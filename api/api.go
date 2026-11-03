@@ -389,6 +389,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sn/artifact", handlers.SnArtifact),
 		router.NewRoute("GET", "/sn/ledger/object", handlers.SnLedgerObject),
 		router.NewRoute("GET", "/sn/ledger/account", handlers.SnLedgerAccount),
+		// the claim relay (apple BTEASY.md): what is pending and why, and Claim now
+		router.NewRoute("GET", "/sn/claim-relay", handlers.SnClaimRelay),
+		router.NewRoute("POST", "/sn/claim-relay/claim-now", handlers.SnClaimRelayClaimNow),
 		router.NewRoute("GET", "/sn/attempt-artifact", handlers.SnAttemptArtifact),
 		router.NewRoute("POST", "/sn/attempt-artifact", handlers.SnUploadAttemptArtifactWithReserved(reserved)),
 		router.NewRoute("POST", "/sn/head-summary", handlers.SnUploadHeadSummary),

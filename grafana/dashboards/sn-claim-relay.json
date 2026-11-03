@@ -1,0 +1,456 @@
+{
+  "uid": "urnetwork-sn-claim-relay",
+  "title": "urnetwork / sn claim relay",
+  "description": "The settlement v2 claim relay (apple BTEASY.md, \"Claim relay\"; server controller/sn_claim_relay.go): relayer balance, spend against the daily cap, claims pending and refused, the cap and the stops. Counts and amounts only; no coldkey, network or account is a label. Each worker keeps its last pass's gauges, so these panels read the worker with the newest pass.",
+  "tags": [
+    "urnetwork",
+    "subtensor"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "refresh": "1m",
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_sn_claim_relay_last_pass_timestamp_seconds, env)",
+        "definition": "label_values(urnetwork_sn_claim_relay_last_pass_timestamp_seconds, env)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "relay state",
+      "description": "The state of the newest pass. no_key means no relayer key is configured, so the relay reads and sends nothing. griefing_stop means a claim's gas jumped, and low_balance that the relayer cannot pay the next claim.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) (urnetwork_sn_claim_relay_state{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))) == 1",
+          "legendFormat": "{{state}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "textMode": "name",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "last pass age",
+      "description": "Seconds since a worker last finished a pass. One worker at a time runs it, about every five minutes, and a pass may wait for one claim's finality.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "age",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "relayer balance",
+      "description": "The relayer account's balance at the newest pass. It holds only operating TAO. A single claim needs about 0.0014 TAO on hand, and the alert warns under 3 days of the cap.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_relayer_balance_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "TAO",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "spent today of the cap",
+      "description": "TAO the relayer's transactions of this UTC day paid, and the most its unfinished ones can, against the daily cap.",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_spent_today_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "spent",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "urnetwork_sn_claim_relay_daily_cap_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "cap",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "relayer balance over time",
+      "description": "The relayer's balance. A steady fall of at most the daily cap is claims; anything faster is not.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_relayer_balance_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "balance"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "spend",
+      "description": "This UTC day's spend against the cap. It starts again at 00:00 UTC.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_spent_today_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "spent today"
+        },
+        {
+          "refId": "B",
+          "expr": "urnetwork_sn_claim_relay_daily_cap_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "cap"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "claims pending",
+      "description": "Claims the relay would send now, and the accounts over the automatic threshold among them. Past the cap they wait for the next UTC day; v2 credit never expires.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_claims_pending{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "pending"
+        },
+        {
+          "refId": "B",
+          "expr": "urnetwork_sn_claim_relay_accounts_over_threshold{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "over the threshold"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "claims paid today",
+      "description": "Claims the relayer's finalized transactions paid in this UTC day, and accounts waiting after a refusal.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_claims_paid_today{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "paid today"
+        },
+        {
+          "refId": "B",
+          "expr": "urnetwork_sn_claim_relay_accounts_refused{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "refused, waiting"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "claims by result",
+      "description": "Claims the relay tried, an hour at a time. A refused claim leaves the rest alone. not_attempted is a batch's gas running out before it; it is due again.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (increase(urnetwork_sn_claim_relay_claims_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "passes by state",
+      "description": "Passes an hour at a time, by the state each ended in.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (increase(urnetwork_sn_claim_relay_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{state}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "gas price",
+      "description": "The chain's gas price. Above 10 gwei nothing is sent.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_gas_price_gwei{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "gwei"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "claim preflight gas",
+      "description": "The gas of the last claim preflight. A claim is about 150,000 to 207,000. At 400,000 the relay stops: third parties filling vault2's staking-hotkey list take a claim to about 1.26M.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_last_estimate_gas{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "gas"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "alpha price",
+      "description": "TAO per alpha at the newest pass, which turns a balance into the TAO value the policy reads.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 29
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "urnetwork_sn_claim_relay_alpha_price_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"} and on (env, service, block, host, instance) (urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"} == scalar(max(urnetwork_sn_claim_relay_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\",instance!=\"\"})))",
+          "legendFormat": "TAO per alpha"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Claim now taps",
+      "description": "Claim now taps an hour at a time, on the api: accepted, or refused because it is not available for that coldkey now.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 37
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (increase(urnetwork_sn_claim_relay_claim_now_requests_total{env=\"$env\",service=\"api\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{result}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    }
+  ]
+}

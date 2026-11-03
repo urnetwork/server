@@ -212,6 +212,7 @@ func initTaskSchedule(ctx context.Context) {
 		// the Top 200 claim: nothing is scheduled while binding is closed
 		work.ScheduleSnFleetAuto(clientSession, tx)
 		work.ScheduleSnFleetAutoRelay(clientSession, tx)
+		work.ScheduleSnClaimRelay(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
 		// crypto payments (controller/crypto_pay_scan.go): the scan and
 		// address refill chains of the coins that are on, and the retention
@@ -758,6 +759,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.SnReadIncentive,
 			work.SnReadIncentivePost,
+		),
+		// the settlement v2 claim relay (apple BTEASY.md, "Claim relay")
+		task.NewTaskTargetWithPost(
+			work.SnClaimRelay,
+			work.SnClaimRelayPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.SnFleetAuto,

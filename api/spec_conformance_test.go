@@ -240,6 +240,8 @@ func registry() []specEndpoint {
 		{"POST", "/sn/wallet/hotkey-delegation/history", rt(controller.SnHotkeyNetworkDelegationHistoryArgs{}), rt(controller.SnWalletMappingHistoryResult{})},
 		{"POST", "/sn/wallet/validate", rt(controller.SnValidateWalletArgs{}), rt(controller.SnValidateWalletResult{})},
 		{"GET", "/sn/head", nil, rt(controller.SnHeadResult{})},
+		{"GET", "/sn/claim-relay", nil, rt(controller.SnClaimRelayResult{})},
+		{"POST", "/sn/claim-relay/claim-now", rt(controller.SnClaimRelayClaimNowArgs{}), rt(controller.SnClaimRelayClaimNowResult{})},
 		{"GET", "/sn/top", nil, rt(controller.SnTopResult{})},
 		{"GET", "/sn/top/me", nil, rt(controller.SnTopMeResult{})},
 		{"POST", "/sn/head/binding", rt(controller.SnHeadBindingArgs{}), rt(controller.SnHeadBindingResult{})},

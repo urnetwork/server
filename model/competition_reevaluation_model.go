@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	CompetitionJobReevaluationAuthorizationKind = "competition-job-reevaluation-authorization/v1"
-	CompetitionJobReevaluationRuntimeKind       = "competition-job-reevaluation-runtime-qualification/v1"
-	CompetitionJobReevaluationCapability        = "competition-job-reevaluation/v1"
-	CompetitionJobReevaluationArchiveInventory  = "archive_inventory_metadata_v1"
+	CompetitionJobReevaluationAuthorizationKind   = "competition-job-reevaluation-authorization/v1"
+	CompetitionJobReevaluationRuntimeKind         = "competition-job-reevaluation-runtime-qualification/v1"
+	CompetitionJobReevaluationCapability          = "competition-job-reevaluation/v1"
+	CompetitionJobReevaluationArchiveInventory    = "archive_inventory_metadata_v1"
+	CompetitionJobReevaluationLegacyArchiveBudget = "operator_authorized_legacy_archive_budget_v1"
 )
 
 // The private pinned document binds the original terminal row, actual incident
