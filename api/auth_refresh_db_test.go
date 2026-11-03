@@ -517,6 +517,44 @@ func TestClientRefreshRefusesAResetCommittedInTheMintGap(t *testing.T) {
 	})
 }
 
+// A network token whose session is revoked in the mint gap is refused with the
+// structured 401 session_revoked authentication gives a revoked session, which
+// the apps read as a sign-out from another device, not a 500.
+func TestNetworkRefreshRefusesASessionRevokedInTheMintGap(t *testing.T) {
+	defer session.Testing_SetSessionCreationEnabled(true)()
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+
+		// a tracked sign-in: the renewal registers the root token's session
+		tracked := self.networkRefresh(t, self.rootToken)
+		if tracked.SessionId == nil {
+			t.Fatal("the renewed network token carries no session")
+		}
+		hooked := false
+		var w *httptest.ResponseRecorder
+		requireNetworkRefreshCounted(t, "state_invalid", func() {
+			withRefreshMintHook(func(*session.ClientSession) {
+				// the network's backend revokes the sign-in
+				self.call(t, http.MethodPost, "/network/revoke-session", self.key(), map[string]any{"session_id": *tracked.SessionId, "operation_id": server.NewId()}, http.StatusOK, nil)
+				hooked = true
+			}, func() {
+				w = self.serve(http.MethodPost, "/auth/network-refresh", "Bearer "+tracked.Testing_Sign(), nil)
+			})
+		})
+		if !hooked {
+			t.Fatal("the refresh never reached its mint")
+		}
+		var refusal struct {
+			Code string `json:"code"`
+		}
+		if w.Code != http.StatusUnauthorized || json.Unmarshal(w.Body.Bytes(), &refusal) != nil || refusal.Code != "session_revoked" {
+			t.Fatalf("network refresh of a session revoked in the mint gap = %d: %s, want 401 session_revoked", w.Code, w.Body.String())
+		}
+	})
+}
+
 // The mint hook of a refresh that fails does not run in a later refresh: a
 // failed assertion exits its goroutine with runtime.Goexit, past any restore
 // that waits for the refresh to return.
