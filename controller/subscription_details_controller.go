@@ -679,8 +679,7 @@ func stripeSetCancelAtPeriodEnd(ctx context.Context, subscriptionId string, canc
 	return sub, nil
 }
 
-// stripeCancelSubscriptionNow ends the subscription at once and returns Stripe's
-// view of it afterwards. Stripe stops collecting its open invoices.
+// Ends the subscription at once and returns Stripe's view of it afterwards. Stripe stops collecting its open invoices.
 func stripeCancelSubscriptionNow(ctx context.Context, subscriptionId string) (*stripeCustomerSubscription, error) {
 	sub, err := server.HttpDelete[*stripeCustomerSubscription](
 		ctx,
