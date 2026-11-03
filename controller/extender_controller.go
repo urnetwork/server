@@ -618,6 +618,11 @@ type ExtenderActivateResult struct {
 	// (connect#230). The activator waits that long instead of backing off. 0,
 	// and left out, on every other answer.
 	RetryAfterSeconds int `json:"retry_after_seconds,omitempty"`
+	// on a refusal the extender acts on, which one (connect/EXTENDER.md C2c):
+	// `key_other_network` for a key another network holds, on which the
+	// extender makes a key of its network's own. Left out on every other
+	// answer; an extender that predates it reads `error` alone.
+	Refusal string `json:"refusal,omitempty"`
 }
 
 // The wire form of a wait (`retry_after_seconds`): whole seconds, rounded up
@@ -829,9 +834,14 @@ func extenderConfigRefusal(err error) string {
 }
 
 // The refusal of an activation whose key is registered to another network.
-// Nothing the caller does can pass it with that key: the extender needs a new
-// key, or support has to move the key's registration.
-const extenderKeyOtherNetworkRefusal = "This extender key is registered to another network, so it cannot be activated for this one. Generate a new extender key, or ask support to move the key to this network."
+// Nothing the caller does can pass it with that key: the extender needs a key of
+// its network's own, which a current app or provider makes on this refusal
+// (connect/EXTENDER.md C2c). The first sentence is what an extender that
+// predates `refusal` recognizes it by, so it stays as it is.
+const extenderKeyOtherNetworkRefusal = "This extender key is registered to another network, so it cannot be activated for this one. An updated app makes a new extender key for this network on its own; otherwise remove the extender key file and restart to make a new one."
+
+// The `refusal` of an activation whose key is registered to another network.
+const extenderActivateRefusalKeyOtherNetwork = "key_other_network"
 
 // Whether the key is registered to a network other than networkId. A key no
 // network has activated is not.
@@ -1038,6 +1048,13 @@ func (self *extenderActivateService) activate(
 		result.RetryAfterSeconds = extenderActivateRetryAfterSeconds(retryAfter)
 		return result, err
 	}
+	// the refusal of a key another network holds, which names itself in
+	// `refusal` so the extender can make a key of its network's own (C2c)
+	refuseKeyOtherNetwork := func() (*ExtenderActivateResult, error) {
+		result, err := refuse(extenderKeyOtherNetworkRefusal)
+		result.Refusal = extenderActivateRefusalKeyOtherNetwork
+		return result, err
+	}
 
 	publicKey, err := connect.ParseExtenderPublicKeyHex(args.PublicKeyHex)
 	if err != nil {
@@ -1186,7 +1203,7 @@ func (self *extenderActivateService) activate(
 	stage = extenderActivationStageOwner
 	networkId := clientSession.ByJwt.NetworkId
 	if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
-		return refuse(extenderKeyOtherNetworkRefusal)
+		return refuseKeyOtherNetwork()
 	}
 
 	// The probe guard (connect#230): the process probes at most
@@ -1419,7 +1436,7 @@ func (self *extenderActivateService) activate(
 	if args.MeasurementDisabled {
 		if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
 			stage = extenderActivationStageOwner
-			return refuse(extenderKeyOtherNetworkRefusal)
+			return refuseKeyOtherNetwork()
 		}
 		optOutExtenderMeasurement(clientSession.Ctx, publicKey, server.NowUtc())
 	}
@@ -1485,7 +1502,7 @@ func (self *extenderActivateService) activate(
 		// network may have activated while this one probed
 		if extenderKeyHeldByAnotherNetwork(clientSession.Ctx, publicKey, networkId) {
 			stage = extenderActivationStageOwner
-			return refuse(extenderKeyOtherNetworkRefusal)
+			return refuseKeyOtherNetwork()
 		}
 		return refuse("the activation could not be stored")
 	}
