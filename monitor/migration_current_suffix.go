@@ -908,6 +908,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{extenderMeasurementProbeMigrationContract},
 	// the extender camouflage key (phase 14b), versioned by its position
 	[]snMainnetMigrationContract{extenderCamouflageKeyMigrationContract},
+	// the usage archive's export ledger, versioned by its position
+	[]snMainnetMigrationContract{usageArchiveExportLedgerMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
