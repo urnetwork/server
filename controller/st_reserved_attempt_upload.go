@@ -150,6 +150,11 @@ func (self *StReservedAttemptUploadConfig) ValidateCapacity() error {
 	return nil
 }
 
+// How long a refused upload waits to learn whether its refusal is the validator's
+// or this instance's. A refreshed admission answers at once, whatever the answer,
+// so this holds only a refusal during the first refresh, and only that long.
+const stReservedAuthorityProbeTimeout = time.Second
+
 // One production API lifecycle owns its cache, RPC clients and finite quota
 // policy. Close joins the cache before either underlying transport is closed.
 type StReservedAttemptUpload struct {
@@ -217,6 +222,11 @@ func NewStReservedAttemptUploadWithConfig(ctx context.Context, cfg *StConfig) (*
 	return &StReservedAttemptUpload{admission: admission, chain: chain, native: native, deployment: cfg.DeploymentKey(), replicaNoID: cfg.NoId, budget: config.Budget}, nil
 }
 
+// A single running admission is its own lane: it can only be running.
+func (self *StReservedAttemptUpload) Admission() (*StReservedAttemptUpload, bool) {
+	return self, false
+}
+
 // Readiness waits for an actual complete authority refresh; constructing the
 // lifecycle alone never grants admission to an upload or fixture.
 func (self *StReservedAttemptUpload) WaitReady(ctx context.Context) error {
@@ -250,9 +260,25 @@ func (self *StReservedAttemptUpload) Begin(ctx context.Context, credential, head
 	lease, err := self.admission.Begin(ctx, header, sessionHash, objectKind, contentHash, size)
 	if err != nil {
 		// the admission's reason can carry chain endpoint errors; it is logged
+		if self.authorityNotCurrent(ctx) {
+			return nil, router.PrivateCause(http.StatusServiceUnavailable, "Validator staging authority is not current on this instance.", err)
+		}
 		return nil, router.PrivateCause(http.StatusForbidden, "Validator staging authority refused.", err)
 	}
 	return lease, nil
+}
+
+// An admission whose first refresh has not finished, whose last one failed or
+// that is stopping refuses every upload, and that says nothing about the
+// validator: a sibling block's refresh, or this one's next, can admit it. Its
+// 403 counted against the validator as an authorization refusal, on a chain
+// endpoint this one instance could not reach or for about 15 seconds after each
+// process start. Answered 503, the lb tries a sibling and the validator retries.
+// Past its bound the probe reports not current, which a first refresh in flight is.
+func (self *StReservedAttemptUpload) authorityNotCurrent(ctx context.Context) bool {
+	probe, cancel := context.WithTimeout(ctx, stReservedAuthorityProbeTimeout)
+	defer cancel()
+	return self.admission.WaitReady(probe) != nil
 }
 
 // Redis atomically decides whether this is a new object before selecting the
@@ -283,5 +309,13 @@ func (self *StReservedAttemptUpload) Close() {
 	if self == nil {
 		return
 	}
-	self.closeOnce.Do(func() { self.admission.Close(); self.native.API.Client.Close(); self.chain.Close() })
+	self.closeOnce.Do(func() {
+		self.admission.Close()
+		if self.native != nil {
+			self.native.API.Client.Close()
+		}
+		if self.chain != nil {
+			self.chain.Close()
+		}
+	})
 }

@@ -34,9 +34,18 @@ func SnUploadAttemptArtifact(w http.ResponseWriter, r *http.Request) {
 		startifact.AttemptObjectBounds{MetadataBytes: maximumSnAttemptMetadataBytes, RecordBytes: maximumSnAttemptRecordBytes, ProofBytes: maximumSnAttemptProofBytes}, snAttemptUploadSlots)
 }
 
+// The API lifecycle's reserved upload lane as the route sees it, asked on each
+// request because a lane whose startup failed can come up later in the process.
+type SnReservedAttemptUploadLane interface {
+	// The running admission, or nil. A nil admission with starting set is a
+	// configured lane that is not running on this process. With starting clear,
+	// no configuration asks this process for a lane.
+	Admission() (admission *controller.StReservedAttemptUpload, starting bool)
+}
+
 // The production router captures the one API-owned admission lifecycle. A
 // missing cache never turns a supplied reserved header into ordinary traffic.
-func SnUploadAttemptArtifactWithReserved(reserved *controller.StReservedAttemptUpload) http.HandlerFunc {
+func SnUploadAttemptArtifactWithReserved(reserved SnReservedAttemptUploadLane) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serveSnAttemptUpload(w, r, server.LoadBlobStore, controller.StReserveAttemptUpload,
 			startifact.AttemptObjectBounds{MetadataBytes: maximumSnAttemptMetadataBytes, RecordBytes: maximumSnAttemptRecordBytes, ProofBytes: maximumSnAttemptProofBytes}, snAttemptUploadSlots, reserved)
@@ -54,7 +63,7 @@ func serveSnUploadAttemptArtifact(w http.ResponseWriter, r *http.Request, loadSt
 // Every refusal names only its declared answer: a cause, which can quote a
 // socket, a temp path, a store endpoint or a Redis script, stays in the log
 // (router.PrivateCause), and an undeclared failure is a 503 (PrivateErrors).
-func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func() (server.BlobStore, bool), reserve func(context.Context, server.Id, uint64) error, bounds startifact.AttemptObjectBounds, slots chan struct{}, reserved *controller.StReservedAttemptUpload) {
+func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func() (server.BlobStore, bool), reserve func(context.Context, server.Id, uint64) error, bounds startifact.AttemptObjectBounds, slots chan struct{}, reservedLane SnReservedAttemptUploadLane) {
 	w.Header().Set("Cache-Control", "no-store")
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -100,7 +109,23 @@ func serveSnAttemptUpload(w http.ResponseWriter, r *http.Request, loadStore func
 		}
 		reservedHeaders := r.Header.Values(protocol.ValidatorAttemptUploadHeader)
 		if len(reservedHeaders) != 0 {
-			if len(reservedHeaders) != 1 || reservedHeaders[0] == "" || reserved == nil {
+			if len(reservedHeaders) != 1 || reservedHeaders[0] == "" {
+				return "", errors.New("403 Validator reserved upload is unavailable or ambiguous.")
+			}
+			var reserved *controller.StReservedAttemptUpload
+			laneStarting := false
+			if reservedLane != nil {
+				reserved, laneStarting = reservedLane.Admission()
+			}
+			// A lane that is not running here says nothing about the validator. A
+			// 503 lets the lb try a sibling block (warp proxy_next_upstream), and
+			// the validator retries it without spending its failure budget
+			// (sn validator classifyReleaseRetryBounded). It counted a 403 as an
+			// authorization refusal, toward the panic that restarts it.
+			if reserved == nil && laneStarting {
+				return "", errors.New("503 Validator reserved upload is not running on this instance.")
+			}
+			if reserved == nil {
 				return "", errors.New("403 Validator reserved upload is unavailable or ambiguous.")
 			}
 			// The existing wrapper already authenticated this exact bearer. Do

@@ -198,7 +198,7 @@ func ProcessAppleNotification(
 			notificationId,
 			notification.NotificationType,
 			notification.Subtype,
-			time.UnixMilli(notification.SignedDate),
+			time.UnixMilli(notification.SignedDate).UTC(),
 		))
 		if notificationTag.RowsAffected() == 0 || !(actionable || revocation) {
 			return
@@ -600,8 +600,10 @@ func validateAppleTransactionAccount(
 		(currency == appleUsdCurrency && appleMaximumUsdPriceMilliunits < priceMilliunits) {
 		return nil, errors.New("invalid App Store purchase dates or price")
 	}
-	validated.purchaseTime = time.UnixMilli(purchaseMillis)
-	validated.expiresTime = time.UnixMilli(expiresMillis)
+	// in UTC, as the timestamp columns these reach hold it: pgx writes such a
+	// column from a time's wall clock and drops its zone
+	validated.purchaseTime = time.UnixMilli(purchaseMillis).UTC()
+	validated.expiresTime = time.UnixMilli(expiresMillis).UTC()
 	if !validated.expiresTime.After(validated.purchaseTime) ||
 		validated.expiresTime.Sub(validated.purchaseTime) > appleMaximumSubscriptionDuration ||
 		validated.purchaseTime.After(time.UnixMilli(notification.SignedDate).Add(appleTransactionPurchaseLead(validated))) {
