@@ -9,6 +9,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -241,7 +242,7 @@ func TestPaymentReconcileAppleEndsTheGraceHoldWhenAppleStopsRetrying(t *testing.
 		defer disableAllReconcileStores(t)()
 		env := newAppleReconcileTestEnv(t, []string{appleGraceTestProductId})
 		for _, status := range []int{3, 2} {
-			fixture := newAppleGraceFixture(t, "applegraceends")
+			fixture := newAppleGraceFixture(t, fmt.Sprintf("applegraceends%d", status))
 			env.statuses[fixture.transactionId] = fixture.statuses(t, 4)
 			fixture.reconcile(t)
 			fixture.assertHeld(t)
