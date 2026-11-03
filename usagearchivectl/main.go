@@ -193,6 +193,17 @@ func runExport(ctx context.Context, args []string) error {
 		return err
 	}
 	fmt.Printf("floor %s (effective %s), %d week leaves, ledger present: %t\n", floorTime.Format(time.DateOnly), effectiveFloor.Format(time.RFC3339), len(leaves), ledgerExists)
+	if *register && ledgerExists {
+		// copies verified before the ledger existed, or whose registration
+		// failed, are recorded now; each is read back once more first
+		written, err := usagearchive.RegisterStoredCopies(ctx, conn, *dir, *location)
+		for _, file := range written {
+			fmt.Printf("earlier copy %s: ledger row written\n", file)
+		}
+		if err != nil {
+			return err
+		}
+	}
 	exported := 0
 	for _, leaf := range leaves {
 		if 0 < len(weeks) && !containsString(weeks, leaf.WeekStart.Format(time.DateOnly)) {
