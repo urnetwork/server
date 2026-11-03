@@ -865,6 +865,8 @@ type CoreStClient struct {
 	transactionSigner func(context.Context, *types.Transaction, types.Signer, *ecdsa.PrivateKey) (*types.Transaction, error)
 	// One bounded registration owner is reused by every authenticated dispatch.
 	clientKeyRegistrations *stClientKeyRegistrationCohorts
+	// Only the claim relay's own client has this (sn_claim_relay_chain.go).
+	claimRelay *stClaimRelayEngine
 }
 
 // client returns a dialed, chain-id-verified client for one rpc url.
@@ -1202,6 +1204,8 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 		// intrinsic gas was selected by the cancellation payload
 	} else if previous != nil {
 		gasLimit = previous.GasLimit
+	} else {
+		gasLimit = self.claimRelay.plannedGasLimit(calldata)
 	}
 	estimate := gasLimit == 0 && previous == nil
 	forceLegacy := previous != nil && previous.GasPrice != nil
@@ -1224,16 +1228,19 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 	if prepared.legacy {
 		envelope.price = prepared.fee
 		if previous != nil {
-			envelope.price = stReplacementFee(previous.GasPrice, envelope.price)
+			envelope.price = stReplacementFee(previous.GasPrice, self.claimRelay.replacementQuote(envelope.price))
 		}
 		feeCap = envelope.price
 	} else {
 		envelope.tip = prepared.fee
 		envelope.fee = new(big.Int).Mul(prepared.header.BaseFee, big.NewInt(2))
 		envelope.fee.Add(envelope.fee, envelope.tip)
+		if self.claimRelay != nil {
+			envelope.fee = snClaimRelayFeeCap(prepared.header.BaseFee, envelope.tip)
+		}
 		if previous != nil {
-			envelope.tip = stReplacementFee(previous.GasTipCap, envelope.tip)
-			envelope.fee = stReplacementFee(previous.GasFeeCap, envelope.fee)
+			envelope.tip = stReplacementFee(previous.GasTipCap, self.claimRelay.replacementQuote(envelope.tip))
+			envelope.fee = stReplacementFee(previous.GasFeeCap, self.claimRelay.replacementQuote(envelope.fee))
 			if envelope.fee.Cmp(envelope.tip) < 0 {
 				envelope.fee.Set(envelope.tip)
 			}
@@ -1742,7 +1749,8 @@ func (self *CoreStClient) reconcileAccountIntents(
 			return err
 		}
 		spent := self.spentLedgerV2Intent(ctx, client, intent, from, finalized)
-		cancelIntent := stale || expiredClose || expiredDeposit || spent
+		retired := self.claimRelay.retiresUnsigned(attempts)
+		cancelIntent := stale || expiredClose || expiredDeposit || spent || retired
 		desiredKind := model.StTxAttemptExecution
 		if cancelIntent {
 			desiredKind = model.StTxAttemptCancellation
