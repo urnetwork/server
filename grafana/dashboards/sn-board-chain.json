@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-sn-board-chain",
   "title": "urnetwork / sn board chain",
-  "description": "The SN top board's chain-side readers (server LEADERTOP.md \u00a75.7, \u00a76.1, \u00a76.2): the live fleet binding sync, the on-chain incentive reader, the validator head-summary ingest and the verify cohort's claimed-fleet priority. Counts and ages only; no client, network or hotkey is a label.",
+  "description": "The SN top board's chain-side readers (server LEADERTOP.md §5.7, §6.1, §6.2): the live fleet binding sync, the on-chain incentive reader, the validator head-summary ingest and the verify cohort's claimed-fleet priority. Counts and ages only; no client, network or hotkey is a label.",
   "tags": [
     "urnetwork",
     "subtensor",
@@ -663,6 +663,189 @@
           "refId": "B",
           "expr": "sum(increase(urnetwork_verify_cohort_census_restores_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "restores"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 22,
+      "type": "stat",
+      "title": "one-tap relay balance",
+      "description": "The TAO each relay key of the Top 200 claim held when last read (urnetwork_sn_fleet_auto_relay_balance_tao), by key: binding and top_up. Under about 0.016 a key counts as not funded, and nothing is sent from it: the transactions wait.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (key) (urnetwork_sn_fleet_auto_relay_balance_tao{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "{{key}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 23,
+      "type": "stat",
+      "title": "one-tap relay waiting",
+      "description": "Relayed transactions waiting or unsettled at the relay's last pass (urnetwork_sn_fleet_auto_relay_open). They wait with no funded key, or when gas is over the limit.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_sn_fleet_auto_relay_open{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "waiting",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 24,
+      "type": "timeseries",
+      "title": "one-tap relayed transactions",
+      "description": "Relayed transactions settled per hour, by kind (bind, revoke, top_up) and status (urnetwork_sn_fleet_auto_relay_settled_total). A failed bind was refused by the coordinator's preflight, with no gas spent: a stale commitment, an overlap or a lost UID.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 39
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind, status) (increase(urnetwork_sn_fleet_auto_relay_settled_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{kind}} {{status}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 25,
+      "type": "timeseries",
+      "title": "one-tap device refusals",
+      "description": "Bindings devices refused to sign, per hour, by the device's reason (urnetwork_sn_fleet_auto_refusals_total). A jump in coldkey_changed or hotkey_changed is what a server bug or breach looks like.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (reason) (increase(urnetwork_sn_fleet_auto_refusals_total{env=\"$env\",service=\"api\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 26,
+      "type": "timeseries",
+      "title": "one-tap claims and manifests",
+      "description": "Per hour: hotkey authorizations stored (urnetwork_sn_fleet_auto_authorizations_total) and manifests built, at most one per network per epoch (urnetwork_sn_fleet_auto_generations_total).",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_sn_fleet_auto_authorizations_total{env=\"$env\",service=\"api\",instance!=\"\"}[1h]))",
+          "legendFormat": "authorizations"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_sn_fleet_auto_generations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[1h]))",
+          "legendFormat": "manifests"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 27,
+      "type": "timeseries",
+      "title": "one-tap top-ups",
+      "description": "Top-ups queued per hour, at most one per network (urnetwork_sn_fleet_auto_top_ups_total). Each pays the live burn plus its fee.",
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_sn_fleet_auto_top_ups_total{env=\"$env\",service=\"api\",instance!=\"\"}[1h]))",
+          "legendFormat": "top-ups"
         }
       ],
       "fieldConfig": {

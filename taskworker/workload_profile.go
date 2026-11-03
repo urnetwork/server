@@ -222,5 +222,7 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.SnSyncFleetBindings), schedule: work.ScheduleSnSyncFleetBindings},
 		{target: task.NewTaskTarget(work.SnClaimRelay), schedule: work.ScheduleSnClaimRelay},
 		{target: task.NewTaskTarget(work.SnReadIncentive), schedule: work.ScheduleSnReadIncentive},
+		{target: task.NewTaskTarget(work.SnFleetAuto), schedule: work.ScheduleSnFleetAuto},
+		{target: task.NewTaskTarget(work.SnFleetAutoRelay), schedule: work.ScheduleSnFleetAutoRelay},
 	}
 }

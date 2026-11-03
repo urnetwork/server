@@ -11303,4 +11303,10 @@ var migrations = []any{
 	// v2 epoch's usage statement. New tables, and the usage statement is written at
 	// zero price too. Apply before deploying the taskworker that writes them.
 	newSqlMigration(stDemandSchemaSql),
+
+	// Claiming a Top 200 spot from one tap (sn_fleet_auto_schema.go,
+	// model/sn_fleet_auto.go). New tables only: nothing is rewritten, and no
+	// earlier release reads them. Apply before deploying the api and taskworker
+	// that use them. They stay empty while binding is closed.
+	snFleetAutoSchemaMigration,
 }

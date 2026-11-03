@@ -53,6 +53,8 @@ var intendedNetworkReportedRoutes = []string{
 	"POST /sn/wallet/hotkey-consent",
 	"POST /sn/wallet/hotkey-delegation",
 	"POST /sn/head/binding",
+	"POST /sn/fleet/authorization",
+	"POST /sn/fleet/top-up",
 	// sign-in methods, auth codes, API keys, network and client tokens, sessions
 	"POST /auth/code-create",
 	"POST /auth/add-auth",
