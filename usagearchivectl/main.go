@@ -142,7 +142,9 @@ func runExport(ctx context.Context, args []string) error {
 	register := flags.Bool("register", true, "record each verified export in the ledger, when the ledger exists")
 	location := flags.String("location", "", "where the copies are kept, for the ledger (default <host>:<dir>)")
 	threads := flags.Int("threads", 2, "zstd threads")
-	minFree := flags.Uint64("min-free-bytes", 1000000000000, "stop before a week while the directory's filesystem has less than this free")
+	minFree := flags.Uint64("min-free-bytes", 1000000000000, "stop before a week while --free-path's filesystem has less than this free")
+	freePath := flags.String("free-path", "", "the filesystem whose free space --min-free-bytes guards (default --dir)")
+	requireMountpoint := flags.Bool("require-mountpoint", false, "refuse to run unless --dir is a mount point of its own, such as a dataset that must be mounted")
 	plan := flags.Bool("plan", false, "print what would be exported and export nothing")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -157,6 +159,14 @@ func runExport(ctx context.Context, args []string) error {
 	host, _ := os.Hostname()
 	if *location == "" {
 		*location = host + ":" + *dir
+	}
+	if *freePath == "" {
+		*freePath = *dir
+	}
+	if *requireMountpoint {
+		if err := requireOwnMount(*dir); err != nil {
+			return err
+		}
 	}
 	unlock, err := lockDir(*dir)
 	if err != nil {
@@ -204,10 +214,10 @@ func runExport(ctx context.Context, args []string) error {
 			fmt.Printf("%s: left for the next run (--max-weeks %d)\n", leaf.Leaf, *maxWeeks)
 			continue
 		}
-		if free, err := freeBytes(*dir); err != nil {
+		if free, err := freeBytes(*freePath); err != nil {
 			return err
 		} else if free < *minFree {
-			return fmt.Errorf("%s has %d bytes free, under --min-free-bytes %d; %s waits", *dir, free, *minFree, leaf.Leaf)
+			return fmt.Errorf("%s has %d bytes free, under --min-free-bytes %d; %s waits", *freePath, free, *minFree, leaf.Leaf)
 		}
 		if *plan {
 			fmt.Printf("%s: would export (%s)\n", leaf.Leaf, reason)
@@ -246,6 +256,7 @@ func containsString(values []string, value string) bool {
 func runVerify(args []string) error {
 	flags := flag.NewFlagSet("verify", flag.ContinueOnError)
 	dir := flags.String("dir", "", "the copies' directory")
+	requireMountpoint := flags.Bool("require-mountpoint", false, "refuse to run unless --dir is a mount point of its own")
 	only := flags.String("manifest", "", "verify only this manifest")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -256,6 +267,11 @@ func runVerify(args []string) error {
 	} else {
 		if *dir == "" {
 			return errors.New("--dir or --manifest is required")
+		}
+		if *requireMountpoint {
+			if err := requireOwnMount(*dir); err != nil {
+				return err
+			}
 		}
 		matches, err := filepath.Glob(filepath.Join(*dir, "st_provider_usage_archive_w*.manifest.json"))
 		if err != nil {
@@ -395,4 +411,21 @@ func freeBytes(dir string) (uint64, error) {
 		return 0, err
 	}
 	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
+}
+
+// dir must be a mount point: its filesystem differs from its parent's. An
+// encrypted dataset that is not mounted leaves an empty directory of the parent
+// filesystem in its place, which must never receive a copy.
+func requireOwnMount(dir string) error {
+	var self, parent unix.Stat_t
+	if err := unix.Stat(dir, &self); err != nil {
+		return err
+	}
+	if err := unix.Stat(filepath.Dir(filepath.Clean(dir)), &parent); err != nil {
+		return err
+	}
+	if self.Dev == parent.Dev {
+		return fmt.Errorf("%s is not mounted: it is a directory of its parent's filesystem", dir)
+	}
+	return nil
 }
