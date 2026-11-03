@@ -437,7 +437,7 @@ func TestStripeWebhookUnknownEventTypeStill200(t *testing.T) {
 		for _, eventType := range []string{
 			"customer.updated",
 			"payment_intent.succeeded",
-			"charge.dispute.closed",
+			"charge.dispute.updated",
 			"refund.updated",
 			"invoice.finalized",
 		} {
@@ -907,5 +907,40 @@ func TestStripeDisputeWonRestoresAfterRetentionRemovedTheBalance(t *testing.T) {
 
 		connect.AssertEqual(t, activeRenewalCount(t, fixture.ctx, fixture.networkId, model.SubscriptionMarketStripe), 1)
 		connect.AssertEqual(t, model.IsProNetwork(fixture.ctx, fixture.networkId), true)
+	})
+}
+
+// An inquiry takes no money, so it ends nothing. Its window ends only when it
+// becomes a dispute and the funds leave.
+func TestStripeDisputeInquiryKeepsTheWindowUntilTheFundsLeave(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputeinquiry")
+		disputedEvents := func() int {
+			return countPaymentReconciliationEventRows(t, fixture.ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionDisputed, fixture.disputeId)
+		}
+
+		fixture.deliver(t, "charge.dispute.created", "warning_needs_response")
+		connect.AssertEqual(t, activeRenewalCount(t, fixture.ctx, fixture.networkId, model.SubscriptionMarketStripe), 1)
+		connect.AssertEqual(t, model.IsProNetwork(fixture.ctx, fixture.networkId), true)
+		connect.AssertEqual(t, disputedEvents(), 0)
+
+		fixture.deliver(t, "charge.dispute.funds_withdrawn", "needs_response")
+		fixture.assertCut(t)
+		connect.AssertEqual(t, disputedEvents(), 1)
+	})
+}
+
+// An ordinary dispute reports both events: one clawback, one event.
+func TestStripeDisputeCreatedAndFundsWithdrawnAreOneClawback(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputeonce")
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.deliver(t, "charge.dispute.funds_withdrawn", "needs_response")
+		fixture.assertCut(t)
+		connect.AssertEqual(
+			t,
+			countPaymentReconciliationEventRows(t, fixture.ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionDisputed, fixture.disputeId),
+			1,
+		)
 	})
 }

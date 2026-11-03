@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -207,6 +208,10 @@ type StripeEventDisputeObject struct {
 // The dispute status that gave the money back (charge.dispute.closed).
 const stripeDisputeStatusWon = "won"
 
+// The dispute statuses of an inquiry: warning_needs_response, warning_under_review
+// and warning_closed. No funds have left.
+const stripeDisputeStatusInquiryPrefix = "warning_"
+
 type StripeWebhookResultErr struct {
 	Message string `json:"message"`
 }
@@ -389,7 +394,8 @@ func StripeWebhook(
 
 		/**
 		 * a dispute withdraws the funds immediately -- treat like a refund,
-		 * with its own action label
+		 * with its own action label. An inquiry withdraws nothing
+		 * (stripeHandleDisputeFunds).
 		 */
 
 		glog.Infof("type: charge.dispute.created")
@@ -399,7 +405,23 @@ func StripeWebhook(
 			return nil, fmt.Errorf("failed to parse dispute: %v", err)
 		}
 
-		return stripeHandleDisputeCreated(&disputeObject, clientSession)
+		return stripeHandleDisputeFunds(&disputeObject, "charge.dispute.created", clientSession)
+
+	} else if stripeWebhook.Type == "charge.dispute.funds_withdrawn" && stripeWebhook.Data != nil {
+
+		/**
+		 * the funds left: for an inquiry that became a dispute this is the first
+		 * sign of it, and otherwise the ledger absorbs it as the same dispute
+		 */
+
+		glog.Infof("type: charge.dispute.funds_withdrawn")
+
+		var disputeObject StripeEventDisputeObject
+		if err := json.Unmarshal(stripeWebhook.Data.Object, &disputeObject); err != nil {
+			return nil, fmt.Errorf("failed to parse dispute: %v", err)
+		}
+
+		return stripeHandleDisputeFunds(&disputeObject, "charge.dispute.funds_withdrawn", clientSession)
 
 	} else if stripeWebhook.Type == "charge.dispute.closed" && stripeWebhook.Data != nil {
 
@@ -1262,12 +1284,22 @@ func stripeHandleRefundCreated(
 	return &StripeWebhookResult{}, nil
 }
 
-func stripeHandleDisputeCreated(
+// stripeHandleDisputeFunds claws back what a dispute's charge bought, once the
+// funds have left. An inquiry (status warning_*) takes no money and may close with
+// nothing more, so it ends nothing; if it becomes a dispute,
+// charge.dispute.funds_withdrawn arrives then. The stripe_refund ledger, keyed on
+// the dispute id, makes the two events of an ordinary dispute one clawback.
+func stripeHandleDisputeFunds(
 	dispute *StripeEventDisputeObject,
+	eventType string,
 	clientSession *session.ClientSession,
 ) (*StripeWebhookResult, error) {
 	if dispute.Id == "" || dispute.Charge == "" {
-		glog.Infof("[sub]charge.dispute.created with no dispute/charge id; ignoring\n")
+		glog.Infof("[sub]%s with no dispute/charge id; ignoring\n", eventType)
+		return &StripeWebhookResult{}, nil
+	}
+	if strings.HasPrefix(dispute.Status, stripeDisputeStatusInquiryPrefix) {
+		glog.Infof("[sub]%s: inquiry %s (%s) took no funds; nothing ends\n", eventType, dispute.Id, dispute.Status)
 		return &StripeWebhookResult{}, nil
 	}
 	charge, err := stripeFetchCharge(clientSession.Ctx, dispute.Charge)
@@ -1281,7 +1313,7 @@ func stripeHandleDisputeCreated(
 		charge.Invoice,
 		charge.PaymentIntent,
 		model.PaymentReconcileActionDisputed,
-		"charge.dispute.created",
+		eventType,
 		dispute.Amount,
 		false,
 	); err != nil {
