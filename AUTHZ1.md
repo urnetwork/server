@@ -807,9 +807,11 @@ allow it, because the session parse honors the gates.
 | `TestNetworkRefreshFollowsCredentialRotation` | a token from before a reset does not renew; a renewed token stops at the next reset |
 | `TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap`, `TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap` | **regression:** `controller.Testing_SetRefreshMintHook` reads a reset's cutoff between the presented create time and the mint, and the reset commits after the refresh. The refreshed token is rejected by `ValidateByJwtState` and the router, keeps the presented create time, and has a fresh iat/exp. Both fail with a fresh create time stamped at the mint ("outlived the reset") and pass with the carried one. Until `fix/apidb-1103` the hook committed the reset in the gap, which the renewal's own check has refused since 16675a430. |
 | `TestNetworkRefreshRefusesAResetCommittedInTheMintGap`, `TestClientRefreshRefusesAResetCommittedInTheMintGap` | a reset committed between the router's check and the mint: 401 and no token (network: `state_invalid`), not the 500 it was |
+| `TestNetworkRefreshRefusesASessionRevokedInTheMintGap` | a tracked sign-in revoked by the backend's API key between the router's check and the mint: the structured 401 `session_revoked`, `state_invalid`, not a 500 |
 | `TestTheRefreshMintHookDoesNotOutliveAFailedRefresh` | a refresh that fails with the hook set (`runtime.Goexit`) restores it; a hook that stayed set ran a failed test's reset in later tests' refreshes (`TestRealClientTokenActsOnlyForItsOwnClients` answered 503) |
 
 Also:
+- `localclient/authority_test.go` `TestAuthorityRefreshRotatedInTheMintGapIsUnauthorized`: the hosted proxy's local authority answers the same refusal with its 401 classification.
 - `session/client_session_api_key_test.go` covers the marker.
 - `session/auth_state_query_source_test.go` covers the state-query source.
 - `jwt/auth_rejection_counter_test.go` covers each cause and kind cell.
