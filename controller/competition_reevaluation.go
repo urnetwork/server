@@ -244,12 +244,24 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 		return ErrAutomationDisabled
 	}
 	if !tokenNamePattern.MatchString(request.IdempotencyKey) || !sha256Pattern.MatchString(request.AuthorizationSha256) ||
-		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind || a.IncidentClass != model.CompetitionJobReevaluationArchiveInventory ||
+		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind ||
 		a.Environment != settings.AutomationPolicy.Environment || a.CompetitionId != settings.CompetitionId || a.SeasonId != settings.AutomationPolicy.SeasonId ||
 		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != 0 || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
 		a.AuthorizedAt.IsZero() || !a.AuthorizedAt.Before(a.ExpiresAt) || !sha256Pattern.MatchString(a.EvidenceSha256) ||
 		!sha256Pattern.MatchString(a.ExpectedTerminalSha256) || a.IncidentEventId < 1 || !sha256Pattern.MatchString(a.IncidentEventSha256) ||
 		!sha256Pattern.MatchString(a.RoundPolicySha256) || !sha256Pattern.MatchString(a.BaselineSha256) {
+		return ErrConflict
+	}
+	switch a.IncidentClass {
+	case model.CompetitionJobReevaluationArchiveInventory:
+		// The separately authenticated manifest remains mandatory for this class.
+	case model.CompetitionJobReevaluationLegacyArchiveBudget:
+		// Explicit operator approval covers an untyped earlier archive interruption,
+		// not a fabricated inventory diagnosis or a generic expired execution.
+		if a.IncidentAttempt < 1 || a.ExpectedAttemptCount <= a.IncidentAttempt || a.FailureManifestSha256 != "" || a.RejectedArtifactPath != "" {
+			return ErrConflict
+		}
+	default:
 		return ErrConflict
 	}
 	digest, err := model.CompetitionAutomationDigest(a)
@@ -300,8 +312,9 @@ func readCompetitionReevaluationReceipt(ctx context.Context, settings *Settings,
 	return receipt, err
 }
 
-// A terminal code alone never proves evaluator fault. The actual immutable
-// event must bind this job, attempt and exact unsafe-inventory failure phase.
+// A terminal code alone cannot grant recovery. The typed class proves the
+// exact inventory defect; explicit legacy approval binds a real earlier
+// archive interruption without claiming its unknown backend cause.
 func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.PgTx, auth model.CompetitionJobReevaluationAuthorization, started, completed time.Time) error {
 	var at time.Time
 	var eventType, digest string
@@ -311,11 +324,23 @@ func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.
 		return ErrConflict
 	}
 	var event struct {
-		Attempt int                                `json:"attempt"`
-		Failure *competitionArtifactArchiveFailure `json:"artifact_archive_failure"`
+		Attempt   int                                `json:"attempt"`
+		ErrorCode json.RawMessage                    `json:"error_code"`
+		Failure   *competitionArtifactArchiveFailure `json:"artifact_archive_failure"`
 	}
-	if json.Unmarshal(payload, &event) != nil || event.Failure == nil || digest != auth.IncidentEventSha256 || event.Attempt != auth.IncidentAttempt ||
+	if json.Unmarshal(payload, &event) != nil || digest != auth.IncidentEventSha256 || event.Attempt != auth.IncidentAttempt ||
 		(eventType != "failed" && eventType != "infrastructure_retry") || at.Before(started) || completed.Before(at) {
+		return ErrConflict
+	}
+	if auth.IncidentClass == model.CompetitionJobReevaluationLegacyArchiveBudget {
+		var errorCode string
+		if json.Unmarshal(event.ErrorCode, &errorCode) != nil || eventType != "infrastructure_retry" || errorCode != "artifact_archive_failed" || event.Failure != nil ||
+			event.Attempt < 1 || auth.ExpectedAttemptCount <= event.Attempt {
+			return ErrConflict
+		}
+		return nil
+	}
+	if auth.IncidentClass != model.CompetitionJobReevaluationArchiveInventory || event.Failure == nil {
 		return ErrConflict
 	}
 	wanted := sha256.Sum256([]byte("failure evidence manifest contains an unsafe artifact"))
@@ -341,7 +366,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 		return existing, loadErr
 	}
 	preflightError := validateCompetitionReevaluationRuntime(settings, a)
-	if preflightError == nil {
+	if preflightError == nil && a.IncidentClass == model.CompetitionJobReevaluationArchiveInventory {
 		preflightError = validateCompetitionReevaluationInventory(settings, a)
 	}
 	// Replay remains possible after retained local files or the authorization
@@ -398,6 +423,9 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			var failure *CompetitionError
 			server.Raise(json.Unmarshal(errorJson, &failure))
 			if failure == nil || failure.Kind != "infrastructure" || failure.Retriable || (failure.Code != "artifact_archive_failed" && failure.Code != "evaluation_time_budget_exhausted") {
+				panic(ErrConflict)
+			}
+			if a.IncidentClass == model.CompetitionJobReevaluationLegacyArchiveBudget && failure.Code != "evaluation_time_budget_exhausted" {
 				panic(ErrConflict)
 			}
 			digest, digestErr := CompetitionJobReevaluationSnapshotDigest(terminal)
