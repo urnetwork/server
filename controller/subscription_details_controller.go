@@ -756,8 +756,16 @@ func appleSubscriptionState(statuses *appleSubscriptionStatusesResponse) *subscr
 		Active: transaction.entitled(),
 	}
 	autoRenewSwitch := -1
+	// in billing grace the customer is entitled to the grace period's end, past
+	// the lapsed expiry
+	var graceExpires *time.Time
 	if transaction.SignedRenewalInfo != "" {
 		if claims, err := appleDecodeJwsPayload(transaction.SignedRenewalInfo); err == nil {
+			if transaction.Status == appleStatusBillingGrace {
+				if t, ok := appleGracePeriodExpires(claims); ok {
+					graceExpires = &t
+				}
+			}
 			if v, ok := claims["autoRenewStatus"].(float64); ok {
 				autoRenewSwitch = int(v)
 			}
@@ -778,6 +786,9 @@ func appleSubscriptionState(statuses *appleSubscriptionStatusesResponse) *subscr
 				}
 			}
 		}
+	}
+	if graceExpires != nil && (state.EndTime == nil || state.EndTime.Before(*graceExpires)) {
+		state.EndTime = graceExpires
 	}
 	switch {
 	case !transaction.entitled():
