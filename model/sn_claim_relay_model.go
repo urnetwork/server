@@ -5,9 +5,10 @@ package model
 //
 // Its status and Claim now live in Redis: no table is needed, a new one would
 // hold every later Main deploy until it is applied, and losing them costs little.
-// The status is rewritten by the next pass. A lost Claim now request can be tapped
-// again, and a lost limit lets one coldkey tap again early, under the same daily
-// cap, which is read from Postgres.
+// The status is rewritten by the next pass. A request is only an entry in a
+// queue and its coldkey's limit is set only once the relay has paid it, so a lost
+// request can be tapped again with nothing used up, and a lost limit lets one
+// coldkey tap again early, under the same daily cap, which is read from Postgres.
 
 import (
 	"context"
@@ -68,28 +69,15 @@ type SnClaimRelayRequest struct {
 	Time    time.Time
 }
 
-// AddSnClaimRelayRequest takes the coldkey's one Claim now of the period and
-// queues it. A coldkey already within its period queues nothing, and limitUntil
-// says when the period ends. The limit's expiry is the period.
-func AddSnClaimRelayRequest(ctx context.Context, deploymentKey StDeploymentKey, coldkey [32]byte, now time.Time, period time.Duration) (added bool, limitUntil time.Time) {
+// AddSnClaimRelayRequest queues a coldkey's Claim now. A coldkey already queued
+// keeps its place. The caller checks the coldkey's limit first.
+func AddSnClaimRelayRequest(ctx context.Context, deploymentKey StDeploymentKey, coldkey [32]byte, now time.Time) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		limitKey := snClaimRelayLimitKey(deploymentKey, coldkey)
-		var err error
-		added, err = r.SetNX(ctx, limitKey, strconv.FormatInt(now.UnixMilli(), 10), period).Result()
-		server.Raise(err)
-		if !added {
-			remaining, err := r.PTTL(ctx, limitKey).Result()
-			server.Raise(err)
-			limitUntil = now.Add(max(remaining, 0))
-			return
-		}
 		requestsKey := snClaimRelayRequestsKey(deploymentKey)
 		member := hex.EncodeToString(coldkey[:])
-		server.Raise(r.ZAdd(ctx, requestsKey, redis.Z{Score: float64(now.UnixMilli()), Member: member}).Err())
+		server.Raise(r.ZAddNX(ctx, requestsKey, redis.Z{Score: float64(now.UnixMilli()), Member: member}).Err())
 		server.Raise(r.Expire(ctx, requestsKey, snClaimRelayRequestsTtl).Err())
-		limitUntil = now.Add(period)
 	})
-	return
 }
 
 // GetSnClaimRelayRequest reports a coldkey's unfinished request and when its limit
@@ -131,14 +119,15 @@ func GetSnClaimRelayRequests(ctx context.Context, deploymentKey StDeploymentKey,
 	return requests
 }
 
-// FinishSnClaimRelayRequest removes a coldkey's request. A refund also ends its
-// limit: nothing was sent for it, so the tap is not used up.
-func FinishSnClaimRelayRequest(ctx context.Context, deploymentKey StDeploymentKey, coldkey [32]byte, refund bool) {
+// FinishSnClaimRelayRequest removes a coldkey's request. startLimit starts the
+// coldkey's limit for period: the relay paid its tap. A limit already running is
+// kept as it is.
+func FinishSnClaimRelayRequest(ctx context.Context, deploymentKey StDeploymentKey, coldkey [32]byte, startLimit bool, now time.Time, period time.Duration) {
 	server.Redis(ctx, func(r server.RedisClient) {
-		server.Raise(r.ZRem(ctx, snClaimRelayRequestsKey(deploymentKey), hex.EncodeToString(coldkey[:])).Err())
-		if refund {
-			server.Raise(r.Del(ctx, snClaimRelayLimitKey(deploymentKey, coldkey)).Err())
+		if startLimit {
+			server.Raise(r.SetNX(ctx, snClaimRelayLimitKey(deploymentKey, coldkey), strconv.FormatInt(now.UnixMilli(), 10), period).Err())
 		}
+		server.Raise(r.ZRem(ctx, snClaimRelayRequestsKey(deploymentKey), hex.EncodeToString(coldkey[:])).Err())
 	})
 }
 

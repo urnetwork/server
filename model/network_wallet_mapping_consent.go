@@ -269,17 +269,18 @@ type NetworkWalletMappingConsentView struct {
 
 // Nil when the network has no accepted consent in the domain. A retained row
 // that no longer verifies is an error, never a displayed wallet.
-// GetNetworkWalletMappingConsentColdkeys returns the coldkey of each consent the
-// network ever signed, newest first: an earlier coldkey's account keeps its
-// balance after a wallet change. Each original is verified as when it was accepted.
-func GetNetworkWalletMappingConsentColdkeys(ctx context.Context, domain protocol.ClientKeyHistoryDomain, networkId server.Id) ([][32]byte, error) {
+// GetNetworkWalletMappingConsentColdkeys returns the coldkey of each of the
+// network's newest consents, at most limit, newest first: an earlier coldkey's
+// account keeps its balance after a wallet change. Each original is verified as
+// when it was accepted.
+func GetNetworkWalletMappingConsentColdkeys(ctx context.Context, domain protocol.ClientKeyHistoryDomain, networkId server.Id, limit int) ([][32]byte, error) {
 	digest, err := domain.Digest()
 	if err != nil {
 		return nil, err
 	}
 	originals := [][]byte{}
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `SELECT original FROM network_wallet_mapping_consent WHERE domain_hash=$1 AND network_id=$2 ORDER BY generation DESC`, digest[:], networkId)
+		result, err := conn.Query(ctx, `SELECT original FROM network_wallet_mapping_consent WHERE domain_hash=$1 AND network_id=$2 ORDER BY generation DESC LIMIT $3`, digest[:], networkId, limit)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				var original []byte

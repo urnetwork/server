@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"slices"
 	"time"
 
 	"github.com/holiman/uint256"
@@ -212,9 +213,18 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 	return account, nil
 }
 
-// The coldkeys a network's sessions may ask about: every wallet SnGetWallet lists
-// and each earlier generation of its network consent, whose account keeps its
-// balance after a wallet change.
+// Each answer reads at most this many coldkeys, and at most this many of a
+// network's consent generations: each is a chain read. The relay claims every
+// account whatever an answer lists.
+const (
+	snClaimRelayColdkeysPerAnswer = 32
+	snClaimRelayConsentsPerAnswer = 8
+)
+
+// The coldkeys a network's sessions may ask about, in order: the session's
+// effective wallet, the network consent's earlier generations, whose accounts
+// keep their balances after a wallet change, and every other wallet SnGetWallet
+// lists. A banned coldkey is left out: the relay claims nothing for it.
 func snClaimRelayNetworkColdkeys(clientSession *session.ClientSession) ([][32]byte, error) {
 	wallets, err := SnGetWallet(clientSession)
 	if err != nil {
@@ -223,20 +233,21 @@ func snClaimRelayNetworkColdkeys(clientSession *session.ClientSession) ([][32]by
 	coldkeys := [][32]byte{}
 	seen := map[[32]byte]bool{}
 	add := func(coldkey [32]byte) {
-		if !seen[coldkey] {
+		if !seen[coldkey] && !SnWalletBanned(coldkey) && len(coldkeys) < snClaimRelayColdkeysPerAnswer {
 			seen[coldkey] = true
 			coldkeys = append(coldkeys, coldkey)
 		}
 	}
-	for _, wallet := range wallets.Wallets {
-		coldkey, err := ss58.DecodeWithPrefix(wallet.ColdkeySs58, ss58.BittensorPrefix)
-		if err != nil {
-			continue
+	addSs58 := func(address string) {
+		if coldkey, err := ss58.DecodeWithPrefix(address, ss58.BittensorPrefix); err == nil {
+			add(coldkey)
 		}
-		add(coldkey)
+	}
+	if wallets.Wallet != nil {
+		addSs58(wallets.Wallet.ColdkeySs58)
 	}
 	if domain, ok := stClientKeyHistoryDomain(); ok {
-		earlier, err := model.GetNetworkWalletMappingConsentColdkeys(clientSession.Ctx, domain, clientSession.ByJwt.NetworkId)
+		earlier, err := model.GetNetworkWalletMappingConsentColdkeys(clientSession.Ctx, domain, clientSession.ByJwt.NetworkId, snClaimRelayConsentsPerAnswer)
 		if err != nil {
 			return nil, err
 		}
@@ -244,13 +255,42 @@ func snClaimRelayNetworkColdkeys(clientSession *session.ClientSession) ([][32]by
 			add(coldkey)
 		}
 	}
+	for _, wallet := range wallets.Wallets {
+		addSs58(wallet.ColdkeySs58)
+	}
 	return coldkeys, nil
+}
+
+// snClaimRelayColdkeyAccounts reads the relay's view of one coldkey's account in
+// the operator's pool: none, or one.
+func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnClaimRelayStatus, coldkey [32]byte, now time.Time) ([]*SnClaimRelayAccount, error) {
+	ledger, err := StLedgerV2Accounts(ctx, coldkey)
+	if err != nil {
+		return nil, err
+	}
+	address, err := ss58.Encode(coldkey, ss58.BittensorPrefix)
+	if err != nil {
+		return nil, err
+	}
+	requested, limitUntil := model.GetSnClaimRelayRequest(ctx, cfg.DeploymentKey(), coldkey, now)
+	accounts := []*SnClaimRelayAccount{}
+	for _, entry := range ledger.Accounts {
+		// the relay claims in the operator's own pool
+		if entry.NoId != cfg.NoId {
+			continue
+		}
+		account, err := snClaimRelayAccountView(status, address, entry, requested, limitUntil, now)
+		if err != nil {
+			return nil, err
+		}
+		accounts = append(accounts, account)
+	}
+	return accounts, nil
 }
 
 // snClaimRelayNetworkAccounts reads the relay's view of each of the network's
 // accounts in the operator's pool.
 func snClaimRelayNetworkAccounts(clientSession *session.ClientSession, cfg *StConfig, status *SnClaimRelayStatus, now time.Time) ([]*SnClaimRelayAccount, error) {
-	ctx := clientSession.Ctx
 	coldkeys, err := snClaimRelayNetworkColdkeys(clientSession)
 	if err != nil {
 		return nil, err
@@ -260,30 +300,11 @@ func snClaimRelayNetworkAccounts(clientSession *session.ClientSession, cfg *StCo
 		return accounts, nil
 	}
 	for _, coldkey := range coldkeys {
-		// the relay claims nothing for a banned coldkey
-		if SnWalletBanned(coldkey) {
-			continue
-		}
-		ledger, err := StLedgerV2Accounts(ctx, coldkey)
+		coldkeyAccounts, err := snClaimRelayColdkeyAccounts(clientSession.Ctx, cfg, status, coldkey, now)
 		if err != nil {
 			return nil, err
 		}
-		address, err := ss58.Encode(coldkey, ss58.BittensorPrefix)
-		if err != nil {
-			return nil, err
-		}
-		requested, limitUntil := model.GetSnClaimRelayRequest(ctx, cfg.DeploymentKey(), coldkey, now)
-		for _, entry := range ledger.Accounts {
-			// the relay claims in the operator's own pool
-			if entry.NoId != cfg.NoId {
-				continue
-			}
-			account, err := snClaimRelayAccountView(status, address, entry, requested, limitUntil, now)
-			if err != nil {
-				return nil, err
-			}
-			accounts = append(accounts, account)
-		}
+		accounts = append(accounts, coldkeyAccounts...)
 	}
 	return accounts, nil
 }
@@ -330,15 +351,16 @@ type SnClaimRelayClaimNowResult struct {
 	Requested bool `json:"requested"`
 	// why not, as SnClaimRelayAccount.ClaimNowReason
 	Reason string `json:"reason,omitempty"`
-	// when the coldkey's limit ends, unix milliseconds
+	// when the coldkey's limit ends, unix milliseconds, for a tap the limit refused
 	NextAtMillis int64              `json:"next_at_millis,omitempty"`
 	Error        *SnClaimRelayError `json:"error,omitempty"`
 }
 
-// SnClaimRelayClaimNow queues one coldkey's balance for the relay's next pass: at
-// most once per coldkey per 30 days, once it clears the transfer floor. The relay
-// sends it first, under the same daily cap, and gives the tap back if nothing can
-// be sent for it.
+// SnClaimRelayClaimNow queues one coldkey's balance for the relay's next pass,
+// once it clears the transfer floor. The relay sends it first, under the same
+// daily cap. A coldkey can do this once per 30 days, counted from when the relay
+// pays a tapped claim it would not have sent by itself, so a tap that sends
+// nothing uses nothing up.
 func SnClaimRelayClaimNow(args *SnClaimRelayClaimNowArgs, clientSession *session.ClientSession) (*SnClaimRelayClaimNowResult, error) {
 	ctx := clientSession.Ctx
 	now := server.NowUtc()
@@ -352,34 +374,32 @@ func SnClaimRelayClaimNow(args *SnClaimRelayClaimNowArgs, clientSession *session
 	if err != nil {
 		return &SnClaimRelayClaimNowResult{Error: &SnClaimRelayError{Message: "Not a Bittensor ss58 address."}}, nil
 	}
-	accounts, err := snClaimRelayNetworkAccounts(clientSession, cfg, status, now)
-	if err != nil {
+	unreadable := func(err error) (*SnClaimRelayClaimNowResult, error) {
 		glog.Infof("[sn]claim relay accounts of network %s: %s\n", clientSession.ByJwt.NetworkId, err)
 		return &SnClaimRelayClaimNowResult{Error: &SnClaimRelayError{Message: "The balances could not be read."}}, nil
 	}
-	address, err := ss58.Encode(coldkey, ss58.BittensorPrefix)
+	coldkeys, err := snClaimRelayNetworkColdkeys(clientSession)
 	if err != nil {
-		return nil, err
+		return unreadable(err)
 	}
-	var account *SnClaimRelayAccount
-	for _, candidate := range accounts {
-		if candidate.ColdkeySs58 == address {
-			account = candidate
-		}
-	}
-	if account == nil {
-		// not this network's, or it has no account: both read as nothing to claim
+	if !slices.Contains(coldkeys, coldkey) || cfg == nil || !cfg.Enabled || !cfg.LedgerV2Enabled() {
+		// not this network's, or banned: both read as nothing to claim
 		return refuse(SnClaimRelayReasonNothingPending, 0)
 	}
+	accounts, err := snClaimRelayColdkeyAccounts(ctx, cfg, status, coldkey, now)
+	if err != nil {
+		return unreadable(err)
+	}
+	if len(accounts) == 0 {
+		return refuse(SnClaimRelayReasonNothingPending, 0)
+	}
+	account := accounts[0]
 	if !account.ClaimNowAvailable {
 		return refuse(account.ClaimNowReason, account.ClaimNowNextAtMillis)
 	}
-	added, limitUntil := model.AddSnClaimRelayRequest(ctx, cfg.DeploymentKey(), coldkey, now, snClaimRelayClaimNowPeriod)
-	if !added {
-		return refuse(SnClaimRelayClaimNowLimit, limitUntil.UnixMilli())
-	}
+	model.AddSnClaimRelayRequest(ctx, cfg.DeploymentKey(), coldkey, now)
 	snClaimRelayClaimNowRequests.WithLabelValues(snClaimRelayRequestAccepted).Inc()
-	return &SnClaimRelayClaimNowResult{Requested: true, NextAtMillis: limitUntil.UnixMilli()}, nil
+	return &SnClaimRelayClaimNowResult{Requested: true}, nil
 }
 
 // snClaimRelayCoreRequests is Claim now in Redis.
@@ -395,8 +415,8 @@ func (self *snClaimRelayCoreRequests) List(ctx context.Context, limit int) []*sn
 	return requests
 }
 
-func (self *snClaimRelayCoreRequests) Finish(ctx context.Context, coldkey [32]byte, refund bool) {
-	model.FinishSnClaimRelayRequest(ctx, self.deploymentKey, coldkey, refund)
+func (self *snClaimRelayCoreRequests) Finish(ctx context.Context, coldkey [32]byte, startLimit bool) {
+	model.FinishSnClaimRelayRequest(ctx, self.deploymentKey, coldkey, startLimit, server.NowUtc(), snClaimRelayClaimNowPeriod)
 }
 
 // SnClaimRelayPassResult tells the task when to run the next pass.

@@ -29,8 +29,6 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-const claimRelayDbKey = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
-
 // A relay's chain over an RPC fixture, as a restart builds it: nothing kept.
 func newClaimRelayDbChain(t testing.TB, fixture *ledgerV2RPC, batcher common.Address) (*snClaimRelayCoreChain, *StConfig, func() *snClaimRelayCoreChain) {
 	t.Helper()
@@ -394,58 +392,51 @@ func TestDbClaimRelayBatch(t *testing.T) {
 	})
 }
 
-// Claim now in Redis: one per coldkey per period, oldest first, and a refund gives
-// the tap back.
+// Claim now in Redis: a queue, oldest first, where a coldkey keeps its place, and
+// a limit that only a paid tap starts and that runs out by itself.
 func TestDbClaimRelayRequests(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		key := model.StDeploymentKey("945:" + server.NewId().String())
-		first, second := claimRelayTestColdkey(1), claimRelayTestColdkey(2)
+		first, second, third := claimRelayTestColdkey(1), claimRelayTestColdkey(2), claimRelayTestColdkey(3)
 		now := server.NowUtc()
 		if requested, until := model.GetSnClaimRelayRequest(ctx, key, first, now); requested || !until.IsZero() {
 			t.Fatalf("no request yet: %t %s", requested, until)
 		}
-		added, until := model.AddSnClaimRelayRequest(ctx, key, first, now, snClaimRelayClaimNowPeriod)
-		if !added || !until.Equal(now.Add(snClaimRelayClaimNowPeriod)) {
-			t.Fatalf("first tap: %t %s", added, until)
-		}
-		added, until = model.AddSnClaimRelayRequest(ctx, key, first, now.Add(time.Minute), snClaimRelayClaimNowPeriod)
-		if added || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) || until.After(now.Add(snClaimRelayClaimNowPeriod+time.Hour)) {
-			t.Fatalf("second tap: %t %s", added, until)
-		}
-		if added, _ := model.AddSnClaimRelayRequest(ctx, key, second, now.Add(time.Second), snClaimRelayClaimNowPeriod); !added {
-			t.Fatal("another coldkey's tap was refused")
-		}
+		model.AddSnClaimRelayRequest(ctx, key, first, now)
+		model.AddSnClaimRelayRequest(ctx, key, second, now.Add(time.Second))
+		// tapped again later, it keeps its place
+		model.AddSnClaimRelayRequest(ctx, key, first, now.Add(time.Minute))
 		requests := model.GetSnClaimRelayRequests(ctx, key, 10)
-		if len(requests) != 2 || requests[0].Coldkey != first || requests[1].Coldkey != second {
+		if len(requests) != 2 || requests[0].Coldkey != first || requests[1].Coldkey != second || !requests[0].Time.Equal(time.UnixMilli(now.UnixMilli()).UTC()) {
 			t.Fatalf("requests %+v", requests)
 		}
-		if requested, until := model.GetSnClaimRelayRequest(ctx, key, first, now); !requested || until.IsZero() {
-			t.Fatalf("after the tap: %t %s", requested, until)
+		if requested, until := model.GetSnClaimRelayRequest(ctx, key, first, now); !requested || !until.IsZero() {
+			t.Fatalf("queued: %t %s", requested, until)
 		}
-		// a paid request keeps its limit
-		model.FinishSnClaimRelayRequest(ctx, key, first, false)
-		if requested, until := model.GetSnClaimRelayRequest(ctx, key, first, now); requested || until.IsZero() {
+		// paid, the limit starts and the request is done
+		model.FinishSnClaimRelayRequest(ctx, key, first, true, now, snClaimRelayClaimNowPeriod)
+		requested, until := model.GetSnClaimRelayRequest(ctx, key, first, now)
+		if requested || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) || until.After(now.Add(snClaimRelayClaimNowPeriod+time.Hour)) {
 			t.Fatalf("after it was paid: %t %s", requested, until)
 		}
-		if added, _ := model.AddSnClaimRelayRequest(ctx, key, first, now, snClaimRelayClaimNowPeriod); added {
-			t.Fatal("tapped again within the period")
+		// a running limit is not pushed back by another
+		model.FinishSnClaimRelayRequest(ctx, key, first, true, now.Add(10*24*time.Hour), snClaimRelayClaimNowPeriod)
+		if _, again := model.GetSnClaimRelayRequest(ctx, key, first, now); !again.Equal(until) && again.Sub(until) > time.Minute {
+			t.Fatalf("the limit moved from %s to %s", until, again)
 		}
-		// a refunded one does not
-		model.FinishSnClaimRelayRequest(ctx, key, second, true)
+		// nothing sent, nothing used up
+		model.FinishSnClaimRelayRequest(ctx, key, second, false, now, snClaimRelayClaimNowPeriod)
 		if requested, until := model.GetSnClaimRelayRequest(ctx, key, second, now); requested || !until.IsZero() {
-			t.Fatalf("after the refund: %t %s", requested, until)
+			t.Fatalf("after nothing was sent: %t %s", requested, until)
 		}
-		if added, _ := model.AddSnClaimRelayRequest(ctx, key, second, now, snClaimRelayClaimNowPeriod); !added {
-			t.Fatal("the refund did not give the tap back")
+		if requests := model.GetSnClaimRelayRequests(ctx, key, 10); len(requests) != 0 {
+			t.Fatalf("requests %+v", requests)
 		}
 		// the limit runs out by itself
-		short := claimRelayTestColdkey(3)
-		if added, _ := model.AddSnClaimRelayRequest(ctx, key, short, now, 50*time.Millisecond); !added {
-			t.Fatal("tap")
-		}
+		model.FinishSnClaimRelayRequest(ctx, key, third, true, now, 50*time.Millisecond)
 		for deadline := time.Now().Add(10 * time.Second); ; {
-			if added, _ := model.AddSnClaimRelayRequest(ctx, key, short, now, snClaimRelayClaimNowPeriod); added {
+			if _, until := model.GetSnClaimRelayRequest(ctx, key, third, server.NowUtc()); until.IsZero() {
 				break
 			}
 			if deadline.Before(time.Now()) {
@@ -732,14 +723,17 @@ func TestDbClaimRelayNetworkConsentsNameTheColdkeys(t *testing.T) {
 		second, _, _ := f.networkConsent(t, f.owner, secondKey, secondAddress, f.scope.Epoch+1)
 		f.accept(t, f.owner, second)
 
-		coldkeys, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, f.owner.NetworkId)
+		coldkeys, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, f.owner.NetworkId, 8)
 		if err != nil {
 			t.Fatal(err)
 		}
 		if len(coldkeys) != 2 || coldkeys[0] != secondKey.Public().Encode() || coldkeys[1] != firstKey.Public().Encode() {
 			t.Fatalf("coldkeys %x", coldkeys)
 		}
-		if others, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, server.NewId()); err != nil || len(others) != 0 {
+		if newest, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, f.owner.NetworkId, 1); err != nil || len(newest) != 1 || newest[0] != secondKey.Public().Encode() {
+			t.Fatalf("the newest coldkey %x (%v)", newest, err)
+		}
+		if others, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, server.NewId(), 8); err != nil || len(others) != 0 {
 			t.Fatalf("another network's coldkeys %x (%v)", others, err)
 		}
 		clientSession := session.Testing_CreateClientSession(ctx, f.owner)

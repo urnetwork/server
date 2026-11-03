@@ -1228,7 +1228,7 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 	if prepared.legacy {
 		envelope.price = prepared.fee
 		if previous != nil {
-			envelope.price = stReplacementFee(previous.GasPrice, envelope.price)
+			envelope.price = stReplacementFee(previous.GasPrice, self.claimRelay.replacementQuote(envelope.price))
 		}
 		feeCap = envelope.price
 	} else {
@@ -1239,8 +1239,8 @@ func (self *CoreStClient) transactionEnvelope(ctx context.Context, client *ethcl
 			envelope.fee = snClaimRelayFeeCap(prepared.header.BaseFee, envelope.tip)
 		}
 		if previous != nil {
-			envelope.tip = stReplacementFee(previous.GasTipCap, envelope.tip)
-			envelope.fee = stReplacementFee(previous.GasFeeCap, envelope.fee)
+			envelope.tip = stReplacementFee(previous.GasTipCap, self.claimRelay.replacementQuote(envelope.tip))
+			envelope.fee = stReplacementFee(previous.GasFeeCap, self.claimRelay.replacementQuote(envelope.fee))
 			if envelope.fee.Cmp(envelope.tip) < 0 {
 				envelope.fee.Set(envelope.tip)
 			}

@@ -10,7 +10,9 @@ package controller
 // TAO:
 //   - a coldkey's balance is claimed automatically once it is worth 0.0125 TAO;
 //   - "Claim now" claims it once it clears the transfer floor of 0.0001 TAO, at
-//     most once per coldkey per 30 days;
+//     most once per coldkey per 30 days. The 30 days start when the relay pays
+//     a tapped claim it would not have sent by itself, so a tap that sends
+//     nothing, or only moves an automatic claim ahead, uses nothing up;
 //   - claims spend at most 0.01 TAO a day. Past that they wait for the next UTC
 //     day, which costs nothing: v2 credit never expires.
 //
@@ -31,9 +33,11 @@ package controller
 // claim survives a list lengthened after its estimate, and only the gas used is
 // paid, but 2,600,000 gas at 5 gwei needs 0.013 TAO on hand and would burn it if
 // the runtime refused the claim, which alone is over the day's cap. At the
-// estimate plus 20% the most a transaction can cost is known before it is sent,
-// so the cap holds; a list lengthened after the estimate costs one reverted claim
-// and trips the stop.
+// estimate plus 20% the most a transaction can cost is known before it is sent:
+// its gas limit at its fee cap, raised by the engine's two fee replacements of
+// 12.5%, which on the relay's client are never more (snClaimRelayWorstCase). The
+// cap holds against that; a list lengthened after the estimate costs one
+// reverted claim and trips the stop.
 //
 // The chain, the clock and the stores are injected. Nothing here keeps state of
 // its own: what was spent comes from the durable transaction intents of the
@@ -207,6 +211,9 @@ type snClaimRelayClaim struct {
 	Estimate uint64
 	// asked for with Claim now
 	Requested bool
+	// a tapped claim the relay would not have sent by itself: once it is paid,
+	// the coldkey's Claim now limit starts
+	UnderThreshold bool
 }
 
 // snClaimRelayFacts are the live chain values one pass decides with.
@@ -310,9 +317,10 @@ type snClaimRelayRequest struct {
 // snClaimRelayRequests holds Claim now's requests and its limit.
 type snClaimRelayRequests interface {
 	List(ctx context.Context, limit int) []*snClaimRelayRequest
-	// Finish removes a request. A refunded one gives the tap back: the coldkey's
-	// limit ends, since nothing was sent for it.
-	Finish(ctx context.Context, coldkey [32]byte, refund bool)
+	// Finish removes a request. startLimit starts the coldkey's 30-day limit: the
+	// relay paid a tapped claim it would not have sent by itself. A request with
+	// nothing sent for it leaves the coldkey free to tap again.
+	Finish(ctx context.Context, coldkey [32]byte, startLimit bool)
 }
 
 // snClaimRelaySigner is the configured relayer, without its key: the policy never
@@ -375,6 +383,16 @@ func snClaimRelayGasLimit(estimate uint64) uint64 {
 
 func snClaimRelayLiability(gasLimit uint64, feeCapWei *big.Int) *big.Int {
 	return new(big.Int).Mul(new(big.Int).SetUint64(gasLimit), feeCapWei)
+}
+
+// The most a transaction the relay signs now can cost: its gas limit at its fee
+// cap, with the engine's two same-nonce replacements of 12.5% each, rounded up.
+// The relay's replacements are never priced higher than that (st_controller.go
+// transactionEnvelope), and one transaction is unfinished at a time.
+func snClaimRelayWorstCase(gasLimit uint64, feeCapWei *big.Int) *big.Int {
+	most := new(big.Int).Mul(snClaimRelayLiability(gasLimit, feeCapWei), big.NewInt(81))
+	most.Add(most, big.NewInt(63))
+	return most.Quo(most, big.NewInt(64))
 }
 
 func snClaimRelayMin(values ...*big.Int) *big.Int {
@@ -446,7 +464,7 @@ func (self *snClaimRelay) run(ctx context.Context, now time.Time, status *SnClai
 	candidates := self.candidates(ctx, accounts, facts, status)
 
 	budget := new(big.Int).Sub(snClaimRelayDailyCapWei, spend.SpentWei)
-	planned := snClaimRelayLiability(snClaimRelayPlanningGasLimit, facts.FeeCapWei)
+	planned := snClaimRelayWorstCase(snClaimRelayPlanningGasLimit, facts.FeeCapWei)
 	switch {
 	case spend.Griefed:
 		status.State = SnClaimRelayStateGriefingStop
@@ -522,7 +540,7 @@ func (self *snClaimRelay) candidates(ctx context.Context, accounts []*snClaimRel
 	for _, request := range self.requests.List(ctx, snClaimRelayRequestsPerPass) {
 		account := coldkeyAccounts[request.Coldkey]
 		if account == nil {
-			self.requests.Finish(ctx, request.Coldkey, true)
+			self.requests.Finish(ctx, request.Coldkey, false)
 			continue
 		}
 		claimable := account.claimable()
@@ -532,7 +550,7 @@ func (self *snClaimRelay) candidates(ctx context.Context, accounts []*snClaimRel
 			continue
 		}
 		if !snClaimRelayClearsFloor(snClaimRelayValueTaoRao(claimable, facts.AlphaPriceWei)) || self.banned(account.Coldkey) {
-			self.requests.Finish(ctx, request.Coldkey, true)
+			self.requests.Finish(ctx, request.Coldkey, false)
 			continue
 		}
 		requested[account.key()] = true
@@ -599,11 +617,12 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 			}
 			continue
 		case candidate.Requested && !snClaimRelayClearsFloor(value):
-			self.requests.Finish(ctx, account.Coldkey, true)
+			self.requests.Finish(ctx, account.Coldkey, false)
 			continue
 		case !candidate.Requested && !snClaimRelayOverThreshold(value):
 			continue
 		}
+		claim.UnderThreshold = !snClaimRelayOverThreshold(value)
 		claim.Proof, err = self.ledger.Proof(ctx, &verified)
 		if err != nil {
 			status.State, status.Detail = SnClaimRelayStateLedgerUnavailable, err.Error()
@@ -633,7 +652,7 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 		// The first claim has to fit by the most it can cost. The batch is sized
 		// from what the others should cost, and checked as a whole below.
 		if len(kept) == 0 {
-			liability := snClaimRelayLiability(snClaimRelayGasLimit(estimate), facts.FeeCapWei)
+			liability := snClaimRelayWorstCase(snClaimRelayGasLimit(estimate), facts.FeeCapWei)
 			if 0 < liability.Cmp(budget) {
 				status.State = SnClaimRelayStateCapReached
 				return nil, false
@@ -674,7 +693,7 @@ func (self *snClaimRelay) transaction(ctx context.Context, chain snClaimRelayCha
 		if batch == nil || batch.Count < 2 {
 			break
 		}
-		liability := snClaimRelayLiability(batch.GasLimit, facts.FeeCapWei)
+		liability := snClaimRelayWorstCase(batch.GasLimit, facts.FeeCapWei)
 		if liability.Cmp(funds) <= 0 {
 			return &snClaimRelaySend{To: batch.To, Calldata: batch.Calldata, GasLimit: batch.GasLimit, Claims: claims[:batch.Count], Batch: true}
 		}
@@ -707,7 +726,7 @@ func (self *snClaimRelay) applyOutcome(ctx context.Context, send *snClaimRelaySe
 		case item.Paid:
 			self.claimResults(SnClaimRelayResultPaid, 1)
 			if claim.Requested {
-				self.requests.Finish(ctx, claim.Account.Coldkey, false)
+				self.requests.Finish(ctx, claim.Account.Coldkey, claim.UnderThreshold)
 			}
 		case item.NotAttempted:
 			self.claimResults(SnClaimRelayResultNotAttempted, 1)

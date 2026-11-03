@@ -187,6 +187,17 @@ func (self *stClaimRelayEngine) plannedGasLimit(calldata []byte) uint64 {
 	return self.calldataHashGasLimits[crypto.Keccak256Hash(calldata)]
 }
 
+// The quote a replacement may rise to: the engine bumps the previous attempt's
+// fees by 12.5% and takes this when it is higher. The relay's replacement is the
+// bump alone, so the most its transaction can cost is known when it is first
+// signed (snClaimRelayWorstCase). Any other client keeps the quote.
+func (self *stClaimRelayEngine) replacementQuote(suggested *big.Int) *big.Int {
+	if self != nil {
+		return nil
+	}
+	return suggested
+}
+
 // An intent reconciled without any signed attempt never reached the chain. What
 // it was checked against has gone by, so it is retired with the ordinary
 // cancellation instead of signed now.

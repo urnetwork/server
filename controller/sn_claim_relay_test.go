@@ -28,6 +28,8 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+const claimRelayDbKey = "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+
 const (
 	claimRelayTestUsedGas     = uint64(155_000)
 	claimRelayTestEstimateGas = uint64(165_000)
@@ -104,7 +106,6 @@ type claimRelayWorld struct {
 	txs        []*claimRelayWorldTx
 	requests   map[[32]byte]time.Time
 	limits     map[[32]byte]time.Time
-	refunded   map[[32]byte]bool
 	status     *SnClaimRelayStatus
 	banned     map[[32]byte]bool
 	results    map[string]int
@@ -121,7 +122,7 @@ func newClaimRelayWorld(t testing.TB, amounts ...*uint256.Int) *claimRelayWorld 
 		balanceWei: claimRelayGwei(100_000_000), gasPriceWei: claimRelayGwei(5), feeCapWei: big.NewInt(5_625_000_000), alphaPriceWei: claimRelayTestAlphaPrice,
 		badProofs: map[uint64]bool{}, estimates: map[uint64]uint64{}, refusals: map[uint64]error{}, gasUsed: map[uint64]uint64{}, reverts: map[uint64]bool{},
 		batchRefusals: map[uint64][4]byte{},
-		requests:      map[[32]byte]time.Time{}, limits: map[[32]byte]time.Time{}, refunded: map[[32]byte]bool{}, banned: map[[32]byte]bool{}, results: map[string]int{},
+		requests:      map[[32]byte]time.Time{}, limits: map[[32]byte]time.Time{}, banned: map[[32]byte]bool{}, results: map[string]int{},
 	}
 	world.setLeaves(amounts...)
 	return world
@@ -385,23 +386,29 @@ func (self *claimRelayWorld) List(_ context.Context, limit int) []*snClaimRelayR
 	return requests[:min(limit, len(requests))]
 }
 
-func (self *claimRelayWorld) Finish(_ context.Context, coldkey [32]byte, refund bool) {
+func (self *claimRelayWorld) Finish(_ context.Context, coldkey [32]byte, startLimit bool) {
 	delete(self.requests, coldkey)
-	if refund {
-		delete(self.limits, coldkey)
-		self.refunded[coldkey] = true
+	if _, limited := self.limits[coldkey]; startLimit && !limited {
+		self.limits[coldkey] = self.nowTime.Add(snClaimRelayClaimNowPeriod)
 	}
 }
 
-// A tap: one per coldkey per period, as the store's.
+// A tap, as the api takes it: refused while the coldkey's limit runs, and a
+// coldkey already queued keeps its place.
 func (self *claimRelayWorld) tap(index int) bool {
 	coldkey := claimRelayTestColdkey(index)
 	if until, limited := self.limits[coldkey]; limited && self.nowTime.Before(until) {
 		return false
 	}
-	self.limits[coldkey] = self.nowTime.Add(snClaimRelayClaimNowPeriod)
-	self.requests[coldkey] = self.nowTime
+	if _, queued := self.requests[coldkey]; !queued {
+		self.requests[coldkey] = self.nowTime
+	}
 	return true
+}
+
+func (self *claimRelayWorld) limited(index int) bool {
+	until, limited := self.limits[claimRelayTestColdkey(index)]
+	return limited && self.nowTime.Before(until)
 }
 
 // Inspection
@@ -731,6 +738,78 @@ func TestClaimRelayCapCountsTheWorstCaseOfTheNextClaim(t *testing.T) {
 	}
 }
 
+// The day's last claim must fit by what its replacements can cost too: one wei short
+// of that and it waits for the next day.
+func TestClaimRelayCapCountsTheReplacementsOfTheNextClaim(t *testing.T) {
+	// 198,000 gas at 5.625 gwei, raised twice by 12.5%
+	worst := big.NewInt(1_409_589_843_750_000)
+	for _, c := range []struct {
+		left  *big.Int
+		sends bool
+	}{
+		{worst, true},
+		{new(big.Int).Sub(worst, big.NewInt(1)), false},
+		// what the first attempt alone can cost fits, and is not enough
+		{snClaimRelayLiability(198_000, big.NewInt(5_625_000_000)), false},
+	} {
+		world := newClaimRelayWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
+		world.txs = append(world.txs, &claimRelayWorldTx{createTime: world.nowTime, send: &snClaimRelaySend{},
+			costWei: new(big.Int).Sub(snClaimRelayDailyCapWei, c.left), outcome: &snClaimRelayOutcome{}, final: true})
+		status := world.pass()
+		if sent := len(world.txs) == 2; sent != c.sends {
+			t.Fatalf("with %s wei left: sent %t (%s), want %t", c.left, sent, status.State, c.sends)
+		}
+		if !c.sends {
+			requireClaimRelayState(t, status, SnClaimRelayStateCapReached)
+		}
+	}
+}
+
+// The relay's replacement is the engine's 12.5% bump of its last attempt, never a
+// quote that rose since, so a base fee that jumps cannot take a transaction past
+// what the cap was checked against. Any other client's replacement follows the
+// quote as before.
+func TestClaimRelayReplacementIsTheBumpAlone(t *testing.T) {
+	fixture := newLedgerV2RPC(t)
+	fixture.baseFee = claimRelayGwei(50)
+	client, rpcClient, cfg := newLedgerV2RPCClient(t, fixture)
+	relayKey, err := crypto.HexToECDSA(claimRelayDbKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayer := crypto.PubkeyToAddress(relayKey.PublicKey)
+	calldata := claimRelaySingleIntent(claimRelayReceiptClaim(5, 1_000)).Calldata
+	feeCap, tip := "5625000000", "0"
+	previous := &model.StTransactionAttempt{Attempt: 1, Kind: model.StTxAttemptExecution, GasLimit: 198_000, GasFeeCap: &feeCap, GasTipCap: &tip}
+	intent := &model.StTransactionIntent{Calldata: calldata}
+	envelope := func(relay bool) *stTransactionEnvelope {
+		t.Helper()
+		client.claimRelay = nil
+		if relay {
+			client.claimRelay = newStClaimRelayEngine(relayer)
+		}
+		result, err := client.transactionEnvelope(context.Background(), rpcClient, intent, relayer, cfg.VaultV2, calldata, 0, previous, model.StTxAttemptExecution, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	relay := envelope(true)
+	if relay.legacy || relay.gasLimit != 198_000 || relay.fee.Cmp(big.NewInt(6_328_125_000)) != 0 || relay.tip.Sign() != 0 {
+		t.Fatalf("the relay's replacement: gas %d fee %s tip %s", relay.gasLimit, relay.fee, relay.tip)
+	}
+	operator := envelope(false)
+	if operator.fee.Cmp(claimRelayGwei(100)) != 0 {
+		t.Fatalf("another client's replacement: fee %s", operator.fee)
+	}
+	// and two of them stay inside the worst case
+	once := relay.fee
+	second := stReplacementFee(&[]string{once.String()}[0], nil)
+	if most := snClaimRelayWorstCase(198_000, big.NewInt(5_625_000_000)); 0 < snClaimRelayLiability(198_000, second).Cmp(most) {
+		t.Fatalf("a second replacement at %s may cost more than %s", second, most)
+	}
+}
+
 // A restart forgets nothing: spend is read back from what the account sent. The
 // same claims and the same cap, with a new relay before every pass.
 func TestClaimRelayCapHoldsAcrossARestart(t *testing.T) {
@@ -1041,7 +1120,7 @@ func TestClaimRelayBatchFitsTheFunds(t *testing.T) {
 		t.Fatalf("first transaction %+v", world.txs)
 	}
 	first := world.txs[0].send
-	liability := snClaimRelayLiability(first.GasLimit, world.feeCapWei)
+	liability := snClaimRelayWorstCase(first.GasLimit, world.feeCapWei)
 	if 0 < liability.Cmp(snClaimRelayDailyCapWei) {
 		t.Fatalf("a batch of %d may cost %s, over the cap", len(first.Claims), liability)
 	}
@@ -1052,7 +1131,7 @@ func TestClaimRelayBatchFitsTheFunds(t *testing.T) {
 	// a balance that covers one claim sends one claim
 	world = newClaimRelayWorld(t, claimRelayRepeat(over, 3)...)
 	world.batching = true
-	world.balanceWei = snClaimRelayLiability(snClaimRelayGasLimit(claimRelayTestEstimateGas), world.feeCapWei)
+	world.balanceWei = snClaimRelayWorstCase(snClaimRelayGasLimit(claimRelayTestEstimateGas), world.feeCapWei)
 	world.pass()
 	if len(world.txs) != 1 || world.txs[0].send.Batch {
 		t.Fatalf("transactions %+v", world.txs[0].send)
@@ -1131,7 +1210,11 @@ func TestClaimRelayGasPriceCeiling(t *testing.T) {
 // nothing is due, so the apps do not offer a tap that cannot be honored.
 func TestClaimRelayLowBalance(t *testing.T) {
 	world := newClaimRelayWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
-	needed := snClaimRelayLiability(snClaimRelayGasLimit(claimRelayTestEstimateGas), world.feeCapWei)
+	// the claim's limit at its fee cap, through both replacements
+	needed := big.NewInt(1_409_589_843_750_000)
+	if worst := snClaimRelayWorstCase(snClaimRelayGasLimit(claimRelayTestEstimateGas), world.feeCapWei); worst.Cmp(needed) != 0 {
+		t.Fatalf("worst case %s", worst)
+	}
 	world.balanceWei = new(big.Int).Sub(needed, big.NewInt(1))
 	requireClaimRelayState(t, world.pass(), SnClaimRelayStateLowBalance)
 	if len(world.txs) != 0 {
@@ -1195,8 +1278,8 @@ func TestClaimRelayBannedColdkeySendsNothing(t *testing.T) {
 	if sent := world.claimsSent(); len(sent) != 1 || sent[0].Account.Index != 1 {
 		t.Fatalf("sent %d", len(sent))
 	}
-	if _, queued := world.requests[claimRelayTestColdkey(0)]; queued {
-		t.Fatal("the banned coldkey's request stayed queued")
+	if _, queued := world.requests[claimRelayTestColdkey(0)]; queued || world.limited(0) {
+		t.Fatal("the banned coldkey's request stayed queued, or used up its limit")
 	}
 }
 
@@ -1223,8 +1306,29 @@ func TestClaimRelayClaimNowGoesFirst(t *testing.T) {
 	if _, queued := world.requests[coldkey]; queued {
 		t.Fatal("a paid request stayed queued")
 	}
-	if _, limited := world.limits[coldkey]; !limited || world.refunded[coldkey] {
-		t.Fatal("a paid request gave its tap back")
+	if !world.limited(0) {
+		t.Fatal("a paid tap under the threshold did not start the limit")
+	}
+	if world.tap(0) {
+		t.Fatal("tapped again within the limit")
+	}
+	world.nowTime = world.nowTime.Add(snClaimRelayClaimNowPeriod)
+	if !world.tap(0) {
+		t.Fatal("the limit did not end after its period")
+	}
+}
+
+// A tap on a balance the relay would claim by itself moves it ahead and uses
+// nothing up.
+func TestClaimRelayClaimNowOverTheThresholdUsesNoLimit(t *testing.T) {
+	world := newClaimRelayWorld(t, claimRelayTestAlpha(100*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
+	world.tap(1)
+	world.pass()
+	if sent := world.claimsSent(); len(sent) != 1 || sent[0].Account.Index != 1 || !sent[0].Requested || sent[0].UnderThreshold {
+		t.Fatalf("sent %+v", sent)
+	}
+	if _, queued := world.requests[claimRelayTestColdkey(1)]; queued || world.limited(1) {
+		t.Fatalf("queued %t limited %t", queued, world.limited(1))
 	}
 }
 
@@ -1293,8 +1397,8 @@ func TestClaimRelayNeverSendsBelowTheFloor(t *testing.T) {
 	if _, queued := world.requests[coldkey]; queued {
 		t.Fatal("the request stayed queued")
 	}
-	if !world.refunded[coldkey] {
-		t.Fatal("the tap was not given back")
+	if world.limited(0) {
+		t.Fatal("a tap with nothing sent used up the limit")
 	}
 	// so it can be tapped again
 	world.alphaPriceWei = claimRelayTestAlphaPrice
@@ -1316,13 +1420,12 @@ func TestClaimRelayFloorHoldsOnTheChainsOwnRead(t *testing.T) {
 	world.tap(0)
 	world.pass()
 	coldkey := claimRelayTestColdkey(0)
-	if len(world.txs) != 0 || !world.refunded[coldkey] {
-		t.Fatalf("sent %d, refunded %t", len(world.txs), world.refunded[coldkey])
+	if _, queued := world.requests[coldkey]; len(world.txs) != 0 || queued || world.limited(0) {
+		t.Fatalf("sent %d, queued %t, limited %t", len(world.txs), queued, world.limited(0))
 	}
 }
 
-// A request for an account anyone has since paid is done, and its tap stays used
-// only if a claim of ours could have paid it.
+// A request for an account someone else has since paid is done, and uses nothing up.
 func TestClaimRelayClaimNowOfAPaidAccount(t *testing.T) {
 	amount := claimRelayTestAlpha(2 * snClaimRelayFloorTaoRao)
 	world := newClaimRelayWorld(t, amount)
@@ -1336,20 +1439,19 @@ func TestClaimRelayClaimNowOfAPaidAccount(t *testing.T) {
 	if _, queued := world.requests[coldkey]; queued {
 		t.Fatal("the request stayed queued")
 	}
-	if world.refunded[coldkey] {
-		t.Fatal("gave back the tap of an account the chain has paid")
+	if world.limited(0) {
+		t.Fatal("a claim someone else paid used up the tap")
 	}
 }
 
-// A request for a coldkey no root holds is given back.
+// A request for a coldkey no root holds is dropped, and uses nothing up.
 func TestClaimRelayClaimNowOfNoAccount(t *testing.T) {
 	world := newClaimRelayWorld(t, claimRelayTestAlpha(2*snClaimRelayFloorTaoRao))
 	unknown := claimRelayTestColdkey(9)
 	world.requests[unknown] = world.nowTime
-	world.limits[unknown] = world.nowTime.Add(snClaimRelayClaimNowPeriod)
 	world.pass()
-	if _, queued := world.requests[unknown]; queued || !world.refunded[unknown] {
-		t.Fatalf("queued %t refunded %t", queued, world.refunded[unknown])
+	if _, queued := world.requests[unknown]; queued || world.limited(9) {
+		t.Fatalf("queued %t limited %t", queued, world.limited(9))
 	}
 }
 
