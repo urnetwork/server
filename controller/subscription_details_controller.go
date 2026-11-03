@@ -498,6 +498,9 @@ func (self *stripeCustomerSubscription) cadence() string {
 	return ""
 }
 
+// Stripe's status for a subscription whose renewal failed and is being retried.
+const stripeSubscriptionStatusPastDue = "past_due"
+
 // stripeSubscriptionBilling reports whether Stripe still bills this
 // subscription: the statuses with a live period. past_due is still a
 // subscription being collected (the reconciler's cancelled ≠ expired rule).
@@ -672,6 +675,26 @@ func stripeSetCancelAtPeriodEnd(ctx context.Context, subscriptionId string, canc
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update subscription %s: %w", subscriptionId, err)
+	}
+	return sub, nil
+}
+
+// stripeCancelSubscriptionNow ends the subscription at once and returns Stripe's
+// view of it afterwards. Stripe stops collecting its open invoices.
+func stripeCancelSubscriptionNow(ctx context.Context, subscriptionId string) (*stripeCustomerSubscription, error) {
+	sub, err := server.HttpDelete[*stripeCustomerSubscription](
+		ctx,
+		fmt.Sprintf("%s/v1/subscriptions/%s", stripeApiBaseUrl, url.PathEscape(subscriptionId)),
+		stripeAuthHeader,
+		server.HttpResponseRequireStatusOk[*stripeCustomerSubscription](
+			server.ResponseJsonObject[*stripeCustomerSubscription],
+		),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cancel subscription %s: %w", subscriptionId, err)
+	}
+	if sub == nil || sub.Id != subscriptionId || sub.Status != "canceled" {
+		return nil, fmt.Errorf("cancel subscription %s: Stripe did not confirm it", subscriptionId)
 	}
 	return sub, nil
 }
@@ -927,6 +950,8 @@ func subscriptionCancelError(code string, message string, manageUrl string) *Sub
 
 // SubscriptionCancel answers POST /subscription/cancel: the Stripe
 // subscription runs out at the end of the paid period and is not billed again.
+// One whose renewal is failing has no paid period left, and ends now, so its
+// retries stop.
 func SubscriptionCancel(args *SubscriptionCancelArgs, clientSession *session.ClientSession) (*SubscriptionCancelResult, error) {
 	return stripeSetSubscriptionCancelAtPeriodEnd(args, clientSession, true)
 }
@@ -1020,6 +1045,30 @@ func stripeSetSubscriptionCancelAtPeriodEnd(
 	}
 	if !stripeSubscriptionBilling(sub.Status) {
 		return subscriptionCancelError(SubscriptionErrorCodeNoSubscription, "No Stripe subscription is billing this network.", ""), nil
+	}
+	if cancelAtPeriodEnd && sub.Status == stripeSubscriptionStatusPastDue {
+		// Cancelling at the period's end leaves the open renewal invoice on Stripe's
+		// retry schedule, so a card could be charged after the customer cancelled.
+		// The period being billed was never paid, so cancelling now loses nothing,
+		// and it stops collection of the subscription's open invoices. Pro from the
+		// last window's grace ends at the next hourly reconcile.
+		canceled, err := stripeCancelSubscriptionNow(lookupCtx, sub.Id)
+		if err != nil {
+			glog.Infof("[sub]cancel: cancel past due stripe subscription %s: %v\n", sub.Id, err)
+			return subscriptionCancelError(
+				SubscriptionErrorCodeStoreUnavailable,
+				"Could not update the subscription with Stripe. Please try again.",
+				"",
+			), nil
+		}
+		clearSubscriptionDetailsCached(ctx, networkId)
+		now := server.NowUtc()
+		glog.Infof("[sub]stripe subscription %s for %s: past due, cancelled now (%s)\n", canceled.Id, networkId, canceled.Status)
+		return &SubscriptionCancelResult{
+			Store:     model.SubscriptionMarketStripe,
+			EndTime:   &now,
+			AutoRenew: boolPtr(false),
+		}, nil
 	}
 	if sub.CancelAtPeriodEnd != cancelAtPeriodEnd {
 		updated, err := stripeSetCancelAtPeriodEnd(lookupCtx, sub.Id, cancelAtPeriodEnd)

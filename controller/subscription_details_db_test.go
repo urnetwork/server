@@ -424,10 +424,64 @@ func TestSubscriptionCancelDbReachesAStripeRenewalStillBeingRetried(t *testing.T
 		if err != nil || result.Error != nil {
 			t.Fatalf("cancel the retried subscription: refused %+v %v", result.Error, err)
 		}
-		if len(env.updates) != 1 || env.updates[0] != "true" {
-			t.Fatalf("expected one cancel_at_period_end=true update, got %v", env.updates)
+		// cancelling at the period's end would leave the open renewal invoice on
+		// Stripe's retry schedule, and a card could be charged after the cancel
+		if len(env.updates) != 0 {
+			t.Fatalf("expected no cancel_at_period_end update, got %v", env.updates)
 		}
-		if result.AutoRenew == nil || *result.AutoRenew || result.EndTime == nil || !result.EndTime.Equal(periodEnd) {
+		if len(env.cancels) != 1 || env.cancels[0] != "sub_checkoutretrycancel" {
+			t.Fatalf("expected the subscription cancelled now, got %v", env.cancels)
+		}
+		// nothing is paid through the next period: the plan ends now, not at its date
+		if result.AutoRenew == nil || *result.AutoRenew || result.EndTime == nil || result.EndTime.After(server.NowUtc()) {
+			t.Fatalf("cancel result: %+v", result)
+		}
+		// and there is nothing left to resume
+		resumed, err := SubscriptionResume(&SubscriptionCancelArgs{Store: "stripe"}, clientSession)
+		if err != nil || resumed.Error == nil || resumed.Error.Code != SubscriptionErrorCodeNoSubscription {
+			t.Fatalf("resume after cancelling now: %+v %v", resumed, err)
+		}
+	})
+}
+
+// A subscription in good standing still runs out at the end of the period it has
+// paid for, and can be resumed.
+func TestSubscriptionCancelDbActiveStillEndsAtThePeriodEnd(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "managesubactivecancel", userId)
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+		env := newStripeSubscriptionTestEnv(t)
+		periodEnd := now.Add(300 * 24 * time.Hour).Truncate(time.Second)
+		env.addSubscription("cus_activecancel", "sub_activecancel", "active", false, periodEnd, "year")
+		env.invoiceSubscription["in_activecancel"] = "sub_activecancel"
+		if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          now.Add(-60 * 24 * time.Hour),
+			EndTime:            periodEnd.Add(manualPaymentGracePeriod),
+			NetRevenue:         model.UsdToNanoCents(40),
+			SubscriptionMarket: model.SubscriptionMarketStripe,
+			TransactionId:      "in_activecancel",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		result, err := SubscriptionCancel(&SubscriptionCancelArgs{Store: "stripe"}, clientSession)
+		if err != nil || result.Error != nil {
+			t.Fatalf("cancel: refused %+v %v", result.Error, err)
+		}
+		if len(env.cancels) != 0 || len(env.updates) != 1 || env.updates[0] != "true" {
+			t.Fatalf("expected one cancel_at_period_end=true update: updates %v cancels %v", env.updates, env.cancels)
+		}
+		if result.EndTime == nil || !result.EndTime.Equal(periodEnd) {
 			t.Fatalf("cancel result: %+v", result)
 		}
 	})

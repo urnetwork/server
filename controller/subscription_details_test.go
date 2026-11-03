@@ -561,6 +561,8 @@ type stripeSubscriptionTestEnv struct {
 	subscriptions map[string]map[string]any
 	// the cancel_at_period_end values POSTed, in order
 	updates []string
+	// the subscriptions DELETEd, in order
+	cancels []string
 
 	testServer *httptest.Server
 }
@@ -606,6 +608,17 @@ func newStripeSubscriptionTestEnv(t testing.TB) *stripeSubscriptionTestEnv {
 		value := r.PostForm.Get("cancel_at_period_end")
 		env.updates = append(env.updates, value)
 		sub["cancel_at_period_end"] = value == "true"
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(sub)
+	})
+	mux.HandleFunc("DELETE /v1/subscriptions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		sub, ok := env.subscriptions[r.PathValue("id")]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		env.cancels = append(env.cancels, r.PathValue("id"))
+		sub["status"] = "canceled"
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(sub)
 	})
