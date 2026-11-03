@@ -16,11 +16,13 @@ package work
 //     as a missed root.
 //   - StCommitRoot(e): idempotent commitOperator within the +commitWindow
 //     deadline; bounded retries via task reschedule; T-2h alert (D-11).
-//   - StDeposit(e): previous-epoch signed usage (bytes and users) priced at
-//     the conviction-snapshot tier, capped per epoch (D-3); push-then-credit,
-//     both publish kinds recorded. Under the zero-price schedule
-//     (deposit_zero_rate_action: equal_demand) nothing is owed: the task
-//     records a skipped publish, sends no transaction and raises no alert.
+//   - StDeposit(e): the demand deposit task. It pays the epoch's deposit as
+//     early as it can and keeps trying until the deposit lands or the epoch
+//     ends: the previous epoch's signed usage (bytes and users) at the signed
+//     price sheet's rates for this epoch and the conviction-snapshot tier,
+//     capped per epoch (D-3); convert-then-push-then-credit, both publish kinds
+//     recorded. Under a zero-price schedule nothing is owed: the task records a
+//     skipped publish, sends no transaction and raises no alert.
 //   - StFinalizePoke(e): permissionless finalizeEpoch at/after the
 //     finalize block; marks the epoch finalized.
 //
@@ -52,13 +54,24 @@ const (
 	// sync task re-seeding the chain when it lapses.
 	stEpochCloseMaxAttempts   = 100
 	stCommitRootMaxAttempts   = 100
-	stDepositMaxAttempts      = 8
 	stFinalizePokeMaxAttempts = 100
 
-	stEpochCloseRetryDelay   = 5 * time.Second
-	stCommitRootRetryDelay   = 5 * time.Minute
-	stDepositRetryDelay      = 15 * time.Minute
+	stEpochCloseRetryDelay = 5 * time.Second
+	stCommitRootRetryDelay = 5 * time.Minute
+	// A refusal, such as a USDC wallet too small for the deposit, retries after
+	// this unless its outcome names a time. A deposit retries until it lands or its
+	// epoch ends, so it has no attempt budget.
+	stDepositRetryDelay = 15 * time.Minute
+	// The least delay between a deposit's attempts, whatever the outcome names.
+	stDepositMinRetryDelay   = 30 * time.Second
 	stFinalizePokeRetryDelay = 5 * time.Minute
+
+	// One attempt can block on the settle before it sizes (8 minutes for the send in
+	// flight), wait out a conversion in Ensure (its 12-minute budget, then the unwrap and
+	// the stake of the step it ends on, 8 each), then staging and the credit (8 each):
+	// 52 minutes. Past this the task's context stops the attempt, whose every send is
+	// durable, and the next one goes on from there.
+	stDepositMaxTime = 60 * time.Minute
 
 	// The close reads every contract closed in the epoch in one snapshot. On
 	// Main the 24-hour epoch 0 closed 9.2M contracts; the 7-day epoch 3 closed
@@ -139,11 +152,16 @@ func StSyncChain(
 		scheduleStFinalizePoke(clientSession, deploymentKey, stEpoch.Epoch, 0, stBlockRunAt(state, stEpoch.FinalizeBlock))
 	}
 
-	// one automated deposit chain per (current) epoch
-	if !stHasPublishKind(ctx, deploymentKey, state.Epoch, model.StPublishKindDeposit) {
-		scheduleStDeposit(clientSession, deploymentKey, state.Epoch, 0, server.NowUtc())
+	// one automated deposit chain per (current) epoch, until it concludes
+	if !stDepositConcluded(ctx, deploymentKey, state.Epoch) {
+		scheduleStDeposit(clientSession, deploymentKey, state.Epoch)
 	}
+	// a price published after the epoch's zero-price skip (st_deposit_late_entry_work.go)
+	scheduleStDepositLateEntry(clientSession, deploymentKey, state.Epoch)
 
+	// Before the epoch's close and census: the users count is exact only at the
+	// boundary. It cannot stop the steps below.
+	scheduleStLedgerV2UsageSteps(clientSession, deploymentKey, state)
 	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
 	scheduleStV1Sweep(clientSession, deploymentKey)
 
@@ -175,13 +193,25 @@ func stBlockRunAt(state *controller.StEpochState, block uint64) time.Time {
 	return runAt
 }
 
-// stHasPublishKind reports whether any publish row of the kind exists for
-// the epoch (used to issue exactly one automated deposit chain per epoch —
-// retries beyond the first chain go through StDepositPost or the
-// `bringyourctl st deposit` manual fallback, D-3).
-func stHasPublishKind(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64, kind string) bool {
+// stDepositConcludes reports whether a deposit publish row ends the epoch's chain:
+// the deposit landed, was found already applied or owes nothing, or can never succeed
+// this epoch. A failed row does not: the chain keeps trying until the epoch ends.
+func stDepositConcludes(publish *model.StPublish) bool {
+	if publish.Kind != model.StPublishKindDeposit {
+		return false
+	}
+	switch publish.Status {
+	case model.StPublishStatusConfirmed, model.StPublishStatusSkipped, model.StPublishStatusRefused:
+		return true
+	}
+	return false
+}
+
+// stDepositConcluded reports whether the epoch's deposit chain has concluded, and so
+// needs no chain seeded (D-3).
+func stDepositConcluded(ctx context.Context, deploymentKey model.StDeploymentKey, epoch uint64) bool {
 	for _, publish := range model.GetStPublishes(ctx, deploymentKey, epoch) {
-		if publish.Kind == kind {
+		if stDepositConcludes(publish) {
 			return true
 		}
 	}
@@ -361,7 +391,7 @@ func StCommitRootPost(
 	return nil
 }
 
-// StDeposit(epoch)
+// StDeposit(epoch), the demand deposit task
 
 type StDepositArgs struct {
 	DeploymentKey string `json:"deployment_key"`
@@ -370,20 +400,36 @@ type StDepositArgs struct {
 }
 
 type StDepositResult struct {
-	Retry bool `json:"retry"`
+	Retry   bool       `json:"retry"`
+	RetryAt *time.Time `json:"retry_at,omitempty"`
 }
 
-func scheduleStDeposit(clientSession *session.ClientSession, deploymentKey model.StDeploymentKey, epoch uint64, attempt int, runAt time.Time) {
-	task.ScheduleTask(
+func stDepositRunOnce(deploymentKey string, epoch uint64) *task.RunOnceOption {
+	return task.RunOnce("st_deposit", deploymentKey, epoch)
+}
+
+// scheduleStDeposit starts the epoch's chain if none is pending. A pending chain
+// keeps its own schedule: a RunOnce schedule would pull its retry forward to now,
+// every sync turn, and a refusal would loop back to back for the whole epoch. It does
+// take this binary's run time, which a chain an earlier binary left pending lacks.
+func scheduleStDeposit(clientSession *session.ClientSession, deploymentKey model.StDeploymentKey, epoch uint64) {
+	runOnce := stDepositRunOnce(string(deploymentKey), epoch)
+	task.ScheduleTaskIfAbsent(
 		StDeposit,
-		&StDepositArgs{DeploymentKey: string(deploymentKey), Epoch: epoch, Attempt: attempt},
+		&StDepositArgs{DeploymentKey: string(deploymentKey), Epoch: epoch},
 		clientSession,
-		task.RunOnce("st_deposit", deploymentKey, epoch),
-		task.RunAt(runAt),
-		task.MaxTime(30*time.Minute),
+		runOnce,
+		task.RunAt(server.NowUtc()),
+		task.MaxTime(stDepositMaxTime),
 	)
+	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		task.RaiseRunOnceMaxTimeInTx(clientSession.Ctx, tx, runOnce, stDepositMaxTime)
+	})
 }
 
+// StDeposit runs one attempt of the demand deposit for its epoch. The chain ends when
+// the deposit is confirmed, nothing is owed, it can never succeed this epoch, or the
+// epoch has passed.
 func StDeposit(
 	stDeposit *StDepositArgs,
 	clientSession *session.ClientSession,
@@ -395,13 +441,38 @@ func StDeposit(
 
 	outcome, err := controller.StDepositForEpoch(ctx, stDeposit.Epoch, nil)
 	if err != nil {
-		glog.Infof("[st]epoch %d deposit failed (attempt %d): %s\n", stDeposit.Epoch, stDeposit.Attempt, err)
-		return &StDepositResult{Retry: true}, nil
+		glog.Errorf("[st]epoch %d deposit failed (attempt %d): %s\n", stDeposit.Epoch, stDeposit.Attempt, err)
+		// An error can come before the attempt reaches its epoch check, and nothing
+		// else would end the chain of a passed epoch.
+		passed, passedErr := controller.StDepositEpochPassed(ctx, stDeposit.Epoch)
+		return &StDepositResult{Retry: passedErr != nil || !passed}, nil
 	}
-	if glog.V(1) {
+	if outcome.Status == model.StPublishStatusRefused {
+		glog.Errorf("[st]epoch %d deposit refused for the epoch (attempt %d): %s\n", stDeposit.Epoch, stDeposit.Attempt, outcome)
+	} else if outcome.Retry || outcome.Status == model.StPublishStatusFailed {
+		glog.Infof("[st]epoch %d deposit (attempt %d): %s\n", stDeposit.Epoch, stDeposit.Attempt, outcome)
+	} else if glog.V(1) {
 		glog.Infof("[st]epoch %d deposit: %s\n", stDeposit.Epoch, outcome)
 	}
-	return &StDepositResult{Retry: outcome.Retry}, nil
+	result := &StDepositResult{Retry: outcome.Retry}
+	if outcome.Retry && !outcome.RetryAt.IsZero() {
+		retryAt := outcome.RetryAt
+		result.RetryAt = &retryAt
+	}
+	return result, nil
+}
+
+// stDepositNextRun is when a deposit retries: when its outcome named, or after the
+// refusal delay, and never sooner than the least delay.
+func stDepositNextRun(now time.Time, retryAt *time.Time) time.Time {
+	runAt := now.Add(stDepositRetryDelay)
+	if retryAt != nil {
+		runAt = *retryAt
+	}
+	if earliest := now.Add(stDepositMinRetryDelay); runAt.Before(earliest) {
+		return earliest
+	}
+	return runAt
 }
 
 func StDepositPost(
@@ -413,15 +484,15 @@ func StDepositPost(
 	if _, current := stTaskDeploymentCurrent(stDeposit.DeploymentKey); !current {
 		return nil
 	}
-	if stDepositResult.Retry && stDeposit.Attempt+1 < stDepositMaxAttempts {
+	if stDepositResult.Retry {
 		task.ScheduleTaskInTx(
 			tx,
 			StDeposit,
 			&StDepositArgs{DeploymentKey: stDeposit.DeploymentKey, Epoch: stDeposit.Epoch, Attempt: stDeposit.Attempt + 1},
 			clientSession,
-			task.RunOnce("st_deposit", stDeposit.DeploymentKey, stDeposit.Epoch),
-			task.RunAt(server.NowUtc().Add(stDepositRetryDelay)),
-			task.MaxTime(30*time.Minute),
+			stDepositRunOnce(stDeposit.DeploymentKey, stDeposit.Epoch),
+			task.RunAt(stDepositNextRun(server.NowUtc(), stDepositResult.RetryAt)),
+			task.MaxTime(stDepositMaxTime),
 		)
 	}
 	return nil

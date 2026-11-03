@@ -740,12 +740,20 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.StDepositPost,
 		),
 		task.NewTaskTargetWithPost(
+			work.StDepositLateEntry,
+			work.StDepositLateEntryPost,
+		),
+		task.NewTaskTargetWithPost(
 			work.StFinalizePoke,
 			work.StFinalizePokePost,
 		),
 		task.NewTaskTargetWithPost(
 			work.StLedgerV2Step,
 			work.StLedgerV2StepPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.StLedgerV2UsageStep,
+			work.StLedgerV2UsageStepPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.StV1Sweep,

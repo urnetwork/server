@@ -913,6 +913,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionJobReevaluationMigrationContract},
 	// the usage archive's export ledger, versioned by its position
 	[]snMainnetMigrationContract{usageArchiveExportLedgerMigrationContract},
+	// the demand deposit funder's state; its version follows the migration's position
+	[]snMainnetMigrationContract{stDemandMigrationContract},
 	// the one-tap Top 200 claim's tables, versioned by their position
 	[]snMainnetMigrationContract{snFleetAutoMigrationContract},
 )

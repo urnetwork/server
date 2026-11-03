@@ -203,6 +203,7 @@ func NewSignals() []Signal {
 		NewSubnetChainSignal(),
 		NewSubnetIdentitySignal(),
 		NewSubnetDepositsSignal(),
+		NewSubnetDemandEventsSignal(),
 		NewSubnetValidationSignal(),
 		NewSubnetHeadSignal(),
 		NewSubnetArtifactsSignal(),
