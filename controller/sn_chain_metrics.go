@@ -32,6 +32,34 @@ var (
 		Namespace: "urnetwork", Subsystem: "sn_fleet_binding", Name: "sync_last_success_timestamp_seconds",
 		Help: "Unix time of the last live binding sync run that reached its end without an error.",
 	})
+	snFleetAutoAuthorizations = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "authorizations_total",
+		Help: "Hotkey authorizations stored from a network's coldkey: claims started with one tap, and changes of hotkey.",
+	})
+	snFleetAutoGenerations = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "generations_total",
+		Help: "Manifests built, at most one per network per settlement epoch.",
+	})
+	snFleetAutoRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "refusals_total",
+		Help: "Bindings a device refused to sign, by the device's reason. A jump in coldkey_changed or hotkey_changed is what a server bug or breach looks like.",
+	}, []string{"reason"})
+	snFleetAutoTopUps = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "top_ups_total",
+		Help: "Top-ups queued, at most one per network.",
+	})
+	snFleetRelaySettled = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "relay_settled_total",
+		Help: "Relayed transactions settled, by kind (bind, revoke, top_up) and status (done, failed).",
+	}, []string{"kind", "status"})
+	snFleetRelayOpen = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "relay_open",
+		Help: "Relayed transactions waiting or unsettled at the last pass, up to one pass's limit.",
+	})
+	snFleetRelayBalance = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "sn_fleet_auto", Name: "relay_balance_tao",
+		Help: "The TAO each relay key held when last read, by key (binding, top_up). Under about 0.016 the key counts as not funded and nothing is sent.",
+	}, []string{"key"})
 	snClaimedFleetsGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "sn_fleet_binding", Name: "claimed_fleets",
 		Help: "Fleets with a binding active at the current settlement epoch, by whether the hotkey holds the bound UID at the newest metagraph census: held (live, the validator counts the members), lost, unknown (the census has not read the UID).",
@@ -128,6 +156,13 @@ func init() {
 	prometheus.MustRegister(
 		snFleetBindingSyncLagBlocks,
 		snFleetBindingSyncEvents,
+		snFleetAutoAuthorizations,
+		snFleetAutoGenerations,
+		snFleetAutoRefusals,
+		snFleetAutoTopUps,
+		snFleetRelaySettled,
+		snFleetRelayOpen,
+		snFleetRelayBalance,
 		snFleetBindingSyncErrors,
 		snFleetBindingSyncLastSuccess,
 		snClaimedFleetsGauge,

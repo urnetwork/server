@@ -42,10 +42,10 @@ engine can never retire an intent that holds a reservation or a signed
 attempt: the engine keeps both as live liability, and the account stays
 blocked for good.
 
-An intent with a reservation and no attempt is not stranded, except for the
-deposit key's staging transfer below. The process stopped between the
-reservation and the signature, and the engine signs the reserved bytes on the
-account's next send. It does so also when the operation can no longer succeed,
+An intent with a reservation and no attempt is not stranded. The process stopped
+between the reservation and the signature, and the engine signs the reserved bytes
+on the account's next send, except for the deposit key's staging transfer below. It
+does so also when the operation can no longer succeed,
 since the reservation refuses the cancellation that would otherwise retire it:
 on the root key when the operation has since been spent or its close has
 expired, and on the deposit key when the deposit's deadline has passed at the
@@ -63,11 +63,28 @@ commit ed453384d the expired deposit stayed refused (`pending original signing
 outcome cannot become a different request`), and the deposit key's later sends
 stopped at it.
 
-A staging transfer (`transferStake`) of the deposit key reserved but not
-signed before its epoch rolled stays refused (`st: retained deposit intent
-belongs to another immutable operation`), and the deposit key's later sends
-stop at it. Signing it would move stake, so the engine does not. No operator
-step frees it; it needs a change to the engine.
+A staging transfer (`transferStake`) of the deposit key reserved but not signed
+before its epoch rolled, or before its deposit nonce moved on, is not signed:
+that would move stake for a deposit that is over. The account's next send cancels
+it instead. It turns the unsigned execution reservation into a 21,000-gas
+self-transfer's at the same nonce, which is the one place the engine changes a
+reservation, and only for an intent with no attempt and one reservation that was
+never signed; bytes reach a node only from a recorded attempt, so nothing can be
+out there. The self-transfer goes out and finalizes, the intent ends `canceled`
+with its calldata kept, its nonce's charge falls to that of the self-transfer, and
+the next send goes out (`TestStOperatorGasPendingStagingOfARolledEpochIsCancelled`).
+Before this the transfer stayed refused (`st: retained deposit intent belongs to
+another immutable operation`), and the deposit key's later sends stopped at it.
+Once the reservation is turned, the decision is durable: a send after a stop between
+the turn and the cancellation's attempt record signs the cancellation from the turned
+reservation without reading custody again, so an unreadable custody cannot leave the
+key behind it
+(`TestStV1SweepCloseGoesAfterATurnedStagingCancellation`). The model refuses to turn
+any reservation but a staging transfer's own unsigned execution, whatever its caller
+has proved. A new staging transfer is not reserved within 30 minutes of the deposit's
+deadline, so that it and its deposit can finish after a restart, and nothing more of a
+deposit is signed or replaced once the latest block has reached its deadline: the
+expiry handling above takes it once the deadline has passed at the finalized head.
 
 An intent whose operation can no longer succeed, a v1 close or deposit past
 its window or a spent v2 operation, is retired by a cancellation, a fee

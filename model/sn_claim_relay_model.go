@@ -3,12 +3,14 @@ package model
 // sn_claim_relay_model.go — what the claim relay (controller/sn_claim_relay.go)
 // keeps or reads beyond the durable transaction intents of its account.
 //
-// Its status and Claim now live in Redis: no table is needed, a new one would
-// hold every later Main deploy until it is applied, and losing them costs little.
-// The status is rewritten by the next pass. A request is only an entry in a
-// queue and its coldkey's limit is set only once the relay has paid it, so a lost
-// request can be tapped again with nothing used up, and a lost limit lets one
-// coldkey tap again early, under the same daily cap, which is read from Postgres.
+// Its status, Claim now and the record of its paid claims live in Redis: no
+// table is needed, a new one would hold every later Main deploy until it is
+// applied, and losing them costs little. The status is rewritten by the next
+// pass. A request is only an entry in a queue and its coldkey's limit is set only
+// once the relay has paid it, so a lost request can be tapped again with nothing
+// used up, and a lost limit lets one coldkey tap again early, under the same
+// daily cap, which is read from Postgres. A lost claim record costs only the
+// link to its transaction: the claim itself is on chain.
 
 import (
 	"context"
@@ -31,8 +33,16 @@ const snClaimRelayStatusTtl = 24 * time.Hour
 // Past any request's life, so that an abandoned queue goes away.
 const snClaimRelayRequestsTtl = 60 * 24 * time.Hour
 
+// A paid claim is named for about the Claim now period after the relay last read
+// its receipt, which it does for a day and a night after the claim.
+const snClaimRelayClaimTtl = 30 * 24 * time.Hour
+
 func snClaimRelayStatusKey(deploymentKey StDeploymentKey) string {
 	return fmt.Sprintf("sn_claim_relay_status:%s", deploymentKey)
+}
+
+func snClaimRelayClaimKey(deploymentKey StDeploymentKey, noId uint64, index uint64) string {
+	return fmt.Sprintf("sn_claim_relay_claim:%s:%d/%d", deploymentKey, noId, index)
 }
 
 func snClaimRelayRequestsKey(deploymentKey StDeploymentKey) string {
@@ -59,6 +69,41 @@ func GetSnClaimRelayStatus(ctx context.Context, deploymentKey StDeploymentKey) (
 		}
 		server.Raise(err)
 		statusJson = []byte(value)
+	})
+	return
+}
+
+// SnClaimRelayClaim is the relay's latest paid claim of one account, as its
+// finalized receipt proves it: the transaction, the cumulative vault2 recorded as
+// claimed by it, and what it paid. Amounts are decimal strings of rao of α.
+type SnClaimRelayClaim struct {
+	TxHash     string `json:"tx_hash"`
+	Cumulative string `json:"cumulative"`
+	AmountRao  string `json:"amount_rao"`
+}
+
+// SetSnClaimRelayClaim records an account's paid claim in place of the one before.
+func SetSnClaimRelayClaim(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, index uint64, claim *SnClaimRelayClaim) {
+	claimJson, err := json.Marshal(claim)
+	server.Raise(err)
+	server.Redis(ctx, func(r server.RedisClient) {
+		server.Raise(r.Set(ctx, snClaimRelayClaimKey(deploymentKey, noId, index), string(claimJson), snClaimRelayClaimTtl).Err())
+	})
+}
+
+// GetSnClaimRelayClaim is an account's recorded claim, nil without one or for a
+// record that does not decode.
+func GetSnClaimRelayClaim(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, index uint64) (claim *SnClaimRelayClaim) {
+	server.Redis(ctx, func(r server.RedisClient) {
+		value, err := r.Get(ctx, snClaimRelayClaimKey(deploymentKey, noId, index)).Result()
+		if errors.Is(err, redis.Nil) {
+			return
+		}
+		server.Raise(err)
+		var record SnClaimRelayClaim
+		if json.Unmarshal([]byte(value), &record) == nil {
+			claim = &record
+		}
 	})
 	return
 }

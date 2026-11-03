@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -332,40 +333,72 @@ func (self *snClaimRelayCoreChain) Spend(ctx context.Context, since time.Time) (
 	genesisHash := "0x" + hex.EncodeToString(self.cfg.GenesisHash[:])
 	from := strings.ToLower(self.relayer.address.Hex())
 	spend := &snClaimRelaySpend{SpentWei: new(big.Int), RevertedAccounts: map[string]string{}}
-	for _, intent := range model.GetStTransactionIntentsSince(ctx, self.cfg.ChainId, genesisHash, from, since) {
+	for _, intent := range model.GetStTransactionIntentsSince(ctx, self.cfg.ChainId, genesisHash, from, since.Add(-snClaimRelayPaidLookback)) {
 		attempts := model.GetStTransactionAttempts(ctx, intent.IntentId)
 		if len(attempts) == 0 {
 			continue
 		}
+		var receipt *snClaimRelayReceipt
 		switch intent.Status {
 		case model.StTxFinalized, model.StTxReverted, model.StTxCanceled:
-			receipt, err := self.receipt(ctx, intent, attempts)
-			if err != nil {
-				// Its receipt is unavailable, so the most it could have cost
-				// stands in. The next pass reads it again.
+			var err error
+			if receipt, err = self.receipt(ctx, intent, attempts); err != nil {
+				// The next pass reads it again.
 				glog.Infof("[sn]claim relay receipt of intent %s: %s\n", intent.IntentKey, err)
-				spend.SpentWei.Add(spend.SpentWei, snClaimRelayMostAttemptCost(attempts))
-				continue
 			}
-			spend.SpentWei.Add(spend.SpentWei, receipt.spentWei)
-			if receipt.outcome == nil {
-				continue
-			}
-			spend.Griefed = spend.Griefed || receipt.outcome.Griefed
-			for index, item := range receipt.outcome.Items {
-				if item.Paid {
-					spend.ClaimsPaid += 1
-				} else if !item.NotAttempted && index < len(receipt.accounts) {
-					spend.RevertedAccounts[receipt.accounts[index]] = item.Reason
-				}
-			}
-		case model.StTxSuperseded, model.StTxFailed, model.StTxInvalid:
-			// no canonical transaction of this intent paid anything
-		default:
-			spend.SpentWei.Add(spend.SpentWei, snClaimRelayMostAttemptCost(attempts))
 		}
+		spend.add(intent, attempts, receipt, !intent.CreateTime.Before(since))
 	}
 	return spend, nil
+}
+
+// add counts one of the relayer's intents. today says it was created since the
+// start of the day Spend reports: only those spend, count and refuse for the day,
+// while paid claims are read from the day before on. receipt is nil for an intent
+// that is not final, or for a final one whose receipt could not be read, which
+// then counts the most it could have cost. Intents arrive newest nonce first, so
+// an account's first paid claim here is its latest. Pure, for the tests.
+func (self *snClaimRelaySpend) add(intent *model.StTransactionIntent, attempts []*model.StTransactionAttempt, receipt *snClaimRelayReceipt, today bool) {
+	switch intent.Status {
+	case model.StTxSuperseded, model.StTxFailed, model.StTxInvalid:
+		// no canonical transaction of this intent paid anything
+		return
+	case model.StTxFinalized, model.StTxReverted, model.StTxCanceled:
+		if receipt == nil {
+			// its receipt is unavailable, so the most it could have cost stands in
+			if today {
+				self.SpentWei.Add(self.SpentWei, snClaimRelayMostAttemptCost(attempts))
+			}
+			return
+		}
+	default:
+		if today {
+			self.SpentWei.Add(self.SpentWei, snClaimRelayMostAttemptCost(attempts))
+		}
+		return
+	}
+	if today {
+		self.SpentWei.Add(self.SpentWei, receipt.spentWei)
+	}
+	if receipt.outcome == nil {
+		return
+	}
+	if today {
+		self.Griefed = self.Griefed || receipt.outcome.Griefed
+	}
+	for index, item := range receipt.outcome.Items {
+		switch {
+		case item.Paid:
+			if today {
+				self.ClaimsPaid += 1
+			}
+			if !slices.ContainsFunc(self.Paid, func(paid *snClaimRelayPaid) bool { return paid.NoId == item.NoId && paid.Index == item.Index }) {
+				self.Paid = append(self.Paid, &snClaimRelayPaid{NoId: item.NoId, Index: item.Index, TxHash: receipt.outcome.TxHash, Cumulative: item.Cumulative, AmountRao: item.AmountRao})
+			}
+		case today && !item.NotAttempted && index < len(receipt.accounts):
+			self.RevertedAccounts[receipt.accounts[index]] = item.Reason
+		}
+	}
 }
 
 // The most any of an intent's same-nonce attempts can cost.
@@ -518,7 +551,8 @@ func snClaimRelayItemFromEvent(receipt *types.Receipt, vault common.Address, cla
 	if claimed.Coldkey != claim.Account.Coldkey || claimed.RootIndex.Cmp(claim.RootIndex) != 0 || claimed.Cumulative.Cmp(claim.Account.Cumulative) != 0 || claimed.Caller != caller || claimed.Amount.Sign() <= 0 || amount != nil && claimed.Amount.Cmp(amount) != 0 {
 		return &snClaimRelayItemOutcome{Reason: "the Claimed event differs from the claim"}
 	}
-	return &snClaimRelayItemOutcome{Paid: true, AmountRao: claimed.Amount}
+	// the account as the receipt's accounts name it, from the calldata the event matched
+	return &snClaimRelayItemOutcome{Paid: true, AmountRao: claimed.Amount, NoId: claim.NoId.Uint64(), Index: claim.Account.Index.Uint64(), Cumulative: claimed.Cumulative}
 }
 
 var (

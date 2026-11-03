@@ -1375,6 +1375,9 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 //
 //	1 active / 4 grace, latest transaction not in the ledger -> credit (through
 //	    the apple_subscription_transaction gate)
+//	4 grace                                                  -> also hold Pro to
+//	    the renewal info's gracePeriodExpiresDate, with no revenue and no bytes
+//	    (appleHoldGraceEntitlementInTx); 2 or 3 after it ends the hold
 //	2 expired / 3 billing retry / 5 revoked, renewal active  -> end
 //	    that renewal's paid window only (with its pre-ledger twin row); the
 //	    network's other App Store subscriptions keep theirs
@@ -1560,6 +1563,9 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 						map[string]any{"status": entitledTransaction.Status},
 					)
 				}
+				if ledgerNetworkId == renewal.NetworkId && transaction.networkId == renewal.NetworkId {
+					run.appleHoldGrace(store, transaction, entitledTransaction)
+				}
 				continue
 			}
 			credited, networkId, err := appleReconcileCreditTransactionInConn(run.connOwner, ctx, claims, creds.ProductIds, run.dryRun)
@@ -1621,6 +1627,63 @@ func reconcileApple(run *paymentReconcileRun, since time.Time) (bool, error) {
 	}
 
 	return true, nil
+}
+
+// Holds Pro through the billing grace period the store reports for the
+// transaction (status 4), for a grace its notification missed
+// (appleHoldGraceEntitlementInTx). A dry run holds nothing, and renewal info
+// without a grace date holds nothing.
+func (self *paymentReconcileRun) appleHoldGrace(
+	store string,
+	transaction *validatedAppleTransaction,
+	lastTransaction *appleLastTransaction,
+) {
+	if self.dryRun || lastTransaction.Status != appleStatusBillingGrace {
+		return
+	}
+	renewalClaims, err := appleDecodeJwsPayload(lastTransaction.SignedRenewalInfo)
+	if err != nil {
+		glog.Infof("[sub]reconcile: apple grace for transaction %s has no readable renewal info: %v\n", transaction.transactionId, err)
+		return
+	}
+	graceExpires, ok := appleGracePeriodExpires(renewalClaims)
+	if !ok {
+		return
+	}
+	ctx := self.clientSession.Ctx
+	held := false
+	var holdErr error
+	server.HandleError(func() {
+		server.TxInConn(ctx, self.connOwner, func(tx server.PgTx) {
+			held, holdErr = appleHoldGraceEntitlementInTx(tx, ctx, transaction, graceExpires, self.now)
+		}, server.TxReadCommitted)
+	}, func(err error) {
+		held = false
+		holdErr = err
+	})
+	if holdErr != nil {
+		self.record(
+			store,
+			model.PaymentReconcileActionError,
+			&transaction.networkId,
+			transaction.transactionId,
+			map[string]any{"error": holdErr.Error(), "leg": "grace"},
+		)
+		return
+	}
+	if held {
+		model.UpdateProNetworkInConn(self.connOwner, ctx, transaction.networkId)
+		self.record(
+			store,
+			model.PaymentReconcileActionEntitlementRepaired,
+			&transaction.networkId,
+			transaction.transactionId,
+			map[string]any{
+				"status":               lastTransaction.Status,
+				"grace_period_expires": graceExpires.Format(time.RFC3339),
+			},
+		)
+	}
 }
 
 // appleUnknownToStore applies the bounded retry to a renewal whose transaction

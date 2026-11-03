@@ -45637,9 +45637,17 @@ verified metadata. Every family reads at this one checkpoint.
 - `subnet-policy-schedule`: PAGE for a version failing the coordinator's own
   replayed `_validatePolicy`, a version not starting at its predecessor's epoch
   boundary, a wrong current-version selection, a current hash other than
-  sn.yml's, a 360-block epoch on mainnet, and a reviewed document whose windows
-  (settlement, or production cadence from its first epoch), claim expiry,
-  binding validity or caps differ from any version under its hash; WARN frame
+  sn.yml's, a 360-block epoch on mainnet, a reviewed document whose windows
+  (settlement, or production cadence from its first epoch), claim expiry or
+  binding validity differ from any version under its hash, and a version under
+  its hash that breaks the validators' deposit cap rule in an epoch it is in
+  force, from the current epoch on: its epoch cap at least the cap in force (the
+  signed price sheet entry's, or with none the document's), and its campaign cap
+  at least the larger of the document's campaign cap and its own epoch cap. The
+  reason `policy-deposit-caps-from-epoch-N` names the first epoch whose deposits
+  validators stop accepting. A published entry is judged against the version in
+  force at its own epoch, so a cap raise scheduled for that epoch covers it, and
+  the sheet is the last that verified at the published address; WARN frame
   `scheduled` for an unreviewed future hash or an invalid or unpinned document;
   unknown when no document is enrolled. The live native profile pages on a
   missing subnet or a changed commit-reveal, mechanism count or liquid-alpha
@@ -45669,6 +45677,7 @@ do not prove historical UID ownership.
 | Alert class | Healthy requirement / trip condition | Severity and action |
 |---|---|---|
 | `subnet-pool-custody-identity` | Every active NO has exactly its registered pool hotkey/UID under the immutable vault coldkey; escrow is correctly registered and pool, deposit, reserve and participant roles remain distinct. | Page on foreign ownership, reused UID credited to the old NO, duplicate active roles or a custody mismatch. Reconstruct the registration/rotation boundary before any repair. |
+| `subnet-deposit-hotkey-owner` | Native `Owner` of every active operator's deposit hotkey is its deposit signer's EVM mirror coldkey. | Page on any other owner, at any price: a squat or swap. An unset owner warns while the price is zero and pages once a priced entry is in force or scheduled, because every priced deposit would then fail with `HotKeyAccountNotExists`. The deposit task's refusal `the deposit hotkey cannot take stake` points here. The operator sends the association outside the engine, so the signer's chain nonce may exceed its intent rows. |
 | `subnet-validator-eligibility` | Each expected active validator has its actual historical hotkey/coldkey, sufficient stake, permit and supported weight version at the scoring/application block; declared measurement key/activation is attributable to that identity. | Warn on permit/stake loss or a stopped eligible validator; page if ineligible/forged identity evidence is accepted. Retain stake ranking and native registration/permit changes. |
 | `subnet-fleet-binding-invalid` | Client Ed25519 consent and hotkey sr25519 authorization bind chain, netuid, coordinator, fleet, generation, epoch interval and finalized manifest commitment. Both directions of live UID mapping and membership/revocation history agree. | Page if an invalid, expired, revoked, stolen, overlapping or wrong-generation binding receives credit. Rejected hostile requests are counted, not themselves a custody breach. |
 | `subnet-commitment-mirror-lag` | Native commitment and finalized mirror match with the configured freshness; cleanup/version history cannot leave a deregistered or reassigned hotkey eligible. | Warn on stale/missing mirror; page on a false mirror being used or deadline-wide loss of valid membership. Preserve native inclusion plus EVM mirror receipt and effective versions. |
@@ -45744,6 +45753,10 @@ trustless revenue/usage oracle. Economic suspicion remains separately labeled.
 | `subnet-reserve-principal` | `liveStake() >= principal`; global/per-NO principal and cumulative conviction reconcile; reserve coldkey/hotkey stay immutable and separate from claims. No path sources a reserve withdrawal. | Page on any proved deficit, unauthorized outflow or custody drift. Check exact runtime share accounting; never fund an escrow discrepancy from the reserve. |
 | `subnet-reserve-credit-delta` | A deposit's reserve receipt covers its full principal, with only the pinned zero-to-two-rao surplus; principal is not reduced to conceal a runtime rounding loss. | Page on a receipt/state delta outside the exact allowed interval or a failed move recorded as funded. Retain both destination share-pool transitions. |
 | `subnet-reserve-yield` | Reserve delegate take is zero; observed dividends compound under the correct coldkey. Publish deposits, voluntary conviction, rounding donations and yield separately. | Page on unauthorized take/custody change; warn on unexplained yield loss across eligible completed tempos. A low demand ratio is an economic warning, not by itself a protocol invariant failure. |
+| `subnet-price-sheet` | The file at the published price sheet address parses, every entry verifies under the deployment's pinned signer, it keeps every entry already verified. Whether an entry's cap fits the coordinator's is `subnet-policy-schedule`'s deposit cap rule. | Page on a file that does not verify: readers keep the last verified sheet, so nothing is paid from it, but it may hide a real entry. Warn when the file stays unreadable past 6 hours; an unreadable file before that is unknown. A deployment with no pinned signer has no sheet. |
+| `subnet-usage-statement` | Each settlement v2 source epoch's signed usage statement is published by the epoch's commit deadline, verifying under the reviewed artifact signer. | Page while a price is in force, since the pool then has no weight. Warn ahead of a scheduled price, since the first priced deposit needs the same pipeline. Not read at zero price with nothing scheduled. Do not sign a statement by hand. |
+| `subnet-deposit-landing` | A priced deposit lands within 900 blocks, 3 hours, of its source totals existing. | Page when the epoch's deposit counter is still zero past that. Read the refusal in `bringyourctl st status`; never send a size other than the one owed. |
+| `subnet-campaign-headroom` | The coordinator's campaign deposit cap less `campaignReserved` covers at least 8 epochs at the latest required deposit, summed over the operators. The cap is a lifetime limit, and a deposit past it reverts. | Warn under 8 epochs and page under 2, each epoch under the cap of the version in force at it, so a raise scheduled in time counts. Each operator counts at this epoch's requirement once its source totals exist, and at its last known one before that. Nothing is read at zero price. The owner schedules a coordinator version with a higher campaign cap before it runs out. |
 
 Implementation (2026-10-23, `signal_subnet_deposits.go`), at the §22.1 agreed
 checkpoint. Observation state (the reserve as last seen, each operator's last
@@ -45789,6 +45802,18 @@ is read again.
   when every operator fails after the deadline. Unknown when the policy
   document is absent or unpinned, a signer is not reviewed or the artifact is
   unreadable.
+- `subnet-price-sheet`, `subnet-usage-statement`, `subnet-deposit-landing`: the
+  audit above runs at the rates the signed sheet puts in force for the epoch,
+  over the reviewed document as baseline. A source epoch at or after the
+  operator's vault2 `firstEpoch` is judged by its signed usage statement at both
+  origins (`/sn/evidence/history`, `/sn/evidence`), and never by whether a v1
+  root exists, because the phase C sweep commits one on a v2 epoch. The reader
+  checks the statement's signature, identity and boundaries and applies the same
+  formula; it does not re-sum the ledger's provider rows, which validators do. A
+  sheet never verified, as on a host that cannot reach the published address,
+  prices the audit under the reviewed document, as validators with no sheet do;
+  only `subnet-price-sheet` reports that the file cannot be read. A zero price with nothing scheduled
+  reads no sheet entry's statement and no vault2 pool.
 - `subnet-deposit-penalty-bypass`: for each decided noncompliant operator, any
   permitted validator's applied `Weights` row whose `LastUpdate` is at or after
   the artifact deadline plus `(RevealPeriodEpochs + 1) * Tempo` and gives the
@@ -45800,6 +45825,27 @@ is read again.
 - **False-negative qualifier:** events before the first frontier window are
   not replayed, so epoch counters are judged only once the published frontier
   covers the epoch; one operator's failure zeroing every pool is not judged.
+
+### 22.3a Demand deposit funder events — partial reader
+Probe: `subnet-demand-events`
+
+`signal_subnet_demand_events.go` reads what only the operator service can see and
+the chain cannot show: the newest row of each paging kind in `st_demand_event`,
+through the producer database's bounded constant query. It reads each row's kind,
+epoch and age, and never its data. This is a partial §22.3 component and does not
+count as a family in the registration sentinel.
+
+| Class | Invariant | Trip and response |
+| --- | --- | --- |
+| `subnet-demand-event` | The operator service has recorded no `swap_needs_person`, `funder_alert` or `hotkey_not_ready` event within its window. | Page while the newest `swap_needs_person` is under 7 days old, or the newest `funder_alert` or `hotkey_not_ready` is under an hour old. `swap_needs_person`: find the swap's USDC from the signature in the event's data. `funder_alert`, a swap's TAO short of its floor a minute after signing, paid below it, or never come: the same check, while the funder buys nothing more until 30 minutes after signing. `hotkey_not_ready`: compare `subnet-deposit-hotkey-owner` and the taskworker's refusal. |
+
+- **False-positive qualifier:** nothing acknowledges an event, so
+  `swap_needs_person` stays up for its 7 days after it is handled. `funder_alert`
+  can be a read of the TAO that lags by more than a minute. `hotkey_not_ready` can
+  be a read that failed during the funder's dry run.
+- **False-negative qualifier:** a database that refuses the event's write loses
+  the page, not the taskworker's `[st]v2 ALERT demand_<kind>` log line. The table
+  not existing yet is silence, because the migration's own signal covers it.
 
 ### 22.4 Real validation paths, attempt completeness, and pool quality
 Probe: `subnet-validation`

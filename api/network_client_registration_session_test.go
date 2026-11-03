@@ -151,7 +151,9 @@ func TestApiKeyRegistrationSessionReplayDoesNotRenewOriginalHorizon(t *testing.T
 	env.Run(t, func(t testing.TB) {
 		fixture := newApiKeyRegistrationSessionFixture(t)
 		original := fixture.requireRegistered(t)
-		horizon := original.AcceptUntil().Add(-time.Hour)
+		// in UTC, as the column holds it: a parsed token's times are in the
+		// process's zone, and pgx writes a time's wall clock
+		horizon := original.AcceptUntil().Add(-time.Hour).UTC()
 		server.Tx(fixture.ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(fixture.ctx, `UPDATE network_client_registration SET session_accept_until=$2 WHERE network_id=$1`, original.NetworkId, horizon))
 		})

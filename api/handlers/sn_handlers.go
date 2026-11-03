@@ -533,6 +533,57 @@ func SnHeadBinding(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.SnHeadBinding, w, r)
 }
 
+// SnFleetDevice backs `GET /sn/fleet/device`: what a device of a claiming network is
+// asked to do, which is almost always nothing. Client tokens only: a device asks for
+// its own work.
+func SnFleetDevice(w http.ResponseWriter, r *http.Request) {
+	args := &controller.SnFleetDeviceArgs{NeedConsent: r.URL.Query().Get("need_consent") == "1"}
+	impl := func(clientSession *session.ClientSession) (*controller.SnFleetDeviceResult, error) {
+		return controller.GetSnFleetDevice(args, clientSession)
+	}
+	router.WrapRequireClient(impl, w, r)
+}
+
+// SnFleetDeviceSignature backs `POST /sn/fleet/device/signature`: a device's signature
+// on its own binding, or why it refused.
+func SnFleetDeviceSignature(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireClient(controller.SnFleetDeviceSignature, w, r)
+}
+
+// SnFleetDeviceBinding backs `GET /sn/fleet/device/binding`: a device's own binding on
+// chain, for leaving it.
+func SnFleetDeviceBinding(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireClient(controller.GetSnFleetDeviceBinding, w, r)
+}
+
+// SnFleetDeviceLeave backs `POST /sn/fleet/device/leave`: a device's signed revocation
+// of its own binding, sent through the relay.
+func SnFleetDeviceLeave(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireClient(controller.SnFleetDeviceLeave, w, r)
+}
+
+// SnFleetClaim backs `GET /sn/fleet/claim`: the network's Top 200 claim.
+func SnFleetClaim(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.GetSnFleetClaim, w, r)
+}
+
+// SnFleetAuthorize backs `POST /sn/fleet/authorization`: the coldkey's signed
+// authorization of a hotkey.
+func SnFleetAuthorize(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnFleetAuthorize, w, r)
+}
+
+// SnFleetHotkeySignatures backs `POST /sn/fleet/hotkey-signatures`: the hotkey's
+// signatures on the newest manifest's bindings.
+func SnFleetHotkeySignatures(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnFleetHotkeySignatures, w, r)
+}
+
+// SnFleetTopUp backs `POST /sn/fleet/top-up`: the network's one top-up.
+func SnFleetTopUp(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.SnFleetTopUp, w, r)
+}
+
 // GetAccountEpochs backs `GET /account/epochs?limit=N`: the caller network's
 // finalized epochs, newest first, with points and pool share.
 func GetAccountEpochs(w http.ResponseWriter, r *http.Request) {
