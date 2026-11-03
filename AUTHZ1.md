@@ -743,7 +743,12 @@ returns `{by_jwt}` or `{error: {message}}`.
   - A failed authentication and `WithByJwt` clear it. A session built for
     trusted work never has it.
 - **A stale identity gets 401** (`state_invalid`): a network that was
-  removed after the router's state check, or whose admin changed.
+  removed after the router's state check, or whose admin changed, or a
+  presented token the renewal's own check refuses because it was rotated,
+  removed or revoked after the router's check (`session.RenewalRefused`). A
+  revoked session gets the structured 401 `session_revoked` that
+  authentication gives it. This refusal was an undeclared 500 until
+  `fix/apidb-1103`.
 
 **The create time is carried, on both refreshes.**
 - `/auth/network-refresh` and `/auth/refresh` mint with the presented
@@ -762,6 +767,13 @@ returns `{by_jwt}` or `{error: {message}}`.
 - With the carried create time, renewal timing does not matter. If the
   presented token is expired by a reset, so is everything minted from it.
 - Nothing else about `/auth/refresh` changed.
+- Since the session work (16675a430), a reset takes the session lifecycle
+  lock exclusively and reads its cutoff after the lock, not Postgres `now()`,
+  and both refreshes check the presented token again under the shared lock
+  (`session.RenewSessionCredential`). A reset that commits between the
+  router's check and the mint refuses the refresh with 401, so no token is
+  minted. The carried create time still expires a token renewed before a
+  reset whose cutoff comes from a clock behind the minting host's.
 
 **Gates.** An expired or legacy (no-exp, no registered claims) network token
 reaches the handler only while `reject_expired` / `reject_missing_expiration`
@@ -793,7 +805,9 @@ allow it, because the session parse honors the gates.
 | `TestNetworkRefreshRefusesAStaleIdentity` | gone network, non-admin user: 401, `state_invalid` |
 | `TestNetworkRefreshFollowsTheExpiryGates` | expired token renews with `reject_expired` off, 401 with it on; a legacy token renews with `reject_missing_expiration` off into a token the gate accepts, 401 with it on |
 | `TestNetworkRefreshFollowsCredentialRotation` | a token from before a reset does not renew; a renewed token stops at the next reset |
-| `TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap`, `TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap` | **regression:** `controller.Testing_SetRefreshMintHook` lands a reset stamped between the presented create time and the mint. The refreshed token is rejected by `ValidateByJwtState` and the router, keeps the presented create time, and has a fresh iat/exp. Both fail with a fresh create time stamped at the mint ("outlived the reset") and pass with the carried one. |
+| `TestNetworkRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap`, `TestClientRefreshKeepsTheCreateTimeAcrossAResetInTheMintGap` | **regression:** `controller.Testing_SetRefreshMintHook` reads a reset's cutoff between the presented create time and the mint, and the reset commits after the refresh. The refreshed token is rejected by `ValidateByJwtState` and the router, keeps the presented create time, and has a fresh iat/exp. Both fail with a fresh create time stamped at the mint ("outlived the reset") and pass with the carried one. Until `fix/apidb-1103` the hook committed the reset in the gap, which the renewal's own check has refused since 16675a430. |
+| `TestNetworkRefreshRefusesAResetCommittedInTheMintGap`, `TestClientRefreshRefusesAResetCommittedInTheMintGap` | a reset committed between the router's check and the mint: 401 and no token (network: `state_invalid`), not the 500 it was |
+| `TestTheRefreshMintHookDoesNotOutliveAFailedRefresh` | a refresh that fails with the hook set (`runtime.Goexit`) restores it; a hook that stayed set ran a failed test's reset in later tests' refreshes (`TestRealClientTokenActsOnlyForItsOwnClients` answered 503) |
 
 Also:
 - `session/client_session_api_key_test.go` covers the marker.
