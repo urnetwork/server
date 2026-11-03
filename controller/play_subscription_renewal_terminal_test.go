@@ -1187,3 +1187,34 @@ func TestPlayGraceHoldEndsWithThePurchase(t *testing.T) {
 		}
 	})
 }
+
+// The hourly reconcile holds Pro for a grace period its notification and poll
+// both missed, once, with no credit.
+func TestPaymentReconcileGoogleHoldsProThroughGrace(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		defer disableAllReconcileStores(t)()
+		fixture := newPlayGraceFixture(t, "gracereconcile")
+		previousHasCredentials := playReconcileHasCredentials
+		playReconcileHasCredentials = func() bool { return true }
+		t.Cleanup(func() { playReconcileHasCredentials = previousHasCredentials })
+
+		for _, want := range []int{1, 0} {
+			result, err := RunPaymentReconciliationWithOptions(
+				reconcileTestSession(t, fixture.ctx),
+				&PaymentReconcileRunOptions{Stores: []string{model.SubscriptionMarketGoogle}},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Credited != 0 || result.EntitlementsRepaired != want {
+				t.Fatalf("reconcile: credited %d, repaired %d, want 0 and %d", result.Credited, result.EntitlementsRepaired, want)
+			}
+			if !model.IsProNetwork(fixture.ctx, fixture.networkId) {
+				t.Fatal("Pro did not hold through Play's grace period")
+			}
+		}
+		if rows := fixture.proRows(); len(rows) != 1 || rows[0].startByteCount != 0 {
+			t.Fatalf("the hold must mint nothing: %+v", rows)
+		}
+	})
+}
