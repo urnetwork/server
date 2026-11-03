@@ -1204,6 +1204,16 @@ the source-qualified writer/relay framing bound. The current fixed schema-2
 receipt remains unchanged by the address scrubber; arbitrary diagnostics can
 expand, and one writer call is not an atomicity or complete-delivery proof.
 
+Verify retained evidence by its declared schema role. A snapshot descriptor's
+`path`, `bytes`, and `sha256` may describe a captured prefix or window of a
+mutable source, not an immutable backing file. Verify the saved container and
+explicitly named immutable capture/guard receipts, then check embedded captured
+bytes, length, hash and recorded identity against their serialized metadata.
+Never recursively follow provenance paths or compare a captured prefix with
+the live source's current whole-file size or hash. Reacquiring live evidence is
+a separate bounded read, not snapshot verification. Byte integrity alone does
+not prove full-file coverage, loaded settings, inventory or trust selection.
+
 A skipped prefix, cut first line, unfinished last line, unsupported or malformed
 receipt, source failure, or missing/stale scope leaves that authority unknown.
 Never infer full collection coverage or healthy absence from a tail, reuse old
@@ -1529,6 +1539,14 @@ triage manifest before Sol Medium begins the repair. Cover, as applicable:
 Run the narrow test first, then the package and race suite. Apply the pinned
 engine-source preflight above before either full monitor suite here as well;
 retain the exported variable in the actual child environment.
+
+A qualified extracted helper body does not qualify a new caller. Preserve
+its bootstrap and referenced globals, including receipt hashers and output
+context. When adapting that caller, audit the consumed helpers' global
+bindings and exercise the actual first PRE/POST receipt and save-return
+boundary before command dispatch. A partial receipt from a failed save is
+not a completed preflight. Preserve it and qualify the repair in a fresh,
+separately admitted namespace.
 
 Before launch, inventory the selected tests' complete runtime filesystem
 dependencies as well as Go source and module inputs. Include files opened by

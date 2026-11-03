@@ -54,6 +54,9 @@ const (
 	PaymentReconcileActionRefunded = "refunded"
 	// a dispute was opened -- the funds are withdrawn, treated like a refund
 	PaymentReconcileActionDisputed = "disputed"
+	// a dispute closed in our favor -- the funds are back. details say whether
+	// the window its clawback cut was restored, and if not, why
+	PaymentReconcileActionDisputeWon = "dispute_won"
 	// a store revoked an entitlement (Apple REFUND/REVOKE, Play
 	// SUBSCRIPTION_REVOKED) and the entitlement was ended
 	PaymentReconcileActionRevoked = "revoked"
@@ -666,6 +669,160 @@ func GetReconcileSubscriptionRenewalsInConn(connOwner server.PgConn,
 		})
 	})
 	return renewals
+}
+
+// Whether the dispute's clawback ended a window: its disputed event in the
+// operator stream says so. A dispute that found
+// the window already over ended nothing, and has nothing to give back.
+func DisputeEndedEntitlementInTx(tx server.PgTx, ctx context.Context, disputeId string) (ended bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT details FROM payment_reconciliation_event
+		WHERE store = $1
+		  AND action = $2
+		  AND evidence = $3
+		  AND NOT dry_run
+		`,
+		SubscriptionMarketStripe,
+		PaymentReconcileActionDisputed,
+		disputeId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var details *string
+			server.Raise(result.Scan(&details))
+			if details == nil {
+				continue
+			}
+			var parsed struct {
+				Ended bool `json:"ended"`
+			}
+			if json.Unmarshal([]byte(*details), &parsed) == nil && parsed.Ended {
+				ended = true
+			}
+		}
+	})
+	return
+}
+
+// Gives back the paid window a dispute's clawback cut: the invoice's renewal on the network, starting at startTime, and
+// the Pro balance it granted, matched by its cut window, get endTime. It returns
+// the restored renewal, or nil when the renewal is gone or isn't cut (a
+// redelivery, or a window that never ended). The caller has established that the
+// dispute was won and that this window is the one its clawback ended, and refreshes
+// the pro cache after commit. A balance that retention already removed is not
+// recreated here; the caller's RepairReconciledProEntitlement adds its marker.
+// The outer transaction must use OptNoRetry: an ownership refusal aborts it with
+// its ledger receipt, so Stripe redelivers. ErrPaymentNetworkNotFound for a deleted
+// network, which writes nothing.
+func RestoreDisputedStripeEntitlementInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	networkId server.Id,
+	invoiceId string,
+	startTime time.Time,
+	endTime time.Time,
+	now time.Time,
+) (*ReconcileSubscriptionRenewal, error) {
+	if err := LockPaymentNetworkInTx(tx, ctx, networkId); err != nil {
+		return nil, err
+	}
+
+	var cutTime time.Time
+	found := false
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT end_time FROM subscription_renewal
+		WHERE network_id = $1
+		  AND subscription_type = $2
+		  AND market = $3
+		  AND transaction_id = $4
+		  AND start_time = $5
+		ORDER BY end_time DESC
+		LIMIT 1
+		FOR UPDATE
+		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketStripe,
+		invoiceId,
+		startTime,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&cutTime))
+			found = true
+		}
+	})
+	if !found || cutTime.After(now) || !cutTime.Before(endTime) {
+		return nil, nil
+	}
+
+	balanceIds := []server.Id{}
+	result, err = tx.Query(
+		ctx,
+		`
+		SELECT balance_id FROM transfer_balance
+		WHERE network_id = $1
+		  AND pro
+		  AND start_time = $2
+		  AND end_time = $3
+		`,
+		networkId,
+		startTime,
+		cutTime,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			server.Raise(result.Scan(&balanceId))
+			balanceIds = append(balanceIds, balanceId)
+		}
+	})
+	admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
+	server.Raise(ownershipErr)
+	if !admitted {
+		server.Raise(errTransferBalanceOwnershipBusy)
+	}
+
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		UPDATE subscription_renewal SET end_time = $1
+		WHERE network_id = $2
+		  AND subscription_type = $3
+		  AND market = $4
+		  AND transaction_id = $5
+		  AND start_time = $6
+		  AND end_time = $7
+		`,
+		endTime,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketStripe,
+		invoiceId,
+		startTime,
+		cutTime,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		UPDATE transfer_balance SET end_time = $1
+		WHERE balance_id = ANY($2::uuid[])
+		  AND end_time = $3
+		`,
+		endTime,
+		balanceIds,
+		cutTime,
+	))
+	return &ReconcileSubscriptionRenewal{
+		NetworkId:     networkId,
+		StartTime:     startTime,
+		EndTime:       endTime,
+		TransactionId: invoiceId,
+	}, nil
 }
 
 // EndReconciledEntitlementForNetworkTransactions is the "store says it is

@@ -1065,6 +1065,38 @@ the platform writes no signed row, evidence blob or Redis `ckey_` key for it.
   window. The connect service, which signs registrations, needs no deploy.
 - **Existing rows** stay. Reclaiming them needs a reviewed retention migration.
 
+### Hosted window client keys (2026-11-02)
+
+The same applies to hosted windows, at a larger scale. On Main on 2026-11-02
+hosted window clients were 70-94% of `st_client_key_history`'s inserts, which
+reached about 480 rows/s, about 122 GB/day. A discovery window builds a new
+client with a new key for each candidate, so a row is one candidate, whether or
+not it ever got a contract.
+
+Rows don't repeat: 99.7% of one minute's rows were generation 1 of a client
+minted seconds earlier, and an unchanged key already writes nothing. An upsert
+or a coalescing rule would remove almost none of them.
+
+Nothing reads a hosted window client's key, for the reasons above: encryption
+is off, it publishes no certificate, it has no close-report domain, and it does
+not wait for registration. In a sample of 600 hosted window clients on Main, 687
+close evidence rows held no signed original.
+
+The proxy therefore sets the sdk's `KeepWindowClientKeysLocal` on every hosted
+device (`newProxyDeviceLocalSettings`), which sets connect's
+`SkipClientKeyPublication` on each window client.
+
+- **A post-quantum profile still publishes.** It raises the window client's
+  sessions to Required, and connect publishes anyway. None of 66,711 sampled
+  hosted device configs asks for it.
+- **A contract to the window client** finds no signed head, so its optional
+  metadata falls through to the legacy Redis key: one GET per companion contract.
+- **Rollout:** the proxy only. The connect service needs no deploy. There is no
+  migration, and rolling back is deploying the previous proxy.
+- **Unchanged:** apps and every other client keep publishing, and the mint, the
+  retirement and the contract attempts of each candidate stay as they are.
+- **Existing rows** leave through the key history retention.
+
 ## Four-hour scheduler and database budget
 
 Each shard execution owns one distinct network, credential parent and balance.

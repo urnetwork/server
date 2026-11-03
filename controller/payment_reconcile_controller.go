@@ -1776,7 +1776,9 @@ func appleReconcileCreditTransactionInConn(connOwner server.PgConn,
 //	    repaired. Never ended.
 //	EXPIRED / PENDING_PURCHASE_CANCELED / 410 Gone, renewal active -> end
 //	CANCELED with expiry passed, renewal active                    -> end
-//	PAUSED / ON_HOLD / GRACE / PENDING                             -> nothing
+//	GRACE, no hold yet -> run the same path, which holds Pro through the grace
+//	    period (playHoldGraceEntitlementInTx): no revenue, no bytes
+//	PAUSED / ON_HOLD / PENDING                                     -> nothing
 //
 // Purchases whose last credited window ended up to
 // paymentReconcileLapsedWindow ago are checked too; a lapsed row is only ever
@@ -1861,6 +1863,45 @@ func reconcilePlay(run *paymentReconcileRun, since time.Time) (bool, error) {
 		if over {
 			if renewal.EndTime.After(run.now) {
 				run.end(store, renewal.NetworkId, paymentReconcileEndScope{purchaseToken: purchaseToken}, purchaseToken, map[string]any{"subscription_state": sub.SubscriptionState})
+			}
+			continue
+		}
+
+		// a grace period whose notification and poll both missed it. A purchase
+		// without an account link that is bound elsewhere is left to its owner.
+		if sub.SubscriptionState == "SUBSCRIPTION_STATE_IN_GRACE_PERIOD" && !run.dryRun &&
+			!playUnlinkedBoundElsewhereInConn(run.connOwner, run.clientSession, sub, renewal) {
+			if !run.spend(store) {
+				return false, nil
+			}
+			result, err := PlaySubscriptionRenewalInConn(run.connOwner,
+				&PlaySubscriptionRenewalArgs{
+					NetworkId:      renewal.NetworkId,
+					PackageName:    packageName,
+					SubscriptionId: sub.LineItems[0].ProductId,
+					PurchaseToken:  purchaseToken,
+				},
+				run.clientSession,
+			)
+			if err != nil {
+				run.record(
+					store,
+					model.PaymentReconcileActionError,
+					&renewal.NetworkId,
+					purchaseToken,
+					map[string]any{"error": err.Error(), "leg": "grace"},
+				)
+			} else if result.GraceHeld {
+				run.record(
+					store,
+					model.PaymentReconcileActionEntitlementRepaired,
+					&renewal.NetworkId,
+					purchaseToken,
+					map[string]any{
+						"subscription_state": sub.SubscriptionState,
+						"expiry_time":        result.ExpiryTime.UTC().Format(time.RFC3339),
+					},
+				)
 			}
 			continue
 		}
