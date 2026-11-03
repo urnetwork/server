@@ -12,6 +12,19 @@ manifest. Both modes omit the deleted `operator-proxy`; no clone, placeholder,
 branch, or pin for it is required. All historical records remain unchanged.
 Neither evaluation nor promotion changes the operator's product checkouts.
 
+### Public epoch source index
+
+On every epoch activation, update [`EPOCH-SOURCE.md`](EPOCH-SOURCE.md) with a
+new section for that production season and epoch, plus its index link. Publish
+the exact round ID, source/activation generations, branch, full GitHub URLs and
+commits for every repository, canonical source-lock digest, evaluator image,
+compiler, initial margin, and versioned public-safe checkpoint evidence. Verify
+the repository map against the activated ledger and live API, not current branch
+heads. Add a section even on unchanged incumbent carry-forward; preserve prior
+entries and never label an unactivated checkpoint as active. Commit and push
+the documentation update as part of the epoch handoff, without editing frozen
+evaluation source or exposing operational config, credentials, or hidden seeds.
+
 Before production activation, start with
 [`launch/current-state.json`](launch/current-state.json), the compact preparation
 checkpoint, then verify its live process/session and linked evidence. It is a

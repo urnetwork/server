@@ -14,11 +14,14 @@ package controller
 // {key, value} sent with every call. Create (POST /v3/webhooks) and update
 // (PUT /v3/webhooks/{webhookId}) take all three, and the list
 // (GET /v3/webhooks) returns url, auth and headers. POST /updates/brevo
-// accepts only Basic: a vault brevo.yml brevo.webhook_bearers user with an
-// empty password (brevoWebhookExpectedAuths). A webhook registered without it
-// is refused with 401 before any event is recorded, and Brevo discards an event
-// refused with a 4xx other than 429 without a retry
-// (https://developers.brevo.com/docs/retry-mechanism): the event is lost.
+// accepts a vault brevo.yml brevo.webhook_bearers user as Basic with an empty
+// password, or as a Bearer token (brevoWebhookExpectedAuths). The account's
+// transactional webhook was made in the Brevo console with `auth` bearer
+// carrying such a user, and Basic alone refused every event it sent. A webhook
+// registered without either is refused with 401 before any event is recorded,
+// and Brevo discards an event refused with a 4xx other than 429 without a
+// retry (https://developers.brevo.com/docs/retry-mechanism): the event is
+// lost.
 
 import (
 	"bytes"
@@ -50,8 +53,8 @@ const (
 	brevoWebhookAccepted = "accepted"
 	// the request has no Authorization header
 	brevoWebhookRefusedNoCredential = "no_credential"
-	// no Authorization value is a brevo.webhook_bearers user with an empty
-	// password
+	// no Authorization value is a brevo.webhook_bearers user, as Basic with an
+	// empty password or as a Bearer token
 	brevoWebhookRefusedWrongCredential = "wrong_credential"
 	// brevo.yml names no usable user, so nothing can be accepted
 	brevoWebhookRefusedVerificationUnavailable = "verification_unavailable"
@@ -61,7 +64,7 @@ var brevoWebhookRequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "brevo",
 	Name:      "webhook_requests_total",
-	Help:      "POST /updates/brevo requests by result: accepted, or refused before any event is recorded for no_credential (no Authorization header), wrong_credential (no Authorization value is a brevo.webhook_bearers user with an empty password) or verification_unavailable (brevo.yml names no usable user). Brevo does not retry a refused event.",
+	Help:      "POST /updates/brevo requests by result: accepted, or refused before any event is recorded for no_credential (no Authorization header), wrong_credential (no Authorization value is a brevo.webhook_bearers user, as Basic with an empty password or as a Bearer token) or verification_unavailable (brevo.yml names no usable user). Brevo does not retry a refused event.",
 }, []string{"result"})
 
 func init() {
@@ -113,7 +116,7 @@ func verifyBrevoWebhookAuthorization(header map[string][]string) error {
 		reportBrevoWebhookRefusal(
 			brevoWebhookRefusedWrongCredential,
 			fmt.Sprintf(
-				"its Authorization (%s) is no brevo.webhook_bearers user with an empty password; register the credential with `bringyourctl onboarding webhook-ensure`",
+				"its Authorization (%s) is no brevo.webhook_bearers user, as Basic with an empty password or as a Bearer token; register the credential with `bringyourctl onboarding webhook-ensure`",
 				brevoAuthorizationSchemes(auths),
 			),
 		)
@@ -250,7 +253,7 @@ func brevoWebhookUrlSafeUser(user string) bool {
 }
 
 // A webhook as GET /v3/webhooks and GET /v3/webhooks/{webhookId} return it.
-// auth and headers are read leniently (brevoWebhookAuthType,
+// auth and headers are read leniently (brevoWebhookAuthCredential,
 // brevoWebhookHeaders): their item schemas are undocumented.
 type brevoWebhook struct {
 	Id          int64           `json:"id"`
@@ -352,23 +355,31 @@ func brevoWebhookHeaders(raw json.RawMessage) (headers []brevoWebhookHeader, ok 
 	return nil, false
 }
 
-// Whether a listed webhook has `auth` set, and its type for output.
-func brevoWebhookAuthType(raw json.RawMessage) (authType string, set bool) {
+// The credential a listed webhook's `auth` carries, and its type for output.
+// Brevo sends a bearer as "Authorization: Bearer <token>", which is accepted
+// when the token is a configured user (brevoWebhookExpectedAuths). The token
+// is never returned.
+func brevoWebhookAuthCredential(raw json.RawMessage, expectedAuths map[string]bool) (state brevoCredentialState, authType string) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) || bytes.Equal(trimmed, []byte("{}")) {
-		return "", false
+		return brevoCredentialNone, ""
 	}
 	var auth struct {
 		Type  string `json:"type"`
 		Token string `json:"token"`
 	}
 	if err := json.Unmarshal(trimmed, &auth); err != nil {
-		return "unreadable", true
+		return brevoCredentialOther, "unreadable"
 	}
 	if auth.Type == "" && auth.Token == "" {
-		return "", false
+		return brevoCredentialNone, ""
 	}
-	return brevoSafeLabel(auth.Type), true
+	if strings.EqualFold(strings.TrimSpace(auth.Type), "bearer") &&
+		strings.TrimSpace(auth.Token) != "" &&
+		expectedAuths[strings.ToLower("Bearer "+auth.Token)] {
+		return brevoCredentialAccepted, "bearer"
+	}
+	return brevoCredentialOther, brevoSafeLabel(auth.Type)
 }
 
 var brevoSafeLabelPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_ .-]{0,63}$`)
@@ -485,19 +496,29 @@ func brevoWebhookHeaderCredential(headers []brevoWebhookHeader, expectedAuths ma
 	return state
 }
 
-func describeBrevoWebhookCredentials(urlCredential brevoCredentialState, headerCredential brevoCredentialState) string {
+func describeBrevoWebhookCredentials(plan *brevoWebhookPlan) string {
 	parts := []string{}
-	switch urlCredential {
+	switch plan.urlCredential {
 	case brevoCredentialAccepted:
 		parts = append(parts, "an accepted credential in the url")
 	case brevoCredentialOther:
 		parts = append(parts, "a credential in the url that this server does not accept")
 	}
-	switch headerCredential {
+	switch plan.headerCredential {
 	case brevoCredentialAccepted:
 		parts = append(parts, "an accepted Authorization header")
 	case brevoCredentialOther:
 		parts = append(parts, "an Authorization header that this server does not accept")
+	}
+	switch plan.authCredential {
+	case brevoCredentialAccepted:
+		parts = append(parts, "an accepted bearer in auth")
+	case brevoCredentialOther:
+		if plan.authType == "bearer" {
+			parts = append(parts, "a bearer in auth that this server does not accept")
+		} else {
+			parts = append(parts, fmt.Sprintf("auth (type %s) that this server does not accept", plan.authType))
+		}
 	}
 	if len(parts) == 0 {
 		return "no credential"
@@ -506,14 +527,18 @@ func describeBrevoWebhookCredentials(urlCredential brevoCredentialState, headerC
 }
 
 // One listed webhook at the endpoint and the state the carrier wants it in:
-// exactly one accepted credential, every wanted event, and no batching, since
-// POST /updates/brevo reads one event per request.
+// an accepted credential in the carrier, every wanted event, and no batching,
+// since POST /updates/brevo reads one event per request. `auth` is read, not
+// written: an accepted bearer there is kept as a second credential.
 type brevoWebhookPlan struct {
 	webhook          *brevoWebhook
 	listedUrl        *url.URL
 	listedHeaders    []brevoWebhookHeader
 	urlCredential    brevoCredentialState
 	headerCredential brevoCredentialState
+	authCredential   brevoCredentialState
+	// for output: "bearer", another plain label, "unclassified" or "unreadable"
+	authType string
 
 	url           *url.URL
 	headers       []brevoWebhookHeader
@@ -537,6 +562,7 @@ func planBrevoWebhook(
 		urlCredential:    brevoWebhookUrlCredential(listedUrl, credential.expectedAuths),
 		headerCredential: brevoWebhookHeaderCredential(listedHeaders, credential.expectedAuths),
 	}
+	plan.authCredential, plan.authType = brevoWebhookAuthCredential(webhook.Auth, credential.expectedAuths)
 
 	desiredUrl := *target
 	headers := []brevoWebhookHeader{}
@@ -594,7 +620,7 @@ func (self *brevoWebhookPlan) done() bool {
 func (self *brevoWebhookPlan) gaps() []string {
 	gaps := []string{}
 	if self.urlChanged() || self.headersChanged() {
-		gaps = append(gaps, fmt.Sprintf("it shows %s", describeBrevoWebhookCredentials(self.urlCredential, self.headerCredential)))
+		gaps = append(gaps, fmt.Sprintf("it shows %s", describeBrevoWebhookCredentials(self)))
 	}
 	if 0 < len(self.missingEvents) {
 		gaps = append(gaps, fmt.Sprintf("it lacks the events %s", strings.Join(self.missingEvents, ", ")))
@@ -714,7 +740,7 @@ func ensureBrevoTransactionalWebhook(
 			continue
 		}
 		refused := ""
-		if plan.urlCredential != brevoCredentialAccepted && plan.headerCredential != brevoCredentialAccepted {
+		if plan.urlCredential != brevoCredentialAccepted && plan.headerCredential != brevoCredentialAccepted && plan.authCredential != brevoCredentialAccepted {
 			refused = ", and it carries no accepted credential, so each of its copies is refused (urnetwork_brevo_webhook_requests_total)"
 		}
 		notes = append(notes, fmt.Sprintf(
@@ -724,11 +750,19 @@ func ensureBrevoTransactionalWebhook(
 			refused,
 		))
 	}
-	if authType, set := brevoWebhookAuthType(primary.webhook.Auth); set {
+	switch primary.authCredential {
+	case brevoCredentialAccepted:
+		// whichever of the two Brevo sends is accepted; an api built before
+		// the bearer was accepted counts the bearer as wrong_credential
 		notes = append(notes, fmt.Sprintf(
-			"warning: webhook %d also has auth (type %s): Brevo may send it as the Authorization header in place of the credential; remove it in the Brevo console",
+			"note: webhook %d also has auth (bearer) carrying a brevo.webhook_bearers user, which POST /updates/brevo accepts as well: Brevo may send either credential (an api built before bearers were accepted refuses this one as wrong_credential)",
 			primary.webhook.Id,
-			authType,
+		))
+	case brevoCredentialOther:
+		notes = append(notes, fmt.Sprintf(
+			"warning: webhook %d also has auth (type %s) that POST /updates/brevo refuses: Brevo may send it as the Authorization header in place of the credential; remove it in the Brevo console",
+			primary.webhook.Id,
+			primary.authType,
 		))
 	}
 
@@ -823,7 +857,7 @@ func updateBrevoTransactionalWebhook(
 		lines = append(lines, fmt.Sprintf(
 			"  credential: now %s (it had %s)",
 			describeBrevoWebhookCarrier(carrier, plan.maskedUser(carrier)),
-			describeBrevoWebhookCredentials(plan.urlCredential, plan.headerCredential),
+			describeBrevoWebhookCredentials(plan),
 		))
 	} else {
 		lines = append(lines, fmt.Sprintf("  credential: %s, unchanged", describeBrevoWebhookCarrier(carrier, plan.maskedUser(carrier))))
