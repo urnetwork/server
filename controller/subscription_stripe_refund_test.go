@@ -719,3 +719,193 @@ func TestStripeChargeKeepsPaidAmount(t *testing.T) {
 		}
 	}
 }
+
+// stripeDisputeWonFixture is a network with a paid yearly Stripe window that a
+// dispute cut: the invoice as Stripe's API reads it, the charge, and the
+// clawback already run.
+type stripeDisputeWonFixture struct {
+	ctx       context.Context
+	env       *stripeRefundTestEnv
+	networkId server.Id
+	invoiceId string
+	chargeId  string
+	disputeId string
+	startTime time.Time
+	periodEnd time.Time
+}
+
+func newStripeDisputeWonFixture(t testing.TB, name string) *stripeDisputeWonFixture {
+	ctx := context.Background()
+	env := newStripeRefundTestEnv(t)
+
+	networkId := server.NewId()
+	userId := server.NewId()
+	model.Testing_CreateNetwork(ctx, networkId, name, userId)
+
+	fixture := &stripeDisputeWonFixture{
+		ctx:       ctx,
+		env:       env,
+		networkId: networkId,
+		invoiceId: "in_" + name,
+		chargeId:  "ch_" + name,
+		disputeId: "du_" + name,
+		startTime: server.NowUtc().Add(-24 * time.Hour).Truncate(time.Second),
+		periodEnd: server.NowUtc().Add(300 * 24 * time.Hour).Truncate(time.Second),
+	}
+	credited, err := stripeCreditInvoicePaid(
+		ctx, networkId, fixture.invoiceId, model.UsdToNanoCents(28.00),
+		fixture.startTime, fixture.periodEnd.Add(manualPaymentGracePeriod),
+	)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, credited, true)
+
+	env.charges[fixture.chargeId] = map[string]any{
+		"id":              fixture.chargeId,
+		"invoice":         fixture.invoiceId,
+		"amount":          4000,
+		"amount_refunded": 0,
+	}
+	fixture.setSubscriptionStatus("active")
+	return fixture
+}
+
+func (self *stripeDisputeWonFixture) setSubscriptionStatus(status string) {
+	subscriptionId := "sub_" + self.invoiceId
+	self.env.fullInvoices[self.invoiceId] = map[string]any{
+		"id": self.invoiceId,
+		"lines": map[string]any{"data": []map[string]any{{
+			"type":         "subscription",
+			"subscription": subscriptionId,
+			"period":       map[string]any{"start": self.startTime.Unix(), "end": self.periodEnd.Unix()},
+		}}},
+		"subscription": map[string]any{
+			"id":       subscriptionId,
+			"status":   status,
+			"metadata": map[string]any{"network_id": self.networkId.String()},
+		},
+		"customer": map[string]any{"id": "cus_" + self.invoiceId},
+	}
+}
+
+func (self *stripeDisputeWonFixture) deliver(t testing.TB, eventType string, status string) {
+	object := map[string]any{"id": self.disputeId, "charge": self.chargeId, "amount": 4000, "status": status}
+	result, err := StripeWebhook(stripeWebhookEvent(t, eventType, object), reconcileTestSession(t, self.ctx))
+	connect.AssertEqual(t, err, nil)
+	connect.AssertNotEqual(t, result, nil)
+}
+
+func (self *stripeDisputeWonFixture) wonEvents(t testing.TB) int {
+	return countPaymentReconciliationEventRows(t, self.ctx, model.SubscriptionMarketStripe, model.PaymentReconcileActionDisputeWon, self.disputeId)
+}
+
+func (self *stripeDisputeWonFixture) assertCut(t testing.TB) {
+	connect.AssertEqual(t, activeRenewalCount(t, self.ctx, self.networkId, model.SubscriptionMarketStripe), 0)
+	connect.AssertEqual(t, len(model.GetActiveTransferBalances(self.ctx, self.networkId)), 0)
+	connect.AssertEqual(t, model.IsProNetwork(self.ctx, self.networkId), false)
+}
+
+// TestStripeDisputeWonRestoresTheWindow pins the money-back side of a dispute: the
+// clawback's renewal and Pro balance come back with the paid end and their bytes,
+// Pro returns at once, and a redelivery changes nothing and writes no second
+// event.
+func TestStripeDisputeWonRestoresTheWindow(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputewon")
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.assertCut(t)
+
+		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
+
+		ctx := fixture.ctx
+		connect.AssertEqual(t, activeRenewalCount(t, ctx, fixture.networkId, model.SubscriptionMarketStripe), 1)
+		balances := model.GetActiveTransferBalances(ctx, fixture.networkId)
+		connect.AssertEqual(t, len(balances), 1)
+		connect.AssertEqual(t, balances[0].Pro, true)
+		connect.AssertEqual(t, balances[0].StartBalanceByteCount, RefreshSupporterTransferBalance)
+		connect.AssertEqual(t, balances[0].EndTime.Equal(fixture.periodEnd.Add(manualPaymentGracePeriod)), true)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, fixture.networkId), true)
+		connect.AssertEqual(t, fixture.wonEvents(t), 1)
+
+		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
+		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, fixture.networkId)), 1)
+		connect.AssertEqual(t, fixture.wonEvents(t), 1)
+	})
+}
+
+// A lost dispute's clawback stands, and an inquiry that closed took no money.
+func TestStripeDisputeLostLeavesTheWindowCut(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputelost")
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.deliver(t, "charge.dispute.closed", "lost")
+		fixture.assertCut(t)
+		fixture.deliver(t, "charge.dispute.closed", "warning_closed")
+		fixture.assertCut(t)
+		connect.AssertEqual(t, fixture.wonEvents(t), 0)
+	})
+}
+
+// Money given back in a refund stays given back, whatever the dispute did.
+func TestStripeDisputeWonOnARefundedChargeStaysCut(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputewonrefunded")
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.env.charges[fixture.chargeId]["amount_refunded"] = 4000
+		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
+		fixture.assertCut(t)
+		connect.AssertEqual(t, fixture.wonEvents(t), 1)
+	})
+}
+
+// A subscription Stripe no longer bills would be cut again at the next hourly
+// reconcile, so nothing comes back, and the event tells support.
+func TestStripeDisputeWonOnACanceledSubscriptionStaysCut(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputewoncanceled")
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.setSubscriptionStatus("canceled")
+		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
+		fixture.assertCut(t)
+		connect.AssertEqual(t, fixture.wonEvents(t), 1)
+	})
+}
+
+// A window another path had already ended is not the dispute's to give back.
+func TestStripeDisputeWonLeavesAWindowItDidNotCut(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputewonother")
+		ended := model.EndReconciledEntitlementForTransactions(
+			fixture.ctx,
+			model.SubscriptionMarketStripe,
+			[]string{fixture.invoiceId},
+			server.NowUtc(),
+		)
+		connect.AssertEqual(t, len(ended), 1)
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
+		fixture.assertCut(t)
+		connect.AssertEqual(t, fixture.wonEvents(t), 1)
+	})
+}
+
+// A long dispute can outlast the cut balance: retention removes it. The window
+// still comes back, with a zero-byte Pro marker that holds Pro.
+func TestStripeDisputeWonRestoresAfterRetentionRemovedTheBalance(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newStripeDisputeWonFixture(t, "disputewonretained")
+		fixture.deliver(t, "charge.dispute.created", "needs_response")
+		fixture.assertCut(t)
+		server.Tx(fixture.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				fixture.ctx,
+				`DELETE FROM transfer_balance WHERE network_id = $1 AND pro`,
+				fixture.networkId,
+			))
+		})
+
+		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
+
+		connect.AssertEqual(t, activeRenewalCount(t, fixture.ctx, fixture.networkId, model.SubscriptionMarketStripe), 1)
+		connect.AssertEqual(t, model.IsProNetwork(fixture.ctx, fixture.networkId), true)
+	})
+}
