@@ -1033,6 +1033,34 @@ func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.C
 	return
 }
 
+// Whether the network already holds Pro for this exact window with a billing
+// grace period's zero-byte marker (controller appleHoldGraceEntitlementInTx).
+// App Store balances carry no purchase token, so the network and the window
+// name it.
+func HasAppleGraceHoldInTx(tx server.PgTx, ctx context.Context, networkId server.Id, startTime time.Time, endTime time.Time) (held bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT 1
+		FROM transfer_balance
+		WHERE
+			network_id = $1 AND
+			start_time = $2 AND
+			end_time = $3 AND
+			pro AND
+			start_balance_byte_count = 0
+		LIMIT 1
+		`,
+		networkId,
+		startTime,
+		endTime,
+	)
+	server.WithPgResult(result, err, func() {
+		held = result.Next()
+	})
+	return
+}
+
 // Whether the purchase already holds Pro for this exact window with a grace period's zero-byte marker
 // (controller playHoldGraceEntitlementInTx).
 func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken string, startTime time.Time, endTime time.Time) (held bool) {
