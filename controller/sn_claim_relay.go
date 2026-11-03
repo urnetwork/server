@@ -16,6 +16,10 @@ package controller
 //   - claims spend at most 0.01 TAO a day. Past that they wait for the next UTC
 //     day, which costs nothing: v2 credit never expires.
 //
+// The receipts that prove each claim paid also name its transaction: the latest
+// paid claim of each account is recorded, and the api names that transaction
+// while it is still the account's latest claim (sn_claim_relay_api.go).
+//
 // Stops, all of them fail closed:
 //   - no relayer key: nothing is read or sent, and the status says so. This is
 //     the only gate; there is no other setting;
@@ -104,6 +108,10 @@ const (
 	// A status older than this means the relay is not running. It covers the
 	// task's own limit, during which a pass may wait for one claim's finality.
 	snClaimRelayStatusStale = 40 * time.Minute
+
+	// Paid claims are read from the relayer's transactions of the day before too,
+	// so a claim whose outcome was only final after midnight is still recorded.
+	snClaimRelayPaidLookback = 24 * time.Hour
 )
 
 var (
@@ -236,6 +244,20 @@ type snClaimRelaySpend struct {
 	Griefed bool
 	// accounts whose claim reverted, by snClaimRelayAccountKey
 	RevertedAccounts map[string]string
+	// the claims its finalized transactions paid, from the day before on: the
+	// latest of each account only, newest first
+	Paid []*snClaimRelayPaid
+}
+
+// snClaimRelayPaid is one claim a finalized transaction of the relayer paid, as
+// its receipt proves it.
+type snClaimRelayPaid struct {
+	NoId   uint64
+	Index  uint64
+	TxHash string
+	// what vault2 now records as the account's claimed
+	Cumulative *big.Int
+	AmountRao  *big.Int
 }
 
 // snClaimRelayBatch is a batch sized through the claim batcher: the first Count
@@ -269,6 +291,10 @@ type snClaimRelayOutcome struct {
 type snClaimRelayItemOutcome struct {
 	Paid      bool
 	AmountRao *big.Int
+	// a paid claim's account, and the cumulative vault2 now records as claimed
+	NoId       uint64
+	Index      uint64
+	Cumulative *big.Int
 	// not attempted: the batch's gas ran out before it; it is simply due again
 	NotAttempted bool
 	Reason       string
@@ -281,7 +307,7 @@ type snClaimRelayChain interface {
 	Reconcile(ctx context.Context) error
 	Facts(ctx context.Context) (*snClaimRelayFacts, error)
 	// Spend reports the transactions the relayer's account created since the
-	// start of a UTC day.
+	// start of a UTC day, and the claims they and those of the day before paid.
 	Spend(ctx context.Context, since time.Time) (*snClaimRelaySpend, error)
 	// Claimed reads vault2's claimed at the finalized head.
 	Claimed(ctx context.Context, account *snClaimRelayAccount) (*uint256.Int, error)
@@ -323,6 +349,12 @@ type snClaimRelayRequests interface {
 	Finish(ctx context.Context, coldkey [32]byte, startLimit bool)
 }
 
+// snClaimRelayClaimRecords keeps each account's latest paid claim for the api.
+type snClaimRelayClaimRecords interface {
+	// Record replaces the account's record with this claim.
+	Record(ctx context.Context, paid *snClaimRelayPaid)
+}
+
 // snClaimRelaySigner is the configured relayer, without its key: the policy never
 // needs the key, only that there is one.
 type snClaimRelaySigner struct {
@@ -335,10 +367,21 @@ type snClaimRelay struct {
 	chain        func(signer *snClaimRelaySigner) (snClaimRelayChain, error)
 	ledger       snClaimRelayLedger
 	requests     snClaimRelayRequests
+	claimRecords snClaimRelayClaimRecords
 	lastStatus   func(ctx context.Context) *SnClaimRelayStatus
 	publish      func(ctx context.Context, status *SnClaimRelayStatus)
 	claimResults func(result string, count int)
 	banned       func(coldkey [32]byte) bool
+}
+
+// Records each account's latest paid claim the spend names, for the api.
+func (self *snClaimRelay) recordPaid(ctx context.Context, spend *snClaimRelaySpend) {
+	if self.claimRecords == nil {
+		return
+	}
+	for _, paid := range spend.Paid {
+		self.claimRecords.Record(ctx, paid)
+	}
 }
 
 func snClaimRelayDayStart(now time.Time) time.Time {
@@ -455,6 +498,8 @@ func (self *snClaimRelay) run(ctx context.Context, now time.Time, status *SnClai
 		return
 	}
 	self.applySpend(status, spend, now)
+	// what a transaction reconciled above paid, whatever this pass does next
+	self.recordPaid(ctx, spend)
 
 	accounts, err := self.ledger.Accounts(ctx)
 	if err != nil {
@@ -506,6 +551,7 @@ func (self *snClaimRelay) run(ctx context.Context, now time.Time, status *SnClai
 		return
 	}
 	self.applySpend(status, spend, now)
+	self.recordPaid(ctx, spend)
 	if spend.Griefed || outcome.Griefed {
 		status.State = SnClaimRelayStateGriefingStop
 		return

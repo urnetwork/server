@@ -63,9 +63,11 @@ type claimRelayWorldTx struct {
 	send       *snClaimRelaySend
 	gasUsed    uint64
 	costWei    *big.Int
-	griefed    bool
-	outcome    *snClaimRelayOutcome
-	final      bool
+	// the fee cap an unfinished one was signed at
+	feeCapWei *big.Int
+	griefed   bool
+	outcome   *snClaimRelayOutcome
+	final     bool
 }
 
 // claimRelayWorld is the chain, the transaction intents, the mirror and Redis.
@@ -106,6 +108,8 @@ type claimRelayWorld struct {
 	txs        []*claimRelayWorldTx
 	requests   map[[32]byte]time.Time
 	limits     map[[32]byte]time.Time
+	records    map[string]*snClaimRelayPaid
+	recorded   int
 	status     *SnClaimRelayStatus
 	banned     map[[32]byte]bool
 	results    map[string]int
@@ -123,6 +127,7 @@ func newClaimRelayWorld(t testing.TB, amounts ...*uint256.Int) *claimRelayWorld 
 		badProofs: map[uint64]bool{}, estimates: map[uint64]uint64{}, refusals: map[uint64]error{}, gasUsed: map[uint64]uint64{}, reverts: map[uint64]bool{},
 		batchRefusals: map[uint64][4]byte{},
 		requests:      map[[32]byte]time.Time{}, limits: map[[32]byte]time.Time{}, banned: map[[32]byte]bool{}, results: map[string]int{},
+		records: map[string]*snClaimRelayPaid{},
 	}
 	world.setLeaves(amounts...)
 	return world
@@ -166,9 +171,10 @@ func (self *claimRelayWorld) relay() *snClaimRelay {
 			}
 			return self, nil
 		},
-		ledger:     self,
-		requests:   self,
-		lastStatus: func(context.Context) *SnClaimRelayStatus { return self.status },
+		ledger:       self,
+		requests:     self,
+		claimRecords: self,
+		lastStatus:   func(context.Context) *SnClaimRelayStatus { return self.status },
 		publish: func(_ context.Context, status *SnClaimRelayStatus) {
 			self.status = status
 			self.published += 1
@@ -207,25 +213,33 @@ func (self *claimRelayWorld) Facts(context.Context) (*snClaimRelayFacts, error) 
 	return &snClaimRelayFacts{BalanceWei: self.balanceWei, GasPriceWei: self.gasPriceWei, FeeCapWei: self.feeCapWei, AlphaPriceWei: self.alphaPriceWei}, nil
 }
 
+// The durable intents as the engine's Spend reads them, counted by the same add:
+// from the day before on, newest first, a final one with its receipt and an
+// unfinished one at the most its attempt can cost.
 func (self *claimRelayWorld) Spend(_ context.Context, since time.Time) (*snClaimRelaySpend, error) {
 	if self.spendErr != nil {
 		return nil, self.spendErr
 	}
 	spend := &snClaimRelaySpend{SpentWei: new(big.Int), RevertedAccounts: map[string]string{}}
-	for _, tx := range self.txs {
-		if tx.createTime.Before(since) {
+	for index := len(self.txs) - 1; 0 <= index; index -= 1 {
+		tx := self.txs[index]
+		if tx.createTime.Before(since.Add(-snClaimRelayPaidLookback)) {
 			continue
 		}
-		spend.SpentWei.Add(spend.SpentWei, tx.costWei)
-		spend.Griefed = spend.Griefed || tx.griefed
-		for index, item := range tx.outcome.Items {
-			switch {
-			case item.Paid:
-				spend.ClaimsPaid += 1
-			case !item.NotAttempted:
-				spend.RevertedAccounts[tx.send.Claims[index].Account.key()] = item.Reason
+		intent := &model.StTransactionIntent{Status: model.StTxBroadcast, CreateTime: tx.createTime}
+		var attempts []*model.StTransactionAttempt
+		var receipt *snClaimRelayReceipt
+		if tx.final {
+			intent.Status = model.StTxFinalized
+			receipt = &snClaimRelayReceipt{spentWei: tx.costWei, outcome: tx.outcome}
+			for _, claim := range tx.send.Claims {
+				receipt.accounts = append(receipt.accounts, claim.Account.key())
 			}
+		} else {
+			feeCap := tx.feeCapWei.String()
+			attempts = []*model.StTransactionAttempt{{GasLimit: tx.send.GasLimit, GasFeeCap: &feeCap}}
 		}
+		spend.add(intent, attempts, receipt, !tx.createTime.Before(since))
 	}
 	return spend, nil
 }
@@ -299,7 +313,7 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 		if errors.Is(self.sendErr, errSnClaimRelayInFlight) {
 			// in flight: signed and sent, but not final, so it may cost its limit
 			self.txs = append(self.txs, &claimRelayWorldTx{createTime: self.nowTime, send: send, gasUsed: send.GasLimit,
-				costWei: snClaimRelayLiability(send.GasLimit, self.feeCapWei), outcome: &snClaimRelayOutcome{}})
+				costWei: snClaimRelayLiability(send.GasLimit, self.feeCapWei), feeCapWei: self.feeCapWei, outcome: &snClaimRelayOutcome{}})
 		}
 		return nil, self.sendErr
 	}
@@ -331,7 +345,8 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 			outcome.Items = append(outcome.Items, &snClaimRelayItemOutcome{Reason: fmt.Sprintf("0x%x", selector)})
 			continue
 		}
-		outcome.Items = append(outcome.Items, &snClaimRelayItemOutcome{Paid: true, AmountRao: claim.Account.claimable().ToBig()})
+		outcome.Items = append(outcome.Items, &snClaimRelayItemOutcome{Paid: true, AmountRao: claim.Account.claimable().ToBig(),
+			NoId: claim.Account.NoId, Index: claim.Account.Index, Cumulative: claim.Account.Cumulative.ToBig()})
 		paid = append(paid, claim)
 	}
 	if send.GasLimit < need {
@@ -391,6 +406,14 @@ func (self *claimRelayWorld) Finish(_ context.Context, coldkey [32]byte, startLi
 	if _, limited := self.limits[coldkey]; startLimit && !limited {
 		self.limits[coldkey] = self.nowTime.Add(snClaimRelayClaimNowPeriod)
 	}
+}
+
+// snClaimRelayClaimRecords, as Redis keeps them: one per account, the last write
+// wins.
+
+func (self *claimRelayWorld) Record(_ context.Context, paid *snClaimRelayPaid) {
+	self.records[snClaimRelayAccountKey(paid.NoId, paid.Index)] = paid
+	self.recorded += 1
 }
 
 // A tap, as the api takes it: refused while the coldkey's limit runs, and a
@@ -1509,7 +1532,7 @@ func TestClaimRelayAccountViewSaysWhy(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			status := &SnClaimRelayStatus{State: c.state, PassTime: now, AlphaPriceWei: claimRelayTestAlphaPrice.String(), Refusals: c.refusals}
-			account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(c.balance, zero, nil), c.requested, c.limit, now)
+			account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(c.balance, zero, nil), c.requested, c.limit, nil, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1532,7 +1555,7 @@ func TestClaimRelayAccountViewAmounts(t *testing.T) {
 	now := claimRelayTestMonday
 	status := &SnClaimRelayStatus{State: SnClaimRelayStateRunning, PassTime: now, AlphaPriceWei: claimRelayTestAlphaPrice.String()}
 	cumulative, claimed, pending := uint256.NewInt(10_000_000_000), uint256.NewInt(4_000_000_000), uint256.NewInt(12_000_000_000)
-	account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(cumulative, claimed, pending), false, time.Time{}, now)
+	account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(cumulative, claimed, pending), false, time.Time{}, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1546,9 +1569,210 @@ func TestClaimRelayAccountViewAmounts(t *testing.T) {
 	rootless := &StLedgerV2AccountEntry{NoId: 1, Index: 7, Cumulative: "0", Claimed: "0"}
 	text := "5"
 	rootless.PendingCumulative = &text
-	account, err = snClaimRelayAccountView(status, "ss58", rootless, false, time.Time{}, now)
+	account, err = snClaimRelayAccountView(status, "ss58", rootless, false, time.Time{}, nil, now)
 	if err != nil || account.Reason != SnClaimRelayReasonNothingPending || account.PendingRao != 5 {
 		t.Fatalf("account %+v (%v)", account, err)
+	}
+}
+
+// The api names the relay's claim while it is the account's latest: vault2's
+// claimed is still the cumulative that claim paid up to. A later claim by anyone,
+// a record that does not read, or none, names nothing.
+func TestClaimRelayAccountViewNamesTheRelaysClaim(t *testing.T) {
+	now := claimRelayTestMonday
+	status := &SnClaimRelayStatus{State: SnClaimRelayStateRunning, PassTime: now, AlphaPriceWei: claimRelayTestAlphaPrice.String()}
+	hash := "0x" + strings.Repeat("ab", 32)
+	record := &model.SnClaimRelayClaim{TxHash: hash, Cumulative: "4000000000", AmountRao: "3000000000"}
+	view := func(cumulative uint64, claimed uint64, record *model.SnClaimRelayClaim) *SnClaimRelayAccount {
+		t.Helper()
+		account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(uint256.NewInt(cumulative), uint256.NewInt(claimed), nil), false, time.Time{}, record, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return account
+	}
+
+	// claimed up to it: the claimed state, with what it paid
+	account := view(4_000_000_000, 4_000_000_000, record)
+	if account.ClaimTxHash != hash || account.ClaimAmountRao != 3_000_000_000 || account.ClaimableRao != 0 || account.Reason != SnClaimRelayReasonNothingPending {
+		t.Fatalf("claimed %+v", account)
+	}
+	// a root since adds a balance: the claim is still the latest one
+	account = view(10_000_000_000, 4_000_000_000, record)
+	if account.ClaimTxHash != hash || account.ClaimAmountRao != 3_000_000_000 || account.ClaimableRao != 6_000_000_000 {
+		t.Fatalf("after a new root %+v", account)
+	}
+	// someone claimed after it, with the gas key or another relayer
+	if account = view(10_000_000_000, 10_000_000_000, record); account.ClaimTxHash != "" || account.ClaimAmountRao != 0 {
+		t.Fatalf("after a later claim %+v", account)
+	}
+	// none, and records that do not read
+	for _, c := range []struct {
+		name   string
+		record *model.SnClaimRelayClaim
+	}{
+		{"none", nil},
+		{"uppercase hash", &model.SnClaimRelayClaim{TxHash: "0x" + strings.Repeat("AB", 32), Cumulative: "4000000000", AmountRao: "3000000000"}},
+		{"short hash", &model.SnClaimRelayClaim{TxHash: "0xabcd", Cumulative: "4000000000", AmountRao: "3000000000"}},
+		{"no 0x", &model.SnClaimRelayClaim{TxHash: strings.Repeat("ab", 33), Cumulative: "4000000000", AmountRao: "3000000000"}},
+		{"cumulative", &model.SnClaimRelayClaim{TxHash: hash, Cumulative: "4e9", AmountRao: "3000000000"}},
+		{"amount", &model.SnClaimRelayClaim{TxHash: hash, Cumulative: "4000000000", AmountRao: "-1"}},
+	} {
+		if account := view(4_000_000_000, 4_000_000_000, c.record); account.ClaimTxHash != "" || account.ClaimAmountRao != 0 {
+			t.Fatalf("%s: %+v", c.name, account)
+		}
+	}
+	// an account never claimed names nothing, whatever a record says
+	if account = view(4_000_000_000, 0, &model.SnClaimRelayClaim{TxHash: hash, Cumulative: "0", AmountRao: "0"}); account.ClaimTxHash != "" {
+		t.Fatalf("never claimed %+v", account)
+	}
+	// an amount past int64 saturates rather than wraps
+	huge := new(uint256.Int).Lsh(uint256.NewInt(1), 70)
+	account = view(4_000_000_000, 4_000_000_000, &model.SnClaimRelayClaim{TxHash: hash, Cumulative: "4000000000", AmountRao: huge.Dec()})
+	if account.ClaimTxHash != hash || account.ClaimAmountRao != math.MaxInt64 {
+		t.Fatalf("huge amount %+v", account)
+	}
+}
+
+// Each claim the relay paid is recorded from its receipt, the latest of each
+// account in place of the one before, and nothing for a claim that did not pay
+// or was not sent.
+func TestClaimRelayRecordsWhatItPaid(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	under := claimRelayTestAlpha(snClaimRelayAutomaticTaoRao / 2)
+	world := newClaimRelayWorld(t, over, under, over)
+	world.reverts[2] = true
+	world.passes()
+	sentFor := func(index uint64) *claimRelayWorldTx {
+		t.Helper()
+		var found *claimRelayWorldTx
+		for _, tx := range world.txs {
+			for _, claim := range tx.send.Claims {
+				if claim.Account.Index == index {
+					found = tx
+				}
+			}
+		}
+		if found == nil {
+			t.Fatalf("account %d was not sent", index)
+		}
+		return found
+	}
+	first := sentFor(0)
+	sentFor(2)
+	record := world.records["1/0"]
+	if record == nil || record.TxHash != first.outcome.TxHash || record.Cumulative.Cmp(over.ToBig()) != 0 || record.AmountRao.Cmp(over.ToBig()) != 0 {
+		t.Fatalf("record %+v, want %s", record, first.outcome.TxHash)
+	}
+	// under the threshold and not sent, and sent and reverted
+	if world.records["1/1"] != nil || world.records["1/2"] != nil || len(world.records) != 1 {
+		t.Fatalf("records %v", world.records)
+	}
+
+	// a new root raises account 0, and the relay claims it again: its record is
+	// the new claim's
+	twice := new(uint256.Int).Add(over, over)
+	world.setLeaves(twice, under, over)
+	world.passes()
+	if second := sentFor(0); second == first {
+		t.Fatal("account 0 was not claimed again")
+	}
+	record = world.records["1/0"]
+	if record == nil || record.TxHash != sentFor(0).outcome.TxHash || record.Cumulative.Cmp(twice.ToBig()) != 0 || record.AmountRao.Cmp(over.ToBig()) != 0 {
+		t.Fatalf("record after the second claim %+v", record)
+	}
+}
+
+// A claim whose outcome was only final after midnight is still recorded, since
+// paid claims are read from the day before on, without counting toward the new
+// day. One from before that is not read again.
+func TestClaimRelayRecordsAClaimFinalAfterMidnight(t *testing.T) {
+	world := newClaimRelayWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
+	world.nowTime = time.Date(2026, 11, 9, 23, 59, 0, 0, time.UTC)
+	world.sendErr = errSnClaimRelayInFlight
+	requireClaimRelayState(t, world.pass(), SnClaimRelayStateInFlight)
+	if len(world.txs) != 1 || len(world.records) != 0 {
+		t.Fatalf("sent %d, records %v", len(world.txs), world.records)
+	}
+
+	// the next pass, after midnight, finds it final
+	tx := world.txs[0]
+	claim := tx.send.Claims[0]
+	tx.final = true
+	tx.costWei = snClaimRelayLiability(claimRelayTestUsedGas, world.gasPriceWei)
+	tx.outcome = &snClaimRelayOutcome{TxHash: "0x" + strings.Repeat("cd", 32), GasUsed: claimRelayTestUsedGas, Items: []*snClaimRelayItemOutcome{
+		{Paid: true, AmountRao: claim.Account.claimable().ToBig(), NoId: claim.Account.NoId, Index: claim.Account.Index, Cumulative: claim.Account.Cumulative.ToBig()},
+	}}
+	world.chainClaimed[0] = &claim.Account.Cumulative
+	world.mirrorClaimed[0] = &claim.Account.Cumulative
+	world.sendErr = nil
+	world.nowTime = time.Date(2026, 11, 10, 0, 5, 0, 0, time.UTC)
+	status := world.pass()
+	if record := world.records["1/0"]; record == nil || record.TxHash != tx.outcome.TxHash || record.Cumulative.Cmp(claim.Account.Cumulative.ToBig()) != 0 {
+		t.Fatalf("record %+v", record)
+	}
+	// it belongs to the day it was created
+	if status.ClaimsPaidToday != 0 || status.SpentTodayWei != "0" || len(world.txs) != 1 {
+		t.Fatalf("today paid %d, spent %s, sent %d", status.ClaimsPaidToday, status.SpentTodayWei, len(world.txs))
+	}
+
+	// two days on, it is not read again
+	delete(world.records, "1/0")
+	world.nowTime = time.Date(2026, 11, 11, 0, 5, 0, 0, time.UTC)
+	world.pass()
+	if len(world.records) != 0 {
+		t.Fatalf("records %v", world.records)
+	}
+}
+
+// What one intent adds: today's spend, count and refusals, and the paid claims of
+// the day before too, the latest of each account only, newest first.
+func TestClaimRelaySpendAddsTheDayAndThePaidClaims(t *testing.T) {
+	price := "5000000000"
+	attempts := []*model.StTransactionAttempt{{GasLimit: 200_000, GasPrice: &price}}
+	most := snClaimRelayMostAttemptCost(attempts)
+	intent := func(status string) *model.StTransactionIntent {
+		return &model.StTransactionIntent{Status: status}
+	}
+	paidItem := func(index uint64, cumulative int64, amount int64) *snClaimRelayItemOutcome {
+		return &snClaimRelayItemOutcome{Paid: true, NoId: 1, Index: index, Cumulative: big.NewInt(cumulative), AmountRao: big.NewInt(amount)}
+	}
+	receipt := func(spent int64, hash string, accounts []string, items ...*snClaimRelayItemOutcome) *snClaimRelayReceipt {
+		return &snClaimRelayReceipt{spentWei: big.NewInt(spent), accounts: accounts, outcome: &snClaimRelayOutcome{TxHash: hash, Items: items}}
+	}
+	reverted := receipt(50, "0x06", []string{"1/6"}, &snClaimRelayItemOutcome{Reason: "the transaction reverted"})
+	reverted.outcome.Reverted = true
+	yesterday := receipt(999, "0x07", []string{"1/7", "1/8"}, paidItem(7, 50, 50), &snClaimRelayItemOutcome{Reason: "refused"})
+	yesterday.outcome.Griefed = true
+
+	spend := &snClaimRelaySpend{SpentWei: new(big.Int), RevertedAccounts: map[string]string{}}
+	// newest nonce first, as the intents read
+	spend.add(intent(model.StTxFinalized), attempts, receipt(100, "0x05b", []string{"1/5"}, paidItem(5, 300, 100)), true)
+	spend.add(intent(model.StTxReverted), attempts, reverted, true)
+	spend.add(intent(model.StTxFinalized), attempts, receipt(70, "0x05a", []string{"1/5"}, paidItem(5, 200, 200)), true)
+	spend.add(intent(model.StTxBroadcast), attempts, nil, true)
+	spend.add(intent(model.StTxSuperseded), attempts, nil, true)
+	// final, and its receipt could not be read
+	spend.add(intent(model.StTxFinalized), attempts, nil, true)
+	spend.add(intent(model.StTxFinalized), attempts, yesterday, false)
+	spend.add(intent(model.StTxBroadcast), attempts, nil, false)
+	spend.add(intent(model.StTxFinalized), attempts, nil, false)
+
+	want := new(big.Int).Add(big.NewInt(100+50+70), new(big.Int).Mul(most, big.NewInt(2)))
+	if spend.SpentWei.Cmp(want) != 0 || spend.ClaimsPaid != 2 || spend.Griefed {
+		t.Fatalf("spent %s (want %s), paid %d, griefed %t", spend.SpentWei, want, spend.ClaimsPaid, spend.Griefed)
+	}
+	if len(spend.RevertedAccounts) != 1 || spend.RevertedAccounts["1/6"] != "the transaction reverted" {
+		t.Fatalf("reverted %v", spend.RevertedAccounts)
+	}
+	if len(spend.Paid) != 2 {
+		t.Fatalf("paid %d", len(spend.Paid))
+	}
+	if paid := spend.Paid[0]; paid.NoId != 1 || paid.Index != 5 || paid.TxHash != "0x05b" || paid.Cumulative.Int64() != 300 || paid.AmountRao.Int64() != 100 {
+		t.Fatalf("latest of account 5 %+v", paid)
+	}
+	if paid := spend.Paid[1]; paid.Index != 7 || paid.TxHash != "0x07" || paid.Cumulative.Int64() != 50 {
+		t.Fatalf("the day before's %+v", paid)
 	}
 }
 
@@ -1647,6 +1871,10 @@ func TestClaimRelayReceiptOfASingleClaim(t *testing.T) {
 	if len(receipt.accounts) != 1 || receipt.accounts[0] != "1/5" {
 		t.Fatalf("accounts %v", receipt.accounts)
 	}
+	// a paid claim names its account and what vault2 now records as its claimed
+	if item := receipt.outcome.Items[0]; item.NoId != 1 || item.Index != 5 || item.Cumulative == nil || item.Cumulative.Int64() != 1_000 {
+		t.Fatalf("paid item %+v", item)
+	}
 	// a node that does not report the price: what was signed stands in
 	if receipt := read(155_000, types.ReceiptStatusSuccessful, nil, good); receipt.spentWei.Cmp(new(big.Int).Mul(big.NewInt(155_000), claimRelayGwei(5))) != 0 {
 		t.Fatalf("spent %s without a reported price", receipt.spentWei)
@@ -1729,6 +1957,9 @@ func TestClaimRelayReceiptOfABatch(t *testing.T) {
 	}
 	if strings.Join(receipt.accounts, " ") != "1/1 1/2 1/3" {
 		t.Fatalf("accounts %v", receipt.accounts)
+	}
+	if item := outcome.Items[2]; item.NoId != 1 || item.Index != 3 || item.Cumulative == nil || item.Cumulative.Int64() != 300 {
+		t.Fatalf("paid item %+v", item)
 	}
 
 	// items the gas did not reach are simply due again

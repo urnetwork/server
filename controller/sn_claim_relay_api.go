@@ -1,16 +1,20 @@
 package controller
 
 // sn_claim_relay_api.go — the claim relay's answer for the apps: per coldkey of
-// the caller's network, what is pending, why, and whether Claim now can be
-// tapped. Apps draw this through the sdk (sdk sn_claim_relay.go), which also
-// chooses between the relay and the device's own claim.
+// the caller's network, what is pending, why, whether Claim now can be tapped,
+// and the transaction of the relay's claim while it is the account's latest.
+// Apps draw this through the sdk (sdk sn_claim_relay.go), which also chooses
+// between the relay and the device's own claim.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"math/big"
+	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/holiman/uint256"
@@ -101,6 +105,11 @@ type SnClaimRelayAccount struct {
 	ClaimNowReason string `json:"claim_now_reason,omitempty"`
 	// when the coldkey's limit ends, unix milliseconds; 0 when none holds
 	ClaimNowNextAtMillis int64 `json:"claim_now_next_at_millis,omitempty"`
+	// the transaction of the account's latest claim, when the relay sent it and
+	// still has it on record; "" for a claim anyone else sent, or none
+	ClaimTxHash string `json:"claim_tx_hash,omitempty"`
+	// what that claim paid, in rao of α
+	ClaimAmountRao int64 `json:"claim_amount_rao,omitempty"`
 }
 
 // The status the api goes by: the last pass's, or not_running when there is no
@@ -129,10 +138,22 @@ func snClaimRelayReadStatus(ctx context.Context, deploymentKey model.StDeploymen
 	return status
 }
 
-// One entry's balance as the relay's status judges it. Pure, for the tests. The
-// mirror behind the account is the chain's own read here, so a Reason never says
-// more than what is true at this read.
-func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, entry *StLedgerV2AccountEntry, requested bool, limitUntil time.Time, now time.Time) (*SnClaimRelayAccount, error) {
+// A transaction hash as the relay records it.
+var snClaimRelayTxHashPattern = regexp.MustCompile(`^0x[0-9a-f]{64}$`)
+
+// The rao of an amount, saturated rather than wrapped.
+func snClaimRelayRao(amount *uint256.Int) int64 {
+	if !amount.IsUint64() || math.MaxInt64 < amount.Uint64() {
+		return math.MaxInt64
+	}
+	return int64(amount.Uint64())
+}
+
+// One entry's balance as the relay's status judges it, and claim the relay's
+// record of the account's latest paid claim, nil without one. Pure, for the tests.
+// The mirror behind the account is the chain's own read here, so a Reason never
+// says more than what is true at this read.
+func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, entry *StLedgerV2AccountEntry, requested bool, limitUntil time.Time, claim *model.SnClaimRelayClaim, now time.Time) (*SnClaimRelayAccount, error) {
 	var cumulative, claimed uint256.Int
 	if err := cumulative.SetFromDecimal(entry.Cumulative); err != nil {
 		return nil, err
@@ -163,6 +184,16 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 		}
 		if cumulative.Lt(&pending) {
 			account.PendingRao = int64(new(uint256.Int).Sub(&pending, &cumulative).Uint64())
+		}
+	}
+	// The record names its claim's transaction while that claim is the account's
+	// latest: vault2's claimed, read at the finalized head, is still the cumulative
+	// it claimed up to. A later claim, by the relay or anyone, moves claimed on.
+	if claim != nil && snClaimRelayTxHashPattern.MatchString(claim.TxHash) {
+		var claimedUpTo, amount uint256.Int
+		if claimedUpTo.SetFromDecimal(claim.Cumulative) == nil && amount.SetFromDecimal(claim.AmountRao) == nil && !claimed.IsZero() && claimedUpTo.Eq(&claimed) {
+			account.ClaimTxHash = claim.TxHash
+			account.ClaimAmountRao = snClaimRelayRao(&amount)
 		}
 	}
 	refusal := status.Refusals[snClaimRelayAccountKey(entry.NoId, entry.Index)]
@@ -279,7 +310,8 @@ func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnC
 		if entry.NoId != cfg.NoId {
 			continue
 		}
-		account, err := snClaimRelayAccountView(status, address, entry, requested, limitUntil, now)
+		claim := model.GetSnClaimRelayClaim(ctx, cfg.DeploymentKey(), entry.NoId, entry.Index)
+		account, err := snClaimRelayAccountView(status, address, entry, requested, limitUntil, claim, now)
 		if err != nil {
 			return nil, err
 		}
@@ -419,6 +451,19 @@ func (self *snClaimRelayCoreRequests) Finish(ctx context.Context, coldkey [32]by
 	model.FinishSnClaimRelayRequest(ctx, self.deploymentKey, coldkey, startLimit, server.NowUtc(), snClaimRelayClaimNowPeriod)
 }
 
+// snClaimRelayCoreClaimRecords keeps the paid claims in Redis.
+type snClaimRelayCoreClaimRecords struct {
+	deploymentKey model.StDeploymentKey
+}
+
+func (self *snClaimRelayCoreClaimRecords) Record(ctx context.Context, paid *snClaimRelayPaid) {
+	model.SetSnClaimRelayClaim(ctx, self.deploymentKey, paid.NoId, paid.Index, &model.SnClaimRelayClaim{
+		TxHash:     strings.ToLower(paid.TxHash),
+		Cumulative: paid.Cumulative.String(),
+		AmountRao:  paid.AmountRao.String(),
+	})
+}
+
 // SnClaimRelayPassResult tells the task when to run the next pass.
 type SnClaimRelayPassResult struct {
 	State string
@@ -447,8 +492,9 @@ func newSnClaimRelayCore(cfg *StConfig) *snClaimRelay {
 			}
 			return newSnClaimRelayCoreChain(cfg, relayer), nil
 		},
-		ledger:   &snClaimRelayCoreLedger{cfg: cfg},
-		requests: &snClaimRelayCoreRequests{deploymentKey: deploymentKey},
+		ledger:       &snClaimRelayCoreLedger{cfg: cfg},
+		requests:     &snClaimRelayCoreRequests{deploymentKey: deploymentKey},
+		claimRecords: &snClaimRelayCoreClaimRecords{deploymentKey: deploymentKey},
 		lastStatus: func(ctx context.Context) *SnClaimRelayStatus {
 			return snClaimRelayReadStatus(ctx, deploymentKey)
 		},
