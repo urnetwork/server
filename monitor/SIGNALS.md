@@ -29207,6 +29207,20 @@ x402. Connect's QUIC/H3 listeners read the peer from `conn.RemoteAddr()`
 without entering the resolver, so a "share on connect" is computed over
 websocket connections and probes only.
 
+The fronts clients reach with no lb in front are their own ingress
+(`router/ingress.go`): alt's api front (inside its limits) and status
+listener, and the proxy's api and status ports, which warp exposes by DNAT.
+Each sets `X-UR-Forwarded-For` from the connection's peer and clears
+`X-Forwarded-For`, `X-Forwarded-Source-Port` and `X-UR-Request-Buffering`
+before any handler reads the request, so the resolver counts `ur_header`
+with the peer there. Each of those headers a client sent anyway is counted in
+`urnetwork_ingress_overwritten_headers_total{header}` (`x_ur_forwarded_for`,
+`x_forwarded_for`, `x_forwarded_source_port`, `x_ur_request_buffering`), once
+per request, charted beside the resolutions. Nothing legitimate sends them to
+those fronts, so a sustained rate is a client trying to name an address of
+its own. Alt's api front answers `/status` as a path with no route; alt's
+deploy poll reads its status listener.
+
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
 

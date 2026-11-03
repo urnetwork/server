@@ -3924,6 +3924,59 @@
       ]
     },
     {
+      "type": "timeseries",
+      "title": "8.8 forwarding headers clients sent to a front with no lb / min by header",
+      "description": "Requests that reached a front with no load balancer in front of it carrying a forwarding header the front owns: X-UR-Forwarded-For, X-Forwarded-For, X-Forwarded-Source-Port or X-UR-Request-Buffering (router/ingress.go). Those fronts are alt's api front and status listener and the proxy's api and status ports, which warp exposes by DNAT. The front overwrites or removes each header before any handler reads it, so the session above resolves the connection's peer whatever the client sent; this counts the headers it replaced, once per header per request. Nothing legitimate needs to send them to such a front, so the expected rate is zero or close to it: a sustained rate is a client naming an address of its own, or a proxy on the client's path adding headers. Empty until the instrumented build deploys.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 200
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (service, header) (rate(urnetwork_ingress_overwritten_headers_total{env=\"$env\"}[$__rate_interval])) * 60",
+          "refId": "A",
+          "legendFormat": "{{service}} / {{header}}"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "coverage notes",
       "collapsed": false,
@@ -3931,7 +3984,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 200
+        "y": 208
       }
     },
     {
@@ -3942,7 +3995,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 201
+        "y": 209
       },
       "options": {
         "mode": "markdown",
@@ -3957,7 +4010,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 208
+        "y": 216
       }
     },
     {
@@ -3968,7 +4021,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 209
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4008,7 +4061,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 209
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4053,7 +4106,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 209
+        "y": 217
       },
       "datasource": {
         "type": "prometheus",
@@ -4093,7 +4146,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 217
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4133,7 +4186,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 217
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4183,7 +4236,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 217
+        "y": 225
       },
       "datasource": {
         "type": "prometheus",
@@ -4223,7 +4276,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 225
+        "y": 233
       },
       "datasource": {
         "type": "prometheus",
@@ -4263,7 +4316,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 225
+        "y": 233
       },
       "datasource": {
         "type": "prometheus",
@@ -4303,7 +4356,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 225
+        "y": 233
       },
       "datasource": {
         "type": "prometheus",
@@ -4358,7 +4411,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 233
+        "y": 241
       },
       "datasource": {
         "type": "prometheus",
@@ -4398,7 +4451,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 233
+        "y": 241
       },
       "datasource": {
         "type": "prometheus",
@@ -4438,7 +4491,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 241
+        "y": 249
       }
     },
     {
@@ -4449,7 +4502,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 242
+        "y": 250
       },
       "datasource": {
         "type": "prometheus",
@@ -4499,7 +4552,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 242
+        "y": 250
       },
       "datasource": {
         "type": "prometheus",
