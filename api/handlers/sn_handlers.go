@@ -103,6 +103,18 @@ func SnLedgerAccount(w http.ResponseWriter, r *http.Request) {
 	controller.SnLedgerAccount(w, r)
 }
 
+// SnClaimRelay backs `GET /sn/claim-relay`: per coldkey of the caller's network,
+// what is pending, why, and whether Claim now can be tapped.
+func SnClaimRelay(w http.ResponseWriter, r *http.Request) {
+	router.WrapRequireAuth(controller.SnClaimRelay, w, r)
+}
+
+// SnClaimRelayClaimNow backs `POST /sn/claim-relay/claim-now`: queues one of the
+// network's coldkeys for the relay's next pass.
+func SnClaimRelayClaimNow(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.SnClaimRelayClaimNow, w, r)
+}
+
 // SnArtifactHistory lists immutable artifact keys under a deployment/netuid
 // prefix. It intentionally returns public object identifiers, never signer or
 // vault material.

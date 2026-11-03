@@ -102,6 +102,14 @@ func newCompetitionReevaluationAuthorizationPgFixture(t testing.TB, ctx context.
 func newCompetitionReevaluationAuthorizationPgFixtureWithTerminal(t testing.TB, ctx context.Context, name string,
 	terminalOutcome func(*Settings, *queuedJob) EvaluationOutcome, verifiedInventoryIncident bool) *competitionReevaluationAuthorizationPgFixture {
 	t.Helper()
+	return newCompetitionReevaluationAuthorizationPgFixtureWithArchiveEvidence(t, ctx, name, terminalOutcome, verifiedInventoryIncident, false)
+}
+
+// Legacy controls use the actual completion path without typed archive fields;
+// every existing fixture keeps the original inventory evidence by default.
+func newCompetitionReevaluationAuthorizationPgFixtureWithArchiveEvidence(t testing.TB, ctx context.Context, name string,
+	terminalOutcome func(*Settings, *queuedJob) EvaluationOutcome, verifiedInventoryIncident, legacyArchive bool) *competitionReevaluationAuthorizationPgFixture {
+	t.Helper()
 	fixture := &competitionReevaluationAuthorizationPgFixture{competitionRankingFixture: newCompetitionAutomationFixture(t)}
 	addCompetitionAutomationJob(t, fixture.competitionRankingFixture, 80)
 	lease, err := fixture.store.AcquireAutomationLease(ctx, fixture.settings, "synthetic-reevaluation-supervisor", 5*time.Minute)
@@ -134,6 +142,9 @@ func newCompetitionReevaluationAuthorizationPgFixtureWithTerminal(t testing.TB, 
 		}
 		if !verifiedInventoryIncident {
 			outcome.archiveFailure.DetailSha256 = strings.Repeat("f", 64)
+		}
+		if legacyArchive {
+			outcome.archiveFailure = nil
 		}
 		if attempt == 2 && terminalOutcome != nil {
 			outcome = terminalOutcome(fixture.settings, fixture.job)
@@ -196,7 +207,8 @@ func newCompetitionReevaluationAuthorizationPgFixtureWithTerminal(t testing.TB, 
 		server.Raise(conn.QueryRow(ctx, `SELECT policy_json FROM competition_round WHERE round_id=$1`, fixture.round.RoundId).Scan(&policyJson))
 		server.Raise(conn.QueryRow(ctx, `SELECT event_id,payload_sha256,(payload_json->>'attempt')::integer FROM competition_job_event
 		 WHERE job_id=$1 AND event_type='infrastructure_retry' AND payload_json->>'error_code'='artifact_archive_failed'
-		 AND payload_json ? 'artifact_archive_failure' ORDER BY event_id LIMIT 1`, fixture.job.JobId).Scan(&incidentEventId, &incidentEventSha256, &incidentAttempt))
+		 AND (($2 AND NOT (payload_json ? 'artifact_archive_failure')) OR (NOT $2 AND payload_json ? 'artifact_archive_failure'))
+		 ORDER BY event_id LIMIT 1`, fixture.job.JobId, legacyArchive).Scan(&incidentEventId, &incidentEventSha256, &incidentAttempt))
 	})
 	policySha256, err := CompetitionJobReevaluationSnapshotDigest(policyJson)
 	if err != nil {

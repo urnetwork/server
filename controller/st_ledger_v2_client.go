@@ -482,13 +482,14 @@ func stLedgerV2RevertName(err error) string {
 // stLedgerV2SpentErrors are the v2 reverts that can never clear for an
 // intent's exact calldata: its window closed, its epoch was closed or its root
 // count moved, or someone else already did it (SPEC A6: a demand answered,
-// NoFault; a root finalized, replaced or deleted, NoPendingRoot).
+// NoFault; a root finalized, replaced or deleted, NoPendingRoot; a claim sent
+// by anyone first, NothingToClaim).
 var stLedgerV2SpentErrors = func() map[[4]byte]string {
 	spent := map[[4]byte]string{}
 	for _, name := range []string{
 		"InvalidWindow", "InvalidTransition", "NoPendingRoot", "NoFault", "UnknownRoot", "StaleRootCount",
 		"EpochOutOfRange", "TotalMismatch", "TotalNotIncreased", "InvalidLeafCount", "InvalidRoot",
-		"IndexOutOfRange", "InvalidProof", "MalformedPath",
+		"IndexOutOfRange", "InvalidProof", "MalformedPath", "NothingToClaim",
 	} {
 		var selector [4]byte
 		copy(selector[:], crypto.Keccak256([]byte(name + "()"))[:4])
