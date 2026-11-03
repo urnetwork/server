@@ -2,7 +2,7 @@ package controller
 
 // sn_claim_relay_db_test.go — the claim relay on the real transaction engine,
 // tables and Redis, against an RPC fixture. Run them with the private test
-// database: TestClaimRelayDb.
+// database: TestDbClaimRelay.
 
 import (
 	"context"
@@ -86,7 +86,7 @@ func claimRelayDbClaimedLog(t testing.TB, cfg *StConfig, claim *snClaimRelayClai
 // The relay's account sends outside the operator gas policy, on its own client
 // only, at the gas limit it planned and with its own close fee cap; what it spent
 // is read back from the receipt, and the claim names the leaf's coldkey.
-func TestClaimRelayDbSendsOutsideTheGasPolicy(t *testing.T) {
+func TestDbClaimRelaySendsOutsideTheGasPolicy(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -164,7 +164,7 @@ func TestClaimRelayDbSendsOutsideTheGasPolicy(t *testing.T) {
 // A claim whose outcome was unknown when the process stopped is finished by the
 // next one, with the exact same bytes and nonce, and it costs the most it can
 // until its receipt reads. Nothing is claimed twice.
-func TestClaimRelayDbRestartResumesTheSameBytes(t *testing.T) {
+func TestDbClaimRelayRestartResumesTheSameBytes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -220,7 +220,7 @@ func TestClaimRelayDbRestartResumesTheSameBytes(t *testing.T) {
 // An intent reserved and never signed is retired by the next process, not signed
 // with the facts it was checked against long gone, and the claim is planned anew
 // under its own name.
-func TestClaimRelayDbUnsignedIntentIsRetired(t *testing.T) {
+func TestDbClaimRelayUnsignedIntentIsRetired(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -278,7 +278,7 @@ func TestClaimRelayDbUnsignedIntentIsRetired(t *testing.T) {
 
 // A signed claim someone else paid first is retired, not sent into a certain
 // revert.
-func TestClaimRelayDbClaimPaidFirstIsRetired(t *testing.T) {
+func TestDbClaimRelayClaimPaidFirstIsRetired(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -317,7 +317,7 @@ func TestClaimRelayDbClaimPaidFirstIsRetired(t *testing.T) {
 
 // A claim that reverts having burned its gas limit stops the day: the receipt says
 // so through the durable intent, whichever process reads it.
-func TestClaimRelayDbRevertedClaimStopsTheDay(t *testing.T) {
+func TestDbClaimRelayRevertedClaimStopsTheDay(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -348,7 +348,7 @@ func TestClaimRelayDbRevertedClaimStopsTheDay(t *testing.T) {
 
 // A batch goes to the batcher at its sized limit, not an estimate, and its receipt
 // says each item's outcome.
-func TestClaimRelayDbBatch(t *testing.T) {
+func TestDbClaimRelayBatch(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		fixture := newLedgerV2RPC(t)
@@ -396,7 +396,7 @@ func TestClaimRelayDbBatch(t *testing.T) {
 
 // Claim now in Redis: one per coldkey per period, oldest first, and a refund gives
 // the tap back.
-func TestClaimRelayDbRequests(t *testing.T) {
+func TestDbClaimRelayRequests(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		key := model.StDeploymentKey("945:" + server.NewId().String())
@@ -573,7 +573,7 @@ func (self *claimRelayDbWorld) session(coldkeyIndex int) *session.ClientSession 
 // The whole relay on its real parts: a pass reads the account index and the tree,
 // claims over the threshold, leaves the rest, and what it did reaches the api; and
 // Claim now takes the rest, once.
-func TestClaimRelayDbWholePass(t *testing.T) {
+func TestDbClaimRelayWholePass(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
 		ctx := world.ctx
@@ -669,7 +669,7 @@ func TestClaimRelayDbWholePass(t *testing.T) {
 
 // Without a key the whole pass reads and sends nothing, and the api and the status
 // say so.
-func TestClaimRelayDbNoKey(t *testing.T) {
+func TestDbClaimRelayNoKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
 		ctx := world.ctx
@@ -705,7 +705,7 @@ func TestClaimRelayDbNoKey(t *testing.T) {
 }
 
 // A status too old to believe reads as a relay that is not running.
-func TestClaimRelayDbStaleStatus(t *testing.T) {
+func TestDbClaimRelayStaleStatus(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
 		SnClaimRelayPass(world.ctx)
@@ -715,6 +715,44 @@ func TestClaimRelayDbStaleStatus(t *testing.T) {
 		}
 		if status := snClaimRelayCurrentStatus(world.ctx, world.cfg, now.Add(snClaimRelayStatusStale+time.Minute)); status.State != SnClaimRelayStateNotRunning {
 			t.Fatalf("stale: %+v", status)
+		}
+	})
+}
+
+// A network's coldkeys are those of its consents, the replaced ones too: their
+// accounts keep their balances, and the relay keeps claiming them.
+func TestDbClaimRelayNetworkConsentsNameTheColdkeys(t *testing.T) {
+	snWalletProviderScopeRun(t, func(t testing.TB) {
+		f := newSnWalletProviderScopeFixture(t)
+		ctx := t.Context()
+		firstKey, firstAddress := snNetworkWalletTestKey(t, 161)
+		secondKey, secondAddress := snNetworkWalletTestKey(t, 162)
+		first, _, _ := f.networkConsent(t, f.owner, firstKey, firstAddress, f.scope.Epoch)
+		f.accept(t, f.owner, first)
+		second, _, _ := f.networkConsent(t, f.owner, secondKey, secondAddress, f.scope.Epoch+1)
+		f.accept(t, f.owner, second)
+
+		coldkeys, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, f.owner.NetworkId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(coldkeys) != 2 || coldkeys[0] != secondKey.Public().Encode() || coldkeys[1] != firstKey.Public().Encode() {
+			t.Fatalf("coldkeys %x", coldkeys)
+		}
+		if others, err := model.GetNetworkWalletMappingConsentColdkeys(ctx, f.rpc.domain, server.NewId()); err != nil || len(others) != 0 {
+			t.Fatalf("another network's coldkeys %x (%v)", others, err)
+		}
+		clientSession := session.Testing_CreateClientSession(ctx, f.owner)
+		listed, err := snClaimRelayNetworkColdkeys(clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seen := map[[32]byte]int{}
+		for _, coldkey := range listed {
+			seen[coldkey] += 1
+		}
+		if seen[firstKey.Public().Encode()] != 1 || seen[secondKey.Public().Encode()] != 1 {
+			t.Fatalf("listed %x", listed)
 		}
 	})
 }

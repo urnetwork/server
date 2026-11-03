@@ -1077,6 +1077,39 @@ func TestClaimRelayEstimatesOnlyWhatItCanSend(t *testing.T) {
 	}
 }
 
+// A pass verifies a bounded number of accounts, however far the mirror is behind, and
+// says more is due.
+func TestClaimRelayVerifiesABoundedNumberInAPass(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	world := newClaimRelayWorld(t, claimRelayRepeat(over, snClaimRelayPreflightsPerPass+10)...)
+	// the chain has paid every one of them; the mirror does not know yet
+	for index := range world.leaves {
+		world.chainClaimed[uint64(index)] = &world.leaves[index].Cumulative
+	}
+	reads := 0
+	counting := &claimRelayCountingChain{claimRelayWorld: world, reads: &reads}
+	relay := world.relay()
+	relay.chain = func(*snClaimRelaySigner) (snClaimRelayChain, error) { return counting, nil }
+	status := relay.pass(context.Background())
+	requireClaimRelayState(t, status, SnClaimRelayStateRunning)
+	if reads != snClaimRelayPreflightsPerPass {
+		t.Fatalf("read %d in one pass", reads)
+	}
+	if len(world.txs) != 0 {
+		t.Fatalf("sent %d", len(world.txs))
+	}
+}
+
+type claimRelayCountingChain struct {
+	*claimRelayWorld
+	reads *int
+}
+
+func (self *claimRelayCountingChain) Claimed(ctx context.Context, account *snClaimRelayAccount) (*uint256.Int, error) {
+	*self.reads += 1
+	return self.claimRelayWorld.Claimed(ctx, account)
+}
+
 // Over the ceiling nothing goes, and the claims wait.
 func TestClaimRelayGasPriceCeiling(t *testing.T) {
 	world := newClaimRelayWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))

@@ -82,7 +82,8 @@ const (
 
 	// The most claims in one transaction.
 	snClaimRelayBatchMaximum = onchain.ClaimBatchMaxClaims
-	// Estimates in one pass, so that many refusals cannot make a pass long.
+	// Accounts verified against the chain in one pass, so that many refusals, or
+	// a mirror far behind, cannot make a pass long. The next pass goes on.
 	snClaimRelayPreflightsPerPass = 64
 	// Requests read in one pass. Past this they wait for the next pass.
 	snClaimRelayRequestsPerPass = 256
@@ -580,6 +581,7 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 		if refusal := status.Refusals[account.key()]; refusal != nil && now.Before(refusal.Until) {
 			continue
 		}
+		preflights++
 		claimed, err := chain.Claimed(ctx, account)
 		if err != nil {
 			status.State, status.Detail = SnClaimRelayStateChainUnavailable, err.Error()
@@ -616,7 +618,6 @@ func (self *snClaimRelay) prepare(ctx context.Context, chain snClaimRelayChain, 
 			self.refuse(&verified, "the proof does not verify against vault2's root", now, snClaimRelayRefusalRetry, status)
 			continue
 		}
-		preflights++
 		estimate, err := chain.Estimate(ctx, claim)
 		if err != nil {
 			self.refuse(&verified, stLedgerV2RevertName(err), now, snClaimRelayRefusalRetry, status)
