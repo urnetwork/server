@@ -19,10 +19,37 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
+// The refusal of a key another network holds names itself in `refusal`, on
+// which the extender makes a key of its network's own, and begins with the
+// sentence an extender that predates `refusal` recognizes it by
+// (connect/EXTENDER.md C2c).
 func testKeyOtherNetworkRefusal(result *ExtenderActivateResult) bool {
-	return !result.Activated && strings.Contains(result.Error, "registered to another network")
+	return !result.Activated &&
+		result.Refusal == "key_other_network" &&
+		strings.HasPrefix(result.Error, "This extender key is registered to another network")
+}
+
+// A refusal that is not the key's names no `refusal`, so no extender makes a
+// key on it; and the key's refusal no longer sends anyone to support for a
+// move, which support makes only for the verified admin of the network that
+// holds the key.
+func TestExtenderActivateRefusalNamesOnlyTheKeysRefusal(t *testing.T) {
+	if strings.Contains(extenderKeyOtherNetworkRefusal, "ask support") {
+		t.Fatalf("the key's refusal sends the caller to support for a move: %q", extenderKeyOtherNetworkRefusal)
+	}
+	result, err := newExtenderActivateService(DefaultExtenderActivateSettings()).activate(
+		&ExtenderActivateArgs{PublicKeyHex: "not a key"},
+		&session.ClientSession{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Activated || result.Refusal != "" {
+		t.Fatalf("result = %+v, expected a refusal with no code", result)
+	}
 }
 
 // The review repro (fix/extender-activation-budget, connect#230): a post with
