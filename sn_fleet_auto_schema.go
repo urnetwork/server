@@ -119,3 +119,10 @@ const snFleetAutoSchemaSql = `
 		PRIMARY KEY (deployment_key, network_id)
 	);
 `
+
+var snFleetAutoSchemaMigration = newSqlMigration(snFleetAutoSchemaSql)
+
+// The version that creates the claim's tables, wherever merges place it.
+func SnFleetAutoSchemaMigrationVersion() int {
+	return migrationVersion(snFleetAutoSchemaMigration)
+}

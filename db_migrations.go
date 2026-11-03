@@ -11302,5 +11302,5 @@ var migrations = []any{
 	// model/sn_fleet_auto.go). New tables only: nothing is rewritten, and no
 	// earlier release reads them. Apply before deploying the api and taskworker
 	// that use them. They stay empty while binding is closed.
-	newSqlMigration(snFleetAutoSchemaSql),
+	snFleetAutoSchemaMigration,
 }
