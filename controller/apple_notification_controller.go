@@ -703,8 +703,7 @@ func validateAppleTransactionAccount(
 		(currency == appleUsdCurrency && appleMaximumUsdPriceMilliunits < priceMilliunits) {
 		return nil, errors.New("invalid App Store purchase dates or price")
 	}
-	// in UTC, as the timestamp columns these reach hold it: pgx writes such a
-	// column from a time's wall clock and drops its zone
+	// in UTC, as the timestamp columns these reach hold it
 	validated.purchaseTime = time.UnixMilli(purchaseMillis).UTC()
 	validated.expiresTime = time.UnixMilli(expiresMillis).UTC()
 	if !validated.expiresTime.After(validated.purchaseTime) ||
