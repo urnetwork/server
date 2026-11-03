@@ -1449,6 +1449,11 @@ func newProxyDeviceLocalSettings(
 	// hosted windows hand drained slots over (connect StrictWindowHandover,
 	// which apps leave off), unless proxy.yml window_strict_handover is false
 	deviceLocalSettings.StrictWindowHandover = !proxyDeviceSettings.DisableStrictWindowHandover
+	// a hosted window client opens no per-peer session and signs no close
+	// report, so nothing reads its identity key, and each key it published would
+	// be one stored signed registration per window candidate. A post-quantum
+	// performance profile needs the key: connect publishes it anyway.
+	deviceLocalSettings.KeepWindowClientKeysLocal = true
 	return deviceLocalSettings
 }
 
