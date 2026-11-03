@@ -602,6 +602,181 @@ func TestEnsureBrevoWebhookRefusesUnsafeConfiguration(t *testing.T) {
 	}
 }
 
+// The transactional webhook Brevo lists for the account was made in the Brevo
+// console, not by webhook-ensure: no credential in the url, `auth`
+// {type: bearer, token: <a brevo.webhook_bearers user>}, only the unsubscribed
+// event, and no batched field. Brevo posts its `auth` as
+// "Authorization: Bearer <token>". The handler accepted only the Basic form of
+// the user, so it refused every event that webhook sent as wrong_credential,
+// and Brevo discarded each one.
+func brevoConsoleWebhook(token string) map[string]any {
+	return map[string]any{
+		"id":          40,
+		"type":        "transactional",
+		"channel":     "email",
+		"description": "",
+		"url":         brevoWebhookTestTarget,
+		"auth":        map[string]any{"type": "bearer", "token": token},
+		"events":      []any{"unsubscribed"},
+		"createdAt":   "2025-09-09T06:49:37.000-07:00",
+		"modifiedAt":  "2025-09-09T06:49:37.000-07:00",
+	}
+}
+
+// What a webhook stored in the fake sends: the Basic value of its url
+// userinfo, its custom Authorization headers and its `auth` bearer.
+func brevoWebhookStoredAuthorizations(t *testing.T, webhook map[string]any) []string {
+	t.Helper()
+	auths := []string{}
+	if webhookUrl, ok := webhook["url"].(string); ok {
+		if parsed, err := url.Parse(webhookUrl); err == nil && parsed.User != nil {
+			auths = append(auths, brevoWebhookClientAuthorization(t, webhookUrl)...)
+		}
+	}
+	if headers, ok := webhook["headers"]; ok && headers != nil {
+		for key, value := range fakeBrevoHeaders(t, headers) {
+			if strings.EqualFold(key, "Authorization") {
+				auths = append(auths, value)
+			}
+		}
+	}
+	if auth, ok := webhook["auth"].(map[string]any); ok && strings.EqualFold(fmt.Sprint(auth["type"]), "bearer") {
+		auths = append(auths, "Bearer "+fmt.Sprint(auth["token"]))
+	}
+	return auths
+}
+
+// Brevo's `auth` bearer carrying a configured user is accepted, as the Basic
+// form of the same user is; any other bearer is refused.
+func TestBrevoWebhookAcceptsTheRegisteredBearer(t *testing.T) {
+	pushBrevoWebhookTestUsers(t)
+	accepted := func() float64 {
+		return testutil.ToFloat64(brevoWebhookRequestsTotal.WithLabelValues(brevoWebhookAccepted))
+	}
+	before := accepted()
+
+	for _, authorization := range brevoWebhookStoredAuthorizations(t, brevoConsoleWebhook(brevoWebhookTestUser)) {
+		if err := verifyBrevoWebhookAuthorization(map[string][]string{"Authorization": {authorization}}); err != nil {
+			t.Errorf("the console webhook's bearer was refused: %v", err)
+		}
+	}
+	if err := verifyBrevoWebhookAuthorization(map[string][]string{"Authorization": {"bearer " + brevoWebhookTestSecondUser}}); err != nil {
+		t.Errorf("another configured user as a bearer, lower-case scheme, was refused: %v", err)
+	}
+	if got := accepted() - before; got != 2 {
+		t.Errorf("accepted counted %v, want 2", got)
+	}
+
+	for _, authorization := range []string{
+		"Bearer synthetic-other-user",
+		"Bearer",
+		"Bearer ",
+		// the Basic value or the user with its separator, sent as a bearer
+		"Bearer " + base64.StdEncoding.EncodeToString([]byte(brevoWebhookTestUser+":")),
+		"Bearer " + brevoWebhookTestUser + ":",
+		// the user without a scheme, or with another one
+		brevoWebhookTestUser,
+		"Token " + brevoWebhookTestUser,
+		"Basic " + brevoWebhookTestUser,
+	} {
+		if err := verifyBrevoWebhookAuthorization(map[string][]string{"Authorization": {authorization}}); !errors.Is(err, errBrevoWebhookNotAuthorized) {
+			t.Errorf("%q was not refused: %v", strings.ReplaceAll(authorization, brevoWebhookTestUser, "<user>"), err)
+		}
+	}
+
+	// a blank configured user adds no bearer anyone can send
+	t.Cleanup(server.Vault.PushSimpleResource("brevo.yml", []byte("brevo:\n  webhook_bearers:\n    - ''\n    - '  '\n    - "+brevoWebhookTestUser+"\n")))
+	for _, authorization := range []string{"Bearer", "Bearer ", "Bearer   "} {
+		if err := verifyBrevoWebhookAuthorization(map[string][]string{"Authorization": {authorization}}); !errors.Is(err, errBrevoWebhookNotAuthorized) {
+			t.Errorf("%q was not refused with a blank configured user: %v", authorization, err)
+		}
+	}
+}
+
+// The live webhook, repaired: webhook-ensure adds every campaign event and its
+// own credential in place, keeps the bearer the console set, and does not ask
+// for that bearer to be removed, since the handler accepts it. Whichever
+// credential Brevo sends from the repaired webhook, it is accepted.
+func TestEnsureBrevoWebhookRepairsTheConsoleWebhook(t *testing.T) {
+	for _, carrier := range []brevoWebhookCredentialCarrier{brevoWebhookCredentialUrl, brevoWebhookCredentialHeader} {
+		t.Run(string(carrier), func(t *testing.T) {
+			pushBrevoWebhookTestUsers(t)
+			fake := newFakeBrevoWebhooks(t, brevoConsoleWebhook(brevoWebhookTestUser))
+
+			outcome := ensureBrevoWebhookForTest(t, carrier)
+
+			if len(fake.requestsFor(http.MethodPut, "/v3/webhooks/40")) != 1 || fake.writes() != 1 {
+				t.Fatalf("writes = %+v", fake.requests)
+			}
+			stored := fake.find("40")
+			storedEvents := fakeBrevoStrings(t, stored["events"])
+			for _, event := range onboardingBrevoWebhookEvents {
+				if !slices.Contains(storedEvents, event) {
+					t.Fatalf("the repaired webhook lacks the event %s", event)
+				}
+			}
+			if stored["batched"] != false {
+				t.Fatalf("the repaired webhook is batched: %v", stored["batched"])
+			}
+
+			auths := brevoWebhookStoredAuthorizations(t, stored)
+			if len(auths) != 2 {
+				t.Fatalf("the repaired webhook carries %d credentials, want its own and the console's bearer", len(auths))
+			}
+			for _, authorization := range auths {
+				if err := verifyBrevoWebhookAuthorization(map[string][]string{"Authorization": {authorization}}); err != nil {
+					t.Errorf("the handler refuses a credential the repaired webhook sends (%s): %v", brevoAuthorizationSchemes([]string{authorization}), err)
+				}
+			}
+
+			for _, want := range []string{
+				"updated: transactional webhook 40 ",
+				"(it had an accepted bearer in auth)",
+				"events: added delivered, opened, uniqueOpened, click, hardBounce, softBounce, blocked, spam, invalid",
+				"check: Brevo's copy carries the credential and every event, unbatched",
+				"note: webhook 40 also has auth (bearer) carrying a brevo.webhook_bearers user, which POST /updates/brevo accepts as well",
+			} {
+				if !strings.Contains(outcome, want) {
+					t.Errorf("outcome lacks %q:\n%s", want, outcome)
+				}
+			}
+			if strings.Contains(outcome, "remove it in the Brevo console") {
+				t.Errorf("outcome asks to remove an accepted credential:\n%s", outcome)
+			}
+
+			// a second run finds nothing left to do
+			second := ensureBrevoWebhookForTest(t, carrier)
+			if !strings.HasPrefix(second, "exists: transactional webhook 40 ") || fake.writes() != 1 {
+				t.Fatalf("second run changed something:\n%s", second)
+			}
+		})
+	}
+}
+
+// A bearer that is no configured user is refused on every event, so the
+// ensure says so and asks for it to be removed.
+func TestEnsureBrevoWebhookWarnsOfAnUnacceptedBearer(t *testing.T) {
+	pushBrevoWebhookTestUsers(t)
+	fake := newFakeBrevoWebhooks(t, brevoConsoleWebhook("synthetic-foreign-token"))
+
+	outcome := ensureBrevoWebhookForTest(t, brevoWebhookCredentialUrl)
+
+	if fake.writes() != 1 {
+		t.Fatalf("writes = %+v", fake.requests)
+	}
+	if strings.Contains(outcome, "synthetic-foreign-token") {
+		t.Fatalf("outcome prints the bearer:\n%s", outcome)
+	}
+	for _, want := range []string{
+		"(it had a bearer in auth that this server does not accept)",
+		"warning: webhook 40 also has auth (type bearer) that POST /updates/brevo refuses: Brevo may send it as the Authorization header in place of the credential; remove it in the Brevo console",
+	} {
+		if !strings.Contains(outcome, want) {
+			t.Errorf("outcome lacks %q:\n%s", want, outcome)
+		}
+	}
+}
+
 // Each request to POST /updates/brevo is counted by result, a refusal by its
 // reason, before any event is recorded.
 func TestBrevoWebhookRefusalsAreCountedByReason(t *testing.T) {
@@ -647,20 +822,26 @@ func TestBrevoWebhookRefusalsAreCountedByReason(t *testing.T) {
 	}
 	for _, authorization := range []string{
 		"Basic " + base64.StdEncoding.EncodeToString([]byte("synthetic-other-user:")),
-		// the right user, as a bearer token rather than Basic
-		"Bearer " + brevoWebhookTestUser,
+		// another user, as a bearer token
+		"Bearer synthetic-other-user",
 	} {
 		if err := call(map[string][]string{"Authorization": {authorization}}); !errors.Is(err, errBrevoWebhookNotAuthorized) {
 			t.Errorf("with a wrong credential: %v", err)
 		}
 	}
-	if err := call(map[string][]string{"Authorization": {brevoWebhookTestAuthorization}}); err != nil {
-		t.Errorf("with the credential: %v", err)
+	for _, authorization := range []string{
+		brevoWebhookTestAuthorization,
+		// the user as a bearer token, as Brevo's `auth` bearer sends it
+		"Bearer " + brevoWebhookTestUser,
+	} {
+		if err := call(map[string][]string{"Authorization": {authorization}}); err != nil {
+			t.Errorf("with the credential: %v", err)
+		}
 	}
 
 	after := counts()
 	for result, want := range map[string]float64{
-		brevoWebhookAccepted:                       1,
+		brevoWebhookAccepted:                       2,
 		brevoWebhookRefusedNoCredential:            2,
 		brevoWebhookRefusedWrongCredential:         2,
 		brevoWebhookRefusedVerificationUnavailable: 1,

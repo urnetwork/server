@@ -22,10 +22,14 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// The Authorization values a Brevo webhook may carry: each configured user as
-// a Basic credential with an empty password, lower cased. A blank user would
-// add "Basic Og==", which anyone can send, so it adds nothing. Without a usable
-// user the error says why, and every webhook is refused.
+// The Authorization values a Brevo webhook may carry, lower cased: each
+// configured user as a Basic credential with an empty password (a webhook
+// url's userinfo, or a custom header), and the same user as a Bearer token (a
+// webhook's `auth` bearer, which Brevo sends as "Authorization: Bearer
+// <token>"; the account's transactional webhook was registered that way in
+// the Brevo console). A blank user would add "Basic Og==" or "Bearer ", which
+// anyone can send, so it adds nothing. Without a usable user the error says
+// why, and every webhook is refused.
 func brevoWebhookExpectedAuths() (map[string]bool, error) {
 	brevo, err := server.Vault.SimpleResource("brevo.yml")
 	if err != nil {
@@ -35,7 +39,7 @@ func brevoWebhookExpectedAuths() (map[string]bool, error) {
 	if _, err := brevo.ParseE(); err != nil {
 		return nil, err
 	}
-	// TODO these are users not bearer tokens
+	// each entry is a user for Basic and a token for Bearer
 	bearers := brevo.String("brevo", "webhook_bearers")
 	expectedAuths := map[string]bool{}
 	for _, bearer := range bearers {
@@ -49,6 +53,7 @@ func brevoWebhookExpectedAuths() (map[string]bool, error) {
 			)),
 		))
 		expectedAuths[expectedAuth] = true
+		expectedAuths[strings.ToLower(fmt.Sprintf("Bearer %s", bearer))] = true
 	}
 	if len(expectedAuths) == 0 {
 		return nil, errors.New("brevo.yml: brevo.webhook_bearers names no user")
