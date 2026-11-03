@@ -209,6 +209,9 @@ func initTaskSchedule(ctx context.Context) {
 		// (LEADERTOP.md §5.7, §6.2)
 		work.ScheduleSnSyncFleetBindings(clientSession, tx)
 		work.ScheduleSnReadIncentive(clientSession, tx)
+		// the Top 200 claim: nothing is scheduled while binding is closed
+		work.ScheduleSnFleetAuto(clientSession, tx)
+		work.ScheduleSnFleetAutoRelay(clientSession, tx)
 		work.SchedulePaymentReconcile(clientSession, tx)
 		// crypto payments (controller/crypto_pay_scan.go): the scan and
 		// address refill chains of the coins that are on, and the retention
@@ -755,6 +758,14 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.SnReadIncentive,
 			work.SnReadIncentivePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SnFleetAuto,
+			work.SnFleetAutoPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SnFleetAutoRelay,
+			work.SnFleetAutoRelayPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.PaymentReconcile,

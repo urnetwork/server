@@ -268,6 +268,14 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sn/top":                                   routeAccessPublic, // the public board; a token only adds the caller's own row
 	"GET /sn/top/me":                                routeAccessClient,
 	"POST /sn/head/binding":                         routeAccessOwnClientPayout, // binds the caller's head
+	"GET /sn/fleet/device":                          routeAccessOwnClientPayout, // the caller's own pending binding
+	"POST /sn/fleet/device/signature":               routeAccessOwnClientPayout, // its own signature on it
+	"GET /sn/fleet/device/binding":                  routeAccessOwnClientPayout, // its own binding, to leave
+	"POST /sn/fleet/device/leave":                   routeAccessOwnClientPayout, // leaves with its own key
+	"GET /sn/fleet/claim":                           routeAccessNetwork,         // the network's claim, for its card
+	"POST /sn/fleet/authorization":                  routeAccessNetwork,         // the coldkey's authorization of a hotkey
+	"POST /sn/fleet/hotkey-signatures":              routeAccessNetwork,         // the hotkey's signatures, from the key holder
+	"POST /sn/fleet/top-up":                         routeAccessNetwork,         // the network's one top-up
 	"GET /sn/pool/claim":                            routeAccessClient,
 	"GET /sn/epoch":                                 routeAccessPublic,
 	"GET /sn/artifact":                              routeAccessPublic,

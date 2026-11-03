@@ -137,6 +137,10 @@ const (
 	// the Bittensor hotkey a hotkey network delegation gives the network's
 	// subnet earnings to, for its epochs
 	SecurityWalletDestinationSubnetHotkey = "subnet_hotkey"
+
+	// the hotkey a network's coldkey authorized to claim its Top 200 spot, whose
+	// devices sign bindings to it with no person looking
+	SecurityWalletDestinationFleetHotkey = "fleet_hotkey"
 )
 
 // What happened to a sign-in method.

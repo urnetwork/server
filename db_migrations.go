@@ -11288,4 +11288,10 @@ var migrations = []any{
 	// Audited single-use evaluator recovery; legacy cycle-zero writers remain
 	// compatible. Deploy compatible API/worker before authorizing any cycle.
 	competitionJobReevaluationMigration,
+
+	// Claiming a Top 200 spot from one tap (sn_fleet_auto_schema.go,
+	// model/sn_fleet_auto.go). New tables only: nothing is rewritten, and no
+	// earlier release reads them. Apply before deploying the api and taskworker
+	// that use them. They stay empty while binding is closed.
+	newSqlMigration(snFleetAutoSchemaSql),
 }
