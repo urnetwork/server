@@ -1033,8 +1033,7 @@ func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.C
 	return
 }
 
-// HasPlayGraceHoldInTx reports whether the purchase already holds Pro for this
-// exact window with a grace period's zero-byte marker
+// Whether the purchase already holds Pro for this exact window with a grace period's zero-byte marker
 // (controller playHoldGraceEntitlementInTx).
 func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken string, startTime time.Time, endTime time.Time) (held bool) {
 	result, err := tx.Query(

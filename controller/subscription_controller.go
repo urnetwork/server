@@ -1743,8 +1743,7 @@ func playCreditSubscriptionInTx(
 	return true, nil
 }
 
-// playHoldGraceEntitlementInTx keeps Pro through Play's grace period. The renewal's
-// charge failed and Play is retrying it, and Play holds the customer entitled
+// Keeps Pro through Play's grace period. The renewal's charge failed and Play is retrying it, and Play holds the customer entitled
 // until maxExpiryTime, the grace period's end. Stripe's manual-payment grace
 // keeps a failing renewal's Pro the same way. Nothing here records the unpaid
 // renewal as paid: a renewal row with no revenue, so the network has an open
