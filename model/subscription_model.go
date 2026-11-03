@@ -4518,7 +4518,7 @@ func GetExpiredOpenContractIds(
                 WHERE
                     transfer_contract.open = true
             `,
-			// in UTC, as close_time holds it: pgx writes a time's wall clock
+			// in UTC, as close_time holds it
 			server.NowUtc().Add(-contractCloseTimeout),
 		)
 		server.WithPgResult(result, err, func() {
