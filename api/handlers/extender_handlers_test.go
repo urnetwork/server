@@ -67,6 +67,8 @@ func TestExtenderActivateArgsFieldNames(t *testing.T) {
 		// the run of the process that posted (connect/EXTENDER.md G3)
 		"previous_exit",
 		"public_key_hex",
+		// the key of the extender's tcp camouflage (connect/EXTENDER.md P1, P6)
+		"reality_public_key_hex",
 		"run_id",
 		"run_start_time",
 		"tcp_port",
