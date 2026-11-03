@@ -43,9 +43,11 @@ import (
 )
 
 const (
-	// how often an idle device asks. A closed answer waits longer, so providers that
-	// update ahead of opening add about one request a second across 100k of them
-	snFleetAutoCheckClosed = 24 * time.Hour
+	// how often an idle device asks. While binding is closed a device asks about once a
+	// week, which across 100k providers is about one request every six seconds; it
+	// saves the schedule, so a restart doesn't ask sooner. A device learns that
+	// binding opened at its next check, so shorten this a week before opening
+	snFleetAutoCheckClosed = 7 * 24 * time.Hour
 	snFleetAutoCheckOpen   = 6 * time.Hour
 	// a chosen device still waiting for its binding asks sooner
 	snFleetAutoCheckChosen = time.Hour
