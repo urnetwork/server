@@ -1413,6 +1413,11 @@ type PlaySubscriptionRenewalResult struct {
 	ExpiryTime       time.Time `json:"expiry_time"`
 	Renewed          bool      `json:"renewed"`
 	Terminal         bool      `json:"terminal"`
+	// Play's grace period: the renewal's charge failed and Play is retrying it,
+	// with the customer entitled through ExpiryTime
+	InGrace bool `json:"in_grace,omitempty"`
+	// this call wrote the grace period's hold (playHoldGraceEntitlementInTx)
+	GraceHeld bool `json:"grace_held,omitempty"`
 }
 
 func SchedulePlaySubscriptionRenewal(
@@ -1502,9 +1507,12 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 	active := false
 	canceled := false
 	terminal := false
+	grace := false
 	switch sub.SubscriptionState {
 	case "SUBSCRIPTION_STATE_ACTIVE":
 		active = true
+	case "SUBSCRIPTION_STATE_IN_GRACE_PERIOD":
+		grace = true
 	case "SUBSCRIPTION_STATE_CANCELED":
 		canceled = true
 		terminal = !maxExpiryTime.After(now)
@@ -1520,6 +1528,27 @@ func PlaySubscriptionRenewalInConn(connOwner server.PgConn,
 			clientSession,
 			minExpiryTime,
 		)
+	}
+
+	if grace {
+		held := false
+		var holdErr error
+		if sku, ok := playSkusFunc()[playSubscriptionRenewal.SubscriptionId]; ok && sku.Supporter {
+			server.TxInConn(clientSession.Ctx, connOwner, func(tx server.PgTx) {
+				held, holdErr = playHoldGraceEntitlementInTx(tx, clientSession, playSubscriptionRenewal, startTime, maxExpiryTime)
+			}, server.TxReadCommitted)
+		}
+		if holdErr != nil {
+			return nil, holdErr
+		}
+		if held {
+			model.UpdateProNetworkInConn(connOwner, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
+		}
+		return &PlaySubscriptionRenewalResult{
+			ExpiryTime: minExpiryTime,
+			InGrace:    true,
+			GraceHeld:  held,
+		}, nil
 	}
 
 	// cancelled ≠ expired: a CANCELED subscription that is not terminal has
@@ -1714,6 +1743,73 @@ func playCreditSubscriptionInTx(
 	return true, nil
 }
 
+// playHoldGraceEntitlementInTx keeps Pro through Play's grace period. The renewal's
+// charge failed and Play is retrying it, and Play holds the customer entitled
+// until maxExpiryTime, the grace period's end. Stripe's manual-payment grace
+// keeps a failing renewal's Pro the same way. Nothing here records the unpaid
+// renewal as paid: a renewal row with no revenue, so the network has an open
+// window (the monthly grant, the new-purchase guard, the cancel path), and a
+// zero-byte Pro marker with its exact window, so the end paths retire it. No
+// bytes, no sales notice and no onboarding or win-back record. When the charge
+// lands, the recovered period credits as usual
+// (model.GetOverlappingTransferBalance does not count a hold as a credit), and
+// if it never does, the hold runs out on its own.
+//
+// held is false when a credit or an earlier hold covers the expiry, or the
+// window has already ended. The tx must be ReadCommitted (see
+// PlaySubscriptionRenewal).
+func playHoldGraceEntitlementInTx(
+	tx server.PgTx,
+	clientSession *session.ClientSession,
+	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+) (held bool, returnErr error) {
+	ctx := clientSession.Ctx
+	if err := model.LockPlaySubscriptionPurchaseInTx(
+		tx,
+		ctx,
+		playSubscriptionRenewal.NetworkId,
+		playSubscriptionRenewal.PurchaseToken,
+	); err != nil {
+		return false, err
+	}
+	endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
+	if !server.NowUtc().Before(endTime) {
+		return false, nil
+	}
+	if _, err := model.GetOverlappingTransferBalanceInTx(tx, ctx, playSubscriptionRenewal.PurchaseToken, maxExpiryTime); err == nil {
+		return false, nil
+	}
+	renewal := &model.SubscriptionRenewal{
+		NetworkId:          playSubscriptionRenewal.NetworkId,
+		StartTime:          startTime,
+		EndTime:            endTime,
+		NetRevenue:         0,
+		PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
+		SubscriptionType:   model.SubscriptionTypeSupporter,
+		SubscriptionMarket: model.SubscriptionMarketGoogle,
+	}
+	if err := model.AddSubscriptionRenewalInTx(tx, ctx, renewal); err != nil {
+		return false, err
+	}
+	if model.HasPlayGraceHoldInTx(tx, ctx, playSubscriptionRenewal.PurchaseToken, startTime, endTime) {
+		return false, nil
+	}
+	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
+		NetworkId:             playSubscriptionRenewal.NetworkId,
+		StartTime:             startTime,
+		EndTime:               endTime,
+		StartBalanceByteCount: 0,
+		NetRevenue:            0,
+		SubsidyNetRevenue:     0,
+		BalanceByteCount:      0,
+		PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
+		Pro:                   true,
+	})
+	return true, nil
+}
+
 // endTerminalPlaySubscriptionRenewal applies the same terminal-state contract
 // as reconciliation, but inside the ordinary scheduled poll: EXPIRED,
 // PENDING_PURCHASE_CANCELED, expired CANCELED, and 410 end only the task's
@@ -1779,6 +1875,22 @@ func PlaySubscriptionRenewalPost(
 				playSubscriptionRenewal,
 			)
 		}
+		return nil
+	}
+
+	if playSubscriptionRenewalResult.InGrace {
+		// Play is still retrying the charge, so nothing has ended: no notice,
+		// and one more poll at the grace period's end, when Play has decided.
+		// The recovery's notification usually gets there first.
+		playSubscriptionRenewal.CheckTime = server.MaxTime(
+			playSubscriptionRenewalResult.ExpiryTime,
+			server.NowUtc().Add(1*time.Hour),
+		)
+		SchedulePlaySubscriptionRenewal(
+			clientSession,
+			tx,
+			playSubscriptionRenewal,
+		)
 		return nil
 	}
 

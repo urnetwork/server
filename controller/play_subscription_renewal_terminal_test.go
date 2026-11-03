@@ -954,3 +954,236 @@ func TestPlaySubscriptionRenewalStaleActiveCannotRestoreTerminalEnd(t *testing.T
 		}
 	})
 }
+
+// playGraceFixture is a Play purchase whose paid window has lapsed and that Play
+// has in its grace period, with a billing recipient on the network.
+type playGraceFixture struct {
+	ctx           context.Context
+	env           *playWebhookTestEnv
+	clientSession *session.ClientSession
+	networkId     server.Id
+	token         string
+	startTime     time.Time
+	graceEnd      time.Time
+}
+
+func newPlayGraceFixture(t testing.TB, name string) *playGraceFixture {
+	ctx := context.Background()
+	env := newPlayWebhookTestEnv(t, map[string]*Sku{
+		playTerminalTestSubscriptionId: {
+			FeeFraction:    0.3,
+			PriceAmountUsd: 5.00,
+			Supporter:      true,
+		},
+	})
+	clientSession := session.Testing_CreateClientSession(ctx, nil)
+	networkId := server.NewId()
+	userId := server.NewId()
+	model.Testing_CreateGuestNetwork(ctx, networkId, "synthetic-"+name, userId)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx,
+			`UPDATE network_user SET user_auth = $1, auth_type = $2 WHERE user_id = $3`,
+			name+"@synthetic.example", model.AuthTypePassword, userId))
+	})
+
+	startTime := server.NowUtc().Add(-40 * 24 * time.Hour).Truncate(time.Second)
+	paidThrough := server.NowUtc().Add(-3 * 24 * time.Hour).Truncate(time.Second)
+	seedPlayTerminalEntitlement(t, ctx, networkId, "synthetic-grace-"+name, startTime, paidThrough.Add(SubscriptionGracePeriod), true)
+
+	graceEnd := server.NowUtc().Add(4 * 24 * time.Hour).Truncate(time.Second)
+	subscription := playTestSubscription(networkId, playTerminalTestSubscriptionId, startTime, graceEnd)
+	subscription.SubscriptionState = "SUBSCRIPTION_STATE_IN_GRACE_PERIOD"
+	subscription.AcknowledgementState = "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED"
+	env.subscriptions["synthetic-grace-"+name] = subscription
+
+	return &playGraceFixture{
+		ctx:           ctx,
+		env:           env,
+		clientSession: clientSession,
+		networkId:     networkId,
+		token:         "synthetic-grace-" + name,
+		startTime:     startTime,
+		graceEnd:      graceEnd,
+	}
+}
+
+func (self *playGraceFixture) args() *PlaySubscriptionRenewalArgs {
+	return playTerminalTestArgs(self.networkId, self.env.packageName, self.token)
+}
+
+// playGraceProRow is one in-window Pro balance of the network, which a
+// zero-byte hold is among, unlike model.GetActiveTransferBalances.
+type playGraceProRow struct {
+	startByteCount    int64
+	netRevenue        int64
+	subsidyNetRevenue int64
+	endTime           time.Time
+}
+
+func (self *playGraceFixture) proRows() []playGraceProRow {
+	rows := []playGraceProRow{}
+	server.Db(self.ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			self.ctx,
+			`
+			SELECT start_balance_byte_count, net_revenue_nano_cents, subsidy_net_revenue_nano_cents, end_time
+			FROM transfer_balance
+			WHERE network_id = $1 AND pro AND $2 < end_time
+			ORDER BY start_balance_byte_count
+			`,
+			self.networkId,
+			server.NowUtc(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var row playGraceProRow
+				server.Raise(result.Scan(&row.startByteCount, &row.netRevenue, &row.subsidyNetRevenue, &row.endTime))
+				rows = append(rows, row)
+			}
+		})
+	})
+	return rows
+}
+
+// Play holds a customer in its grace period entitled, so Pro stays. The hold is
+// no credit: no bytes, no revenue. A second poll adds nothing.
+func TestPlaySubscriptionRenewalGraceHoldsProWithoutACredit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newPlayGraceFixture(t, "graceholds")
+		ctx := fixture.ctx
+		if model.IsProNetwork(ctx, fixture.networkId) {
+			t.Fatal("the lapsed window must not read as Pro before the poll")
+		}
+
+		result, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Renewed || result.Canceled || result.Terminal {
+			t.Fatalf("a grace period credits and ends nothing: %+v", result)
+		}
+		if !model.IsProNetwork(ctx, fixture.networkId) {
+			t.Fatal("Pro did not hold through Play's grace period")
+		}
+		rows := fixture.proRows()
+		if len(rows) != 1 || rows[0].startByteCount != 0 || rows[0].netRevenue != 0 || rows[0].subsidyNetRevenue != 0 {
+			t.Fatalf("the hold must mint nothing: %+v", rows)
+		}
+		if !rows[0].endTime.Equal(fixture.graceEnd.Add(SubscriptionGracePeriod)) {
+			t.Fatalf("the hold ends %v, want the grace period's end with the store's day %v", rows[0].endTime, fixture.graceEnd.Add(SubscriptionGracePeriod))
+		}
+		if count := countActivePlayRenewals(t, ctx, fixture.networkId, fixture.token); count != 1 {
+			t.Fatalf("open renewals = %d, want the hold's one", count)
+		}
+
+		if _, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession); err != nil {
+			t.Fatal(err)
+		}
+		if rows := fixture.proRows(); len(rows) != 1 {
+			t.Fatalf("a second poll added a balance: %+v", rows)
+		}
+	})
+}
+
+// A renewal in grace has not ended: no ended notice, and the poll stays scheduled
+// for the grace period's end, when Play has decided.
+func TestPlaySubscriptionRenewalPostInGraceKeepsPollingWithoutANotice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newPlayGraceFixture(t, "gracepost")
+		ctx := fixture.ctx
+		result, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		args := fixture.args()
+		var postErr error
+		server.Tx(ctx, func(tx server.PgTx) {
+			postErr = PlaySubscriptionRenewalPost(args, result, fixture.clientSession, tx)
+		})
+		if postErr != nil {
+			t.Fatal(postErr)
+		}
+		if count := outboxMessageCount(t, ctx, fixture.networkId); count != 0 {
+			t.Fatalf("a subscription in grace was told it ended: %d notices", count)
+		}
+		if count, _ := countScheduledPlayRenewals(t, ctx, fixture.token); count != 1 {
+			t.Fatalf("scheduled polls = %d, want one at the grace period's end", count)
+		}
+	})
+}
+
+// The charge lands: the recovered period gets its credit and its revenue, also
+// when its expiry falls inside the hold's window.
+func TestPlaySubscriptionRenewalRecoveryAfterGraceCredits(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newPlayGraceFixture(t, "gracerecovers")
+		ctx := fixture.ctx
+		if _, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession); err != nil {
+			t.Fatal(err)
+		}
+
+		// recovered with the hold's own expiry: the 30-day grace on a monthly plan
+		sub := fixture.env.subscriptions[fixture.token]
+		sub.SubscriptionState = "SUBSCRIPTION_STATE_ACTIVE"
+		result, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !result.Renewed {
+			t.Fatalf("the recovered charge was not credited: %+v", result)
+		}
+		credited := int64(0)
+		for _, row := range fixture.proRows() {
+			credited += row.startByteCount
+		}
+		if credited != int64(RefreshSupporterTransferBalance) {
+			t.Fatalf("credited %d bytes, want one period's %d", credited, RefreshSupporterTransferBalance)
+		}
+
+		// and a redelivery of the same state does not credit again
+		result, err = PlaySubscriptionRenewal(fixture.args(), fixture.clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Renewed {
+			t.Fatal("the same expiry was credited twice")
+		}
+		if !model.IsProNetwork(ctx, fixture.networkId) {
+			t.Fatal("recovered, but not Pro")
+		}
+	})
+}
+
+// Play gives up: the subscription goes on hold, nothing new is written, and the
+// hold runs out with its window.
+func TestPlaySubscriptionRenewalOnHoldAfterGraceAddsNothing(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newPlayGraceFixture(t, "graceonhold")
+		sub := fixture.env.subscriptions[fixture.token]
+		sub.SubscriptionState = "SUBSCRIPTION_STATE_ON_HOLD"
+		result, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.InGrace || result.GraceHeld || result.Renewed {
+			t.Fatalf("on hold: %+v", result)
+		}
+		if model.IsProNetwork(fixture.ctx, fixture.networkId) {
+			t.Fatal("a subscription on hold holds no Pro")
+		}
+	})
+}
+
+// A revocation during grace ends the hold with the rest of the purchase.
+func TestPlayGraceHoldEndsWithThePurchase(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		fixture := newPlayGraceFixture(t, "graceends")
+		if _, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession); err != nil {
+			t.Fatal(err)
+		}
+		model.EndReconciledEntitlementForPurchaseToken(fixture.ctx, model.SubscriptionMarketGoogle, fixture.token, server.NowUtc())
+		if model.IsProNetwork(fixture.ctx, fixture.networkId) {
+			t.Fatal("the hold outlived the purchase")
+		}
+	})
+}
