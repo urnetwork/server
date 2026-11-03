@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
@@ -106,17 +108,72 @@ func (self PostgresStore) clearExpiredCompetitionRecoverySlotInTx(ctx context.Co
 }
 
 // Canonical JSONB-object identity is independent of PostgreSQL key order and
-// whitespace. Duplicate keys, nonobjects and malformed documents fail closed.
+// whitespace. Data keys are case-sensitive, not typed protocol fields. Repeated
+// keys, nonobjects, invalid utf-8, excessive nesting and trailing data refuse.
 func CompetitionJobReevaluationSnapshotDigest(content json.RawMessage) (string, error) {
-	var fields map[string]json.RawMessage
-	if err := decodeFailureEvidenceJson(content, &fields); err != nil || fields == nil {
+	if !utf8.Valid(content) {
 		return "", ErrConflict
 	}
-	var value any
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return "", err
+	var readValue func(int) (any, error)
+	readValue = func(depth int) (any, error) {
+		if 64 < depth {
+			return nil, ErrConflict
+		}
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, ErrConflict
+		}
+		delimiter, ok := token.(json.Delim)
+		if !ok {
+			return token, nil
+		}
+		switch delimiter {
+		case '{':
+			fields := map[string]any{}
+			for decoder.More() {
+				keyToken, err := decoder.Token()
+				key, ok := keyToken.(string)
+				if err != nil || !ok {
+					return nil, ErrConflict
+				}
+				if _, duplicate := fields[key]; duplicate {
+					return nil, ErrConflict
+				}
+				value, err := readValue(depth + 1)
+				if err != nil {
+					return nil, err
+				}
+				fields[key] = value
+			}
+			if end, err := decoder.Token(); err != nil || end != json.Delim('}') {
+				return nil, ErrConflict
+			}
+			return fields, nil
+		case '[':
+			values := []any{}
+			for decoder.More() {
+				value, err := readValue(depth + 1)
+				if err != nil {
+					return nil, err
+				}
+				values = append(values, value)
+			}
+			if end, err := decoder.Token(); err != nil || end != json.Delim(']') {
+				return nil, ErrConflict
+			}
+			return values, nil
+		default:
+			return nil, ErrConflict
+		}
+	}
+	value, err := readValue(0)
+	if _, ok := value.(map[string]any); err != nil || !ok {
+		return "", ErrConflict
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return "", ErrConflict
 	}
 	return model.CompetitionAutomationDigest(value)
 }
@@ -187,12 +244,24 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 		return ErrAutomationDisabled
 	}
 	if !tokenNamePattern.MatchString(request.IdempotencyKey) || !sha256Pattern.MatchString(request.AuthorizationSha256) ||
-		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind || a.IncidentClass != model.CompetitionJobReevaluationArchiveInventory ||
+		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind ||
 		a.Environment != settings.AutomationPolicy.Environment || a.CompetitionId != settings.CompetitionId || a.SeasonId != settings.AutomationPolicy.SeasonId ||
 		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != 0 || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
 		a.AuthorizedAt.IsZero() || !a.AuthorizedAt.Before(a.ExpiresAt) || !sha256Pattern.MatchString(a.EvidenceSha256) ||
 		!sha256Pattern.MatchString(a.ExpectedTerminalSha256) || a.IncidentEventId < 1 || !sha256Pattern.MatchString(a.IncidentEventSha256) ||
 		!sha256Pattern.MatchString(a.RoundPolicySha256) || !sha256Pattern.MatchString(a.BaselineSha256) {
+		return ErrConflict
+	}
+	switch a.IncidentClass {
+	case model.CompetitionJobReevaluationArchiveInventory:
+		// The separately authenticated manifest remains mandatory for this class.
+	case model.CompetitionJobReevaluationLegacyArchiveBudget:
+		// Explicit operator approval covers an untyped earlier archive interruption,
+		// not a fabricated inventory diagnosis or a generic expired execution.
+		if a.IncidentAttempt < 1 || a.ExpectedAttemptCount <= a.IncidentAttempt || a.FailureManifestSha256 != "" || a.RejectedArtifactPath != "" {
+			return ErrConflict
+		}
+	default:
 		return ErrConflict
 	}
 	digest, err := model.CompetitionAutomationDigest(a)
@@ -243,8 +312,9 @@ func readCompetitionReevaluationReceipt(ctx context.Context, settings *Settings,
 	return receipt, err
 }
 
-// A terminal code alone never proves evaluator fault. The actual immutable
-// event must bind this job, attempt and exact unsafe-inventory failure phase.
+// A terminal code alone cannot grant recovery. The typed class proves the
+// exact inventory defect; explicit legacy approval binds a real earlier
+// archive interruption without claiming its unknown backend cause.
 func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.PgTx, auth model.CompetitionJobReevaluationAuthorization, started, completed time.Time) error {
 	var at time.Time
 	var eventType, digest string
@@ -254,11 +324,23 @@ func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.
 		return ErrConflict
 	}
 	var event struct {
-		Attempt int                                `json:"attempt"`
-		Failure *competitionArtifactArchiveFailure `json:"artifact_archive_failure"`
+		Attempt   int                                `json:"attempt"`
+		ErrorCode json.RawMessage                    `json:"error_code"`
+		Failure   *competitionArtifactArchiveFailure `json:"artifact_archive_failure"`
 	}
-	if json.Unmarshal(payload, &event) != nil || event.Failure == nil || digest != auth.IncidentEventSha256 || event.Attempt != auth.IncidentAttempt ||
+	if json.Unmarshal(payload, &event) != nil || digest != auth.IncidentEventSha256 || event.Attempt != auth.IncidentAttempt ||
 		(eventType != "failed" && eventType != "infrastructure_retry") || at.Before(started) || completed.Before(at) {
+		return ErrConflict
+	}
+	if auth.IncidentClass == model.CompetitionJobReevaluationLegacyArchiveBudget {
+		var errorCode string
+		if json.Unmarshal(event.ErrorCode, &errorCode) != nil || eventType != "infrastructure_retry" || errorCode != "artifact_archive_failed" || event.Failure != nil ||
+			event.Attempt < 1 || auth.ExpectedAttemptCount <= event.Attempt {
+			return ErrConflict
+		}
+		return nil
+	}
+	if auth.IncidentClass != model.CompetitionJobReevaluationArchiveInventory || event.Failure == nil {
 		return ErrConflict
 	}
 	wanted := sha256.Sum256([]byte("failure evidence manifest contains an unsafe artifact"))
@@ -284,7 +366,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 		return existing, loadErr
 	}
 	preflightError := validateCompetitionReevaluationRuntime(settings, a)
-	if preflightError == nil {
+	if preflightError == nil && a.IncidentClass == model.CompetitionJobReevaluationArchiveInventory {
 		preflightError = validateCompetitionReevaluationInventory(settings, a)
 	}
 	// Replay remains possible after retained local files or the authorization
@@ -341,6 +423,9 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			var failure *CompetitionError
 			server.Raise(json.Unmarshal(errorJson, &failure))
 			if failure == nil || failure.Kind != "infrastructure" || failure.Retriable || (failure.Code != "artifact_archive_failed" && failure.Code != "evaluation_time_budget_exhausted") {
+				panic(ErrConflict)
+			}
+			if a.IncidentClass == model.CompetitionJobReevaluationLegacyArchiveBudget && failure.Code != "evaluation_time_budget_exhausted" {
 				panic(ErrConflict)
 			}
 			digest, digestErr := CompetitionJobReevaluationSnapshotDigest(terminal)

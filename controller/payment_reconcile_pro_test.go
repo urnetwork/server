@@ -240,9 +240,9 @@ func TestPaymentReconcileAppleNeverRecreditsPreLedgerWindow(t *testing.T) {
 		// the pre-ledger credit, built the way that handler built it: renewal
 		// keyed on the app transaction id, started at processing time
 		// (time.Now), ended at time.Unix(expiresDate/1000) plus the grace
-		// period, no ledger row
-		preLedgerStart := time.Unix(purchaseTime.Unix()+2, 0)
-		preLedgerEnd := time.Unix(expiresTime.UnixMilli()/1000, 0).Add(SubscriptionGracePeriod)
+		// period, no ledger row. In UTC, the zone of the process that wrote it.
+		preLedgerStart := time.Unix(purchaseTime.Unix()+2, 0).UTC()
+		preLedgerEnd := time.Unix(expiresTime.UnixMilli()/1000, 0).UTC().Add(SubscriptionGracePeriod)
 		connect.AssertEqual(t, model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
 			NetworkId:          networkId,
 			SubscriptionType:   model.SubscriptionTypeSupporter,

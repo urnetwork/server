@@ -135,6 +135,7 @@ func TestExtenderMigrationsApply(t *testing.T) {
 			"network_extender_latency",
 			"network_extender_measurement",
 			"network_extender_measurement_cert",
+			"network_extender_measurement_probe",
 			"network_extender_publish",
 			"network_extender_release",
 			"network_extender_release_request",

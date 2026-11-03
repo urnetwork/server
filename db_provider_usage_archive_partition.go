@@ -229,8 +229,9 @@ func ProviderUsageArchivePartitionMigrationVersion() int {
 // Refuses a drop that bypasses the retention policy: a transaction without the
 // retention opt-in, a range that is not one canonical week, or a week whose
 // upper bound is not yet a year past by the database's clock, whatever clock
-// the caller judged expiry by. It runs first in the drop transaction, before
-// any detach.
+// the caller judged expiry by, unless its export may drop it
+// (providerUsageArchiveExportFence, db_provider_usage_archive_export.go). It
+// runs first in the drop transaction, before any detach.
 func providerUsageArchiveDropFence(ctx context.Context, tx PgTx, r PartitionRange) {
 	week := PartitionGranularityWeekly.RangeOf(r.Lower)
 	if r.Default || r.Legacy || r.Lower.IsZero() || !week.Lower.Equal(r.Lower) || !week.Upper.Equal(r.Upper) {
@@ -248,7 +249,7 @@ func providerUsageArchiveDropFence(ctx context.Context, tx PgTx, r PartitionRang
 		panic(errors.New("archived provider usage is append-only: a week drops only under the retention opt-in"))
 	}
 	if !due {
-		panic(fmt.Errorf("archived provider usage is append-only: the week of %s is kept until %s", r.Lower.Format(time.DateOnly), r.Upper.Add(providerUsageArchiveRetention).Format(time.RFC3339)))
+		providerUsageArchiveExportFence(ctx, tx, r)
 	}
 }
 
@@ -256,12 +257,14 @@ func providerUsageArchiveDropFence(ctx context.Context, tx PgTx, r PartitionRang
 // ahead, as the contract weeks do, so a contract's archive week exists long
 // before retention deletes the contract. A week is dropped under the retention
 // opt-in once it ended 52 weeks ago; nothing else keeps it, since a contract
-// archived after its week was dropped lands in the DEFAULT partition. The
-// leaves are dropped whole, so they stay out of the REINDEX rotation, and
-// autovacuum analyzes them as their weeks fill.
+// archived after its week was dropped lands in the DEFAULT partition. A week
+// whose verified export holds its rows may drop sooner, under the export
+// control (db_provider_usage_archive_export.go). The leaves are dropped
+// whole, so they stay out of the REINDEX rotation, and autovacuum analyzes
+// them as their weeks fill.
 var providerUsageArchivePartitionFamily = RegisterPartitionFamily(&PartitionFamily{
 	Name:             "st_provider_usage_archive",
-	Description:      "archived subnet usage proof of deleted contracts, weekly by contract week, each week kept 52 weeks after it ends",
+	Description:      "archived subnet usage proof of deleted contracts, weekly by contract week, each week kept 52 weeks after it ends or until its verified export off the primary drops it",
 	Tables:           []string{"st_provider_usage_archive"},
 	KeyColumn:        "contract_id",
 	KeyKind:          PartitionKeyId,
@@ -271,5 +274,7 @@ var providerUsageArchivePartitionFamily = RegisterPartitionFamily(&PartitionFami
 	DefaultPartition: true,
 	DropGuardSetting: providerUsageArchiveRetentionSetting,
 	ReindexExempt:    true,
+	RangeExpired:     providerUsageArchiveRangeExpired,
 	DropFence:        providerUsageArchiveDropFence,
+	DropPrecondition: providerUsageArchiveWeekBlocker,
 })

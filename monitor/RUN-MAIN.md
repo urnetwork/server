@@ -380,6 +380,16 @@ binary's `vcs.modified` bit: Go reports that bit for the main module, while code
 from a dirty local replacement can still be compiled into the service. This is
 coordination and evidence for the existing local-checkout workflow, not a
 Warpctl clean-worktree gate or a replacement build design.
+
+For a release epoch governed by `local/source-graph/lock.yml`, compare every
+recorded sibling revision with that exact checked-in lock before admitting the
+source graph or launching Go. A clean, stable checkout and matching `go.mod`
+prove identity, not agreement with the lock or compatibility of exported APIs.
+Retain the complete comparison and stop on a missing or different revision;
+review intentional lock changes explicitly. A lock-matching graph still needs
+actual compilation of the selected service packages before release tests can
+qualify it. Do not replace missing dependency APIs with guessed server constants.
+
 The exact local `warpctl` resolved for the build and every installed
 managed-host copy must expose a parseable full Go VCS base revision and Boolean
 modified bit; `modified=true` is context, not a fault. A desired version label,
@@ -796,6 +806,16 @@ decoder cursor, sequence, open calls and pending bytes. Physical capture offsets
 and placeholder pending values (including zero or null) do not establish that
 state. Bind the generation, selected-key specifications, original file/receipt
 custody and each declared metadata reference before adopting a checkpoint.
+At the preparer boundary, decode a validated checkpoint's `Pending: null` as
+empty bytes only when the independently accepted pending length is the exact
+integer zero. Every other value must be a strict Base64 string whose decoded
+bytes match the exact accepted length, contain no LF and have fewer than 4,096
+bytes; an empty string therefore also requires an accepted zero length. Refuse
+missing fields, unknown or boolean lengths, null with a nonzero length, and
+malformed encodings. This rule never turns a physical metadata placeholder into
+checkpoint authority. Test serialized null and string cases at the actual
+preparer assignment and frame boundary; retain the failed attempt and use a
+fresh, separately admitted request.
 When original capture metadata does not satisfy a legacy schema, retain the
 refusal and originals; do not add invented adoption fields or rewrite receipts.
 Use a separately qualified original-metadata path, and require each declared
@@ -1194,6 +1214,16 @@ the source-qualified writer/relay framing bound. The current fixed schema-2
 receipt remains unchanged by the address scrubber; arbitrary diagnostics can
 expand, and one writer call is not an atomicity or complete-delivery proof.
 
+Verify retained evidence by its declared schema role. A snapshot descriptor's
+`path`, `bytes`, and `sha256` may describe a captured prefix or window of a
+mutable source, not an immutable backing file. Verify the saved container and
+explicitly named immutable capture/guard receipts, then check embedded captured
+bytes, length, hash and recorded identity against their serialized metadata.
+Never recursively follow provenance paths or compare a captured prefix with
+the live source's current whole-file size or hash. Reacquiring live evidence is
+a separate bounded read, not snapshot verification. Byte integrity alone does
+not prove full-file coverage, loaded settings, inventory or trust selection.
+
 A skipped prefix, cut first line, unfinished last line, unsupported or malformed
 receipt, source failure, or missing/stale scope leaves that authority unknown.
 Never infer full collection coverage or healthy absence from a tail, reuse old
@@ -1519,6 +1549,14 @@ triage manifest before Sol Medium begins the repair. Cover, as applicable:
 Run the narrow test first, then the package and race suite. Apply the pinned
 engine-source preflight above before either full monitor suite here as well;
 retain the exported variable in the actual child environment.
+
+A qualified extracted helper body does not qualify a new caller. Preserve
+its bootstrap and referenced globals, including receipt hashers and output
+context. When adapting that caller, audit the consumed helpers' global
+bindings and exercise the actual first PRE/POST receipt and save-return
+boundary before command dispatch. A partial receipt from a failed save is
+not a completed preflight. Preserve it and qualify the repair in a fresh,
+separately admitted namespace.
 
 Before launch, inventory the selected tests' complete runtime filesystem
 dependencies as well as Go source and module inputs. Include files opened by

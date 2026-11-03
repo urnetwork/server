@@ -873,6 +873,31 @@ func TestStripeInvoiceCreditIncludesManualPaymentGrace(t *testing.T) {
 	}
 }
 
+// The invoice period reaches the timestamp columns, which pgx writes from a
+// time's wall clock, dropping its zone. time.Unix answers in Local on every
+// machine, even one whose zone is UTC, so an unconverted period fails here
+// wherever this runs.
+func TestStripeInvoiceCreditTimesAreUtc(t *testing.T) {
+	stripeEnv := newStripeReconcileTestEnv(t)
+	invoiceId := "in_synthetic_utc_period"
+	periodStart := time.Date(2099, time.January, 1, 0, 0, 0, 0, time.UTC)
+	stripeEnv.fullInvoices[invoiceId] = stripeTestFullInvoice(
+		invoiceId, "sub_synthetic_utc_period", server.NewId(),
+		periodStart, periodStart.Add(30*24*time.Hour), "active", false,
+	)
+
+	credit, err := stripeResolveInvoiceCredit(
+		invoiceId, &session.ClientSession{Ctx: context.Background()},
+	)
+	connect.AssertEqual(t, err, nil)
+	if credit == nil {
+		t.Fatal("synthetic paid subscription invoice was not credited")
+	}
+	if credit.startTime.Location() != time.UTC || credit.endTime.Location() != time.UTC {
+		t.Fatal("the credit's times were left in the process's zone, want them in time.UTC")
+	}
+}
+
 // A paid invoice can outlive the network named by its subscription metadata.
 // The lifecycle lock must still refuse every ledger/credit write, but this
 // terminal business exception must not masquerade as a Stripe adapter error

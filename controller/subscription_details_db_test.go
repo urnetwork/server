@@ -424,10 +424,64 @@ func TestSubscriptionCancelDbReachesAStripeRenewalStillBeingRetried(t *testing.T
 		if err != nil || result.Error != nil {
 			t.Fatalf("cancel the retried subscription: refused %+v %v", result.Error, err)
 		}
-		if len(env.updates) != 1 || env.updates[0] != "true" {
-			t.Fatalf("expected one cancel_at_period_end=true update, got %v", env.updates)
+		// cancelling at the period's end would leave the open renewal invoice on
+		// Stripe's retry schedule, and a card could be charged after the cancel
+		if len(env.updates) != 0 {
+			t.Fatalf("expected no cancel_at_period_end update, got %v", env.updates)
 		}
-		if result.AutoRenew == nil || *result.AutoRenew || result.EndTime == nil || !result.EndTime.Equal(periodEnd) {
+		if len(env.cancels) != 1 || env.cancels[0] != "sub_checkoutretrycancel" {
+			t.Fatalf("expected the subscription cancelled now, got %v", env.cancels)
+		}
+		// nothing is paid through the next period: the plan ends now, not at its date
+		if result.AutoRenew == nil || *result.AutoRenew || result.EndTime == nil || result.EndTime.After(server.NowUtc()) {
+			t.Fatalf("cancel result: %+v", result)
+		}
+		// and there is nothing left to resume
+		resumed, err := SubscriptionResume(&SubscriptionCancelArgs{Store: "stripe"}, clientSession)
+		if err != nil || resumed.Error == nil || resumed.Error.Code != SubscriptionErrorCodeNoSubscription {
+			t.Fatalf("resume after cancelling now: %+v %v", resumed, err)
+		}
+	})
+}
+
+// A subscription in good standing still runs out at the end of the period it has
+// paid for, and can be resumed.
+func TestSubscriptionCancelDbActiveStillEndsAtThePeriodEnd(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "managesubactivecancel", userId)
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+		env := newStripeSubscriptionTestEnv(t)
+		periodEnd := now.Add(300 * 24 * time.Hour).Truncate(time.Second)
+		env.addSubscription("cus_activecancel", "sub_activecancel", "active", false, periodEnd, "year")
+		env.invoiceSubscription["in_activecancel"] = "sub_activecancel"
+		if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          now.Add(-60 * 24 * time.Hour),
+			EndTime:            periodEnd.Add(manualPaymentGracePeriod),
+			NetRevenue:         model.UsdToNanoCents(40),
+			SubscriptionMarket: model.SubscriptionMarketStripe,
+			TransactionId:      "in_activecancel",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		result, err := SubscriptionCancel(&SubscriptionCancelArgs{Store: "stripe"}, clientSession)
+		if err != nil || result.Error != nil {
+			t.Fatalf("cancel: refused %+v %v", result.Error, err)
+		}
+		if len(env.cancels) != 0 || len(env.updates) != 1 || env.updates[0] != "true" {
+			t.Fatalf("expected one cancel_at_period_end=true update: updates %v cancels %v", env.updates, env.cancels)
+		}
+		if result.EndTime == nil || !result.EndTime.Equal(periodEnd) {
 			t.Fatalf("cancel result: %+v", result)
 		}
 	})
@@ -529,6 +583,92 @@ func TestSubscriptionDetailsDbLeavesAnEndedStripeSubscriptionUnlisted(t *testing
 		}
 		if len(env.updates) != 0 {
 			t.Fatalf("nothing must be written to stripe: %v", env.updates)
+		}
+	})
+}
+
+// A network that bought through web checkout has no Stripe customer on file. With
+// its renewal failing past its last window, nothing but that window leads to the
+// subscription Stripe is still retrying, and a new purchase would bill beside it.
+func TestStripePurchaseGuardSeesARetriedRenewalWithNoCustomer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		cases := []struct {
+			status string
+			blocks bool
+		}{
+			{status: "past_due", blocks: true},
+			{status: "active", blocks: true},
+			{status: "canceled", blocks: false},
+			{status: "unpaid", blocks: false},
+		}
+		env := newStripeSubscriptionTestEnv(t)
+		for _, c := range cases {
+			networkId := server.NewId()
+			userId := server.NewId()
+			clientId := server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, "guardretry"+c.status, userId)
+			clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+				NetworkId: networkId,
+				ClientId:  &clientId,
+				UserId:    userId,
+			})
+			subscriptionId := "sub_guardretry_" + c.status
+			invoiceId := "in_guardretry_" + c.status
+			env.addSubscription("cus_guardretry_"+c.status, subscriptionId, c.status, false, now.Add(360*24*time.Hour).Truncate(time.Second), "year")
+			env.invoiceSubscription[invoiceId] = subscriptionId
+			if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+				NetworkId:          networkId,
+				SubscriptionType:   model.SubscriptionTypeSupporter,
+				StartTime:          now.Add(-370 * 24 * time.Hour),
+				EndTime:            now.Add(-5 * 24 * time.Hour),
+				NetRevenue:         model.UsdToNanoCents(40),
+				SubscriptionMarket: model.SubscriptionMarketStripe,
+				TransactionId:      invoiceId,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if blocks := stripeNetworkHasActiveSubscription(clientSession, ""); blocks != c.blocks {
+				t.Errorf("last window's subscription %s: blocks = %t, want %t", c.status, blocks, c.blocks)
+			}
+		}
+	})
+}
+
+// Stripe not answering does not block a purchase, and a network that never had a
+// Stripe window asks Stripe nothing.
+func TestStripePurchaseGuardWithNoLastWindowOrNoAnswer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		newStripeSubscriptionTestEnv(t)
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "guardretrynone", userId)
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+		if stripeNetworkHasActiveSubscription(clientSession, "") {
+			t.Error("a network with no Stripe window was refused")
+		}
+		if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          now.Add(-370 * 24 * time.Hour),
+			EndTime:            now.Add(-5 * 24 * time.Hour),
+			NetRevenue:         model.UsdToNanoCents(40),
+			SubscriptionMarket: model.SubscriptionMarketStripe,
+			TransactionId:      "in_guardretrynone",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// the fake knows no such invoice
+		if stripeNetworkHasActiveSubscription(clientSession, "") {
+			t.Error("a Stripe error blocked the purchase")
 		}
 	})
 }

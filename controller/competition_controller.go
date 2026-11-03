@@ -6064,6 +6064,8 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 	})
 }
 
+// A scanned candidate becomes a claim only after both authority updates commit.
+// Any failed or rolled-back transaction returns no job to its caller.
 func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerId string, workerImageDigest string) (job *queuedJob, err error) {
 	if _, identityErr := validateRuntimeImageDigest(workerImageDigest); identityErr != nil {
 		return nil, identityErr
@@ -6214,18 +6216,26 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 				panic(ErrLeaseLost)
 			}
 			server.Raise(setCompetitionJobAuthorityInTx(ctx, tx, job.JobId, job.EvaluationCycle, job.AttemptCount))
-			server.RaisePgResult(tx.Exec(ctx, `
+			jobUpdate, updateErr := tx.Exec(ctx, `
 				UPDATE competition_job SET state = 'running', started_at = COALESCE(started_at, $2),
 					cycle_started_at=CASE WHEN evaluation_cycle>0 THEN COALESCE(cycle_started_at,$2) ELSE cycle_started_at END,
 					lease_owner = $3, lease_expires_at = $4, attempt_count = attempt_count + 1,
 					worker_image_digest = $5
 				WHERE job_id = $1
-			`, job.JobId, now, workerId, leaseUntil, workerImageDigest))
+			`, job.JobId, now, workerId, leaseUntil, workerImageDigest)
+			server.Raise(updateErr)
+			if jobUpdate.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
 			server.Raise(setCompetitionJobAuthorityInTx(ctx, tx, job.JobId, job.EvaluationCycle, job.AttemptCount+1))
-			server.RaisePgResult(tx.Exec(ctx, `
+			slotUpdate, updateErr := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET worker_id = $1, job_id = $2,
 					lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = 1
-			`, workerId, job.JobId, leaseUntil, now))
+			`, workerId, job.JobId, leaseUntil, now)
+			server.Raise(updateErr)
+			if slotUpdate.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
 			appendEvent(ctx, tx, job.JobId, now, "claimed", workerId, map[string]any{
 				"attempt": job.AttemptCount + 1, "worker_image_digest": workerImageDigest,
 			})
@@ -6243,14 +6253,15 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 			}
 		})
 	})
-	if err == nil {
-		for _, jobId := range discarded {
-			if removeErr := removeCompetitionJobSignal(ctx, settings, jobId); removeErr != nil {
-				glog.Infof("[competition]discarded FIFO signal cleanup failed job=%s: %s\n", jobId, removeErr)
-			}
+	if err != nil {
+		return nil, err
+	}
+	for _, jobId := range discarded {
+		if removeErr := removeCompetitionJobSignal(ctx, settings, jobId); removeErr != nil {
+			glog.Infof("[competition]discarded FIFO signal cleanup failed job=%s: %s\n", jobId, removeErr)
 		}
 	}
-	return job, err
+	return job, nil
 }
 
 // Lock both existing authorities before reading the renewal clock. Expired or

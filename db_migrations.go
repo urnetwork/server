@@ -11289,6 +11289,15 @@ var migrations = []any{
 	// compatible. Deploy compatible API/worker before authorizing any cycle.
 	competitionJobReevaluationMigration,
 
+	// The usage archive's export ledger
+	// (db_provider_usage_archive_export.go): one row per verified copy of a
+	// week of st_provider_usage_archive stored off the primary, which the
+	// exporter writes and the week's early drop stamps. A new table: nothing
+	// is rewritten, and older binaries never read it. Apply before the
+	// exporter registers copies; the taskworker that drops weeks early reads
+	// it only while the export control is on.
+	providerUsageArchiveExportLedgerMigration,
+
 	// The demand deposit's durable state (sn/demand, st_demand_schema.go): the
 	// funder's state and events, the last verified price sheet and each settlement
 	// v2 epoch's usage statement. New tables, and the usage statement is written at
