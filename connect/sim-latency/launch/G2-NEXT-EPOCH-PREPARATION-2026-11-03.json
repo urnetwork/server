@@ -3,6 +3,7 @@
   "kind": "inactive-next-epoch-g2-source-and-qualification-handoff",
   "status": "source_correction_staged_not_tested_built_installed_or_activated",
   "observed_at": "2026-11-03T19:24:01Z",
+  "source_preparation_revised_at": "2026-11-03T19:54:22Z",
   "control_source_base": "23d4a3baba84dffb68b2db05007b3cf218794ce5",
   "normal_control_source_lock": {
     "path": "local/source-graph/lock.yml",
@@ -99,7 +100,8 @@
     "operational_wrappers_executed": false,
     "installed_files_rewritten": false,
     "old_archive_or_oci_runtime_requalified": false,
-    "old_control_bundle_includes_new_suite_fix": false
+    "old_control_bundle_includes_new_suite_fix": false,
+    "consistent_pins_do_not_make_old_future2_worker_deployable": "The Oct31/4f worker/prepare/qualify binaries predate the current8c archive/claim/recovery fixes. Never replace the current qualified scoring worker with those old future2 binaries. A fresh coherent four-program control bundle is mandatory."
   },
   "source_capability_vs_deployment": {
     "source_support": [
@@ -117,7 +119,8 @@
   },
   "deferred_qualification": {
     "run_now": false,
-    "exclusion_requirement": "Root-confirmed authoritative empty queue/poll or separately approved maintenance exclusion. Do not start in a short apparent gap, hold/restart the live worker, interrupt an active evaluation or write main DB state.",
+    "exclusion_requirement": "The owner chose natural queue empty. After an authoritative empty queued/running poll, Root must establish durable intake-preserving evaluation-claim-only maintenance through the separately reviewed control workflow, then recheck the authoritative queue/slot and join every prior worker/evaluator/Docker owner. A claim winning this race must finish and join; never interrupt it. Hold the canonical evaluation slot and maintain the durable admission exclusion through all heavy work and cleanup even if new submissions queue afterward. An empty snapshot or environment marker alone is not exclusion authority. Do not pause the existing active queue or restart/repoint the worker to create a window.",
+    "maintenance_intake_requirement": "Admission remains unheld and actual intakeReady must stay true. Keep genuine idle worker host heartbeats and the current runtime tuple intact. The old Oct30 revision4 CALIBRATION_MAINTENANCE intake exception was exact, bounded and expired; never replay it as a generic technical-build permit or fabricate readiness. The external maintenance owner watches its fence/slot and cancels the technical unit on exclusion loss; owned-container cleanup must join before restoring normal claim admission.",
     "executor": "Independent gpt-6.1-sol with low reasoning, not the implementation agent",
     "toolchain": {
       "bin_directory": "/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin",
@@ -153,10 +156,10 @@
     "commands_after_exclusion_and_closed_graph_only": [
       {
         "working_directory": "sealed-normal-control-graph/server",
-        "command": "CGO_ENABLED=1 go test -json -race -count=1 -run '^Test(SourceMinimumWork|SourceCorrectness|SourceBuildQualifier|SourceTestJournal|SourceTestModel|SourceTestSnow)' ./connect/sim-latency",
-        "selected_top_level_roots_static_count": 47,
+        "command": "CGO_ENABLED=1 go test -json -race -count=1 -run '^Test(SourceMinimumWork|SourceCorrectness|SourceBuildQualifier|SourceTestJournal|SourceTestModel|SourceTestSnow|G2InstrumentBasePlan)' ./connect/sim-latency",
+        "selected_top_level_roots_static_count": 55,
         "fresh_process_repetitions": 3,
-        "mandatory_top_level_passes_if_all_three_complete": 141,
+        "mandatory_top_level_passes_if_all_three_complete": 165,
         "actual_passes_claimed": 0,
         "race_requires": "Pinned available C compiler and CGO_ENABLED=1 for this test-only phase; final runtime CLI remains CGO_ENABLED=0."
       },
@@ -164,11 +167,59 @@
         "working_directory": "sealed-normal-control-graph/server",
         "command": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o <new-private-artifact-directory>/sim-latency ./connect/sim-latency",
         "verify": "Exact Go1.27.3, Linux/amd64, disabled cgo, corrected clean vcs.revision and vcs.modified=false; retain actual ELF hash and source graph. This builds control, not the selected-product evaluator image."
+      },
+      {
+        "working_directory": "sealed-normal-control-graph/server",
+        "command": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o <new-private-artifact-directory>/competitionworker ./cli/competitionworker",
+        "verify": "Fresh compatible control source, current archive/claim/recovery schema, clean exact build metadata; never reuse the old Oct31/4f worker for rollout."
+      },
+      {
+        "working_directory": "sealed-normal-control-graph/server",
+        "command": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o <new-private-artifact-directory>/competitionprepare ./cli/competitionprepare",
+        "verify": "Same corrected normal-control source/graph/toolchain as the other three programs; regenerate fenced preparation wrapper/config pins coherently."
+      },
+      {
+        "working_directory": "sealed-normal-control-graph/server",
+        "command": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o <new-private-artifact-directory>/competitionqualify ./cli/competitionqualify",
+        "verify": "Same corrected normal-control source/graph/toolchain as the other three programs; regenerate host qualification and whole-tuple provenance coherently."
       }
     ],
     "deterministic_red_control": "In a disposable qualification copy only, force the new event parser to require the historical census for minimum-work. The new root TestSourceMinimumWorkQualificationRejectsLegacyOnlyCorrectness must fail. Preserve that failed red-control evidence; restore the exact corrected committed source before three fresh passing runs. Never edit the approved patch, final sealed source or any build/test journal to create this control.",
-    "minimum_rebuild_before_actual_image_qualification": "Rebuild and independently qualify sim-latency, the single binary implementing manager/build broker/source qualifier. Existing4f executables cannot acquire this fix. Do not overwrite their immutable release. Create a new immutable control release and regenerate all affected native/wrapper/config hashes and the whole-tuple plan; coherent four-program provenance may require rebuilding the full bundle.",
-    "runtime_and_image_work_after_actual_product_selection": [
+    "minimum_rebuild_before_production_image_qualification": "Rebuild and independently qualify ALL FOUR programs: sim-latency, competitionworker, competitionprepare and competitionqualify from the corrected compatible clean normal-control source. Existing4f executables cannot acquire the suite correction and predate current8c archive/claim/recovery fixes. Never reinstall that old worker. Do not overwrite immutable releases. Regenerate coherent native/wrapper/config/provenance/whole-tuple pins, preserving both separately bound legacy and minimum-work baseline roles, and qualify the current recovery schema before any future activation. The technical-only test probe below is a separate non-production route, not permission to activate an old bundle.",
+    "pre_election_technical_instrument_image": {
+      "purpose": "Build and technically prequalify a NEW real G2 instrument image before epoch one ends, using only the frozen incumbent product and the unchanged approved overlay. This is independent of the later winner election; it declares neither no winner nor incumbent carry.",
+      "supported_route_audit": "The production source-build-broker and source-qualify-build require an authorized successor manifest/selected-product proof. The ordinary build-base.sh authenticates source-record membership and performs networked rebuilding. The older real-pipeline test constructs synthetic review records. None is a legitimate pre-election operational input. The new opt-in Go technical probe reuses only the authority-neutral clean-clone/sealer/offline-sandbox/containment primitives, without constructing any reviewedSourceBuildRequest or source activation.",
+      "probe_source": "connect/sim-latency/g2_instrument_base_integration_test.go",
+      "plan_and_admission_regressions": "connect/sim-latency/g2_instrument_base_plan_test.go",
+      "synthetic_plan_regression_roots": 8,
+      "plan_regression_command": "Included in the55-root three-fresh-process development command above via |G2InstrumentBasePlan. The separate opt-in TechnicalImageQualification root is deliberately excluded, so a skipped real probe cannot count as unit qualification.",
+      "plan_regression_fresh_processes": 3,
+      "new_plan_regressions_executed": false,
+      "input_template": "G2-INSTRUMENT-BASE-TECHNICAL-INPUT-2026-11-03.json",
+      "input_scope": "Exact approved incumbent10-repo graph from the retained frozen source root, one deterministic private approved server child, original source dependencies and base image. No source-generation/epoch/round mapping, selected-product election, review/carry metadata, operational source-build receipt, hidden seed, calibration or baseline is produced.",
+      "input_install": "Root independently reviews/seals the exact credential-free template as root0400 at /etc/urnetwork/competition-g2-instrument-base-6423-20261103-v1.json; creates only the new named root0700 state directory after durable natural-empty exclusion; hashes the actual sealed bytes. These targets are not created by this source-preparation checkpoint.",
+      "precompile_command_after_development_red_green": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o <new-private-artifact-directory>/g2-bridge.test ./connect/sim-latency",
+      "precompile_custody": "Before opt-in execution retain the actual test ELF SHA/build metadata, exact corrected clean control source manifest, sibling/module/toolchain manifests and sealed input hash. No cached test result or recompilation under an unrecorded source is accepted.",
+      "deferred_real_command": "SIM_LATENCY_G2_BRIDGE_REAL=1 SIM_LATENCY_G2_BRIDGE_AUTHORITY=ROOT_CONFIRMED_EMPTY_DURABLE_CLAIM_EXCLUSION SIM_LATENCY_G2_BRIDGE_SETTINGS=/etc/urnetwork/competition-g2-instrument-base-6423-20261103-v1.json SIM_LATENCY_G2_BRIDGE_SETTINGS_SHA256=<actual-sealed-input-hash> go tool test2json -t -p github.com/urnetwork/server/connect/sim-latency <new-private-artifact-directory>/g2-bridge.test -test.run '^TestG2InstrumentBaseTechnicalImageQualification$' -test.count=1 -test.timeout=3h10m -test.v=test2json",
+      "timeout_scope": "The default/max operation budget is enforced at3h before any approval/state/Docker side effect, and the original durable reservation or earlier parent remains authoritative. The explicit3h10m outer test timeout only allows bounded cancellation/cleanup; the default10m Go test timeout is not used. SIGINT/SIGTERM cancel the operation context and trigger owned cleanup; forced process death requires separate owner reconciliation before exclusion release.",
+      "executor_and_network": "Independent Sol6.1 LOW executes the single explicit probe after plan regressions pass. Run inside the Root-maintained exclusion and cancellation owner, with offline exact Go1.27.3/closed normal-control graph; management CPUs20,22/8GiB/noSwap. Fixed Docker guests use the existing bounded offline evaluation allocation. No main/provider/vault credential or host cache is mounted in a guest.",
+      "existing_base_alias_requirement": "Authenticate the exact existing digest-named local alias for approval.InstrumentBaseImageDigest. The probe refuses a missing/substituted alias and never overwrites it. Root may separately create an absent correct alias only after resolving the exact target; never replace an existing different alias.",
+      "actual_work": [
+        "Exclusively reserve the fixed approval/base technical operation and original three-hour deadline before cloning; existing completed or interrupted attempts block automatic rerun.",
+        "Clone all10 exact incumbent commits without ignored files, credentials, alternates or source-ref changes; authenticate the unchanged approved protected patch and create its deterministic child in the private clone only; seal the exact clean graph read-only.",
+        "Export bounded metadata from actual incumbent image98, run offline checks and compile a clean Linux/amd64 Go1.27.3 CGO0 instrument executable; inspect its real embedded build metadata and digest.",
+        "First observe a fixed unprivileged incumbent CLI proving the complete approval/base-owner namespace absent. Assemble a new COPY-only qualification image into that fresh /opt/urnetwork/instrument-qualification/<owner>/source path, never merge into inherited /workspace. Bind technical identity and image working directory to this exact path, and observe a fixed built-in source-graph CLI checking all10 clean heads and the source-lock file hash. Actual protected runner/entrypoint bytes/digests are retained; no candidate Dockerfile RUN, network or deployment command.",
+        "Run all48 mandatory source/instrument regressions plus prefix-selected supplemental resident-contract roots against the new image, with strict actual before-start/terminal/cleanup containment observations and retained complete Go events/log hashes.",
+        "Separately create/observe/run/clean fixed unprivileged offline identity and score-policy CLI probes; require the exact complete technical identity and minimum-work/1 scorer2 output. Every CLI's actual Name/image/id/owner/phase/command/containment must pass before start and again before immutable-id cleanup. Recheck the original private graph remains clean afterward."
+      ],
+      "production_admission": "Image kind is evaluator-instrument-qualification, production_eligible=false and runtime_qualified=false. Its identity omits the authorized epoch/source-generation/round/review tuple and clears inherited source epoch/config labels. Deterministic tests exercise the actual evaluator-minimum-work.sh production jq predicate: technical kind and missing tuple each reject, with a genuine-shaped synthetic positive control. Supplying the actual image digest cannot confer production admission.",
+      "source_digest_semantics": "source_lock_file_sha256 (and the ordinary image-file alias source_lock_sha256) hashes the pretty source-lock.json bytes, not the public model canonical source lock. canonical_child_source_lock_sha256 is separately computed with model.CompetitionSourceLockDigest for technical provenance only. Neither is a declaration that this child was selected for epoch two/public EPOCH-SOURCE.",
+      "retained_evidence": "One technical-prequalification.json plus actual image id/binary digest/private child, original reservation/deadline, effective settings digest, approval/both lock identities/image inspect/build logs,48-root events and containment/CLI observations. The record separately proves incumbent namespace absence and the fresh built-in source snapshot. This is technical bridge/containment evidence only; independent production-provider provenance, timed runtime qualification, next-epoch readiness and winner-product baseline transfer are explicitly unclaimed.",
+      "rollback_and_cleanup": "No production tuple/config/marker/source ref/DB state is changed, so there is no production rollback to perform. Only exact immutable container ids independently authenticated against this operation's full image/name/owner/phase are automatically removed, including lost-create recovery; residual/uncertain cleanup fails and must be reconciled, never retried. Keep the technical image, private source and evidence for review. Later authorized retention must authenticate qualification-only image-kind and com.urnetwork.instrument-qualification.owner, then remove only that exact technical image/private attempt; never delete the incumbent image, shared base alias, live mounts or unrelated source/state. Join all clients/owned containers before releasing the slot and reviewed claim-only maintenance exclusion.",
+      "failure_and_resume": "The fixed state directory plus approval/base-derived owner is one attempt. Completed, failed, interrupted or uncertain state is immutable and refuses another automatic build/test draw. Root must reconcile retained artifacts, actual Docker owners and original deadline; a new approved investigation/attempt must be explicit, not a changed output path or deleted journal.",
+      "actual_new_image_built_or_technical_probe_executed": false
+    },
+    "production_runtime_and_image_work_after_actual_product_selection": [
       "Wait for epoch-one close/drain, authoritative seal, old owners joined and genuine winner review or incumbent carry; never choose the original product early just to build an image.",
       "Apply the unchanged approved overlay to that actual selected graph using the existing deterministic-child path. Protected-preimage conflicts require new operator approval, never fallback or substitution.",
       "Run the new sealed broker and independently configured qualifier with the genuine immutable build request through their existing supervised workflow. No hand-authored receipt or credential on argv/stdout.",
