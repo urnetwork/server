@@ -988,18 +988,35 @@ type overlappingBalanceQuerier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
+// A credit for the expiry, from any balance of the purchase token that covers it.
+// A grace period's hold (HasPlayGraceHoldInTx) covers an expiry without having
+// credited it: the charge that recovers the subscription can land an expiry
+// inside the hold's window, and it is owed its credit.
 func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.Context, purchaseToken string, expiryTime time.Time) (balanceId server.Id, returnErr error) {
 	result, err := conn.Query(
 		ctx,
 		`
                 SELECT
                     balance_id
-                FROM transfer_balance
+                FROM transfer_balance balance
                 WHERE
-                    purchase_token = $1 AND
-                    $2 < end_time AND
-                    start_time <= $2
-                ORDER BY end_time DESC
+                    balance.purchase_token = $1 AND
+                    $2 < balance.end_time AND
+                    balance.start_time <= $2 AND
+                    NOT (
+                        balance.start_balance_byte_count = 0 AND
+                        EXISTS (
+                            SELECT 1
+                            FROM subscription_renewal renewal
+                            WHERE
+                                renewal.network_id = balance.network_id AND
+                                renewal.purchase_token = balance.purchase_token AND
+                                renewal.start_time = balance.start_time AND
+                                renewal.end_time = balance.end_time AND
+                                renewal.net_revenue_nano_cents = 0
+                        )
+                    )
+                ORDER BY balance.end_time DESC
                 LIMIT 1
             `,
 		purchaseToken,
@@ -1013,6 +1030,32 @@ func getOverlappingTransferBalance(conn overlappingBalanceQuerier, ctx context.C
 		}
 	})
 
+	return
+}
+
+// Whether the purchase already holds Pro for this exact window with a grace period's zero-byte marker
+// (controller playHoldGraceEntitlementInTx).
+func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken string, startTime time.Time, endTime time.Time) (held bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT 1
+		FROM transfer_balance
+		WHERE
+			purchase_token = $1 AND
+			start_time = $2 AND
+			end_time = $3 AND
+			pro AND
+			start_balance_byte_count = 0
+		LIMIT 1
+		`,
+		purchaseToken,
+		startTime,
+		endTime,
+	)
+	server.WithPgResult(result, err, func() {
+		held = result.Next()
+	})
 	return
 }
 
