@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"math/big"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 
+	"github.com/urfoundation/sn/demand/pricesheet"
 	"github.com/urfoundation/sn/protocol"
 	"github.com/urfoundation/sn/stabi"
 )
@@ -58,10 +60,12 @@ type subnetChainProbe struct {
 	cursor         *subnetFinalizedCursor
 	governanceLogs *subnetLogFrontier
 	latch          *subnetReplayLatch
+	// The last price sheet that verified, for the deposit cap rule.
+	sheet *subnetPriceSheetMemory
 }
 
 func newSubnetChainProbe() *subnetChainProbe {
-	return &subnetChainProbe{runtimes: newSubnetRuntimeCache(), cursor: &subnetFinalizedCursor{}, governanceLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch()}
+	return &subnetChainProbe{runtimes: newSubnetRuntimeCache(), cursor: &subnetFinalizedCursor{}, governanceLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch(), sheet: &subnetPriceSheetMemory{}}
 }
 
 func (*subnetChainProbe) id() string               { return "subnet/chain" }
@@ -131,7 +135,15 @@ func (self *subnetChainProbe) observe(ctx context.Context, run *subnetRun) ([]fi
 		return nil, err
 	}
 	findings = append(findings, governance...)
-	policy, err := observeSubnetPolicy(ctx, run, checkpoint, state)
+	// The signed entries the deposit cap rule judges. A file that cannot be taken
+	// leaves the last that verified in force, as it does for operators and validators;
+	// whether it can be read is the deposits family's to report. A deployment with no
+	// pinned signer reads nothing.
+	sheet, err := self.sheet.read(ctx, run)
+	if err != nil {
+		return nil, err
+	}
+	policy, err := observeSubnetPolicy(ctx, run, checkpoint, state, sheet.sheet)
 	if err != nil {
 		return nil, err
 	}
@@ -452,7 +464,7 @@ func (self *subnetChainProbe) observeGovernanceEvents(ctx context.Context, run *
 // arithmetic replayed per version, the current hash against sn.yml, future
 // versions against the reviewed schedule, the reviewed document against the
 // current snapshot, and the live native profile.
-func observeSubnetPolicy(ctx context.Context, run *subnetRun, checkpoint *subnetCheckpoint, state *subnetDeploymentState) ([]finding, error) {
+func observeSubnetPolicy(ctx context.Context, run *subnetRun, checkpoint *subnetCheckpoint, state *subnetDeploymentState, sheet *pricesheet.Sheet) ([]finding, error) {
 	deployment := run.settings.Deployment
 	pageReasons := []string{}
 	warnReasons := []string{}
@@ -493,7 +505,7 @@ func observeSubnetPolicy(ctx context.Context, run *subnetRun, checkpoint *subnet
 	findings := []finding{}
 	price := "unreviewed"
 	if document, ok := run.settings.policyDocumentBytes(); ok {
-		documentReasons, documentWarn, zeroPrice := subnetPolicyDocumentReasons(document, deployment, state.policies)
+		documentReasons, documentWarn, zeroPrice := subnetPolicyDocumentReasons(document, deployment, state.policies, state.currentEpoch, sheet)
 		pageReasons = append(pageReasons, documentReasons...)
 		warnReasons = append(warnReasons, documentWarn...)
 		price = "positive"
@@ -516,7 +528,7 @@ func observeSubnetPolicy(ctx context.Context, run *subnetRun, checkpoint *subnet
 				tier: tierPage, sustain: subnetProvedSustain,
 				invariant: "reviewed-policy-schedule", expected: "coordinator-rules-and-the-pinned-policy-document", observed: strings.Join(subnetSortedUnique(pageReasons), ","),
 				symptom:   "The live subnet policy schedule is not the reviewed one",
-				mechanism: "The current effective policy hash, a policy version's own validity or boundary arithmetic, or the reviewed document's windows and caps disagree with the coordinator at a finalized block. A wrong, retroactive or testnet-duration policy changes every deadline and cap that writers and readers derive in blocks.",
+				mechanism: "The current effective policy hash, a policy version's own validity or boundary arithmetic, the reviewed document's windows, or a version's deposit caps against the cap in force (the signed price sheet's, or the document's) disagree with the coordinator at a finalized block; policy-deposit-caps-from-epoch-N names the first epoch whose deposits validators will no longer accept. A wrong, retroactive or testnet-duration policy changes every deadline and cap that writers and readers derive in blocks.",
 				baseline:  "The current policy hash equals sn.yml's; every version passes the coordinator's validation; each version starts exactly at its predecessor's epoch boundary; the reviewed document reproduces the current snapshot.",
 				action:    "Preserve the effective epoch and every affected reader and writer version, and route to governance review. Never inherit a testnet duration on mainnet or relabel a policy hash to match.",
 				verify:    "A fresh agreed checkpoint shows the reviewed current policy and a continuous, valid version schedule.",
@@ -570,11 +582,12 @@ func subnetCoordinatorPolicyValid(policy stabi.STCoordinatorPolicySnapshot) bool
 
 // The reviewed document must hash to the pinned policy, and every coordinator
 // version under that hash must reproduce the document's windows, claim
-// expiry, binding validity and caps by the validator's own cadence rule: the
-// settlement windows, or the production cadence from its first epoch. A zero
-// price with its explicit equal-demand action is the owner's reviewed launch
-// state, not a violation.
-func subnetPolicyDocumentReasons(document []byte, deployment SubnetDeploymentIdentity, versions []stabi.STCoordinatorPolicySnapshot) ([]string, []string, bool) {
+// expiry and binding validity by the validator's own cadence rule: the
+// settlement windows, or the production cadence from its first epoch. Its
+// deposit caps follow the validators' cap rule instead (subnetDepositCapsStop),
+// which lets the owner raise them for a price. A zero price with its explicit
+// equal-demand action is the owner's reviewed launch state, not a violation.
+func subnetPolicyDocumentReasons(document []byte, deployment SubnetDeploymentIdentity, versions []stabi.STCoordinatorPolicySnapshot, currentEpoch uint64, sheet *pricesheet.Sheet) ([]string, []string, bool) {
 	policy, err := protocol.ParsePolicy(document)
 	if err != nil {
 		return nil, []string{"policy-document-invalid"}, false
@@ -601,11 +614,55 @@ func subnetPolicyDocumentReasons(document []byte, deployment SubnetDeploymentIde
 		if version.MaximumBindingValidityEpochs != policy.Binding.MaximumValidityEpochs {
 			reasons = append(reasons, "policy-binding-validity")
 		}
-		if version.EpochDepositCapRao == nil || version.CampaignDepositCapRao == nil || !version.EpochDepositCapRao.IsUint64() || version.EpochDepositCapRao.Uint64() != policy.Deposit.EpochCapRaoPerOperator || !version.CampaignDepositCapRao.IsUint64() || version.CampaignDepositCapRao.Uint64() != policy.Deposit.TotalTestCampaignCapRao {
-			reasons = append(reasons, "policy-deposit-caps")
-		}
+	}
+	if epoch, broken := subnetDepositCapsStop(policy, deployment.PolicyHash, versions, currentEpoch, sheet); broken {
+		reasons = append(reasons, fmt.Sprintf("policy-deposit-caps-from-epoch-%d", epoch))
 	}
 	return reasons, nil, policy.IsZeroPrice()
+}
+
+// The validators' deposit cap rule, judged for each version under the pinned hash in
+// every epoch it is in force, from the current epoch on: its epoch cap is at least
+// the cap in force, which is the signed entry's or, with none, the document's; and
+// its campaign cap is at least the larger of the document's campaign cap and its
+// own epoch cap. Either changes only where a version or an entry takes effect, so
+// those epochs are the ones judged. It returns the first epoch that breaks the rule,
+// which is where validators stop accepting deposits. An entry is judged against the
+// version in force at its own epoch, so a raise scheduled for that epoch covers it.
+func subnetDepositCapsStop(policy *protocol.Policy, pinnedHash string, versions []stabi.STCoordinatorPolicySnapshot, currentEpoch uint64, sheet *pricesheet.Sheet) (uint64, bool) {
+	epochs := []uint64{currentEpoch}
+	for _, version := range versions {
+		if currentEpoch < version.EffectiveEpoch {
+			epochs = append(epochs, version.EffectiveEpoch)
+		}
+	}
+	if sheet != nil {
+		for i := range sheet.Entries {
+			if currentEpoch < sheet.Entries[i].EffectiveEpoch {
+				epochs = append(epochs, sheet.Entries[i].EffectiveEpoch)
+			}
+		}
+	}
+	slices.Sort(epochs)
+	documentCampaign := new(big.Int).SetUint64(policy.Deposit.TotalTestCampaignCapRao)
+	for _, epoch := range slices.Compact(epochs) {
+		version, ok := subnetPolicyAtEpoch(versions, epoch)
+		if !ok || subnetHex32(version.PolicyHash) != pinnedHash {
+			continue
+		}
+		if version.EpochDepositCapRao == nil || version.CampaignDepositCapRao == nil {
+			return epoch, true
+		}
+		inForce := new(big.Int).SetUint64(pricesheet.Effective(sheet, epoch, policy.Deposit).EpochCapRaoPerOperator)
+		campaign := documentCampaign
+		if version.EpochDepositCapRao.Cmp(campaign) > 0 {
+			campaign = version.EpochDepositCapRao
+		}
+		if version.EpochDepositCapRao.Cmp(inForce) < 0 || version.CampaignDepositCapRao.Cmp(campaign) < 0 {
+			return epoch, true
+		}
+	}
+	return 0, false
 }
 
 // The live native hyperparameters against the reviewed profile. Disabling a
