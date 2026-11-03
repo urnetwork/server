@@ -549,13 +549,23 @@ func stripeSubscriptionBlocksNewPurchase(sub *stripe.Subscription) bool {
 }
 
 // stripeNetworkHasActiveSubscription checks the network's recorded subscription
-// renewals (any store) and, when it has a Stripe customer, the customer's live
-// Stripe subscriptions, which cover a payment made before its webhook landed.
-// A Stripe listing error does not block the purchase. stripe.Key must be set.
+// renewals (any store), the subscription behind its last Stripe window, and, when
+// it has a Stripe customer, the customer's live Stripe subscriptions, which cover
+// a payment made before its webhook landed. A Stripe error does not block the
+// purchase. stripe.Key must be set.
+//
+// The last window is for a renewal Stripe is still retrying after that window
+// ended. A network that bought through web checkout has no stripe_customer row,
+// so no customer leads to that subscription, and the payment sheet makes a new
+// empty customer for it: without this, a failing renewal could end up billed
+// beside a new subscription.
 func stripeNetworkHasActiveSubscription(clientSession *session.ClientSession, customerId string) bool {
 	networkId := clientSession.ByJwt.NetworkId
 	markets := model.GetActiveSubscriptionRenewalMarkets(clientSession.Ctx, networkId, model.SubscriptionTypeSupporter)
 	if subscriptionMarketsBlockNewPurchase(markets) {
+		return true
+	}
+	if stripeLastWindowSubscriptionBilling(clientSession.Ctx, networkId) {
 		return true
 	}
 	if customerId == "" {
@@ -574,6 +584,24 @@ func stripeNetworkHasActiveSubscription(clientSession *session.ClientSession, cu
 		glog.Infof("[stripe]could not list subscriptions for customer %s: %s\n", customerId, err)
 	}
 	return false
+}
+
+// Whether Stripe still bills the subscription behind the network's last Stripe
+// window, within the store lookup budget. False when it never had one, or when
+// Stripe can't say.
+func stripeLastWindowSubscriptionBilling(ctx context.Context, networkId server.Id) bool {
+	renewal := model.GetLastSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter, model.SubscriptionMarketStripe)
+	if renewal == nil || renewal.TransactionId == "" {
+		return false
+	}
+	lookupCtx, cancel := context.WithTimeout(ctx, subscriptionStoreLookupTimeout)
+	defer cancel()
+	sub, err := stripeSubscriptionFromInvoice(lookupCtx, renewal.TransactionId)
+	if err != nil {
+		glog.Infof("[stripe]could not read the last window's subscription for network %s: %s\n", networkId, err)
+		return false
+	}
+	return stripeSubscriptionBilling(sub.Status)
 }
 
 func stripeCancelPendingPaymentSheetSubscriptions(customerId string, networkId server.Id) {

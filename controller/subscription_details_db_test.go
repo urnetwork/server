@@ -532,3 +532,89 @@ func TestSubscriptionDetailsDbLeavesAnEndedStripeSubscriptionUnlisted(t *testing
 		}
 	})
 }
+
+// A network that bought through web checkout has no Stripe customer on file. With
+// its renewal failing past its last window, nothing but that window leads to the
+// subscription Stripe is still retrying, and a new purchase would bill beside it.
+func TestStripePurchaseGuardSeesARetriedRenewalWithNoCustomer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		cases := []struct {
+			status string
+			blocks bool
+		}{
+			{status: "past_due", blocks: true},
+			{status: "active", blocks: true},
+			{status: "canceled", blocks: false},
+			{status: "unpaid", blocks: false},
+		}
+		env := newStripeSubscriptionTestEnv(t)
+		for _, c := range cases {
+			networkId := server.NewId()
+			userId := server.NewId()
+			clientId := server.NewId()
+			model.Testing_CreateNetwork(ctx, networkId, "guardretry"+c.status, userId)
+			clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+				NetworkId: networkId,
+				ClientId:  &clientId,
+				UserId:    userId,
+			})
+			subscriptionId := "sub_guardretry_" + c.status
+			invoiceId := "in_guardretry_" + c.status
+			env.addSubscription("cus_guardretry_"+c.status, subscriptionId, c.status, false, now.Add(360*24*time.Hour).Truncate(time.Second), "year")
+			env.invoiceSubscription[invoiceId] = subscriptionId
+			if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+				NetworkId:          networkId,
+				SubscriptionType:   model.SubscriptionTypeSupporter,
+				StartTime:          now.Add(-370 * 24 * time.Hour),
+				EndTime:            now.Add(-5 * 24 * time.Hour),
+				NetRevenue:         model.UsdToNanoCents(40),
+				SubscriptionMarket: model.SubscriptionMarketStripe,
+				TransactionId:      invoiceId,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if blocks := stripeNetworkHasActiveSubscription(clientSession, ""); blocks != c.blocks {
+				t.Errorf("last window's subscription %s: blocks = %t, want %t", c.status, blocks, c.blocks)
+			}
+		}
+	})
+}
+
+// Stripe not answering does not block a purchase, and a network that never had a
+// Stripe window asks Stripe nothing.
+func TestStripePurchaseGuardWithNoLastWindowOrNoAnswer(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		now := server.NowUtc()
+		newStripeSubscriptionTestEnv(t)
+		networkId := server.NewId()
+		userId := server.NewId()
+		clientId := server.NewId()
+		model.Testing_CreateNetwork(ctx, networkId, "guardretrynone", userId)
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+			NetworkId: networkId,
+			ClientId:  &clientId,
+			UserId:    userId,
+		})
+		if stripeNetworkHasActiveSubscription(clientSession, "") {
+			t.Error("a network with no Stripe window was refused")
+		}
+		if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
+			NetworkId:          networkId,
+			SubscriptionType:   model.SubscriptionTypeSupporter,
+			StartTime:          now.Add(-370 * 24 * time.Hour),
+			EndTime:            now.Add(-5 * 24 * time.Hour),
+			NetRevenue:         model.UsdToNanoCents(40),
+			SubscriptionMarket: model.SubscriptionMarketStripe,
+			TransactionId:      "in_guardretrynone",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// the fake knows no such invoice
+		if stripeNetworkHasActiveSubscription(clientSession, "") {
+			t.Error("a Stripe error blocked the purchase")
+		}
+	})
+}
