@@ -1530,6 +1530,14 @@ Run the narrow test first, then the package and race suite. Apply the pinned
 engine-source preflight above before either full monitor suite here as well;
 retain the exported variable in the actual child environment.
 
+A qualified extracted helper body does not qualify a new caller. Preserve
+its bootstrap and referenced globals, including receipt hashers and output
+context. When adapting that caller, audit the consumed helpers' global
+bindings and exercise the actual first PRE/POST receipt and save-return
+boundary before command dispatch. A partial receipt from a failed save is
+not a completed preflight. Preserve it and qualify the repair in a fresh,
+separately admitted namespace.
+
 Before launch, inventory the selected tests' complete runtime filesystem
 dependencies as well as Go source and module inputs. Include files opened by
 helpers, documentation assertions, embedded or generated fixture inputs and
