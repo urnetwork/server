@@ -1,0 +1,190 @@
+{
+  "schema": 1,
+  "kind": "inactive-next-epoch-g2-source-and-qualification-handoff",
+  "status": "source_correction_staged_not_tested_built_installed_or_activated",
+  "observed_at": "2026-11-03T19:24:01Z",
+  "control_source_base": "23d4a3baba84dffb68b2db05007b3cf218794ce5",
+  "normal_control_source_lock": {
+    "path": "local/source-graph/lock.yml",
+    "sha256": "2cbe6c696cda8b7f3f6ba0bdfa782f62bb7ccad394676238256260197dc98656",
+    "not_the_frozen_competition_product_graph": true,
+    "sibling_commits": {
+      "connect": "4478668f5ec50f58ee97da8b4c60e54296103e42",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "sdk": "215caab72eefd03a08bdf86a4760cf95defd9901",
+      "proxy": "584eac38243a9842200eb3b8577d62667c850c19",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "userwireguard": "70ecd6e7f97715718f1079cc9be9fd42a8ebe82c",
+      "warp": "a3bb2fb5af5c452978b1db80dfb1eb0cf67771b3",
+      "sn": "dece58e2aee2795c54a79a5e893ebaa01885a5bb",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+    }
+  },
+  "approved_future_instrument": {
+    "from_epoch": 2,
+    "g2_volume_policy": "minimum-work/1",
+    "scorer_version": "sim-latency-score/2",
+    "request_count_and_received_bytes_median_floor_inclusive": 0.95,
+    "upper_bounds": false,
+    "approval_file": "G2-INSTRUMENT-OPERATOR-APPROVAL-2026-10-31.json",
+    "approval_file_sha256": "d7520563915e7e774f0e2c7e4b275f95e027bd01f95e06816a98ad287b8f9258",
+    "approval_sha256": "f7c1d4c4e825347c70e9c0c5068cec8bef264ede5dad59adf1b8360c9ac0cf50",
+    "approved_patch_sha256": "6423d41b5f252ef0304adf6c513653fb5a7e37a55733e1bf56b9d59d4cda7819",
+    "patch_or_protected_path_scope_changed": false,
+    "actual_future_product_or_winner_selected": false,
+    "instrument_child_commit": null,
+    "final_evaluator_image_digest": null,
+    "actual_image_or_runtime_qualification_claimed": false
+  },
+  "source_correction": {
+    "cause": "The trusted image qualifier selected only the historical mandatory33-root suite for minimum-work source generations, so successful historical testing did not prove any approved G2 regression ran.",
+    "scope": "Normal-control sim-latency manager, broker and independent source qualifier; not the approved frozen instrument overlay or its product source.",
+    "legacy_mandatory_roots": 33,
+    "legacy_suite_digest_unchanged": "db073c8785827c77de1f9be4c39d864ed0959e47ed10bc291c955f0fe80f82e5",
+    "minimum_work_additional_mandatory_roots": 15,
+    "minimum_work_total_mandatory_roots": 48,
+    "minimum_work_suite_protocol": "reviewed-source-minimum-work-correctness-v1",
+    "additional_roots_exact_approved_patch_membership": "Seven score roots, seven lineage roots and one model codec root were read directly from the unchanged approved patch. A file-only regression authenticates their exact package/name membership against that approval.",
+    "supplemental_resident_contract_execution_preserved": "The single ./connect invocation retains the historical ^TestResidentContract prefix. Additional selected product roots supplement the named mandatory census.",
+    "policy_inheritance": "Explicit adoption and later minimum-work generations select the extended suite from their authenticated generation policy, not from proof presence alone.",
+    "shared_identity_boundaries": [
+      "prescribed sandbox command",
+      "required Go test-event census",
+      "independent model plan",
+      "durable execution reservation and replay",
+      "execution suite digest",
+      "actual observed-container command and retained containment"
+    ],
+    "new_deterministic_regression_roots": 8,
+    "new_or_related_tests_executed": false,
+    "formatting": "Actual installed Go1.27.3 gofmt only; git diff --check passed. Neither is runtime qualification.",
+    "old_minimum_work_attempt_rule": "Any pre-existing old-suite reservation remains immutable and blocks a changed plan. Never delete, relabel or reset it to rerun qualification. Reconcile its actual owner and evidence."
+  },
+  "installed_inactive_material_audit": {
+    "claim": "Read-only path-to-SHA association and exact approval equality audit, not execution or readiness.",
+    "profile_directory": "/etc/urnetwork/competition-production-r2-future2-4f46bb0d87f0-20261031-v1",
+    "wrapper_directory": "/usr/local/libexec/urnetwork/competition-epoch2-host-control-4f46bb0d87f0-20261031-v1",
+    "producer_directory": "/usr/local/libexec/urnetwork/competition-epoch2-minimum-work-4f46bb0d87f0-20261031-v1/container",
+    "profile_sha256": {
+      "future-policy.fragment.json": "a0a4cd7a144e38f9fcbb745f6532f517b385126bfe174302a4f34e838f698de9",
+      "round-baseline-preparation.minimum-work.json": "6811b3d40d706073914e41f1ade82372849654f372093b8684390e025aef79cd",
+      "preparation.json": "d04066a5e188bdb3d3abbb3b4e7a8ffff62865a4b63a49eedebd1c433b567450",
+      "qualification.json": "a7037c3d144a7171f11810942d0b852258eb22edab4d60b7c703254faa8feeff",
+      "source-build.json": "c1b6979741621e537839848a786dee2e538ff24c485b001dc256261b3b973fba",
+      "source-qualification.json": "adbe4b2132259d9d014e2c3382e200d837a8e952438c5ef0247cb9f235b154f7",
+      "supervisor-plan.json": "8772fd8dd903decea51009a049b9e38aed4b9b25c8948ea6fd9a71190121823c",
+      "native-control-binding.json": "3391d76f915d20be18175ba232892941db6feeef53b3514cfcc6d98871f416a1"
+    },
+    "wrapper_sha256": {
+      "competitionworker-fixed-profile": "d5db732f76e7611654e9a10fe94b9beb950a3d50228ad23ad9f4874bd5934d56",
+      "competitionprepare-fixed-profile": "b7e137bb46c17ec13dad42e3b9a6c7a291be7682f797a26ed7400f218899a8b6",
+      "competitionqualify-fixed-profile": "2af51a38d4d0ef3c6f780591bb5af8d52e67d1728c72b47545f5ee5ab965eec1",
+      "source-build": "9ceb029f1fbdd354c1cdb71b9de1b25a9b0405861430482bf736d7016b2c716c",
+      "source-qualify": "a2431b341cd7bd05c80700423c8c6d5fa0fc2ba2f75f474baf651f258a6c5091"
+    },
+    "association_result": "All five wrappers name the correct actual native ELF/config bytes. The worker FUTURE pin6811 names the minimum-work baseline profile; preparer CONFIG pin d040 names the separate fenced preparation config. Earlier summary terminology differed; the installed association is not broken and no immutable file was regenerated.",
+    "cross_links_verified": [
+      "preparation.json -> worker d5db732f and qualifier2af51a38",
+      "qualification.json -> same worker d5db732f",
+      "source-build.json -> source-qualify wrapper a2431b34",
+      "future fragment -> exact repository approval and checker c6db6d3b",
+      "source-qualification.json -> checker c6db6d3b and provider settings cb9218b1",
+      "qualification.json -> promoter89d6e660 and resource-bomb report f59fb790",
+      "native binding -> manifest1fe601ff and binding receipt9f0a5ea3"
+    ],
+    "minimum_work_producer_and_dependency_hash_checks": 17,
+    "minimum_work_producer_and_dependency_hash_check_exit": 0,
+    "legacy_baseline_profile_sha256_unchanged": "7f654b9e3b1a4af1398cf2d5bad80a5748b5a4824ac997e101ad508362c9459b",
+    "installed_fragment_matches_exact_approved_typed_json": true,
+    "operational_wrappers_executed": false,
+    "installed_files_rewritten": false,
+    "old_archive_or_oci_runtime_requalified": false,
+    "old_control_bundle_includes_new_suite_fix": false
+  },
+  "source_capability_vs_deployment": {
+    "source_support": [
+      "controller/competition_g2_policy.go projects epoch-two settings prospectively and preserves current frozen rounds",
+      "controller/competition_trusted_instrument.go authenticates independent operator approval, actual selected product and schema-two build receipt",
+      "cli/competitionworker/main.go loads separate legacy and future pinned baseline profiles",
+      "controller/competition_round_baseline_preparation.go admits the future role without replacing the current startup profile",
+      "connect/sim-latency/source_trusted_instrument.go selects the actual product first, then creates/builds its exact deterministic approved child"
+    ],
+    "actual_current_serving_api_image_digest": null,
+    "actual_current_serving_api_source_compatibility_proved": false,
+    "historical_worker_request_is_current_deployment_proof": false,
+    "future_exact_intent_api_worker_acknowledgments_complete": false,
+    "inactive_source_qualifier_provider_profile": "Existing dedicated two-member Snow profile, without historical-provider fallback. This preparation does not change that operator policy or substitute it for independent Sol6.1 LOW development testing."
+  },
+  "deferred_qualification": {
+    "run_now": false,
+    "exclusion_requirement": "Root-confirmed authoritative empty queue/poll or separately approved maintenance exclusion. Do not start in a short apparent gap, hold/restart the live worker, interrupt an active evaluation or write main DB state.",
+    "executor": "Independent gpt-6.1-sol with low reasoning, not the implementation agent",
+    "toolchain": {
+      "bin_directory": "/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin",
+      "go_sha256": "5f5eb6d0b2fb6aa0bb5d5f8c5f1c944e0de955c925f0111af92a9d8f79680b5b",
+      "gofmt_sha256": "fd464d1c9098a6714d06bd3fcd2a1fedcdd291e710241160ebb663bf99adf2f8",
+      "race_cc": "/usr/bin/x86_64-linux-gnu-gcc-13",
+      "race_cc_sha256": "1b99826121ae6682a634e5efe09bd3e3df58ce58e0b28f849114ab5b89139c26",
+      "version_observed_read_only": "go version go1.27.3 linux/amd64",
+      "bootstrap_usr_local_go_is_not_this_toolchain": true,
+      "download_permitted": false
+    },
+    "closed_graph_requirement": "Freeze the corrected normal-control server commit plus all nine exact sibling commits from its lock in independent clean checkouts. The implementation worktree alone lacks those sibling checkouts and is not a runnable or qualified graph. Bind source, modules and actual toolchain read-only; retain before/after manifests.",
+    "management_limits": {
+      "cpu_set": "20,22",
+      "gomaxprocs": 2,
+      "go_parallelism": 2,
+      "memory_max_bytes": 8589934592,
+      "swap_max_bytes": 0,
+      "network": "private namespace, no online dependency fallback",
+      "main_or_provider_credentials": "not mounted or required for the deterministic mocked-provider regressions"
+    },
+    "environment": {
+      "PATH": "/home/by/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.27.3.linux-amd64/bin:/usr/bin:/bin",
+      "GOTOOLCHAIN": "local",
+      "GOPROXY": "off",
+      "GOSUMDB": "off",
+      "GOWORK": "off",
+      "GOFLAGS": "-mod=readonly -p=2",
+      "GOMAXPROCS": "2",
+      "CC": "/usr/bin/x86_64-linux-gnu-gcc-13",
+      "GOCACHE": "fresh private per-qualification cache, never a live scoring cache"
+    },
+    "commands_after_exclusion_and_closed_graph_only": [
+      {
+        "working_directory": "sealed-normal-control-graph/server",
+        "command": "CGO_ENABLED=1 go test -json -race -count=1 -run '^Test(SourceMinimumWork|SourceCorrectness|SourceBuildQualifier|SourceTestJournal|SourceTestModel|SourceTestSnow)' ./connect/sim-latency",
+        "selected_top_level_roots_static_count": 47,
+        "fresh_process_repetitions": 3,
+        "mandatory_top_level_passes_if_all_three_complete": 141,
+        "actual_passes_claimed": 0,
+        "race_requires": "Pinned available C compiler and CGO_ENABLED=1 for this test-only phase; final runtime CLI remains CGO_ENABLED=0."
+      },
+      {
+        "working_directory": "sealed-normal-control-graph/server",
+        "command": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o <new-private-artifact-directory>/sim-latency ./connect/sim-latency",
+        "verify": "Exact Go1.27.3, Linux/amd64, disabled cgo, corrected clean vcs.revision and vcs.modified=false; retain actual ELF hash and source graph. This builds control, not the selected-product evaluator image."
+      }
+    ],
+    "deterministic_red_control": "In a disposable qualification copy only, force the new event parser to require the historical census for minimum-work. The new root TestSourceMinimumWorkQualificationRejectsLegacyOnlyCorrectness must fail. Preserve that failed red-control evidence; restore the exact corrected committed source before three fresh passing runs. Never edit the approved patch, final sealed source or any build/test journal to create this control.",
+    "minimum_rebuild_before_actual_image_qualification": "Rebuild and independently qualify sim-latency, the single binary implementing manager/build broker/source qualifier. Existing4f executables cannot acquire this fix. Do not overwrite their immutable release. Create a new immutable control release and regenerate all affected native/wrapper/config hashes and the whole-tuple plan; coherent four-program provenance may require rebuilding the full bundle.",
+    "runtime_and_image_work_after_actual_product_selection": [
+      "Wait for epoch-one close/drain, authoritative seal, old owners joined and genuine winner review or incumbent carry; never choose the original product early just to build an image.",
+      "Apply the unchanged approved overlay to that actual selected graph using the existing deterministic-child path. Protected-preimage conflicts require new operator approval, never fallback or substitution.",
+      "Run the new sealed broker and independently configured qualifier with the genuine immutable build request through their existing supervised workflow. No hand-authored receipt or credential on argv/stdout.",
+      "Observe all48 mandatory roots plus prefix-selected supplemental roots in the exact approved child, actual Docker containment and prospective host profile. Preserve one-attempt reservations and original three-hour qualification budgets.",
+      "Obtain the actual image id, simulator/scorer digest and host qualification; install the genuinely intended runtime using existing fences, real API/worker readiness acknowledgments and full runtime probe.",
+      "Measure a new source-bound future R9 baseline. Epoch-one score, source, baseline, R9, significance and three-hour candidate budget remain unchanged."
+    ]
+  },
+  "unchanged_boundaries": {
+    "epoch_one_rejudged": false,
+    "epoch_one_source_refs_policy_baseline_or_budgets_changed": false,
+    "live_service_worker_or_supervisor_repointed_restarted_or_held": false,
+    "main_db_or_live_config_writes": false,
+    "future_epoch_activated": false,
+    "pending_four_recovery_grants_executed": false,
+    "pending_recovery_dossiers_modified": false,
+    "any_build_test_calibration_scoring_or_live_model_call_executed_by_preparation_agent": false
+  }
+}

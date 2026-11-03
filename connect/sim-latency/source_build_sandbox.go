@@ -48,6 +48,7 @@ func defaultSourceBuildSandboxSettings() sourceBuildSandboxSettings {
 type sourceBuildSandboxInput struct {
 	Owner             string
 	Phase             string
+	MinimumWork       bool
 	ImageId           string
 	Commit            string
 	SourceDirectory   string
@@ -111,7 +112,7 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 	} else if input.Phase == "check" {
 		script += "go vet ./connect/...; go test -run '^$' ./connect/..."
 	} else if input.Phase == "correctness" {
-		script += sourceCorrectnessSuiteScript()
+		script += sourceCorrectnessSuiteScriptForMinimumWork(input.MinimumWork)
 	} else {
 		args = append(args, "--tmpfs=/output:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.Itoa(settings.BinaryBytes))
 		script += "go build -trimpath -o /output/sim-latency ./connect/sim-latency; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.revision=//p')\" = \"$SOURCE_BUILD_COMMIT\"; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.modified=//p')\" = false; cat /output/sim-latency"
