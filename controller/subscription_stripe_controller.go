@@ -187,10 +187,10 @@ type StripeEventChargeObject struct {
 	Refunds *StripeEventChargeRefundList `json:"refunds"`
 }
 
-// keepsPaidAmount reports whether the charge still holds part of its money with
-// this refund of refundAmount counted, so what it bought stays paid for. A
-// charge read back before it shows the refund has the refund itself to go on,
-// and one that does not state its amount counts as given back.
+// Whether the charge still holds part of its money with this refund of
+// refundAmount counted, so what it bought stays paid for. A charge read back
+// before it shows the refund has the refund itself to go on, and one that does
+// not state its amount counts as given back.
 func (self *StripeEventChargeObject) keepsPaidAmount(refundAmount int) bool {
 	return max(self.AmountRefunded, refundAmount) < self.Amount
 }
