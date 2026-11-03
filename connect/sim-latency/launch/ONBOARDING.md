@@ -4,7 +4,7 @@ Current production pointers, verified 2026-11-02:
 
 - [Submission format](../evaluator/PATCH-SURFACE.md): all ten locked repositories
   in mono-root coordinates, except the protected instrument.
-- [Exact epoch-1 source](../EPOCH-1-SOURCE.md): commits and canonical digest.
+- [Epoch source index](../EPOCH-SOURCE.md): branches, exact commits, and canonical digests.
 - The selected winner-review policy is `elected_winner_snow_union_v2`, not the
   older model policy in the historical preparation record below.
 - Intake and provisional grading are active. An owning submitter can retrieve
