@@ -74,8 +74,7 @@ func RegisterAndSignInTx(ctx context.Context, tx server.PgTx, credential *ByJwt,
 		if err != nil {
 			return "", err
 		}
-		// in UTC, as next_review_time holds it: pgx writes a time's wall clock
-		// and drops its zone
+		// in UTC, as next_review_time holds it
 		if err = QueueSessionIndexInTx(ctx, tx, credential.NetworkId, time.UnixMilli(registered.AcceptUntil).UTC()); err != nil {
 			return "", err
 		}
