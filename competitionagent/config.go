@@ -40,6 +40,7 @@ type Config struct {
 	WorkerUser                 string           `json:"worker_user"`
 	Evaluator                  Pin              `json:"evaluator"`
 	SelfCheck                  Pin              `json:"self_check"`
+	HostCheckConfiguration     Pin              `json:"host_check_configuration"`
 	Agent                      Pin              `json:"agent"`
 	Docker                     Pin              `json:"docker"`
 	DockerSocketPath           string           `json:"docker_socket_path"`
@@ -189,6 +190,11 @@ func (self *Config) validate(protected bool) error {
 	for _, pin := range []Pin{self.Evaluator, self.SelfCheck, self.Agent, self.Docker, self.SubmissionBuilderIdentity, self.SubevaluationOwnership, self.JsonFormatter} {
 		if err := validatePin(pin, protected); err != nil {
 			return err
+		}
+	}
+	if protected {
+		if err := validateFilePin(self.HostCheckConfiguration, DefaultAgentSettings().ConfigBytes, true); err != nil {
+			return errors.New("private host check requires its own protected configuration pin")
 		}
 	}
 	if err := self.DockerRole.validate(self, protected); err != nil {

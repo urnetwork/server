@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Verify an internal bridge cannot expose a host gateway, before untrusted code.
 set -Eeuo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/subevaluation-ownership.sh"
+subevaluation_ownership_init
 
 check_inspect() {
     jq -e 'length == 1 and .[0].Driver == "bridge" and .[0].Scope == "local" and
@@ -24,7 +26,7 @@ case "$1" in
     --check-link) check_link; exit ;;
     -*) exit 2 ;;
 esac
-network_json="$(sudo -n docker network inspect "$1")"
+network_json="$(evaluation_docker network inspect "$1")"
 if ! check_inspect <<<"$network_json"; then
     jq -n --argjson network "$network_json" \
         '{schema:1, network:$network[0], isolated_gateway:false, failure:"network_inspection"}'

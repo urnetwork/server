@@ -9,62 +9,103 @@ import (
 	"errors"
 	"io"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 )
 
 // This bounded pre-launch read verifies the actual fixed daemon hierarchy and
 // changes no host state. Cleanup remains usable if that daemon later degrades.
-func (self *Agent) verifyCleanupRuntime(parent context.Context) error {
+func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourceBoundary, error) {
 	if !self.protected {
-		return nil
+		return nil, nil
 	}
 	if self.config.SubmissionBuilderIdentity.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), "submission-builder-identity.sh") {
-		return errors.New("cleanup builder helper is not the evaluator's own protected release")
+		return nil, errors.New("cleanup builder helper is not the evaluator's own protected release")
 	}
 	if self.config.SubevaluationOwnership.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), "subevaluation-ownership.sh") {
-		return errors.New("cleanup ownership helper is not the evaluator's pinned prospective release")
+		return nil, errors.New("cleanup ownership helper is not the evaluator's pinned prospective release")
 	}
-	for name, pin := range map[string]Pin{"jq": self.config.JsonFormatter, "docker": self.config.Docker} {
-		path, err := controlProgramPath(name)
-		if err != nil || path != pin.Path {
-			return errors.New("cleanup tool pin differs from the evaluator's fixed runtime search path")
+	for _, component := range []struct {
+		pin  Pin
+		name string
+	}{{pin: self.config.DockerRole.Dockerfile, name: "Dockerfile.submission"},
+		{pin: self.config.DockerRole.PostgresInitialization, name: "postgres-init.sh"}, {pin: self.config.DockerRole.ResourcePolicy, name: "resource-boundary.sh"}} {
+		if component.pin.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), component.name) {
+			return nil, errors.New("private Docker role differs from its own protected evaluator release")
 		}
 	}
-	endpoint, err := filepath.EvalSymlinks("/var/run/docker.sock")
-	if err != nil || endpoint != self.config.DockerSocketPath {
-		return errors.New("default evaluator Docker socket differs from the cleanup endpoint")
+	path, err := controlProgramPath("jq")
+	if err != nil || path != self.config.JsonFormatter.Path {
+		return nil, errors.New("cleanup JSON formatter differs from the fixed worker search path")
 	}
-	root, err := user.LookupId("0")
-	if err != nil || !filepath.IsAbs(root.HomeDir) || filepath.Clean(root.HomeDir) != root.HomeDir || root.HomeDir == "/" {
-		return errors.New("cannot establish the sudo target's fixed Docker configuration home")
+	if self.credential == nil || self.credential.Uid == 0 {
+		return nil, errors.New("private runtime admission requires the actual trusted non-root worker identity")
 	}
-	configPath := filepath.Join(root.HomeDir, ".docker", "config.json")
-	if _, err := os.Lstat(configPath); err == nil {
-		if err := protectedRootPath(configPath, false, false); err != nil {
-			return err
-		}
-		content, err := readBounded(configPath, self.settings.ConfigBytes)
-		if err != nil {
-			return err
-		}
-		defer clear(content)
-		if err := validateDefaultDockerContext(content); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return errors.New("cannot inspect the evaluator's default Docker configuration")
+	operatorUid, err := trustedOperatorUid(self.config.TrustedOperatorUser)
+	if err != nil {
+		return nil, err
 	}
-	cleaner, ok := self.cleaner.(*hostCleaner)
-	if !ok {
-		return errors.New("protected agent has no concrete fixed-daemon runtime verifier")
+	boundary, err := VerifyRuntimeResourceBoundary(parent, self.config.DockerRole.ResourceBoundary, RuntimeResourceScope{BaseDirectory: self.config.BaseDirectory,
+		StateDirectory: self.config.StateDirectory, WorkDirectory: self.config.WorkDirectory, ScratchDirectory: self.config.DockerRole.ScratchDirectory,
+		TrustedOperatorUid: operatorUid, WorkerUid: self.credential.Uid, WorkerGid: self.credential.Gid}, DefaultRuntimeResourceBoundarySettings())
+	if err != nil {
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(parent, self.settings.CleanupCommandTimeout)
-	defer cancel()
-	identity, err := cleaner.docker(ctx, []string{"info", "--format", "{{.CgroupDriver}} {{.CgroupVersion}}"})
-	if err != nil || validateCleanupDaemonCgroups(identity) != nil {
-		return errors.New("cleanup requires the qualified daemon's actual systemd driver and cgroup v2")
+	if err := validateCleanupRuntimeBinding(self.config, boundary); err != nil {
+		return nil, err
+	}
+	return boundary, nil
+}
+
+// A valid private engine is not authority to select a different endpoint or
+// candidate filesystem from the one that this worker and its cleanup use.
+func validateCleanupRuntimeBinding(config Config, boundary *RuntimeResourceBoundary) error {
+	if boundary == nil || boundary.PrivateSocketPath != config.DockerSocketPath || boundary.WorkRoot != config.WorkDirectory ||
+		boundary.ScratchRoot != config.DockerRole.ScratchDirectory || boundary.WorkDeviceId == 0 {
+		return errors.New("qualified private runtime differs from the cleanup/client role")
+	}
+	return nil
+}
+
+// The root-only audit may read only its exact local qualification tuple. A
+// report for the default engine or another host is not this runtime's proof.
+func (self *Agent) validateHostCheckConfiguration(boundary *RuntimeResourceBoundary) error {
+	if boundary == nil {
+		return errors.New("host audit has no protected local qualification")
+	}
+	content, err := readHostCheckConfiguration(self.config.HostCheckConfiguration, self.settings.ConfigBytes, true)
+	if err != nil {
+		return errors.New("host audit configuration is unavailable")
+	}
+	return validateHostCheckIdentity(self.config, boundary, content)
+}
+
+// Host configuration is non-executable data. Its exact bytes still require a
+// bounded protected content pin before the root audit may consume any path.
+func readHostCheckConfiguration(pin Pin, maximum int64, protected bool) ([]byte, error) {
+	if err := validateFilePin(pin, maximum, protected); err != nil {
+		return nil, err
+	}
+	return readBounded(pin.Path, maximum)
+}
+
+// The legacy host document has additional hardware/marker fields. Only this
+// exact tuple may bind those fields to the independently admitted private role.
+func validateHostCheckIdentity(config Config, boundary *RuntimeResourceBoundary, content []byte) error {
+	if boundary == nil || validateDocumentKeys(content) != nil {
+		return errors.New("host audit configuration is ambiguous or unavailable")
+	}
+	var identity struct {
+		HostId                       string `json:"host_id"`
+		ImageDigest                  string `json:"image_digest"`
+		QualificationSha256          string `json:"qualification_sha256"`
+		DockerDaemonConfigSha256     string `json:"docker_daemon_config_sha256"`
+		PrivateRuntimeBoundarySha256 string `json:"private_runtime_boundary_sha256"`
+	}
+	if json.Unmarshal(content, &identity) != nil || identity.HostId != config.HostId || identity.ImageDigest != config.EvaluatorImageDigest ||
+		identity.QualificationSha256 != config.QualificationSha256 || identity.DockerDaemonConfigSha256 != boundary.EngineConfig.Sha256 ||
+		identity.PrivateRuntimeBoundarySha256 != config.DockerRole.ResourceBoundary.Sha256 {
+		return errors.New("host audit configuration differs from the private runtime identity")
 	}
 	return nil
 }

@@ -7,6 +7,8 @@
 
 set -Eeuo pipefail
 umask 077
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/subevaluation-ownership.sh"
+subevaluation_ownership_init
 
 die() {
     printf '[retain-failure-evidence] ERROR: %s\n' "$*" >&2
@@ -42,34 +44,42 @@ destination_parent="$(realpath -e "$(dirname "$destination_dir")")"
 
 # These paths contain either per-stage throwaway credentials or the hidden
 # workload input. Completed run output remains available for diagnosis.
-sudo -n rm -rf -- \
+if [[ "$subevaluation_scoped" = true ]]; then
+    # Only the broker-reclaimed output vocabulary and trusted source checkouts
+    # remain here. Worker-owned sealed directories need write permission before
+    # this non-root sanitizer can remove its hidden input/source trees.
+    find "$source_dir" -type d -user "$(id -u)" -exec chmod u+rwx {} +
+fi
+evaluation_file rm -rf -- \
     "$source_dir/input" \
     "$source_dir/scorer-input" \
     "$source_dir/score-runtime"
-sudo -n find "$source_dir" -mindepth 1 -maxdepth 1 -type d \
+evaluation_file find "$source_dir" -mindepth 1 -maxdepth 1 -type d \
     -name 'evaluation-sources.*' -exec rm -rf -- {} +
-sudo -n find "$source_dir" -depth -type d -name runtime -exec rm -rf -- {} +
-sudo -n find "$source_dir" -type f \
+evaluation_file find "$source_dir" -depth -type d -name runtime -exec rm -rf -- {} +
+evaluation_file find "$source_dir" -type f \
     \( -name '*.env' -o -name '*.env.new' \) -delete
 # A raw Docker inspection contains Config.Env and bind source paths. Current
 # evaluators sanitize it in memory, but reject any legacy/partial file rather
 # than trusting its filename during failure recovery.
 while IFS= read -r -d '' inspection; do
-    if ! sudo -n jq -e '
+    if ! evaluation_file jq -e '
         type == "array" and all(.[];
           (keys | sort) == ["config","host_config","id","image_id","mounts","name","state"] and
           (.config | keys | sort) == ["image","labels","user"] and
           (.mounts | type == "array" and all(.[];
             (keys | sort) == ["destination","rw","type"])))
     ' "$inspection" >/dev/null 2>&1; then
-        sudo -n rm -f -- "$inspection"
+        evaluation_file rm -f -- "$inspection"
     fi
-done < <(sudo -n find "$source_dir" -type f -name containers.json -print0)
+done < <(evaluation_file find "$source_dir" -type f -name containers.json -print0)
 # A failed candidate may have created links, devices, sockets, or FIFOs before
 # the normal output validator ran. None are useful evidence and none may cross
 # the retention boundary.
-sudo -n find "$source_dir" -mindepth 1 ! -type f ! -type d -delete
-sudo -n chown -R "$(id -u):$(id -g)" "$source_dir"
+evaluation_file find "$source_dir" -mindepth 1 ! -type f ! -type d -delete
+if [[ "$subevaluation_scoped" != true ]]; then
+    sudo -n chown -R "$(id -u):$(id -g)" "$source_dir"
+fi
 
 [ -z "$(find "$source_dir" -type d -name runtime -print -quit)" ] || die 'runtime secret directory survived sanitization'
 [ -z "$(find "$source_dir" -type f \( -name '*.env' -o -name '*.env.new' \) -print -quit)" ] ||

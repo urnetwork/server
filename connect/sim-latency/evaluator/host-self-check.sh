@@ -8,16 +8,22 @@ set -uo pipefail
 umask 077
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-readonly DOCKER_DAEMON_CONFIG=/etc/docker/daemon.json
+docker_daemon_config=/etc/docker/daemon.json
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/container/resource-boundary.sh"
 readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/container/hash-local-mount.sh"
 readonly DOCKER_ID_MAP="$SCRIPT_DIR/container/docker-id-map.sh"
 readonly IRQ_CONTROL="$SCRIPT_DIR/authoritative-host-irqs.sh"
+private_runtime=false
+private_agent=""
+private_agent_config=""
+private_boundary=""
+trusted_operator_uid=""
+original_args=("$@")
 
 # Prospective-image qualification uses a separate root-owned configuration;
 # it must not replace active host markers before the source transition exists.
 secure_host_path() {
-    local path="$1" current mode
+    local path="$1" current mode owner
     [[ "$path" == /* && "$path" != / && "$path" != *$'\n'* && "$path" != *$'\r'* ]] || return 1
     [ "$(realpath -e -- "$path" 2>/dev/null)" = "$path" ] || return 1
     case "${2:-file}" in
@@ -29,7 +35,11 @@ secure_host_path() {
     current="$path"
     while :; do
         [ ! -L "$current" ] || return 1
-        [ "$(stat -c %u -- "$current" 2>/dev/null)" = 0 ] || return 1
+        owner="$(stat -c %u -- "$current" 2>/dev/null)" || return 1
+        if [ "$owner" != 0 ]; then
+            [ "$private_runtime" = true ] && [ "$current" != "$path" ] &&
+                [ -n "$trusted_operator_uid" ] && [ "$owner" = "$trusted_operator_uid" ] || return 1
+        fi
         mode="$(stat -c %a -- "$current" 2>/dev/null)" || return 1
         [[ "$mode" =~ ^[0-7]{3,4}$ ]] && [ $((8#$mode & 0022)) -eq 0 ] || return 1
         [ "$current" = / ] && return 0
@@ -51,11 +61,41 @@ elif [ "${1:-}" = --json ] && [ "$#" -eq 3 ] && [ "$2" = --config ]; then
         exit 2
     }
     host_config="$3"
+elif [ "${1:-}" = --json ] && [ "$#" -eq 9 ] && [ "$2" = --config ] &&
+     [ "$4" = --private-runtime ] && [ "$6" = --agent-config ] && [ "$8" = --boundary ]; then
+    [ "$(id -u)" = 0 ] && secure_host_config_path "$3" &&
+        secure_host_path "$5" file && secure_host_path "$7" file && secure_host_path "$9" file || {
+        printf 'private host audit requires its protected root-owned role tuple\n' >&2
+        exit 2
+    }
+    host_config="$3"
+    private_agent="$5"
+    private_agent_config="$7"
+    private_boundary="$9"
+    private_runtime=true
+    operator_user="$(jq -er '.trusted_operator_user' "$private_agent_config")" || exit 2
+    [[ "$operator_user" =~ ^[a-z_][a-z0-9_-]*$ ]] || exit 2
+    trusted_operator_uid="$(id -u "$operator_user")" || exit 2
+    [[ "$trusted_operator_uid" =~ ^[1-9][0-9]*$ ]] || exit 2
+    docker_daemon_config="$(jq -er '.engine_config.path' "$private_boundary")" || exit 2
+    secure_host_path "$docker_daemon_config" file || exit 2
+    [ "$(sha256sum "$docker_daemon_config" | awk '{print $1}')" = "$(jq -er '.engine_config.sha256' "$private_boundary")" ] || exit 2
 else
-    printf 'usage: competition-host-self-check --json [--config ROOT_OWNED_PATH]\n' >&2
+    printf 'usage: competition-host-self-check --json [--config ROOT_OWNED_PATH [--private-runtime ROOT_AGENT --agent-config ROOT_CONFIG --boundary ROOT_BOUNDARY]]\n' >&2
     exit 2
 fi
 readonly HOST_CONFIG="$host_config"
+readonly DOCKER_DAEMON_CONFIG="$docker_daemon_config"
+
+# The prospective audit has no Docker mutation capability. It never invokes
+# the live namespace probe, which belongs only to an authenticated run owner.
+host_docker() {
+    if [ "$private_runtime" = true ]; then
+        "$private_agent" --config "$private_agent_config" --docker-probe -- "$@"
+    else
+        sudo -n docker "$@"
+    fi
+}
 
 command -v jq >/dev/null 2>&1 || exit 2
 command -v sha256sum >/dev/null 2>&1 || exit 2
@@ -116,6 +156,15 @@ immutable_marker_sha="$(cfg '.immutable_reports_marker_sha256')"
 rebaseline_manifest="$(cfg '.rebaseline_manifest')"
 rebaseline_manifest_sha="$(cfg '.rebaseline_manifest_sha256')"
 
+if [ "$private_runtime" = true ]; then
+    [[ "$expected_management_cpu_list" =~ ^[0-9]+([,-][0-9]+)*$ ]] || exit 2
+    expected_affinity="$(taskset -c "$expected_management_cpu_list" awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)" || exit 2
+    actual_affinity="$(awk '/^Cpus_allowed_list:/ {print $2}' /proc/self/status)" || exit 2
+    if [ "$actual_affinity" != "$expected_affinity" ]; then
+        exec taskset -c "$expected_management_cpu_list" "$0" "${original_args[@]}"
+    fi
+fi
+
 [ -n "$host_id" ] || host_id="$(hostname 2>/dev/null || true)"
 kernel_release="$(uname -r 2>/dev/null || true)"
 microcode_revision="$(awk -F: '$1 ~ /^microcode/ {gsub(/[[:space:]]/, "", $2); print $2}' /proc/cpuinfo 2>/dev/null | sort -u | paste -sd, -)"
@@ -153,9 +202,9 @@ if [ -x "$IRQ_CONTROL" ]; then
 fi
 
 os_identity="$(. /etc/os-release 2>/dev/null; printf '%s-%s' "${ID:-unknown}" "${VERSION_ID:-unknown}")"
-docker_server_version="$(sudo -n docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
-docker_cgroup_version="$(sudo -n docker info --format '{{.CgroupVersion}}' 2>/dev/null || true)"
-docker_security_options="$(sudo -n docker info --format '{{json .SecurityOptions}}' 2>/dev/null | jq -cS . 2>/dev/null || true)"
+docker_server_version="$(host_docker version --format '{{.Server.Version}}' 2>/dev/null || true)"
+docker_cgroup_version="$(host_docker info --format '{{.CgroupVersion}}' 2>/dev/null || true)"
+docker_security_options="$(host_docker info --format '{{json .SecurityOptions}}' 2>/dev/null | jq -cS . 2>/dev/null || true)"
 docker_daemon_config_secure=false
 docker_daemon_config_sha256=""
 if [ -f "$DOCKER_DAEMON_CONFIG" ] && [ ! -L "$DOCKER_DAEMON_CONFIG" ] &&
@@ -175,7 +224,30 @@ docker_id_map_json=""
 docker_uid_map_sha256=""
 docker_gid_map_sha256=""
 docker_id_map_remapped=false
-if [ -x "$DOCKER_ID_MAP" ] && [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+namespace_probe_source=live_probe
+namespace_probe_fresh=true
+if [ "$private_runtime" = true ]; then
+    namespace_probe_source=retained_native_containment
+    namespace_probe_fresh=false
+    # These are retained native-run hashes, not a fresh container proof. Each
+    # real evaluation independently verifies live maps before output handoff.
+    boundary_sha256="$(sha256sum "$private_boundary" | awk '{print $1}')"
+    if secure_host_path "$cleanup_marker" file &&
+       [ "$(sha256sum "$cleanup_marker" | awk '{print $1}')" = "$cleanup_marker_sha" ] &&
+       jq -e --arg boundary_sha256 "$boundary_sha256" --slurpfile boundary "$private_boundary" '
+           .schema == 1 and .kind == "sim-latency-host-containment" and
+           .private_runtime_boundary_sha256 == $boundary_sha256 and
+           .docker_user_namespace_verified == true and
+           .container_root_uid == $boundary[0].container_root_uid and
+           .container_root_gid == $boundary[0].container_root_gid and
+           .container_id_map_length == $boundary[0].container_id_map_length and
+           (.docker_uid_map_sha256 | test("^[0-9a-f]{64}$")) and
+           (.docker_gid_map_sha256 | test("^[0-9a-f]{64}$"))' "$cleanup_marker" >/dev/null 2>&1; then
+        docker_uid_map_sha256="$(jq -er '.docker_uid_map_sha256' "$cleanup_marker")"
+        docker_gid_map_sha256="$(jq -er '.docker_gid_map_sha256' "$cleanup_marker")"
+        docker_id_map_remapped=true
+    fi
+elif [ -x "$DOCKER_ID_MAP" ] && [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     docker_id_map_json="$($DOCKER_ID_MAP --image "$image_digest" --uid 65532 --gid 65532 2>/dev/null || true)"
     if jq -e --arg image_id "$image_digest" \
         '.schema == 1 and .kind == "sim-latency-docker-id-map" and
@@ -188,8 +260,8 @@ if [ -x "$DOCKER_ID_MAP" ] && [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; th
         docker_id_map_remapped="$(jq -er '.remapped' <<<"$docker_id_map_json")"
     fi
 fi
-postgres_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$expected_postgres_image" 2>/dev/null || true)"
-redis_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$expected_redis_image" 2>/dev/null || true)"
+postgres_image_id="$(host_docker image inspect --format '{{.Id}}' "$expected_postgres_image" 2>/dev/null || true)"
+redis_image_id="$(host_docker image inspect --format '{{.Id}}' "$expected_redis_image" 2>/dev/null || true)"
 somaxconn="$(cat /proc/sys/net/core/somaxconn 2>/dev/null || true)"
 port_range="$(tr '\t' '-' </proc/sys/net/ipv4/ip_local_port_range 2>/dev/null || true)"
 resource_boundary_json=""
@@ -270,6 +342,11 @@ facts="$(jq -cnS \
       config_local_sha256:$config_local_sha256,
       vault_local_sha256:$vault_local_sha256}')"
 qualification_sha256="$(printf '%s' "$facts" | sha256sum | awk '{print $1}')"
+if [ "$private_runtime" = true ]; then
+    facts="$(jq -cnS --argjson facts "$facts" --arg boundary_sha256 "$boundary_sha256" \
+        '$facts + {private_runtime_boundary_sha256:$boundary_sha256,namespace_probe_source:"retained_native_containment"}')"
+    qualification_sha256="$(printf '%s' "$facts" | sha256sum | awk '{print $1}')"
+fi
 
 qualification_match=false
 [ "$config_secure" = true ] && [ "$qualification_sha256" = "$expected_qualification" ] && qualification_match=true
@@ -538,6 +615,11 @@ report="$(jq -cn \
         cpu_count_exact:$cpu_count_exact,worker_affinity_pinned:$worker_affinity_pinned,
         kernel_microcode_pinned:$kernel_pinned,
         docker_runtime:$docker_runtime,docker_user_namespace:$docker_user_namespace}}')"
+if [ "$private_runtime" = true ]; then
+    report="$(jq -cn --argjson report "$report" --arg source "$namespace_probe_source" --argjson fresh "$namespace_probe_fresh" \
+        --arg boundary_sha256 "$boundary_sha256" \
+        '$report + {namespace_probe_source:$source,namespace_probe_fresh:$fresh,private_runtime_boundary_sha256:$boundary_sha256}')"
+fi
 
 printf '%s\n' "$report"
 jq -e '

@@ -113,7 +113,7 @@ func readHostNamespace(ctx context.Context, processPath, expectedCgroup string, 
 		return HostNamespaceMap{}, errors.New("container process identity changed during namespace capture")
 	}
 	return HostNamespaceMap{ContainerRootUid: plan.ContainerRootUid, ContainerRootGid: plan.ContainerRootGid, ContainerIdMapLength: plan.ContainerIdMapLength,
-		UidMapSha256: digestDockerBytes(uidMap), GidMapSha256: digestDockerBytes(gidMap)}, nil
+		UidMapSha256: digestDockerBytes(uidMap), GidMapSha256: digestDockerBytes(gidMap), CgroupPath: expectedCgroup}, nil
 }
 
 // The qualified engine uses one explicit complete subordinate-id range. Extra,

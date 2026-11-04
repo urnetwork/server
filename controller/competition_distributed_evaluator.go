@@ -57,10 +57,19 @@ func (self *competitionAgentEvaluator) SelfCheck(ctx context.Context, settings *
 		return HostSelfCheck{}, err
 	}
 	check, err := decodeHostSelfCheck(response.SelfCheck)
-	if err != nil || response.State != "ready" || !check.Eligible(settings) {
+	if err != nil || response.State != "ready" || !check.Eligible(settings) || validateCompetitionPrivateHostProbe(check) != nil {
 		return check, errors.New("authenticated executor did not pass containment and exact-round readiness")
 	}
 	return check, nil
+}
+
+// Private readiness retains a qualified native-run receipt; it does not
+// silently relabel that historical map evidence as a new unowned live probe.
+func validateCompetitionPrivateHostProbe(check HostSelfCheck) error {
+	if check.NamespaceProbeSource != "retained_native_containment" || check.NamespaceProbeFresh || !sha256Pattern.MatchString(check.PrivateRuntimeBoundarySha256) {
+		return errors.New("private executor did not retain an explicit native qualification boundary")
+	}
+	return nil
 }
 
 // The deadline starts in the first PostgreSQL claim and is persisted unchanged.

@@ -10,12 +10,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly BUILD_TIMEOUT_SECONDS=600
 readonly SOURCE_APPLICATION_TIMEOUT_SECONDS=70
-subevaluation_docker_args=()
-if [[ -v URNETWORK_SUBEVALUATION_RUN_ID || -v URNETWORK_SUBEVALUATION_JOB_ID ||
-      -v URNETWORK_SUBEVALUATION_ROUND_ID || -v URNETWORK_SUBEVALUATION_ATTEMPT ]]; then
-    source "$SCRIPT_DIR/subevaluation-ownership.sh"
-    subevaluation_ownership_init
-fi
+source "$SCRIPT_DIR/subevaluation-ownership.sh"
+subevaluation_ownership_init
 
 base_image=""
 patch_path=""
@@ -139,7 +135,7 @@ fi
 for command in awk git jq sha256sum mktemp realpath sudo stat taskset timeout; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
-sudo -n docker info >/dev/null
+evaluation_docker info >/dev/null
 [ -x "$RESOURCE_BOUNDARY" ] || { printf 'trusted resource boundary is not executable\n' >&2; exit 1; }
 
 resource_boundary_json="$($RESOURCE_BOUNDARY)"
@@ -166,8 +162,8 @@ patch_path="$(realpath -e "$patch_path")"
 policy_path="$(realpath -e "$policy_path")"
 source_root="$(realpath -e "$source_root")"
 
-base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
-image_staging="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
+base_image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$base_image")"
+image_staging="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
 source_branch=sim-latency
 if [ "$staging" = true ]; then
     [ "$image_staging" = true ] || infrastructure_failure "staging build requires an explicitly staging evaluator image"
@@ -181,9 +177,9 @@ fi
 REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
-base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image")"
-image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image")"
-source_lock_sha256="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image")"
+base_sha="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image")"
+image_kind="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image")"
+source_lock_sha256="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image")"
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$image_kind" = evaluator-base ] || {
     printf 'base image is missing the trusted evaluator identity labels\n' >&2
     exit 1
@@ -385,16 +381,16 @@ fi
 
 # A cache hit is accepted only when every trusted identity label agrees. A
 # caller-supplied tag that points at unrelated content fails closed.
-if sudo -n docker image inspect "$image_tag" >/dev/null 2>&1; then
-    image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
-    cached_identity="$(sudo -n docker image inspect "$image_tag" | jq -er '.[0].Config.Labels')"
+if evaluation_docker image inspect "$image_tag" >/dev/null 2>&1; then
+    image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
+    cached_identity="$(evaluation_docker image inspect "$image_tag" | jq -er '.[0].Config.Labels')"
     validate_submission_labels "$cached_identity" || {
             printf 'existing candidate tag does not match authenticated build inputs: %s\n' "$image_tag" >&2
             exit 1
         }
 else
 DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS" \
-    sudo -n docker build \
+    evaluation_docker build \
     --platform linux/amd64 \
     --provenance=false \
     --no-cache \
@@ -418,25 +414,25 @@ DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS
     --tag "$image_tag" \
     "$build_context" >&2
 
-image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
+image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
 fi
 
-actual_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
+actual_image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
 [ "$actual_image_id" = "$image_id" ] || {
     printf 'candidate image id changed after build\n' >&2
     exit 1
 }
-actual_labels="$(sudo -n docker image inspect "$image_id" | jq -er '.[0].Config.Labels')"
+actual_labels="$(evaluation_docker image inspect "$image_id" | jq -er '.[0].Config.Labels')"
 validate_submission_labels "$actual_labels" || {
         printf 'candidate image labels do not authenticate build inputs\n' >&2
         exit 1
     }
-runtime_identity="$(sudo -n docker run --rm \
+runtime_identity="$(evaluation_docker run --rm \
     --network none \
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
-    "${subevaluation_docker_args[@]}" "$image_id" identity)"
+    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$image_id" identity)"
 validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2
         exit 1
