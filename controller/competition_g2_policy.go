@@ -12,17 +12,18 @@ import (
 // epoch one. Qualification supplies exact future image and binary identities.
 // All workload, resource, significance and submission-clock settings are kept.
 type CompetitionFutureEpochPolicy struct {
-	TrustedInstrument       *model.CompetitionTrustedInstrumentApproval `yaml:"trusted_instrument,omitempty"`
-	FromEpoch               int                                         `yaml:"from_epoch"`
-	G2VolumePolicy          model.CompetitionG2VolumePolicy             `yaml:"g2_volume_policy"`
-	EvaluatorImageDigest    string                                      `yaml:"evaluator_image_digest"`
-	SimulatorSha256         string                                      `yaml:"simulator_sha256"`
-	ScorerSha256            string                                      `yaml:"scorer_sha256"`
-	HostQualificationSha256 string                                      `yaml:"host_qualification_sha256"`
-	EvaluatorCommand        string                                      `yaml:"evaluator_command"`
-	EvaluatorCommandSha256  string                                      `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand        string                                      `yaml:"self_check_command"`
-	SelfCheckCommandSha256  string                                      `yaml:"self_check_command_sha256"`
+	DistributedEvaluationPolicy *CompetitionDistributedEvaluationPolicy     `yaml:"distributed_evaluation_policy,omitempty"`
+	TrustedInstrument           *model.CompetitionTrustedInstrumentApproval `yaml:"trusted_instrument,omitempty"`
+	FromEpoch                   int                                         `yaml:"from_epoch"`
+	G2VolumePolicy              model.CompetitionG2VolumePolicy             `yaml:"g2_volume_policy"`
+	EvaluatorImageDigest        string                                      `yaml:"evaluator_image_digest"`
+	SimulatorSha256             string                                      `yaml:"simulator_sha256"`
+	ScorerSha256                string                                      `yaml:"scorer_sha256"`
+	HostQualificationSha256     string                                      `yaml:"host_qualification_sha256"`
+	EvaluatorCommand            string                                      `yaml:"evaluator_command"`
+	EvaluatorCommandSha256      string                                      `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand            string                                      `yaml:"self_check_command"`
+	SelfCheckCommandSha256      string                                      `yaml:"self_check_command_sha256"`
 }
 
 // Empty is intentionally legacy; the exported version-one constant remains
@@ -51,6 +52,9 @@ func (self *Settings) validateFutureEpochPolicy() error {
 	if err := ValidateCompetitionTrustedInstrumentApproval(p.TrustedInstrument); err != nil {
 		return err
 	}
+	if err := validateCompetitionDistributedPolicy(p.DistributedEvaluationPolicy); err != nil {
+		return err
+	}
 	return validatePinnedCommand(p.SelfCheckCommand, p.SelfCheckCommandSha256, "future self-check")
 }
 
@@ -66,6 +70,8 @@ func (self *Settings) ForCompetitionEpoch(epoch int) (*Settings, error) {
 	copy := *self
 	p := self.FutureEpochPolicy
 	if p != nil && p.FromEpoch <= epoch {
+		copy.DistributedEvaluationPolicy = p.DistributedEvaluationPolicy
+		copy.distributedRoundEpoch = epoch
 		copy.EvaluationPolicy.G2VolumePolicy = p.G2VolumePolicy
 		if p.SimulatorSha256 != "" {
 			copy.EvaluationPolicy.SimulatorSha256, copy.EvaluationPolicy.ScorerSha256 = p.SimulatorSha256, p.ScorerSha256

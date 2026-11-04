@@ -25,14 +25,31 @@ import (
 type competitionJobAuthorityKey struct{}
 
 type competitionJobAuthority struct {
-	JobId   server.Id
-	Cycle   int
-	Attempt int
+	JobId            server.Id
+	Cycle            int
+	Attempt          int
+	ExecutorHostId   string
+	SlotId           int
+	SlotFencingToken int64
+	ExecutorSettings *Settings
 }
 
 // Detached persistence and cleanup retain values without reviving evaluation.
 func withCompetitionJobAuthority(ctx context.Context, job *queuedJob) context.Context {
-	return context.WithValue(ctx, competitionJobAuthorityKey{}, competitionJobAuthority{JobId: job.JobId, Cycle: job.EvaluationCycle, Attempt: job.AttemptCount})
+	executorSettings := job.executorSettings
+	if executorSettings != nil {
+		copy := *executorSettings
+		if copy.automationLease != nil {
+			lease := *copy.automationLease
+			copy.automationLease = &lease
+		}
+		executorSettings = &copy
+	}
+	return context.WithValue(ctx, competitionJobAuthorityKey{}, competitionJobAuthority{
+		JobId: job.JobId, Cycle: job.EvaluationCycle, Attempt: job.AttemptCount,
+		ExecutorHostId: job.ExecutorHostId, SlotId: job.SlotId, SlotFencingToken: job.SlotFencingToken,
+		ExecutorSettings: executorSettings,
+	})
 }
 
 // Legacy cycle-zero calls remain compatible. A recovered row requires the

@@ -11309,4 +11309,8 @@ var migrations = []any{
 	// earlier release reads them. Apply before deploying the api and taskworker
 	// that use them. They stay empty while binding is closed.
 	snFleetAutoSchemaMigration,
+
+	// Prospective epoch-two executor custody; the running singleton and every
+	// existing epoch-one row remain unchanged until an approved future opt-in.
+	newSqlMigration(competitionDistributedEvaluationMigrationSql),
 }
