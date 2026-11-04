@@ -11309,4 +11309,14 @@ var migrations = []any{
 	// earlier release reads them. Apply before deploying the api and taskworker
 	// that use them. They stay empty while binding is closed.
 	snFleetAutoSchemaMigration,
+
+	// The unresolved predicate's selectivity for the planner
+	// (db_transfer_contract_unresolved_statistics.go, CPUOPT4 Part D #1): an
+	// expression statistics object on transfer_contract's opaque unresolved
+	// CASE, so the payer open-sum and the payer-due read keep their partial
+	// index once the open set drains. A catalog change only: no rewrite, no
+	// sample. It takes SHARE UPDATE EXCLUSIVE for at most five seconds and runs
+	// as a no-op when the operator created the object first. Any release can
+	// run before or after it.
+	transferContractUnresolvedPredicateStatisticsMigration,
 }
