@@ -29292,6 +29292,25 @@ immutable identity/catalog faults still page. Synthetic public-path controls
 exercise complete older predicates, a replaced artifact, independent immutable
 fault and unchanged real numeric lag without changing global source catalogs.
 
+The unresolved-predicate statistics migration (currently version 926, resolved
+from its position in the server list) has an explicit artifact contract in this
+catalog. It requires `public.transfer_contract_unresolved_predicate` on
+`public.transfer_contract`, exactly the published unresolved CASE expression,
+expression statistics only, and no additional column keys or expressions. A
+same-name object in another schema, on another table, or with the legacy
+`outcome IS NULL` expression is drift once the migration is applied. Before
+publication a missing object remains migration lag. Native controls exercise
+both prefixes and rolled-back object/shape faults; synthetic controls preserve
+unknown authority above the source-known head.
+
+False-positive qualifier: the migration deliberately creates no sample, so a
+correct but unsampled statistics object is healthy for this schema contract;
+this probe neither reads `pg_statistic_ext_data` nor requires ANALYZE. A missing
+or partial catalog result still cannot certify health. False-negative qualifier:
+object presence does not prove populated or fresh estimates, the payer's query
+plan, running service versions, or performance recovery. Those require separate
+qualified observations; the monitor does not sample the table to establish them.
+
 Mainnet and native-fee artifact checks belong to this one registered probe.
 Their helpers live in `migration_sn_mainnet.go` and `migration_native_fee.go`;
 `signal_*.go` filenames are reserved for independently registered signals.

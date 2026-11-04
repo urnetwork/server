@@ -1,9 +1,11 @@
-// A known successor cannot certify a missing predecessor. Native object
-// faults and unknown future heads retain their separate authority boundaries.
+// The unresolved expression statistics through the public migration signal:
+// an unsampled published object is healthy, lag remains lag, and shape faults
+// at a source-known head belong to this migration.
 package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -11,89 +13,119 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The predecessor has an operative exact predicate, not a TRUE placeholder.
-// Omitting it must still stop authority before 926 even when 927 is present.
-func TestMigrationsUnresolvedStatisticsClosesOnlyItsCatalogGap(t *testing.T) {
+func TestMigrationsTransferContractUnresolvedStatisticsPublicationBoundary(t *testing.T) {
 	version := server.TransferContractUnresolvedPredicateStatisticsVersion()
-	contract := migrationCurrentSuffixTestContract(t, version)
-	if version != 926 || contract.query != transferContractUnresolvedStatisticsArtifactQuery || contract.artifact.rowColumn != version-589 || contract.artifact.removedVersion != 0 {
-		t.Fatal("published statistics contract lost its exact position", version, contract.artifact)
-	}
-	if head := migrationCatalogAuthorityHead(migrationCurrentSuffixContracts); head != server.MigrationCount() {
-		t.Fatal("qualified predecessor and successor did not form a complete catalog", head)
-	}
-	without := make([]snMainnetMigrationContract, 0, len(migrationCurrentSuffixContracts)-1)
-	for _, candidate := range migrationCurrentSuffixContracts {
-		if candidate.artifact.requiredVersion != version {
-			without = append(without, candidate)
-		}
-	}
-	if head := migrationCatalogAuthorityHead(without); head != version-1 {
-		t.Fatal("later finalization contract silently bridged an unknown predecessor", head)
-	}
-	// Exercise the public verdict as well as the contiguous-head census:
-	// only a complete known catalog can promote a live definition mismatch.
 	head := server.MigrationCount()
+	if version < 1 || head < version {
+		t.Fatalf("unresolved expression statistics migration is not published: version=%d head=%d", version, head)
+	}
+	artifact := migrationCurrentSuffixTestContract(t, version).artifact
+	contract := migrationCurrentSuffixTestContract(t, version)
+	if contract.query != transferContractUnresolvedStatisticsArtifactQuery ||
+		artifact.name != "transfer_contract unresolved predicate expression statistics" ||
+		artifact.rowColumn != version-589 || artifact.removedVersion != 0 {
+		t.Fatalf("expression statistics contract is %+v", artifact)
+	}
 	for _, test := range []struct {
-		name                string
-		dbHead, catalogHead int
-		contracts           []snMainnetMigrationContract
-		wantClass           string
+		version int
+		present bool
+		class   string
 	}{
-		{name: "internal predecessor gap", dbHead: head, catalogHead: version - 1, contracts: without, wantClass: "cannot-observe"},
-		{name: "known statistics drift", dbHead: head, catalogHead: head, wantClass: "migration-schema-drift"},
-		{name: "unknown future head", dbHead: head + 1, catalogHead: head, wantClass: "cannot-observe"},
+		{version: version - 1, class: "migration-behind"},
+		{version: head, present: true},
+		{version: head, class: "migration-schema-drift"},
+		{version: head + 1, present: true, class: "cannot-observe"},
+		{version: head + 1, class: "cannot-observe"},
 	} {
-		row := syntheticMigrationArtifactRow(test.dbHead)
-		row[contract.artifact.rowColumn] = "f"
-		catalog := syntheticMigrationCatalogRows(head)
-		if head < test.dbHead {
-			catalog = migrationFutureSchemaCatalogRows()
+		row := syntheticMigrationArtifactRow(test.version)
+		row[artifact.rowColumn] = "f"
+		if test.present {
+			row[artifact.rowColumn] = "t"
 		}
-		signal := NewMigrationsSignal().(*signalAdapter)
-		signal.probe = migrationsProbe{catalogContracts: test.contracts}
-		alerts := migrationFutureSchemaAlerts(t, signal, test.name, row, catalog)
-		alert := requireAlertClass(t, alerts, test.wantClass)
-		if len(alerts) != 1 {
-			t.Fatal("catalog authority emitted an unrelated verdict", test.name, alerts)
-		}
-		if test.wantClass == "cannot-observe" {
-			if !alert.unobservable || alert.Severity != SeverityWarn || !strings.Contains(alert.Observed, fmt.Sprintf("catalog_known_version=%d", test.catalogHead)) {
-				t.Fatal("catalog gap or unknown future head gained live-schema authority", test.name, alert)
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				if test.version > head {
+					return migrationFutureSchemaCatalogRows(), nil
+				}
+				return syntheticMigrationCatalogRows(test.version), nil
 			}
-		} else if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, fmt.Sprintf("%s@v%d", contract.artifact.name, version)) {
-			t.Fatal("known statistics corruption lost its exact owning page", alert)
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if test.class == "" {
+			if len(alerts) != 0 {
+				t.Fatalf("a present expression statistics object produced %d alerts", len(alerts))
+			}
+			continue
+		}
+		if len(alerts) != 1 {
+			t.Fatalf("version %d produced %d alerts, want exactly one %s", test.version, len(alerts), test.class)
+		}
+		alert := requireAlertClass(t, alerts, test.class)
+		if test.class == "migration-schema-drift" && !strings.Contains(alert.Markdown(), fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion)) {
+			t.Fatal("published expression statistics drift lost its owning artifact")
+		}
+		if test.class == "cannot-observe" && (!alert.unobservable || alert.Severity != SeverityWarn) {
+			t.Fatal("an unknown successor certified the expression statistics")
 		}
 	}
 }
 
-// Fresh published prefixes contain no ANALYZE sample. Only the object identity,
-// relation, expression census and exact opaque predicate grant schema authority.
-func TestMigrationsUnresolvedStatisticsPublishedPrefixesAndNativeFaults(t *testing.T) {
+// A failed or absent metadata result never becomes a healthy statistics object.
+func TestMigrationsTransferContractUnresolvedStatisticsUnavailableSource(t *testing.T) {
+	private := errors.New("synthetic statistics catalog unavailable")
+	for _, sourceError := range []error{nil, private} {
+		reads := 0
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			reads++
+			if !strings.Contains(query, transferContractUnresolvedStatisticsArtifactQuery) {
+				t.Fatal("the owning probe omitted the expression statistics predicate")
+			}
+			return nil, sourceError
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		if reads != 1 || err == nil || len(alerts) != 0 {
+			t.Fatal("an unavailable statistics catalog certified health or continued reading")
+		}
+		if sourceError != nil && !errors.Is(err, sourceError) {
+			t.Fatal("the statistics catalog lost its source error identity")
+		}
+	}
+}
+
+// The real schema before and at publication, without ANALYZE, then rolled-back
+// name, namespace, relation, expression and statistics-kind faults.
+func TestMigrationsTransferContractUnresolvedStatisticsPublishedSchemaAndFaults(t *testing.T) {
 	version := server.TransferContractUnresolvedPredicateStatisticsVersion()
-	contract := migrationCurrentSuffixTestContract(t, version)
-	owner := fmt.Sprintf("%s@v%d", contract.artifact.name, version)
-	definition := `CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END) FROM public.transfer_contract`
+	artifact := migrationCurrentSuffixTestContract(t, version).artifact
+	owner := fmt.Sprintf("%s@v%d", artifact.name, version)
 	faults := []struct{ name, sql string }{
 		{"object absent", `DROP STATISTICS public.transfer_contract_unresolved_predicate`},
-		{"same name transparent predicate", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (outcome IS NULL AND dispute=false) FROM public.transfer_contract`},
-		{"same name different CASE", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute=true ELSE false END) FROM public.transfer_contract`},
-		{"wrong table", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE TABLE synthetic_statistics_contract(outcome varchar,dispute boolean); CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute=false ELSE false END) FROM public.synthetic_statistics_contract`},
-		{"wrong namespace", `CREATE SCHEMA synthetic_statistics_scope; ALTER STATISTICS public.transfer_contract_unresolved_predicate SET SCHEMA synthetic_statistics_scope`},
-		{"column statistics substitute", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON outcome,dispute FROM public.transfer_contract`},
-		{"extra expression", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute=false ELSE false END),(dispute IS NULL) FROM public.transfer_contract`},
+		{"object outside public", `CREATE SCHEMA monitor_statistics_fault; ALTER STATISTICS public.transfer_contract_unresolved_predicate SET SCHEMA monitor_statistics_fault`},
+		{"object on a different table", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (reschedule_error_count = 0) FROM public.pending_task`},
+		{"legacy outcome expression", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (outcome IS NULL) FROM public.transfer_contract`},
+		{"inverted dispute expression", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute = true ELSE false END) FROM public.transfer_contract`},
+		{"extra expression", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END), (outcome IS NULL) FROM public.transfer_contract`},
+		{"extra column and statistics kinds", `DROP STATISTICS public.transfer_contract_unresolved_predicate; CREATE STATISTICS public.transfer_contract_unresolved_predicate ON (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END), dispute FROM public.transfer_contract`},
 	}
+	type prefix struct {
+		row    Row
+		alerts []Alert
+	}
+	prefixes := map[int]prefix{}
+	var observations [][]Alert
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
-		for _, head := range []int{version - 1, version, server.CompetitionFinalizationHoldMigrationVersion()} {
+		for _, head := range []int{version - 1, version} {
 			server.ApplyDbMigrationsUpTo(t.Context(), head)
-			row, drift := migrationPingDatabaseCheck(t, t.Context())
-			want := "f"
-			if version <= head {
-				want = "t"
+			source := &migrationPingDatabaseSource{}
+			alerts, err := NewMigrationsSignal().Run(t.Context(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal(err)
 			}
-			if drift != "" || row[contract.artifact.rowColumn] != want {
-				t.Fatalf("prefix%d statistics=%q want=%q drift=%s", head, row[contract.artifact.rowColumn], want, drift)
-			}
+			prefixes[head] = prefix{row: source.artifactRow, alerts: alerts}
 		}
 		for _, fault := range faults {
 			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
@@ -104,20 +136,38 @@ func TestMigrationsUnresolvedStatisticsPublishedPrefixesAndNativeFaults(t *testi
 				if err != nil {
 					t.Fatalf("inspect %s: %v", fault.name, err)
 				}
-				alert := requireAlertClass(t, alerts, "migration-schema-drift")
-				if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, owner) || requireAlertClassCount(alerts, "cannot-observe") != 0 {
-					t.Fatalf("%s lost exact known-head statistics authority", fault.name)
-				}
+				observations = append(observations, alerts)
 			})
 		}
-		// Recreating the exact definition is a healthy control in the same
-		// private transaction, without reading or filling statistics samples.
-		snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(ctx, `DROP STATISTICS public.transfer_contract_unresolved_predicate; `+definition))
-			alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
-			if err != nil || requireAlertClassCount(alerts, "migration-schema-drift") != 0 || requireAlertClassCount(alerts, "cannot-observe") != 0 {
-				t.Fatal("exact unsampled statistics definition did not remain healthy", alerts, err)
-			}
-		})
+		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+			t.Fatalf("rolled-back expression statistics faults left drift: %s", drift)
+		}
 	})
+	pending, published := prefixes[version-1], prefixes[version]
+	if pending.row == nil || published.row == nil {
+		t.Fatal("a published prefix was not observed")
+	}
+	if pending.row[artifact.rowColumn] != "f" || published.row[artifact.rowColumn] != "t" {
+		t.Fatalf("the expression statistics reads %q one version behind and %q at its version", pending.row[artifact.rowColumn], published.row[artifact.rowColumn])
+	}
+	// behind or at its version the object is never drift; only the lag
+	// warning while the database is behind the source
+	for _, head := range []int{version - 1, version} {
+		wantLag := 0
+		if head < server.MigrationCount() {
+			wantLag = 1
+		}
+		alerts := prefixes[head].alerts
+		if len(alerts) != wantLag || (wantLag == 1 && alerts[0].Class != "migration-behind") {
+			t.Fatalf("at head %d: %d alerts, want %d migration-behind", head, len(alerts), wantLag)
+		}
+	}
+	if len(observations) != len(faults) {
+		t.Fatalf("observed %d expression statistics faults, want %d", len(observations), len(faults))
+	}
+	for index, alerts := range observations {
+		if alert := requireAlertClass(t, alerts, "migration-schema-drift"); alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), owner) {
+			t.Fatalf("%s lost its owning migration: %s", faults[index].name, alert.Markdown())
+		}
+	}
 }
