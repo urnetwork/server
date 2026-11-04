@@ -68,3 +68,9 @@ The no-op screen uses the same frozen seed/source/workload/shared baseline; its
 five-percent operational screen does not claim statistical equivalence.
 Kernel and Docker minor-version differences are an explicit operator acceptance,
 not a reason to bypass physical-control, fixture, source, image or cleanup pins.
+
+Historical operator reevaluation authorization is not supported for a frozen
+distributed round. Its two reviewed singleton incident classes do not grant a
+new remote execution cycle or reset its original absolute deadline. A new
+incident-specific recovery needs separate review; do not repair it with direct
+job/slot SQL. Existing committed singleton recovery receipts remain replayable.
