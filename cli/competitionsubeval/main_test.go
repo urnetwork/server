@@ -19,6 +19,9 @@ func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
 		{"--docker-client=" + strings.Repeat("a", 64)},
 		{"--config", "/synthetic/agent.json", "--docker-client=" + strings.Repeat("a", 64), "--", "info"},
 		{"--serve", "--docker-client=" + strings.Repeat("a", 64), "--", "info"},
+		{"--config", "/synthetic/agent.json", "--serve", "--docker-owner=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--docker-owner=" + strings.Repeat("a", 64), "--freeze=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--execute=" + strings.Repeat("a", 64), "--freeze=" + strings.Repeat("a", 64)},
 	}
 	for _, args := range cases {
 		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
@@ -51,5 +54,13 @@ func TestSubevaluationArgumentsAcceptFixedRoles(t *testing.T) {
 	cleanup, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--cleanup=" + runId}, &bytes.Buffer{})
 	if err != nil || cleanup.serve || cleanup.executeRunId != "" || cleanup.cleanupRunId != runId {
 		t.Fatalf("systemd cleanup role was not retained exactly: %+v %v", cleanup, err)
+	}
+	owner, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--docker-owner=" + runId}, &bytes.Buffer{})
+	if err != nil || owner.dockerOwnerRunId != runId || owner.freezeRunId != "" || owner.executeRunId != "" {
+		t.Fatal("independent Docker owner role was not retained", err)
+	}
+	freeze, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--freeze=" + runId}, &bytes.Buffer{})
+	if err != nil || freeze.freezeRunId != runId || freeze.dockerOwnerRunId != "" || freeze.cleanupRunId != "" {
+		t.Fatal("independent emergency freeze role was not retained", err)
 	}
 }

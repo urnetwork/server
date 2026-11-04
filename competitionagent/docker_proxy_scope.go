@@ -30,7 +30,7 @@ const dockerProxyRunLabel = "com.urnetwork.competition.run-id"
 // Configuration authority comes from the durable agent, never a worker request.
 func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings, protected bool) error {
 	if plan.Schema != Schema || !digestPattern.MatchString(plan.RunId) || !cleanupUuidPattern.MatchString(plan.JobId) || !cleanupUuidPattern.MatchString(plan.RoundId) || plan.Attempt <= 0 ||
-		plan.DeadlineAt.IsZero() || plan.UpstreamSocketPath != "/run/docker.sock" || !dockerProxyCpuSetPattern.MatchString(plan.CpuSet) || !dockerProxyMemoryPattern.MatchString(plan.BuildMemory) ||
+		plan.DeadlineAt.IsZero() || plan.WorkerUid == 0 || !digestPattern.MatchString(plan.ResourcePolicySha256) || !dockerProxyCpuSetPattern.MatchString(plan.CpuSet) || !dockerProxyMemoryPattern.MatchString(plan.BuildMemory) ||
 		!strings.HasPrefix(plan.BaseImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(plan.BaseImageDigest, "sha256:")) {
 		return errors.New("invalid fixed Docker owner identity or resource policy")
 	}
@@ -40,9 +40,29 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 		settings.OperationTimeout <= 0 || settings.BuildTimeout <= 0 || settings.BuildStopGrace <= 0 || settings.QuiesceTimeout <= 0 || settings.DrainAllowance <= 0 || settings.Now == nil {
 		return errors.New("Docker owner requires positive bounded settings")
 	}
-	for _, path := range []string{plan.StateDirectory, plan.ScratchDirectory, plan.SocketPath, plan.BuildSocketPath, plan.ContextRoot} {
+	for _, path := range []string{plan.BaseDirectory, plan.UpstreamSocketPath, plan.StateDirectory, plan.ScratchDirectory, plan.SocketPath, plan.BuildSocketPath, plan.ContextRoot} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || strings.ContainsAny(path, "\x00\r\n") {
 			return errors.New("Docker role paths must be canonical and private")
+		}
+	}
+	if !pathWithin(plan.BaseDirectory, plan.StateDirectory) || !pathWithin(plan.BaseDirectory, plan.ScratchDirectory) || !pathWithin(plan.BaseDirectory, plan.ContextRoot) ||
+		!pathWithin(plan.BaseDirectory, plan.UpstreamSocketPath) || pathWithin(plan.StateDirectory, plan.UpstreamSocketPath) || pathWithin(plan.ScratchDirectory, plan.UpstreamSocketPath) || pathWithin(plan.ContextRoot, plan.UpstreamSocketPath) ||
+		plan.SocketPath != filepath.Join(plan.BaseDirectory, "clients", plan.RunId, "docker.sock") || plan.BuildSocketPath != filepath.Join(plan.BaseDirectory, "clients", plan.RunId, "build.sock") {
+		return errors.New("Docker owner endpoints differ from the installed private per-run role")
+	}
+	if len(plan.SocketPath) >= len(syscall.RawSockaddrUnix{}.Path) || len(plan.BuildSocketPath) >= len(syscall.RawSockaddrUnix{}.Path) {
+		return errors.New("Docker authority sockets exceed the native Unix address boundary")
+	}
+	for _, path := range plan.ReadOnlyBindPaths {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
+			return errors.New("Docker readonly fixture path is not canonical")
+		}
+	}
+	if protected {
+		for _, path := range []string{filepath.Dir(plan.StateDirectory), filepath.Dir(plan.ScratchDirectory), filepath.Dir(plan.ContextRoot), filepath.Dir(plan.SocketPath), filepath.Dir(plan.UpstreamSocketPath)} {
+			if err := protectedRuntimePath(path, plan.BaseDirectory, plan.TrustedOperatorUid); err != nil {
+				return err
+			}
 		}
 	}
 	if plan.SocketPath == plan.BuildSocketPath || filepath.Base(plan.ContextRoot) != plan.RunId || pathWithin(plan.ContextRoot, plan.StateDirectory) || pathWithin(plan.StateDirectory, plan.ContextRoot) ||

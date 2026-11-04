@@ -16,12 +16,15 @@ import (
 
 // The launcher contains only agent-owned paths and the signed remaining budget.
 type Launch struct {
-	UnitName      string
-	RunId         string
-	ConfigPath    string
-	BaseDirectory string
-	Agent         Pin
-	DeadlineAt    time.Time
+	UnitName         string
+	RunId            string
+	ConfigPath       string
+	BaseDirectory    string
+	Agent            Pin
+	DeadlineAt       time.Time
+	Role             string
+	OwnerUnitName    string
+	ManagementCpuSet string
 }
 
 // Active includes starting and stopping so neither can free the physical slot.
@@ -53,6 +56,9 @@ func NewSystemdRunner(settings AgentSettings) *SystemdRunner {
 // The immutable unit name is retained after exit; no --collect or restart can
 // turn a reconnect into another execution. RuntimeMaxSec is never a fresh clock.
 func (self *SystemdRunner) Start(ctx context.Context, launch Launch) error {
+	if launch.ManagementCpuSet == "" || launch.Role == "" && launch.OwnerUnitName != dockerOwnerUnitName(launch.RunId) {
+		return errors.New("protected systemd launch requires bounded independent management custody")
+	}
 	if err := validatePin(launch.Agent, true); err != nil {
 		return err
 	}
@@ -74,7 +80,14 @@ func (self *SystemdRunner) Start(ctx context.Context, launch Launch) error {
 // See systemd.service(5), ExecStopPost and Command lines. The post-stop command
 // uses only the same pinned agent/config and immutable persisted run identity.
 func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, error) {
-	if !validUnitName(launch.UnitName) || !digestPattern.MatchString(launch.RunId) || launch.UnitName != unitName(launch.RunId) ||
+	executionFlag, cleanupFlag := "--execute=", "--cleanup="
+	expectedUnit := unitName(launch.RunId)
+	if launch.Role == "docker-owner" {
+		executionFlag, cleanupFlag, expectedUnit = "--docker-owner=", "--freeze=", dockerOwnerUnitName(launch.RunId)
+	} else if launch.Role != "" {
+		return nil, errors.New("systemd role is outside the fixed evaluator/owner pair")
+	}
+	if !validUnitName(launch.UnitName) || !digestPattern.MatchString(launch.RunId) || launch.UnitName != expectedUnit ||
 		settings.Now == nil || settings.CancelGrace <= 0 || settings.CleanupTimeout <= 0 {
 		return nil, errors.New("invalid fixed systemd launch identity")
 	}
@@ -92,7 +105,7 @@ func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, er
 		return nil, errors.New("systemd cleanup stop allowance overflowed")
 	}
 	cleanup := strings.Join([]string{systemdCommandWord(launch.Agent.Path), systemdCommandWord("--config"),
-		systemdCommandWord(launch.ConfigPath), systemdCommandWord("--cleanup=" + launch.RunId)}, " ")
+		systemdCommandWord(launch.ConfigPath), systemdCommandWord(cleanupFlag + launch.RunId)}, " ")
 	args := []string{"--quiet", "--no-block", "--unit=" + launch.UnitName, "--service-type=exec",
 		"--property=RequiresMountsFor=" + systemdCommandWord(launch.BaseDirectory),
 		"--property=Restart=no", "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
@@ -100,7 +113,23 @@ func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, er
 		"--property=RuntimeMaxSec=" + strconv.FormatFloat(remaining.Seconds(), 'f', 6, 64) + "s",
 		"--property=TimeoutStopSec=" + strconv.FormatFloat(stopTimeout.Seconds(), 'f', 6, 64) + "s",
 		"--property=StandardInput=null", "--property=StandardOutput=null", "--property=StandardError=null",
-		"--property=UMask=0077", "--", launch.Agent.Path, "--config", launch.ConfigPath, "--execute=" + launch.RunId}
+		"--property=UMask=0077"}
+	if launch.OwnerUnitName != "" {
+		if launch.Role != "" || launch.OwnerUnitName != dockerOwnerUnitName(launch.RunId) {
+			return nil, errors.New("evaluator must bind only its own independent Docker service")
+		}
+		args = append(args, "--property=BindsTo="+launch.OwnerUnitName, "--property=After="+launch.OwnerUnitName)
+	}
+	if launch.ManagementCpuSet != "" {
+		if !dockerProxyCpuSetPattern.MatchString(launch.ManagementCpuSet) || settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 {
+			return nil, errors.New("invalid bounded management resource identity")
+		}
+		cpus := strings.ReplaceAll(launch.ManagementCpuSet, ",", " ")
+		args = append(args, "--property=AllowedCPUs="+cpus, "--property=CPUAffinity="+cpus,
+			"--property=MemoryMax="+strconv.FormatInt(settings.ManagementMemoryBytes, 10), "--property=MemorySwapMax=0",
+			"--property=CPUQuota="+strconv.Itoa(settings.ManagementCpuQuotaPercent)+"%", "--property=OOMPolicy=kill")
+	}
+	args = append(args, "--", launch.Agent.Path, "--config", launch.ConfigPath, executionFlag+launch.RunId)
 	return args, nil
 }
 
@@ -161,9 +190,13 @@ func (self *SystemdRunner) Stop(ctx context.Context, unit string) error {
 
 // The service identity cannot contain options, paths or unit substitutions.
 func validUnitName(unit string) bool {
-	const prefix = "urnetwork-subeval-"
 	const suffix = ".service"
-	return strings.HasPrefix(unit, prefix) && strings.HasSuffix(unit, suffix) && digestPattern.MatchString(strings.TrimSuffix(strings.TrimPrefix(unit, prefix), suffix))
+	for _, prefix := range []string{"urnetwork-subeval-", "urnetwork-subeval-docker-"} {
+		if strings.HasPrefix(unit, prefix) && strings.HasSuffix(unit, suffix) && digestPattern.MatchString(strings.TrimSuffix(strings.TrimPrefix(unit, prefix), suffix)) {
+			return true
+		}
+	}
+	return false
 }
 
 // No ambient database, vault or session credentials cross an exec boundary.

@@ -69,6 +69,19 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 	plan := &cleanupPlan{Schema: Schema, RunId: manifest.Identity.RunId, JobId: manifest.Identity.JobId, RoundId: manifest.Identity.RoundId,
 		Attempt: manifest.Identity.Attempt, CgroupNames: cgroups, EvidenceDirectory: filepath.Join(self.workDirectory(manifest.Identity.RunId), ".evidence-runtime"),
 		EvidenceSource: fmt.Sprintf("urnetwork-evidence-%s-%d", strings.ReplaceAll(manifest.Identity.JobId, "-", ""), manifest.Identity.Attempt)}
+	resourceBytes, err := self.cleanupIdentityCommand(ctx, self.config.DockerRole.ResourcePolicy, nil, nil, manifest.Identity)
+	if err != nil {
+		return nil, err
+	}
+	resource, err := decodeRunResourceIdentity(resourceBytes)
+	if err != nil {
+		return nil, err
+	}
+	plan.ManagementCpuSet = resource.ManagementCpuSet
+	plan.DockerOwner, err = self.makeDockerOwnerPlan(manifest, *plan, resource)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateCleanupPlan(*plan, self.config); err != nil {
 		return nil, err
 	}
@@ -159,7 +172,25 @@ func (self *Agent) Cleanup(ctx context.Context, runId string) error {
 	if state.StopCleanupVerified && state.CleanupVerified {
 		return nil
 	}
-	if err := self.cleaner.Cleanup(cleanupCtx, *plan); err != nil {
+	reaped, err := self.loadResourcesReaped(runId, state.CleanupPlanSha256)
+	if err != nil {
+		return err
+	}
+	if err := self.containment.Quiesce(cleanupCtx, *plan, reaped); err != nil {
+		return err
+	}
+	if !reaped {
+		if err := self.cleaner.Cleanup(cleanupCtx, *plan); err != nil {
+			return err
+		}
+		if err := self.containment.VerifyRetained(cleanupCtx, *plan); err != nil {
+			return err
+		}
+		if err := self.storeResourcesReaped(runId, state.CleanupPlanSha256); err != nil {
+			return err
+		}
+	}
+	if err := self.containment.Release(cleanupCtx, *plan); err != nil {
 		return err
 	}
 	publication, err := self.lock(cleanupCtx)
@@ -196,6 +227,9 @@ func (self *Agent) loadCleanupPlan(runId string, state *runState, manifest *Star
 		return nil, errors.New("persisted cleanup scope failed authentication")
 	}
 	if err := validateCleanupPlan(*plan, self.config); err != nil {
+		return nil, err
+	}
+	if err := self.verifyDockerOwnerPlan(*manifest, *plan); err != nil {
 		return nil, err
 	}
 	return plan, nil

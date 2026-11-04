@@ -34,6 +34,8 @@ type arguments struct {
 	cleanupRunId      string
 	dockerClientRunId string
 	dockerArguments   []string
+	dockerOwnerRunId  string
+	freezeRunId       string
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -46,11 +48,13 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.executeRunId, "execute", "", "Systemd-only fixed persisted execution identity")
 	flags.StringVar(&parsed.cleanupRunId, "cleanup", "", "Systemd-only fixed persisted stop-cleanup identity")
 	flags.StringVar(&parsed.dockerClientRunId, "docker-client", "", "Non-root fixed-run Docker client; public sibling metadata only")
+	flags.StringVar(&parsed.dockerOwnerRunId, "docker-owner", "", "Systemd-only independent persisted Docker request owner")
+	flags.StringVar(&parsed.freezeRunId, "freeze", "", "Systemd-only fixed emergency freeze/kill, with no mutual unit join")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != ""} {
+	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != ""} {
 		if enabled {
 			roles++
 		}
@@ -93,6 +97,12 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	}
 	if parsed.cleanupRunId != "" {
 		return agent.Cleanup(ctx, parsed.cleanupRunId)
+	}
+	if parsed.dockerOwnerRunId != "" {
+		return agent.RunDockerOwner(ctx, parsed.dockerOwnerRunId)
+	}
+	if parsed.freezeRunId != "" {
+		return agent.EmergencyFreeze(ctx, parsed.freezeRunId)
 	}
 	return agent.Execute(ctx, parsed.executeRunId)
 }

@@ -28,6 +28,7 @@ type Agent struct {
 	settings             AgentSettings
 	runner               Runner
 	cleaner              runCleaner
+	containment          runContainment
 	coordinatorPublicKey ed25519.PublicKey
 	signingKey           ed25519.PrivateKey
 	credential           *syscall.Credential
@@ -85,7 +86,8 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 		return nil, errors.New("invalid bounded subevaluation agent owner")
 	}
 	if settings.CleanupTimeout <= 0 || settings.CleanupCommandTimeout <= 0 || settings.CleanupCommandTimeout > settings.CleanupTimeout ||
-		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 {
+		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 || settings.OwnerPollInterval <= 0 ||
+		settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 {
 		return nil, errors.New("invalid bounded subevaluation cleanup owner")
 	}
 	keyContent, err := readBounded(config.SigningKeyPath, settings.ConfigBytes)
@@ -133,7 +135,7 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	if err := syncDirectory(config.StateDirectory); err != nil {
 		return nil, err
 	}
-	return &Agent{config: *config, settings: settings, runner: runner, cleaner: newHostCleaner(*config, settings), coordinatorPublicKey: publicKey,
+	return &Agent{config: *config, settings: settings, runner: runner, cleaner: newHostCleaner(*config, settings), containment: newHostRunContainment(*config, settings, credential), coordinatorPublicKey: publicKey,
 		signingKey: privateKey, credential: credential, protected: protected}, nil
 }
 
@@ -369,8 +371,17 @@ func (self *Agent) commitStart(ctx context.Context, request Request, digest, inc
 func (self *Agent) launch(ctx context.Context, manifest StartManifest) {
 	controlCtx, cancel := context.WithTimeout(ctx, self.settings.ControlTimeout)
 	defer cancel()
+	state, err := self.loadState(manifest.Identity.RunId)
+	if err != nil {
+		return
+	}
+	plan, err := self.loadCleanupPlan(manifest.Identity.RunId, state, &manifest)
+	if err != nil || self.containment.Prepare(controlCtx, *plan) != nil || self.containment.Start(controlCtx, *plan) != nil {
+		return
+	}
 	_ = self.runner.Start(controlCtx, Launch{UnitName: unitName(manifest.Identity.RunId), RunId: manifest.Identity.RunId,
-		ConfigPath: self.config.configPath, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent, DeadlineAt: manifest.Identity.DeadlineAt})
+		ConfigPath: self.config.configPath, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent, DeadlineAt: manifest.Identity.DeadlineAt,
+		OwnerUnitName: dockerOwnerUnitName(manifest.Identity.RunId), ManagementCpuSet: plan.ManagementCpuSet})
 }
 
 // Status advances only custody, never the execution clock, attempt or launch.
@@ -552,7 +563,7 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 		lock.Close()
 		return err
 	}
-	if state.ExecutionStarted || !state.LaunchAttempted || terminalState(state.State) {
+	if state.ExecutionStarted || !state.LaunchAttempted || state.CleanupVerified || state.StopCleanupVerified || terminalState(state.State) {
 		lock.Close()
 		return errors.New("subevaluation execution was already attempted or not authorized")
 	}

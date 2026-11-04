@@ -37,7 +37,11 @@ type dockerProxyTest struct {
 func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 	t.Helper()
 	scope := newHostCleanupTest(t)
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "dp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	contextRoot := filepath.Join(root, "jobs", scope.plan.RunId)
 	contextDirectory := filepath.Join(contextRoot, "build-input")
 	if err := os.MkdirAll(contextDirectory, 0700); err != nil {
@@ -56,11 +60,11 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 	}
 	digest := sha256.Sum256(contents)
 	plan := DockerProxyPlan{Schema: Schema, RunId: scope.plan.RunId, JobId: scope.plan.JobId, RoundId: scope.plan.RoundId, Attempt: scope.plan.Attempt,
-		DeadlineAt: time.Now().Add(time.Hour), StateDirectory: filepath.Join(root, "owner"), ScratchDirectory: filepath.Join(root, "scratch"), SocketPath: filepath.Join(root, "worker.sock"),
-		BuildSocketPath: filepath.Join(root, "build.sock"), ContextRoot: contextRoot, UpstreamSocketPath: "/run/docker.sock",
+		DeadlineAt: time.Now().Add(time.Hour), BaseDirectory: root, StateDirectory: filepath.Join(root, "owner"), ScratchDirectory: filepath.Join(root, "scratch"), SocketPath: filepath.Join(root, "clients", scope.plan.RunId, "docker.sock"),
+		BuildSocketPath: filepath.Join(root, "clients", scope.plan.RunId, "build.sock"), ContextRoot: contextRoot, UpstreamSocketPath: filepath.Join(root, "engine", "docker.sock"),
 		Docker: Pin{Path: filepath.Join(root, "docker"), Sha256: strings.Repeat("d", 64)}, Buildx: Pin{Path: filepath.Join(root, "docker-buildx"), Sha256: strings.Repeat("e", 64)},
 		Dockerfile: Pin{Path: dockerfile, Sha256: hex.EncodeToString(digest[:])}, BaseImageDigest: "sha256:" + strings.Repeat("3", 64),
-		CgroupNames: append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", BuildMemory: "5g", WorkerUid: 12345}
+		CgroupNames: append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
 	settings := DefaultDockerProxySettings()
 	proxy, err := newDockerProxy(plan, settings, false)
 	if err != nil {
@@ -284,6 +288,55 @@ func TestDockerProxyRejectsOverlappingStateScratchAndWorkRoots(t *testing.T) {
 		if err := validateDockerProxyPlan(plan, fixture.settings, false); err == nil {
 			t.Errorf("overlapping root was accepted: %q", scratch)
 		}
+	}
+}
+
+// A canceled real CLI may still be joining its native process group. Releasing
+// the journal lock before that join would let recovery overlap its late write.
+func TestDockerProxyCloseRetainsJournalUntilOwnedBuildJoins(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	entered, canceled, release := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	fixture.proxy.buildRunner = func(ctx context.Context, _ *dockerProxyBuild) DockerBuildResult {
+		close(entered)
+		<-ctx.Done()
+		close(canceled)
+		<-release
+		return DockerBuildResult{RunId: fixture.plan.RunId, Acknowledged: false, ExitCode: -1, ErrorCode: "synthetic_joined_unknown"}
+	}
+	buildDone, closeDone, closeFinished := make(chan struct{}), make(chan error, 1), make(chan struct{})
+	go func() { defer close(buildDone); _, _ = fixture.proxy.RunOwnedBuild(t.Context(), fixture.buildRequest) }()
+	<-entered
+	go func() { defer close(closeFinished); closeDone <- fixture.proxy.Close() }()
+	var releaseOnce sync.Once
+	t.Cleanup(func() {
+		fixture.proxy.cancelOwner()
+		releaseOnce.Do(func() { close(release) })
+		<-buildDone
+		<-closeFinished
+	})
+	<-canceled
+	if replacement, err := newDockerProxy(fixture.plan, fixture.settings, false); err == nil {
+		replacement.Close()
+		t.Fatal("recovery overlapped a still-owned native build/result writer")
+	}
+	select {
+	case <-closeDone:
+		t.Fatal("close returned before the explicit native join barrier")
+	default:
+	}
+	releaseOnce.Do(func() { close(release) })
+	<-buildDone
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	<-closeFinished
+	recovered, err := newDockerProxy(fixture.plan, fixture.settings, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if err := recovered.Quiesce(t.Context()); !errors.Is(err, ErrDockerProxyUnknown) {
+		t.Fatal("joined but unknown build became replayable", err)
 	}
 }
 

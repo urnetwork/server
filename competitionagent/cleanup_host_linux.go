@@ -26,14 +26,16 @@ import (
 // Persisted before launch, outside the worker's writable workspace. The build
 // identities are exact image-key prefixes, never a shared slice prefix scan.
 type cleanupPlan struct {
-	Schema            int      `json:"schema"`
-	RunId             string   `json:"run_id"`
-	JobId             string   `json:"job_id"`
-	RoundId           string   `json:"round_id"`
-	Attempt           int      `json:"attempt"`
-	CgroupNames       []string `json:"cgroup_names"`
-	EvidenceDirectory string   `json:"evidence_directory"`
-	EvidenceSource    string   `json:"evidence_source"`
+	Schema            int              `json:"schema"`
+	RunId             string           `json:"run_id"`
+	JobId             string           `json:"job_id"`
+	RoundId           string           `json:"round_id"`
+	Attempt           int              `json:"attempt"`
+	CgroupNames       []string         `json:"cgroup_names"`
+	EvidenceDirectory string           `json:"evidence_directory"`
+	EvidenceSource    string           `json:"evidence_source"`
+	DockerOwner       *DockerProxyPlan `json:"docker_owner,omitempty"`
+	ManagementCpuSet  string           `json:"management_cpu_set,omitempty"`
 }
 
 // Only a successful concrete cleanup permits releasing physical host custody.

@@ -151,6 +151,12 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 // Both listeners are manager-provisioned Unix sockets; no request can select a
 // daemon. The root-only build socket additionally owns BuildKit's live session.
 func (self *DockerProxy) Serve(ctx context.Context, workerListener, buildListener net.Listener) error {
+	return self.serve(ctx, workerListener, buildListener, nil)
+}
+
+// The externally driven root lifecycle may freeze/kill its exact parents
+// before any daemon join, including listener failure as well as cancellation.
+func (self *DockerProxy) serve(ctx context.Context, workerListener, buildListener net.Listener, stopping func(context.Context) error) error {
 	if workerListener == nil || buildListener == nil {
 		return errors.New("Docker owner requires separate worker and build listeners")
 	}
@@ -162,26 +168,51 @@ func (self *DockerProxy) Serve(ctx context.Context, workerListener, buildListene
 	done := make(chan error, 2)
 	go func() { done <- worker.Serve(workerListener) }()
 	go func() { done <- build.Serve(buildListener) }()
+	completed := 0
+	var serveErr error
 	select {
 	case err := <-done:
+		completed++
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			worker.Close()
-			build.Close()
-			return err
+			serveErr = err
 		}
 	case <-ctx.Done():
+	case <-self.ownerCtx.Done():
 	}
 	quiesceCtx, cancel := context.WithTimeout(context.Background(), self.settings.QuiesceTimeout)
 	defer cancel()
-	err := self.Quiesce(quiesceCtx)
+	self.stateLock.Lock()
+	self.accepting = false
+	self.notifyWithLock()
+	self.stateLock.Unlock()
+	// Interrupt incomplete worker uploads, but retain the separate root build
+	// session until its terminal daemon response has been drained or is unknown.
 	_ = worker.Close()
+	if stopping != nil {
+		serveErr = errors.Join(serveErr, stopping(quiesceCtx))
+	}
+	err := self.Quiesce(quiesceCtx)
+	if err != nil {
+		self.cancelOwner()
+	}
 	_ = build.Close()
-	return err
+	for completed < 2 {
+		serverErr := <-done
+		completed++
+		if serverErr != nil && !errors.Is(serverErr, http.ErrServerClosed) {
+			serveErr = errors.Join(serveErr, serverErr)
+		}
+	}
+	return errors.Join(serveErr, err)
 }
 
 // Close is a terminal owner shutdown, never an evaluator-client cancellation.
 // Any issued operation not yet durably acknowledged stays unknown on restart.
 func (self *DockerProxy) Close() error {
+	self.stateLock.Lock()
+	self.accepting = false
+	self.notifyWithLock()
+	self.stateLock.Unlock()
 	self.cancelOwner()
 	self.transport.CloseIdleConnections()
 	self.grpcTransport.CloseIdleConnections()
@@ -194,10 +225,28 @@ func (self *DockerProxy) Close() error {
 	for _, session := range sessions {
 		_ = session.Close()
 	}
-	if self.journalLock != nil {
-		return self.journalLock.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), self.settings.QuiesceTimeout)
+	defer cancel()
+	for {
+		self.stateLock.Lock()
+		changed, inflight := self.changed, self.inflight
+		var journal *os.File
+		if inflight == 0 {
+			journal, self.journalLock = self.journalLock, nil
+		}
+		self.stateLock.Unlock()
+		if inflight == 0 {
+			if journal != nil {
+				return journal.Close()
+			}
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return errors.New("Docker owner native work has not joined; journal custody retained")
+		case <-changed:
+		}
 	}
-	return nil
 }
 
 // Admission closes atomically before its durable barrier. Existing admitted
@@ -317,7 +366,7 @@ func (self *DockerProxy) admit(internalBuild bool) (func(), error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	if (!self.accepting && !(internalBuild && self.build != nil && self.build.issued && !self.build.finished)) ||
-		!self.settings.Now().Before(self.plan.DeadlineAt) || self.operations >= self.settings.MaximumOperations || self.inflight >= self.settings.MaximumConnections {
+		self.ownerCtx.Err() != nil || !self.settings.Now().Before(self.plan.DeadlineAt) || self.operations >= self.settings.MaximumOperations || self.inflight >= self.settings.MaximumConnections {
 		return nil, errors.New("Docker mutation admission is closed")
 	}
 	self.operations++

@@ -30,53 +30,57 @@ type Pin struct {
 // WorkDirectory is a root-owned searchable parent; individual runs are 0700 and
 // owned by WorkerUser. StateDirectory and SigningKeyPath stay root-only.
 type Config struct {
-	Schema                     int    `json:"schema"`
-	HostId                     string `json:"host_id"`
-	BaseDirectory              string `json:"base_directory"`
-	TrustedOperatorUser        string `json:"trusted_operator_user"`
-	ExpectedDataDeviceId       uint64 `json:"expected_data_device_id"`
-	StateDirectory             string `json:"state_directory"`
-	WorkDirectory              string `json:"work_directory"`
-	WorkerUser                 string `json:"worker_user"`
-	Evaluator                  Pin    `json:"evaluator"`
-	SelfCheck                  Pin    `json:"self_check"`
-	Agent                      Pin    `json:"agent"`
-	Docker                     Pin    `json:"docker"`
-	DockerSocketPath           string `json:"docker_socket_path"`
-	SubmissionBuilderIdentity  Pin    `json:"submission_builder_identity"`
-	SubmissionBuilderSha256    string `json:"submission_builder_sha256"`
-	SubevaluationOwnership     Pin    `json:"subevaluation_ownership"`
-	JsonFormatter              Pin    `json:"json_formatter"`
-	ConfigLocalDirectory       string `json:"config_local_directory"`
-	VaultLocalDirectory        string `json:"vault_local_directory"`
-	ConfigLocalSha256          string `json:"config_local_sha256"`
-	VaultLocalSha256           string `json:"vault_local_sha256"`
-	EvaluatorImageDigest       string `json:"evaluator_image_digest"`
-	SourceLockSha256           string `json:"source_lock_sha256"`
-	QualificationSha256        string `json:"qualification_sha256"`
-	CoordinatorPublicKeyBase64 string `json:"coordinator_public_key_base64"`
-	SigningKeyPath             string `json:"signing_key_path"`
-	Limits                     Limits `json:"limits"`
+	Schema                     int              `json:"schema"`
+	HostId                     string           `json:"host_id"`
+	BaseDirectory              string           `json:"base_directory"`
+	TrustedOperatorUser        string           `json:"trusted_operator_user"`
+	ExpectedDataDeviceId       uint64           `json:"expected_data_device_id"`
+	StateDirectory             string           `json:"state_directory"`
+	WorkDirectory              string           `json:"work_directory"`
+	WorkerUser                 string           `json:"worker_user"`
+	Evaluator                  Pin              `json:"evaluator"`
+	SelfCheck                  Pin              `json:"self_check"`
+	Agent                      Pin              `json:"agent"`
+	Docker                     Pin              `json:"docker"`
+	DockerSocketPath           string           `json:"docker_socket_path"`
+	DockerRole                 DockerRoleConfig `json:"docker_role"`
+	SubmissionBuilderIdentity  Pin              `json:"submission_builder_identity"`
+	SubmissionBuilderSha256    string           `json:"submission_builder_sha256"`
+	SubevaluationOwnership     Pin              `json:"subevaluation_ownership"`
+	JsonFormatter              Pin              `json:"json_formatter"`
+	ConfigLocalDirectory       string           `json:"config_local_directory"`
+	VaultLocalDirectory        string           `json:"vault_local_directory"`
+	ConfigLocalSha256          string           `json:"config_local_sha256"`
+	VaultLocalSha256           string           `json:"vault_local_sha256"`
+	EvaluatorImageDigest       string           `json:"evaluator_image_digest"`
+	SourceLockSha256           string           `json:"source_lock_sha256"`
+	QualificationSha256        string           `json:"qualification_sha256"`
+	CoordinatorPublicKeyBase64 string           `json:"coordinator_public_key_base64"`
+	SigningKeyPath             string           `json:"signing_key_path"`
+	Limits                     Limits           `json:"limits"`
 	configPath                 string
 }
 
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
 // values are invalid; Now is a test seam and is never accepted from a peer.
 type AgentSettings struct {
-	ControlTimeout        time.Duration
-	SelfCheckTimeout      time.Duration
-	CancelGrace           time.Duration
-	LockPollInterval      time.Duration
-	MaximumClockSkew      time.Duration
-	DiagnosticBytes       int64
-	ConfigBytes           int64
-	DirectoryBatch        int
-	InputTransferTimeout  time.Duration
-	CleanupTimeout        time.Duration
-	CleanupCommandTimeout time.Duration
-	CleanupPollInterval   time.Duration
-	CleanupObjectCount    int
-	Now                   func() time.Time
+	ControlTimeout            time.Duration
+	SelfCheckTimeout          time.Duration
+	CancelGrace               time.Duration
+	LockPollInterval          time.Duration
+	MaximumClockSkew          time.Duration
+	DiagnosticBytes           int64
+	ConfigBytes               int64
+	DirectoryBatch            int
+	InputTransferTimeout      time.Duration
+	CleanupTimeout            time.Duration
+	CleanupCommandTimeout     time.Duration
+	CleanupPollInterval       time.Duration
+	CleanupObjectCount        int
+	OwnerPollInterval         time.Duration
+	ManagementMemoryBytes     int64
+	ManagementCpuQuotaPercent int
+	Now                       func() time.Time
 }
 
 // Control calls are short; only the detached systemd service owns evaluation.
@@ -85,7 +89,8 @@ func DefaultAgentSettings() AgentSettings {
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
 		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
-		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024, Now: time.Now}
+		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024,
+		OwnerPollInterval: 25 * time.Millisecond, ManagementMemoryBytes: 8 * 1024 * 1024 * 1024, ManagementCpuQuotaPercent: 200, Now: time.Now}
 }
 
 // Only an explicitly pinned path may select the role; unknown fields fail closed.
@@ -186,16 +191,16 @@ func (self *Config) validate(protected bool) error {
 			return err
 		}
 	}
+	if err := self.DockerRole.validate(self, protected); err != nil {
+		return err
+	}
 	key, err := base64.StdEncoding.DecodeString(self.CoordinatorPublicKeyBase64)
 	if err != nil || len(key) != ed25519.PublicKeySize {
 		return errors.New("invalid independent coordinator public key")
 	}
 	if protected {
-		// The frozen evaluator uses the local default daemon. A different endpoint
-		// needs a separately qualified evaluator release, never a cleanup-only override.
-		if self.DockerSocketPath != "/run/docker.sock" {
-			return errors.New("cleanup endpoint must match the qualified evaluator's local Docker daemon")
-		}
+		// The prospective role uses only the independently qualified private
+		// engine. The public helper metadata never exposes that root endpoint.
 		if err := protectedRootPath(self.configPath, false, true); err != nil {
 			return err
 		}

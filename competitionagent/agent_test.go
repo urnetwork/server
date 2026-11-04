@@ -87,6 +87,7 @@ type agentTestFixture struct {
 	settings       AgentSettings
 	runner         *agentTestRunner
 	cleaner        *agentTestCleaner
+	containment    *agentTestContainment
 	coordinatorKey ed25519.PrivateKey
 	agentPublicKey ed25519.PublicKey
 	manifest       StartManifest
@@ -97,11 +98,16 @@ type agentTestFixture struct {
 // Produces an inert evaluator and an independent cleanup checker in a temp root.
 func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	t.Helper()
-	root := t.TempDir()
+	root, err := os.MkdirTemp("/tmp", "ag-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
 	stateDirectory, workDirectory := filepath.Join(root, "state"), filepath.Join(root, "work")
+	scratchDirectory, clientsDirectory := filepath.Join(root, "scratch"), filepath.Join(root, "clients")
 	inputDirectory := filepath.Join(root, "inputs")
 	configDirectory, vaultDirectory := filepath.Join(root, "config", "local"), filepath.Join(root, "vault", "local")
-	for _, directory := range []string{stateDirectory, workDirectory, inputDirectory, configDirectory, vaultDirectory} {
+	for _, directory := range []string{stateDirectory, workDirectory, scratchDirectory, clientsDirectory, inputDirectory, configDirectory, vaultDirectory} {
 		if err := os.MkdirAll(directory, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -141,11 +147,17 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	if err := os.WriteFile(formatterPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"allowed_paths\":[\"server/example.go\"],\"forbidden_paths\":[\"server/connect/sim-latency/**\"],\"max_patch_bytes\":1024}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	resourcePath := filepath.Join(root, "resource-policy")
+	if err := os.WriteFile(resourcePath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-resource-boundary\",\"evaluation_cpuset\":\"2,4\",\"management_cpuset\":\"6,8\",\"build_memory_limit\":\"5g\",\"disjoint_cpu_sets\":true,\"memory_capacity_passed\":true}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	fixture := &agentTestFixture{inputDirectory: inputDirectory, coordinatorKey: coordinatorKey, agentPublicKey: agentPublicKey,
 		runner: &agentTestRunner{units: map[string]UnitStatus{}}, now: time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)}
 	fixture.config = &Config{Schema: Schema, HostId: "synthetic-executor", BaseDirectory: root, TrustedOperatorUser: "synthetic-operator", ExpectedDataDeviceId: 1, StateDirectory: stateDirectory, WorkDirectory: workDirectory, WorkerUser: "synthetic-worker",
 		Evaluator: testAgentPin(t, evaluatorPath), SelfCheck: testAgentPin(t, selfCheckPath), Agent: testAgentPin(t, agentPath),
-		Docker: testAgentPin(t, agentPath), DockerSocketPath: "/synthetic/docker.sock", SubmissionBuilderIdentity: testAgentPin(t, builderPath),
+		Docker: testAgentPin(t, agentPath), DockerSocketPath: filepath.Join(root, "engine", "docker.sock"), SubmissionBuilderIdentity: testAgentPin(t, builderPath),
+		DockerRole: DockerRoleConfig{ScratchDirectory: scratchDirectory, Compose: testAgentPin(t, agentPath), Buildx: testAgentPin(t, agentPath), Dockerfile: testAgentPin(t, agentPath),
+			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, agentPath)},
 		SubmissionBuilderSha256: builderSha256, SubevaluationOwnership: ownershipPin, JsonFormatter: testAgentPin(t, formatterPath),
 		ConfigLocalDirectory: configDirectory, VaultLocalDirectory: vaultDirectory, ConfigLocalSha256: strings.Repeat("1", 64), VaultLocalSha256: strings.Repeat("2", 64),
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64), QualificationSha256: strings.Repeat("5", 64),
@@ -158,6 +170,8 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	}
 	fixture.cleaner = &agentTestCleaner{}
 	fixture.agent.cleaner = fixture.cleaner
+	fixture.containment = &agentTestContainment{}
+	fixture.agent.containment = fixture.containment
 	contents := map[string][]byte{"canonical.patch": {}, "providers.yml": []byte("synthetic-workload\n"), "round-baseline.json": []byte("{\"synthetic_baseline\":true}\n")}
 	files := []File{}
 	for _, name := range []string{"canonical.patch", "providers.yml", "round-baseline.json"} {

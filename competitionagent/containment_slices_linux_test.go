@@ -211,6 +211,44 @@ func TestContainmentSlicesRetainedProofRequiresFrozenAndEmpty(t *testing.T) {
 	}
 }
 
+// A retirement is complete only when both the systemd job and the exact
+// kernel parent are gone. Empty-but-still-frozen is not safe name reuse.
+func TestContainmentSlicesRetirementRequiresInactiveUnitAndAbsentParent(t *testing.T) {
+	for _, pending := range []string{"", "unit-job", "kernel-parent"} {
+		fixture := newHostCleanupTest(t)
+		ctx, cancel := context.WithCancel(t.Context())
+		groups := &containmentTestCgroups{events: fixture.events}
+		groups.frozen = func(context.Context, string) (bool, error) {
+			if pending == "kernel-parent" {
+				cancel()
+				return true, nil
+			}
+			return false, errCleanupCgroupAbsent
+		}
+		stops, observations := 0, 0
+		boundary := &hostRunSlices{config: fixture.cleaner.config, settings: fixture.cleaner.settings, cgroups: groups,
+			command: func(_ context.Context, operation string, names []string) error {
+				stops++
+				if operation != "stop" || !reflect.DeepEqual(names, fixture.plan.CgroupNames) {
+					t.Fatal("retirement changed or restarted a containment parent")
+				}
+				return nil
+			}, retired: func(context.Context, string) (bool, error) {
+				observations++
+				if pending == "unit-job" {
+					cancel()
+					return false, nil
+				}
+				return true, nil
+			}}
+		err := boundary.Release(ctx, fixture.plan)
+		cancel()
+		if stops != 1 || (err != nil) != (pending != "") || pending == "" && observations != len(fixture.plan.CgroupNames) {
+			t.Fatal("retirement accepted an unjoined unit or reusable frozen parent", pending, err)
+		}
+	}
+}
+
 // Native FD access is exercised only under a synthetic private hierarchy.
 func newContainmentKernelFixture(t *testing.T) (*hostCleanupCgroups, string, string) {
 	t.Helper()
