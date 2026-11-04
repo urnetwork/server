@@ -234,6 +234,84 @@ func TestConnectMoveControlNarrowsLocalTransport(t *testing.T) {
 	}
 }
 
+// The exchange's in-process forward delivery (connect
+// resident_local_forward.go) chooses blocks the way localTransport does, under
+// its own ceiling and from its own field: neither in-process switch reads the
+// other's field or ceiling, the code default decides while the field is absent,
+// and every other reader ignores it.
+func TestConnectMoveControlNarrowsLocalForward(t *testing.T) {
+	dark := ConnectMoveControlCeiling{EnableLocalForward: true, LocalForwardDefault: "off"}
+	shipped := ConnectMoveControlCeiling{EnableLocalForward: true, LocalForwardDefault: "all"}
+	ceilingOff := ConnectMoveControlCeiling{EnableLocalForward: false, LocalForwardDefault: "all"}
+	// the transport switch's ceiling and default, fully on, with the forward
+	// ceiling off
+	transportOnly := ConnectMoveControlCeiling{EnableLocalTransport: true, LocalTransportDefault: "all"}
+	cases := []struct {
+		name    string
+		fields  map[string]string
+		ceiling ConnectMoveControlCeiling
+		allowed []string
+		refused []string
+	}{
+		{name: "absent: dark by default", fields: nil, ceiling: dark, refused: []string{"beta", "g1", "g2"}},
+		{name: "absent: a default of all", fields: nil, ceiling: shipped, allowed: []string{"beta", "g1", "g2"}},
+		{name: "absent: the ceiling off", fields: nil, ceiling: ceilingOff, refused: []string{"beta", "g1"}},
+		{name: "the beta stage", fields: map[string]string{"localForward": "beta"}, ceiling: dark, allowed: []string{"beta"}, refused: []string{"g1", "g2"}},
+		{name: "g1 against the other blocks", fields: map[string]string{"localForward": "g1"}, ceiling: dark, allowed: []string{"g1"}, refused: []string{"beta", "g2", "g3", "g4"}},
+		{name: "a list, padded and mixed separators", fields: map[string]string{"localForward": " beta, g1 g2\tg3 "}, ceiling: dark, allowed: []string{"beta", "g1", "g2", "g3"}, refused: []string{"g4"}},
+		{name: "all", fields: map[string]string{"localForward": "all"}, ceiling: dark, allowed: []string{"beta", "g1", "g4"}},
+		{name: "the kill switch", fields: map[string]string{"localForward": "off"}, ceiling: shipped, refused: []string{"beta", "g1"}},
+		{name: "all cannot widen past the ceiling", fields: map[string]string{"localForward": "all"}, ceiling: ceilingOff, refused: []string{"beta", "g1"}},
+		{name: "a block cannot widen past the ceiling", fields: map[string]string{"localForward": "g1"}, ceiling: ceilingOff, refused: []string{"g1"}},
+		{name: "an empty value names no block", fields: map[string]string{"localForward": ""}, ceiling: shipped, refused: []string{"beta", "g1"}},
+		{name: "on is not all: it names a block called on", fields: map[string]string{"localForward": "on"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "a keyword is exact", fields: map[string]string{"localForward": "All"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "a field name is exact", fields: map[string]string{"localforward": "all"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "the transport field does not choose forwards", fields: map[string]string{"localTransport": "all"}, ceiling: dark, refused: []string{"beta", "g1"}},
+		{name: "the transport ceiling does not widen forwards", fields: map[string]string{"localForward": "all"}, ceiling: transportOnly, refused: []string{"beta", "g1"}},
+		{name: "other ceilings ignore it with moves", fields: map[string]string{"localForward": "all"}, ceiling: connectMoveTestCeiling(), refused: []string{"beta", "g1"}},
+	}
+	for _, c := range cases {
+		control := NarrowConnectMoveControl(c.fields, c.ceiling)
+		for _, block := range c.allowed {
+			if !control.LocalForwardAllows(block) {
+				t.Errorf("%s: block %s refused, want allowed", c.name, block)
+			}
+		}
+		for _, block := range c.refused {
+			if control.LocalForwardAllows(block) {
+				t.Errorf("%s: block %s allowed, want refused", c.name, block)
+			}
+		}
+	}
+
+	// the forward field does not choose transports, and the two switches keep
+	// their own blocks when both are set
+	transportDark := ConnectMoveControlCeiling{EnableLocalTransport: true, LocalTransportDefault: "off"}
+	if control := NarrowConnectMoveControl(map[string]string{"localForward": "all"}, transportDark); control.LocalTransportAllows("g1") {
+		t.Error("the forward field chose a transport block")
+	}
+	both := connectMoveTestCeiling()
+	both.EnableTransportDelay = true
+	both.EnableLocalTransport = true
+	both.LocalTransportDefault = "off"
+	both.EnableLocalForward = true
+	both.LocalForwardDefault = "off"
+	control := NarrowConnectMoveControl(map[string]string{
+		"mode":           "on",
+		"localTransport": "g1",
+		"localForward":   "g2",
+	}, both)
+	if !control.LocalTransportAllows("g1") || control.LocalTransportAllows("g2") ||
+		!control.LocalForwardAllows("g2") || control.LocalForwardAllows("g1") {
+		t.Errorf("the in-process switches mixed their blocks: %+v", control)
+	}
+	// the switch changes nothing the mover or the handlers read
+	if control.Mode != ConnectMoveModeOn || control.MaxPerMinute != 120 || control.Tolerance != 0.10 || !control.DrainMoves || !control.TransportDelay {
+		t.Errorf("local forward changed another control: %+v", control)
+	}
+}
+
 // The stuck provider switches choose blocks the way localTransport does, each
 // under its own ceiling and from its own field: the api's signal and the
 // exchanges' recycle never read each other's field, and every other reader
