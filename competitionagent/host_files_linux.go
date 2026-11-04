@@ -56,6 +56,7 @@ type HostNamespaceMap struct {
 	ContainerIdMapLength uint32 `json:"container_id_map_length"`
 	UidMapSha256         string `json:"uid_map_sha256"`
 	GidMapSha256         string `json:"gid_map_sha256"`
+	CgroupPath           string `json:"cgroup_path"`
 }
 
 // Walks bound work examined and descriptor depth, not merely returned results.

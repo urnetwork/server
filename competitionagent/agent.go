@@ -555,7 +555,8 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 		lock.Close()
 		return err
 	}
-	if _, err := self.loadCleanupPlan(runId, state, manifest); err != nil {
+	plan, err := self.loadCleanupPlan(runId, state, manifest)
+	if err != nil {
 		lock.Close()
 		return err
 	}
@@ -597,7 +598,7 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 	}
 	lock.Close()
 	evaluationCtx, cancel := context.WithDeadline(ctx, manifest.Identity.DeadlineAt)
-	exitCode, runErr := self.runEvaluator(evaluationCtx, manifest)
+	exitCode, runErr := self.runEvaluator(evaluationCtx, manifest, plan)
 	evaluationExpired := !self.settings.Now().UTC().Before(manifest.Identity.DeadlineAt) || errors.Is(evaluationCtx.Err(), context.DeadlineExceeded)
 	evaluationCanceled := evaluationCtx.Err() != nil
 	cancel()
@@ -641,10 +642,25 @@ func (self *Agent) check(ctx context.Context) (Response, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, self.settings.SelfCheckTimeout)
 	defer cancel()
 	output := &boundedOutput{maximum: self.settings.DiagnosticBytes}
-	command := exec.CommandContext(checkCtx, self.config.SelfCheck.Path, "--json")
+	arguments := []string{"--json"}
+	if self.protected {
+		boundary, err := self.verifyCleanupRuntime(checkCtx)
+		if err != nil {
+			return Response{Schema: Schema, HostId: self.config.HostId, State: "unavailable", ExitCode: -1, ErrorCode: "private_runtime_unqualified"}, nil
+		}
+		if err := self.validateHostCheckConfiguration(boundary); err != nil {
+			return Response{Schema: Schema, HostId: self.config.HostId, State: "unavailable", ExitCode: -1, ErrorCode: "host_check_configuration_invalid"}, nil
+		}
+		arguments = append(arguments, "--config", self.config.HostCheckConfiguration.Path, "--private-runtime", self.config.Agent.Path,
+			"--agent-config", self.config.configPath, "--boundary", self.config.DockerRole.ResourceBoundary.Path)
+	}
+	command := exec.CommandContext(checkCtx, self.config.SelfCheck.Path, arguments...)
 	command.Env = controlEnvironment()
 	command.Stdout, command.Stderr = output, &discardWriter{}
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: self.credential}
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if !self.protected {
+		command.SysProcAttr.Credential = self.credential
+	}
 	exitCode, err := runProcessGroup(checkCtx, command, self.settings.CancelGrace)
 	response := Response{Schema: Schema, HostId: self.config.HostId, State: "ready", ExitCode: exitCode}
 	if output.exceeded || !json.Valid(output.Bytes()) {
@@ -854,7 +870,7 @@ func (self *Agent) prepareWorkerOwnership(directory string) error {
 
 // Executes the pinned evaluator as the isolated host account with a fresh
 // environment. Cancellation joins its process group and bounded normal cleanup.
-func (self *Agent) runEvaluator(ctx context.Context, manifest *StartManifest) (int, error) {
+func (self *Agent) runEvaluator(ctx context.Context, manifest *StartManifest, plan *cleanupPlan) (int, error) {
 	if err := validatePin(self.config.Evaluator, self.protected); err != nil {
 		return -1, err
 	}
@@ -875,6 +891,8 @@ func (self *Agent) runEvaluator(ctx context.Context, manifest *StartManifest) (i
 	command.Dir = directory
 	command.Env = append(controlEnvironment(), "HOME="+directory, "USER="+self.config.WorkerUser, "LOGNAME="+self.config.WorkerUser)
 	command.Env = append(command.Env, subevaluationScopeEnvironment(manifest.Identity)...)
+	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_CLIENT="+self.config.Agent.Path)
+	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET="+plan.ManagementCpuSet)
 	command.Stdout, command.Stderr = stdoutWriter, stderrWriter
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: self.credential}
 	exitCode, runErr := runProcessGroup(ctx, command, self.settings.CancelGrace)

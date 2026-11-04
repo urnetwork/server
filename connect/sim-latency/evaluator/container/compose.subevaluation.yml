@@ -3,18 +3,84 @@
 x-subevaluation-labels: &subevaluation-labels
   com.urnetwork.competition.run-id: ${URNETWORK_SUBEVALUATION_RUN_ID:?set the authenticated subevaluation run identity}
 
+# Defense in depth only: the independent native core-handler gate must also
+# pass, because a piped kernel handler may ignore this per-process limit.
+x-subevaluation-ulimits: &subevaluation-ulimits
+  core:
+    soft: 0
+    hard: 0
+
 services:
   postgres:
     labels: *subevaluation-labels
+    ulimits: *subevaluation-ulimits
+    volumes:
+      - type: bind
+        source: ${EVALUATION_POSTGRES_INIT:?set the trusted PostgreSQL init script}
+        target: /docker-entrypoint-initdb.d/10-competition-app.sh
+        read_only: true
+        bind: {create_host_path: false}
   migrate:
     labels: *subevaluation-labels
+    ulimits: *subevaluation-ulimits
+    volumes:
+      - type: bind
+        source: ${EVALUATION_CONFIG_LOCAL_DIR:?set frozen direct config/local directory}
+        target: /runtime/config/local
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVALUATION_VAULT_LOCAL_DIR:?set frozen direct vault/local directory}
+        target: /runtime/vault/local
+        read_only: true
+        bind: {create_host_path: false}
   redis:
     labels: *subevaluation-labels
+    ulimits: *subevaluation-ulimits
   runner:
     labels: *subevaluation-labels
+    ulimits: *subevaluation-ulimits
+    volumes:
+      - type: bind
+        source: ${EVALUATION_SOURCE_DIR:?set the per-evaluation temporary source checkout}
+        target: /workspace
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVALUATION_CONFIG_LOCAL_DIR:?set frozen direct config/local directory}
+        target: /runtime/config/local
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVALUATION_VAULT_LOCAL_DIR:?set frozen direct vault/local directory}
+        target: /runtime/vault/local
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVALUATION_INPUT_DIR:?set authenticated workload directory}
+        target: /input
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVALUATION_OUTPUT_DIR:?set empty stage artifact directory}
+        target: /artifacts
+        bind: {create_host_path: false}
   scorer:
     labels: *subevaluation-labels
+    ulimits: *subevaluation-ulimits
+    volumes:
+      - type: bind
+        source: ${EVALUATION_INPUT_DIR:?set authenticated score input directory}
+        target: /artifacts
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ${EVALUATION_OUTPUT_DIR:?set empty score output directory}
+        target: /score-output
+        bind: {create_host_path: false}
 
 networks:
   evaluation:
     labels: *subevaluation-labels
+    driver_opts:
+      com.docker.network.bridge.name: ${URNETWORK_SUBEVALUATION_BRIDGE_NAME:?set the authenticated subevaluation bridge identity}

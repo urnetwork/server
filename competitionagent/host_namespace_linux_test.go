@@ -35,7 +35,7 @@ func TestHostNamespaceCapturesExactCgroupAndKernelMapHashes(t *testing.T) {
 	plan := HostFilesPlan{ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536}
 	mapping, err := readHostNamespace(t.Context(), root, expected, plan, DefaultHostFilesSettings())
 	if err != nil || mapping.ContainerRootUid != 200000 || mapping.ContainerRootGid != 300000 || mapping.ContainerIdMapLength != 65536 ||
-		mapping.UidMapSha256 != digestDockerBytes(uidMap) || mapping.GidMapSha256 != digestDockerBytes(gidMap) {
+		mapping.UidMapSha256 != digestDockerBytes(uidMap) || mapping.GidMapSha256 != digestDockerBytes(gidMap) || mapping.CgroupPath != expected {
 		t.Fatal("namespace proof lost exact scoped kernel bytes", err)
 	}
 	if _, err := readHostNamespace(t.Context(), root, expected+"-foreign", plan, DefaultHostFilesSettings()); err == nil {

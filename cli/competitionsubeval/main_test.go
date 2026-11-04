@@ -25,11 +25,22 @@ func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
 		{"--config", "/synthetic/agent.json", "--host-operation=" + strings.Repeat("a", 64), "--", "mount-evidence"},
 		{"--host-operation=" + strings.Repeat("a", 64)},
 		{"--host-operation=" + strings.Repeat("a", 64), "--docker-client=" + strings.Repeat("a", 64), "--", "info"},
+		{"--docker-probe", "--", "info", "--format", "{{.CgroupVersion}}"},
+		{"--config", "/synthetic/agent.json", "--docker-probe"},
+		{"--config", "/synthetic/agent.json", "--docker-probe", "--serve", "--", "info", "--format", "{{.CgroupVersion}}"},
 	}
 	for _, args := range cases {
 		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
 			t.Fatalf("accepted expanded or incomplete role: %q", args)
 		}
+	}
+}
+
+func TestSubevaluationArgumentsAcceptRootOnlyDockerProbeRole(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--docker-probe", "--", "info", "--format", "{{.CgroupVersion}}"}, &bytes.Buffer{})
+	if err != nil || !parsed.dockerProbe || parsed.configPath != "/synthetic/agent.json" || parsed.serve || parsed.dockerClientRunId != "" ||
+		len(parsed.dockerArguments) != 3 || parsed.dockerArguments[0] != "info" {
+		t.Fatal("closed root host-audit role was not retained", err)
 	}
 }
 

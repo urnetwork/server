@@ -37,6 +37,7 @@ type arguments struct {
 	dockerOwnerRunId   string
 	freezeRunId        string
 	hostOperationRunId string
+	dockerProbe        bool
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -52,11 +53,12 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.dockerOwnerRunId, "docker-owner", "", "Systemd-only independent persisted Docker request owner")
 	flags.StringVar(&parsed.freezeRunId, "freeze", "", "Systemd-only fixed emergency freeze/kill, with no mutual unit join")
 	flags.StringVar(&parsed.hostOperationRunId, "host-operation", "", "Non-root finite fixed-run file handoff; public sibling metadata only")
+	flags.BoolVar(&parsed.dockerProbe, "docker-probe", false, "Root-only closed read-only private-engine host-audit query")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != ""} {
+	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe} {
 		if enabled {
 			roles++
 		}
@@ -67,6 +69,11 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	if parsed.dockerClientRunId != "" || parsed.hostOperationRunId != "" {
 		if parsed.configPath != "" || flags.NArg() == 0 {
 			return arguments{}, errors.New("Docker client requires only its fixed run identity and command")
+		}
+		parsed.dockerArguments = append([]string(nil), flags.Args()...)
+	} else if parsed.dockerProbe {
+		if parsed.configPath == "" || flags.NArg() == 0 {
+			return arguments{}, errors.New("root-only Docker audit requires protected configuration and fixed fact arguments")
 		}
 		parsed.dockerArguments = append([]string(nil), flags.Args()...)
 	} else if flags.NArg() != 0 || parsed.configPath == "" {
@@ -88,9 +95,15 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if parsed.hostOperationRunId != "" {
 		return competitionagent.RunHostFilesClient(ctx, parsed.hostOperationRunId, parsed.dockerArguments, output)
 	}
+	if parsed.dockerProbe && os.Geteuid() != 0 {
+		return errors.New("Docker host audit requires the fixed root role")
+	}
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {
 		return err
+	}
+	if parsed.dockerProbe {
+		return competitionagent.RunDockerProbe(ctx, config, parsed.dockerArguments, output)
 	}
 	settings := competitionagent.DefaultAgentSettings()
 	agent, err := competitionagent.NewAgent(config, competitionagent.NewSystemdRunner(settings), settings)
