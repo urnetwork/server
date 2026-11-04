@@ -75,8 +75,10 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 	if lease.Environment != settings.AutomationPolicy.Environment || lease.CompetitionId != settings.CompetitionId || lease.SeasonId != settings.AutomationPolicy.SeasonId {
 		return nil, ErrLeaseLost
 	}
-	err = captureDatabaseError(func() {
+	observation := newCompetitionSupervisorRenewObservation()
+	err = observation.capture(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
+			observation.callbackEntered = true
 			result = nil
 			automationScopeLockInTx(ctx, tx, settings)
 			var previousExpiry time.Time
@@ -105,7 +107,7 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 			}
 			copyLease := lease
 			result = &copyLease
-		})
+		}, &observation.phase, &observation.timing, observation.read)
 	})
 	return result, err
 }
