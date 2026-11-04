@@ -399,7 +399,11 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 	}
 	id := hex.EncodeToString(idBytes)
 	bodyPath := filepath.Join(self.bodyDirectory(), id+".request")
-	_ = http.NewResponseController(w).SetReadDeadline(self.settings.Now().Add(self.settings.UploadTimeout))
+	uploadDeadline := self.settings.Now().Add(self.settings.UploadTimeout)
+	if self.plan.DeadlineAt.Before(uploadDeadline) {
+		uploadDeadline = self.plan.DeadlineAt
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(uploadDeadline)
 	body := io.Reader(http.NoBody)
 	if r.Body != nil {
 		body = r.Body
@@ -423,6 +427,10 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 		r = r.Clone(r.Context())
 		r.URL.Path = path
 		r.URL.RawPath = ""
+	}
+	if !self.settings.Now().Before(self.plan.DeadlineAt) {
+		http.Error(w, "original Docker issue deadline elapsed", http.StatusRequestTimeout)
+		return
 	}
 	operation := &dockerProxyOperation{Schema: Schema, Id: id, RunId: self.plan.RunId, Kind: kind, Method: r.Method,
 		Uri: r.URL.RequestURI(), State: "issued", RequestSha256: bodyDigest, RequestBytes: bodyBytes}

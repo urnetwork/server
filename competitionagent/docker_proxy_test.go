@@ -180,6 +180,44 @@ type dockerProxyIncompleteBody struct {
 	read    bool
 }
 
+// The final complete body boundary advances a synthetic clock without sleeps.
+type dockerProxyDeadlineBody struct {
+	reader   io.Reader
+	finished func()
+}
+
+func (self *dockerProxyDeadlineBody) Read(destination []byte) (int, error) {
+	count, err := self.reader.Read(destination)
+	if errors.Is(err, io.EOF) {
+		self.finished()
+	}
+	return count, err
+}
+
+func (self *dockerProxyDeadlineBody) Close() error { return nil }
+
+// Admission before deadline cannot authorize a new daemon mutation after a
+// delayed upload. Cleanup's drain allowance never renews issue authority.
+func TestDockerProxyCompleteUploadCannotIssueAfterOriginalDeadline(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	now := fixture.plan.DeadlineAt.Add(-time.Second)
+	fixture.proxy.settings.Now = func() time.Time { return now }
+	var calls atomic.Int64
+	fixture.daemon(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusCreated) })
+	request := httptest.NewRequest(http.MethodPost, "http://worker/containers/create", nil)
+	request.Body = &dockerProxyDeadlineBody{reader: bytes.NewReader(fixture.create), finished: func() { now = fixture.plan.DeadlineAt }}
+	request.ContentLength = int64(len(fixture.create))
+	response := httptest.NewRecorder()
+	fixture.proxy.workerHandler(response, request)
+	if response.Code != http.StatusRequestTimeout || calls.Load() != 0 {
+		t.Fatal("a pre-deadline upload became a post-deadline daemon issue")
+	}
+	entries, err := os.ReadDir(fixture.proxy.operationDirectory())
+	if err != nil || len(entries) != 0 {
+		t.Fatal("expired input manufactured an issued intent", err)
+	}
+}
+
 // EOF is deliberately not a valid end-of-message.
 func (self *dockerProxyIncompleteBody) Read(destination []byte) (int, error) {
 	if self.read {
