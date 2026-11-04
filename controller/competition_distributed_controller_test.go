@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"math"
 	"path/filepath"
 	"testing"
@@ -243,3 +244,27 @@ func TestCompetitionDistributedRunIdentitySeparatesRoundAndSourceEpoch(t *testin
 		t.Fatal("later epoch could not carry the same reviewed source", err)
 	}
 }
+
+// Extra bytes after the signed frame are integrity failures. Zero-byte network
+// errors retain their uncertainty and do not condemn the original execution.
+func TestCompetitionDistributedTrailerSeparatesCorruptionFromTransportFailure(t *testing.T) {
+	if err := readCompetitionAgentTrailer(bytes.NewReader([]byte{1, 2, 3})); !errors.Is(err, competitionagent.ErrIntegrity) {
+		t.Fatal("trailing bytes were not a definitive integrity rejection", err)
+	}
+	if err := readCompetitionAgentTrailer(bytes.NewReader(nil)); err != nil {
+		t.Fatal("clean frame EOF was rejected", err)
+	}
+	transportErr := errors.New("synthetic connection reset")
+	if err := readCompetitionAgentTrailer(competitionTrailerFailureReader{err: transportErr}); !errors.Is(err, transportErr) || errors.Is(err, competitionagent.ErrIntegrity) {
+		t.Fatal("zero-byte transport error was misclassified", err)
+	}
+	if err := readCompetitionAgentTrailer(competitionTrailerFailureReader{}); !errors.Is(err, io.ErrNoProgress) {
+		t.Fatal("nonprogressing trailer read was accepted", err)
+	}
+}
+
+// Supplies an exact I/O boundary without depending on sockets or wall clocks.
+type competitionTrailerFailureReader struct{ err error }
+
+// A zero-byte error is not evidence of a malformed authenticated payload.
+func (self competitionTrailerFailureReader) Read([]byte) (int, error) { return 0, self.err }

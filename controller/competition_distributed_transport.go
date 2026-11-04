@@ -108,10 +108,7 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 		}
 	}
 	if readErr == nil {
-		var trailing [1]byte
-		if n, err := stdout.Read(trailing[:]); n != 0 || err != io.EOF {
-			readErr = errors.New("executor response has trailing unframed bytes")
-		}
+		readErr = readCompetitionAgentTrailer(stdout)
 	}
 	if readErr != nil {
 		cancel()
@@ -126,6 +123,23 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 		return competitionagent.Response{}, fmt.Errorf("authenticated executor transport failed: %w", err)
 	}
 	return response, nil
+}
+
+// One extra byte is definitive framing corruption; an I/O error without bytes
+// is still uncertain transport. EOF is the only successful frame terminator.
+func readCompetitionAgentTrailer(reader io.Reader) error {
+	var trailing [1]byte
+	count, err := reader.Read(trailing[:])
+	if count > 0 {
+		return errors.Join(competitionagent.ErrIntegrity, errors.New("executor response has trailing unframed bytes"))
+	}
+	if err == io.EOF {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return io.ErrNoProgress
 }
 
 // Matching is exact on the frozen host list; extra/missing deployment routes
