@@ -29303,6 +29303,19 @@ publication a missing object remains migration lag. Native controls exercise
 both prefixes and rolled-back object/shape faults; synthetic controls preserve
 unknown authority above the source-known head.
 
+The native partition-cutover control exposed a preservation boundary: table
+renames keep extended statistics attached to the original table OID, while the
+staged parent was created without them. An object left only on
+`transfer_contract_legacy` does not satisfy version 926 on the published parent.
+The owning cutover repair captures definitions after acquiring the swap's table
+locks, keeps the original objects for rollback, and publishes parent copies
+with their original names, owners, targets and comments. Name collisions or
+identifier-length overflow refuse the atomic swap; rollback refuses an ambiguous
+parent/legacy counterpart. Controls cover statistics added after prepare,
+collision rollback, parent object shape and restoration of original object OIDs.
+This is a cutover schema-preservation defect; the monitor's expression contract
+remains unchanged.
+
 False-positive qualifier: the migration deliberately creates no sample, so a
 correct but unsampled statistics object is healthy for this schema contract;
 this probe neither reads `pg_statistic_ext_data` nor requires ANALYZE. A missing
