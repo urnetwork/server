@@ -1,11 +1,22 @@
 {
   "schema": 1,
   "kind": "inactive-next-epoch-g2-source-and-qualification-handoff",
-  "status": "independent_mocked_developer_units_165_passes_heavy_qualification_pending_not_activated",
+  "status": "prospective_upstream_integration_pending_fresh_mocked_developer_validation_not_activated",
   "observed_at": "2026-11-03T19:24:01Z",
-  "source_preparation_revised_at": "2026-11-04T03:37:28Z",
-  "control_source_base": "164f75ecad3949c94c97b92b48818e77cb93bc9b",
+  "source_preparation_revised_at": "2026-11-04T03:45:35Z",
+  "control_source_base": "9f565f38a4cecc511649a8ee2a82415f0cd6b110",
   "original_g2_control_source_base": "23d4a3baba84dffb68b2db05007b3cf218794ce5",
+  "prospective_upstream_integration_2026_11_04": {
+    "status": "private_merge_candidate_only_pending_independent_low_revalidation",
+    "g2_parent_commit": "9ab5026ce17c3047725f75e0f60d86e5f67e24d9",
+    "upstream_parent_commit": "9f565f38a4cecc511649a8ee2a82415f0cd6b110",
+    "existing_165_developer_passes_qualify_only": "2f991a6ac9e396d2667d70c0fe07ee9c4edd0d4c",
+    "combined_source_passes_claimed": 0,
+    "upstream_executable_delta": "model/provider_intent_exempt_index.go, model/verify_cohort_model.go, model/verify_dead_hop.go and model/verify_model.go; G2 Go source, go.mod/go.sum and normal-control sibling pins remain byte-identical to qualified2f.",
+    "hermetic_lane_static_review": "New model initialization constructs and registers two in-memory Prometheus collectors only. New DB/Redis dead-hop operations are behind unselected verify entry points, not initialization or the mocked55 roots. Upstream model/controller/root test files are not imported into the sim-latency test executable. No new sim-latency init/TestMain, dependency declaration, selected root or real Docker/provider/network operation was introduced.",
+    "required_validation": "Independent LOW must compile a new race-test ELF from this exact private combined commit and run only the same hermetic55-root selector in three fresh bounded processes, using the unchanged locked graph and reviewed isolation. Prior165 passes and red evidence remain sealed and are not relabeled as combined-source qualification.",
+    "integration_boundary": "Do not merge or push this candidate into main until fresh independent validation and final source review. No release/artifact/source-gate build, Docker, runtime/config/policy/API/DB/hold change or G2 activation is authorized. Heavy work still requires natural empty plus durable exclusion."
+  },
   "normal_control_source_lock": {
     "path": "local/source-graph/lock.yml",
     "sha256": "f4080fe99a06c4881f3941e2c057b1f837cb4dbb748890f7cc0264e9b43c98dc",
@@ -209,7 +220,7 @@
     },
     "closed_graph_requirement": "Freeze the corrected normal-control server commit plus all nine exact sibling commits from its lock in independent clean checkouts. The implementation worktree alone lacks those sibling checkouts and is not a runnable or qualified graph. Bind source, modules and actual toolchain read-only; retain before/after manifests.",
     "prospective_light_unit_lane": {
-      "status": "completed_independent_mocked_developer_qualification_55_roots_three_fresh_processes_red_control_proven",
+      "status": "completed_for_2f_source_only_prospective_upstream_merge_pending_fresh_revalidation",
       "run_now": false,
       "any_further_corrected_source_attempt_requires_new_root_authorization": true,
       "root_reviewed_light_compile_and_unit_authority": true,

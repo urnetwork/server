@@ -38,6 +38,9 @@ package model
 //	{verify_cohort:<deployment>}e<epoch>       providers admitted for one settlement epoch
 //	{verify_cohort:<deployment>}e<epoch>draws  next hops drawn from that cohort
 //	{verify_cohort:<deployment>}lifetime       every provider ever admitted (no ttl)
+//	verify_dead_hop         set of providers on dead-hop probation (verify_dead_hop.go)
+//	verify_dead_hop_refresh held while the probation set is fresh
+//	{vdhp_<clientId>}       a provider's probe slot while on probation
 //
 // The egress index is fed by one bijection-gated feeder
 // (`feedVerifyEgressLease`, applied a chunk at a time by the proxy refresh's
@@ -135,6 +138,13 @@ func DefaultVerifySettings() *VerifySettings {
 		// today; note /48 v6, NOT the /56 of server.ClientIpHash).
 		EgressHashV4Prefix: 29,
 		EgressHashV6Prefix: 48,
+		// Dead-hop probation (verify_dead_hop.go, owner decision 2026-11-04):
+		// no confirmation of at least 50 assignments in 24 h, then one probe
+		// every 4 h until a confirmation.
+		DeadHopAssignments:     50,
+		DeadHopWindow:          24 * time.Hour,
+		DeadHopProbeInterval:   4 * time.Hour,
+		DeadHopRefreshInterval: 5 * time.Minute,
 	}
 }
 
@@ -217,6 +227,19 @@ type VerifySettings struct {
 	// as before, the only record a validator's receipt check accepts until it
 	// takes the moved one; turn it on once every validator does.
 	HopLatencyFromAttributedAttempt bool
+	// DeadHopAssignments, when positive, puts on probation a provider with no
+	// confirmation and at least this many assignments over the trailing
+	// DeadHopWindow of verify_provider_stats (verify_dead_hop.go). Every draw,
+	// cohort or uniform, skips a provider on probation, except that it may be
+	// drawn once per DeadHopProbeInterval (zero or less: never) so that it
+	// can confirm again. Its probation ends at its first confirmation in the
+	// window, or once the window holds no assignment of it. Every
+	// DeadHopRefreshInterval one api process recomputes the probation set.
+	// Zero turns probation off.
+	DeadHopAssignments     int64
+	DeadHopWindow          time.Duration
+	DeadHopProbeInterval   time.Duration
+	DeadHopRefreshInterval time.Duration
 }
 
 // TrailTtl is the redis lifetime of one trail's state (VALIDATOR.md §5.5:
@@ -835,6 +858,10 @@ func resolveVerifyEgressAt(
 // refill passively so set membership cannot track them). Members with no
 // provide modes are lazily evicted from the set.
 //
+// Either draw skips providers on dead-hop probation, except for a due probe
+// (verify_dead_hop.go). `n` still counts them, as it counts members without a
+// token.
+//
 // With a configured cohort (CohortSize > 0) every draw comes from the bounded
 // settlement-epoch cohort instead, and nothing falls back to this uniform draw.
 func SampleVerifyNextHop(
@@ -842,6 +869,7 @@ func SampleVerifyNextHop(
 	excludeClientIds []server.Id,
 	settings *VerifySettings,
 ) (nextHop *server.Id, n int) {
+	refreshVerifyDeadHopIfDue(ctx, settings)
 	if 0 < settings.CohortSize {
 		return sampleVerifyCohortNextHop(ctx, excludeClientIds, settings)
 	}
@@ -884,6 +912,7 @@ func SampleVerifyNextHop(
 					allowed = append(allowed, candidate)
 				}
 			}
+			allowed, probes := filterVerifyDeadHop(ctx, r, allowed, settings)
 			if len(allowed) == 0 {
 				continue
 			}
@@ -899,6 +928,11 @@ func SampleVerifyNextHop(
 			}
 			if !SpendVerifyEligibilityToken(ctx, candidateId, settings) {
 				// token exhausted: temporarily unassignable, try another
+				excluded[candidate] = true
+				continue
+			}
+			if probes[candidate] && !claimVerifyDeadHopProbe(ctx, r, candidate, settings) {
+				// another draw took this probe first
 				excluded[candidate] = true
 				continue
 			}

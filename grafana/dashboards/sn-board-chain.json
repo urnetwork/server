@@ -854,6 +854,40 @@
         },
         "overrides": []
       }
+    },
+    {
+      "id": 28,
+      "type": "timeseries",
+      "title": "verify dead-hop probation",
+      "description": "Next hops assigned as probes to providers on dead-hop probation (no confirmation of at least 50 assignments in 24 h; one probe per provider every 4 h, so probes per 4 h roughly count the providers on probation), and probation refreshes from verify_provider_stats by result. A failed refresh keeps the last probation set. api and alt both draw next hops.",
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 51
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_verify_dead_hop_probes_total{env=\"$env\",service=~\"api|alt\",instance!=\"\"}[1h]))",
+          "legendFormat": "probes per hour"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (result) (increase(urnetwork_verify_dead_hop_refreshes_total{env=\"$env\",service=~\"api|alt\",instance!=\"\"}[1h]))",
+          "legendFormat": "refreshes {{result}} per hour"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      }
     }
   ]
 }

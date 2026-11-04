@@ -1079,7 +1079,14 @@ func TestProviderLivenessExclusionsPipelineAcrossClusterShards(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{authority}})
+	// The seed and every node the cluster names dial through the process
+	// guard, as server's TestRedisShardSubscriptionFollowsSlotMigration does.
+	clusterClient := redis.NewClusterClient(&redis.ClusterOptions{
+		Addrs: []string{authority},
+		Dialer: func(ctx context.Context, network string, address string) (net.Conn, error) {
+			return server.Testing_DialTestEnv(ctx, "redis", network, address)
+		},
+	})
 	defer clusterClient.Close()
 
 	clusterInfo, err := clusterClient.ClusterInfo(ctx).Result()

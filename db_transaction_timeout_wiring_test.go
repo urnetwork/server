@@ -147,10 +147,12 @@ func TestLongOperationsLiftTransactionTimeout(t *testing.T) {
 		// the weekly payment plan
 		{directory: "model", function: "configurePaymentPlanTransaction", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		// the reliability transactions over every client
-		{directory: "model", function: "UpdateClientLocationReliabilities", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "UpdateClientReliabilityScores", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "UpdateNetworkReliabilityWindow", identifiers: []string{"boundReliabilityTransactionInTx"}},
 		{directory: "model", function: "boundReliabilityTransactionInTx", identifiers: []string{"SetTransactionTimeoutInTx", "reliabilityRunningCheckpointStatementTimeout"}},
+		// the location refresh no longer holds one transaction over every
+		// client: each page of a client cohort replaces the bound with its own
+		{directory: "model", function: "clientLocationRefreshTx", identifiers: []string{"SetTransactionTimeoutInTx", "clientLocationRefreshPageTimeout"}},
 		// operator backfills and a partition index build
 		{directory: "model", function: "BackfillProviderAuditEvents", identifiers: []string{"SetTransactionTimeoutInTx"}},
 		{directory: "model", function: "BackfillDeviceAuditEvents", identifiers: []string{"SetTransactionTimeoutInTx"}},
