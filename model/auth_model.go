@@ -1922,8 +1922,7 @@ func AuthCodeCreate(
 		if clientSession.ByJwt.SessionId != nil {
 			horizon, err := session.RegisterNetworkSession(clientSession.Ctx, clientSession.ByJwt, "restored", nil, false, now)
 			server.Raise(err)
-			// in UTC, as the end_time column holds it: pgx writes a time's
-			// wall clock and drops its zone
+			// in UTC, as the end_time column holds it
 			effective := time.UnixMilli(horizon.AcceptUntil).UTC()
 			if effective.Before(endTime) {
 				endTime = effective

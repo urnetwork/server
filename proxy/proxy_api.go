@@ -175,7 +175,10 @@ func (self *apiServer) httpConfiguration() (http.Handler, server.HttpServerOptio
 		router.NewRoute("GET", flowTracePath, flowTrace.ServeHTTP),
 	}
 
-	router := router.NewRouter(self.ctx, routes)
+	// warp exposes this port by DNAT, with no nginx in front to set the
+	// forwarding headers the session trusts, so the api is its own ingress
+	// (router/ingress.go)
+	handler := router.NewIngressHandler(router.NewRouter(self.ctx, routes))
 
 	httpServerOptions := server.HttpServerOptions{
 		ReadTimeout:     15 * time.Second,
@@ -188,7 +191,7 @@ func (self *apiServer) httpConfiguration() (http.Handler, server.HttpServerOptio
 		GetConfigForClient: self.transportTls.GetTlsConfigForClient,
 	}
 
-	return router, httpServerOptions, tlsConfig
+	return handler, httpServerOptions, tlsConfig
 }
 
 type WarmupRequest struct {

@@ -300,6 +300,10 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /sn/wallet/network-consent":         {path: "/sn/wallet/network-consent", body: map[string]any{"coldkey_ss58": "attacker"}},
 		"POST /sn/wallet/hotkey-consent":          {path: "/sn/wallet/hotkey-consent", body: map[string]any{"coldkey_ss58": "attacker"}},
 		"POST /sn/wallet/hotkey-delegation":       {path: "/sn/wallet/hotkey-delegation", body: map[string]any{"coldkey_ss58": "attacker"}},
+		"GET /sn/fleet/claim":                     {path: "/sn/fleet/claim"},
+		"POST /sn/fleet/authorization":            {path: "/sn/fleet/authorization", body: map[string]any{"message": "attacker", "signature": "00"}},
+		"POST /sn/fleet/hotkey-signatures":        {path: "/sn/fleet/hotkey-signatures", body: map[string]any{"signatures": []any{}}},
+		"POST /sn/fleet/top-up":                   {path: "/sn/fleet/top-up"},
 		"POST /account/api-key":                   {path: "/account/api-key", body: map[string]any{"name": "attacker"}},
 		"POST /account/api-key/remove":            {path: "/account/api-key/remove", body: map[string]any{"id": self.apiKeyId}},
 		"GET /account/api-keys":                   {path: "/account/api-keys"},
@@ -339,6 +343,13 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /sn/wallet/consent": {path: "/sn/wallet/consent", body: map[string]any{"client_id": victimClientId, "coldkey_ss58": "attacker"}},
 		"GET /sn/wallet":          {path: "/sn/wallet"},
 		"POST /sn/head/binding":   {path: "/sn/head/binding", body: map[string]any{"binding": map[string]any{"client_id": victimClientId}, "client_signature": "00"}},
+		// a device's own part of a Top 200 claim, and the claim relay
+		"GET /sn/fleet/device":            {path: "/sn/fleet/device?need_consent=1"},
+		"POST /sn/fleet/device/signature": {path: "/sn/fleet/device/signature", body: map[string]any{"digest": "attacker", "refusal": "attacker"}},
+		"GET /sn/fleet/device/binding":    {path: "/sn/fleet/device/binding"},
+		"POST /sn/fleet/device/leave":     {path: "/sn/fleet/device/leave", body: map[string]any{"generation": 1, "effective_epoch": 1}},
+		"GET /sn/claim-relay":             {path: "/sn/claim-relay"},
+		"POST /sn/claim-relay/claim-now":  {path: "/sn/claim-relay/claim-now", body: map[string]any{"coldkey_ss58": "attacker"}},
 	}
 }
 
@@ -508,15 +519,20 @@ func TestRealClientTokenOfAnOrdinaryNetworkKeepsItsOwnPayoutRoutes(t *testing.T)
 				continue
 			}
 			key := routeAccessKey(route)
-			request := requests[key]
+			request, ok := requests[key]
+			if !ok {
+				t.Fatalf("%s has no request in routeAccessAdminRequests", key)
+			}
 			w := self.serve(route.Method(), request.path, client, request.body)
 			if w.Code == http.StatusForbidden && strings.TrimSpace(w.Body.String()) == router.ClientCredentialRefusedMessage {
 				t.Fatalf("%s: the client token of an ordinary network was refused", key)
 			}
 			servedCount += 1
 		}
-		if servedCount != 4 {
-			t.Fatalf("served %d own client payout routes, want 4", servedCount)
+		// the four of AUTHZ1.md decision 3, a device's four Top 200 claim
+		// routes and the claim relay's two
+		if servedCount != 10 {
+			t.Fatalf("served %d own client payout routes, want 10", servedCount)
 		}
 
 		// the wallet read serves it, and a mapping for another client is the

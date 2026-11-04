@@ -684,9 +684,10 @@ func (self *Exchange) takeOverMovedResident(
 	if !nominated {
 		return false
 	}
-	// best effort: an intent left behind only ends with its ttl
-	if _, err := model.TakeResidentMoveIntent(ctx, clientId); err != nil && glog.V(1) {
-		glog.Infof("[move]take intent %s = %s\n", clientId, err)
+	// Nomination can overlap a newer move; remove only the intent we used.
+	// Best effort: an intent left behind only ends with its ttl.
+	if _, err := model.DeleteResidentMoveIntent(ctx, clientId, intent.MoveId); err != nil && glog.V(1) {
+		glog.Infof("[move]delete intent %s = %s\n", clientId, err)
 	}
 	residentMovesArrivedCounter.WithLabelValues(string(intent.Kind), self.localMoveHost()).Inc()
 	if glog.V(1) {

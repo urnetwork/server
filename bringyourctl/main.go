@@ -3616,7 +3616,9 @@ func onboardingSendTest(opts docopt.Opts) {
 // --credential=url (the default) puts the first brevo.webhook_bearers user,
 // with an empty password, in the webhook url (Brevo's username and password
 // authentication); --credential=header sends the same Basic value as a custom
-// Authorization header instead. It prints what it did, the credential masked.
+// Authorization header instead. An `auth` bearer the webhook already has is
+// left in place: when its token is a brevo.webhook_bearers user the api
+// accepts it too. It prints what it did, the credential masked.
 // A disabled campaign is a refusal, not a fault: the gate exists so nothing
 // touches the live Brevo account until onboarding.enabled is set, so say what
 // to flip and exit non-zero without a stack trace.
