@@ -127,9 +127,9 @@ func newCompetitionDistributedPgFixture(outer *testing.T, t testing.TB, publish,
 // Explicit ids/timestamps test admission order independently of commit order.
 func (self *competitionDistributedPgFixture) addJob(t testing.TB, jobId server.Id, submittedAt time.Time, label string) *queuedJob {
 	t.Helper()
-	patch, err := ValidateAndCanonicalizePatch(testPatch("synthetic-"+label), self.settings.PatchPolicy)
-	if err != nil {
-		t.Fatal(err)
+	patch, patchError := ValidateAndCanonicalizePatch(testPatch("synthetic-"+label), self.settings.PatchPolicy)
+	if patchError != nil {
+		t.Fatal(patchError)
 	}
 	server.Tx(context.Background(), func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(context.Background(), `INSERT INTO competition_job(job_id,round_id,patch_bytes,patch_sha256,cache_key,state,submitted_at,available_at,attempt_count,artifact_retain_until,api_image_digest)
