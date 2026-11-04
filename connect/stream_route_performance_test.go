@@ -719,6 +719,16 @@ func waitForStreamRoutePerformanceP2p(
 // TestStreamRouteDataPlaneSelection is the always-on, small end-to-end
 // correctness gate for both exchange carriers and both P2P data planes.
 func TestStreamRouteDataPlaneSelection(t *testing.T) {
+	testStreamRouteDataPlaneSelection(t, localDeliveryTestTcp)
+}
+
+// The same gate with the platform relay's transports and forwards delivered in
+// process: every resident shares the one exchange.
+func TestStreamRouteDataPlaneSelectionInProcess(t *testing.T) {
+	testStreamRouteDataPlaneSelection(t, localDeliveryTestInProcess)
+}
+
+func testStreamRouteDataPlaneSelection(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -729,8 +739,10 @@ func TestStreamRouteDataPlaneSelection(t *testing.T) {
 	testEnv.Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		env := testing_newPeerDiscoveryEnv(ctx, t)
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.apply)
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 1)
 		markerByte := byte(1)
 		measureStreamRouteExchange(
 			t,
