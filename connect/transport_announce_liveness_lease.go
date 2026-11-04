@@ -28,6 +28,15 @@ package connect
 // any vouched connection is more than model.ProviderLivenessWriterWithholdAge
 // old, so readers fail open before any lease the process vouches for lapses.
 // A pass that raises is logged and the next runs as planned.
+//
+// The writer keeps its connections indexed so that the cost of a write follows
+// what it writes, not the number of connections of the process: each client's
+// connections, each client's count of providing connections, and the list of
+// connections not yet written. A woken write visits only that list, and a
+// shard write's result visits only the connections of the clients it wrote.
+// Only the full pass visits every connection, once. A write chooses the same
+// clients, and a result takes the same outcomes, as a walk of every connection
+// would (TestLivenessLeaseWriterMatchesTheFullWalk).
 
 import (
 	"context"
@@ -121,7 +130,8 @@ type providerLivenessLeaseConnection struct {
 	// a requested release failed; the next read that finds the client not
 	// providing requests it again
 	releasePending bool
-	// not yet in a write since it was registered or started providing
+	// not yet in a write since it was registered or started providing; a dirty
+	// connection is in the writer's dirtyConnections
 	dirty bool
 	ended bool
 }
@@ -136,8 +146,16 @@ type providerLivenessLeaseWriter struct {
 	wake            chan struct{}
 	startOnce       sync.Once
 
-	stateLock        sync.Mutex
-	connections      map[*providerLivenessLeaseConnection]bool
+	stateLock   sync.Mutex
+	connections map[*providerLivenessLeaseConnection]bool
+	// the connections above, by client
+	clientIdConnections map[server.Id]map[*providerLivenessLeaseConnection]bool
+	// how many of each client's connections are providing; a client with none
+	// is absent
+	clientIdProvidingCounts map[server.Id]int
+	// the connections whose dirty is set, each once, in the order they were
+	// dirtied. A connection that ended stays until the next write drops it.
+	dirtyConnections []*providerLivenessLeaseConnection
 	releaseClientIds map[server.Id]bool
 }
 
@@ -149,12 +167,14 @@ func newProviderLivenessLeaseWriter(refreshInterval time.Duration) *providerLive
 		jitter: func() time.Duration {
 			return time.Duration(mathrand.Int63n(int64(model.ProviderLivenessLeaseRefreshJitter) + 1))
 		},
-		now:              time.Now,
-		writeShard:       model.WriteProviderLivenessLeaseShard,
-		observe:          observeLivenessLeaseOutcome,
-		wake:             make(chan struct{}, 1),
-		connections:      map[*providerLivenessLeaseConnection]bool{},
-		releaseClientIds: map[server.Id]bool{},
+		now:                     time.Now,
+		writeShard:              model.WriteProviderLivenessLeaseShard,
+		observe:                 observeLivenessLeaseOutcome,
+		wake:                    make(chan struct{}, 1),
+		connections:             map[*providerLivenessLeaseConnection]bool{},
+		clientIdConnections:     map[server.Id]map[*providerLivenessLeaseConnection]bool{},
+		clientIdProvidingCounts: map[server.Id]int{},
+		releaseClientIds:        map[server.Id]bool{},
 	}
 }
 
@@ -176,6 +196,40 @@ func (self *providerLivenessLeaseWriter) wakeUp() {
 	}
 }
 
+// Marks the connection for the next write, listing it once.
+func (self *providerLivenessLeaseWriter) setDirtyWithLock(connection *providerLivenessLeaseConnection) {
+	if connection.dirty {
+		return
+	}
+	connection.dirty = true
+	self.dirtyConnections = append(self.dirtyConnections, connection)
+}
+
+// Moves the connection to state, keeping its client's count of providing
+// connections.
+func (self *providerLivenessLeaseWriter) setStateWithLock(connection *providerLivenessLeaseConnection, state int) {
+	if connection.state == state {
+		return
+	}
+	if connection.state == livenessLeaseProviding {
+		self.addProvidingCountWithLock(connection.clientId, -1)
+	}
+	if state == livenessLeaseProviding {
+		self.addProvidingCountWithLock(connection.clientId, 1)
+	}
+	connection.state = state
+}
+
+// Adds delta to the client's count of providing connections; a count that
+// reaches zero is removed.
+func (self *providerLivenessLeaseWriter) addProvidingCountWithLock(clientId server.Id, delta int) {
+	if count := self.clientIdProvidingCounts[clientId] + delta; 0 < count {
+		self.clientIdProvidingCounts[clientId] = count
+	} else {
+		delete(self.clientIdProvidingCounts, clientId)
+	}
+}
+
 // Registers a connection of clientId as its sync rounds start: pending, vouched
 // for from now, and written at once. Starts the writer, for the life of the
 // process, if nothing has.
@@ -187,12 +241,18 @@ func (self *providerLivenessLeaseWriter) begin(clientId server.Id, writtenForTes
 		writtenForTest: writtenForTest,
 		state:          livenessLeasePending,
 		writeTime:      self.now(),
-		dirty:          true,
 	}
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.connections[connection] = true
+		clientConnections := self.clientIdConnections[clientId]
+		if clientConnections == nil {
+			clientConnections = map[*providerLivenessLeaseConnection]bool{}
+			self.clientIdConnections[clientId] = clientConnections
+		}
+		clientConnections[connection] = true
+		self.setDirtyWithLock(connection)
 	}()
 	self.wakeUp()
 	return connection
@@ -216,8 +276,8 @@ func (self *providerLivenessLeaseConnection) afterRead(provideModes map[model.Pr
 					// vouched for again from now
 					self.writeTime = writer.now()
 				}
-				self.state = livenessLeaseProviding
-				self.dirty = true
+				writer.setStateWithLock(self, livenessLeaseProviding)
+				writer.setDirtyWithLock(self)
 				wake = true
 			}
 			return
@@ -229,7 +289,7 @@ func (self *providerLivenessLeaseConnection) afterRead(provideModes map[model.Pr
 			self.releasePending = false
 			wake = true
 		}
-		self.state = livenessLeaseNotProviding
+		writer.setStateWithLock(self, livenessLeaseNotProviding)
 		self.writeTime = time.Time{}
 	}()
 	if wake {
@@ -241,13 +301,25 @@ func (self *providerLivenessLeaseConnection) afterRead(provideModes map[model.Pr
 // nothing more is written for it but a release its last read already
 // requested; a release that failed is not tried again. The lease is the
 // client's, another connection of the client or the one it reconnects with
-// may hold it, and it lapses within the window.
+// may hold it, and it lapses within the window. A second end does nothing.
 func (self *providerLivenessLeaseConnection) end() {
 	writer := self.writer
 	writer.stateLock.Lock()
 	defer writer.stateLock.Unlock()
+	if self.ended {
+		return
+	}
 	self.ended = true
 	delete(writer.connections, self)
+	if self.state == livenessLeaseProviding {
+		writer.addProvidingCountWithLock(self.clientId, -1)
+	}
+	if clientConnections := writer.clientIdConnections[self.clientId]; clientConnections != nil {
+		delete(clientConnections, self)
+		if len(clientConnections) == 0 {
+			delete(writer.clientIdConnections, self.clientId)
+		}
+	}
 }
 
 // The earliest vouch time of a pending or providing connection, and whether
@@ -311,6 +383,10 @@ type providerLivenessLeaseShardWrite struct {
 // unless a connection of the process has the client providing: its read may
 // be older, but deleting a fresh lease is worse. Each connection whose shard
 // write succeeds is vouched for from that shard write's start.
+//
+// A write of those not yet written visits the dirty list, not every
+// connection, and a client is providing while its count of providing
+// connections is positive.
 func (self *providerLivenessLeaseWriter) write(ctx context.Context, all bool) {
 	shardWrites := map[int]*providerLivenessLeaseShardWrite{}
 	shardWrite := func(clientId server.Id) *providerLivenessLeaseShardWrite {
@@ -323,22 +399,13 @@ func (self *providerLivenessLeaseWriter) write(ctx context.Context, all bool) {
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		providingClientIds := map[server.Id]bool{}
-		for connection := range self.connections {
-			if connection.state == livenessLeaseProviding {
-				providingClientIds[connection.clientId] = true
-			}
-		}
 		scoredClientIds := map[server.Id]bool{}
 		extendedClientIds := map[server.Id]bool{}
-		for connection := range self.connections {
-			if !all && !connection.dirty {
-				continue
-			}
+		writeConnection := func(connection *providerLivenessLeaseConnection) {
 			connection.dirty = false
 			clientId := connection.clientId
 			switch {
-			case providingClientIds[clientId] && (connection.state == livenessLeaseProviding || connection.state == livenessLeasePending):
+			case 0 < self.clientIdProvidingCounts[clientId] && (connection.state == livenessLeaseProviding || connection.state == livenessLeasePending):
 				if !scoredClientIds[clientId] {
 					scoredClientIds[clientId] = true
 					shardWrite(clientId).scoredClientIds = append(shardWrite(clientId).scoredClientIds, clientId)
@@ -350,8 +417,23 @@ func (self *providerLivenessLeaseWriter) write(ctx context.Context, all bool) {
 				}
 			}
 		}
+		if all {
+			for connection := range self.connections {
+				writeConnection(connection)
+			}
+		} else {
+			for _, connection := range self.dirtyConnections {
+				// one that ended since it was dirtied is no longer the writer's
+				if !connection.ended {
+					writeConnection(connection)
+				}
+			}
+		}
+		// no connection is dirty now
+		clear(self.dirtyConnections)
+		self.dirtyConnections = self.dirtyConnections[:0]
 		for clientId := range self.releaseClientIds {
-			if !providingClientIds[clientId] {
+			if self.clientIdProvidingCounts[clientId] == 0 {
 				shardWrite(clientId).removedClientIds = append(shardWrite(clientId).removedClientIds, clientId)
 			}
 		}
@@ -384,7 +466,9 @@ func (self *providerLivenessLeaseWriter) write(ctx context.Context, all bool) {
 // clients, and of its extended clients the shard held, are vouched for from
 // start, and pending connections whose client the shard did not hold are not
 // vouched for at all; a failed release is left for the next read that finds
-// the client not providing.
+// the client not providing. Only the connections of the write's clients can
+// take an outcome, so only theirs are visited, whichever connections began or
+// ended during the shard write.
 func (self *providerLivenessLeaseWriter) written(start time.Time, write *providerLivenessLeaseShardWrite, held []bool, err error) {
 	scoredClientIds := map[server.Id]bool{}
 	for _, clientId := range write.scoredClientIds {
@@ -413,35 +497,43 @@ func (self *providerLivenessLeaseWriter) written(start time.Time, write *provide
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		for connection := range self.connections {
-			clientId := connection.clientId
-			outcome := ""
-			switch {
-			case scoredClientIds[clientId] && connection.state != livenessLeaseNotProviding:
-				if err == nil {
-					connection.writeTime = start
-					outcome = livenessLeaseOutcomeRefreshed
-				} else {
-					outcome = livenessLeaseOutcomeRefreshFailed
+		writtenClientIds := map[server.Id]bool{}
+		for _, clientIds := range [][]server.Id{write.scoredClientIds, write.extendedClientIds, write.removedClientIds} {
+			for _, clientId := range clientIds {
+				if writtenClientIds[clientId] {
+					continue
 				}
-			case heldClientIds[clientId] && connection.state == livenessLeasePending:
-				connection.writeTime = start
-				connection.held = true
-				outcome = livenessLeaseOutcomeExtended
-			case unheldClientIds[clientId] && connection.state == livenessLeasePending:
-				// no lease to vouch for until a read finds the client providing
-				connection.writeTime = time.Time{}
-				connection.held = false
-			case removedClientIds[clientId] && connection.state == livenessLeaseNotProviding:
-				if err == nil {
-					outcome = livenessLeaseOutcomeReleased
-				} else {
-					connection.releasePending = true
-					outcome = livenessLeaseOutcomeReleaseFailed
+				writtenClientIds[clientId] = true
+				for connection := range self.clientIdConnections[clientId] {
+					outcome := ""
+					switch {
+					case scoredClientIds[clientId] && connection.state != livenessLeaseNotProviding:
+						if err == nil {
+							connection.writeTime = start
+							outcome = livenessLeaseOutcomeRefreshed
+						} else {
+							outcome = livenessLeaseOutcomeRefreshFailed
+						}
+					case heldClientIds[clientId] && connection.state == livenessLeasePending:
+						connection.writeTime = start
+						connection.held = true
+						outcome = livenessLeaseOutcomeExtended
+					case unheldClientIds[clientId] && connection.state == livenessLeasePending:
+						// no lease to vouch for until a read finds the client providing
+						connection.writeTime = time.Time{}
+						connection.held = false
+					case removedClientIds[clientId] && connection.state == livenessLeaseNotProviding:
+						if err == nil {
+							outcome = livenessLeaseOutcomeReleased
+						} else {
+							connection.releasePending = true
+							outcome = livenessLeaseOutcomeReleaseFailed
+						}
+					}
+					if outcome != "" && connection.writtenForTest != nil {
+						connectionOutcomes = append(connectionOutcomes, connectionOutcome{writtenForTest: connection.writtenForTest, outcome: outcome})
+					}
 				}
-			}
-			if outcome != "" && connection.writtenForTest != nil {
-				connectionOutcomes = append(connectionOutcomes, connectionOutcome{writtenForTest: connection.writtenForTest, outcome: outcome})
 			}
 		}
 	}()
