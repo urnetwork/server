@@ -40,6 +40,29 @@ func TestCompetitionDistributedMigrationIsProspectiveAndPreservesSingleton(t *te
 	}
 }
 
+// An unpublished executor append must follow, not displace, the complete
+// published statistics/finalization prefix from the current control release.
+func TestCompetitionDistributedMigrationFollowsPublishedFinalizationPrefix(t *testing.T) {
+	statistics := TransferContractUnresolvedPredicateStatisticsVersion()
+	finalization := CompetitionFinalizationHoldMigrationVersion()
+	distributed := CompetitionDistributedEvaluationMigrationVersion()
+	if statistics != 926 || finalization != 927 || distributed != finalization+1 || distributed != len(migrations) {
+		t.Fatalf("executor append reordered published authority: statistics=%d finalization=%d distributed=%d head=%d", statistics, finalization, distributed, len(migrations))
+	}
+	for _, published := range []struct {
+		version int
+		sql     string
+	}{
+		{version: statistics, sql: TransferContractUnresolvedPredicateStatisticsSql},
+		{version: finalization, sql: competitionFinalizationHoldMigrationSql},
+	} {
+		migration, ok := migrations[published.version-1].(*SqlMigration)
+		if !ok || migration.sql != published.sql {
+			t.Fatal("published migration no longer owns its original position", published.version)
+		}
+	}
+}
+
 // The narrow publication-only alternative cannot erase the running release's
 // real baseline-source, cancellation or legacy-ranking protections.
 func TestCompetitionDistributedBaselineGuardKeepsLegacyChecks(t *testing.T) {

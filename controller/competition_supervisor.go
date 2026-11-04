@@ -177,7 +177,7 @@ type CompetitionSupervisor struct {
 	PollInterval  time.Duration
 	LeaseDuration time.Duration
 	// Nil retains per-owner defaults; tests inject retry time and exact renewal edges.
-	leaseRetrySettings *competitionLeaseRetrySettings
+	leaseRetrySettings *competitionSupervisorRenewalSettings
 	renewTickForTest   <-chan time.Time
 	// Nil does nothing; tests acknowledge an accepted renewed authority window.
 	renewedForTest func()
@@ -379,7 +379,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		return "lease_unavailable", err
 	}
 	operationCtx, cancel := context.WithCancel(ctx)
-	retrySettings := defaultCompetitionLeaseRetrySettings()
+	retrySettings := defaultCompetitionSupervisorRenewalSettings()
 	if self.leaseRetrySettings != nil {
 		retrySettings = *self.leaseRetrySettings
 	}
@@ -397,7 +397,7 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 				return
 			case <-renewTick:
 				var next *model.CompetitionSupervisorLease
-				_, renewErr := retryCompetitionLeaseOperation(operationCtx, current.LeaseExpiresAt, retrySettings, func(ctx context.Context) error {
+				renewErr := retryCompetitionSupervisorRenewal(operationCtx, current.LeaseExpiresAt, retrySettings, func(ctx context.Context) error {
 					var err error
 					next, err = self.Driver.Renew(ctx, current, leaseDuration)
 					return err

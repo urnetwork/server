@@ -15,14 +15,16 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-func newClientCloseTestEnv(ctx context.Context, t testing.TB) *peerDiscoveryEnv {
+func newClientCloseTestEnv(ctx context.Context, t testing.TB, delivery localDeliveryTestMode) *peerDiscoveryEnv {
 	server.Testing_EnableKeyspaceNotifications(ctx)
-	return testing_newPeerDiscoveryEnvWithSettings(ctx, t, func(settings *ExchangeSettings) {
+	env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.after(func(settings *ExchangeSettings) {
 		settings.KeyEventDelivery.Enabled = true
 		// far outside the test window: delivery must come from key events
 		settings.KeyEventDelivery.CorrectivePollInterval = 10 * time.Minute
 		settings.KeyEventDelivery.ResyncSpreadTimeout = 1 * time.Second
-	})
+	}))
+	delivery.requireExchange(t, env.exchange)
+	return env
 }
 
 func waitFor(ctx context.Context, timeout time.Duration, cond func() bool) bool {
@@ -49,6 +51,16 @@ func (self *Exchange) testingHoldsClient(clientId server.Id) (connections int, r
 // Close requests added for a client reach it from its resident as one
 // `CloseSequences` from the control id (CLIENTCLOSE.md section 2).
 func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
+	testExchangeClientCloseRequestsReachTheClient(t, localDeliveryTestTcp)
+}
+
+// The same close requests with the client's transport delivered in process to
+// its resident.
+func TestExchangeClientCloseRequestsReachTheClientInProcess(t *testing.T) {
+	testExchangeClientCloseRequestsReachTheClient(t, localDeliveryTestInProcess)
+}
+
+func testExchangeClientCloseRequestsReachTheClient(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -56,8 +68,9 @@ func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := newClientCloseTestEnv(ctx, t)
+		env := newClientCloseTestEnv(ctx, t, delivery)
 		defer env.Close()
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 1, 0)
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
 			Description: "device a",
@@ -147,6 +160,16 @@ func TestExchangeClientCloseRequestsReachTheClient(t *testing.T) {
 // other clients alone (CLIENTCLOSE.md section 4). The resident stays until its
 // idle ttl, so peers' forwards to it do not spin on the resident lookup.
 func TestExchangeClosesRemovedClient(t *testing.T) {
+	testExchangeClosesRemovedClient(t, localDeliveryTestTcp)
+}
+
+// The same removal with each transport delivered in process to its resident:
+// the typed close must end an attached transport as it ends a socket's.
+func TestExchangeClosesRemovedClientInProcess(t *testing.T) {
+	testExchangeClosesRemovedClient(t, localDeliveryTestInProcess)
+}
+
+func testExchangeClosesRemovedClient(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -154,8 +177,9 @@ func TestExchangeClosesRemovedClient(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := newClientCloseTestEnv(ctx, t)
+		env := newClientCloseTestEnv(ctx, t, delivery)
 		defer env.Close()
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 0)
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
 			Description: "device a",

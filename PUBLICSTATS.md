@@ -24,9 +24,10 @@ service stats pushers (`grafana.go`; series are per process, keyed by
   (distinct devices), `urnetwork_connect_exchange_io_bytes_total{sent,data}`
   plus `urnetwork_connect_exchange_local_bytes_total{sent,data}` (live relay
   throughput: bytes over exchange sockets plus the same traffic delivered in
-  process, which connect counts as the socket would, so the sum stays
-  continuous as blocks turn in-process delivery on; the local term falls back
-  to zero only where the socket term has a sample, so a Mimir gap stays a gap),
+  process, transports and forwards alike, which connect counts as the socket
+  would, so the sum stays continuous as blocks turn in-process delivery on;
+  both terms sum over the `op` label, and the local term falls back to zero
+  only where the socket term has a sample, so a Mimir gap stays a gap),
   `urnetwork_connect_connection_new` (new
   connections per minute).
 - the operator measurements `urnetwork_stats_*` from the taskworker stats

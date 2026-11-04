@@ -152,6 +152,16 @@ func TestExchangeAclGroupIsolatesAPeer(t *testing.T) {
 // usage stops new contracts (a hard stop once the rollup has run), and raising
 // the cap resumes traffic.
 func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
+	testExchangeDataCapPausesStopsAndResumesTraffic(t, localDeliveryTestTcp)
+}
+
+// The same caps with the payer's traffic delivered in process to the
+// provider's resident in the one exchange.
+func TestExchangeDataCapPausesStopsAndResumesTrafficInProcess(t *testing.T) {
+	testExchangeDataCapPausesStopsAndResumesTraffic(t, localDeliveryTestInProcess)
+}
+
+func testExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -161,8 +171,12 @@ func TestExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T) {
 		model.Testing_ResetClientDataCapState()
 		defer model.Testing_ResetClientDataCapState()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t)
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.apply)
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		// the provider and the payer share the one exchange, so their
+		// transports and the payer's forwards to the provider attach in process
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 1)
 		model.Testing_EnableNetworkEmbed(ctx, env.networkId)
 
 		// a public provider in its own network

@@ -60,9 +60,13 @@ func readCompetitionIntakeHolds(ctx context.Context, reader competitionIntakeRea
 	var content []byte
 	err := reader.QueryRow(ctx, `SELECT COALESCE(jsonb_object_agg(kind,jsonb_build_object('active',active,'revision',revision,'hold_id',hold_id,
  'created_at',created_at AT TIME ZONE 'UTC','idempotency_key',idempotency_key,'request_sha256',request_sha256,'hold',hold_json)),'{}'::jsonb)
- FROM (SELECT DISTINCT ON (kind) kind,active,revision,hold_id,created_at,idempotency_key,request_sha256,hold_json FROM competition_automation_hold
+ FROM (SELECT DISTINCT ON (kind) kind,active,revision,hold_id,created_at,idempotency_key,request_sha256,hold_json FROM (
+ SELECT environment,competition_id,season_id,kind,active,revision,hold_id,created_at,idempotency_key,request_sha256,hold_json FROM competition_automation_hold
+ UNION ALL
+ SELECT environment,competition_id,season_id,kind,active,revision,hold_id,created_at,idempotency_key,request_sha256,hold_json FROM competition_finalization_hold
+ ) AS holds
  WHERE environment=$1 AND competition_id=$2 AND season_id=$3
- AND kind IN ('admission','evaluation','reward_delivery')
+ AND kind IN ('admission','evaluation','reward_delivery','finalization')
  ORDER BY kind,revision DESC) AS latest`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId).Scan(&content)
 	if err != nil {
 		return competitionAutomationHoldStatus{}, err
@@ -109,6 +113,8 @@ func readCompetitionIntakeHolds(ctx context.Context, reader competitionIntakeRea
 			status.Evaluation, status.EvaluationHold = *record.Active, &hold
 		case "reward_delivery":
 			status.RewardDelivery, status.RewardDeliveryHold = *record.Active, &hold
+		case "finalization":
+			status.Finalization = *record.Active
 		default:
 			return status, errors.New("unexpected competition hold capability")
 		}

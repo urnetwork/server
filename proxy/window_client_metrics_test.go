@@ -31,6 +31,10 @@ func (windowClientStatsTestSource) VisitRemovals(visit func(window string, cause
 	visit("quality", "handover", 5)
 }
 
+func (windowClientStatsTestSource) VisitBalanceProbes(visit func(window string, outcome string, count uint64)) {
+	visit("quality", "short", 13)
+}
+
 func (windowClientStatsTestSource) VisitWindows(visit func(window string, state string, count int64)) {
 	visit("quality", "strict_hole", 11)
 }
@@ -39,6 +43,9 @@ func (windowClientStatsTestSource) VisitWindows(visit func(window string, state 
 func TestWindowClientStatsCollectorExportsVisitedValues(t *testing.T) {
 	collector := newWindowClientStatsCollector(windowClientStatsTestSource{})
 	expected := `
+# HELP urnetwork_proxy_window_balance_probes_total Balance probes hosted windows sent while the payer's balance refused their contracts, by what each learned
+# TYPE urnetwork_proxy_window_balance_probes_total counter
+urnetwork_proxy_window_balance_probes_total{outcome="short",window="quality"} 13
 # HELP urnetwork_proxy_window_candidates_total Window client candidates hosted windows built, by the state of the expansion pass that built them and how they ended
 # TYPE urnetwork_proxy_window_candidates_total counter
 urnetwork_proxy_window_candidates_total{outcome="declined_strict_cap",state="strict_hole",window="quality"} 7
@@ -84,14 +91,16 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 			}
 		}
 	}
-	// 3 windows x 3 building pass states x 9 outcomes, 3 x 5 pass states,
-	// 3 x 7 warning causes, 3 x 7 removal causes, 3 x 5 window states
+	// 3 windows x 3 building pass states x 9 outcomes, 3 x 6 pass states,
+	// 3 x 7 warning causes, 3 x 7 removal causes, 3 x 4 balance probe
+	// outcomes, 3 x 5 window states
 	for name, want := range map[string]int{
-		"urnetwork_proxy_window_candidates_total":    81,
-		"urnetwork_proxy_window_expand_passes_total": 15,
-		"urnetwork_proxy_window_warnings_total":      21,
-		"urnetwork_proxy_window_removals_total":      21,
-		"urnetwork_proxy_windows":                    15,
+		"urnetwork_proxy_window_candidates_total":     81,
+		"urnetwork_proxy_window_expand_passes_total":  18,
+		"urnetwork_proxy_window_warnings_total":       21,
+		"urnetwork_proxy_window_removals_total":       21,
+		"urnetwork_proxy_window_balance_probes_total": 12,
+		"urnetwork_proxy_windows":                     15,
 	} {
 		if counts[name] != want {
 			t.Errorf("%s exports %d series, want %d", name, counts[name], want)
@@ -102,7 +111,12 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 			t.Errorf("no candidate series has outcome %q", outcome)
 		}
 	}
-	for _, state := range []string{"below_min", "below_target", "strict_hole", "skipped_strict_full", "deferred", "selectable_full", "no_selectable"} {
+	for _, outcome := range []string{"short", "limited", "restored", "unknown"} {
+		if !labels["outcome"][outcome] {
+			t.Errorf("no balance probe series has outcome %q", outcome)
+		}
+	}
+	for _, state := range []string{"below_min", "below_target", "strict_hole", "skipped_strict_full", "deferred", "held_insufficient_balance", "selectable_full", "no_selectable"} {
 		if !labels["state"][state] {
 			t.Errorf("no series has state %q", state)
 		}

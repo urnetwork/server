@@ -160,12 +160,21 @@ func establishedLeaseRechecks(ctx context.Context, t testing.TB, rechecksList []
 // transport kept (establishedLeaseRechecks, drivenLeaseRechecks). The attacker
 // retains its client/P2P lifecycle after its platform socket is closed.
 func TestSessionRevocationRetiresEstablishedRelayAndRogueP2p(t *testing.T) {
-	testSessionRevocationDataPlane(t, connectlib.TransportModeH1)
+	testSessionRevocationDataPlane(t, connectlib.TransportModeH1, localDeliveryTestTcp)
 }
 func TestSessionRevocationRetiresEstablishedH3AndRogueP2p(t *testing.T) {
-	testSessionRevocationDataPlane(t, connectlib.TransportModeH3)
+	testSessionRevocationDataPlane(t, connectlib.TransportModeH3, localDeliveryTestTcp)
 }
-func testSessionRevocationDataPlane(t *testing.T, mode connectlib.TransportMode) {
+
+// The same revocations with the relay's transports and forwards delivered in
+// process: revocation must retire an in-process path within the same bounds.
+func TestSessionRevocationRetiresEstablishedRelayAndRogueP2pInProcess(t *testing.T) {
+	testSessionRevocationDataPlane(t, connectlib.TransportModeH1, localDeliveryTestInProcess)
+}
+func TestSessionRevocationRetiresEstablishedH3AndRogueP2pInProcess(t *testing.T) {
+	testSessionRevocationDataPlane(t, connectlib.TransportModeH3, localDeliveryTestInProcess)
+}
+func testSessionRevocationDataPlane(t *testing.T, mode connectlib.TransportMode, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		t.Skip("requires local Postgres and Redis")
 	}
@@ -181,7 +190,7 @@ func testSessionRevocationDataPlane(t *testing.T, mode connectlib.TransportMode)
 			rechecks *drivenLeaseRechecks
 		}
 		admissions := make(chan admitted, 16)
-		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, func(settings *ExchangeSettings) { settings.KeyEventDelivery.Enabled = false }, func(settings *ConnectHandlerSettings) {
+		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, delivery.after(func(settings *ExchangeSettings) { settings.KeyEventDelivery.Enabled = false }), func(settings *ConnectHandlerSettings) {
 			settings.testingAfterAuthorizationLease = func(claims *session.ByJwt, lease *session.AuthorizationLease) {
 				select {
 				case admissions <- admitted{claims: claims, rechecks: newDrivenLeaseRechecks(lease)}:
@@ -190,6 +199,9 @@ func testSessionRevocationDataPlane(t *testing.T, mode connectlib.TransportMode)
 			}
 		})
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		// the relay's two transports and its forward share the one exchange
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 1)
 		attackerLogin := session.NewByJwt(env.networkId, env.userId, "attacker", false, false)
 		honestLogin := session.NewByJwt(env.networkId, env.userId, "honest", false, false)
 		for _, claims := range []*session.ByJwt{attackerLogin, honestLogin} {

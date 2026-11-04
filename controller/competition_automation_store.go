@@ -140,6 +140,13 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			if !errors.Is(sealErr, pgx.ErrNoRows) {
 				server.Raise(sealErr)
 			}
+			if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "finalization"); holdErr != nil {
+				if errors.Is(holdErr, ErrAutomationHeld) {
+					stateErr = ErrFinalizationHeld
+					return
+				}
+				server.Raise(holdErr)
+			}
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			now := self.nowUtc()
 			if round.Canceled || now.Before(round.ClosesAt) {

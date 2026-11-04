@@ -255,6 +255,73 @@ func TestSendAt(t *testing.T) {
 	}
 }
 
+func TestSendWindowNextOpen(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := DefaultSendWindow
+	for _, c := range []struct {
+		name     string
+		at, want time.Time
+	}{
+		{"before the start", time.Date(2026, 11, 4, 6, 15, 0, 0, ny), time.Date(2026, 11, 4, 8, 0, 0, 0, ny)},
+		{"the start", time.Date(2026, 11, 4, 8, 0, 0, 0, ny), time.Date(2026, 11, 4, 8, 0, 0, 0, ny)},
+		{"inside", time.Date(2026, 11, 4, 14, 5, 9, 0, ny), time.Date(2026, 11, 4, 14, 5, 9, 0, ny)},
+		{"the end", time.Date(2026, 11, 4, 21, 0, 59, 0, ny), time.Date(2026, 11, 4, 21, 0, 59, 0, ny)},
+		{"past the end", time.Date(2026, 11, 4, 21, 1, 0, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"before midnight", time.Date(2026, 11, 4, 23, 59, 0, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"after midnight", time.Date(2026, 11, 5, 0, 30, 0, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		// DST ends 2026-11-01 02:00 in New York: still 08:00 wall clock
+		{"across DST", time.Date(2026, 10, 31, 22, 0, 0, 0, ny), time.Date(2026, 11, 1, 8, 0, 0, 0, ny)},
+	} {
+		if got := w.NextOpen(c.at, ny); !got.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.name, got.In(ny), c.want)
+		}
+	}
+	custom := SendWindow{StartHour: 9, StartMinute: 30, EndHour: 20}
+	if got, want := custom.NextOpen(time.Date(2026, 11, 4, 20, 5, 0, 0, ny), ny), time.Date(2026, 11, 5, 9, 30, 0, 0, ny); !got.Equal(want) {
+		t.Errorf("custom window: %s, want %s", got.In(ny), want)
+	}
+	if got, want := w.NextOpen(time.Date(2026, 11, 4, 22, 0, 0, 0, time.UTC), nil), time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("nil location = UTC: %s, want %s", got, want)
+	}
+}
+
+// A step that is already due goes out inside the window: right away while it
+// is open, else at the next window start, never tonight past the window's end
+// (SendAt's same-day clamp is already in the past there).
+func TestDueSendAt(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := DefaultSendWindow
+	for _, c := range []struct {
+		name      string
+		now, want time.Time
+	}{
+		{"past the end", time.Date(2026, 11, 4, 21, 30, 20, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"a minute on passes the end", time.Date(2026, 11, 4, 21, 0, 30, 0, ny), time.Date(2026, 11, 5, 8, 0, 0, 0, ny)},
+		{"open", time.Date(2026, 11, 4, 14, 5, 20, 0, ny), time.Date(2026, 11, 4, 14, 6, 20, 0, ny)},
+		{"open, on the minute", time.Date(2026, 11, 4, 14, 5, 0, 0, ny), time.Date(2026, 11, 4, 14, 5, 0, 0, ny)},
+		{"before the start", time.Date(2026, 11, 4, 6, 15, 0, 0, ny), time.Date(2026, 11, 4, 8, 0, 0, 0, ny)},
+		// DST ends 2026-11-01 in New York: the next morning is 08:00 EST
+		{"past the end before DST ends", time.Date(2026, 10, 31, 22, 0, 0, 0, ny), time.Date(2026, 11, 1, 8, 0, 0, 0, ny)},
+	} {
+		got := DueSendAt(c.now, ny, w)
+		if !got.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.name, got.In(ny), c.want)
+		}
+		if got.Before(c.now) {
+			t.Errorf("%s: %s is in the past", c.name, got.In(ny))
+		}
+	}
+	if got, want := DueSendAt(time.Date(2026, 11, 4, 22, 0, 0, 0, time.UTC), nil, w), time.Date(2026, 11, 5, 8, 0, 0, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("nil location = UTC: %s, want %s", got, want)
+	}
+}
+
 func TestParseSendWindow(t *testing.T) {
 	w, err := ParseSendWindow("")
 	if err != nil || w != DefaultSendWindow {

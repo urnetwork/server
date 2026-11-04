@@ -917,7 +917,11 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{stDemandMigrationContract},
 	// the one-tap Top 200 claim's tables, versioned by their position
 	[]snMainnetMigrationContract{snFleetAutoMigrationContract},
-	// The future executor slots and no-op evidence, versioned by position.
+	// planner statistics on the opaque unresolved CASE; no sample is required
+	[]snMainnetMigrationContract{transferContractUnresolvedStatisticsMigrationContract},
+	// Prospective finalization control, after all previously published history.
+	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
+	// The future executor slots and no-op evidence follow that origin prefix.
 	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract},
 )
 

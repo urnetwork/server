@@ -114,6 +114,10 @@ const (
 	// (send) or into the transport's receive queue (receive).
 	receiveQueueBoundaryLocalTransportSend    = "local_transport_send"
 	receiveQueueBoundaryLocalTransportReceive = "local_transport_receive"
+	// A local forward link's pump (resident_local_forward.go): messages it
+	// dequeued from the forward and did not deliver into the destination
+	// resident's forward queue.
+	receiveQueueBoundaryLocalForwardSend = "local_forward_send"
 )
 
 var receiveQueueDroppedMessagesCounter = prometheus.NewCounterVec(
@@ -416,6 +420,7 @@ func init() {
 		receiveQueueBoundaryResidentClientForward,
 		receiveQueueBoundaryLocalTransportSend,
 		receiveQueueBoundaryLocalTransportReceive,
+		receiveQueueBoundaryLocalForwardSend,
 	} {
 		receiveQueueDroppedMessagesCounter.WithLabelValues(boundary).Add(0)
 		receiveQueueDroppedBytesCounter.WithLabelValues(boundary).Add(0)
@@ -818,10 +823,18 @@ type Exchange struct {
 	beforeLocalTransportGatherForTest func(*localTransportLink, localTransportDirection)
 	afterLocalTransportGatherForTest  func(*localTransportLink, localTransportDirection, int)
 	beforeLocalTransportBlockForTest  func(*localTransportLink, localTransportDirection)
+	// Nil in production; local forward tests hold an attach after its
+	// generation check, and observe each forward that dials its destination
+	// over the exchange (resident_local_forward.go).
+	beforeLocalForwardAttachForTest func(*Resident)
+	beforeForwardDialForTest        func(ExchangeHeader)
 
 	// in-process delivery of transports to local residents; nil while
 	// EnableLocalTransport is off (resident_local_transport.go)
 	localTransport *exchangeLocalTransport
+	// in-process delivery of forwards to local destination residents; nil
+	// while EnableLocalForward is off (resident_local_forward.go)
+	localForward *exchangeLocalTransport
 
 	// recycles of stuck providers the api reports; nil while
 	// EnableStuckProviderRecycle is off (client_recycle.go)
@@ -962,7 +975,8 @@ func newExchange(
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
-	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block)
+	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpTransport)
+	exchange.localForward = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpForward)
 	// flags arrive only as key events
 	if exchange.keyEventSubscriber != nil {
 		exchange.stuckProviderRecycle = newExchangeStuckProviderRecycle(cancelCtx, settings, block, exchange.recycleStuckProvider)
@@ -2462,6 +2476,9 @@ func (self *Exchange) Close() {
 	if self.localTransport != nil {
 		self.localTransport.closeWorkers()
 	}
+	if self.localForward != nil {
+		self.localForward.closeWorkers()
+	}
 	if self.stuckProviderRecycle != nil {
 		self.stuckProviderRecycle.closeWorkers()
 	}
@@ -2487,10 +2504,10 @@ func (self *Exchange) Close() {
 }
 
 // WaitForIdle waits until every admitted resident, listener, accepted
-// connection, and in-process transport link has completed teardown, with the
-// local transport's control loop and pacer and the stuck provider recycle's
-// control loop and recycles. Close must be called first so no wait group can
-// receive another admission.
+// connection, and in-process transport and forward link has completed
+// teardown, with the local transport's and local forward's control loops and
+// pacers and the stuck provider recycle's control loop and recycles. Close
+// must be called first so no wait group can receive another admission.
 func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 	done := make(chan struct{})
 	go func() {
@@ -2498,6 +2515,9 @@ func (self *Exchange) WaitForIdle(ctx context.Context) bool {
 		self.connectionWorkers.Wait()
 		if self.localTransport != nil {
 			self.localTransport.workers.Wait()
+		}
+		if self.localForward != nil {
+			self.localForward.workers.Wait()
 		}
 		if self.stuckProviderRecycle != nil {
 			self.stuckProviderRecycle.workers.Wait()
@@ -4090,36 +4110,51 @@ func (self *ResidentForward) runWithResidentLookup(
 		})
 		initialLookup = false
 		if resident != nil && 0 < len(resident.ResidentInternalPorts) {
-			port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
 			header := ExchangeHeader{
 				ClientId:   self.clientId,
 				ResidentId: resident.ResidentId,
 				Op:         ExchangeOpForward,
 			}
-			exchangeConnection, err := NewExchangeConnection(
-				self.ctx,
-				header,
-				resident.ResidentHost,
-				port,
-				self.exchange.routes,
-				self.exchange.settings,
-			)
-			if err != nil {
-				if glog.V(1) {
-					glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+			// A destination resident in this process takes the forward in
+			// process, with the accept path's checks, instead of a socket back
+			// into this process (resident_local_forward.go).
+			if link := self.exchange.attachLocalForward(self.ctx, header); link != nil {
+				if self.runLocal(link, &pending, &hasPending) == localTransportDetachDisabled {
+					// The switch detached a link to a resident that still serves:
+					// the next message dials it over the exchange, with no
+					// reconnect wait. The loop's head checks the forward's end.
+					continue
 				}
-			}
-			if err == nil {
-				c := func() {
-					handle(exchangeConnection)
+			} else {
+				if beforeDial := self.exchange.beforeForwardDialForTest; beforeDial != nil {
+					beforeDial(header)
 				}
-				if glog.V(2) {
-					server.Trace(
-						fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
-						c,
-					)
-				} else {
-					c()
+				port := resident.ResidentInternalPorts[rand.Intn(len(resident.ResidentInternalPorts))]
+				exchangeConnection, err := NewExchangeConnection(
+					self.ctx,
+					header,
+					resident.ResidentHost,
+					port,
+					self.exchange.routes,
+					self.exchange.settings,
+				)
+				if err != nil {
+					if glog.V(1) {
+						glog.Infof("[rf]exchange connection error %s->%s@%s:%d = %s\n", self.clientId, resident.ResidentId, resident.ResidentHost, port, err)
+					}
+				}
+				if err == nil {
+					c := func() {
+						handle(exchangeConnection)
+					}
+					if glog.V(2) {
+						server.Trace(
+							fmt.Sprintf("[rf]exchange connection %s->%s@%s:%d", self.clientId, resident.ResidentId, resident.ResidentHost, port),
+							c,
+						)
+					} else {
+						c()
+					}
 				}
 			}
 		}
@@ -4261,9 +4296,10 @@ type Resident struct {
 	// activity is tracked with an atomic, not stateLock, so UpdateActivity is
 	// lock-free on the per-frame inbound and forward paths
 	lastActivityNanos atomic.Int64
-	// transports attached in process (resident_local_transport.go). While
-	// any is attached the resident is active, as an exchange socket's pings
-	// kept it.
+	// transports, and forwards to this resident, attached in process
+	// (resident_local_transport.go, resident_local_forward.go). While any is
+	// attached the resident is active, as an exchange socket's pings kept it:
+	// a transport's in both directions, and a forward's dialer's pings.
 	localAttachments atomic.Int64
 
 	// set when the teardown is caused by a server drain / migrate rather than
@@ -4296,6 +4332,11 @@ type Resident struct {
 	// Nil in production; tests use this barrier after forward cancellation and
 	// immediately before teardown joins the active consumer.
 	beforeForwardCloseJoinForTest func()
+	// Nil in production; tests receive what AddForward's queues deliver, from
+	// an accepted forward socket or an in-process forward link, in place of
+	// the internal client's forward. It takes a message on true, as
+	// Client.ForwardWithTimeout does.
+	forwardReceiveForTest func(context.Context, []byte) bool
 	// Nil in production; forward tests force cleanup immediately after launch.
 	afterForwardWorkersStartedForTest func(*ResidentForward)
 	// Nil in production; tests observe the exact internal-client join boundary.
@@ -5314,12 +5355,17 @@ func (self *Resident) addTransportWithEdge(
 	return
 }
 
-// AddForward attaches one exchange-forward queue to the resident client.
+// AddForward attaches one exchange-forward queue to the resident client. The
+// accept path's forward connections and in-process forward links
+// (resident_local_forward.go) both deliver into it.
 func (self *Resident) AddForward() (
 	forward chan []byte,
 	closeForward func(),
 	returnErr error,
 ) {
+	if receiveForTest := self.forwardReceiveForTest; receiveForTest != nil {
+		return self.addForwardWithReceive(receiveForTest)
+	}
 	return self.addForwardWithReceive(func(ctx context.Context, message []byte) bool {
 		return self.client.ForwardWithTimeout(message, self.exchange.settings.WriteTimeout, connect.Ctx(ctx))
 	})
@@ -5411,7 +5457,7 @@ func (self *Resident) CancelIfIdle() bool {
 	default:
 	}
 
-	// An attached local transport is activity, as the at most
+	// An attached local transport or forward is activity, as the at most
 	// ExchangePingTimeout pings of an exchange socket were. Refreshing here
 	// rearms the watcher a full ttl out instead of every wake; a wedged link
 	// detaches within WriteTimeout, which refreshes once more.

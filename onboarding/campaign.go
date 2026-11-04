@@ -380,6 +380,25 @@ func ParseSendWindow(value string) (SendWindow, error) {
 func (w SendWindow) startMinutes() int { return w.StartHour*60 + w.StartMinute }
 func (w SendWindow) endMinutes() int   { return w.EndHour*60 + w.EndMinute }
 
+// NextOpen is the first moment from `at` on when the window is open in `loc`:
+// `at` itself inside the window (both edges count, as in SendAt's clamp), else
+// the next window start: that day's before the window, the next day's after
+// it.
+func (w SendWindow) NextOpen(at time.Time, loc *time.Location) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := at.In(loc)
+	minutes := local.Hour()*60 + local.Minute()
+	if minutes < w.startMinutes() {
+		return time.Date(local.Year(), local.Month(), local.Day(), w.StartHour, w.StartMinute, 0, 0, loc).UTC()
+	}
+	if w.endMinutes() < minutes {
+		return time.Date(local.Year(), local.Month(), local.Day()+1, w.StartHour, w.StartMinute, 0, 0, loc).UTC()
+	}
+	return at.UTC()
+}
+
 // SendAt places a step: the sign-up's local hour and minute, `day` days later,
 // clamped into the window. Local means `loc` (the network's time zone, or UTC
 // when unknown, which is why the clamp exists). Day arithmetic goes through
@@ -398,6 +417,19 @@ func SendAt(createdAt time.Time, day int, loc *time.Location, w SendWindow) time
 		at = time.Date(at.Year(), at.Month(), at.Day(), w.EndHour, w.EndMinute, 0, 0, loc)
 	}
 	return at.UTC()
+}
+
+// DueSendAt is where a step that is already due goes (a long retry, a late
+// enable, a late scan): right away while the window is open (a minute on once
+// `now` is past the minute's start), else the next window start. Past the
+// window's end that is the next morning: SendAt's same-day clamp lands in the
+// past there, and sending a minute on would mail at night.
+func DueSendAt(now time.Time, loc *time.Location, w SendWindow) time.Time {
+	at := SendAt(now, 0, loc, w)
+	if at.Before(now) {
+		at = now.Add(time.Minute)
+	}
+	return w.NextOpen(at, loc)
 }
 
 // LoadLocation resolves an IANA zone name, falling back to UTC for "" or an
