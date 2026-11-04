@@ -37,10 +37,8 @@ func runCompetitionDistributedCoordinator(ctx context.Context, settings *Setting
 	if err != nil {
 		return err
 	}
-	for _, host := range settings.DistributedEvaluationPolicy.Hosts {
-		if host.Transport == "local" && (host.HostId != hostCheck.HostId || host.QualificationSha256 != hostCheck.QualificationSha256) {
-			return errors.New("frozen local executor is not the independently qualified baseline host")
-		}
+	if err := validateCompetitionDistributedBaselineHost(&bootstrapSettings, hostCheck); err != nil {
+		return err
 	}
 	var baseline *roundBaselineRecord
 	for {
@@ -112,6 +110,25 @@ func runCompetitionDistributedCoordinator(ctx context.Context, settings *Setting
 		}
 	}
 	return errors.Join(childErrors...)
+}
+
+// The separately pinned, no-candidate baseline producer has the global frozen
+// qualification. Its physical host must be local, but that fingerprint is not
+// the private executor's fingerprint. Every executor still passes its own
+// signed check and retained full-R9 screen before any candidate may be claimed.
+func validateCompetitionDistributedBaselineHost(settings *Settings, check HostSelfCheck) error {
+	if settings == nil || settings.DistributedEvaluationPolicy == nil || settings.executorHostId != "" || !check.Eligible(settings) {
+		return errors.New("baseline producer did not pass its independent frozen qualification")
+	}
+	for _, host := range settings.DistributedEvaluationPolicy.Hosts {
+		if host.Transport == "local" {
+			if host.HostId != check.HostId {
+				return errors.New("baseline producer is not the frozen local physical host")
+			}
+			return nil
+		}
+	}
+	return errors.New("baseline producer has no frozen local physical host")
 }
 
 // A failed preflight or acknowledgement cannot permanently strand an expired
