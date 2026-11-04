@@ -46,6 +46,8 @@ type DockerProxy struct {
 	sessions                      map[net.Conn]bool
 	beforeIssue                   func()
 	beforeBuildIssue              func()
+	beforeHandoffWait             func()
+	fileHandoff                   bool
 	hostFiles                     *hostFileBroker
 	syncSpoolDirectory            func(string) error
 }
@@ -396,7 +398,7 @@ func (self *DockerProxy) workerHandler(w http.ResponseWriter, r *http.Request) {
 func (self *DockerProxy) admit(internalBuild bool) (func(), error) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	if (!self.accepting && !(internalBuild && self.build != nil && self.build.issued && !self.build.finished)) ||
+	if ((!self.accepting || self.fileHandoff) && !(internalBuild && self.build != nil && self.build.issued && !self.build.finished)) ||
 		self.ownerCtx.Err() != nil || !self.settings.Now().Before(self.plan.DeadlineAt) || self.operations >= self.settings.MaximumOperations || self.inflight >= self.settings.MaximumConnections {
 		return nil, errors.New("Docker mutation admission is closed")
 	}

@@ -389,8 +389,11 @@ if evaluation_docker image inspect "$image_tag" >/dev/null 2>&1; then
             exit 1
         }
 else
+if [[ "$subevaluation_scoped" = true ]]; then
+    subevaluation_require_client || infrastructure_failure "fixed build client is unavailable"
+fi
 DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS" \
-    evaluation_docker build \
+    "${subevaluation_docker_command[@]}" build \
     --platform linux/amd64 \
     --provenance=false \
     --no-cache \

@@ -14,6 +14,7 @@ subevaluation_ownership_init() {
     subevaluation_management_args=()
     subevaluation_compose_args=()
     subevaluation_cleanup_filter_args=()
+    subevaluation_docker_command=(sudo -n docker)
     local present=0 name value directory token
     for name in URNETWORK_SUBEVALUATION_RUN_ID URNETWORK_SUBEVALUATION_JOB_ID URNETWORK_SUBEVALUATION_ROUND_ID URNETWORK_SUBEVALUATION_ATTEMPT; do
         if [[ -v "$name" ]]; then
@@ -38,6 +39,7 @@ subevaluation_ownership_init() {
     [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 2
     directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 2
     subevaluation_run_id="$URNETWORK_SUBEVALUATION_RUN_ID"
+    subevaluation_docker_command=("${URNETWORK_SUBEVALUATION_CLIENT:-}" --docker-client "$subevaluation_run_id" --)
     subevaluation_preflight_cgroup="urnetwork-evaluation-${token:0:32}-preflight.slice"
     export URNETWORK_SUBEVALUATION_BRIDGE_NAME="unev-${subevaluation_run_id:0:10}"
     subevaluation_management_args=(--cpuset-cpus "${URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET:-}")

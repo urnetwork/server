@@ -35,6 +35,7 @@ func TestEvaluatorRoutingUsesFixedNonRootRolesAndDerivedBridge(t *testing.T) {
 	command := exec.Command("bash", "-eu", "-c", `source "$1"
 subevaluation_ownership_init
 evaluation_docker image inspect synthetic-image
+timeout 5s "${subevaluation_docker_command[@]}" build synthetic-context
 evaluation_host prepare-output /synthetic/output
 printf '%s\n' "$URNETWORK_SUBEVALUATION_BRIDGE_NAME"
 printf '%s\n' "${subevaluation_probe_args[@]}"
@@ -47,7 +48,7 @@ printf '%s\n' "${subevaluation_probe_args[@]}"
 	if err != nil {
 		t.Fatal("fixed helper route failed", err, string(output))
 	}
-	expected := "--docker-client\n" + runId + "\n--\nimage\ninspect\nsynthetic-image\n--host-operation\n" + runId +
+	expected := "--docker-client\n" + runId + "\n--\nimage\ninspect\nsynthetic-image\n--docker-client\n" + runId + "\n--\nbuild\nsynthetic-context\n--host-operation\n" + runId +
 		"\n--\nprepare-output\n/synthetic/output\nunev-aaaaaaaaaa\n"
 	if !bytes.HasPrefix(output, []byte(expected)) || bytes.Contains(output, []byte("untrusted-override")) ||
 		!bytes.Contains(output, []byte("--memory\n4g\n--memory-swap\n4g\n--pids-limit\n1024\n--cpuset-cpus\n10,12\n")) {
