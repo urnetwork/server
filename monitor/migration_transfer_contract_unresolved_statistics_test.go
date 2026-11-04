@@ -31,6 +31,40 @@ func TestMigrationsUnresolvedStatisticsClosesOnlyItsCatalogGap(t *testing.T) {
 	if head := migrationCatalogAuthorityHead(without); head != version-1 {
 		t.Fatal("later finalization contract silently bridged an unknown predecessor", head)
 	}
+	// Exercise the public verdict as well as the contiguous-head census:
+	// only a complete known catalog can promote a live definition mismatch.
+	head := server.MigrationCount()
+	for _, test := range []struct {
+		name                string
+		dbHead, catalogHead int
+		contracts           []snMainnetMigrationContract
+		wantClass           string
+	}{
+		{name: "internal predecessor gap", dbHead: head, catalogHead: version - 1, contracts: without, wantClass: "cannot-observe"},
+		{name: "known statistics drift", dbHead: head, catalogHead: head, wantClass: "migration-schema-drift"},
+		{name: "unknown future head", dbHead: head + 1, catalogHead: head, wantClass: "cannot-observe"},
+	} {
+		row := syntheticMigrationArtifactRow(test.dbHead)
+		row[contract.artifact.rowColumn] = "f"
+		catalog := syntheticMigrationCatalogRows(head)
+		if head < test.dbHead {
+			catalog = migrationFutureSchemaCatalogRows()
+		}
+		signal := NewMigrationsSignal().(*signalAdapter)
+		signal.probe = migrationsProbe{catalogContracts: test.contracts}
+		alerts := migrationFutureSchemaAlerts(t, signal, test.name, row, catalog)
+		alert := requireAlertClass(t, alerts, test.wantClass)
+		if len(alerts) != 1 {
+			t.Fatal("catalog authority emitted an unrelated verdict", test.name, alerts)
+		}
+		if test.wantClass == "cannot-observe" {
+			if !alert.unobservable || alert.Severity != SeverityWarn || !strings.Contains(alert.Observed, fmt.Sprintf("catalog_known_version=%d", test.catalogHead)) {
+				t.Fatal("catalog gap or unknown future head gained live-schema authority", test.name, alert)
+			}
+		} else if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, fmt.Sprintf("%s@v%d", contract.artifact.name, version)) {
+			t.Fatal("known statistics corruption lost its exact owning page", alert)
+		}
+	}
 }
 
 // Fresh published prefixes contain no ANALYZE sample. Only the object identity,
