@@ -254,7 +254,7 @@ func TestAgentEmergencyFreezeDoesNotAcquirePublicationOrCleanupLocks(t *testing.
 // Resource strings are not approximated: duplicate, overlapping, range-form,
 // aliased or unproven CPU identities cannot become systemd/Docker authority.
 func TestRunResourceIdentityRejectsUnprovenOrNoncanonicalSplit(t *testing.T) {
-	valid := `{"schema":1,"kind":"sim-latency-resource-boundary","evaluation_cpuset":"2,4","management_cpuset":"6,8","build_memory_limit":"5g","disjoint_cpu_sets":true,"memory_capacity_passed":true}`
+	valid := `{"schema":1,"kind":"sim-latency-resource-boundary","evaluation_cpuset":"2,4","management_cpuset":"6,8","build_memory_limit":"5g","disjoint_cpu_sets":true,"memory_capacity_passed":true,"evidence_memory_limit_bytes":1048576}`
 	if _, err := decodeRunResourceIdentity([]byte(valid)); err != nil {
 		t.Fatal(err)
 	}

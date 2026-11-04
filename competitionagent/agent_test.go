@@ -148,7 +148,11 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		t.Fatal(err)
 	}
 	resourcePath := filepath.Join(root, "resource-policy")
-	if err := os.WriteFile(resourcePath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-resource-boundary\",\"evaluation_cpuset\":\"2,4\",\"management_cpuset\":\"6,8\",\"build_memory_limit\":\"5g\",\"disjoint_cpu_sets\":true,\"memory_capacity_passed\":true}'\n"), 0700); err != nil {
+	if err := os.WriteFile(resourcePath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-resource-boundary\",\"evaluation_cpuset\":\"2,4\",\"management_cpuset\":\"6,8\",\"build_memory_limit\":\"5g\",\"disjoint_cpu_sets\":true,\"memory_capacity_passed\":true,\"evidence_memory_limit_bytes\":1048576}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	boundaryPath := filepath.Join(root, "resource-boundary.json")
+	if err := os.WriteFile(boundaryPath, []byte(`{"schema":1,"container_root_uid":200000,"container_root_gid":200000,"container_id_map_length":65536}`), 0400); err != nil {
 		t.Fatal(err)
 	}
 	fixture := &agentTestFixture{inputDirectory: inputDirectory, coordinatorKey: coordinatorKey, agentPublicKey: agentPublicKey,
@@ -157,7 +161,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		Evaluator: testAgentPin(t, evaluatorPath), SelfCheck: testAgentPin(t, selfCheckPath), Agent: testAgentPin(t, agentPath),
 		Docker: testAgentPin(t, agentPath), DockerSocketPath: filepath.Join(root, "engine", "docker.sock"), SubmissionBuilderIdentity: testAgentPin(t, builderPath),
 		DockerRole: DockerRoleConfig{ScratchDirectory: scratchDirectory, Compose: testAgentPin(t, agentPath), Buildx: testAgentPin(t, agentPath), Dockerfile: testAgentPin(t, agentPath),
-			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, agentPath)},
+			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, boundaryPath)},
 		SubmissionBuilderSha256: builderSha256, SubevaluationOwnership: ownershipPin, JsonFormatter: testAgentPin(t, formatterPath),
 		ConfigLocalDirectory: configDirectory, VaultLocalDirectory: vaultDirectory, ConfigLocalSha256: strings.Repeat("1", 64), VaultLocalSha256: strings.Repeat("2", 64),
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64), QualificationSha256: strings.Repeat("5", 64),

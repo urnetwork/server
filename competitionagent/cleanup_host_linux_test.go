@@ -610,6 +610,7 @@ func newCleanupMountTest(t *testing.T) *cleanupMountTest {
 		t.Fatal(err)
 	}
 	fixture.cleaner.config.ExpectedDataDeviceId = uint64(info.Sys().(*syscall.Stat_t).Dev)
+	fixture.plan.WorkDeviceId = uint64(info.Sys().(*syscall.Stat_t).Dev)
 	test := &cleanupMountTest{plan: fixture.plan}
 	test.content = cleanupMountTestLine(42, test.plan.EvidenceDirectory, "tmpfs", test.plan.EvidenceSource)
 	test.mounts = newHostCleanupMounts(fixture.cleaner.config, fixture.cleaner.settings)
@@ -643,6 +644,25 @@ func newCleanupMountTest(t *testing.T) *cleanupMountTest {
 		return nil
 	}
 	return test
+}
+
+// Journals live on the data filesystem while jobs occupy a distinct bounded
+// candidate filesystem. Cleanup must pin the admitted work device, not base.
+func TestHostCleanupMountParentUsesAdmittedWorkDeviceNotJournalDevice(t *testing.T) {
+	fixture := newCleanupMountTest(t)
+	config := Config{WorkDirectory: filepath.Dir(filepath.Dir(fixture.plan.EvidenceDirectory)), ExpectedDataDeviceId: fixture.plan.WorkDeviceId ^ 1}
+	mounts := newHostCleanupMounts(config, DefaultAgentSettings())
+	parent, err := mounts.openParent(fixture.plan)
+	if err != nil {
+		t.Fatal("distinct bounded work device was mistaken for the journal's filesystem", err)
+	}
+	parent.Close()
+	plan := fixture.plan
+	plan.WorkDeviceId ^= 1
+	if parent, err := mounts.openParent(plan); err == nil {
+		parent.Close()
+		t.Fatal("a changed work device was accepted because another configured device matched")
+	}
 }
 
 // Test mountinfo uses only encoded synthetic private paths and sources.

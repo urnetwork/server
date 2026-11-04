@@ -59,6 +59,9 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 		}
 	}
 	if protected {
+		if err := validateHostFilesPlan(plan, DefaultHostFilesSettings()); err != nil {
+			return err
+		}
 		for _, path := range []string{filepath.Dir(plan.StateDirectory), filepath.Dir(plan.ScratchDirectory), filepath.Dir(plan.ContextRoot), filepath.Dir(plan.SocketPath), filepath.Dir(plan.UpstreamSocketPath)} {
 			if err := protectedRuntimePath(path, plan.BaseDirectory, plan.TrustedOperatorUid); err != nil {
 				return err

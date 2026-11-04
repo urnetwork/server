@@ -36,6 +36,7 @@ type cleanupPlan struct {
 	EvidenceSource    string           `json:"evidence_source"`
 	DockerOwner       *DockerProxyPlan `json:"docker_owner,omitempty"`
 	ManagementCpuSet  string           `json:"management_cpu_set,omitempty"`
+	WorkDeviceId      uint64           `json:"work_device_id,omitempty"`
 }
 
 // Only a successful concrete cleanup permits releasing physical host custody.
@@ -643,7 +644,7 @@ func newHostCleanupMounts(config Config, settings AgentSettings) *hostCleanupMou
 			return nil, err
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || uint64(stat.Dev) != config.ExpectedDataDeviceId {
+		if !ok || plan.WorkDeviceId == 0 || uint64(stat.Dev) != plan.WorkDeviceId {
 			parent.Close()
 			return nil, errors.New("evidence parent moved off the pinned data filesystem")
 		}

@@ -5,6 +5,7 @@ package competitionagent
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os/user"
 	"path/filepath"
@@ -114,4 +115,28 @@ func trustedOperatorUid(name string) (uint32, error) {
 		return 0, errors.New("invalid trusted runtime operator identity")
 	}
 	return uint32(uid), nil
+}
+
+// Static declared ids are not live namespace proof. Admission separately
+// verifies the complete native resource boundary, and output handoff requires
+// an owned-container kernel probe matching this exact pinned declaration.
+func (self DockerRoleConfig) namespaceMetadata(protected bool) (HostNamespaceMap, error) {
+	maximum := DefaultAgentSettings().ConfigBytes
+	if err := validateFilePin(self.ResourceBoundary, maximum, protected); err != nil {
+		return HostNamespaceMap{}, err
+	}
+	content, err := readBounded(self.ResourceBoundary.Path, maximum)
+	if err != nil {
+		return HostNamespaceMap{}, err
+	}
+	var metadata struct {
+		Schema               int    `json:"schema"`
+		ContainerRootUid     uint32 `json:"container_root_uid"`
+		ContainerRootGid     uint32 `json:"container_root_gid"`
+		ContainerIdMapLength uint32 `json:"container_id_map_length"`
+	}
+	if validateDocumentKeys(content) != nil || json.Unmarshal(content, &metadata) != nil || metadata.Schema != Schema {
+		return HostNamespaceMap{}, errors.New("private engine has no canonical declared namespace range")
+	}
+	return HostNamespaceMap{ContainerRootUid: metadata.ContainerRootUid, ContainerRootGid: metadata.ContainerRootGid, ContainerIdMapLength: metadata.ContainerIdMapLength}, nil
 }

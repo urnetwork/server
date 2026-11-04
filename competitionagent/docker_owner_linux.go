@@ -214,13 +214,14 @@ func (self *hostRunContainment) requestControl(ctx context.Context, plan DockerP
 // Only the pinned resource helper supplies CPU/memory identity. A peer cannot
 // replace the qualified resource split with Docker command-line arguments.
 type runResourceIdentity struct {
-	Schema               int    `json:"schema"`
-	Kind                 string `json:"kind"`
-	EvaluationCpuSet     string `json:"evaluation_cpuset"`
-	ManagementCpuSet     string `json:"management_cpuset"`
-	BuildMemoryLimit     string `json:"build_memory_limit"`
-	DisjointCpuSets      bool   `json:"disjoint_cpu_sets"`
-	MemoryCapacityPassed bool   `json:"memory_capacity_passed"`
+	Schema                   int    `json:"schema"`
+	Kind                     string `json:"kind"`
+	EvaluationCpuSet         string `json:"evaluation_cpuset"`
+	ManagementCpuSet         string `json:"management_cpuset"`
+	BuildMemoryLimit         string `json:"build_memory_limit"`
+	DisjointCpuSets          bool   `json:"disjoint_cpu_sets"`
+	MemoryCapacityPassed     bool   `json:"memory_capacity_passed"`
+	EvidenceMemoryLimitBytes int64  `json:"evidence_memory_limit_bytes"`
 }
 
 // The helper has additional retained capacity fields. Duplicate/case aliases
@@ -229,7 +230,7 @@ func decodeRunResourceIdentity(content []byte) (runResourceIdentity, error) {
 	identity := runResourceIdentity{}
 	if validateDocumentKeys(content) != nil || json.Unmarshal(content, &identity) != nil || identity.Schema != Schema || identity.Kind != "sim-latency-resource-boundary" ||
 		!identity.DisjointCpuSets || !identity.MemoryCapacityPassed || !dockerProxyCpuSetPattern.MatchString(identity.EvaluationCpuSet) ||
-		!dockerProxyCpuSetPattern.MatchString(identity.ManagementCpuSet) || !dockerProxyMemoryPattern.MatchString(identity.BuildMemoryLimit) {
+		!dockerProxyCpuSetPattern.MatchString(identity.ManagementCpuSet) || !dockerProxyMemoryPattern.MatchString(identity.BuildMemoryLimit) || identity.EvidenceMemoryLimitBytes <= 0 {
 		return runResourceIdentity{}, errors.New("pinned resource helper did not prove the qualified management/evaluation split")
 	}
 	seen := map[string]bool{}
@@ -249,12 +250,21 @@ func decodeRunResourceIdentity(content []byte) (runResourceIdentity, error) {
 // no authority derived from workspace sidecars or a later caller environment.
 func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan, resource runResourceIdentity) (*DockerProxyPlan, error) {
 	workerUid := uint32(os.Geteuid())
+	workerGid := uint32(os.Getegid())
 	operatorUid := workerUid
 	if self.credential != nil {
 		workerUid = self.credential.Uid
+		workerGid = self.credential.Gid
 	}
 	if !self.protected && workerUid == 0 {
 		workerUid = 65534
+	}
+	if !self.protected && workerGid == 0 {
+		workerGid = 65534
+	}
+	idMap, err := self.config.DockerRole.namespaceMetadata(self.protected)
+	if err != nil {
+		return nil, err
 	}
 	if self.protected {
 		var err error
@@ -270,11 +280,16 @@ func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan,
 		ContextRoot: self.workDirectory(manifest.Identity.RunId), UpstreamSocketPath: self.config.DockerSocketPath, Docker: self.config.Docker, Buildx: self.config.DockerRole.Buildx,
 		Dockerfile: self.config.DockerRole.Dockerfile, BaseImageDigest: manifest.EvaluatorImageDigest, CgroupNames: append([]string(nil), plan.CgroupNames...),
 		CpuSet: resource.EvaluationCpuSet, BuildMemory: resource.BuildMemoryLimit, WorkerUid: workerUid,
-		ReadOnlyBindPaths: []string{self.config.ConfigLocalDirectory, self.config.VaultLocalDirectory, self.config.DockerRole.PostgresInitialization.Path}, ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256}
+		ReadOnlyBindPaths: []string{self.config.ConfigLocalDirectory, self.config.VaultLocalDirectory, self.config.DockerRole.PostgresInitialization.Path}, ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256,
+		HostFiles: &HostFilesPlan{WorkerGid: workerGid, ContainerRootUid: idMap.ContainerRootUid, ContainerRootGid: idMap.ContainerRootGid,
+			ContainerIdMapLength: idMap.ContainerIdMapLength, EvidenceBytes: resource.EvidenceMemoryLimitBytes, WorkDeviceId: plan.WorkDeviceId}}
 	for _, name := range plan.CgroupNames {
 		if cleanupBuildSlicePattern.MatchString(name) {
 			owner.BuildCgroupName = name
 		}
+	}
+	if err := validateHostFilesPlan(*owner, DefaultHostFilesSettings()); err != nil {
+		return nil, err
 	}
 	if err := validateDockerProxyPlan(*owner, DefaultDockerProxySettings(), false); err != nil {
 		return nil, err
@@ -288,7 +303,11 @@ func (self *Agent) verifyDockerOwnerPlan(manifest StartManifest, plan cleanupPla
 	if plan.DockerOwner == nil || !dockerProxyCpuSetPattern.MatchString(plan.ManagementCpuSet) {
 		return errors.New("run cleanup omitted its independent Docker owner")
 	}
-	resource := runResourceIdentity{EvaluationCpuSet: plan.DockerOwner.CpuSet, ManagementCpuSet: plan.ManagementCpuSet, BuildMemoryLimit: plan.DockerOwner.BuildMemory}
+	if plan.DockerOwner.HostFiles == nil || plan.WorkDeviceId == 0 {
+		return errors.New("run cleanup omitted its independently admitted work device and file scope")
+	}
+	resource := runResourceIdentity{EvaluationCpuSet: plan.DockerOwner.CpuSet, ManagementCpuSet: plan.ManagementCpuSet, BuildMemoryLimit: plan.DockerOwner.BuildMemory,
+		EvidenceMemoryLimitBytes: plan.DockerOwner.HostFiles.EvidenceBytes}
 	expected, err := self.makeDockerOwnerPlan(manifest, plan, resource)
 	if err != nil || !reflect.DeepEqual(expected, plan.DockerOwner) {
 		return errors.New("Docker custody plan differs from the root-pinned run role")

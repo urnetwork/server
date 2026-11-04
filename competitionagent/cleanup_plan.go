@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
@@ -69,6 +70,15 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 	plan := &cleanupPlan{Schema: Schema, RunId: manifest.Identity.RunId, JobId: manifest.Identity.JobId, RoundId: manifest.Identity.RoundId,
 		Attempt: manifest.Identity.Attempt, CgroupNames: cgroups, EvidenceDirectory: filepath.Join(self.workDirectory(manifest.Identity.RunId), ".evidence-runtime"),
 		EvidenceSource: fmt.Sprintf("urnetwork-evidence-%s-%d", strings.ReplaceAll(manifest.Identity.JobId, "-", ""), manifest.Identity.Attempt)}
+	workInfo, err := os.Stat(self.config.WorkDirectory)
+	if err != nil {
+		return nil, err
+	}
+	workStat, ok := workInfo.Sys().(*syscall.Stat_t)
+	if !ok || workStat.Dev == 0 {
+		return nil, errors.New("candidate work filesystem has no concrete native device identity")
+	}
+	plan.WorkDeviceId = uint64(workStat.Dev)
 	resourceBytes, err := self.cleanupIdentityCommand(ctx, self.config.DockerRole.ResourcePolicy, nil, nil, manifest.Identity)
 	if err != nil {
 		return nil, err

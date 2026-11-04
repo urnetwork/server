@@ -60,31 +60,32 @@ func DefaultDockerProxySettings() DockerProxySettings {
 // ContextRoot is exactly the run's private work directory; callers cannot use
 // another checkout, Dockerfile, builder, context, daemon or resource setting.
 type DockerProxyPlan struct {
-	Schema               int       `json:"schema"`
-	RunId                string    `json:"run_id"`
-	JobId                string    `json:"job_id"`
-	RoundId              string    `json:"round_id"`
-	Attempt              int       `json:"attempt"`
-	DeadlineAt           time.Time `json:"deadline_at"`
-	BaseDirectory        string    `json:"base_directory"`
-	TrustedOperatorUid   uint32    `json:"trusted_operator_uid"`
-	StateDirectory       string    `json:"state_directory"`
-	ScratchDirectory     string    `json:"scratch_directory"`
-	SocketPath           string    `json:"socket_path"`
-	BuildSocketPath      string    `json:"build_socket_path"`
-	ContextRoot          string    `json:"context_root"`
-	UpstreamSocketPath   string    `json:"upstream_socket_path"`
-	Docker               Pin       `json:"docker"`
-	Buildx               Pin       `json:"buildx"`
-	Dockerfile           Pin       `json:"dockerfile"`
-	BaseImageDigest      string    `json:"base_image_digest"`
-	CgroupNames          []string  `json:"cgroup_names"`
-	BuildCgroupName      string    `json:"build_cgroup_name"`
-	CpuSet               string    `json:"cpu_set"`
-	BuildMemory          string    `json:"build_memory"`
-	WorkerUid            uint32    `json:"worker_uid"`
-	ReadOnlyBindPaths    []string  `json:"read_only_bind_paths"`
-	ResourcePolicySha256 string    `json:"resource_policy_sha256"`
+	Schema               int            `json:"schema"`
+	RunId                string         `json:"run_id"`
+	JobId                string         `json:"job_id"`
+	RoundId              string         `json:"round_id"`
+	Attempt              int            `json:"attempt"`
+	DeadlineAt           time.Time      `json:"deadline_at"`
+	BaseDirectory        string         `json:"base_directory"`
+	TrustedOperatorUid   uint32         `json:"trusted_operator_uid"`
+	StateDirectory       string         `json:"state_directory"`
+	ScratchDirectory     string         `json:"scratch_directory"`
+	SocketPath           string         `json:"socket_path"`
+	BuildSocketPath      string         `json:"build_socket_path"`
+	ContextRoot          string         `json:"context_root"`
+	UpstreamSocketPath   string         `json:"upstream_socket_path"`
+	Docker               Pin            `json:"docker"`
+	Buildx               Pin            `json:"buildx"`
+	Dockerfile           Pin            `json:"dockerfile"`
+	BaseImageDigest      string         `json:"base_image_digest"`
+	CgroupNames          []string       `json:"cgroup_names"`
+	BuildCgroupName      string         `json:"build_cgroup_name"`
+	CpuSet               string         `json:"cpu_set"`
+	BuildMemory          string         `json:"build_memory"`
+	WorkerUid            uint32         `json:"worker_uid"`
+	ReadOnlyBindPaths    []string       `json:"read_only_bind_paths"`
+	ResourcePolicySha256 string         `json:"resource_policy_sha256"`
+	HostFiles            *HostFilesPlan `json:"host_files,omitempty"`
 }
 
 // Arguments are only the existing fixed build family, not a command launcher.
