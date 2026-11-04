@@ -919,6 +919,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{snFleetAutoMigrationContract},
 	// planner statistics on the opaque unresolved CASE; no sample is required
 	[]snMainnetMigrationContract{transferContractUnresolvedStatisticsMigrationContract},
+	// Prospective finalization control, after all previously published history.
+	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -1,0 +1,146 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-prospective-finalization-hold-selected-qualification",
+  "status": "passed_selected_ordinary_race_and_private_postgres_scope",
+  "qualified_source": {
+    "server_code_checkpoint": "514c61d1c5f4ef16206e02d70e20918340c60b57",
+    "server_code_tree": "4718517c34c9e1036df7792de311580f1694a7e2",
+    "origin_main_preserved": "86e5be897b61739f2304c7794ef7b2da277ea050",
+    "sn_code_checkpoint": "b2c491cf8c84b4e01db7ed14d2885f2b71dad558",
+    "sn_origin_main_preserved": "bbf4815c957840a46618a57e6161bff86878de8d",
+    "finalization_migration_version": 927,
+    "preceding_published_migration_version": 926,
+    "finalization_migration_source_git_blob": "6899b1ab749cac05c2709e06face55abda0be8ce",
+    "migration_list_git_blob": "39df6dfa23a4cbadecc74bfc0e1d26391d4aa5b5",
+    "post_qualification_change": "This appended qualification JSON record only; no compiled source, DDL, dependency or test input changed.",
+    "graph_note": "Explicitly approved server988 physical graph plus complete eight-path514 overlay and SNb2 archive. Server lock remains SN43ea; other eight repos verified exact lock HEAD/clean/fsck/readonly. No fabricated git metadata.",
+    "independent_executor_model": "gpt-6.1-sol",
+    "independent_executor_reasoning": "low",
+    "implementation_debug_and_merge_review_reasoning": "max"
+  },
+  "reviewed_evidence": {
+    "execution_host": "goofe",
+    "receipt_path": "/mnt/data/urnetwork-competition-development-20261104/finalization-514-overlay-validation/qualification.json",
+    "receipt_sha256": "e09376f4fe8bb27ffc43c62de74ef3a2606e7eec271fe481857fd00ac82530b1",
+    "original_e09_receipt_sha256": "fade0c23bc71c7cf42f64cedcf47d004bd2f63bf61f92cd501880519ca4d3ba4",
+    "root_review": "Independent rehash of six native-PG and two pure-group manifests and recount of 90 fresh affected passes; 156 unaffected passes reused with explicit dependency/hash proof.",
+    "new_affected_passes": 90,
+    "reused_unaffected_passes": 156,
+    "total_selected_primary_passes": 246,
+    "preserved_earlier_evidence": "Prior OpenAPI parser, monitor testing.TB compile, missing-926-catalog and standalone-843-predicate fixture failures are retained in the original e09 receipt; none is recast as a green run."
+  },
+  "capability_boundaries": {
+    "kind": "finalization",
+    "scope": "exact immutable round environment/competition/season through the existing scheduler CAS",
+    "prospective_only": true,
+    "blocks": "New seals, first reward elections and first terminal/publication authority writes, including pre-capability SQL writers.",
+    "preserves": "Intake, FIFO claims, heartbeat, admitted completion and owner-private numeric feedback; committed seals retain their authorized publication time and append-only integrity/reward history.",
+    "repeatable_read_fence": "Both control journals and first terminal writers mutate the same scoped tuple under the established advisory lock; a stale snapshot must fail serialization before interpreting stale hold state.",
+    "old_four_kind_hold_table_check_and_canonical_digests_unchanged": true,
+    "frozen_policy_or_competition_source_branch_changed": false,
+    "hold_activated_by_migration": false
+  },
+  "independent_receipt": {
+    "schema": 1,
+    "status": "targeted-merged-monitor-qualification-passed",
+    "execution_host": "goofe",
+    "source_commit": "514c61d1c5f4ef16206e02d70e20918340c60b57",
+    "base_server_commit": "9886328002dc882d84a0a6754c79efab42c27790",
+    "base_server_archive_sha256": "546166a54d5f9f66e1db74e3ca51c83fe5200fab71bfd555d57f0ef72d4ec14d",
+    "base_server_archive_exclusion": "connect/sim-latency/baseline historical measurements only",
+    "eight_path_delta_archive_sha256": "674600d44087ec28382b17bd842e53dd252f27212991b7f80ce2bb9905c64492",
+    "overlay_sha256": "a08defe7f2bd8e355b5f394ef350eb53714e3ac3f0d146ff2320bb038e50fcb3",
+    "compile_harness_sha256": "091a27f47e9a7bfaf6012da6eaca16f2389c37cf520b71642b4fc112330972ce",
+    "build_receipt_manifest_sha256": "c296677a07b70bee29dbeec332ecfe96b1ffd7048ef3182e544134e5b5c9e443",
+    "monitor_ordinary_binary_sha256": "44e01329f05d66cc7ea49d966821acdd3088ede484899226b1973358516956c1",
+    "monitor_race_binary_sha256": "10f4dba0bca8272f065ade47cba50e3929c046c5b016e378869a6e59da4c8fea",
+    "sn_commit": "b2c491cf8c84b4e01db7ed14d2885f2b71dad558",
+    "sn_archive_sha256": "6346835d83b7b12770258e4041e518017f8ca41d21d695fd7146b56e19b83afe",
+    "graph_note": "Explicitly approved server988 physical graph plus complete eight-path514 overlay and SNb2 archive. Server lock remains SN43ea; other eight repos verified exact lock HEAD/clean/fsck/readonly. No fabricated git metadata.",
+    "go_version": "go1.27.3",
+    "affected_new_passes": 90,
+    "affected_pure": {
+      "roots": 8,
+      "ordinary_fresh_processes": 3,
+      "race_fresh_processes": 3,
+      "passes": 48,
+      "receipts": [
+        "controller-pure.cFR53l7w",
+        "controller-pure.XOeOzTYa"
+      ]
+    },
+    "affected_native": {
+      "roots": 7,
+      "ordinary_fresh_clusters": 3,
+      "race_fresh_clusters": 3,
+      "passes": 42,
+      "ordinary_receipts": [
+        "db-validation.wEMtitIO",
+        "db-validation.d0CZTsF8",
+        "db-validation.V5lOc0NT"
+      ],
+      "race_receipts": [
+        "db-validation.IlsueYuk",
+        "db-validation.wVT72Z1w",
+        "db-validation.fjEecFtX"
+      ]
+    },
+    "native_manifests": {
+      "wEMtitIO": "1c19aa7b7e4243b477a09aa88b8baea04180f6453df7a559ea4fe423db0ae160",
+      "d0CZTsF8": "22dcf15dc78c94c87c902460430980d9723e77f1bef1abd6e444ad340f1be706",
+      "V5lOc0NT": "f30422e0c787189f342e6388283b4ea2012729a3e8d893ff5e38795b51a21402",
+      "IlsueYuk": "fec18faff61ab5e806dd376477f804c09b466ccb8b90b64c19d1c97663ba7a42",
+      "wVT72Z1w": "f8266029ebf419bd34857ea91cce6bdcfdc0dd9da191bfbe5283f8c03cd6bf76",
+      "fjEecFtX": "60553f617de928d15d8e09e13bc78e454f0682544fbd5e6d2d675f59072cb456"
+    },
+    "pure_selector": "^TestMigrations(CatalogAuthorityRequiresContiguousExplicitContracts|CompiledHeadBeyondCatalogStaysUnknown|ForwardSchemaAuthorityBoundary|FutureHeadPreservesCatalogFaults|FutureHeadCannotClearKnownSchemaIncident|UnresolvedStatisticsClosesOnlyItsCatalogGap|TransferContractUnresolvedStatistics(PublicationBoundary|UnavailableSource))$",
+    "native_selector": "^TestMigrations(Automation(StagingPublishedTransition|HistoricalFunctionCustody|SchemaFaultsReachSignal)|CompetitionFinalizationHold(PublishedPrefixes|NativeFaultCustody)|UnresolvedStatisticsPublishedPrefixesAndNativeFaults|TransferContractUnresolvedStatisticsPublishedSchemaAndFaults)$",
+    "native_command": "testbinary -test.v -test.timeout=20m -test.count=1 -test.run=<native_selector>",
+    "native_harness_sha256": "2dd6453875eefe951fe6e13c11b324f546030c40de390812f22ed37a1a01aa03",
+    "native_repetition_batch_sha256": "ac797f4fc2b3586e1c17347a34758bb2e2692bf33e776a6a2266bfe8dac61ceb",
+    "pure_batch_sha256": "b069ff1719a800cf28fe817671205cffee7d73bee21c31eeb2e0408f27c1c3dc",
+    "reused_unaffected_passes": 156,
+    "reused_scopes": {
+      "controller_model_pure": 66,
+      "controller_finalization_pg": 36,
+      "controller_legacy_pg": 54
+    },
+    "reuse_proof": "e09-to514 changes confined to monitor paths; controller/model/product/DDL/module bytes unchanged. Qualified controller/model test dependency closure excludes monitor.",
+    "reuse_dependency_receipt_manifest_sha256": "d53cf12a1432bc8699ec06289820024ce4b2439e018f2b0512ed5db565d2ac73",
+    "historical_receipt": "/mnt/data/urnetwork-competition-development-20261104/finalization-e09-overlay-validation/qualification.json",
+    "historical_receipt_sha256": "fade0c23bc71c7cf42f64cedcf47d004bd2f63bf61f92cd501880519ca4d3ba4",
+    "total_primary_passes_with_explicit_reuse": 246,
+    "all_selected_runs_exit_zero": true,
+    "no_failure_or_race_warnings": true,
+    "source_overlay_and_harness_inputs_unchanged": true,
+    "private_services_cleaned_and_terminal_cgroups_empty": true,
+    "isolation": "Goofe only, env-i/offline private toolchain/caches, readonly inputs, private loopback PG18/Redis8, maximum two CPUQuota200% MemoryMax12GiB units on disjoint0,2 and4,6, package-correct test cwd",
+    "limitations": [
+      "Targeted suite only",
+      "Root test binary equivalence NOT claimed (root tests import monitor)",
+      "Old-writer test is native SQL fixture NOT old-worker binary",
+      "No main DDL/API/grants/deploy/publication actions by executor"
+    ],
+    "earlier_failed_and_green_evidence_preserved": true
+  },
+  "next_pipeline_boundary": {
+    "migration": "The normal user migration pipeline must apply additive migration 927 after every published origin migration through 926.",
+    "release_components": [
+      "server API/control handlers and runtime status",
+      "server monitor/schema catalog and hold metrics"
+    ],
+    "deployment_or_migration_performed_by_this_checkpoint": false,
+    "live_finalization_hold_created_by_this_checkpoint": false,
+    "worker_or_evaluator_interrupted_by_this_checkpoint": false,
+    "requires_separate_authority": "Build/deploy, main migrations and any finalization hold activation remain separate normal-pipeline actions."
+  },
+  "limitations": [
+    "Selected compile/pure/private-Pg scope, not the full repository suite or a live-runtime qualification.",
+    "The qualified physical graph explicitly uses SNb2 rather than the canonical lock's SN43ea, with all other pinned siblings independently checked.",
+    "Old-writer compatibility is exercised by actual guarded SQL fixtures, not execution of an old worker binary.",
+    "Controller/model reuse is supported by unchanged blobs and a dependency closure excluding monitor; root test-binary equivalence is not claimed.",
+    "No main database, production credential, Sille build/test, deployment, service restart, configuration activation or live finalization hold was used.",
+    "This evidence record does not itself authorize production migration, deployment, hold activation, policy change or source activation."
+  ],
+  "deployment_authorized_by_this_receipt": false
+}

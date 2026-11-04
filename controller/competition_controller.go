@@ -7132,7 +7132,7 @@ func (self *Worker) finishEpoch(ctx context.Context) (bool, error) {
 			return false, ErrUnsupportedDecisionMode
 		}
 		_, err := store.SealAndElect(ctx, self.settings, latest.RoundId)
-		if errors.Is(err, ErrReviewNotReady) {
+		if errors.Is(err, ErrReviewNotReady) || errors.Is(err, ErrFinalizationHeld) {
 			return false, nil
 		}
 		return err == nil, err

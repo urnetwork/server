@@ -80,7 +80,9 @@ func syntheticSettings(source SignalSource) SignalSettings {
 	}
 }
 
-func requireAlertClass(t *testing.T, alerts []Alert, class string) Alert {
+// Keep assertions on the caller's actual test owner, including TestEnv's
+// retryTB wrapper; every operation below is part of testing.TB's contract.
+func requireAlertClass(t testing.TB, alerts []Alert, class string) Alert {
 	t.Helper()
 	for _, alert := range alerts {
 		if alert.Class == class {
