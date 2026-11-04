@@ -211,6 +211,25 @@ func TestCompetitionDistributedShutdownAfterResultSelectionDoesNotComplete(t *te
 	}
 }
 
+// An invalid authenticated boundary cannot be converted into an ordinary retry
+// or a failed score without retained proof. It withdraws the exact old custody.
+func TestCompetitionDistributedIntegrityResultHoldsOriginalExecution(t *testing.T) {
+	fixture := newCompetitionCompletionFixture(t)
+	settings := fixture.worker.settings
+	settings.DistributedEvaluationPolicy = competitionDistributedSlotTestPolicy(t)
+	settings.distributedRoundEpoch = 2
+	host := settings.DistributedEvaluationPolicy.Hosts[0]
+	settings.executorHostId, settings.executorSlotId = host.HostId, host.SlotId
+	fixture.job.ExecutorHostId, fixture.job.SlotId, fixture.job.SlotFencingToken = host.HostId, host.SlotId, 4
+	fixture.job.executorSettings = settings
+	started, attempt := *fixture.job.StartedAt, fixture.job.AttemptCount
+	fixture.evaluator.outcome = EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "synthetic integrity rejection"), distributedIntegrityRejected: true}
+	err := fixture.worker.evaluateOne(t.Context(), fixture.job, fixture.host)
+	if !errors.Is(err, errCompetitionExecutorIntegrityRejected) || fixture.store.calls != 0 || fixture.store.handbacks != 1 || fixture.evaluator.calls != 1 || !fixture.job.StartedAt.Equal(started) || fixture.job.AttemptCount != attempt {
+		t.Fatal("integrity rejection completed, redispatched or reset the original execution", err)
+	}
+}
+
 // The stable key is independent of ownership, transport and elapsed queue time.
 func TestCompetitionDistributedRunIdentitySeparatesRoundAndSourceEpoch(t *testing.T) {
 	started := time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)

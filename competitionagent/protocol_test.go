@@ -157,3 +157,38 @@ func TestReadFilesRequiresPrivateDestinationAndPreservesExistingEvidence(t *test
 		t.Fatal("exclusive receive changed existing evidence", err)
 	}
 }
+
+// A complete invalid signature/hash is definitive; a truncated stream is only
+// uncertain transport and must reconnect to the original durable execution.
+func TestProtocolDistinguishesIntegrityRejectionFromTransportTruncation(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := Response{Schema: Schema, HostId: "synthetic-executor", State: "ready"}
+	if err := SignResponse(&response, privateKey); err != nil {
+		t.Fatal(err)
+	}
+	response.State = "running"
+	if err := VerifyResponse(response, publicKey); !errors.Is(err, ErrIntegrity) {
+		t.Fatal("altered signed response was not a definitive integrity rejection", err)
+	}
+	header := make([]byte, 8)
+	binary.BigEndian.PutUint64(header, 128)
+	var truncated Response
+	err = ReadDocument(bytes.NewReader(append(header, []byte("short body")...)), &truncated, 4096)
+	if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, ErrIntegrity) {
+		t.Fatal("truncated response was misclassified as integrity rejection", err)
+	}
+	content := []byte("synthetic report")
+	digest := sha256.Sum256(content)
+	files := []File{{Path: "report.json", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))}}
+	err = ReadFiles(bytes.NewReader([]byte("changed contents")), privateProtocolTestDirectory(t), files, DefaultLimits().ArtifactBytes, DefaultLimits())
+	if !errors.Is(err, ErrIntegrity) {
+		t.Fatal("complete changed artifact was not an integrity rejection", err)
+	}
+	err = ReadFiles(bytes.NewReader([]byte("short")), privateProtocolTestDirectory(t), files, DefaultLimits().ArtifactBytes, DefaultLimits())
+	if err == nil || errors.Is(err, ErrIntegrity) {
+		t.Fatal("truncated artifact was misclassified as definitive integrity rejection", err)
+	}
+}

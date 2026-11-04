@@ -23,6 +23,10 @@ import (
 
 const Schema = 1
 
+// Definitive malformed/authentication failures are not transport uncertainty.
+// Callers must hold the original run for integrity review, never redispatch it.
+var ErrIntegrity = errors.New("subevaluation integrity rejection")
+
 // Bounds belong to each transport/agent owner, not to candidate input. Nonpositive
 // values are invalid, including a disabled bound; defaults cover full R9 reports.
 type Limits struct {
@@ -153,7 +157,7 @@ func VerifyRequest(request Request, publicKey ed25519.PublicKey) error {
 	request.Signature = ""
 	content, marshalErr := json.Marshal(request)
 	if err != nil || marshalErr != nil || len(publicKey) != ed25519.PublicKeySize || !ed25519.Verify(publicKey, content, signature) {
-		return errors.New("subevaluation request authentication failed")
+		return errors.Join(ErrIntegrity, errors.New("subevaluation request authentication failed"))
 	}
 	return nil
 }
@@ -175,7 +179,7 @@ func VerifyResponse(response Response, publicKey ed25519.PublicKey) error {
 	response.Signature = ""
 	content, marshalErr := json.Marshal(response)
 	if err != nil || marshalErr != nil || len(publicKey) != ed25519.PublicKeySize || !ed25519.Verify(publicKey, content, signature) {
-		return errors.New("subevaluation response authentication failed")
+		return errors.Join(ErrIntegrity, errors.New("subevaluation response authentication failed"))
 	}
 	return nil
 }
@@ -215,7 +219,7 @@ func ReadDocument(reader io.Reader, value any, maximum int64) error {
 	}
 	size := binary.BigEndian.Uint64(header)
 	if size == 0 || maximum <= 0 || uint64(maximum) < size {
-		return errors.New("subevaluation document exceeds its bound")
+		return errors.Join(ErrIntegrity, errors.New("subevaluation document exceeds its bound"))
 	}
 	content := make([]byte, int(size))
 	if _, err := io.ReadFull(reader, content); err != nil {
@@ -223,15 +227,15 @@ func ReadDocument(reader io.Reader, value any, maximum int64) error {
 	}
 	defer clear(content)
 	if err := validateDocumentKeys(content); err != nil {
-		return err
+		return errors.Join(ErrIntegrity, err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
-		return err
+		return errors.Join(ErrIntegrity, err)
 	}
 	if decoder.Decode(new(any)) != io.EOF {
-		return errors.New("subevaluation document contains trailing data")
+		return errors.Join(ErrIntegrity, errors.New("subevaluation document contains trailing data"))
 	}
 	return nil
 }
@@ -298,7 +302,7 @@ func ValidateFiles(files []File, maximum int64, limits Limits) error {
 		return err
 	}
 	if len(files) > limits.FileCount || maximum <= 0 {
-		return errors.New("subevaluation file count exceeds its bound")
+		return errors.Join(ErrIntegrity, errors.New("subevaluation file count exceeds its bound"))
 	}
 	paths := map[string]bool{}
 	total := int64(0)
@@ -306,7 +310,7 @@ func ValidateFiles(files []File, maximum int64, limits Limits) error {
 		if file.Path == "" || strings.ContainsAny(file.Path, "\\\x00\r\n") || strings.HasPrefix(file.Path, "/") ||
 			filepath.ToSlash(filepath.Clean(file.Path)) != file.Path || file.Path == "." || file.Path == ".." || strings.HasPrefix(file.Path, "../") ||
 			paths[file.Path] || !digestPattern.MatchString(file.Sha256) || file.Bytes < 0 || limits.FileBytes < file.Bytes || maximum-total < file.Bytes {
-			return errors.New("unsafe or oversized subevaluation file manifest")
+			return errors.Join(ErrIntegrity, errors.New("unsafe or oversized subevaluation file manifest"))
 		}
 		paths[file.Path] = true
 		total += file.Bytes
@@ -369,8 +373,11 @@ func ReadFiles(reader io.Reader, root string, files []File, maximum int64, limit
 		count, copyErr := io.CopyN(io.MultiWriter(output, digest), reader, file.Bytes)
 		syncErr := output.Sync()
 		closeErr := output.Close()
-		if copyErr != nil || syncErr != nil || closeErr != nil || count != file.Bytes || hex.EncodeToString(digest.Sum(nil)) != file.Sha256 {
-			return errors.New("subevaluation received file failed authentication")
+		if err := errors.Join(copyErr, syncErr, closeErr); err != nil {
+			return err
+		}
+		if count != file.Bytes || hex.EncodeToString(digest.Sum(nil)) != file.Sha256 {
+			return errors.Join(ErrIntegrity, errors.New("subevaluation received file failed authentication"))
 		}
 	}
 	return nil

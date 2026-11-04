@@ -6384,7 +6384,8 @@ type EvaluationOutcome struct {
 	RoundBaselineSha256 string
 	archiveFailure      *competitionArtifactArchiveFailure
 	// Set only by the coordinator after authenticated artifacts are retained.
-	distributedArchiveVerified bool
+	distributedArchiveVerified   bool
+	distributedIntegrityRejected bool
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -7317,6 +7318,12 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 					return fmt.Errorf("hand back canceled executor job %s: %w", job.JobId, err)
 				}
 				return parent.Err()
+			}
+			if competitionDistributedEnabled(self.settings) && result.outcome.distributedIntegrityRejected {
+				if err := self.handBackJob(job, "executor_integrity_rejected"); err != nil {
+					return fmt.Errorf("hold rejected executor job %s: %w", job.JobId, err)
+				}
+				return errCompetitionExecutorIntegrityRejected
 			}
 			if result.outcome.Score != nil {
 				if err := validateScore(result.outcome.Score); err != nil {

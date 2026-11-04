@@ -577,6 +577,35 @@ func TestCompetitionDistributedContextCapturesPhysicalAuthority(t *testing.T) {
 	}
 }
 
+// A definitive integrity rejection is a durable same-attempt hold, not a queue
+// retry. Other approved hosts continue claiming later admissions independently.
+func TestCompetitionDistributedIntegrityHoldSurvivesCoordinatorRestart(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		fixture := newCompetitionDistributedPgFixture(t, tb, true, true)
+		second := fixture.addJob(tb, server.Id{15: 4}, fixture.clock.Now(), "healthy-following")
+		settings := fixture.selected(0)
+		first, err := fixture.store.Claim(tb.Context(), settings, "synthetic-worker-a", testWorkerImageDigest())
+		if err != nil || first == nil {
+			tb.Fatal(err)
+		}
+		if err := fixture.store.HandBack(withCompetitionJobAuthority(tb.Context(), first), "synthetic-worker-a", first.JobId, "executor_integrity_rejected"); err != nil {
+			tb.Fatal(err)
+		}
+		restarted, err := fixture.store.Claim(tb.Context(), settings, "synthetic-restarted-coordinator", testWorkerImageDigest())
+		if err != nil || restarted != nil {
+			tb.Fatalf("restarted coordinator redispatched an integrity-rejected run: job=%+v err=%v", restarted, err)
+		}
+		healthy, err := fixture.store.Claim(tb.Context(), fixture.selected(1), "synthetic-worker-b", testWorkerImageDigest())
+		if err != nil || healthy == nil || healthy.JobId != second.JobId {
+			tb.Fatalf("rejected host blocked its healthy sibling: job=%+v err=%v", healthy, err)
+		}
+		stored, err := fixture.store.GetJob(tb.Context(), settings, first.JobId, &Principal{Id: "synthetic-operator", Role: "operator"})
+		if err != nil || stored.State != "running" || stored.AttemptCount != first.AttemptCount || !stored.StartedAt.Equal(*first.StartedAt) || !stored.ExecutionDeadline.Equal(*first.ExecutionDeadline) || stored.SlotFencingToken != first.SlotFencingToken {
+			tb.Fatal("integrity hold changed the original execution identity or budget", err)
+		}
+	})
+}
+
 // The minimum-work policy is compulsory, not a configurable scoring shortcut.
 func TestCompetitionDistributedSlotPolicyRequiresMinimumWorkRound(t *testing.T) {
 	settings := automationApiSettings()

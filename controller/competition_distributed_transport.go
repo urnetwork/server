@@ -98,7 +98,7 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 		}
 	}
 	if readErr == nil && (response.Schema != competitionagent.Schema || response.HostId != self.host.HostId || response.RunId != request.RunId || response.FencingToken != request.FencingToken) {
-		readErr = errors.New("executor response belongs to another host, run or owner fence")
+		readErr = errors.Join(competitionagent.ErrIntegrity, errors.New("executor response belongs to another host, run or owner fence"))
 	}
 	if readErr == nil && request.Operation == "artifacts" {
 		if outputDirectory == "" {

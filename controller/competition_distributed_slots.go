@@ -190,6 +190,16 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			// claim's clock starts only after those waits and a fresh parent fence.
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 			now = self.nowUtc().Truncate(time.Microsecond)
+			if reconcile && job.ExecutionDeadline != nil && now.Before(*job.ExecutionDeadline) {
+				var rejected bool
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job_event WHERE job_id=$1 AND event_type='execution_custody_released'
+ AND payload_json->>'reason'='executor_integrity_rejected' AND (payload_json->>'evaluation_cycle')::integer=$2
+ AND (payload_json->>'attempt')::integer=$3)`, job.JobId, job.EvaluationCycle, job.AttemptCount).Scan(&rejected))
+				if rejected {
+					job = nil
+					return
+				}
+			}
 			if settings.executorReconcileExpiredOnly && (job.ExecutionDeadline == nil || now.Before(*job.ExecutionDeadline)) {
 				job = nil
 				return
@@ -300,7 +310,11 @@ func (self PostgresStore) handBackDistributedCompetitionJob(ctx context.Context,
 			if updated.RowsAffected() != 1 {
 				panic(ErrLeaseLost)
 			}
-			appendEvent(ctx, tx, jobId, now, "execution_custody_released", workerId, competitionHandBackEvent{Reason: reason, competitionHeartbeatFailure: failure})
+			appendEvent(ctx, tx, jobId, now, "execution_custody_released", workerId, struct {
+				competitionHandBackEvent
+				EvaluationCycle int `json:"evaluation_cycle"`
+				Attempt         int `json:"attempt"`
+			}{competitionHandBackEvent: competitionHandBackEvent{Reason: reason, competitionHeartbeatFailure: failure}, EvaluationCycle: cycle, Attempt: attempt})
 		})
 	})
 }

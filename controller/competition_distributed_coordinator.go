@@ -118,12 +118,13 @@ func runCompetitionDistributedCoordinator(ctx context.Context, settings *Setting
 // remote run. Only already-owned, deadline-expired work can bypass host health;
 // fresh FIFO work still requires the genuine agent self-check.
 func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator *competitionAgentEvaluator) error {
+	integrityRejected := false
 	for {
 		finished, err := worker.finishEpoch(ctx)
 		if finished {
 			return nil
 		}
-		if err == nil {
+		if err == nil && !integrityRejected {
 			err = worker.Run(ctx)
 			if err == nil {
 				return nil
@@ -131,6 +132,9 @@ func runCompetitionExecutorWorker(ctx context.Context, worker *Worker, evaluator
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+		if errors.Is(err, errCompetitionExecutorIntegrityRejected) || errors.Is(err, competitionagent.ErrIntegrity) {
+			integrityRejected = true
 		}
 		competitionExecutorTransportFailures.WithLabelValues(evaluator.host.HostId).Inc()
 		expiredSettings := *worker.settings

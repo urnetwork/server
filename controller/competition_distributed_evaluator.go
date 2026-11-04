@@ -31,6 +31,10 @@ type competitionExecutorArtifactIdentity struct {
 	AgentReceiptSha256  string `json:"agent_receipt_sha256"`
 }
 
+// Definitive peer integrity failures withdraw custody without redispatching the
+// unchanged execution. The database event keeps this hold across coordinator death.
+var errCompetitionExecutorIntegrityRejected = errors.New("executor integrity rejected; original run remains held")
+
 // A selected host has one evaluation owner. Transport failures only reconnect
 // the same stable run; they never become a second infrastructure attempt.
 type competitionAgentEvaluator struct {
@@ -99,6 +103,9 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 			return failure("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
 		}
 		response, exchangeErr := self.transport.Exchange(ctx, request, inputDirectory, "")
+		if errors.Is(exchangeErr, competitionagent.ErrIntegrity) {
+			return EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "authenticated executor transport rejected altered or invalid evidence"), distributedIntegrityRejected: true}
+		}
 		if exchangeErr == nil && response.ManifestSha256 == manifestDigest && sameCompetitionAgentIdentity(response.Identity, &manifest.Identity) {
 			competitionExecutorRemoteState.WithLabelValues(self.host.HostId).Set(competitionAgentStateNumber(response.State))
 			switch response.State {
@@ -106,6 +113,10 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 				directory, createErr := os.MkdirTemp(settings.ArtifactRoot, ".executor-receive-"+manifest.Identity.RunId+"-")
 				if createErr == nil {
 					artifactResponse, artifactErr := self.transport.Exchange(ctx, competitionagent.Request{Operation: "artifacts", RunId: request.RunId, FencingToken: request.FencingToken}, "", directory)
+					if errors.Is(artifactErr, competitionagent.ErrIntegrity) {
+						_ = os.RemoveAll(directory)
+						return EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "authenticated executor artifact transfer rejected altered or invalid evidence"), distributedIntegrityRejected: true}
+					}
 					if artifactErr == nil && artifactResponse.ManifestSha256 == manifestDigest && sameCompetitionAgentIdentity(artifactResponse.Identity, &manifest.Identity) && artifactResponse.State == response.State {
 						outcome := authenticateDistributedCompetitionAttempt(ctx, settings, job, manifest, artifactResponse, directory)
 						if outcome.distributedArchiveVerified {
