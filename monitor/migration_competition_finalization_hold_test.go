@@ -11,6 +11,23 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Observe the artifact row returned by the complete production query on the
+// existing fault transaction. Its catalog CTEs are never copied or bypassed.
+type competitionFinalizationArtifactSource struct {
+	*snMainnetMigrationTxSource
+	artifactRow Row
+}
+
+// Delegate execution and value conversion to the established native source;
+// retain only the actual coherence row, not the independent identity rows.
+func (self *competitionFinalizationArtifactSource) PostgreSQL(ctx context.Context, query string) ([]Row, error) {
+	rows, err := self.snMainnetMigrationTxSource.PostgreSQL(ctx, query)
+	if err == nil && strings.Contains(query, "WITH version AS") && strings.Contains(query, "FROM migration_audit") && len(rows) == 1 {
+		self.artifactRow = rows[0]
+	}
+	return rows, err
+}
+
 // Both the previous published prefix and the additive head retain all old
 // artifacts. The new contract becomes mandatory only at its exact DDL version.
 func TestMigrationsCompetitionFinalizationHoldPublishedPrefixes(t *testing.T) {
@@ -41,6 +58,7 @@ func TestMigrationsCompetitionFinalizationHoldNativeFaultCustody(t *testing.T) {
 	version := server.CompetitionFinalizationHoldMigrationVersion()
 	contract := migrationCurrentSuffixTestContract(t, version)
 	owner := fmt.Sprintf("%s@v%d", contract.artifact.name, version)
+	legacy := migrationCurrentSuffixTestContract(t, 843).artifact
 	faults := []struct{ name, sql string }{
 		{"mutable finalization history", `ALTER TABLE competition_finalization_hold DISABLE TRIGGER competition_finalization_hold_immutable`},
 		{"truncate bypass", `ALTER TABLE competition_finalization_hold DISABLE TRIGGER competition_finalization_hold_no_truncate`},
@@ -66,7 +84,8 @@ func TestMigrationsCompetitionFinalizationHoldNativeFaultCustody(t *testing.T) {
 				if _, err := tx.Exec(ctx, fault.sql); err != nil {
 					t.Fatalf("apply %s: %v", fault.name, err)
 				}
-				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+				source := &competitionFinalizationArtifactSource{snMainnetMigrationTxSource: &snMainnetMigrationTxSource{tx: tx}}
+				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
 				if err != nil {
 					t.Fatalf("inspect %s: %v", fault.name, err)
 				}
@@ -74,11 +93,10 @@ func TestMigrationsCompetitionFinalizationHoldNativeFaultCustody(t *testing.T) {
 				if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, owner) {
 					t.Fatalf("%s lost owning finalization artifact: %s", fault.name, alert.Observed)
 				}
-				// New independent faults must not rewrite or invalidate the old
-				// four-kind capability journal's exact historical contract.
-				var oldArtifact bool
-				server.Raise(tx.QueryRow(ctx, `SELECT `+competitionMigration843ArtifactQuery).Scan(&oldArtifact))
-				if !oldArtifact {
+				// Inspect the original four-kind journal's own artifact column
+				// from that same full query. A standalone predicate would omit
+				// its required index/function/trigger catalog CTEs.
+				if len(source.artifactRow) <= legacy.rowColumn || source.artifactRow[legacy.rowColumn] != "t" {
 					t.Fatalf("%s unexpectedly changed original hold authority", fault.name)
 				}
 			})
