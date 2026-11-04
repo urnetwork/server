@@ -11,6 +11,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/urnetwork/server/model"
 )
 
@@ -88,5 +90,71 @@ func (self localDeliveryTestMode) requireExchange(t testing.TB, exchange *Exchan
 		if exchange.localTransport != nil || exchange.localForward != nil {
 			t.Errorf("mode %s: the exchange built an in-process switch", self.name)
 		}
+	}
+}
+
+// The mode's name, tcp for the zero value an unset config holds.
+func (self localDeliveryTestMode) label() string {
+	if self.name == "" {
+		return localDeliveryTestTcp.name
+	}
+	return self.name
+}
+
+// The in-process links of each operation over every exchange of the process,
+// as the exchange_local metrics count them: those attached now and those
+// detached so far.
+type localLinkCounts struct {
+	attached [exchangeIOOpCount]float64
+	detached [exchangeIOOpCount]float64
+}
+
+func snapshotLocalLinkCounts() localLinkCounts {
+	var counts localLinkCounts
+	for _, op := range localLinkOps {
+		counts.attached[op] = testutil.ToFloat64(exchangeLocalAttachments[op])
+		for reason := localTransportDetachResidentDone; reason < localTransportDetachReasonCount; reason++ {
+			if counter := exchangeLocalDetachesCounters[op][reason]; counter != nil {
+				counts.detached[op] += testutil.ToFloat64(counter)
+			}
+		}
+	}
+	return counts
+}
+
+// The links of op that attached after before: the change in attached links
+// plus the links that detached in between.
+func (self localLinkCounts) attachesSince(before localLinkCounts, op exchangeIOOp) float64 {
+	return self.attached[op] - before.attached[op] + self.detached[op] - before.detached[op]
+}
+
+// A settings mutator that runs mutate, then sets the mode, for fixtures that
+// take one mutator.
+func (self localDeliveryTestMode) after(mutate func(*ExchangeSettings)) func(*ExchangeSettings) {
+	return func(settings *ExchangeSettings) {
+		if mutate != nil {
+			mutate(settings)
+		}
+		self.apply(settings)
+	}
+}
+
+// Fails unless the in-process links since before are what the mode allows on a
+// fixture whose every resident shares its transports' and forwards' exchange:
+// in process, at least minTransports transport links and minForwards forward
+// links attached; over the socket path, none. On such a fixture an eligible
+// transport or forward that dialed instead is a silent fallback.
+func (self localDeliveryTestMode) requireLinksSince(t testing.TB, before localLinkCounts, minTransports int, minForwards int) {
+	t.Helper()
+	after := snapshotLocalLinkCounts()
+	transportLinks := after.attachesSince(before, exchangeIOOpTransport)
+	forwardLinks := after.attachesSince(before, exchangeIOOpForward)
+	t.Logf("[local delivery]mode=%s in_process_transport_links=%v in_process_forward_links=%v", self.label(), transportLinks, forwardLinks)
+	if self.local {
+		if transportLinks < float64(minTransports) || forwardLinks < float64(minForwards) {
+			t.Errorf("mode %s: %v transport and %v forward links attached in process, want at least %d and %d", self.label(), transportLinks, forwardLinks, minTransports, minForwards)
+		}
+	} else if transportLinks != 0 || forwardLinks != 0 {
+		t.Errorf("mode %s: %v transport and %v forward links attached in process, want none", self.label(), transportLinks, forwardLinks)
 	}
 }

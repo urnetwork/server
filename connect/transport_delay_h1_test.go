@@ -223,16 +223,29 @@ func TestConnectH1TransportDelay(t *testing.T) {
 // the offering client included, is the legacy wire it always read. A stamped
 // frame would carry 12 bytes it cannot parse, and the exchange would stall.
 func TestConnectH1TransportDelayExchange(t *testing.T) {
+	testConnectH1TransportDelayExchange(t, localDeliveryTestTcp)
+}
+
+// The same exchange with each transport delivered in process to its resident
+// and the clients' forwards in process: the resident's read-only shares then
+// reach the stamping H1 writers without a socket copy between.
+func TestConnectH1TransportDelayExchangeInProcess(t *testing.T) {
+	testConnectH1TransportDelayExchange(t, localDeliveryTestInProcess)
+}
+
+func testConnectH1TransportDelayExchange(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
+		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, delivery.apply, func(settings *ConnectHandlerSettings) {
 			settings.EnableH1Plus = true
 		})
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 1)
 
 		// collects one client's published intervals from transport goroutines
 		type delayStatsCollector struct {
