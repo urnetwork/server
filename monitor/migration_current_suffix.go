@@ -917,6 +917,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{stDemandMigrationContract},
 	// the one-tap Top 200 claim's tables, versioned by their position
 	[]snMainnetMigrationContract{snFleetAutoMigrationContract},
+	// Prospective finalization control, after all previously published history.
+	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

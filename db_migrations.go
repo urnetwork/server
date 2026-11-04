@@ -11319,4 +11319,8 @@ var migrations = []any{
 	// as a no-op when the operator created the object first. Any release can
 	// run before or after it.
 	transferContractUnresolvedPredicateStatisticsMigration,
+
+	// Independent prospective finalization control. The original four-kind hold
+	// journal and old binaries remain compatible; no hold is activated by DDL.
+	newSqlMigration(competitionFinalizationHoldMigrationSql),
 }
