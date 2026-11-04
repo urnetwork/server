@@ -43,7 +43,13 @@
 // The build state is a sentinel member scored -inf (never counted), so a lost
 // index takes its state with it and the next count rebuilds it. A complete
 // index holds `#ready` scored by its build time negated (never counted either),
-// and a count rebuilds an index older than providerIntentExemptRebuildAge.
+// and a count rebuilds an index older than providerIntentExemptRebuildAge. A
+// network of up to providerIntentExemptRebuildWalkLimit registry members is
+// rebuilt from nothing, as above. A larger one keeps its index, and `#ready`
+// with the old build time, while a re-sweep takes the same steps over its
+// registries beside them, re-deriving each member's entry in place; the counts
+// read the index meanwhile, and the re-sweep records a new build time when it
+// completes.
 //
 // The cost per call, each command O(log N) in the network's registry size N:
 //   - a count: TIME, the sentinel ZSCORE and a TTL read (and an EXPIRE once per
@@ -56,7 +62,10 @@
 //   - a count while the index builds: the walk, plus at most two sweep steps
 //     deriving max(1024, N/4) members and two more, and any run of equal
 //     scores, at most seven commands each, for at most a handful of counts per
-//     build.
+//     build;
+//   - a count while a large network's index re-sweeps: the count, plus at most
+//     two sweep steps deriving 1024 members and two more, and any run of equal
+//     scores, at most seven commands each, for N/1024 counts or so a re-sweep.
 //
 // The index is exact once every process that writes these keys runs this code:
 // a writer without it changes the mirrored state without the index. Such an
@@ -75,7 +84,7 @@
 // checks do not see what is still offset: a stale entry while another live
 // member has no entry, a missing entry, a stale status, or a lost registry
 // while the other registry has more live members than the index has entries.
-// The rebuild age bounds those.
+// The rebuild age bounds those, with a rebuild or a re-sweep after it.
 package model
 
 import (
@@ -133,19 +142,36 @@ func providerIntentExemptKey(networkId server.Id) string {
 // sources. The count's own checks see an index that counts entries without
 // sources, not one that misses entries or holds a stale status, as one left by
 // a writer without the index (a rollout or a rollback) can. The age bounds such
-// a disagreement to an hour and a build. A rebuild drops the index and sweeps
-// its registries again, one sweep per counted network an hour. No count walks
-// for a network up to the build limit; a larger one walks for the counts its
-// sweep takes, a quarter of its members each, so a network of 40 to 50
-// thousand members walks four or five counts an hour. The age is measured on
-// the redis clock (TIME), so the callers' clocks do not move it.
+// a disagreement to an hour and a rebuild. A rebuild sweeps the registries
+// again, one sweep per counted network an hour. Up to the rebuild walk limit
+// it drops the index and builds it anew, and no count walks for a network up
+// to the build limit; a larger network keeps its index, which counts while a
+// re-sweep re-derives it, so no count of it walks. The age is measured on the
+// redis clock (TIME), so the callers' clocks do not move it.
 const providerIntentExemptRebuildAge = time.Hour
 
 // The fewest registry members one count derives while the index builds. A
 // count builds at least a quarter of the network's registry members, so a build
 // takes at most a handful of counts that walk, and a network of up to this many
-// members is built by its first count without a walk.
+// members is built by its first count without a walk. A count derives exactly
+// this many while a large network's index re-sweeps (see
+// providerIntentExemptRebuildWalkLimit).
 const providerIntentExemptBuildLimit = 1024
+
+// The most registry members a network can have and still have its index
+// rebuilt from nothing past its age, with the counts walking while it builds.
+// A walk of up to this many members holds the network's redis node for a few
+// tens of milliseconds (the walk took about 8 µs per member on node 37). Past
+// its age, the index of a larger network goes on counting while a re-sweep
+// re-derives its entries in place, a build limit of members per count, beside
+// a build state; when the re-sweep completes it records a new build time. An
+// entry it does not reach, one whose member left its registry, stops counting
+// at its own expiry, as an entry left without a registry entry does. Before
+// the re-sweep, every rebuild of a network of tens of thousands of members
+// walked: on 2026-11-03 and 11-04 the slowlog of node 37 (6416 on edge-5)
+// grew by one to seven entries at each hourly rebuild of one network's index,
+// with calls of up to 0.57 s, each one holding every key on the node.
+const providerIntentExemptRebuildWalkLimit = 4 * providerIntentExemptBuildLimit
 
 // Re-derives one registry entry's exempt index entry. The status match is the
 // walk's (count_clients_walk). `key_ttl_seconds` is a backstop for the index
@@ -199,9 +225,11 @@ end
 
 // The count library of the provider intent scripts. count_clients_walk is the
 // walk over every live registry member, used while a network's index builds.
-// build_exempt_index advances the build and returns whether the index is
-// complete; its state is `#c <cursor> <sweep end>` or `#p ...` while it
-// sweeps a registry, and `#ready` scored by the negated build time. The cursor
+// build_exempt_index advances the build, or a large network's re-sweep, and
+// returns whether the count reads the index: when it is complete, or while it
+// re-sweeps. Its state is `#c <cursor> <sweep end>` or `#p ...` while it
+// sweeps a registry, and `#ready` scored by the negated build time; a re-sweep
+// keeps `#ready`, with the old build time, beside its state. The cursor
 // is `start` or a score, the sweep end `none` (an empty registry) or a score.
 // sweep_exempt_index takes one step of a sweep and returns the members derived
 // and the next cursor, or false at the sweep's end. count_clients_indexed
@@ -303,28 +331,48 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 		end
 		-- past its age, the index is rebuilt from its sources
 	end
+	local member_count = redis.call('ZCARD', connected_key) + redis.call('ZCARD', provider_key)
+	-- past its age, the index of a network over the walk limit goes on counting
+	-- while a re-sweep re-derives its entries in place; any other index is
+	-- built from nothing
+	local resweep = built ~= false and %d < member_count
 	local registry_tag, cursor, sweep_end = nil, nil, nil
-	local states = redis.call('ZRANGEBYSCORE', index_key, '-inf', '-inf', 'LIMIT', 0, 1)
-	if built == false and #states == 1 then
-		registry_tag, cursor, sweep_end = string.match(states[1], '^#([cp]) ([^ ]+) ([^ ]+)$')
+	-- a build state sorts before an unrecorded #ready, which shares its -inf
+	local state = redis.call('ZRANGEBYSCORE', index_key, '-inf', '-inf', 'LIMIT', 0, 1)[1]
+	if state == '#ready' then
+		state = nil
+	end
+	if state ~= nil and (built == false or resweep) then
+		registry_tag, cursor, sweep_end = string.match(state, '^#([cp]) ([^ ]+) ([^ ]+)$')
 		if registry_tag ~= nil and not (exempt_sweep_token(cursor, 'start') and exempt_sweep_token(sweep_end, 'none')) then
 			-- an unreadable state restarts the build
 			registry_tag = nil
 		end
 	end
-	if registry_tag == nil then
+	if registry_tag ~= nil then
+		redis.call('ZREM', index_key, state)
+	elseif resweep then
+		-- a re-sweep starts over and keeps every entry until it derives it; an
+		-- unreadable state goes
+		if state ~= nil and string.sub(state, 1, 1) == '#' then
+			redis.call('ZREM', index_key, state)
+		end
+	else
 		-- a new build derives every entry itself
 		redis.call('UNLINK', index_key)
+	end
+	if registry_tag == nil then
 		registry_tag = 'c'
 		cursor = 'start'
 		sweep_end = exempt_sweep_end(connected_key)
-	else
-		redis.call('ZREM', index_key, states[1])
 	end
-	local budget = math.max(
-		tonumber(build_limit),
-		math.ceil((redis.call('ZCARD', connected_key) + redis.call('ZCARD', provider_key)) / 4)
-	)
+	-- a build walks on every count until it completes, so a count takes at
+	-- least a quarter of the members; a re-sweep walks on none, and a count
+	-- takes a build limit
+	local budget = tonumber(build_limit)
+	if not resweep then
+		budget = math.max(budget, math.ceil(member_count / 4))
+	end
 	-- at most one step per registry; the provider step runs on what the
 	-- connected step left, so an empty or short provider registry completes
 	-- the build in the same count
@@ -350,7 +398,8 @@ local function build_exempt_index(index_key, pi_key, present_key, expire_key, co
 	end
 	redis.call('ZADD', index_key, '-inf', '#' .. registry_tag .. ' ' .. cursor .. ' ' .. sweep_end)
 	redis.call('EXPIRE', index_key, key_ttl_seconds)
-	return false
+	-- a re-sweep counts from the index it re-derives
+	return resweep
 end
 
 local function count_clients_indexed(index_key, pi_key, present_key, expire_key, connected_key, proxy_key, provider_key, live_min, skip_member)
@@ -379,4 +428,4 @@ local function count_clients_indexed(index_key, pi_key, present_key, expire_key,
 	end
 	return redis.call('ZCOUNT', proxy_key, live_min, '+inf') + live_count - exempt_count, exempt_count
 end
-`, providerIntentExemptSyncLua, providerIntentExemptRebuildAge.Milliseconds())
+`, providerIntentExemptSyncLua, providerIntentExemptRebuildAge.Milliseconds(), providerIntentExemptRebuildWalkLimit)
