@@ -206,10 +206,9 @@ func (self *Config) validate(protected bool) error {
 		if err != nil || info.Mode().Perm()&0077 != 0 {
 			return errors.New("agent state must be root-only")
 		}
-		workInfo, err := os.Lstat(self.WorkDirectory)
-		if err != nil || workInfo.Mode().Perm()&0001 == 0 {
-			return errors.New("protected work parent must be searchable by the unprivileged worker")
-		}
+		// A scoped search ACL need not set the world-execute bit. NewAgent
+		// probes this protected path and all ancestors as the actual worker
+		// before it creates state; mode bits alone cannot establish ACL access.
 		if _, err := workerCredential(self.WorkerUser); err != nil {
 			return err
 		}
