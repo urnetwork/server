@@ -395,6 +395,7 @@ func configurePgPoolLiveness(config *pgxpool.Config) *pgPoolStartupMetrics {
 	}
 	config.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		pgxRegisterIdType(conn.TypeMap())
+		pgxRegisterUtcTimestampType(conn.TypeMap())
 		started := startupMetrics.begin(pgPoolInitialPing)
 		err := pingPgConnection(ctx, conn)
 		startupMetrics.finish(pgPoolInitialPing, time.Since(started), err)

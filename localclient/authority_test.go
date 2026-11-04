@@ -14,6 +14,7 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
 	"google.golang.org/protobuf/proto"
@@ -129,6 +130,34 @@ func TestAuthorityCredentialRotationAndCancellation(t *testing.T) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, claims.UserId, server.NowUtc().Add(time.Second)))
 		})
 		_, err = owner.Get(ctx, owner.apiUrl+"/auth/refresh", owner.token())
+		authorityTestUnauthorized(t, err)
+	})
+}
+
+// A password rotation that commits after the local check, in the refresh's
+// mint gap, is refused by the renewal's own check: that refusal is the same
+// 401 the local check gives, not an unclassified error.
+func TestAuthorityRefreshRotatedInTheMintGapIsUnauthorized(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		owner, claims := authorityTestOwner(t, ctx)
+		hooked := false
+		defer controller.Testing_SetRefreshMintHook(func(*session.ClientSession) {
+			rotation := server.NowUtc()
+			if !claims.CreateTime.Before(rotation) {
+				rotation = claims.CreateTime.Add(time.Microsecond)
+			}
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `UPDATE network_user SET credential_change_time=$2 WHERE user_id=$1`, claims.UserId, rotation))
+			})
+			hooked = true
+		})()
+		_, err := owner.Get(ctx, owner.apiUrl+"/auth/refresh", owner.token())
+		if !hooked {
+			t.Fatal("the refresh never reached its mint", err)
+		}
 		authorityTestUnauthorized(t, err)
 	})
 }

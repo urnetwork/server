@@ -3,23 +3,96 @@
   "kind": "inactive-next-epoch-g2-source-and-qualification-handoff",
   "status": "source_correction_staged_not_tested_built_installed_or_activated",
   "observed_at": "2026-11-03T19:24:01Z",
-  "source_preparation_revised_at": "2026-11-03T19:54:22Z",
-  "control_source_base": "23d4a3baba84dffb68b2db05007b3cf218794ce5",
+  "source_preparation_revised_at": "2026-11-04T02:03:10Z",
+  "control_source_base": "164f75ecad3949c94c97b92b48818e77cb93bc9b",
+  "original_g2_control_source_base": "23d4a3baba84dffb68b2db05007b3cf218794ce5",
   "normal_control_source_lock": {
     "path": "local/source-graph/lock.yml",
-    "sha256": "2cbe6c696cda8b7f3f6ba0bdfa782f62bb7ccad394676238256260197dc98656",
+    "sha256": "f4080fe99a06c4881f3941e2c057b1f837cb4dbb748890f7cc0264e9b43c98dc",
     "not_the_frozen_competition_product_graph": true,
     "sibling_commits": {
-      "connect": "4478668f5ec50f58ee97da8b4c60e54296103e42",
+      "connect": "0dad308f8611e6bec08126b683b4586f71a403fa",
       "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
-      "sdk": "215caab72eefd03a08bdf86a4760cf95defd9901",
-      "proxy": "584eac38243a9842200eb3b8577d62667c850c19",
+      "sdk": "4b3cddc9d797cfa5bfe76565b16609517d176fa3",
+      "proxy": "1575ad25cb8b10bd42865e630ec09f6823096e64",
       "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
       "userwireguard": "70ecd6e7f97715718f1079cc9be9fd42a8ebe82c",
       "warp": "a3bb2fb5af5c452978b1db80dfb1eb0cf67771b3",
-      "sn": "dece58e2aee2795c54a79a5e893ebaa01885a5bb",
+      "sn": "43ea9f61432965d7a7d5fc17f0258c013259ceb9",
       "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
     }
+  },
+  "normal_control_graph_refresh_2026_11_04": {
+    "status": "private_branch_source_metadata_only_not_a_fully_qualified_graph",
+    "integrated_main_commit": "164f75ecad3949c94c97b92b48818e77cb93bc9b",
+    "preserved_g2_source_commit": "864fbc260720683b57ee6308fab4b95870c37541",
+    "previous_normal_lock_file_sha256": "2cbe6c696cda8b7f3f6ba0bdfa782f62bb7ccad394676238256260197dc98656",
+    "reason": "The old ordinary-control SDK pin lacked SnFleetDevice and the old SN pin lacked demand packages consumed by current main. The independently tested developer graph identifies compatible source revisions; updating these normal-control pins removes those known metadata blockers without claiming the merged G2 graph compiles or passes.",
+    "format_and_generator": "Hand-maintained YAML: go plus nine repository/path/ref records, with complete40-hex commits. README.md instructs coordinated lock review; local/source-graph reads this exact file and checks effective replacements, clean sibling heads, compiler declarations, actual service builds and SN capability controls. No writer/generator for this lock was found in the inspected server/warp build sources. No generator or build command was run.",
+    "go_mod_sha256_unchanged": "3fafa5fb613fc3dc04afebcb847f0a255b6855948d6225befe7ea1e8cf0bf437",
+    "go_sum_sha256_unchanged": "ddaf957e478dbe41f13e8edff748a18dbbc9c466dd2e12d5ba1508cde804f11a",
+    "static_source_checks": {
+      "all_nine_exact_commit_objects_available_without_fetch": true,
+      "all_nine_locked_go_mod_declare_go": "1.27.3",
+      "sdk_fleet_api": "Selected SDK commit declares SnFleetDevice in sn_fleet_device.go; current server fleet consumers are retained.",
+      "sn_demand_tree": "3403c7a4fc0e3b939b4add5b9725b9e5fb5a5d80",
+      "nested_replacements": {
+        "github.com/pion/sctp": {
+          "unchanged_server_replace": "../connect/sctp",
+          "selected_connect_subtree": "3a372a1f501d864d51fafbd1a6d68301dd3fba1e",
+          "matches_current_live_parent_subtree_read_only": true
+        },
+        "github.com/centrifuge/go-substrate-rpc-client/v4": {
+          "unchanged_server_replace": "../sn/third_party/go-substrate-rpc-client",
+          "selected_sn_subtree": "b66204771d72600148b281031f84ba422a9d7865",
+          "matches_current_live_parent_subtree_read_only": true
+        }
+      },
+      "warp": "Retained a3bb2fb5af5c452978b1db80dfb1eb0cf67771b3 as existing workspace/build-context pin. Server go.mod has no Warp requirement/replacement; selected SN go.mod has a Warp replace only, with no Warp requirement or production import found. Dependency replacements are not inherited. No effective go list/build was run or claimed.",
+      "normal_go_resolution_or_compilation_executed": false
+    },
+    "developer_evidence_not_g2_qualification": {
+      "phase_receipt": "/tmp/heartbeat-phase-tests.FUoBbT/qualification-receipt.txt",
+      "phase_receipt_sha256": "439ff9bb4d15122e1fddf3c67b1647860d869223a58ee6e83ae409aa7aa25f8e",
+      "phase_receipt_source": "aaaa533114232534691794186d6596419039386f; earlier premerge/red evidence is separately preserved in that receipt.",
+      "phase_merged_results_as_reported": {
+        "pure_roots_per_fresh_run": 32,
+        "pure_fresh_runs": 3,
+        "pg_roots_per_fresh_run": 3,
+        "pg_fresh_runs": 3,
+        "adjacent_pg_roots_one_run": 5,
+        "total_green_test_pass_events_for_that_merged_scope": 110,
+        "reported_green_failures": 0,
+        "reported_green_skips": 0
+      },
+      "parent_cause_receipt": "/tmp/heartbeat-phase-tests.FUoBbT/parent-cause-receipt.txt",
+      "parent_cause_receipt_sha256": "fb37cb2faa1fac9acab6ef508c9203a820793d2a342142d418678fa928d902f6",
+      "parent_cause_source_scope": "aaaa533114232534691794186d6596419039386f plus the then-uncommitted parent-cause changes, subsequently integrated in164f75ec. Only the recorded controller/test byte identity is independently matched here.",
+      "parent_cause_results_as_reported": {
+        "pure_roots_per_fresh_run": 33,
+        "fresh_runs": 3,
+        "green_test_pass_events": 99,
+        "reported_green_failures": 0,
+        "reported_green_skips": 0,
+        "separate_deterministic_red_control_preserved": true
+      },
+      "matching_merged_source_file_sha256": {
+        "controller/competition_controller.go": "ac6a3d8490bb5bfba4892c41d9b553f103b5fa2b39c87fa3bcbe4d9364f3e1a0",
+        "controller/competition_heartbeat_parent_cause_test.go": "9e6cedb1e07defb74863effa028a9b5c774dd5df21c6d7fbf9976147bb383d7a"
+      },
+      "private_developer_mod_sha256": "e70fd2a059a17420d51bb4a4051e4614cf9ddc757859a95ffe8251ca9dfb3fe0",
+      "private_developer_sum_sha256": "ddaf957e478dbe41f13e8edff748a18dbbc9c466dd2e12d5ba1508cde804f11a",
+      "scope_limit": "Developer heartbeat/phase/lease/parent-cause evidence used the stated private module graph and fixtures. It is NOT a full-source service build, the55-root G2 development qualification, instrument image/48-root bridge, containment, deployed API proof, runtime qualification or source activation. Counts from different source scopes are not combined into a G2 pass claim. Existing failed/red evidence is retained unchanged."
+    },
+    "preserved_current_control_fixes": {
+      "current_main_retains_8c_source_ancestry": true,
+      "no_older_binary_archive_claim_or_recovery_code_restored": true,
+      "current_heartbeat_phase_and_parent_cause_sources_retained": true,
+      "merged_g2_source_and_probe_files_unchanged_from_864fbc26": true,
+      "existing_old_approved_attempt_or_recovery_journals_modified": false
+    },
+    "authorization_boundary": "The current user-approved diagnostics hold is not G2 maintenance authority, and zero running under a diagnostics hold is not a naturally empty queue. This refresh performs no tests, builds, Docker, DB, service/config/vault changes, hold changes, main merge/push or deployment. Heavy G2 qualification still waits for a genuinely empty queued/running poll plus the separately reviewed durable intake-preserving exclusion and owner/slot rechecks. The separately Root-reviewed strictly bounded hermetic developer lane below is not heavy image/runtime authority.",
+    "deferred_source_gate": "The existing local/source-graph gate (actual six-service compilation and locked SN capability controls) and coherent four-program artifact build remain heavy, natural-empty plus durable-exclusion work. The55-root mocked unit selector has a separate prospective Root-reviewed light lane below; neither its possible earlier execution nor the developer receipts qualify those heavy gates. The private G2 worktree alone still has no nine sibling checkout layout. No compilation, tests or readiness are inferred from this metadata refresh."
   },
   "approved_future_instrument": {
     "from_epoch": 2,
@@ -119,7 +192,7 @@
   },
   "deferred_qualification": {
     "run_now": false,
-    "exclusion_requirement": "The owner chose natural queue empty. After an authoritative empty queued/running poll, Root must establish durable intake-preserving evaluation-claim-only maintenance through the separately reviewed control workflow, then recheck the authoritative queue/slot and join every prior worker/evaluator/Docker owner. A claim winning this race must finish and join; never interrupt it. Hold the canonical evaluation slot and maintain the durable admission exclusion through all heavy work and cleanup even if new submissions queue afterward. An empty snapshot or environment marker alone is not exclusion authority. Do not pause the existing active queue or restart/repoint the worker to create a window.",
+    "heavy_exclusion_requirement": "The owner chose natural queue empty for heavy G2 work. After an authoritative empty queued/running poll, Root must establish durable intake-preserving evaluation-claim-only maintenance through the separately reviewed control workflow, then recheck the authoritative queue/slot and join every prior worker/evaluator/Docker owner. A claim winning this race must finish and join; never interrupt it. Hold the canonical evaluation slot and maintain the durable admission exclusion through all heavy work and cleanup even if new submissions queue afterward. An empty snapshot or environment marker alone is not exclusion authority. Do not pause the existing active queue or restart/repoint the worker to create a window. The separately reviewed mocked-unit lane below does not authorize any of these heavy operations.",
     "maintenance_intake_requirement": "Admission remains unheld and actual intakeReady must stay true. Keep genuine idle worker host heartbeats and the current runtime tuple intact. The old Oct30 revision4 CALIBRATION_MAINTENANCE intake exception was exact, bounded and expired; never replay it as a generic technical-build permit or fabricate readiness. The external maintenance owner watches its fence/slot and cancels the technical unit on exclusion loss; owned-container cleanup must join before restoring normal claim admission.",
     "executor": "Independent gpt-6.1-sol with low reasoning, not the implementation agent",
     "toolchain": {
@@ -133,6 +206,62 @@
       "download_permitted": false
     },
     "closed_graph_requirement": "Freeze the corrected normal-control server commit plus all nine exact sibling commits from its lock in independent clean checkouts. The implementation worktree alone lacks those sibling checkouts and is not a runnable or qualified graph. Bind source, modules and actual toolchain read-only; retain before/after manifests.",
+    "prospective_light_unit_lane": {
+      "status": "root_reviewed_bounded_hermetic_compile_and_unit_lane_approved_execution_delegated_to_independent_low_not_started",
+      "run_now": false,
+      "root_reviewed_light_compile_and_unit_authority": true,
+      "requires_canonical_evaluation_slot": false,
+      "purpose": "Root explicitly reviewed and approved only the strictly bounded offline management compile plus55 mocked development roots under the isolation below. It need not wait for natural queue empty and does not use the canonical evaluation slot, change/release the diagnostics hold or authorize real image/runtime/artifact work. Execution belongs to independent Sol6.1 LOW; this source/metadata agent has not compiled or run it.",
+      "selector": "^Test(SourceMinimumWork|SourceCorrectness|SourceBuildQualifier|SourceTestJournal|SourceTestModel|SourceTestSnow|G2InstrumentBasePlan)",
+      "static_top_level_roots": 55,
+      "fresh_processes_proposed": 3,
+      "required_top_level_passes_if_completed": 165,
+      "actual_passes_claimed": 0,
+      "root_groups_static_count": {
+        "SourceMinimumWork": 8,
+        "SourceCorrectness": 7,
+        "SourceBuildQualifier": 3,
+        "SourceTestJournal": 6,
+        "SourceTestModel_including_journals_and_quota_refusal": 13,
+        "SourceTestSnow_including_schema_and_two_member_journal": 10,
+        "G2InstrumentBasePlan": 8
+      },
+      "real_docker_or_live_provider_or_network_dependent_selected_roots": [],
+      "static_findings": [
+        "Every selected Docker, image-inspect, host-profile and provider-execution boundary receives an in-process fake callback/transport. Client cloning preserves those injected transports; no selected root calls the production Docker runner, real host checker, source-build pipeline or live provider CLI.",
+        "No selected root opens an HTTP listener, needs PostgreSQL/Redis, calls a warmup/deployment entrypoint, runs Go compilation/scoring/calibration, or executes the real opt-in bridge. There is no init or TestMain in the sim-latency package itself. Imported server env initialization does read settings, so fixture-only config/vault and a private empty site/home are required at process startup; fail-closed dial guards and OS network/socket denial remain mandatory.",
+        "Not everything is in-process: three selected paths call sourceBuildContextFixture, creating about30 tiny synthetic Git repositories per pass with local init/config/add/commit/rev-parse operations. They do not fetch/push or modify operator repositories. sourceTestGit uses exec.Command without its own context, so sanitize inherited Git configuration/hooks/transports and bound the whole test process group.",
+        "TestG2InstrumentBasePlanFailsActualProductionImageAdmission runs four jq subprocesses with the repository's real predicate and synthetic stdin. Other file access is test-owned temporary data plus read-only public repository approval/evaluator-script inputs. Journals, chmod, fsync, links and corruption controls are confined to t.TempDir.",
+        "The real TestG2InstrumentBaseTechnicalImageQualification root and other opt-in real build/runtime roots do not match this exact selector. Do not broaden it to all tests or infer image containment/provider provenance from mocked unit success. Long model/cleanup durations in fixtures are context/contract data, not deliberate waits; selected roots use explicit barriers and immediate fake callbacks, with no t.Parallel or timing sleeps."
+      ],
+      "compilation_review": "Root approved initial -race test-ELF compilation only with CPU20,22/GOMAXPROCS2/-p2, MemoryMax8GiB/noSwap, an explicit bounded whole-process-group timeout, exact offline Go1.27.3/GCC13 and read-only closed source/dependencies plus fresh private caches/temp writes. Cold caches may still make it substantial; no existing G2 ELF or compilation success is assumed. Missing offline inputs stop the attempt: no downloads, service/source-gate builds, control release artifacts or image compilation may be smuggled into this lane.",
+      "precompile_working_directory": "<closed-graph>/server",
+      "prospective_precompile_command_under_reviewed_management_unit": "CGO_ENABLED=1 timeout --signal=TERM --kill-after=30s 15m go test -c -race -o <private-light-artifacts>/g2-units-race.test ./connect/sim-latency",
+      "execution_working_directory": "<closed-graph>/server/connect/sim-latency",
+      "prospective_execution_command_after_review_and_elf_custody": "go tool test2json -t -p github.com/urnetwork/server/connect/sim-latency <private-light-artifacts>/g2-units-race.test -test.run '^Test(SourceMinimumWork|SourceCorrectness|SourceBuildQualifier|SourceTestJournal|SourceTestModel|SourceTestSnow|G2InstrumentBasePlan)' -test.count=1 -test.timeout=2m -test.v=test2json",
+      "custody": "Use the closed corrected normal-control graph, exact Go1.27.3 and pinned GCC13; retain source/sibling/module/toolchain manifests plus actual race-test ELF hash/build metadata before three fresh executions. Use private writable caches/temporary directories, source/module/toolchain inputs read-only, no cached test results and no online fallback. The precompiled test ELF is not the real3h bridge ELF or a control/evaluator release artifact.",
+      "required_isolation": "Management CPUs20,22, GOMAXPROCS2/-p2, MemoryMax8GiB, MemorySwapMax0, bounded tasks/time and whole-process-group cleanup. Start from env-i under an unprivileged identity with writes restricted to its private test/cache tree. Private network plus default-deny outbound address families/IP policy; hide both /run/docker.sock and /var/run/docker.sock and all live competition state, main/local operator config/vault, provider settings/keys and token paths. Bind trusted source/public approval/evaluator-script data and exact dependencies/toolchain read-only; retain their before/after manifests and original hashes. No main, DB, model, Docker or SSH-agent credential is inherited. Root verifies the live worker/queue/service/holds remain untouched.",
+      "process_and_resume_fence": "Git fixture helpers lack an individual command context, so compile/test/JQ/Git descendants must remain in one explicitly time-bounded management cgroup with whole-group termination and verified join. Preserve red/green logs; never automatically retry after an unknown result or timeout. If the user approves resuming claims while this light unit is still running, cancel/join this entire unit first. The light executor never releases a hold or touches the canonical evaluation slot.",
+      "fixture_environment": {
+        "WARP_ENV": "local",
+        "WARP_SERVICE": "test",
+        "WARP_BLOCK": "test",
+        "WARP_DOMAIN": "synthetic.example",
+        "WARP_HOST": "synthetic-test",
+        "WARP_VERSION": "0.0.0",
+        "WARP_HOME": "<private-light-root>",
+        "WARP_CONFIG_HOME": "<closed-graph>/server/local/testdata/config",
+        "WARP_VAULT_HOME": "<closed-graph>/server/local/testdata/vault",
+        "WARP_SITE_HOME": "<private-light-root>/empty-site",
+        "TMPDIR": "<private-light-root>/tmp",
+        "HOME": "<private-light-root>/empty-home",
+        "GOCACHE": "<private-light-root>/fresh-go-cache",
+        "GOMODCACHE": "<closed-readonly-module-cache>",
+        "provider_keys_main_credentials_and_dial_attestations": "unset; retain the default-deny local dial guard; do not set URNETWORK_TEST_REAL_VAULT or SIM_LATENCY_G2_BRIDGE_REAL"
+      },
+      "git_subprocess_policy": "env-i clears GIT_DIR/WORK_TREE/COMMON_DIR, alternates, author overrides and SSH agent. Set GIT_CONFIG_NOSYSTEM=1 with system/global config=/dev/null, GIT_TERMINAL_PROMPT=0, GIT_ASKPASS=/bin/false, GIT_NO_LAZY_FETCH=1 and an empty private template. Command-scope config disables hooks/fsmonitor/credentials/gc/maintenance and all transports; trust only the exact closed server checkout if precompilation needs VCS metadata, never wildcard trust. Fixture commits use their own synthetic local identity.",
+      "scope_limit": "A passing light lane proves only these mocked development regressions. It does not qualify the full normal source gate, four control binaries, actual G2 image48-root execution, real containment/provider access,3h runtime, baseline, API deployment or source activation. Actual Docker, service/source-gate builds, control/evaluator artifact builds and timed runtime gates remain subject to natural empty plus durable exclusion."
+    },
     "management_limits": {
       "cpu_set": "20,22",
       "gomaxprocs": 2,
@@ -156,12 +285,10 @@
     "commands_after_exclusion_and_closed_graph_only": [
       {
         "working_directory": "sealed-normal-control-graph/server",
-        "command": "CGO_ENABLED=1 go test -json -race -count=1 -run '^Test(SourceMinimumWork|SourceCorrectness|SourceBuildQualifier|SourceTestJournal|SourceTestModel|SourceTestSnow|G2InstrumentBasePlan)' ./connect/sim-latency",
-        "selected_top_level_roots_static_count": 55,
-        "fresh_process_repetitions": 3,
-        "mandatory_top_level_passes_if_all_three_complete": 165,
+        "command": "CGO_ENABLED=0 go test -json -mod=readonly -p=2 -count=1 -timeout=30m ./local/source-graph",
+        "selected_top_level_roots_static_count": 12,
         "actual_passes_claimed": 0,
-        "race_requires": "Pinned available C compiler and CGO_ENABLED=1 for this test-only phase; final runtime CLI remains CGO_ENABLED=0."
+        "scope": "Existing structural pin/effective-replacement/clean-head/toolchain checks, actual api/alt/taskworker/connect/proxy/bringyourctl builds and locked SN runtime/head-summary/upload-observation capability tests. This command is heavy and remains deferred, including its nested child tests/builds."
       },
       {
         "working_directory": "sealed-normal-control-graph/server",
@@ -192,13 +319,14 @@
       "probe_source": "connect/sim-latency/g2_instrument_base_integration_test.go",
       "plan_and_admission_regressions": "connect/sim-latency/g2_instrument_base_plan_test.go",
       "synthetic_plan_regression_roots": 8,
-      "plan_regression_command": "Included in the55-root three-fresh-process development command above via |G2InstrumentBasePlan. The separate opt-in TechnicalImageQualification root is deliberately excluded, so a skipped real probe cannot count as unit qualification.",
+      "plan_regression_command": "Included in the Root-reviewed strictly bounded55-root three-fresh-process mocked unit lane via |G2InstrumentBasePlan. The separate opt-in TechnicalImageQualification root is deliberately excluded, so a skipped real probe cannot count as unit qualification. Independent LOW owns the approved light compilation/tests; none were executed by this source/metadata checkpoint.",
       "plan_regression_fresh_processes": 3,
       "new_plan_regressions_executed": false,
       "input_template": "G2-INSTRUMENT-BASE-TECHNICAL-INPUT-2026-11-03.json",
       "input_scope": "Exact approved incumbent10-repo graph from the retained frozen source root, one deterministic private approved server child, original source dependencies and base image. No source-generation/epoch/round mapping, selected-product election, review/carry metadata, operational source-build receipt, hidden seed, calibration or baseline is produced.",
       "input_install": "Root independently reviews/seals the exact credential-free template as root0400 at /etc/urnetwork/competition-g2-instrument-base-6423-20261103-v1.json; creates only the new named root0700 state directory after durable natural-empty exclusion; hashes the actual sealed bytes. These targets are not created by this source-preparation checkpoint.",
       "precompile_command_after_development_red_green": "CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -c -o <new-private-artifact-directory>/g2-bridge.test ./connect/sim-latency",
+      "real_probe_execution_working_directory": "sealed-normal-control-graph/server/connect/sim-latency",
       "precompile_custody": "Before opt-in execution retain the actual test ELF SHA/build metadata, exact corrected clean control source manifest, sibling/module/toolchain manifests and sealed input hash. No cached test result or recompilation under an unrecorded source is accepted.",
       "deferred_real_command": "SIM_LATENCY_G2_BRIDGE_REAL=1 SIM_LATENCY_G2_BRIDGE_AUTHORITY=ROOT_CONFIRMED_EMPTY_DURABLE_CLAIM_EXCLUSION SIM_LATENCY_G2_BRIDGE_SETTINGS=/etc/urnetwork/competition-g2-instrument-base-6423-20261103-v1.json SIM_LATENCY_G2_BRIDGE_SETTINGS_SHA256=<actual-sealed-input-hash> go tool test2json -t -p github.com/urnetwork/server/connect/sim-latency <new-private-artifact-directory>/g2-bridge.test -test.run '^TestG2InstrumentBaseTechnicalImageQualification$' -test.count=1 -test.timeout=3h10m -test.v=test2json",
       "timeout_scope": "The default/max operation budget is enforced at3h before any approval/state/Docker side effect, and the original durable reservation or earlier parent remains authoritative. The explicit3h10m outer test timeout only allows bounded cancellation/cleanup; the default10m Go test timeout is not used. SIGINT/SIGTERM cancel the operation context and trigger owned cleanup; forced process death requires separate owner reconciliation before exclusion release.",

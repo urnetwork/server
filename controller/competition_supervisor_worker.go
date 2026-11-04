@@ -70,8 +70,8 @@ func (self competitionSupervisorWorkerStore) CurrentStagingRound(context.Context
 
 // Checks only the current lease, never renews it on behalf of a dead parent.
 func checkCompetitionSupervisorWorkerFence(ctx context.Context, store PostgresStore, settings *Settings, lease model.CompetitionSupervisorLease) error {
-	return captureDatabaseError(func() {
-		server.Tx(ctx, func(tx server.PgTx) { server.Raise(store.requireAutomationLeaseInTx(ctx, tx, settings, lease)) })
+	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
+		server.Tx(ctx, func(tx server.PgTx) { server.Raise(store.requireAutomationLeaseInTx(ctx, tx, settings, lease)) }, observation)
 	})
 }
 

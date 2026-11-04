@@ -32,9 +32,32 @@ func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
 // Only fixed categories, a validated PostgreSQL code and an opaque digest are
 // serializable. The original error is deliberately absent from this type.
 type competitionHeartbeatFailure struct {
-	Category     string `json:"error_category,omitempty"`
-	SqlState     string `json:"error_sqlstate,omitempty"`
-	DetailSha256 string `json:"error_sha256,omitempty"`
+	Category      string                  `json:"error_category,omitempty"`
+	SqlState      string                  `json:"error_sqlstate,omitempty"`
+	DetailSha256  string                  `json:"error_sha256,omitempty"`
+	DatabasePhase server.DbOperationPhase `json:"database_phase,omitempty"`
+}
+
+// Adds finite source-boundary evidence without changing formatting or identity.
+type competitionDatabasePhaseError struct {
+	cause error
+	phase server.DbOperationPhase
+}
+
+// Preserve the exact original digest and never format the observation as SQL.
+func (self competitionDatabasePhaseError) Error() string { return self.cause.Error() }
+
+// Existing cancellation, PostgreSQL and fencing decisions retain their causes.
+func (self competitionDatabasePhaseError) Unwrap() error { return self.cause }
+
+// Read the sequential observer only after the complete database call unwinds.
+func captureCompetitionDatabasePhase(run func(*server.DbPhaseObservation)) error {
+	observation := &server.DbPhaseObservation{}
+	err := captureDatabaseError(func() { run(observation) })
+	if err == nil {
+		return nil
+	}
+	return competitionDatabasePhaseError{cause: err, phase: observation.Phase()}
 }
 
 // A narrow optional capability preserves compatibility with non-PG stores.
@@ -50,6 +73,10 @@ func competitionHeartbeatFailureDetails(err error) competitionHeartbeatFailure {
 	}
 	digest := sha256.Sum256([]byte(err.Error()))
 	detail := competitionHeartbeatFailure{Category: "other", DetailSha256: hex.EncodeToString(digest[:])}
+	var phaseError competitionDatabasePhaseError
+	if errors.As(err, &phaseError) && phaseError.phase > server.DbOperationUnknown && phaseError.phase <= server.DbOperationPostCommit {
+		detail.DatabasePhase = phaseError.phase
+	}
 	var sqlError interface{ SQLState() string }
 	var networkError net.Error
 	switch {
@@ -90,6 +117,9 @@ type competitionSafeHeartbeatError struct {
 
 // Diagnostic formatting contains only the same safe fields as the ledger.
 func (self competitionSafeHeartbeatError) Error() string {
+	if self.detail.DatabasePhase != server.DbOperationUnknown {
+		return fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s database_phase=%d", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256, self.detail.DatabasePhase)
+	}
 	return fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256)
 }
 

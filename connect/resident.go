@@ -804,6 +804,9 @@ type Exchange struct {
 	// Nil in production; constructor tests inject failure after child ownership
 	// exists but before the fallible peer-profile lookup publishes callbacks.
 	beforeResidentProfileForTest func(*Resident)
+	// Nil in production; composed nomination tests replace only the profile
+	// lookup while retaining resident construction and lifecycle ownership.
+	residentProfileForTest func(context.Context, server.Id) (server.Id, bool, model.NetworkPeerCategory, *model.NetworkPeer, bool)
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
@@ -4401,7 +4404,11 @@ func newResidentDuringAdmission(
 	if beforeProfile := exchange.beforeResidentProfileForTest; beforeProfile != nil {
 		beforeProfile(resident)
 	}
-	networkId, topLevel, category, peerProfile, peersEnabled := model.GetNetworkPeerProfile(cancelCtx, clientId)
+	loadProfile := model.GetNetworkPeerProfile
+	if exchange.residentProfileForTest != nil {
+		loadProfile = exchange.residentProfileForTest
+	}
+	networkId, topLevel, category, peerProfile, peersEnabled := loadProfile(cancelCtx, clientId)
 	if networkId != (server.Id{}) {
 		resident.sessionNetworkId = &networkId
 	}

@@ -16,7 +16,6 @@ import (
 	"github.com/urnetwork/server/edgeplacement"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/proxy"
-	"github.com/urnetwork/server/router"
 )
 
 // this value is set via the linker, e.g.
@@ -299,10 +298,6 @@ Options:
 	})
 	defer fullSyncSub()
 
-	routes := []*router.Route{
-		router.NewRoute("GET", "/status", readiness.StatusHandler),
-	}
-
 	listenIpv4, _, listenPort := server.RequireListenIpPort(port)
 
 	glog.Infof(
@@ -327,7 +322,7 @@ Options:
 	err = server.HttpListenAndServeWithReusePort(
 		ctx,
 		net.JoinHostPort(listenIpv4, strconv.Itoa(listenPort)),
-		router.NewRouter(ctx, routes),
+		proxy.NewStatusHandler(ctx, readiness),
 		reusePort,
 		httpServerOptions,
 	)
