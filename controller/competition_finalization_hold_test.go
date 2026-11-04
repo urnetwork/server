@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -101,27 +102,113 @@ func TestCompetitionFinalizationHoldOpenApiContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var document struct {
-		Components struct {
-			Schemas map[string]struct {
-				Required   []string `yaml:"required"`
-				Properties map[string]struct {
-					Type string   `yaml:"type"`
-					Enum []string `yaml:"enum"`
-				} `yaml:"properties"`
-			} `yaml:"schemas"`
-		} `yaml:"components"`
-	}
-	if err := yaml.Unmarshal(content, &document); err != nil {
+	if err := competitionFinalizationOpenApiContract(content); err != nil {
 		t.Fatal(err)
 	}
-	got := document.Components.Schemas["CompetitionAutomationHoldArgs"].Properties["kind"].Enum
+}
+
+// OpenAPI 3.1 permits sequence-valued types elsewhere in the document. Retain
+// the syntax tree and decode only the three paths this contract actually owns.
+func competitionFinalizationOpenApiContract(content []byte) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(content, &document); err != nil {
+		return err
+	}
+	kind, err := competitionFinalizationOpenApiNode(&document, "components", "schemas", "CompetitionAutomationHoldArgs", "properties", "kind", "enum")
+	if err != nil {
+		return err
+	}
+	var got []string
+	if kind.Kind != yaml.SequenceNode || kind.Decode(&got) != nil {
+		return fmt.Errorf("finalization hold kind must retain its explicit enum")
+	}
 	want := []string{"admission", "evaluation", "source_activation", "reward_delivery", "finalization"}
 	slices.Sort(got)
 	slices.Sort(want)
-	status := document.Components.Schemas["CompetitionRuntimeStatus"]
-	if !reflect.DeepEqual(got, want) || status.Properties["finalization_held"].Type != "boolean" || slices.Contains(status.Required, "finalization_held") || len(status.Required) != 3 {
-		t.Fatal("finalization API contract drift", got, status.Required)
+	if !reflect.DeepEqual(got, want) {
+		return fmt.Errorf("finalization hold capability enum changed")
+	}
+	statusType, err := competitionFinalizationOpenApiNode(&document, "components", "schemas", "CompetitionRuntimeStatus", "properties", "finalization_held", "type")
+	if err != nil {
+		return err
+	}
+	if statusType.Kind != yaml.ScalarNode || statusType.Tag != "!!str" || statusType.Value != "boolean" {
+		return fmt.Errorf("finalization runtime status must be an explicit boolean")
+	}
+	required, err := competitionFinalizationOpenApiNode(&document, "components", "schemas", "CompetitionRuntimeStatus", "required")
+	if err != nil {
+		return err
+	}
+	var requiredFields []string
+	if required.Kind != yaml.SequenceNode || required.Decode(&requiredFields) != nil {
+		return fmt.Errorf("runtime status must retain its required-field contract")
+	}
+	slices.Sort(requiredFields)
+	if !reflect.DeepEqual(requiredFields, []string{"grading_ready", "intake_ready", "publication_held"}) {
+		return fmt.Errorf("finalization status must remain optional without changing legacy required fields")
+	}
+	return nil
+}
+
+// Missing or incorrectly shaped targeted paths fail closed, without projecting
+// unrelated schema properties into a narrower Go representation of OpenAPI.
+func competitionFinalizationOpenApiNode(node *yaml.Node, path ...string) (*yaml.Node, error) {
+	if node.Kind == yaml.DocumentNode && len(node.Content) == 1 {
+		node = node.Content[0]
+	}
+	for index, key := range path {
+		if node.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("OpenAPI contract path %s is not an object", strings.Join(path[:index], "."))
+		}
+		var next *yaml.Node
+		for entry := 0; entry+1 < len(node.Content); entry += 2 {
+			if node.Content[entry].Kind == yaml.ScalarNode && node.Content[entry].Value == key {
+				next = node.Content[entry+1]
+				break
+			}
+		}
+		if next == nil {
+			return nil, fmt.Errorf("OpenAPI contract path %s is missing", strings.Join(path[:index+1], "."))
+		}
+		node = next
+	}
+	return node, nil
+}
+
+// An unrelated valid nullable union reproduces the original parser failure;
+// ignoring that unrelated shape must not weaken any owned-field assertion.
+func TestCompetitionFinalizationHoldOpenApiTargetedProjection(t *testing.T) {
+	const document = `openapi: 3.1.0
+components:
+  schemas:
+    Unrelated:
+      properties:
+        nullable: {type: [string, null]}
+    CompetitionAutomationHoldArgs:
+      properties:
+        kind: {enum: [admission, evaluation, source_activation, reward_delivery, finalization]}
+    CompetitionRuntimeStatus:
+      required: [intake_ready, grading_ready, publication_held]
+      properties:
+        finalization_held: {type: boolean}
+`
+	if err := competitionFinalizationOpenApiContract([]byte(document)); err != nil {
+		t.Fatal("valid unrelated OpenAPI union changed finalization contract", err)
+	}
+	for _, test := range []struct{ name, old, replacement string }{
+		{"missing kind enum", "kind: {enum:", "other: {enum:"},
+		{"missing capability", "reward_delivery, finalization", "reward_delivery"},
+		{"unknown capability", "reward_delivery, finalization", "reward_delivery, finalization, unrelated"},
+		{"missing runtime property", "finalization_held: {type: boolean}", "other: {type: boolean}"},
+		{"wrong runtime type", "finalization_held: {type: boolean}", "finalization_held: {type: string}"},
+		{"nullable target type", "finalization_held: {type: boolean}", "finalization_held: {type: [boolean, null]}"},
+		{"required finalization status", "grading_ready, publication_held]", "grading_ready, publication_held, finalization_held]"},
+		{"missing legacy required field", "grading_ready, publication_held]", "grading_ready]"},
+	} {
+		changed := strings.Replace(document, test.old, test.replacement, 1)
+		if changed == document || competitionFinalizationOpenApiContract([]byte(changed)) == nil {
+			t.Fatalf("targeted contract accepted %s", test.name)
+		}
 	}
 }
 
