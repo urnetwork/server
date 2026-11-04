@@ -225,6 +225,15 @@ func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *t
 			competitionSupervisorUnadmittedDeadline(completed.err) || competitionSupervisorLockTimeout(completed.err) {
 			t.Fatal("late callback completion gained acquire retry or lost its exact deadline/phase evidence", completed, detail)
 		}
+		database := detail.HeartbeatDatabase
+		statement := competitionHeartbeatStatementAt(database, competitionHeartbeatDatabaseJobUpdate, 1)
+		if database == nil || database.Step != competitionHeartbeatDatabaseJobUpdate || database.CallbackEntries != 1 ||
+			statement == nil || statement.Entered.State != "live" || !statement.Entered.HasDeadline || statement.Entered.RemainingNs <= 0 ||
+			!statement.Returned || statement.Succeeded || statement.AtReturn == nil || statement.AtReturn.State != "deadline" || statement.AtReturn.RemainingNs > 0 ||
+			database.Transaction.AcquireSucceeded != 1 || database.Transaction.BeginSucceeded != 1 || database.Transaction.CallbackEntered != 1 ||
+			database.Transaction.CommitAttempts != 0 || database.Transaction.RollbackAttempts != 1 || database.Transaction.RollbackAcknowledged != 1 {
+			t.Fatalf("late server completion lost its exact statement/budget/rollback acknowledgment: %+v", database)
+		}
 		causes := server.InspectErrorCauseBatch(completed.err)
 		deadlines, doneSentinels := 0, 0
 		if !causes.Complete || causes.NilBranches != 0 {

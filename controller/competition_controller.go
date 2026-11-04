@@ -6267,14 +6267,17 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 // Lock both existing authorities before reading the renewal clock. Expired or
 // mismatched ownership rolls back the whole transaction, including either update.
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
-	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
+	return captureCompetitionHeartbeatDatabase(ctx, func(observation *competitionHeartbeatDatabaseObservation) {
 		server.Tx(ctx, func(tx server.PgTx) {
+			tx = observation.beginCallback(tx)
 			if settings.AutomationPolicy.Enabled {
+				observation.enterStep(competitionHeartbeatDatabaseScopeLock)
 				automationScopeLockInTx(ctx, tx, settings)
 			}
 			var slotLease, jobLease time.Time
 			var actualRoundId server.Id
 			var evaluationCycle, attempts int
+			observation.enterStep(competitionHeartbeatDatabaseSlotLock)
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("worker_slot")
 			}
@@ -6284,6 +6287,7 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 				panic(ErrLeaseLost)
 			}
 			server.Raise(loadError)
+			observation.enterStep(competitionHeartbeatDatabaseJobLock)
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("job")
 			}
@@ -6293,21 +6297,26 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 				panic(ErrLeaseLost)
 			}
 			server.Raise(loadError)
+			observation.enterStep(competitionHeartbeatDatabaseJobAuthority)
 			server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
 			if settings.AutomationPolicy.Enabled {
 				if settings.automationLease != nil {
+					observation.enterStep(competitionHeartbeatDatabaseSupervisorAuthority)
 					server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 					if actualRoundId != settings.automationRoundId {
 						panic(ErrLeaseLost)
 					}
 				}
+				observation.enterStep(competitionHeartbeatDatabaseWorkerMode)
 				server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_v2_worker = 'on'`))
 			}
+			observation.enterStep(competitionHeartbeatDatabaseClockCheck)
 			now := self.nowUtc()
 			if !now.Before(slotLease) || !now.Before(jobLease) {
 				panic(ErrLeaseLost)
 			}
 			leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
+			observation.enterStep(competitionHeartbeatDatabaseSlotUpdate)
 			result, err := tx.Exec(ctx, `
 				UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
 				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
@@ -6316,6 +6325,7 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			if result.RowsAffected() != 1 {
 				panic(ErrLeaseLost)
 			}
+			observation.enterStep(competitionHeartbeatDatabaseJobUpdate)
 			result, err = tx.Exec(ctx, `
 				UPDATE competition_job SET lease_expires_at = $3
 				WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at
@@ -6324,7 +6334,8 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			if result.RowsAffected() != 1 {
 				panic(ErrLeaseLost)
 			}
-		}, observation)
+			observation.enterStep(competitionHeartbeatDatabaseCallbackReturn)
+		}, &observation.phase, &observation.timing, &observation.transaction)
 	})
 }
 
