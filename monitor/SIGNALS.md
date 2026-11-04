@@ -32021,12 +32021,33 @@ A transport whose resident is in its own process is attached in process
 instead of dialing a socket back into that process
 (connect/resident_local_transport.go, CPUOPT3 D1), so the established
 transport owners are the outbound transport sockets plus
-`urnetwork_connect_exchange_local_attachments`: one link per attached
-transport, with two pump goroutines and no socket. A block whose
+`urnetwork_connect_exchange_local_attachments{op="transport"}`: one link per
+attached transport, with two pump goroutines and no socket. A block whose
 `exchange_local_transport_enabled` is 1 moves most of its transport sockets
-into that gauge, which is a population change, not a loss of owners. Exchange
-frame and byte totals are `exchange_io` plus `exchange_local`, which counts
-each in-process frame as its socket counted it.
+into that gauge, which is a population change, not a loss of owners. A
+resident's forward whose destination's resident is in the same process is
+attached the same way (connect/resident_local_forward.go), so the established
+forward owners are the outbound forward sockets plus
+`exchange_local_attachments{op="forward"}`: one link per attached forward,
+with one pump on the forward's own goroutine and no socket. Its switch is
+separate: a block whose `exchange_local_forward_enabled` is 1 moves its
+same-process forward sockets into that gauge. Exchange frame and byte totals
+are `exchange_io` plus `exchange_local`, per `op` and in all; the local series
+count each in-process frame as its socket counted it. Messages a forward link
+took and did not deliver count at the `receive_queue_dropped` boundary
+`local_forward_send`, beside the transport links' `local_transport_send` and
+`local_transport_receive`. A forward link that ends with its forward detaches
+with reason `forward_done`, where a transport link's is `transport_done`.
+
+The release that adds forwards adds the same `op` label (`transport`,
+`forward`) to every `exchange_local` series: `frames_total`, `bytes_total`,
+`attachments`, `detaches_total` and `blocked_seconds`. As with `exchange_io`
+below, each process that starts on it reports series of a new identity, and
+every dashboard query on them (connect.json panels 87–93 and 106;
+public-traffic.json panels 3 and 25) sums, or groups by `op`, so totals stay
+continuous across the deploy. A query that selects one exact label set
+without an aggregation would split into one series per `op`; wrap it in
+`sum`.
 
 The same release adds an `op` label (`transport`, `forward`, `unknown`) to
 `urnetwork_connect_exchange_io_frames_total` and
@@ -47628,7 +47649,9 @@ each of the previous 7 days. Connect traffic is
 `urnetwork_connect_exchange_local_bytes_total`: a block with in-process
 transport delivery on (§8.15) carries most transport frames without a socket,
 and the socket counter alone would fall by that share, about 60% of exchange
-frames once every block is on.
+frames once every block is on. A block with in-process forward delivery on
+also carries its same-process forward frames there; the local counter sums
+both operations, as the socket counter does.
 
 - WARN `delivered-traffic-floor`: below 50% of that median for 15 minutes.
 - PAGE: below 25% for 10 minutes.
