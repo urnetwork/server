@@ -312,7 +312,7 @@ func sourceCorrectnessContainmentDocker(input sourceBuildSandboxInput, settings 
 // and an empty post-removal census to the actual tests and exact image. It does
 // not replace separate physical-host or future-round runtime qualification.
 func retainSourceCorrectnessContainment(input sourceBuildSandboxInput, settings sourceBuildSandboxSettings, execution sourceTestExecution) (string, error) {
-	if execution.ImageId != input.ImageId || execution.SuiteSha256 != sourceCorrectnessSuiteDigest() || execution.ExitCode != 0 || execution.TestCount <= 0 ||
+	if execution.ImageId != input.ImageId || execution.SuiteSha256 != sourceCorrectnessSuiteDigestForMinimumWork(input.MinimumWork) || execution.ExitCode != 0 || execution.TestCount <= 0 ||
 		!validSha256(execution.TestLogsSha256) || settings.OutputBytes <= 0 {
 		return "", errors.New("containment evidence requires complete exact-image test execution")
 	}

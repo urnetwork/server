@@ -93,7 +93,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 	} else if tests.WinnerReviewPolicy != "" || len(tests.Members) != 0 || tests.Model != "gpt-6.1-sol" || tests.Reasoning != "low" || tests.ProviderResponseId == "" || tests.CompletionId == "" {
 		return nil, errors.New("legacy source qualification lacks its original independent test evidence")
 	}
-	input := sourceBuildSandboxInput{Owner: qualification.Owner, Phase: "correctness", ImageId: qualification.Artifacts.ImageId,
+	input := sourceBuildSandboxInput{Owner: qualification.Owner, Phase: "correctness", MinimumWork: sourceBuildRequestMinimumWork(qualification.Build), ImageId: qualification.Artifacts.ImageId,
 		Commit: qualification.Build.Proposal.Commits["server"], SourceDirectory: filepath.Join(qualification.Artifacts.Directory, "source"),
 		MetadataDirectory: filepath.Join(qualification.Artifacts.Directory, "correctness", "metadata"), OutputDirectory: filepath.Join(qualification.Artifacts.Directory, "correctness", "output")}
 	containmentDigest, err := retainSourceCorrectnessContainment(input, settings.Sandbox, tests.Execution)
