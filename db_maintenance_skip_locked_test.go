@@ -37,8 +37,6 @@ import (
 // vacuum moved to VacuumHotTables on 2026-10-24, so the rotation issues no
 // VACUUM of its own.
 func TestDbMaintenanceVacuumAndAnalyzeSkipLockedTables(t *testing.T) {
-	// the command as a word, so "vacuumed" or "Vacuums of ..." is not one
-	command := regexp.MustCompile(`^(VACUUM|ANALYZE)\b`)
 	for _, c := range []struct {
 		fileName string
 		// the statements the file must issue
@@ -47,25 +45,7 @@ func TestDbMaintenanceVacuumAndAnalyzeSkipLockedTables(t *testing.T) {
 		{fileName: "db_maintenance.go", want: []string{"ANALYZE"}},
 		{fileName: "db_maintenance_hot_vacuum.go", want: []string{"VACUUM", "VACUUM"}},
 	} {
-		file, err := parser.ParseFile(token.NewFileSet(), c.fileName, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		statements := []string{}
-		ast.Inspect(file, func(node ast.Node) bool {
-			literal, ok := node.(*ast.BasicLit)
-			if !ok || literal.Kind != token.STRING {
-				return true
-			}
-			text, err := strconv.Unquote(literal.Value)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if command.MatchString(strings.ToUpper(strings.TrimSpace(text))) {
-				statements = append(statements, text)
-			}
-			return true
-		})
+		statements := dbMaintenanceVacuumAndAnalyzeStatements(t, c.fileName, nil)
 
 		checked := []string{}
 		for _, statement := range statements {
@@ -74,7 +54,7 @@ func TestDbMaintenanceVacuumAndAnalyzeSkipLockedTables(t *testing.T) {
 			if strings.HasPrefix(upper, "VACUUM (FULL") || strings.HasPrefix(upper, "VACUUM FULL") {
 				continue
 			}
-			checked = append(checked, command.FindString(upper))
+			checked = append(checked, dbMaintenanceVacuumOrAnalyzeCommand.FindString(upper))
 			if !strings.Contains(upper, "SKIP_LOCKED") {
 				t.Errorf("%s: %q queues for a table an autovacuum holds, which cancels the autovacuum", c.fileName, statement)
 			}
@@ -82,6 +62,54 @@ func TestDbMaintenanceVacuumAndAnalyzeSkipLockedTables(t *testing.T) {
 		if !slices.Equal(checked, c.want) {
 			t.Errorf("%s issues %v in %q, want %v", c.fileName, checked, statements, c.want)
 		}
+	}
+}
+
+// The server writes SQL keywords in uppercase, so a statement starts with the
+// uppercase command as a word. A message that names the command in lowercase,
+// such as the hot vacuum's "vacuum unfinished: " detail, is not one, nor is
+// "vacuumed" or "Vacuums of ...".
+var dbMaintenanceVacuumOrAnalyzeCommand = regexp.MustCompile(`^(VACUUM|ANALYZE)\b`)
+
+// The VACUUM and ANALYZE statements among a Go source's string literals. src is
+// as parser.ParseFile takes it: nil reads fileName.
+func dbMaintenanceVacuumAndAnalyzeStatements(t *testing.T, fileName string, src any) []string {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), fileName, src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statements := []string{}
+	ast.Inspect(file, func(node ast.Node) bool {
+		literal, ok := node.(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		text, err := strconv.Unquote(literal.Value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dbMaintenanceVacuumOrAnalyzeCommand.MatchString(strings.TrimSpace(text)) {
+			statements = append(statements, text)
+		}
+		return true
+	})
+	return statements
+}
+
+// A message that names VACUUM or ANALYZE in lowercase is not a statement, so it
+// cannot fail the SKIP_LOCKED check, while an uppercase statement is found with
+// or without SKIP_LOCKED. The hot vacuum's "vacuum unfinished: " detail, added
+// on 2026-10-24, failed TestDbMaintenanceVacuumAndAnalyzeSkipLockedTables as a
+// VACUUM that queues for a locked table.
+func TestDbMaintenanceSkipLockedCheckIgnoresMessagesThatNameTheCommand(t *testing.T) {
+	source := "package synthetic\n\n" +
+		"const vacuum = `VACUUM (SKIP_LOCKED) `\n" +
+		"const analyze = `ANALYZE synthetic_table`\n" +
+		"var messages = []string{\"vacuum unfinished: \", \"analyze %s: %w\", \"vacuumed\", \"Vacuums of the churn tables\"}\n"
+	statements := dbMaintenanceVacuumAndAnalyzeStatements(t, "synthetic.go", source)
+	if want := []string{"VACUUM (SKIP_LOCKED) ", "ANALYZE synthetic_table"}; !slices.Equal(statements, want) {
+		t.Fatalf("statements %q, want %q", statements, want)
 	}
 }
 
