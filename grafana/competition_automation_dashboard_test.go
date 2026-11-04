@@ -3,6 +3,7 @@
 package grafana
 
 import (
+	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
@@ -38,4 +39,59 @@ func TestCompetitionAutomationDashboardHasNoCandidateDisclosure(t *testing.T) {
 	if !strings.Contains(dashboard.Description, "not a chain settlement") {
 		t.Fatal("delivery receipt must not imply payment finality")
 	}
+}
+
+// The exported minus-one sentinel is not healthy zero. Threshold colors and
+// the exact value mapping must both distinguish missing heartbeat telemetry.
+func TestCompetitionExecutorHeartbeatDashboardMarksMissingObservationUnhealthy(t *testing.T) {
+	dashboard := readTestDashboard(t, "competition-automation.json")
+	panel := dashboardPanelById(dashboard, 12)
+	if panel == nil || len(panel.Targets) != 1 || !strings.Contains(panel.Targets[0].Expr, "executor_heartbeat_age_seconds") {
+		t.Fatal("executor heartbeat panel is missing")
+	}
+	steps := panel.FieldConfig.Defaults.Thresholds.Steps
+	if len(steps) < 2 || steps[0].Value != nil || steps[0].Color != "red" || steps[1].Value == nil || *steps[1].Value != 0 || steps[1].Color != "green" {
+		t.Fatal("missing heartbeat falls into the healthy threshold color")
+	}
+	content, err := dashboardsFs.ReadFile("dashboards/competition-automation.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw struct {
+		Panels []struct {
+			Id          int `json:"id"`
+			FieldConfig struct {
+				Defaults struct {
+					Color struct {
+						Mode string `json:"mode"`
+					} `json:"color"`
+					Mappings []struct {
+						Type    string `json:"type"`
+						Options map[string]struct {
+							Color string `json:"color"`
+							Text  string `json:"text"`
+						} `json:"options"`
+					} `json:"mappings"`
+				} `json:"defaults"`
+			} `json:"fieldConfig"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(content, &raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range raw.Panels {
+		if candidate.Id != 12 {
+			continue
+		}
+		if candidate.FieldConfig.Defaults.Color.Mode != "thresholds" {
+			t.Fatal("executor heartbeat series do not use their health threshold colors")
+		}
+		for _, mapping := range candidate.FieldConfig.Defaults.Mappings {
+			if value, present := mapping.Options["-1"]; present && mapping.Type == "value" && value.Color == "red" && value.Text == "missing heartbeat" {
+				return
+			}
+		}
+		t.Fatal("executor heartbeat has no explicit unhealthy missing-observation mapping")
+	}
+	t.Fatal("executor heartbeat panel could not be inspected")
 }

@@ -62,6 +62,9 @@ func refreshCompetitionDistributedMetrics(ctx context.Context, settings *Setting
 	}
 	hostMetrics := []hostMetric{}
 	err := captureDatabaseError(func() {
+		if settings == nil || !settings.AutomationPolicy.Enabled {
+			return
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var installed bool
 			server.Raise(conn.QueryRow(ctx, `SELECT to_regclass('competition_execution_slot') IS NOT NULL AND to_regclass('competition_executor_equivalence') IS NOT NULL`).Scan(&installed))
@@ -70,12 +73,24 @@ func refreshCompetitionDistributedMetrics(ctx context.Context, settings *Setting
 			}
 			var policyJson []byte
 			var roundId server.Id
-			loadErr := conn.QueryRow(ctx, `SELECT round_id,policy_json FROM competition_round WHERE competition_id=$1 AND NOT canceled
-			 AND policy_json ? 'distributed_evaluation_policy' ORDER BY epoch_number DESC,round_id DESC LIMIT 1`, settings.CompetitionId).Scan(&roundId, &policyJson)
+			var opensAt time.Time
+			var finalizedAt, sealedAt *time.Time
+			loadErr := conn.QueryRow(ctx, `SELECT round_id,policy_json,opens_at,finalized_at,automation_sealed_at FROM competition_round
+			 WHERE competition_id=$1 AND staging=$2 AND NOT canceled
+			 AND COALESCE((policy_json->'automation_policy'->>'enabled')::boolean,false)
+			 AND COALESCE((policy_json->'automation_policy'->>'staging')::boolean,false)=$2
+			 AND policy_json->'automation_policy'->>'environment'=$3 AND policy_json->'automation_policy'->>'season_id'=$4
+			 ORDER BY epoch_number DESC,round_id DESC LIMIT 1`, settings.CompetitionId, settings.AutomationPolicy.Staging,
+				settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&roundId, &policyJson, &opensAt, &finalizedAt, &sealedAt)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
 				return
 			}
 			server.Raise(loadErr)
+			// Choose the current round before testing execution mode/lifecycle:
+			// historical distributed policy cannot replace a newer singleton.
+			if now.Before(opensAt) || finalizedAt != nil || sealedAt != nil {
+				return
+			}
 			policy, policyErr := decodeRoundPolicySnapshot(policyJson)
 			server.Raise(policyErr)
 			if policy.DistributedEvaluationPolicy == nil {
@@ -103,6 +118,9 @@ func refreshCompetitionDistributedMetrics(ctx context.Context, settings *Setting
 	competitionExecutorHeartbeatAge.Reset()
 	competitionExecutorDeadlineRemaining.Reset()
 	competitionExecutorQualified.Reset()
+	if len(hostMetrics) == 0 {
+		competitionExecutorRemoteState.Reset()
+	}
 	oldestHeartbeatAge := -1.0
 	allHeartbeatsPresent := true
 	for _, metric := range hostMetrics {
