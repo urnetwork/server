@@ -6979,6 +6979,22 @@ func BackfillStragglerContractReapTime(ctx context.Context, limit int, progress 
 	}
 }
 
+// The read of GetOpenTransferByteCount, apart so its plan can be tested: $1 the
+// payer. Its index is transfer_contract_unresolved_payer_transfer_byte_count.
+// Once the open set drains, the planner keeps choosing it only with the
+// statistics object on the unresolved predicate
+// (server.TransferContractUnresolvedPredicateStatisticsSql).
+const openTransferByteCountSql = `
+			SELECT
+			   COALESCE(SUM(transfer_byte_count), 0)
+			FROM transfer_contract
+			WHERE
+			    payer_network_id = $1 AND
+			    -- Isolate this payer aggregate from every false-zero global,
+			    -- pair, or create-time partial index.
+			    (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
+			`
+
 func GetOpenTransferByteCount(
 	ctx context.Context,
 	payerNetworkId server.Id,
@@ -6990,16 +7006,7 @@ func GetOpenTransferByteCount(
 
 		result, err := tx.Query(
 			ctx,
-			`
-			SELECT
-			   COALESCE(SUM(transfer_byte_count), 0)
-			FROM transfer_contract
-			WHERE
-			    payer_network_id = $1 AND
-			    -- Isolate this payer aggregate from every false-zero global,
-			    -- pair, or create-time partial index.
-			    (CASE WHEN outcome IS NULL THEN dispute = false ELSE false END)
-			`,
+			openTransferByteCountSql,
 			payerNetworkId,
 		)
 		server.WithPgResult(result, err, func() {
