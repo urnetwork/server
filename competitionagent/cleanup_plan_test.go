@@ -62,7 +62,7 @@ func TestAgentCleanupPlanIsDurableBeforeDetachedLaunch(t *testing.T) {
 			t.Fatal("launch preceded immutable cleanup authority", err)
 		}
 		plan, err := fixture.agent.loadCleanupPlan(launch.RunId, state, &fixture.manifest)
-		if err != nil || len(plan.CgroupNames) != 30 {
+		if err != nil || len(plan.CgroupNames) != 31 {
 			t.Fatal("launch did not retain the complete finite full-R9 cleanup plan", err)
 		}
 		policyBytes := []byte("{\"allowed_paths\":[\"server/example.go\"],\"forbidden_paths\":[\"server/connect/sim-latency/**\"],\"max_patch_bytes\":1024}\n")

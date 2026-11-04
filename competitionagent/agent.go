@@ -586,7 +586,7 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 	}
 	lock.Close()
 	evaluationCtx, cancel := context.WithDeadline(ctx, manifest.Identity.DeadlineAt)
-	exitCode, runErr := self.runEvaluator(evaluationCtx, runId)
+	exitCode, runErr := self.runEvaluator(evaluationCtx, manifest)
 	evaluationExpired := !self.settings.Now().UTC().Before(manifest.Identity.DeadlineAt) || errors.Is(evaluationCtx.Err(), context.DeadlineExceeded)
 	evaluationCanceled := evaluationCtx.Err() != nil
 	cancel()
@@ -843,11 +843,11 @@ func (self *Agent) prepareWorkerOwnership(directory string) error {
 
 // Executes the pinned evaluator as the isolated host account with a fresh
 // environment. Cancellation joins its process group and bounded normal cleanup.
-func (self *Agent) runEvaluator(ctx context.Context, runId string) (int, error) {
+func (self *Agent) runEvaluator(ctx context.Context, manifest *StartManifest) (int, error) {
 	if err := validatePin(self.config.Evaluator, self.protected); err != nil {
 		return -1, err
 	}
-	directory := self.workDirectory(runId)
+	directory := self.workDirectory(manifest.Identity.RunId)
 	stderr, err := os.OpenFile(filepath.Join(directory, "worker.stderr.log"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0400)
 	if err != nil {
 		return -1, err
@@ -863,6 +863,7 @@ func (self *Agent) runEvaluator(ctx context.Context, runId string) (int, error) 
 	command := exec.Command(self.config.Evaluator.Path, "--request", filepath.Join(directory, "worker-request.json"), "--result", filepath.Join(directory, "worker-result.json"))
 	command.Dir = directory
 	command.Env = append(controlEnvironment(), "HOME="+directory, "USER="+self.config.WorkerUser, "LOGNAME="+self.config.WorkerUser)
+	command.Env = append(command.Env, subevaluationScopeEnvironment(manifest.Identity)...)
 	command.Stdout, command.Stderr = stdoutWriter, stderrWriter
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: self.credential}
 	exitCode, runErr := runProcessGroup(ctx, command, self.settings.CancelGrace)

@@ -74,11 +74,12 @@ func newHostCleaner(config Config, settings AgentSettings) runCleaner {
 
 var cleanupUuidPattern = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 var cleanupBuildSlicePattern = regexp.MustCompile(`^urnetwork-submission-build-[0-9a-f]{32}\.slice$`)
-var cleanupEvaluationSlicePattern = regexp.MustCompile(`^urnetwork-evaluation-[0-9a-f]{32}-((baseline|candidate)-(0[1-9]|score)|live-0[1-9])\.slice$`)
+var cleanupEvaluationSlicePattern = regexp.MustCompile(`^urnetwork-evaluation-[0-9a-f]{32}-((baseline|candidate)-(0[1-9]|score)|live-0[1-9]|preflight)\.slice$`)
 var errCleanupCgroupAbsent = errors.New("exact cleanup cgroup is absent")
 
 const cleanupJobLabel = "com.urnetwork.competition.job-id"
 const cleanupRoundLabel = "com.urnetwork.competition.round-id"
+const cleanupRunLabel = "com.urnetwork.competition.run-id"
 
 // The build cgroup is killed and joined first because BuildKit children need
 // not carry job labels. Docker deletion requires an independent inspect proof.
@@ -195,6 +196,7 @@ func validateCleanupPlan(plan cleanupPlan, config Config) error {
 	for _, role := range []string{"baseline", "candidate"} {
 		allowed["urnetwork-evaluation-"+token+"-"+role+"-score.slice"] = true
 	}
+	allowed["urnetwork-evaluation-"+token+"-preflight.slice"] = true
 	seen := map[string]bool{}
 	buildCount := 0
 	for _, name := range plan.CgroupNames {
@@ -290,8 +292,8 @@ func (self *hostCleaner) inspect(ctx context.Context, plan cleanupPlan, id strin
 		}
 	}
 	var labels map[string]string
-	if json.Unmarshal(labelObject["Labels"], &labels) != nil || labels[cleanupJobLabel] != plan.JobId || labels[cleanupRoundLabel] != plan.RoundId {
-		return errors.New("Docker cleanup target does not carry both exact run labels")
+	if json.Unmarshal(labelObject["Labels"], &labels) != nil || labels[cleanupJobLabel] != plan.JobId || labels[cleanupRoundLabel] != plan.RoundId || labels[cleanupRunLabel] != plan.RunId {
+		return errors.New("Docker cleanup target does not carry all three exact execution labels")
 	}
 	if !network {
 		var host map[string]json.RawMessage

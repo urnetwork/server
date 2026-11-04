@@ -22,29 +22,31 @@ import (
 // BuildKit containers are not job-labelled. Freeze their exact release-derived
 // slice alongside the finite full-R9 evaluation slices before any launch.
 func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifest) (*cleanupPlan, error) {
-	if err := self.verifyCleanupRuntime(); err != nil {
+	if err := self.verifyCleanupRuntime(ctx); err != nil {
 		return nil, err
 	}
 	request, err := decodeEvaluatorRequest(manifest.EvaluatorRequest)
 	if err != nil {
 		return nil, err
 	}
-	builderBytes, err := self.cleanupIdentityCommand(ctx, self.config.SubmissionBuilderIdentity, nil, nil)
+	builderBytes, err := self.cleanupIdentityCommand(ctx, self.config.SubmissionBuilderIdentity, nil, nil, manifest.Identity)
 	if err != nil {
 		return nil, err
 	}
 	var builder struct {
-		Schema        int    `json:"schema"`
-		Kind          string `json:"kind"`
-		BuilderSha256 string `json:"builder_sha256"`
+		Schema                       int    `json:"schema"`
+		Kind                         string `json:"kind"`
+		BuilderSha256                string `json:"builder_sha256"`
+		SubevaluationOwnershipSha256 string `json:"subevaluation_ownership_sha256"`
 	}
-	if json.Unmarshal(builderBytes, &builder) != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || builder.BuilderSha256 != self.config.SubmissionBuilderSha256 {
+	if json.Unmarshal(builderBytes, &builder) != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || builder.BuilderSha256 != self.config.SubmissionBuilderSha256 ||
+		builder.SubevaluationOwnershipSha256 != self.config.SubevaluationOwnership.Sha256 {
 		return nil, errors.New("cleanup builder identity differs from its installed release pin")
 	}
 	// This is the same fixed jq filter used by evaluator-minimum-work.sh. Hash
 	// its exact bytes, including the final newline, rather than approximating
 	// jq's Unicode/number/pretty-print encoding in a second implementation.
-	policyBytes, err := self.cleanupIdentityCommand(ctx, self.config.JsonFormatter, []string{"-S", ".patch_policy"}, manifest.EvaluatorRequest)
+	policyBytes, err := self.cleanupIdentityCommand(ctx, self.config.JsonFormatter, []string{"-S", ".patch_policy"}, manifest.EvaluatorRequest, manifest.Identity)
 	if err != nil || !sameCleanupJson(policyBytes, request.PatchPolicy) {
 		return nil, errors.New("cleanup policy formatter did not retain the authenticated patch policy")
 	}
@@ -54,7 +56,7 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 	imageKey := hex.EncodeToString(imageDigest[:])
 	attemptDigest := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", manifest.Identity.JobId, manifest.Identity.Attempt)))
 	attemptToken := hex.EncodeToString(attemptDigest[:])[:32]
-	cgroups := []string{"urnetwork-submission-build-" + imageKey[:32] + ".slice"}
+	cgroups := []string{"urnetwork-submission-build-" + imageKey[:32] + ".slice", "urnetwork-evaluation-" + attemptToken + "-preflight.slice"}
 	for _, role := range []string{"baseline", "candidate"} {
 		for ordinal := 1; ordinal <= 9; ordinal++ {
 			cgroups = append(cgroups, fmt.Sprintf("urnetwork-evaluation-%s-%s-%02d.slice", attemptToken, role, ordinal))
@@ -75,7 +77,7 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 
 // Only pinned fixed helpers and fixed arguments run, as the non-root worker,
 // with bounded input/output/time and no inherited application credentials.
-func (self *Agent) cleanupIdentityCommand(ctx context.Context, pin Pin, args []string, input []byte) ([]byte, error) {
+func (self *Agent) cleanupIdentityCommand(ctx context.Context, pin Pin, args []string, input []byte, identity Identity) ([]byte, error) {
 	if err := validatePin(pin, self.protected); err != nil {
 		return nil, err
 	}
@@ -83,7 +85,7 @@ func (self *Agent) cleanupIdentityCommand(ctx context.Context, pin Pin, args []s
 	defer cancel()
 	output := &boundedOutput{maximum: self.config.Limits.DocumentBytes}
 	command := exec.Command(pin.Path, args...)
-	command.Env, command.Stdin = controlEnvironment(), bytes.NewReader(input)
+	command.Env, command.Stdin = append(controlEnvironment(), subevaluationScopeEnvironment(identity)...), bytes.NewReader(input)
 	command.Stdout, command.Stderr = output, &discardWriter{}
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: self.credential}
 	code, err := runProcessGroup(child, command, self.settings.CancelGrace)
@@ -91,6 +93,14 @@ func (self *Agent) cleanupIdentityCommand(ctx context.Context, pin Pin, args []s
 		return nil, errors.New("fixed cleanup identity helper failed or exceeded its bound")
 	}
 	return append([]byte(nil), output.Bytes()...), nil
+}
+
+// Only the authenticated manifest supplies this prospective helper scope. No
+// ambient caller environment can select another job, round, attempt or run.
+func subevaluationScopeEnvironment(identity Identity) []string {
+	return []string{"URNETWORK_SUBEVALUATION_RUN_ID=" + identity.RunId,
+		"URNETWORK_SUBEVALUATION_JOB_ID=" + identity.JobId, "URNETWORK_SUBEVALUATION_ROUND_ID=" + identity.RoundId,
+		fmt.Sprintf("URNETWORK_SUBEVALUATION_ATTEMPT=%d", identity.Attempt)}
 }
 
 // Exact semantic JSON comparison retains integer precision and rejects extra

@@ -45,6 +45,7 @@ type Config struct {
 	DockerSocketPath           string `json:"docker_socket_path"`
 	SubmissionBuilderIdentity  Pin    `json:"submission_builder_identity"`
 	SubmissionBuilderSha256    string `json:"submission_builder_sha256"`
+	SubevaluationOwnership     Pin    `json:"subevaluation_ownership"`
 	JsonFormatter              Pin    `json:"json_formatter"`
 	ConfigLocalDirectory       string `json:"config_local_directory"`
 	VaultLocalDirectory        string `json:"vault_local_directory"`
@@ -180,7 +181,7 @@ func (self *Config) validate(protected bool) error {
 			}
 		}
 	}
-	for _, pin := range []Pin{self.Evaluator, self.SelfCheck, self.Agent, self.Docker, self.SubmissionBuilderIdentity, self.JsonFormatter} {
+	for _, pin := range []Pin{self.Evaluator, self.SelfCheck, self.Agent, self.Docker, self.SubmissionBuilderIdentity, self.SubevaluationOwnership, self.JsonFormatter} {
 		if err := validatePin(pin, protected); err != nil {
 			return err
 		}

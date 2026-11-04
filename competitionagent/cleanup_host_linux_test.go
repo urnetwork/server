@@ -94,7 +94,7 @@ func (self *cleanupTestDocker) command(ctx context.Context, args []string) ([]by
 			return nil, errors.New("synthetic inspect expanded its target")
 		}
 		id := args[3]
-		labels := map[string]string{cleanupJobLabel: self.plan.JobId, cleanupRoundLabel: self.plan.RoundId}
+		labels := map[string]string{cleanupJobLabel: self.plan.JobId, cleanupRoundLabel: self.plan.RoundId, cleanupRunLabel: self.plan.RunId}
 		report := map[string]any{"Id": id}
 		if network {
 			report["Labels"] = labels
@@ -196,7 +196,7 @@ func newHostCleanupTest(t *testing.T) *hostCleanupTest {
 		}
 		groups = append(groups, fmt.Sprintf("urnetwork-evaluation-%s-live-%02d.slice", strings.ReplaceAll(jobId, "-", ""), index))
 	}
-	groups = append(groups, "urnetwork-evaluation-"+token+"-baseline-score.slice", "urnetwork-evaluation-"+token+"-candidate-score.slice")
+	groups = append(groups, "urnetwork-evaluation-"+token+"-baseline-score.slice", "urnetwork-evaluation-"+token+"-candidate-score.slice", "urnetwork-evaluation-"+token+"-preflight.slice")
 	plan := cleanupPlan{Schema: Schema, RunId: runId, JobId: jobId, RoundId: roundId, Attempt: 1,
 		CgroupNames:       groups,
 		EvidenceDirectory: filepath.Join(work, runId, ".evidence-runtime"), EvidenceSource: "urnetwork-evidence-" + strings.ReplaceAll(jobId, "-", "") + "-1"}
@@ -274,7 +274,7 @@ func TestHostCleanupCancellationCannotAcknowledgePopulatedBuild(t *testing.T) {
 	}
 }
 
-// Both labels, inspect identity and cgroup parent are independently required.
+// All labels, inspect identity and cgroup parent are independently required.
 func TestHostCleanupRejectsForeignContainerProofsBeforeRemoval(t *testing.T) {
 	mutations := []func(bool, string, map[string]any){
 		func(network bool, _ string, report map[string]any) {
@@ -327,10 +327,37 @@ func TestHostCleanupRejectsForeignNetworkBeforeRemovingContainers(t *testing.T) 
 	}
 }
 
+// Same-job attempts never inherit each other's resources merely because their
+// public job/round labels match. Missing new ownership metadata fails closed.
+func TestHostCleanupRejectsMissingOrForeignStableRunLabels(t *testing.T) {
+	for _, network := range []bool{false, true} {
+		for _, runId := range []string{"", strings.Repeat("f", 64)} {
+			fixture := newHostCleanupTest(t)
+			fixture.docker.inspectMutation = func(isNetwork bool, _ string, report map[string]any) {
+				if isNetwork != network {
+					return
+				}
+				labels := map[string]string{cleanupJobLabel: fixture.plan.JobId, cleanupRoundLabel: fixture.plan.RoundId}
+				if runId != "" {
+					labels[cleanupRunLabel] = runId
+				}
+				if network {
+					report["Labels"] = labels
+				} else {
+					report["Config"] = map[string]any{"Labels": labels}
+				}
+			}
+			if err := fixture.cleaner.Cleanup(context.Background(), fixture.plan); err == nil || len(fixture.docker.removedContainers) != 0 || len(fixture.docker.removedNetworks) != 0 {
+				t.Fatal("same-job foreign/missing stable run metadata permitted removal", network, runId, err)
+			}
+		}
+	}
+}
+
 // Invalid lists cannot be expanded into targets or silently truncated to fit.
 func TestHostCleanupRejectsShortDuplicateAndExcessDockerIds(t *testing.T) {
 	excess := []string{}
-	for index := 1; index <= 31; index++ {
+	for index := 1; index <= 32; index++ {
 		excess = append(excess, fmt.Sprintf("%064x", index))
 	}
 	cases := [][]string{{"abcdef"}, {strings.Repeat("a", 64), strings.Repeat("a", 64)}, excess}

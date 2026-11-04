@@ -4,6 +4,7 @@ package competitionagent
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,14 +14,17 @@ import (
 	"strings"
 )
 
-// This pre-launch check performs no daemon request and changes no host state.
-// Cleanup itself must remain usable if the daemon becomes unhealthy later.
-func (self *Agent) verifyCleanupRuntime() error {
+// This bounded pre-launch read verifies the actual fixed daemon hierarchy and
+// changes no host state. Cleanup remains usable if that daemon later degrades.
+func (self *Agent) verifyCleanupRuntime(parent context.Context) error {
 	if !self.protected {
 		return nil
 	}
 	if self.config.SubmissionBuilderIdentity.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), "submission-builder-identity.sh") {
 		return errors.New("cleanup builder helper is not the evaluator's own protected release")
+	}
+	if self.config.SubevaluationOwnership.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), "subevaluation-ownership.sh") {
+		return errors.New("cleanup ownership helper is not the evaluator's pinned prospective release")
 	}
 	for name, pin := range map[string]Pin{"jq": self.config.JsonFormatter, "docker": self.config.Docker} {
 		path, err := controlProgramPath(name)
@@ -37,20 +41,41 @@ func (self *Agent) verifyCleanupRuntime() error {
 		return errors.New("cannot establish the sudo target's fixed Docker configuration home")
 	}
 	configPath := filepath.Join(root.HomeDir, ".docker", "config.json")
-	if _, err := os.Lstat(configPath); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
+	if _, err := os.Lstat(configPath); err == nil {
+		if err := protectedRootPath(configPath, false, false); err != nil {
+			return err
+		}
+		content, err := readBounded(configPath, self.settings.ConfigBytes)
+		if err != nil {
+			return err
+		}
+		defer clear(content)
+		if err := validateDefaultDockerContext(content); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return errors.New("cannot inspect the evaluator's default Docker configuration")
 	}
-	if err := protectedRootPath(configPath, false, false); err != nil {
-		return err
+	cleaner, ok := self.cleaner.(*hostCleaner)
+	if !ok {
+		return errors.New("protected agent has no concrete fixed-daemon runtime verifier")
 	}
-	content, err := readBounded(configPath, self.settings.ConfigBytes)
-	if err != nil {
-		return err
+	ctx, cancel := context.WithTimeout(parent, self.settings.CleanupCommandTimeout)
+	defer cancel()
+	identity, err := cleaner.docker(ctx, []string{"info", "--format", "{{.CgroupDriver}} {{.CgroupVersion}}"})
+	if err != nil || validateCleanupDaemonCgroups(identity) != nil {
+		return errors.New("cleanup requires the qualified daemon's actual systemd driver and cgroup v2")
 	}
-	defer clear(content)
-	return validateDefaultDockerContext(content)
+	return nil
+}
+
+// A cgroup-v2 mount alone does not determine Docker's hierarchy layout.
+func validateCleanupDaemonCgroups(content []byte) error {
+	fields := strings.Fields(string(content))
+	if len(fields) != 2 || fields[0] != "systemd" || fields[1] != "2" {
+		return errors.New("Docker cleanup hierarchy is not systemd cgroup v2")
+	}
+	return nil
 }
 
 // Lookups use the fresh child PATH, never this process's ambient PATH. The

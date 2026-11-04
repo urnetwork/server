@@ -27,3 +27,18 @@ func TestCleanupRuntimeRejectsRemoteAmbiguousAndAliasedDockerContext(t *testing.
 		}
 	}
 }
+
+// Docker's cgroupfs driver also supports v2, but its path layout is not the
+// systemd slice expansion whose exact targets this cleanup implementation owns.
+func TestCleanupRuntimeRequiresActualSystemdCgroupV2Driver(t *testing.T) {
+	for _, report := range []string{"systemd 2", "systemd 2\n"} {
+		if err := validateCleanupDaemonCgroups([]byte(report)); err != nil {
+			t.Fatal("actual qualified systemd hierarchy was refused", err)
+		}
+	}
+	for _, report := range []string{"", "cgroupfs 2", "systemd 1", "systemd 2 extra", "systemd", "2"} {
+		if err := validateCleanupDaemonCgroups([]byte(report)); err == nil {
+			t.Fatal("v2 alone or unknown daemon hierarchy was accepted", report)
+		}
+	}
+}

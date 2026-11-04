@@ -34,6 +34,7 @@ func verifyWorkerRuntimeAccess(ctx context.Context, config *Config, credential *
 		{predicate: "-x", path: config.SelfCheck.Path},
 		{predicate: "-x", path: config.SubmissionBuilderIdentity.Path},
 		{predicate: "-r", path: config.SubmissionBuilderIdentity.Path},
+		{predicate: "-r", path: config.SubevaluationOwnership.Path},
 		{predicate: "-x", path: config.JsonFormatter.Path},
 	} {
 		if err := probe(ctx, check.predicate, check.path, credential); err != nil {

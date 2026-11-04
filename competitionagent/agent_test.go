@@ -120,7 +120,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	}
 	program := "#!/bin/sh\nset -eu\nresult=$4\nprintf '%s\\n' '{\"schema\":1,\"job_id\":\"11111111-1111-4111-8111-111111111111\",\"security\":{\"cleanup_complete\":true}}' > \"$result\"\nprintf '%s\\n' once > process-invocations.txt\nenv > process-environment.txt\n"
 	evaluatorPath, selfCheckPath, agentPath := filepath.Join(root, "evaluator"), filepath.Join(root, "self-check"), filepath.Join(root, "agent")
-	builderPath, formatterPath := filepath.Join(root, "builder-identity"), filepath.Join(root, "json-formatter")
+	builderPath, formatterPath, ownershipPath := filepath.Join(root, "builder-identity"), filepath.Join(root, "json-formatter"), filepath.Join(root, "subevaluation-ownership.sh")
 	if err := os.WriteFile(evaluatorPath, []byte(program), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,11 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		t.Fatal(err)
 	}
 	builderSha256 := strings.Repeat("e", 64)
-	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/v2\",\"builder_sha256\":\""+builderSha256+"\"}'\n"), 0700); err != nil {
+	if err := os.WriteFile(ownershipPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	ownershipPin := testAgentPin(t, ownershipPath)
+	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/v2\",\"builder_sha256\":\""+builderSha256+"\",\"subevaluation_ownership_sha256\":\""+ownershipPin.Sha256+"\"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(formatterPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"allowed_paths\":[\"server/example.go\"],\"forbidden_paths\":[\"server/connect/sim-latency/**\"],\"max_patch_bytes\":1024}'\n"), 0700); err != nil {
@@ -142,7 +146,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	fixture.config = &Config{Schema: Schema, HostId: "synthetic-executor", BaseDirectory: root, TrustedOperatorUser: "synthetic-operator", ExpectedDataDeviceId: 1, StateDirectory: stateDirectory, WorkDirectory: workDirectory, WorkerUser: "synthetic-worker",
 		Evaluator: testAgentPin(t, evaluatorPath), SelfCheck: testAgentPin(t, selfCheckPath), Agent: testAgentPin(t, agentPath),
 		Docker: testAgentPin(t, agentPath), DockerSocketPath: "/synthetic/docker.sock", SubmissionBuilderIdentity: testAgentPin(t, builderPath),
-		SubmissionBuilderSha256: builderSha256, JsonFormatter: testAgentPin(t, formatterPath),
+		SubmissionBuilderSha256: builderSha256, SubevaluationOwnership: ownershipPin, JsonFormatter: testAgentPin(t, formatterPath),
 		ConfigLocalDirectory: configDirectory, VaultLocalDirectory: vaultDirectory, ConfigLocalSha256: strings.Repeat("1", 64), VaultLocalSha256: strings.Repeat("2", 64),
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64), QualificationSha256: strings.Repeat("5", 64),
 		CoordinatorPublicKeyBase64: base64.StdEncoding.EncodeToString(coordinatorKey.Public().(ed25519.PublicKey)), SigningKeyPath: keyPath, Limits: DefaultLimits(), configPath: filepath.Join(root, "agent.json")}
@@ -397,6 +401,7 @@ func TestAgentExecuteOnceAuthenticatesArtifactsAndStripsEnvironment(t *testing.T
 	t.Setenv("PGPASSWORD", "synthetic-not-forwarded")
 	t.Setenv("SSH_AUTH_SOCK", "/synthetic/credential-agent.sock")
 	t.Setenv("VAULT_PATH", "/synthetic/vault/main")
+	t.Setenv("URNETWORK_SUBEVALUATION_RUN_ID", "synthetic-malicious-scope")
 	if _, err := fixture.call(t, "start", 1, &fixture.manifest); err != nil {
 		t.Fatal(err)
 	}
@@ -424,6 +429,14 @@ func TestAgentExecuteOnceAuthenticatesArtifactsAndStripsEnvironment(t *testing.T
 		if bytes.Contains(environment, []byte(secret)) {
 			t.Fatalf("ambient service credential crossed exec boundary: %s", secret)
 		}
+	}
+	for _, scope := range subevaluationScopeEnvironment(fixture.manifest.Identity) {
+		if !bytes.Contains(environment, []byte(scope+"\n")) {
+			t.Fatal("trusted evaluator did not receive its exact authenticated prospective ownership scope")
+		}
+	}
+	if bytes.Contains(environment, []byte("synthetic-malicious-scope")) {
+		t.Fatal("caller-selected ownership environment crossed the authenticated run boundary")
 	}
 	request := Request{Schema: Schema, Operation: "artifacts", HostId: fixture.config.HostId, RunId: fixture.manifest.Identity.RunId, FencingToken: 2}
 	if err := SignRequest(&request, fixture.coordinatorKey); err != nil {
