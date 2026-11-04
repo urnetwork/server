@@ -1,0 +1,70 @@
+Restricted subevaluation role (prospective epoch two only)
+
+No command below is run by source installation. Provision and review the role
+on an isolated executor before adding its public identities to frozen policy.
+Do not copy config/main, vault/main, database credentials, MinIO credentials,
+coordinator signing secrets, API tokens, or SSH private keys to this role.
+
+Build the competitionsubeval command from main product-control source using
+the approved Go toolchain. Install the binary and its evaluator/self-check
+release under protected root-owned non-writable ancestors. Pin exact SHA-256
+values in a root-only /etc/urnetwork-subeval/agent.json (Config in config.go).
+Generate independent Ed25519 role keys; the agent receives only the coordinator
+public verification key and its own private output-signing seed. SigningKeyPath
+is a root-owned 0600 base64 seed file. Pin the agent public key at coordinator.
+
+Set BaseDirectory to /home/by/sim-latency for this executor and explicitly set
+TrustedOperatorUser to the existing trusted operator. Keep state/jobs/cache and
+artifacts logically beneath that base; a root-provisioned bind mount to a private
+data-volume directory is acceptable. Do not chown the operator's home directory.
+Pin ExpectedDataDeviceId from that independently verified mounted data filesystem;
+the agent refuses the root filesystem or a changed/missing mount before creating
+state. Transient evaluator units require RequiresMountsFor for the same base.
+Only ancestors above BaseDirectory may belong to that configured operator; the
+base and every authority directory beneath it remain protected root ownership.
+
+Create a non-root eval-worker account. StateDirectory defaults to base/state and
+must be root-owned 0700; WorkDirectory defaults to base/jobs and is a separate
+root-owned 0711 parent. The agent creates each run
+directory 0700 for eval-worker. Keep direct config/local and vault/local fixture
+directories outside both roots, immutable and readable by eval-worker. Their
+hashes must equal the frozen evaluation policy. The existing pinned evaluator
+must retain its restricted submission-builder, resource and network brokers.
+
+Install exactly the pinned evaluator image and offline build cache. Preserve
+the authenticated prepare-evaluation-source.sh path: each evaluation creates a
+fresh private checkout of server, connect, sdk, proxy, glog, goidenticons,
+userwireguard, sn, warp and gvisor, verifies all locked clean heads, and uses the
+competition branches. No operator-proxy checkout or operator worktree is mounted.
+
+Use a dedicated SSH eval-control account with a root-owned forced-command policy
+and a key scoped to this coordinator. An sshd Match User fragment should apply:
+
+    ForceCommand /usr/bin/sudo -n /usr/local/libexec/competitionsubeval --config /etc/urnetwork-subeval/agent.json --serve
+    DisableForwarding yes
+    PermitTTY no
+    PasswordAuthentication no
+    AuthenticationMethods publickey
+
+The corresponding sudoers allowance is only the exact fixed command above,
+not a shell, arbitrary competitionsubeval arguments, systemctl or systemd-run.
+The Go agent, running as root, owns stable transient systemd services. It drops
+to eval-worker for the pinned evaluator child and never inherits ambient service
+credentials. No listener, database client, MinIO client or server settings loader
+is present in the agent. SSH must verify strict independently pinned host keys.
+
+Persist StateDirectory and WorkDirectory across SSH loss and coordinator restart.
+Do not prune them while any run is active, uncertain, unarchived, or retained.
+The coordinator owns archive verification/retention and final completion. A lost
+launch acknowledgement, missing unit, or reboot does not permit relaunching the
+same execution. Stable run ids and fsynced launch-attempt markers prevent replay;
+fences only transfer custody. An unknown or unverified cleanup retains the local
+slot. Investigate or explicitly repair host cleanup before admitting more work.
+
+Before epoch-two activation, require the additive database migration compatibility
+tests, isolated agent lifecycle tests, per-host containment/self-checks, shared
+full-R9 baseline retention, and the coordinator's archived no-op host screen.
+The no-op screen uses the same frozen seed/source/workload/shared baseline; its
+five-percent operational screen does not claim statistical equivalence.
+Kernel and Docker minor-version differences are an explicit operator acceptance,
+not a reason to bypass physical-control, fixture, source, image or cleanup pins.
