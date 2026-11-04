@@ -389,6 +389,9 @@ func TestAgentExecuteOnceAuthenticatesArtifactsAndStripsEnvironment(t *testing.T
 		t.Fatal(err)
 	}
 	destination := t.TempDir()
+	if err := os.Chmod(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
 	if err := ReadFiles(output, destination, response.Files, fixture.config.Limits.ArtifactBytes, fixture.config.Limits); err != nil {
 		t.Fatal(err)
 	}

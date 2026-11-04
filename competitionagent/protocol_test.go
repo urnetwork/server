@@ -18,7 +18,7 @@ import (
 
 // Root confinement must hold before mkdir, even with a reused private root.
 func TestReadFilesNeverCreatesThroughSymlinkAncestor(t *testing.T) {
-	destination := t.TempDir()
+	destination := privateProtocolTestDirectory(t)
 	external := t.TempDir()
 	if err := os.Symlink(external, filepath.Join(destination, "redirect")); err != nil {
 		t.Fatal(err)
@@ -109,11 +109,51 @@ func TestReadFilesRejectsTamperingAndOversizedDeclarations(t *testing.T) {
 	content := []byte("synthetic report")
 	digest := sha256.Sum256(content)
 	files := []File{{Path: "reports/result.json", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))}}
-	if err := ReadFiles(bytes.NewReader([]byte("changed-content!")), t.TempDir(), files, limits.ArtifactBytes, limits); err == nil {
+	if err := ReadFiles(bytes.NewReader([]byte("changed-content!")), privateProtocolTestDirectory(t), files, limits.ArtifactBytes, limits); err == nil {
 		t.Fatal("tampered file body was accepted")
 	}
 	files[0].Bytes = limits.ArtifactBytes + 1
-	if err := ReadFiles(bytes.NewReader(nil), t.TempDir(), files, limits.ArtifactBytes, limits); err == nil {
+	if err := ReadFiles(bytes.NewReader(nil), privateProtocolTestDirectory(t), files, limits.ArtifactBytes, limits); err == nil {
 		t.Fatal("oversized declaration was accepted")
+	}
+}
+
+// Go's testing.TempDir numbered leaf uses 0777 filtered by umask, not the
+// private mode required by the production os.MkdirTemp receiver contract.
+func privateProtocolTestDirectory(t testing.TB) string {
+	t.Helper()
+	directory, err := os.MkdirTemp(t.TempDir(), "private-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return directory
+}
+
+// Explicit fixture modes prove both sides of admission without global umask
+// mutation and ensure hash/traversal tests reach their intended boundaries.
+func TestReadFilesRequiresPrivateDestinationAndPreservesExistingEvidence(t *testing.T) {
+	limits := DefaultLimits()
+	content := []byte("synthetic report")
+	digest := sha256.Sum256(content)
+	files := []File{{Path: "report.json", Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))}}
+	destination := privateProtocolTestDirectory(t)
+	if err := os.Chmod(destination, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadFiles(bytes.NewReader(content), destination, files, limits.ArtifactBytes, limits); err == nil {
+		t.Fatal("nonprivate destination was accepted")
+	}
+	if err := os.Chmod(destination, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadFiles(bytes.NewReader(content), destination, files, limits.ArtifactBytes, limits); err != nil {
+		t.Fatalf("fresh private destination was rejected: %v", err)
+	}
+	if err := ReadFiles(bytes.NewReader([]byte("tampered report!")), destination, files, limits.ArtifactBytes, limits); err == nil {
+		t.Fatal("existing evidence was overwritten")
+	}
+	retained, err := os.ReadFile(filepath.Join(destination, files[0].Path))
+	if err != nil || !bytes.Equal(retained, content) {
+		t.Fatal("exclusive receive changed existing evidence", err)
 	}
 }
