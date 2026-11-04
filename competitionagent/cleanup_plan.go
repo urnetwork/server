@@ -23,10 +23,11 @@ import (
 // BuildKit containers are not job-labelled. Freeze their exact release-derived
 // slice alongside the finite full-R9 evaluation slices before any launch.
 func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifest) (*cleanupPlan, error) {
-	boundary, err := self.verifyCleanupRuntime(ctx)
+	boundary, err := self.runtimeAdmission(ctx)
 	if err != nil {
 		return nil, err
 	}
+	defer boundary.Close()
 	request, err := decodeEvaluatorRequest(manifest.EvaluatorRequest)
 	if err != nil {
 		return nil, err
@@ -99,6 +100,11 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 	}
 	if err := validateCleanupPlan(*plan, self.config); err != nil {
 		return nil, err
+	}
+	if boundary != nil {
+		if err := boundary.Recheck(ctx); err != nil {
+			return nil, err
+		}
 	}
 	return plan, nil
 }

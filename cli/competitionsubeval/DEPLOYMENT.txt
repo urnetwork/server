@@ -23,13 +23,32 @@ state. Transient evaluator units require RequiresMountsFor for the same base.
 Only ancestors above BaseDirectory may belong to that configured operator; the
 base and every authority directory beneath it remain protected root ownership.
 
-Create a non-root eval-worker account. StateDirectory defaults to base/state and
-must be root-owned 0700; WorkDirectory defaults to base/jobs and is a separate
-root-owned 0711 parent. The agent creates each run
-directory 0700 for eval-worker. Keep direct config/local and vault/local fixture
-directories outside both roots, immutable and readable by eval-worker. Their
-hashes must equal the frozen evaluation policy. The existing pinned evaluator
-must retain its restricted submission-builder, resource and network brokers.
+Use the dedicated locked urnetwork-eval-worker account and separate locked
+urnetwork-eval-control account. Explicitly configure root-only StateDirectory
+at base/state, outside the bounded candidate filesystem. WorkDirectory belongs
+at base/candidate/jobs and DockerRole.ScratchDirectory at base/candidate/scratch.
+Private daemon layers/cache/temp/logs also occupy that hard-bounded filesystem;
+agent journals, public client sockets and private control sockets do not. See
+private-engine/README.md for the inert quota/namespace provisioning inputs.
+No unmounted-root fallback or user-daemon resource sharing is permitted.
+
+The base and work parents stay root-owned; use scoped worker traverse ACLs,
+including the trusted operator-owned home ancestor, not broad 0711 permissions
+or a home-directory chown. Each fresh run/source checkout begins private 0700.
+Keep direct config/local and vault/local trees outside state/work/scratch and
+immutable. Prove actual worker and remapped-container read access; their hashes
+must equal frozen policy. Only those exact direct trees are bound read-only.
+The worker receives neither generic sudo nor a root Docker socket. All Docker
+mutations use the fixed non-root client and independent per-run request owner;
+the finite host broker owns evidence mounts and output handoff after cohort join.
+
+Pin HostCheckConfiguration as non-executable root-owned data in the agent role.
+The root-only host audit may call only the closed read-only --docker-probe
+version/info/digest-image grammar against this private engine. Historical native
+containment receipts explicitly identify retained map evidence; every actual
+run still proves live owned-container maps before output handoff. Private host
+fingerprints include actual agent/evaluator/builder/resource/source pins as well
+as the private boundary, so changing trusted runtime bytes invalidates old proof.
 
 Install exactly the pinned evaluator image and offline build cache. Preserve
 the authenticated prepare-evaluation-source.sh path: each evaluation creates a
@@ -49,7 +68,7 @@ and a key scoped to this coordinator. An sshd Match User fragment should apply:
 The corresponding sudoers allowance is only the exact fixed command above,
 not a shell, arbitrary competitionsubeval arguments, systemctl or systemd-run.
 The Go agent, running as root, owns stable transient systemd services. It drops
-to eval-worker for the pinned evaluator child and never inherits ambient service
+to urnetwork-eval-worker for the pinned evaluator child and never inherits ambient service
 credentials. No listener, database client, MinIO client or server settings loader
 is present in the agent. SSH must verify strict independently pinned host keys.
 
@@ -68,6 +87,21 @@ The no-op screen uses the same frozen seed/source/workload/shared baseline; its
 five-percent operational screen does not claim statistical equivalence.
 Kernel and Docker minor-version differences are an explicit operator acceptance,
 not a reason to bypass physical-control, fixture, source, image or cleanup pins.
+
+The main coordinator's separately sealed no-candidate baseline producer retains
+its own global frozen qualification and historical dependency catalog. Do not
+replace its exact control helper with the private candidate helper. Both roles
+use the same local physical host id, but their qualification hashes need not be
+equal. Every private executor, including local, must independently pass signed
+readiness and the retained full-R9 screen before any candidate claim. The shared
+baseline remains bound to its original producer, source, seed, image and workload.
+
+Source/unit-test success is not native admission. The reviewed class must still
+prove actual child-scope caps, independent owner hard-exit cleanup, late Docker
+responses, mapped handoff, quota exhaustion and positive intra-cohort networking
+alongside negative host/LAN/main/DNS controls. Current piped core handlers remain
+unqualified; LimitCORE=0 alone cannot contain piped dumps. Never change a global
+core handler, host forwarding rules or the user's daemon from these templates.
 
 Historical operator reevaluation authorization is not supported for a frozen
 distributed round. Its two reviewed singleton incident classes do not grant a

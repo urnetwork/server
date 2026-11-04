@@ -27,6 +27,7 @@ type HostFilesPlan struct {
 	ContainerIdMapLength uint32 `json:"container_id_map_length"`
 	EvidenceBytes        int64  `json:"evidence_bytes"`
 	WorkDeviceId         uint64 `json:"work_device_id"`
+	ResourceBoundary     Pin    `json:"resource_boundary"`
 }
 
 // The role accepts no command, owner, mode, mount option, source or executable.
@@ -37,17 +38,30 @@ type HostFilesRequest struct {
 	Operation   string `json:"operation"`
 	Path        string `json:"path,omitempty"`
 	ContainerId string `json:"container_id,omitempty"`
+	NetworkId   string `json:"network_id,omitempty"`
 }
 
 // Finite errors contain no native error, candidate content or arbitrary path.
 // Namespace proof consists only of declared ids and hashes of kernel maps.
 type HostFilesResult struct {
-	RunId        string            `json:"run_id"`
-	Operation    string            `json:"operation"`
-	Acknowledged bool              `json:"acknowledged"`
-	ExitCode     int               `json:"exit_code"`
-	ErrorCode    string            `json:"error_code,omitempty"`
-	Namespace    *HostNamespaceMap `json:"namespace,omitempty"`
+	RunId        string               `json:"run_id"`
+	Operation    string               `json:"operation"`
+	Acknowledged bool                 `json:"acknowledged"`
+	ExitCode     int                  `json:"exit_code"`
+	ErrorCode    string               `json:"error_code,omitempty"`
+	Namespace    *HostNamespaceMap    `json:"namespace,omitempty"`
+	Network      *HostNetworkBoundary `json:"network,omitempty"`
+}
+
+// No host PID, namespace path, command or raw policy becomes caller authority.
+// The link digest retains the bounded kernel observation for exact evidence.
+type HostNetworkBoundary struct {
+	Schema           int    `json:"schema"`
+	NetworkId        string `json:"network_id"`
+	BridgeName       string `json:"bridge_name"`
+	PrivateNamespace bool   `json:"private_namespace"`
+	IsolatedGateway  bool   `json:"isolated_gateway"`
+	LinkSha256       string `json:"link_sha256"`
 }
 
 type HostNamespaceMap struct {
@@ -92,6 +106,7 @@ type hostFileBroker struct {
 	stateLock       sync.Mutex
 	verified        bool
 	proveMap        func(context.Context, string) (HostNamespaceMap, error)
+	proveNetwork    func(context.Context, string) (HostNetworkBoundary, error)
 	beforePath      func(context.Context, string) error
 	mount           func(context.Context, cleanupPlan, uint32, uint32, int64) error
 	unmount         func(context.Context, cleanupPlan) error
@@ -143,6 +158,9 @@ func (self *hostFileBroker) validateRequest(request HostFilesRequest) (string, e
 	if request.Schema != Schema || request.RunId != self.plan.RunId {
 		return "", errors.New("host-file request belongs to another run")
 	}
+	if request.Operation != "verify-network" && request.NetworkId != "" {
+		return "", errors.New("network identity cannot alter another finite host operation")
+	}
 	switch request.Operation {
 	case "mount-evidence", "unmount-evidence":
 		if request.Path != "" || request.ContainerId != "" {
@@ -152,6 +170,11 @@ func (self *hostFileBroker) validateRequest(request HostFilesRequest) (string, e
 	case "verify-id-map":
 		if request.Path != "" || !digestPattern.MatchString(request.ContainerId) {
 			return "", errors.New("namespace proof requires one full owned container id")
+		}
+		return "", nil
+	case "verify-network":
+		if request.Path != "" || request.ContainerId != "" || !digestPattern.MatchString(request.NetworkId) {
+			return "", errors.New("network proof requires one full owned network id")
 		}
 		return "", nil
 	case "prepare-output", "reclaim-output":
@@ -193,6 +216,19 @@ func (self *hostFileBroker) Execute(parent context.Context, request HostFilesReq
 	}
 	if err := ctx.Err(); err != nil {
 		result.ErrorCode = "host_operation_canceled"
+		return result
+	}
+	if request.Operation == "verify-network" {
+		if self.proveNetwork == nil {
+			result.ErrorCode = "host_network_unverified"
+			return result
+		}
+		network, err := self.proveNetwork(ctx, request.NetworkId)
+		if err != nil || validateHostNetworkProof(network, self.plan.RunId, request.NetworkId) != nil {
+			result.ErrorCode = "host_network_unverified"
+			return result
+		}
+		result.Network, result.ExitCode, result.ErrorCode = &network, 0, ""
 		return result
 	}
 	if request.Operation == "verify-id-map" {

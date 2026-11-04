@@ -46,16 +46,8 @@ type competitionDistributedSourceEvidence struct {
 // Exactly ten measured repositories are permitted; operator control code is
 // never copied into an evaluation checkout or accepted as a candidate product.
 func validateDistributedMeasuredCommits(commits map[string]string) error {
-	if len(commits) != len(model.CompetitionSourceRepositoryNames())-1 {
-		return errors.New("measured source must contain exactly ten repositories")
-	}
-	for _, repository := range model.CompetitionSourceRepositoryNames() {
-		if repository == "operator-proxy" {
-			continue
-		}
-		if !gitShaPattern.MatchString(commits[repository]) {
-			return errors.New("measured source omitted a frozen repository head")
-		}
+	if _, err := model.CompetitionSourceLockDigest(commits); err != nil {
+		return errors.New("measured source must contain the exact canonical ten-repository graph")
 	}
 	return nil
 }

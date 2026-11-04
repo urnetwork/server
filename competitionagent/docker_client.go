@@ -117,6 +117,11 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 			return dockerClientExitError{code: 2}
 		}
 		request.ContainerId = arguments[1]
+	case "verify-network":
+		if len(arguments) != 2 || !digestPattern.MatchString(arguments[1]) {
+			return dockerClientExitError{code: 2}
+		}
+		request.NetworkId = arguments[1]
 	default:
 		return dockerClientExitError{code: 2}
 	}
@@ -132,6 +137,15 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 			return dockerClientExitError{code: 2}
 		}
 		content, err := json.Marshal(result.Namespace)
+		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
+			return dockerClientExitError{code: 2}
+		}
+	}
+	if request.Operation == "verify-network" {
+		if result.Network == nil || validateHostNetworkProof(*result.Network, runId, request.NetworkId) != nil {
+			return dockerClientExitError{code: 2}
+		}
+		content, err := json.Marshal(result.Network)
 		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
 			return dockerClientExitError{code: 2}
 		}

@@ -282,6 +282,7 @@ func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan,
 		CpuSet: resource.EvaluationCpuSet, ManagementCpuSet: resource.ManagementCpuSet, BuildMemory: resource.BuildMemoryLimit, WorkerUid: workerUid,
 		ReadOnlyBindPaths: []string{self.config.ConfigLocalDirectory, self.config.VaultLocalDirectory, self.config.DockerRole.PostgresInitialization.Path}, ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256,
 		HostFiles: &HostFilesPlan{WorkerGid: workerGid, ContainerRootUid: idMap.ContainerRootUid, ContainerRootGid: idMap.ContainerRootGid,
+			ResourceBoundary:     self.config.DockerRole.ResourceBoundary,
 			ContainerIdMapLength: idMap.ContainerIdMapLength, EvidenceBytes: resource.EvidenceMemoryLimitBytes, WorkDeviceId: plan.WorkDeviceId}}
 	for _, name := range plan.CgroupNames {
 		if cleanupBuildSlicePattern.MatchString(name) {

@@ -157,8 +157,8 @@ for repository in "${REPOSITORIES[@]}"; do
         exit 1
     }
     expected_commit="$(jq -er --arg repository "$repository" '.repositories[$repository]' "$source_lock_path")"
-    actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
-    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+    actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)"
+    source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
     [ "$actual_commit" = "$expected_commit" ] || {
         printf 'evaluation repository %s does not match the source lock\n' "$repository" >&2
         exit 1
@@ -167,10 +167,10 @@ for repository in "${REPOSITORIES[@]}"; do
         printf 'evaluation repository is not clean: %s\n' "$repository" >&2
         exit 1
     }
-    git -C "$repository_root" checkout --quiet -B "$source_branch" "$expected_commit"
-    actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)"
-    actual_commit="$(git -C "$repository_root" rev-parse HEAD)"
-    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
+    evaluation_git -C "$repository_root" checkout --quiet -B "$source_branch" "$expected_commit"
+    actual_branch="$(evaluation_git -C "$repository_root" symbolic-ref --quiet --short HEAD)"
+    actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)"
+    source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)"
     [ "$actual_branch" = "$source_branch" ]
     [ "$actual_commit" = "$expected_commit" ]
     [ -z "$source_status" ]
