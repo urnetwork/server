@@ -6044,7 +6044,7 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 	}
 	digest := sha256.Sum256(bytes)
 	eligible := selfCheck.Eligible(settings)
-	return captureDatabaseError(func() {
+	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
 		server.Db(ctx, func(conn server.PgConn) {
 			server.RaisePgResult(conn.Exec(ctx, `
 				INSERT INTO competition_evaluator_host (
@@ -6060,7 +6060,7 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 					heartbeat_at = EXCLUDED.heartbeat_at
 			`, selfCheck.HostId, selfCheck.HardwareId, selfCheck.ImageDigest,
 				string(bytes), hex.EncodeToString(digest[:]), eligible, self.nowUtc()))
-		}, server.OptReadWrite())
+		}, server.OptReadWrite(), observation)
 	})
 }
 
@@ -6267,7 +6267,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 // Lock both existing authorities before reading the renewal clock. Expired or
 // mismatched ownership rolls back the whole transaction, including either update.
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
-	return captureDatabaseError(func() {
+	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			if settings.AutomationPolicy.Enabled {
 				automationScopeLockInTx(ctx, tx, settings)
@@ -6324,7 +6324,7 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			if result.RowsAffected() != 1 {
 				panic(ErrLeaseLost)
 			}
-		})
+		}, observation)
 	})
 }
 
