@@ -172,6 +172,9 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 			return nil, err
 		}
 	}
+	if err := host.Directory(filepath.Join(boundary.CandidateRoot, "daemon-logs"), scope); err != nil {
+		return nil, err
+	}
 	engine, err := host.Document(boundary.EngineConfig, settings.DocumentBytes)
 	if err != nil {
 		return nil, err
@@ -194,6 +197,7 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 	if err := validateRuntimeBoundaryFacts(*boundary, scope, settings, facts); err != nil {
 		return nil, err
 	}
+	boundary.WorkDeviceId = facts.BlockDeviceId
 	daemon, err := host.Daemon(ctx, *boundary, settings)
 	if err != nil {
 		return nil, err
@@ -211,7 +215,6 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	boundary.WorkDeviceId = facts.BlockDeviceId
 	return boundary, nil
 }
 
@@ -228,6 +231,9 @@ func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error 
 	}
 	if self.RuntimeName != "runc" || self.RuntimeArguments == nil || len(self.RuntimeArguments) != 0 {
 		return errors.New("private engine changed the explicitly qualified stock runc profile")
+	}
+	if _, err := strconv.ParseUint(strings.TrimPrefix(self.BlockDevice, "/dev/loop"), 10, 32); err != nil {
+		return errors.New("private engine loop-device number exceeds the kernel identity range")
 	}
 	for _, path := range []string{scope.BaseDirectory, scope.StateDirectory, self.CandidateRoot, self.BackingFile, self.BlockDevice, self.PrivateSocketPath,
 		self.ContainerdSocketPath, self.DockerDataRoot, self.ContainerdRoot, self.EngineExecRoot, self.ScratchRoot, self.WorkRoot} {
@@ -864,11 +870,66 @@ func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, 
 	if executable == (Pin{}) || configPath == "" || err != nil || !bytes.Equal(arguments, expected) {
 		return errors.New("private engine live arguments changed its protected configuration")
 	}
+	program := "dockerd"
+	if executable == boundary.Containerd {
+		program = "containerd"
+	} else if executable != boundary.Dockerd {
+		return errors.New("private engine live peer has no daemon role")
+	}
+	logs := []runtimeBoundaryLog{}
+	for index, stream := range []string{"stdout", "stderr"} {
+		path := filepath.Join(proc, "fd", strconv.Itoa(index+1))
+		target, err := os.Readlink(path)
+		if err != nil || target != filepath.Join(boundary.CandidateRoot, "daemon-logs", program+"."+stream+".log") {
+			return errors.New("private engine live diagnostic target is not bounded")
+		}
+		file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			return err
+		}
+		var stat syscall.Stat_t
+		err = syscall.Fstat(int(file.Fd()), &stat)
+		_ = file.Close()
+		if err != nil {
+			return err
+		}
+		logs = append(logs, runtimeBoundaryLog{Target: target, Stream: stream, DeviceId: stat.Dev, Uid: stat.Uid, Mode: stat.Mode})
+	}
+	if err := validateRuntimeBoundaryLogs(logs, program, boundary); err != nil {
+		return err
+	}
 	environment, err := readBounded(filepath.Join(proc, "environ"), settings.DocumentBytes)
 	if err != nil {
 		return err
 	}
+	defer clear(environment)
 	return validateRuntimeBoundaryEnvironment(environment, boundary, settings)
+}
+
+// Live daemon diagnostics are candidate-amplifiable and must not target the
+// host journal, /var/log, a pipe with an unknown owner or another filesystem.
+type runtimeBoundaryLog struct {
+	Target, Stream string
+	DeviceId       uint64
+	Uid, Mode      uint32
+}
+
+// Descriptor facts, not merely unit-file paths, establish quota containment.
+func validateRuntimeBoundaryLogs(logs []runtimeBoundaryLog, program string, boundary RuntimeResourceBoundary) error {
+	if boundary.WorkDeviceId == 0 || len(logs) != 2 || program != "dockerd" && program != "containerd" {
+		return errors.New("private engine live log ownership is incomplete")
+	}
+	for index, log := range logs {
+		stream := "stdout"
+		if index == 1 {
+			stream = "stderr"
+		}
+		if log.Stream != stream || log.Target != filepath.Join(boundary.CandidateRoot, "daemon-logs", program+"."+stream+".log") ||
+			log.DeviceId != boundary.WorkDeviceId || log.Uid != 0 || log.Mode&syscall.S_IFMT != syscall.S_IFREG || log.Mode&0077 != 0 {
+			return errors.New("private engine live diagnostics escape the bounded filesystem")
+		}
+	}
+	return nil
 }
 
 // Only the manifest's private Unix endpoint is queried. No environment proxy,

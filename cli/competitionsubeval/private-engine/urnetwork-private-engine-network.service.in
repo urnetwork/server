@@ -1,0 +1,16 @@
+[Unit]
+Description=Scoped private evaluation engine network guard
+Before=urnetwork-private-containerd.service urnetwork-private-engine.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=@NFT_PATH@ --file @CONFIG_DIRECTORY@/network.nft
+RemainAfterExit=yes
+StandardOutput=null
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

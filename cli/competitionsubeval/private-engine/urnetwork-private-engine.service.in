@@ -1,0 +1,33 @@
+[Unit]
+Description=Private bounded evaluation Docker engine
+Requires=urnetwork-private-containerd.service urnetwork-private-engine-network.service
+After=urnetwork-private-containerd.service urnetwork-private-engine-network.service
+RequiresMountsFor=@BASE_DIRECTORY@/candidate
+ConditionPathIsMountPoint=@BASE_DIRECTORY@/candidate
+
+[Service]
+Type=notify
+User=root
+Group=root
+UMask=0077
+Environment="PATH=@ENGINE_BIN@"
+Environment="TMPDIR=@BASE_DIRECTORY@/candidate/scratch/engine-tmp"
+Environment="DOCKER_TMPDIR=@BASE_DIRECTORY@/candidate/scratch/docker-tmp"
+Environment="HOME=@BASE_DIRECTORY@/candidate/scratch/engine-home"
+WorkingDirectory=@BASE_DIRECTORY@/candidate
+ExecStart=@ENGINE_BIN@/dockerd --config-file @CONFIG_DIRECTORY@/engine.json
+ExecStartPost=/usr/bin/chmod 0600 @BASE_DIRECTORY@/control/docker.sock
+Delegate=yes
+KillMode=control-group
+Restart=no
+TimeoutStartSec=@ENGINE_START_SECONDS@
+TimeoutStopSec=@ENGINE_STOP_SECONDS@
+MemoryMax=@ENGINE_MEMORY_MAXIMUM@
+CPUQuota=@ENGINE_CPU_QUOTA@
+TasksMax=@ENGINE_TASKS_MAXIMUM@
+LimitNOFILE=@ENGINE_DESCRIPTOR_MAXIMUM@
+StandardOutput=append:@BASE_DIRECTORY@/candidate/daemon-logs/dockerd.stdout.log
+StandardError=append:@BASE_DIRECTORY@/candidate/daemon-logs/dockerd.stderr.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+table inet urnetwork_subeval {
+  chain input {
+    type filter hook input priority -300; policy accept;
+    iifname "unev-*" drop
+  }
+  chain forward {
+    type filter hook forward priority -300; policy accept;
+    iifname "unev-*" drop
+    oifname "unev-*" drop
+  }
+  chain output {
+    type filter hook output priority -300; policy accept;
+    oifname "unev-*" drop
+  }
+}

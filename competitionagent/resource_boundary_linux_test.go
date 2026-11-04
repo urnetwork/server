@@ -11,8 +11,12 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -573,6 +577,97 @@ func TestRuntimeResourceBoundaryRejectsActualEnvironmentOverrides(t *testing.T) 
 	if err := validateRuntimeBoundaryEnvironment(duplicate, fixture.boundary, fixture.settings); err == nil {
 		t.Fatal("duplicate daemon environment override was admitted")
 	}
+}
+
+// Even a root-owned daemon's noisy diagnostics must consume only the private
+// quota; a correct unit template is not proof of the actual open descriptors.
+func TestRuntimeResourceBoundaryRejectsUnboundedLiveDaemonLogs(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	fixture.boundary.WorkDeviceId = fixture.host.facts.BlockDeviceId
+	logs := []runtimeBoundaryLog{
+		{Target: filepath.Join(fixture.boundary.CandidateRoot, "daemon-logs", "dockerd.stdout.log"), Stream: "stdout", DeviceId: fixture.boundary.WorkDeviceId, Mode: syscall.S_IFREG | 0600},
+		{Target: filepath.Join(fixture.boundary.CandidateRoot, "daemon-logs", "dockerd.stderr.log"), Stream: "stderr", DeviceId: fixture.boundary.WorkDeviceId, Mode: syscall.S_IFREG | 0600},
+	}
+	if err := validateRuntimeBoundaryLogs(logs, "dockerd", fixture.boundary); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func([]runtimeBoundaryLog){
+		func(logs []runtimeBoundaryLog) { logs[0].Target = "pipe:[123]" },
+		func(logs []runtimeBoundaryLog) { logs[0].Target = "/var/log/synthetic-daemon.log" },
+		func(logs []runtimeBoundaryLog) { logs[1].DeviceId++ },
+		func(logs []runtimeBoundaryLog) { logs[1].Uid = fixture.scope.WorkerUid },
+		func(logs []runtimeBoundaryLog) { logs[1].Mode = syscall.S_IFIFO | 0600 },
+		func(logs []runtimeBoundaryLog) { logs[1].Mode |= 0020 },
+	} {
+		current := append([]runtimeBoundaryLog(nil), logs...)
+		change(current)
+		if err := validateRuntimeBoundaryLogs(current, "dockerd", fixture.boundary); err == nil {
+			t.Fatal("unbounded actual daemon diagnostics were admitted")
+		}
+	}
+}
+
+// Deployment inputs are rendered only in memory. This exercises the shipped
+// assets without installing a unit, formatting a device or executing a helper.
+func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	boundary := fixture.boundary
+	tokens := map[string]string{
+		"BASE_DIRECTORY": boundary.BaseDirectory, "BACKING_FILE": boundary.BackingFile, "LOOP_NUMBER": "31",
+		"MAXIMUM_BYTES": strconv.FormatUint(boundary.MaximumBytes, 10), "MINIMUM_FREE_BYTES": strconv.FormatUint(boundary.MinimumFreeBytes, 10),
+		"MINIMUM_BACKING_FREE_BYTES": strconv.FormatUint(boundary.MinimumBackingFreeBytes, 10), "REMAP_ACCOUNT": boundary.UserNamespace,
+		"CONTAINER_ROOT_UID": strconv.FormatUint(uint64(boundary.ContainerRootUid), 10), "CONTAINER_ROOT_GID": strconv.FormatUint(uint64(boundary.ContainerRootGid), 10),
+		"CONTAINER_ID_MAP_LENGTH": strconv.FormatUint(uint64(boundary.ContainerIdMapLength), 10), "ENGINE_BIN": filepath.Dir(boundary.Runc.Path),
+		"DOCKERD_SHA256": boundary.Dockerd.Sha256, "CONTAINERD_SHA256": boundary.Containerd.Sha256, "CONTAINERD_SHIM_SHA256": boundary.ContainerdShim.Sha256,
+		"RUNC_SHA256": boundary.Runc.Sha256, "CHMOD_SHA256": boundary.SocketModeHelper.Sha256, "NFT_PATH": boundary.Nftables.Path, "NFT_SHA256": boundary.Nftables.Sha256,
+		"CONFIG_DIRECTORY": filepath.Dir(boundary.EngineConfig.Path), "CONTAINER_LOG_MAXIMUM_SIZE": fixture.settings.ContainerLogMaximumSize,
+		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
+		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
+	}
+	unresolved := regexp.MustCompile(`@[A-Z0-9_]+@`)
+	render := func(name string) []byte {
+		content, err := os.ReadFile(filepath.Join("..", "cli", "competitionsubeval", "private-engine", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		document := string(content)
+		for name, value := range tokens {
+			document = strings.ReplaceAll(document, "@"+name+"@", value)
+		}
+		if unresolved.MatchString(document) {
+			t.Fatalf("deployment template contains an unresolved token: %s", name)
+		}
+		return []byte(document)
+	}
+	engine, containerd, policy := render("engine.json.in"), render("containerd.toml.in"), render("network.nft")
+	if err := validateRuntimeBoundaryDocuments(boundary, engine, containerd, policy, fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string][]byte{"ENGINE_CONFIG_SHA256": engine, "CONTAINERD_CONFIG_SHA256": containerd, "NETWORK_POLICY_SHA256": policy} {
+		digest := sha256.Sum256(content)
+		tokens[name] = hex.EncodeToString(digest[:])
+	}
+	var rendered RuntimeResourceBoundary
+	if err := decodeStrict(render("boundary.json.in"), &rendered); err != nil {
+		t.Fatal(err)
+	}
+	if err := rendered.validate(fixture.scope); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
+		unit := string(render(name))
+		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "PATH=" + filepath.Dir(boundary.Runc.Path),
+			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
+			if !strings.Contains(unit, required) {
+				t.Fatalf("private service lost an enforced boundary: %s", name)
+			}
+		}
+		if strings.Contains(unit, "/run/docker.sock") || strings.Contains(unit, "docker.service") {
+			t.Fatal("private unit targets the user's engine")
+		}
+	}
+	_ = render("candidate.mount.in")
+	_ = render("urnetwork-private-engine-network.service.in")
 }
 
 // Kernel arithmetic is checked without issuing a filesystem operation.
