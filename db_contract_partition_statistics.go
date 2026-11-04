@@ -20,15 +20,16 @@ type contractStatistics struct {
 	definition string
 	shape      string
 	owner      string
-	target     int
-	comment    *string
+	// -1 preserves the default target (NULL in PostgreSQL 18's catalog).
+	target  int
+	comment *string
 }
 
 // Uses the swap or rollback transaction's connection and catalog snapshot.
 func readContractStatistics(ctx context.Context, conn contractCatalogQuerier, table string) (statistics []contractStatistics) {
 	result, err := conn.Query(ctx, `
 		SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid),
-			pg_get_userbyid(s.stxowner), s.stxstattarget,
+			pg_get_userbyid(s.stxowner), COALESCE(s.stxstattarget::int, -1),
 			obj_description(s.oid, 'pg_statistic_ext'),
 			ARRAY(
 				SELECT a.attname::text

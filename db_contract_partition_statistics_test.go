@@ -37,6 +37,10 @@ func TestContractPartitionStatisticsSql(t *testing.T) {
 	parent.target += 1
 	_, err = contractStatisticsRollbackSql([]contractStatistics{statistic}, []contractStatistics{parent})
 	connect.AssertEqual(t, err != nil, true)
+	statistic.target = -1
+	_, create, err = contractStatisticsSwapSql([]contractStatistics{statistic})
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, create[1], `ALTER STATISTICS "odd schema"."predicate_l" SET STATISTICS -1`)
 	statistic.name = strings.Repeat("x", pgMaxIdentifierLength)
 	_, _, err = contractStatisticsSwapSql([]contractStatistics{statistic})
 	connect.AssertEqual(t, err != nil, true)
@@ -66,6 +70,8 @@ func TestContractPartitionStatisticsDroppedColumns(t *testing.T) {
 			parent := readContractStatistics(ctx, tx, "contract_statistics_parent")
 			connect.AssertEqual(t, len(legacy), 1)
 			connect.AssertEqual(t, len(parent), 1)
+			connect.AssertEqual(t, legacy[0].target, -1)
+			connect.AssertEqual(t, parent[0].target, -1)
 			connect.AssertEqual(t, legacy[0].shape, parent[0].shape)
 			statements, err := contractStatisticsRollbackSql(legacy, parent)
 			Raise(err)
