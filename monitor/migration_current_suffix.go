@@ -917,6 +917,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{stDemandMigrationContract},
 	// the one-tap Top 200 claim's tables, versioned by their position
 	[]snMainnetMigrationContract{snFleetAutoMigrationContract},
+	// The published planner-only predecessor still needs an explicit schema
+	// contract; a later finalization contract cannot bridge a catalog gap.
+	[]snMainnetMigrationContract{transferContractUnresolvedStatisticsMigrationContract},
 	// Prospective finalization control, after all previously published history.
 	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
 )

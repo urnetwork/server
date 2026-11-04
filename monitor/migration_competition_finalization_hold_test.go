@@ -57,7 +57,7 @@ func TestMigrationsCompetitionFinalizationHoldNativeFaultCustody(t *testing.T) {
 		{"weakened capability check", snMainnetMigrationDropConstraint("competition_finalization_hold", "c", "CHECK (((kind)::text = 'finalization'::text))")},
 		{"lost global actor key", snMainnetMigrationDropConstraint("competition_finalization_hold", "u", "UNIQUE (environment, competition_id, season_id, actor_id, idempotency_key)")},
 	}
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
 		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
 			t.Fatal("published finalization schema drift", drift)
 		}
