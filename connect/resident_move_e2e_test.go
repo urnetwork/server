@@ -106,6 +106,16 @@ func waitForNoResidentMoveTestResident(ctx context.Context, t testing.TB, exchan
 // Without the takeover the target forwards to the source's resident; without
 // the poll the source keeps its resident until the refresh, 30 s here.
 func TestResidentMoveHandsOffToTargetExchange(t *testing.T) {
+	testResidentMoveHandsOffToTargetExchange(t, localDeliveryTestTcp)
+}
+
+// The same hand-off with a transport delivered in process to a resident of its
+// own exchange, and over the socket to the other's.
+func TestResidentMoveHandsOffToTargetExchangeInProcess(t *testing.T) {
+	testResidentMoveHandsOffToTargetExchange(t, localDeliveryTestInProcess)
+}
+
+func testResidentMoveHandsOffToTargetExchange(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -113,10 +123,14 @@ func TestResidentMoveHandsOffToTargetExchange(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		envA := testing_newPeerDiscoveryEnvWithSettings(ctx, t, residentMoveTestExchangeSettings("alpha-edge-0", nil))
+		envA := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.after(residentMoveTestExchangeSettings("alpha-edge-0", nil)))
 		defer envA.Close()
-		envB := testing_newPeerDiscoveryEnvWithSettings(ctx, t, residentMoveTestExchangeSettings("alpha-edge-1", nil))
+		envB := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.after(residentMoveTestExchangeSettings("alpha-edge-1", nil)))
 		defer envB.Close()
+		delivery.requireExchange(t, envA.exchange)
+		delivery.requireExchange(t, envB.exchange)
+		// both clients start on envA with their residents there
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 0)
 		<-envA.exchange.EdgeInventory().Loaded()
 		<-envB.exchange.EdgeInventory().Loaded()
 
@@ -750,6 +764,16 @@ func TestResidentMoveCapableClientGetsMoveFields(t *testing.T) {
 // Without drain intents the sibling forwards back into the draining resident
 // until the sweep closes it.
 func TestExchangeDrainMovesConvergeByIntent(t *testing.T) {
+	testExchangeDrainMovesConvergeByIntent(t, localDeliveryTestTcp)
+}
+
+// The same drain moves with transports and forwards to a resident of their own
+// exchange delivered in process.
+func TestExchangeDrainMovesConvergeByIntentInProcess(t *testing.T) {
+	testExchangeDrainMovesConvergeByIntent(t, localDeliveryTestInProcess)
+}
+
+func testExchangeDrainMovesConvergeByIntent(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -790,10 +814,14 @@ func TestExchangeDrainMovesConvergeByIntent(t *testing.T) {
 				}
 			}
 		}
-		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, residentMoveTestExchangeSettings("alpha-edge-0", mutateExchangeSettings), mutateHandlerSettings)
+		env1 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, delivery.after(residentMoveTestExchangeSettings("alpha-edge-0", mutateExchangeSettings)), mutateHandlerSettings)
 		defer env1.Close()
-		env2 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, residentMoveTestExchangeSettings("alpha-edge-0", mutateExchangeSettings), mutateHandlerSettings)
+		env2 := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, delivery.after(residentMoveTestExchangeSettings("alpha-edge-0", mutateExchangeSettings)), mutateHandlerSettings)
 		defer env2.Close()
+		delivery.requireExchange(t, env1.exchange)
+		delivery.requireExchange(t, env2.exchange)
+		// the clients start on env1 with their residents there
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 0)
 		<-env1.exchange.EdgeInventory().Loaded()
 		<-env2.exchange.EdgeInventory().Loaded()
 

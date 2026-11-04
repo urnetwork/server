@@ -372,6 +372,16 @@ func sendSimpleMessage(t testing.TB, from *connect.Client, toClientId server.Id,
 // Requires the test DB env (WARP_ENV=local + postgres/redis/vault), like the
 // rest of this package; skipped under -short.
 func TestExchangePeerDiscovery(t *testing.T) {
+	testExchangePeerDiscovery(t, localDeliveryTestTcp)
+}
+
+// The same discovery with each transport delivered in process to its resident,
+// and the network peers' messages forwarded in process, in the one exchange.
+func TestExchangePeerDiscoveryInProcess(t *testing.T) {
+	testExchangePeerDiscovery(t, localDeliveryTestInProcess)
+}
+
+func testExchangePeerDiscovery(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -379,8 +389,10 @@ func TestExchangePeerDiscovery(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t)
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.apply)
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		defer delivery.requireLinksSince(t, snapshotLocalLinkCounts(), 2, 1)
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
 			Description: "device a",
