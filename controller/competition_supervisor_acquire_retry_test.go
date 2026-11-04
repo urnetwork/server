@@ -443,15 +443,25 @@ func TestCompetitionSupervisorAcquireRetryRejectsExpiredUnknownAndLateAuthority(
 	synctest.Test(t, func(t *testing.T) {
 		for _, check := range []struct {
 			name        string
-			lease       time.Time
+			knownLease  bool
+			leaseTtl    time.Duration
 			lateSuccess bool
+			wantedCalls int
+			wantedError error
 		}{
-			{name: "unknown"},
-			{name: "expiry", lease: time.Now().Add(time.Second)},
-			{name: "late success", lease: time.Now().Add(time.Minute), lateSuccess: true},
+			{name: "unknown", wantedCalls: 1, wantedError: context.DeadlineExceeded},
+			{name: "already expired", knownLease: true, leaseTtl: -time.Second, wantedCalls: 0, wantedError: ErrLeaseLost},
+			{name: "expiry", knownLease: true, leaseTtl: time.Second, wantedCalls: 1, wantedError: ErrLeaseLost},
+			{name: "late success", knownLease: true, leaseTtl: time.Minute, lateSuccess: true, wantedCalls: 1, wantedError: context.DeadlineExceeded},
 		} {
+			// Each earlier callback can advance this bubble's virtual clock.
+			// A case owns a fresh relative lease, never a stale table timestamp.
+			lease := time.Time{}
+			if check.knownLease {
+				lease = time.Now().Add(check.leaseTtl)
+			}
 			calls := 0
-			err := retryCompetitionSupervisorRenewal(t.Context(), check.lease, defaultCompetitionSupervisorRenewalSettings(), func(ctx context.Context) error {
+			err := retryCompetitionSupervisorRenewal(t.Context(), lease, defaultCompetitionSupervisorRenewalSettings(), func(ctx context.Context) error {
 				calls++
 				<-ctx.Done()
 				if check.lateSuccess {
@@ -459,7 +469,7 @@ func TestCompetitionSupervisorAcquireRetryRejectsExpiredUnknownAndLateAuthority(
 				}
 				return competitionSupervisorAcquireFailure(ctx.Err())
 			})
-			if calls != 1 || err == nil {
+			if calls != check.wantedCalls || !errors.Is(err, check.wantedError) {
 				t.Errorf("%s extended unconfirmed or expired authority: calls=%d error=%v", check.name, calls, err)
 			}
 		}
