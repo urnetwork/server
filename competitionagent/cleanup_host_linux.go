@@ -406,7 +406,7 @@ func cleanupSlicePath(name string) (string, error) {
 
 // All property access is descriptor-confined to a verified cgroup v2 root.
 func (self *hostCleanupCgroups) open(name, property string, flags int) (*os.File, error) {
-	if property != "cgroup.kill" && property != "cgroup.events" {
+	if property != "cgroup.kill" && property != "cgroup.events" && property != "cgroup.freeze" {
 		return nil, errors.New("unsupported exact cgroup cleanup property")
 	}
 	relative, err := cleanupSlicePath(name)
@@ -484,6 +484,70 @@ func (self *hostCleanupCgroups) Kill(ctx context.Context, name string) error {
 		return io.ErrShortWrite
 	}
 	return nil
+}
+
+// Prepared parent slices remain frozen until the independent Docker owner has
+// acknowledged quiescence. An absent parent cannot contain a late daemon start.
+func (self *hostCleanupCgroups) Freeze(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	file, err := self.open(name, "cgroup.freeze", os.O_WRONLY)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	count, err := file.Write([]byte("1\n"))
+	if err != nil {
+		return err
+	}
+	if count != 2 {
+		return io.ErrShortWrite
+	}
+	return nil
+}
+
+// Writing freeze requests suspension; only the kernel's finite frozen reply
+// acknowledges it. Unlike Empty, a missing slice never counts as frozen.
+func (self *hostCleanupCgroups) Frozen(ctx context.Context, name string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	file, err := self.open(name, "cgroup.events", os.O_RDONLY)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	if self.maximumBytes <= 0 {
+		return false, errors.New("invalid frozen cgroup read bound")
+	}
+	content, err := io.ReadAll(io.LimitReader(file, self.maximumBytes+1))
+	if err != nil || int64(len(content)) > self.maximumBytes {
+		return false, errors.New("frozen cgroup state exceeds its bound")
+	}
+	seen, frozen := false, false
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return false, errors.New("malformed frozen cgroup state")
+		}
+		if _, err := strconv.ParseUint(fields[1], 10, 64); err != nil {
+			return false, errors.New("nonfinite frozen cgroup counter")
+		}
+		if fields[0] == "frozen" {
+			if seen || fields[1] != "0" && fields[1] != "1" {
+				return false, errors.New("invalid cgroup frozen value")
+			}
+			seen, frozen = true, fields[1] == "1"
+		}
+	}
+	if !seen {
+		return false, errors.New("cgroup state omitted its frozen acknowledgment")
+	}
+	return frozen, nil
 }
 
 // Populated is parsed exactly once and must be a finite boolean kernel value.
