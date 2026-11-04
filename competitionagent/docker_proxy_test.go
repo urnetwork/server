@@ -60,19 +60,26 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 	}
 	digest := sha256.Sum256(contents)
 	plan := DockerProxyPlan{Schema: Schema, RunId: scope.plan.RunId, JobId: scope.plan.JobId, RoundId: scope.plan.RoundId, Attempt: scope.plan.Attempt,
-		DeadlineAt: time.Now().Add(time.Hour), BaseDirectory: root, StateDirectory: filepath.Join(root, "owner"), ScratchDirectory: filepath.Join(root, "scratch"), SocketPath: filepath.Join(root, "clients", scope.plan.RunId, "docker.sock"),
+		DeadlineAt: time.Now().Add(time.Hour), BaseDirectory: root, StateDirectory: filepath.Join(root, "state", scope.plan.RunId, "docker-owner"), ScratchDirectory: filepath.Join(root, "scratch", scope.plan.RunId), SocketPath: filepath.Join(root, "clients", scope.plan.RunId, "docker.sock"),
 		BuildSocketPath: filepath.Join(root, "clients", scope.plan.RunId, "build.sock"), ContextRoot: contextRoot, UpstreamSocketPath: filepath.Join(root, "engine", "docker.sock"),
 		Docker: Pin{Path: filepath.Join(root, "docker"), Sha256: strings.Repeat("d", 64)}, Buildx: Pin{Path: filepath.Join(root, "docker-buildx"), Sha256: strings.Repeat("e", 64)},
 		Dockerfile: Pin{Path: dockerfile, Sha256: hex.EncodeToString(digest[:])}, BaseImageDigest: "sha256:" + strings.Repeat("3", 64),
-		CgroupNames: append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
+		CgroupNames: append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", ManagementCpuSet: "0", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
 	settings := DefaultDockerProxySettings()
 	proxy, err := newDockerProxy(plan, settings, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = proxy.Close() })
-	create, err := json.Marshal(map[string]any{"Image": plan.BaseImageDigest, "Labels": map[string]string{cleanupJobLabel: plan.JobId, cleanupRoundLabel: plan.RoundId, dockerProxyRunLabel: plan.RunId},
-		"HostConfig": map[string]any{"CgroupParent": plan.CgroupNames[len(plan.CgroupNames)-1], "Privileged": false}})
+	create, err := json.Marshal(map[string]any{"Image": plan.BaseImageDigest, "User": "65532:65532", "Cmd": []string{"identity"},
+		"AttachStdout": true, "AttachStderr": true, "Labels": map[string]string{cleanupJobLabel: plan.JobId, cleanupRoundLabel: plan.RoundId, dockerProxyRunLabel: plan.RunId},
+		"HostConfig": map[string]any{"CgroupParent": plan.CgroupNames[len(plan.CgroupNames)-1], "Privileged": false, "ReadonlyRootfs": true,
+			"CapDrop": []string{"ALL"}, "CapAdd": nil, "SecurityOpt": []string{"no-new-privileges:true"}, "NetworkMode": "none", "CgroupnsMode": "private",
+			"Memory": int64(4 * 1024 * 1024 * 1024), "MemorySwap": int64(4 * 1024 * 1024 * 1024), "PidsLimit": 1024, "CpusetCpus": plan.ManagementCpuSet,
+			"Ulimits": []map[string]any{{"Name": "core", "Soft": 0, "Hard": 0}}, "ShmSize": 64 * 1024 * 1024,
+			"Binds": nil, "PortBindings": map[string]any{}, "PublishAllPorts": false, "MaskedPaths": nil, "ReadonlyPaths": nil,
+			"LogConfig": map[string]any{"Type": "", "Config": map[string]string{}}, "RestartPolicy": map[string]any{"Name": "no", "MaximumRetryCount": 0},
+			"AutoRemove": true, "CpuShares": 0, "NanoCpus": 0, "Devices": nil, "DeviceRequests": nil, "VolumeDriver": "", "VolumesFrom": nil}})
 	if err != nil {
 		t.Fatal(err)
 	}

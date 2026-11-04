@@ -15,31 +15,39 @@ var ErrDockerProxyUnknown = errors.New("Docker request outcome remains unknown")
 // Nonpositive values are invalid; increasing them never changes the signed
 // submission deadline or the frozen build-resource policy.
 type DockerProxySettings struct {
-	MaximumOperations       int
-	MaximumConnections      int
-	MaximumHeaderBytes      int
-	MaximumDocumentBytes    int64
-	MaximumBuildOutputBytes int64
-	MaximumRequestBytes     int64
-	MaximumImageLoadBytes   int64
-	MaximumResponseBytes    int64
-	MaximumSpoolBytes       int64
-	MaximumContextBytes     int64
-	MaximumContextFileBytes int64
-	MaximumContextEntries   int
-	MaximumContextDepth     int
-	MaximumDocumentDepth    int
-	DirectoryBatch          int
-	CopyBufferBytes         int
-	HeaderTimeout           time.Duration
-	UploadTimeout           time.Duration
-	ClientWriteTimeout      time.Duration
-	OperationTimeout        time.Duration
-	BuildTimeout            time.Duration
-	BuildStopGrace          time.Duration
-	QuiesceTimeout          time.Duration
-	DrainAllowance          time.Duration
-	Now                     func() time.Time
+	MaximumOperations           int
+	MaximumConnections          int
+	MaximumHeaderBytes          int
+	MaximumDocumentBytes        int64
+	MaximumBuildOutputBytes     int64
+	MaximumRequestBytes         int64
+	MaximumImageLoadBytes       int64
+	MaximumResponseBytes        int64
+	MaximumSpoolBytes           int64
+	MaximumContextBytes         int64
+	MaximumContextFileBytes     int64
+	MaximumContextEntries       int
+	MaximumContextDepth         int
+	MaximumDocumentDepth        int
+	DirectoryBatch              int
+	CopyBufferBytes             int
+	MaximumContainerMemoryBytes int64
+	MaximumContainerPids        int64
+	MaximumContainerOpenFiles   int64
+	MaximumContainerTmpfsBytes  int64
+	MaximumContainerTmpfsMounts int
+	MaximumContainerMounts      int
+	MaximumCpuIndex             int
+	DefaultContainerShmBytes    int64
+	HeaderTimeout               time.Duration
+	UploadTimeout               time.Duration
+	ClientWriteTimeout          time.Duration
+	OperationTimeout            time.Duration
+	BuildTimeout                time.Duration
+	BuildStopGrace              time.Duration
+	QuiesceTimeout              time.Duration
+	DrainAllowance              time.Duration
+	Now                         func() time.Time
 }
 
 // Contexts contain the trusted validator and immutable input documents, not
@@ -50,6 +58,9 @@ func DefaultDockerProxySettings() DockerProxySettings {
 		MaximumResponseBytes: 16 * 1024 * 1024 * 1024, MaximumSpoolBytes: 32 * 1024 * 1024 * 1024,
 		MaximumContextBytes: 1024 * 1024 * 1024, MaximumContextFileBytes: 512 * 1024 * 1024,
 		MaximumContextEntries: 16384, MaximumContextDepth: 64, MaximumDocumentDepth: 64, DirectoryBatch: 128, CopyBufferBytes: 64 * 1024,
+		MaximumContainerMemoryBytes: 72 * 1024 * 1024 * 1024, MaximumContainerPids: 65536, MaximumContainerOpenFiles: 1048576,
+		MaximumContainerTmpfsBytes: 72 * 1024 * 1024 * 1024, MaximumContainerTmpfsMounts: 8, MaximumContainerMounts: 64,
+		MaximumCpuIndex: 4095, DefaultContainerShmBytes: 64 * 1024 * 1024,
 		HeaderTimeout: 15 * time.Second, UploadTimeout: 2 * time.Minute, ClientWriteTimeout: 15 * time.Second,
 		OperationTimeout: 3 * time.Hour, BuildTimeout: 10 * time.Minute, BuildStopGrace: 30 * time.Second,
 		QuiesceTimeout: 2 * time.Minute, DrainAllowance: 2 * time.Minute, Now: time.Now}
@@ -81,6 +92,7 @@ type DockerProxyPlan struct {
 	CgroupNames          []string       `json:"cgroup_names"`
 	BuildCgroupName      string         `json:"build_cgroup_name"`
 	CpuSet               string         `json:"cpu_set"`
+	ManagementCpuSet     string         `json:"management_cpu_set"`
 	BuildMemory          string         `json:"build_memory"`
 	WorkerUid            uint32         `json:"worker_uid"`
 	ReadOnlyBindPaths    []string       `json:"read_only_bind_paths"`
