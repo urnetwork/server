@@ -26,6 +26,7 @@ MemoryMax=@ENGINE_MEMORY_MAXIMUM@
 CPUQuota=@ENGINE_CPU_QUOTA@
 TasksMax=@ENGINE_TASKS_MAXIMUM@
 LimitNOFILE=@ENGINE_DESCRIPTOR_MAXIMUM@
+LimitCORE=0
 StandardOutput=append:@BASE_DIRECTORY@/candidate/daemon-logs/dockerd.stdout.log
 StandardError=append:@BASE_DIRECTORY@/candidate/daemon-logs/dockerd.stderr.log
 

@@ -109,6 +109,7 @@ type runtimeBoundaryHost interface {
 // Device identities and loop backing provenance are captured from descriptors.
 type runtimeBoundaryFacts struct {
 	MountInfo, MountInfoAfter                    []byte
+	CorePattern, CorePatternAfter                []byte
 	SubUids, SubGids                             []byte
 	BlockDeviceId, BlockBytes                    uint64
 	LoopBackingDevice, LoopBackingInode          uint64
@@ -490,6 +491,12 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 // A full allocated backing file reserves host storage before candidate work.
 // Capacity and free-space arithmetic must not overflow into an admission proof.
 func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, facts runtimeBoundaryFacts) error {
+	if !bytes.Equal(facts.CorePattern, facts.CorePatternAfter) {
+		return errors.New("host core policy changed during resource admission")
+	}
+	if err := validateRuntimeBoundaryCorePattern(facts.CorePattern, settings); err != nil {
+		return err
+	}
 	if !bytes.Equal(facts.MountInfo, facts.MountInfoAfter) {
 		return errors.New("resource mounts changed during admission")
 	}
@@ -544,6 +551,40 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 		return err
 	}
 	return validateRuntimeBoundarySubIds(facts.SubGids, boundary.UserNamespace, boundary.ContainerRootGid, boundary.ContainerIdMapLength, settings)
+}
+
+// RLIMIT_CORE is ignored for piped handlers, which run in the initial host
+// namespaces. No expected-string pin or Boolean waiver can qualify such a
+// handler here. Only this fixed slash-free filename policy is supported.
+func validateRuntimeBoundaryCorePattern(content []byte, settings RuntimeResourceBoundarySettings) error {
+	if settings.DocumentBytes <= 0 || int64(len(content)) > settings.DocumentBytes ||
+		strings.TrimSuffix(string(content), "\n") != "core.%P" {
+		return errors.New("host core policy is not a qualified non-piped quota filename")
+	}
+	return nil
+}
+
+// Zero limits are necessary defense in depth, not sufficient host-core proof.
+// The native peer separately checks the non-piped policy and quota-backed cwd.
+func validateRuntimeBoundaryCoreLimits(content []byte, settings RuntimeResourceBoundarySettings) error {
+	if settings.DocumentBytes <= 0 || int64(len(content)) > settings.DocumentBytes {
+		return errors.New("private daemon core-limit inventory is unbounded")
+	}
+	found := false
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 4 || strings.Join(fields[:4], " ") != "Max core file size" {
+			continue
+		}
+		if found || len(fields) != 7 || fields[4] != "0" || fields[5] != "0" || fields[6] != "bytes" {
+			return errors.New("private daemon does not have zero soft and hard core limits")
+		}
+		found = true
+	}
+	if !found {
+		return errors.New("private daemon core limits are absent")
+	}
+	return nil
 }
 
 // Docker uses the delegated ranges, not a number asserted by the manifest.
@@ -703,6 +744,13 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 	if err = ctx.Err(); err != nil {
 		return facts, err
 	}
+	facts.CorePattern, err = readBounded("/proc/sys/kernel/core_pattern", settings.DocumentBytes)
+	if err != nil {
+		return facts, err
+	}
+	if err := validateRuntimeBoundaryCorePattern(facts.CorePattern, settings); err != nil {
+		return facts, err
+	}
 	facts.MountInfo, err = readBounded("/proc/self/mountinfo", settings.NativeBytes)
 	if err != nil {
 		return facts, err
@@ -801,6 +849,10 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 		}
 	}
 	facts.MountInfoAfter, err = readBounded("/proc/self/mountinfo", settings.NativeBytes)
+	if err != nil {
+		return facts, err
+	}
+	facts.CorePatternAfter, err = readBounded("/proc/sys/kernel/core_pattern", settings.DocumentBytes)
 	return facts, err
 }
 
@@ -851,6 +903,34 @@ func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, 
 		return errors.New("private engine peer is not an owned root daemon")
 	}
 	proc := "/proc/" + strconv.FormatInt(int64(credential.Pid), 10)
+	corePattern, err := readBounded("/proc/sys/kernel/core_pattern", settings.DocumentBytes)
+	if err != nil {
+		return err
+	}
+	if err := validateRuntimeBoundaryCorePattern(corePattern, settings); err != nil {
+		return err
+	}
+	limits, err := readBounded(filepath.Join(proc, "limits"), settings.DocumentBytes)
+	if err != nil {
+		return err
+	}
+	if err := validateRuntimeBoundaryCoreLimits(limits, settings); err != nil {
+		return err
+	}
+	cwdTarget, err := os.Readlink(filepath.Join(proc, "cwd"))
+	if err != nil || filepath.Clean(cwdTarget) != cwdTarget || !pathWithin(boundary.CandidateRoot, cwdTarget) {
+		return errors.New("private daemon non-piped core filename would escape its quota")
+	}
+	cwd, err := os.OpenFile(filepath.Join(proc, "cwd"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return err
+	}
+	var cwdStat syscall.Stat_t
+	cwdErr := syscall.Fstat(int(cwd.Fd()), &cwdStat)
+	_ = cwd.Close()
+	if cwdErr != nil || boundary.WorkDeviceId == 0 || cwdStat.Dev != boundary.WorkDeviceId {
+		return errors.New("private daemon core working directory is not quota-backed")
+	}
 	target, err := os.Readlink(filepath.Join(proc, "exe"))
 	if err != nil || target != executable.Path {
 		return errors.New("private engine live executable differs")

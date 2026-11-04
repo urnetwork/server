@@ -129,6 +129,7 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 	const blockDevice = uint64(7<<8 | 31)
 	mountInfo := []byte(fmt.Sprintf("1 0 8:1 / / rw - ext4 /dev/synthetic-root rw\n2 1 7:31 / %s rw,nosuid,nodev - ext4 /dev/loop31 rw\n", candidate))
 	host.facts = runtimeBoundaryFacts{MountInfo: mountInfo, MountInfoAfter: append([]byte(nil), mountInfo...),
+		CorePattern: []byte("core.%P\n"), CorePatternAfter: []byte("core.%P\n"),
 		SubUids: []byte("synthetic_evaluation:200000:65536\n"), SubGids: []byte("synthetic_evaluation:300000:65536\n"),
 		BlockDeviceId: blockDevice, BlockBytes: boundary.MaximumBytes, LoopNumber: 31, LoopBackingDevice: 8<<8 | 2, LoopBackingInode: 123,
 		BackingDevice: 8<<8 | 2, BackingInode: 123, BackingBytes: boundary.MaximumBytes, BackingAllocatedBytes: boundary.MaximumBytes,
@@ -656,7 +657,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	}
 	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
 		unit := string(render(name))
-		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "PATH=" + filepath.Dir(boundary.Runc.Path),
+		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
 			if !strings.Contains(unit, required) {
 				t.Fatalf("private service lost an enforced boundary: %s", name)
@@ -682,6 +683,47 @@ func TestRuntimeResourceBoundaryCapacityArithmeticRejectsOverflow(t *testing.T) 
 	}
 	if value, err := runtimeBoundaryBytes(4, 512); err != nil || value != 2048 {
 		t.Fatal("valid kernel capacity arithmetic changed")
+	}
+}
+
+// A zero-limit daemon cannot qualify an unbounded host pipe handler: the kernel
+// ignores RLIMIT_CORE for pipes and executes the handler outside the workload.
+func TestRuntimeResourceBoundaryRejectsPipedCorePolicyDespiteZeroLimits(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	limits := []byte("Limit                     Soft Limit           Hard Limit           Units\nMax core file size        0                    0                    bytes\n")
+	if err := validateRuntimeBoundaryCoreLimits(limits, fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range []string{"|/usr/libexec/synthetic-core-handler %P\n", "|/bin/false\n", "|/usr/libexec/synthetic-bounded-handler %P\n"} {
+		current := newRuntimeBoundaryTest(t)
+		current.host.facts.CorePattern, current.host.facts.CorePatternAfter = []byte(pattern), []byte(pattern)
+		if _, err := verifyRuntimeResourceBoundary(context.Background(), current.pin, current.scope, current.settings, current.host); err == nil {
+			t.Fatal("zero limits or a handler-looking name waived the host pipe policy")
+		}
+	}
+}
+
+// Only the fixed slash-free filename policy is supported, and actual zero
+// soft/hard limits remain mandatory. Neither condition alone is sufficient.
+func TestRuntimeResourceBoundaryNonPipedCoreContract(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	if err := validateRuntimeBoundaryCorePattern([]byte("core.%P\n"), fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, pattern := range []string{"", "core\n", "/var/log/synthetic-core.%P\n", "../core.%P\n", "cores/core.%P\n", "core.%e\n", " core.%P\n", "core.%P\n\n"} {
+		if err := validateRuntimeBoundaryCorePattern([]byte(pattern), fixture.settings); err == nil {
+			t.Fatal("unqualified non-piped core filename was admitted")
+		}
+	}
+	for _, limits := range []string{"", "Max core file size 0 unlimited bytes\n", "Max core file size unlimited unlimited bytes\n", "Max core file size 1 1 bytes\n",
+		"Max core file size 0 0 bytes\nMax core file size 0 0 bytes\n", "Max core file size 0 0 blocks\n"} {
+		if err := validateRuntimeBoundaryCoreLimits([]byte(limits), fixture.settings); err == nil {
+			t.Fatal("nonzero, absent or ambiguous native core limits were admitted")
+		}
+	}
+	fixture.host.facts.CorePatternAfter = []byte("|/usr/libexec/synthetic-core-handler %P\n")
+	if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil {
+		t.Fatal("host core policy changed during admission without refusal")
 	}
 }
 

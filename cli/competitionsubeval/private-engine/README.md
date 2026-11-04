@@ -52,6 +52,17 @@ socket peer executable, configuration argv and helper/temp environment must
 match. The exact protected `chmod` helper makes both control sockets root-only;
 `UMask` alone does not override Docker's explicit socket mode.
 
+Both daemon units set `LimitCORE=0` as defense in depth, not as proof for a piped
+host core collector. Linux ignores that limit for piped `core_pattern` handlers.
+Admission currently rejects every pipe handler, including a seemingly bounded or
+drop-only handler; there is no expected-string or Boolean waiver. The only
+supported policy is the exact non-piped `core.%P` filename, with actual daemon
+soft/hard core limits both zero and an actual quota-backed working directory.
+These templates do not change global core policy. A separately approved
+maintenance/handler plan and native child/core proof are required before a host
+with an unqualified pipe collector can be used.
+The pipe exception follows the [Linux core(5) contract](https://man7.org/linux/man-pages/man5/core.5.html).
+
 The network unit creates only `inet urnetwork_subeval`; it neither flushes a
 ruleset nor changes user Docker tables, routes or sysctls. Candidate networks must
 be internal, non-attachable, IPv6-disabled, isolated-gateway bridges named exactly
