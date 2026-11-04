@@ -22,16 +22,18 @@ func main() {
 	if err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		// Errors never include a request, hidden seed, key, or evaluator output.
 		fmt.Fprintln(os.Stderr, "subevaluation operation failed")
-		os.Exit(1)
+		os.Exit(competitionagent.DockerClientExitStatus(err))
 	}
 }
 
 // Startup accepts exactly one role and no caller-selected evaluator command.
 type arguments struct {
-	configPath   string
-	serve        bool
-	executeRunId string
-	cleanupRunId string
+	configPath        string
+	serve             bool
+	executeRunId      string
+	cleanupRunId      string
+	dockerClientRunId string
+	dockerArguments   []string
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -43,17 +45,26 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.BoolVar(&parsed.serve, "serve", false, "Serve one signed framed operation on stdin/stdout")
 	flags.StringVar(&parsed.executeRunId, "execute", "", "Systemd-only fixed persisted execution identity")
 	flags.StringVar(&parsed.cleanupRunId, "cleanup", "", "Systemd-only fixed persisted stop-cleanup identity")
+	flags.StringVar(&parsed.dockerClientRunId, "docker-client", "", "Non-root fixed-run Docker client; public sibling metadata only")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != ""} {
+	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != ""} {
 		if enabled {
 			roles++
 		}
 	}
-	if flags.NArg() != 0 || parsed.configPath == "" || roles != 1 {
+	if roles != 1 {
 		return arguments{}, errors.New("exactly one fixed subevaluation role and protected config are required")
+	}
+	if parsed.dockerClientRunId != "" {
+		if parsed.configPath != "" || flags.NArg() == 0 {
+			return arguments{}, errors.New("Docker client requires only its fixed run identity and command")
+		}
+		parsed.dockerArguments = append([]string(nil), flags.Args()...)
+	} else if flags.NArg() != 0 || parsed.configPath == "" {
+		return arguments{}, errors.New("systemd and SSH roles require only protected configuration")
 	}
 	return parsed, nil
 }
@@ -64,6 +75,9 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	parsed, err := parseArguments(args, diagnostic)
 	if err != nil {
 		return err
+	}
+	if parsed.dockerClientRunId != "" {
+		return competitionagent.RunDockerClient(ctx, parsed.dockerClientRunId, parsed.dockerArguments, input, output, diagnostic)
 	}
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {
