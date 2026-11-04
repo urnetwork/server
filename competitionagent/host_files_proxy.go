@@ -84,9 +84,17 @@ func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.
 		http.Error(w, "original host-file issue deadline elapsed after intent commit", http.StatusRequestTimeout)
 		return
 	}
-	ctx, cancel := context.WithDeadline(self.ownerCtx, self.plan.DeadlineAt)
-	result := self.hostFiles.Execute(ctx, request)
-	cancel()
+	fileCtx, fileCancel := context.WithTimeout(self.ownerCtx, self.hostFiles.settings.OperationTimeout)
+	defer fileCancel()
+	ctx, cancel := context.WithDeadline(fileCtx, self.plan.DeadlineAt)
+	defer cancel()
+	result := HostFilesResult{RunId: self.plan.RunId, Operation: request.Operation, Acknowledged: true, ExitCode: 2, ErrorCode: "host_handoff_unavailable"}
+	if request.Operation == "verify-id-map" {
+		result = self.hostFiles.Execute(ctx, request)
+	} else if release, err := self.beginHostFileHandoff(ctx); err == nil {
+		defer release()
+		result = self.hostFiles.Execute(ctx, request)
+	}
 	response, marshalErr := json.Marshal(result)
 	acknowledged := marshalErr == nil && int64(len(response)) <= self.settings.MaximumDocumentBytes
 	if acknowledged {
@@ -102,6 +110,52 @@ func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(response)
+}
+
+// No late create/start may race a filesystem handoff after an empty census.
+// This temporary barrier joins every previously admitted upload/mutation;
+// root build-session drain remains allowed, and stop cleanup never takes it.
+func (self *DockerProxy) beginHostFileHandoff(ctx context.Context) (func(), error) {
+	self.stateLock.Lock()
+	if self.fileHandoff || !self.accepting || self.unknown != 0 {
+		self.stateLock.Unlock()
+		return nil, errors.New("host-file handoff has unresolved daemon custody")
+	}
+	self.fileHandoff = true
+	self.notifyWithLock()
+	self.stateLock.Unlock()
+	release := func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.fileHandoff = false
+		self.notifyWithLock()
+	}
+	if self.beforeHandoffWait != nil {
+		self.beforeHandoffWait()
+	}
+	for {
+		self.stateLock.Lock()
+		changed, inflight, unknown, accepting := self.changed, self.inflight, self.unknown, self.accepting
+		self.stateLock.Unlock()
+		if err := ctx.Err(); err != nil {
+			release()
+			return nil, err
+		}
+		if !accepting || unknown != 0 || self.ownerCtx.Err() != nil {
+			release()
+			return nil, errors.New("host-file handoff cannot pass uncertain or stopped daemon work")
+		}
+		// The host-files request itself owns the remaining admission.
+		if inflight == 1 {
+			return release, nil
+		}
+		select {
+		case <-ctx.Done():
+			release()
+			return nil, ctx.Err()
+		case <-changed:
+		}
+	}
 }
 
 // Filesystem handoff/unmount never races an already-running owned container.
