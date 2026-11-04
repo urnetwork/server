@@ -1,0 +1,163 @@
+// A finite local RPC connects the trusted non-root helper to the independent
+// root file owner. Complete bounded input and a synced intent precede mutation.
+package competitionagent
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// The worker UID was authenticated by the original Unix peer credentials in
+// workerHandler. No peer is given a mount executable or a general root shell.
+func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost || self.hostFiles == nil {
+		http.Error(w, "host-file role unavailable", http.StatusForbidden)
+		return
+	}
+	release, err := self.admit(false)
+	if err != nil {
+		http.Error(w, "host-file admission closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
+	idBytes := make([]byte, 16)
+	if _, err := rand.Read(idBytes); err != nil {
+		http.Error(w, "host-file custody unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	id := hex.EncodeToString(idBytes)
+	bodyPath := filepath.Join(self.bodyDirectory(), id+".request")
+	deadline := self.settings.Now().Add(self.settings.UploadTimeout)
+	if self.plan.DeadlineAt.Before(deadline) {
+		deadline = self.plan.DeadlineAt
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(deadline)
+	reader := io.Reader(http.NoBody)
+	if r.Body != nil {
+		reader = r.Body
+	}
+	size, digest, err := self.sealBody(r.Context(), reader, bodyPath, self.settings.MaximumDocumentBytes)
+	_ = http.NewResponseController(w).SetReadDeadline(time.Time{})
+	if err != nil || r.ContentLength >= 0 && size != r.ContentLength {
+		http.Error(w, "host-file input incomplete", http.StatusBadRequest)
+		return
+	}
+	content, err := readBounded(bodyPath, self.settings.MaximumDocumentBytes)
+	request := HostFilesRequest{}
+	if err != nil || validateDocumentKeys(content) != nil || decodeStrict(content, &request) != nil {
+		http.Error(w, "host-file input rejected", http.StatusBadRequest)
+		return
+	}
+	if _, err := self.hostFiles.validateRequest(request); err != nil {
+		http.Error(w, "host-file scope rejected", http.StatusForbidden)
+		return
+	}
+	if !self.settings.Now().Before(self.plan.DeadlineAt) {
+		http.Error(w, "original host-file issue deadline elapsed", http.StatusRequestTimeout)
+		return
+	}
+	operation := &dockerProxyOperation{Schema: Schema, Id: id, RunId: self.plan.RunId, Kind: "host-files", Method: http.MethodPost,
+		Uri: "/_urnetwork/host-files", State: "issued", RequestSha256: digest, RequestBytes: size}
+	if err := self.storeOperation(operation); err != nil {
+		http.Error(w, "host-file intent unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	self.stateLock.Lock()
+	self.operationsByIds[id] = operation
+	self.stateLock.Unlock()
+	if self.beforeIssue != nil {
+		self.beforeIssue()
+	}
+	if !self.settings.Now().Before(self.plan.DeadlineAt) {
+		operation.StatusCode = http.StatusRequestTimeout
+		self.finishUnissuedOperation(operation)
+		http.Error(w, "original host-file issue deadline elapsed after intent commit", http.StatusRequestTimeout)
+		return
+	}
+	ctx, cancel := context.WithDeadline(self.ownerCtx, self.plan.DeadlineAt)
+	result := self.hostFiles.Execute(ctx, request)
+	cancel()
+	response, marshalErr := json.Marshal(result)
+	acknowledged := marshalErr == nil && int64(len(response)) <= self.settings.MaximumDocumentBytes
+	if acknowledged {
+		acknowledged = self.reserveSpool(int64(len(response))) == nil && exclusiveFile(filepath.Join(self.bodyDirectory(), id+".response"), response, 0600) == nil &&
+			self.syncSpoolDirectory(self.bodyDirectory()) == nil
+	}
+	operation.StatusCode, operation.ResponseBytes, operation.ResponseSha256 = http.StatusOK, int64(len(response)), digestDockerBytes(response)
+	self.finishOperation(operation, acknowledged && result.Acknowledged)
+	if !acknowledged {
+		http.Error(w, "host-file receipt could not be retained", http.StatusServiceUnavailable)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(response)
+}
+
+// Filesystem handoff/unmount never races an already-running owned container.
+// The trusted helper joins its entire cohort before requesting reclaim.
+func (self *DockerProxy) requireNoRunContainers(ctx context.Context, _ string) error {
+	filters, err := json.Marshal(map[string][]string{"label": {cleanupJobLabel + "=" + self.plan.JobId, cleanupRoundLabel + "=" + self.plan.RoundId, cleanupRunLabel + "=" + self.plan.RunId}})
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://docker/containers/json?all=1&filters="+url.QueryEscape(string(filters)), nil)
+	if err != nil {
+		return err
+	}
+	response, err := self.transport.RoundTrip(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(response.Body, self.settings.MaximumDocumentBytes+1))
+	if err != nil || response.StatusCode != http.StatusOK || int64(len(content)) > self.settings.MaximumDocumentBytes || validateDockerMutationJson(content, self.settings.MaximumDocumentDepth) != nil {
+		return errors.New("owned container census is unavailable")
+	}
+	var containers []json.RawMessage
+	if json.Unmarshal(content, &containers) != nil || containers == nil || len(containers) != 0 {
+		return errors.New("host-file handoff requires all owned containers to have joined and been removed")
+	}
+	return nil
+}
+
+// The public non-root client can wait for only a typed finite local operation.
+// A transport failure is never an instruction to replay a native mutation.
+func requestHostFiles(ctx context.Context, socket string, request HostFilesRequest, settings DockerProxySettings) (HostFilesResult, error) {
+	content, err := json.Marshal(request)
+	if err != nil || int64(len(content)) > settings.MaximumDocumentBytes {
+		return HostFilesResult{}, errors.New("host-file request exceeds its bound")
+	}
+	transport := &http.Transport{Proxy: nil, DisableCompression: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, "unix", socket)
+	}}
+	defer transport.CloseIdleConnections()
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://owner/_urnetwork/host-files", strings.NewReader(string(content)))
+	if err != nil {
+		return HostFilesResult{}, err
+	}
+	response, err := transport.RoundTrip(httpRequest)
+	if err != nil {
+		return HostFilesResult{}, err
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, settings.MaximumDocumentBytes+1))
+	if err != nil || response.StatusCode != http.StatusOK || int64(len(body)) > settings.MaximumDocumentBytes || validateDocumentKeys(body) != nil {
+		return HostFilesResult{}, errors.New("host-file response remains unknown")
+	}
+	result := HostFilesResult{}
+	if decodeStrict(body, &result) != nil || result.RunId != request.RunId || result.Operation != request.Operation || result.ExitCode < 0 || result.ExitCode > 255 || !result.Acknowledged {
+		return HostFilesResult{}, ErrDockerProxyUnknown
+	}
+	return result, nil
+}

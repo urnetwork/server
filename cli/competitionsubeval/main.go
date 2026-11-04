@@ -28,14 +28,15 @@ func main() {
 
 // Startup accepts exactly one role and no caller-selected evaluator command.
 type arguments struct {
-	configPath        string
-	serve             bool
-	executeRunId      string
-	cleanupRunId      string
-	dockerClientRunId string
-	dockerArguments   []string
-	dockerOwnerRunId  string
-	freezeRunId       string
+	configPath         string
+	serve              bool
+	executeRunId       string
+	cleanupRunId       string
+	dockerClientRunId  string
+	dockerArguments    []string
+	dockerOwnerRunId   string
+	freezeRunId        string
+	hostOperationRunId string
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -50,11 +51,12 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.dockerClientRunId, "docker-client", "", "Non-root fixed-run Docker client; public sibling metadata only")
 	flags.StringVar(&parsed.dockerOwnerRunId, "docker-owner", "", "Systemd-only independent persisted Docker request owner")
 	flags.StringVar(&parsed.freezeRunId, "freeze", "", "Systemd-only fixed emergency freeze/kill, with no mutual unit join")
+	flags.StringVar(&parsed.hostOperationRunId, "host-operation", "", "Non-root finite fixed-run file handoff; public sibling metadata only")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != ""} {
+	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != ""} {
 		if enabled {
 			roles++
 		}
@@ -62,7 +64,7 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	if roles != 1 {
 		return arguments{}, errors.New("exactly one fixed subevaluation role and protected config are required")
 	}
-	if parsed.dockerClientRunId != "" {
+	if parsed.dockerClientRunId != "" || parsed.hostOperationRunId != "" {
 		if parsed.configPath != "" || flags.NArg() == 0 {
 			return arguments{}, errors.New("Docker client requires only its fixed run identity and command")
 		}
@@ -82,6 +84,9 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	}
 	if parsed.dockerClientRunId != "" {
 		return competitionagent.RunDockerClient(ctx, parsed.dockerClientRunId, parsed.dockerArguments, input, output, diagnostic)
+	}
+	if parsed.hostOperationRunId != "" {
+		return competitionagent.RunHostFilesClient(ctx, parsed.hostOperationRunId, parsed.dockerArguments, output)
 	}
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {

@@ -436,7 +436,9 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 	if err := syncDirectory(directory); err != nil {
 		return err
 	}
-	return proxy.serve(ctx, worker, build, func(closingCtx context.Context) error {
+	issueCtx, stopIssue := context.WithDeadline(ctx, manifest.Identity.DeadlineAt)
+	defer stopIssue()
+	return proxy.serve(issueCtx, worker, build, func(closingCtx context.Context) error {
 		return self.containment.EmergencyFreeze(closingCtx, *plan)
 	})
 }

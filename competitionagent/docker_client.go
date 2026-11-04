@@ -40,12 +40,13 @@ type dockerClientSettings struct {
 	MaximumArgumentBytes int
 	CancelGrace          time.Duration
 	Proxy                DockerProxySettings
+	HostFiles            HostFilesSettings
 	currentUid           func() uint32
 }
 
 func defaultDockerClientSettings() dockerClientSettings {
 	return dockerClientSettings{ConfigBytes: 64 * 1024, MaximumArguments: 4096, MaximumArgumentBytes: 2 * 1024 * 1024,
-		CancelGrace: 10 * time.Second, Proxy: DefaultDockerProxySettings(), currentUid: func() uint32 { return uint32(os.Geteuid()) }}
+		CancelGrace: 10 * time.Second, Proxy: DefaultDockerProxySettings(), HostFiles: DefaultHostFilesSettings(), currentUid: func() uint32 { return uint32(os.Geteuid()) }}
 }
 
 // Transport/unknown failures remain evaluator infrastructure errors; complete
@@ -75,6 +76,67 @@ func RunDockerClient(ctx context.Context, runId string, arguments []string, inpu
 		return dockerClientExitError{code: 2}
 	}
 	return runDockerClient(ctx, config, runId, arguments, input, output, diagnostic, settings)
+}
+
+// This separate public role exposes only four fixed filesystem mutations and
+// one owned-container namespace check. It cannot select a private agent file,
+// root command, mode, uid/gid, mount source, daemon or arbitrary path grammar.
+func RunHostFilesClient(ctx context.Context, runId string, arguments []string, output io.Writer) error {
+	settings := defaultDockerClientSettings()
+	executable, err := os.Executable()
+	if err != nil {
+		return dockerClientExitError{code: 2}
+	}
+	config, err := loadDockerClientConfig(executable, settings, true)
+	if err != nil {
+		return dockerClientExitError{code: 2}
+	}
+	return runHostFilesClient(ctx, config, runId, arguments, output, settings)
+}
+
+// The finite positional form has no shell parsing or configurable operation
+// surface. Unknown/transport failure stops this evaluation without replay.
+func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId string, arguments []string, output io.Writer, settings dockerClientSettings) error {
+	if config == nil || settings.currentUid == nil || settings.currentUid() != config.WorkerUid || !digestPattern.MatchString(runId) || len(arguments) == 0 || len(arguments) > 2 {
+		return dockerClientExitError{code: 2}
+	}
+	request := HostFilesRequest{Schema: Schema, RunId: runId, Operation: arguments[0]}
+	switch request.Operation {
+	case "mount-evidence", "unmount-evidence":
+		if len(arguments) != 1 {
+			return dockerClientExitError{code: 2}
+		}
+	case "prepare-output", "reclaim-output":
+		if len(arguments) != 2 || settings.HostFiles.MaximumPathBytes <= 0 || len(arguments[1]) > settings.HostFiles.MaximumPathBytes || strings.ContainsAny(arguments[1], "\x00\r\n") ||
+			!filepath.IsAbs(arguments[1]) || filepath.Clean(arguments[1]) != arguments[1] || !pathWithin(filepath.Join(config.WorkDirectory, runId, ".evidence-runtime"), arguments[1]) {
+			return dockerClientExitError{code: 2}
+		}
+		request.Path = arguments[1]
+	case "verify-id-map":
+		if len(arguments) != 2 || !digestPattern.MatchString(arguments[1]) {
+			return dockerClientExitError{code: 2}
+		}
+		request.ContainerId = arguments[1]
+	default:
+		return dockerClientExitError{code: 2}
+	}
+	result, err := requestHostFiles(ctx, filepath.Join(config.SocketDirectory, runId, "docker.sock"), request, settings.Proxy)
+	if err != nil || !result.Acknowledged || result.RunId != runId || result.Operation != request.Operation {
+		return dockerClientExitError{code: 2}
+	}
+	if result.ExitCode != 0 {
+		return dockerClientExitError{code: result.ExitCode}
+	}
+	if request.Operation == "verify-id-map" {
+		if result.Namespace == nil || !digestPattern.MatchString(result.Namespace.UidMapSha256) || !digestPattern.MatchString(result.Namespace.GidMapSha256) {
+			return dockerClientExitError{code: 2}
+		}
+		content, err := json.Marshal(result.Namespace)
+		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
+			return dockerClientExitError{code: 2}
+		}
+	}
+	return nil
 }
 
 func loadDockerClientConfig(executable string, settings dockerClientSettings, protected bool) (*DockerClientConfig, error) {

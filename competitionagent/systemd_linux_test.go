@@ -64,7 +64,8 @@ func TestSystemdDockerOwnerAndEvaluatorHaveIndependentBoundedRoles(t *testing.T)
 		!slices.Contains(args, "--property=ExecStopPost=\"/synthetic-release/agent\" \"--config\" \"/synthetic-release/agent.json\" \"--freeze="+runId+"\"") ||
 		!slices.Contains(args, "--property=RuntimeMaxSec=480.000000s") || !slices.Contains(args, "--property=AllowedCPUs=6 8") ||
 		!slices.Contains(args, "--property=CPUAffinity=6 8") || !slices.Contains(args, "--property=MemoryMax=8589934592") ||
-		!slices.Contains(args, "--property=MemorySwapMax=0") || !slices.Contains(args, "--property=CPUQuota=200%") || !slices.Contains(args, "--property=OOMPolicy=kill") {
+		!slices.Contains(args, "--property=MemorySwapMax=0") || !slices.Contains(args, "--property=CPUQuota=200%") || !slices.Contains(args, "--property=OOMPolicy=kill") ||
+		!slices.Contains(args, "--property=LimitCORE=0") {
 		t.Fatal("independent Docker owner lost its bounded emergency role", args, err)
 	}
 	for _, arg := range args {

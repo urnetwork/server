@@ -22,6 +22,9 @@ func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
 		{"--config", "/synthetic/agent.json", "--serve", "--docker-owner=" + strings.Repeat("a", 64)},
 		{"--config", "/synthetic/agent.json", "--docker-owner=" + strings.Repeat("a", 64), "--freeze=" + strings.Repeat("a", 64)},
 		{"--config", "/synthetic/agent.json", "--execute=" + strings.Repeat("a", 64), "--freeze=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--host-operation=" + strings.Repeat("a", 64), "--", "mount-evidence"},
+		{"--host-operation=" + strings.Repeat("a", 64)},
+		{"--host-operation=" + strings.Repeat("a", 64), "--docker-client=" + strings.Repeat("a", 64), "--", "info"},
 	}
 	for _, args := range cases {
 		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
@@ -37,6 +40,15 @@ func TestSubevaluationArgumentsAcceptPublicDockerClientRole(t *testing.T) {
 	if err != nil || client.dockerClientRunId != runId || client.configPath != "" || client.serve ||
 		len(client.dockerArguments) != 2 || client.dockerArguments[0] != "compose" || client.dockerArguments[1] != "ps" {
 		t.Fatal("fixed non-root client role was not retained without private config", err)
+	}
+}
+
+func TestSubevaluationArgumentsAcceptFinitePublicHostOperationRole(t *testing.T) {
+	runId := strings.Repeat("a", 64)
+	parsed, err := parseArguments([]string{"--host-operation=" + runId, "--", "mount-evidence"}, &bytes.Buffer{})
+	if err != nil || parsed.hostOperationRunId != runId || parsed.configPath != "" || parsed.dockerClientRunId != "" || parsed.serve ||
+		len(parsed.dockerArguments) != 1 || parsed.dockerArguments[0] != "mount-evidence" {
+		t.Fatal("host client selected private configuration or expanded its role", err)
 	}
 }
 

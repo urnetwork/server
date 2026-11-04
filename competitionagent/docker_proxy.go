@@ -45,6 +45,9 @@ type DockerProxy struct {
 	buildRunner                   func(context.Context, *dockerProxyBuild) DockerBuildResult
 	sessions                      map[net.Conn]bool
 	beforeIssue                   func()
+	beforeBuildIssue              func()
+	hostFiles                     *hostFileBroker
+	syncSpoolDirectory            func(string) error
 }
 
 // Only bounded hashes/statuses enter metadata; bodies stay private files.
@@ -71,6 +74,12 @@ func NewDockerProxy(plan DockerProxyPlan, settings DockerProxySettings) (*Docker
 
 // Tests replace protected ownership only, never admission/durable transitions.
 func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protected bool) (*DockerProxy, error) {
+	plan.CgroupNames = append([]string(nil), plan.CgroupNames...)
+	plan.ReadOnlyBindPaths = append([]string(nil), plan.ReadOnlyBindPaths...)
+	if plan.HostFiles != nil {
+		copy := *plan.HostFiles
+		plan.HostFiles = &copy
+	}
 	if err := validateDockerProxyPlan(plan, settings, protected); err != nil {
 		return nil, err
 	}
@@ -128,6 +137,16 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 			return self.dialDaemon(ctx)
 		}}
 	self.buildRunner = self.runBuildCli
+	self.syncSpoolDirectory = syncDirectory
+	if plan.HostFiles != nil {
+		self.hostFiles, err = newHostFileBroker(plan, DefaultHostFilesSettings())
+		if err != nil {
+			self.Close()
+			return nil, err
+		}
+		self.hostFiles.proveMap = self.proveHostNamespace
+		self.hostFiles.beforePath = self.requireNoRunContainers
+	}
 	if err := self.recoverJournal(); err != nil {
 		self.Close()
 		return nil, err
@@ -348,6 +367,9 @@ func (self *DockerProxy) workerHandler(w http.ResponseWriter, r *http.Request) {
 	case "/_urnetwork/build":
 		self.buildRequestHandler(w, r)
 		return
+	case "/_urnetwork/host-files":
+		self.hostFilesRequestHandler(w, r)
+		return
 	}
 	path := dockerProxyApiPath(r.URL.Path)
 	if path == "/grpc" || path == "/session" || path == "/build" || strings.HasPrefix(path, "/moby.buildkit.") || strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc") {
@@ -488,8 +510,9 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 	count, digest, copyErr := self.drainResponse(w, response, responseFile)
 	syncErr := responseFile.Sync()
 	closeErr := responseFile.Close()
+	directoryErr := self.syncSpoolDirectory(self.bodyDirectory())
 	operation.ResponseBytes, operation.ResponseSha256 = count, digest
-	ack := copyErr == nil && syncErr == nil && closeErr == nil && response.StatusCode < 500
+	ack := copyErr == nil && syncErr == nil && closeErr == nil && directoryErr == nil && response.StatusCode < 500
 	if kind == "grpc" {
 		operation.GrpcStatus = response.Trailer.Get("Grpc-Status")
 		if operation.GrpcStatus == "" {

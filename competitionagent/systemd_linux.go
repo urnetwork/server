@@ -109,6 +109,7 @@ func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, er
 	args := []string{"--quiet", "--no-block", "--unit=" + launch.UnitName, "--service-type=exec",
 		"--property=RequiresMountsFor=" + systemdCommandWord(launch.BaseDirectory),
 		"--property=Restart=no", "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
+		"--property=LimitCORE=0",
 		"--property=ExecStopPost=" + cleanup,
 		"--property=RuntimeMaxSec=" + strconv.FormatFloat(remaining.Seconds(), 'f', 6, 64) + "s",
 		"--property=TimeoutStopSec=" + strconv.FormatFloat(stopTimeout.Seconds(), 'f', 6, 64) + "s",

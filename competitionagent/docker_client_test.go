@@ -232,3 +232,58 @@ func TestDockerClientOutputRequiresCompleteWrite(t *testing.T) {
 		t.Fatal("short compiler output was silently accepted")
 	}
 }
+
+// A finite host operation uses the same pinned local endpoint without loading
+// private role metadata, expanding command authority or accepting unknown work.
+func TestHostFilesClientUsesTypedOwnerAndReturnsOnlyNamespaceProof(t *testing.T) {
+	fixture := newDockerClientTestFixture(t)
+	socket := filepath.Join(fixture.config.SocketDirectory, fixture.runId, "docker.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerId := strings.Repeat("c", 64)
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := HostFilesRequest{}
+		if r.Method != http.MethodPost || r.URL.Path != "/_urnetwork/host-files" || json.NewDecoder(r.Body).Decode(&request) != nil || request.RunId != fixture.runId ||
+			request.Operation != "verify-id-map" || request.ContainerId != containerId || request.Path != "" {
+			t.Error("host client expanded its typed namespace role")
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(HostFilesResult{RunId: fixture.runId, Operation: request.Operation, Acknowledged: true, ExitCode: 0,
+			Namespace: &HostNamespaceMap{ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536, UidMapSha256: strings.Repeat("a", 64), GidMapSha256: strings.Repeat("b", 64)}})
+	})}
+	joined := make(chan error, 1)
+	go func() { joined <- server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close(); <-joined })
+	var output bytes.Buffer
+	if err := runHostFilesClient(t.Context(), fixture.config, fixture.runId, []string{"verify-id-map", containerId}, &output, fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	var proof HostNamespaceMap
+	if json.Unmarshal(output.Bytes(), &proof) != nil || proof.ContainerRootUid != 200000 || proof.UidMapSha256 != strings.Repeat("a", 64) {
+		t.Fatal("host client lost its finite namespace proof")
+	}
+	_ = server.Close()
+	if err := runHostFilesClient(t.Context(), fixture.config, fixture.runId, []string{"mount-evidence"}, &output, fixture.settings); DockerClientExitStatus(err) != 2 {
+		t.Fatal("unreachable host owner was mistaken for acknowledged mutation")
+	}
+}
+
+// Local validation rejects endpoint/config/root-command expansion before even
+// opening a socket, and changing host uid cannot borrow the worker role.
+func TestHostFilesClientRejectsExpandedArgumentsAndWorkerIdentity(t *testing.T) {
+	fixture := newDockerClientTestFixture(t)
+	for _, arguments := range [][]string{nil, {"/bin/sh"}, {"mount-evidence", "/synthetic/alternate"}, {"verify-id-map", "short"},
+		{"prepare-output", "/synthetic/outside"}, {"reclaim-output", filepath.Join(fixture.config.WorkDirectory, fixture.runId, ".evidence-runtime") + "/../worker-request.json"},
+		{"mount-evidence", "--config", "/synthetic/private.json"}} {
+		if err := runHostFilesClient(t.Context(), fixture.config, fixture.runId, arguments, io.Discard, fixture.settings); DockerClientExitStatus(err) != 2 {
+			t.Fatal("expanded host arguments were accepted", arguments)
+		}
+	}
+	fixture.settings.currentUid = func() uint32 { return fixture.config.WorkerUid + 1 }
+	if err := runHostFilesClient(t.Context(), fixture.config, fixture.runId, []string{"mount-evidence"}, io.Discard, fixture.settings); DockerClientExitStatus(err) != 2 {
+		t.Fatal("another uid borrowed the host worker role")
+	}
+}

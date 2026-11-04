@@ -140,6 +140,12 @@ func (self *DockerProxy) RunOwnedBuild(ctx context.Context, request DockerBuildR
 	if err := self.storeBuild(build, "issued"); err != nil {
 		return failBeforeIssue(err)
 	}
+	if self.beforeBuildIssue != nil {
+		self.beforeBuildIssue()
+	}
+	if !self.settings.Now().Before(self.plan.DeadlineAt) {
+		return failBeforeIssue(errors.New("original deadline elapsed during owned build intent commit"))
+	}
 	self.stateLock.Lock()
 	build.issued = true
 	self.notifyWithLock()
@@ -544,6 +550,9 @@ func (self *DockerProxy) storeBuildResult(build *dockerProxyBuild, result Docker
 		return err
 	}
 	if err := exclusiveFile(filepath.Join(self.buildDirectory(), "stderr"), result.Stderr, 0400); err != nil {
+		return err
+	}
+	if err := self.syncSpoolDirectory(self.buildDirectory()); err != nil {
 		return err
 	}
 	state := "unknown"

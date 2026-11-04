@@ -247,6 +247,27 @@ func TestDockerProxyCommittedIntentCannotIssueAfterOriginalDeadline(t *testing.T
 	}
 }
 
+// The single build's source snapshot and intent sync cannot acquire a new
+// execution window after the immutable job deadline passes.
+func TestDockerProxyBuildIntentExpiryNeverStartsNativeCli(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	now := fixture.plan.DeadlineAt.Add(-time.Second)
+	fixture.proxy.settings.Now = func() time.Time { return now }
+	fixture.proxy.beforeBuildIssue = func() { now = fixture.plan.DeadlineAt }
+	calls := 0
+	fixture.proxy.buildRunner = func(context.Context, *dockerProxyBuild) DockerBuildResult {
+		calls++
+		return DockerBuildResult{Acknowledged: true, ExitCode: 0}
+	}
+	result, err := fixture.proxy.RunOwnedBuild(t.Context(), fixture.buildRequest)
+	if err == nil || calls != 0 || !result.Acknowledged || result.ErrorCode != "build_not_issued" {
+		t.Fatal("expired intent launched a fresh native build", result, err)
+	}
+	if err := fixture.proxy.Quiesce(t.Context()); err != nil {
+		t.Fatal("definitely unissued build stranded cleanup", err)
+	}
+}
+
 // EOF is deliberately not a valid end-of-message.
 func (self *dockerProxyIncompleteBody) Read(destination []byte) (int, error) {
 	if self.read {
