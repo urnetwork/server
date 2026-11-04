@@ -438,10 +438,7 @@ func OnboardingCampaignStep(
 		if at.Before(now) {
 			// a step that is already due (a long retry, a late enable) goes out
 			// at the next window edge rather than immediately
-			at = onboarding.SendAt(now, 0, onboarding.LoadLocation(row.TimeZone), onboardingSendWindow())
-			if at.Before(now) {
-				at = now.Add(time.Minute)
-			}
+			at = onboarding.DueSendAt(now, onboarding.LoadLocation(row.TimeZone), onboardingSendWindow())
 		}
 		result.NextSendAt = &at
 	} else {

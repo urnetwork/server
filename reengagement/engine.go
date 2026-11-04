@@ -567,10 +567,7 @@ func SendAt(startedAt time.Time, day int, loc *time.Location, s Schedule, now ti
 	at := onboarding.SendAt(anchor, day, loc, w)
 	if at.Before(now) {
 		// due already (a late scan, a retry): the next window edge
-		at = onboarding.SendAt(now, 0, loc, w)
-		if at.Before(now) {
-			at = now.Add(time.Minute)
-		}
+		at = onboarding.DueSendAt(now, loc, w)
 	}
 	return at
 }
