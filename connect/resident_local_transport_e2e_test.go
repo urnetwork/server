@@ -179,7 +179,7 @@ func TestLocalTransportDrainConvergence(t *testing.T) {
 		clientB := env1.newClient(clientIdB)
 		defer clientB.Close()
 		outboundBefore := testutil.ToFloat64(exchangeActiveConnectionsGauge.WithLabelValues("outbound", "transport"))
-		attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachmentsGauge)
+		attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport])
 		mtA := newMigratingTransport(ctx, clientA, byClientJwtA, server.NewId(), lb.port(), 0, 0)
 		defer mtA.Close()
 		mtB := newMigratingTransport(ctx, clientB, byClientJwtB, server.NewId(), lb.port(), 0, 0)
@@ -190,7 +190,7 @@ func TestLocalTransportDrainConvergence(t *testing.T) {
 			return env1.exchange.localTransport.linkCount() == 2
 		})
 		connect.AssertEqual(t, outboundBefore, testutil.ToFloat64(exchangeActiveConnectionsGauge.WithLabelValues("outbound", "transport")))
-		connect.AssertEqual(t, attachmentsBefore+2, testutil.ToFloat64(exchangeLocalAttachmentsGauge))
+		connect.AssertEqual(t, attachmentsBefore+2, testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport]))
 
 		// gapless traffic a->b through the drain
 		var sentCount, ackCount, failCount atomic.Int64
@@ -247,7 +247,7 @@ func TestLocalTransportDrainConvergence(t *testing.T) {
 			return env1.exchange.localTransport.linkCount() == 0 && env2.exchange.localTransport.linkCount() == 2
 		})
 		waitForLocalTransportE2e(ctx, t, 30*time.Second, "the attachments and transport sockets to settle", func() bool {
-			return testutil.ToFloat64(exchangeLocalAttachmentsGauge) == attachmentsBefore+2 &&
+			return testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport]) == attachmentsBefore+2 &&
 				testutil.ToFloat64(exchangeActiveConnectionsGauge.WithLabelValues("outbound", "transport")) == outboundBefore
 		})
 
