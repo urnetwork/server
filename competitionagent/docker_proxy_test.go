@@ -218,6 +218,35 @@ func TestDockerProxyCompleteUploadCannotIssueAfterOriginalDeadline(t *testing.T)
 	}
 }
 
+// Syncing an intent can itself cross the original clock. The final issue
+// boundary must retain definite non-issue, not forward using drain allowance.
+func TestDockerProxyCommittedIntentCannotIssueAfterOriginalDeadline(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	now := fixture.plan.DeadlineAt.Add(-time.Second)
+	fixture.proxy.settings.Now = func() time.Time { return now }
+	fixture.proxy.beforeIssue = func() { now = fixture.plan.DeadlineAt }
+	var calls atomic.Int64
+	fixture.daemon(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.WriteHeader(http.StatusCreated) })
+	request := httptest.NewRequest(http.MethodPost, "http://worker/containers/create", bytes.NewReader(fixture.create))
+	response := httptest.NewRecorder()
+	fixture.proxy.workerHandler(response, request)
+	if response.Code != http.StatusRequestTimeout || calls.Load() != 0 || fixture.proxy.Snapshot().UnknownOperations != 0 {
+		t.Fatal("synced intent acquired a fresh post-deadline issue window")
+	}
+	entries, err := os.ReadDir(fixture.proxy.operationDirectory())
+	if err != nil || len(entries) != 1 {
+		t.Fatal("committed but unissued intent was not retained", err)
+	}
+	content, err := readBounded(filepath.Join(fixture.proxy.operationDirectory(), entries[0].Name()), fixture.settings.MaximumDocumentBytes)
+	operation := dockerProxyOperation{}
+	if err != nil || decodeStrict(content, &operation) != nil || operation.State != "not-issued" {
+		t.Fatal("expiry lost its durable definite-not-issued classification", err)
+	}
+	if err := fixture.proxy.Quiesce(t.Context()); err != nil {
+		t.Fatal("definitely unissued intent stranded cleanup custody", err)
+	}
+}
+
 // EOF is deliberately not a valid end-of-message.
 func (self *dockerProxyIncompleteBody) Read(destination []byte) (int, error) {
 	if self.read {

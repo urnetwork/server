@@ -44,6 +44,7 @@ type DockerProxy struct {
 	dialDaemon                    func(context.Context) (net.Conn, error)
 	buildRunner                   func(context.Context, *dockerProxyBuild) DockerBuildResult
 	sessions                      map[net.Conn]bool
+	beforeIssue                   func()
 }
 
 // Only bounded hashes/statuses enter metadata; bodies stay private files.
@@ -103,7 +104,15 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 	self := &DockerProxy{plan: plan, settings: settings, ownerCtx: ownerCtx, cancelOwner: cancel, accepting: true,
 		changed: make(chan struct{}), operationsByIds: map[string]*dockerProxyOperation{}, journalLock: lock, protected: protected, sessions: map[net.Conn]bool{}}
 	self.dialDaemon = func(ctx context.Context) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", plan.UpstreamSocketPath)
+		connection, err := (&net.Dialer{}).DialContext(ctx, "unix", plan.UpstreamSocketPath)
+		if err != nil {
+			return nil, err
+		}
+		if err := connection.SetWriteDeadline(plan.DeadlineAt); err != nil {
+			connection.Close()
+			return nil, err
+		}
+		return connection, nil
 	}
 	self.transport = &http.Transport{Proxy: nil, DisableCompression: true, MaxConnsPerHost: settings.MaximumConnections,
 		MaxIdleConns: settings.MaximumConnections, MaxIdleConnsPerHost: settings.MaximumConnections,
@@ -441,6 +450,15 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 	self.stateLock.Lock()
 	self.operationsByIds[id] = operation
 	self.stateLock.Unlock()
+	if self.beforeIssue != nil {
+		self.beforeIssue()
+	}
+	if !self.settings.Now().Before(self.plan.DeadlineAt) {
+		operation.StatusCode = http.StatusRequestTimeout
+		self.finishUnissuedOperation(operation)
+		http.Error(w, "original Docker issue deadline elapsed after intent commit", http.StatusRequestTimeout)
+		return
+	}
 	ctx, cancel := self.operationContext()
 	defer cancel()
 	request, err := self.upstreamRequest(ctx, r, bodyPath, bodyBytes)
@@ -577,15 +595,26 @@ func (self *DockerProxy) upstreamRequest(ctx context.Context, r *http.Request, p
 // An issued operation is never removed; a failed acknowledgement write remains
 // unknown even if the daemon response itself was definitively complete.
 func (self *DockerProxy) finishOperation(operation *dockerProxyOperation, ack bool) {
-	operation.State = "unknown"
+	state := "unknown"
 	if ack {
-		operation.State = "acknowledged"
+		state = "acknowledged"
 	}
+	self.finishOperationState(operation, state)
+}
+
+// The durable intent may outlive its issue deadline before any daemon call.
+// Retain a distinct definite-not-issued receipt instead of inventing an RPC.
+func (self *DockerProxy) finishUnissuedOperation(operation *dockerProxyOperation) {
+	self.finishOperationState(operation, "not-issued")
+}
+
+func (self *DockerProxy) finishOperationState(operation *dockerProxyOperation, state string) {
+	operation.State = state
 	if err := self.storeOperation(operation); err != nil {
 		operation.State = "unknown"
 	}
 	self.stateLock.Lock()
-	if operation.State != "acknowledged" {
+	if operation.State != "acknowledged" && operation.State != "not-issued" {
 		self.unknown++
 		self.accepting = false
 	}
@@ -707,7 +736,7 @@ func (self *DockerProxy) recoverJournal() error {
 						return errors.New("Docker custody record is corrupt")
 					}
 					self.operationsByIds[stem] = operation
-					if operation.State != "acknowledged" {
+					if operation.State != "acknowledged" && operation.State != "not-issued" {
 						self.unknown++
 					}
 				}
