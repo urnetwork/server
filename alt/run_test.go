@@ -70,11 +70,15 @@ func TestDefaultSettingsGiveTheConnectHandlerNoListenerAndNoProxyProtocol(t *tes
 	}
 }
 
-// Alt's embedded exchange keeps in-process transport delivery off at the code
-// ceiling, so the connect service's Redis control cannot turn it on in alt.
+// Alt's embedded exchange keeps in-process transport and forward delivery off
+// at their code ceilings, so the connect service's Redis control cannot turn
+// either on in alt.
 func TestDefaultSettingsKeepTheLocalTransportCeilingOff(t *testing.T) {
 	if DefaultSettings().ExchangeSettings.EnableLocalTransport {
 		t.Fatal("alt's exchange allows local transport delivery")
+	}
+	if DefaultSettings().ExchangeSettings.EnableLocalForward {
+		t.Fatal("alt's exchange allows local forward delivery")
 	}
 }
 

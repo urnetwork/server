@@ -29,6 +29,16 @@ import (
 // Requires the test DB env (WARP_ENV=local + postgres/redis/vault), like the
 // rest of this package; skipped under -short.
 func TestExchangeStreamP2pPeerTraffic(t *testing.T) {
+	testExchangeStreamP2pPeerTraffic(t, localDeliveryTestTcp)
+}
+
+// The same traffic with the transports and the platform forwards delivered in
+// process: both residents share the one exchange.
+func TestExchangeStreamP2pPeerTrafficInProcess(t *testing.T) {
+	testExchangeStreamP2pPeerTraffic(t, localDeliveryTestInProcess)
+}
+
+func testExchangeStreamP2pPeerTraffic(t *testing.T, delivery localDeliveryTestMode) {
 	if testing.Short() {
 		return
 	}
@@ -40,8 +50,10 @@ func TestExchangeStreamP2pPeerTraffic(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
-		env := testing_newPeerDiscoveryEnv(ctx, t)
+		env := testing_newPeerDiscoveryEnvWithSettings(ctx, t, delivery.apply)
 		defer env.Close()
+		delivery.requireExchange(t, env.exchange)
+		localLinksBefore := snapshotLocalLinkCounts()
 
 		clientIdA, byClientJwtA := env.authClient(&model.AuthNetworkClientArgs{
 			Description: "device a",
@@ -96,6 +108,11 @@ func TestExchangeStreamP2pPeerTraffic(t *testing.T) {
 		// {DestinationId: b} destination in the send sequence
 		clientA.ContractManager().AddNoContractPeer(connect.Id(clientIdB))
 		clientB.ContractManager().AddNoContractPeer(connect.Id(clientIdA))
+
+		// The stream message and the signaling crossed the platform both ways,
+		// over both transports and both residents' forwards, all in the one
+		// exchange.
+		delivery.requireLinksSince(t, localLinksBefore, 2, 2)
 
 		// with the platform transports closed, the p2p conn is the only route
 		fmt.Printf("[progress]stream p2p: close platform transports\n")
