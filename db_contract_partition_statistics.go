@@ -30,7 +30,12 @@ func readContractStatistics(ctx context.Context, conn contractCatalogQuerier, ta
 		SELECT n.nspname, s.stxname, pg_get_statisticsobjdef(s.oid),
 			pg_get_userbyid(s.stxowner), s.stxstattarget,
 			obj_description(s.oid, 'pg_statistic_ext'),
-			s.stxkeys::text || ':' || s.stxkind::text || ':' || COALESCE(pg_get_expr(s.stxexprs, s.stxrelid), '')
+			ARRAY(
+				SELECT a.attname::text
+				FROM unnest(s.stxkeys) WITH ORDINALITY AS k(attnum, position)
+				JOIN pg_attribute a ON a.attrelid = s.stxrelid AND a.attnum = k.attnum
+				ORDER BY k.position
+			)::text || ':' || s.stxkind::text || ':' || COALESCE(pg_get_expr(s.stxexprs, s.stxrelid), '')
 		FROM pg_statistic_ext s
 		JOIN pg_namespace n ON n.oid = s.stxnamespace
 		WHERE s.stxrelid = to_regclass($1)

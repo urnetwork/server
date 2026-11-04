@@ -29313,6 +29313,10 @@ with their original names, owners, targets and comments. Name collisions or
 identifier-length overflow refuse the atomic swap; rollback refuses an ambiguous
 parent/legacy counterpart. Controls cover statistics added after prepare,
 collision rollback, parent object shape and restoration of original object OIDs.
+Rollback compares statistics keys by their ordered column names: `LIKE` omits
+dropped attribute slots, so equivalent legacy and parent keys can have different
+physical attribute numbers. A native dropped-slot control accepts equivalent
+named columns and still rejects a different column under the published name.
 This is a cutover schema-preservation defect; the monitor's expression contract
 remains unchanged.
 
