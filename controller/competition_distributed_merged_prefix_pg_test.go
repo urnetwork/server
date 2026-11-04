@@ -296,7 +296,7 @@ func TestCompetitionDistributedMergedCompletionRechecksDeadlineAfterBaseline(t *
 			tb.Fatal("deadline crossing did not become a terminal timeout", retry, err)
 		}
 		stored, err := fixture.store.GetJob(ctx, settings, job.JobId, &Principal{Id: "synthetic-operator", Role: "operator"})
-		if err != nil || stored == nil || hookCalls != 1 || stored.State != "failed" || stored.Score != nil || stored.Error == nil || stored.Error.Code != "evaluation_time_budget_exhausted" ||
+		if err != nil || stored == nil || hookCalls != 1 || stored.State != "failed" || stored.Score != nil || stored.EvalError == nil || stored.EvalError.Code != "evaluation_time_budget_exhausted" ||
 			stored.StartedAt == nil || !stored.StartedAt.Equal(*job.StartedAt) || stored.ExecutionDeadline == nil || !stored.ExecutionDeadline.Equal(*job.ExecutionDeadline) ||
 			stored.AttemptCount != job.AttemptCount || stored.CompletedAt == nil || !stored.CompletedAt.Equal(*job.ExecutionDeadline) {
 			tb.Fatal("baseline wait published a late score or reset the original execution clock", stored, err)
