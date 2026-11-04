@@ -600,6 +600,7 @@ type Settings struct {
 	executorHostId               string
 	executorSlotId               int
 	executorReconcileExpiredOnly bool
+	distributedSourceCommits     map[string]string
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
 }

@@ -113,6 +113,14 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 		return err
 	}
 	frozen.automationLease, frozen.automationRoundId = &request.Lease, round.RoundId
+	if frozen.DistributedEvaluationPolicy != nil {
+		frozen.distributedSourceCommits = map[string]string{}
+		for repository, commit := range intent.Commits {
+			if repository != "operator-proxy" {
+				frozen.distributedSourceCommits[repository] = commit
+			}
+		}
+	}
 	workerStore := competitionSupervisorWorkerStore{PostgresStore: store, roundId: round.RoundId}
 	operationCtx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
