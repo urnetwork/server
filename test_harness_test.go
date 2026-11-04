@@ -580,6 +580,7 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 		filepath.Join(serverDir, "proxy"),
 		filepath.Join(serverDir, "connect", "perfvar"),
 		filepath.Join(serverDir, "fixture"),
+		filepath.Join(serverDir, "grafana"),
 	} {
 		if err := os.MkdirAll(directory, 0o700); err != nil {
 			t.Fatal(err)
@@ -594,8 +595,11 @@ func writeTestServerRunnerFixture(t *testing.T, grepScript string) (string, stri
 		t.Fatal(err)
 	}
 	files := map[string]string{
-		filepath.Join(serverDir, "test-env.sh"):                                  "#!/usr/bin/env bash\nreturn 0\n",
-		filepath.Join(serverDir, "test-dirs.sh"):                                 "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
+		filepath.Join(serverDir, "test-env.sh"):  "#!/usr/bin/env bash\nreturn 0\n",
+		filepath.Join(serverDir, "test-dirs.sh"): "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n'\n",
+		// test.sh names the dashboard tests' promtool before its first command;
+		// the synthetic go never runs it
+		filepath.Join(serverDir, "grafana", "promtool.sh"):                       "#!/usr/bin/env bash\nprintf '/synthetic/promtool\\n'\n",
 		filepath.Join(workspaceRoot, "tests", "network-intensive-suite-lock.sh"): "#!/bin/sh\n[ \"$1\" = --verify-held ] && [ \"$2\" = run-all ]\n",
 		filepath.Join(binDir, "go"): `#!/bin/sh
 printf '%s\0' "${PWD#"$URNETWORK_ROOT"/}" "${WARP_TEST_ENV_FAIL_FAST:-}" "$@" >> "$URNETWORK_ROOT/go-invocations"
