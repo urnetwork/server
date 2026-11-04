@@ -234,3 +234,72 @@ func TestCompetitionDistributedMergedFinalizeWaitsForReconciliationAndHoldReleas
 		}
 	})
 }
+
+// Exercise the existing final deadline recheck with ordinary acknowledged
+// renewals, not enlarged leases, direct timestamp edits or wall-clock sleeps.
+// The baseline-return hook alone crosses the original absolute job boundary.
+func TestCompetitionDistributedMergedCompletionRechecksDeadlineAfterBaseline(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		fixture := newCompetitionDistributedPgFixture(t, tb, true, true)
+		settings := fixture.selected(0)
+		job, err := fixture.store.Claim(ctx, settings, "synthetic-merged-deadline-worker", testWorkerImageDigest())
+		if err != nil || job == nil || job.ExecutionDeadline == nil || job.StartedAt == nil {
+			tb.Fatal("original deadline fixture did not obtain execution custody", job, err)
+		}
+		authority := withCompetitionJobAuthority(ctx, job)
+		target := job.ExecutionDeadline.Add(-time.Second)
+		step := time.Duration(settings.WorkerLeaseSeconds)*time.Second - time.Second
+		if step <= 0 {
+			tb.Fatal("fixture requires the unchanged ordinary worker lease")
+		}
+		// Move the owned clock using finite actual heartbeat/renewal calls.
+		// Both authority leases are healthy before and after the deadline
+		// boundary; none of their duration policies is widened for this test.
+		for fixture.clock.Now().Before(target) {
+			next := fixture.clock.Now().Add(step)
+			if target.Before(next) {
+				next = target
+			}
+			if !next.Add(time.Second).Before(settings.automationLease.LeaseExpiresAt) {
+				renewed, err := fixture.store.RenewAutomationLease(ctx, settings, *settings.automationLease, 5*time.Minute)
+				if err != nil {
+					tb.Fatal("ordinary supervisor renewal did not preserve deadline fixture authority", err)
+				}
+				settings.automationLease, fixture.settings.automationLease = renewed, renewed
+			}
+			fixture.clock.Advance(next.Sub(fixture.clock.Now()))
+			if err := fixture.store.Heartbeat(authority, settings, "synthetic-merged-deadline-worker", job.JobId); err != nil {
+				tb.Fatal("ordinary heartbeat did not preserve the original run", err)
+			}
+		}
+		renewed, err := fixture.store.RenewAutomationLease(ctx, settings, *settings.automationLease, 5*time.Minute)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		settings.automationLease, fixture.settings.automationLease = renewed, renewed
+		before := readCompetitionDistributedMergedHeartbeat(ctx, job.JobId)
+		if !job.ExecutionDeadline.Before(before.jobLease) || !job.ExecutionDeadline.Before(before.slotLease) || !job.ExecutionDeadline.Before(renewed.LeaseExpiresAt) {
+			tb.Fatal("deadline fixture accidentally exhausted another authority")
+		}
+		outcome := testSharedBaselineOutcome(tb, settings, job, EvaluationOutcome{Score: competitionRankingScore(90, 110), distributedArchiveVerified: true})
+		outcome.Score.Diagnostics["g2_volume_policy"] = string(settings.EvaluationPolicy.G2VolumePolicy)
+		outcome.Score.Diagnostics["scorer_version"] = settings.scorerVersion()
+		hookCalls := 0
+		fixture.store.afterCompletionBaselineForTest = func() {
+			hookCalls++
+			if hookCalls == 1 {
+				fixture.clock.Advance(time.Second)
+			}
+		}
+		if retry, err := fixture.store.Complete(authority, settings, "synthetic-merged-deadline-worker", job.JobId, outcome); err != nil || retry {
+			tb.Fatal("deadline crossing did not become a terminal timeout", retry, err)
+		}
+		stored, err := fixture.store.GetJob(ctx, settings, job.JobId, &Principal{Id: "synthetic-operator", Role: "operator"})
+		if err != nil || stored == nil || hookCalls != 1 || stored.State != "failed" || stored.Score != nil || stored.Error == nil || stored.Error.Code != "evaluation_time_budget_exhausted" ||
+			stored.StartedAt == nil || !stored.StartedAt.Equal(*job.StartedAt) || stored.ExecutionDeadline == nil || !stored.ExecutionDeadline.Equal(*job.ExecutionDeadline) ||
+			stored.AttemptCount != job.AttemptCount || stored.CompletedAt == nil || !stored.CompletedAt.Equal(*job.ExecutionDeadline) {
+			tb.Fatal("baseline wait published a late score or reset the original execution clock", stored, err)
+		}
+	})
+}
