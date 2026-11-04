@@ -186,6 +186,12 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 	if outcome.Score == nil || outcome.Error != nil || !outcome.distributedArchiveVerified || validateScore(outcome.Score) != nil || !outcome.Score.Placeable || len(outcome.ArtifactManifest) == 0 || job.ExecutionDeadline == nil || job.StartedAt == nil {
 		return nil, errors.New("no-op did not complete all scoring, containment and retention gates")
 	}
+	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+		gate, present := outcome.Score.Gates[name]
+		if !present || !gate.Passed {
+			return nil, errors.New("no-op omitted or failed a mandatory frozen score gate")
+		}
+	}
 	for _, gate := range outcome.Score.Gates {
 		if !gate.Passed {
 			return nil, errors.New("no-op failed a frozen score gate")
