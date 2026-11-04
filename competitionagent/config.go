@@ -70,6 +70,7 @@ type AgentSettings struct {
 	DiagnosticBytes       int64
 	ConfigBytes           int64
 	DirectoryBatch        int
+	InputTransferTimeout  time.Duration
 	CleanupTimeout        time.Duration
 	CleanupCommandTimeout time.Duration
 	CleanupPollInterval   time.Duration
@@ -82,7 +83,7 @@ func DefaultAgentSettings() AgentSettings {
 	return AgentSettings{ControlTimeout: 30 * time.Second, SelfCheckTimeout: 2 * time.Minute,
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
-		ConfigBytes: 64 * 1024, DirectoryBatch: 128, CleanupTimeout: 2 * time.Minute,
+		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
 		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024, Now: time.Now}
 }
 

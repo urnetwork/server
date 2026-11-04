@@ -85,7 +85,7 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 		return nil, errors.New("invalid bounded subevaluation agent owner")
 	}
 	if settings.CleanupTimeout <= 0 || settings.CleanupCommandTimeout <= 0 || settings.CleanupCommandTimeout > settings.CleanupTimeout ||
-		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 {
+		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 {
 		return nil, errors.New("invalid bounded subevaluation cleanup owner")
 	}
 	keyContent, err := readBounded(config.SigningKeyPath, settings.ConfigBytes)
@@ -203,6 +203,36 @@ func (self *Agent) start(ctx context.Context, request Request, reader io.Reader)
 	if err != nil {
 		return Response{}, err
 	}
+	// Network reads, large file hashing and fixed helper calls never own the
+	// authority lock. A stalled reconnect cannot delay post-stop resource reap.
+	incoming, err := os.MkdirTemp(self.config.WorkDirectory, ".incoming-"+request.RunId+"-")
+	if err != nil {
+		return Response{}, err
+	}
+	defer os.RemoveAll(incoming)
+	if err := self.receiveStartInputs(ctx, request, reader, incoming); err != nil {
+		return Response{}, err
+	}
+	if err := self.materializeRequest(incoming, self.workDirectory(request.RunId), *request.Start); err != nil {
+		return Response{}, err
+	}
+	cleanup, err := self.prepareCleanupPlan(ctx, *request.Start)
+	if err != nil {
+		return Response{}, err
+	}
+	cleanupBytes, err := json.Marshal(cleanup)
+	if err != nil {
+		return Response{}, err
+	}
+	if err := self.prepareWorkerOwnership(incoming); err != nil {
+		return Response{}, err
+	}
+	return self.commitStart(ctx, request, digest, incoming, cleanupBytes)
+}
+
+// Recheck immutable identity, current fence, physical slot and original clock
+// after the private transfer. Concurrent duplicate uploads cannot launch twice.
+func (self *Agent) commitStart(ctx context.Context, request Request, digest, incoming string, cleanupBytes []byte) (Response, error) {
 	lock, err := self.lock(ctx)
 	if err != nil {
 		return Response{}, err
@@ -212,10 +242,6 @@ func (self *Agent) start(ctx context.Context, request Request, reader io.Reader)
 		if state.ManifestSha256 != digest || request.FencingToken < state.FencingToken {
 			lock.Close()
 			return Response{}, errors.New("stale fence or conflicting immutable execution")
-		}
-		if err := consumeFiles(ctx, reader, request.Start.Inputs); err != nil {
-			lock.Close()
-			return Response{}, err
 		}
 		state.FencingToken = request.FencingToken
 		if err := self.storeState(request.RunId, state); err != nil {
@@ -273,45 +299,11 @@ func (self *Agent) start(ctx context.Context, request Request, reader io.Reader)
 		lock.Close()
 		return Response{}, err
 	}
-	incoming, err := os.MkdirTemp(self.config.WorkDirectory, ".incoming-"+request.RunId+"-")
-	if err != nil {
-		lock.Close()
-		return Response{}, err
-	}
-	keepIncoming := false
-	defer func() {
-		if !keepIncoming {
-			_ = os.RemoveAll(incoming)
-		}
-	}()
-	if err := ReadFiles(&contextReader{ctx: ctx, reader: reader}, incoming, request.Start.Inputs, self.config.Limits.InputBytes, self.config.Limits); err != nil {
-		lock.Close()
-		return Response{}, err
-	}
-	if err := self.materializeRequest(incoming, self.workDirectory(request.RunId), *request.Start); err != nil {
-		lock.Close()
-		return Response{}, err
-	}
-	cleanup, err := self.prepareCleanupPlan(ctx, *request.Start)
-	if err != nil {
-		lock.Close()
-		return Response{}, err
-	}
-	cleanupBytes, err := json.Marshal(cleanup)
-	if err != nil {
-		lock.Close()
-		return Response{}, err
-	}
 	cleanupDigest := sha256.Sum256(cleanupBytes)
-	if err := self.prepareWorkerOwnership(incoming); err != nil {
-		lock.Close()
-		return Response{}, err
-	}
 	if err := os.Rename(incoming, self.workDirectory(request.RunId)); err != nil {
 		lock.Close()
 		return Response{}, errors.New("run workspace already exists or cannot be committed")
 	}
-	keepIncoming = true
 	if err := syncDirectory(self.config.WorkDirectory); err != nil {
 		lock.Close()
 		return Response{}, err
@@ -1064,11 +1056,23 @@ func (self *Agent) workDirectory(runId string) string {
 
 // Cross-process locking is cancellable and bounded by the control request owner.
 func (self *Agent) lock(ctx context.Context) (*os.File, error) {
-	file, err := os.OpenFile(filepath.Join(self.config.StateDirectory, "agent.lock"), os.O_RDWR|os.O_CREATE, 0600)
+	return self.lockFile(ctx, filepath.Join(self.config.StateDirectory, "agent.lock"))
+}
+
+// Cleanup has its own run-local lock, independent of admission publication.
+func (self *Agent) lockFile(ctx context.Context, path string) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
 	if err != nil {
 		return nil, err
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			file.Close()
+			return nil, err
+		}
 		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
 			return file, nil
 		} else if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
@@ -1136,19 +1140,8 @@ func syncDirectory(path string) error {
 	return directory.Sync()
 }
 
-// Duplicate bodies are still fully authenticated without retaining them.
-func consumeFiles(ctx context.Context, reader io.Reader, files []File) error {
-	for _, file := range files {
-		digest := sha256.New()
-		count, err := io.CopyN(digest, &contextReader{ctx: ctx, reader: reader}, file.Bytes)
-		if err != nil || count != file.Bytes || hex.EncodeToString(digest.Sum(nil)) != file.Sha256 {
-			return errors.New("duplicate subevaluation body failed authentication")
-		}
-	}
-	return nil
-}
-
-// Pipe ownership remains with the SSH caller, which closes it on cancellation.
+// Transfer ownership independently interrupts a blocked read on cancellation.
+// This adapter additionally refuses consumption between reads after expiry.
 type contextReader struct {
 	ctx    context.Context
 	reader io.Reader

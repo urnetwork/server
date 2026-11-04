@@ -122,7 +122,10 @@ func (self *Agent) Cleanup(ctx context.Context, runId string) error {
 	}
 	cleanupCtx, cancel := context.WithTimeout(ctx, self.settings.CleanupTimeout)
 	defer cancel()
-	lock, err := self.lock(cleanupCtx)
+	// Physical reap never waits for admission's publication lock. Immutable
+	// manifest/plan bytes exist before launch, and unfinished cleanup retains
+	// the slot. A per-run lock only prevents duplicate cleanup subprocesses.
+	lock, err := self.lockFile(cleanupCtx, filepath.Join(self.stateDirectory(runId), "cleanup.lock"))
 	if err != nil {
 		return err
 	}
@@ -146,14 +149,23 @@ func (self *Agent) Cleanup(ctx context.Context, runId string) error {
 	if state.StopCleanupVerified && state.CleanupVerified {
 		return nil
 	}
-	// A failed or interrupted retry must never inherit an older success bit.
-	state.CleanupVerified, state.StopCleanupVerified = false, false
-	if err := self.storeState(runId, state); err != nil {
-		return err
-	}
 	if err := self.cleaner.Cleanup(cleanupCtx, *plan); err != nil {
 		return err
 	}
+	publication, err := self.lock(cleanupCtx)
+	if err != nil {
+		return err
+	}
+	defer publication.Close()
+	current, err := self.loadState(runId)
+	if err != nil {
+		return err
+	}
+	slot, err = self.loadSlot()
+	if err != nil || slot.RunId != runId || current.ManifestSha256 != state.ManifestSha256 || current.CleanupPlanSha256 != state.CleanupPlanSha256 || !current.LaunchAttempted {
+		return errors.New("cleanup custody changed before durable publication")
+	}
+	state = current
 	state.CleanupVerified, state.StopCleanupVerified = true, true
 	return self.storeState(runId, state)
 }
