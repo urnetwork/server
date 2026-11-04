@@ -42,6 +42,12 @@ var windowRemovalsDesc = prometheus.NewDesc(
 	[]string{"window", "cause"}, nil,
 )
 
+var windowBalanceProbesDesc = prometheus.NewDesc(
+	"urnetwork_proxy_window_balance_probes_total",
+	"Balance probes hosted windows sent while the payer's balance refused their contracts, by what each learned",
+	[]string{"window", "outcome"}, nil,
+)
+
 var windowsDesc = prometheus.NewDesc(
 	"urnetwork_proxy_windows",
 	"Live hosted windows by the state their last resize pass ended in",
@@ -54,6 +60,7 @@ type windowClientStatsSource interface {
 	VisitExpandPasses(visit func(window string, state string, count uint64))
 	VisitWarnings(visit func(window string, cause string, count uint64))
 	VisitRemovals(visit func(window string, cause string, count uint64))
+	VisitBalanceProbes(visit func(window string, outcome string, count uint64))
 	VisitWindows(visit func(window string, state string, count int64))
 }
 
@@ -73,6 +80,7 @@ func (self *windowClientStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- windowExpandPassesDesc
 	ch <- windowWarningsDesc
 	ch <- windowRemovalsDesc
+	ch <- windowBalanceProbesDesc
 	ch <- windowsDesc
 }
 
@@ -88,6 +96,9 @@ func (self *windowClientStatsCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 	self.stats.VisitRemovals(func(window string, cause string, count uint64) {
 		ch <- prometheus.MustNewConstMetric(windowRemovalsDesc, prometheus.CounterValue, float64(count), window, cause)
+	})
+	self.stats.VisitBalanceProbes(func(window string, outcome string, count uint64) {
+		ch <- prometheus.MustNewConstMetric(windowBalanceProbesDesc, prometheus.CounterValue, float64(count), window, outcome)
 	})
 	self.stats.VisitWindows(func(window string, state string, count int64) {
 		ch <- prometheus.MustNewConstMetric(windowsDesc, prometheus.GaugeValue, float64(count), window, state)
