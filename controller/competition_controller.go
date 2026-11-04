@@ -7277,7 +7277,13 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		case <-parent.Done():
 			cancel()
 			<-done
-			if err := self.handBackJob(job, "worker_shutdown"); err != nil {
+			// Ordinary shutdown remains reason-only; a fenced supervisor's
+			// distinct cause retains safe evidence after candidate cleanup joins.
+			shutdownCause := context.Cause(parent)
+			if shutdownCause == context.Canceled {
+				shutdownCause = nil
+			}
+			if err := self.handBackJob(job, "worker_shutdown", shutdownCause); err != nil {
 				return fmt.Errorf("hand back competition job %s: %w", job.JobId, err)
 			}
 			return parent.Err()
