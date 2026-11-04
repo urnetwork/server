@@ -1,21 +1,33 @@
 {
   "schema": 1,
   "kind": "inactive-next-epoch-g2-source-and-qualification-handoff",
-  "status": "prospective_upstream_integration_pending_fresh_mocked_developer_validation_not_activated",
+  "status": "combined_source_mocked_developer_units_165_passes_heavy_qualification_pending_not_activated",
   "observed_at": "2026-11-03T19:24:01Z",
-  "source_preparation_revised_at": "2026-11-04T03:45:35Z",
+  "source_preparation_revised_at": "2026-11-04T04:02:32Z",
   "control_source_base": "9f565f38a4cecc511649a8ee2a82415f0cd6b110",
   "original_g2_control_source_base": "23d4a3baba84dffb68b2db05007b3cf218794ce5",
   "prospective_upstream_integration_2026_11_04": {
-    "status": "private_merge_candidate_only_pending_independent_low_revalidation",
+    "status": "independent_low_combined_source_green_only_revalidation_complete",
     "g2_parent_commit": "9ab5026ce17c3047725f75e0f60d86e5f67e24d9",
     "upstream_parent_commit": "9f565f38a4cecc511649a8ee2a82415f0cd6b110",
     "existing_165_developer_passes_qualify_only": "2f991a6ac9e396d2667d70c0fe07ee9c4edd0d4c",
-    "combined_source_passes_claimed": 0,
+    "combined_source_passes_claimed": 165,
+    "combined_qualified_source_commit": "cf6e969470d6e863a80964f0d1ffdd75092d7576",
+    "combined_receipt": "/mnt/data/synthetic-g2-unit-setup-20261104.IibETXy9/combined-cf6/qualification-receipt.txt",
+    "combined_receipt_sha256": "c1e34b99d9d439c1dae63735c50bc4a6ac345ccc21050b14d48983c272a061c9",
+    "combined_race_test_elf_sha256": "8a416d599f12e7083d8a2c162d856f047759741378d829a4d3d15beee3424d95",
+    "combined_results": "Single independently bounded offline race compile exit0; three fresh processes each55 top-level passes, zero failures/skips. Each passed-name set hashes to89fe0b00ac0a07430483a25fc7bb799eea17c0dcdb2a57d423df815cb8efda45. New ELF has Go1.27.3/race/CGO1 metadata but no VCS fields; exact source is authenticated by sealed manifests/argv, not an invented ELF revision.",
+    "combined_green_log_sha256": [
+      "bc8906012d4dfc5559a1321b7c35b6f3e098c311c6702e78510b2fd4ca770dd2",
+      "406332e65197486602252c6cfa0875f89e599c9675db4f700ac393b1643636ba",
+      "151e566771391918c277289cdf6535314045ac320a20f027e954eb1e7ff2d61b"
+    ],
+    "combined_custody_as_reported": "All41605 combined source files, full module/toolchain manifests and new ELF reverified unchanged. All nine siblings retain the exact normal-control pins. Separate retained2f source/original+red ELF/evidence remained unchanged. Every combined setup/compile/test/verification group is terminal with MainPID0 and empty ControlGroup. The same explicitly approved owner-private warmed compiler cache was used, never a live scoring or test-result cache.",
+    "combined_scope_limit": "Only the same hermetic mocked55-root lane was revalidated. No new red compile/run occurred on cf6; historical red remains2f-only. No controller-suite, full source gate, service/control/evaluator artifact, actual48-root image, real Docker/provider,3h runtime, baseline or deployment qualification is claimed. This metadata-only successor changes no executable source or dependency pin from testedcf6.",
     "upstream_executable_delta": "model/provider_intent_exempt_index.go, model/verify_cohort_model.go, model/verify_dead_hop.go and model/verify_model.go; G2 Go source, go.mod/go.sum and normal-control sibling pins remain byte-identical to qualified2f.",
     "hermetic_lane_static_review": "New model initialization constructs and registers two in-memory Prometheus collectors only. New DB/Redis dead-hop operations are behind unselected verify entry points, not initialization or the mocked55 roots. Upstream model/controller/root test files are not imported into the sim-latency test executable. No new sim-latency init/TestMain, dependency declaration, selected root or real Docker/provider/network operation was introduced.",
-    "required_validation": "Independent LOW must compile a new race-test ELF from this exact private combined commit and run only the same hermetic55-root selector in three fresh bounded processes, using the unchanged locked graph and reviewed isolation. Prior165 passes and red evidence remain sealed and are not relabeled as combined-source qualification.",
-    "integration_boundary": "Do not merge or push this candidate into main until fresh independent validation and final source review. No release/artifact/source-gate build, Docker, runtime/config/policy/API/DB/hold change or G2 activation is authorized. Heavy work still requires natural empty plus durable exclusion."
+    "completed_validation": "Independent LOW compiled the new exactcf6 race-test ELF and ran only the same hermetic55-root selector in three fresh bounded processes under the unchanged locked graph and reviewed isolation. Prior2f165 passes and red evidence remain sealed and are not relabeled as cf6 qualification.",
+    "integration_boundary": "Root authorizes a source-only main checkpoint/push after this closed receipt, final review and one origin check. A newly advanced upstream executable delta is not covered and must not be chased or silently relabeled. No release/artifact/source-gate build, Docker, runtime/config/policy/API/DB/hold change or G2 activation is authorized. Heavy work still requires natural empty plus durable exclusion."
   },
   "normal_control_source_lock": {
     "path": "local/source-graph/lock.yml",
@@ -143,7 +155,7 @@
     ],
     "new_deterministic_regression_roots": 8,
     "new_or_related_tests_executed": true,
-    "execution_scope": "Independent LOW executed only the selected55 mocked developer roots in three fresh processes:165 top-level passes, zero green failures/skips. A separate deterministic red control failed the intended assertion. Exact source/custody/evidence is recorded in deferred_qualification.prospective_light_unit_lane.completed_developer_qualification; no actual48-root image or runtime gate ran.",
+    "execution_scope": "Independent LOW completed separate2f and cf6 source qualifications, each with only the selected55 mocked developer roots in three fresh processes:165 top-level passes, zero green failures/skips per source. The deterministic red assertion belongs only to the earlier2f attempt; no new red ran on cf6. Exact source/custody/evidence is recorded separately below and in prospective_upstream_integration_2026_11_04; no actual48-root image or runtime gate ran.",
     "formatting": "The source-preparation agent used actual installed Go1.27.3 gofmt and git diff --check only; independent developer test evidence is separately recorded and is not runtime qualification.",
     "old_minimum_work_attempt_rule": "Any pre-existing old-suite reservation remains immutable and blocks a changed plan. Never delete, relabel or reset it to rerun qualification. Reconcile its actual owner and evidence."
   },
@@ -220,7 +232,7 @@
     },
     "closed_graph_requirement": "Freeze the corrected normal-control server commit plus all nine exact sibling commits from its lock in independent clean checkouts. The implementation worktree alone lacks those sibling checkouts and is not a runnable or qualified graph. Bind source, modules and actual toolchain read-only; retain before/after manifests.",
     "prospective_light_unit_lane": {
-      "status": "completed_for_2f_source_only_prospective_upstream_merge_pending_fresh_revalidation",
+      "status": "completed_separately_for_2f_and_cf6_mocked_source_scopes_not_image_or_runtime_qualification",
       "run_now": false,
       "any_further_corrected_source_attempt_requires_new_root_authorization": true,
       "root_reviewed_light_compile_and_unit_authority": true,
@@ -354,7 +366,7 @@
         "provider_keys_main_credentials_and_dial_attestations": "unset; retain the default-deny local dial guard; do not set URNETWORK_TEST_REAL_VAULT or SIM_LATENCY_G2_BRIDGE_REAL"
       },
       "git_subprocess_policy": "env-i clears GIT_DIR/WORK_TREE/COMMON_DIR, alternates, author overrides and SSH agent. Set GIT_CONFIG_NOSYSTEM=1 with system/global config=/dev/null, GIT_TERMINAL_PROMPT=0, GIT_ASKPASS=/bin/false, GIT_NO_LAZY_FETCH=1 and an empty private template. Command-scope config disables hooks/fsmonitor/credentials/gc/maintenance and all transports; trust only the exact closed server checkout if precompilation needs VCS metadata, never wildcard trust. Fixture commits use their own synthetic local identity.",
-      "scope_limit": "The completed light lane proves only these mocked development regressions on exact2f executable source and its recorded graph. This metadata-only successor changes no Go source. It does not qualify the full normal source gate, four control binaries, actual G2 image48-root execution, real containment/provider access,3h runtime, baseline, API deployment or source activation. Actual Docker, service/source-gate builds, control/evaluator artifact builds and timed runtime gates remain subject to natural empty plus durable exclusion."
+      "scope_limit": "The completed_developer_qualification record below binds only exact2f; the separate prospective_upstream_integration_2026_11_04 record binds only exactcf6 green revalidation. This metadata-only successor ofcf6 changes no Go source. Neither record qualifies the full normal source gate, four control binaries, actual G2 image48-root execution, real containment/provider access,3h runtime, baseline, API deployment or source activation. Actual Docker, service/source-gate builds, control/evaluator artifact builds and timed runtime gates remain subject to natural empty plus durable exclusion."
     },
     "management_limits": {
       "cpu_set": "20,22",
@@ -405,7 +417,7 @@
         "verify": "Same corrected normal-control source/graph/toolchain as the other three programs; regenerate host qualification and whole-tuple provenance coherently."
       }
     ],
-    "deterministic_red_control": "Completed before the three fresh green runs in the separate corrected developer attempt: a disposable source copy plus Go overlay forced the event parser to require the historical census for minimum-work. TestSourceMinimumWorkQualificationRejectsLegacyOnlyCorrectness failed exactly its intended legacy-only-census assertion. Original corrected source/ELF and approved patch were untouched; separate red source/overlay/ELF/failed JSON remain preserved. This is developer regression proof, not permission to edit or repeat any sealed build/test journal.",
+    "deterministic_red_control": "Completed only on source2f before its three fresh green runs: a disposable source copy plus Go overlay forced the event parser to require the historical census for minimum-work. TestSourceMinimumWorkQualificationRejectsLegacyOnlyCorrectness failed exactly its intended legacy-only-census assertion. Original corrected source/ELF and approved patch were untouched; separate red source/overlay/ELF/failed JSON remain preserved. No new red compile/run occurred on cf6. This is developer regression proof, not permission to edit or repeat any sealed build/test journal.",
     "minimum_rebuild_before_production_image_qualification": "Rebuild and independently qualify ALL FOUR programs: sim-latency, competitionworker, competitionprepare and competitionqualify from the corrected compatible clean normal-control source. Existing4f executables cannot acquire the suite correction and predate current8c archive/claim/recovery fixes. Never reinstall that old worker. Do not overwrite immutable releases. Regenerate coherent native/wrapper/config/provenance/whole-tuple pins, preserving both separately bound legacy and minimum-work baseline roles, and qualify the current recovery schema before any future activation. The technical-only test probe below is a separate non-production route, not permission to activate an old bundle.",
     "pre_election_technical_instrument_image": {
       "purpose": "Build and technically prequalify a NEW real G2 instrument image before epoch one ends, using only the frozen incumbent product and the unchanged approved overlay. This is independent of the later winner election; it declares neither no winner nor incumbent carry.",
