@@ -56,6 +56,7 @@ type Identity struct {
 	RunId       string    `json:"run_id"`
 	JobId       string    `json:"job_id"`
 	RoundId     string    `json:"round_id"`
+	RoundEpoch  int       `json:"round_epoch"`
 	SourceEpoch int       `json:"source_epoch"`
 	Cycle       int       `json:"cycle"`
 	Attempt     int       `json:"attempt"`
@@ -74,7 +75,7 @@ var digestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // Time is checked without replacing the signed clock with an agent-local one.
 func (self Identity) Validate(limits Limits) error {
-	if !namePattern.MatchString(self.HostId) || self.JobId == "" || self.RoundId == "" || self.SourceEpoch < 2 || self.SourceEpoch > 6 || self.Cycle < 0 || self.Attempt < 1 ||
+	if !namePattern.MatchString(self.HostId) || self.JobId == "" || self.RoundId == "" || self.RoundEpoch < 2 || self.RoundEpoch > 6 || self.SourceEpoch < 0 || self.SourceEpoch > 6 || self.Cycle < 0 || self.Attempt < 1 ||
 		self.RunId != RunId(self.JobId, self.Cycle, self.Attempt) || self.StartedAt.IsZero() || !self.StartedAt.Before(self.DeadlineAt) ||
 		limits.MaximumJobDuration < self.DeadlineAt.Sub(self.StartedAt) {
 		return errors.New("invalid immutable subevaluation identity")

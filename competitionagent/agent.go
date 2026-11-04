@@ -110,6 +110,12 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 		if err != nil {
 			return nil, err
 		}
+		accessCtx, cancel := context.WithTimeout(context.Background(), settings.ControlTimeout)
+		err = verifyWorkerRuntimeAccess(accessCtx, config, credential, probeWorkerRuntimeAccess)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(filepath.Join(config.StateDirectory, "runs"), 0700); err != nil {
 		return nil, err

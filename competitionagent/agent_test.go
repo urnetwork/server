@@ -150,7 +150,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		digest := sha256.Sum256(content)
 		files = append(files, File{Path: name, Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))})
 	}
-	identity := Identity{HostId: fixture.config.HostId, JobId: "synthetic-job", RoundId: "synthetic-round", SourceEpoch: 2, Cycle: 0, Attempt: 1, StartedAt: fixture.now, DeadlineAt: fixture.now.Add(3 * time.Hour)}
+	identity := Identity{HostId: fixture.config.HostId, JobId: "synthetic-job", RoundId: "synthetic-round", RoundEpoch: 2, SourceEpoch: 0, Cycle: 0, Attempt: 1, StartedAt: fixture.now, DeadlineAt: fixture.now.Add(3 * time.Hour)}
 	identity.RunId = RunId(identity.JobId, identity.Cycle, identity.Attempt)
 	policy, err := json.Marshal(map[string]any{"host_qualification_sha256": fixture.config.QualificationSha256, "config_local_sha256": fixture.config.ConfigLocalSha256,
 		"vault_local_sha256": fixture.config.VaultLocalSha256, "score_timeout_seconds": 10800, "g2_volume_policy": "minimum-work/1"})
@@ -236,6 +236,39 @@ func (self *agentTestFixture) anotherManifest(t *testing.T, jobId string, attemp
 		t.Fatal(err)
 	}
 	return manifest
+}
+
+// A later competition epoch may carry the same reviewed source generation.
+// Round admission and measured source identity must never be conflated.
+func TestAgentAdmitsEpochTwoAndLaterCarriedSourceGenerations(t *testing.T) {
+	for _, epochs := range []struct{ round, source int }{{round: 2, source: 0}, {round: 2, source: 1}, {round: 6, source: 1}} {
+		fixture := newAgentTestFixture(t)
+		manifest := fixture.manifest
+		manifest.Identity.RoundEpoch, manifest.Identity.SourceEpoch = epochs.round, epochs.source
+		request, err := decodeEvaluatorRequest(manifest.EvaluatorRequest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.SourceEpoch = epochs.source
+		manifest.EvaluatorRequest, err = json.Marshal(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := fixture.call(t, "start", 1, &manifest); err != nil || fixture.runner.launchCount() != 1 {
+			t.Fatalf("round %d carrying source %d was rejected: %v", epochs.round, epochs.source, err)
+		}
+	}
+}
+
+// Distributed execution cannot be retroactively enabled for epoch one even
+// when its source generation happens to look like a later generation number.
+func TestAgentRejectsEpochOneDespiteLaterSourceGeneration(t *testing.T) {
+	fixture := newAgentTestFixture(t)
+	manifest := fixture.manifest
+	manifest.Identity.RoundEpoch, manifest.Identity.SourceEpoch = 1, 2
+	if _, err := fixture.call(t, "start", 1, &manifest); err == nil || fixture.runner.launchCount() != 0 {
+		t.Fatal("epoch-one work reached the distributed execution role")
+	}
 }
 
 // A dropped SSH acknowledgement and a fresh process cannot repeat dispatch.

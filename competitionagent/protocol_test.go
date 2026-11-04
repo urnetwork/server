@@ -87,7 +87,7 @@ func TestRequestAuthenticationBindsClockInputsAndOwnerFence(t *testing.T) {
 	}
 	startedAt := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
 	request := Request{Schema: Schema, Operation: "start", HostId: "executor.example", RunId: RunId("synthetic-job", 0, 1), FencingToken: 1,
-		Start: &StartManifest{Identity: Identity{HostId: "executor.example", RunId: RunId("synthetic-job", 0, 1), JobId: "synthetic-job", RoundId: "synthetic-round", SourceEpoch: 2,
+		Start: &StartManifest{Identity: Identity{HostId: "executor.example", RunId: RunId("synthetic-job", 0, 1), JobId: "synthetic-job", RoundId: "synthetic-round", RoundEpoch: 2, SourceEpoch: 0,
 			Attempt: 1, StartedAt: startedAt, DeadlineAt: startedAt.Add(3 * time.Hour)}}}
 	if err := SignRequest(&request, privateKey); err != nil || VerifyRequest(request, publicKey) != nil {
 		t.Fatalf("valid request did not authenticate: %v", err)
