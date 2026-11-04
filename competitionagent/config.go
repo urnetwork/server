@@ -41,6 +41,11 @@ type Config struct {
 	Evaluator                  Pin    `json:"evaluator"`
 	SelfCheck                  Pin    `json:"self_check"`
 	Agent                      Pin    `json:"agent"`
+	Docker                     Pin    `json:"docker"`
+	DockerSocketPath           string `json:"docker_socket_path"`
+	SubmissionBuilderIdentity  Pin    `json:"submission_builder_identity"`
+	SubmissionBuilderSha256    string `json:"submission_builder_sha256"`
+	JsonFormatter              Pin    `json:"json_formatter"`
 	ConfigLocalDirectory       string `json:"config_local_directory"`
 	VaultLocalDirectory        string `json:"vault_local_directory"`
 	ConfigLocalSha256          string `json:"config_local_sha256"`
@@ -57,15 +62,19 @@ type Config struct {
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
 // values are invalid; Now is a test seam and is never accepted from a peer.
 type AgentSettings struct {
-	ControlTimeout   time.Duration
-	SelfCheckTimeout time.Duration
-	CancelGrace      time.Duration
-	LockPollInterval time.Duration
-	MaximumClockSkew time.Duration
-	DiagnosticBytes  int64
-	ConfigBytes      int64
-	DirectoryBatch   int
-	Now              func() time.Time
+	ControlTimeout        time.Duration
+	SelfCheckTimeout      time.Duration
+	CancelGrace           time.Duration
+	LockPollInterval      time.Duration
+	MaximumClockSkew      time.Duration
+	DiagnosticBytes       int64
+	ConfigBytes           int64
+	DirectoryBatch        int
+	CleanupTimeout        time.Duration
+	CleanupCommandTimeout time.Duration
+	CleanupPollInterval   time.Duration
+	CleanupObjectCount    int
+	Now                   func() time.Time
 }
 
 // Control calls are short; only the detached systemd service owns evaluation.
@@ -73,7 +82,8 @@ func DefaultAgentSettings() AgentSettings {
 	return AgentSettings{ControlTimeout: 30 * time.Second, SelfCheckTimeout: 2 * time.Minute,
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
-		ConfigBytes: 64 * 1024, DirectoryBatch: 128, Now: time.Now}
+		ConfigBytes: 64 * 1024, DirectoryBatch: 128, CleanupTimeout: 2 * time.Minute,
+		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024, Now: time.Now}
 }
 
 // Only an explicitly pinned path may select the role; unknown fields fail closed.
@@ -101,6 +111,7 @@ func LoadConfig(path string) (*Config, error) {
 func (self *Config) validate(protected bool) error {
 	if self == nil || self.Schema != Schema || !namePattern.MatchString(self.HostId) || self.WorkerUser == "" || self.TrustedOperatorUser == "" || self.ExpectedDataDeviceId == 0 ||
 		!digestPattern.MatchString(self.SourceLockSha256) || !digestPattern.MatchString(self.QualificationSha256) ||
+		!digestPattern.MatchString(self.SubmissionBuilderSha256) ||
 		!digestPattern.MatchString(self.ConfigLocalSha256) || !digestPattern.MatchString(self.VaultLocalSha256) ||
 		!strings.HasPrefix(self.EvaluatorImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(self.EvaluatorImageDigest, "sha256:")) {
 		return errors.New("invalid subevaluation agent configuration")
@@ -168,7 +179,7 @@ func (self *Config) validate(protected bool) error {
 			}
 		}
 	}
-	for _, pin := range []Pin{self.Evaluator, self.SelfCheck, self.Agent} {
+	for _, pin := range []Pin{self.Evaluator, self.SelfCheck, self.Agent, self.Docker, self.SubmissionBuilderIdentity, self.JsonFormatter} {
 		if err := validatePin(pin, protected); err != nil {
 			return err
 		}
@@ -178,6 +189,11 @@ func (self *Config) validate(protected bool) error {
 		return errors.New("invalid independent coordinator public key")
 	}
 	if protected {
+		// The frozen evaluator uses the local default daemon. A different endpoint
+		// needs a separately qualified evaluator release, never a cleanup-only override.
+		if self.DockerSocketPath != "/run/docker.sock" {
+			return errors.New("cleanup endpoint must match the qualified evaluator's local Docker daemon")
+		}
 		if err := protectedRootPath(self.configPath, false, true); err != nil {
 			return err
 		}

@@ -27,6 +27,7 @@ type Agent struct {
 	config               Config
 	settings             AgentSettings
 	runner               Runner
+	cleaner              runCleaner
 	coordinatorPublicKey ed25519.PublicKey
 	signingKey           ed25519.PrivateKey
 	credential           *syscall.Credential
@@ -36,18 +37,20 @@ type Agent struct {
 // State and hidden-input manifests live outside the unprivileged run directory.
 // LaunchAttempted is fsynced before the only possible service-start operation.
 type runState struct {
-	Schema           int    `json:"schema"`
-	ManifestSha256   string `json:"manifest_sha256"`
-	FencingToken     int64  `json:"fencing_token"`
-	LaunchAttempted  bool   `json:"launch_attempted"`
-	ExecutionStarted bool   `json:"execution_started"`
-	CancelRequested  bool   `json:"cancel_requested"`
-	CleanupVerified  bool   `json:"cleanup_verified"`
-	State            string `json:"state"`
-	RequestSha256    string `json:"request_sha256"`
-	ExitCode         int    `json:"exit_code"`
-	ErrorCode        string `json:"error_code,omitempty"`
-	Files            []File `json:"files,omitempty"`
+	Schema              int    `json:"schema"`
+	ManifestSha256      string `json:"manifest_sha256"`
+	FencingToken        int64  `json:"fencing_token"`
+	LaunchAttempted     bool   `json:"launch_attempted"`
+	ExecutionStarted    bool   `json:"execution_started"`
+	CancelRequested     bool   `json:"cancel_requested"`
+	CleanupVerified     bool   `json:"cleanup_verified"`
+	StopCleanupVerified bool   `json:"stop_cleanup_verified"`
+	CleanupPlanSha256   string `json:"cleanup_plan_sha256"`
+	State               string `json:"state"`
+	RequestSha256       string `json:"request_sha256"`
+	ExitCode            int    `json:"exit_code"`
+	ErrorCode           string `json:"error_code,omitempty"`
+	Files               []File `json:"files,omitempty"`
 }
 
 // A retained unknown run continues occupying the physical slot. Reboot or SSH
@@ -80,6 +83,10 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	if runner == nil || settings.ControlTimeout <= 0 || settings.SelfCheckTimeout <= 0 || settings.CancelGrace <= 0 || settings.LockPollInterval <= 0 ||
 		settings.MaximumClockSkew <= 0 || settings.DiagnosticBytes <= 0 || settings.ConfigBytes <= 0 || settings.DirectoryBatch <= 0 || settings.Now == nil {
 		return nil, errors.New("invalid bounded subevaluation agent owner")
+	}
+	if settings.CleanupTimeout <= 0 || settings.CleanupCommandTimeout <= 0 || settings.CleanupCommandTimeout > settings.CleanupTimeout ||
+		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 {
+		return nil, errors.New("invalid bounded subevaluation cleanup owner")
 	}
 	keyContent, err := readBounded(config.SigningKeyPath, settings.ConfigBytes)
 	if err != nil {
@@ -126,7 +133,7 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	if err := syncDirectory(config.StateDirectory); err != nil {
 		return nil, err
 	}
-	return &Agent{config: *config, settings: settings, runner: runner, coordinatorPublicKey: publicKey,
+	return &Agent{config: *config, settings: settings, runner: runner, cleaner: newHostCleaner(*config, settings), coordinatorPublicKey: publicKey,
 		signingKey: privateKey, credential: credential, protected: protected}, nil
 }
 
@@ -217,6 +224,10 @@ func (self *Agent) start(ctx context.Context, request Request, reader io.Reader)
 		}
 		launch := !state.LaunchAttempted && state.State == "accepted"
 		if launch {
+			if _, err := self.loadCleanupPlan(request.RunId, state, request.Start); err != nil {
+				lock.Close()
+				return Response{}, err
+			}
 			if !self.settings.Now().UTC().Before(request.Start.Identity.DeadlineAt) {
 				state.State, state.ErrorCode, state.CleanupVerified = "expired", "deadline_elapsed_before_launch", true
 				if err := self.storeState(request.RunId, state); err != nil {
@@ -281,6 +292,17 @@ func (self *Agent) start(ctx context.Context, request Request, reader io.Reader)
 		lock.Close()
 		return Response{}, err
 	}
+	cleanup, err := self.prepareCleanupPlan(ctx, *request.Start)
+	if err != nil {
+		lock.Close()
+		return Response{}, err
+	}
+	cleanupBytes, err := json.Marshal(cleanup)
+	if err != nil {
+		lock.Close()
+		return Response{}, err
+	}
+	cleanupDigest := sha256.Sum256(cleanupBytes)
 	if err := self.prepareWorkerOwnership(incoming); err != nil {
 		lock.Close()
 		return Response{}, err
@@ -312,13 +334,17 @@ func (self *Agent) start(ctx context.Context, request Request, reader io.Reader)
 		lock.Close()
 		return Response{}, err
 	}
+	if err := atomicFile(self.stateDirectory(request.RunId), "cleanup-plan.json", cleanupBytes); err != nil {
+		lock.Close()
+		return Response{}, err
+	}
 	requestFile, err := self.fileDigest(self.workDirectory(request.RunId), "worker-request.json")
 	if err != nil {
 		lock.Close()
 		return Response{}, err
 	}
 	state = &runState{Schema: Schema, ManifestSha256: digest, FencingToken: request.FencingToken,
-		State: "accepted", RequestSha256: requestFile.Sha256, ExitCode: -1}
+		State: "accepted", RequestSha256: requestFile.Sha256, CleanupPlanSha256: hex.EncodeToString(cleanupDigest[:]), ExitCode: -1}
 	if err := self.storeState(request.RunId, state); err != nil {
 		lock.Close()
 		return Response{}, err
@@ -389,16 +415,21 @@ func (self *Agent) status(ctx context.Context, request Request) (Response, error
 	}
 	response := self.response(manifest, state)
 	lock.Close()
-	if terminalState(state.State) || !state.LaunchAttempted {
+	if !state.LaunchAttempted {
 		return response, nil
 	}
 	controlCtx, cancel := context.WithTimeout(ctx, self.settings.ControlTimeout)
 	defer cancel()
 	unit, statusErr := self.runner.Status(controlCtx, unitName(request.RunId))
+	if terminalState(state.State) && state.StopCleanupVerified && statusErr == nil && !unit.Active {
+		return response, nil
+	}
 	if statusErr != nil || !unit.Exists {
 		response.State, response.ErrorCode = "unknown", "launch_outcome_unknown"
 	} else if unit.Active {
-		if state.ExecutionStarted {
+		if terminalState(state.State) {
+			response.State, response.ErrorCode = "unknown", "stop_cleanup_pending"
+		} else if state.ExecutionStarted {
 			response.State = "running"
 		} else {
 			response.State = "accepted"
@@ -418,12 +449,23 @@ func (self *Agent) status(ctx context.Context, request Request) (Response, error
 }
 
 // A service which exited before committing an inventory cannot report success.
-// Cleanup plus an inactive service can recover terminal failure evidence without
-// replaying execution; a missing unit is considered only after its old deadline.
+// An exact scoped cleanup plus an inactive service can recover terminal failure
+// evidence without replaying execution. Historical self-check markers cannot
+// prove this run's cleanup. A missing unit is considered only after its deadline.
 func (self *Agent) reconcileStopped(ctx context.Context, request Request, manifest *StartManifest, unit UnitStatus) (Response, error) {
-	cleanupVerified := self.cleanupVerified(request.RunId)
-	if !cleanupVerified {
-		cleanupVerified = self.probeCleanup(ctx)
+	if err := self.Cleanup(ctx, request.RunId); err != nil {
+		lock, lockErr := self.lock(ctx)
+		if lockErr != nil {
+			return Response{}, lockErr
+		}
+		defer lock.Close()
+		state, loadErr := self.loadState(request.RunId)
+		if loadErr != nil {
+			return Response{}, loadErr
+		}
+		response := self.response(manifest, state)
+		response.State, response.ErrorCode = "unknown", "cleanup_not_verified"
+		return response, nil
 	}
 	files, artifactErr := self.collectFiles(self.workDirectory(request.RunId))
 	lock, err := self.lock(ctx)
@@ -442,10 +484,7 @@ func (self *Agent) reconcileStopped(ctx context.Context, request Request, manife
 		return self.response(manifest, state), nil
 	}
 	state.State, state.ErrorCode, state.ExitCode = "failed", "executor_exit_uncommitted", unit.ExitCode
-	state.CleanupVerified = cleanupVerified
-	if !cleanupVerified {
-		state.ErrorCode = "cleanup_not_verified"
-	}
+	state.CleanupVerified = true
 	if artifactErr == nil {
 		state.Files = files
 	} else {
@@ -513,6 +552,10 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 		lock.Close()
 		return err
 	}
+	if _, err := self.loadCleanupPlan(runId, state, manifest); err != nil {
+		lock.Close()
+		return err
+	}
 	if err := self.validateManifest(*manifest); err != nil {
 		lock.Close()
 		return err
@@ -556,10 +599,6 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 	evaluationCanceled := evaluationCtx.Err() != nil
 	cancel()
 	files, artifactErr := self.collectFiles(self.workDirectory(runId))
-	cleanupVerified := self.cleanupVerified(runId)
-	if !cleanupVerified {
-		cleanupVerified = self.probeCleanup(context.WithoutCancel(ctx))
-	}
 	completionCtx, completionCancel := context.WithTimeout(context.WithoutCancel(ctx), self.settings.ControlTimeout)
 	defer completionCancel()
 	lock, err = self.lock(completionCtx)
@@ -571,16 +610,15 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 	if err != nil {
 		return err
 	}
-	state.ExitCode, state.Files, state.CleanupVerified = exitCode, files, cleanupVerified
+	// Normal result cleanup is an evaluator gate, not proof that Docker/BuildKit
+	// resources outside this service cgroup have joined. ExecStopPost owns that.
+	state.ExitCode, state.Files, state.CleanupVerified, state.StopCleanupVerified = exitCode, files, false, false
 	state.State, state.ErrorCode = "succeeded", ""
 	if runErr != nil || exitCode != 0 {
 		state.State, state.ErrorCode = "failed", "evaluator_process_failed"
 	}
 	if artifactErr != nil {
 		state.State, state.ErrorCode, state.Files = "failed", "artifact_authentication_failed", nil
-	}
-	if !cleanupVerified {
-		state.State, state.ErrorCode = "failed", "cleanup_not_verified"
 	}
 	if state.CancelRequested || evaluationCanceled {
 		state.State, state.ErrorCode = "canceled", "evaluation_canceled"
@@ -628,7 +666,7 @@ func (self *Agent) requireFreeSlot(ctx context.Context, runId string) error {
 		return err
 	}
 	state, err := self.loadState(slot.RunId)
-	if err != nil || !terminalState(state.State) || !state.CleanupVerified {
+	if err != nil || !terminalState(state.State) || !state.CleanupVerified || state.LaunchAttempted && !state.StopCleanupVerified {
 		return errors.New("physical executor slot is occupied or cleanup is uncertain")
 	}
 	if state.LaunchAttempted {
@@ -855,44 +893,6 @@ func (self *Agent) authenticateInputFiles(manifest StartManifest) error {
 	return nil
 }
 
-// Only the trusted evaluator's final cleanup proof permits reuse of the host.
-func (self *Agent) cleanupVerified(runId string) bool {
-	content, err := readBounded(filepath.Join(self.workDirectory(runId), "worker-result.json"), self.config.Limits.DocumentBytes)
-	if err != nil {
-		return false
-	}
-	defer clear(content)
-	var result struct {
-		Schema   int    `json:"schema"`
-		JobId    string `json:"job_id"`
-		Security struct {
-			CleanupComplete bool `json:"cleanup_complete"`
-		} `json:"security"`
-	}
-	if json.Unmarshal(content, &result) != nil || result.Schema != 1 || !result.Security.CleanupComplete {
-		return false
-	}
-	state, err := self.loadState(runId)
-	if err != nil {
-		return false
-	}
-	manifest, err := self.loadManifest(runId, state.ManifestSha256)
-	return err == nil && result.JobId == manifest.Identity.JobId
-}
-
-// The checker independently proves leftover-resource cleanup for failed runs
-// which produced no final result. No scoring claim is inferred from this probe.
-func (self *Agent) probeCleanup(ctx context.Context) bool {
-	response, err := self.check(ctx)
-	if err != nil || len(response.SelfCheck) == 0 {
-		return false
-	}
-	var proof struct {
-		CleanupVerified bool `json:"cleanup_verified"`
-	}
-	return json.Unmarshal(response.SelfCheck, &proof) == nil && proof.CleanupVerified
-}
-
 // The terminal inventory bounds work examined, not just files returned. It
 // rejects links, devices, deep trees and excess directories before hashing data.
 func (self *Agent) collectFiles(root string) ([]File, error) {
@@ -983,7 +983,7 @@ func (self *Agent) loadState(runId string) (*runState, error) {
 	if err := decodeStrict(content, state); err != nil {
 		return nil, err
 	}
-	if state.Schema != Schema || state.FencingToken <= 0 || !digestPattern.MatchString(state.ManifestSha256) || !digestPattern.MatchString(state.RequestSha256) {
+	if state.Schema != Schema || state.FencingToken <= 0 || !digestPattern.MatchString(state.ManifestSha256) || !digestPattern.MatchString(state.RequestSha256) || !digestPattern.MatchString(state.CleanupPlanSha256) {
 		return nil, errors.New("invalid durable subevaluation state")
 	}
 	return state, nil

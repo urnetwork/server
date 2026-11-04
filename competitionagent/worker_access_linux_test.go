@@ -30,7 +30,8 @@ func TestWorkerRuntimeAccessRejectsMissingTraversePermission(t *testing.T) {
 // mode broadening; every direct local fixture and trusted command is checked.
 func TestWorkerRuntimeAccessChecksFixtureAndExecutablePermissions(t *testing.T) {
 	config := &Config{WorkDirectory: "/synthetic-runtime/jobs", ConfigLocalDirectory: "/synthetic-fixtures/config/local", VaultLocalDirectory: "/synthetic-fixtures/vault/local",
-		Evaluator: Pin{Path: "/synthetic-release/evaluator"}, SelfCheck: Pin{Path: "/synthetic-release/self-check"}}
+		Evaluator: Pin{Path: "/synthetic-release/evaluator"}, SelfCheck: Pin{Path: "/synthetic-release/self-check"},
+		SubmissionBuilderIdentity: Pin{Path: "/synthetic-release/builder-identity"}, JsonFormatter: Pin{Path: "/synthetic-release/jq"}}
 	credential := &syscall.Credential{Uid: 65534, Gid: 65534}
 	paths := map[string]int{}
 	err := verifyWorkerRuntimeAccess(context.Background(), config, credential, func(_ context.Context, predicate, path string, actual *syscall.Credential) error {
@@ -40,7 +41,7 @@ func TestWorkerRuntimeAccessChecksFixtureAndExecutablePermissions(t *testing.T) 
 		paths[path]++
 		return nil
 	})
-	if err != nil || paths[config.WorkDirectory] != 1 || paths[config.ConfigLocalDirectory] != 2 || paths[config.VaultLocalDirectory] != 2 || paths[config.Evaluator.Path] != 2 || paths[config.SelfCheck.Path] != 1 {
+	if err != nil || paths[config.WorkDirectory] != 1 || paths[config.ConfigLocalDirectory] != 2 || paths[config.VaultLocalDirectory] != 2 || paths[config.Evaluator.Path] != 2 || paths[config.SelfCheck.Path] != 1 || paths[config.SubmissionBuilderIdentity.Path] != 2 || paths[config.JsonFormatter.Path] != 1 {
 		t.Fatalf("required worker access was not completely checked: paths=%v err=%v", paths, err)
 	}
 }

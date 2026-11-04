@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -85,6 +86,7 @@ type agentTestFixture struct {
 	config         *Config
 	settings       AgentSettings
 	runner         *agentTestRunner
+	cleaner        *agentTestCleaner
 	coordinatorKey ed25519.PrivateKey
 	agentPublicKey ed25519.PublicKey
 	manifest       StartManifest
@@ -116,8 +118,9 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	if err := os.WriteFile(keyPath, []byte(base64.StdEncoding.EncodeToString(agentKey.Seed())), 0600); err != nil {
 		t.Fatal(err)
 	}
-	program := "#!/bin/sh\nset -eu\nresult=$4\nprintf '%s\\n' '{\"schema\":1,\"job_id\":\"synthetic-job\",\"security\":{\"cleanup_complete\":true}}' > \"$result\"\nprintf '%s\\n' once > process-invocations.txt\nenv > process-environment.txt\n"
+	program := "#!/bin/sh\nset -eu\nresult=$4\nprintf '%s\\n' '{\"schema\":1,\"job_id\":\"11111111-1111-4111-8111-111111111111\",\"security\":{\"cleanup_complete\":true}}' > \"$result\"\nprintf '%s\\n' once > process-invocations.txt\nenv > process-environment.txt\n"
 	evaluatorPath, selfCheckPath, agentPath := filepath.Join(root, "evaluator"), filepath.Join(root, "self-check"), filepath.Join(root, "agent")
+	builderPath, formatterPath := filepath.Join(root, "builder-identity"), filepath.Join(root, "json-formatter")
 	if err := os.WriteFile(evaluatorPath, []byte(program), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -127,10 +130,19 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	if err := os.WriteFile(agentPath, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	builderSha256 := strings.Repeat("e", 64)
+	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/v2\",\"builder_sha256\":\""+builderSha256+"\"}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(formatterPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"allowed_paths\":[\"server/example.go\"],\"forbidden_paths\":[\"server/connect/sim-latency/**\"],\"max_patch_bytes\":1024}'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	fixture := &agentTestFixture{inputDirectory: inputDirectory, coordinatorKey: coordinatorKey, agentPublicKey: agentPublicKey,
 		runner: &agentTestRunner{units: map[string]UnitStatus{}}, now: time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)}
 	fixture.config = &Config{Schema: Schema, HostId: "synthetic-executor", BaseDirectory: root, TrustedOperatorUser: "synthetic-operator", ExpectedDataDeviceId: 1, StateDirectory: stateDirectory, WorkDirectory: workDirectory, WorkerUser: "synthetic-worker",
 		Evaluator: testAgentPin(t, evaluatorPath), SelfCheck: testAgentPin(t, selfCheckPath), Agent: testAgentPin(t, agentPath),
+		Docker: testAgentPin(t, agentPath), DockerSocketPath: "/synthetic/docker.sock", SubmissionBuilderIdentity: testAgentPin(t, builderPath),
+		SubmissionBuilderSha256: builderSha256, JsonFormatter: testAgentPin(t, formatterPath),
 		ConfigLocalDirectory: configDirectory, VaultLocalDirectory: vaultDirectory, ConfigLocalSha256: strings.Repeat("1", 64), VaultLocalSha256: strings.Repeat("2", 64),
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64), QualificationSha256: strings.Repeat("5", 64),
 		CoordinatorPublicKeyBase64: base64.StdEncoding.EncodeToString(coordinatorKey.Public().(ed25519.PublicKey)), SigningKeyPath: keyPath, Limits: DefaultLimits(), configPath: filepath.Join(root, "agent.json")}
@@ -140,6 +152,8 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixture.cleaner = &agentTestCleaner{}
+	fixture.agent.cleaner = fixture.cleaner
 	contents := map[string][]byte{"canonical.patch": {}, "providers.yml": []byte("synthetic-workload\n"), "round-baseline.json": []byte("{\"synthetic_baseline\":true}\n")}
 	files := []File{}
 	for _, name := range []string{"canonical.patch", "providers.yml", "round-baseline.json"} {
@@ -150,7 +164,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		digest := sha256.Sum256(content)
 		files = append(files, File{Path: name, Sha256: hex.EncodeToString(digest[:]), Bytes: int64(len(content))})
 	}
-	identity := Identity{HostId: fixture.config.HostId, JobId: "synthetic-job", RoundId: "synthetic-round", RoundEpoch: 2, SourceEpoch: 0, Cycle: 0, Attempt: 1, StartedAt: fixture.now, DeadlineAt: fixture.now.Add(3 * time.Hour)}
+	identity := Identity{HostId: fixture.config.HostId, JobId: "11111111-1111-4111-8111-111111111111", RoundId: "22222222-2222-4222-8222-222222222222", RoundEpoch: 2, SourceEpoch: 0, Cycle: 0, Attempt: 1, StartedAt: fixture.now, DeadlineAt: fixture.now.Add(3 * time.Hour)}
 	identity.RunId = RunId(identity.JobId, identity.Cycle, identity.Attempt)
 	policy, err := json.Marshal(map[string]any{"host_qualification_sha256": fixture.config.QualificationSha256, "config_local_sha256": fixture.config.ConfigLocalSha256,
 		"vault_local_sha256": fixture.config.VaultLocalSha256, "score_timeout_seconds": 10800, "g2_volume_policy": "minimum-work/1"})
@@ -223,6 +237,12 @@ func (self *agentTestFixture) call(t *testing.T, operation string, fence int64, 
 // A different synthetic job or attempt retains all exact named input bytes.
 func (self *agentTestFixture) anotherManifest(t *testing.T, jobId string, attempt int) StartManifest {
 	t.Helper()
+	if jobId == "synthetic-job" {
+		jobId = self.manifest.Identity.JobId
+	} else {
+		digest := sha256.Sum256([]byte(jobId))
+		jobId = fmt.Sprintf("%x-%x-%x-%x-%x", digest[:4], digest[4:6], digest[6:8], digest[8:10], digest[10:16])
+	}
 	manifest := self.manifest
 	manifest.Identity.JobId, manifest.Identity.Attempt = jobId, attempt
 	manifest.Identity.RunId = RunId(jobId, manifest.Identity.Cycle, attempt)
@@ -383,6 +403,7 @@ func TestAgentExecuteOnceAuthenticatesArtifactsAndStripsEnvironment(t *testing.T
 	if err := fixture.agent.Execute(context.Background(), fixture.manifest.Identity.RunId); err != nil {
 		t.Fatal(err)
 	}
+	fixture.joinStoppedRun(t)
 	if err := fixture.agent.Execute(context.Background(), fixture.manifest.Identity.RunId); err == nil {
 		t.Fatal("persisted execution was run twice")
 	}
@@ -512,7 +533,7 @@ func TestAgentLaterAttemptCannotResetSubmissionClock(t *testing.T) {
 	if err := fixture.agent.Execute(context.Background(), fixture.manifest.Identity.RunId); err != nil {
 		t.Fatal(err)
 	}
-	fixture.runner.units[unitName(fixture.manifest.Identity.RunId)] = UnitStatus{Exists: true, Active: false}
+	fixture.joinStoppedRun(t)
 	later := fixture.anotherManifest(t, "synthetic-job", 2)
 	later.Identity.StartedAt = later.Identity.StartedAt.Add(time.Minute)
 	later.Identity.DeadlineAt = later.Identity.DeadlineAt.Add(time.Minute)

@@ -53,24 +53,13 @@ func NewSystemdRunner(settings AgentSettings) *SystemdRunner {
 // The immutable unit name is retained after exit; no --collect or restart can
 // turn a reconnect into another execution. RuntimeMaxSec is never a fresh clock.
 func (self *SystemdRunner) Start(ctx context.Context, launch Launch) error {
-	if !validUnitName(launch.UnitName) || !digestPattern.MatchString(launch.RunId) || launch.ConfigPath == "" ||
-		!filepath.IsAbs(launch.BaseDirectory) || filepath.Clean(launch.BaseDirectory) != launch.BaseDirectory || launch.BaseDirectory == "/" {
-		return errors.New("invalid fixed systemd launch identity")
-	}
 	if err := validatePin(launch.Agent, true); err != nil {
 		return err
 	}
-	remaining := launch.DeadlineAt.Sub(self.settings.Now().UTC())
-	if remaining <= 0 {
-		return errors.New("subevaluation deadline already elapsed")
+	args, err := systemdLaunchArguments(launch, self.settings)
+	if err != nil {
+		return err
 	}
-	args := []string{"--quiet", "--no-block", "--unit=" + launch.UnitName, "--service-type=exec",
-		"--property=RequiresMountsFor=" + launch.BaseDirectory,
-		"--property=Restart=no", "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
-		"--property=RuntimeMaxSec=" + strconv.FormatFloat(remaining.Seconds(), 'f', 6, 64) + "s",
-		"--property=TimeoutStopSec=" + strconv.FormatFloat(self.settings.CancelGrace.Seconds(), 'f', 6, 64) + "s",
-		"--property=StandardInput=null", "--property=StandardOutput=null", "--property=StandardError=null",
-		"--property=UMask=0077", "--", launch.Agent.Path, "--config", launch.ConfigPath, "--execute=" + launch.RunId}
 	command := exec.CommandContext(ctx, "/usr/bin/systemd-run", args...)
 	command.Env = controlEnvironment()
 	command.Stdout, command.Stderr = &discardWriter{}, &discardWriter{}
@@ -78,6 +67,47 @@ func (self *SystemdRunner) Start(ctx context.Context, launch Launch) error {
 		return errors.New("systemd launch outcome is uncertain; reconcile the original unit")
 	}
 	return nil
+}
+
+// ExecStopPost runs after unexpected exit and startup failure as well as normal
+// stop. KillMode alone cannot reap Docker/BuildKit's separate daemon cgroups.
+// See systemd.service(5), ExecStopPost and Command lines. The post-stop command
+// uses only the same pinned agent/config and immutable persisted run identity.
+func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, error) {
+	if !validUnitName(launch.UnitName) || !digestPattern.MatchString(launch.RunId) || launch.UnitName != unitName(launch.RunId) ||
+		settings.Now == nil || settings.CancelGrace <= 0 || settings.CleanupTimeout <= 0 {
+		return nil, errors.New("invalid fixed systemd launch identity")
+	}
+	for _, path := range []string{launch.BaseDirectory, launch.ConfigPath, launch.Agent.Path} {
+		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || strings.ContainsAny(path, "$%\n\r\x00") {
+			return nil, errors.New("systemd authority paths must be canonical and cannot contain substitutions")
+		}
+	}
+	remaining := launch.DeadlineAt.Sub(settings.Now().UTC())
+	if remaining <= 0 {
+		return nil, errors.New("subevaluation deadline already elapsed")
+	}
+	stopTimeout := settings.CancelGrace + settings.CleanupTimeout
+	if stopTimeout <= settings.CancelGrace {
+		return nil, errors.New("systemd cleanup stop allowance overflowed")
+	}
+	cleanup := strings.Join([]string{systemdCommandWord(launch.Agent.Path), systemdCommandWord("--config"),
+		systemdCommandWord(launch.ConfigPath), systemdCommandWord("--cleanup=" + launch.RunId)}, " ")
+	args := []string{"--quiet", "--no-block", "--unit=" + launch.UnitName, "--service-type=exec",
+		"--property=RequiresMountsFor=" + systemdCommandWord(launch.BaseDirectory),
+		"--property=Restart=no", "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
+		"--property=ExecStopPost=" + cleanup,
+		"--property=RuntimeMaxSec=" + strconv.FormatFloat(remaining.Seconds(), 'f', 6, 64) + "s",
+		"--property=TimeoutStopSec=" + strconv.FormatFloat(stopTimeout.Seconds(), 'f', 6, 64) + "s",
+		"--property=StandardInput=null", "--property=StandardOutput=null", "--property=StandardError=null",
+		"--property=UMask=0077", "--", launch.Agent.Path, "--config", launch.ConfigPath, "--execute=" + launch.RunId}
+	return args, nil
+}
+
+// Double quoting prevents property parsing from splitting a protected path;
+// doubled percent/dollar tokens cannot introduce manager substitutions.
+func systemdCommandWord(value string) string {
+	return "\"" + strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "%", "%%", "$", "$$").Replace(value) + "\""
 }
 
 // Not-found is distinct from inactive: a missing unit after durable launch is

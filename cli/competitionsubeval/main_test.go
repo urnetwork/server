@@ -12,6 +12,8 @@ func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
 	cases := [][]string{
 		{}, {"--serve"}, {"--config", "/synthetic/agent.json"},
 		{"--config", "/synthetic/agent.json", "--serve", "--execute=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--serve", "--cleanup=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--execute=" + strings.Repeat("a", 64), "--cleanup=" + strings.Repeat("a", 64)},
 		{"--config", "/synthetic/agent.json", "--serve", "arbitrary-command"},
 		{"--config", "/synthetic/agent.json", "--command=/bin/sh", "--serve"},
 	}
@@ -22,7 +24,7 @@ func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
 	}
 }
 
-// Both legal entrypoints remain exact and do not load service configuration.
+// All fixed entrypoints remain exact and do not load service configuration.
 func TestSubevaluationArgumentsAcceptFixedRoles(t *testing.T) {
 	serve, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--serve"}, &bytes.Buffer{})
 	if err != nil || !serve.serve || serve.executeRunId != "" || serve.configPath != "/synthetic/agent.json" {
@@ -32,5 +34,9 @@ func TestSubevaluationArgumentsAcceptFixedRoles(t *testing.T) {
 	execute, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--execute=" + runId}, &bytes.Buffer{})
 	if err != nil || execute.serve || execute.executeRunId != runId {
 		t.Fatalf("systemd role was not retained exactly: %+v %v", execute, err)
+	}
+	cleanup, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--cleanup=" + runId}, &bytes.Buffer{})
+	if err != nil || cleanup.serve || cleanup.executeRunId != "" || cleanup.cleanupRunId != runId {
+		t.Fatalf("systemd cleanup role was not retained exactly: %+v %v", cleanup, err)
 	}
 }

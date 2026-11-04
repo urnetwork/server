@@ -31,6 +31,7 @@ type arguments struct {
 	configPath   string
 	serve        bool
 	executeRunId string
+	cleanupRunId string
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -41,10 +42,17 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.configPath, "config", "", "Protected root-owned subevaluation-role configuration")
 	flags.BoolVar(&parsed.serve, "serve", false, "Serve one signed framed operation on stdin/stdout")
 	flags.StringVar(&parsed.executeRunId, "execute", "", "Systemd-only fixed persisted execution identity")
+	flags.StringVar(&parsed.cleanupRunId, "cleanup", "", "Systemd-only fixed persisted stop-cleanup identity")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
-	if flags.NArg() != 0 || parsed.configPath == "" || parsed.serve == (parsed.executeRunId != "") {
+	roles := 0
+	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != ""} {
+		if enabled {
+			roles++
+		}
+	}
+	if flags.NArg() != 0 || parsed.configPath == "" || roles != 1 {
 		return arguments{}, errors.New("exactly one fixed subevaluation role and protected config are required")
 	}
 	return parsed, nil
@@ -68,6 +76,9 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	}
 	if parsed.serve {
 		return agent.Serve(ctx, input, output)
+	}
+	if parsed.cleanupRunId != "" {
+		return agent.Cleanup(ctx, parsed.cleanupRunId)
 	}
 	return agent.Execute(ctx, parsed.executeRunId)
 }
