@@ -67,6 +67,7 @@ type DockerProxyPlan struct {
 	Attempt            int       `json:"attempt"`
 	DeadlineAt         time.Time `json:"deadline_at"`
 	StateDirectory     string    `json:"state_directory"`
+	ScratchDirectory   string    `json:"scratch_directory"`
 	SocketPath         string    `json:"socket_path"`
 	BuildSocketPath    string    `json:"build_socket_path"`
 	ContextRoot        string    `json:"context_root"`

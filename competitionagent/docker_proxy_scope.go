@@ -40,12 +40,13 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 		settings.OperationTimeout <= 0 || settings.BuildTimeout <= 0 || settings.BuildStopGrace <= 0 || settings.QuiesceTimeout <= 0 || settings.DrainAllowance <= 0 || settings.Now == nil {
 		return errors.New("Docker owner requires positive bounded settings")
 	}
-	for _, path := range []string{plan.StateDirectory, plan.SocketPath, plan.BuildSocketPath, plan.ContextRoot} {
+	for _, path := range []string{plan.StateDirectory, plan.ScratchDirectory, plan.SocketPath, plan.BuildSocketPath, plan.ContextRoot} {
 		if !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" || strings.ContainsAny(path, "\x00\r\n") {
 			return errors.New("Docker role paths must be canonical and private")
 		}
 	}
-	if plan.SocketPath == plan.BuildSocketPath || filepath.Base(plan.ContextRoot) != plan.RunId || pathWithin(plan.ContextRoot, plan.StateDirectory) || pathWithin(plan.StateDirectory, plan.ContextRoot) {
+	if plan.SocketPath == plan.BuildSocketPath || filepath.Base(plan.ContextRoot) != plan.RunId || pathWithin(plan.ContextRoot, plan.StateDirectory) || pathWithin(plan.StateDirectory, plan.ContextRoot) ||
+		pathWithin(plan.ContextRoot, plan.ScratchDirectory) || pathWithin(plan.ScratchDirectory, plan.ContextRoot) || pathWithin(plan.StateDirectory, plan.ScratchDirectory) || pathWithin(plan.ScratchDirectory, plan.StateDirectory) {
 		return errors.New("Docker role state, source and sockets are not independent")
 	}
 	cleanup := cleanupPlan{Schema: Schema, RunId: plan.RunId, JobId: plan.JobId, RoundId: plan.RoundId, Attempt: plan.Attempt, CgroupNames: plan.CgroupNames,
@@ -165,7 +166,7 @@ func (self *DockerProxy) verifyMutationScope(ctx context.Context, r *http.Reques
 				if err != nil {
 					return "", errors.New("Docker bind source could not be confined")
 				}
-				for _, authority := range []string{self.plan.UpstreamSocketPath, self.plan.SocketPath, self.plan.BuildSocketPath, self.plan.StateDirectory} {
+				for _, authority := range []string{self.plan.UpstreamSocketPath, self.plan.SocketPath, self.plan.BuildSocketPath, self.plan.StateDirectory, self.plan.ScratchDirectory} {
 					if pathWithin(resolved, authority) {
 						return "", errors.New("Docker candidate mount exposes request-owner authority")
 					}

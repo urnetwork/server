@@ -56,7 +56,7 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 	}
 	digest := sha256.Sum256(contents)
 	plan := DockerProxyPlan{Schema: Schema, RunId: scope.plan.RunId, JobId: scope.plan.JobId, RoundId: scope.plan.RoundId, Attempt: scope.plan.Attempt,
-		DeadlineAt: time.Now().Add(time.Hour), StateDirectory: filepath.Join(root, "owner"), SocketPath: filepath.Join(root, "worker.sock"),
+		DeadlineAt: time.Now().Add(time.Hour), StateDirectory: filepath.Join(root, "owner"), ScratchDirectory: filepath.Join(root, "scratch"), SocketPath: filepath.Join(root, "worker.sock"),
 		BuildSocketPath: filepath.Join(root, "build.sock"), ContextRoot: contextRoot, UpstreamSocketPath: "/run/docker.sock",
 		Docker: Pin{Path: filepath.Join(root, "docker"), Sha256: strings.Repeat("d", 64)}, Buildx: Pin{Path: filepath.Join(root, "docker-buildx"), Sha256: strings.Repeat("e", 64)},
 		Dockerfile: Pin{Path: dockerfile, Sha256: hex.EncodeToString(digest[:])}, BaseImageDigest: "sha256:" + strings.Repeat("3", 64),
@@ -211,6 +211,78 @@ func TestDockerProxyIncompleteUploadNeverIssuesIntent(t *testing.T) {
 	for _, entry := range entries {
 		if strings.HasSuffix(entry.Name(), ".json") {
 			t.Fatal("incomplete upload manufactured an issued intent")
+		}
+	}
+}
+
+// A bounded scratch outage after issue must still leave a durable unknown
+// receipt outside that filesystem; empty replacement scratch cannot clear it.
+func TestDockerProxyScratchLossRetainsIndependentUnknownJournal(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	fixture.daemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := os.RemoveAll(fixture.plan.ScratchDirectory); err != nil {
+			t.Error(err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, "synthetic terminal response")
+	})
+	request := httptest.NewRequest(http.MethodPost, "http://worker/containers/create", bytes.NewReader(fixture.create))
+	fixture.proxy.workerHandler(httptest.NewRecorder(), request)
+	if fixture.proxy.Snapshot().UnknownOperations != 1 {
+		t.Fatal("missing response spool erased an issued mutation")
+	}
+	entries, err := os.ReadDir(fixture.proxy.operationDirectory())
+	if err != nil || len(entries) != 1 || !strings.HasSuffix(entries[0].Name(), ".json") {
+		t.Fatalf("scratch loss consumed the independent journal: %v", err)
+	}
+	if err := fixture.proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := newDockerProxy(fixture.plan, fixture.settings, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if err := recovered.Quiesce(context.Background()); !errors.Is(err, ErrDockerProxyUnknown) || recovered.Snapshot().Quiesced {
+		t.Fatalf("replacement empty scratch cleared issued authority: %v", err)
+	}
+}
+
+// An orphan partial body has no issued intent and is never replayed. Its bytes
+// remain charged across recovery, independently from the metadata inventory.
+func TestDockerProxyRecoversUnissuedBodyWithoutInventingMutation(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	body := []byte("synthetic incomplete request")
+	path := filepath.Join(fixture.proxy.bodyDirectory(), strings.Repeat("a", 32)+".request")
+	if err := exclusiveFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.proxy.Close(); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := newDockerProxy(fixture.plan, fixture.settings, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recovered.Close()
+	if recovered.spoolBytes != int64(len(body)) || recovered.Snapshot().Operations != 1 || recovered.Snapshot().UnknownOperations != 0 {
+		t.Fatal("unissued scratch was uncharged or mistaken for issued authority")
+	}
+	if err := recovered.Quiesce(context.Background()); err != nil || !recovered.Snapshot().Quiesced {
+		t.Fatalf("definitely unissued body prevented positive quiescence: %v", err)
+	}
+}
+
+// Candidate rename/write authority cannot contain the owner scratch, and an
+// exhausted candidate filesystem cannot share the journal's directory tree.
+func TestDockerProxyRejectsOverlappingStateScratchAndWorkRoots(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	for _, scratch := range []string{fixture.plan.StateDirectory, filepath.Join(fixture.plan.StateDirectory, "scratch"), filepath.Dir(fixture.plan.StateDirectory),
+		fixture.plan.ContextRoot, filepath.Join(fixture.plan.ContextRoot, "scratch"), filepath.Dir(fixture.plan.ContextRoot)} {
+		plan := fixture.plan
+		plan.ScratchDirectory = scratch
+		if err := validateDockerProxyPlan(plan, fixture.settings, false); err == nil {
+			t.Errorf("overlapping root was accepted: %q", scratch)
 		}
 	}
 }

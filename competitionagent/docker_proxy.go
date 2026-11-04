@@ -76,14 +76,19 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 	if err := os.MkdirAll(filepath.Join(plan.StateDirectory, "operations"), 0700); err != nil {
 		return nil, err
 	}
-	info, err := os.Lstat(plan.StateDirectory)
-	if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("Docker owner state must be a private directory")
+	if err := os.MkdirAll(filepath.Join(plan.ScratchDirectory, "operations"), 0700); err != nil {
+		return nil, err
 	}
-	if protected {
-		stat, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || stat.Uid != 0 {
-			return nil, errors.New("Docker owner state must be root-owned")
+	for _, path := range []string{plan.StateDirectory, plan.ScratchDirectory} {
+		info, err := os.Lstat(path)
+		if err != nil || !info.IsDir() || info.Mode().Perm()&0077 != 0 || info.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("Docker owner state and scratch must be private directories")
+		}
+		if protected {
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || stat.Uid != 0 {
+				return nil, errors.New("Docker owner state and scratch must be root-owned")
+			}
 		}
 	}
 	lock, err := os.OpenFile(filepath.Join(plan.StateDirectory, "proxy.lock"), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0600)
@@ -344,7 +349,7 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	id := hex.EncodeToString(idBytes)
-	bodyPath := filepath.Join(self.operationDirectory(), id+".request")
+	bodyPath := filepath.Join(self.bodyDirectory(), id+".request")
 	_ = http.NewResponseController(w).SetReadDeadline(self.settings.Now().Add(self.settings.UploadTimeout))
 	body := io.Reader(http.NoBody)
 	if r.Body != nil {
@@ -400,7 +405,7 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 	}
 	defer response.Body.Close()
 	operation.StatusCode = response.StatusCode
-	responseFile, err := os.OpenFile(filepath.Join(self.operationDirectory(), id+".response"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	responseFile, err := os.OpenFile(filepath.Join(self.bodyDirectory(), id+".response"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		self.finishOperation(operation, false)
 		return
@@ -559,7 +564,10 @@ func (self *DockerProxy) sealBody(ctx context.Context, reader io.Reader, path st
 			if maximum-total < int64(count) || self.reserveSpool(int64(count)) != nil {
 				return total, "", errors.New("Docker request exceeds its custody bound")
 			}
-			if _, err := file.Write(buffer[:count]); err != nil {
+			if written, err := file.Write(buffer[:count]); err != nil || written != count {
+				if err == nil {
+					err = io.ErrShortWrite
+				}
 				return total, "", err
 			}
 			_, _ = digest.Write(buffer[:count])
@@ -595,53 +603,67 @@ func (self *DockerProxy) reserveSpool(bytes int64) error {
 // Recovery examines at most the configured finite per-run inventory. Issued or
 // corrupt work is never forwarded again; it permanently holds this run.
 func (self *DockerProxy) recoverJournal() error {
-	directory, err := os.Open(self.operationDirectory())
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	examined := 0
 	stems := map[string]bool{}
-	for {
-		entries, readErr := directory.ReadDir(self.settings.DirectoryBatch)
-		for _, entry := range entries {
-			examined++
-			if examined > self.settings.MaximumOperations*3 {
-				return errors.New("Docker custody inventory exceeds its bound")
-			}
-			info, err := entry.Info()
-			if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-				return errors.New("Docker custody inventory is not regular")
-			}
-			stem, extension, ok := strings.Cut(entry.Name(), ".")
-			if !ok || len(stem) != 32 || !isDockerProxyHex(stem) || extension != "json" && extension != "request" && extension != "response" {
-				return errors.New("Docker custody inventory contains an unknown file")
-			}
-			stems[stem] = true
-			if extension != "json" {
-				if err := self.reserveSpool(info.Size()); err != nil {
-					return err
+	for _, metadata := range []bool{true, false} {
+		path, maximum := self.operationDirectory(), self.settings.MaximumOperations
+		if !metadata {
+			path, maximum = self.bodyDirectory(), self.settings.MaximumOperations*2
+		}
+		directory, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		examined := 0
+		err = func() error {
+			defer directory.Close()
+			for {
+				entries, readErr := directory.ReadDir(self.settings.DirectoryBatch)
+				for _, entry := range entries {
+					examined++
+					if examined > maximum {
+						return errors.New("Docker custody inventory exceeds its bound")
+					}
+					info, err := entry.Info()
+					if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+						return errors.New("Docker custody inventory is not regular")
+					}
+					stem, extension, ok := strings.Cut(entry.Name(), ".")
+					if !ok || len(stem) != 32 || !isDockerProxyHex(stem) || metadata && extension != "json" || !metadata && extension != "request" && extension != "response" {
+						return errors.New("Docker custody inventory contains an unknown file")
+					}
+					stems[stem] = true
+					if len(stems) > self.settings.MaximumOperations {
+						return errors.New("Docker custody operation count exceeds its bound")
+					}
+					if !metadata {
+						if err := self.reserveSpool(info.Size()); err != nil {
+							return err
+						}
+						continue
+					}
+					content, err := readBounded(filepath.Join(path, entry.Name()), self.settings.MaximumDocumentBytes)
+					if err != nil {
+						return err
+					}
+					operation := &dockerProxyOperation{}
+					if decodeStrict(content, operation) != nil || operation.Schema != Schema || operation.Id != stem || operation.RunId != self.plan.RunId {
+						return errors.New("Docker custody record is corrupt")
+					}
+					self.operationsByIds[stem] = operation
+					if operation.State != "acknowledged" {
+						self.unknown++
+					}
 				}
-				continue
+				if errors.Is(readErr, io.EOF) {
+					return nil
+				}
+				if readErr != nil {
+					return readErr
+				}
 			}
-			content, err := readBounded(filepath.Join(self.operationDirectory(), entry.Name()), self.settings.MaximumDocumentBytes)
-			if err != nil {
-				return err
-			}
-			operation := &dockerProxyOperation{}
-			if decodeStrict(content, operation) != nil || operation.Schema != Schema || operation.Id != stem || operation.RunId != self.plan.RunId {
-				return errors.New("Docker custody record is corrupt")
-			}
-			self.operationsByIds[stem] = operation
-			if operation.State != "acknowledged" {
-				self.unknown++
-			}
-		}
-		if errors.Is(readErr, io.EOF) {
-			break
-		}
-		if readErr != nil {
-			return readErr
+		}()
+		if err != nil {
+			return err
 		}
 	}
 	self.operations = len(stems)
@@ -651,6 +673,12 @@ func (self *DockerProxy) recoverJournal() error {
 // Path generation never uses a caller-controlled filename.
 func (self *DockerProxy) operationDirectory() string {
 	return filepath.Join(self.plan.StateDirectory, "operations")
+}
+
+// Large bodies and exports consume only the separately bounded candidate
+// filesystem; an exhausted spool cannot consume journal/cleanup reserve.
+func (self *DockerProxy) bodyDirectory() string {
+	return filepath.Join(self.plan.ScratchDirectory, "operations")
 }
 
 // Hex decoding is bounded by the fixed operation-id length at each caller.

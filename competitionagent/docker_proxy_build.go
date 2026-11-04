@@ -597,7 +597,7 @@ func (self *DockerProxy) recoverBuild() error {
 
 // The directory belongs only to this fixed single-build run.
 func (self *DockerProxy) buildDirectory() string {
-	return filepath.Join(self.plan.StateDirectory, "build")
+	return filepath.Join(self.plan.ScratchDirectory, "build")
 }
 
 // Shared content hashing has no mutable process-global state.
