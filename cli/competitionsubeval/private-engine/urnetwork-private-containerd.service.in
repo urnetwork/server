@@ -1,16 +1,21 @@
 [Unit]
 Description=Private bounded evaluation containerd
-Requires=urnetwork-private-engine-network.service
-After=urnetwork-private-engine-network.service
+Requires=urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
+BindsTo=urnetwork-private-engine-network-namespace.service
+After=urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
+JoinsNamespaceOf=urnetwork-private-engine-network-namespace.service
 RequiresMountsFor=@BASE_DIRECTORY@/candidate
 Before=urnetwork-private-engine.service
 ConditionPathIsMountPoint=@BASE_DIRECTORY@/candidate
+ConditionPathIsDirectory=/run/containerd
 
 [Service]
 Type=notify
 User=root
 Group=root
 UMask=0077
+PrivateNetwork=yes
+BindPaths=@BASE_DIRECTORY@/candidate/exec/containerd-sockets:/run/containerd
 Environment="PATH=@ENGINE_BIN@"
 Environment="TMPDIR=@BASE_DIRECTORY@/candidate/scratch/engine-tmp"
 Environment="DOCKER_TMPDIR=@BASE_DIRECTORY@/candidate/scratch/docker-tmp"

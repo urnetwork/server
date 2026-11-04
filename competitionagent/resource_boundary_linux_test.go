@@ -28,7 +28,45 @@ type runtimeBoundaryTestHost struct {
 	daemon    []byte
 	events    []string
 	fail      string
+	namespace *runtimeBoundaryTestNamespace
 }
+
+// Fake receipts own no native namespace, but retain close/recheck state so
+// error paths and read-only command custody can be tested without host calls.
+type runtimeBoundaryTestNamespace struct {
+	closed        bool
+	rechecks      int
+	failAt        int
+	calls         [][]string
+	links, routes []byte
+}
+
+// Returning a closed or failed generation is never treated as a fresh proof.
+func (self *runtimeBoundaryTestNamespace) Recheck(ctx context.Context) error {
+	self.rechecks++
+	if self.closed || self.failAt > 0 && self.rechecks >= self.failAt {
+		return errors.New("synthetic namespace generation failure")
+	}
+	return ctx.Err()
+}
+
+// Fake daemon facts are independently tested by the production pure validator.
+func (self *runtimeBoundaryTestNamespace) Peer(int, Pin) error { return nil }
+
+// Output is entirely synthetic; no nsenter or ip process is started.
+func (self *runtimeBoundaryTestNamespace) Run(ctx context.Context, _ Pin, arguments []string) ([]byte, error) {
+	if err := self.Recheck(ctx); err != nil {
+		return nil, err
+	}
+	self.calls = append(self.calls, append([]string(nil), arguments...))
+	if len(arguments) > 2 && arguments[2] == "route" {
+		return append([]byte(nil), self.routes...), nil
+	}
+	return append([]byte(nil), self.links...), nil
+}
+
+// The fake implements the same idempotent ownership edge without kernel state.
+func (self *runtimeBoundaryTestNamespace) Close() error { self.closed = true; return nil }
 
 // A fake protected read still rejects changed bytes or an excessive document.
 func (self *runtimeBoundaryTestHost) Document(pin Pin, maximum int64) ([]byte, error) {
@@ -66,6 +104,18 @@ func (self *runtimeBoundaryTestHost) Kernel(ctx context.Context, _ RuntimeResour
 		return runtimeBoundaryFacts{}, errors.New("synthetic kernel failure")
 	}
 	return self.facts, ctx.Err()
+}
+
+// Captures are explicit; a later generation is not synthesized on recheck.
+func (self *runtimeBoundaryTestHost) Namespace(ctx context.Context, _ RuntimeResourceBoundary, _ RuntimeResourceBoundarySettings) (runtimeBoundaryNamespace, error) {
+	self.events = append(self.events, "namespace")
+	if self.fail == "namespace" {
+		return nil, errors.New("synthetic namespace capture failure")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return self.namespace, nil
 }
 
 // Reported engine class is an independent native requirement, not inferred
@@ -109,11 +159,13 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 		WorkRoot: filepath.Join(candidate, "jobs"), ScratchRoot: filepath.Join(candidate, "scratch"),
 		UserNamespace: "synthetic_evaluation", ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536,
 		RuntimeName: "runc", RuntimeArguments: []string{}}
+	boundary.ContainerdVersion, boundary.ContainerdSourceCommit = "2.2.1", strings.Repeat("c", 40)
 	executable := func(name string) Pin {
 		return Pin{Path: "/opt/synthetic-private-engine/bin/" + name, Sha256: strings.Repeat("a", 64)}
 	}
 	boundary.Dockerd, boundary.Containerd, boundary.Runc, boundary.ContainerdShim, boundary.Nftables = executable("dockerd"), executable("containerd"), executable("runc"), executable("containerd-shim-runc-v2"), executable("nft")
 	boundary.SocketModeHelper = Pin{Path: "/usr/bin/chmod", Sha256: strings.Repeat("b", 64)}
+	boundary.NamespaceKeeper, boundary.Systemctl, boundary.Nsenter, boundary.Ip = executable("sleep"), executable("systemctl"), executable("nsenter"), executable("ip")
 	scope := RuntimeResourceScope{BaseDirectory: base, StateDirectory: filepath.Join(base, "state"), WorkDirectory: boundary.WorkRoot,
 		ScratchDirectory: boundary.ScratchRoot, TrustedOperatorUid: 12345, WorkerUid: 12346, WorkerGid: 12346}
 	host := &runtimeBoundaryTestHost{documents: map[string][]byte{}}
@@ -125,6 +177,24 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 	fixture.boundary.EngineConfig = fixture.document("engine.json", engine)
 	fixture.boundary.ContainerdConfig = fixture.document("containerd.toml", runtimeBoundaryContainerdDocument(boundary))
 	fixture.boundary.NetworkPolicy = fixture.document("network.nft", runtimeBoundaryNetworkPolicy())
+	for _, name := range []string{runtimeBoundaryKeeperUnitName, runtimeBoundaryEngineUnitName, runtimeBoundaryContainerdUnitName, runtimeBoundaryNetworkUnitName} {
+		path := "/etc/systemd/system/" + name
+		content := []byte("synthetic protected unit\n")
+		digest := sha256.Sum256(content)
+		host.documents[path] = content
+		pin := Pin{Path: path, Sha256: hex.EncodeToString(digest[:])}
+		switch name {
+		case runtimeBoundaryKeeperUnitName:
+			fixture.boundary.NamespaceKeeperUnit = pin
+		case runtimeBoundaryEngineUnitName:
+			fixture.boundary.EngineUnit = pin
+		case runtimeBoundaryContainerdUnitName:
+			fixture.boundary.ContainerdUnit = pin
+		case runtimeBoundaryNetworkUnitName:
+			fixture.boundary.NetworkUnit = pin
+		}
+	}
+	host.namespace = &runtimeBoundaryTestNamespace{links: []byte(`[{"ifindex":1,"ifname":"lo","link_type":"loopback","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]}]`), routes: []byte("[]")}
 	fixture.commit()
 	const blockDevice = uint64(7<<8 | 31)
 	mountInfo := []byte(fmt.Sprintf("1 0 8:1 / / rw - ext4 /dev/synthetic-root rw\n2 1 7:31 / %s rw,nosuid,nodev - ext4 /dev/loop31 rw\n", candidate))
@@ -180,6 +250,10 @@ func runtimeBoundaryTestNetwork(t *testing.T) []byte {
 			"handle": 2, "type": "filter", "hook": chain, "prio": -300, "policy": "accept"}})
 		keys := []string{"iifname"}
 		if chain == "forward" {
+			objects = append(objects, map[string]any{"rule": map[string]any{"family": "inet", "table": runtimeBoundaryNftTable, "chain": chain, "handle": 3,
+				"expr": []any{map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"meta": map[string]any{"key": "iifname"}}, "right": runtimeBoundaryBridgePattern}},
+					map[string]any{"match": map[string]any{"op": "==", "left": map[string]any{"meta": map[string]any{"key": "oifname"}}, "right": runtimeBoundaryBridgePattern}},
+					map[string]any{"accept": nil}}}})
 			keys = append(keys, "oifname")
 		} else if chain == "output" {
 			keys = []string{"oifname"}
@@ -208,7 +282,8 @@ func TestRuntimeResourceBoundaryRequiresAllNativeProofs(t *testing.T) {
 		boundary.ContainerIdMapLength != 65536 || boundary.PrivateSocketPath != fixture.boundary.PrivateSocketPath {
 		t.Fatal("admission lost concrete block, engine or remap identity")
 	}
-	if fixture.host.events[len(fixture.host.events)-3] != "kernel" || fixture.host.events[len(fixture.host.events)-2] != "daemon" || fixture.host.events[len(fixture.host.events)-1] != "network" {
+	if fixture.host.events[len(fixture.host.events)-4] != "kernel" || fixture.host.events[len(fixture.host.events)-3] != "namespace" ||
+		fixture.host.events[len(fixture.host.events)-2] != "daemon" || fixture.host.events[len(fixture.host.events)-1] != "network" {
 		t.Fatal("live network proof did not follow kernel proof")
 	}
 }
@@ -515,6 +590,9 @@ func TestRuntimeResourceBoundaryBoundsAndCancellation(t *testing.T) {
 		func(settings *RuntimeResourceBoundarySettings) { settings.CommandTimeout = 0 },
 		func(settings *RuntimeResourceBoundarySettings) { settings.ContainerLogMaximumSize = "" },
 		func(settings *RuntimeResourceBoundarySettings) { settings.ContainerLogMaximumFiles = 0 },
+		func(settings *RuntimeResourceBoundarySettings) { settings.MaximumNetworkInterfaces = 0 },
+		func(settings *RuntimeResourceBoundarySettings) { settings.MaximumNetworkRoutes = 0 },
+		func(settings *RuntimeResourceBoundarySettings) { settings.MaximumRuntimeProcesses = 0 },
 	} {
 		fixture := newRuntimeBoundaryTest(t)
 		change(&fixture.settings)
@@ -620,7 +698,13 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		"CONTAINER_ROOT_UID": strconv.FormatUint(uint64(boundary.ContainerRootUid), 10), "CONTAINER_ROOT_GID": strconv.FormatUint(uint64(boundary.ContainerRootGid), 10),
 		"CONTAINER_ID_MAP_LENGTH": strconv.FormatUint(uint64(boundary.ContainerIdMapLength), 10), "ENGINE_BIN": filepath.Dir(boundary.Runc.Path),
 		"DOCKERD_SHA256": boundary.Dockerd.Sha256, "CONTAINERD_SHA256": boundary.Containerd.Sha256, "CONTAINERD_SHIM_SHA256": boundary.ContainerdShim.Sha256,
+		"CONTAINERD_VERSION": boundary.ContainerdVersion, "CONTAINERD_SOURCE_COMMIT": boundary.ContainerdSourceCommit,
 		"RUNC_SHA256": boundary.Runc.Sha256, "CHMOD_SHA256": boundary.SocketModeHelper.Sha256, "NFT_PATH": boundary.Nftables.Path, "NFT_SHA256": boundary.Nftables.Sha256,
+		"NAMESPACE_KEEPER_PATH": boundary.NamespaceKeeper.Path, "NAMESPACE_KEEPER_SHA256": boundary.NamespaceKeeper.Sha256,
+		"SYSTEMCTL_PATH": boundary.Systemctl.Path, "SYSTEMCTL_SHA256": boundary.Systemctl.Sha256,
+		"NSENTER_PATH": boundary.Nsenter.Path, "NSENTER_SHA256": boundary.Nsenter.Sha256, "IP_PATH": boundary.Ip.Path, "IP_SHA256": boundary.Ip.Sha256,
+		"NAMESPACE_KEEPER_UNIT_SHA256": boundary.NamespaceKeeperUnit.Sha256, "ENGINE_UNIT_SHA256": boundary.EngineUnit.Sha256,
+		"CONTAINERD_UNIT_SHA256": boundary.ContainerdUnit.Sha256, "NETWORK_UNIT_SHA256": boundary.NetworkUnit.Sha256,
 		"CONFIG_DIRECTORY": filepath.Dir(boundary.EngineConfig.Path), "CONTAINER_LOG_MAXIMUM_SIZE": fixture.settings.ContainerLogMaximumSize,
 		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
 		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
@@ -658,6 +742,8 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
 		unit := string(render(name))
 		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
+			"PrivateNetwork=yes", "BindsTo=" + runtimeBoundaryKeeperUnitName, "JoinsNamespaceOf=" + runtimeBoundaryKeeperUnitName,
+			"BindPaths=" + boundary.EngineExecRoot + "/containerd-sockets:/run/containerd",
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
 			if !strings.Contains(unit, required) {
 				t.Fatalf("private service lost an enforced boundary: %s", name)
@@ -669,6 +755,267 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	}
 	_ = render("candidate.mount.in")
 	_ = render("urnetwork-private-engine-network.service.in")
+	keeper := string(render(runtimeBoundaryKeeperUnitName + ".in"))
+	for _, required := range []string{"PrivateNetwork=yes", "ExecStart=" + boundary.NamespaceKeeper.Path + " infinity", "Restart=no", "KillMode=control-group"} {
+		if !strings.Contains(keeper, required) {
+			t.Fatal("keeper template lost its stable private namespace lifetime")
+		}
+	}
+}
+
+// Positive namespace identities must agree across three distinct live roots;
+// unit metadata alone cannot qualify host identity or a missing participant.
+func TestRuntimeResourceBoundaryNamespacePeersRequireNonHostIdentity(t *testing.T) {
+	private := runtimeBoundaryNamespaceId{Device: 4, Inode: 200}
+	host := runtimeBoundaryNamespaceId{Device: 4, Inode: 100}
+	makeUnits := func() map[string]runtimeBoundaryUnit {
+		return map[string]runtimeBoundaryUnit{
+			runtimeBoundaryKeeperUnitName:     {Pid: 101, ProcessStart: 1, Namespace: private},
+			runtimeBoundaryEngineUnitName:     {Pid: 102, ProcessStart: 2, Namespace: private},
+			runtimeBoundaryContainerdUnitName: {Pid: 103, ProcessStart: 3, Namespace: private},
+		}
+	}
+	if err := validateRuntimeBoundaryNamespacePeers(makeUnits(), private, host); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(map[string]runtimeBoundaryUnit){
+		func(units map[string]runtimeBoundaryUnit) { delete(units, runtimeBoundaryKeeperUnitName) },
+		func(units map[string]runtimeBoundaryUnit) {
+			unit := units[runtimeBoundaryEngineUnitName]
+			unit.Namespace = host
+			units[runtimeBoundaryEngineUnitName] = unit
+		},
+		func(units map[string]runtimeBoundaryUnit) {
+			unit := units[runtimeBoundaryContainerdUnitName]
+			unit.ProcessStart = 0
+			units[runtimeBoundaryContainerdUnitName] = unit
+		},
+		func(units map[string]runtimeBoundaryUnit) {
+			unit := units[runtimeBoundaryEngineUnitName]
+			unit.Pid = 101
+			units[runtimeBoundaryEngineUnitName] = unit
+		},
+	} {
+		units := makeUnits()
+		change(units)
+		if err := validateRuntimeBoundaryNamespacePeers(units, private, host); err == nil {
+			t.Fatal("missing, reused or foreign namespace participant was admitted")
+		}
+	}
+	if err := validateRuntimeBoundaryNamespacePeers(makeUnits(), host, host); err == nil {
+		t.Fatal("host namespace was accepted as private")
+	}
+}
+
+// Synthetic systemd properties preserve the exact requested units and dependencies.
+func runtimeBoundaryTestUnitProperties(boundary RuntimeResourceBoundary, pin Pin) map[string]string {
+	name := filepath.Base(pin.Path)
+	properties := map[string]string{"Id": name, "FragmentPath": pin.Path, "DropInPaths": "", "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+		"MainPID": "101", "InvocationID": strings.Repeat("a", 32), "ExecMainStartTimestampMonotonic": "123",
+		"ControlGroup": "/system.slice/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
+		"Restart": "no", "KillMode": "control-group", "RemainAfterExit": "no", "JoinsNamespaceOf": runtimeBoundaryKeeperUnitName,
+		"Requires": runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
+	if name == runtimeBoundaryKeeperUnitName {
+		properties["JoinsNamespaceOf"] = runtimeBoundaryEngineUnitName + " " + runtimeBoundaryContainerdUnitName + " " + runtimeBoundaryNetworkUnitName
+	}
+	if name == runtimeBoundaryNetworkUnitName {
+		properties["MainPID"], properties["SubState"], properties["RemainAfterExit"] = "0", "exited", "yes"
+	}
+	return properties
+}
+
+// No real systemctl command runs; serialized native facts exercise the same parser.
+func runtimeBoundaryTestUnitBytes(properties map[string]string) []byte {
+	var content strings.Builder
+	for key, value := range properties {
+		content.WriteString(key + "=" + value + "\n")
+	}
+	return []byte(content.String())
+}
+
+// Drop-ins, host fallbacks, ambiguous namespace groups and unit restarts do not
+// inherit the authority of an otherwise correctly pinned unit file.
+func TestRuntimeResourceBoundaryPrivateUnitContract(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	for _, pin := range fixture.boundary.unitPins() {
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(runtimeBoundaryTestUnitProperties(fixture.boundary, pin)), pin, fixture.boundary, fixture.settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, change := range []func(map[string]string){
+		func(properties map[string]string) { properties["PrivateNetwork"] = "no" },
+		func(properties map[string]string) { properties["NetworkNamespacePath"] = "/proc/1/ns/net" },
+		func(properties map[string]string) {
+			properties["DropInPaths"] = "/etc/systemd/system/synthetic-override.conf"
+		},
+		func(properties map[string]string) { properties["JoinsNamespaceOf"] = "synthetic-foreign.service" },
+		func(properties map[string]string) { properties["BindsTo"] = "" },
+		func(properties map[string]string) { properties["After"] = "" },
+		func(properties map[string]string) { properties["Restart"] = "always" },
+		func(properties map[string]string) { properties["InvocationID"] = "" },
+		func(properties map[string]string) { properties["SubState"] = "dead" },
+	} {
+		pin := fixture.boundary.EngineUnit
+		properties := runtimeBoundaryTestUnitProperties(fixture.boundary, pin)
+		change(properties)
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("unqualified private namespace unit was admitted")
+		}
+	}
+}
+
+// Closing and failed-generation paths never leave a usable namespace receipt.
+func TestRuntimeResourceBoundaryNamespaceReceiptClosesOnFailure(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	fixture.host.fail = "daemon"
+	if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil || !fixture.host.namespace.closed {
+		t.Fatal("failed admission retained namespace custody")
+	}
+	fixture = newRuntimeBoundaryTest(t)
+	fixture.host.namespace.failAt = 1
+	if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil || !fixture.host.namespace.closed {
+		t.Fatal("failed recheck retained namespace custody")
+	}
+	fixture = newRuntimeBoundaryTest(t)
+	boundary, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := boundary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := boundary.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := boundary.Recheck(context.Background()); err == nil {
+		t.Fatal("closed namespace receipt was renewed")
+	}
+	var absent *RuntimeResourceBoundary
+	if err := absent.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The only allowed links are loopback and one address-free private cohort
+// bridge with container veths enslaved to it; physical/tunnel/extra bridges fail.
+func TestRuntimeResourceBoundaryOfflineInterfaceInventory(t *testing.T) {
+	settings := DefaultRuntimeResourceBoundarySettings()
+	valid := []byte(`[{"ifindex":1,"ifname":"lo","link_type":"loopback","addr_info":[{"family":"inet","local":"127.0.0.1","prefixlen":8}]},{"ifindex":2,"ifname":"unev-0123456789","linkinfo":{"info_kind":"bridge"},"addr_info":[]},{"ifindex":3,"ifname":"veth0123abc","master":"unev-0123456789","link_netnsid":0,"linkinfo":{"info_kind":"veth"},"addr_info":[]}]`)
+	if err := validateRuntimeBoundaryInterfaces(valid, settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		`[{"ifindex":1,"ifname":"lo","link_type":"loopback"},{"ifindex":2,"ifname":"eth0","link_type":"ether"}]`,
+		`[{"ifindex":1,"ifname":"lo","link_type":"loopback"},{"ifindex":2,"ifname":"tun0","linkinfo":{"info_kind":"tun"}}]`,
+		`[{"ifindex":1,"ifname":"lo","link_type":"loopback"},{"ifindex":2,"ifname":"veth0123abc","master":"synthetic-foreign","link_netnsid":0,"linkinfo":{"info_kind":"veth"}}]`,
+		`[{"ifindex":1,"ifname":"lo","link_type":"loopback"},{"ifindex":2,"ifname":"unev-0123456789","linkinfo":{"info_kind":"bridge"},"addr_info":[{"family":"inet","local":"192.0.2.1","prefixlen":24}]}]`,
+		`[{"ifindex":1,"ifname":"lo","link_type":"loopback"},{"ifindex":2,"ifname":"unev-0123456789","linkinfo":{"info_kind":"bridge"}},{"ifindex":3,"ifname":"unev-abcdef0123","linkinfo":{"info_kind":"bridge"}}]`,
+	} {
+		if err := validateRuntimeBoundaryInterfaces([]byte(content), settings); err == nil {
+			t.Fatal("external or unreviewed private-namespace interface was admitted")
+		}
+	}
+	settings.MaximumNetworkInterfaces = 1
+	if err := validateRuntimeBoundaryInterfaces(valid, settings); err == nil {
+		t.Fatal("interface inventory exceeded its bound")
+	}
+}
+
+// Offline routes cannot install a gateway, default, multipath or foreign link.
+func TestRuntimeResourceBoundaryOfflineRouteContract(t *testing.T) {
+	settings := DefaultRuntimeResourceBoundarySettings()
+	if err := validateRuntimeBoundaryRoutes([]byte(`[{"dst":"127.0.0.1","dev":"lo","type":"local"}]`), settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		`[{"dst":"default","dev":"unev-0123456789"}]`,
+		`[{"dst":"192.0.2.0/24","dev":"eth0"}]`,
+		`[{"dst":"192.0.2.0/24","dev":"unev-0123456789","gateway":"192.0.2.1"}]`,
+		`[{"dst":"192.0.2.0/24","dev":"unev-0123456789","nexthops":[{"dev":"lo"}]}]`,
+	} {
+		if err := validateRuntimeBoundaryRoutes([]byte(content), settings); err == nil {
+			t.Fatal("external private-namespace route was admitted")
+		}
+	}
+}
+
+// A network fact consumer cannot select host namespace paths, PIDs, tools or
+// mutating ip/nft commands; even a valid bridge fails after receipt closure.
+func TestRuntimeResourceBoundaryNetworkLinkUsesCapturedReadOnlyReceipt(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	boundary, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer boundary.Close()
+	if _, err := (runtimeBoundaryNativeHost{}).NetworkLink(context.Background(), *boundary, "unev-0123456789", fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.host.namespace.calls) != 4 {
+		t.Fatal("network proof skipped its bounded private interface/route inventory")
+	}
+	for _, arguments := range [][]string{{"link", "add", "synthetic"}, {"-j", "addr", "show", "dev", "lo"}, {"-j", "addr", "show", "dev", "/proc/1/ns/net"}} {
+		if runtimeBoundaryNetworkCommandAllowed(*boundary, boundary.Ip, arguments) {
+			t.Fatal("network fact consumer accepted a mutating or caller-selected target")
+		}
+	}
+	if runtimeBoundaryNetworkCommandAllowed(*boundary, boundary.Nftables, []string{"flush", "ruleset"}) {
+		t.Fatal("network proof accepted a mutating nft command")
+	}
+	if _, err := (runtimeBoundaryNativeHost{}).NetworkLink(context.Background(), *boundary, "/proc/1/ns/net", fixture.settings); err == nil {
+		t.Fatal("network proof accepted a caller namespace path")
+	}
+	_ = boundary.Close()
+	if _, err := (runtimeBoundaryNativeHost{}).NetworkLink(context.Background(), *boundary, "unev-0123456789", fixture.settings); err == nil {
+		t.Fatal("network proof renewed a stopped owner")
+	}
+}
+
+// Source/version and shim daemon arguments are explicit closed contracts, not
+// inferred from an executable filename or a separately allowed Docker minor.
+func TestRuntimeResourceBoundaryContainerdSourceAndShimContract(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	version := []byte("containerd github.com/containerd/containerd/v2 v" + fixture.boundary.ContainerdVersion + " " + fixture.boundary.ContainerdSourceCommit + "\n")
+	if err := validateRuntimeBoundaryContainerdVersion(version, fixture.boundary, fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{"containerd github.com/containerd/containerd/v2 v9.9.9 " + fixture.boundary.ContainerdSourceCommit,
+		"containerd github.com/containerd/containerd/v2 v" + fixture.boundary.ContainerdVersion + " " + strings.Repeat("d", 40),
+		"containerd synthetic-unreviewed-vendor v" + fixture.boundary.ContainerdVersion + " " + fixture.boundary.ContainerdSourceCommit} {
+		if err := validateRuntimeBoundaryContainerdVersion([]byte(content), fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("unfrozen private containerd source/version was admitted")
+		}
+	}
+	arguments := []string{fixture.boundary.ContainerdShim.Path, "-namespace", "urnetwork-evaluation", "-id", strings.Repeat("a", 64), "-address", fixture.boundary.ContainerdSocketPath}
+	encode := func(arguments []string) []byte { return []byte(strings.Join(arguments, "\x00") + "\x00") }
+	if err := validateRuntimeBoundaryShimArguments(encode(arguments), fixture.boundary, fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func([]string){
+		func(arguments []string) { arguments[2] = "moby" },
+		func(arguments []string) { arguments[4] = "synthetic-short-id" },
+		func(arguments []string) { arguments[6] = "/run/containerd/containerd.sock" },
+	} {
+		current := append([]string(nil), arguments...)
+		change(current)
+		if err := validateRuntimeBoundaryShimArguments(encode(current), fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("private shim escaped its frozen namespace/id/address family")
+		}
+	}
+}
+
+// Process comm may contain spaces and parentheses; the native birth field
+// cannot shift to another numeric stat token or accept a missing identity.
+func TestRuntimeResourceBoundaryProcessBirthParser(t *testing.T) {
+	content := []byte("101 (synthetic (worker)) S " + strings.Repeat("0 ", 18) + "123 0\n")
+	if birth, err := runtimeBoundaryProcessStart(content); err != nil || birth != 123 {
+		t.Fatal("native process birth parser used a comm token as stat identity")
+	}
+	for _, content := range []string{"", "101 synthetic 123", "101 (synthetic) S 0", "101 (synthetic) S " + strings.Repeat("0 ", 19)} {
+		if _, err := runtimeBoundaryProcessStart([]byte(content)); err == nil {
+			t.Fatal("incomplete process birth was admitted")
+		}
+	}
 }
 
 // Kernel arithmetic is checked without issuing a filesystem operation.
