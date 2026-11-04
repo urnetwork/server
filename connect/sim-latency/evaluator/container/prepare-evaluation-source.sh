@@ -8,6 +8,12 @@
 set -Eeuo pipefail
 umask 077
 export LANG=C LC_ALL=C
+subevaluation_docker_args=()
+if [[ -v URNETWORK_SUBEVALUATION_RUN_ID || -v URNETWORK_SUBEVALUATION_JOB_ID ||
+      -v URNETWORK_SUBEVALUATION_ROUND_ID || -v URNETWORK_SUBEVALUATION_ATTEMPT ]]; then
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/subevaluation-ownership.sh"
+    subevaluation_ownership_init
+fi
 
 base_image=""
 staging=false
@@ -113,7 +119,7 @@ expected_source_lock_sha256="$(sudo -n docker image inspect --format '{{index .C
 
 install -d -m 0700 "$destination"
 source_lock_path="$(mktemp "$destination_parent/.evaluation-source-lock.XXXXXXXX.json")"
-source_container="$(sudo -n docker create "$base_image_id")"
+source_container="$(sudo -n docker create "${subevaluation_docker_args[@]}" "$base_image_id")"
 sudo -n docker cp "$source_container:/opt/urnetwork/source-lock.json" "$source_lock_path"
 for repository in "${REPOSITORIES[@]}"; do
     sudo -n docker cp "$source_container:/workspace/$repository" "$destination/"

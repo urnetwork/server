@@ -1,0 +1,20 @@
+# Prospective-only overlay. The original Compose file and its labels remain
+# unchanged when no authenticated subevaluation ownership scope is present.
+x-subevaluation-labels: &subevaluation-labels
+  com.urnetwork.competition.run-id: ${URNETWORK_SUBEVALUATION_RUN_ID:?set the authenticated subevaluation run identity}
+
+services:
+  postgres:
+    labels: *subevaluation-labels
+  migrate:
+    labels: *subevaluation-labels
+  redis:
+    labels: *subevaluation-labels
+  runner:
+    labels: *subevaluation-labels
+  scorer:
+    labels: *subevaluation-labels
+
+networks:
+  evaluation:
+    labels: *subevaluation-labels

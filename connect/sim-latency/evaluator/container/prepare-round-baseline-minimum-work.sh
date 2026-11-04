@@ -53,7 +53,7 @@ baseline_actual_management_affinity="$(awk -F: \
 round_baseline_control_prefix() {
     local source="$1" program prefix count
     [ -f "$source" ] && [ ! -L "$source" ] || return 1
-    [ "$(sha256sum -- "$source" | awk '{print $1}')" = 7780930d44ebc1df5d8f775a75c37aadb2048fc1b9386027615f3ce6b5fe56d4 ] || return 1
+    [ "$(sha256sum -- "$source" | awk '{print $1}')" = fdb6fe25f9eb696f73e1b416e08c9c1fe764b056497aa4787e54a58f4d7c81fe ] || return 1
     program="$(<"$source")"
     count="$(printf '%s\n' "$program" | awk '$0 == "build_candidate" {n++} END {print n+0}')"
     [ "$count" = 1 ] || return 1

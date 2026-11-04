@@ -7,6 +7,12 @@
 
 set -Eeuo pipefail
 umask 077
+subevaluation_docker_args=()
+if [[ -v URNETWORK_SUBEVALUATION_RUN_ID || -v URNETWORK_SUBEVALUATION_JOB_ID ||
+      -v URNETWORK_SUBEVALUATION_ROUND_ID || -v URNETWORK_SUBEVALUATION_ATTEMPT ]]; then
+    source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/subevaluation-ownership.sh"
+    subevaluation_ownership_init
+fi
 
 die() {
     printf '[docker-id-map] ERROR: %s\n' "$*" >&2
@@ -100,7 +106,7 @@ probe_id="$(sudo -n docker run --detach \
     --memory-swap 32m \
     --user 0:0 \
     --entrypoint /usr/bin/sleep \
-    "$image" 60)" || die 'could not start the namespace-map probe'
+    "${subevaluation_docker_args[@]}" "$image" 60)" || die 'could not start the namespace-map probe'
 [[ "$probe_id" =~ ^[0-9a-f]{64}$ ]] || die 'namespace-map probe id is invalid'
 
 probe_pid=""

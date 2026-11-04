@@ -10,6 +10,12 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly BUILD_TIMEOUT_SECONDS=600
 readonly SOURCE_APPLICATION_TIMEOUT_SECONDS=70
+subevaluation_docker_args=()
+if [[ -v URNETWORK_SUBEVALUATION_RUN_ID || -v URNETWORK_SUBEVALUATION_JOB_ID ||
+      -v URNETWORK_SUBEVALUATION_ROUND_ID || -v URNETWORK_SUBEVALUATION_ATTEMPT ]]; then
+    source "$SCRIPT_DIR/subevaluation-ownership.sh"
+    subevaluation_ownership_init
+fi
 
 base_image=""
 patch_path=""
@@ -430,7 +436,7 @@ runtime_identity="$(sudo -n docker run --rm \
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
-    "$image_id" identity)"
+    "${subevaluation_docker_args[@]}" "$image_id" identity)"
 validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2
         exit 1

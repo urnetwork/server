@@ -19,6 +19,18 @@ readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
 readonly RETAIN_FAILURE_EVIDENCE="$SCRIPT_DIR/retain-failure-evidence.sh"
 readonly POSTGRES_INIT="$SCRIPT_DIR/postgres-init.sh"
 readonly TIMEOUT_BUDGET="$SCRIPT_DIR/timeout-budget.sh"
+# Only a prospective agent supplies this all-or-none authenticated scope. Old
+# releases and unscoped evaluations keep their exact Docker/Compose arguments.
+subevaluation_scoped=false
+subevaluation_docker_args=()
+subevaluation_run_label_args=()
+subevaluation_compose_args=()
+subevaluation_cleanup_filter_args=()
+if [[ -v URNETWORK_SUBEVALUATION_RUN_ID || -v URNETWORK_SUBEVALUATION_JOB_ID ||
+      -v URNETWORK_SUBEVALUATION_ROUND_ID || -v URNETWORK_SUBEVALUATION_ATTEMPT ]]; then
+    source "$SCRIPT_DIR/subevaluation-ownership.sh"
+    subevaluation_ownership_init
+fi
 readonly EMPTY_PATCH_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 readonly MAX_REQUEST_BYTES=$((2 * 1024 * 1024))
 readonly MAX_PROVIDERS_BYTES=$((1024 * 1024 * 1024))
@@ -236,17 +248,17 @@ cleanup() {
     if [ -n "${job_id:-}" ]; then
         while IFS= read -r container_id; do
             [ -n "$container_id" ] && sudo -n docker rm -f "$container_id" >/dev/null 2>&1 || true
-        done < <(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" 2>/dev/null || true)
+        done < <(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}" 2>/dev/null || true)
         while IFS= read -r network_id; do
             [ -n "$network_id" ] && sudo -n docker network rm "$network_id" >/dev/null 2>&1 || true
-        done < <(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" 2>/dev/null || true)
+        done < <(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}" 2>/dev/null || true)
     fi
     if [ -n "${artifact_dir:-}" ] && [ -f "$artifact_dir/evaluator-failure.json" ]; then
         local residual_containers residual_networks
         if residual_containers="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker ps -aq \
-               --filter "label=com.urnetwork.competition.job-id=$job_id")" &&
+               --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" &&
            residual_networks="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker network ls -q \
-               --filter "label=com.urnetwork.competition.job-id=$job_id")" &&
+               --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" &&
            [ -z "$residual_containers" ] && [ -z "$residual_networks" ]; then
             :
         else
@@ -358,6 +370,9 @@ replicates="$(jq -er '.evaluation_policy.replicates' "$request_path")"
 [[ "$round_id" =~ ^[0-9a-f-]{36}$ ]] || die "round id is invalid"
 [[ "$source_epoch" =~ ^[0-6]$ ]] || die "source epoch is invalid"
 [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "attempt is invalid"
+if [[ "$subevaluation_scoped" = true ]]; then
+    subevaluation_require_identity "$job_id" "$round_id" "$attempt" || die "subevaluation ownership differs from its request"
+fi
 # A systemd slice may retain counters after its last Docker child disappears.
 # Include the authenticated retry identity without truncating stage suffixes.
 attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print substr($1, 1, 32)}')"
@@ -538,7 +553,7 @@ fi
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
 base_identity="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "$base_image_id" identity)"
+    --security-opt no-new-privileges:true "${subevaluation_docker_args[@]}" "$base_image_id" identity)"
 jq -e --arg base_sha "$base_sha" --arg empty_patch "$EMPTY_PATCH_SHA256" --argjson source_epoch "$source_epoch" \
     '.schema == 1 and .image_kind == "evaluator-base" and
      .base_sha == $base_sha and .build_sha == $base_sha and
@@ -554,7 +569,7 @@ if [ -n "$g2_volume_policy" ]; then
     instrument_policy="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges:true --cpuset-cpus "$management_cpuset" \
         --memory "$SCORER_MEMORY_LIMIT" --memory-swap "$SCORER_MEMORY_LIMIT" --pids-limit "$SCORER_PIDS_LIMIT" \
-        --entrypoint /opt/urnetwork/bin/sim-latency "$base_image_id" \
+        --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_docker_args[@]}" "$base_image_id" \
         score-policy --g2-volume-policy "$g2_volume_policy")" || die "pristine image does not implement the frozen scoring policy"
     jq -e --arg policy "$g2_volume_policy" --arg version "$scorer_version" \
         '.score_schema == 1 and .g2_volume_policy == $policy and .scorer_version == $version' \
@@ -646,7 +661,7 @@ compose_with() {
     local project="$1" env_file="$2"
     shift 2
     sudo -n docker compose --env-file "$env_file" --file "$COMPOSE_FILE" \
-        --project-name "$project" "$@"
+        "${subevaluation_compose_args[@]}" --project-name "$project" "$@"
 }
 
 new_secret() {
@@ -756,6 +771,9 @@ write_compose_env() {
         'EVALUATION_REDIS_MIN_CONNECTIONS=4' \
         'EVALUATION_REDIS_MAX_CONNECTIONS=32' \
         > "$pending"
+    if [[ "${subevaluation_scoped:-false}" = true ]]; then
+        printf '%s\n' "URNETWORK_SUBEVALUATION_RUN_ID=$subevaluation_run_id" >> "$pending"
+    fi
     chmod 0400 "$pending"
     mv -f -- "$pending" "$path"
 }
@@ -879,9 +897,9 @@ emit_candidate_build_failure() {
         mv "$build_log.tail" "$build_log"
     fi
     rm -f -- "$work_dir/candidate-build.json"
-    [ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
+    [ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
         die "candidate build failure left job containers"
-    [ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
+    [ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
         die "candidate build failure left job networks"
     remove_evaluation_sources
 
@@ -1104,7 +1122,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency \
+            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
             "$base_image_id" score-progress \
             --run "$(join_csv "${candidate_csv[@]}")" \
             --baseline /artifacts/baseline.json)" || die "candidate-$ordinal live comparison failed"
@@ -1119,7 +1137,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency \
+            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
             "$base_image_id" compare \
             --a "$(join_csv "${candidate_manifests[@]}")" \
             --b "$(join_csv "${baseline_manifests[@]}")" \
@@ -1521,7 +1539,7 @@ run_stage() {
 
     compose_with "$project" "$compose_env" --profile run down --volumes --remove-orphans >&2
     [ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" \
-        --filter "label=com.urnetwork.competition.stage=$role")" ] || die "$stage_token cleanup left containers"
+        --filter "label=com.urnetwork.competition.stage=$role" "${subevaluation_cleanup_filter_args[@]}")" ] || die "$stage_token cleanup left containers"
     sudo -n cp -a "$output/." "$work_dir/scorer-input/"
     validate_output_tree "$work_dir/scorer-input"
     record_stage_progress "$role" "$index" "$run_dir/run.json"
@@ -1614,7 +1632,7 @@ jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
 [ "$(sudo -n docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
 candidate_identity="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "$candidate_image_id" identity)"
+    --security-opt no-new-privileges:true "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
 candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity")"
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_sha "$patch_sha256" --arg policy_sha "$policy_sha256" \
@@ -1649,7 +1667,7 @@ sudo -n docker run --rm --network none --read-only --cap-drop ALL \
     --env "APEX_SIM_SHA256=$base_simulator_sha256" \
     --env "APEX_EPOCH=$source_epoch" --env "APEX_TAKEOVER_MARGIN=$takeover_margin" \
     --env "APEX_G2_VOLUME_POLICY=$g2_volume_policy" \
-    "$base_image_id" margin-preflight >&2 || die "source epoch takeover margin preflight failed"
+    "${subevaluation_docker_args[@]}" "$base_image_id" margin-preflight >&2 || die "source epoch takeover margin preflight failed"
 
 if [ -n "$round_baseline_path" ]; then
     jq -e --arg round_id "$round_id" --arg providers_sha256 "$providers_sha256" \
@@ -1839,9 +1857,9 @@ write_evidence_manifest
 
 template_database_id="$(printf '%s\n' "${migration_hashes[@]}" | sha256sum | awk '{print $1}')"
 redis_generation_id="$(printf '%s\n' "${redis_generations[@]}" | sha256sum | awk '{print $1}')"
-[ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
+[ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
     die "final cleanup left job containers"
-[ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
+[ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
     die "final cleanup left job networks"
 cleanup_complete=true
 write_evaluation_progress complete "$replicates" "$replicates"
