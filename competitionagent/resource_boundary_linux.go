@@ -42,17 +42,21 @@ type RuntimeResourceScope struct {
 // Every potentially large read, inventory or command has an owner-local bound.
 // Nonpositive values refuse admission, rather than selecting another default.
 type RuntimeResourceBoundarySettings struct {
-	DocumentBytes  int64
-	NativeBytes    int64
-	MountCount     int
-	DocumentDepth  int
-	CommandTimeout time.Duration
+	DocumentBytes            int64
+	NativeBytes              int64
+	ExecutableBytes          int64
+	MountCount               int
+	DocumentDepth            int
+	CommandTimeout           time.Duration
+	ContainerLogMaximumSize  string
+	ContainerLogMaximumFiles int
 }
 
 // Native inventories exceed a small configuration but remain strictly bounded.
 func DefaultRuntimeResourceBoundarySettings() RuntimeResourceBoundarySettings {
 	return RuntimeResourceBoundarySettings{DocumentBytes: 128 * 1024, NativeBytes: 4 * 1024 * 1024,
-		MountCount: 16384, DocumentDepth: 64, CommandTimeout: 10 * time.Second}
+		ExecutableBytes: 512 * 1024 * 1024, MountCount: 16384, DocumentDepth: 64, CommandTimeout: 10 * time.Second,
+		ContainerLogMaximumSize: "8m", ContainerLogMaximumFiles: 2}
 }
 
 // The protected manifest pins a separate engine, all of its writable roots and
@@ -78,11 +82,13 @@ type RuntimeResourceBoundary struct {
 	ContainerRootUid        uint32   `json:"container_root_uid"`
 	ContainerRootGid        uint32   `json:"container_root_gid"`
 	ContainerIdMapLength    uint32   `json:"container_id_map_length"`
-	RunscArguments          []string `json:"runsc_arguments"`
+	RuntimeName             string   `json:"runtime_name"`
+	RuntimeArguments        []string `json:"runtime_arguments"`
 	Dockerd                 Pin      `json:"dockerd"`
 	Containerd              Pin      `json:"containerd"`
 	Runc                    Pin      `json:"runc"`
-	Runsc                   Pin      `json:"runsc"`
+	ContainerdShim          Pin      `json:"containerd_shim"`
+	SocketModeHelper        Pin      `json:"socket_mode_helper"`
 	Nftables                Pin      `json:"nftables"`
 	EngineConfig            Pin      `json:"engine_config"`
 	ContainerdConfig        Pin      `json:"containerd_config"`
@@ -132,7 +138,8 @@ func VerifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 
 // The concrete public path always installs native protected-file/kernel checks.
 func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost) (*RuntimeResourceBoundary, error) {
-	if settings.DocumentBytes <= 0 || settings.NativeBytes <= 0 || settings.MountCount <= 0 || settings.DocumentDepth <= 0 || settings.CommandTimeout <= 0 {
+	if settings.DocumentBytes <= 0 || settings.NativeBytes <= 0 || settings.ExecutableBytes <= 0 || settings.MountCount <= 0 || settings.DocumentDepth <= 0 || settings.CommandTimeout <= 0 ||
+		!dockerProxyMemoryPattern.MatchString(settings.ContainerLogMaximumSize) || settings.ContainerLogMaximumFiles <= 0 {
 		return nil, errors.New("resource boundary requires positive finite settings")
 	}
 	if err := ctx.Err(); err != nil {
@@ -149,13 +156,18 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 	if err := boundary.validate(scope); err != nil {
 		return nil, err
 	}
-	for _, executable := range []Pin{boundary.Dockerd, boundary.Containerd, boundary.Runc, boundary.Runsc, boundary.Nftables} {
+	for _, executable := range []Pin{boundary.Dockerd, boundary.Containerd, boundary.ContainerdShim, boundary.Runc, boundary.SocketModeHelper, boundary.Nftables} {
 		if err := host.Executable(executable); err != nil {
 			return nil, err
 		}
 	}
 	for _, directory := range []string{scope.BaseDirectory, scope.StateDirectory, boundary.CandidateRoot, boundary.DockerDataRoot, boundary.ContainerdRoot,
 		boundary.EngineExecRoot, boundary.WorkRoot, boundary.ScratchRoot, filepath.Dir(boundary.PrivateSocketPath), filepath.Dir(boundary.ContainerdSocketPath)} {
+		if err := host.Directory(directory, scope); err != nil {
+			return nil, err
+		}
+	}
+	for _, directory := range runtimeBoundaryTemporaryDirectories(*boundary) {
 		if err := host.Directory(directory, scope); err != nil {
 			return nil, err
 		}
@@ -214,23 +226,8 @@ func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error 
 		uint64(self.ContainerRootGid)+uint64(self.ContainerIdMapLength) > uint64(math.MaxUint32)+1 {
 		return errors.New("invalid resource boundary identity, hard quota or mapped root range")
 	}
-	if self.RunscArguments == nil {
-		return errors.New("private engine has no explicitly qualified gVisor arguments")
-	}
-	flags := map[string]bool{}
-	for _, argument := range self.RunscArguments {
-		name, _, present := strings.Cut(argument, "=")
-		allowed := false
-		switch argument {
-		case "--platform=systrap", "--platform=ptrace", "--platform=kvm",
-			"--network=sandbox", "--network=none", "--directfs=true", "--directfs=false",
-			"--file-access=exclusive", "--file-access=shared":
-			allowed = true
-		}
-		if !present || !allowed || flags[name] {
-			return errors.New("qualified gVisor arguments contain an unreviewed host capability")
-		}
-		flags[name] = true
+	if self.RuntimeName != "runc" || self.RuntimeArguments == nil || len(self.RuntimeArguments) != 0 {
+		return errors.New("private engine changed the explicitly qualified stock runc profile")
 	}
 	for _, path := range []string{scope.BaseDirectory, scope.StateDirectory, self.CandidateRoot, self.BackingFile, self.BlockDevice, self.PrivateSocketPath,
 		self.ContainerdSocketPath, self.DockerDataRoot, self.ContainerdRoot, self.EngineExecRoot, self.ScratchRoot, self.WorkRoot} {
@@ -264,17 +261,21 @@ func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error 
 		inRange(scope.TrustedOperatorUid, self.ContainerRootUid) {
 		return errors.New("container subordinate ids overlap worker or operator authority")
 	}
-	for _, pin := range []Pin{self.EngineConfig, self.ContainerdConfig, self.NetworkPolicy, self.Dockerd, self.Containerd, self.Runc, self.Runsc, self.Nftables} {
+	for _, pin := range []Pin{self.EngineConfig, self.ContainerdConfig, self.NetworkPolicy, self.Dockerd, self.Containerd, self.ContainerdShim, self.Runc, self.SocketModeHelper, self.Nftables} {
 		if !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path || !digestPattern.MatchString(pin.Sha256) || pathWithin(self.CandidateRoot, pin.Path) {
 			return errors.New("resource boundary pin is invalid or candidate-writable")
 		}
+	}
+	if filepath.Base(self.Runc.Path) != "runc" || filepath.Base(self.ContainerdShim.Path) != "containerd-shim-runc-v2" ||
+		filepath.Dir(self.Runc.Path) != filepath.Dir(self.ContainerdShim.Path) || self.SocketModeHelper.Path != "/usr/bin/chmod" {
+		return errors.New("private engine helper path differs from pinned stock runtime tools")
 	}
 	return nil
 }
 
 // Exact trusted engine configuration prevents unbounded roots, alternate
 // sockets, unremapped root or an implicit fallback runtime from being hidden.
-func runtimeBoundaryEngineDocument(boundary RuntimeResourceBoundary) map[string]any {
+func runtimeBoundaryEngineDocument(boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings) map[string]any {
 	return map[string]any{
 		"data-root": boundary.DockerDataRoot, "exec-root": filepath.Join(boundary.EngineExecRoot, "docker"),
 		"storage-driver": "overlay2", "features": map[string]any{"containerd-snapshotter": false},
@@ -284,28 +285,59 @@ func runtimeBoundaryEngineDocument(boundary RuntimeResourceBoundary) map[string]
 		"containerd-plugins-namespace": "urnetwork-evaluation-plugins",
 		"bridge":                       "none", "iptables": false, "ip6tables": false, "ip-forward": false, "ip-masq": false, "userland-proxy": false, "ipv6": false,
 		"userns-remap": boundary.UserNamespace + ":" + boundary.UserNamespace,
-		"exec-opts":    []any{"native.cgroupdriver=systemd"}, "default-runtime": "runsc", "live-restore": false,
-		"runtimes": map[string]any{
-			"runc":  map[string]any{"path": boundary.Runc.Path, "runtimeArgs": []any{}},
-			"runsc": map[string]any{"path": boundary.Runsc.Path, "runtimeArgs": runtimeBoundaryRunscArguments(boundary)}},
-		"log-driver": "json-file", "log-opts": map[string]any{"max-size": "8m", "max-file": "2"},
+		"exec-opts":    []any{"native.cgroupdriver=systemd"}, "default-runtime": boundary.RuntimeName, "live-restore": false,
+		"log-driver": "json-file", "log-opts": map[string]any{"max-size": settings.ContainerLogMaximumSize, "max-file": strconv.Itoa(settings.ContainerLogMaximumFiles)},
 	}
-}
-
-// Only root bookkeeping moves into the bounded filesystem; every other runtime
-// argument must be an explicitly declared, reviewed qualified profile value.
-func runtimeBoundaryRunscArguments(boundary RuntimeResourceBoundary) []any {
-	arguments := []any{"--root=" + filepath.Join(boundary.EngineExecRoot, "runsc")}
-	for _, argument := range boundary.RunscArguments {
-		arguments = append(arguments, argument)
-	}
-	return arguments
 }
 
 // Containerd's root, state and socket are explicit; only its fixed daemon is
 // permitted to load the private engine's trusted runtime integrations.
 func runtimeBoundaryContainerdDocument(boundary RuntimeResourceBoundary) []byte {
-	return []byte(fmt.Sprintf("version = 3\nroot = %q\nstate = %q\n[grpc]\n  address = %q\n  uid = 0\n  gid = 0\n[debug]\n  level = \"error\"\n[metrics]\n  address = \"\"\n[plugins.'io.containerd.cri.v1.runtime']\n  enable_selinux = false\n", boundary.ContainerdRoot, filepath.Join(boundary.EngineExecRoot, "containerd"), boundary.ContainerdSocketPath))
+	return []byte(fmt.Sprintf("version = 3\nroot = %q\nstate = %q\ndisabled_plugins = [\"io.containerd.cri.v1.images\", \"io.containerd.cri.v1.runtime\"]\n[grpc]\n  address = %q\n  uid = 0\n  gid = 0\n[debug]\n  level = \"error\"\n[metrics]\n  address = \"\"\n", boundary.ContainerdRoot, filepath.Join(boundary.EngineExecRoot, "containerd"), boundary.ContainerdSocketPath))
+}
+
+// Candidate-controlled temporary data may not spill into the host's /tmp or
+// an engine process's default root home outside the bounded filesystem.
+func runtimeBoundaryTemporaryDirectories(boundary RuntimeResourceBoundary) []string {
+	return []string{filepath.Join(boundary.ScratchRoot, "engine-tmp"), filepath.Join(boundary.ScratchRoot, "docker-tmp"), filepath.Join(boundary.ScratchRoot, "engine-home")}
+}
+
+// Both daemons resolve only protected pinned helpers and use bounded temporary
+// roots; systemd supplies incidental invocation/notification metadata separately.
+func runtimeBoundaryEnvironment(boundary RuntimeResourceBoundary) map[string]string {
+	directories := runtimeBoundaryTemporaryDirectories(boundary)
+	return map[string]string{"PATH": filepath.Dir(boundary.Runc.Path), "TMPDIR": directories[0], "DOCKER_TMPDIR": directories[1], "HOME": directories[2]}
+}
+
+// Protected unit configuration is checked against the actual daemon process,
+// including duplicate keys and environment switches that override its class.
+func validateRuntimeBoundaryEnvironment(content []byte, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings) error {
+	if int64(len(content)) > settings.DocumentBytes || len(content) == 0 || content[len(content)-1] != 0 {
+		return errors.New("private engine environment is incomplete or unbounded")
+	}
+	expected := runtimeBoundaryEnvironment(boundary)
+	seen := map[string]bool{}
+	for _, raw := range bytes.Split(content[:len(content)-1], []byte{0}) {
+		name, value, present := strings.Cut(string(raw), "=")
+		if !present || name == "" || seen[name] {
+			return errors.New("private engine environment is ambiguous")
+		}
+		seen[name] = true
+		if required, owns := expected[name]; owns && value != required {
+			return errors.New("private engine helper or temporary root differs")
+		}
+		if strings.HasPrefix(name, "DOCKER_") && name != "DOCKER_TMPDIR" || strings.HasPrefix(name, "CONTAINERD_") ||
+			name == "LD_PRELOAD" || name == "LD_LIBRARY_PATH" || name == "HTTP_PROXY" || name == "HTTPS_PROXY" || name == "ALL_PROXY" ||
+			name == "http_proxy" || name == "https_proxy" || name == "all_proxy" {
+			return errors.New("private engine inherited a runtime or endpoint override")
+		}
+	}
+	for name := range expected {
+		if !seen[name] {
+			return errors.New("private engine environment omitted a bounded root")
+		}
+	}
+	return nil
 }
 
 // The policy changes only the dedicated bridge prefix, never user Docker
@@ -323,7 +355,7 @@ func validateRuntimeBoundaryDocuments(boundary RuntimeResourceBoundary, engine, 
 		return errors.New("private engine configuration is ambiguous")
 	}
 	var actual any
-	if json.Unmarshal(engine, &actual) != nil || !reflect.DeepEqual(actual, runtimeBoundaryEngineDocument(boundary)) {
+	if json.Unmarshal(engine, &actual) != nil || !reflect.DeepEqual(actual, runtimeBoundaryEngineDocument(boundary, settings)) {
 		return errors.New("private engine configuration changed the closed boundary")
 	}
 	if !bytes.Equal(containerd, runtimeBoundaryContainerdDocument(boundary)) || !bytes.Equal(policy, runtimeBoundaryNetworkPolicy()) {
@@ -360,7 +392,7 @@ func validateRuntimeBoundaryDaemon(content []byte, boundary RuntimeResourceBound
 	}
 	if json.Unmarshal(content, &info) != nil || info.Driver != "overlay2" ||
 		info.DockerRootDir != filepath.Join(boundary.DockerDataRoot, fmt.Sprintf("%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)) ||
-		info.CgroupDriver != "systemd" || info.CgroupVersion != "2" || info.DefaultRuntime != "runsc" || info.LiveRestoreEnabled ||
+		info.CgroupDriver != "systemd" || info.CgroupVersion != "2" || info.DefaultRuntime != boundary.RuntimeName || info.LiveRestoreEnabled ||
 		info.Containerd == nil || info.Containerd.Address != boundary.ContainerdSocketPath ||
 		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != "urnetwork-evaluation-plugins" {
 		return errors.New("private daemon storage, remap, cgroup or runtime class differs")
@@ -374,15 +406,14 @@ func validateRuntimeBoundaryDaemon(content []byte, boundary RuntimeResourceBound
 			return errors.New("private daemon unexpectedly uses the containerd image store")
 		}
 	}
-	runsc, present := info.Runtimes["runsc"]
 	runc, runcPresent := info.Runtimes["runc"]
-	expectedArgs := []string{}
-	for _, argument := range runtimeBoundaryRunscArguments(boundary) {
-		expectedArgs = append(expectedArgs, argument.(string))
+	if !userns || !runcPresent || runc.Path != "runc" || len(runc.Args) != 0 || runc.Type != "" || len(runc.Options) != 0 {
+		return errors.New("private daemon actual user namespace or stock runtime differs")
 	}
-	if !userns || !present || !runcPresent || runsc.Path != boundary.Runsc.Path || !reflect.DeepEqual(runsc.Args, expectedArgs) ||
-		runsc.Type != "" || len(runsc.Options) != 0 || runc.Path != boundary.Runc.Path || len(runc.Args) != 0 || runc.Type != "" || len(runc.Options) != 0 {
-		return errors.New("private daemon actual user namespace or gVisor executable differs")
+	for name, runtime := range info.Runtimes {
+		if name != "runc" && name != "io.containerd.runc.v2" || runtime.Path != "runc" || len(runtime.Args) != 0 || runtime.Type != "" || len(runtime.Options) != 0 {
+			return errors.New("private daemon registered an unqualified custom runtime")
+		}
 	}
 	return nil
 }
@@ -797,7 +828,7 @@ func protectedRuntimeBoundaryFile(path string, scope RuntimeResourceScope) error
 
 // The live socket peer must be the pinned daemon running only its protected
 // configuration. A different root process on the same path is not equivalent.
-func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, configFlag string, settings RuntimeResourceBoundarySettings) error {
+func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, configFlag string, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings) error {
 	unix, ok := connection.(*net.UnixConn)
 	if !ok {
 		return errors.New("private engine peer is not a Unix connection")
@@ -823,9 +854,9 @@ func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, 
 		return err
 	}
 	digest := sha256.New()
-	_, copyErr := io.Copy(digest, file)
+	count, copyErr := io.Copy(digest, io.LimitReader(file, settings.ExecutableBytes+1))
 	_ = file.Close()
-	if copyErr != nil || hex.EncodeToString(digest.Sum(nil)) != executable.Sha256 {
+	if copyErr != nil || count > settings.ExecutableBytes || hex.EncodeToString(digest.Sum(nil)) != executable.Sha256 {
 		return errors.New("private engine live executable content differs")
 	}
 	arguments, err := readBounded(filepath.Join(proc, "cmdline"), settings.DocumentBytes)
@@ -833,7 +864,11 @@ func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, 
 	if executable == (Pin{}) || configPath == "" || err != nil || !bytes.Equal(arguments, expected) {
 		return errors.New("private engine live arguments changed its protected configuration")
 	}
-	return nil
+	environment, err := readBounded(filepath.Join(proc, "environ"), settings.DocumentBytes)
+	if err != nil {
+		return err
+	}
+	return validateRuntimeBoundaryEnvironment(environment, boundary, settings)
 }
 
 // Only the manifest's private Unix endpoint is queried. No environment proxy,
@@ -846,7 +881,7 @@ func (runtimeBoundaryNativeHost) Daemon(parent context.Context, boundary Runtime
 		if err != nil {
 			return nil, err
 		}
-		if err := verifyRuntimeBoundaryPeer(connection, executable, configPath, configFlag, settings); err != nil {
+		if err := verifyRuntimeBoundaryPeer(connection, executable, configPath, configFlag, boundary, settings); err != nil {
 			_ = connection.Close()
 			return nil, err
 		}

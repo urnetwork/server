@@ -103,16 +103,18 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 		PrivateSocketPath: filepath.Join(base, "control", "docker.sock"), ContainerdSocketPath: filepath.Join(base, "control", "containerd.sock"),
 		DockerDataRoot: filepath.Join(candidate, "docker"), ContainerdRoot: filepath.Join(candidate, "containerd"), EngineExecRoot: filepath.Join(candidate, "exec"),
 		WorkRoot: filepath.Join(candidate, "jobs"), ScratchRoot: filepath.Join(candidate, "scratch"),
-		UserNamespace: "synthetic_evaluation", ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536, RunscArguments: []string{"--platform=systrap"}}
+		UserNamespace: "synthetic_evaluation", ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536,
+		RuntimeName: "runc", RuntimeArguments: []string{}}
 	executable := func(name string) Pin {
-		return Pin{Path: "/usr/libexec/synthetic-private-" + name, Sha256: strings.Repeat("a", 64)}
+		return Pin{Path: "/opt/synthetic-private-engine/bin/" + name, Sha256: strings.Repeat("a", 64)}
 	}
-	boundary.Dockerd, boundary.Containerd, boundary.Runc, boundary.Runsc, boundary.Nftables = executable("dockerd"), executable("containerd"), executable("runc"), executable("runsc"), executable("nft")
+	boundary.Dockerd, boundary.Containerd, boundary.Runc, boundary.ContainerdShim, boundary.Nftables = executable("dockerd"), executable("containerd"), executable("runc"), executable("containerd-shim-runc-v2"), executable("nft")
+	boundary.SocketModeHelper = Pin{Path: "/usr/bin/chmod", Sha256: strings.Repeat("b", 64)}
 	scope := RuntimeResourceScope{BaseDirectory: base, StateDirectory: filepath.Join(base, "state"), WorkDirectory: boundary.WorkRoot,
 		ScratchDirectory: boundary.ScratchRoot, TrustedOperatorUid: 12345, WorkerUid: 12346, WorkerGid: 12346}
 	host := &runtimeBoundaryTestHost{documents: map[string][]byte{}}
 	fixture := &runtimeBoundaryTest{boundary: boundary, scope: scope, host: host, settings: DefaultRuntimeResourceBoundarySettings()}
-	engine, err := json.Marshal(runtimeBoundaryEngineDocument(boundary))
+	engine, err := json.Marshal(runtimeBoundaryEngineDocument(boundary, fixture.settings))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,10 +137,10 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 	host.facts.PathDeviceIds[filepath.Dir(boundary.PrivateSocketPath)] = 8<<8 | 2
 	host.network = runtimeBoundaryTestNetwork(t)
 	info := map[string]any{"Driver": "overlay2", "DriverStatus": [][]string{{"Backing Filesystem", "extfs"}},
-		"DockerRootDir": filepath.Join(boundary.DockerDataRoot, "200000.300000"), "CgroupDriver": "systemd", "CgroupVersion": "2", "DefaultRuntime": "runsc",
+		"DockerRootDir": filepath.Join(boundary.DockerDataRoot, "200000.300000"), "CgroupDriver": "systemd", "CgroupVersion": "2", "DefaultRuntime": "runc",
 		"LiveRestoreEnabled": false, "SecurityOptions": []string{"name=userns"},
 		"Containerd": map[string]any{"Address": boundary.ContainerdSocketPath, "Namespaces": map[string]any{"Containers": "urnetwork-evaluation", "Plugins": "urnetwork-evaluation-plugins"}},
-		"Runtimes":   runtimeBoundaryEngineDocument(boundary)["runtimes"]}
+		"Runtimes":   map[string]any{"runc": map[string]any{"path": "runc"}, "io.containerd.runc.v2": map[string]any{"path": "runc"}}}
 	host.daemon, err = json.Marshal(info)
 	if err != nil {
 		t.Fatal(err)
@@ -206,9 +208,32 @@ func TestRuntimeResourceBoundaryRequiresAllNativeProofs(t *testing.T) {
 	}
 }
 
+// The qualified host uses stock runc with explicitly empty arguments. Docker
+// reserves that name, so its daemon config must not redefine runtimes.runc.
+func TestRuntimeResourceBoundaryAcceptsOnlyExplicitStockRuncProfile(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	document := runtimeBoundaryEngineDocument(fixture.boundary, fixture.settings)
+	if document["default-runtime"] != "runc" || document["runtimes"] != nil {
+		t.Fatal("private engine silently changed or redefined the stock runtime")
+	}
+	if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err != nil {
+		t.Fatalf("explicit empty-argument runc profile was rejected: %v", err)
+	}
+	document["runtimes"] = map[string]any{"runc": map[string]any{"path": fixture.boundary.Runc.Path}}
+	content, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.boundary.EngineConfig = fixture.document("engine.json", content)
+	fixture.commit()
+	if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil {
+		t.Fatal("reserved runtimes.runc redefinition was admitted")
+	}
+}
+
 // Every authority failure stops admission; another daemon is never attempted.
 func TestRuntimeResourceBoundaryProtectedFailureHasNoFallback(t *testing.T) {
-	for _, failure := range []string{"kernel", "daemon", "network", "/usr/libexec/synthetic-private-runsc", "/srv/synthetic-evaluation/state", "/etc/synthetic-private-engine/network.nft"} {
+	for _, failure := range []string{"kernel", "daemon", "network", "/opt/synthetic-private-engine/bin/runc", "/srv/synthetic-evaluation/state", "/etc/synthetic-private-engine/network.nft"} {
 		fixture := newRuntimeBoundaryTest(t)
 		fixture.host.fail = failure
 		if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil {
@@ -236,10 +261,10 @@ func TestRuntimeResourceBoundaryRejectsUnboundedOrOverlappingRoots(t *testing.T)
 			boundary.EngineConfig.Path = boundary.CandidateRoot + "/engine.json"
 		},
 		func(boundary *RuntimeResourceBoundary) { boundary.BlockDevice = "/dev/synthetic-disk" },
-		func(boundary *RuntimeResourceBoundary) { boundary.RunscArguments = nil },
-		func(boundary *RuntimeResourceBoundary) { boundary.RunscArguments = []string{"--network=host"} },
+		func(boundary *RuntimeResourceBoundary) { boundary.RuntimeArguments = nil },
+		func(boundary *RuntimeResourceBoundary) { boundary.RuntimeName = "runsc" },
 		func(boundary *RuntimeResourceBoundary) {
-			boundary.RunscArguments = []string{"--root=/srv/synthetic-host-authority"}
+			boundary.RuntimeArguments = []string{"--root=/srv/synthetic-host-authority"}
 		},
 	} {
 		fixture := newRuntimeBoundaryTest(t)
@@ -378,13 +403,13 @@ func TestRuntimeResourceBoundaryRejectsEngineConfigurationExpansion(t *testing.T
 		func(document map[string]any) { document["data-root"] = "/var/lib/docker" },
 		func(document map[string]any) { document["hosts"] = []any{"unix:///run/docker.sock"} },
 		func(document map[string]any) { document["userns-remap"] = "" },
-		func(document map[string]any) { document["default-runtime"] = "runc" },
+		func(document map[string]any) { document["default-runtime"] = "runsc" },
 		func(document map[string]any) { document["bridge"] = "docker0" },
 		func(document map[string]any) { document["iptables"] = true },
 		func(document map[string]any) { document["experimental"] = true },
 	} {
 		fixture := newRuntimeBoundaryTest(t)
-		document := runtimeBoundaryEngineDocument(fixture.boundary)
+		document := runtimeBoundaryEngineDocument(fixture.boundary, fixture.settings)
 		change(document)
 		content, err := json.Marshal(document)
 		if err != nil {
@@ -412,17 +437,17 @@ func TestRuntimeResourceBoundaryRejectsActualDaemonClassMismatch(t *testing.T) {
 		func(info map[string]any) { info["DockerRootDir"] = "/var/lib/docker" },
 		func(info map[string]any) { info["CgroupDriver"] = "cgroupfs" },
 		func(info map[string]any) { info["CgroupVersion"] = "1" },
-		func(info map[string]any) { info["DefaultRuntime"] = "runc" },
+		func(info map[string]any) { info["DefaultRuntime"] = "runsc" },
 		func(info map[string]any) { info["SecurityOptions"] = []string{} },
 		func(info map[string]any) { info["LiveRestoreEnabled"] = true },
 		func(info map[string]any) {
 			info["Containerd"].(map[string]any)["Address"] = "/run/containerd/containerd.sock"
 		},
 		func(info map[string]any) {
-			info["Runtimes"].(map[string]any)["runsc"].(map[string]any)["path"] = "/usr/bin/synthetic-other-runsc"
+			info["Runtimes"].(map[string]any)["runc"].(map[string]any)["path"] = "/usr/bin/synthetic-other-runtime"
 		},
 		func(info map[string]any) {
-			info["Runtimes"].(map[string]any)["runsc"].(map[string]any)["runtimeArgs"] = []string{"--network=host"}
+			info["Runtimes"].(map[string]any)["runc"].(map[string]any)["runtimeArgs"] = []string{"--network=host"}
 		},
 	} {
 		fixture := newRuntimeBoundaryTest(t)
@@ -479,9 +504,12 @@ func TestRuntimeResourceBoundaryBoundsAndCancellation(t *testing.T) {
 	for _, change := range []func(*RuntimeResourceBoundarySettings){
 		func(settings *RuntimeResourceBoundarySettings) { settings.DocumentBytes = 0 },
 		func(settings *RuntimeResourceBoundarySettings) { settings.NativeBytes = 0 },
+		func(settings *RuntimeResourceBoundarySettings) { settings.ExecutableBytes = 0 },
 		func(settings *RuntimeResourceBoundarySettings) { settings.MountCount = 0 },
 		func(settings *RuntimeResourceBoundarySettings) { settings.DocumentDepth = 0 },
 		func(settings *RuntimeResourceBoundarySettings) { settings.CommandTimeout = 0 },
+		func(settings *RuntimeResourceBoundarySettings) { settings.ContainerLogMaximumSize = "" },
+		func(settings *RuntimeResourceBoundarySettings) { settings.ContainerLogMaximumFiles = 0 },
 	} {
 		fixture := newRuntimeBoundaryTest(t)
 		change(&fixture.settings)
@@ -504,6 +532,46 @@ func TestRuntimeResourceBoundaryBoundsAndCancellation(t *testing.T) {
 	fixture.settings.NativeBytes = 1
 	if _, err := verifyRuntimeResourceBoundary(context.Background(), fixture.pin, fixture.scope, fixture.settings, fixture.host); err == nil {
 		t.Fatal("native inventory bytes exceeded their bound")
+	}
+}
+
+// Actual daemon environment, not a unit-file assertion, must keep helper
+// lookup and all candidate-amplified temporary data inside their fixed roots.
+func TestRuntimeResourceBoundaryRejectsActualEnvironmentOverrides(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	environment := runtimeBoundaryEnvironment(fixture.boundary)
+	encode := func(values map[string]string) []byte {
+		var content []byte
+		for name, value := range values {
+			content = append(content, []byte(name+"="+value+"\x00")...)
+		}
+		return content
+	}
+	if err := validateRuntimeBoundaryEnvironment(encode(environment), fixture.boundary, fixture.settings); err != nil {
+		t.Fatal(err)
+	}
+	for _, change := range []func(map[string]string){
+		func(environment map[string]string) { environment["PATH"] = "/usr/bin:/bin" },
+		func(environment map[string]string) { environment["TMPDIR"] = "/tmp" },
+		func(environment map[string]string) { environment["DOCKER_TMPDIR"] = "/var/lib/docker/tmp" },
+		func(environment map[string]string) { environment["HOME"] = "/root" },
+		func(environment map[string]string) { environment["DOCKER_HOST"] = "unix:///run/docker.sock" },
+		func(environment map[string]string) { environment["DOCKER_RAMDISK"] = "1" },
+		func(environment map[string]string) {
+			environment["CONTAINERD_ADDRESS"] = "/run/containerd/containerd.sock"
+		},
+		func(environment map[string]string) { environment["HTTP_PROXY"] = "http://synthetic-proxy.example" },
+		func(environment map[string]string) { delete(environment, "TMPDIR") },
+	} {
+		current := runtimeBoundaryEnvironment(fixture.boundary)
+		change(current)
+		if err := validateRuntimeBoundaryEnvironment(encode(current), fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("private daemon environment escaped frozen helper/temp authority")
+		}
+	}
+	duplicate := append(encode(environment), []byte("TMPDIR=/tmp\x00")...)
+	if err := validateRuntimeBoundaryEnvironment(duplicate, fixture.boundary, fixture.settings); err == nil {
+		t.Fatal("duplicate daemon environment override was admitted")
 	}
 }
 
