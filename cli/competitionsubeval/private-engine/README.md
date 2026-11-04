@@ -26,6 +26,12 @@ plan:
   binaries in the one protected `ENGINE_BIN` directory. The qualified runtime is
   stock `runc`, with explicitly empty arguments; do not install or enable `runsc`
   and do not define the reserved `runtimes.runc` name.
+- Freeze the actual private containerd executable SHA, semantic version and
+  source commit explicitly on both hosts. The version/source fields have no
+  deployment default and are not covered by the kernel/Docker minor waiver.
+- Pin the actual `sleep`, `systemctl`, `nsenter` and `ip` binaries and all four
+  private unit files. The namespace keeper is the fixed `sleep infinity` process;
+  it is not a shell or an evaluator-owned process.
 - Reserve a distinct loop device against an existing, fully allocated, root-only
   regular backing file. Formatting and loop attachment are deliberately not
   automated here: inspect exact targets and preserve existing data. The file and
@@ -39,6 +45,13 @@ plan:
 - Create root-owned protected `candidate/{docker,containerd,exec,jobs,scratch,
   daemon-logs}`, `candidate/scratch/{engine-tmp,docker-tmp,engine-home}`, `state/`
   and `control/` parents. Individual worker run directories remain private.
+- Create a fresh root-owned `candidate/exec/containerd-sockets` directory.
+  Containerd's shim socket source currently uses `/run/containerd` independently
+  of configured root/state. Both private daemon units privately bind this quota
+  source over the existing `/run/containerd` in their mount views; they never
+  write the user's containerd tree. Admission verifies actual device/inode
+  identity in both peers and every managed shim. This prospective compatibility
+  requirement needs source/version and native qualification, not an assumption.
 - Review engine memory/CPU/task/descriptor and start/stop limits. The default
   verifier settings expect container log limits `8m` and `2`; changing those
   settings requires matching pinned engine content. Disable CRI and keep every
@@ -63,12 +76,32 @@ maintenance/handler plan and native child/core proof are required before a host
 with an unqualified pipe collector can be used.
 The pipe exception follows the [Linux core(5) contract](https://man7.org/linux/man-pages/man5/core.5.html).
 
-The network unit creates only `inet urnetwork_subeval`; it neither flushes a
-ruleset nor changes user Docker tables, routes or sysctls. Candidate networks must
+The stable namespace keeper uses `PrivateNetwork=yes` and initially has only
+loopback, with no external link setup. Engine, managed containerd/shims and the
+network guard share that namespace through the pinned lifetime dependency group.
+`Requires`, `BindsTo` and `After` prevent a replacement daemon from silently
+escaping when the keeper dies. Native proof compares the three live namespace
+identities to a captured keeper descriptor and positively rejects the host
+namespace; systemd metadata alone is insufficient.
+
+The network unit creates only `inet urnetwork_subeval` inside that private
+namespace; it neither flushes a ruleset nor reads or changes user Docker or host
+FORWARD rules, routes or sysctls. Candidate networks must
 be internal, non-attachable, IPv6-disabled, isolated-gateway bridges named exactly
 `unev-` plus the first ten run-id hex characters. `iptables=false` is not the
-network boundary: admission checks the live, scoped input/forward/output drops.
+network boundary: admission checks bounded link/route inventory and the live
+input/forward/output policy inside the captured namespace. Only loopback, at most
+one address-free cohort bridge and its enslaved container veths are permitted.
+The explicit within-that-one-bridge forwarding rule preserves PG/Redis/workload
+traffic; all other scoped ingress/egress still drops.
 Never remove the guard while any private workload exists.
+
+Read-only native network tools enter only the captured descriptor via pinned
+`nsenter`. Callers cannot select a PID, namespace path, tool or ip/nft command.
+The same unit invocation, process births and daemon UDS peers are rechecked around
+every fact consumer. Every successful verification owns a receipt: defer
+`boundary.Close()` and call `boundary.Recheck(ctx)` after consuming native facts.
+No receipt is serialized into a job plan and no host-namespace fallback exists.
 
 Native qualification remains mandatory before use: prove ordinary same-bridge
 evaluation traffic with this host's bridge-netfilter settings, deny host/outside
@@ -82,4 +115,6 @@ shared-baseline no-op screen; these templates claim no host equivalence.
 Primary contracts: [Docker multiple-daemon isolation](https://docs.docker.com/reference/cli/dockerd/#run-multiple-daemons),
 [Docker29 containerd image store](https://docs.docker.com/engine/storage/containerd/),
 [Moby29 runtime reservation](https://github.com/moby/moby/blob/docker-v29.9.2/daemon/runtime_unix.go),
+[systemd private-network sharing](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#PrivateNetwork=),
+[containerd2.2.1 shim socket root](https://github.com/containerd/containerd/blob/v2.2.1/pkg/shim/util_unix.go),
 and [nftables interface matching](https://www.netfilter.org/projects/nftables/manpage.html).

@@ -5,6 +5,7 @@ table inet urnetwork_subeval {
   }
   chain forward {
     type filter hook forward priority -300; policy accept;
+    iifname "unev-*" oifname "unev-*" accept
     iifname "unev-*" drop
     oifname "unev-*" drop
   }

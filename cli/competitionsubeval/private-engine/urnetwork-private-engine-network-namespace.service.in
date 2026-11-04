@@ -1,0 +1,22 @@
+[Unit]
+Description=Stable offline private evaluation network namespace
+Before=urnetwork-private-engine-network.service urnetwork-private-containerd.service urnetwork-private-engine.service
+RequiresMountsFor=@BASE_DIRECTORY@/candidate
+ConditionPathIsMountPoint=@BASE_DIRECTORY@/candidate
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+PrivateNetwork=yes
+WorkingDirectory=@BASE_DIRECTORY@/candidate
+ExecStart=@NAMESPACE_KEEPER_PATH@ infinity
+KillMode=control-group
+Restart=no
+LimitCORE=0
+StandardOutput=null
+StandardError=null
+
+[Install]
+WantedBy=multi-user.target
