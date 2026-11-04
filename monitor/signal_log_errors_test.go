@@ -966,19 +966,32 @@ func TestLogErrorsSignalGenericConnectionRefusalDoesNotAssumeRedis(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	markdown := requireAlertClass(t, alerts, "connection-refused").Markdown()
-	for _, want := range []string{
-		"otherwise-unclassified TCP target",
-		"does not identify the target service",
-		"Do not assume this is Redis",
-		"same network namespace",
-		"Do not restart an inferred service",
+	alert := requireAlertClass(t, alerts, "connection-refused")
+	if len(alerts) != 1 || alert.Identity() != "logs/connection-refused|connection-refused|service|" ||
+		alert.Severity != SeverityPage || alert.Sustain != 1 ||
+		alert.Observed != "rate=10/min class=connection-refused target=service" {
+		t.Fatalf("generic refusal changed diagnostic identity or threshold: %+v", alerts)
+	}
+	for _, required := range []struct{ value, text string }{
+		{value: alert.Evidence, text: "connection-refused diagnostic"},
+		{value: alert.Evidence, text: "target listener state and operation outcome are unknown"},
+		{value: alert.Mechanism, text: "diagnostic lines, not native socket results"},
+		{value: alert.Context, text: "does not identify the target service"},
+		{value: alert.Context, text: "Do not assume this is Redis"},
+		{value: alert.Action, text: "Bind one retained original event"},
+		{value: alert.Action, text: "Only after that binding"},
+		{value: alert.Action, text: "same source path and same network namespace"},
+		{value: alert.Action, text: "Do not restart an inferred service"},
+		{value: alert.Verify, text: "independently acknowledged successful operation"},
+		{value: alert.Verify, text: "Quiet or missing logs"},
 	} {
-		if !strings.Contains(markdown, want) {
-			t.Errorf("generic refusal alert omitted %q:\n%s", want, markdown)
+		if !strings.Contains(required.value, required.text) {
+			t.Errorf("generic refusal alert omitted %q from its owning field:\n%s", required.text, alert.Markdown())
 		}
 	}
+	markdown := alert.Markdown()
 	for _, stale := range []string{
+		"had no accepting listener",
 		"SIGNALS.md 5.2",
 		"after manual restart",
 		"restart with correct conf",
