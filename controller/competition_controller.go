@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/competitionagent"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"io"
@@ -240,6 +241,11 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		!imageDigestPattern.MatchString(manifest.WorkerImageDigest) {
 		return nil, errors.New("attempt archive identity is invalid")
 	}
+	if job.SlotFencingToken > 0 && (manifest.Executor == nil || !workerIdPattern.MatchString(job.ExecutorHostId) || job.SlotId <= 0 ||
+		manifest.Executor.HostId != job.ExecutorHostId || manifest.Executor.SlotId != job.SlotId || manifest.Executor.SlotFencingToken != job.SlotFencingToken ||
+		manifest.Executor.RunId != competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount)) {
+		return nil, errors.New("distributed archive lost its exact executor custody")
+	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)
 	workerArtifacts := []struct {
 		path   string
@@ -329,6 +335,18 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 	competitionArtifactObjects.Add(float64(retention.ObjectCount))
 	competitionArtifactBytes.Add(float64(retention.Bytes))
 	manifest.Retention = retention
+	if job.SlotFencingToken > 0 {
+		// A lost PUT acknowledgement can finish after a later archive of the
+		// same fence. Different object-version metadata must never alias the
+		// latest manifest key; identical canonical bodies may safely share it.
+		retention.ManifestKey = ""
+		identityBytes, err := json.Marshal(manifest)
+		if err != nil {
+			return nil, err
+		}
+		identityDigest := sha256.Sum256(identityBytes)
+		retention.ManifestKey = filepath.ToSlash(filepath.Join(basePrefix, "manifests", hex.EncodeToString(identityDigest[:]), "artifact-manifest.json"))
+	}
 	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
 		return nil, err
@@ -469,7 +487,7 @@ func (self *blobArtifactArchive) submissionPatchKey(settings *Settings, roundId 
 }
 
 func (self *blobArtifactArchive) attemptPrefix(settings *Settings, job *queuedJob) string {
-	return filepath.ToSlash(filepath.Join(
+	prefix := filepath.ToSlash(filepath.Join(
 		self.store.Prefix(),
 		"competition",
 		"v1",
@@ -480,6 +498,10 @@ func (self *blobArtifactArchive) attemptPrefix(settings *Settings, job *queuedJo
 		job.JobId.String(),
 		fmt.Sprintf("attempt-%02d", job.AttemptCount),
 	))
+	if job.SlotFencingToken > 0 {
+		prefix = filepath.ToSlash(filepath.Join(prefix, "executors", job.ExecutorHostId, fmt.Sprintf("fence-%d", job.SlotFencingToken)))
+	}
+	return prefix
 }
 
 func artifactContentType(path string) string {
