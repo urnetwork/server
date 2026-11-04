@@ -27,6 +27,21 @@ case "$1" in
     -*) exit 2 ;;
 esac
 network_json="$(evaluation_docker network inspect "$1")"
+if [[ "$subevaluation_scoped" = true ]]; then
+    network_id="$(jq -er 'select(length == 1) | .[0].Id | select(test("^[0-9a-f]{64}$"))' <<<"$network_json")"
+    proof="$(evaluation_host verify-network "$network_id")" || {
+        printf 'evaluation private namespace network proof is unavailable\n' >&2
+        exit 1
+    }
+    jq -e --arg network_id "$network_id" --arg bridge "$URNETWORK_SUBEVALUATION_BRIDGE_NAME" '
+        .schema == 1 and .network_id == $network_id and .bridge_name == $bridge and
+        .private_namespace == true and .isolated_gateway == true and
+        (.link_sha256 | test("^[0-9a-f]{64}$"))' <<<"$proof" >/dev/null || exit 1
+    jq -n --argjson network "$network_json" --argjson proof "$proof" \
+        '{schema:1,network:$network[0],private_namespace:$proof.private_namespace,
+          bridge_name:$proof.bridge_name,link_sha256:$proof.link_sha256,isolated_gateway:true}'
+    exit 0
+fi
 if ! check_inspect <<<"$network_json"; then
     jq -n --argjson network "$network_json" \
         '{schema:1, network:$network[0], isolated_gateway:false, failure:"network_inspection"}'

@@ -147,6 +147,7 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 			return nil, err
 		}
 		self.hostFiles.proveMap = self.proveHostNamespace
+		self.hostFiles.proveNetwork = self.proveHostNetwork
 		self.hostFiles.beforePath = self.requireNoRunContainers
 	}
 	if err := self.recoverJournal(); err != nil {

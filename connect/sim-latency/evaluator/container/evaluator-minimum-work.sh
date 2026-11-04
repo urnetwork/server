@@ -808,10 +808,10 @@ validate_output_tree() {
 # read; never persist safe.directory or turn off Git's ownership check globally.
 authenticate_protected_simulator_tree() {
     local baseline_tree candidate_tree
-    baseline_tree="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" \
+    baseline_tree="$(evaluation_git -c safe.directory= -c safe.directory="$baseline_source_root/server" \
         -C "$baseline_source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
         die "could not read the baseline protected sim-latency source tree: Git invocation failed"
-    candidate_tree="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" \
+    candidate_tree="$(evaluation_git -c safe.directory= -c safe.directory="$candidate_source_root/server" \
         -C "$candidate_source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
         die "could not read the candidate protected sim-latency source tree: Git invocation failed"
     [[ "$baseline_tree" =~ ^[0-9a-f]{40}$ ]] && [[ "$candidate_tree" =~ ^[0-9a-f]{40}$ ]] ||
@@ -829,18 +829,18 @@ seal_evaluation_source() {
         local expected_commit actual_branch actual_commit source_status
         expected_commit="$(jq -er --arg repository "$repository" \
             '.repositories[$repository]' "$root/.evaluation-source.json")"
-        actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
+        actual_branch="$(evaluation_git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
             die "could not read temporary $repository source branch"
-        actual_commit="$(git -C "$repository_root" rev-parse HEAD)" ||
+        actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)" ||
             die "could not read temporary $repository source commit"
-        source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
+        source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
             die "could not inspect temporary $repository source worktree"
         [ "$actual_branch" = "$source_branch" ] && [ "$actual_commit" = "$expected_commit" ] &&
             [ -z "$source_status" ] ||
             die "temporary $repository source checkout is not clean and identity-bound"
     done
     local server_commit actual_patch
-    server_commit="$(git -C "$root/server" rev-parse HEAD)" ||
+    server_commit="$(evaluation_git -C "$root/server" rev-parse HEAD)" ||
         die "could not read temporary server source commit"
     [ "$server_commit" = "$expected_server" ] ||
         die "temporary server source checkout has the wrong commit"

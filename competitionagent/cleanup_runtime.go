@@ -52,6 +52,7 @@ func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourc
 		return nil, err
 	}
 	if err := validateCleanupRuntimeBinding(self.config, boundary); err != nil {
+		_ = boundary.Close()
 		return nil, err
 	}
 	return boundary, nil

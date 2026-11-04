@@ -33,6 +33,7 @@ type Agent struct {
 	signingKey           ed25519.PrivateKey
 	credential           *syscall.Credential
 	protected            bool
+	runtimeAdmission     func(context.Context) (*RuntimeResourceBoundary, error)
 }
 
 // State and hidden-input manifests live outside the unprivileged run directory.
@@ -135,8 +136,10 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	if err := syncDirectory(config.StateDirectory); err != nil {
 		return nil, err
 	}
-	return &Agent{config: *config, settings: settings, runner: runner, cleaner: newHostCleaner(*config, settings), containment: newHostRunContainment(*config, settings, credential), coordinatorPublicKey: publicKey,
-		signingKey: privateKey, credential: credential, protected: protected}, nil
+	self := &Agent{config: *config, settings: settings, runner: runner, cleaner: newHostCleaner(*config, settings), containment: newHostRunContainment(*config, settings, credential), coordinatorPublicKey: publicKey,
+		signingKey: privateKey, credential: credential, protected: protected}
+	self.runtimeAdmission = self.verifyCleanupRuntime
+	return self, nil
 }
 
 // One SSH invocation owns one authenticated operation. Response files are sent
@@ -541,6 +544,13 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 	if !digestPattern.MatchString(runId) {
 		return errors.New("invalid fixed execution identity")
 	}
+	// Admission may perform bounded native reads but cannot delay post-stop
+	// custody by retaining the publication lock. Recheck state after it joins.
+	boundary, err := self.runtimeAdmission(ctx)
+	if err != nil {
+		return err
+	}
+	defer boundary.Close()
 	lock, err := self.lock(ctx)
 	if err != nil {
 		return err
@@ -559,6 +569,10 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 	if err != nil {
 		lock.Close()
 		return err
+	}
+	if boundary != nil && plan.WorkDeviceId != boundary.WorkDeviceId {
+		lock.Close()
+		return errors.New("execution runtime changed its admitted candidate device")
 	}
 	if err := self.validateManifest(*manifest); err != nil {
 		lock.Close()
@@ -643,11 +657,14 @@ func (self *Agent) check(ctx context.Context) (Response, error) {
 	defer cancel()
 	output := &boundedOutput{maximum: self.settings.DiagnosticBytes}
 	arguments := []string{"--json"}
+	var boundary *RuntimeResourceBoundary
 	if self.protected {
-		boundary, err := self.verifyCleanupRuntime(checkCtx)
+		var err error
+		boundary, err = self.runtimeAdmission(checkCtx)
 		if err != nil {
 			return Response{Schema: Schema, HostId: self.config.HostId, State: "unavailable", ExitCode: -1, ErrorCode: "private_runtime_unqualified"}, nil
 		}
+		defer boundary.Close()
 		if err := self.validateHostCheckConfiguration(boundary); err != nil {
 			return Response{Schema: Schema, HostId: self.config.HostId, State: "unavailable", ExitCode: -1, ErrorCode: "host_check_configuration_invalid"}, nil
 		}
@@ -670,6 +687,9 @@ func (self *Agent) check(ctx context.Context) (Response, error) {
 	response.SelfCheck = append(json.RawMessage(nil), output.Bytes()...)
 	if err != nil || exitCode != 0 {
 		response.State, response.ErrorCode = "unavailable", "self_check_failed"
+	}
+	if boundary != nil && boundary.Recheck(checkCtx) != nil {
+		response.State, response.ErrorCode = "unavailable", "private_runtime_changed"
 	}
 	return response, nil
 }

@@ -229,14 +229,27 @@ namespace_probe_fresh=true
 if [ "$private_runtime" = true ]; then
     namespace_probe_source=retained_native_containment
     namespace_probe_fresh=false
+    agent_sha256="$(jq -er '.agent.sha256' "$private_agent_config")"
+    evaluator_sha256="$(jq -er '.evaluator.sha256' "$private_agent_config")"
+    builder_sha256="$(jq -er '.submission_builder_sha256' "$private_agent_config")"
+    resource_policy_sha256="$(jq -er '.docker_role.resource_policy.sha256' "$private_agent_config")"
+    source_lock_sha256="$(jq -er '.source_lock_sha256' "$private_agent_config")"
     # These are retained native-run hashes, not a fresh container proof. Each
     # real evaluation independently verifies live maps before output handoff.
     boundary_sha256="$(sha256sum "$private_boundary" | awk '{print $1}')"
     if secure_host_path "$cleanup_marker" file &&
        [ "$(sha256sum "$cleanup_marker" | awk '{print $1}')" = "$cleanup_marker_sha" ] &&
-       jq -e --arg boundary_sha256 "$boundary_sha256" --slurpfile boundary "$private_boundary" '
+       jq -e --arg boundary_sha256 "$boundary_sha256" --slurpfile boundary "$private_boundary" \
+           --arg agent_sha256 "$agent_sha256" --arg evaluator_sha256 "$evaluator_sha256" \
+           --arg builder_sha256 "$builder_sha256" --arg resource_policy_sha256 "$resource_policy_sha256" \
+           --arg source_lock_sha256 "$source_lock_sha256" '
            .schema == 1 and .kind == "sim-latency-host-containment" and
            .private_runtime_boundary_sha256 == $boundary_sha256 and
+           .subevaluation_agent_sha256 == $agent_sha256 and
+           .evaluator_command_sha256 == $evaluator_sha256 and
+           .submission_builder_sha256 == $builder_sha256 and
+           .resource_policy_sha256 == $resource_policy_sha256 and
+           .source_lock_sha256 == $source_lock_sha256 and
            .docker_user_namespace_verified == true and
            .container_root_uid == $boundary[0].container_root_uid and
            .container_root_gid == $boundary[0].container_root_gid and
@@ -342,11 +355,18 @@ facts="$(jq -cnS \
       config_local_sha256:$config_local_sha256,
       vault_local_sha256:$vault_local_sha256}')"
 qualification_sha256="$(printf '%s' "$facts" | sha256sum | awk '{print $1}')"
+# private_runtime_fingerprint_program_begin
 if [ "$private_runtime" = true ]; then
     facts="$(jq -cnS --argjson facts "$facts" --arg boundary_sha256 "$boundary_sha256" \
-        '$facts + {private_runtime_boundary_sha256:$boundary_sha256,namespace_probe_source:"retained_native_containment"}')"
+        --arg agent_sha256 "$agent_sha256" --arg evaluator_sha256 "$evaluator_sha256" \
+        --arg builder_sha256 "$builder_sha256" --arg resource_policy_sha256 "$resource_policy_sha256" \
+        --arg source_lock_sha256 "$source_lock_sha256" \
+        '$facts + {private_runtime_boundary_sha256:$boundary_sha256,namespace_probe_source:"retained_native_containment",
+          subevaluation_agent_sha256:$agent_sha256,evaluator_command_sha256:$evaluator_sha256,
+          submission_builder_sha256:$builder_sha256,resource_policy_sha256:$resource_policy_sha256,source_lock_sha256:$source_lock_sha256}')"
     qualification_sha256="$(printf '%s' "$facts" | sha256sum | awk '{print $1}')"
 fi
+# private_runtime_fingerprint_program_end
 
 qualification_match=false
 [ "$config_secure" = true ] && [ "$qualification_sha256" = "$expected_qualification" ] && qualification_match=true

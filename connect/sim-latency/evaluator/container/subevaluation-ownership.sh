@@ -130,6 +130,47 @@ evaluation_sealed_copy() {
     fi
 }
 
+# Product/source data must not gain a host process through Git hooks, fsmonitor,
+# global configuration or protocol helpers after a checked patch is applied.
+# Broad writes additionally use the independently pinned canonical validator.
+evaluation_git() {
+    if [[ "${subevaluation_scoped:-false}" = true ]]; then
+        local argument repository="" previous="" configured status=0
+        local -a safe_arguments=()
+        local command_seen=false option_value=false
+        for argument in "$@"; do
+            if [[ "$previous" = -C ]]; then repository="$argument"; fi
+            previous="$argument"
+            safe_arguments+=("$argument")
+            if [[ "$option_value" = true ]]; then option_value=false; continue; fi
+            if [[ "$command_seen" != true ]]; then
+                case "$argument" in
+                    -C|-c|--git-dir|--work-tree) option_value=true ;;
+                    -*) ;;
+                    *)
+                        command_seen=true
+                        if [[ "$argument" = diff ]]; then safe_arguments+=(--no-ext-diff --no-textconv); fi
+                        ;;
+                esac
+            fi
+        done
+        [[ "$repository" = /* && -d "$repository/.git" && ! -L "$repository/.git" ]] || return 2
+        configured="$(GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
+            git --no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false -C "$repository" \
+                config --local --includes --name-only --get-regexp '^filter\.')" || status=$?
+        [[ "$status" = 1 && -z "$configured" ]] || {
+            printf 'source repository contains an unqualified Git content filter\n' >&2
+            return 2
+        }
+        GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_CONFIG_GLOBAL=/dev/null \
+        GIT_ATTR_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+            git --no-pager -c core.hooksPath=/dev/null -c core.fsmonitor=false \
+                -c protocol.allow=never -c gc.auto=0 -c maintenance.auto=false "${safe_arguments[@]}"
+    else
+        git "$@"
+    fi
+}
+
 # Bind the evaluator's decoded immutable request before any resource creation.
 subevaluation_require_identity() {
     if [[ "${subevaluation_scoped:-false}" = true ]]; then

@@ -89,7 +89,7 @@ func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.
 	ctx, cancel := context.WithDeadline(fileCtx, self.plan.DeadlineAt)
 	defer cancel()
 	result := HostFilesResult{RunId: self.plan.RunId, Operation: request.Operation, Acknowledged: true, ExitCode: 2, ErrorCode: "host_handoff_unavailable"}
-	if request.Operation == "verify-id-map" {
+	if request.Operation == "verify-id-map" || request.Operation == "verify-network" {
 		result = self.hostFiles.Execute(ctx, request)
 	} else if release, err := self.beginHostFileHandoff(ctx); err == nil {
 		defer release()

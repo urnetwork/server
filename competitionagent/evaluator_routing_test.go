@@ -88,3 +88,43 @@ func TestEvaluatorRoutingAssetsAreSyntacticallyComplete(t *testing.T) {
 		t.Fatal("sealed private host-audit helper has invalid shell syntax", err, string(output))
 	}
 }
+
+func TestPrivateHostFingerprintIncludesActualTrustedActorAndSourcePins(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(filepath.Dir(evaluatorRoutingHelper(t)), "..", "host-self-check.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(content)
+	begin, end := "# private_runtime_fingerprint_program_begin\n", "# private_runtime_fingerprint_program_end\n"
+	if strings.Count(source, begin) != 1 || strings.Count(source, end) != 1 {
+		t.Fatal("private fingerprint source boundary is absent or ambiguous")
+	}
+	start, finish := strings.Index(source, begin)+len(begin), strings.Index(source, end)
+	if start >= finish {
+		t.Fatal("private fingerprint source boundary is reversed")
+	}
+	program := source[start:finish] + "\nprintf '%s' \"$qualification_sha256\"\n"
+	fields := []string{"boundary_sha256", "agent_sha256", "evaluator_sha256", "builder_sha256", "resource_policy_sha256", "source_lock_sha256"}
+	fingerprint := func(changed int) string {
+		command := exec.Command("bash", "-eu", "-c", program)
+		command.Env = append(controlEnvironment(), "private_runtime=true", `facts={"synthetic_hardware":"qualified"}`)
+		for index, field := range fields {
+			value := strings.Repeat("a", 64)
+			if index == changed {
+				value = strings.Repeat("b", 64)
+			}
+			command.Env = append(command.Env, field+"="+value)
+		}
+		output, err := command.CombinedOutput()
+		if err != nil || !digestPattern.Match(output) {
+			t.Fatal("synthetic private fingerprint failed", err, string(output))
+		}
+		return string(output)
+	}
+	original := fingerprint(-1)
+	for index, field := range fields {
+		if fingerprint(index) == original {
+			t.Fatal("changed trusted actor/source reused an old native qualification", field)
+		}
+	}
+}
