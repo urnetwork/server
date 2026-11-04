@@ -19,13 +19,19 @@ type competitionLeaseRetrySupervisorDriver struct {
 	clock                                *competitionLeaseRetryClock
 	started, canceled, release, finished chan struct{}
 	renew                                func(int) error
+	renewWithContext                     func(context.Context, int) error
 	renewCalls                           int
 	joined                               bool
 }
 
 // Exact current owner/token and expiry are rechecked on every synthetic call.
-func (self *competitionLeaseRetrySupervisorDriver) Renew(_ context.Context, lease model.CompetitionSupervisorLease, ttl time.Duration) (*model.CompetitionSupervisorLease, error) {
+func (self *competitionLeaseRetrySupervisorDriver) Renew(ctx context.Context, lease model.CompetitionSupervisorLease, ttl time.Duration) (*model.CompetitionSupervisorLease, error) {
 	self.renewCalls++
+	if self.renewWithContext != nil {
+		if err := self.renewWithContext(ctx, self.renewCalls); err != nil {
+			return nil, err
+		}
+	}
 	if self.renew != nil {
 		if err := self.renew(self.renewCalls); err != nil {
 			return nil, err
@@ -59,7 +65,7 @@ type competitionLeaseRetrySupervisorFixture struct {
 	clock      *competitionLeaseRetryClock
 	supervisor *CompetitionSupervisor
 	driver     *competitionLeaseRetrySupervisorDriver
-	settings   *competitionLeaseRetrySettings
+	settings   *competitionSupervisorRenewalSettings
 	watchdog   context.Context
 	ticks      chan time.Time
 	accepted   chan struct{}
@@ -80,9 +86,9 @@ func newCompetitionLeaseRetrySupervisorFixture(t *testing.T) *competitionLeaseRe
 	base.snapshot.Round.Status, base.snapshot.Round.ClosesAt = "open", clock.Now().Add(time.Hour)
 	driver := &competitionLeaseRetrySupervisorDriver{competitionSupervisorFixture: base, clock: clock,
 		started: make(chan struct{}), canceled: make(chan struct{}), release: make(chan struct{}), finished: make(chan struct{})}
-	settings := defaultCompetitionLeaseRetrySettings()
-	settings.Now = clock.Now
-	settings.Wait = func(_ context.Context, delay time.Duration) error { clock.Advance(delay); return nil }
+	settings := defaultCompetitionSupervisorRenewalSettings()
+	settings.LockRetry.Now = clock.Now
+	settings.LockRetry.Wait = func(_ context.Context, delay time.Duration) error { clock.Advance(delay); return nil }
 	watchdog, stopWatchdog := context.WithTimeout(t.Context(), 5*time.Second)
 	fixture := &competitionLeaseRetrySupervisorFixture{clock: clock, driver: driver, settings: &settings, watchdog: watchdog,
 		ticks: make(chan time.Time, 1), accepted: make(chan struct{}, 2), done: make(chan struct {
@@ -143,7 +149,8 @@ func (self *competitionLeaseRetrySupervisorFixture) RequireFailure(t *testing.T,
 // the returned expiry, even after the original acquired lease's expiry passes.
 func TestCompetitionSupervisorLeaseRetryRecoversWithRollingAuthority(t *testing.T) {
 	fixture := newCompetitionLeaseRetrySupervisorFixture(t)
-	fixture.settings.Timeout, fixture.settings.Interval = 2*time.Minute, time.Minute
+	fixture.settings.Timeout, fixture.settings.AttemptTimeout = 2*time.Minute, 2*time.Minute
+	fixture.settings.LockRetry.Timeout, fixture.settings.LockRetry.Interval = 2*time.Minute, time.Minute
 	fixture.driver.renew = func(call int) error {
 		if call == 1 {
 			return &pgconn.PgError{Code: "55P03"}
@@ -178,7 +185,7 @@ func TestCompetitionSupervisorLeaseRetryRecoversWithRollingAuthority(t *testing.
 // Bounded failure retains the existing lease_lost state and joined worker stop.
 func TestCompetitionSupervisorLeaseRetryExhaustionCancelsAndJoins(t *testing.T) {
 	fixture := newCompetitionLeaseRetrySupervisorFixture(t)
-	fixture.settings.MaximumAttempts = 2
+	fixture.settings.LockRetry.MaximumAttempts = 2
 	cause := &pgconn.PgError{Code: "55P03"}
 	fixture.driver.renew = func(int) error { return cause }
 	fixture.Start(t)
@@ -196,7 +203,7 @@ func TestCompetitionSupervisorLeaseRetryStopsAfterFenceChange(t *testing.T) {
 		}
 		return nil
 	}
-	fixture.settings.Wait = func(_ context.Context, delay time.Duration) error {
+	fixture.settings.LockRetry.Wait = func(_ context.Context, delay time.Duration) error {
 		fixture.clock.Advance(delay)
 		fixture.driver.lease.FencingToken++
 		return nil
