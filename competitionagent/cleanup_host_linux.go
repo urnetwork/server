@@ -26,17 +26,18 @@ import (
 // Persisted before launch, outside the worker's writable workspace. The build
 // identities are exact image-key prefixes, never a shared slice prefix scan.
 type cleanupPlan struct {
-	Schema            int              `json:"schema"`
-	RunId             string           `json:"run_id"`
-	JobId             string           `json:"job_id"`
-	RoundId           string           `json:"round_id"`
-	Attempt           int              `json:"attempt"`
-	CgroupNames       []string         `json:"cgroup_names"`
-	EvidenceDirectory string           `json:"evidence_directory"`
-	EvidenceSource    string           `json:"evidence_source"`
-	DockerOwner       *DockerProxyPlan `json:"docker_owner,omitempty"`
-	ManagementCpuSet  string           `json:"management_cpu_set,omitempty"`
-	WorkDeviceId      uint64           `json:"work_device_id,omitempty"`
+	Schema            int                `json:"schema"`
+	RunId             string             `json:"run_id"`
+	JobId             string             `json:"job_id"`
+	RoundId           string             `json:"round_id"`
+	Attempt           int                `json:"attempt"`
+	CgroupNames       []string           `json:"cgroup_names"`
+	EvidenceDirectory string             `json:"evidence_directory"`
+	EvidenceSource    string             `json:"evidence_source"`
+	DockerOwner       *DockerProxyPlan   `json:"docker_owner,omitempty"`
+	ManagementCpuSet  string             `json:"management_cpu_set,omitempty"`
+	WorkDeviceId      uint64             `json:"work_device_id,omitempty"`
+	SliceResources    *runSliceResources `json:"slice_resources,omitempty"`
 }
 
 // Only a successful concrete cleanup permits releasing physical host custody.
@@ -385,9 +386,11 @@ func (self *hostCleaner) runDocker(ctx context.Context, args []string) ([]byte, 
 // The cgroup v2 filesystem does not permit symlinks; protected ancestor checks
 // and descriptor confinement also reject synthetic or replaced path components.
 type hostCleanupCgroups struct {
-	rootPath        string
-	maximumBytes    int64
-	requireCgroupFs bool
+	rootPath            string
+	maximumBytes        int64
+	requireCgroupFs     bool
+	limitCommandTimeout time.Duration
+	limitCommand        func(context.Context, []string) error
 }
 
 // A systemd slice expands into exact parent slice components, never a prefix
@@ -409,7 +412,16 @@ func cleanupSlicePath(name string) (string, error) {
 
 // All property access is descriptor-confined to a verified cgroup v2 root.
 func (self *hostCleanupCgroups) open(name, property string, flags int) (*os.File, error) {
-	if property != "cgroup.kill" && property != "cgroup.events" && property != "cgroup.freeze" {
+	admissionLimit := property != "cgroup.kill" && property != "cgroup.events" && property != "cgroup.freeze"
+	return self.openWithLimitAuthority(name, property, flags, admissionLimit)
+}
+
+// Before manager mutation even the exact census file must prove exclusive
+// root authority, without depending on controllers that are not enabled yet.
+func (self *hostCleanupCgroups) openWithLimitAuthority(name, property string, flags int, admissionLimit bool) (*os.File, error) {
+	if property != "cgroup.kill" && property != "cgroup.events" && property != "cgroup.freeze" &&
+		property != "memory.max" && property != "memory.swap.max" && property != "pids.max" && property != "cpu.max" &&
+		property != "cpuset.cpus" && property != "cpuset.cpus.effective" {
 		return nil, errors.New("unsupported exact cgroup cleanup property")
 	}
 	relative, err := cleanupSlicePath(name)
@@ -428,10 +440,14 @@ func (self *hostCleanupCgroups) open(name, property string, flags int) (*os.File
 		}
 		var stat syscall.Statfs_t
 		err = syscall.Fstatfs(int(directory.Fd()), &stat)
+		info, infoErr := directory.Stat()
 		directory.Close()
 		const cgroup2SuperMagic = 0x63677270
 		if err != nil || stat.Type != cgroup2SuperMagic {
 			return nil, errors.New("cleanup cgroup root is not cgroup v2")
+		}
+		if admissionLimit && (infoErr != nil || !rootOwnedContainmentNode(info)) {
+			return nil, errors.New("containment limit hierarchy is not exclusively root-owned")
 		}
 	}
 	current := ""
@@ -446,6 +462,9 @@ func (self *hostCleanupCgroups) open(name, property string, flags int) (*os.File
 		}
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return nil, errors.New("cleanup cgroup ancestor is not an exact directory")
+		}
+		if self.requireCgroupFs && admissionLimit && !rootOwnedContainmentNode(info) {
+			return nil, errors.New("containment limit parent is delegated or writable outside root")
 		}
 	}
 	file, err := root.OpenFile(filepath.Join(relative, property), flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
@@ -462,6 +481,10 @@ func (self *hostCleanupCgroups) open(name, property string, flags int) (*os.File
 	if err != nil || !info.Mode().IsRegular() {
 		file.Close()
 		return nil, errors.New("cleanup cgroup property is not regular")
+	}
+	if self.requireCgroupFs && admissionLimit && !rootOwnedContainmentNode(info) {
+		file.Close()
+		return nil, errors.New("containment limit property is delegated or writable outside root")
 	}
 	return file, nil
 }

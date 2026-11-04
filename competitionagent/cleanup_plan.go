@@ -94,6 +94,11 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 		return nil, err
 	}
 	plan.ManagementCpuSet = resource.ManagementCpuSet
+	plan.SliceResources = &runSliceResources{ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256, Identity: resource,
+		BuildTasksMaximum: self.settings.BuildTasksMaximum, CpuPeriodMicros: self.settings.ContainmentCpuPeriodMicros}
+	if _, err := prepareRunSliceLimits(*plan, self.config); err != nil {
+		return nil, err
+	}
 	plan.DockerOwner, err = self.makeDockerOwnerPlan(manifest, *plan, resource)
 	if err != nil {
 		return nil, err

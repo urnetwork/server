@@ -81,7 +81,13 @@ type AgentSettings struct {
 	OwnerPollInterval         time.Duration
 	ManagementMemoryBytes     int64
 	ManagementCpuQuotaPercent int
-	Now                       func() time.Time
+	// Build tasks include the retained BuildKit daemon and all of its children;
+	// 4096 is an independent parent ceiling. Nonpositive values refuse launch.
+	BuildTasksMaximum int64
+	// The 100000-microsecond kernel quota period bounds each exact CPU role.
+	// Values outside the cgroup v2 period range refuse launch.
+	ContainmentCpuPeriodMicros int64
+	Now                        func() time.Time
 }
 
 // Control calls are short; only the detached systemd service owns evaluation.
@@ -91,7 +97,8 @@ func DefaultAgentSettings() AgentSettings {
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
 		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
 		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024,
-		OwnerPollInterval: 25 * time.Millisecond, ManagementMemoryBytes: 8 * 1024 * 1024 * 1024, ManagementCpuQuotaPercent: 200, Now: time.Now}
+		OwnerPollInterval: 25 * time.Millisecond, ManagementMemoryBytes: 8 * 1024 * 1024 * 1024, ManagementCpuQuotaPercent: 200,
+		BuildTasksMaximum: 4096, ContainmentCpuPeriodMicros: 100000, Now: time.Now}
 }
 
 // Only an explicitly pinned path may select the role; unknown fields fail closed.

@@ -148,7 +148,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		t.Fatal(err)
 	}
 	resourcePath := filepath.Join(root, "resource-policy")
-	if err := os.WriteFile(resourcePath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-resource-boundary\",\"evaluation_cpuset\":\"2,4\",\"management_cpuset\":\"6,8\",\"build_memory_limit\":\"5g\",\"disjoint_cpu_sets\":true,\"memory_capacity_passed\":true,\"evidence_memory_limit_bytes\":1048576}'\n"), 0700); err != nil {
+	if err := os.WriteFile(resourcePath, []byte("#!/bin/sh\nprintf '%s\\n' '"+testRunResourceIdentityJson(t)+"'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	boundaryPath := filepath.Join(root, "resource-boundary.json")

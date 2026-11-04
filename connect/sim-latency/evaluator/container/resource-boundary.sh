@@ -9,12 +9,19 @@ readonly EVALUATION_PHYSICAL_CORE_COUNT=10
 readonly MANAGEMENT_PHYSICAL_CORE_COUNT=2
 readonly RUNNER_MEMORY_LIMIT=72g
 readonly RUNNER_MEMORY_BYTES=77309411328
+readonly RUNNER_PIDS_LIMIT=65536
 readonly POSTGRES_MEMORY_LIMIT=16g
 readonly POSTGRES_MEMORY_BYTES=17179869184
+readonly POSTGRES_PIDS_LIMIT=4096
 readonly REDIS_MEMORY_LIMIT=8g
 readonly REDIS_MEMORY_BYTES=8589934592
+readonly REDIS_PIDS_LIMIT=4096
 readonly BUILD_MEMORY_LIMIT=12g
 readonly BUILD_MEMORY_BYTES=12884901888
+readonly SCORER_MEMORY_BYTES=4294967296
+readonly SCORER_PIDS_LIMIT=1024
+readonly PREFLIGHT_MEMORY_BYTES=4294967296
+readonly PREFLIGHT_PIDS_LIMIT=1024
 readonly EVIDENCE_MEMORY_LIMIT=5g
 readonly EVIDENCE_MEMORY_BYTES=5368709120
 readonly MINIMUM_MANAGEMENT_MEMORY_RESERVE_BYTES=25769803776
@@ -121,9 +128,17 @@ jq -n \
     --argjson management_logical_cpu_count "${#management_cpus[@]}" \
     --argjson memory_budget "$memory_budget_json" \
     --argjson runner_memory_limit_bytes "$RUNNER_MEMORY_BYTES" \
+    --argjson runner_pids_limit "$RUNNER_PIDS_LIMIT" \
     --argjson postgres_memory_limit_bytes "$POSTGRES_MEMORY_BYTES" \
+    --argjson postgres_pids_limit "$POSTGRES_PIDS_LIMIT" \
     --argjson redis_memory_limit_bytes "$REDIS_MEMORY_BYTES" \
+    --argjson redis_pids_limit "$REDIS_PIDS_LIMIT" \
     --argjson build_memory_limit_bytes "$BUILD_MEMORY_BYTES" \
+    --argjson active_pids_limit "$((RUNNER_PIDS_LIMIT + POSTGRES_PIDS_LIMIT + REDIS_PIDS_LIMIT))" \
+    --argjson scorer_memory_limit_bytes "$SCORER_MEMORY_BYTES" \
+    --argjson scorer_pids_limit "$SCORER_PIDS_LIMIT" \
+    --argjson preflight_memory_limit_bytes "$PREFLIGHT_MEMORY_BYTES" \
+    --argjson preflight_pids_limit "$PREFLIGHT_PIDS_LIMIT" \
     '{schema:1,kind:"sim-latency-resource-boundary",
       evaluation_cpuset:$evaluation_cpuset,management_cpuset:$management_cpuset,
       discovered_physical_core_count:$discovered_physical_core_count,
@@ -133,10 +148,16 @@ jq -n \
       management_logical_cpu_count:$management_logical_cpu_count,
       runner_memory_limit:$runner_memory_limit,
       runner_memory_limit_bytes:$runner_memory_limit_bytes,
+      runner_pids_limit:$runner_pids_limit,
       postgres_memory_limit:$postgres_memory_limit,
       postgres_memory_limit_bytes:$postgres_memory_limit_bytes,
+      postgres_pids_limit:$postgres_pids_limit,
       redis_memory_limit:$redis_memory_limit,
       redis_memory_limit_bytes:$redis_memory_limit_bytes,
+      redis_pids_limit:$redis_pids_limit,
       build_memory_limit:$build_memory_limit,
       build_memory_limit_bytes:$build_memory_limit_bytes,
+      active_pids_limit:$active_pids_limit,
+      scorer_memory_limit_bytes:$scorer_memory_limit_bytes,scorer_pids_limit:$scorer_pids_limit,
+      preflight_memory_limit_bytes:$preflight_memory_limit_bytes,preflight_pids_limit:$preflight_pids_limit,
       disjoint_cpu_sets:true} + $memory_budget'

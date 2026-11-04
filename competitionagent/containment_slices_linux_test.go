@@ -15,11 +15,14 @@ import (
 )
 
 type containmentTestCgroups struct {
-	events   *cleanupTestEvents
-	freeze   func(context.Context, string) error
-	frozen   func(context.Context, string) (bool, error)
-	empty    func(context.Context, string) (bool, error)
-	prepared bool
+	events       *cleanupTestEvents
+	freeze       func(context.Context, string) error
+	frozen       func(context.Context, string) (bool, error)
+	empty        func(context.Context, string) (bool, error)
+	prepared     bool
+	setLimits    func(context.Context, string, runSliceLimits) error
+	verifyLimits func(context.Context, string, runSliceLimits) error
+	limits       map[string]runSliceLimits
 }
 
 func (self *containmentTestCgroups) Freeze(ctx context.Context, name string) error {
@@ -51,10 +54,37 @@ func (self *containmentTestCgroups) Empty(ctx context.Context, name string) (boo
 	return true, nil
 }
 
+// Synthetic writes retain their exact typed limits for positive readback.
+func (self *containmentTestCgroups) SetLimits(ctx context.Context, name string, limit runSliceLimits) error {
+	self.events.record("set-limits:" + name)
+	if self.setLimits != nil {
+		if err := self.setLimits(ctx, name, limit); err != nil {
+			return err
+		}
+	}
+	if self.limits == nil {
+		self.limits = map[string]runSliceLimits{}
+	}
+	self.limits[name] = limit
+	return nil
+}
+
+// Tests may refuse an acknowledgment without pretending a write was proof.
+func (self *containmentTestCgroups) VerifyLimits(ctx context.Context, name string, limit runSliceLimits) error {
+	self.events.record("verify-limits:" + name)
+	if self.verifyLimits != nil {
+		return self.verifyLimits(ctx, name, limit)
+	}
+	if self.limits[name] != limit {
+		return errors.New("synthetic kernel has different aggregate limits")
+	}
+	return nil
+}
+
 // Every prepared unit is the exact manifest-derived full-R9 parent inventory.
 func TestContainmentSlicesPrepareRequiresEmptyUnfrozenCompleteParents(t *testing.T) {
 	for _, refusal := range []string{"", "populated", "frozen", "missing"} {
-		fixture := newHostCleanupTest(t)
+		fixture := newContainmentResourceTest(t)
 		groups := &containmentTestCgroups{events: fixture.events, prepared: true}
 		if refusal == "populated" {
 			groups.empty = func(context.Context, string) (bool, error) { return false, nil }

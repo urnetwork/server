@@ -214,36 +214,64 @@ func (self *hostRunContainment) requestControl(ctx context.Context, plan DockerP
 // Only the pinned resource helper supplies CPU/memory identity. A peer cannot
 // replace the qualified resource split with Docker command-line arguments.
 type runResourceIdentity struct {
-	Schema                   int    `json:"schema"`
-	Kind                     string `json:"kind"`
-	EvaluationCpuSet         string `json:"evaluation_cpuset"`
-	ManagementCpuSet         string `json:"management_cpuset"`
-	BuildMemoryLimit         string `json:"build_memory_limit"`
-	DisjointCpuSets          bool   `json:"disjoint_cpu_sets"`
-	MemoryCapacityPassed     bool   `json:"memory_capacity_passed"`
-	EvidenceMemoryLimitBytes int64  `json:"evidence_memory_limit_bytes"`
+	Schema                    int    `json:"schema"`
+	Kind                      string `json:"kind"`
+	EvaluationCpuSet          string `json:"evaluation_cpuset"`
+	ManagementCpuSet          string `json:"management_cpuset"`
+	BuildMemoryLimit          string `json:"build_memory_limit"`
+	BuildMemoryLimitBytes     int64  `json:"build_memory_limit_bytes"`
+	RunnerMemoryLimitBytes    int64  `json:"runner_memory_limit_bytes"`
+	PostgresMemoryLimitBytes  int64  `json:"postgres_memory_limit_bytes"`
+	RedisMemoryLimitBytes     int64  `json:"redis_memory_limit_bytes"`
+	RunnerPidsLimit           int64  `json:"runner_pids_limit"`
+	PostgresPidsLimit         int64  `json:"postgres_pids_limit"`
+	RedisPidsLimit            int64  `json:"redis_pids_limit"`
+	ActiveMemoryLimitBytes    int64  `json:"active_memory_limit_bytes"`
+	ActivePidsLimit           int64  `json:"active_pids_limit"`
+	ScorerMemoryLimitBytes    int64  `json:"scorer_memory_limit_bytes"`
+	ScorerPidsLimit           int64  `json:"scorer_pids_limit"`
+	PreflightMemoryLimitBytes int64  `json:"preflight_memory_limit_bytes"`
+	PreflightPidsLimit        int64  `json:"preflight_pids_limit"`
+	DisjointCpuSets           bool   `json:"disjoint_cpu_sets"`
+	MemoryCapacityPassed      bool   `json:"memory_capacity_passed"`
+	EvidenceMemoryLimitBytes  int64  `json:"evidence_memory_limit_bytes"`
 }
 
 // The helper has additional retained capacity fields. Duplicate/case aliases
 // are still rejected before decoding its finite required custody facts.
 func decodeRunResourceIdentity(content []byte) (runResourceIdentity, error) {
 	identity := runResourceIdentity{}
-	if validateDocumentKeys(content) != nil || json.Unmarshal(content, &identity) != nil || identity.Schema != Schema || identity.Kind != "sim-latency-resource-boundary" ||
+	if validateDocumentKeys(content) != nil || json.Unmarshal(content, &identity) != nil {
+		return runResourceIdentity{}, errors.New("pinned resource helper identity is malformed")
+	}
+	if err := validateRunResourceIdentity(identity); err != nil {
+		return runResourceIdentity{}, err
+	}
+	return identity, nil
+}
+
+// The exact helper-derived role totals are finite and internally consistent.
+// This same static check authenticates committed metadata without a live probe.
+func validateRunResourceIdentity(identity runResourceIdentity) error {
+	if identity.Schema != Schema || identity.Kind != "sim-latency-resource-boundary" ||
 		!identity.DisjointCpuSets || !identity.MemoryCapacityPassed || !dockerProxyCpuSetPattern.MatchString(identity.EvaluationCpuSet) ||
 		!dockerProxyCpuSetPattern.MatchString(identity.ManagementCpuSet) || !dockerProxyMemoryPattern.MatchString(identity.BuildMemoryLimit) || identity.EvidenceMemoryLimitBytes <= 0 {
-		return runResourceIdentity{}, errors.New("pinned resource helper did not prove the qualified management/evaluation split")
+		return errors.New("pinned resource helper did not prove the qualified management/evaluation split")
+	}
+	if err := validateRunResourceLimits(identity); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	for _, set := range []string{identity.EvaluationCpuSet, identity.ManagementCpuSet} {
 		for _, cpu := range strings.Split(set, ",") {
 			parsed, err := strconv.ParseUint(cpu, 10, 32)
 			if err != nil || strconv.FormatUint(parsed, 10) != cpu || seen[cpu] {
-				return runResourceIdentity{}, errors.New("resource helper CPU sets overlap or are noncanonical")
+				return errors.New("resource helper CPU sets overlap or are noncanonical")
 			}
 			seen[cpu] = true
 		}
 	}
-	return identity, nil
+	return nil
 }
 
 // The cleanup plan is root-committed before launch. Its nested owner plan has

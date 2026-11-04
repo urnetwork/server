@@ -15,6 +15,8 @@ type runSliceCgroups interface {
 	cleanupCgroups
 	Freeze(context.Context, string) error
 	Frozen(context.Context, string) (bool, error)
+	SetLimits(context.Context, string, runSliceLimits) error
+	VerifyLimits(context.Context, string, runSliceLimits) error
 }
 
 // Private seams keep preparation/freezing tests away from systemd and cgroups.
@@ -29,7 +31,8 @@ type hostRunSlices struct {
 
 func newHostRunSlices(config Config, settings AgentSettings) *hostRunSlices {
 	self := &hostRunSlices{config: config, settings: settings,
-		cgroups: &hostCleanupCgroups{rootPath: "/sys/fs/cgroup", maximumBytes: settings.DiagnosticBytes, requireCgroupFs: true}}
+		cgroups: &hostCleanupCgroups{rootPath: "/sys/fs/cgroup", maximumBytes: settings.DiagnosticBytes, requireCgroupFs: true,
+			limitCommandTimeout: settings.CleanupCommandTimeout}}
 	self.command = self.systemctl
 	self.retired = self.systemdRetired
 	return self
@@ -42,11 +45,38 @@ func (self *hostRunSlices) Prepare(parent context.Context, plan cleanupPlan) err
 	if err := self.validate(plan); err != nil {
 		return err
 	}
+	limits, err := prepareRunSliceLimits(plan, self.config)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(parent, self.settings.CleanupTimeout)
 	defer cancel()
 	if err := self.command(ctx, "start", plan.CgroupNames); err != nil {
 		return err
 	}
+	// No limit is written until every parent has passed the complete census.
+	if err := self.verifyPreparedEmpty(ctx, plan); err != nil {
+		return err
+	}
+	for index, name := range plan.CgroupNames {
+		if err := self.cgroups.SetLimits(ctx, name, limits[index]); err != nil {
+			return err
+		}
+	}
+	for index, name := range plan.CgroupNames {
+		if err := self.cgroups.VerifyLimits(ctx, name, limits[index]); err != nil {
+			return err
+		}
+	}
+	if err := self.verifyPreparedEmpty(ctx, plan); err != nil {
+		return err
+	}
+	return ctx.Err()
+}
+
+// The second census refuses population or freeze changes during limit writes.
+// Cleanup deliberately does not depend on healthy admission-time limits.
+func (self *hostRunSlices) verifyPreparedEmpty(ctx context.Context, plan cleanupPlan) error {
 	for _, name := range plan.CgroupNames {
 		frozen, err := self.cgroups.Frozen(ctx, name)
 		if err != nil || frozen {

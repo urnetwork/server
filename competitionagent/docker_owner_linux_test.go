@@ -83,6 +83,10 @@ func TestAgentPreparesContainmentAndDockerOwnerBeforeEvaluator(t *testing.T) {
 			!plan.DockerOwner.DeadlineAt.Equal(fixture.manifest.Identity.DeadlineAt) {
 			t.Fatal("Docker owner was not bound to the committed source/resource/original-clock tuple", err)
 		}
+		if plan.SliceResources == nil || plan.SliceResources.ResourcePolicySha256 != fixture.config.DockerRole.ResourcePolicy.Sha256 ||
+			plan.SliceResources.BuildTasksMaximum != fixture.settings.BuildTasksMaximum || plan.SliceResources.CpuPeriodMicros != fixture.settings.ContainmentCpuPeriodMicros {
+			t.Fatal("aggregate resource ceilings were not root-committed before launch")
+		}
 	}
 	for fence := int64(1); fence <= 2; fence++ {
 		if _, err := fixture.call(t, "start", fence, &fixture.manifest); err != nil {
@@ -254,7 +258,7 @@ func TestAgentEmergencyFreezeDoesNotAcquirePublicationOrCleanupLocks(t *testing.
 // Resource strings are not approximated: duplicate, overlapping, range-form,
 // aliased or unproven CPU identities cannot become systemd/Docker authority.
 func TestRunResourceIdentityRejectsUnprovenOrNoncanonicalSplit(t *testing.T) {
-	valid := `{"schema":1,"kind":"sim-latency-resource-boundary","evaluation_cpuset":"2,4","management_cpuset":"6,8","build_memory_limit":"5g","disjoint_cpu_sets":true,"memory_capacity_passed":true,"evidence_memory_limit_bytes":1048576}`
+	valid := testRunResourceIdentityJson(t)
 	if _, err := decodeRunResourceIdentity([]byte(valid)); err != nil {
 		t.Fatal(err)
 	}
