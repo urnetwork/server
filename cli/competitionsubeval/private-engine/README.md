@@ -67,13 +67,24 @@ match. The exact protected `chmod` helper makes both control sockets root-only;
 
 Both daemon units set `LimitCORE=0` as defense in depth, not as proof for a piped
 host core collector. Linux ignores that limit for piped `core_pattern` handlers.
-Admission currently rejects every pipe handler, including a seemingly bounded or
-drop-only handler; there is no expected-string or Boolean waiver. The only
-supported policy is the exact non-piped `core.%P` filename, with actual daemon
-soft/hard core limits both zero and an actual quota-backed working directory.
-These templates do not change global core policy. A separately approved
-maintenance/handler plan and native child/core proof are required before a host
-with an unqualified pipe collector can be used.
+Without a separately selected native class, admission rejects every pipe handler,
+including a seemingly bounded or drop-only handler. That unchanged default admits
+only the exact non-piped `core.%P` filename, with actual daemon soft/hard core
+limits both zero and an actual quota-backed working directory. There is no
+expected-string or Boolean waiver.
+
+The optional `tracked-create-core-one/v1` source contract is a separate path, not
+evidence that the current host is qualified. Its protected acceptance must name
+the exact kernel/raw handler bytes, runtime/release, thirteen helper assets,
+twelve retained native trials and separate operator review. It is loaded and
+rechecked by the concrete native owner; probe output or a caller-supplied pass
+cannot mint acceptance. This class also requires its actual tracked compiler,
+candidate core=1:1 and derived inherited seccomp controls to be proved. Missing,
+stale or mismatched evidence refuses admission, with no fallback to either class.
+
+These templates do not change global core policy. A separately approved host
+policy and native child/core, crash-storm, kernel/journal, storage and cleanup
+proof are required before a host with an unqualified pipe collector can be used.
 The pipe exception follows the [Linux core(5) contract](https://man7.org/linux/man-pages/man5/core.5.html).
 
 The stable namespace keeper uses `PrivateNetwork=yes` and initially has only

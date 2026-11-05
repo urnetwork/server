@@ -5,9 +5,25 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
+
+// The published launch example must use the same fixed root wrapper as the
+// protected key/sudo policy, not its placement-checked internal child role.
+func TestSubevaluationDeploymentUsesManagedForcedCommand(t *testing.T) {
+	content, err := os.ReadFile("DEPLOYMENT.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "ForceCommand /usr/bin/sudo -n -- /usr/local/libexec/competitionsubeval --config /etc/urnetwork-subeval/agent.json --serve-managed\n") ||
+		strings.Contains(text, "agent.json --serve\n") || !strings.Contains(text, "./cli/competitionsubeval") ||
+		!strings.Contains(text, "management/authorized_keys.in") || !strings.Contains(text, "management/sudoers.in") {
+		t.Fatal("deployment selected another privilege route or confused the coordinator with the standalone agent")
+	}
+}
 
 // The SSH role cannot append a shell command or select both lifecycle owners.
 func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
