@@ -15,9 +15,9 @@ import (
 )
 
 // Force the public AfterFunc fallback while preserving the real timer,
-// deadline, cause and application values. The pinned context implementation
-// uses a private *int key for its direct cancelCtx optimization; hiding only
-// that key lets this test acknowledge child-cancel registration deterministically.
+// deadline error and application values. WithoutCancel's value lookup hides
+// exactly the private cancelCtx key, forcing child-cancel registration through
+// this test's acknowledged fallback. Arbitrary custom causes are not preserved.
 type competitionHeartbeatPgDeadlineContext struct {
 	context.Context
 	stopped chan struct{}
@@ -25,11 +25,7 @@ type competitionHeartbeatPgDeadlineContext struct {
 }
 
 func (self *competitionHeartbeatPgDeadlineContext) Value(key any) any {
-	keyType := reflect.TypeOf(key)
-	if keyType != nil && keyType.Kind() == reflect.Pointer && keyType.Elem().Kind() == reflect.Int && keyType.Elem().PkgPath() == "" {
-		return nil
-	}
-	return self.Context.Value(key)
+	return context.WithoutCancel(self.Context).Value(key)
 }
 
 // The callback has marked the actual AfterFunc child canceled before this
