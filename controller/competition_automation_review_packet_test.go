@@ -45,6 +45,17 @@ func (self competitionReviewVersionedFixture) GetVersion(ctx context.Context, ke
 func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// Observe this exact fixture while it is alive; an external poll can
+		// miss the short interval between migration completion and cleanup.
+		var schemaHead int
+		server.Db(t.Context(), func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(t.Context(), `SELECT COALESCE(MAX(end_version_number),0)
+			 FROM migration_audit WHERE status='success'`).Scan(&schemaHead))
+		}, server.OptReadOnly(), server.OptNoRetry())
+		if schemaHead != server.MigrationCount() {
+			t.Fatalf("review packet fixture schema head %d differs from source head %d", schemaHead, server.MigrationCount())
+		}
+		t.Logf("review_packet_fixture_schema_head=%d", schemaHead)
 		fixture := newCompetitionAutomationFixture(t)
 		root := t.TempDir()
 		store := competitionReviewVersionedFixture{RetainedBlobStore: server.NewLocalBlobStore(filepath.Join(root, "blobs"), "synthetic").(server.RetainedBlobStore)}
