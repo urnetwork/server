@@ -10,8 +10,23 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
+
+// The observation is inside the actual migrated fixture and owns no resource
+// across the caller's store operation. A missed external poll is not evidence.
+func requireCompetitionPostCloseFixtureSchema(t testing.TB, ctx context.Context) {
+	t.Helper()
+	var actual int
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(MAX(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actual))
+	})
+	if actual != server.MigrationCount() {
+		t.Fatalf("post-close fixture schema=%d want=%d", actual, server.MigrationCount())
+	}
+	t.Logf("post_close_fixture_schema_head=%d", actual)
+}
 
 // Existing fixtures genuinely fail and retain inventory evidence; only the
 // clock and the separately digested close approval change for these controls.
@@ -33,6 +48,7 @@ func competitionPostCloseReevaluationRequest(t testing.TB, fixture *competitionR
 // changed result. Exact replay after expiry remains receipt-only.
 func TestCompetitionReevaluationPostClosePgPreservesOriginalOrderAndEvidence(t *testing.T) {
 	runCompetitionReevaluationPgTest(t, func(t testing.TB, ctx context.Context) {
+		requireCompetitionPostCloseFixtureSchema(t, ctx)
 		fixture := newCompetitionReevaluationAuthorizationPgFixture(t, ctx, "post-close-preserve")
 		competitionPostCloseReevaluationRequest(t, fixture)
 		if _, err := fixture.store.SetAutomationHold(ctx, fixture.settings, fixture.principal.Id,
@@ -61,6 +77,7 @@ func TestCompetitionReevaluationPostClosePgPreservesOriginalOrderAndEvidence(t *
 // the old open-round grant cannot be reused by merely moving its clock.
 func TestCompetitionReevaluationPostClosePgRejectsUnheldOrUnapprovedGrant(t *testing.T) {
 	runCompetitionReevaluationPgTest(t, func(t testing.TB, ctx context.Context) {
+		requireCompetitionPostCloseFixtureSchema(t, ctx)
 		fixture := newCompetitionReevaluationAuthorizationPgFixture(t, ctx, "post-close-hold")
 		competitionPostCloseReevaluationRequest(t, fixture)
 		before := readCompetitionReevaluationPgSnapshot(ctx, fixture.job)

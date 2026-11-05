@@ -45,6 +45,14 @@ func TestMigrationsCompetitionPostCloseRecoveryNativeFaultCustody(t *testing.T) 
 		{name: "lost-slot-authority", sql: `ALTER TABLE competition_worker_slot DISABLE TRIGGER competition_recovery_slot_authority`},
 	}
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
+		var actual int
+		server.Db(t.Context(), func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(t.Context(), `SELECT COALESCE(MAX(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actual))
+		})
+		if actual != server.MigrationCount() {
+			t.Fatalf("post-close monitor fixture schema=%d want=%d", actual, server.MigrationCount())
+		}
+		t.Logf("post_close_fixture_schema_head=%d", actual)
 		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
 			t.Fatal("post-close migration schema drift", drift)
 		}
