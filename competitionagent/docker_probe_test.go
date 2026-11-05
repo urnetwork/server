@@ -1,3 +1,5 @@
+//go:build linux
+
 // Host-audit tests exercise a closed metadata grammar only. They do not load
 // root configuration, contact a daemon or execute a privileged subprocess.
 package competitionagent

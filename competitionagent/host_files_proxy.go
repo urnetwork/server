@@ -1,3 +1,5 @@
+//go:build linux
+
 // A finite local RPC connects the trusted non-root helper to the independent
 // root file owner. Complete bounded input and a synced intent precede mutation.
 package competitionagent

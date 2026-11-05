@@ -1,3 +1,5 @@
+//go:build linux
+
 // The real protected helper consumes only a fake client in a private directory.
 // No evaluator, daemon, mount, root process or native cgroup is executed.
 package competitionagent

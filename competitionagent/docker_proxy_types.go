@@ -1,3 +1,5 @@
+//go:build linux
+
 // Per-run Docker request custody is independent of the evaluator's process
 // tree. Mutations and build sessions retain one durable owner until a complete
 // daemon response, or remain explicitly unknown without replay after restart.

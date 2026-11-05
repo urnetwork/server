@@ -1,3 +1,5 @@
+//go:build linux
+
 // The public fixed client sees only fake Unix HTTP and finite proof values.
 // It cannot pass a cgroup, ceiling, command or path to build retirement.
 package competitionagent

@@ -1,3 +1,5 @@
+//go:build linux
+
 // A restricted SSH command and systemd entrypoint, independent of all server
 // service configuration. Standard output is exclusively the framed protocol.
 package main
