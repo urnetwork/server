@@ -872,7 +872,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	snTopBoardMigrationContracts,
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(900, "trusted instrument overlay with two-member review, identity and retained source custody",
-			competitionMigration900ArtifactQuery),
+			competitionMigration900ArtifactQuery).removedAt(server.CompetitionProductionBenefitMigrationVersion()),
 		snTopReplicaMigrationContract,
 		verifyCohortCensusMigrationContract,
 		competitionSubmissionMetricsMigrationContract,
@@ -923,6 +923,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
 	// The future executor slots and no-op evidence follow that origin prefix.
 	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract},
+	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract},
+	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
@@ -992,6 +994,7 @@ const transactionTimeoutRoleDefaultArtifactQuery = `(` + transactionTimeoutPoolR
 		JOIN pg_roles role_row ON role_row.oid = setting_row.setrole
 		CROSS JOIN LATERAL unnest(setting_row.setconfig) AS setting
 		WHERE setting_row.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+		AND role_row.rolname = current_user
 		AND NOT role_row.rolsuper
 		AND setting = 'transaction_timeout=15min'))`
 

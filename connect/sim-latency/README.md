@@ -402,7 +402,7 @@ source commits and percentage carry forward unchanged.
 
 ### Current and next-epoch G2 work-volume policy
 
-Production R2 epoch 1 retains its frozen rule: the median completed-request
+Production R2 epoch 1 retains its frozen rule: the median attempted-request
 count and median received bytes must each be within **95–105%**, inclusive, of
 the shared epoch baseline. A genuine speedup receives no exception to the
 current upper bounds. Its existing jobs, evaluator and results are not rejudged.
@@ -410,7 +410,7 @@ current upper bounds. Its existing jobs, evaluator and results are not rejudged.
 The owner approved a prospective change starting in epoch 2: both medians must
 remain **at least 95%** of baseline, inclusive, with **no upper bounds**.
 This is `g2_volume_policy: minimum-work/1` and scorer `sim-latency-score/2`;
-absence of that policy identifies the historical two-sided rule. More completed
+absence of that policy identifies the historical two-sided rule. More attempted
 work alone will no longer fail G2. All other gates, nine-run replication,
 latency ranking, practical margin, Welch significance and three-hour submission
 budget remain unchanged. Faster raw latency is not permission to fake traffic,
@@ -423,6 +423,58 @@ image advertised for their accepted round, not infer an upgrade from this
 announcement or reuse another round's control sample. See the
 [owner approval](launch/PRIVATE-FEEDBACK-NEXT-G2-APPROVAL-2026-10-30.json)
 and [current checkpoint](launch/current-state.json) for rollout status.
+
+### Traffic preservation and honesty review
+
+In epoch 1 and later epochs, passing numerical gates is not permission to
+deliberately sacrifice useful traffic to improve latency or fit a volume gate.
+Failure tolerances accommodate ordinary variation and incidental regressions;
+they are not a budget for dropping large/slow transfers, expiring otherwise
+healthy work early, or suppressing descendants. This applies even without
+benchmark detection or fabricated telemetry. Legitimate cancellation, security
+refusals and bounded overload handling remain distinct from benchmark-serving
+work suppression. There is no new zero-loss rule or automatic disqualification
+based on a success-rate decrease.
+
+Epoch 1 counts attempted request rows, including failed attempts and partial
+received bytes. Failed rows receive the frozen configured timeout penalty.
+However, its discovery-gated crawler does not attempt descendants of an
+incomplete parent. A large latency gain accompanied by reduced success or work
+therefore warrants investigation, but does not prove misconduct. Removing the
+G2 upper bounds removes that particular incentive; it does not alone eliminate
+selective-failure or subtree-suppression risks.
+
+The `traffic-preservation/1` review clarification adds an explicit per-model
+check under the existing honesty/safety criteria, using exact patch/score
+evidence and authenticated activated-instrument context. It does not change
+epoch 1's gates, re-score submissions, or revoke old approvals automatically.
+The changed broker and both Snow members require independent tests and genuine
+provider qualification before operational activation. Implementation or mocked
+tests alone are not proof that a model detects every abuse. See the
+[review contract and qualification requirements](evaluator/review/README.md#traffic-preservation-addendum).
+
+### Production-client benefit eligibility
+
+Every new review, including pending epoch-1 candidates and future epochs, also
+requires a supported explanation of how the changed production path can improve
+real clients. Provider/server improvements count when they benefit client
+service. A source-level causal argument can suffice; live production A/B testing
+is not required for every patch. Correctness, useful traffic, resource bounds,
+recovery and lifecycle semantics must remain sound.
+
+A score gain alone, a benign no-op/comment-only change without a production
+effect, or a benchmark-only improvement does not establish eligibility. Proven
+lack of production benefit uses `NO_PRODUCTION_BENEFIT` under
+`workload_generalization`; it rejects reward/source eligibility without alleging
+fraud. Missing callers, helpers or causal evidence instead hold review as
+uncertain. Both the production-benefit and traffic-preservation checks must pass
+for approval. See the version/hash-bound
+[`production-benefit/1` addendum](evaluator/review/PRODUCTION-BENEFIT.md).
+
+This source contract does not change numerical gates or reopen immutable old
+approvals. New requests and receipts carry its explicit identity; exact old
+idempotent replays remain unchanged. Independent tests and real Qwen/Gemma
+qualification of the new contract are required before operational activation.
 
 ## Epoch source identity and promotion
 

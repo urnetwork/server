@@ -16,55 +16,80 @@ const (
 	CompetitionJobReevaluationCapability          = "competition-job-reevaluation/v1"
 	CompetitionJobReevaluationArchiveInventory    = "archive_inventory_metadata_v1"
 	CompetitionJobReevaluationLegacyArchiveBudget = "operator_authorized_legacy_archive_budget_v1"
+	CompetitionJobReevaluationHeartbeatBudget     = "operator_authorized_heartbeat_budget_v1"
+	CompetitionJobReevaluationBackingService      = "operator_authorized_backing_service_v1"
 )
 
 // The private pinned document binds the original terminal row, actual incident
 // event and separately qualified compatible release. It grants one cycle only.
 type CompetitionJobReevaluationAuthorization struct {
-	Schema                     int             `json:"schema"`
-	Kind                       string          `json:"kind"`
-	IncidentClass              string          `json:"incident_class"`
-	Environment                string          `json:"environment"`
-	CompetitionId              string          `json:"competition_id"`
-	SeasonId                   string          `json:"season_id"`
-	JobId                      server.Id       `json:"job_id"`
-	RoundId                    server.Id       `json:"round_id"`
-	ExpectedCycle              int             `json:"expected_cycle"`
-	ExpectedAttemptCount       int             `json:"expected_attempt_count"`
-	ExpectedTerminalSnapshot   json.RawMessage `json:"expected_terminal_snapshot"`
-	ExpectedTerminalSha256     string          `json:"expected_terminal_sha256"`
-	EvidenceSha256             string          `json:"evidence_sha256"`
-	IncidentEventId            int64           `json:"incident_event_id"`
-	IncidentEventSha256        string          `json:"incident_event_sha256"`
-	IncidentAttempt            int             `json:"incident_attempt"`
-	FailureManifestSha256      string          `json:"failure_manifest_sha256"`
-	RejectedArtifactPath       string          `json:"rejected_artifact_path"`
-	RoundPolicySha256          string          `json:"round_policy_sha256"`
-	BaselineSha256             string          `json:"baseline_sha256"`
-	RuntimeQualificationSha256 string          `json:"runtime_qualification_sha256"`
-	FixedSourceCommit          string          `json:"fixed_source_commit"`
-	FixedWorkerSha256          string          `json:"fixed_worker_sha256"`
-	FixedWorkerImageDigest     string          `json:"fixed_worker_image_digest"`
-	ApiImageDigest             string          `json:"api_image_digest"`
-	AuthorizedAt               time.Time       `json:"authorized_at"`
-	ExpiresAt                  time.Time       `json:"expires_at"`
-	SingleUse                  bool            `json:"single_use"`
+	Schema                     int                                               `json:"schema"`
+	Kind                       string                                            `json:"kind"`
+	IncidentClass              string                                            `json:"incident_class"`
+	Environment                string                                            `json:"environment"`
+	CompetitionId              string                                            `json:"competition_id"`
+	SeasonId                   string                                            `json:"season_id"`
+	JobId                      server.Id                                         `json:"job_id"`
+	RoundId                    server.Id                                         `json:"round_id"`
+	ExpectedCycle              int                                               `json:"expected_cycle"`
+	ExpectedAttemptCount       int                                               `json:"expected_attempt_count"`
+	ExpectedTerminalSnapshot   json.RawMessage                                   `json:"expected_terminal_snapshot"`
+	ExpectedTerminalSha256     string                                            `json:"expected_terminal_sha256"`
+	EvidenceSha256             string                                            `json:"evidence_sha256"`
+	IncidentEventId            int64                                             `json:"incident_event_id"`
+	IncidentEventSha256        string                                            `json:"incident_event_sha256"`
+	IncidentAttempt            int                                               `json:"incident_attempt"`
+	FailureManifestSha256      string                                            `json:"failure_manifest_sha256"`
+	RejectedArtifactPath       string                                            `json:"rejected_artifact_path"`
+	RoundPolicySha256          string                                            `json:"round_policy_sha256"`
+	BaselineSha256             string                                            `json:"baseline_sha256"`
+	RuntimeQualificationSha256 string                                            `json:"runtime_qualification_sha256"`
+	FixedSourceCommit          string                                            `json:"fixed_source_commit"`
+	FixedWorkerSha256          string                                            `json:"fixed_worker_sha256"`
+	FixedWorkerImageDigest     string                                            `json:"fixed_worker_image_digest"`
+	ApiImageDigest             string                                            `json:"api_image_digest"`
+	AuthorizedAt               time.Time                                         `json:"authorized_at"`
+	ExpiresAt                  time.Time                                         `json:"expires_at"`
+	SingleUse                  bool                                              `json:"single_use"`
+	PostCloseApproval          *CompetitionJobReevaluationPostCloseApproval      `json:"post_close_approval,omitempty"`
+	BackingServiceEvidence     *CompetitionJobReevaluationBackingServiceEvidence `json:"backing_service_evidence,omitempty"`
+}
+
+// Retained bytes support a separate operator diagnosis. Neither this record
+// nor a candidate-produced log can independently grant recovery authority.
+type CompetitionJobReevaluationBackingServiceEvidence struct {
+	Schema         int    `json:"schema"`
+	Service        string `json:"service"`
+	ArtifactPath   string `json:"artifact_path"`
+	ArtifactSha256 string `json:"artifact_sha256"`
+	ArtifactBytes  int64  `json:"artifact_bytes"`
+}
+
+// Explicit close-bound authority does not reopen intake or permit changing a
+// sealed result. Omission retains the original open-round recovery contract.
+type CompetitionJobReevaluationPostCloseApproval struct {
+	Schema         int       `json:"schema"`
+	ClosesAt       time.Time `json:"closes_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	EvidenceSha256 string    `json:"evidence_sha256"`
 }
 
 // Qualification is a separately pinned operator receipt, not a model or
 // candidate assertion. Its retained evidence binds both compatible consumers.
 type CompetitionJobReevaluationRuntime struct {
-	Schema            int    `json:"schema"`
-	Kind              string `json:"kind"`
-	Accepted          bool   `json:"accepted"`
-	Capability        string `json:"capability"`
-	SourceCommit      string `json:"source_commit"`
-	ApiImageDigest    string `json:"api_image_digest"`
-	WorkerImageDigest string `json:"worker_image_digest"`
-	WorkerSha256      string `json:"worker_sha256"`
-	EvidenceSha256    string `json:"evidence_sha256"`
-	ApiCompatible     bool   `json:"api_compatible"`
-	WorkerCompatible  bool   `json:"worker_compatible"`
+	Schema     int    `json:"schema"`
+	Kind       string `json:"kind"`
+	Accepted   bool   `json:"accepted"`
+	Capability string `json:"capability"`
+	// Omission qualifies historical archive cycles only, never new incident kinds.
+	IncidentClasses   []string `json:"incident_classes,omitempty"`
+	SourceCommit      string   `json:"source_commit"`
+	ApiImageDigest    string   `json:"api_image_digest"`
+	WorkerImageDigest string   `json:"worker_image_digest"`
+	WorkerSha256      string   `json:"worker_sha256"`
+	EvidenceSha256    string   `json:"evidence_sha256"`
+	ApiCompatible     bool     `json:"api_compatible"`
+	WorkerCompatible  bool     `json:"worker_compatible"`
 }
 
 // An idempotency key binds one exact authorization; another key cannot grant
@@ -94,6 +119,7 @@ type CompetitionJobReevaluationCycle struct {
 	EvidenceSha256             string                       `json:"evidence_sha256"`
 	PreviousTerminalSha256     string                       `json:"previous_terminal_sha256"`
 	PreviousFailure            CompetitionEvaluationFailure `json:"previous_failure"`
+	IncidentClass              string                       `json:"incident_class,omitempty"`
 	RuntimeQualificationSha256 string                       `json:"runtime_qualification_sha256"`
 	FixedSourceCommit          string                       `json:"fixed_source_commit"`
 	FixedWorkerSha256          string                       `json:"fixed_worker_sha256"`
@@ -130,8 +156,8 @@ func ValidateCompetitionJobReevaluationCycle(cycle *CompetitionJobReevaluationCy
 		!competitionAutomationSha256.MatchString(cycle.RuntimeQualificationSha256) || !competitionSourceCommitPattern.MatchString(cycle.FixedSourceCommit) ||
 		!competitionAutomationSha256.MatchString(cycle.FixedWorkerSha256) || !validCompetitionReevaluationImage(cycle.FixedWorkerImageDigest) || !validCompetitionReevaluationImage(cycle.ApiImageDigest) ||
 		cycle.AuthorizedAt.IsZero() || cycle.ExecutionTimeoutSeconds != 3*60*60 ||
-		cycle.PreviousFailure.Kind != "infrastructure" || cycle.PreviousFailure.Retriable ||
-		(cycle.PreviousFailure.Code != "artifact_archive_failed" && cycle.PreviousFailure.Code != "evaluation_time_budget_exhausted") ||
+		(cycle.IncidentClass != "" && cycle.IncidentClass != CompetitionJobReevaluationHeartbeatBudget && cycle.IncidentClass != CompetitionJobReevaluationBackingService) ||
+		!CompetitionJobReevaluationFailureAllowed(cycle.IncidentClass, cycle.PreviousFailure) ||
 		cycle.StartedAt != nil && (cycle.StartedAt.IsZero() || cycle.StartedAt.Before(cycle.AuthorizedAt)) {
 		return errors.New("reevaluation cycle identity or bounded authority is invalid")
 	}
@@ -140,6 +166,24 @@ func ValidateCompetitionJobReevaluationCycle(cycle *CompetitionJobReevaluationCy
 		return errors.New("reevaluation cycle receipt digest does not match")
 	}
 	return nil
+}
+
+// A typed operator exception preserves the old public failure instead of
+// relabelling it. Unknown classes and genuine scored successes remain closed.
+func CompetitionJobReevaluationFailureAllowed(incidentClass string, failure CompetitionEvaluationFailure) bool {
+	if failure.Retriable {
+		return false
+	}
+	switch incidentClass {
+	case "", CompetitionJobReevaluationArchiveInventory:
+		return failure.Kind == "infrastructure" && (failure.Code == "artifact_archive_failed" || failure.Code == "evaluation_time_budget_exhausted")
+	case CompetitionJobReevaluationLegacyArchiveBudget, CompetitionJobReevaluationHeartbeatBudget:
+		return failure.Kind == "infrastructure" && failure.Code == "evaluation_time_budget_exhausted"
+	case CompetitionJobReevaluationBackingService:
+		return failure.Kind == "submission" && failure.Code == "run_unstable"
+	default:
+		return false
+	}
 }
 
 // Image identities are immutable local OCI digests, never moving tags.

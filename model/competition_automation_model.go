@@ -417,6 +417,7 @@ type CompetitionIntegrityReviewRequest struct {
 	ExpectedDecisionSha256      string                     `json:"expected_decision_sha256,omitempty"`
 	ReviewerModel               string                     `json:"reviewer_model,omitempty"`
 	ReviewerReasoning           string                     `json:"reviewer_reasoning,omitempty"`
+	ProductionBenefitAddendum   *CompetitionReviewAddendum `json:"production_benefit_addendum,omitempty"`
 }
 
 // Review records remain separate even when approval does not change the reward recipient.
@@ -448,6 +449,9 @@ func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequ
 // The private member context changes only the criterion census, never review
 // authority or the treatment of uncertainty, approval and substantiated failure.
 func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy, snowMember bool) error {
+	if err := ValidateCompetitionProductionBenefitReview(request, false); err != nil {
+		return err
+	}
 	content, err := json.Marshal(request)
 	if err != nil || len(content) > 64*1024 {
 		return errors.New("review exceeds bounded contract")
@@ -557,7 +561,7 @@ func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityRevie
 // Shared protocol vocabulary for native validation and provider schemas. Each
 // caller receives an owned slice; disposition and policy checks remain separate.
 func CompetitionIntegrityReviewReasonCodes() []string {
-	return []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD"}
+	return []string{"APPROVED", "SCORE_TAMPERING", "MEASUREMENT_FABRICATION", "WORKLOAD_SPECIAL_CASING", "BENCHMARK_DETECTION", "SANDBOX_ESCAPE", "SECRET_ACCESS", "EXFILTRATION", "UNSAFE_BEHAVIOR", "PERSISTENCE", "DENIAL_OF_SERVICE", "PATCH_POLICY_VIOLATION", "UNRELATED_CHANGE", "REWARD_DUPLICATE", "REWARD_RULE_EVASION", "SOURCE_NOT_READY", "PRODUCT_INTEGRATION_RISK", "EVALUATION_INTEGRITY_INCIDENT", "APPEAL_UPHELD", "NO_PRODUCTION_BENEFIT"}
 }
 
 // The cursor orders durable insertion; the payload binds every scope and revision.

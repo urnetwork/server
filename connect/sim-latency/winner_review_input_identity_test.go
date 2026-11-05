@@ -106,7 +106,7 @@ func TestWinnerReviewModelInputRejectsStalePatchBeforeProviders(t *testing.T) {
 		if snow {
 			request, _ = winnerSnowJudgmentFixture()
 		}
-		request.Packet.Patch = bytes.Replace(request.Packet.Patch, []byte("synthetic patch:"), []byte("synthetic replacement:"), 1)
+		request.Packet.Patch = bytes.Replace(request.Packet.Patch, []byte("return len(packet)"), []byte("return 0"), 1)
 		digest := sha256.Sum256(request.Packet.Patch)
 		request.Template.PatchSha256 = hex.EncodeToString(digest[:])
 		calls := 0
@@ -259,7 +259,7 @@ func TestWinnerReviewModelInputLabelsPristineBaseWithoutMutation(t *testing.T) {
 	}
 	if !strings.Contains(semantics, "authenticated pristine source") || !strings.Contains(semantics, "before patch_text") ||
 		!strings.Contains(semantics, "not post-patch candidate source") || patch != string(request.Packet.Patch) ||
-		!reflect.DeepEqual(context.SourceFiles, request.SourceFiles) || strings.Contains(context.SourceFiles[0].Content, "synthetic patch:") {
+		!reflect.DeepEqual(context.SourceFiles, request.SourceFiles) || strings.Contains(context.SourceFiles[0].Content, "return len(packet)") {
 		t.Fatal("base source was confused with the resulting patched candidate")
 	}
 	after, err := json.Marshal(request)

@@ -13,7 +13,7 @@ import "github.com/urnetwork/server"
 // the server's list.
 var competitionJobReevaluationMigrationContract = func() snMainnetMigrationContract {
 	insertGuard, commitGuard, jobImmutableGuard, slotGuard := server.CompetitionJobReevaluationBodiesSql()
-	return migrationCurrentSuffix(server.CompetitionJobReevaluationMigrationVersion(), "audited single-use competition job recovery",
+	contract := migrationCurrentSuffix(server.CompetitionJobReevaluationMigrationVersion(), "audited single-use competition job recovery",
 		snMainnetMigrationColumns("competition_job",
 			snMainnetMigrationColumn{name: "evaluation_cycle", kind: "integer", notNull: true, defaultExpression: "0"},
 			snMainnetMigrationColumn{name: "cycle_attempt_offset", kind: "integer", notNull: true, defaultExpression: "0"},
@@ -56,4 +56,6 @@ var competitionJobReevaluationMigrationContract = func() snMainnetMigrationContr
 		snMainnetMigrationTrigger("competition_job_reevaluation", "competition_job_reevaluation_insert", "competition_job_reevaluation_insert_guard", 7),
 		migrationCompetitionDeferredTrigger("competition_job_reevaluation", "competition_job_reevaluation_atomic", "competition_job_reevaluation_commit_guard", 5),
 		snMainnetMigrationTrigger("competition_worker_slot", "competition_recovery_slot_authority", "competition_recovery_slot_guard", 19))
+	contract.artifact.removedVersion = server.CompetitionReevaluationPostCloseMigrationVersion()
+	return contract
 }()

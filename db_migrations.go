@@ -11328,6 +11328,14 @@ var migrations = []any{
 	// origin prefix; singleton execution is unchanged until future opt-in.
 	newSqlMigration(competitionDistributedEvaluationMigrationSql),
 
+	// Optional addendum encoding is compatible with the previous release; new
+	// code requires it only after checking historical exact review replay.
+	newSqlMigration(competitionProductionBenefitReviewMigration()),
+
+	// Explicitly approved post-close recovery leaves intake and sealed outcomes
+	// immutable; no new grant is possible without claim and finalization holds.
+	competitionReevaluationPostCloseMigration,
+
 	// Unique-exit hosted proxies (HOSTED-PROXY-UNIQUE-EXIT.md,
 	// db_proxy_unique_exit_schema.go). All additive: three nullable or
 	// constant-default columns on provider_egress_location (a catalog change, no

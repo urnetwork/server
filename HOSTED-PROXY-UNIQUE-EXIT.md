@@ -265,6 +265,18 @@ A proxy over its cap stays `replacing`, and the reason is shown.
 
 **Before telling them:** create one pinned proxy on a test network and confirm its exit IP is stable across requests. That path (hosted device + client-id location to a public provider) is supported by the code read in §5 but has not been exercised in production.
 
+**Phase 0 test, done 2026-11-05 19:12-19:19Z (fact).** The test used a throwaway network from the seedphrase sign-up path (`/auth/network-create` with only `terms`; free plan). It created three hosted proxies, made 30 requests each to an IP echo about 12 s apart, then removed all of it (three remove-clients, `/auth/network-delete` HTTP 200).
+
+| Proxy | Location | Requests | Distinct exit IPs |
+|---|---|---|---|
+| A | pinned to provider `01a199c3-…` via `connect_location_id.client_id` | 30 of 30 ok, HTTPS and SOCKS5 alternating | 1 (a 67.173.122.0/24 address) |
+| B | pinned to provider `01a15e37-…` | 30 of 30 ok, HTTPS | 1 (a 96.27.49.0/24 address); none shared with A |
+| C | `best_available`, unpinned | 30 of 30 ok, HTTPS | 2 (a 68.106.49.0/24 address, then from request 14 a 76.246.236.0/24 address) |
+
+- Pinning works for a free network today; `unique_exit` itself will be Pro only (§7).
+- Both pinned proxies held their single exit through the run. The unpinned proxy changed exits mid-run, which is the behavior §1 describes.
+- On this result, the 8205 reply went to engageub at 19:21Z with the phase 0 recipe and notice that a `unique_exit` setting is being built, with no date.
+
 **Phase 1 (server):**
 - the egress-key columns at ingest;
 - `proxy_exit_assignment`, the allocator and the option;
@@ -284,6 +296,8 @@ Tests, deterministic per connect/CODESTYLE.md "Bug fixes" and "Tunables live in 
 **Phase 3:** metrics, the audit job and monitor signals. Run the `./grafana/` metric-coverage test and the monitor alert-class tests.
 
 ## 12. Open questions for the owner
+
+**Decided (owner 2026-11-05): accepted as recommended.** All eight below stand as the decisions. The owner also said "go ahead and fully build the unique exit feature" (phases 1-3).
 
 | # | Question | Recommendation |
 |---|---|---|

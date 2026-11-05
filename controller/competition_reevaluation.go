@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -205,11 +206,19 @@ func BindCompetitionJobReevaluationRuntime(settings *Settings, proof model.Compe
 		!sha256Pattern.MatchString(proof.EvidenceSha256) || !sha256Pattern.MatchString(digest) {
 		return ErrConflict
 	}
+	seen := map[string]bool{}
+	for _, class := range proof.IncidentClasses {
+		if seen[class] || (class != model.CompetitionJobReevaluationHeartbeatBudget && class != model.CompetitionJobReevaluationBackingService) {
+			return ErrConflict
+		}
+		seen[class] = true
+	}
 	actual, err := model.CompetitionAutomationDigest(proof)
 	if err != nil || actual != digest {
 		return ErrConflict
 	}
 	copy := proof
+	copy.IncidentClasses = append([]string(nil), proof.IncidentClasses...)
 	settings.reevaluationRuntime = &copy
 	settings.reevaluationRuntimeSha256 = digest
 	return nil
@@ -278,8 +287,22 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 		if a.IncidentAttempt < 1 || a.ExpectedAttemptCount <= a.IncidentAttempt || a.FailureManifestSha256 != "" || a.RejectedArtifactPath != "" {
 			return ErrConflict
 		}
+	case model.CompetitionJobReevaluationHeartbeatBudget:
+		if a.IncidentAttempt < 1 || a.ExpectedAttemptCount <= a.IncidentAttempt || a.FailureManifestSha256 != "" || a.RejectedArtifactPath != "" {
+			return ErrConflict
+		}
+	case model.CompetitionJobReevaluationBackingService:
+		if validateCompetitionReevaluationBackingServiceShape(settings, a) != nil {
+			return ErrConflict
+		}
 	default:
 		return ErrConflict
+	}
+	if a.IncidentClass != model.CompetitionJobReevaluationBackingService && a.BackingServiceEvidence != nil {
+		return ErrConflict
+	}
+	if err := validateCompetitionReevaluationPostCloseApproval(a); err != nil {
+		return err
 	}
 	digest, err := model.CompetitionAutomationDigest(a)
 	if err != nil || digest != request.AuthorizationSha256 {
@@ -296,6 +319,10 @@ func validateCompetitionReevaluationRuntime(settings *Settings, a model.Competit
 	proof := settings.reevaluationRuntime
 	if proof == nil || settings.reevaluationRuntimeSha256 != a.RuntimeQualificationSha256 || proof.SourceCommit != a.FixedSourceCommit ||
 		proof.WorkerSha256 != a.FixedWorkerSha256 || proof.WorkerImageDigest != a.FixedWorkerImageDigest || proof.ApiImageDigest != a.ApiImageDigest {
+		return ErrConflict
+	}
+	if (a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService) &&
+		!slices.Contains(proof.IncidentClasses, a.IncidentClass) {
 		return ErrConflict
 	}
 	copySettings := *settings
@@ -341,13 +368,46 @@ func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.
 		return ErrConflict
 	}
 	var event struct {
-		Attempt   int                                `json:"attempt"`
-		ErrorCode json.RawMessage                    `json:"error_code"`
-		Failure   *competitionArtifactArchiveFailure `json:"artifact_archive_failure"`
+		Attempt      int                                `json:"attempt"`
+		ErrorCode    json.RawMessage                    `json:"error_code"`
+		Failure      *competitionArtifactArchiveFailure `json:"artifact_archive_failure"`
+		Reason       string                             `json:"reason"`
+		Category     string                             `json:"error_category"`
+		DetailSha256 string                             `json:"error_sha256"`
 	}
-	if json.Unmarshal(payload, &event) != nil || digest != auth.IncidentEventSha256 || event.Attempt != auth.IncidentAttempt ||
-		(eventType != "failed" && eventType != "infrastructure_retry") || at.Before(started) || completed.Before(at) {
+	if json.Unmarshal(payload, &event) != nil || digest != auth.IncidentEventSha256 || at.Before(started) || completed.Before(at) {
 		return ErrConflict
+	}
+	if auth.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget {
+		if eventType != "handed_back" || (event.Reason != "heartbeat_failed" && event.Reason != "host_heartbeat_failed") ||
+			(event.Category != "deadline_exceeded" && event.Category != "lease_lost" && event.Category != "postgresql" && event.Category != "network") ||
+			!sha256Pattern.MatchString(event.DetailSha256) || auth.IncidentAttempt < 1 || auth.IncidentAttempt >= auth.ExpectedAttemptCount {
+			return ErrConflict
+		}
+		var claimedAttempt int
+		if err := tx.QueryRow(ctx, `SELECT (payload_json->>'attempt')::integer FROM competition_job_event
+		 WHERE job_id=$1 AND event_type='claimed' AND (event_at,event_id)<=($2,$3)
+		 ORDER BY event_at DESC,event_id DESC LIMIT 1`, auth.JobId, at, auth.IncidentEventId).Scan(&claimedAttempt); err != nil || claimedAttempt != auth.IncidentAttempt {
+			return ErrConflict
+		}
+		return nil
+	}
+	if event.Attempt != auth.IncidentAttempt || (eventType != "failed" && eventType != "infrastructure_retry") {
+		return ErrConflict
+	}
+	if auth.IncidentClass == model.CompetitionJobReevaluationBackingService {
+		if eventType != "failed" || event.Failure != nil {
+			return ErrConflict
+		}
+		// Historical terminal events omit error_code; the separately locked
+		// terminal snapshot binds its exact kind/code. Present fields must agree.
+		if len(event.ErrorCode) != 0 {
+			var errorCode string
+			if json.Unmarshal(event.ErrorCode, &errorCode) != nil || errorCode != "run_unstable" {
+				return ErrConflict
+			}
+		}
+		return nil
 	}
 	if auth.IncidentClass == model.CompetitionJobReevaluationLegacyArchiveBudget {
 		var errorCode string
@@ -385,6 +445,9 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 	preflightError := validateCompetitionReevaluationRuntime(settings, a)
 	if preflightError == nil && a.IncidentClass == model.CompetitionJobReevaluationArchiveInventory {
 		preflightError = validateCompetitionReevaluationInventory(settings, a)
+	}
+	if preflightError == nil && a.IncidentClass == model.CompetitionJobReevaluationBackingService {
+		preflightError = validateCompetitionReevaluationBackingService(settings, a, defaultCompetitionReevaluationEvidenceSettings())
 	}
 	// Replay remains possible after retained local files or the authorization
 	// lifetime expire, but only after its exact immutable request has matched.
@@ -430,8 +493,8 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			if running || slotWorker != nil && (slotExpiry == nil || now.Before(*slotExpiry)) || slotJob != nil {
 				panic(ErrLeaseLost)
 			}
-			if now.Before(a.AuthorizedAt) || !now.Before(a.ExpiresAt) || round.Canceled || round.FinalizedAt != nil || round.AutomationSealedAt != nil || round.AdmissionClosedAt != nil || round.WinnerJobId != nil ||
-				round.CompetitionId != settings.CompetitionId || !submissionWithinEpoch(round, now) || !storedPolicyMatches(settings, round.PolicyJson) {
+			if !competitionReevaluationWithinApprovedWindow(a, round, now) || round.Canceled || round.FinalizedAt != nil || round.AutomationSealedAt != nil || round.AdmissionClosedAt != nil || round.WinnerJobId != nil ||
+				round.CompetitionId != settings.CompetitionId || !storedPolicyMatches(settings, round.PolicyJson) {
 				panic(ErrConflict)
 			}
 			if state != "failed" || cycle != 0 || attempts != a.ExpectedAttemptCount || started == nil || completed == nil || leaseOwner != nil || leaseExpiry != nil ||
@@ -440,7 +503,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			}
 			var failure *CompetitionError
 			server.Raise(json.Unmarshal(errorJson, &failure))
-			if failure == nil || failure.Kind != "infrastructure" || failure.Retriable || (failure.Code != "artifact_archive_failed" && failure.Code != "evaluation_time_budget_exhausted") {
+			if failure == nil || !model.CompetitionJobReevaluationFailureAllowed(a.IncidentClass, model.CompetitionEvaluationFailure{Kind: failure.Kind, Code: failure.Code, Retriable: failure.Retriable}) {
 				panic(ErrConflict)
 			}
 			if a.IncidentClass == model.CompetitionJobReevaluationLegacyArchiveBudget && failure.Code != "evaluation_time_budget_exhausted" {
@@ -458,7 +521,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			}
 			holds, holdErr := readCompetitionIntakeHolds(ctx, tx, settings)
 			server.Raise(holdErr)
-			if !holds.Evaluation {
+			if !holds.Evaluation || a.PostCloseApproval != nil && !holds.Finalization {
 				panic(ErrAutomationHeld)
 			}
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, a.RoundId))
@@ -475,10 +538,13 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			}
 			server.Raise(validateCompetitionReevaluationIncidentInTx(ctx, tx, a, *started, *completed))
 			now = self.nowUtc()
-			if now.Before(a.AuthorizedAt) || !now.Before(a.ExpiresAt) || !submissionWithinEpoch(round, now) {
+			if !competitionReevaluationWithinApprovedWindow(a, round, now) {
 				panic(ErrConflict)
 			}
 			cycleReceipt := model.CompetitionJobReevaluationCycle{Schema: 1, Environment: a.Environment, CompetitionId: a.CompetitionId, SeasonId: a.SeasonId, JobId: a.JobId, RoundId: a.RoundId, PatchSha256: "", RoundPolicySha256: a.RoundPolicySha256, BaselineSha256: a.BaselineSha256, Cycle: 1, AuthorizationSha256: request.AuthorizationSha256, EvidenceSha256: a.EvidenceSha256, PreviousTerminalSha256: a.ExpectedTerminalSha256, PreviousFailure: model.CompetitionEvaluationFailure{Kind: failure.Kind, Code: failure.Code, Retriable: false}, RuntimeQualificationSha256: a.RuntimeQualificationSha256, FixedSourceCommit: a.FixedSourceCommit, FixedWorkerSha256: a.FixedWorkerSha256, FixedWorkerImageDigest: a.FixedWorkerImageDigest, ApiImageDigest: a.ApiImageDigest, AuthorizedAt: now, ExecutionTimeoutSeconds: settings.EvaluationPolicy.ScoreTimeoutSeconds}
+			if a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService {
+				cycleReceipt.IncidentClass = a.IncidentClass
+			}
 			server.Raise(tx.QueryRow(ctx, `SELECT patch_sha256 FROM competition_job WHERE job_id=$1`, a.JobId).Scan(&cycleReceipt.PatchSha256))
 			cycleReceipt.ReceiptSha256, digestErr = model.CompetitionJobReevaluationCycleDigest(cycleReceipt)
 			server.Raise(digestErr)

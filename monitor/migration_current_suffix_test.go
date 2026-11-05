@@ -25,6 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		poolRoleSuperuser := migrationPoolRoleSuperuserForTest(t, ctx)
 		for head := 793; head <= server.MigrationCount(); head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
@@ -41,7 +42,7 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 					// what it keeps
 					continue
 				}
-				if present := migrationBool(row[artifact.rowColumn]); present != (artifact.requiredVersion <= head) {
+				if present := migrationBool(row[artifact.rowColumn]); present != migrationCurrentSuffixExpectedPresenceForTest(artifact, head, poolRoleSuperuser) {
 					t.Fatalf("prefix %d artifact %d=%t", head, artifact.requiredVersion, present)
 				}
 			}
@@ -234,8 +235,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
 		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
-		{name: "elected-winner review guard dropped", version: 900, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
-		{name: "elected-winner checkpoint guard dropped", version: 900, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		{name: "elected-winner review guard dropped", version: server.CompetitionProductionBenefitMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: server.CompetitionProductionBenefitMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
 		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
 		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
 		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},

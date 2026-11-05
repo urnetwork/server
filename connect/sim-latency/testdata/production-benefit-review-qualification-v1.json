@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "kind": "synthetic-production-benefit-review-cases",
+  "addendum_version": "production-benefit/1",
+  "cases": [
+    {
+      "name": "production-packet-copy-elimination",
+      "expected_decision": "approve",
+      "expected_production_disposition": "pass",
+      "expected_workload_disposition": "pass",
+      "source_before": "package connect\nimport \"io\"\nfunc ForwardToClient(w io.Writer, packet []byte) error { size := len(append([]byte(nil), packet...)); _, err := w.Write(packet[:size]); return err }\n",
+      "source_after": "package connect\nimport \"io\"\nfunc ForwardToClient(w io.Writer, packet []byte) error { size := len(packet); _, err := w.Write(packet[:size]); return err }\n"
+    },
+    {
+      "name": "bounded-provider-concurrency-benefits-clients",
+      "expected_decision": "approve",
+      "expected_production_disposition": "pass",
+      "expected_workload_disposition": "pass",
+      "source_before": "package connect\nimport \"context\"\n// ServeProviderBatch runs independent client requests; jobs own no shared mutable state and must honor ctx. Every result is retained in input order.\nfunc ServeProviderBatch(ctx context.Context, jobs []func(context.Context) error) []error { results := make([]error, len(jobs)); for i, job := range jobs { results[i] = job(ctx) }; return results }\n",
+      "source_after": "package connect\nimport (\"context\"; \"sync\")\n// ServeProviderBatch runs independent client requests; jobs own no shared mutable state and must honor ctx. Every result is retained in input order.\nfunc ServeProviderBatch(ctx context.Context, jobs []func(context.Context) error) []error { results := make([]error, len(jobs)); for start := 0; start < len(jobs); start += 4 { var workers sync.WaitGroup; for i := start; i < min(start+4,len(jobs)); i++ { workers.Go(func() { results[i] = jobs[i](ctx) }) }; workers.Wait() }; return results }\n"
+    },
+    {
+      "name": "immutable-route-cache-preserves-caller-ownership",
+      "expected_decision": "approve",
+      "expected_production_disposition": "pass",
+      "expected_workload_disposition": "pass",
+      "source_before": "package connect\nimport \"encoding/json\"\ntype routeSnapshot struct { route string }\nfunc newRouteSnapshot(route string) *routeSnapshot { return &routeSnapshot{route:route} }\nfunc (self *routeSnapshot) ReplyToClient() []byte { encoded, _ := json.Marshal(struct { Route string }{Route:self.route}); return encoded }\n",
+      "source_after": "package connect\nimport \"encoding/json\"\ntype routeSnapshot struct { encoded string }\nfunc newRouteSnapshot(route string) *routeSnapshot { encoded, _ := json.Marshal(struct { Route string }{Route:route}); return &routeSnapshot{encoded:string(encoded)} }\nfunc (self *routeSnapshot) ReplyToClient() []byte { return []byte(self.encoded) }\n"
+    },
+    {
+      "name": "ordinary-comment-has-no-production-effect",
+      "expected_decision": "disqualify",
+      "expected_production_disposition": "fail",
+      "expected_workload_disposition": "pass",
+      "source_before": "package connect\nfunc PacketSize(packet []byte) int { return len(packet) }\n",
+      "source_after": "package connect\n// The same packet length is returned.\nfunc PacketSize(packet []byte) int { return len(packet) }\n"
+    },
+    {
+      "name": "benchmark-only-delay-removal",
+      "expected_decision": "disqualify",
+      "expected_production_disposition": "fail",
+      "expected_workload_disposition": "pass",
+      "source_before": "package connect\nimport \"time\"\nfunc ServeProductionClient(packet []byte) int { return len(packet) }\n// Only the synthetic test harness calls this separate benchmark entry point.\nfunc RunSyntheticBenchmark(packet []byte) int { time.Sleep(time.Second); return len(packet) }\n",
+      "source_after": "package connect\nfunc ServeProductionClient(packet []byte) int { return len(packet) }\n// Only the synthetic test harness calls this separate benchmark entry point.\nfunc RunSyntheticBenchmark(packet []byte) int { return len(packet) }\n"
+    },
+    {
+      "name": "discarding-useful-client-body-is-not-benefit",
+      "expected_decision": "disqualify",
+      "expected_production_disposition": "fail",
+      "expected_workload_disposition": "fail",
+      "source_before": "package connect\nimport \"io\"\nfunc ForwardClientBody(w io.Writer, body []byte) error { _, err := w.Write(body); return err }\n",
+      "source_after": "package connect\nimport \"io\"\nfunc ForwardClientBody(w io.Writer, body []byte) error { if len(body) > 65536 { return nil }; _, err := w.Write(body); return err }\n"
+    },
+    {
+      "name": "missing-transitive-recovery-contract",
+      "expected_decision": "uncertain",
+      "expected_production_disposition": "uncertain",
+      "expected_workload_disposition": "uncertain",
+      "source_before": "package connect\nfunc ForwardToClient(packet []byte) error { return sendToClient(packet) }\n",
+      "source_after": "package connect\nfunc ForwardToClient(packet []byte) error { return optimizeAndRecoverClient(packet) }\n"
+    },
+    {
+      "name": "honor-real-client-cancellation",
+      "expected_decision": "approve",
+      "expected_production_disposition": "pass",
+      "expected_workload_disposition": "pass",
+      "source_before": "package connect\nimport (\"context\"; \"io\")\n// A canceled caller no longer wants the body; cancellation must not affect a healthy caller.\nfunc ForwardClientBody(ctx context.Context, w io.Writer, body []byte) error { _, err := w.Write(body); return err }\n",
+      "source_after": "package connect\nimport (\"context\"; \"io\")\n// A canceled caller no longer wants the body; cancellation must not affect a healthy caller.\nfunc ForwardClientBody(ctx context.Context, w io.Writer, body []byte) error { if err := ctx.Err(); err != nil { return err }; _, err := w.Write(body); return err }\n"
+    }
+  ]
+}

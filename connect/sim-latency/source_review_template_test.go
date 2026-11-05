@@ -19,7 +19,8 @@ func TestSourceReviewTemplateRequiresEveryActualFinding(t *testing.T) {
 	request := sourceReviewTemplate(packet)
 	policy := model.CompetitionAutomationPolicy{ReviewCriteriaVersion: packet.ReviewCriteriaVersion}
 	if request.ExpectedRevision != 4 || request.JobId != packet.Entry.JobId || request.BaselineSha256 != packet.Seal.BaselineSha256 ||
-		request.ScoreSha256 != packet.Entry.ScoreSha256 || request.CriteriaVersion != packet.ReviewCriteriaVersion || len(request.Findings) != 6 {
+		request.ScoreSha256 != packet.Entry.ScoreSha256 || request.CriteriaVersion != packet.ReviewCriteriaVersion || len(request.Findings) != 6 ||
+		request.ProductionBenefitAddendum == nil || *request.ProductionBenefitAddendum != *model.CompetitionProductionBenefitReviewAddendum() {
 		t.Fatal("review template lost frozen evidence identities or required criteria")
 	}
 	if model.ValidateCompetitionIntegrityReview(request, policy) == nil {
