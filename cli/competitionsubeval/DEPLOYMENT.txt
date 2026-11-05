@@ -9,6 +9,8 @@ Build the competitionsubeval command from main product-control source using
 the approved Go toolchain. Install the binary and its evaluator/self-check
 release under protected root-owned non-writable ancestors. Pin exact SHA-256
 values in a root-only /etc/urnetwork-subeval/agent.json (Config in config.go).
+The private Evaluator pin must name evaluator-subevaluation.sh, not the
+independently sealed evaluator-minimum-work.sh used by the baseline producer.
 Generate independent Ed25519 role keys; the agent receives only the coordinator
 public verification key and its own private output-signing seed. SigningKeyPath
 is a root-owned 0600 base64 seed file. Pin the agent public key at coordinator.

@@ -46,7 +46,7 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 		builder.SubevaluationOwnershipSha256 != self.config.SubevaluationOwnership.Sha256 {
 		return nil, errors.New("cleanup builder identity differs from its installed release pin")
 	}
-	// This is the same fixed jq filter used by evaluator-minimum-work.sh. Hash
+	// This is the same fixed jq filter used by evaluator-subevaluation.sh. Hash
 	// its exact bytes, including the final newline, rather than approximating
 	// jq's Unicode/number/pretty-print encoding in a second implementation.
 	policyBytes, err := self.cleanupIdentityCommand(ctx, self.config.JsonFormatter, []string{"-S", ".patch_policy"}, manifest.EvaluatorRequest, manifest.Identity)

@@ -4,6 +4,8 @@ package competitionagent
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,7 +79,7 @@ func TestEvaluatorRoutingRetainsUnscopedArgumentsAndRejectsPartialScope(t *testi
 
 func TestEvaluatorRoutingAssetsAreSyntacticallyComplete(t *testing.T) {
 	directory := filepath.Dir(evaluatorRoutingHelper(t))
-	for _, name := range []string{"subevaluation-ownership.sh", "evaluator-minimum-work.sh", "build-submission.sh", "prepare-evaluation-source.sh", "docker-id-map.sh", "network-boundary.sh", "retain-failure-evidence.sh"} {
+	for _, name := range []string{"subevaluation-ownership.sh", "evaluator-subevaluation.sh", "build-submission.sh", "prepare-evaluation-source.sh", "docker-id-map.sh", "network-boundary.sh", "retain-failure-evidence.sh"} {
 		command := exec.Command("bash", "-n", filepath.Join(directory, name))
 		command.Env = []string{"PATH=/usr/bin:/bin"}
 		if output, err := command.CombinedOutput(); err != nil {
@@ -86,6 +88,26 @@ func TestEvaluatorRoutingAssetsAreSyntacticallyComplete(t *testing.T) {
 	}
 	if output, err := exec.Command("bash", "-n", filepath.Join(directory, "..", "host-self-check.sh")).CombinedOutput(); err != nil {
 		t.Fatal("sealed private host-audit helper has invalid shell syntax", err, string(output))
+	}
+}
+
+// The separately named private helper must never alter the historical control
+// producer or silently fall back to its unscoped Docker authority.
+func TestPrivateEvaluatorKeepsSealedControlAndRejectsMissingScope(t *testing.T) {
+	directory := filepath.Dir(evaluatorRoutingHelper(t))
+	content, err := os.ReadFile(filepath.Join(directory, "evaluator-minimum-work.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	if hex.EncodeToString(digest[:]) != "7780930d44ebc1df5d8f775a75c37aadb2048fc1b9386027615f3ce6b5fe56d4" {
+		t.Fatal("private lifecycle changes altered the independently sealed control helper")
+	}
+	command := exec.Command("bash", filepath.Join(directory, "evaluator-subevaluation.sh"))
+	command.Env = controlEnvironment()
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "private evaluation requires authenticated agent ownership scope") {
+		t.Fatal("private helper could borrow legacy unscoped Docker authority", err, string(output))
 	}
 }
 

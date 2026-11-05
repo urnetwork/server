@@ -19,10 +19,6 @@ readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/hash-local-mount.sh"
 readonly RETAIN_FAILURE_EVIDENCE="$SCRIPT_DIR/retain-failure-evidence.sh"
 readonly POSTGRES_INIT="$SCRIPT_DIR/postgres-init.sh"
 readonly TIMEOUT_BUDGET="$SCRIPT_DIR/timeout-budget.sh"
-# Only a prospective agent supplies this all-or-none authenticated scope. Old
-# releases and unscoped evaluations keep their exact Docker/Compose arguments.
-source "$SCRIPT_DIR/subevaluation-ownership.sh"
-subevaluation_ownership_init
 readonly EMPTY_PATCH_SHA256=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 readonly MAX_REQUEST_BYTES=$((2 * 1024 * 1024))
 readonly MAX_PROVIDERS_BYTES=$((1024 * 1024 * 1024))
@@ -164,10 +160,10 @@ authenticate_local_mounts() {
 # Inspection only: recovery of any leftover resources requires the operator.
 check_evaluator_residual_resources() {
     local containers networks mounts filesystem source
-    containers="$(evaluation_timed_docker ps -aq \
+    containers="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker ps -aq \
         --filter label=com.urnetwork.competition.job-id)" || die "could not enumerate prior evaluator containers"
     [ -z "$containers" ] || die "prior evaluator containers still exist"
-    networks="$(evaluation_timed_docker network ls -q \
+    networks="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker network ls -q \
         --filter label=com.urnetwork.competition.job-id)" || die "could not enumerate prior evaluator networks"
     [ -z "$networks" ] || die "prior evaluator networks still exist"
     mounts="$(timeout --signal=TERM --kill-after=1s 3s findmnt -rn -o FSTYPE,SOURCE)" ||
@@ -239,33 +235,18 @@ cleanup() {
     fi
     if [ -n "${job_id:-}" ]; then
         while IFS= read -r container_id; do
-            [ -n "$container_id" ] && evaluation_docker rm -f "$container_id" >/dev/null 2>&1 || true
-        done < <(evaluation_docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}" 2>/dev/null || true)
+            [ -n "$container_id" ] && sudo -n docker rm -f "$container_id" >/dev/null 2>&1 || true
+        done < <(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" 2>/dev/null || true)
         while IFS= read -r network_id; do
-            [ -n "$network_id" ] && evaluation_docker network rm "$network_id" >/dev/null 2>&1 || true
-        done < <(evaluation_docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}" 2>/dev/null || true)
-    fi
-    if [[ "$subevaluation_scoped" = true ]] && [ -n "${active_work_mount:-}" ] && mountpoint -q "$active_work_mount"; then
-        local role ordinal output
-        for role in baseline candidate; do
-            for ordinal in 01 02 03 04 05 06 07 08 09; do
-                output="$active_work_mount/runs/$role-$ordinal/output"
-                if [ -d "$output" ] && [ ! -L "$output" ]; then
-                    evaluation_host reclaim-output "$output" >/dev/null 2>&1 || true
-                fi
-            done
-            output="$active_work_mount/$role-score-output"
-            if [ -d "$output" ] && [ ! -L "$output" ]; then
-                evaluation_host reclaim-output "$output" >/dev/null 2>&1 || true
-            fi
-        done
+            [ -n "$network_id" ] && sudo -n docker network rm "$network_id" >/dev/null 2>&1 || true
+        done < <(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" 2>/dev/null || true)
     fi
     if [ -n "${artifact_dir:-}" ] && [ -f "$artifact_dir/evaluator-failure.json" ]; then
         local residual_containers residual_networks
-        if residual_containers="$(evaluation_timed_docker ps -aq \
-               --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" &&
-           residual_networks="$(evaluation_timed_docker network ls -q \
-               --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" &&
+        if residual_containers="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker ps -aq \
+               --filter "label=com.urnetwork.competition.job-id=$job_id")" &&
+           residual_networks="$(sudo -n timeout --signal=TERM --kill-after=1s 3s docker network ls -q \
+               --filter "label=com.urnetwork.competition.job-id=$job_id")" &&
            [ -z "$residual_containers" ] && [ -z "$residual_networks" ]; then
             :
         else
@@ -293,12 +274,8 @@ cleanup() {
     fi
     local work_cleanup_complete=true
     if [ -n "${active_work_mount:-}" ] && mountpoint -q "$active_work_mount"; then
-        if [[ "$subevaluation_scoped" = true ]]; then
-            evaluation_host unmount-evidence >/dev/null 2>&1 || work_cleanup_complete=false
-        else
-            sudo -n timeout --signal=TERM --kill-after=1s 3s umount "$active_work_mount" >/dev/null 2>&1 ||
-                work_cleanup_complete=false
-        fi
+        sudo -n timeout --signal=TERM --kill-after=1s 3s umount "$active_work_mount" >/dev/null 2>&1 ||
+            work_cleanup_complete=false
     fi
     if [ -n "${active_work_mount:-}" ] && [ -d "$active_work_mount" ]; then
         rmdir "$active_work_mount" >/dev/null 2>&1 || work_cleanup_complete=false
@@ -307,7 +284,7 @@ cleanup() {
         [ -z "${artifact_dir:-}" ] || rm -f -- "$artifact_dir/evaluator-failure.json"
         log "ERROR: stage failure classification invalidated by incomplete evidence tmpfs cleanup"
     fi
-    if [[ "$subevaluation_scoped" != true ]] && [ -n "${artifact_dir:-}" ] && [ -d "$artifact_dir" ]; then
+    if [ -n "${artifact_dir:-}" ] && [ -d "$artifact_dir" ]; then
         sudo -n chown -R "$worker_uid:$worker_gid" "$artifact_dir" >/dev/null 2>&1 || true
     fi
     exit "$rc"
@@ -321,7 +298,7 @@ for command in awk cat cp date df find findmnt git head install jq mkfifo mount 
     require_command "$command"
 done
 check_evaluator_residual_resources
-evaluation_docker info >/dev/null
+sudo -n docker info >/dev/null
 [ -x "$BUILD_SUBMISSION" ] || die "trusted submission builder is not executable"
 [ -x "$PREPARE_EVALUATION_SOURCE" ] || die "trusted evaluation source preparer is not executable"
 [ -x "$RESOURCE_BOUNDARY" ] || die "trusted resource boundary is not executable"
@@ -381,9 +358,6 @@ replicates="$(jq -er '.evaluation_policy.replicates' "$request_path")"
 [[ "$round_id" =~ ^[0-9a-f-]{36}$ ]] || die "round id is invalid"
 [[ "$source_epoch" =~ ^[0-6]$ ]] || die "source epoch is invalid"
 [[ "$attempt" =~ ^[1-9][0-9]*$ ]] || die "attempt is invalid"
-if [[ "$subevaluation_scoped" = true ]]; then
-    subevaluation_require_identity "$job_id" "$round_id" "$attempt" || die "subevaluation ownership differs from its request"
-fi
 # A systemd slice may retain counters after its last Docker child disappears.
 # Include the authenticated retry identity without truncating stage suffixes.
 attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print substr($1, 1, 32)}')"
@@ -479,13 +453,9 @@ actual_management_affinity="$(awk -F: \
 work_dir="$artifact_dir/.evidence-runtime"
 [ ! -e "$work_dir" ] || die "runtime evidence directory already exists"
 install -d -m 0700 "$work_dir"
-if [[ "$subevaluation_scoped" = true ]]; then
-    evaluation_host mount-evidence
-else
-    sudo -n mount -t tmpfs \
-        -o "size=$EVIDENCE_WORK_LIMIT,mode=0700,uid=$worker_uid,gid=$worker_gid,nosuid,nodev,noexec" \
-        "urnetwork-evidence-${job_id//-/}-$attempt" "$work_dir"
-fi
+sudo -n mount -t tmpfs \
+    -o "size=$EVIDENCE_WORK_LIMIT,mode=0700,uid=$worker_uid,gid=$worker_gid,nosuid,nodev,noexec" \
+    "urnetwork-evidence-${job_id//-/}-$attempt" "$work_dir"
 active_work_mount="$work_dir"
 [ "$(stat -f -c '%T' "$work_dir")" = tmpfs ] || die "runtime evidence filesystem is not tmpfs"
 work_capacity="$(df -B1 --output=size "$work_dir" | awk 'NR == 2 {print $1}')"
@@ -532,7 +502,7 @@ builder_sha256="$(jq -er '.builder_sha256 | select(test("^[0-9a-f]{64}$"))' <<<"
 patch_validator_sha256="$(jq -er '.patch_validator_sha256 | select(test("^[0-9a-f]{64}$"))' <<<"$builder_identity")"
 printf '%s\n' "$builder_identity" > "$work_dir/builder-identity.json"
 chmod 0400 "$work_dir/builder-identity.json"
-base_image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$base_image")" || die "base image is unavailable offline"
+base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")" || die "base image is unavailable offline"
 [ "$base_image_id" = "$base_image" ] || die "base image id does not match frozen digest"
 docker_id_map_json="$($DOCKER_ID_MAP --image "$base_image_id" --uid 65532 --gid 65532)" ||
     die "could not resolve the live Docker user-namespace map"
@@ -551,28 +521,24 @@ container_host_uid="$(jq -er '.host_uid' <<<"$docker_id_map_json")"
 container_host_gid="$(jq -er '.host_gid' <<<"$docker_id_map_json")"
 printf '%s\n' "$docker_id_map_json" > "$work_dir/docker-id-map.json"
 chmod 0400 "$work_dir/docker-id-map.json"
-evaluation_sealed_copy "$container_host_uid" "$container_host_gid" \
+sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
     "$providers_path" "$work_dir/input/providers.yml"
-evaluation_sealed_copy "$container_host_uid" "$container_host_gid" \
+sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
     "$providers_path" "$work_dir/scorer-input/providers.yml"
-if [[ "$subevaluation_scoped" = true ]]; then
-    chmod 0755 "$work_dir/input" "$work_dir/scorer-input"
-else
-    sudo -n chown "$container_host_uid:$container_host_gid" "$work_dir/input" "$work_dir/scorer-input"
-    sudo -n chmod 0500 "$work_dir/input" "$work_dir/scorer-input"
-fi
+sudo -n chown "$container_host_uid:$container_host_gid" "$work_dir/input" "$work_dir/scorer-input"
+sudo -n chmod 0500 "$work_dir/input" "$work_dir/scorer-input"
 
 base_build_ref="urnetwork/sim-latency-evaluator-base-id:${base_image_id#sha256:}"
-if evaluation_docker image inspect "$base_build_ref" >/dev/null 2>&1; then
-    [ "$(evaluation_docker image inspect --format '{{.Id}}' "$base_build_ref")" = "$base_image_id" ] ||
+if sudo -n docker image inspect "$base_build_ref" >/dev/null 2>&1; then
+    [ "$(sudo -n docker image inspect --format '{{.Id}}' "$base_build_ref")" = "$base_image_id" ] ||
         die "daemon-local base alias points at the wrong image"
 else
-    evaluation_docker image tag "$base_image_id" "$base_build_ref"
+    sudo -n docker image tag "$base_image_id" "$base_build_ref"
 fi
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
-base_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id" identity)"
+base_identity="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true "$base_image_id" identity)"
 jq -e --arg base_sha "$base_sha" --arg empty_patch "$EMPTY_PATCH_SHA256" --argjson source_epoch "$source_epoch" \
     '.schema == 1 and .image_kind == "evaluator-base" and
      .base_sha == $base_sha and .build_sha == $base_sha and
@@ -585,10 +551,10 @@ policy_simulator_sha256="$(jq -er '.evaluation_policy.simulator_sha256' "$reques
 [ "$policy_scorer_sha256" = "$base_simulator_sha256" ] || die "frozen scorer digest does not match pristine image"
 [ "$policy_simulator_sha256" = "$base_simulator_sha256" ] || die "frozen simulator digest does not match pristine image"
 if [ -n "$g2_volume_policy" ]; then
-    instrument_policy="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
+    instrument_policy="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
         --security-opt no-new-privileges:true --cpuset-cpus "$management_cpuset" \
         --memory "$SCORER_MEMORY_LIMIT" --memory-swap "$SCORER_MEMORY_LIMIT" --pids-limit "$SCORER_PIDS_LIMIT" \
-        --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_docker_args[@]}" "$base_image_id" \
+        --entrypoint /opt/urnetwork/bin/sim-latency "$base_image_id" \
         score-policy --g2-volume-policy "$g2_volume_policy")" || die "pristine image does not implement the frozen scoring policy"
     jq -e --arg policy "$g2_volume_policy" --arg version "$scorer_version" \
         '.score_schema == 1 and .g2_volume_policy == $policy and .scorer_version == $version' \
@@ -679,8 +645,8 @@ wall_timeout_seconds="$(
 compose_with() {
     local project="$1" env_file="$2"
     shift 2
-    evaluation_docker compose --env-file "$env_file" --file "$COMPOSE_FILE" \
-        "${subevaluation_compose_args[@]}" --project-name "$project" "$@"
+    sudo -n docker compose --env-file "$env_file" --file "$COMPOSE_FILE" \
+        --project-name "$project" "$@"
 }
 
 new_secret() {
@@ -790,16 +756,13 @@ write_compose_env() {
         'EVALUATION_REDIS_MIN_CONNECTIONS=4' \
         'EVALUATION_REDIS_MAX_CONNECTIONS=32' \
         > "$pending"
-    if [[ "${subevaluation_scoped:-false}" = true ]]; then
-        printf '%s\n' "URNETWORK_SUBEVALUATION_RUN_ID=$subevaluation_run_id" >> "$pending"
-    fi
     chmod 0400 "$pending"
     mv -f -- "$pending" "$path"
 }
 
 validate_output_tree() {
     local root="$1"
-    [ -z "$(evaluation_file find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ] ||
+    [ -z "$(sudo -n find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ] ||
         die "candidate output contains a non-regular entry"
 }
 
@@ -808,10 +771,10 @@ validate_output_tree() {
 # read; never persist safe.directory or turn off Git's ownership check globally.
 authenticate_protected_simulator_tree() {
     local baseline_tree candidate_tree
-    baseline_tree="$(evaluation_git -c safe.directory= -c safe.directory="$baseline_source_root/server" \
+    baseline_tree="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" \
         -C "$baseline_source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
         die "could not read the baseline protected sim-latency source tree: Git invocation failed"
-    candidate_tree="$(evaluation_git -c safe.directory= -c safe.directory="$candidate_source_root/server" \
+    candidate_tree="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" \
         -C "$candidate_source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
         die "could not read the candidate protected sim-latency source tree: Git invocation failed"
     [[ "$baseline_tree" =~ ^[0-9a-f]{40}$ ]] && [[ "$candidate_tree" =~ ^[0-9a-f]{40}$ ]] ||
@@ -829,18 +792,18 @@ seal_evaluation_source() {
         local expected_commit actual_branch actual_commit source_status
         expected_commit="$(jq -er --arg repository "$repository" \
             '.repositories[$repository]' "$root/.evaluation-source.json")"
-        actual_branch="$(evaluation_git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
+        actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
             die "could not read temporary $repository source branch"
-        actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)" ||
+        actual_commit="$(git -C "$repository_root" rev-parse HEAD)" ||
             die "could not read temporary $repository source commit"
-        source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
+        source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
             die "could not inspect temporary $repository source worktree"
         [ "$actual_branch" = "$source_branch" ] && [ "$actual_commit" = "$expected_commit" ] &&
             [ -z "$source_status" ] ||
             die "temporary $repository source checkout is not clean and identity-bound"
     done
     local server_commit actual_patch
-    server_commit="$(evaluation_git -C "$root/server" rev-parse HEAD)" ||
+    server_commit="$(git -C "$root/server" rev-parse HEAD)" ||
         die "could not read temporary server source commit"
     [ "$server_commit" = "$expected_server" ] ||
         die "temporary server source checkout has the wrong commit"
@@ -852,12 +815,10 @@ seal_evaluation_source() {
     # Preserve tracked executable bits while making both the bind itself and
     # the underlying host tree non-writable. The Docker bind adds a second,
     # independently inspected read-only boundary.
-    evaluation_file find "$root" -type d -exec chmod 0555 {} +
-    evaluation_file find "$root" -type f -perm /111 -exec chmod 0555 {} +
-    evaluation_file find "$root" -type f ! -perm /111 -exec chmod 0444 {} +
-    if [[ "$subevaluation_scoped" != true ]]; then
-        sudo -n chown -R "$container_host_uid:$container_host_gid" "$root"
-    fi
+    sudo -n find "$root" -type d -exec chmod 0555 {} +
+    sudo -n find "$root" -type f -perm /111 -exec chmod 0555 {} +
+    sudo -n find "$root" -type f ! -perm /111 -exec chmod 0444 {} +
+    sudo -n chown -R "$container_host_uid:$container_host_gid" "$root"
 }
 
 remove_evaluation_sources() {
@@ -868,12 +829,7 @@ remove_evaluation_sources() {
     esac
     [ "$(realpath -e "$(dirname "$active_source_root")")" = "$work_dir" ] ||
         die "temporary source directory escaped the attempt tmpfs"
-    if [[ "$subevaluation_scoped" = true ]]; then
-        find "$active_source_root" -type d -exec chmod u+rwx {} +
-        rm -rf -- "$active_source_root"
-    else
-        sudo -n rm -rf -- "$active_source_root"
-    fi
+    sudo -n rm -rf -- "$active_source_root"
     [ ! -e "$active_source_root" ] || die "temporary evaluation sources survived cleanup"
     active_source_root=""
     jq -S '.cleanup_complete = true' "$source_evidence_path" > "$source_evidence_path.new"
@@ -882,9 +838,7 @@ remove_evaluation_sources() {
 }
 
 persist_evidence_tree() {
-    if [[ "$subevaluation_scoped" != true ]]; then
-        sudo -n chown -R "$worker_uid:$worker_gid" "$work_dir"
-    fi
+    sudo -n chown -R "$worker_uid:$worker_gid" "$work_dir"
     find "$work_dir" -type d -exec chmod u+rwx,go-rwx {} +
     find "$work_dir" -type f -exec chmod 0400 {} +
     validate_output_tree "$work_dir"
@@ -894,11 +848,7 @@ persist_evidence_tree() {
     install -d -m 0700 "$work_dir"
     cp -a "$runtime_work_dir/." "$work_dir/"
     sync "$work_dir"
-    if [[ "$subevaluation_scoped" = true ]]; then
-        evaluation_host unmount-evidence
-    else
-        sudo -n umount "$runtime_work_dir"
-    fi
+    sudo -n umount "$runtime_work_dir"
     active_work_mount=""
     rmdir "$runtime_work_dir"
     validate_output_tree "$work_dir"
@@ -929,9 +879,9 @@ emit_candidate_build_failure() {
         mv "$build_log.tail" "$build_log"
     fi
     rm -f -- "$work_dir/candidate-build.json"
-    [ -z "$(evaluation_docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
+    [ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
         die "candidate build failure left job containers"
-    [ -z "$(evaluation_docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
+    [ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
         die "candidate build failure left job networks"
     remove_evaluation_sources
 
@@ -1001,14 +951,7 @@ emit_candidate_build_failure() {
 
 container_cgroup() {
     local container_id="$1" pid rel
-    if [[ "$subevaluation_scoped" = true ]]; then
-        rel="$(evaluation_host verify-id-map "$container_id" | jq -er '.cgroup_path')" || return
-        [[ "$rel" = /* && "$rel" != *..* && "$rel" != *$'\n'* && "$rel" != *$'\r'* ]] || return 1
-        [ -d "/sys/fs/cgroup$rel" ] || return 1
-        printf '%s' "$rel"
-        return
-    fi
-    pid="$(evaluation_docker inspect --format '{{.State.Pid}}' "$container_id")"
+    pid="$(sudo -n docker inspect --format '{{.State.Pid}}' "$container_id")"
     [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
     rel="$(sudo -n awk -F: '$1 == "0" {print $3}' "/proc/$pid/cgroup")"
     [ -n "$rel" ] && [ -d "/sys/fs/cgroup$rel" ] || return 1
@@ -1151,7 +1094,7 @@ run_live_comparison() {
     if [ -n "$round_baseline_path" ]; then
         # Official score commands accept results.csv and resolve its run.json
         # sidecar; compare below accepts the manifests directly.
-        comparison="$(evaluation_docker run --rm --name "$compare_name" \
+        comparison="$(sudo -n docker run --rm --name "$compare_name" \
             --network none --read-only --user 65532:65532 \
             --cpuset-cpus "$cpuset" \
             --memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES" \
@@ -1161,12 +1104,12 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
+            --entrypoint /opt/urnetwork/bin/sim-latency \
             "$base_image_id" score-progress \
             --run "$(join_csv "${candidate_csv[@]}")" \
             --baseline /artifacts/baseline.json)" || die "candidate-$ordinal live comparison failed"
     else
-        comparison="$(evaluation_docker run --rm --name "$compare_name" \
+        comparison="$(sudo -n docker run --rm --name "$compare_name" \
             --network none --read-only --user 65532:65532 \
             --cpuset-cpus "$cpuset" \
             --memory "$SCORER_MEMORY_BYTES" --memory-swap "$SCORER_MEMORY_BYTES" \
@@ -1176,7 +1119,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
+            --entrypoint /opt/urnetwork/bin/sim-latency \
             "$base_image_id" compare \
             --a "$(join_csv "${candidate_manifests[@]}")" \
             --b "$(join_csv "${baseline_manifests[@]}")" \
@@ -1202,7 +1145,7 @@ record_stage_progress() {
     for metric in \
         ttfb_p50_ms ttfb_p95_ms \
         throughput_p50_bytes_per_s throughput_p95_bytes_per_s; do
-        value="$(evaluation_file jq -er --arg metric "$metric" \
+        value="$(sudo -n jq -er --arg metric "$metric" \
             '.metrics[$metric].value |
              select(type == "number" and isfinite and . >= 0)' \
             "$run_manifest")" || die "$role-$index live metric $metric is invalid"
@@ -1276,12 +1219,8 @@ run_stage() {
     write_runner_env "$runner_env" "$evaluation_id" "$build_sha" "$simulator_sha" "$image" "$candidate_patch_sha"
     write_compose_env "$compose_env" "$project" "$role" "$image" "$runner_env" \
         "$work_dir/input" "$output" "$cgroup_parent" "$source"
-    if [[ "$subevaluation_scoped" = true ]]; then
-        evaluation_host prepare-output "$output"
-    else
-        sudo -n chown -R "$container_host_uid:$container_host_gid" "$output"
-        sudo -n chmod 0700 "$output"
-    fi
+    sudo -n chown -R "$container_host_uid:$container_host_gid" "$output"
+    sudo -n chmod 0700 "$output"
 
     active_project="$project"
     active_compose_env="$compose_env"
@@ -1307,7 +1246,7 @@ run_stage() {
     postgres_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet postgres)"
     redis_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet redis)"
     [ -n "$postgres_id" ] && [ -n "$redis_id" ] || die "$stage_token backing container identity missing"
-    inspect_json="$(evaluation_docker inspect "$postgres_id" "$redis_id")"
+    inspect_json="$(sudo -n docker inspect "$postgres_id" "$redis_id")"
     write_container_inspection "$inspect_path" <<<"$inspect_json"
     postgres_cgroup="$(container_cgroup "$postgres_id")" || die "$stage_token postgres cgroup membership unavailable"
     redis_cgroup="$(container_cgroup "$redis_id")" || die "$stage_token redis cgroup membership unavailable"
@@ -1323,7 +1262,7 @@ run_stage() {
     compose_with "$project" "$compose_env" --profile run up --no-deps --detach runner >&2
     runner_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet runner)"
     [ -n "$runner_id" ] && [ -n "$postgres_id" ] && [ -n "$redis_id" ] || die "$stage_token container identity missing"
-    inspect_json="$(evaluation_docker inspect "$runner_id" "$postgres_id" "$redis_id")"
+    inspect_json="$(sudo -n docker inspect "$runner_id" "$postgres_id" "$redis_id")"
     write_container_inspection "$inspect_path" <<<"$inspect_json"
     for _ in $(seq 1 200); do
         runner_cgroup="$(container_cgroup "$runner_id" 2>/dev/null || true)"
@@ -1332,7 +1271,7 @@ run_stage() {
         [ -n "$runner_cgroup" ] && [ -n "$postgres_cgroup" ] && [ -n "$redis_cgroup" ] && break
         # A fast crash removes its live cgroup before the first sample. Its
         # immutable Docker identity and terminal state remain inspectable.
-        [ "$(evaluation_docker inspect --format '{{.State.Status}}' "$runner_id")" != exited ] || break
+        [ "$(sudo -n docker inspect --format '{{.State.Status}}' "$runner_id")" != exited ] || break
         sleep 0.1
     done
     local cgroup_membership_available=false
@@ -1352,14 +1291,14 @@ run_stage() {
         sampler_pid=$!
         active_sampler_pid="$sampler_pid"
     fi
-    exit_code="$(evaluation_docker wait "$runner_id")"
+    exit_code="$(sudo -n docker wait "$runner_id")"
     if [ -n "$sampler_pid" ]; then
         kill "$sampler_pid" >/dev/null 2>&1 || true
         wait "$sampler_pid" >/dev/null 2>&1 || true
     fi
     active_sampler_pid=""
-    evaluation_docker logs "$runner_id" >&2 || true
-    inspect_json="$(evaluation_docker inspect "$runner_id" "$postgres_id" "$redis_id")"
+    sudo -n docker logs "$runner_id" >&2 || true
+    inspect_json="$(sudo -n docker inspect "$runner_id" "$postgres_id" "$redis_id")"
     write_container_inspection "$inspect_path" <<<"$inspect_json"
     [[ "$exit_code" =~ ^(0|[1-9][0-9]{0,2})$ ]] && [ "$exit_code" -le 255 ] ||
         die "$stage_token runner exit status is invalid"
@@ -1499,27 +1438,20 @@ run_stage() {
     resource_start_ms="$(date --date="$started_at" +%s%3N)"
     resource_end_ms="$(date --date="$finished_at" +%s%3N)"
 
-    # Resource counters and timestamps have been captured. Prospective output
-    # ownership cannot move until the whole cohort has stopped and joined.
-    if [[ "$subevaluation_scoped" = true ]]; then
-        compose_with "$project" "$compose_env" --profile run down --volumes --remove-orphans >&2
-        evaluation_host reclaim-output "$output"
-    fi
-
     local run_dir="$output/$evaluation_id"
-    evaluation_file test -s "$run_dir/run.json" || die "$stage_token run manifest missing"
-    evaluation_file test -s "$run_dir/accounting.source.json" || die "$stage_token provider accounting source missing"
-    evaluation_file jq -e --arg evaluation_id "$evaluation_id" \
+    sudo -n test -s "$run_dir/run.json" || die "$stage_token run manifest missing"
+    sudo -n test -s "$run_dir/accounting.source.json" || die "$stage_token provider accounting source missing"
+    sudo -n jq -e --arg evaluation_id "$evaluation_id" \
         '.schema == 1 and .kind == "sim-latency-provider-accounting-source" and
          .evaluation_id == $evaluation_id and .complete == true and .provider_egress_bytes >= 0' \
         "$run_dir/accounting.source.json" >/dev/null || die "$stage_token provider accounting source invalid"
     local accounting_tmp="$stage_root/accounting.json"
-    evaluation_file jq \
+    sudo -n jq \
         '{schema:1,kind:"sim-latency-accounting",evaluation_id:.evaluation_id,
           complete:.complete,measure_start_ms:.measure_start_ms,
           measure_end_ms:.measure_end_ms,provider_egress_bytes:.provider_egress_bytes}' \
         "$run_dir/accounting.source.json" > "$accounting_tmp"
-    evaluation_sealed_copy "$container_host_uid" "$container_host_gid" \
+    sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
         "$accounting_tmp" "$run_dir/accounting.json"
     local resource_tmp="$stage_root/resources.json"
     jq -n \
@@ -1537,13 +1469,13 @@ run_stage() {
           hard_killed:$resource_state.hard_killed,limit_escape:$resource_state.limit_escape,
           measurement_missing:false,cpu_seconds:$cpu_seconds,
           peak_rss_bytes:$peak_rss_bytes}' > "$resource_tmp"
-    evaluation_sealed_copy "$container_host_uid" "$container_host_gid" \
+    sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
         "$resource_tmp" "$run_dir/resources.json"
-    evaluation_file sync -d "$run_dir/accounting.json" "$run_dir/resources.json"
+    sudo -n sync -d "$run_dir/accounting.json" "$run_dir/resources.json"
     validate_output_tree "$output"
 
     local stats_root
-    stats_root="$(evaluation_file jq -er '.stats_root' "$run_dir/run.json")"
+    stats_root="$(sudo -n jq -er '.stats_root' "$run_dir/run.json")"
     case "$stats_root" in
         "/artifacts/$evaluation_id/site/stats/"*) ;;
         *) die "$stage_token stats root identity mismatch" ;;
@@ -1572,41 +1504,32 @@ run_stage() {
         candidate_manifests+=("$manifest")
     fi
     local provider_bytes
-    provider_bytes="$(evaluation_file jq -er '.provider_egress_bytes' "$run_dir/accounting.json")"
+    provider_bytes="$(sudo -n jq -er '.provider_egress_bytes' "$run_dir/accounting.json")"
     run_accounting_records+=("$(jq -cn --arg evaluation_id "$evaluation_id" --arg role "$role" \
-        --arg path "$accounting" --arg sha256 "$(evaluation_file sha256sum "$run_dir/accounting.json" | awk '{print $1}')" \
-        --argjson bytes "$(evaluation_file stat -c '%s' "$run_dir/accounting.json")" \
+        --arg path "$accounting" --arg sha256 "$(sudo -n sha256sum "$run_dir/accounting.json" | awk '{print $1}')" \
+        --argjson bytes "$(sudo -n stat -c '%s' "$run_dir/accounting.json")" \
         --argjson provider_egress_bytes "$provider_bytes" \
         '{evaluation_id:$evaluation_id,role:$role,path:$path,sha256:$sha256,bytes:$bytes,
           provider_egress_bytes:$provider_egress_bytes}')")
     run_resource_records+=("$(jq -cn --arg evaluation_id "$evaluation_id" --arg role "$role" \
-        --arg path "$resources" --arg sha256 "$(evaluation_file sha256sum "$run_dir/resources.json" | awk '{print $1}')" \
-        --argjson bytes "$(evaluation_file stat -c '%s' "$run_dir/resources.json")" \
+        --arg path "$resources" --arg sha256 "$(sudo -n sha256sum "$run_dir/resources.json" | awk '{print $1}')" \
+        --argjson bytes "$(sudo -n stat -c '%s' "$run_dir/resources.json")" \
         --argjson cpu_seconds "$(awk -v value="$cpu_usec" 'BEGIN {printf "%.6f", value / 1000000}')" \
         --argjson peak_rss_bytes "$peak_bytes" \
         '{evaluation_id:$evaluation_id,role:$role,path:$path,sha256:$sha256,bytes:$bytes,
           cpu_seconds:$cpu_seconds,peak_rss_bytes:$peak_rss_bytes}')")
 
-    if [[ "$subevaluation_scoped" != true ]]; then
-        compose_with "$project" "$compose_env" --profile run down --volumes --remove-orphans >&2
-    fi
-    [ -z "$(evaluation_docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" \
-        --filter "label=com.urnetwork.competition.stage=$role" "${subevaluation_cleanup_filter_args[@]}")" ] || die "$stage_token cleanup left containers"
-    evaluation_file cp -a "$output/." "$work_dir/scorer-input/"
-    if [[ "$subevaluation_scoped" = true ]]; then
-        find "$work_dir/scorer-input" -type d -exec chmod 0555 {} +
-        find "$work_dir/scorer-input" -type f -exec chmod 0444 {} +
-        chmod 0755 "$work_dir/scorer-input"
-    fi
+    compose_with "$project" "$compose_env" --profile run down --volumes --remove-orphans >&2
+    [ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" \
+        --filter "label=com.urnetwork.competition.stage=$role")" ] || die "$stage_token cleanup left containers"
+    sudo -n cp -a "$output/." "$work_dir/scorer-input/"
     validate_output_tree "$work_dir/scorer-input"
     record_stage_progress "$role" "$index" "$run_dir/run.json"
     authenticate_local_mounts
     active_project=""
     active_compose_env=""
     rm -f -- "$runner_env" "$compose_env" "$accounting_tmp" "$resource_tmp"
-    if [[ "$subevaluation_scoped" != true ]]; then
-        sudo -n chown -R "$worker_uid:$worker_gid" "$stage_root"
-    fi
+    sudo -n chown -R "$worker_uid:$worker_gid" "$stage_root"
     log "$stage_token complete"
 }
 
@@ -1642,8 +1565,8 @@ trap 'on_error "$LINENO" "$?"' ERR
 [ "$candidate_build_log_status" -eq 0 ] || die "bounded candidate build log capture failed"
 if [ "$candidate_build_status" -ne 0 ]; then
     if [ "$candidate_build_status" -eq 2 ] ||
-       ! evaluation_docker info >/dev/null 2>&1 ||
-       ! evaluation_docker image inspect "$base_image_id" >/dev/null 2>&1; then
+       ! sudo -n docker info >/dev/null 2>&1 ||
+       ! sudo -n docker image inspect "$base_image_id" >/dev/null 2>&1; then
         die "candidate builder failed because evaluator infrastructure is unavailable"
     fi
     emit_candidate_build_failure "$candidate_build_log"
@@ -1688,10 +1611,10 @@ jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
     die "temporary candidate checkout does not match the candidate image"
 [ "$(jq -er '.candidate_patch_sha256' "$candidate_source_root/.evaluation-source.json")" = "$patch_sha256" ] ||
     die "temporary candidate checkout does not match the canonical patch"
-[ "$(evaluation_docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
+[ "$(sudo -n docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
-candidate_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
+candidate_identity="$(sudo -n docker run --rm --network none --read-only --cap-drop ALL \
+    --security-opt no-new-privileges:true "$candidate_image_id" identity)"
 candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity")"
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_sha "$patch_sha256" --arg policy_sha "$policy_sha256" \
@@ -1719,14 +1642,14 @@ seal_evaluation_source "$baseline_source_root" "$base_sha" ""
 
 # Refuse source-percent/request-fraction mismatches before paying for any
 # baseline run. The pristine image performs this metadata-only check offline.
-evaluation_docker run --rm --network none --read-only --cap-drop ALL \
+sudo -n docker run --rm --network none --read-only --cap-drop ALL \
     --security-opt no-new-privileges:true --cpuset-cpus "$management_cpuset" \
     --memory "$SCORER_MEMORY_LIMIT" --memory-swap "$SCORER_MEMORY_LIMIT" --pids-limit "$SCORER_PIDS_LIMIT" \
     --env APEX_SIM_BIN=/opt/urnetwork/bin/sim-latency \
     --env "APEX_SIM_SHA256=$base_simulator_sha256" \
     --env "APEX_EPOCH=$source_epoch" --env "APEX_TAKEOVER_MARGIN=$takeover_margin" \
     --env "APEX_G2_VOLUME_POLICY=$g2_volume_policy" \
-    "${subevaluation_docker_args[@]}" "$base_image_id" margin-preflight >&2 || die "source epoch takeover margin preflight failed"
+    "$base_image_id" margin-preflight >&2 || die "source epoch takeover margin preflight failed"
 
 if [ -n "$round_baseline_path" ]; then
     jq -e --arg round_id "$round_id" --arg providers_sha256 "$providers_sha256" \
@@ -1746,9 +1669,9 @@ if [ -n "$round_baseline_path" ]; then
             (keys | sort) == ["throughput_p50_bytes_per_s","throughput_p95_bytes_per_s","ttfb_p50_ms","ttfb_p95_ms"] and
             all(.[]; .value >= 0 and .n > 0 and (.block_se // 0) >= 0)))' \
         "$round_baseline_path" >/dev/null || die "frozen round baseline contract mismatch"
-    evaluation_sealed_copy "$worker_uid" "$worker_gid" \
+    sudo -n install -o "$worker_uid" -g "$worker_gid" -m 0400 \
         "$round_baseline_path" "$artifact_dir/baseline.json"
-    evaluation_sealed_copy "$container_host_uid" "$container_host_gid" \
+    sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
         "$artifact_dir/baseline.json" "$work_dir/scorer-input/baseline.json"
     baseline_sha256="$(sha256_file "$artifact_dir/baseline.json")"
     [ "$baseline_sha256" = "$round_baseline_sha256" ] || die "materialized round baseline hash mismatch"
@@ -1792,11 +1715,7 @@ chmod 0400 "$score_runner_env"
 
 baseline_score_output="$work_dir/baseline-score-output"
 install -d -m 0700 "$baseline_score_output"
-if [[ "$subevaluation_scoped" = true ]]; then
-    evaluation_host prepare-output "$baseline_score_output"
-else
-    sudo -n chown "$container_host_uid:$container_host_gid" "$baseline_score_output"
-fi
+sudo -n chown "$container_host_uid:$container_host_gid" "$baseline_score_output"
 score_project="urnetwork-eval-${attempt_token}-baseline-score"
 score_cgroup_parent="urnetwork-evaluation-${attempt_token}-baseline-score.slice"
 write_compose_env "$score_compose_env" "$score_project" score "$base_image_id" "$score_runner_env" \
@@ -1807,13 +1726,13 @@ active_compose_env="$score_compose_env"
 compose_with "$score_project" "$score_compose_env" --profile score up --detach scorer >&2
 scorer_id="$(compose_with "$score_project" "$score_compose_env" --profile score ps --all --quiet scorer)"
 [ -n "$scorer_id" ] || die "baseline scorer container missing"
-scorer_exit="$(evaluation_docker wait "$scorer_id")"
+scorer_exit="$(sudo -n docker wait "$scorer_id")"
 baseline_scorer_log="$work_dir/baseline-scorer.log"
-evaluation_docker logs "$scorer_id" > "$baseline_scorer_log" 2>&1 || true
+sudo -n docker logs "$scorer_id" > "$baseline_scorer_log" 2>&1 || true
 cat "$baseline_scorer_log" >&2
 chmod 0400 "$baseline_scorer_log"
 [ "$scorer_exit" -eq 0 ] || die "baseline scorer exited $scorer_exit"
-evaluation_docker inspect "$scorer_id" | jq -e --arg parent "$score_cgroup_parent" \
+sudo -n docker inspect "$scorer_id" | jq -e --arg parent "$score_cgroup_parent" \
     --arg image "$base_image_id" --arg cpuset "$cpuset" \
     '.[0].Config.User == "65532:65532" and .[0].HostConfig.ReadonlyRootfs == true and
      .[0].HostConfig.NetworkMode == "none" and .[0].HostConfig.Memory == 4294967296 and
@@ -1823,19 +1742,13 @@ evaluation_docker inspect "$scorer_id" | jq -e --arg parent "$score_cgroup_paren
      (.[0].HostConfig.CapDrop | index("ALL") != null) and
      (.[0].HostConfig.SecurityOpt | index("no-new-privileges:true") != null)' >/dev/null ||
     die "baseline scorer containment mismatch"
-if [[ "$subevaluation_scoped" != true ]]; then
-    evaluation_file test -s "$baseline_score_output/baseline.json" || die "baseline manifest missing"
-fi
+sudo -n test -s "$baseline_score_output/baseline.json" || die "baseline manifest missing"
 compose_with "$score_project" "$score_compose_env" --profile score down --volumes --remove-orphans >&2
-if [[ "$subevaluation_scoped" = true ]]; then
-    evaluation_host reclaim-output "$baseline_score_output"
-    test -s "$baseline_score_output/baseline.json" || die "baseline manifest missing"
-fi
 active_project=""
 active_compose_env=""
-evaluation_sealed_copy "$worker_uid" "$worker_gid" \
+sudo -n install -o "$worker_uid" -g "$worker_gid" -m 0400 \
     "$baseline_score_output/baseline.json" "$artifact_dir/baseline.json"
-evaluation_sealed_copy "$container_host_uid" "$container_host_gid" \
+sudo -n install -o "$container_host_uid" -g "$container_host_gid" -m 0400 \
     "$artifact_dir/baseline.json" "$work_dir/scorer-input/baseline.json"
 baseline_sha256="$(sha256_file "$artifact_dir/baseline.json")"
 fi
@@ -1845,9 +1758,6 @@ fi
 # backing-service credentials out of a terminal build-failure archive.
 rm -f -- "$score_runner_env" "$score_compose_env"
 build_candidate
-if [[ "$subevaluation_scoped" = true ]]; then
-    subevaluation_retire_build "$work_dir/build-retirement.json" || die "build retirement did not prove its bounded frozen memory phase"
-fi
 for ((i = 1; i <= replicates; i++)); do
     run_stage candidate "$i" "$candidate_image_id" "$candidate_sha" "$candidate_simulator_sha256" "$patch_sha256"
 done
@@ -1877,11 +1787,7 @@ chmod 0400 "$score_runner_env"
 
 candidate_score_output="$work_dir/candidate-score-output"
 install -d -m 0700 "$candidate_score_output"
-if [[ "$subevaluation_scoped" = true ]]; then
-    evaluation_host prepare-output "$candidate_score_output"
-else
-    sudo -n chown "$container_host_uid:$container_host_gid" "$candidate_score_output"
-fi
+sudo -n chown "$container_host_uid:$container_host_gid" "$candidate_score_output"
 score_project="urnetwork-eval-${attempt_token}-candidate-score"
 score_cgroup_parent="urnetwork-evaluation-${attempt_token}-candidate-score.slice"
 write_compose_env "$score_compose_env" "$score_project" score "$base_image_id" "$score_runner_env" \
@@ -1892,13 +1798,13 @@ active_compose_env="$score_compose_env"
 compose_with "$score_project" "$score_compose_env" --profile score up --detach scorer >&2
 scorer_id="$(compose_with "$score_project" "$score_compose_env" --profile score ps --all --quiet scorer)"
 [ -n "$scorer_id" ] || die "candidate scorer container missing"
-scorer_exit="$(evaluation_docker wait "$scorer_id")"
+scorer_exit="$(sudo -n docker wait "$scorer_id")"
 candidate_scorer_log="$work_dir/candidate-scorer.log"
-evaluation_docker logs "$scorer_id" > "$candidate_scorer_log" 2>&1 || true
+sudo -n docker logs "$scorer_id" > "$candidate_scorer_log" 2>&1 || true
 cat "$candidate_scorer_log" >&2
 chmod 0400 "$candidate_scorer_log"
 [ "$scorer_exit" -eq 0 ] || die "candidate scorer exited $scorer_exit"
-evaluation_docker inspect "$scorer_id" | jq -e --arg parent "$score_cgroup_parent" \
+sudo -n docker inspect "$scorer_id" | jq -e --arg parent "$score_cgroup_parent" \
     --arg image "$base_image_id" --arg cpuset "$cpuset" \
     '.[0].Config.User == "65532:65532" and .[0].HostConfig.ReadonlyRootfs == true and
      .[0].HostConfig.NetworkMode == "none" and .[0].HostConfig.Memory == 4294967296 and
@@ -1908,17 +1814,11 @@ evaluation_docker inspect "$scorer_id" | jq -e --arg parent "$score_cgroup_paren
      (.[0].HostConfig.CapDrop | index("ALL") != null) and
      (.[0].HostConfig.SecurityOpt | index("no-new-privileges:true") != null)' >/dev/null ||
     die "candidate scorer containment mismatch"
-if [[ "$subevaluation_scoped" != true ]]; then
-    evaluation_file test -s "$candidate_score_output/score.json" || die "score output missing"
-fi
+sudo -n test -s "$candidate_score_output/score.json" || die "score output missing"
 compose_with "$score_project" "$score_compose_env" --profile score down --volumes --remove-orphans >&2
-if [[ "$subevaluation_scoped" = true ]]; then
-    evaluation_host reclaim-output "$candidate_score_output"
-    test -s "$candidate_score_output/score.json" || die "score output missing"
-fi
 active_project=""
 active_compose_env=""
-evaluation_sealed_copy "$worker_uid" "$worker_gid" \
+sudo -n install -o "$worker_uid" -g "$worker_gid" -m 0400 \
     "$candidate_score_output/score.json" "$artifact_dir/score.json"
 
 printf '%s\n' "${run_accounting_records[@]}" | jq -s \
@@ -1939,9 +1839,9 @@ write_evidence_manifest
 
 template_database_id="$(printf '%s\n' "${migration_hashes[@]}" | sha256sum | awk '{print $1}')"
 redis_generation_id="$(printf '%s\n' "${redis_generations[@]}" | sha256sum | awk '{print $1}')"
-[ -z "$(evaluation_docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
+[ -z "$(sudo -n docker ps -aq --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
     die "final cleanup left job containers"
-[ -z "$(evaluation_docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id" "${subevaluation_cleanup_filter_args[@]}")" ] ||
+[ -z "$(sudo -n docker network ls -q --filter "label=com.urnetwork.competition.job-id=$job_id")" ] ||
     die "final cleanup left job networks"
 cleanup_complete=true
 write_evaluation_progress complete "$replicates" "$replicates"
