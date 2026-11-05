@@ -25,9 +25,29 @@ type DbTxObservationSnapshot struct {
 	CommitAcknowledged   uint64                  `json:"commit_acknowledged"`
 	RollbackAttempts     uint64                  `json:"rollback_attempts"`
 	RollbackAcknowledged uint64                  `json:"rollback_acknowledged"`
+	ReleaseAttempts      uint64                  `json:"release_attempts"`
+	ReleaseReturned      uint64                  `json:"release_returned"`
 	LastBegin            DbTxBoundaryObservation `json:"last_begin"`
 	LastCommit           DbTxBoundaryObservation `json:"last_commit"`
 	LastRollback         DbTxBoundaryObservation `json:"last_rollback"`
+	LastRelease          DbTxReleaseObservation  `json:"last_release"`
+}
+
+// These dispositions describe the existing pool owner, not a cleanup join.
+// Unknown includes hooks whose release/destructor lifetime is not established.
+type DbTxReleaseDisposition uint8
+
+const (
+	DbTxReleaseUnknown DbTxReleaseDisposition = iota
+	DbTxReleaseIdle
+	DbTxReleaseDestroyTransferred
+)
+
+// A disposal transfer may still have physical resources pending. Only the
+// actual held cleanup channel supplies CleanupComplete; it grants no replay.
+type DbTxReleaseObservation struct {
+	Disposition     DbTxReleaseDisposition `json:"disposition"`
+	CleanupComplete bool                   `json:"cleanup_complete"`
 }
 
 // Only the last entered boundary retains finite context budgets. BEGIN samples
@@ -122,6 +142,28 @@ func (self *DbTxObservation) rollbackReturned(ctx context.Context, acknowledged 
 		self.snapshot.LastRollback.AtReturn, self.snapshot.LastRollback.Returned = ObserveDbContextBudget(ctx), true
 		if acknowledged {
 			self.snapshot.RollbackAcknowledged++
+		}
+	}
+}
+
+// Entry precedes the existing non-Hijack release, without changing its owner.
+func (self *DbTxObservation) releaseEntered() {
+	if self != nil {
+		self.snapshot.ReleaseAttempts++
+		self.snapshot.LastRelease = DbTxReleaseObservation{}
+	}
+}
+
+// Only a returned release can transfer custody. Sampling a channel does not
+// wait for it, retain it, or start another cleanup worker.
+func (self *DbTxObservation) releaseReturned(disposition DbTxReleaseDisposition, cleanup <-chan struct{}) {
+	if self != nil {
+		self.snapshot.ReleaseReturned++
+		self.snapshot.LastRelease.Disposition = disposition
+		select {
+		case <-cleanup:
+			self.snapshot.LastRelease.CleanupComplete = true
+		default:
 		}
 	}
 }

@@ -6330,6 +6330,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
 	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	return captureCompetitionHeartbeatDatabase(ctx, func(observation *competitionHeartbeatDatabaseObservation) {
+		if settings.AutomationPolicy.Enabled && settings.automationLease != nil && !competitionDistributedEnabled(settings) && self.beforeLeaseRowLockForTest == nil {
+			observation.sqlShape, observation.sqlValid = competitionHeartbeatLegacySlotShape, true
+		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			tx = observation.beginCallback(tx)
 			if settings.AutomationPolicy.Enabled {
@@ -7408,7 +7411,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 			return nil
 		case <-heartbeatTick:
-			attemptStartedAt, err := retryCompetitionHeartbeatOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings, false, func(ctx context.Context) error {
+			attemptStartedAt, err := retryCompetitionJobHeartbeatOperation(evalCtx, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt, self.heartbeatSettings, func(ctx context.Context) error {
 				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
 			})
 			if err != nil {
