@@ -38,6 +38,9 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 	if err := validateDockerBuildRetirementPlan(plan, protected); err != nil {
 		return err
 	}
+	if _, err := ValidateCandidateCoreProfiles(plan.StockSeccompProfile, plan.CandidateCoreProfile, settings.CoreProfile, protected); err != nil {
+		return err
+	}
 	if settings.MaximumOperations <= 0 || settings.MaximumConnections <= 0 || settings.MaximumHeaderBytes <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumRequestBytes <= 0 ||
 		settings.MaximumImageLoadBytes <= 0 || settings.MaximumBuildOutputBytes <= 0 || settings.MaximumResponseBytes <= 0 || settings.MaximumSpoolBytes <= 0 || settings.MaximumContextBytes <= 0 || settings.MaximumContextFileBytes <= 0 || settings.MaximumContextEntries <= 0 ||
 		settings.MaximumDocumentDepth <= 0 || settings.MaximumContextDepth <= 0 || settings.DirectoryBatch <= 0 || settings.CopyBufferBytes <= 0 || settings.HeaderTimeout <= 0 || settings.UploadTimeout <= 0 || settings.ClientWriteTimeout <= 0 ||
@@ -378,10 +381,12 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 		json.Unmarshal(object["HostConfig"], &host) != nil || !self.allowedCgroup(host.CgroupParent) || host.Privileged || !host.ReadonlyRootfs ||
 		host.PidMode != "" || host.UtsMode != "" || host.UsernsMode != "" || host.CgroupnsMode != "" && host.CgroupnsMode != "private" ||
 		host.IpcMode != "" && host.IpcMode != "private" && host.IpcMode != "none" || host.Runtime != "" && host.Runtime != "runc" ||
-		len(host.CapAdd) != 0 || len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" || len(host.SecurityOpt) != 1 ||
-		host.SecurityOpt[0] != "no-new-privileges:true" && host.SecurityOpt[0] != "no-new-privileges=true" ||
+		len(host.CapAdd) != 0 || len(host.CapDrop) != 1 || host.CapDrop[0] != "ALL" ||
 		host.MaskedPaths != nil || host.ReadonlyPaths != nil || host.RestartPolicy.Name != "" && host.RestartPolicy.Name != "no" || host.RestartPolicy.MaximumRetryCount != 0 {
 		return errors.New("Docker container changed its closed namespace or privilege policy")
+	}
+	if err := self.verifyCandidateCoreSecurity(host.SecurityOpt); err != nil {
+		return err
 	}
 	for _, name := range []string{"Devices", "DeviceRequests", "DeviceCgroupRules", "VolumesFrom", "GroupAdd", "Links", "Annotations", "StorageOpt",
 		"PortBindings", "Dns", "DnsOptions", "DnsSearch", "ExtraHosts"} {
@@ -425,8 +430,8 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 		limits[limit.Name] = true
 		switch limit.Name {
 		case "core":
-			if limit.Soft != 0 || limit.Hard != 0 {
-				return errors.New("Docker container core limits are not both zero")
+			if limit.Soft != 1 || limit.Hard != 1 {
+				return errors.New("Docker candidate core limits are not both one")
 			}
 			coreFound = true
 		case "nofile":
@@ -438,7 +443,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 		}
 	}
 	if !coreFound {
-		return errors.New("Docker container omitted zero core limits")
+		return errors.New("Docker candidate omitted its core-suppression limits")
 	}
 	for name, value := range host.Sysctls {
 		if name != "net.ipv6.conf.all.disable_ipv6" && name != "net.ipv6.conf.default.disable_ipv6" || value != "1" {
