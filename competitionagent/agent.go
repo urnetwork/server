@@ -88,7 +88,7 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 		return nil, errors.New("invalid bounded subevaluation agent owner")
 	}
 	if settings.CleanupTimeout <= 0 || settings.CleanupCommandTimeout <= 0 || settings.CleanupCommandTimeout > settings.CleanupTimeout ||
-		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 || settings.OwnerPollInterval <= 0 ||
+		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 || settings.OutputTransferTimeout <= 0 || settings.OwnerPollInterval <= 0 ||
 		settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 {
 		return nil, errors.New("invalid bounded subevaluation cleanup owner")
 	}
@@ -146,8 +146,23 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 // One SSH invocation owns one authenticated operation. Response files are sent
 // only after a signed bounded manifest, never as an archive or arbitrary path.
 func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
+	input, err := newControlReadStream(reader)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := newControlWriteStream(writer)
+	if err != nil {
+		return err
+	}
+	defer output.Close()
 	request := Request{}
-	if err := ReadDocument(reader, &request, self.config.Limits.DocumentBytes); err != nil {
+	if err := input.WithDeadline(ctx, self.settings.ControlTimeout, func(input io.Reader) error {
+		return ReadDocument(input, &request, self.config.Limits.DocumentBytes)
+	}); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := VerifyRequest(request, self.coordinatorPublicKey); err != nil {
@@ -157,7 +172,6 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 		return errors.New("subevaluation request has another role identity")
 	}
 	var response Response
-	var err error
 	switch request.Operation {
 	case "check", "availability":
 		if request.RunId != "" || request.FencingToken != 0 || request.Start != nil {
@@ -172,7 +186,7 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 		if request.Start == nil || request.RunId != request.Start.Identity.RunId || request.FencingToken <= 0 {
 			return errors.New("invalid start operation")
 		}
-		response, err = self.start(ctx, request, reader)
+		response, err = self.start(ctx, request, input.reader)
 	case "status", "cancel", "artifacts":
 		if request.Start != nil || !digestPattern.MatchString(request.RunId) || request.FencingToken <= 0 {
 			return errors.New("invalid fixed-run operation")
@@ -194,11 +208,15 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 	if err := SignResponse(&response, self.signingKey); err != nil {
 		return err
 	}
-	if err := WriteDocument(writer, response, self.config.Limits.DocumentBytes); err != nil {
+	if err := output.WithDeadline(ctx, self.settings.ControlTimeout, func(output io.Writer) error {
+		return WriteDocument(output, response, self.config.Limits.DocumentBytes)
+	}); err != nil {
 		return err
 	}
 	if request.Operation == "artifacts" {
-		return WriteFiles(writer, self.workDirectory(request.RunId), response.Files, self.config.Limits.ArtifactBytes, self.config.Limits)
+		return output.WithDeadline(ctx, self.settings.OutputTransferTimeout, func(output io.Writer) error {
+			return WriteFiles(output, self.workDirectory(request.RunId), response.Files, self.config.Limits.ArtifactBytes, self.config.Limits)
+		})
 	}
 	return nil
 }

@@ -65,15 +65,18 @@ type Config struct {
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
 // values are invalid; Now is a test seam and is never accepted from a peer.
 type AgentSettings struct {
-	ControlTimeout            time.Duration
-	SelfCheckTimeout          time.Duration
-	CancelGrace               time.Duration
-	LockPollInterval          time.Duration
-	MaximumClockSkew          time.Duration
-	DiagnosticBytes           int64
-	ConfigBytes               int64
-	DirectoryBatch            int
+	ControlTimeout   time.Duration
+	SelfCheckTimeout time.Duration
+	CancelGrace      time.Duration
+	LockPollInterval time.Duration
+	MaximumClockSkew time.Duration
+	DiagnosticBytes  int64
+	ConfigBytes      int64
+	DirectoryBatch   int
+	// Each file-body direction receives its own two-minute native I/O budget,
+	// distinct from framing. Nonpositive durations refuse the agent owner.
 	InputTransferTimeout      time.Duration
+	OutputTransferTimeout     time.Duration
 	CleanupTimeout            time.Duration
 	CleanupCommandTimeout     time.Duration
 	CleanupPollInterval       time.Duration
@@ -95,7 +98,7 @@ func DefaultAgentSettings() AgentSettings {
 	return AgentSettings{ControlTimeout: 30 * time.Second, SelfCheckTimeout: 2 * time.Minute,
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
-		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
+		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, OutputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
 		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024,
 		OwnerPollInterval: 25 * time.Millisecond, ManagementMemoryBytes: 8 * 1024 * 1024 * 1024, ManagementCpuQuotaPercent: 200,
 		BuildTasksMaximum: 4096, ContainmentCpuPeriodMicros: 100000, Now: time.Now}
