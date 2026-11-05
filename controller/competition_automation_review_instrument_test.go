@@ -75,3 +75,32 @@ func TestCompetitionReviewInstrumentLegacyEncodingDoesNotGrantAuthority(t *testi
 		t.Fatal("historical packet lacking instrument identity authorized a new review")
 	}
 }
+
+// A legacy scoring policy does not exempt a newly requested review from binary
+// provenance. Matching empty duplicates must not bypass the actual format check.
+func TestCompetitionReviewInstrumentRequiresLegacyBinaryPins(t *testing.T) {
+	for _, staging := range []bool{false, true} {
+		for _, fixture := range []struct {
+			simulator string
+			scorer    string
+			valid     bool
+		}{
+			{simulator: strings.Repeat("7", 64), scorer: strings.Repeat("8", 64), valid: true},
+			{},
+			{simulator: strings.Repeat("7", 64)},
+			{scorer: strings.Repeat("8", 64)},
+			{simulator: strings.Repeat("7", 63), scorer: strings.Repeat("8", 64)},
+			{simulator: strings.Repeat("7", 64), scorer: strings.Repeat("G", 64)},
+		} {
+			packet := &CompetitionSourceReviewPacket{BaseSha: strings.Repeat("a", 40), EvaluatedImageDigest: "sha256:" + strings.Repeat("9", 64),
+				Seal: model.CompetitionEvaluationSeal{Staging: staging}}
+			packet.Instrument = &CompetitionReviewInstrument{Schema: 1, ServerCommit: packet.BaseSha, ImageDigest: packet.EvaluatedImageDigest,
+				SimulatorSha256: fixture.simulator, ScorerSha256: fixture.scorer,
+				EvaluationPolicy: model.CompetitionEvaluationPolicy{G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy, SimulatorSha256: fixture.simulator, ScorerSha256: fixture.scorer}}
+			err := ValidateCompetitionReviewInstrument(packet)
+			if (err == nil) != fixture.valid || err != nil && !strings.Contains(err.Error(), "compiled binary identities") {
+				t.Fatalf("staging=%t simulator=%q scorer=%q valid=%t: %v", staging, fixture.simulator, fixture.scorer, fixture.valid, err)
+			}
+		}
+	}
+}

@@ -38,7 +38,7 @@ incidental regression, genuine optimization, caller cancellation, security
 refusal and legitimate overload recovery are not automatically misconduct.
 
 The private packet carries the activated image/source identity, frozen
-evaluation policy, compiled simulator/scorer hashes when available, and the
+evaluation policy, mandatory compiled simulator/scorer hashes, and the
 trusted-instrument overlay proof when one exists. The selected product parent
 inside that proof must not replace its instrumented server child. The manager
 reads the fixed instrument-file census from that exact commit even when the
@@ -46,7 +46,8 @@ candidate touches none of those files. Future coverage-helper absence is
 explicitly authenticated at historical bases. Whole files preserve local
 helpers, but this is not a complete transitive dependency graph; unavailable
 external helpers require uncertainty/additional authenticated context, not
-invented semantics. Source/image/proof mismatches hold review.
+invented semantics. Source/image/proof mismatches hold review. Legacy G2 does
+not exempt a new review from either binary pin, in production or staging.
 
 The fixed addendum text and SHA-256, instrument bytes/hashes, exact score and
 patch enter the readable model input and non-clock cache identity. Both Snow

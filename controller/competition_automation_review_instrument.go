@@ -31,10 +31,8 @@ func ValidateCompetitionReviewInstrument(packet *CompetitionSourceReviewPacket) 
 		!imageDigestPattern.MatchString(value.ImageDigest) || value.SimulatorSha256 != value.EvaluationPolicy.SimulatorSha256 || value.ScorerSha256 != value.EvaluationPolicy.ScorerSha256 {
 		return errors.New("review instrument differs from the frozen source or evaluated image")
 	}
-	if value.SimulatorSha256 != "" || value.ScorerSha256 != "" || value.EvaluationPolicy.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
-		if !sha256Pattern.MatchString(value.SimulatorSha256) || !sha256Pattern.MatchString(value.ScorerSha256) {
-			return errors.New("review instrument compiled binary identities are incomplete")
-		}
+	if !sha256Pattern.MatchString(value.SimulatorSha256) || !sha256Pattern.MatchString(value.ScorerSha256) {
+		return errors.New("review instrument compiled binary identities are incomplete")
 	}
 	if proof := value.TrustedInstrument; proof != nil {
 		selectedLock, err := model.CompetitionSourceLockDigestForMode(proof.SelectedProductCommits, packet.Seal.Staging)

@@ -40,7 +40,7 @@ func winnerModelFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
 		SourceFiles: []winnerReviewSourceFile{{Path: "connect/example.go", Sha256: hex.EncodeToString(sourceDigest[:]), Content: source}}}
 	request.WorkloadReview = winnerWorkloadContextFixture(request.Packet.BaseSha)
 	request.Packet.EvaluatedImageDigest = "sha256:" + strings.Repeat("9", 64)
-	request.Packet.Instrument = &controller.CompetitionReviewInstrument{Schema: 1, ServerCommit: request.Packet.BaseSha, ImageDigest: request.Packet.EvaluatedImageDigest}
+	request.Packet.Instrument = winnerWorkloadInstrumentFixture(request.Packet.BaseSha, request.Packet.EvaluatedImageDigest)
 	return request, winnerModelJudgment{Decision: "approve", ReasonCodes: result.Review.ReasonCodes,
 		PublicExplanation: result.Review.PublicExplanation, PrivateEvidence: result.PrivateEvidence, Findings: result.Review.Findings,
 		WorkloadPreservation: &winnerWorkloadPreservationFinding{Version: winnerWorkloadReviewVersion, Disposition: "pass", Explanation: "The synthetic comment-only change preserves request admission, deadlines and delivered work."}}

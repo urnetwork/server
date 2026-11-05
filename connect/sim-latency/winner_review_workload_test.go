@@ -32,6 +32,14 @@ func winnerWorkloadContextFixture(commit string) *winnerWorkloadReviewContext {
 	return value
 }
 
+// Even legacy-G2 synthetic reviews carry both frozen compiled binary pins.
+func winnerWorkloadInstrumentFixture(commit, imageDigest string) *controller.CompetitionReviewInstrument {
+	simulator, scorer := strings.Repeat("7", 64), strings.Repeat("8", 64)
+	return &controller.CompetitionReviewInstrument{Schema: 1, ServerCommit: commit, ImageDigest: imageDigest,
+		SimulatorSha256: simulator, ScorerSha256: scorer,
+		EvaluationPolicy: model.CompetitionEvaluationPolicy{SimulatorSha256: simulator, ScorerSha256: scorer}}
+}
+
 // The same retained-input and model-output binding used in production, with
 // explicitly synthetic provider metadata and no transport operation.
 func winnerBrokerAuthenticatedFixture(t *testing.T) (winnerReviewBrokerResult, winnerReviewBrokerRequest) {
@@ -91,7 +99,7 @@ func TestWinnerWorkloadReviewLoadsUntouchedFrozenInstrument(t *testing.T) {
 		PatchPolicy: controller.PatchPolicy{PathBase: "mono_root_v1", AllowedPaths: []string{"connect/**"}, ForbiddenPaths: []string{"server/connect/sim-latency/**"}},
 		Entry:       model.CompetitionSealedEntry{BaseSourceLockSha256: lock}}
 	packet.EvaluatedImageDigest = "sha256:" + strings.Repeat("9", 64)
-	packet.Instrument = &controller.CompetitionReviewInstrument{Schema: 1, ServerCommit: packet.BaseSha, ImageDigest: packet.EvaluatedImageDigest}
+	packet.Instrument = winnerWorkloadInstrumentFixture(packet.BaseSha, packet.EvaluatedImageDigest)
 	if err := os.WriteFile(filepath.Join(root, fixture.InstrumentFiles[0].Path), []byte("moving worktree must never become review evidence"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +132,7 @@ func TestWinnerWorkloadReviewMissingInstrumentFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	commit := sourceTestRepository(t, root, "server")
 	packet := &controller.CompetitionSourceReviewPacket{BaseSha: commit, EvaluatedImageDigest: "sha256:" + strings.Repeat("9", 64)}
-	packet.Instrument = &controller.CompetitionReviewInstrument{Schema: 1, ServerCommit: packet.BaseSha, ImageDigest: packet.EvaluatedImageDigest}
+	packet.Instrument = winnerWorkloadInstrumentFixture(packet.BaseSha, packet.EvaluatedImageDigest)
 	if _, err := loadWinnerWorkloadReviewContext(t.Context(), root, packet, defaultWinnerWorkloadReviewSettings()); err == nil {
 		t.Fatal("missing frozen instrument context accepted")
 	}
