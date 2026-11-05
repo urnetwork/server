@@ -99,7 +99,7 @@ func TestOfficialRunWorkCoverageRequiresFullCompiledCapability(t *testing.T) {
 	}{
 		{policy: &policy, valid: true},
 		{valid: true},
-		{policy: &model.CompetitionWorkCoveragePolicy{Kind: model.CompetitionWorkCoverageKind, MaximumPageCoverageLoss: .5, MaximumByteCoverageLoss: .5}},
+		{policy: &model.CompetitionWorkCoveragePolicy{Kind: model.CompetitionWorkCoverageKind, MinimumPageCoverageRatio: .5, MinimumByteCoverageRatio: .5}},
 		{policy: &model.CompetitionWorkCoveragePolicy{Kind: "unknown/1"}},
 	} {
 		content, err := json.Marshal(test.policy)

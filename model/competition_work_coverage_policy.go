@@ -22,14 +22,14 @@ const competitionWorkCoveragePolicyBytes = 512
 
 // Schema-three run manifests include the bounded completion ledger. This is
 // an artifact-format ceiling, distinct from the control RPC document budget.
-const CompetitionWorkCoverageMaximumManifestBytes = 8 << 20
+const CompetitionWorkCoverageMaximumManifestBytes = 8 * 1024 * 1024
 
 // Nil/omission preserves historical scoring exactly. An explicit v1 contract
-// freezes both tolerances, never deriving them from candidate measurements.
+// freezes both relative floors, never deriving them from candidate measurements.
 type CompetitionWorkCoveragePolicy struct {
-	Kind                    string  `json:"kind" yaml:"kind"`
-	MaximumPageCoverageLoss float64 `json:"maximum_page_coverage_loss" yaml:"maximum_page_coverage_loss"`
-	MaximumByteCoverageLoss float64 `json:"maximum_byte_coverage_loss" yaml:"maximum_byte_coverage_loss"`
+	Kind                     string  `json:"kind" yaml:"kind"`
+	MinimumPageCoverageRatio float64 `json:"minimum_page_coverage_ratio" yaml:"minimum_page_coverage_ratio"`
+	MinimumByteCoverageRatio float64 `json:"minimum_byte_coverage_ratio" yaml:"minimum_byte_coverage_ratio"`
 }
 
 // A missing historical leaf stays missing; explicit policies are copied by
@@ -42,14 +42,14 @@ func (self *CompetitionWorkCoveragePolicy) Clone() *CompetitionWorkCoveragePolic
 	return &copy
 }
 
-// One percentage point is an absolute loss in completion fractions. There is
-// no absolute 97% work floor, no zero-loss rule, and no upper-volume penalty.
+// Each dimension retains at least 95% of its own baseline coverage. This is
+// relative, not five percentage points or an absolute coverage floor.
 func DefaultCompetitionWorkCoveragePolicy() CompetitionWorkCoveragePolicy {
-	return CompetitionWorkCoveragePolicy{Kind: CompetitionWorkCoverageKind, MaximumPageCoverageLoss: 0.01, MaximumByteCoverageLoss: 0.01}
+	return CompetitionWorkCoveragePolicy{Kind: CompetitionWorkCoverageKind, MinimumPageCoverageRatio: 0.95, MinimumByteCoverageRatio: 0.95}
 }
 
 // Values different from the versioned v1 contract need another
-// policy version; an omitted tolerance must not become an implicit zero.
+// policy version; an omitted relative floor must not become an implicit zero.
 func ValidateCompetitionWorkCoveragePolicy(policy *CompetitionWorkCoveragePolicy) error {
 	if policy == nil {
 		return nil
@@ -76,7 +76,7 @@ func (self *CompetitionWorkCoveragePolicy) UnmarshalJSON(content []byte) error {
 	for decoder.More() {
 		keyToken, err := decoder.Token()
 		key, ok := keyToken.(string)
-		if err != nil || !ok || seen[key] || key != "kind" && key != "maximum_page_coverage_loss" && key != "maximum_byte_coverage_loss" {
+		if err != nil || !ok || seen[key] || key != "kind" && key != "minimum_page_coverage_ratio" && key != "minimum_byte_coverage_ratio" {
 			return errors.New("ambiguous or unknown work coverage policy field")
 		}
 		seen[key] = true
@@ -151,28 +151,28 @@ func ValidateCompetitionWorkCoverageSummary(value *CompetitionWorkCoverageSummar
 }
 
 // Eligibility uses integer fractions and the policy's canonical decimal, not
-// an epsilon or binary64 subtraction at the inclusive publication boundary.
+// an epsilon or binary64 multiplication at the inclusive publication boundary.
 func CompetitionWorkCoveragePassed(policy *CompetitionWorkCoveragePolicy, baseline, candidate *CompetitionWorkCoverageSummary) bool {
 	if policy == nil || ValidateCompetitionWorkCoveragePolicy(policy) != nil ||
 		ValidateCompetitionWorkCoverageSummary(baseline) != nil || ValidateCompetitionWorkCoverageSummary(candidate) != nil ||
 		baseline.PlanSha256 != candidate.PlanSha256 || baseline.OfferedRoots != candidate.OfferedRoots ||
 		baseline.ExpectedPages != candidate.ExpectedPages || baseline.ExpectedBytes != candidate.ExpectedBytes ||
-		candidate.CompletedPages <= 0 || candidate.CompletedBytes <= 0 {
+		baseline.CompletedPages <= 0 || baseline.CompletedBytes <= 0 || candidate.CompletedPages <= 0 || candidate.CompletedBytes <= 0 {
 		return false
 	}
 	for _, dimension := range []struct {
 		baseline, candidate, expected int64
-		loss                          float64
+		ratio                         float64
 	}{
-		{baseline.CompletedPages, candidate.CompletedPages, baseline.ExpectedPages, policy.MaximumPageCoverageLoss},
-		{baseline.CompletedBytes, candidate.CompletedBytes, baseline.ExpectedBytes, policy.MaximumByteCoverageLoss},
+		{baseline: baseline.CompletedPages, candidate: candidate.CompletedPages, expected: baseline.ExpectedPages, ratio: policy.MinimumPageCoverageRatio},
+		{baseline: baseline.CompletedBytes, candidate: candidate.CompletedBytes, expected: baseline.ExpectedBytes, ratio: policy.MinimumByteCoverageRatio},
 	} {
-		loss, ok := new(big.Rat).SetString(strconv.FormatFloat(dimension.loss, 'g', -1, 64))
+		ratio, ok := new(big.Rat).SetString(strconv.FormatFloat(dimension.ratio, 'g', -1, 64))
 		control := new(big.Rat).SetFrac64(dimension.baseline, dimension.expected)
-		if !ok || control.Cmp(loss) <= 0 {
+		if !ok || ratio.Sign() <= 0 {
 			return false
 		}
-		floor := new(big.Rat).Sub(control, loss)
+		floor := new(big.Rat).Mul(control, ratio)
 		observed := new(big.Rat).SetFrac64(dimension.candidate, dimension.expected)
 		if observed.Cmp(floor) < 0 {
 			return false

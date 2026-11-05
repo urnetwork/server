@@ -12,7 +12,7 @@ import (
 // Every body has a single exact monitor owner; this migration creates only new
 // functions and triggers and never updates previously stored evidence.
 func TestCompetitionWorkCoverageMigrationIsAdditive(t *testing.T) {
-	for _, forbidden := range []string{"CREATE OR REPLACE", "UPDATE competition_", "DELETE FROM", "ALTER TABLE", "maximum_page_coverage_loss", "maximum_byte_coverage_loss"} {
+	for _, forbidden := range []string{"CREATE OR REPLACE", "UPDATE competition_", "DELETE FROM", "ALTER TABLE", "minimum_page_coverage_ratio", "minimum_byte_coverage_ratio"} {
 		if strings.Contains(competitionWorkCoverageMigration, forbidden) {
 			t.Errorf("coverage migration mutates history or selects provisional policy: %s", forbidden)
 		}

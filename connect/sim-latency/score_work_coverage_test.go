@@ -187,7 +187,7 @@ func TestWorkCoverageGateInclusiveBoundariesAndDegenerateControls(t *testing.T) 
 	baseline := workCoverageSummaryForTest(8000, 800000)
 	for percentage := int64(2); percentage <= 100; percentage++ {
 		control := workCoverageSummaryForTest(percentage*100, percentage*10000)
-		candidate := workCoverageSummaryForTest((percentage-1)*100, (percentage-1)*10000)
+		candidate := workCoverageSummaryForTest(percentage*95, percentage*9500)
 		if !workCoverageGate(&policy, control, candidate).Passed {
 			t.Fatal("exact decimal inclusive boundary was rounded into failure", percentage)
 		}
@@ -196,17 +196,26 @@ func TestWorkCoverageGateInclusiveBoundariesAndDegenerateControls(t *testing.T) 
 		pages, bytes int64
 		pass         bool
 	}{
-		{7900, 790000, true}, {7899, 790000, false}, {7900, 789999, false},
-		{10000, 1000000, true}, {10000, 789999, false}, {7899, 1000000, false}, {0, 0, false},
+		{pages: 7600, bytes: 760000, pass: true},
+		{pages: 7599, bytes: 760000, pass: false},
+		{pages: 7600, bytes: 759999, pass: false},
+		{pages: 7500, bytes: 750000, pass: false},
+		{pages: 10000, bytes: 1000000, pass: true},
+		{pages: 10000, bytes: 759999, pass: false},
+		{pages: 7599, bytes: 1000000, pass: false},
+		{pages: 0, bytes: 0, pass: false},
 	} {
 		if got := workCoverageGate(&policy, baseline, workCoverageSummaryForTest(test.pages, test.bytes)).Passed; got != test.pass {
 			t.Fatal("independent inclusive coverage boundary changed", test, got)
 		}
 	}
-	for _, control := range []*model.CompetitionWorkCoverageSummary{nil, workCoverageSummaryForTest(0, 0), workCoverageSummaryForTest(100, 10000), workCoverageSummaryForTest(101, 10000)} {
+	for _, control := range []*model.CompetitionWorkCoverageSummary{nil, workCoverageSummaryForTest(0, 0), workCoverageSummaryForTest(0, 10000), workCoverageSummaryForTest(100, 0)} {
 		if workCoverageGate(&policy, control, baseline).Passed {
 			t.Fatal("missing or unresolved baseline authorized empty useful work")
 		}
+	}
+	if !workCoverageGate(&policy, workCoverageSummaryForTest(100, 10000), baseline).Passed {
+		t.Fatal("positive low baseline coverage acquired an unapproved absolute floor")
 	}
 	for _, mutate := range []func(*model.CompetitionWorkCoverageSummary){
 		func(value *model.CompetitionWorkCoverageSummary) { value.PageCoverage = math.NaN() },

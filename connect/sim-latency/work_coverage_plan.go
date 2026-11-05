@@ -25,9 +25,9 @@ type workCoverageLimits struct {
 // Unsupported shape or overflow is rejected, never silently truncated.
 func defaultWorkCoverageLimits() workCoverageLimits {
 	return workCoverageLimits{
-		Roots: 16384, Pages: 1 << 20, PagesPerRoot: 4096,
-		Ticks: 65536, RandomDraws: 1 << 24,
-		BodyBytes: 64 << 20, InventoryBytes: model.CompetitionWorkCoverageMaximumManifestBytes / 2, ExpectedBytes: 16 << 40,
+		Roots: 16384, Pages: 1024 * 1024, PagesPerRoot: 4096,
+		Ticks: 65536, RandomDraws: 16 * 1024 * 1024,
+		BodyBytes: 64 * 1024 * 1024, InventoryBytes: model.CompetitionWorkCoverageMaximumManifestBytes / 2, ExpectedBytes: 16 * 1024 * 1024 * 1024 * 1024,
 	}
 }
 

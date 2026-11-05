@@ -143,8 +143,8 @@ validate_worker_request_schema() {
            ((keys | sort) == ($evaluation_policy_keys + (if has("g2_volume_policy") then ["g2_volume_policy"] else [] end) + (if has("work_coverage_policy") then ["work_coverage_policy"] else [] end) | sort)) and
            ((has("g2_volume_policy") | not) or .g2_volume_policy == "minimum-work/1") and
            ((has("work_coverage_policy") | not) or (.g2_volume_policy == "minimum-work/1" and (.work_coverage_policy | type == "object" and .kind == "seeded-crawl-coverage/v1" and
-             (keys | sort) == ["kind","maximum_byte_coverage_loss","maximum_page_coverage_loss"] and
-             all(.maximum_page_coverage_loss,.maximum_byte_coverage_loss; type == "number" and isfinite and . > 0 and . < 1))))) and
+             (keys | sort) == ["kind","minimum_byte_coverage_ratio","minimum_page_coverage_ratio"] and
+             all(.minimum_page_coverage_ratio,.minimum_byte_coverage_ratio; type == "number" and isfinite and . > 0 and . < 1))))) and
          .scorer_version == (if .evaluation_policy.work_coverage_policy != null then "sim-latency-score/3" elif .evaluation_policy.g2_volume_policy == "minimum-work/1"
                              then "sim-latency-score/2" else "sim-latency-score/1" end)' \
         "$1" >/dev/null

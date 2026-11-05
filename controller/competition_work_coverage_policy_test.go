@@ -105,17 +105,17 @@ func TestCompetitionWorkCoveragePublicProbeAndFutureCopiesOwnLeaves(t *testing.T
 	original := future.EvaluationPolicy.Clone()
 	public := future.PublicInfo()
 	probe := competitionHostQualificationSettings(future)
-	public.EvaluationPolicy.WorkCoveragePolicy.MaximumPageCoverageLoss = .5
-	probe.EvaluationPolicy.WorkCoveragePolicy.MaximumByteCoverageLoss = .5
+	public.EvaluationPolicy.WorkCoveragePolicy.MinimumPageCoverageRatio = .5
+	probe.EvaluationPolicy.WorkCoveragePolicy.MinimumByteCoverageRatio = .5
 	if !future.EvaluationPolicy.Equal(original) || !reflect.DeepEqual(settings.FutureEpochPolicy.WorkCoveragePolicy, original.WorkCoveragePolicy) {
 		t.Fatal("derived view mutated its official policy owner")
 	}
-	future.EvaluationPolicy.WorkCoveragePolicy.MaximumPageCoverageLoss = .5
+	future.EvaluationPolicy.WorkCoveragePolicy.MinimumPageCoverageRatio = .5
 	if !reflect.DeepEqual(settings.FutureEpochPolicy.WorkCoveragePolicy, original.WorkCoveragePolicy) {
 		t.Fatal("future settings mutated separately configured operator authority")
 	}
-	future.FutureEpochPolicy.WorkCoveragePolicy.MaximumPageCoverageLoss = .5
-	future.FutureEpochPolicy.TrustedInstrument.WorkCoveragePolicy.MaximumByteCoverageLoss = .5
+	future.FutureEpochPolicy.WorkCoveragePolicy.MinimumPageCoverageRatio = .5
+	future.FutureEpochPolicy.TrustedInstrument.WorkCoveragePolicy.MinimumByteCoverageRatio = .5
 	if !reflect.DeepEqual(settings.FutureEpochPolicy.WorkCoveragePolicy, original.WorkCoveragePolicy) ||
 		!reflect.DeepEqual(settings.FutureEpochPolicy.TrustedInstrument.WorkCoveragePolicy, original.WorkCoveragePolicy) {
 		t.Fatal("returned future configuration shared an operator coverage leaf")
@@ -196,7 +196,7 @@ func TestCompetitionWorkCoverageBaselineRequiresSeparateProducerAndControl(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	round := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 2}, PolicyJson: content, ProvidersSha256: strings.Repeat("b", 64)}
+	round := &roundRecord{RoundResult: RoundResult{RoundId: server.NewId(), Epoch: 2, ProvidersSha256: strings.Repeat("b", 64)}, PolicyJson: content}
 	baseline := testRoundBaseline(t, future, round, []float64{99, 100, 101})
 	if _, err := validateRoundBaselineJson(future, round, baseline); err != nil {
 		t.Fatal("new control did not bind its coverage policy", err)

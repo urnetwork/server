@@ -546,10 +546,8 @@ func validateScoreBaseline(baseline *ScoreBaselineManifest) error {
 		if baseline.WorkCoveragePolicy != nil {
 			coverage := replicate.WorkCoverage
 			if model.ValidateCompetitionWorkCoverageSummary(coverage) != nil ||
-				coverage.PageCoverage <= baseline.WorkCoveragePolicy.MaximumPageCoverageLoss ||
-				coverage.ByteCoverage <= baseline.WorkCoveragePolicy.MaximumByteCoverageLoss ||
 				coverage.CompletedPages <= 0 || coverage.CompletedBytes <= 0 {
-				return scoreError("invalid_baseline_coverage", "baseline coverage is missing, degenerate or unresolved at its fixed tolerance")
+				return scoreError("invalid_baseline_coverage", "baseline coverage is missing or contains no completed expected work")
 			}
 		} else if replicate.WorkCoverage != nil {
 			return scoreError("unexpected_work_coverage", "historical baseline has prospective coverage diagnostics")

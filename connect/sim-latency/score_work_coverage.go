@@ -122,24 +122,23 @@ func medianWorkCoverage(values []*model.CompetitionWorkCoverageSummary) *model.C
 	return &result
 }
 
-// The proposed v1 tolerance is an inclusive absolute loss. It has no upper
-// work bound. Calibration must establish a nondegenerate baseline and an
-// acceptable no-op variance before this source contract is frozen publicly.
+// Each inclusive floor is 95% of that dimension's baseline coverage. There
+// is no upper-volume penalty; independent runtime qualification remains required.
 func workCoverageGate(policy *model.CompetitionWorkCoveragePolicy, baseline, candidate *model.CompetitionWorkCoverageSummary) ScoreGate {
 	gate := ScoreGate{Details: map[string]any{"policy": policy, "baseline": baseline, "candidate": candidate}}
 	if policy == nil || model.ValidateCompetitionWorkCoveragePolicy(policy) != nil ||
 		model.ValidateCompetitionWorkCoverageSummary(baseline) != nil || model.ValidateCompetitionWorkCoverageSummary(candidate) != nil ||
 		baseline.PlanSha256 != candidate.PlanSha256 || baseline.OfferedRoots != candidate.OfferedRoots || baseline.ExpectedPages != candidate.ExpectedPages || baseline.ExpectedBytes != candidate.ExpectedBytes ||
-		baseline.PageCoverage <= policy.MaximumPageCoverageLoss || baseline.ByteCoverage <= policy.MaximumByteCoverageLoss ||
+		baseline.CompletedPages <= 0 || baseline.CompletedBytes <= 0 ||
 		candidate.CompletedPages == 0 || candidate.CompletedBytes == 0 {
 		return gate
 	}
 	gate.Details["baseline_page_coverage"] = baseline.PageCoverage
 	gate.Details["candidate_page_coverage"] = candidate.PageCoverage
-	gate.Details["page_min_inclusive"] = baseline.PageCoverage - policy.MaximumPageCoverageLoss
+	gate.Details["page_min_inclusive"] = baseline.PageCoverage * policy.MinimumPageCoverageRatio
 	gate.Details["baseline_byte_coverage"] = baseline.ByteCoverage
 	gate.Details["candidate_byte_coverage"] = candidate.ByteCoverage
-	gate.Details["byte_min_inclusive"] = baseline.ByteCoverage - policy.MaximumByteCoverageLoss
+	gate.Details["byte_min_inclusive"] = baseline.ByteCoverage * policy.MinimumByteCoverageRatio
 	gate.Passed = model.CompetitionWorkCoveragePassed(policy, baseline, candidate)
 	return gate
 }

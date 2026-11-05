@@ -27,8 +27,8 @@ func TestCompetitionWorkCoveragePolicyCopiesAndRoundTripsByValue(t *testing.T) {
 	if !cloned.Equal(original) || cloned.WorkCoveragePolicy == original.WorkCoveragePolicy {
 		t.Fatal("cloned policy shared its optional mutable leaf")
 	}
-	cloned.WorkCoveragePolicy.MaximumByteCoverageLoss = .5
-	if original.Equal(cloned) || original.WorkCoveragePolicy.MaximumByteCoverageLoss != coverage.MaximumByteCoverageLoss {
+	cloned.WorkCoveragePolicy.MinimumByteCoverageRatio = .5
+	if original.Equal(cloned) || original.WorkCoveragePolicy.MinimumByteCoverageRatio != coverage.MinimumByteCoverageRatio {
 		t.Fatal("copy mutation escaped its owned policy")
 	}
 	replay.WorkCoveragePolicy = nil
@@ -45,8 +45,8 @@ func TestCompetitionWorkCoveragePolicyCopiesAndRoundTripsByValue(t *testing.T) {
 		t.Fatal("independently decoded build receipt lost policy value identity", err)
 	}
 	copyReceipt := receipt.Clone()
-	copyReceipt.WorkCoveragePolicy.MaximumPageCoverageLoss = .5
-	if receipt.Equal(copyReceipt) || receipt.WorkCoveragePolicy.MaximumPageCoverageLoss != coverage.MaximumPageCoverageLoss {
+	copyReceipt.WorkCoveragePolicy.MinimumPageCoverageRatio = .5
+	if receipt.Equal(copyReceipt) || receipt.WorkCoveragePolicy.MinimumPageCoverageRatio != coverage.MinimumPageCoverageRatio {
 		t.Fatal("returned receipt shared its mutable policy leaf")
 	}
 }
@@ -79,7 +79,7 @@ func TestCompetitionWorkCoverageScoreRequiresGateAndExactProvenance(t *testing.T
 		func(score *CompetitionScoreResult) { score.Diagnostics["work_coverage_policy"] = nil },
 		func(score *CompetitionScoreResult) {
 			changed := policy
-			changed.MaximumPageCoverageLoss = .5
+			changed.MinimumPageCoverageRatio = .5
 			score.Diagnostics["work_coverage_policy"] = changed
 		},
 	} {
@@ -135,7 +135,7 @@ func TestCompetitionWorkCoveragePolicyPreservesHistoricalVersionMappings(t *test
 	}
 }
 
-// The source contract fixes inclusive one-point losses, not a candidate knob.
+// The source contract fixes inclusive 95% relative floors, not a candidate knob.
 func TestCompetitionWorkCoveragePolicyRequiresExactVersionedContract(t *testing.T) {
 	policy := DefaultCompetitionWorkCoveragePolicy()
 	if version, err := CompetitionScorerVersionForWorkCoverage(CompetitionG2VolumePolicyMinimumWork, &policy); err != nil || version != CompetitionWorkCoverageScorerVersion {
@@ -146,11 +146,11 @@ func TestCompetitionWorkCoveragePolicyRequiresExactVersionedContract(t *testing.
 	}
 	for _, mutate := range []func(*CompetitionWorkCoveragePolicy){
 		func(value *CompetitionWorkCoveragePolicy) { value.Kind = "unknown/v1" },
-		func(value *CompetitionWorkCoveragePolicy) { value.MaximumPageCoverageLoss = 0 },
-		func(value *CompetitionWorkCoveragePolicy) { value.MaximumByteCoverageLoss = 0 },
-		func(value *CompetitionWorkCoveragePolicy) { value.MaximumPageCoverageLoss = 0.05 },
-		func(value *CompetitionWorkCoveragePolicy) { value.MaximumByteCoverageLoss = math.NaN() },
-		func(value *CompetitionWorkCoveragePolicy) { value.MaximumPageCoverageLoss = math.Inf(1) },
+		func(value *CompetitionWorkCoveragePolicy) { value.MinimumPageCoverageRatio = 0 },
+		func(value *CompetitionWorkCoveragePolicy) { value.MinimumByteCoverageRatio = 0 },
+		func(value *CompetitionWorkCoveragePolicy) { value.MinimumPageCoverageRatio = 0.05 },
+		func(value *CompetitionWorkCoveragePolicy) { value.MinimumByteCoverageRatio = math.NaN() },
+		func(value *CompetitionWorkCoveragePolicy) { value.MinimumPageCoverageRatio = math.Inf(1) },
 	} {
 		changed := policy
 		mutate(&changed)
@@ -178,7 +178,9 @@ func TestCompetitionWorkCoveragePolicyRejectsAmbiguousWireShapes(t *testing.T) {
 		bytes.Replace(content, []byte(`"kind":`), []byte(`"kind":"seeded-crawl-coverage/v1","kind":`), 1),
 		append([]byte(`{"allow_missing_work":true,`), content[1:]...),
 		append(append([]byte(nil), content...), []byte("{}")...),
-		[]byte(`{"kind":"seeded-crawl-coverage/v1","maximum_page_coverage_loss":0.01}`),
+		[]byte(`{"kind":"seeded-crawl-coverage/v1","minimum_page_coverage_ratio":0.01}`),
+		[]byte(`{"kind":"seeded-crawl-coverage/v1","maximum_page_coverage_loss":0.01,"maximum_byte_coverage_loss":0.01}`),
+		[]byte(`{"kind":"seeded-crawl-coverage/v1","maximum_page_coverage_loss":0.05,"maximum_byte_coverage_loss":0.05}`),
 	} {
 		if err := json.Unmarshal(invalid, &decoded); err == nil {
 			t.Fatal("ambiguous policy was accepted", string(invalid))

@@ -1571,8 +1571,7 @@ func validateRoundBaselineJson(settings *Settings, round *roundRecord, content [
 	for _, replicate := range manifest.Replicates {
 		if manifest.WorkCoveragePolicy != nil {
 			coverage := replicate.WorkCoverage
-			if model.ValidateCompetitionWorkCoverageSummary(coverage) != nil || coverage.PageCoverage <= manifest.WorkCoveragePolicy.MaximumPageCoverageLoss ||
-				coverage.ByteCoverage <= manifest.WorkCoveragePolicy.MaximumByteCoverageLoss || coverage.CompletedPages <= 0 || coverage.CompletedBytes <= 0 ||
+			if model.ValidateCompetitionWorkCoverageSummary(coverage) != nil || coverage.CompletedPages <= 0 || coverage.CompletedBytes <= 0 ||
 				manifest.Replicates[0].WorkCoverage == nil || coverage.PlanSha256 != manifest.Replicates[0].WorkCoverage.PlanSha256 {
 				return "", errors.New("round baseline lacks a nondegenerate independent work coverage qualification")
 			}
