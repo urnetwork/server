@@ -99,6 +99,43 @@ func TestUniqueExitShareConnPacesWrites(t *testing.T) {
 	}
 }
 
+type testCallCountingConn struct {
+	net.Conn
+	calls   int
+	written int
+}
+
+func (self *testCallCountingConn) Write(b []byte) (int, error) {
+	self.calls += 1
+	self.written += len(b)
+	return len(b), nil
+}
+
+// A share without a rate (the device's loop has not read its exit yet, or the
+// provider has no throughput estimate) is unlimited: a connection writes in
+// one call and never waits. Before the fix a share that had never been given a
+// rate had a burst of zero, so every write went out one byte per call.
+func TestUniqueExitShareWithoutARateWritesAtOnce(t *testing.T) {
+	for _, rated := range []bool{false, true} {
+		clock := &testUniqueExitClock{now: time.Unix(1_762_380_000, 0)}
+		sleeps := &testSleeps{clock: clock}
+		share := newUniqueExitShare(clock.Now)
+		share.sleep = sleeps.sleep
+		if rated {
+			// no estimate
+			share.setRate(0)
+		}
+		inner := &testCallCountingConn{}
+		conn := &uniqueExitShareConn{Conn: inner, ctx: context.Background(), share: share}
+		n, err := conn.Write(make([]byte, 1_000_000))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, n, 1_000_000)
+		connect.AssertEqual(t, inner.written, 1_000_000)
+		connect.AssertEqual(t, inner.calls, 1)
+		connect.AssertEqual(t, sleeps.total, time.Duration(0))
+	}
+}
+
 type testUniqueExitSource struct {
 	mutex     sync.Mutex
 	exit      *model.ProxyExitForDevice
@@ -232,6 +269,13 @@ func TestUniqueExitDeviceReportsAnUnreachableExit(t *testing.T) {
 	connect.AssertEqual(t, len(device.source.failings), 0)
 	device.loop.step(ctx)
 	connect.AssertEqual(t, device.source.failings, []string{model.ProxyExitReasonUnreachable})
+	// still failing: reported again only after another threshold's worth
+	for i := 0; i < device.loop.settings.UnreachableConfirmFailures-1; i += 1 {
+		device.loop.step(ctx)
+	}
+	connect.AssertEqual(t, len(device.source.failings), 1)
+	device.loop.step(ctx)
+	connect.AssertEqual(t, len(device.source.failings), 2)
 
 	device.echoErr = nil
 	device.loop.step(ctx)

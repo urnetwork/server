@@ -132,9 +132,14 @@ func (self *uniqueExitShare) wait(ctx context.Context, n int) error {
 	return nil
 }
 
+// chunk is how much of a write to pace at once, or 0 when the share is
+// unlimited (no rate yet, or no estimate) and the write goes out whole.
 func (self *uniqueExitShare) chunk() int {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
+	if self.bytesPerSecond <= 0 {
+		return 0
+	}
 	return max(1, int(self.burst))
 }
 
@@ -159,7 +164,12 @@ func (self *uniqueExitShareConn) Read(b []byte) (int, error) {
 func (self *uniqueExitShareConn) Write(b []byte) (int, error) {
 	written := 0
 	for written < len(b) {
-		end := min(len(b), written+self.share.chunk())
+		size := self.share.chunk()
+		if size <= 0 {
+			n, err := self.Conn.Write(b[written:])
+			return written + n, err
+		}
+		end := min(len(b), written+size)
 		if err := self.share.wait(self.ctx, end-written); err != nil {
 			return written, err
 		}
@@ -248,7 +258,10 @@ func (self *proxyUniqueExit) step(ctx context.Context) {
 	ip, err := self.echo(ctx)
 	if err != nil {
 		self.confirmFailures += 1
-		if self.settings.UnreachableConfirmFailures <= self.confirmFailures {
+		// report at the threshold, then again at each further threshold's
+		// worth of failures: the report is idempotent, and the sweeper acts on
+		// the first one after the grace
+		if threshold := max(1, self.settings.UnreachableConfirmFailures); self.confirmFailures%threshold == 0 {
 			self.source.ReportProxyExitFailing(ctx, self.clientId, self.assignmentId, model.ProxyExitReasonUnreachable, now)
 		}
 		return
