@@ -650,7 +650,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				}
 			}
 			if authClient.ProxyConfig != nil && proxyClientLimit > 0 {
-				activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientLimit+1)
+				activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientCountBound(proxyClientLimit))
 				if proxyClientLimitReached(proxyClientLimit, activeProxyCount) {
 					authClientResult = &AuthNetworkClientResult{
 						Error: &AuthNetworkClientError{
