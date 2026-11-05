@@ -36,6 +36,9 @@ type Agent struct {
 	credential           *syscall.Credential
 	protected            bool
 	runtimeAdmission     func(context.Context) (*RuntimeResourceBoundary, error)
+	beforeDirectoryOpen  func(string)
+	recoveryOnly         bool
+	recoveryPlacement    func(context.Context, bool) error
 }
 
 // State and hidden-input manifests live outside the unprivileged run directory.
@@ -49,6 +52,7 @@ type runState struct {
 	CancelRequested     bool   `json:"cancel_requested"`
 	CleanupVerified     bool   `json:"cleanup_verified"`
 	StopCleanupVerified bool   `json:"stop_cleanup_verified"`
+	RecoveryActive      bool   `json:"recovery_active"`
 	CleanupPlanSha256   string `json:"cleanup_plan_sha256"`
 	State               string `json:"state"`
 	RequestSha256       string `json:"request_sha256"`
@@ -89,8 +93,9 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 		return nil, errors.New("invalid bounded subevaluation agent owner")
 	}
 	if settings.CleanupTimeout <= 0 || settings.CleanupCommandTimeout <= 0 || settings.CleanupCommandTimeout > settings.CleanupTimeout ||
-		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 || settings.OwnerPollInterval <= 0 ||
-		settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 {
+		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 || settings.OutputTransferTimeout <= 0 || settings.OwnerPollInterval <= 0 ||
+		settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 || settings.RecoveryMemoryHeadroomBytes <= 0 || settings.RecoveryTasksHeadroom <= 0 ||
+		settings.ManagementGroupDepth <= 0 || settings.ManagementMemoryHeadroomBytes <= 0 || settings.ManagementTasksHeadroom <= 0 {
 		return nil, errors.New("invalid bounded subevaluation cleanup owner")
 	}
 	keyContent, err := readBounded(config.SigningKeyPath, settings.ConfigBytes)
@@ -141,14 +146,33 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	self := &Agent{config: *config, settings: settings, runner: runner, cleaner: newHostCleaner(*config, settings), containment: newHostRunContainment(*config, settings, credential), coordinatorPublicKey: publicKey,
 		signingKey: privateKey, credential: credential, protected: protected}
 	self.runtimeAdmission = self.verifyCleanupRuntime
+	self.recoveryPlacement = self.verifyRecoveryPlacement
 	return self, nil
 }
 
 // One SSH invocation owns one authenticated operation. Response files are sent
 // only after a signed bounded manifest, never as an archive or arbitrary path.
 func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer) error {
+	if self.recoveryOnly {
+		return errors.New("recovery role cannot serve or admit execution")
+	}
+	input, err := newControlReadStream(reader)
+	if err != nil {
+		return err
+	}
+	defer input.Close()
+	output, err := newControlWriteStream(writer)
+	if err != nil {
+		return err
+	}
+	defer output.Close()
 	request := Request{}
-	if err := ReadDocument(reader, &request, self.config.Limits.DocumentBytes); err != nil {
+	if err := input.WithDeadline(ctx, self.settings.ControlTimeout, func(input io.Reader) error {
+		return ReadDocument(input, &request, self.config.Limits.DocumentBytes)
+	}); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := VerifyRequest(request, self.coordinatorPublicKey); err != nil {
@@ -158,7 +182,6 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 		return errors.New("subevaluation request has another role identity")
 	}
 	var response Response
-	var err error
 	switch request.Operation {
 	case "check", "availability":
 		if request.RunId != "" || request.FencingToken != 0 || request.Start != nil {
@@ -173,7 +196,7 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 		if request.Start == nil || request.RunId != request.Start.Identity.RunId || request.FencingToken <= 0 {
 			return errors.New("invalid start operation")
 		}
-		response, err = self.start(ctx, request, reader)
+		response, err = self.start(ctx, request, input.reader)
 	case "status", "cancel", "artifacts":
 		if request.Start != nil || !digestPattern.MatchString(request.RunId) || request.FencingToken <= 0 {
 			return errors.New("invalid fixed-run operation")
@@ -195,11 +218,15 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 	if err := SignResponse(&response, self.signingKey); err != nil {
 		return err
 	}
-	if err := WriteDocument(writer, response, self.config.Limits.DocumentBytes); err != nil {
+	if err := output.WithDeadline(ctx, self.settings.ControlTimeout, func(output io.Writer) error {
+		return WriteDocument(output, response, self.config.Limits.DocumentBytes)
+	}); err != nil {
 		return err
 	}
 	if request.Operation == "artifacts" {
-		return WriteFiles(writer, self.workDirectory(request.RunId), response.Files, self.config.Limits.ArtifactBytes, self.config.Limits)
+		return output.WithDeadline(ctx, self.settings.OutputTransferTimeout, func(output io.Writer) error {
+			return WriteFiles(output, self.workDirectory(request.RunId), response.Files, self.config.Limits.ArtifactBytes, self.config.Limits)
+		})
 	}
 	return nil
 }
@@ -389,7 +416,7 @@ func (self *Agent) launch(ctx context.Context, manifest StartManifest) {
 		return
 	}
 	_ = self.runner.Start(controlCtx, Launch{UnitName: unitName(manifest.Identity.RunId), RunId: manifest.Identity.RunId,
-		ConfigPath: self.config.configPath, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent, DeadlineAt: manifest.Identity.DeadlineAt,
+		ConfigPath: self.config.configPath, ConfigSha256: self.config.configSha256, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent, DeadlineAt: manifest.Identity.DeadlineAt,
 		OwnerUnitName: dockerOwnerUnitName(manifest.Identity.RunId), ManagementCpuSet: plan.ManagementCpuSet})
 }
 
@@ -427,6 +454,9 @@ func (self *Agent) status(ctx context.Context, request Request) (Response, error
 	}
 	response := self.response(manifest, state)
 	lock.Close()
+	if state.RecoveryActive {
+		return response, nil
+	}
 	if !state.LaunchAttempted {
 		return response, nil
 	}
@@ -547,6 +577,9 @@ func (self *Agent) cancel(ctx context.Context, request Request) (Response, error
 // The fixed systemd entrypoint reauthenticates persisted input and marks
 // execution exactly once before invoking the trusted unprivileged evaluator.
 func (self *Agent) Execute(ctx context.Context, runId string) error {
+	if self.recoveryOnly {
+		return errors.New("recovery role cannot execute an evaluator")
+	}
 	if !digestPattern.MatchString(runId) {
 		return errors.New("invalid fixed execution identity")
 	}
@@ -584,7 +617,7 @@ func (self *Agent) Execute(ctx context.Context, runId string) error {
 		lock.Close()
 		return err
 	}
-	if state.ExecutionStarted || !state.LaunchAttempted || state.CleanupVerified || state.StopCleanupVerified || terminalState(state.State) {
+	if state.ExecutionStarted || state.RecoveryActive || !state.LaunchAttempted || state.CleanupVerified || state.StopCleanupVerified || terminalState(state.State) {
 		lock.Close()
 		return errors.New("subevaluation execution was already attempted or not authorized")
 	}
@@ -711,7 +744,7 @@ func (self *Agent) requireFreeSlot(ctx context.Context, runId string) error {
 		return err
 	}
 	state, err := self.loadState(slot.RunId)
-	if err != nil || !terminalState(state.State) || !state.CleanupVerified || state.LaunchAttempted && !state.StopCleanupVerified {
+	if err != nil || state.RecoveryActive || !terminalState(state.State) || !state.CleanupVerified || state.LaunchAttempted && !state.StopCleanupVerified {
 		return errors.New("physical executor slot is occupied or cleanup is uncertain")
 	}
 	if state.LaunchAttempted {
@@ -919,6 +952,7 @@ func (self *Agent) runEvaluator(ctx context.Context, manifest *StartManifest, pl
 	command.Env = append(command.Env, subevaluationScopeEnvironment(manifest.Identity)...)
 	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_CLIENT="+self.config.Agent.Path)
 	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET="+plan.ManagementCpuSet)
+	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_CORE_PROFILE="+self.config.DockerRole.CandidateCoreProfile.Path)
 	command.Stdout, command.Stderr = stdoutWriter, stderrWriter
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: self.credential}
 	exitCode, runErr := runProcessGroup(ctx, command, self.settings.CancelGrace)
@@ -944,7 +978,7 @@ func (self *Agent) authenticateInputFiles(manifest StartManifest) error {
 // The terminal inventory bounds work examined, not just files returned. It
 // rejects links, devices, deep trees and excess directories before hashing data.
 func (self *Agent) collectFiles(root string) ([]File, error) {
-	confined, err := os.OpenRoot(root)
+	confined, err := openDirectoryNoFollow(root)
 	if err != nil {
 		return nil, err
 	}
@@ -956,7 +990,10 @@ func (self *Agent) collectFiles(root string) ([]File, error) {
 	for len(pending) != 0 {
 		relative := pending[0]
 		pending = pending[1:]
-		directory, err := confined.OpenFile(relative, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
+		if self.beforeDirectoryOpen != nil {
+			self.beforeDirectoryOpen(relative)
+		}
+		directory, err := openRelativeNoFollow(confined, relative, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -1089,10 +1126,14 @@ func (self *Agent) storeSlot(runId string) error {
 // Copies only non-secret provenance into the authenticated response envelope.
 func (self *Agent) response(manifest *StartManifest, state *runState) Response {
 	identity := manifest.Identity
-	return Response{Schema: Schema, HostId: self.config.HostId, RunId: identity.RunId, Identity: &identity,
+	response := Response{Schema: Schema, HostId: self.config.HostId, RunId: identity.RunId, Identity: &identity,
 		FencingToken: state.FencingToken, State: state.State, ManifestSha256: state.ManifestSha256,
 		RequestSha256: state.RequestSha256, ExitCode: state.ExitCode, ErrorCode: state.ErrorCode,
 		Files: append([]File(nil), state.Files...)}
+	if state.RecoveryActive {
+		response.State, response.ErrorCode = "unknown", "independent_recovery_pending"
+	}
+	return response
 }
 
 // Caller-visible terminal status requires an atomically committed inventory.

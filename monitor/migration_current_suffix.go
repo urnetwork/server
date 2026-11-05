@@ -611,7 +611,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 		migrationCurrentSuffix(843, "independent competition holds and immutable integrity incidents", competitionMigration843ArtifactQuery),
 		migrationCurrentSuffix(844, "competition source authority and atomic outbox custody", competitionMigration844ArtifactQuery),
 		migrationCurrentSuffix(845, "competition source abandonment and committed review custody", competitionMigration845ArtifactQuery),
-		migrationCurrentSuffix(846, "competition prospective round identity and readiness binding", competitionMigration846ArtifactQuery),
+		migrationCurrentSuffix(846, "competition prospective round identity and readiness binding", competitionMigration846ArtifactQuery).removedAt(server.CompetitionIntakeFirstMigrationVersion()),
 		migrationCurrentSuffix(847, "isolated automation staging and current lifecycle guards", competitionMigration847ArtifactQuery),
 		migrationCurrentSuffix(848, "network-leading account feedback time index", competitionMigration848ArtifactQuery),
 		migrationCurrentSuffix(849, "wallet authentication key by user and chain",
@@ -922,9 +922,14 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// Prospective finalization control, after all previously published history.
 	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
 	// The future executor slots and no-op evidence follow that origin prefix.
-	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract},
-	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract},
+	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
+	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract},
+	// Version is resolved from the appended coverage migration, never fixed.
+	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
+	// The successor retains all four retired composites, replacing only
+	// their exact operative guard bodies with scoped legacy-preserving ones.
+	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery())},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

@@ -21,6 +21,9 @@ func ValidateCompetitionTrustedInstrumentApproval(approval *model.CompetitionTru
 		!sha256Pattern.MatchString(approval.ApprovalSha256) || !sha256Pattern.MatchString(approval.PatchSha256) || len(approval.Patch) == 0 || len(approval.ProtectedPaths) == 0 {
 		return errors.New("trusted instrument requires a separately approved exact patch and original instrument provenance")
 	}
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(approval.G2VolumePolicy, approval.WorkCoveragePolicy); err != nil {
+		return err
+	}
 	lock, err := model.CompetitionSourceLockDigestForMode(approval.InstrumentBaseCommits, false)
 	if err != nil || lock != approval.InstrumentBaseSourceLockSha256 {
 		return errors.New("trusted instrument original source graph is incomplete or changed")

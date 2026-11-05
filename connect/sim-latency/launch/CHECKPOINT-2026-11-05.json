@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "kind": "competition-source-preparation-checkpoint",
+  "recorded_at": "2026-11-05T20:54:05Z",
+  "authority_warning": "Source checkpoint only. A push, installed binary, passing subset or draft configuration is not live qualification or activation.",
+  "source_inputs": {
+    "combined_core_and_managed_agent": "6c75156cbd4111a6674b6e12d808a264a7912e4a",
+    "review_adapter": "8e14128081560d4f8768e8358e8fe09fad00b125",
+    "review_adapter_replay_fix": "a51cc24fa8accd2b657fb1c43a4424e9100ef5ab",
+    "sn_contract": "6e44c9892ead8b66d24c873571c46f6e1cc8c3f2"
+  },
+  "preserved_live_boundaries": {
+    "epoch": 1,
+    "competition_source_branches_promoted": false,
+    "evaluator_or_baseline_changed": false,
+    "numeric_rules_rejudged": false,
+    "submission_order_or_original_clocks_reset": false,
+    "new_recovery_grants_issued": false,
+    "worker_restarted": false,
+    "main_database_migrated_by_this_checkpoint": false
+  },
+  "source_only_preparation": [
+    "Epoch-two floors-only G2 plus independent relative page/byte coverage floors of 95% of baseline",
+    "Additional manual source-handoff gate with separate intake and grading authority",
+    "Database-owned full-week opening after workload retention; queued clocks remain unstarted",
+    "Legacy-preserving guard successors and four exact custody transfers",
+    "Managed sub-evaluator, restricted SSH and explicit unsupported-platform refusal",
+    "Authenticated review packet, source-index preview and current Qwen/Gemma qualification adapter"
+  ],
+  "qualification": {
+    "coverage_component": "35 canonical tests plus one focused historical-policy regression passed on source 3cad6b79c; not live runtime qualification",
+    "combined_predecessor": "45 first-pass tests passed on cc90b555a; raw SQL, stale-transaction and published-prefix assertions passed. Catalog-fault test failed because its test query omitted native CTEs; that failure is retained and source 6c75156cb corrects the boundary.",
+    "combined_current": "Seven-package compilation, 47 first-pass tests and five database checks are pending completion on the exact 6c75156cb tuple; do not transfer predecessor acceptance.",
+    "managed_agent": "Fourteen targeted Linux tests and Darwin named-package build/vet/test-compile passed on 5d90d0fbb. Windows agent/CLI checks passed; Windows controller build remains unsupported and failed identically on the pre-merge baseline.",
+    "review_preparation": "Six offline preparation tests passed on 37443f9d8. The new 20-test adapter and replay-fix closure remain pending.",
+    "harness_status": "Three deterministic Go controls passed for early-zero ambiguity, explicit completion, real failures and signal handling. Interrupted observer/waiter evidence remains unaccepted.",
+    "genuine_provider_calls_run": false,
+    "goofe_native_or_cross_host_qualification_complete": false,
+    "full_final_source_suite_complete": false
+  },
+  "deployment": {
+    "latest_confirmed_main_schema": 926,
+    "recovery_release_requires_schema": 930,
+    "prospective_coverage_migration": 931,
+    "prospective_intake_migration": 932,
+    "normal_pipeline_deployment_verification_pending": true,
+    "future_intake_configuration_enabled": false,
+    "no_config_vault_or_remote_host_changes_in_this_checkpoint": true
+  },
+  "test_scope_warning": "Qualification uses immutable recorded source/dependency tuples. Pulling newer operator checkouts does not retrospectively qualify their new dependency closure, alter frozen evaluation commits or authorize source promotion. Keep failed and incomplete receipts."
+}

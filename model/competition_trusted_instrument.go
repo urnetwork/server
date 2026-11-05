@@ -35,6 +35,7 @@ func (self *CompetitionTrustedInstrumentPatch) UnmarshalYAML(unmarshal func(any)
 // census before product selection. ApprovalSha256 hashes this value with that
 // field empty; no selected-product identity participates in operator approval.
 type CompetitionTrustedInstrumentApproval struct {
+	WorkCoveragePolicy             *CompetitionWorkCoveragePolicy    `json:"work_coverage_policy,omitempty" yaml:"work_coverage_policy,omitempty"`
 	Schema                         int                               `json:"schema" yaml:"schema"`
 	ApprovalId                     string                            `json:"approval_id" yaml:"approval_id"`
 	ApprovalSha256                 string                            `json:"approval_sha256,omitempty" yaml:"approval_sha256"`
@@ -67,27 +68,47 @@ type CompetitionTrustedInstrumentProof struct {
 // a reviewed product build without allocating a fictitious review identity.
 // Historical field order and omitted additions preserve legacy encoded bytes.
 type CompetitionReviewedSourceBuildReceipt struct {
-	Schema                   int                       `json:"schema"`
-	Staging                  bool                      `json:"staging,omitempty"`
-	ReviewId                 server.Id                 `json:"review_id"`
-	PatchSha256              string                    `json:"patch_sha256"`
-	SourceLockSha256         string                    `json:"source_lock_sha256"`
-	EvaluatorImageDigest     string                    `json:"evaluator_image_digest"`
-	HostQualificationSha256  string                    `json:"host_qualification_sha256"`
-	ContainmentSha256        string                    `json:"containment_sha256"`
-	TestEvidenceSha256       string                    `json:"test_evidence_sha256"`
-	SandboxId                string                    `json:"sandbox_id"`
-	Offline                  bool                      `json:"offline"`
-	NoMainCredentials        bool                      `json:"no_main_credentials"`
-	ReadOnlySource           bool                      `json:"read_only_source"`
-	Passed                   bool                      `json:"passed"`
-	TestModel                string                    `json:"test_model"`
-	TestReasoning            string                    `json:"test_reasoning"`
-	WinnerReviewPolicy       string                    `json:"winner_review_policy,omitempty"`
-	Operation                string                    `json:"operation,omitempty"`
-	InstrumentApprovalSha256 string                    `json:"instrument_approval_sha256,omitempty"`
-	SimulatorSha256          string                    `json:"simulator_sha256,omitempty"`
-	G2VolumePolicy           CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
+	Schema                   int                            `json:"schema"`
+	Staging                  bool                           `json:"staging,omitempty"`
+	ReviewId                 server.Id                      `json:"review_id"`
+	PatchSha256              string                         `json:"patch_sha256"`
+	SourceLockSha256         string                         `json:"source_lock_sha256"`
+	EvaluatorImageDigest     string                         `json:"evaluator_image_digest"`
+	HostQualificationSha256  string                         `json:"host_qualification_sha256"`
+	ContainmentSha256        string                         `json:"containment_sha256"`
+	TestEvidenceSha256       string                         `json:"test_evidence_sha256"`
+	SandboxId                string                         `json:"sandbox_id"`
+	Offline                  bool                           `json:"offline"`
+	NoMainCredentials        bool                           `json:"no_main_credentials"`
+	ReadOnlySource           bool                           `json:"read_only_source"`
+	Passed                   bool                           `json:"passed"`
+	TestModel                string                         `json:"test_model"`
+	TestReasoning            string                         `json:"test_reasoning"`
+	WinnerReviewPolicy       string                         `json:"winner_review_policy,omitempty"`
+	Operation                string                         `json:"operation,omitempty"`
+	InstrumentApprovalSha256 string                         `json:"instrument_approval_sha256,omitempty"`
+	SimulatorSha256          string                         `json:"simulator_sha256,omitempty"`
+	G2VolumePolicy           CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy       *CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+}
+
+// Independently decoded receipts retain exact value identity despite distinct
+// allocations for the optional prospective policy leaf.
+func (self CompetitionReviewedSourceBuildReceipt) Equal(other CompetitionReviewedSourceBuildReceipt) bool {
+	if (self.WorkCoveragePolicy == nil) != (other.WorkCoveragePolicy == nil) {
+		return false
+	}
+	if self.WorkCoveragePolicy != nil && *self.WorkCoveragePolicy != *other.WorkCoveragePolicy {
+		return false
+	}
+	self.WorkCoveragePolicy, other.WorkCoveragePolicy = nil, nil
+	return self == other
+}
+
+// A returned receipt cannot mutate the operator's configured policy leaf.
+func (self CompetitionReviewedSourceBuildReceipt) Clone() CompetitionReviewedSourceBuildReceipt {
+	self.WorkCoveragePolicy = self.WorkCoveragePolicy.Clone()
+	return self
 }
 
 // Shared deterministic commit metadata must not depend on runtime clocks.

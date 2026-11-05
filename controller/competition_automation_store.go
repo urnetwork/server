@@ -175,7 +175,7 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 				frozenSettings := *settings
 				frozenSettings.BaseSha = policy.BaseSha
 				frozenSettings.EvaluatorImageDigest = policy.EvaluatorImageDigest
-				frozenSettings.EvaluationPolicy = policy.EvaluationPolicy
+				frozenSettings.EvaluationPolicy = policy.EvaluationPolicy.Clone()
 				server.Raise(validateRoundBaselineRecord(&frozenSettings, round, baseline))
 				seal.BaselineSha256 = baseline.Sha256
 				var manifest roundBaselineManifest

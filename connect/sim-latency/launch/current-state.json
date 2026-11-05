@@ -1,5 +1,6 @@
 {
   "schema": 1,
+  "source_preparation_checkpoint": "CHECKPOINT-2026-11-05.json",
   "kind": "sim-latency-launch-preparation-checkpoint",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "requested_launch_deadline_met": false,

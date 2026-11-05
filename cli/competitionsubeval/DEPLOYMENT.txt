@@ -5,8 +5,10 @@ on an isolated executor before adding its public identities to frozen policy.
 Do not copy config/main, vault/main, database credentials, MinIO credentials,
 coordinator signing secrets, API tokens, or SSH private keys to this role.
 
-Build the competitionsubeval command from main product-control source using
-the approved Go toolchain. Install the binary and its evaluator/self-check
+Build the standalone ./cli/competitionsubeval command from the exact reviewed
+product-control commit using the approved Go toolchain. The sim-latency
+coordinator/review command is a different executable and has no durable-agent
+entrypoint. Install the agent binary and its evaluator/self-check
 release under protected root-owned non-writable ancestors. Pin exact SHA-256
 values in a root-only /etc/urnetwork-subeval/agent.json (Config in config.go).
 The private Evaluator pin must name evaluator-subevaluation.sh, not the
@@ -33,6 +35,14 @@ Private daemon layers/cache/temp/logs also occupy that hard-bounded filesystem;
 agent journals, public client sockets and private control sockets do not. See
 private-engine/README.md for the inert quota/namespace provisioning inputs.
 No unmounted-root fallback or user-daemon resource sharing is permitted.
+
+Set the private boundary's explicit management_cpuset and every private unit's
+AllowedCPUs from the unchanged pinned resource helper. Manager metadata alone
+is insufficient: live daemon/keeper/shim membership, configured/effective cgroup
+CPU sets and process affinity are rechecked through held kernel descriptors.
+Do not impose inherited per-thread CPUAffinity on the private daemons: newly
+created workload children must transition into their disjoint evaluation sets.
+Native qualification must prove both the actual workload and management sets.
 
 The base and work parents stay root-owned; use scoped worker traverse ACLs,
 including the trusted operator-owned home ancestor, not broad 0711 permissions
@@ -61,11 +71,19 @@ competition branches. No operator-proxy checkout or operator worktree is mounted
 Use a dedicated SSH eval-control account with a root-owned forced-command policy
 and a key scoped to this coordinator. An sshd Match User fragment should apply:
 
-    ForceCommand /usr/bin/sudo -n /usr/local/libexec/competitionsubeval --config /etc/urnetwork-subeval/agent.json --serve
+    ForceCommand /usr/bin/sudo -n -- /usr/local/libexec/competitionsubeval --config /etc/urnetwork-subeval/agent.json --serve-managed
     DisableForwarding yes
     PermitTTY no
     PasswordAuthentication no
     AuthenticationMethods publickey
+
+Use the rendered management/authorized_keys.in and management/sudoers.in as the
+complete restricted-key and privilege contracts; also disable user-supplied
+environment and rc hooks in the reviewed sshd policy. Keep the authorized key in
+a root-owned path, not the control account's writable home. Do not provision the
+internal --serve command directly: it verifies managed placement and is launched
+only by the fixed --serve-managed wrapper. See management/FORCED-SSH.txt for
+descriptor ownership, nonce admission, unknown-session custody and join proof.
 
 The corresponding sudoers allowance is only the exact fixed command above,
 not a shell, arbitrary competitionsubeval arguments, systemctl or systemd-run.
@@ -73,6 +91,13 @@ The Go agent, running as root, owns stable transient systemd services. It drops
 to urnetwork-eval-worker for the pinned evaluator child and never inherits ambient service
 credentials. No listener, database client, MinIO client or server settings loader
 is present in the agent. SSH must verify strict independently pinned host keys.
+An existing locked account or valid sshd/sudoers syntax is not positive login,
+root-placement or RPC proof. Native qualification must exercise the complete
+restricted path without granting a shell or weakening its account policy.
+
+INSTALLATION.txt separates the inert payload, local-only secrets, approved host
+provisioning, native containment and full-R9 admission. It is not an installer
+and authorizes no host action merely by being checked out.
 
 Persist StateDirectory and WorkDirectory across SSH loss and coordinator restart.
 Do not prune them while any run is active, uncertain, unarchived, or retained.

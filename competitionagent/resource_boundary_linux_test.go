@@ -158,7 +158,7 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 		DockerDataRoot: filepath.Join(candidate, "docker"), ContainerdRoot: filepath.Join(candidate, "containerd"), EngineExecRoot: filepath.Join(candidate, "exec"),
 		WorkRoot: filepath.Join(candidate, "jobs"), ScratchRoot: filepath.Join(candidate, "scratch"),
 		UserNamespace: "synthetic_evaluation", ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536,
-		RuntimeName: "runc", RuntimeArguments: []string{}}
+		RuntimeName: "runc", RuntimeArguments: []string{}, ManagementCpuSet: "2,4"}
 	boundary.ContainerdVersion, boundary.ContainerdSourceCommit = "2.2.1", strings.Repeat("c", 40)
 	executable := func(name string) Pin {
 		return Pin{Path: "/opt/synthetic-private-engine/bin/" + name, Sha256: strings.Repeat("a", 64)}
@@ -708,6 +708,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		"CONFIG_DIRECTORY": filepath.Dir(boundary.EngineConfig.Path), "CONTAINER_LOG_MAXIMUM_SIZE": fixture.settings.ContainerLogMaximumSize,
 		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
 		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
+		"MANAGEMENT_CPUSET": boundary.ManagementCpuSet,
 	}
 	unresolved := regexp.MustCompile(`@[A-Z0-9_]+@`)
 	render := func(name string) []byte {
@@ -742,6 +743,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
 		unit := string(render(name))
 		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
+			"AllowedCPUs=" + boundary.ManagementCpuSet,
 			"PrivateNetwork=yes", "BindsTo=" + runtimeBoundaryKeeperUnitName, "JoinsNamespaceOf=" + runtimeBoundaryKeeperUnitName,
 			"BindPaths=" + boundary.EngineExecRoot + "/containerd-sockets:/run/containerd",
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
@@ -754,9 +756,11 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		}
 	}
 	_ = render("candidate.mount.in")
-	_ = render("urnetwork-private-engine-network.service.in")
+	if !strings.Contains(string(render("urnetwork-private-engine-network.service.in")), "AllowedCPUs="+boundary.ManagementCpuSet) {
+		t.Fatal("network policy helper lost the management processor boundary")
+	}
 	keeper := string(render(runtimeBoundaryKeeperUnitName + ".in"))
-	for _, required := range []string{"PrivateNetwork=yes", "ExecStart=" + boundary.NamespaceKeeper.Path + " infinity", "Restart=no", "KillMode=control-group"} {
+	for _, required := range []string{"PrivateNetwork=yes", "ExecStart=" + boundary.NamespaceKeeper.Path + " infinity", "Restart=no", "KillMode=control-group", "AllowedCPUs=" + boundary.ManagementCpuSet} {
 		if !strings.Contains(keeper, required) {
 			t.Fatal("keeper template lost its stable private namespace lifetime")
 		}
@@ -812,9 +816,11 @@ func runtimeBoundaryTestUnitProperties(boundary RuntimeResourceBoundary, pin Pin
 	name := filepath.Base(pin.Path)
 	properties := map[string]string{"Id": name, "FragmentPath": pin.Path, "DropInPaths": "", "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
 		"MainPID": "101", "InvocationID": strings.Repeat("a", 32), "ExecMainStartTimestampMonotonic": "123",
-		"ControlGroup": "/system.slice/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
+		"ControlGroup": managementPrivateCgroupPath + "/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
+		"Slice": managementPrivateSliceName, "OnFailure": managementRecoveryServiceName, "OnFailureJobMode": "replace",
 		"Restart": "no", "KillMode": "control-group", "RemainAfterExit": "no", "JoinsNamespaceOf": runtimeBoundaryKeeperUnitName,
-		"Requires": runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
+		"AllowedCPUs": strings.ReplaceAll(boundary.ManagementCpuSet, ",", " "),
+		"Requires":    runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
 	if name == runtimeBoundaryKeeperUnitName {
 		properties["JoinsNamespaceOf"] = runtimeBoundaryEngineUnitName + " " + runtimeBoundaryContainerdUnitName + " " + runtimeBoundaryNetworkUnitName
 	}
@@ -893,6 +899,66 @@ func TestRuntimeResourceBoundaryNamespaceReceiptClosesOnFailure(t *testing.T) {
 	var absent *RuntimeResourceBoundary
 	if err := absent.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Correct namespace membership cannot hide ordinary management placement or
+// an absent/expanded PID1 fallback outside that parent's OOM failure domain.
+func TestRuntimeResourceBoundaryPrivateUnitsRequireIndependentRecovery(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	for _, pin := range fixture.boundary.unitPins() {
+		properties := runtimeBoundaryTestUnitProperties(fixture.boundary, pin)
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err != nil {
+			t.Fatal("valid synthetic private unit failed its closed lifetime projection", err)
+		}
+		for _, change := range []struct{ key, value string }{
+			{key: "Slice", value: "system.slice"}, {key: "OnFailure", value: ""},
+			{key: "OnFailure", value: managementRecoveryServiceName + " synthetic-other.service"}, {key: "OnFailureJobMode", value: "ignore-dependencies"},
+		} {
+			mutated := make(map[string]string, len(properties))
+			for key, value := range properties {
+				mutated[key] = value
+			}
+			mutated[change.key] = change.value
+			if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(mutated), pin, fixture.boundary, fixture.settings); err == nil {
+				t.Fatal("private unit lost aggregate placement or fixed independent fallback", change.key)
+			}
+		}
+	}
+}
+
+// A legacy system.slice process is not covered by the new eight-GiB aggregate,
+// even if its independent CPU and network namespace facts happen to match.
+func TestRuntimeResourceBoundaryRejectsLegacyPrivateManagementGroup(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	for _, pin := range []Pin{fixture.boundary.EngineUnit, fixture.boundary.ContainerdUnit, fixture.boundary.NamespaceKeeperUnit} {
+		properties := runtimeBoundaryTestUnitProperties(fixture.boundary, pin)
+		properties["ControlGroup"] = "/system.slice/" + filepath.Base(pin.Path)
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("private manager accepted a legacy unaggregated process")
+		}
+		if runtimeBoundaryManagementGroup(runtimeBoundaryUnit{Name: filepath.Base(pin.Path), ControlGroup: properties["ControlGroup"]}) {
+			t.Fatal("kernel membership accepted legacy placement outside the aggregate")
+		}
+	}
+}
+
+// Inert templates are inspected only. They neither start a daemon nor change a
+// host's network, service, cgroup, core policy or currently running evaluator.
+func TestRuntimeResourceBoundaryPrivateTemplatesArmFixedRecovery(t *testing.T) {
+	for _, name := range []string{runtimeBoundaryEngineUnitName, runtimeBoundaryContainerdUnitName, runtimeBoundaryKeeperUnitName, runtimeBoundaryNetworkUnitName} {
+		content, err := os.ReadFile(filepath.Join("..", "cli", "competitionsubeval", "private-engine", name+".in"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, expected := range []string{"OnFailure=" + managementRecoveryServiceName, "OnFailureJobMode=replace", "Slice=" + managementPrivateSliceName} {
+			if bytes.Count(content, []byte(expected+"\n")) != 1 {
+				t.Fatal("private template omitted or duplicated fixed recovery ownership", name, expected)
+			}
+		}
+		if bytes.Contains(content, []byte("Slice="+managementCleanupSliceName)) {
+			t.Fatal("ordinary daemon entered cleanup's independent failure domain", name)
+		}
 	}
 }
 

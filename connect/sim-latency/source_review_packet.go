@@ -26,11 +26,7 @@ func materializeSourceReviewPacket(packet *controller.CompetitionSourceReviewPac
 	if len(packet.Patch) == 0 || len(packet.Score) == 0 || hex.EncodeToString(patchDigest[:]) != packet.Entry.PatchSha256 || hex.EncodeToString(scoreDigest[:]) != packet.Entry.ScoreSha256 {
 		return "", errors.New("review packet differs from authenticated sealed evidence")
 	}
-	directory, err := filepath.Abs(requestedDirectory)
-	if err != nil || requestedDirectory == "" {
-		return "", errors.New("review packet requires a fresh --out-dir")
-	}
-	if err := os.Mkdir(directory, 0o700); err != nil {
+	if err := validateSourceReviewPacketArchiveIdentity(packet); err != nil {
 		return "", err
 	}
 	metadata := *packet
@@ -50,19 +46,42 @@ func materializeSourceReviewPacket(packet *controller.CompetitionSourceReviewPac
 	if err != nil {
 		return "", err
 	}
-	for name, content := range map[string][]byte{"candidate.json": append(metadataBytes, '\n'), "canonical.patch": packet.Patch, "score.json": packet.Score, "review-template.json": append(templateBytes, '\n')} {
+	handoffBytes, err := json.MarshalIndent(newSourceManualHandoffTemplate(packet), "", "  ")
+	if err != nil {
+		return "", err
+	}
+	fileContents := map[string][]byte{"candidate.json": append(metadataBytes, '\n'), "canonical.patch": packet.Patch, "score.json": packet.Score,
+		"review-template.json": append(templateBytes, '\n'), "manual-handoff-template.json": append(handoffBytes, '\n')}
+	manifestBytes, err := encodeSourceReviewPacketManifest(packet, fileContents)
+	if err != nil {
+		return "", err
+	}
+	directory, err := filepath.Abs(requestedDirectory)
+	if err != nil || requestedDirectory == "" {
+		return "", errors.New("review packet requires a fresh --out-dir")
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		return "", err
+	}
+	for name, content := range fileContents {
 		if err := writePrivateReviewFile(filepath.Join(directory, name), content); err != nil {
 			return "", err
 		}
+	}
+	if err := writePrivateReviewFile(filepath.Join(directory, "packet-manifest.json"), manifestBytes); err != nil {
+		return "", err
 	}
 	file, err := os.Open(directory)
 	if err != nil {
 		return "", err
 	}
 	err = file.Sync()
-	file.Close()
+	closeErr := file.Close()
 	if err != nil {
 		return "", err
+	}
+	if closeErr != nil {
+		return "", closeErr
 	}
 	return directory, nil
 }
@@ -92,11 +111,20 @@ func runSourceReviewPacket(opts docopt.Opts) {
 	if err != nil {
 		fatalf("private review packet: %s", err)
 	}
+	manifestBytes, err := readSourceFile(filepath.Join(directory, "packet-manifest.json"))
+	if err != nil {
+		fatalf("private review packet completion: %s", err)
+	}
+	manifestDigest := sha256.Sum256(manifestBytes)
 	result, _ := json.Marshal(struct {
-		Directory   string    `json:"directory"`
-		RoundId     server.Id `json:"round_id"`
-		JobId       server.Id `json:"job_id"`
-		ScoreSha256 string    `json:"score_sha256"`
-	}{Directory: directory, RoundId: roundId, JobId: jobId, ScoreSha256: packet.Entry.ScoreSha256})
+		Directory            string    `json:"directory"`
+		RoundId              server.Id `json:"round_id"`
+		JobId                server.Id `json:"job_id"`
+		ScoreSha256          string    `json:"score_sha256"`
+		PacketManifestSha256 string    `json:"packet_manifest_sha256"`
+		Status               string    `json:"status"`
+		PromotionAuthorized  bool      `json:"promotion_authorized"`
+	}{Directory: directory, RoundId: roundId, JobId: jobId, ScoreSha256: packet.Entry.ScoreSha256,
+		PacketManifestSha256: hex.EncodeToString(manifestDigest[:]), Status: "PREPARED"})
 	fmt.Printf("%s\n", result)
 }

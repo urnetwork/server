@@ -1,0 +1,171 @@
+Managed subevaluation installation packet: preparation, not activation
+
+This is a staged operator plan for the reviewed Linux-only role. No command is
+executed by this document, no accepted native receipt is supplied, and no epoch
+is opened or candidate dispatched. Keep the source commit, companion contract,
+qualification receipts and every installed byte in one immutable release record.
+Do not substitute a newer working tree or relabel an old binary's source.
+
+1. Seal and independently qualify the payload
+
+Build the distinct ./cli/competitionsubeval target on the isolated build host
+using an explicitly pinned Go 1.27.3 executable and offline module inputs. Use
+CGO_ENABLED=0, GOOS=linux and GOARCH=amd64. Record all other actual build flags,
+source archive/tree/commit, module closure, compiler digest, output digest and
+the independent qualification manifest. A -buildvcs=false build must say so;
+its source proof is the retained closure, not an invented embedded revision.
+The separate sim-latency executable cannot serve this agent role.
+
+Inspect the resulting binary without executing a candidate:
+
+    sha256sum -- <sealed-agent>
+    readelf -h -- <sealed-agent>
+    readelf -l -- <sealed-agent>
+
+Require the independently expected SHA-256, Linux amd64 ELF and the declared
+static build. The checks identify bytes/platform only, not native readiness.
+The standalone agent loads no production server settings, database or MinIO.
+Its host PATH never selects the build compiler; the trusted build image must
+separately contain and prove the pinned Go toolchain used for candidate work.
+
+Include the thirteen assets enumerated by runtimeNativeAssetNames, the complete
+builder-identity dependency closure, stock and derived seccomp profiles, and the
+exact private-engine and management templates. Pin the actual Docker CLI,
+Compose, Buildx, dockerd, managed containerd, shim, stock runc, JSON formatter,
+systemd-run, systemctl, namespace/network tools and every referenced executable.
+Do not replace stock runc with another sandbox or equate a host's default image
+store/user namespace with the prospective private engine.
+
+Render only the reviewed tokens in management/ and private-engine/ from the
+protected owner settings. Reject missing, duplicate, unknown or remaining tokens.
+Use systemd-escape --path --suffix=mount for the exact candidate mount target;
+candidate.mount.in is not an installable unit name. Keep final rendered bytes
+and SHA-256s, not merely template hashes. An installation review may use:
+
+    systemd-analyze verify -- <exact-rendered-unit-paths>
+    visudo --check --file <exact-rendered-sudoers-path>
+    sshd -t -f <complete-reviewed-sshd-configuration>
+
+Syntax checks are not service activation, account/RPC proof or a permission to
+merge a fragment into the host. Missing target-host directives remain a blocker.
+Do not enable, start or restart any service while preparing this packet.
+
+2. Define the exact protected layout and authority
+
+Use an immutable root-owned release below /usr/local/libexec/urnetwork and
+root-protected configuration below /etc/urnetwork-subeval. All selected parents
+and leaf pins must satisfy the real Config and native-boundary loaders. Public
+executables may be 0555; protected authority and retained accepted receipts are
+private, non-symlink, single-link leaves with their required modes. Do not
+blanket-chmod repository trees or an operator home to make a failed check pass.
+
+The requested data-backed runtime base stays /home/by/sim-latency. Record its
+actual filesystem device and mount, and recheck it before provisioning. Keep
+state/, clients/ and control/ outside candidate/. Put every candidate-writable
+layer, cache, temp, build output, run directory, container/shim socket backing
+and daemon log inside the separately hard-bounded candidate filesystem. Trusted
+intent/join/cleanup journals must remain writable when that filesystem is full.
+Never fall back to the root filesystem or the user's default engine.
+
+Provisioning must inspect and approve the exact fully allocated backing file,
+loop device and mount targets before formatting or attaching anything. No
+allocation, formatting, remap-range assignment, mount, ACL or daemon command is
+provided as an automatic step here. Preserve unrelated data and services.
+
+Keep urnetwork-eval-worker and urnetwork-eval-control separate locked accounts.
+The worker receives only the minimal reviewed traversal/read rights to the
+immutable evaluator, source, direct synthetic local fixtures and private run
+inputs. The control account receives no Docker/socket group or broad privilege.
+Choose a dedicated non-overlapping container remap range, not the user daemon's
+range. Native mapped-UID read/write and denied host traversal must be proved.
+
+Only the unchanged direct config/local and vault/local fixture trees may be
+staged. Hash them before and after transport and at destination. Their names
+do not authorize copying config/main, vault/main, a parent tree, production
+credentials, coordinator signing secrets, tokens or cloud storage access.
+
+Generate the independent agent output-signing seed locally under protected root
+custody; never copy a coordinator private key to the executor. The agent gets
+only the coordinator public verification key. The coordinator gets the agent
+public key plus separately pinned host key, endpoint and immutable role hashes.
+Missing keys or final source/image/runtime identities are explicit blockers;
+do not manufacture placeholder-valid Config, QualificationSha256 or receipts.
+
+3. Review host changes as a separate finite plan
+
+Pin exact prepared files and read current host state before a separately
+authorized installation. Preserve the user's Docker/containerd, networks,
+database/cache services, SSH access and global core settings. Do not prune a
+daemon or stop unrelated services. No source qualification authorizes these
+host changes or an accepted native receipt.
+
+The ordinary management aggregate is sixteen GiB, split into coordinator eight
+and private-management eight; cleanup is an independent two-GiB sibling outside
+every binding ordinary OOM/task ancestor. Count the core reserve and observed
+ambient headroom once, inside the same twenty-four-GiB ledger. Prove actual
+ancestor ceilings, CPU placement and descendant closure; arithmetic or matching
+unit text does not establish that cleanup survives ordinary pressure.
+
+Install the exact independent recovery unit before any ordinary private unit
+can launch. The real agent must arm and verify it before use. Do not start it
+as a smoke test against unknown retained custody. Its fixed --recover-active
+role cannot serve frames or start an evaluation. Never configure a transport
+failure to invoke recovery of an otherwise healthy durable attempt.
+
+Private engine/containerd/keeper/network units share the stable private network
+namespace and bounded storage. They do not share or reconfigure the default
+daemon. Pin and verify actual overlay2, remapping, runc, containerd/shim version,
+namespace peers, root-only UDS and no-external-link policy. Positive PG/Redis
+cohort traffic and negative host/LAN/main/DNS controls are independent tests.
+
+4. Install the restricted control path only after separate review
+
+Render the exact management/authorized_keys.in and management/sudoers.in using
+the reviewed coordinator public key, locked control user and protected absolute
+agent/config paths. The root-owned authorized-key location must not be writable
+by the control user. The only privilege command is --serve-managed with that
+exact config; never authorize a shell, arbitrary agent arguments, systemctl or
+systemd-run. Keep forwarding, TTY, environment and rc hooks disabled. Require
+strict independently pinned SSH host keys and no agent forwarding at coordinator.
+
+The forced wrapper ignores caller command/environment and places inherited
+stdio in the bounded PID1-owned control service before reading a frame. Direct
+--serve fails outside that verified placement. Local coordinator transport uses
+the same fixed wrapper under its explicit existing trusted-root role; it does
+not gain a generic sudo bridge. Actual account login, root handoff, exact native
+capability/manager readback and descriptor inheritance require positive proof.
+
+A disconnected RPC may withdraw and join only its ephemeral control service.
+Durable evaluator and Docker-owner units retain the original signed identity,
+single physical slot, absolute deadline and fsynced non-replayable launch state.
+Unknown start/stop or journal state holds custody; it is not absent or retryable
+merely because SSH exited. Prove status/reconnect/cancel plus clean physical
+join and no late start after a killed wrapper. Never reset a job clock.
+
+5. Native containment gate, then independent scoring admission
+
+A piped core_pattern is unqualified by default. LimitCORE=0 does not contain
+piped dumps. Do not change core_pattern/core_pipe_limit or install a handler
+under this plan. A separately approved plain-core policy still needs actual
+descendant/core proof. Alternatively the closed tracked-create-core-one/v1
+selection needs its exact retained trials and independent operator acceptance;
+this document, a probe pass or a source test cannot create that authority.
+
+Run only separately authorized owned-host native trials. Include actual core
+and compat-ABI inheritance, tracked build/cgo/probes, hard-exit/late-Docker join,
+CPU/memory/quota exhaustion, kernel/journal crash pressure, independent cleanup
+under management loss, readonly source/fixtures and both network controls. Keep
+immutable bounded evidence and independently review the exact runtime class.
+Any missing or unknown fact refuses native admission.
+
+Only after that native gate, run the unchanged approved full-R9 shared-baseline
+no-op host screen within the selected five-percent acceptance rule. Keep the
+source, numerical rules, workload, shared baseline and per-host proof identities
+separate. Do not reuse a different image/agent/host receipt or call a static
+readiness check statistical equivalence. Source/round approval and real worker
+acknowledgements remain required before any production candidate claim.
+
+Rollback and later retirement target only the exact newly installed files and
+owned units after physical join/census. Retain uncertain run/intent/archive
+custody; never use a broad rm, default-daemon prune, or key/config replacement to
+make readiness appear healthy. Keep epoch-one source, policy and scoring intact.

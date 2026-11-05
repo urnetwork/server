@@ -1,0 +1,35 @@
+# No RUN or external frontend: all candidate code already finished in tracked
+# direct containers. The inherited workspace remains explicitly pristine; every
+# candidate probe/measurement must mount its authenticated fresh source graph.
+ARG EVALUATOR_BASE_IMAGE=urnetwork/sim-latency-evaluator-base:unset
+FROM ${EVALUATOR_BASE_IMAGE}
+ARG BASE_SHA
+ARG CANDIDATE_SHA
+ARG PATCH_SHA256
+ARG POLICY_SHA256
+ARG BUILDER_SHA256
+ARG PATCH_VALIDATOR_SHA256
+ARG CANDIDATE_COMMITS_SHA256
+ARG ORIGINAL_SOURCE_IDENTITY_SHA256
+ARG CANDIDATE_SOURCE_IDENTITY_SHA256
+ARG SUBMISSION_IDENTITY
+USER 0:0
+COPY --chown=0:0 --chmod=0444 canonical.patch policy.json original-source.json candidate-commits.json validated-identity.json tracked-compiler.json /opt/urnetwork/submission/
+COPY --chown=0:0 --chmod=0555 sim-latency /opt/urnetwork/bin/sim-latency
+COPY --chown=0:0 --chmod=0444 image-identity.json /opt/urnetwork/image-identity.json
+LABEL org.opencontainers.image.title="URnetwork sim-latency tracked submission" \
+      org.opencontainers.image.revision="${CANDIDATE_SHA}" \
+      com.urnetwork.competition.image-kind="submission" \
+      com.urnetwork.competition.base-sha="${BASE_SHA}" \
+      com.urnetwork.competition.patch-sha256="${PATCH_SHA256}" \
+      com.urnetwork.competition.policy-sha256="${POLICY_SHA256}" \
+      com.urnetwork.competition.builder-sha256="${BUILDER_SHA256}" \
+      com.urnetwork.competition.patch-validator-sha256="${PATCH_VALIDATOR_SHA256}" \
+      com.urnetwork.competition.candidate-commits-sha256="${CANDIDATE_COMMITS_SHA256}" \
+      com.urnetwork.competition.source-identity-sha256="${ORIGINAL_SOURCE_IDENTITY_SHA256}" \
+      com.urnetwork.competition.candidate-source-identity-sha256="${CANDIDATE_SOURCE_IDENTITY_SHA256}" \
+      com.urnetwork.competition.source-materialization="required-readonly-run-source/v1" \
+      com.urnetwork.competition.builtin-source-kind="pristine-evaluator-base" \
+      com.urnetwork.competition.image-key="${SUBMISSION_IDENTITY}"
+USER 65532:65532
+CMD ["identity"]

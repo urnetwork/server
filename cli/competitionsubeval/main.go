@@ -40,8 +40,31 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if parsed.hostOperationRunId != "" {
 		return competitionagent.RunHostFilesClient(ctx, parsed.hostOperationRunId, parsed.dockerArguments, output)
 	}
+	if parsed.serveManaged {
+		return competitionagent.ServeManagedSsh(ctx, parsed.configPath, input, output, diagnostic)
+	}
 	if parsed.dockerProbe && os.Geteuid() != 0 {
 		return errors.New("Docker host audit requires the fixed root role")
+	}
+	if parsed.recoverActive {
+		if os.Geteuid() != 0 {
+			return errors.New("independent recovery requires the fixed root role")
+		}
+		config, err := competitionagent.LoadRecoveryConfig(parsed.configPath)
+		if err != nil {
+			return err
+		}
+		settings := competitionagent.DefaultAgentSettings()
+		agent, err := competitionagent.NewRecoveryAgent(config, competitionagent.NewSystemdRunner(settings), settings)
+		if err != nil {
+			return err
+		}
+		return agent.RecoverActive(ctx)
+	}
+	if parsed.serve {
+		if err := competitionagent.VerifyManagedControlPlacement(ctx, parsed.configPath); err != nil {
+			return err
+		}
 	}
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {

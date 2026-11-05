@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"syscall"
 	"time"
 
@@ -52,12 +53,13 @@ type roundBaselinePreparationPin struct {
 }
 
 type roundBaselinePreparationConfig struct {
-	G2VolumePolicy     model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
-	Schema             int                             `json:"schema"`
-	Kind               string                          `json:"kind"`
-	Program            roundBaselinePreparationPin     `json:"program"`
-	Dependencies       []roundBaselinePreparationPin   `json:"dependencies"`
-	ZeroSampleRecovery *roundBaselinePreparationPin    `json:"zero_sample_recovery,omitempty"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	Schema             int                                  `json:"schema"`
+	Kind               string                               `json:"kind"`
+	Program            roundBaselinePreparationPin          `json:"program"`
+	Dependencies       []roundBaselinePreparationPin        `json:"dependencies"`
+	ZeroSampleRecovery *roundBaselinePreparationPin         `json:"zero_sample_recovery,omitempty"`
 }
 
 // Runtime-only policy survives source/frozen-settings copies without changing
@@ -91,9 +93,24 @@ func roundBaselinePreparationDependencyDigests() map[string]string {
 	}
 }
 
+// Coverage preparation is a new protected release. Historical producer pins
+// remain unchanged and cannot authenticate these changed source bytes.
+func roundBaselineWorkCoverageDependencyDigests() map[string]string {
+	dependencies := roundBaselinePreparationDependencyDigests()
+	delete(dependencies, "evaluator.sh")
+	dependencies["evaluator-work-coverage.sh"] = "484a9e2eb107b0d5a812db4f0c2a9cd30a30e3615604def4eeea1d000a0b8b4e"
+	return dependencies
+}
+
 // A new producer has its own immutable release. The historical program and
 // dependency fingerprints above continue to authenticate version-one controls.
-func roundBaselinePreparationPolicyDependencies(policy model.CompetitionG2VolumePolicy) (map[string]string, string, error) {
+func roundBaselinePreparationPolicyDependencies(policy model.CompetitionG2VolumePolicy, coveragePolicies ...*model.CompetitionWorkCoveragePolicy) (map[string]string, string, error) {
+	if len(coveragePolicies) == 1 && coveragePolicies[0] != nil {
+		if _, err := model.CompetitionScorerVersionForWorkCoverage(policy, coveragePolicies[0]); err != nil {
+			return nil, "", err
+		}
+		return roundBaselineWorkCoverageDependencyDigests(), "prepare-round-baseline-work-coverage.sh", nil
+	}
 	dependencies := roundBaselinePreparationDependencyDigests()
 	switch policy {
 	case model.CompetitionG2VolumePolicyLegacy:
@@ -168,7 +185,7 @@ func ConfigureCompetitionFutureRoundBaselinePreparation(settings *Settings, path
 	if err := ConfigureCompetitionRoundBaselinePreparation(&copy, path, expected); err != nil {
 		return err
 	}
-	if copy.futureBaselinePreparation == nil || copy.futureBaselinePreparation.Config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy {
+	if copy.futureBaselinePreparation == nil || copy.futureBaselinePreparation.Config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(copy.futureBaselinePreparation.Config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy) {
 		return errors.New("future preparation config does not name the separately staged policy")
 	}
 	settings.futureBaselinePreparation = copy.futureBaselinePreparation
@@ -217,11 +234,11 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := decodeCompetitionPreparationJson(bytes.NewReader(content), 64*1024, &config); err != nil {
 		return err
 	}
-	if config.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy &&
-		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy) {
+	if (config.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || !reflect.DeepEqual(config.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy)) &&
+		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy)) {
 		return errors.New("baseline preparation policy is neither current nor explicitly staged for a future epoch")
 	}
-	expectedDependencies, expectedProgram, err := roundBaselinePreparationPolicyDependencies(config.G2VolumePolicy)
+	expectedDependencies, expectedProgram, err := roundBaselinePreparationPolicyDependencies(config.G2VolumePolicy, config.WorkCoveragePolicy)
 	if err != nil {
 		return err
 	}
@@ -268,7 +285,7 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 	if err := configureRoundBaselineRecovery(settings, profile); err != nil {
 		return err
 	}
-	if config.G2VolumePolicy == settings.EvaluationPolicy.G2VolumePolicy {
+	if config.G2VolumePolicy == settings.EvaluationPolicy.G2VolumePolicy && reflect.DeepEqual(config.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) {
 		settings.roundBaselinePreparation = profile
 	} else {
 		settings.futureBaselinePreparation = profile
@@ -296,7 +313,7 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 		return self.store.Claim(ctx, &selected, self.workerId, self.workerImageDigest)
 	}
 	if self.settings.roundBaselinePreparation == nil {
-		if self.settings.distributedPreparationOnly {
+		if self.settings.distributedPreparationOnly || self.settings.intakeFirstActivation != nil {
 			return nil, errors.New("distributed execution requires the pinned shared-baseline preparation role")
 		}
 		return self.store.Claim(ctx, self.settings, self.workerId, self.workerImageDigest)
@@ -399,7 +416,7 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 	if err := operationCtx.Err(); err != nil {
 		return hold("canceled_before_publication", errors.Join(err, context.Cause(operationCtx)))
 	}
-	if self.settings.distributedPreparationOnly {
+	if self.settings.distributedPreparationOnly || self.settings.intakeFirstActivation != nil {
 		publisher, ok := self.store.(interface {
 			PublishPreparedRoundBaseline(context.Context, *Settings, *roundBaselinePreparation, *preparedRoundBaseline) error
 		})

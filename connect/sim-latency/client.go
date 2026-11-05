@@ -53,6 +53,8 @@ type ClientDriver struct {
 	pool       []ClientIdentity
 	// crawl deadline and official failed-observation score ceiling
 	requestTimeout time.Duration
+	// Nil is the unchanged historical arrival/response path.
+	workCoverage *workCoverageCollector
 
 	out     *bufio.Writer
 	outLock sync.Mutex
@@ -628,6 +630,9 @@ func (self *ClientDriver) StopArrivals() {
 // Run drives Poisson arrivals as crawls routed across the warm pool until the
 // admission boundary is closed or the context is canceled. Call Warmup first.
 func (self *ClientDriver) Run() error {
+	if self.workCoverage != nil {
+		return self.runWorkCoverage()
+	}
 	defer self.Close()
 	if len(self.clients) == 0 {
 		return fmt.Errorf("no warm clients established; nothing to measure")
@@ -911,6 +916,8 @@ func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpCli
 
 	jobs := make(chan job, 4096)
 	var pending sync.WaitGroup
+	var submittedLock sync.Mutex
+	submitted := map[string]bool{}
 
 	submit := func(path string, depth int) {
 		// checking ctx before Add narrows the enqueue-after-cancel window
@@ -918,6 +925,18 @@ func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpCli
 		// slips through is balanced by the post-worker drain below
 		if ctx.Err() != nil {
 			return
+		}
+		if self.workCoverage != nil {
+			if _, _, expected := self.workCoverage.page(crawlIndex, path, depth); !expected {
+				return
+			}
+			submittedLock.Lock()
+			duplicate := submitted[path]
+			submitted[path] = true
+			submittedLock.Unlock()
+			if duplicate {
+				return
+			}
 		}
 		pending.Add(1)
 		select {
@@ -944,7 +963,7 @@ func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpCli
 					if !ok {
 						return
 					}
-					childUrls := self.fetch(ctx, httpClient, clientLabel, j.path, j.depth)
+					childUrls := self.fetch(ctx, httpClient, clientLabel, j.path, j.depth, crawlIndex)
 					for _, childUrl := range childUrls {
 						submit(childUrl, j.depth+1)
 					}
@@ -993,7 +1012,20 @@ func (self *ClientDriver) crawl(ctx context.Context, clientLabel string, httpCli
 
 // fetch performs one request through the tunnel, emits its CSV row, and
 // returns the discovered child suburls.
-func (self *ClientDriver) fetch(ctx context.Context, httpClient *http.Client, clientLabel string, path string, depth int) []string {
+func (self *ClientDriver) fetch(ctx context.Context, httpClient *http.Client, clientLabel string, path string, depth int, rootIndices ...int) []string {
+	var expected workCoveragePage
+	pageIndex, rootIndex := 0, 0
+	if self.workCoverage != nil {
+		if len(rootIndices) != 1 {
+			return nil
+		}
+		rootIndex = rootIndices[0]
+		var ok bool
+		pageIndex, expected, ok = self.workCoverage.page(rootIndex, path, depth)
+		if !ok {
+			return nil
+		}
+	}
 	requestUrl := fmt.Sprintf("http://%s%s", self.siteAddr, path)
 
 	startTime := time.Now()
@@ -1015,7 +1047,13 @@ func (self *ClientDriver) fetch(ctx context.Context, httpClient *http.Client, cl
 		return nil
 	}
 	status := response.StatusCode
-	read, readErr := readSiteResponse(response)
+	var read siteResponse
+	var readErr error
+	if self.workCoverage == nil {
+		read, readErr = readSiteResponse(response)
+	} else {
+		read, readErr = readExpectedSiteResponse(response, expected)
+	}
 	// Preserve received bytes for volume/path-integrity accounting, but never
 	// let a malformed or partial 200 enter the success population. The CSV
 	// format stays stable: status=0 is the existing incomplete-request marker;
@@ -1024,9 +1062,13 @@ func (self *ClientDriver) fetch(ctx context.Context, httpClient *http.Client, cl
 		status = 0
 	}
 	totalTime := time.Since(startTime)
-	self.writeCsvRow(startTime, clientLabel, path, depth, status, read.receivedBytes, ttfb, totalTime)
+	completed := startTime.Add(totalTime)
+	rowIndex := self.writeCsvRow(startTime, clientLabel, path, depth, status, read.receivedBytes, ttfb, totalTime)
 	if readErr != nil || !read.complete {
 		return nil
+	}
+	if self.workCoverage != nil {
+		self.workCoverage.record(rootIndex, pageIndex, rowIndex, startTime, completed)
 	}
 	return read.page.Urls
 }
@@ -1039,7 +1081,7 @@ func (self *ClientDriver) writeCsvHeader() {
 
 // Emits the historical CSV bytes and retains exactly their timing precision.
 // The sidecar and scorer must summarize the same persisted observations.
-func (self *ClientDriver) writeCsvRow(startTime time.Time, client string, path string, depth int, status int, bytes int64, ttfb time.Duration, total time.Duration) {
+func (self *ClientDriver) writeCsvRow(startTime time.Time, client string, path string, depth int, status int, bytes int64, ttfb time.Duration, total time.Duration) int {
 	bytesPerSecond := float64(0)
 	if 0 < total {
 		bytesPerSecond = float64(bytes) / total.Seconds()
@@ -1070,11 +1112,15 @@ func (self *ClientDriver) writeCsvRow(startTime time.Time, client string, path s
 	self.writeCsvLineLocked(line)
 	self.rows = append(self.rows, resultRow{
 		tStartMs: startTime.UnixMilli(),
+		path:     path,
+		depth:    depth,
+		client:   client,
 		status:   status,
 		bytes:    bytes,
 		ttfbMs:   ttfbMillis,
 		totalMs:  totalMillis,
 	})
+	return len(self.rows) - 1
 }
 
 func (self *ClientDriver) writeCsvLineLocked(line string) {

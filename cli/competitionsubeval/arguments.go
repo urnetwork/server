@@ -11,6 +11,7 @@ import (
 type arguments struct {
 	configPath         string
 	serve              bool
+	serveManaged       bool
 	executeRunId       string
 	cleanupRunId       string
 	dockerClientRunId  string
@@ -19,6 +20,7 @@ type arguments struct {
 	freezeRunId        string
 	hostOperationRunId string
 	dockerProbe        bool
+	recoverActive      bool
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -28,6 +30,7 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.SetOutput(diagnostic)
 	flags.StringVar(&parsed.configPath, "config", "", "Protected root-owned subevaluation-role configuration")
 	flags.BoolVar(&parsed.serve, "serve", false, "Serve one signed framed operation on stdin/stdout")
+	flags.BoolVar(&parsed.serveManaged, "serve-managed", false, "Root forced SSH wrapper; place fixed control service before framing")
 	flags.StringVar(&parsed.executeRunId, "execute", "", "Systemd-only fixed persisted execution identity")
 	flags.StringVar(&parsed.cleanupRunId, "cleanup", "", "Systemd-only fixed persisted stop-cleanup identity")
 	flags.StringVar(&parsed.dockerClientRunId, "docker-client", "", "Non-root fixed-run Docker client; public sibling metadata only")
@@ -35,11 +38,12 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.freezeRunId, "freeze", "", "Systemd-only fixed emergency freeze/kill, with no mutual unit join")
 	flags.StringVar(&parsed.hostOperationRunId, "host-operation", "", "Non-root finite fixed-run file handoff; public sibling metadata only")
 	flags.BoolVar(&parsed.dockerProbe, "docker-probe", false, "Root-only closed read-only private-engine host-audit query")
+	flags.BoolVar(&parsed.recoverActive, "recover-active", false, "PID1-only independent recovery of the existing physical slot")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe} {
+	for _, enabled := range []bool{parsed.serve, parsed.serveManaged, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive} {
 		if enabled {
 			roles++
 		}

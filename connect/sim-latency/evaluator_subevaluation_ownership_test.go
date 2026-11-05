@@ -86,7 +86,8 @@ subevaluation_require_identity "$URNETWORK_SUBEVALUATION_JOB_ID" "$URNETWORK_SUB
 	want := []string{"true", group,
 		"--label", "com.urnetwork.competition.job-id=11111111-2222-4333-8444-555555555555",
 		"--label", "com.urnetwork.competition.round-id=66666666-7777-4888-8999-000000000000",
-		"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--cgroup-parent", group, "--ulimit", "core=0:0",
+		"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--cgroup-parent", group, "--ulimit", "core=1:1",
+		"--security-opt", "seccomp=" + filepath.Join(filepath.Dir(overlay), "candidate-core.seccomp.json"),
 		"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--file", overlay,
 		"--filter", "label=com.urnetwork.competition.round-id=66666666-7777-4888-8999-000000000000",
 		"--filter", "label=com.urnetwork.competition.run-id=" + strings.Repeat("a", 64)}
@@ -127,6 +128,14 @@ func TestSubevaluationOwnershipRejectsPartialAndMalformedScope(t *testing.T) {
 		environment[change.index] = name + "=" + change.value
 		if output, err := subevaluationOwnershipCommand(t, "printf 'unexpected resource admission\\n'\n", environment).CombinedOutput(); err == nil || strings.Contains(string(output), "unexpected resource admission") {
 			t.Errorf("malformed field %d value %q reached admission: %v: %s", change.index, change.value, err, output)
+		}
+	}
+	// An omitted environment value derives the exact protected release path;
+	// an explicitly empty, redirected or ambiguous value may not override it.
+	for _, profile := range []string{"", "/other-release/candidate-core.seccomp.json", "candidate-core.seccomp.json", "/other-release/profile\n--privileged"} {
+		environment := append(append([]string(nil), complete...), "URNETWORK_SUBEVALUATION_CORE_PROFILE="+profile)
+		if output, err := subevaluationOwnershipCommand(t, "printf 'unexpected resource admission\\n'\n", environment).CombinedOutput(); err == nil || strings.Contains(string(output), "unexpected resource admission") {
+			t.Fatalf("substituted core profile reached resource admission: %q: %v: %s", profile, err, output)
 		}
 	}
 }
@@ -216,11 +225,15 @@ func TestSubevaluationSourceExportOwnsContainerBeforeCreate(t *testing.T) {
 			}
 		} else {
 			token := sha256.Sum256([]byte("11111111-2222-4333-8444-555555555555:2"))
+			profile, err := filepath.Abs(filepath.Join("evaluator", "container", "candidate-core.seccomp.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
 			want := []string{"--docker-client", strings.Repeat("a", 64), "--", "create", "--network", "none", "--read-only", "--cap-drop", "ALL",
 				"--security-opt", "no-new-privileges:true", "--memory", "4g", "--memory-swap", "4g", "--pids-limit", "1024", "--cpuset-cpus", "20,22",
 				"--label", "com.urnetwork.competition.job-id=11111111-2222-4333-8444-555555555555", "--label", "com.urnetwork.competition.round-id=66666666-7777-4888-8999-000000000000",
 				"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--cgroup-parent", "urnetwork-evaluation-" + hex.EncodeToString(token[:])[:32] + "-preflight.slice",
-				"--ulimit", "core=0:0", "sha256:" + strings.Repeat("b", 64)}
+				"--ulimit", "core=1:1", "--security-opt", "seccomp=" + profile, "sha256:" + strings.Repeat("b", 64)}
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("source container was created without exact bounded prospective ownership: got %q want %q", got, want)
 			}
@@ -237,6 +250,7 @@ func TestSubevaluationEveryTemporaryDockerPathDeclaresOwnership(t *testing.T) {
 	}{
 		{name: "evaluator-subevaluation.sh", count: 6}, {name: "build-submission.sh", count: 1},
 		{name: "prepare-evaluation-source.sh", count: 1}, {name: "docker-id-map.sh", count: 1},
+		{name: "tracked-submission-build.sh", count: 2},
 	} {
 		content, err := os.ReadFile(filepath.Join("evaluator", "container", entry.name))
 		if err != nil {
@@ -257,8 +271,23 @@ func TestSubevaluationEveryTemporaryDockerPathDeclaresOwnership(t *testing.T) {
 				}
 				block += "\n" + lines[index]
 			}
-			if !strings.Contains(block, `"${subevaluation_docker_args[@]}"`) &&
-				(!strings.Contains(block, `"${subevaluation_run_label_args[@]}"`) || !strings.Contains(block, `--cgroup-parent "$compare_cgroup"`)) {
+			owned := strings.Contains(block, `"${subevaluation_docker_args[@]}"`) ||
+				strings.Contains(block, `"${subevaluation_run_label_args[@]}"`) && strings.Contains(block, `--cgroup-parent "$compare_cgroup"`)
+			if entry.name == "tracked-submission-build.sh" && strings.Contains(block, `--cgroup-parent "$build_cgroup_parent"`) {
+				owned = true
+				for _, required := range []string{
+					`--label "com.urnetwork.competition.job-id=$URNETWORK_SUBEVALUATION_JOB_ID"`,
+					`--label "com.urnetwork.competition.round-id=$URNETWORK_SUBEVALUATION_ROUND_ID"`,
+					`--label "com.urnetwork.competition.run-id=$subevaluation_run_id"`,
+					`--label "com.urnetwork.competition.builder-stage=$stage"`,
+					`--security-opt "seccomp=$URNETWORK_SUBEVALUATION_CORE_PROFILE" --ulimit core=1:1`,
+				} {
+					if !strings.Contains(block, required) {
+						owned = false
+					}
+				}
+			}
+			if !owned {
 				t.Errorf("%s temporary Docker command has no declared pre-creation ownership: %s", entry.name, block)
 			}
 		}
@@ -276,7 +305,11 @@ func TestSubevaluationComposeOverlayCoversAllOwnedObjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	var overlay struct {
-		Services map[string]struct{ Labels map[string]string } `yaml:"services"`
+		Services map[string]struct {
+			Labels   map[string]string                   `yaml:"labels"`
+			Ulimits  map[string]struct{ Soft, Hard int } `yaml:"ulimits"`
+			Security []string                            `yaml:"security_opt"`
+		} `yaml:"services"`
 		Networks map[string]struct{ Labels map[string]string } `yaml:"networks"`
 	}
 	if err := yaml.Unmarshal(content, &overlay); err != nil {
@@ -287,8 +320,16 @@ func TestSubevaluationComposeOverlayCoversAllOwnedObjects(t *testing.T) {
 		t.Fatal("prospective overlay does not enumerate every Compose object")
 	}
 	for _, name := range []string{"postgres", "migrate", "redis", "runner", "scorer"} {
-		if labels := overlay.Services[name].Labels; len(labels) != 1 || labels["com.urnetwork.competition.run-id"] != label {
+		service := overlay.Services[name]
+		if labels := service.Labels; len(labels) != 1 || labels["com.urnetwork.competition.run-id"] != label {
 			t.Error("prospective service lacks one exact run ownership label", name)
+		}
+		if limit, ok := service.Ulimits["core"]; !ok || len(service.Ulimits) != 1 || limit.Soft != 1 || limit.Hard != 1 {
+			t.Error("prospective service changed its exact inherited core-one class", name)
+		}
+		expectedSecurity := []string{"no-new-privileges:true", "seccomp=${URNETWORK_SUBEVALUATION_CORE_PROFILE:?set the pinned inherited core profile}"}
+		if !reflect.DeepEqual(service.Security, expectedSecurity) {
+			t.Error("prospective service omitted the exact pinned inherited profile", name, service.Security)
 		}
 	}
 	if labels := overlay.Networks["evaluation"].Labels; len(labels) != 1 || labels["com.urnetwork.competition.run-id"] != label {
@@ -344,7 +385,7 @@ func TestSubevaluationComposeAdapterPreservesLegacyArguments(t *testing.T) {
 func TestSubevaluationBuilderIdentityPinsOwnershipRelease(t *testing.T) {
 	root := t.TempDir()
 	var helper []byte
-	for _, name := range []string{"submission-builder-identity.sh", "build-submission.sh", "Dockerfile.submission", "evaluator.sh", "prepare-evaluation-source.sh", "subevaluation-ownership.sh", "compose.subevaluation.yml", "docker-id-map.sh"} {
+	for _, name := range []string{"submission-builder-identity.sh", "build-submission.sh", "Dockerfile.submission", "Dockerfile.submission.tracked", "tracked-submission-build.sh", "evaluator.sh", "prepare-evaluation-source.sh", "subevaluation-ownership.sh", "compose.yml", "compose.subevaluation.yml", "docker-id-map.sh"} {
 		content, err := os.ReadFile(filepath.Join("evaluator", "container", name))
 		if err != nil {
 			t.Fatal(err)
@@ -353,6 +394,13 @@ func TestSubevaluationBuilderIdentityPinsOwnershipRelease(t *testing.T) {
 			helper = content
 		}
 		if err := os.WriteFile(filepath.Join(root, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This test proves release hashing only. Canonical profile derivation and
+	// CREATE admission have their own bounded parser/native qualification gates.
+	for _, name := range []string{"docker-stock.seccomp.json", "candidate-core.seccomp.json"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("{\"synthetic_hash_input\":true}\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -390,7 +438,7 @@ stat() {
 			return nil, err
 		}
 		values := map[string]string{}
-		for _, name := range []string{"builder_sha256", "subevaluation_ownership_sha256", "subevaluation_compose_sha256", "subevaluation_docker_id_map_sha256"} {
+		for _, name := range []string{"builder_sha256", "subevaluation_ownership_sha256", "subevaluation_compose_sha256", "subevaluation_docker_id_map_sha256", "tracked_dockerfile_sha256", "tracked_builder_sha256", "stock_seccomp_profile_sha256", "candidate_core_profile_sha256", "compose_base_sha256"} {
 			var value string
 			if err := json.Unmarshal(manifest[name], &value); err != nil {
 				return nil, err
@@ -406,6 +454,9 @@ stat() {
 	for _, file := range []struct{ name, field string }{
 		{name: "subevaluation-ownership.sh", field: "subevaluation_ownership_sha256"}, {name: "compose.subevaluation.yml", field: "subevaluation_compose_sha256"},
 		{name: "docker-id-map.sh", field: "subevaluation_docker_id_map_sha256"},
+		{name: "Dockerfile.submission.tracked", field: "tracked_dockerfile_sha256"}, {name: "tracked-submission-build.sh", field: "tracked_builder_sha256"},
+		{name: "docker-stock.seccomp.json", field: "stock_seccomp_profile_sha256"}, {name: "candidate-core.seccomp.json", field: "candidate_core_profile_sha256"},
+		{name: "compose.yml", field: "compose_base_sha256"},
 	} {
 		path := filepath.Join(root, file.name)
 		content, err := os.ReadFile(path)
