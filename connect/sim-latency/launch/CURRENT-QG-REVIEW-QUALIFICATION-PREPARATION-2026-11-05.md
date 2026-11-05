@@ -43,7 +43,7 @@ evidence. A models-list response proves availability metadata only.
 The two additive Go test files are offline preparation tools:
 
 - `winner_review_current_qg_preparation_test.go`: closed fixture/input builder,
-  private exclusive export, inert `TestCurrentQGQualificationPreparationCommand`
+  private exclusive export, inert `TestCurrentQgQualificationPreparationCommand`
   and native per-member outcome checker. It contains no provider transport,
   process execution, source publication or API/database write.
 - `winner_review_current_qg_preparation_guards_test.go`: deterministic census,
@@ -149,7 +149,7 @@ Use one exact immutable Go 1.27.3/offline dependency closure and retain actual
 VCS/workspace/compiler/binary/source manifests. New test sources change the test
 driver identity, not the d49 production broker's actual VCS identity.
 
-Run the `^TestCurrentQGQualificationPreparation` guards with every
+Run the `^TestCurrentQgQualificationPreparation` guards with every
 `SIM_LATENCY_REVIEW_QUALIFICATION_*` and `SIM_LATENCY_CURRENT_QG_PREPARE_*`
 variable unset. Independently qualify the actual input/response/containment
 adapter; three exact-binary consecutive race passes must have a complete

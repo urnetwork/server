@@ -18,9 +18,9 @@ import (
 
 // Exact old census bytes and every classic category remain present. Current
 // eligibility changes the no-op answer, not the policy to obtain an approval.
-func TestCurrentQGQualificationPreparationClosedCensus(t *testing.T) {
-	workload, production := currentQGQualificationReadCensuses(t)
-	sources, err := currentQGQualificationSources(workload, production)
+func TestCurrentQgQualificationPreparationClosedCensus(t *testing.T) {
+	workload, production := currentQgQualificationReadCensuses(t)
+	sources, err := currentQgQualificationSources(workload, production)
 	if err != nil || len(sources) != 19 {
 		t.Fatal("current QG case census is not complete", err)
 	}
@@ -45,19 +45,19 @@ func TestCurrentQGQualificationPreparationClosedCensus(t *testing.T) {
 		strings.Contains(sources[4].After, "append([]byte(nil), packet...)") {
 		t.Fatal("current QG no-op eligibility or prompt-injection positive lost its concrete code effect")
 	}
-	if _, err := currentQGQualificationSources(append(append([]byte{}, workload...), '\n'), production); err == nil {
+	if _, err := currentQgQualificationSources(append(append([]byte{}, workload...), '\n'), production); err == nil {
 		t.Fatal("unprecommitted workload census was accepted")
 	}
-	if _, err := currentQGQualificationSources(workload, bytes.Replace(production, []byte("\"approve\""), []byte("\"uncertain\""), 1)); err == nil {
+	if _, err := currentQgQualificationSources(workload, bytes.Replace(production, []byte("\"approve\""), []byte("\"uncertain\""), 1)); err == nil {
 		t.Fatal("unprecommitted production census was accepted")
 	}
 }
 
 // The same deterministic request/source/instrument bytes are emitted twice.
 // Neither expected labels nor real candidate authority enter provider input.
-func TestCurrentQGQualificationPreparationBindsContextWithoutLabels(t *testing.T) {
-	workload, production := currentQGQualificationReadCensuses(t)
-	sources, err := currentQGQualificationSources(workload, production)
+func TestCurrentQgQualificationPreparationBindsContextWithoutLabels(t *testing.T) {
+	workload, production := currentQgQualificationReadCensuses(t)
+	sources, err := currentQgQualificationSources(workload, production)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,11 +70,11 @@ func TestCurrentQGQualificationPreparationBindsContextWithoutLabels(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	requests, err := currentQGQualificationRequests(seed.Packet, seed.WorkloadReview, sources)
+	requests, err := currentQgQualificationRequests(seed.Packet, seed.WorkloadReview, sources)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := currentQGQualificationRequests(seed.Packet, seed.WorkloadReview, sources)
+	second, err := currentQgQualificationRequests(seed.Packet, seed.WorkloadReview, sources)
 	if err != nil || !reflect.DeepEqual(requests, second) {
 		t.Fatal("prospective QG requests contain unfrozen clock/random evidence", err)
 	}
@@ -86,7 +86,7 @@ func TestCurrentQGQualificationPreparationBindsContextWithoutLabels(t *testing.T
 			request.Operation = "review_elected_winner"
 		}
 		input, err := winnerModelInput(request)
-		if err != nil || currentQGQualificationContainsExpectedLabels(input) || !bytes.Contains(input, []byte("production-benefit/1")) || !bytes.Contains(input, []byte("traffic-preservation/1")) ||
+		if err != nil || currentQgQualificationContainsExpectedLabels(input) || !bytes.Contains(input, []byte("production-benefit/1")) || !bytes.Contains(input, []byte("traffic-preservation/1")) ||
 			request.Packet.BaseSha != seed.Packet.BaseSha || request.Packet.Instrument.ImageDigest != seed.Packet.Instrument.ImageDigest || request.Packet.Seal.RoundId == seed.Packet.Seal.RoundId {
 			t.Fatal("QG input lost authenticated context or exposed expected/real-candidate authority", err)
 		}
@@ -100,16 +100,16 @@ func TestCurrentQGQualificationPreparationBindsContextWithoutLabels(t *testing.T
 		}
 	}
 	seed.WorkloadReview.Addendum += " synthetic substitution"
-	if _, err := currentQGQualificationRequests(seed.Packet, seed.WorkloadReview, sources); err == nil {
+	if _, err := currentQgQualificationRequests(seed.Packet, seed.WorkloadReview, sources); err == nil {
 		t.Fatal("substituted addendum entered prospective QG preparation")
 	}
 }
 
 // The expectation file is independently digested and never mounted or sent to
 // a broker. The export is exclusive; partial evidence cannot be overwritten.
-func TestCurrentQGQualificationPreparationExportIsPrivateAndNonAuthorizing(t *testing.T) {
-	workload, production := currentQGQualificationReadCensuses(t)
-	sources, err := currentQGQualificationSources(workload, production)
+func TestCurrentQgQualificationPreparationExportIsPrivateAndNonAuthorizing(t *testing.T) {
+	workload, production := currentQgQualificationReadCensuses(t)
+	sources, err := currentQgQualificationSources(workload, production)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestCurrentQGQualificationPreparationExportIsPrivateAndNonAuthorizing(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	requests, err := currentQGQualificationRequests(seed.Packet, seed.WorkloadReview, sources)
+	requests, err := currentQgQualificationRequests(seed.Packet, seed.WorkloadReview, sources)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestCurrentQGQualificationPreparationExportIsPrivateAndNonAuthorizing(t *te
 		t.Fatal(err)
 	}
 	directory := filepath.Join(parent, "prepared")
-	if err := currentQGQualificationExport(directory, strings.Repeat("b", 64), requests, sources); err != nil {
+	if err := currentQgQualificationExport(directory, strings.Repeat("b", 64), requests, sources); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(directory)
@@ -145,7 +145,7 @@ func TestCurrentQGQualificationPreparationExportIsPrivateAndNonAuthorizing(t *te
 		}
 		if strings.Contains(entry.Name(), "input.json") || strings.Contains(entry.Name(), "broker-request.json") {
 			input, err := os.ReadFile(filepath.Join(directory, entry.Name()))
-			if err != nil || currentQGQualificationContainsExpectedLabels(input) {
+			if err != nil || currentQgQualificationContainsExpectedLabels(input) {
 				t.Fatal("expected label leaked into broker/provider input", err)
 			}
 		}
@@ -154,16 +154,16 @@ func TestCurrentQGQualificationPreparationExportIsPrivateAndNonAuthorizing(t *te
 	if err != nil || !bytes.Contains(content, []byte("PREPARED_NOT_AUTHORIZED_NOT_QUALIFIED")) || !bytes.Contains(content, []byte("\"provider_calls_made\": 0")) {
 		t.Fatal("preparation export manufactured genuine provider qualification", err)
 	}
-	if err := currentQGQualificationExport(directory, strings.Repeat("b", 64), requests, sources); err == nil {
+	if err := currentQgQualificationExport(directory, strings.Repeat("b", 64), requests, sources); err == nil {
 		t.Fatal("preparation export overwrote existing attempt evidence")
 	}
 }
 
 // Native validation still requires both unmodified originals even when the
 // expected result is uncertainty; a fabricated or missing member is not a pass.
-func TestCurrentQGQualificationPreparationChecksEveryNativeMember(t *testing.T) {
+func TestCurrentQgQualificationPreparationChecksEveryNativeMember(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
-	expected := currentQGQualificationExpectation{Decision: "approve", WorkloadDisposition: "pass", ProductionDisposition: "pass"}
+	expected := currentQgQualificationExpectation{Decision: "approve", WorkloadDisposition: "pass", ProductionDisposition: "pass"}
 	if err := validateCurrentQGQualificationMembers(request, members, expected); err != nil {
 		t.Fatal("complete synthetic native shape failed the offline checker", err)
 	}
@@ -202,7 +202,7 @@ func TestCurrentQGQualificationPreparationChecksEveryNativeMember(t *testing.T) 
 		}
 		members[index].ProviderOutput = string(content)
 	}
-	expected = currentQGQualificationExpectation{Decision: "uncertain", WorkloadDisposition: "uncertain", ProductionDisposition: "uncertain"}
+	expected = currentQgQualificationExpectation{Decision: "uncertain", WorkloadDisposition: "uncertain", ProductionDisposition: "uncertain"}
 	if err := validateCurrentQGQualificationMembers(request, members, expected); err != nil {
 		t.Fatal("two complete synthetic uncertain judgments were lost", err)
 	}
@@ -214,12 +214,12 @@ func TestCurrentQGQualificationPreparationChecksEveryNativeMember(t *testing.T) 
 
 // The authenticated template's expected_decision_sha256 is an identity, not a
 // desired verdict. Reject exact private label keys without that prefix bug.
-func TestCurrentQGQualificationPreparationSeparatesLabelKeysAndIdentity(t *testing.T) {
-	if currentQGQualificationContainsExpectedLabels([]byte(`{"expected_decision_sha256":"synthetic-authenticated-identity"}`)) {
+func TestCurrentQgQualificationPreparationSeparatesLabelKeysAndIdentity(t *testing.T) {
+	if currentQgQualificationContainsExpectedLabels([]byte(`{"expected_decision_sha256":"synthetic-authenticated-identity"}`)) {
 		t.Fatal("authenticated expected decision identity was mistaken for a private label")
 	}
 	for _, content := range []string{`{"expected_decision":"approve"}`, `{"expected_workload_disposition":"pass"}`, `{"expected_production_disposition":"pass"}`} {
-		if !currentQGQualificationContainsExpectedLabels([]byte(content)) {
+		if !currentQgQualificationContainsExpectedLabels([]byte(content)) {
 			t.Fatal("private expected label entered provider input")
 		}
 	}
