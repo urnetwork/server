@@ -80,6 +80,31 @@ func recoveryClockBytes(t *testing.T, fixture *agentTestFixture) []byte {
 	return content
 }
 
+// Only metadata owned by this private fixture is made writable. WriteFile's
+// mode does not change an existing 0400 inode; restore that intended mode too.
+func writeRecoveryTestAuthority(t *testing.T, fixture *agentTestFixture, path string, content []byte) {
+	t.Helper()
+	if !pathWithin(fixture.config.BaseDirectory, path) || path == fixture.config.BaseDirectory {
+		t.Fatal("test metadata write escaped its owned private fixture")
+	}
+	if info, err := os.Lstat(path); err == nil {
+		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			t.Fatal("test metadata write requires an owned regular file")
+		}
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Fatal(err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0400); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRecoveryConstructionDoesNotNeedWorkerSigningKeyOrHealthyEngine(t *testing.T) {
 	fixture := newAgentTestFixture(t)
 	config := *fixture.config
@@ -451,26 +476,20 @@ func recoveryArmTestFixture(t *testing.T) (*agentTestFixture, *SystemdRunner, La
 		t.Fatal(err)
 	}
 	service := renderRecoveryTestService(t, *config, fixture.settings, policy)
-	if err := os.WriteFile(config.RecoveryService.Path, service, 0400); err != nil {
-		t.Fatal(err)
-	}
+	writeRecoveryTestAuthority(t, fixture, config.RecoveryService.Path, service)
 	config.RecoveryService = testAgentPin(t, config.RecoveryService.Path)
 	boundary := RuntimeResourceBoundary{Schema: Schema, Systemctl: Pin{Path: "/usr/bin/systemctl", Sha256: strings.Repeat("a", 64)}}
 	content, err := json.Marshal(boundary)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(config.DockerRole.ResourceBoundary.Path, content, 0400); err != nil {
-		t.Fatal(err)
-	}
+	writeRecoveryTestAuthority(t, fixture, config.DockerRole.ResourceBoundary.Path, content)
 	config.DockerRole.ResourceBoundary = testAgentPin(t, config.DockerRole.ResourceBoundary.Path)
 	configBytes, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(config.configPath, configBytes, 0400); err != nil {
-		t.Fatal(err)
-	}
+	writeRecoveryTestAuthority(t, fixture, config.configPath, configBytes)
 	config.configSha256 = testAgentPin(t, config.configPath).Sha256
 	launch := Launch{UnitName: dockerOwnerUnitName(fixture.manifest.Identity.RunId), RunId: fixture.manifest.Identity.RunId, Role: "docker-owner", ConfigPath: config.configPath, ConfigSha256: config.configSha256, BaseDirectory: config.BaseDirectory, Agent: config.Agent, DeadlineAt: fixture.manifest.Identity.DeadlineAt, ManagementCpuSet: policy.ManagementCpuSet}
 	launched := new(int)
@@ -521,9 +540,7 @@ func TestSystemdStartRejectsUnarmedChangedConfigOrRecoveryGeneration(t *testing.
 		case "config":
 			fixture.config.configSha256 = strings.Repeat("d", 64)
 		case "pin":
-			if err := os.WriteFile(fixture.config.RecoveryService.Path, []byte("changed unit"), 0400); err != nil {
-				t.Fatal(err)
-			}
+			writeRecoveryTestAuthority(t, fixture, fixture.config.RecoveryService.Path, []byte("changed unit"))
 		case "ancestor":
 			runner.recoveryBoundary = func(context.Context, *ManagementResourcePolicy, Pin, AgentSettings, bool, bool) error {
 				return errors.New("shared binding ordinary ancestor")
