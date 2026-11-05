@@ -75,19 +75,28 @@ func (self PostgresStore) NextSourceActivationGeneration(ctx context.Context, se
 
 // The sole non-abandoned intent is the recovery authority for this target epoch.
 func (self PostgresStore) SourceActivationForTarget(ctx context.Context, settings *Settings, targetEpoch int) (result *model.CompetitionSourceActivation, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			result, stateErr = nil, nil
 			var generation int64
 			err := tx.QueryRow(ctx, `SELECT generation FROM competition_source_activation WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 AND abandoned_at IS NULL`,
 				settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, targetEpoch).Scan(&generation)
 			if errors.Is(err, pgx.ErrNoRows) {
-				panic(ErrNotFound)
+				stateErr = ErrNotFound
+				return
 			}
 			server.Raise(err)
 			result, err = sourceActivationInTx(ctx, tx, settings, generation)
+			if errors.Is(err, ErrNotFound) {
+				stateErr = err
+				return
+			}
 			server.Raise(err)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
