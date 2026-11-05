@@ -1,0 +1,11 @@
+# Inert source template; render, review and pin before a separately approved install.
+[Unit]
+Description=Ordinary evaluation management aggregate, excluding independent recovery
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=@PARENT_MEMORY_BYTES@
+MemorySwapMax=@SWAP_BYTES@
+TasksAccounting=yes
+TasksMax=@PARENT_TASKS_MAXIMUM@
+AllowedCPUs=@MANAGEMENT_CPUSET@
