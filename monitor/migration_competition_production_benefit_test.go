@@ -12,11 +12,12 @@ import (
 )
 
 // Neither an early waiver nor a missing successor can hide exact function
-// drift. The replaced predecessor remains required until the dynamic boundary.
+// drift. Each replaced predecessor remains required until its registered boundary.
 func TestMigrationsProductionBenefitSuccessorContractCustody(t *testing.T) {
 	version := server.CompetitionProductionBenefitMigrationVersion()
 	contract := migrationCurrentSuffixTestContract(t, version)
-	if version <= 900 || contract.artifact.rowColumn != version-589 || contract.artifact.removedVersion != 0 || migrationCurrentSuffixTestContract(t, 900).artifact.removedVersion != version {
+	retirement := server.CompetitionIntakeFirstMigrationVersion()
+	if version <= 900 || retirement <= version || contract.artifact.rowColumn != version-589 || contract.artifact.removedVersion != retirement || migrationCurrentSuffixTestContract(t, 900).artifact.removedVersion != version {
 		t.Fatal("production-benefit custody has wrong version or lifetime")
 	}
 	valid, guard, findingsV1, findingsV2 := server.CompetitionProductionBenefitBodiesSql()
@@ -45,6 +46,52 @@ func TestMigrationsProductionBenefitSuccessorContractCustody(t *testing.T) {
 		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
 		if err != nil || (requireAlertClassCount(alerts, "migration-schema-drift") != 0) != fixture.drift {
 			t.Fatalf("head=%d bad=%d drift expected=%t: %v", fixture.head, fixture.bad, fixture.drift, err)
+		}
+	}
+}
+
+// The benefit predecessor remains active immediately before intake. At intake,
+// its retired row cannot page; the successor's inherited custody still can.
+func TestMigrationsProductionBenefitRetirementBoundaryRetainsSuccessorCustody(t *testing.T) {
+	version := server.CompetitionProductionBenefitMigrationVersion()
+	retirement := server.CompetitionIntakeFirstMigrationVersion()
+	predecessor := migrationCurrentSuffixTestContract(t, version)
+	successor := migrationCurrentSuffixTestContract(t, retirement)
+	if retirement <= version || predecessor.artifact.removedVersion != retirement || (successor.artifact.removedVersion != 0 && successor.artifact.removedVersion <= retirement) {
+		t.Fatal("benefit retirement must match an intake successor active at its boundary")
+	}
+	for _, fixture := range []struct {
+		head, bad int
+		drift     bool
+	}{
+		{head: retirement - 1, bad: version, drift: true},
+		{head: retirement, bad: version},
+		{head: retirement, bad: retirement, drift: true},
+	} {
+		row := syntheticMigrationArtifactRow(fixture.head)
+		badContract := migrationCurrentSuffixTestContract(t, fixture.bad)
+		row[badContract.artifact.rowColumn] = "f"
+		source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+			if strings.Contains(query, "FROM migration_catalog") {
+				return syntheticMigrationCatalogRows(fixture.head), nil
+			}
+			return []Row{row}, nil
+		}}
+		alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+		want := 0
+		if fixture.drift {
+			want = 1
+		}
+		if err != nil || requireAlertClassCount(alerts, "migration-schema-drift") != want {
+			t.Fatalf("head=%d fault=%d want=%d migration drift alerts: %v", fixture.head, fixture.bad, want, err)
+		}
+		if fixture.drift {
+			owner := fmt.Sprintf("%s@v%d", badContract.artifact.name, fixture.bad)
+			for _, alert := range alerts {
+				if alert.Class == "migration-schema-drift" && !strings.Contains(alert.Markdown(), owner) {
+					t.Fatalf("head=%d fault=%d lost exact owning custody", fixture.head, fixture.bad)
+				}
+			}
 		}
 	}
 }
