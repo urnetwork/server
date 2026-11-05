@@ -92,6 +92,7 @@ type DockerProxyPlan struct {
 	StockSeccompProfile  Pin                    `json:"stock_seccomp_profile"`
 	CandidateCoreProfile Pin                    `json:"candidate_core_profile"`
 	BaseImageDigest      string                 `json:"base_image_digest"`
+	BackingImages        []string               `json:"backing_images"`
 	CgroupNames          []string               `json:"cgroup_names"`
 	BuildCgroupName      string                 `json:"build_cgroup_name"`
 	CpuSet               string                 `json:"cpu_set"`

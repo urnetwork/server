@@ -66,7 +66,8 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 		Docker: Pin{Path: filepath.Join(root, "docker"), Sha256: strings.Repeat("d", 64)}, Buildx: Pin{Path: filepath.Join(root, "docker-buildx"), Sha256: strings.Repeat("e", 64)},
 		Dockerfile: Pin{Path: dockerfile, Sha256: hex.EncodeToString(digest[:])}, BaseImageDigest: "sha256:" + strings.Repeat("3", 64),
 		StockSeccompProfile: stockProfile, CandidateCoreProfile: coreProfile,
-		CgroupNames: append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", ManagementCpuSet: "0", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
+		BackingImages: []string{"postgres:synthetic@sha256:" + strings.Repeat("a", 64), "redis:synthetic@sha256:" + strings.Repeat("b", 64)},
+		CgroupNames:   append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", ManagementCpuSet: "0", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
 	settings := DefaultDockerProxySettings()
 	proxy, err := newDockerProxy(plan, settings, false)
 	if err != nil {

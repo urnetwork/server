@@ -83,6 +83,7 @@ func NewDockerProxy(plan DockerProxyPlan, settings DockerProxySettings) (*Docker
 func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protected bool) (*DockerProxy, error) {
 	plan.CgroupNames = append([]string(nil), plan.CgroupNames...)
 	plan.ReadOnlyBindPaths = append([]string(nil), plan.ReadOnlyBindPaths...)
+	plan.BackingImages = append([]string(nil), plan.BackingImages...)
 	if plan.HostFiles != nil {
 		copy := *plan.HostFiles
 		plan.HostFiles = &copy

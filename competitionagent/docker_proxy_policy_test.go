@@ -61,6 +61,9 @@ func TestDockerPolicyAcceptsActualBoundedDirectHelperSchema(t *testing.T) {
 		t.Fatalf("bounded direct helper was rejected: %d", response.Code)
 	}
 	for _, group := range fixture.plan.CgroupNames {
+		if group == fixture.plan.BuildCgroupName {
+			continue // Tracked check/compile stages have their own mandatory source/cache/output contract.
+		}
 		response := dockerPolicyTestCreate(t, fixture, func(object map[string]any) { object["HostConfig"].(map[string]any)["CgroupParent"] = group })
 		if response.Code != http.StatusCreated {
 			t.Fatalf("exact precommitted full-R9 cgroup was rejected: %s", group)

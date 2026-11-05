@@ -41,6 +41,9 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 	if _, err := ValidateCandidateCoreProfiles(plan.StockSeccompProfile, plan.CandidateCoreProfile, settings.CoreProfile, protected); err != nil {
 		return err
 	}
+	if err := validateDockerBackingImages(plan.BackingImages); err != nil {
+		return err
+	}
 	if settings.MaximumOperations <= 0 || settings.MaximumConnections <= 0 || settings.MaximumHeaderBytes <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumRequestBytes <= 0 ||
 		settings.MaximumImageLoadBytes <= 0 || settings.MaximumBuildOutputBytes <= 0 || settings.MaximumResponseBytes <= 0 || settings.MaximumSpoolBytes <= 0 || settings.MaximumContextBytes <= 0 || settings.MaximumContextFileBytes <= 0 || settings.MaximumContextEntries <= 0 ||
 		settings.MaximumDocumentDepth <= 0 || settings.MaximumContextDepth <= 0 || settings.DirectoryBatch <= 0 || settings.CopyBufferBytes <= 0 || settings.HeaderTimeout <= 0 || settings.UploadTimeout <= 0 || settings.ClientWriteTimeout <= 0 ||
@@ -564,6 +567,9 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 	}
 	if tmpfsCount > self.settings.MaximumContainerTmpfsMounts || tmpfsBytes > host.Memory {
 		return errors.New("Docker tmpfs count or total exceeds its memory budget")
+	}
+	if err := self.verifyCandidateSourceBinding(ctx, object, host); err != nil {
+		return err
 	}
 	return self.verifyContainerNetworking(ctx, host.NetworkMode, object["NetworkingConfig"])
 }
