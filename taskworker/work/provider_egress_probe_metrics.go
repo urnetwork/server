@@ -633,6 +633,8 @@ func (self *egressProbeMetricsReporter) submitEgressHealthScored(
 		if 0 < res.Total {
 			egressProbeHealthRatio.Observe(float64(res.OkCount) / float64(res.Total))
 		}
+		// a URL turn's own timing of its sampled request, by the same country
+		observeUrlProbePerformance(country, urlProbeEvidenceOf(measured, scored))
 	}
 	err := self.inner.SubmitEgressHealth(ctx, providerClientId, scored)
 	if err == nil && scored != nil && !scored.CycleStartedAt.IsZero() {
@@ -674,6 +676,7 @@ func (self *egressProbeMetricsReporter) SubmitBandwidth(
 	sampleByteCount int64,
 ) error {
 	egressProbeBandwidthBytesPerSecond.WithLabelValues(source).Observe(bytesPerSecond)
+	egressProbeBandwidthCountryBytesPerSecond.WithLabelValues(source, self.country(ctx, providerClientId)).Observe(bytesPerSecond)
 	return self.inner.SubmitBandwidth(ctx, providerClientId, source, bytesPerSecond, sampleByteCount)
 }
 
