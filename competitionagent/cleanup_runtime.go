@@ -31,7 +31,9 @@ func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourc
 	for _, component := range []struct {
 		pin  Pin
 		name string
-	}{{pin: self.config.DockerRole.Dockerfile, name: "Dockerfile.submission"},
+	}{{pin: self.config.DockerRole.Dockerfile, name: "Dockerfile.submission.tracked"},
+		{pin: self.config.DockerRole.CandidateCoreProfile, name: "candidate-core.seccomp.json"},
+		{pin: self.config.DockerRole.StockSeccompProfile, name: "docker-stock.seccomp.json"},
 		{pin: self.config.DockerRole.PostgresInitialization, name: "postgres-init.sh"}, {pin: self.config.DockerRole.ResourcePolicy, name: "resource-boundary.sh"}} {
 		if component.pin.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), component.name) {
 			return nil, errors.New("private Docker role differs from its own protected evaluator release")

@@ -950,6 +950,7 @@ func (self *Agent) runEvaluator(ctx context.Context, manifest *StartManifest, pl
 	command.Env = append(command.Env, subevaluationScopeEnvironment(manifest.Identity)...)
 	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_CLIENT="+self.config.Agent.Path)
 	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET="+plan.ManagementCpuSet)
+	command.Env = append(command.Env, "URNETWORK_SUBEVALUATION_CORE_PROFILE="+self.config.DockerRole.CandidateCoreProfile.Path)
 	command.Stdout, command.Stderr = stdoutWriter, stderrWriter
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Credential: self.credential}
 	exitCode, runErr := runProcessGroup(ctx, command, self.settings.CancelGrace)

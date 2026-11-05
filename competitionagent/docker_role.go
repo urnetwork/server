@@ -22,6 +22,8 @@ type DockerRoleConfig struct {
 	PostgresInitialization Pin    `json:"postgres_initialization"`
 	ResourcePolicy         Pin    `json:"resource_policy"`
 	ResourceBoundary       Pin    `json:"resource_boundary"`
+	StockSeccompProfile    Pin    `json:"stock_seccomp_profile"`
+	CandidateCoreProfile   Pin    `json:"candidate_core_profile"`
 }
 
 // Root-pinned public metadata is compared, not generated from an SSH request.
@@ -45,6 +47,9 @@ func (self DockerRoleConfig) validate(config *Config, protected bool) error {
 		if err := validateFilePin(pin, DefaultAgentSettings().ConfigBytes, protected); err != nil {
 			return err
 		}
+	}
+	if _, err := ValidateCandidateCoreProfiles(self.StockSeccompProfile, self.CandidateCoreProfile, DefaultCandidateCoreProfileSettings(), protected); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(config.DockerSocketPath) || filepath.Clean(config.DockerSocketPath) != config.DockerSocketPath || config.DockerSocketPath == "/" {
 		return errors.New("private Docker endpoint must be canonical and absolute")

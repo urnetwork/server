@@ -169,6 +169,7 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	if err := os.WriteFile(recoveryPath, []byte("# private fixture metadata; no unit is installed\n"), 0400); err != nil {
 		t.Fatal(err)
 	}
+	stockCoreProfile, candidateCoreProfile := testCandidateCoreProfilePins(t, root)
 	fixture := &agentTestFixture{inputDirectory: inputDirectory, coordinatorKey: coordinatorKey, agentPublicKey: agentPublicKey,
 		runner: &agentTestRunner{units: map[string]UnitStatus{}}, now: time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)}
 	fixture.config = &Config{Schema: Schema, HostId: "synthetic-executor", BaseDirectory: root, TrustedOperatorUser: "synthetic-operator", ExpectedDataDeviceId: 1, StateDirectory: stateDirectory, WorkDirectory: workDirectory, WorkerUser: "synthetic-worker",
@@ -176,7 +177,8 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		ManagementPolicy: testAgentPin(t, managementPath), RecoveryService: testAgentPin(t, recoveryPath),
 		Docker: testAgentPin(t, agentPath), DockerSocketPath: filepath.Join(root, "engine", "docker.sock"), SubmissionBuilderIdentity: testAgentPin(t, builderPath),
 		DockerRole: DockerRoleConfig{ScratchDirectory: scratchDirectory, Compose: testAgentPin(t, agentPath), Buildx: testAgentPin(t, agentPath), Dockerfile: testAgentPin(t, agentPath),
-			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, boundaryPath)},
+			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, boundaryPath),
+			StockSeccompProfile: stockCoreProfile, CandidateCoreProfile: candidateCoreProfile},
 		SubmissionBuilderSha256: builderSha256, SubevaluationOwnership: ownershipPin, JsonFormatter: testAgentPin(t, formatterPath),
 		ConfigLocalDirectory: configDirectory, VaultLocalDirectory: vaultDirectory, ConfigLocalSha256: strings.Repeat("1", 64), VaultLocalSha256: strings.Repeat("2", 64),
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64), QualificationSha256: strings.Repeat("5", 64),

@@ -36,6 +36,7 @@ func verifyWorkerRuntimeAccess(ctx context.Context, config *Config, credential *
 		{predicate: "-r", path: config.SubmissionBuilderIdentity.Path},
 		{predicate: "-r", path: config.SubevaluationOwnership.Path},
 		{predicate: "-x", path: config.JsonFormatter.Path},
+		{predicate: "-r", path: config.DockerRole.CandidateCoreProfile.Path},
 	} {
 		if err := probe(ctx, check.predicate, check.path, credential); err != nil {
 			return errors.New("trusted evaluator account cannot traverse its protected runtime and fixture paths")
