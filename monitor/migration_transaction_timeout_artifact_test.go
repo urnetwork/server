@@ -13,7 +13,7 @@ import (
 // exercise both role classes without grants or production-query changes;
 // ordinary fixtures also retain the real lost-default regression.
 func TestMigrationsTransactionTimeoutArtifactFollowsThePoolRole(t *testing.T) {
-	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		evaluate := func(query string) bool {
 			var value bool
