@@ -1,3 +1,5 @@
+//go:build linux
+
 // Stop cleanup owns only identities derived before launch from the signed
 // request and pinned builder release. Candidate-written files never choose a
 // Docker object, cgroup or mount on which the privileged cleanup may operate.

@@ -1,3 +1,5 @@
+//go:build linux
+
 // Deterministic post-stop tests prove state/slot ordering without accessing a
 // host daemon or privileged cgroup. Concrete resource checks have their own
 // fake-backed tests; actual systemd/hard-kill/bomb qualification stays separate.

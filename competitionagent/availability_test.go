@@ -1,3 +1,5 @@
+//go:build linux
+
 // Signed physical-custody tests use private agent files and a fake service
 // manager only; they never contact a daemon, mount or native host cgroup.
 package competitionagent

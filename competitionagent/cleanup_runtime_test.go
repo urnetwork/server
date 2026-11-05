@@ -1,3 +1,5 @@
+//go:build linux
+
 // Default-context admission tests contain only synthetic metadata. They never
 // read an operator's Docker configuration or contact a container daemon.
 package competitionagent

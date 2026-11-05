@@ -1,3 +1,5 @@
+//go:build linux
+
 // Composed finite-role tests retain real journals, build acknowledgments and
 // HTTP admission while replacing only native build/kernel/daemon boundaries.
 package competitionagent

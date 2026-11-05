@@ -1,3 +1,5 @@
+//go:build linux
+
 // The proxy role is a closed subset of the fixed evaluator's local Docker API.
 // Creation requires all run labels and precommitted cgroups; follow-up actions
 // are rewritten to inspected immutable ids before an upstream mutation.

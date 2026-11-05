@@ -1,3 +1,5 @@
+//go:build linux
+
 // Closed Docker admission is exercised through the real worker HTTP handler
 // against fake daemons and private files. No Docker, service or host probe runs.
 package competitionagent
