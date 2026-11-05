@@ -107,11 +107,7 @@ type CompetitionSourceOperatorHandoff struct {
 // Shape validation is followed by a fenced reread of the elected decision,
 // current complete review and exact proposed product graph in the store.
 func ValidateCompetitionSourceOperatorHandoffArgs(value CompetitionSourceOperatorHandoffArgs) error {
-<<<<<<< HEAD
 	if value.TargetEpoch < 2 || value.TargetEpoch > 6 || value.ExpectedRevision < 0 || value.ExpectedRevision == 1<<63-1 ||
-=======
-	if value.TargetEpoch < 2 || value.TargetEpoch > 6 || value.ExpectedRevision < 0 ||
->>>>>>> 9cb51eb62ff634f3a73915d1f849659a879811f8
 		!competitionAutomationSha256.MatchString(value.RewardDecisionSha256) ||
 		!competitionAutomationSha256.MatchString(value.ProductSourceLockSha256) || !competitionAutomationSha256.MatchString(value.EvidenceSha256) ||
 		!competitionAutomationScope.MatchString(value.IdempotencyKey) {
