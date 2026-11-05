@@ -236,7 +236,7 @@ func TestCompetitionIntakeFirstDatabaseOpensFullWeekAfterArchiveAndRetainsClockl
 		go func() {
 			defer close(joined)
 			round, err := fixture.store.CreateIntakeFirstRound(ctx, &openingSettings, fixture.lease, 2)
-			done <- result{round, err}
+			done <- result{round: round, err: err}
 		}()
 		defer func() { cancel(); <-joined }()
 		select {
