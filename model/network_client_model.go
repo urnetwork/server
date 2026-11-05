@@ -224,6 +224,15 @@ type ProxyConfig struct {
 	EnableWg         bool `json:"enable_wg"`
 
 	InitialDeviceState *ExtendedProxyDeviceState `json:"initial_device_state,omitempty"`
+
+	// UniqueExit pins the proxy to one provider whose exit IP no other
+	// unique-exit proxy of the network uses (HOSTED-PROXY-UNIQUE-EXIT.md). Pro
+	// only. The location constrains where the exit is drawn from and may not
+	// name one provider.
+	UniqueExit bool `json:"unique_exit,omitempty"`
+	// UniqueExitReplace is "auto" (the default: a failed exit is replaced by a
+	// new unique one) or "manual" (the exit is held until rotate-exit).
+	UniqueExitReplace string `json:"unique_exit_replace,omitempty"`
 }
 
 type ExtendedProxyDeviceState struct {
@@ -245,13 +254,19 @@ type AuthNetworkClientError struct {
 	// clients (pro.yml concurrent_clients). Unlike ClientLimitExceeded, this is
 	// a plan limit rather than a hard cap: the client should surface an upgrade
 	// prompt. Corresponds to HTTP 402 semantics for the caller.
-	UpgradeRequired bool   `json:"upgrade_required,omitempty"`
-	Message         string `json:"message"`
+	UpgradeRequired bool `json:"upgrade_required,omitempty"`
+	// a unique-exit create found no exit the network could take in the
+	// location. Nothing was created, and neither the proxy cap nor the create
+	// rate was spent.
+	NoUniqueSupply bool   `json:"no_unique_supply,omitempty"`
+	Message        string `json:"message"`
 }
 
 type ProxyConfigResult struct {
 	KeepaliveSeconds int `json:"keepalive_seconds"`
 	ProxyClient
+	// the unique exit of a proxy created with unique_exit
+	Exit *ProxyExit `json:"exit,omitempty"`
 }
 
 type ProxyAuthResult struct {
@@ -491,6 +506,24 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			proxyInitialDeviceState = &proxyDeviceState
 		}
 
+		// A unique-exit proxy (proxy_unique_exit_model.go) is decided before the
+		// create is counted below: Pro only, a location that is not one provider,
+		// and an exit the network can take. A refusal here spends neither the
+		// network's proxy cap nor its create rate.
+		var uniqueExitPlan *uniqueExitCreatePlan
+		if authClient.ProxyConfig != nil && authClient.ProxyConfig.UniqueExit {
+			plan, refusal := planUniqueExitCreate(clientSession, authClient.ProxyConfig, proxyInitialDeviceState)
+			if refusal != nil {
+				authClientResult = &AuthNetworkClientResult{Error: refusal}
+				return
+			}
+			uniqueExitPlan = plan
+		}
+		// the device state the proxy is created with, and the exit it is pinned
+		// to; each try of the transaction below sets them again
+		var proxyCreateDeviceState *ProxyDeviceState
+		var uniqueExitAssignment *proxyExitAssignment
+
 		// Client-creation gate for the plan's concurrent connected-client limit:
 		// Do not provision a new top-level client while the network is already at its
 		// connected limit. Only top-level clients count and a client created with
@@ -684,6 +717,38 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						return
 					}
 				}
+			}
+			// pin a unique-exit proxy before any of its rows exist, so an exit the
+			// planned candidates lost to a concurrent create refuses with nothing
+			// written
+			proxyCreateDeviceState = proxyInitialDeviceState
+			uniqueExitAssignment = nil
+			if uniqueExitPlan != nil {
+				uniqueExitAssignment = insertProxyExitAssignmentInTx(
+					clientSession.Ctx,
+					tx,
+					clientSession.ByJwt.NetworkId,
+					clientId,
+					uniqueExitPlan.candidates,
+					uniqueExitPlan.settings,
+					server.NowUtc(),
+				)
+				if uniqueExitAssignment == nil {
+					authClientResult = &AuthNetworkClientResult{Error: uniqueExitNoSupplyError()}
+					return
+				}
+				insertProxyUniqueExitInTx(
+					clientSession.Ctx,
+					tx,
+					clientId,
+					clientSession.ByJwt.NetworkId,
+					uniqueExitPlan.replaceMode,
+					uniqueExitPlan.specs,
+					server.NowUtc(),
+				)
+				pinnedState := *proxyInitialDeviceState
+				pinnedState.Location = UniqueExitPinnedLocation(uniqueExitAssignment.ProviderClientId, uniqueExitAssignment.CountryCode)
+				proxyCreateDeviceState = &pinnedState
 			}
 			createTime := server.NowUtc()
 
@@ -912,7 +977,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						ClientId: clientId,
 					},
 					LockSubnets:        proxyLockSubnets,
-					InitialDeviceState: proxyInitialDeviceState,
+					InitialDeviceState: proxyCreateDeviceState,
+					UniqueExit:         uniqueExitAssignment != nil,
 				}
 				var err error
 				proxyDeviceConfigJson, err = createProxyDeviceConfigInTx(clientSession.Ctx, tx, proxyDeviceConfig)
@@ -953,6 +1019,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			if proxyClient != nil {
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
 					ProxyClient: *proxyClient,
+				}
+				if uniqueExitAssignment != nil {
+					authClientResult.ProxyConfigResult.Exit = proxyExitFromAssignment(
+						clientSession.Ctx,
+						uniqueExitAssignment,
+						uniqueExitPlan.replaceMode,
+					)
 				}
 			}
 		}, registrationTxOptions...)
@@ -1961,6 +2034,10 @@ type NetworkClientInfo struct {
 	NetworkClient
 
 	Connections []*NetworkClientConnection `json:"connections,omitempty"`
+
+	// the unique exit of a hosted proxy created with unique_exit, in the
+	// proxies list only
+	Exit *ProxyExit `json:"exit,omitempty"`
 }
 
 type NetworkClientConnection struct {
@@ -2010,7 +2087,29 @@ func GetNetworkClients(clientSession *session.ClientSession) (*NetworkClientsRes
 // else about a row (resident, connections, roles, provide mode) reads the same
 // as GetNetworkClients.
 func GetNetworkProxies(clientSession *session.ClientSession) (*NetworkClientsResult, error) {
-	return getNetworkClientList(clientSession, networkClientListProxies)
+	result, err := getNetworkClientList(clientSession, networkClientListProxies)
+	if err != nil || result == nil {
+		return result, err
+	}
+	addProxyExitsToClientList(clientSession.Ctx, result)
+	return result, nil
+}
+
+// addProxyExitsToClientList reports each unique-exit proxy's exit in the list.
+func addProxyExitsToClientList(ctx context.Context, result *NetworkClientsResult) {
+	clientIds := make([]server.Id, 0, len(result.Clients))
+	for _, client := range result.Clients {
+		clientIds = append(clientIds, client.ClientId)
+	}
+	if len(clientIds) == 0 {
+		return
+	}
+	exits := GetProxyExits(ctx, clientIds)
+	for _, client := range result.Clients {
+		if exit, ok := exits[client.ClientId]; ok {
+			client.Exit = exit
+		}
+	}
 }
 
 func getNetworkClientList(clientSession *session.ClientSession, kind networkClientListKind) (*NetworkClientsResult, error) {

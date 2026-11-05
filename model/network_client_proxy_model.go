@@ -199,6 +199,11 @@ type ProxyDeviceConfig struct {
 	HttpRequireAuth bool            `json:"http_require_auth"`
 
 	InitialDeviceState *ProxyDeviceState `json:"initial_device_state"`
+
+	// UniqueExit marks a proxy pinned to one unique exit
+	// (proxy_unique_exit_model.go): its device follows the proxy's exit
+	// assignment and confirms it through its own tunnel.
+	UniqueExit bool `json:"unique_exit,omitempty"`
 }
 
 type ProxyDeviceState struct {
