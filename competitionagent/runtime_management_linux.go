@@ -77,22 +77,44 @@ func readRuntimeBoundaryManagementFacts(unit runtimeBoundaryUnit, procPath, cgro
 	if !runtimeBoundaryManagementGroup(unit) || unit.Pid <= 1 || unit.ProcessStart == 0 || settings.DocumentBytes <= 0 {
 		return facts, errors.New("private management process has no definite service generation")
 	}
-	procRoot, err := os.OpenRoot(procPath)
+	procRoot, err := os.OpenFile(procPath, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return facts, err
 	}
 	defer procRoot.Close()
-	proc, err := procRoot.OpenFile(strconv.Itoa(unit.Pid), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	openDirectory := func(root *os.File, relative string) (*os.File, error) {
+		parent, held := int(root.Fd()), -1
+		for _, part := range strings.Split(relative, "/") {
+			if part == "" || part == "." || part == ".." {
+				if held >= 0 {
+					_ = syscall.Close(held)
+				}
+				return nil, errors.New("management kernel path is not an exact relative identity")
+			}
+			next, err := syscall.Openat(parent, part, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+			if held >= 0 {
+				_ = syscall.Close(held)
+			}
+			if err != nil {
+				return nil, err
+			}
+			parent, held = next, next
+		}
+		return os.NewFile(uintptr(held), "private-management-kernel-directory"), nil
+	}
+	// os.Root intentionally follows confined symlinks, even when its OpenFile
+	// flags include O_NOFOLLOW. This authority walk rejects every component.
+	proc, err := openDirectory(procRoot, strconv.Itoa(unit.Pid))
 	if err != nil {
 		return facts, err
 	}
 	defer proc.Close()
-	cgroupRoot, err := os.OpenRoot(cgroupPath)
+	cgroupRoot, err := os.OpenFile(cgroupPath, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return facts, err
 	}
 	defer cgroupRoot.Close()
-	group, err := cgroupRoot.OpenFile(strings.TrimPrefix(unit.ControlGroup, "/"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	group, err := openDirectory(cgroupRoot, strings.TrimPrefix(unit.ControlGroup, "/"))
 	if err != nil {
 		return facts, err
 	}

@@ -231,7 +231,7 @@ func TestRuntimeResourceBoundaryManagementRejectsSymlinkKernelProperty(t *testin
 	if err := os.Rename(property, property+"-original"); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(property+"-original", property); err != nil {
+	if err := os.Symlink(filepath.Base(property)+"-original", property); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readRuntimeBoundaryManagementFacts(unit, procRoot, cgroupRoot, fixture.settings, false); err == nil {
@@ -239,18 +239,27 @@ func TestRuntimeResourceBoundaryManagementRejectsSymlinkKernelProperty(t *testin
 	}
 }
 
-// Capturing the process directory may not escape through a replaced PID leaf.
-func TestRuntimeResourceBoundaryManagementRejectsSymlinkProcessDirectory(t *testing.T) {
-	fixture := newRuntimeBoundaryTest(t)
-	unit, procRoot, cgroupRoot, procPath, _ := newRuntimeManagementFileTest(t)
-	if err := os.Rename(procPath, procPath+"-original"); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(procPath+"-original", procPath); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readRuntimeBoundaryManagementFacts(unit, procRoot, cgroupRoot, fixture.settings, false); err == nil {
-		t.Fatal("symlink process generation was followed")
+// Even a confined relative symlink must not redirect a PID leaf, cgroup leaf
+// or intermediate service group. Root.OpenFile's confined follow is not enough.
+func TestRuntimeResourceBoundaryManagementRejectsSymlinkAuthorityDirectories(t *testing.T) {
+	for _, role := range []string{"process", "group", "group-parent"} {
+		fixture := newRuntimeBoundaryTest(t)
+		unit, procRoot, cgroupRoot, procPath, groupPath := newRuntimeManagementFileTest(t)
+		path := procPath
+		if role == "group" {
+			path = groupPath
+		} else if role == "group-parent" {
+			path = filepath.Dir(groupPath)
+		}
+		if err := os.Rename(path, path+"-original"); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Base(path)+"-original", path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readRuntimeBoundaryManagementFacts(unit, procRoot, cgroupRoot, fixture.settings, false); err == nil {
+			t.Fatal("relative symlink authority generation was followed", role)
+		}
 	}
 }
 
