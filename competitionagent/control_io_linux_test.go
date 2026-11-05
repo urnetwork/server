@@ -5,6 +5,7 @@ package competitionagent
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"os"
@@ -642,6 +643,36 @@ func TestAgentControlNilMemoryStreamsRefuseBeforeDispatch(t *testing.T) {
 		}
 		if _, err := fixture.agent.loadState(fixture.manifest.Identity.RunId); !errors.Is(err, os.ErrNotExist) {
 			t.Fatal("nil finite stream created durable run state", variant, err)
+		}
+	}
+}
+
+// A typed-nil native transport also satisfies the deadline interfaces. Reject
+// it before invoking methods which may dereference the absent receiver.
+func TestAgentControlNilNativeStreamsRefuseBeforeDispatch(t *testing.T) {
+	for _, variant := range []string{"tls-input", "tls-output", "file-input", "file-output", "pipe-input", "pipe-output"} {
+		fixture := newAgentTestFixture(t)
+		var input io.Reader = bytes.NewReader(controlTestStartInput(t, fixture))
+		var output io.Writer = &bytes.Buffer{}
+		switch variant {
+		case "tls-input":
+			input = (*tls.Conn)(nil)
+		case "tls-output":
+			output = (*tls.Conn)(nil)
+		case "file-input":
+			input = (*os.File)(nil)
+		case "file-output":
+			output = (*os.File)(nil)
+		case "pipe-input":
+			input = (*controlTestPipe)(nil)
+		case "pipe-output":
+			output = (*controlTestPipe)(nil)
+		}
+		if err := fixture.agent.Serve(t.Context(), input, output); err == nil || fixture.runner.launchCount() != 0 {
+			t.Fatal("nil native transport reached durable dispatch", variant, err)
+		}
+		if _, err := fixture.agent.loadState(fixture.manifest.Identity.RunId); !errors.Is(err, os.ErrNotExist) {
+			t.Fatal("nil native transport created durable run state", variant, err)
 		}
 	}
 }

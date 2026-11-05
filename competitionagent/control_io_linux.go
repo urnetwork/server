@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -39,6 +40,9 @@ type controlReadStream struct {
 // Only production pipes, deadline-capable streams and finite memory input are
 // accepted before parsing an unauthenticated frame. Unknown readers fail closed.
 func newControlReadStream(reader io.Reader) (*controlReadStream, error) {
+	if nilControlStream(reader) {
+		return nil, errors.New("control header input must not be a nil stream")
+	}
 	self := &controlReadStream{reader: reader}
 	if file, ok := reader.(*os.File); ok {
 		owned, err := duplicateControlFile(file, false)
@@ -49,19 +53,10 @@ func newControlReadStream(reader io.Reader) (*controlReadStream, error) {
 	} else if stream, ok := reader.(controlDeadlineReader); ok {
 		self.cancelClose, self.setDeadline = stream, stream.SetReadDeadline
 	} else {
-		nilInput := false
-		switch input := reader.(type) {
-		case *bytes.Buffer:
-			nilInput = input == nil
-		case *bytes.Reader:
-			nilInput = input == nil
-		case *strings.Reader:
-			nilInput = input == nil
+		switch reader.(type) {
+		case *bytes.Buffer, *bytes.Reader, *strings.Reader:
 		default:
 			return nil, errors.New("control header input must be finite or support native read deadlines")
-		}
-		if nilInput {
-			return nil, errors.New("control header input must not be a nil finite stream")
 		}
 	}
 	if self.setDeadline != nil {
@@ -102,6 +97,9 @@ type controlWriteStream struct {
 // Validation happens before dispatch, so an unsupported output cannot cause a
 // durable start whose acknowledgement was never writable by this RPC owner.
 func newControlWriteStream(writer io.Writer) (*controlWriteStream, error) {
+	if nilControlStream(writer) {
+		return nil, errors.New("control reply output must not be a nil stream")
+	}
 	self := &controlWriteStream{writer: writer}
 	if file, ok := writer.(*os.File); ok {
 		owned, err := duplicateControlFile(file, true)
@@ -112,10 +110,7 @@ func newControlWriteStream(writer io.Writer) (*controlWriteStream, error) {
 	} else if stream, ok := writer.(controlDeadlineWriter); ok {
 		self.cancelClose, self.setDeadline = stream, stream.SetWriteDeadline
 	} else {
-		memory, finite := writer.(*bytes.Buffer)
-		if finite && memory == nil {
-			return nil, errors.New("control reply output must not be a nil finite stream")
-		}
+		_, finite := writer.(*bytes.Buffer)
 		if !finite && writer != io.Discard {
 			return nil, errors.New("control reply output must be finite or support native write deadlines")
 		}
@@ -127,6 +122,21 @@ func newControlWriteStream(writer io.Writer) (*controlWriteStream, error) {
 		}
 	}
 	return self, nil
+}
+
+// Interface satisfaction does not prove a receiver exists. Reject all nil-able
+// representations before calling any borrowed transport or finite-buffer method.
+func nilControlStream(stream any) bool {
+	if stream == nil {
+		return true
+	}
+	value := reflect.ValueOf(stream)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // This does not close a caller-owned connection after a successful operation.

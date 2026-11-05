@@ -36,6 +36,8 @@ func cancellableControlInput(reader io.Reader) (io.Reader, io.Closer, error) {
 
 // Input and output each own a distinct nonblocking duplicate; closing an RPC
 // lease never closes the launcher-owned original or a detached evaluation.
+// O_NONBLOCK still belongs to the shared open-file description. Serve owns its
+// stdio exclusively; independent concurrent I/O through the original is invalid.
 func duplicateControlFile(file *os.File, writing bool) (*os.File, error) {
 	connection, err := file.SyscallConn()
 	if err != nil {
