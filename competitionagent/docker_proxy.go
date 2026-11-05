@@ -147,7 +147,11 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 			return self.dialDaemon(ctx)
 		}}
 	self.buildRunner = self.runBuildCli
-	self.buildRetirer = newHostBuildRetirement(DefaultBuildRetirementSettings())
+	managerBoundary := Pin{}
+	if plan.HostFiles != nil {
+		managerBoundary = plan.HostFiles.ResourceBoundary
+	}
+	self.buildRetirer = newHostBuildRetirement(managerBoundary, DefaultBuildRetirementSettings())
 	self.syncSpoolDirectory = syncDirectory
 	if plan.HostFiles != nil {
 		self.hostFiles, err = newHostFileBroker(plan, DefaultHostFilesSettings())

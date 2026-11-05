@@ -72,9 +72,9 @@ type hostBuildRetirement struct {
 }
 
 // Construction is inert; actual mutation belongs only to the durable owner.
-func newHostBuildRetirement(settings BuildRetirementSettings) *hostBuildRetirement {
+func newHostBuildRetirement(boundary Pin, settings BuildRetirementSettings) *hostBuildRetirement {
 	return &hostBuildRetirement{settings: settings, kernel: &hostCleanupCgroups{rootPath: "/sys/fs/cgroup",
-		maximumBytes: settings.NativeBytes, requireCgroupFs: true, limitCommandTimeout: settings.CommandTimeout}}
+		maximumBytes: settings.NativeBytes, requireCgroupFs: true, limitCommandTimeout: settings.CommandTimeout, managerBoundary: boundary, managerMaximumBytes: settings.NativeBytes}}
 }
 
 // The same fields produce the exact same cap after coordinator/agent restart.

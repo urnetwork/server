@@ -338,6 +338,8 @@ func newContainmentLimitKernelTest(t *testing.T) (*hostCleanupCgroups, string, s
 		t.Fatal(err)
 	}
 	groups.limitCommandTimeout = DefaultAgentSettings().CleanupCommandTimeout
+	groups.managerMaximumBytes = DefaultAgentSettings().DiagnosticBytes
+	managerProperties := map[string]string{}
 	groups.limitCommand = func(ctx context.Context, arguments []string) error {
 		if ctx.Err() != nil || len(arguments) != 10 || !reflect.DeepEqual(arguments[:4], []string{"set-property", "--runtime", "--", name}) {
 			return errors.New("synthetic manager received an open or unbounded command")
@@ -375,7 +377,21 @@ func newContainmentLimitKernelTest(t *testing.T) (*hostCleanupCgroups, string, s
 				return errors.New("synthetic manager kernel write was not acknowledged")
 			}
 		}
+		managerProperties = properties
 		return nil
+	}
+	groups.limitReadCommand = func(ctx context.Context, arguments []string) ([]byte, error) {
+		wanted, err := containmentManagerReadArguments(name)
+		if err != nil || ctx.Err() != nil || !reflect.DeepEqual(arguments, wanted) {
+			return nil, errors.New("synthetic manager received an unrelated read")
+		}
+		quotaPercent, quotaErr := strconv.ParseInt(strings.TrimSuffix(managerProperties["CPUQuota"], "%"), 10, 64)
+		if quotaErr != nil {
+			return nil, errors.New("synthetic manager has no committed quota")
+		}
+		return []byte(fmt.Sprintf("MemoryMax=%s\nMemorySwapMax=%s\nTasksMax=%s\nCPUQuotaPerSecUSec=%dus\nCPUQuotaPeriodUSec=%s\nAllowedCPUs=%s\n",
+			managerProperties["MemoryMax"], managerProperties["MemorySwapMax"], managerProperties["TasksMax"], quotaPercent*10000,
+			managerProperties["CPUQuotaPeriodSec"], strings.ReplaceAll(managerProperties["AllowedCPUs"], ",", " "))), nil
 	}
 	return groups, name, directory, limit
 }
