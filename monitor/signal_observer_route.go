@@ -48,9 +48,20 @@ func NewObserverRouteSignal() Signal {
 
 // The signal with explicit tunables and route adapter.
 func NewObserverRouteSignalWithSettings(settings *ObserverRouteSettings) Signal {
+	if settings == nil {
+		settings = DefaultObserverRouteSettings()
+	}
+	values := *settings
+	defaults := DefaultObserverRouteSettings()
+	if values.MaxReceiptBytes == 0 {
+		values.MaxReceiptBytes = defaults.MaxReceiptBytes
+	}
+	if values.MaxReceiptTargets == 0 {
+		values.MaxReceiptTargets = defaults.MaxReceiptTargets
+	}
 	return &signalAdapter{
 		number: "1.7", key: "observer-route", name: "Observer overlay route conformance",
-		probe: observerRouteProbe{settings: settings},
+		probe: observerRouteProbe{settings: &values},
 	}
 }
 
@@ -63,6 +74,10 @@ type ObserverRouteSettings struct {
 	Platform string
 	// The largest route lookup output read.
 	MaxRouteOutputBytes int
+	// Private receipt and exact-policy encoding bounds. Zero selects defaults;
+	// negative values refuse publication rather than truncating into health.
+	MaxReceiptBytes   int
+	MaxReceiptTargets int
 }
 
 // Five-minute local lookups; two observations ride out a tunnel reconnect.
@@ -72,6 +87,8 @@ func DefaultObserverRouteSettings() *ObserverRouteSettings {
 		Sustain:             2,
 		Platform:            runtime.GOOS,
 		MaxRouteOutputBytes: 16 * 1024,
+		MaxReceiptBytes:     64 * 1024,
+		MaxReceiptTargets:   256,
 	}
 }
 
@@ -227,11 +244,14 @@ func observerRouteLinux(output string, address netip.Addr) observerRoute {
 
 // Every enabled overlay destination is classified against the contract. An
 // excluded host is neither looked up nor certified.
-func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
+func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) (findings []finding, resultErr error) {
+	receipt := beginObserverRouteReceipt(ctx, env, self.settings)
+	defer func() { receipt.finish(ctx, &findings, resultErr) }()
 	if probeEnded(ctx) {
 		return nil, ctx.Err()
 	}
 	if env.cfg.addressMode != addressModeOverlay {
+		receipt.reason("mode-not-overlay")
 		// The lan address mode dials lan addresses; the overlay contract does
 		// not apply.
 		return nil, nil
@@ -240,11 +260,13 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 	target := "monitor-host/overlay"
 	contract := env.cfg.observerOverlay
 	if len(contract.Interfaces) == 0 && len(contract.Gateways) == 0 {
+		receipt.reason("contract-missing")
 		return []finding{self.contractMissing(target)}, nil
 	}
 	interfaces, gateways := map[string]bool{}, map[netip.Addr]bool{}
 	for _, name := range contract.Interfaces {
 		if !observerRouteInterfacePattern.MatchString(name) {
+			receipt.reason("invalid-contract-interface")
 			return []finding{self.unknown(target, "invalid-contract-interface", nil)}, nil
 		}
 		interfaces[name] = true
@@ -252,6 +274,7 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 	for _, text := range contract.Gateways {
 		gateway, err := netip.ParseAddr(strings.TrimSpace(text))
 		if err != nil {
+			receipt.reason("invalid-contract-gateway")
 			return []finding{self.unknown(target, "invalid-contract-gateway", nil)}, nil
 		}
 		gateways[gateway.Unmap()] = true
@@ -260,7 +283,7 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 	hostStates := map[observerRouteState][]string{}
 	interfaceCounts := map[string]int{}
 	looked := 0
-	for _, configured := range env.cfg.hosts {
+	for slot, configured := range env.cfg.hosts {
 		if isScoped {
 			if err := scoped.guardHost(ctx, configured); err != nil {
 				if probeEnded(ctx) {
@@ -271,6 +294,7 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 		}
 		address, err := netip.ParseAddr(strings.TrimSpace(configured.overlayIp))
 		if err != nil {
+			receipt.target(slot, "unknown")
 			hostStates[observerRouteUnknown] = append(hostStates[observerRouteUnknown], configured.name)
 			continue
 		}
@@ -288,6 +312,7 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 		if route.state == observerRouteDiverted {
 			interfaceCounts[route.interfaceName]++
 		}
+		receipt.target(slot, string(route.state))
 		hostStates[route.state] = append(hostStates[route.state], configured.name)
 	}
 	for _, names := range hostStates {
@@ -296,7 +321,7 @@ func (self observerRouteProbe) check(ctx context.Context, env *probeEnv) ([]find
 	counts := fmt.Sprintf("targets=%d looked_up=%d conforming=%d diverted=%d absent=%d unknown=%d",
 		len(hostStates[observerRouteConforming])+len(hostStates[observerRouteDiverted])+len(hostStates[observerRouteAbsent])+len(hostStates[observerRouteUnknown]),
 		looked, len(hostStates[observerRouteConforming]), len(hostStates[observerRouteDiverted]), len(hostStates[observerRouteAbsent]), len(hostStates[observerRouteUnknown]))
-	findings := []finding{}
+	findings = []finding{}
 	if broken := append(append([]string{}, hostStates[observerRouteDiverted]...), hostStates[observerRouteAbsent]...); len(broken) != 0 {
 		sort.Strings(broken)
 		exits := []string{}

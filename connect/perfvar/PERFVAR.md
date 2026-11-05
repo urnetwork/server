@@ -5,6 +5,25 @@
 Implemented single-host harness. Physical-device and multi-host validation
 remain outside this userspace test tier.
 
+The 2026-11-05 checkpoint includes the complete SDK-owned browsing fixture
+dependencies and separates ordinary same-site workload completion from strict
+midpoint mechanism qualification. Ordinary readiness counts distinct owned
+remote providers independently of the local channel rows. The strict
+six-provider and midpoint alternative-provider predicates remain separate.
+All 100 HTML responses, 400 assets, 500 request observations, 99 overlaps,
+four connections per origin, four live pages, payload extents and existing
+timeouts remain required by their original workload oracles.
+
+Before integration, the platform donor passed 17 Darwin normal and 17 race
+roots; Linux was compile-only. The corrected browsing-purpose donor passed
+30 normal and 30 race controls. These exact private-source results are not a
+full-suite pass for this checkpoint. Fresh performance replay with the
+corrected 100-page fixture, device 32/64 MiB MEMSTEADY qualification and the
+complete six-suite correctness run remain pending. Historical latency
+regressions stay recorded; the later page-ten fixture-contract rejection did
+not establish a network stall. No new Go or runtime validation was performed
+during checkpoint integration.
+
 The harness runs in `server/connect/perfvar` on macOS inside `go test`. It
 drives real application traffic through the Connect TUN boundary, provider
 NAT, and each forced production carrier while applying deterministic userspace

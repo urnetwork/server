@@ -29,6 +29,7 @@ const nativeBrowsingPressureReportByteLimit = 128 * 1024
 
 // Page capacity is a workload setting, not additional production queue space.
 type nativeBrowsingRunSettings struct {
+	midSessionForTest                *privateSdkMidSession
 	maxLivePages                     int
 	pressure                         *nativeBrowsingPressureObservation
 	nextNavigationOverlap            bool
@@ -36,6 +37,8 @@ type nativeBrowsingRunSettings struct {
 	originServerTlsForTest           *tls.Config
 	originClientTlsForTest           *tls.Config
 	innerHttp2ForTest                bool
+	innerHttpTraceForTest            *nativeBrowsingInnerHttpTrace
+	beforeNavigationForTest          func(context.Context) error
 	coldLinkForTest                  bool
 	originDestinationForTest         func(int, net.Listener) string
 	afterOriginsClosedForTest        func()
@@ -48,9 +51,26 @@ type nativeBrowsingRunSettings struct {
 	afterFetchForTest                func(string, nativeBrowsingAssetResult)
 }
 
-// Four origins with four HTTP connections each leave a navigation connection
-// available beside at most three older assets per origin before the next tap.
+// The original plan rotates four origins. Same-site mode uses one of those
+// pools without changing the four-connection or four-live-page limits.
 func (self nativeBrowsingRunSettings) validate() error {
+	if self.midSessionForTest != nil {
+		switch self.midSessionForTest.purpose {
+		case privateSdkMidMechanismPurpose:
+		case privateSdkSameSiteWorkloadPurpose:
+			if !self.midSessionForTest.sameSite {
+				return errors.New("ordinary same-site workload requires its one-origin plan")
+			}
+		default:
+			return errors.New("browsing purpose is not configured")
+		}
+	}
+	if self.midSessionForTest != nil && self.midSessionForTest.sameSite && (self.midSessionForTest.cold || self.midSessionForTest.fault) {
+		return errors.New("same-site browsing requires its matched warm no-fault plan")
+	}
+	if self.midSessionForTest != nil && (self.coldLinkForTest || !self.nextNavigationOverlap || self.maxLivePages != 4 || self.innerHttp2ForTest || self.originServerTlsForTest == nil || self.originClientTlsForTest == nil) {
+		return errors.New("mid-session requires its independent four-page verified-H1 overlap plan")
+	}
 	if (self.originServerTlsForTest == nil) != (self.originClientTlsForTest == nil) {
 		return errors.New("browsing TLS requires both verified client and server configurations")
 	}
@@ -186,11 +206,13 @@ func nativeBrowsingStreamingCancellationValid(result nativeBrowsingAssetResult, 
 // The eight fixed phase slots store first events only. Callbacks may be on
 // transport goroutines; no callback takes a packet-owner lock or reads TCP stats.
 type nativeBrowsingHttpTrace struct {
-	started  time.Time
-	now      func() time.Time
-	phases   [8]atomic.Int64
-	attempts atomic.Int32
-	reused   atomic.Bool
+	connectionOrdinal atomic.Uint64
+	connectionReused  atomic.Bool
+	started           time.Time
+	now               func() time.Time
+	phases            [8]atomic.Int64
+	attempts          atomic.Int32
+	reused            atomic.Bool
 }
 
 // Plus one preserves a legitimate zero elapsed event while zero means unseen.
@@ -223,6 +245,8 @@ func (self *nativeBrowsingHttpTrace) clientTrace(firstByte *atomic.Int64) *httpt
 // Unknown phases are -1. A retried acquisition is marked rather than treating
 // first-event differences as a complete single-attempt causal timeline.
 type nativeBrowsingNavigationTrace struct {
+	ConnectionOrdinal       uint64   `json:"last_got_conn_ordinal,omitempty"`
+	ConnectionReused        bool     `json:"last_got_conn_reused,omitempty"`
 	Phases                  [8]int64 `json:"phase_ns"`
 	Attempts                int32    `json:"attempts"`
 	Reused                  bool     `json:"reused"`
@@ -231,6 +255,8 @@ type nativeBrowsingNavigationTrace struct {
 	WrittenToFirstByteNs    int64    `json:"reply_ns"`
 	UnfinishedPriorPages    int      `json:"prior_pages"`
 	UnfinishedPriorAssets   int      `json:"prior_assets"`
+	LivePriorAssets         int      `json:"prior_live_assets"`
+	CanceledPriorAssets     int      `json:"prior_canceled_pending_assets"`
 	PriorRemainingBodyBytes int64    `json:"prior_bytes"`
 	ActiveRequestsAtStart   int64    `json:"active"`
 	OfferedBodyBytesAtStart int64    `json:"offered_bytes"`
@@ -257,7 +283,7 @@ func nativeBrowsingErrorClass(err error) string {
 func (self *nativeBrowsingHttpTrace) snapshot(result nativeBrowsingAssetResult) nativeBrowsingNavigationTrace {
 	row := nativeBrowsingNavigationTrace{Attempts: self.attempts.Load(), Reused: self.reused.Load(),
 		ElapsedNs: int64(result.complete), ConnectionAcquireNs: -1, WrittenToFirstByteNs: -1,
-		ErrorClass: nativeBrowsingErrorClass(result.err)}
+		ErrorClass: nativeBrowsingErrorClass(result.err), ConnectionOrdinal: self.connectionOrdinal.Load(), ConnectionReused: self.connectionReused.Load()}
 	for index := range row.Phases {
 		row.Phases[index] = self.phases[index].Load() - 1
 	}
@@ -275,6 +301,8 @@ func (self *nativeBrowsingHttpTrace) snapshot(result nativeBrowsingAssetResult) 
 // Snapshots are fixture aggregates at navigation return, not per-flow blame or
 // an observation at the exact five-second crossing. No new packet observer runs.
 type nativeBrowsingPressureBoundary struct {
+	SdkProviderReadyMask      uint8                                   `json:"sdk_provider_ready_mask,omitempty"`
+	SdkProviderAbsentMask     uint8                                   `json:"sdk_provider_absent_mask,omitempty"`
 	AssetOwnership            nativeBrowsingAssetOwnership            `json:"asset_ownership"`
 	Page                      int                                     `json:"page"`
 	AtNs                      int64                                   `json:"at_ns"`
@@ -368,6 +396,8 @@ type nativeBrowsingPressureObservation struct {
 	ServerObservedCancellation     int                                                    `json:"server_observed_cancellation"`
 	AssetDrain                     nativeBrowsingAssetOwnership                           `json:"asset_drain"`
 	MaximumPriorRemainingBodyBytes int64                                                  `json:"maximum_prior_remaining_body_bytes"`
+	MaximumLivePriorAssets         int                                                    `json:"maximum_live_prior_assets_at_navigation"`
+	MaximumCanceledPriorAssets     int                                                    `json:"maximum_canceled_pending_prior_assets_at_navigation"`
 	Scope                          string                                                 `json:"scope"`
 	captureBoundaryForTest         func(*fullTunPath, int, *nativeBrowsingPressureObservation) *nativeBrowsingPressureBoundary
 	slowNavigation                 time.Duration
@@ -398,6 +428,12 @@ func (self *nativeBrowsingPressureObservation) beginNavigation(page, livePages i
 			}
 			unfinished = true
 			row.UnfinishedPriorAssets++
+			if progress.started.Load() {
+				row.LivePriorAssets++
+				if progress.cancelRequested.Load() {
+					row.CanceledPriorAssets++
+				}
+			}
 			row.PriorRemainingBodyBytes += max(0, progress.expectedBytes-progress.receivedBytes.Load())
 		}
 		if unfinished {
@@ -405,6 +441,9 @@ func (self *nativeBrowsingPressureObservation) beginNavigation(page, livePages i
 		}
 	}
 	self.MaximumPriorRemainingBodyBytes = max(self.MaximumPriorRemainingBodyBytes, row.PriorRemainingBodyBytes)
+	// These are maxima of boundary samples, not a continuous occupancy peak.
+	self.MaximumLivePriorAssets = max(self.MaximumLivePriorAssets, row.LivePriorAssets)
+	self.MaximumCanceledPriorAssets = max(self.MaximumCanceledPriorAssets, row.CanceledPriorAssets)
 	row.ActiveRequestsAtStart = self.activeRequests.Load()
 	row.OfferedBodyBytesAtStart = self.offeredBytes.Load()
 	return &nativeBrowsingHttpTrace{now: time.Now}
@@ -416,6 +455,7 @@ func (self *nativeBrowsingPressureObservation) finishNavigation(path *fullTunPat
 	prior, row := self.Navigations[page], trace.snapshot(result)
 	row.UnfinishedPriorPages, row.ActiveRequestsAtStart = prior.UnfinishedPriorPages, prior.ActiveRequestsAtStart
 	row.UnfinishedPriorAssets, row.PriorRemainingBodyBytes = prior.UnfinishedPriorAssets, prior.PriorRemainingBodyBytes
+	row.LivePriorAssets, row.CanceledPriorAssets = prior.LivePriorAssets, prior.CanceledPriorAssets
 	row.OfferedBodyBytesAtStart = prior.OfferedBodyBytesAtStart
 	self.Navigations[page] = row
 	slow := self.slowNavigation <= result.firstByte || result.err != nil && self.slowNavigation <= result.complete

@@ -961,11 +961,14 @@ func finalizeContractPartitionCutoverWithDeadline(ctx context.Context, deadline 
 	statements := contractSwapSql(shapes, staged, floor)
 	if dryRun {
 		logf("would swap in one transaction:\n%s", strings.Join(statements, ";\n"))
+		logf("would preserve extended statistics under the swap locks: rename originals for rollback, then copy their definitions and metadata to the published parents")
 		logf("dry run: nothing changed")
 		return nil
 	}
 	swapStart := time.Now()
-	if err := contractPartitionExecQuietRetry(ctx, statements, 60, 10*time.Second, logf); err != nil {
+	if err := contractPartitionRetryWhen(ctx, DefaultContractPartitionLockSettings(), func() error {
+		return contractPartitionSwap(ctx, statements)
+	}, 60, 10*time.Second, logf); err != nil {
 		return fmt.Errorf("swap: %w", err)
 	}
 	logf("swapped the contract tables in %s; contracts from %s go to weekly partitions", time.Since(swapStart).Round(time.Millisecond), cutoverWeek.Format(time.DateOnly))
@@ -1072,6 +1075,11 @@ func contractPartitionRollbackSqlInConn(ctx context.Context, conn contractCatalo
 				statements = append(statements, fmt.Sprintf("ALTER INDEX public.%s RENAME TO %s", quoteIdentifier(index.name), quoteIdentifier(name)))
 			}
 		}
+		statisticsStatements, statisticsErr := contractStatisticsRollbackSql(readContractStatistics(ctx, conn, legacyName), readContractStatistics(ctx, conn, table))
+		if statisticsErr != nil {
+			return nil, nil, statisticsErr
+		}
+		statements = append(statements, statisticsStatements...)
 		for _, trigger := range parent.triggers {
 			if trigger.truncate && slices.ContainsFunc(legacy.triggers, func(legacyTrigger contractTrigger) bool {
 				return legacyTrigger.name == trigger.name

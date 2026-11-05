@@ -3597,9 +3597,14 @@ ledger crosswalks deterministic:
   Grafana nginx-facing 429 and Taskworker page-budget saturation are separate
   visibility failures until the active proxy rule and producer are confirmed.
 
-- `connection-refused`, `clusterdown`, and `redis-loading` distinguish a TCP
-  refusal, Redis slot-coverage loss, and Redis load/failover state. The text
-  alone does not identify the restart or rollout cause.
+- `connection-refused`, `clusterdown`, and `redis-loading` distinguish log
+  diagnostic categories, not native socket results, Redis slot-coverage loss,
+  or Redis load/failover state. Quoted or relayed text can match without the
+  emitting service owning the original event. Bind the original event,
+  immutable emitter, intended target, source namespace and operation outcome
+  before assigning a service, listener, topology or lifecycle cause. For a
+  generic refusal, reproduce the intended operation from the same source path
+  and network namespace only after that binding; do not assume Redis.
 - `missing-origin-contract` is the metric-only raw log classifier feeding the
   independently bounded §2.17 missing-origin analysis.
 - `circle-transfer-admitted` is non-alerting admission evidence for §2.14;
@@ -5460,6 +5465,44 @@ are incomplete. Addresses, gateways and raw route output never enter alerts;
 inventory host names and plain interface names do. Every tunable (cadence,
 sustain, the route adapter and its output bound) is a field of
 `ObserverRouteSettings`.
+
+When `StateDir` is configured, the same existing invocation also publishes a
+private immutable `observer-route/receipt-<sha256>.json` using the sampler's
+content-addressed, mode-0600 publication convention in a mode-0700 directory.
+Healthy findings remain suppressed from ordinary Alerts. The existing invocation
+witness's `run_return` record adds `observer_route_receipt_sha256` and
+`observer_route_receipt_status`, so a healthy cycle has an exact retained locator
+without interpreting `returned_nil` or a quiet Alert stream as conformance.
+No new lookup, cadence, watcher or remote contact is added.
+
+The receipt contains its own unique cycle, start/end clocks, source/run/invocation
+association, exact effective route-policy digest, hashed inventory slots and
+each slot's conforming/diverted/absent/unknown/excluded/disabled/not-observed
+outcome. The digest covers only the route contract, address mode, probe settings,
+environment and desired inventory/exclusion scope; credentials and other service
+configuration are not hashed. Raw policy, names, addresses, gateways, interfaces
+and command output are not serialized. Association is checked against the exact
+settings passed into that invocation and against the probe's unchanged policy.
+An unbound direct library call retains explicitly incomplete source association.
+These are same-process observation declarations, not physical-writer or VPN
+packet-delivery proofs.
+
+`complete` describes an authoritative complete observation, not healthy routes:
+an observed diverted or absent route can be complete. Missing/invalid contract,
+LAN mode, malformed address, zero eligible scope, exclusions/disabled targets,
+cancellation, policy/source mismatch and omitted targets cannot certify complete
+conformance. Cancellation and early returns still publish their incomplete
+cycle. `MaxReceiptBytes` defaults to 64 KiB and `MaxReceiptTargets` to 256; zero
+selects these defaults, negative values refuse publication. No oversized prefix
+is accepted. A publication failure retains concrete route findings and adds
+visibility; a missing/disabled/unavailable receipt never gives absence credit.
+Receipts are append-only immutable evidence; retention/removal remains explicit
+operator policy, as for sampler receipts. A source-qualified rollout and Low's
+deterministic normal/race gates are required before relying on this new surface.
+Completeness is assessed at the receipt's finished boundary; publication cannot
+retract an immutable observation when cancellation arrives later. Consumers must
+also join its exact invocation's terminal result and must not grant conformance
+or recovery from a canceled/deadline/context-ended return or a receipt alone.
 
 False-positive qualifier: a conforming route does not prove the tunnel
 delivers packets or that a remote host is up. False-negative qualifiers: a
@@ -25408,7 +25451,7 @@ controls, then observe complete fresh coverage through the normal alert window.
 | Proxy exact `observable=v1 path=tun ... result=timeout` (`doh-tun-dial-timeout`) | A hosted device's remote DoH leg through its own tunnel timed out. The tunnel egresses through the provider the customer selected, so a device pinned to an offline or retired provider times out every leg it races. Lines are throttled per process and resolver target: one such device keeps a process above threshold, and the rate measures neither devices nor failed lookups. On Main on 2026-10-12 every Proxy process logged ~20/min of these while logical tun resolver calls had zero timeouts and zero failures (~66% answered, ~34% canceled by their callers), host-path calls answered 100%, and the ingress dial failure ratio was at its pre-incident baseline. | WARN at 10 lines/minute with the single `doh-tun-attempt` frame. Before treating it as a platform incident, compare fresh same-process `[doh]resolver owner_path=tun` deltas and the Proxy ingress dial outcome ratio with their baseline; a platform-wide tunnel failure also shows in Connect handshake, contract creation and ingress dial signals. Do not fall back to host DoH for a customer's lookups (it would egress the customer's queries from the platform host) or lengthen resolver timeouts from this class. Platform-owned host/caller paths keep the `doh-dial-timeout` page. |
 | DoH `observable=` record with an unknown version, malformed finite fields, or extra fields (`doh-observation-schema`) | The monitor cannot establish the recorded dial path, family, terminal outcome, or counters. This is a visibility gap; it does not prove resolver or user-request failure. All fields and outer identity are discarded. | WARN on one record. Compare the deployed producer and parser schemas and add only a verified bounded decoder with a synthetic fixture. Require exact parsing, malformed-fixture coverage, and ten fresh minutes without a schema gap under positive resolver workload. |
 | otherwise-unclassified `dial tcp <ip>:<port>: i/o timeout` (`dial-io-timeout`) | An outgoing TCP connection attempt exceeded its deadline. The count aggregates all matching lines for the emitting service/class; its frame names only the first counted exemplar's textual dial destination, never every counted line's destination or a destination bucket. Multiple dial candidates leave that frame unknown without removing the positive count. This alone does not identify the target service, a Redis event-loop wedge, or a persistent outage. Listener saturation, packet loss, routing, local resource pressure, and scheduling remain alternatives. | Preserve PAGE at 10 service/class lines/minute, stable emitter-service target, first-exemplar selection and existing exclusions. Resolve the exact original source path and target from native evidence; compare same-window process, listener, TCP and resource controls. Apply §5.2 only to an identified Redis target with a corroborating local PING hang and accept-path evidence; never restart an inferred service. Require original-path reachability, owning health controls and ten minutes below threshold. |
-| otherwise-unclassified `connect: connection refused` | Selected-service log text matched the fallback category; PAGE at >=10 matching diagnostic lines per service/class window. The text alone does not authenticate a socket attempt, listener state, target ownership or caller outcome. More-specific rows retain precedence. | Bind the original event, immutable emitter and source namespace, intended target, typed socket/context result and independently acknowledged operation before assigning listener or service cause. Do not assume Redis or restart an inferred service. Quiet or missing logs cannot establish recovery. |
+| otherwise-unclassified `connect: connection refused` | Selected-service log text matched the fallback category; PAGE at >=10 matching diagnostic lines per service/class window. The text alone does not authenticate a socket attempt, listener state, target ownership or caller outcome. More-specific rows retain precedence. | Bind the original event, immutable emitter and source namespace, intended target, typed socket/context result and independently acknowledged operation before assigning listener or service cause. Only after binding the source and target, reproduce the intended operation from the same source path and network namespace. Do not assume Redis or restart an inferred service. Quiet or missing logs cannot establish recovery. |
 | `[c]Could not initialize tls config. Disabling transport. = ...` (`connect-tls-disabled`) | A legacy Connect-bearing process failed to load its transport identity, substituted an empty TLS configuration, and could still bind UDP while rejecting every QUIC ClientHello below authentication. | Inspect and repair the active TLS certificate/key resource without logging key material, then deploy server `64366fb5` or later so the checked constructor fails startup before any listener goroutine. Require listener readiness plus a real QUIC handshake on every enabled carrier; do not restart the same artifact or treat a bound socket as recovery. |
 | `connect: cannot assign requested address` (`port-exhaustion`) | The selected stream reported this text at rate. It does not identify a native emitter, error code, resource namespace, exhausted port range, unique attempts or one destination. A frame is only the first exemplar's textual address hint. | Preserve the WARN at >=100 matching lines/window. Bind the original event to its artifact/process/attempt/network namespace and compare same-window local-address and socket/tuple limit/usage evidence. Ephemeral-port pressure is a candidate, not a diagnosis; do not infer a target-node fault, restart clients, raise limits, change routes or promise a fixed self-drain timer. Complete comparable logs plus independent native controls are required for recovery. |
 | `Proxy protocol header must be UDP` (legacy log) or `urnetwork_connect_pp_dropped_packets_total{reason="transport_family"}` | The UDP backend received a PROXY header whose address family is not UDP, observed when legacy `proxy_protocol on`/PPv1 traffic overlaps PPv2. Pre-hardening Connect returned this error to quic-go and could kill the shared listener; current Connect drops and counts only that datagram. | Inspect the ACTUAL LB generations and require `proxy_protocol v2`. Page if the PP-drop rate is sustained or `h3_listener_up` falls; a legacy error followed by a missing socket means a pre-fix image is still serving. See §16.2/§16.5. |
@@ -29302,6 +29345,23 @@ same-name object in another schema, on another table, or with the legacy
 publication a missing object remains migration lag. Native controls exercise
 both prefixes and rolled-back object/shape faults; synthetic controls preserve
 unknown authority above the source-known head.
+
+The native partition-cutover control exposed a preservation boundary: table
+renames keep extended statistics attached to the original table OID, while the
+staged parent was created without them. An object left only on
+`transfer_contract_legacy` does not satisfy version 926 on the published parent.
+The owning cutover repair captures definitions after acquiring the swap's table
+locks, keeps the original objects for rollback, and publishes parent copies
+with their original names, owners, targets and comments. Name collisions or
+identifier-length overflow refuse the atomic swap; rollback refuses an ambiguous
+parent/legacy counterpart. Controls cover statistics added after prepare,
+collision rollback, parent object shape and restoration of original object OIDs.
+Rollback compares statistics keys by their ordered column names: `LIKE` omits
+dropped attribute slots, so equivalent legacy and parent keys can have different
+physical attribute numbers. A native dropped-slot control accepts equivalent
+named columns and still rejects a different column under the published name.
+This is a cutover schema-preservation defect; the monitor's expression contract
+remains unchanged.
 
 False-positive qualifier: the migration deliberately creates no sample, so a
 correct but unsampled statistics object is healthy for this schema contract;
