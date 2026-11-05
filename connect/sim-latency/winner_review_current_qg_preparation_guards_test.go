@@ -140,7 +140,7 @@ func TestCurrentQGQualificationPreparationExportIsPrivateAndNonAuthorizing(t *te
 	}
 	for _, entry := range entries {
 		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0400 {
 			t.Fatal("preparation leaf lost private regular-file mode", err)
 		}
 		if strings.Contains(entry.Name(), "input.json") || strings.Contains(entry.Name(), "broker-request.json") {

@@ -173,7 +173,7 @@ Do not include config/vault material or claim its unused score/seal fields are
 final current-candidate evidence. The generated cases replace job/seal/score
 identity with explicit synthetic source-only values.
 
-Export produces exactly forty mode-0600 leaves: nineteen broker requests,
+Export produces exactly forty immutable mode-0400 leaves: nineteen broker requests,
 nineteen readable provider-input previews, one private expectation file, and one
 preparation manifest. All original clocks are zero until the executor starts a
 case. The manifest says `PREPARED_NOT_AUTHORIZED_NOT_QUALIFIED`, records zero
