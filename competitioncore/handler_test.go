@@ -148,6 +148,7 @@ func newTestHandler(t *testing.T, cgroup string) (*Handler, *testHost, *testCore
 	host := &testHost{settings: settings, registry: Snapshot{Registry: registry, digest: strings.Repeat("d", 64)}, pipeLimit: ExpectedPipeLimit,
 		pattern: DispatcherPattern, boot: registry.BootId,
 		policy: Policy{Schema: Schema, ExpectedPipeLimit: ExpectedPipeLimit, ManagementCpuSet: "20,22", Apport: Pin{Path: ApportPath, Sha256: strings.Repeat("e", 64)},
+			HandlerUnit: Pin{Path: managerUnitPath, Sha256: strings.Repeat("d", 64)},
 			Interpreter: Pin{Path: "/synthetic/interpreter", Sha256: strings.Repeat("f", 64)}}}
 	host.placement = &testPlacement{events: &host.events}
 	host.process = &testProcess{events: &host.events, facts: []ProcessFacts{{HostPid: 4321, NamespacePid: 23, Birth: 777, Uid: 1000, Gid: 1001, Cgroup: cgroup}}}
@@ -250,8 +251,8 @@ func TestPrivateEngineAndHandlerCgroupsCannotBecomeOrdinary(t *testing.T) {
 // A source plan cannot be activated merely by supplying synthetic metadata.
 func TestProductionBackendsHaveExplicitImplementationFailures(t *testing.T) {
 	settings := DefaultSettings()
-	if !errors.Is(nativeManagerProof(t.Context(), Policy{}, settings), ErrManagerProofUnimplemented) {
-		t.Fatal("production manager backend manufactured proof")
+	if nativeManagerProof(t.Context(), Policy{}, settings) == nil {
+		t.Fatal("production manager backend manufactured proof without its fixed root policy")
 	}
 	if !errors.Is((nativeHost{}).Handoff(t.Context(), Policy{}, Invocation{}, &testCore{}), ErrOrdinaryHandoffUnimplemented) {
 		t.Fatal("production handoff backend manufactured script custody")

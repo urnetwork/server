@@ -23,7 +23,7 @@ func NewHandler(settings Settings) *Handler {
 // Missing/zero limits refuse work; settings cannot relax the reviewed resource
 // class or authorize ordinary script execution that has no native backend.
 func validateSettings(settings Settings) error {
-	if settings.DocumentBytes <= 0 || settings.ProcBytes <= 0 || settings.ArgumentBytes <= 0 || settings.DocumentDepth <= 0 || settings.DocumentTokens <= 0 ||
+	if validateManagerSettings(settings.Manager) != nil || settings.DocumentBytes <= 0 || settings.ProcBytes <= 0 || settings.ArgumentBytes <= 0 || settings.DocumentDepth <= 0 || settings.DocumentTokens <= 0 ||
 		settings.MaximumRuns <= 0 || settings.MaximumCgroupDepth <= 0 || settings.MaximumCgroupBytes <= 0 || settings.MaximumCpuIndex <= 0 ||
 		settings.MaximumDescriptor == 0 || settings.HandlerTimeout <= 0 || settings.MaximumJobLifetime <= 0 || settings.HandlerMemoryBytes != 256*1024*1024 ||
 		settings.HandlerTasksMaximum != 128 || settings.HandlerCpuQuota != 200000 || settings.HandlerCpuPeriod != 100000 {
@@ -35,7 +35,7 @@ func validateSettings(settings Settings) error {
 // Root metadata cannot select another Apport or silently waive a changed pipe
 // limit. Interpreter identity is necessary metadata, never execution authority.
 func validatePolicy(policy Policy, settings Settings) error {
-	if policy.Schema != Schema || policy.ExpectedPipeLimit != ExpectedPipeLimit || policy.Apport.Path != ApportPath || !validHex(policy.Apport.Sha256, 64) ||
+	if policy.Schema != Schema || policy.ExpectedPipeLimit != ExpectedPipeLimit || policy.HandlerUnit.Path != managerUnitPath || !validHex(policy.HandlerUnit.Sha256, 64) || policy.Apport.Path != ApportPath || !validHex(policy.Apport.Sha256, 64) ||
 		!filepath.IsAbs(policy.Interpreter.Path) || filepath.Clean(policy.Interpreter.Path) != policy.Interpreter.Path || policy.Interpreter.Path == "/" ||
 		!validHex(policy.Interpreter.Sha256, 64) || !validCpuSet(policy.ManagementCpuSet, settings.MaximumCpuIndex) {
 		return errors.New("core dispatcher lacks its fixed protected policy")

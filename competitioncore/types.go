@@ -25,6 +25,7 @@ const (
 // All byte/count/time bounds belong to the dispatcher instance. Nonpositive
 // settings refuse work rather than selecting a permissive fallback.
 type Settings struct {
+	Manager             ManagerSettings
 	DocumentBytes       int64
 	ProcBytes           int64
 	ArgumentBytes       int
@@ -46,7 +47,7 @@ type Settings struct {
 // Ten kernel-admitted helpers still have pre-main Go/runtime overhead. These
 // limits do not qualify that overhead or kernel/journal pressure.
 func DefaultSettings() Settings {
-	return Settings{DocumentBytes: 128 * 1024, ProcBytes: 128 * 1024, ArgumentBytes: 4096,
+	return Settings{Manager: DefaultManagerSettings(), DocumentBytes: 128 * 1024, ProcBytes: 128 * 1024, ArgumentBytes: 4096,
 		DocumentDepth: 32, DocumentTokens: 32768, MaximumRuns: 16, MaximumCgroupDepth: 64, MaximumCgroupBytes: 4096,
 		MaximumCpuIndex: 4095, MaximumDescriptor: 1048576, HandlerTimeout: 2 * time.Second, MaximumJobLifetime: 3 * time.Hour,
 		HandlerMemoryBytes: 256 * 1024 * 1024, HandlerTasksMaximum: 128, HandlerCpuQuota: 200000, HandlerCpuPeriod: 100000}
@@ -64,6 +65,7 @@ type Policy struct {
 	Schema            int    `json:"schema"`
 	ExpectedPipeLimit uint64 `json:"expected_pipe_limit"`
 	ManagementCpuSet  string `json:"management_cpu_set"`
+	HandlerUnit       Pin    `json:"handler_unit"`
 	Apport            Pin    `json:"apport"`
 	Interpreter       Pin    `json:"interpreter"`
 }

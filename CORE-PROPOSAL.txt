@@ -6,13 +6,16 @@ Status and authority
 This is NOT a completed native feature and MUST NOT be installed or activated.
 It grants no admission waiver. No current agent, host policy, default daemon,
 sysctl, Apport installation or production service is changed by this source.
-The production helper is intentionally drop-only because required native
-implementations are absent. A successful fake test is not native evidence.
+The production helper is intentionally drop-only because ordinary handoff,
+cleanup joining and lifecycle implementations are absent. The in-process
+manager source is now concrete but unqualified. A fake test is not native proof.
 
 Base: 4945fc322883dfc66753d1c445427ed72368cad0.
 Scope: competitioncore/, cli/competitioncore/, this proposal only.
 Target: Linux/amd64, Go 1.27.3, standard library only.
-No main/server configuration, agent keys, database credentials or network client.
+No main/server configuration, agent keys, database credentials, TCP or external
+network client. The only prospective IPC client is the fixed private manager
+Unix socket, whose native use is not authorized by this draft.
 No source-only approval is permission to install, alter sysctls, waive current
 piped-core rejection, or start evaluation.
 
@@ -54,8 +57,9 @@ Concrete draft source
 
 2. Strict bounded root JSON rejects unknown fields, duplicate/case-folded keys,
    excessive depth, token work and bytes. The fixed configuration pathname is
-   /etc/urnetwork/core-dispatcher.json. Declared script/interpreter pins are
-   metadata only; they cannot turn on the missing execution backend.
+   /etc/urnetwork/core-dispatcher.json. HandlerUnit must explicitly pin the fixed
+   /etc/systemd/system/urnetwork-core-handler.slice file; no SHA is defaulted.
+   Script/interpreter pins remain metadata, not missing-exec-backend authority.
 
 3. A fixed root registry directory /var/lib/urnetwork/core is opened, not
    created. Atomic updates use a nonblocking root-private writer lease,
@@ -96,24 +100,50 @@ Concrete draft source
    checks cgroupfs/root-owned components and finite memory/swap/tasks/CPU/
    cpuset/effective-cpuset limits, and writes ONLY os.Getpid() to the held
    cgroup.procs descriptor. It cannot select the crashing PID or a caller PID.
-   It is unreachable in production until authoritative manager proof exists.
+   It follows the concrete manager source proof; neither half grants permission
+   to install this incomplete dispatcher or change current admission.
 
-Required implementations still missing
--------------------------------------
-A. A finite authoritative IN-PROCESS systemd manager reader, using only the
-   protected local management IPC contract. It must prove exact handler unit,
-   manager and kernel state: 256MiB aggregate, 128 tasks, the frozen management
-   processors, no swap and 200% CPU at the reviewed period. It must repeat
-   proof around movement/classification. Calling systemctl/forking another
-   program on a candidate/unknown branch is not acceptable. A cached receipt,
-   arbitrary expected string, environment switch or Boolean waiver is not a
-   substitute. nativeManagerProof currently always fails explicitly.
+Implementation status and remaining gaps
+---------------------------------------
+A. IN-PROCESS MANAGER SOURCE NOW IMPLEMENTED, NOT NATIVE-QUALIFIED. A fresh
+   session connects only /run/systemd/private, checks native SO_PEERCRED root
+   UID/PID1, and authenticates with closed EXTERNAL uid0. It never forks,
+   executes systemctl, negotiates fd passing, connects TCP, calls GetAll or
+   chooses a generic object/property/method from input. GetUnit must return
+   the exact escaped handler object path. Twelve fixed Properties.Get calls
+   read Unit Id/LoadState/ActiveState/FragmentPath/DropInPaths and Slice
+   ControlGroup/MemoryMax/MemorySwapMax/TasksMax/CPUQuotaPerSecUSec/
+   CPUQuotaPeriodUSec/AllowedCPUs. A final GetUnit closes the 14-call list.
+   The exact loaded active unit/pin, no drop-ins, 256MiB, 128 tasks, no swap,
+   200% CPU/100ms period and frozen management mask must all agree.
+
+   The codec supports only little-endian D-Bus v1 and the finite scalar/byte/
+   string-array vocabulary. It bounds auth/header/body/frame/string/array
+   sizes, serial/call counts, depth, ancillary space, total session bytes and
+   the original parent deadline. Unknown types/headers, signals, errors,
+   incomplete/overflow/trailing values and wrong serials fail closed. Every
+   read uses recvmsg, and unexpected rights are closed and refused; a final
+   nonblocking peek rejects queued trailing bytes/rights. Cancellation closes
+   blocked I/O. Unit bytes and kernel peer credentials are rechecked.
+
+   This source adds IPC/PID1 work, not a zero-cost proof. The current helper
+   ordering nominally performs three fresh 14-call sessions (before placement,
+   after placement, and before final classification): 42 RPCs per helper and
+   up to 420 for ten helpers, besides authentication and reads. Real syscall,
+   framing, permissions, latency, storm pressure and root-disk/journal behavior
+   require separate approved native gates. There is no cached proof or waiver.
 
 B. Exact ordinary restoration of original cgroup, ALL thread affinities and
-   inherited resource limits before handoff. Go's pre-main runtime can already
-   alter resources such as nofile; a post-main proc snapshot is not proof of
-   original inherited state. A reviewed capture/restore mechanism and actual
-   successful ordinary control are required. Native Restore always fails.
+   inherited resource limits before handoff. Go 1.27.3 syscall/rlimit.go captures
+   origRlimitNofile before raising the soft limit; builtin syscall.Exec in
+   exec_unix.go restores it IF the handler NEVER calls Setrlimit(NOFILE), which
+   would clear that pointer. This is a viable source lead, not an impossibility
+   claim or native proof. A future implementation must use builtin syscall.Exec,
+   not raw execveat as a nofile-restoration substitute. It must LockOSThread
+   BEFORE capturing cgroup/affinity and restore the executing thread before
+   Exec; static CGO=0 runtime/affinity behavior and successful ordinary controls
+   still require review and native evidence. No B implementation is added here;
+   native Restore always fails.
 
 C. Exact pinned Apport SCRIPT and interpreter/loader/import custody. A naive
    execveat of a CLOEXEC script descriptor fails shebang lifetime semantics;
@@ -154,7 +184,8 @@ Mandatory native gates AFTER those implementations
 Deterministic source tests
 -------------------------
 All tests use private temporary files, synthetic identities, injected native
-fact/placement/handoff seams or a private fake join backend. They do not call
+fact/placement/handoff seams, private fake peer/join backends or anonymous
+test-owned Unix socket pairs. No test connects /run/systemd/private. They do not call
 pidfd_open, start crashes, read real proc/cgroups, execute Apport/systemctl,
 move a process, contact a daemon or change a host. They cover component scope,
 complete inventories, no-read/no-exec unknown and candidate paths, exact closed
@@ -162,6 +193,10 @@ ordinary argv/stream at an injected seam, generation/clock preservation,
 registry/boot changes, retirement CAS and join-outside-lock ordering, retained
 receipt/no replay, PID directory/birth reuse, disappearance, migration,
 credentials, malformed/oversized metadata and confined relative symlink swaps.
+The manager follow-up includes typed positive transcripts, native credential/
+recvmsg adapters over private socket pairs, serial/type/size/overflow/padding/
+trailing-rights refusal, original deadlines, pin swaps and explicit blocking
+read/cancel/close barriers. These private socket tests are not systemd proof.
 They must be remotely compiled/executed independently; source formatting alone
 is not a green test receipt.
 
@@ -177,5 +212,13 @@ https://man7.org/linux/man-pages/man2/pidfd_open.2.html
 Documents pidfd identity and PID/zombie lifetime limitations.
 https://man7.org/linux/man-pages/man2/execveat.2.html
 Documents script/shebang CLOEXEC descriptor lifetime failure.
+https://dbus.freedesktop.org/doc/dbus-specification.html
+Documents EXTERNAL auth, v1 framing/alignment/header fields and Unix fd passing.
+https://www.freedesktop.org/software/systemd/man/255/org.freedesktop.systemd1.html
+Documents fixed Manager.GetUnit, Unit and Slice property names/native types.
+https://github.com/systemd/systemd/blob/v255/src/core/dbus.c
+Documents private peer server ownership/root credentials and fixed sender.
+https://github.com/systemd/systemd/blob/v255/src/core/dbus-cgroup.c
+Documents uint64 resource values and AllowedCPUs byte-mask representation.
 
 No current host setting or live-scoring claim is inferred from this draft.

@@ -1,6 +1,6 @@
-// The native entry point is intentionally non-activatable: live in-process
-// manager proof, pre-Go restoration and Apport script/interpreter custody are
-// implementation gaps, not user-configurable qualification flags.
+// The native entry point is intentionally not deployable: ordinary resource
+// restoration, Apport custody, helper cleanup and agent wiring remain missing.
+// Concrete manager/kernel source proof still requires native qualification.
 package competitioncore
 
 import (
@@ -14,10 +14,10 @@ import (
 	"syscall"
 )
 
-var ErrManagerProofUnimplemented = errors.New("in-process native systemd manager resource proof is not implemented")
 var ErrOrdinaryHandoffUnimplemented = errors.New("exact ordinary restoration and Apport script/interpreter FD custody are not implemented")
 
-// There are no credentials, main/server configuration or network dependencies.
+// No main/server credentials or external network dependencies exist; the only
+// local IPC dependency is the fixed authenticated private systemd connection.
 type nativeHost struct{ settings Settings }
 
 // Root-only policy bytes may declare pins but cannot enable missing backends.
@@ -107,10 +107,6 @@ func (self nativeHost) Place(ctx context.Context, policy Policy) (placement, err
 	return joinNativeHandler(ctx, policy, self.settings)
 }
 
-// Do not replace this with systemctl, a cached receipt, a Boolean waiver or an
-// environment setting. Candidate/unknown branches must execute nothing else.
-func nativeManagerProof(context.Context, Policy, Settings) error { return ErrManagerProofUnimplemented }
-
 // Apport is a script. Executing /proc/self/fd/N with CLOEXEC can break its
 // shebang, and reopening the path/interpreter loses descriptor identity. Neither
 // a nil fake exec nor a metadata pin is evidence this native gap is solved.
@@ -129,8 +125,8 @@ type nativePlacement struct {
 	directory fileIdentity
 }
 
-// This concrete kernel half is reachable only after the absent native manager
-// verifier is implemented. It is not called by tests or during development.
+// Manager proof precedes the held-FD kernel half; source alone does not qualify
+// deployment. This path is not called by tests or during development.
 func joinNativeHandler(ctx context.Context, policy Policy, settings Settings) (*nativePlacement, error) {
 	root, err := openDirectory("/sys/fs/cgroup", false)
 	if err != nil {
@@ -229,8 +225,9 @@ func (self *nativePlacement) Recheck(ctx context.Context) error {
 	return nil
 }
 
-// Go's pre-main runtime may already alter resources (notably nofile). A later
-// proc snapshot cannot prove exact inherited restoration for ordinary Apport.
+// Future restoration must preserve Go's preinit origRlimitNofile pointer by
+// never calling Setrlimit(NOFILE), then use builtin syscall.Exec restoration.
+// Thread affinity/cgroup capture and native proof remain a separate missing B.
 func (*nativePlacement) Restore(context.Context) error { return ErrOrdinaryHandoffUnimplemented }
 
 func (self *nativePlacement) Close() error {
