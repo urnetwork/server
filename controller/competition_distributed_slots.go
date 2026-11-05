@@ -179,6 +179,12 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				job = nil
 				return
 			}
+			allowed, gateErr := competitionIntakeFirstCandidateClaimInTx(ctx, tx, settings, job.RoundId)
+			server.Raise(gateErr)
+			if !allowed {
+				job = nil
+				return
+			}
 			executionWorkerImageDigest := workerImageDigest
 			if reconcile {
 				executionWorkerImageDigest = job.WorkerImageDigest

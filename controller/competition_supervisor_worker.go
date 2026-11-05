@@ -109,6 +109,14 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 	if intent == nil || intent.TargetRoundId != round.RoundId || intent.TargetEpoch != round.Epoch || intent.Generation != frozen.AutomationPolicy.SourceActivationGeneration || intent.SourceLockSha256 != frozen.AutomationPolicy.SourceLockSha256 {
 		return ErrConflict
 	}
+	if competitionIntakeFirstApplies(settings, intent) {
+		// Keep the strict genuine-runtime check and attach only an authenticated
+		// intake grant so shared-baseline preparation cannot start its source job.
+		frozen, err = settingsForAutomationRound(ctx, settings, store, round)
+		if err != nil {
+			return err
+		}
+	}
 	if err := LoadCompetitionRuntimeManifestContext(ctx, frozen, intent); err != nil {
 		return err
 	}

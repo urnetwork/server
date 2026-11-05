@@ -308,6 +308,9 @@ func (self PostgresStore) HoldRoundBaselinePreparation(ctx context.Context, sett
 // Publication starts the real job exactly once. The existing foreign-key and
 // running-attempt trigger see this actual claim inside the same transaction.
 func (self PostgresStore) ClaimPreparedRoundBaseline(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation, prepared *preparedRoundBaseline) (job *queuedJob, resultErr error) {
+	if settings.intakeFirstActivation != nil {
+		return nil, errCompetitionIntakeFirstPending
+	}
 	resultErr = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			job = nil
@@ -364,7 +367,13 @@ func (self PostgresStore) PublishPreparedRoundBaseline(ctx context.Context, sett
 			source, frozen, err := self.checkRoundBaselinePreparationInTx(ctx, tx, settings, preparation)
 			server.Raise(err)
 			policy := frozen.DistributedEvaluationPolicy
-			if policy == nil || policy.FromEpoch < 2 || source.Round.Epoch < policy.FromEpoch || !roundUsesAutomation(&source.Round) {
+			distributed := policy != nil && policy.FromEpoch >= 2 && source.Round.Epoch >= policy.FromEpoch
+			intake := false
+			if settings.intakeFirstActivation != nil {
+				server.Raise(checkCompetitionIntakeFirstAdmission(ctx, tx, settings, &source.Round))
+				intake = source.Round.Epoch >= settings.intakeFirstActivation.TargetEpoch && source.RoundId == settings.intakeFirstActivation.TargetRoundId
+			}
+			if (!distributed && !intake) || !roundUsesAutomation(&source.Round) {
 				panic(ErrConflict)
 			}
 			server.Raise(validatePreparedRoundBaseline(prepared, preparation, frozen))

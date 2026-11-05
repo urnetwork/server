@@ -52,6 +52,8 @@ type CompetitionSourceIntakeActivation struct {
 	RoundPolicySha256     string                       `json:"round_policy_sha256"`
 	ApiReadinessSha256    string                       `json:"api_readiness_sha256"`
 	ApiRuntimeImageDigest string                       `json:"api_runtime_image_digest"`
+	SeasonEndsAt          time.Time                    `json:"season_ends_at"`
+	RetainUntil           time.Time                    `json:"retain_until"`
 	CreatedAt             time.Time                    `json:"created_at"`
 }
 
@@ -64,7 +66,8 @@ func ValidateCompetitionSourceIntakeActivation(value *CompetitionSourceIntakeAct
 		value.Generation <= value.ExpectedGeneration || value.ExpectedGeneration < 1 || value.TargetEpoch < value.Policy.FromEpoch || value.TargetEpoch > 6 ||
 		value.TargetRoundId == (server.Id{}) || !competitionAutomationSha256.MatchString(value.IntentSha256) ||
 		!competitionAutomationSha256.MatchString(value.RoundPolicySha256) || !competitionAutomationSha256.MatchString(value.ApiReadinessSha256) ||
-		!strings.HasPrefix(value.ApiRuntimeImageDigest, "sha256:") || !competitionAutomationSha256.MatchString(strings.TrimPrefix(value.ApiRuntimeImageDigest, "sha256:")) || value.CreatedAt.IsZero() {
+		!strings.HasPrefix(value.ApiRuntimeImageDigest, "sha256:") || !competitionAutomationSha256.MatchString(strings.TrimPrefix(value.ApiRuntimeImageDigest, "sha256:")) || value.CreatedAt.IsZero() ||
+		!value.CreatedAt.Before(value.SeasonEndsAt) || value.RetainUntil.Before(value.SeasonEndsAt) {
 		return errors.New("source intake grant lacks exact prospective source, API or frozen-rule identity")
 	}
 	return nil
@@ -104,7 +107,7 @@ type CompetitionSourceOperatorHandoff struct {
 // Shape validation is followed by a fenced reread of the elected decision,
 // current complete review and exact proposed product graph in the store.
 func ValidateCompetitionSourceOperatorHandoffArgs(value CompetitionSourceOperatorHandoffArgs) error {
-	if value.TargetEpoch < 2 || value.TargetEpoch > 6 || value.ExpectedRevision < 0 ||
+	if value.TargetEpoch < 2 || value.TargetEpoch > 6 || value.ExpectedRevision < 0 || value.ExpectedRevision == 1<<63-1 ||
 		!competitionAutomationSha256.MatchString(value.RewardDecisionSha256) ||
 		!competitionAutomationSha256.MatchString(value.ProductSourceLockSha256) || !competitionAutomationSha256.MatchString(value.EvidenceSha256) ||
 		!competitionAutomationScope.MatchString(value.IdempotencyKey) {

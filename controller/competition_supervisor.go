@@ -194,6 +194,7 @@ type CompetitionSupervisorHooks struct {
 	ChooseSource   func(context.Context, model.CompetitionSupervisorLease, *CompetitionSupervisorSnapshot, model.CompetitionSupervisorTransition) (*model.CompetitionSourceActivation, error)
 	PublishSource  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
 	PrepareSource  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
+	PrepareIntake  func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation) error
 	FallbackSource func(context.Context, model.CompetitionSupervisorLease, *model.CompetitionSourceActivation, string) (bool, error)
 	ReviewWinner   func(context.Context, model.CompetitionSupervisorLease, CompetitionWinnerReviewRequest) error
 }
@@ -328,6 +329,11 @@ func (self *PostgresCompetitionSupervisorDriver) PublishSource(ctx context.Conte
 	if self.Hooks.PublishSource == nil {
 		return errors.New("source publication integration is not configured")
 	}
+	if self.IntakeFirst(intent) {
+		if err := self.Store.CheckSourceOperatorHandoff(ctx, self.Settings, lease, intent.Generation); err != nil {
+			return err
+		}
+	}
 	return self.Hooks.PublishSource(ctx, lease, intent)
 }
 
@@ -438,6 +444,11 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if self.PreparationOnly {
 			return "preparation_only", nil
 		}
+		if driver, ok := self.Driver.(competitionSupervisorRoundGradingDriver); ok {
+			if err := driver.PrepareRoundGrading(operationCtx, *lease, *snapshot.Round); err != nil {
+				return "grading_preparation_pending", err
+			}
+		}
 		if err := self.Driver.RunWorker(operationCtx, *lease, *snapshot.Round); err != nil {
 			return "evaluation_blocked", err
 		}
@@ -504,6 +515,10 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if intent != nil {
 			next.SourceActivationGeneration = intent.Generation
 			next.PreparationStartedAt = intent.PreparedAt
+			if nextState == "round_created" {
+				copyRoundId := intent.TargetRoundId
+				next.RoundId = &copyRoundId
+			}
 		}
 		if !opensAt.IsZero() {
 			next.OpensAt = opensAt
@@ -585,6 +600,26 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		if snapshot.Intent == nil {
 			return "preparation_blocked", errors.New("durable source intent is missing")
 		}
+		if driver, ok := self.Driver.(competitionSupervisorIntakeFirstDriver); ok && driver.IntakeFirst(snapshot.Intent) {
+			if err := driver.PrepareIntake(operationCtx, *lease, snapshot.Intent); err != nil {
+				state, saveErr := checkpoint("preparation_blocked", "genuine API intake publication is pending; grading authority is separate", snapshot.Intent, time.Time{})
+				if saveErr != nil {
+					return state, saveErr
+				}
+				return state, err
+			}
+			if self.PreparationOnly {
+				return checkpoint("preparation_ready", "API intake receipt recorded; no activation or opening in preparation-only mode", snapshot.Intent, time.Time{})
+			}
+			round, err := driver.OpenIntake(operationCtx, *lease, snapshot.Intent)
+			if err != nil {
+				return "round_creation_blocked", err
+			}
+			if !competitionIntakeFirstRoundIdentity(round, snapshot.Intent) {
+				return "round_creation_blocked", ErrConflict
+			}
+			return checkpoint("round_created", "intake open; independent grading preparation pending", snapshot.Intent, round.OpensAt)
+		}
 		if prepareErr := self.Driver.PrepareSource(operationCtx, *lease, snapshot.Intent); prepareErr != nil {
 			if abandoned, state, fallbackErr := fallback("readiness_failed"); abandoned {
 				return state, fallbackErr
@@ -608,6 +643,16 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		}
 		if self.PreparationOnly || now.Before(snapshot.Intent.PreparedAt.Add(sourcePreparationInterval(snapshot.Intent))) {
 			return "preparation_ready", nil
+		}
+		if driver, ok := self.Driver.(competitionSupervisorIntakeFirstDriver); ok && driver.IntakeFirst(snapshot.Intent) {
+			round, err := driver.OpenIntake(operationCtx, *lease, snapshot.Intent)
+			if err != nil {
+				return "round_creation_blocked", err
+			}
+			if !competitionIntakeFirstRoundIdentity(round, snapshot.Intent) {
+				return "round_creation_blocked", ErrConflict
+			}
+			return checkpoint("round_created", "intake open; independent grading preparation pending", snapshot.Intent, round.OpensAt)
 		}
 		if activationErr := self.Driver.ActivateSource(operationCtx, *lease, snapshot.Intent); activationErr != nil {
 			return "activation_blocked", activationErr

@@ -18,7 +18,8 @@ func TestCompetitionIntakeFirstGrantHasNoGradingAuthority(t *testing.T) {
 		Policy:      CompetitionIntakeFirstPolicy{Kind: CompetitionIntakeFirstKind, FromEpoch: 2, ApprovalSha256: strings.Repeat("a", 64)},
 		Environment: "synthetic", CompetitionId: "synthetic-competition", SeasonId: "synthetic-season", Generation: 2, ExpectedGeneration: 1,
 		TargetEpoch: 2, TargetRoundId: server.NewId(), IntentSha256: strings.Repeat("b", 64), RoundPolicySha256: strings.Repeat("c", 64),
-		ApiReadinessSha256: strings.Repeat("d", 64), ApiRuntimeImageDigest: "sha256:" + strings.Repeat("e", 64), CreatedAt: time.Unix(1000, 0).UTC()}
+		ApiReadinessSha256: strings.Repeat("d", 64), ApiRuntimeImageDigest: "sha256:" + strings.Repeat("e", 64),
+		SeasonEndsAt: time.Unix(2000, 0).UTC(), RetainUntil: time.Unix(3000, 0).UTC(), CreatedAt: time.Unix(1000, 0).UTC()}
 	if err := ValidateCompetitionSourceIntakeActivation(&value); err != nil {
 		t.Fatal(err)
 	}

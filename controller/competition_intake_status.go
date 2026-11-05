@@ -49,14 +49,22 @@ func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Set
 	}
 	strictReady := allChecks(checks) && !holds.Admission
 	intakeReady := strictReady
+	gradingPurposeReady := true
+	if settings.intakeFirstActivation != nil {
+		intakeReady = competitionIntakeChecksPass(checks) && !holds.Admission
+		gradingPurposeReady, err = competitionIntakeFirstGradingReady(ctx, settings, self.store)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if !intakeReady {
 		intakeReady, err = self.approvedIntakeReadiness(ctx, settings, round, checks, holds)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: strictReady && !holds.Evaluation,
-		PublicationHeld: holds.Evaluation, FinalizationHeld: holds.Finalization}, nil
+	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: strictReady && !holds.Evaluation && gradingPurposeReady,
+		PublicationHeld: holds.Evaluation || !gradingPurposeReady, FinalizationHeld: holds.Finalization}, nil
 }
 
 // Public scores, winners and round secrets share the grading hold. A payout
@@ -78,6 +86,16 @@ func (self *Service) competitionPublicationHeld(ctx context.Context, settings *S
 	holds, err := store.AutomationHoldStatus(ctx, &scoped)
 	if err != nil {
 		return true, err
+	}
+	if settings.IntakeFirstPolicy != nil && round.Epoch >= settings.IntakeFirstPolicy.FromEpoch && !round.Staging && round.AutomationSealedAt == nil && round.FinalizedAt == nil {
+		frozen, err := settingsForCompetitionApiRound(ctx, settings, self.store, round)
+		if err != nil {
+			return true, err
+		}
+		ready, err := competitionIntakeFirstGradingReady(ctx, frozen, self.store)
+		if err != nil || !ready {
+			return true, err
+		}
 	}
 	return holds.Evaluation, nil
 }

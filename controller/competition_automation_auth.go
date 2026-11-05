@@ -13,6 +13,7 @@ const (
 	competitionReviewerRole       = "reviewer"
 	competitionSettlementRole     = "settlement"
 	competitionSourcePromoterRole = "source_promoter"
+	competitionSourceHandoffRole  = "source_handoff"
 )
 
 // Legacy token shapes remain valid. New capabilities require an explicit scope
@@ -21,7 +22,7 @@ func validateCompetitionTokenRole(token Token) error {
 	switch token.Role {
 	case "submitter", "operator":
 		return nil
-	case competitionSchedulerRole, competitionReviewerRole, competitionSettlementRole, competitionSourcePromoterRole:
+	case competitionSchedulerRole, competitionReviewerRole, competitionSettlementRole, competitionSourcePromoterRole, competitionSourceHandoffRole:
 		if !tokenNamePattern.MatchString(token.Environment) ||
 			!tokenNamePattern.MatchString(token.CompetitionId) || !tokenNamePattern.MatchString(token.SeasonId) {
 			return fmt.Errorf("competition token %q requires an explicit environment, competition, and season scope", token.Name)
