@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -410,7 +409,7 @@ func openRegular(root, name string) (*os.File, error) {
 		return nil, err
 	}
 	defer directory.Close()
-	file, err := directory.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	file, err := openProtocolFile(directory, name)
 	if err != nil {
 		return nil, err
 	}

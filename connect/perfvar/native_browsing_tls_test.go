@@ -67,6 +67,9 @@ func nativeBrowsingTlsConfigsForOrigins(origins int) (*tls.Config, *tls.Config, 
 
 // H1 connection and idle limits remain the original four-per-origin geometry.
 func newNativeBrowsingInnerTransport(dial func(context.Context, string, string) (net.Conn, error), settings nativeBrowsingRunSettings) *http.Transport {
+	if settings.innerHttpTraceForTest != nil {
+		return newPrivateSdkBrowsingInnerTransport(dial, settings)
+	}
 	transport := &http.Transport{MaxConnsPerHost: nativeBrowsingConnectionsPerOrigin, MaxIdleConns: nativeBrowsingOriginCount * nativeBrowsingConnectionsPerOrigin, MaxIdleConnsPerHost: nativeBrowsingConnectionsPerOrigin, DialContext: dial}
 	if settings.originClientTlsForTest != nil {
 		transport.TLSClientConfig = settings.originClientTlsForTest.Clone()
@@ -84,6 +87,9 @@ func newNativeBrowsingInnerTransport(dial func(context.Context, string, string) 
 
 // The server accepts the same handler and listener; only TLS wraps the socket.
 func newNativeBrowsingInnerServer(handler http.Handler, listener net.Listener, settings nativeBrowsingRunSettings) (*http.Server, net.Listener) {
+	if settings.innerHttpTraceForTest != nil {
+		return newPrivateSdkBrowsingInnerServer(handler, listener, settings)
+	}
 	server := &http.Server{Handler: handler}
 	if settings.originServerTlsForTest == nil {
 		return server, listener

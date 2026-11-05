@@ -1,3 +1,5 @@
+//go:build linux
+
 // Connection admission is shared by both Unix authority sockets. Rejected
 // peers never acquire a goroutine, body buffer or upstream connection.
 package competitionagent
