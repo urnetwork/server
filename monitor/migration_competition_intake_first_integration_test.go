@@ -56,6 +56,14 @@ func TestMigrationsCompetitionIntakeFirstIntegratedPrefixesRemainCoherent(t *tes
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		for _, head := range []int{version - 1, version} {
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
+			var actualHead int
+			server.Db(tb.Context(), func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(tb.Context(), `SELECT COALESCE(max(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actualHead))
+			})
+			if actualHead != head {
+				tb.Fatalf("intake prefix fixture schema=%d want=%d", actualHead, head)
+			}
+			tb.Logf("intake_prefix_fixture_schema_head=%d", actualHead)
 			row, drift := migrationPingDatabaseCheck(tb, tb.Context())
 			want := "f"
 			if head == version {

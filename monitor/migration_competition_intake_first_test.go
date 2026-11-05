@@ -45,6 +45,14 @@ func TestMigrationsCompetitionIntakeFirstCarriesExactPredecessorCustody(t *testi
 func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		ctx := tb.Context()
+		var actualHead int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(max(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actualHead))
+		})
+		if actualHead != server.MigrationCount() {
+			tb.Fatalf("intake catalog fixture schema=%d want=%d", actualHead, server.MigrationCount())
+		}
+		tb.Logf("intake_catalog_fixture_schema_head=%d", actualHead)
 		if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, server.CompetitionIntakeFirstMigrationSql())) }, server.OptReadWrite())
 		}

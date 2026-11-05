@@ -34,6 +34,14 @@ func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context)
 	if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 		t.Fatal("intake lifecycle fixture requires its actually registered composed migration")
 	}
+	var actualHead int
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(max(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actualHead))
+	})
+	if actualHead != server.MigrationCount() {
+		t.Fatalf("intake lifecycle fixture schema=%d want=%d", actualHead, server.MigrationCount())
+	}
+	t.Logf("intake_lifecycle_fixture_schema_head=%d", actualHead)
 	fixture := &competitionIntakeFirstDatabaseFixture{settings: automationApiSettings()}
 	server.Db(ctx, func(conn server.PgConn) {
 		var err error

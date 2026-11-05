@@ -18,6 +18,14 @@ func TestCompetitionIntakeFirstLedgerFenceRejectsStaleRepeatableRead(t *testing.
 	(&TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		ctx, cancel := context.WithTimeout(tb.Context(), 30*time.Second)
 		defer cancel()
+		var actualHead int
+		Db(ctx, func(conn PgConn) {
+			Raise(conn.QueryRow(ctx, `SELECT COALESCE(max(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actualHead))
+		})
+		if actualHead != MigrationCount() {
+			tb.Fatalf("intake snapshot fixture schema=%d want=%d", actualHead, MigrationCount())
+		}
+		tb.Logf("intake_snapshot_fixture_schema_head=%d", actualHead)
 		if CompetitionIntakeFirstMigrationVersion() == 0 {
 			Tx(ctx, func(tx PgTx) { RaisePgResult(tx.Exec(ctx, CompetitionIntakeFirstMigrationSql())) }, OptReadWrite())
 		}
