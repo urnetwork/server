@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -90,43 +91,49 @@ func TestExtenderActivationRefusalOfASilentTcpCarrierNamesTheWholeBudget(t *test
 	)
 }
 
-// A dns port that never answers is left out with "no answer within 3 s", its
-// own budget (L2), and a quic carrier that never answers with what was left
-// of the shared budget when it was probed. One that fails on its own keeps
-// its probe's error alone.
+// An optional carrier that never answers is left out with what was left of
+// the shared budget when the optional carriers started, the same for each
+// since they run together (connect#230). One that fails on its own keeps its
+// probe's error alone.
 func TestExtenderActivationLeftOutCarrierSaysHowLongItHadToAnswer(t *testing.T) {
-	probeNames := testOptionalCarrierProbes
-	probes := newTestActivationProbes()
-	probes.answer = func(ctx context.Context, probe string) error {
-		switch probe {
-		case probeNames.dns53, probeNames.quic:
-			return probes.clock.WaitOut(ctx)
-		case probeNames.dns4053:
-			probes.clock.Advance(500 * time.Millisecond)
-			return errors.New("connection refused")
+	synctest.Test(t, func(t *testing.T) {
+		probeNames := testOptionalCarrierProbes
+		probes := newTestActivationProbes()
+		probes.answer = func(ctx context.Context, probe string) error {
+			switch probe {
+			case testTimingTcpProbe:
+				return testAnswerAfter(ctx, 1500*time.Millisecond)
+			case probeNames.dns53, probeNames.quic:
+				return testNeverAnswer(ctx)
+			case probeNames.dns4053:
+				if err := testAnswerAfter(ctx, 500*time.Millisecond); err != nil {
+					return err
+				}
+				return errors.New("connection refused")
+			}
+			return nil
 		}
-		return nil
-	}
-	outcome := probes.judge(
-		context.Background(),
-		connect.ExtenderCarrierTcp,
-		connect.ExtenderCarrierDns,
-		connect.ExtenderCarrierQuic,
-	)
-	if outcome.refusal != "" {
-		t.Fatalf("the activation was refused for an optional carrier: %s", outcome.refusal)
-	}
-	wantErrors := map[string]string{
-		probeNames.dns53:   "no answer within 3 s: context deadline exceeded",
-		probeNames.dns4053: "connection refused",
-		// probed 3.5 s in, after both dns ports
-		probeNames.quic: "no answer within the 6.5 s left of the 10 s probe budget: context deadline exceeded",
-	}
-	connect.AssertEqual(t, len(outcome.refusedCarriers), len(wantErrors))
-	for _, refusedCarrier := range outcome.refusedCarriers {
-		probe := fmt.Sprintf("%s:%d", refusedCarrier.Carrier, refusedCarrier.Port)
-		if refusedCarrier.Error != wantErrors[probe] {
-			t.Fatalf("%s was left out for %q, want %q", probe, refusedCarrier.Error, wantErrors[probe])
+		outcome := probes.judgeOnTheRealClock(
+			context.Background(),
+			connect.ExtenderCarrierTcp,
+			connect.ExtenderCarrierDns,
+			connect.ExtenderCarrierQuic,
+		)
+		if outcome.refusal != "" {
+			t.Fatalf("the activation was refused for an optional carrier: %s", outcome.refusal)
 		}
-	}
+		wantErrors := map[string]string{
+			// the optional carriers start 1.5 s in, after the required test
+			probeNames.dns53:   "no answer within the 8.5 s left of the 10 s probe budget: context deadline exceeded",
+			probeNames.dns4053: "connection refused",
+			probeNames.quic:    "no answer within the 8.5 s left of the 10 s probe budget: context deadline exceeded",
+		}
+		connect.AssertEqual(t, len(outcome.refusedCarriers), len(wantErrors))
+		for _, refusedCarrier := range outcome.refusedCarriers {
+			probe := fmt.Sprintf("%s:%d", refusedCarrier.Carrier, refusedCarrier.Port)
+			if refusedCarrier.Error != wantErrors[probe] {
+				t.Fatalf("%s was left out for %q, want %q", probe, refusedCarrier.Error, wantErrors[probe])
+			}
+		}
+	})
 }
