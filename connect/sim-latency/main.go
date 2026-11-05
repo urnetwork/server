@@ -29,6 +29,8 @@ package main
 //             verify one frozen source epoch against the measured repositories
 //   source-record
 //             verify and print one epoch from the remote competition branches
+//   source-index
+//             preview exact public source and authenticated intake/grading purpose
 //   staging-source-check
 //             verify immutable staging branches alias frozen baseline source
 //   epoch-review
@@ -77,6 +79,7 @@ Usage:
   sim-latency calibrate --calibration-inputs=<path> --calibration-inputs-sha256=<digest> --calibration-lock=<path> --calibration-cpuset=<cpus> [--calibration-protocol=<name> --calibration-approval=<path> --calibration-approval-sha256=<digest> --calibration-original-plan=<path> --calibration-original-plan-sha256=<digest>]
   sim-latency source-check --epoch=<n> [--source-config=<path>] [--repos-root=<dir>] [--json]
   sim-latency source-record --epoch=<n> [--staging] [--source-config=<path>] [--repos-root=<dir>]
+  sim-latency source-index --activation-generation=<n> [--json]
   sim-latency staging-source-check --epoch=0 [--source-config=<path>] [--repos-root=<dir>]
   sim-latency epoch-review --epoch=<n> next [--out-dir=<dir>]
   sim-latency epoch-review --epoch=<n> export-winner --job-id=<id> [--out-dir=<dir>]
@@ -154,6 +157,7 @@ Options:
   --build-command=<path> Pinned isolated source build/test broker; never a candidate host command.
   --build-sha256=<digest> SHA-256 of the qualified isolated build/test broker.
   --manifest-commit=<sha> Exact already-published, prospectively approved baseline config commit.
+  --activation-generation=<n> Exact persisted source activation to preview; never a moving branch head.
   --evaluator-image=<digest>  Immutable sha256 evaluator image identity.
   --operator-token-file=<path>  Private file containing the competition operator bearer token.
   --grafana-url=<url>     Main Grafana origin used by launch preflight.
@@ -288,6 +292,9 @@ func main() {
 		runSourceCheck(opts)
 	case optBool(opts, "source-record"):
 		runSourceRecord(opts)
+	case optBool(opts, "source-index"):
+		requireMainEnvironment("source-index")
+		runSourceIndex(opts)
 	case optBool(opts, "staging-source-check"):
 		runStagingSourceCheck(opts)
 	case optBool(opts, "epoch-review"):
@@ -521,7 +528,7 @@ func validateEnvironment(command string, env string) error {
 				env,
 			)
 		}
-	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials", "supervise", "stage-reviewed-source", "bootstrap-source", "source-review-packet":
+	case "epoch-review", "staging-review", "promote", "launch-preflight", "credentials", "supervise", "stage-reviewed-source", "bootstrap-source", "source-review-packet", "source-index":
 		if env != "main" {
 			return fmt.Errorf(
 				"sim-latency %s is main-only: refusing WARP_ENV=%q",

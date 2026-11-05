@@ -25,6 +25,40 @@ entries and never label an unactivated checkpoint as active. Commit and push
 the documentation update as part of the epoch handoff, without editing frozen
 evaluation source or exposing operational config, credentials, or hidden seeds.
 
+The prepared native read-only exporter produces a Markdown preview by default,
+or a compact machine-readable public checkpoint with `--json`:
+
+```sh
+sim-latency source-index --activation-generation=N
+sim-latency source-index --activation-generation=N --json
+```
+
+It requires the authenticated `competition.source.lifecycle.v1` read capability;
+older installed code without that capability fails closed. It never fetches a
+moving origin, writes `EPOCH-SOURCE.md`, publishes refs or activates anything.
+The owner appends/commits the actual public index after checking the live scope
+and opening. A complete ten-repository map and immutable source-manifest bytes
+must reproduce the selected lock/mapping. Public repository URLs come from a
+fixed allowlist, not credential-bearing origin configuration. Instrumented
+evaluation commits and separately selected product parents remain distinct.
+
+Use the exported purpose labels literally:
+
+- `PREPARED`: authenticated prepared source, not an intake opening or grading
+  assertion.
+- `INTAKE_OPEN-evaluator_pending`: the real source-purpose intake grant, actual
+  round schedule and API acknowledgment exist; this is not a worker-ready or
+  fresh-baseline claim.
+- `GRADING_READY`: actual runtime activation, API/worker quorum, host admission
+  and immutable same-round scoring baseline are authenticated together.
+
+`ActivatedAt` alone never establishes these purposes. The exporter lists Go
+`1.27.3` as the compiler requirement; `compiler_verified` remains false unless
+independently authenticated compiler evidence exists. An absent baseline is
+printed as not established, never copied from an old or planned control. These
+new capability/command paths remain prepared release work until qualified and
+deployed; they do not assert that current production already supports them.
+
 Before production activation, start with
 [`launch/current-state.json`](launch/current-state.json), the compact preparation
 checkpoint, then verify its live process/session and linked evidence. It is a
