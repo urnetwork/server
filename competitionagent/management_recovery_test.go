@@ -1,3 +1,5 @@
+//go:build linux
+
 // Recovery tests use signed private custody files and fake manager/cgroup/
 // daemon observations only. No native wrapper is called, even in unprotected mode.
 package competitionagent

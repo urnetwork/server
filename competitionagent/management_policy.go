@@ -1,3 +1,5 @@
+//go:build linux
+
 // A protected ledger partitions the existing management reserve exactly once.
 // Structural policy validation is not native resource or pressure admission.
 package competitionagent

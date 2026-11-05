@@ -1,3 +1,5 @@
+//go:build linux
+
 // The fixed recovery role consumes root custody only, independently of worker
 // accounts, candidate mounts, signing keys and private engine admission health.
 package competitionagent

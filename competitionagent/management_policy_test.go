@@ -1,3 +1,5 @@
+//go:build linux
+
 // Pure ledgers and inert templates prove no host admission or pressure result.
 package competitionagent
 
