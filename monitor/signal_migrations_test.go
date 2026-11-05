@@ -753,7 +753,7 @@ func TestMigrationsSignalActivationHistoryExecutesExactSchemaGuard(t *testing.T)
 				if !ok {
 					t.Fatal("activation-history schema query has no following lookup-index boundary")
 				}
-				guard = strings.ReplaceAll(guard, "information_schema.columns", "observed_column")
+				guard = strings.ReplaceAll(guard, "public_columns", "observed_column")
 				guard = strings.ReplaceAll(guard, marker, "$1::boolean")
 				var admitted bool
 				err := conn.QueryRow(ctx, `
