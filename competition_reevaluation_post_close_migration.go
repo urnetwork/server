@@ -30,6 +30,14 @@ END $recovery_window$;
 // terminal snapshot, principal scope, lease or immutable publication checks.
 var competitionReevaluationPostCloseMigration = func() *SqlMigration {
 	insertGuard, _, _, _ := CompetitionJobReevaluationBodiesSql()
+	oldTerminal := "AND j.eval_error_json->>'kind'='infrastructure'\n\t      AND j.eval_error_json->>'code' IN ('artifact_archive_failed','evaluation_time_budget_exhausted')"
+	if strings.Count(insertGuard, oldTerminal) != 1 {
+		panic("incident recovery predecessor terminal changed")
+	}
+	insertGuard = strings.Replace(insertGuard, oldTerminal, `AND (
+       (`+strings.TrimPrefix(oldTerminal, "AND ")+` AND NEW.authorization_json->>'incident_class' IS DISTINCT FROM 'operator_authorized_backing_service_v1') OR
+       (j.eval_error_json->>'kind'='submission' AND j.eval_error_json->>'code'='run_unstable'
+        AND NEW.authorization_json->>'incident_class'='operator_authorized_backing_service_v1'))`, 1)
 	oldWindow := `AND r.opens_at<=NEW.authorized_at AND NEW.authorized_at<r.closes_at`
 	newWindow := `AND r.opens_at<=NEW.authorized_at AND (
        (NEW.authorized_at<r.closes_at AND NOT (NEW.authorization_json ? 'post_close_approval')) OR
@@ -46,6 +54,27 @@ var competitionReevaluationPostCloseMigration = func() *SqlMigration {
 	}
 	insertGuard = strings.Replace(insertGuard, oldWindow, newWindow, 1)
 	insertGuard = strings.Replace(insertGuard, "BEGIN", `BEGIN
+ IF NEW.authorization_json->>'incident_class' IN ('operator_authorized_heartbeat_budget_v1','operator_authorized_backing_service_v1') THEN
+  IF NEW.receipt_json->>'incident_class' IS DISTINCT FROM NEW.authorization_json->>'incident_class'
+   OR NEW.receipt_json->'previous_failure'->>'kind' IS DISTINCT FROM NEW.original_terminal_json->'eval_error_json'->>'kind'
+   OR NEW.receipt_json->'previous_failure'->>'code' IS DISTINCT FROM NEW.original_terminal_json->'eval_error_json'->>'code' THEN
+   RAISE EXCEPTION 'incident recovery must retain its original failure and typed approval';
+  END IF;
+  IF NEW.authorization_json->>'incident_class'='operator_authorized_heartbeat_budget_v1'
+   AND (NEW.original_terminal_json->'eval_error_json'->>'kind' IS DISTINCT FROM 'infrastructure'
+    OR NEW.original_terminal_json->'eval_error_json'->>'code' IS DISTINCT FROM 'evaluation_time_budget_exhausted') THEN
+   RAISE EXCEPTION 'heartbeat recovery requires an exhausted infrastructure budget';
+  END IF;
+  IF NEW.authorization_json->>'incident_class'='operator_authorized_backing_service_v1'
+   AND (NEW.authorization_json->'backing_service_evidence'->>'schema' IS DISTINCT FROM '1'
+    OR NEW.authorization_json->'backing_service_evidence'->>'service' IS DISTINCT FROM 'postgresql'
+    OR COALESCE(NEW.authorization_json->'backing_service_evidence'->>'artifact_sha256' !~ '^[0-9a-f]{64}$',true)
+    OR COALESCE(NEW.authorization_json->'backing_service_evidence'->>'artifact_bytes' !~ '^[1-9][0-9]{0,9}$',true)
+    OR COALESCE(NEW.authorization_json->'backing_service_evidence'->>'artifact_path' !~
+      ('^evidence/scorer-input/candidate-[0-9]{2}-'||left(NEW.job_id::text,8)||'/stderr[.]log$'),true)) THEN
+   RAISE EXCEPTION 'backing service recovery requires exact retained log evidence';
+  END IF;
+ END IF;
  IF NEW.authorization_json ? 'post_close_approval' THEN
   PERFORM competition_finalization_touch_scope(NEW.environment,NEW.competition_id,NEW.season_id);
  END IF;`, 1)
