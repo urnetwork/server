@@ -1776,6 +1776,25 @@ Changes:
     - A chain starts at the horizon. Windows retired before its first run
       age out through the 30-day reap, so a deploy deletes no backlog at
       once.
+  - **Removed and expired proxies (2026-11-05).** Task
+    `remove_retired_hosted_proxy_clients` hard deletes an inactive client
+    with a `proxy_device_config` two days after its deactivation
+    (`model.RemoveRetiredHostedProxyClients`).
+    - **Why.** Nothing reactivates a client, so a removed or idle-expired
+      proxy is dead at its deactivation. Its `proxy_client` row stayed until
+      the 30-day reap, though, and every proxy instance restores and
+      reconciles all rows of its (host, block) as WireGuard clients. On Main,
+      92% of the 3.79M `proxy_device_config` rows were inactive, and about 93%
+      of the 823k configured WireGuard clients were theirs.
+    - **Order.** Two days is after the 1-day window reap, whose hosted test
+      reads the proxy's config, so a proxy's windows go first.
+    - **Walk.** `proxy_device_config` in `proxy_id` order with a cursor, pages
+      of 5,000, at most 5,000 deletions a run. A run with work left continues
+      a minute later, and a finished pass starts the next an hour later. A
+      deploy paces the existing backlog instead of deleting it at once.
+    - **Unchanged.** The idle window (`TopLevelClientIdleExpiration`, 30
+      days) is untouched: of the active proxies used again after their first
+      day, about 16% were last used 21 to 30 days ago.
   - **Provide keys at deactivation.** Every deactivation deletes the
     client's keys in its own transaction, and their mirror after the commit:
     `deactivateLockedNetworkClientsInTx`, which covers every removal path, the
