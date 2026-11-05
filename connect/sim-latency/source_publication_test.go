@@ -256,12 +256,24 @@ func TestSourcePublicationVerifiesExactApprovedPatchTree(t *testing.T) {
 	ref := sourcePublicationRef{Repository: "server", Branch: "sim-latency", ExpectedCommit: base, Commit: commit, StagedRoot: repository}
 	backend := &gitSourcePublicationBackend{patchPolicy: controller.PatchPolicy{MaxPatchBytes: 4096, AllowedPaths: []string{"connect/*.go"}, ForbiddenPaths: []string{"connect/sim-latency/**"}}}
 	originalPath := os.Getenv("PATH")
-	sourceTestForeignGit(t, repository)
+	originalGlobal, globalPresent := os.LookupEnv("GIT_CONFIG_GLOBAL")
+	foreignGlobal := sourceTestForeignGit(t, repository)
 	sourceTestUnscopedGitRefusal(t, repository)
 	if err := backend.Verify(context.Background(), ref, intent); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := os.Lstat(foreignGlobal); !os.IsNotExist(err) {
+		t.Fatal("verification created persistent foreign Git configuration", err)
+	}
+	// The ownership probe deliberately disabled global discovery. Restore the
+	// caller's exact identity source before the fixture's later real commit.
 	t.Setenv("PATH", originalPath)
+	t.Setenv("GIT_CONFIG_GLOBAL", originalGlobal)
+	if !globalPresent {
+		if err := os.Unsetenv("GIT_CONFIG_GLOBAL"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := os.WriteFile(path, []byte("package connect\n\nvar synthetic = 3\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
