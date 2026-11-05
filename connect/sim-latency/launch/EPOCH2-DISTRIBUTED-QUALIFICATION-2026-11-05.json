@@ -1,0 +1,149 @@
+{
+  "schema": 1,
+  "kind": "prospective-epoch2-distributed-targeted-source-qualification",
+  "status": "passed_targeted_composite_with_explicit_dependency_closure_reuse",
+  "qualified_source": {
+    "server_code_checkpoint": "531aefabea4a33bd859ec8cfa4967c5d1795f02a",
+    "server_code_tree": "f112a3ccd7d804b4060d726ea564ae059bd53c8a",
+    "origin_main_preserved": "abbff6987b62bc7251aa4acab04ea3037a53f140",
+    "go_toolchain": "go1.27.3",
+    "compiler_dependency_commits": {
+      "connect": "ee9ee771f427c55177dda53faa0fda472bdbb3b8",
+      "sdk": "7a618ba590499366a3f88c88ece2faf833882811",
+      "proxy": "1575ad25cb8b10bd42865e630ec09f6823096e64",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "userwireguard": "70ecd6e7f97715718f1079cc9be9fd42a8ebe82c",
+      "sn": "b2c491cf8c84b4e01db7ed14d2885f2b71dad558",
+      "warp": "6ae07414fa1215d5a74e7ee02c0e390ab9325889",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+    },
+    "control_graph_manifest_sha256": "3cb5008d430d9a3bc14491ef80194ee8cc07c443fbbfc4355ebce76f81f1d564",
+    "full_ten_repository_source_manifest_sha256": "02ac0cbd72f9d73a6058279dbb0c736980e5f854d40097034b9c5aecf227dfbe",
+    "preceding_published_migration": 927,
+    "prospective_distributed_migration": 928,
+    "graph_note": "Once-pinned current-product compiler graph, not a competition epoch source freeze; competition source locks unchanged.",
+    "post_qualification_change": "This JSON evidence record only; no compiled source, dependency, SQL migration, policy, fixture or selected-test input changed.",
+    "excluded_later_checkpoints": [
+      "397e11d00a5ca3d26e1c595a1a5af24d980c90f9",
+      "c2b5e23bb15f2e8ee84bd5eb0d118c170677c48d"
+    ]
+  },
+  "reviewed_evidence": {
+    "execution_host": "goofe",
+    "receipt_path": "/mnt/data/urnetwork-competition-development-20261104/control-release-graph-4945-20261105.6qo3eQ0n/531-composite-qualification.json",
+    "receipt_sha256": "d4e9d78bd45658eb5e2c7d97d459742cdf9f0df6c219b4b934e0ea110f1f20d5",
+    "parent_receipt_sha256": "dc014fc506bf318623d28ac26346937d113061af257ecf4f1253aa9c1de96eae",
+    "verification_receipt_sha256": "0c4892b775218780f560f64b08a2937fb306b5180a56c6253c67fbb9beafdb71",
+    "root_review": "Independent root rehash/recount of prior618 and fresh12logs/five manifests; complete limitations and append-only PG resource correction reviewed.",
+    "fresh_scope": {
+      "grafana_all_runtime_roots": 148,
+      "sim_selected_runtime_roots": 22,
+      "fresh_processes_each_mode": 3,
+      "modes": [
+        "ordinary",
+        "race"
+      ],
+      "grafana_actual_passes": 888,
+      "sim_actual_passes": 132,
+      "total_actual_passes": 1020
+    },
+    "reuse_proof": {
+      "compiled_go_list_deps_test_compiled_modes": [
+        "ordinary",
+        "race"
+      ],
+      "unaffected_packages": [
+        "controller",
+        ".",
+        "monitor",
+        "model"
+      ],
+      "all_eight_closures_exclude_changed_grafana": true,
+      "closure_proof_sha256": "0ce9e1558f777eae3709545b078563614f006272a0daf30347237d46821a69ed",
+      "source_delta_proof_sha256": "234e41f6ff2885324d9d0fd19f4463a0e4afd0a0672a9b43c3437e913391bd1a",
+      "reused_pure_passes": 276,
+      "reused_private_pg_passes": 192,
+      "total_reused_passes": 468,
+      "not_binary_byte_equivalence": true
+    },
+    "fresh_actual_passes": 1020,
+    "closure_proven_reused_passes": 468,
+    "nonduplicated_selected_composite_passes": 1488,
+    "failed_roots": 0,
+    "skipped_fresh_roots": 0,
+    "race_reports": 0,
+    "source_harness_binary_prepost_equal": true,
+    "owned_test_cgroups_empty": true,
+    "earlier_failed_323_receipt_preserved_sha256": "1bbf384a4814ca5e0bcac99e9e9630affb21640fc21b72173ca46a6919c0dc72"
+  },
+  "resource_accounting": {
+    "correction_path": "/mnt/data/urnetwork-competition-development-20261104/control-release-graph-4945-20261105.6qo3eQ0n/pg-resource-accounting-correction.json",
+    "correction_sha256": "e7bef892acd4263dad15e78c4e69a4055cd57a456d154620189f4e2ca93b873f",
+    "correction": {
+      "schema": 1,
+      "kind": "append-only-resource-accounting-correction",
+      "corrects_resource_wording_in": "qualification.json",
+      "original_qualification_sha256": "dc014fc506bf318623d28ac26346937d113061af257ecf4f1253aa9c1de96eae",
+      "functional_results_retained": {
+        "actual_passes": 618,
+        "failed_roots": 0,
+        "race_reports": 0,
+        "source_harness_binary_prepost_equal": true
+      },
+      "actual_pg_profile": {
+        "aggregate_parent_cap_present": false,
+        "memory_max_bytes_per_pg_service": 12884901888,
+        "memory_max_bytes_per_redis_service": 12884901888,
+        "memory_max_bytes_per_test_service": 12884901888,
+        "tasks_max_per_service": 512,
+        "swap_max_bytes_per_service": 0,
+        "cpu_quota_percent_per_service": 200,
+        "all_three_services_share_one_two_physical_cpu_pair": true
+      },
+      "theoretical_during_test": {
+        "memory_max_gib_per_pg_invocation": 36,
+        "tasks_max_per_pg_invocation": 1536,
+        "memory_max_gib_four_pg_invocations": 144
+      },
+      "init_phase": "initdb has its own12GiB/512task cap and completes before PG/Redis/test services start; it is not a fourth concurrent test-phase service",
+      "child_config_not_a_cgroup_aggregate_cap": {
+        "postgres_max_connections": 100,
+        "postgres_shared_buffers_mib": 128,
+        "redis_maxmemory_mib": 256
+      },
+      "peak_measurement_limit": "Some transient unit MemoryPeak values are unavailable after stop/collection. No four-PG aggregate peak measurement or host-wide no-OOM proof is asserted. Root's approximately122GiB available-RAM observation was PRE-expansion, not a concurrent-four-PG peak.",
+      "observations": "Trusted nonadversarial selected tests completed and their owned services joined with empty cgroups; no OOM was observed in retained results. This is not a memory-pressure/bomb qualification.",
+      "future_old_profile_ceiling": "At most ONE PG invocation plus ONE pure/build unit: configured memory-cap sum36+12=48GiB. No concurrentPG under the four-unit allowance until a common12GiB/512task parent and live ancestor/child readback are mechanically qualified.",
+      "pure_profile_distinction": "A pure/build invocation is one service with its child processes in the same12GiB/512task cgroup; four such units have48GiB configured-cap sum.",
+      "history_not_rewritten": true,
+      "product_or_test_source_changed": false,
+      "native_or_high_pressure_authority_granted": false
+    },
+    "fresh_pure_service_cap": "One service and all subprocesses share12GiB/512tasks/swap0/2CPU; at mostfour disjoint pure units",
+    "future_old_profile_limit": "At most one PG invocation plus one pure/build unit until a common parent cap and live ancestor/child readback are mechanically qualified."
+  },
+  "publication_boundary": {
+    "source_only": true,
+    "main_ddl_performed": false,
+    "deployment_or_service_restart": false,
+    "active_worker_or_evaluator_interrupted": false,
+    "runtime_fence_or_job_deadline_changed": false,
+    "live_policy_config_hold_or_native_executor_activated": false,
+    "frozen_competition_source_branches_or_locks_changed": false,
+    "next_user_pipeline": "Normal build/deploy and additive migration928 after the full published prefix through927 remain separate user-operated actions. This receipt does not authorize runtime activation.",
+    "native_activation_gates": "Remote roles, helper installation, native Docker/cgroup/mount/memory-pressure containment, host-equivalence measurements and management aggregate-cap proof remain separate."
+  },
+  "limitations": [
+    "Targeted composite, not entire server suite",
+    "No production Grafana/Slack/DB calls; Grafana APIs are private loopback fixtures, promtool uses synthetic rules",
+    "No native Docker/cgroup/mount/bomb or measurement qualification",
+    "No deployment/main DDL/API/grants performed by test executor",
+    "Agent397 partial is separate and is not substituted into this531 source proof",
+    "The1488 count is1020 fresh plus468 explicitly reused; do not add the whole parent618 again. Reuse is dependency/source closure proof, not binary byte equivalence.",
+    "Historical baseline files, parent Git history and Git blobs were omitted from test materialization; no full clean checkout or full repository suite is claimed. VCS metadata embedding was disabled.",
+    "PG12GiB was PER SERVICE: PG+Redis+test can total36GiB per invocation, not12GiB aggregate. No concurrent-four-PG aggregate peak/no-OOM or memory-pressure proof exists.",
+    "Only synthetic/private services and public source/fixture inputs were used; no main DB credentials or production Grafana/Slack calls. No native executor activation authority follows.",
+    "Later397/core source and partial evidence remain separate backups, not substituted into this release. No Sille builds/tests, migration, restart or fence cancellation was performed."
+  ]
+}
