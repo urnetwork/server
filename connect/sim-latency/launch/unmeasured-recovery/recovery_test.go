@@ -3,16 +3,29 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// TempDir's returned leaf follows the process umask. The fixture owns its
+// privacy requirement and must enforce it rather than relying on the harness.
+func privateRecoveryTestRoot(t *testing.T) string {
+	t.Helper()
+	anchor := t.TempDir()
+	if err := os.Chmod(anchor, 0700); err != nil {
+		t.Fatal(err)
+	}
+	return anchor
+}
 
 // Every byte and identity is generated test-only, never copied from production.
 type recoveryFixture struct {
@@ -48,7 +61,7 @@ func writeSyntheticJson(t *testing.T, path string, value any) filePin {
 // Build the complete six-job shape and explicit owner/proof pins deterministically.
 func newRecoveryFixture(t *testing.T) recoveryFixture {
 	t.Helper()
-	anchor := t.TempDir()
+	anchor := privateRecoveryTestRoot(t)
 	policy := recoveryPolicy{CampaignRoot: filepath.Join(anchor, "campaign"), SelectionRoot: filepath.Join(anchor, "selection"), Paths: pathPolicy{OwnerUid: uint32(os.Getuid()), AnchorPath: anchor}}
 	settings := defaultRecoverySettings()
 	config := recoveryConfig{Schema: 1, Kind: "sim-latency-unmeasured-recovery-config", CampaignRoot: policy.CampaignRoot, SelectionRoot: policy.SelectionRoot,
@@ -350,7 +363,7 @@ func TestDefaultOpaqueCapCoversLargeQualifiedExecutor(t *testing.T) {
 
 // A small sparse fixture proves the same streaming size boundary deterministically.
 func TestOpaqueStreamingHashRejectsOverCapAndAcceptsExactBoundary(t *testing.T) {
-	anchor := t.TempDir()
+	anchor := privateRecoveryTestRoot(t)
 	path := filepath.Join(anchor, "synthetic-sparse-file")
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
@@ -370,6 +383,46 @@ func TestOpaqueStreamingHashRejectsOverCapAndAcceptsExactBoundary(t *testing.T) 
 	digest, size, err := hashProtected(path, policy, 4097)
 	if err != nil || size != 4097 || digest != digestBytes(make([]byte, 4097)) {
 		t.Fatal("exact-boundary streaming digest mismatch")
+	}
+}
+
+// A fresh process changes only its own umask, even when the parent test unit
+// uses a restrictive mask. Exercise the actual fixture, lock and hash consumer.
+func TestRecoveryFixturesEnforcePrivateAnchorUnderPermissiveUmask(t *testing.T) {
+	const probeKey = "URNETWORK_RECOVERY_TEST_PRIVATE_ANCHOR_PROBE"
+	if os.Getenv(probeKey) == "child" {
+		previous := syscall.Umask(0022)
+		defer syscall.Umask(previous)
+		fixture := newRecoveryFixture(t)
+		info, err := os.Lstat(fixture.Policy.Paths.AnchorPath)
+		if err != nil || info.Mode().Perm() != 0700 {
+			t.Fatal("fixture did not establish its owned private anchor", err)
+		}
+		lock, err := openLegacyLock(fixture.Request.Config, fixture.Policy.ScoringLock)
+		if err != nil {
+			t.Fatal("permissive child umask changed exact lock admission", err)
+		}
+		defer lock.Close()
+		if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			t.Fatal(err)
+		}
+		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+		if err := recheckHeldLegacyLock(lock, fixture.Request.Config, fixture.Policy.ScoringLock); err != nil {
+			t.Fatal("private fixture lost exact held-lock authority", err)
+		}
+		TestOpaqueStreamingHashRejectsOverCapAndAcceptsExactBoundary(t)
+		return
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	command := exec.CommandContext(ctx, executable, "-test.run=^TestRecoveryFixturesEnforcePrivateAnchorUnderPermissiveUmask$", "-test.count=1")
+	command.Env = []string{probeKey + "=child", "TMPDIR=" + privateRecoveryTestRoot(t), "PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C"}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("isolated permissive-umask fixture regression failed: %v\n%s", err, output)
 	}
 }
 

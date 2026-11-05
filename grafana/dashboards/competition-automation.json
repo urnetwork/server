@@ -73,6 +73,62 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
       "targets": [{"refId": "A", "expr": "max(urnetwork_competition_automation_integrity_incidents{env=\"$env\"})", "instant": true}]
+    },
+    {
+      "id": 9, "type": "timeseries", "title": "executor slots occupied",
+      "description": "Coordinator database custody per frozen executor. A terminal timeout may release this row before remote cleanup is confirmed; the separate physical admission observation must also allow reuse. A transport failure is not a new attempt.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max by (executor_host) (urnetwork_competition_executor_slot_busy{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
+    },
+    {
+      "id": 10, "type": "timeseries", "title": "executor no-op admission receipts",
+      "description": "Every approved host must retain a passing no-op receipt against the same immutable round baseline before any candidate is dispatched. The five-percent operational screen is not proof of statistical equivalence.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 26},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max by (executor_host) (urnetwork_competition_executor_noop_qualified{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
+    },
+    {
+      "id": 11, "type": "timeseries", "title": "executor absolute budget remaining",
+      "description": "The original three-hour clock includes dispatch, reconnects, result transfer and archival verification. Recovery never grants another clock. Zero means idle or expired.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 34},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "min by (executor_host) (urnetwork_competition_executor_deadline_remaining_seconds{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
+    },
+    {
+      "id": 12, "type": "timeseries", "title": "executor host heartbeat age",
+      "description": "Coordinator-retained authenticated host heartbeat age. Minus one is a missing observation, shown in red rather than healthy; healthy sibling executors continue while an unavailable host is reconciled.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 34},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "s", "color": {"mode": "thresholds"}, "mappings": [{"type": "value", "options": {"-1": {"color": "red", "index": 0, "text": "missing heartbeat"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "green", "value": 0}, {"color": "orange", "value": 60}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "min by (executor_host) (urnetwork_competition_executor_heartbeat_age_seconds{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
+    },
+    {
+      "id": 13, "type": "timeseries", "title": "executor transport reconciliation failures",
+      "description": "Failed authenticated agent operations over the last hour. These retain the same run identity; they do not count as candidate failures or authorize duplicate execution.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 42},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "short", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "sum by (executor_host) (increase(urnetwork_competition_executor_transport_failures_total{env=\"$env\"}[1h]))", "legendFormat": "{{executor_host}}"}]
+    },
+    {
+      "id": 14, "type": "timeseries", "title": "executor state and expired custody",
+      "description": "Authenticated run state: 0 unknown, 1 accepted, 2 running, 3 succeeded, 4 failed. Expired custody requires reconciliation of the original run before slot reuse; closing waits for every admitted job.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 42},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "max by (executor_host) (urnetwork_competition_executor_remote_state{env=\"$env\"})", "legendFormat": "{{executor_host}} state"}, {"refId": "B", "expr": "max by (executor_host) (urnetwork_competition_executor_reconciliation_required{env=\"$env\"})", "legendFormat": "{{executor_host}} expired custody"}]
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "executor physical admission observation",
+      "description": "Signed current physical custody, separate from database slot state and historical no-op admission. One is available, zero occupied, minus one unknown or older than 60 seconds. Current policy host membership is required. This is an observation, not a lease or permission to repeat a run.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": -1, "max": 1, "color": {"mode": "thresholds"}, "mappings": [{"type": "value", "options": {"-1": {"color": "red", "index": 0, "text": "unknown or stale"}, "0": {"color": "orange", "index": 1, "text": "physical custody occupied"}, "1": {"color": "green", "index": 2, "text": "available observation"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "min by (executor_host) (((urnetwork_competition_executor_physical_available{env=\"$env\"} * ((time() - urnetwork_competition_executor_physical_observed_at_seconds{env=\"$env\"}) <= bool 60)) - ((time() - urnetwork_competition_executor_physical_observed_at_seconds{env=\"$env\"}) > bool 60)) and on (executor_host) urnetwork_competition_executor_noop_qualified{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
     }
   ]
 }

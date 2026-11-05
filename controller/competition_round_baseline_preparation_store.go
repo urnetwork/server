@@ -122,6 +122,13 @@ func (self PostgresStore) ReserveRoundBaseline(ctx context.Context, settings *Se
 			var slotJob *server.Id
 			var slotDeadline *time.Time
 			server.Raise(tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&slotOwner, &slotJob, &slotDeadline))
+			if settings.DistributedEvaluationPolicy != nil && settings.distributedRoundEpoch >= 2 {
+				var distributedBusy bool
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_execution_slot WHERE job_id IS NOT NULL)`).Scan(&distributedBusy))
+				if distributedBusy {
+					return
+				}
+			}
 			// Choose the execution clock only after this transaction owns the slot.
 			now := self.nowUtc()
 			recovery := settings.roundBaselinePreparation.Recovery
@@ -346,6 +353,47 @@ func (self PostgresStore) ClaimPreparedRoundBaseline(ctx context.Context, settin
 		}, server.OptReadWrite())
 	})
 	return job, resultErr
+}
+
+// Future distributed rounds publish their one control before qualification or
+// candidate dispatch. The source admission keeps its FIFO identity, zero
+// attempts and absent execution clock; publication releases only preparation.
+func (self PostgresStore) PublishPreparedRoundBaseline(ctx context.Context, settings *Settings, preparation *roundBaselinePreparation, prepared *preparedRoundBaseline) error {
+	return captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			source, frozen, err := self.checkRoundBaselinePreparationInTx(ctx, tx, settings, preparation)
+			server.Raise(err)
+			policy := frozen.DistributedEvaluationPolicy
+			if policy == nil || policy.FromEpoch < 2 || source.Round.Epoch < policy.FromEpoch || !roundUsesAutomation(&source.Round) {
+				panic(ErrConflict)
+			}
+			server.Raise(validatePreparedRoundBaseline(prepared, preparation, frozen))
+			now := self.nowUtc()
+			server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_executor_baseline_owner',$1,true),
+			 set_config('urnetwork.competition_executor_baseline_context',$2,true),set_config('urnetwork.competition_executor_baseline_manifest',$3,true)`,
+				preparation.Owner, preparation.ContextSha256, prepared.ArtifactManifestSha256))
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_round_baseline
+			 (round_id,baseline_json,baseline_sha256,source_job_id,source_attempt,source_artifact_manifest_sha256,
+			 base_sha,providers_sha256,evaluator_image_digest,scorer_version,hardware_id,host_qualification_sha256,created_at)
+			 VALUES($1,$2,$3,$4,1,$5,$6,$7,$8,$9,$10,$11,$12)`, source.RoundId, prepared.BaselineJson, prepared.BaselineSha256,
+				source.JobId, prepared.ArtifactManifestSha256, frozen.BaseSha, source.Round.ProvidersSha256, frozen.EvaluatorImageDigest, frozen.scorerVersion(),
+				frozen.EvaluationPolicy.HardwareId, frozen.EvaluationPolicy.HostQualificationSha256, now))
+			baseline := &roundBaselineRecord{RoundId: source.RoundId, Json: prepared.BaselineJson, Sha256: prepared.BaselineSha256,
+				SourceJobId: source.JobId, SourceAttempt: 1, SourceArtifactManifestSha256: prepared.ArtifactManifestSha256,
+				BaseSha: frozen.BaseSha, ProvidersSha256: source.Round.ProvidersSha256, EvaluatorImageDigest: frozen.EvaluatorImageDigest,
+				ScorerVersion: frozen.scorerVersion(), HardwareId: frozen.EvaluationPolicy.HardwareId, HostQualificationSha256: frozen.EvaluationPolicy.HostQualificationSha256, CreatedAt: now}
+			server.Raise(validateRoundBaselineRecord(frozen, &source.Round, baseline))
+			appendEvent(ctx, tx, source.JobId, now, "round_baseline_preparation_published", preparation.Owner,
+				map[string]any{"schema": 1, "owner": preparation.Owner, "baseline_sha256": prepared.BaselineSha256,
+					"artifact_manifest_sha256": prepared.ArtifactManifestSha256, "candidate_started": false})
+			updated, updateErr := tx.Exec(ctx, `UPDATE competition_worker_slot SET worker_id=NULL,job_id=NULL,lease_expires_at=NULL,heartbeat_at=$2
+			 WHERE slot_id=1 AND worker_id=$1 AND job_id IS NULL`, preparation.Owner, now)
+			server.Raise(updateErr)
+			if updated.RowsAffected() != 1 {
+				panic(ErrLeaseLost)
+			}
+		}, server.OptReadWrite())
+	})
 }
 
 // A successful transfer has non-null job_id, so this cannot release the real

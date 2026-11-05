@@ -113,10 +113,15 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 		return err
 	}
 	frozen.automationLease, frozen.automationRoundId = &request.Lease, round.RoundId
-	worker, err := NewWorker(frozen, competitionSupervisorWorkerStore{PostgresStore: store, roundId: round.RoundId}, CommandEvaluator{}, workerId)
-	if err != nil {
-		return err
+	if frozen.DistributedEvaluationPolicy != nil {
+		frozen.distributedSourceCommits = map[string]string{}
+		for repository, commit := range intent.Commits {
+			if repository != "operator-proxy" {
+				frozen.distributedSourceCommits[repository] = commit
+			}
+		}
 	}
+	workerStore := competitionSupervisorWorkerStore{PostgresStore: store, roundId: round.RoundId}
 	operationCtx, cancel := context.WithCancelCause(ctx)
 	done := make(chan struct{})
 	go func() {
@@ -134,7 +139,15 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 		}
 	}()
 	defer func() { cancel(nil); <-done }()
-	err = worker.Run(operationCtx)
+	if frozen.DistributedEvaluationPolicy != nil {
+		err = runCompetitionDistributedCoordinator(operationCtx, frozen, workerStore, workerId)
+	} else {
+		worker, workerErr := NewWorker(frozen, workerStore, CommandEvaluator{}, workerId)
+		if workerErr != nil {
+			return workerErr
+		}
+		err = worker.Run(operationCtx)
+	}
 	if cause := context.Cause(operationCtx); cause != nil {
 		return cause
 	}

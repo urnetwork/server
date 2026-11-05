@@ -12,7 +12,8 @@ import (
 
 // Statement ordinals are local to one step. SupervisorAuthority consists of
 // the lease EXISTS scan, instrument-approval setup and supervisor-fence setup,
-// in that order. Every other SQL-bearing step currently contains one statement.
+// in that order. JobAuthority also has two prospective executor-fence statements
+// for a distributed host; every other SQL-bearing step has one statement.
 type competitionHeartbeatDatabaseStep uint8
 
 const (

@@ -279,7 +279,26 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 // The ordinary Claim starts the submission clock. A cold round instead owns
 // one separate producer first; publication and the real first Claim are atomic.
 func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host HostSelfCheck) (*queuedJob, error) {
+	if competitionDistributedEnabled(self.settings) {
+		// Qualification proves this runtime class, not that an earlier remote
+		// run has joined. Read physical custody before every fresh FIFO claim;
+		// busy hosts may only reconcile their already-started execution.
+		availability, ok := self.evaluator.(competitionExecutorAvailability)
+		if !ok {
+			return nil, errors.New("distributed evaluator cannot observe physical slot custody")
+		}
+		available, err := availability.Available(ctx)
+		if err != nil {
+			return nil, err
+		}
+		selected := *self.settings
+		selected.executorReconcileOnly = !available
+		return self.store.Claim(ctx, &selected, self.workerId, self.workerImageDigest)
+	}
 	if self.settings.roundBaselinePreparation == nil {
+		if self.settings.distributedPreparationOnly {
+			return nil, errors.New("distributed execution requires the pinned shared-baseline preparation role")
+		}
 		return self.store.Claim(ctx, self.settings, self.workerId, self.workerImageDigest)
 	}
 	store, ok := self.store.(roundBaselinePreparationStore)
@@ -295,6 +314,9 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 		return nil, err
 	}
 	if preparation == nil {
+		if self.settings.distributedPreparationOnly {
+			return nil, nil
+		}
 		return self.store.Claim(ctx, self.settings, self.workerId, self.workerImageDigest)
 	}
 	policy := self.settings.roundBaselinePreparation.Settings
@@ -376,6 +398,18 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 	joinFence()
 	if err := operationCtx.Err(); err != nil {
 		return hold("canceled_before_publication", errors.Join(err, context.Cause(operationCtx)))
+	}
+	if self.settings.distributedPreparationOnly {
+		publisher, ok := self.store.(interface {
+			PublishPreparedRoundBaseline(context.Context, *Settings, *roundBaselinePreparation, *preparedRoundBaseline) error
+		})
+		if !ok {
+			return hold("publication_capability", errors.New("distributed shared-baseline publication capability is unavailable"))
+		}
+		if err := publisher.PublishPreparedRoundBaseline(operationCtx, self.settings, preparation, prepared); err != nil {
+			return hold("publication_fence", err)
+		}
+		return nil, nil
 	}
 	job, err := store.ClaimPreparedRoundBaseline(operationCtx, self.settings, preparation, prepared)
 	if err != nil {

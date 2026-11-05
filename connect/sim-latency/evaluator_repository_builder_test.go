@@ -260,7 +260,7 @@ infrastructure_failure() { printf 'infrastructure failure: %s\n' "$*" >&2; exit 
 `
 		policySection := sourceGitScriptSection(t, "build-submission.sh", "REPOSITORIES=(", "\nbase_sha=")
 		applicationSection := sourceGitScriptSection(t, "build-submission.sh", "source_identity=", "\nimage_key=")
-		command := exec.CommandContext(t.Context(), "bash", "-c", prelude+policySection+"\n"+applicationSection)
+		command := exec.CommandContext(t.Context(), "bash", "-c", prelude+sourceBuilderGitDependency(t)+policySection+"\n"+applicationSection)
 		calledPath := filepath.Join(root, "called")
 		command.Env = append(os.Environ(), "BUILDER_TEST_SOURCE="+sourceRoot, "BUILDER_TEST_CONTEXT="+contextRoot,
 			"BUILDER_TEST_LOCK_SHA256="+lockHex, "BUILDER_TEST_VALIDATOR="+validatorPath, "BUILDER_TEST_CALLED="+calledPath,

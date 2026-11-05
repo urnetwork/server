@@ -10,6 +10,8 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 readonly RESOURCE_BOUNDARY="$SCRIPT_DIR/resource-boundary.sh"
 readonly BUILD_TIMEOUT_SECONDS=600
 readonly SOURCE_APPLICATION_TIMEOUT_SECONDS=70
+source "$SCRIPT_DIR/subevaluation-ownership.sh"
+subevaluation_ownership_init
 
 base_image=""
 patch_path=""
@@ -133,7 +135,7 @@ fi
 for command in awk git jq sha256sum mktemp realpath sudo stat taskset timeout; do
     command -v "$command" >/dev/null 2>&1 || { printf 'missing command: %s\n' "$command" >&2; exit 1; }
 done
-sudo -n docker info >/dev/null
+evaluation_docker info >/dev/null
 [ -x "$RESOURCE_BOUNDARY" ] || { printf 'trusted resource boundary is not executable\n' >&2; exit 1; }
 
 resource_boundary_json="$($RESOURCE_BOUNDARY)"
@@ -160,8 +162,8 @@ patch_path="$(realpath -e "$patch_path")"
 policy_path="$(realpath -e "$policy_path")"
 source_root="$(realpath -e "$source_root")"
 
-base_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$base_image")"
-image_staging="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
+base_image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$base_image")"
+image_staging="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.staging"}}' "$base_image_id")"
 source_branch=sim-latency
 if [ "$staging" = true ]; then
     [ "$image_staging" = true ] || infrastructure_failure "staging build requires an explicitly staging evaluator image"
@@ -175,9 +177,9 @@ fi
 REPOSITORIES=(server connect sdk proxy glog goidenticons userwireguard sn warp gvisor)
 readonly REPOSITORIES
 repository_names_json="$(printf '%s\n' "${REPOSITORIES[@]}" | jq -Rsc 'split("\n")[:-1]')"
-base_sha="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image")"
-image_kind="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image")"
-source_lock_sha256="$(sudo -n docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image")"
+base_sha="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.base-sha"}}' "$base_image")"
+image_kind="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.image-kind"}}' "$base_image")"
+source_lock_sha256="$(evaluation_docker image inspect --format '{{index .Config.Labels "com.urnetwork.competition.source-lock-sha256"}}' "$base_image")"
 [[ "$base_sha" =~ ^[0-9a-f]{40}$ ]] && [ "$image_kind" = evaluator-base ] || {
     printf 'base image is missing the trusted evaluator identity labels\n' >&2
     exit 1
@@ -248,24 +250,24 @@ for repository in "${REPOSITORIES[@]}"; do
         exit 1
     }
     expected_commit="$(jq -er --arg repository "$repository" '.repositories[$repository]' "$source_identity")"
-    actual_branch="$(git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
+    actual_branch="$(evaluation_git -C "$repository_root" symbolic-ref --quiet --short HEAD)" ||
         infrastructure_failure "could not read evaluation $repository source branch"
-    actual_commit="$(git -C "$repository_root" rev-parse HEAD)" ||
+    actual_commit="$(evaluation_git -C "$repository_root" rev-parse HEAD)" ||
         infrastructure_failure "could not read evaluation $repository source commit"
-    source_status="$(git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
+    source_status="$(evaluation_git -C "$repository_root" status --porcelain=v1 --untracked-files=all)" ||
         infrastructure_failure "could not inspect evaluation $repository source worktree"
     [ "$actual_branch" = "$source_branch" ] && [ "$actual_commit" = "$expected_commit" ] &&
         [ -z "$source_status" ] ||
         infrastructure_failure "evaluation source repository does not match its temporary source identity: $repository"
 done
-server_commit="$(git -C "$source_root/server" rev-parse HEAD)" ||
+server_commit="$(evaluation_git -C "$source_root/server" rev-parse HEAD)" ||
     infrastructure_failure "could not read evaluation server source commit"
 [ "$server_commit" = "$base_sha" ] || infrastructure_failure "evaluation server source does not match the base image"
 
 # The simulator/scorer source is part of the trusted evaluator, never the
 # submission surface. Authenticate its Git tree before and after applying the
 # patch so this boundary fails closed independently of the API policy.
-protected_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
+protected_simulator_tree="$(evaluation_git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
     infrastructure_failure "could not read the trusted sim-latency source tree"
 [[ "$protected_simulator_tree" =~ ^[0-9a-f]{40}$ ]] ||
     infrastructure_failure "trusted sim-latency source tree is missing"
@@ -310,9 +312,9 @@ if [[ ${patch_path_base:-} == mono_root_v1 ]]; then
 else
 # Historical server-relative application retains its exact commit and failure
 # classification. The Docker validator independently reconstructs the same tree.
-git -C "$source_root/server" apply --check --whitespace=error-all "$build_context/canonical.patch"
-git -C "$source_root/server" apply --whitespace=error-all "$build_context/canonical.patch"
-if git -C "$source_root/server" diff --quiet -- connect/sim-latency; then
+evaluation_git -C "$source_root/server" apply --check --whitespace=error-all "$build_context/canonical.patch"
+evaluation_git -C "$source_root/server" apply --whitespace=error-all "$build_context/canonical.patch"
+if evaluation_git -C "$source_root/server" diff --quiet -- connect/sim-latency; then
     :
 else
     protected_diff_status=$?
@@ -321,31 +323,31 @@ else
     printf 'submission attempted to modify the protected sim-latency source tree\n' >&2
     exit 1
 fi
-protected_status="$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all -- connect/sim-latency)" ||
+protected_status="$(evaluation_git -C "$source_root/server" status --porcelain=v1 --untracked-files=all -- connect/sim-latency)" ||
     infrastructure_failure "could not inspect the protected sim-latency source worktree"
 [ -z "$protected_status" ] || {
     printf 'submission created content in the protected sim-latency source tree\n' >&2
     exit 1
 }
-git -C "$source_root/server" add --update || infrastructure_failure "could not stage the checked candidate patch"
-git -C "$source_root/server" diff --cached --check || infrastructure_failure "could not verify the checked candidate index"
+evaluation_git -C "$source_root/server" add --update || infrastructure_failure "could not stage the checked candidate patch"
+evaluation_git -C "$source_root/server" diff --cached --check || infrastructure_failure "could not verify the checked candidate index"
 GIT_AUTHOR_NAME='URnetwork Competition' \
 GIT_AUTHOR_EMAIL='competition@invalid' \
 GIT_COMMITTER_NAME='URnetwork Competition' \
 GIT_COMMITTER_EMAIL='competition@invalid' \
 GIT_AUTHOR_DATE='2000-01-01T00:00:00Z' \
 GIT_COMMITTER_DATE='2000-01-01T00:00:00Z' \
-    git -C "$source_root/server" commit --quiet --no-gpg-sign -m "competition submission $patch_sha256" ||
+    evaluation_git -C "$source_root/server" commit --quiet --no-gpg-sign -m "competition submission $patch_sha256" ||
     infrastructure_failure "could not commit the checked candidate patch"
-candidate_sha="$(git -C "$source_root/server" rev-parse HEAD)" ||
+candidate_sha="$(evaluation_git -C "$source_root/server" rev-parse HEAD)" ||
     infrastructure_failure "could not read the candidate source commit"
-candidate_branch="$(git -C "$source_root/server" symbolic-ref --quiet --short HEAD)" ||
+candidate_branch="$(evaluation_git -C "$source_root/server" symbolic-ref --quiet --short HEAD)" ||
     infrastructure_failure "could not read the candidate source branch"
-candidate_status="$(git -C "$source_root/server" status --porcelain=v1 --untracked-files=all)" ||
+candidate_status="$(evaluation_git -C "$source_root/server" status --porcelain=v1 --untracked-files=all)" ||
     infrastructure_failure "could not inspect the candidate source worktree"
 [ "$candidate_branch" = "$source_branch" ] && [ -z "$candidate_status" ] ||
     infrastructure_failure "committed candidate source is not clean on the temporary branch"
-candidate_simulator_tree="$(git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
+candidate_simulator_tree="$(evaluation_git -C "$source_root/server" rev-parse --verify HEAD:connect/sim-latency)" ||
     infrastructure_failure "could not read the candidate protected sim-latency source tree"
 [[ "$candidate_simulator_tree" =~ ^[0-9a-f]{40}$ ]] ||
     infrastructure_failure "candidate protected sim-latency source tree identity is invalid"
@@ -379,16 +381,19 @@ fi
 
 # A cache hit is accepted only when every trusted identity label agrees. A
 # caller-supplied tag that points at unrelated content fails closed.
-if sudo -n docker image inspect "$image_tag" >/dev/null 2>&1; then
-    image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
-    cached_identity="$(sudo -n docker image inspect "$image_tag" | jq -er '.[0].Config.Labels')"
+if evaluation_docker image inspect "$image_tag" >/dev/null 2>&1; then
+    image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
+    cached_identity="$(evaluation_docker image inspect "$image_tag" | jq -er '.[0].Config.Labels')"
     validate_submission_labels "$cached_identity" || {
             printf 'existing candidate tag does not match authenticated build inputs: %s\n' "$image_tag" >&2
             exit 1
         }
 else
+if [[ "$subevaluation_scoped" = true ]]; then
+    subevaluation_require_client || infrastructure_failure "fixed build client is unavailable"
+fi
 DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS" \
-    sudo -n docker build \
+    "${subevaluation_docker_command[@]}" build \
     --platform linux/amd64 \
     --provenance=false \
     --no-cache \
@@ -412,25 +417,25 @@ DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS
     --tag "$image_tag" \
     "$build_context" >&2
 
-image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
+image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
 fi
 
-actual_image_id="$(sudo -n docker image inspect --format '{{.Id}}' "$image_tag")"
+actual_image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
 [ "$actual_image_id" = "$image_id" ] || {
     printf 'candidate image id changed after build\n' >&2
     exit 1
 }
-actual_labels="$(sudo -n docker image inspect "$image_id" | jq -er '.[0].Config.Labels')"
+actual_labels="$(evaluation_docker image inspect "$image_id" | jq -er '.[0].Config.Labels')"
 validate_submission_labels "$actual_labels" || {
         printf 'candidate image labels do not authenticate build inputs\n' >&2
         exit 1
     }
-runtime_identity="$(sudo -n docker run --rm \
+runtime_identity="$(evaluation_docker run --rm \
     --network none \
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
-    "$image_id" identity)"
+    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$image_id" identity)"
 validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2
         exit 1

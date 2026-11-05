@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/competitionagent"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"io"
@@ -240,6 +241,11 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		!imageDigestPattern.MatchString(manifest.WorkerImageDigest) {
 		return nil, errors.New("attempt archive identity is invalid")
 	}
+	if job.SlotFencingToken > 0 && (manifest.Executor == nil || !workerIdPattern.MatchString(job.ExecutorHostId) || job.SlotId <= 0 ||
+		manifest.Executor.HostId != job.ExecutorHostId || manifest.Executor.SlotId != job.SlotId || manifest.Executor.SlotFencingToken != job.SlotFencingToken ||
+		manifest.Executor.RunId != competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount)) {
+		return nil, errors.New("distributed archive lost its exact executor custody")
+	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)
 	workerArtifacts := []struct {
 		path   string
@@ -329,6 +335,18 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 	competitionArtifactObjects.Add(float64(retention.ObjectCount))
 	competitionArtifactBytes.Add(float64(retention.Bytes))
 	manifest.Retention = retention
+	if job.SlotFencingToken > 0 {
+		// A lost PUT acknowledgement can finish after a later archive of the
+		// same fence. Different object-version metadata must never alias the
+		// latest manifest key; identical canonical bodies may safely share it.
+		retention.ManifestKey = ""
+		identityBytes, err := json.Marshal(manifest)
+		if err != nil {
+			return nil, err
+		}
+		identityDigest := sha256.Sum256(identityBytes)
+		retention.ManifestKey = filepath.ToSlash(filepath.Join(basePrefix, "manifests", hex.EncodeToString(identityDigest[:]), "artifact-manifest.json"))
+	}
 	manifestBytes, err := json.Marshal(manifest)
 	if err != nil {
 		return nil, err
@@ -469,7 +487,7 @@ func (self *blobArtifactArchive) submissionPatchKey(settings *Settings, roundId 
 }
 
 func (self *blobArtifactArchive) attemptPrefix(settings *Settings, job *queuedJob) string {
-	return filepath.ToSlash(filepath.Join(
+	prefix := filepath.ToSlash(filepath.Join(
 		self.store.Prefix(),
 		"competition",
 		"v1",
@@ -480,6 +498,10 @@ func (self *blobArtifactArchive) attemptPrefix(settings *Settings, job *queuedJo
 		job.JobId.String(),
 		fmt.Sprintf("attempt-%02d", job.AttemptCount),
 	))
+	if job.SlotFencingToken > 0 {
+		prefix = filepath.ToSlash(filepath.Join(prefix, "executors", job.ExecutorHostId, fmt.Sprintf("fence-%d", job.SlotFencingToken)))
+	}
+	return prefix
 }
 
 func artifactContentType(path string) string {
@@ -557,42 +579,51 @@ var (
 )
 
 type Settings struct {
-	reevaluationRuntime        *model.CompetitionJobReevaluationRuntime
-	reevaluationRuntimeSha256  string
-	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
-	Enabled                    bool                              `yaml:"enabled"`
-	CompetitionId              string                            `yaml:"competition_id"`
-	BaseSha                    string                            `yaml:"base_sha"`
-	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
-	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
-	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
-	FutureEpochPolicy          *CompetitionFutureEpochPolicy     `yaml:"future_epoch_policy,omitempty"`
-	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
-	ArtifactRoot               string                            `yaml:"artifact_root"`
-	ArtifactBucket             string                            `yaml:"artifact_bucket"`
-	ConfigLocalDirectory       string                            `yaml:"config_local_directory"`
-	VaultLocalDirectory        string                            `yaml:"vault_local_directory"`
-	SeasonEndsAt               time.Time                         `yaml:"season_ends_at"`
-	RetainUntil                time.Time                         `yaml:"retain_until"`
-	WorkerLeaseSeconds         int                               `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds     int                               `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds int                               `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts  int                               `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand           string                            `yaml:"simulator_command"`
-	EvaluatorCommand           string                            `yaml:"evaluator_command"`
-	EvaluatorCommandSha256     string                            `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand           string                            `yaml:"self_check_command"`
-	SelfCheckCommandSha256     string                            `yaml:"self_check_command_sha256"`
-	Tokens                     []Token                           `yaml:"-"`
-	SeedKey                    []byte                            `yaml:"-"`
-	workloadGenerator          WorkloadGenerator
-	artifactArchive            artifactArchive
-	automationLease            *model.CompetitionSupervisorLease
-	automationRoundId          server.Id
-	automationTargetRoundId    server.Id
-	roundBaselinePreparation   *roundBaselinePreparationProfile
-	futureBaselinePreparation  *roundBaselinePreparationProfile
-	intakeAdmission            *competitionIntakeAdmission
+	reevaluationRuntime          *model.CompetitionJobReevaluationRuntime
+	reevaluationRuntimeSha256    string
+	AutomationPolicy             model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
+	Enabled                      bool                                    `yaml:"enabled"`
+	CompetitionId                string                                  `yaml:"competition_id"`
+	BaseSha                      string                                  `yaml:"base_sha"`
+	EvaluatorImageDigest         string                                  `yaml:"evaluator_image_digest"`
+	PatchPolicy                  PatchPolicy                             `yaml:"patch_policy"`
+	EvaluationPolicy             EvaluationPolicy                        `yaml:"evaluation_policy"`
+	FutureEpochPolicy            *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
+	DistributedEvaluationPolicy  *CompetitionDistributedEvaluationPolicy `yaml:"-"`
+	SeasonPolicy                 SeasonPolicy                            `yaml:"season_policy"`
+	ArtifactRoot                 string                                  `yaml:"artifact_root"`
+	ArtifactBucket               string                                  `yaml:"artifact_bucket"`
+	ConfigLocalDirectory         string                                  `yaml:"config_local_directory"`
+	VaultLocalDirectory          string                                  `yaml:"vault_local_directory"`
+	SeasonEndsAt                 time.Time                               `yaml:"season_ends_at"`
+	RetainUntil                  time.Time                               `yaml:"retain_until"`
+	WorkerLeaseSeconds           int                                     `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds       int                                     `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds   int                                     `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts    int                                     `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand             string                                  `yaml:"simulator_command"`
+	EvaluatorCommand             string                                  `yaml:"evaluator_command"`
+	EvaluatorCommandSha256       string                                  `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand             string                                  `yaml:"self_check_command"`
+	SelfCheckCommandSha256       string                                  `yaml:"self_check_command_sha256"`
+	Tokens                       []Token                                 `yaml:"-"`
+	SeedKey                      []byte                                  `yaml:"-"`
+	workloadGenerator            WorkloadGenerator
+	artifactArchive              artifactArchive
+	automationLease              *model.CompetitionSupervisorLease
+	automationRoundId            server.Id
+	automationTargetRoundId      server.Id
+	roundBaselinePreparation     *roundBaselinePreparationProfile
+	futureBaselinePreparation    *roundBaselinePreparationProfile
+	intakeAdmission              *competitionIntakeAdmission
+	distributedCoordinator       *competitionDistributedCoordinatorProfile
+	distributedRoundEpoch        int
+	distributedPreparationOnly   bool
+	executorHostId               string
+	executorSlotId               int
+	executorReconcileExpiredOnly bool
+	executorReconcileOnly        bool
+	distributedSourceCommits     map[string]string
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
 }
@@ -754,6 +785,9 @@ func (self *Settings) Validate() error {
 		return err
 	}
 	if err := self.validateFutureEpochPolicy(); err != nil {
+		return err
+	}
+	if err := validateCompetitionDistributedPolicy(self.DistributedEvaluationPolicy); err != nil {
 		return err
 	}
 	season := self.SeasonPolicy
@@ -1184,23 +1218,24 @@ type evaluationArtifact struct {
 }
 
 type artifactManifest struct {
-	Schema                 int                  `json:"schema"`
-	JobId                  string               `json:"job_id"`
-	RoundId                string               `json:"round_id"`
-	SourceEpoch            int                  `json:"source_epoch"`
-	Attempt                int                  `json:"attempt"`
-	EvaluatorImageDigest   string               `json:"evaluator_image_digest"`
-	ApiImageDigest         string               `json:"api_image_digest"`
-	WorkerImageDigest      string               `json:"worker_image_digest"`
-	EvaluatorCommandSha256 string               `json:"evaluator_command_sha256"`
-	RequestSha256          string               `json:"request_sha256"`
-	PatchSha256            string               `json:"patch_sha256"`
-	StderrSha256           string               `json:"stderr_sha256"`
-	ResultSha256           string               `json:"result_sha256"`
-	Security               evaluationSecurity   `json:"security"`
-	Artifacts              []evaluationArtifact `json:"artifacts"`
-	Failure                *CompetitionError    `json:"failure,omitempty"`
-	Retention              *artifactRetention   `json:"retention,omitempty"`
+	Executor               *competitionExecutorArtifactIdentity `json:"executor,omitempty"`
+	Schema                 int                                  `json:"schema"`
+	JobId                  string                               `json:"job_id"`
+	RoundId                string                               `json:"round_id"`
+	SourceEpoch            int                                  `json:"source_epoch"`
+	Attempt                int                                  `json:"attempt"`
+	EvaluatorImageDigest   string                               `json:"evaluator_image_digest"`
+	ApiImageDigest         string                               `json:"api_image_digest"`
+	WorkerImageDigest      string                               `json:"worker_image_digest"`
+	EvaluatorCommandSha256 string                               `json:"evaluator_command_sha256"`
+	RequestSha256          string                               `json:"request_sha256"`
+	PatchSha256            string                               `json:"patch_sha256"`
+	StderrSha256           string                               `json:"stderr_sha256"`
+	ResultSha256           string                               `json:"result_sha256"`
+	Security               evaluationSecurity                   `json:"security"`
+	Artifacts              []evaluationArtifact                 `json:"artifacts"`
+	Failure                *CompetitionError                    `json:"failure,omitempty"`
+	Retention              *artifactRetention                   `json:"retention,omitempty"`
 }
 
 func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) (HostSelfCheck, error) {
@@ -1678,6 +1713,14 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 	// A staged future policy is never inherited by an already frozen round.
 	// Its image and command pins must still match the immutable snapshot below.
 	copy.EvaluationPolicy.G2VolumePolicy = policy.EvaluationPolicy.G2VolumePolicy
+	copy.DistributedEvaluationPolicy = policy.DistributedEvaluationPolicy
+	copy.distributedRoundEpoch = round.Epoch
+	if policy.DistributedEvaluationPolicy != nil {
+		if round.Staging || round.Epoch < policy.DistributedEvaluationPolicy.FromEpoch || settings.FutureEpochPolicy == nil ||
+			!sameCompetitionDistributedPolicy(policy.DistributedEvaluationPolicy, settings.FutureEpochPolicy.DistributedEvaluationPolicy) {
+			return nil, errors.New("distributed execution is not approved for this exact frozen round")
+		}
+	}
 	if round.Staging {
 		if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled {
 			copy.AutomationPolicy = model.CompetitionAutomationPolicy{}
@@ -2916,6 +2959,9 @@ func refreshOperationalMetrics(ctx context.Context, settings *Settings) error {
 		competitionArtifactArchiveReady.Set(1)
 	} else {
 		competitionArtifactArchiveReady.Set(0)
+	}
+	if err := refreshCompetitionDistributedMetrics(ctx, settings, now); err != nil {
+		return err
 	}
 	return refreshAutomationOperationalMetrics(ctx, settings, now)
 }
@@ -4315,18 +4361,19 @@ func (self PostgresStore) dequeueSignal(ctx context.Context, settings *Settings)
 }
 
 type roundPolicySnapshot struct {
-	AutomationPolicy       *model.CompetitionAutomationPolicy `json:"automation_policy,omitempty"`
-	Schema                 int                                `json:"schema"`
-	CompetitionId          string                             `json:"competition_id"`
-	BaseSha                string                             `json:"base_sha"`
-	EvaluatorImageDigest   string                             `json:"evaluator_image_digest"`
-	EvaluatorCommand       string                             `json:"evaluator_command,omitempty"`
-	EvaluatorCommandSha256 string                             `json:"evaluator_command_sha256,omitempty"`
-	ScoreSchema            int                                `json:"score_schema"`
-	ScorerVersion          string                             `json:"scorer_version"`
-	PatchPolicy            PatchPolicy                        `json:"patch_policy"`
-	EvaluationPolicy       EvaluationPolicy                   `json:"evaluation_policy"`
-	SeasonPolicy           SeasonPolicy                       `json:"season_policy"`
+	AutomationPolicy            *model.CompetitionAutomationPolicy      `json:"automation_policy,omitempty"`
+	DistributedEvaluationPolicy *CompetitionDistributedEvaluationPolicy `json:"distributed_evaluation_policy,omitempty"`
+	Schema                      int                                     `json:"schema"`
+	CompetitionId               string                                  `json:"competition_id"`
+	BaseSha                     string                                  `json:"base_sha"`
+	EvaluatorImageDigest        string                                  `json:"evaluator_image_digest"`
+	EvaluatorCommand            string                                  `json:"evaluator_command,omitempty"`
+	EvaluatorCommandSha256      string                                  `json:"evaluator_command_sha256,omitempty"`
+	ScoreSchema                 int                                     `json:"score_schema"`
+	ScorerVersion               string                                  `json:"scorer_version"`
+	PatchPolicy                 PatchPolicy                             `json:"patch_policy"`
+	EvaluationPolicy            EvaluationPolicy                        `json:"evaluation_policy"`
+	SeasonPolicy                SeasonPolicy                            `json:"season_policy"`
 }
 
 // Both policy versions remain readable for seed reveal and historical evidence.
@@ -4369,6 +4416,12 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 			return nil, err
 		}
 	}
+	if err := validateCompetitionDistributedPolicy(policy.DistributedEvaluationPolicy); err != nil {
+		return nil, err
+	}
+	if policy.DistributedEvaluationPolicy != nil && (policy.Schema != 2 || policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled || policy.AutomationPolicy.Staging || policy.EvaluationPolicy.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork) {
+		return nil, errors.New("distributed execution requires a production minimum-work v2 round")
+	}
 	return policy, nil
 }
 
@@ -4381,18 +4434,19 @@ func policySnapshot(settings *Settings) ([]byte, error) {
 		automationPolicy = &copyPolicy
 	}
 	return json.Marshal(roundPolicySnapshot{
-		AutomationPolicy:       automationPolicy,
-		Schema:                 2,
-		CompetitionId:          settings.CompetitionId,
-		BaseSha:                settings.BaseSha,
-		EvaluatorImageDigest:   settings.EvaluatorImageDigest,
-		EvaluatorCommand:       settings.EvaluatorCommand,
-		EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
-		ScoreSchema:            ScoreSchema,
-		ScorerVersion:          settings.scorerVersion(),
-		PatchPolicy:            settings.PatchPolicy,
-		EvaluationPolicy:       settings.EvaluationPolicy,
-		SeasonPolicy:           settings.SeasonPolicy,
+		AutomationPolicy:            automationPolicy,
+		DistributedEvaluationPolicy: settings.DistributedEvaluationPolicy,
+		Schema:                      2,
+		CompetitionId:               settings.CompetitionId,
+		BaseSha:                     settings.BaseSha,
+		EvaluatorImageDigest:        settings.EvaluatorImageDigest,
+		EvaluatorCommand:            settings.EvaluatorCommand,
+		EvaluatorCommandSha256:      settings.EvaluatorCommandSha256,
+		ScoreSchema:                 ScoreSchema,
+		ScorerVersion:               settings.scorerVersion(),
+		PatchPolicy:                 settings.PatchPolicy,
+		EvaluationPolicy:            settings.EvaluationPolicy,
+		SeasonPolicy:                settings.SeasonPolicy,
 	})
 }
 
@@ -5858,6 +5912,7 @@ const jobSelect = `
 	       j.lease_expires_at, j.api_image_digest, COALESCE(j.worker_image_digest, ''),
 	       j.evaluation_cycle,j.cycle_attempt_offset,j.cycle_started_at,
 	       (SELECT receipt_json FROM competition_job_reevaluation recovery WHERE recovery.job_id=j.job_id),
+	       COALESCE(j.executor_host_id,''),COALESCE(j.executor_slot_id,0),COALESCE(j.executor_fencing_token,0),j.execution_deadline_at,
 	       r.competition_id, r.workload_commitment, r.seed_nonce,
 	       r.seed_ciphertext, r.providers_sha256, r.providers_path,
 	       r.policy_json, r.opens_at, r.closes_at,
@@ -5875,6 +5930,7 @@ func scanJob(row pgx.Row, includePatch bool, now time.Time) (*queuedJob, error) 
 		&scoreJson, &errorJson, &job.Patch, &job.AttemptCount, &job.LeaseOwner,
 		&job.LeaseExpiresAt, &job.ApiImageDigest, &job.WorkerImageDigest,
 		&job.EvaluationCycle, &job.CycleAttemptOffset, &job.CycleStartedAt, &reevaluationJson,
+		&job.ExecutorHostId, &job.SlotId, &job.SlotFencingToken, &job.ExecutionDeadline,
 		&job.Round.CompetitionId,
 		&job.Round.WorkloadCommitment, &job.Round.SeedNonce,
 		&job.Round.SeedCiphertext, &job.Round.ProvidersSha256,
@@ -6044,8 +6100,10 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 	}
 	digest := sha256.Sum256(bytes)
 	eligible := selfCheck.Eligible(settings)
-	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
+	observation := newCompetitionHostHeartbeatObservation()
+	return observation.capture(func() {
 		server.Db(ctx, func(conn server.PgConn) {
+			observation.callbackEntered = true
 			server.RaisePgResult(conn.Exec(ctx, `
 				INSERT INTO competition_evaluator_host (
 					host_id, hardware_id, image_digest, self_check_json,
@@ -6060,7 +6118,7 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 					heartbeat_at = EXCLUDED.heartbeat_at
 			`, selfCheck.HostId, selfCheck.HardwareId, selfCheck.ImageDigest,
 				string(bytes), hex.EncodeToString(digest[:]), eligible, self.nowUtc()))
-		}, server.OptReadWrite(), observation)
+		}, server.OptReadWrite(), &observation.phase, &observation.timing, observation.read)
 	})
 }
 
@@ -6072,6 +6130,9 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 	}
 	if settings.AutomationPolicy.Enabled && !model.SupportsCompetitionAutomationCapability(settings.AutomationPolicy.RequiredApiCapability) {
 		return nil, ErrUnsupportedDecisionMode
+	}
+	if competitionDistributedEnabled(settings) {
+		return self.claimDistributedCompetitionJob(ctx, settings, workerId, workerImageDigest)
 	}
 	now := self.nowUtc()
 	leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
@@ -6267,6 +6328,7 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 // Lock both existing authorities before reading the renewal clock. Expired or
 // mismatched ownership rolls back the whole transaction, including either update.
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
+	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	return captureCompetitionHeartbeatDatabase(ctx, func(observation *competitionHeartbeatDatabaseObservation) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			tx = observation.beginCallback(tx)
@@ -6281,8 +6343,14 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("worker_slot")
 			}
-			loadError := tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_worker_slot
-			 WHERE slot_id=1 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, workerId, jobId).Scan(&slotLease)
+			var loadError error
+			if competitionDistributedEnabled(settings) {
+				loadError = tx.QueryRow(ctx, `SELECT lease_expires_at FROM `+slotTable+`
+				 WHERE slot_id=$3 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, workerId, jobId, slotId).Scan(&slotLease)
+			} else {
+				loadError = tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_worker_slot
+				 WHERE slot_id=1 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE`, workerId, jobId).Scan(&slotLease)
+			}
 			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
 			}
@@ -6299,6 +6367,7 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 			server.Raise(loadError)
 			observation.enterStep(competitionHeartbeatDatabaseJobAuthority)
 			server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
+			server.Raise(requireCompetitionExecutorAuthorityInTx(ctx, tx, settings, jobId))
 			if settings.AutomationPolicy.Enabled {
 				if settings.automationLease != nil {
 					observation.enterStep(competitionHeartbeatDatabaseSupervisorAuthority)
@@ -6316,23 +6385,43 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 				panic(ErrLeaseLost)
 			}
 			leaseUntil := now.Add(time.Duration(settings.WorkerLeaseSeconds) * time.Second)
-			observation.enterStep(competitionHeartbeatDatabaseSlotUpdate)
-			result, err := tx.Exec(ctx, `
-				UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
-				WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
-			`, workerId, jobId, leaseUntil, now)
-			server.Raise(err)
-			if result.RowsAffected() != 1 {
-				panic(ErrLeaseLost)
+			updateJob := func() {
+				observation.enterStep(competitionHeartbeatDatabaseJobUpdate)
+				result, err := tx.Exec(ctx, `
+					UPDATE competition_job SET lease_expires_at = $3
+					WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at
+				`, jobId, workerId, leaseUntil, now)
+				server.Raise(err)
+				if result.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
 			}
-			observation.enterStep(competitionHeartbeatDatabaseJobUpdate)
-			result, err = tx.Exec(ctx, `
-				UPDATE competition_job SET lease_expires_at = $3
-				WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at
-			`, jobId, workerId, leaseUntil, now)
-			server.Raise(err)
-			if result.RowsAffected() != 1 {
-				panic(ErrLeaseLost)
+			updateSlot := func() {
+				observation.enterStep(competitionHeartbeatDatabaseSlotUpdate)
+				query := `
+					UPDATE competition_worker_slot SET lease_expires_at = $3, heartbeat_at = $4
+					WHERE slot_id = 1 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
+				`
+				args := []any{workerId, jobId, leaseUntil, now}
+				if competitionDistributedEnabled(settings) {
+					query = `
+						UPDATE ` + slotTable + ` SET lease_expires_at = $3, heartbeat_at = $4
+						WHERE slot_id = $5 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at
+					`
+					args = append(args, slotId)
+				}
+				result, err := tx.Exec(ctx, query, args...)
+				server.Raise(err)
+				if result.RowsAffected() != 1 {
+					panic(ErrLeaseLost)
+				}
+			}
+			if competitionDistributedEnabled(settings) {
+				updateJob()
+				updateSlot()
+			} else {
+				updateSlot()
+				updateJob()
 			}
 			observation.enterStep(competitionHeartbeatDatabaseCallbackReturn)
 		}, &observation.phase, &observation.timing, &observation.transaction)
@@ -6346,6 +6435,9 @@ type EvaluationOutcome struct {
 	RoundBaselineJson   []byte
 	RoundBaselineSha256 string
 	archiveFailure      *competitionArtifactArchiveFailure
+	// Set only by the coordinator after authenticated artifacts are retained.
+	distributedArchiveVerified   bool
+	distributedIntegrityRejected bool
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -6365,6 +6457,7 @@ func infrastructureRetrySchedule(
 // Completion locks both current authorities before recording a result. Any
 // lost authority or suppressed update rolls back the result, event and release.
 func (self PostgresStore) Complete(ctx context.Context, settings *Settings, workerId string, jobId server.Id, outcome EvaluationOutcome) (retry bool, err error) {
+	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			// server.Tx can rerun the callback; every run starts from empty results.
@@ -6379,7 +6472,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				self.beforeLeaseRowLockForTest("completion_slot")
 			}
 			loadError := tx.QueryRow(ctx, `SELECT worker_id,job_id,lease_expires_at
-			 FROM competition_worker_slot WHERE slot_id=1 FOR UPDATE`).Scan(&slotWorker, &slotJob, &slotLease)
+			 FROM `+slotTable+` WHERE slot_id=$1 FOR UPDATE`, slotId).Scan(&slotWorker, &slotJob, &slotLease)
 			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
 			}
@@ -6389,23 +6482,25 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			var cycleStartedAt *time.Time
 			var apiImageDigest, workerImageDigest string
 			var roundId server.Id
+			var roundEpoch int
 			var staging bool
 			var providersSha256 string
 			var policyJson []byte
 			var startedAt time.Time
+			var executionDeadline *time.Time
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("completion_job")
 			}
 			loadError = tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
 				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,evaluation_cycle,cycle_attempt_offset,cycle_started_at,
-			       job.round_id, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at
+				       job.round_id, round.epoch_number, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at,job.execution_deadline_at
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE job.job_id = $1 FOR UPDATE OF job
 			`, jobId).Scan(
 				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt, &evaluationCycle, &attemptOffset, &cycleStartedAt,
-				&roundId, &staging, &providersSha256, &policyJson, &jobLease,
+				&roundId, &roundEpoch, &staging, &providersSha256, &policyJson, &jobLease, &executionDeadline,
 			)
 			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
@@ -6413,6 +6508,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			server.Raise(loadError)
 			requireAuthority := func() time.Time {
 				server.Raise(requireCompetitionJobAuthorityInTx(ctx, tx, jobId, evaluationCycle, attempts))
+				server.Raise(requireCompetitionExecutorAuthorityInTx(ctx, tx, settings, jobId))
 				if settings.AutomationPolicy.Enabled {
 					if settings.automationLease != nil {
 						server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
@@ -6431,6 +6527,21 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				return now
 			}
 			now := requireAuthority()
+			if competitionDistributedEnabled(settings) {
+				if executionDeadline == nil {
+					panic(ErrLeaseLost)
+				}
+				if !now.Before(*executionDeadline) {
+					outcome.Score = nil
+					outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
+				}
+				if !outcome.distributedArchiveVerified && (outcome.Score != nil || outcome.Error == nil || outcome.Error.Code != "evaluation_time_budget_exhausted" || now.Before(*executionDeadline)) {
+					panic(errors.New("distributed outcome requires authenticated coordinator-retained artifacts"))
+				}
+				if outcome.distributedArchiveVerified {
+					server.RaisePgResult(tx.Exec(ctx, `SET LOCAL urnetwork.competition_executor_artifacts_verified = 'on'`))
+				}
+			}
 			if outcome.Score != nil && outcome.Error == nil {
 				policy, policyErr := decodeRoundPolicySnapshot(policyJson)
 				server.Raise(policyErr)
@@ -6465,7 +6576,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				}
 				round := &roundRecord{
 					RoundResult: RoundResult{
-						RoundId: roundId, Staging: staging, ProvidersSha256: providersSha256,
+						RoundId: roundId, Epoch: roundEpoch, Staging: staging, ProvidersSha256: providersSha256,
 					},
 					PolicyJson: policyJson,
 				}
@@ -6515,6 +6626,10 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			// Baseline insertion/conflict and shared reads can wait after the first
 			// check. Revalidate before publishing any terminal or retry transition.
 			now = requireAuthority()
+			if competitionDistributedEnabled(settings) && !now.Before(*executionDeadline) {
+				outcome.Score = nil
+				outcome.Error = terminalInfrastructureError("evaluation_time_budget_exhausted", "submission exhausted its total evaluation time budget")
+			}
 			executionStartedAt := startedAt
 			if evaluationCycle > 0 {
 				executionStartedAt = *cycleStartedAt
@@ -6579,10 +6694,10 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				}))
 			}
 			updated, updateError := tx.Exec(ctx, `
-				UPDATE competition_worker_slot SET worker_id = NULL, job_id = NULL,
+				UPDATE `+slotTable+` SET worker_id = NULL, job_id = NULL,
 					lease_expires_at = NULL, heartbeat_at = $1
-				WHERE slot_id = 1 AND worker_id = $2 AND job_id = $3
-			`, now, workerId, jobId)
+				WHERE slot_id = $4 AND worker_id = $2 AND job_id = $3
+			`, now, workerId, jobId, slotId)
 			server.Raise(updateError)
 			if updated.RowsAffected() != 1 {
 				panic(ErrLeaseLost)
@@ -6611,6 +6726,9 @@ func (self PostgresStore) HandBack(ctx context.Context, workerId string, jobId s
 // Persists safe heartbeat cause metadata in the existing owner-fenced event;
 // every state/slot update and the transaction boundary are unchanged.
 func (self PostgresStore) handBackWithFailure(ctx context.Context, workerId string, jobId server.Id, reason string, failure competitionHeartbeatFailure) error {
+	if authority, present := ctx.Value(competitionJobAuthorityKey{}).(competitionJobAuthority); present && authority.SlotFencingToken > 0 {
+		return self.handBackDistributedCompetitionJob(ctx, workerId, jobId, reason, failure, authority)
+	}
 	now := self.nowUtc()
 	return captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -6797,41 +6915,49 @@ type queuedJob struct {
 	LeaseExpiresAt     *time.Time
 	Round              roundRecord
 	RoundBaseline      *roundBaselineRecord
+	ExecutorHostId     string
+	SlotId             int
+	SlotFencingToken   int64
+	ExecutionDeadline  *time.Time
+	executorSettings   *Settings
 }
 
 type HostSelfCheck struct {
-	Schema                      int             `json:"schema"`
-	HostId                      string          `json:"host_id"`
-	HardwareId                  string          `json:"hardware_id"`
-	QualificationSha256         string          `json:"qualification_sha256"`
-	ImageDigest                 string          `json:"image_digest"`
-	KernelRelease               string          `json:"kernel_release"`
-	MicrocodeRevision           string          `json:"microcode_revision"`
-	IrqAffinitySha256           string          `json:"irq_affinity_sha256"`
-	IrqPolicySha256             string          `json:"irq_policy_sha256"`
-	LogicalCpuCount             int             `json:"logical_cpu_count"`
-	SMTDisabled                 bool            `json:"smt_disabled"`
-	GovernorPinned              bool            `json:"governor_pinned"`
-	TurboPinned                 bool            `json:"turbo_pinned"`
-	NumaPinned                  bool            `json:"numa_pinned"`
-	IrqPinned                   bool            `json:"irq_pinned"`
-	CgroupV2                    bool            `json:"cgroup_v2"`
-	ServicesInJobCgroup         bool            `json:"services_in_job_cgroup"`
-	DefaultDenyNetwork          bool            `json:"default_deny_network"`
-	OfflineBuildCache           bool            `json:"offline_build_cache"`
-	TemplateDatabase            bool            `json:"template_database"`
-	RedisReset                  bool            `json:"redis_reset"`
-	ArtifactStorage             bool            `json:"artifact_storage"`
-	ImmutableReports            bool            `json:"immutable_reports"`
-	NoProductionSecrets         bool            `json:"no_production_secrets"`
-	CleanupVerified             bool            `json:"cleanup_verified"`
-	ResourceLimitsVerified      bool            `json:"resource_limits_verified"`
-	ManagementCpuReserved       bool            `json:"management_cpu_reserved"`
-	ManagementMemoryReserved    bool            `json:"management_memory_reserved"`
-	ResourceBombCleanupVerified bool            `json:"resource_bomb_cleanup_verified"`
-	RebaselinePassed            bool            `json:"rebaseline_passed"`
-	RebaselineRoundId           *server.Id      `json:"rebaseline_round_id,omitempty"`
-	Checks                      map[string]bool `json:"checks"`
+	Schema                       int             `json:"schema"`
+	HostId                       string          `json:"host_id"`
+	HardwareId                   string          `json:"hardware_id"`
+	QualificationSha256          string          `json:"qualification_sha256"`
+	ImageDigest                  string          `json:"image_digest"`
+	KernelRelease                string          `json:"kernel_release"`
+	MicrocodeRevision            string          `json:"microcode_revision"`
+	IrqAffinitySha256            string          `json:"irq_affinity_sha256"`
+	IrqPolicySha256              string          `json:"irq_policy_sha256"`
+	LogicalCpuCount              int             `json:"logical_cpu_count"`
+	SMTDisabled                  bool            `json:"smt_disabled"`
+	GovernorPinned               bool            `json:"governor_pinned"`
+	TurboPinned                  bool            `json:"turbo_pinned"`
+	NumaPinned                   bool            `json:"numa_pinned"`
+	IrqPinned                    bool            `json:"irq_pinned"`
+	CgroupV2                     bool            `json:"cgroup_v2"`
+	ServicesInJobCgroup          bool            `json:"services_in_job_cgroup"`
+	DefaultDenyNetwork           bool            `json:"default_deny_network"`
+	OfflineBuildCache            bool            `json:"offline_build_cache"`
+	TemplateDatabase             bool            `json:"template_database"`
+	RedisReset                   bool            `json:"redis_reset"`
+	ArtifactStorage              bool            `json:"artifact_storage"`
+	ImmutableReports             bool            `json:"immutable_reports"`
+	NoProductionSecrets          bool            `json:"no_production_secrets"`
+	CleanupVerified              bool            `json:"cleanup_verified"`
+	ResourceLimitsVerified       bool            `json:"resource_limits_verified"`
+	ManagementCpuReserved        bool            `json:"management_cpu_reserved"`
+	ManagementMemoryReserved     bool            `json:"management_memory_reserved"`
+	ResourceBombCleanupVerified  bool            `json:"resource_bomb_cleanup_verified"`
+	RebaselinePassed             bool            `json:"rebaseline_passed"`
+	RebaselineRoundId            *server.Id      `json:"rebaseline_round_id,omitempty"`
+	NamespaceProbeSource         string          `json:"namespace_probe_source,omitempty"`
+	NamespaceProbeFresh          bool            `json:"namespace_probe_fresh,omitempty"`
+	PrivateRuntimeBoundarySha256 string          `json:"private_runtime_boundary_sha256,omitempty"`
+	Checks                       map[string]bool `json:"checks"`
 }
 
 // Decodes exactly one checker-owned report while rejecting schema drift in
@@ -6851,7 +6977,8 @@ func decodeHostSelfCheck(content []byte) (HostSelfCheck, error) {
 
 func (self HostSelfCheck) Eligible(settings *Settings) bool {
 	return self.commonContainmentEligible(settings) &&
-		self.QualificationSha256 == settings.EvaluationPolicy.HostQualificationSha256 &&
+		self.QualificationSha256 == competitionExecutorQualificationSha256(settings) &&
+		(settings.executorHostId == "" || self.HostId == settings.executorHostId) &&
 		self.ImageDigest == settings.EvaluatorImageDigest &&
 		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
 		allChecks(self.Checks)
@@ -6915,7 +7042,13 @@ type Worker struct {
 	evaluationContextForTest func(context.Context, time.Time) (context.Context, context.CancelFunc)
 	// Nil does nothing; tests acknowledge a fully completed heartbeat cycle.
 	evaluationHeartbeatForTest func()
-	heartbeatSettings          competitionHeartbeatSettings
+	// Nil preserves the production result boundary; tests force shutdown after
+	// the done case won but before it can obtain completion authority.
+	evaluationResultForTest func()
+	heartbeatSettings       competitionHeartbeatSettings
+	// Only a successful actual host registration can move this conservative
+	// freshness bound. Job lease acknowledgements never refresh it.
+	confirmedHostLeaseExpiresAt time.Time
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
@@ -7003,7 +7136,7 @@ func (self *Worker) Run(ctx context.Context) error {
 				}
 				return fmt.Errorf("competition evaluator lost self-check after job: %w", checkErr)
 			}
-			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
+			if err := self.registerHost(ctx, fresh); err != nil {
 				return fmt.Errorf("refresh evaluator host after job: %w", err)
 			}
 			hostCheck = fresh
@@ -7021,7 +7154,7 @@ func (self *Worker) Run(ctx context.Context) error {
 				}
 				return fmt.Errorf("competition evaluator lost self-check: %w", checkErr)
 			}
-			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
+			if err := self.registerHost(ctx, fresh); err != nil {
 				return fmt.Errorf("refresh evaluator host: %w", err)
 			}
 			hostCheck = fresh
@@ -7045,7 +7178,7 @@ func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
 		}
 		return hostCheck, fmt.Errorf("competition evaluator self-check: %w", err)
 	}
-	if err := self.store.RegisterHost(ctx, self.settings, hostCheck); err != nil {
+	if err := self.registerHost(ctx, hostCheck); err != nil {
 		return hostCheck, fmt.Errorf("register evaluator host: %w", err)
 	}
 	return hostCheck, nil
@@ -7236,6 +7369,21 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		select {
 		case result := <-done:
 			cancel()
+			if self.evaluationResultForTest != nil {
+				self.evaluationResultForTest()
+			}
+			if competitionDistributedEnabled(self.settings) && parent.Err() != nil {
+				if err := self.handBackJob(job, "worker_shutdown", context.Cause(parent)); err != nil {
+					return fmt.Errorf("hand back canceled executor job %s: %w", job.JobId, err)
+				}
+				return parent.Err()
+			}
+			if competitionDistributedEnabled(self.settings) && result.outcome.distributedIntegrityRejected {
+				if err := self.handBackJob(job, "executor_integrity_rejected"); err != nil {
+					return fmt.Errorf("hold rejected executor job %s: %w", job.JobId, err)
+				}
+				return errCompetitionExecutorIntegrityRejected
+			}
 			if result.outcome.Score != nil {
 				if err := validateScore(result.outcome.Score); err != nil {
 					result.outcome = EvaluationOutcome{
@@ -7260,7 +7408,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 			return nil
 		case <-heartbeatTick:
-			attemptStartedAt, err := retryCompetitionLeaseOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings.LeaseRetry, func(ctx context.Context) error {
+			attemptStartedAt, err := retryCompetitionHeartbeatOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings, false, func(ctx context.Context) error {
 				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
 			})
 			if err != nil {
@@ -7273,9 +7421,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			// successful public operation's start is a conservative committed bound.
 			confirmedLeaseExpiresAt = attemptStartedAt.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
 
-			_, err = retryCompetitionLeaseOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings.LeaseRetry, func(ctx context.Context) error {
-				return self.store.RegisterHost(ctx, self.settings, hostCheck)
-			})
+			err = self.refreshHostHeartbeat(evalCtx, confirmedLeaseExpiresAt, hostCheck)
 			if err != nil {
 				cancel()
 				<-done

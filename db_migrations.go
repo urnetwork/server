@@ -11323,4 +11323,8 @@ var migrations = []any{
 	// Independent prospective finalization control. The original four-kind hold
 	// journal and old binaries remain compatible; no hold is activated by DDL.
 	newSqlMigration(competitionFinalizationHoldMigrationSql),
+
+	// Prospective epoch-two executor custody follows the complete published
+	// origin prefix; singleton execution is unchanged until future opt-in.
+	newSqlMigration(competitionDistributedEvaluationMigrationSql),
 }

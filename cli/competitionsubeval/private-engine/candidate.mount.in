@@ -1,0 +1,13 @@
+[Unit]
+Description=Hard-capacity private evaluation filesystem
+Before=urnetwork-private-containerd.service urnetwork-private-engine.service
+
+[Mount]
+What=/dev/loop@LOOP_NUMBER@
+Where=@BASE_DIRECTORY@/candidate
+Type=ext4
+Options=rw,nosuid,nodev
+TimeoutSec=@MOUNT_START_SECONDS@
+
+[Install]
+WantedBy=multi-user.target

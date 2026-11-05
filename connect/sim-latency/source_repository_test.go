@@ -32,7 +32,28 @@ func TestSourceRepositorySetMatchesRequiredLocalModules(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(serverRoot, "go.mod"), moduleBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sourceTestGit(t, serverRoot, "add", "--", "go.mod")
+	parsed, err := parseSourceModuleGraph(t.Context(), moduleBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	layout, err := requiredLocalSourceLayout(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range layout.inTreePaths {
+		content, err := os.ReadFile(filepath.Join("..", "..", relative, "go.mod"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(serverRoot, relative, "go.mod")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceTestGit(t, serverRoot, "add", "--all")
 	sourceTestGit(t, serverRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic repository-under-test module snapshot")
 	commit := sourceTestGit(t, serverRoot, "rev-parse", "HEAD")
 	if err := verifyFrozenSourceGraph(context.Background(), serverRoot, commit); err != nil {
@@ -239,7 +260,7 @@ func TestSourceRepositoryCoverageRetainsSiblingLayoutBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
-		"../../connect", "/synthetic/connect", "./connect", "../", "../.", "../..",
+		"../../connect", "/synthetic/connect", "./", "./nested/../connect", "../", "../.", "../..",
 		"../connect/..", "../connect/../sdk", "../connect/nested/../../sdk",
 		"../connect//nested", "../connect/./nested", "../connect/nested/",
 		`../connect/nested\..\..\synthetic`,

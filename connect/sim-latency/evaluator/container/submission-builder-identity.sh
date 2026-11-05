@@ -23,6 +23,16 @@ protected_file() {
     done
 }
 
+subevaluation_scoped=false
+if [[ -v URNETWORK_SUBEVALUATION_RUN_ID || -v URNETWORK_SUBEVALUATION_JOB_ID ||
+      -v URNETWORK_SUBEVALUATION_ROUND_ID || -v URNETWORK_SUBEVALUATION_ATTEMPT ]]; then
+    protected_file "$SCRIPT_DIR/subevaluation-ownership.sh"
+    protected_file "$SCRIPT_DIR/compose.subevaluation.yml"
+    protected_file "$SCRIPT_DIR/docker-id-map.sh"
+    source "$SCRIPT_DIR/subevaluation-ownership.sh"
+    subevaluation_ownership_init || fail
+fi
+
 for leaf in submission-builder-identity.sh build-submission.sh Dockerfile.submission evaluator.sh prepare-evaluation-source.sh competitionpatch competitionpatch.sha256; do
     protected_file "$SCRIPT_DIR/$leaf"
 done
@@ -46,6 +56,13 @@ manifest="$(jq -nSc --arg validator "$validator_sha256" --arg dockerfile "$docke
       dockerfile_sha256:$dockerfile,build_script_sha256:$build_script,
       identity_helper_sha256:$identity_helper,validator_pin_sha256:$validator_pin,
       evaluator_sha256:$evaluator,source_preparer_sha256:$source_preparer}')"
+if [[ "$subevaluation_scoped" = true ]]; then
+    ownership_sha256="$(sha256sum "$SCRIPT_DIR/subevaluation-ownership.sh" | awk '{print $1}')"
+    compose_sha256="$(sha256sum "$SCRIPT_DIR/compose.subevaluation.yml" | awk '{print $1}')"
+    id_map_sha256="$(sha256sum "$SCRIPT_DIR/docker-id-map.sh" | awk '{print $1}')"
+    manifest="$(jq -nSc --argjson manifest "$manifest" --arg ownership "$ownership_sha256" --arg compose "$compose_sha256" --arg id_map "$id_map_sha256" \
+        '$manifest + {subevaluation_ownership_sha256:$ownership,subevaluation_compose_sha256:$compose,subevaluation_docker_id_map_sha256:$id_map}')"
+fi
 builder_sha256="$(printf '%s' "$manifest" | sha256sum | awk '{print $1}')"
 jq -nSc --argjson manifest "$manifest" --arg builder_sha256 "$builder_sha256" \
     '$manifest + {builder_sha256:$builder_sha256}'

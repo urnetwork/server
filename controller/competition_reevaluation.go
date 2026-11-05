@@ -25,14 +25,31 @@ import (
 type competitionJobAuthorityKey struct{}
 
 type competitionJobAuthority struct {
-	JobId   server.Id
-	Cycle   int
-	Attempt int
+	JobId            server.Id
+	Cycle            int
+	Attempt          int
+	ExecutorHostId   string
+	SlotId           int
+	SlotFencingToken int64
+	ExecutorSettings *Settings
 }
 
 // Detached persistence and cleanup retain values without reviving evaluation.
 func withCompetitionJobAuthority(ctx context.Context, job *queuedJob) context.Context {
-	return context.WithValue(ctx, competitionJobAuthorityKey{}, competitionJobAuthority{JobId: job.JobId, Cycle: job.EvaluationCycle, Attempt: job.AttemptCount})
+	executorSettings := job.executorSettings
+	if executorSettings != nil {
+		copy := *executorSettings
+		if copy.automationLease != nil {
+			lease := *copy.automationLease
+			copy.automationLease = &lease
+		}
+		executorSettings = &copy
+	}
+	return context.WithValue(ctx, competitionJobAuthorityKey{}, competitionJobAuthority{
+		JobId: job.JobId, Cycle: job.EvaluationCycle, Attempt: job.AttemptCount,
+		ExecutorHostId: job.ExecutorHostId, SlotId: job.SlotId, SlotFencingToken: job.SlotFencingToken,
+		ExecutorSettings: executorSettings,
+	})
 }
 
 // Legacy cycle-zero calls remain compatible. A recovered row requires the
@@ -406,6 +423,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			server.Raise(tx.QueryRow(ctx, `SELECT to_jsonb(j),state,attempt_count,evaluation_cycle,started_at,completed_at,score_json,eval_error_json,lease_owner,lease_expires_at FROM competition_job j WHERE job_id=$1 AND round_id=$2 FOR UPDATE`, a.JobId, a.RoundId).Scan(&terminal, &state, &attempts, &cycle, &started, &completed, &score, &errorJson, &leaseOwner, &leaseExpiry))
 			round, roundErr := scanRound(tx.QueryRow(ctx, `SELECT round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled,finalized_at,winner_job_id,admission_closed_at,automation_sealed_at,automation_publication_at FROM competition_round WHERE round_id=$1 FOR UPDATE`, a.RoundId))
 			server.Raise(roundErr)
+			server.Raise(validateCompetitionReevaluationRound(round))
 			now := self.nowUtc()
 			var running bool
 			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_job WHERE state='running')`).Scan(&running))

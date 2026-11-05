@@ -7,6 +7,8 @@
 
 set -Eeuo pipefail
 umask 077
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/subevaluation-ownership.sh"
+subevaluation_ownership_init
 
 die() {
     printf '[docker-id-map] ERROR: %s\n' "$*" >&2
@@ -74,21 +76,21 @@ for command in awk docker jq seq sha256sum sleep sudo; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
 done
 
-[ "$(sudo -n docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" = "$image" ] ||
+[ "$(evaluation_docker image inspect --format '{{.Id}}' "$image" 2>/dev/null)" = "$image" ] ||
     die 'image is unavailable or its identity changed'
 
 probe_name="urnetwork-docker-id-map-$$-$RANDOM"
 probe_id=""
 cleanup() {
     if [ -n "$probe_id" ]; then
-        sudo -n docker rm -f "$probe_id" >/dev/null 2>&1 || true
+        evaluation_docker rm -f "$probe_id" >/dev/null 2>&1 || true
     else
-        sudo -n docker rm -f "$probe_name" >/dev/null 2>&1 || true
+        evaluation_docker rm -f "$probe_name" >/dev/null 2>&1 || true
     fi
 }
 trap cleanup EXIT INT TERM
 
-probe_id="$(sudo -n docker run --detach \
+probe_id="$(evaluation_docker run --detach \
     --name "$probe_name" \
     --label com.urnetwork.competition.id-map-probe=true \
     --network none \
@@ -100,27 +102,46 @@ probe_id="$(sudo -n docker run --detach \
     --memory-swap 32m \
     --user 0:0 \
     --entrypoint /usr/bin/sleep \
+    "${subevaluation_docker_args[@]}" \
+    "${subevaluation_management_args[@]}" \
     "$image" 60)" || die 'could not start the namespace-map probe'
 [[ "$probe_id" =~ ^[0-9a-f]{64}$ ]] || die 'namespace-map probe id is invalid'
 
-probe_pid=""
-for _ in $(seq 1 100); do
-    probe_pid="$(sudo -n docker inspect --format '{{.State.Pid}}' "$probe_id" 2>/dev/null || true)"
-    [[ "$probe_pid" =~ ^[1-9][0-9]*$ ]] && [ -r "/proc/$probe_pid/uid_map" ] && break
-    sleep 0.05
-done
-[[ "$probe_pid" =~ ^[1-9][0-9]*$ ]] || die 'namespace-map probe never entered a live process'
-uid_map_path="/proc/$probe_pid/uid_map"
-gid_map_path="/proc/$probe_pid/gid_map"
-[ -r "$uid_map_path" ] && [ -r "$gid_map_path" ] || die 'live namespace maps are unreadable'
-
-host_uid="$(translate_id "$uid_map_path" "$container_uid")" || die 'container UID is unmapped'
-host_gid="$(translate_id "$gid_map_path" "$container_gid")" || die 'container GID is unmapped'
-root_host_uid="$(translate_id "$uid_map_path" 0)" || die 'container root UID is unmapped'
-root_host_gid="$(translate_id "$gid_map_path" 0)" || die 'container root GID is unmapped'
-uid_map_sha256="$(sha256sum "$uid_map_path" | awk '{print $1}')"
-gid_map_sha256="$(sha256sum "$gid_map_path" | awk '{print $1}')"
-security_options="$(sudo -n docker info --format '{{json .SecurityOptions}}' | jq -cS .)"
+if [[ "$subevaluation_scoped" = true ]]; then
+    [[ "$container_uid" = 65532 && "$container_gid" = 65532 ]] || die 'private role only translates its frozen container identity'
+    namespace=""
+    for _ in $(seq 1 100); do
+        namespace="$(evaluation_host verify-id-map "$probe_id" 2>/dev/null || true)"
+        jq -e '.container_root_uid > 0 and .container_root_gid > 0 and
+            .container_id_map_length > 65532 and (.uid_map_sha256 | test("^[0-9a-f]{64}$")) and
+            (.gid_map_sha256 | test("^[0-9a-f]{64}$"))' <<<"$namespace" >/dev/null 2>&1 && break
+        sleep 0.05
+    done
+    root_host_uid="$(jq -er '.container_root_uid' <<<"$namespace")"
+    root_host_gid="$(jq -er '.container_root_gid' <<<"$namespace")"
+    host_uid="$((root_host_uid + container_uid))"
+    host_gid="$((root_host_gid + container_gid))"
+    uid_map_sha256="$(jq -er '.uid_map_sha256' <<<"$namespace")"
+    gid_map_sha256="$(jq -er '.gid_map_sha256' <<<"$namespace")"
+else
+    probe_pid=""
+    for _ in $(seq 1 100); do
+        probe_pid="$(evaluation_docker inspect --format '{{.State.Pid}}' "$probe_id" 2>/dev/null || true)"
+        [[ "$probe_pid" =~ ^[1-9][0-9]*$ ]] && [ -r "/proc/$probe_pid/uid_map" ] && break
+        sleep 0.05
+    done
+    [[ "$probe_pid" =~ ^[1-9][0-9]*$ ]] || die 'namespace-map probe never entered a live process'
+    uid_map_path="/proc/$probe_pid/uid_map"
+    gid_map_path="/proc/$probe_pid/gid_map"
+    [ -r "$uid_map_path" ] && [ -r "$gid_map_path" ] || die 'live namespace maps are unreadable'
+    host_uid="$(translate_id "$uid_map_path" "$container_uid")" || die 'container UID is unmapped'
+    host_gid="$(translate_id "$gid_map_path" "$container_gid")" || die 'container GID is unmapped'
+    root_host_uid="$(translate_id "$uid_map_path" 0)" || die 'container root UID is unmapped'
+    root_host_gid="$(translate_id "$gid_map_path" 0)" || die 'container root GID is unmapped'
+    uid_map_sha256="$(sha256sum "$uid_map_path" | awk '{print $1}')"
+    gid_map_sha256="$(sha256sum "$gid_map_path" | awk '{print $1}')"
+fi
+security_options="$(evaluation_docker info --format '{{json .SecurityOptions}}' | jq -cS .)"
 remapped=false
 if [ "$root_host_uid" != 0 ] || [ "$root_host_gid" != 0 ] ||
    [ "$host_uid" != "$container_uid" ] || [ "$host_gid" != "$container_gid" ]; then

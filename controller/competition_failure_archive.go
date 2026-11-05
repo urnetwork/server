@@ -378,7 +378,7 @@ func authenticateFailureArchiveArtifacts(root string, artifacts []evaluationArti
 	for _, artifact := range artifacts {
 		allowed := safeFailureEvidencePath(artifact.Path)
 		switch artifact.Path {
-		case "canonical.patch", "worker.stderr.log", "controller-failure.json", "failed-evidence-manifest.json", "evaluator-failure.json":
+		case "canonical.patch", "worker.stderr.log", "controller-failure.json", "failed-evidence-manifest.json", "evaluator-failure.json", "executor-receipt.json":
 			allowed = true
 		}
 		if !allowed || seenPaths[artifact.Path] || artifact.Bytes < 0 || maxFailureEvidenceBytes-totalBytes < artifact.Bytes {

@@ -534,27 +534,43 @@ func (self PostgresStore) ActivateSource(ctx context.Context, settings *Settings
 
 // Reads an immutable staged or active generation for crash recovery.
 func (self PostgresStore) SourceActivation(ctx context.Context, settings *Settings, generation int64) (result *model.CompetitionSourceActivation, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			result, stateErr = nil, nil
 			var loadErr error
 			result, loadErr = sourceActivationInTx(ctx, tx, settings, generation)
+			if errors.Is(loadErr, ErrNotFound) {
+				stateErr = loadErr
+				return
+			}
 			server.Raise(loadErr)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
 
 // Returns only the active authority selected by the database pointer.
 func (self PostgresStore) CurrentSourceActivation(ctx context.Context, settings *Settings) (result *model.CompetitionSourceActivation, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			result = nil
+			result, stateErr = nil, nil
 			var loadErr error
 			result, loadErr = currentSourceActivationInTx(ctx, tx, settings)
+			if errors.Is(loadErr, ErrNotFound) {
+				stateErr = loadErr
+				return
+			}
 			server.Raise(loadErr)
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }
 
@@ -590,18 +606,23 @@ func (self PostgresStore) RecordSupervisorTransition(ctx context.Context, settin
 
 // Reads the durable desired state so a restarted reconciler resumes the same transition.
 func (self PostgresStore) SupervisorTransition(ctx context.Context, settings *Settings, targetEpoch int) (result *model.CompetitionSupervisorTransition, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			result = nil
+			result, stateErr = nil, nil
 			var content []byte
 			loadErr := conn.QueryRow(ctx, `SELECT transition_json FROM competition_supervisor_transition WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 ORDER BY revision DESC LIMIT 1`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId, targetEpoch).Scan(&content)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
-				panic(ErrNotFound)
+				stateErr = ErrNotFound
+				return
 			}
 			server.Raise(loadErr)
 			result = &model.CompetitionSupervisorTransition{}
 			server.Raise(json.Unmarshal(content, result))
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return result, err
 }

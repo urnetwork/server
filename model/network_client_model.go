@@ -500,6 +500,22 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// Checked before the tx so the lookup does not hold it open. Connection
 		// activation applies the same limit; see CanConnectNetworkPeer.
 		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		// A hosted proxy is limited on its own, and always
+		// (network_client_proxy_limit.go): the network's active proxies are
+		// capped and its proxy creates are rated per minute. The Embed row and
+		// this create's count are read before the tx, like the concurrent limit;
+		// the active proxies are counted inside it. The create is counted once
+		// per call, so a retried tx does not count it again.
+		proxyLimitOverride, proxyLimitOverridden := 0, false
+		var proxyCreateCount int64
+		proxyCreateCounted := false
+		if authClient.ProxyConfig != nil {
+			proxyLimitOverride, proxyLimitOverridden = networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+			proxyCreateCount, proxyCreateCounted = countProxyClientCreate(clientSession.Ctx, clientSession.ByJwt.NetworkId, proxyClientCreateNow())
+		}
+		proxyCreateRateExceeded := func(isPro bool) bool {
+			return proxyCreateCounted && proxyClientCreateRateExceeded(proxyClientCreatesPerMinute(isPro), proxyCreateCount)
+		}
 		if concurrentLimitExceeded && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
@@ -589,6 +605,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		} else {
 			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 		}
+		// a proxy create over the network's rate is refused here, before any db
+		// work, once the plan is known; a registration is decided in the tx,
+		// where a retained one still answers
+		if !validateParent && registration == nil && proxyCreateRateExceeded(isPro) {
+			authClientResult = proxyClientCreateRateRefusal(isPro)
+			return
+		}
 		// one registration per network per process waits for the network's
 		// allocation lock; the rest wait here, holding no pooled connection
 		// (network_client_registration_gate.go). The gate opens when the
@@ -642,6 +665,26 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					return
 				}
 			}
+			if proxyCreateRateExceeded(isPro) {
+				authClientResult = proxyClientCreateRateRefusal(isPro)
+				return
+			}
+			if authClient.ProxyConfig != nil {
+				proxyLimit := proxyClientLimitFor(isPro, proxyLimitOverride, proxyLimitOverridden)
+				if 0 < proxyLimit {
+					activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientCountBound(proxyLimit))
+					if proxyClientLimitReached(proxyLimit, activeProxyCount) {
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								ClientLimitExceeded: true,
+								UpgradeRequired:     !isPro,
+								Message:             proxyClientLimitMessage(proxyLimit, isPro),
+							},
+						}
+						return
+					}
+				}
+			}
 			createTime := server.NowUtc()
 
 			var deviceId server.Id
@@ -693,11 +736,43 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				))
 			} else if validateParent {
 				// The same snapshot just verified this exact active client and
-				// claimed device; no second source-client read is needed.
+				// claimed device. The parent's row is held (FOR KEY SHARE) until
+				// the child commits, which orders the mint against the parent's
+				// deactivation: a deactivation that locked the parent first leaves
+				// it inactive here, and one that waits for this mint deactivates
+				// the child with it (deactivateLockedNetworkClientsInTx). The key
+				// share lock conflicts with that FOR UPDATE and not with the
+				// parent's auth time refresh.
+				parentActive := false
+				result, err := tx.Query(
+					clientSession.Ctx,
+					`
+						SELECT true
+						FROM network_client
+						WHERE
+							client_id = $1 AND
+							network_id = $2 AND
+							active = true
+						FOR KEY SHARE
+					`,
+					*authClient.SourceClientId,
+					clientSession.ByJwt.NetworkId,
+				)
+				server.WithPgResult(result, err, func() {
+					parentActive = result.Next()
+				})
+				if !parentActive {
+					authClientError = ErrClientParentInactive
+					return
+				}
 				deviceId = *clientSession.ByJwt.DeviceId
 			} else {
 				// copy the device id from the source
-				// important: validate the source client id is in the same network
+				// important: validate the source client id is in the same network,
+				// and active: an inactive source has no lifecycle left to retire
+				// the child (deactivateLockedNetworkClientsInTx). The source's row
+				// is held (FOR KEY SHARE) until the child commits, which orders
+				// this mint against the source's deactivation as above.
 				sourceFound := false
 				result, err := tx.Query(
 					clientSession.Ctx,
@@ -707,7 +782,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						FROM network_client
 						WHERE
 							client_id = $1 AND
-							network_id = $2
+							network_id = $2 AND
+							active = true
+						FOR KEY SHARE
 					`,
 					*authClient.SourceClientId,
 					clientSession.ByJwt.NetworkId,
@@ -1322,14 +1399,88 @@ func deactivateOwnedNetworkClientInTx(
 // The caller must hold FOR UPDATE on every client in this exact owned set.
 // The clients' provide keys go in the same transaction: an inactive client is
 // never a contract destination.
+//
+// The clients' active descendants are deactivated with them, and the count
+// returned is of the caller's clients only. A derived client is retired with
+// its parent's own credential (connect's ApiMultiClientGenerator, through
+// localclient.Authority or /network/remove-client), and this deactivation
+// revokes that credential, so nothing else retires a descendant it leaves
+// active: it would stay active until the child reap, a client window after its
+// own last auth. A removed hosted proxy left its windows that way, by the
+// hundreds of thousands in a network that churned proxies (2026-11-05), which
+// also kept them from the retired hosted reap, which reaps retired ones only.
 func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, lockedClientIds []server.Id, networkId server.Id) (int64, error) {
 	if len(lockedClientIds) == 0 {
 		return 0, nil
 	}
 
+	// Locks the clients' active descendants, one generation at a time, each in
+	// client id order after the generation above it. A descendant already among
+	// the caller's clients is not returned again. A child copies its parent's
+	// device (AuthNetworkClient), so a generation is read through
+	// network_client_device_id, the parent's device and then the child's source;
+	// network_client has no index on source_client_id. A parent without a device
+	// has no descendants this finds, and those stay to the child reap. The walk
+	// stops at session.ClientAncestryDepthLimit generations.
+	lockActiveDescendants := func() ([]server.Id, error) {
+		seenClientIds := map[server.Id]bool{}
+		for _, clientId := range lockedClientIds {
+			seenClientIds[clientId] = true
+		}
+		descendantClientIds := []server.Id{}
+		parentClientIds := lockedClientIds
+		for depth := 0; depth < session.ClientAncestryDepthLimit && 0 < len(parentClientIds); depth += 1 {
+			generationClientIds := []server.Id{}
+			result, err := tx.Query(
+				ctx,
+				`
+					SELECT child.client_id
+					FROM network_client AS parent
+					INNER JOIN network_client AS child ON
+						child.device_id = parent.device_id AND
+						child.source_client_id = parent.client_id
+					WHERE
+						parent.client_id = ANY($1) AND
+						child.network_id = $2 AND
+						child.active = true
+					ORDER BY child.client_id
+					FOR UPDATE OF child
+				`,
+				parentClientIds,
+				networkId,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for result.Next() {
+				var clientId server.Id
+				if err := result.Scan(&clientId); err != nil {
+					result.Close()
+					return nil, err
+				}
+				if !seenClientIds[clientId] {
+					seenClientIds[clientId] = true
+					generationClientIds = append(generationClientIds, clientId)
+				}
+			}
+			result.Close()
+			if err := result.Err(); err != nil {
+				return nil, err
+			}
+			descendantClientIds = append(descendantClientIds, generationClientIds...)
+			parentClientIds = generationClientIds
+		}
+		return descendantClientIds, nil
+	}
+	descendantClientIds, err := lockActiveDescendants()
+	if err != nil {
+		return 0, err
+	}
+	deactivatedClientIds := append(slices.Clone(lockedClientIds), descendantClientIds...)
+
 	// The revocation records refuse these clients before the deactivation can
 	// commit; a failed write fails the deactivation (revocation_record.go).
-	if err := session.RevokeClientRecordsInTx(ctx, tx, networkId, lockedClientIds); err != nil {
+	if err := session.RevokeClientRecordsInTx(ctx, tx, networkId, deactivatedClientIds); err != nil {
 		return 0, err
 	}
 
@@ -1337,7 +1488,7 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 	// is locked. A concurrent contract holding FOR SHARE must remain ordered
 	// before this deactivation in both database state and recorded time, even
 	// when the two API calls run on hosts whose application clocks differ.
-	tag, err := tx.Exec(
+	result, err := tx.Query(
 		ctx,
 		`
 			WITH lifecycle_clock AS MATERIALIZED (
@@ -1351,20 +1502,40 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 			WHERE
 				network_client.client_id = ANY($1) AND
 				network_client.network_id = $2
+			RETURNING network_client.client_id
 		`,
-		lockedClientIds,
+		deactivatedClientIds,
 		networkId,
 	)
 	if err != nil {
 		return 0, err
 	}
-	if err := removeDeactivatedProvideKeysInTx(ctx, tx, lockedClientIds); err != nil {
+	lockedClientIdSet := map[server.Id]bool{}
+	for _, clientId := range lockedClientIds {
+		lockedClientIdSet[clientId] = true
+	}
+	var lockedCount int64
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return 0, err
+		}
+		if lockedClientIdSet[clientId] {
+			lockedCount += 1
+		}
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return 0, err
+	}
+	if err := removeDeactivatedProvideKeysInTx(ctx, tx, deactivatedClientIds); err != nil {
 		return 0, err
 	}
 	// the connect and proxy processes close what they hold of the clients, and
 	// the clients' counterparties close their contracts (CLIENTCLOSE.md)
-	addClientsRemovedPostCommit(ctx, tx, lockedClientIds)
-	return tag.RowsAffected(), nil
+	addClientsRemovedPostCommit(ctx, tx, deactivatedClientIds)
+	return lockedCount, nil
 }
 
 // Deletes the provide keys of clients this transaction deactivates, and their

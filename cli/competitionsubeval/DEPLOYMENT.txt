@@ -1,0 +1,123 @@
+Restricted subevaluation role (prospective epoch two only)
+
+No command below is run by source installation. Provision and review the role
+on an isolated executor before adding its public identities to frozen policy.
+Do not copy config/main, vault/main, database credentials, MinIO credentials,
+coordinator signing secrets, API tokens, or SSH private keys to this role.
+
+Build the competitionsubeval command from main product-control source using
+the approved Go toolchain. Install the binary and its evaluator/self-check
+release under protected root-owned non-writable ancestors. Pin exact SHA-256
+values in a root-only /etc/urnetwork-subeval/agent.json (Config in config.go).
+The private Evaluator pin must name evaluator-subevaluation.sh, not the
+independently sealed evaluator-minimum-work.sh used by the baseline producer.
+Generate independent Ed25519 role keys; the agent receives only the coordinator
+public verification key and its own private output-signing seed. SigningKeyPath
+is a root-owned 0600 base64 seed file. Pin the agent public key at coordinator.
+
+Set BaseDirectory to /home/by/sim-latency for this executor and explicitly set
+TrustedOperatorUser to the existing trusted operator. Keep state/jobs/cache and
+artifacts logically beneath that base; a root-provisioned bind mount to a private
+data-volume directory is acceptable. Do not chown the operator's home directory.
+Pin ExpectedDataDeviceId from that independently verified mounted data filesystem;
+the agent refuses the root filesystem or a changed/missing mount before creating
+state. Transient evaluator units require RequiresMountsFor for the same base.
+Only ancestors above BaseDirectory may belong to that configured operator; the
+base and every authority directory beneath it remain protected root ownership.
+
+Use the dedicated locked urnetwork-eval-worker account and separate locked
+urnetwork-eval-control account. Explicitly configure root-only StateDirectory
+at base/state, outside the bounded candidate filesystem. WorkDirectory belongs
+at base/candidate/jobs and DockerRole.ScratchDirectory at base/candidate/scratch.
+Private daemon layers/cache/temp/logs also occupy that hard-bounded filesystem;
+agent journals, public client sockets and private control sockets do not. See
+private-engine/README.md for the inert quota/namespace provisioning inputs.
+No unmounted-root fallback or user-daemon resource sharing is permitted.
+
+The base and work parents stay root-owned; use scoped worker traverse ACLs,
+including the trusted operator-owned home ancestor, not broad 0711 permissions
+or a home-directory chown. Each fresh run/source checkout begins private 0700.
+Keep direct config/local and vault/local trees outside state/work/scratch and
+immutable. Prove actual worker and remapped-container read access; their hashes
+must equal frozen policy. Only those exact direct trees are bound read-only.
+The worker receives neither generic sudo nor a root Docker socket. All Docker
+mutations use the fixed non-root client and independent per-run request owner;
+the finite host broker owns evidence mounts and output handoff after cohort join.
+
+Pin HostCheckConfiguration as non-executable root-owned data in the agent role.
+The root-only host audit may call only the closed read-only --docker-probe
+version/info/digest-image grammar against this private engine. Historical native
+containment receipts explicitly identify retained map evidence; every actual
+run still proves live owned-container maps before output handoff. Private host
+fingerprints include actual agent/evaluator/builder/resource/source pins as well
+as the private boundary, so changing trusted runtime bytes invalidates old proof.
+
+Install exactly the pinned evaluator image and offline build cache. Preserve
+the authenticated prepare-evaluation-source.sh path: each evaluation creates a
+fresh private checkout of server, connect, sdk, proxy, glog, goidenticons,
+userwireguard, sn, warp and gvisor, verifies all locked clean heads, and uses the
+competition branches. No operator-proxy checkout or operator worktree is mounted.
+
+Use a dedicated SSH eval-control account with a root-owned forced-command policy
+and a key scoped to this coordinator. An sshd Match User fragment should apply:
+
+    ForceCommand /usr/bin/sudo -n /usr/local/libexec/competitionsubeval --config /etc/urnetwork-subeval/agent.json --serve
+    DisableForwarding yes
+    PermitTTY no
+    PasswordAuthentication no
+    AuthenticationMethods publickey
+
+The corresponding sudoers allowance is only the exact fixed command above,
+not a shell, arbitrary competitionsubeval arguments, systemctl or systemd-run.
+The Go agent, running as root, owns stable transient systemd services. It drops
+to urnetwork-eval-worker for the pinned evaluator child and never inherits ambient service
+credentials. No listener, database client, MinIO client or server settings loader
+is present in the agent. SSH must verify strict independently pinned host keys.
+
+Persist StateDirectory and WorkDirectory across SSH loss and coordinator restart.
+Do not prune them while any run is active, uncertain, unarchived, or retained.
+The coordinator owns archive verification/retention and final completion. A lost
+launch acknowledgement, missing unit, or reboot does not permit relaunching the
+same execution. Stable run ids and fsynced launch-attempt markers prevent replay;
+fences only transfer custody. An unknown or unverified cleanup retains the local
+slot. Investigate or explicitly repair host cleanup before admitting more work.
+The signed no-argument availability operation checks current physical custody,
+not historical qualification. It may reconcile an already-stopped run through
+ordinary status, but never launches or advances a run fence. An occupied host
+permits only existing-job reconciliation; it cannot start another FIFO clock.
+Before the first measurement, the fixed no-argument retire-build role closes
+future builds, joins issued requests, freezes/joins the exact build parent and
+lowers its retained-memory cap to measured headroom beyond the unchanged
+96 GiB active + 5 GiB evidence + 24 GiB management budget. It records explicit
+acknowledged-build or verified no-build-issued/cache-hit provenance. Measurement
+creation requires the durable receipt and fresh kernel readback; unknown or
+partial retirement never reopens a build or resets the original job clock.
+
+Before epoch-two activation, require the additive database migration compatibility
+tests, isolated agent lifecycle tests, per-host containment/self-checks, shared
+full-R9 baseline retention, and the coordinator's archived no-op host screen.
+The no-op screen uses the same frozen seed/source/workload/shared baseline; its
+five-percent operational screen does not claim statistical equivalence.
+Kernel and Docker minor-version differences are an explicit operator acceptance,
+not a reason to bypass physical-control, fixture, source, image or cleanup pins.
+
+The main coordinator's separately sealed no-candidate baseline producer retains
+its own global frozen qualification and historical dependency catalog. Do not
+replace its exact control helper with the private candidate helper. Both roles
+use the same local physical host id, but their qualification hashes need not be
+equal. Every private executor, including local, must independently pass signed
+readiness and the retained full-R9 screen before any candidate claim. The shared
+baseline remains bound to its original producer, source, seed, image and workload.
+
+Source/unit-test success is not native admission. The reviewed class must still
+prove actual child-scope caps, independent owner hard-exit cleanup, late Docker
+responses, mapped handoff, quota exhaustion and positive intra-cohort networking
+alongside negative host/LAN/main/DNS controls. Current piped core handlers remain
+unqualified; LimitCORE=0 alone cannot contain piped dumps. Never change a global
+core handler, host forwarding rules or the user's daemon from these templates.
+
+Historical operator reevaluation authorization is not supported for a frozen
+distributed round. Its two reviewed singleton incident classes do not grant a
+new remote execution cycle or reset its original absolute deadline. A new
+incident-specific recovery needs separate review; do not repair it with direct
+job/slot SQL. Existing committed singleton recovery receipts remain replayable.

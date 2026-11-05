@@ -17,7 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Fixture commands operate on disposable repositories with synthetic local identity.
+// Disposable repositories retain the explicitly configured global Git identity.
 func sourceTestGit(t *testing.T, repositoryRoot string, args ...string) string {
 	t.Helper()
 	commandArgs := append([]string{"-C", repositoryRoot}, args...)
@@ -37,8 +37,6 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 		t.Fatal(err)
 	}
 	sourceTestGit(t, repositoryRoot, "init", "--quiet", "--initial-branch=sim-latency")
-	sourceTestGit(t, repositoryRoot, "config", "--local", "user.name", "Synthetic Source Fixture")
-	sourceTestGit(t, repositoryRoot, "config", "--local", "user.email", "source@fixture.example")
 	if err := os.WriteFile(filepath.Join(repositoryRoot, "source.txt"), []byte(name+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,11 +57,15 @@ func sourceTestRepository(t *testing.T, repositoriesRoot string, name string) st
 	return sourceTestGit(t, repositoryRoot, "rev-parse", "HEAD")
 }
 
-// Clearing ambient identity forces commits to use the disposable repo's own
-// synthetic configuration, including when a later fixture appends a commit.
+// A private explicit global fixture supplies identity without ambient author
+// overrides, including when a later fixture appends a commit.
 func TestSourceTestRepositoryCommitsWithoutAmbientIdentity(t *testing.T) {
+	global := filepath.Join(t.TempDir(), "global-gitconfig")
+	if err := os.WriteFile(global, []byte("[user]\nname = Synthetic Source Fixture\nemail = source@fixture.example\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
-	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	t.Setenv("GIT_CONFIG_COUNT", "0")
 	for _, name := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
