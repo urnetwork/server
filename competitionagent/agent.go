@@ -158,11 +158,15 @@ func (self *Agent) Serve(ctx context.Context, reader io.Reader, writer io.Writer
 	var response Response
 	var err error
 	switch request.Operation {
-	case "check":
+	case "check", "availability":
 		if request.RunId != "" || request.FencingToken != 0 || request.Start != nil {
 			return errors.New("invalid self-check operation")
 		}
-		response, err = self.check(ctx)
+		if request.Operation == "check" {
+			response, err = self.check(ctx)
+		} else {
+			response, err = self.availability(ctx)
+		}
 	case "start":
 		if request.Start == nil || request.RunId != request.Start.Identity.RunId || request.FencingToken <= 0 {
 			return errors.New("invalid start operation")

@@ -79,6 +79,10 @@ launch acknowledgement, missing unit, or reboot does not permit relaunching the
 same execution. Stable run ids and fsynced launch-attempt markers prevent replay;
 fences only transfer custody. An unknown or unverified cleanup retains the local
 slot. Investigate or explicitly repair host cleanup before admitting more work.
+The signed no-argument availability operation checks current physical custody,
+not historical qualification. It may reconcile an already-stopped run through
+ordinary status, but never launches or advances a run fence. An occupied host
+permits only existing-job reconciliation; it cannot start another FIFO clock.
 
 Before epoch-two activation, require the additive database migration compatibility
 tests, isolated agent lifecycle tests, per-host containment/self-checks, shared

@@ -121,7 +121,7 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			if hostId != settings.executorHostId {
 				panic(ErrConflict)
 			}
-			if settings.executorReconcileExpiredOnly && slotJob == nil {
+			if (settings.executorReconcileExpiredOnly || settings.executorReconcileOnly) && slotJob == nil {
 				return
 			}
 			now := self.nowUtc().Truncate(time.Microsecond)
