@@ -58,6 +58,12 @@ func NetworkProxies(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(model.GetNetworkProxies, w, r)
 }
 
+// NetworkProxyRotateExit moves a unique-exit proxy to a new unique exit
+// (model/proxy_unique_exit_model.go).
+func NetworkProxyRotateExit(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(model.RotateProxyExit, w, r)
+}
+
 func NetworkPeers(w http.ResponseWriter, r *http.Request) {
 	router.WrapRequireAuth(model.GetNetworkPeersForSession, w, r)
 }

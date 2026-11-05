@@ -234,6 +234,14 @@ func SubmitProviderEgressLocation(
 		// the provider over a single tunnel from the prober
 	})
 
+	// the keyed egress a unique-exit allocation compares
+	// (model/proxy_unique_exit_model.go): the address is hashed and dropped
+	// here, as the location's is above. ResolveProviderEgressExit already parsed
+	// it, so this parse cannot fail.
+	if addr, err := netip.ParseAddr(strings.TrimSpace(args.ExitIp)); err == nil {
+		model.SetProviderEgressKey(ctx, args.ClientId, addr, args.ObservedAt)
+	}
+
 	return &SubmitProviderEgressLocationResult{LocationId: exit.Location.LocationId}, nil
 }
 

@@ -276,6 +276,7 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /network/register-client-v1":        {path: "/network/register-client-v1", body: map[string]any{"description": "attacker", "device_spec": "attacker"}},
 		"POST /network/remove-clients":            {path: "/network/remove-clients", body: map[string]any{"client_ids": []server.Id{victimClientId}}},
 		"GET /network/proxies":                    {path: "/network/proxies"},
+		"POST /network/proxy/rotate-exit":         {path: "/network/proxy/rotate-exit", body: map[string]any{"client_id": victimClientId}},
 		"POST /network/user/update":               {path: "/network/user/update", body: map[string]any{"network_name": "attacker" + self.networkName}},
 		"POST /network/client-data-cap":           {path: "/network/client-data-cap", body: map[string]any{"client_id": victimClientId, "monthly_byte_limit": 0}},
 		"GET /network/client-data-caps":           {path: "/network/client-data-caps?limit=100"},

@@ -3570,6 +3570,105 @@
           "legendFormat": "{{window}} {{outcome}}"
         }
       ]
+    },
+    {
+      "id": 75,
+      "type": "row",
+      "title": "unique-exit proxies: exit confirms through the tunnel and the throughput share",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 250
+      },
+      "panels": []
+    },
+    {
+      "id": 76,
+      "type": "timeseries",
+      "title": "unique-exit confirms / s by result",
+      "description": "Unique-exit devices asking the operator's /my-ip-info echo through their own tunnel (HOSTED-PROXY-UNIQUE-EXIT.md): match; changed_unique, a residential IP that moved and is still unique in the network; changed_collision, now the same exit as another of the network's proxies, replaced at once; stale, the device's assignment changed meanwhile.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 251
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_proxy_unique_exit_confirm_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{result}}"
+        }
+      ]
+    },
+    {
+      "id": 77,
+      "type": "timeseries",
+      "title": "unique-exit share: WireGuard packets policed / s",
+      "description": "A unique-exit proxy gives at most half its provider's estimated throughput. HTTP and SOCKS connections are paced and drop nothing; WireGuard packets over the share are dropped and counted here, by direction.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 251
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (direction) (rate(urnetwork_proxy_unique_exit_share_policed_packets_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{direction}}"
+        }
+      ]
     }
   ]
 }
