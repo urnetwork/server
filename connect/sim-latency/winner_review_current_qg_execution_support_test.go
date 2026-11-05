@@ -331,7 +331,9 @@ func executeCurrentQgQualification(ctx context.Context, directory string, plan c
 				providerIds = []string{verdict.ProviderResponseId}
 			}
 			for _, providerId := range providerIds {
-				if hooks.Mode == "genuine_provider" && (providerId == "" || seenProviderIdBools[providerId]) {
+				// Transport mode controls final qualification authority, not
+				// whether native receipt identities must be complete/unique.
+				if providerId == "" || seenProviderIdBools[providerId] {
 					observation.Passed = false
 					observation.Observed = "reused_provider_response"
 					report.Observations = append(report.Observations, observation)

@@ -222,6 +222,24 @@ func TestCurrentQgQualificationExecutionRejectsGlobalResponseReplay(t *testing.T
 	if err == nil || calls != 3 || report == nil || report.Complete || report.Qualified {
 		t.Fatal("provider response id replay was masked by a different member name", err)
 	}
+	// Even a broken offline response hook cannot turn a missing identity into
+	// a complete qualifying shape. The first real-shape judgment stops here.
+	hooks = currentQgExecutionOfflineHooks(t, plan, expectations)
+	invoke, calls = hooks.Invoke, 0
+	validate := hooks.ValidateResponse
+	hooks.Invoke = func(ctx context.Context, input []byte) ([]byte, []byte, error) {
+		calls++
+		return invoke(ctx, input)
+	}
+	hooks.ValidateResponse = func(output []byte, request winnerReviewBrokerRequest, expected string) (currentQgQualificationObservation, error) {
+		observation, err := validate(output, request, expected)
+		observation.ProviderResponseIds, observation.ProviderResponseId = nil, ""
+		return observation, err
+	}
+	report, err = executeCurrentQgQualification(t.Context(), t.TempDir(), plan, settings, hooks)
+	if err == nil || calls != 2 || report == nil || report.Complete || report.Qualified {
+		t.Fatal("offline transport mode suppressed the missing native receipt identity guard", err)
+	}
 }
 
 // Output roots/clocks/receipt formatting never change a semantic draw key.
