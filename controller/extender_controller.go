@@ -14,6 +14,7 @@ import (
 	mathrand "math/rand/v2"
 	"net"
 	"net/netip"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -66,17 +67,12 @@ const (
 
 	// The whole probe budget of one activation (C2). Every carrier and the
 	// forward share it, so a caller cannot hold a request open by being slow
-	// on one carrier. The required test runs first (C2a), so an optional
-	// carrier that spends what is left of it only loses itself.
+	// on one carrier. The required test runs first (C2a), and then every
+	// optional carrier -- quic and each dns port -- is probed at once, each
+	// under all of what is left (connect#230). A udp carrier gives no answer
+	// to fail fast on, so one that never answers waits out the budget, but it
+	// waits beside the others rather than before them, and loses only itself.
 	ExtenderActivateProbeTimeout = 10 * time.Second
-
-	// The budget of one dns carrier port (L2). The dns carrier is probed once
-	// per listed port, and a udp port with nothing bound gives no answer to
-	// fail fast on, so a dead port under the shared budget alone would spend
-	// it all and fail every port and carrier probed after it. Two dead ports
-	// still leave up to four seconds of the activation budget for quic, which
-	// is probed after them.
-	ExtenderActivateDnsPortProbeTimeout = 3 * time.Second
 
 	// The service label of the family api hosts an activation is posted to
 	// (C2): `[<env>-]api-v4` and `[<env>-]api-v6`.
@@ -590,10 +586,11 @@ type ExtenderActivateResult struct {
 	// answered and no others. Empty on a refusal, which probes no optional
 	// carrier.
 	RefusedCarriers []*ExtenderCarrierRefusal `json:"refused_carriers,omitempty"`
-	// every probe step the activation ran, in the order run -- the tcp
-	// challenge, the forward through it, each dns port, then quic -- with how
-	// long it ran, how much of the probe budget was left when it started, and
-	// how it ended (C2). A refusal's last step is the one that refused it.
+	// every probe step the activation ran -- the tcp challenge and the forward
+	// through it, in the order run, then each dns port and quic, which run
+	// together and are listed in that order -- with how long it ran, how much
+	// of the probe budget was left when it started, and how it ended (C2). A
+	// refusal's last step is the one that refused it.
 	// Empty when the activation was refused before anything was probed.
 	ProbeSteps []*ExtenderProbeStep `json:"probe_steps,omitempty"`
 	// why the activation was refused, empty on success. A refusal is a normal
@@ -638,13 +635,14 @@ type ExtenderCarrierRefusal struct {
 	// the port the carrier was probed on
 	Port int `json:"port"`
 	// why the probe failed. A probe whose budget ran out first says how much
-	// time it had: "no answer within 3 s" for a dns port (L2), or within what
-	// was left of the probe budget.
+	// time it had, which is what was left of the probe budget after the
+	// required test: "no answer within the 8.5 s left of the 10 s probe
+	// budget".
 	Error string `json:"error"`
 	// how long the probe ran
 	ElapsedMs int64 `json:"elapsed_ms"`
 	// how much of the activation's probe budget was left when the probe
-	// started. A dns port is also bounded by its own 3 s.
+	// started. The optional carriers start together, so each has the same.
 	BudgetLeftMs int64 `json:"budget_left_ms"`
 }
 
@@ -664,7 +662,7 @@ type ExtenderProbeStep struct {
 	// how long the step ran
 	ElapsedMs int64 `json:"elapsed_ms"`
 	// how much of the activation's probe budget was left when the step
-	// started. A dns port is also bounded by its own 3 s.
+	// started. The optional carriers start together, so each has the same.
 	BudgetLeftMs int64 `json:"budget_left_ms"`
 	// ok; error, the step failed before its budget ran out; or timeout, its
 	// budget ran out before it answered
@@ -1585,10 +1583,10 @@ type extenderActivationProbes struct {
 }
 
 // The clock the probes of one activation run on (C2): the time each step is
-// read at, and the deadlines that bound the shared probe budget and each dns
-// port's own. Production is the real clock; a test drives a fake one, so a
-// step that takes 9.5 s, or one that waits out its budget, does so at once
-// and to the instant.
+// read at, and the deadline that bounds the shared probe budget. Production
+// is the real clock; a test drives a fake one, or the real one in a synctest
+// bubble, so a step that takes 9.5 s, or one that waits out its budget, does
+// so at once and to the instant.
 type extenderActivationClock struct {
 	now func() time.Time
 	// context.WithDeadline on this clock: the context ends with
@@ -1642,8 +1640,10 @@ type extenderActivationOutcome struct {
 	// the optional carriers, and the dns ports, that did not answer, in the
 	// order offered
 	refusedCarriers []*ExtenderCarrierRefusal
-	// every step probed, in the order probed. A refusal's last step is the
-	// one that refused it.
+	// every step probed: the required test's in the order probed, then the
+	// optional carriers', which run together, listed as the dns ports in the
+	// order offered and then quic. A refusal's last step is the one that
+	// refused it.
 	steps []*ExtenderProbeStep
 }
 
@@ -1654,17 +1654,18 @@ type extenderProbeStepRun struct {
 	// how long it ran
 	elapsed time.Duration
 	// how long it was allowed to run: what was left of the shared budget, or
-	// a dns port's own budget when that ended first (L2)
+	// less when the caller's own context ended first
 	allowance time.Duration
-	// the shared budget, rather than a dns port's own, bounded it
+	// the shared budget, rather than an earlier deadline of the caller's
+	// context, bounded it
 	sharedBudget bool
 	err          error
 }
 
-// How much time a step was given, as its timeout says it: "within 3 s" for a
-// dns port that ran out of its own budget, "within the 10 s probe budget" for
-// a step that had all of the shared budget, and "within the 0.5 s left of the
-// 10 s probe budget" for one that ran out of what was left of it.
+// How much time a step was given, as its timeout says it: "within the 10 s
+// probe budget" for a step that had all of the shared budget, "within the
+// 0.5 s left of the 10 s probe budget" for one that ran out of what was left
+// of it, and "within 3 s" for one bounded by an earlier deadline of its own.
 func (self *extenderProbeStepRun) withinText() string {
 	if !self.sharedBudget {
 		return fmt.Sprintf("within %s", extenderProbeSecondsText(self.allowance))
@@ -1715,27 +1716,31 @@ func extenderProbeSecondsText(d time.Duration) string {
 // The required test runs first: the challenge on the tcp carrier, the
 // verified forward through it, and the family the forward arrived on (A7). If
 // any of those fails, the activation is refused with that failure named, and
-// nothing else is probed. Only then is each optional carrier probed, when it
-// was offered, under what is left of the shared budget. One that does not
-// answer is left out and listed; it never refuses an activation the required
-// test passed (connect#230). The order is part of the rule: a udp carrier
-// gives no answer to fail fast on, so an optional carrier probed before the
-// forward could spend the budget the forward needs and gate the activation
-// after all.
+// nothing else is probed. Only then are the optional carriers probed, when
+// they were offered. One that does not answer is left out and listed; it
+// never refuses an activation the required test passed (connect#230). The
+// order is part of the rule: a udp carrier gives no answer to fail fast on, so
+// an optional carrier probed before the forward could spend the budget the
+// forward needs and gate the activation after all.
 //
-// The dns carrier goes before quic. Each dns port is bounded on its own (L2),
-// so the dns carrier always leaves quic the rest of the budget, while quic is
-// bounded only by the budget: a quic carrier that never answers, probed
-// first, would leave the dns carrier no time to answer in.
+// The optional carriers -- each offered dns port and quic -- are probed all at
+// once, each until it answers or the shared budget ends (connect#230). A udp
+// port with nothing bound waits out the budget, and probed one after the
+// other, each port under a window of its own (L2), a dead port spent the
+// time of every carrier after it, while a live one that answered after its
+// window was left out as if nothing listened on it: an extender whose first
+// reply came 2.4-4.3 s after the hello passed the tcp test and lost its dns
+// and quic carriers. Probed together, no carrier waits on another, every one
+// has all of what is left of the budget after the required test, and the
+// activation still ends with the budget, never later.
 //
 // Every step runs on the clock: the shared budget ends
-// ExtenderActivateProbeTimeout after the judging starts, and a dns port ends
-// at its own ExtenderActivateDnsPortProbeTimeout or at the end of the shared
-// budget, whichever comes first. Each step is timed, and the outcome lists
-// every step with how long it ran and what was left of the shared budget when
-// it started. A step whose budget ran out before it answered timed out, and
-// its refusal says how much time it had; a late answer and no answer were the
-// same "context deadline exceeded" before (connect#230).
+// ExtenderActivateProbeTimeout after the judging starts. Each step is timed,
+// and the outcome lists every step with how long it ran and what was left of
+// the shared budget when it started. A step whose budget ran out before it
+// answered timed out, and its refusal says how much time it had; a late
+// answer and no answer were the same "context deadline exceeded" before
+// (connect#230).
 func probeExtenderActivation(
 	ctx context.Context,
 	clock *extenderActivationClock,
@@ -1751,10 +1756,11 @@ func probeExtenderActivation(
 	defer probeCancel()
 
 	steps := []*ExtenderProbeStep{}
-	// runs one step under stepCtx, which ends at the shared budget or sooner,
-	// and records it. A step that failed once its context had reached its
-	// deadline timed out; any other failure is the step's own.
-	runStep := func(
+	// times one step under stepCtx, which ends at the shared budget or sooner.
+	// A step that failed once its context had reached its deadline timed out;
+	// any other failure is the step's own. It records nothing, so the optional
+	// carriers can be timed together and listed in a fixed order.
+	timeStep := func(
 		stepCtx context.Context,
 		name string,
 		port int,
@@ -1784,6 +1790,17 @@ func probeExtenderActivation(
 				run.step.Outcome = extenderProbeStepOutcomeTimeout
 			}
 		}
+		return run
+	}
+	// times one step and records it, for the required test, which runs in
+	// order
+	runStep := func(
+		stepCtx context.Context,
+		name string,
+		port int,
+		probe func(ctx context.Context) error,
+	) *extenderProbeStepRun {
+		run := timeStep(stepCtx, name, port, probe)
 		steps = append(steps, run.step)
 		return run
 	}
@@ -1835,44 +1852,65 @@ func probeExtenderActivation(
 	}
 	refusals := map[string][]*ExtenderCarrierRefusal{}
 
-	// the dns ports that answered, which is what the address row and the
-	// record list (L2). Empty unless the dns carrier was offered and answered.
-	activeDnsPorts := []int{}
+	// the optional carriers to probe, in the order their steps are listed:
+	// each offered dns port, then quic
+	type optionalCarrierProbe struct {
+		carrier     string
+		connectMode connect.ExtenderConnectMode
+		port        int
+		run         *extenderProbeStepRun
+	}
+	optionalProbes := []*optionalCarrierProbe{}
 	if slices.Contains(carriers, connect.ExtenderCarrierDns) {
 		// one dns port failing is not the carrier failing: an extender that
 		// offers 53 and 4053 on a path that blocks 53 is still reachable on
 		// 4053, and the record must say which
 		for _, port := range dnsPorts {
-			portDeadline := clock.now().Add(ExtenderActivateDnsPortProbeTimeout)
-			if probeDeadline.Before(portDeadline) {
-				portDeadline = probeDeadline
-			}
-			portCtx, portCancel := clock.withDeadline(probeCtx, portDeadline)
-			portRun := runStep(portCtx, connect.ExtenderCarrierDns, port, func(ctx context.Context) error {
-				return probes.carrier(ctx, connect.ExtenderConnectModeDns, port)
+			optionalProbes = append(optionalProbes, &optionalCarrierProbe{
+				carrier:     connect.ExtenderCarrierDns,
+				connectMode: connect.ExtenderConnectModeDns,
+				port:        port,
 			})
-			portCancel()
-			if portRun.err == nil {
-				activeDnsPorts = append(activeDnsPorts, port)
-			} else {
-				refusals[connect.ExtenderCarrierDns] = append(
-					refusals[connect.ExtenderCarrierDns],
-					portRun.carrierRefusal(connect.ExtenderCarrierDns, port),
-				)
-			}
 		}
-		answered[connect.ExtenderCarrierDns] = 0 < len(activeDnsPorts)
 	}
 	if slices.Contains(carriers, connect.ExtenderCarrierQuic) {
-		quicRun := runStep(probeCtx, connect.ExtenderCarrierQuic, udpPort, func(ctx context.Context) error {
-			return probes.carrier(ctx, connect.ExtenderConnectModeQuic, udpPort)
+		optionalProbes = append(optionalProbes, &optionalCarrierProbe{
+			carrier:     connect.ExtenderCarrierQuic,
+			connectMode: connect.ExtenderConnectModeQuic,
+			port:        udpPort,
 		})
-		if quicRun.err == nil {
-			answered[connect.ExtenderCarrierQuic] = true
+	}
+	// all at once, each under the shared budget (connect#230): none waits on
+	// another, so a carrier with nothing bound costs only itself, and a live
+	// one that is slow has all of what is left. Each probe ends with the
+	// shared budget at the latest, so this waits no longer than the budget.
+	var optionalProbesDone sync.WaitGroup
+	for _, optional := range optionalProbes {
+		optionalProbesDone.Add(1)
+		go func() {
+			defer optionalProbesDone.Done()
+			optional.run = timeStep(probeCtx, optional.carrier, optional.port, func(ctx context.Context) error {
+				return probeOptionalExtenderCarrier(ctx, probes, optional.connectMode, optional.port)
+			})
+		}()
+	}
+	optionalProbesDone.Wait()
+
+	// the dns ports that answered, which is what the address row and the
+	// record list (L2), in the order offered. Empty unless the dns carrier
+	// was offered and answered.
+	activeDnsPorts := []int{}
+	for _, optional := range optionalProbes {
+		steps = append(steps, optional.run.step)
+		if optional.run.err == nil {
+			answered[optional.carrier] = true
+			if optional.carrier == connect.ExtenderCarrierDns {
+				activeDnsPorts = append(activeDnsPorts, optional.port)
+			}
 		} else {
-			refusals[connect.ExtenderCarrierQuic] = append(
-				refusals[connect.ExtenderCarrierQuic],
-				quicRun.carrierRefusal(connect.ExtenderCarrierQuic, udpPort),
+			refusals[optional.carrier] = append(
+				refusals[optional.carrier],
+				optional.run.carrierRefusal(optional.carrier, optional.port),
 			)
 		}
 	}
@@ -1892,4 +1930,23 @@ func probeExtenderActivation(
 		outcome.refusedCarriers = append(outcome.refusedCarriers, refusals[carrier]...)
 	}
 	return outcome
+}
+
+// One optional carrier's probe, which runs in a goroutine of its own
+// (probeExtenderActivation). A probe that panics fails that carrier alone: the
+// panic is logged and becomes the probe's error, rather than ending the
+// process from a goroutine no caller recovers.
+func probeOptionalExtenderCarrier(
+	ctx context.Context,
+	probes *extenderActivationProbes,
+	connectMode connect.ExtenderConnectMode,
+	port int,
+) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[extender]activation probe %s:%d panicked: %s\n", connectMode, port, server.ErrorJson(r, debug.Stack()))
+			err = fmt.Errorf("the probe failed: %v", r)
+		}
+	}()
+	return probes.carrier(ctx, connectMode, port)
 }

@@ -138,13 +138,13 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 				Port:         443,
 				Error:        "connection refused",
 				ElapsedMs:    12,
-				BudgetLeftMs: 6400,
+				BudgetLeftMs: 9400,
 			},
 			{
 				Carrier:      "dns",
 				Port:         53,
-				Error:        "no answer within 3 s: context deadline exceeded",
-				ElapsedMs:    3000,
+				Error:        "no answer within the 9.4 s left of the 10 s probe budget: context deadline exceeded",
+				ElapsedMs:    9400,
 				BudgetLeftMs: 9400,
 			},
 		},
@@ -156,9 +156,9 @@ func TestExtenderActivateRefusedCarriersWireForm(t *testing.T) {
 		t,
 		string(resultBytes),
 		`{"activated":true,"carriers":["tcp","dns"],"dns_ports":[4053],"refused_carriers":[`+
-			`{"carrier":"quic","port":443,"error":"connection refused","elapsed_ms":12,"budget_left_ms":6400},`+
-			`{"carrier":"dns","port":53,"error":"no answer within 3 s: context deadline exceeded",`+
-			`"elapsed_ms":3000,"budget_left_ms":9400}]}`,
+			`{"carrier":"quic","port":443,"error":"connection refused","elapsed_ms":12,"budget_left_ms":9400},`+
+			`{"carrier":"dns","port":53,"error":"no answer within the 9.4 s left of the 10 s probe budget: context deadline exceeded",`+
+			`"elapsed_ms":9400,"budget_left_ms":9400}]}`,
 	)
 
 	acceptedBytes, err := json.Marshal(&controller.ExtenderActivateResult{
@@ -253,7 +253,7 @@ func TestExtenderActivateAnswerReadsOnAShippedProvider(t *testing.T) {
 	steps := []*controller.ExtenderProbeStep{
 		{Name: "tcp", IpVersion: 6, Port: 443, ElapsedMs: 120, BudgetLeftMs: 10000, Outcome: "ok"},
 		{Name: "forward", IpVersion: 6, Port: 443, ElapsedMs: 310, BudgetLeftMs: 9880, Outcome: "ok"},
-		{Name: "dns", IpVersion: 6, Port: 4053, ElapsedMs: 3000, BudgetLeftMs: 9570, Outcome: "timeout"},
+		{Name: "dns", IpVersion: 6, Port: 4053, ElapsedMs: 9570, BudgetLeftMs: 9570, Outcome: "timeout"},
 	}
 	for _, result := range []*controller.ExtenderActivateResult{
 		{
@@ -270,8 +270,8 @@ func TestExtenderActivateAnswerReadsOnAShippedProvider(t *testing.T) {
 				{
 					Carrier:      "dns",
 					Port:         4053,
-					Error:        "no answer within 3 s: context deadline exceeded",
-					ElapsedMs:    3000,
+					Error:        "no answer within the 9.57 s left of the 10 s probe budget: context deadline exceeded",
+					ElapsedMs:    9570,
 					BudgetLeftMs: 9570,
 				},
 			},
