@@ -20,6 +20,11 @@ installation files and claim journals must not be overwritten or reset.
 
 ## Traffic-preservation addendum
 
+New reviews also require the separately versioned
+[production-client benefit eligibility addendum](PRODUCTION-BENEFIT.md).
+Both checks must pass for approval. A benign no-op can be ineligible without
+being fraudulent; source-only integration risk is not a reward rejection reason.
+
 `traffic-preservation/1` makes the existing prohibition on deliberate workload
 suppression explicit for epoch 1 and future reviews. It is not a new numerical
 gate, a zero-failure requirement, a new model-policy ID, or a seventh public

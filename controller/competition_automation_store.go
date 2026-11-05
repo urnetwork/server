@@ -419,6 +419,9 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			if !errors.Is(loadErr, pgx.ErrNoRows) {
 				server.Raise(loadErr)
 			}
+			// Old exact replays above retain their immutable request digest. Every
+			// newly inserted review, regardless of epoch, adopts the addendum.
+			server.Raise(model.ValidateCompetitionProductionBenefitReview(request, true))
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			current := automationResultInTx(ctx, tx, roundId)
 			if current.RewardRevision != request.ExpectedRevision {

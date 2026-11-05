@@ -453,6 +453,29 @@ provider qualification before operational activation. Implementation or mocked
 tests alone are not proof that a model detects every abuse. See the
 [review contract and qualification requirements](evaluator/review/README.md#traffic-preservation-addendum).
 
+### Production-client benefit eligibility
+
+Every new review, including pending epoch-1 candidates and future epochs, also
+requires a supported explanation of how the changed production path can improve
+real clients. Provider/server improvements count when they benefit client
+service. A source-level causal argument can suffice; live production A/B testing
+is not required for every patch. Correctness, useful traffic, resource bounds,
+recovery and lifecycle semantics must remain sound.
+
+A score gain alone, a benign no-op/comment-only change without a production
+effect, or a benchmark-only improvement does not establish eligibility. Proven
+lack of production benefit uses `NO_PRODUCTION_BENEFIT` under
+`workload_generalization`; it rejects reward/source eligibility without alleging
+fraud. Missing callers, helpers or causal evidence instead hold review as
+uncertain. Both the production-benefit and traffic-preservation checks must pass
+for approval. See the version/hash-bound
+[`production-benefit/1` addendum](evaluator/review/PRODUCTION-BENEFIT.md).
+
+This source contract does not change numerical gates or reopen immutable old
+approvals. New requests and receipts carry its explicit identity; exact old
+idempotent replays remain unchanged. Independent tests and real Qwen/Gemma
+qualification of the new contract are required before operational activation.
+
 ## Epoch source identity and promotion
 
 The source graph applies to both contracts. The manual `epoch-review` and

@@ -16,7 +16,8 @@ func sourceReviewTemplate(packet *controller.CompetitionSourceReviewPacket) mode
 		BaseSourceLockSha256: packet.Entry.BaseSourceLockSha256, ScoreSha256: packet.Entry.ScoreSha256,
 		BaselineSha256: packet.Seal.BaselineSha256, ArtifactManifestSha256: packet.Entry.ArtifactManifestSha256,
 		CriteriaVersion: packet.ReviewCriteriaVersion, RewardDisposition: "unchanged", SourceDisposition: "deferred",
-		ReasonCodes: []string{}, Findings: []model.CompetitionReviewFinding{},
+		ProductionBenefitAddendum: model.CompetitionProductionBenefitReviewAddendum(),
+		ReasonCodes:               []string{}, Findings: []model.CompetitionReviewFinding{},
 	}
 	for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
 		request.Findings = append(request.Findings, model.CompetitionReviewFinding{Criterion: criterion})

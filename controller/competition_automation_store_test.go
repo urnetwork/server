@@ -180,7 +180,8 @@ func addCompetitionAutomationJobWithManifest(t testing.TB, fixture *competitionR
 // Every criterion has structured evidence; this helper never fabricates a legacy approval row.
 func competitionAutomationReviewRequest(result *model.CompetitionV2RoundResult, entry model.CompetitionSealedEntry, disqualify bool) model.CompetitionIntegrityReviewRequest {
 	request := model.CompetitionIntegrityReviewRequest{IdempotencyKey: "synthetic-review-" + server.NewId().String(), ExpectedRevision: result.RewardRevision, JobId: entry.JobId,
-		PatchSha256: entry.PatchSha256, BaseSourceLockSha256: entry.BaseSourceLockSha256, ScoreSha256: entry.ScoreSha256, BaselineSha256: result.Seal.BaselineSha256, ArtifactManifestSha256: entry.ArtifactManifestSha256,
+		ProductionBenefitAddendum: model.CompetitionProductionBenefitReviewAddendum(),
+		PatchSha256:               entry.PatchSha256, BaseSourceLockSha256: entry.BaseSourceLockSha256, ScoreSha256: entry.ScoreSha256, BaselineSha256: result.Seal.BaselineSha256, ArtifactManifestSha256: entry.ArtifactManifestSha256,
 		CriteriaVersion: "synthetic-criteria-v1", RewardDisposition: "approved", SourceDisposition: "deferred", ReasonCodes: []string{"APPROVED"}, PublicExplanation: "Synthetic deterministic review evidence.", WithheldEvidenceExplanation: "Synthetic private evidence retained for the test.", PrivateEvidenceSha256: strings.Repeat("d", 64)}
 	if disqualify {
 		request.RewardDisposition = "disqualified"

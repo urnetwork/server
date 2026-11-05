@@ -183,7 +183,8 @@ func validateWinnerWorkloadPreservation(judgment winnerModelJudgment) error {
 				continue
 			}
 			for _, reason := range winnerSnowDispositionReasons("disqualify", judgment.ReasonCodes) {
-				supported = supported || finding.ReasonCode == reason
+				// Benign ineligibility alone is not proof of traffic suppression.
+				supported = supported || reason != "NO_PRODUCTION_BENEFIT" && finding.ReasonCode == reason
 			}
 		}
 		if !supported {

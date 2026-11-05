@@ -11327,4 +11327,8 @@ var migrations = []any{
 	// Prospective epoch-two executor custody follows the complete published
 	// origin prefix; singleton execution is unchanged until future opt-in.
 	newSqlMigration(competitionDistributedEvaluationMigrationSql),
+
+	// Optional addendum encoding is compatible with the previous release; new
+	// code requires it only after checking historical exact review replay.
+	newSqlMigration(competitionProductionBenefitReviewMigration()),
 }

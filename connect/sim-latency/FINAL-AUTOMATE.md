@@ -520,6 +520,7 @@ runbook rather than leaving grounds to reviewer taste. Suggested reason codes:
 | `PATCH_POLICY_VIOLATION` / `UNRELATED_CHANGE` | Cite the frozen allowed/forbidden surface or published scope rule and exact patch locations. |
 | `REWARD_DUPLICATE` / `REWARD_RULE_EVASION` | Only if prospectively adopted; cite exact prior implementation/reward identity and the published rule. |
 | `SOURCE_NOT_READY` / `PRODUCT_INTEGRATION_RISK` | Source deferral or rejection only unless a separately evidenced published reward rule is violated. |
+| `NO_PRODUCTION_BENEFIT` | Under the exact `production-benefit/1` addendum, identify the changed path and concrete inability to improve production clients. Reject reward/source eligibility under `workload_generalization`, without alleging fraud. Missing causal evidence instead holds review. |
 | `EVALUATION_INTEGRITY_INCIDENT` | Evaluator/host/evidence failure; do not accuse a miner of fraud without causal evidence. May require round invalidation. |
 
 Require structured findings for every honesty/safety criterion, exact patch,

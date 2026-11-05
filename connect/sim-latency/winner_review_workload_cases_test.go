@@ -85,10 +85,18 @@ func TestWinnerWorkloadReviewQualificationCasesKeepLabelsOutOfInput(t *testing.T
 		judgment.Decision = fixture.ExpectedDecision
 		judgment.WorkloadPreservation.Disposition = fixture.ExpectedWorkloadDisposition
 		judgment.WorkloadPreservation.Explanation = "Synthetic contract expectation for the changed Forward function; this fixture does not claim a provider detected the behavior."
+		judgment.ProductionBenefit.ProductionPath = "Forward in the supplied synthetic client forwarding path."
+		judgment.ProductionBenefit.Mechanism = "The source-specific batching or caller-cancellation control can reduce unnecessary client-path work."
+		judgment.ProductionBenefit.PreservedSemantics = "The supplied positive control preserves healthy transfer completion, recovery and caller ownership."
+		judgment.ProductionBenefit.ClientBenefit = "Less forwarding overhead or unwanted canceled work, without intentionally dropping useful healthy traffic."
 		if fixture.ExpectedDecision == "disqualify" {
+			// This older corpus isolates traffic misconduct. The separate
+			// production corpus supplies explicit eligibility-failure controls.
+			judgment.ProductionBenefit.Disposition = "uncertain"
 			judgment.ReasonCodes = []string{"WORKLOAD_SPECIAL_CASING"}
 			judgment.Findings[1].Disposition, judgment.Findings[1].ReasonCode = "fail", "WORKLOAD_SPECIAL_CASING"
 		} else if fixture.ExpectedDecision == "uncertain" {
+			judgment.ProductionBenefit.Disposition = "uncertain"
 			judgment.ReasonCodes = []string{"SOURCE_NOT_READY"}
 			judgment.Findings[1].Disposition, judgment.Findings[1].ReasonCode = "uncertain", "SOURCE_NOT_READY"
 		}
@@ -110,7 +118,7 @@ func winnerQualificationAnswerKey(input []byte) (string, error) {
 		switch value := value.(type) {
 		case map[string]any:
 			for key, child := range value {
-				if key == "expected_decision" || key == "expected_workload_disposition" {
+				if key == "expected_decision" || key == "expected_workload_disposition" || key == "expected_production_disposition" {
 					return key
 				}
 				if found := find(child); found != "" {
@@ -142,6 +150,7 @@ func TestWinnerWorkloadReviewQualificationAnswerKeysAreStructural(t *testing.T) 
 		{input: `{"context":{"labels":{"expected_workload_disposition":"pass"}}}`, want: "expected_workload_disposition"},
 		{input: `{"context":[null,[{"expected_decision":"approve"}]]}`, want: "expected_decision"},
 		{input: `[{"expected_\u0064ecision":"approve"}]`, want: "expected_decision"},
+		{input: `{"context":[{"expected_production_disposition":"pass"}]}`, want: "expected_production_disposition"},
 	} {
 		if got, err := winnerQualificationAnswerKey([]byte(fixture.input)); err != nil || got != fixture.want {
 			t.Fatalf("answer-key check for %s: got %q, want %q: %v", fixture.input, got, fixture.want, err)
