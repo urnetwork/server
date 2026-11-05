@@ -3,30 +3,60 @@ package model
 import (
 	"context"
 	"fmt"
+	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 )
 
-// The hosted proxy limit (owner, 2026-11-05).
+// The hosted proxy limits (owner, 2026-11-05). Every network has two:
+//   - a cap on its active hosted proxies: free 5, Pro 1000, or its Embed plan
+//     row's limit when it has one (bringyourctl network client-limit);
+//   - a rate on its hosted proxy creates: free 5, Pro 20 a minute, counted in
+//     one redis key per network and minute.
 //
-// A network holds at most its plan's number of active hosted proxies: the
-// plan's concurrent client count (pro.yml: free 2, Pro 1000), or an Embed
-// plan's override (networkConcurrentClientLimit). Unlike the concurrent client
-// limit it is always enforced: it does not wait for enforce_concurrent_clients,
-// which turns the rest of the client limits on with the app release.
+// Both apply to every hosted proxy create, top-level or derived, and always:
+// they do not wait for enforce_concurrent_clients, which turns the rest of the
+// client limits on with the app release. Only a new proxy is refused. A
+// network's existing proxies keep working, and removing one makes room for
+// the next.
 //
-// Why: on 2026-11-04/05 one network held 300,006 active hosted proxies and
-// created 14-22k more an hour. Every live hosted proxy is a device on a proxy
-// host that keeps finding providers and reserving contracts, so the two proxy
-// hosts ran at 100% CPU from about 00:00Z and their hosted devices, other
-// networks' among them, lost their connections, while that network moved about
-// 9.7 GB in the month. Only a new proxy is refused; a network's existing proxies
-// keep working, and removing one makes room for the next.
+// Why: on 2026-11-04/05 the two proxy hosts ran at 99.6% CPU with 91,000
+// installed hosted devices. Every live hosted proxy is a device on a proxy
+// host that keeps finding providers and reserving contracts. One network held
+// 123,295 active hosted proxies; another created about 17,000 an hour and
+// removed them within minutes, so a cap on active proxies alone never refused
+// it.
+//
+// Free is 5 for now, not lower: browser extensions up to the current release
+// create 5 hosted proxies per connect (src/utils/connection-manager.ts
+// MULTI_IP_POOL_SIZE = 5, used only as an ordered failover list). The next
+// extension release creates 1; lower free once it is out. The free tier's
+// pro.yml concurrent_clients (2) is the dark device limit and is not used here.
+//
+// Variables only so tests can change them; 0 or less means no limit.
+var (
+	freeProxyClientLimit = 5
+	proProxyClientLimit  = 1000
 
-// networkProxyClientLimit is the most active hosted proxies the network may hold.
-// 0 (no pro.yml) means no limit.
-func networkProxyClientLimit(ctx context.Context, networkId server.Id) int {
-	return networkConcurrentClientLimit(ctx, networkId)
+	freeProxyClientCreatesPerMinute = 5
+	proProxyClientCreatesPerMinute  = 20
+)
+
+// proxyClientLimitFor is the most active hosted proxies a network may hold: its
+// Embed plan row's limit when it has one (networkClientLimitOverride),
+// otherwise its plan's cap.
+func proxyClientLimitFor(isPro bool, overrideLimit int, override bool) int {
+	if override {
+		return overrideLimit
+	}
+	if isPro {
+		return proProxyClientLimit
+	}
+	return freeProxyClientLimit
 }
 
 // proxyClientLimitReached reports whether a network with `activeCount` active
@@ -171,4 +201,122 @@ func proxyClientLimitMessage(limit int, isPro bool) string {
 		return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy to create another.", limit)
 	}
 	return fmt.Sprintf("Your plan's limit of %d active proxies is reached. Remove a proxy to create another, or upgrade to UR Pro for more.", limit)
+}
+
+// The create rate counts every hosted proxy create attempt in a redis counter
+// per network and unix minute, `cl-<network_id>-<block>`. It is a single key,
+// so a single cluster slot. Each create refreshes the key's ttl, which outlives
+// its minute.
+const proxyClientCreateKeyTtl = 120 * time.Second
+
+// proxyClientCreateNow is the clock the rate's minutes are read from.
+var proxyClientCreateNow = time.Now
+
+// proxyClientCreateBlock is the unix minute a create at `now` counts in.
+func proxyClientCreateBlock(now time.Time) int64 {
+	return now.Unix() / 60
+}
+
+func proxyClientCreateKey(networkId server.Id, block int64) string {
+	return fmt.Sprintf("cl-%s-%d", networkId, block)
+}
+
+func proxyClientCreatesPerMinute(isPro bool) int {
+	if isPro {
+		return proProxyClientCreatesPerMinute
+	}
+	return freeProxyClientCreatesPerMinute
+}
+
+// proxyClientCreateRateExceeded reports whether the create that brought its
+// minute's count to `count` is over `perMinute`. 0 or less never refuses.
+func proxyClientCreateRateExceeded(perMinute int, count int64) bool {
+	return 0 < perMinute && int64(perMinute) < count
+}
+
+// countProxyClientCreate counts one hosted proxy create in the network's minute
+// and returns the minute's count. A redis failure is logged and returns counted
+// false. The create then goes ahead (the rate fails open), and the active cap
+// still applies.
+func countProxyClientCreate(ctx context.Context, networkId server.Id, now time.Time) (count int64, counted bool) {
+	key := proxyClientCreateKey(networkId, proxyClientCreateBlock(now))
+	server.HandleError(func() {
+		server.Redis(ctx, func(r server.RedisClient) {
+			var incr *redis.IntCmd
+			_, err := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
+				incr = pipe.Incr(ctx, key)
+				pipe.Expire(ctx, key, proxyClientCreateKeyTtl)
+				return nil
+			})
+			server.Raise(err)
+			count, counted = incr.Val(), true
+		})
+	}, func(err error) {
+		count, counted = 0, false
+		glog.Warningf("[nc]proxy create rate not counted for network %s; the create goes ahead: %s\n", networkId, err)
+	})
+	return
+}
+
+func proxyClientCreateRateMessage(perMinute int, isPro bool) string {
+	proxies := "proxies"
+	if perMinute == 1 {
+		proxies = "proxy"
+	}
+	if isPro {
+		return fmt.Sprintf("Your plan allows %d new %s a minute. Try again in a minute.", perMinute, proxies)
+	}
+	return fmt.Sprintf("Your plan allows %d new %s a minute. Try again in a minute, or upgrade to UR Pro for more.", perMinute, proxies)
+}
+
+func proxyClientCreateRateRefusal(isPro bool) *AuthNetworkClientResult {
+	return &AuthNetworkClientResult{
+		Error: &AuthNetworkClientError{
+			ClientLimitExceeded: true,
+			UpgradeRequired:     !isPro,
+			Message:             proxyClientCreateRateMessage(proxyClientCreatesPerMinute(isPro), isPro),
+		},
+	}
+}
+
+// Testing_SetProxyClientLimits sets the active hosted proxy caps (0 or less: no
+// cap) and returns a function that restores them. Tests that use it must not
+// run in parallel.
+func Testing_SetProxyClientLimits(free int, pro int) func() {
+	prevFree, prevPro := freeProxyClientLimit, proProxyClientLimit
+	freeProxyClientLimit, proProxyClientLimit = free, pro
+	return func() {
+		freeProxyClientLimit, proProxyClientLimit = prevFree, prevPro
+	}
+}
+
+// Testing_SetProxyClientCreatesPerMinute sets the hosted proxy create rates (0
+// or less: no rate) and returns a function that restores them.
+func Testing_SetProxyClientCreatesPerMinute(free int, pro int) func() {
+	prevFree, prevPro := freeProxyClientCreatesPerMinute, proProxyClientCreatesPerMinute
+	freeProxyClientCreatesPerMinute, proProxyClientCreatesPerMinute = free, pro
+	return func() {
+		freeProxyClientCreatesPerMinute, proProxyClientCreatesPerMinute = prevFree, prevPro
+	}
+}
+
+// Testing_SetProxyClientCreateNow replaces the rate's clock and returns a
+// function that restores it.
+func Testing_SetProxyClientCreateNow(now func() time.Time) func() {
+	prev := proxyClientCreateNow
+	proxyClientCreateNow = now
+	return func() {
+		proxyClientCreateNow = prev
+	}
+}
+
+// Testing_LiftProxyClientLimits lifts the hosted proxy cap and rate, for a test
+// about something else that creates many proxies in one network.
+func Testing_LiftProxyClientLimits() func() {
+	restoreLimits := Testing_SetProxyClientLimits(0, 0)
+	restoreRates := Testing_SetProxyClientCreatesPerMinute(0, 0)
+	return func() {
+		restoreRates()
+		restoreLimits()
+	}
 }

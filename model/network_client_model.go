@@ -500,12 +500,21 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// Checked before the tx so the lookup does not hold it open. Connection
 		// activation applies the same limit; see CanConnectNetworkPeer.
 		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
-		// A hosted proxy is limited on its own, and always: a network holds at
-		// most its plan's number of active proxies (network_client_proxy_limit.go).
-		// Resolved before the tx, like the concurrent limit; counted inside it.
-		proxyClientLimit := 0
+		// A hosted proxy is limited on its own, and always
+		// (network_client_proxy_limit.go): the network's active proxies are
+		// capped and its proxy creates are rated per minute. The Embed row and
+		// this create's count are read before the tx, like the concurrent limit;
+		// the active proxies are counted inside it. The create is counted once
+		// per call, so a retried tx does not count it again.
+		proxyLimitOverride, proxyLimitOverridden := 0, false
+		var proxyCreateCount int64
+		proxyCreateCounted := false
 		if authClient.ProxyConfig != nil {
-			proxyClientLimit = networkProxyClientLimit(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+			proxyLimitOverride, proxyLimitOverridden = networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+			proxyCreateCount, proxyCreateCounted = countProxyClientCreate(clientSession.Ctx, clientSession.ByJwt.NetworkId, proxyClientCreateNow())
+		}
+		proxyCreateRateExceeded := func(isPro bool) bool {
+			return proxyCreateCounted && proxyClientCreateRateExceeded(proxyClientCreatesPerMinute(isPro), proxyCreateCount)
 		}
 		if concurrentLimitExceeded && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
@@ -596,6 +605,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		} else {
 			isPro = IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
 		}
+		// a proxy create over the network's rate is refused here, before any db
+		// work, once the plan is known; a registration is decided in the tx,
+		// where a retained one still answers
+		if !validateParent && registration == nil && proxyCreateRateExceeded(isPro) {
+			authClientResult = proxyClientCreateRateRefusal(isPro)
+			return
+		}
 		// one registration per network per process waits for the network's
 		// allocation lock; the rest wait here, holding no pooled connection
 		// (network_client_registration_gate.go). The gate opens when the
@@ -649,17 +665,24 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					return
 				}
 			}
-			if authClient.ProxyConfig != nil && proxyClientLimit > 0 {
-				activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientCountBound(proxyClientLimit))
-				if proxyClientLimitReached(proxyClientLimit, activeProxyCount) {
-					authClientResult = &AuthNetworkClientResult{
-						Error: &AuthNetworkClientError{
-							ClientLimitExceeded: true,
-							UpgradeRequired:     !isPro,
-							Message:             proxyClientLimitMessage(proxyClientLimit, isPro),
-						},
+			if proxyCreateRateExceeded(isPro) {
+				authClientResult = proxyClientCreateRateRefusal(isPro)
+				return
+			}
+			if authClient.ProxyConfig != nil {
+				proxyLimit := proxyClientLimitFor(isPro, proxyLimitOverride, proxyLimitOverridden)
+				if 0 < proxyLimit {
+					activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientCountBound(proxyLimit))
+					if proxyClientLimitReached(proxyLimit, activeProxyCount) {
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								ClientLimitExceeded: true,
+								UpgradeRequired:     !isPro,
+								Message:             proxyClientLimitMessage(proxyLimit, isPro),
+							},
+						}
+						return
 					}
-					return
 				}
 			}
 			createTime := server.NowUtc()
