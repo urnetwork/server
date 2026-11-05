@@ -457,6 +457,12 @@ var migrationArtifacts = append(append(append([]migrationArtifact{
 	name: "legacy settlement missing-payer registration index", requiredVersion: 793, rowColumn: 204,
 }), migrationCurrentSuffixArtifacts()...)
 
+// Share the exact permission-aware public-column view within one statement.
+// Every invocation refreshes it, including after fixture DDL and restoration.
+const migrationPublicColumnsQuery = `public_columns AS MATERIALIZED (
+ SELECT table_schema, table_name, column_name, column_default, is_nullable, data_type, character_maximum_length FROM information_schema.columns WHERE table_schema = 'public'
+)`
+
 func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []finding, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -495,7 +501,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 			SELECT coalesce(max(end_version_number), 0)::int AS value
 			FROM migration_audit
 			WHERE status = 'success'
-		), `+competitionStagingApprovalCatalogQuery+`, `+migrationFp2CatalogQuery+`, index_artifact AS (
+		), `+migrationPublicColumnsQuery+`, `+competitionStagingApprovalCatalogQuery+`, `+migrationFp2CatalogQuery+`, index_artifact AS (
 			SELECT table_relation.relname::text AS table_name,
 			       index_relation.relname::text AS index_name,
 			       `+migrationIndexDefinitionSql("index_relation", "table_relation.relname")+` AS definition,
@@ -565,24 +571,24 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       to_regclass('public.competition_round') IS NOT NULL,
 		       to_regprocedure('public.competition_job_immutable_guard()') IS NOT NULL,
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'competition_round'
 		             AND column_name = 'providers_sha256'
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'competition_round'
 		             AND column_name = 'epoch_number'
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'competition_job'
 		             AND column_name = 'api_image_digest'
 		       ),
 		       to_regclass('public.competition_candidate_review') IS NOT NULL,
 		       to_regclass('public.transfer_escrow_balance_contract') IS NOT NULL,
 		       (
-		           SELECT count(*) = 2 FROM information_schema.columns
+		           SELECT count(*) = 2 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'account_payment'
 		             AND column_name IN ('contract_retention_cursor', 'contract_retention_pending')
 		       ),
@@ -591,14 +597,14 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       to_regclass('public.migration_catalog') IS NOT NULL,
 		       to_regclass('public.transfer_escrow_unsettled_balance_contract') IS NOT NULL,
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public'
 		             AND table_name = 'client_reliability_running_window'
 		             AND column_name = 'degraded_classification_version'
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'client_reliability_running_window'
 		                 AND column_name = 'degraded_classification_write_token'
@@ -617,7 +623,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'provider_egress_health'
 		                 AND column_name = 'tls_authentication_failure'
@@ -630,12 +636,12 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       to_regclass('public.st_epoch_notification') IS NOT NULL,
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network'
 		             AND column_name = 'points_leaderboard_public'
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network'
 		             AND column_name = 'emoji_tag'
 		       ),
@@ -647,7 +653,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           (
 		               SELECT count(*) = 7
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name IN (
 		                     'st_epoch', 'st_payout_leaf', 'st_publish', 'st_event',
@@ -699,7 +705,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           (
 		               SELECT count(*) = 3
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'st_transaction_intent'
 		                 AND column_name IN ('deployment_key', 'logical_key', 'generation')
@@ -740,7 +746,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public'
 		             AND table_name = 'st_transaction_intent'
 		             AND column_name = 'genesis_hash'
@@ -791,7 +797,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'st_transaction_attempt'
 		                 AND column_name = 'kind'
@@ -818,7 +824,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           (
 		               SELECT count(*) = 2
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name IN ('st_fleet_binding_signature', 'st_epoch_notification')
 		                 AND column_name = 'deployment_key'
@@ -851,7 +857,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'transfer_contract'
 		                 AND column_name = 'stream_id'
@@ -860,7 +866,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           AND to_regclass('public.contract_participant') IS NOT NULL
 		           AND (
 		               SELECT count(*) = 3
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'contract_participant'
 		                 AND column_name IN ('stream_id', 'client_id', 'network_id')
@@ -885,7 +891,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'competition_round'
 		                 AND column_name = 'staging' AND data_type = 'boolean'
 		                 AND is_nullable = 'NO' AND column_default IS NULL
@@ -917,7 +923,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'transfer_escrow_sweep'
 		                 AND column_name = 'provider_payouts' AND data_type = 'jsonb'
 		                 AND is_nullable = 'YES' AND column_default IS NULL
@@ -997,13 +1003,13 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'subscription_renewal'
 		             AND column_name = 'price_tier' AND data_type = 'character varying'
 		             AND character_maximum_length = 32 AND is_nullable = 'YES'
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'stripe_customer'
 		             AND column_name = 'billing_country' AND data_type = 'character varying'
 		             AND character_maximum_length = 2 AND is_nullable = 'YES'
@@ -1080,7 +1086,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       (
 		           EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'competition_round'
 		                 AND column_name = 'admission_closed_at'
 		                 AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
@@ -1101,7 +1107,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           )
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public'
 		             AND table_name = 'network_points_leaderboard_snapshot'
 		             AND column_name = 'epoch_metrics_available'
@@ -1111,14 +1117,14 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           to_regclass('public.onboarding_email_tracker_daily') IS NOT NULL
 		           AND EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'onboarding_email_tracker_daily'
 		                 AND column_name = 'attribution_ambiguous'
 		                 AND data_type = 'bigint' AND is_nullable = 'NO'
 		           )
 		           AND NOT EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'onboarding_email_tracker_daily'
 		                 AND column_name IN ('network_id', 'message_id', 'email_address')
@@ -1141,28 +1147,28 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
 		             AND column_name = 'ip_version'
 		             AND data_type = 'smallint' AND is_nullable = 'NO'
 		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
 		             AND column_name = 'ip_family_intent'
 		             AND data_type = 'smallint' AND is_nullable = 'NO'
 		             AND column_default IN ('0', '0::smallint', '''0''::smallint')
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
 		             AND column_name = 'ipv4_proven'
 		             AND data_type = 'boolean' AND is_nullable = 'NO'
 		             AND column_default IN ('false', 'false::boolean', '''false''::boolean')
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
 		             AND column_name = 'ipv6_proven'
 		             AND data_type = 'boolean' AND is_nullable = 'NO'
@@ -1188,7 +1194,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('record_issue_time', 'timestamp without time zone', 'YES')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_extender'
 		                     AND actual.column_name = expected.column_name
@@ -1228,7 +1234,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('last_publish_time', 'timestamp without time zone', 'YES')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_extender_address'
 		                     AND actual.column_name = expected.column_name
@@ -1265,7 +1271,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('published_time', 'timestamp without time zone', 'YES')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_extender_publish'
 		                     AND actual.column_name = expected.column_name
@@ -1290,7 +1296,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           )
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_connection'
 		             AND column_name = 'extender_id'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
@@ -1316,7 +1322,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('network_id', 'uuid', 'NO')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'contract_extender'
 		                     AND actual.column_name = expected.column_name
@@ -1325,7 +1331,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		               )
 		           )
 		           AND EXISTS (
-		               SELECT 1 FROM information_schema.columns
+		               SELECT 1 FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'contract_extender'
 		                 AND column_name = 'party'
 		                 AND character_maximum_length = 16
@@ -1339,7 +1345,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           )
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_extender_address'
 		             AND column_name = 'dns_ports'
 		             AND data_type = 'character varying' AND is_nullable = 'NO'
@@ -1350,35 +1356,35 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		             )
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_extender'
 		             AND column_name = 'location_id'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_extender'
 		             AND column_name = 'city_location_id'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_extender'
 		             AND column_name = 'region_location_id'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_extender'
 		             AND column_name = 'country_location_id'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'contract_extender'
 		             AND column_name = 'create_time'
 		             AND data_type = 'timestamp without time zone' AND is_nullable = 'NO'
@@ -1420,7 +1426,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('created_at', 'timestamp without time zone', 'NO')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'competition_round_baseline'
 		                     AND actual.column_name = expected.column_name
@@ -1430,7 +1436,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           )
 		           AND (
 		               SELECT count(*) = 13
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public'
 		                 AND table_name = 'competition_round_baseline'
 		           )
@@ -1524,7 +1530,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('create_time', 'timestamp without time zone', 'NO')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_extender_latency'
 		                     AND actual.column_name = expected.column_name
@@ -1580,7 +1586,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('country_location_id', 'uuid', 'YES', NULL)
 		               ) AS expected(column_name, data_type, is_nullable, column_default)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_extender_activation'
 		                     AND actual.column_name = expected.column_name
@@ -1616,7 +1622,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('block_number', 'bigint', 'NO')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'account_payment_block'
 		                     AND actual.column_name = expected.column_name
@@ -1633,14 +1639,14 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           )
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'account_payment'
 		             AND column_name = 'block_rollup_complete'
 		             AND data_type = 'boolean' AND is_nullable = 'NO'
 		             AND column_default IN ('false', 'false::boolean')
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'account_payment'
 		             AND column_name = 'block_rollup_cursor'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
@@ -1670,7 +1676,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       ),
 		       `+competitionStagingBestWinnerArtifactQuery+`,
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'location'
 		             AND column_name = 'geoname_id'
 		             AND data_type = 'bigint' AND is_nullable = 'YES'
@@ -1703,7 +1709,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('create_time', 'timestamp without time zone', 'NO', ARRAY['now()'])
 		               ) AS expected(column_name, data_type, is_nullable, column_defaults)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_ping'
 		                     AND actual.column_name = expected.column_name
@@ -1756,21 +1762,21 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		             AND indisvalid AND indisready
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location'
 		             AND column_name = 'accuracy_km'
 		             AND data_type = 'real' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_extender_activation'
 		             AND column_name = 'accuracy_km'
 		             AND data_type = 'real' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_ping'
 		             AND column_name = 'hop_count'
 		             AND data_type = 'smallint' AND is_nullable = 'NO'
@@ -1803,7 +1809,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('update_time', 'timestamp without time zone')
 		               ) AS expected(column_name, data_type)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'derived_location'
 		                     AND actual.column_name = expected.column_name
@@ -1821,49 +1827,49 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		           )
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location'
 		             AND column_name = 'genesis_location_id'
 		             AND data_type = 'uuid' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
 		             AND column_name = 'egress_index'
 		             AND data_type = 'smallint' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
 		             AND column_name = 'egress_quality'
 		             AND data_type = 'boolean' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'network_client_location_reliability'
 		             AND column_name = 'egress_evidence_time'
 		             AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'provider_blackhole_check'
 		             AND column_name = 'consecutive_failures'
 		             AND data_type = 'integer' AND is_nullable = 'NO'
 		             AND column_default IN ('0', '0::integer', '''0''::integer')
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'provider_blackhole_check'
 		             AND column_name = 'first_failed_at'
 		             AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
 		             AND column_default IS NULL
 		       ),
 		       EXISTS (
-		           SELECT 1 FROM information_schema.columns
+		           SELECT 1 FROM public_columns
 		           WHERE table_schema = 'public' AND table_name = 'provider_blackhole_check'
 		             AND column_name = 'next_due_at'
 		             AND data_type = 'timestamp without time zone' AND is_nullable = 'YES'
@@ -1880,7 +1886,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		               ('unscored_failed_names', 'text')
 		           ) AS expected(column_name, data_type)
 		           WHERE EXISTS (
-		               SELECT 1 FROM information_schema.columns AS actual
+		               SELECT 1 FROM public_columns AS actual
 		               WHERE actual.table_schema = 'public'
 		                 AND actual.table_name = 'provider_egress_health'
 		                 AND actual.column_name = expected.column_name
@@ -1892,7 +1898,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           (
 		               SELECT count(*) = 25
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'provider_egress_destination'
 		           )
 		           AND (
@@ -1909,7 +1915,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('above_retire_since', 'timestamp without time zone', 'YES')
 		               ) AS expected(column_name, data_type, is_nullable)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'provider_egress_destination'
 		                     AND actual.column_name = expected.column_name
@@ -1928,7 +1934,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           (
 		               SELECT count(*) = 11
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'provider_egress_site_tally'
 		           )
 		           AND EXISTS (
@@ -1942,7 +1948,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		       (
 		           (
 		               SELECT count(*) = 7
-		               FROM information_schema.columns
+		               FROM public_columns
 		               WHERE table_schema = 'public' AND table_name = 'provider_egress_place_tally'
 		           )
 		           AND EXISTS (
@@ -1981,7 +1987,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		                   ('hop_count', 'smallint', 'NO', ARRAY['0', '0::smallint', '''0''::smallint'])
 		               ) AS expected(column_name, data_type, is_nullable, column_defaults)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_ping'
 		                     AND actual.column_name = expected.column_name
@@ -2055,7 +2061,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 				   ('beyond_half_planet_count', 'bigint')
 		               ) AS expected(column_name, data_type)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_ping_hour_tally'
 		                     AND actual.column_name = expected.column_name
@@ -2085,7 +2091,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 				   ('pinger_id', 'uuid')
 		               ) AS expected(column_name, data_type)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_ping_pinger_day'
 		                     AND actual.column_name = expected.column_name
@@ -2115,7 +2121,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 				   ('target_extender_id', 'uuid')
 		               ) AS expected(column_name, data_type)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_ping_target_day'
 		                     AND actual.column_name = expected.column_name
@@ -2148,7 +2154,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 				   ('rejection_count', 'bigint')
 		               ) AS expected(column_name, data_type)
 		               WHERE EXISTS (
-		                   SELECT 1 FROM information_schema.columns AS actual
+		                   SELECT 1 FROM public_columns AS actual
 		                   WHERE actual.table_schema = 'public'
 		                     AND actual.table_name = 'network_ping_target_hour_tally'
 		                     AND actual.column_name = expected.column_name
@@ -2194,7 +2200,7 @@ func (self migrationsProbe) check(ctx context.Context, env *probeEnv) (result []
 		               ('provider_usage', 'jsonb', 'YES')
 		           ) AS expected(column_name, data_type, is_nullable)
 		           WHERE EXISTS (
-		               SELECT 1 FROM information_schema.columns AS actual
+		               SELECT 1 FROM public_columns AS actual
 		               WHERE actual.table_schema = 'public' AND actual.table_name = 'transfer_contract'
 		                 AND actual.column_name = expected.column_name
 		                 AND actual.data_type = expected.data_type
