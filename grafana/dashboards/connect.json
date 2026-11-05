@@ -381,7 +381,7 @@
             "id": 5,
             "type": "stat",
             "title": "current exchange data TX",
-            "description": "Current completed exchange data-frame write rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes.",
+            "description": "Current completed exchange data-frame write rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes. Frames delivered in process by local links count as their sockets would have counted them (exchange_local_*), so the totals hold as blocks turn in-process delivery on.",
             "gridPos": {"h": 5, "w": 6, "x": 6, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "bps", "min": 0}, "overrides": []},
@@ -395,7 +395,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+                    "expr": "(sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum(rate(urnetwork_connect_exchange_local_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"sent\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or vector(0))) * 8",
                     "instant": true,
                     "range": false
                 }
@@ -405,7 +405,7 @@
             "id": 6,
             "type": "stat",
             "title": "current exchange data RX",
-            "description": "Current completed exchange data-frame read rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes.",
+            "description": "Current completed exchange data-frame read rate. Grafana automatically scales bits/s to Kbps, Mbps, or Gbps. The count includes the exchange protocol's 4-byte frame header but excludes pings and handshakes. Frames delivered in process by local links count as their sockets would have counted them (exchange_local_*), so the totals hold as blocks turn in-process delivery on.",
             "gridPos": {"h": 5, "w": 6, "x": 12, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "bps", "min": 0}, "overrides": []},
@@ -419,7 +419,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"received\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+                    "expr": "(sum(rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"received\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum(rate(urnetwork_connect_exchange_local_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",direction=\"received\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or vector(0))) * 8",
                     "instant": true,
                     "range": false
                 }
@@ -429,7 +429,7 @@
             "id": 7,
             "type": "stat",
             "title": "current exchange data frames / s",
-            "description": "Completed application-protocol data frames per second in each I/O direction. These are exchange packets, not kernel TCP segments; TCP segmentation and retransmission are below this measurement boundary.",
+            "description": "Completed application-protocol data frames per second in each I/O direction. These are exchange packets, not kernel TCP segments; TCP segmentation and retransmission are below this measurement boundary. Frames delivered in process by local links count as their sockets would have counted them (exchange_local_*), so the totals hold as blocks turn in-process delivery on.",
             "gridPos": {"h": 5, "w": 6, "x": 18, "y": 24},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {"defaults": {"unit": "ops", "min": 0}, "overrides": []},
@@ -444,7 +444,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval]))",
+                    "expr": "(sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum by (direction) (rate(urnetwork_connect_exchange_local_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or (sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 0)))",
                     "legendFormat": "{{direction}}",
                     "instant": true,
                     "range": false
@@ -455,7 +455,7 @@
             "id": 8,
             "type": "timeseries",
             "title": "exchange data throughput",
-            "description": "Live exchange data-frame throughput by process-local I/O direction. Fleet TX and RX are two observations of the same inter-server traffic and should converge; never sum them into a traffic total.",
+            "description": "Live exchange data-frame throughput by process-local I/O direction. Fleet TX and RX are two observations of the same inter-server traffic and should converge; never sum them into a traffic total. Frames delivered in process by local links count as their sockets would have counted them (exchange_local_*), so the totals hold as blocks turn in-process delivery on.",
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 29},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
@@ -469,7 +469,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 8",
+                    "expr": "(sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum by (direction) (rate(urnetwork_connect_exchange_local_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or (sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 0))) * 8",
                     "legendFormat": "{{direction}}"
                 }
             ]
@@ -478,7 +478,7 @@
             "id": 9,
             "type": "timeseries",
             "title": "exchange protocol frames / s",
-            "description": "Completed exchange frames by direction and kind. Data is relayed traffic, ping is keepalive/control traffic, and handshake is connection setup. A frame is counted only after the complete frame succeeds. The series carry an op label (transport, forward, unknown) since the release that added in-process delivery; a process on that release reports series of a new identity, as every restart does, and this panel sums across op, so the totals stay continuous.",
+            "description": "Completed exchange frames by direction and kind. Data is relayed traffic, ping is keepalive/control traffic, and handshake is connection setup. A frame is counted only after the complete frame succeeds. The series carry an op label (transport, forward, unknown) since the release that added in-process delivery; a process on that release reports series of a new identity, as every restart does, and this panel sums across op, so the totals stay continuous. Frames delivered in process by local links count as their sockets would have counted them (exchange_local_*), so the totals hold as blocks turn in-process delivery on.",
             "gridPos": {"h": 8, "w": 12, "x": 12, "y": 29},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
@@ -492,7 +492,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "sum by (direction, kind) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+                    "expr": "(sum by (direction, kind) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) + (sum by (direction, kind) (rate(urnetwork_connect_exchange_local_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) or (sum by (direction, kind) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval])) * 0)))",
                     "legendFormat": "{{direction}} {{kind}}"
                 }
             ]
@@ -501,7 +501,7 @@
             "id": 10,
             "type": "timeseries",
             "title": "average exchange data-frame payload",
-            "description": "Mean data payload bytes per completed exchange frame. The query removes the fixed 4-byte exchange header from the byte/frame ratio; compare sent and received to spot partial fleet selection or rollout skew.",
+            "description": "Mean data payload bytes per completed exchange frame. The query removes the fixed 4-byte exchange header from the byte/frame ratio; compare sent and received to spot partial fleet selection or rollout skew. Frames delivered in process by local links count as their sockets would have counted them (exchange_local_*), so the totals hold as blocks turn in-process delivery on.",
             "gridPos": {"h": 8, "w": 12, "x": 0, "y": 37},
             "datasource": {"type": "prometheus", "uid": "warp-mimir"},
             "fieldConfig": {
@@ -515,7 +515,7 @@
             "targets": [
                 {
                     "refId": "A",
-                    "expr": "clamp_min((sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) / sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval]))) - 4, 0)",
+                    "expr": "clamp_min(((sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum by (direction) (rate(urnetwork_connect_exchange_local_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or (sum by (direction) (rate(urnetwork_connect_exchange_io_bytes_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 0))) / (sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) + (sum by (direction) (rate(urnetwork_connect_exchange_local_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) or (sum by (direction) (rate(urnetwork_connect_exchange_io_frames_total{env=\"$env\",block=~\"$block\",host=~\"$host\",kind=\"data\",instance!=\"\"}[$__rate_interval])) * 0)))) - 4, 0)",
                     "legendFormat": "{{direction}}"
                 }
             ]
