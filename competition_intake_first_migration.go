@@ -453,11 +453,12 @@ CREATE FUNCTION competition_v2_intake_execution_guard() RETURNS trigger LANGUAGE
 DECLARE epoch_round competition_round%ROWTYPE; execute_candidate boolean;
 BEGIN
  IF NOT EXISTS(SELECT 1 FROM competition_source_intake_activation WHERE target_round_id=NEW.round_id) THEN RETURN NEW; END IF;
- execute_candidate:=NEW.state='running';
  IF TG_OP='INSERT' THEN
-  execute_candidate:=execute_candidate OR NEW.attempt_count<>0 OR NEW.started_at IS NOT NULL;
+  execute_candidate:=NEW.state='running' OR NEW.attempt_count<>0 OR NEW.started_at IS NOT NULL
+   OR NEW.evaluation_cycle<>0 OR NEW.cycle_started_at IS NOT NULL;
  ELSE
-  execute_candidate:=execute_candidate OR NEW.attempt_count IS DISTINCT FROM OLD.attempt_count OR NEW.started_at IS DISTINCT FROM OLD.started_at
+  execute_candidate:=(NEW.state='running' AND OLD.state IS DISTINCT FROM 'running')
+   OR NEW.attempt_count IS DISTINCT FROM OLD.attempt_count OR NEW.started_at IS DISTINCT FROM OLD.started_at
    OR NEW.evaluation_cycle IS DISTINCT FROM OLD.evaluation_cycle OR NEW.cycle_started_at IS DISTINCT FROM OLD.cycle_started_at;
  END IF;
  IF execute_candidate THEN

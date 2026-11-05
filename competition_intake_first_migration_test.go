@@ -85,7 +85,7 @@ CREATE TABLE competition_finalization_scope_fence(environment text,competition_i
 CREATE TABLE competition_automation_hold(environment text,competition_id text,season_id text,kind text,revision integer,active boolean);
 CREATE TABLE competition_automation_incident(round_id uuid,invalidates_evaluation boolean);
 CREATE TABLE competition_evaluation_seal(round_id uuid,seal_json jsonb);
-CREATE TABLE competition_job(job_id uuid PRIMARY KEY,round_id uuid,state text,attempt_count integer DEFAULT 0,started_at timestamp,evaluation_cycle integer DEFAULT 0,cycle_started_at timestamp,score_json jsonb);
+CREATE TABLE competition_job(job_id uuid PRIMARY KEY,round_id uuid,state text,attempt_count integer DEFAULT 0,started_at timestamp,evaluation_cycle integer DEFAULT 0,cycle_started_at timestamp,score_json jsonb,heartbeat_at timestamp,lease_expires_at timestamp);
 CREATE TABLE competition_worker_slot(slot_id integer PRIMARY KEY,job_id uuid,worker_id text,lease_expires_at timestamp);
 CREATE TABLE competition_job_event(job_id uuid,actor_id text,event_type text,payload_json jsonb);
 CREATE TABLE competition_round_baseline(round_id uuid PRIMARY KEY,baseline_json bytea,baseline_sha256 text,source_job_id uuid,source_attempt integer,source_artifact_manifest_sha256 text,
@@ -253,6 +253,21 @@ BEGIN
  IF NOT competition_v2_intake_grading_ready('00000000-0000-0000-0000-000000000002') THEN RAISE EXCEPTION 'genuine full quorum, R9 and every no-op host refused'; END IF;
 END $hosts$;
 UPDATE competition_job SET state='running',attempt_count=1,started_at=timezone('UTC',clock_timestamp()) WHERE job_id='00000000-0000-0000-0000-000000000003';
+-- A claim-only evaluation hold must not stop an already owned attempt's
+-- ordinary heartbeat/renewal or its clock-preserving queue handback.
+INSERT INTO competition_automation_hold VALUES('synthetic','synthetic-competition','synthetic-season','evaluation',1,true);
+DO $$ BEGIN IF competition_v2_intake_grading_ready('00000000-0000-0000-0000-000000000002') THEN RAISE EXCEPTION 'evaluation hold did not close the new-claim control'; END IF; END $$;
+UPDATE competition_job SET heartbeat_at=timezone('UTC',clock_timestamp()),lease_expires_at=timezone('UTC',clock_timestamp())+interval '1 minute'
+ WHERE job_id='00000000-0000-0000-0000-000000000003';
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET attempt_count=attempt_count+1 WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET started_at=started_at+interval ''1 second'' WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET evaluation_cycle=evaluation_cycle+1 WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET cycle_started_at=timezone(''UTC'',clock_timestamp()) WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+UPDATE competition_job SET state='queued' WHERE job_id='00000000-0000-0000-0000-000000000003';
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET state=''running'' WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+SELECT synthetic_expect_intake_failure('INSERT INTO competition_job(job_id,round_id,state,evaluation_cycle) VALUES(''00000000-0000-0000-0000-000000000005'',''00000000-0000-0000-0000-000000000002'',''queued'',1)');
+SELECT synthetic_expect_intake_failure('INSERT INTO competition_job(job_id,round_id,state,cycle_started_at) VALUES(''00000000-0000-0000-0000-000000000005'',''00000000-0000-0000-0000-000000000002'',''queued'',timezone(''UTC'',clock_timestamp()))');
+UPDATE competition_automation_hold SET active=false WHERE kind='evaluation';
 SELECT synthetic_expect_intake_failure('UPDATE competition_source_intake_activation SET target_epoch=3');
 SELECT synthetic_expect_intake_failure('DELETE FROM competition_source_operator_handoff');
 SELECT synthetic_expect_intake_failure('TRUNCATE competition_source_intake_activation CASCADE');
