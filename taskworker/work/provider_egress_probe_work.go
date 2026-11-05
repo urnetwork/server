@@ -36,9 +36,10 @@ const (
 	defaultProviderEgressProbeShardCount = 4
 	// The prober shard registry's slots (model.BeginProberShard).
 	maxProviderEgressProbeShardCount = 256
-	// The most URL probe shards. They take slots [0, shard_count), and the
-	// registry's last slot is the capability probe's.
-	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 1
+	// The most URL probe shards. They take slots [0, shard_count); the
+	// registry's second to last slot is the bandwidth probe's and its last the
+	// capability probe's.
+	maxProviderUrlProbeShardCount        = maxProviderEgressProbeShardCount - 2
 	providerEgressBlackholeSubmitTimeout = 30 * time.Second
 	// In-process operator calls one pass runs at once (operator_concurrency).
 	// Two 64-worker passes per taskworker, Main's geometry, then run at most 16
