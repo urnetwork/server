@@ -135,9 +135,9 @@ func TestMigrationsAutomationSchemaFaultsReachSignal(t *testing.T) {
 				if err != nil {
 					t.Fatalf("inspect %s: %v", fault.name, err)
 				}
-				artifact := migrationCurrentSuffixTestContract(t, fault.version).artifact
+				artifact := migrationAutomationFaultOwner(t, fault.version, server.MigrationCount())
 				observed = append(observed, snMainnetMigrationAlertObservation{
-					alerts: alerts, want: fmt.Sprintf("%s@v%d", artifact.name, fault.version),
+					alerts: alerts, want: fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion),
 				})
 			})
 		}
@@ -153,4 +153,80 @@ func TestMigrationsAutomationSchemaFaultsReachSignal(t *testing.T) {
 			t.Fatalf("%s lost its owning migration: %s", faults[index].name, alert.Markdown())
 		}
 	}
+}
+
+// Only v846 transfers these predicates to intake-first. Unexpected retirements
+// remain failures instead of silently following any future contract chain.
+func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArtifact {
+	t.Helper()
+	artifact := migrationCurrentSuffixTestContract(t, version).artifact
+	if version != 846 {
+		if artifact.removedVersion != 0 {
+			t.Fatalf("automation owner %d has an unreviewed successor", version)
+		}
+		return artifact
+	}
+	successor := server.CompetitionIntakeFirstMigrationVersion()
+	if successor <= version || artifact.removedVersion != successor {
+		t.Fatal("v846 does not transfer custody at the registered intake-first boundary")
+	}
+	next := migrationCurrentSuffixTestContract(t, successor).artifact
+	if next.removedVersion != 0 {
+		t.Fatal("intake-first custody has an unreviewed successor")
+	}
+	if head >= successor {
+		return next
+	}
+	return artifact
+}
+
+func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
+	successor := server.CompetitionIntakeFirstMigrationVersion()
+	for _, head := range []int{846, successor - 1, successor} {
+		want := 846
+		if head == successor {
+			want = successor
+		}
+		if got := migrationAutomationFaultOwner(t, 846, head).requiredVersion; got != want {
+			t.Fatalf("head %d owner=%d want=%d", head, got, want)
+		}
+	}
+}
+
+// The same two physical faults must retain v846 custody before intake-first,
+// move to its exact successor afterward, and roll back to a healthy catalog.
+func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
+	successor := server.CompetitionIntakeFirstMigrationVersion()
+	faults := []string{
+		`DROP INDEX competition_source_reserved_round`,
+		`CREATE OR REPLACE FUNCTION competition_v2_source_target_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
+	}
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		for _, head := range []int{846, successor - 1, successor} {
+			server.ApplyDbMigrationsUpTo(tb.Context(), head)
+			if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
+				tb.Fatalf("healthy owner prefix %d drift: %s", head, drift)
+			}
+			artifact := migrationAutomationFaultOwner(tb, 846, head)
+			want := fmt.Sprintf("%s@v%d", artifact.name, artifact.requiredVersion)
+			for index, statement := range faults {
+				snMainnetMigrationFaultTx(tb, func(ctx context.Context, tx server.PgTx) {
+					if _, err := tx.Exec(ctx, statement); err != nil {
+						tb.Fatalf("apply owner fault %d at %d: %v", index, head, err)
+					}
+					alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(&snMainnetMigrationTxSource{tx: tx}))
+					if err != nil {
+						tb.Fatalf("inspect owner fault %d at %d: %v", index, head, err)
+					}
+					alert := requireAlertClass(tb, alerts, "migration-schema-drift")
+					if !strings.Contains(alert.Markdown(), want) {
+						tb.Fatalf("fault %d at %d lost exact owner %s", index, head, want)
+					}
+				})
+				if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
+					tb.Fatalf("restored owner prefix %d fault %d drift: %s", head, index, drift)
+				}
+			}
+		}
+	})
 }
