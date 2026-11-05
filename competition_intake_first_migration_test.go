@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Published legacy bodies remain exact nested blocks; unrelated source and
@@ -57,12 +59,16 @@ CREATE FUNCTION competition_v2_source_graph_valid(commits jsonb,staging_mode boo
 CREATE FUNCTION competition_v2_source_mode(intent jsonb) RETURNS void LANGUAGE plpgsql AS $fixture_mode$%s$fixture_mode$;
 CREATE FUNCTION competition_v2_winner_source_authorized(intent jsonb,predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS $fixture_winner$%s$fixture_winner$;
 `, lease, scope, graph, mode, winner)
-	// The shared harness first creates its own independent winner fixture. Only
-	// that throwaway container's public schema is replaced by this full fixture.
+	// Run directly in TestEnv's isolated database. This test must not require
+	// host Docker privileges or silently skip behind a native-helper flag.
 	coveragePolicy := CompetitionWorkCoverageBodiesSql()["policy"]
-	setup := "DROP SCHEMA public CASCADE; CREATE SCHEMA public;\n" + competitionIntakeFirstSqlFixture + helpers + competitionTrustedInstrumentMigration() +
+	setup := competitionIntakeFirstSqlFixture + helpers + competitionTrustedInstrumentMigration() +
 		"CREATE FUNCTION competition_work_coverage_policy_valid(policy jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fixture_coverage$" + coveragePolicy + "$fixture_coverage$;\n" + CompetitionIntakeFirstMigrationSql()
-	testCompetitionWinnerReviewDatabaseGuards(t, setup, competitionIntakeFirstSqlAssertions)
+	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		Db(tb.Context(), func(conn PgConn) {
+			RaisePgResult(conn.Exec(tb.Context(), setup+competitionIntakeFirstSqlAssertions, pgx.QueryExecModeSimpleProtocol))
+		}, OptReadWrite(), OptNoRetry())
+	})
 }
 
 const competitionIntakeFirstSqlFixture = `
