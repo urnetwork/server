@@ -5,6 +5,7 @@ package controller
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
@@ -39,6 +40,7 @@ func (self PostgresStore) CreateIntakeFirstRound(ctx context.Context, settings *
 	var grant *model.CompetitionSourceIntakeActivation
 	var api model.CompetitionSourceReadiness
 	var existing *roundRecord
+	var observed time.Time
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			automationScopeLockInTx(ctx, tx, settings)
@@ -55,6 +57,8 @@ func (self PostgresStore) CreateIntakeFirstRound(ctx context.Context, settings *
 				_, err := competitionIntakeFirstActivationMatches(settings, intent, existing, api, grant)
 				server.Raise(err)
 			}
+			observed, err = competitionIntakeFirstDatabaseTime(ctx, tx)
+			server.Raise(err)
 		})
 	})
 	if err != nil {
@@ -72,7 +76,7 @@ func (self PostgresStore) CreateIntakeFirstRound(ctx context.Context, settings *
 	frozen.intakeFirstActivation = grant
 	// Preliminary bounds avoid pointless work. The transaction chooses again
 	// after ArchiveRound, so this preliminary timestamp is never the opening.
-	args, err := competitionIntakeFirstOpening(frozen, intent, grant, self.nowUtc())
+	args, err := competitionIntakeFirstOpening(frozen, intent, grant, observed)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +108,11 @@ func (self PostgresStore) checkIntakeFirstRoundInTx(ctx context.Context, tx serv
 	if err := requireSourceOperatorHandoffInTx(ctx, tx, settings, intent); err != nil {
 		return err
 	}
-	args, err := competitionIntakeFirstOpening(settings, intent, grant, self.nowUtc())
+	now, err := competitionIntakeFirstDatabaseTime(ctx, tx)
+	if err != nil {
+		return err
+	}
+	args, err := competitionIntakeFirstOpening(settings, intent, grant, now)
 	if err != nil {
 		return err
 	}

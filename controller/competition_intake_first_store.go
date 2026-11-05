@@ -16,6 +16,15 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// The database is the opening/authority time owner. UTC application clocks
+// remain useful for nonauthoritative projections, not sub-millisecond cross-
+// host comparisons against the SQL trigger's transaction/clock timestamps.
+func competitionIntakeFirstDatabaseTime(ctx context.Context, reader competitionIntakeReader) (time.Time, error) {
+	var now time.Time
+	err := reader.QueryRow(ctx, `SELECT timezone('UTC',clock_timestamp())`).Scan(&now)
+	return now.UTC(), err
+}
+
 // A single receipt never stands in for the absent independent worker role.
 func sourceIntakeApiReceipt(ctx context.Context, reader competitionIntakeReader, settings *Settings, intent *model.CompetitionSourceActivation) (model.CompetitionSourceReadiness, error) {
 	var content []byte
@@ -175,8 +184,10 @@ func (self PostgresStore) RecordSourceOperatorHandoff(ctx context.Context, setti
 					panic(ErrConflict)
 				}
 			}
+			now, err := competitionIntakeFirstDatabaseTime(ctx, tx)
+			server.Raise(err)
 			value := &model.CompetitionSourceOperatorHandoff{Schema: 1, Kind: model.CompetitionSourceOperatorHandoffKind, Environment: intent.Environment,
-				CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Revision: revision + 1, ActorId: actor, Request: request, RequestSha256: requestDigest, CreatedAt: self.nowUtc().Truncate(time.Microsecond)}
+				CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Revision: revision + 1, ActorId: actor, Request: request, RequestSha256: requestDigest, CreatedAt: now}
 			if !competitionSourceOperatorHandoffTargets(intent, value, false) {
 				panic(ErrConflict)
 			}
@@ -272,7 +283,9 @@ func (self PostgresStore) ActivateSourceIntake(ctx context.Context, settings *Se
 			if !errors.Is(err, ErrNotFound) {
 				server.Raise(err)
 			}
-			value, err := competitionIntakeFirstActivationValue(settings, intent, api, self.nowUtc().Truncate(time.Microsecond))
+			now, err := competitionIntakeFirstDatabaseTime(ctx, tx)
+			server.Raise(err)
+			value, err := competitionIntakeFirstActivationValue(settings, intent, api, now)
 			server.Raise(err)
 			content, err := json.Marshal(value)
 			server.Raise(err)
