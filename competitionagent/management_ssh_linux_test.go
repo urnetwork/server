@@ -22,6 +22,9 @@ func managementSshTestProjection(config Config, policy ManagementResourcePolicy,
 	}
 	for key, value := range map[string]string{
 		"Id": plan.UnitName, "LoadState": "loaded", "ActiveState": "active", "SubState": "running", "Transient": "yes", "Slice": managementPrivateSliceName,
+		// Read-only Goofe PID1 observation of an existing owned test unit:
+		// Transient=yes, FragmentPath=/run/systemd/transient/<exact unit>.
+		"FragmentPath": "/run/systemd/transient/" + plan.UnitName,
 		"ControlGroup": managementPrivateCgroupPath + "/" + plan.UnitName, "User": "root", "Group": "root", "Type": "exec", "Restart": "no", "RemainAfterExit": "yes",
 		"KillMode": "control-group", "MainPID": "17", "InvocationID": strings.Repeat("e", 32), "ExecMainStartTimestampMonotonic": "100",
 		"MemoryMax": strconv.FormatInt(plan.MemoryBytes, 10), "MemoryHigh": "infinity", "MemorySwapMax": "0", "TasksMax": strconv.FormatInt(plan.TasksMaximum, 10),
@@ -75,6 +78,15 @@ func TestManagementSshManagerProjectionPreservesMissingAndRejectsAuthorityChange
 	plan := managementSshTestPlan(config, policy, settings)
 	for _, mutate := range []func(map[string]string){
 		func(values map[string]string) { values["Id"] = unitName(strings.Repeat("f", 64)) },
+		func(values map[string]string) { values["FragmentPath"] = "" },
+		func(values map[string]string) { values["FragmentPath"] = "/etc/systemd/system/" + plan.UnitName },
+		func(values map[string]string) { values["FragmentPath"] = "/run/systemd/transient/other.service" },
+		func(values map[string]string) {
+			values["FragmentPath"] = "/run/systemd/transient/../transient/" + plan.UnitName
+		},
+		func(values map[string]string) {
+			values["DropInPaths"] = "/run/systemd/system/" + plan.UnitName + ".d/override.conf"
+		},
 		func(values map[string]string) { values["Slice"] = managementCleanupSliceName },
 		func(values map[string]string) {
 			values["ControlGroup"] = managementCleanupCgroupPath + "/" + plan.UnitName
@@ -105,6 +117,10 @@ func TestManagementSshManagerProjectionPreservesMissingAndRejectsAuthorityChange
 	}
 	missing := managementSshTestProjection(config, policy, plan, settings)
 	missing["LoadState"], missing["ActiveState"], missing["MainPID"], missing["ControlGroup"] = "not-found", "inactive", "0", ""
+	if _, err := validateManagementSshUnit(managementSshTestProjectionBytes(missing), config, &policy, plan, settings); err == nil {
+		t.Fatal("missing unit retained a loaded transient fragment")
+	}
+	missing["FragmentPath"] = ""
 	unit, err := validateManagementSshUnit(managementSshTestProjectionBytes(missing), config, &policy, plan, settings)
 	if err != nil || unit.exists || unit.inactive {
 		t.Fatal("missing unit was converted to positive inactive proof", err)

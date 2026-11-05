@@ -308,12 +308,12 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 		return unit, errors.New("managed SSH unit properties selected another owner")
 	}
 	if values["LoadState"] == "not-found" {
-		if values["ActiveState"] != "inactive" || values["MainPID"] != "0" || values["ControlGroup"] != "" {
+		if values["ActiveState"] != "inactive" || values["MainPID"] != "0" || values["ControlGroup"] != "" || values["FragmentPath"] != "" || values["DropInPaths"] != "" {
 			return unit, errors.New("missing managed SSH unit still has uncertain process custody")
 		}
 		return unit, nil
 	}
-	if values["LoadState"] != "loaded" || values["Transient"] != "yes" || values["FragmentPath"] != "" || values["DropInPaths"] != "" ||
+	if values["LoadState"] != "loaded" || values["Transient"] != "yes" || values["FragmentPath"] != "/run/systemd/transient/"+plan.UnitName || values["DropInPaths"] != "" ||
 		values["Slice"] != managementPrivateSliceName || values["User"] != "root" || values["Group"] != "root" || values["Type"] != "exec" ||
 		values["Restart"] != "no" || values["RemainAfterExit"] != "yes" || values["KillMode"] != "control-group" || values["MemoryHigh"] != "infinity" || values["NoNewPrivileges"] != "yes" {
 		return unit, errors.New("managed SSH unit changed its fixed placement or lifecycle")
