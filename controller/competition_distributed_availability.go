@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/competitionagent"
 )
 
@@ -18,6 +19,9 @@ type competitionExecutorAvailability interface {
 // This observation does not alter any run fence, execution identity, deadline or host
 // qualification. Occupied is healthy control transport but not fresh admission.
 func (self *competitionAgentEvaluator) Available(ctx context.Context) (bool, error) {
+	metric := competitionExecutorPhysicalAvailable.WithLabelValues(self.host.HostId)
+	metric.Set(-1)
+	competitionExecutorPhysicalObservedAt.WithLabelValues(self.host.HostId).Set(float64(server.NowUtc().Unix()))
 	response, err := self.transport.Exchange(ctx, competitionagent.Request{Operation: "availability"}, "", "")
 	if err != nil {
 		return false, err
@@ -27,8 +31,10 @@ func (self *competitionAgentEvaluator) Available(ctx context.Context) (bool, err
 	}
 	switch response.State {
 	case "available":
+		metric.Set(1)
 		return true, nil
 	case "occupied":
+		metric.Set(0)
 		return false, nil
 	default:
 		return false, errors.New("executor physical availability is unavailable")

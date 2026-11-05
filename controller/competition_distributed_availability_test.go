@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/competitionagent"
 )
@@ -32,12 +33,17 @@ func (self *competitionAvailabilityTransport) Exchange(_ context.Context, reques
 
 func TestCompetitionDistributedAvailabilityRequiresExactFiniteResponse(t *testing.T) {
 	transport := &competitionAvailabilityTransport{}
-	evaluator := &competitionAgentEvaluator{transport: transport}
+	evaluator := &competitionAgentEvaluator{transport: transport, host: CompetitionExecutorHostPolicy{HostId: "synthetic-physical-executor"}}
+	t.Cleanup(func() { competitionExecutorPhysicalAvailable.Reset(); competitionExecutorPhysicalObservedAt.Reset() })
 	for _, state := range []string{"available", "occupied"} {
 		transport.response = competitionagent.Response{State: state}
 		available, err := evaluator.Available(t.Context())
 		if err != nil || available != (state == "available") || transport.request.Operation != "availability" || transport.request.RunId != "" || transport.request.Start != nil || transport.request.FencingToken != 0 {
 			t.Fatal("physical observation lost its finite authenticated boundary", err)
+		}
+		value := testutil.ToFloat64(competitionExecutorPhysicalAvailable.WithLabelValues(evaluator.host.HostId))
+		if value != map[string]float64{"available": 1, "occupied": 0}[state] || testutil.ToFloat64(competitionExecutorPhysicalObservedAt.WithLabelValues(evaluator.host.HostId)) <= 0 {
+			t.Fatal("physical custody observation was not reflected independently of the database slot", value)
 		}
 	}
 	for _, response := range []competitionagent.Response{
@@ -48,6 +54,9 @@ func TestCompetitionDistributedAvailabilityRequiresExactFiniteResponse(t *testin
 		transport.response = response
 		if available, err := evaluator.Available(t.Context()); available || err == nil {
 			t.Fatal("unavailable or expanded physical observation qualified fresh admission", response)
+		}
+		if value := testutil.ToFloat64(competitionExecutorPhysicalAvailable.WithLabelValues(evaluator.host.HostId)); value != -1 {
+			t.Fatal("unavailable physical observation became a healthy zero", value)
 		}
 	}
 	transport.err = errors.New("synthetic transport outcome remains unknown")
