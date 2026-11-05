@@ -72,6 +72,7 @@ func TestCompetitionWorkCoverageHistoricalActiveSourceAndFrozenV2RemainReadable(
 	}
 	activated := time.Unix(1000, 0)
 	intent := &model.CompetitionSourceActivation{State: "active", ActivatedAt: &activated,
+		Generation: 2, SourceGeneration: 1,
 		Environment: settings.AutomationPolicy.Environment, CompetitionId: settings.CompetitionId, SeasonId: settings.AutomationPolicy.SeasonId,
 		TargetRoundId: server.NewId(), TargetEpoch: 2, Commits: approval.InstrumentBaseCommits, SourceLockSha256: approval.InstrumentBaseSourceLockSha256,
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("d", 64), HostQualificationSha256: strings.Repeat("e", 64),
@@ -79,6 +80,9 @@ func TestCompetitionWorkCoverageHistoricalActiveSourceAndFrozenV2RemainReadable(
 	derived, err := sourceSettingsFromIntent(settings, intent)
 	if err != nil || derived.EvaluationPolicy.WorkCoveragePolicy != nil || derived.scorerVersion() != model.CompetitionMinimumWorkScorerVersion {
 		t.Fatal("historical active receipt was retroactively rejected or relabeled", err)
+	}
+	if err := model.ValidateCompetitionAutomationPolicy(derived.AutomationPolicy); err != nil {
+		t.Fatal("historical active fixture omitted its durable activation authority", err)
 	}
 	content, err := policySnapshot(derived)
 	if err != nil {
