@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -698,7 +699,7 @@ func LoadSettings() (*Settings, error) {
 		BaseSha:                    strings.TrimSpace(public.BaseSha),
 		EvaluatorImageDigest:       strings.TrimSpace(public.EvaluatorImageDigest),
 		PatchPolicy:                public.PatchPolicy,
-		EvaluationPolicy:           public.EvaluationPolicy,
+		EvaluationPolicy:           public.EvaluationPolicy.Clone(),
 		FutureEpochPolicy:          public.FutureEpochPolicy,
 		SeasonPolicy:               public.SeasonPolicy,
 		ArtifactRoot:               filepath.Clean(public.ArtifactRoot),
@@ -781,8 +782,17 @@ func (self *Settings) Validate() error {
 		return fmt.Errorf("patch_policy.forbidden_paths must explicitly contain %q", protectedTree)
 	}
 	p := self.EvaluationPolicy
-	if _, err := model.CompetitionScorerVersionForG2Policy(p.G2VolumePolicy); err != nil {
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(p.G2VolumePolicy, p.WorkCoveragePolicy); err != nil {
 		return err
+	}
+	if p.WorkCoveragePolicy != nil {
+		dependency := "model/competition_work_coverage_policy.go"
+		if self.PatchPolicy.PathBase == competitionMonoRootPathBase {
+			dependency = "server/" + dependency
+		}
+		if !slices.Contains(self.PatchPolicy.ForbiddenPaths, dependency) {
+			return errors.New("coverage instrument dependency must be explicitly protected by the new frozen patch policy")
+		}
 	}
 	if err := self.validateFutureEpochPolicy(); err != nil {
 		return err
@@ -971,7 +981,7 @@ func (self *Settings) PublicInfo() InfoResult {
 		BaseSha:              self.BaseSha,
 		EvaluatorImageDigest: self.EvaluatorImageDigest,
 		PatchPolicy:          self.PatchPolicy,
-		EvaluationPolicy:     self.EvaluationPolicy,
+		EvaluationPolicy:     self.EvaluationPolicy.Clone(),
 		SeasonPolicy:         self.SeasonPolicy,
 	}
 	if self.AutomationPolicy.Enabled {
@@ -1134,21 +1144,23 @@ type evaluatorRequest struct {
 // This is the strict subset of baseline.json independently authenticated by
 // the worker before it freezes or redistributes the scorer-owned document.
 type roundBaselineManifest struct {
-	G2VolumePolicy   model.CompetitionG2VolumePolicy `json:"g2_volume_policy,omitempty"`
-	ScoreSchema      int                             `json:"score_schema"`
-	Kind             string                          `json:"kind"`
-	ScorerVersion    string                          `json:"scorer_version"`
-	RoundId          string                          `json:"round_id"`
-	ConfigSha256     string                          `json:"config_sha256"`
-	RequestTimeoutMs int64                           `json:"request_timeout_ms"`
-	RunFlags         map[string]string               `json:"run_flags"`
-	TakeoverMargin   float64                         `json:"takeover_margin"`
-	Replicates       []roundBaselineReplicate        `json:"replicates"`
+	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	ScoreSchema        int                                  `json:"score_schema"`
+	Kind               string                               `json:"kind"`
+	ScorerVersion      string                               `json:"scorer_version"`
+	RoundId            string                               `json:"round_id"`
+	ConfigSha256       string                               `json:"config_sha256"`
+	RequestTimeoutMs   int64                                `json:"request_timeout_ms"`
+	RunFlags           map[string]string                    `json:"run_flags"`
+	TakeoverMargin     float64                              `json:"takeover_margin"`
+	Replicates         []roundBaselineReplicate             `json:"replicates"`
 }
 
 // Carries the recomputed score inputs and public live telemetry for one
 // trusted control run.
 type roundBaselineReplicate struct {
+	WorkCoverage                    *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
 	RawScore                        float64                               `json:"raw_score"`
 	SuccessRate                     float64                               `json:"success_rate"`
 	RequestCount                    int64                                 `json:"request_count"`
@@ -1398,7 +1410,7 @@ func (self CommandEvaluator) Evaluate(ctx context.Context, settings *Settings, j
 			}
 		}
 		if !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) ||
-			!scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy) {
+			!scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) {
 			return EvaluationOutcome{Error: terminalInfrastructureError(
 				"score_result_invalid", "pinned scorer used a policy different from the frozen round",
 			)}
@@ -1508,7 +1520,7 @@ func evaluatorRequestForJob(settings *Settings, job *queuedJob, seed, attemptDir
 		ConfigLocalDirectory: settings.ConfigLocalDirectory,
 		VaultLocalDirectory:  settings.VaultLocalDirectory,
 		PatchPolicy:          settings.PatchPolicy,
-		EvaluationPolicy:     settings.EvaluationPolicy,
+		EvaluationPolicy:     settings.EvaluationPolicy.Clone(),
 	}
 }
 
@@ -1543,6 +1555,7 @@ func validateRoundBaselineJson(settings *Settings, round *roundRecord, content [
 	if manifest.ScoreSchema != ScoreSchema || manifest.Kind != "sim-latency-score-baseline" ||
 		manifest.ScorerVersion != settings.scorerVersion() || manifest.ScorerVersion != policy.ScorerVersion ||
 		manifest.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || manifest.G2VolumePolicy != policy.EvaluationPolicy.G2VolumePolicy ||
+		!reflect.DeepEqual(manifest.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) || !reflect.DeepEqual(manifest.WorkCoveragePolicy, policy.EvaluationPolicy.WorkCoveragePolicy) ||
 		manifest.RoundId != round.RoundId.String() ||
 		manifest.ConfigSha256 != round.ProvidersSha256 ||
 		manifest.RequestTimeoutMs != settings.EvaluationPolicy.RequestTimeoutMs ||
@@ -1556,6 +1569,16 @@ func validateRoundBaselineJson(settings *Settings, round *roundRecord, content [
 	finitePositive := func(value float64) bool { return finite(value) && 0 < value }
 	finiteNonnegative := func(value float64) bool { return finite(value) && 0 <= value }
 	for _, replicate := range manifest.Replicates {
+		if manifest.WorkCoveragePolicy != nil {
+			coverage := replicate.WorkCoverage
+			if model.ValidateCompetitionWorkCoverageSummary(coverage) != nil || coverage.PageCoverage <= manifest.WorkCoveragePolicy.MaximumPageCoverageLoss ||
+				coverage.ByteCoverage <= manifest.WorkCoveragePolicy.MaximumByteCoverageLoss || coverage.CompletedPages <= 0 || coverage.CompletedBytes <= 0 ||
+				manifest.Replicates[0].WorkCoverage == nil || coverage.PlanSha256 != manifest.Replicates[0].WorkCoverage.PlanSha256 {
+				return "", errors.New("round baseline lacks a nondegenerate independent work coverage qualification")
+			}
+		} else if replicate.WorkCoverage != nil {
+			return "", errors.New("historical round baseline contains prospective coverage")
+		}
 		if !finitePositive(replicate.RawScore) ||
 			float64(manifest.RequestTimeoutMs) < replicate.RawScore ||
 			!finite(replicate.SuccessRate) || replicate.SuccessRate < 0.97 || 1 < replicate.SuccessRate ||
@@ -1706,6 +1729,7 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 		return nil, errors.New("round policy is missing")
 	}
 	copy := *settings
+	copy.EvaluationPolicy = settings.EvaluationPolicy.Clone()
 	policy, err := decodeRoundPolicySnapshot(round.PolicyJson)
 	if err != nil {
 		return nil, err
@@ -1713,6 +1737,7 @@ func settingsForFrozenRound(settings *Settings, round *roundRecord) (*Settings, 
 	// A staged future policy is never inherited by an already frozen round.
 	// Its image and command pins must still match the immutable snapshot below.
 	copy.EvaluationPolicy.G2VolumePolicy = policy.EvaluationPolicy.G2VolumePolicy
+	copy.EvaluationPolicy.WorkCoveragePolicy = policy.EvaluationPolicy.WorkCoveragePolicy
 	copy.DistributedEvaluationPolicy = policy.DistributedEvaluationPolicy
 	copy.distributedRoundEpoch = round.Epoch
 	if policy.DistributedEvaluationPolicy != nil {
@@ -3746,7 +3771,7 @@ func applyFrozenRoundPublicPolicy(result *InfoResult, round *roundRecord) error 
 	result.ScoreSchema, result.ScorerVersion = policy.ScoreSchema, policy.ScorerVersion
 	result.EvaluatorImageDigest = policy.EvaluatorImageDigest
 	result.PatchPolicy = policy.PatchPolicy
-	result.EvaluationPolicy = policy.EvaluationPolicy
+	result.EvaluationPolicy = policy.EvaluationPolicy.Clone()
 	result.SeasonPolicy = policy.SeasonPolicy
 	result.AutomationPolicy = nil
 	if policy.AutomationPolicy != nil && policy.AutomationPolicy.Enabled {
@@ -4397,7 +4422,7 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 		policy.ScoreSchema != ScoreSchema {
 		return nil, errors.New("round policy identity is invalid")
 	}
-	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(policy.EvaluationPolicy.G2VolumePolicy)
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy)
 	if err != nil || policy.ScorerVersion != scorerVersion || (policy.Schema == 1 && policy.EvaluationPolicy.G2VolumePolicy != "") {
 		return nil, errors.New("round scorer version does not match its frozen g2 volume policy")
 	}
@@ -4445,7 +4470,7 @@ func policySnapshot(settings *Settings) ([]byte, error) {
 		ScoreSchema:                 ScoreSchema,
 		ScorerVersion:               settings.scorerVersion(),
 		PatchPolicy:                 settings.PatchPolicy,
-		EvaluationPolicy:            settings.EvaluationPolicy,
+		EvaluationPolicy:            settings.EvaluationPolicy.Clone(),
 		SeasonPolicy:                settings.SeasonPolicy,
 	})
 }
@@ -6545,7 +6570,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			if outcome.Score != nil && outcome.Error == nil {
 				policy, policyErr := decodeRoundPolicySnapshot(policyJson)
 				server.Raise(policyErr)
-				if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy) {
+				if !scoreMatchesFrozenG2Policy(outcome.Score, policy.EvaluationPolicy.G2VolumePolicy, policy.EvaluationPolicy.WorkCoveragePolicy) {
 					panic(errors.New("score g2 volume policy does not match the immutable round"))
 				}
 			}

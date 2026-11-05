@@ -149,6 +149,7 @@ func LoadCompetitionHostQualificationConfig(path string) (*CompetitionHostQualif
 // the entire operation a separate fifteen-minute cancellation boundary.
 func competitionHostQualificationSettings(settings *Settings) *Settings {
 	copy := *settings
+	copy.EvaluationPolicy = settings.EvaluationPolicy.Clone()
 	policy := &copy.EvaluationPolicy
 	policy.ProviderCount, policy.ClientPoolSize, policy.ArrivalsPerMinute, policy.QualityWindowSize = 32, 8, 16, 8
 	policy.ExchangeHosts, policy.FleetShards = 1, 0
@@ -519,13 +520,14 @@ func authenticateCompetitionQualification(directory string, request evaluatorReq
 	}
 	if result.Schema != 1 || result.JobId != request.JobId || result.EvalError != nil || validateScore(result.Score) != nil || !result.Score.Placeable ||
 		!scoreMatchesFrozenMargin(result.Score, request.EvaluationPolicy.TakeoverMargin) ||
-		!scoreMatchesFrozenG2Policy(result.Score, request.EvaluationPolicy.G2VolumePolicy) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
+		!scoreMatchesFrozenG2Policy(result.Score, request.EvaluationPolicy.G2VolumePolicy, request.EvaluationPolicy.WorkCoveragePolicy) || result.Score.Significance.ReplicateCount != 1 || !result.Security.passedFor(nil) {
 		return errors.New("host-readiness evaluation did not pass its score and security gates")
 	}
-	if len(result.Score.Gates) != 6 {
-		return errors.New("host-readiness score does not contain exactly the six required gates")
+	names, err := model.CompetitionScoreRequiredGateNames(result.Score)
+	if err != nil || len(result.Score.Gates) != len(names) {
+		return errors.New("host-readiness score does not contain exactly its versioned required gates")
 	}
-	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+	for _, name := range names {
 		if gate, ok := result.Score.Gates[name]; !ok || !gate.Passed {
 			return errors.New("host-readiness score has a missing or failed required gate")
 		}

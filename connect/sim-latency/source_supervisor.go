@@ -262,7 +262,8 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 	preparedAt := time.Now().UTC()
 	intent := &model.CompetitionSourceActivation{
 		G2VolumePolicy: current.G2VolumePolicy, SimulatorSha256: current.SimulatorSha256, ScorerSha256: current.ScorerSha256,
-		Environment: current.Environment, CompetitionId: current.CompetitionId, SeasonId: current.SeasonId,
+		WorkCoveragePolicy: current.WorkCoveragePolicy.Clone(),
+		Environment:        current.Environment, CompetitionId: current.CompetitionId, SeasonId: current.SeasonId,
 		Staging: current.Staging, StagingRoundWindowSeconds: current.StagingRoundWindowSeconds, StagingPreparationSeconds: current.StagingPreparationSeconds,
 		Generation: generation, ExpectedGeneration: current.Generation, SourceGeneration: current.SourceGeneration, TargetEpoch: transition.TargetEpoch,
 		TargetRoundId: server.NewId(),
@@ -350,8 +351,9 @@ func (self *sourceSupervisorRuntime) chooseSource(ctx context.Context, lease mod
 		return nil, err
 	}
 	manifest.EvaluationSource.Rounds = append(manifest.EvaluationSource.Rounds, reviewedSourceRound{
-		G2VolumePolicy: intent.G2VolumePolicy,
-		Epoch:          intent.TargetEpoch, SourceGeneration: intent.SourceGeneration, ActivationGeneration: intent.Generation,
+		G2VolumePolicy:     intent.G2VolumePolicy,
+		WorkCoveragePolicy: intent.WorkCoveragePolicy.Clone(),
+		Epoch:              intent.TargetEpoch, SourceGeneration: intent.SourceGeneration, ActivationGeneration: intent.Generation,
 		SourceDecisionDigest: intent.SourceDecisionDigest, Kind: intent.Kind, Reason: intent.Reason, RewardDecisionDigest: rewardDigest,
 		SourceLockSha256: intent.SourceLockSha256, SignificantImprovementPercent: selectedMargin,
 	})

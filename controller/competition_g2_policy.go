@@ -4,6 +4,8 @@ package controller
 
 import (
 	"errors"
+	"reflect"
+	"slices"
 
 	"github.com/urnetwork/server/model"
 )
@@ -12,6 +14,7 @@ import (
 // epoch one. Qualification supplies exact future image and binary identities.
 // All workload, resource, significance and submission-clock settings are kept.
 type CompetitionFutureEpochPolicy struct {
+	WorkCoveragePolicy          *model.CompetitionWorkCoveragePolicy        `yaml:"work_coverage_policy,omitempty"`
 	DistributedEvaluationPolicy *CompetitionDistributedEvaluationPolicy     `yaml:"distributed_evaluation_policy,omitempty"`
 	TrustedInstrument           *model.CompetitionTrustedInstrumentApproval `yaml:"trusted_instrument,omitempty"`
 	FromEpoch                   int                                         `yaml:"from_epoch"`
@@ -29,7 +32,7 @@ type CompetitionFutureEpochPolicy struct {
 // Empty is intentionally legacy; the exported version-one constant remains
 // unchanged for historical callers and artifacts.
 func (self *Settings) scorerVersion() string {
-	version, _ := model.CompetitionScorerVersionForG2Policy(self.EvaluationPolicy.G2VolumePolicy)
+	version, _ := model.CompetitionScorerVersionForWorkCoverage(self.EvaluationPolicy.G2VolumePolicy, self.EvaluationPolicy.WorkCoveragePolicy)
 	return version
 }
 
@@ -38,6 +41,10 @@ func (self *Settings) validateFutureEpochPolicy() error {
 	p := self.FutureEpochPolicy
 	if p == nil {
 		return nil
+	}
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(p.G2VolumePolicy, p.WorkCoveragePolicy); err != nil ||
+		p.WorkCoveragePolicy != nil && (p.TrustedInstrument == nil || !reflect.DeepEqual(p.WorkCoveragePolicy, p.TrustedInstrument.WorkCoveragePolicy)) {
+		return errors.New("future coverage policy lacks its exact independent instrument approval")
 	}
 	if self.AutomationPolicy.Staging || p.FromEpoch != 2 || p.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork ||
 		(p.EvaluatorImageDigest != "" && (!imageDigestPattern.MatchString(p.EvaluatorImageDigest) || (p.EvaluatorImageDigest == self.EvaluatorImageDigest && self.EvaluationPolicy.G2VolumePolicy != p.G2VolumePolicy))) ||
@@ -61,18 +68,39 @@ func (self *Settings) validateFutureEpochPolicy() error {
 // Only source selection/preparation for a genuinely future epoch calls this.
 // Public info and current-round grading continue to use their frozen settings.
 func (self *Settings) ForCompetitionEpoch(epoch int) (*Settings, error) {
+	return self.forCompetitionEpoch(epoch, true)
+}
+
+// Historical active source receipts retain their original profile. Only a
+// genuinely new source choice acquires the prospective capability gate.
+func (self *Settings) forCompetitionEpoch(epoch int, newActivation bool) (*Settings, error) {
 	if self == nil || epoch < 1 || self.SeasonPolicy.EpochCount < epoch {
 		return nil, errors.New("future epoch identity is invalid")
 	}
 	if err := self.validateFutureEpochPolicy(); err != nil {
 		return nil, err
 	}
+	if newActivation && !self.AutomationPolicy.Staging && epoch >= 2 && (self.FutureEpochPolicy == nil || self.FutureEpochPolicy.WorkCoveragePolicy == nil) {
+		return nil, errors.New("new production epoch source activation requires explicit qualified work coverage policy")
+	}
 	copy := *self
+	copy.EvaluationPolicy = self.EvaluationPolicy.Clone()
 	p := self.FutureEpochPolicy
 	if p != nil && p.FromEpoch <= epoch {
 		copy.DistributedEvaluationPolicy = p.DistributedEvaluationPolicy
 		copy.distributedRoundEpoch = epoch
 		copy.EvaluationPolicy.G2VolumePolicy = p.G2VolumePolicy
+		copy.EvaluationPolicy.WorkCoveragePolicy = p.WorkCoveragePolicy.Clone()
+		if p.WorkCoveragePolicy != nil {
+			dependency := "model/competition_work_coverage_policy.go"
+			if copy.PatchPolicy.PathBase == competitionMonoRootPathBase {
+				dependency = "server/" + dependency
+			}
+			copy.PatchPolicy.ForbiddenPaths = append([]string{}, self.PatchPolicy.ForbiddenPaths...)
+			if !slices.Contains(copy.PatchPolicy.ForbiddenPaths, dependency) {
+				copy.PatchPolicy.ForbiddenPaths = append(copy.PatchPolicy.ForbiddenPaths, dependency)
+			}
+		}
 		if p.SimulatorSha256 != "" {
 			copy.EvaluationPolicy.SimulatorSha256, copy.EvaluationPolicy.ScorerSha256 = p.SimulatorSha256, p.ScorerSha256
 		}
@@ -93,11 +121,19 @@ func (self *Settings) ForCompetitionEpoch(epoch int) (*Settings, error) {
 
 // Scorer output must name the exact policy/version when it is non-legacy.
 // Omitted historical diagnostics retain their original version-one meaning.
-func scoreMatchesFrozenG2Policy(score *ScoreResult, policy model.CompetitionG2VolumePolicy) bool {
+func scoreMatchesFrozenG2Policy(score *ScoreResult, policy model.CompetitionG2VolumePolicy, coveragePolicies ...*model.CompetitionWorkCoveragePolicy) bool {
 	if score == nil {
 		return false
 	}
-	version, err := model.CompetitionScorerVersionForG2Policy(policy)
+	var coverage *model.CompetitionWorkCoveragePolicy
+	if len(coveragePolicies) == 1 {
+		coverage = coveragePolicies[0]
+	}
+	actualCoverage, err := model.CompetitionScoreWorkCoveragePolicy(score.Diagnostics)
+	if err != nil || !reflect.DeepEqual(actualCoverage, coverage) {
+		return false
+	}
+	version, err := model.CompetitionScorerVersionForWorkCoverage(policy, coverage)
 	if err != nil {
 		return false
 	}
@@ -105,6 +141,11 @@ func scoreMatchesFrozenG2Policy(score *ScoreResult, policy model.CompetitionG2Vo
 	versionValue, versionPresent := score.Diagnostics["scorer_version"]
 	if policy == model.CompetitionG2VolumePolicyLegacy {
 		return !policyPresent && !versionPresent
+	}
+	if coverage != nil {
+		if _, present := score.Gates["G7_work_coverage"]; !present {
+			return false
+		}
 	}
 	return policyValue == string(policy) && versionValue == version
 }

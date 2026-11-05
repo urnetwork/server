@@ -66,8 +66,8 @@ func newCompetitionNoopScreenFixture(t *testing.T) *competitionNoopScreenFixture
 	}
 	for index, replicate := range control.Replicates {
 		id := fmt.Sprintf("candidate-%02d-synthetic", index+1)
-		replicates = append(replicates, map[string]any{"evaluation_id": id, "raw_score": replicate.RawScore, "request_count": replicate.RequestCount, "received_bytes": replicate.ReceivedBytes})
-		content, err := json.Marshal(map[string]any{"evaluation_id": id, "config_sha256": round.ProvidersSha256, "source_epoch": evaluationSourceEpoch(round), "metrics": replicate.LiveMetrics})
+		replicates = append(replicates, map[string]any{"evaluation_id": id, "raw_score": replicate.RawScore, "request_count": replicate.RequestCount, "received_bytes": replicate.ReceivedBytes, "work_coverage": replicate.WorkCoverage})
+		content, err := json.Marshal(map[string]any{"evaluation_id": id, "config_sha256": round.ProvidersSha256, "source_epoch": evaluationSourceEpoch(round), "metrics": replicate.LiveMetrics, "work_coverage_policy": settings.EvaluationPolicy.WorkCoveragePolicy, "work_coverage": replicate.WorkCoverage})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,6 +92,10 @@ func newCompetitionNoopScreenFixture(t *testing.T) *competitionNoopScreenFixture
 	fixture.outcome = EvaluationOutcome{Score: &ScoreResult{ScoreSchema: ScoreSchema, RawScore: &raw, NormalizedScore: &normalized, Placeable: true, Gates: gates, Significance: significance,
 		Diagnostics: map[string]any{"g2_volume_policy": string(settings.EvaluationPolicy.G2VolumePolicy), "scorer_version": settings.scorerVersion(), "baseline_sha256": job.RoundBaseline.Sha256,
 			"replicate_count": 9, "replicates": replicates}}, ArtifactManifest: json.RawMessage("{\"schema\":1,\"synthetic_retained_manifest\":true}"), distributedArchiveVerified: true}
+	if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+		fixture.outcome.Score.Gates["G7_work_coverage"] = Gate{Passed: true, Details: map[string]any{"policy": settings.EvaluationPolicy.WorkCoveragePolicy}}
+		fixture.outcome.Score.Diagnostics["work_coverage_policy"] = settings.EvaluationPolicy.WorkCoveragePolicy
+	}
 	return fixture
 }
 
@@ -113,7 +117,7 @@ func sealCompetitionNoopScreenReceipt(t testing.TB, settings *Settings, receipt 
 func TestCompetitionDistributedNoopAdmissionRetainsUncertaintyWithoutEquivalenceClaim(t *testing.T) {
 	fixture := newCompetitionNoopScreenFixture(t)
 	receipt, err := screenCompetitionExecutorNoop(fixture.settings, fixture.job, fixture.host, fixture.directory, fixture.response, fixture.outcome)
-	if err != nil || !receipt.Passed || receipt.StatisticalEquivalenceProven || len(receipt.Metrics) != 7 || receipt.Metrics[0].DifferenceCiHigh <= receipt.Metrics[0].BaselineMean*0.05 {
+	if err != nil || !receipt.Passed || receipt.StatisticalEquivalenceProven || len(receipt.Metrics) != len(competitionNoopMetricNames(fixture.settings)) || receipt.Metrics[0].DifferenceCiHigh <= receipt.Metrics[0].BaselineMean*0.05 {
 		t.Fatal("operational screen weakened or misrepresented full-R9 uncertainty", err)
 	}
 	sealCompetitionNoopScreenReceipt(t, fixture.settings, receipt)
