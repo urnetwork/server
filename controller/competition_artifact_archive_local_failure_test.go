@@ -95,10 +95,12 @@ type competitionArchiveErrnoPointerWrapper struct {
 	cause *syscall.Errno
 }
 
+// Formatting stays synthetic while retaining the intentional pointer cause.
 func (self *competitionArchiveErrnoPointerWrapper) Error() string {
 	return "synthetic-private-unknown-pointer"
 }
 
+// The standard error graph exposes the exact pointer without normalization.
 func (self *competitionArchiveErrnoPointerWrapper) Unwrap() error { return self.cause }
 
 // Errno's value-receiver methods also make its pointer implement net.Error.
