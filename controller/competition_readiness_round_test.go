@@ -41,11 +41,26 @@ func requireCompetitionReadinessBaselineOnly(t testing.TB, ctx context.Context, 
 	}
 }
 
+// Observe this callback's actual database before constructing its fixture;
+// the owned connection is released before any subsequent store operation.
+func requireCompetitionReadinessFixtureSchema(t testing.TB, ctx context.Context) {
+	t.Helper()
+	var actualHead int
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(max(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actualHead))
+	})
+	if actualHead != server.MigrationCount() {
+		t.Fatalf("readiness fixture schema=%d want=%d", actualHead, server.MigrationCount())
+	}
+	t.Logf("actual_readiness_fixture_schema_head=%d", actualHead)
+}
+
 // This is the runtime-blob v2 API path used while a closed production round
 // still grades. Source authentication and the finalization-only hold stay real.
 func TestCompetitionReadinessClosedRuntimeRoundKeepsGradingReady(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		requireCompetitionReadinessFixtureSchema(t, ctx)
 		fixture := newCompetitionAutomationFixtureWithCapability(t, false, model.CompetitionRuntimeBlobCapability)
 		blobs := &competitionRuntimeBlobTestStore{objects: map[string][]byte{}, versions: map[string][]byte{}}
 		archive := &blobArtifactArchive{store: blobs}
@@ -100,6 +115,7 @@ func TestCompetitionReadinessClosedRuntimeRoundKeepsGradingReady(t *testing.T) {
 func TestCompetitionReadinessAutomationScopeAndStagingRemainExact(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		requireCompetitionReadinessFixtureSchema(t, ctx)
 		fixture := newCompetitionAutomationFixtureWithMode(t, true)
 		fixture.now = fixture.round.ClosesAt
 		registerCompetitionReadinessHost(t, ctx, fixture, fixture.round.RoundId)
@@ -137,6 +153,7 @@ func TestCompetitionReadinessAutomationScopeAndStagingRemainExact(t *testing.T) 
 func TestCompetitionReadinessLegacyRoundAndStagingEraRemainReadable(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		requireCompetitionReadinessFixtureSchema(t, ctx)
 		for _, staging := range []bool{false, true} {
 			fixture := newCompetitionRankingFixture(t, staging)
 			fixture.now = fixture.round.ClosesAt
@@ -174,6 +191,7 @@ func TestCompetitionReadinessLegacyRoundAndStagingEraRemainReadable(t *testing.T
 func TestCompetitionReadinessFrozenHostClassAndFreshnessRemainRequired(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		requireCompetitionReadinessFixtureSchema(t, ctx)
 		fixture := newCompetitionAutomationFixture(t)
 		fixture.now = fixture.round.ClosesAt
 		check := registerCompetitionReadinessHost(t, ctx, fixture, fixture.round.RoundId)
@@ -219,6 +237,7 @@ func TestCompetitionReadinessFrozenHostClassAndFreshnessRemainRequired(t *testin
 func TestCompetitionReadinessLatestScheduledAndFinalizedDoNotFallBack(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		requireCompetitionReadinessFixtureSchema(t, ctx)
 		fixture := newCompetitionRankingFixture(t, false)
 		fixture.now = fixture.round.ClosesAt
 		registerCompetitionReadinessHost(t, ctx, fixture, fixture.round.RoundId)
