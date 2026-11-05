@@ -1241,6 +1241,10 @@ type ProxyDevice struct {
 	// Replaces the packet loop of Run for a device with no DeviceLocal or
 	// Tun; Run returns when it does.
 	runForTest func()
+
+	// The throughput share of a unique-exit proxy (proxy_unique_exit.go); nil
+	// for every other device. Set once at construction.
+	uniqueExitShare *uniqueExitShare
 }
 
 func NewProxyDeviceWithDefaults(
@@ -1404,6 +1408,19 @@ func NewProxyDevice(
 	}
 	proxyDevice.lastActivityNanos.Store(time.Now().UnixNano())
 	activityDevice.Store(proxyDevice)
+	if proxyDeviceConfig.UniqueExit {
+		// the device was created pinned (its initial location); the loop
+		// follows the assignment from there
+		var initialProviderClientId *server.Id
+		if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil &&
+			initialDeviceState.Location != nil &&
+			initialDeviceState.Location.ConnectLocationId != nil &&
+			initialDeviceState.Location.ConnectLocationId.ClientId != nil {
+			providerClientId := server.RequireIdFromBytes(initialDeviceState.Location.ConnectLocationId.ClientId.Bytes())
+			initialProviderClientId = &providerClientId
+		}
+		proxyDevice.startUniqueExit(networkSpace.GetApiUrl(), initialProviderClientId)
+	}
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
@@ -1666,6 +1683,10 @@ func (self *ProxyDevice) deliverReturnPackets(packets [][]byte) {
 		if !proxyPacketMatchesReceiveAddress(packet, receiveAddr) {
 			continue
 		}
+		if !self.policeUniqueExitPacket("destination_to_client", len(packet)) {
+			observeWireGuardPacket("destination_to_client", "dropped", len(packet))
+			continue
+		}
 		// Restore the peer's own address before it reaches WireGuard. The
 		// packet is this batch's borrowed buffer and is about to be shared
 		// read-only, so the rewrite happens here, after the partition has
@@ -1735,6 +1756,10 @@ func (self *ProxyDevice) Send(packet []byte) bool {
 		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
 		return false
 	}
+	if !self.policeUniqueExitPacket("client_to_destination", len(packet)) {
+		observeWireGuardPacket("client_to_destination", "dropped", len(packet))
+		return false
+	}
 	ownedPacket := connect.MessagePoolCopy(packet)
 	// Rewrite the owned copy, never the borrowed input. A refusal drops rather
 	// than forwards: emitting the peer's tunnel address to a provider is the
@@ -1773,6 +1798,19 @@ func (self *ProxyDevice) SendBorrowedBatch(packets [][]byte, offset int) int {
 	if !self.UpdateActivity() {
 		observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
 		return 0
+	}
+	if self.uniqueExitShare != nil {
+		// a burst over the unique-exit share is dropped whole, and reported
+		// consumed so the caller does not re-offer it into the same empty
+		// bucket; whole keeps the returned count a prefix
+		byteCount := 0
+		for _, packet := range packets {
+			byteCount += max(0, len(packet)-offset)
+		}
+		if !self.policeUniqueExitPacket("client_to_destination", byteCount) {
+			observeWireGuardPackets("client_to_destination", "dropped", packets, offset)
+			return len(packets)
+		}
 	}
 	// The owned copies stay 1:1 with the input, because the count returned
 	// below is a PREFIX of the caller's packets. A packet the rewrite cannot
@@ -1963,6 +2001,15 @@ func (self *ProxyDevice) Tun() *connect.Tun {
 // are independently selected by destination address in Run, so starting a Tun
 // connection must not detach or interrupt an active WireGuard peer.
 func (self *ProxyDevice) DialContext(ctx context.Context, network string, addr string) (net.Conn, error) {
+	conn, err := self.dialTun(ctx, network, addr)
+	if err != nil || self.uniqueExitShare == nil {
+		return conn, err
+	}
+	// a unique-exit proxy's connections are paced to its throughput share
+	return &uniqueExitShareConn{Conn: conn, ctx: self.ctx, share: self.uniqueExitShare}, nil
+}
+
+func (self *ProxyDevice) dialTun(ctx context.Context, network string, addr string) (net.Conn, error) {
 	return self.tun.DialContext(ctx, network, addr)
 }
 

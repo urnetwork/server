@@ -930,6 +930,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// The successor retains all four retired composites, replacing only
 	// their exact operative guard bodies with scoped legacy-preserving ones.
 	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery())},
+	// unique-exit hosted proxies: eleven additive migrations, each versioned by
+	// its position
+	proxyUniqueExitMigrationContracts,
 )
 
 // Free space a table keeps on every page it writes, so an update of an
