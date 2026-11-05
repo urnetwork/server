@@ -5,7 +5,6 @@ package competitionagent
 import (
 	"context"
 	"errors"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -32,7 +31,7 @@ type hostRunSlices struct {
 func newHostRunSlices(config Config, settings AgentSettings) *hostRunSlices {
 	self := &hostRunSlices{config: config, settings: settings,
 		cgroups: &hostCleanupCgroups{rootPath: "/sys/fs/cgroup", maximumBytes: settings.DiagnosticBytes, requireCgroupFs: true,
-			limitCommandTimeout: settings.CleanupCommandTimeout}}
+			limitCommandTimeout: settings.CleanupCommandTimeout, managerBoundary: config.DockerRole.ResourceBoundary, managerMaximumBytes: settings.DiagnosticBytes}}
 	self.command = self.systemctl
 	self.retired = self.systemdRetired
 	return self
@@ -195,16 +194,12 @@ func (self *hostRunSlices) systemdRetired(parent context.Context, name string) (
 	}
 	ctx, cancel := context.WithTimeout(parent, self.settings.CleanupCommandTimeout)
 	defer cancel()
-	command := exec.CommandContext(ctx, "/usr/bin/systemctl", "show", "--no-pager", "--property=LoadState,ActiveState,Job", "--", name)
-	command.Env = controlEnvironment()
-	output := &boundedOutput{maximum: self.settings.DiagnosticBytes}
-	command.Stdout, command.Stderr = output, &discardWriter{}
-	runErr := command.Run()
-	if ctx.Err() != nil || output.exceeded {
+	output, runErr := self.managerCommand(ctx, []string{"show", "--no-pager", "--property=LoadState,ActiveState,Job", "--", name})
+	if ctx.Err() != nil {
 		return false, errors.New("slice retirement manager observation is unavailable")
 	}
 	values := map[string]string{}
-	for _, line := range strings.Split(output.String(), "\n") {
+	for _, line := range strings.Split(string(output), "\n") {
 		if key, value, ok := strings.Cut(line, "="); ok {
 			if _, exists := values[key]; exists {
 				return false, errors.New("slice retirement manager observation is ambiguous")
@@ -259,9 +254,6 @@ func (self *hostRunSlices) systemctl(parent context.Context, operation string, n
 	if operation != "start" && operation != "stop" || len(names) == 0 || len(names) > self.settings.CleanupObjectCount {
 		return errors.New("invalid fixed containment unit operation")
 	}
-	if err := protectedRootPath("/usr/bin/systemctl", false, false); err != nil {
-		return err
-	}
 	for _, name := range names {
 		if _, err := cleanupSlicePath(name); err != nil {
 			return err
@@ -270,10 +262,7 @@ func (self *hostRunSlices) systemctl(parent context.Context, operation string, n
 	ctx, cancel := context.WithTimeout(parent, self.settings.CleanupCommandTimeout)
 	defer cancel()
 	args := append([]string{operation, "--"}, names...)
-	command := exec.CommandContext(ctx, "/usr/bin/systemctl", args...)
-	command.Env = controlEnvironment()
-	command.Stdout, command.Stderr = &discardWriter{}, &discardWriter{}
-	if err := command.Run(); err != nil {
+	if _, err := self.managerCommand(ctx, args); err != nil {
 		return errors.New("exact containment slice preparation was not acknowledged")
 	}
 	return ctx.Err()

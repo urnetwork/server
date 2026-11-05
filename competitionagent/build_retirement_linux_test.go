@@ -164,7 +164,7 @@ func TestBuildRetirementCapUsesOnlyPageRoundedMeasuredHeadroom(t *testing.T) {
 
 // The production owner has no configuration field that selects a fake kernel.
 func TestBuildRetirementConstructorAlwaysUsesNativeFiniteOwner(t *testing.T) {
-	engine := newHostBuildRetirement(DefaultBuildRetirementSettings())
+	engine := newHostBuildRetirement(Pin{}, DefaultBuildRetirementSettings())
 	kernel, ok := engine.kernel.(*hostCleanupCgroups)
 	if !ok || !kernel.requireCgroupFs || kernel.rootPath != "/sys/fs/cgroup" || kernel.limitCommand != nil || kernel.limitCommandTimeout <= 0 {
 		t.Fatal("retirement constructor bypassed native finite cgroup ownership")

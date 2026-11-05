@@ -9,7 +9,6 @@ import (
 	"io"
 	"math"
 	"os"
-	"os/exec"
 	"reflect"
 	"strconv"
 	"strings"
@@ -205,16 +204,8 @@ func (self *hostCleanupCgroups) applyManagerLimitArguments(ctx context.Context, 
 	command := self.limitCommand
 	if command == nil {
 		command = func(ctx context.Context, arguments []string) error {
-			if err := protectedRootPath("/usr/bin/systemctl", false, false); err != nil {
-				return err
-			}
-			process := exec.CommandContext(ctx, "/usr/bin/systemctl", arguments...)
-			process.Env = controlEnvironment()
-			process.Stdout, process.Stderr = &discardWriter{}, &discardWriter{}
-			if err := process.Run(); err != nil {
-				return errors.New("exact runtime containment limit properties were not acknowledged")
-			}
-			return ctx.Err()
+			_, err := self.runManager(ctx, arguments)
+			return err
 		}
 	}
 	if err := command(ctx, arguments); err != nil {
@@ -223,11 +214,14 @@ func (self *hostCleanupCgroups) applyManagerLimitArguments(ctx context.Context, 
 	return ctx.Err()
 }
 
-// Read all actual limits as well as the effective processor set. An inherited
-// subset, offline processor, missing controller or unlimited reply refuses
-// admission even if every previous write returned success.
+// Independently read manager properties, actual kernel limits and effective
+// processors. Missing/default manager state, an inherited CPU subset or any
+// unlimited reply refuses admission even after a successful property write.
 func (self *hostCleanupCgroups) VerifyLimits(ctx context.Context, name string, limit runSliceLimits) error {
 	if err := validateRunSliceLimits(limit); err != nil {
+		return err
+	}
+	if err := self.verifyManagerLimits(ctx, name, limit); err != nil {
 		return err
 	}
 	for _, property := range []struct {

@@ -391,6 +391,9 @@ type hostCleanupCgroups struct {
 	requireCgroupFs     bool
 	limitCommandTimeout time.Duration
 	limitCommand        func(context.Context, []string) error
+	managerBoundary     Pin
+	managerMaximumBytes int64
+	limitReadCommand    func(context.Context, []string) ([]byte, error)
 }
 
 // A systemd slice expands into exact parent slice components, never a prefix
