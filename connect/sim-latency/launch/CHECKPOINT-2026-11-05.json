@@ -54,12 +54,16 @@
     "full_final_source_suite_complete": false
   },
   "deployment": {
-    "latest_confirmed_main_schema": 930,
-    "main_schema_observed_at": "2026-11-05T21:15:56.345200017Z",
+    "latest_confirmed_main_schema": 932,
+    "main_schema_observed_at": "2026-11-05T21:22:21.4144163Z",
+    "serving_api_version_observed": "2026.11.5-outerwerld+1090599830",
+    "serving_api_version_observed_at": "2026-11-05T21:25:06.567936Z",
+    "serving_api_immutable_image_identity_verified": false,
     "recovery_release_requires_schema": 930,
     "prospective_coverage_migration": 931,
     "prospective_intake_migration": 932,
-    "normal_pipeline_deployment_verification_pending": true,
+    "epoch_one_recovery_schema_is_installed": true,
+    "normal_pipeline_runtime_image_verification_pending": true,
     "future_intake_configuration_enabled": false,
     "no_config_vault_or_remote_host_changes_in_this_checkpoint": true
   },
