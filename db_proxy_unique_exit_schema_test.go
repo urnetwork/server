@@ -32,3 +32,30 @@ func TestProxyUniqueExitEgressKeyMigrationBoundsItsLockWait(t *testing.T) {
 		}
 	}
 }
+
+// The unique-exit migrations are in the list, in order, one contiguous block:
+// the monitor's contracts version each by its position.
+func TestProxyUniqueExitMigrationVersionsAreContiguous(t *testing.T) {
+	v := ProxyUniqueExitMigrationVersion()
+	versions := []int{
+		v.EgressKeyColumns,
+		v.UniqueExitTable,
+		v.UniqueExitNetworkIndex,
+		v.AssignmentTable,
+		v.AssignmentNetworkEgressKeyLiveIndex,
+		v.AssignmentProxyLiveIndex,
+		v.AssignmentProviderLiveIndex,
+		v.AssignmentAssignedAtLiveIndex,
+		v.AssignmentProxyReleasedIndex,
+		v.AssignmentNetworkReleasedIndex,
+		v.AssignmentReleasedAtIndex,
+	}
+	for i, version := range versions {
+		if version == 0 {
+			t.Fatalf("unique-exit migration %d is not in the migration list", i)
+		}
+		if 0 < i && version != versions[i-1]+1 {
+			t.Fatalf("unique-exit migrations are not contiguous: %v", versions)
+		}
+	}
+}

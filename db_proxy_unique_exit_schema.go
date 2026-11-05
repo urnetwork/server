@@ -114,3 +114,36 @@ const proxyExitAssignmentReleasedAtIndexSql = `
         ON proxy_exit_assignment (released_at)
         WHERE state = 'released'
 `
+
+// ProxyUniqueExitMigrationVersions are the versions of the unique-exit
+// migrations, each its migration's position in the list, for the monitor's
+// schema contracts (monitor/migration_proxy_unique_exit.go).
+type ProxyUniqueExitMigrationVersions struct {
+	EgressKeyColumns                    int
+	UniqueExitTable                     int
+	UniqueExitNetworkIndex              int
+	AssignmentTable                     int
+	AssignmentNetworkEgressKeyLiveIndex int
+	AssignmentProxyLiveIndex            int
+	AssignmentProviderLiveIndex         int
+	AssignmentAssignedAtLiveIndex       int
+	AssignmentProxyReleasedIndex        int
+	AssignmentNetworkReleasedIndex      int
+	AssignmentReleasedAtIndex           int
+}
+
+func ProxyUniqueExitMigrationVersion() ProxyUniqueExitMigrationVersions {
+	return ProxyUniqueExitMigrationVersions{
+		EgressKeyColumns:                    sqlMigrationVersion(proxyUniqueExitEgressKeyColumnsSql),
+		UniqueExitTable:                     sqlMigrationVersion(proxyUniqueExitTableSql),
+		UniqueExitNetworkIndex:              sqlMigrationVersion(proxyUniqueExitNetworkIndexSql),
+		AssignmentTable:                     sqlMigrationVersion(proxyExitAssignmentTableSql),
+		AssignmentNetworkEgressKeyLiveIndex: sqlMigrationVersion(proxyExitAssignmentNetworkEgressKeyLiveIndexSql),
+		AssignmentProxyLiveIndex:            sqlMigrationVersion(proxyExitAssignmentProxyLiveIndexSql),
+		AssignmentProviderLiveIndex:         sqlMigrationVersion(proxyExitAssignmentProviderLiveIndexSql),
+		AssignmentAssignedAtLiveIndex:       sqlMigrationVersion(proxyExitAssignmentAssignedAtLiveIndexSql),
+		AssignmentProxyReleasedIndex:        sqlMigrationVersion(proxyExitAssignmentProxyReleasedIndexSql),
+		AssignmentNetworkReleasedIndex:      sqlMigrationVersion(proxyExitAssignmentNetworkReleasedIndexSql),
+		AssignmentReleasedAtIndex:           sqlMigrationVersion(proxyExitAssignmentReleasedAtIndexSql),
+	}
+}
