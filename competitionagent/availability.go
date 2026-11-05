@@ -11,7 +11,7 @@ import (
 // A terminal result alone cannot release a host: independent scoped cleanup
 // and the service-manager join must both have completed before the next job.
 func availableRunState(state *runState) bool {
-	return state != nil && terminalState(state.State) && state.CleanupVerified && (!state.LaunchAttempted || state.StopCleanupVerified)
+	return state != nil && !state.RecoveryActive && terminalState(state.State) && state.CleanupVerified && (!state.LaunchAttempted || state.StopCleanupVerified)
 }
 
 // Service inspection never retains the publication lock. A final state/slot

@@ -87,3 +87,26 @@ func TestSubevaluationArgumentsAcceptFixedRoles(t *testing.T) {
 		t.Fatal("independent emergency freeze role was not retained", err)
 	}
 }
+
+// Recovery selects the fixed physical slot; no run id, trailing command or
+// second lifecycle role is accepted before any root configuration is loaded.
+func TestSubevaluationArgumentsAcceptOnlyClosedRecoveryRole(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--recover-active"}, &bytes.Buffer{})
+	if err != nil || !parsed.recoverActive || parsed.serve || parsed.cleanupRunId != "" || parsed.executeRunId != "" || parsed.configPath != "/synthetic/agent.json" || len(parsed.dockerArguments) != 0 {
+		t.Fatal("fixed independent recovery role was not retained", err)
+	}
+	for _, args := range [][]string{
+		{"--recover-active"},
+		{"--config", "/synthetic/agent.json", "--recover-active", "arbitrary-command"},
+		{"--config", "/synthetic/agent.json", "--recover-active=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--serve"},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--cleanup=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--execute=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--docker-owner=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--docker-probe", "--", "info"},
+	} {
+		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
+			t.Fatal("recovery accepted caller-selected execution or authority", args)
+		}
+	}
+}

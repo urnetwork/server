@@ -19,6 +19,7 @@ type Launch struct {
 	UnitName         string
 	RunId            string
 	ConfigPath       string
+	ConfigSha256     string
 	BaseDirectory    string
 	Agent            Pin
 	DeadlineAt       time.Time
@@ -45,12 +46,19 @@ type Runner interface {
 // The concrete runner is safe for concurrent control calls. It never uses a
 // shell, a caller-selected executable, or inherited production environment.
 type SystemdRunner struct {
-	settings AgentSettings
+	settings         AgentSettings
+	protected        bool
+	recoveryConfig   func(string) (*Config, error)
+	recoveryBoundary func(context.Context, *ManagementResourcePolicy, Pin, AgentSettings, bool, bool) error
+	recoveryCommand  func(context.Context, Pin, []string, AgentSettings) ([]byte, error)
+	launchCommand    func(context.Context, []string) error
 }
 
 // Host paths are system-owned commands, not values from the wire protocol.
 func NewSystemdRunner(settings AgentSettings) *SystemdRunner {
-	return &SystemdRunner{settings: settings}
+	self := &SystemdRunner{settings: settings, protected: true, recoveryConfig: LoadRecoveryConfig, recoveryBoundary: verifyManagementRecoveryBoundary, recoveryCommand: runRecoveryManagerCommand}
+	self.launchCommand = self.runLaunch
+	return self
 }
 
 // The immutable unit name is retained after exit; no --collect or restart can
@@ -59,11 +67,25 @@ func (self *SystemdRunner) Start(ctx context.Context, launch Launch) error {
 	if launch.ManagementCpuSet == "" || launch.Role == "" && launch.OwnerUnitName != dockerOwnerUnitName(launch.RunId) {
 		return errors.New("protected systemd launch requires bounded independent management custody")
 	}
-	if err := validatePin(launch.Agent, true); err != nil {
+	if err := self.armRecovery(ctx, launch); err != nil {
+		return err
+	}
+	if err := validatePin(launch.Agent, self.protected); err != nil {
 		return err
 	}
 	args, err := systemdLaunchArguments(launch, self.settings)
 	if err != nil {
+		return err
+	}
+	if self.launchCommand == nil {
+		return errors.New("systemd launch has no concrete native owner")
+	}
+	return self.launchCommand(ctx, args)
+}
+
+// The service executable/argv are closed; only root fixed unit management runs.
+func (self *SystemdRunner) runLaunch(ctx context.Context, args []string) error {
+	if err := protectedRootPath("/usr/bin/systemd-run", false, false); err != nil {
 		return err
 	}
 	command := exec.CommandContext(ctx, "/usr/bin/systemd-run", args...)
@@ -110,6 +132,9 @@ func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, er
 		"--property=RequiresMountsFor=" + systemdCommandWord(launch.BaseDirectory),
 		"--property=Restart=no", "--property=KillMode=control-group", "--property=SendSIGKILL=yes",
 		"--property=LimitCORE=0",
+		"--property=Slice=" + managementPrivateSliceName,
+		"--property=OnFailure=" + managementRecoveryServiceName,
+		"--property=OnFailureJobMode=replace",
 		"--property=ExecStopPost=" + cleanup,
 		"--property=RuntimeMaxSec=" + strconv.FormatFloat(remaining.Seconds(), 'f', 6, 64) + "s",
 		"--property=TimeoutStopSec=" + strconv.FormatFloat(stopTimeout.Seconds(), 'f', 6, 64) + "s",

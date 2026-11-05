@@ -82,7 +82,7 @@ func (self *hostRunContainment) Start(ctx context.Context, plan cleanupPlan) err
 		return errors.New("run has no finite Docker management identity")
 	}
 	err := self.runner.Start(ctx, Launch{UnitName: dockerOwnerUnitName(plan.RunId), Role: "docker-owner", RunId: plan.RunId,
-		ConfigPath: self.config.configPath, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent,
+		ConfigPath: self.config.configPath, ConfigSha256: self.config.configSha256, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent,
 		DeadlineAt: plan.DockerOwner.DeadlineAt.Add(self.proxySettings.DrainAllowance), ManagementCpuSet: plan.ManagementCpuSet})
 	if err != nil {
 		return err
@@ -345,7 +345,16 @@ func (self *Agent) verifyDockerOwnerPlan(manifest StartManifest, plan cleanupPla
 	}
 	resource := runResourceIdentity{EvaluationCpuSet: plan.DockerOwner.CpuSet, ManagementCpuSet: plan.ManagementCpuSet, BuildMemoryLimit: plan.DockerOwner.BuildMemory,
 		EvidenceMemoryLimitBytes: plan.DockerOwner.HostFiles.EvidenceBytes}
-	expected, err := self.makeDockerOwnerPlan(manifest, plan, resource)
+	owner := self
+	if self.recoveryOnly {
+		if plan.DockerOwner.WorkerUid == 0 || plan.DockerOwner.HostFiles.WorkerGid == 0 {
+			return errors.New("authenticated cleanup plan omitted its original worker identity")
+		}
+		copy := *self
+		copy.credential = &syscall.Credential{Uid: plan.DockerOwner.WorkerUid, Gid: plan.DockerOwner.HostFiles.WorkerGid}
+		owner = &copy
+	}
+	expected, err := owner.makeDockerOwnerPlan(manifest, plan, resource)
 	if err != nil || !reflect.DeepEqual(expected, plan.DockerOwner) {
 		return errors.New("Docker custody plan differs from the root-pinned run role")
 	}
@@ -405,6 +414,9 @@ func (self *Agent) EmergencyFreeze(ctx context.Context, runId string) error {
 // unit. It never executes candidate code, loads main credentials, or restarts
 // an issued build after process loss. ExecStopPost owns emergency freezing.
 func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
+	if self.recoveryOnly {
+		return errors.New("recovery role cannot launch or resume a Docker owner")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -413,7 +425,7 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 		return err
 	}
 	reaped, err := self.loadResourcesReaped(runId, state.CleanupPlanSha256)
-	if err != nil || reaped || state.CleanupVerified || state.StopCleanupVerified || state.CancelRequested || terminalState(state.State) || !self.settings.Now().Before(manifest.Identity.DeadlineAt) {
+	if err != nil || reaped || state.RecoveryActive || state.CleanupVerified || state.StopCleanupVerified || state.CancelRequested || terminalState(state.State) || !self.settings.Now().Before(manifest.Identity.DeadlineAt) {
 		return errors.New("Docker owner execution authority is closed")
 	}
 	marker, err := json.Marshal(struct {

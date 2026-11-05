@@ -38,6 +38,7 @@ type arguments struct {
 	freezeRunId        string
 	hostOperationRunId string
 	dockerProbe        bool
+	recoverActive      bool
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -54,11 +55,12 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.freezeRunId, "freeze", "", "Systemd-only fixed emergency freeze/kill, with no mutual unit join")
 	flags.StringVar(&parsed.hostOperationRunId, "host-operation", "", "Non-root finite fixed-run file handoff; public sibling metadata only")
 	flags.BoolVar(&parsed.dockerProbe, "docker-probe", false, "Root-only closed read-only private-engine host-audit query")
+	flags.BoolVar(&parsed.recoverActive, "recover-active", false, "PID1-only independent recovery of the existing physical slot")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe} {
+	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive} {
 		if enabled {
 			roles++
 		}
@@ -97,6 +99,21 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	}
 	if parsed.dockerProbe && os.Geteuid() != 0 {
 		return errors.New("Docker host audit requires the fixed root role")
+	}
+	if parsed.recoverActive {
+		if os.Geteuid() != 0 {
+			return errors.New("independent recovery requires the fixed root role")
+		}
+		config, err := competitionagent.LoadRecoveryConfig(parsed.configPath)
+		if err != nil {
+			return err
+		}
+		settings := competitionagent.DefaultAgentSettings()
+		agent, err := competitionagent.NewRecoveryAgent(config, competitionagent.NewSystemdRunner(settings), settings)
+		if err != nil {
+			return err
+		}
+		return agent.RecoverActive(ctx)
 	}
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {
