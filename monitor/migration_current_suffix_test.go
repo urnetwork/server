@@ -25,6 +25,7 @@ func migrationCurrentSuffixTestContract(t testing.TB, version int) snMainnetMigr
 func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := t.Context()
+		poolRoleSuperuser := migrationPoolRoleSuperuserForTest(t, ctx)
 		for head := 793; head <= server.MigrationCount(); head++ {
 			server.ApplyDbMigrationsUpTo(ctx, head)
 			row, drift := migrationPingDatabaseCheck(t, ctx)
@@ -41,7 +42,7 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 					// what it keeps
 					continue
 				}
-				if present := migrationBool(row[artifact.rowColumn]); present != (artifact.requiredVersion <= head) {
+				if present := migrationBool(row[artifact.rowColumn]); present != migrationCurrentSuffixExpectedPresenceForTest(artifact, head, poolRoleSuperuser) {
 					t.Fatalf("prefix %d artifact %d=%t", head, artifact.requiredVersion, present)
 				}
 			}
