@@ -63,6 +63,7 @@ CREATE FUNCTION competition_v2_winner_source_authorized(intent jsonb,predecessor
 	// host Docker privileges or silently skip behind a native-helper flag.
 	coveragePolicy := CompetitionWorkCoverageBodiesSql()["policy"]
 	setup := competitionIntakeFirstSqlFixture + helpers + competitionTrustedInstrumentMigration() +
+		competitionJobReevaluationMigration.sql + competitionReevaluationPostCloseMigration.sql +
 		"CREATE FUNCTION competition_work_coverage_policy_valid(policy jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fixture_coverage$" + coveragePolicy + "$fixture_coverage$;\n" + CompetitionIntakeFirstMigrationSql()
 	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
 		Db(tb.Context(), func(conn PgConn) {
@@ -83,9 +84,12 @@ CREATE TABLE competition_supervisor_transition(environment text,competition_id t
 CREATE TABLE competition_supervisor_lease(environment text,competition_id text,season_id text,owner_id text,fencing_token bigint,lease_expires_at timestamp);
 CREATE TABLE competition_finalization_scope_fence(environment text,competition_id text,season_id text,generation bigint,PRIMARY KEY(environment,competition_id,season_id));
 CREATE TABLE competition_automation_hold(environment text,competition_id text,season_id text,kind text,revision integer,active boolean);
+CREATE TABLE competition_finalization_hold(environment text,competition_id text,season_id text,kind text,revision integer,active boolean);
 CREATE TABLE competition_automation_incident(round_id uuid,invalidates_evaluation boolean);
 CREATE TABLE competition_evaluation_seal(round_id uuid,seal_json jsonb);
-CREATE TABLE competition_job(job_id uuid PRIMARY KEY,round_id uuid,state text,attempt_count integer DEFAULT 0,started_at timestamp,evaluation_cycle integer DEFAULT 0,cycle_started_at timestamp,score_json jsonb,heartbeat_at timestamp,lease_expires_at timestamp);
+CREATE TABLE competition_job(job_id uuid PRIMARY KEY,round_id uuid,state text,attempt_count integer DEFAULT 0,started_at timestamp,score_json jsonb,heartbeat_at timestamp,lease_expires_at timestamp,
+ completed_at timestamp,available_at timestamp,eval_error_json jsonb,artifact_manifest_json jsonb,artifact_manifest_sha256 text,lease_owner text,
+ patch_bytes bytea,patch_sha256 text,cache_key text,submitted_at timestamp,api_image_digest text,artifact_retain_until timestamp);
 CREATE TABLE competition_worker_slot(slot_id integer PRIMARY KEY,job_id uuid,worker_id text,lease_expires_at timestamp);
 CREATE TABLE competition_job_event(job_id uuid,actor_id text,event_type text,payload_json jsonb);
 CREATE TABLE competition_round_baseline(round_id uuid PRIMARY KEY,baseline_json bytea,baseline_sha256 text,source_job_id uuid,source_attempt integer,source_artifact_manifest_sha256 text,
@@ -116,6 +120,7 @@ CREATE TRIGGER competition_v2_round_source BEFORE INSERT ON competition_round FO
 CREATE TRIGGER competition_v2_round_reserved_identity BEFORE INSERT ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_v2_round_reserved_identity_guard();
 CREATE TRIGGER competition_round_baseline_source_guard BEFORE INSERT ON competition_round_baseline FOR EACH ROW EXECUTE FUNCTION competition_round_baseline_insert_guard();
 CREATE TRIGGER competition_work_coverage_round BEFORE INSERT OR UPDATE ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_work_coverage_round_guard();
+CREATE TRIGGER synthetic_intake_job_immutable BEFORE UPDATE ON competition_job FOR EACH ROW EXECUTE FUNCTION competition_job_immutable_guard();
 BEGIN;
 DO $fixture$
 DECLARE commits jsonb; refs jsonb; lock_digest text; intent jsonb; policy jsonb; api jsonb; grant_value jsonb; request jsonb; handoff jsonb; at_time timestamp;
@@ -267,6 +272,35 @@ UPDATE competition_job SET state='queued' WHERE job_id='00000000-0000-0000-0000-
 SELECT synthetic_expect_intake_failure('UPDATE competition_job SET state=''running'' WHERE job_id=''00000000-0000-0000-0000-000000000003''');
 SELECT synthetic_expect_intake_failure('INSERT INTO competition_job(job_id,round_id,state,evaluation_cycle) VALUES(''00000000-0000-0000-0000-000000000005'',''00000000-0000-0000-0000-000000000002'',''queued'',1)');
 SELECT synthetic_expect_intake_failure('INSERT INTO competition_job(job_id,round_id,state,cycle_started_at) VALUES(''00000000-0000-0000-0000-000000000005'',''00000000-0000-0000-0000-000000000002'',''queued'',timezone(''UTC'',clock_timestamp()))');
+-- The real published recovery guards admit only an atomic, same-transaction
+-- operator audit. Its post-close finite approval queues metadata under both
+-- holds without starting a candidate or changing its original start/attempt.
+UPDATE competition_job SET state='failed',completed_at=timezone('UTC',clock_timestamp()),lease_expires_at=NULL,
+ eval_error_json='{"kind":"infrastructure","code":"artifact_archive_failed"}'::jsonb WHERE job_id='00000000-0000-0000-0000-000000000003';
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET state=''queued'',evaluation_cycle=1,cycle_attempt_offset=attempt_count WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+SELECT set_config('urnetwork.competition_reevaluation_operator','synthetic-recovery-operator',true),set_config('urnetwork.competition_reevaluation_request',repeat('8',64),true);
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET state=''queued'',evaluation_cycle=1,cycle_attempt_offset=attempt_count WHERE job_id=''00000000-0000-0000-0000-000000000003''');
+INSERT INTO competition_finalization_hold VALUES('synthetic','synthetic-competition','synthetic-season','finalization',1,true);
+DO $recovery$
+DECLARE original jsonb; closed timestamp; granted timestamp; approval jsonb;
+BEGIN
+ SELECT to_jsonb(j) INTO original FROM competition_job j WHERE job_id='00000000-0000-0000-0000-000000000003';
+ SELECT closes_at INTO closed FROM competition_round WHERE round_id='00000000-0000-0000-0000-000000000002';
+ granted:=closed+interval '1 minute';
+ approval:=jsonb_build_object('authorized_at',granted,'expires_at',granted+interval '1 hour','post_close_approval',
+  jsonb_build_object('schema',1,'closes_at',closed,'expires_at',granted+interval '1 hour','evidence_sha256',repeat('9',64)));
+ INSERT INTO competition_job_reevaluation(job_id,round_id,environment,competition_id,season_id,operator_id,idempotency_key,request_sha256,authorization_sha256,authorized_at,original_terminal_json,authorization_json,receipt_json)
+ VALUES('00000000-0000-0000-0000-000000000003','00000000-0000-0000-0000-000000000002','synthetic','synthetic-competition','synthetic-season',
+  'synthetic-recovery-operator','synthetic-audited-post-close',repeat('8',64),repeat('9',64),granted,original,approval,'{}');
+ UPDATE competition_job SET evaluation_cycle=1,cycle_attempt_offset=attempt_count,cycle_started_at=NULL,state='queued',available_at=granted,
+  completed_at=NULL,score_json=NULL,eval_error_json=NULL,artifact_manifest_json=NULL,artifact_manifest_sha256=NULL
+  WHERE job_id='00000000-0000-0000-0000-000000000003';
+ IF EXISTS(SELECT 1 FROM competition_job WHERE job_id='00000000-0000-0000-0000-000000000003' AND
+  (started_at IS DISTINCT FROM (original->>'started_at')::timestamp OR attempt_count<>(original->>'attempt_count')::integer OR cycle_started_at IS NOT NULL OR state<>'queued')) THEN
+  RAISE EXCEPTION 'audited queue metadata changed original execution clocks or started recovery';
+ END IF;
+END $recovery$;
+SELECT synthetic_expect_intake_failure('UPDATE competition_job SET state=''running'',attempt_count=attempt_count+1,cycle_started_at=timezone(''UTC'',clock_timestamp()) WHERE job_id=''00000000-0000-0000-0000-000000000003''');
 UPDATE competition_automation_hold SET active=false WHERE kind='evaluation';
 SELECT synthetic_expect_intake_failure('UPDATE competition_source_intake_activation SET target_epoch=3');
 SELECT synthetic_expect_intake_failure('DELETE FROM competition_source_operator_handoff');

@@ -460,6 +460,22 @@ BEGIN
   execute_candidate:=(NEW.state='running' AND OLD.state IS DISTINCT FROM 'running')
    OR NEW.attempt_count IS DISTINCT FROM OLD.attempt_count OR NEW.started_at IS DISTINCT FROM OLD.started_at
    OR NEW.evaluation_cycle IS DISTINCT FROM OLD.evaluation_cycle OR NEW.cycle_started_at IS DISTINCT FROM OLD.cycle_started_at;
+  -- This is permission to queue the already audited recovery metadata, not
+  -- permission to claim it or start its new cycle clock. The independently
+  -- retained recovery insert/immutable/atomic guards still run unchanged.
+  IF OLD.evaluation_cycle=0 AND NEW.evaluation_cycle=1 AND OLD.state='failed' AND NEW.state='queued'
+   AND NEW.attempt_count=OLD.attempt_count AND NEW.started_at IS NOT DISTINCT FROM OLD.started_at
+   AND NEW.cycle_started_at IS NULL AND OLD.cycle_started_at IS NULL AND NEW.cycle_attempt_offset=OLD.attempt_count
+   AND EXISTS(SELECT 1 FROM competition_job_reevaluation a WHERE a.job_id=OLD.job_id AND a.round_id=OLD.round_id
+    AND a.transaction_id=pg_current_xact_id() AND a.original_terminal_json=to_jsonb(OLD)
+    AND a.operator_id=current_setting('urnetwork.competition_reevaluation_operator',true)
+    AND a.request_sha256=current_setting('urnetwork.competition_reevaluation_request',true) AND NEW.available_at=a.authorized_at
+    AND (to_jsonb(NEW)-ARRAY['evaluation_cycle','cycle_attempt_offset','cycle_started_at','state','completed_at',
+      'score_json','eval_error_json','artifact_manifest_json','artifact_manifest_sha256','available_at'])
+     =(to_jsonb(OLD)-ARRAY['evaluation_cycle','cycle_attempt_offset','cycle_started_at','state','completed_at',
+      'score_json','eval_error_json','artifact_manifest_json','artifact_manifest_sha256','available_at'])) THEN
+   execute_candidate:=false;
+  END IF;
  END IF;
  IF execute_candidate THEN
   SELECT * INTO epoch_round FROM competition_round WHERE round_id=NEW.round_id;
