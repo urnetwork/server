@@ -77,7 +77,7 @@ case "$1" in
     ;;
   logs) printf 'synthetic finite compiler log\n' ;;
   rm) ;;
-  build) ;;
+  build) [[ "$SYNTHETIC_BUILD_FAULT" != assembly ]] || exit 1 ;;
   *) exit 95 ;;
 esac
 `
@@ -171,6 +171,16 @@ func TestTrackedBuilderUnknownWaitNeverStartsSuccessorOrAssembly(t *testing.T) {
 	if code != 2 || strings.Contains(log, "builder-stage=compile") || strings.Contains(log, "reclaim-build-output") || strings.Contains(log, "-- build ") ||
 		!strings.Contains(log, "rm --force") || !strings.Contains(log, "tracked compiler completion remains uncertain") {
 		t.Fatal("uncertain check response reached a successor or lost cleanup custody", code, log)
+	}
+}
+
+// A failure in the fixed no-execution assembly cannot relabel already-passed
+// compilation as a candidate rejection, even when Docker returns exit one.
+func TestTrackedBuilderTrustedAssemblyFailureRemainsInfrastructure(t *testing.T) {
+	log, code := runTrackedBuilderProtocol(t, "assembly")
+	if code != 2 || !strings.Contains(log, "reclaim-build-output") || !strings.Contains(log, "-- build ") ||
+		!strings.Contains(log, "trusted image assembly failed or its outcome remains uncertain") || strings.Contains(log, "candidate compile rejected") {
+		t.Fatal("trusted assembly failure became candidate rejection or lost completed compilation", code, log)
 	}
 }
 

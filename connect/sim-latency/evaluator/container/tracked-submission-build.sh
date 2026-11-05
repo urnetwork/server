@@ -133,7 +133,7 @@ tracked_submission_build() {
     chmod 0400 "$build_context/image-identity.json" "$build_context/validated-identity.json" "$build_context/tracked-compiler.json"
     remaining=$((tracked_build_deadline - SECONDS))
     [[ "$remaining" -gt 0 ]] || infrastructure_failure "tracked compiler completed after its original build allowance"
-    DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "${remaining}s" \
+    if DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "${remaining}s" \
         "${subevaluation_docker_command[@]}" build --platform linux/amd64 --provenance=false --no-cache --pull=false --network none \
         --cgroup-parent "$build_cgroup_parent" --resource "cpuset-cpus=$evaluation_cpuset" \
         --resource "memory=$build_memory_limit" --resource "memory-swap=$build_memory_limit" \
@@ -143,5 +143,11 @@ tracked_submission_build() {
         --build-arg "PATCH_VALIDATOR_SHA256=$patch_validator_sha256" --build-arg "CANDIDATE_COMMITS_SHA256=$candidate_commits_sha256" \
         --build-arg "ORIGINAL_SOURCE_IDENTITY_SHA256=$original_source_identity_sha256" \
         --build-arg "CANDIDATE_SOURCE_IDENTITY_SHA256=$candidate_source_identity_sha256" \
-        --build-arg "SUBMISSION_IDENTITY=$image_key" --tag "$image_tag" "$build_context" >&2
+        --build-arg "SUBMISSION_IDENTITY=$image_key" --tag "$image_tag" "$build_context" >&2; then
+        :
+    else
+        # Candidate compilation already returned a definite successful result.
+        # A fixed COPY-only assembly error is always evaluator infrastructure.
+        infrastructure_failure "trusted image assembly failed or its outcome remains uncertain"
+    fi
 }
