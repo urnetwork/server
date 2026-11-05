@@ -55,7 +55,7 @@ func validateRunResourceLimits(resource runResourceIdentity) error {
 			return errors.New("pinned resource helper omitted a finite role memory ceiling")
 		}
 	}
-	for _, value := range []int64{resource.RunnerPidsLimit, resource.PostgresPidsLimit, resource.RedisPidsLimit, resource.ScorerPidsLimit, resource.PreflightPidsLimit} {
+	for _, value := range []int64{resource.RunnerPidsLimit, resource.PostgresPidsLimit, resource.RedisPidsLimit, resource.ScorerPidsLimit, resource.PreflightPidsLimit, resource.BuildPidsLimit} {
 		if value <= 0 || value > settings.MaximumContainerPids {
 			return errors.New("pinned resource helper omitted a finite role task ceiling")
 		}
@@ -73,6 +73,10 @@ func validateRunResourceLimits(resource runResourceIdentity) error {
 	bytes, err := pinnedResourceMemoryBytes(resource.BuildMemoryLimit)
 	if err != nil || bytes != resource.BuildMemoryLimitBytes {
 		return errors.New("pinned build memory string differs from its byte ceiling")
+	}
+	workBytes, err := pinnedResourceMemoryBytes(resource.BuildWorkLimit)
+	if err != nil || workBytes != resource.BuildWorkLimitBytes || workBytes <= 0 || workBytes >= resource.BuildMemoryLimitBytes {
+		return errors.New("pinned tracked-build scratch differs from its finite parent memory ceiling")
 	}
 	return nil
 }
@@ -103,7 +107,7 @@ func pinnedResourceMemoryBytes(memory string) (int64, error) {
 func prepareRunSliceLimits(plan cleanupPlan, config Config) ([]runSliceLimits, error) {
 	resource := plan.SliceResources
 	if resource == nil || !digestPattern.MatchString(resource.ResourcePolicySha256) || resource.ResourcePolicySha256 != config.DockerRole.ResourcePolicy.Sha256 ||
-		resource.BuildTasksMaximum <= 0 || resource.BuildTasksMaximum > resource.Identity.ActivePidsLimit {
+		resource.BuildTasksMaximum <= 0 || resource.BuildTasksMaximum > resource.Identity.ActivePidsLimit || resource.BuildTasksMaximum > resource.Identity.BuildPidsLimit {
 		return nil, errors.New("containment plan omitted its pinned finite resource authority")
 	}
 	if err := validateRunResourceIdentity(resource.Identity); err != nil {

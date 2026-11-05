@@ -3,17 +3,23 @@
 x-subevaluation-labels: &subevaluation-labels
   com.urnetwork.competition.run-id: ${URNETWORK_SUBEVALUATION_RUN_ID:?set the authenticated subevaluation run identity}
 
-# Defense in depth only: the independent native core-handler gate must also
-# pass, because a piped kernel handler may ignore this per-process limit.
+# The matched-kernel class suppresses pipe helpers at exactly one. The pinned
+# inherited profile denies every change to this limit, including lowering to
+# zero. Native crash/journal-pressure qualification remains mandatory.
 x-subevaluation-ulimits: &subevaluation-ulimits
   core:
-    soft: 0
-    hard: 0
+    soft: 1
+    hard: 1
+
+x-subevaluation-security: &subevaluation-security
+  - no-new-privileges:true
+  - seccomp=${URNETWORK_SUBEVALUATION_CORE_PROFILE:?set the pinned inherited core profile}
 
 services:
   postgres:
     labels: *subevaluation-labels
     ulimits: *subevaluation-ulimits
+    security_opt: *subevaluation-security
     volumes:
       - type: bind
         source: ${EVALUATION_POSTGRES_INIT:?set the trusted PostgreSQL init script}
@@ -23,6 +29,7 @@ services:
   migrate:
     labels: *subevaluation-labels
     ulimits: *subevaluation-ulimits
+    security_opt: *subevaluation-security
     volumes:
       - type: bind
         source: ${EVALUATION_CONFIG_LOCAL_DIR:?set frozen direct config/local directory}
@@ -37,9 +44,11 @@ services:
   redis:
     labels: *subevaluation-labels
     ulimits: *subevaluation-ulimits
+    security_opt: *subevaluation-security
   runner:
     labels: *subevaluation-labels
     ulimits: *subevaluation-ulimits
+    security_opt: *subevaluation-security
     volumes:
       - type: bind
         source: ${EVALUATION_SOURCE_DIR:?set the per-evaluation temporary source checkout}
@@ -68,6 +77,7 @@ services:
   scorer:
     labels: *subevaluation-labels
     ulimits: *subevaluation-ulimits
+    security_opt: *subevaluation-security
     volumes:
       - type: bind
         source: ${EVALUATION_INPUT_DIR:?set authenticated score input directory}

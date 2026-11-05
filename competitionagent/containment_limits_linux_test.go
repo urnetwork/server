@@ -21,6 +21,7 @@ import (
 func testRunResourceIdentity() runResourceIdentity {
 	return runResourceIdentity{Schema: Schema, Kind: "sim-latency-resource-boundary", EvaluationCpuSet: "2,4", ManagementCpuSet: "6,8",
 		BuildMemoryLimit: "5g", BuildMemoryLimitBytes: 5 * 1024 * 1024 * 1024,
+		BuildPidsLimit: 4096, BuildWorkLimit: "3g", BuildWorkLimitBytes: 3 * 1024 * 1024 * 1024,
 		RunnerMemoryLimitBytes: 72 * 1024 * 1024 * 1024, PostgresMemoryLimitBytes: 16 * 1024 * 1024 * 1024, RedisMemoryLimitBytes: 8 * 1024 * 1024 * 1024,
 		RunnerPidsLimit: 65536, PostgresPidsLimit: 4096, RedisPidsLimit: 4096,
 		ActiveMemoryLimitBytes: 96 * 1024 * 1024 * 1024, ActivePidsLimit: 65536 + 4096 + 4096,

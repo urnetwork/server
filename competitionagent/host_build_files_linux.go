@@ -8,11 +8,13 @@ import (
 	"crypto/sha256"
 	"debug/buildinfo"
 	"debug/elf"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -185,7 +187,11 @@ func (self *hostFileBroker) reclaimBuildBinary(ctx context.Context, directory *o
 	if err != nil || !ok || !info.Mode().IsRegular() || stat.Nlink != 1 || info.Size() <= 0 || info.Size() > self.settings.MaximumBuildBinaryBytes {
 		return nil, errors.New("tracked binary is not one bounded regular inode")
 	}
-	object, err := elf.NewFile(file)
+	reader := &hostBuildMetadataReader{ctx: ctx, reader: file, fileBytes: info.Size(), settings: self.settings}
+	if err := validateHostBuildElfHeader(reader, info.Size(), self.settings); err != nil {
+		return nil, err
+	}
+	object, err := elf.NewFile(reader)
 	if err != nil {
 		return nil, errors.New("tracked output is not a native Linux ELF binary")
 	}
@@ -194,7 +200,7 @@ func (self *hostFileBroker) reclaimBuildBinary(ctx context.Context, directory *o
 		object.Type != elf.ET_EXEC && object.Type != elf.ET_DYN || object.OSABI != elf.ELFOSABI_NONE && object.OSABI != elf.ELFOSABI_LINUX {
 		return nil, errors.New("tracked binary changed the fixed Linux amd64 platform")
 	}
-	metadata, err := buildinfo.Read(file)
+	metadata, err := buildinfo.Read(reader)
 	if err != nil || len(metadata.GoVersion) > 64 || len(metadata.Path) > 256 {
 		return nil, errors.New("tracked output has no bounded Go build metadata")
 	}
@@ -262,4 +268,72 @@ func sameHostBuildFile(before, after os.FileInfo) bool {
 	first, firstOk := infoSysStat(before)
 	last, lastOk := infoSysStat(after)
 	return firstOk && lastOk && os.SameFile(before, after) && before.Size() == after.Size() && first.Mtim == last.Mtim && first.Ctim == last.Ctim
+}
+
+// Every actual read, including repeated section-header and build-info scans,
+// consumes one finite owner budget. This wrapper is single-call-owner only.
+type hostBuildMetadataReader struct {
+	ctx       context.Context
+	reader    io.ReaderAt
+	fileBytes int64
+	settings  HostFilesSettings
+	total     int64
+	reads     int
+}
+
+// Refusal precedes any underlying read and cannot become an unbounded retry.
+func (self *hostBuildMetadataReader) ReadAt(buffer []byte, offset int64) (int, error) {
+	if err := self.ctx.Err(); err != nil {
+		return 0, err
+	}
+	size := int64(len(buffer))
+	if offset < 0 || offset > self.fileBytes || size > self.fileBytes-offset || size > self.settings.MaximumBuildMetadataBytes ||
+		self.total > self.settings.MaximumBuildMetadataTotal-size || self.reads >= self.settings.MaximumBuildMetadataReads {
+		return 0, errors.New("tracked binary metadata exceeded its finite reader budget")
+	}
+	self.total += size
+	self.reads++
+	return self.reader.ReadAt(buffer, offset)
+}
+
+// The fixed Go class emits ordinary ELF64 headers. Reject extended counts and
+// compressed or over-cap section-name tables before debug/elf can decompress
+// them. Other compressed DWARF sections are never loaded by these consumers.
+func validateHostBuildElfHeader(reader io.ReaderAt, size int64, settings HostFilesSettings) error {
+	header := make([]byte, 64)
+	if _, err := reader.ReadAt(header, 0); err != nil || string(header[:4]) != "\x7fELF" || header[4] != byte(elf.ELFCLASS64) || header[5] != byte(elf.ELFDATA2LSB) ||
+		binary.LittleEndian.Uint16(header[18:20]) != uint16(elf.EM_X86_64) || binary.LittleEndian.Uint16(header[52:54]) != 64 {
+		return errors.New("tracked binary is outside its fixed ELF64 platform")
+	}
+	programOffset, sectionOffset := binary.LittleEndian.Uint64(header[32:40]), binary.LittleEndian.Uint64(header[40:48])
+	programCount, sectionCount := uint64(binary.LittleEndian.Uint16(header[56:58])), uint64(binary.LittleEndian.Uint16(header[60:62]))
+	stringIndex := uint64(binary.LittleEndian.Uint16(header[62:64]))
+	if size < 0 || programCount == 0 || sectionCount == 0 || programCount > uint64(settings.MaximumBuildElfHeaders) || sectionCount > uint64(settings.MaximumBuildElfHeaders) ||
+		binary.LittleEndian.Uint16(header[54:56]) != 56 || binary.LittleEndian.Uint16(header[58:60]) != 64 ||
+		programOffset > uint64(size) || programCount > (uint64(size)-programOffset)/56 ||
+		sectionOffset > uint64(size) || sectionCount > (uint64(size)-sectionOffset)/64 || stringIndex == 0 || stringIndex >= sectionCount {
+		return errors.New("tracked binary ELF header inventory is absent or out of bounds")
+	}
+	program := make([]byte, 56)
+	for index := uint64(0); index < programCount; index++ {
+		if _, err := reader.ReadAt(program, int64(programOffset+index*56)); err != nil {
+			return errors.New("tracked binary program header is unavailable")
+		}
+		offset, address, fileBytes, memoryBytes := binary.LittleEndian.Uint64(program[8:16]), binary.LittleEndian.Uint64(program[16:24]),
+			binary.LittleEndian.Uint64(program[32:40]), binary.LittleEndian.Uint64(program[40:48])
+		if offset > uint64(size) || fileBytes > uint64(size)-offset || address > math.MaxUint64-fileBytes || address > math.MaxUint64-memoryBytes ||
+			binary.LittleEndian.Uint32(program[:4]) == uint32(elf.PT_LOAD) && memoryBytes < fileBytes {
+			return errors.New("tracked binary program range exceeds its actual file or address space")
+		}
+	}
+	section := make([]byte, 64)
+	if _, err := reader.ReadAt(section, int64(sectionOffset+stringIndex*64)); err != nil {
+		return errors.New("tracked binary section-name header is unavailable")
+	}
+	offset, bytes := binary.LittleEndian.Uint64(section[24:32]), binary.LittleEndian.Uint64(section[32:40])
+	if binary.LittleEndian.Uint32(section[4:8]) != uint32(elf.SHT_STRTAB) || binary.LittleEndian.Uint64(section[8:16])&uint64(elf.SHF_COMPRESSED) != 0 ||
+		bytes == 0 || bytes > uint64(settings.MaximumBuildMetadataBytes) || offset > uint64(size) || bytes > uint64(size)-offset {
+		return errors.New("tracked binary section-name table has unbounded decompression or size")
+	}
+	return nil
 }

@@ -141,7 +141,8 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		t.Fatal(err)
 	}
 	ownershipPin := testAgentPin(t, ownershipPath)
-	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/v2\",\"builder_sha256\":\""+builderSha256+"\",\"subevaluation_ownership_sha256\":\""+ownershipPin.Sha256+"\"}'\n"), 0700); err != nil {
+	backingImagesJson := `["postgres:synthetic@sha256:` + strings.Repeat("a", 64) + `","redis:synthetic@sha256:` + strings.Repeat("b", 64) + `"]`
+	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/tracked-v1\",\"builder_sha256\":\""+builderSha256+"\",\"subevaluation_ownership_sha256\":\""+ownershipPin.Sha256+"\",\"backing_images\":"+backingImagesJson+"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(formatterPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"allowed_paths\":[\"server/example.go\"],\"forbidden_paths\":[\"server/connect/sim-latency/**\"],\"max_patch_bytes\":1024}'\n"), 0700); err != nil {

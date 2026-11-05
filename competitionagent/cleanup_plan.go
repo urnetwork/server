@@ -37,14 +37,18 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 		return nil, err
 	}
 	var builder struct {
-		Schema                       int    `json:"schema"`
-		Kind                         string `json:"kind"`
-		BuilderSha256                string `json:"builder_sha256"`
-		SubevaluationOwnershipSha256 string `json:"subevaluation_ownership_sha256"`
+		Schema                       int      `json:"schema"`
+		Kind                         string   `json:"kind"`
+		BuilderSha256                string   `json:"builder_sha256"`
+		SubevaluationOwnershipSha256 string   `json:"subevaluation_ownership_sha256"`
+		BackingImages                []string `json:"backing_images"`
 	}
-	if json.Unmarshal(builderBytes, &builder) != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/v2" || builder.BuilderSha256 != self.config.SubmissionBuilderSha256 ||
+	if json.Unmarshal(builderBytes, &builder) != nil || builder.Schema != 1 || builder.Kind != "sim-latency-submission-builder/tracked-v1" || builder.BuilderSha256 != self.config.SubmissionBuilderSha256 ||
 		builder.SubevaluationOwnershipSha256 != self.config.SubevaluationOwnership.Sha256 {
 		return nil, errors.New("cleanup builder identity differs from its installed release pin")
+	}
+	if err := validateDockerBackingImages(builder.BackingImages); err != nil {
+		return nil, err
 	}
 	// This is the same fixed jq filter used by evaluator-subevaluation.sh. Hash
 	// its exact bytes, including the final newline, rather than approximating
@@ -104,7 +108,7 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 	if _, err := prepareRunSliceLimits(*plan, self.config); err != nil {
 		return nil, err
 	}
-	plan.DockerOwner, err = self.makeDockerOwnerPlan(manifest, *plan, resource)
+	plan.DockerOwner, err = self.makeDockerOwnerPlan(manifest, *plan, resource, builder.BackingImages)
 	if err != nil {
 		return nil, err
 	}

@@ -90,12 +90,18 @@ type HostFilesSettings struct {
 	// Only the base's existing writable module-download metadata is copied.
 	MaximumBuildCacheBytes   int64
 	MaximumBuildCacheEntries int
+	// File size alone does not bound ELF-declared decompression or parse work.
+	MaximumBuildMetadataBytes int64
+	MaximumBuildMetadataTotal int64
+	MaximumBuildMetadataReads int
+	MaximumBuildElfHeaders    int
 }
 
 func DefaultHostFilesSettings() HostFilesSettings {
 	return HostFilesSettings{MaximumTreeEntries: 500000, MaximumTreeDepth: 64, DirectoryBatch: 128,
 		MaximumProcBytes: 128 * 1024, MaximumPathBytes: 4096, OperationTimeout: 2 * time.Minute,
-		MaximumBuildBinaryBytes: 256 * 1024 * 1024, MaximumBuildCacheBytes: 32 * 1024 * 1024, MaximumBuildCacheEntries: 1024}
+		MaximumBuildBinaryBytes: 256 * 1024 * 1024, MaximumBuildCacheBytes: 32 * 1024 * 1024, MaximumBuildCacheEntries: 1024,
+		MaximumBuildMetadataBytes: 2 * 1024 * 1024, MaximumBuildMetadataTotal: 16 * 1024 * 1024, MaximumBuildMetadataReads: 4096, MaximumBuildElfHeaders: 4096}
 }
 
 const hostFilesContainerUid uint32 = 65532
@@ -146,7 +152,8 @@ func validateHostFilesPlan(plan DockerProxyPlan, settings HostFilesSettings) err
 	if plan.HostFiles == nil || plan.WorkerUid == 0 || plan.HostFiles.WorkerGid == 0 || plan.HostFiles.WorkDeviceId == 0 || plan.HostFiles.EvidenceBytes <= 0 ||
 		settings.MaximumTreeEntries <= 0 || settings.MaximumTreeDepth <= 0 || settings.DirectoryBatch <= 0 || settings.MaximumProcBytes <= 0 ||
 		settings.MaximumPathBytes <= 0 || settings.OperationTimeout <= 0 || settings.MaximumBuildBinaryBytes <= 0 ||
-		settings.MaximumBuildCacheBytes <= 0 || settings.MaximumBuildCacheEntries <= 0 {
+		settings.MaximumBuildCacheBytes <= 0 || settings.MaximumBuildCacheEntries <= 0 || settings.MaximumBuildMetadataBytes <= 0 ||
+		settings.MaximumBuildMetadataTotal <= 0 || settings.MaximumBuildMetadataReads <= 0 || settings.MaximumBuildElfHeaders <= 0 {
 		return errors.New("host-file owner requires finite protected run authority")
 	}
 	rangeLength := uint64(plan.HostFiles.ContainerIdMapLength)

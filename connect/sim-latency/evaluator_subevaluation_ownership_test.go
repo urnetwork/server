@@ -344,7 +344,7 @@ func TestSubevaluationComposeAdapterPreservesLegacyArguments(t *testing.T) {
 func TestSubevaluationBuilderIdentityPinsOwnershipRelease(t *testing.T) {
 	root := t.TempDir()
 	var helper []byte
-	for _, name := range []string{"submission-builder-identity.sh", "build-submission.sh", "Dockerfile.submission", "evaluator.sh", "prepare-evaluation-source.sh", "subevaluation-ownership.sh", "compose.subevaluation.yml", "docker-id-map.sh"} {
+	for _, name := range []string{"submission-builder-identity.sh", "build-submission.sh", "Dockerfile.submission", "Dockerfile.submission.tracked", "tracked-submission-build.sh", "evaluator.sh", "prepare-evaluation-source.sh", "subevaluation-ownership.sh", "compose.yml", "compose.subevaluation.yml", "docker-id-map.sh"} {
 		content, err := os.ReadFile(filepath.Join("evaluator", "container", name))
 		if err != nil {
 			t.Fatal(err)
@@ -353,6 +353,13 @@ func TestSubevaluationBuilderIdentityPinsOwnershipRelease(t *testing.T) {
 			helper = content
 		}
 		if err := os.WriteFile(filepath.Join(root, name), content, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This test proves release hashing only. Canonical profile derivation and
+	// CREATE admission have their own bounded parser/native qualification gates.
+	for _, name := range []string{"docker-stock.seccomp.json", "candidate-core.seccomp.json"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("{\"synthetic_hash_input\":true}\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -390,7 +397,7 @@ stat() {
 			return nil, err
 		}
 		values := map[string]string{}
-		for _, name := range []string{"builder_sha256", "subevaluation_ownership_sha256", "subevaluation_compose_sha256", "subevaluation_docker_id_map_sha256"} {
+		for _, name := range []string{"builder_sha256", "subevaluation_ownership_sha256", "subevaluation_compose_sha256", "subevaluation_docker_id_map_sha256", "tracked_dockerfile_sha256", "tracked_builder_sha256", "stock_seccomp_profile_sha256", "candidate_core_profile_sha256", "compose_base_sha256"} {
 			var value string
 			if err := json.Unmarshal(manifest[name], &value); err != nil {
 				return nil, err
@@ -406,6 +413,9 @@ stat() {
 	for _, file := range []struct{ name, field string }{
 		{name: "subevaluation-ownership.sh", field: "subevaluation_ownership_sha256"}, {name: "compose.subevaluation.yml", field: "subevaluation_compose_sha256"},
 		{name: "docker-id-map.sh", field: "subevaluation_docker_id_map_sha256"},
+		{name: "Dockerfile.submission.tracked", field: "tracked_dockerfile_sha256"}, {name: "tracked-submission-build.sh", field: "tracked_builder_sha256"},
+		{name: "docker-stock.seccomp.json", field: "stock_seccomp_profile_sha256"}, {name: "candidate-core.seccomp.json", field: "candidate_core_profile_sha256"},
+		{name: "compose.yml", field: "compose_base_sha256"},
 	} {
 		path := filepath.Join(root, file.name)
 		content, err := os.ReadFile(path)

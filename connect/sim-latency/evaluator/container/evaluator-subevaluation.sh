@@ -793,6 +793,8 @@ write_compose_env() {
         > "$pending"
     if [[ "${subevaluation_scoped:-false}" = true ]]; then
         printf '%s\n' "URNETWORK_SUBEVALUATION_RUN_ID=$subevaluation_run_id" >> "$pending"
+        printf '%s\n' "URNETWORK_SUBEVALUATION_BRIDGE_NAME=$URNETWORK_SUBEVALUATION_BRIDGE_NAME" \
+            "URNETWORK_SUBEVALUATION_CORE_PROFILE=$URNETWORK_SUBEVALUATION_CORE_PROFILE" >> "$pending"
     fi
     chmod 0400 "$pending"
     mv -f -- "$pending" "$path"
@@ -1692,7 +1694,8 @@ jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
 [ "$(evaluation_docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
 candidate_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
+    --security-opt no-new-privileges:true --mount "type=bind,src=$candidate_source_root,dst=/workspace,readonly" \
+    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
 candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity")"
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_sha "$patch_sha256" --arg policy_sha "$policy_sha256" \
@@ -1700,6 +1703,7 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_validator_sha256 "$patch_validator_sha256" \
     --arg candidate_commits_sha256 "$candidate_commits_sha256" \
     --arg original_source_identity_sha256 "$candidate_original_source_identity_sha256" \
+    --arg candidate_source_identity_sha256 "$(sha256_file "$candidate_source_root/.evaluation-source.json")" \
     --argjson candidate_commits "$candidate_commits_json" \
     '.schema == 1 and .image_kind == "submission" and .base_sha == $base_sha and
      .build_sha == $build_sha and .patch_sha256 == $patch_sha and
@@ -1708,6 +1712,8 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
      .patch_validator_sha256 == $patch_validator_sha256 and
      .candidate_commits_sha256 == $candidate_commits_sha256 and
      .original_source_identity_sha256 == $original_source_identity_sha256 and
+     .candidate_source_identity_sha256 == $candidate_source_identity_sha256 and
+     .source_materialization == "required-readonly-run-source/v1" and .builtin_source_kind == "pristine-evaluator-base" and
      .candidate_commits == $candidate_commits and
      (.paths | type == "array")' \
     <<<"$candidate_identity" >/dev/null || die "candidate image identity is invalid"

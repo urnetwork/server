@@ -632,6 +632,18 @@ func (self *DockerProxy) verifyDockerBind(source, target string, readOnly bool) 
 	}
 	relative = filepath.ToSlash(relative)
 	if !readOnly {
+		if relative == "tracked-build/check-cache" || relative == "tracked-build/compile-cache" {
+			if target != "/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v" {
+				return errors.New("tracked compiler metadata changed its only writable cache leaf")
+			}
+			return nil
+		}
+		if relative == "tracked-build/output" {
+			if target != "/candidate-output" {
+				return errors.New("tracked compiler output changed its exact destination")
+			}
+			return nil
+		}
 		if !hostFilesOutputPattern.MatchString(relative) && relative != "baseline-score-output" && relative != "candidate-score-output" ||
 			target != "/artifacts" && target != "/score-output" {
 			return errors.New("Docker writable bind is not an exact full-R9 output")

@@ -132,6 +132,9 @@ func (self *DockerProxy) RunOwnedBuild(ctx context.Context, request DockerBuildR
 	if err != nil || digestDockerBytes(dockerfile) != self.plan.Dockerfile.Sha256 {
 		return failBeforeIssue(errors.New("owned Dockerfile failed its fixed content pin"))
 	}
+	if err := validateTrackedSubmissionDockerfile(dockerfile); err != nil {
+		return failBeforeIssue(err)
+	}
 	if err := exclusiveFile(filepath.Join(self.buildDirectory(), "Dockerfile"), dockerfile, 0400); err != nil {
 		return failBeforeIssue(err)
 	}
@@ -270,7 +273,7 @@ func (self *DockerProxy) validateBuildArguments(request DockerBuildRequest) ([]s
 		return nil, errors.New("owned build changed frozen network, executable or resource policy")
 	}
 	allowed := map[string]bool{"EVALUATOR_BASE_IMAGE": true, "BASE_SHA": true, "CANDIDATE_SHA": true, "PATCH_SHA256": true, "POLICY_SHA256": true,
-		"BUILDER_SHA256": true, "PATCH_VALIDATOR_SHA256": true, "CANDIDATE_COMMITS_SHA256": true, "ORIGINAL_SOURCE_IDENTITY_SHA256": true, "SUBMISSION_IDENTITY": true}
+		"BUILDER_SHA256": true, "PATCH_VALIDATOR_SHA256": true, "CANDIDATE_COMMITS_SHA256": true, "ORIGINAL_SOURCE_IDENTITY_SHA256": true, "CANDIDATE_SOURCE_IDENTITY_SHA256": true, "SUBMISSION_IDENTITY": true}
 	baseAlias := "urnetwork/sim-latency-evaluator-base-id:" + strings.TrimPrefix(self.plan.BaseImageDigest, "sha256:")
 	if len(buildArgs) != len(allowed) || buildArgs["EVALUATOR_BASE_IMAGE"] != baseAlias {
 		return nil, errors.New("owned build omitted frozen source arguments")

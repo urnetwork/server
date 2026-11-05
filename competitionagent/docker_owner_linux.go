@@ -220,6 +220,9 @@ type runResourceIdentity struct {
 	ManagementCpuSet          string `json:"management_cpuset"`
 	BuildMemoryLimit          string `json:"build_memory_limit"`
 	BuildMemoryLimitBytes     int64  `json:"build_memory_limit_bytes"`
+	BuildPidsLimit            int64  `json:"build_pids_limit"`
+	BuildWorkLimit            string `json:"build_work_limit"`
+	BuildWorkLimitBytes       int64  `json:"build_work_limit_bytes"`
 	RunnerMemoryLimitBytes    int64  `json:"runner_memory_limit_bytes"`
 	PostgresMemoryLimitBytes  int64  `json:"postgres_memory_limit_bytes"`
 	RedisMemoryLimitBytes     int64  `json:"redis_memory_limit_bytes"`
@@ -278,7 +281,7 @@ func validateRunResourceIdentity(identity runResourceIdentity) error {
 
 // The cleanup plan is root-committed before launch. Its nested owner plan has
 // no authority derived from workspace sidecars or a later caller environment.
-func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan, resource runResourceIdentity) (*DockerProxyPlan, error) {
+func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan, resource runResourceIdentity, backingImages []string) (*DockerProxyPlan, error) {
 	workerUid := uint32(os.Geteuid())
 	workerGid := uint32(os.Getegid())
 	operatorUid := workerUid
@@ -310,7 +313,8 @@ func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan,
 		ContextRoot: self.workDirectory(manifest.Identity.RunId), UpstreamSocketPath: self.config.DockerSocketPath, Docker: self.config.Docker, Buildx: self.config.DockerRole.Buildx,
 		Dockerfile: self.config.DockerRole.Dockerfile, BaseImageDigest: manifest.EvaluatorImageDigest, CgroupNames: append([]string(nil), plan.CgroupNames...),
 		StockSeccompProfile: self.config.DockerRole.StockSeccompProfile, CandidateCoreProfile: self.config.DockerRole.CandidateCoreProfile,
-		CpuSet: resource.EvaluationCpuSet, ManagementCpuSet: resource.ManagementCpuSet, BuildMemory: resource.BuildMemoryLimit, WorkerUid: workerUid,
+		BackingImages: append([]string(nil), backingImages...),
+		CpuSet:        resource.EvaluationCpuSet, ManagementCpuSet: resource.ManagementCpuSet, BuildMemory: resource.BuildMemoryLimit, WorkerUid: workerUid,
 		ReadOnlyBindPaths: []string{self.config.ConfigLocalDirectory, self.config.VaultLocalDirectory, self.config.DockerRole.PostgresInitialization.Path}, ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256,
 		HostFiles: &HostFilesPlan{WorkerGid: workerGid, ContainerRootUid: idMap.ContainerRootUid, ContainerRootGid: idMap.ContainerRootGid,
 			ResourceBoundary:     self.config.DockerRole.ResourceBoundary,
@@ -355,7 +359,7 @@ func (self *Agent) verifyDockerOwnerPlan(manifest StartManifest, plan cleanupPla
 		copy.credential = &syscall.Credential{Uid: plan.DockerOwner.WorkerUid, Gid: plan.DockerOwner.HostFiles.WorkerGid}
 		owner = &copy
 	}
-	expected, err := owner.makeDockerOwnerPlan(manifest, plan, resource)
+	expected, err := owner.makeDockerOwnerPlan(manifest, plan, resource, plan.DockerOwner.BackingImages)
 	if err != nil || !reflect.DeepEqual(expected, plan.DockerOwner) {
 		return errors.New("Docker custody plan differs from the root-pinned run role")
 	}

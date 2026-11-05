@@ -51,7 +51,7 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 		t.Fatal(err)
 	}
 	dockerfile := filepath.Join(root, "Dockerfile.submission")
-	if err := os.WriteFile(dockerfile, []byte("FROM scratch\n"), 0400); err != nil {
+	if err := os.WriteFile(dockerfile, []byte("ARG EVALUATOR_BASE_IMAGE\nFROM ${EVALUATOR_BASE_IMAGE}\n"), 0400); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(dockerfile)
@@ -94,8 +94,8 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 		"--file", plan.Dockerfile.Path}
 	buildArgs := map[string]string{"EVALUATOR_BASE_IMAGE": "urnetwork/sim-latency-evaluator-base-id:" + strings.TrimPrefix(plan.BaseImageDigest, "sha256:"), "BASE_SHA": strings.Repeat("a", 40), "CANDIDATE_SHA": strings.Repeat("c", 40),
 		"PATCH_SHA256": strings.Repeat("1", 64), "POLICY_SHA256": strings.Repeat("2", 64), "BUILDER_SHA256": strings.Repeat("4", 64), "PATCH_VALIDATOR_SHA256": strings.Repeat("5", 64),
-		"CANDIDATE_COMMITS_SHA256": strings.Repeat("6", 64), "ORIGINAL_SOURCE_IDENTITY_SHA256": strings.Repeat("7", 64), "SUBMISSION_IDENTITY": strings.Repeat("b", 64)}
-	for _, name := range []string{"EVALUATOR_BASE_IMAGE", "BASE_SHA", "CANDIDATE_SHA", "PATCH_SHA256", "POLICY_SHA256", "BUILDER_SHA256", "PATCH_VALIDATOR_SHA256", "CANDIDATE_COMMITS_SHA256", "ORIGINAL_SOURCE_IDENTITY_SHA256", "SUBMISSION_IDENTITY"} {
+		"CANDIDATE_COMMITS_SHA256": strings.Repeat("6", 64), "ORIGINAL_SOURCE_IDENTITY_SHA256": strings.Repeat("7", 64), "CANDIDATE_SOURCE_IDENTITY_SHA256": strings.Repeat("8", 64), "SUBMISSION_IDENTITY": strings.Repeat("b", 64)}
+	for _, name := range []string{"EVALUATOR_BASE_IMAGE", "BASE_SHA", "CANDIDATE_SHA", "PATCH_SHA256", "POLICY_SHA256", "BUILDER_SHA256", "PATCH_VALIDATOR_SHA256", "CANDIDATE_COMMITS_SHA256", "ORIGINAL_SOURCE_IDENTITY_SHA256", "CANDIDATE_SOURCE_IDENTITY_SHA256", "SUBMISSION_IDENTITY"} {
 		args = append(args, "--build-arg", name+"="+buildArgs[name])
 	}
 	args = append(args, "--tag", "urnetwork/sim-latency-submission:"+strings.Repeat("b", 32), contextDirectory)

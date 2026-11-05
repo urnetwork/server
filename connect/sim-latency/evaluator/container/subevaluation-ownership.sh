@@ -38,6 +38,11 @@ subevaluation_ownership_init() {
     token="${token%% *}"
     [[ "$token" =~ ^[0-9a-f]{64}$ ]] || return 2
     directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 2
+    if [[ -v URNETWORK_SUBEVALUATION_CORE_PROFILE && "$URNETWORK_SUBEVALUATION_CORE_PROFILE" != "$directory/candidate-core.seccomp.json" ]]; then
+        printf 'subevaluation core profile differs from its protected helper release\n' >&2
+        return 2
+    fi
+    export URNETWORK_SUBEVALUATION_CORE_PROFILE="$directory/candidate-core.seccomp.json"
     subevaluation_run_id="$URNETWORK_SUBEVALUATION_RUN_ID"
     subevaluation_docker_command=("${URNETWORK_SUBEVALUATION_CLIENT:-}" --docker-client "$subevaluation_run_id" --)
     subevaluation_preflight_cgroup="urnetwork-evaluation-${token:0:32}-preflight.slice"
@@ -48,7 +53,8 @@ subevaluation_ownership_init() {
         --label "com.urnetwork.competition.round-id=$URNETWORK_SUBEVALUATION_ROUND_ID"
         --label "com.urnetwork.competition.run-id=$subevaluation_run_id"
         --cgroup-parent "$subevaluation_preflight_cgroup"
-        --ulimit core=0:0
+        --ulimit core=1:1
+        --security-opt "seccomp=$URNETWORK_SUBEVALUATION_CORE_PROFILE"
     )
     subevaluation_probe_args=(
         --network none --read-only --cap-drop ALL

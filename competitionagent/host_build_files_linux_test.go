@@ -5,6 +5,8 @@ package competitionagent
 import (
 	"context"
 	"crypto/sha256"
+	"debug/elf"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"io"
@@ -318,5 +320,85 @@ func TestHostTrackedBuildBinaryDirectorySubstitutionKeepsOriginalInode(t *testin
 	content, err := os.ReadFile(filepath.Join(outside, "sim-latency"))
 	if err != nil || string(content) != "outside" {
 		t.Fatal("outside binary content changed", err)
+	}
+}
+
+// The real fixed test ELF passes the precheck; synthetic changes at its actual
+// section header demonstrate refusal before a general parser can decompress.
+func TestHostTrackedBuildMetadataRejectsCompressedAndOversizedNameTables(t *testing.T) {
+	for _, fault := range []string{"compressed", "oversized", "headers", "program-overflow"} {
+		fixture := newHostTrackedBuildTest(t)
+		path := filepath.Join(fixture.output, "sim-latency")
+		copyHostTrackedTestBinary(t, path)
+		file, err := os.OpenFile(path, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		header := make([]byte, 64)
+		if _, err := file.ReadAt(header, 0); err != nil {
+			t.Fatal(err)
+		}
+		sectionOffset := binary.LittleEndian.Uint64(header[40:48]) + uint64(binary.LittleEndian.Uint16(header[62:64]))*64
+		value := make([]byte, 8)
+		writeAt := int64(sectionOffset + 8)
+		switch fault {
+		case "compressed":
+			binary.LittleEndian.PutUint64(value, uint64(elf.SHF_COMPRESSED))
+		case "oversized":
+			writeAt = int64(sectionOffset + 32)
+			binary.LittleEndian.PutUint64(value, uint64(fixture.broker.settings.MaximumBuildMetadataBytes+1))
+		case "headers":
+			fixture.broker.settings.MaximumBuildElfHeaders = 1
+			value = nil
+		case "program-overflow":
+			writeAt = int64(binary.LittleEndian.Uint64(header[32:40]) + 32)
+			binary.LittleEndian.PutUint64(value, ^uint64(0))
+		}
+		if len(value) != 0 {
+			if _, err := file.WriteAt(value, writeAt); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if result := fixture.broker.Execute(t.Context(), fixture.request("reclaim-build-output", "")); result.ExitCode == 0 || result.BuildBinary != nil || fixture.chowns != 0 {
+			t.Fatal("unbounded metadata declarations crossed binary reclaim", fault, result)
+		}
+	}
+}
+
+// Per-read, cumulative and count refusal are checked before the underlying
+// reader is invoked, including canceled owners and out-of-file offsets.
+func TestHostTrackedBuildMetadataReaderBoundsActualWorkBeforeRead(t *testing.T) {
+	for _, fault := range []string{"per-read", "total", "count", "offset", "owner"} {
+		settings := DefaultHostFilesSettings()
+		settings.MaximumBuildMetadataBytes = 4
+		settings.MaximumBuildMetadataTotal = 6
+		settings.MaximumBuildMetadataReads = 2
+		ctx, cancel := context.WithCancel(t.Context())
+		reader := &hostBuildMetadataReader{ctx: ctx, reader: strings.NewReader("synthetic bytes"), fileBytes: 15, settings: settings}
+		buffer := make([]byte, 3)
+		if _, err := reader.ReadAt(buffer, 0); err != nil {
+			t.Fatal("initial bounded metadata read failed", err)
+		}
+		offset := int64(0)
+		switch fault {
+		case "per-read":
+			buffer = make([]byte, 5)
+		case "total":
+			buffer = make([]byte, 4)
+		case "count":
+			reader.settings.MaximumBuildMetadataReads = 1
+		case "offset":
+			offset = reader.fileBytes
+		case "owner":
+			cancel()
+		}
+		beforeTotal, beforeReads := reader.total, reader.reads
+		if _, err := reader.ReadAt(buffer, offset); err == nil || reader.total != beforeTotal || reader.reads != beforeReads {
+			t.Fatal("refused metadata work consumed an underlying read or escaped its owner", fault, err)
+		}
+		cancel()
 	}
 }

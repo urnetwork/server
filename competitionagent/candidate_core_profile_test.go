@@ -1,3 +1,5 @@
+//go:build linux
+
 // Profile regressions interpret the admitted predicates and exercise the real
 // worker HTTP admission with private pinned files and fake daemons. They do not
 // load seccomp, crash a process, or qualify native Docker/kernel ABI behavior.

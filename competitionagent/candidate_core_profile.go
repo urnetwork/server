@@ -1,3 +1,5 @@
+//go:build linux
+
 // The prospective direct-container class preserves a pinned stock seccomp
 // profile except for resource-limit writes. Both core limits must start at one:
 // the reviewed kernel pipe path suppresses its helper at one, not at zero.
