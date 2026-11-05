@@ -432,7 +432,7 @@ Panels:
 - `proxy.json` shows confirms and share policing, scoped to the proxy service.
 - `taskworker.json` shows assignments, allocations, replacements, supply, lifetime and snapshot age.
 
-No monitor alert class was added.
+No monitor alert class was added. The monitor's migrations signal has a schema contract for each of the eleven migrations (`monitor/migration_proxy_unique_exit.go`): columns, primary keys and complete index definitions, versioned by position.
 
 ### 13.5 Deploy order
 
