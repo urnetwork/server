@@ -516,6 +516,7 @@ func (self PostgresStore) ActivateSource(ctx context.Context, settings *Settings
 				panic(ErrConflict)
 			}
 			server.Raise(validateSourceAuthorizationInTx(ctx, tx, settings, intent, current))
+			server.Raise(requireSourceOperatorHandoffInTx(ctx, tx, settings, intent))
 			var ready int
 			server.Raise(tx.QueryRow(ctx, `SELECT count(*) FROM competition_source_readiness WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4 AND (receipt_json->>'ready')::boolean AND receipt_json->>'manifest_sha256'=$5 AND receipt_json->>'source_lock_sha256'=$6 AND (receipt_json->>'target_round_id')::uuid=$7`, intent.Environment, intent.CompetitionId, intent.SeasonId, generation, intent.ManifestSha256, intent.SourceLockSha256, intent.TargetRoundId).Scan(&ready))
 			if ready != 2 {

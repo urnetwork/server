@@ -196,6 +196,14 @@ func (self *Service) requireSecureIntake(ctx context.Context, settings *Settings
 	if err != nil {
 		return nil, infrastructureError("not_ready", "competition intake containment is not ready")
 	}
+	if settings.intakeFirstActivation != nil {
+		// Authentication happened in API-purpose source derivation. These are
+		// still genuine non-host checks, including protected archive and image.
+		if !competitionIntakeChecksPass(checks) {
+			return nil, infrastructureError("not_ready", "source-only intake security dependencies are unavailable")
+		}
+		return settings, nil
+	}
 	if secureEvaluatorChecksPass(checks) {
 		return settings, nil
 	}
@@ -226,6 +234,9 @@ func checkCompetitionIntakeAdmission(ctx context.Context, reader competitionInta
 // Production always supplies the real server clock. A private clock seam lets
 // deterministic tests cross maintenance expiry without altering receipt time.
 func checkCompetitionIntakeAdmissionWithClock(ctx context.Context, reader competitionIntakeReader, settings *Settings, round *roundRecord, receivedAt time.Time, nowUtc func() time.Time) error {
+	if settings.intakeFirstActivation != nil {
+		return checkCompetitionIntakeFirstAdmission(ctx, reader, settings, round)
+	}
 	if settings.intakeAdmission == nil {
 		return nil
 	}

@@ -566,6 +566,19 @@ func (self *sourceSupervisorRuntime) prepareSource(ctx context.Context, lease mo
 	}{Operation: "propagate_and_qualify", Intent: intent, Lease: lease})
 }
 
+// This purpose publishes the same exact retained envelope and obtains only
+// the real API acknowledgment. Runtime qualification is a later operation of
+// the independently pinned preparation broker, not a fabricated worker ACK.
+func (self *sourceSupervisorRuntime) prepareIntake(ctx context.Context, lease model.CompetitionSupervisorLease, intent *model.CompetitionSourceActivation) error {
+	if err := validateSourceActivationMode(intent, self.settings); err != nil {
+		return err
+	}
+	if _, err := self.store.RenewAutomationLease(ctx, self.settings, lease, time.Minute); err != nil {
+		return err
+	}
+	return runSourceSupervisorCommand(ctx, self.prepareCommand, self.prepareSha256, controller.CompetitionPreparationRequest{Operation: "propagate_intake", Intent: *intent, Lease: lease})
+}
+
 // Preparation-only is an explicit one-step boundary, never a continuously
 // running supervisor whose later reconciliation could activate prepared source.
 func sourceSupervisorPreparationMode(opts docopt.Opts) (bool, error) {
@@ -626,7 +639,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 	}
 	driver := &controller.PostgresCompetitionSupervisorDriver{Settings: settings, Store: store, Hooks: controller.CompetitionSupervisorHooks{
 		ReviewWinner: runtime.reviewWinner,
-		ChooseSource: runtime.chooseSource, PublishSource: runtime.publishSource, PrepareSource: runtime.prepareSource, FallbackSource: runtime.fallbackSource,
+		ChooseSource: runtime.chooseSource, PublishSource: runtime.publishSource, PrepareSource: runtime.prepareSource, PrepareIntake: runtime.prepareIntake, FallbackSource: runtime.fallbackSource,
 		RunWorker: func(ctx context.Context, lease model.CompetitionSupervisorLease, round model.CompetitionRoundResult) error {
 			return runSourceSupervisorWorkerCommand(ctx, runtime.workerCommand, runtime.workerSha256, controller.CompetitionSupervisorWorkerRequest{Operation: "run_one_epoch", Round: round, Lease: lease})
 		},

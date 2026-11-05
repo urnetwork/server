@@ -590,6 +590,7 @@ type Settings struct {
 	PatchPolicy                  PatchPolicy                             `yaml:"patch_policy"`
 	EvaluationPolicy             EvaluationPolicy                        `yaml:"evaluation_policy"`
 	FutureEpochPolicy            *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
+	IntakeFirstPolicy            *model.CompetitionIntakeFirstPolicy     `yaml:"intake_first_policy,omitempty"`
 	DistributedEvaluationPolicy  *CompetitionDistributedEvaluationPolicy `yaml:"-"`
 	SeasonPolicy                 SeasonPolicy                            `yaml:"season_policy"`
 	ArtifactRoot                 string                                  `yaml:"artifact_root"`
@@ -617,6 +618,7 @@ type Settings struct {
 	roundBaselinePreparation     *roundBaselinePreparationProfile
 	futureBaselinePreparation    *roundBaselinePreparationProfile
 	intakeAdmission              *competitionIntakeAdmission
+	intakeFirstActivation        *model.CompetitionSourceIntakeActivation
 	distributedCoordinator       *competitionDistributedCoordinatorProfile
 	distributedRoundEpoch        int
 	distributedPreparationOnly   bool
@@ -630,30 +632,31 @@ type Settings struct {
 }
 
 type settingsFile struct {
-	AutomationPolicy           model.CompetitionAutomationPolicy `yaml:"automation_policy"`
-	Enabled                    bool                              `yaml:"enabled"`
-	CompetitionId              string                            `yaml:"competition_id"`
-	BaseSha                    string                            `yaml:"base_sha"`
-	EvaluatorImageDigest       string                            `yaml:"evaluator_image_digest"`
-	PatchPolicy                PatchPolicy                       `yaml:"patch_policy"`
-	EvaluationPolicy           EvaluationPolicy                  `yaml:"evaluation_policy"`
-	FutureEpochPolicy          *CompetitionFutureEpochPolicy     `yaml:"future_epoch_policy,omitempty"`
-	SeasonPolicy               SeasonPolicy                      `yaml:"season_policy"`
-	ArtifactRoot               string                            `yaml:"artifact_root"`
-	ArtifactBucket             string                            `yaml:"artifact_bucket"`
-	ConfigLocalDirectory       string                            `yaml:"config_local_directory"`
-	VaultLocalDirectory        string                            `yaml:"vault_local_directory"`
-	SeasonEndsAt               time.Time                         `yaml:"season_ends_at"`
-	RetainUntil                time.Time                         `yaml:"retain_until"`
-	WorkerLeaseSeconds         int                               `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds     int                               `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds int                               `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts  int                               `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand           string                            `yaml:"simulator_command"`
-	EvaluatorCommand           string                            `yaml:"evaluator_command"`
-	EvaluatorCommandSha256     string                            `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand           string                            `yaml:"self_check_command"`
-	SelfCheckCommandSha256     string                            `yaml:"self_check_command_sha256"`
+	AutomationPolicy           model.CompetitionAutomationPolicy   `yaml:"automation_policy"`
+	IntakeFirstPolicy          *model.CompetitionIntakeFirstPolicy `yaml:"intake_first_policy,omitempty"`
+	Enabled                    bool                                `yaml:"enabled"`
+	CompetitionId              string                              `yaml:"competition_id"`
+	BaseSha                    string                              `yaml:"base_sha"`
+	EvaluatorImageDigest       string                              `yaml:"evaluator_image_digest"`
+	PatchPolicy                PatchPolicy                         `yaml:"patch_policy"`
+	EvaluationPolicy           EvaluationPolicy                    `yaml:"evaluation_policy"`
+	FutureEpochPolicy          *CompetitionFutureEpochPolicy       `yaml:"future_epoch_policy,omitempty"`
+	SeasonPolicy               SeasonPolicy                        `yaml:"season_policy"`
+	ArtifactRoot               string                              `yaml:"artifact_root"`
+	ArtifactBucket             string                              `yaml:"artifact_bucket"`
+	ConfigLocalDirectory       string                              `yaml:"config_local_directory"`
+	VaultLocalDirectory        string                              `yaml:"vault_local_directory"`
+	SeasonEndsAt               time.Time                           `yaml:"season_ends_at"`
+	RetainUntil                time.Time                           `yaml:"retain_until"`
+	WorkerLeaseSeconds         int                                 `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds     int                                 `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds int                                 `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts  int                                 `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand           string                              `yaml:"simulator_command"`
+	EvaluatorCommand           string                              `yaml:"evaluator_command"`
+	EvaluatorCommandSha256     string                              `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand           string                              `yaml:"self_check_command"`
+	SelfCheckCommandSha256     string                              `yaml:"self_check_command_sha256"`
 }
 
 type secretsFile struct {
@@ -694,6 +697,7 @@ func LoadSettings() (*Settings, error) {
 	}
 	s := &Settings{
 		AutomationPolicy:           public.AutomationPolicy,
+		IntakeFirstPolicy:          public.IntakeFirstPolicy,
 		Enabled:                    public.Enabled,
 		CompetitionId:              strings.TrimSpace(public.CompetitionId),
 		BaseSha:                    strings.TrimSpace(public.BaseSha),
@@ -749,6 +753,12 @@ func (self *Settings) Validate() error {
 	}
 	if err := model.ValidateCompetitionAutomationPolicy(self.AutomationPolicy); err != nil {
 		return err
+	}
+	if err := model.ValidateCompetitionIntakeFirstPolicy(self.IntakeFirstPolicy); err != nil {
+		return err
+	}
+	if self.IntakeFirstPolicy != nil && (!self.AutomationPolicy.Enabled || self.AutomationPolicy.Staging || self.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability) {
+		return errors.New("intake-first requires explicit production automation and authenticated runtime-blob source authority")
 	}
 	if self.CompetitionId == "" || len(self.CompetitionId) > 128 {
 		return errors.New("competition_id must contain 1..128 characters")
@@ -3543,7 +3553,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 		return result, evalError
 	}
 	if competitionRoundUsesV2(round) {
-		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+		settings, err = settingsForCompetitionApiRound(ctx, settings, self.store, round)
 		if err != nil {
 			result.Checks["frozen_source_activation"] = false
 			evalError := infrastructureError("source_not_ready", "the current round's approved source and frozen policy do not match runtime readiness")
@@ -3675,7 +3685,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+	if err := requireConfiguredCompetitionApiRuntime(ctx, settings, self.store); err != nil {
 		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	result := settings.PublicInfo()
@@ -3686,7 +3696,7 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		effective := settings
 		if competitionRoundUsesV2(round) {
 			var sourceErr error
-			effective, sourceErr = settingsForAutomationRound(ctx, settings, self.store, round)
+			effective, sourceErr = settingsForCompetitionApiRound(ctx, settings, self.store, round)
 			if sourceErr != nil {
 				return infrastructureError("source_not_ready", "the exact frozen round source is unavailable")
 			}
@@ -3939,7 +3949,7 @@ func (self *Service) Leaderboards(ctx context.Context, includeStaging bool) (*Se
 	if err != nil {
 		return nil, infrastructureError("configuration_unavailable", "competition configuration is not ready")
 	}
-	if err := requireConfiguredCompetitionRuntime(ctx, settings, self.store); err != nil {
+	if err := requireConfiguredCompetitionApiRuntime(ctx, settings, self.store); err != nil {
 		return nil, infrastructureError("source_not_ready", "the exact runtime source envelope is unavailable")
 	}
 	result, err := self.store.Leaderboards(ctx, settings, includeStaging)
@@ -4000,7 +4010,7 @@ func (self *Service) submitWithDecisionContract(ctx context.Context, args ScoreA
 			}
 			return nil, status, patchErr
 		}
-		settings, err = settingsForAutomationRound(ctx, settings, self.store, round)
+		settings, err = settingsForCompetitionApiRound(ctx, settings, self.store, round)
 		if err != nil {
 			return nil, http.StatusServiceUnavailable, infrastructureError("round_source_not_ready", "the exact activated source for this frozen round is not ready")
 		}
@@ -4590,6 +4600,18 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"))
 			}
 			server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('competition-round-v1', 0))`))
+			if settings.intakeFirstActivation != nil {
+				existing, replayErr := competitionIntakeFirstRound(ctx, tx, settings, round.RoundId)
+				server.Raise(replayErr)
+				if existing != nil {
+					if existing.Epoch != settings.intakeFirstActivation.TargetEpoch || !storedPolicyMatches(settings, existing.PolicyJson) {
+						stateErr = ErrConflict
+						return
+					}
+					round = existing
+					return
+				}
+			}
 			var activeAutomationStaging bool
 			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_round
 			 WHERE competition_id=$1 AND staging AND NOT canceled AND automation_sealed_at IS NULL
@@ -4623,7 +4645,12 @@ func (self PostgresStore) CreateRound(ctx context.Context, settings *Settings, a
 				}
 			}
 			round.Epoch = previousEpoch + 1
-			if settings.AutomationPolicy.Enabled {
+			if settings.intakeFirstActivation != nil {
+				if err := self.checkIntakeFirstRoundInTx(ctx, tx, settings, round); err != nil {
+					stateErr = err
+					return
+				}
+			} else if settings.AutomationPolicy.Enabled {
 				intent, loadErr := currentSourceActivationInTx(ctx, tx, settings)
 				server.Raise(loadErr)
 				if intent.Generation != settings.AutomationPolicy.SourceActivationGeneration || intent.TargetEpoch != round.Epoch || intent.TargetRoundId != round.RoundId || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.SourceGeneration != settings.AutomationPolicy.SourceGeneration || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || intent.G2VolumePolicy != settings.EvaluationPolicy.G2VolumePolicy || intent.EvaluatorImageDigest != settings.EvaluatorImageDigest || intent.HostQualificationSha256 != settings.EvaluationPolicy.HostQualificationSha256 || (!intent.OpensAt.IsZero() && !intent.OpensAt.Equal(round.OpensAt)) || round.OpensAt.Before(intent.PreparedAt.Add(sourcePreparationInterval(intent))) || round.ClosesAt.Sub(round.OpensAt) != 7*24*time.Hour || round.RevealAt.Before(round.ClosesAt) || intent.ActivatedAt == nil {
@@ -6296,6 +6323,12 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 					job = nil
 					return
 				}
+			}
+			allowed, gateErr := competitionIntakeFirstCandidateClaimInTx(ctx, tx, settings, job.RoundId)
+			server.Raise(gateErr)
+			if !allowed {
+				job = nil
+				return
 			}
 			if job.EvaluationCycle > 0 && (job.Reevaluation == nil || workerImageDigest != job.Reevaluation.FixedWorkerImageDigest) {
 				panic(ErrLeaseLost)

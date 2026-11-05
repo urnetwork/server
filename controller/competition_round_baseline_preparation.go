@@ -313,7 +313,7 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 		return self.store.Claim(ctx, &selected, self.workerId, self.workerImageDigest)
 	}
 	if self.settings.roundBaselinePreparation == nil {
-		if self.settings.distributedPreparationOnly {
+		if self.settings.distributedPreparationOnly || self.settings.intakeFirstActivation != nil {
 			return nil, errors.New("distributed execution requires the pinned shared-baseline preparation role")
 		}
 		return self.store.Claim(ctx, self.settings, self.workerId, self.workerImageDigest)
@@ -416,7 +416,7 @@ func (self *Worker) claimWithPreparedRoundBaseline(ctx context.Context, host Hos
 	if err := operationCtx.Err(); err != nil {
 		return hold("canceled_before_publication", errors.Join(err, context.Cause(operationCtx)))
 	}
-	if self.settings.distributedPreparationOnly {
+	if self.settings.distributedPreparationOnly || self.settings.intakeFirstActivation != nil {
 		publisher, ok := self.store.(interface {
 			PublishPreparedRoundBaseline(context.Context, *Settings, *roundBaselinePreparation, *preparedRoundBaseline) error
 		})
