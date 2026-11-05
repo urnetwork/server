@@ -56,6 +56,18 @@ var MaxContractTransferByteCount = func() model.ByteCount {
 	)
 }()
 
+// Sets the contract ceiling every payer is granted up to, returning the
+// restore. It never goes below MinContractTransferByteCount, so a granted
+// contract still fits a message. It changes the process-wide ceiling: tests
+// that call it must not run in parallel and must defer the restore.
+func Testing_SetMaxContractTransferByteCount(byteCount model.ByteCount) (restore func()) {
+	previous := MaxContractTransferByteCount
+	MaxContractTransferByteCount = max(MinContractTransferByteCount, byteCount)
+	return func() {
+		MaxContractTransferByteCount = previous
+	}
+}
+
 // urnetwork_connect_transfer_bytes counts bytes transferred on the connect
 // path, summed from the acked byte counts of closed and checkpointed transfer
 // contracts (see CloseContract). the acked byte count reported at each
@@ -1213,10 +1225,10 @@ func nextContract(
 }
 
 // The lifecycle lookup, Stream fallback origin lookup, provide secret read,
-// degradation valve, escrow and zero escrow creation and payer plan lookup
-// CreateContract and newContract perform. Tests replace them to check, without
-// a database, which byte count the controller requests and signs for a given
-// escrow, which creation path it takes, and which reads a refusal skips.
+// degradation valve, and escrow and zero escrow creation CreateContract and
+// newContract perform. Tests replace them to check, without a database, which
+// byte count the controller requests and signs for a given escrow, which
+// creation path it takes, and which reads a refusal skips.
 var findActiveClientPairNetworks = model.FindActiveClientPairNetworks
 var companionOriginExists = model.CompanionOriginExists
 var getProvideSecretKey = model.GetProvideSecretKey
@@ -1225,50 +1237,6 @@ var createTransferEscrow = model.CreateTransferEscrow
 var createCompanionTransferEscrow = model.CreateCompanionTransferEscrow
 var createZeroEscrowContract = model.CreateZeroEscrowContract
 var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
-var isProNetwork = model.IsProNetwork
-
-// Returns the network whose balance escrows a contract, following the order in
-// which newContract chooses the funding path. Network and friends-and-family
-// contracts escrow nothing, so they have no payer. A companion contract is paid
-// by its destination, the source of its origin.
-func contractPayerNetworkId(
-	provideMode model.ProvideMode,
-	companionContract bool,
-	sourceNetworkId server.Id,
-	destinationNetworkId server.Id,
-) (payerNetworkId server.Id, escrowed bool) {
-	switch {
-	case provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily:
-		return server.Id{}, false
-	case companionContract:
-		return destinationNetworkId, true
-	default:
-		return sourceNetworkId, true
-	}
-}
-
-// The largest contract, per hop, granted against the payer's balance. pro.yml
-// may cap the contracts of a tier (<tier>.max_contract_transfer_byte_count,
-// e.g. free) so that a contract abandoned by its client holds less of the
-// payer's balance until it is force-closed. The grant is signed into the
-// contract and clients size from it, so a smaller grant is transparent to them.
-// While no tier sets a cap, the payer's plan is not looked up at all. A cap
-// never goes below MinContractTransferByteCount, so a granted contract still
-// fits a message.
-func payerMaxContractTransferByteCount(ctx context.Context, payerNetworkId server.Id) model.ByteCount {
-	c := model.Pro()
-	if c.MaxContractTransferByteCount(false) == 0 && c.MaxContractTransferByteCount(true) == 0 {
-		return MaxContractTransferByteCount
-	}
-	tierMaxContractTransferByteCount := c.MaxContractTransferByteCount(isProNetwork(ctx, payerNetworkId))
-	if tierMaxContractTransferByteCount == 0 {
-		return MaxContractTransferByteCount
-	}
-	return min(
-		max(MinContractTransferByteCount, tierMaxContractTransferByteCount),
-		MaxContractTransferByteCount,
-	)
-}
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
@@ -1320,13 +1288,9 @@ func newContract(
 		}
 	}
 
-	maxContractTransferByteCount := MaxContractTransferByteCount
-	if payerNetworkId, escrowed := contractPayerNetworkId(provideMode, companionContract, sourceNetworkId, destinationNetworkId); escrowed {
-		maxContractTransferByteCount = payerMaxContractTransferByteCount(ctx, payerNetworkId)
-	}
 	contractTransferByteCount = min(
 		max(MinContractTransferByteCount, transferByteCount),
-		maxContractTransferByteCount,
+		MaxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
 
 	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
