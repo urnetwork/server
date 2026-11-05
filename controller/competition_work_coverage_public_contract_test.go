@@ -121,7 +121,8 @@ func TestCompetitionWorkCoveragePublicAndPrivateScoreShapes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if fixture.name != "historical" {
-			policy := model.DefaultCompetitionWorkCoveragePolicy()
+			approved := model.DefaultCompetitionWorkCoveragePolicy()
+			policy := map[string]any{"kind": approved.Kind, "minimum_page_coverage_ratio": approved.MinimumPageCoverageRatio, "minimum_byte_coverage_ratio": approved.MinimumByteCoverageRatio}
 			details := map[string]any{"candidate_page_coverage": .99, "candidate_byte_coverage": .99}
 			if fixture.name != "private coverage" {
 				details["policy"] = policy
@@ -164,7 +165,8 @@ func TestCompetitionWorkCoveragePublicSourceAndSummaryShapes(t *testing.T) {
 	} {
 		instance := map[string]any{"target_round_id": "00000000-0000-0000-0000-000000000001"}
 		if fixture.policy {
-			instance["work_coverage_policy"] = model.DefaultCompetitionWorkCoveragePolicy()
+			approved := model.DefaultCompetitionWorkCoveragePolicy()
+			instance["work_coverage_policy"] = map[string]any{"kind": approved.Kind, "minimum_page_coverage_ratio": approved.MinimumPageCoverageRatio, "minimum_byte_coverage_ratio": approved.MinimumByteCoverageRatio}
 		}
 		if fixture.g2 {
 			instance["g2_volume_policy"] = "minimum-work/1"
