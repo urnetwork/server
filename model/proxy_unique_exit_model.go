@@ -30,10 +30,15 @@ package model
 //     failures;
 //   - the taskworker sweeper replaces failed exits and keeps the rest honest.
 //
-// Every writer of a network's assignments takes the network's advisory lock,
-// so the read-then-write checks below are serial per network. The partial
-// unique index on (network_id, egress_key) is the backstop: Postgres refuses a
-// second live assignment of a key whatever any code path does.
+// Every writer of a live key first takes that (network, key)'s advisory lock,
+// and a pin first takes its provider's lock. Both are tried, never waited for:
+// a main-pool transaction may wait at most PgLockTimeout (2 s) for any lock,
+// and a burst of creates for one network must not queue behind each other. A
+// busy candidate is skipped, a busy key update waits for the next pass. With
+// the key held, an insert can meet only committed rows, so ON CONFLICT never
+// waits either. The partial unique index on (network_id, egress_key) is the
+// backstop: Postgres refuses a second live assignment of a key whatever any
+// code path does.
 
 import (
 	"bytes"
@@ -231,6 +236,16 @@ var (
 		Help:    "How long a unique-exit assignment lived, observed when it is released",
 		Buckets: prometheus.ExponentialBuckets(60, 4, 8),
 	})
+	// the sweep runs on any one taskworker replica, so its gauges are read
+	// only from the replica whose snapshot is fresh
+	proxyUniqueExitSweepSnapshot = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "urnetwork_proxy_unique_exit_sweep_snapshot_timestamp_seconds",
+		Help: "Unix time this replica last set the unique-exit assignment gauges",
+	})
+	proxyUniqueExitSupplySnapshot = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "urnetwork_proxy_unique_exit_supply_snapshot_timestamp_seconds",
+		Help: "Unix time this replica last set the unique-exit supply gauges",
+	})
 )
 
 func init() {
@@ -241,6 +256,8 @@ func init() {
 		proxyUniqueExitAssignments,
 		proxyUniqueExitSupplyKeys,
 		proxyUniqueExitAssignmentLifetime,
+		proxyUniqueExitSweepSnapshot,
+		proxyUniqueExitSupplySnapshot,
 	)
 }
 
@@ -635,7 +652,7 @@ func filterUniqueExitCandidates(
 			unstable = append(unstable, clientId)
 		}
 	}
-	slotLike := uniqueExitSlotLikeProviders(ctx, unstable, settings)
+	slotLike := uniqueExitSlotLike(ctx, unstable, settings)
 
 	candidates := []*uniqueExitCandidate{}
 	for _, provider := range providers {
@@ -667,6 +684,17 @@ func filterUniqueExitCandidates(
 		})
 	}
 	return candidates
+}
+
+// the slot-like check, injectable for tests
+var uniqueExitSlotLike = uniqueExitSlotLikeProviders
+
+func Testing_SetUniqueExitSlotLike(slotLike func(ctx context.Context, clientIds []server.Id, settings *UniqueExitSettings) map[server.Id]bool) func() {
+	previous := uniqueExitSlotLike
+	uniqueExitSlotLike = slotLike
+	return func() {
+		uniqueExitSlotLike = previous
+	}
 }
 
 // uniqueExitSlotLikeProviders is the set of providers whose connected address
@@ -773,12 +801,15 @@ func scanProxyExitAssignment(scan func(dest ...any) error) *proxyExitAssignment 
 	return a
 }
 
-func lockUniqueExitNetworkInTx(ctx context.Context, tx server.PgTx, networkId server.Id) {
-	server.RaisePgResult(tx.Exec(
+// tryLockUniqueExitKeyInTx takes the lock every writer of the network's key
+// takes, or reports that another transaction holds it.
+func tryLockUniqueExitKeyInTx(ctx context.Context, tx server.PgTx, networkId server.Id, key []byte) (locked bool) {
+	server.Raise(tx.QueryRow(
 		ctx,
-		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-		"proxy-unique-exit-network:"+networkId.String(),
-	))
+		`SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))`,
+		fmt.Sprintf("proxy-unique-exit-key:%s:%x", networkId, key),
+	).Scan(&locked))
+	return
 }
 
 // A provider's pin count is decided under its lock. The lock is tried, never
@@ -806,9 +837,9 @@ func insertProxyExitAssignmentInTx(
 	settings *UniqueExitSettings,
 	now time.Time,
 ) *proxyExitAssignment {
-	lockUniqueExitNetworkInTx(ctx, tx, networkId)
 	for _, candidate := range candidates {
-		if !tryLockUniqueExitProviderInTx(ctx, tx, candidate.ProviderClientId) {
+		if !tryLockUniqueExitProviderInTx(ctx, tx, candidate.ProviderClientId) ||
+			!tryLockUniqueExitKeyInTx(ctx, tx, networkId, candidate.EgressKey) {
 			proxyUniqueExitAllocations.WithLabelValues("collision_retry").Inc()
 			continue
 		}
@@ -1042,7 +1073,9 @@ func loadLiveProxyExitAssignment(ctx context.Context, proxyClientId server.Id) *
 	return assignment
 }
 
-func releaseProxyExitAssignmentInTx(ctx context.Context, tx server.PgTx, assignment *proxyExitAssignment, reason string, now time.Time) {
+// releaseProxyExitAssignmentInTx releases the assignment and reports whether
+// this call did; the caller observes the lifetime once the release commits.
+func releaseProxyExitAssignmentInTx(ctx context.Context, tx server.PgTx, assignment *proxyExitAssignment, reason string, now time.Time) (released bool) {
 	tag := server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -1059,9 +1092,11 @@ func releaseProxyExitAssignmentInTx(ctx context.Context, tx server.PgTx, assignm
 		now.UTC(),
 		reason,
 	))
-	if tag.RowsAffected() == 1 {
-		proxyUniqueExitAssignmentLifetime.Observe(max(0, now.Sub(assignment.AssignedAt).Seconds()))
-	}
+	return tag.RowsAffected() == 1
+}
+
+func observeProxyExitLifetime(assignment *proxyExitAssignment, now time.Time) {
+	proxyUniqueExitAssignmentLifetime.Observe(max(0, now.Sub(assignment.AssignedAt).Seconds()))
 }
 
 // setProxyDeviceConfigLocationInTx repins a proxy's stored device config, so a
@@ -1172,7 +1207,6 @@ func ConfirmProxyExit(
 			outcome = ProxyExitConfirmStale
 			return
 		}
-		lockUniqueExitNetworkInTx(ctx, tx, assignment.NetworkId)
 		if bytes.Equal(assignment.EgressKey, observedKey) {
 			server.RaisePgResult(tx.Exec(
 				ctx,
@@ -1189,6 +1223,12 @@ func ConfirmProxyExit(
 				now.UTC(),
 			))
 			outcome = ProxyExitConfirmMatch
+			return
+		}
+		if !tryLockUniqueExitKeyInTx(ctx, tx, assignment.NetworkId, observedKey) {
+			// another writer holds the new key right now: decide on the next
+			// confirm
+			outcome = ProxyExitConfirmStale
 			return
 		}
 		var taken bool
@@ -1420,17 +1460,23 @@ func replaceProxyExit(
 	server.Tx(ctx, func(tx server.PgTx) {
 		next = nil
 		proxyIds, configJsons = nil, nil
-		lockUniqueExitNetworkInTx(ctx, tx, current.NetworkId)
 		live := loadLiveProxyExitAssignmentInTx(ctx, tx, current.ProxyClientId)
 		if live == nil || live.AssignmentId != current.AssignmentId {
 			// another writer moved the proxy first
 			return
 		}
-		releaseProxyExitAssignmentInTx(ctx, tx, live, reason, now)
+		// the current key stays this proxy's until the new exit commits, so a
+		// replacement that finds every candidate taken can put it back
+		if !tryLockUniqueExitKeyInTx(ctx, tx, live.NetworkId, live.EgressKey) {
+			return
+		}
+		if !releaseProxyExitAssignmentInTx(ctx, tx, live, reason, now) {
+			return
+		}
 		next = insertProxyExitAssignmentInTx(ctx, tx, current.NetworkId, current.ProxyClientId, candidates, settings, now)
 		if next == nil {
 			// every candidate was taken meanwhile: the proxy keeps its exit, as
-			// it was, and holds the network lock, so its key is still free
+			// it was, and holds its key's lock, so the key is still free
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`
@@ -1457,6 +1503,7 @@ func replaceProxyExit(
 		})
 	}
 	if next != nil {
+		observeProxyExitLifetime(current, now)
 		proxyUniqueExitReplacements.WithLabelValues(reason).Inc()
 	}
 	return next
@@ -1916,22 +1963,26 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 		}
 	}
 
-	for _, assignment := range live {
+	sweepOne := func(assignment *proxyExitAssignment) {
 		if !activeProxies[assignment.ProxyClientId] {
+			released := false
 			server.Tx(ctx, func(tx server.PgTx) {
-				releaseProxyExitAssignmentInTx(ctx, tx, assignment, ProxyExitReasonProxyRemoved, now)
+				released = releaseProxyExitAssignmentInTx(ctx, tx, assignment, ProxyExitReasonProxyRemoved, now)
 				server.RaisePgResult(tx.Exec(
 					ctx,
 					`DELETE FROM proxy_unique_exit WHERE proxy_client_id = $1`,
 					assignment.ProxyClientId,
 				))
 			})
+			if released {
+				observeProxyExitLifetime(assignment, now)
+			}
 			sweep.ReleasedCount += 1
-			continue
+			return
 		}
 		config, ok := configs[assignment.ProxyClientId]
 		if !ok {
-			continue
+			return
 		}
 
 		if assignment.State == proxyExitAssignmentReplacing {
@@ -1942,16 +1993,16 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 				}
 				replace(config, assignment, reason)
 			}
-			continue
+			return
 		}
 
 		if excluded[assignment.ProviderClientId] {
 			replace(config, assignment, ProxyExitReasonVerdict)
-			continue
+			return
 		}
 		if assignment.FailingReason == ProxyExitReasonCollision {
 			replace(config, assignment, ProxyExitReasonCollision)
-			continue
+			return
 		}
 
 		if current, ok := currentKeys[assignment.ProviderClientId]; ok && !bytes.Equal(current.key, assignment.EgressKey) {
@@ -1960,11 +2011,12 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 				since = *assignment.ConfirmedAt
 			}
 			if since.Before(current.observedAt) {
-				if updateProxyExitKey(ctx, assignment, current.key) {
+				updated, collision := updateProxyExitKey(ctx, assignment, current.key)
+				if updated {
 					sweep.KeyUpdatedCount += 1
-				} else {
+				} else if collision {
 					replace(config, assignment, ProxyExitReasonCollision)
-					continue
+					return
 				}
 			}
 		}
@@ -1989,6 +2041,15 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 			sweep.ClearedCount += 1
 		}
 	}
+	for _, assignment := range live {
+		// one assignment's failure (a lock timeout, a lost connection) must not
+		// stop the sweep of the rest
+		if r := server.HandleError(func() {
+			sweepOne(assignment)
+		}); r != nil {
+			glog.Infof("[upe]sweep proxy %s: %v\n", assignment.ProxyClientId, r)
+		}
+	}
 
 	server.Db(ctx, func(conn server.PgConn) {
 		tag := server.RaisePgResult(conn.Exec(
@@ -2010,6 +2071,7 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 	for state, count := range stateCounts {
 		proxyUniqueExitAssignments.WithLabelValues(state).Set(float64(count))
 	}
+	proxyUniqueExitSweepSnapshot.Set(float64(server.NowUtc().Unix()))
 	if last := uniqueExitSupplyGaugeAt.Load(); last == 0 || settings.SupplyGaugeInterval <= now.Sub(time.Unix(0, last)) {
 		uniqueExitSupplyGaugeAt.Store(now.UnixNano())
 		setUniqueExitSupplyGauge(ctx, now, settings)
@@ -2017,11 +2079,15 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 	return sweep
 }
 
-// updateProxyExitKey moves an exit to its provider's new key, unless another of
-// the network's live exits holds it.
-func updateProxyExitKey(ctx context.Context, assignment *proxyExitAssignment, key []byte) (updated bool) {
+// updateProxyExitKey moves an exit to its provider's new key. It reports a
+// collision when another of the network's live exits holds the key, and
+// neither when another writer holds the key's lock right now (the next pass
+// decides).
+func updateProxyExitKey(ctx context.Context, assignment *proxyExitAssignment, key []byte) (updated bool, collision bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		lockUniqueExitNetworkInTx(ctx, tx, assignment.NetworkId)
+		if !tryLockUniqueExitKeyInTx(ctx, tx, assignment.NetworkId, key) {
+			return
+		}
 		var taken bool
 		server.Raise(tx.QueryRow(
 			ctx,
@@ -2041,6 +2107,7 @@ func updateProxyExitKey(ctx context.Context, assignment *proxyExitAssignment, ke
 			assignment.AssignmentId,
 		).Scan(&taken))
 		if taken {
+			collision = true
 			return
 		}
 		tag := server.RaisePgResult(tx.Exec(
@@ -2104,5 +2171,6 @@ func setUniqueExitSupplyGauge(ctx context.Context, now time.Time, settings *Uniq
 		for countryCode, count := range counts {
 			proxyUniqueExitSupplyKeys.WithLabelValues(countryCode).Set(float64(count))
 		}
+		proxyUniqueExitSupplySnapshot.Set(float64(server.NowUtc().Unix()))
 	})
 }
