@@ -47,6 +47,19 @@ func sourceIndexTestStatus(t *testing.T, purpose string) *controller.Competition
 			Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: intent.Generation, ExpectedGeneration: 1,
 			TargetEpoch: intent.TargetEpoch, TargetRoundId: intent.TargetRoundId, IntentSha256: intent.IntentSha256, RoundPolicySha256: strings.Repeat("b", 64),
 			ApiReadinessSha256: strings.Repeat("c", 64), ApiRuntimeImageDigest: "sha256:" + strings.Repeat("e", 64), CreatedAt: time.Unix(2000000000, 0).UTC()}
+		// The interface's additive successor requires frozen season/retention
+		// bounds. JSON overlay keeps this fixture valid before and after that
+		// independently composed model commit, without fabricating live dates.
+		bounds, err := json.Marshal(struct {
+			SeasonEndsAt time.Time `json:"season_ends_at"`
+			RetainUntil  time.Time `json:"retain_until"`
+		}{SeasonEndsAt: status.Intake.CreatedAt.Add(30 * 24 * time.Hour), RetainUntil: status.Intake.CreatedAt.Add(60 * 24 * time.Hour)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(bounds, status.Intake); err != nil {
+			t.Fatal(err)
+		}
 		status.Round = &controller.CompetitionSourceLifecycleRound{RoundId: intent.TargetRoundId, Epoch: 2,
 			OpensAt: time.Unix(2000000000, 0).UTC(), ClosesAt: time.Unix(2000000000, 0).UTC().Add(7 * 24 * time.Hour)}
 		status.ApiAcknowledged = true
