@@ -6454,6 +6454,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			var cycleStartedAt *time.Time
 			var apiImageDigest, workerImageDigest string
 			var roundId server.Id
+			var roundEpoch int
 			var staging bool
 			var providersSha256 string
 			var policyJson []byte
@@ -6465,13 +6466,13 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 			loadError = tx.QueryRow(ctx, `
 				SELECT state, COALESCE(lease_owner, ''), attempt_count,
 				       api_image_digest, COALESCE(worker_image_digest, ''), started_at,evaluation_cycle,cycle_attempt_offset,cycle_started_at,
-				       job.round_id, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at,job.execution_deadline_at
+				       job.round_id, round.epoch_number, round.staging, round.providers_sha256, round.policy_json, job.lease_expires_at,job.execution_deadline_at
 				FROM competition_job AS job
 				JOIN competition_round AS round ON round.round_id = job.round_id
 				WHERE job.job_id = $1 FOR UPDATE OF job
 			`, jobId).Scan(
 				&state, &owner, &attempts, &apiImageDigest, &workerImageDigest, &startedAt, &evaluationCycle, &attemptOffset, &cycleStartedAt,
-				&roundId, &staging, &providersSha256, &policyJson, &jobLease, &executionDeadline,
+				&roundId, &roundEpoch, &staging, &providersSha256, &policyJson, &jobLease, &executionDeadline,
 			)
 			if errors.Is(loadError, pgx.ErrNoRows) {
 				panic(ErrLeaseLost)
@@ -6547,7 +6548,7 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				}
 				round := &roundRecord{
 					RoundResult: RoundResult{
-						RoundId: roundId, Staging: staging, ProvidersSha256: providersSha256,
+						RoundId: roundId, Epoch: roundEpoch, Staging: staging, ProvidersSha256: providersSha256,
 					},
 					PolicyJson: policyJson,
 				}
