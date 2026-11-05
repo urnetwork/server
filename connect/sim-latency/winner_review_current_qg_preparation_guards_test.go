@@ -186,6 +186,30 @@ func TestCurrentQGQualificationPreparationChecksEveryNativeMember(t *testing.T) 
 	if validateCurrentQGQualificationMembers(request, members[:1], expected) == nil {
 		t.Fatal("offline checker accepted a single member")
 	}
+	request, members = winnerSnowMemberFixture(t)
+	for index := range members {
+		judgment := &members[index].Judgment
+		production := *judgment.ProductionBenefit
+		workload := *judgment.WorkloadPreservation
+		judgment.ProductionBenefit, judgment.WorkloadPreservation = &production, &workload
+		judgment.Decision, judgment.ReasonCodes = "uncertain", []string{"SOURCE_NOT_READY"}
+		judgment.ProductionBenefit.Disposition, judgment.WorkloadPreservation.Disposition = "uncertain", "uncertain"
+		judgment.Findings = append([]model.CompetitionReviewFinding{}, judgment.Findings...)
+		judgment.Findings[1].Disposition, judgment.Findings[1].ReasonCode = "uncertain", "SOURCE_NOT_READY"
+		content, err := json.Marshal(judgment)
+		if err != nil {
+			t.Fatal(err)
+		}
+		members[index].ProviderOutput = string(content)
+	}
+	expected = currentQGQualificationExpectation{Decision: "uncertain", WorkloadDisposition: "uncertain", ProductionDisposition: "uncertain"}
+	if err := validateCurrentQGQualificationMembers(request, members, expected); err != nil {
+		t.Fatal("two complete synthetic uncertain judgments were lost", err)
+	}
+	members[1].ProviderOutput = "{}"
+	if validateCurrentQGQualificationMembers(request, members, expected) == nil {
+		t.Fatal("malformed original member was mistaken for completed expected uncertainty")
+	}
 }
 
 // The authenticated template's expected_decision_sha256 is an identity, not a
