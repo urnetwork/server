@@ -11338,4 +11338,8 @@ var migrations = []any{
 	// Coverage custody is additive and follows every published migration.
 	// The integration owner keeps this unpublished suffix after origin's head.
 	newSqlMigration(competitionWorkCoverageMigration),
+
+	// Intake purpose never impersonates grading activation. Preserve legacy
+	// guard branches and append only after every published predecessor.
+	newSqlMigration(CompetitionIntakeFirstMigrationSql()),
 }
