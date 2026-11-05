@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -205,11 +206,19 @@ func BindCompetitionJobReevaluationRuntime(settings *Settings, proof model.Compe
 		!sha256Pattern.MatchString(proof.EvidenceSha256) || !sha256Pattern.MatchString(digest) {
 		return ErrConflict
 	}
+	seen := map[string]bool{}
+	for _, class := range proof.IncidentClasses {
+		if seen[class] || (class != model.CompetitionJobReevaluationHeartbeatBudget && class != model.CompetitionJobReevaluationBackingService) {
+			return ErrConflict
+		}
+		seen[class] = true
+	}
 	actual, err := model.CompetitionAutomationDigest(proof)
 	if err != nil || actual != digest {
 		return ErrConflict
 	}
 	copy := proof
+	copy.IncidentClasses = append([]string(nil), proof.IncidentClasses...)
 	settings.reevaluationRuntime = &copy
 	settings.reevaluationRuntimeSha256 = digest
 	return nil
@@ -310,6 +319,10 @@ func validateCompetitionReevaluationRuntime(settings *Settings, a model.Competit
 	proof := settings.reevaluationRuntime
 	if proof == nil || settings.reevaluationRuntimeSha256 != a.RuntimeQualificationSha256 || proof.SourceCommit != a.FixedSourceCommit ||
 		proof.WorkerSha256 != a.FixedWorkerSha256 || proof.WorkerImageDigest != a.FixedWorkerImageDigest || proof.ApiImageDigest != a.ApiImageDigest {
+		return ErrConflict
+	}
+	if (a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService) &&
+		!slices.Contains(proof.IncidentClasses, a.IncidentClass) {
 		return ErrConflict
 	}
 	copySettings := *settings

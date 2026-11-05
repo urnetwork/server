@@ -77,17 +77,19 @@ type CompetitionJobReevaluationPostCloseApproval struct {
 // Qualification is a separately pinned operator receipt, not a model or
 // candidate assertion. Its retained evidence binds both compatible consumers.
 type CompetitionJobReevaluationRuntime struct {
-	Schema            int    `json:"schema"`
-	Kind              string `json:"kind"`
-	Accepted          bool   `json:"accepted"`
-	Capability        string `json:"capability"`
-	SourceCommit      string `json:"source_commit"`
-	ApiImageDigest    string `json:"api_image_digest"`
-	WorkerImageDigest string `json:"worker_image_digest"`
-	WorkerSha256      string `json:"worker_sha256"`
-	EvidenceSha256    string `json:"evidence_sha256"`
-	ApiCompatible     bool   `json:"api_compatible"`
-	WorkerCompatible  bool   `json:"worker_compatible"`
+	Schema     int    `json:"schema"`
+	Kind       string `json:"kind"`
+	Accepted   bool   `json:"accepted"`
+	Capability string `json:"capability"`
+	// Omission qualifies historical archive cycles only, never new incident kinds.
+	IncidentClasses   []string `json:"incident_classes,omitempty"`
+	SourceCommit      string   `json:"source_commit"`
+	ApiImageDigest    string   `json:"api_image_digest"`
+	WorkerImageDigest string   `json:"worker_image_digest"`
+	WorkerSha256      string   `json:"worker_sha256"`
+	EvidenceSha256    string   `json:"evidence_sha256"`
+	ApiCompatible     bool     `json:"api_compatible"`
+	WorkerCompatible  bool     `json:"worker_compatible"`
 }
 
 // An idempotency key binds one exact authorization; another key cannot grant

@@ -22,6 +22,15 @@ func sealCompetitionIncidentReevaluationFixture(t testing.TB, ctx context.Contex
 	fixture *competitionReevaluationAuthorizationPgFixture, eventType string) {
 	t.Helper()
 	a := &fixture.request.Authorization
+	fixture.runtime.IncidentClasses = []string{a.IncidentClass}
+	runtimeSha256, err := model.CompetitionAutomationDigest(fixture.runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := BindCompetitionJobReevaluationRuntime(fixture.settings, fixture.runtime, runtimeSha256); err != nil {
+		t.Fatal(err)
+	}
+	a.RuntimeQualificationSha256 = runtimeSha256
 	server.Db(ctx, func(conn server.PgConn) {
 		server.Raise(conn.QueryRow(ctx, `SELECT event_id,payload_sha256 FROM competition_job_event
 		 WHERE job_id=$1 AND event_type=$2 ORDER BY event_id DESC LIMIT 1`, a.JobId, eventType).Scan(&a.IncidentEventId, &a.IncidentEventSha256))
