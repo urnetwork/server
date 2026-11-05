@@ -263,7 +263,7 @@ func TestHostTrackedBuildRejectsBinarySymlinksAndExpandedOutput(t *testing.T) {
 				t.Fatal(err)
 			}
 			if fault == "hardlink" {
-				if err := os.Link(path, filepath.Join(t.TempDir(), "shared")); err != nil {
+				if err := os.Link(path, filepath.Join(filepath.Dir(fixture.output), "shared-hardlink")); err != nil {
 					t.Fatal(err)
 				}
 			}
