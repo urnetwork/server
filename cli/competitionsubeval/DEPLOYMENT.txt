@@ -83,6 +83,13 @@ The signed no-argument availability operation checks current physical custody,
 not historical qualification. It may reconcile an already-stopped run through
 ordinary status, but never launches or advances a run fence. An occupied host
 permits only existing-job reconciliation; it cannot start another FIFO clock.
+Before the first measurement, the fixed no-argument retire-build role closes
+future builds, joins issued requests, freezes/joins the exact build parent and
+lowers its retained-memory cap to measured headroom beyond the unchanged
+96 GiB active + 5 GiB evidence + 24 GiB management budget. It records explicit
+acknowledged-build or verified no-build-issued/cache-hit provenance. Measurement
+creation requires the durable receipt and fresh kernel readback; unknown or
+partial retirement never reopens a build or resets the original job clock.
 
 Before epoch-two activation, require the additive database migration compatibility
 tests, isolated agent lifecycle tests, per-host containment/self-checks, shared

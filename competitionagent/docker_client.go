@@ -102,7 +102,7 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 	}
 	request := HostFilesRequest{Schema: Schema, RunId: runId, Operation: arguments[0]}
 	switch request.Operation {
-	case "mount-evidence", "unmount-evidence":
+	case "mount-evidence", "unmount-evidence", "retire-build":
 		if len(arguments) != 1 {
 			return dockerClientExitError{code: 2}
 		}
@@ -146,6 +146,18 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 			return dockerClientExitError{code: 2}
 		}
 		content, err := json.Marshal(result.Network)
+		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
+			return dockerClientExitError{code: 2}
+		}
+	}
+	if request.Operation == "retire-build" {
+		proof := result.BuildRetirement
+		if result.ErrorCode != "" || result.Namespace != nil || result.Network != nil || proof == nil ||
+			(proof.OutcomeKind != "acknowledged-build" && proof.OutcomeKind != "no-build-issued") || proof.RetainedMemoryMaximumBytes <= 0 ||
+			proof.MemoryCurrentBytes > uint64(proof.RetainedMemoryMaximumBytes) || !digestPattern.MatchString(proof.MemoryStatSha256) || !digestPattern.MatchString(proof.ReceiptSha256) {
+			return dockerClientExitError{code: 2}
+		}
+		content, err := json.Marshal(proof)
 		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
 			return dockerClientExitError{code: 2}
 		}

@@ -124,6 +124,13 @@ func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.
 // This temporary barrier joins every previously admitted upload/mutation;
 // root build-session drain remains allowed, and stop cleanup never takes it.
 func (self *DockerProxy) beginHostFileHandoff(ctx context.Context) (func(), error) {
+	return self.beginHostFileHandoffExceptRetirementWaiters(ctx, false)
+}
+
+// Only retirement can exempt its already-admitted duplicate observers. Those
+// requests still count in ordinary handoffs and final owner quiescence, so a
+// receipt-write/disconnect cannot make the owner forget a live request.
+func (self *DockerProxy) beginHostFileHandoffExceptRetirementWaiters(ctx context.Context, retirement bool) (func(), error) {
 	self.stateLock.Lock()
 	if self.fileHandoff || !self.accepting || self.unknown != 0 {
 		self.stateLock.Unlock()
@@ -144,6 +151,9 @@ func (self *DockerProxy) beginHostFileHandoff(ctx context.Context) (func(), erro
 	for {
 		self.stateLock.Lock()
 		changed, inflight, unknown, accepting := self.changed, self.inflight, self.unknown, self.accepting
+		if retirement {
+			inflight -= self.retirementWaiters
+		}
 		self.stateLock.Unlock()
 		if err := ctx.Err(); err != nil {
 			release()

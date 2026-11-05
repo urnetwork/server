@@ -39,6 +39,7 @@ type DockerProxy struct {
 	build                         *dockerProxyBuild
 	buildAdmissionsClosed         bool
 	retirement                    *dockerBuildRetirement
+	retirementWaiters             int
 	buildRetirer                  *hostBuildRetirement
 	journalLock                   *os.File
 	protected                     bool
