@@ -1,7 +1,6 @@
 // The active provider bandwidth probe: a provider's throughput measured
-// through its tunnel against the operator's download endpoint and a public
-// CDN (qualityprobe/bandwidth), for the per-region capacity picture a URL
-// turn's small sample cannot give.
+// through its tunnel against a public CDN's speed test (qualityprobe/bandwidth),
+// for the per-region capacity picture a URL turn's small sample cannot give.
 //
 // The URL probe is sampled-only (FP2FIX.md; af17d1d2d): a quality tunnel
 // carries randomized destination-pool requests and nothing a modified
@@ -20,7 +19,10 @@
 //   - its providers come from a random draw of the connected fleet, not the
 //     URL probe's due claims, so its timing follows no URL turn;
 //   - its figures are advisory: provider_bandwidth ranks and selects nothing
-//     (model/provider_bandwidth_readers_test.go).
+//     (model/provider_bandwidth_readers_test.go);
+//   - its tunnels carry no credential: the CDN is its only target, and the
+//     operator's download endpoint, which authorizes with the operator ingest
+//     secret, is never sampled (providerBandwidthProbeTargets).
 //
 // Every reservation is the deployment-wide budget's
 // (model.ReserveProviderBandwidthSlot, provider_bandwidth.yml): a pass takes
@@ -63,8 +65,9 @@ const (
 // Every tunable of the probe. The defaults constructor is their one source;
 // the URL probe's settings file supplies the endpoints and the bandwidth keys
 // it has always carried (full.bandwidth, full.bandwidth_timeout_seconds,
-// bandwidth_cdn_url, public_api_url), so a deployment configures nothing new
-// and the probe runs by default.
+// bandwidth_cdn_url), so a deployment configures nothing new and the probe
+// runs by default. public_api_url is not read: the operator target is never
+// sampled (providerBandwidthProbeTargets).
 type providerBandwidthProbeSettings struct {
 	// full.bandwidth, true unless the URL probe's settings switch it off
 	Enabled bool
@@ -88,11 +91,10 @@ type providerBandwidthProbeSettings struct {
 	RequestTimeout     time.Duration
 	TunnelCloseTimeout time.Duration
 	RetryDelay         time.Duration
-	// endpoints: the control plane, and the targets' inputs
-	ApiUrl       string
-	PlatformUrl  string
-	PublicApiUrl string
-	CdnUrl       string
+	// endpoints: the control plane, and the CDN target
+	ApiUrl      string
+	PlatformUrl string
+	CdnUrl      string
 	// how a pass reaches the operator ingest (operator_transport)
 	OperatorTransport   string
 	OperatorConcurrency int
@@ -124,7 +126,6 @@ func providerBandwidthProbeSettingsFrom(egress providerEgressProbeSettings) prov
 	}
 	settings.ApiUrl = egress.APIURL
 	settings.PlatformUrl = egress.PlatformURL
-	settings.PublicApiUrl = egress.PublicAPIURL
 	settings.CdnUrl = egress.BandwidthCDNURL
 	settings.OperatorTransport = egress.OperatorTransport
 	settings.OperatorConcurrency = egress.OperatorConcurrency
@@ -147,8 +148,8 @@ func (self providerBandwidthProbeSettings) validate() error {
 	if strings.TrimSpace(self.ApiUrl) == "" || strings.TrimSpace(self.PlatformUrl) == "" {
 		return fmt.Errorf("bandwidth probe api_url and platform_url are required")
 	}
-	if self.MaxTime < self.turnBudget(2) {
-		return fmt.Errorf("bandwidth probe max time %s cannot hold one provider's turn (%s)", self.MaxTime, self.turnBudget(2))
+	if targetCount := len(providerBandwidthProbeTargets(self)); self.MaxTime < self.turnBudget(targetCount) {
+		return fmt.Errorf("bandwidth probe max time %s cannot hold one provider's turn (%s)", self.MaxTime, self.turnBudget(targetCount))
 	}
 	return nil
 }
@@ -184,7 +185,6 @@ func loadProviderBandwidthProbeSettings() (providerBandwidthProbeSettings, error
 // replaced by tests that must not open tunnels or read the deployment.
 var getProviderBandwidthProbeSettings = loadProviderBandwidthProbeSettings
 var executeProviderBandwidthProbe = runProviderBandwidthProbe
-var readProviderBandwidthOperatorSecret = readProviderEgressOperatorSecret
 var openBandwidthProviderTunnel = providertunnel.Open
 var getProviderBandwidthProbeSample = model.GetProviderBandwidthProbeSample
 var filterProviderBandwidthProbeEligible = func(ctx context.Context, clientIds []server.Id) []server.Id {
@@ -211,19 +211,22 @@ func providerBandwidthProbePassLimit(settings providerBandwidthProbeSettings, pr
 	return int(min(max(1, limit), int64(settings.MaxLimit)))
 }
 
-// The targets of a pass: the operator's own endpoint where the public api url
-// and the operator secret are both at hand, and the public CDN always. The
-// two figures are stored apart and never averaged (bandwidth.Sampler).
-func providerBandwidthProbeTargets(settings providerBandwidthProbeSettings, operatorSecret string) []bandwidth.Target {
-	targets := []bandwidth.Target{}
-	if strings.TrimSpace(settings.PublicApiUrl) != "" && operatorSecret != "" {
-		targets = append(targets, bandwidth.OperatorTarget(settings.PublicApiUrl, operatorSecret))
-	}
+// The targets of a pass: the public CDN alone, which carries no credential.
+//
+// The operator's own download endpoint (bandwidth.OperatorTarget) is never
+// sampled. Its route authorizes with X-UR-Operator-Secret, the operator ingest
+// secret that authorizes every operator ingest call, and a sample sends its
+// request through the provider's tunnel. TLS would keep the header from the
+// provider, but that secret has no business on a provider-controlled path.
+// Sampling the operator target needs a secret scoped to
+// /network/provider-bandwidth-test alone, which that route does not accept
+// today (docs/operator/prober-taskworker.md).
+func providerBandwidthProbeTargets(settings providerBandwidthProbeSettings) []bandwidth.Target {
 	cdn := bandwidth.CdnTarget()
 	if strings.TrimSpace(settings.CdnUrl) != "" {
 		cdn.Url = settings.CdnUrl
 	}
-	return append(targets, cdn)
+	return []bandwidth.Target{cdn}
 }
 
 // The bandwidth probe's slot is free of the URL probe's geometry.
@@ -632,13 +635,7 @@ func runProviderBandwidthProbe(ctx context.Context, settings providerBandwidthPr
 	if err := providerBandwidthProbeShardAvailable(egressSettings.ShardCount); err != nil {
 		return nil, err
 	}
-	operatorSecret, err := readProviderBandwidthOperatorSecret()
-	if err != nil {
-		// the CDN figure stands alone; the operator target needs the secret
-		glog.Errorf("[bwprobe]operator target unavailable, sampling the CDN alone: %s\n", err)
-		operatorSecret = ""
-	}
-	targets := providerBandwidthProbeTargets(settings, operatorSecret)
+	targets := providerBandwidthProbeTargets(settings)
 	limit := providerBandwidthProbePassLimit(settings, getProviderBandwidthProbesPerHour(), len(targets))
 	selection, err := selectProviderBandwidthProbePass(ctx, settings, limit, server.NowUtc())
 	if err != nil {

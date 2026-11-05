@@ -5,6 +5,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"net/http"
 	"slices"
@@ -54,8 +57,8 @@ func TestProviderBandwidthProbeShardSlotIsItsOwn(t *testing.T) {
 // The probe is on by default and needs no settings of its own: the URL
 // probe's settings file supplies its endpoints and the bandwidth keys it has
 // always carried. full.bandwidth switches it off, full.bandwidth_timeout_seconds
-// sets the per-target cap, bandwidth_cdn_url and public_api_url its targets,
-// and a switched-off URL probe switches it off too.
+// sets the per-target cap, bandwidth_cdn_url its target, and a switched-off
+// URL probe switches it off too.
 func TestProviderBandwidthProbeSettingsComeFromTheUrlProbeSettings(t *testing.T) {
 	egress := defaultProviderEgressProbeSettings("probe.example")
 	settings := providerBandwidthProbeSettingsFrom(egress)
@@ -65,7 +68,6 @@ func TestProviderBandwidthProbeSettingsComeFromTheUrlProbeSettings(t *testing.T)
 	connect.AssertEqual(t, settings.SampleTimeout, bandwidth.DefaultTimeout)
 	connect.AssertEqual(t, settings.ApiUrl, "https://api.probe.example")
 	connect.AssertEqual(t, settings.PlatformUrl, "wss://connect.probe.example")
-	connect.AssertEqual(t, settings.PublicApiUrl, "https://api.probe.example")
 	connect.AssertEqual(t, settings.CdnUrl, bandwidth.CdnTestUrl)
 
 	off := egress
@@ -95,10 +97,11 @@ func TestProviderBandwidthProbeSettingsComeFromTheUrlProbeSettings(t *testing.T)
 // A pass takes its share of the deployment's hourly budget: the budget's
 // reservations an hour, over the passes an hour, over one reservation per
 // target and provider; never under one provider, never over the cap. The
-// default budget (40 an hour) with both targets and a pass every fifteen
-// minutes samples five providers a pass, twenty an hour.
+// default budget (40 an hour) with the CDN target alone and a pass every
+// fifteen minutes samples ten providers a pass, forty an hour.
 func TestProviderBandwidthProbePassLimitIsItsShareOfTheHourlyBudget(t *testing.T) {
 	settings := defaultProviderBandwidthProbeSettings()
+	connect.AssertEqual(t, providerBandwidthProbePassLimit(settings, 40, len(providerBandwidthProbeTargets(settings))), 10)
 	for _, c := range []struct {
 		probesPerHour int64
 		targets       int
@@ -117,27 +120,62 @@ func TestProviderBandwidthProbePassLimitIsItsShareOfTheHourlyBudget(t *testing.T
 	}
 }
 
-// Both targets with the operator secret and the public api url, the CDN alone
-// without either, and the configured CDN url in place of the default. A
-// tunnel's allowlist is the targets' hosts and nothing else.
+// The probe's one target is the public CDN, which carries no credential;
+// the configured CDN url replaces the default, and a tunnel's allowlist is
+// that host and nothing else.
 func TestProviderBandwidthProbeTargets(t *testing.T) {
 	settings := providerBandwidthProbeSettingsFrom(defaultProviderEgressProbeSettings("probe.example"))
-	both := providerBandwidthProbeTargets(settings, "operator-secret")
-	connect.AssertEqual(t, len(both), 2)
-	connect.AssertEqual(t, both[0].Source, bandwidth.SourceOperator)
-	connect.AssertEqual(t, both[0].Url, "https://api.probe.example/network/provider-bandwidth-test")
-	connect.AssertEqual(t, both[1].Source, bandwidth.SourceCdn)
-	connect.AssertEqual(t, bandwidth.TargetHosts(both), []string{"api.probe.example", "speed.cloudflare.com"})
-
-	connect.AssertEqual(t, len(providerBandwidthProbeTargets(settings, "")), 1)
-	noPublic := settings
-	noPublic.PublicApiUrl = ""
-	cdnOnly := providerBandwidthProbeTargets(noPublic, "operator-secret")
-	connect.AssertEqual(t, len(cdnOnly), 1)
-	connect.AssertEqual(t, cdnOnly[0].Source, bandwidth.SourceCdn)
+	targets := providerBandwidthProbeTargets(settings)
+	connect.AssertEqual(t, len(targets), 1)
+	connect.AssertEqual(t, targets[0].Source, bandwidth.SourceCdn)
+	connect.AssertEqual(t, targets[0].Url, bandwidth.CdnTestUrl)
+	connect.AssertEqual(t, bandwidth.TargetHosts(targets), []string{"speed.cloudflare.com"})
 	custom := settings
 	custom.CdnUrl = "https://cdn.example/__down"
-	connect.AssertEqual(t, providerBandwidthProbeTargets(custom, "")[0].Url, "https://cdn.example/__down")
+	connect.AssertEqual(t, providerBandwidthProbeTargets(custom)[0].Url, "https://cdn.example/__down")
+}
+
+// Review 2026-11-05: the operator target authorizes with X-UR-Operator-Secret,
+// the operator ingest secret that authorizes every operator ingest call, and
+// a sample sends its requests through the provider's tunnel. The first cut of
+// this probe sampled it whenever the public api url and the vault secret were
+// at hand, which a default deployment always has. The probe now never builds
+// it: with the URL probe's public_api_url set or not, every target is
+// credential-free and none reaches the api host, and the probe's source
+// neither builds the operator target nor reads the ingest secret.
+func TestProviderBandwidthProbeNeverSendsTheOperatorSecret(t *testing.T) {
+	for _, publicApiUrl := range []string{"", "https://api.probe.example"} {
+		egress := defaultProviderEgressProbeSettings("probe.example")
+		egress.PublicAPIURL = publicApiUrl
+		for _, target := range providerBandwidthProbeTargets(providerBandwidthProbeSettingsFrom(egress)) {
+			if len(target.Header) != 0 || target.Source == bandwidth.SourceOperator {
+				t.Fatalf("public_api_url %q: target %s carries a credential or is the operator's", publicApiUrl, target.Name)
+			}
+			for _, host := range bandwidth.TargetHosts([]bandwidth.Target{target}) {
+				if host == "api.probe.example" {
+					t.Fatalf("public_api_url %q: a target reaches the api host", publicApiUrl)
+				}
+			}
+		}
+	}
+	files := token.NewFileSet()
+	parsed, err := parser.ParseFile(files, "provider_bandwidth_probe_work.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ast.Inspect(parsed, func(node ast.Node) bool {
+		switch n := node.(type) {
+		case *ast.SelectorExpr:
+			if pkg, ok := n.X.(*ast.Ident); ok && pkg.Name == "bandwidth" && (n.Sel.Name == "OperatorTarget" || n.Sel.Name == "DefaultTargets") {
+				t.Errorf("the probe builds the operator target (bandwidth.%s)", n.Sel.Name)
+			}
+		case *ast.Ident:
+			if n.Name == "readProviderEgressOperatorSecret" {
+				t.Error("the probe reads the operator ingest secret")
+			}
+		}
+		return true
+	})
 }
 
 // A bandwidth tunnel is an ordinary client's tunnel in the pass's own
