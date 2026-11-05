@@ -926,8 +926,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract.removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract},
 	// Version is resolved from the appended coverage migration, never fixed.
-	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract()},
-	// The successor retains all three retired composites, replacing only
+	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
+	// The successor retains all four retired composites, replacing only
 	// their exact operative guard bodies with scoped legacy-preserving ones.
 	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery())},
 )
