@@ -235,6 +235,8 @@ type runResourceIdentity struct {
 	DisjointCpuSets           bool   `json:"disjoint_cpu_sets"`
 	MemoryCapacityPassed      bool   `json:"memory_capacity_passed"`
 	EvidenceMemoryLimitBytes  int64  `json:"evidence_memory_limit_bytes"`
+	HostMemoryBytes           int64  `json:"host_memory_bytes"`
+	ManagementReserveBytes    int64  `json:"minimum_management_memory_reserve_bytes"`
 }
 
 // The helper has additional retained capacity fields. Duplicate/case aliases
@@ -315,6 +317,12 @@ func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan,
 	for _, name := range plan.CgroupNames {
 		if cleanupBuildSlicePattern.MatchString(name) {
 			owner.BuildCgroupName = name
+		}
+	}
+	if plan.SliceResources != nil {
+		owner.BuildRetirement, err = newBuildRetirementPolicy(*plan.SliceResources, owner.BuildCgroupName, int64(os.Getpagesize()))
+		if err != nil {
+			return nil, err
 		}
 	}
 	if err := validateHostFilesPlan(*owner, DefaultHostFilesSettings()); err != nil {

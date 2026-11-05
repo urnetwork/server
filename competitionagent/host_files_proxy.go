@@ -58,7 +58,13 @@ func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.
 		http.Error(w, "host-file input rejected", http.StatusBadRequest)
 		return
 	}
-	if _, err := self.hostFiles.validateRequest(request); err != nil {
+	var validationErr error
+	if request.Operation == "retire-build" {
+		validationErr = self.validateBuildRetirementRequest(request)
+	} else {
+		_, validationErr = self.hostFiles.validateRequest(request)
+	}
+	if validationErr != nil {
 		http.Error(w, "host-file scope rejected", http.StatusForbidden)
 		return
 	}
@@ -89,7 +95,9 @@ func (self *DockerProxy) hostFilesRequestHandler(w http.ResponseWriter, r *http.
 	ctx, cancel := context.WithDeadline(fileCtx, self.plan.DeadlineAt)
 	defer cancel()
 	result := HostFilesResult{RunId: self.plan.RunId, Operation: request.Operation, Acknowledged: true, ExitCode: 2, ErrorCode: "host_handoff_unavailable"}
-	if request.Operation == "verify-id-map" || request.Operation == "verify-network" {
+	if request.Operation == "retire-build" {
+		result = self.retireBuild(ctx)
+	} else if request.Operation == "verify-id-map" || request.Operation == "verify-network" {
 		result = self.hostFiles.Execute(ctx, request)
 	} else if release, err := self.beginHostFileHandoff(ctx); err == nil {
 		defer release()

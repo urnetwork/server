@@ -44,13 +44,14 @@ type HostFilesRequest struct {
 // Finite errors contain no native error, candidate content or arbitrary path.
 // Namespace proof consists only of declared ids and hashes of kernel maps.
 type HostFilesResult struct {
-	RunId        string               `json:"run_id"`
-	Operation    string               `json:"operation"`
-	Acknowledged bool                 `json:"acknowledged"`
-	ExitCode     int                  `json:"exit_code"`
-	ErrorCode    string               `json:"error_code,omitempty"`
-	Namespace    *HostNamespaceMap    `json:"namespace,omitempty"`
-	Network      *HostNetworkBoundary `json:"network,omitempty"`
+	RunId           string                  `json:"run_id"`
+	Operation       string                  `json:"operation"`
+	Acknowledged    bool                    `json:"acknowledged"`
+	ExitCode        int                     `json:"exit_code"`
+	ErrorCode       string                  `json:"error_code,omitempty"`
+	Namespace       *HostNamespaceMap       `json:"namespace,omitempty"`
+	Network         *HostNetworkBoundary    `json:"network,omitempty"`
+	BuildRetirement *BuildRetirementSummary `json:"build_retirement,omitempty"`
 }
 
 // No host PID, namespace path, command or raw policy becomes caller authority.

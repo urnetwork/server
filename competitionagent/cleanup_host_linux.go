@@ -421,7 +421,8 @@ func (self *hostCleanupCgroups) open(name, property string, flags int) (*os.File
 func (self *hostCleanupCgroups) openWithLimitAuthority(name, property string, flags int, admissionLimit bool) (*os.File, error) {
 	if property != "cgroup.kill" && property != "cgroup.events" && property != "cgroup.freeze" &&
 		property != "memory.max" && property != "memory.swap.max" && property != "pids.max" && property != "cpu.max" &&
-		property != "cpuset.cpus" && property != "cpuset.cpus.effective" {
+		property != "cpuset.cpus" && property != "cpuset.cpus.effective" &&
+		property != "memory.current" && property != "memory.swap.current" && property != "memory.stat" {
 		return nil, errors.New("unsupported exact cgroup cleanup property")
 	}
 	relative, err := cleanupSlicePath(name)

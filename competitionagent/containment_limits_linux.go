@@ -28,12 +28,12 @@ type runSliceResources struct {
 // A parent limit covers all descendant containers and subprocesses together.
 // SwapBytes is zero: Docker's memory-swap == memory policy permits no swap.
 type runSliceLimits struct {
-	MemoryBytes     int64
-	SwapBytes       int64
-	TasksMaximum    int64
-	CpuQuotaMicros  int64
-	CpuPeriodMicros int64
-	CpuSet          string
+	MemoryBytes     int64  `json:"memory_bytes"`
+	SwapBytes       int64  `json:"swap_bytes"`
+	TasksMaximum    int64  `json:"tasks_maximum"`
+	CpuQuotaMicros  int64  `json:"cpu_quota_micros"`
+	CpuPeriodMicros int64  `json:"cpu_period_micros"`
+	CpuSet          string `json:"cpu_set"`
 }
 
 // A delegated parent could let the worker replace or widen a verified limit.
@@ -71,10 +71,18 @@ func validateRunResourceLimits(resource runResourceIdentity) error {
 	}
 	// Docker's build memory string must describe the same byte ceiling as the
 	// parent; a mismatched suffix cannot silently widen either boundary.
-	memory := resource.BuildMemoryLimit
+	bytes, err := pinnedResourceMemoryBytes(resource.BuildMemoryLimit)
+	if err != nil || bytes != resource.BuildMemoryLimitBytes {
+		return errors.New("pinned build memory string differs from its byte ceiling")
+	}
+	return nil
+}
+
+// Both immutable owner plans and pinned helper identities use one unit parser.
+func pinnedResourceMemoryBytes(memory string) (int64, error) {
 	scale := int64(1)
-	if len(memory) == 0 {
-		return errors.New("pinned build memory ceiling is absent")
+	if !dockerProxyMemoryPattern.MatchString(memory) {
+		return 0, errors.New("pinned build memory ceiling is absent or malformed")
 	}
 	switch memory[len(memory)-1] {
 	case 'k', 'K':
@@ -85,10 +93,10 @@ func validateRunResourceLimits(resource runResourceIdentity) error {
 		scale, memory = 1024*1024*1024, memory[:len(memory)-1]
 	}
 	count, err := strconv.ParseInt(memory, 10, 64)
-	if err != nil || count <= 0 || count > math.MaxInt64/scale || count*scale != resource.BuildMemoryLimitBytes {
-		return errors.New("pinned build memory string differs from its byte ceiling")
+	if err != nil || count <= 0 || count > math.MaxInt64/scale {
+		return 0, errors.New("pinned build memory string is not finite")
 	}
-	return nil
+	return count * scale, nil
 }
 
 // No new path or role can be supplied by metadata: the complete name inventory
@@ -188,6 +196,12 @@ func (self *hostCleanupCgroups) SetLimits(parent context.Context, name string, l
 	if freezeErr != nil || emptyErr != nil || frozen || !empty {
 		return errors.New("containment parent changed before its manager limit write")
 	}
+	return self.applyManagerLimitArguments(ctx, arguments)
+}
+
+// Both preparation and frozen build retirement use the same fixed manager
+// vocabulary. Their different population/freeze prerequisites stay separate.
+func (self *hostCleanupCgroups) applyManagerLimitArguments(ctx context.Context, arguments []string) error {
 	command := self.limitCommand
 	if command == nil {
 		command = func(ctx context.Context, arguments []string) error {
