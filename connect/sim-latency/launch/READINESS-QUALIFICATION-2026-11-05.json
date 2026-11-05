@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "kind": "competition-post-close-readiness-code-qualification",
+  "qualified_source_commit": "808956511e735afaabc77375e60c00ef203a6fe3",
+  "production_change_commit": "1c7929428f8a93b247db9b40c3147f22a206fb73",
+  "actual_postgresql_test_passes": 6,
+  "same_fixture_schema_head_for_every_pass": 932,
+  "default_vet_enabled": true,
+  "coverage": [
+    "Activated runtime source and finalization hold remain grading-ready before, exactly at and after admission close",
+    "Closed submissions remain rejected with 409 and create no job or execution clock",
+    "Corrupt retained source envelope still refuses readiness",
+    "Configured automation season, environment, staging mode, opening boundary and seal remain exact",
+    "Legacy production and staging-era transitions remain supported",
+    "Frozen hardware/image/qualification, baseline round identity and inclusive heartbeat freshness remain required",
+    "A scheduled or finalized latest round cannot borrow an older round's baseline",
+    "Existing intake-first lifecycle preserves its full window and clockless queue before genuine grading readiness"
+  ],
+  "causal_control": {
+    "restored_only_parent_production_controller_file": true,
+    "compile_exit": 0,
+    "actual_test_exit": 1,
+    "same_fixture_schema_head": 932,
+    "expected_failure": "The authenticated pre-close checks pass; exactly at close, host_rebaseline becomes false while all ten other checks remain true.",
+    "raw_manifest_sha256": "fea88b42ddc60575a5cc4fd618026932180b29819310b8528b3296cce79c5849"
+  },
+  "positive_manifests": {
+    "first_causal_test": "2e5ee692693b0144e5a185e700b551f144768f7b7adb3b3ac0158ab3e6859f61",
+    "remaining_five_tests": "b0921a09c559d2740bc607b841920e9c8e8605206669ae7bbb0b6f511aa69c39"
+  },
+  "qualification_receipt_sha256": "e8837de6192ccb3424d1321dfa5170244e77cd8a4a93df0a3f8cd3c39da01059",
+  "preserved_incomplete_observation": "The first 1c7929428 product test passed, but its external observer missed the short-lived schema head. That attempt does not supply schema proof. The test-only successor observes the actual schema inside each callback; no production failure was relabeled.",
+  "scope_warning": "This qualifies the named change on its recorded immutable dependency tuple, not the full repository or later upstream migrations. The subsequent main merge preserved unrelated unique-exit work; its migration/deployment requirements remain separate.",
+  "deployment": {
+    "fix_itself_adds_migrations_or_configuration": false,
+    "api_release_required_to_correct_live_reporting": true,
+    "worker_restart_required": false,
+    "main_database_migrated_by_this_work": false,
+    "frozen_epoch_one_source_policy_baseline_or_clocks_changed": false
+  }
+}
