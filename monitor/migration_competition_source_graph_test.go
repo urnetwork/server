@@ -4,6 +4,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,23 +45,108 @@ func TestMigrationsSourceGraphHistoricalAuthorityCustody(t *testing.T) {
 	}
 }
 
-// Successors through v900 republish the v855 guards; current-head faults belong to
-// the last published successor, while historical prefixes retain their owner.
+// The historical v900 owner remains exact at its own published prefix.
+// Current-head faults belong to its explicitly registered successors.
 const competitionSourceGuardsHeadOwner = "trusted instrument overlay with two-member review, identity and retained source custody@v900"
+
+// Validate the registered 900-to-benefit-to-intake transfers before selecting
+// the current owner. This is the known lineage, never a generic waiver for an
+// unknown successor or an expired predicate.
+func competitionSourceGuardsCurrentOwner(t testing.TB) string {
+	t.Helper()
+	benefitVersion := server.CompetitionProductionBenefitMigrationVersion()
+	intakeVersion := server.CompetitionIntakeFirstMigrationVersion()
+	if benefitVersion <= 900 || intakeVersion <= benefitVersion || server.MigrationCount() < intakeVersion {
+		t.Fatal("source guard successors are not published in order")
+	}
+	for _, expected := range []struct {
+		version   int
+		removedAt int
+		name      string
+	}{
+		{900, benefitVersion, "trusted instrument overlay with two-member review, identity and retained source custody"},
+		{benefitVersion, intakeVersion, "production-benefit eligibility with retained review and instrument custody"},
+		{intakeVersion, 0, "separate published-source intake and qualified grading custody"},
+	} {
+		contract := migrationCurrentSuffixTestContract(t, expected.version)
+		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
+			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
+		}
+	}
+	return fmt.Sprintf("separate published-source intake and qualified grading custody@v%d", intakeVersion)
+}
+
+// Before a registered transfer the old artifact remains required; at the
+// transfer the successor owns drift. Missing old or future artifact booleans
+// cannot move that boundary, and every result uses the public signal reducer.
+func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
+	currentOwner := competitionSourceGuardsCurrentOwner(t)
+	benefitVersion := server.CompetitionProductionBenefitMigrationVersion()
+	intakeVersion := server.CompetitionIntakeFirstMigrationVersion()
+	benefitOwner := fmt.Sprintf("production-benefit eligibility with retained review and instrument custody@v%d", benefitVersion)
+	for _, transfer := range []struct {
+		oldVersion  int
+		nextVersion int
+		oldOwner    string
+		nextOwner   string
+	}{
+		{900, benefitVersion, competitionSourceGuardsHeadOwner, benefitOwner},
+		{benefitVersion, intakeVersion, benefitOwner, currentOwner},
+	} {
+		for _, control := range []struct {
+			head           int
+			missingVersion int
+			wantOwner      string
+		}{
+			{transfer.nextVersion - 1, transfer.oldVersion, transfer.oldOwner},
+			{transfer.nextVersion - 1, transfer.nextVersion, ""},
+			{transfer.nextVersion, transfer.oldVersion, ""},
+			{transfer.nextVersion, transfer.nextVersion, transfer.nextOwner},
+		} {
+			row := syntheticMigrationArtifactRow(control.head)
+			artifact := migrationCurrentSuffixTestContract(t, control.missingVersion).artifact
+			row[artifact.rowColumn] = "f"
+			source := &syntheticSource{postgresFn: func(query string) ([]Row, error) {
+				if strings.Contains(query, "FROM migration_catalog") {
+					return syntheticMigrationCatalogRows(control.head), nil
+				}
+				return []Row{row}, nil
+			}}
+			alerts, err := NewMigrationsSignal().Run(context.Background(), syntheticSettings(source))
+			if err != nil {
+				t.Fatal("source guard boundary did not reach the public reducer")
+			}
+			wantDrift := 0
+			if control.wantOwner != "" {
+				wantDrift = 1
+			}
+			if requireAlertClassCount(alerts, "migration-schema-drift") != wantDrift || requireAlertClassCount(alerts, "cannot-observe") != 0 {
+				t.Fatal("source guard publication or retirement boundary changed")
+			}
+			if wantDrift != 0 {
+				alert := requireAlertClass(t, alerts, "migration-schema-drift")
+				if alert.Severity != SeverityPage || !strings.Contains(alert.Markdown(), control.wantOwner) {
+					t.Fatal("source guard fault lost its exact applied owner")
+				}
+			}
+		}
+	}
+}
 
 // Numeric head, matching names, old legitimate bodies and unchanged source
 // functions cannot substitute for the exact published successor graph.
 func TestMigrationsSourceGraphSchemaFaultsReachSignal(t *testing.T) {
+	currentOwner := competitionSourceGuardsCurrentOwner(t)
 	faults := []struct {
 		name string
 		sql  string
 		want string
 	}{
-		{name: "legacy source mode restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_mode(intent jsonb) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceModeBody + `$regression$`, want: competitionSourceGuardsHeadOwner},
-		{name: "legacy source authority restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_authorized(intent jsonb, env text, competition text, season text) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceAuthorizedBody + `$regression$`, want: competitionSourceGuardsHeadOwner},
-		{name: "graph validator always accepts", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: competitionSourceGuardsHeadOwner},
-		{name: "graph security privilege changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) SECURITY DEFINER`, want: competitionSourceGuardsHeadOwner},
-		{name: "graph volatility changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) VOLATILE`, want: competitionSourceGuardsHeadOwner},
+		{name: "legacy source mode restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_mode(intent jsonb) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceModeBody + `$regression$`, want: currentOwner},
+		{name: "legacy source authority restored", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_authorized(intent jsonb, env text, competition text, season text) RETURNS void LANGUAGE plpgsql AS $regression$` + competitionMigration847CompetitionV2SourceAuthorizedBody + `$regression$`, want: currentOwner},
+		{name: "graph validator always accepts", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_graph_valid(commits jsonb, staging_mode boolean) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS 'BEGIN RETURN true; END'`, want: currentOwner},
+		{name: "graph security privilege changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) SECURITY DEFINER`, want: currentOwner},
+		{name: "graph volatility changed", sql: `ALTER FUNCTION competition_v2_source_graph_valid(jsonb,boolean) VOLATILE`, want: currentOwner},
 		{name: "retained seal guard changed", sql: `CREATE OR REPLACE FUNCTION competition_v2_seal_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`, want: "isolated automation staging and current lifecycle guards@v847"},
 		{name: "retained staging index removed", sql: `DROP INDEX competition_round_v2_staging_epoch`, want: "isolated automation staging and current lifecycle guards@v847"},
 	}
@@ -102,6 +188,9 @@ func TestMigrationsSourceGraphSchemaFaultsReachSignal(t *testing.T) {
 // Exact-body custody transfers only when the real successor migration applies.
 // Each published prefix must be healthy and still detect every retained guard.
 func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
+	currentOwner := competitionSourceGuardsCurrentOwner(t)
+	benefitVersion := server.CompetitionProductionBenefitMigrationVersion()
+	intakeVersion := server.CompetitionIntakeFirstMigrationVersion()
 	prefixes := []struct {
 		head      int
 		removedAt int
@@ -114,7 +203,9 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{892, 893, "reviewed repository patch source and winner guard custody@v892"},
 		{893, 897, "provider union review, identity and retained source custody@v893"},
 		{897, 900, "two-member provider union review, identity and retained source custody@v897"},
-		{900, 0, competitionSourceGuardsHeadOwner},
+		{900, benefitVersion, competitionSourceGuardsHeadOwner},
+		{benefitVersion, intakeVersion, fmt.Sprintf("production-benefit eligibility with retained review and instrument custody@v%d", benefitVersion)},
+		{intakeVersion, 0, currentOwner},
 	}
 	faults := []struct {
 		name string
