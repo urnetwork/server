@@ -229,12 +229,18 @@ func TestHostFilesFileSwapUsesCapturedInodeOnly(t *testing.T) {
 func TestHostFilesRejectHardLinkedOutputBeforeMetadataWrite(t *testing.T) {
 	fixture := newHostFilesTest(t)
 	fixture.verify(t)
-	outside := filepath.Join(fixture.broker.plan.BaseDirectory, "outside.json")
+	outside := filepath.Join(filepath.Dir(fixture.output), "outside.json")
 	if err := os.WriteFile(outside, []byte("synthetic unchanged"), 0444); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Link(outside, filepath.Join(fixture.output, "shared.json")); err != nil {
 		t.Fatal(err)
+	}
+	outsideInfo, outsideErr := os.Stat(outside)
+	insideInfo, insideErr := os.Stat(filepath.Join(fixture.output, "shared.json"))
+	stat, ok := infoSysStat(outsideInfo)
+	if outsideErr != nil || insideErr != nil || !ok || stat.Nlink != 2 || !os.SameFile(outsideInfo, insideInfo) {
+		t.Fatal("hardlink fixture did not establish one shared inode outside the accepted output", outsideErr, insideErr)
 	}
 	if result := fixture.broker.Execute(t.Context(), fixture.request("reclaim-output", fixture.output)); result.ExitCode == 0 || fixture.chowns != 0 {
 		t.Fatal("shared external inode acquired metadata write authority", result)

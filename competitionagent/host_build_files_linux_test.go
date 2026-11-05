@@ -259,12 +259,23 @@ func TestHostTrackedBuildRejectsBinarySymlinksAndExpandedOutput(t *testing.T) {
 				t.Fatal(err)
 			}
 		default:
-			if err := os.WriteFile(path, []byte("not an ELF"), 0600); err != nil {
-				t.Fatal(err)
+			if fault == "hardlink" {
+				copyHostTrackedTestBinary(t, path)
+			} else {
+				if err := os.WriteFile(path, []byte("not an ELF"), 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if fault == "hardlink" {
-				if err := os.Link(path, filepath.Join(filepath.Dir(fixture.output), "shared-hardlink")); err != nil {
+				outside := filepath.Join(filepath.Dir(fixture.output), "shared-hardlink")
+				if err := os.Link(path, outside); err != nil {
 					t.Fatal(err)
+				}
+				originalInfo, originalErr := os.Stat(path)
+				outsideInfo, outsideErr := os.Stat(outside)
+				stat, ok := infoSysStat(originalInfo)
+				if originalErr != nil || outsideErr != nil || !ok || stat.Nlink != 2 || !os.SameFile(originalInfo, outsideInfo) {
+					t.Fatal("hardlink fixture did not establish one shared inode on its owned filesystem", originalErr, outsideErr)
 				}
 			}
 			if fault == "extra" {
