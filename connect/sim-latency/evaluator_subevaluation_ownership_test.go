@@ -35,8 +35,19 @@ func subevaluationOwnershipCommand(t *testing.T, body string, environment []stri
 		t.Fatal(err)
 	}
 	command := exec.CommandContext(t.Context(), "/bin/bash", "-c", "set -Eeuo pipefail\nsource \"$1\"\nsubevaluation_ownership_init\n"+body, "synthetic-subevaluation", helper)
-	command.Env = append([]string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C"}, environment...)
+	command.Env = append([]string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C", "URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET=20,22"}, environment...)
 	return command
+}
+
+// A fixed private executable records arguments without invoking a real Docker
+// CLI. The production routing and positional public-role grammar remain real.
+func subevaluationOwnershipClient(t *testing.T, body string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "fixed-client")
+	if err := os.WriteFile(path, []byte("#!/bin/bash\nset -Eeuo pipefail\n"+body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // Absence retains empty arrays, including no new Compose file or cgroup flag.
@@ -75,7 +86,7 @@ subevaluation_require_identity "$URNETWORK_SUBEVALUATION_JOB_ID" "$URNETWORK_SUB
 	want := []string{"true", group,
 		"--label", "com.urnetwork.competition.job-id=11111111-2222-4333-8444-555555555555",
 		"--label", "com.urnetwork.competition.round-id=66666666-7777-4888-8999-000000000000",
-		"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--cgroup-parent", group,
+		"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--cgroup-parent", group, "--ulimit", "core=0:0",
 		"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--file", overlay,
 		"--filter", "label=com.urnetwork.competition.round-id=66666666-7777-4888-8999-000000000000",
 		"--filter", "label=com.urnetwork.competition.run-id=" + strings.Repeat("a", 64)}
@@ -171,7 +182,7 @@ func TestSubevaluationSourceExportOwnsContainerBeforeCreate(t *testing.T) {
 	}
 	var create string
 	for _, line := range strings.Split(string(content), "\n") {
-		if strings.HasPrefix(line, "source_container=\"$(sudo -n docker create ") {
+		if strings.HasPrefix(line, "source_container=\"$(evaluation_docker create ") {
 			if create != "" {
 				t.Fatal("source export gained an ambiguous create path")
 			}
@@ -188,6 +199,8 @@ func TestSubevaluationSourceExportOwnsContainerBeforeCreate(t *testing.T) {
 		environment := []string{"SUBEVALUATION_TEST_CAPTURE=" + capture}
 		if scoped {
 			environment = append(environment, subevaluationOwnershipEnvironment()...)
+			client := subevaluationOwnershipClient(t, `printf '%s\000' "$@" > "$SUBEVALUATION_TEST_CAPTURE"; printf '%064d\n' 0`+"\n")
+			environment = append(environment, "URNETWORK_SUBEVALUATION_CLIENT="+client)
 		}
 		if output, err := subevaluationOwnershipCommand(t, body, environment).CombinedOutput(); err != nil {
 			t.Fatalf("source create scope %t: %v: %s", scoped, err, output)
@@ -201,8 +214,16 @@ func TestSubevaluationSourceExportOwnsContainerBeforeCreate(t *testing.T) {
 			if want := []string{"-n", "docker", "create", "sha256:" + strings.Repeat("b", 64)}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("legacy create arguments changed: %q", got)
 			}
-		} else if len(got) != 12 || got[3] != "--label" || got[8] != "com.urnetwork.competition.run-id="+strings.Repeat("a", 64) || got[9] != "--cgroup-parent" || !strings.HasSuffix(got[10], "-preflight.slice") {
-			t.Fatalf("source container was created without exact prospective ownership: %q", got)
+		} else {
+			token := sha256.Sum256([]byte("11111111-2222-4333-8444-555555555555:2"))
+			want := []string{"--docker-client", strings.Repeat("a", 64), "--", "create", "--network", "none", "--read-only", "--cap-drop", "ALL",
+				"--security-opt", "no-new-privileges:true", "--memory", "4g", "--memory-swap", "4g", "--pids-limit", "1024", "--cpuset-cpus", "20,22",
+				"--label", "com.urnetwork.competition.job-id=11111111-2222-4333-8444-555555555555", "--label", "com.urnetwork.competition.round-id=66666666-7777-4888-8999-000000000000",
+				"--label", "com.urnetwork.competition.run-id=" + strings.Repeat("a", 64), "--cgroup-parent", "urnetwork-evaluation-" + hex.EncodeToString(token[:])[:32] + "-preflight.slice",
+				"--ulimit", "core=0:0", "sha256:" + strings.Repeat("b", 64)}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("source container was created without exact bounded prospective ownership: got %q want %q", got, want)
+			}
 		}
 	}
 }
@@ -224,7 +245,7 @@ func TestSubevaluationEveryTemporaryDockerPathDeclaresOwnership(t *testing.T) {
 		lines := strings.Split(string(content), "\n")
 		count := 0
 		for index, line := range lines {
-			if !strings.Contains(line, "sudo -n docker run ") && !strings.Contains(line, "sudo -n docker create ") {
+			if !strings.Contains(line, "evaluation_docker run ") && !strings.Contains(line, "evaluation_docker create ") {
 				continue
 			}
 			count++
@@ -288,7 +309,7 @@ func TestSubevaluationComposeAdapterPreservesLegacyArguments(t *testing.T) {
 			`sudo() { printf '%s\000' "$@"; }` + "\ncompose_with synthetic-project /synthetic-stage/compose.env --profile run up --detach\n"
 		var environment []string
 		if scoped {
-			environment = subevaluationOwnershipEnvironment()
+			environment = append(subevaluationOwnershipEnvironment(), "URNETWORK_SUBEVALUATION_CLIENT="+subevaluationOwnershipClient(t, `printf '%s\000' "$@"`+"\n"))
 		}
 		output, err := subevaluationOwnershipCommand(t, body, environment).CombinedOutput()
 		if err != nil {
@@ -296,6 +317,7 @@ func TestSubevaluationComposeAdapterPreservesLegacyArguments(t *testing.T) {
 		}
 		want := []string{"-n", "docker", "compose", "--env-file", "/synthetic-stage/compose.env", "--file", "/synthetic-release/compose.yml"}
 		if scoped {
+			want = append([]string{"--docker-client", strings.Repeat("a", 64), "--", "compose"}, want[3:]...)
 			overlay, err := filepath.Abs(filepath.Join("evaluator", "container", "compose.subevaluation.yml"))
 			if err != nil {
 				t.Fatal(err)
@@ -410,10 +432,10 @@ stat() {
 	}
 }
 
-// The prospective baseline role must inherit the exact updated trusted prefix,
-// without rewriting the legacy evaluator or its separately pinned baseline role.
-func TestSubevaluationBaselinePrefixPinsUpdatedEvaluator(t *testing.T) {
-	path := filepath.Join("evaluator", "container", "evaluator-subevaluation.sh")
+// The baseline producer keeps its sealed no-candidate purpose. A private
+// lifecycle helper cannot silently replace it, even when scoring policy agrees.
+func TestSubevaluationBaselinePrefixRejectsPrivateEvaluator(t *testing.T) {
+	path := filepath.Join("evaluator", "container", "evaluator-minimum-work.sh")
 	function := g2ScriptFunction(t, filepath.Join("evaluator", "container", "prepare-round-baseline-minimum-work.sh"), "round_baseline_control_prefix")
 	run := func(source string) error {
 		command := exec.CommandContext(t.Context(), "/bin/bash", "-c", "set -Eeuo pipefail\n"+function+"\nround_baseline_control_prefix \"$1\" >/dev/null\n", "synthetic-baseline-prefix", source)
@@ -421,7 +443,10 @@ func TestSubevaluationBaselinePrefixPinsUpdatedEvaluator(t *testing.T) {
 		return command.Run()
 	}
 	if err := run(path); err != nil {
-		t.Fatal("prospective baseline no longer authenticates its exact evaluator prefix", err)
+		t.Fatal("baseline no longer authenticates its exact sealed control prefix", err)
+	}
+	if err := run(filepath.Join("evaluator", "container", "evaluator-subevaluation.sh")); err == nil {
+		t.Fatal("private candidate lifecycle replaced the no-candidate baseline release")
 	}
 	content, err := os.ReadFile(path)
 	if err != nil {
