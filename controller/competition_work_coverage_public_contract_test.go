@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/google/jsonschema-go/jsonschema"
+	"github.com/urnetwork/server/model"
 	"gopkg.in/yaml.v3"
 )
 
@@ -44,8 +45,8 @@ func coveragePublicSchemaValidator(t testing.TB, name string) func(any) error {
 	return resolved.Validate
 }
 
-// Numeric policy values remain operator approval, not an implicit choice by
-// this transport test. The version selection nevertheless binds all fields.
+// The approved relative floors and version selection bind the complete
+// public contract; obsolete prototype policy fields are not accepted.
 func TestCompetitionWorkCoveragePublicPolicyVersions(t *testing.T) {
 	validate := coveragePublicSchemaValidator(t, "CompetitionInfoResult")
 	for _, fixture := range []struct {
@@ -60,6 +61,7 @@ func TestCompetitionWorkCoveragePublicPolicyVersions(t *testing.T) {
 		{name: "policy stripped", version: "sim-latency-score/3", g2: true},
 		{name: "null coverage", version: "sim-latency-score/3", g2: true, coverage: true},
 		{name: "unknown coverage", version: "sim-latency-score/3", g2: true, coverage: true},
+		{name: "prototype coverage", version: "sim-latency-score/3", g2: true, coverage: true},
 	} {
 		content, err := json.Marshal(validSettings().PublicInfo())
 		if err != nil {
@@ -77,12 +79,15 @@ func TestCompetitionWorkCoveragePublicPolicyVersions(t *testing.T) {
 			policy["g2_volume_policy"] = "minimum-work/1"
 		}
 		if fixture.coverage {
-			policy["work_coverage_policy"] = map[string]any{"kind": "seeded-crawl-coverage/v1", "synthetic_threshold": .037}
+			approved := model.DefaultCompetitionWorkCoveragePolicy()
+			policy["work_coverage_policy"] = map[string]any{"kind": approved.Kind, "minimum_page_coverage_ratio": approved.MinimumPageCoverageRatio, "minimum_byte_coverage_ratio": approved.MinimumByteCoverageRatio}
 		}
 		if fixture.name == "null coverage" {
 			policy["work_coverage_policy"] = nil
 		} else if fixture.name == "unknown coverage" {
 			policy["work_coverage_policy"].(map[string]any)["kind"] = "unknown/1"
+		} else if fixture.name == "prototype coverage" {
+			policy["work_coverage_policy"] = map[string]any{"kind": model.CompetitionWorkCoverageKind, "synthetic_threshold": .037}
 		}
 		if err := validate(instance); (err == nil) != fixture.valid {
 			t.Errorf("%s accepted=%t want=%t: %v", fixture.name, err == nil, fixture.valid, err)
@@ -116,7 +121,7 @@ func TestCompetitionWorkCoveragePublicAndPrivateScoreShapes(t *testing.T) {
 			t.Fatal(err)
 		}
 		if fixture.name != "historical" {
-			policy := map[string]any{"kind": "seeded-crawl-coverage/v1", "synthetic_threshold": .037}
+			policy := model.DefaultCompetitionWorkCoveragePolicy()
 			details := map[string]any{"candidate_page_coverage": .99, "candidate_byte_coverage": .99}
 			if fixture.name != "private coverage" {
 				details["policy"] = policy
@@ -159,7 +164,7 @@ func TestCompetitionWorkCoveragePublicSourceAndSummaryShapes(t *testing.T) {
 	} {
 		instance := map[string]any{"target_round_id": "00000000-0000-0000-0000-000000000001"}
 		if fixture.policy {
-			instance["work_coverage_policy"] = map[string]any{"kind": "seeded-crawl-coverage/v1", "synthetic_threshold": .037}
+			instance["work_coverage_policy"] = model.DefaultCompetitionWorkCoveragePolicy()
 		}
 		if fixture.g2 {
 			instance["g2_volume_policy"] = "minimum-work/1"
