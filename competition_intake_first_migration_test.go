@@ -95,13 +95,23 @@ CREATE TABLE competition_executor_equivalence(round_id uuid,host_id text,receipt
 CREATE FUNCTION competition_append_only_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'competition append-only record changed'; END $$;
 CREATE FUNCTION synthetic_expect_intake_failure(statement text) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
- BEGIN EXECUTE statement; EXCEPTION WHEN OTHERS THEN RETURN; END;
+ BEGIN EXECUTE statement; EXCEPTION WHEN raise_exception THEN RETURN; END;
  RAISE EXCEPTION 'synthetic forbidden intake statement succeeded: %',statement;
 END $$;
 CREATE TEMP TABLE synthetic_intake_fixture(intent jsonb,policy jsonb,api jsonb,grant_value jsonb,request jsonb,handoff jsonb);
 `
 
 const competitionIntakeFirstSqlAssertions = `
+-- A typo or missing fixture object must not masquerade as an authority refusal.
+DO $negative_control$
+DECLARE escaped boolean:=false;
+BEGIN
+ BEGIN
+  PERFORM synthetic_expect_intake_failure('SELECT * FROM synthetic_absent_intake_table');
+ EXCEPTION WHEN undefined_table THEN escaped:=true;
+ END;
+ IF NOT escaped THEN RAISE EXCEPTION 'negative helper hid an unrelated SQL failure'; END IF;
+END $negative_control$;
 CREATE TRIGGER competition_v2_round_source BEFORE INSERT ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_v2_round_insert_guard();
 CREATE TRIGGER competition_v2_round_reserved_identity BEFORE INSERT ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_v2_round_reserved_identity_guard();
 CREATE TRIGGER competition_round_baseline_source_guard BEFORE INSERT ON competition_round_baseline FOR EACH ROW EXECUTE FUNCTION competition_round_baseline_insert_guard();
