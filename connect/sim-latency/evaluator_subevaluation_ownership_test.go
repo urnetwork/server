@@ -149,7 +149,7 @@ func TestSubevaluationHelpersValidateScopeBeforeDocker(t *testing.T) {
 	if err := os.WriteFile(bashEnvironment, []byte("sudo() { printf 'unexpected sudo\\n' >> \"$SUBEVALUATION_TEST_TRIPWIRE\"; return 99; }\ndocker() { printf 'unexpected docker\\n' >> \"$SUBEVALUATION_TEST_TRIPWIRE\"; return 99; }\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"evaluator-minimum-work.sh", "build-submission.sh", "prepare-evaluation-source.sh", "docker-id-map.sh"} {
+	for _, name := range []string{"evaluator-subevaluation.sh", "build-submission.sh", "prepare-evaluation-source.sh", "docker-id-map.sh"} {
 		command := exec.CommandContext(t.Context(), "/bin/bash", filepath.Join("evaluator", "container", name), "--help")
 		command.Env = []string{"PATH=" + root + ":/usr/bin:/bin", "LANG=C", "LC_ALL=C", "BASH_ENV=" + bashEnvironment,
 			"SUBEVALUATION_TEST_TRIPWIRE=" + marker, subevaluationOwnershipEnvironment()[0]}
@@ -214,7 +214,7 @@ func TestSubevaluationEveryTemporaryDockerPathDeclaresOwnership(t *testing.T) {
 		name  string
 		count int
 	}{
-		{name: "evaluator-minimum-work.sh", count: 6}, {name: "build-submission.sh", count: 1},
+		{name: "evaluator-subevaluation.sh", count: 6}, {name: "build-submission.sh", count: 1},
 		{name: "prepare-evaluation-source.sh", count: 1}, {name: "docker-id-map.sh", count: 1},
 	} {
 		content, err := os.ReadFile(filepath.Join("evaluator", "container", entry.name))
@@ -282,7 +282,7 @@ func TestSubevaluationComposeOverlayCoversAllOwnedObjects(t *testing.T) {
 // Exercise the real Compose adapter with an inert sudo function: only the
 // future scope adds a file, and its run id crosses sudo via the stage env file.
 func TestSubevaluationComposeAdapterPreservesLegacyArguments(t *testing.T) {
-	function := g2ScriptFunction(t, filepath.Join("evaluator", "container", "evaluator-minimum-work.sh"), "compose_with")
+	function := g2ScriptFunction(t, filepath.Join("evaluator", "container", "evaluator-subevaluation.sh"), "compose_with")
 	for _, scoped := range []bool{false, true} {
 		body := "COMPOSE_FILE=/synthetic-release/compose.yml\n" + function + "\n" +
 			`sudo() { printf '%s\000' "$@"; }` + "\ncompose_with synthetic-project /synthetic-stage/compose.env --profile run up --detach\n"
@@ -307,11 +307,11 @@ func TestSubevaluationComposeAdapterPreservesLegacyArguments(t *testing.T) {
 			t.Fatalf("compose scope %t arguments differ: %q", scoped, got)
 		}
 	}
-	script, err := os.ReadFile(filepath.Join("evaluator", "container", "evaluator-minimum-work.sh"))
+	script, err := os.ReadFile(filepath.Join("evaluator", "container", "evaluator-subevaluation.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writer := g2ScriptFunction(t, filepath.Join("evaluator", "container", "evaluator-minimum-work.sh"), "write_compose_env")
+	writer := g2ScriptFunction(t, filepath.Join("evaluator", "container", "evaluator-subevaluation.sh"), "write_compose_env")
 	if !strings.Contains(writer, `"URNETWORK_SUBEVALUATION_RUN_ID=$subevaluation_run_id" >> "$pending"`) || !strings.Contains(string(script), `subevaluation_require_identity "$job_id" "$round_id" "$attempt"`) {
 		t.Fatal("prospective Compose did not retain and bind the authenticated outer run scope")
 	}
@@ -413,7 +413,7 @@ stat() {
 // The prospective baseline role must inherit the exact updated trusted prefix,
 // without rewriting the legacy evaluator or its separately pinned baseline role.
 func TestSubevaluationBaselinePrefixPinsUpdatedEvaluator(t *testing.T) {
-	path := filepath.Join("evaluator", "container", "evaluator-minimum-work.sh")
+	path := filepath.Join("evaluator", "container", "evaluator-subevaluation.sh")
 	function := g2ScriptFunction(t, filepath.Join("evaluator", "container", "prepare-round-baseline-minimum-work.sh"), "round_baseline_control_prefix")
 	run := func(source string) error {
 		command := exec.CommandContext(t.Context(), "/bin/bash", "-c", "set -Eeuo pipefail\n"+function+"\nround_baseline_control_prefix \"$1\" >/dev/null\n", "synthetic-baseline-prefix", source)

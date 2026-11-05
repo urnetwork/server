@@ -19,6 +19,9 @@ func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourc
 	if !self.protected {
 		return nil, nil
 	}
+	if filepath.Base(self.config.Evaluator.Path) != "evaluator-subevaluation.sh" {
+		return nil, errors.New("private executor cannot reuse the independently sealed baseline producer")
+	}
 	if self.config.SubmissionBuilderIdentity.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), "submission-builder-identity.sh") {
 		return nil, errors.New("cleanup builder helper is not the evaluator's own protected release")
 	}

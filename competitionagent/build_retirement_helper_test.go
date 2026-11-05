@@ -12,7 +12,7 @@ import (
 )
 
 func TestBuildRetirementHelperRetainsOnlyFiniteProofBeforeMeasurement(t *testing.T) {
-	source, err := os.ReadFile(filepath.Join(filepath.Dir(evaluatorRoutingHelper(t)), "evaluator-minimum-work.sh"))
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(evaluatorRoutingHelper(t)), "evaluator-subevaluation.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}

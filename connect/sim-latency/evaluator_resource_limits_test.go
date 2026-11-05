@@ -57,6 +57,18 @@ memory_budget_json="$(memory_budget 137438953472)"
 		}
 		constants[match[1]] = value
 	}
+	privateSource, err := os.ReadFile(filepath.Join("evaluator", "container", "evaluator-subevaluation.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateConstants := map[string]int64{}
+	for _, match := range regexp.MustCompile(`(?m)^readonly ([A-Z_]+)=([0-9]+)$`).FindAllStringSubmatch(string(privateSource), -1) {
+		value, err := strconv.ParseInt(match[2], 10, 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		privateConstants[match[1]] = value
+	}
 	for field, constant := range map[string]string{
 		"runner_memory_limit_bytes": "RUNNER_MEMORY_BYTES", "postgres_memory_limit_bytes": "POSTGRES_MEMORY_BYTES", "redis_memory_limit_bytes": "REDIS_MEMORY_BYTES",
 		"runner_pids_limit": "RUNNER_PIDS_LIMIT", "postgres_pids_limit": "POSTGRES_PIDS_LIMIT", "redis_pids_limit": "REDIS_PIDS_LIMIT",
@@ -65,7 +77,7 @@ memory_budget_json="$(memory_budget 137438953472)"
 	} {
 		var actual int64
 		expected := constants[constant]
-		if json.Unmarshal(report[field], &actual) != nil || expected <= 0 || actual != expected {
+		if json.Unmarshal(report[field], &actual) != nil || expected <= 0 || actual != expected || privateConstants[constant] != expected {
 			t.Fatal("prospective aggregate parent metadata differs from frozen container policy", field, string(report[field]), expected)
 		}
 	}

@@ -1,6 +1,6 @@
 // Exact source evidence is compared with the already authenticated activation
 // intent, not the coordinator's mutable main worktrees. These wire shapes are
-// emitted by prepare-evaluation-source.sh and evaluator-minimum-work.sh.
+// emitted by prepare-evaluation-source.sh and evaluator-subevaluation.sh.
 package controller
 
 import (
