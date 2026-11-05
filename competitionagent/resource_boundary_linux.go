@@ -182,7 +182,7 @@ const runtimeBoundaryEngineUnitName = "urnetwork-private-engine.service"
 const runtimeBoundaryContainerdUnitName = "urnetwork-private-containerd.service"
 const runtimeBoundaryNetworkUnitName = "urnetwork-private-engine-network.service"
 const runtimeBoundaryNsfs = 0x6e736673
-const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs"
+const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs,Slice,OnFailure,OnFailureJobMode"
 
 var runtimeBoundaryBridgeNamePattern = regexp.MustCompile(`^unev-[0-9a-f]{10}$`)
 var runtimeBoundaryVethNamePattern = regexp.MustCompile(`^veth[0-9a-f]+$`)
@@ -1261,6 +1261,7 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 		properties["LoadState"] != "loaded" || properties["ActiveState"] != "active" || properties["PrivateNetwork"] != "yes" ||
 		properties["NetworkNamespacePath"] != "" || properties["User"] != "root" || properties["Group"] != "root" ||
 		properties["Restart"] != "no" || properties["KillMode"] != "control-group" ||
+		properties["Slice"] != managementPrivateSliceName || properties["OnFailure"] != managementRecoveryServiceName || properties["OnFailureJobMode"] != "replace" ||
 		network && (properties["SubState"] != "exited" || properties["RemainAfterExit"] != "yes") ||
 		!network && (properties["SubState"] != "running" || properties["RemainAfterExit"] != "no") {
 		return result, errors.New("private unit changed its protected namespace or lifetime policy")
@@ -1297,7 +1298,8 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 	if err != nil || start == 0 {
 		return result, errors.New("private unit process start is unproved")
 	}
-	if !network && properties["ControlGroup"] != "/system.slice/"+result.Name {
+	expectedGroup := managementPrivateCgroupPath + "/" + result.Name
+	if !network && properties["ControlGroup"] != expectedGroup || network && properties["ControlGroup"] != "" && properties["ControlGroup"] != expectedGroup {
 		return result, errors.New("private unit control group is outside its fixed role")
 	}
 	result.Fragment, result.Invocation, result.MainStart, result.ControlGroup = pin.Path, properties["InvocationID"], properties["ExecMainStartTimestampMonotonic"], properties["ControlGroup"]

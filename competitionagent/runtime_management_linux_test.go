@@ -12,7 +12,7 @@ import (
 
 // A correct private namespace is independent of its processor/cgroup role.
 func runtimeManagementTestFacts() (runtimeBoundaryUnit, runtimeBoundaryManagementFacts) {
-	unit := runtimeBoundaryUnit{Name: runtimeBoundaryEngineUnitName, ControlGroup: "/system.slice/" + runtimeBoundaryEngineUnitName,
+	unit := runtimeBoundaryUnit{Name: runtimeBoundaryEngineUnitName, ControlGroup: managementPrivateCgroupPath + "/" + runtimeBoundaryEngineUnitName,
 		Pid: 123, ProcessStart: 456, Namespace: runtimeBoundaryNamespaceId{Device: 4, Inode: 200}}
 	facts := runtimeBoundaryManagementFacts{ProcessStartBefore: unit.ProcessStart, ProcessStartAfter: unit.ProcessStart,
 		CgroupBefore: []byte("0::" + unit.ControlGroup + "\n"), CgroupAfter: []byte("0::" + unit.ControlGroup + "\n"),

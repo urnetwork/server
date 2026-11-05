@@ -1,5 +1,7 @@
 [Unit]
 Description=Private bounded evaluation Docker engine
+OnFailure=urnetwork-subeval-recovery.service
+OnFailureJobMode=replace
 Requires=urnetwork-private-containerd.service urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
 BindsTo=urnetwork-private-engine-network-namespace.service
 After=urnetwork-private-containerd.service urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
@@ -12,6 +14,7 @@ ConditionPathIsDirectory=/run/containerd
 Type=notify
 User=root
 Group=root
+Slice=urnetwork-management-private.slice
 UMask=0077
 PrivateNetwork=yes
 BindPaths=@BASE_DIRECTORY@/candidate/exec/containerd-sockets:/run/containerd

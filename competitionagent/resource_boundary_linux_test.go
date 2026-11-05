@@ -816,7 +816,8 @@ func runtimeBoundaryTestUnitProperties(boundary RuntimeResourceBoundary, pin Pin
 	name := filepath.Base(pin.Path)
 	properties := map[string]string{"Id": name, "FragmentPath": pin.Path, "DropInPaths": "", "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
 		"MainPID": "101", "InvocationID": strings.Repeat("a", 32), "ExecMainStartTimestampMonotonic": "123",
-		"ControlGroup": "/system.slice/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
+		"ControlGroup": managementPrivateCgroupPath + "/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
+		"Slice": managementPrivateSliceName, "OnFailure": managementRecoveryServiceName, "OnFailureJobMode": "replace",
 		"Restart": "no", "KillMode": "control-group", "RemainAfterExit": "no", "JoinsNamespaceOf": runtimeBoundaryKeeperUnitName,
 		"AllowedCPUs": strings.ReplaceAll(boundary.ManagementCpuSet, ",", " "),
 		"Requires":    runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
@@ -898,6 +899,66 @@ func TestRuntimeResourceBoundaryNamespaceReceiptClosesOnFailure(t *testing.T) {
 	var absent *RuntimeResourceBoundary
 	if err := absent.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Correct namespace membership cannot hide ordinary management placement or
+// an absent/expanded PID1 fallback outside that parent's OOM failure domain.
+func TestRuntimeResourceBoundaryPrivateUnitsRequireIndependentRecovery(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	for _, pin := range fixture.boundary.unitPins() {
+		properties := runtimeBoundaryTestUnitProperties(fixture.boundary, pin)
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err != nil {
+			t.Fatal("valid synthetic private unit failed its closed lifetime projection", err)
+		}
+		for _, change := range []struct{ key, value string }{
+			{key: "Slice", value: "system.slice"}, {key: "OnFailure", value: ""},
+			{key: "OnFailure", value: managementRecoveryServiceName + " synthetic-other.service"}, {key: "OnFailureJobMode", value: "ignore-dependencies"},
+		} {
+			mutated := make(map[string]string, len(properties))
+			for key, value := range properties {
+				mutated[key] = value
+			}
+			mutated[change.key] = change.value
+			if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(mutated), pin, fixture.boundary, fixture.settings); err == nil {
+				t.Fatal("private unit lost aggregate placement or fixed independent fallback", change.key)
+			}
+		}
+	}
+}
+
+// A legacy system.slice process is not covered by the new eight-GiB aggregate,
+// even if its independent CPU and network namespace facts happen to match.
+func TestRuntimeResourceBoundaryRejectsLegacyPrivateManagementGroup(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	for _, pin := range []Pin{fixture.boundary.EngineUnit, fixture.boundary.ContainerdUnit, fixture.boundary.NamespaceKeeperUnit} {
+		properties := runtimeBoundaryTestUnitProperties(fixture.boundary, pin)
+		properties["ControlGroup"] = "/system.slice/" + filepath.Base(pin.Path)
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("private manager accepted a legacy unaggregated process")
+		}
+		if runtimeBoundaryManagementGroup(runtimeBoundaryUnit{Name: filepath.Base(pin.Path), ControlGroup: properties["ControlGroup"]}) {
+			t.Fatal("kernel membership accepted legacy placement outside the aggregate")
+		}
+	}
+}
+
+// Inert templates are inspected only. They neither start a daemon nor change a
+// host's network, service, cgroup, core policy or currently running evaluator.
+func TestRuntimeResourceBoundaryPrivateTemplatesArmFixedRecovery(t *testing.T) {
+	for _, name := range []string{runtimeBoundaryEngineUnitName, runtimeBoundaryContainerdUnitName, runtimeBoundaryKeeperUnitName, runtimeBoundaryNetworkUnitName} {
+		content, err := os.ReadFile(filepath.Join("..", "cli", "competitionsubeval", "private-engine", name+".in"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, expected := range []string{"OnFailure=" + managementRecoveryServiceName, "OnFailureJobMode=replace", "Slice=" + managementPrivateSliceName} {
+			if bytes.Count(content, []byte(expected+"\n")) != 1 {
+				t.Fatal("private template omitted or duplicated fixed recovery ownership", name, expected)
+			}
+		}
+		if bytes.Contains(content, []byte("Slice="+managementCleanupSliceName)) {
+			t.Fatal("ordinary daemon entered cleanup's independent failure domain", name)
+		}
 	}
 }
 

@@ -55,7 +55,7 @@ func validateRuntimeBoundaryManagementIdentity(boundary RuntimeResourceBoundary,
 func runtimeBoundaryManagementGroup(unit runtimeBoundaryUnit) bool {
 	switch unit.Name {
 	case runtimeBoundaryKeeperUnitName, runtimeBoundaryEngineUnitName, runtimeBoundaryContainerdUnitName:
-		return unit.ControlGroup == "/system.slice/"+unit.Name
+		return unit.ControlGroup == managementPrivateCgroupPath+"/"+unit.Name
 	}
 	return false
 }
