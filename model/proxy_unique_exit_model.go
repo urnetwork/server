@@ -138,6 +138,10 @@ type UniqueExitSettings struct {
 	MaxNetworkReplacementFractionPerHour float64
 	// a proxy is not pinned again to a provider it left within this
 	ReleasedProviderExclusion time.Duration
+	// a held proxy (auto mode, waiting on a cap or on supply) is retried at
+	// most this often: each retry may draw from find-providers2, and a
+	// network's held proxies must not draw on every pass
+	HeldRetryInterval time.Duration
 	// a provider's egress key older than this is not trusted for allocation
 	EgressKeyMaxAge time.Duration
 	// a provider whose connected address carries at least this many connected
@@ -176,6 +180,7 @@ func DefaultUniqueExitSettings() *UniqueExitSettings {
 		MaxReplacementsPerProxyPerHour:       6,
 		MaxNetworkReplacementFractionPerHour: 0.10,
 		ReleasedProviderExclusion:            24 * time.Hour,
+		HeldRetryInterval:                    5 * time.Minute,
 		EgressKeyMaxAge:                      24 * time.Hour,
 		SharedAddressSlotThreshold:           10,
 		StableProbeCount:                     2,
@@ -927,6 +932,8 @@ type proxyUniqueExitConfig struct {
 	Specs         []*ProviderSpec
 	State         string
 	StateReason   string
+	// the last state change: a hold's time
+	UpdateTime time.Time
 }
 
 func insertProxyUniqueExitInTx(
@@ -984,7 +991,8 @@ func loadProxyUniqueExitConfigs(ctx context.Context, proxyClientIds []server.Id)
 					replace_mode,
 					specs_json,
 					state,
-					state_reason
+					state_reason,
+					update_time
 				FROM proxy_unique_exit
 				WHERE proxy_client_id = ANY($1)
 			`,
@@ -1001,6 +1009,7 @@ func loadProxyUniqueExitConfigs(ctx context.Context, proxyClientIds []server.Id)
 					&specsJson,
 					&config.State,
 					&config.StateReason,
+					&config.UpdateTime,
 				))
 				if err := json.Unmarshal([]byte(specsJson), &config.Specs); err != nil {
 					glog.Errorf("[upe]unreadable specs for proxy %s: %s\n", config.ProxyClientId, err)
@@ -1987,6 +1996,11 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 
 		if assignment.State == proxyExitAssignmentReplacing {
 			if config.ReplaceMode == UniqueExitReplaceAuto {
+				if now.Sub(config.UpdateTime) < settings.HeldRetryInterval {
+					// held recently: the caps and the supply rarely change
+					// within a few passes
+					return
+				}
 				reason := assignment.FailingReason
 				if reason == "" {
 					reason = ProxyExitReasonOffline

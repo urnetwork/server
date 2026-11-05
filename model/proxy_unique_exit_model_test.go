@@ -645,6 +645,42 @@ func TestSweepProxyExitsVerdictsAndCaps(t *testing.T) {
 	})
 }
 
+// A held proxy is retried at most once a HeldRetryInterval, since each retry
+// may draw from find-providers2: a proxy held for no supply is not retried
+// within the interval even once supply appears, and is moved when it ends.
+func TestSweepProxyExitsRetriesAHeldProxyAtTheRetryInterval(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		signals := newTestExitSignals()
+		defer signals.install()()
+		providers = testExitProviders(ctx, []string{"192.0.2.160"}, 2)
+		_, userSession := testUniqueExitProNetwork(ctx)
+		proxyClientId := *testAuthUniqueExitProxy(t, userSession, "").ClientId
+		first := loadLiveProxyExitAssignment(ctx, proxyClientId)
+		settings := DefaultUniqueExitSettings()
+		now := server.NowUtc()
+
+		// a verdict on the only provider: there is no other exit to take
+		signals.set(nil, map[server.Id]bool{first.ProviderClientId: true})
+		sweep := SweepProxyExits(ctx, now, settings)
+		connect.AssertEqual(t, sweep.HeldCount, 1)
+		connect.AssertEqual(t, GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId].State, ProxyExitStateNoSupply)
+
+		providers = append(providers, testExitProviders(ctx, []string{"192.0.2.161"}, 2)...)
+		sweep = SweepProxyExits(ctx, now.Add(settings.HeldRetryInterval-time.Second), settings)
+		connect.AssertEqual(t, sweep.HeldCount, 0)
+		connect.AssertEqual(t, sweep.ReplacedCount, 0)
+		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, proxyClientId).AssignmentId, first.AssignmentId)
+
+		sweep = SweepProxyExits(ctx, now.Add(settings.HeldRetryInterval), settings)
+		connect.AssertEqual(t, sweep.ReplacedCount, 1)
+		connect.AssertEqual(t, GetProxyExits(ctx, []server.Id{proxyClientId})[proxyClientId].State, ProxyExitStateAssigned)
+		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, proxyClientId).ProviderClientId != first.ProviderClientId, true)
+	})
+}
+
 // Manual mode holds a failing exit until the customer rotates it.
 func TestSweepProxyExitsManualModeHoldsUntilRotate(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
