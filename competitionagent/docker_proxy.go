@@ -51,6 +51,7 @@ type DockerProxy struct {
 	beforeIssue                   func()
 	beforeBuildIssue              func()
 	beforeHandoffWait             func()
+	beforeContextOpen             func(string, string)
 	fileHandoff                   bool
 	hostFiles                     *hostFileBroker
 	syncSpoolDirectory            func(string) error

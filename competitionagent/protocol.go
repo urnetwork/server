@@ -350,22 +350,30 @@ func ReadFiles(reader io.Reader, root string, files []File, maximum int64, limit
 	if err != nil || !rootInfo.IsDir() || rootInfo.Mode().Perm()&0077 != 0 {
 		return errors.New("subevaluation destination must be a fresh private directory")
 	}
-	destination, err := os.OpenRoot(root)
+	destination, err := openDirectoryNoFollow(root)
 	if err != nil {
 		return err
 	}
 	defer destination.Close()
+	openedInfo, err := destination.Stat()
+	if err != nil || !os.SameFile(rootInfo, openedInfo) {
+		return errors.New("subevaluation destination changed during capture")
+	}
+	entries, readErr := destination.ReadDir(1)
+	if len(entries) != 0 || !errors.Is(readErr, io.EOF) {
+		return errors.New("subevaluation destination must be empty before transfer")
+	}
 	for _, file := range files {
 		parent := filepath.Dir(file.Path)
 		if parent != "." {
-			if err := destination.MkdirAll(parent, 0700); err != nil {
+			if err := mkdirRelativeNoFollow(destination, parent, 0700); err != nil {
 				return err
 			}
 		}
 		if err := safeAncestors(root, file.Path); err != nil {
 			return err
 		}
-		output, err := destination.OpenFile(file.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+		output, err := openRelativeNoFollow(destination, file.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
 		if err != nil {
 			return err
 		}
@@ -378,6 +386,13 @@ func ReadFiles(reader io.Reader, root string, files []File, maximum int64, limit
 		}
 		if count != file.Bytes || hex.EncodeToString(digest.Sum(nil)) != file.Sha256 {
 			return errors.Join(ErrIntegrity, errors.New("subevaluation received file failed authentication"))
+		}
+		directory, err := openRelativeNoFollow(destination, parent, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+		if err != nil {
+			return err
+		}
+		if err := errors.Join(directory.Sync(), directory.Close()); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -405,12 +420,12 @@ func openRegular(root, name string) (*os.File, error) {
 	if err := safeAncestors(root, name); err != nil {
 		return nil, err
 	}
-	directory, err := os.OpenRoot(root)
+	directory, err := openDirectoryNoFollow(root)
 	if err != nil {
 		return nil, err
 	}
 	defer directory.Close()
-	file, err := directory.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	file, err := openRelativeNoFollow(directory, name, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, err
 	}

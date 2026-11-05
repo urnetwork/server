@@ -34,6 +34,7 @@ type Agent struct {
 	credential           *syscall.Credential
 	protected            bool
 	runtimeAdmission     func(context.Context) (*RuntimeResourceBoundary, error)
+	beforeDirectoryOpen  func(string)
 }
 
 // State and hidden-input manifests live outside the unprivileged run directory.
@@ -942,7 +943,7 @@ func (self *Agent) authenticateInputFiles(manifest StartManifest) error {
 // The terminal inventory bounds work examined, not just files returned. It
 // rejects links, devices, deep trees and excess directories before hashing data.
 func (self *Agent) collectFiles(root string) ([]File, error) {
-	confined, err := os.OpenRoot(root)
+	confined, err := openDirectoryNoFollow(root)
 	if err != nil {
 		return nil, err
 	}
@@ -954,7 +955,10 @@ func (self *Agent) collectFiles(root string) ([]File, error) {
 	for len(pending) != 0 {
 		relative := pending[0]
 		pending = pending[1:]
-		directory, err := confined.OpenFile(relative, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
+		if self.beforeDirectoryOpen != nil {
+			self.beforeDirectoryOpen(relative)
+		}
+		directory, err := openRelativeNoFollow(confined, relative, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
 			return nil, err
 		}
