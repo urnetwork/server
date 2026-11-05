@@ -88,6 +88,32 @@ func TestCompetitionArtifactArchiveLocalWrappersAndJoinsRetainProvenance(t *test
 	requireCompetitionArchiveDiagnosticClass(t, fmt.Errorf("synthetic-private-unknown: %w", syscall.EIO), "other")
 }
 
+// Errno's value-receiver methods also make its pointer implement net.Error.
+// Neither representation supplies transport provenance by itself, including
+// through an ordinary wrapper or joined error graph.
+func TestCompetitionArtifactArchiveErrnoPointersDoNotClaimNetwork(t *testing.T) {
+	errno := syscall.EIO
+	for _, cause := range []error{
+		&errno,
+		fmt.Errorf("synthetic-private-unknown-pointer: %w", &errno),
+		errors.Join(errors.New("synthetic-private-pointer-context"), &errno),
+	} {
+		var networkError net.Error
+		if !errors.As(cause, &networkError) {
+			t.Fatal("errno pointer control lost the shared network-error method set")
+		}
+		if _, pointer := networkError.(*syscall.Errno); !pointer {
+			t.Fatal("errno pointer control did not reach the actual pointer representation")
+		}
+		requireCompetitionArchiveDiagnosticClass(t, cause, "other")
+	}
+	missing, permission := syscall.ENOENT, syscall.EACCES
+	requireCompetitionArchiveDiagnosticClass(t, &missing, "filesystem_not_found")
+	requireCompetitionArchiveDiagnosticClass(t, &permission, "filesystem_permission")
+	requireCompetitionArchiveDiagnosticClass(t,
+		&net.OpError{Op: "dial", Net: "tcp", Err: &errno}, "network")
+}
+
 // An actual net.Conn deadline and concrete network operations keep their class,
 // even when the transport's native cause is itself a syscall wrapper or errno.
 func TestCompetitionArtifactArchiveNetworkDeadlineKeepsTransportClass(t *testing.T) {

@@ -124,7 +124,9 @@ func competitionArtifactArchiveFailureDetails(phase string, cause error) *compet
 		// Every syscall.Errno implements net.Error, including ENOENT and EIO.
 		// Only actual transport provenance may turn those into network faults;
 		// local typed wrappers above retain their own bounded classifications.
-		if _, errnoOnly := networkError.(syscall.Errno); !errnoOnly {
+		switch networkError.(type) {
+		case syscall.Errno, *syscall.Errno:
+		default:
 			detail.Category = "network"
 		}
 	}
