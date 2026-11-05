@@ -21,6 +21,7 @@
     "api_identity_observation": {"observed_at": "2026-11-05T22:55:10Z", "observed_processes": 20, "unknown_processes": 0, "source_revision": "dcc6d6aa5178b71211afdb29482f782f3327f238", "modified": false, "image_digest": "sha256:ef9576d7bfc9aa989080c11fdbc1a7ffd931853aab78390591f46d46b7197f93", "receipt_sha256": "c70186cbfaa1055e6c7e0b2ac06ef072209b777b035a467a5b0407706b149f53", "scope": "Fresh observed process metadata, not full placement, statistical or model qualification"},
     "legacy_intake_grant_query_completed": true,
     "legacy_epoch_intake_grants_found": 0,
+    "two_incident_runtime_qualification": {"accepted": true, "scope": "Two separately approved singleton epoch-one recovery cases only; not grant, winner, model or calibration authority", "native_bind_valid": true, "typed_canonical_sha256": "4816a59f95a320e703e9d9dff0d519291bdb68078fc937eed269dae0c35ab002", "runtime_file_sha256": "ec5cc5db2786c263394c6e65121438352c6df5c3fc37fecca62217e8c6f65a00", "evidence_sha256": "069d7dd3117fc608748cd051c6815d20423a10aade64bc68442f2ba30536ac56", "root_private_directory": "/mnt/data/competition-two-incident-runtime-accepted-20261105.TWsymI9d", "grants_issued": false},
     "worker_service_state": "active/running",
     "worker_main_pid": 1275009,
     "worker_slot_lease_live": true,
@@ -45,7 +46,7 @@
     "epoch2_approved_policy": {"g2_volume_policy": "minimum-work/1", "g2_requests_and_bytes_floor": 0.95, "g2_upper_bounds": false, "page_coverage_relative_baseline_floor": 0.95, "byte_coverage_relative_baseline_floor": 0.95, "deployed_or_qualified": false},
     "epoch1_rejudged": false,
     "readiness_reporting_fix": {"source_checkpoint": "2b929b2cc", "qualified_change": "808956511e735afaabc77375e60c00ef203a6fe3", "qualification_receipt": "READINESS-QUALIFICATION-2026-11-05.json", "live_deployment_verified": false},
-    "next_action": "Keep the healthy FIFO scoring. Finish the separately reviewed native runtime proof for the two approved recoveries using actual API/worker identities and legacy scope; issue grants only at a genuine idle, evaluation-held and finalization-held boundary. A third operator-interrupted failed ticket remains separately awaiting owner direction. Verify deployment of the pushed readiness-reporting fix without restarting the active evaluator. Keep finalization held for calibration and manual winner approval; no source promotion, baseline replacement, gate waiver or calibration acceptance is implied."
+    "next_action": "Keep the healthy FIFO scoring. The two-case runtime proof is accepted and native-validated; at the next approved idle maintenance boundary, establish the evaluation hold and freshly verify no running row/occupied slot, unchanged terminal snapshots, unsealed scope and finalization hold before materializing short-window job authorizations. Do not interrupt an active job or infer a grant from runtime acceptance. A third operator-interrupted failed ticket remains separately awaiting owner direction. Verify deployment of the pushed readiness-reporting fix without restarting the evaluator. Keep finalization held for calibration and manual winner approval; no source promotion, baseline replacement, gate waiver or calibration acceptance is implied."
   },
   "deployment_status": {
     "historical_observations_only": true,
