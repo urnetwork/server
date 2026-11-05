@@ -83,7 +83,7 @@ func validateCleanupRuntimeBinding(config Config, boundary *RuntimeResourceBound
 		boundary.ScratchRoot != config.DockerRole.ScratchDirectory || boundary.WorkDeviceId == 0 {
 		return errors.New("qualified private runtime differs from the cleanup/client role")
 	}
-	return nil
+	return validateRuntimeNativeClassBinding(config, *boundary)
 }
 
 // The root-only audit may read only its exact local qualification tuple. A
