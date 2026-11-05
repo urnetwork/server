@@ -79,6 +79,12 @@ func (self *DockerProxy) buildHandler(w http.ResponseWriter, r *http.Request) {
 // The HTTP/1 upgrade is only a protocol prelude. A new native h2c server parses
 // the bytes after it; no custom HPACK/frame parser or legacy-builder fallback.
 func (self *DockerProxy) serveGrpcUpgrade(w http.ResponseWriter, r *http.Request) {
+	admission, err := self.admit(true)
+	if err != nil {
+		http.Error(w, "owned build upgrade admission is closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer admission()
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "h2c upgrade unavailable", http.StatusInternalServerError)
@@ -115,6 +121,12 @@ func (self *DockerProxy) serveGrpcUpgrade(w http.ResponseWriter, r *http.Request
 // Auxiliary RPCs are owned by the pinned CLI. Its reverse filesync session has
 // a fully snapshotted logical build body and cannot outlive the owner's budget.
 func (self *DockerProxy) forwardGrpcRead(w http.ResponseWriter, r *http.Request) {
+	release, err := self.admit(true)
+	if err != nil {
+		http.Error(w, "owned build read admission is closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 	ctx, cancel := context.WithTimeout(r.Context(), self.settings.OperationTimeout)
 	defer cancel()
 	request := r.Clone(ctx)
@@ -198,6 +210,12 @@ func (self *DockerProxy) attach(w http.ResponseWriter, r *http.Request) {
 // Session upgrades are opaque reverse gRPC by design: the real pinned CLI
 // remains their server. They are not admitted on the worker socket.
 func (self *DockerProxy) relayUpgrade(w http.ResponseWriter, r *http.Request, build bool) {
+	admission, err := self.admit(build)
+	if err != nil {
+		http.Error(w, "owned session admission is closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer admission()
 	if r.ContentLength > 0 {
 		http.Error(w, "upgrade body rejected", http.StatusBadRequest)
 		return

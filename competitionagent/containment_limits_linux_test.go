@@ -26,7 +26,8 @@ func testRunResourceIdentity() runResourceIdentity {
 		ActiveMemoryLimitBytes: 96 * 1024 * 1024 * 1024, ActivePidsLimit: 65536 + 4096 + 4096,
 		ScorerMemoryLimitBytes: 4 * 1024 * 1024 * 1024, ScorerPidsLimit: 1024,
 		PreflightMemoryLimitBytes: 4 * 1024 * 1024 * 1024, PreflightPidsLimit: 1024,
-		DisjointCpuSets: true, MemoryCapacityPassed: true, EvidenceMemoryLimitBytes: 1024 * 1024}
+		DisjointCpuSets: true, MemoryCapacityPassed: true, EvidenceMemoryLimitBytes: 1024 * 1024,
+		HostMemoryBytes: 128 * 1024 * 1024 * 1024, ManagementReserveBytes: 24 * 1024 * 1024 * 1024}
 }
 
 // Fixture helpers emit the same finite shape as the pinned resource helper.

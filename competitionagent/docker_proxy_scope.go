@@ -35,6 +35,9 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 		!strings.HasPrefix(plan.BaseImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(plan.BaseImageDigest, "sha256:")) {
 		return errors.New("invalid fixed Docker owner identity or resource policy")
 	}
+	if err := validateDockerBuildRetirementPlan(plan, protected); err != nil {
+		return err
+	}
 	if settings.MaximumOperations <= 0 || settings.MaximumConnections <= 0 || settings.MaximumHeaderBytes <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumRequestBytes <= 0 ||
 		settings.MaximumImageLoadBytes <= 0 || settings.MaximumBuildOutputBytes <= 0 || settings.MaximumResponseBytes <= 0 || settings.MaximumSpoolBytes <= 0 || settings.MaximumContextBytes <= 0 || settings.MaximumContextFileBytes <= 0 || settings.MaximumContextEntries <= 0 ||
 		settings.MaximumDocumentDepth <= 0 || settings.MaximumContextDepth <= 0 || settings.DirectoryBatch <= 0 || settings.CopyBufferBytes <= 0 || settings.HeaderTimeout <= 0 || settings.UploadTimeout <= 0 || settings.ClientWriteTimeout <= 0 ||
@@ -385,6 +388,9 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 		if !dockerPolicyEmptyCollection(hostObject[name]) {
 			return errors.New("Docker create requested a nonempty host capability collection")
 		}
+	}
+	if err := self.requireBuildRetired(ctx, host.CgroupParent); err != nil {
+		return err
 	}
 	if host.Memory <= 0 || host.Memory > self.settings.MaximumContainerMemoryBytes || host.MemorySwap != host.Memory ||
 		host.PidsLimit == nil || *host.PidsLimit <= 0 || *host.PidsLimit > self.settings.MaximumContainerPids {

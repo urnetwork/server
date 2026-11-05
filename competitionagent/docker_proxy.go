@@ -37,6 +37,9 @@ type DockerProxy struct {
 	changed                       chan struct{}
 	operationsByIds               map[string]*dockerProxyOperation
 	build                         *dockerProxyBuild
+	buildAdmissionsClosed         bool
+	retirement                    *dockerBuildRetirement
+	buildRetirer                  *hostBuildRetirement
 	journalLock                   *os.File
 	protected                     bool
 	transport                     *http.Transport
@@ -81,6 +84,10 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 	if plan.HostFiles != nil {
 		copy := *plan.HostFiles
 		plan.HostFiles = &copy
+	}
+	if plan.BuildRetirement != nil {
+		copy := *plan.BuildRetirement
+		plan.BuildRetirement = &copy
 	}
 	if err := validateDockerProxyPlan(plan, settings, protected); err != nil {
 		return nil, err
@@ -139,6 +146,7 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 			return self.dialDaemon(ctx)
 		}}
 	self.buildRunner = self.runBuildCli
+	self.buildRetirer = newHostBuildRetirement(DefaultBuildRetirementSettings())
 	self.syncSpoolDirectory = syncDirectory
 	if plan.HostFiles != nil {
 		self.hostFiles, err = newHostFileBroker(plan, DefaultHostFilesSettings())
@@ -155,6 +163,10 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 		return nil, err
 	}
 	if err := self.recoverBuild(); err != nil {
+		self.Close()
+		return nil, err
+	}
+	if err := self.recoverBuildRetirement(); err != nil {
 		self.Close()
 		return nil, err
 	}

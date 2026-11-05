@@ -61,6 +61,10 @@ func (self *DockerProxy) RunOwnedBuild(ctx context.Context, request DockerBuildR
 	}
 	requestSha := digestDockerBytes(content)
 	self.stateLock.Lock()
+	if self.buildAdmissionsClosed {
+		self.stateLock.Unlock()
+		return DockerBuildResult{}, errors.New("build admission is permanently closed for retirement")
+	}
 	existing := self.build
 	if existing != nil {
 		if existing.requestSha256 != requestSha {
@@ -83,6 +87,11 @@ func (self *DockerProxy) RunOwnedBuild(ctx context.Context, request DockerBuildR
 	}
 	build := &dockerProxyBuild{request: request, requestSha256: requestSha, arguments: arguments, done: make(chan struct{})}
 	self.stateLock.Lock()
+	if self.buildAdmissionsClosed {
+		self.stateLock.Unlock()
+		release()
+		return DockerBuildResult{}, errors.New("retirement closed build admission before its reservation")
+	}
 	if self.build != nil {
 		self.stateLock.Unlock()
 		release()
