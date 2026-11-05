@@ -90,7 +90,11 @@ supervisor that can publish source before the required manual handoff stop.
    force-push or change product checkouts. A newly staged config parent is chosen
    only for a fresh intent as documented below. Update the public source-index
    preview from authenticated records, never branch heads. Mark prepared source
-   `PREPARED`, not active, qualified or scored.
+   `PREPARED`, not active, qualified or scored. The native fast-forward guard
+   assumes protected, non-rewritable branches; it is not strict frozen-old-value
+   compare-and-swap against an external force-rewind. Any observed source-ref
+   drift requires manual resolution before full activation; preserve ordinary
+   no-force publication rather than weakening that guard.
 7. Only the separately implemented, independently qualified and deployed
    intake-first path may open epoch-two submission intake before new evaluator
    qualification/baseline completion. It must have the real manual handoff and
@@ -105,10 +109,16 @@ supervisor that can publish source before the required manual handoff stop.
    than permission to bypass the default gates.
 
 The owner-approved next-epoch G2 choice is floors-only at 95%; it is prospective,
-not an epoch-one change or proof of deployed enforcement. G7 coverage-rule
-implementation and tests remain pending the numerical choice: a proposed 5%
-allowance does not establish an answered relative-95% interpretation. Do not
-publish a provisional one-percentage-point choice as frozen policy.
+not an epoch-one change or proof of deployed enforcement. The owner-approved
+epoch-two-and-later G7 rule is separately at least 95% of the same-round baseline
+page coverage and byte coverage. A baseline coverage of 80% therefore requires
+at least 76%, not 75% or 79%. The prospective public fields are
+`expected.minimum_page_coverage_ratio` and
+`expected.minimum_byte_coverage_ratio`. Implementation, deterministic tests and
+release qualification must establish those semantics before grading; do not
+publish the old provisional one-percentage-point or five-percentage-point rule
+as the new policy. Intentional useful-traffic suppression remains prohibited
+regardless of numerical floor headroom.
 
 ## Agent model roles
 

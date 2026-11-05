@@ -33,7 +33,7 @@ func TestRunMainManualHandoffDocsKeepFrozenAndProspectiveAuthoritySeparate(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"Status: `PREPARED / NOT LIVE`", "Finish epoch one unchanged", "Earlier code inspection and", "never select or approve a winner", "traffic-preservation/1", "production-benefit addendum", "twelve attributed findings", "persisted operator handoff disposition", "no-winner carry-forward", "actual opening after handoff", "INTAKE_OPEN-evaluator_pending", "immutable fresh same-round scoring baseline", "G2 choice is floors-only at 95%", "G7 coverage-rule", "provisional one-percentage-point", "### Historical independent-source v2 policy"} {
+	for _, required := range []string{"Status: `PREPARED / NOT LIVE`", "Finish epoch one unchanged", "Earlier code inspection and", "never select or approve a winner", "traffic-preservation/1", "production-benefit addendum", "twelve attributed findings", "persisted operator handoff disposition", "no-winner carry-forward", "actual opening after handoff", "INTAKE_OPEN-evaluator_pending", "immutable fresh same-round scoring baseline", "G2 choice is floors-only at 95%", "G7 rule is separately at least 95%", "at least 76%", "expected.minimum_page_coverage_ratio", "expected.minimum_byte_coverage_ratio", "protected, non-rewritable branches", "### Historical independent-source v2 policy"} {
 		if !strings.Contains(string(content), required) {
 			t.Errorf("manual handoff runbook lost %q", required)
 		}
