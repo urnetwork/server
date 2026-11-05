@@ -29267,6 +29267,19 @@ deploy poll reads its status listener.
 ### 8.9 Append-only migration coherence — a numeric head can hide skipped schema
 Probe: `migrations`
 
+Column predicates share one statement-local materialized projection of the seven
+fields they consume from `information_schema.columns`. The original
+permission-aware view and public-schema filter remain authority; each fresh
+statement observes its own schema, including a missing or altered column and
+its restoration. This reduces repeated view expansion without changing the
+artifact row, published-prefix checks, or versioned drift reduction. Planning
+can dominate this catalog query: a bounded local four-sample comparison showed
+about 10% lower mean query time, with baseline drift of about 9%. That is a local
+cost observation, not a production latency guarantee or evidence of network
+health. The owning controls compare every dynamically emitted column against
+the unshared query at prepublication, publication, faults, restoration and the
+current compiled head; they do not freeze a migration count or row width.
+
 Owning-parent completion: an already-ended `Run` enters no source. If a parent
 ends before successful artifact/catalog reduction returns, late valid rows
 cannot certify schema health: a healthy-only result returns the parent's
