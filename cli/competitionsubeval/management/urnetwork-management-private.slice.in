@@ -1,0 +1,11 @@
+# Inert source template; all private daemon services must share this one ceiling.
+[Unit]
+Description=Private engine containerd shim and helper management aggregate
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=@PRIVATE_MEMORY_BYTES@
+MemorySwapMax=@SWAP_BYTES@
+TasksAccounting=yes
+TasksMax=@PRIVATE_TASKS_MAXIMUM@
+AllowedCPUs=@MANAGEMENT_CPUSET@

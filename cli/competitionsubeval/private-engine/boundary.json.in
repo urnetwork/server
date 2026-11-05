@@ -20,6 +20,7 @@
   "container_id_map_length": @CONTAINER_ID_MAP_LENGTH@,
   "runtime_name": "runc",
   "runtime_arguments": [],
+  "management_cpuset": "@MANAGEMENT_CPUSET@",
   "dockerd": {"path": "@ENGINE_BIN@/dockerd", "sha256": "@DOCKERD_SHA256@"},
   "containerd": {"path": "@ENGINE_BIN@/containerd", "sha256": "@CONTAINERD_SHA256@"},
   "containerd_version": "@CONTAINERD_VERSION@",

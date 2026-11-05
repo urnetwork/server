@@ -18,17 +18,8 @@ import (
 // interruptible poll owner rather than an uninterruptible syscall.Read thread.
 func cancellableControlInput(reader io.Reader) (io.Reader, io.Closer, error) {
 	if file, ok := reader.(*os.File); ok {
-		fd, err := syscall.Dup(int(file.Fd()))
-		if err != nil {
-			return nil, nil, err
-		}
-		syscall.CloseOnExec(fd)
-		if err := syscall.SetNonblock(fd, true); err != nil {
-			syscall.Close(fd)
-			return nil, nil, err
-		}
-		owned := os.NewFile(uintptr(fd), "subevaluation-input")
-		return owned, owned, nil
+		owned, err := duplicateControlFile(file, false)
+		return owned, owned, err
 	}
 	// These finite memory readers cannot block inside Read. Every other stream
 	// must explicitly promise that Close interrupts its pending read, matching
@@ -41,6 +32,47 @@ func cancellableControlInput(reader io.Reader) (io.Reader, io.Closer, error) {
 		return closer, closer, nil
 	}
 	return nil, nil, errors.New("subevaluation input must support interruptible close or finite memory reads")
+}
+
+// Input and output each own a distinct nonblocking duplicate; closing an RPC
+// lease never closes the launcher-owned original or a detached evaluation.
+// O_NONBLOCK still belongs to the shared open-file description. Serve owns its
+// stdio exclusively; independent concurrent I/O through the original is invalid.
+func duplicateControlFile(file *os.File, writing bool) (*os.File, error) {
+	connection, err := file.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	fd := -1
+	var duplicateErr error
+	if err := connection.Control(func(original uintptr) {
+		flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, original, syscall.F_GETFL, 0)
+		if errno != 0 {
+			duplicateErr = errno
+			return
+		}
+		accessMode := int(flags) & syscall.O_ACCMODE
+		if writing && accessMode == syscall.O_RDONLY || !writing && accessMode == syscall.O_WRONLY {
+			duplicateErr = errors.New("control descriptor has the wrong I/O direction")
+			return
+		}
+		duplicate, _, errno := syscall.Syscall(syscall.SYS_FCNTL, original, syscall.F_DUPFD_CLOEXEC, 0)
+		if errno != 0 {
+			duplicateErr = errno
+			return
+		}
+		fd = int(duplicate)
+	}); err != nil {
+		return nil, err
+	}
+	if duplicateErr != nil {
+		return nil, duplicateErr
+	}
+	if err := syscall.SetNonblock(fd, true); err != nil {
+		syscall.Close(fd)
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), "subevaluation-control-stream"), nil
 }
 
 // The absolute submission deadline and fixed transfer ceiling both apply to

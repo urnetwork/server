@@ -44,6 +44,9 @@ type Config struct {
 	SelfCheck                  Pin              `json:"self_check"`
 	HostCheckConfiguration     Pin              `json:"host_check_configuration"`
 	Agent                      Pin              `json:"agent"`
+	SystemdRun                 Pin              `json:"systemd_run"`
+	ManagementPolicy           Pin              `json:"management_policy"`
+	RecoveryService            Pin              `json:"recovery_service"`
 	Docker                     Pin              `json:"docker"`
 	DockerSocketPath           string           `json:"docker_socket_path"`
 	DockerRole                 DockerRoleConfig `json:"docker_role"`
@@ -62,20 +65,24 @@ type Config struct {
 	SigningKeyPath             string           `json:"signing_key_path"`
 	Limits                     Limits           `json:"limits"`
 	configPath                 string
+	configSha256               string
 }
 
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
 // values are invalid; Now is a test seam and is never accepted from a peer.
 type AgentSettings struct {
-	ControlTimeout            time.Duration
-	SelfCheckTimeout          time.Duration
-	CancelGrace               time.Duration
-	LockPollInterval          time.Duration
-	MaximumClockSkew          time.Duration
-	DiagnosticBytes           int64
-	ConfigBytes               int64
-	DirectoryBatch            int
+	ControlTimeout   time.Duration
+	SelfCheckTimeout time.Duration
+	CancelGrace      time.Duration
+	LockPollInterval time.Duration
+	MaximumClockSkew time.Duration
+	DiagnosticBytes  int64
+	ConfigBytes      int64
+	DirectoryBatch   int
+	// Each file-body direction receives its own two-minute native I/O budget,
+	// distinct from framing. Nonpositive durations refuse the agent owner.
 	InputTransferTimeout      time.Duration
+	OutputTransferTimeout     time.Duration
 	CleanupTimeout            time.Duration
 	CleanupCommandTimeout     time.Duration
 	CleanupPollInterval       time.Duration
@@ -83,6 +90,17 @@ type AgentSettings struct {
 	OwnerPollInterval         time.Duration
 	ManagementMemoryBytes     int64
 	ManagementCpuQuotaPercent int
+	// Bytes/tasks left available in the independent cleanup aggregate before
+	// admitting ordinary work. Nonpositive values refuse arming; these are
+	// source class margins, not measured native recovery peak guarantees.
+	RecoveryMemoryHeadroomBytes int64
+	RecoveryTasksHeadroom       int64
+	// Ordinary admission inventories every descendant within the fixed parent.
+	// Nonpositive depth or runnable margins refuse admission. These source-class
+	// margins require separate native pressure qualification, not arithmetic alone.
+	ManagementGroupDepth          int
+	ManagementMemoryHeadroomBytes int64
+	ManagementTasksHeadroom       int64
 	// Build tasks include the retained BuildKit daemon and all of its children;
 	// 4096 is an independent parent ceiling. Nonpositive values refuse launch.
 	BuildTasksMaximum int64
@@ -97,9 +115,11 @@ func DefaultAgentSettings() AgentSettings {
 	return AgentSettings{ControlTimeout: 30 * time.Second, SelfCheckTimeout: 2 * time.Minute,
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
-		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
+		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, OutputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
 		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024,
 		OwnerPollInterval: 25 * time.Millisecond, ManagementMemoryBytes: 8 * 1024 * 1024 * 1024, ManagementCpuQuotaPercent: 200,
+		RecoveryMemoryHeadroomBytes: 256 * 1024 * 1024, RecoveryTasksHeadroom: 128,
+		ManagementGroupDepth: 32, ManagementMemoryHeadroomBytes: 256 * 1024 * 1024, ManagementTasksHeadroom: 128,
 		BuildTasksMaximum: 4096, ContainmentCpuPeriodMicros: 100000, Now: time.Now}
 }
 
@@ -115,6 +135,8 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	defer clear(content)
 	config := &Config{Limits: DefaultLimits(), configPath: path}
+	digest := sha256.Sum256(content)
+	config.configSha256 = hex.EncodeToString(digest[:])
 	if err := decodeStrict(content, config); err != nil {
 		return nil, err
 	}
@@ -207,6 +229,9 @@ func (self *Config) validate(protected bool) error {
 		}
 	}
 	if err := self.DockerRole.validate(self, protected); err != nil {
+		return err
+	}
+	if err := self.validateRecoveryConfiguration(DefaultAgentSettings(), protected); err != nil {
 		return err
 	}
 	key, err := base64.StdEncoding.DecodeString(self.CoordinatorPublicKeyBase64)

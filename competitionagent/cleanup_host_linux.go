@@ -432,20 +432,15 @@ func (self *hostCleanupCgroups) openWithLimitAuthority(name, property string, fl
 	if err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(self.rootPath)
+	root, err := openDirectoryNoFollow(self.rootPath)
 	if err != nil {
 		return nil, errors.New("cleanup cgroup hierarchy is unavailable")
 	}
 	defer root.Close()
 	if self.requireCgroupFs {
-		directory, err := root.Open(".")
-		if err != nil {
-			return nil, err
-		}
 		var stat syscall.Statfs_t
-		err = syscall.Fstatfs(int(directory.Fd()), &stat)
-		info, infoErr := directory.Stat()
-		directory.Close()
+		err = syscall.Fstatfs(int(root.Fd()), &stat)
+		info, infoErr := root.Stat()
 		const cgroup2SuperMagic = 0x63677270
 		if err != nil || stat.Type != cgroup2SuperMagic {
 			return nil, errors.New("cleanup cgroup root is not cgroup v2")
@@ -457,24 +452,30 @@ func (self *hostCleanupCgroups) openWithLimitAuthority(name, property string, fl
 	current := ""
 	for _, part := range strings.Split(relative, string(filepath.Separator)) {
 		current = filepath.Join(current, part)
-		info, err := root.Lstat(current)
+		directory, err := openRelativeNoFollow(root, current, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil, errCleanupCgroupAbsent
 			}
 			return nil, err
 		}
-		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		info, statErr := directory.Stat()
+		closeErr := directory.Close()
+		if statErr != nil || closeErr != nil || !info.IsDir() {
 			return nil, errors.New("cleanup cgroup ancestor is not an exact directory")
 		}
 		if self.requireCgroupFs && admissionLimit && !rootOwnedContainmentNode(info) {
 			return nil, errors.New("containment limit parent is delegated or writable outside root")
 		}
 	}
-	file, err := root.OpenFile(filepath.Join(relative, property), flags|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	file, err := openRelativeNoFollow(root, filepath.Join(relative, property), flags, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			if _, checkErr := root.Lstat(relative); errors.Is(checkErr, os.ErrNotExist) {
+			directory, checkErr := openRelativeNoFollow(root, relative, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+			if directory != nil {
+				_ = directory.Close()
+			}
+			if errors.Is(checkErr, os.ErrNotExist) {
 				return nil, errCleanupCgroupAbsent
 			}
 			return nil, errors.New("required cgroup cleanup property is unavailable")
@@ -629,12 +630,13 @@ func (self *hostCleanupCgroups) Empty(ctx context.Context, name string) (bool, e
 // Mount identity comes from procfs, then from the opened descriptor's mount id.
 // The unmount target is that pinned descriptor, not a raceable path string.
 type hostCleanupMounts struct {
-	config     Config
-	settings   AgentSettings
-	readMounts func(context.Context) ([]byte, error)
-	openParent func(cleanupPlan) (*os.File, error)
-	mountId    func(*os.File) (uint64, error)
-	unmount    func(context.Context, string, int) error
+	config           Config
+	settings         AgentSettings
+	readMounts       func(context.Context) ([]byte, error)
+	openParent       func(cleanupPlan) (*os.File, error)
+	beforeParentOpen func(cleanupPlan)
+	mountId          func(*os.File) (uint64, error)
+	unmount          func(context.Context, string, int) error
 }
 
 // No mount or filesystem mutation occurs during construction.
@@ -647,28 +649,35 @@ func newHostCleanupMounts(config Config, settings AgentSettings) *hostCleanupMou
 		return readBounded("/proc/self/mountinfo", settings.DiagnosticBytes)
 	}
 	self.openParent = func(plan cleanupPlan) (*os.File, error) {
-		root, err := os.OpenRoot(config.WorkDirectory)
+		root, err := openDirectoryNoFollow(config.WorkDirectory)
 		if err != nil {
 			return nil, err
 		}
 		defer root.Close()
-		for _, part := range []string{plan.RunId, filepath.Join(plan.RunId, ".evidence-runtime")} {
-			info, err := root.Lstat(part)
-			if err != nil {
-				return nil, err
-			}
-			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-				return nil, errors.New("evidence cleanup path is not an exact private directory")
-			}
+		original, err := os.Lstat(fmt.Sprintf("/proc/self/fd/%d/%s", root.Fd(), plan.RunId))
+		if err != nil || !original.IsDir() || original.Mode()&os.ModeSymlink != 0 {
+			return nil, errors.New("evidence cleanup parent is not an exact directory")
 		}
-		parent, err := root.OpenFile(plan.RunId, os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+		if self.beforeParentOpen != nil {
+			self.beforeParentOpen(plan)
+		}
+		parent, err := openRelativeNoFollow(root, plan.RunId, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
+			return nil, err
+		}
+		child, err := openRelativeNoFollow(parent, ".evidence-runtime", os.O_RDONLY|syscall.O_DIRECTORY, 0)
+		if err != nil {
+			_ = parent.Close()
+			return nil, err
+		}
+		if err := child.Close(); err != nil {
+			_ = parent.Close()
 			return nil, err
 		}
 		info, err := parent.Stat()
-		if err != nil {
+		if err != nil || !os.SameFile(original, info) {
 			parent.Close()
-			return nil, err
+			return nil, errors.New("evidence cleanup parent changed during descriptor capture")
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || plan.WorkDeviceId == 0 || uint64(stat.Dev) != plan.WorkDeviceId {

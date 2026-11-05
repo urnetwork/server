@@ -33,7 +33,9 @@ func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourc
 	for _, component := range []struct {
 		pin  Pin
 		name string
-	}{{pin: self.config.DockerRole.Dockerfile, name: "Dockerfile.submission"},
+	}{{pin: self.config.DockerRole.Dockerfile, name: "Dockerfile.submission.tracked"},
+		{pin: self.config.DockerRole.CandidateCoreProfile, name: "candidate-core.seccomp.json"},
+		{pin: self.config.DockerRole.StockSeccompProfile, name: "docker-stock.seccomp.json"},
 		{pin: self.config.DockerRole.PostgresInitialization, name: "postgres-init.sh"}, {pin: self.config.DockerRole.ResourcePolicy, name: "resource-boundary.sh"}} {
 		if component.pin.Path != filepath.Join(filepath.Dir(self.config.Evaluator.Path), component.name) {
 			return nil, errors.New("private Docker role differs from its own protected evaluator release")
@@ -60,6 +62,17 @@ func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourc
 		_ = boundary.Close()
 		return nil, err
 	}
+	policy, err := loadManagementResourcePolicy(self.config.ManagementPolicy, DefaultManagementBoundarySettings(), self.settings.ConfigBytes, true)
+	if err == nil {
+		err = validateRuntimeBoundaryManagementCpuSet(policy.ManagementCpuSet, boundary.ManagementCpuSet)
+	}
+	if err == nil {
+		err = verifyManagementOrdinaryBoundary(parent, policy, boundary.Systemctl, self.settings)
+	}
+	if err != nil {
+		_ = boundary.Close()
+		return nil, err
+	}
 	return boundary, nil
 }
 
@@ -70,7 +83,7 @@ func validateCleanupRuntimeBinding(config Config, boundary *RuntimeResourceBound
 		boundary.ScratchRoot != config.DockerRole.ScratchDirectory || boundary.WorkDeviceId == 0 {
 		return errors.New("qualified private runtime differs from the cleanup/client role")
 	}
-	return nil
+	return validateRuntimeNativeClassBinding(config, *boundary)
 }
 
 // The root-only audit may read only its exact local qualification tuple. A

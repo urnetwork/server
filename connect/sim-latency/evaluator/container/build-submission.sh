@@ -55,6 +55,7 @@ validate_submission_labels() {
         --arg patch_validator_sha256 "$patch_validator_sha256" \
         --arg candidate_commits_sha256 "$candidate_commits_sha256" \
         --arg original_source_identity_sha256 "$original_source_identity_sha256" \
+        --argjson scoped "${subevaluation_scoped:-false}" --arg candidate_source_identity_sha256 "${candidate_source_identity_sha256:-}" \
         '."com.urnetwork.competition.image-kind" == "submission" and
          ."com.urnetwork.competition.base-sha" == $base_sha and
          ."org.opencontainers.image.revision" == $candidate_sha and
@@ -64,7 +65,10 @@ validate_submission_labels() {
          ."com.urnetwork.competition.patch-validator-sha256" == $patch_validator_sha256 and
          ."com.urnetwork.competition.candidate-commits-sha256" == $candidate_commits_sha256 and
          ."com.urnetwork.competition.source-identity-sha256" == $original_source_identity_sha256 and
-         ."com.urnetwork.competition.image-key" == $image_key' <<<"$1" >/dev/null
+         ."com.urnetwork.competition.image-key" == $image_key and
+         ($scoped == false or (."com.urnetwork.competition.source-materialization" == "required-readonly-run-source/v1" and
+          ."com.urnetwork.competition.builtin-source-kind" == "pristine-evaluator-base" and
+          ."com.urnetwork.competition.candidate-source-identity-sha256" == $candidate_source_identity_sha256))' <<<"$1" >/dev/null
 }
 
 # The runtime document must bind every repository, not just the server VCS head.
@@ -75,6 +79,7 @@ validate_submission_runtime_identity() {
         --arg patch_validator_sha256 "$patch_validator_sha256" \
         --arg candidate_commits_sha256 "$candidate_commits_sha256" \
         --arg original_source_identity_sha256 "$original_source_identity_sha256" \
+        --argjson scoped "${subevaluation_scoped:-false}" --arg candidate_source_identity_sha256 "${candidate_source_identity_sha256:-}" \
         --argjson candidate_commits "$candidate_commits_json" \
         '.schema == 1 and .image_kind == "submission" and
          .base_sha == $base_sha and .build_sha == $candidate_sha and
@@ -84,7 +89,10 @@ validate_submission_runtime_identity() {
          .candidate_commits_sha256 == $candidate_commits_sha256 and
          .original_source_identity_sha256 == $original_source_identity_sha256 and
          .candidate_commits == $candidate_commits and
-         (.simulator_sha256 | test("^[0-9a-f]{64}$")) and (.paths | type == "array")' <<<"$1" >/dev/null
+         (.simulator_sha256 | test("^[0-9a-f]{64}$")) and (.paths | type == "array") and
+         ($scoped == false or (.source_materialization == "required-readonly-run-source/v1" and
+          .builtin_source_kind == "pristine-evaluator-base" and
+          .candidate_source_identity_sha256 == $candidate_source_identity_sha256))' <<<"$1" >/dev/null
 }
 
 usage() {
@@ -200,14 +208,26 @@ case "$patch_path_base" in
     ''|mono_root_v1) ;;
     *) infrastructure_failure "unsupported frozen patch path base" ;;
 esac
-build_context="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-submission.XXXXXXXX")"
+if [[ "$subevaluation_scoped" = true ]]; then
+    build_parent="$(dirname "$(dirname "$source_root")")"
+    [[ "$(basename "$build_parent")" = .evidence-runtime ]] || infrastructure_failure "tracked build source is outside its bounded run inventory"
+    build_context="$(mktemp -d "$build_parent/urnetwork-submission.XXXXXXXX")"
+else
+    build_context="$(mktemp -d "${TMPDIR:-/tmp}/urnetwork-submission.XXXXXXXX")"
+fi
 cleanup() {
+    if [[ "$subevaluation_scoped" = true ]] && declare -F tracked_submission_cleanup >/dev/null; then
+        tracked_submission_cleanup || true
+    fi
     if [ -n "${build_context:-}" ] && [ -d "$build_context" ]; then
         chmod -R u+w "$build_context" 2>/dev/null || true
         rm -rf -- "$build_context"
     fi
 }
 trap cleanup EXIT INT TERM
+if [[ "$subevaluation_scoped" = true ]]; then
+    trap 'exit 2' INT TERM
+fi
 
 install -m 0400 "$patch_path" "$build_context/canonical.patch"
 install -m 0400 "$policy_path" "$build_context/policy.json"
@@ -275,15 +295,15 @@ fi
 
 # Broad mode uses the installed validator to route/apply every repository. Its
 # exact original identity and expected map are independently replayed by Docker.
-if [[ ${patch_path_base:-} == mono_root_v1 ]]; then
+if [[ ${patch_path_base:-} == mono_root_v1 || "$subevaluation_scoped" = true ]]; then
     base_source_lock="$source_root/.evaluation-source-lock.json"
     [[ -f "$base_source_lock" && ! -L "$base_source_lock" ]] ||
         infrastructure_failure "broad candidate image source-lock evidence is absent"
     [[ "$(sha256sum "$base_source_lock" | awk '{print $1}')" == "$source_lock_sha256" ]] ||
         infrastructure_failure "broad candidate image source-lock evidence changed"
-    jq -e --slurpfile original "$build_context/original-source.json" \
-        '.candidate_path_base == "mono_root_v1" and
-         $original[0].candidate_path_base == .candidate_path_base and
+    jq -e --arg path_base "$patch_path_base" --slurpfile original "$build_context/original-source.json" \
+        '($path_base == "" or (.candidate_path_base == "mono_root_v1" and
+         $original[0].candidate_path_base == .candidate_path_base)) and
          .repositories == $original[0].repositories' "$base_source_lock" >/dev/null ||
         infrastructure_failure "base evaluator image does not support broad candidate source"
     if timeout --signal=TERM --kill-after=5s "$SOURCE_APPLICATION_TIMEOUT_SECONDS" "$trusted_validator" \
@@ -357,7 +377,7 @@ candidate_simulator_tree="$(evaluation_git -C "$source_root/server" rev-parse --
 }
 fi
 chmod 0600 "$source_identity"
-if [[ "$patch_path_base" == mono_root_v1 ]]; then
+if [[ "$patch_path_base" == mono_root_v1 || "$subevaluation_scoped" = true ]]; then
     candidate_commits_json="$(jq -cS '.candidate_commits' "$build_context/source-application.json")"
 else
     candidate_commits_json="$(jq -cS --arg candidate_sha "$candidate_sha" '.repositories + {server:$candidate_sha}' "$source_identity")"
@@ -371,6 +391,7 @@ jq -S --argjson candidate_commits "$candidate_commits_json" --arg patch_sha256 "
     "$source_identity" > "$source_identity.new"
 mv -f -- "$source_identity.new" "$source_identity"
 chmod 0400 "$source_identity"
+candidate_source_identity_sha256="$(sha256sum "$source_identity" | awk '{print $1}')"
 
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
@@ -391,7 +412,9 @@ if evaluation_docker image inspect "$image_tag" >/dev/null 2>&1; then
 else
 if [[ "$subevaluation_scoped" = true ]]; then
     subevaluation_require_client || infrastructure_failure "fixed build client is unavailable"
-fi
+    source "$SCRIPT_DIR/tracked-submission-build.sh"
+    tracked_submission_build
+else
 DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS" \
     "${subevaluation_docker_command[@]}" build \
     --platform linux/amd64 \
@@ -416,6 +439,7 @@ DOCKER_BUILDKIT=1 timeout --signal=TERM --kill-after=30s "$BUILD_TIMEOUT_SECONDS
     --build-arg "SUBMISSION_IDENTITY=$image_key" \
     --tag "$image_tag" \
     "$build_context" >&2
+fi
 
 image_id="$(evaluation_docker image inspect --format '{{.Id}}' "$image_tag")"
 fi
@@ -430,12 +454,16 @@ validate_submission_labels "$actual_labels" || {
         printf 'candidate image labels do not authenticate build inputs\n' >&2
         exit 1
     }
+candidate_source_mount_args=()
+if [[ "$subevaluation_scoped" = true ]]; then
+    candidate_source_mount_args=(--mount "type=bind,src=$source_root,dst=/workspace,readonly")
+fi
 runtime_identity="$(evaluation_docker run --rm \
     --network none \
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
-    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$image_id" identity)"
+    "${candidate_source_mount_args[@]}" "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$image_id" identity)"
 validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2
         exit 1

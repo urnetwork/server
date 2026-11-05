@@ -1,3 +1,5 @@
+//go:build linux
+
 // Protocol regressions exercise the actual framing and confined filesystem path.
 package competitionagent
 

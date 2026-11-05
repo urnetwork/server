@@ -227,6 +227,15 @@ func (self *DockerProxy) requireBuildRetired(ctx context.Context, cgroup string)
 	if self.plan.BuildRetirement == nil || strings.HasSuffix(cgroup, "-preflight.slice") {
 		return nil
 	}
+	if cgroup == self.plan.BuildCgroupName {
+		self.stateLock.Lock()
+		open := !self.buildAdmissionsClosed && self.retirement == nil && self.build == nil && self.accepting && self.unknown == 0
+		self.stateLock.Unlock()
+		if !open {
+			return errors.New("tracked compiler admission closed before final assembly or retirement")
+		}
+		return ctx.Err()
+	}
 	self.stateLock.Lock()
 	state := self.retirement
 	valid := state != nil && state.err == nil && state.receipt != nil && state.summary != nil && self.buildAdmissionsClosed && self.unknown == 0

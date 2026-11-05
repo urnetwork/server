@@ -49,6 +49,7 @@ type DockerProxySettings struct {
 	BuildStopGrace              time.Duration
 	QuiesceTimeout              time.Duration
 	DrainAllowance              time.Duration
+	CoreProfile                 CandidateCoreProfileSettings
 	Now                         func() time.Time
 }
 
@@ -65,7 +66,7 @@ func DefaultDockerProxySettings() DockerProxySettings {
 		MaximumCpuIndex: 4095, DefaultContainerShmBytes: 64 * 1024 * 1024,
 		HeaderTimeout: 15 * time.Second, UploadTimeout: 2 * time.Minute, ClientWriteTimeout: 15 * time.Second,
 		OperationTimeout: 3 * time.Hour, BuildTimeout: 10 * time.Minute, BuildStopGrace: 30 * time.Second,
-		QuiesceTimeout: 2 * time.Minute, DrainAllowance: 2 * time.Minute, Now: time.Now}
+		QuiesceTimeout: 2 * time.Minute, DrainAllowance: 2 * time.Minute, CoreProfile: DefaultCandidateCoreProfileSettings(), Now: time.Now}
 }
 
 // This root-persisted plan names only the installed local daemon and pinned
@@ -90,7 +91,10 @@ type DockerProxyPlan struct {
 	Docker               Pin                    `json:"docker"`
 	Buildx               Pin                    `json:"buildx"`
 	Dockerfile           Pin                    `json:"dockerfile"`
+	StockSeccompProfile  Pin                    `json:"stock_seccomp_profile"`
+	CandidateCoreProfile Pin                    `json:"candidate_core_profile"`
 	BaseImageDigest      string                 `json:"base_image_digest"`
+	BackingImages        []string               `json:"backing_images"`
 	CgroupNames          []string               `json:"cgroup_names"`
 	BuildCgroupName      string                 `json:"build_cgroup_name"`
 	CpuSet               string                 `json:"cpu_set"`

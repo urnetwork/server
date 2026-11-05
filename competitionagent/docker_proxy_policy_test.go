@@ -54,8 +54,8 @@ func dockerPolicyTestDirectory(t *testing.T, path string) string {
 	return path
 }
 
-// Real direct metadata/source probes have readonly root, cap-drop ALL, NNP,
-// explicit core0 and finite management CPU/memory/PID ceilings.
+// Real direct metadata/source probes have readonly root, cap-drop all, nnp,
+// pinned core-suppression profile and finite management CPU/memory/pid ceilings.
 func TestDockerPolicyAcceptsActualBoundedDirectHelperSchema(t *testing.T) {
 	fixture := newDockerProxyTest(t)
 	calls := dockerPolicyTestDaemon(t, fixture)
@@ -63,6 +63,9 @@ func TestDockerPolicyAcceptsActualBoundedDirectHelperSchema(t *testing.T) {
 		t.Fatalf("bounded direct helper was rejected: %d", response.Code)
 	}
 	for _, group := range fixture.plan.CgroupNames {
+		if group == fixture.plan.BuildCgroupName {
+			continue // Tracked check/compile stages have their own mandatory source/cache/output contract.
+		}
 		response := dockerPolicyTestCreate(t, fixture, func(object map[string]any) { object["HostConfig"].(map[string]any)["CgroupParent"] = group })
 		if response.Code != http.StatusCreated {
 			t.Fatalf("exact precommitted full-R9 cgroup was rejected: %s", group)
@@ -138,8 +141,8 @@ func TestDockerPolicyRejectsPrivilegeAndNamespaceExpansions(t *testing.T) {
 	}
 }
 
-// The body cannot reset a frozen cap, use swap, mix role CPUs or omit core0.
-// LimitCORE0 is tested only as defense in depth, never host pipe authorization.
+// The body cannot reset a frozen cap, use swap, mix role cpus, or omit core1.
+// The profile/limit source contract is separate from native pipe qualification.
 func TestDockerPolicyRejectsUnboundedResources(t *testing.T) {
 	for _, mutate := range []func(map[string]any){
 		func(object map[string]any) { object["HostConfig"].(map[string]any)["Memory"] = 0 },
@@ -157,7 +160,7 @@ func TestDockerPolicyRejectsUnboundedResources(t *testing.T) {
 		},
 		func(object map[string]any) { object["HostConfig"].(map[string]any)["Ulimits"] = []map[string]any{} },
 		func(object map[string]any) {
-			object["HostConfig"].(map[string]any)["Ulimits"] = []map[string]any{{"Name": "core", "Soft": 0, "Hard": 0}, {"Name": "nofile", "Soft": 1048577, "Hard": 1048577}}
+			object["HostConfig"].(map[string]any)["Ulimits"] = []map[string]any{{"Name": "core", "Soft": 1, "Hard": 1}, {"Name": "nofile", "Soft": 1048577, "Hard": 1048577}}
 		},
 		func(object map[string]any) { object["HostConfig"].(map[string]any)["OomKillDisable"] = true },
 		func(object map[string]any) { object["HostConfig"].(map[string]any)["CpuQuota"] = -1 },
@@ -301,7 +304,7 @@ func TestDockerPolicyAcceptsFrozenRoleTmpfsAndRejectsUnboundedMounts(t *testing.
 			object["User"] = role.user
 			host := object["HostConfig"].(map[string]any)
 			host["Memory"], host["MemorySwap"], host["Tmpfs"], host["CpusetCpus"] = role.memory, role.memory, role.tmpfs, fixture.plan.CpuSet
-			host["Ulimits"] = []map[string]any{{"Name": "core", "Soft": 0, "Hard": 0}, {"Name": "nofile", "Soft": 1048576, "Hard": 1048576}}
+			host["Ulimits"] = []map[string]any{{"Name": "core", "Soft": 1, "Hard": 1}, {"Name": "nofile", "Soft": 1048576, "Hard": 1048576}}
 		})
 		if response.Code != http.StatusCreated {
 			t.Fatal("actual frozen role tmpfs/resource schema was rejected")

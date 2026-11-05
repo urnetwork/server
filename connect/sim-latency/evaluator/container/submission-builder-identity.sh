@@ -57,11 +57,33 @@ manifest="$(jq -nSc --arg validator "$validator_sha256" --arg dockerfile "$docke
       identity_helper_sha256:$identity_helper,validator_pin_sha256:$validator_pin,
       evaluator_sha256:$evaluator,source_preparer_sha256:$source_preparer}')"
 if [[ "$subevaluation_scoped" = true ]]; then
+    for leaf in Dockerfile.submission.tracked tracked-submission-build.sh docker-stock.seccomp.json candidate-core.seccomp.json compose.yml; do
+        protected_file "$SCRIPT_DIR/$leaf"
+    done
     ownership_sha256="$(sha256sum "$SCRIPT_DIR/subevaluation-ownership.sh" | awk '{print $1}')"
     compose_sha256="$(sha256sum "$SCRIPT_DIR/compose.subevaluation.yml" | awk '{print $1}')"
     id_map_sha256="$(sha256sum "$SCRIPT_DIR/docker-id-map.sh" | awk '{print $1}')"
+    tracked_dockerfile_sha256="$(sha256sum "$SCRIPT_DIR/Dockerfile.submission.tracked" | awk '{print $1}')"
+    tracked_builder_sha256="$(sha256sum "$SCRIPT_DIR/tracked-submission-build.sh" | awk '{print $1}')"
+    stock_profile_sha256="$(sha256sum "$SCRIPT_DIR/docker-stock.seccomp.json" | awk '{print $1}')"
+    core_profile_sha256="$(sha256sum "$SCRIPT_DIR/candidate-core.seccomp.json" | awk '{print $1}')"
+    compose_base_sha256="$(sha256sum "$SCRIPT_DIR/compose.yml" | awk '{print $1}')"
+    backing_images="$(awk '$1 == "image:" && ($2 ~ /^postgres:/ || $2 ~ /^redis:/) {print $2}' "$SCRIPT_DIR/compose.yml" |
+        jq -Rsc 'split("\n")[:-1] | sort')"
+    jq -e 'length == 2 and (unique | length == 2) and
+        (map(select(test("^postgres:[a-zA-Z0-9_.-]+@sha256:[0-9a-f]{64}$"))) | length == 1) and
+        (map(select(test("^redis:[a-zA-Z0-9_.-]+@sha256:[0-9a-f]{64}$"))) | length == 1)' \
+        <<<"$backing_images" >/dev/null || fail
     manifest="$(jq -nSc --argjson manifest "$manifest" --arg ownership "$ownership_sha256" --arg compose "$compose_sha256" --arg id_map "$id_map_sha256" \
-        '$manifest + {subevaluation_ownership_sha256:$ownership,subevaluation_compose_sha256:$compose,subevaluation_docker_id_map_sha256:$id_map}')"
+        --arg tracked_dockerfile "$tracked_dockerfile_sha256" --arg tracked_builder "$tracked_builder_sha256" \
+        --arg stock_profile "$stock_profile_sha256" --arg core_profile "$core_profile_sha256" \
+        --arg compose_base "$compose_base_sha256" --argjson backing_images "$backing_images" \
+        '$manifest + {kind:"sim-latency-submission-builder/tracked-v1",execution_class:"tracked-create-core-one/v1",
+          source_materialization:"required-readonly-run-source/v1",builtin_source_kind:"pristine-evaluator-base",
+          subevaluation_ownership_sha256:$ownership,subevaluation_compose_sha256:$compose,subevaluation_docker_id_map_sha256:$id_map,
+          tracked_dockerfile_sha256:$tracked_dockerfile,tracked_builder_sha256:$tracked_builder,
+          stock_seccomp_profile_sha256:$stock_profile,candidate_core_profile_sha256:$core_profile,
+          compose_base_sha256:$compose_base,backing_images:$backing_images}')"
 fi
 builder_sha256="$(printf '%s' "$manifest" | sha256sum | awk '{print $1}')"
 jq -nSc --argjson manifest "$manifest" --arg builder_sha256 "$builder_sha256" \

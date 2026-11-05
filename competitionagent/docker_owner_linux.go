@@ -82,7 +82,7 @@ func (self *hostRunContainment) Start(ctx context.Context, plan cleanupPlan) err
 		return errors.New("run has no finite Docker management identity")
 	}
 	err := self.runner.Start(ctx, Launch{UnitName: dockerOwnerUnitName(plan.RunId), Role: "docker-owner", RunId: plan.RunId,
-		ConfigPath: self.config.configPath, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent,
+		ConfigPath: self.config.configPath, ConfigSha256: self.config.configSha256, BaseDirectory: self.config.BaseDirectory, Agent: self.config.Agent,
 		DeadlineAt: plan.DockerOwner.DeadlineAt.Add(self.proxySettings.DrainAllowance), ManagementCpuSet: plan.ManagementCpuSet})
 	if err != nil {
 		return err
@@ -220,6 +220,9 @@ type runResourceIdentity struct {
 	ManagementCpuSet          string `json:"management_cpuset"`
 	BuildMemoryLimit          string `json:"build_memory_limit"`
 	BuildMemoryLimitBytes     int64  `json:"build_memory_limit_bytes"`
+	BuildPidsLimit            int64  `json:"build_pids_limit"`
+	BuildWorkLimit            string `json:"build_work_limit"`
+	BuildWorkLimitBytes       int64  `json:"build_work_limit_bytes"`
 	RunnerMemoryLimitBytes    int64  `json:"runner_memory_limit_bytes"`
 	PostgresMemoryLimitBytes  int64  `json:"postgres_memory_limit_bytes"`
 	RedisMemoryLimitBytes     int64  `json:"redis_memory_limit_bytes"`
@@ -278,7 +281,7 @@ func validateRunResourceIdentity(identity runResourceIdentity) error {
 
 // The cleanup plan is root-committed before launch. Its nested owner plan has
 // no authority derived from workspace sidecars or a later caller environment.
-func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan, resource runResourceIdentity) (*DockerProxyPlan, error) {
+func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan, resource runResourceIdentity, backingImages []string) (*DockerProxyPlan, error) {
 	workerUid := uint32(os.Geteuid())
 	workerGid := uint32(os.Getegid())
 	operatorUid := workerUid
@@ -309,7 +312,9 @@ func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan,
 		SocketPath: filepath.Join(self.config.BaseDirectory, "clients", manifest.Identity.RunId, "docker.sock"), BuildSocketPath: filepath.Join(self.config.BaseDirectory, "clients", manifest.Identity.RunId, "build.sock"),
 		ContextRoot: self.workDirectory(manifest.Identity.RunId), UpstreamSocketPath: self.config.DockerSocketPath, Docker: self.config.Docker, Buildx: self.config.DockerRole.Buildx,
 		Dockerfile: self.config.DockerRole.Dockerfile, BaseImageDigest: manifest.EvaluatorImageDigest, CgroupNames: append([]string(nil), plan.CgroupNames...),
-		CpuSet: resource.EvaluationCpuSet, ManagementCpuSet: resource.ManagementCpuSet, BuildMemory: resource.BuildMemoryLimit, WorkerUid: workerUid,
+		StockSeccompProfile: self.config.DockerRole.StockSeccompProfile, CandidateCoreProfile: self.config.DockerRole.CandidateCoreProfile,
+		BackingImages: append([]string(nil), backingImages...),
+		CpuSet:        resource.EvaluationCpuSet, ManagementCpuSet: resource.ManagementCpuSet, BuildMemory: resource.BuildMemoryLimit, WorkerUid: workerUid,
 		ReadOnlyBindPaths: []string{self.config.ConfigLocalDirectory, self.config.VaultLocalDirectory, self.config.DockerRole.PostgresInitialization.Path}, ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256,
 		HostFiles: &HostFilesPlan{WorkerGid: workerGid, ContainerRootUid: idMap.ContainerRootUid, ContainerRootGid: idMap.ContainerRootGid,
 			ResourceBoundary:     self.config.DockerRole.ResourceBoundary,
@@ -345,7 +350,16 @@ func (self *Agent) verifyDockerOwnerPlan(manifest StartManifest, plan cleanupPla
 	}
 	resource := runResourceIdentity{EvaluationCpuSet: plan.DockerOwner.CpuSet, ManagementCpuSet: plan.ManagementCpuSet, BuildMemoryLimit: plan.DockerOwner.BuildMemory,
 		EvidenceMemoryLimitBytes: plan.DockerOwner.HostFiles.EvidenceBytes}
-	expected, err := self.makeDockerOwnerPlan(manifest, plan, resource)
+	owner := self
+	if self.recoveryOnly {
+		if plan.DockerOwner.WorkerUid == 0 || plan.DockerOwner.HostFiles.WorkerGid == 0 {
+			return errors.New("authenticated cleanup plan omitted its original worker identity")
+		}
+		copy := *self
+		copy.credential = &syscall.Credential{Uid: plan.DockerOwner.WorkerUid, Gid: plan.DockerOwner.HostFiles.WorkerGid}
+		owner = &copy
+	}
+	expected, err := owner.makeDockerOwnerPlan(manifest, plan, resource, plan.DockerOwner.BackingImages)
 	if err != nil || !reflect.DeepEqual(expected, plan.DockerOwner) {
 		return errors.New("Docker custody plan differs from the root-pinned run role")
 	}
@@ -405,6 +419,9 @@ func (self *Agent) EmergencyFreeze(ctx context.Context, runId string) error {
 // unit. It never executes candidate code, loads main credentials, or restarts
 // an issued build after process loss. ExecStopPost owns emergency freezing.
 func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
+	if self.recoveryOnly {
+		return errors.New("recovery role cannot launch or resume a Docker owner")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -413,7 +430,7 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 		return err
 	}
 	reaped, err := self.loadResourcesReaped(runId, state.CleanupPlanSha256)
-	if err != nil || reaped || state.CleanupVerified || state.StopCleanupVerified || state.CancelRequested || terminalState(state.State) || !self.settings.Now().Before(manifest.Identity.DeadlineAt) {
+	if err != nil || reaped || state.RecoveryActive || state.CleanupVerified || state.StopCleanupVerified || state.CancelRequested || terminalState(state.State) || !self.settings.Now().Before(manifest.Identity.DeadlineAt) {
 		return errors.New("Docker owner execution authority is closed")
 	}
 	marker, err := json.Marshal(struct {

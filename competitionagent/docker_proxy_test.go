@@ -53,7 +53,7 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 		t.Fatal(err)
 	}
 	dockerfile := filepath.Join(root, "Dockerfile.submission")
-	if err := os.WriteFile(dockerfile, []byte("FROM scratch\n"), 0400); err != nil {
+	if err := os.WriteFile(dockerfile, []byte("ARG EVALUATOR_BASE_IMAGE\nFROM ${EVALUATOR_BASE_IMAGE}\n"), 0400); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(dockerfile)
@@ -61,24 +61,31 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(contents)
+	stockProfile, coreProfile := testCandidateCoreProfilePins(t, root)
 	plan := DockerProxyPlan{Schema: Schema, RunId: scope.plan.RunId, JobId: scope.plan.JobId, RoundId: scope.plan.RoundId, Attempt: scope.plan.Attempt,
 		DeadlineAt: time.Now().Add(time.Hour), BaseDirectory: root, StateDirectory: filepath.Join(root, "state", scope.plan.RunId, "docker-owner"), ScratchDirectory: filepath.Join(root, "scratch", scope.plan.RunId), SocketPath: filepath.Join(root, "clients", scope.plan.RunId, "docker.sock"),
 		BuildSocketPath: filepath.Join(root, "clients", scope.plan.RunId, "build.sock"), ContextRoot: contextRoot, UpstreamSocketPath: filepath.Join(root, "engine", "docker.sock"),
 		Docker: Pin{Path: filepath.Join(root, "docker"), Sha256: strings.Repeat("d", 64)}, Buildx: Pin{Path: filepath.Join(root, "docker-buildx"), Sha256: strings.Repeat("e", 64)},
 		Dockerfile: Pin{Path: dockerfile, Sha256: hex.EncodeToString(digest[:])}, BaseImageDigest: "sha256:" + strings.Repeat("3", 64),
-		CgroupNames: append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", ManagementCpuSet: "0", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
+		StockSeccompProfile: stockProfile, CandidateCoreProfile: coreProfile,
+		BackingImages: []string{"postgres:synthetic@sha256:" + strings.Repeat("a", 64), "redis:synthetic@sha256:" + strings.Repeat("b", 64)},
+		CgroupNames:   append([]string(nil), scope.plan.CgroupNames...), BuildCgroupName: scope.plan.CgroupNames[0], CpuSet: "2,4", ManagementCpuSet: "0", BuildMemory: "5g", WorkerUid: 12345, ResourcePolicySha256: strings.Repeat("f", 64)}
 	settings := DefaultDockerProxySettings()
 	proxy, err := newDockerProxy(plan, settings, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = proxy.Close() })
+	profileContent, err := ValidateCandidateCoreProfiles(stockProfile, coreProfile, settings.CoreProfile, false)
+	if err != nil {
+		t.Fatal(err)
+	}
 	create, err := json.Marshal(map[string]any{"Image": plan.BaseImageDigest, "User": "65532:65532", "Cmd": []string{"identity"},
 		"AttachStdout": true, "AttachStderr": true, "Labels": map[string]string{cleanupJobLabel: plan.JobId, cleanupRoundLabel: plan.RoundId, dockerProxyRunLabel: plan.RunId},
 		"HostConfig": map[string]any{"CgroupParent": plan.CgroupNames[len(plan.CgroupNames)-1], "Privileged": false, "ReadonlyRootfs": true,
-			"CapDrop": []string{"ALL"}, "CapAdd": nil, "SecurityOpt": []string{"no-new-privileges:true"}, "NetworkMode": "none", "CgroupnsMode": "private",
+			"CapDrop": []string{"ALL"}, "CapAdd": nil, "SecurityOpt": []string{"no-new-privileges:true", "seccomp=" + string(profileContent)}, "NetworkMode": "none", "CgroupnsMode": "private",
 			"Memory": int64(4 * 1024 * 1024 * 1024), "MemorySwap": int64(4 * 1024 * 1024 * 1024), "PidsLimit": 1024, "CpusetCpus": plan.ManagementCpuSet,
-			"Ulimits": []map[string]any{{"Name": "core", "Soft": 0, "Hard": 0}}, "ShmSize": 64 * 1024 * 1024,
+			"Ulimits": []map[string]any{{"Name": "core", "Soft": 1, "Hard": 1}}, "ShmSize": 64 * 1024 * 1024,
 			"Binds": nil, "PortBindings": map[string]any{}, "PublishAllPorts": false, "MaskedPaths": nil, "ReadonlyPaths": nil,
 			"LogConfig": map[string]any{"Type": "", "Config": map[string]string{}}, "RestartPolicy": map[string]any{"Name": "no", "MaximumRetryCount": 0},
 			"AutoRemove": true, "CpuShares": 0, "NanoCpus": 0, "Devices": nil, "DeviceRequests": nil, "VolumeDriver": "", "VolumesFrom": nil}})
@@ -90,8 +97,8 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 		"--file", plan.Dockerfile.Path}
 	buildArgs := map[string]string{"EVALUATOR_BASE_IMAGE": "urnetwork/sim-latency-evaluator-base-id:" + strings.TrimPrefix(plan.BaseImageDigest, "sha256:"), "BASE_SHA": strings.Repeat("a", 40), "CANDIDATE_SHA": strings.Repeat("c", 40),
 		"PATCH_SHA256": strings.Repeat("1", 64), "POLICY_SHA256": strings.Repeat("2", 64), "BUILDER_SHA256": strings.Repeat("4", 64), "PATCH_VALIDATOR_SHA256": strings.Repeat("5", 64),
-		"CANDIDATE_COMMITS_SHA256": strings.Repeat("6", 64), "ORIGINAL_SOURCE_IDENTITY_SHA256": strings.Repeat("7", 64), "SUBMISSION_IDENTITY": strings.Repeat("b", 64)}
-	for _, name := range []string{"EVALUATOR_BASE_IMAGE", "BASE_SHA", "CANDIDATE_SHA", "PATCH_SHA256", "POLICY_SHA256", "BUILDER_SHA256", "PATCH_VALIDATOR_SHA256", "CANDIDATE_COMMITS_SHA256", "ORIGINAL_SOURCE_IDENTITY_SHA256", "SUBMISSION_IDENTITY"} {
+		"CANDIDATE_COMMITS_SHA256": strings.Repeat("6", 64), "ORIGINAL_SOURCE_IDENTITY_SHA256": strings.Repeat("7", 64), "CANDIDATE_SOURCE_IDENTITY_SHA256": strings.Repeat("8", 64), "SUBMISSION_IDENTITY": strings.Repeat("b", 64)}
+	for _, name := range []string{"EVALUATOR_BASE_IMAGE", "BASE_SHA", "CANDIDATE_SHA", "PATCH_SHA256", "POLICY_SHA256", "BUILDER_SHA256", "PATCH_VALIDATOR_SHA256", "CANDIDATE_COMMITS_SHA256", "ORIGINAL_SOURCE_IDENTITY_SHA256", "CANDIDATE_SOURCE_IDENTITY_SHA256", "SUBMISSION_IDENTITY"} {
 		args = append(args, "--build-arg", name+"="+buildArgs[name])
 	}
 	args = append(args, "--tag", "urnetwork/sim-latency-submission:"+strings.Repeat("b", 32), contextDirectory)

@@ -54,61 +54,69 @@ type RuntimeResourceBoundarySettings struct {
 	MaximumNetworkInterfaces int
 	MaximumNetworkRoutes     int
 	MaximumRuntimeProcesses  int
+	// Parser ceiling for the exact observed core_pipe_limit count; default 128
+	// changes no host sysctl. Nonpositive refuses the optional native class.
+	MaximumCorePipeLimit int
 }
 
 // Native inventories exceed a small configuration but remain strictly bounded.
 func DefaultRuntimeResourceBoundarySettings() RuntimeResourceBoundarySettings {
 	return RuntimeResourceBoundarySettings{DocumentBytes: 128 * 1024, NativeBytes: 4 * 1024 * 1024,
 		ExecutableBytes: 512 * 1024 * 1024, MountCount: 16384, DocumentDepth: 64, CommandTimeout: 10 * time.Second,
-		ContainerLogMaximumSize: "8m", ContainerLogMaximumFiles: 2, MaximumNetworkInterfaces: 128, MaximumNetworkRoutes: 256, MaximumRuntimeProcesses: 128}
+		ContainerLogMaximumSize: "8m", ContainerLogMaximumFiles: 2, MaximumNetworkInterfaces: 128, MaximumNetworkRoutes: 256, MaximumRuntimeProcesses: 128, MaximumCorePipeLimit: 128}
 }
 
 // The protected manifest pins a separate engine, all of its writable roots and
 // its host-id allocation. Container identity still requires a native uid_map
 // and gid_map probe before handing off output; this document cannot prove that.
+// Its management set must match the pinned resource helper; daemon cgroups
+// restrict all threads without imposing inherited per-task affinity.
 type RuntimeResourceBoundary struct {
-	Schema                  int      `json:"schema"`
-	BaseDirectory           string   `json:"base_directory"`
-	CandidateRoot           string   `json:"candidate_root"`
-	BackingFile             string   `json:"backing_file"`
-	BlockDevice             string   `json:"block_device"`
-	MaximumBytes            uint64   `json:"maximum_bytes"`
-	MinimumFreeBytes        uint64   `json:"minimum_free_bytes"`
-	MinimumBackingFreeBytes uint64   `json:"minimum_backing_free_bytes"`
-	PrivateSocketPath       string   `json:"private_socket_path"`
-	ContainerdSocketPath    string   `json:"containerd_socket_path"`
-	DockerDataRoot          string   `json:"docker_data_root"`
-	ContainerdRoot          string   `json:"containerd_root"`
-	EngineExecRoot          string   `json:"engine_exec_root"`
-	ScratchRoot             string   `json:"scratch_root"`
-	WorkRoot                string   `json:"work_root"`
-	UserNamespace           string   `json:"user_namespace"`
-	ContainerRootUid        uint32   `json:"container_root_uid"`
-	ContainerRootGid        uint32   `json:"container_root_gid"`
-	ContainerIdMapLength    uint32   `json:"container_id_map_length"`
-	RuntimeName             string   `json:"runtime_name"`
-	RuntimeArguments        []string `json:"runtime_arguments"`
-	Dockerd                 Pin      `json:"dockerd"`
-	Containerd              Pin      `json:"containerd"`
-	ContainerdVersion       string   `json:"containerd_version"`
-	ContainerdSourceCommit  string   `json:"containerd_source_commit"`
-	Runc                    Pin      `json:"runc"`
-	ContainerdShim          Pin      `json:"containerd_shim"`
-	SocketModeHelper        Pin      `json:"socket_mode_helper"`
-	Nftables                Pin      `json:"nftables"`
-	EngineConfig            Pin      `json:"engine_config"`
-	ContainerdConfig        Pin      `json:"containerd_config"`
-	NetworkPolicy           Pin      `json:"network_policy"`
-	NamespaceKeeper         Pin      `json:"namespace_keeper"`
-	Systemctl               Pin      `json:"systemctl"`
-	Nsenter                 Pin      `json:"nsenter"`
-	Ip                      Pin      `json:"ip"`
-	NamespaceKeeperUnit     Pin      `json:"namespace_keeper_unit"`
-	EngineUnit              Pin      `json:"engine_unit"`
-	ContainerdUnit          Pin      `json:"containerd_unit"`
-	NetworkUnit             Pin      `json:"network_unit"`
-	WorkDeviceId            uint64   `json:"-"`
+	Schema                  int                          `json:"schema"`
+	BaseDirectory           string                       `json:"base_directory"`
+	CandidateRoot           string                       `json:"candidate_root"`
+	BackingFile             string                       `json:"backing_file"`
+	BlockDevice             string                       `json:"block_device"`
+	MaximumBytes            uint64                       `json:"maximum_bytes"`
+	MinimumFreeBytes        uint64                       `json:"minimum_free_bytes"`
+	MinimumBackingFreeBytes uint64                       `json:"minimum_backing_free_bytes"`
+	PrivateSocketPath       string                       `json:"private_socket_path"`
+	ContainerdSocketPath    string                       `json:"containerd_socket_path"`
+	DockerDataRoot          string                       `json:"docker_data_root"`
+	ContainerdRoot          string                       `json:"containerd_root"`
+	EngineExecRoot          string                       `json:"engine_exec_root"`
+	ScratchRoot             string                       `json:"scratch_root"`
+	WorkRoot                string                       `json:"work_root"`
+	UserNamespace           string                       `json:"user_namespace"`
+	ContainerRootUid        uint32                       `json:"container_root_uid"`
+	ContainerRootGid        uint32                       `json:"container_root_gid"`
+	ContainerIdMapLength    uint32                       `json:"container_id_map_length"`
+	RuntimeName             string                       `json:"runtime_name"`
+	RuntimeArguments        []string                     `json:"runtime_arguments"`
+	ManagementCpuSet        string                       `json:"management_cpuset"`
+	Dockerd                 Pin                          `json:"dockerd"`
+	Containerd              Pin                          `json:"containerd"`
+	ContainerdVersion       string                       `json:"containerd_version"`
+	ContainerdSourceCommit  string                       `json:"containerd_source_commit"`
+	Runc                    Pin                          `json:"runc"`
+	ContainerdShim          Pin                          `json:"containerd_shim"`
+	SocketModeHelper        Pin                          `json:"socket_mode_helper"`
+	Nftables                Pin                          `json:"nftables"`
+	EngineConfig            Pin                          `json:"engine_config"`
+	ContainerdConfig        Pin                          `json:"containerd_config"`
+	NetworkPolicy           Pin                          `json:"network_policy"`
+	NamespaceKeeper         Pin                          `json:"namespace_keeper"`
+	Systemctl               Pin                          `json:"systemctl"`
+	Nsenter                 Pin                          `json:"nsenter"`
+	Ip                      Pin                          `json:"ip"`
+	NamespaceKeeperUnit     Pin                          `json:"namespace_keeper_unit"`
+	EngineUnit              Pin                          `json:"engine_unit"`
+	ContainerdUnit          Pin                          `json:"containerd_unit"`
+	NetworkUnit             Pin                          `json:"network_unit"`
+	NativeClass             *RuntimeNativeClassSelection `json:"native_class,omitempty"`
+	WorkDeviceId            uint64                       `json:"-"`
 	namespace               runtimeBoundaryNamespace
+	nativeClass             *runtimeNativeClassProof
 }
 
 // Test seams replace native facts, not the closed schema or its policy checks.
@@ -153,6 +161,7 @@ func (self *RuntimeResourceBoundary) Recheck(ctx context.Context) error {
 type runtimeBoundaryFacts struct {
 	MountInfo, MountInfoAfter                    []byte
 	CorePattern, CorePatternAfter                []byte
+	NativeKernel, NativeKernelAfter              RuntimeNativeKernelIdentity
 	SubUids, SubGids                             []byte
 	BlockDeviceId, BlockBytes                    uint64
 	LoopBackingDevice, LoopBackingInode          uint64
@@ -179,7 +188,7 @@ const runtimeBoundaryEngineUnitName = "urnetwork-private-engine.service"
 const runtimeBoundaryContainerdUnitName = "urnetwork-private-containerd.service"
 const runtimeBoundaryNetworkUnitName = "urnetwork-private-engine-network.service"
 const runtimeBoundaryNsfs = 0x6e736673
-const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit"
+const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs,Slice,OnFailure,OnFailureJobMode"
 
 var runtimeBoundaryBridgeNamePattern = regexp.MustCompile(`^unev-[0-9a-f]{10}$`)
 var runtimeBoundaryVethNamePattern = regexp.MustCompile(`^veth[0-9a-f]+$`)
@@ -254,6 +263,9 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 			return nil, err
 		}
 	}
+	if err := prepareRuntimeNativeClass(ctx, boundary, scope, settings, host); err != nil {
+		return nil, err
+	}
 	facts, err := host.Kernel(ctx, *boundary, scope, settings)
 	if err != nil {
 		return nil, err
@@ -280,6 +292,9 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 	if err := validateRuntimeBoundaryDaemon(daemon, *boundary, settings); err != nil {
 		return nil, err
 	}
+	if err := verifyRuntimeNativeClassImage(ctx, *boundary, settings, host); err != nil {
+		return nil, err
+	}
 	network, err := host.Network(ctx, *boundary, settings)
 	if err != nil {
 		return nil, err
@@ -300,6 +315,11 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 // All mutable engine paths are distinct children of the one quota filesystem.
 // Socket/control state and durable agent journals cannot consume that budget.
 func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error {
+	if self.NativeClass != nil {
+		if err := self.NativeClass.validate(*self); err != nil {
+			return err
+		}
+	}
 	if self.Schema != Schema || scope.WorkerUid == 0 || scope.WorkerGid == 0 || self.BaseDirectory != scope.BaseDirectory || self.WorkRoot != scope.WorkDirectory || self.ScratchRoot != scope.ScratchDirectory ||
 		self.MaximumBytes == 0 || self.MinimumFreeBytes == 0 || self.MinimumFreeBytes >= self.MaximumBytes || self.MinimumBackingFreeBytes == 0 ||
 		!runtimeBoundaryLoopPattern.MatchString(self.BlockDevice) || !runtimeBoundaryUserPattern.MatchString(self.UserNamespace) || !runtimeBoundaryVersionPattern.MatchString(self.ContainerdVersion) ||
@@ -311,6 +331,9 @@ func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error 
 	}
 	if self.RuntimeName != "runc" || self.RuntimeArguments == nil || len(self.RuntimeArguments) != 0 {
 		return errors.New("private engine changed the explicitly qualified stock runc profile")
+	}
+	if _, err := dockerPolicyCpuSet(self.ManagementCpuSet, DefaultDockerProxySettings().MaximumCpuIndex); err != nil {
+		return errors.New("private engine has no explicit bounded management CPU set")
 	}
 	if _, err := strconv.ParseUint(strings.TrimPrefix(self.BlockDevice, "/dev/loop"), 10, 32); err != nil {
 		return errors.New("private engine loop-device number exceeds the kernel identity range")
@@ -584,8 +607,11 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 	if !bytes.Equal(facts.CorePattern, facts.CorePatternAfter) {
 		return errors.New("host core policy changed during resource admission")
 	}
-	if err := validateRuntimeBoundaryCorePattern(facts.CorePattern, settings); err != nil {
+	if err := validateRuntimeBoundaryCorePolicy(boundary, facts.CorePattern, settings); err != nil {
 		return err
+	}
+	if boundary.NativeClass != nil && (boundary.nativeClass == nil || facts.NativeKernel != boundary.nativeClass.kernel || facts.NativeKernelAfter != facts.NativeKernel) {
+		return errors.New("native class kernel/build/core policy changed during admission")
 	}
 	if !bytes.Equal(facts.MountInfo, facts.MountInfoAfter) {
 		return errors.New("resource mounts changed during admission")
@@ -643,9 +669,9 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 	return validateRuntimeBoundarySubIds(facts.SubGids, boundary.UserNamespace, boundary.ContainerRootGid, boundary.ContainerIdMapLength, settings)
 }
 
-// RLIMIT_CORE is ignored for piped handlers, which run in the initial host
-// namespaces. No expected-string pin or Boolean waiver can qualify such a
-// handler here. Only this fixed slash-free filename policy is supported.
+// The legacy branch has no pipe waiver: zero RLIMIT_CORE is ignored for piped
+// handlers in the initial host namespaces. Only its original fixed filename is
+// supported here; the optional reviewed core-one class has a separate gate.
 func validateRuntimeBoundaryCorePattern(content []byte, settings RuntimeResourceBoundarySettings) error {
 	if settings.DocumentBytes <= 0 || int64(len(content)) > settings.DocumentBytes ||
 		strings.TrimSuffix(string(content), "\n") != "core.%P" {
@@ -654,8 +680,9 @@ func validateRuntimeBoundaryCorePattern(content []byte, settings RuntimeResource
 	return nil
 }
 
-// Zero limits are necessary defense in depth, not sufficient host-core proof.
-// The native peer separately checks the non-piped policy and quota-backed cwd.
+// Zero private-daemon limits remain defense in depth, not pipe suppression.
+// Candidate core-one inheritance belongs to the separate reviewed class; the
+// native peer still checks its core policy and quota-backed working directory.
 func validateRuntimeBoundaryCoreLimits(content []byte, settings RuntimeResourceBoundarySettings) error {
 	if settings.DocumentBytes <= 0 || int64(len(content)) > settings.DocumentBytes {
 		return errors.New("private daemon core-limit inventory is unbounded")
@@ -844,8 +871,14 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 	if err != nil {
 		return facts, err
 	}
-	if err := validateRuntimeBoundaryCorePattern(facts.CorePattern, settings); err != nil {
+	if err := validateRuntimeBoundaryCorePolicy(boundary, facts.CorePattern, settings); err != nil {
 		return facts, err
+	}
+	if boundary.NativeClass != nil {
+		facts.NativeKernel, err = (runtimeBoundaryNativeHost{}).NativeClassKernel(ctx, settings)
+		if err != nil || boundary.nativeClass == nil || facts.NativeKernel != boundary.nativeClass.kernel || facts.NativeKernel.CorePatternSha256 != digestDockerBytes(facts.CorePattern) {
+			return facts, errors.New("native class initial kernel facts do not match the pinned review")
+		}
 	}
 	facts.MountInfo, err = readBounded("/proc/self/mountinfo", settings.NativeBytes)
 	if err != nil {
@@ -949,6 +982,9 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 		return facts, err
 	}
 	facts.CorePatternAfter, err = readBounded("/proc/sys/kernel/core_pattern", settings.DocumentBytes)
+	if err == nil && boundary.NativeClass != nil {
+		facts.NativeKernelAfter, err = (runtimeBoundaryNativeHost{}).NativeClassKernel(ctx, settings)
+	}
 	return facts, err
 }
 
@@ -1006,8 +1042,14 @@ func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, 
 	if err != nil {
 		return err
 	}
-	if err := validateRuntimeBoundaryCorePattern(corePattern, settings); err != nil {
+	if err := validateRuntimeBoundaryCorePolicy(boundary, corePattern, settings); err != nil {
 		return err
+	}
+	if boundary.NativeClass != nil {
+		actual, err := (runtimeBoundaryNativeHost{}).NativeClassKernel(context.Background(), settings)
+		if err != nil || boundary.nativeClass == nil || actual != boundary.nativeClass.kernel || actual.CorePatternSha256 != digestDockerBytes(corePattern) {
+			return errors.New("private daemon peer no longer matches its reviewed native core class")
+		}
 	}
 	limits, err := readBounded(filepath.Join(proc, "limits"), settings.DocumentBytes)
 	if err != nil {
@@ -1018,7 +1060,7 @@ func verifyRuntimeBoundaryPeer(connection net.Conn, executable Pin, configPath, 
 	}
 	cwdTarget, err := os.Readlink(filepath.Join(proc, "cwd"))
 	if err != nil || filepath.Clean(cwdTarget) != cwdTarget || !pathWithin(boundary.CandidateRoot, cwdTarget) {
-		return errors.New("private daemon non-piped core filename would escape its quota")
+		return errors.New("private daemon working directory escaped the candidate quota")
 	}
 	cwd, err := os.OpenFile(filepath.Join(proc, "cwd"), os.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NONBLOCK, 0)
 	if err != nil {
@@ -1117,6 +1159,14 @@ func validateRuntimeBoundaryLogs(logs []runtimeBoundaryLog, program string, boun
 // Only the manifest's private Unix endpoint is queried. No environment proxy,
 // redirect, alternate context, network listener or Docker CLI is involved.
 func (runtimeBoundaryNativeHost) Daemon(parent context.Context, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings) ([]byte, error) {
+	return runtimeBoundaryEngineRead(parent, boundary, settings, "/v1.56/info")
+}
+
+// Admission has only two read-only query shapes and no caller-selected route.
+func runtimeBoundaryEngineRead(parent context.Context, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings, path string) ([]byte, error) {
+	if path != "/v1.56/info" && (boundary.NativeClass == nil || path != "/v1.56/images/"+boundary.NativeClass.Release.EvaluatorImageDigest+"/json") {
+		return nil, errors.New("private engine admission refused another read route")
+	}
 	ctx, cancel := context.WithTimeout(parent, settings.CommandTimeout)
 	defer cancel()
 	dial := func(ctx context.Context, socket string, executable Pin, configPath, configFlag string) (net.Conn, error) {
@@ -1141,7 +1191,7 @@ func (runtimeBoundaryNativeHost) Daemon(parent context.Context, boundary Runtime
 		}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://private-engine/v1.56/info", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://private-engine"+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1255,9 +1305,13 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 		properties["LoadState"] != "loaded" || properties["ActiveState"] != "active" || properties["PrivateNetwork"] != "yes" ||
 		properties["NetworkNamespacePath"] != "" || properties["User"] != "root" || properties["Group"] != "root" ||
 		properties["Restart"] != "no" || properties["KillMode"] != "control-group" ||
+		properties["Slice"] != managementPrivateSliceName || properties["OnFailure"] != managementRecoveryServiceName || properties["OnFailureJobMode"] != "replace" ||
 		network && (properties["SubState"] != "exited" || properties["RemainAfterExit"] != "yes") ||
 		!network && (properties["SubState"] != "running" || properties["RemainAfterExit"] != "no") {
 		return result, errors.New("private unit changed its protected namespace or lifetime policy")
+	}
+	if err := validateRuntimeBoundaryManagementManager(properties["AllowedCPUs"], boundary); err != nil {
+		return result, err
 	}
 	contains := func(key, required string) bool {
 		for _, value := range strings.Fields(properties[key]) {
@@ -1288,7 +1342,8 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 	if err != nil || start == 0 {
 		return result, errors.New("private unit process start is unproved")
 	}
-	if !network && properties["ControlGroup"] != "/system.slice/"+result.Name {
+	expectedGroup := managementPrivateCgroupPath + "/" + result.Name
+	if !network && properties["ControlGroup"] != expectedGroup || network && properties["ControlGroup"] != "" && properties["ControlGroup"] != expectedGroup {
 		return result, errors.New("private unit control group is outside its fixed role")
 	}
 	result.Fragment, result.Invocation, result.MainStart, result.ControlGroup = pin.Path, properties["InvocationID"], properties["ExecMainStartTimestampMonotonic"], properties["ControlGroup"]
@@ -1354,7 +1409,7 @@ func runtimeBoundaryProcessStart(content []byte) (uint64, error) {
 
 // A participant must remain in the same unit invocation and descriptor-backed
 // network namespace while its native process birth is sampled.
-func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, settings RuntimeResourceBoundarySettings) (runtimeBoundaryUnit, error) {
+func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings) (runtimeBoundaryUnit, error) {
 	proc := "/proc/" + strconv.Itoa(unit.Pid)
 	before, err := readBounded(filepath.Join(proc, "stat"), settings.DocumentBytes)
 	if err != nil {
@@ -1370,6 +1425,9 @@ func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, settings RuntimeResour
 	}
 	_ = file.Close()
 	unit.Namespace = identity
+	if err := verifyRuntimeBoundaryManagement(unit, boundary, settings); err != nil {
+		return unit, err
+	}
 	after, err := readBounded(filepath.Join(proc, "stat"), settings.DocumentBytes)
 	if err != nil {
 		return unit, err
@@ -1449,7 +1507,7 @@ func (runtimeBoundaryNativeHost) Namespace(ctx context.Context, boundary Runtime
 			return nil, err
 		}
 		if unit.Pid != 0 {
-			unit, err = runtimeBoundaryParticipant(unit, settings)
+			unit, err = runtimeBoundaryParticipant(unit, boundary, settings)
 			if err != nil {
 				return nil, err
 			}
@@ -1509,7 +1567,7 @@ func (self *runtimeBoundaryNativeNamespace) Peer(pid int, executable Pin) error 
 	if expected.Pid != pid {
 		return errors.New("private socket peer is not the captured service process")
 	}
-	current, err := runtimeBoundaryParticipant(expected, self.settings)
+	current, err := runtimeBoundaryParticipant(expected, self.boundary, self.settings)
 	if err != nil || current.ProcessStart != expected.ProcessStart || current.Namespace != self.identity {
 		return errors.New("private socket peer changed its process or namespace generation")
 	}
@@ -1543,7 +1601,7 @@ func (self *runtimeBoundaryNativeNamespace) Recheck(ctx context.Context) error {
 			return errors.New("private namespace unit restarted or changed invocation")
 		}
 		if unit.Pid != 0 {
-			unit, err = runtimeBoundaryParticipant(unit, self.settings)
+			unit, err = runtimeBoundaryParticipant(unit, self.boundary, self.settings)
 			if err != nil || unit.ProcessStart != expected.ProcessStart {
 				return errors.New("private namespace process generation changed")
 			}
@@ -1613,6 +1671,10 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if err != nil {
 			return err
 		}
+		participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Name: unit.Name, ControlGroup: unit.ControlGroup, Pid: pid}, self.boundary, self.settings)
+		if err != nil {
+			return errors.New("private containerd helper escaped its management CPU role")
+		}
 		if target == self.boundary.Runc.Path {
 			continue
 		}
@@ -1623,8 +1685,7 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if err != nil || validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
 			return errors.New("managed containerd shim arguments escaped its private runtime")
 		}
-		participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Pid: pid}, self.settings)
-		if err != nil || participant.Namespace != self.identity {
+		if participant.Namespace != self.identity {
 			return errors.New("managed containerd shim escaped its private namespace")
 		}
 		if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {
