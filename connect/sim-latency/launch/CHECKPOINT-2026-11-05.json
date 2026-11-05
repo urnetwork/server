@@ -48,6 +48,17 @@
       "source_commit": "1a4a0102dd0e0139c2934ede410bda38abfd26c7",
       "provider_inference_or_native_fixture_execution": false
     },
+    "review_source_fixture_followup": {
+      "source_commit": "1a4a0102dd0e0139c2934ede410bda38abfd26c7",
+      "observations": 38,
+      "successful_single_test_variants": 32,
+      "intentional_unavailable_helper_build_failures": 6,
+      "unexpected_failures": 0,
+      "source_plan_sha256": "affb16bef937f70f80126b66a9a82da3e1fd4bcefb995e4c2b7540e61e20c5df",
+      "retained_observations_sha256": "8fcbf8680a4ac4bdf47818c31377caa7bd3c76e943ea55f40742d6ab15562073",
+      "copied_unit_only_acceptance_sha256": "ae1753aeecfd41bc4dd9ef134052b341a7793c62f728154e2ab6500fc455d6c8",
+      "scope": "Closed synthetic source/compiler observations and copied unit-test evidence only; no provider, containment, performance or production review qualification"
+    },
     "harness_status": "Three deterministic Go controls passed for early-zero ambiguity, explicit completion, real failures and signal handling. Interrupted observer/waiter evidence remains unaccepted.",
     "genuine_provider_calls_run": false,
     "goofe_native_or_cross_host_qualification_complete": false,
