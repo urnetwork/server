@@ -32,9 +32,16 @@ var competitionMigration897ArtifactQuery = competitionSnowTwoMemberCustodyArtifa
 // The v897 custody with the given source authorization body. 900 re-creates
 // only that body, so it republishes the rest of this custody unchanged.
 func competitionSnowTwoMemberCustodyArtifactQuery(sourceAuthorized string) string {
+	_, _, _, _, _, findingsV1, findingsV2, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
+	return competitionSnowTwoMemberCustodyWithFindingsArtifactQuery(sourceAuthorized, findingsV1, findingsV2)
+}
+
+// A later additive eligibility policy replaces only its two finding bodies;
+// the complete original provider, source, identity and trigger custody survives.
+func competitionSnowTwoMemberCustodyWithFindingsArtifactQuery(sourceAuthorized, findingsV1, findingsV2 string) string {
 	sourceGraphValid, _ := server.CompetitionSourceRetirementBodiesSql()
 	_, _, _, _, winnerCheckpointGuard := server.CompetitionWinnerReviewBodiesSql()
-	provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, identityGuard, findingsV1, findingsV2, findingsPolicy := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
+	provider, roundInsertGuard, winnerSourceAuthorized, winnerReviewGuard, identityGuard, _, _, findingsPolicy := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
 	parallelSafe := func(query string) string { return strings.Replace(query, "p.proparallel='u'", "p.proparallel='s'", 1) }
 	return "(" + parallelSafe(snMainnetMigrationFunction("competition_v2_winner_review_provider(text,text,text)", "boolean", "sql", "i", false, provider, "policy_name", "model_name", "reasoning_name")) + " AND " +
 		parallelSafe(snMainnetMigrationFunction("competition_v2_snow_review_findings_valid(jsonb)", "boolean", "plpgsql", "i", false, findingsV1, "request")) + " AND " +

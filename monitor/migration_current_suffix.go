@@ -872,7 +872,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	snTopBoardMigrationContracts,
 	[]snMainnetMigrationContract{
 		migrationCurrentSuffix(900, "trusted instrument overlay with two-member review, identity and retained source custody",
-			competitionMigration900ArtifactQuery),
+			competitionMigration900ArtifactQuery).removedAt(server.CompetitionProductionBenefitMigrationVersion()),
 		snTopReplicaMigrationContract,
 		verifyCohortCensusMigrationContract,
 		competitionSubmissionMetricsMigrationContract,
@@ -923,6 +923,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionFinalizationHoldMigrationContract},
 	// The future executor slots and no-op evidence follow that origin prefix.
 	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract},
+	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
