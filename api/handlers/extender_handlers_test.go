@@ -100,6 +100,9 @@ func TestExtenderActivateResultFieldNames(t *testing.T) {
 		// connect#230)
 		"probe_steps",
 		"record",
+		// which refusal the extender acts on, `key_other_network` for a key
+		// another network holds (EXTENDER.md C2c)
+		"refusal",
 		// the optional carriers that were left out of an accepted activation,
 		// and why (EXTENDER.md C2a, connect#230)
 		"refused_carriers",
