@@ -1,3 +1,5 @@
+//go:build linux
+
 // Trusted prospective helpers use a pinned non-root client, never the daemon's
 // root socket. Public role metadata is separate from all signing/private config.
 package competitionagent

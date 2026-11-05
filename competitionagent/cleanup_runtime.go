@@ -1,3 +1,5 @@
+//go:build linux
+
 // Cleanup must address the same privileged runtime selected by the frozen
 // evaluator. A cleanup-only endpoint or formatter override is not sufficient.
 package competitionagent

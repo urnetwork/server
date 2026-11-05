@@ -13,6 +13,7 @@ import (
 // Scope-specific latest revisions contain no private explanation or actor data.
 type competitionAutomationHoldStatus struct {
 	Admission, Evaluation, RewardDelivery bool
+	Finalization                          bool
 	EvaluationHold, RewardDeliveryHold    *model.CompetitionAutomationHold
 }
 
@@ -55,7 +56,7 @@ func (self *Service) competitionRuntimeStatus(ctx context.Context, settings *Set
 		}
 	}
 	return &model.CompetitionRuntimeStatus{IntakeReady: intakeReady, GradingReady: strictReady && !holds.Evaluation,
-		PublicationHeld: holds.Evaluation}, nil
+		PublicationHeld: holds.Evaluation, FinalizationHeld: holds.Finalization}, nil
 }
 
 // Public scores, winners and round secrets share the grading hold. A payout

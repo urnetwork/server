@@ -1,3 +1,5 @@
+//go:build linux
+
 // The agent has an independent, root-provisioned role. It never loads server
 // settings, a production vault, a database connection, or coordinator secrets.
 package competitionagent

@@ -32,6 +32,9 @@ import (
 func TestAuthNetworkClientProxyWriteFailureCreatesNothing(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// one network creates more proxies, and faster, than the free plan's
+		// proxy limits (network_client_proxy_limit.go, tested on their own) allow
+		defer Testing_LiftProxyClientLimits()()
 
 		_, userSession := authClientTestNetwork(ctx, "test")
 		sourceClientId, _ := authClientTestClient(ctx, t, userSession)

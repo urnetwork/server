@@ -1,3 +1,5 @@
+//go:build linux
+
 // Docker 29's default buildx driver uses /grpc Upgrade:h2c plus a reverse
 // /session connection. Only the independently owned real build CLI may use
 // these channels. Go's native unencrypted HTTP/2 parses terminal Solve trailers.

@@ -1,0 +1,98 @@
+{
+  "schema": 1,
+  "kind": "sim-latency-supervisor-acquisition-renewal-selected-qualification",
+  "status": "passed_selected_ordinary_race_and_private_postgres_scope",
+  "qualified_source": {
+    "server_commit": "de4146b24f32ea669c6ab63ede3db52bca76ab9d",
+    "server_tree": "c654cfdeb9807b09551b961d0000e880a4b82c2b",
+    "source_archive_sha256": "fb5725f1c308f8d709e7bedaa34051228f33f80238a901c58945f710d6e8786d",
+    "source_manifest_before_and_after_sha256": "9c5ce9e130c21bb6b5567af6644629132ba7afc3dc70a4fe51d7ad8d6073d7fc",
+    "execution_host": "goofe",
+    "go_version": "go1.27.3",
+    "go_sha256": "5f5eb6d0b2fb6aa0bb5d5f8c5f1c944e0de955c925f0111af92a9d8f79680b5b",
+    "compile_sha256": "c331d8fc6c4ae9dbe20e8198435db0455f2a5ca55d2d02fc6d7337c906be8283",
+    "link_sha256": "c9990b939ed48a77ca9a29b33d408d44b56fc4950a28e3d3533025a8dc08b2fe",
+    "independent_executor_model": "gpt-6.1-sol",
+    "independent_executor_reasoning": "low",
+    "implementation_debug_and_merge_review_reasoning": "max"
+  },
+  "selected_execution": {
+    "pure": {
+      "roots": 60,
+      "ordinary_fresh_processes": 3,
+      "race_fresh_processes": 3,
+      "passes": 360
+    },
+    "private_postgres": {
+      "roots": 10,
+      "ordinary_fresh_clusters": 3,
+      "race_fresh_clusters": 3,
+      "passes": 60,
+      "includes_real_supervisor_pool_deadline_retry_and_same_fenced_worker": true,
+      "open_round_snapshot_and_evaluator_workload_are_synthetic": true
+    },
+    "planned_passes": 420,
+    "failures": 0,
+    "race_warnings": 0,
+    "source_and_harness_unchanged": true,
+    "temporary_service_groups_joined": true
+  },
+  "private_evidence": {
+    "base_directory": "/mnt/data/urnetwork-competition-development-20261104",
+    "complete_green_receipt": "supervisor-de4146b24-validation/green-qualification.json",
+    "complete_green_receipt_sha256": "274c992012203a694226afc07c287817b90702f2a198f7f8fa59a18f1f6b41d9",
+    "complete_green_receipt_scope": "Exact pure-file census, ten private-Pg names, eight group manifests, toolchain/test-binary hashes, unchanged source/harnesses and zero remaining test cgroups.",
+    "pure_directories": ["controller-pure.i6T5SLhL", "controller-pure.UNBEZbgC"],
+    "database_receipt_manifest_sha256": {
+      "ordinary_1": "2d70ad1a7e8ea7c0e94cf78e71e45eea308694cc726cc664147f15aca1806aa5",
+      "ordinary_2": "763bed9548b18af7b225ec76db214178bbf14b0ad2086cc53d070065f5809c54",
+      "ordinary_3": "b892b8fe2614dc0e8739fc3c1f84c23862954b859a975ecfd2b1e49c5e0d3970",
+      "race_1": "01a4da5f1d2fba46b0e5f84191bcf2a2ce8a0121d0c96960ccaa0c213a2355e3",
+      "race_2": "0f684e794d5f9baca70488d27578b41fcdeea01b62bbf1df76447f712748c642",
+      "race_3": "160f3aa49fcfe3a320b14d397220fee4902c0724148b726c2edb07fb564f05aa"
+    },
+    "operator_verification": "Counted 10 passing root records in each of six database logs and 180 passing records in each ordinary/race pure group; checked terminal statuses, source manifests, harness preservation and temporary service cleanup."
+  },
+  "negative_controls": {
+    "disposable_source_overlays_only": true,
+    "all_mutant_compiles_succeeded": true,
+    "all_three_expected_behavioral_assertions_observed": true,
+    "acquire_continuation_disabled": ["TestCompetitionSupervisorAcquireRetryRecoversAfterOwnedDeadline", "TestCompetitionSupervisorAcquireRetryPgComposedKeepsOriginalWorker"],
+    "cumulative_admission_checks_removed": "TestCompetitionSupervisorAcquireProofRetainsEarlierAdmission",
+    "timeout_or_setup_failure_count": 0,
+    "private_receipt": "renewal-red-validation.Qum3LGgx/artifacts",
+    "private_manifest_sha256": "dd0eea0344454c73243b4d39183b4aaf21f55e59411b97360047e5b00752f4ca",
+    "composed_private_pg_receipt": "db-validation.JHk5cBR2/artifacts",
+    "composed_private_pg_manifest_sha256": "69fe92274f95aabb9a49430695fc178bf5aef1685e399df597637b48bc0f4855"
+  },
+  "separate_manager_build": {
+    "source_commit": "de4146b24f32ea669c6ab63ede3db52bca76ab9d",
+    "exit_code": 0,
+    "elf_sha256": "f35dcc314cb08bc43a87aa5fccd9c12171384ae4277cebc79901216c22050ba6",
+    "artifact_manifest_sha256": "ce2b47583cf885e83ff1d24d2f3aeae3a71534773678706d1d77db82daecbe1f",
+    "source_and_harness_unchanged": true,
+    "deployment_claimed": false
+  },
+  "bounded_merge_review": {
+    "origin_main_parent": "7f0e0ad8943d4bbf06dd8b0cc7d3755f8aa2d210",
+    "qualified_branch_parent": "d241993ed39838eac3ed38f6c99f826845682186",
+    "automatic_merge_conflicts": 0,
+    "renewal_file_count": 7,
+    "all_renewal_blobs_equal_qualified_source": true,
+    "all_other_origin_main_blobs_preserved": true,
+    "merged_main_tested_by_this_receipt": false,
+    "release_binary_must_use_exact_qualified_source": true,
+    "deployed_manager_source_compared": "164f75ecad3949c94c97b92b48818e77cb93bc9b",
+    "active_manager_delta": "Only periodic supervisor renewal receives bounded, positively authenticated recovery for a completed wholly unadmitted acquire deadline; identical fenced SQL, owner/lease tuple, worker command, status format and frozen current-round policy are retained.",
+    "schema_migration_required": false,
+    "current_worker_or_evaluator_replacement_required": false
+  },
+  "scope_limitations": [
+    "Historical baseline directory excluded from archive; no historical simulation-suite claim.",
+    "No main database, production credentials, Sille test build or active evaluation interruption used.",
+    "No full repository-suite claim and no qualification claim for the newly merged main graph.",
+    "Candidate manager build and negative controls are separate narrow evidence recorded above; deployed-runtime verification remains separate and pending.",
+    "This receipt does not authorize deployment, policy changes, source activation or migrations."
+  ],
+  "deployment_authorized_by_this_receipt": false
+}

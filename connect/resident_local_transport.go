@@ -55,6 +55,14 @@
 // LocalTransportDisableDetachRate per second, each redialing its resident over
 // the exchange at once.
 //
+// A link is the in-process carrier of one exchange connection, so the same
+// link, pump and switch also carry a resident's forward to a destination
+// resident of this process (op forward, resident_local_forward.go): one pump,
+// from the forward's send queue into the destination's forward queue, under its
+// own switch, EnableLocalForward and the control's `localForward`. Each
+// operation has its own switch state, control loop and pacer; the metrics
+// carry the operation as their op label.
+//
 // Safe for concurrent use.
 package connect
 
@@ -75,16 +83,17 @@ import (
 )
 
 // Frames that crossed a link instead of a socket, counted as the socket
-// counted them, so exchange totals are exchange_io plus exchange_local. The
-// labels are the closed sets of exchange_io; a link carries no handshake.
+// counted them, so exchange totals are exchange_io plus exchange_local, per
+// operation as well as in total. The labels are the closed sets of exchange_io;
+// a link carries no handshake and has a known operation.
 var exchangeLocalFramesCounter = prometheus.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_local_frames_total",
-		Help:      "Frames delivered in process by local transport links instead of an exchange socket, each counted once sent and once received as the socket counted it, partitioned by I/O direction and frame kind",
+		Help:      "Frames delivered in process by local links instead of an exchange socket, each counted once sent and once received as the socket counted it, partitioned by exchange operation, I/O direction and frame kind",
 	},
-	[]string{"direction", "kind"},
+	[]string{"op", "direction", "kind"},
 )
 
 var exchangeLocalBytesCounter = prometheus.NewCounterVec(
@@ -92,18 +101,19 @@ var exchangeLocalBytesCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_local_bytes_total",
-		Help:      "Bytes in frames delivered in process by local transport links, including the 4-byte frame header an exchange socket would have carried, partitioned by I/O direction and frame kind",
+		Help:      "Bytes in frames delivered in process by local links, including the 4-byte frame header an exchange socket would have carried, partitioned by exchange operation, I/O direction and frame kind",
 	},
-	[]string{"direction", "kind"},
+	[]string{"op", "direction", "kind"},
 )
 
-var exchangeLocalAttachmentsGauge = prometheus.NewGauge(
+var exchangeLocalAttachmentsGauge = prometheus.NewGaugeVec(
 	prometheus.GaugeOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_local_attachments",
-		Help:      "Transports attached in process to a resident of this process",
+		Help:      "Links attached in process to a resident of this process, partitioned by exchange operation: transports, and forwards to a destination resident",
 	},
+	[]string{"op"},
 )
 
 var exchangeLocalDetachesCounter = prometheus.NewCounterVec(
@@ -111,19 +121,20 @@ var exchangeLocalDetachesCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_local_detaches_total",
-		Help:      "Local transport links detached, partitioned by reason",
+		Help:      "Local links detached, partitioned by exchange operation and reason",
 	},
-	[]string{"reason"},
+	[]string{"op", "reason"},
 )
 
-var exchangeLocalBlockedSecondsHistogram = prometheus.NewHistogram(
+var exchangeLocalBlockedSecondsHistogram = prometheus.NewHistogramVec(
 	prometheus.HistogramOpts{
 		Namespace: "urnetwork",
 		Subsystem: "connect",
 		Name:      "exchange_local_blocked_seconds",
-		Help:      "Time a local transport delivery waited for queue capacity, observed only when a delivery would block",
+		Help:      "Time a local link delivery waited for queue capacity, observed only when a delivery would block, partitioned by exchange operation",
 		Buckets:   []float64{0.0001, 0.001, 0.01, 0.1, 1, 5, 10, 15},
 	},
+	[]string{"op"},
 )
 
 var exchangeLocalTransportEnabledGauge = prometheus.NewGauge(
@@ -132,6 +143,15 @@ var exchangeLocalTransportEnabledGauge = prometheus.NewGauge(
 		Subsystem: "connect",
 		Name:      "exchange_local_transport_enabled",
 		Help:      "Whether this process's exchange attaches transports to its own residents in process: EnableLocalTransport as the Redis control last chose for its block, 1 on, 0 off",
+	},
+)
+
+var exchangeLocalForwardEnabledGauge = prometheus.NewGauge(
+	prometheus.GaugeOpts{
+		Namespace: "urnetwork",
+		Subsystem: "connect",
+		Name:      "exchange_local_forward_enabled",
+		Help:      "Whether this process's exchange attaches its residents' forwards to destination residents of this process in process: EnableLocalForward as the Redis control's localForward last chose for its block, 1 on, 0 off",
 	},
 )
 
@@ -147,6 +167,8 @@ const (
 	localTransportDetachDisabled
 	// a pump raised; the batch it held is returned and counted as dropped
 	localTransportDetachRaised
+	// a forward link's forward ended: idle, closed, or its resident closed
+	localTransportDetachForwardDone
 	localTransportDetachReasonCount
 )
 
@@ -158,19 +180,28 @@ var localTransportDetachReasonLabels = [localTransportDetachReasonCount]string{
 	"max_message_len",
 	"disabled",
 	"raised",
+	"forward_done",
 }
 
-// The direction of a pump: client to resident, or resident to client.
+// The direction of a pump: client to resident, resident to client, or a
+// forward to its destination resident.
 type localTransportDirection uint8
 
 const (
 	localTransportDirectionClient localTransportDirection = iota
 	localTransportDirectionResident
+	localTransportDirectionForward
 )
 
-// Pre-bound like exchange_io, for the same hot path.
-var exchangeLocalIOCollectorsByLabel [exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
-var exchangeLocalDetachesCounters [localTransportDetachReasonCount]prometheus.Counter
+// The operations a link carries, as op labels.
+var localLinkOps = [...]exchangeIOOp{exchangeIOOpTransport, exchangeIOOpForward}
+
+// Pre-bound like exchange_io, for the same hot path. Only the operations a
+// link carries, and the reasons each can detach for, are bound.
+var exchangeLocalIOCollectorsByLabel [exchangeIOOpCount][exchangeIODirectionCount][exchangeIOFrameKindCount]exchangeIOCollectors
+var exchangeLocalAttachments [exchangeIOOpCount]prometheus.Gauge
+var exchangeLocalDetachesCounters [exchangeIOOpCount][localTransportDetachReasonCount]prometheus.Counter
+var exchangeLocalBlockedSeconds [exchangeIOOpCount]prometheus.Observer
 
 func init() {
 	prometheus.MustRegister(exchangeLocalFramesCounter)
@@ -179,45 +210,75 @@ func init() {
 	prometheus.MustRegister(exchangeLocalDetachesCounter)
 	prometheus.MustRegister(exchangeLocalBlockedSecondsHistogram)
 	prometheus.MustRegister(exchangeLocalTransportEnabledGauge)
+	prometheus.MustRegister(exchangeLocalForwardEnabledGauge)
 
-	for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
-		for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
-			exchangeLocalIOCollectorsByLabel[direction][kind] = exchangeIOCollectors{
-				frames: exchangeLocalFramesCounter.WithLabelValues(
-					exchangeIODirectionLabels[direction],
-					exchangeIOFrameKindLabels[kind],
-				),
-				bytes: exchangeLocalBytesCounter.WithLabelValues(
-					exchangeIODirectionLabels[direction],
-					exchangeIOFrameKindLabels[kind],
-				),
+	for _, op := range localLinkOps {
+		for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
+			for kind := exchangeIOFrameKind(0); kind < exchangeIOFrameKindCount; kind++ {
+				exchangeLocalIOCollectorsByLabel[op][direction][kind] = exchangeIOCollectors{
+					frames: exchangeLocalFramesCounter.WithLabelValues(
+						exchangeIOOpLabels[op],
+						exchangeIODirectionLabels[direction],
+						exchangeIOFrameKindLabels[kind],
+					),
+					bytes: exchangeLocalBytesCounter.WithLabelValues(
+						exchangeIOOpLabels[op],
+						exchangeIODirectionLabels[direction],
+						exchangeIOFrameKindLabels[kind],
+					),
+				}
 			}
 		}
-	}
-	for reason := localTransportDetachResidentDone; reason < localTransportDetachReasonCount; reason++ {
-		exchangeLocalDetachesCounters[reason] = exchangeLocalDetachesCounter.WithLabelValues(
-			localTransportDetachReasonLabels[reason],
-		)
+		exchangeLocalAttachments[op] = exchangeLocalAttachmentsGauge.WithLabelValues(exchangeIOOpLabels[op])
+		exchangeLocalBlockedSeconds[op] = exchangeLocalBlockedSecondsHistogram.WithLabelValues(exchangeIOOpLabels[op])
+		for reason := localTransportDetachResidentDone; reason < localTransportDetachReasonCount; reason++ {
+			if !localTransportDetachReasonApplies(op, reason) {
+				continue
+			}
+			exchangeLocalDetachesCounters[op][reason] = exchangeLocalDetachesCounter.WithLabelValues(
+				exchangeIOOpLabels[op],
+				localTransportDetachReasonLabels[reason],
+			)
+		}
 	}
 }
 
-// A process runs one exchange, whose switch sets the gauge.
-func setExchangeLocalTransportEnabledGauge(enabled bool) {
+// Whether a link of op can detach for reason: a transport's own end is
+// transport_done, and a forward's forward_done.
+func localTransportDetachReasonApplies(op exchangeIOOp, reason localTransportDetachReason) bool {
+	switch reason {
+	case localTransportDetachNone:
+		return false
+	case localTransportDetachTransportDone:
+		return op == exchangeIOOpTransport
+	case localTransportDetachForwardDone:
+		return op == exchangeIOOpForward
+	default:
+		return true
+	}
+}
+
+// A process runs one exchange, whose switch for op sets op's gauge.
+func setExchangeLocalEnabledGauge(op exchangeIOOp, enabled bool) {
+	gauge := exchangeLocalTransportEnabledGauge
+	if op == exchangeIOOpForward {
+		gauge = exchangeLocalForwardEnabledGauge
+	}
 	if enabled {
-		exchangeLocalTransportEnabledGauge.Set(1)
+		gauge.Set(1)
 	} else {
-		exchangeLocalTransportEnabledGauge.Set(0)
+		gauge.Set(0)
 	}
 }
 
-// Counts delivered frames as an exchange socket counted them: each once sent
-// and once received, with the 4-byte frame header it would have carried.
-func recordLocalTransportFrames(dataFrameCount int, dataByteCount int, pingCount int) {
+// Counts delivered frames as an exchange socket of op counted them: each once
+// sent and once received, with the 4-byte frame header it would have carried.
+func recordLocalTransportFrames(op exchangeIOOp, dataFrameCount int, dataByteCount int, pingCount int) {
 	if 0 < dataFrameCount {
 		frames := float64(dataFrameCount)
 		frameBytes := float64(dataFrameCount*exchangeIOFrameHeaderByteCount + dataByteCount)
 		for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
-			collectors := &exchangeLocalIOCollectorsByLabel[direction][exchangeIOFrameKindData]
+			collectors := &exchangeLocalIOCollectorsByLabel[op][direction][exchangeIOFrameKindData]
 			collectors.frames.Add(frames)
 			collectors.bytes.Add(frameBytes)
 		}
@@ -226,7 +287,7 @@ func recordLocalTransportFrames(dataFrameCount int, dataByteCount int, pingCount
 		frames := float64(pingCount)
 		frameBytes := float64(pingCount * exchangeIOFrameHeaderByteCount)
 		for direction := exchangeIODirection(0); direction < exchangeIODirectionCount; direction++ {
-			collectors := &exchangeLocalIOCollectorsByLabel[direction][exchangeIOFrameKindPing]
+			collectors := &exchangeLocalIOCollectorsByLabel[op][direction][exchangeIOFrameKindPing]
 			collectors.frames.Add(frames)
 			collectors.bytes.Add(frameBytes)
 		}
@@ -245,36 +306,62 @@ type ExchangeLocalTransportSettings struct {
 	// separated by commas or spaces. Not a ceiling: an operator widens it with
 	// the control, up to EnableLocalTransport. "off" ships the code dark.
 	LocalTransportDefault string
-	// How often the exchange reads the control's `localTransport`, so a
-	// change reaches each process within about this long. Non-positive reads
-	// it once, at start.
+	// The code ceiling for forwards, as EnableLocalTransport is for
+	// transports. False: every forward dials its destination's resident over
+	// an exchange socket, and the control's `localForward` is not read. Off by
+	// default; the connect service turns it on (run.go), and embedders such as
+	// alt keep it off.
+	EnableLocalForward bool
+	// The blocks that deliver forwards in process while the control sets no
+	// `localForward`, in the control's syntax. Not a ceiling, as
+	// LocalTransportDefault. "off" ships the code dark.
+	LocalForwardDefault string
+	// How often the exchange reads the control's `localTransport` and
+	// `localForward`, so a change reaches each process within about this long.
+	// Non-positive reads each once, at start.
 	LocalTransportControlRefreshInterval time.Duration
 	// Bounds one read of the control.
 	LocalTransportControlReadTimeout time.Duration
-	// Live links detached per second after the control turns this block off.
-	// Each then redials its resident over the exchange, so this paces that
-	// wave of dials and handshakes. Non-positive detaches none: the change
-	// then reaches only new attaches.
+	// Live transport links detached per second after the control turns this
+	// block off. Each then redials its resident over the exchange, so this
+	// paces that wave of dials and handshakes. Non-positive detaches none: the
+	// change then reaches only new attaches.
 	LocalTransportDisableDetachRate int
+	// Live forward links detached per second after the control's
+	// `localForward` turns this block off, as LocalTransportDisableDetachRate:
+	// each redials its destination over the exchange with its next message.
+	// Non-positive detaches none.
+	LocalForwardDisableDetachRate int
+
+	// Nil in production, where the exchange reads the Redis control. Tests
+	// read a control they hold instead (localDeliveryTestMode).
+	localControlReadForTest func(context.Context, model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error)
 }
 
 func DefaultExchangeLocalTransportSettings() *ExchangeLocalTransportSettings {
 	return &ExchangeLocalTransportSettings{
 		EnableLocalTransport:                 false,
 		LocalTransportDefault:                model.ConnectLocalTransportOff,
+		EnableLocalForward:                   false,
+		LocalForwardDefault:                  model.ConnectLocalTransportOff,
 		LocalTransportControlRefreshInterval: 10 * time.Second,
 		LocalTransportControlReadTimeout:     5 * time.Second,
 		LocalTransportDisableDetachRate:      500,
+		LocalForwardDisableDetachRate:        500,
 	}
 }
 
-// The in-process delivery state of one exchange: the switch as the control
-// last chose it for this block, and the live links a narrowing detaches.
+// The in-process delivery state of one exchange for one operation, transports
+// or forwards: the switch as the control last chose it for this block, and the
+// live links a narrowing detaches.
 type exchangeLocalTransport struct {
 	ctx      context.Context
 	settings *ExchangeSettings
 	block    string
-	read     func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error)
+	// ExchangeOpTransport or ExchangeOpForward, which chooses the ceiling, the
+	// control field, the pacing rate and the metrics' op label
+	op   ExchangeOp
+	read func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error)
 
 	// whether this block attaches, as of the last good read of the control,
 	// and before the first as the code default chooses
@@ -303,46 +390,94 @@ type exchangeLocalTransport struct {
 	afterPacerStartForTest func()
 }
 
-// The exchange's in-process delivery, which reads the control until ctx ends.
-// Nil while EnableLocalTransport is off: nothing is read and every transport
-// dials.
-func newExchangeLocalTransport(ctx context.Context, settings *ExchangeSettings, block string) *exchangeLocalTransport {
-	if !settings.EnableLocalTransport {
+// The exchange's in-process delivery of op, which reads the control until ctx
+// ends. Nil while op's ceiling (EnableLocalTransport or EnableLocalForward) is
+// off: nothing is read and every exchange connection of op dials.
+func newExchangeLocalTransport(ctx context.Context, settings *ExchangeSettings, block string, op ExchangeOp) *exchangeLocalTransport {
+	enabled := settings.EnableLocalTransport
+	if op == ExchangeOpForward {
+		enabled = settings.EnableLocalForward
+	}
+	if !enabled {
 		return nil
 	}
-	localTransport := newExchangeLocalTransportWithStore(ctx, settings, block, model.GetConnectMoveControl)
+	read := model.GetConnectMoveControl
+	if readForTest := settings.localControlReadForTest; readForTest != nil {
+		read = readForTest
+	}
+	localTransport := newExchangeLocalOpWithStore(ctx, settings, block, op, read)
 	localTransport.start()
 	return localTransport
 }
 
-// The state over an explicit store, without its control loop. Tests drive
-// refresh directly, or start the loop.
+// The transport state over an explicit store, without its control loop. Tests
+// drive refresh directly, or start the loop.
 func newExchangeLocalTransportWithStore(
 	ctx context.Context,
 	settings *ExchangeSettings,
 	block string,
 	read func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error),
 ) *exchangeLocalTransport {
+	return newExchangeLocalOpWithStore(ctx, settings, block, ExchangeOpTransport, read)
+}
+
+// The state of op over an explicit store, without its control loop.
+func newExchangeLocalOpWithStore(
+	ctx context.Context,
+	settings *ExchangeSettings,
+	block string,
+	op ExchangeOp,
+	read func(ctx context.Context, ceiling model.ConnectMoveControlCeiling) (*model.ConnectMoveControl, error),
+) *exchangeLocalTransport {
 	localTransport := &exchangeLocalTransport{
 		ctx:      ctx,
 		settings: settings,
 		block:    block,
+		op:       op,
 		read:     read,
 		links:    map[*localTransportLink]struct{}{},
 	}
 	// until the first read, the code default chooses
-	allowed := model.NarrowConnectMoveControl(nil, localTransport.ceiling()).LocalTransportAllows(block)
+	allowed := localTransport.controlAllows(model.NarrowConnectMoveControl(nil, localTransport.ceiling()))
 	localTransport.allowed.Store(allowed)
-	setExchangeLocalTransportEnabledGauge(allowed)
+	setExchangeLocalEnabledGauge(localTransport.metricOp(), allowed)
 	return localTransport
 }
 
-// The code settings the control narrows.
+// The code settings the control narrows. Each operation's ceiling and default
+// are its own; the control never reads one for the other.
 func (self *exchangeLocalTransport) ceiling() model.ConnectMoveControlCeiling {
+	if self.op == ExchangeOpForward {
+		return model.ConnectMoveControlCeiling{
+			EnableLocalForward:  self.settings.EnableLocalForward,
+			LocalForwardDefault: self.settings.LocalForwardDefault,
+		}
+	}
 	return model.ConnectMoveControlCeiling{
 		EnableLocalTransport:  self.settings.EnableLocalTransport,
 		LocalTransportDefault: self.settings.LocalTransportDefault,
 	}
+}
+
+// Whether control lets this block attach links of the operation.
+func (self *exchangeLocalTransport) controlAllows(control *model.ConnectMoveControl) bool {
+	if self.op == ExchangeOpForward {
+		return control.LocalForwardAllows(self.block)
+	}
+	return control.LocalTransportAllows(self.block)
+}
+
+// Live links detached per second after the switch turns off.
+func (self *exchangeLocalTransport) disableDetachRate() int {
+	if self.op == ExchangeOpForward {
+		return self.settings.LocalForwardDisableDetachRate
+	}
+	return self.settings.LocalTransportDisableDetachRate
+}
+
+// The op label of the operation's metrics.
+func (self *exchangeLocalTransport) metricOp() exchangeIOOp {
+	return exchangeIOOpOf(self.op)
 }
 
 // Whether this block attaches new links, as of the last good read.
@@ -423,14 +558,14 @@ func (self *exchangeLocalTransport) refresh() {
 		}
 		if !self.failing {
 			self.failing = true
-			glog.Infof("[exchange]local transport control unavailable, keeping attach=%t (%s)\n", self.allows(), err)
+			glog.Infof("[exchange]local %s control unavailable, keeping attach=%t (%s)\n", exchangeOpMetricLabel(self.op), self.allows(), err)
 		} else if glog.V(1) {
-			glog.Infof("[exchange]local transport control unavailable (%s)\n", err)
+			glog.Infof("[exchange]local %s control unavailable (%s)\n", exchangeOpMetricLabel(self.op), err)
 		}
 		return
 	}
 	self.failing = false
-	self.setAllowed(control.LocalTransportAllows(self.block))
+	self.setAllowed(self.controlAllows(control))
 }
 
 // Publishes the switch for new attaches. Turning it off with live links starts
@@ -444,7 +579,7 @@ func (self *exchangeLocalTransport) setAllowed(allowed bool) {
 			return false, false
 		}
 		self.allowed.Store(allowed)
-		if allowed || self.pacing || len(self.links) == 0 || self.settings.LocalTransportDisableDetachRate <= 0 {
+		if allowed || self.pacing || len(self.links) == 0 || self.disableDetachRate() <= 0 {
 			return true, false
 		}
 		self.pacing = true
@@ -453,8 +588,8 @@ func (self *exchangeLocalTransport) setAllowed(allowed bool) {
 	if !changed {
 		return
 	}
-	setExchangeLocalTransportEnabledGauge(allowed)
-	glog.Infof("[exchange]local transport control: block %s attach=%t\n", self.block, allowed)
+	setExchangeLocalEnabledGauge(self.metricOp(), allowed)
+	glog.Infof("[exchange]local %s control: block %s attach=%t\n", exchangeOpMetricLabel(self.op), self.block, allowed)
 	if startPacer {
 		self.startPacer()
 	}
@@ -482,7 +617,7 @@ func (self *exchangeLocalTransport) startPacer() {
 // switch turns on again or no link is left. No link attaches while the switch
 // is off, so the pacer ends.
 func (self *exchangeLocalTransport) detachPaced() {
-	interval := time.Second / time.Duration(self.settings.LocalTransportDisableDetachRate)
+	interval := time.Second / time.Duration(self.disableDetachRate())
 	timer := time.NewTimer(0)
 	defer timer.Stop()
 	for {
@@ -598,8 +733,10 @@ func (self *Exchange) attachLocalTransport(ctx context.Context, header ExchangeH
 	})
 }
 
-// The attach after its checks, over the routes publish adds to the resident.
-// Tests publish queues they own in place of the resident's routes.
+// The attach after its checks, over the routes publish adds to the resident:
+// a transport's send and receive routes, or a forward's forward queue as the
+// receive route with no send route. Tests publish queues they own in place of
+// the resident's routes. localTransport is the switch of the link's operation.
 func (self *Exchange) attachLocalTransportRoutes(
 	ctx context.Context,
 	localTransport *exchangeLocalTransport,
@@ -617,6 +754,7 @@ func (self *Exchange) attachLocalTransportRoutes(
 		ctx:      linkCtx,
 		cancel:   linkCancel,
 		exchange: self,
+		local:    localTransport,
 		settings: self.settings,
 		resident: resident,
 		header:   header,
@@ -641,7 +779,7 @@ func (self *Exchange) attachLocalTransportRoutes(
 	link.routeReceive = routeReceive
 	link.closeTransport = closeTransport
 	resident.localAttachments.Add(1)
-	exchangeLocalAttachmentsGauge.Inc()
+	exchangeLocalAttachments[localTransport.metricOp()].Inc()
 	// Propagates the resident's end only; the pumps own every wait.
 	link.stopResidentDone = context.AfterFunc(resident.ctx, func() {
 		link.detach(localTransportDetachResidentDone)
@@ -657,20 +795,24 @@ func (self *Exchange) attachLocalTransportRoutes(
 	return link
 }
 
-// One transport attached in process to a resident. The owner, the transport's
-// Run goroutine, runs its client pump and its detach, and alone reads the
-// routes after attach returns. The pacer and the resident's done edge only
-// call detach.
+// One transport, or one forward, attached in process to a resident. The owner,
+// the transport's or the forward's Run goroutine, runs its client or forward
+// pump and its detach, and alone reads the routes after attach returns. The
+// pacer and the resident's done edge only call detach.
 type localTransportLink struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
 	exchange *Exchange
+	// the switch of the link's operation, whose worker the owner is
+	local    *exchangeLocalTransport
 	settings *ExchangeSettings
 	resident *Resident
 	header   ExchangeHeader
 
-	// the resident's routes for this transport and their removal
+	// the resident's routes for this link and their removal. A forward link
+	// has no send route: its receive route is the resident's forward queue,
+	// and its removal closes that queue (Resident.AddForward).
 	routeSend      chan []byte
 	routeReceive   chan []byte
 	closeTransport func()
@@ -688,15 +830,18 @@ func (self *localTransportLink) detach(reason localTransportDetachReason) {
 }
 
 // Detaches the link in closeExchangeTransportQueues order after the client
-// pump has returned, joins the resident pump, and returns the reason. Called
-// once, by the owner, which then stops being an exchange worker.
+// or forward pump has returned, joins the resident pump, and returns the
+// reason. Called once, by the owner, which then stops being an exchange
+// worker.
 func (self *localTransportLink) close(pumps *sync.WaitGroup) localTransportDetachReason {
-	defer self.exchange.localTransport.endWorker()
-	self.exchange.localTransport.removeLink(self)
+	defer self.local.endWorker()
+	self.local.removeLink(self)
 	self.stopResidentDone()
 	// Route removal joins every resident writer still admitted to the old
 	// routes. One blocked on a full send route ends at its own write timeout,
-	// as when a socket closes.
+	// as when a socket closes. A forward's removal joins the resident's
+	// forward consumer, after the pump, its only producer, has returned, as
+	// the accept path joins it after its socket reader.
 	self.closeTransport()
 	self.cancel()
 	pumps.Wait()
@@ -707,14 +852,18 @@ func (self *localTransportLink) close(pumps *sync.WaitGroup) localTransportDetac
 	self.resident.UpdateActivity()
 	self.resident.localAttachments.Add(-1)
 	self.exchange.unregisterExchangeConnection(self.header.ClientId)
-	exchangeLocalAttachmentsGauge.Dec()
+	op := self.local.metricOp()
+	exchangeLocalAttachments[op].Dec()
 
 	reason := localTransportDetachReason(self.reason.Load())
 	if reason == localTransportDetachNone {
-		// only the transport's own end records no reason
+		// only the transport's or the forward's own end records no reason
 		reason = localTransportDetachTransportDone
+		if op == exchangeIOOpForward {
+			reason = localTransportDetachForwardDone
+		}
 	}
-	exchangeLocalDetachesCounters[reason].Inc()
+	exchangeLocalDetachesCounters[op][reason].Inc()
 	return reason
 }
 
@@ -729,6 +878,12 @@ type localTransportPump struct {
 	dropBoundary string
 	// ends the link when the source queue is closed
 	sourceClosed func()
+	// the payload ledger whose forward output stage holds each message the
+	// pump takes until it delivers or returns it, as the socket path holds it
+	// until its admission. Nil for none: a transport's path charges no
+	// ledger, and the ledger is optional.
+	ledger      *residentPayloadLedger
+	ledgerOwner byte
 
 	// reused batch index; its references are cleared after each batch
 	batch [][]byte
@@ -828,21 +983,30 @@ gather:
 
 	// The whole batch has WriteTimeout from its start, as one exchange write.
 	deadline := time.Now().Add(settings.WriteTimeout)
+	op := link.local.metricOp()
 	var timer *time.Timer
 	dataFrameCount := 0
 	dataByteCount := 0
 	pingCount := 0
 	for messageIndex, message := range self.batch {
+		// the charge while the pump still owns the message: a delivered one is
+		// its destination's
+		var charge residentPayloadCharge
+		if self.ledger != nil {
+			charge = payloadCharge(message)
+		}
 		if len(message) == 0 {
 			// a ping: activity, not a delivery
 			owned = messageIndex + 1
 			connect.MessagePoolReturn(message)
+			self.release(charge)
 			pingCount += 1
 			continue
 		}
 		select {
 		case self.destination <- message:
 			owned = messageIndex + 1
+			self.release(charge)
 			dataFrameCount += 1
 			dataByteCount += len(message)
 			continue
@@ -860,30 +1024,39 @@ gather:
 		select {
 		case self.destination <- message:
 			owned = messageIndex + 1
-			exchangeLocalBlockedSecondsHistogram.Observe(time.Since(blockStartTime).Seconds())
+			self.release(charge)
+			exchangeLocalBlockedSeconds[op].Observe(time.Since(blockStartTime).Seconds())
 			dataFrameCount += 1
 			dataByteCount += len(message)
 		case <-timer.C:
-			exchangeLocalBlockedSecondsHistogram.Observe(time.Since(blockStartTime).Seconds())
-			recordLocalTransportFrames(dataFrameCount, dataByteCount, pingCount)
+			exchangeLocalBlockedSeconds[op].Observe(time.Since(blockStartTime).Seconds())
+			recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
 			link.detach(localTransportDetachWriteTimeout)
 			return false
 		case <-link.ctx.Done():
 			timer.Stop()
-			recordLocalTransportFrames(dataFrameCount, dataByteCount, pingCount)
+			recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
 			return false
 		}
 	}
 	if timer != nil {
 		timer.Stop()
 	}
-	recordLocalTransportFrames(dataFrameCount, dataByteCount, pingCount)
+	recordLocalTransportFrames(op, dataFrameCount, dataByteCount, pingCount)
 	link.resident.UpdateActivity()
 	if !open {
 		self.sourceClosed()
 		return false
 	}
 	return true
+}
+
+// Releases a message's charge from the ledger's forward output stage once the
+// pump handed it onward or returned it.
+func (self *localTransportPump) release(charge residentPayloadCharge) {
+	if self.ledger != nil {
+		self.ledger.update(residentPayloadForwardOutput, self.ledgerOwner, charge, false)
+	}
 }
 
 // Returns messages this pump dequeued and did not deliver, counting each data
@@ -893,7 +1066,12 @@ func (self *localTransportPump) drop(messages [][]byte) {
 		if 0 < len(message) {
 			recordReceiveQueueDrop(self.dropBoundary, len(message))
 		}
+		var charge residentPayloadCharge
+		if self.ledger != nil {
+			charge = payloadCharge(message)
+		}
 		connect.MessagePoolReturn(message)
+		self.release(charge)
 	}
 }
 

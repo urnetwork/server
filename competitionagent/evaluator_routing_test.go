@@ -1,3 +1,5 @@
+//go:build linux
+
 // Prospective helper tests execute only a fake client and fake sudo in private
 // directories. No Docker socket, namespace, mount or host command is available.
 package competitionagent

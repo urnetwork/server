@@ -1449,6 +1449,12 @@ func newProxyDeviceLocalSettings(
 	// hosted windows hand drained slots over (connect StrictWindowHandover,
 	// which apps leave off), unless proxy.yml window_strict_handover is false
 	deviceLocalSettings.StrictWindowHandover = !proxyDeviceSettings.DisableStrictWindowHandover
+	// while the payer's balance refuses the device's contracts, a hosted
+	// window sends one balance probe per expansion step instead of building
+	// window clients the balance refuses, and a granted contract resumes the
+	// refill at once (connect OutOfBalanceRefillProbe, which apps leave off;
+	// server CPUOPT4.md, Part B #1)
+	deviceLocalSettings.OutOfBalanceRefillProbe = true
 	// a hosted window client opens no per-peer session and signs no close
 	// report, so nothing reads its identity key, and each key it published would
 	// be one stored signed registration per window candidate. A post-quantum

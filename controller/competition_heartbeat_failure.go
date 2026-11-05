@@ -19,6 +19,9 @@ import (
 type competitionHeartbeatSettings struct {
 	HandBackTimeout time.Duration
 	LeaseRetry      competitionLeaseRetrySettings
+	// Only wholly unadmitted returned acquisition deadlines can use this outer
+	// allowance. It never enlarges lock retries, the lease or evaluation clock.
+	AcquireRetry competitionHeartbeatAcquireRetrySettings
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings
 }
@@ -26,16 +29,17 @@ type competitionHeartbeatSettings struct {
 // Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
 	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
-		LeaseRetry: defaultCompetitionLeaseRetrySettings(), CompletionRetry: defaultCompetitionLeaseRetrySettings()}
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), CompletionRetry: defaultCompetitionLeaseRetrySettings()}
 }
 
-// Only fixed categories, a validated PostgreSQL code and an opaque digest are
-// serializable. The original error is deliberately absent from this type.
+// Only fixed categories, a validated PostgreSQL code, an opaque digest and
+// finite heartbeat boundaries are serializable. The original error is absent.
 type competitionHeartbeatFailure struct {
-	Category      string                  `json:"error_category,omitempty"`
-	SqlState      string                  `json:"error_sqlstate,omitempty"`
-	DetailSha256  string                  `json:"error_sha256,omitempty"`
-	DatabasePhase server.DbOperationPhase `json:"database_phase,omitempty"`
+	Category          string                                `json:"error_category,omitempty"`
+	SqlState          string                                `json:"error_sqlstate,omitempty"`
+	DetailSha256      string                                `json:"error_sha256,omitempty"`
+	DatabasePhase     server.DbOperationPhase               `json:"database_phase,omitempty"`
+	HeartbeatDatabase *competitionHeartbeatDatabaseSnapshot `json:"heartbeat_database,omitempty"`
 }
 
 // Adds finite source-boundary evidence without changing formatting or identity.
@@ -77,6 +81,11 @@ func competitionHeartbeatFailureDetails(err error) competitionHeartbeatFailure {
 	if errors.As(err, &phaseError) && phaseError.phase > server.DbOperationUnknown && phaseError.phase <= server.DbOperationPostCommit {
 		detail.DatabasePhase = phaseError.phase
 	}
+	var heartbeatError competitionHeartbeatDatabaseError
+	if errors.As(err, &heartbeatError) {
+		snapshot := heartbeatError.snapshot
+		detail.HeartbeatDatabase = &snapshot
+	}
 	var sqlError interface{ SQLState() string }
 	var networkError net.Error
 	switch {
@@ -117,10 +126,16 @@ type competitionSafeHeartbeatError struct {
 
 // Diagnostic formatting contains only the same safe fields as the ledger.
 func (self competitionSafeHeartbeatError) Error() string {
+	formatted := fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256)
 	if self.detail.DatabasePhase != server.DbOperationUnknown {
-		return fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s database_phase=%d", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256, self.detail.DatabasePhase)
+		formatted += fmt.Sprintf(" database_phase=%d", self.detail.DatabasePhase)
 	}
-	return fmt.Sprintf("category=%s sqlstate=%s detail_sha256=%s", self.detail.Category, self.detail.SqlState, self.detail.DetailSha256)
+	if observation := self.detail.HeartbeatDatabase; observation != nil {
+		formatted += fmt.Sprintf(" heartbeat_step=%d callback_entries=%d acquire_attempts=%d acquire_succeeded=%d commit_acknowledged=%d rollback_acknowledged=%d",
+			observation.Step, observation.CallbackEntries, observation.Transaction.AcquireAttempts, observation.Transaction.AcquireSucceeded,
+			observation.Transaction.CommitAcknowledged, observation.Transaction.RollbackAcknowledged)
+	}
+	return formatted
 }
 
 // The original cause is retained for programmatic decisions, never serialization.

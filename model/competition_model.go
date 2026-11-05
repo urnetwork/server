@@ -37,6 +37,8 @@ type CompetitionRuntimeStatus struct {
 	IntakeReady     bool `json:"intake_ready"`
 	GradingReady    bool `json:"grading_ready"`
 	PublicationHeld bool `json:"publication_held"`
+	// Prospective only: existing seals retain their authorized publication time.
+	FinalizationHeld bool `json:"finalization_held,omitempty"`
 }
 
 type CompetitionPatchPolicy struct {

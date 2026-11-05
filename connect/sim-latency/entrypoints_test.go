@@ -153,8 +153,11 @@ func TestHostBuildAndRunEntrypoints(t *testing.T) {
 		"failure or suspected flake must be handed to Sol 6.1 (`gpt-6.1-sol`) with max reasoning to diagnose the root cause, implement the correction, and add a deterministic regression test",
 		"A separate Sol 6.1 low agent then reruns the affected test and required suite",
 		"do not accept a debugging agent's test run as the independent completion result",
-		"Sol 6.1 with max reasoning owns code evaluation, each winning-submission honesty and safety code review, the approve/reject decision",
-		"every winner promotion, and all source or config merge/push operations",
+		"The prospective production policy uses Snow's two reviewers:",
+		"`qwen3.8-27b` (`xhigh`) and `gemma-4-26b-a4b` (`high`)",
+		"Both must approve. Retain the union of all attributed findings",
+		"missing, malformed, unavailable or uncertain evidence holds progression",
+		"Sol 6.1 max retains implementation, debugging, and source/config merge/push ownership after the required independent review",
 		"The low-reasoning test agent must not approve candidates, merge branches, or push source/config refs",
 		"Sol 6.1 max owns the source pull/merge and release review; Sol 6.1 low owns independent regression and image validation",
 		"Before qualifying the repaired evaluator, Sol 6.1 low must independently exercise the deterministic regressions",
@@ -207,11 +210,17 @@ func TestActiveHarnessDocumentationUsesSol61Roles(t *testing.T) {
 		required []string
 	}{
 		{path: "AUTOMATION.md", required: []string{
-			"Sol 6.1 (`gpt-6.1-sol`) with max reasoning owns code evaluation, honesty/safety review, debugging, correction, promotion, and source/config merges",
+			"Snow's two reviewers, `qwen3.8-27b` (`xhigh`) and `gemma-4-26b-a4b` (`high`)",
+			"Both must approve; retain the union of their attributed findings",
+			"missing, malformed, unavailable or uncertain evidence holds progression",
+			"Sol 6.1 max retains implementation, debugging, correction and source/config merges",
 			"an independent Sol 6.1 low agent executes tests",
 		}},
 		{path: "FINAL-AUTOMATE.md", required: []string{
-			"runbook's Sol 6.1 (`gpt-6.1-sol`) max review/promotion and independent Sol 6.1 low test ownership",
+			"Snow's two reviewers, `qwen3.8-27b` (`xhigh`) and `gemma-4-26b-a4b` (`high`)",
+			"Both must approve; retain the union of their attributed findings",
+			"`elected_winner_snow_union_v2`",
+			"runbook's Snow two-model formal review, Sol 6.1 (`gpt-6.1-sol`) max implementation/debugging/source-merge ownership, and independent Sol 6.1 low test ownership",
 		}},
 	}
 	for _, c := range cases {

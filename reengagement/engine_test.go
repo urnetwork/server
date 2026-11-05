@@ -253,6 +253,40 @@ func TestSendAt(t *testing.T) {
 	}
 }
 
+// The daily scan runs at 02:30 UTC, after that day's 10:00 in the Americas and
+// East Asia, so those first steps are already due. Inside the window (09:00 to
+// 20:00) they go out a minute on; a network already past the window's end
+// waits for the next morning instead of getting mail at night.
+func TestSendAtLateScanKeepsTheWindow(t *testing.T) {
+	zone := func(name string) *time.Location {
+		loc, err := time.LoadLocation(name)
+		if err != nil {
+			t.Fatalf("%s: %s", name, err)
+		}
+		return loc
+	}
+	scan := time.Date(2026, 11, 4, 2, 30, 20, 0, time.UTC)
+	for _, c := range []struct {
+		zone string
+		want time.Time
+	}{
+		// 21:30, 20:30 and 23:30 local: past the window, so 09:00 the next morning
+		{"America/New_York", time.Date(2026, 11, 4, 9, 0, 0, 0, zone("America/New_York"))},
+		{"America/Chicago", time.Date(2026, 11, 4, 9, 0, 0, 0, zone("America/Chicago"))},
+		{"America/Sao_Paulo", time.Date(2026, 11, 4, 9, 0, 0, 0, zone("America/Sao_Paulo"))},
+		// 18:30 and 11:30 local: inside the window, a minute on
+		{"America/Los_Angeles", scan.Add(time.Minute)},
+		{"Asia/Tokyo", scan.Add(time.Minute)},
+		// 06:00 local: before the send hour, so 10:00 that day
+		{"Asia/Tehran", time.Date(2026, 11, 4, 10, 0, 0, 0, zone("Asia/Tehran"))},
+		{"UTC", time.Date(2026, 11, 4, 10, 0, 0, 0, time.UTC)},
+	} {
+		if at := SendAt(scan, 0, zone(c.zone), DefaultSchedule, scan); !at.Equal(c.want) {
+			t.Errorf("%s: %s, want %s", c.zone, at.In(zone(c.zone)), c.want)
+		}
+	}
+}
+
 // Every template's params are exactly its manifest's keys.
 func TestParamsMatchManifests(t *testing.T) {
 	mmm := filepath.Join("..", "..", "mmm")

@@ -15,6 +15,16 @@ package mcp
 //
 // Reuse guarantees the same LOCATION, not the same exit ip: the underlying
 // provider selection rebalances, so callers must not depend on ip stability.
+//
+// A call without a live handle first reuses the newest active proxy this tool
+// created for the network and location (model.FindReusableNetworkProxy), and
+// provisions only when there is none. The handle lasts fetchSealTtl and the
+// caller never sees the proxy's credential, so a proxy whose handle lapsed was
+// unreachable, yet stayed active until the idle reap: every new conversation
+// created another, each kept a device on a proxy host and counted against the
+// network's active proxy cap, where a free network's leftovers blocked the
+// proxies its people create themselves. Proxies are shared across a network's
+// calls for one location; cookies stay per call (newCookieJar).
 
 import (
 	"context"
@@ -36,6 +46,10 @@ import (
 
 // x402 resource identifier quoted in payment terms for this tool
 const fetchX402Resource = "mcp:fetch"
+
+// The device spec of the proxies this tool provisions, which is also how it
+// finds them again; changing it orphans the proxies created under the old one.
+const fetchProxyDeviceSpec = "mcp"
 
 var errProxyGone = errors.New("the proxy for this signed_proxy_id no longer exists")
 
@@ -166,12 +180,16 @@ func createProxy(
 		return nil, nil, err
 	}
 
+	if proxy := reuseLocationProxy(clientSession, binding, connectLocation, locationName); proxy != nil {
+		return proxy, nil, nil
+	}
+
 	// no ip lock: the proxy is used from this service, and locking to the
 	// calling agent's ip would refuse our own egress connection
 	authClientResult, err := model.AuthNetworkClient(
 		&model.AuthNetworkClientArgs{
 			Description: "mcp fetch",
-			DeviceSpec:  "mcp",
+			DeviceSpec:  fetchProxyDeviceSpec,
 			ProxyConfig: &model.ProxyConfig{
 				InitialDeviceState: &model.ExtendedProxyDeviceState{
 					ProxyDeviceState: model.ProxyDeviceState{
@@ -226,6 +244,46 @@ func createProxy(
 		location:      locationName,
 		created:       true,
 	}, nil, nil
+}
+
+// The newest active proxy this tool created for the network at the connect
+// location, sealed into a fresh handle, or nil when there is none (or its
+// credential cannot be read), in which case the caller provisions one.
+func reuseLocationProxy(
+	clientSession *session.ClientSession,
+	binding string,
+	connectLocation *sdk.ConnectLocation,
+	locationName string,
+) *acquiredProxy {
+	proxyId := model.FindReusableNetworkProxy(
+		clientSession.Ctx,
+		clientSession.ByJwt.NetworkId,
+		fetchProxyDeviceSpec,
+		connectLocation,
+		model.DefaultReusableNetworkProxySettings(),
+	)
+	if proxyId == nil {
+		return nil
+	}
+	proxyClient, err := model.GetProxyClient(clientSession.Ctx, *proxyId)
+	if err != nil || proxyClient == nil {
+		return nil
+	}
+	sealedProxyId, err := seal(
+		sealLabelProxy,
+		binding,
+		&sealedProxyHandle{SignedProxyId: proxyClient.AuthToken},
+		fetchSealTtl,
+	)
+	if err != nil {
+		return nil
+	}
+	return &acquiredProxy{
+		signedProxyId: sealedProxyId,
+		proxyClient:   proxyClient,
+		location:      locationName,
+		created:       false,
+	}
 }
 
 // Maps a free-text location query to a connect location. An empty query means

@@ -298,6 +298,15 @@ therefore staging `settlement_status` is limited to `pending`, `received`, or
 explicit v2 rounds; v2 review/source authority uses the separately scoped
 automation contract described in [`RUN-MAIN.md`](RUN-MAIN.md).
 
+The scheduler's independent `finalization` hold is prospective and scoped to
+the exact environment, competition and season. It pauses new seals and first
+elections without pausing intake, FIFO grading, lease renewal or credential-owner
+private score feedback. It does not change frozen policy or the publication time
+of an already committed seal, and it does not hide historical results, integrity
+notices or later append-only reward revisions. `runtime_status.finalization_held`
+is optional when inactive; intake/grading/publication readiness remain separate.
+Like the other holds, release requires an exact revision and `RECOVERY_APPROVED`.
+
 ### Explicit intake-preserving calibration maintenance
 
 The [October 30 owner approval](launch/CALIBRATION-MAINTENANCE-INTAKE-OWNER-APPROVAL-2026-10-30.json)

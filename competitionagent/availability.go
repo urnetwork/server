@@ -1,3 +1,5 @@
+//go:build linux
+
 // Physical availability is a signed finite observation, independent of a
 // historical qualification. Unknown cleanup never starts another job's clock.
 package competitionagent

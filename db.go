@@ -758,6 +758,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	var timing *DbTiming
 	phase := dbPhaseObservation(options)
 	var readObservation *DbReadObservation
+	var txObservation *DbTxObservation
 	var ownedConnection *pgOwnedConnection
 	var readBeforeBegin TxReadBeforeBegin
 	// debugOptions := OptNoDebug()
@@ -771,6 +772,8 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			timing = v
 		case *DbReadObservation:
 			readObservation = v
+		case *DbTxObservation:
+			txObservation = v
 		case *pgOwnedConnection:
 			ownedConnection = v
 		case TxReadBeforeBegin:
@@ -807,7 +810,9 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		acquireObservation.opened(ctx, pgPool)
 		readObservation.BeginAcquire()
 		acquireObservation.startAcquire()
+		txObservation.acquireEntered()
 		conn, connErr := pgPool.Acquire(ctx)
+		txObservation.acquireReturned(connErr == nil)
 		acquireObservation.finish(ctx, pgPool, connErr == nil)
 		readObservation.FinishAcquire(connErr == nil)
 		timing.finish(DbTimingAcquire, acquireStarted)
@@ -977,12 +982,19 @@ func Tx(ctx context.Context, callback func(PgTx), options ...any) {
 // and can replace the owning failure. Use a detached, bounded context and
 // deliberately leave the rollback result secondary to the existing outcome.
 func rollbackTx(ctx context.Context, tx PgTx) {
+	rollbackTxWithObservation(ctx, tx, nil)
+}
+
+// Preserve best-effort cleanup exactly; only its actual nil return is an ack.
+func rollbackTxWithObservation(ctx context.Context, tx PgTx, observation *DbTxObservation) {
 	rollbackCtx, rollbackCancel := context.WithTimeout(
 		context.WithoutCancel(ctx),
 		PgRollbackTimeout,
 	)
 	defer rollbackCancel()
-	_ = tx.Rollback(rollbackCtx)
+	observation.rollbackEntered(rollbackCtx)
+	err := tx.Rollback(rollbackCtx)
+	observation.rollbackReturned(rollbackCtx, err == nil)
 }
 
 // Bounds BEGIN after the caller stops, in place of `PgBeginTimeout`. Only
@@ -1047,6 +1059,7 @@ func txWithPool(ctx context.Context, pool *safePgPool, callback func(PgTx), opti
 func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func(PgTx), options ...any) {
 	retryOptions := OptRetryDefault()
 	var timing *DbTiming
+	var txObservation *DbTxObservation
 	phase := dbPhaseObservation(options)
 	// by default use RepeatableRead isolation
 	// https://www.postgresql.org/docs/current/transaction-iso.html
@@ -1066,6 +1079,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			retryOptions = v
 		case *DbTiming:
 			timing = v
+		case *DbTxObservation:
+			txObservation = v
 		case txBeginTimeout:
 			beginTimeout = time.Duration(v)
 		case txStatementStopTimeout:
@@ -1113,7 +1128,9 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 				panic(err)
 			}
 			beginStarted := timing.start()
+			txObservation.beginEntered(ctx)
 			rawTx, err := beginTx(ctx, conn, txOptions, beginTimeout)
+			txObservation.beginReturned(ctx, err == nil)
 			timing.finish(DbTimingBegin, beginStarted)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -1140,7 +1157,7 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 			defer func() {
 				if err := recover(); err != nil {
 					rollbackStarted := timing.start()
-					rollbackTx(ctx, tx)
+					rollbackTxWithObservation(ctx, tx, txObservation)
 					timing.finish(DbTimingRollback, rollbackStarted)
 					panic(err)
 				}
@@ -1169,6 +1186,7 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 					}
 				}()
 				phase.enter(DbOperationCallback)
+				txObservation.callbackEntered()
 				callback(tx)
 			}()
 			if pgErr == nil && tx.statementStopErr != nil {
@@ -1195,7 +1213,9 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 				)
 				phase.enter(DbOperationCommit)
 				commitStarted := timing.start()
+				txObservation.commitEntered(commitCtx)
 				commitErr = commitObservedTx(commitCtx, tx)
+				txObservation.commitReturned(commitCtx, commitErr == nil)
 				if commitErr == nil {
 					phase.enter(DbOperationAcknowledged)
 					committedAt = time.Now()
@@ -1212,7 +1232,7 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 				}
 			} else {
 				rollbackStarted := timing.start()
-				rollbackTx(ctx, tx)
+				rollbackTxWithObservation(ctx, tx, txObservation)
 				timing.finish(DbTimingRollback, rollbackStarted)
 			}
 		})

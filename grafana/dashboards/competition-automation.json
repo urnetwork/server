@@ -60,7 +60,7 @@
     },
     {
       "id": 6, "type": "timeseries", "title": "independent capability holds",
-      "description": "A hold pauses only the named capability. Incident safety holds need an independently authorized recovery, not ordinary winner approval. Accepted evidence remains intact.",
+      "description": "A hold pauses only the named capability. Finalization blocks new seals and first elections while intake/grading continue; existing seals retain their authorized publication times. Incident safety holds need independently authorized recovery. Accepted evidence remains intact.",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 13},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1}, "overrides": []},

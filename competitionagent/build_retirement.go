@@ -1,3 +1,5 @@
+//go:build linux
+
 // The durable Docker owner closes build admission before retiring BuildKit.
 // Candidate measurement requires both the private receipt and fresh kernel facts.
 package competitionagent

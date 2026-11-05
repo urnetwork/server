@@ -302,8 +302,8 @@ type localTransportIOSnapshot struct {
 
 func snapshotLocalTransportIO(direction string, kind string) localTransportIOSnapshot {
 	return localTransportIOSnapshot{
-		frames: testutil.ToFloat64(exchangeLocalFramesCounter.WithLabelValues(direction, kind)),
-		bytes:  testutil.ToFloat64(exchangeLocalBytesCounter.WithLabelValues(direction, kind)),
+		frames: testutil.ToFloat64(exchangeLocalFramesCounter.WithLabelValues("transport", direction, kind)),
+		bytes:  testutil.ToFloat64(exchangeLocalBytesCounter.WithLabelValues("transport", direction, kind)),
 	}
 }
 
@@ -313,7 +313,7 @@ func snapshotLocalTransportDrops(boundary string) (float64, float64) {
 }
 
 func snapshotLocalTransportDetaches(reason localTransportDetachReason) float64 {
-	return testutil.ToFloat64(exchangeLocalDetachesCounter.WithLabelValues(localTransportDetachReasonLabels[reason]))
+	return testutil.ToFloat64(exchangeLocalDetachesCounter.WithLabelValues("transport", localTransportDetachReasonLabels[reason]))
 }
 
 // Fails the test at any pool ownership violation and reports the count change.
@@ -1003,14 +1003,14 @@ func TestLocalTransportAttachAccountingBalances(t *testing.T) {
 	defer cancel()
 	f := newLocalTransportPumpFixture(t, ctx, localTransportTestSettings(), 16)
 	defer f.close()
-	attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachmentsGauge)
+	attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport])
 	testLink := f.attach()
 	clientId := f.resident.clientId
 	if count := f.exchange.exchangeConnectionCounts[clientId]; count != 1 {
 		t.Fatalf("accepted exchange connections = %d, want 1", count)
 	}
 	if f.resident.localAttachments.Load() != 1 || f.exchange.localTransport.linkCount() != 1 ||
-		testutil.ToFloat64(exchangeLocalAttachmentsGauge) != attachmentsBefore+1 {
+		testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport]) != attachmentsBefore+1 {
 		t.Fatal("attach did not count its attachment and link")
 	}
 	f.run(testLink)
@@ -1023,7 +1023,7 @@ func TestLocalTransportAttachAccountingBalances(t *testing.T) {
 		t.Error("detach left an accepted exchange connection")
 	}
 	if f.resident.localAttachments.Load() != 0 || f.exchange.localTransport.linkCount() != 0 ||
-		testutil.ToFloat64(exchangeLocalAttachmentsGauge) != attachmentsBefore {
+		testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport]) != attachmentsBefore {
 		t.Error("detach left its attachment or link")
 	}
 	if testLink.closeTransport.Load() != 1 {
@@ -1135,7 +1135,7 @@ func TestLocalTransportControlReadsTheSwitch(t *testing.T) {
 	}
 	ceilingOff := localTransportTestSettings()
 	ceilingOff.EnableLocalTransport = false
-	if newExchangeLocalTransport(ctx, ceilingOff, "g1") != nil {
+	if newExchangeLocalTransport(ctx, ceilingOff, "g1", ExchangeOpTransport) != nil {
 		t.Error("the ceiling off still built a switch that reads the control")
 	}
 }
@@ -1347,7 +1347,7 @@ func TestLocalTransportWaitForIdleJoinsLinkDetach(t *testing.T) {
 	violations := watchLocalTransportPoolViolations(t)
 	f := newLocalTransportPumpFixture(t, ctx, localTransportTestSettings(), 16)
 	defer f.close()
-	attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachmentsGauge)
+	attachmentsBefore := testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport])
 	routeRemovalEntered := make(chan struct{})
 	routeRemovalRelease := make(chan struct{})
 	// a failure must not leave the detach held under the fixture's close
@@ -1384,7 +1384,7 @@ func TestLocalTransportWaitForIdleJoinsLinkDetach(t *testing.T) {
 	// final at once
 	requireResidentPoolOwnerReturned(t, witness, "a message left on a route at the exchange's close")
 	if len(f.exchange.exchangeConnectionCounts) != 0 || f.exchange.localTransport.linkCount() != 0 ||
-		f.resident.localAttachments.Load() != 0 || testutil.ToFloat64(exchangeLocalAttachmentsGauge) != attachmentsBefore {
+		f.resident.localAttachments.Load() != 0 || testutil.ToFloat64(exchangeLocalAttachments[exchangeIOOpTransport]) != attachmentsBefore {
 		t.Error("the exchange's accounting was not final when WaitForIdle returned")
 	}
 	// the close ends the resident and the transport together, and either end

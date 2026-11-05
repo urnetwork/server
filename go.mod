@@ -234,3 +234,12 @@ replace github.com/centrifuge/go-substrate-rpc-client/v4 => ../sn/third_party/go
 // lock (local/source-graph/lock.yml) pins this sibling's full revision; the
 // release builder converts it to an immutable pin.
 replace gvisor.dev/gvisor => ../gvisor
+
+// The slow write timer arms a new timer per write instead of resetting the last
+// one while it is still in the runtime's timer heap (third_party/pgx/URNETWORK.md).
+replace github.com/jackc/pgx/v5 => ./third_party/pgx
+
+// The connection's run loop timer keeps a pending unchanged deadline and arms a
+// new timer for another, instead of resetting one still in the runtime's timer
+// heap (third_party/quic-go/URNETWORK.md).
+replace github.com/quic-go/quic-go => ./third_party/quic-go

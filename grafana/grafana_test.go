@@ -2010,6 +2010,47 @@ func TestExchangeTrafficDashboardsUseLiveIoWithoutDoubleCounting(t *testing.T) {
 	}
 }
 
+// 2026-11-04: with in-process delivery on for transports and forwards, more
+// than half of the exchange's data frames went through local links, and the
+// connect dashboard's totals, which read the socket counters alone, showed
+// exchange traffic falling by about two thirds while socket plus in-process
+// traffic matched the nights before. Each total must add the local counter of
+// the same kind, under the same selectors, and fall back to zero so it keeps
+// the socket count where no process exports local series.
+func TestConnectDashboardExchangeTotalsIncludeInProcessLinks(t *testing.T) {
+	dashboard := readTestDashboard(t, "connect.json")
+	selectors := `{env="$env",block=~"$block",host=~"$host",`
+	for _, expected := range []struct {
+		panelId int
+		kind    string
+	}{
+		{panelId: 5, kind: "bytes"},
+		{panelId: 6, kind: "bytes"},
+		{panelId: 7, kind: "frames"},
+		{panelId: 8, kind: "bytes"},
+		{panelId: 9, kind: "frames"},
+		{panelId: 10, kind: "bytes"},
+		{panelId: 10, kind: "frames"},
+	} {
+		panel := dashboardPanelById(dashboard, expected.panelId)
+		if panel == nil || len(panel.Targets) != 1 {
+			t.Fatalf("exchange total panel %d is missing its query", expected.panelId)
+		}
+		expression := panel.Targets[0].Expr
+		socket := "urnetwork_connect_exchange_io_" + expected.kind + "_total" + selectors
+		local := "urnetwork_connect_exchange_local_" + expected.kind + "_total" + selectors
+		if !strings.Contains(expression, socket) {
+			t.Errorf("exchange total panel %d no longer reads the socket %s: %s", expected.panelId, expected.kind, expression)
+		}
+		if !strings.Contains(expression, local) {
+			t.Errorf("exchange total panel %d omits the in-process %s: %s", expected.panelId, expected.kind, expression)
+		}
+		if !strings.Contains(expression, " or ") {
+			t.Errorf("exchange total panel %d has no fallback for processes without local series: %s", expected.panelId, expression)
+		}
+	}
+}
+
 // Keeps carrier rates, instantaneous queue occupancy, and wait duration distinct.
 func TestConnectH3DashboardPreservesMetricUnitsAndScope(t *testing.T) {
 	dashboard := readTestDashboard(t, "connect.json")

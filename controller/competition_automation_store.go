@@ -140,6 +140,13 @@ func (self PostgresStore) SealAndElect(ctx context.Context, settings *Settings, 
 			if !errors.Is(sealErr, pgx.ErrNoRows) {
 				server.Raise(sealErr)
 			}
+			if holdErr := ensureAutomationNotHeldInTx(ctx, tx, settings, "finalization"); holdErr != nil {
+				if errors.Is(holdErr, ErrAutomationHeld) {
+					stateErr = ErrFinalizationHeld
+					return
+				}
+				server.Raise(holdErr)
+			}
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, roundId))
 			now := self.nowUtc()
 			if round.Canceled || now.Before(round.ClosesAt) {
@@ -353,21 +360,32 @@ func (self PostgresStore) AutomationResult(ctx context.Context, settings *Settin
 
 // Private supervisor reconciliation can inspect a seal without publishing it.
 func (self PostgresStore) AutomationSeal(ctx context.Context, settings *Settings, roundId server.Id) (seal *model.CompetitionEvaluationSeal, err error) {
+	var stateErr error
 	err = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
-			seal = nil
+			// A supervisor may read before either the round or seal exists.
+			// Reset both outcomes if the read-only transaction is retried.
+			seal, stateErr = nil, nil
 			_, _, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
+			if errors.Is(loadErr, ErrNotFound) {
+				stateErr = loadErr
+				return
+			}
 			server.Raise(loadErr)
 			var content []byte
 			loadErr = tx.QueryRow(ctx, `SELECT seal_json FROM competition_evaluation_seal WHERE round_id=$1`, roundId).Scan(&content)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
-				panic(ErrNotFound)
+				stateErr = ErrNotFound
+				return
 			}
 			server.Raise(loadErr)
 			seal = &model.CompetitionEvaluationSeal{}
 			server.Raise(json.Unmarshal(content, seal))
 		})
 	})
+	if err == nil {
+		err = stateErr
+	}
 	return seal, err
 }
 

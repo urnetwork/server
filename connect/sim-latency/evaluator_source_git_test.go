@@ -135,6 +135,12 @@ func runSourceGitBuilderFixture(t *testing.T, mode string, protectedPatch bool) 
 // The real candidate path must keep the temporary stage ref after patching.
 func runSourceGitBuilderFixtureForMode(t *testing.T, mode string, protectedPatch, staging bool) ([]byte, error) {
 	t.Helper()
+	return runSourceGitBuilderFixtureForScope(t, mode, protectedPatch, staging, false)
+}
+
+// Both ownership modes execute the same extracted Git helper as the builder.
+func runSourceGitBuilderFixtureForScope(t *testing.T, mode string, protectedPatch, staging, scoped bool) ([]byte, error) {
+	t.Helper()
 	root := t.TempDir()
 	repositoryCommits := map[string]string{}
 	for _, repository := range sourceRepositoryNamesForMode(staging) {
@@ -186,25 +192,34 @@ base_image_id="sha256:$(printf 'b%.0s' {1..64})"
 base_sha="$SOURCE_TEST_BASE"
 source_lock_sha256="$(printf 'c%.0s' {1..64})"
 patch_sha256="$(printf 'd%.0s' {1..64})"
+subevaluation_scoped="$SOURCE_TEST_SCOPED"
 git() {
-    local fail=false
+    local fail=false operation="" option_value=false argument
+    for argument in "$@"; do
+        if [[ "$option_value" = true ]]; then option_value=false; continue; fi
+        case "$argument" in
+            -C|-c|--git-dir|--work-tree) option_value=true ;;
+            -*) ;;
+            *) operation="$argument"; break ;;
+        esac
+    done
     case "$SOURCE_TEST_MODE" in
-        status) [[ "$3" != status ]] || fail=true ;;
+        status) [[ "$operation" != status ]] || fail=true ;;
         protected-status) [[ "$*" != *'status --porcelain=v1 --untracked-files=all -- connect/sim-latency' ]] || fail=true ;;
-        protected-diff) [[ "$*" != *'diff --quiet -- connect/sim-latency' ]] || fail=true ;;
+        protected-diff) [[ "$operation" != diff || "$*" != *'--quiet -- connect/sim-latency' ]] || fail=true ;;
         protected-tree) [[ "$*" != *'HEAD:connect/sim-latency' ]] || fail=true ;;
         candidate-tree)
             if [[ -f "$SOURCE_TEST_ROOT/committed" && "$*" == *'HEAD:connect/sim-latency' ]]; then fail=true; fi ;;
         candidate-status)
-            if [[ -f "$SOURCE_TEST_ROOT/committed" && "$3" == status ]]; then fail=true; fi ;;
-        candidate-commit) [[ "$3" != commit ]] || fail=true ;;
+            if [[ -f "$SOURCE_TEST_ROOT/committed" && "$operation" == status ]]; then fail=true; fi ;;
+        candidate-commit) [[ "$operation" != commit ]] || fail=true ;;
     esac
     if [[ "$fail" == true ]]; then
         printf 'synthetic Git invocation failure\n' >&2
         return 128
     fi
     "$SOURCE_TEST_GIT" "$@" || return $?
-    if [[ "$3" == commit ]]; then
+    if [[ "$operation" == commit ]]; then
         : > "$SOURCE_TEST_ROOT/committed"
     fi
 }
@@ -212,11 +227,26 @@ git() {
 	errorFunction := sourceGitScriptSection(t, "build-submission.sh", "infrastructure_failure() {\n", "\nusage() {")
 	repositoryPolicy := sourceGitScriptSection(t, "build-submission.sh", "REPOSITORIES=(", "\nbase_sha=")
 	buildSection := sourceGitScriptSection(t, "build-submission.sh", "source_identity=", "\nchmod 0600 \"$source_identity\"")
-	command := exec.Command("bash", "-c", prelude+errorFunction+repositoryPolicy+"\n"+buildSection+"\nprintf 'candidate source authenticated\\n'\n")
+	command := exec.CommandContext(t.Context(), "bash", "-c", prelude+sourceBuilderGitDependency(t)+errorFunction+repositoryPolicy+"\n"+buildSection+"\nprintf 'candidate source authenticated\\n'\n")
 	command.Env = append(os.Environ(), "SOURCE_TEST_ROOT="+root, "SOURCE_TEST_GIT="+gitPath,
 		"SOURCE_TEST_STAGING="+strconv.FormatBool(staging), "SOURCE_TEST_BRANCH="+sourceBranch(staging),
-		"SOURCE_TEST_BASE="+repositoryCommits["server"], "SOURCE_TEST_MODE="+mode)
+		"SOURCE_TEST_BASE="+repositoryCommits["server"], "SOURCE_TEST_MODE="+mode,
+		"SOURCE_TEST_SCOPED="+strconv.FormatBool(scoped))
 	return command.CombinedOutput()
+}
+
+// Missing helper dependencies are fixture failures, not synthetic Git errors.
+// Extract the production helper itself; do not replace it with a Git shim.
+func sourceBuilderGitDependency(t *testing.T) string {
+	t.Helper()
+	return sourceGitScriptSection(t, "subevaluation-ownership.sh", "evaluation_git() {\n", "\n}\n") + `
+}
+command_not_found_handle() {
+    printf 'source fixture helper dependency is absent: %s\n' "$1" >&2
+    exit 97
+}
+declare -F evaluation_git >/dev/null || exit 97
+`
 }
 
 // A benign candidate still crosses the exact same source verification path.
@@ -224,6 +254,14 @@ func TestSubmissionBuilderAuthenticatesUnchangedProtectedSource(t *testing.T) {
 	output, err := runSourceGitBuilderFixture(t, "", false)
 	if err != nil || string(output) != "candidate source authenticated\n" {
 		t.Fatalf("valid candidate source: %v: %s", err, output)
+	}
+}
+
+// Safe Git global/diff options must not bypass the fixture's failure injector.
+func TestScopedSubmissionBuilderAuthenticatesUnchangedProtectedSource(t *testing.T) {
+	output, err := runSourceGitBuilderFixtureForScope(t, "", false, false, true)
+	if err != nil || string(output) != "candidate source authenticated\n" {
+		t.Fatalf("valid scoped candidate source: %v: %s", err, output)
 	}
 }
 
@@ -243,12 +281,16 @@ func TestStagingSubmissionBuilderRetainsStageBranchAndProtectedSource(t *testing
 
 // Exit 2 keeps trusted Git failures out of terminal submission rejection.
 func TestSubmissionBuilderClassifiesSourceGitFailuresAsInfrastructure(t *testing.T) {
-	for _, mode := range []string{"status", "protected-status", "protected-diff", "protected-tree", "candidate-tree", "candidate-status", "candidate-commit"} {
-		output, err := runSourceGitBuilderFixture(t, mode, false)
-		exitError, ok := err.(*exec.ExitError)
-		if !ok || exitError.ExitCode() != 2 || !strings.Contains(string(output), "evaluator infrastructure failure:") ||
-			strings.Contains(string(output), "submission attempted") || strings.Contains(string(output), "candidate source authenticated") {
-			t.Errorf("%s: error=%v, output=%s", mode, err, output)
+	for _, scoped := range []bool{false, true} {
+		for _, mode := range []string{"status", "protected-status", "protected-diff", "protected-tree", "candidate-tree", "candidate-status", "candidate-commit"} {
+			output, err := runSourceGitBuilderFixtureForScope(t, mode, false, false, scoped)
+			exitError, ok := err.(*exec.ExitError)
+			if !ok || exitError.ExitCode() != 2 || !strings.Contains(string(output), "evaluator infrastructure failure:") ||
+				!strings.Contains(string(output), "synthetic Git invocation failure") ||
+				strings.Contains(string(output), "source fixture helper dependency is absent:") ||
+				strings.Contains(string(output), "submission attempted") || strings.Contains(string(output), "candidate source authenticated") {
+				t.Errorf("scoped=%t %s: error=%v, output=%s", scoped, mode, err, output)
+			}
 		}
 	}
 }
