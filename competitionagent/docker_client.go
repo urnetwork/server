@@ -102,7 +102,7 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 	}
 	request := HostFilesRequest{Schema: Schema, RunId: runId, Operation: arguments[0]}
 	switch request.Operation {
-	case "mount-evidence", "unmount-evidence", "retire-build":
+	case "mount-evidence", "unmount-evidence", "retire-build", "prepare-build-check-cache", "prepare-build-compile-cache", "prepare-build-output", "reclaim-build-output":
 		if len(arguments) != 1 {
 			return dockerClientExitError{code: 2}
 		}
@@ -158,6 +158,34 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 			return dockerClientExitError{code: 2}
 		}
 		content, err := json.Marshal(proof)
+		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
+			return dockerClientExitError{code: 2}
+		}
+	}
+	if strings.HasPrefix(request.Operation, "prepare-build-") && request.Operation != "prepare-build-output" {
+		cache := result.BuildCache
+		stage := "check"
+		if request.Operation == "prepare-build-compile-cache" {
+			stage = "compile"
+		}
+		if cache == nil || cache.Stage != stage || !digestPattern.MatchString(cache.Sha256) || cache.Bytes < 0 || cache.Bytes > settings.HostFiles.MaximumBuildCacheBytes ||
+			cache.Files < 0 || cache.Files > settings.HostFiles.MaximumBuildCacheEntries || result.BuildBinary != nil || result.Namespace != nil || result.Network != nil || result.BuildRetirement != nil {
+			return dockerClientExitError{code: 2}
+		}
+		content, err := json.Marshal(cache)
+		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
+			return dockerClientExitError{code: 2}
+		}
+	}
+	if request.Operation == "reclaim-build-output" {
+		binary := result.BuildBinary
+		if binary == nil || !digestPattern.MatchString(binary.Sha256) || binary.Bytes <= 0 || binary.Bytes > settings.HostFiles.MaximumBuildBinaryBytes ||
+			len(binary.GoVersion) > 64 || len(binary.GoPackage) > 256 || binary.VcsRevision != "" && (len(binary.VcsRevision) != 40 || !isDockerProxyHex(binary.VcsRevision)) ||
+			binary.VcsModified != "" && binary.VcsModified != "true" && binary.VcsModified != "false" ||
+			result.BuildCache != nil || result.Namespace != nil || result.Network != nil || result.BuildRetirement != nil {
+			return dockerClientExitError{code: 2}
+		}
+		content, err := json.Marshal(binary)
 		if err != nil || writeDockerClientBytes(output, append(content, '\n')) != nil {
 			return dockerClientExitError{code: 2}
 		}

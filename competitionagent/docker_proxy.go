@@ -163,6 +163,7 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 		self.hostFiles.proveMap = self.proveHostNamespace
 		self.hostFiles.proveNetwork = self.proveHostNetwork
 		self.hostFiles.beforePath = self.requireNoRunContainers
+		self.hostFiles.buildJoined = self.requireBuildOutputJoined
 	}
 	if err := self.recoverJournal(); err != nil {
 		self.Close()

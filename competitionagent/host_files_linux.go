@@ -52,6 +52,8 @@ type HostFilesResult struct {
 	Namespace       *HostNamespaceMap       `json:"namespace,omitempty"`
 	Network         *HostNetworkBoundary    `json:"network,omitempty"`
 	BuildRetirement *BuildRetirementSummary `json:"build_retirement,omitempty"`
+	BuildBinary     *HostBuildBinary        `json:"build_binary,omitempty"`
+	BuildCache      *HostBuildCache         `json:"build_cache,omitempty"`
 }
 
 // No host PID, namespace path, command or raw policy becomes caller authority.
@@ -83,11 +85,17 @@ type HostFilesSettings struct {
 	MaximumProcBytes   int64
 	MaximumPathBytes   int
 	OperationTimeout   time.Duration
+	// Candidate compilation returns one bounded regular binary, not a tree.
+	MaximumBuildBinaryBytes int64
+	// Only the base's existing writable module-download metadata is copied.
+	MaximumBuildCacheBytes   int64
+	MaximumBuildCacheEntries int
 }
 
 func DefaultHostFilesSettings() HostFilesSettings {
 	return HostFilesSettings{MaximumTreeEntries: 500000, MaximumTreeDepth: 64, DirectoryBatch: 128,
-		MaximumProcBytes: 128 * 1024, MaximumPathBytes: 4096, OperationTimeout: 2 * time.Minute}
+		MaximumProcBytes: 128 * 1024, MaximumPathBytes: 4096, OperationTimeout: 2 * time.Minute,
+		MaximumBuildBinaryBytes: 256 * 1024 * 1024, MaximumBuildCacheBytes: 32 * 1024 * 1024, MaximumBuildCacheEntries: 1024}
 }
 
 const hostFilesContainerUid uint32 = 65532
@@ -113,6 +121,7 @@ type hostFileBroker struct {
 	unmount         func(context.Context, cleanupPlan) error
 	chown           func(*os.File, uint32, uint32) error
 	beforeOpen      func(*os.File, string)
+	buildJoined     func(context.Context) error
 	operationTokens chan struct{}
 }
 
@@ -136,7 +145,8 @@ func newHostFileBroker(plan DockerProxyPlan, settings HostFilesSettings) (*hostF
 func validateHostFilesPlan(plan DockerProxyPlan, settings HostFilesSettings) error {
 	if plan.HostFiles == nil || plan.WorkerUid == 0 || plan.HostFiles.WorkerGid == 0 || plan.HostFiles.WorkDeviceId == 0 || plan.HostFiles.EvidenceBytes <= 0 ||
 		settings.MaximumTreeEntries <= 0 || settings.MaximumTreeDepth <= 0 || settings.DirectoryBatch <= 0 || settings.MaximumProcBytes <= 0 ||
-		settings.MaximumPathBytes <= 0 || settings.OperationTimeout <= 0 {
+		settings.MaximumPathBytes <= 0 || settings.OperationTimeout <= 0 || settings.MaximumBuildBinaryBytes <= 0 ||
+		settings.MaximumBuildCacheBytes <= 0 || settings.MaximumBuildCacheEntries <= 0 {
 		return errors.New("host-file owner requires finite protected run authority")
 	}
 	rangeLength := uint64(plan.HostFiles.ContainerIdMapLength)
@@ -163,6 +173,11 @@ func (self *hostFileBroker) validateRequest(request HostFilesRequest) (string, e
 		return "", errors.New("network identity cannot alter another finite host operation")
 	}
 	switch request.Operation {
+	case "prepare-build-check-cache", "prepare-build-compile-cache", "prepare-build-output", "reclaim-build-output":
+		if request.Path != "" || request.ContainerId != "" {
+			return "", errors.New("build handoff targets cannot be overridden")
+		}
+		return hostBuildRelativePath(request.Operation), nil
 	case "mount-evidence", "unmount-evidence":
 		if request.Path != "" || request.ContainerId != "" {
 			return "", errors.New("evidence target cannot be overridden")
@@ -267,6 +282,9 @@ func (self *hostFileBroker) Execute(parent context.Context, request HostFilesReq
 		if !verified {
 			result.ErrorCode = "host_namespace_unverified"
 			return result
+		}
+		if strings.HasPrefix(request.Operation, "prepare-build-") || request.Operation == "reclaim-build-output" {
+			return self.executeBuildFiles(ctx, request, relative, result)
 		}
 		directory, openErr := self.openDirectory(relative)
 		if openErr != nil {
