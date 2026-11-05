@@ -75,6 +75,7 @@ Usage:
     bringyourctl network client-limit --network_id=<network_id> [--set=<limit> | --clear]
     bringyourctl network embed --network_id=<network_id> [--enable [--client-limit=<limit>] | --disable]
     bringyourctl network sign-out-all --network_id=<network_id> [--remove-clients] [(--commit --expect=<digest>)]
+    bringyourctl network trim-proxies [--network_ids=<network_ids>] [--keep=<keep>] [--rate=<rate>] [(--commit --expect=<digest>)]
     bringyourctl health status
     bringyourctl health degrade --reason=<reason> [--level=<level>]
     bringyourctl health recover
@@ -255,12 +256,15 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, balance move-redeemed or contracts close-due dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed or contracts close-due dry run printed; --send and --commit refuse any other census.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect. Without it the run is a read-only dry run.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
+    --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
+    --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed free network keeps, its newest by client id; omitted, the free cap (5).
+    --rate=<rate>  With network trim-proxies --commit, hosted proxies removed a second, in batches of 500; omitted, 200.
     --balance_id=<balance_id>  With balance move-redeemed, the unused balance a redeemed balance code granted, left on a deleted network.
     --to_network_id=<network_id>  With balance move-redeemed, the network the balance and its code move to.
     --allow_prior_reimbursement  With payouts reimburse, pay networks that already have an open manual reimbursement of another plan; each row lists them, and the digest binds the flag and exactly those.
@@ -363,6 +367,8 @@ func main() {
 			networkEmbed(opts)
 		} else if signOutAll, _ := opts.Bool("sign-out-all"); signOutAll {
 			os.Exit(networkSignOutAllCommand(opts))
+		} else if trimProxies, _ := opts.Bool("trim-proxies"); trimProxies {
+			os.Exit(networkTrimProxiesCommand(opts))
 		}
 	} else if health, _ := opts.Bool("health"); health {
 		os.Exit(healthCommand(opts, os.Stdout))
