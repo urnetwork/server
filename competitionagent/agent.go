@@ -92,7 +92,8 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	}
 	if settings.CleanupTimeout <= 0 || settings.CleanupCommandTimeout <= 0 || settings.CleanupCommandTimeout > settings.CleanupTimeout ||
 		settings.CleanupPollInterval <= 0 || settings.CleanupObjectCount <= 0 || settings.InputTransferTimeout <= 0 || settings.OutputTransferTimeout <= 0 || settings.OwnerPollInterval <= 0 ||
-		settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 || settings.RecoveryMemoryHeadroomBytes <= 0 || settings.RecoveryTasksHeadroom <= 0 {
+		settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 || settings.RecoveryMemoryHeadroomBytes <= 0 || settings.RecoveryTasksHeadroom <= 0 ||
+		settings.ManagementGroupDepth <= 0 || settings.ManagementMemoryHeadroomBytes <= 0 || settings.ManagementTasksHeadroom <= 0 {
 		return nil, errors.New("invalid bounded subevaluation cleanup owner")
 	}
 	keyContent, err := readBounded(config.SigningKeyPath, settings.ConfigBytes)

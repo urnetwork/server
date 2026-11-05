@@ -65,9 +65,11 @@ future activation, an independent native owner must still establish all of:
 
 - Fresh actual host headroom and the frozen resource helper's exact host,
   active, evidence and management facts, including retained-build accounting.
-- Finite, independently verified ambient ceilings and actual usage fitting the
-  one OS/reserved allowance. Unbounded or unaccounted services refuse admission;
-  a 5.75 GiB ledger line cannot prove their containment.
+- Fresh observed trusted ambient load and available headroom fitting the one
+  OS/reserved allowance, followed by pressure qualification under the declared
+  workload. This is not an instruction to resize or cap unrelated host services.
+  Unexpected load refuses admission; a 5.75 GiB ledger line alone proves nothing
+  about future trusted-service demand or candidate-induced kernel pressure.
 - Manager plus kernel readback for every intended ancestor/child ceiling,
   zero swap, effective management CPU set, process births and exact cgroup
   membership. This must include native service children and container scopes,
@@ -83,3 +85,15 @@ future activation, an independent native owner must still establish all of:
 No Boolean waiver, fake-kernel regression, static pin, or successful arithmetic
 check substitutes for those held native observations and pressure results.
 Native acceptance and activation require a separate reviewed plan.
+
+The prospective agent now observes the ordinary parent's exact 16 GiB cap and
+both 8 GiB children independently in PID1 and native cgroup v2 before admission.
+Held descriptor inventories bound all examined descendant groups and require
+their effective management CPU set; fixed slices must contain no direct tasks,
+and the common ancestor must remain nonbinding for independent recovery. Changed
+generations, extra sibling roles, inherited/unbounded caps, swap and insufficient
+current runnable margins refuse admission. These observations are not a proof of
+ambient headroom, every external coordinator's process placement, SSH ingress
+placement, worst-case memory peaks or actual pressure recovery. Those remaining
+contracts must compose before native acceptance; the synthetic tests do not
+activate or qualify any host.

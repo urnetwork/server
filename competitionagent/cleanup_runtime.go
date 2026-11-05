@@ -58,6 +58,17 @@ func (self *Agent) verifyCleanupRuntime(parent context.Context) (*RuntimeResourc
 		_ = boundary.Close()
 		return nil, err
 	}
+	policy, err := loadManagementResourcePolicy(self.config.ManagementPolicy, DefaultManagementBoundarySettings(), self.settings.ConfigBytes, true)
+	if err == nil {
+		err = validateRuntimeBoundaryManagementCpuSet(policy.ManagementCpuSet, boundary.ManagementCpuSet)
+	}
+	if err == nil {
+		err = verifyManagementOrdinaryBoundary(parent, policy, boundary.Systemctl, self.settings)
+	}
+	if err != nil {
+		_ = boundary.Close()
+		return nil, err
+	}
 	return boundary, nil
 }
 

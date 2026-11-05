@@ -92,6 +92,12 @@ type AgentSettings struct {
 	// source class margins, not measured native recovery peak guarantees.
 	RecoveryMemoryHeadroomBytes int64
 	RecoveryTasksHeadroom       int64
+	// Ordinary admission inventories every descendant within the fixed parent.
+	// Nonpositive depth or runnable margins refuse admission. These source-class
+	// margins require separate native pressure qualification, not arithmetic alone.
+	ManagementGroupDepth          int
+	ManagementMemoryHeadroomBytes int64
+	ManagementTasksHeadroom       int64
 	// Build tasks include the retained BuildKit daemon and all of its children;
 	// 4096 is an independent parent ceiling. Nonpositive values refuse launch.
 	BuildTasksMaximum int64
@@ -110,6 +116,7 @@ func DefaultAgentSettings() AgentSettings {
 		CleanupCommandTimeout: 10 * time.Second, CleanupPollInterval: 25 * time.Millisecond, CleanupObjectCount: 1024,
 		OwnerPollInterval: 25 * time.Millisecond, ManagementMemoryBytes: 8 * 1024 * 1024 * 1024, ManagementCpuQuotaPercent: 200,
 		RecoveryMemoryHeadroomBytes: 256 * 1024 * 1024, RecoveryTasksHeadroom: 128,
+		ManagementGroupDepth: 32, ManagementMemoryHeadroomBytes: 256 * 1024 * 1024, ManagementTasksHeadroom: 128,
 		BuildTasksMaximum: 4096, ContainmentCpuPeriodMicros: 100000, Now: time.Now}
 }
 
