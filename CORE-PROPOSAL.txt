@@ -1,0 +1,181 @@
+Scoped core dispatcher: separate source-only draft
+=================================================
+
+Status and authority
+--------------------
+This is NOT a completed native feature and MUST NOT be installed or activated.
+It grants no admission waiver. No current agent, host policy, default daemon,
+sysctl, Apport installation or production service is changed by this source.
+The production helper is intentionally drop-only because required native
+implementations are absent. A successful fake test is not native evidence.
+
+Base: 4945fc322883dfc66753d1c445427ed72368cad0.
+Scope: competitioncore/, cli/competitioncore/, this proposal only.
+Target: Linux/amd64, Go 1.27.3, standard library only.
+No main/server configuration, agent keys, database credentials or network client.
+No source-only approval is permission to install, alter sysctls, waive current
+piped-core rejection, or start evaluation.
+
+Fixed kernel and Apport contract
+-------------------------------
+Original pattern, preserved as a literal closed contract:
+|/usr/share/apport/apport -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E
+
+Prospective short dispatcher path/pattern, NOT installed:
+|/usr/lib/urnetwork/core -p%p -s%s -c%c -d%d -P%P -u%u -g%g -F%F -- %E
+
+The exact argument order, numeric grammar, separator and opaque executable
+value are retained; no flag chooses a path, command, interpreter or config.
+The prospective pattern fits the kernel's 127-character limit. The original
+Apport vector is retained byte-for-byte for the future ordinary handoff.
+No shell parses that vector. The package never reads the core stream.
+
+The protected expected core_pipe_limit is 10, matching the already reported
+host value. This draft DOES NOT change it. Zero, another value or an unavailable
+read is UNKNOWN/DROP. A positive finite value is necessary for the kernel's
+documented wait/proc lifetime contract. It is not a complete resource proof.
+%P is checked as the initial-PID-namespace process identity. The newer %F token
+is optional only as the exact empty expansion '-F' on an older kernel; the
+dispatcher always opens and validates its own pidfd. Real kernel expansion and
+Apport's handling of the retained -F vector remain native-control gates.
+
+Over-limit crashes are logged by the kernel even with a limit of ten. Therefore
+bounded helper count does NOT bound kernel/journal/root-filesystem pressure.
+No Go-runtime pre-main overhead is assumed zero. Up to ten helper startups,
+thread stacks, allocators, descriptors and pre-cgroup CPU/memory cost require
+separate measured capacity and pressure gates.
+
+Concrete draft source
+---------------------
+1. A silent fixed CLI calls the closed parser and handler. Every uncertain
+   return closes stdin without reading/draining it. No diagnostic includes a
+   crashing PID, argument, filename, host identity or any core data. There is
+   no registry-admin/config/program override in the CLI and no sysctl writer.
+
+2. Strict bounded root JSON rejects unknown fields, duplicate/case-folded keys,
+   excessive depth, token work and bytes. The fixed configuration pathname is
+   /etc/urnetwork/core-dispatcher.json. Declared script/interpreter pins are
+   metadata only; they cannot turn on the missing execution backend.
+
+3. A fixed root registry directory /var/lib/urnetwork/core is opened, not
+   created. Atomic updates use a nonblocking root-private writer lease,
+   complete JSON, exclusive temporary file, file fsync, rename and directory
+   fsync. Metadata inventory is bounded; interrupted/pending receipts consume
+   the bound and require explicit reviewed maintenance, never automatic prune.
+
+4. Registration requires an exact root run/plan identity and original start/
+   deadline, with the complete derived 31 parents: build, baseline stages01-09
+   and score, candidate stages01-09 and score, live01-09 and preflight. Four
+   fixed private-engine role cgroups remain registered independently of runs.
+   Stage/preflight names use SHA256(job UUID + ':' + attempt)'s first 32 hex
+   digits; live names use the job UUID with hyphens removed. These are the
+   exact current evaluator/cleanup ABI, not a guessed run-ID prefix.
+   Matching uses equality or a complete '/' component descendant, never a
+   substring, string-prefix sibling or blanket urnetwork ancestor.
+   Expired deadlines NEVER expire registry custody. Duplicate identities and
+   identities with retained retirement receipts cannot become new attempts.
+
+5. Retirement calls a PRIVATE join backend outside the writer/publication
+   lock, then rechecks the exact generation/digest and retains a bound proof
+   before removing scope. The production join backend is UNIMPLEMENTED and
+   therefore cannot retire a run. There is no caller-provided Boolean proof.
+
+6. A concrete native classifier holds a kernel pidfd plus a descriptor for
+   /proc/<host-PID>. It verifies procfs, the directory device/inode, initial PID,
+   birth tick, namespace PID, initial UID/GID, positive CoreDumping, single
+   unified cgroup view and pidfd fdinfo identity. The handler repeats facts and
+   registry generation before deciding, and again before ordinary handoff.
+   Disappearance, reuse, migration, ambiguous facts and errors are UNKNOWN.
+
+7. All asserted no-follow relative reads use raw held-directory Openat calls,
+   with O_DIRECTORY|O_NOFOLLOW for each ancestor and O_NOFOLLOW for each leaf.
+   The code does not rely on os.Root.OpenFile's symlink-retry semantics. Both
+   relative-leaf and relative-ancestor symlink negatives are included.
+
+8. The concrete kernel-placement half opens a held exact handler cgroup,
+   checks cgroupfs/root-owned components and finite memory/swap/tasks/CPU/
+   cpuset/effective-cpuset limits, and writes ONLY os.Getpid() to the held
+   cgroup.procs descriptor. It cannot select the crashing PID or a caller PID.
+   It is unreachable in production until authoritative manager proof exists.
+
+Required implementations still missing
+-------------------------------------
+A. A finite authoritative IN-PROCESS systemd manager reader, using only the
+   protected local management IPC contract. It must prove exact handler unit,
+   manager and kernel state: 256MiB aggregate, 128 tasks, the frozen management
+   processors, no swap and 200% CPU at the reviewed period. It must repeat
+   proof around movement/classification. Calling systemctl/forking another
+   program on a candidate/unknown branch is not acceptable. A cached receipt,
+   arbitrary expected string, environment switch or Boolean waiver is not a
+   substitute. nativeManagerProof currently always fails explicitly.
+
+B. Exact ordinary restoration of original cgroup, ALL thread affinities and
+   inherited resource limits before handoff. Go's pre-main runtime can already
+   alter resources such as nofile; a post-main proc snapshot is not proof of
+   original inherited state. A reviewed capture/restore mechanism and actual
+   successful ordinary control are required. Native Restore always fails.
+
+C. Exact pinned Apport SCRIPT and interpreter/loader/import custody. A naive
+   execveat of a CLOEXEC script descriptor fails shebang lifetime semantics;
+   reopening the script or interpreter by mutable path loses byte identity.
+   Non-CLOEXEC script descriptor lifetime, interpreter executable identity,
+   dynamic loader/libraries, imports, original stdin/argv/environment and the
+   original process resources require a concrete reviewed implementation and
+   native controls. Native Handoff always fails; it executes nothing.
+
+D. Complete crash-helper cleanup/lifetime accounting. pidfd/proc leases can
+   hold the crashing process while the helper lives. Moving a helper out of a
+   run's group must not let run cleanup ignore it. Real cleanup must join and
+   account ALL relevant helpers plus the frozen run/private-engine processes
+   and durable daemon outcomes. An unknown helper outcome retains custody.
+   The production join verifier is absent and cannot remove registry scope.
+
+E. Agent lifecycle wiring: freeze root registry before any launch, reconcile
+   it on restart/unknown outcomes, and retire only after D. This draft touches
+   no agent and cannot authorize current piped-core admission. Host install,
+   rollback, sysctl authorization and root configuration provisioning need a
+   separate reviewed plan. There is no deployment/install template here.
+
+Mandatory native gates AFTER those implementations
+-------------------------------------------------
+* Exact kernel/core_pipe_limit wait, PID namespace and placeholder behavior.
+* Positive ordinary Apport control: original stdin and argv, exact restored
+  cgroup/affinity/rlimits, script/interpreter descriptor lifetime and no leaks.
+* Candidate and unknown controls, process reuse/disappearance/migration and
+  registry update races, hard-exit helper/cleanup joining and reboot recovery.
+* Ten simultaneous startup costs, handler memory/task/CPU containment, and
+  pre-main overhead under pressure. Test more than ten crashes deliberately:
+  measure bounded kernel log/journal/root-disk pressure rather than assuming
+  the sysctl prevents it. Do not use the active host for this harness.
+* Full containment/admission tests, disk/core bomb controls, original ordinary
+  behavior, rollback and supervisor failure/restart controls on reviewed private
+  hosts. No helper zero exit status alone is proof of any of these.
+
+Deterministic source tests
+-------------------------
+All tests use private temporary files, synthetic identities, injected native
+fact/placement/handoff seams or a private fake join backend. They do not call
+pidfd_open, start crashes, read real proc/cgroups, execute Apport/systemctl,
+move a process, contact a daemon or change a host. They cover component scope,
+complete inventories, no-read/no-exec unknown and candidate paths, exact closed
+ordinary argv/stream at an injected seam, generation/clock preservation,
+registry/boot changes, retirement CAS and join-outside-lock ordering, retained
+receipt/no replay, PID directory/birth reuse, disappearance, migration,
+credentials, malformed/oversized metadata and confined relative symlink swaps.
+They must be remotely compiled/executed independently; source formatting alone
+is not a green test receipt.
+
+Primary contracts reviewed
+--------------------------
+https://kernel.org/doc/html/v6.7/admin-guide/sysctl/kernel.html#core-pipe-limit
+Documents positive-limit wait/proc semantics, zero's lack of waiting and
+over-limit kernel logging. It also documents the 127-character pattern bound.
+https://man7.org/linux/man-pages/man5/core.5.html
+Documents piped-core behavior, placeholders and RLIMIT_CORE being ignored for
+piped handlers. LimitCORE=0 alone is NOT storage containment.
+https://man7.org/linux/man-pages/man2/pidfd_open.2.html
+Documents pidfd identity and PID/zombie lifetime limitations.
+https://man7.org/linux/man-pages/man2/execveat.2.html
+Documents script/shebang CLOEXEC descriptor lifetime failure.
+
+No current host setting or live-scoring claim is inferred from this draft.
