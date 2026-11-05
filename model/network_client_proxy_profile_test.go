@@ -203,6 +203,9 @@ func TestValidatePerformanceProfile(t *testing.T) {
 func TestAuthNetworkClientRefusesInvalidPerformanceProfile(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		// one network creates more proxies than the free plan's proxy limit
+		// (network_client_proxy_limit.go, tested on its own) allows
+		defer Testing_SetConcurrentClientsLimit(1000, 1000)()
 
 		networkId := server.NewId()
 		userId := server.NewId()

@@ -500,6 +500,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// Checked before the tx so the lookup does not hold it open. Connection
 		// activation applies the same limit; see CanConnectNetworkPeer.
 		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		// A hosted proxy is limited on its own, and always: a network holds at
+		// most its plan's number of active proxies (network_client_proxy_limit.go).
+		// Resolved before the tx, like the concurrent limit; counted inside it.
+		proxyClientLimit := 0
+		if authClient.ProxyConfig != nil {
+			proxyClientLimit = networkProxyClientLimit(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		}
 		if concurrentLimitExceeded && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
 				Error: &AuthNetworkClientError{
@@ -639,6 +646,19 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				}
 				if concurrentLimitExceeded {
 					authClientResult = &AuthNetworkClientResult{Error: &AuthNetworkClientError{ClientLimitExceeded: true, UpgradeRequired: true, Message: "Your plan's concurrent client limit is reached."}}
+					return
+				}
+			}
+			if authClient.ProxyConfig != nil && proxyClientLimit > 0 {
+				activeProxyCount := countNetworkActiveProxyClientsInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, proxyClientLimit+1)
+				if proxyClientLimitReached(proxyClientLimit, activeProxyCount) {
+					authClientResult = &AuthNetworkClientResult{
+						Error: &AuthNetworkClientError{
+							ClientLimitExceeded: true,
+							UpgradeRequired:     !isPro,
+							Message:             proxyClientLimitMessage(proxyClientLimit, isPro),
+						},
+					}
 					return
 				}
 			}
