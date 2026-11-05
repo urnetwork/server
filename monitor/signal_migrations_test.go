@@ -515,13 +515,20 @@ func TestMigrationArtifactCatalogCoversEveryVersion614ThroughHead(t *testing.T) 
 			return syntheticMigrationCatalogRows(head), nil
 		}
 		normalized := strings.Join(strings.Fields(query), " ")
+		// The column predicates read the statement's one shared projection of the
+		// permission-aware information_schema.columns view (b866afef7), so that
+		// projection is what each typed check interrogates.
+		if !strings.Contains(query, migrationPublicColumnsQuery) ||
+			!strings.Contains(migrationPublicColumnsQuery, "FROM information_schema.columns WHERE table_schema = 'public'") {
+			t.Fatal("IPv6 artifacts lost the shared permission-aware column view")
+		}
 		for _, column := range []struct{ table, name, kind, defaults string }{
 			{table: "network_client_connection", name: "ip_version", kind: "smallint", defaults: "('0', '0::smallint', '''0''::smallint')"},
 			{table: "network_client_connection", name: "ip_family_intent", kind: "smallint", defaults: "('0', '0::smallint', '''0''::smallint')"},
 			{table: "network_client_location_reliability", name: "ipv4_proven", kind: "boolean", defaults: "('false', 'false::boolean', '''false''::boolean')"},
 			{table: "network_client_location_reliability", name: "ipv6_proven", kind: "boolean", defaults: "('false', 'false::boolean', '''false''::boolean')"},
 		} {
-			want := "EXISTS ( SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = '" + column.table + "' AND column_name = '" + column.name + "' AND data_type = '" + column.kind + "' AND is_nullable = 'NO' AND column_default IN " + column.defaults + " )"
+			want := "EXISTS ( SELECT 1 FROM public_columns WHERE table_schema = 'public' AND table_name = '" + column.table + "' AND column_name = '" + column.name + "' AND data_type = '" + column.kind + "' AND is_nullable = 'NO' AND column_default IN " + column.defaults + " )"
 			if !strings.Contains(normalized, want) {
 				t.Fatalf("IPv6 artifact %s.%s lost its actual typed schema check", column.table, column.name)
 			}
