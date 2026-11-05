@@ -286,7 +286,7 @@ func currentQgQualificationRequests(seed *controller.CompetitionSourceReviewPack
 // A complete native receipt must preserve both originals and both subchecks.
 // This offline checker does not authenticate the wrapper, invoke a model, mark
 // a provider qualified, or replace independently read containment evidence.
-func validateCurrentQGQualificationMembers(request winnerReviewBrokerRequest, members []winnerSnowMemberEvidence, expected currentQgQualificationExpectation) error {
+func validateCurrentQgQualificationMembers(request winnerReviewBrokerRequest, members []winnerSnowMemberEvidence, expected currentQgQualificationExpectation) error {
 	provider := defaultWinnerSnowProviderSettings()
 	if _, err := winnerModelInput(request); err != nil {
 		return err

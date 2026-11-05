@@ -164,7 +164,7 @@ func TestCurrentQgQualificationPreparationExportIsPrivateAndNonAuthorizing(t *te
 func TestCurrentQgQualificationPreparationChecksEveryNativeMember(t *testing.T) {
 	request, members := winnerSnowMemberFixture(t)
 	expected := currentQgQualificationExpectation{Decision: "approve", WorkloadDisposition: "pass", ProductionDisposition: "pass"}
-	if err := validateCurrentQGQualificationMembers(request, members, expected); err != nil {
+	if err := validateCurrentQgQualificationMembers(request, members, expected); err != nil {
 		t.Fatal("complete synthetic native shape failed the offline checker", err)
 	}
 	for _, mutate := range []func([]winnerSnowMemberEvidence){
@@ -179,11 +179,11 @@ func TestCurrentQgQualificationPreparationChecksEveryNativeMember(t *testing.T) 
 	} {
 		request, members = winnerSnowMemberFixture(t)
 		mutate(members)
-		if validateCurrentQGQualificationMembers(request, members, expected) == nil {
+		if validateCurrentQgQualificationMembers(request, members, expected) == nil {
 			t.Fatal("offline checker accepted missing/substituted original member evidence")
 		}
 	}
-	if validateCurrentQGQualificationMembers(request, members[:1], expected) == nil {
+	if validateCurrentQgQualificationMembers(request, members[:1], expected) == nil {
 		t.Fatal("offline checker accepted a single member")
 	}
 	request, members = winnerSnowMemberFixture(t)
@@ -203,11 +203,11 @@ func TestCurrentQgQualificationPreparationChecksEveryNativeMember(t *testing.T) 
 		members[index].ProviderOutput = string(content)
 	}
 	expected = currentQgQualificationExpectation{Decision: "uncertain", WorkloadDisposition: "uncertain", ProductionDisposition: "uncertain"}
-	if err := validateCurrentQGQualificationMembers(request, members, expected); err != nil {
+	if err := validateCurrentQgQualificationMembers(request, members, expected); err != nil {
 		t.Fatal("two complete synthetic uncertain judgments were lost", err)
 	}
 	members[1].ProviderOutput = "{}"
-	if validateCurrentQGQualificationMembers(request, members, expected) == nil {
+	if validateCurrentQgQualificationMembers(request, members, expected) == nil {
 		t.Fatal("malformed original member was mistaken for completed expected uncertainty")
 	}
 }

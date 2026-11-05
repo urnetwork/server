@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "competition-source-preparation-checkpoint",
-  "recorded_at": "2026-11-05T20:50:09Z",
+  "recorded_at": "2026-11-05T20:54:05Z",
   "authority_warning": "Source checkpoint only. A push, installed binary, passing subset or draft configuration is not live qualification or activation.",
   "source_inputs": {
     "combined_core_and_managed_agent": "6c75156cbd4111a6674b6e12d808a264a7912e4a",
@@ -30,20 +30,40 @@
   "qualification": {
     "coverage_component": "35 canonical tests plus one focused historical-policy regression passed on source 3cad6b79c; not live runtime qualification",
     "combined_predecessor": "45 first-pass tests passed on cc90b555a; raw SQL, stale-transaction and published-prefix assertions passed. Catalog-fault test failed because its test query omitted native CTEs; that failure is retained and source 6c75156cb corrects the boundary.",
-    "combined_current": "Seven-package compilation, 47 first-pass tests and five database checks are pending completion on the exact 6c75156cb tuple; do not transfer predecessor acceptance.",
+    "combined_current": "On exact 6c75156cb: seven-package compilation, 47 first-pass tests and four database checks passed. The final controller lifecycle check failed because its metadata-only workload generator did not create the file required by real retained archival. The failed receipt is preserved; the fixture-only successor is qualified separately below.",
     "managed_agent": "Fourteen targeted Linux tests and Darwin named-package build/vet/test-compile passed on 5d90d0fbb. Windows agent/CLI checks passed; Windows controller build remains unsupported and failed identically on the pre-merge baseline.",
-    "review_preparation": "Six offline preparation tests passed on 37443f9d8. The new 20-test adapter and replay-fix closure remain pending.",
+    "review_preparation": "Six offline preparation tests passed on 37443f9d8. On exact main 1a4a0102d, the 20-test adapter passed ordinarily and then passed three consecutive race-enabled runs (60 executions). These are offline adapter tests, not genuine model or native containment qualification.",
+    "retained_archive_fixture_successor": {
+      "source_commit": "cefe558d039d2b0e66cfa105ba5cc6f65044bcb4",
+      "actual_passes": 28,
+      "unique_test_roots": 26,
+      "actual_private_database_schema": 932,
+      "receipt_path_on_goofe": "/mnt/data/urnetwork-competition-development-20261104/intakecefe-qualification.jfAFO6n5/qualification.json",
+      "receipt_sha256": "c491fba58707b95a3fb3bdcaa45b7965656c8b28cb9bf10bbb5a085832f55324",
+      "scope": "Two focused tests, 25 controller pure tests and one actual PostgreSQL lifecycle test; not a complete final-source suite"
+    },
+    "review_adapter_race_manifest": {
+      "path_on_goofe": "/mnt/data/urnetwork-competition-development-20261104/qg-main1a4a010-race-validation/artifacts/manifest.sha256",
+      "sha256": "9ea7f7c71e2de50566127f712f8b2659809f7fe4e04179b708832b0d2a604622",
+      "source_commit": "1a4a0102dd0e0139c2934ede410bda38abfd26c7",
+      "provider_inference_or_native_fixture_execution": false
+    },
     "harness_status": "Three deterministic Go controls passed for early-zero ambiguity, explicit completion, real failures and signal handling. Interrupted observer/waiter evidence remains unaccepted.",
     "genuine_provider_calls_run": false,
     "goofe_native_or_cross_host_qualification_complete": false,
     "full_final_source_suite_complete": false
   },
   "deployment": {
-    "latest_confirmed_main_schema": 926,
+    "latest_confirmed_main_schema": 932,
+    "main_schema_observed_at": "2026-11-05T21:22:21.4144163Z",
+    "serving_api_version_observed": "2026.11.5-outerwerld+1090599830",
+    "serving_api_version_observed_at": "2026-11-05T21:25:06.567936Z",
+    "serving_api_immutable_image_identity_verified": false,
     "recovery_release_requires_schema": 930,
     "prospective_coverage_migration": 931,
     "prospective_intake_migration": 932,
-    "normal_pipeline_deployment_verification_pending": true,
+    "epoch_one_recovery_schema_is_installed": true,
+    "normal_pipeline_runtime_image_verification_pending": true,
     "future_intake_configuration_enabled": false,
     "no_config_vault_or_remote_host_changes_in_this_checkpoint": true
   },
