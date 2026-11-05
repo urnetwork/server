@@ -238,3 +238,10 @@ After the genuine report is independently accepted, wrapper deployment and
 production review activation still require separate operator authority. No
 epoch-one scorer, frozen product source, numerical policy, current candidate
 decision or admission clock is changed by this preparation.
+
+Operational hold distinction: an existing candidate's ordinary heartbeat may
+continue under a claim-only evaluation hold, but the existing reserved-baseline
+control contract checks that hold at reservation, periodic owner checks and
+publication. Do not issue that hold during an owned R9 control expecting the
+control to finish/publish. This preparation does not change that pre-existing
+control cancellation contract or authorize a replacement control sample.
