@@ -1391,7 +1391,65 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		return 0, nil
 	}
 
-	descendantClientIds, err := lockActiveNetworkClientDescendantsInTx(ctx, tx, lockedClientIds, networkId)
+	// Locks the clients' active descendants, one generation at a time, each in
+	// client id order after the generation above it. A descendant already among
+	// the caller's clients is not returned again. A child copies its parent's
+	// device (AuthNetworkClient), so a generation is read through
+	// network_client_device_id, the parent's device and then the child's source;
+	// network_client has no index on source_client_id. A parent without a device
+	// has no descendants this finds, and those stay to the child reap. The walk
+	// stops at session.ClientAncestryDepthLimit generations.
+	lockActiveDescendants := func() ([]server.Id, error) {
+		seenClientIds := map[server.Id]bool{}
+		for _, clientId := range lockedClientIds {
+			seenClientIds[clientId] = true
+		}
+		descendantClientIds := []server.Id{}
+		parentClientIds := lockedClientIds
+		for depth := 0; depth < session.ClientAncestryDepthLimit && 0 < len(parentClientIds); depth += 1 {
+			generationClientIds := []server.Id{}
+			result, err := tx.Query(
+				ctx,
+				`
+					SELECT child.client_id
+					FROM network_client AS parent
+					INNER JOIN network_client AS child ON
+						child.device_id = parent.device_id AND
+						child.source_client_id = parent.client_id
+					WHERE
+						parent.client_id = ANY($1) AND
+						child.network_id = $2 AND
+						child.active = true
+					ORDER BY child.client_id
+					FOR UPDATE OF child
+				`,
+				parentClientIds,
+				networkId,
+			)
+			if err != nil {
+				return nil, err
+			}
+			for result.Next() {
+				var clientId server.Id
+				if err := result.Scan(&clientId); err != nil {
+					result.Close()
+					return nil, err
+				}
+				if !seenClientIds[clientId] {
+					seenClientIds[clientId] = true
+					generationClientIds = append(generationClientIds, clientId)
+				}
+			}
+			result.Close()
+			if err := result.Err(); err != nil {
+				return nil, err
+			}
+			descendantClientIds = append(descendantClientIds, generationClientIds...)
+			parentClientIds = generationClientIds
+		}
+		return descendantClientIds, nil
+	}
+	descendantClientIds, err := lockActiveDescendants()
 	if err != nil {
 		return 0, err
 	}
@@ -1455,66 +1513,6 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 	// the clients' counterparties close their contracts (CLIENTCLOSE.md)
 	addClientsRemovedPostCommit(ctx, tx, deactivatedClientIds)
 	return lockedCount, nil
-}
-
-// Locks the active descendants of the clients, one generation at a time, each
-// in client id order after the generation above it, and returns them. A
-// descendant already among the caller's clients is not returned again.
-//
-// A child copies its parent's device (AuthNetworkClient), so a generation is
-// read through network_client_device_id, the parent's device and then the
-// child's source; network_client has no index on source_client_id. A parent
-// without a device has no descendants this finds, and those stay to the child
-// reap. The walk stops at session.ClientAncestryDepthLimit generations.
-func lockActiveNetworkClientDescendantsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) ([]server.Id, error) {
-	seenClientIds := map[server.Id]bool{}
-	for _, clientId := range clientIds {
-		seenClientIds[clientId] = true
-	}
-	descendantClientIds := []server.Id{}
-	parentClientIds := clientIds
-	for depth := 0; depth < session.ClientAncestryDepthLimit && 0 < len(parentClientIds); depth += 1 {
-		generationClientIds := []server.Id{}
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT child.client_id
-				FROM network_client AS parent
-				INNER JOIN network_client AS child ON
-					child.device_id = parent.device_id AND
-					child.source_client_id = parent.client_id
-				WHERE
-					parent.client_id = ANY($1) AND
-					child.network_id = $2 AND
-					child.active = true
-				ORDER BY child.client_id
-				FOR UPDATE OF child
-			`,
-			parentClientIds,
-			networkId,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for result.Next() {
-			var clientId server.Id
-			if err := result.Scan(&clientId); err != nil {
-				result.Close()
-				return nil, err
-			}
-			if !seenClientIds[clientId] {
-				seenClientIds[clientId] = true
-				generationClientIds = append(generationClientIds, clientId)
-			}
-		}
-		result.Close()
-		if err := result.Err(); err != nil {
-			return nil, err
-		}
-		descendantClientIds = append(descendantClientIds, generationClientIds...)
-		parentClientIds = generationClientIds
-	}
-	return descendantClientIds, nil
 }
 
 // Deletes the provide keys of clients this transaction deactivates, and their
