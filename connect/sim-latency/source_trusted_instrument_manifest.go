@@ -15,7 +15,7 @@ import (
 func validateTrustedInstrumentGeneration(generation, previous *reviewedSourceGeneration) error {
 	proof := generation.TrustedInstrument
 	if proof == nil {
-		if generation.Kind == "trusted_instrument_transition" || generation.G2VolumePolicy != previous.G2VolumePolicy {
+		if generation.Kind == "trusted_instrument_transition" || generation.G2VolumePolicy != previous.G2VolumePolicy || !reflect.DeepEqual(generation.WorkCoveragePolicy, previous.WorkCoveragePolicy) {
 			return errors.New("changed generation instrument requires its explicit operator proof")
 		}
 		return nil
@@ -25,6 +25,9 @@ func validateTrustedInstrumentGeneration(generation, previous *reviewedSourceGen
 	}
 	if err := controller.ValidateCompetitionTrustedInstrumentApproval(&proof.Approval); err != nil {
 		return err
+	}
+	if !reflect.DeepEqual(generation.WorkCoveragePolicy, proof.Approval.WorkCoveragePolicy) {
+		return errors.New("instrument generation coverage differs from its independent approval")
 	}
 	if proof.Approval.InstrumentBaseSourceLockSha256 != previous.SourceLockSha256 || !reflect.DeepEqual(proof.Approval.InstrumentBaseCommits, previous.Repositories.commitsForMode(false)) {
 		return errors.New("instrument generation provenance differs from the frozen legacy source")

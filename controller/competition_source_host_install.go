@@ -80,7 +80,7 @@ func competitionReviewedHostInstallContent(settings *Settings, intent *model.Com
 		return nil, errors.New("host identity change requires the exact approved promoted source")
 	}
 	if intent.TrustedInstrument != nil {
-		if receipt != *intent.TrustedInstrument.BuildReceipt {
+		if !receipt.Equal(*intent.TrustedInstrument.BuildReceipt) {
 			return nil, errors.New("instrument host installation receipt differs from the immutable source proof")
 		}
 	} else {
@@ -291,7 +291,7 @@ func ensureCompetitionReviewedHostConfig(ctx context.Context, settings *Settings
 	if _, err := readCompetitionReviewedBuildRecord(filepath.Join(ownerRoot, "qualifier-receipt.json"), limits.DocumentBytes, &ownerReceipt); err != nil {
 		return err
 	}
-	if receipt != ownerReceipt || receipt.SandboxId != reservation.Owner {
+	if !receipt.Equal(ownerReceipt) || receipt.SandboxId != reservation.Owner {
 		return errors.New("reviewed build owner and completed broker receipt disagree")
 	}
 	var profile CompetitionProspectiveHostProfile

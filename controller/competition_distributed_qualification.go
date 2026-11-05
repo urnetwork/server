@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/competitionagent"
+	"github.com/urnetwork/server/model"
 )
 
 // Run-level variance is the error term; request counts are never substituted
@@ -44,34 +46,45 @@ type competitionHostMetricScreen struct {
 // The immutable retained receipt binds every host to this exact seed/workload,
 // source, image, local fixtures, full shared baseline and original no-op clock.
 type competitionExecutorEquivalenceReceipt struct {
-	Schema                            int                           `json:"schema"`
-	Kind                              string                        `json:"kind"`
-	RoundId                           string                        `json:"round_id"`
-	HostId                            string                        `json:"host_id"`
-	BaselineSha256                    string                        `json:"baseline_sha256"`
-	SourceLockSha256                  string                        `json:"source_lock_sha256"`
-	ProvidersSha256                   string                        `json:"providers_sha256"`
-	EvaluatorImageDigest              string                        `json:"evaluator_image_digest"`
-	QualificationSha256               string                        `json:"qualification_sha256"`
-	ConfigLocalSha256                 string                        `json:"config_local_sha256"`
-	VaultLocalSha256                  string                        `json:"vault_local_sha256"`
-	PolicyApprovalSha256              string                        `json:"policy_approval_sha256"`
-	QualificationJobId                string                        `json:"qualification_job_id"`
-	QualificationStartedAt            time.Time                     `json:"qualification_started_at"`
-	QualificationDeadlineAt           time.Time                     `json:"qualification_deadline_at"`
-	Noop                              bool                          `json:"noop"`
-	Passed                            bool                          `json:"passed"`
-	Replicates                        int                           `json:"replicates"`
-	ScreenKind                        string                        `json:"screen_kind"`
-	MaximumRawScoreRelativeDifference float64                       `json:"maximum_raw_score_relative_difference"`
-	RawScoreRelativeDifference        float64                       `json:"raw_score_relative_difference"`
-	ConfidenceLevel                   float64                       `json:"confidence_level"`
-	StatisticalMethod                 string                        `json:"statistical_method"`
-	StatisticalEquivalenceProven      bool                          `json:"statistical_equivalence_proven"`
-	Metrics                           []competitionHostMetricScreen `json:"metrics"`
-	ArchiveManifestSha256             string                        `json:"archive_manifest_sha256"`
-	CreatedAt                         time.Time                     `json:"created_at"`
-	Retention                         *retainedArtifact             `json:"retention,omitempty"`
+	WorkCoveragePolicy                *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	Schema                            int                                  `json:"schema"`
+	Kind                              string                               `json:"kind"`
+	RoundId                           string                               `json:"round_id"`
+	HostId                            string                               `json:"host_id"`
+	BaselineSha256                    string                               `json:"baseline_sha256"`
+	SourceLockSha256                  string                               `json:"source_lock_sha256"`
+	ProvidersSha256                   string                               `json:"providers_sha256"`
+	EvaluatorImageDigest              string                               `json:"evaluator_image_digest"`
+	QualificationSha256               string                               `json:"qualification_sha256"`
+	ConfigLocalSha256                 string                               `json:"config_local_sha256"`
+	VaultLocalSha256                  string                               `json:"vault_local_sha256"`
+	PolicyApprovalSha256              string                               `json:"policy_approval_sha256"`
+	QualificationJobId                string                               `json:"qualification_job_id"`
+	QualificationStartedAt            time.Time                            `json:"qualification_started_at"`
+	QualificationDeadlineAt           time.Time                            `json:"qualification_deadline_at"`
+	Noop                              bool                                 `json:"noop"`
+	Passed                            bool                                 `json:"passed"`
+	Replicates                        int                                  `json:"replicates"`
+	ScreenKind                        string                               `json:"screen_kind"`
+	MaximumRawScoreRelativeDifference float64                              `json:"maximum_raw_score_relative_difference"`
+	RawScoreRelativeDifference        float64                              `json:"raw_score_relative_difference"`
+	ConfidenceLevel                   float64                              `json:"confidence_level"`
+	StatisticalMethod                 string                               `json:"statistical_method"`
+	StatisticalEquivalenceProven      bool                                 `json:"statistical_equivalence_proven"`
+	Metrics                           []competitionHostMetricScreen        `json:"metrics"`
+	ArchiveManifestSha256             string                               `json:"archive_manifest_sha256"`
+	CreatedAt                         time.Time                            `json:"created_at"`
+	Retention                         *retainedArtifact                    `json:"retention,omitempty"`
+}
+
+// Coverage adds two run-level uncertainty records only for the prospective
+// contract. Historical seven-metric receipt bytes remain unchanged.
+func competitionNoopMetricNames(settings *Settings) []string {
+	names := []string{"raw_score", "request_count", "received_bytes", "ttfb_p50_ms", "ttfb_p95_ms", "throughput_p50_bytes_per_s", "throughput_p95_bytes_per_s"}
+	if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+		names = append(names, "page_coverage", "byte_coverage")
+	}
+	return names
 }
 
 // All hosts finish their independently owned probes, including when one fails.
@@ -183,10 +196,14 @@ func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, 
 // independently for volume, latency and throughput. The five-percent bound is
 // the approved raw-score admission band only, not a candidate volume ceiling.
 func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host CompetitionExecutorHostPolicy, directory string, response competitionagent.Response, outcome EvaluationOutcome) (*competitionExecutorEquivalenceReceipt, error) {
-	if outcome.Score == nil || outcome.Error != nil || !outcome.distributedArchiveVerified || validateScore(outcome.Score) != nil || !outcome.Score.Placeable || len(outcome.ArtifactManifest) == 0 || job.ExecutionDeadline == nil || job.StartedAt == nil {
+	if outcome.Score == nil || outcome.Error != nil || !outcome.distributedArchiveVerified || validateScore(outcome.Score) != nil || !scoreMatchesFrozenG2Policy(outcome.Score, settings.EvaluationPolicy.G2VolumePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) || !outcome.Score.Placeable || len(outcome.ArtifactManifest) == 0 || job.ExecutionDeadline == nil || job.StartedAt == nil {
 		return nil, errors.New("no-op did not complete all scoring, containment and retention gates")
 	}
-	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+	names, err := model.CompetitionScoreRequiredGateNames(outcome.Score)
+	if err != nil {
+		return nil, err
+	}
+	for _, name := range names {
 		gate, present := outcome.Score.Gates[name]
 		if !present || !gate.Passed {
 			return nil, errors.New("no-op omitted or failed a mandatory frozen score gate")
@@ -198,7 +215,7 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 		}
 	}
 	baseline := &roundBaselineManifest{}
-	if err := json.Unmarshal(job.RoundBaseline.Json, baseline); err != nil || len(baseline.Replicates) != 9 {
+	if err := json.Unmarshal(job.RoundBaseline.Json, baseline); err != nil || len(baseline.Replicates) != 9 || !reflect.DeepEqual(baseline.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) {
 		return nil, errors.New("no-op requires the exact shared full-R9 control")
 	}
 	diagnosticsBytes, err := json.Marshal(outcome.Score.Diagnostics)
@@ -208,10 +225,11 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 	diagnostics := struct {
 		ReplicateCount int `json:"replicate_count"`
 		Replicates     []struct {
-			EvaluationId  string  `json:"evaluation_id"`
-			RawScore      float64 `json:"raw_score"`
-			RequestCount  int64   `json:"request_count"`
-			ReceivedBytes int64   `json:"received_bytes"`
+			WorkCoverage  *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
+			EvaluationId  string                                `json:"evaluation_id"`
+			RawScore      float64                               `json:"raw_score"`
+			RequestCount  int64                                 `json:"request_count"`
+			ReceivedBytes int64                                 `json:"received_bytes"`
 		} `json:"replicates"`
 	}{}
 	if json.Unmarshal(diagnosticsBytes, &diagnostics) != nil || diagnostics.ReplicateCount != 9 || len(diagnostics.Replicates) != 9 {
@@ -221,6 +239,13 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 	candidateValues := map[string][]float64{"raw_score": {}, "request_count": {}, "received_bytes": {}}
 	baselineWithinSe, candidateWithinSe := map[string][]float64{}, map[string][]float64{}
 	for _, replicate := range baseline.Replicates {
+		if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+			if model.ValidateCompetitionWorkCoverageSummary(replicate.WorkCoverage) != nil {
+				return nil, errors.New("shared control omitted independent work coverage")
+			}
+			baselineValues["page_coverage"] = append(baselineValues["page_coverage"], replicate.WorkCoverage.PageCoverage)
+			baselineValues["byte_coverage"] = append(baselineValues["byte_coverage"], replicate.WorkCoverage.ByteCoverage)
+		}
 		baselineValues["raw_score"] = append(baselineValues["raw_score"], replicate.RawScore)
 		baselineValues["request_count"] = append(baselineValues["request_count"], float64(replicate.RequestCount))
 		baselineValues["received_bytes"] = append(baselineValues["received_bytes"], float64(replicate.ReceivedBytes))
@@ -234,6 +259,13 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 		}
 	}
 	for _, replicate := range diagnostics.Replicates {
+		if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+			if model.ValidateCompetitionWorkCoverageSummary(replicate.WorkCoverage) != nil {
+				return nil, errors.New("no-op omitted independent work coverage")
+			}
+			candidateValues["page_coverage"] = append(candidateValues["page_coverage"], replicate.WorkCoverage.PageCoverage)
+			candidateValues["byte_coverage"] = append(candidateValues["byte_coverage"], replicate.WorkCoverage.ByteCoverage)
+		}
 		candidateValues["raw_score"] = append(candidateValues["raw_score"], replicate.RawScore)
 		candidateValues["request_count"] = append(candidateValues["request_count"], float64(replicate.RequestCount))
 		candidateValues["received_bytes"] = append(candidateValues["received_bytes"], float64(replicate.ReceivedBytes))
@@ -247,18 +279,27 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 		if !declared || !strings.HasPrefix(replicate.EvaluationId, "candidate-") || strings.ContainsAny(replicate.EvaluationId, "/\\") {
 			return nil, errors.New("candidate live metrics are not bound to authenticated run evidence")
 		}
-		content, err := readRegularFile(filepath.Join(directory, runPath), settings.distributedCoordinator.Config.Settings.Limits.DocumentBytes)
+		runLimit := settings.distributedCoordinator.Config.Settings.Limits.DocumentBytes
+		if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+			runLimit = model.CompetitionWorkCoverageMaximumManifestBytes
+		}
+		content, err := readRegularFile(filepath.Join(directory, runPath), runLimit)
 		if err != nil {
 			return nil, err
 		}
 		run := struct {
-			EvaluationId string                                `json:"evaluation_id"`
-			ConfigSha256 string                                `json:"config_sha256"`
-			SourceEpoch  int                                   `json:"source_epoch"`
-			Metrics      map[string]roundBaselineMetricSummary `json:"metrics"`
+			WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy  `json:"work_coverage_policy,omitempty"`
+			WorkCoverage       *model.CompetitionWorkCoverageSummary `json:"work_coverage,omitempty"`
+			EvaluationId       string                                `json:"evaluation_id"`
+			ConfigSha256       string                                `json:"config_sha256"`
+			SourceEpoch        int                                   `json:"source_epoch"`
+			Metrics            map[string]roundBaselineMetricSummary `json:"metrics"`
 		}{}
 		if json.Unmarshal(content, &run) != nil || run.EvaluationId != replicate.EvaluationId || run.ConfigSha256 != job.Round.ProvidersSha256 || run.SourceEpoch != evaluationSourceEpoch(&job.Round) {
 			return nil, errors.New("no-op sidecar changed the frozen workload or source epoch")
+		}
+		if !reflect.DeepEqual(run.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) || !reflect.DeepEqual(run.WorkCoverage, replicate.WorkCoverage) {
+			return nil, errors.New("no-op coverage diagnostic differs from its authenticated run")
 		}
 		for name := range roundBaselineLiveMetrics {
 			metric, present := run.Metrics[name]
@@ -272,13 +313,14 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 	policy := settings.DistributedEvaluationPolicy
 	manifestDigest := sha256.Sum256(outcome.ArtifactManifest)
 	receipt := &competitionExecutorEquivalenceReceipt{Schema: 1, Kind: "competition-executor-noop-admission/v1", RoundId: job.RoundId.String(), HostId: host.HostId,
-		BaselineSha256: job.RoundBaseline.Sha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256, ProvidersSha256: job.Round.ProvidersSha256,
+		WorkCoveragePolicy: settings.EvaluationPolicy.Clone().WorkCoveragePolicy,
+		BaselineSha256:     job.RoundBaseline.Sha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256, ProvidersSha256: job.Round.ProvidersSha256,
 		EvaluatorImageDigest: job.EvaluatorImageDigest, QualificationSha256: host.QualificationSha256, ConfigLocalSha256: settings.EvaluationPolicy.ConfigLocalSha256, VaultLocalSha256: settings.EvaluationPolicy.VaultLocalSha256,
 		PolicyApprovalSha256: policy.ApprovalSha256, QualificationJobId: job.JobId.String(), QualificationStartedAt: job.StartedAt.UTC(), QualificationDeadlineAt: job.ExecutionDeadline.UTC(),
 		Noop: true, Passed: true, Replicates: 9, ScreenKind: policy.EquivalencePolicy.ScreenKind, MaximumRawScoreRelativeDifference: policy.EquivalencePolicy.MaximumRawScoreRelativeDifference,
 		ConfidenceLevel: 0.95, StatisticalMethod: "two-sided-welch-t-run-level", StatisticalEquivalenceProven: false,
 		ArchiveManifestSha256: hex.EncodeToString(manifestDigest[:]), CreatedAt: server.NowUtc().Truncate(time.Microsecond)}
-	for _, name := range []string{"raw_score", "request_count", "received_bytes", "ttfb_p50_ms", "ttfb_p95_ms", "throughput_p50_bytes_per_s", "throughput_p95_bytes_per_s"} {
+	for _, name := range competitionNoopMetricNames(settings) {
 		screen, err := compareCompetitionHostMetric(name, baselineValues[name], candidateValues[name])
 		if err != nil {
 			return nil, err
@@ -312,7 +354,7 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.QualificationSha256 != host.QualificationSha256 || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
 		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || !receipt.Passed || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
 		receipt.ScreenKind != "operational-admission/v1" || receipt.MaximumRawScoreRelativeDifference != 0.05 || receipt.RawScoreRelativeDifference < 0 || receipt.RawScoreRelativeDifference > 0.05 || math.IsNaN(receipt.RawScoreRelativeDifference) || math.IsInf(receipt.RawScoreRelativeDifference, 0) || receipt.ConfidenceLevel != 0.95 ||
-		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) || len(receipt.Metrics) != 7 ||
+		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) || len(receipt.Metrics) != len(competitionNoopMetricNames(settings)) || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) ||
 		receipt.QualificationJobId != competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256).String() || receipt.QualificationStartedAt.IsZero() ||
 		!receipt.QualificationDeadlineAt.Equal(receipt.QualificationStartedAt.Add(3*time.Hour)) || receipt.CreatedAt.Before(receipt.QualificationStartedAt) ||
 		receipt.Retention == nil || receipt.Retention.Mode != "COMPLIANCE" || receipt.Retention.RetainUntil.Before(settings.RetainUntil) {
@@ -333,6 +375,13 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 	baselineValues := map[string][]float64{"raw_score": {}, "request_count": {}, "received_bytes": {}}
 	baselineWithinSe := map[string][]float64{}
 	for _, replicate := range control.Replicates {
+		if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+			if model.ValidateCompetitionWorkCoverageSummary(replicate.WorkCoverage) != nil {
+				return errors.New("host admission control omitted work coverage uncertainty")
+			}
+			baselineValues["page_coverage"] = append(baselineValues["page_coverage"], replicate.WorkCoverage.PageCoverage)
+			baselineValues["byte_coverage"] = append(baselineValues["byte_coverage"], replicate.WorkCoverage.ByteCoverage)
+		}
 		baselineValues["raw_score"] = append(baselineValues["raw_score"], replicate.RawScore)
 		baselineValues["request_count"] = append(baselineValues["request_count"], float64(replicate.RequestCount))
 		baselineValues["received_bytes"] = append(baselineValues["received_bytes"], float64(replicate.ReceivedBytes))
@@ -349,7 +398,7 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 	for _, metric := range receipt.Metrics {
 		values, present := baselineValues[metric.Metric]
 		if !present || seen[metric.Metric] || len(metric.BaselineValues) != len(values) {
-			return errors.New("host admission must retain all seven distinct frozen-control metrics")
+			return errors.New("host admission must retain all versioned distinct frozen-control metrics")
 		}
 		seen[metric.Metric] = true
 		for index, value := range values {

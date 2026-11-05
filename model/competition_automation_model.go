@@ -230,7 +230,11 @@ func CompetitionRewardEligibilityForMode(score *CompetitionScoreResult, baseline
 	if !score.Placeable {
 		return "not_placeable"
 	}
-	for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources"} {
+	names, err := CompetitionScoreRequiredGateNames(score)
+	if err != nil {
+		return "invalid_score"
+	}
+	for _, name := range names {
 		gate, ok := score.Gates[name]
 		if !ok || !gate.Passed {
 			return "gate_failed_or_missing"
@@ -626,6 +630,7 @@ type CompetitionSourceGitRef struct {
 // An immutable intent stages source; only a separately recorded activation changes runtime authority.
 type CompetitionSourceActivation struct {
 	G2VolumePolicy            CompetitionG2VolumePolicy          `json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy        *CompetitionWorkCoveragePolicy     `json:"work_coverage_policy,omitempty"`
 	TrustedInstrument         *CompetitionTrustedInstrumentProof `json:"trusted_instrument,omitempty"`
 	SimulatorSha256           string                             `json:"simulator_sha256,omitempty"`
 	ScorerSha256              string                             `json:"scorer_sha256,omitempty"`

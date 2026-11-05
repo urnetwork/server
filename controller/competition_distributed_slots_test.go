@@ -155,6 +155,41 @@ func (self *competitionDistributedPgFixture) qualifyHost(t testing.TB, host Comp
 		"qualification_sha256": host.QualificationSha256, "policy_approval_sha256": self.settings.DistributedEvaluationPolicy.ApprovalSha256,
 		"passed": true, "noop": true, "archive_manifest_sha256": strings.Repeat("6", 64),
 		"qualification_job_id": jobId.String(), "qualification_started_at": now, "qualification_deadline_at": deadline, "created_at": now}
+	if self.settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+		receipt["work_coverage_policy"] = self.settings.EvaluationPolicy.WorkCoveragePolicy.Clone()
+		var baseline roundBaselineManifest
+		if err := json.Unmarshal(self.prepared.BaselineJson, &baseline); err != nil {
+			t.Fatal(err)
+		}
+		metrics := []competitionHostMetricScreen{}
+		for _, name := range competitionNoopMetricNames(self.settings) {
+			values := []float64{}
+			for _, replicate := range baseline.Replicates {
+				var value float64
+				switch name {
+				case "raw_score":
+					value = replicate.RawScore
+				case "request_count":
+					value = float64(replicate.RequestCount)
+				case "received_bytes":
+					value = float64(replicate.ReceivedBytes)
+				case "page_coverage":
+					value = replicate.WorkCoverage.PageCoverage
+				case "byte_coverage":
+					value = replicate.WorkCoverage.ByteCoverage
+				default:
+					value = replicate.LiveMetrics[name].Value
+				}
+				values = append(values, value)
+			}
+			screen, err := compareCompetitionHostMetric(name, values, values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			metrics = append(metrics, *screen)
+		}
+		receipt["metrics"] = metrics
+	}
 	content, err := json.Marshal(receipt)
 	if err != nil {
 		t.Fatal(err)
@@ -310,6 +345,12 @@ func TestCompetitionDistributedCompletionPublishesScoredSharedBaseline(t *testin
 		})
 		outcome.Score.Diagnostics["g2_volume_policy"] = string(settings.EvaluationPolicy.G2VolumePolicy)
 		outcome.Score.Diagnostics["scorer_version"] = settings.scorerVersion()
+		outcome.Score.Diagnostics["work_coverage_policy"] = settings.EvaluationPolicy.WorkCoveragePolicy
+		outcome.Score.Gates = map[string]Gate{}
+		for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources", "G7_work_coverage"} {
+			outcome.Score.Gates[name] = Gate{Passed: true, Details: map[string]any{}}
+		}
+		outcome.Score.Gates["G7_work_coverage"] = Gate{Passed: true, Details: map[string]any{"policy": settings.EvaluationPolicy.WorkCoveragePolicy}}
 		if retry, err := fixture.store.Complete(withCompetitionJobAuthority(ctx, job), settings, "synthetic-scored-completion-worker", job.JobId, outcome); err != nil || retry {
 			tb.Fatal("scored shared-baseline completion lost its stored round epoch", retry, err)
 		}

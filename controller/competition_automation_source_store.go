@@ -199,7 +199,7 @@ func validateSourceAuthorizationInTx(ctx context.Context, tx server.PgTx, settin
 		return ErrConflict
 	}
 	if current == nil {
-		if intent.TrustedInstrument != nil || intent.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+		if intent.TrustedInstrument != nil || intent.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy || intent.WorkCoveragePolicy != nil {
 			return errors.New("baseline cannot import a prospective instrument transition")
 		}
 		if intent.Kind != "baseline" || intent.ExpectedGeneration != 0 || intent.TargetEpoch != 1 || intent.SourceGeneration != 0 || intent.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || intent.Commits["server"] != settings.BaseSha || intent.Threshold != settings.EvaluationPolicy.TakeoverMargin || !sha256Pattern.MatchString(settings.AutomationPolicy.PolicyApprovalSha256) {

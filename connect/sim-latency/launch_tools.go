@@ -20,6 +20,7 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -528,8 +529,8 @@ func checkCompetitionApi(
 	if err := getLaunchJson(ctx, client, config.ApiUrl, "/competition/info", "", info); err != nil {
 		return nil, nil, err
 	}
-	expectedScorerVersion, policyErr := model.CompetitionScorerVersionForG2Policy(epoch.G2VolumePolicy)
-	if policyErr != nil || info.EvaluationPolicy.G2VolumePolicy != epoch.G2VolumePolicy ||
+	expectedScorerVersion, policyErr := model.CompetitionScorerVersionForWorkCoverage(epoch.G2VolumePolicy, epoch.WorkCoveragePolicy)
+	if policyErr != nil || info.EvaluationPolicy.G2VolumePolicy != epoch.G2VolumePolicy || !reflect.DeepEqual(info.EvaluationPolicy.WorkCoveragePolicy, epoch.WorkCoveragePolicy) ||
 		!info.Enabled || info.ScoreSchema != controller.ScoreSchema || info.ScorerVersion != expectedScorerVersion ||
 		info.BaseSha != epoch.Repositories.Server.Commit || info.EvaluatorImageDigest != config.EvaluatorImageDigest {
 		return nil, nil, errors.New("live competition policy does not match the frozen epoch and evaluator")

@@ -23,13 +23,17 @@ func validateTrustedInstrumentSource(settings *Settings, intent, current *model.
 		if err := settings.validateFutureEpochPolicy(); err != nil {
 			return err
 		}
-		if policy.FromEpoch <= intent.TargetEpoch && intent.G2VolumePolicy != policy.G2VolumePolicy {
+		if policy.FromEpoch <= intent.TargetEpoch && (intent.G2VolumePolicy != policy.G2VolumePolicy || !reflect.DeepEqual(intent.WorkCoveragePolicy, policy.WorkCoveragePolicy)) {
 			return errors.New("source successor does not use its prospectively approved scoring policy")
 		}
 	}
+	if !intent.Staging && intent.TargetEpoch >= 2 &&
+		(settings.FutureEpochPolicy == nil || intent.WorkCoveragePolicy == nil || !reflect.DeepEqual(intent.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy)) {
+		return errors.New("new production source activation requires its explicitly approved coverage capability")
+	}
 	proof := intent.TrustedInstrument
 	if proof == nil {
-		if intent.Kind == "trusted_instrument_transition" || (current != nil && intent.G2VolumePolicy != current.G2VolumePolicy) {
+		if intent.Kind == "trusted_instrument_transition" || (current != nil && (intent.G2VolumePolicy != current.G2VolumePolicy || !reflect.DeepEqual(intent.WorkCoveragePolicy, current.WorkCoveragePolicy))) {
 			return errors.New("changed instrument policy requires its independent operator proof")
 		}
 		return nil
@@ -74,6 +78,10 @@ func validateTrustedInstrumentProof(settings *Settings, intent *model.Competitio
 		!reflect.DeepEqual(proof.Approval, *settings.FutureEpochPolicy.TrustedInstrument) {
 		return errors.New("trusted instrument transition is not prospectively authorized for this successor")
 	}
+	if !reflect.DeepEqual(intent.WorkCoveragePolicy, proof.Approval.WorkCoveragePolicy) ||
+		proof.BuildReceipt == nil || !reflect.DeepEqual(intent.WorkCoveragePolicy, proof.BuildReceipt.WorkCoveragePolicy) {
+		return errors.New("trusted instrument coverage policy differs across intent, approval and build receipt")
+	}
 	lock, err := model.CompetitionSourceLockDigestForMode(intent.Commits, false)
 	if err != nil || lock != intent.SourceLockSha256 {
 		return errors.New("trusted instrument child source graph differs from its exact lock")
@@ -114,11 +122,15 @@ func validateTrustedInstrumentProof(settings *Settings, intent *model.Competitio
 // Reuses independent tests/containment with an explicit instrument operation;
 // zero review id means no product review is being fabricated by this receipt.
 func ValidateCompetitionTrustedInstrumentBuildReceipt(receipt CompetitionReviewedSourceBuildReceipt, approvalDigest, patchDigest, lockDigest string, staging bool, policy string) error {
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(receipt.G2VolumePolicy, receipt.WorkCoveragePolicy); err != nil {
+		return err
+	}
 	if receipt.Schema != 2 || receipt.Operation != "trusted_instrument_build" || receipt.ReviewId != (server.Id{}) ||
 		receipt.InstrumentApprovalSha256 != approvalDigest || !sha256Pattern.MatchString(approvalDigest) || !sha256Pattern.MatchString(receipt.SimulatorSha256) || receipt.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork {
 		return errors.New("trusted instrument build receipt has a substituted authorization identity")
 	}
 	legacy := receipt
+	legacy.WorkCoveragePolicy = nil
 	legacy.Schema, legacy.Operation, legacy.InstrumentApprovalSha256, legacy.SimulatorSha256, legacy.G2VolumePolicy = 1, "", "", "", model.CompetitionG2VolumePolicyLegacy
 	return ValidateCompetitionReviewedSourceBuildReceiptForPolicy(legacy, server.Id{}, patchDigest, lockDigest, staging, policy)
 }

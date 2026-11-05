@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/urnetwork/server/model"
@@ -14,6 +15,7 @@ import (
 // mandatory for new code; a reward decision is deliberately not an approval.
 type reviewedSourceGeneration struct {
 	G2VolumePolicy                model.CompetitionG2VolumePolicy          `yaml:"g2_volume_policy,omitempty" json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy            *model.CompetitionWorkCoveragePolicy     `yaml:"work_coverage_policy,omitempty" json:"work_coverage_policy,omitempty"`
 	TrustedInstrument             *model.CompetitionTrustedInstrumentProof `yaml:"trusted_instrument,omitempty" json:"trusted_instrument,omitempty"`
 	Generation                    int                                      `yaml:"generation" json:"generation"`
 	Kind                          string                                   `yaml:"kind" json:"kind"`
@@ -32,16 +34,17 @@ type reviewedSourceGeneration struct {
 // Records the exact source choice for one future round. Its reward digest is
 // provenance only, including when that round carries an unshipped winner.
 type reviewedSourceRound struct {
-	G2VolumePolicy                model.CompetitionG2VolumePolicy `yaml:"g2_volume_policy,omitempty" json:"g2_volume_policy,omitempty"`
-	Epoch                         int                             `yaml:"epoch" json:"epoch"`
-	SourceGeneration              int                             `yaml:"source_generation" json:"source_generation"`
-	ActivationGeneration          int64                           `yaml:"activation_generation" json:"activation_generation"`
-	SourceDecisionDigest          string                          `yaml:"source_decision_digest" json:"source_decision_digest"`
-	Kind                          string                          `yaml:"kind" json:"kind"`
-	Reason                        string                          `yaml:"reason" json:"reason"`
-	RewardDecisionDigest          string                          `yaml:"reward_decision_digest,omitempty" json:"reward_decision_digest,omitempty"`
-	SourceLockSha256              string                          `yaml:"source_lock_sha256" json:"source_lock_sha256"`
-	SignificantImprovementPercent float64                         `yaml:"significant_improvement_percent" json:"significant_improvement_percent"`
+	G2VolumePolicy                model.CompetitionG2VolumePolicy      `yaml:"g2_volume_policy,omitempty" json:"g2_volume_policy,omitempty"`
+	WorkCoveragePolicy            *model.CompetitionWorkCoveragePolicy `yaml:"work_coverage_policy,omitempty" json:"work_coverage_policy,omitempty"`
+	Epoch                         int                                  `yaml:"epoch" json:"epoch"`
+	SourceGeneration              int                                  `yaml:"source_generation" json:"source_generation"`
+	ActivationGeneration          int64                                `yaml:"activation_generation" json:"activation_generation"`
+	SourceDecisionDigest          string                               `yaml:"source_decision_digest" json:"source_decision_digest"`
+	Kind                          string                               `yaml:"kind" json:"kind"`
+	Reason                        string                               `yaml:"reason" json:"reason"`
+	RewardDecisionDigest          string                               `yaml:"reward_decision_digest,omitempty" json:"reward_decision_digest,omitempty"`
+	SourceLockSha256              string                               `yaml:"source_lock_sha256" json:"source_lock_sha256"`
+	SignificantImprovementPercent float64                              `yaml:"significant_improvement_percent" json:"significant_improvement_percent"`
 }
 
 // Validates historical entries separately so upgrading a manifest never
@@ -98,7 +101,7 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 			if generation.Kind != "baseline" || generation.SourceApprovalId != "" ||
 				generation.SourceApprovalDigest != "" || generation.Significance != nil ||
 				generation.EvaluatedBaseSourceLockSha256 != "" || generation.PatchSha256 != "" || generation.ScoreSha256 != "" ||
-				generation.TrustedInstrument != nil || generation.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy {
+				generation.TrustedInstrument != nil || generation.G2VolumePolicy != model.CompetitionG2VolumePolicyLegacy || generation.WorkCoveragePolicy != nil {
 				return errors.New("source generation 0 must be an approved baseline without promotion metadata")
 			}
 			if len(manifest.EvaluationSource.Epochs) > 0 {
@@ -140,7 +143,7 @@ func validateReviewedSourceManifest(manifest *sourceManifest) error {
 		}
 		generation, err := manifest.generation(round.SourceGeneration)
 		if err != nil || round.SourceLockSha256 != generation.SourceLockSha256 ||
-			round.SignificantImprovementPercent != generation.SignificantImprovementPercent || round.G2VolumePolicy != generation.G2VolumePolicy {
+			round.SignificantImprovementPercent != generation.SignificantImprovementPercent || round.G2VolumePolicy != generation.G2VolumePolicy || !reflect.DeepEqual(round.WorkCoveragePolicy, generation.WorkCoveragePolicy) {
 			return fmt.Errorf("source round %d does not match its explicit reviewed generation and margin", round.Epoch)
 		}
 		previousGeneration := 0
