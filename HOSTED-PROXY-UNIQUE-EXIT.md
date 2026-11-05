@@ -397,7 +397,8 @@ A busy candidate is skipped. A busy key update or confirm waits for the next pas
 - find-providers2's hard exclusions (verdict) and key collisions, with no grace.
 
 **The share.** Each pinned proxy is held to half its provider's estimated bytes per second. The token bucket's burst is max(64 KiB, rate/4).
-- HTTP and SOCKS connections are paced, and nothing is dropped.
+- HTTP and SOCKS connections are paced, and nothing is dropped. With no rate yet (or no estimate) the share is unlimited, and a write goes out whole.
+- The device reports an unreachable exit at each 3 failed confirms, not on every poll.
 - WireGuard packets over the share are dropped and counted. A batch is policed all or nothing, so the batch contract holds.
 
 **The sweeper** (taskworker `sweep_proxy_exits`, every 30 s):
@@ -406,7 +407,7 @@ A busy candidate is skipped. A busy key update or confirm waits for the next pas
 - updates or replaces on key changes;
 - marks offline exits and replaces them after the grace;
 - clears recovered exits;
-- retries held proxies in `auto` mode;
+- retries held proxies in `auto` mode, each at most once per 5 minutes (`HeldRetryInterval`), since a retry may draw from find-providers2;
 - enforces 6 replacements an hour per proxy and max(1, ceil(10% of the network's unique-exit proxies)) an hour per network, over failure releases;
 - excludes released providers for 24 h;
 - in `manual` mode holds the proxy as `replacing`, reason `manual`.
