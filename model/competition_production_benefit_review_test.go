@@ -37,7 +37,7 @@ func TestCompetitionProductionBenefitReasonRequiresBoundEligibilityEvidence(t *t
 		makeReview := func() (CompetitionAutomationPolicy, CompetitionIntegrityReviewRequest) {
 			policy, review := winnerProviderReviewFixture(CompetitionWinnerReviewPolicy)
 			if snow {
-				policy, review = snowWinnerReviewForPolicyFixture(CompetitionSnowWinnerReviewPolicyV2)
+				policy, review = snowWinnerReviewForPolicyFixture(CompetitionSnowWinnerReviewPolicy)
 			}
 			review.ProductionBenefitAddendum = CompetitionProductionBenefitReviewAddendum()
 			review.RewardDisposition, review.SourceDisposition, review.ReasonCodes = "disqualified", "rejected", []string{"NO_PRODUCTION_BENEFIT"}

@@ -58,7 +58,7 @@ func TestCompetitionProductionBenefitPublicContractConformance(t *testing.T) {
 				RewardDisposition: "approved", SourceDisposition: "approved", ReasonCodes: []string{"APPROVED"}, PublicExplanation: "Synthetic supported client benefit.", WithheldEvidenceExplanation: "Synthetic retained evidence.", PrivateEvidenceSha256: digest}
 			members := []string{""}
 			if snow {
-				members = model.CompetitionSnowWinnerReviewModelsForPolicy(model.CompetitionSnowWinnerReviewPolicyV2)
+				members = model.CompetitionSnowWinnerReviewModelsForPolicy(model.CompetitionSnowWinnerReviewPolicy)
 				review.ReviewerModel = model.CompetitionSnowWinnerReviewModel
 				review.ReviewerReasoning = model.CompetitionSnowWinnerReviewReasoning
 				review.ExpectedDecisionSha256 = digest
