@@ -8,28 +8,62 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
+// Exact private archive provenance accompanies exported bytes. The manifest
+// currently has a content-addressed digest, not a persisted object version.
+type CompetitionReviewArtifactIdentity struct {
+	Path        string    `json:"path"`
+	Key         string    `json:"key"`
+	VersionId   string    `json:"version_id,omitempty"`
+	Sha256      string    `json:"sha256"`
+	Bytes       int64     `json:"bytes"`
+	Mode        string    `json:"mode,omitempty"`
+	RetainUntil time.Time `json:"retain_until,omitempty"`
+}
+
 // This trusted control-plane result is not a public projection. Score contains
 // original archived bytes, not a JSONB serialization with a different digest.
 type CompetitionSourceReviewPacket struct {
-	Seal                  model.CompetitionEvaluationSeal `json:"seal"`
-	Entry                 model.CompetitionSealedEntry    `json:"entry"`
-	Patch                 []byte                          `json:"patch"`
-	Score                 []byte                          `json:"score"`
-	PatchPolicy           PatchPolicy                     `json:"patch_policy"`
-	BaseSha               string                          `json:"base_sha"`
-	EvaluatedImageDigest  string                          `json:"evaluated_image_digest"`
-	ReviewCriteriaVersion string                          `json:"review_criteria_version"`
-	RewardRevision        int                             `json:"reward_revision"`
-	SourceCommits         map[string]string               `json:"source_commits"`
-	SourceGeneration      int                             `json:"source_generation"`
-	ActivationGeneration  int64                           `json:"activation_generation"`
-	Instrument            *CompetitionReviewInstrument    `json:"instrument,omitempty"`
+	Seal                  model.CompetitionEvaluationSeal    `json:"seal"`
+	Entry                 model.CompetitionSealedEntry       `json:"entry"`
+	Patch                 []byte                             `json:"patch"`
+	Score                 []byte                             `json:"score"`
+	PatchPolicy           PatchPolicy                        `json:"patch_policy"`
+	BaseSha               string                             `json:"base_sha"`
+	EvaluatedImageDigest  string                             `json:"evaluated_image_digest"`
+	ReviewCriteriaVersion string                             `json:"review_criteria_version"`
+	RewardRevision        int                                `json:"reward_revision"`
+	SourceCommits         map[string]string                  `json:"source_commits"`
+	SourceGeneration      int                                `json:"source_generation"`
+	ActivationGeneration  int64                              `json:"activation_generation"`
+	Instrument            *CompetitionReviewInstrument       `json:"instrument,omitempty"`
+	WinnerReviewPolicy    string                             `json:"winner_review_policy,omitempty"`
+	RewardDecision        *model.CompetitionRewardDecision   `json:"reward_decision,omitempty"`
+	ManifestArtifact      *CompetitionReviewArtifactIdentity `json:"manifest_artifact,omitempty"`
+	ScoreArtifact         *CompetitionReviewArtifactIdentity `json:"score_artifact,omitempty"`
+}
+
+// A decision is a current snapshot, not a new election. Exact scope and digest
+// keep a template from attaching another round's revision to sealed evidence.
+func validateCompetitionReviewDecision(decision *model.CompetitionRewardDecision, seal *model.CompetitionEvaluationSeal) error {
+	if decision == nil {
+		return nil
+	}
+	copy := *decision
+	copy.DecisionSha256 = ""
+	digest, err := model.CompetitionAutomationDigest(copy)
+	if err != nil || seal == nil || decision.Revision < 1 || decision.RoundId != seal.RoundId || decision.Staging != seal.Staging ||
+		decision.Environment != seal.Environment || decision.CompetitionId != seal.CompetitionId || decision.SeasonId != seal.SeasonId ||
+		decision.SealSha256 != seal.SealSha256 || digest != decision.DecisionSha256 {
+		return ErrConflict
+	}
+	return nil
 }
 
 // Reads bounded immutable bytes and checks both identity and declared length.
@@ -63,14 +97,15 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 	var manifestJson []byte
 	err := captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
-			var sealJson, policyJson []byte
+			var sealJson, policyJson, decisionJson []byte
 			server.Raise(conn.QueryRow(ctx, `SELECT s.seal_json,j.patch_bytes,j.artifact_manifest_json,r.policy_json,
-				COALESCE((SELECT max(revision) FROM competition_reward_decision WHERE round_id=r.round_id),0)
+				COALESCE((SELECT decision_json FROM competition_reward_decision WHERE round_id=r.round_id ORDER BY revision DESC LIMIT 1),'null'::jsonb)
 				FROM competition_evaluation_seal s JOIN competition_round r ON r.round_id=s.round_id
 				JOIN competition_job j ON j.round_id=r.round_id
 				WHERE r.round_id=$1 AND j.job_id=$2 AND r.competition_id=$3`, roundId, jobId, settings.CompetitionId).
-				Scan(&sealJson, &packet.Patch, &manifestJson, &policyJson, &packet.RewardRevision))
+				Scan(&sealJson, &packet.Patch, &manifestJson, &policyJson, &decisionJson))
 			server.Raise(json.Unmarshal(sealJson, &packet.Seal))
+			server.Raise(json.Unmarshal(decisionJson, &packet.RewardDecision))
 			policy, err := decodeRoundPolicySnapshot(policyJson)
 			server.Raise(err)
 			if policy.AutomationPolicy == nil || !policy.AutomationPolicy.Enabled || policy.AutomationPolicy.Staging != settings.AutomationPolicy.Staging || packet.Seal.Staging != settings.AutomationPolicy.Staging || policy.AutomationPolicy.Environment != settings.AutomationPolicy.Environment ||
@@ -91,6 +126,11 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 			}
 			packet.PatchPolicy, packet.BaseSha, packet.EvaluatedImageDigest = policy.PatchPolicy, policy.BaseSha, policy.EvaluatorImageDigest
 			packet.ReviewCriteriaVersion = policy.AutomationPolicy.ReviewCriteriaVersion
+			packet.WinnerReviewPolicy = policy.AutomationPolicy.WinnerReviewPolicy
+			if decision := packet.RewardDecision; decision != nil {
+				server.Raise(validateCompetitionReviewDecision(decision, &packet.Seal))
+				packet.RewardRevision = decision.Revision
+			}
 			var intentJson []byte
 			server.Raise(conn.QueryRow(ctx, `SELECT intent_json FROM competition_source_activation
 				WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4
@@ -129,6 +169,7 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 	if err := json.Unmarshal(manifestJson, &manifest); err != nil || manifest.Retention == nil || manifest.Retention.ManifestKey == "" {
 		return nil, errors.New("review artifact retention identity is unavailable")
 	}
+	manifestKey := manifest.Retention.ManifestKey
 	// The manifest's content-addressed key is checked against the sealed digest.
 	reader, err := archive.store.Get(ctx, manifest.Retention.ManifestKey)
 	if err != nil {
@@ -145,6 +186,8 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 		manifest.EvaluatorImageDigest != packet.EvaluatedImageDigest {
 		return nil, errors.New("archived review manifest has a conflicting identity")
 	}
+	packet.ManifestArtifact = &CompetitionReviewArtifactIdentity{Path: "artifact-manifest.json", Key: manifestKey,
+		Sha256: packet.Entry.ArtifactManifestSha256, Bytes: int64(len(manifestBytes))}
 	var scoreArtifact *retainedArtifact
 	for index := range manifest.Retention.Objects {
 		artifact := &manifest.Retention.Objects[index]
@@ -175,5 +218,7 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 	if actualErr != nil || expectedErr != nil || actualScoreDigest != expectedScoreDigest {
 		return nil, errors.New("archived review score disagrees with the sealed result")
 	}
+	packet.ScoreArtifact = &CompetitionReviewArtifactIdentity{Path: scoreArtifact.Path, Key: scoreArtifact.Key, VersionId: scoreArtifact.VersionId,
+		Sha256: scoreArtifact.Sha256, Bytes: scoreArtifact.Bytes, Mode: scoreArtifact.Mode, RetainUntil: scoreArtifact.RetainUntil}
 	return packet, nil
 }
