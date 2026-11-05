@@ -140,7 +140,8 @@ BEGIN
   'qualification_sha256',intent->>'host_qualification_sha256','runtime_image_digest','sha256:'||repeat('8',64),'recorded_at',at_time);
  INSERT INTO competition_source_readiness VALUES('synthetic','synthetic-competition','synthetic-season',2,'api',api,at_time);
  policy:=jsonb_build_object('schema',2,'competition_id','synthetic-competition','base_sha',repeat('a',40),'score_schema',1,'scorer_version','sim-latency-score/3',
-  'evaluator_image_digest',intent->>'evaluator_image_digest','evaluator_command','/synthetic/evaluator','evaluator_command_sha256',repeat('9',64),'patch_policy','{}'::jsonb,
+  'evaluator_image_digest',intent->>'evaluator_image_digest','evaluator_command','/synthetic/evaluator','evaluator_command_sha256',repeat('9',64),
+  'patch_policy',jsonb_build_object('max_patch_bytes',4096,'allowed_paths',jsonb_build_array('synthetic/*.go'),'forbidden_paths',jsonb_build_array('synthetic/protected/**')),
   'automation_policy',jsonb_build_object('enabled',true,'version',2,'environment','synthetic','season_id','synthetic-season','required_api_capability','competition.reward.v2.runtime-blob.v1',
    'source_activation_generation',2,'source_generation',0,'source_lock_sha256',lock_digest,'winner_review_policy','elected_winner_snow_union_v2'),
   'evaluation_policy',jsonb_build_object('replicates',9,'takeover_margin',0.161,'host_qualification_sha256',repeat('4',64),'hardware_id','synthetic-hardware',
@@ -159,11 +160,17 @@ CREATE FUNCTION synthetic_insert_intake(value jsonb, frozen jsonb) RETURNS void 
  INSERT INTO competition_source_intake_activation SELECT 'synthetic','synthetic-competition','synthetic-season',2,'00000000-0000-0000-0000-000000000002',2,
   value,encode(sha256(convert_to(value::text,'UTF8')),'hex'),frozen,convert_to(value::text,'UTF8'),convert_to(frozen::text,'UTF8'),convert_to(api::text,'UTF8'),(value->>'created_at')::timestamp FROM synthetic_intake_fixture;
 $$;
+CREATE FUNCTION synthetic_insert_policy_variant(frozen jsonb) RETURNS void LANGUAGE sql AS $$
+ SELECT synthetic_insert_intake(grant_value||jsonb_build_object('round_policy_sha256',encode(sha256(convert_to(frozen::text,'UTF8')),'hex')),frozen) FROM synthetic_intake_fixture;
+$$;
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value,policy) FROM synthetic_intake_fixture');
 SELECT set_config('urnetwork.competition_source_handoff_capability','source_promoter',true);
 SELECT synthetic_expect_intake_failure('INSERT INTO competition_source_operator_handoff SELECT ''synthetic'',''synthetic-competition'',''synthetic-season'',2,1,''synthetic-handoff'',handoff,convert_to(request::text,''UTF8''),(handoff->>''created_at'')::timestamp FROM synthetic_intake_fixture');
 SELECT set_config('urnetwork.competition_source_handoff_capability','source_handoff',true);
 INSERT INTO competition_source_operator_handoff SELECT 'synthetic','synthetic-competition','synthetic-season',2,1,'synthetic-handoff',handoff,convert_to(request::text,'UTF8'),(handoff->>'created_at')::timestamp FROM synthetic_intake_fixture;
+SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(jsonb_set(policy,''{patch_policy}'',''{}''::jsonb)) FROM synthetic_intake_fixture');
+SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(policy-''evaluator_command_sha256'') FROM synthetic_intake_fixture');
+SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(jsonb_set(policy,''{scorer_version}'',''"sim-latency-score/2"''::jsonb)) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value||''{"intent_sha256":"'||repeat('0',64)||'"}''::jsonb,policy) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value||''{"expected_generation":9}''::jsonb,policy) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value,policy||''{"base_sha":"'||repeat('0',40)||'"}''::jsonb) FROM synthetic_intake_fixture');

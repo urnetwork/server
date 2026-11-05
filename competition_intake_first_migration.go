@@ -228,6 +228,14 @@ BEGIN
   OR policy->>'base_sha' IS DISTINCT FROM intent->'commits'->>'server' OR policy->>'evaluator_image_digest' IS DISTINCT FROM intent->>'evaluator_image_digest'
   OR COALESCE(policy->>'evaluator_command','') NOT LIKE '/%' OR COALESCE(policy->>'evaluator_command_sha256','') !~ '^[0-9a-f]{64}$'
   OR jsonb_typeof(policy->'patch_policy') IS DISTINCT FROM 'object' OR jsonb_typeof(policy->'evaluation_policy') IS DISTINCT FROM 'object'
+  OR policy->'score_schema' IS DISTINCT FROM '1'::jsonb
+  OR NOT COALESCE((policy->'patch_policy'->>'max_patch_bytes')::integer>0,false)
+  OR jsonb_typeof(policy->'patch_policy'->'allowed_paths') IS DISTINCT FROM 'array'
+  OR jsonb_typeof(policy->'patch_policy'->'forbidden_paths') IS DISTINCT FROM 'array'
+  OR NOT COALESCE(jsonb_array_length(policy->'patch_policy'->'allowed_paths')>0 AND jsonb_array_length(policy->'patch_policy'->'forbidden_paths')>0,false)
+  OR COALESCE(policy->'evaluation_policy'->>'simulator_sha256','') !~ '^[0-9a-f]{64}$'
+  OR COALESCE(policy->'evaluation_policy'->>'scorer_sha256','') !~ '^[0-9a-f]{64}$'
+  OR COALESCE(policy->'evaluation_policy'->>'hardware_id','')=''
   OR policy->>'scorer_version' IS DISTINCT FROM 'sim-latency-score/3'
   OR policy->'evaluation_policy'->>'g2_volume_policy' IS DISTINCT FROM 'minimum-work/1'
   OR jsonb_typeof(policy->'evaluation_policy'->'work_coverage_policy') IS DISTINCT FROM 'object'
@@ -237,7 +245,7 @@ BEGIN
   OR (automatic->>'source_activation_generation')::bigint IS DISTINCT FROM NEW.generation OR automatic->'source_generation' IS DISTINCT FROM intent->'source_generation'
   OR automatic->>'source_lock_sha256' IS DISTINCT FROM intent->>'source_lock_sha256'
   OR COALESCE(automatic->>'winner_review_policy','') IS DISTINCT FROM COALESCE(intent->>'winner_review_policy','')
-  OR automatic->'staging'='true'::jsonb OR (policy->'evaluation_policy'->>'replicates')::integer IS DISTINCT FROM 9
+  OR COALESCE(automatic->'staging','false'::jsonb) IS DISTINCT FROM 'false'::jsonb OR (policy->'evaluation_policy'->>'replicates')::integer IS DISTINCT FROM 9
   OR policy->'evaluation_policy'->'takeover_margin' IS DISTINCT FROM intent->'threshold'
   OR policy->'evaluation_policy'->>'host_qualification_sha256' IS DISTINCT FROM intent->>'host_qualification_sha256'
   OR COALESCE(policy->'evaluation_policy'->>'g2_volume_policy','') IS DISTINCT FROM COALESCE(intent->>'g2_volume_policy','')
