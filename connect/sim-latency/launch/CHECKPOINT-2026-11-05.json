@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "kind": "competition-source-preparation-checkpoint",
-  "recorded_at": "2026-11-05T20:50:09Z",
+  "recorded_at": "2026-11-05T20:54:05Z",
   "authority_warning": "Source checkpoint only. A push, installed binary, passing subset or draft configuration is not live qualification or activation.",
   "source_inputs": {
     "combined_core_and_managed_agent": "6c75156cbd4111a6674b6e12d808a264a7912e4a",
