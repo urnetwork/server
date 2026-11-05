@@ -109,6 +109,37 @@ evaluation_host() {
     "$URNETWORK_SUBEVALUATION_CLIENT" --host-operation "$subevaluation_run_id" -- "$@"
 }
 
+# Measurement cannot overlap retained unbounded BuildKit memory. Only the
+# no-argument root role retires it; this helper retains its finite receipt.
+# The unscoped evaluator never calls this prospective phase boundary.
+subevaluation_retire_build() {
+    [[ "${subevaluation_scoped:-false}" = true && "$#" = 1 && "$1" = /* &&
+       "$1" != *$'\n'* && "$1" != *$'\r'* ]] || return 2
+    local destination="$1" pending="$1.new"
+    [[ ! -e "$destination" && ! -L "$destination" && ! -e "$pending" && ! -L "$pending" ]] || return 2
+    if ! (set -o noclobber; evaluation_host retire-build > "$pending"); then
+        rm -f -- "$pending"
+        return 2
+    fi
+    if ! jq -e '
+        type == "object" and
+        (keys | sort) == ["memory_current_bytes","memory_stat_sha256","outcome_kind","receipt_sha256","retained_memory_maximum_bytes"] and
+        (.outcome_kind == "acknowledged-build" or .outcome_kind == "no-build-issued") and
+        (.retained_memory_maximum_bytes | type == "number" and . > 0 and floor == .) and
+        (.memory_current_bytes | type == "number" and . >= 0 and floor == .) and
+        .memory_current_bytes <= .retained_memory_maximum_bytes and
+        (.memory_stat_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+        (.receipt_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+    ' "$pending" >/dev/null; then
+        rm -f -- "$pending"
+        return 2
+    fi
+    chmod 0400 "$pending" || return
+    sync -d "$pending" || return
+    mv -- "$pending" "$destination" || return
+    sync "$(dirname "$destination")"
+}
+
 # Container output is inspected only after its complete cohort has stopped and
 # the descriptor-confined broker has reclaimed it. Scoped work stays non-root.
 evaluation_file() {

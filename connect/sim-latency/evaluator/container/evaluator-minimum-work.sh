@@ -1845,6 +1845,9 @@ fi
 # backing-service credentials out of a terminal build-failure archive.
 rm -f -- "$score_runner_env" "$score_compose_env"
 build_candidate
+if [[ "$subevaluation_scoped" = true ]]; then
+    subevaluation_retire_build "$work_dir/build-retirement.json" || die "build retirement did not prove its bounded frozen memory phase"
+fi
 for ((i = 1; i <= replicates; i++)); do
     run_stage candidate "$i" "$candidate_image_id" "$candidate_sha" "$candidate_simulator_sha256" "$patch_sha256"
 done

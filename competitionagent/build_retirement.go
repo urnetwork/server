@@ -93,8 +93,19 @@ func (self *DockerProxy) retireBuild(ctx context.Context) HostFilesResult {
 	self.stateLock.Lock()
 	existing := self.retirement
 	if existing != nil {
+		// A duplicate owns a real HTTP admission until its receipt is durable,
+		// but cannot mutate the host. Exclude only these explicit observers
+		// from the initiating retirement's join, not from final quiescence.
+		self.retirementWaiters++
+		self.notifyWithLock()
 		done := existing.done
 		self.stateLock.Unlock()
+		defer func() {
+			self.stateLock.Lock()
+			self.retirementWaiters--
+			self.notifyWithLock()
+			self.stateLock.Unlock()
+		}()
 		select {
 		case <-done:
 			self.stateLock.Lock()
@@ -120,13 +131,13 @@ func (self *DockerProxy) retireBuild(ctx context.Context) HostFilesResult {
 	var receipt *buildRetirementReceipt
 	var summary *BuildRetirementSummary
 	err := func() error {
-		release, err := self.beginHostFileHandoff(ctx)
+		release, err := self.beginHostFileHandoffExceptRetirementWaiters(ctx, true)
 		if err != nil {
 			return err
 		}
 		defer release()
 		self.stateLock.Lock()
-		joined := self.inflight == 1 && len(self.sessions) == 0 && self.unknown == 0 && self.accepting
+		joined := self.inflight == 1+self.retirementWaiters && len(self.sessions) == 0 && self.unknown == 0 && self.accepting
 		self.stateLock.Unlock()
 		if !joined || ctx.Err() != nil || !self.settings.Now().Before(self.plan.DeadlineAt) {
 			return errors.New("retirement cannot pass outstanding or uncertain daemon work")
