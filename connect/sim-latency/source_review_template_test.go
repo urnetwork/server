@@ -47,3 +47,47 @@ func TestSourceReviewTemplateRequiresEveryActualFinding(t *testing.T) {
 		}
 	}
 }
+
+// Frozen Snow membership changes the required finding census, never supplies
+// member output. Historical three-member evidence remains a separate policy.
+func TestSourceReviewTemplatePreservesFrozenProviderAndDecision(t *testing.T) {
+	for _, fixture := range []struct {
+		policy    string
+		modelName string
+		count     int
+	}{
+		{policy: model.CompetitionSnowWinnerReviewPolicy, modelName: model.CompetitionSnowWinnerReviewModel, count: 12},
+		{policy: model.CompetitionSnowWinnerReviewPolicyV1, modelName: model.CompetitionSnowWinnerReviewModelV1, count: 18},
+		{policy: model.CompetitionLegacyWinnerReviewPolicy, modelName: model.CompetitionLegacyWinnerReviewModel, count: 6},
+	} {
+		packet := &controller.CompetitionSourceReviewPacket{RewardRevision: 3, ReviewCriteriaVersion: "synthetic-review/v2", WinnerReviewPolicy: fixture.policy,
+			RewardDecision: &model.CompetitionRewardDecision{Revision: 3, DecisionSha256: strings.Repeat("f", 64)},
+			Seal:           model.CompetitionEvaluationSeal{BaselineSha256: strings.Repeat("a", 64)},
+			Entry: model.CompetitionSealedEntry{JobId: server.NewId(), PatchSha256: strings.Repeat("b", 64), BaseSourceLockSha256: strings.Repeat("c", 64),
+				ScoreSha256: strings.Repeat("d", 64), ArtifactManifestSha256: strings.Repeat("e", 64)}}
+		request := sourceReviewTemplate(packet)
+		if request.ExpectedDecisionSha256 != packet.RewardDecision.DecisionSha256 || request.ReviewerModel != fixture.modelName || len(request.Findings) != fixture.count {
+			t.Fatalf("template lost policy-specific decision or membership: %s", fixture.policy)
+		}
+		if request.PublicExplanation != "" || request.PrivateEvidenceSha256 != "" || request.RewardDisposition == "approved" || request.SourceDisposition == "approved" ||
+			model.ValidateCompetitionIntegrityReview(request, model.CompetitionAutomationPolicy{WinnerReviewPolicy: fixture.policy, ReviewCriteriaVersion: packet.ReviewCriteriaVersion}) == nil {
+			t.Fatal("expected provider identities became a fabricated judgment")
+		}
+		census := map[string]int{}
+		for _, finding := range request.Findings {
+			if finding.Disposition != "" || finding.Explanation != "" || finding.EvidenceSha256 != "" || finding.ReasonCode != "" {
+				t.Fatal("template invented a provider finding")
+			}
+			census[finding.Model]++
+		}
+		if model.IsCompetitionSnowWinnerReviewPolicy(fixture.policy) {
+			for _, modelName := range model.CompetitionSnowWinnerReviewModelsForPolicy(fixture.policy) {
+				if census[modelName] != 6 {
+					t.Fatalf("template omitted six required criteria for %s", modelName)
+				}
+			}
+		} else if census[""] != 6 {
+			t.Fatal("historical single-provider finding format was relabeled")
+		}
+	}
+}
