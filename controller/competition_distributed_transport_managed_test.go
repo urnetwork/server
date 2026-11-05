@@ -61,25 +61,23 @@ func TestCompetitionAgentCommandsUseOnlyManagedRole(t *testing.T) {
 // Existing local pins still gate the wrapper, before any process can run.
 func TestCompetitionLocalAgentCommandsRejectChangedPins(t *testing.T) {
 	for _, fault := range []string{"agent", "config", "agent-alias"} {
-		t.Run(fault, func(t *testing.T) {
-			transport := competitionManagedTransportFixture(t)
-			switch fault {
-			case "agent":
-				transport.connection.AgentCommandSha256 = strings.Repeat("0", 64)
-			case "config":
-				transport.connection.AgentConfigSha256 = strings.Repeat("0", 64)
-			case "agent-alias":
-				alias := filepath.Join(filepath.Dir(transport.connection.AgentCommand), "agent-alias")
-				if err := os.Symlink(transport.connection.AgentCommand, alias); err != nil {
-					t.Fatal(err)
-				}
-				transport.connection.AgentCommand = alias
+		transport := competitionManagedTransportFixture(t)
+		switch fault {
+		case "agent":
+			transport.connection.AgentCommandSha256 = strings.Repeat("0", 64)
+		case "config":
+			transport.connection.AgentConfigSha256 = strings.Repeat("0", 64)
+		case "agent-alias":
+			alias := filepath.Join(filepath.Dir(transport.connection.AgentCommand), "agent-alias")
+			if err := os.Symlink(transport.connection.AgentCommand, alias); err != nil {
+				t.Fatal(err)
 			}
-			command, arguments, err := transport.commandArguments()
-			if err == nil || command != "" || arguments != nil {
-				t.Fatal("changed local pin retained an executable command", command, arguments, err)
-			}
-		})
+			transport.connection.AgentCommand = alias
+		}
+		command, arguments, err := transport.commandArguments()
+		if err == nil || command != "" || arguments != nil {
+			t.Fatal("changed local pin retained an executable command", command, arguments, err)
+		}
 	}
 }
 
