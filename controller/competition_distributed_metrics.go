@@ -13,6 +13,14 @@ import (
 )
 
 var (
+	competitionExecutorPhysicalAvailable = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "competition", Name: "executor_physical_available",
+		Help: "Last authenticated physical admission observation: one available, zero occupied, minus one unknown; inspect its observation time too.",
+	}, []string{"executor_host"})
+	competitionExecutorPhysicalObservedAt = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: "urnetwork", Subsystem: "competition", Name: "executor_physical_observed_at_seconds",
+		Help: "UTC Unix time of the physical admission check, not a historical qualification or database slot heartbeat.",
+	}, []string{"executor_host"})
 	competitionExecutorRemoteState = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "urnetwork", Subsystem: "competition", Name: "executor_remote_state",
 		Help: "Last authenticated run state: zero unknown, one accepted, two running, three succeeded, four failed.",
@@ -48,7 +56,7 @@ var (
 func init() {
 	prometheus.MustRegister(competitionExecutorBusy, competitionExecutorReconciliationRequired,
 		competitionExecutorHeartbeatAge, competitionExecutorDeadlineRemaining, competitionExecutorQualified,
-		competitionExecutorRemoteState, competitionExecutorTransportFailures)
+		competitionExecutorRemoteState, competitionExecutorTransportFailures, competitionExecutorPhysicalAvailable, competitionExecutorPhysicalObservedAt)
 }
 
 // Keeps the prior complete snapshot on a database error; successful omission of
@@ -120,6 +128,8 @@ func refreshCompetitionDistributedMetrics(ctx context.Context, settings *Setting
 	competitionExecutorQualified.Reset()
 	if len(hostMetrics) == 0 {
 		competitionExecutorRemoteState.Reset()
+		competitionExecutorPhysicalAvailable.Reset()
+		competitionExecutorPhysicalObservedAt.Reset()
 	}
 	oldestHeartbeatAge := -1.0
 	allHeartbeatsPresent := true

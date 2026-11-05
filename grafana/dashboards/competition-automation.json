@@ -76,7 +76,7 @@
     },
     {
       "id": 9, "type": "timeseries", "title": "executor slots occupied",
-      "description": "One physical slot per frozen executor. Uncertain executions retain their slot until the same run is reconciled; a transport failure is not a new attempt.",
+      "description": "Coordinator database custody per frozen executor. A terminal timeout may release this row before remote cleanup is confirmed; the separate physical admission observation must also allow reuse. A transport failure is not a new attempt.",
       "gridPos": {"h": 8, "w": 12, "x": 0, "y": 26},
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "min": 0, "max": 1}, "overrides": []},
@@ -121,6 +121,14 @@
       "datasource": {"type": "prometheus", "uid": "warp-mimir"},
       "fieldConfig": {"defaults": {"unit": "none", "min": 0}, "overrides": []},
       "targets": [{"refId": "A", "expr": "max by (executor_host) (urnetwork_competition_executor_remote_state{env=\"$env\"})", "legendFormat": "{{executor_host}} state"}, {"refId": "B", "expr": "max by (executor_host) (urnetwork_competition_executor_reconciliation_required{env=\"$env\"})", "legendFormat": "{{executor_host}} expired custody"}]
+    },
+    {
+      "id": 15, "type": "timeseries", "title": "executor physical admission observation",
+      "description": "Signed current physical custody, separate from database slot state and historical no-op admission. One is available, zero occupied, minus one unknown or older than 60 seconds. Current policy host membership is required. This is an observation, not a lease or permission to repeat a run.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 50},
+      "datasource": {"type": "prometheus", "uid": "warp-mimir"},
+      "fieldConfig": {"defaults": {"unit": "none", "min": -1, "max": 1, "color": {"mode": "thresholds"}, "mappings": [{"type": "value", "options": {"-1": {"color": "red", "index": 0, "text": "unknown or stale"}, "0": {"color": "orange", "index": 1, "text": "physical custody occupied"}, "1": {"color": "green", "index": 2, "text": "available observation"}}}], "thresholds": {"mode": "absolute", "steps": [{"color": "red", "value": null}, {"color": "orange", "value": 0}, {"color": "green", "value": 1}]}}, "overrides": []},
+      "targets": [{"refId": "A", "expr": "min by (executor_host) (((urnetwork_competition_executor_physical_available{env=\"$env\"} * ((time() - urnetwork_competition_executor_physical_observed_at_seconds{env=\"$env\"}) <= bool 60)) - ((time() - urnetwork_competition_executor_physical_observed_at_seconds{env=\"$env\"}) > bool 60)) and on (executor_host) urnetwork_competition_executor_noop_qualified{env=\"$env\"})", "legendFormat": "{{executor_host}}"}]
     }
   ]
 }

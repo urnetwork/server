@@ -17,7 +17,7 @@ import (
 func competitionDistributedMetricTestGauges() []*prometheus.GaugeVec {
 	return []*prometheus.GaugeVec{competitionExecutorBusy, competitionExecutorReconciliationRequired,
 		competitionExecutorHeartbeatAge, competitionExecutorDeadlineRemaining, competitionExecutorQualified,
-		competitionExecutorRemoteState}
+		competitionExecutorRemoteState, competitionExecutorPhysicalAvailable, competitionExecutorPhysicalObservedAt}
 }
 
 // A previous successful scrape leaves real series to be withdrawn by omission.

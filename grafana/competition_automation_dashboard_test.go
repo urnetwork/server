@@ -26,6 +26,7 @@ func TestCompetitionAutomationDashboardHasNoCandidateDisclosure(t *testing.T) {
 		"executor_slot_busy", "executor_noop_qualified", "executor_deadline_remaining_seconds",
 		"executor_heartbeat_age_seconds", "executor_transport_failures_total", "executor_remote_state",
 		"executor_reconciliation_required",
+		"executor_physical_available", "executor_physical_observed_at_seconds",
 	} {
 		if !strings.Contains(queries, "urnetwork_competition_"+metric) {
 			t.Errorf("missing automation metric %s", metric)
