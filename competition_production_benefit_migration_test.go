@@ -5,6 +5,8 @@ package server
 import (
 	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // A text change requires an explicit new version and qualification, not an
@@ -35,12 +37,18 @@ func TestCompetitionProductionBenefitMigrationIsAdditive(t *testing.T) {
 	}
 }
 
-// Runs the real PostgreSQL predicates for both unions and old/new requests in
-// the existing disposable fixture. No live database or provider is contacted.
+// Runs both unions and old/new requests in the existing private TestEnv
+// database. No Docker socket, host database or provider is contacted.
 func TestCompetitionProductionBenefitDatabaseRejectsUnboundReason(t *testing.T) {
-	assertions := strings.ReplaceAll(competitionProductionBenefitSqlAssertions, "@addendum_sha256@", CompetitionProductionBenefitAddendumSha256())
-	testCompetitionWinnerReviewDatabaseGuards(t,
-		competitionWinnerReviewMigration()+competitionWinnerReviewProviderMigration()+competitionSnowWinnerReviewMigration()+competitionSnowTwoMemberWinnerReviewMigration()+competitionProductionBenefitReviewMigration(), assertions)
+	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		assertions := strings.ReplaceAll(competitionProductionBenefitSqlAssertions, "@addendum_sha256@", CompetitionProductionBenefitAddendumSha256())
+		migration := competitionWinnerReviewMigration() + competitionWinnerReviewProviderMigration() + competitionSnowWinnerReviewMigration() + competitionSnowTwoMemberWinnerReviewMigration() + competitionProductionBenefitReviewMigration()
+		Db(t.Context(), func(conn PgConn) {
+			// The exact multi-statement fixture and SQL assertions execute on
+			// PostgreSQL, rather than through a Docker-command substitute.
+			RaisePgResult(conn.Exec(t.Context(), winnerReviewSqlFixture+migration+assertions, pgx.QueryExecModeSimpleProtocol))
+		}, OptReadWrite(), OptNoRetry())
+	})
 }
 
 const competitionProductionBenefitSqlAssertions = `
