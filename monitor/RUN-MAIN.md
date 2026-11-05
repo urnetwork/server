@@ -1721,6 +1721,30 @@ than synthesizing readiness. A direct test that happened to pass without this
 preflight remains diagnostic evidence, not a formal gate.
 For piped commands, preserve required stage failures with `pipefail` and the
 appropriate captured `PIPESTATUS`; `exec` on one pipeline stage is not enough.
+Capacity and source preflight failure must prevent the native controller from
+starting. A newline after a failed command is not a gate. Use an explicit
+conditional or `monitor/gate_capacity/guard.sh --preflight <argv...> --launch
+<unchanged-controller-argv...>`; retain the actual preflight exit and launch
+only once on success. Keep every existing source/input/fixture guard in the
+authoritative preflight, with failures propagated. Preserve failed owners and
+outputs; a new admission uses new owner/output names and cannot qualify an old
+attempt retrospectively.
+
+Capture accounting requires an explicit qualified capture ledger. Files named
+stdout.log or stderr.log inside checked-out source fixtures are source/work
+inputs, not capture authority. Prove roles from owned capture receipts or
+pinned source materialization; retain every byte in owned-work accounting.
+When global owned work G already includes current phase work P exactly once,
+reserve only max(0,L-P) for a proposed phase ceiling L, and separately refuse
+P>L. Unknown overlap/scope remains a STOP. Root must approve changed profiles
+prospectively from measured allocations and a fresh global/free/capture fit.
+
+The standalone `monitor/gate_capacity` command accepts bounded typed JSON and
+known explicit old-5gib/new-red-6gib phase profiles, retaining the 20GiB global
+and 80MiB capture ceilings of this selected profile. Its green result is only
+arithmetic admission: SHA bindings still require external source validation,
+and all native status, complete output, EOF, reader and exact cleanup gates
+remain required. Missing/ambiguous input or an unwritable result refuses launch.
 
 A separately compiled test binary runs from its package directory, matching
 Go's `runTestActor` (`cmd.Dir = a.Package.Dir`), even when compilation starts in
@@ -1760,6 +1784,17 @@ automatic retry, or grounds to split, skip or weaken the race gate.
 
 Size stdout and stderr capture limits separately. A declared 32 MiB combined
 allowance of 16 MiB per stream does not let stdout borrow unused stderr space.
+
+For resource capacity only, a bounded population of contained regular files
+with unknown capture roles may be conservatively charged in full as a capture
+debit upper bound and as owned work. Retain each path/stat byte debit, the whole
+ledger hash, and explicit UNKNOWN role count/bytes. Never drop unknown bytes or
+invent missing sidecars. Aliases, out-of-scope files or unbounded populations
+remain STOP conditions. A qualified resource ledger, including the legacy
+`qualified-capture-ledger` scope label, establishes byte-debit authority only;
+it does not establish event provenance, complete capture, source signal health
+or a passing failed attempt. Existing semantic evidence qualifications remain
+unknown until independently established.
 On 2026-10-31, a prior complete full-suite capture had 16,596,015 stdout bytes,
 near that stdout cap. A later attempt observed 16,777,387 bytes (16 MiB + 171),
 retained only 16 MiB and overflowed; the capture killed its known native group.

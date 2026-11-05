@@ -5466,6 +5466,44 @@ inventory host names and plain interface names do. Every tunable (cadence,
 sustain, the route adapter and its output bound) is a field of
 `ObserverRouteSettings`.
 
+When `StateDir` is configured, the same existing invocation also publishes a
+private immutable `observer-route/receipt-<sha256>.json` using the sampler's
+content-addressed, mode-0600 publication convention in a mode-0700 directory.
+Healthy findings remain suppressed from ordinary Alerts. The existing invocation
+witness's `run_return` record adds `observer_route_receipt_sha256` and
+`observer_route_receipt_status`, so a healthy cycle has an exact retained locator
+without interpreting `returned_nil` or a quiet Alert stream as conformance.
+No new lookup, cadence, watcher or remote contact is added.
+
+The receipt contains its own unique cycle, start/end clocks, source/run/invocation
+association, exact effective route-policy digest, hashed inventory slots and
+each slot's conforming/diverted/absent/unknown/excluded/disabled/not-observed
+outcome. The digest covers only the route contract, address mode, probe settings,
+environment and desired inventory/exclusion scope; credentials and other service
+configuration are not hashed. Raw policy, names, addresses, gateways, interfaces
+and command output are not serialized. Association is checked against the exact
+settings passed into that invocation and against the probe's unchanged policy.
+An unbound direct library call retains explicitly incomplete source association.
+These are same-process observation declarations, not physical-writer or VPN
+packet-delivery proofs.
+
+`complete` describes an authoritative complete observation, not healthy routes:
+an observed diverted or absent route can be complete. Missing/invalid contract,
+LAN mode, malformed address, zero eligible scope, exclusions/disabled targets,
+cancellation, policy/source mismatch and omitted targets cannot certify complete
+conformance. Cancellation and early returns still publish their incomplete
+cycle. `MaxReceiptBytes` defaults to 64 KiB and `MaxReceiptTargets` to 256; zero
+selects these defaults, negative values refuse publication. No oversized prefix
+is accepted. A publication failure retains concrete route findings and adds
+visibility; a missing/disabled/unavailable receipt never gives absence credit.
+Receipts are append-only immutable evidence; retention/removal remains explicit
+operator policy, as for sampler receipts. A source-qualified rollout and Low's
+deterministic normal/race gates are required before relying on this new surface.
+Completeness is assessed at the receipt's finished boundary; publication cannot
+retract an immutable observation when cancellation arrives later. Consumers must
+also join its exact invocation's terminal result and must not grant conformance
+or recovery from a canceled/deadline/context-ended return or a receipt alone.
+
 False-positive qualifier: a conforming route does not prove the tunnel
 delivers packets or that a remote host is up. False-negative qualifiers: a
 route sample cannot establish when the path broke or that every earlier
