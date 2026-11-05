@@ -75,7 +75,7 @@ func (self *Handler) Handle(parent context.Context, arguments []string, core io.
 		return UnknownDropped
 	}
 	// Manager+kernel proof precedes the own-PID-only move, then all crash
-	// classification. Its production manager backend is deliberately absent.
+	// classification. Native qualification and ordinary handoff remain gated.
 	placement, err := self.host.Place(ctx, policy)
 	if err != nil {
 		return UnknownDropped

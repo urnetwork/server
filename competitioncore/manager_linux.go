@@ -56,9 +56,21 @@ func verifyManager(parent context.Context, policy Policy, settings Settings, con
 	if err != nil {
 		return errors.New("private manager connection unavailable")
 	}
-	defer stream.Close()
-	stop := context.AfterFunc(ctx, func() { stream.Close() })
-	defer stop()
+	callbackDone := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(callbackDone)
+		stream.Close()
+	})
+	defer func() {
+		if stop() {
+			stream.Close()
+		} else {
+			// A false stop does not join an already-running callback. Its
+			// Close owns the stream until it returns; do not race it or
+			// publish completed proof/cleanup while it still owns work.
+			<-callbackDone
+		}
+	}()
 	deadline, ok := ctx.Deadline()
 	if !ok || !deadline.After(time.Now()) || stream.SetDeadline(deadline) != nil {
 		return errors.New("manager connection has no original finite I/O deadline")

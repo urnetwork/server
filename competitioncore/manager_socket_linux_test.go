@@ -147,9 +147,12 @@ func TestManagerCancellationClosesAndJoinsBlockedPrivateRead(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		stream.Close()
+		join, finish := context.WithTimeout(context.Background(), 2*settings.Manager.Timeout)
+		defer finish()
 		select {
 		case <-done:
-		case <-guard.Done():
+		case <-join.Done():
+			t.Error("private manager proof did not join during cleanup")
 		}
 	})
 	select {
@@ -166,5 +169,116 @@ func TestManagerCancellationClosesAndJoinsBlockedPrivateRead(t *testing.T) {
 		done <- err
 	case <-guard.Done():
 		t.Fatal("cancellation failed to close/join the blocked private read")
+	}
+}
+
+// The actual native socket is closed first, releasing recvmsg, while the test
+// deliberately withholds acknowledgment of the callback's Close return.
+type acknowledgedManagerClose struct {
+	*nativeManagerStream
+	stateLock              sync.Mutex
+	readStarted            chan struct{}
+	readReturned           chan struct{}
+	closeEntered           chan struct{}
+	allowCloseReturn       chan struct{}
+	readOnce, returnedOnce sync.Once
+	closes                 int
+	closeReturned          bool
+}
+
+// Only peer identity is a private seam; every socket read/close is native and
+// confined to the anonymous pair, never the real systemd connection.
+func (*acknowledgedManagerClose) Peer() (managerPeer, error) { return managerPeer{uid: 0, pid: 1}, nil }
+
+func (self *acknowledgedManagerClose) ReadMsg(content, control []byte) (int, int, int, error) {
+	self.readOnce.Do(func() { close(self.readStarted) })
+	n, oob, flags, err := self.nativeManagerStream.ReadMsg(content, control)
+	self.returnedOnce.Do(func() { close(self.readReturned) })
+	return n, oob, flags, err
+}
+
+// A duplicate deferred Close is observable even if a faulty proof return races
+// the test's final acknowledgment, so the regression needs no negative timer.
+func (self *acknowledgedManagerClose) Close() error {
+	self.stateLock.Lock()
+	self.closes++
+	first := self.closes == 1
+	self.stateLock.Unlock()
+	err := self.nativeManagerStream.Close()
+	if first {
+		close(self.closeEntered)
+		<-self.allowCloseReturn
+		self.stateLock.Lock()
+		self.closeReturned = true
+		self.stateLock.Unlock()
+	}
+	return err
+}
+
+// AfterFunc's callback must join, not merely start Close and release recvmsg.
+// The original implementation also performs a second concurrent/deferred Close
+// and deterministically fails the sole-owner assertion even under either race.
+func TestManagerCancellationJoinsAcknowledgedNativeCloseBeforeProofReturn(t *testing.T) {
+	policy, settings, _, pin := newTestManager(t)
+	native, _ := testManagerSocketPair(t)
+	stream := &acknowledgedManagerClose{nativeManagerStream: native, readStarted: make(chan struct{}), readReturned: make(chan struct{}), closeEntered: make(chan struct{}), allowCloseReturn: make(chan struct{})}
+	guard, stop := context.WithTimeout(t.Context(), 2*settings.Manager.Timeout)
+	defer stop()
+	ctx, cancel := context.WithCancel(guard)
+	defer cancel()
+	type result struct {
+		err          error
+		acknowledged bool
+		closes       int
+	}
+	done := make(chan result, 1)
+	go func() {
+		err := verifyManager(ctx, policy, settings, func(context.Context) (managerStream, error) { return stream, nil }, pin)
+		stream.stateLock.Lock()
+		completed := result{err: err, acknowledged: stream.closeReturned, closes: stream.closes}
+		stream.stateLock.Unlock()
+		done <- completed
+	}()
+	var acknowledge sync.Once
+	t.Cleanup(func() {
+		cancel()
+		acknowledge.Do(func() { close(stream.allowCloseReturn) })
+		native.Close()
+		join, finish := context.WithTimeout(context.Background(), 2*settings.Manager.Timeout)
+		defer finish()
+		select {
+		case <-done:
+		case <-join.Done():
+			t.Error("acknowledged manager callback did not join during cleanup")
+		}
+	})
+	select {
+	case <-stream.readStarted:
+	case <-guard.Done():
+		t.Fatal("native private read did not enter its explicit barrier")
+	}
+	cancel()
+	for _, event := range []<-chan struct{}{stream.closeEntered, stream.readReturned} {
+		select {
+		case <-event:
+		case <-guard.Done():
+			t.Fatal("cancellation did not close and interrupt the actual private socket read")
+		}
+	}
+	stream.stateLock.Lock()
+	pending := !stream.closeReturned
+	stream.stateLock.Unlock()
+	if !pending {
+		t.Fatal("Close-return acknowledgment barrier was bypassed")
+	}
+	acknowledge.Do(func() { close(stream.allowCloseReturn) })
+	select {
+	case completed := <-done:
+		if completed.err == nil || !completed.acknowledged || completed.closes != 1 {
+			t.Fatal("proof returned before cancellation Close finished or raced a duplicate close", completed)
+		}
+		done <- completed
+	case <-guard.Done():
+		t.Fatal("proof failed to join the acknowledged native cancellation Close")
 	}
 }
