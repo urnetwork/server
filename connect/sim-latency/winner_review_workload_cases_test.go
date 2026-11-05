@@ -79,10 +79,8 @@ func TestWinnerWorkloadReviewQualificationCasesKeepLabelsOutOfInput(t *testing.T
 		if err != nil || !bytes.Contains(input, []byte(`"workload_review"`)) || !bytes.Contains(input, []byte(`"instrument"`)) {
 			t.Fatal("qualification case lost required evidence", fixture.Name, err)
 		}
-		for _, label := range []string{fixture.Name, "expected_decision", "expected_workload_disposition"} {
-			if bytes.Contains(input, []byte(label)) {
-				t.Fatal("qualification answer label leaked into provider input", label)
-			}
+		if key, err := winnerQualificationAnswerKey(input); err != nil || key != "" || bytes.Contains(input, []byte(fixture.Name)) {
+			t.Fatal("qualification answer label leaked into provider input", key, err)
 		}
 		judgment.Decision = fixture.ExpectedDecision
 		judgment.WorkloadPreservation.Disposition = fixture.ExpectedWorkloadDisposition
@@ -96,6 +94,57 @@ func TestWinnerWorkloadReviewQualificationCasesKeepLabelsOutOfInput(t *testing.T
 		}
 		if err := validateWinnerSnowMember(judgment, request); err != nil {
 			t.Fatal("supported synthetic disposition was not representable", fixture.Name, err)
+		}
+	}
+}
+
+// Exact decoded keys distinguish external answer labels from authenticated
+// expected_decision_sha256 identities, including inside nested array objects.
+func winnerQualificationAnswerKey(input []byte) (string, error) {
+	var value any
+	if err := json.Unmarshal(input, &value); err != nil {
+		return "", err
+	}
+	var find func(any) string
+	find = func(value any) string {
+		switch value := value.(type) {
+		case map[string]any:
+			for key, child := range value {
+				if key == "expected_decision" || key == "expected_workload_disposition" {
+					return key
+				}
+				if found := find(child); found != "" {
+					return found
+				}
+			}
+		case []any:
+			for _, child := range value {
+				if found := find(child); found != "" {
+					return found
+				}
+			}
+		}
+		return ""
+	}
+	return find(value), nil
+}
+
+// The legitimate authenticated identity is not an answer label, while actual
+// keys remain forbidden at every object/array depth and after JSON unescaping.
+func TestWinnerWorkloadReviewQualificationAnswerKeysAreStructural(t *testing.T) {
+	for _, fixture := range []struct {
+		input string
+		want  string
+	}{
+		{input: `{"context":{"template":{"expected_decision_sha256":"synthetic-digest"}}}`},
+		{input: `{"explanation":"expected_decision is a label name, not a JSON key here"}`},
+		{input: `{"expected_decision":"approve"}`, want: "expected_decision"},
+		{input: `{"context":{"labels":{"expected_workload_disposition":"pass"}}}`, want: "expected_workload_disposition"},
+		{input: `{"context":[null,[{"expected_decision":"approve"}]]}`, want: "expected_decision"},
+		{input: `[{"expected_\u0064ecision":"approve"}]`, want: "expected_decision"},
+	} {
+		if got, err := winnerQualificationAnswerKey([]byte(fixture.input)); err != nil || got != fixture.want {
+			t.Fatalf("answer-key check for %s: got %q, want %q: %v", fixture.input, got, fixture.want, err)
 		}
 	}
 }
