@@ -22,7 +22,7 @@ func managementSshTestProjection(config Config, policy ManagementResourcePolicy,
 	}
 	for key, value := range map[string]string{
 		"Id": plan.UnitName, "LoadState": "loaded", "ActiveState": "active", "SubState": "running", "Transient": "yes", "Slice": managementPrivateSliceName,
-		// Read-only Goofe PID1 observation of an existing owned test unit:
+		// Read-only PID1 observation of an existing owned test unit:
 		// Transient=yes, FragmentPath=/run/systemd/transient/<exact unit>.
 		"FragmentPath": "/run/systemd/transient/" + plan.UnitName,
 		"ControlGroup": managementPrivateCgroupPath + "/" + plan.UnitName, "User": "root", "Group": "root", "Type": "exec", "Restart": "no", "RemainAfterExit": "yes",
