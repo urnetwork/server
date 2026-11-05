@@ -10,6 +10,23 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Inherited custody predicates share catalog CTEs with the native emitter.
+// Reuse that exact prefix; a naked SELECT is not the production query shape.
+func competitionIntakeFirstCatalogTestQuery(t testing.TB) string {
+	t.Helper()
+	return snMainnetMigrationProbePrefix(t) + "SELECT " + competitionIntakeFirstArtifactQuery()
+}
+
+// Removing the prefix deterministically loses index_artifact before a fault
+// can be tested, even when the complete deployed schema is healthy.
+func TestMigrationsCompetitionIntakeFirstCatalogQueryRetainsNativePrefix(t *testing.T) {
+	query := competitionIntakeFirstCatalogTestQuery(t)
+	if !strings.HasPrefix(strings.TrimSpace(query), "WITH ") || !strings.Contains(query, "index_artifact AS (") ||
+		!strings.HasSuffix(query, "SELECT "+competitionIntakeFirstArtifactQuery()) {
+		t.Fatal("intake catalog fixture detached its inherited native CTE authority")
+	}
+}
+
 // No predecessor-wide waiver is manufactured. Its full query, changed only at
 // the exact replaced body, remains part of the new successor artifact.
 func TestMigrationsCompetitionIntakeFirstCarriesExactPredecessorCustody(t *testing.T) {
@@ -56,7 +73,7 @@ func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 		if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, server.CompetitionIntakeFirstMigrationSql())) }, server.OptReadWrite())
 		}
-		query := "SELECT " + competitionIntakeFirstArtifactQuery()
+		query := competitionIntakeFirstCatalogTestQuery(tb)
 		server.Db(ctx, func(conn server.PgConn) {
 			var healthy bool
 			if err := conn.QueryRow(ctx, query).Scan(&healthy); err != nil || !healthy {
