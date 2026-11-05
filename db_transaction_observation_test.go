@@ -48,6 +48,8 @@ func TestDbTxObservationNilAndSnapshotOwnership(t *testing.T) {
 	absent.commitReturned(ctx, true)
 	absent.rollbackEntered(ctx)
 	absent.rollbackReturned(ctx, true)
+	absent.releaseEntered()
+	absent.releaseReturned(DbTxReleaseIdle, nil)
 	if absent.Snapshot() != (DbTxObservationSnapshot{}) {
 		t.Fatal("nil transaction observation invented evidence")
 	}
@@ -132,6 +134,7 @@ func TestDbTxObservationRetainsAllInnerAttemptsAndWireOrder(t *testing.T) {
 		{name: "body panic", want: DbTxObservationSnapshot{AcquireAttempts: 1, AcquireSucceeded: 1, BeginAttempts: 1, BeginSucceeded: 1, CallbackEntered: 1, RollbackAttempts: 1, RollbackAcknowledged: 1}, queries: []string{"begin", "SELECT 1", "rollback"}},
 		{name: "lost commit", want: DbTxObservationSnapshot{AcquireAttempts: 1, AcquireSucceeded: 1, BeginAttempts: 1, BeginSucceeded: 1, CallbackEntered: 1, CommitAttempts: 1}, queries: []string{"begin", "SELECT 1", "commit"}},
 	} {
+		check.want.ReleaseAttempts, check.want.ReleaseReturned = check.want.AcquireSucceeded, check.want.AcquireSucceeded
 		failed := false
 		fixture, pool := newPgPoolWireFixture(t, func(_ int, query string) bool { return check.name != "lost commit" || query != "commit" }, neverPingTestPool,
 			func(fixture *pgPoolWireFixture, _ *pgxpool.Config) {
@@ -169,6 +172,10 @@ func TestDbTxObservationRetainsAllInnerAttemptsAndWireOrder(t *testing.T) {
 			t.Fatal("cleanup changed the last business phase", check.name, phase.Phase())
 		}
 		snapshot.LastBegin, snapshot.LastCommit, snapshot.LastRollback = DbTxBoundaryObservation{}, DbTxBoundaryObservation{}, DbTxBoundaryObservation{}
+		if snapshot.LastRelease.Disposition != DbTxReleaseIdle && snapshot.LastRelease.Disposition != DbTxReleaseDestroyTransferred {
+			t.Fatal("returned wire release lost its concrete owner", check.name, snapshot.LastRelease)
+		}
+		snapshot.LastRelease = DbTxReleaseObservation{}
 		if snapshot != check.want {
 			t.Fatalf("%s census got %+v, want %+v", check.name, snapshot, check.want)
 		}
@@ -227,7 +234,11 @@ func TestDbTxObservationRefusedBeginDoesNotInventCallback(t *testing.T) {
 		t.Fatal("refused BEGIN lost its returned boundary", recovered, snapshot)
 	}
 	snapshot.LastBegin = DbTxBoundaryObservation{}
-	if snapshot != (DbTxObservationSnapshot{AcquireAttempts: 1, AcquireSucceeded: 1, BeginAttempts: 1}) {
+	if snapshot.LastRelease.Disposition != DbTxReleaseDestroyTransferred {
+		t.Fatal("failed BEGIN did not transfer the closed connection", snapshot)
+	}
+	snapshot.LastRelease = DbTxReleaseObservation{}
+	if snapshot != (DbTxObservationSnapshot{AcquireAttempts: 1, AcquireSucceeded: 1, BeginAttempts: 1, ReleaseAttempts: 1, ReleaseReturned: 1}) {
 		t.Fatal("refused BEGIN fabricated an admitted business transaction", snapshot)
 	}
 }

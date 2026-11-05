@@ -54,15 +54,11 @@ const (
 	testSmallContractByteCount = 4 * testMib
 )
 
-// withSmallContracts lowers the controller's granted contract size cap and
-// returns a restore function. The tests in this package run sequentially, so
-// mutating the package var is safe.
+// withSmallContracts lowers the controller's contract ceiling, which every
+// payer is granted up to, and returns a restore function. The tests in this
+// package run sequentially, so changing the ceiling is safe.
 func withSmallContracts() (restore func()) {
-	previousMax := controller.MaxContractTransferByteCount
-	controller.MaxContractTransferByteCount = testSmallContractByteCount
-	return func() {
-		controller.MaxContractTransferByteCount = previousMax
-	}
+	return controller.Testing_SetMaxContractTransferByteCount(testSmallContractByteCount)
 }
 
 // ---- local target server -----------------------------------------------
@@ -395,7 +391,10 @@ func settleAllEscrowedContracts(t testing.TB, ctx context.Context, payerNetworkI
 // every escrowed byte is either swept as payout or returned to the balance, and
 // the redis net escrow mirror is exactly zero (any residue is the
 // balance-lockup bug class where networks permanently lose apparent balance and
-// can no longer create contracts).
+// can no longer create contracts). The proxy device network holds only a
+// redeemed data code, which does not make it Pro, and it pays for both
+// directions: every contract it pays for must be granted at most the ceiling
+// every payer gets.
 func TestProxyContractChurnLoad(t *testing.T) {
 	if testing.Short() {
 		return
@@ -403,27 +402,6 @@ func TestProxyContractChurnLoad(t *testing.T) {
 	restore := withSmallContracts()
 	defer restore()
 
-	testProxyContractChurnLoad(t, testSmallContractByteCount)
-}
-
-// The same churn load with the contract size capped by the free tier's pro.yml
-// cap (free.max_contract_transfer_byte_count) instead of the controller's
-// maximum. The proxy device network holds only a redeemed data code, which does
-// not make it Pro, and it pays for both directions. Every contract it pays for
-// must be granted at most the cap, and the ledger must still reconcile exactly.
-func TestProxyContractChurnLoadFreePayerCap(t *testing.T) {
-	if testing.Short() {
-		return
-	}
-	restore := model.Testing_SetMaxContractTransferByteCount(testSmallContractByteCount, 0)
-	defer restore()
-
-	testProxyContractChurnLoad(t, testSmallContractByteCount)
-}
-
-// Runs the churn load and the ledger reconciliation with granted contracts
-// limited to maxContractByteCount.
-func testProxyContractChurnLoad(t *testing.T, maxContractByteCount model.ByteCount) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -528,8 +506,8 @@ func testProxyContractChurnLoad(t *testing.T, maxContractByteCount model.ByteCou
 			})
 			return maxByteCount
 		}
-		if maxByteCount := maxEscrowedContractByteCount(h.pdNetworkId); maxContractByteCount < maxByteCount {
-			t.Fatalf("a contract was granted %d bytes, above the %d byte cap", maxByteCount, maxContractByteCount)
+		if maxByteCount := maxEscrowedContractByteCount(h.pdNetworkId); testSmallContractByteCount < maxByteCount {
+			t.Fatalf("a contract was granted %d bytes, above the %d byte ceiling", maxByteCount, testSmallContractByteCount)
 		}
 		// the cap (4MiB) must have forced real churn: ~98MiB of payload cannot
 		// fit in a handful of contracts

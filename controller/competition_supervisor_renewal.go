@@ -152,9 +152,10 @@ func retryCompetitionSupervisorRenewal(ctx context.Context, leaseExpiresAt time.
 	return retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, settings, operation, competitionSupervisorUnadmittedDeadline)
 }
 
-// Each authority owner supplies its exact completed no-admission proof. The
-// original lock allowance, shared call cap and confirmed expiry stay unchanged.
-func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, unadmittedDeadline func(error) bool) error {
+// Each owner supplies its exact completed-deadline predicate. Supervisor/host
+// predicates remain acquisition-only; the job heartbeat owns its separate
+// closed no-COMMIT proof. Lock allowance, call cap and expiry remain unchanged.
+func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, completedDeadline func(error) bool) error {
 	defaults := defaultCompetitionSupervisorRenewalSettings()
 	if settings.LockRetry.Now == nil {
 		settings.LockRetry.Now = defaults.LockRetry.Now
@@ -190,7 +191,7 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 		lockCtx, lockCancel = context.WithDeadline(totalCtx, startedAt.Add(lockDeadline.Sub(now)))
 	}
 	defer lockCancel()
-	acquireRecovery := false
+	deadlineRecovery := false
 	var lastError error
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -203,27 +204,27 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 		if err := totalCtx.Err(); err != nil {
 			return err
 		}
-		if !acquireRecovery && lockCtx.Err() != nil {
+		if !deadlineRecovery && lockCtx.Err() != nil {
 			if lastError == nil {
 				return context.DeadlineExceeded
 			}
 			return lastError
 		}
-		if !totalDeadline.IsZero() && !now.Before(totalDeadline) || !acquireRecovery && settings.LockRetry.Timeout > 0 && !lockDeadline.IsZero() && !now.Before(lockDeadline) {
+		if !totalDeadline.IsZero() && !now.Before(totalDeadline) || !deadlineRecovery && settings.LockRetry.Timeout > 0 && !lockDeadline.IsZero() && !now.Before(lockDeadline) {
 			if lastError == nil {
 				return context.DeadlineExceeded
 			}
 			return lastError
 		}
 		attemptDeadline := totalDeadline
-		if !acquireRecovery && settings.LockRetry.Timeout > 0 && (attemptDeadline.IsZero() || lockDeadline.Before(attemptDeadline)) {
+		if !deadlineRecovery && settings.LockRetry.Timeout > 0 && (attemptDeadline.IsZero() || lockDeadline.Before(attemptDeadline)) {
 			attemptDeadline = lockDeadline
 		}
 		if settings.AttemptTimeout > 0 && (attemptDeadline.IsZero() || now.Add(settings.AttemptTimeout).Before(attemptDeadline)) {
 			attemptDeadline = now.Add(settings.AttemptTimeout)
 		}
 		attemptParent := lockCtx
-		if acquireRecovery {
+		if deadlineRecovery {
 			attemptParent = totalCtx
 		}
 		attemptCtx, attemptCancel := context.WithCancel(attemptParent)
@@ -275,8 +276,8 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 			return nil
 		}
 		lockRetry := attemptError == nil && competitionSupervisorLockTimeout(err)
-		acquireRetry := attemptError == context.DeadlineExceeded && unadmittedDeadline != nil && unadmittedDeadline(err)
-		if !lockRetry && !acquireRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
+		deadlineRetry := attemptError == context.DeadlineExceeded && completedDeadline != nil && completedDeadline(err)
+		if !lockRetry && !deadlineRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
 			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= settings.LockRetry.MaximumAttempts {
 			return err
 		}
@@ -286,14 +287,14 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 		if totalCtx.Err() != nil || !now.Before(totalDeadline) || lockRetry && !now.Before(lockDeadline) {
 			return err
 		}
-		lastError, acquireRecovery = err, acquireRetry
+		lastError, deadlineRecovery = err, deadlineRetry
 		waitDeadline := totalDeadline
-		if !acquireRecovery && lockDeadline.Before(waitDeadline) {
+		if !deadlineRecovery && lockDeadline.Before(waitDeadline) {
 			waitDeadline = lockDeadline
 		}
 		delay := min(settings.LockRetry.Interval, waitDeadline.Sub(now))
 		waitCtx := totalCtx
-		if !acquireRecovery {
+		if !deadlineRecovery {
 			waitCtx = lockCtx
 		}
 		if err := settings.LockRetry.Wait(waitCtx, delay); err != nil {

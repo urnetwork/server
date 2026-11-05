@@ -19,8 +19,9 @@ import (
 type competitionHeartbeatSettings struct {
 	HandBackTimeout time.Duration
 	LeaseRetry      competitionLeaseRetrySettings
-	// Only wholly unadmitted returned acquisition deadlines can use this outer
-	// allowance. It never enlarges lock retries, the lease or evaluation clock.
+	// The existing outer allowance admits acquisition-only host failures and
+	// the job's separately proved no-COMMIT slot-update failure. It never
+	// enlarges lock retries, lease duration or the evaluation clock.
 	AcquireRetry competitionHeartbeatAcquireRetrySettings
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings

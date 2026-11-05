@@ -836,6 +836,10 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		lifecycle := pool.observeBorrow(pgPool)
 		physical := conn.Conn().PgConn()
 		cleanup := physical.CleanupDone()
+		releasePolicyKnown := false
+		if txObservation != nil {
+			releasePolicyKnown = dbPoolReleasePolicyKnown(pgPool.Config())
+		}
 
 		func() {
 			// Cleanup must observe the classification below. Register it first so
@@ -847,6 +851,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 				discard := connErr != nil && pgConnectionErrorDiscards(connErr, physical)
 				needsCleanup := discard || physical.IsClosed() || physical.IsBusy() || physical.TxStatus() != 'I'
 				lifecycle.beginRelease()
+				txObservation.releaseEntered()
 				if discard {
 					discardPgConnection(ctx, conn)
 					conn = nil
@@ -854,6 +859,14 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 					conn.Release()
 				}
 				lifecycle.finishRelease(cleanup, needsCleanup)
+				disposition := DbTxReleaseUnknown
+				if releasePolicyKnown {
+					disposition = DbTxReleaseIdle
+					if needsCleanup {
+						disposition = DbTxReleaseDestroyTransferred
+					}
+				}
+				txObservation.releaseReturned(disposition, cleanup)
 			}()
 			defer func() {
 				if err := recover(); err != nil {
