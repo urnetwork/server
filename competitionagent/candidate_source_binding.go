@@ -371,6 +371,7 @@ func (self *DockerProxy) readCandidateSourceIdentity(source string) (*candidateS
 	if decodeStrict(content, identity) != nil || identity.Schema != 1 || identity.Kind != "sim-latency-evaluation-source" || !identity.Temporary ||
 		identity.BaseImageId != self.plan.BaseImageDigest || !candidateSourceCommitPattern.MatchString(identity.BaseSha) ||
 		!digestPattern.MatchString(identity.CandidatePatchSha256) || !digestPattern.MatchString(identity.SourceLockSha256) ||
+		identity.SourceEpoch < 0 || identity.SourceEpoch > 6 || !identity.Staging && identity.Branch != "sim-latency" || identity.Staging && identity.Branch != "sim-latency-staging" ||
 		identity.CandidatePathBase != "" && identity.CandidatePathBase != "mono_root_v1" {
 		return nil, "", errors.New("candidate source identity is not the exact temporary post-patch class")
 	}

@@ -8,6 +8,9 @@ package competitionagent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -216,6 +219,68 @@ func TestTrackedBuilderAdmissionClosesBeforeFinalAssemblyAndRetirement(t *testin
 		if (err == nil) != (phase == "open") {
 			t.Fatal("tracked compiler admission ignored its original phase owner", phase, err)
 		}
+	}
+}
+
+// The final source hook alone is insufficient proof: both real stage schemas
+// must pass the common profile/resource/bind gate before one daemon CREATE.
+func TestTrackedBuilderCompleteCreateGateAcceptsBothIsolatedStages(t *testing.T) {
+	for _, stage := range []string{"check", "compile"} {
+		fixture := newCandidateSourceTest(t)
+		resource := testRunResourceIdentity()
+		policy, err := newBuildRetirementPolicy(runSliceResources{ResourcePolicySha256: fixture.fixture.plan.ResourcePolicySha256, Identity: resource,
+			BuildTasksMaximum: resource.BuildPidsLimit, CpuPeriodMicros: 100000}, fixture.fixture.plan.BuildCgroupName, int64(os.Getpagesize()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.fixture.proxy.plan.BuildRetirement = policy
+		reads, creates := fixture.daemon(t, nil)
+		var body []byte
+		if err := fixture.trackedBuild(t, stage, func(object map[string]json.RawMessage, host *dockerPolicyHostConfig) {
+			host.Memory, host.MemorySwap, host.CpusetCpus = resource.BuildMemoryLimitBytes, resource.BuildMemoryLimitBytes, fixture.fixture.plan.CpuSet
+			host.PidsLimit = &resource.BuildPidsLimit
+			host.Tmpfs = map[string]string{"/work": "rw,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=" + resource.BuildWorkLimit}
+			object["HostConfig"], _ = json.Marshal(host)
+			body, _ = json.Marshal(object)
+		}); err != nil {
+			t.Fatal("isolated stage did not reach composed common admission", stage, err)
+		}
+		response := httptest.NewRecorder()
+		fixture.fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost, "http://worker/v1.56/containers/create", bytes.NewReader(body)))
+		if response.Code != http.StatusCreated || creates.Load() != 1 || reads.Load() != 0 {
+			t.Fatal("complete tracked CREATE gate rejected a frozen isolated stage", stage, response.Code, response.Body.String())
+		}
+	}
+}
+
+// The common finite bind grammar deliberately knows both cache paths, but its
+// role-specific composition still refuses cross-stage cache reuse before issue.
+func TestTrackedBuilderCompleteCreateGateRejectsCrossStageCache(t *testing.T) {
+	fixture := newCandidateSourceTest(t)
+	_, creates := fixture.daemon(t, nil)
+	var body []byte
+	if err := fixture.trackedBuild(t, "compile", func(object map[string]json.RawMessage, host *dockerPolicyHostConfig) {
+		object["HostConfig"], _ = json.Marshal(host)
+		body, _ = json.Marshal(object)
+	}); err != nil {
+		t.Fatal("positive compile setup did not bind its complete stage", err)
+	}
+	var object map[string]any
+	if err := json.Unmarshal(body, &object); err != nil {
+		t.Fatal(err)
+	}
+	host := object["HostConfig"].(map[string]any)
+	binds := host["Binds"].([]any)
+	binds[1] = strings.Replace(binds[1].(string), "/compile-cache:", "/check-cache:", 1)
+	dockerPolicyTestDirectory(t, filepath.Join(fixture.fixture.plan.ContextRoot, ".evidence-runtime", "tracked-build", "check-cache"))
+	body, err := json.Marshal(object)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	fixture.fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost, "http://worker/v1.56/containers/create", bytes.NewReader(body)))
+	if response.Code != http.StatusForbidden || creates.Load() != 0 {
+		t.Fatal("cross-stage cache reuse reached upstream CREATE", response.Code)
 	}
 }
 
