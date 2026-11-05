@@ -34,6 +34,14 @@ agent journals, public client sockets and private control sockets do not. See
 private-engine/README.md for the inert quota/namespace provisioning inputs.
 No unmounted-root fallback or user-daemon resource sharing is permitted.
 
+Set the private boundary's explicit management_cpuset and every private unit's
+AllowedCPUs from the unchanged pinned resource helper. Manager metadata alone
+is insufficient: live daemon/keeper/shim membership, configured/effective cgroup
+CPU sets and process affinity are rechecked through held kernel descriptors.
+Do not impose inherited per-thread CPUAffinity on the private daemons: newly
+created workload children must transition into their disjoint evaluation sets.
+Native qualification must prove both the actual workload and management sets.
+
 The base and work parents stay root-owned; use scoped worker traverse ACLs,
 including the trusted operator-owned home ancestor, not broad 0711 permissions
 or a home-directory chown. Each fresh run/source checkout begins private 0700.

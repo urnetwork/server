@@ -66,6 +66,8 @@ func DefaultRuntimeResourceBoundarySettings() RuntimeResourceBoundarySettings {
 // The protected manifest pins a separate engine, all of its writable roots and
 // its host-id allocation. Container identity still requires a native uid_map
 // and gid_map probe before handing off output; this document cannot prove that.
+// Its management set must match the pinned resource helper; daemon cgroups
+// restrict all threads without imposing inherited per-task affinity.
 type RuntimeResourceBoundary struct {
 	Schema                  int      `json:"schema"`
 	BaseDirectory           string   `json:"base_directory"`
@@ -88,6 +90,7 @@ type RuntimeResourceBoundary struct {
 	ContainerIdMapLength    uint32   `json:"container_id_map_length"`
 	RuntimeName             string   `json:"runtime_name"`
 	RuntimeArguments        []string `json:"runtime_arguments"`
+	ManagementCpuSet        string   `json:"management_cpuset"`
 	Dockerd                 Pin      `json:"dockerd"`
 	Containerd              Pin      `json:"containerd"`
 	ContainerdVersion       string   `json:"containerd_version"`
@@ -179,7 +182,7 @@ const runtimeBoundaryEngineUnitName = "urnetwork-private-engine.service"
 const runtimeBoundaryContainerdUnitName = "urnetwork-private-containerd.service"
 const runtimeBoundaryNetworkUnitName = "urnetwork-private-engine-network.service"
 const runtimeBoundaryNsfs = 0x6e736673
-const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit"
+const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs"
 
 var runtimeBoundaryBridgeNamePattern = regexp.MustCompile(`^unev-[0-9a-f]{10}$`)
 var runtimeBoundaryVethNamePattern = regexp.MustCompile(`^veth[0-9a-f]+$`)
@@ -311,6 +314,9 @@ func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error 
 	}
 	if self.RuntimeName != "runc" || self.RuntimeArguments == nil || len(self.RuntimeArguments) != 0 {
 		return errors.New("private engine changed the explicitly qualified stock runc profile")
+	}
+	if _, err := dockerPolicyCpuSet(self.ManagementCpuSet, DefaultDockerProxySettings().MaximumCpuIndex); err != nil {
+		return errors.New("private engine has no explicit bounded management CPU set")
 	}
 	if _, err := strconv.ParseUint(strings.TrimPrefix(self.BlockDevice, "/dev/loop"), 10, 32); err != nil {
 		return errors.New("private engine loop-device number exceeds the kernel identity range")
@@ -1259,6 +1265,9 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 		!network && (properties["SubState"] != "running" || properties["RemainAfterExit"] != "no") {
 		return result, errors.New("private unit changed its protected namespace or lifetime policy")
 	}
+	if err := validateRuntimeBoundaryManagementManager(properties["AllowedCPUs"], boundary); err != nil {
+		return result, err
+	}
 	contains := func(key, required string) bool {
 		for _, value := range strings.Fields(properties[key]) {
 			if value == required {
@@ -1354,7 +1363,7 @@ func runtimeBoundaryProcessStart(content []byte) (uint64, error) {
 
 // A participant must remain in the same unit invocation and descriptor-backed
 // network namespace while its native process birth is sampled.
-func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, settings RuntimeResourceBoundarySettings) (runtimeBoundaryUnit, error) {
+func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings) (runtimeBoundaryUnit, error) {
 	proc := "/proc/" + strconv.Itoa(unit.Pid)
 	before, err := readBounded(filepath.Join(proc, "stat"), settings.DocumentBytes)
 	if err != nil {
@@ -1370,6 +1379,9 @@ func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, settings RuntimeResour
 	}
 	_ = file.Close()
 	unit.Namespace = identity
+	if err := verifyRuntimeBoundaryManagement(unit, boundary, settings); err != nil {
+		return unit, err
+	}
 	after, err := readBounded(filepath.Join(proc, "stat"), settings.DocumentBytes)
 	if err != nil {
 		return unit, err
@@ -1449,7 +1461,7 @@ func (runtimeBoundaryNativeHost) Namespace(ctx context.Context, boundary Runtime
 			return nil, err
 		}
 		if unit.Pid != 0 {
-			unit, err = runtimeBoundaryParticipant(unit, settings)
+			unit, err = runtimeBoundaryParticipant(unit, boundary, settings)
 			if err != nil {
 				return nil, err
 			}
@@ -1509,7 +1521,7 @@ func (self *runtimeBoundaryNativeNamespace) Peer(pid int, executable Pin) error 
 	if expected.Pid != pid {
 		return errors.New("private socket peer is not the captured service process")
 	}
-	current, err := runtimeBoundaryParticipant(expected, self.settings)
+	current, err := runtimeBoundaryParticipant(expected, self.boundary, self.settings)
 	if err != nil || current.ProcessStart != expected.ProcessStart || current.Namespace != self.identity {
 		return errors.New("private socket peer changed its process or namespace generation")
 	}
@@ -1543,7 +1555,7 @@ func (self *runtimeBoundaryNativeNamespace) Recheck(ctx context.Context) error {
 			return errors.New("private namespace unit restarted or changed invocation")
 		}
 		if unit.Pid != 0 {
-			unit, err = runtimeBoundaryParticipant(unit, self.settings)
+			unit, err = runtimeBoundaryParticipant(unit, self.boundary, self.settings)
 			if err != nil || unit.ProcessStart != expected.ProcessStart {
 				return errors.New("private namespace process generation changed")
 			}
@@ -1613,6 +1625,10 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if err != nil {
 			return err
 		}
+		participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Name: unit.Name, ControlGroup: unit.ControlGroup, Pid: pid}, self.boundary, self.settings)
+		if err != nil {
+			return errors.New("private containerd helper escaped its management CPU role")
+		}
 		if target == self.boundary.Runc.Path {
 			continue
 		}
@@ -1623,8 +1639,7 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if err != nil || validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
 			return errors.New("managed containerd shim arguments escaped its private runtime")
 		}
-		participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Pid: pid}, self.settings)
-		if err != nil || participant.Namespace != self.identity {
+		if participant.Namespace != self.identity {
 			return errors.New("managed containerd shim escaped its private namespace")
 		}
 		if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {

@@ -158,7 +158,7 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 		DockerDataRoot: filepath.Join(candidate, "docker"), ContainerdRoot: filepath.Join(candidate, "containerd"), EngineExecRoot: filepath.Join(candidate, "exec"),
 		WorkRoot: filepath.Join(candidate, "jobs"), ScratchRoot: filepath.Join(candidate, "scratch"),
 		UserNamespace: "synthetic_evaluation", ContainerRootUid: 200000, ContainerRootGid: 300000, ContainerIdMapLength: 65536,
-		RuntimeName: "runc", RuntimeArguments: []string{}}
+		RuntimeName: "runc", RuntimeArguments: []string{}, ManagementCpuSet: "2,4"}
 	boundary.ContainerdVersion, boundary.ContainerdSourceCommit = "2.2.1", strings.Repeat("c", 40)
 	executable := func(name string) Pin {
 		return Pin{Path: "/opt/synthetic-private-engine/bin/" + name, Sha256: strings.Repeat("a", 64)}
@@ -708,6 +708,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		"CONFIG_DIRECTORY": filepath.Dir(boundary.EngineConfig.Path), "CONTAINER_LOG_MAXIMUM_SIZE": fixture.settings.ContainerLogMaximumSize,
 		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
 		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
+		"MANAGEMENT_CPUSET": boundary.ManagementCpuSet,
 	}
 	unresolved := regexp.MustCompile(`@[A-Z0-9_]+@`)
 	render := func(name string) []byte {
@@ -742,6 +743,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
 		unit := string(render(name))
 		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
+			"AllowedCPUs=" + boundary.ManagementCpuSet,
 			"PrivateNetwork=yes", "BindsTo=" + runtimeBoundaryKeeperUnitName, "JoinsNamespaceOf=" + runtimeBoundaryKeeperUnitName,
 			"BindPaths=" + boundary.EngineExecRoot + "/containerd-sockets:/run/containerd",
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
@@ -754,9 +756,11 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		}
 	}
 	_ = render("candidate.mount.in")
-	_ = render("urnetwork-private-engine-network.service.in")
+	if !strings.Contains(string(render("urnetwork-private-engine-network.service.in")), "AllowedCPUs="+boundary.ManagementCpuSet) {
+		t.Fatal("network policy helper lost the management processor boundary")
+	}
 	keeper := string(render(runtimeBoundaryKeeperUnitName + ".in"))
-	for _, required := range []string{"PrivateNetwork=yes", "ExecStart=" + boundary.NamespaceKeeper.Path + " infinity", "Restart=no", "KillMode=control-group"} {
+	for _, required := range []string{"PrivateNetwork=yes", "ExecStart=" + boundary.NamespaceKeeper.Path + " infinity", "Restart=no", "KillMode=control-group", "AllowedCPUs=" + boundary.ManagementCpuSet} {
 		if !strings.Contains(keeper, required) {
 			t.Fatal("keeper template lost its stable private namespace lifetime")
 		}
@@ -814,7 +818,8 @@ func runtimeBoundaryTestUnitProperties(boundary RuntimeResourceBoundary, pin Pin
 		"MainPID": "101", "InvocationID": strings.Repeat("a", 32), "ExecMainStartTimestampMonotonic": "123",
 		"ControlGroup": "/system.slice/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
 		"Restart": "no", "KillMode": "control-group", "RemainAfterExit": "no", "JoinsNamespaceOf": runtimeBoundaryKeeperUnitName,
-		"Requires": runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
+		"AllowedCPUs": strings.ReplaceAll(boundary.ManagementCpuSet, ",", " "),
+		"Requires":    runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
 	if name == runtimeBoundaryKeeperUnitName {
 		properties["JoinsNamespaceOf"] = runtimeBoundaryEngineUnitName + " " + runtimeBoundaryContainerdUnitName + " " + runtimeBoundaryNetworkUnitName
 	}

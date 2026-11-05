@@ -93,6 +93,11 @@ func (self *Agent) prepareCleanupPlan(ctx context.Context, manifest StartManifes
 	if err != nil {
 		return nil, err
 	}
+	if boundary != nil {
+		if err := validateRuntimeBoundaryManagementIdentity(*boundary, resource); err != nil {
+			return nil, err
+		}
+	}
 	plan.ManagementCpuSet = resource.ManagementCpuSet
 	plan.SliceResources = &runSliceResources{ResourcePolicySha256: self.config.DockerRole.ResourcePolicy.Sha256, Identity: resource,
 		BuildTasksMaximum: self.settings.BuildTasksMaximum, CpuPeriodMicros: self.settings.ContainmentCpuPeriodMicros}

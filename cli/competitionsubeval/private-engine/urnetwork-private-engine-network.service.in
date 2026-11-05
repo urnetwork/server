@@ -17,6 +17,7 @@ RemainAfterExit=yes
 KillMode=control-group
 Restart=no
 LimitCORE=0
+AllowedCPUs=@MANAGEMENT_CPUSET@
 StandardOutput=null
 StandardError=journal
 

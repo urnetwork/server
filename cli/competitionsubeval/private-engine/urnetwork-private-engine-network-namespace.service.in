@@ -15,6 +15,7 @@ ExecStart=@NAMESPACE_KEEPER_PATH@ infinity
 KillMode=control-group
 Restart=no
 LimitCORE=0
+AllowedCPUs=@MANAGEMENT_CPUSET@
 StandardOutput=null
 StandardError=null
 
