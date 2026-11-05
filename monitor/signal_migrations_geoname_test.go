@@ -146,7 +146,7 @@ func TestMigrationGeonameColumnExecutesExactGuard(t *testing.T) {
 					return syntheticMigrationCatalogRows(head), nil
 				}
 				normalized := strings.Join(strings.Fields(query), " ")
-				marker := "EXISTS ( SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'location' AND column_name = 'geoname_id'"
+				marker := "EXISTS ( SELECT 1 FROM public_columns WHERE table_schema = 'public' AND table_name = 'location' AND column_name = 'geoname_id'"
 				if strings.Count(normalized, marker) != 1 {
 					t.Fatal("migration 692 has no unique relation-scoped column guard")
 				}
@@ -155,7 +155,7 @@ func TestMigrationGeonameColumnExecutesExactGuard(t *testing.T) {
 				if !ok {
 					t.Fatal("migration 692 column guard has no following artifact boundary")
 				}
-				guard = strings.ReplaceAll(guard+" )", "information_schema.columns", "observed_column")
+				guard = strings.ReplaceAll(guard+" )", "public_columns", "observed_column")
 				var admitted bool
 				err := conn.QueryRow(ctx, `
 					WITH observed_column AS (

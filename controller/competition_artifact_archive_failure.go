@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"syscall"
 
 	"github.com/minio/minio-go/v7"
 )
@@ -92,6 +93,7 @@ func competitionArtifactArchiveFailureDetails(phase string, cause error) *compet
 	}
 	var response minio.ErrorResponse
 	var responsePointer *minio.ErrorResponse
+	var networkOperationError *net.OpError
 	var networkError net.Error
 	var pathError *os.PathError
 	var linkError *os.LinkError
@@ -110,7 +112,7 @@ func competitionArtifactArchiveFailureDetails(phase string, cause error) *compet
 		if 100 <= response.StatusCode && response.StatusCode <= 599 {
 			detail.HttpStatus = response.StatusCode
 		}
-	case errors.As(cause, &networkError):
+	case errors.As(cause, &networkOperationError):
 		detail.Category = "network"
 	case errors.Is(cause, os.ErrPermission):
 		detail.Category = "filesystem_permission"
@@ -118,6 +120,15 @@ func competitionArtifactArchiveFailureDetails(phase string, cause error) *compet
 		detail.Category = "filesystem_not_found"
 	case errors.As(cause, &pathError), errors.As(cause, &linkError), errors.As(cause, &syscallError):
 		detail.Category = "filesystem"
+	case errors.As(cause, &networkError):
+		// Every syscall.Errno implements net.Error, including ENOENT and EIO.
+		// Only actual transport provenance may turn those into network faults;
+		// local typed wrappers above retain their own bounded classifications.
+		switch networkError.(type) {
+		case syscall.Errno, *syscall.Errno:
+		default:
+			detail.Category = "network"
+		}
 	}
 	return detail
 }
