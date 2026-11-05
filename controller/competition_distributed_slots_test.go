@@ -292,6 +292,49 @@ func TestCompetitionDistributedConcurrentCompletionRequiresCoordinatorArtifacts(
 	})
 }
 
+// Successful score publication must reconstruct the epoch from the same stored
+// round as its policy. Omitting it rejects every future shared-baseline result.
+func TestCompetitionDistributedCompletionPublishesScoredSharedBaseline(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		ctx := tb.Context()
+		fixture := newCompetitionDistributedPgFixture(t, tb, true, true)
+		settings := fixture.selected(1)
+		job, err := fixture.store.Claim(ctx, settings, "synthetic-scored-completion-worker", testWorkerImageDigest())
+		if err != nil || job == nil || job.Round.Epoch != 2 || job.RoundBaseline == nil || job.StartedAt == nil || job.ExecutionDeadline == nil {
+			tb.Fatal("shared-baseline fixture did not obtain exact epoch-two custody", job, err)
+		}
+		baselineJson := append([]byte(nil), job.RoundBaseline.Json...)
+		baselineSha256 := job.RoundBaseline.Sha256
+		outcome := testSharedBaselineOutcome(tb, settings, job, EvaluationOutcome{
+			Score: competitionRankingScore(90, 110), distributedArchiveVerified: true,
+		})
+		outcome.Score.Diagnostics["g2_volume_policy"] = string(settings.EvaluationPolicy.G2VolumePolicy)
+		outcome.Score.Diagnostics["scorer_version"] = settings.scorerVersion()
+		if retry, err := fixture.store.Complete(withCompetitionJobAuthority(ctx, job), settings, "synthetic-scored-completion-worker", job.JobId, outcome); err != nil || retry {
+			tb.Fatal("scored shared-baseline completion lost its stored round epoch", retry, err)
+		}
+		stored, err := fixture.store.GetJob(ctx, settings, job.JobId, &Principal{Id: "synthetic-operator", Role: "operator"})
+		if err != nil || stored == nil || stored.Round.Epoch != 2 || stored.State != "succeeded" || stored.Score == nil || stored.EvalError != nil ||
+			stored.Score.Diagnostics["baseline_sha256"] != baselineSha256 || stored.StartedAt == nil || !stored.StartedAt.Equal(*job.StartedAt) ||
+			stored.ExecutionDeadline == nil || !stored.ExecutionDeadline.Equal(*job.ExecutionDeadline) || stored.AttemptCount != job.AttemptCount ||
+			stored.SlotFencingToken != job.SlotFencingToken || stored.ExecutorHostId != job.ExecutorHostId || stored.SlotId != job.SlotId ||
+			stored.CompletedAt == nil || !stored.CompletedAt.Equal(fixture.clock.Now()) {
+			tb.Fatal("scored completion changed its immutable baseline, epoch or execution clock", stored, err)
+		}
+		baseline, err := fixture.store.distributedRoundBaseline(ctx, settings, job.RoundId)
+		if err != nil || baseline == nil || baseline.Sha256 != baselineSha256 || !bytes.Equal(baseline.Json, baselineJson) {
+			tb.Fatal("scored completion replaced its append-only shared baseline", baseline, err)
+		}
+		server.Db(ctx, func(conn server.PgConn) {
+			var occupied int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM competition_execution_slot WHERE job_id=$1`, job.JobId).Scan(&occupied))
+			if occupied != 0 {
+				tb.Fatal("scored completion retained physical slot authority")
+			}
+		})
+	})
+}
+
 // Closing observes the entire round inventory, not whichever host finished
 // first. Expired hosts retain the same attempt until terminal reconciliation.
 func TestCompetitionDistributedSealWaitsForEveryHostCompletion(t *testing.T) {
