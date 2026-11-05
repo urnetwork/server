@@ -43,6 +43,9 @@ func TestCompetitionReevaluationPostCloseWindowHasExactExclusiveBounds(t *testin
 	if competitionReevaluationWithinApprovedWindow(a, &other, a.AuthorizedAt) {
 		t.Fatal("approval from another close widened recovery authority")
 	}
+	if competitionReevaluationWithinApprovedWindow(a, nil, a.AuthorizedAt) {
+		t.Fatal("an absent round gained post-close recovery authority")
+	}
 }
 
 // Old serialized authorizations stay byte-compatible and retain the original

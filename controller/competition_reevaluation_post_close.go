@@ -26,7 +26,7 @@ func validateCompetitionReevaluationPostCloseApproval(a model.CompetitionJobReev
 // Both authorization clock checks use the same closed-round semantics. The
 // caller still locks the round and rejects cancellation, sealing and winners.
 func competitionReevaluationWithinApprovedWindow(a model.CompetitionJobReevaluationAuthorization, round *roundRecord, now time.Time) bool {
-	if now.Before(a.AuthorizedAt) || !now.Before(a.ExpiresAt) {
+	if round == nil || now.Before(a.AuthorizedAt) || !now.Before(a.ExpiresAt) {
 		return false
 	}
 	if a.PostCloseApproval == nil {
