@@ -214,6 +214,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/network/revoke-other-sessions", handlers.RevokeOtherNetworkSessions),
 		router.NewRoute("GET", "/network/session-operations/([^/]+)", handlers.NetworkSessionOperation),
 		router.NewRoute("GET", "/network/proxies", handlers.NetworkProxies),
+		router.NewRoute("POST", "/network/proxy/rotate-exit", handlers.NetworkProxyRotateExit),
 		router.NewRoute("GET", "/network/peers", handlers.NetworkPeers),
 		router.NewRoute("GET", "/network/provider-locations", handlers.NetworkGetProviderLocations),
 		router.NewRoute("POST", "/network/find-provider-locations", handlers.NetworkFindProviderLocations),

@@ -156,6 +156,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/provider-verdict":                routeAccessClient,
 	"GET /network/clients":                          routeAccessAppAdmin, // lists every client of the network
 	"GET /network/proxies":                          routeAccessNetwork,  // lists the network's proxy clients
+	"POST /network/proxy/rotate-exit":               routeAccessNetwork,  // moves a network's unique-exit proxy to a new exit
 	"GET /network/peers":                            routeAccessClient,
 	"GET /network/provider-locations":               routeAccessPublic,
 	"POST /network/find-provider-locations":         routeAccessPublic,

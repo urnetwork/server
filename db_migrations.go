@@ -11327,4 +11327,22 @@ var migrations = []any{
 	// Prospective epoch-two executor custody follows the complete published
 	// origin prefix; singleton execution is unchanged until future opt-in.
 	newSqlMigration(competitionDistributedEvaluationMigrationSql),
+
+	// Unique-exit hosted proxies (HOSTED-PROXY-UNIQUE-EXIT.md,
+	// db_proxy_unique_exit_schema.go). All additive: three nullable or
+	// constant-default columns on provider_egress_location (a catalog change, no
+	// rewrite) and two new empty tables with their indexes. No earlier release
+	// reads or writes any of them. Apply before deploying the api, alt, proxy and
+	// taskworker that use them.
+	newSqlMigration(proxyUniqueExitEgressKeyColumnsSql),
+	newSqlMigration(proxyUniqueExitTableSql),
+	newSqlMigration(proxyUniqueExitNetworkIndexSql),
+	newSqlMigration(proxyExitAssignmentTableSql),
+	newSqlMigration(proxyExitAssignmentNetworkEgressKeyLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentProxyLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentProviderLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentAssignedAtLiveIndexSql),
+	newSqlMigration(proxyExitAssignmentProxyReleasedIndexSql),
+	newSqlMigration(proxyExitAssignmentNetworkReleasedIndexSql),
+	newSqlMigration(proxyExitAssignmentReleasedAtIndexSql),
 }
