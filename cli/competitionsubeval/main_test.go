@@ -1,3 +1,5 @@
+//go:build linux
+
 // CLI mode validation happens before protected configuration is accessed.
 package main
 
@@ -107,6 +109,28 @@ func TestSubevaluationArgumentsAcceptOnlyClosedRecoveryRole(t *testing.T) {
 	} {
 		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
 			t.Fatal("recovery accepted caller-selected execution or authority", args)
+		}
+	}
+}
+
+// Only the installed forced wrapper selects the managed transport. It cannot
+// append a remote command, pick another lifecycle role or recurse into itself.
+func TestSubevaluationArgumentsAcceptOnlyClosedManagedServeRole(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--serve-managed"}, &bytes.Buffer{})
+	if err != nil || !parsed.serveManaged || parsed.serve || parsed.configPath != "/synthetic/agent.json" || parsed.recoverActive {
+		t.Fatal("managed forced role was not retained exactly", err)
+	}
+	for _, arguments := range [][]string{
+		{"--serve-managed"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--serve"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "arbitrary-command"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--recover-active"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--execute=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--unit=synthetic.service"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--command=/bin/sh"},
+	} {
+		if _, err := parseArguments(arguments, &bytes.Buffer{}); err == nil {
+			t.Fatalf("managed role expanded its root authority: %q", arguments)
 		}
 	}
 }

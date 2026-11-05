@@ -32,6 +32,7 @@ func main() {
 type arguments struct {
 	configPath         string
 	serve              bool
+	serveManaged       bool
 	executeRunId       string
 	cleanupRunId       string
 	dockerClientRunId  string
@@ -50,6 +51,7 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.SetOutput(diagnostic)
 	flags.StringVar(&parsed.configPath, "config", "", "Protected root-owned subevaluation-role configuration")
 	flags.BoolVar(&parsed.serve, "serve", false, "Serve one signed framed operation on stdin/stdout")
+	flags.BoolVar(&parsed.serveManaged, "serve-managed", false, "Root forced SSH wrapper; place fixed control service before framing")
 	flags.StringVar(&parsed.executeRunId, "execute", "", "Systemd-only fixed persisted execution identity")
 	flags.StringVar(&parsed.cleanupRunId, "cleanup", "", "Systemd-only fixed persisted stop-cleanup identity")
 	flags.StringVar(&parsed.dockerClientRunId, "docker-client", "", "Non-root fixed-run Docker client; public sibling metadata only")
@@ -62,7 +64,7 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive} {
+	for _, enabled := range []bool{parsed.serve, parsed.serveManaged, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive} {
 		if enabled {
 			roles++
 		}
@@ -99,6 +101,9 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if parsed.hostOperationRunId != "" {
 		return competitionagent.RunHostFilesClient(ctx, parsed.hostOperationRunId, parsed.dockerArguments, output)
 	}
+	if parsed.serveManaged {
+		return competitionagent.ServeManagedSsh(ctx, parsed.configPath, input, output, diagnostic)
+	}
 	if parsed.dockerProbe && os.Geteuid() != 0 {
 		return errors.New("Docker host audit requires the fixed root role")
 	}
@@ -116,6 +121,11 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 			return err
 		}
 		return agent.RecoverActive(ctx)
+	}
+	if parsed.serve {
+		if err := competitionagent.VerifyManagedControlPlacement(ctx, parsed.configPath); err != nil {
+			return err
+		}
 	}
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {

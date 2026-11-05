@@ -44,6 +44,7 @@ type Config struct {
 	SelfCheck                  Pin              `json:"self_check"`
 	HostCheckConfiguration     Pin              `json:"host_check_configuration"`
 	Agent                      Pin              `json:"agent"`
+	SystemdRun                 Pin              `json:"systemd_run"`
 	ManagementPolicy           Pin              `json:"management_policy"`
 	RecoveryService            Pin              `json:"recovery_service"`
 	Docker                     Pin              `json:"docker"`
