@@ -9,7 +9,13 @@ package server
 // consecutive probes saw the same key, so a proxy-miner slot behind a rotating
 // upstream (a new key every probe) never reaches the two the allocator wants
 // from a slot-like provider.
+//
+// While ADD COLUMN waits for its ACCESS EXCLUSIVE lock, new readers of
+// provider_egress_location (find-providers, the reliability reads) queue behind
+// it, so the lock timeout bounds that wait: a busy table makes the migration
+// give up, and a rerun applies it.
 const proxyUniqueExitEgressKeyColumnsSql = `
+    SET LOCAL lock_timeout = '2s';
     ALTER TABLE provider_egress_location
         ADD COLUMN IF NOT EXISTS egress_key bytea NULL,
         ADD COLUMN IF NOT EXISTS egress_key_observed_at timestamp NULL,
