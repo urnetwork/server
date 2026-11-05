@@ -50,7 +50,7 @@ func (self *dbReleaseAcquireContext) Done() <-chan struct{} {
 // exact original pool continues holding capacity and refuses replacement.
 func TestDbReleaseObservationTransfersPendingCleanupWithoutReleasingCapacity(t *testing.T) {
 	watchdog, stopWatchdog := context.WithTimeout(t.Context(), 5*time.Second)
-	defer stopWatchdog()
+	t.Cleanup(stopWatchdog)
 	queryEntered, releaseQuery := make(chan struct{}), make(chan struct{})
 	closeEntered, releaseClose := make(chan struct{}), make(chan struct{})
 	var queryOnce, closeOnce sync.Once
@@ -83,19 +83,21 @@ func TestDbReleaseObservationTransfersPendingCleanupWithoutReleasingCapacity(t *
 	firstDone, secondDone := make(chan struct{}), make(chan struct{})
 	secondStarted := false
 	t.Cleanup(func() {
+		cleanup, cancelCleanup := dbReleaseTestCleanupContext(watchdog)
+		defer cancelCleanup()
 		cancelCaller()
 		cancelSecond()
 		unblockQuery()
 		unblockClose()
 		select {
 		case <-firstDone:
-		case <-watchdog.Done():
+		case <-cleanup.Done():
 			t.Error("first release owner did not join")
 		}
 		if secondStarted {
 			select {
 			case <-secondDone:
-			case <-watchdog.Done():
+			case <-cleanup.Done():
 				t.Error("second capacity waiter did not join")
 			}
 		}
@@ -164,5 +166,33 @@ func TestDbReleaseObservationTransfersPendingCleanupWithoutReleasingCapacity(t *
 	defer conn.Release()
 	if _, err := conn.Exec(watchdog, "SELECT 2"); err != nil || dials.Load() != 2 {
 		t.Fatal("capacity did not recover after owned cleanup completed", err, dials.Load())
+	}
+}
+
+// Teardown has its own finite owner even when the operation watchdog expired.
+// It never revives database work; it only joins already canceled fixture work.
+func dbReleaseTestCleanupContext(parent context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+}
+
+// A canceled operation must not turn a physically joinable owner into a random
+// choice between two ready channels during testing.T cleanup.
+func TestDbReleaseCleanupRetainsJoinAuthorityAfterOperationCancellation(t *testing.T) {
+	parent, cancelParent := context.WithCancel(t.Context())
+	cancelParent()
+	cleanup, cancelCleanup := dbReleaseTestCleanupContext(parent)
+	defer cancelCleanup()
+	if cleanup.Err() != nil {
+		t.Fatal("fixture cleanup inherited the stopped operation")
+	}
+	if _, bounded := cleanup.Deadline(); !bounded {
+		t.Fatal("fixture cleanup lost its finite join allowance")
+	}
+	joined := make(chan struct{})
+	close(joined)
+	select {
+	case <-joined:
+	case <-cleanup.Done():
+		t.Fatal("canceled operation prevented an already completed fixture join")
 	}
 }
