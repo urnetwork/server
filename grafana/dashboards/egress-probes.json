@@ -7229,6 +7229,284 @@
           "legendFormat": "teardown errors / min"
         }
       ]
+    },
+    {
+      "id": 142,
+      "type": "row",
+      "title": "speed: URL turn timing by country, and active bandwidth samples (CDN, prober shard slot 254)",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 467
+      }
+    },
+    {
+      "id": 143,
+      "type": "timeseries",
+      "title": "URL turn time to first byte p50 / p90 (fleet)",
+      "description": "Final-request time to first byte of measured URL turns, from the request written to the first response byte; DNS, TCP, TLS and redirects are excluded. One fleet histogram without labels; the policy fails a turn above 2s.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 468
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(urnetwork_url_probe_ttfb_seconds_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.9, sum by (le) (rate(urnetwork_url_probe_ttfb_seconds_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p90"
+        }
+      ]
+    },
+    {
+      "id": 144,
+      "type": "timeseries",
+      "title": "URL turn wire throughput p10 / p50 (fleet)",
+      "description": "Wire throughput after the first body byte of measured URL turns whose sample met the policy's minimum size (passed or throughput_slow). The sample is at most 1 MiB of a real page, so this is page-load speed, not provider capacity; see the active bandwidth panel for capacity.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 468
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.1, sum by (le) (rate(urnetwork_url_probe_body_bits_per_second_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p10"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(urnetwork_url_probe_body_bits_per_second_bucket{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])))",
+          "legendFormat": "p50"
+        }
+      ]
+    },
+    {
+      "id": 145,
+      "type": "timeseries",
+      "title": "URL turn mean time to first byte by country (top 15 by turns)",
+      "description": "Mean final-request time to first byte by the provider's claim country, from the per-country sum and count (no buckets, so no per-country percentiles). Countries with the most measured turns are shown.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 476
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_country_ttfb_seconds_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])) / clamp_min(sum by (country) (rate(urnetwork_url_probe_country_ttfb_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])), 1e-9) and on (country) topk(15, sum by (country) (rate(urnetwork_url_probe_country_ttfb_seconds_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])))",
+          "legendFormat": "{{country}}"
+        }
+      ]
+    },
+    {
+      "id": 146,
+      "type": "timeseries",
+      "title": "URL turn mean wire throughput by country (top 15 by turns)",
+      "description": "Mean wire throughput after the first body byte by the provider's claim country, from the per-country sum and count, for turns whose sample met the policy's minimum size.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 476
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_country_body_bits_per_second_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])) / clamp_min(sum by (country) (rate(urnetwork_url_probe_country_body_bits_per_second_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])), 1e-9) and on (country) topk(15, sum by (country) (rate(urnetwork_url_probe_country_body_bits_per_second_count{env=\"$env\",service=\"taskworker\",instance!=\"\",country=~\"$country\"}[1h])))",
+          "legendFormat": "{{country}}"
+        }
+      ]
+    },
+    {
+      "id": 147,
+      "type": "timeseries",
+      "title": "active bandwidth mean by country (CDN, 6h)",
+      "description": "Mean active bandwidth sampled through provider tunnels against the public CDN by the provider's egress country, from the per-country sum and count over six hours. Samples are few (the deployment's hourly budget), so read this over hours, not minutes. The figures are advisory: nothing ranks or selects providers by them.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 484
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "Bps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (country) (rate(urnetwork_egress_probe_bandwidth_country_bytes_per_second_sum{env=\"$env\",service=\"taskworker\",instance!=\"\",source=\"active-cdn\",country=~\"$country\"}[6h])) / clamp_min(sum by (country) (rate(urnetwork_egress_probe_bandwidth_country_bytes_per_second_count{env=\"$env\",service=\"taskworker\",instance!=\"\",source=\"active-cdn\",country=~\"$country\"}[6h])), 1e-12)",
+          "legendFormat": "{{country}}"
+        }
+      ]
+    },
+    {
+      "id": 148,
+      "type": "timeseries",
+      "title": "bandwidth probe passes, samples and readiness / hour",
+      "description": "Bandwidth probe passes by result (measured, empty, disabled, failed), target samples by source and result (measured, no_budget, no_time, unsupported, failed; source tunnel counts tunnels that did not open), and passes refused by their shard's funding readiness. no_budget is the deployment's hourly budget working as designed.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 484
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (result) (rate(urnetwork_egress_probe_bandwidth_passes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "pass {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (source, result) (rate(urnetwork_egress_probe_bandwidth_samples_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "sample {{source}} {{result}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (step) (rate(urnetwork_egress_probe_bandwidth_readiness_failures_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "readiness {{step}}"
+        }
+      ]
     }
   ]
 }
