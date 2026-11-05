@@ -1,3 +1,5 @@
+//go:build linux
+
 // The prospective Docker role binds private daemon/quota authority and public
 // non-root helper metadata to one immutable trusted evaluator installation.
 package competitionagent

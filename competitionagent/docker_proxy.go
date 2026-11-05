@@ -1,3 +1,5 @@
+//go:build linux
+
 // The finite Docker API boundary seals complete request bodies and a durable
 // intent before issuing a mutation. It drains terminal responses independently
 // of downstream disconnects, and never replays issued work after process loss.

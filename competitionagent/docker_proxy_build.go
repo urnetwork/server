@@ -1,3 +1,5 @@
+//go:build linux
+
 // A real Docker/buildx process owns BuildKit's filesync/session lifetime outside
 // the evaluator tree. Only its fixed build command and fully sealed context may
 // start it; disconnecting the evaluator only stops waiting for its receipt.

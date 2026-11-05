@@ -1,3 +1,5 @@
+//go:build linux
+
 // Durable, single-host admission for signed subevaluations. Disk state is
 // committed before systemd launch, and uncertain outcomes are never replayed.
 package competitionagent

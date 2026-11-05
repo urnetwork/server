@@ -1,3 +1,5 @@
+//go:build linux
+
 // Execution admission uses a native-read seam; tests touch only private durable
 // agent state and fake cleanup, never a daemon, namespace or actual host unit.
 package competitionagent

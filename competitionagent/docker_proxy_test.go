@@ -1,3 +1,5 @@
+//go:build linux
+
 // Durable request-owner regressions use only private files and fake daemons.
 // Barriers force delayed responses and disconnects without timing assertions.
 package competitionagent

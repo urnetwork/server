@@ -1,3 +1,5 @@
+//go:build linux
+
 // Explicit barriers reproduce two already-admitted retirement RPCs. Only fake
 // kernel operations and real private journals are used; no native host is touched.
 package competitionagent

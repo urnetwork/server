@@ -1,3 +1,5 @@
+//go:build linux
+
 // Real Git runs only in a synthetic private repository. Its deliberately
 // executable worktree hooks must never become a prospective host process.
 package competitionagent

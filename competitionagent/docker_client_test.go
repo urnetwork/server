@@ -1,3 +1,5 @@
+//go:build linux
+
 // The trusted client tests use only private scripts/files and fake Unix HTTP
 // endpoints. No daemon, privileged account, config/vault or service is accessed.
 package competitionagent
