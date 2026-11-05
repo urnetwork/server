@@ -22,5 +22,5 @@ var competitionReevaluationPostCloseMigrationContract = func() snMainnetMigratio
 	query = strings.Replace(query, oldQuery, newQuery, 1)
 	return migrationCurrentSuffix(server.CompetitionReevaluationPostCloseMigrationVersion(), "finite held post-close competition recovery",
 		query, snMainnetMigrationFunction("competition_job_reevaluation_post_close_allows(jsonb,timestamp without time zone,timestamp without time zone)",
-			"boolean", "plpgsql", "s", false, window, "authorization", "closes", "granted"))
+			"boolean", "plpgsql", "s", false, window, "request", "closes", "granted"))
 }()

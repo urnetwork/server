@@ -4,12 +4,36 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// PostgreSQL accepts the parameter declaration but parses its reserved spelling
+// differently in the function body. Exercise that exact grammar before proving
+// the published helper itself creates and executes with an ordinary identifier.
+func TestCompetitionReevaluationPostCloseSqlReservedParameterRegression(t *testing.T) {
+	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		Db(t.Context(), func(conn PgConn) {
+			_, err := conn.Exec(t.Context(), `CREATE FUNCTION synthetic_recovery_reserved_parameter(authorization jsonb)
+			 RETURNS jsonb LANGUAGE plpgsql AS $test$ BEGIN RETURN authorization->'synthetic'; END $test$;`, pgx.QueryExecModeSimpleProtocol)
+			var pgError *pgconn.PgError
+			if !errors.As(err, &pgError) || pgError.Code != "42601" {
+				t.Fatalf("reserved-parameter control error=%v, want42601", err)
+			}
+			RaisePgResult(conn.Exec(t.Context(), competitionReevaluationPostCloseWindowSql, pgx.QueryExecModeSimpleProtocol))
+			var allowed bool
+			Raise(conn.QueryRow(t.Context(), `SELECT competition_job_reevaluation_post_close_allows('{}'::jsonb,TIMESTAMP '2026-01-02',TIMESTAMP '2026-01-02')`).Scan(&allowed))
+			if allowed {
+				t.Fatal("compiled corrected helper admitted a missing approval")
+			}
+		}, OptReadWrite(), OptNoRetry())
+	})
+}
 
 // Raw SQL needs only the new helper, not a migrated production-shaped schema.
 func TestCompetitionReevaluationPostCloseSqlWindowRejectsUnboundAuthority(t *testing.T) {

@@ -37,7 +37,7 @@ func TestMigrationsCompetitionPostCloseRecoveryNativeFaultCustody(t *testing.T) 
 	owner := fmt.Sprintf("%s@v%d", contract.artifact.name, version)
 	oldInsert, _, _, _ := server.CompetitionJobReevaluationBodiesSql()
 	faults := []struct{ name, sql string }{
-		{name: "window-bypass", sql: `CREATE OR REPLACE FUNCTION competition_job_reevaluation_post_close_allows(authorization jsonb,closes timestamp,granted timestamp) RETURNS boolean LANGUAGE plpgsql STABLE AS 'BEGIN RETURN true; END'`},
+		{name: "window-bypass", sql: `CREATE OR REPLACE FUNCTION competition_job_reevaluation_post_close_allows(request jsonb,closes timestamp,granted timestamp) RETURNS boolean LANGUAGE plpgsql STABLE AS 'BEGIN RETURN true; END'`},
 		{name: "restore-open-only-guard", sql: "CREATE OR REPLACE FUNCTION competition_job_reevaluation_insert_guard() RETURNS trigger LANGUAGE plpgsql AS $old_guard$" + oldInsert + "$old_guard$"},
 		{name: "privileged-window", sql: `ALTER FUNCTION competition_job_reevaluation_post_close_allows(jsonb,timestamp,timestamp) SECURITY DEFINER`},
 		{name: "lost-immutable-audit", sql: `ALTER TABLE competition_job_reevaluation DISABLE TRIGGER competition_job_reevaluation_append_only`},

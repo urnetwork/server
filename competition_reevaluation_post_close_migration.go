@@ -5,11 +5,11 @@ package server
 import "strings"
 
 const competitionReevaluationPostCloseWindowSql = `
-CREATE FUNCTION competition_job_reevaluation_post_close_allows(authorization jsonb, closes timestamp, granted timestamp)
+CREATE FUNCTION competition_job_reevaluation_post_close_allows(request jsonb, closes timestamp, granted timestamp)
 RETURNS boolean LANGUAGE plpgsql STABLE AS $recovery_window$
 DECLARE approval jsonb;
 BEGIN
- approval := authorization->'post_close_approval';
+ approval := request->'post_close_approval';
  IF jsonb_typeof(approval) IS DISTINCT FROM 'object' THEN RETURN false; END IF;
  IF (SELECT count(*) FROM jsonb_object_keys(approval))<>4
   OR approval->>'schema' IS DISTINCT FROM '1'
@@ -17,9 +17,9 @@ BEGIN
   OR approval->>'evidence_sha256' IS NULL THEN RETURN false; END IF;
  RETURN COALESCE((approval->>'closes_at')::timestamptz AT TIME ZONE 'UTC'=closes
   AND closes<=granted
-  AND (authorization->>'authorized_at')::timestamptz AT TIME ZONE 'UTC'<=granted
-  AND granted<(authorization->>'expires_at')::timestamptz AT TIME ZONE 'UTC'
-  AND (authorization->>'expires_at')::timestamptz<=(approval->>'expires_at')::timestamptz
+  AND (request->>'authorized_at')::timestamptz AT TIME ZONE 'UTC'<=granted
+  AND granted<(request->>'expires_at')::timestamptz AT TIME ZONE 'UTC'
+  AND (request->>'expires_at')::timestamptz<=(approval->>'expires_at')::timestamptz
   AND (approval->>'closes_at')::timestamptz<(approval->>'expires_at')::timestamptz,false);
 EXCEPTION WHEN invalid_datetime_format OR datetime_field_overflow OR invalid_parameter_value THEN
  RETURN false;
