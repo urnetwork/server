@@ -6106,33 +6106,8 @@ func (self PostgresStore) Readiness(ctx context.Context, settings *Settings) (ch
 			var slots int
 			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM competition_worker_slot WHERE slot_id = 1`).Scan(&slots))
 			checks["fifo_slot"] = slots == 1
-			var hosts, artifactHosts, rebaselineHosts int
-			server.Raise(conn.QueryRow(ctx, `
-				WITH current_round AS (
-					SELECT round_id::text AS round_id
-					FROM competition_round
-					WHERE competition_id = $6 AND canceled = false
-					  AND finalized_at IS NULL AND $5 < closes_at
-					ORDER BY staging, epoch_number DESC
-					LIMIT 1
-				)
-				SELECT count(*),
-				       count(*) FILTER (WHERE (self_check_json->>'artifact_storage')::boolean),
-				       count(*) FILTER (
-				           WHERE (self_check_json->>'rebaseline_passed')::boolean
-				             AND self_check_json->>'rebaseline_round_id' =
-				                 COALESCE((SELECT round_id FROM current_round), '')
-				       )
-				FROM competition_evaluator_host
-				WHERE eligible = true AND hardware_id = $1 AND image_digest = $2
-				  AND self_check_json->>'qualification_sha256' = $3
-				  AND heartbeat_at >= $4
-			`, settings.EvaluationPolicy.HardwareId, settings.EvaluatorImageDigest,
-				settings.EvaluationPolicy.HostQualificationSha256,
-				self.nowUtc().Add(-time.Duration(settings.HostHeartbeatMaxAgeSeconds)*time.Second),
-				self.nowUtc(), settings.CompetitionId).Scan(
-				&hosts, &artifactHosts, &rebaselineHosts,
-			))
+			hosts, artifactHosts, rebaselineHosts, hostErr := readCompetitionReadinessHosts(ctx, conn, settings, self.nowUtc())
+			server.Raise(hostErr)
 			checks["authoritative_evaluator_host"] = 1 <= hosts
 			checks["artifact_storage"] = 1 <= artifactHosts
 			checks["host_rebaseline"] = 1 <= rebaselineHosts
