@@ -19,8 +19,20 @@ func sourceReviewTemplate(packet *controller.CompetitionSourceReviewPacket) mode
 		ProductionBenefitAddendum: model.CompetitionProductionBenefitReviewAddendum(),
 		ReasonCodes:               []string{}, Findings: []model.CompetitionReviewFinding{},
 	}
-	for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
-		request.Findings = append(request.Findings, model.CompetitionReviewFinding{Criterion: criterion})
+	if packet.RewardDecision != nil {
+		request.ExpectedDecisionSha256 = packet.RewardDecision.DecisionSha256
+	}
+	// These names describe required provenance, not evidence that a provider
+	// ran. Every attributed finding and both dispositions remain incomplete.
+	request.ReviewerModel, request.ReviewerReasoning, _ = model.CompetitionWinnerReviewProvider(packet.WinnerReviewPolicy)
+	models := []string{""}
+	if model.IsCompetitionSnowWinnerReviewPolicy(packet.WinnerReviewPolicy) {
+		models = model.CompetitionSnowWinnerReviewModelsForPolicy(packet.WinnerReviewPolicy)
+	}
+	for _, modelName := range models {
+		for _, criterion := range []string{"measurement_integrity", "workload_generalization", "containment", "patch_scope", "reproducibility", "source_safety"} {
+			request.Findings = append(request.Findings, model.CompetitionReviewFinding{Model: modelName, Criterion: criterion})
+		}
 	}
 	return request
 }

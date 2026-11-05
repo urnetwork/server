@@ -1,0 +1,11 @@
+# Inert source template; never nest this under the binding management aggregate.
+[Unit]
+Description=Independent evaluation cleanup outside ordinary management OOM ancestry
+
+[Slice]
+MemoryAccounting=yes
+MemoryMax=@CLEANUP_MEMORY_BYTES@
+MemorySwapMax=@SWAP_BYTES@
+TasksAccounting=yes
+TasksMax=@CLEANUP_TASKS_MAXIMUM@
+AllowedCPUs=@MANAGEMENT_CPUSET@

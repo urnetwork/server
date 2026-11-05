@@ -144,6 +144,9 @@ func sourceBuildAuthorizationIdentity(request reviewedSourceBuildRequest) string
 
 // Review and instrument operations share containment, but not authorization.
 func validateSourceBuildReceipt(request reviewedSourceBuildRequest, receipt reviewedSourceBuildReceipt) error {
+	if !reflect.DeepEqual(sourceBuildRequestWorkCoverage(request), receipt.WorkCoveragePolicy) {
+		return errors.New("source build receipt differs from the prospectively frozen coverage policy")
+	}
 	if sourceBuildRequestMinimumWork(request) != (receipt.G2VolumePolicy == model.CompetitionG2VolumePolicyMinimumWork) {
 		return errors.New("source build receipt differs from the prospectively frozen scoring policy")
 	}
@@ -161,7 +164,7 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 	if err != nil {
 		return err
 	}
-	if future.EvaluationPolicy.G2VolumePolicy == current.G2VolumePolicy {
+	if future.EvaluationPolicy.G2VolumePolicy == current.G2VolumePolicy && reflect.DeepEqual(future.EvaluationPolicy.WorkCoveragePolicy, current.WorkCoveragePolicy) {
 		return nil
 	}
 	if self.settings.FutureEpochPolicy == nil || self.settings.FutureEpochPolicy.TrustedInstrument == nil || current.Staging || intent.TargetEpoch != 2 || current.TargetEpoch != 1 ||
@@ -201,6 +204,7 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 	}
 	intent.SourceGeneration = current.SourceGeneration + 1
 	intent.G2VolumePolicy, intent.TrustedInstrument = model.CompetitionG2VolumePolicyMinimumWork, proof
+	intent.WorkCoveragePolicy = approval.WorkCoveragePolicy.Clone()
 	var generation reviewedSourceGeneration
 	if proof.SelectedProductKind == "reviewed_source_carry_forward" {
 		intent.Kind = "trusted_instrument_transition"
@@ -214,6 +218,7 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 	}
 	generation.SourceLockSha256, generation.Repositories = intent.SourceLockSha256, sourceRepositoriesFromCommits(commits)
 	generation.G2VolumePolicy, generation.TrustedInstrument = intent.G2VolumePolicy, proof
+	generation.WorkCoveragePolicy = intent.WorkCoveragePolicy.Clone()
 	manifest.EvaluationSource.Generations[len(manifest.EvaluationSource.Generations)-1] = generation
 	if err := validateSourceManifest(manifest); err != nil {
 		return err

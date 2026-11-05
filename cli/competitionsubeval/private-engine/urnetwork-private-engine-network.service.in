@@ -1,4 +1,6 @@
 [Unit]
+OnFailure=urnetwork-subeval-recovery.service
+OnFailureJobMode=replace
 Description=Scoped private evaluation engine network guard
 Requires=urnetwork-private-engine-network-namespace.service
 BindsTo=urnetwork-private-engine-network-namespace.service
@@ -10,6 +12,7 @@ Before=urnetwork-private-containerd.service urnetwork-private-engine.service
 Type=oneshot
 User=root
 Group=root
+Slice=urnetwork-management-private.slice
 UMask=0077
 PrivateNetwork=yes
 ExecStart=@NFT_PATH@ --file @CONFIG_DIRECTORY@/network.nft
@@ -17,6 +20,7 @@ RemainAfterExit=yes
 KillMode=control-group
 Restart=no
 LimitCORE=0
+AllowedCPUs=@MANAGEMENT_CPUSET@
 StandardOutput=null
 StandardError=journal
 

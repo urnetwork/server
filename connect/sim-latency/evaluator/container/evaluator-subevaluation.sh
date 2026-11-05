@@ -133,18 +133,19 @@ validate_worker_request_schema() {
         'type == "object" and (.schema == 1) and
          ((keys - ["staging"] | sort) == $request_keys) and
          ((has("staging") | not) or (.staging | type == "boolean")) and
-         (if .staging == true then .evaluation_policy.takeover_margin == 0 else true end) and
+         (if .staging == true then .evaluation_policy.takeover_margin == 0 and (.evaluation_policy | has("work_coverage_policy") | not) else true end) and
          (.patch_policy | type == "object" and
            (if has("path_base") then
               ((keys | sort) == ($patch_policy_keys + ["path_base"] | sort)) and
               .path_base == "mono_root_v1"
             else (keys | sort) == $patch_policy_keys end)) and
          (.evaluation_policy | type == "object" and
-           (if has("g2_volume_policy") then
-              ((keys | sort) == ($evaluation_policy_keys + ["g2_volume_policy"] | sort)) and
-              .g2_volume_policy == "minimum-work/1"
-            else ((keys | sort) == $evaluation_policy_keys) end)) and
-         .scorer_version == (if .evaluation_policy.g2_volume_policy == "minimum-work/1"
+           ((keys | sort) == ($evaluation_policy_keys + (if has("g2_volume_policy") then ["g2_volume_policy"] else [] end) + (if has("work_coverage_policy") then ["work_coverage_policy"] else [] end) | sort)) and
+           ((has("g2_volume_policy") | not) or .g2_volume_policy == "minimum-work/1") and
+           ((has("work_coverage_policy") | not) or (.g2_volume_policy == "minimum-work/1" and (.work_coverage_policy | type == "object" and .kind == "seeded-crawl-coverage/v1" and
+             (keys | sort) == ["kind","minimum_byte_coverage_ratio","minimum_page_coverage_ratio"] and
+             all(.minimum_page_coverage_ratio,.minimum_byte_coverage_ratio; type == "number" and isfinite and . > 0 and . < 1))))) and
+         .scorer_version == (if .evaluation_policy.work_coverage_policy != null then "sim-latency-score/3" elif .evaluation_policy.g2_volume_policy == "minimum-work/1"
                              then "sim-latency-score/2" else "sim-latency-score/1" end)' \
         "$1" >/dev/null
 }
@@ -365,6 +366,9 @@ api_control_image="$(jq -er '.api_image_digest' "$request_path")"
 worker_control_image="$(jq -er '.worker_image_digest' "$request_path")"
 scorer_version="$(jq -er '.scorer_version' "$request_path")"
 g2_volume_policy="$(jq -r '.evaluation_policy.g2_volume_policy // ""' "$request_path")"
+work_coverage_policy="$(jq -c '.evaluation_policy.work_coverage_policy // null' "$request_path")"
+coverage_policy_args=()
+if [ "$work_coverage_policy" != null ]; then coverage_policy_args=(--work-coverage-policy "$(jq -er '.kind' <<<"$work_coverage_policy")"); fi
 providers_path="$(jq -er '.providers_path' "$request_path")"
 providers_sha256="$(jq -er '.providers_sha256' "$request_path")"
 round_baseline_path="$(jq -er '.round_baseline_path' "$request_path")"
@@ -394,7 +398,7 @@ attempt_token="$(printf '%s:%s' "$job_id" "$attempt" | sha256sum | awk '{print s
 [[ "$api_control_image" =~ ^sha256:[0-9a-f]{64}$ ]] || die "API control image id is invalid"
 [[ "$worker_control_image" =~ ^sha256:[0-9a-f]{64}$ ]] || die "worker control image id is invalid"
 case "$g2_volume_policy:$scorer_version" in
-    :sim-latency-score/1|minimum-work/1:sim-latency-score/2) ;;
+    :sim-latency-score/1|minimum-work/1:sim-latency-score/2|minimum-work/1:sim-latency-score/3) ;;
     *) die "scorer version does not match frozen g2 volume policy" ;;
 esac
 [[ "$providers_sha256" =~ ^[0-9a-f]{64}$ ]] || die "providers SHA-256 is invalid"
@@ -590,9 +594,9 @@ if [ -n "$g2_volume_policy" ]; then
         --security-opt no-new-privileges:true --cpuset-cpus "$management_cpuset" \
         --memory "$SCORER_MEMORY_LIMIT" --memory-swap "$SCORER_MEMORY_LIMIT" --pids-limit "$SCORER_PIDS_LIMIT" \
         --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_docker_args[@]}" "$base_image_id" \
-        score-policy --g2-volume-policy "$g2_volume_policy")" || die "pristine image does not implement the frozen scoring policy"
-    jq -e --arg policy "$g2_volume_policy" --arg version "$scorer_version" \
-        '.score_schema == 1 and .g2_volume_policy == $policy and .scorer_version == $version' \
+        score-policy --g2-volume-policy "$g2_volume_policy" "${coverage_policy_args[@]}")" || die "pristine image does not implement the frozen scoring policy"
+    jq -e --arg policy "$g2_volume_policy" --arg version "$scorer_version" --argjson coverage "$work_coverage_policy" \
+        '.score_schema == 1 and .g2_volume_policy == $policy and .scorer_version == $version and (.work_coverage_policy // null) == $coverage' \
         <<<"$instrument_policy" >/dev/null || die "pristine scoring policy identity mismatch"
 fi
 
@@ -735,6 +739,9 @@ write_runner_env() {
     if [ -n "$g2_volume_policy" ]; then
         printf '%s\n' "APEX_G2_VOLUME_POLICY=$g2_volume_policy" >> "$pending"
     fi
+    if [ "$work_coverage_policy" != null ]; then
+        printf '%s\n' "APEX_WORK_COVERAGE_POLICY_JSON=$work_coverage_policy" >> "$pending"
+    fi
     chmod 0400 "$pending"
     mv -f -- "$pending" "$path"
 }
@@ -793,6 +800,8 @@ write_compose_env() {
         > "$pending"
     if [[ "${subevaluation_scoped:-false}" = true ]]; then
         printf '%s\n' "URNETWORK_SUBEVALUATION_RUN_ID=$subevaluation_run_id" >> "$pending"
+        printf '%s\n' "URNETWORK_SUBEVALUATION_BRIDGE_NAME=$URNETWORK_SUBEVALUATION_BRIDGE_NAME" \
+            "URNETWORK_SUBEVALUATION_CORE_PROFILE=$URNETWORK_SUBEVALUATION_CORE_PROFILE" >> "$pending"
     fi
     chmod 0400 "$pending"
     mv -f -- "$pending" "$path"
@@ -819,6 +828,13 @@ authenticate_protected_simulator_tree() {
         die "could not authenticate the protected sim-latency source tree: invalid Git object identity"
     [ "$candidate_tree" = "$baseline_tree" ] ||
         die "candidate changed the protected sim-latency source tree"
+    if [ "${work_coverage_policy:-null}" != null ]; then
+        local dependency="model/competition_work_coverage_policy.go" baseline_dependency candidate_dependency
+        baseline_dependency="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" -C "$baseline_source_root/server" ls-tree HEAD -- "$dependency")" || die "missing trusted coverage dependency"
+        candidate_dependency="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" -C "$candidate_source_root/server" ls-tree HEAD -- "$dependency")" || die "missing candidate coverage dependency"
+        [[ "$baseline_dependency" =~ ^100644\ blob\ [0-9a-f]{40}$'\t' ]] || die "coverage dependency is not a committed regular Go file"
+        [ "$baseline_dependency" = "$candidate_dependency" ] || die "candidate changed the trusted coverage dependency"
+    fi
 }
 
 seal_evaluation_source() {
@@ -1692,7 +1708,8 @@ jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
 [ "$(evaluation_docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
 candidate_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
+    --security-opt no-new-privileges:true --mount "type=bind,src=$candidate_source_root,dst=/workspace,readonly" \
+    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
 candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity")"
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_sha "$patch_sha256" --arg policy_sha "$policy_sha256" \
@@ -1700,6 +1717,7 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
     --arg patch_validator_sha256 "$patch_validator_sha256" \
     --arg candidate_commits_sha256 "$candidate_commits_sha256" \
     --arg original_source_identity_sha256 "$candidate_original_source_identity_sha256" \
+    --arg candidate_source_identity_sha256 "$(sha256_file "$candidate_source_root/.evaluation-source.json")" \
     --argjson candidate_commits "$candidate_commits_json" \
     '.schema == 1 and .image_kind == "submission" and .base_sha == $base_sha and
      .build_sha == $build_sha and .patch_sha256 == $patch_sha and
@@ -1708,6 +1726,8 @@ jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
      .patch_validator_sha256 == $patch_validator_sha256 and
      .candidate_commits_sha256 == $candidate_commits_sha256 and
      .original_source_identity_sha256 == $original_source_identity_sha256 and
+     .candidate_source_identity_sha256 == $candidate_source_identity_sha256 and
+     .source_materialization == "required-readonly-run-source/v1" and .builtin_source_kind == "pristine-evaluator-base" and
      .candidate_commits == $candidate_commits and
      (.paths | type == "array")' \
     <<<"$candidate_identity" >/dev/null || die "candidate image identity is invalid"
@@ -1727,17 +1747,20 @@ evaluation_docker run --rm --network none --read-only --cap-drop ALL \
     --env "APEX_SIM_SHA256=$base_simulator_sha256" \
     --env "APEX_EPOCH=$source_epoch" --env "APEX_TAKEOVER_MARGIN=$takeover_margin" \
     --env "APEX_G2_VOLUME_POLICY=$g2_volume_policy" \
+    --env "APEX_WORK_COVERAGE_POLICY_JSON=$work_coverage_policy" \
     "${subevaluation_docker_args[@]}" "$base_image_id" margin-preflight >&2 || die "source epoch takeover margin preflight failed"
 
 if [ -n "$round_baseline_path" ]; then
     jq -e --arg round_id "$round_id" --arg providers_sha256 "$providers_sha256" \
         --arg scorer_version "$scorer_version" --argjson replicates "$replicates" \
         --arg g2_volume_policy "$g2_volume_policy" \
+        --argjson coverage "$work_coverage_policy" \
         --argjson request_timeout_ms "$request_timeout_ms" \
         --argjson takeover_margin "$takeover_margin" \
         '.score_schema == 1 and .kind == "sim-latency-score-baseline" and
          .scorer_version == $scorer_version and .round_id == $round_id and
          (.g2_volume_policy // "") == $g2_volume_policy and
+         (.work_coverage_policy // null) == $coverage and
          .config_sha256 == $providers_sha256 and
          .request_timeout_ms == $request_timeout_ms and
          .takeover_margin == $takeover_margin and

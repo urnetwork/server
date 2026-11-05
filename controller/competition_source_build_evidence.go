@@ -24,6 +24,9 @@ func ValidateCompetitionReviewedSourceBuildReceipt(receipt CompetitionReviewedSo
 // New Snow intent consumers require its aggregate; historical receipts retain
 // their original Sol/low contract and cannot be silently used for Snow source.
 func ValidateCompetitionReviewedSourceBuildReceiptForPolicy(receipt CompetitionReviewedSourceBuildReceipt, reviewId server.Id, patchDigest, lockDigest string, staging bool, policy string) error {
+	if _, err := model.CompetitionScorerVersionForWorkCoverage(receipt.G2VolumePolicy, receipt.WorkCoveragePolicy); err != nil || staging && receipt.WorkCoveragePolicy != nil {
+		return errors.New("source qualification has unsupported prospective coverage provenance")
+	}
 	testModel, testReasoning := "gpt-6.1-sol", "low"
 	if model.IsCompetitionSnowWinnerReviewPolicy(policy) {
 		if receipt.WinnerReviewPolicy != policy {

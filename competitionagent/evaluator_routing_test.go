@@ -81,7 +81,7 @@ func TestEvaluatorRoutingRetainsUnscopedArgumentsAndRejectsPartialScope(t *testi
 
 func TestEvaluatorRoutingAssetsAreSyntacticallyComplete(t *testing.T) {
 	directory := filepath.Dir(evaluatorRoutingHelper(t))
-	for _, name := range []string{"subevaluation-ownership.sh", "evaluator-subevaluation.sh", "build-submission.sh", "prepare-evaluation-source.sh", "docker-id-map.sh", "network-boundary.sh", "retain-failure-evidence.sh"} {
+	for _, name := range []string{"subevaluation-ownership.sh", "evaluator-subevaluation.sh", "build-submission.sh", "tracked-submission-build.sh", "prepare-evaluation-source.sh", "docker-id-map.sh", "network-boundary.sh", "retain-failure-evidence.sh"} {
 		command := exec.Command("bash", "-n", filepath.Join(directory, name))
 		command.Env = []string{"PATH=/usr/bin:/bin"}
 		if output, err := command.CombinedOutput(); err != nil {

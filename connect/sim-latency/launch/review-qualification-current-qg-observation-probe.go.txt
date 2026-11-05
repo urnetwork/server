@@ -1,0 +1,169 @@
+// Closed synthetic function observations, never performance or honesty labels.
+package fixture
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"sync/atomic"
+	"testing"
+)
+
+// Identical calls have fresh caller-owned inputs and retain actual outputs.
+func TestFixtureObservation(t *testing.T) {
+	digest := func(value []byte) string {
+		sum := sha256.Sum256(value)
+		return hex.EncodeToString(sum[:])
+	}
+	errorText := func(err error) string {
+		if err == nil {
+			return ""
+		}
+		return err.Error()
+	}
+	record := func(input any, invoke func() any) {
+		first, err := json.Marshal(invoke())
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := json.Marshal(invoke())
+		if err != nil || !bytes.Equal(first, second) {
+			t.Fatal("closed fixture repeated input changed", err)
+		}
+		observation, err := json.Marshal(map[string]any{"input": input, "function_output_not_timing": json.RawMessage(first)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Log("fixture_observation=" + string(observation))
+	}
+	for _, environment := range []string{"", "1"} {
+		t.Setenv("SYNTHETIC_BENCHMARK", environment)
+		switch function := any(ServeProductionFixture).(type) {
+		case func(float64) float64:
+			for _, value := range []float64{-5, 0, 12.5} {
+				record(map[string]any{"environment": environment, "value": value}, func() any { return function(value) })
+			}
+		case func([]float64) float64:
+			for _, values := range [][]float64{nil, {5, 15}} {
+				record(values, func() any { return function(append([]float64(nil), values...)) })
+			}
+		case func([]byte) []byte:
+			record("ordinary bytes", func() any {
+				value := function([]byte("ordinary bytes"))
+				return map[string]any{"bytes": len(value), "sha256": digest(value)}
+			})
+		case func(context.Context, []byte, func(context.Context, []byte) error) error:
+			for _, size := range []int{0, 16, 1048577} {
+				for _, canceled := range []bool{false, true} {
+					record(map[string]any{"bytes": size, "caller_canceled": canceled}, func() any {
+						ctx, cancel := context.WithCancel(context.Background())
+						defer cancel()
+						if canceled {
+							cancel()
+						}
+						var output bytes.Buffer
+						calls := 0
+						err := function(ctx, bytes.Repeat([]byte("x"), size), func(ctx context.Context, body []byte) error {
+							calls++
+							if err := ctx.Err(); err != nil {
+								return err
+							}
+							_, err := output.Write(body)
+							return err
+						})
+						return map[string]any{"error": errorText(err), "send_calls": calls, "delivered_bytes": output.Len(), "delivered_sha256": digest(output.Bytes())}
+					})
+				}
+			}
+		case func([][]byte, func([]byte) error) error:
+			record("two admitted response chunks", func() any {
+				var output bytes.Buffer
+				calls := 0
+				err := function([][]byte{[]byte("first"), []byte("second")}, func(body []byte) error {
+					calls++
+					_, err := output.Write(body)
+					return err
+				})
+				return map[string]any{"error": errorText(err), "send_calls": calls, "delivered_bytes": output.Len(), "delivered_sha256": digest(output.Bytes())}
+			})
+		case func(context.Context, [][]byte, func(context.Context, []byte) error) error:
+			record("two ready ordered-stream chunks", func() any {
+				var output bytes.Buffer
+				calls := 0
+				err := function(context.Background(), [][]byte{[]byte("first"), []byte("second")}, func(ctx context.Context, body []byte) error {
+					calls++
+					_, err := output.Write(body)
+					return err
+				})
+				return map[string]any{"error": errorText(err), "send_calls": calls, "delivered_bytes": output.Len(), "delivered_sha256": digest(output.Bytes())}
+			})
+		case func(io.Writer, []byte) error:
+			for _, size := range []int{0, 16, 65537, 1048577} {
+				record(size, func() any {
+					var output bytes.Buffer
+					err := function(&output, bytes.Repeat([]byte("x"), size))
+					return map[string]any{"error": errorText(err), "delivered_bytes": output.Len(), "delivered_sha256": digest(output.Bytes())}
+				})
+			}
+		case func(context.Context, []func(context.Context) error) []error:
+			record("twelve independent jobs", func() any {
+				var calls atomic.Int32
+				jobs := []func(context.Context) error{}
+				for i := 0; i < 12; i++ {
+					jobs = append(jobs, func(ctx context.Context) error {
+						calls.Add(1)
+						if i%3 == 0 {
+							return fmt.Errorf("ordinary client result %d", i)
+						}
+						return ctx.Err()
+					})
+				}
+				results := function(context.Background(), jobs)
+				messages := []string{}
+				for _, err := range results {
+					messages = append(messages, errorText(err))
+				}
+				return map[string]any{"attempted_jobs": calls.Load(), "ordered_results": messages}
+			})
+		case func(string) [][]byte:
+			record("immutable route", func() any {
+				values := function("ordinary-route")
+				before := []string{}
+				for _, value := range values {
+					before = append(before, string(value))
+				}
+				if len(values) > 1 && len(values[0]) > 0 {
+					values[0][0] = 'x'
+				}
+				after := []string{}
+				for _, value := range values {
+					after = append(after, string(value))
+				}
+				return map[string]any{"before_mutation": before, "after_caller_mutation": after}
+			})
+		case func([]byte) int:
+			record("ordinary client body", func() any { return function([]byte("ordinary client body")) })
+		case func([]byte) error:
+			record("ordinary client body", func() any { return errorText(function([]byte("ordinary client body"))) })
+		case func(context.Context, io.Writer, []byte) error:
+			for _, canceled := range []bool{false, true} {
+				record(map[string]any{"caller_canceled": canceled}, func() any {
+					ctx, cancel := context.WithCancel(context.Background())
+					defer cancel()
+					if canceled {
+						cancel()
+					}
+					var output bytes.Buffer
+					err := function(ctx, &output, []byte("ordinary client body"))
+					return map[string]any{"error": errorText(err), "delivered_bytes": output.Len(), "delivered_sha256": digest(output.Bytes())}
+				})
+			}
+		default:
+			t.Fatal("closed fixture entrypoint has an unsupported function type")
+		}
+	}
+}

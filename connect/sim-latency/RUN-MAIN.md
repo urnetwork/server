@@ -25,12 +25,134 @@ entries and never label an unactivated checkpoint as active. Commit and push
 the documentation update as part of the epoch handoff, without editing frozen
 evaluation source or exposing operational config, credentials, or hidden seeds.
 
+The prepared native read-only exporter produces a Markdown preview by default,
+or a compact machine-readable public checkpoint with `--json`:
+
+```sh
+sim-latency source-index --activation-generation=N
+sim-latency source-index --activation-generation=N --json
+```
+
+It requires the authenticated `competition.source.lifecycle.v1` read capability;
+older installed code without that capability fails closed. It never fetches a
+moving origin, writes `EPOCH-SOURCE.md`, publishes refs or activates anything.
+The owner appends/commits the actual public index after checking the live scope
+and opening. A complete ten-repository map and immutable source-manifest bytes
+must reproduce the selected lock/mapping. Public repository URLs come from a
+fixed allowlist, not credential-bearing origin configuration. Instrumented
+evaluation commits and separately selected product parents remain distinct.
+
+Use the exported purpose labels literally:
+
+- `PREPARED`: authenticated prepared source, not an intake opening or grading
+  assertion.
+- `INTAKE_OPEN-evaluator_pending`: the real source-purpose intake grant, actual
+  round schedule and API acknowledgment exist; this is not a worker-ready or
+  fresh-baseline claim.
+- `GRADING_READY`: actual runtime activation, API/worker quorum, host admission
+  and immutable same-round scoring baseline are authenticated together.
+
+`ActivatedAt` alone never establishes these purposes. The exporter lists Go
+`1.27.3` as the compiler requirement; `compiler_verified` remains false unless
+independently authenticated compiler evidence exists. An absent baseline is
+printed as not established, never copied from an old or planned control. These
+new capability/command paths remain prepared release work until qualified and
+deployed; they do not assert that current production already supports them.
+
 Before production activation, start with
 [`launch/current-state.json`](launch/current-state.json), the compact preparation
 checkpoint, then verify its live process/session and linked evidence. It is a
 dated operator snapshot, not score/runtime authority or permission to restart an
 active qualification. Live season state remains authoritative in the API,
 database and the supervisor's state directory described below.
+
+### Prepared epoch-one to epoch-two operator handoff
+
+Status: `PREPARED / NOT LIVE` for the optional intake-first release. This is
+the current operator handoff plan, not evidence that a new mode, grant, source,
+baseline, qualification, migration or deployment has run. The historical default
+full-readiness flow below retains its meaning. Do not enable an automatic
+supervisor that can publish source before the required manual handoff stop.
+
+1. Finish epoch one unchanged on its existing evaluation host, frozen product
+   source/evaluator, rules, shared baseline and nine-replicate (`R=9`) scoring.
+   Drain every accepted job, including separately approved and audited recovery
+   attempts. Do not reset its baseline, change its workload, import next-epoch
+   numerical rules or re-evaluate it under a new instrument to speed the handoff.
+2. After the final seal and current reward election, materialize the elected
+   candidate with `source-review-packet` below. Earlier code inspection and
+   ranking notes remain provisional: they never select or approve a winner.
+   Preserve `packet-manifest.json` and its returned exact byte digest,
+   `candidate.json`, original `score.json`, canonical patch, archive key/version
+   metadata and the incomplete `manual-handoff-template.json` worksheet. The
+   packet contains one candidate projection, not the other submissions' code.
+3. Review honesty, safety, intentional useful-traffic suppression and credible
+   production-client benefit against the actual frozen source/instrument and
+   authenticated dataflow. Use the qualified `traffic-preservation/1` check and
+   [production-benefit addendum](evaluator/review/PRODUCTION-BENEFIT.md), including
+   concrete production reachability, changed code, causal mechanism and preserved
+   useful-work semantics. A faster score is insufficient. Missing transitive
+   context, uncertainty or provider unavailability holds review; it is not an
+   approval or a dishonest-submission verdict. A demonstrated
+   `NO_PRODUCTION_BENEFIT` result is eligibility rejection, not an allegation of
+   fraud. Record a substantiated rejection through the scoped v2 review API,
+   then reload the newly elected decision and review the next ranked candidate.
+   Never choose a replacement locally or carry an old approval to a new decision.
+4. The frozen `elected_winner_snow_union_v2` policy still requires genuine Qwen
+   and Gemma evidence and all twelve attributed findings. Expected provider names
+   in a blank template do not prove either model ran. An additional explicit,
+   persisted operator handoff disposition must stop publication until manual
+   approval binds the current elected decision, job/patch/review and exact
+   selected product source lock. A no-winner carry-forward needs its own explicit
+   disposition. The worksheet is not that persisted approval. Replacing the
+   frozen provider requirement with human-only judgment would require separate
+   policy authority and a qualified release; do not fake model provenance or
+   change a live season's provider field.
+5. After genuine approval, use native source staging/publication, not an ad-hoc
+   shell promotion. Stage fresh mode-0700 clones of `server`, `connect`, `sdk`,
+   `proxy`, `glog`, `goidenticons`, `userwireguard`, `sn`, `warp` and `gvisor` at
+   the exact locked commits. Apply only the accepted canonical patch and preserve
+   protected evaluator/dependency surfaces. Record the accepted patch and complete
+   selected product commit map; keep any separately approved trusted-instrument
+   child distinct from its selected product parent. For exhausted/no-winner
+   rankings, retain the incumbent product commits and margin; do not invent a
+   promotion or borrow an unshipped candidate's significance floor.
+6. Persist the immutable publication intent before any push. Recheck durable
+   authority and exact expected/new refs, publish source first and config last,
+   and resume the same commits after lost replies or partial pushes. Ref drift
+   blocks progress; do not fetch a moving source head, rebase a recorded intent,
+   force-push or change product checkouts. A newly staged config parent is chosen
+   only for a fresh intent as documented below. Update the public source-index
+   preview from authenticated records, never branch heads. Mark prepared source
+   `PREPARED`, not active, qualified or scored. The native fast-forward guard
+   assumes protected, non-rewritable branches; it is not strict frozen-old-value
+   compare-and-swap against an external force-rewind. Any observed source-ref
+   drift requires manual resolution before full activation; preserve ordinary
+   no-force publication rather than weakening that guard.
+7. Only the separately implemented, independently qualified and deployed
+   intake-first path may open epoch-two submission intake before new evaluator
+   qualification/baseline completion. It must have the real manual handoff and
+   exact source-purpose intake grant. Open a full seven-day admission window
+   from the actual opening after handoff; do not backdate it to an older reserved
+   preparation time. Publish `INTAKE_OPEN-evaluator_pending`, not runtime-ready.
+   Grade accepted submissions only after the actual exact-source/image runtime
+   quorum, grading activation and immutable fresh same-round scoring baseline
+   are authenticated. A source pin, API intake acknowledgment, prepared image or
+   planned baseline is not worker readiness or a scoring control. Until this
+   path is qualified/deployed, its absence remains an explicit blocker rather
+   than permission to bypass the default gates.
+
+The owner-approved next-epoch G2 choice is floors-only at 95%; it is prospective,
+not an epoch-one change or proof of deployed enforcement. The owner-approved
+epoch-two-and-later G7 rule is separately at least 95% of the same-round baseline
+page coverage and byte coverage. A baseline coverage of 80% therefore requires
+at least 76%, not 75% or 79%. The prospective public fields are
+`expected.minimum_page_coverage_ratio` and
+`expected.minimum_byte_coverage_ratio`. Implementation, deterministic tests and
+release qualification must establish those semantics before grading; do not
+publish the old provisional one-percentage-point or five-percentage-point rule
+as the new policy. Intentional useful-traffic suppression remains prohibited
+regardless of numerical floor headroom.
 
 ## Agent model roles
 
@@ -548,12 +670,19 @@ sim-latency source-review-packet --round-id=ROUND_ID --job-id=JOB_ID \
 
 This read-only command requires existing trusted database/archive access. It
 creates a new mode-0700 directory with read-only evidence, verifies archive
-identities, exports no seed/request secrets, and never records approval. Inspect
-the code and all six criteria. Copy the packet's `review-template.json` into a
+identities, exports no seed/request secrets, and never records approval. Its
+`packet-manifest.json` hashes the exact exported files, and the command returns
+that manifest's byte digest as `packet_manifest_sha256`. Candidate metadata
+preserves the frozen reviewer policy, current elected-decision digest and exact
+score archive object version/length. The archive manifest is bound by its sealed
+content digest; no unavailable manifest-object version is invented. A local
+packet digest identifies prepared bytes, not a new signature or authorization.
+Inspect the code and all six criteria per required provider. Copy the packet's `review-template.json` into a
 new private `review.json`; do not edit the read-only evidence packet. Fill every
 actual finding, explicit dispositions, public reasons and private-evidence
 digest before submitting with `review-v2`. The template includes exact evidence
-identities and expected revision but is deliberately invalid until real review
+identities, expected revision/decision and policy-specific blank finding census
+(twelve for current Snow, eighteen for historical three-member Snow), but is deliberately invalid until real review
 is complete; it never supplies passing findings. After a
 genuine separate source approval, Sol 6.1 max may prepare a proposal ahead of the deadline:
 

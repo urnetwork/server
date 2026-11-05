@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"reflect"
 
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -46,7 +47,7 @@ func validateSourceActivationMode(intent *model.CompetitionSourceActivation, set
 		return errors.New("source activation manifest digest does not match")
 	}
 	generation, err := manifest.generation(intent.SourceGeneration)
-	if err != nil || generation.SourceLockSha256 != intent.SourceLockSha256 || !sourceMarginMatches(generation.SignificantImprovementPercent, intent.Threshold) || generation.G2VolumePolicy != intent.G2VolumePolicy {
+	if err != nil || generation.SourceLockSha256 != intent.SourceLockSha256 || !sourceMarginMatches(generation.SignificantImprovementPercent, intent.Threshold) || generation.G2VolumePolicy != intent.G2VolumePolicy || !reflect.DeepEqual(generation.WorkCoveragePolicy, intent.WorkCoveragePolicy) {
 		return errors.New("source activation differs from its manifest generation and margin")
 	}
 	if intent.TrustedInstrument != nil || intent.Kind == "trusted_instrument_transition" || (generation.TrustedInstrument != nil && intent.TargetEpoch == 2) {
@@ -63,7 +64,7 @@ func validateSourceActivationMode(intent *model.CompetitionSourceActivation, set
 		if err != nil || round.SourceGeneration != intent.SourceGeneration || round.ActivationGeneration != intent.Generation ||
 			round.SourceDecisionDigest != intent.SourceDecisionDigest || round.Kind != intent.Kind || round.Reason != intent.Reason ||
 			round.RewardDecisionDigest != intent.RewardDecisionDigest || round.SourceLockSha256 != intent.SourceLockSha256 ||
-			round.G2VolumePolicy != intent.G2VolumePolicy || !sourceMarginMatches(round.SignificantImprovementPercent, intent.Threshold) {
+			round.G2VolumePolicy != intent.G2VolumePolicy || !reflect.DeepEqual(round.WorkCoveragePolicy, intent.WorkCoveragePolicy) || !sourceMarginMatches(round.SignificantImprovementPercent, intent.Threshold) {
 			return errors.New("source activation differs from its exact epoch-two instrument round mapping")
 		}
 	}

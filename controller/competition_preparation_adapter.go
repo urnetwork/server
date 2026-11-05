@@ -74,7 +74,7 @@ func DecodeCompetitionPreparationRequest(reader io.Reader) (*CompetitionPreparat
 	if err := decodeCompetitionPreparationJson(reader, competitionRuntimeManifestLimit, request); err != nil {
 		return nil, err
 	}
-	if request.Operation != "propagate_and_qualify" || request.Intent.Generation < 1 || request.Intent.TargetEpoch < 1 || request.Intent.TargetEpoch > 6 ||
+	if (request.Operation != "propagate_and_qualify" && request.Operation != "propagate_intake") || request.Intent.Generation < 1 || request.Intent.TargetEpoch < 1 || request.Intent.TargetEpoch > 6 ||
 		request.Intent.TargetRoundId == (server.Id{}) || !sha256Pattern.MatchString(request.Intent.IntentSha256) ||
 		!tokenNamePattern.MatchString(request.Lease.OwnerId) || request.Lease.FencingToken < 1 {
 		return nil, errors.New("preparation request identity is invalid")
@@ -133,7 +133,8 @@ func competitionPreparationIntentDigest(intent model.CompetitionSourceActivation
 // lease in one transaction, then releases it before any external execution.
 // It never renews a dead supervisor's lease on the child's behalf.
 func CheckCompetitionPreparationFence(ctx context.Context, settings *Settings, request CompetitionPreparationRequest) (intent *model.CompetitionSourceActivation, err error) {
-	if settings == nil || !settings.AutomationPolicy.Enabled || settings.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability || request.Operation != "propagate_and_qualify" || !sourceModeMatches(settings, &request.Intent) {
+	if settings == nil || !settings.AutomationPolicy.Enabled || settings.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability ||
+		(request.Operation != "propagate_and_qualify" && request.Operation != "propagate_intake") || !sourceModeMatches(settings, &request.Intent) {
 		return nil, ErrAutomationDisabled
 	}
 	requestedDigest, err := competitionPreparationIntentDigest(request.Intent)
@@ -162,6 +163,10 @@ func CheckCompetitionPreparationFence(ctx context.Context, settings *Settings, r
 				panic(ErrConflict)
 			}
 			server.Raise(validateSourceAuthorizationInTx(ctx, tx, settings, stored, current))
+			if request.Operation == "propagate_intake" && !competitionIntakeFirstApplies(settings, stored) {
+				panic(ErrConflict)
+			}
+			server.Raise(requireSourceOperatorHandoffInTx(ctx, tx, settings, stored))
 			intent = stored
 		})
 	})
@@ -183,20 +188,30 @@ type competitionPreparationAdapter struct {
 // The endpoint is HTTPS with normal certificate verification, no URL secrets,
 // no query/fragment and no redirects. A path prefix may select an approved API.
 func validateCompetitionPreparationConfig(settings *Settings, config CompetitionPreparationConfig) error {
+	return validateCompetitionPreparationPurposeConfig(settings, config, false)
+}
+
+// Intake validates only its actual API/source transport. Missing host commands
+// cannot block this purpose, and cannot be reused to satisfy grading's profile.
+func validateCompetitionPreparationPurposeConfig(settings *Settings, config CompetitionPreparationConfig, intake bool) error {
 	if settings == nil || config.Environment != settings.AutomationPolicy.Environment || config.CompetitionId != settings.CompetitionId || config.SeasonId != settings.AutomationPolicy.SeasonId || config.Staging != settings.AutomationPolicy.Staging ||
 		!settings.AutomationPolicy.Enabled || settings.AutomationPolicy.RequiredApiCapability != model.CompetitionRuntimeBlobCapability ||
-		(config.ApiImageDigest != "" && !imageDigestPattern.MatchString(config.ApiImageDigest)) || !imageDigestPattern.MatchString(config.WorkerImageDigest) || !tokenNamePattern.MatchString(config.WorkerId) || config.TimeoutSeconds < 60 || config.TimeoutSeconds > 4*60*60 {
+		(config.ApiImageDigest != "" && !imageDigestPattern.MatchString(config.ApiImageDigest)) || (!intake && (!imageDigestPattern.MatchString(config.WorkerImageDigest) || !tokenNamePattern.MatchString(config.WorkerId))) || config.TimeoutSeconds < 60 || config.TimeoutSeconds > 4*60*60 {
 		return errors.New("preparation configuration does not bind its scope, runtime images and bounded duration")
 	}
 	endpoint, err := url.Parse(config.ApiBaseUrl)
 	if err != nil || endpoint.Scheme != "https" || endpoint.Hostname() == "" || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" || endpoint.Opaque != "" || strings.Contains(endpoint.EscapedPath(), "%") {
 		return errors.New("preparation API must be an authenticated HTTPS origin or path prefix")
 	}
-	if err := validatePinnedCommand(config.QualificationCommand, config.QualificationSha256, "qualification"); err != nil {
-		return err
-	}
-	if err := validatePinnedCommand(config.WorkerCommand, config.WorkerSha256, "worker"); err != nil {
-		return err
+	if !intake {
+		if err := validatePinnedCommand(config.QualificationCommand, config.QualificationSha256, "qualification"); err != nil {
+			return err
+		}
+		if err := validatePinnedCommand(config.WorkerCommand, config.WorkerSha256, "worker"); err != nil {
+			return err
+		}
+	} else if settings.IntakeFirstPolicy == nil || model.ValidateCompetitionIntakeFirstPolicy(settings.IntakeFirstPolicy) != nil || config.Staging {
+		return ErrConflict
 	}
 	if !filepath.IsAbs(config.SourcePromoterTokenFile) {
 		return errors.New("preparation source-promoter token file must be explicit")
@@ -207,7 +222,10 @@ func validateCompetitionPreparationConfig(settings *Settings, config Competition
 // The real entrypoint cannot replace qualification or worker acknowledgment
 // with a caller callback. It checks every step under a cancelable live fence.
 func RunCompetitionPreparation(ctx context.Context, settings *Settings, config CompetitionPreparationConfig, request CompetitionPreparationRequest) (*CompetitionPreparationResult, error) {
-	if err := validateCompetitionPreparationConfig(settings, config); err != nil {
+	if request.Operation != "propagate_and_qualify" && request.Operation != "propagate_intake" {
+		return nil, ErrConflict
+	}
+	if err := validateCompetitionPreparationPurposeConfig(settings, config, request.Operation == "propagate_intake"); err != nil {
 		return nil, err
 	}
 	archive, ok := settings.artifactArchive.(*blobArtifactArchive)
@@ -253,11 +271,17 @@ func RunCompetitionPreparation(ctx context.Context, settings *Settings, config C
 // API role evidence precedes host qualification so the qualifier can use the
 // real API release identity. No source pointer changes on partial completion.
 func (self *competitionPreparationAdapter) run(ctx context.Context, request CompetitionPreparationRequest) (*CompetitionPreparationResult, error) {
+	if request.Operation != "propagate_and_qualify" && request.Operation != "propagate_intake" {
+		return nil, ErrConflict
+	}
 	intent, err := self.checkFence(ctx, self.settings, request)
 	if err != nil {
 		return nil, err
 	}
 	request.Intent = *intent
+	if request.Operation == "propagate_intake" && !competitionIntakeFirstApplies(self.settings, intent) {
+		return nil, ErrConflict
+	}
 	receipt, err := self.archive.publishRuntimeManifest(ctx, self.settings, intent)
 	if err != nil {
 		return nil, err
@@ -271,6 +295,11 @@ func (self *competitionPreparationAdapter) run(ctx context.Context, request Comp
 	}
 	if _, err := self.checkFence(ctx, self.settings, request); err != nil {
 		return nil, err
+	}
+	if request.Operation == "propagate_intake" {
+		// The API acknowledgment is genuine and durable. There is deliberately
+		// no qualifier/worker launch, role-quorum check or runtime activation.
+		return &CompetitionPreparationResult{Generation: intent.Generation, TargetRoundId: intent.TargetRoundId, EnvelopeSha256: receipt.Sha256, EnvelopeKey: receipt.Key, EnvelopeVersion: receipt.VersionId}, nil
 	}
 	if err := self.runProgram(ctx, self.config.QualificationCommand, self.config.QualificationSha256, request, nil); err != nil {
 		return nil, err

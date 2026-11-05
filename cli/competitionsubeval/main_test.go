@@ -1,11 +1,29 @@
+//go:build linux
+
 // CLI mode validation happens before protected configuration is accessed.
 package main
 
 import (
 	"bytes"
+	"os"
 	"strings"
 	"testing"
 )
+
+// The published launch example must use the same fixed root wrapper as the
+// protected key/sudo policy, not its placement-checked internal child role.
+func TestSubevaluationDeploymentUsesManagedForcedCommand(t *testing.T) {
+	content, err := os.ReadFile("DEPLOYMENT.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	if !strings.Contains(text, "ForceCommand /usr/bin/sudo -n -- /usr/local/libexec/competitionsubeval --config /etc/urnetwork-subeval/agent.json --serve-managed\n") ||
+		strings.Contains(text, "agent.json --serve\n") || !strings.Contains(text, "./cli/competitionsubeval") ||
+		!strings.Contains(text, "management/authorized_keys.in") || !strings.Contains(text, "management/sudoers.in") {
+		t.Fatal("deployment selected another privilege route or confused the coordinator with the standalone agent")
+	}
+}
 
 // The SSH role cannot append a shell command or select both lifecycle owners.
 func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
@@ -85,5 +103,50 @@ func TestSubevaluationArgumentsAcceptFixedRoles(t *testing.T) {
 	freeze, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--freeze=" + runId}, &bytes.Buffer{})
 	if err != nil || freeze.freezeRunId != runId || freeze.dockerOwnerRunId != "" || freeze.cleanupRunId != "" {
 		t.Fatal("independent emergency freeze role was not retained", err)
+	}
+}
+
+// Recovery selects the fixed physical slot; no run id, trailing command or
+// second lifecycle role is accepted before any root configuration is loaded.
+func TestSubevaluationArgumentsAcceptOnlyClosedRecoveryRole(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--recover-active"}, &bytes.Buffer{})
+	if err != nil || !parsed.recoverActive || parsed.serve || parsed.cleanupRunId != "" || parsed.executeRunId != "" || parsed.configPath != "/synthetic/agent.json" || len(parsed.dockerArguments) != 0 {
+		t.Fatal("fixed independent recovery role was not retained", err)
+	}
+	for _, args := range [][]string{
+		{"--recover-active"},
+		{"--config", "/synthetic/agent.json", "--recover-active", "arbitrary-command"},
+		{"--config", "/synthetic/agent.json", "--recover-active=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--serve"},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--cleanup=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--execute=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--docker-owner=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--recover-active", "--docker-probe", "--", "info"},
+	} {
+		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
+			t.Fatal("recovery accepted caller-selected execution or authority", args)
+		}
+	}
+}
+
+// Only the installed forced wrapper selects the managed transport. It cannot
+// append a remote command, pick another lifecycle role or recurse into itself.
+func TestSubevaluationArgumentsAcceptOnlyClosedManagedServeRole(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--serve-managed"}, &bytes.Buffer{})
+	if err != nil || !parsed.serveManaged || parsed.serve || parsed.configPath != "/synthetic/agent.json" || parsed.recoverActive {
+		t.Fatal("managed forced role was not retained exactly", err)
+	}
+	for _, arguments := range [][]string{
+		{"--serve-managed"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--serve"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "arbitrary-command"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--recover-active"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--execute=" + strings.Repeat("a", 64)},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--unit=synthetic.service"},
+		{"--config", "/synthetic/agent.json", "--serve-managed", "--command=/bin/sh"},
+	} {
+		if _, err := parseArguments(arguments, &bytes.Buffer{}); err == nil {
+			t.Fatalf("managed role expanded its root authority: %q", arguments)
+		}
 	}
 }

@@ -18,6 +18,7 @@ import (
 // Approval bytes are visibly synthetic and independent of any selected winner.
 func g2FuturePolicyForTest(t *testing.T) *CompetitionFutureEpochPolicy {
 	t.Helper()
+	coverage := model.DefaultCompetitionWorkCoveragePolicy()
 	commits := map[string]string{}
 	for _, repository := range model.CompetitionSourceRepositoryNames() {
 		commits[repository] = strings.Repeat("a", 40)
@@ -29,7 +30,8 @@ func g2FuturePolicyForTest(t *testing.T) *CompetitionFutureEpochPolicy {
 	patch := []byte("diff --git a/connect/sim-latency/score.go b/connect/sim-latency/score.go\nindex 1111111..2222222 100644\n--- a/connect/sim-latency/score.go\n+++ b/connect/sim-latency/score.go\n@@ -1 +1 @@\n-// synthetic old instrument\n+// synthetic minimum work instrument\n")
 	patchDigest := sha256.Sum256(patch)
 	approval := &model.CompetitionTrustedInstrumentApproval{Schema: 1, ApprovalId: "synthetic-g2-approval", TargetEpoch: 2,
-		G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, InstrumentBaseCommits: commits, InstrumentBaseSourceLockSha256: lock,
+		WorkCoveragePolicy: &coverage,
+		G2VolumePolicy:     model.CompetitionG2VolumePolicyMinimumWork, InstrumentBaseCommits: commits, InstrumentBaseSourceLockSha256: lock,
 		InstrumentBaseImageDigest: "sha256:" + strings.Repeat("b", 64), Patch: patch, PatchSha256: hex.EncodeToString(patchDigest[:]),
 		ProtectedPaths: []string{"connect/sim-latency/score.go"}}
 	approval.ApprovalSha256, err = model.CompetitionAutomationDigest(*approval)
@@ -37,8 +39,9 @@ func g2FuturePolicyForTest(t *testing.T) *CompetitionFutureEpochPolicy {
 		t.Fatal(err)
 	}
 	return &CompetitionFutureEpochPolicy{FromEpoch: 2, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, TrustedInstrument: approval,
+		WorkCoveragePolicy:   &coverage,
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("6", 64), SimulatorSha256: strings.Repeat("5", 64), ScorerSha256: strings.Repeat("5", 64), HostQualificationSha256: strings.Repeat("7", 64),
-		EvaluatorCommand: "/synthetic/minimum-work/evaluator-minimum-work.sh", EvaluatorCommandSha256: strings.Repeat("8", 64),
+		EvaluatorCommand: "/synthetic/coverage/evaluator-work-coverage.sh", EvaluatorCommandSha256: strings.Repeat("8", 64),
 		SelfCheckCommand: "/synthetic/minimum-work/host-check.sh", SelfCheckCommandSha256: strings.Repeat("9", 64)}
 }
 
@@ -80,9 +83,10 @@ func TestG2FuturePolicySelectsEpochTwoAndCarriesForward(t *testing.T) {
 		}
 		expected := settings.EvaluationPolicy
 		expected.G2VolumePolicy = model.CompetitionG2VolumePolicyMinimumWork
+		expected.WorkCoveragePolicy = settings.FutureEpochPolicy.WorkCoveragePolicy
 		expected.SimulatorSha256, expected.ScorerSha256 = strings.Repeat("5", 64), strings.Repeat("5", 64)
 		expected.HostQualificationSha256 = strings.Repeat("7", 64)
-		if !reflect.DeepEqual(future.EvaluationPolicy, expected) || future.scorerVersion() != model.CompetitionMinimumWorkScorerVersion ||
+		if !reflect.DeepEqual(future.EvaluationPolicy, expected) || future.scorerVersion() != model.CompetitionWorkCoverageScorerVersion ||
 			future.EvaluationPolicy.ScoreTimeoutSeconds != 10800 || future.EvaluationPolicy.Replicates != 9 || future.EvaluatorCommand != settings.FutureEpochPolicy.EvaluatorCommand {
 			t.Fatalf("epoch %d lost future policy or changed an unrelated contract: %+v", epoch, future.EvaluationPolicy)
 		}
@@ -98,7 +102,7 @@ func TestG2FutureBaselinePreparationProfileIsInactiveForCurrentRound(t *testing.
 	settings := validSettings()
 	settings.FutureEpochPolicy = g2FuturePolicyForTest(t)
 	legacy := &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{}}
-	futureProfile := &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork}}
+	futureProfile := &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: settings.FutureEpochPolicy.WorkCoveragePolicy}}
 	settings.roundBaselinePreparation, settings.futureBaselinePreparation = legacy, futureProfile
 	current, err := settings.ForCompetitionEpoch(1)
 	if err != nil || current.roundBaselinePreparation != legacy {
@@ -128,6 +132,7 @@ func TestG2SourceSettingsUseQualifiedFuturePinsOnly(t *testing.T) {
 		t.Fatal("current activation inherited future pins", err)
 	}
 	intent.TargetEpoch, intent.G2VolumePolicy = 2, model.CompetitionG2VolumePolicyMinimumWork
+	intent.WorkCoveragePolicy = settings.FutureEpochPolicy.WorkCoveragePolicy
 	if _, err := sourceSettingsFromIntent(settings, intent); err == nil {
 		t.Fatal("uncompiled new instrument accepted")
 	}
@@ -142,7 +147,7 @@ func TestG2SourceSettingsUseQualifiedFuturePinsOnly(t *testing.T) {
 	if _, err := sourceSettingsFromIntent(settings, intent); err == nil {
 		t.Fatal("future source inherited the current round's sealed producer")
 	}
-	settings.futureBaselinePreparation = &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork}}
+	settings.futureBaselinePreparation = &roundBaselinePreparationProfile{Config: roundBaselinePreparationConfig{G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: settings.FutureEpochPolicy.WorkCoveragePolicy}}
 	future, err = sourceSettingsFromIntent(settings, intent)
 	if err != nil || future.roundBaselinePreparation != settings.futureBaselinePreparation {
 		t.Fatal("future source did not use its separately authenticated producer", err)
@@ -163,7 +168,7 @@ func TestG2FutureSourceCannotBypassApprovedPolicyWithLegacyOmission(t *testing.T
 		{epoch: 1, futureConfigured: true, valid: true},
 		{epoch: 2, futureConfigured: true},
 		{epoch: 6, futureConfigured: true},
-		{epoch: 2, valid: true},
+		{epoch: 2},
 	} {
 		settings := automationApiSettings()
 		future := g2FuturePolicyForTest(t)

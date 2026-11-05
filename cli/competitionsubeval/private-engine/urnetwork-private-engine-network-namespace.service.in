@@ -1,4 +1,6 @@
 [Unit]
+OnFailure=urnetwork-subeval-recovery.service
+OnFailureJobMode=replace
 Description=Stable offline private evaluation network namespace
 Before=urnetwork-private-engine-network.service urnetwork-private-containerd.service urnetwork-private-engine.service
 RequiresMountsFor=@BASE_DIRECTORY@/candidate
@@ -8,6 +10,7 @@ ConditionPathIsMountPoint=@BASE_DIRECTORY@/candidate
 Type=simple
 User=root
 Group=root
+Slice=urnetwork-management-private.slice
 UMask=0077
 PrivateNetwork=yes
 WorkingDirectory=@BASE_DIRECTORY@/candidate
@@ -15,6 +18,7 @@ ExecStart=@NAMESPACE_KEEPER_PATH@ infinity
 KillMode=control-group
 Restart=no
 LimitCORE=0
+AllowedCPUs=@MANAGEMENT_CPUSET@
 StandardOutput=null
 StandardError=null
 

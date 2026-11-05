@@ -134,6 +134,9 @@ func (self *DockerProxy) RunOwnedBuild(ctx context.Context, request DockerBuildR
 	if err != nil || digestDockerBytes(dockerfile) != self.plan.Dockerfile.Sha256 {
 		return failBeforeIssue(errors.New("owned Dockerfile failed its fixed content pin"))
 	}
+	if err := validateTrackedSubmissionDockerfile(dockerfile); err != nil {
+		return failBeforeIssue(err)
+	}
 	if err := exclusiveFile(filepath.Join(self.buildDirectory(), "Dockerfile"), dockerfile, 0400); err != nil {
 		return failBeforeIssue(err)
 	}
@@ -272,7 +275,7 @@ func (self *DockerProxy) validateBuildArguments(request DockerBuildRequest) ([]s
 		return nil, errors.New("owned build changed frozen network, executable or resource policy")
 	}
 	allowed := map[string]bool{"EVALUATOR_BASE_IMAGE": true, "BASE_SHA": true, "CANDIDATE_SHA": true, "PATCH_SHA256": true, "POLICY_SHA256": true,
-		"BUILDER_SHA256": true, "PATCH_VALIDATOR_SHA256": true, "CANDIDATE_COMMITS_SHA256": true, "ORIGINAL_SOURCE_IDENTITY_SHA256": true, "SUBMISSION_IDENTITY": true}
+		"BUILDER_SHA256": true, "PATCH_VALIDATOR_SHA256": true, "CANDIDATE_COMMITS_SHA256": true, "ORIGINAL_SOURCE_IDENTITY_SHA256": true, "CANDIDATE_SOURCE_IDENTITY_SHA256": true, "SUBMISSION_IDENTITY": true}
 	baseAlias := "urnetwork/sim-latency-evaluator-base-id:" + strings.TrimPrefix(self.plan.BaseImageDigest, "sha256:")
 	if len(buildArgs) != len(allowed) || buildArgs["EVALUATOR_BASE_IMAGE"] != baseAlias {
 		return nil, errors.New("owned build omitted frozen source arguments")
@@ -305,7 +308,13 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 	if err := validateDockerContextRoot(self.plan.ContextRoot); err != nil {
 		return "", 0, err
 	}
-	contextRoot, err := os.OpenRoot(self.plan.ContextRoot)
+	contextDirectory, err := openDirectoryNoFollow(self.plan.ContextRoot)
+	if err != nil {
+		return "", 0, err
+	}
+	defer contextDirectory.Close()
+	// Root is used only for confined lstat/readlink, never as a no-follow open.
+	contextRoot, err := os.OpenRoot(fmt.Sprintf("/proc/self/fd/%d", contextDirectory.Fd()))
 	if err != nil {
 		return "", 0, err
 	}
@@ -315,14 +324,28 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 		return "", 0, errors.New("owned build source escaped its private root")
 	}
 	current := ""
+	var sourceInfo os.FileInfo
 	for _, part := range strings.Split(relative, string(filepath.Separator)) {
 		current = filepath.Join(current, part)
 		info, err := contextRoot.Lstat(current)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return "", 0, errors.New("owned build source has an unsafe ancestor")
 		}
+		sourceInfo = info
 	}
-	root, err := contextRoot.OpenRoot(relative)
+	if self.beforeContextOpen != nil {
+		self.beforeContextOpen("source", relative)
+	}
+	sourceDirectory, err := openRelativeNoFollow(contextDirectory, relative, os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	if err != nil {
+		return "", 0, err
+	}
+	defer sourceDirectory.Close()
+	openedSource, err := sourceDirectory.Stat()
+	if err != nil || !os.SameFile(sourceInfo, openedSource) {
+		return "", 0, errors.New("owned build source root changed before capture")
+	}
+	root, err := os.OpenRoot(fmt.Sprintf("/proc/self/fd/%d", sourceDirectory.Fd()))
 	if err != nil {
 		return "", 0, err
 	}
@@ -333,17 +356,25 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 	hash := sha256.New()
 	total := int64(0)
 	examined := 0
-	var copyDirectory func(string, int) error
-	copyDirectory = func(relative string, depth int) error {
+	var copyDirectory func(string, int, os.FileInfo) error
+	copyDirectory = func(relative string, depth int, expected os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if depth > self.settings.MaximumContextDepth {
 			return errors.New("owned build context depth exceeds its bound")
 		}
-		directory, err := root.Open(relative)
+		if self.beforeContextOpen != nil {
+			self.beforeContextOpen("directory", relative)
+		}
+		directory, err := openRelativeNoFollow(sourceDirectory, relative, os.O_RDONLY|syscall.O_DIRECTORY, 0)
 		if err != nil {
 			return err
+		}
+		opened, err := directory.Stat()
+		if err != nil || expected != nil && !os.SameFile(expected, opened) {
+			_ = directory.Close()
+			return errors.New("owned build directory changed before capture")
 		}
 		names := []string{}
 		for {
@@ -380,15 +411,16 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 					return err
 				}
 				_, _ = fmt.Fprintf(hash, "directory\x00%s\x00", filepath.ToSlash(child))
-				if err := copyDirectory(child, depth+1); err != nil {
+				if err := copyDirectory(child, depth+1, info); err != nil {
 					return err
 				}
 				continue
 			}
 			if info.Mode()&os.ModeSymlink != 0 {
 				link, err := root.Readlink(child)
+				after, statErr := root.Lstat(child)
 				resolved := filepath.Clean(filepath.Join(filepath.Dir(child), link))
-				if err != nil || filepath.IsAbs(link) || resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
+				if err != nil || statErr != nil || !os.SameFile(info, after) || filepath.IsAbs(link) || resolved == ".." || strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
 					return errors.New("owned build symlink escaped its sealed context")
 				}
 				if err := os.Symlink(link, target); err != nil {
@@ -400,7 +432,10 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 			if !info.Mode().IsRegular() || info.Size() < 0 || info.Size() > self.settings.MaximumContextFileBytes || self.settings.MaximumContextBytes-total < info.Size() {
 				return errors.New("owned build context file exceeds its bound")
 			}
-			input, err := root.OpenFile(child, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+			if self.beforeContextOpen != nil {
+				self.beforeContextOpen("file", child)
+			}
+			input, err := openRelativeNoFollow(sourceDirectory, child, os.O_RDONLY, 0)
 			if err != nil {
 				return err
 			}
@@ -418,7 +453,7 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 			count, copyErr := io.CopyBuffer(counter, &contextReader{ctx: ctx, reader: io.LimitReader(input, self.settings.MaximumContextFileBytes+1)}, make([]byte, self.settings.CopyBufferBytes))
 			after, statErr := input.Stat()
 			closeInputErr, syncErr, closeOutputErr := input.Close(), output.Sync(), output.Close()
-			if copyErr != nil || statErr != nil || closeInputErr != nil || syncErr != nil || closeOutputErr != nil || count != info.Size() || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
+			if copyErr != nil || statErr != nil || closeInputErr != nil || syncErr != nil || closeOutputErr != nil || !os.SameFile(info, after) || count != info.Size() || after.Size() != info.Size() || !after.ModTime().Equal(info.ModTime()) {
 				return errors.New("owned build context changed or failed durable copy")
 			}
 			total += count
@@ -426,7 +461,7 @@ func (self *DockerProxy) snapshotContext(ctx context.Context, source, destinatio
 		}
 		return syncDirectory(filepath.Join(destination, relative))
 	}
-	if err := copyDirectory(".", 0); err != nil {
+	if err := copyDirectory(".", 0, nil); err != nil {
 		return "", total, err
 	}
 	if err := syncDirectory(self.buildDirectory()); err != nil {

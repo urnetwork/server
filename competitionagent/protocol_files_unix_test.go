@@ -1,6 +1,6 @@
-//go:build unix
+//go:build linux
 
-// Coordinator file transport retains the real protected Unix open boundary.
+// Coordinator file transport retains the Linux descriptor-owned open boundary.
 package competitionagent_test
 
 import (

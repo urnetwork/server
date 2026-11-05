@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -201,6 +202,51 @@ func (self *DockerProxy) requireNoRunContainers(ctx context.Context, _ string) e
 	var containers []json.RawMessage
 	if json.Unmarshal(content, &containers) != nil || containers == nil || len(containers) != 0 {
 		return errors.New("host-file handoff requires all owned containers to have joined and been removed")
+	}
+	return nil
+}
+
+// The handoff barrier has joined all admitted Docker work, so no successor can
+// attach while these exact kernel facts are read. Missing parents are unknown,
+// not proof that an orphaned compiler has joined.
+func (self *DockerProxy) requireBuildOutputJoined(ctx context.Context) error {
+	groups := &hostCleanupCgroups{rootPath: "/sys/fs/cgroup", maximumBytes: self.settings.MaximumDocumentBytes, requireCgroupFs: true}
+	file, err := groups.open(self.plan.BuildCgroupName, "cgroup.events", 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, self.settings.MaximumDocumentBytes+1))
+	if err != nil || int64(len(content)) > self.settings.MaximumDocumentBytes || validateBuildOutputJoin(content) != nil {
+		return errors.New("tracked compiler descendants have not positively joined")
+	}
+	return ctx.Err()
+}
+
+// An absent, repeated or malformed population value cannot manufacture a join
+// acknowledgment. The caller retains the actual kernel file for this read.
+func validateBuildOutputJoin(content []byte) error {
+	seen := false
+	for _, line := range strings.Split(string(content), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return errors.New("tracked build cgroup state is malformed")
+		}
+		if _, err := strconv.ParseUint(fields[1], 10, 64); err != nil {
+			return errors.New("tracked build cgroup state has a nonfinite counter")
+		}
+		if fields[0] == "populated" {
+			if seen || fields[1] != "0" {
+				return errors.New("tracked build cgroup is not positively empty")
+			}
+			seen = true
+		}
+	}
+	if !seen {
+		return errors.New("tracked build cgroup omitted its join acknowledgment")
 	}
 	return nil
 }

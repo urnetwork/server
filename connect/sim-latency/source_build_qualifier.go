@@ -128,6 +128,7 @@ func executeSourceBuildQualifier(ctx context.Context, qualification sourceBuildQ
 		TestModel: tests.Model, TestReasoning: tests.Reasoning, WinnerReviewPolicy: tests.WinnerReviewPolicy}
 	if sourceBuildRequestMinimumWork(qualification.Build) {
 		receipt.SimulatorSha256, receipt.G2VolumePolicy = qualification.Artifacts.SimulatorSha256, model.CompetitionG2VolumePolicyMinimumWork
+		receipt.WorkCoveragePolicy = sourceBuildRequestWorkCoverage(qualification.Build).Clone()
 	}
 	if qualification.Build.TrustedInstrument != nil {
 		receipt.Schema, receipt.Operation = 2, "trusted_instrument_build"

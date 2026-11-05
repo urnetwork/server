@@ -18,6 +18,9 @@ readonly REDIS_MEMORY_BYTES=8589934592
 readonly REDIS_PIDS_LIMIT=4096
 readonly BUILD_MEMORY_LIMIT=12g
 readonly BUILD_MEMORY_BYTES=12884901888
+readonly BUILD_PIDS_LIMIT=4096
+readonly BUILD_WORK_LIMIT=10g
+readonly BUILD_WORK_BYTES=10737418240
 readonly SCORER_MEMORY_BYTES=4294967296
 readonly SCORER_PIDS_LIMIT=1024
 readonly PREFLIGHT_MEMORY_BYTES=4294967296
@@ -134,6 +137,9 @@ jq -n \
     --argjson redis_memory_limit_bytes "$REDIS_MEMORY_BYTES" \
     --argjson redis_pids_limit "$REDIS_PIDS_LIMIT" \
     --argjson build_memory_limit_bytes "$BUILD_MEMORY_BYTES" \
+    --argjson build_pids_limit "$BUILD_PIDS_LIMIT" \
+    --arg build_work_limit "$BUILD_WORK_LIMIT" \
+    --argjson build_work_limit_bytes "$BUILD_WORK_BYTES" \
     --argjson active_pids_limit "$((RUNNER_PIDS_LIMIT + POSTGRES_PIDS_LIMIT + REDIS_PIDS_LIMIT))" \
     --argjson scorer_memory_limit_bytes "$SCORER_MEMORY_BYTES" \
     --argjson scorer_pids_limit "$SCORER_PIDS_LIMIT" \
@@ -157,6 +163,8 @@ jq -n \
       redis_pids_limit:$redis_pids_limit,
       build_memory_limit:$build_memory_limit,
       build_memory_limit_bytes:$build_memory_limit_bytes,
+      build_pids_limit:$build_pids_limit,
+      build_work_limit:$build_work_limit,build_work_limit_bytes:$build_work_limit_bytes,
       active_pids_limit:$active_pids_limit,
       scorer_memory_limit_bytes:$scorer_memory_limit_bytes,scorer_pids_limit:$scorer_pids_limit,
       preflight_memory_limit_bytes:$preflight_memory_limit_bytes,preflight_pids_limit:$preflight_pids_limit,

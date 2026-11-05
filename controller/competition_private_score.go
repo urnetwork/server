@@ -48,6 +48,7 @@ func privateCompletedScore(score *ScoreResult) *ScoreResult {
 		Placeable: score.Placeable, TakeoverEligible: score.TakeoverEligible,
 		Gates: map[string]Gate{}, Significance: score.Significance,
 	}
+	coverage, _ := model.CompetitionScoreWorkCoveragePolicy(score.Diagnostics)
 	for _, gateFields := range []struct {
 		name         string
 		numberFields []string
@@ -63,7 +64,11 @@ func privateCompletedScore(score *ScoreResult) *ScoreResult {
 		}, boolFields: []string{"all_replicates_have_samples", "all_pools_nonempty", "all_replicates_span_at_least_minimum"}},
 		{name: "G5_stability", boolFields: []string{"all_replicates_clean"}},
 		{name: "G6_resources", boolFields: []string{"all_replicates_within_limits"}},
+		{name: "G7_work_coverage", numberFields: []string{"baseline_page_coverage", "candidate_page_coverage", "page_min_inclusive", "baseline_byte_coverage", "candidate_byte_coverage", "byte_min_inclusive"}},
 	} {
+		if gateFields.name == "G7_work_coverage" && coverage == nil {
+			continue
+		}
 		if gate, ok := score.Gates[gateFields.name]; ok {
 			result.Gates[gateFields.name] = Gate{
 				Passed:  gate.Passed,
@@ -74,6 +79,11 @@ func privateCompletedScore(score *ScoreResult) *ScoreResult {
 	result.Diagnostics = privateScoreDiagnosticFields(score.Diagnostics,
 		[]string{"replicate_count", "request_timeout_ms", "takeover_margin", "baseline_takeover_raw_max"},
 		[]string{"baseline_takeover_eligible"})
+	if coverage != nil {
+		result.Diagnostics["work_coverage_policy"] = coverage
+		result.Diagnostics["g2_volume_policy"] = string(model.CompetitionG2VolumePolicyMinimumWork)
+		result.Diagnostics["scorer_version"] = model.CompetitionWorkCoverageScorerVersion
+	}
 	for _, name := range []string{"baseline", "candidate"} {
 		if summary, ok := score.Diagnostics[name].(map[string]any); ok {
 			result.Diagnostics[name] = privateScoreDiagnosticFields(summary, []string{

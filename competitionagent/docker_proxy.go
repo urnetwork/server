@@ -53,6 +53,7 @@ type DockerProxy struct {
 	beforeIssue                   func()
 	beforeBuildIssue              func()
 	beforeHandoffWait             func()
+	beforeContextOpen             func(string, string)
 	fileHandoff                   bool
 	hostFiles                     *hostFileBroker
 	syncSpoolDirectory            func(string) error
@@ -84,6 +85,7 @@ func NewDockerProxy(plan DockerProxyPlan, settings DockerProxySettings) (*Docker
 func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protected bool) (*DockerProxy, error) {
 	plan.CgroupNames = append([]string(nil), plan.CgroupNames...)
 	plan.ReadOnlyBindPaths = append([]string(nil), plan.ReadOnlyBindPaths...)
+	plan.BackingImages = append([]string(nil), plan.BackingImages...)
 	if plan.HostFiles != nil {
 		copy := *plan.HostFiles
 		plan.HostFiles = &copy
@@ -164,6 +166,7 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 		self.hostFiles.proveMap = self.proveHostNamespace
 		self.hostFiles.proveNetwork = self.proveHostNetwork
 		self.hostFiles.beforePath = self.requireNoRunContainers
+		self.hostFiles.buildJoined = self.requireBuildOutputJoined
 	}
 	if err := self.recoverJournal(); err != nil {
 		self.Close()

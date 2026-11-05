@@ -323,8 +323,13 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 	}
 	replicates := make([]roundBaselineReplicate, 0, len(rawScores))
 	for _, rawScore := range rawScores {
+		var coverage *model.CompetitionWorkCoverageSummary
+		if evaluationPolicy.WorkCoveragePolicy != nil {
+			coverage = &model.CompetitionWorkCoverageSummary{PlanSha256: strings.Repeat("a", 64), OfferedRoots: 10, ExpectedPages: 100, ExpectedBytes: 1000, CompletedPages: 100, CompletedBytes: 1000, PageCoverage: 1, ByteCoverage: 1}
+		}
 		replicates = append(replicates, roundBaselineReplicate{
-			RawScore: rawScore, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 1000,
+			WorkCoverage: coverage,
+			RawScore:     rawScore, SuccessRate: 1, RequestCount: 100, ReceivedBytes: 1000,
 			FindProvidersLoadP95Ms: 2, FindProvidersPoolP05: 10,
 			FindProvidersSampleSpanFraction: 1,
 			LiveMetrics: map[string]roundBaselineMetricSummary{
@@ -335,13 +340,14 @@ func testRoundBaseline(t testing.TB, settings *Settings, round *roundRecord, raw
 			},
 		})
 	}
-	scorerVersion, err := model.CompetitionScorerVersionForG2Policy(evaluationPolicy.G2VolumePolicy)
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(evaluationPolicy.G2VolumePolicy, evaluationPolicy.WorkCoveragePolicy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	content, err := json.MarshalIndent(roundBaselineManifest{
-		G2VolumePolicy: evaluationPolicy.G2VolumePolicy,
-		ScoreSchema:    ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: scorerVersion,
+		G2VolumePolicy:     evaluationPolicy.G2VolumePolicy,
+		WorkCoveragePolicy: evaluationPolicy.WorkCoveragePolicy,
+		ScoreSchema:        ScoreSchema, Kind: "sim-latency-score-baseline", ScorerVersion: scorerVersion,
 		RoundId: round.RoundId.String(), ConfigSha256: round.ProvidersSha256,
 		RequestTimeoutMs: evaluationPolicy.RequestTimeoutMs,
 		RunFlags:         map[string]string{"official": "true"},

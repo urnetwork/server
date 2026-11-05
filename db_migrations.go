@@ -11335,6 +11335,13 @@ var migrations = []any{
 	// Explicitly approved post-close recovery leaves intake and sealed outcomes
 	// immutable; no new grant is possible without claim and finalization holds.
 	competitionReevaluationPostCloseMigration,
+	// Coverage custody is additive and follows every published migration.
+	// The integration owner keeps this unpublished suffix after origin's head.
+	newSqlMigration(competitionWorkCoverageMigration),
+
+	// Intake purpose never impersonates grading activation. Preserve legacy
+	// guard branches and append only after every published predecessor.
+	newSqlMigration(CompetitionIntakeFirstMigrationSql()),
 
 	// Unique-exit hosted proxies (HOSTED-PROXY-UNIQUE-EXIT.md,
 	// db_proxy_unique_exit_schema.go). All additive: three nullable or

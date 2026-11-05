@@ -143,7 +143,8 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 		t.Fatal(err)
 	}
 	ownershipPin := testAgentPin(t, ownershipPath)
-	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/v2\",\"builder_sha256\":\""+builderSha256+"\",\"subevaluation_ownership_sha256\":\""+ownershipPin.Sha256+"\"}'\n"), 0700); err != nil {
+	backingImagesJson := `["postgres:synthetic@sha256:` + strings.Repeat("a", 64) + `","redis:synthetic@sha256:` + strings.Repeat("b", 64) + `"]`
+	if err := os.WriteFile(builderPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"schema\":1,\"kind\":\"sim-latency-submission-builder/tracked-v1\",\"builder_sha256\":\""+builderSha256+"\",\"subevaluation_ownership_sha256\":\""+ownershipPin.Sha256+"\",\"backing_images\":"+backingImagesJson+"}'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(formatterPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"allowed_paths\":[\"server/example.go\"],\"forbidden_paths\":[\"server/connect/sim-latency/**\"],\"max_patch_bytes\":1024}'\n"), 0700); err != nil {
@@ -157,13 +158,31 @@ func newAgentTestFixture(t *testing.T) *agentTestFixture {
 	if err := os.WriteFile(boundaryPath, []byte(`{"schema":1,"container_root_uid":200000,"container_root_gid":200000,"container_id_map_length":65536}`), 0400); err != nil {
 		t.Fatal(err)
 	}
+	managementPath := filepath.Join(root, "management-policy.json")
+	managementPolicy := managementTestPolicy(DefaultManagementBoundarySettings())
+	managementPolicy.ManagementCpuSet = testRunResourceIdentity().ManagementCpuSet
+	managementBytes, err := json.Marshal(managementPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(managementPath, managementBytes, 0400); err != nil {
+		t.Fatal(err)
+	}
+	recoveryPath := filepath.Join(root, managementRecoveryServiceName)
+	if err := os.WriteFile(recoveryPath, []byte("# private fixture metadata; no unit is installed\n"), 0400); err != nil {
+		t.Fatal(err)
+	}
+	stockCoreProfile, candidateCoreProfile := testCandidateCoreProfilePins(t, root)
 	fixture := &agentTestFixture{inputDirectory: inputDirectory, coordinatorKey: coordinatorKey, agentPublicKey: agentPublicKey,
 		runner: &agentTestRunner{units: map[string]UnitStatus{}}, now: time.Date(2035, 1, 2, 3, 4, 5, 0, time.UTC)}
 	fixture.config = &Config{Schema: Schema, HostId: "synthetic-executor", BaseDirectory: root, TrustedOperatorUser: "synthetic-operator", ExpectedDataDeviceId: 1, StateDirectory: stateDirectory, WorkDirectory: workDirectory, WorkerUser: "synthetic-worker",
 		Evaluator: testAgentPin(t, evaluatorPath), SelfCheck: testAgentPin(t, selfCheckPath), Agent: testAgentPin(t, agentPath),
+		SystemdRun:       testAgentPin(t, agentPath),
+		ManagementPolicy: testAgentPin(t, managementPath), RecoveryService: testAgentPin(t, recoveryPath),
 		Docker: testAgentPin(t, agentPath), DockerSocketPath: filepath.Join(root, "engine", "docker.sock"), SubmissionBuilderIdentity: testAgentPin(t, builderPath),
 		DockerRole: DockerRoleConfig{ScratchDirectory: scratchDirectory, Compose: testAgentPin(t, agentPath), Buildx: testAgentPin(t, agentPath), Dockerfile: testAgentPin(t, agentPath),
-			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, boundaryPath)},
+			PostgresInitialization: testAgentPin(t, agentPath), ResourcePolicy: testAgentPin(t, resourcePath), ResourceBoundary: testAgentPin(t, boundaryPath),
+			StockSeccompProfile: stockCoreProfile, CandidateCoreProfile: candidateCoreProfile},
 		SubmissionBuilderSha256: builderSha256, SubevaluationOwnership: ownershipPin, JsonFormatter: testAgentPin(t, formatterPath),
 		ConfigLocalDirectory: configDirectory, VaultLocalDirectory: vaultDirectory, ConfigLocalSha256: strings.Repeat("1", 64), VaultLocalSha256: strings.Repeat("2", 64),
 		EvaluatorImageDigest: "sha256:" + strings.Repeat("3", 64), SourceLockSha256: strings.Repeat("4", 64), QualificationSha256: strings.Repeat("5", 64),

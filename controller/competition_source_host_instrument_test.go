@@ -37,6 +37,8 @@ func newCompetitionInstrumentHostFixture(t *testing.T, promoted bool) competitio
 	proof.Approval = *approval
 	f.Settings.FutureEpochPolicy = settings.FutureEpochPolicy
 	f.Settings.EvaluationPolicy.G2VolumePolicy = model.CompetitionG2VolumePolicyMinimumWork
+	f.Settings.EvaluationPolicy.WorkCoveragePolicy = approval.WorkCoveragePolicy
+	f.Settings.PatchPolicy.ForbiddenPaths = append(f.Settings.PatchPolicy.ForbiddenPaths, "model/competition_work_coverage_policy.go")
 	intent.BaseSourceLockSha256 = approval.InstrumentBaseSourceLockSha256
 	intent.EvaluatorImageDigest, intent.HostQualificationSha256 = f.Settings.EvaluatorImageDigest, f.Settings.EvaluationPolicy.HostQualificationSha256
 	if promoted {
@@ -57,6 +59,7 @@ func newCompetitionInstrumentHostFixture(t *testing.T, promoted bool) competitio
 	receipt.Schema, receipt.Operation, receipt.ReviewId = 2, "trusted_instrument_build", server.Id{}
 	receipt.InstrumentApprovalSha256, receipt.PatchSha256 = approval.ApprovalSha256, approval.PatchSha256
 	receipt.SourceLockSha256, receipt.SimulatorSha256, receipt.G2VolumePolicy = intent.SourceLockSha256, intent.SimulatorSha256, intent.G2VolumePolicy
+	receipt.WorkCoveragePolicy = intent.WorkCoveragePolicy
 	proof.BuildReceipt = &receipt
 	f.Intent, f.Receipt = intent, receipt
 	f.Profile.SourceLockSha256 = intent.SourceLockSha256

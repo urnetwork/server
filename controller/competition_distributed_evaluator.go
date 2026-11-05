@@ -301,7 +301,7 @@ func authenticateDistributedCompetitionAttempt(ctx context.Context, settings *Se
 	}) != nil || result.Schema != 1 || result.JobId != job.JobId.String() || (result.Score == nil) == (result.EvalError == nil) {
 		return failure("evaluator_result_invalid", "executor result identity or schema is invalid")
 	}
-	if result.Score != nil && (validateScore(result.Score) != nil || !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) || !scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy)) ||
+	if result.Score != nil && (validateScore(result.Score) != nil || !scoreMatchesFrozenMargin(result.Score, settings.EvaluationPolicy.TakeoverMargin) || !scoreMatchesFrozenG2Policy(result.Score, settings.EvaluationPolicy.G2VolumePolicy, settings.EvaluationPolicy.WorkCoveragePolicy)) ||
 		result.EvalError != nil && validateEvaluationError(result.EvalError) != nil || !result.Security.passedFor(result.EvalError) {
 		return failure("containment_gate_failed", "executor result did not prove every frozen scoring and containment gate")
 	}
