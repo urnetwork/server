@@ -6,13 +6,15 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/connect"
 )
 
 // The probe steps an activation answers with (ExtenderProbeStep, C2): every
-// step probed, in the order probed, with its family, port, how long it ran,
+// step probed -- the required test's in the order probed, then the optional
+// carriers', which run together -- with its family, port, how long it ran,
 // how much of the shared budget was left when it started, and how it ended.
 // The refused carriers carry the same two times. Judged over fake probes on
 // the fake activation clock, so each time is exact.
@@ -37,53 +39,56 @@ func testProbeStepTexts(steps []*ExtenderProbeStep) []string {
 	return texts
 }
 
-// An accepted activation lists the required test's steps and then every
-// optional step, in the order probed, each with its own times; a dns port
-// that waited out its budget timed out, and its refused carrier entry carries
-// the same times as its step.
+// An accepted activation lists the required test's steps, in the order
+// probed, and then every optional step, listed as the dns ports and then
+// quic, each with its own times. The optional carriers start together after
+// the forward, so each had the same 9.5 s of the budget left; a dns port that
+// waited it out timed out at the end of the shared budget, and its refused
+// carrier entry carries the same times as its step.
 func TestExtenderActivationListsEveryProbeStep(t *testing.T) {
-	probeNames := testOptionalCarrierProbes
-	probes := newTestActivationProbes()
-	probes.answer = func(ctx context.Context, probe string) error {
-		switch probe {
-		case testTimingTcpProbe:
-			probes.clock.Advance(200 * time.Millisecond)
-		case probeNames.dns53:
-			return probes.clock.WaitOut(ctx)
-		case probeNames.dns4053:
-			probes.clock.Advance(100 * time.Millisecond)
-		case probeNames.quic:
-			probes.clock.Advance(400 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		probeNames := testOptionalCarrierProbes
+		probes := newTestActivationProbes()
+		probes.answer = func(ctx context.Context, probe string) error {
+			switch probe {
+			case testTimingTcpProbe:
+				return testAnswerAfter(ctx, 200*time.Millisecond)
+			case probeNames.dns53:
+				return testNeverAnswer(ctx)
+			case probeNames.dns4053:
+				return testAnswerAfter(ctx, 100*time.Millisecond)
+			case probeNames.quic:
+				return testAnswerAfter(ctx, 400*time.Millisecond)
+			}
+			return nil
 		}
-		return nil
-	}
-	probes.forwardAnswer = func(ctx context.Context) error {
-		probes.clock.Advance(300 * time.Millisecond)
-		return nil
-	}
-	outcome := probes.judge(
-		context.Background(),
-		connect.ExtenderCarrierTcp,
-		connect.ExtenderCarrierQuic,
-		connect.ExtenderCarrierDns,
-	)
-	if outcome.refusal != "" {
-		t.Fatalf("the activation was refused: %s", outcome.refusal)
-	}
-	connect.AssertEqual(t, testProbeStepTexts(outcome.steps), []string{
-		"tcp v4 :8443 200ms of 10000ms ok",
-		// the forward runs over the tcp carrier
-		"forward v4 :8443 300ms of 9800ms ok",
-		"dns v4 :53 3000ms of 9500ms timeout",
-		"dns v4 :4053 100ms of 6500ms ok",
-		"quic v4 :8444 400ms of 6400ms ok",
+		probes.forwardAnswer = func(ctx context.Context) error {
+			return testAnswerAfter(ctx, 300*time.Millisecond)
+		}
+		outcome := probes.judgeOnTheRealClock(
+			context.Background(),
+			connect.ExtenderCarrierTcp,
+			connect.ExtenderCarrierQuic,
+			connect.ExtenderCarrierDns,
+		)
+		if outcome.refusal != "" {
+			t.Fatalf("the activation was refused: %s", outcome.refusal)
+		}
+		connect.AssertEqual(t, testProbeStepTexts(outcome.steps), []string{
+			"tcp v4 :8443 200ms of 10000ms ok",
+			// the forward runs over the tcp carrier
+			"forward v4 :8443 300ms of 9800ms ok",
+			"dns v4 :53 9500ms of 9500ms timeout",
+			"dns v4 :4053 100ms of 9500ms ok",
+			"quic v4 :8444 400ms of 9500ms ok",
+		})
+		connect.AssertEqual(t, len(outcome.refusedCarriers), 1)
+		refusedCarrier := outcome.refusedCarriers[0]
+		connect.AssertEqual(t, refusedCarrier.Carrier, connect.ExtenderCarrierDns)
+		connect.AssertEqual(t, refusedCarrier.Port, 53)
+		connect.AssertEqual(t, refusedCarrier.ElapsedMs, int64(9500))
+		connect.AssertEqual(t, refusedCarrier.BudgetLeftMs, int64(9500))
 	})
-	connect.AssertEqual(t, len(outcome.refusedCarriers), 1)
-	refusedCarrier := outcome.refusedCarriers[0]
-	connect.AssertEqual(t, refusedCarrier.Carrier, connect.ExtenderCarrierDns)
-	connect.AssertEqual(t, refusedCarrier.Port, 53)
-	connect.AssertEqual(t, refusedCarrier.ElapsedMs, int64(3000))
-	connect.AssertEqual(t, refusedCarrier.BudgetLeftMs, int64(9500))
 }
 
 // A refusal lists the steps up to the one that refused it, which is last,

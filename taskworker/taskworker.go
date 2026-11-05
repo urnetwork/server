@@ -115,6 +115,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleCloseExpiredNetworkClientHandlers(clientSession, tx)
 		work.ScheduleRemoveDisconnectedNetworkClients(clientSession, tx)
 		work.ScheduleRemoveRetiredHostedNetworkClients(clientSession, tx)
+		work.ScheduleRemoveRetiredHostedProxyClients(clientSession, tx)
 		work.ScheduleRemoveGoneStClientKeyHistory(clientSession, tx)
 		work.ScheduleSweepOrphanNetworkClientData(clientSession, tx)
 		work.ScheduleSweepOrphanContractData(clientSession, tx)
@@ -156,6 +157,9 @@ func initTaskSchedule(ctx context.Context) {
 		// the modern provider gate's evidence (server/capprobe), apart from
 		// the URL probe's shards, quota and budget
 		work.ScheduleCapabilityProbe(clientSession, tx)
+		// active bandwidth samples in a shard of their own, apart from the
+		// URL probe's sampled-only quality tunnels
+		work.ScheduleProviderBandwidthProbe(clientSession, tx)
 		work.ScheduleRefreshEgressDestinations(clientSession, tx)
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
@@ -284,6 +288,8 @@ func ensureCapabilityProbeChain(ctx context.Context) {
 		case <-time.After(interval):
 		}
 		server.HandleError(func() { work.EnsureCapabilityProbe(ctx) })
+		// the bandwidth probe's chain returns the same way
+		server.HandleError(func() { work.EnsureProviderBandwidthProbe(ctx) })
 	}
 }
 
@@ -382,6 +388,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveRetiredHostedNetworkClients,
 			work.RemoveRetiredHostedNetworkClientsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveRetiredHostedProxyClients,
+			work.RemoveRetiredHostedProxyClientsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveGoneStClientKeyHistory,
@@ -516,6 +526,7 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		work.NewProviderEgressProbeTaskTarget(),
 		work.NewProviderEgressProbeDisabledTaskTarget(),
 		work.NewCapabilityProbeTaskTarget(),
+		work.NewProviderBandwidthProbeTaskTarget(),
 		task.NewTaskTargetWithPost(work.RollupProviderEgressTallies, work.RollupProviderEgressTalliesPost),
 		task.NewTaskTargetWithPost(
 			work.RefreshEgressDestinations,

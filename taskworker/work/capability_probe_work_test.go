@@ -281,13 +281,17 @@ func TestCapabilityProbeKeepsAFinishedPassWhoseShardCleanupFailed(t *testing.T) 
 // URL shard and it would have retired each other's owner. The URL probe's
 // settings, its URL arguments and its legacy arguments now refuse a
 // shard_count that reaches the capability probe's slot, accept the largest
-// that does not, and every geometry they accept leaves the slot free.
+// that does not, and every geometry they accept leaves the slot free. The
+// bandwidth probe's slot 254 is reserved the same way: the largest accepted
+// shard_count is 254, which leaves both slots free.
 func TestUrlProbeShardCountStopsBeforeTheCapabilityProbeSlot(t *testing.T) {
 	for _, c := range []struct {
 		shardCount int
 		valid      bool
 	}{
-		{shardCount: capabilityProbeShardIndex, valid: true},
+		{shardCount: providerBandwidthProbeShardIndex, valid: true},
+		{shardCount: providerBandwidthProbeShardIndex + 1, valid: false},
+		{shardCount: capabilityProbeShardIndex, valid: false},
 		{shardCount: capabilityProbeShardIndex + 1, valid: false},
 	} {
 		settings := defaultProviderEgressProbeSettings("probe.example")
@@ -312,6 +316,9 @@ func TestUrlProbeShardCountStopsBeforeTheCapabilityProbeSlot(t *testing.T) {
 		if c.valid {
 			if err := capabilityProbeShardAvailable(c.shardCount); err != nil {
 				t.Errorf("an accepted URL shard_count %d reaches the capability probe's slot: %v", c.shardCount, err)
+			}
+			if err := providerBandwidthProbeShardAvailable(c.shardCount); err != nil {
+				t.Errorf("an accepted URL shard_count %d reaches the bandwidth probe's slot: %v", c.shardCount, err)
 			}
 		}
 	}

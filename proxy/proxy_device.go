@@ -1076,6 +1076,25 @@ type deviceCreation struct {
 // keepalive pings, resolver refreshes) does not hold it.
 const defaultProxyDeviceIdleTimeout = 45 * time.Minute
 
+// defaultProxyDeviceIdleRefillHold is how long a device may go without user
+// traffic (the activity above) before its below-target windows stop refilling
+// (connect IdleRefillHold). A held window keeps its exits, which keep serving,
+// and the device's next user traffic refills it at once; until then it lists,
+// mints and dials nothing. Without it every below-target window of an idle
+// device refills until the device is reaped: on Main at 17:20Z on 2026-11-05,
+// 22,200 devices were live and 3,268 had moved user traffic in the last ten
+// minutes, while the quality windows built about 48 candidates a second. Ten
+// minutes is the activity window the active-device count uses, so a user
+// pausing for less never sees the hold.
+const defaultProxyDeviceIdleRefillHold = 10 * time.Minute
+
+// The gap in user traffic after which the next activity signals the device's
+// windows (connect NoteUserActivity), so a busy relay costs one swap per
+// update. Any window held for idleness waits at least BalanceRestoreSpreadIdle
+// (1 minute) or IdleRefillHold of no activity, far longer than this, so the
+// first activity after such a wait always signals.
+const proxyDeviceActivityWakeGap = time.Second
+
 func DefaultProxyDeviceSettings() *ProxyDeviceSettings {
 	return DefaultProxyDeviceSettingsWithBufferSize(32)
 }
@@ -1086,6 +1105,7 @@ func DefaultProxyDeviceSettingsWithBufferSize(bufferSize int) *ProxyDeviceSettin
 		ProxyDeviceSpec:              "resident proxy",
 		Mtu:                          connect.DefaultMtu,
 		ProxyDeviceIdleTimeout:       defaultProxyDeviceIdleTimeout,
+		IdleRefillHold:               defaultProxyDeviceIdleRefillHold,
 		SequenceBufferSize:           bufferSize,
 		MemoryTargetByteCount:        defaultProxyDeviceMemoryTargetByteCount,
 		HostedEvaluationPoolMultiple: defaultHostedEvaluationPoolMultiple,
@@ -1098,7 +1118,12 @@ type ProxyDeviceSettings struct {
 	ClientSecurityPolicyGenerator func(context.Context, *connect.SecurityPolicyStatsCollector) connect.SecurityPolicy
 	Mtu                           int
 	ProxyDeviceIdleTimeout        time.Duration
-	SequenceBufferSize            int
+	// How long the device may go without user traffic before its
+	// below-target windows stop refilling until the next user traffic
+	// (connect IdleRefillHold; see defaultProxyDeviceIdleRefillHold).
+	// Nonpositive refills them whether or not the device is used.
+	IdleRefillHold     time.Duration
+	SequenceBufferSize int
 	// MemoryTargetByteCount sizes the shared SDK low profile's private DNS,
 	// mux, transfer, P2P, and carrier budgets. A positive override preserves
 	// the low profile; it is not a whole-device RSS or process-wide limit.
@@ -1265,6 +1290,11 @@ func NewProxyDevice(
 	deviceLocalSettings.ClientControl = localControl
 	deviceLocalSettings.ProviderDiscovery = localControl
 	deviceLocalSettings.LocalApi = localControl
+	// the windows read the device's own record of user traffic, which the tun's
+	// upkeep (the DoH keepalive pings it sends through the device) never
+	// refreshes; until the device exists they read as active
+	var activityDevice atomic.Pointer[ProxyDevice]
+	deviceLocalSettings.UserActivitySince = proxyDeviceUserActivitySince(&activityDevice)
 	deviceLocal, err := sdk.NewPlatformDeviceLocal(
 		nil,
 		networkSpace,
@@ -1373,6 +1403,7 @@ func NewProxyDevice(
 		glog.Infof("[pd]no local nat address available; wg source is not rewritten\n")
 	}
 	proxyDevice.lastActivityNanos.Store(time.Now().UnixNano())
+	activityDevice.Store(proxyDevice)
 
 	glog.Infof("[pd]using api=%s connect=%s\n", networkSpace.GetApiUrl(), networkSpace.GetPlatformUrl())
 
@@ -1455,6 +1486,11 @@ func newProxyDeviceLocalSettings(
 	// refill at once (connect OutOfBalanceRefillProbe, which apps leave off;
 	// server CPUOPT4.md, Part B #1)
 	deviceLocalSettings.OutOfBalanceRefillProbe = true
+	// a device no one has used for IdleRefillHold refills nothing until its next
+	// user traffic, which refills it at once (connect IdleRefillHold, which apps
+	// leave off). NewProxyDevice hands the windows the device's own record of
+	// user traffic, since the tun's upkeep goes through the device too.
+	deviceLocalSettings.IdleRefillHold = proxyDeviceSettings.IdleRefillHold
 	// a hosted window client opens no per-peer session and signs no close
 	// report, so nothing reads its identity key, and each key it published would
 	// be one stored signed registration per window candidate. A post-quantum
@@ -2109,14 +2145,38 @@ func (self *ProxyDevice) Active() bool {
 }
 
 // UpdateActivity records user traffic, holding the device against the idle
-// reaper. False once the device is done.
+// reaper. The first traffic after a gap of proxyDeviceActivityWakeGap also
+// wakes any window that waits for a user (connect NoteUserActivity), so a
+// window whose refill the idle hold kept refills at once. False once the
+// device is done.
 func (self *ProxyDevice) UpdateActivity() bool {
 	select {
 	case <-self.ctx.Done():
 		return false
 	default:
-		self.lastActivityNanos.Store(time.Now().UnixNano())
+		nowNanos := time.Now().UnixNano()
+		previousNanos := self.lastActivityNanos.Swap(nowNanos)
+		if proxyDeviceActivityWakesWindows(previousNanos, nowNanos) && self.deviceLocal != nil {
+			self.deviceLocal.NoteUserActivity()
+		}
 		return true
+	}
+}
+
+// Whether activity at `nowNanos`, after the previous at `previousNanos`, ends a
+// gap long enough that a window may be waiting for it.
+func proxyDeviceActivityWakesWindows(previousNanos int64, nowNanos int64) bool {
+	return int64(proxyDeviceActivityWakeGap) <= nowNanos-previousNanos
+}
+
+// The windows' read of the device's record of user traffic: whether the
+// device in `activityDevice` moved user traffic at or after `since`. Before
+// the device is stored, while it is being created, it reads as active, so no
+// window holds its refill for a device still forming.
+func proxyDeviceUserActivitySince(activityDevice *atomic.Pointer[ProxyDevice]) func(since time.Time) bool {
+	return func(since time.Time) bool {
+		device := activityDevice.Load()
+		return device == nil || since.UnixNano() <= device.lastActivityNanos.Load()
 	}
 }
 
