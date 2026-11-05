@@ -28,8 +28,15 @@ func sealApexReevaluationCycle(t testing.TB, cycle *model.CompetitionJobReevalua
 	cycle.ReceiptSha256 = digest
 }
 
-// Both public polling contracts begin with a real, cached infrastructure failure.
+// Historical callers retain the original cached infrastructure fixture.
 func newApexReevaluationFixture(t testing.TB, v2 bool) (*ApexAdapterFileStore, string, ScoreJobResult, time.Time) {
+	t.Helper()
+	return newApexReevaluationFixtureWithFailure(t, v2, EvaluationFailure{Kind: "infrastructure", Code: "artifact_archive_failed"})
+}
+
+// Public admission/polling records the chosen synthetic original failure;
+// another test never rewrites an already cached terminal classification.
+func newApexReevaluationFixtureWithFailure(t testing.TB, v2 bool, originalFailure EvaluationFailure) (*ApexAdapterFileStore, string, ScoreJobResult, time.Time) {
 	t.Helper()
 	store, err := NewApexAdapterFileStore(filepath.Join(t.TempDir(), "synthetic-apex-recovery"))
 	if err != nil {
@@ -45,7 +52,7 @@ func newApexReevaluationFixture(t testing.TB, v2 bool) (*ApexAdapterFileStore, s
 	name := "synthetic-recovery-miner"
 	preparePrivateScoreAssociation(t, store, name, round, now)
 	job := ScoreJobResult{JobId: server.NewId(), RoundId: round.RoundId, PatchSha256: strings.Repeat("a", 64),
-		State: "completed", EvaluationStatus: "failed", EvaluationFailure: &EvaluationFailure{Kind: "infrastructure", Code: "artifact_archive_failed"},
+		State: "completed", EvaluationStatus: "failed", EvaluationFailure: &originalFailure,
 		DecisionMode: round.DecisionMode, RequiredApiCapability: round.RequiredApiCapability}
 	if _, err := store.RecordAdmission(name, ScoreAcceptedResult{JobId: job.JobId, RoundId: job.RoundId, PatchSha256: job.PatchSha256,
 		State: "queued", StatusUrl: statusPrefix + job.JobId.String(), DecisionMode: job.DecisionMode, RequiredApiCapability: job.RequiredApiCapability}, now); err != nil {
@@ -64,6 +71,9 @@ func newApexReevaluationFixture(t testing.TB, v2 bool) (*ApexAdapterFileStore, s
 		RuntimeQualificationSha256: strings.Repeat("7", 64), FixedSourceCommit: strings.Repeat("b", 40),
 		FixedWorkerSha256: strings.Repeat("c", 64), FixedWorkerImageDigest: "sha256:" + strings.Repeat("d", 64),
 		ApiImageDigest: "sha256:" + strings.Repeat("e", 64), AuthorizedAt: now, ExecutionTimeoutSeconds: 3 * 60 * 60,
+	}
+	if originalFailure.Kind == "submission" && originalFailure.Code == "run_unstable" {
+		cycle.IncidentClass = model.CompetitionJobReevaluationBackingService
 	}
 	sealApexReevaluationCycle(t, cycle)
 	job.State, job.EvaluationStatus, job.EvaluationFailure, job.Reevaluation = "queued", "queued", nil, cycle
@@ -463,7 +473,7 @@ func TestCompetitionReevaluationApexRefreshSharesBackoffAcrossAliases(t *testing
 	}
 }
 
-// Read-only discovery never targets genuine submission failures or a cycle
+// Read-only discovery excludes non-remedial failure classes and any cycle
 // whose one authorization has already been consumed.
 func TestCompetitionReevaluationApexRefreshExcludesGenuineAndUsedFailures(t *testing.T) {
 	store, name, poll, now := newApexReevaluationFixture(t, false)
@@ -475,8 +485,8 @@ func TestCompetitionReevaluationApexRefreshExcludesGenuineAndUsedFailures(t *tes
 		name   string
 		mutate func(*ApexAdapterRecord)
 	}{
-		{name: "genuine g5", mutate: func(record *ApexAdapterRecord) {
-			record.EvaluationFailure = &EvaluationFailure{Kind: "submission", Code: "run_unstable"}
+		{name: "genuine resource failure", mutate: func(record *ApexAdapterRecord) {
+			record.EvaluationFailure = &EvaluationFailure{Kind: "submission", Code: "resource_violation"}
 		}},
 		{name: "canceled", mutate: func(record *ApexAdapterRecord) { record.EvaluationStatus = "canceled" }},
 		{name: "staging", mutate: func(record *ApexAdapterRecord) { record.Staging = true }},
