@@ -29,6 +29,22 @@ type CompetitionFutureEpochPolicy struct {
 	SelfCheckCommandSha256      string                                      `yaml:"self_check_command_sha256"`
 }
 
+// Derived settings own the new optional policy leaves, including the nested
+// approval. Existing source maps and command configuration remain read-only.
+func (self *CompetitionFutureEpochPolicy) cloneWorkCoverage() *CompetitionFutureEpochPolicy {
+	if self == nil {
+		return nil
+	}
+	copy := *self
+	copy.WorkCoveragePolicy = self.WorkCoveragePolicy.Clone()
+	if self.TrustedInstrument != nil {
+		approval := *self.TrustedInstrument
+		approval.WorkCoveragePolicy = self.TrustedInstrument.WorkCoveragePolicy.Clone()
+		copy.TrustedInstrument = &approval
+	}
+	return &copy
+}
+
 // Empty is intentionally legacy; the exported version-one constant remains
 // unchanged for historical callers and artifacts.
 func (self *Settings) scorerVersion() string {
@@ -85,6 +101,7 @@ func (self *Settings) forCompetitionEpoch(epoch int, newActivation bool) (*Setti
 	}
 	copy := *self
 	copy.EvaluationPolicy = self.EvaluationPolicy.Clone()
+	copy.FutureEpochPolicy = self.FutureEpochPolicy.cloneWorkCoverage()
 	p := self.FutureEpochPolicy
 	if p != nil && p.FromEpoch <= epoch {
 		copy.DistributedEvaluationPolicy = p.DistributedEvaluationPolicy

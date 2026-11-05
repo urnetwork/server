@@ -11327,4 +11327,8 @@ var migrations = []any{
 	// Prospective epoch-two executor custody follows the complete published
 	// origin prefix; singleton execution is unchanged until future opt-in.
 	newSqlMigration(competitionDistributedEvaluationMigrationSql),
+
+	// Coverage custody is additive and follows every published migration.
+	// The integration owner keeps this unpublished suffix after origin's head.
+	newSqlMigration(competitionWorkCoverageMigration),
 }

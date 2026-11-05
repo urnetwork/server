@@ -114,6 +114,12 @@ func TestCompetitionWorkCoveragePublicProbeAndFutureCopiesOwnLeaves(t *testing.T
 	if !reflect.DeepEqual(settings.FutureEpochPolicy.WorkCoveragePolicy, original.WorkCoveragePolicy) {
 		t.Fatal("future settings mutated separately configured operator authority")
 	}
+	future.FutureEpochPolicy.WorkCoveragePolicy.MaximumPageCoverageLoss = .5
+	future.FutureEpochPolicy.TrustedInstrument.WorkCoveragePolicy.MaximumByteCoverageLoss = .5
+	if !reflect.DeepEqual(settings.FutureEpochPolicy.WorkCoveragePolicy, original.WorkCoveragePolicy) ||
+		!reflect.DeepEqual(settings.FutureEpochPolicy.TrustedInstrument.WorkCoveragePolicy, original.WorkCoveragePolicy) {
+		t.Fatal("returned future configuration shared an operator coverage leaf")
+	}
 }
 
 // Mandatory gate and policy provenance survive private projection and durable
