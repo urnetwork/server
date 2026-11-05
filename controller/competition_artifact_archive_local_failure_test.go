@@ -88,6 +88,19 @@ func TestCompetitionArtifactArchiveLocalWrappersAndJoinsRetainProvenance(t *test
 	requireCompetitionArchiveDiagnosticClass(t, fmt.Errorf("synthetic-private-unknown: %w", syscall.EIO), "other")
 }
 
+// An explicit test owner retains the intentional pointer without fmt's errno
+// value normalization guidance. The actual error graph still unwraps to the
+// same pointer; no formatter, error predicate or vet check is disabled.
+type competitionArchiveErrnoPointerWrapper struct {
+	cause *syscall.Errno
+}
+
+func (self *competitionArchiveErrnoPointerWrapper) Error() string {
+	return "synthetic-private-unknown-pointer"
+}
+
+func (self *competitionArchiveErrnoPointerWrapper) Unwrap() error { return self.cause }
+
 // Errno's value-receiver methods also make its pointer implement net.Error.
 // Neither representation supplies transport provenance by itself, including
 // through an ordinary wrapper or joined error graph.
@@ -95,7 +108,7 @@ func TestCompetitionArtifactArchiveErrnoPointersDoNotClaimNetwork(t *testing.T) 
 	errno := syscall.EIO
 	for _, cause := range []error{
 		&errno,
-		fmt.Errorf("synthetic-private-unknown-pointer: %w", &errno),
+		&competitionArchiveErrnoPointerWrapper{cause: &errno},
 		errors.Join(errors.New("synthetic-private-pointer-context"), &errno),
 	} {
 		var networkError net.Error
@@ -108,6 +121,9 @@ func TestCompetitionArtifactArchiveErrnoPointersDoNotClaimNetwork(t *testing.T) 
 		requireCompetitionArchiveDiagnosticClass(t, cause, "other")
 	}
 	missing, permission := syscall.ENOENT, syscall.EACCES
+	if !errors.Is(&missing, os.ErrNotExist) || !errors.Is(&permission, os.ErrPermission) {
+		t.Fatal("errno pointer control lost its standard filesystem sentinel matching")
+	}
 	requireCompetitionArchiveDiagnosticClass(t, &missing, "filesystem_not_found")
 	requireCompetitionArchiveDiagnosticClass(t, &permission, "filesystem_permission")
 	requireCompetitionArchiveDiagnosticClass(t,
