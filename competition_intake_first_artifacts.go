@@ -14,7 +14,7 @@ type CompetitionIntakeFirstFunction struct {
 }
 
 // A caller receives owned metadata; historical functions are not redefined by
-// the monitor. Their intact bodies are embedded in the three scoped successors.
+// the monitor. Their intact bodies are embedded in the four scoped successors.
 func CompetitionIntakeFirstFunctionsSql() []CompetitionIntakeFirstFunction {
 	sql := CompetitionIntakeFirstMigrationSql()
 	functions := []struct {
@@ -38,6 +38,7 @@ func CompetitionIntakeFirstFunctionsSql() []CompetitionIntakeFirstFunction {
 		{signature: "competition_v2_round_insert_guard()", result: "trigger", marker: "intake_round_wrapper"},
 		{signature: "competition_v2_round_reserved_identity_guard()", result: "trigger", marker: "intake_reserved_wrapper"},
 		{signature: "competition_round_baseline_insert_guard()", result: "trigger", marker: "intake_baseline_wrapper"},
+		{signature: "competition_work_coverage_round_guard()", result: "trigger", marker: "intake_coverage_round_wrapper"},
 	}
 	result := make([]CompetitionIntakeFirstFunction, 0, len(functions))
 	for _, function := range functions {
@@ -48,4 +49,10 @@ func CompetitionIntakeFirstFunctionsSql() []CompetitionIntakeFirstFunction {
 		result = append(result, CompetitionIntakeFirstFunction{Signature: function.signature, Result: function.result, Arguments: function.arguments, Body: parts[1]})
 	}
 	return result
+}
+
+// The separately sealed coverage migration remains unchanged. Only its exact
+// round body receives the purpose-scoped successor during intake integration.
+func CompetitionIntakeFirstLegacyCoverageRoundBodySql() string {
+	return CompetitionWorkCoverageBodiesSql()["round"]
 }

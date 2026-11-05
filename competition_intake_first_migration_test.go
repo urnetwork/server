@@ -13,7 +13,7 @@ import (
 func TestCompetitionIntakeFirstMigrationRetainsExactLegacyBranches(t *testing.T) {
 	sql := CompetitionIntakeFirstMigrationSql()
 	round, reserved, baseline := CompetitionIntakeFirstLegacyBodiesSql()
-	for _, body := range []string{round, reserved, baseline} {
+	for _, body := range []string{round, reserved, baseline, CompetitionIntakeFirstLegacyCoverageRoundBodySql()} {
 		if strings.Count(sql, body+";\nEND ") != 1 {
 			t.Fatal("intake-first changed or omitted an exact published legacy branch")
 		}
@@ -29,7 +29,7 @@ func TestCompetitionIntakeFirstMigrationRetainsExactLegacyBranches(t *testing.T)
 		}
 	}
 	functions := CompetitionIntakeFirstFunctionsSql()
-	if len(functions) != 15 {
+	if len(functions) != 16 {
 		t.Fatal("intake-first exact function census changed")
 	}
 	seen := map[string]bool{}
@@ -59,7 +59,9 @@ CREATE FUNCTION competition_v2_winner_source_authorized(intent jsonb,predecessor
 `, lease, scope, graph, mode, winner)
 	// The shared harness first creates its own independent winner fixture. Only
 	// that throwaway container's public schema is replaced by this full fixture.
-	setup := "DROP SCHEMA public CASCADE; CREATE SCHEMA public;\n" + competitionIntakeFirstSqlFixture + helpers + competitionTrustedInstrumentMigration() + CompetitionIntakeFirstMigrationSql()
+	coveragePolicy := CompetitionWorkCoverageBodiesSql()["policy"]
+	setup := "DROP SCHEMA public CASCADE; CREATE SCHEMA public;\n" + competitionIntakeFirstSqlFixture + helpers + competitionTrustedInstrumentMigration() +
+		"CREATE FUNCTION competition_work_coverage_policy_valid(policy jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS $fixture_coverage$" + coveragePolicy + "$fixture_coverage$;\n" + CompetitionIntakeFirstMigrationSql()
 	testCompetitionWinnerReviewDatabaseGuards(t, setup, competitionIntakeFirstSqlAssertions)
 }
 
@@ -97,6 +99,7 @@ const competitionIntakeFirstSqlAssertions = `
 CREATE TRIGGER competition_v2_round_source BEFORE INSERT ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_v2_round_insert_guard();
 CREATE TRIGGER competition_v2_round_reserved_identity BEFORE INSERT ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_v2_round_reserved_identity_guard();
 CREATE TRIGGER competition_round_baseline_source_guard BEFORE INSERT ON competition_round_baseline FOR EACH ROW EXECUTE FUNCTION competition_round_baseline_insert_guard();
+CREATE TRIGGER competition_work_coverage_round BEFORE INSERT OR UPDATE ON competition_round FOR EACH ROW EXECUTE FUNCTION competition_work_coverage_round_guard();
 BEGIN;
 DO $fixture$
 DECLARE commits jsonb; refs jsonb; lock_digest text; intent jsonb; policy jsonb; api jsonb; grant_value jsonb; request jsonb; handoff jsonb; at_time timestamp;
@@ -114,6 +117,7 @@ BEGIN
   'manifest_commit',repeat('c',40),'config_expected_commit',repeat('b',40),'publication_journal_sha256',repeat('2',64),
   'evaluator_image_digest','sha256:'||repeat('3',64),'host_qualification_sha256',repeat('4',64),'winner_review_policy','elected_winner_snow_union_v2',
   'g2_volume_policy','minimum-work/1','simulator_sha256',repeat('a',64),'scorer_sha256',repeat('a',64),
+  'work_coverage_policy',jsonb_build_object('kind','seeded-crawl-coverage/v1','synthetic_opaque_ratio',0.95),
   'prepared_at',at_time-interval '1 hour','opens_at','0001-01-01T00:00:00Z');
  INSERT INTO competition_source_activation VALUES('synthetic','synthetic-competition','synthetic-season',1,1,
   intent||jsonb_build_object('generation',1,'expected_generation',0,'target_epoch',1,'target_round_id','00000000-0000-0000-0000-000000000001','kind','baseline'),at_time-interval '1 day',NULL);
@@ -145,7 +149,7 @@ BEGIN
   'automation_policy',jsonb_build_object('enabled',true,'version',2,'environment','synthetic','season_id','synthetic-season','required_api_capability','competition.reward.v2.runtime-blob.v1',
    'source_activation_generation',2,'source_generation',0,'source_lock_sha256',lock_digest,'winner_review_policy','elected_winner_snow_union_v2'),
   'evaluation_policy',jsonb_build_object('replicates',9,'takeover_margin',0.161,'host_qualification_sha256',repeat('4',64),'hardware_id','synthetic-hardware',
-   'g2_volume_policy','minimum-work/1','simulator_sha256',repeat('a',64),'scorer_sha256',repeat('a',64),'work_coverage_policy',jsonb_build_object('synthetic_opaque_ratio',0.95)),
+   'g2_volume_policy','minimum-work/1','simulator_sha256',repeat('a',64),'scorer_sha256',repeat('a',64),'work_coverage_policy',intent->'work_coverage_policy'),
   'season_policy',jsonb_build_object('submission_window_seconds',604800,'epoch_count',6,'preparation_window_seconds',0));
  policy:=policy||jsonb_build_object('distributed_evaluation_policy',jsonb_build_object('approval_sha256',repeat('e',64),
   'hosts',jsonb_build_array(jsonb_build_object('host_id','synthetic-host-local','qualification_sha256',repeat('c',64)),jsonb_build_object('host_id','synthetic-host-remote','qualification_sha256',repeat('d',64)))));
@@ -153,7 +157,7 @@ BEGIN
   'environment','synthetic','competition_id','synthetic-competition','season_id','synthetic-season','generation',2,'expected_generation',1,'target_epoch',2,
   'target_round_id','00000000-0000-0000-0000-000000000002','intent_sha256',repeat('1',64),'round_policy_sha256',encode(sha256(convert_to(policy::text,'UTF8')),'hex'),
   'api_readiness_sha256',encode(sha256(convert_to(api::text,'UTF8')),'hex'),'api_runtime_image_digest',api->>'runtime_image_digest',
-  'created_at',at_time,'season_ends_at',at_time+interval '30 days','retain_until',at_time+interval '60 days');
+  'created_at',at_time,'season_ends_at',at_time+interval '30 days','retain_until',at_time+interval '30 days');
  INSERT INTO synthetic_intake_fixture VALUES(intent,policy,api,grant_value,request,handoff);
 END $fixture$;
 CREATE FUNCTION synthetic_insert_intake(value jsonb, frozen jsonb) RETURNS void LANGUAGE sql AS $$
@@ -171,6 +175,7 @@ INSERT INTO competition_source_operator_handoff SELECT 'synthetic','synthetic-co
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(jsonb_set(policy,''{patch_policy}'',''{}''::jsonb)) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(policy-''evaluator_command_sha256'') FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(jsonb_set(policy,''{scorer_version}'',''"sim-latency-score/2"''::jsonb)) FROM synthetic_intake_fixture');
+SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_policy_variant(jsonb_set(policy,''{evaluation_policy,work_coverage_policy,synthetic_opaque_ratio}'',''0.90''::jsonb)) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value||''{"intent_sha256":"'||repeat('0',64)||'"}''::jsonb,policy) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value||''{"expected_generation":9}''::jsonb,policy) FROM synthetic_intake_fixture');
 SELECT synthetic_expect_intake_failure('SELECT synthetic_insert_intake(grant_value,policy||''{"base_sha":"'||repeat('0',40)||'"}''::jsonb) FROM synthetic_intake_fixture');
@@ -208,7 +213,8 @@ DO $baseline$
 DECLARE content bytea;
 BEGIN
  content:=convert_to(jsonb_build_object('kind','sim-latency-score-baseline','round_id','00000000-0000-0000-0000-000000000002','score_schema',1,'scorer_version','sim-latency-score/3','takeover_margin',0.161,'g2_volume_policy','minimum-work/1',
-  'replicates',(SELECT jsonb_agg(jsonb_build_object('raw_score',80,'request_count',100,'received_bytes',1000)) FROM generate_series(1,9)))::text,'UTF8');
+  'work_coverage_policy',(SELECT intent->'work_coverage_policy' FROM synthetic_intake_fixture),
+  'replicates',(SELECT jsonb_agg(jsonb_build_object('raw_score',80,'request_count',100,'received_bytes',1000,'work_coverage','{"synthetic_measured_work":true}'::jsonb)) FROM generate_series(1,9)))::text,'UTF8');
  INSERT INTO competition_round_baseline VALUES('00000000-0000-0000-0000-000000000002',content,encode(sha256(content),'hex'),'00000000-0000-0000-0000-000000000003',1,repeat('b',64),
   repeat('a',40),repeat('5',64),'sha256:'||repeat('3',64),'sim-latency-score/3','synthetic-hardware',repeat('4',64),timezone('UTC',clock_timestamp()));
  IF competition_v2_intake_grading_ready('00000000-0000-0000-0000-000000000002') THEN RAISE EXCEPTION 'missing configured host no-op receipts permitted grading'; END IF;

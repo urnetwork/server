@@ -26,6 +26,7 @@ func TestMigrationsCompetitionIntakeFirstCarriesExactPredecessorCustody(t *testi
 		{query: competitionProductionBenefitMigrationContract.query, old: round, next: bodies["competition_v2_round_insert_guard()"]},
 		{query: competitionMigration846ArtifactQuery, old: reserved, next: bodies["competition_v2_round_reserved_identity_guard()"]},
 		{query: competitionDistributedEvaluationMigrationContract.query, old: baseline, next: bodies["competition_round_baseline_insert_guard()"]},
+		{query: "(" + strings.Join(competitionWorkCoverageArtifactQueries(), " AND ") + ")", old: server.CompetitionIntakeFirstLegacyCoverageRoundBodySql(), next: bodies["competition_work_coverage_round_guard()"]},
 	} {
 		want := strings.Replace(predecessor.query, snMainnetMigrationLiteral(predecessor.old), snMainnetMigrationLiteral(predecessor.next), 1)
 		if !strings.Contains(query, want) || strings.Contains(query, "p.prosrc="+snMainnetMigrationLiteral(predecessor.old)) {
@@ -65,6 +66,8 @@ func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 			{name: "new raw bytes dropped", sql: `ALTER TABLE competition_source_intake_activation ALTER COLUMN grant_canonical DROP NOT NULL`},
 			{name: "retained source authority weakened", sql: `CREATE OR REPLACE FUNCTION competition_v2_source_authorized(intent jsonb,env text,competition text,season text) RETURNS void LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$`},
 			{name: "retained executor clock weakened", sql: `CREATE OR REPLACE FUNCTION competition_executor_job_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`},
+			{name: "old coverage round body restored", sql: `CREATE OR REPLACE FUNCTION competition_work_coverage_round_guard() RETURNS trigger LANGUAGE plpgsql AS $old$` + server.CompetitionIntakeFirstLegacyCoverageRoundBodySql() + `$old$`},
+			{name: "retained coverage source guard disabled", sql: `ALTER TABLE competition_source_activation DISABLE TRIGGER competition_work_coverage_source`},
 		} {
 			snMainnetMigrationFaultTx(tb, func(ctx context.Context, tx server.PgTx) {
 				if _, err := tx.Exec(ctx, fault.sql); err != nil {

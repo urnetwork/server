@@ -8,7 +8,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// Every inherited predicate survives. Only the three exact legacy-body pins
+// Every inherited predicate survives. Only the four exact legacy-body pins
 // are replaced by successors that embed those complete bodies byte-for-byte.
 func competitionIntakeFirstArtifactQuery() string {
 	functions := server.CompetitionIntakeFirstFunctionsSql()
@@ -30,6 +30,7 @@ func competitionIntakeFirstArtifactQuery() string {
 		replace(competitionProductionBenefitMigrationContract.query, round, bodies["competition_v2_round_insert_guard()"]),
 		replace(competitionMigration846ArtifactQuery, reserved, bodies["competition_v2_round_reserved_identity_guard()"]),
 		replace(competitionDistributedEvaluationMigrationContract.query, baseline, bodies["competition_round_baseline_insert_guard()"]),
+		replace("("+strings.Join(competitionWorkCoverageArtifactQueries(), " AND ")+")", server.CompetitionIntakeFirstLegacyCoverageRoundBodySql(), bodies["competition_work_coverage_round_guard()"]),
 		migrationFp2Table("competition_source_operator_handoff"),
 		snMainnetMigrationColumns("competition_source_operator_handoff",
 			snMainnetMigrationColumn{name: "environment", kind: "character varying(128)", notNull: true},

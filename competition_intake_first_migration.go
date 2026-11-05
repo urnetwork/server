@@ -17,7 +17,8 @@ func CompetitionIntakeFirstMigrationSql() string {
 	return competitionIntakeFirstTablesSql + competitionIntakeFirstAuthoritySql + competitionIntakeFirstRuntimeSql +
 		wrap("competition_v2_round_insert_guard", "intake_round_wrapper", round, competitionIntakeFirstRoundPrefixSql) +
 		wrap("competition_v2_round_reserved_identity_guard", "intake_reserved_wrapper", reserved, competitionIntakeFirstRoundPrefixSql) +
-		wrap("competition_round_baseline_insert_guard", "intake_baseline_wrapper", baseline, competitionIntakeFirstBaselinePrefixSql)
+		wrap("competition_round_baseline_insert_guard", "intake_baseline_wrapper", baseline, competitionIntakeFirstBaselinePrefixSql) +
+		wrap("competition_work_coverage_round_guard", "intake_coverage_round_wrapper", CompetitionIntakeFirstLegacyCoverageRoundBodySql(), competitionIntakeFirstCoverageRoundPrefixSql)
 }
 
 // Positional identity remains zero until integration appends this exact SQL;
@@ -211,7 +212,7 @@ BEGIN
   OR NEW.target_epoch<2 OR NEW.target_epoch>6 OR COALESCE((intent->>'staging')::boolean,false)
   OR (intake_grant->>'created_at')::timestamp IS DISTINCT FROM NEW.created_at OR NEW.created_at<(intent->>'prepared_at')::timestamp
   OR NEW.created_at>timezone('UTC',clock_timestamp())+interval '1 millisecond'
-  OR NOT COALESCE((intake_grant->>'retain_until')::timestamp>(intake_grant->>'season_ends_at')::timestamp AND (intake_grant->>'season_ends_at')::timestamp>NEW.created_at,false)
+  OR NOT COALESCE((intake_grant->>'retain_until')::timestamp>=(intake_grant->>'season_ends_at')::timestamp AND (intake_grant->>'season_ends_at')::timestamp>NEW.created_at,false)
   OR intake_grant ? 'opens_at' OR intake_grant ? 'closes_at'
   OR NOT COALESCE((SELECT t.state IN ('preparation_pending','preparation_blocked','preparation_ready','round_created')
    AND (t.transition_json->>'source_activation_generation')::bigint=NEW.generation FROM competition_supervisor_transition t
@@ -239,6 +240,10 @@ BEGIN
   OR policy->>'scorer_version' IS DISTINCT FROM 'sim-latency-score/3'
   OR policy->'evaluation_policy'->>'g2_volume_policy' IS DISTINCT FROM 'minimum-work/1'
   OR jsonb_typeof(policy->'evaluation_policy'->'work_coverage_policy') IS DISTINCT FROM 'object'
+  OR policy->'evaluation_policy'->'work_coverage_policy' IS DISTINCT FROM intent->'work_coverage_policy'
+  OR (NULLIF(intent->'trusted_instrument','null'::jsonb) IS NOT NULL AND
+   (intent->'trusted_instrument'->'approval'->'work_coverage_policy' IS DISTINCT FROM intent->'work_coverage_policy'
+    OR intent->'trusted_instrument'->'build_receipt'->'work_coverage_policy' IS DISTINCT FROM intent->'work_coverage_policy'))
   OR automatic->'enabled' IS DISTINCT FROM 'true'::jsonb OR automatic->'version' IS DISTINCT FROM '2'::jsonb
   OR automatic->>'environment' IS DISTINCT FROM NEW.environment OR automatic->>'season_id' IS DISTINCT FROM NEW.season_id
   OR automatic->>'required_api_capability' IS DISTINCT FROM 'competition.reward.v2.runtime-blob.v1'
@@ -297,6 +302,7 @@ BEGIN
  observed_at:=timezone('UTC',clock_timestamp());
  IF value->'staging' IS DISTINCT FROM 'false'::jsonb OR value->>'competition_id' IS DISTINCT FROM intake_grant.competition_id
   OR (value->>'epoch_number')::integer IS DISTINCT FROM intake_grant.target_epoch OR value->'policy_json' IS DISTINCT FROM intake_grant.round_policy_json
+  OR value->'policy_json'->'evaluation_policy'->'work_coverage_policy' IS DISTINCT FROM intent->'work_coverage_policy'
   OR value->>'finalized_at' IS NOT NULL OR value->>'winner_job_id' IS NOT NULL OR value->>'admission_closed_at' IS NOT NULL
   OR value->>'automation_sealed_at' IS NOT NULL OR value->>'automation_publication_at' IS NOT NULL OR COALESCE((value->>'canceled')::boolean,false)
   OR (value->>'opens_at')::timestamp<timezone('UTC',transaction_timestamp()) OR (value->>'opens_at')::timestamp>observed_at
@@ -328,6 +334,29 @@ const competitionIntakeFirstRoundPrefixSql = `
 BEGIN
  IF EXISTS(SELECT 1 FROM competition_source_intake_activation WHERE target_round_id=NEW.round_id) THEN
   PERFORM competition_v2_intake_round_authorized(to_jsonb(NEW));
+  RETURN NEW;
+ END IF;
+`
+
+// Coverage's independent round guard otherwise requires a grading pointer too.
+// The new insertion path authenticates the complete same source/approval/grant
+// policy; its original insertion and every update remain the exact legacy body.
+const competitionIntakeFirstCoverageRoundPrefixSql = `
+DECLARE intake_source jsonb; coverage jsonb;
+BEGIN
+ IF TG_OP='INSERT' AND EXISTS(SELECT 1 FROM competition_source_intake_activation WHERE target_round_id=NEW.round_id) THEN
+  PERFORM competition_v2_intake_round_authorized(to_jsonb(NEW));
+  SELECT a.intent_json INTO intake_source FROM competition_source_intake_activation g JOIN competition_source_activation a
+   USING(environment,competition_id,season_id,generation) WHERE g.target_round_id=NEW.round_id AND a.abandoned_at IS NULL;
+  coverage:=NEW.policy_json->'evaluation_policy'->'work_coverage_policy';
+  IF NOT COALESCE(competition_work_coverage_policy_valid(coverage),false) OR coverage IS DISTINCT FROM intake_source->'work_coverage_policy'
+   OR NEW.policy_json->>'scorer_version' IS DISTINCT FROM 'sim-latency-score/3'
+   OR NEW.policy_json->'evaluation_policy'->>'g2_volume_policy' IS DISTINCT FROM 'minimum-work/1'
+   OR (NULLIF(intake_source->'trusted_instrument','null'::jsonb) IS NOT NULL AND
+    (coverage IS DISTINCT FROM intake_source->'trusted_instrument'->'approval'->'work_coverage_policy'
+     OR coverage IS DISTINCT FROM intake_source->'trusted_instrument'->'build_receipt'->'work_coverage_policy')) THEN
+   RAISE EXCEPTION 'intake coverage must bind the complete frozen source, grant and independent instrument approval';
+  END IF;
   RETURN NEW;
  END IF;
 `
@@ -380,12 +409,14 @@ BEGIN
  IF control->>'round_id' IS DISTINCT FROM target::text OR control->>'kind' IS DISTINCT FROM 'sim-latency-score-baseline'
   OR control->'score_schema' IS DISTINCT FROM epoch_round.policy_json->'score_schema'
   OR control->>'scorer_version' IS DISTINCT FROM scorer
+  OR control->'work_coverage_policy' IS DISTINCT FROM epoch_round.policy_json->'evaluation_policy'->'work_coverage_policy'
   OR COALESCE(control->>'g2_volume_policy','') IS DISTINCT FROM COALESCE(epoch_round.policy_json->'evaluation_policy'->>'g2_volume_policy','')
   OR control->'takeover_margin' IS DISTINCT FROM epoch_round.policy_json->'evaluation_policy'->'takeover_margin'
   OR jsonb_typeof(control->'replicates') IS DISTINCT FROM 'array' THEN RETURN false; END IF;
  RETURN jsonb_array_length(control->'replicates')=9 AND (epoch_round.policy_json->'evaluation_policy'->>'replicates')::integer=9
   AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements(control->'replicates') r WHERE
-   NOT COALESCE((r->>'raw_score')::double precision>0 AND (r->>'request_count')::bigint>0 AND (r->>'received_bytes')::bigint>0,false));
+   jsonb_typeof(r->'work_coverage') IS DISTINCT FROM 'object'
+   OR NOT COALESCE((r->>'raw_score')::double precision>0 AND (r->>'request_count')::bigint>0 AND (r->>'received_bytes')::bigint>0,false));
 END $intake_baseline_valid$;
 
 CREATE FUNCTION competition_v2_intake_grading_ready(target uuid) RETURNS boolean LANGUAGE plpgsql AS $intake_grading_ready$
