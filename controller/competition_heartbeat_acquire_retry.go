@@ -1,5 +1,6 @@
 // A returned, wholly unadmitted heartbeat acquisition may recover while its
-// original confirmed authority remains live. SQL/commit deadlines never qualify.
+// original confirmed authority remains live. The job-only adapter separately
+// recognizes one closed no-COMMIT slot-update failure; host renewal does not.
 package controller
 
 import (
@@ -9,8 +10,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// These budgets belong to one worker, independently of manager renewal and
-// finished-outcome persistence. Nonpositive values disable extra acquisition.
+// These existing budgets belong to one worker, independently of manager
+// renewal and completion. Nonpositive values disable deadline continuation.
 type competitionHeartbeatAcquireRetrySettings struct {
 	Timeout        time.Duration
 	AttemptTimeout time.Duration
@@ -74,11 +75,34 @@ func (self *Worker) heartbeatNow() time.Time {
 // The returned start is adopted only after the whole public operation and its
 // cleanup return within every authority/deadline check of the shared engine.
 func retryCompetitionHeartbeatOperation(ctx context.Context, leaseExpiresAt time.Time, settings competitionHeartbeatSettings, host bool, operation func(context.Context) error) (time.Time, error) {
-	policy := competitionSupervisorRenewalSettings{Timeout: settings.AcquireRetry.Timeout, AttemptTimeout: settings.AcquireRetry.AttemptTimeout, LockRetry: settings.LeaseRetry}
 	proof := competitionHeartbeatUnadmittedDeadline
 	if host {
 		proof = competitionHostHeartbeatUnadmittedDeadline
 	}
+	return retryCompetitionHeartbeatWithProof(ctx, leaseExpiresAt, settings, operation, proof)
+}
+
+// A job can continue its closed no-COMMIT transaction only while BOTH of its
+// previously confirmed bounds remain live. Unknown host authority preserves
+// the acquisition-only behavior; it cannot authorize an admitted continuation.
+func retryCompetitionJobHeartbeatOperation(ctx context.Context, jobExpiresAt, hostExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error) (time.Time, error) {
+	proof := competitionHeartbeatUnadmittedDeadline
+	expiresAt := jobExpiresAt
+	if !jobExpiresAt.IsZero() && !hostExpiresAt.IsZero() {
+		if hostExpiresAt.Before(expiresAt) {
+			expiresAt = hostExpiresAt
+		}
+		proof = func(err error) bool {
+			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err)
+		}
+	}
+	return retryCompetitionHeartbeatWithProof(ctx, expiresAt, settings, operation, proof)
+}
+
+// Only the job adapter above broadens its own predicate. Supervisor/host
+// callers retain their original proofs, twenty-second total and shared cap.
+func retryCompetitionHeartbeatWithProof(ctx context.Context, leaseExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, proof func(error) bool) (time.Time, error) {
+	policy := competitionSupervisorRenewalSettings{Timeout: settings.AcquireRetry.Timeout, AttemptTimeout: settings.AcquireRetry.AttemptTimeout, LockRetry: settings.LeaseRetry}
 	var acknowledgedStart time.Time
 	err := retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, policy, func(attemptCtx context.Context) error {
 		now := settings.LeaseRetry.Now
@@ -111,6 +135,7 @@ func competitionHeartbeatUnadmittedDeadline(err error) bool {
 		transaction.AcquireAttempts == 0 || transaction.AcquireAttempts != snapshot.Acquire.Attempt || transaction.AcquireSucceeded != 0 ||
 		transaction.BeginAttempts != 0 || transaction.BeginSucceeded != 0 || transaction.CallbackEntered != 0 || transaction.CommitAttempts != 0 || transaction.CommitAcknowledged != 0 ||
 		transaction.RollbackAttempts != 0 || transaction.RollbackAcknowledged != 0 || transaction.LastBegin != (server.DbTxBoundaryObservation{}) || transaction.LastCommit != (server.DbTxBoundaryObservation{}) || transaction.LastRollback != (server.DbTxBoundaryObservation{}) ||
+		transaction.ReleaseAttempts != 0 || transaction.ReleaseReturned != 0 || transaction.LastRelease != (server.DbTxReleaseObservation{}) ||
 		!competitionReturnedUnadmittedAcquire(snapshot.Acquire) {
 		return false
 	}
@@ -173,6 +198,12 @@ func competitionReturnedUnadmittedAcquire(acquire server.DbAcquireObservation) b
 // Only exact source-owned proof wrappers, phase wrappers and standard fmt/join
 // transparency may surround deadline/Done leaves. Unknown graphs fail closed.
 func competitionHeartbeatDeadlineCauses(root error, host bool) bool {
+	return competitionHeartbeatDeadlineCausesInPhase(root, host, server.DbOperationAcquire)
+}
+
+// The no-COMMIT caller must request Callback explicitly; this never changes
+// what qualifies as an unadmitted host/job acquisition failure.
+func competitionHeartbeatDeadlineCausesInPhase(root error, host bool, phase server.DbOperationPhase) bool {
 	causes := server.InspectErrorCauseBatch(root)
 	if !causes.Complete || causes.NilBranches != 0 {
 		return false
@@ -191,7 +222,7 @@ func competitionHeartbeatDeadlineCauses(root error, host bool) bool {
 			}
 			foundProof = true
 		case competitionDatabasePhaseError:
-			if foundPhase || value.phase != server.DbOperationAcquire {
+			if foundPhase || value.phase != phase {
 				return false
 			}
 			foundPhase = true

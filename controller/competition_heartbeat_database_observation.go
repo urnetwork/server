@@ -59,6 +59,9 @@ type competitionHeartbeatDatabaseSnapshot struct {
 	Acquire           server.DbAcquireObservation                `json:"acquire"`
 	Transaction       server.DbTxObservationSnapshot             `json:"transaction"`
 	Statements        []competitionHeartbeatStatementObservation `json:"statements"`
+	SqlShape          string                                     `json:"sql_shape,omitempty"`
+	SqlStatements     uint64                                     `json:"sql_statements,omitempty"`
+	SqlShapeValid     bool                                       `json:"sql_shape_valid,omitempty"`
 }
 
 // One sequential owner supplies this observation to the original transaction.
@@ -72,6 +75,9 @@ type competitionHeartbeatDatabaseObservation struct {
 	callbacks   uint64
 	unknown     uint64
 	statements  [competitionHeartbeatDatabaseStepCount][3]competitionHeartbeatStatementObservation
+	sqlShape    string
+	sqlCount    uint64
+	sqlValid    bool
 }
 
 // The original error bytes and Is/As graph remain unchanged by diagnostics.
@@ -93,7 +99,8 @@ func captureCompetitionHeartbeatDatabase(ctx context.Context, run func(*competit
 	}
 	snapshot := competitionHeartbeatDatabaseSnapshot{AtEntry: entered, AtReturn: server.ObserveDbContextBudget(ctx),
 		Step: observation.step, CallbackEntries: observation.callbacks, UnknownStatements: observation.unknown,
-		Acquire: *observation.timing.Acquire, Transaction: observation.transaction.Snapshot()}
+		Acquire: *observation.timing.Acquire, Transaction: observation.transaction.Snapshot(),
+		SqlShape: observation.sqlShape, SqlStatements: observation.sqlCount, SqlShapeValid: observation.sqlValid}
 	for _, statements := range observation.statements {
 		for _, statement := range statements {
 			if statement.Count != 0 {
@@ -108,7 +115,7 @@ func captureCompetitionHeartbeatDatabase(ctx context.Context, run func(*competit
 func (self *competitionHeartbeatDatabaseObservation) beginCallback(tx server.PgTx) *competitionHeartbeatObservedTx {
 	self.callbacks++
 	self.step, self.ordinal = competitionHeartbeatDatabaseUnknown, 0
-	return &competitionHeartbeatObservedTx{PgTx: tx, observation: self}
+	return &competitionHeartbeatObservedTx{tx: tx, observation: self}
 }
 
 // A semantic boundary is explicitly chosen by trusted source, not inferred
@@ -138,33 +145,41 @@ func finishCompetitionHeartbeatStatement(ctx context.Context, statement *competi
 	}
 }
 
-// Embedding preserves every other pgx.Tx method. Only the two statement forms
-// used by Heartbeat are observed, with their original contexts and arguments.
+// No embedding can silently bypass the closed proof when pgx adds a method.
+// Every other current method explicitly invalidates proof before delegating.
 type competitionHeartbeatObservedTx struct {
-	server.PgTx
+	tx          server.PgTx
 	observation *competitionHeartbeatDatabaseObservation
 }
 
+var _ server.PgTx = (*competitionHeartbeatObservedTx)(nil)
+
 func (self *competitionHeartbeatObservedTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	statement := self.observation.beginStatement(ctx, "exec")
-	result, err := self.PgTx.Exec(ctx, sql, args...)
+	self.observation.observeSql(statement, sql)
+	result, err := self.tx.Exec(ctx, sql, args...)
 	finishCompetitionHeartbeatStatement(ctx, statement, err)
 	return result, err
 }
 
 func (self *competitionHeartbeatObservedTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
 	statement := self.observation.beginStatement(ctx, "row_scan")
-	return competitionHeartbeatObservedRow{Row: self.PgTx.QueryRow(ctx, sql, args...), ctx: ctx, statement: statement}
+	self.observation.observeSql(statement, sql)
+	return competitionHeartbeatObservedRow{Row: self.tx.QueryRow(ctx, sql, args...), ctx: ctx, statement: statement, observation: self.observation}
 }
 
 // Row.Scan is the actual terminal reply/error boundary for pgx.QueryRow.
 type competitionHeartbeatObservedRow struct {
 	pgx.Row
-	ctx       context.Context
-	statement *competitionHeartbeatStatementObservation
+	ctx         context.Context
+	statement   *competitionHeartbeatStatementObservation
+	observation *competitionHeartbeatDatabaseObservation
 }
 
 func (self competitionHeartbeatObservedRow) Scan(dest ...any) error {
+	if self.statement != nil && self.statement.Returned {
+		self.observation.unknown++
+	}
 	err := self.Row.Scan(dest...)
 	finishCompetitionHeartbeatStatement(self.ctx, self.statement, err)
 	return err
