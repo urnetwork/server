@@ -140,6 +140,7 @@ func (self *competitionLeaseRetryWorkerFixture) Finish(t *testing.T) error {
 func TestCompetitionWorkerLeaseRetryRecoversWithoutCancelOrFreshJobBudget(t *testing.T) {
 	fixture := newCompetitionLeaseRetryWorkerFixture(t)
 	fixture.worker.settings.WorkerLeaseSeconds = 1800
+	fixture.worker.settings.HostHeartbeatMaxAgeSeconds = 1800
 	initialExpiry := fixture.clock.Now().Add(10 * time.Minute)
 	fixture.job.LeaseExpiresAt = &initialExpiry
 	startedAt := *fixture.job.StartedAt
