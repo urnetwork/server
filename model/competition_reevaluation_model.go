@@ -21,34 +21,44 @@ const (
 // The private pinned document binds the original terminal row, actual incident
 // event and separately qualified compatible release. It grants one cycle only.
 type CompetitionJobReevaluationAuthorization struct {
-	Schema                     int             `json:"schema"`
-	Kind                       string          `json:"kind"`
-	IncidentClass              string          `json:"incident_class"`
-	Environment                string          `json:"environment"`
-	CompetitionId              string          `json:"competition_id"`
-	SeasonId                   string          `json:"season_id"`
-	JobId                      server.Id       `json:"job_id"`
-	RoundId                    server.Id       `json:"round_id"`
-	ExpectedCycle              int             `json:"expected_cycle"`
-	ExpectedAttemptCount       int             `json:"expected_attempt_count"`
-	ExpectedTerminalSnapshot   json.RawMessage `json:"expected_terminal_snapshot"`
-	ExpectedTerminalSha256     string          `json:"expected_terminal_sha256"`
-	EvidenceSha256             string          `json:"evidence_sha256"`
-	IncidentEventId            int64           `json:"incident_event_id"`
-	IncidentEventSha256        string          `json:"incident_event_sha256"`
-	IncidentAttempt            int             `json:"incident_attempt"`
-	FailureManifestSha256      string          `json:"failure_manifest_sha256"`
-	RejectedArtifactPath       string          `json:"rejected_artifact_path"`
-	RoundPolicySha256          string          `json:"round_policy_sha256"`
-	BaselineSha256             string          `json:"baseline_sha256"`
-	RuntimeQualificationSha256 string          `json:"runtime_qualification_sha256"`
-	FixedSourceCommit          string          `json:"fixed_source_commit"`
-	FixedWorkerSha256          string          `json:"fixed_worker_sha256"`
-	FixedWorkerImageDigest     string          `json:"fixed_worker_image_digest"`
-	ApiImageDigest             string          `json:"api_image_digest"`
-	AuthorizedAt               time.Time       `json:"authorized_at"`
-	ExpiresAt                  time.Time       `json:"expires_at"`
-	SingleUse                  bool            `json:"single_use"`
+	Schema                     int                                          `json:"schema"`
+	Kind                       string                                       `json:"kind"`
+	IncidentClass              string                                       `json:"incident_class"`
+	Environment                string                                       `json:"environment"`
+	CompetitionId              string                                       `json:"competition_id"`
+	SeasonId                   string                                       `json:"season_id"`
+	JobId                      server.Id                                    `json:"job_id"`
+	RoundId                    server.Id                                    `json:"round_id"`
+	ExpectedCycle              int                                          `json:"expected_cycle"`
+	ExpectedAttemptCount       int                                          `json:"expected_attempt_count"`
+	ExpectedTerminalSnapshot   json.RawMessage                              `json:"expected_terminal_snapshot"`
+	ExpectedTerminalSha256     string                                       `json:"expected_terminal_sha256"`
+	EvidenceSha256             string                                       `json:"evidence_sha256"`
+	IncidentEventId            int64                                        `json:"incident_event_id"`
+	IncidentEventSha256        string                                       `json:"incident_event_sha256"`
+	IncidentAttempt            int                                          `json:"incident_attempt"`
+	FailureManifestSha256      string                                       `json:"failure_manifest_sha256"`
+	RejectedArtifactPath       string                                       `json:"rejected_artifact_path"`
+	RoundPolicySha256          string                                       `json:"round_policy_sha256"`
+	BaselineSha256             string                                       `json:"baseline_sha256"`
+	RuntimeQualificationSha256 string                                       `json:"runtime_qualification_sha256"`
+	FixedSourceCommit          string                                       `json:"fixed_source_commit"`
+	FixedWorkerSha256          string                                       `json:"fixed_worker_sha256"`
+	FixedWorkerImageDigest     string                                       `json:"fixed_worker_image_digest"`
+	ApiImageDigest             string                                       `json:"api_image_digest"`
+	AuthorizedAt               time.Time                                    `json:"authorized_at"`
+	ExpiresAt                  time.Time                                    `json:"expires_at"`
+	SingleUse                  bool                                         `json:"single_use"`
+	PostCloseApproval          *CompetitionJobReevaluationPostCloseApproval `json:"post_close_approval,omitempty"`
+}
+
+// Explicit close-bound authority does not reopen intake or permit changing a
+// sealed result. Omission retains the original open-round recovery contract.
+type CompetitionJobReevaluationPostCloseApproval struct {
+	Schema         int       `json:"schema"`
+	ClosesAt       time.Time `json:"closes_at"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	EvidenceSha256 string    `json:"evidence_sha256"`
 }
 
 // Qualification is a separately pinned operator receipt, not a model or

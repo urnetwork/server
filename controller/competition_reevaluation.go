@@ -281,6 +281,9 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 	default:
 		return ErrConflict
 	}
+	if err := validateCompetitionReevaluationPostCloseApproval(a); err != nil {
+		return err
+	}
 	digest, err := model.CompetitionAutomationDigest(a)
 	if err != nil || digest != request.AuthorizationSha256 {
 		return ErrConflict
@@ -430,8 +433,8 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			if running || slotWorker != nil && (slotExpiry == nil || now.Before(*slotExpiry)) || slotJob != nil {
 				panic(ErrLeaseLost)
 			}
-			if now.Before(a.AuthorizedAt) || !now.Before(a.ExpiresAt) || round.Canceled || round.FinalizedAt != nil || round.AutomationSealedAt != nil || round.AdmissionClosedAt != nil || round.WinnerJobId != nil ||
-				round.CompetitionId != settings.CompetitionId || !submissionWithinEpoch(round, now) || !storedPolicyMatches(settings, round.PolicyJson) {
+			if !competitionReevaluationWithinApprovedWindow(a, round, now) || round.Canceled || round.FinalizedAt != nil || round.AutomationSealedAt != nil || round.AdmissionClosedAt != nil || round.WinnerJobId != nil ||
+				round.CompetitionId != settings.CompetitionId || !storedPolicyMatches(settings, round.PolicyJson) {
 				panic(ErrConflict)
 			}
 			if state != "failed" || cycle != 0 || attempts != a.ExpectedAttemptCount || started == nil || completed == nil || leaseOwner != nil || leaseExpiry != nil ||
@@ -458,7 +461,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			}
 			holds, holdErr := readCompetitionIntakeHolds(ctx, tx, settings)
 			server.Raise(holdErr)
-			if !holds.Evaluation {
+			if !holds.Evaluation || a.PostCloseApproval != nil && !holds.Finalization {
 				panic(ErrAutomationHeld)
 			}
 			server.Raise(ensureAutomationRoundValidInTx(ctx, tx, a.RoundId))
@@ -475,7 +478,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 			}
 			server.Raise(validateCompetitionReevaluationIncidentInTx(ctx, tx, a, *started, *completed))
 			now = self.nowUtc()
-			if now.Before(a.AuthorizedAt) || !now.Before(a.ExpiresAt) || !submissionWithinEpoch(round, now) {
+			if !competitionReevaluationWithinApprovedWindow(a, round, now) {
 				panic(ErrConflict)
 			}
 			cycleReceipt := model.CompetitionJobReevaluationCycle{Schema: 1, Environment: a.Environment, CompetitionId: a.CompetitionId, SeasonId: a.SeasonId, JobId: a.JobId, RoundId: a.RoundId, PatchSha256: "", RoundPolicySha256: a.RoundPolicySha256, BaselineSha256: a.BaselineSha256, Cycle: 1, AuthorizationSha256: request.AuthorizationSha256, EvidenceSha256: a.EvidenceSha256, PreviousTerminalSha256: a.ExpectedTerminalSha256, PreviousFailure: model.CompetitionEvaluationFailure{Kind: failure.Kind, Code: failure.Code, Retriable: false}, RuntimeQualificationSha256: a.RuntimeQualificationSha256, FixedSourceCommit: a.FixedSourceCommit, FixedWorkerSha256: a.FixedWorkerSha256, FixedWorkerImageDigest: a.FixedWorkerImageDigest, ApiImageDigest: a.ApiImageDigest, AuthorizedAt: now, ExecutionTimeoutSeconds: settings.EvaluationPolicy.ScoreTimeoutSeconds}

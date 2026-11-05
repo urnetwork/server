@@ -11327,4 +11327,8 @@ var migrations = []any{
 	// Prospective epoch-two executor custody follows the complete published
 	// origin prefix; singleton execution is unchanged until future opt-in.
 	newSqlMigration(competitionDistributedEvaluationMigrationSql),
+
+	// Explicitly approved post-close recovery leaves intake and sealed outcomes
+	// immutable; no new grant is possible without claim and finalization holds.
+	competitionReevaluationPostCloseMigration,
 }
