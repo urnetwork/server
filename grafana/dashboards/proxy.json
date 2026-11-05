@@ -3370,7 +3370,7 @@
       "id": 70,
       "type": "timeseries",
       "title": "resize passes that wanted to grow / s by window and state",
-      "description": "Resize passes that wanted more clients, by the window state they found: below_min, below_target, strict_hole (fewer kept clients than the target while a strict window's installed clients, warned ones included, fill its hard max), skipped_strict_full (a strict window at its hard max with no warned client that may hand over, so the pass built nothing) and deferred (the expansion backoff or a fixed destination's re-dial pacing held the pass), and held_insufficient_balance (the payer's balance refused the window's contracts, so the pass sent one balance probe instead of building candidates).",
+      "description": "Resize passes that wanted more clients, by the window state they found: below_min, below_target, strict_hole (fewer kept clients than the target while a strict window's installed clients, warned ones included, fill its hard max), skipped_strict_full (a strict window at its hard max with no warned client that may hand over, so the pass built nothing) and deferred (the expansion backoff or a fixed destination's re-dial pacing held the pass), and held_insufficient_balance (the payer's balance refused the window's contracts, so the pass sent one balance probe instead of building candidates), and held_idle (the device had no user traffic for the idle refill hold, 10 minutes, so the pass built and probed nothing until the user is back).",
       "gridPos": {
         "h": 8,
         "w": 12,
