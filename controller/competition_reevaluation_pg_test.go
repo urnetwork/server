@@ -108,8 +108,12 @@ func newCompetitionReevaluationAuthorizationPgFixtureWithTerminal(t testing.TB, 
 // Legacy controls use the actual completion path without typed archive fields;
 // every existing fixture keeps the original inventory evidence by default.
 func newCompetitionReevaluationAuthorizationPgFixtureWithArchiveEvidence(t testing.TB, ctx context.Context, name string,
-	terminalOutcome func(*Settings, *queuedJob) EvaluationOutcome, verifiedInventoryIncident, legacyArchive bool) *competitionReevaluationAuthorizationPgFixture {
+	terminalOutcome func(*Settings, *queuedJob) EvaluationOutcome, verifiedInventoryIncident, legacyArchive bool,
+	beforeTerminal ...func(*competitionReevaluationAuthorizationPgFixture)) *competitionReevaluationAuthorizationPgFixture {
 	t.Helper()
+	if len(beforeTerminal) > 1 {
+		t.Fatal("synthetic recovery fixture accepts one explicit pre-terminal transition")
+	}
 	fixture := &competitionReevaluationAuthorizationPgFixture{competitionRankingFixture: newCompetitionAutomationFixture(t)}
 	addCompetitionAutomationJob(t, fixture.competitionRankingFixture, 80)
 	lease, err := fixture.store.AcquireAutomationLease(ctx, fixture.settings, "synthetic-reevaluation-supervisor", 5*time.Minute)
@@ -147,6 +151,9 @@ func newCompetitionReevaluationAuthorizationPgFixtureWithArchiveEvidence(t testi
 			outcome.archiveFailure = nil
 		}
 		if attempt == 2 && terminalOutcome != nil {
+			if len(beforeTerminal) == 1 {
+				beforeTerminal[0](fixture)
+			}
 			outcome = terminalOutcome(fixture.settings, fixture.job)
 		}
 		retry, err := fixture.store.Complete(ctx, fixture.settings, "synthetic-reevaluation-worker", fixture.job.JobId, outcome)

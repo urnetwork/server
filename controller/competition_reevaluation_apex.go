@@ -1,4 +1,4 @@
-// One authenticated recovery cycle can supersede a cached infrastructure
+// One authenticated recovery cycle can supersede a cached evaluator failure
 // failure without erasing its history or acquiring publication authority.
 package controller
 
@@ -251,13 +251,15 @@ func reconcileApexReevaluationAssociations(records []*ApexAdapterRecord, now tim
 	return true, nil
 }
 
-// A read-only owner probe is not reevaluation permission. Genuine submission
-// failures, completed scores, staging and the already-used recovery stay idle.
+// A read-only owner probe is not reevaluation permission. An unstable run may
+// discover an explicit backing-service receipt; other submission failures,
+// completed scores, staging and an already-used recovery stay idle.
 func apexReevaluationRefreshEligible(record ApexAdapterRecord) bool {
 	return record.JobId != (server.Id{}) && !record.Staging && !record.Published && record.Reevaluation == nil &&
 		record.EvaluationStatus == "failed" && record.EvaluationFailure != nil &&
-		record.EvaluationFailure.Kind == "infrastructure" && !record.EvaluationFailure.Retriable &&
-		(record.EvaluationFailure.Code == "artifact_archive_failed" || record.EvaluationFailure.Code == "evaluation_time_budget_exhausted") &&
+		!record.EvaluationFailure.Retriable &&
+		((record.EvaluationFailure.Kind == "infrastructure" && (record.EvaluationFailure.Code == "artifact_archive_failed" || record.EvaluationFailure.Code == "evaluation_time_budget_exhausted")) ||
+			(record.EvaluationFailure.Kind == "submission" && record.EvaluationFailure.Code == "run_unstable")) &&
 		record.PrivateScore == nil && record.Score == nil && record.EvalError == nil
 }
 

@@ -924,6 +924,7 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// The future executor slots and no-op evidence follow that origin prefix.
 	[]snMainnetMigrationContract{competitionDistributedEvaluationMigrationContract},
 	[]snMainnetMigrationContract{competitionProductionBenefitMigrationContract},
+	[]snMainnetMigrationContract{competitionReevaluationPostCloseMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

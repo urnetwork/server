@@ -11331,4 +11331,8 @@ var migrations = []any{
 	// Optional addendum encoding is compatible with the previous release; new
 	// code requires it only after checking historical exact review replay.
 	newSqlMigration(competitionProductionBenefitReviewMigration()),
+
+	// Explicitly approved post-close recovery leaves intake and sealed outcomes
+	// immutable; no new grant is possible without claim and finalization holds.
+	competitionReevaluationPostCloseMigration,
 }
