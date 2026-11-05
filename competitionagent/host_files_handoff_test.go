@@ -1,3 +1,5 @@
+//go:build linux
+
 // Handoff regressions force a pending daemon response and a concurrent file
 // operation. Fake boundaries prove ordering without host mounts or sleeps.
 package competitionagent

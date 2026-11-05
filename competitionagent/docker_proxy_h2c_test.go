@@ -1,3 +1,5 @@
+//go:build linux
+
 // BuildKit compatibility tests exercise real native HTTP/2, legacy upgrade and
 // reverse-session byte transport with fake local servers, never Docker itself.
 package competitionagent

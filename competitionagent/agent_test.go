@@ -1,3 +1,5 @@
+//go:build linux
+
 // Deterministic protocol-level tests exercise real persistence and framing with
 // only the systemd bus replaced. No database, Docker or network is involved.
 package competitionagent

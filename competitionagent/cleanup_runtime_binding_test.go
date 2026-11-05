@@ -1,3 +1,5 @@
+//go:build linux
+
 // Launch binding must use the independently admitted endpoint and actual
 // bounded candidate device, not merely a separately valid private engine.
 package competitionagent

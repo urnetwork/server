@@ -1,3 +1,5 @@
+//go:build linux
+
 // Only the pinned root host audit can use this read-only private-engine role.
 // It never creates an untracked namespace probe or touches the user's daemon.
 package competitionagent

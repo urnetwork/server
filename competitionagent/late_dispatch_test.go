@@ -1,3 +1,5 @@
+//go:build linux
+
 // A complete but delayed old transfer cannot reserve a host after its original
 // deadline. Only private input files, fake units and an acknowledged read gate
 // are used; no wall-clock sleeps or native evaluator workloads are involved.

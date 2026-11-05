@@ -1,3 +1,5 @@
+//go:build linux
+
 // Host-file RPC ownership tests inject native work into a private real proxy
 // journal. No privileged syscall, real daemon or production endpoint is used.
 package competitionagent
