@@ -32,6 +32,35 @@ type competitionCommandAgentTransport struct {
 	connection competitionExecutorConnection
 }
 
+// Management placement precedes unauthenticated framing for both host classes.
+// Local launch retains the existing trusted-root coordinator role; SSH uses the
+// independently provisioned exact forced command, never a generic sudo bridge.
+func (self competitionCommandAgentTransport) commandArguments() (string, []string, error) {
+	command := self.connection.AgentCommand
+	arguments := []string{"--config", self.connection.AgentConfigPath, "--serve-managed"}
+	switch self.host.Transport {
+	case "local":
+		if err := verifyPinnedExecutable(command, self.connection.AgentCommandSha256); err != nil {
+			return "", nil, err
+		}
+		digest, _, err := hashRegularFile(self.connection.AgentConfigPath)
+		if err != nil || digest != self.connection.AgentConfigSha256 {
+			return "", nil, errors.New("local executor role pin changed")
+		}
+	case "ssh":
+		settings := self.profile.Config.Settings
+		command = settings.SshCommand
+		arguments = []string{"-T", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+			"-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "RequestTTY=no", "-o", "ConnectionAttempts=1",
+			"-o", "ConnectTimeout=" + strconv.Itoa(int(settings.ConnectionTimeout/time.Second)), "-o", "UserKnownHostsFile=" + self.connection.SshKnownHostsFile,
+			"-i", self.connection.SshIdentityFile, "--", self.connection.SshEndpoint,
+			self.connection.AgentCommand + " --config " + self.connection.AgentConfigPath + " --serve-managed"}
+	default:
+		return "", nil, errors.New("unsupported executor transport")
+	}
+	return command, arguments, nil
+}
+
 // Both directions are authenticated before files are trusted. The caller's
 // absolute job deadline bounds this request timeout, including artifact copies.
 func (self competitionCommandAgentTransport) Exchange(parent context.Context, request competitionagent.Request, inputDirectory, outputDirectory string) (competitionagent.Response, error) {
@@ -42,24 +71,9 @@ func (self competitionCommandAgentTransport) Exchange(parent context.Context, re
 	if err := competitionagent.SignRequest(&request, self.profile.PrivateKey); err != nil {
 		return competitionagent.Response{}, err
 	}
-	command := self.connection.AgentCommand
-	arguments := []string{"--config", self.connection.AgentConfigPath, "--serve"}
-	if self.host.Transport == "local" {
-		if err := verifyPinnedExecutable(command, self.connection.AgentCommandSha256); err != nil {
-			return competitionagent.Response{}, err
-		}
-		digest, _, err := hashRegularFile(self.connection.AgentConfigPath)
-		if err != nil || digest != self.connection.AgentConfigSha256 {
-			return competitionagent.Response{}, errors.New("local executor role pin changed")
-		}
-	}
-	if self.host.Transport == "ssh" {
-		command = settings.SshCommand
-		arguments = []string{"-T", "-F", "/dev/null", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
-			"-o", "ForwardAgent=no", "-o", "ClearAllForwardings=yes", "-o", "PermitLocalCommand=no", "-o", "RequestTTY=no", "-o", "ConnectionAttempts=1",
-			"-o", "ConnectTimeout=" + strconv.Itoa(int(settings.ConnectionTimeout/time.Second)), "-o", "UserKnownHostsFile=" + self.connection.SshKnownHostsFile,
-			"-i", self.connection.SshIdentityFile, "--", self.connection.SshEndpoint,
-			self.connection.AgentCommand + " --config " + self.connection.AgentConfigPath + " --serve"}
+	command, arguments, err := self.commandArguments()
+	if err != nil {
+		return competitionagent.Response{}, err
 	}
 	process := exec.CommandContext(ctx, command, arguments...)
 	process.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"}
