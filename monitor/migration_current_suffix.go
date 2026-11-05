@@ -993,6 +993,7 @@ const transactionTimeoutRoleDefaultArtifactQuery = `(` + transactionTimeoutPoolR
 		JOIN pg_roles role_row ON role_row.oid = setting_row.setrole
 		CROSS JOIN LATERAL unnest(setting_row.setconfig) AS setting
 		WHERE setting_row.setdatabase = (SELECT oid FROM pg_database WHERE datname = current_database())
+		AND role_row.rolname = current_user
 		AND NOT role_row.rolsuper
 		AND setting = 'transaction_timeout=15min'))`
 
