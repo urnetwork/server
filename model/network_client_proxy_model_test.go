@@ -274,13 +274,17 @@ func TestSweepOrphanReapsProxyClients(t *testing.T) {
 		connect.AssertEqual(t, host, staleProxyClient.ProxyHost)
 		connect.AssertEqual(t, block, staleProxyClient.Block)
 
-		// before the reap the startup sync sees both
+		// before the reap the startup sync sees only the live client: the stale
+		// one has no active network_client, though its row is still there
 		proxyClients, _, err := GetProxyClientsSince(ctx, host, block, 0)
 		connect.AssertEqual(t, err, nil)
 		_, ok := proxyClients[liveProxyClient.ProxyId]
 		connect.AssertEqual(t, ok, true)
 		_, ok = proxyClients[staleProxyClient.ProxyId]
-		connect.AssertEqual(t, ok, true)
+		connect.AssertEqual(t, ok, false)
+		staleRow, err := GetProxyClient(ctx, staleProxyClient.ProxyId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, staleRow != nil, true)
 
 		SweepOrphanNetworkClientData(ctx, 1000)
 
