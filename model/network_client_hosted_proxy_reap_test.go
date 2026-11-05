@@ -119,8 +119,9 @@ func TestHostedProxyRemovedTwoDaysAgoLeavesTheWireGuardSet(t *testing.T) {
 	})
 }
 
-// The boundary, on the reap alone: a proxy removed 47 hours ago stays, with its
-// row still in the WireGuard set; at 49 hours it is deleted.
+// The boundary, on the reap alone: a proxy removed 47 hours ago keeps its rows,
+// though it left the WireGuard set at its removal (GetProxyClientsSince reads
+// active clients only); at 49 hours it is deleted.
 func TestHostedProxyReapKeepsARemovedProxyFor47Hours(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -132,8 +133,14 @@ func TestHostedProxyReapKeepsARemovedProxyFor47Hours(t *testing.T) {
 		if removedCount != 0 || more || !passComplete || cursor != (HostedProxyReapCursor{}) {
 			t.Fatalf("at 47h: removed=%d more=%t pass_complete=%t cursor=%+v", removedCount, more, passComplete, cursor)
 		}
-		if !retiredHostedTestClientExists(t, proxy.clientId) || !hostedProxyReapTestInWireGuardSet(t, proxy) {
+		if !retiredHostedTestClientExists(t, proxy.clientId) {
 			t.Fatal("a proxy removed 47h ago was reaped")
+		}
+		if n := hostedProxyReapTestRowCount(t, `SELECT count(*) FROM proxy_client WHERE proxy_id = $1`, proxy.proxyId); n != 1 {
+			t.Fatalf("a proxy removed 47h ago has %d proxy_client rows, want its row kept", n)
+		}
+		if hostedProxyReapTestInWireGuardSet(t, proxy) {
+			t.Fatal("a removed proxy is still in the WireGuard set")
 		}
 
 		removedCount, cursor, passComplete, more = RemoveRetiredHostedProxyClients(ctx, deactivateTime.Add(49*time.Hour), HostedProxyReapCursor{}, settings)

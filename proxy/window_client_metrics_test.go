@@ -91,12 +91,12 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 			}
 		}
 	}
-	// 3 windows x 3 building pass states x 9 outcomes, 3 x 6 pass states,
+	// 3 windows x 3 building pass states x 9 outcomes, 3 x 7 pass states,
 	// 3 x 7 warning causes, 3 x 7 removal causes, 3 x 4 balance probe
 	// outcomes, 3 x 5 window states
 	for name, want := range map[string]int{
 		"urnetwork_proxy_window_candidates_total":     81,
-		"urnetwork_proxy_window_expand_passes_total":  18,
+		"urnetwork_proxy_window_expand_passes_total":  21,
 		"urnetwork_proxy_window_warnings_total":       21,
 		"urnetwork_proxy_window_removals_total":       21,
 		"urnetwork_proxy_window_balance_probes_total": 12,
@@ -116,7 +116,7 @@ func TestWindowClientStatsCollectorExportsTheFixedVocabulary(t *testing.T) {
 			t.Errorf("no balance probe series has outcome %q", outcome)
 		}
 	}
-	for _, state := range []string{"below_min", "below_target", "strict_hole", "skipped_strict_full", "deferred", "held_insufficient_balance", "selectable_full", "no_selectable"} {
+	for _, state := range []string{"below_min", "below_target", "strict_hole", "skipped_strict_full", "deferred", "held_insufficient_balance", "held_idle", "selectable_full", "no_selectable"} {
 		if !labels["state"][state] {
 			t.Errorf("no series has state %q", state)
 		}
