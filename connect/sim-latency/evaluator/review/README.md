@@ -18,6 +18,72 @@ The prospective wrapper reads `/etc/urnetwork/competition-review-v2.json` and
 `/var/lib/urnetwork/competition-review/snow-provider-v2.json`; existing v1
 installation files and claim journals must not be overwritten or reset.
 
+## Traffic-preservation addendum
+
+`traffic-preservation/1` makes the existing prohibition on deliberate workload
+suppression explicit for epoch 1 and future reviews. It is not a new numerical
+gate, a zero-failure requirement, a new model-policy ID, or a seventh public
+criterion. Each model must return `workload_preservation` with the exact
+version, `pass`, `fail` or `uncertain`, and a factual explanation. Approval
+requires `pass`. A failed check must be supported by a failed existing
+`measurement_integrity`, `workload_generalization` or `source_safety` finding
+and an applicable existing reason. Missing/malformed checks fail closed; an
+uncertain check cannot approve. Every Snow member must supply its own check.
+
+The shared instructions require tracing changed deadlines, admission, refusal,
+retry and body completion, including suppression of downstream discovery.
+Authentic telemetry and passing G1/G2 do not establish honesty. Conversely,
+lower success or work is only an investigation signal: ordinary variation,
+incidental regression, genuine optimization, caller cancellation, security
+refusal and legitimate overload recovery are not automatically misconduct.
+
+The private packet carries the activated image/source identity, frozen
+evaluation policy, compiled simulator/scorer hashes when available, and the
+trusted-instrument overlay proof when one exists. The selected product parent
+inside that proof must not replace its instrumented server child. The manager
+reads the fixed instrument-file census from that exact commit even when the
+candidate touches none of those files. Future coverage-helper absence is
+explicitly authenticated at historical bases. Whole files preserve local
+helpers, but this is not a complete transitive dependency graph; unavailable
+external helpers require uncertainty/additional authenticated context, not
+invented semantics. Source/image/proof mismatches hold review.
+
+The fixed addendum text and SHA-256, instrument bytes/hashes, exact score and
+patch enter the readable model input and non-clock cache identity. Both Snow
+and historical single-provider paths validate their original input. Old cached
+judgments remain retained; missing or different context holds for operator
+intervention instead of silently reusing an old approval or rerolling a model.
+No existing review or frozen round policy is rewritten by this implementation.
+Touched-file and instrument context have separate bounds, and the overall
+4 MiB request bound still refuses oversize input rather than truncating it.
+
+The new source is not operational qualification. Before activation:
+
+1. Independently run the deterministic `TestWinnerWorkloadReview*`, existing
+   winner-review suites, and `TestCompetitionReviewInstrument*` tests, including
+   the private packet's database producer regression on the designated test
+   host. These tests make no live model calls.
+2. Precommit the exact wrapper/binary/image/settings/addendum and input hashes.
+   Extend the qualified one-shot plan with all cases in
+   [`testdata/workload-review-qualification-v1.json`](../../testdata/workload-review-qualification-v1.json),
+   alongside existing benign, fabrication, injection and containment controls.
+   Use authenticated instrument context for the intended epoch. Keep expected
+   verdict labels outside provider input; the mock-test context is not genuine
+   qualification evidence.
+3. Run the actual pinned Qwen/Gemma union, retaining each original subcheck,
+   six findings, input/output hashes, provider receipts, usage and containment
+   evidence. Include deliberate generic large-transfer refusal, incomplete
+   parent-body suppression, an honest optimization with the same suspicious
+   metrics, legitimate cancellation, and missing recovery-context uncertainty.
+   Never resample a failed or uncertain completed case until it agrees.
+4. Authorize deployment of the exact qualified control programs separately.
+   Do not change epoch 1's scorer, numeric gates, accepted results or source pins.
+   A future instrument change needs its own approved image and fresh baseline.
+
+The historical qualification receipts and draft plans below do not cover this
+new mandatory context/output contract. Passing mocked schema/union tests proves
+contract enforcement, not real-model detection or freedom from false positives.
+
 ## Historical key-backed policies
 
 This is the real tool-free Responses API client for `gpt-5.4-mini` at `xhigh`

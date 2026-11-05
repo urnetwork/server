@@ -94,6 +94,9 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 		if err != nil || lock != packet.Entry.BaseSourceLockSha256 || packet.SourceCommits["server"] != packet.BaseSha || packet.ActivationGeneration != 1 {
 			t.Fatalf("review packet lost its authenticated complete source base: %+v, %v", packet.SourceCommits, err)
 		}
+		if err := ValidateCompetitionReviewInstrument(packet); err != nil || packet.Instrument.EvaluationPolicy != fixture.settings.EvaluationPolicy {
+			t.Fatal("review packet lost activated instrument or frozen evaluation policy", err)
+		}
 		paused := *fixture.settings
 		paused.AutomationPolicy.Enabled = false
 		if packet, err := fixture.store.SourceReviewPacket(ctx, &paused, job.RoundId, job.JobId); err != nil || packet == nil || !bytes.Equal(packet.Score, scoreBytes) {

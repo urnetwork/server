@@ -29,6 +29,7 @@ type CompetitionSourceReviewPacket struct {
 	SourceCommits         map[string]string               `json:"source_commits"`
 	SourceGeneration      int                             `json:"source_generation"`
 	ActivationGeneration  int64                           `json:"activation_generation"`
+	Instrument            *CompetitionReviewInstrument    `json:"instrument,omitempty"`
 }
 
 // Reads bounded immutable bytes and checks both identity and declared length.
@@ -104,6 +105,14 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 				panic(ErrConflict)
 			}
 			packet.SourceCommits, packet.SourceGeneration, packet.ActivationGeneration = intent.Commits, intent.SourceGeneration, intent.Generation
+			if intent.G2VolumePolicy != policy.EvaluationPolicy.G2VolumePolicy ||
+				(intent.SimulatorSha256 != "" && intent.SimulatorSha256 != policy.EvaluationPolicy.SimulatorSha256) ||
+				(intent.ScorerSha256 != "" && intent.ScorerSha256 != policy.EvaluationPolicy.ScorerSha256) {
+				panic(ErrConflict)
+			}
+			packet.Instrument = &CompetitionReviewInstrument{Schema: 1, ServerCommit: intent.Commits["server"], ImageDigest: intent.EvaluatorImageDigest,
+				SimulatorSha256: policy.EvaluationPolicy.SimulatorSha256, ScorerSha256: policy.EvaluationPolicy.ScorerSha256, EvaluationPolicy: policy.EvaluationPolicy, TrustedInstrument: intent.TrustedInstrument}
+			server.Raise(ValidateCompetitionReviewInstrument(packet))
 		})
 	})
 	if errors.Is(err, pgx.ErrNoRows) {

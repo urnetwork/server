@@ -105,12 +105,13 @@ func loadWinnerReviewSourceFiles(ctx context.Context, repositoriesRoot string, p
 // The deployment-qualified broker must perform actual model review, not simply
 // echo a template. No command, credential or untrusted executable is supplied.
 type winnerReviewBrokerRequest struct {
-	Operation    string                                    `json:"operation"`
-	Request      controller.CompetitionWinnerReviewRequest `json:"request"`
-	Packet       *controller.CompetitionSourceReviewPacket `json:"packet"`
-	Template     model.CompetitionIntegrityReviewRequest   `json:"template"`
-	SourceFiles  []winnerReviewSourceFile                  `json:"source_files"`
-	Instructions string                                    `json:"instructions"`
+	Operation      string                                    `json:"operation"`
+	Request        controller.CompetitionWinnerReviewRequest `json:"request"`
+	Packet         *controller.CompetitionSourceReviewPacket `json:"packet"`
+	Template       model.CompetitionIntegrityReviewRequest   `json:"template"`
+	SourceFiles    []winnerReviewSourceFile                  `json:"source_files"`
+	WorkloadReview *winnerWorkloadReviewContext              `json:"workload_review,omitempty"`
+	Instructions   string                                    `json:"instructions"`
 }
 
 // This is trusted broker provenance, not a model's self-authentication. The
@@ -127,7 +128,7 @@ type winnerReviewBrokerResult struct {
 
 // Rejects stale/cross-candidate responses and unfinished judgments before any
 // API mutation. Infrastructure/uncertainty is not a dishonest-submission verdict.
-func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template model.CompetitionIntegrityReviewRequest, policy model.CompetitionAutomationPolicy, original ...winnerReviewBrokerRequest) error {
+func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template model.CompetitionIntegrityReviewRequest, policy model.CompetitionAutomationPolicy, original winnerReviewBrokerRequest) error {
 	maximumEvidenceBytes := 64 * 1024
 	if model.IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy) {
 		maximumEvidenceBytes = 512 * 1024
@@ -153,12 +154,11 @@ func validateWinnerReviewBrokerResult(result *winnerReviewBrokerResult, template
 		return errors.New("winner review private evidence digest does not match")
 	}
 	if model.IsCompetitionSnowWinnerReviewPolicy(policy.WinnerReviewPolicy) {
-		if len(original) != 1 {
-			return errors.New("Snow review requires its original authenticated input")
-		}
-		if err := validateWinnerSnowEvidence(result, original[0]); err != nil {
+		if err := validateWinnerSnowEvidence(result, original); err != nil {
 			return err
 		}
+	} else if err := validateWinnerModelEvidence(result, original); err != nil {
+		return err
 	}
 	return model.ValidateCompetitionIntegrityReview(review, policy)
 }
@@ -248,6 +248,10 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	if err != nil {
 		return err
 	}
+	broker.WorkloadReview, err = loadWinnerWorkloadReviewContext(reviewCtx, self.repositoriesRoot, packet, defaultWinnerWorkloadReviewSettings())
+	if err != nil {
+		return err
+	}
 	brokerBytes, err := json.Marshal(broker)
 	if err != nil || len(brokerBytes) > 4*1024*1024 {
 		return errors.New("winner review packet exceeds its bounded protocol")
@@ -309,14 +313,14 @@ func (self *sourceSupervisorRuntime) reviewWinner(ctx context.Context, _ model.C
 	return writePrivateReviewFile(filepath.Join(root, "review-receipt.json"), content)
 }
 
-// An accepted Snow judgment must retain the exact completed response and its
+// Every accepted judgment must retain the exact completed response and its
 // original authenticated input. Missing metadata holds without another call.
 func winnerReviewResponse(path string, request winnerReviewBrokerRequest, run func() ([]byte, error)) ([]byte, winnerReviewBrokerRequest, error) {
 	output, err := readSourceFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return winnerReviewCompletedResponse(path+".broker-response", request, run)
 	}
-	if err != nil || !model.IsCompetitionSnowWinnerReviewPolicy(request.Request.Policy.WinnerReviewPolicy) {
+	if err != nil {
 		return output, request, err
 	}
 	completed, original, err := winnerReviewCompletedResponse(path+".broker-response", request, nil)
@@ -324,7 +328,7 @@ func winnerReviewResponse(path string, request winnerReviewBrokerRequest, run fu
 		return nil, request, err
 	}
 	if !bytes.Equal(output, completed) {
-		return nil, request, errors.New("accepted Snow judgment differs from its original completed response")
+		return nil, request, errors.New("accepted winner judgment differs from its original completed response")
 	}
 	return output, original, nil
 }

@@ -31,15 +31,19 @@ func winnerModelFixture() (winnerReviewBrokerRequest, winnerModelJudgment) {
 		Request: controller.CompetitionWinnerReviewRequest{RoundId: roundId, JobId: template.JobId, SealSha256: sealSha256,
 			RewardRevision: template.ExpectedRevision, RewardDecisionSha256: template.ExpectedDecisionSha256, CriteriaVersion: template.CriteriaVersion,
 			Policy: policy, ReviewerModel: model.CompetitionWinnerReviewModel, ReviewerReasoning: model.CompetitionWinnerReviewReasoning},
-		Packet: &controller.CompetitionSourceReviewPacket{Patch: patch, Score: score,
+		Packet: &controller.CompetitionSourceReviewPacket{Patch: patch, Score: score, BaseSha: strings.Repeat("a", 40),
 			RewardRevision: template.ExpectedRevision, ReviewCriteriaVersion: template.CriteriaVersion,
 			Seal: model.CompetitionEvaluationSeal{RoundId: roundId, SealSha256: sealSha256, BaselineSha256: template.BaselineSha256},
 			Entry: model.CompetitionSealedEntry{JobId: template.JobId, State: "succeeded", Eligible: true,
 				PatchSha256: template.PatchSha256, ScoreSha256: template.ScoreSha256, BaseSourceLockSha256: template.BaseSourceLockSha256, ArtifactManifestSha256: template.ArtifactManifestSha256},
 			PatchPolicy: controller.PatchPolicy{MaxPatchBytes: 4096, AllowedPaths: []string{"connect/example.go"}}},
 		SourceFiles: []winnerReviewSourceFile{{Path: "connect/example.go", Sha256: hex.EncodeToString(sourceDigest[:]), Content: source}}}
+	request.WorkloadReview = winnerWorkloadContextFixture(request.Packet.BaseSha)
+	request.Packet.EvaluatedImageDigest = "sha256:" + strings.Repeat("9", 64)
+	request.Packet.Instrument = &controller.CompetitionReviewInstrument{Schema: 1, ServerCommit: request.Packet.BaseSha, ImageDigest: request.Packet.EvaluatedImageDigest}
 	return request, winnerModelJudgment{Decision: "approve", ReasonCodes: result.Review.ReasonCodes,
-		PublicExplanation: result.Review.PublicExplanation, PrivateEvidence: result.PrivateEvidence, Findings: result.Review.Findings}
+		PublicExplanation: result.Review.PublicExplanation, PrivateEvidence: result.PrivateEvidence, Findings: result.Review.Findings,
+		WorkloadPreservation: &winnerWorkloadPreservationFinding{Version: winnerWorkloadReviewVersion, Disposition: "pass", Explanation: "The synthetic comment-only change preserves request admission, deadlines and delivered work."}}
 }
 
 // Emit one real-shape Responses terminal event, not pre-decoded model data.
@@ -83,17 +87,21 @@ func TestWinnerReviewModelPinsAuthorityAndBindsFindings(t *testing.T) {
 			Reasoning struct {
 				Effort string `json:"effort"`
 			} `json:"reasoning"`
-			Store      bool   `json:"store"`
-			Stream     bool   `json:"stream"`
-			Tools      []any  `json:"tools"`
-			ToolChoice string `json:"tool_choice"`
-			Input      string `json:"input"`
+			Store        bool   `json:"store"`
+			Stream       bool   `json:"stream"`
+			Tools        []any  `json:"tools"`
+			ToolChoice   string `json:"tool_choice"`
+			Input        string `json:"input"`
+			Instructions string `json:"instructions"`
 		}
 		if err := json.Unmarshal(body, &payload); err != nil {
 			t.Fatal(err)
 		}
 		if payload.Model != winnerReviewMiniProviderSnapshot || payload.Reasoning.Effort != "xhigh" || payload.Store || !payload.Stream || len(payload.Tools) != 0 || payload.ToolChoice != "none" {
 			t.Fatal("model execution contract was downgraded or gained tools")
+		}
+		if !strings.Contains(payload.Instructions, winnerWorkloadReviewInstructions) || !strings.Contains(payload.Input, `"workload_review"`) {
+			t.Fatal("single-provider review skipped the required traffic-preservation evidence or instructions")
 		}
 		var readable struct {
 			Patch string `json:"patch_text"`
@@ -110,7 +118,7 @@ func TestWinnerReviewModelPinsAuthorityAndBindsFindings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy); err != nil {
+	if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(result.PrivateEvidence, "resp_synthetic") {
@@ -159,7 +167,7 @@ func TestWinnerReviewModelSelectsProviderFromFrozenPolicy(t *testing.T) {
 		if err != nil || calls != 1 || result == nil || result.Model != modelName || result.Reasoning != reasoning {
 			t.Fatalf("frozen policy result: %+v calls=%d error=%v", result, calls, err)
 		}
-		if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy); err != nil {
+		if err := validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -245,7 +253,7 @@ func TestWinnerReviewModelRetainsCompletedMalformedAnswerAsUncertainty(t *testin
 	if err != nil {
 		t.Fatal("completed malformed answer became a retryable transport failure", err)
 	}
-	if result.Review.SourceDisposition != "deferred" || validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy) == nil {
+	if result.Review.SourceDisposition != "deferred" || validateWinnerReviewBrokerResult(result, request.Template, request.Request.Policy, request) == nil {
 		t.Fatal("malformed completed model output authorized a verdict")
 	}
 }
