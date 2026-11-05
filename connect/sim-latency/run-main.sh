@@ -58,7 +58,7 @@ Optional environment:
   SIM_LATENCY_WORKER_SHA256        pinned worker launcher digest
   SIM_LATENCY_PREPARE_COMMAND      absolute trusted runtime propagation adapter
   SIM_LATENCY_PREPARE_SHA256       pinned propagation/qualification adapter digest
-  SIM_LATENCY_REVIEW_COMMAND       qualified isolated three-model Snow review broker
+  SIM_LATENCY_REVIEW_COMMAND       qualified isolated frozen-policy review broker
   SIM_LATENCY_REVIEW_SHA256        pinned review broker digest
   SIM_LATENCY_REVIEWER_TOKEN_FILE  scoped reviewer token, never sent to the broker
   SIM_LATENCY_BUILD_COMMAND        qualified isolated source-build/test broker
@@ -68,6 +68,20 @@ V2 supervise uses a durable database lease and the frozen closing policy.
 The elected-winner policy invokes qualified review/build brokers automatically.
 Missing runtime propagation/readiness leaves preparation_blocked. It
 never calls legacy promote --no-winner for a provisional reward winner.
+
+Current epoch-one to epoch-two operator plan (optional intake-first release is
+PREPARED / NOT LIVE until independently qualified and deployed): finish epoch
+one unchanged on its existing host, rules, shared baseline and R=9; drain all
+accepted jobs and approved audited recoveries, then seal the final ranking.
+Frozen genuine Qwen/Gemma review remains mandatory alongside an explicit
+persisted manual handoff stop before source/config publication. Use all ten
+private source clones, exact accepted patches/commits, stale-ref guards and
+restart-safe source-first/config-last publication, including no-winner carry.
+Open a full seven-day epoch-two intake window only after actual handoff; do not
+backdate it to a preparation reservation. Intake-only source grants never prove
+runtime readiness or a scoring baseline. Grading requires the actual runtime
+quorum/grading activation and immutable fresh same-round baseline. See the
+prepared handoff checklist and source-index status rules in RUN-MAIN.md.
 
 Exit 20 means a legacy production candidate is waiting for the mandatory honesty and
 safety review documented in RUN-MAIN.md. Legacy staging automatically names the best
