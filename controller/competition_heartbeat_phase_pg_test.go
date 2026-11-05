@@ -40,7 +40,9 @@ func TestCompetitionHeartbeatPhasePgHostWriteRefusal(t *testing.T) {
 		})
 		err := fixture.store.RegisterHost(ctx, fixture.settings, HostSelfCheck{HostId: "synthetic-phase-host"})
 		detail := competitionHeartbeatFailureDetails(err)
-		if err == nil || detail.DatabasePhase != server.DbOperationCallback || detail.SqlState != "P0001" {
+		proof, observed := err.(competitionHostHeartbeatAcquireError)
+		if err == nil || detail.DatabasePhase != server.DbOperationCallback || detail.SqlState != "P0001" || !observed ||
+			!proof.callbackEntered || proof.read.AcquireSucceeded == 0 || competitionHostHeartbeatUnadmittedDeadline(err) {
 			t.Fatalf("real host write lost refusal/phase evidence: %+v", detail)
 		}
 	})

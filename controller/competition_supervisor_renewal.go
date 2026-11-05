@@ -149,6 +149,12 @@ func defaultCompetitionSupervisorRenewalSettings() competitionSupervisorRenewalS
 // A recovery call beyond the old lock deadline needs fresh positive proof from
 // its immediate predecessor. A lock error can never grant that continuation.
 func retryCompetitionSupervisorRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error) error {
+	return retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, settings, operation, competitionSupervisorUnadmittedDeadline)
+}
+
+// Each authority owner supplies its exact completed no-admission proof. The
+// original lock allowance, shared call cap and confirmed expiry stay unchanged.
+func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, unadmittedDeadline func(error) bool) error {
 	defaults := defaultCompetitionSupervisorRenewalSettings()
 	if settings.LockRetry.Now == nil {
 		settings.LockRetry.Now = defaults.LockRetry.Now
@@ -269,7 +275,7 @@ func retryCompetitionSupervisorRenewal(ctx context.Context, leaseExpiresAt time.
 			return nil
 		}
 		lockRetry := attemptError == nil && competitionSupervisorLockTimeout(err)
-		acquireRetry := attemptError == context.DeadlineExceeded && competitionSupervisorUnadmittedDeadline(err)
+		acquireRetry := attemptError == context.DeadlineExceeded && unadmittedDeadline != nil && unadmittedDeadline(err)
 		if !lockRetry && !acquireRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
 			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= settings.LockRetry.MaximumAttempts {
 			return err

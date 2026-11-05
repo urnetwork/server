@@ -19,6 +19,9 @@ import (
 type competitionHeartbeatSettings struct {
 	HandBackTimeout time.Duration
 	LeaseRetry      competitionLeaseRetrySettings
+	// Only wholly unadmitted returned acquisition deadlines can use this outer
+	// allowance. It never enlarges lock retries, the lease or evaluation clock.
+	AcquireRetry competitionHeartbeatAcquireRetrySettings
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings
 }
@@ -26,7 +29,7 @@ type competitionHeartbeatSettings struct {
 // Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
 	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
-		LeaseRetry: defaultCompetitionLeaseRetrySettings(), CompletionRetry: defaultCompetitionLeaseRetrySettings()}
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), CompletionRetry: defaultCompetitionLeaseRetrySettings()}
 }
 
 // Only fixed categories, a validated PostgreSQL code, an opaque digest and

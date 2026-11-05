@@ -6100,8 +6100,10 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 	}
 	digest := sha256.Sum256(bytes)
 	eligible := selfCheck.Eligible(settings)
-	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
+	observation := newCompetitionHostHeartbeatObservation()
+	return observation.capture(func() {
 		server.Db(ctx, func(conn server.PgConn) {
+			observation.callbackEntered = true
 			server.RaisePgResult(conn.Exec(ctx, `
 				INSERT INTO competition_evaluator_host (
 					host_id, hardware_id, image_digest, self_check_json,
@@ -6116,7 +6118,7 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 					heartbeat_at = EXCLUDED.heartbeat_at
 			`, selfCheck.HostId, selfCheck.HardwareId, selfCheck.ImageDigest,
 				string(bytes), hex.EncodeToString(digest[:]), eligible, self.nowUtc()))
-		}, server.OptReadWrite(), observation)
+		}, server.OptReadWrite(), &observation.phase, &observation.timing, observation.read)
 	})
 }
 
@@ -7044,6 +7046,9 @@ type Worker struct {
 	// the done case won but before it can obtain completion authority.
 	evaluationResultForTest func()
 	heartbeatSettings       competitionHeartbeatSettings
+	// Only a successful actual host registration can move this conservative
+	// freshness bound. Job lease acknowledgements never refresh it.
+	confirmedHostLeaseExpiresAt time.Time
 }
 
 func NewWorker(settings *Settings, store Store, evaluator Evaluator, workerId string) (*Worker, error) {
@@ -7131,7 +7136,7 @@ func (self *Worker) Run(ctx context.Context) error {
 				}
 				return fmt.Errorf("competition evaluator lost self-check after job: %w", checkErr)
 			}
-			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
+			if err := self.registerHost(ctx, fresh); err != nil {
 				return fmt.Errorf("refresh evaluator host after job: %w", err)
 			}
 			hostCheck = fresh
@@ -7149,7 +7154,7 @@ func (self *Worker) Run(ctx context.Context) error {
 				}
 				return fmt.Errorf("competition evaluator lost self-check: %w", checkErr)
 			}
-			if err := self.store.RegisterHost(ctx, self.settings, fresh); err != nil {
+			if err := self.registerHost(ctx, fresh); err != nil {
 				return fmt.Errorf("refresh evaluator host: %w", err)
 			}
 			hostCheck = fresh
@@ -7173,7 +7178,7 @@ func (self *Worker) preflight(ctx context.Context) (HostSelfCheck, error) {
 		}
 		return hostCheck, fmt.Errorf("competition evaluator self-check: %w", err)
 	}
-	if err := self.store.RegisterHost(ctx, self.settings, hostCheck); err != nil {
+	if err := self.registerHost(ctx, hostCheck); err != nil {
 		return hostCheck, fmt.Errorf("register evaluator host: %w", err)
 	}
 	return hostCheck, nil
@@ -7403,7 +7408,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 			return nil
 		case <-heartbeatTick:
-			attemptStartedAt, err := retryCompetitionLeaseOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings.LeaseRetry, func(ctx context.Context) error {
+			attemptStartedAt, err := retryCompetitionHeartbeatOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings, false, func(ctx context.Context) error {
 				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
 			})
 			if err != nil {
@@ -7416,9 +7421,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			// successful public operation's start is a conservative committed bound.
 			confirmedLeaseExpiresAt = attemptStartedAt.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
 
-			_, err = retryCompetitionLeaseOperation(evalCtx, confirmedLeaseExpiresAt, self.heartbeatSettings.LeaseRetry, func(ctx context.Context) error {
-				return self.store.RegisterHost(ctx, self.settings, hostCheck)
-			})
+			err = self.refreshHostHeartbeat(evalCtx, confirmedLeaseExpiresAt, hostCheck)
 			if err != nil {
 				cancel()
 				<-done
