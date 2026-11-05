@@ -7,12 +7,13 @@ import (
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// Pure: both workload profiles register the retired hosted identity reap and
-// the key history retention, and the subnet operator schedules both, since it
-// mints, retires and reaps clients too.
+// Pure: both workload profiles register the retired hosted identity reap, the
+// retired hosted proxy reap and the key history retention, and the subnet
+// operator schedules all three, since it mints, retires and reaps clients too.
 func TestIdentityRetentionRegisteredInBothProfiles(t *testing.T) {
 	names := []string{
 		task.NewTaskTarget(work.RemoveRetiredHostedNetworkClients).TargetFunctionName(),
+		task.NewTaskTarget(work.RemoveRetiredHostedProxyClients).TargetFunctionName(),
 		task.NewTaskTarget(work.RemoveGoneStClientKeyHistory).TargetFunctionName(),
 	}
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {

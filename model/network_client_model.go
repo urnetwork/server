@@ -4072,7 +4072,11 @@ func RetireNetworkClientHandlerConnection(
 // Keep the client window much larger than the connection window: provisioned
 // an inactive client is reaped this long after it was deactivated (user
 // removal or the idle top-level marker), giving a notice window before the
-// hard delete and its cascades
+// hard delete and its cascades. Hosted clients go sooner: retired windows a
+// day after deactivation (RemoveRetiredHostedNetworkClients) and removed or
+// expired proxies two days after (RemoveRetiredHostedProxyClients), since
+// nothing reactivates them and a dead proxy's proxy_client row would otherwise
+// stay in every proxy instance's WireGuard client set for this whole window.
 const NetworkClientReapAfterDeactivate = 30 * 24 * time.Hour
 
 // a top-level client (source_client_id IS NULL) that has not authed or
@@ -4645,8 +4649,10 @@ func removeProxyDeviceConfigsForClientIds(ctx context.Context, clientIds []serve
 // removeProxyClientData deletes proxy_client and proxy_client_change rows for
 // the removed proxy ids.
 // proxy_client rows are otherwise never deleted, and each wg proxy instance
-// restores all rows for its (host, block) as wg device peers at startup, which
-// is bounded by the device max peer count - so stale rows must be reaped.
+// restores all rows for its (host, block) as wg clients at startup and reads
+// them all again on every reconcile, whether or not the proxy is still active
+// - so stale rows must be reaped. A deactivated proxy's rows go with its
+// client two days after the deactivation (RemoveRetiredHostedProxyClients).
 // change rows are reaped so the startup full sync (GetProxyClientsSince from 0)
 // stays bounded.
 func removeProxyClientData(ctx context.Context, proxyIds []server.Id) {
