@@ -6,7 +6,7 @@ This document designs a hosted-proxy option that gives a network N simultaneous,
 
 **Conventions:**
 - A statement with a `file:line` or a measurement is a fact about origin/main or Main on 2026-11-05. The code citations are server `c65ed59fa`, connect `539e8d80`, sdk `5517f035` and sn `b2c491cf8`.
-- Everything marked **Design** is a proposal, and nothing in it exists yet.
+- Everything marked **Design** was a proposal when written. Phase 1 is now built (2026-11-05); §13 holds what was built, the final API names, and where the build differs from the design.
 - Measurements are read-only Main queries through `support db query`, and Mimir.
 
 ## 1. Problem and goals
@@ -57,6 +57,8 @@ This document designs a hosted-proxy option that gives a network N simultaneous,
 - per-request rotation.
 
 ## 2. The user-facing API (Design)
+
+The final names, including additions to this design (`replace_mode`, `state_reason`, the error flags, the route's access), are in §13.
 
 **Option.** `proxy_config.unique_exit: true` on `/network/auth-client`. `ProxyConfig` today has `lock_caller_ip`, `lock_ip_list`, `https_require_auth`, `enable_wg` and `initial_device_state` (`model/network_client_model.go:219-227`).
 - **Location constraint:** reuse the existing `initial_device_state.location` or `country_code`. Today the server resolves these at `model/network_client_model.go:466-491`, and a missing location is refused as "Invalid location" (`:479-486`). The constraint limits the candidate pool. `best_available` means any country.
@@ -309,3 +311,144 @@ Tests, deterministic per connect/CODESTYLE.md "Bug fixes" and "Tunables live in 
 | Q6 | Proxy-miner slots as unique exits | Eligible only once their egress key is stable across at least 2 probes. |
 | Q7 | Scraping policy and per-provider load | A per-pinned-provider bandwidth share of at most half its estimated throughput, plus an acceptable-use update to the terms. |
 | Q8 | Do phase 0 for engageub now? | Yes, after one test proxy confirms the pinned exit is stable. |
+
+## 13. Implementation (phase 1, built 2026-11-05)
+
+Server branch `feat/unique-exit`, connect branch `feat/unique-exit-spec` (the API spec), both merged to main. Phase 1 is complete; the deferred items are at the end.
+
+### 13.1 The API, final names
+
+**`/network/auth-client`, `proxy_config`:**
+- `unique_exit` (boolean): Pro only.
+- `unique_exit_replace` (string): `auto` (default) or `manual`.
+- The location constraint is the existing `initial_device_state` `location` or `country_code`. A location naming one provider (`connect_location_id.client_id`) is refused.
+
+**`proxy_config_result.exit`, and `clients[].exit` on `/network/proxies`** (item level, beside `proxy_client`), a `ProxyExit`:
+
+| Field | Meaning |
+|---|---|
+| `exit_id` | udid, opaque: the assignment id, new on every replacement or rotate; absent while the proxy has no exit |
+| `country_code`, `region`, `city` | the provider's egress location |
+| `exit_since` | when the proxy moved to this exit (RFC 3339) |
+| `state` | `assigned`, `replacing`, or `no_supply` |
+| `state_reason` | with `replacing` or `no_supply`: `offline`, `unreachable`, `verdict`, `collision`, `cap`, `manual`, or `no_supply` |
+| `replace_mode` | `auto` or `manual` |
+
+**Create refusals** (HTTP 200, `error.message`, nothing created). They are decided before the create is counted, so none spends the active proxy cap or the create rate:
+- not Pro: `error.upgrade_required`, "Unique exit IPs are a UR Pro feature. Upgrade to UR Pro to create unique-exit proxies." With x402 enabled this answers 402 with the Pro terms, like the other `upgrade_required` refusals.
+- a client-id location: "A unique exit picks its own provider: use a country, region, city, group or best available location."
+- a bad `unique_exit_replace`: `unique_exit_replace must be "auto" or "manual".`
+- no supply: `error.no_unique_supply`, "No unique exit IP is available in this location right now. Try another location, or best available."
+- The cap and the rate refuse with their existing messages; a unique-exit proxy is a hosted proxy.
+
+**`POST /network/proxy/rotate-exit`** `{client_id}` returns `{exit}` or `{error: {message, no_unique_supply?, rate_limited?}}`:
+- Network access only (the network JWT or an API key): a client JWT gets the 403 `ClientJwtRefused`, like `/network/proxies`.
+- 1 a minute and 60 a day per proxy, counted in Redis (`upe-rot-<proxy>-<minute>`, `upe-rotd-<proxy>-<day>`), failing open.
+- It skips the replacement caps and manual mode. Without supply, the proxy keeps its current exit.
+- "Not a unique-exit proxy of this network." for any other `client_id`.
+
+### 13.2 Schema
+
+The migrations are appended at the end of `db_migrations.go`, all additive (`db_proxy_unique_exit_schema.go`):
+- `provider_egress_location` gains `egress_key bytea`, `egress_key_observed_at` and `egress_key_stable_count`. The ADD COLUMN bounds its lock wait at 2 s.
+- **`proxy_unique_exit`**: one row per unique-exit proxy. It holds the replace mode, the location as provider specs, and the customer-facing state.
+- **`proxy_exit_assignment`**: as §4, plus `location_id`, `country_code`, `estimated_bytes_per_second`, `failing_since` and `failing_reason`. Indexes:
+  - unique `(network_id, egress_key)` over `pending` and `active`;
+  - unique `(proxy_client_id)` over `pending`, `active` and `replacing`;
+  - provider, `assigned_at` and released-row indexes.
+- Released rows are kept 90 days, deleted 5,000 per sweep.
+
+### 13.3 How it works, and where it differs from the design
+
+**The key.** HMAC-SHA256 under vault `verify.yml` `egress_hash_key`, in its own domains:
+- `urnetwork/unique-exit-ipv4/v1`: the exact address;
+- `urnetwork/unique-exit-ipv6-64/v1`: the /64.
+
+Without that key it falls back to the client-IP pepper. The egress ingest (`controller/provider_egress_location_controller.go`) stores the key. The stable count goes up on the same key and resets on a new one, and an older observation never overwrites a newer one.
+
+**The allocator** (`model/proxy_unique_exit_model.go`):
+- Candidates come from find-providers2's `quality` bucket under the location specs, with the network's live providers excluded.
+- A candidate needs a key no older than 24 h. A slot-like provider needs a key stable across 2 probes; slot-like means its connection address is shared by 10 or more connected clients.
+- Stable keys rank first.
+- The pin cap is K = 3 live pins per provider, across networks.
+
+**Locking differs from the design.** Every writer of a live key try-locks that `(network, key)`, and a pin also try-locks its provider. These are transaction advisory locks, tried and never waited for:
+- A main-pool transaction may wait at most `PgLockTimeout` (2 s) for any lock.
+- A burst of creates for one network must neither queue nor deadlock.
+
+A busy candidate is skipped. A busy key update or confirm waits for the next pass. The partial unique index is the backstop.
+
+**The supply check runs before the create is counted.**
+- The create plan (Pro, specs, a draw of 16) runs before the rate counter.
+- In the create transaction the assignment is inserted before any client rows.
+- If a concurrent create took every candidate, the transaction ends with `no_unique_supply` and nothing written.
+
+**The device** (`proxy/proxy_unique_exit.go`):
+- A unique-exit proxy is created already pinned: `initial_device_state.location` is `connect_location_id.client_id` of its exit, a fixed window of one.
+- It polls its assignment every 15 s (jittered), and repins through `SetConnectLocation` only when the provider changes.
+- It confirms on every new assignment, and every 30 minutes after: a GET of `/my-ip-info` through its own tunnel, with the key computed in process.
+  - A match activates the exit.
+  - A changed key that is still unique updates the assignment.
+  - A changed key that collides is replaced without a grace.
+
+**Failure detection differs from the design.** It does not hook window-client conviction. It uses:
+- the provider liveness lease (offline), with the 120 s grace;
+- 3 consecutive failed confirms (unreachable), with the grace;
+- find-providers2's hard exclusions (verdict) and key collisions, with no grace.
+
+**The share.** Each pinned proxy is held to half its provider's estimated bytes per second. The token bucket's burst is max(64 KiB, rate/4).
+- HTTP and SOCKS connections are paced, and nothing is dropped.
+- WireGuard packets over the share are dropped and counted. A batch is policed all or nothing, so the batch contract holds.
+
+**The sweeper** (taskworker `sweep_proxy_exits`, every 30 s):
+- releases removed proxies;
+- replaces on verdicts and collisions at once;
+- updates or replaces on key changes;
+- marks offline exits and replaces them after the grace;
+- clears recovered exits;
+- retries held proxies in `auto` mode;
+- enforces 6 replacements an hour per proxy and max(1, ceil(10% of the network's unique-exit proxies)) an hour per network, over failure releases;
+- excludes released providers for 24 h;
+- in `manual` mode holds the proxy as `replacing`, reason `manual`.
+
+Each assignment is swept in isolation, so one failure doesn't stop the pass.
+
+**Tunables.** All of them are in `UniqueExitSettings` (`DefaultUniqueExitSettings`).
+
+### 13.4 Observability
+
+Metrics:
+- `urnetwork_proxy_unique_exit_assignments{state}`;
+- `…_allocations_total{result}`;
+- `…_replacements_total{reason}`;
+- `…_confirm_total{result=match|changed_unique|changed_collision|stale}`;
+- `…_supply_keys{country}`;
+- `…_assignment_lifetime_seconds`;
+- `…_share_policed_packets_total{direction}`;
+- the snapshot timestamps `…_sweep_snapshot_timestamp_seconds` and `…_supply_snapshot_timestamp_seconds`, so the dashboards read only the replica whose gauges are fresh.
+
+Panels:
+- `proxy.json` shows confirms and share policing, scoped to the proxy service.
+- `taskworker.json` shows assignments, allocations, replacements, supply, lifetime and snapshot age.
+
+No monitor alert class was added.
+
+### 13.5 Deploy order
+
+1. `db migrate` first, from the local main working copy.
+2. api and alt.
+3. proxy.
+4. taskworker.
+5. grafana, with the dashboards.
+
+The api refuses nothing new until it is deployed. A proxy built without the feature ignores `unique_exit` in its device config, so an api deployed ahead of the proxy creates pinned proxies whose confirm and share wait for the proxy roll. A taskworker roll before the Nov 6 close needs sn-81's sets on that commit first.
+
+### 13.6 Deferred
+
+- monitor signals (§10: supply below 2× demand, replacement storms, confirm collisions over 1%);
+- the audit job and the 1% re-confirm sample;
+- the optional webhook;
+- `unique_exit_scope` subnet and ASN modes;
+- the acceptable-use update to the terms.
+
+A provider without a throughput estimate is not throttled.
