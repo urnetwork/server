@@ -150,8 +150,7 @@ func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context)
 // separate HTTPS tests exercise the concrete API producer/envelope path.
 func (self *competitionIntakeFirstDatabaseFixture) acknowledgeApi(t testing.TB, ctx context.Context) {
 	t.Helper()
-	self.archive = &blobArtifactArchive{store: &competitionRuntimeBlobTestStore{objects: map[string][]byte{}, versions: map[string][]byte{}}}
-	self.settings.artifactArchive = self.archive
+	self.archive = newCompetitionIntakeFirstRetainedArchive(self.settings)
 	if _, err := self.archive.publishRuntimeManifest(ctx, self.settings, self.intent); err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +158,16 @@ func (self *competitionIntakeFirstDatabaseFixture) acknowledgeApi(t testing.TB, 
 	if err := self.store.RecordSourceReadiness(ctx, self.settings, api); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// The retained archive consumes real local bytes, unlike the metadata-only
+// generator paired with validSettings' ordinary no-op archive. Both boundaries
+// move together when this fixture starts testing actual retained publication.
+func newCompetitionIntakeFirstRetainedArchive(settings *Settings) *blobArtifactArchive {
+	settings.workloadGenerator = ControlPlaneWorkloadGenerator{}
+	archive := &blobArtifactArchive{store: &competitionRuntimeBlobTestStore{objects: map[string][]byte{}, versions: map[string][]byte{}}}
+	settings.artifactArchive = archive
+	return archive
 }
 
 // Publication is a pinned external boundary in production. This controlled
