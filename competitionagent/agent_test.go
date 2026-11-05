@@ -227,7 +227,7 @@ func (self *agentTestFixture) call(t *testing.T, operation string, fence int64, 
 	if manifest != nil {
 		request.RunId = manifest.Identity.RunId
 	}
-	if operation == "check" {
+	if operation == "check" || operation == "availability" {
 		request.RunId, request.FencingToken = "", 0
 	}
 	if err := SignRequest(&request, self.coordinatorKey); err != nil {
