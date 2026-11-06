@@ -134,6 +134,43 @@ func TestClientRefusesAdminCachesItsAnswers(t *testing.T) {
 	})
 }
 
+// A credential that names an API key lives while the network has the key, network
+// and client token alike, and on a build that does not link MG0 too: the check
+// reads account_api_key, which every release has. A key another network holds is
+// no key of this one.
+func TestStateCheckReadsTheApiKeyAClaimNames(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		self := newClientOwnerFixture(t)
+		result, err := CreateApiKey(&CreateApiKeyArgs{Name: "backend"}, self.root)
+		connect.AssertEqual(t, err, nil)
+		apiKeyId := result.Id
+
+		network := session.NewByJwt(self.networkId, self.userId, "owner", false, false)
+		network.ApiKeyId = &apiKeyId
+		client := self.mint(t, self.root, &AuthNetworkClientArgs{Description: "device", DeviceSpec: "test"})
+		clientByJwt := self.sessionOf(t, client).ByJwt
+		clientByJwt.ApiKeyId = &apiKeyId
+
+		stranger := newClientOwnerFixture(t)
+		foreign := session.NewByJwt(stranger.networkId, stranger.userId, "owner", false, false)
+		foreign.ApiKeyId = &apiKeyId
+		if err := session.ValidateByJwtState(self.ctx, foreign, false); err == nil {
+			t.Fatal("another network's key passed the state check")
+		}
+
+		connect.AssertEqual(t, session.ValidateByJwtState(self.ctx, network, false), nil)
+		connect.AssertEqual(t, session.ValidateByJwtState(self.ctx, clientByJwt, true), nil)
+
+		connect.AssertEqual(t, DeleteApiKey(&apiKeyId, self.root), nil)
+		if err := session.ValidateByJwtState(self.ctx, network, false); err == nil {
+			t.Fatal("a network token outlived the key it names")
+		}
+		if err := session.ValidateByJwtState(self.ctx, clientByJwt, true); err == nil {
+			t.Fatal("a client token outlived the key it names")
+		}
+	})
+}
+
 // A full cache costs a read, not an answer (boundedClientMap).
 func TestClientAdminCacheIsBounded(t *testing.T) {
 	settings := DefaultClientAdminSettings()

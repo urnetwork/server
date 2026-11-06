@@ -141,6 +141,14 @@ func TestChildrenInheritBothMarks(t *testing.T) {
 			connect.AssertEqual(t, byJwt.StrictExp, true)
 			connect.AssertEqual(t, *byJwt.RootClientId, *sidecar.ClientId)
 		}
+
+		// a local owner's mint asks the same row
+		child, err := AuthNetworkClientFromParent(&AuthNetworkClientArgs{SourceClientId: sidecar.ClientId, Description: "window", DeviceSpec: "test"}, self.sessionOf(t, sidecar))
+		connect.AssertEqual(t, err, nil)
+		if child.Error != nil || !child.StrictExp || !child.AdminRefused {
+			t.Fatalf("a local owner's child = %+v, error = %+v", child, child.Error)
+		}
+		requireTokenLifetime(t, self, *child.ByClientJwt, strictExpLifetime)
 	})
 }
 
