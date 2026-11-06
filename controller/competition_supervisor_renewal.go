@@ -160,6 +160,12 @@ func retryCompetitionSupervisorRenewal(ctx context.Context, leaseExpiresAt time.
 // predicates remain acquisition-only; the job heartbeat owns its separate
 // closed no-COMMIT proof. Lock allowance, call cap and expiry remain unchanged.
 func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, completedDeadline func(error) bool) error {
+	return retryCompetitionAuthorityRenewalObserved(ctx, leaseExpiresAt, settings, operation, completedDeadline, nil)
+}
+
+// Optional facts mark the selected return branch, never alter its decision,
+// clock reads, predicate input, error identity, timeout, cap or authority bound.
+func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, completedDeadline func(error) bool, observation *competitionHeartbeatOwnerObservation) error {
 	defaults := defaultCompetitionSupervisorRenewalSettings()
 	if settings.LockRetry.Now == nil {
 		settings.LockRetry.Now = defaults.LockRetry.Now
@@ -168,12 +174,14 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 		settings.LockRetry.Wait = defaults.LockRetry.Wait
 	}
 	if err := ctx.Err(); err != nil {
+		observation.returning(competitionHeartbeatOwnerParentBeforeDispatch, ctx, nil)
 		return err
 	}
 	// Preserve monotonic duration ownership even though the authority clock is UTC.
 	startedAt := time.Now()
 	now := settings.LockRetry.Now()
 	if !leaseExpiresAt.IsZero() && !now.Before(leaseExpiresAt) {
+		observation.returning(competitionHeartbeatOwnerAuthorityBeforeDispatch, ctx, nil)
 		return ErrLeaseLost
 	}
 	totalDeadline, lockDeadline := leaseExpiresAt, leaseExpiresAt
@@ -199,22 +207,31 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 	var lastError error
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
+			observation.returning(competitionHeartbeatOwnerParentBeforeDispatch, ctx, totalCtx)
 			return err
 		}
 		now = settings.LockRetry.Now()
 		if !leaseExpiresAt.IsZero() && !now.Before(leaseExpiresAt) {
+			observation.returning(competitionHeartbeatOwnerAuthorityBeforeDispatch, ctx, totalCtx)
 			return ErrLeaseLost
 		}
 		if err := totalCtx.Err(); err != nil {
+			observation.returning(competitionHeartbeatOwnerTotalBeforeDispatch, ctx, totalCtx)
 			return err
 		}
 		if !deadlineRecovery && lockCtx.Err() != nil {
+			observation.returning(competitionHeartbeatOwnerLockBeforeDispatch, ctx, totalCtx)
 			if lastError == nil {
 				return context.DeadlineExceeded
 			}
 			return lastError
 		}
 		if !totalDeadline.IsZero() && !now.Before(totalDeadline) || !deadlineRecovery && settings.LockRetry.Timeout > 0 && !lockDeadline.IsZero() && !now.Before(lockDeadline) {
+			boundary := competitionHeartbeatOwnerLockBeforeDispatch
+			if !totalDeadline.IsZero() && !now.Before(totalDeadline) {
+				boundary = competitionHeartbeatOwnerTotalBeforeDispatch
+			}
+			observation.returning(boundary, ctx, totalCtx)
 			if lastError == nil {
 				return context.DeadlineExceeded
 			}
@@ -238,57 +255,76 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 		}
 		if parentError := ctx.Err(); parentError != nil {
 			attemptCancel()
+			observation.returning(competitionHeartbeatOwnerParentBeforeDispatch, ctx, totalCtx)
 			return parentError
 		}
 		dispatchNow := settings.LockRetry.Now()
 		if parentError := ctx.Err(); parentError != nil {
 			attemptCancel()
+			observation.returning(competitionHeartbeatOwnerParentBeforeDispatch, ctx, totalCtx)
 			return parentError
 		}
 		if !leaseExpiresAt.IsZero() && !dispatchNow.Before(leaseExpiresAt) {
 			attemptCancel()
+			observation.returning(competitionHeartbeatOwnerAuthorityBeforeDispatch, ctx, totalCtx)
 			return ErrLeaseLost
 		}
 		if attemptError := attemptCtx.Err(); attemptError != nil {
 			attemptCancel()
+			observation.returning(competitionHeartbeatOwnerAttemptBeforeDispatch, ctx, totalCtx)
 			return attemptError
 		}
 		if !attemptDeadline.IsZero() && !dispatchNow.Before(attemptDeadline) {
 			attemptCancel()
+			observation.returning(competitionHeartbeatOwnerAttemptBeforeDispatch, ctx, totalCtx)
 			return context.DeadlineExceeded
 		}
 		err := operation(attemptCtx)
 		attemptError := attemptCtx.Err()
 		attemptCancel()
 		if parentError := ctx.Err(); parentError != nil {
+			observation.returning(competitionHeartbeatOwnerParentAfterStore, ctx, totalCtx)
 			return parentError
 		}
 		now = settings.LockRetry.Now()
 		if parentError := ctx.Err(); parentError != nil {
+			observation.returning(competitionHeartbeatOwnerParentAfterStore, ctx, totalCtx)
 			return parentError
 		}
 		if err == nil {
 			if !leaseExpiresAt.IsZero() && !now.Before(leaseExpiresAt) {
+				observation.returning(competitionHeartbeatOwnerAuthorityAfterStore, ctx, totalCtx)
 				return ErrLeaseLost
 			}
 			if attemptError != nil {
+				observation.returning(competitionHeartbeatOwnerAttemptAfterSuccess, ctx, totalCtx)
 				return attemptError
 			}
 			if !attemptDeadline.IsZero() && !now.Before(attemptDeadline) {
+				observation.returning(competitionHeartbeatOwnerAttemptAfterSuccess, ctx, totalCtx)
 				return context.DeadlineExceeded
 			}
+			observation.returning(competitionHeartbeatOwnerSuccess, ctx, totalCtx)
 			return nil
 		}
 		lockRetry := attemptError == nil && competitionSupervisorLockTimeout(err)
 		deadlineRetry := attemptError == context.DeadlineExceeded && completedDeadline != nil && completedDeadline(err)
 		if !lockRetry && !deadlineRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
 			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= settings.LockRetry.MaximumAttempts {
+			observation.returning(competitionHeartbeatOwnerStoreError, ctx, totalCtx)
 			return err
 		}
 		if !now.Before(leaseExpiresAt) {
+			observation.returning(competitionHeartbeatOwnerAuthorityAfterStore, ctx, totalCtx)
 			return ErrLeaseLost
 		}
-		if totalCtx.Err() != nil || !now.Before(totalDeadline) || lockRetry && !now.Before(lockDeadline) {
+		totalExpired := totalCtx.Err() != nil || !now.Before(totalDeadline)
+		if totalExpired || lockRetry && !now.Before(lockDeadline) {
+			boundary := competitionHeartbeatOwnerLockAfterStore
+			if totalExpired {
+				boundary = competitionHeartbeatOwnerTotalAfterStore
+			}
+			observation.returning(boundary, ctx, totalCtx)
 			return err
 		}
 		lastError, deadlineRecovery = err, deadlineRetry
@@ -303,8 +339,10 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 		}
 		if err := settings.LockRetry.Wait(waitCtx, delay); err != nil {
 			if parentError := ctx.Err(); parentError != nil {
+				observation.returning(competitionHeartbeatOwnerParentDuringWait, ctx, totalCtx)
 				return parentError
 			}
+			observation.returning(competitionHeartbeatOwnerWaitError, ctx, totalCtx)
 			return err
 		}
 	}

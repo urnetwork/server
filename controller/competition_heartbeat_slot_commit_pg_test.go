@@ -77,6 +77,7 @@ func TestCompetitionHeartbeatSlotRetryPgLateCommitNeverReplays(t *testing.T) {
 			err               error
 			calls             int
 			storeAcknowledged bool
+			owner             competitionHeartbeatOwnerSnapshot
 		}
 		done, joined := make(chan result, 1), make(chan struct{})
 		defer func() {
@@ -103,7 +104,8 @@ func TestCompetitionHeartbeatSlotRetryPgLateCommitNeverReplays(t *testing.T) {
 		go func() {
 			defer close(joined)
 			calls, storeAcknowledged := 0, false
-			ack, err := retryCompetitionJobHeartbeatOperation(operationCtx, *job.LeaseExpiresAt, fixture.now.Add(time.Minute), settings, func(ctx context.Context) error {
+			observation := newCompetitionHeartbeatOwnerObservation(operationCtx, *job.LeaseExpiresAt, fixture.now.Add(time.Minute))
+			ack, err := retryCompetitionJobHeartbeatOperationObserved(operationCtx, *job.LeaseExpiresAt, fixture.now.Add(time.Minute), settings, func(ctx context.Context) error {
 				calls++
 				if calls == 1 {
 					attempts <- ctx
@@ -111,8 +113,8 @@ func TestCompetitionHeartbeatSlotRetryPgLateCommitNeverReplays(t *testing.T) {
 				err := fixture.store.Heartbeat(ctx, fixture.settings, "synthetic-slot-worker", job.JobId)
 				storeAcknowledged = err == nil
 				return err
-			})
-			done <- result{ack: ack, err: err, calls: calls, storeAcknowledged: storeAcknowledged}
+			}, observation)
+			done <- result{ack: ack, err: err, calls: calls, storeAcknowledged: storeAcknowledged, owner: observation.snapshotCopy()}
 		}()
 		var attempt context.Context
 		select {
@@ -147,6 +149,12 @@ func TestCompetitionHeartbeatSlotRetryPgLateCommitNeverReplays(t *testing.T) {
 		case returned := <-done:
 			if !errors.Is(returned.err, context.DeadlineExceeded) || !returned.ack.IsZero() || returned.calls != 1 || !returned.storeAcknowledged {
 				t.Fatal("late actual COMMIT was adopted/replayed or lost its reply", returned)
+			}
+			owner := returned.owner
+			if owner.Boundary != competitionHeartbeatOwnerAttemptAfterSuccess || owner.StoreCalls != 1 || owner.LastStoreOutcome != competitionHeartbeatStoreSucceeded ||
+				owner.CompletedDatabaseCaptures != 1 || owner.CompletedStoreDatabase == nil || owner.CompletedStoreDatabase.Transaction.CommitAttempts != 1 || owner.CompletedStoreDatabase.Transaction.CommitAcknowledged != 1 ||
+				competitionHeartbeatSlotUpdateDeadline(returned.err) || competitionHeartbeatJobLockDeadline(returned.err) || competitionHeartbeatFailureDetails(returned.err).HeartbeatDatabase != nil {
+				t.Fatal("late committed success was hidden or converted into retry proof", owner)
 			}
 		case <-watchdog.Done():
 			t.Fatal("late COMMIT did not return after release")
