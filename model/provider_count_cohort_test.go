@@ -25,6 +25,7 @@ func TestProviderCountCohortEmptyNeedsNoBackend(t *testing.T) {
 }
 
 func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
+	useSingleArindbCanaryForCohortTest(t)
 	env := server.DefaultTestEnv()
 	env.ApplyDbMigrations = false
 	env.Run(t, func(t testing.TB) {
@@ -107,7 +108,9 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 		observer, closeObservation := cohortObserveQueries(t, ctx)
 		defer closeObservation()
 		settings := egressIndexSettings()
-		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts()}
+		// ModernOnlineCounts joined the dashboard counts with 92a738f17
+		// (FP2-MODERN.md); every Online member counts under its modern outcome
+		wantCounts := &ProviderEgressCounts{BucketIndexCounts: map[string]map[string]int64{}, ReasonCounts: map[string]int64{}, MaxIndex: settings.MaxIndex(), ModernGateShadowCounts: newProviderModernGateShadowCounts(), ModernOnlineCounts: newProviderModernOnlineCounts()}
 		for _, bucket := range ProviderEgressBuckets {
 			wantCounts.BucketIndexCounts[bucket] = map[string]int64{}
 		}
@@ -120,7 +123,9 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 			code := "us"
 			index := 0
 			quality := true
-			d := decideProviderEgress(fleet.egressFacts(id, &code, &index, &quality, settings), providerEgressTestEnabled())
+			facts := fleet.egressFacts(id, &code, &index, &quality, settings)
+			d := decideProviderEgress(facts, providerEgressTestEnabled())
+			countProviderModernOnline(wantCounts.ModernOnlineCounts, facts, d)
 			if d.quality {
 				wantCounts.BucketIndexCounts[RankModeQuality]["0"]++
 			}
