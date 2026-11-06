@@ -1,0 +1,37 @@
+{
+  "schema": "competition-interruption-observation/v1",
+  "job_id": "01a1a9e1-ca26-ab2a-d712-45f54ff04a7b",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "attempt_interrupted": 1,
+  "completed_candidate_runs_before_interruption": 6,
+  "interrupted_candidate_run": 7,
+  "evaluator_exit_code": 143,
+  "supervisor_error_at": "2026-11-06T16:41:08.317182Z",
+  "supervisor_operation": "RenewAutomationLease",
+  "supervisor_error": "Done; context deadline exceeded; context deadline exceeded",
+  "pooler_or_network_root_cause_proven": false,
+  "failure_evidence_sha256": "39f7602c7b48ed2280902a713f7265a2b245257974bf7be86f41fbd5f0009fe7",
+  "original_started_at": "2026-11-06T15:36:21.418875Z",
+  "original_deadline": "2026-11-06T18:36:21.418875Z",
+  "maintenance_approved": true,
+  "evaluation_hold": {
+    "revision": 18,
+    "hold_id": "01a1b1bf-ea99-6540-ff0a-84cf255670ce",
+    "created_at": "2026-11-06T16:45:07.095060Z",
+    "active": true
+  },
+  "boundary_observation": {
+    "observed_at": "2026-11-06T16:45:32.907061301Z",
+    "receipt": "/home/by/urnetwork/temp/competition-monitor-current.5CMlYqBx/audit.private.json",
+    "automatic_attempt": 2,
+    "worker_slot_lease_live": true,
+    "evaluation_cgroup_populated": true,
+    "compose_token": "89756c1d887973fbf00c25a7da48e24b",
+    "runner_live": true,
+    "idle_boundary_passed": false
+  },
+  "next_action": "Keep the claim-only hold active and allow the already-claimed retry to finish within its unchanged deadline. Deploy and preflight the qualified 29e worker and ddb diagnostic supervisor only after verifying idle execution and fencing. Resume claims after successful verification.",
+  "staged_fixes_activated": false,
+  "operator_clock_reset": false,
+  "operator_retry_issued": false
+}
