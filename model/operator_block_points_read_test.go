@@ -4,18 +4,67 @@ import (
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 )
 
+// The completed operator block an award test computes at the wall clock now,
+// and the clock its award runs at. client_reliability keeps 14 days
+// (ClientReliabilityRetention, 12a34def3), two blocks, so only the block
+// before the open one keeps its reliability window inside retention for the
+// whole open block, at the award's clock and on the wall clock, where the
+// award checks it again; the block before that is past it. That block is due
+// once its last settlements are in (OperatorBlockPointsSettleTime), so an
+// award run within that time of the block's end runs at its end.
+func operatorBlockPointsTestBlock(now time.Time) (block int64, awardNow time.Time) {
+	block = int64(SubnetBlockNumber(now)) - 1
+	settled := operatorBlockStart(block + 1).Add(OperatorBlockPointsSettleTime)
+	return block, server.MaxTime(now, settled)
+}
+
+// Pure: at any wall clock in the open block, the award tests' block is due at
+// its award's clock, which is at most the settle time ahead, and inside
+// retention there and on the wall clock; the block before it, which the tests
+// read while retention was 21 days, is past retention.
+func TestOperatorBlockPointsTestBlockIsAwardable(t *testing.T) {
+	open := operatorBlockStart(20)
+	for _, wall := range []time.Time{
+		open.Add(time.Minute),
+		open.Add(OperatorBlockPointsSettleTime - time.Minute),
+		open.Add(OperatorBlockPointsSettleTime),
+		open.Add(3 * 24 * time.Hour),
+		open.Add(SubnetBlockDuration - time.Minute),
+	} {
+		block, awardNow := operatorBlockPointsTestBlock(wall)
+		start, end, _ := OperatorBlockPointsWindow(block, time.Time{})
+		minBlockNumber, _ := operatorBlockReliabilityBlockWindow(start, end)
+		previousStart, previousEnd, _ := OperatorBlockPointsWindow(block-1, time.Time{})
+		previousMinBlockNumber, _ := operatorBlockReliabilityBlockWindow(previousStart, previousEnd)
+		switch {
+		case block != 19:
+			t.Errorf("at %s: block %d, want 19", wall, block)
+		case awardNow.Before(wall) || OperatorBlockPointsSettleTime < awardNow.Sub(wall):
+			t.Errorf("at %s: the award runs at %s", wall, awardNow)
+		case !slices.Contains(OperatorBlockPointsDueBlocks(start.Add(-2*24*time.Hour), awardNow), block):
+			t.Errorf("at %s: block %d is not due at %s", wall, block, awardNow)
+		case !operatorBlockReliabilityRetained(minBlockNumber, awardNow) || !operatorBlockReliabilityRetained(minBlockNumber, wall):
+			t.Errorf("at %s: block %d is past retention", wall, block)
+		case operatorBlockReliabilityRetained(previousMinBlockNumber, wall):
+			t.Errorf("at %s: block %d is still retained", wall, block-1)
+		}
+	}
+}
+
 // A completed operator block whose award runs every bounded read: traffic in
 // the block, and the reliability evidence of two valid clients of the provider
-// in two countries, one with a country multiplier.
-func newOperatorBlockPointsReadFixture(t testing.TB, ctx context.Context, now time.Time) (block int64) {
+// in two countries, one with a country multiplier. The award runs at awardNow
+// (operatorBlockPointsTestBlock).
+func newOperatorBlockPointsReadFixture(t testing.TB, ctx context.Context, now time.Time) (block int64, awardNow time.Time) {
 	t.Helper()
-	block = int64(SubnetBlockNumber(now)) - 2
+	block, awardNow = operatorBlockPointsTestBlock(now)
 	blockStart := operatorBlockStart(block)
 	useOperatorBlockPointsTransition(t, blockStart.Add(-2*24*time.Hour))
 
@@ -60,7 +109,7 @@ func newOperatorBlockPointsReadFixture(t testing.TB, ctx context.Context, now ti
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client_location_reliability_multiplier (country_location_id, reliability_multiplier) VALUES ($1, 1.5)`, countries["de"]))
 	})
-	return block
+	return block, awardNow
 }
 
 // The root cause of the backfill dry run's failure on Main (2026-10-29,
@@ -74,13 +123,13 @@ func TestOperatorBlockPointsAwardBeginsNoTransaction(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
-		block := newOperatorBlockPointsReadFixture(t, ctx, now)
+		block, awardNow := newOperatorBlockPointsReadFixture(t, ctx, now)
 
 		// as the dry run runs it
 		server.RequirePgReadOnly()
 		defer server.Testing_ReleasePgReadOnly()
 		observation, uninstall := server.Testing_ObserveTxIo()
-		award, err := ComputeOperatorBlockPoints(ctx, operatorBlockPointsTestConfig(), block, now)
+		award, err := ComputeOperatorBlockPoints(ctx, operatorBlockPointsTestConfig(), block, awardNow)
 		uninstall()
 		if err != nil {
 			t.Fatal(err)
