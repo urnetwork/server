@@ -56,7 +56,9 @@ type sdkBrowsingScenario struct {
 	cssFlowsBefore, cssFlowsAfter                                                int32
 	cssOwnerRetained                                                             bool
 	page1Provider                                                                int
+	page1Timeline                                                                *sdkBrowsingPage1Timeline
 	acceptOwnedSpeedRecovery                                                     bool
+	allInitialDestinationOutageForTest                                           bool
 	tapStarted                                                                   time.Time
 	preTapNs, combinedFirstByteNs, page1FirstByteNs                              int64
 	refusalNs                                                                    [sdkBrowsingProviderCount]int64
@@ -137,7 +139,11 @@ func (self *sdkBrowsingScenario) registerColdLinkConstructorWithLock() (context.
 // Only the actual old-provider origin1 TCP dial is refused. All other traffic,
 // including the established origin0 CSS socket, keeps its ordinary lifetime.
 func (self *sdkBrowsingScenario) rejectNavigationDial(ordinal int, address string) bool {
-	if !sdkBrowsingNavigationDialRefused(self.coldLinkForTest, self.rejectNew.Load(), ordinal, address) {
+	refused := sdkBrowsingNavigationDialRefused(self.coldLinkForTest, self.rejectNew.Load(), ordinal, address)
+	if self.allInitialDestinationOutageForTest {
+		refused = sdkBrowsingInitialCohortOutageDialRefused(self.rejectNew.Load(), ordinal, address)
+	}
+	if !refused {
 		return false
 	}
 	self.stateLock.Lock()
@@ -202,7 +208,8 @@ func (self *sdkBrowsingScenario) requestTrace(target string) *httptrace.ClientTr
 			self.stateLock.Unlock()
 		}}
 	case "/page/1":
-		return &httptrace.ClientTrace{GotFirstResponseByte: func() {
+		return &httptrace.ClientTrace{GotConn: func(info httptrace.GotConnInfo) { self.page1Timeline.gotConn(info.Conn) }, GotFirstResponseByte: func() {
+			self.page1Timeline.firstByte()
 			self.stateLock.Lock()
 			if self.combinedFirstByteNs == 0 && !self.tapStarted.IsZero() {
 				self.combinedFirstByteNs = int64(time.Since(self.tapStarted))
@@ -226,7 +233,9 @@ func (self *sdkBrowsingScenario) beforePage(ctx context.Context, page int, close
 	}
 	self.stateLock.Lock()
 	self.tapStarted = time.Now()
+	tap := self.tapStarted
 	self.stateLock.Unlock()
+	self.page1Timeline.arm(tap)
 	for _, event := range []<-chan struct{}{self.prefixRead, self.suffixWritten, self.readHeld, self.jsDone} {
 		select {
 		case <-event:
@@ -324,6 +333,7 @@ func (self *sdkBrowsingScenario) buildLate(ctx context.Context) {
 	self.lateConstructedNs = int64(time.Since(self.tapStarted))
 	self.stateLock.Unlock()
 	id := self.fixture.providers[4].id
+	self.page1Timeline.late(id)
 	details := model.GetProvideRelationshipDetails(ctx, self.fixture.consumerClientId, server.Id(id))
 	if details.Mode != model.ProvideModePublic || details.SourceLifecycle != model.NetworkClientLifecycleActiveTop || details.DestinationLifecycle != model.NetworkClientLifecycleActiveTop {
 		self.recordError(errors.New("late actual public relationship missing"))
@@ -346,6 +356,7 @@ func (self *sdkBrowsingScenario) buildLate(ctx context.Context) {
 func (self *sdkBrowsingScenario) wrapHandler(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/page/1" {
+			self.page1Timeline.handler(self.native.originConnection(request))
 			ordinal, known := self.native.provider(request)
 			if !known {
 				self.recordError(errors.New("page1 upstream provider unknown"))
@@ -571,7 +582,11 @@ func (self *sdkBrowsingScenario) verdict(observation *nativeBrowsingObservation)
 		return errors.New("SDK_BROWSING_PUBLIC_FULL_WINDOW_CUSTODY_OR_WORKLOAD")
 	}
 	var mechanismErr, latencyErr error
-	if provider != 4 && !(self.acceptOwnedSpeedRecovery && provider == 5) {
+	if self.allInitialDestinationOutageForTest {
+		if !sdkBrowsingInitialCohortPublishedProvider(self.fixture, provider) {
+			mechanismErr = fmt.Errorf("INITIAL_COHORT_RESPONSE_OWNER_UNPUBLISHED: page1_provider=%d", provider)
+		}
+	} else if provider != 4 && !(self.acceptOwnedSpeedRecovery && provider == 5) {
 		mechanismErr = fmt.Errorf("SDK_BROWSING_LATE_PROVIDER_NOT_EXERCISED: page1_provider=%d; existing-route recovery is not a latency regression", provider)
 	}
 	if combined <= 0 || sdk.DefaultDeviceLocalSettings().SendTimeout <= combined {
@@ -604,10 +619,12 @@ func sdkBrowsingAwaitConstructor(ctx context.Context, done <-chan struct{}) erro
 // Bounded receipts precede assertions and contain no synthetic IDs or tuples.
 func (self *sdkBrowsingScenario) log(t testing.TB, observation *nativeBrowsingObservation) {
 	t.Helper()
+	self.page1Timeline.log(t)
 	self.stateLock.Lock()
 	report := struct {
 		Topology                                 string `json:"topology"`
 		AcceptOwnedSpeedRecovery                 bool   `json:"accept_owned_speed_recovery"`
+		AllInitialDestinationOutage              bool   `json:"all_initial_destination_outage"`
 		RuntimeProcs                             int    `json:"gomaxprocs"`
 		Scope                                    string `json:"scope"`
 		Initial, AtCss, AtTap, AfterFirstRefusal sdkBrowsingSetupSnapshot
@@ -635,7 +652,10 @@ func (self *sdkBrowsingScenario) log(t testing.TB, observation *nativeBrowsingOb
 		AfterJoin                                *sdk.DeviceLocalMemoryUsage      `json:"owner_after_join"`
 		UnpublishedKnown                         bool                             `json:"unpublished_offers_known"`
 		QuiescenceKnown                          bool                             `json:"quiescence_known"`
-	}{Topology: sdkBrowsingTopology, AcceptOwnedSpeedRecovery: self.acceptOwnedSpeedRecovery, RuntimeProcs: runtime.GOMAXPROCS(0), Scope: "changed public full-window input; actual SDK32/H1; canonical aggregate pressure boundaries unavailable; one named fixture API probe is observational; source refusal followup views are non-atomic; no forced wake or fixture aging", Initial: self.initial, AtCss: self.atCss, AtTap: self.atTap, AfterFirstRefusal: self.afterFirstRefusal, Html: self.htmlFetches.Load(), Assets: self.assetFetches.Load(), CssExpected: nativeBrowsingAssetBytes(0, 0), CssReceived: self.cssReceivedBytes, CssOriginal: self.cssComplete, HeldThroughHtml: self.heldThroughHtml, OwnerRetained: self.cssOwnerRetained, FlowsBefore: self.cssFlowsBefore, FlowsAfter: self.cssFlowsAfter, PositiveHeldRead: self.positiveHeldBytes, Page1Provider: self.page1Provider, PreTapNs: self.preTapNs, CombinedNs: self.combinedFirstByteNs, Page1Ns: self.page1FirstByteNs, RefusalNs: self.refusalNs, Refusals: self.refusalCounts, LateConstructedNs: self.lateConstructedNs, LateApiVisibleNs: self.lateApiVisibleNs, LateReady: self.lateReady, LateJoined: self.lateJoined, Discovery: self.fixture.discovery.snapshot(), AfterJoin: self.fixture.afterJoin}
+	}{Topology: sdkBrowsingTopology, AcceptOwnedSpeedRecovery: self.acceptOwnedSpeedRecovery, AllInitialDestinationOutage: self.allInitialDestinationOutageForTest, RuntimeProcs: runtime.GOMAXPROCS(0), Scope: "changed public full-window input; actual SDK32/H1; canonical aggregate pressure boundaries unavailable; one named fixture API probe is observational; source refusal followup views are non-atomic; no forced wake or fixture aging", Initial: self.initial, AtCss: self.atCss, AtTap: self.atTap, AfterFirstRefusal: self.afterFirstRefusal, Html: self.htmlFetches.Load(), Assets: self.assetFetches.Load(), CssExpected: nativeBrowsingAssetBytes(0, 0), CssReceived: self.cssReceivedBytes, CssOriginal: self.cssComplete, HeldThroughHtml: self.heldThroughHtml, OwnerRetained: self.cssOwnerRetained, FlowsBefore: self.cssFlowsBefore, FlowsAfter: self.cssFlowsAfter, PositiveHeldRead: self.positiveHeldBytes, Page1Provider: self.page1Provider, PreTapNs: self.preTapNs, CombinedNs: self.combinedFirstByteNs, Page1Ns: self.page1FirstByteNs, RefusalNs: self.refusalNs, Refusals: self.refusalCounts, LateConstructedNs: self.lateConstructedNs, LateApiVisibleNs: self.lateApiVisibleNs, LateReady: self.lateReady, LateJoined: self.lateJoined, Discovery: self.fixture.discovery.snapshot(), AfterJoin: self.fixture.afterJoin}
+	if self.allInitialDestinationOutageForTest {
+		report.Scope += "; all-initial-destination-outage-current-topology-v1; current7-provider topology: initial quality0..3+6 and speed5 all refuse only new203.0.113.11:443 dials while armed; late4 constructed only after real refusal with actual public API visibility; established CSS and unrelated destinations unchanged; optional historical private bootstrap/SYN/auth trace unavailable; no imported production policy"
+	}
 	self.stateLock.Unlock()
 	encoded, err := json.Marshal(report)
 	if err != nil || len(encoded) > 16*1024 {
@@ -684,7 +704,13 @@ func TestFullTunH1Sdk32ServiceRefusalRecovery100Pages(t *testing.T) {
 
 // Both roots share the exact input and driver. This flag changes only the
 // post-workload mechanism predicate and its report, never scheduling or gates.
+// Existing service-recovery roots preserve their original quality-only fault.
 func testSdkBrowsingPublicServiceRecovery(t *testing.T, acceptOwnedSpeed bool) {
+	testSdkBrowsingPublicServiceRecoveryWithInitialOutage(t, acceptOwnedSpeed, false)
+}
+
+// A separate root broadens only the failed destination's initial cohort.
+func testSdkBrowsingPublicServiceRecoveryWithInitialOutage(t *testing.T, acceptOwnedSpeed, allInitialOutage bool) {
 	if testing.Short() {
 		t.Skip("actual SDK/H1/provider topology needs shared PERFVAR services")
 	}
@@ -692,7 +718,11 @@ func testSdkBrowsingPublicServiceRecovery(t *testing.T, acceptOwnedSpeed bool) {
 	environment.Run(t, func(t testing.TB) {
 		plan := newNativeBrowsingPressurePlan()
 		scenario := newSdkBrowsingScenario(plan)
+		if os.Getenv(sdkBrowsingPage1TimelineFlag) == "1" {
+			scenario.page1Timeline = &sdkBrowsingPage1Timeline{}
+		}
 		scenario.acceptOwnedSpeedRecovery = acceptOwnedSpeed
+		scenario.allInitialDestinationOutageForTest = allInitialOutage
 		fixture, err := newSdkBrowsingSetupFixture(t, plan, scenario)
 		if err != nil {
 			t.Fatal("public full-window constructor: ", err)
@@ -738,4 +768,47 @@ func testSdkBrowsingPublicServiceRecovery(t *testing.T, acceptOwnedSpeed bool) {
 			t.Fatal("public full-window browsing failure: ", err)
 		}
 	})
+}
+
+// Historical semantic replay on the current distinct-initial provider topology.
+func TestPrivateInitialCohortDestinationOutageNatural100Pages(t *testing.T) {
+	testSdkBrowsingPublicServiceRecoveryWithInitialOutage(t, true, true)
+}
+
+// Only NEW origin1 dials on initial providers fail; existing sockets are untouched.
+func sdkBrowsingInitialCohortOutageDialRefused(armed bool, ordinal int, address string) bool {
+	return armed && 0 <= ordinal && ordinal < sdkBrowsingProviderCount && ordinal != 4 && address == "203.0.113.11:443"
+}
+
+// Actual response ownership is required; neither late4 nor an initial winner is forced.
+func sdkBrowsingInitialCohortPublishedProvider(fixture *sdkBrowsingSetupFixture, ordinal int) bool {
+	if fixture == nil || ordinal < 0 || ordinal >= len(fixture.providers) {
+		return false
+	}
+	provider := &fixture.providers[ordinal]
+	return provider.ready.Load() && provider.id != (clientconnect.Id{}) && provider.client != nil && provider.carrier != nil && provider.transport != nil && provider.localNat != nil && provider.remoteNat != nil
+}
+
+// The current initial sixth peer must not escape an all-initial outage.
+func TestSdkBrowsingInitialCohortOutageDialScope(t *testing.T) {
+	if sdkBrowsingProviderCount != 7 || sdkBrowsingInitialQualityMask != 0x4f {
+		t.Fatal("reviewed current-topology all-initial premise changed")
+	}
+	for ordinal := -1; ordinal <= sdkBrowsingProviderCount; ordinal++ {
+		want := 0 <= ordinal && ordinal < sdkBrowsingProviderCount && ordinal != 4
+		if sdkBrowsingInitialCohortOutageDialRefused(false, ordinal, "203.0.113.11:443") || sdkBrowsingInitialCohortOutageDialRefused(true, ordinal, "203.0.113.11:443") != want {
+			t.Fatalf("wrong activation or initial cohort at ordinal %d", ordinal)
+		}
+		for _, address := range []string{"203.0.113.10:443", "203.0.113.12:443", "203.0.113.11:80"} {
+			if sdkBrowsingInitialCohortOutageDialRefused(true, ordinal, address) {
+				t.Fatalf("destination fault escaped its exact new-dial scope: %d %s", ordinal, address)
+			}
+		}
+	}
+	if sdkBrowsingNavigationDialRefused(false, true, 5, "203.0.113.11:443") || !sdkBrowsingNavigationDialRefused(false, true, 6, "203.0.113.11:443") {
+		t.Fatal("existing quality-only current topology predicate changed")
+	}
+	if sdkBrowsingInitialCohortPublishedProvider(nil, 4) || sdkBrowsingInitialCohortPublishedProvider(&sdkBrowsingSetupFixture{}, 4) {
+		t.Fatal("unconstructed response provider qualified")
+	}
 }

@@ -134,6 +134,9 @@ func newSdkBrowsingSetupFixture(t testing.TB, plan *nativeBrowsingPressurePlan, 
 	byJwt := session.NewByJwt(fixture.environment.networkId, fixture.environment.userId, fmt.Sprintf("sdk-browsing-%s", fixture.environment.networkId), false, false).Client(deviceId, clientId).Testing_Sign()
 	fixture.callerToken = byJwt
 	fixture.discovery = newSdkBrowsingSetupDiscovery(fixture.readyProviderIds, &sdkBrowsingSetupApiDiscovery{strategy: fixture.deviceStrategy, apiUrl: apiUrl})
+	if fixture.scenario != nil {
+		fixture.discovery.page1Timeline = fixture.scenario.page1Timeline
+	}
 	settings := sdk.DefaultDeviceLocalSettings()
 	settings.MemoryTargetByteCount, settings.LowMemoryProfile = 32*1024*1024, true
 	settings.AllowProvider, settings.ProvideExtenderEnabled, settings.EnableRpc = false, false, false

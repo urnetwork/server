@@ -65,6 +65,7 @@ func newSdkBrowsingNative(fixture *sdkBrowsingSetupFixture, scenario *sdkBrowsin
 	}
 	path.appTun, self.path = appTun, path
 	self.receiveUnsub = fixture.device.AddReceivePacketsCallback(func(_ clientconnect.TransferPath, _ protocol.ProvideMode, _ *clientconnect.IpPath, packets [][]byte) {
+		scenario.page1Timeline.received(packets)
 		_, _ = appTun.WriteBatch(packets)
 	})
 	go self.run(resources)
@@ -103,6 +104,7 @@ func (self *sdkBrowsingNative) run(resources tunResourceProfile) {
 			self.bridgeInvalid.Store(true)
 			return
 		}
+		traceTokens := self.scenario.page1Timeline.nativeRead(packets[:count])
 		compact := make([]byte, byteCount)
 		offset := 0
 		for _, packet := range packets[:count] {
@@ -121,7 +123,9 @@ func (self *sdkBrowsingNative) run(resources tunResourceProfile) {
 			self.path.bridgeSends.delayDurationNanoseconds.Add(uint64(time.Since(start)))
 		}
 		start := time.Now()
+		self.scenario.page1Timeline.nativeOffer(traceTokens)
 		accepted := self.fixture.device.SendPacketBatch(compact)
+		self.scenario.page1Timeline.nativeReturned(traceTokens, accepted)
 		self.path.bridgeSends.sendDurationNanoseconds.Add(uint64(time.Since(start)))
 		if accepted < 0 || int32(count) < accepted {
 			self.bridgeInvalid.Store(true)
@@ -241,11 +245,15 @@ func (self *sdkBrowsingNative) dialProvider(ordinal int, ctx context.Context, ne
 	if destination == "" || network != "tcp" && network != "tcp4" {
 		return nil, errors.New("unowned documentation fixture endpoint")
 	}
+	traceToken := self.scenario.page1Timeline.originStart(ordinal, address)
 	connection, err := (&net.Dialer{}).DialContext(ctx, "tcp4", destination)
 	if err != nil {
+		self.scenario.page1Timeline.originEnd(traceToken, nil, err)
 		return nil, err
 	}
-	return self.ownOriginConnection(connection, ordinal)
+	owned, err := self.ownOriginConnection(connection, ordinal)
+	self.scenario.page1Timeline.originEnd(traceToken, owned, err)
+	return owned, err
 }
 
 // The same ownership boundary serves real dials and deterministic tuple controls.
