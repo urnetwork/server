@@ -117,7 +117,7 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 			copyLease := lease
 			result = &copyLease
 			observation.step = competitionSupervisorRenewalCallbackReturn
-		}, &observation.phase, &observation.timing, observation.read, &observation.transaction)
+		}, &observation.phase, &observation.timing, &observation.acquire, observation.read, &observation.transaction)
 	})
 	return result, err
 }

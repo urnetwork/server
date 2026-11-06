@@ -16,6 +16,7 @@ import (
 type competitionSupervisorRenewObservation struct {
 	phase            server.DbPhaseObservation
 	timing           server.DbTiming
+	acquire          server.DbAcquireObservation
 	read             *server.DbReadObservation
 	transaction      server.DbTxObservation
 	step             competitionSupervisorRenewalStep
@@ -27,7 +28,7 @@ type competitionSupervisorRenewObservation struct {
 
 // Fresh cumulative counters cannot forget an earlier admitted inner attempt.
 func newCompetitionSupervisorRenewObservation() *competitionSupervisorRenewObservation {
-	return &competitionSupervisorRenewObservation{timing: server.DbTiming{Acquire: &server.DbAcquireObservation{}}, read: server.NewDbReadObservation(),
+	return &competitionSupervisorRenewObservation{read: server.NewDbReadObservation(),
 		readPrefix: competitionSupervisorReadPrefixSnapshot{valid: true}, readPrefixBypass: &competitionHeartbeatDatabaseObservation{}}
 }
 
@@ -64,7 +65,7 @@ func (self *competitionSupervisorRenewObservation) capture(run func()) error {
 	prefix := self.readPrefix
 	prefix.bypasses = self.readPrefixBypass.unknown
 	return competitionSupervisorRenewError{cause: competitionDatabasePhaseError{cause: err, phase: self.phase.Phase()},
-		phase: self.phase.Phase(), acquire: *self.timing.Acquire, read: self.read.Snapshot(), callbackEntered: self.callbackEntered,
+		phase: self.phase.Phase(), acquire: self.acquire, read: self.read.Snapshot(), callbackEntered: self.callbackEntered,
 		transaction: self.transaction.Snapshot(), step: self.step, callbacks: self.callbacks, readPrefix: prefix}
 }
 

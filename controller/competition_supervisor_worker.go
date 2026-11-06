@@ -101,7 +101,7 @@ func readCompetitionSupervisorWorkerFence(ctx context.Context, store PostgresSto
 			}
 			server.Raise(err)
 			server.Raise(setAutomationLeaseGuardsInTx(ctx, tx, settings, lease))
-		}, &observation.phase, &observation.timing, observation.read, &observation.transaction)
+		}, &observation.phase, &observation.timing, &observation.acquire, observation.read, &observation.transaction)
 	})
 	if proof, ok := err.(competitionSupervisorRenewError); ok {
 		proof.entered, proof.returned = entered, server.ObserveDbContextBudget(ctx)
