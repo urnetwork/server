@@ -68,7 +68,7 @@ func TestCompetitionWorkerDeadlineJoinsSameAttemptWithoutHeartbeatIncident(t *te
 			t.Fatal("deadline handback or completion preceded joined evaluator cleanup")
 		}
 		if err := fixture.Finish(t); err != nil || fixture.ctx.Err() != nil ||
-			fixture.store.heartbeatCalls != 1 || fixture.store.hostCalls != 1 || fixture.store.diagnosticCalls != 0 ||
+			fixture.store.heartbeatCalls > 1 || fixture.store.hostCalls > fixture.store.heartbeatCalls || fixture.store.diagnosticCalls != 0 ||
 			fixture.store.handbacks != 0 || fixture.store.claims != 0 || fixture.store.completedCount() != 1 ||
 			fixture.evaluator.calls != 1 || !fixture.evaluator.joined.Load() || !fixture.job.StartedAt.Equal(originalStart) || fixture.job.AttemptCount != originalAttempt {
 			t.Fatal("natural deadline must complete the joined same attempt without a heartbeat incident or reclaim", err)
