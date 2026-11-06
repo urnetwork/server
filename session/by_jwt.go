@@ -34,7 +34,10 @@ func logLoadedPrivateKey(keyType string, path string) {
 	glog.Infof("[jwt]loaded %s key %q\n", keyType, path)
 }
 
-const (
+// How long a by_jwt lasts.
+type ByJwtSettings struct {
+	// The exp of every token but a strict_exp one, from its mint.
+	//
 	// Reverted from 24h to 30 days by team decision.
 	//
 	// The one-day value bounded stale authorization for a client that stays
@@ -59,8 +62,21 @@ const (
 	// health has aged out (ProviderEgressHealthMaxAge).
 	// Shortening this again should wait until a client that ignores the deadline
 	// is the exception rather than the rule.
-	expiryDuration = 30 * 24 * time.Hour
-	clockLeeway    = 30 * time.Second
+	Expiry time.Duration
+	// The exp of a strict_exp token, a sidecar's, from its mint: a copied token
+	// outlives its theft by at most this (D-TEAM-14; owner decisions 103, 131).
+	StrictExpiry time.Duration
+}
+
+func DefaultByJwtSettings() *ByJwtSettings {
+	return &ByJwtSettings{
+		Expiry:       30 * 24 * time.Hour,
+		StrictExpiry: 7 * 24 * time.Hour,
+	}
+}
+
+const (
+	clockLeeway = 30 * time.Second
 
 	ByJwtIssuer          = "urnetwork:byjwt"
 	ByJwtAudienceApi     = "urnetwork:api"
@@ -151,16 +167,35 @@ type ByJwt struct {
 	// client (session/AUTH.md §1). Set when the guest is created; renewal and
 	// every credential derived from it keep it.
 	LagGuest bool `json:"lag_guest,omitempty"`
+	// a sidecar-held credential (§7.4, D-TEAM-14). It lasts
+	// ByJwtSettings.StrictExpiry and ends at its exp whatever reject_expired or
+	// AcceptUntil say, it reaches only the routes api.strictExpRoutes names, and
+	// it renews and mints only with a proof of its ClientKey. Set from the
+	// client's owner row at mint; renewal and every credential derived from it
+	// keep it.
+	StrictExp bool `json:"strict_exp,omitempty"`
+	// the API key this credential descends from through an auth code. The
+	// credential ends when the key is removed (ValidateByJwtState). A credential
+	// minted by the key itself, a client token of an embed backend, has none:
+	// that client outlives a rotation of the backend's key, as it always has.
+	// Set at /auth/code-login; renewal and every credential derived from it keep
+	// it.
+	ApiKeyId *server.Id `json:"api_key_id,omitempty"`
 	gojwt.RegisteredClaims
 }
 
-func newRegisteredClaims(userId server.Id) gojwt.RegisteredClaims {
+func newRegisteredClaims(userId server.Id, strictExp bool) gojwt.RegisteredClaims {
+	settings := DefaultByJwtSettings()
+	expiry := settings.Expiry
+	if strictExp {
+		expiry = settings.StrictExpiry
+	}
 	now := server.NowUtc()
 	return gojwt.RegisteredClaims{
 		Issuer:    ByJwtIssuer,
 		Subject:   userId.String(),
 		Audience:  gojwt.ClaimStrings{ByJwtAudienceApi, ByJwtAudienceConnect},
-		ExpiresAt: gojwt.NewNumericDate(now.Add(expiryDuration)),
+		ExpiresAt: gojwt.NewNumericDate(now.Add(expiry)),
 		NotBefore: gojwt.NewNumericDate(now),
 		IssuedAt:  gojwt.NewNumericDate(now),
 		ID:        server.NewId().String(),
@@ -216,7 +251,7 @@ func NewByJwtWithCreateTime(
 		Pro:         pro,
 		// round here so that the string representation in the jwt does not lose information
 		CreateTime:       server.CodecTime(createTime),
-		RegisteredClaims: newRegisteredClaims(userId),
+		RegisteredClaims: newRegisteredClaims(userId, false),
 	}
 }
 
@@ -327,6 +362,10 @@ type AuthLegacyAcceptCause string
 const (
 	AuthLegacyMissingExpiration AuthLegacyAcceptCause = "missing_expiration"
 	AuthLegacyExpired           AuthLegacyAcceptCause = "expired"
+	// a strict_exp token past its exp, accepted while sidecar.yml's p0_enforce
+	// is off (D-TEAM-14's log-only days). Unlike the others it reads no auth.yml
+	// gate, and reject_expired refuses it too.
+	AuthLegacyStrictExpired AuthLegacyAcceptCause = "strict_expired"
 )
 
 // AuthCredentialKind is the bounded kind of a credential a migration gate let
@@ -459,7 +498,8 @@ func parseByJwtSigned(keyring *byJwtKeyring, jwtSigned string) (*ByJwt, error) {
 // are tolerated and only the claims present on a token are validated; while
 // the reject_expired gate is off, a present-but-passed expiration is
 // tolerated too. A wrong claim value (issuer, audience, subject, not-before)
-// is rejected in every mode, and the signature is always enforced.
+// is rejected in every mode, and the signature is always enforced. A strict_exp
+// token answers to neither gate: see validateStrictExp.
 //
 // The claims policy is enforced manually below rather than with parser
 // options because gojwt validates exp whenever it is present, with no option
@@ -499,7 +539,11 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 		}
 		// gauge of stale-credential traffic, for deciding when to flip
 		// reject_expired on
-		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyExpired), string(authCredentialKind(byJwt))).Inc()
+		cause := AuthLegacyExpired
+		if byJwt.StrictExp {
+			cause = AuthLegacyStrictExpired
+		}
+		authLegacyAcceptCounter.WithLabelValues(string(cause), string(authCredentialKind(byJwt))).Inc()
 	}
 	if byJwt.NotBefore != nil && now.Before(byJwt.NotBefore.Time.Add(-clockLeeway)) {
 		return nil, rejectByJwt(AuthRejectionNotYetValid, "token is not valid yet")
@@ -662,8 +706,10 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 				INNER JOIN network ON
 					network.admin_user_id = network_user.user_id AND
 					network.network_id = $2
-				WHERE network_user.user_id = $1
-			`, byJwt.UserId, byJwt.NetworkId)
+				WHERE
+					network_user.user_id = $1 AND
+					($3::uuid IS NULL OR EXISTS (SELECT 1 FROM account_api_key WHERE api_key_id=$3 AND network_id=$2))
+			`, byJwt.UserId, byJwt.NetworkId, byJwt.ApiKeyId)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
 					server.Raise(result.Scan(&credentialChangeTime))
@@ -693,11 +739,12 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 				network_user.user_id = $1 AND
 				($4::uuid IS NULL OR network_client.device_id = $4) AND
 				($5::uuid IS NULL OR network_client.source_client_id = $5) AND
+				($8::uuid IS NULL OR EXISTS (SELECT 1 FROM account_api_key WHERE api_key_id=$8 AND network_id=$2)) AND
 				($6::uuid IS NOT NULL OR CASE WHEN $7::uuid IS NOT NULL THEN
 				 EXISTS (SELECT 1 FROM network_client root WHERE root.client_id=$7 AND root.network_id=$2 AND root.active)
 				 ELSE NOT EXISTS (SELECT 1 FROM ancestors WHERE NOT active OR network_id<>$2) AND
 				 EXISTS (SELECT 1 FROM ancestors WHERE source_client_id IS NULL) END)
-		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId, byJwt.SessionId, byJwt.RootClientId)
+		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId, byJwt.SessionId, byJwt.RootClientId, byJwt.ApiKeyId)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&credentialChangeTime))
@@ -781,6 +828,18 @@ func ByJwtNamesClientUnverified(jwtStr string) bool {
 	return byJwt.ClientId != nil
 }
 
+// Whether the token's claims, read without verifying it, say it is a strict_exp
+// token. As with a guest's, a token that says so is verified before anything is
+// refused on its word, and one that does not cannot be one, since removing the
+// claim breaks its signature.
+func ByJwtStrictExpUnverified(jwtStr string) bool {
+	byJwt := &ByJwt{}
+	if _, _, err := gojwt.NewParser().ParseUnverified(jwtStr, byJwt); err != nil {
+		return false
+	}
+	return byJwt.StrictExp
+}
+
 // Testing_Sign constructs signed malformed/legacy fixtures. Production mints
 // must use registration helpers in session_mint.go.
 func (self *ByJwt) Testing_Sign() string {
@@ -801,11 +860,13 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		Roles:            self.Roles,
 		Principal:        self.Principal,
 		LagGuest:         self.LagGuest,
+		StrictExp:        self.StrictExp,
+		ApiKeyId:         self.ApiKeyId,
 		DeviceId:         &deviceId,
 		ClientId:         &clientId,
 		SessionId:        self.SessionId,
 		RootClientId:     self.clientRoot(clientId),
-		RegisteredClaims: newRegisteredClaims(self.UserId),
+		RegisteredClaims: newRegisteredClaims(self.UserId, self.StrictExp),
 	}
 }
 
@@ -823,9 +884,20 @@ func (self *ByJwt) clientRoot(clientId server.Id) *server.Id {
 // Copies lineage and identity while refreshing only registered claims.
 func (self *ByJwt) Renew() *ByJwt {
 	copy := *self
-	copy.RegisteredClaims = newRegisteredClaims(self.UserId)
+	copy.RegisteredClaims = newRegisteredClaims(self.UserId, self.StrictExp)
 	copy.Roles = slices.Clone(self.Roles)
 	return &copy
+}
+
+// Sets whether a credential about to be signed is a strict_exp one, with the
+// registered claims that go with it. The mint knows this only once it has read
+// the client's owner row.
+func (self *ByJwt) SetStrictExp(strictExp bool) {
+	if self.StrictExp == strictExp {
+		return
+	}
+	self.StrictExp = strictExp
+	self.RegisteredClaims = newRegisteredClaims(self.UserId, strictExp)
 }
 
 // in some cases, the byJwt might be corrupt
@@ -1098,6 +1170,6 @@ func Testing_NormalizeClaims(byJwt *ByJwt) {
 		byJwt.CreateTime = server.CodecTime(server.NowUtc())
 	}
 	if byJwt.Subject == "" {
-		byJwt.RegisteredClaims = newRegisteredClaims(byJwt.UserId)
+		byJwt.RegisteredClaims = newRegisteredClaims(byJwt.UserId, byJwt.StrictExp)
 	}
 }

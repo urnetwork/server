@@ -14,7 +14,7 @@ import (
 // These tests pin that every ByJwt-issuing path stamps the network's CURRENT Pro,
 // re-derived from the source of truth (an in-window pro transfer_balance), rather than
 // copying a caller's stale jwt claim or reading a possibly-stale cache. A ByJwt lasts
-// expiryDuration (30 days), so a wrong Pro at issue time is frozen for the token's whole
+// ByJwtSettings.Expiry (30 days), so a wrong Pro at issue time is frozen for the token's whole
 // lifetime — which is how a Pro network ends up showing no Pro in the app.
 
 // grant an in-window pro balance and refresh the cache, so the network is Pro.

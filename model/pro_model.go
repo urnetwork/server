@@ -208,7 +208,7 @@ func UpdateProNetworks(ctx context.Context, networkIds ...server.Id) {
 // the same value UpdateProNetwork does.
 //
 // Use this — NOT IsProNetwork — whenever the result is baked into a durable artifact,
-// above all a ByJwt (which lasts expiryDuration = 30 days). IsProNetwork is a self-healing
+// above all a ByJwt (which lasts ByJwtSettings.Expiry = 30 days). IsProNetwork is a self-healing
 // read-through cache: a stale `false` (e.g. a node whose entry predates the upgrade) is
 // harmless for an ephemeral feature check because it corrects within the ttl. But stamping
 // that stale `false` into a 30-day token freezes it for the token's whole lifetime — the

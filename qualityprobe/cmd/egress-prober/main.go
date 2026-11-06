@@ -1164,8 +1164,8 @@ var errCredentialUnverified = errors.New("egress-prober: could not verify the by
 // carries a client_id.
 //
 // The gap between those two is a real outage mode, not a hypothetical. A token
-// that parses perfectly is still refused once it expires (jwt.expiryDuration is
-// 24h) or once the server begins enforcing a claim the token predates, and the
+// that parses perfectly is still refused once it expires (session.ByJwtSettings)
+// or once the server begins enforcing a claim the token predates, and the
 // prober has no way to notice: the byJwt authenticates only the provider
 // tunnel, while the due queue, attempt reporting and pin fetch all authenticate
 // with the operator secret. So every one of those keeps working, the prober
