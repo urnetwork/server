@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"os"
 	"os/exec"
@@ -112,11 +113,22 @@ func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string
 	command.Env = environment
 	command.Stdin = bytes.NewReader(requestBytes)
 	output := &sourceSupervisorOutput{limit: 1024 * 1024}
-	diagnostics := &sourceSupervisorOutput{limit: 64 * 1024}
+	diagnostics := &sourceSupervisorOutput{limit: 64 * 1024, tail: true, digest: sha256.New()}
 	command.Stdout = output
 	command.Stderr = diagnostics
 	if err := command.Run(); err != nil {
-		return nil, fmt.Errorf("trusted automation integration failed: %w (stdout_truncated=%t stderr_truncated=%t)", err, output.exceeded, diagnostics.exceeded)
+		failure := &sourceSupervisorProcessFailure{cause: err, stdoutTruncated: output.exceeded, stderrTruncated: diagnostics.exceeded,
+			stderrBytes: diagnostics.totalBytes, stderrSha256: hex.EncodeToString(diagnostics.digest.Sum(nil))}
+		if len(arguments) == 1 && arguments[0] == "--supervisor-request" {
+			lines := bytes.Split(diagnostics.content, []byte{'\n'})
+			for index := len(lines) - 1; index >= 0; index-- {
+				if report, decodeError := controller.DecodeCompetitionWorkerFailureReport(lines[index]); decodeError == nil {
+					failure.workerFailure = report
+					break
+				}
+			}
+		}
+		return nil, failure
 	}
 	if machineOutput && output.exceeded {
 		return nil, errors.New("trusted automation integration output exceeds its bound")
@@ -127,18 +139,65 @@ func runSourceSupervisorProcess(ctx context.Context, path, expectedDigest string
 // Each stream has one os/exec copy goroutine; the parent reads only after Wait
 // joins it. Discarding excess bytes must not produce SIGPIPE in a trusted child.
 type sourceSupervisorOutput struct {
-	limit    int
-	content  []byte
-	exceeded bool
+	limit      int
+	content    []byte
+	exceeded   bool
+	tail       bool
+	digest     hash.Hash
+	totalBytes uint64
 }
 
 // Retains a bounded prefix but acknowledges every byte so draining continues.
 func (self *sourceSupervisorOutput) Write(content []byte) (int, error) {
+	self.totalBytes += uint64(len(content))
+	if self.digest != nil {
+		_, _ = self.digest.Write(content)
+	}
+	if self.tail {
+		self.exceeded = self.exceeded || len(self.content)+len(content) > self.limit
+		if len(content) >= self.limit {
+			self.content = append(self.content[:0], content[len(content)-self.limit:]...)
+		} else {
+			retained := min(len(self.content), self.limit-len(content))
+			copy(self.content, self.content[len(self.content)-retained:])
+			self.content = append(self.content[:retained], content...)
+		}
+		return len(content), nil
+	}
 	remaining := max(0, self.limit-len(self.content))
 	retained := min(remaining, len(content))
 	self.content = append(self.content, content[:retained]...)
 	self.exceeded = self.exceeded || retained < len(content)
 	return len(content), nil
+}
+
+// Error formatting exposes only process status, truncation and an opaque log
+// digest. The separate validated worker document contains no raw stderr bytes.
+type sourceSupervisorProcessFailure struct {
+	cause                            error
+	stdoutTruncated, stderrTruncated bool
+	stderrBytes                      uint64
+	stderrSha256                     string
+	workerFailure                    *controller.CompetitionWorkerFailureReport
+}
+
+// Preserve the actual child status without reflecting any private log line.
+func (self *sourceSupervisorProcessFailure) Error() string {
+	return fmt.Sprintf("trusted automation integration failed: %v (stdout_truncated=%t stderr_truncated=%t stderr_bytes=%d stderr_sha256=%s)",
+		self.cause, self.stdoutTruncated, self.stderrTruncated, self.stderrBytes, self.stderrSha256)
+}
+
+// Existing callers retain exact exec and cancellation error inspection.
+func (self *sourceSupervisorProcessFailure) Unwrap() error { return self.cause }
+
+// The report formatter receives a copy; neither raw stderr nor a retained
+// child-output pointer crosses this optional diagnostic interface.
+func (self *sourceSupervisorProcessFailure) CompetitionWorkerFailure() *controller.CompetitionWorkerFailureReport {
+	if self.workerFailure == nil {
+		return nil
+	}
+	copy := *self.workerFailure
+	return &copy
 }
 
 // Historical policy may carry at its source deadline. Elected-winner policy

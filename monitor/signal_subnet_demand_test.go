@@ -121,6 +121,8 @@ func subnetDemandDeclareV2(t *testing.T, world *subnetWorld, firstEpoch uint64) 
 	contract.views["pools"] = func(inputs []any) ([]any, error) {
 		return []any{stabi.ISTSettlementVault2Pool{Hotkey: subnetWorldKey("vault2-pool"), FirstEpoch: firstEpoch, Registered: true}}, nil
 	}
+	// sn.yml declares the pair together.
+	world.deployment.SettlementV2 = strings.ToLower(subnetWorldAddress("settlement-v2").Hex())
 	world.deployment.VaultV2 = strings.ToLower(vault.Hex())
 	world.settings.Deployment = world.deployment
 	return contract

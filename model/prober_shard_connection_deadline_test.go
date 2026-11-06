@@ -11,6 +11,9 @@ import (
 
 // An unchanged registry row still expires while admission waits. Use the real
 // connection owner and exact database lock edges, then advance only the clock.
+// The deadline passes inside the main pool's lock bound
+// (proberShardDeadlineBarrierWindow): a longer barrier ends the wait with 55P03
+// before admission can recheck.
 func exerciseProberShardConnectionDeadlineWait(t testing.TB, boundary string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -20,8 +23,8 @@ func exerciseProberShardConnectionDeadlineWait(t testing.TB, boundary string) {
 	var deadline time.Time
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.Raise(tx.QueryRow(ctx, `UPDATE prober_shard_run
-			SET deadline=(clock_timestamp() AT TIME ZONE 'UTC')+interval '5 seconds'
-			WHERE network_id=$1 RETURNING deadline`, owner.NetworkId).Scan(&deadline))
+			SET deadline=(clock_timestamp() AT TIME ZONE 'UTC')+make_interval(secs => $2)
+			WHERE network_id=$1 RETURNING deadline`, owner.NetworkId, proberShardDeadlineBarrierWindow.Seconds()).Scan(&deadline))
 	})
 	holderConn := acquireContractLifecycleTestConnection(t, ctx)
 	defer holderConn.Release()
