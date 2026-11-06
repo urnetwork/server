@@ -124,10 +124,25 @@ func newForceCloseDisputeFixtureWithReports(t testing.TB, ctx context.Context, s
 	}
 	AddToStream(ctx, contractId, sourceId, destinationId, nil)
 	// A covering receiver checkpoint reported after the sender's final settles
-	// in that report (owner decision B). Report the receiver first: every shape
-	// then stays open for the expiry sweep, as a sender final whose receiver
-	// checkpoint predates it does.
+	// in that report (owner decision B), and since 2026-10-28 a sender's final
+	// after the receiver's checkpoint settles in its own report when the counts
+	// agree. Report the receiver first, and apply a sender final that follows
+	// a receiver checkpoint without settling: every shape then stays open for
+	// the expiry sweep, as one whose report settlement never ran does.
 	report := func(clientId server.Id, byteCount ByteCount, checkpoint bool) {
+		if clientId == sourceId && !checkpoint && destinationCheckpoint {
+			var reportId *server.Id
+			if exact {
+				id := server.NewId()
+				reportId = &id
+			}
+			server.Tx(ctx, func(tx server.PgTx) {
+				applied, _, _, err := applyContractCloseReportUsageInTx(ctx, tx, contractId, clientId, byteCount, checkpoint, reportId, nil)
+				server.Raise(err)
+				connect.AssertEqual(t, true, applied)
+			}, server.TxReadCommitted, server.OptNoRetry())
+			return
+		}
 		if exact {
 			applied, err := CloseContractReport(ctx, contractId, clientId, byteCount, checkpoint, server.NewId())
 			connect.AssertEqual(t, nil, err)

@@ -4,8 +4,10 @@
 // checks that finalized history never rolls back under the monitor's cursor,
 // and compares the coordinator proxy, immutable vault and sink bytecode, the
 // one-time links, the three mirrored contract coldkeys, the governance roles
-// and the policy schedule with the reviewed deployment. It observes; it
-// never deploys, upgrades, pauses or signs.
+// and the policy schedule with the reviewed deployment. A declared settlement
+// v2 pair adds its proxy, vault2, timelock and governance Safe
+// (subnet_chain_settlement_v2.go). It observes; it never deploys,
+// upgrades, pauses, schedules, cancels or signs.
 package monitor
 
 import (
@@ -21,6 +23,7 @@ import (
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/urfoundation/sn/demand/pricesheet"
 	"github.com/urfoundation/sn/protocol"
@@ -62,10 +65,12 @@ type subnetChainProbe struct {
 	latch          *subnetReplayLatch
 	// The last price sheet that verified, for the deposit cap rule.
 	sheet *subnetPriceSheetMemory
+	// Settlement v2 governance frontiers and timelock operation journal.
+	settlementV2 *subnetSettlementV2Observer
 }
 
 func newSubnetChainProbe() *subnetChainProbe {
-	return &subnetChainProbe{runtimes: newSubnetRuntimeCache(), cursor: &subnetFinalizedCursor{}, governanceLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch(), sheet: &subnetPriceSheetMemory{}}
+	return &subnetChainProbe{runtimes: newSubnetRuntimeCache(), cursor: &subnetFinalizedCursor{}, governanceLogs: newSubnetLogFrontier(), latch: newSubnetReplayLatch(), sheet: &subnetPriceSheetMemory{}, settlementV2: newSubnetSettlementV2Observer()}
 }
 
 func (*subnetChainProbe) id() string               { return "subnet/chain" }
@@ -111,6 +116,7 @@ func (self *subnetChainProbe) observe(ctx context.Context, run *subnetRun) ([]fi
 			subnetUnknown(subnetChainFamily, subnetDeploymentGovernanceClass, "subnet-chain/deployment", "checkpoint-"+result.gate, subnetTransientSustain, "an agreed approved finalized checkpoint"),
 			subnetUnknown(subnetChainFamily, subnetPolicyScheduleClass, "subnet-chain/policy", "checkpoint-"+result.gate, subnetTransientSustain, "an agreed approved finalized checkpoint"),
 		)
+		findings = append(findings, subnetSettlementV2Unobserved(run.settings, "checkpoint-"+result.gate)...)
 		return findings, nil
 	}
 	checkpoint := result.checkpoint
@@ -119,6 +125,13 @@ func (self *subnetChainProbe) observe(ctx context.Context, run *subnetRun) ([]fi
 		return nil, err
 	}
 	findings = append(findings, cursorFindings...)
+	// Settlement v2 governance reads none of the v1 views, so a v1 read
+	// failure cannot hide it.
+	settlementV2, err := self.settlementV2.observe(ctx, run, checkpoint)
+	if err != nil {
+		return nil, err
+	}
+	findings = append(findings, settlementV2...)
 	state, err := readSubnetDeploymentState(ctx, checkpoint, run.settings)
 	if canceled := subnetCanceled(ctx); canceled != nil {
 		return nil, canceled
@@ -407,7 +420,11 @@ func (self *subnetChainProbe) observeGovernanceEvents(ctx context.Context, run *
 		topics = append(topics, event.ID)
 	}
 	plan := self.governanceLogs.plan(checkpoint.number, run.settings.DeployBlock, run.limits)
-	logs, err := subnetFetchLogs(ctx, checkpoint.evmReader, state.coordinator, [][]common.Hash{topics}, plan, run.limits)
+	err = subnetLogPlanServed(ctx, checkpoint.evmReader, plan)
+	var logs []ethtypes.Log
+	if err == nil {
+		logs, err = subnetFetchLogs(ctx, checkpoint.evmReader, state.coordinator, [][]common.Hash{topics}, plan, run.limits)
+	}
 	if canceled := subnetCanceled(ctx); canceled != nil {
 		return nil, nil, nil, canceled
 	}
