@@ -532,20 +532,31 @@ func TestCompetitionWorkerEvaluationBudgetParentCancellationWinsSelectedResult(t
 // A genuine cleanup ownership failure stays fenced; this phase is not a
 // blanket permission to ignore host/job authority in order to retain a result.
 func TestCompetitionWorkerEvaluationBudgetCleanupFailureStaysFenced(t *testing.T) {
-	fixture := newCompetitionEvaluationBudgetFixture(t)
-	fixture.store.heartbeat = func(ctx context.Context, _ int) error {
-		if ctx.Err() != nil {
-			t.Error("cleanup used an expired scoring context")
+	synctest.Test(t, func(t *testing.T) {
+		fixture := newCompetitionEvaluationBudgetFixture(t)
+		entered := make(chan struct{})
+		fixture.store.heartbeat = func(ctx context.Context, _ int) error {
+			if ctx.Err() != nil {
+				t.Error("cleanup used an expired scoring context")
+			}
+			close(entered)
+			return ErrLeaseLost
 		}
-		return ErrLeaseLost
-	}
-	fixture.Start(t)
-	fixture.Expire(t)
-	fixture.Tick(t)
-	if err := fixture.Finish(t); !errors.Is(err, ErrLeaseLost) || fixture.store.heartbeatCalls != 1 || fixture.store.hostCalls != 0 ||
-		fixture.store.failure.Category != "lease_lost" || fixture.store.completedCount() != 0 || !fixture.joined.Load() {
-		t.Fatal("budget cleanup bypassed actual lost ownership", err)
-	}
+		fixture.Start(t)
+		fixture.Expire(t)
+		fixture.Tick(t)
+		<-entered
+		// Selection alone does not prove dispatch. The actual failed store
+		// and retry engine must return while the evaluator is still held.
+		synctest.Wait()
+		if fixture.joined.Load() || fixture.store.diagnosticCalls != 0 || fixture.store.completedCount() != 0 {
+			t.Fatal("ownership failure escaped the held evaluator cleanup join")
+		}
+		if err := fixture.Finish(t); !errors.Is(err, ErrLeaseLost) || fixture.store.heartbeatCalls != 1 || fixture.store.hostCalls != 0 ||
+			fixture.store.failure.Category != "lease_lost" || fixture.store.completedCount() != 0 || !fixture.joined.Load() {
+			t.Fatal("budget cleanup bypassed actual lost ownership", err)
+		}
+	})
 }
 
 // The test holds the selected cleanup edge, queues the completed evaluator
