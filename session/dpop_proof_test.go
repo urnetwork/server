@@ -209,6 +209,12 @@ func TestDpopProofHeaderAndClaimsAreExact(t *testing.T) {
 		"a short key": func(token *gojwt.Token, claims *dpopProofClaims) {
 			token.Header["jwk"].(map[string]any)["x"] = "AAAA"
 		},
+		// signed by the bound key and naming another: the proof's own key must be
+		// the bound key, whatever the signature says
+		"another key": func(token *gojwt.Token, claims *dpopProofClaims) {
+			otherKey, _ := newDpopTestKey(t)
+			token.Header["jwk"].(map[string]any)["x"] = base64.RawURLEncoding.EncodeToString(otherKey)
+		},
 		"no jti":      func(token *gojwt.Token, claims *dpopProofClaims) { claims.ID = "" },
 		"a long jti":  func(token *gojwt.Token, claims *dpopProofClaims) { claims.ID = strings.Repeat("j", 17) },
 		"no iat":      func(token *gojwt.Token, claims *dpopProofClaims) { claims.IssuedAt = nil },
