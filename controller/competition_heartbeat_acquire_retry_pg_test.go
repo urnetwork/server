@@ -125,6 +125,10 @@ func TestCompetitionHostAcquireRetryPgComposedKeepsJobAuthoritySeparate(t *testi
 		if err != nil || calls != 2 || waits != 1 || ack.IsZero() || !competitionHostHeartbeatUnadmittedDeadline(firstError) || !readHost().After(originalHost) {
 			t.Fatal("real host acquisition did not recover within its confirmed bound", calls, waits, err)
 		}
+		if acquire := firstError.(competitionHostHeartbeatAcquireError).acquire; acquire.Attempt != 1 || !acquire.Returned || acquire.Admitted ||
+			acquire.PoolEntry.Maximum != 1 || acquire.PoolEntry.Acquired != 1 || acquire.PoolReturn == nil {
+			t.Fatal("host registration observation lost its acquisition snapshot", acquire)
+		}
 		if after := readCompetitionLeasePgSnapshot(ctx, job.JobId); !reflect.DeepEqual(before, after) {
 			t.Fatal("host acquisition recovery renewed job authority or claim budget")
 		}
@@ -152,16 +156,22 @@ func TestCompetitionHeartbeatAcquireRetryPgRejectsEarlierTransactionHistory(t *t
 				tx = observation.beginCallback(tx)
 				observation.enterStep(competitionHeartbeatDatabaseSlotLock)
 				server.RaisePgResult(tx.Exec(ctx, `SELECT 1`))
-			}, &observation.phase, &observation.timing, &observation.transaction)
+			}, &observation.phase, &observation.timing, &observation.acquire, &observation.transaction)
 			release = holdCompetitionSupervisorAcquirePgPool(t, ctx)
 			child, stop := context.WithTimeout(ctx, time.Second)
 			defer stop()
-			server.Tx(child, func(server.PgTx) { panic("synthetic later acquisition must never admit") }, &observation.phase, &observation.timing, &observation.transaction)
+			server.Tx(child, func(server.PgTx) { panic("synthetic later acquisition must never admit") }, &observation.phase, &observation.timing, &observation.acquire, &observation.transaction)
 		})
 		proof, ok := err.(competitionHeartbeatDatabaseError)
 		if !ok || !errors.Is(err, context.DeadlineExceeded) || proof.snapshot.Transaction.AcquireSucceeded != 1 || proof.snapshot.Transaction.CommitAcknowledged != 1 ||
 			proof.snapshot.CallbackEntries != 1 || competitionHeartbeatUnadmittedDeadline(err) {
 			t.Fatal("final acquisition erased real prior SQL/commit history", err)
+		}
+		// The acquisition option spans both inner transactions; only the last,
+		// refused attempt is retained.
+		if acquire := proof.snapshot.Acquire; acquire.Attempt != 2 || acquire.Attempt != proof.snapshot.Transaction.AcquireAttempts || !acquire.Returned || acquire.Admitted ||
+			acquire.PoolEntry.Maximum != 1 || acquire.PoolReturn == nil {
+			t.Fatal("heartbeat observation lost its acquisition snapshot", acquire)
 		}
 	})
 }

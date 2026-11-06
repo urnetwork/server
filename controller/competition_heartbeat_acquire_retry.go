@@ -171,6 +171,7 @@ func competitionHeartbeatUnadmittedDeadline(err error) bool {
 type competitionHostHeartbeatObservation struct {
 	phase           server.DbPhaseObservation
 	timing          server.DbTiming
+	acquire         server.DbAcquireObservation
 	read            *server.DbReadObservation
 	callbackEntered bool
 }
@@ -188,7 +189,7 @@ func (self competitionHostHeartbeatAcquireError) Unwrap() error { return self.ca
 
 // One fresh owner spans all inner Db retries and captures only after unwind.
 func newCompetitionHostHeartbeatObservation() *competitionHostHeartbeatObservation {
-	return &competitionHostHeartbeatObservation{timing: server.DbTiming{Acquire: &server.DbAcquireObservation{}}, read: server.NewDbReadObservation()}
+	return &competitionHostHeartbeatObservation{read: server.NewDbReadObservation()}
 }
 
 func (self *competitionHostHeartbeatObservation) capture(run func()) error {
@@ -197,7 +198,7 @@ func (self *competitionHostHeartbeatObservation) capture(run func()) error {
 	if err == nil {
 		return nil
 	}
-	return competitionHostHeartbeatAcquireError{cause: competitionDatabasePhaseError{cause: err, phase: self.phase.Phase()}, acquire: *self.timing.Acquire,
+	return competitionHostHeartbeatAcquireError{cause: competitionDatabasePhaseError{cause: err, phase: self.phase.Phase()}, acquire: self.acquire,
 		read: self.read.Snapshot(), callbackEntered: self.callbackEntered}
 }
 
