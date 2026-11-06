@@ -80,6 +80,7 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 		server.Tx(ctx, func(tx server.PgTx) {
 			observation.callbackEntered = true
 			observation.callbacks++
+			tx = observation.observeReadPrefix(tx, false)
 			result = nil
 			observation.step = competitionSupervisorRenewalScopeLock
 			automationScopeLockInTx(ctx, tx, settings)
@@ -96,6 +97,9 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 			}
 			server.Raise(loadError)
 			observation.step = competitionSupervisorRenewalAuthority
+			if self.beforeAutomationLeaseAuthorityForTest != nil {
+				self.beforeAutomationLeaseAuthorityForTest()
+			}
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, lease))
 			now := self.nowUtc()
 			if !now.Before(previousExpiry) {
@@ -134,6 +138,12 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 	if !valid {
 		return ErrLeaseLost
 	}
+	return setAutomationLeaseGuardsInTx(ctx, tx, settings, lease)
+}
+
+// Both the fenced writer and read-only worker observer install the same
+// transaction-local guards without reacquiring a connection or authority row.
+func setAutomationLeaseGuardsInTx(ctx context.Context, tx server.PgTx, settings *Settings, lease model.CompetitionSupervisorLease) error {
 	approvalDigest, approvalJson := "", ""
 	if settings.FutureEpochPolicy != nil && settings.FutureEpochPolicy.TrustedInstrument != nil {
 		approval := settings.FutureEpochPolicy.TrustedInstrument
@@ -150,7 +160,7 @@ func (self PostgresStore) requireAutomationLeaseInTx(ctx context.Context, tx ser
 		return err
 	}
 	// Database triggers independently fence stale and legacy source writers.
-	_, err = tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_owner',$1,true),set_config('urnetwork.competition_v2_fence',$2,true),
+	_, err := tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_owner',$1,true),set_config('urnetwork.competition_v2_fence',$2,true),
 	 set_config('urnetwork.competition_v2_bootstrap_lock',$3,true),set_config('urnetwork.competition_v2_bootstrap_base',$4,true),
 	 set_config('urnetwork.competition_v2_bootstrap_margin',$5,true),set_config('urnetwork.competition_v2_policy_approval',$6,true),
 	 set_config('urnetwork.competition_v2_staging',$7,true),set_config('urnetwork.competition_v2_staging_window',$8,true),set_config('urnetwork.competition_v2_staging_preparation',$9,true)`, lease.OwnerId, strconv.FormatInt(lease.FencingToken, 10), settings.AutomationPolicy.SourceLockSha256, settings.BaseSha, strconv.FormatFloat(settings.EvaluationPolicy.TakeoverMargin, 'g', -1, 64), settings.AutomationPolicy.PolicyApprovalSha256,
