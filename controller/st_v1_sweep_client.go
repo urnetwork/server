@@ -267,7 +267,55 @@ func (self *CoreStClient) V1SweepChain(ctx context.Context, epoch uint64, noId u
 		})
 		stV1SweepApplyRecorded(chain, out, readErr)
 	}
+	// So is STSettlement2's owner: a timelock owner turns each owner call
+	// into the Safe's schedule of it.
+	if chain.AssignSelector {
+		chain.Owner, chain.OwnerMinDelay, chain.OwnerReadError = self.v1SweepOwner(ctx, block)
+	}
 	return chain, nil
+}
+
+var (
+	stV1SweepOwnerSelector    = crypto.Keccak256([]byte("owner()"))[:4]
+	stV1SweepMinDelaySelector = crypto.Keccak256([]byte("getMinDelay()"))[:4]
+)
+
+// v1SweepOwner reads STSettlement2's owner() at block and, when the owner is
+// a contract that answers getMinDelay(), as a TimelockController does and a
+// Safe does not, that least delay in seconds. The error is display-only.
+func (self *CoreStClient) v1SweepOwner(ctx context.Context, block uint64) (common.Address, uint64, string) {
+	var owner common.Address
+	var delay uint64
+	err := self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+		at := new(big.Int).SetUint64(block)
+		out, err := client.CallContract(ctx, ethereum.CallMsg{To: &self.cfg.SettlementV2, Data: stV1SweepOwnerSelector}, at)
+		if err != nil {
+			return err
+		}
+		if len(out) != 32 {
+			return fmt.Errorf("STSettlement2 owner() answered %d bytes", len(out))
+		}
+		read := common.BytesToAddress(out[12:])
+		code, err := client.CodeAt(ctx, read, at)
+		if err != nil {
+			return err
+		}
+		readDelay := uint64(0)
+		if len(code) != 0 {
+			// A Safe reverts or answers nothing here; only a timelock answers a word.
+			if out, err := client.CallContract(ctx, ethereum.CallMsg{To: &read, Data: stV1SweepMinDelaySelector}, at); err == nil && len(out) == 32 {
+				if value := new(big.Int).SetBytes(out); value.IsUint64() {
+					readDelay = value.Uint64()
+				}
+			}
+		}
+		owner, delay = read, readDelay
+		return nil
+	})
+	if err != nil {
+		return common.Address{}, 0, err.Error()
+	}
+	return owner, delay, ""
 }
 
 // Whether STSettlement2's implementation at block is the phase C upgrade: its
