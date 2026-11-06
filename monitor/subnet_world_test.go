@@ -96,6 +96,8 @@ type subnetWorldContract struct {
 	code  []byte
 	slots map[common.Hash]common.Hash
 	views map[string]subnetWorldView
+	// Code reads at an earlier block see no contract.
+	deployed uint64
 }
 
 // A synthetic included transaction.
@@ -1180,6 +1182,13 @@ func (self *subnetWorld) dispatch(endpoint, method string, params []json.RawMess
 		_ = json.Unmarshal(params[0], &address)
 		contract, ok := self.contracts[address]
 		if !ok {
+			return "0x", nil
+		}
+		// World block hashes carry their height in the first eight bytes.
+		var selector struct {
+			BlockHash common.Hash `json:"blockHash"`
+		}
+		if 1 < len(params) && json.Unmarshal(params[1], &selector) == nil && binary.BigEndian.Uint64(selector.BlockHash[:8]) < contract.deployed {
 			return "0x", nil
 		}
 		return hexutil.Encode(contract.code), nil
