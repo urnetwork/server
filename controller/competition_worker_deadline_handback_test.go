@@ -1,10 +1,9 @@
-// This regression fixes the ordering of the existing deadline handback path;
-// it grants no new retry, clock, recovery or production behavior.
+// Natural scoring expiry joins the same evaluator's retained cleanup outcome;
+// it is not a database heartbeat incident or authority for another claim.
 package controller
 
 import (
 	"context"
-	"errors"
 	"reflect"
 	"testing"
 	"testing/synctest"
@@ -14,11 +13,9 @@ import (
 )
 
 // The real evaluation context reaches its original deadline while cleanup is
-// held. An acknowledged unbuffered heartbeat edge then necessarily wins over
-// the unavailable evaluator result; handback must wait for cleanup to join.
-// The next Store claim is synthetic, while evaluateOne's expired-job decision
-// and bounded terminal-persistence path are the actual production code.
-func TestCompetitionWorkerDeadlineHeartbeatHandbackThenExpiredReclaim(t *testing.T) {
+// held. An acknowledged unbuffered heartbeat edge necessarily wins over the
+// unavailable result; only ownership metadata may renew on the live parent.
+func TestCompetitionWorkerDeadlineJoinsSameAttemptWithoutHeartbeatIncident(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		fixture := newCompetitionLeaseRetryWorkerFixture(t)
 		policy := fixture.worker.settings.EvaluationPolicy
@@ -70,41 +67,18 @@ func TestCompetitionWorkerDeadlineHeartbeatHandbackThenExpiredReclaim(t *testing
 		if fixture.store.diagnosticCalls != 0 || fixture.store.completedCount() != 0 || fixture.evaluator.joined.Load() {
 			t.Fatal("deadline handback or completion preceded joined evaluator cleanup")
 		}
-		if err := fixture.Finish(t); !errors.Is(err, context.DeadlineExceeded) || fixture.ctx.Err() != nil ||
-			fixture.store.heartbeatCalls != 0 || fixture.store.hostCalls != 0 || fixture.store.diagnosticCalls != 1 ||
-			fixture.store.reason != "heartbeat_failed" || fixture.store.detail.Category != "deadline_exceeded" || !fixture.store.joined ||
-			fixture.store.completedCount() != 0 || fixture.evaluator.calls != 1 || !fixture.job.StartedAt.Equal(originalStart) || fixture.job.AttemptCount != originalAttempt {
-			t.Fatal("deadline handback changed its existing join, cause, attempt or original clock", err)
+		if err := fixture.Finish(t); err != nil || fixture.ctx.Err() != nil ||
+			fixture.store.heartbeatCalls > 1 || fixture.store.hostCalls > fixture.store.heartbeatCalls || fixture.store.diagnosticCalls != 0 ||
+			fixture.store.handbacks != 0 || fixture.store.claims != 0 || fixture.store.completedCount() != 1 ||
+			fixture.evaluator.calls != 1 || !fixture.evaluator.joined.Load() || !fixture.job.StartedAt.Equal(originalStart) || fixture.job.AttemptCount != originalAttempt {
+			t.Fatal("natural deadline must complete the joined same attempt without a heartbeat incident or reclaim", err)
 		}
-
-		// Model only the next ordinary Claim's fresh lease/attempt. Its start
-		// remains the original COALESCE-preserved timestamp, not claim time.
-		reclaimed := *fixture.job
-		reclaimed.AttemptCount++
-		freshExpiry := server.NowUtc().Add(time.Minute)
-		reclaimed.LeaseExpiresAt = &freshExpiry
-		store := &fakeStore{claimJobs: []*queuedJob{&reclaimed}}
-		evaluator := &competitionCompletionEvaluator{evaluate: func(context.Context) EvaluationOutcome {
-			t.Error("an expired ordinary reclaim invoked the evaluator")
-			return EvaluationOutcome{}
-		}}
-		worker, err := newWorkerWithImageDigest(fixture.worker.settings, store, evaluator, fixture.worker.workerId, testWorkerImageDigest())
-		if err != nil {
-			t.Fatal(err)
-		}
-		claimed, err := store.Claim(fixture.ctx, fixture.worker.settings, fixture.worker.workerId, testWorkerImageDigest())
-		if err != nil || claimed == nil || claimed.JobId != fixture.job.JobId {
-			t.Fatal("synthetic ordinary reclaim lost the original job")
-		}
-		if err := worker.evaluateOne(fixture.ctx, claimed, host); err != nil {
-			t.Fatal("expired reclaim failed its independent terminal metadata path", err)
-		}
-		outcomes := store.outcomes()
-		if evaluator.calls != 0 || len(outcomes) != 1 || outcomes[0].Score != nil || outcomes[0].Error == nil ||
-			outcomes[0].Error.Code != "evaluation_time_budget_exhausted" || outcomes[0].Error.Retriable || store.handbacks != 0 ||
-			!claimed.StartedAt.Equal(originalStart) || !claimed.StartedAt.Add(time.Duration(policy.ScoreTimeoutSeconds)*time.Second).Equal(originalDeadline) ||
-			claimed.AttemptCount != originalAttempt+1 || !reflect.DeepEqual(fixture.worker.settings.EvaluationPolicy, policy) {
-			t.Fatal("expired reclaim gained evaluation, a new deadline or another infrastructure retry")
+		outcomes := fixture.store.outcomes()
+		if len(outcomes) != 1 || outcomes[0].Score != nil || outcomes[0].Error == nil ||
+			outcomes[0].Error.Code != "evaluation_time_budget_exhausted" || outcomes[0].Error.Retriable ||
+			!fixture.job.StartedAt.Add(time.Duration(policy.ScoreTimeoutSeconds)*time.Second).Equal(originalDeadline) ||
+			!reflect.DeepEqual(fixture.worker.settings.EvaluationPolicy, policy) {
+			t.Fatal("deadline completion gained score authority, a new clock or another infrastructure retry")
 		}
 	})
 }

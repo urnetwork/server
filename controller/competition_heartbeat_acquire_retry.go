@@ -18,7 +18,7 @@ type competitionHeartbeatAcquireRetrySettings struct {
 }
 
 // Three calls share twenty seconds, each no longer than the original eight.
-// The confirmed lease and original evaluation deadline can only shorten them.
+// The confirmed lease and live worker parent can only shorten them.
 func defaultCompetitionHeartbeatAcquireRetrySettings() competitionHeartbeatAcquireRetrySettings {
 	return competitionHeartbeatAcquireRetrySettings{Timeout: 20 * time.Second, AttemptTimeout: 8 * time.Second}
 }
@@ -47,6 +47,12 @@ func (self *Worker) refreshHostHeartbeat(ctx context.Context, jobExpiresAt time.
 	operation := func(attemptCtx context.Context) error {
 		return self.store.RegisterHost(attemptCtx, self.settings, check)
 	}
+	return self.refreshHostHeartbeatWithOperation(ctx, jobExpiresAt, operation)
+}
+
+// The worker can withdraw a cleanup dispatch when its evaluator has already
+// finished, without changing the host retry predicate, budget or ACK rules.
+func (self *Worker) refreshHostHeartbeatWithOperation(ctx context.Context, jobExpiresAt time.Time, operation func(context.Context) error) error {
 	var startedAt time.Time
 	var err error
 	if self.confirmedHostLeaseExpiresAt.IsZero() {
