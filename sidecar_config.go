@@ -24,6 +24,7 @@ import (
 // previews nothing. Taking a gate back off is an edit to the file, not its
 // removal: a removal holds until the process restarts.
 
+// The file's name under config/<env>.
 const sidecarConfigResourceName = "sidecar.yml"
 
 // Settings of the reader.
@@ -34,12 +35,14 @@ type SidecarConfigSettings struct {
 	RereadInterval time.Duration
 }
 
+// §19.11's interval.
 func DefaultSidecarConfigSettings() *SidecarConfigSettings {
 	return &SidecarConfigSettings{
 		RereadInterval: 60 * time.Second,
 	}
 }
 
+// The keys this reader reads.
 type sidecarConfigYaml struct {
 	Sidecar struct {
 		P0Enforce struct {
@@ -63,6 +66,7 @@ func (self *SidecarConfig) PreviewNetwork(networkId Id) bool {
 	return self.previewNetworkIds[networkId]
 }
 
+// One bad preview entry costs only that entry.
 func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 	config := &SidecarConfig{
 		P0Enforce:         y.Sidecar.P0Enforce.Enabled,
@@ -111,6 +115,7 @@ func loadSidecarConfig(previous *SidecarConfig) (config *SidecarConfig) {
 	return
 }
 
+// A read and when it was taken.
 type sidecarConfigRead struct {
 	config   *SidecarConfig
 	readTime time.Time
@@ -127,6 +132,7 @@ type sidecarConfigReader struct {
 	latest    atomic.Pointer[sidecarConfigRead]
 }
 
+// A reader of the file on the wall clock.
 func newSidecarConfigReader(settings *SidecarConfigSettings) *sidecarConfigReader {
 	return &sidecarConfigReader{
 		settings: settings,
@@ -135,6 +141,8 @@ func newSidecarConfigReader(settings *SidecarConfigSettings) *sidecarConfigReade
 	}
 }
 
+// The latest read, taken again first when it is stale and no other caller is
+// taking it.
 func (self *sidecarConfigReader) get() *SidecarConfig {
 	now := self.now()
 	read := self.latest.Load()
@@ -155,6 +163,8 @@ func (self *sidecarConfigReader) get() *SidecarConfig {
 	return config
 }
 
+// The process's reader. The file is the process's, so unlike a budget it has one
+// owner per process.
 var defaultSidecarConfigReader = newSidecarConfigReader(DefaultSidecarConfigSettings())
 
 // The current sidecar.yml.

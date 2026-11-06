@@ -258,86 +258,88 @@ func strictExpProofStub(t *testing.T) {
 	})
 }
 
-// With the allowlist on, a strict_exp bearer reaches exactly §7.4's routes and
-// every other route answers it 403, with its own message and before its handler,
-// so a route a sidecar needs and the list lacks fails here. The check runs over
-// the served route table, so a new route is covered without a change here: off the
-// list it refuses, and under a sidecar family it fails until it is classified.
+// With the allowlist on, a strict_exp bearer reaches exactly §7.4's routes, with
+// its proof where they want one, and every other route answers it 403, with its
+// own message and before its handler, so a route a sidecar needs and the list lacks
+// fails here. The check runs over the served route table, so a new route is covered
+// without a change here: off the list it refuses, and under a sidecar family it
+// fails until it is classified. Reads Redis for the proofs' jtis.
 func TestSidecarTokenRoutes(t *testing.T) {
-	tokens := newStrictExpTokens()
-	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
-		return false
-	})
-	strictExpProofStub(t)
-	pushP0Enforce(t)
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		self := newStrictExpProofFixture(t)
+		setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+			return false
+		})
+		pushP0Enforce(t)
 
-	listed := []string{}
-	for key := range strictExpRoutes {
-		listed = append(listed, key)
-	}
-	slices.Sort(listed)
-	want := slices.Clone(sidecarAllowlist)
-	slices.Sort(want)
-	if !slices.Equal(listed, want) {
-		t.Fatalf("strictExpRoutes = %v, want §7.4's %v", listed, want)
-	}
+		listed := []string{}
+		for key := range strictExpRoutes {
+			listed = append(listed, key)
+		}
+		slices.Sort(listed)
+		want := slices.Clone(sidecarAllowlist)
+		slices.Sort(want)
+		if !slices.Equal(listed, want) {
+			t.Fatalf("strictExpRoutes = %v, want §7.4's %v", listed, want)
+		}
 
-	routes := Routes()
-	served := map[string]bool{}
-	for _, route := range routes {
-		served[routeAccessKey(route)] = true
-	}
-	for _, key := range sidecarAllowlist {
-		if !served[key] {
-			t.Errorf("the allowlist names %s, which no route serves", key)
+		routes := Routes()
+		served := map[string]bool{}
+		for _, route := range routes {
+			served[routeAccessKey(route)] = true
 		}
-	}
-	for _, key := range sidecarScenarioRoutes {
-		if !strictExpRoutes[key] {
-			t.Errorf("a scenario calls %s, which the allowlist lacks", key)
+		for _, key := range sidecarAllowlist {
+			if !served[key] {
+				t.Errorf("the allowlist names %s, which no route serves", key)
+			}
 		}
-	}
-
-	refusedCount := 0
-	for _, route := range routes {
-		key := routeAccessKey(route)
-		if route.RefusesStrictExpCredentials() == strictExpRoutes[key] {
-			t.Errorf("%s: strict_exp gate = %t, on the allowlist = %t", key, route.RefusesStrictExpCredentials(), strictExpRoutes[key])
-		}
-		for _, family := range sidecarRouteFamilies {
-			if strings.HasPrefix(route.Pattern(), family) && !strictExpRoutes[key] && !slices.Contains(sidecarRouteFamilyRefusals, route.Pattern()) {
-				t.Errorf("%s is under §7.4's sidecar family %s and off the allowlist", key, family)
+		for _, key := range sidecarScenarioRoutes {
+			if !strictExpRoutes[key] {
+				t.Errorf("a scenario calls %s, which the allowlist lacks", key)
 			}
 		}
 
-		w, reached := serveStubbed(route, "Bearer "+tokens.strictToken, nil)
-		if strictExpRoutes[key] {
-			if strictExpProofRoutes[key] {
-				// with no proof: the route is reached and the proof gate answers
-				if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpProofRefusedMessage {
-					t.Errorf("%s: status = %d body = %q, handler ran = %t; want the proof refused", key, w.Code, w.Body.String(), reached)
+		authorization := "Bearer " + self.tokens.strictToken
+		refusedCount := 0
+		for _, route := range routes {
+			key := routeAccessKey(route)
+			if route.RefusesStrictExpCredentials() == strictExpRoutes[key] {
+				t.Errorf("%s: strict_exp gate = %t, on the allowlist = %t", key, route.RefusesStrictExpCredentials(), strictExpRoutes[key])
+			}
+			for _, family := range sidecarRouteFamilies {
+				if strings.HasPrefix(route.Pattern(), family) && !strictExpRoutes[key] && !slices.Contains(sidecarRouteFamilyRefusals, route.Pattern()) {
+					t.Errorf("%s is under §7.4's sidecar family %s and off the allowlist", key, family)
 				}
-			} else if !reached || w.Code != http.StatusOK {
-				t.Errorf("%s: status = %d, handler ran = %t; want the handler", key, w.Code, reached)
 			}
-			continue
-		}
-		refusedCount += 1
-		if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
-			t.Errorf("%s: status = %d body = %q, handler ran = %t; want the sidecar refusal", key, w.Code, w.Body.String(), reached)
-		}
-	}
-	if refusedCount != len(routes)-len(sidecarAllowlist) {
-		t.Fatalf("refused %d of %d routes", refusedCount, len(routes))
-	}
 
-	// an ordinary client's token is none of this: the gate looks at the mark
-	for _, key := range []string{"GET /transfer/stats", "POST /stripe/payment-intent"} {
-		route := routes[slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })]
-		if w, reached := serveStubbed(route, "Bearer "+tokens.clientToken, nil); !reached || w.Code != http.StatusOK {
-			t.Errorf("%s: client token status = %d, handler ran = %t; want the handler", key, w.Code, reached)
+			var proof func(r *http.Request)
+			if strictExpProofRoutes[key] {
+				proof = self.proof(route, self.privateKey)
+			}
+			w, reached := serveStubbed(route, authorization, proof)
+			if strictExpRoutes[key] {
+				if !reached || w.Code != http.StatusOK {
+					t.Errorf("%s: status = %d body = %q, handler ran = %t; want the handler", key, w.Code, w.Body.String(), reached)
+				}
+				continue
+			}
+			refusedCount += 1
+			if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+				t.Errorf("%s: status = %d body = %q, handler ran = %t; want the sidecar refusal", key, w.Code, w.Body.String(), reached)
+			}
 		}
-	}
+		if refusedCount != len(routes)-len(sidecarAllowlist) {
+			t.Fatalf("refused %d of %d routes", refusedCount, len(routes))
+		}
+
+		// an ordinary client's token is none of this: the gate looks at the mark
+		for _, key := range []string{"GET /transfer/stats", "POST /stripe/payment-intent"} {
+			route := routes[slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })]
+			if w, reached := serveStubbed(route, "Bearer "+self.tokens.clientToken, nil); !reached || w.Code != http.StatusOK {
+				t.Errorf("%s: client token status = %d, handler ran = %t; want the handler", key, w.Code, reached)
+			}
+		}
+	})
 }
 
 // §7.4 names what the list leaves out: no payment, purchase, redemption, rename,

@@ -80,7 +80,8 @@ func sidecarRunProbe(t *testing.T, binary string, env string) (string, string, e
 // tag refuses to start anywhere but local or canary (FS-54's first two cases).
 func TestSidecarPendingBuildTags(t *testing.T) {
 	dir := t.TempDir()
-	release := sidecarBuildProbe(t, dir, "release")
+	// an empty -tags, so a GOFLAGS that sets the tag cannot pass for a release build
+	release := sidecarBuildProbe(t, dir, "release", "-tags", "")
 	pending := sidecarBuildProbe(t, dir, "pending", "-tags", "sidecar_pending")
 
 	// every package that reads the group, and the migration runner's own, in both

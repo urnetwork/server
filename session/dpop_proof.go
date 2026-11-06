@@ -43,6 +43,7 @@ type DpopProofSettings struct {
 	AllowHttp bool
 }
 
+// §7.4's window and ttl, with http on a local stack alone.
 func DefaultDpopProofSettings() *DpopProofSettings {
 	env, _ := server.Env()
 	return &DpopProofSettings{
@@ -64,10 +65,12 @@ const (
 // is driven by client input, and the caller answers it with a fixed message.
 var ErrDpopProofRefused = errors.New("DPoP proof refused")
 
+// A refusal with its detail for the logs.
 func dpopRefused(detail string) error {
 	return fmt.Errorf("%w: %s", ErrDpopProofRefused, detail)
 }
 
+// A proof's claims. jti and iat are registered claims.
 type dpopProofClaims struct {
 	Htm string `json:"htm"`
 	Htu string `json:"htu"`
@@ -116,7 +119,10 @@ func dpopCanonicalHost(scheme string, host string) string {
 // Whether htu names the request's URI, ignoring query and fragment (RFC 9449
 // §4.3). What reached this process past the load balancer is http whatever the
 // client dialed, so the scheme is checked against what the api serves and only
-// the host and path against the request.
+// the host and path against the request. The host is the one the ingress passed
+// on, which the sender chose, and that is enough here: htu keeps a proof from
+// serving another route, and a proof that is not spent yet needs the bearer token
+// it hashes to be of any use.
 func dpopHtuMatches(htu string, r *http.Request, settings *DpopProofSettings) bool {
 	target, err := url.Parse(htu)
 	if err != nil {
@@ -174,6 +180,7 @@ func verifyDpopProof(proof string, r *http.Request, bearerToken string, boundKey
 	return claims.ID, nil
 }
 
+// The replay key §7.4 names, one hash slot per client.
 func dpopJtiKey(clientId server.Id, jti string) string {
 	return fmt.Sprintf("{dpop_%s}%s", clientId, jti)
 }

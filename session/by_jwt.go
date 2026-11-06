@@ -68,6 +68,7 @@ type ByJwtSettings struct {
 	StrictExpiry time.Duration
 }
 
+// The lifetimes every token is minted with.
 func DefaultByJwtSettings() *ByJwtSettings {
 	return &ByJwtSettings{
 		Expiry:       30 * 24 * time.Hour,

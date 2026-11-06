@@ -41,6 +41,7 @@ func (self *Route) RefusesStrictExpCredentials() bool {
 	return self.strictExpRefusal != nil
 }
 
+// Serves the handler unless the refusal applies to a verified strict_exp token.
 func strictExpGate(refusal ClientCredentialRefusal, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if _, byJwt := requestStrictExpCredential(r); byJwt != nil && refusal(r.Context(), byJwt) {
@@ -65,6 +66,8 @@ func (self *Route) RequiresStrictExpProof() bool {
 	return self.strictExpProofRefusal != nil
 }
 
+// Serves the handler unless the refusal applies to a verified strict_exp token's
+// request.
 func strictExpProofGate(refusal StrictExpProofRefusal, handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if bearerToken, byJwt := requestStrictExpCredential(r); byJwt != nil && refusal(r, bearerToken, byJwt) {

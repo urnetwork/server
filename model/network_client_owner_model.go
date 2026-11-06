@@ -31,12 +31,14 @@ type ClientAdminSettings struct {
 	CachedClientMaxCount int64
 }
 
+// The cache's bound.
 func DefaultClientAdminSettings() *ClientAdminSettings {
 	return &ClientAdminSettings{
 		CachedClientMaxCount: 32 * 1024,
 	}
 }
 
+// What this process has read. Each answer is immutable.
 var clientRefusesAdminAnswers = newBoundedClientMap[bool](DefaultClientAdminSettings().CachedClientMaxCount)
 
 var clientAdminLookupErrorCounter = prometheus.NewCounter(prometheus.CounterOpts{
@@ -122,10 +124,12 @@ type clientMarks struct {
 	strictExp bool
 }
 
+// Whether there is anything to write in an owner row.
 func (self clientMarks) marked() bool {
 	return self.adminRefused || self.strictExp
 }
 
+// Both sets of marks: what a request asks for and what a parent passes down.
 func (self clientMarks) union(other clientMarks) clientMarks {
 	return clientMarks{
 		adminRefused: self.adminRefused || other.adminRefused,
