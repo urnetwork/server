@@ -45793,7 +45793,7 @@ verified metadata. Every family reads at this one checkpoint.
   process-local. Governance events before the first frontier window are not
   replayed; the checkpoint state remains the authority.
 
-**Settlement v2 governance (2026-11-06, `signal_subnet_chain_settlement_v2.go`).**
+**Settlement v2 governance (2026-11-06, `subnet_chain_settlement_v2.go`).**
 Incident 2026-11-05 ("F2"), remediation R4b: before this, the reader watched
 only the v1 coordinator. Settlement v2's dispute game is optimistic, so a
 hostile root goes through unless someone acts within vault2's 14,400-block

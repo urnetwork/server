@@ -6,7 +6,7 @@
 // one-time links, the three mirrored contract coldkeys, the governance roles
 // and the policy schedule with the reviewed deployment. A declared settlement
 // v2 pair adds its proxy, vault2, timelock and governance Safe
-// (signal_subnet_chain_settlement_v2.go). It observes; it never deploys,
+// (subnet_chain_settlement_v2.go). It observes; it never deploys,
 // upgrades, pauses, schedules, cancels or signs.
 package monitor
 
