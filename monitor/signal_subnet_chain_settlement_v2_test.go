@@ -226,9 +226,10 @@ func TestSubnetChainSettlementV2ReviewedGovernanceIsHealthy(t *testing.T) {
 			t.Fatal("a write method was contacted")
 		}
 	}
-	if world.calls[subnetWorldEvm1+" eth_getLogs"] == 0 {
-		t.Fatal("settlement v2 governance read no events")
-	}
+	// The silence came from a reader that observed this world: one more,
+	// unreviewed call in it pages.
+	world.schedule(subnetWorldKey("operation-control"), 0, world.proxy, subnetV2WorldHostileUpgrade(), subnetV2WorldDeployBlock+970, subnetV2WorldReadyAt)
+	requireSubnetAlert(t, runSubnetWorld(t, NewSubnetChainSignal(), world.signalSettings()), subnetDeploymentGovernanceClass, "subnet-chain/timelock-operations", "operation-"+subnetHex32(subnetWorldKey("operation-control")), SeverityPage)
 }
 
 // A declared pair without reviewed values is unknown, never healthy, and

@@ -53,6 +53,11 @@ func TestSubnetSettlementV2RoutineHistoryIsQuiet(t *testing.T) {
 	end := f.chain.end(subnetSettlementCutoverTestFirst)
 	f.routineV2(t, end)
 	requireSubnetSettlementOnlyV2ReaderGap(t, f.run(t, end+200))
+	// The silence came from a reader that read this history: one demand in
+	// it pages.
+	f.emitV2(t, "PathDemanded", end+96, big.NewInt(1), uint64(1), big.NewInt(0), big.NewInt(1), subnetDisputeTestDemander)
+	f.signal = nil
+	requireSubnetReplayAlert(t, f.run(t, end+200), "subnet-payout-root", "subnet-settlement/no-1", "v2-seq-1/path-demanded")
 }
 
 // Each dispute kind pages on the operator's pending root sequence, once per

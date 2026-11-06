@@ -45689,7 +45689,7 @@ the coordinator proxy. Reuse §17 for gateway/sync diagnosis.
 |---|---|---|
 | `subnet-runtime-identity` | Chain/genesis/netuid and complete runtime/Wasm/metadata tuple match reviewed current signing authority; historical artifacts are read-only. A matching spec number alone is insufficient. | Page on a live writer using an unreviewed identity; warn on observer incompatibility. Preserve both endpoint responses and route to runtime compatibility review, not a blind pin update. |
 | `subnet-finality-divergence` | Independent endpoints agree on the same finalized native checkpoint and the same finalized EVM checkpoint, with their runtime-defined relationship verified; finalized cursor never rolls back or silently skips a gap. Syncing/stale private RPC is not a substitute for a synced operational endpoint. | Page on contradictory finalized history; unknown/warn on one unavailable endpoint. Retain both hashes and runtime identities; investigate provider routing/indexing before attributing a chain fault. |
-| `subnet-deployment-governance` | Coordinator implementation/ERC-1967 slot, immutable vault/sink bytecode, mapped coldkeys, recorder/coordinator links, owner/guardian/oracle and upgrade events match the approved deployment. Testnet uses its dedicated owner; mainnet uses the approved distinct 2-of-3 multisig. | Page on unauthorized drift, a mutable/replaced custody contract, role overlap outside policy, or testnet authority on mainnet. Capture exact code/slot/role evidence; request governance incident response. |
+| `subnet-deployment-governance` | Coordinator implementation/ERC-1967 slot, immutable vault/sink bytecode, mapped coldkeys, recorder/coordinator links, owner/guardian/oracle and upgrade events match the approved deployment. Testnet uses its dedicated owner; mainnet uses the approved distinct 2-of-3 multisig. A declared settlement v2 pair also matches its reviewed STSettlement2 implementation, initializer, timelock owner and auditor set, vault2 code, and the timelock's code, delay and roles; every timelock operation is reviewed, and the governance Safe changes nothing outside review. | Page on unauthorized drift, a mutable/replaced custody contract, role overlap outside policy, testnet authority on mainnet, an unreviewed timelock operation (named by operation id, target role and selector), or any governance Safe owner, threshold, guard, module or fallback handler change. Capture exact code/slot/role evidence; request governance incident response and follow the incident runbook (settlement v2 governance below). |
 | `subnet-policy-schedule` | Policy hashes/signers, future-effective versions, positive tier rates, theta, quality/weight caps, prefix granularity, epoch windows and expiration rules are exact and non-overlapping. Live native mechanism count, UID capacity, permits, CRv4, Liquid Alpha, immunity, stake thresholds and version key match the reviewed profile. | Page if a live writer uses a wrong/retroactive policy or disables a required defense; warn for an authorized upcoming change not yet adopted. Preserve effective epoch and every affected reader/writer version. |
 
 Mainnet's timelock hardening is a governance phase, not something to infer from
@@ -45792,6 +45792,263 @@ verified metadata. Every family reads at this one checkpoint.
   the checkpoint, runtime and mapping only. The cursor and caches are
   process-local. Governance events before the first frontier window are not
   replayed; the checkpoint state remains the authority.
+
+**Settlement v2 governance (2026-11-06, `signal_subnet_chain_settlement_v2.go`).**
+Incident 2026-11-05 ("F2"), remediation R4b: before this, the reader watched
+only the v1 coordinator. Settlement v2's dispute game is optimistic, so a
+hostile root goes through unless someone acts within vault2's 14,400-block
+challenge window, and whoever controls the STSettlement2 proxy's owner or its
+auditor quorum can commit and finalize any root vault2 accepts. Since R1 the
+proxy's owner is a TimelockController with a 72-hour delay whose only
+proposer and canceller is the governance Safe, with open execution and itself
+as its only admin. Every finding below names its action as the incident
+runbook: [REMEDIATION-PLAN.md](../../factury/security/incident-20261105/REMEDIATION-PLAN.md),
+"Runbook: suspected restatement or governance compromise".
+
+The check runs whenever sn.yml declares `settlement_v2_address` and
+`vault_v2_address` (the deployment identity now carries both and accepts
+both or neither). There is no switch to turn it off. It needs the reviewed
+block `subnet_correctness.governance.settlement_v2`. While that block is
+absent, target `subnet-chain/settlement-v2` is unknown (WARN, Sustain 1,
+reason `settlement-v2-governance-not-enrolled`) and never healthy, and every
+v1 check still decides. A partial or malformed block, or one without a
+declared pair, makes the whole enrollment `expectations-invalid`. The block
+for mainnet as reviewed on 2026-11-06 18:40Z:
+
+```yaml
+subnet_correctness:
+  governance:
+    # ... the v1 values ...
+    settlement_v2:
+      implementation: "0x4abe1b9cc49338dbd5beacb85fc21b9e4e4cc369"
+      proxy_code_hash: "0x8b9a6be720b7bedae5f47f9505113a1340490930d4b7ea79966382ac12a4a9e2"
+      implementation_code_hash: "0x885cc06f47890f5396efce9c0e9102ddfed6fb51001b407b5d1e4dd2a93d4880"
+      vault_code_hash: "0xffe288108e5b56dcf2437129f364cfd546732f2bda256b8295d8a95fe81688dc"
+      initialized_version: 1
+      auditors: ["0xe49a35fe9b84f110d9537c9e32f3bf10c4ba513b"]
+      quorum: 1
+      auditor_set_version: 1
+      timelock: "0x5529dfe070f73a96c14b5afcf4fb3ddea6122fac"
+      timelock_code_hash: "0xe3a14af165a6b22bbe7e2c4259833eed0f02e64acb782992c0c4f50ab32eb880"
+      timelock_min_delay: 259200
+      proposers: ["0x56f4dad575576cc0b679fef52899630f9f605418"]
+      cancellers: ["0x56f4dad575576cc0b679fef52899630f9f605418"]
+      executors: ["0x0000000000000000000000000000000000000000"]
+      events_from_block: 9448589
+      reviewed_operations: []
+```
+
+Addresses and hashes are lowercase hex. `executors` may name the zero
+address, which is open execution; no other role may. `events_from_block` is
+the timelock's deployment block (or any earlier block). `reviewed_operations`
+lists the timelock operation ids (`hashOperation`/`hashOperationBatch`)
+governance reviewed. Enroll a planned call's id before the Safe schedules it,
+and an incident's id once its disposition is recorded. The proxy is the sn.yml
+`settlement_v2_address`; vault2 is `vault_v2_address`. Update this block only
+from a review, never from the response under observation. A reviewed change
+through the timelock (R2's `setAuditors`, say) is silent while it waits once
+its id is enrolled. From its execution, which anyone may send, its state and
+event page until the monitor runs with the new values. Settings are a startup
+snapshot (an edited monitor.yml reads as a stale generation until restart),
+and the restart also clears retained pages, so enroll the new values and
+restart right after it executes; that is the stopgap's "review, then clear".
+
+State at the agreed checkpoint (target `subnet-chain/settlement-v2`, PAGE,
+Sustain 1, invariant `reviewed-settlement-v2-governance`), each with its own
+reason:
+
+- the proxy's ERC-1967 implementation slot (`settlement-v2-implementation-slot`),
+  a nonzero admin or beacon slot (`settlement-v2-proxy-kind`), and its
+  OpenZeppelin 5 initializer word, version and not initializing
+  (`settlement-v2-initialized-version`);
+- the code hashes of the proxy, the implementation, vault2 and the timelock
+  (`settlement-v2-proxy-code`, `settlement-v2-implementation-code`,
+  `settlement-vault-v2-code`, `timelock-code`);
+- `owner()` is the reviewed timelock (`settlement-v2-owner`); `auditors()` as
+  a set with no duplicate, `quorum()` and `auditorSetVersion()`
+  (`settlement-v2-auditors`, `settlement-v2-quorum`,
+  `settlement-v2-auditor-set-version`); `v1Coordinator()` and `vault()` name
+  the sn.yml pair and `vault2.coordinator()` names the proxy
+  (`settlement-v2-links`). A view the reviewed code answers but the live
+  proxy refuses pages as `settlement-v2-views-unreadable`, so a hostile
+  implementation cannot turn a violation into an unknown;
+- `getMinDelay()` (`timelock-min-delay`) and `hasRole` true for the timelock
+  as its own admin and for every reviewed proposer, canceller and executor
+  (`timelock-roles`). AccessControl is not enumerable, so an extra holder is
+  found by its `RoleGranted` event instead;
+- a proposer other than the reviewed v1 owner gets its own Safe threshold and
+  signer census against `owner_threshold`/`owner_signers` (`proposer-...`). At
+  launch the proposer is the v1 owner Safe, whose census is already the v1
+  owner authority check, so it is not read twice.
+
+The **change-detector frontier** is bounded like the v1 governance frontier:
+its first run starts at the later of `events_from_block` and the initial
+window, and older changes rest on the state above. It reads:
+
+- the proxy: `Upgraded` other than the reviewed implementation
+  (`settlement-v2-upgrade-event`), `OwnershipTransferred` to anyone but the
+  timelock (`settlement-v2-ownership-event`), `AuditorsSet` other than the
+  reviewed version, set and quorum (`settlement-v2-auditors-event`) and
+  `Initialized` other than the reviewed version
+  (`settlement-v2-initialized-event`) page;
+- the timelock: `RoleGranted` to an account that is not a reviewed holder of
+  that role pages (`timelock-role-granted-event`), as does `RoleRevoked` of a
+  reviewed holder (`timelock-role-revoked-event`) and `MinDelayChange` to
+  another delay (`timelock-min-delay-event`). `RoleRevoked` of an account that
+  was never a reviewed holder (`timelock-unreviewed-holder-revoked-event`) and
+  `Cancelled` of a reviewed operation
+  (`timelock-reviewed-operation-cancelled-event`) warn on the same target,
+  frame `drift`. The R1 constructor grants, `MinDelayChange(0, 259200)` and
+  the Safe's transfer of the proxy to the timelock are the healthy control;
+- the governance Safe (each proposer, and the v1 owner when it is a reviewed
+  multisig): every `AddedOwner`, `RemovedOwner`, `ChangedThreshold`,
+  `ChangedGuard`, `EnabledModule`, `DisabledModule` and
+  `ChangedFallbackHandler` pages on its own target `subnet-chain/governance-safe`
+  (reasons `safe-added-owner-event`, ..., `safe-changed-threshold-event-to-N`).
+  Its executions and other events are silent.
+
+Tiers follow the v1 rule. An event that moves an active authority to an
+unreviewed value pages, as v1's `Upgraded`, `OwnershipTransferred`,
+`GuardianSet` and a retroactive `PolicyScheduled` do. An unreviewed
+`CallExecuted`, a grant to an unreviewed holder, a revoked reviewed holder
+(for example the Safe losing `CANCELLER_ROLE`, or execution closed) and a
+changed delay all change who can act or how fast, so they page. A change
+that moves nothing toward an attacker warns, as v1's unreviewed pending
+rotations and reinitialization do: a reviewed operation cancelled, or a role
+revoked from an account that never held it in review. The two exceptions to
+v1's tiers are deliberate. A scheduled call pages rather than warns, because
+the delay is the response window. `Initialized` pages, because after R1 the
+only legitimate reinitialization is part of a reviewed upgrade, and
+`initialized_version` names it. Safe events page because the Safe acts at
+once, outside the timelock.
+
+The **operation journal** is complete. It reads the timelock's
+`CallScheduled`, `CallExecuted` and `Cancelled` from `events_from_block`,
+proven to precede the timelock (the canonical block before it is served and
+holds no timelock code). It advances in bounded chunks and commits only with
+a published run. A scheduled call is visible only in its event and stays
+executable by anyone once ready, so it must survive a monitor restart and
+any outage, which a bounded first window cannot guarantee. Each operation
+whose id is not in `reviewed_operations` pages on target
+`subnet-chain/timelock-operations`, frame `operation-0x<operation id>`,
+invariant `every-timelock-operation-reviewed`, Sustain 1. Its observation
+names `operation_id`, `state` at the checkpoint (`waiting`, `ready`, `done` or
+`unset` after a cancellation), `ready_at` (UTC) while it is pending, and each
+call as `call_N=target:<reviewed role or unreviewed-target>,function:<name or
+unknown>,selector:0x<4 bytes>,value_wei:<n>,delay_seconds:<n>`. The roles are
+`settlement-v2-proxy`, `settlement-v2-implementation`, `settlement-vault-v2`,
+`timelock`, `governance-safe`, `v1-coordinator`, `settlement-vault-v1` and
+`reserve-sink`; addresses are never rendered. An unreviewed operation keeps
+paging after it executes (`state=done`) or is cancelled (`state=unset`):
+its schedule proves the proposer signed a call outside review. A reviewed
+operation is silent in every state.
+
+Unknown, never healthy (WARN, Sustain 2, frame `unobserved`): state reads
+that fail in transport (`subnet-chain/settlement-v2`, `state-<reason>`); a
+change-detector or journal frontier that is behind (`event-frontier-behind`),
+whose logs fail (`logs-<reason>`, `operation-logs-<reason>`) or whose first
+block the endpoint no longer serves (`logs-history-block-absent`); a journal
+start that is not proven (`operation-journal-start-after-deployment`,
+`operation-journal-start-<reason>`); an undecodable operation event
+(`operation-journal-decode`); or more than 4,096 operations
+(`operation-census-bound`).
+
+The enrolled EVM endpoints must serve the frontiers' history. An endpoint
+that pruned a block answers `eth_getLogs` over it with an empty list.
+`https://lite.chain.opentensor.ai` did this on 2026-11-06: the timelock's
+deployment block 9,448,589 was already gone about 400 blocks later, and
+`eth_getLogs` and `eth_getCode` answered it empty. The reader therefore reads
+the first block of every governance frontier window, the v1 one included, and
+an absent block is unknown (`logs-block-absent` on
+`subnet-chain/governance-events`). Enroll archive endpoints.
+
+Findings (each action follows the runbook above):
+
+- `subnet-chain/settlement-v2`, PAGE.
+  - Symptom: settlement v2 governance differs from the reviewed deployment.
+  - Mechanism: the proxy's implementation slot, owner, auditor set or
+    initializer, a v2 contract's code, the timelock's delay or roles, or a
+    finalized proxy or timelock governance event contradicts the reviewed
+    block. The proxy's owner or auditor quorum can finalize any root vault2
+    accepts, so an unreviewed change can redirect every unclaimed and newly
+    funded balance unless a dispute stops it within the challenge window.
+  - Baseline: a UUPS proxy to the reviewed implementation at the reviewed
+    initializer version, owned by the reviewed timelock with the reviewed
+    auditors and quorum; reviewed code everywhere; the timelock keeps the
+    reviewed delay, roles and only itself as admin.
+  - Action: treat as a suspected governance compromise. Cancel any pending
+    timelock call. If a hostile implementation or auditor set is live, pause
+    v1 with the guardian, demand and claim every account before the window
+    closes, and tell the owner. Never update the reviewed block from the
+    observed values.
+  - Verify: a fresh checkpoint matches every reviewed input, and the incident
+    record attributes each event.
+- `subnet-chain/settlement-v2`, frame `drift`, WARN.
+  - Symptom: timelock activity moved nothing toward an attacker but was not
+    reviewed.
+  - Mechanism: a canceller withdrew a reviewed operation, or a role was
+    revoked from an account that was never a reviewed holder.
+  - Baseline: reviewed operations execute as planned, and role changes touch
+    only reviewed holders.
+  - Action: confirm it with the owner and the reviewed plan. A revocation from
+    an unreviewed holder means an unreviewed grant happened first; find it.
+  - Verify: the owner attributes it, and the plan or block records it.
+- `subnet-chain/governance-safe`, PAGE.
+  - Symptom: the governance Safe changed its owners, threshold, guard, modules
+    or fallback handler.
+  - Mechanism: the Safe owns the v1 coordinator and alone schedules and
+    cancels timelock calls. Its changes take effect at once: a new owner or
+    lower threshold changes who can schedule, a module executes without
+    signatures, and a guard or handler changes every transaction.
+  - Baseline: no such event outside a reviewed Safe transaction; threshold and
+    signer count equal `owner_threshold`/`owner_signers` (v1 check).
+  - Action: confirm against the reviewed, signed Safe transaction. An
+    unreviewed change is a governance key compromise: cancel every pending
+    timelock call and tell the owner. Update `owner_threshold` and
+    `owner_signers` only from the review (R2 adds two owners and threshold 2).
+  - Verify: every Safe event is attributed to a reviewed transaction.
+- `subnet-chain/timelock-operations`, frame `operation-0x<id>`, PAGE.
+  - Symptom: the timelock holds an operation governance did not review.
+  - Mechanism: only the proposer can schedule, and anyone can execute once the
+    delay passes. Upgrading the proxy, changing its auditors or owner, and
+    changing the timelock's own roles or delay all go through such a call, so
+    this is the last warning before any of them takes effect.
+  - Baseline: every scheduled operation id is in `reviewed_operations` before
+    it is scheduled.
+  - Action: read the call by `operation_id` from the timelock's
+    `CallScheduled` event. If it is not a reviewed change, cancel it with
+    `cancel(operation_id)` from a canceller before `ready_at`, and follow the
+    runbook (step 4): a proposer that schedules unreviewed calls is
+    compromised. If governance reviews it, enroll the id. Never execute it to
+    clear the alert.
+  - Verify: the operation is cancelled before it is ready, or its review is
+    recorded and its id enrolled.
+
+Healthy controls: the R1 history; a reviewed auditor rotation scheduled,
+executed and followed by its `AuditorsSet`; a reviewed call still waiting;
+auditor approvals; and ordinary Safe executions are all silent.
+
+- **False-positive qualifier:** a planned schedule pages unless its id was
+  enrolled first, and a planned Safe change always pages. Both are by
+  design, as in the stopgap: review, enroll the id or record the change, and
+  restart to clear the retained page. A restart replays the change-detector
+  window, so a planned Safe change or reviewed cancellation newer than
+  `initial_log_window_blocks` pages or warns once more.
+- **False-negative qualifier:** the reviewed block is in the monitor's own
+  enrollment, so whoever controls it can mark a hostile operation reviewed;
+  keep it under the release owner's review. The operation journal is
+  process-local and replays from `events_from_block` after a restart; until
+  it reaches the checkpoint it is unknown. Safe and proxy events older than
+  the first change-detector window are not replayed; the state is the
+  authority for them, except for an extra role holder, which only its
+  `RoleGranted` reveals (and that grant needed a timelock operation, which the
+  journal sees). This check does not decide root contents, approvals or
+  disputes (§22.7).
+- **Missing today:** production `vault/main/monitor.yml` has no
+  `subnet_correctness` mapping, so neither this check nor the v1 governance
+  checks run until the release owner enrolls one with this block. Until then
+  the planetoid watcher's chain alarms (xops `SN-MAINNET-SETTLEMENT-V2-WATCHER.md`,
+  "Chain alarms") are the only paging on these events.
 
 ### 22.2 Pool registration, validator identity, and fleet ownership
 Probe: `subnet-identity`
@@ -46178,7 +46435,7 @@ own root; do not invent a global claim root or pay providers from deposits.
 |---|---|---|
 | `subnet-epoch-progress` | Each due NO closes within close grace, commits its root within the root window, finalizes no earlier than permitted, and advances independently of a broken peer NO. | Warn on at-risk/missed operator publication; page on overdue required settlement or early/incorrect finalization. A missed close must record zero and defer stake to a later timely boundary, never assign a multi-epoch delta to the first missed epoch. |
 | `subnet-capture-delta` | Captured funding equals measured pool decrease and escrow increase. A sub-minimum TAO-equivalent move has explicit dust deferral; a failed price read/transfer cannot become success or manufactured zero funding. | Page on fabricated/misattributed capture or failed movement entered into accounting. Warn on persistent unexplained deferral after the threshold becomes feasible. Record immutable transfer floor and exact finalized price input. |
-| `subnet-payout-root` | Authorized NO root and artifact hash reproduce the canonical signed payout list, exact 10,000-bps allocation, deterministic remainder rule, claimant identity and historical head exclusion. | Page on accepted malformed/equivocating/wrong-domain root or artifact, or finalized entitlement rewrite. Warn on missing publication after its deadline; custody caps do not make an unfair or unavailable list correct. |
+| `subnet-payout-root` | Authorized NO root and artifact hash reproduce the canonical signed payout list, exact 10,000-bps allocation, deterministic remainder rule, claimant identity and historical head exclusion. A settlement v2 pending root is never disputed, deleted or replaced. | Page on accepted malformed/equivocating/wrong-domain root or artifact, or finalized entitlement rewrite, and on every vault2 `PathDemanded`, `DistributionDeleted` and replacing `DistributionCommitted`. Warn on missing publication after its deadline; custody caps do not make an unfair or unavailable list correct. |
 | `subnet-claim-correctness` | A valid same-NO/epoch Merkle proof creates exactly the leaf's integer entitlement once, for its fixed coldkey; invalid/replayed/cross-root/cross-epoch proofs cannot create credit. | Page on duplicate/redirected/excess credit or valid finalized claims blocked by coordinator pause/upgrade/deactivation. Investigate ordinary proof/request errors without auto-submitting claims. |
 | `subnet-claim-credit-payment` | `Claimed` means logical credit, `ClaimPaymentDeferred` means unpaid durable credit, and `ClaimPaid` requires measured escrow decrease/recipient increase. Credit aggregates across epochs/NOs only for the same coldkey, survives expiry and is permissionlessly retryable. | Page on credit loss, double payment, wrong destination or claimed-as-paid reporting. Warn when a configured claimant/keeper SLO is missed despite feasible transfer; sub-floor credit or a provider choosing not to withdraw is not a breach. |
 | `subnet-carry-isolation` | Missing-root and expired unclaimed remainder become only the same NO's carry; already-claimed credit is excluded. Expiry is after snapshotted TTL/grace and each remainder is consumed once. | Page on cross-NO movement, early expiry, lost durable credit, double carry or an old entitlement being reopened. Reconcile both adjacent epochs before closing the incident. |
@@ -46338,6 +46595,92 @@ names `subnet-epoch-progress` and `subnet-payout-root` as undecided.
   coverage gap keeps the run from reading healthy, and §22.7.1 still pages
   the root deadline.
 
+**Settlement v2 disputes (2026-11-06, `subnet_settlement_v2_disputes.go`).**
+Incident 2026-11-05 ("F2"), remediation R4b. vault2's dispute game is
+optimistic: a root that lowers, reassigns or hides a finalized account
+finalizes unless someone deletes it with the free `checkPath` or blocks it
+with a paid `demandPath` within `CHALLENGE_BLOCKS` (14,400 on mainnet) of its
+commit. A dispute is the watcher or validator stopping such a root, so every
+one is an incident, and so is a pending root replaced before it finalized.
+The check needs no enrollment and has no switch to turn it off. Once the
+cutover read above has proven the declared pair's links, the same checkpoint
+and relay read vault2's `DistributionCommitted`, `PathDemanded` and
+`DistributionDeleted` logs, topic-filtered, over a process-local frontier.
+Its first window is vault2's own `CHALLENGE_BLOCKS` back from the checkpoint,
+so a restarted monitor still sees every dispute of the last challenge
+window. Later runs read only new blocks, bounded like the event journal,
+and every log block is checked against the canonical block at its height. The
+frontier commits only after the closing checkpoint recheck. Each finding is
+PAGE, Sustain 1, class `subnet-payout-root`, retained, on target
+`subnet-settlement/no-N`. Its frame names the operator's pending root
+sequence, `v2-seq-S/<kind>`, so one sequence's many demands are one incident.
+The observation names the event count and the first and last event blocks;
+demanders and challengers are never rendered. Each action follows the
+runbook in [REMEDIATION-PLAN.md](../../factury/security/incident-20261105/REMEDIATION-PLAN.md),
+"Runbook: suspected restatement or governance compromise".
+
+- `v2-seq-S/path-demanded`, invariant `v2-pending-root-needs-no-demand`.
+  - Symptom: someone demanded an opening of an operator's pending v2 root.
+  - Mechanism: a demand blocks finalization until the root is opened at that
+    account. A watcher demands when it cannot verify the root from the
+    published ledger, so a demand means a withheld or unverifiable tree, or
+    someone probing for a lowered account.
+  - Baseline: every pending root's ledger is published and verifies, so no
+    watcher demands.
+  - Action: check that the root's ledger objects are served and verify, and
+    answer every demand before commit + `challenge_blocks`. If the tree is
+    withheld or a demand cannot be answered, follow runbook steps 1 and 3.
+    Keep the transaction hashes and the served objects.
+  - Verify: every demand is answered and the root finalizes, or it is deleted
+    or replaced, and the incident record attributes the demander.
+- `v2-seq-S/distribution-deleted`, invariant `v2-pending-root-has-no-fault`;
+  the observation names the `LedgerTree.Fault` (`inconsistent-node`,
+  `lower-value`, `wrong-leaf`), level, root index and account index.
+  - Symptom: a pending v2 root was deleted as faulty.
+  - Mechanism: `checkPath` proved that the root restates a finalized
+    account, or opened a demanded one with a fault: a stolen root-signer key,
+    a hostile coordinator or a ledger bug.
+  - Baseline: no pending root is ever deleted.
+  - Action: treat the root signer and v2 governance as suspect. Pause v1 with
+    the guardian if the coordinator path is hostile, rotate the root signer
+    and auditor, keep the challenge transaction and served objects, and tell
+    the owner. Never recommit the same tree.
+  - Verify: the record attributes the faulty root, and the operator's next
+    root verifies and finalizes.
+- `v2-seq-S/replacing-commit` (a `DistributionCommitted` with
+  `replacedSeq != 0`), invariant `v2-pending-root-finalizes-before-replacement`;
+  the observation names `replaced_seq`, the epoch, leaf count and total.
+  - Symptom: an operator's pending v2 root was replaced before it finalized.
+  - Mechanism: the coordinator allows a replacement only after the next epoch
+    has ended, so the replaced root never finalized: its auditor quorum did not
+    approve it, a demand stayed open, or nobody finalized it. An auditor that
+    refuses a root it cannot verify is the defense working.
+  - Baseline: each pending root is approved and finalized after its window,
+    so every commit has `replacedSeq` zero.
+  - Action: find why: the auditor's refusal and ledger audit, open demands and
+    the finalizer. If the auditor refused a root it could not verify, follow
+    runbook steps 1 and 3 and verify the replacement before its window closes.
+  - Verify: the record explains the replaced root, and the replacement
+    verifies and finalizes.
+
+A failed vault2 read, a zero `CHALLENGE_BLOCKS`, an undecodable dispute event
+(`dispute-event-malformed`) or a frontier behind the checkpoint
+(`frontier-behind-<bucket>`) is a `settlement-v2-disputes` coverage gap that
+names `subnet-payout-root` as undecided; it is never read as no dispute. An
+unproven cutover leaves the disputes unread under the `settlement-v2-cutover`
+gap, which already names `subnet-payout-root`. Healthy controls: ordinary
+captures, first commits, finalizations and claims are silent.
+
+- **False-negative qualifier:** a dispute that happened while the monitor was
+  down and is older than the first window is not replayed after a restart,
+  and a pending root still blocked by such an old open demand is not reported
+  here. The page is retained only for the watcher's lifetime. This check pages
+  on disputes that happen. It does not verify that a pending root's ledger
+  objects are served by commit + 7,200 blocks: the monitor has no ledger
+  object reader, and the planetoid watcher's `object missing` result is the
+  coverage for that until one is built. It does not replay v2 settlement (the
+  `settlement-v2` gap below).
+
 Bands: a proved identity, carry, claim, payment, root or clock contradiction is
 PAGE with Sustain 1 and is retained; at-risk close or root, a missed root,
 finalization due, persistent dust deferral and an unavailable artifact are WARN
@@ -46352,7 +46695,8 @@ addresses are never rendered. Missing today: the `subnet_replay` enrollment
 provisioned in vault/main monitor.yml, so the journal and root reproduction
 stay unknown until it is and a planned sweep epoch cannot warn; a declared
 settlement v2 deployment is not replayed and reports a coverage gap, although
-its cutover facts above are read; no claimant or keeper SLO is configured.
+its cutover facts above are read and its disputes page; no claimant or keeper
+SLO is configured.
 The independent deadline page in §22.7.1 covers root presence for both
 versions without this replay enrollment.
 
@@ -46632,7 +46976,9 @@ progress-file reader in this server monitor. `subnet-process` currently reads
 operator database/task/intent state and explicitly reports the missing
 validator/miner process exporters; `subnet-weights` reads the native chain.
 `subnet-settlement` replays v1 and reports
-`settlement-v2-reader-unimplemented` for a declared V2 pair. The independent
+`settlement-v2-reader-unimplemented` for a declared V2 pair, whose vault2
+disputes it pages (§22.7). `subnet-chain` reviews V2 governance: the
+STSettlement2 proxy, its timelock and the governance Safe (§22.1). The independent
 `subnet-root-deadline` (§22.7.1) reads v1/v2 root presence and funding for the
 current deadline; it does not implement full V2 settlement replay. Registering
 these probes does not establish enrollment, deployment, metric ingestion or delivered

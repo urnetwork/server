@@ -5,7 +5,7 @@
 // incident, and so is a pending root replaced before it finalized. The
 // family reads vault2's dispute events over a bounded finalized frontier
 // whose first window is vault2's own challenge window, so a restarted monitor
-// still sees every dispute against a root that may yet finalize.
+// still sees every dispute of the last challenge window.
 package monitor
 
 import (
@@ -90,8 +90,8 @@ func readSubnetSettlementV2Disputes(ctx context.Context, rpc *subnetReplayRpc, p
 			return nil, newSubnetReplayUnknown("challenge-window-invalid", nil)
 		}
 	}
-	// The first window is the challenge window: any dispute against a root
-	// that can still finalize lies inside it.
+	// The first window is the challenge window, in which a demand can still
+	// be made against the newest pending roots.
 	if next == 0 {
 		next = 1
 		if challengeBlocks <= checkpoint.number {
