@@ -209,7 +209,7 @@ func executeSourceTestModel(ctx context.Context, client *http.Client, key string
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if execution.ImageId != plan.ImageId || execution.SuiteSha256 != plan.SuiteSha256 || execution.TestCount <= 0 || execution.DurationMillis < 0 ||
+	if execution.ImageId != plan.ImageId || execution.SuiteSha256 != plan.SuiteSha256 || !sourceCorrectnessExecutionCountValid(execution) || execution.DurationMillis < 0 ||
 		!validSha256(execution.TestLogsSha256) || execution.ExitCode < 0 {
 		return nil, errors.New("independent test execution did not bind complete observed evidence")
 	}

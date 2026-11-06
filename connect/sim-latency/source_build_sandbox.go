@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
 // Deployment owns these ceilings; candidate input cannot change them. Every
@@ -46,14 +48,15 @@ func defaultSourceBuildSandboxSettings() sourceBuildSandboxSettings {
 
 // These are authenticated staging paths, never candidate-provided commands.
 type sourceBuildSandboxInput struct {
-	Owner             string
-	Phase             string
-	MinimumWork       bool
-	ImageId           string
-	Commit            string
-	SourceDirectory   string
-	MetadataDirectory string
-	OutputDirectory   string
+	Owner              string
+	Phase              string
+	MinimumWork        bool
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy
+	ImageId            string
+	Commit             string
+	SourceDirectory    string
+	MetadataDirectory  string
+	OutputDirectory    string
 }
 
 // Builds fixed argv rather than interpolating paths, commits or code in shell
@@ -112,7 +115,11 @@ func sourceBuildSandboxArguments(input sourceBuildSandboxInput, settings sourceB
 	} else if input.Phase == "check" {
 		script += "go vet ./connect/...; go test -run '^$' ./connect/..."
 	} else if input.Phase == "correctness" {
-		script += sourceCorrectnessSuiteScriptForMinimumWork(input.MinimumWork)
+		suite, err := newSourceCorrectnessSuite(input.MinimumWork, input.WorkCoveragePolicy)
+		if err != nil {
+			return nil, err
+		}
+		script += suite.script
 	} else {
 		args = append(args, "--tmpfs=/output:rw,nosuid,nodev,noexec,uid=65532,gid=65532,mode=0700,size="+strconv.Itoa(settings.BinaryBytes))
 		script += "go build -trimpath -o /output/sim-latency ./connect/sim-latency; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.revision=//p')\" = \"$SOURCE_BUILD_COMMIT\"; test \"$(go version -m /output/sim-latency | sed -n 's/.*vcs.modified=//p')\" = false; cat /output/sim-latency"
