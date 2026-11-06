@@ -92,6 +92,23 @@ if [[ -d $baseline_dir ]]; then
     "$baseline_dir/verify.sh" || exit $?
 fi
 
+# The model package's TestStNativeFeeSettlementPublic* roots settle the
+# native-fee fixtures and the mainnet.test verifier that only the sn release
+# gate builds (sn/scripts/build-mainnet-exports.sh). The gate exports them as
+# URNETWORK_NATIVE_FEE_SETTLEMENT_* and runs these roots in its server-db phase
+# (sn/scripts/test-release-1.0-local.sh). By design a missing asset fails them:
+# an unexecuted fixture is never a skip (model/st_native_fee_settlement_public_test.go).
+# An ordinary local or CI run sets none of the gate's variables and cannot
+# execute them, so it leaves them out here instead of reporting four certain
+# failures. With any of the variables set, even empty, the run is the gate or
+# reproduces it: the roots run, and a missing or partial export fails as
+# designed. go test keeps only the last -skip, so a caller's own -skip
+# replaces this one.
+model_skip_args=()
+if [[ -z "${URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256+set}" ]]; then
+    model_skip_args=(-skip TestStNativeFeeSettlementPublic)
+fi
+
 test_directories="$(./test-dirs.sh)" || exit $?
 while IFS= read -r d; do
     [[ -n "$d" ]] || continue
@@ -99,12 +116,16 @@ while IFS= read -r d; do
         # run separately above with each integration package's timing contract
         continue
     fi
+    package_args=()
+    if [[ $d == ./model ]]; then
+        package_args=("${model_skip_args[@]}")
+    fi
     # if [[ $1 == "" || $1 == `basename $d` ]]; then
         pushd "$d"
         # highlight source files in this dir
         match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
         # go test -v "$@" | grep --color=always -e "^" -e "$match"
-        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
+        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "${package_args[@]}" "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
         pipeline_status=("${PIPESTATUS[@]}")
         test_pipeline_status "${pipeline_status[0]}" "${pipeline_status[1]}" || exit $?
         popd
