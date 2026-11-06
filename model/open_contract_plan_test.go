@@ -276,6 +276,30 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 		"GetOpenContractIdsForSourceOrDestination":          1,
 		"GetOpenTransferByteCount":                          1,
 	}
+	// The statement constants of the file, so a function that sends its
+	// statement through one is checked as if it held the literal
+	// (GetOpenTransferByteCount's read moved to openTransferByteCountSql in
+	// 8a76e30a2).
+	statementConstants := map[string]string{}
+	for _, declaration := range file.Decls {
+		general, ok := declaration.(*ast.GenDecl)
+		if !ok || general.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range general.Specs {
+			value, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range value.Names {
+				if i < len(value.Values) {
+					if sql, ok := modelSqlExpressionValue(value.Values[i]); ok {
+						statementConstants[name.Name] = sql
+					}
+				}
+			}
+		}
+	}
 	found := map[string]bool{}
 	for _, declaration := range file.Decls {
 		function, ok := declaration.(*ast.FuncDecl)
@@ -288,8 +312,22 @@ func TestOpenContractRuntimeQueriesUseStructuralPredicate(t *testing.T) {
 		}
 		found[function.Name.Name] = true
 
+		// a selected field or method is not a constant of the file
+		selected := map[*ast.Ident]bool{}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if selector, ok := node.(*ast.SelectorExpr); ok {
+				selected[selector.Sel] = true
+			}
+			return true
+		})
 		literals := []string{}
 		ast.Inspect(function.Body, func(node ast.Node) bool {
+			if name, ok := node.(*ast.Ident); ok {
+				if sql, ok := statementConstants[name.Name]; ok && !selected[name] {
+					literals = append(literals, sql)
+				}
+				return true
+			}
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
 				return true
