@@ -16,6 +16,19 @@ func captureShardQueryPanic(callback func()) (recovered any) {
 	return
 }
 
+// The registry read's own outcome when its caller stops mid-wait. A statement
+// in flight when its caller stops completes on its connection
+// (db_statement_stop.go), and every main-pool transaction ends a lock wait at
+// server.PgLockTimeout (7962a8d7d), so a wait canceled while the row stays
+// locked ends at that bound and reports 55P03 joined with the cancellation.
+// Admission must raise exactly that. One that returned it instead still
+// unwinds, through Tx's own check for a reported stop, but that check raises
+// the bare cancellation.
+func isCanceledShardRegistryWait(recovered any) bool {
+	err, ok := recovered.(error)
+	return ok && errors.Is(err, context.Canceled) && server.IsLockTimeoutRefusal(err)
+}
+
 // A canceled registry lock read must unwind the transaction with its original
 // cancellation. Returning it as a policy refusal instead lets Tx reach COMMIT,
 // whose statement-cache cleanup masks the owner with "conn closed".
@@ -70,8 +83,8 @@ func TestProberShardCanceledAdmissionQueryRollsBack(t *testing.T) {
 		cancel()
 		select {
 		case got := <-finished:
-			if !server.IsDoneError(got.panicValue) || got.returnedErr != nil || got.callbacks != 1 || got.escrow != nil || got.posts != 0 {
-				t.Fatalf("canceled admission panic=%v returned=%v callbacks=%d escrow=%v posts=%d; want cancellation panic, one callback, no effects",
+			if !isCanceledShardRegistryWait(got.panicValue) || got.returnedErr != nil || got.callbacks != 1 || got.escrow != nil || got.posts != 0 {
+				t.Fatalf("canceled admission panic=%v returned=%v callbacks=%d escrow=%v posts=%d; want the canceled registry wait's own outcome raised, one callback, no effects",
 					got.panicValue, got.returnedErr, got.callbacks, got.escrow, got.posts)
 			}
 		case <-ctx.Done():

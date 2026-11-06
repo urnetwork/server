@@ -142,6 +142,15 @@ func TestProberShardDrainFirstRejectsBeforeGrantRead(t *testing.T) {
 	})
 }
 
+// A deadline barrier holds admission's lock until the deadline has passed.
+// Every main-pool transaction ends a lock wait at server.PgLockTimeout with
+// 55P03 (7962a8d7d), so the deadline must pass well inside that bound. The
+// wait begins tens of milliseconds after the deadline is written and the
+// holder commits a few after the deadline: a window as long as the bound made
+// the bound, not the recheck, end the wait. Half the bound leaves the setup
+// and the bound each a wide margin.
+const proberShardDeadlineBarrierWindow = server.PgLockTimeout / 2
+
 // PostgreSQL's clock advances while a row is unchanged and exclusively locked,
 // while a census runs, or while admission waits for an endpoint. These explicit
 // barriers exercise each deadline recheck without changing the registry row.
@@ -159,8 +168,8 @@ func TestProberShardAdmissionRechecksDeadlineAfterWaits(t *testing.T) {
 				var priorRevision int64
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.Raise(tx.QueryRow(ctx, `UPDATE prober_shard_run
-						SET deadline=(clock_timestamp() AT TIME ZONE 'UTC')+interval '2 seconds'
-						WHERE network_id=$1 RETURNING deadline`, owner.NetworkId).Scan(&deadline))
+						SET deadline=(clock_timestamp() AT TIME ZONE 'UTC')+make_interval(secs => $2)
+						WHERE network_id=$1 RETURNING deadline`, owner.NetworkId, proberShardDeadlineBarrierWindow.Seconds()).Scan(&deadline))
 					server.Raise(tx.QueryRow(ctx, `SELECT COALESCE((SELECT revision FROM transfer_balance_net_escrow_revision WHERE balance_id=$1),0)`, owner.BalanceId).Scan(&priorRevision))
 				})
 				waitForDeadline := func(tx server.PgTx) {
