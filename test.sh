@@ -47,6 +47,16 @@ test_pipeline_status() {
 WARP_TEST_ENV_FAIL_FAST=1 go test -p=1 -race -count=1 -timeout=5m ./model ./taskworker/work \
     -run '^(TestRedisAdmission.*|TestAsyncDebit.*|TestTransferDebitTaskPartitionsAndBoundedContinuation|TestSettlementParticipantReadsDoNotHoldSharedGrant|TestRedisSettlementCompletesWithSharedFinancialRowsHeld|TestContractCreationSameNetworkLargeNContentionFree|TestContractSettlementSameNetworkLargeNContentionFree|TestPrivateProviderCreationDoesNotQueueOnSharedFinancialRows)$' || exit $?
 
+# The sidecar's pending migration groups link only under their build tag
+# (db_migrations_sidecar.go), so the runs below never reach them. Every test in a
+# file with that tag runs here, in its package, with the tag.
+while IFS= read -r pending_dir; do
+    pending_tests="$(grep -lx '//go:build sidecar_pending' "$pending_dir"/*_test.go \
+        | xargs sed -n 's/^func \(Test[A-Za-z0-9_]*\)(.*/\1/p' | paste -s -d '|' -)"
+    WARP_TEST_ENV_FAIL_FAST=1 go test -tags sidecar_pending -count=1 -timeout=10m "$pending_dir" \
+        -run "^($pending_tests)$" || exit $?
+done < <(grep -rlx --include='*_test.go' '//go:build sidecar_pending' . | xargs -n1 dirname | sort -u)
+
 # The proxy integration tests (./proxy) drive real-time wireguard/gvisor packet
 # paths and real outbound TLS. Like the connect packet-translation tests, the
 # race detector's scheduling overhead slows that real-time delivery enough to

@@ -86,4 +86,8 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     printf 'local-env.sh must be sourced: source ./local/local-env.sh\n' >&2
     exit 2
 fi
+# Local builds link the sidecar's pending migration groups, and release legs never
+# do (db_migrations_sidecar.go). A pending group's versions move with each merge,
+# so a local database that applied one is rebuilt after a merge.
+export GOFLAGS="-tags=sidecar_pending ${GOFLAGS:-}"
 local_env_attest
