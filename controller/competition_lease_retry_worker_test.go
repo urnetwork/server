@@ -255,8 +255,9 @@ func (self *competitionLeaseRetryDeadlineContext) Stop(err error) {
 	}
 }
 
-// The evaluation's own deadline stops retry even while its parent remains live.
-func TestCompetitionWorkerLeaseRetryExecutionDeadlineStopsWait(t *testing.T) {
+// Scoring stops independently while a metadata backoff remains owned by the
+// live parent and its unchanged bounds. Parent cancellation still stops it.
+func TestCompetitionWorkerLeaseRetryScoringDeadlineDoesNotCancelMetadataWait(t *testing.T) {
 	fixture := newCompetitionLeaseRetryWorkerFixture(t)
 	var execution *competitionLeaseRetryDeadlineContext
 	fixture.worker.evaluationContextForTest = func(parent context.Context, deadline time.Time) (context.Context, context.CancelFunc) {
@@ -264,19 +265,28 @@ func TestCompetitionWorkerLeaseRetryExecutionDeadlineStopsWait(t *testing.T) {
 		stopParent := context.AfterFunc(parent, func() { execution.Stop(parent.Err()) })
 		return execution, func() { stopParent(); execution.Stop(context.Canceled) }
 	}
-	waiting := make(chan struct{})
-	fixture.worker.heartbeatSettings.LeaseRetry.Wait = func(ctx context.Context, _ time.Duration) error { close(waiting); <-ctx.Done(); return ctx.Err() }
+	waiting := make(chan context.Context, 1)
+	fixture.worker.heartbeatSettings.LeaseRetry.Wait = func(ctx context.Context, _ time.Duration) error { waiting <- ctx; <-ctx.Done(); return ctx.Err() }
 	fixture.store.heartbeat = func(context.Context, int) error { return &pgconn.PgError{Code: "55P03"} }
 	fixture.Start(t)
 	fixture.ticks <- fixture.clock.Now()
 	select {
-	case <-waiting:
+	case metadataCtx := <-waiting:
 		execution.Stop(context.DeadlineExceeded)
+		select {
+		case <-fixture.evaluator.canceled:
+		case <-fixture.watchdog.Done():
+			t.Fatal("scoring did not stop at its original deadline")
+		}
+		if metadataCtx.Err() != nil || fixture.ctx.Err() != nil || fixture.store.diagnosticCalls != 0 {
+			t.Fatal("scoring deadline canceled metadata ownership or manufactured a heartbeat incident")
+		}
+		fixture.cancel()
 	case <-fixture.watchdog.Done():
 		t.Fatal("worker did not reach its retry wait")
 	}
-	if err := fixture.Finish(t); !errors.Is(err, context.DeadlineExceeded) || fixture.ctx.Err() != nil || fixture.store.heartbeatCalls != 1 || !fixture.store.joined {
-		t.Fatalf("retry ignored the original evaluation deadline or canceled its parent: %v", err)
+	if err := fixture.Finish(t); !errors.Is(err, context.Canceled) || execution.Err() != context.DeadlineExceeded || fixture.store.heartbeatCalls != 1 || !fixture.store.joined || fixture.store.reason != "worker_shutdown" {
+		t.Fatalf("metadata retry ignored parent cancellation or lost joined scoring cleanup: %v", err)
 	}
 }
 

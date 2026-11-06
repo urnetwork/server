@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // A hosted proxy as auth-client writes one: a top-level client with a
@@ -279,4 +280,61 @@ func TestHostedProxyReapNextRunAt(t *testing.T) {
 	if got := HostedProxyReapNextRunAt(now, true, settings); !got.Equal(now.Add(settings.PassInterval)) {
 		t.Fatalf("finished pass: next run at %s", got)
 	}
+}
+
+// The revocation record guard exempts removeHostedProxyClientsSql because it
+// ends no live credential (revocation_record_writer_guard_test.go). Handed the
+// ids directly, the delete removes only the client that was deactivated before
+// the horizon, and that client's deactivation had already tombstoned it; an
+// active proxy and one deactivated at the horizon stay.
+func TestHostedProxyReapDeleteEndsNoLiveCredential(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		activeProxy := newHostedProxyReapTestProxy(t)
+		expiredProxy := newHostedProxyReapTestProxy(t)
+		recentProxy := newHostedProxyReapTestProxy(t)
+		expiredDeactivateTime := retireRetiredHostedTestClient(t, expiredProxy.networkId, expiredProxy.clientId)
+		recentDeactivateTime := retireRetiredHostedTestClient(t, recentProxy.networkId, recentProxy.clientId)
+		if !expiredDeactivateTime.Before(recentDeactivateTime) {
+			t.Fatalf("deactivations out of order: %s, %s", expiredDeactivateTime, recentDeactivateTime)
+		}
+		// the deactivation tombstoned the client before the delete runs
+		assertRevocationField(
+			t,
+			ctx,
+			session.Testing_RevocationRecordKey(expiredProxy.networkId, expiredProxy.clientId),
+			session.Testing_RevocationClientField(expiredProxy.clientId),
+			"x",
+		)
+
+		// the horizon is the recent proxy's deactivation: the expired proxy is
+		// before it, the recent proxy is not, and the active proxy was created
+		// before it but is active
+		deletedClientIds := []server.Id{}
+		server.Tx(ctx, func(tx server.PgTx) {
+			result, err := tx.Query(
+				ctx,
+				removeHostedProxyClientsSql,
+				[]server.Id{activeProxy.clientId, expiredProxy.clientId, recentProxy.clientId},
+				recentDeactivateTime,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var clientId server.Id
+					var deviceId *server.Id
+					server.Raise(result.Scan(&clientId, &deviceId))
+					deletedClientIds = append(deletedClientIds, clientId)
+				}
+			})
+		})
+		if len(deletedClientIds) != 1 || deletedClientIds[0] != expiredProxy.clientId {
+			t.Fatalf("the delete removed %v, want only the proxy deactivated before the horizon %s", deletedClientIds, expiredProxy.clientId)
+		}
+		if !retiredHostedTestClientExists(t, activeProxy.clientId) || !testingClientActive(ctx, activeProxy.clientId) {
+			t.Fatal("the delete removed or ended an active proxy")
+		}
+		if !retiredHostedTestClientExists(t, recentProxy.clientId) {
+			t.Fatal("the delete removed a proxy deactivated at the horizon")
+		}
+	})
 }
