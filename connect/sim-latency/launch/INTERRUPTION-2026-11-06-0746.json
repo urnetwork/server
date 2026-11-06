@@ -48,6 +48,18 @@
     "matching_local_kernel_faults_found_in_checked_window": false,
     "network_or_pooler_root_cause_proven": false
   },
+  "terminal_database_observation": {
+    "observed_at": "2026-11-06T09:49:14.511034358Z",
+    "state": "failed",
+    "completed_at": "2026-11-06T09:49:00.626840Z",
+    "receipt": "/home/by/urnetwork/temp/competition-monitor-current.r1tVt3Yp/audit.private.json",
+    "receipt_sha256": "5a85e2913b63f4e8a15d6cd0a3fd443d6fb006d12eec6399df1c49725691598c",
+    "failure_code_included_by_reader": false,
+    "last_measurement_attempt": 7,
+    "last_completed_candidate_runs": 4,
+    "next_fifo_job": "01a1a6bf-2efb-6e93-390b-dbff8eb76ec8",
+    "next_fifo_started_at": "2026-11-06T09:49:06.659308Z"
+  },
   "operator_retry_issued": false,
   "operator_clock_reset": false,
   "recovery_grant_issued": false,
