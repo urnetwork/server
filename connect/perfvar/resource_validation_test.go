@@ -487,3 +487,20 @@ func validatePerfvarResourceLifecycle(t *testing.T, resource perfvarResource) {
 		after.PoolTakenCount-before.PoolTakenCount,
 	)
 }
+
+// Ordinary synthetic application defaults follow the product packet MTU,
+// while a deliberately smaller path or explicit compatibility fixture remains bounded.
+func TestFullTunProductMtu1280Defaults(t *testing.T) {
+	if clientconnect.DefaultMtu != 1280 {
+		t.Fatalf("product packet MTU=%d want1280", clientconnect.DefaultMtu)
+	}
+	profile := initialNetworkProfiles(20260819)["clean-lan"]
+	if got := resolvedFullTunApplicationMtu(profile, defaultTunResourceProfile()); got != 1280 {
+		t.Fatalf("ordinary app MTU=%d want1280", got)
+	}
+	resources := defaultTunResourceProfile()
+	resources.ApplicationMtu = 900
+	if got := resolvedFullTunApplicationMtu(profile, resources); got != 900 {
+		t.Fatalf("explicit low-MTU compatibility=%d want900", got)
+	}
+}

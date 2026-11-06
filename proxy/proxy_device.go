@@ -1428,9 +1428,8 @@ func NewProxyDevice(
 	return proxyDevice, nil
 }
 
-// Preserve a caller's lower MTU but never enable the gVisor IPv6 address and
-// ::/0 route. The inner data-center path is IPv4-only even when a caller asks
-// for the dual-stack Connect default of 1280 bytes.
+// Caps the inner mtu at the shared packet default, preserving lower requests.
+// The data-center path explicitly disables ipv6 independently of that size.
 func proxyDeviceTunSettings(settings *ProxyDeviceSettings) *connect.TunSettings {
 	tunSettings := connect.DefaultTunSettingsWithBufferSize(settings.SequenceBufferSize)
 	tunSettings.Mtu = settings.Mtu

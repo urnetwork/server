@@ -32,7 +32,7 @@ func requireServicePoolBudget(t *testing.T, total connectcore.ByteCount) {
 			expected = packet - packet/4
 		case 4096, 8192:
 			expected = 256*1024 + (large-512*1024)/3
-		case 9216:
+		case 12288:
 			expected = (large - 512*1024) / 3
 		default:
 			t.Fatalf("unreviewed pool class %d", class.Size)
@@ -108,7 +108,7 @@ func TestServiceMessagePoolLoadedReturnHonorsTotalAndBorrowedOwners(t *testing.T
 			}
 		}
 	})
-	sizes := map[int]int{256: 80, 2048: 1400, 4096: 3072, 8192: 8000, 9216: 9000}
+	sizes := map[int]int{256: 80, 2048: 1400, 4096: 3072, 8192: 8000, 12288: 9000}
 	for _, class := range connectcore.GetMessagePoolClassStats() {
 		size, ok := sizes[class.Size]
 		if !ok {
@@ -187,7 +187,7 @@ func TestServiceMessagePoolFiveClassBudgetGeometry(t *testing.T) {
 	connectcore.ClearMessagePools()
 	t.Cleanup(func() { connectcore.ClearMessagePools(); ConfigureMessagePools() })
 	resizeServiceMessagePools(budget)
-	want := map[int]int{256: 1024, 2048: 384, 4096: 192, 8192: 96, 9216: 56}
+	want := map[int]int{256: 1024, 2048: 384, 4096: 192, 8192: 96, 12288: 42}
 	classes := connectcore.GetMessagePoolClassStats()
 	if len(classes) != len(want) {
 		t.Fatalf("service five-class geometry: got %d classes want %d", len(classes), len(want))

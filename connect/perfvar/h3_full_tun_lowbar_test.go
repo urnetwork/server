@@ -1068,7 +1068,7 @@ func requireH3FullTunOneDatagramHybrid(
 	}
 }
 
-// TestH3LowBarFullTcpProductionHybridTrack accepts the global 1,100-byte MTU
+// TestH3LowBarFullTcpProductionHybridTrack accepts the global 1,280-byte MTU
 // and production H3 defaults only when the exact hashed TCP body completes,
 // every DATAGRAM message uses one fragment, and both the packet and reliable
 // stream lanes carry classified IP traffic.
@@ -1076,7 +1076,7 @@ func TestH3LowBarFullTcpProductionHybridTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(
 		t,
 		clientconnect.DefaultMtu,
-		"production-hybrid-1100-mtu",
+		"production-hybrid-1280-mtu",
 		true,
 		0,
 		false,
@@ -1090,7 +1090,7 @@ func TestH3LowBarFullTcpFragmentedPacketTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(
 		t,
 		clientconnect.DefaultMtu,
-		"fragmented-packet-1100-mtu",
+		"fragmented-packet-1280-mtu",
 		false,
 		8,
 		true,
@@ -1105,14 +1105,14 @@ func TestH3LowBarFullTcpSingleDatagramMtuTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(t, 900, "single-datagram-900-mtu", true, 1, true)
 }
 
-// TestH3LowBarFullTcpOneDatagramHybridTrack keeps the global 1,100-byte MTU
+// TestH3LowBarFullTcpOneDatagramHybridTrack keeps the global 1,280-byte MTU
 // while restricting the packet lane to one QUIC DATAGRAM. Small IP/control
 // messages remain unordered; larger Transfer frames use the reliable stream.
 func TestH3LowBarFullTcpOneDatagramHybridTrack(t *testing.T) {
 	testH3LowBarFullTcpPacketTrackMtu(
 		t,
 		clientconnect.DefaultMtu,
-		"one-datagram-hybrid-1100-mtu",
+		"one-datagram-hybrid-1280-mtu",
 		true,
 		1,
 		false,
