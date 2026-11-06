@@ -21,6 +21,14 @@ func TestCompetitionHeartbeatSlotRetryPgLateCommitNeverReplays(t *testing.T) {
 	env.Run(t, func(t testing.TB) {
 		watchdog, stopWatchdog := context.WithTimeout(t.Context(), 40*time.Second)
 		defer stopWatchdog()
+		server.Db(watchdog, func(conn server.PgConn) {
+			var head int
+			server.Raise(conn.QueryRow(watchdog, `SELECT COALESCE(MAX(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&head))
+			if head != server.MigrationCount() {
+				t.Fatal("actual heartbeat owner commit fixture did not reach source schema head", head, server.MigrationCount())
+			}
+			t.Logf("actual_heartbeat_owner_commit_fixture_schema_head=%d", head)
+		})
 		pop := server.Config.PushSimpleResource(server.MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 2\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
