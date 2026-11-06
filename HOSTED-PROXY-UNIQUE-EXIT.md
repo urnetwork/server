@@ -343,9 +343,9 @@ Server branch `feat/unique-exit`, connect branch `feat/unique-exit-spec` (the AP
 
 **`POST /network/proxy/rotate-exit`** `{client_id}` returns `{exit}` or `{error: {message, no_unique_supply?, rate_limited?}}`:
 - Network access only (the network JWT or an API key): a client JWT gets the 403 `ClientJwtRefused`, like `/network/proxies`.
-- 1 a minute and 60 a day per proxy, counted in Redis (`upe-rot-<proxy>-<minute>`, `upe-rotd-<proxy>-<day>`), failing open.
+- 1 a minute and 60 a day per proxy, failing open. Only rotations count. A rotate reserves the minute's slot (`upe-rot-<proxy>-<minute>`, SET NX) and one of the day's rotations (`upe-rotd-<proxy>-<day>`, taken by a script only below the limit) before it moves the proxy, and gives both back when the proxy does not move. A refused call, rate limited or without supply, spends nothing, and concurrent rotates of one proxy move it once. The minute is a fixed UTC bucket, so two rotations a second apart across a bucket boundary both go.
 - It skips the replacement caps and manual mode. Without supply, the proxy keeps its current exit.
-- "Not a unique-exit proxy of this network." for any other `client_id`.
+- "Not a unique-exit proxy of this network." for any other `client_id`, including a removed proxy. remove-client only deactivates the client, and its exit stays live until the sweeper releases it (§13.3). The move's transaction share-locks the proxy's client row and requires it active, so a removal that commits during a rotate or a sweep leaves no new exit and no repinned device config.
 
 ### 13.2 Schema
 
