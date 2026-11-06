@@ -11,48 +11,61 @@ import (
 )
 
 const (
-	CompetitionJobReevaluationAuthorizationKind   = "competition-job-reevaluation-authorization/v1"
-	CompetitionJobReevaluationRuntimeKind         = "competition-job-reevaluation-runtime-qualification/v1"
-	CompetitionJobReevaluationCapability          = "competition-job-reevaluation/v1"
-	CompetitionJobReevaluationArchiveInventory    = "archive_inventory_metadata_v1"
-	CompetitionJobReevaluationLegacyArchiveBudget = "operator_authorized_legacy_archive_budget_v1"
-	CompetitionJobReevaluationHeartbeatBudget     = "operator_authorized_heartbeat_budget_v1"
-	CompetitionJobReevaluationBackingService      = "operator_authorized_backing_service_v1"
+	CompetitionJobReevaluationAuthorizationKind    = "competition-job-reevaluation-authorization/v1"
+	CompetitionJobReevaluationRuntimeKind          = "competition-job-reevaluation-runtime-qualification/v1"
+	CompetitionJobReevaluationCapability           = "competition-job-reevaluation/v1"
+	CompetitionJobReevaluationArchiveInventory     = "archive_inventory_metadata_v1"
+	CompetitionJobReevaluationLegacyArchiveBudget  = "operator_authorized_legacy_archive_budget_v1"
+	CompetitionJobReevaluationHeartbeatBudget      = "operator_authorized_heartbeat_budget_v1"
+	CompetitionJobReevaluationBackingService       = "operator_authorized_backing_service_v1"
+	CompetitionJobReevaluationOperatorInterruption = "operator_authorized_interrupted_budget_v1"
 )
 
 // The private pinned document binds the original terminal row, actual incident
 // event and separately qualified compatible release. It grants one cycle only.
 type CompetitionJobReevaluationAuthorization struct {
-	Schema                     int                                               `json:"schema"`
-	Kind                       string                                            `json:"kind"`
-	IncidentClass              string                                            `json:"incident_class"`
-	Environment                string                                            `json:"environment"`
-	CompetitionId              string                                            `json:"competition_id"`
-	SeasonId                   string                                            `json:"season_id"`
-	JobId                      server.Id                                         `json:"job_id"`
-	RoundId                    server.Id                                         `json:"round_id"`
-	ExpectedCycle              int                                               `json:"expected_cycle"`
-	ExpectedAttemptCount       int                                               `json:"expected_attempt_count"`
-	ExpectedTerminalSnapshot   json.RawMessage                                   `json:"expected_terminal_snapshot"`
-	ExpectedTerminalSha256     string                                            `json:"expected_terminal_sha256"`
-	EvidenceSha256             string                                            `json:"evidence_sha256"`
-	IncidentEventId            int64                                             `json:"incident_event_id"`
-	IncidentEventSha256        string                                            `json:"incident_event_sha256"`
-	IncidentAttempt            int                                               `json:"incident_attempt"`
-	FailureManifestSha256      string                                            `json:"failure_manifest_sha256"`
-	RejectedArtifactPath       string                                            `json:"rejected_artifact_path"`
-	RoundPolicySha256          string                                            `json:"round_policy_sha256"`
-	BaselineSha256             string                                            `json:"baseline_sha256"`
-	RuntimeQualificationSha256 string                                            `json:"runtime_qualification_sha256"`
-	FixedSourceCommit          string                                            `json:"fixed_source_commit"`
-	FixedWorkerSha256          string                                            `json:"fixed_worker_sha256"`
-	FixedWorkerImageDigest     string                                            `json:"fixed_worker_image_digest"`
-	ApiImageDigest             string                                            `json:"api_image_digest"`
-	AuthorizedAt               time.Time                                         `json:"authorized_at"`
-	ExpiresAt                  time.Time                                         `json:"expires_at"`
-	SingleUse                  bool                                              `json:"single_use"`
-	PostCloseApproval          *CompetitionJobReevaluationPostCloseApproval      `json:"post_close_approval,omitempty"`
-	BackingServiceEvidence     *CompetitionJobReevaluationBackingServiceEvidence `json:"backing_service_evidence,omitempty"`
+	Schema                       int                                                     `json:"schema"`
+	Kind                         string                                                  `json:"kind"`
+	IncidentClass                string                                                  `json:"incident_class"`
+	Environment                  string                                                  `json:"environment"`
+	CompetitionId                string                                                  `json:"competition_id"`
+	SeasonId                     string                                                  `json:"season_id"`
+	JobId                        server.Id                                               `json:"job_id"`
+	RoundId                      server.Id                                               `json:"round_id"`
+	ExpectedCycle                int                                                     `json:"expected_cycle"`
+	ExpectedAttemptCount         int                                                     `json:"expected_attempt_count"`
+	ExpectedTerminalSnapshot     json.RawMessage                                         `json:"expected_terminal_snapshot"`
+	ExpectedTerminalSha256       string                                                  `json:"expected_terminal_sha256"`
+	EvidenceSha256               string                                                  `json:"evidence_sha256"`
+	IncidentEventId              int64                                                   `json:"incident_event_id"`
+	IncidentEventSha256          string                                                  `json:"incident_event_sha256"`
+	IncidentAttempt              int                                                     `json:"incident_attempt"`
+	FailureManifestSha256        string                                                  `json:"failure_manifest_sha256"`
+	RejectedArtifactPath         string                                                  `json:"rejected_artifact_path"`
+	RoundPolicySha256            string                                                  `json:"round_policy_sha256"`
+	BaselineSha256               string                                                  `json:"baseline_sha256"`
+	RuntimeQualificationSha256   string                                                  `json:"runtime_qualification_sha256"`
+	FixedSourceCommit            string                                                  `json:"fixed_source_commit"`
+	FixedWorkerSha256            string                                                  `json:"fixed_worker_sha256"`
+	FixedWorkerImageDigest       string                                                  `json:"fixed_worker_image_digest"`
+	ApiImageDigest               string                                                  `json:"api_image_digest"`
+	AuthorizedAt                 time.Time                                               `json:"authorized_at"`
+	ExpiresAt                    time.Time                                               `json:"expires_at"`
+	SingleUse                    bool                                                    `json:"single_use"`
+	PostCloseApproval            *CompetitionJobReevaluationPostCloseApproval            `json:"post_close_approval,omitempty"`
+	BackingServiceEvidence       *CompetitionJobReevaluationBackingServiceEvidence       `json:"backing_service_evidence,omitempty"`
+	OperatorInterruptionEvidence *CompetitionJobReevaluationOperatorInterruptionEvidence `json:"operator_interruption_evidence,omitempty"`
+}
+
+// The scoped operator binds retained stop evidence to an actual interrupted
+// claim. This attestation is not a manufactured evaluator or heartbeat event.
+type CompetitionJobReevaluationOperatorInterruptionEvidence struct {
+	Schema           int       `json:"schema"`
+	Action           string    `json:"action"`
+	StoppedAt        time.Time `json:"stopped_at"`
+	ClaimEventId     int64     `json:"claim_event_id"`
+	ClaimEventSha256 string    `json:"claim_event_sha256"`
+	EvidenceSha256   string    `json:"evidence_sha256"`
 }
 
 // Retained bytes support a separate operator diagnosis. Neither this record
@@ -156,7 +169,7 @@ func ValidateCompetitionJobReevaluationCycle(cycle *CompetitionJobReevaluationCy
 		!competitionAutomationSha256.MatchString(cycle.RuntimeQualificationSha256) || !competitionSourceCommitPattern.MatchString(cycle.FixedSourceCommit) ||
 		!competitionAutomationSha256.MatchString(cycle.FixedWorkerSha256) || !validCompetitionReevaluationImage(cycle.FixedWorkerImageDigest) || !validCompetitionReevaluationImage(cycle.ApiImageDigest) ||
 		cycle.AuthorizedAt.IsZero() || cycle.ExecutionTimeoutSeconds != 3*60*60 ||
-		(cycle.IncidentClass != "" && cycle.IncidentClass != CompetitionJobReevaluationHeartbeatBudget && cycle.IncidentClass != CompetitionJobReevaluationBackingService) ||
+		(cycle.IncidentClass != "" && cycle.IncidentClass != CompetitionJobReevaluationHeartbeatBudget && cycle.IncidentClass != CompetitionJobReevaluationBackingService && cycle.IncidentClass != CompetitionJobReevaluationOperatorInterruption) ||
 		!CompetitionJobReevaluationFailureAllowed(cycle.IncidentClass, cycle.PreviousFailure) ||
 		cycle.StartedAt != nil && (cycle.StartedAt.IsZero() || cycle.StartedAt.Before(cycle.AuthorizedAt)) {
 		return errors.New("reevaluation cycle identity or bounded authority is invalid")
@@ -177,7 +190,7 @@ func CompetitionJobReevaluationFailureAllowed(incidentClass string, failure Comp
 	switch incidentClass {
 	case "", CompetitionJobReevaluationArchiveInventory:
 		return failure.Kind == "infrastructure" && (failure.Code == "artifact_archive_failed" || failure.Code == "evaluation_time_budget_exhausted")
-	case CompetitionJobReevaluationLegacyArchiveBudget, CompetitionJobReevaluationHeartbeatBudget:
+	case CompetitionJobReevaluationLegacyArchiveBudget, CompetitionJobReevaluationHeartbeatBudget, CompetitionJobReevaluationOperatorInterruption:
 		return failure.Kind == "infrastructure" && failure.Code == "evaluation_time_budget_exhausted"
 	case CompetitionJobReevaluationBackingService:
 		return failure.Kind == "submission" && failure.Code == "run_unstable"

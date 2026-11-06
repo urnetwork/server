@@ -28,7 +28,7 @@ func TestCompetitionReevaluationIncidentRuntimeRequiresExplicitCapability(t *tes
 	if err := validateCompetitionReevaluationRuntime(settings, a); err != nil {
 		t.Fatalf("older archive qualification stranded: %v", err)
 	}
-	for _, class := range []string{model.CompetitionJobReevaluationHeartbeatBudget, model.CompetitionJobReevaluationBackingService} {
+	for _, class := range []string{model.CompetitionJobReevaluationHeartbeatBudget, model.CompetitionJobReevaluationBackingService, model.CompetitionJobReevaluationOperatorInterruption} {
 		a.IncidentClass = class
 		if validateCompetitionReevaluationRuntime(settings, a) == nil {
 			t.Fatalf("generic old qualification granted %s", class)
