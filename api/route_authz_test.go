@@ -159,12 +159,25 @@ func serveRouteAccess(handler http.Handler, method string, path string, authoriz
 	return w
 }
 
-// setNetworkRefusesClientAdmin replaces the Embed decision for one test.
+// Replaces the Embed decision for one test, whose clients are legacy clients until
+// it says otherwise (setClientRefusesAdmin).
 func setNetworkRefusesClientAdmin(t *testing.T, refuses func(ctx context.Context, networkId server.Id) bool) {
 	previous := networkRefusesClientAdmin
 	networkRefusesClientAdmin = refuses
 	t.Cleanup(func() {
 		networkRefusesClientAdmin = previous
+	})
+	setClientRefusesAdmin(t, func(ctx context.Context, networkId server.Id, clientId server.Id) bool {
+		return false
+	})
+}
+
+// Replaces the client decision for one test.
+func setClientRefusesAdmin(t *testing.T, refuses func(ctx context.Context, networkId server.Id, clientId server.Id) bool) {
+	previous := clientRefusesAdmin
+	clientRefusesAdmin = refuses
+	t.Cleanup(func() {
+		clientRefusesAdmin = previous
 	})
 }
 

@@ -2,7 +2,13 @@ package api
 
 import (
 	"context"
+	"net/http"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -16,6 +22,14 @@ import (
 // client token never administers the network or the account. The router
 // refuses it on the admin routes before the handler runs, whatever wrapper the
 // handler uses, and the model limits the routes it keeps to its own clients.
+//
+// The P0 auth fix (§7.4's stage 1, D-TEAM-14) adds two refusals. A child or
+// admin_refused client's token is refused on the app admin and own client
+// payout routes, and a strict_exp token, a sidecar's, reaches only the routes
+// strictExpRoutes lists, with a proof of its ClientKey where it renews or mints.
+// Each refusal is counted in urnetwork_auth_child_admin_calls_total, and until
+// sidecar.yml's p0_enforce is on that is all it does: stage 1 runs log-only for
+// 14 days first, and M1's enforcement changes that one gate and no code.
 
 type routeAccess int
 
@@ -347,6 +361,31 @@ var lagGuestRoutes = map[string]bool{
 	"POST /lag/track":    true,
 }
 
+// The only routes a strict_exp bearer reaches (§7.4). Every other route refuses
+// it before its handler runs, whatever its class, a new or unclassified route
+// included, so an omission here fails closed. A route classified sidecar by
+// §5-§21 joins this list when it lands; §7.4 names those it knows
+// (/sidecar/*, /network/config/*, /network/enroll, /network/bridge/share/*,
+// /acl/*, POST /approval/cancel, /tls/*, /mail/*, /smtp/*, /socket/*, /dns/*,
+// GET /abuse/status), and TestSidecarTokenRoutes fails a route under those paths
+// that is not here. The route's own class still applies, so /smtp/appeal and
+// /mail/direct-mx stay refused.
+var strictExpRoutes = map[string]bool{
+	"GET /auth/refresh":           true, // with the proof
+	"POST /network/auth-client":   true, // with the proof; its children inherit both marks
+	"POST /network/remove-client": true, // its own client or children (the model)
+	"GET /key/([^/]+)":            true,
+	"POST /connect/control":       true,
+	"POST /oauth/token":           true, // the token exchange, which carries its own proof
+}
+
+// The routes where a strict_exp bearer proves its ClientKey (§7.4). The third is
+// POST /oauth/token's exchange, whose subject token and proof it checks itself.
+var strictExpProofRoutes = map[string]bool{
+	"GET /auth/refresh":         true,
+	"POST /network/auth-client": true,
+}
+
 func routeAccessKey(route *router.Route) string {
 	return route.Method() + " " + route.Pattern()
 }
@@ -362,28 +401,112 @@ func routeAccessFor(route *router.Route) routeAccess {
 // refused on the app admin and own client payout routes too. Tests replace it.
 var networkRefusesClientAdmin = model.NetworkRefusesClientAdmin
 
-func refuseClientAdmin(ctx context.Context, byJwt *session.ByJwt) bool {
-	return networkRefusesClientAdmin(ctx, byJwt.NetworkId)
+// Decides whether one client's tokens are, wherever its network stands (§7.4).
+// Tests replace it.
+var clientRefusesAdmin = model.ClientRefusesAdmin
+
+// The key a strict_exp bearer's proof must be signed by. Tests replace it.
+var clientProofPublicKey = model.ClientProofPublicKey
+
+// What a refusal of the P0 auth fix was, as counted.
+const (
+	p0RefusalClientAdmin = "client_admin"
+	p0RefusalStrictExp   = "strict_exp_route"
+	p0RefusalProof       = "strict_exp_proof"
+)
+
+var childAdminCallCounter = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "urnetwork",
+		Subsystem: "auth",
+		Name:      "child_admin_calls_total",
+		Help:      "Calls the P0 auth fix refuses, by route template, by what refuses them (client_admin: a child or admin_refused client on an app admin or own client payout route; strict_exp_route: a strict_exp token off its allowlist; strict_exp_proof: a strict_exp token without a good proof) and by result: refused, or logged while sidecar.yml's p0_enforce is off. Stage 1's 14 log-only days watch this",
+	},
+	[]string{"route", "refusal", "result"},
+)
+
+func init() {
+	prometheus.MustRegister(childAdminCallCounter)
+}
+
+// Counts a call the P0 auth fix would refuse and decides it: refused once
+// p0_enforce is on, and until then let through. A refusal is driven by client
+// input, so it is counted, with the detail at V(1).
+func refuseP0Call(routeKey string, refusal string, byJwt *session.ByJwt) bool {
+	enforce := server.CurrentSidecarConfig().P0Enforce
+	result := "logged"
+	if enforce {
+		result = "refused"
+	}
+	childAdminCallCounter.WithLabelValues(routeKey, refusal, result).Inc()
+	if glog.V(1) {
+		glog.Infof("[auth][%s]%s %s: client %s on %s\n", byJwt.NetworkId, refusal, result, byJwt.ClientId, routeKey)
+	}
+	return enforce
+}
+
+// An Embed network's client tokens are refused here outright. Stage 1 adds any
+// network's child and admin_refused clients, log-only until it is enforced.
+func refuseClientAdmin(ctx context.Context, routeKey string, byJwt *session.ByJwt) bool {
+	if networkRefusesClientAdmin(ctx, byJwt.NetworkId) {
+		return true
+	}
+	if clientRefusesAdmin(ctx, byJwt.NetworkId, *byJwt.ClientId) {
+		return refuseP0Call(routeKey, p0RefusalClientAdmin, byJwt)
+	}
+	return false
+}
+
+// Whether the request's proof shows the strict_exp bearer holds its ClientKey.
+// A proof spends its jti here, whatever the gate then decides.
+func strictExpProofHolds(r *http.Request, bearerToken string, byJwt *session.ByJwt) bool {
+	boundKey, err := clientProofPublicKey(r.Context(), *byJwt.ClientId)
+	if err == nil {
+		err = session.VerifyDpopProof(r.Context(), r, bearerToken, *byJwt.ClientId, boundKey)
+	}
+	if err != nil {
+		if glog.V(1) {
+			glog.Infof("[auth][%s]proof of client %s refused: %s\n", byJwt.NetworkId, byJwt.ClientId, err)
+		}
+		return false
+	}
+	return true
 }
 
 // applyRouteAccess puts the client token gate in front of every admin route and
-// every own client payout route, the lag.dev guest gate in front of every route
-// but the guest's own, and the intended network gate in front of every route
-// that takes a URnetwork credential: every class but public, whose routes do
-// not act for the bearer's network (AUTHZ1.md §10). The intended network gate
-// runs first, so a request meant for another network is refused before any
-// other gate or the handler looks at it.
+// every own client payout route, the strict_exp gate in front of every route off
+// a sidecar's allowlist and the proof gate in front of the routes where a sidecar
+// renews or mints, the lag.dev guest gate in front of every route but the guest's
+// own, and the intended network gate in front of every route that takes a
+// URnetwork credential: every class but public, whose routes do not act for the
+// bearer's network (AUTHZ1.md §10). The intended network gate runs first, so a
+// request meant for another network is refused before any other gate or the
+// handler looks at it. The strict_exp gate runs before the client token gate, so
+// a sidecar's token hears its own refusal on every route off its list.
 func applyRouteAccess(routes []*router.Route) []*router.Route {
 	applied := make([]*router.Route, 0, len(routes))
 	for _, route := range routes {
 		access := routeAccessFor(route)
+		routeKey := routeAccessKey(route)
+		if strictExpProofRoutes[routeKey] {
+			route = router.RequireStrictExpProof(route, func(r *http.Request, bearerToken string, byJwt *session.ByJwt) bool {
+				return !strictExpProofHolds(r, bearerToken, byJwt) && refuseP0Call(routeKey, p0RefusalProof, byJwt)
+			})
+		}
 		switch access {
 		case routeAccessNetwork:
 			route = router.RefuseClientCredentials(route, router.RefuseEveryClientCredential)
 		case routeAccessAppAdmin, routeAccessOwnClientPayout:
-			route = router.RefuseClientCredentials(route, refuseClientAdmin)
+			route = router.RefuseClientCredentials(route, func(ctx context.Context, byJwt *session.ByJwt) bool {
+				return refuseClientAdmin(ctx, routeKey, byJwt)
+			})
 		}
-		if !lagGuestRoutes[routeAccessKey(route)] {
+		if !strictExpRoutes[routeKey] {
+			route = router.RefuseStrictExpCredentials(route, func(ctx context.Context, byJwt *session.ByJwt) bool {
+				return refuseP0Call(routeKey, p0RefusalStrictExp, byJwt)
+			})
+		}
+		if !lagGuestRoutes[routeKey] {
 			route = router.RefuseLagGuestCredentials(route)
 		}
 		if access != routeAccessPublic {

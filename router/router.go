@@ -37,6 +37,12 @@ type Route struct {
 	// set by RefuseClientCredentials: decides which client tokens the route
 	// refuses before its handler runs; nil refuses none
 	clientCredentialRefusal ClientCredentialRefusal
+	// set by RefuseStrictExpCredentials: decides which strict_exp tokens the
+	// route refuses before its handler runs; nil is a route on the allowlist
+	strictExpRefusal ClientCredentialRefusal
+	// set by RequireStrictExpProof: decides which strict_exp tokens' requests
+	// the route refuses for their proof before its handler runs; nil asks none
+	strictExpProofRefusal StrictExpProofRefusal
 	// set by RefuseLagGuestCredentials: the route refuses a lag.dev guest's
 	// token before its handler runs
 	lagGuestRefused bool
