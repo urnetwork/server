@@ -23,6 +23,7 @@ import (
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 
 	"github.com/urfoundation/sn/demand/pricesheet"
 	"github.com/urfoundation/sn/protocol"
@@ -419,7 +420,11 @@ func (self *subnetChainProbe) observeGovernanceEvents(ctx context.Context, run *
 		topics = append(topics, event.ID)
 	}
 	plan := self.governanceLogs.plan(checkpoint.number, run.settings.DeployBlock, run.limits)
-	logs, err := subnetFetchLogs(ctx, checkpoint.evmReader, state.coordinator, [][]common.Hash{topics}, plan, run.limits)
+	err = subnetLogPlanServed(ctx, checkpoint.evmReader, plan)
+	var logs []ethtypes.Log
+	if err == nil {
+		logs, err = subnetFetchLogs(ctx, checkpoint.evmReader, state.coordinator, [][]common.Hash{topics}, plan, run.limits)
+	}
 	if canceled := subnetCanceled(ctx); canceled != nil {
 		return nil, nil, nil, canceled
 	}

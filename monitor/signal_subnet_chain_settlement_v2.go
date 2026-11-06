@@ -524,16 +524,6 @@ func subnetTimelockUint(contract *abi.ABI, method string, call subnetEvmCall) (*
 	return value, nil
 }
 
-// An endpoint that pruned the plan's first block answers eth_getLogs for it
-// with an empty list, which must not read as no events.
-func subnetLogPlanServed(ctx context.Context, reader subnetEvmReader, plan subnetLogPlan) error {
-	if plan.empty {
-		return nil
-	}
-	_, err := reader.blockAt(ctx, plan.from)
-	return err
-}
-
 // The change-detector frontier over the proxy, the timelock's role, delay and
 // cancellation events and the Safes. Its first window is bounded like the v1
 // frontier; the checkpoint state stays authoritative for older changes.
