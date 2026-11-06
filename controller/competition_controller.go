@@ -7443,12 +7443,14 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 			return nil
 		case <-heartbeatTick:
-			attemptStartedAt, err := retryCompetitionJobHeartbeatOperation(evalCtx, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt, self.heartbeatSettings, func(ctx context.Context) error {
+			observation := newCompetitionHeartbeatOwnerObservation(evalCtx, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt)
+			attemptStartedAt, err := retryCompetitionJobHeartbeatOperationObserved(evalCtx, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt, self.heartbeatSettings, func(ctx context.Context) error {
 				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
-			})
+			}, observation)
 			if err != nil {
 				cancel()
 				<-done
+				err = withCompetitionHeartbeatOwner(err, observation)
 				_ = self.handBackJob(job, "heartbeat_failed", err)
 				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}

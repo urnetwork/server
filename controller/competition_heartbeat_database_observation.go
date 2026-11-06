@@ -94,7 +94,8 @@ func captureCompetitionHeartbeatDatabase(ctx context.Context, run func(*competit
 	observation := &competitionHeartbeatDatabaseObservation{timing: server.DbTiming{Acquire: &server.DbAcquireObservation{}}}
 	entered := server.ObserveDbContextBudget(ctx)
 	err := captureDatabaseError(func() { run(observation) })
-	if err == nil {
+	completed := competitionHeartbeatCompletedDatabaseFromContext(ctx)
+	if err == nil && completed == nil {
 		return nil
 	}
 	snapshot := competitionHeartbeatDatabaseSnapshot{AtEntry: entered, AtReturn: server.ObserveDbContextBudget(ctx),
@@ -107,6 +108,10 @@ func captureCompetitionHeartbeatDatabase(ctx context.Context, run func(*competit
 				snapshot.Statements = append(snapshot.Statements, statement)
 			}
 		}
+	}
+	completed.capture(snapshot)
+	if err == nil {
+		return nil
 	}
 	return competitionHeartbeatDatabaseError{cause: competitionDatabasePhaseError{cause: err, phase: observation.phase.Phase()}, snapshot: snapshot}
 }

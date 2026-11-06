@@ -86,6 +86,11 @@ func retryCompetitionHeartbeatOperation(ctx context.Context, leaseExpiresAt time
 // previously confirmed bounds remain live. Unknown host authority preserves
 // the acquisition-only behavior; it cannot authorize an admitted continuation.
 func retryCompetitionJobHeartbeatOperation(ctx context.Context, jobExpiresAt, hostExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error) (time.Time, error) {
+	return retryCompetitionJobHeartbeatOperationObserved(ctx, jobExpiresAt, hostExpiresAt, settings, operation, nil)
+}
+
+// The worker alone opts into finite diagnostics; errors stay original here.
+func retryCompetitionJobHeartbeatOperationObserved(ctx context.Context, jobExpiresAt, hostExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, observation *competitionHeartbeatOwnerObservation) (time.Time, error) {
 	proof := competitionHeartbeatUnadmittedDeadline
 	expiresAt := jobExpiresAt
 	if !jobExpiresAt.IsZero() && !hostExpiresAt.IsZero() {
@@ -96,26 +101,39 @@ func retryCompetitionJobHeartbeatOperation(ctx context.Context, jobExpiresAt, ho
 			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err) || competitionHeartbeatJobLockDeadline(err)
 		}
 	}
-	return retryCompetitionHeartbeatWithProof(ctx, expiresAt, settings, operation, proof)
+	return retryCompetitionHeartbeatWithProofObserved(ctx, expiresAt, settings, operation, proof, observation)
 }
 
 // Only the job adapter above broadens its own predicate. Supervisor/host
 // callers retain their original proofs, twenty-second total and shared cap.
 func retryCompetitionHeartbeatWithProof(ctx context.Context, leaseExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, proof func(error) bool) (time.Time, error) {
+	return retryCompetitionHeartbeatWithProofObserved(ctx, leaseExpiresAt, settings, operation, proof, nil)
+}
+
+// Neither observation nor completed-store capture can wrap a predicate input.
+func retryCompetitionHeartbeatWithProofObserved(ctx context.Context, leaseExpiresAt time.Time, settings competitionHeartbeatSettings, operation func(context.Context) error, proof func(error) bool, observation *competitionHeartbeatOwnerObservation) (time.Time, error) {
 	policy := competitionSupervisorRenewalSettings{Timeout: settings.AcquireRetry.Timeout, AttemptTimeout: settings.AcquireRetry.AttemptTimeout, LockRetry: settings.LeaseRetry}
 	var acknowledgedStart time.Time
-	err := retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, policy, func(attemptCtx context.Context) error {
+	err := retryCompetitionAuthorityRenewalObserved(ctx, leaseExpiresAt, policy, func(attemptCtx context.Context) error {
 		now := settings.LeaseRetry.Now
 		if now == nil {
 			now = server.NowUtc
 		}
 		startedAt := now()
-		err := operation(attemptCtx)
+		var err error
+		if observation == nil {
+			err = operation(attemptCtx)
+		} else {
+			database := &competitionHeartbeatCompletedDatabase{}
+			observation.beginStore(attemptCtx)
+			err = operation(context.WithValue(attemptCtx, competitionHeartbeatCompletedDatabaseKey{}, database))
+			observation.finishStore(attemptCtx, err == nil, database)
+		}
 		if err == nil {
 			acknowledgedStart = startedAt
 		}
 		return err
-	}, proof)
+	}, proof, observation)
 	if err != nil {
 		return time.Time{}, err
 	}
