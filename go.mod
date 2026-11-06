@@ -23,7 +23,7 @@ require (
 	github.com/holiman/uint256 v1.3.2
 	github.com/jackc/pgerrcode v0.0.0-20250907135507-afb5586c32a6
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/klauspost/compress v1.19.2
+	github.com/klauspost/compress v1.20.2
 	github.com/mailgun/proxyproto v1.0.0
 	github.com/maxmind/mmdbwriter v1.1.0
 	github.com/minio/minio-go/v7 v7.2.1
@@ -67,7 +67,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/ProjectZKM/Ziren/crates/go-runtime/zkvm_runtime v0.0.0-20251001021608-1fe7b43fc4d6 // indirect
 	github.com/StackExchange/wmi v1.2.1 // indirect
-	github.com/andybalholm/brotli v1.0.6 // indirect
+	github.com/andybalholm/brotli v1.2.7 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect

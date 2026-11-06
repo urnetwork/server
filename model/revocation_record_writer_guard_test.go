@@ -38,10 +38,15 @@ var revokingStatementOwners = map[string]struct {
 	// clients; its inactive reap deletes only rows already ended
 	"model/network_client_model.go:RemoveDisconnectedNetworkClients":              {hooks: []string{"RevokeNetworkClientRecordsInTx", "RevokeRetiredClientRecordsInTx"}},
 	"model/network_client_retired_hosted.go:removeRetiredHostedNetworkClientsSql": {reason: "deletes only rows already inactive (NOT locked.active)"},
-	"model/prober_shard_model.go:ReapProberShard":                                 {hooks: []string{"RetireNetworkRecords"}},
-	"model/account_model.go:RemoveNetworkWithStoreSnapshot":                       {hooks: []string{"RetireNetworkRecords"}},
-	"model/lag_guest_model.go:removeExpiredLagGuest":                              {hooks: []string{"RetireNetworkRecords"}},
-	"model/auth_model.go:AuthPasswordSet":                                         {hooks: []string{"RotateCredentialRecordsInTx"}},
+	// the 2-day hosted proxy reap (91f14f258): its delete re-checks, under the
+	// row lock, that the client is inactive and was deactivated before the
+	// horizon, so the deactivation already tombstoned it
+	// (TestHostedProxyReapDeleteEndsNoLiveCredential)
+	"model/network_client_hosted_proxy_reap.go:removeHostedProxyClientsSql": {reason: "deletes only rows already inactive (NOT locked.active), deactivated before the reap horizon"},
+	"model/prober_shard_model.go:ReapProberShard":                           {hooks: []string{"RetireNetworkRecords"}},
+	"model/account_model.go:RemoveNetworkWithStoreSnapshot":                 {hooks: []string{"RetireNetworkRecords"}},
+	"model/lag_guest_model.go:removeExpiredLagGuest":                        {hooks: []string{"RetireNetworkRecords"}},
+	"model/auth_model.go:AuthPasswordSet":                                   {hooks: []string{"RotateCredentialRecordsInTx"}},
 	// bringyourctl network sign-out-all runs the password reset's rotation
 	"model/network_sign_out_model.go:CommitNetworkSignOut": {hooks: []string{"RotateCredentialRecordsInTx"}},
 }
