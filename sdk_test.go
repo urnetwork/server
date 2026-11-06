@@ -51,7 +51,7 @@ func TestCapServerTunIPv4(t *testing.T) {
 		settings.Mtu = mtu
 		settings.Log = connect.NewNoopLogger()
 		want := *settings
-		want.Mtu = min(mtu, 1280)
+		want.Mtu = min(mtu, connect.DefaultMtu)
 		want.DisableIpv6 = true
 		for range 2 {
 			CapServerTunIPv4(settings)

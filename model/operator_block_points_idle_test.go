@@ -37,9 +37,9 @@ func TestOperatorBlockPointsAwardOutlastsIdleInTransactionTimeout(t *testing.T) 
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
-		block := newOperatorBlockPointsReadFixture(t, ctx, now)
+		block, awardNow := newOperatorBlockPointsReadFixture(t, ctx, now)
 		config := operatorBlockPointsTestConfig()
-		baseline, err := ComputeOperatorBlockPoints(ctx, config, block, now)
+		baseline, err := ComputeOperatorBlockPoints(ctx, config, block, awardNow)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -73,7 +73,7 @@ func TestOperatorBlockPointsAwardOutlastsIdleInTransactionTimeout(t *testing.T) 
 
 		// as the dry run runs it
 		server.RequirePgReadOnly()
-		award, err := ComputeOperatorBlockPoints(ctx, config, block, now)
+		award, err := ComputeOperatorBlockPoints(ctx, config, block, awardNow)
 		server.Testing_ReleasePgReadOnly()
 		if err != nil {
 			t.Fatal(err)

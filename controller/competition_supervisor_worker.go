@@ -10,6 +10,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
@@ -70,9 +71,46 @@ func (self competitionSupervisorWorkerStore) CurrentStagingRound(context.Context
 
 // Checks only the current lease, never renews it on behalf of a dead parent.
 func checkCompetitionSupervisorWorkerFence(ctx context.Context, store PostgresStore, settings *Settings, lease model.CompetitionSupervisorLease) error {
-	return captureCompetitionDatabasePhase(func(observation *server.DbPhaseObservation) {
-		server.Tx(ctx, func(tx server.PgTx) { server.Raise(store.requireAutomationLeaseInTx(ctx, tx, settings, lease)) }, observation)
+	_, err := readCompetitionSupervisorWorkerFence(ctx, store, settings, lease)
+	return err
+}
+
+// A successful complete read acknowledges only the database's existing
+// expiry. Reading it never extends a dead parent's lease or changes its token.
+func readCompetitionSupervisorWorkerFence(ctx context.Context, store PostgresStore, settings *Settings, lease model.CompetitionSupervisorLease) (time.Time, error) {
+	observation := newCompetitionSupervisorRenewObservation()
+	entered := server.ObserveDbContextBudget(ctx)
+	var expiresAt time.Time
+	err := observation.capture(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			observation.callbackEntered = true
+			observation.callbacks++
+			tx = observation.observeReadPrefix(tx, true)
+			observation.step = competitionSupervisorWorkerFenceRead
+			if !settings.AutomationPolicy.Enabled {
+				panic(ErrAutomationDisabled)
+			}
+			if lease.Environment != settings.AutomationPolicy.Environment || lease.CompetitionId != settings.CompetitionId || lease.SeasonId != settings.AutomationPolicy.SeasonId {
+				panic(ErrLeaseLost)
+			}
+			err := tx.QueryRow(ctx, `SELECT lease_expires_at FROM competition_supervisor_lease
+			 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$4 AND fencing_token=$5 AND $6<lease_expires_at`,
+				lease.Environment, lease.CompetitionId, lease.SeasonId, lease.OwnerId, lease.FencingToken, store.nowUtc()).Scan(&expiresAt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				panic(ErrLeaseLost)
+			}
+			server.Raise(err)
+			server.Raise(setAutomationLeaseGuardsInTx(ctx, tx, settings, lease))
+		}, &observation.phase, &observation.timing, observation.read, &observation.transaction)
 	})
+	if proof, ok := err.(competitionSupervisorRenewError); ok {
+		proof.entered, proof.returned = entered, server.ObserveDbContextBudget(ctx)
+		err = proof
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return expiresAt, nil
 }
 
 // Uses the normal worker/evaluator and its singleton slot; cancellation joins
@@ -83,7 +121,8 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 		return ErrAutomationDisabled
 	}
 	store := PostgresStore{}
-	if err := checkCompetitionSupervisorWorkerFence(ctx, store, settings, request.Lease); err != nil {
+	confirmedExpiry, err := readCompetitionSupervisorWorkerFence(ctx, store, settings, request.Lease)
+	if err != nil {
 		return err
 	}
 	round, err := store.CurrentAutomationRound(ctx, settings)
@@ -130,34 +169,24 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 		}
 	}
 	workerStore := competitionSupervisorWorkerStore{PostgresStore: store, roundId: round.RoundId}
-	operationCtx, cancel := context.WithCancelCause(ctx)
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		for {
-			select {
-			case <-operationCtx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-			if err := checkCompetitionSupervisorWorkerFence(operationCtx, store, frozen, request.Lease); err != nil {
-				cancel(err)
-				return
-			}
-		}
-	}()
-	defer func() { cancel(nil); <-done }()
-	if frozen.DistributedEvaluationPolicy != nil {
-		err = runCompetitionDistributedCoordinator(operationCtx, frozen, workerStore, workerId)
-	} else {
-		worker, workerErr := NewWorker(frozen, workerStore, CommandEvaluator{}, workerId)
-		if workerErr != nil {
-			return workerErr
-		}
-		err = worker.Run(operationCtx)
+	// Setup may have outlived the request's initial confirmed window. No
+	// evaluator has started; only a fresh real read may authorize its launch.
+	confirmedExpiry, err = readCompetitionSupervisorWorkerFence(ctx, store, frozen, request.Lease)
+	if err != nil {
+		return err
 	}
-	if cause := context.Cause(operationCtx); cause != nil {
-		return cause
-	}
-	return err
+	return runCompetitionSupervisorWorkerFenced(ctx, confirmedExpiry, defaultCompetitionSupervisorWorkerFenceSettings(),
+		func(ctx context.Context) (time.Time, error) {
+			return readCompetitionSupervisorWorkerFence(ctx, store, frozen, request.Lease)
+		},
+		func(operationCtx context.Context) error {
+			if frozen.DistributedEvaluationPolicy != nil {
+				return runCompetitionDistributedCoordinator(operationCtx, frozen, workerStore, workerId)
+			}
+			worker, err := NewWorker(frozen, workerStore, CommandEvaluator{}, workerId)
+			if err != nil {
+				return err
+			}
+			return worker.Run(operationCtx)
+		})
 }

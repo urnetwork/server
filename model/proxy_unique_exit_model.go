@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sdk"
@@ -1037,6 +1038,58 @@ func setProxyUniqueExitStateInTx(ctx context.Context, tx server.PgTx, proxyClien
 	))
 }
 
+// uniqueExitProxyActive reports whether the proxy's client is active in the
+// network. remove-client only deactivates the client: the proxy_unique_exit
+// row and the exit stay until the sweeper releases them.
+func uniqueExitProxyActive(ctx context.Context, proxyClientId server.Id, networkId server.Id) (active bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1
+					FROM network_client
+					WHERE
+						client_id = $1 AND
+						network_id = $2 AND
+						active = true
+				)
+			`,
+			proxyClientId,
+			networkId,
+		).Scan(&active))
+	})
+	return
+}
+
+// lockActiveUniqueExitProxyInTx share-locks the proxy's client row while the
+// client is active, and reports whether it is. The lock conflicts with every
+// write of the row, so a removal either commits before it, and the client
+// reads removed, or waits for this transaction. A move takes it before the
+// assignment's lock. The other writers of a live assignment (confirm, hold,
+// key update, the sweeper's release) lock no client row, and a create writes
+// only its new proxy's rows, so the order cannot deadlock.
+func lockActiveUniqueExitProxyInTx(ctx context.Context, tx server.PgTx, proxyClientId server.Id, networkId server.Id) (active bool) {
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT client_id
+			FROM network_client
+			WHERE
+				client_id = $1 AND
+				network_id = $2 AND
+				active = true
+			FOR SHARE
+		`,
+		proxyClientId,
+		networkId,
+	)
+	server.WithPgResult(result, err, func() {
+		active = result.Next()
+	})
+	return
+}
+
 func loadLiveProxyExitAssignmentInTx(ctx context.Context, tx server.PgTx, proxyClientId server.Id) *proxyExitAssignment {
 	var assignment *proxyExitAssignment
 	result, err := tx.Query(
@@ -1419,7 +1472,9 @@ func holdProxyExit(ctx context.Context, assignment *proxyExitAssignment, failing
 // replaceProxyExit moves a proxy to a new unique exit and returns it, or nil
 // when the proxy stays where it is: manual mode, over a cap, or no supply. A
 // rotate is the customer's own request: it skips the caps and manual mode, and
-// without supply it leaves the working exit untouched.
+// without supply it leaves the working exit untouched. removed reports a proxy
+// whose client was removed before the move could commit: nothing is changed,
+// and the sweeper releases its exit.
 func replaceProxyExit(
 	ctx context.Context,
 	clientSession *session.ClientSession,
@@ -1429,21 +1484,21 @@ func replaceProxyExit(
 	rotate bool,
 	settings *UniqueExitSettings,
 	now time.Time,
-) *proxyExitAssignment {
+) (next *proxyExitAssignment, removed bool) {
 	if !rotate {
 		if config.ReplaceMode == UniqueExitReplaceManual {
 			holdProxyExit(ctx, current, reason, ProxyExitStateReplacing, ProxyExitReasonManual, now)
-			return nil
+			return nil, false
 		}
 		hourAgo := now.Add(-time.Hour)
 		if settings.MaxReplacementsPerProxyPerHour <= proxyExitFailuresSince(ctx, "proxy_client_id", current.ProxyClientId, hourAgo) {
 			holdProxyExit(ctx, current, reason, ProxyExitStateReplacing, ProxyExitReasonCap, now)
-			return nil
+			return nil, false
 		}
 		budget := networkReplacementBudget(networkUniqueExitProxyCount(ctx, current.NetworkId), settings)
 		if budget <= proxyExitFailuresSince(ctx, "network_id", current.NetworkId, hourAgo) {
 			holdProxyExit(ctx, current, reason, ProxyExitStateReplacing, ProxyExitReasonCap, now)
-			return nil
+			return nil, false
 		}
 	}
 
@@ -1460,15 +1515,22 @@ func replaceProxyExit(
 		if !rotate {
 			holdProxyExit(ctx, current, reason, ProxyExitStateNoSupply, ProxyExitReasonNoSupply, now)
 		}
-		return nil
+		return nil, false
 	}
 
-	var next *proxyExitAssignment
 	var proxyIds []server.Id
 	var configJsons [][]byte
 	server.Tx(ctx, func(tx server.PgTx) {
 		next = nil
+		removed = false
 		proxyIds, configJsons = nil, nil
+		// a proxy removed since it was read is not moved: a rotate or a pass
+		// that read it before a remove-client committed must not give it a
+		// new live exit or repin its stored config
+		if !lockActiveUniqueExitProxyInTx(ctx, tx, current.ProxyClientId, current.NetworkId) {
+			removed = true
+			return
+		}
 		live := loadLiveProxyExitAssignmentInTx(ctx, tx, current.ProxyClientId)
 		if live == nil || live.AssignmentId != current.AssignmentId {
 			// another writer moved the proxy first
@@ -1515,7 +1577,7 @@ func replaceProxyExit(
 		observeProxyExitLifetime(current, now)
 		proxyUniqueExitReplacements.WithLabelValues(reason).Inc()
 	}
-	return next
+	return next, removed
 }
 
 // The api's view
@@ -1727,29 +1789,129 @@ func Testing_SetUniqueExitRotateNow(now func() time.Time) func() {
 	}
 }
 
-// rotateAllowed spends one of the proxy's rotates: at most one per
-// RotateMinInterval and RotatesPerDay a day, counted in redis time buckets like
-// the proxy create rate. A redis failure allows the rotate, as the create rate
-// does.
-func rotateAllowed(ctx context.Context, proxyClientId server.Id, now time.Time, settings *UniqueExitSettings) (allowed bool) {
+// The rotate limits count rotations: at most one per RotateMinInterval bucket
+// and RotatesPerDay a UTC day, per proxy (connect/api/bringyour.yml
+// rate_limited: "The proxy rotated in the last minute, or 60 times today"). A
+// rotate reserves both before it moves the proxy and gives both back when the
+// proxy does not move, so a refused call, or one without supply, spends
+// nothing. Each counter is one redis key, so one cluster slot:
+//   - upe-rot-<proxy>-<bucket> is the bucket's slot, taken with SET NX: of
+//     concurrent rotates of one proxy, one holds it and the rest are refused;
+//   - upe-rotd-<proxy>-<day> counts the day's rotations, reserved by a script
+//     that takes one only below the limit.
+//
+// Api instances still on the INCR counters during a roll share the keys: their
+// INCR of a held slot refuses. A redis failure allows the rotate, as the
+// create rate does.
+type rotateReservation struct {
+	bucketKey string
+	dayKey    string
+	// what the reservation holds
+	bucket bool
+	day    bool
+}
+
+// KEYS[1] is the day's count, ARGV[1] the day's limit and ARGV[2] the count's
+// ttl in seconds. Takes one of the day's rotations and answers 1, or answers 0
+// at the limit and changes nothing.
+var rotateDayReserveScript = redis.NewScript(`
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+if tonumber(ARGV[1]) <= count then
+  return 0
+end
+redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+`)
+
+// KEYS[1] is the day's count. Gives back one rotation, never below zero.
+var rotateDayReleaseScript = redis.NewScript(`
+if 0 < tonumber(redis.call('GET', KEYS[1]) or '0') then
+  redis.call('DECR', KEYS[1])
+end
+return 1
+`)
+
+// a day's count outlives its day, for a rotate near midnight
+const rotateDayCountTtl = 48 * time.Hour
+
+// a reservation is given back even when the request that took it has ended
+const rotateReleaseTimeout = 5 * time.Second
+
+// reserveRotate takes the proxy's slot in now's bucket and one of the day's
+// rotations, or neither: allowed is false, and nothing is held, when the
+// bucket's slot is taken or the day is at its limit. A callback rerun after a
+// lost reply finds the slot it took and refuses; that errs toward refusing,
+// for one bucket.
+func reserveRotate(ctx context.Context, proxyClientId server.Id, now time.Time, settings *UniqueExitSettings) (reservation *rotateReservation, allowed bool) {
+	bucketSeconds := max(1, int64(settings.RotateMinInterval/time.Second))
+	reservation = &rotateReservation{
+		bucketKey: fmt.Sprintf("upe-rot-%s-%d", proxyClientId, now.Unix()/bucketSeconds),
+		dayKey:    fmt.Sprintf("upe-rotd-%s-%d", proxyClientId, now.Unix()/86400),
+	}
 	allowed = true
-	intervalSeconds := max(1, int64(settings.RotateMinInterval/time.Second))
-	intervalKey := fmt.Sprintf("upe-rot-%s-%d", proxyClientId, now.Unix()/intervalSeconds)
-	dayKey := fmt.Sprintf("upe-rotd-%s-%d", proxyClientId, now.Unix()/86400)
 	server.HandleError(func() {
 		server.Redis(ctx, func(r server.RedisClient) {
-			intervalCount, err := r.Incr(ctx, intervalKey).Result()
+			// the slot holds the integer 1, so the old code's INCR of a held
+			// slot reads 2 and refuses
+			set, err := r.SetNX(ctx, reservation.bucketKey, 1, 2*time.Duration(bucketSeconds)*time.Second).Result()
 			server.Raise(err)
-			r.Expire(ctx, intervalKey, 2*time.Duration(intervalSeconds)*time.Second)
-			dayCount, err := r.Incr(ctx, dayKey).Result()
-			server.Raise(err)
-			r.Expire(ctx, dayKey, 48*time.Hour)
-			if 1 < intervalCount || int64(settings.RotatesPerDay) < dayCount {
+			if !set {
 				allowed = false
+				return
+			}
+			reservation.bucket = true
+			taken, err := rotateDayReserveScript.Run(
+				ctx,
+				r,
+				[]string{reservation.dayKey},
+				settings.RotatesPerDay,
+				int64(rotateDayCountTtl/time.Second),
+			).Int()
+			server.Raise(err)
+			if taken == 0 {
+				allowed = false
+				return
+			}
+			reservation.day = true
+		})
+	})
+	if !allowed {
+		// the day was at its limit: give back the bucket's slot
+		reservation.release(ctx)
+	}
+	return
+}
+
+// release gives back what the reservation holds. A redis failure here leaves
+// the counts one rotation high until their keys expire, which errs toward
+// refusing.
+func (self *rotateReservation) release(ctx context.Context) {
+	if !self.bucket && !self.day {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rotateReleaseTimeout)
+	defer cancel()
+	server.HandleError(func() {
+		server.Redis(releaseCtx, func(r server.RedisClient) {
+			if self.day {
+				server.Raise(rotateDayReleaseScript.Run(releaseCtx, r, []string{self.dayKey}).Err())
+				self.day = false
+			}
+			if self.bucket {
+				server.Raise(r.Del(releaseCtx, self.bucketKey).Err())
+				self.bucket = false
 			}
 		})
 	})
-	return
+}
+
+// The answer for a client_id that is not a unique-exit proxy of the caller's
+// network (connect/api/bringyour.yml), including a removed proxy.
+func rotateNotAUniqueExitProxy() *RotateProxyExitResult {
+	return &RotateProxyExitResult{
+		Error: &RotateProxyExitError{Message: "Not a unique-exit proxy of this network."},
+	}
 }
 
 // RotateProxyExit moves a unique-exit proxy to a new unique exit on the
@@ -1761,24 +1923,24 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 	now := uniqueExitRotateNow()
 	config := loadProxyUniqueExitConfigs(ctx, []server.Id{rotate.ClientId})[rotate.ClientId]
 	if config == nil || config.NetworkId != clientSession.ByJwt.NetworkId {
-		return &RotateProxyExitResult{
-			Error: &RotateProxyExitError{Message: "Not a unique-exit proxy of this network."},
-		}, nil
+		return rotateNotAUniqueExitProxy(), nil
 	}
 	if callerClientId := clientSession.ByJwt.ClientId; callerClientId != nil && *callerClientId != rotate.ClientId {
 		// a client token may rotate only itself; the network token rotates any
 		// of the network's proxies
-		return &RotateProxyExitResult{
-			Error: &RotateProxyExitError{Message: "Not a unique-exit proxy of this network."},
-		}, nil
+		return rotateNotAUniqueExitProxy(), nil
+	}
+	// a removed proxy keeps its row and its exit until the sweeper releases
+	// them, but it is no longer one of the network's proxies
+	if !uniqueExitProxyActive(ctx, rotate.ClientId, config.NetworkId) {
+		return rotateNotAUniqueExitProxy(), nil
 	}
 	current := loadLiveProxyExitAssignment(ctx, rotate.ClientId)
 	if current == nil {
-		return &RotateProxyExitResult{
-			Error: &RotateProxyExitError{Message: "Not a unique-exit proxy of this network."},
-		}, nil
+		return rotateNotAUniqueExitProxy(), nil
 	}
-	if !rotateAllowed(ctx, rotate.ClientId, now, settings) {
+	reservation, allowed := reserveRotate(ctx, rotate.ClientId, now, settings)
+	if !allowed {
 		return &RotateProxyExitResult{
 			Error: &RotateProxyExitError{
 				RateLimited: true,
@@ -1786,7 +1948,19 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 			},
 		}, nil
 	}
-	next := replaceProxyExit(ctx, clientSession, config, current, ProxyExitReasonRotate, true, settings, now)
+	rotated := false
+	defer func() {
+		if !rotated {
+			// only rotations count: a rotate that did not move the proxy (no
+			// supply, removed, another writer first, or an error) gives back
+			// its reservation
+			reservation.release(ctx)
+		}
+	}()
+	next, removed := replaceProxyExit(ctx, clientSession, config, current, ProxyExitReasonRotate, true, settings, now)
+	if removed {
+		return rotateNotAUniqueExitProxy(), nil
+	}
 	if next == nil {
 		return &RotateProxyExitResult{
 			Error: &RotateProxyExitError{
@@ -1795,6 +1969,7 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 			},
 		}, nil
 	}
+	rotated = true
 	return &RotateProxyExitResult{
 		Exit: GetProxyExits(ctx, []server.Id{rotate.ClientId})[rotate.ClientId],
 	}, nil
@@ -1965,9 +2140,14 @@ func SweepProxyExits(ctx context.Context, now time.Time, settings *UniqueExitSet
 	}()
 
 	replace := func(config *proxyUniqueExitConfig, assignment *proxyExitAssignment, reason string) {
-		if next := replaceProxyExit(ctx, networkSession(assignment.NetworkId), config, assignment, reason, false, settings, now); next != nil {
+		next, removed := replaceProxyExit(ctx, networkSession(assignment.NetworkId), config, assignment, reason, false, settings, now)
+		switch {
+		case next != nil:
 			sweep.ReplacedCount += 1
-		} else {
+		case removed:
+			// removed since this pass read the active proxies: the next pass
+			// releases its exit
+		default:
 			sweep.HeldCount += 1
 		}
 	}
