@@ -41,17 +41,39 @@ var (
 // is added to locationReferences with its repoint.
 func TestLocationReferencesCoverTheMigrations(t *testing.T) {
 	// Replays db_migrations.go the way the migrations apply: every SQL string
-	// in the file, in order, statement by statement, tracking CREATE TABLE,
-	// DROP TABLE, and ALTER TABLE's ADD COLUMN, DROP COLUMN and RENAME. It
-	// returns the uuid columns named location_id or *_location_id that the
-	// migrated schema ends with, as table.column.
+	// in the file, in order, statement by statement, and, where a migration
+	// constructor registers a SQL constant declared in another file of the
+	// package (newSqlMigration(proxyExitAssignmentTableSql)), that constant's
+	// SQL at the point of registration. It tracks CREATE TABLE, DROP TABLE, and
+	// ALTER TABLE's ADD COLUMN, DROP COLUMN and RENAME, and returns the uuid
+	// columns named location_id or *_location_id that the migrated schema ends
+	// with, as table.column. SQL built by a function call is not replayed here;
+	// TestLocationReferencesMatchTheMigratedSchema covers it against the
+	// migrated test schema.
 	migrationLocationReferenceColumns := func() map[string]bool {
 		file, err := parser.ParseFile(token.NewFileSet(), filepath.Join("..", "db_migrations.go"), nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
+		externalSql := migrationSqlConstantsOutside(t, "db_migrations.go")
 		statements := []string{}
+		appendSql := func(sql string) {
+			sql = migrationSqlBlockComment.ReplaceAllString(migrationSqlLineComment.ReplaceAllString(sql, ""), "")
+			statements = append(statements, strings.Split(sql, ";")...)
+		}
+		replayed := map[string]bool{}
 		ast.Inspect(file, func(node ast.Node) bool {
+			if call, ok := node.(*ast.CallExpr); ok {
+				if constructor, ok := call.Fun.(*ast.Ident); ok && migrationSqlConstructors[constructor.Name] && 0 < len(call.Args) {
+					if name, ok := call.Args[0].(*ast.Ident); ok {
+						if sql, ok := externalSql[name.Name]; ok && !replayed[name.Name] {
+							replayed[name.Name] = true
+							appendSql(sql)
+						}
+					}
+				}
+				return true
+			}
 			literal, ok := node.(*ast.BasicLit)
 			if !ok || literal.Kind != token.STRING {
 				return true
@@ -60,10 +82,12 @@ func TestLocationReferencesCoverTheMigrations(t *testing.T) {
 			if err != nil {
 				return true
 			}
-			sql = migrationSqlBlockComment.ReplaceAllString(migrationSqlLineComment.ReplaceAllString(sql, ""), "")
-			statements = append(statements, strings.Split(sql, ";")...)
+			appendSql(sql)
 			return true
 		})
+		if !replayed["proxyExitAssignmentTableSql"] {
+			t.Fatalf("the replay did not resolve the registered constant proxyExitAssignmentTableSql (db_proxy_unique_exit_schema.go)")
+		}
 
 		tableColumns := map[string]map[string]bool{}
 		for _, statement := range statements {
@@ -167,6 +191,180 @@ func TestLocationReferencesCoverTheMigrations(t *testing.T) {
 			t.Errorf("a merge would rewrite the country column %s.%s", reference.table, reference.column)
 		}
 	}
+}
+
+// The constructors db_migrations.go registers a SQL migration with.
+var migrationSqlConstructors = map[string]bool{
+	"newSqlMigration":                  true,
+	"newOnlineSqlMigration":            true,
+	"newRestartableOnlineSqlMigration": true,
+}
+
+// The package-level string constants and variables of the server package's
+// non-test files other than exceptFilename, by name: those whose value is a
+// string literal or a concatenation of string literals.
+func migrationSqlConstantsOutside(t *testing.T, exceptFilename string) map[string]string {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join("..", "*.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var literalValue func(expression ast.Expr) (string, bool)
+	literalValue = func(expression ast.Expr) (string, bool) {
+		switch e := expression.(type) {
+		case *ast.BasicLit:
+			if e.Kind != token.STRING {
+				return "", false
+			}
+			value, err := strconv.Unquote(e.Value)
+			return value, err == nil
+		case *ast.ParenExpr:
+			return literalValue(e.X)
+		case *ast.BinaryExpr:
+			if e.Op != token.ADD {
+				return "", false
+			}
+			left, ok := literalValue(e.X)
+			if !ok {
+				return "", false
+			}
+			right, ok := literalValue(e.Y)
+			return left + right, ok
+		}
+		return "", false
+	}
+	constants := map[string]string{}
+	for _, path := range paths {
+		name := filepath.Base(path)
+		if name == exceptFilename || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, declaration := range file.Decls {
+			general, ok := declaration.(*ast.GenDecl)
+			if !ok || (general.Tok != token.CONST && general.Tok != token.VAR) {
+				continue
+			}
+			for _, spec := range general.Specs {
+				valueSpec, ok := spec.(*ast.ValueSpec)
+				if !ok || len(valueSpec.Names) != len(valueSpec.Values) {
+					continue
+				}
+				for i, ident := range valueSpec.Names {
+					if value, ok := literalValue(valueSpec.Values[i]); ok {
+						constants[ident.Name] = value
+					}
+				}
+			}
+		}
+	}
+	return constants
+}
+
+// Every column of the migrated test schema that holds a location id is one the
+// inventory names, and the inventory names nothing that schema lacks: the
+// check DeduplicateLocations runs before it changes anything, run against all
+// the migrations, including SQL the static replay cannot read.
+func TestLocationReferencesMatchTheMigratedSchema(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var unknownColumns []string
+		var missingColumns []string
+		server.Tx(ctx, func(tx server.PgTx) {
+			unknownColumns, missingColumns = locationReferenceDriftInTx(ctx, tx)
+		}, server.TxReadCommitted)
+		if 0 < len(unknownColumns) || 0 < len(missingColumns) {
+			t.Fatalf(
+				"the inventory differs from the migrated schema: unknown columns [%s], missing columns [%s]",
+				strings.Join(unknownColumns, ", "),
+				strings.Join(missingColumns, ", "),
+			)
+		}
+	})
+}
+
+// A unique-exit assignment pinned to a duplicate location names the kept row
+// after the merge. Before proxy_exit_assignment.location_id was inventoried,
+// the de-duplication refused to run at all once migrations 933-943 applied.
+func TestDeduplicateLocationsRepointsUniqueExitAssignments(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		defer pushTestPlaces(testPlacesYaml)()
+
+		canonical := &Location{
+			LocationType:     LocationTypeCity,
+			City:             "Dorking",
+			Region:           "England",
+			Country:          "United Kingdom",
+			CountryCode:      "gb",
+			Latitude:         51.2344,
+			Longitude:        -0.3336,
+			CityGeonameId:    2651095,
+			RegionGeonameId:  6269131,
+			CountryGeonameId: 2635167,
+		}
+		CreateLocation(ctx, canonical)
+		legacyCityId := insertTestLocation(ctx, LocationTypeCity, "DORKING", "gb", canonical.CountryLocationId, &canonical.RegionLocationId, 0)
+
+		assignmentId := server.NewId()
+		releasedAssignmentId := server.NewId()
+		unlocatedAssignmentId := server.NewId()
+		networkId := server.NewId()
+		server.Db(ctx, func(conn server.PgConn) {
+			server.RaisePgResult(conn.Exec(ctx, `
+				INSERT INTO proxy_exit_assignment (
+					assignment_id,
+					network_id,
+					proxy_client_id,
+					provider_client_id,
+					egress_key,
+					state,
+					location_id,
+					country_code,
+					assigned_at,
+					released_at
+				)
+				VALUES
+					($1, $4, $5, $6, '\x01', 'active', $7, 'gb', now(), NULL),
+					($2, $4, $8, $9, '\x02', 'released', $7, 'gb', now(), now()),
+					($3, $4, $10, $11, '\x03', 'active', NULL, '', now(), NULL)
+			`,
+				assignmentId,
+				releasedAssignmentId,
+				unlocatedAssignmentId,
+				networkId,
+				server.NewId(),
+				server.NewId(),
+				legacyCityId,
+				server.NewId(),
+				server.NewId(),
+				server.NewId(),
+				server.NewId(),
+			))
+		})
+
+		deduplication, err := DeduplicateLocations(ctx)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, deduplication.CityGroupCount, 1)
+		connect.AssertEqual(t, deduplication.CityMergedRowCount, 1)
+		connect.AssertEqual(t, testLocationExists(ctx, legacyCityId), false)
+
+		// the live and the released assignment both name the kept city, and
+		// the assignment without a location keeps none
+		connect.AssertEqual(t, testCountRows(ctx, `SELECT COUNT(*) FROM proxy_exit_assignment WHERE location_id = $1`, legacyCityId), 0)
+		connect.AssertEqual(t, testCountRows(ctx, `SELECT COUNT(*) FROM proxy_exit_assignment WHERE assignment_id = ANY($1) AND location_id = $2`, []server.Id{assignmentId, releasedAssignmentId}, canonical.LocationId), 2)
+		connect.AssertEqual(t, testCountRows(ctx, `SELECT COUNT(*) FROM proxy_exit_assignment WHERE assignment_id = $1 AND location_id IS NULL`, unlocatedAssignmentId), 1)
+		// no assignment names a location row that no longer exists
+		connect.AssertEqual(t, testCountRows(ctx, `
+			SELECT COUNT(*)
+			FROM proxy_exit_assignment
+			LEFT JOIN location ON location.location_id = proxy_exit_assignment.location_id
+			WHERE proxy_exit_assignment.location_id IS NOT NULL AND location.location_id IS NULL
+		`), 0)
+	})
 }
 
 // Writes a location row directly, bypassing CreateLocation's matching, the way

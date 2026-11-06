@@ -1,0 +1,38 @@
+{
+  "schema": "competition-interruption-observation/v1",
+  "job_id": "01a1a672-824d-c2a3-330c-db4244a8972a",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "attempt_interrupted": 1,
+  "completed_candidate_runs_before_interruption": 5,
+  "interrupted_candidate_run": 6,
+  "evaluator_exit_code": 143,
+  "controller_failure": "evaluator_process_failed",
+  "supervisor_error_at": "2026-11-06T07:46:25.562208Z",
+  "supervisor_lease_lost_at": "2026-11-06T07:46:29.368819Z",
+  "supervisor_error": "FATAL: query_wait_timeout (SQLSTATE 08P01)",
+  "supervisor_operation": "RenewAutomationLease",
+  "causality_warning": "The evaluator termination preceded the supervisor lease-loss observation. This record does not prove that the later supervisor error caused the earlier termination, or identify the original worker-heartbeat database phase.",
+  "readonly_database_receipt": "/home/by/urnetwork/temp/competition-monitor-current.sr4OYguL/audit.private.json",
+  "state_in_receipt": "queued",
+  "original_started_at": "2026-11-06T06:46:39.161711Z",
+  "original_deadline": "2026-11-06T09:46:39.161711Z",
+  "subsequent_observation": {
+    "attempt_directory": "attempt-02",
+    "compose_token": "2900f57f134caf92b5763c4e3d7e8d6f",
+    "candidate_run": 1,
+    "runner_live": true,
+    "backing_services_healthy": true
+  },
+  "subsequent_failure_observation": {
+    "attempt": 2,
+    "controller_failure": "evaluator_process_failed",
+    "supervisor_error_at": "2026-11-06T07:50:05.889193Z",
+    "supervisor_error": "FATAL: query_wait_timeout (SQLSTATE 08P01)",
+    "causal_connection_between_observations_proven": false,
+    "read_only_pooler_diagnostics_requested": true
+  },
+  "operator_retry_issued": false,
+  "operator_clock_reset": false,
+  "recovery_grant_issued": false,
+  "staged_fixes_activated": false
+}
