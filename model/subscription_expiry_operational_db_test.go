@@ -338,7 +338,12 @@ func TestForceCloseCheckpointWaitDeadlinePreservesRecovery(t *testing.T) {
 					if id != f.contractId {
 						return parent
 					}
-					child, stop := context.WithTimeout(parent, 3*time.Second)
+					// The continuation's transaction ends a lock wait at
+					// server.PgLockTimeout with 55P03 (7962a8d7d). The child
+					// deadline must expire inside that bound to be witnessed:
+					// the waiting statement then reports it, joined with the
+					// 55P03 that ends the wait (db_statement_stop.go).
+					child, stop := context.WithTimeout(parent, server.PgLockTimeout/2)
 					started <- childOwner{child, stop}
 					return child
 				})
