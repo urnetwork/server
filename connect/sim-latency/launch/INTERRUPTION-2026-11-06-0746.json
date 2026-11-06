@@ -31,6 +31,23 @@
     "causal_connection_between_observations_proven": false,
     "read_only_pooler_diagnostics_requested": true
   },
+  "later_interruption": {
+    "attempt": 6,
+    "completed_candidate_runs": 6,
+    "interrupted_candidate_run": 7,
+    "controller_failure": "evaluator_process_failed",
+    "supervisor_lease_lost_unix_microseconds": "1793955771676813",
+    "database_dial_timeout_unix_microseconds": ["1793955846878728", "1793955924846577"],
+    "database_endpoint": "172.28.208.182:6432",
+    "subsequent_tcp_connect_succeeded_at": "2026-11-06T09:07:04Z",
+    "tcp_connect_proves_authenticated_database_health": false,
+    "automatic_attempt_7_observed": true,
+    "attempt_7_compose_token": "be3bf8e5afa4d9988e484213010d4a1d",
+    "local_vpn_interface_up_when_inspected": true,
+    "local_vpn_interface_errors_and_drops_when_inspected": 0,
+    "matching_local_kernel_faults_found_in_checked_window": false,
+    "network_or_pooler_root_cause_proven": false
+  },
   "operator_retry_issued": false,
   "operator_clock_reset": false,
   "recovery_grant_issued": false,
