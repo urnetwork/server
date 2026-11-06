@@ -40,6 +40,16 @@ is covered by deterministic unit tests, not forced by these PostgreSQL tests.
 Supplemental test-only source `f76cf435c7c8d23fc799e0d4174c6fbbcf9dff98`
 has separate qualification and must not borrow this receipt.
 
+The test-only supplement independently passed its three targeted roots once
+ordinarily and once with the race detector: six positive executions, zero
+failures/skips/race reports. Four PostgreSQL callbacks attested schema 943.
+It proves original confirmed-expiry clipping and real post-write refusal
+through both the historical and new job-heartbeat adapters. Production files
+are identical to `1ef571200`; this does not extend the primary test scope to
+other source changes. Supplemental receipt:
+`/mnt/data/low-merged-d49-plan.b9EKrHyZ/prefix-f76-qualification.json`, SHA-256
+`1cf252cc08fa921936713349f863b93b447e911756e09da834f73cbdd756dcb9`.
+
 No deployment, interruption, new recovery grant, evaluation-clock reset,
 scoring-policy change or acceptance of an unclassified incident is authorized
 by this record. The current evaluator continues unchanged until a safe,
