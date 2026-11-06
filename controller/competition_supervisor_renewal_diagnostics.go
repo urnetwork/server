@@ -21,6 +21,7 @@ const (
 	competitionSupervisorRenewalAuthority
 	competitionSupervisorRenewalLeaseUpdate
 	competitionSupervisorRenewalCallbackReturn
+	competitionSupervisorWorkerFenceRead
 )
 
 // Each field is a bounded scalar or a fixed-size observation. A returned
@@ -48,6 +49,7 @@ func (self *competitionSupervisorRenewObservation) captureContext(ctx context.Co
 	if !ok {
 		return err
 	}
+	proof.entered, proof.returned = entered, server.ObserveDbContextBudget(ctx)
 	acquire := proof.acquire
 	if acquire.PoolReturn != nil {
 		pool := *acquire.PoolReturn
@@ -55,7 +57,7 @@ func (self *competitionSupervisorRenewObservation) captureContext(ctx context.Co
 	}
 	proof.database = &CompetitionSupervisorRenewalDatabaseFailure{Schema: 1, Kind: "competition-supervisor-renewal-database/v1",
 		DatabasePhase: proof.phase, Step: self.step, CallbackEntries: self.callbacks, ConfirmedLeaseExpiresAt: confirmedExpiry,
-		AtEntry: entered, AtReturn: server.ObserveDbContextBudget(ctx), Acquire: acquire, Transaction: self.transaction.Snapshot()}
+		AtEntry: entered, AtReturn: proof.returned, Acquire: acquire, Transaction: self.transaction.Snapshot()}
 	return proof
 }
 
@@ -83,10 +85,18 @@ func MarshalCompetitionSupervisorReport(state string, err error) ([]byte, error)
 		State           string                                       `json:"state"`
 		Error           string                                       `json:"error,omitempty"`
 		RenewalDatabase *CompetitionSupervisorRenewalDatabaseFailure `json:"renewal_database,omitempty"`
+		WorkerFailure   *CompetitionWorkerFailureReport              `json:"worker_failure,omitempty"`
 	}{State: state}
 	if err != nil {
 		result.Error = err.Error()
 		result.RenewalDatabase = CompetitionSupervisorRenewalFailureDetails(err)
+		if carrier, ok := err.(interface {
+			CompetitionWorkerFailure() *CompetitionWorkerFailureReport
+		}); ok {
+			if content, marshalError := json.Marshal(carrier.CompetitionWorkerFailure()); marshalError == nil {
+				result.WorkerFailure, _ = DecodeCompetitionWorkerFailureReport(content)
+			}
+		}
 	}
 	return json.Marshal(result)
 }

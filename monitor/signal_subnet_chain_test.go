@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
 
 	"github.com/urfoundation/sn/stabi"
 )
@@ -443,6 +444,32 @@ func TestSubnetChainEventFrontierIsBoundedAndAdvances(t *testing.T) {
 	requireNoSubnetAlerts(t, alerts)
 	if reads := world.calls[subnetWorldEvm1+" eth_getLogs"]; reads != 10 {
 		t.Fatalf("log reads = %d, want exactly the 1000-block window in 100-block chunks", reads)
+	}
+}
+
+// An endpoint that pruned the frontier's first block answers eth_getLogs over
+// it with an empty list (lite.chain.opentensor.ai did on 2026-11-06). The
+// governance events are then unknown, never read as no unreviewed upgrade.
+func TestSubnetChainPrunedGovernanceHistoryIsUnknown(t *testing.T) {
+	world := newSubnetWorld(t)
+	coordinatorAbi := subnetWorldAbi(t, stabi.STCoordinatorMetaData.ParseABI)
+	world.emit(world.coordinator, coordinatorAbi, "Upgraded", world.finalized-50, 0, map[string]any{"implementation": subnetWorldAddress("unreviewed")})
+	firstBlock := world.finalized - 7200 + 1
+	world.override = func(endpoint, method string, params []json.RawMessage) (any, error, bool) {
+		switch method {
+		case "eth_getBlockByNumber":
+			if subnetWorldString(t, params[0]) == hexutil.EncodeUint64(firstBlock) {
+				return nil, nil, true
+			}
+		case "eth_getLogs":
+			return []any{}, nil, true
+		}
+		return nil, nil, false
+	}
+	alerts := runSubnetWorld(t, NewSubnetChainSignal(), world.signalSettings())
+	alert := requireSubnetAlert(t, alerts, subnetDeploymentGovernanceClass, "subnet-chain/governance-events", "unobserved", SeverityWarn)
+	if !alert.unobservable || !strings.Contains(alert.Observed, "reason=logs-block-absent") {
+		t.Fatalf("pruned governance history = %+v", alert)
 	}
 }
 
