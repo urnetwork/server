@@ -93,7 +93,7 @@ func retryCompetitionJobHeartbeatOperation(ctx context.Context, jobExpiresAt, ho
 			expiresAt = hostExpiresAt
 		}
 		proof = func(err error) bool {
-			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err)
+			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err) || competitionHeartbeatJobLockDeadline(err)
 		}
 	}
 	return retryCompetitionHeartbeatWithProof(ctx, expiresAt, settings, operation, proof)
