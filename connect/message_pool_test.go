@@ -14,13 +14,15 @@ import (
 func requireServicePoolBudget(t *testing.T, total connectcore.ByteCount) {
 	t.Helper()
 	stats := connectcore.GetMessagePoolAggregateStats()
-	if stats.CapacityByteCount > total || total-stats.CapacityByteCount >= 16*1024 {
+	if stats.CapacityByteCount > total {
 		t.Errorf("global free-buffer capacity=%d, total budget=%d", stats.CapacityByteCount, total)
 	}
 	if stats.RetainedByteCount > total {
 		t.Errorf("native returned high-water=%d exceeds total budget=%d", stats.RetainedByteCount, total)
 	}
 	packet, large := total/3, total-total/3
+	var expectedTotal connectcore.ByteCount
+	seen := map[int]bool{}
 	for _, class := range connectcore.GetMessagePoolClassStats() {
 		var expected connectcore.ByteCount
 		switch class.Size {
@@ -29,10 +31,17 @@ func requireServicePoolBudget(t *testing.T, total connectcore.ByteCount) {
 		case 2048:
 			expected = packet - packet/4
 		case 4096, 8192:
-			expected = large / 2
+			expected = 256*1024 + (large-512*1024)/3
+		case 9216:
+			expected = (large - 512*1024) / 3
 		default:
 			t.Fatalf("unreviewed pool class %d", class.Size)
 		}
+		if seen[class.Size] {
+			t.Fatalf("duplicate pool class %d", class.Size)
+		}
+		seen[class.Size] = true
+		expectedTotal += expected / connectcore.ByteCount(class.Size) * connectcore.ByteCount(class.Size)
 		capacity := connectcore.ByteCount(class.Size * class.Capacity)
 		if capacity > expected || expected-capacity >= connectcore.ByteCount(class.Size) {
 			t.Errorf("class=%d capacity=%d budget=%d", class.Size, capacity, expected)
@@ -40,6 +49,9 @@ func requireServicePoolBudget(t *testing.T, total connectcore.ByteCount) {
 		if class.Retained > class.Capacity {
 			t.Errorf("class=%d retained=%d exceeds capacity=%d", class.Size, class.Retained, class.Capacity)
 		}
+	}
+	if len(seen) != 5 || stats.CapacityByteCount != expectedTotal {
+		t.Errorf("five-class capacity=%d want=%d classes=%d", stats.CapacityByteCount, expectedTotal, len(seen))
 	}
 }
 
@@ -71,7 +83,8 @@ func TestServiceMessagePoolStartupUsesOneTotalBudget(t *testing.T) {
 	t.Logf("production_startup_capacity=%d expected_total=%d", connectcore.GetMessagePoolAggregateStats().CapacityByteCount, connectcore.ByteCount(16<<30))
 }
 
-// A real four-class return burst fills the historical 3x free-list ceiling.
+// A real five-class return burst fills the historical 3x free-list ceiling;
+// the extended class keeps a borrowed root but has zero legacy free capacity.
 // Applying the service policy must drop only excess free roots, keep borrowed
 // read-only shares intact, and bound subsequent native Get/Return high-waters.
 func TestServiceMessagePoolLoadedReturnHonorsTotalAndBorrowedOwners(t *testing.T) {
@@ -95,11 +108,18 @@ func TestServiceMessagePoolLoadedReturnHonorsTotalAndBorrowedOwners(t *testing.T
 			}
 		}
 	})
-	sizes := map[int]int{256: 80, 2048: 1400, 4096: 3072, 8192: 8000}
+	sizes := map[int]int{256: 80, 2048: 1400, 4096: 3072, 8192: 8000, 9216: 9000}
 	for _, class := range connectcore.GetMessagePoolClassStats() {
+		size, ok := sizes[class.Size]
+		if !ok {
+			t.Fatalf("missing loaded-burst size for pool class %d", class.Size)
+		}
 		buffers := make([][]byte, class.Capacity+8)
 		for i := range buffers {
-			buffers[i] = connectcore.MessagePoolGet(sizes[class.Size])
+			buffers[i] = connectcore.MessagePoolGet(size)
+			if connectcore.MessagePoolRootByteCount(buffers[i]) != connectcore.ByteCount(class.Size) {
+				t.Fatalf("loaded burst did not take class %d", class.Size)
+			}
 			buffers[i][0], buffers[i][len(buffers[i])-1] = byte(i), byte(i>>8)
 		}
 		owner := buffers[0]
@@ -114,7 +134,7 @@ func TestServiceMessagePoolLoadedReturnHonorsTotalAndBorrowedOwners(t *testing.T
 		clear(buffers)
 	}
 	legacy := connectcore.GetMessagePoolAggregateStats()
-	if legacy.RetainedByteCount != 3*budget || legacy.Taken-legacy.Returned != before.Taken-before.Returned+4 {
+	if legacy.RetainedByteCount != 3*budget || legacy.Taken-legacy.Returned != before.Taken-before.Returned+uint64(len(held)) {
 		t.Fatalf("native high-water or borrowed-root ownership: %+v", legacy)
 	}
 	resizeServiceMessagePools(budget)
@@ -155,5 +175,32 @@ func TestServiceMessagePoolLoadedReturnHonorsTotalAndBorrowedOwners(t *testing.T
 	if after.Taken-after.Returned != before.Taken-before.Returned {
 		t.Fatalf("final owner imbalance: before=%+v after=%+v", before, after)
 	}
-	t.Logf("legacy_retained=%d bounded_retained=%d total_budget=%d held_roots=4 shares_preserved=true refill_rounds=3 taken_delta=%d returned_delta=%d", legacy.RetainedByteCount, after.RetainedByteCount, budget, after.Taken-before.Taken, after.Returned-before.Returned)
+	t.Logf("legacy_retained=%d bounded_retained=%d total_budget=%d held_roots=%d shares_preserved=true refill_rounds=3 taken_delta=%d returned_delta=%d", legacy.RetainedByteCount, after.RetainedByteCount, budget, len(held), after.Taken-before.Taken, after.Returned-before.Returned)
+}
+
+// The current service allowance first funds the two historical 256-KiB
+// large-class floors, then shares the remaining bytes among all three classes.
+// This exact small budget exposes a missing extended class and incorrect
+// half-budget expectations without traffic, sleeps or large allocations.
+func TestServiceMessagePoolFiveClassBudgetGeometry(t *testing.T) {
+	const budget connectcore.ByteCount = 3 << 20
+	connectcore.ClearMessagePools()
+	t.Cleanup(func() { connectcore.ClearMessagePools(); ConfigureMessagePools() })
+	resizeServiceMessagePools(budget)
+	want := map[int]int{256: 1024, 2048: 384, 4096: 192, 8192: 96, 9216: 56}
+	classes := connectcore.GetMessagePoolClassStats()
+	if len(classes) != len(want) {
+		t.Fatalf("service five-class geometry: got %d classes want %d", len(classes), len(want))
+	}
+	for _, class := range classes {
+		capacity, ok := want[class.Size]
+		if !ok || class.Capacity != capacity {
+			t.Fatalf("service five-class geometry: size=%d capacity=%d want=%d", class.Size, class.Capacity, capacity)
+		}
+		delete(want, class.Size)
+	}
+	if len(want) != 0 {
+		t.Fatalf("service five-class geometry omitted classes: %v", want)
+	}
+	requireServicePoolBudget(t, budget)
 }

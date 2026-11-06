@@ -49,6 +49,7 @@ type sdkBrowsingSetupDiscovery struct {
 	stateLock        sync.Mutex
 	report           sdkBrowsingSetupDiscoveryReport
 	changed          chan struct{}
+	page1Timeline    *sdkBrowsingPage1Timeline
 }
 
 // Construction publishes the complete fixed-size observation owner.
@@ -123,7 +124,9 @@ func (self *sdkBrowsingSetupDiscovery) FindProviders2(ctx context.Context, token
 		self.report.SpeedCalls++
 	}
 	self.stateLock.Unlock()
+	traceToken := self.page1Timeline.discoveryStart(args.RankMode, ready[4])
 	result, err := self.base.FindProviders2(ctx, token, &query)
+	self.page1Timeline.discoveryEnd(traceToken, result, err)
 	if err == nil {
 		err = ctx.Err()
 	}
