@@ -1489,12 +1489,12 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 
 	// Locks the clients' active descendants, one generation at a time, each in
 	// client id order after the generation above it. A descendant already among
-	// the caller's clients is not returned again. A child copies its parent's
-	// device (AuthNetworkClient), so a generation is read through
-	// network_client_device_id, the parent's device and then the child's source;
-	// network_client has no index on source_client_id. A parent without a device
-	// has no descendants this finds, and those stay to the child reap. The walk
-	// stops at session.ClientAncestryDepthLimit generations.
+	// the caller's clients is not returned again. A generation is read from each
+	// parent's device, only the clients minted since the parent
+	// (readActiveChildClientIdsInTx), and then locked by primary key. A parent
+	// without a device has no descendants this finds, and those stay to the
+	// child reap. The walk stops at session.ClientAncestryDepthLimit
+	// generations.
 	lockActiveDescendants := func() ([]server.Id, error) {
 		seenClientIds := map[server.Id]bool{}
 		for _, clientId := range lockedClientIds {
@@ -1503,41 +1503,22 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		descendantClientIds := []server.Id{}
 		parentClientIds := lockedClientIds
 		for depth := 0; depth < session.ClientAncestryDepthLimit && 0 < len(parentClientIds); depth += 1 {
-			generationClientIds := []server.Id{}
-			result, err := tx.Query(
-				ctx,
-				`
-					SELECT child.client_id
-					FROM network_client AS parent
-					INNER JOIN network_client AS child ON
-						child.device_id = parent.device_id AND
-						child.source_client_id = parent.client_id
-					WHERE
-						parent.client_id = ANY($1) AND
-						child.network_id = $2 AND
-						child.active = true
-					ORDER BY child.client_id
-					FOR UPDATE OF child
-				`,
-				parentClientIds,
-				networkId,
-			)
+			childClientIds, err := readActiveChildClientIdsInTx(ctx, tx, parentClientIds, networkId)
 			if err != nil {
 				return nil, err
 			}
-			for result.Next() {
-				var clientId server.Id
-				if err := result.Scan(&clientId); err != nil {
-					result.Close()
-					return nil, err
-				}
+			unseenClientIds := []server.Id{}
+			for _, clientId := range childClientIds {
 				if !seenClientIds[clientId] {
 					seenClientIds[clientId] = true
-					generationClientIds = append(generationClientIds, clientId)
+					unseenClientIds = append(unseenClientIds, clientId)
 				}
 			}
-			result.Close()
-			if err := result.Err(); err != nil {
+			if len(unseenClientIds) == 0 {
+				break
+			}
+			generationClientIds, err := lockActiveNetworkClientsInTx(ctx, tx, unseenClientIds, networkId)
+			if err != nil {
 				return nil, err
 			}
 			descendantClientIds = append(descendantClientIds, generationClientIds...)
@@ -1609,6 +1590,181 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 	// the clients' counterparties close their contracts (CLIENTCLOSE.md)
 	addClientsRemovedPostCommit(ctx, tx, deactivatedClientIds)
 	return lockedCount, nil
+}
+
+// A child is minted (AuthNetworkClient) by a request that names its parent's
+// committed id, and its client id is a server.NewId of that request, which
+// leads with the minting host's wall clock in milliseconds. So a child sorts at
+// or after its parent's create time and its parent's id, less how far the
+// child's host clock is behind the parent's. The descendant walk reads a
+// parent's device from there on, tolerating this much clock difference. A
+// child minted on a host further behind is not found, and stays active until
+// the child reap, as every child did before the walk.
+const descendantMintClockSkew = 10 * time.Minute
+
+// The millisecond prefix server.NewId writes into an id.
+func idMintMillis(id server.Id) int64 {
+	return int64(id[0])<<40 |
+		int64(id[1])<<32 |
+		int64(id[2])<<24 |
+		int64(id[3])<<16 |
+		int64(id[4])<<8 |
+		int64(id[5])
+}
+
+// The least client id a child of the parent can have: the earlier of the
+// parent's id time and create time, less descendantMintClockSkew, as an id
+// prefix with no entropy. The earlier of the two holds when either is not what
+// NewId and the mint wrote. The zero id bounds nothing.
+func descendantMinClientId(parentClientId server.Id, parentCreateTime time.Time) server.Id {
+	ms := min(idMintMillis(parentClientId), parentCreateTime.UnixMilli()) - descendantMintClockSkew.Milliseconds()
+	var minClientId server.Id
+	if ms <= 0 {
+		return minClientId
+	}
+	minClientId[0] = byte(ms >> 40)
+	minClientId[1] = byte(ms >> 32)
+	minClientId[2] = byte(ms >> 24)
+	minClientId[3] = byte(ms >> 16)
+	minClientId[4] = byte(ms >> 8)
+	minClientId[5] = byte(ms)
+	return minClientId
+}
+
+// The active children of the parents, unlocked. The caller holds the parents
+// FOR UPDATE, which conflicts with the FOR KEY SHARE a child mint holds on its
+// source until it commits, so every child of theirs committed before this
+// read's snapshot.
+//
+// A child copies its parent's device (AuthNetworkClient), and network_client
+// has no index on source_client_id, so each parent's children are read from
+// network_client_device_id: the parent's device, only from
+// descendantMinClientId on. Nearly every parent the walk sees is a retired
+// window with no children, and a hosted proxy's device holds every window it
+// minted, active or retired and kept for the reap; the whole device was read
+// on every window retirement (2026-11-06, edge-2 saturated). OFFSET 0 keeps
+// the other conditions out of the device read, so it can only be that range:
+// a hash join, or the network's active range, reads clients of every device
+// in the network.
+func readActiveChildClientIdsInTx(ctx context.Context, tx server.PgTx, parentClientIds []server.Id, networkId server.Id) ([]server.Id, error) {
+	boundParentClientIds := []server.Id{}
+	boundDeviceIds := []server.Id{}
+	minChildClientIds := []server.Id{}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT client_id, device_id, create_time
+			FROM network_client
+			WHERE
+				client_id = ANY($1) AND
+				device_id IS NOT NULL
+		`,
+		parentClientIds,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for result.Next() {
+		var parentClientId server.Id
+		var deviceId server.Id
+		var createTime time.Time
+		if err := result.Scan(&parentClientId, &deviceId, &createTime); err != nil {
+			result.Close()
+			return nil, err
+		}
+		boundParentClientIds = append(boundParentClientIds, parentClientId)
+		boundDeviceIds = append(boundDeviceIds, deviceId)
+		minChildClientIds = append(minChildClientIds, descendantMinClientId(parentClientId, createTime))
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	if len(boundParentClientIds) == 0 {
+		return nil, nil
+	}
+
+	childClientIds := []server.Id{}
+	result, err = tx.Query(
+		ctx,
+		`
+			SELECT device_client.client_id
+			FROM unnest($1::uuid[], $2::uuid[], $3::uuid[]) AS parent(client_id, device_id, min_child_client_id)
+			CROSS JOIN LATERAL (
+				SELECT
+					network_client.client_id,
+					network_client.source_client_id,
+					network_client.network_id,
+					network_client.active
+				FROM network_client
+				WHERE
+					network_client.device_id = parent.device_id AND
+					network_client.client_id >= parent.min_child_client_id
+				OFFSET 0
+			) AS device_client
+			WHERE
+				device_client.source_client_id = parent.client_id AND
+				device_client.network_id = $4 AND
+				device_client.active
+		`,
+		boundParentClientIds,
+		boundDeviceIds,
+		minChildClientIds,
+		networkId,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return nil, err
+		}
+		childClientIds = append(childClientIds, clientId)
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	return childClientIds, nil
+}
+
+// Locks the clients of the network that are still active, in client id order,
+// and returns them. A client deactivated since it was read is passed over.
+func lockActiveNetworkClientsInTx(ctx context.Context, tx server.PgTx, clientIds []server.Id, networkId server.Id) ([]server.Id, error) {
+	lockedClientIds := []server.Id{}
+	result, err := tx.Query(
+		ctx,
+		`
+			SELECT client_id
+			FROM network_client
+			WHERE
+				client_id = ANY($1) AND
+				network_id = $2 AND
+				active = true
+			ORDER BY client_id
+			FOR UPDATE
+		`,
+		clientIds,
+		networkId,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for result.Next() {
+		var clientId server.Id
+		if err := result.Scan(&clientId); err != nil {
+			result.Close()
+			return nil, err
+		}
+		lockedClientIds = append(lockedClientIds, clientId)
+	}
+	result.Close()
+	if err := result.Err(); err != nil {
+		return nil, err
+	}
+	return lockedClientIds, nil
 }
 
 // Deletes the provide keys of clients this transaction deactivates, and their
