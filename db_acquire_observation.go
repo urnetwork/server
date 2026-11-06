@@ -69,6 +69,8 @@ func observeDbAcquirePool(pool *pgxpool.Pool) DbAcquirePoolSnapshot {
 	}
 }
 
+// An optional Db/Tx option of its own, *DbAcquireObservation, like
+// *DbReadObservation and *DbTxObservation; DbTiming stays numeric-only.
 // Only the last attempt is retained, with an explicit return/admission state.
 // PoolReturn is present only on refusal. Acquire includes pgx validation and
 // construction admission; it is never labeled as resource-queue time.
@@ -85,14 +87,6 @@ type DbAcquireObservation struct {
 	PoolReturn     *DbAcquirePoolSnapshot `json:"pool_return,omitempty"`
 	openStarted    time.Time
 	acquireStarted time.Time
-}
-
-// Detailed snapshots are independent of ordinary phase timing opt-in.
-func (self *DbTiming) acquireObservation() *DbAcquireObservation {
-	if self == nil {
-		return nil
-	}
-	return self.Acquire
 }
 
 // Reuse keeps one attempt and cannot retain an earlier refusal after success.

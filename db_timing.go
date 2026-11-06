@@ -6,11 +6,11 @@ import "time"
 // numeric phases, never query text, arguments, identifiers, or error strings.
 // Repeated attempts accumulate rather than replacing a rolled-back attempt.
 // One sequential owner must finish using it before another goroutine reads it.
+// Request observations embed it under a guard that admits only arrays, structs
+// and numeric fields, so it holds nothing else: an acquisition snapshot is its
+// own option, *DbAcquireObservation.
 type DbTiming struct {
 	Phases [DbTimingPhaseCount]DbTimingSample
-	// Only callers that supply this fixed observation sample acquire budgets
-	// and pool state. Ordinary timing users retain their existing cost/schema.
-	Acquire *DbAcquireObservation `json:"acquire,omitempty"`
 }
 
 type DbTimingPhase uint8

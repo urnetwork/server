@@ -6146,7 +6146,7 @@ func (self PostgresStore) RegisterHost(ctx context.Context, settings *Settings, 
 					heartbeat_at = EXCLUDED.heartbeat_at
 			`, selfCheck.HostId, selfCheck.HardwareId, selfCheck.ImageDigest,
 				string(bytes), hex.EncodeToString(digest[:]), eligible, self.nowUtc()))
-		}, server.OptReadWrite(), &observation.phase, &observation.timing, observation.read)
+		}, server.OptReadWrite(), &observation.phase, &observation.timing, &observation.acquire, observation.read)
 	})
 }
 
@@ -6461,7 +6461,7 @@ func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, wor
 				updateJob()
 			}
 			observation.enterStep(competitionHeartbeatDatabaseCallbackReturn)
-		}, &observation.phase, &observation.timing, &observation.transaction)
+		}, &observation.phase, &observation.timing, &observation.acquire, &observation.transaction)
 	})
 }
 
