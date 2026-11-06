@@ -66,7 +66,10 @@ func TestSourceTestRepositoryCommitsWithoutAmbientIdentity(t *testing.T) {
 	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
 	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
 	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
-	t.Setenv("GIT_CONFIG_COUNT", "0")
+	// Refuse Git's guessed actor even on hosts with a usable default hostname.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.useConfigOnly")
+	t.Setenv("GIT_CONFIG_VALUE_0", "true")
 	t.Setenv("GIT_CONFIG_PARAMETERS", "")
 	for _, name := range []string{"GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"} {
 		t.Setenv(name, "")
@@ -79,6 +82,11 @@ func TestSourceTestRepositoryCommitsWithoutAmbientIdentity(t *testing.T) {
 	if !errors.As(err, &exit) || exit.ExitCode() != 1 || len(output) != 0 {
 		t.Fatal("cold fixture retained a configured global identity", err)
 	}
+	// Each real affected root must supply its own global fixture. A configured
+	// test runner must not conceal a missing setup call in any of these roots.
+	t.Run("host_unavailability", TestSourceBuildQualifierReplaysTestsAfterHostUnavailability)
+	t.Run("legacy_correctness", TestSourceMinimumWorkCorrectnessPreservesLegacySuiteIdentity)
+	t.Run("contained_correctness", TestSourceCorrectnessSuiteUsesContainedImageAndRetainsExactLogs)
 	sourceTestPrivateGlobalIdentity(t, "Synthetic Source Fixture", "source@fixture.example")
 	root := t.TempDir()
 	commit := sourceTestRepository(t, root, "synthetic")
