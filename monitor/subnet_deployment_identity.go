@@ -32,8 +32,11 @@ type SubnetDeploymentIdentity struct {
 	Coordinator     string
 	SettlementVault string
 	PolicyHash      string
-	// VaultV2 is settlement v2's vault, "" while the deployment declares none.
-	VaultV2 string
+	// SettlementV2 is settlement v2's coordinator, the STSettlement2 proxy, and
+	// VaultV2 its immutable vault. sn.yml declares both or neither; both are ""
+	// while the deployment declares no settlement v2.
+	SettlementV2 string
+	VaultV2      string
 }
 
 // A fixed reason for a deployment that cannot pin the readers.
@@ -50,7 +53,16 @@ func (self SubnetDeploymentIdentity) validate() string {
 	if self.ChainId == 0 || self.Netuid == 0 || self.DeploymentId == "" || !subnetCorrectnessHex(self.GenesisHash, 32) || !subnetArtifactAddress(self.Coordinator) || !subnetArtifactAddress(self.SettlementVault) || !subnetCorrectnessHex(self.PolicyHash, 32) {
 		return "deployment-identity-invalid"
 	}
+	// A half-declared pair would silently leave settlement v2 unobserved.
+	if (self.SettlementV2 == "") != (self.VaultV2 == "") || (self.settlementV2Declared() && (!subnetArtifactAddress(self.SettlementV2) || !subnetArtifactAddress(self.VaultV2) || self.SettlementV2 == self.VaultV2)) {
+		return "deployment-identity-invalid"
+	}
 	return ""
+}
+
+// Whether the deployment declares settlement v2; callers validate first.
+func (self SubnetDeploymentIdentity) settlementV2Declared() bool {
+	return self.SettlementV2 != "" && self.VaultV2 != ""
 }
 
 // The coordinator and vault as typed addresses; callers validate first.
@@ -103,6 +115,7 @@ func subnetDeploymentIdentityFromBytes(data []byte) SubnetDeploymentIdentity {
 		Coordinator:     strings.ToLower(mainnet.Coordinator),
 		SettlementVault: strings.ToLower(mainnet.SettlementVault),
 		PolicyHash:      strings.ToLower(mainnet.PolicyHash),
+		SettlementV2:    strings.ToLower(mainnet.SettlementV2Address),
 		VaultV2:         strings.ToLower(mainnet.VaultV2Address),
 	}
 }

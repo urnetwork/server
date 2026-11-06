@@ -17,6 +17,23 @@ import (
 // the real model path used that same session and explicitly made it writable.
 func withReadOnlyModelDbSession(t testing.TB, ctx context.Context, do func()) {
 	t.Helper()
+	withReadOnlyModelSession(t, ctx, "off", do)
+}
+
+// As withReadOnlyModelDbSession, for a model write in its own transaction
+// (server.Tx). Its BEGIN declares READ WRITE, which overrides the session's
+// read-only default for that transaction only, so the write succeeds and the
+// session keeps the default the negative control set. The contract-time stamp
+// writes this way since adf5d5e04 bounded its lock wait.
+func withReadOnlyModelTxSession(t testing.TB, ctx context.Context, do func()) {
+	t.Helper()
+	withReadOnlyModelSession(t, ctx, "on", do)
+}
+
+// The model path ran on the pinned read-only session and left its
+// default_transaction_read_only at wantReadOnly.
+func withReadOnlyModelSession(t testing.TB, ctx context.Context, wantReadOnly string, do func()) {
+	t.Helper()
 	popConfig := server.Config.PushSimpleResource(
 		server.DefaultPgConfigResourceName,
 		[]byte("min_connections: 0\nmax_connections: 1\n"),
@@ -47,8 +64,12 @@ func withReadOnlyModelDbSession(t testing.TB, ctx context.Context, do func()) {
 		if observedPid != backendPid {
 			t.Fatal("model write used a replaced test session; read-only regression is not proven")
 		}
-		if readOnly != "off" {
+		switch {
+		case readOnly == wantReadOnly:
+		case wantReadOnly == "off":
 			t.Fatal("model write did not explicitly make the read-only test session writable")
+		default:
+			t.Fatal("model transaction changed the read-only test session's default")
 		}
 	}, server.OptNoRetry())
 }
@@ -77,7 +98,7 @@ func TestStampTopLevelClientContractTimeReadOnlySession(t *testing.T) {
 		for _, payerId := range []server.Id{parentId, childId} {
 			testSetNetworkClientContractTime(ctx, parentId, staleTime)
 			Testing_ResetContractTimeStampGate()
-			withReadOnlyModelDbSession(t, ctx, func() {
+			withReadOnlyModelTxSession(t, ctx, func() {
 				StampTopLevelClientContractTime(ctx, payerId)
 				stampedTime := testGetNetworkClientContractTime(ctx, parentId)
 				if stampedTime == nil || !staleTime.Add(time.Hour).Before(*stampedTime) {
