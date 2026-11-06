@@ -12,7 +12,8 @@
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "current_observation": {
-    "observed_at": "2026-11-06T21:40:55.115990152Z",
+    "observed_at": "2026-11-06T22:31:26Z",
+    "all_failed_recovery_approval": {"record": "FAILED-RECOVERY-APPROVAL-2026-11-06.json", "approved_count": 7, "grants_issued": false, "execution_plan": "Six existing incident-class cases on qualified E7/CBC worker first; the operator-stopped case follows after its distinct recovery path is tested and deployed. Do not change the image pin or interrupt the active evaluation."},
     "worker_verified_at": "2026-11-06T21:24:29.816210097Z",
     "resume_receipt": "RESILIENCY-RESUME-2026-11-06.json",
     "historical_fields_warning": "Dated October observations and receipts below are retained history, not current process, queue, deployment or approval authority. This current_observation supersedes them for operational status.",
