@@ -385,11 +385,19 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 	if err != nil {
 		return "lease_unavailable", err
 	}
-	operationCtx, cancel := context.WithCancel(ctx)
 	retrySettings := defaultCompetitionSupervisorRenewalSettings()
 	if self.leaseRetrySettings != nil {
 		retrySettings = *self.leaseRetrySettings
 	}
+	authorityNow := self.Now
+	if self.leaseRetrySettings != nil && self.leaseRetrySettings.LockRetry.Now != nil {
+		authorityNow = self.leaseRetrySettings.LockRetry.Now
+	}
+	authority, err := newCompetitionConfirmedAuthority(ctx, lease.LeaseExpiresAt, authorityNow)
+	if err != nil {
+		return "lease_lost", err
+	}
+	operationCtx := authority.ctx
 	renewed := make(chan error, 1)
 	go func() {
 		current := *lease
@@ -410,7 +418,18 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 					return err
 				})
 				if renewErr != nil {
-					cancel()
+					authority.cancel(renewErr)
+					renewed <- renewErr
+					return
+				}
+				if next == nil || next.OwnerId != current.OwnerId || next.FencingToken != current.FencingToken || next.Environment != current.Environment ||
+					next.CompetitionId != current.CompetitionId || next.SeasonId != current.SeasonId {
+					renewErr = ErrLeaseLost
+				} else {
+					renewErr = authority.confirm(next.LeaseExpiresAt)
+				}
+				if renewErr != nil {
+					authority.cancel(renewErr)
 					renewed <- renewErr
 					return
 				}
@@ -422,9 +441,13 @@ func (self *CompetitionSupervisor) Reconcile(ctx context.Context) (state string,
 		}
 	}()
 	defer func() {
-		cancel()
-		if renewErr := <-renewed; renewErr != nil {
+		finishedWhileLive := operationCtx.Err() == nil
+		authority.close()
+		if renewErr := <-renewed; renewErr != nil && !(finishedWhileLive && errors.Is(renewErr, context.Canceled)) {
 			state, err = "lease_lost", renewErr
+		}
+		if context.Cause(operationCtx) == ErrLeaseLost {
+			state, err = "lease_lost", ErrLeaseLost
 		}
 	}()
 	snapshot, err := self.Driver.Snapshot(operationCtx, *lease)

@@ -12,12 +12,28 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Supplies a synthetic handoff key until the returned pop, as the server and
+// proxy handoff tests do: a test binary reads only the checked-in fixture vault
+// (05bab076b), which holds no wireguard.yml, and no test reads a deployment
+// secret. The pop restores the prior cached key before removing the resource.
+func pushModelTestWgHandoffKey() func() {
+	pop := server.Vault.PushSimpleResource("wireguard.yml", []byte(
+		"handoff_encryption_key: synthetic-model-handoff-fixture-key\n",
+	))
+	restore := server.Testing_ReloadWgHandoffKey()
+	return func() {
+		restore()
+		pop()
+	}
+}
+
 // The wg handoff store carries the drained instance's peer endpoints to the
 // replacement instance, consumed exactly once (PROXYDRAIN1.md §3.4).
 func TestProxyWgHandoff(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		defer pushModelTestWgHandoffKey()()
 
 		proxyHost := fmt.Sprintf("handofftest%d", time.Now().UnixNano())
 		block := "g1"
@@ -112,6 +128,7 @@ func TestProxyWgHandoff(t *testing.T) {
 func TestProxyWgHandoffSealedAtRest(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		defer pushModelTestWgHandoffKey()()
 
 		host := "sealtest-host"
 		block := "sealtest-block"
