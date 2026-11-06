@@ -40,8 +40,9 @@ func ForceIPv4ConnectSettings(settings *connect.ConnectSettings) {
 	}
 }
 
-// CapServerTunIPv4 keeps an inner gVisor TUN below the IPv6-enabling MTU.
-// A caller's smaller MTU remains intact.
+// Keeps a server-owned inner tun ipv4-only independently of its packet size.
+// The standard inner mtu caps larger requests; smaller requests remain intact.
 func CapServerTunIPv4(settings *connect.TunSettings) {
 	settings.Mtu = min(settings.Mtu, connect.DefaultMtu)
+	settings.DisableIpv6 = true
 }

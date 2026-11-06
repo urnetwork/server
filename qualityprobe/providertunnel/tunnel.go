@@ -299,10 +299,9 @@ var ErrPlainHttpRefused = errors.New("providertunnel: plain http refused; only h
 // that test rather than silently reintroducing the leak.
 var createTun = func(ctx context.Context, resolver *connect.DnsResolverSettings) (*connect.Tun, error) {
 	settings := connect.DefaultTunSettings()
-	// Main's inner data-center routing is IPv4-only. DefaultTunnelMtu is
-	// 1280 and would enable an IPv6 address and ::/0 route in this private
-	// gVisor stack; the hosted server/proxy device uses DefaultMtu for the
-	// same boundary. Keep the public/control-plane address family separate.
+	// Main's inner data-center routing is ipv4-only independently of the
+	// shared 1280-byte packet/link mtu. Keep this owner policy separate
+	// from the public/control-plane address family.
 	server.CapServerTunIPv4(settings)
 	return connect.CreateTunWithResolver(ctx, settings, resolver)
 }

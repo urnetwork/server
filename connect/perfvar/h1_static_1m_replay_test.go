@@ -23,6 +23,8 @@ func h1Static1MLoadedDownloadRun1Scenario(t testing.TB) perfvarScenario {
 		t.Fatalf("H1 static 1m scenario count=%d err=%v", len(scenarios), err)
 	}
 	scenario := scenarios[0]
+	// This is an explicit historical1100 replay with frozen identity, not an ordinary product default.
+	scenario.ApplicationMtu = 1100
 	hash, err := scenario.hash()
 	if err != nil || hash != "7261c32e05be5f5361bc72ec03be471f9c0f67023d3c7bbb844b9e5943a6a08d" {
 		t.Fatalf("H1 static 1m scenario changed: %s %v", hash, err)

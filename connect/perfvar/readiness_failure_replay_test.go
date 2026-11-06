@@ -39,6 +39,8 @@ func readinessFailureRun1Scenario(t testing.TB) perfvarScenario {
 		t.Fatalf("scenario count=%d err=%v", len(scenarios), err)
 	}
 	scenario := scenarios[0]
+	// This is an explicit historical1100 replay with frozen identity, not an ordinary product default.
+	scenario.ApplicationMtu = 1100
 	hash, err := scenario.hash()
 	if err != nil || hash != "43df3a7fb026e4a979b5d544baa93ee178942893bde03c1c3207115d56405048" {
 		t.Fatalf("readiness scenario changed: %s %v", hash, err)

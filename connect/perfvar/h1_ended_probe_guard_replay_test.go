@@ -35,6 +35,8 @@ func h1EndedProbeGuardScenario(t testing.TB, profile string) perfvarScenario {
 		t.Fatalf("ended-probe scenario count=%d err=%v", len(scenarios), err)
 	}
 	scenario := scenarios[0]
+	// This is an explicit historical1100 replay with frozen identity, not an ordinary product default.
+	scenario.ApplicationMtu = 1100
 	hash, err := scenario.hash()
 	if err != nil {
 		t.Fatal(err)

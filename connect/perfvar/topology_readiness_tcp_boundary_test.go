@@ -104,7 +104,7 @@ func newReadinessTCPBridge(t *testing.T, ctx context.Context) *readinessTCPBridg
 	for _, target := range []**clientconnect.Tun{&b.app, &b.origin} {
 		resources := mobileTunResourceProfile()
 		settings := clientconnect.DefaultTunSettingsWithBufferSize(resources.ChannelSize)
-		settings.Mtu = 1100
+		settings.Mtu = 1280
 		// This single-flow byte-range fixture excludes the already separately
 		// tested dial race, whose extra four-tuple would need its own ledger.
 		settings.DialRace = 1

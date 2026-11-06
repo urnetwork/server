@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"reflect"
+	"syscall"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -38,15 +40,46 @@ func TestForceIPv4ConnectSettingsPreservesInstanceSeams(t *testing.T) {
 	}
 }
 
+// The server keeps its standard mtu and independently refuses ipv6. Applying
+// the owner policy twice changes neither the chosen mtu nor other settings.
 func TestCapServerTunIPv4(t *testing.T) {
-	settings := connect.DefaultTunSettings()
-	CapServerTunIPv4(settings)
-	if settings.Mtu != connect.DefaultMtu {
-		t.Fatalf("default inner MTU = %d, want %d", settings.Mtu, connect.DefaultMtu)
+	if got := connect.DefaultTunSettings().Mtu; got != 1280 {
+		t.Fatalf("default inner mtu = %d, want 1280", got)
 	}
-	settings.Mtu = 900
-	CapServerTunIPv4(settings)
-	if settings.Mtu != 900 {
-		t.Fatalf("lower custom MTU = %d, want 900", settings.Mtu)
+	for _, mtu := range []int{1280, 900, 1500} {
+		settings := connect.DefaultTunSettings()
+		settings.Mtu = mtu
+		settings.Log = connect.NewNoopLogger()
+		want := *settings
+		want.Mtu = min(mtu, 1280)
+		want.DisableIpv6 = true
+		for range 2 {
+			CapServerTunIPv4(settings)
+		}
+		tun, err := connect.CreateTun(t.Context(), settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = tun.Close() })
+		if tun.Ipv6Enabled() {
+			t.Fatalf("SERVER_TUN_IPV6_ENABLED_AT_MTU1280: requested mtu=%d", mtu)
+		}
+		if addresses := tun.LocalAddresses(); len(addresses) != 1 || !addresses[0].Is4() {
+			t.Fatalf("requested mtu %d: server addresses = %v, want one ipv4 address", mtu, addresses)
+		}
+		for _, network := range []string{"tcp6", "udp6"} {
+			if conn, err := tun.DialContext(t.Context(), network, "[2001:db8::25]:443"); conn != nil || err != syscall.EAFNOSUPPORT {
+				if conn != nil {
+					_ = conn.Close()
+				}
+				t.Fatalf("requested mtu %d: server %s dial error = %v, want %v", mtu, network, err, syscall.EAFNOSUPPORT)
+			}
+		}
+		if err := tun.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(*settings, want) {
+			t.Fatalf("requested mtu %d: server policy changed fields beyond mtu and family", mtu)
+		}
 	}
 }
