@@ -22,14 +22,27 @@ func TestContractHoleReadinessCapsMeasuredLeaseAndAbsoluteDeadline(t *testing.T)
 			source, destination, contract := server.NewId(), server.NewId(), server.NewId()
 			start := server.NowUtc()
 			bound := start.Add(ContractHoleTtl - 5*time.Millisecond).Truncate(time.Millisecond)
+			// The latest local time the witness lease may report.
+			leaseBound := bound
 			if finite {
 				bound = start.Add(3 * ContractHoleTtl / 4).Truncate(time.Millisecond)
+				leaseBound = bound
 				server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create", bound))
 			} else {
 				server.Raise(applyContractHoleEvent(ctx, contract, source, destination, "create"))
+				// PEXPIREAT would place bound on the Redis clock, which can trail
+				// this host's by milliseconds, while the lease adds Redis's
+				// remaining TTL to this host's clock. A relative expiry keeps
+				// the lease on this host's clock: each key expires no later than
+				// bound plus its PEXPIRE round trip, and PTTL rounds by under a
+				// millisecond.
 				server.Redis(ctx, func(client server.RedisClient) {
 					for _, key := range contractHoleKeys(source, destination)[:2] {
-						server.Raise(client.PExpireAt(ctx, key, bound).Err())
+						sent := time.Now()
+						server.Raise(client.PExpire(ctx, key, bound.Sub(sent)).Err())
+						if latest := bound.Add(time.Since(sent) + time.Millisecond); latest.After(leaseBound) {
+							leaseBound = latest
+						}
 					}
 				})
 			}
@@ -37,13 +50,13 @@ func TestContractHoleReadinessCapsMeasuredLeaseAndAbsoluteDeadline(t *testing.T)
 				PairVisits: 1, SuccessfulPairs: 1, PositivePairs: 1, Pages: 1,
 				EarliestPositive: &ContractHoleWitness{SourceClientId: source, DestinationClientId: destination, SourceStarted: start}}
 			ready, err := PublishContractHoleReadiness(ctx, receipt)
-			if err != nil || !ready || receipt.CoveredUntil.After(bound) || receipt.MinimumRemainingTtlMillis <= contractHoleReadinessMargin.Milliseconds() {
-				t.Fatalf("measured finite=%t readiness=%t receipt=%+v error=%v", finite, ready, receipt, err)
+			if err != nil || !ready || receipt.CoveredUntil.After(leaseBound) || receipt.MinimumRemainingTtlMillis <= contractHoleReadinessMargin.Milliseconds() {
+				t.Fatalf("measured finite=%t readiness=%t receipt=%+v lease_bound=%s error=%v", finite, ready, receipt, leaseBound, err)
 			}
 			server.Redis(ctx, func(client server.RedisClient) {
 				expiry, err := client.Eval(ctx, `return redis.call('PEXPIRETIME', KEYS[1])`, []string{contractHoleReadinessKey}).Int64()
-				if err != nil || expiry > bound.UnixMilli() || expiry != receipt.CoveredUntil.UnixMilli() {
-					t.Fatalf("receipt exceeded observed lease: expiry=%d receipt=%s bound=%s error=%v", expiry, receipt.CoveredUntil, bound, err)
+				if err != nil || expiry > leaseBound.UnixMilli() || expiry != receipt.CoveredUntil.UnixMilli() {
+					t.Fatalf("receipt exceeded observed lease: expiry=%d receipt=%s bound=%s error=%v", expiry, receipt.CoveredUntil, leaseBound, err)
 				}
 			})
 			observed, err := ReadContractHoleReadiness(ctx)
