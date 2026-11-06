@@ -933,6 +933,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// unique-exit hosted proxies: eleven additive migrations, each versioned by
 	// its position
 	proxyUniqueExitMigrationContracts,
+	// Independent prospective stop evidence does not retire prior recovery custody.
+	[]snMainnetMigrationContract{competitionOperatorInterruptionMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
