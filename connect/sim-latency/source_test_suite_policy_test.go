@@ -254,6 +254,7 @@ func TestSourceMinimumWorkCorrectnessCensusMatchesApprovedPatch(t *testing.T) {
 // The constant is the historical protocol's exact source-defined digest, not
 // a new release identity. Legacy requests and later policy inheritance diverge.
 func TestSourceMinimumWorkCorrectnessPreservesLegacySuiteIdentity(t *testing.T) {
+	sourceTestPrivateGlobalIdentity(t, "Synthetic Source Fixture", "source@fixture.example")
 	if sourceCorrectnessSuiteDigestForMinimumWork(false) != "db073c8785827c77de1f9be4c39d864ed0959e47ed10bc291c955f0fe80f82e5" ||
 		sourceCorrectnessSuiteScriptForMinimumWork(false) != sourceCorrectnessSuiteScript() ||
 		!reflect.DeepEqual(sourceCorrectnessRequiredTestsForMinimumWork(false), sourceCorrectnessRequiredTests()) {
