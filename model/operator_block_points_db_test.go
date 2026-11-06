@@ -169,10 +169,9 @@ func operatorBlockPointsUsdc(plan *PaymentPlan) map[server.Id][4]int64 {
 func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		now := server.NowUtc()
 		// a completed block whose reliability evidence is retained, after a
-		// boundary inside the block before it
-		block := int64(SubnetBlockNumber(now)) - 2
+		// boundary inside the block before it (operatorBlockPointsTestBlock)
+		block, now := operatorBlockPointsTestBlock(server.NowUtc())
 		blockStart := operatorBlockStart(block)
 		blockEnd := blockStart.Add(SubnetBlockDuration)
 		cutoff := blockStart.Add(-2 * 24 * time.Hour)

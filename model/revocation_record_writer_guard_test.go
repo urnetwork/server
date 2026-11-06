@@ -43,7 +43,7 @@ var revokingStatementOwners = map[string]struct {
 	// horizon, so the deactivation already tombstoned it
 	// (TestHostedProxyReapDeleteEndsNoLiveCredential)
 	"model/network_client_hosted_proxy_reap.go:removeHostedProxyClientsSql": {reason: "deletes only rows already inactive (NOT locked.active), deactivated before the reap horizon"},
-	"model/prober_shard_model.go:ReapProberShard":                           {hooks: []string{"RetireNetworkRecords"}},
+	"model/prober_shard_model.go:reapProberShard":                           {hooks: []string{"RetireNetworkRecords"}},
 	"model/account_model.go:RemoveNetworkWithStoreSnapshot":                 {hooks: []string{"RetireNetworkRecords"}},
 	"model/lag_guest_model.go:removeExpiredLagGuest":                        {hooks: []string{"RetireNetworkRecords"}},
 	"model/auth_model.go:AuthPasswordSet":                                   {hooks: []string{"RotateCredentialRecordsInTx"}},
