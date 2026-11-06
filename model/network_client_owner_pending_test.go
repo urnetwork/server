@@ -568,3 +568,30 @@ func TestRedemptionRetryEndsWithTheKey(t *testing.T) {
 		}
 	})
 }
+
+// A removed key refuses the credentials that name it, and only those: a client
+// token derived from the login stops, and the same client's token minted by the
+// root credential keeps working, however often the first was refused. The refusal
+// cache keys on every claim the state query binds.
+func TestRemovingAnApiKeyLeavesTheSameClientsOtherTokens(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		self := newClientOwnerFixture(t)
+		apiKeyId := self.createApiKey(t)
+		_, loginSession := self.login(t, self.authCode(t, self.apiKeySession(t, apiKeyId)))
+
+		derived := self.mint(t, loginSession, &AuthNetworkClientArgs{Description: "device", DeviceSpec: "test"})
+		derivedByJwt, err := session.ParseByJwt(self.ctx, *derived.ByClientJwt)
+		connect.AssertEqual(t, err, nil)
+
+		// a re-auth by the root credential is the same client without the claim
+		reissued := self.mint(t, self.root, &AuthNetworkClientArgs{ClientId: derived.ClientId, Description: "device", DeviceSpec: "test"})
+		reissuedByJwt, err := session.ParseByJwt(self.ctx, *reissued.ByClientJwt)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, reissuedByJwt.ApiKeyId == nil, true)
+
+		connect.AssertEqual(t, DeleteApiKey(&apiKeyId, self.root), nil)
+		self.requireTokenLive(t, derivedByJwt, false)
+		self.requireTokenLive(t, derivedByJwt, false)
+		self.requireTokenLive(t, reissuedByJwt, true)
+	})
+}
