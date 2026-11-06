@@ -648,14 +648,7 @@ func runSourceSupervisor(opts docopt.Opts) {
 	ctx, cancel := signalContext()
 	defer cancel()
 	report := func(state string, err error) {
-		result := struct {
-			State string `json:"state"`
-			Error string `json:"error,omitempty"`
-		}{State: state}
-		if err != nil {
-			result.Error = err.Error()
-		}
-		encoded, _ := json.Marshal(result)
+		encoded, _ := controller.MarshalCompetitionSupervisorReport(state, err)
 		fmt.Printf("%s\n", encoded)
 	}
 	if optBool(opts, "--once") {

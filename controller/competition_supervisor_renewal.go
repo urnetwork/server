@@ -17,6 +17,9 @@ type competitionSupervisorRenewObservation struct {
 	phase           server.DbPhaseObservation
 	timing          server.DbTiming
 	read            *server.DbReadObservation
+	transaction     server.DbTxObservation
+	step            competitionSupervisorRenewalStep
+	callbacks       uint64
 	callbackEntered bool
 }
 
@@ -33,6 +36,7 @@ type competitionSupervisorRenewError struct {
 	acquire         server.DbAcquireObservation
 	read            server.DbReadObservationSnapshot
 	callbackEntered bool
+	database        *CompetitionSupervisorRenewalDatabaseFailure
 }
 
 // Retains the original diagnostic bytes without serializing observations.

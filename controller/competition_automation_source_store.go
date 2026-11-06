@@ -76,12 +76,15 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 		return nil, ErrLeaseLost
 	}
 	observation := newCompetitionSupervisorRenewObservation()
-	err = observation.capture(func() {
+	err = observation.captureContext(ctx, lease.LeaseExpiresAt, func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			observation.callbackEntered = true
+			observation.callbacks++
 			result = nil
+			observation.step = competitionSupervisorRenewalScopeLock
 			automationScopeLockInTx(ctx, tx, settings)
 			var previousExpiry time.Time
+			observation.step = competitionSupervisorRenewalLeaseRowLock
 			if self.beforeLeaseRowLockForTest != nil {
 				self.beforeLeaseRowLockForTest("supervisor")
 			}
@@ -92,12 +95,14 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 				panic(ErrLeaseLost)
 			}
 			server.Raise(loadError)
+			observation.step = competitionSupervisorRenewalAuthority
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, lease))
 			now := self.nowUtc()
 			if !now.Before(previousExpiry) {
 				panic(ErrLeaseLost)
 			}
 			lease.LeaseExpiresAt = now.Add(ttl)
+			observation.step = competitionSupervisorRenewalLeaseUpdate
 			updated, updateError := tx.Exec(ctx, `UPDATE competition_supervisor_lease SET lease_expires_at=$4,heartbeat_at=$5
 			 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$6 AND fencing_token=$7 AND $5<lease_expires_at`,
 				lease.Environment, lease.CompetitionId, lease.SeasonId, lease.LeaseExpiresAt, now, lease.OwnerId, lease.FencingToken)
@@ -107,7 +112,8 @@ func (self PostgresStore) RenewAutomationLease(ctx context.Context, settings *Se
 			}
 			copyLease := lease
 			result = &copyLease
-		}, &observation.phase, &observation.timing, observation.read)
+			observation.step = competitionSupervisorRenewalCallbackReturn
+		}, &observation.phase, &observation.timing, observation.read, &observation.transaction)
 	})
 	return result, err
 }
