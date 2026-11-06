@@ -25,9 +25,9 @@ import (
 
 // Settings of the client admin check.
 type ClientAdminSettings struct {
-	// The clients whose answer a process keeps. Each answer is immutable, so a
-	// full map only costs one read per client after it clears; 32,768 holds an
-	// hour of a process's admin calls with room to spare.
+	// The clients whose answer a process keeps, 32,768 to match clientAuthTimes'
+	// bound. Each answer is immutable, so a full map clears and costs one more
+	// read per client, never a wrong answer.
 	CachedClientMaxCount int64
 }
 
