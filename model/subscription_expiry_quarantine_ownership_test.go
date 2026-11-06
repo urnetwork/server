@@ -105,9 +105,24 @@ func TestExpiryPublicationBusyRetainsFinancialCustody(t *testing.T) {
 		if err != nil || applied != 1 || released != 1 || busy {
 			t.Fatal("resumed native expiry did not debit exactly once", applied, released, busy, err)
 		}
-		drain, err := legacyFinancialDrainOwners(t, ctx, 1, nil)
-		if err != nil || drain.Finished != 1 || drain.Remaining != 0 {
-			t.Fatal("resumed native expiry lost its actual provider completion", drain, err)
+		// The durable provider owners: a provider total and no net escrow mirror.
+		pendingOwners := func() (pending int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=ANY($1)`,
+					[]string{task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName(),
+						task.NewTaskTarget(ApplyLegacyNetEscrowMirror).TargetFunctionName()}).Scan(&pending))
+			})
+			return
+		}
+		if pending := pendingOwners(); pending != 1 {
+			t.Fatal("resumed native expiry did not queue exactly one provider completion", pending)
+		}
+		// Since f1b0b6417 a provider total is queued legacyProviderTotalsDeferral
+		// ahead of the per-task reader, for the drain to take once it is older
+		// than the drain's lag. One drain pass at that time completes it.
+		_, drained := providerTotalsDrainTestPass(t, ctx, server.NowUtc().Add(2*legacyProviderTotalsDrainLag))
+		if pending := pendingOwners(); drained != (legacyProviderTotalsDrainOutcome{credited: 1}) || pending != 0 {
+			t.Fatal("resumed native expiry lost its actual provider completion", drained, pending)
 		}
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 11)
 		credit, pending, appliedRows := asyncDebitTestState(t, ctx, f.balanceId)

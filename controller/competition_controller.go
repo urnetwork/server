@@ -4374,6 +4374,8 @@ type PostgresStore struct {
 	dequeueCompetitionSignal func(context.Context, *Settings) (*server.Id, error)
 	// Nil preserves real row locking; tests admit an exact held-lock boundary.
 	beforeLeaseRowLockForTest func(string)
+	// Nil preserves real authority reads; tests force a completed owned deadline.
+	beforeAutomationLeaseAuthorityForTest func()
 	// Nil preserves normal baseline work; tests advance time at its completion.
 	afterCompletionBaselineForTest func()
 	// bounds the admission upload in Enqueue; zero selects defaultSubmissionArchiveTimeout

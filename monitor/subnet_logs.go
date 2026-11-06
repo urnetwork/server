@@ -71,6 +71,17 @@ func (self *subnetLogFrontier) originBlock() uint64 {
 	return self.origin
 }
 
+// An endpoint that pruned history answers eth_getLogs over the blocks it
+// dropped with an empty list, which must not read as no events. Pruning drops
+// the oldest blocks first, so a served first block vouches for the plan.
+func subnetLogPlanServed(ctx context.Context, reader subnetEvmReader, plan subnetLogPlan) error {
+	if plan.empty {
+		return nil
+	}
+	_, err := reader.blockAt(ctx, plan.from)
+	return err
+}
+
 // Records that every block through to was read.
 func (self *subnetLogFrontier) advance(to uint64) {
 	self.stateLock.Lock()
@@ -82,6 +93,7 @@ func (self *subnetLogFrontier) advance(to uint64) {
 
 // Reads one address's logs over the plan in configured chunks. A chunk at the
 // reply limit is halved; a single block over the limit stays unavailable.
+// Callers first check subnetLogPlanServed.
 func subnetFetchLogs(ctx context.Context, reader subnetEvmReader, address common.Address, topics [][]common.Hash, plan subnetLogPlan, limits subnetLimits) ([]ethtypes.Log, error) {
 	if plan.empty {
 		return nil, nil

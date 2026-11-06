@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
@@ -153,9 +154,22 @@ Options:
 			err = worker.Run(quit.Ctx)
 		}
 	}
-	if err != nil && !errors.Is(err, context.Canceled) {
-		panic(fmt.Errorf("competition worker: %w", err))
+	finishCompetitionWorker(err, supervised, os.Stderr)
+}
+
+// Supervised failure drains the joined worker before emitting only finite
+// diagnostics. Panic retains the existing exit code and deferred owner cleanup.
+func finishCompetitionWorker(err error, supervised bool, diagnostics io.Writer) {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
 	}
+	if supervised {
+		if content, reportErr := controller.MarshalCompetitionWorkerFailureReport(err); reportErr == nil {
+			fmt.Fprintln(diagnostics, string(content))
+		}
+		panic("competition worker failed; bounded diagnostics emitted")
+	}
+	panic(fmt.Errorf("competition worker: %w", err))
 }
 
 // A probe owns its cancellation through synchronous cleanup. Exiting directly
