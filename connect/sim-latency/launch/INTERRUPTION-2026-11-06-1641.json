@@ -31,7 +31,35 @@
     "idle_boundary_passed": false
   },
   "next_action": "Keep the claim-only hold active and allow the already-claimed retry to finish within its unchanged deadline. Deploy and preflight the qualified 29e worker and ddb diagnostic supervisor only after verifying idle execution and fencing. Resume claims after successful verification.",
-  "staged_fixes_activated": false,
+  "staged_fixes_activated": true,
+  "activation_receipt": "RENEWAL-MAINTENANCE-2026-11-06.json",
+  "later_interruption": {
+    "attempt": 3,
+    "completed_candidate_runs": 2,
+    "renewal_database_phase": 7,
+    "renewal_step": 3,
+    "step_name": "Authority",
+    "connection_acquire_ns": 6332992784,
+    "commit_attempts": 0,
+    "rollback_acknowledged": 1,
+    "release_returned": 1,
+    "release_disposition": 1,
+    "physical_cleanup_complete": false,
+    "receipt": "/home/by/urnetwork/temp/competition-maintenance-20261106.O6ZJ2z0O/renewal-1809.jsonl",
+    "receipt_sha256": "8d1ecf8eb3970717e7281e7caed2e8175f24da89b3757865b1fbe60638412349"
+  },
+  "terminal_database_observation": {
+    "observed_at": "2026-11-06T18:38:20.248788554Z",
+    "state": "failed",
+    "completed_at": "2026-11-06T18:37:15.475399Z",
+    "attempt_count": 4,
+    "last_completed_candidate_runs": 2,
+    "failure_code_included_by_reader": false,
+    "receipt": "/home/by/urnetwork/temp/competition-monitor-current.K57GLiUs/audit.private.json",
+    "receipt_sha256": "fadc779c896b37e0905e4524e5bcbf38533fcedc4a2199f77a68266aec45485c",
+    "next_fifo_job": "01a1aad5-5827-a79a-ed06-52df34194821",
+    "next_fifo_started_at": "2026-11-06T18:37:22.081579Z"
+  },
   "operator_clock_reset": false,
   "operator_retry_issued": false
 }
