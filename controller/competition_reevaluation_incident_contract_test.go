@@ -49,9 +49,11 @@ func TestCompetitionReevaluationIncidentPublicContractPreservesTypedFailure(t *t
 		{name: "legacy-budget", kind: "infrastructure", code: "evaluation_time_budget_exhausted", valid: true},
 		{name: "heartbeat", class: model.CompetitionJobReevaluationHeartbeatBudget, kind: "infrastructure", code: "evaluation_time_budget_exhausted", valid: true},
 		{name: "backing-service", class: model.CompetitionJobReevaluationBackingService, kind: "submission", code: "run_unstable", valid: true},
+		{name: "operator-interruption", class: model.CompetitionJobReevaluationOperatorInterruption, kind: "infrastructure", code: "evaluation_time_budget_exhausted", valid: true},
 		{name: "untyped-submission", kind: "submission", code: "run_unstable"},
 		{name: "backing-service-wrong-kind", class: model.CompetitionJobReevaluationBackingService, kind: "infrastructure", code: "artifact_archive_failed"},
 		{name: "heartbeat-wrong-code", class: model.CompetitionJobReevaluationHeartbeatBudget, kind: "infrastructure", code: "artifact_archive_failed"},
+		{name: "operator-interruption-wrong-code", class: model.CompetitionJobReevaluationOperatorInterruption, kind: "infrastructure", code: "artifact_archive_failed"},
 		{name: "unknown-class", class: "synthetic_unknown", kind: "infrastructure", code: "artifact_archive_failed"},
 		{name: "unpublished-class-marker", class: model.CompetitionJobReevaluationArchiveInventory, kind: "infrastructure", code: "artifact_archive_failed"},
 	} {
