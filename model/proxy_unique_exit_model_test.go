@@ -819,6 +819,16 @@ func testRemoveClient(t testing.TB, userSession *session.ClientSession, clientId
 	connect.AssertEqual(t, removed.Error == nil, true)
 }
 
+// a whole hour that is not the day's last, so a test's minutes from it share
+// one UTC day, and the day after it is the next rotate day
+func testRotateStart() time.Time {
+	start := server.NowUtc().Truncate(time.Hour)
+	if start.Hour() == 23 {
+		start = start.Add(-time.Hour)
+	}
+	return start
+}
+
 // A removed proxy is not a unique-exit proxy of the network. remove-client
 // only deactivates its client: the proxy_unique_exit row and the exit stay
 // until the sweeper releases them. Until then a rotate must neither move the
@@ -936,6 +946,121 @@ func TestSweepProxyExitsLeavesAProxyRemovedDuringThePass(t *testing.T) {
 		sweep = SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
 		connect.AssertEqual(t, sweep.ReleasedCount, 1)
 		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
+	})
+}
+
+// Only rotations count against a proxy's rotate limits. The spec's
+// rate_limited is "The proxy rotated in the last minute, or 60 times today"
+// (connect/api/bringyour.yml), so a refused call, rate limited or without
+// supply, spends nothing. The limits used to count every call before comparing
+// it: 61 calls in one minute made one rotation and locked the proxy out until
+// 00:00Z.
+func TestRotateProxyExitCountsOnlyRotations(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		start := testRotateStart()
+		rotateNow := start
+		defer Testing_SetUniqueExitRotateNow(func() time.Time { return rotateNow })()
+		providers = testExitProviders(ctx, []string{"192.0.2.200", "192.0.2.201"}, 2)
+		_, userSession := testUniqueExitProNetwork(ctx)
+		proxyClientId := *testAuthUniqueExitProxy(t, userSession, "").ClientId
+		settings := DefaultUniqueExitSettings()
+		connect.AssertEqual(t, settings.RotatesPerDay, 60)
+
+		// 61 calls in one minute: one rotation, and 60 refusals
+		connect.AssertEqual(t, testRotateExit(t, userSession, proxyClientId).Exit != nil, true)
+		for range settings.RotatesPerDay {
+			again := testRotateExit(t, userSession, proxyClientId)
+			connect.AssertEqual(t, again.Error != nil && again.Error.RateLimited, true)
+		}
+
+		// later minutes without supply: the only other provider is the one the
+		// proxy left, excluded for a day. A call without supply did not rotate
+		// the proxy, so a second call in its minute is not rate limited either
+		for minute := 1; minute <= 3; minute += 1 {
+			rotateNow = start.Add(time.Duration(minute) * time.Minute)
+			for range 2 {
+				none := testRotateExit(t, userSession, proxyClientId)
+				connect.AssertEqual(t, none.Error != nil && none.Error.NoUniqueSupply, true)
+			}
+		}
+
+		// supply returns: the proxy rotates
+		providers = append(providers, testExitProviders(ctx, []string{"192.0.2.202"}, 2)...)
+		rotateNow = start.Add(4 * time.Minute)
+		second := testRotateExit(t, userSession, proxyClientId)
+		connect.AssertEqual(t, second.Error == nil, true)
+		connect.AssertEqual(t, second.Exit != nil, true)
+
+		// every rotation still counts: at two a day, the third rotate of the
+		// day is refused though there is supply, and the next day it goes
+		limited := DefaultUniqueExitSettings()
+		limited.RotatesPerDay = 2
+		defer Testing_SetUniqueExitSettings(limited)()
+		providers = append(providers, testExitProviders(ctx, []string{"192.0.2.203"}, 2)...)
+		rotateNow = start.Add(5 * time.Minute)
+		third := testRotateExit(t, userSession, proxyClientId)
+		connect.AssertEqual(t, third.Error != nil && third.Error.RateLimited, true)
+		rotateNow = start.Add(24 * time.Hour)
+		connect.AssertEqual(t, testRotateExit(t, userSession, proxyClientId).Exit != nil, true)
+	})
+}
+
+// Concurrent rotates of one proxy in one minute move it once, and only that
+// rotation counts: at two a day, the proxy may rotate once more that day and
+// then no more.
+func TestRotateProxyExitConcurrentRotatesMoveOnceAndCountOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		settings := DefaultUniqueExitSettings()
+		settings.RotatesPerDay = 2
+		defer Testing_SetUniqueExitSettings(settings)()
+		start := testRotateStart()
+		rotateNow := start
+		defer Testing_SetUniqueExitRotateNow(func() time.Time { return rotateNow })()
+		providers = testExitProviders(ctx, []string{"192.0.2.210", "192.0.2.211", "192.0.2.212", "192.0.2.213"}, 2)
+		networkId, userSession := testUniqueExitProNetwork(ctx)
+		proxyClientId := *testAuthUniqueExitProxy(t, userSession, "").ClientId
+		first := loadLiveProxyExitAssignment(ctx, proxyClientId)
+
+		var wg sync.WaitGroup
+		var mutex sync.Mutex
+		rotated, limited := 0, 0
+		for range 16 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				result, err := RotateProxyExit(&RotateProxyExitArgs{ClientId: proxyClientId}, userSession)
+				mutex.Lock()
+				defer mutex.Unlock()
+				switch {
+				case err != nil:
+					t.Errorf("rotate: %s", err)
+				case result.Exit != nil:
+					rotated += 1
+				case result.Error != nil && result.Error.RateLimited:
+					limited += 1
+				default:
+					t.Errorf("unexpected rotate result: %+v", result.Error)
+				}
+			}()
+		}
+		wg.Wait()
+		connect.AssertEqual(t, rotated, 1)
+		connect.AssertEqual(t, limited, 15)
+		connect.AssertEqual(t, loadLiveProxyExitAssignment(ctx, proxyClientId).AssignmentId != first.AssignmentId, true)
+		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 1)
+
+		// the burst spent one of the day's two
+		rotateNow = start.Add(time.Minute)
+		connect.AssertEqual(t, testRotateExit(t, userSession, proxyClientId).Exit != nil, true)
+		rotateNow = start.Add(2 * time.Minute)
+		third := testRotateExit(t, userSession, proxyClientId)
+		connect.AssertEqual(t, third.Error != nil && third.Error.RateLimited, true)
 	})
 }
 

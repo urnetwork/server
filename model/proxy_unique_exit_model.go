@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sdk"
@@ -1788,29 +1789,121 @@ func Testing_SetUniqueExitRotateNow(now func() time.Time) func() {
 	}
 }
 
-// rotateAllowed spends one of the proxy's rotates: at most one per
-// RotateMinInterval and RotatesPerDay a day, counted in redis time buckets like
-// the proxy create rate. A redis failure allows the rotate, as the create rate
-// does.
-func rotateAllowed(ctx context.Context, proxyClientId server.Id, now time.Time, settings *UniqueExitSettings) (allowed bool) {
+// The rotate limits count rotations: at most one per RotateMinInterval bucket
+// and RotatesPerDay a UTC day, per proxy (connect/api/bringyour.yml
+// rate_limited: "The proxy rotated in the last minute, or 60 times today"). A
+// rotate reserves both before it moves the proxy and gives both back when the
+// proxy does not move, so a refused call, or one without supply, spends
+// nothing. Each counter is one redis key, so one cluster slot:
+//   - upe-rot-<proxy>-<bucket> is the bucket's slot, taken with SET NX: of
+//     concurrent rotates of one proxy, one holds it and the rest are refused;
+//   - upe-rotd-<proxy>-<day> counts the day's rotations, reserved by a script
+//     that takes one only below the limit.
+//
+// Api instances still on the INCR counters during a roll share the keys: their
+// INCR of a held slot refuses. A redis failure allows the rotate, as the
+// create rate does.
+type rotateReservation struct {
+	bucketKey string
+	dayKey    string
+	// what the reservation holds
+	bucket bool
+	day    bool
+}
+
+// KEYS[1] is the day's count, ARGV[1] the day's limit and ARGV[2] the count's
+// ttl in seconds. Takes one of the day's rotations and answers 1, or answers 0
+// at the limit and changes nothing.
+var rotateDayReserveScript = redis.NewScript(`
+local count = tonumber(redis.call('GET', KEYS[1]) or '0')
+if tonumber(ARGV[1]) <= count then
+  return 0
+end
+redis.call('INCR', KEYS[1])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+return 1
+`)
+
+// KEYS[1] is the day's count. Gives back one rotation, never below zero.
+var rotateDayReleaseScript = redis.NewScript(`
+if 0 < tonumber(redis.call('GET', KEYS[1]) or '0') then
+  redis.call('DECR', KEYS[1])
+end
+return 1
+`)
+
+// a day's count outlives its day, for a rotate near midnight
+const rotateDayCountTtl = 48 * time.Hour
+
+// a reservation is given back even when the request that took it has ended
+const rotateReleaseTimeout = 5 * time.Second
+
+// reserveRotate takes the proxy's slot in now's bucket and one of the day's
+// rotations, or neither: allowed is false, and nothing is held, when the
+// bucket's slot is taken or the day is at its limit. A callback rerun after a
+// lost reply finds the slot it took and refuses; that errs toward refusing,
+// for one bucket.
+func reserveRotate(ctx context.Context, proxyClientId server.Id, now time.Time, settings *UniqueExitSettings) (reservation *rotateReservation, allowed bool) {
+	bucketSeconds := max(1, int64(settings.RotateMinInterval/time.Second))
+	reservation = &rotateReservation{
+		bucketKey: fmt.Sprintf("upe-rot-%s-%d", proxyClientId, now.Unix()/bucketSeconds),
+		dayKey:    fmt.Sprintf("upe-rotd-%s-%d", proxyClientId, now.Unix()/86400),
+	}
 	allowed = true
-	intervalSeconds := max(1, int64(settings.RotateMinInterval/time.Second))
-	intervalKey := fmt.Sprintf("upe-rot-%s-%d", proxyClientId, now.Unix()/intervalSeconds)
-	dayKey := fmt.Sprintf("upe-rotd-%s-%d", proxyClientId, now.Unix()/86400)
 	server.HandleError(func() {
 		server.Redis(ctx, func(r server.RedisClient) {
-			intervalCount, err := r.Incr(ctx, intervalKey).Result()
+			// the slot holds the integer 1, so the old code's INCR of a held
+			// slot reads 2 and refuses
+			set, err := r.SetNX(ctx, reservation.bucketKey, 1, 2*time.Duration(bucketSeconds)*time.Second).Result()
 			server.Raise(err)
-			r.Expire(ctx, intervalKey, 2*time.Duration(intervalSeconds)*time.Second)
-			dayCount, err := r.Incr(ctx, dayKey).Result()
-			server.Raise(err)
-			r.Expire(ctx, dayKey, 48*time.Hour)
-			if 1 < intervalCount || int64(settings.RotatesPerDay) < dayCount {
+			if !set {
 				allowed = false
+				return
+			}
+			reservation.bucket = true
+			taken, err := rotateDayReserveScript.Run(
+				ctx,
+				r,
+				[]string{reservation.dayKey},
+				settings.RotatesPerDay,
+				int64(rotateDayCountTtl/time.Second),
+			).Int()
+			server.Raise(err)
+			if taken == 0 {
+				allowed = false
+				return
+			}
+			reservation.day = true
+		})
+	})
+	if !allowed {
+		// the day was at its limit: give back the bucket's slot
+		reservation.release(ctx)
+	}
+	return
+}
+
+// release gives back what the reservation holds. A redis failure here leaves
+// the counts one rotation high until their keys expire, which errs toward
+// refusing.
+func (self *rotateReservation) release(ctx context.Context) {
+	if !self.bucket && !self.day {
+		return
+	}
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rotateReleaseTimeout)
+	defer cancel()
+	server.HandleError(func() {
+		server.Redis(releaseCtx, func(r server.RedisClient) {
+			if self.day {
+				server.Raise(rotateDayReleaseScript.Run(releaseCtx, r, []string{self.dayKey}).Err())
+				self.day = false
+			}
+			if self.bucket {
+				server.Raise(r.Del(releaseCtx, self.bucketKey).Err())
+				self.bucket = false
 			}
 		})
 	})
-	return
 }
 
 // The answer for a client_id that is not a unique-exit proxy of the caller's
@@ -1846,7 +1939,8 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 	if current == nil {
 		return rotateNotAUniqueExitProxy(), nil
 	}
-	if !rotateAllowed(ctx, rotate.ClientId, now, settings) {
+	reservation, allowed := reserveRotate(ctx, rotate.ClientId, now, settings)
+	if !allowed {
 		return &RotateProxyExitResult{
 			Error: &RotateProxyExitError{
 				RateLimited: true,
@@ -1854,6 +1948,15 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 			},
 		}, nil
 	}
+	rotated := false
+	defer func() {
+		if !rotated {
+			// only rotations count: a rotate that did not move the proxy (no
+			// supply, removed, another writer first, or an error) gives back
+			// its reservation
+			reservation.release(ctx)
+		}
+	}()
 	next, removed := replaceProxyExit(ctx, clientSession, config, current, ProxyExitReasonRotate, true, settings, now)
 	if removed {
 		return rotateNotAUniqueExitProxy(), nil
@@ -1866,6 +1969,7 @@ func RotateProxyExit(rotate *RotateProxyExitArgs, clientSession *session.ClientS
 			},
 		}, nil
 	}
+	rotated = true
 	return &RotateProxyExitResult{
 		Exit: GetProxyExits(ctx, []server.Id{rotate.ClientId})[rotate.ClientId],
 	}, nil
