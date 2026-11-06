@@ -539,8 +539,10 @@ func TestCompanionCoveredRequestActualQueryAvoidsEligibleMaximum(t *testing.T) {
 	})
 }
 
-// The source harness permits the exact new context pin while still rejecting
-// dead owners, substituted contexts, changed arguments and extra statements.
+// The source harness permits the exact new context pin, and the final-refusal
+// drain request after the admission (fbfacd208), while still rejecting dead
+// owners, substituted contexts, changed arguments, results that are not the
+// owner's and extra statements.
 func TestOpenContractCompanionOwnerBindingPreservesPinnedContext(t *testing.T) {
 	base := `package model
 func createCompanionTransferEscrow() {}
@@ -549,6 +551,17 @@ ctx = providerWorkSessionContext(ctx)
 return runRedisContractAdmission(ctx, func(ctx any) any {
 return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
 })
+}`
+	// the wrapper as it is since fbfacd208
+	refusal := `package model
+func createCompanionTransferEscrow() {}
+func CreateCompanionTransferEscrow() (transferEscrow *TransferEscrow, returnErr error) {
+ctx = providerWorkSessionContext(ctx)
+transferEscrow, returnErr = runRedisContractAdmission(ctx, func(ctx any) any {
+return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, contractTransferByteCount, originContractTimeout)
+})
+requestPayerDueContractCloseAfterRefusal(ctx, destinationNetworkId, returnErr)
+return
 }`
 	for _, test := range []struct {
 		name, source string
@@ -562,6 +575,19 @@ return createCompanionTransferEscrow(ctx, sourceNetworkId, sourceId, destination
 		{name: "dead owner", source: strings.Replace(base, "return createCompanionTransferEscrow(", "return unrelated(", 1)},
 		{name: "changed amount", source: strings.Replace(base, "contractTransferByteCount, originContractTimeout", "differentAmount, originContractTimeout", 1)},
 		{name: "extra statement", source: strings.Replace(base, "return runRedisContractAdmission", "unrelated()\nreturn runRedisContractAdmission", 1)},
+		{name: "final refusal drain", source: refusal, accepted: true},
+		{name: "final refusal drain unpinned", source: strings.Replace(refusal, "ctx = providerWorkSessionContext(ctx)\n", "", 1), accepted: true},
+		{name: "final refusal drain foreign pin", source: strings.Replace(refusal, "providerWorkSessionContext(ctx)", "providerWorkSessionContext(other)", 1)},
+		{name: "final refusal drain dead owner", source: strings.Replace(refusal, "return createCompanionTransferEscrow(", "return unrelated(", 1)},
+		{name: "discarded owner result", source: strings.Replace(refusal, "transferEscrow, returnErr = runRedisContractAdmission", "_, returnErr = runRedisContractAdmission", 1)},
+		{name: "swapped results", source: strings.Replace(refusal, "transferEscrow, returnErr = runRedisContractAdmission", "returnErr, transferEscrow = runRedisContractAdmission", 1)},
+		{name: "unnamed results", source: strings.Replace(refusal, "(transferEscrow *TransferEscrow, returnErr error)", "(*TransferEscrow, error)", 1)},
+		{name: "returns other values", source: strings.Replace(refusal, "returnErr)\nreturn\n", "returnErr)\nreturn nil, returnErr\n", 1)},
+		{name: "rewritten error", source: strings.Replace(refusal, "requestPayerDueContractCloseAfterRefusal(ctx, destinationNetworkId, returnErr)", "returnErr = unrelated(returnErr)", 1)},
+		{name: "arbitrary post-admission call", source: strings.Replace(refusal, "requestPayerDueContractCloseAfterRefusal(", "unrelated(", 1)},
+		{name: "refusal holds the error's address", source: strings.Replace(refusal, "destinationNetworkId, returnErr)", "destinationNetworkId, &returnErr)", 1)},
+		{name: "refusal of a computed payer", source: strings.Replace(refusal, "(ctx, destinationNetworkId, returnErr)", "(ctx, payer(&transferEscrow), returnErr)", 1)},
+		{name: "extra post-admission statement", source: strings.Replace(refusal, "returnErr)\nreturn\n", "returnErr)\nunrelated()\nreturn\n", 1)},
 	} {
 		file, err := parser.ParseFile(token.NewFileSet(), "synthetic.go", test.source, 0)
 		if err != nil {
