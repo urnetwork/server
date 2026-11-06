@@ -39,22 +39,43 @@ func competitionHeartbeatCallbackWaitingBackend(ctx context.Context, holderPid i
 // it after the real default eight-second caller deadline, within the unchanged
 // statement-stop grace, returns a plain callback deadline and rolls back both
 // authorities. No acquire-only recovery or fresh submission clock is permitted.
-func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *testing.T) {
+func testCompetitionHeartbeatPgCallbackDeadline(t *testing.T, jobAdapter bool) {
+	t.Helper()
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		watchdog, stopWatchdog := context.WithTimeout(t.Context(), 30*time.Second)
 		defer stopWatchdog()
+		server.Db(watchdog, func(conn server.PgConn) {
+			var head int
+			server.Raise(conn.QueryRow(watchdog, `SELECT COALESCE(MAX(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&head))
+			if head != server.MigrationCount() {
+				t.Fatal("actual post-write fixture schema did not reach source head", head, server.MigrationCount())
+			}
+			t.Logf("actual_post_write_fixture_schema_head=%d", head)
+		})
 		// The holder and exact server observer own separate maintenance slots.
 		// This configuration belongs only to the disposable TestEnv lifecycle.
 		pop := server.Config.PushSimpleResource(server.MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 2\n"))
 		server.PgReset()
 		defer func() { pop(); server.PgReset() }()
-		fixture, job := newCompetitionLeasePgFixture(t, watchdog, "callback-statement-deadline")
+		var store PostgresStore
+		var frozenSettings *Settings
+		var job *queuedJob
+		var fixtureClock time.Time
+		workerId := "synthetic-lease-worker"
+		if jobAdapter {
+			fixture, claimed := newCompetitionHeartbeatSlotPgFixture(t, watchdog)
+			store, frozenSettings, job, fixtureClock = fixture.store, fixture.settings, claimed, fixture.now
+			workerId = "synthetic-slot-worker"
+		} else {
+			fixture, claimed := newCompetitionLeasePgFixture(t, watchdog, "callback-statement-deadline")
+			store, frozenSettings, job, fixtureClock = fixture.store, fixture.settings, claimed, fixture.clock
+		}
 		before := readCompetitionLeasePgSnapshot(watchdog, job.JobId)
-		clock := &competitionLeaseRetryClock{now: fixture.clock}
+		clock := &competitionLeaseRetryClock{now: fixtureClock}
 		clock.Advance(time.Second)
-		fixture.store.now = clock.Now
+		store.now = clock.Now
 		advisoryClass, advisoryObject := int32(170129), int32(731021)
 		applicationName := "synthetic-heartbeat-callback-latency"
 		server.Tx(watchdog, func(tx server.PgTx) {
@@ -132,8 +153,9 @@ func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *t
 		case <-watchdog.Done():
 			t.Fatal("synthetic advisory holder did not acknowledge its exact lock")
 		}
-		// Capture the real helper-owned child, not a substituted error/context.
+		// Retain the real helper-owned deadline and an acknowledged stop witness.
 		attemptContexts := make(chan context.Context, 3)
+		deadlineObserved := make(chan struct{})
 		// One joined result owns the exact outer-call and backoff census.
 		type heartbeatResult struct {
 			startedAt    time.Time
@@ -153,11 +175,21 @@ func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *t
 				waits++
 				return errors.New("synthetic callback deadline must not reach acquire/lock retry backoff")
 			}
-			startedAt, err := retryCompetitionLeaseOperation(operationCtx, *job.LeaseExpiresAt, settings, func(ctx context.Context) error {
+			operation := func(ctx context.Context) error {
 				calls++
+				actual := &competitionHeartbeatPgDeadlineContext{Context: ctx, stopped: deadlineObserved}
 				attemptContexts <- ctx
-				return fixture.store.Heartbeat(ctx, fixture.settings, "synthetic-lease-worker", job.JobId)
-			})
+				return store.Heartbeat(actual, frozenSettings, workerId, job.JobId)
+			}
+			var startedAt time.Time
+			var err error
+			if jobAdapter {
+				jobSettings := defaultCompetitionHeartbeatSettings()
+				jobSettings.LeaseRetry = settings
+				startedAt, err = retryCompetitionJobHeartbeatOperation(operationCtx, *job.LeaseExpiresAt, clock.Now().Add(time.Minute), jobSettings, operation)
+			} else {
+				startedAt, err = retryCompetitionLeaseOperation(operationCtx, *job.LeaseExpiresAt, settings, operation)
+			}
 			result <- heartbeatResult{startedAt: startedAt, err: err, calls: calls, waits: waits}
 		}()
 		heartbeatStarted = true
@@ -200,6 +232,11 @@ func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *t
 		case <-watchdog.Done():
 			t.Fatal("owned heartbeat deadline did not expire within the watchdog")
 		}
+		select {
+		case <-deadlineObserved:
+		case <-watchdog.Done():
+			t.Fatal("actual post-write statement did not acknowledge its caller stop")
+		}
 		// No sleep grants permission to proceed. The exact lock remains held
 		// until after the owner is done; release immediately inside stop grace.
 		releaseHolder()
@@ -233,6 +270,10 @@ func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *t
 			database.Transaction.AcquireSucceeded != 1 || database.Transaction.BeginSucceeded != 1 || database.Transaction.CallbackEntered != 1 ||
 			database.Transaction.CommitAttempts != 0 || database.Transaction.RollbackAttempts != 1 || database.Transaction.RollbackAcknowledged != 1 {
 			t.Fatalf("late server completion lost its exact statement/budget/rollback acknowledgment: %+v", database)
+		}
+		if jobAdapter && (database.SqlShape != competitionHeartbeatLegacySlotShape || database.SqlShapeValid || database.SqlStatements != uint64(len(competitionHeartbeatLegacySlotStatements())+1) ||
+			competitionHeartbeatJobLockDeadline(completed.err) || competitionHeartbeatSlotUpdateDeadline(completed.err)) {
+			t.Fatal("actual post-write job adapter gained read-only-prefix/slot-update continuation", database)
 		}
 		causes := server.InspectErrorCauseBatch(completed.err)
 		deadlines, doneSentinels := 0, 0
@@ -272,4 +313,15 @@ func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *t
 			t.Fatal("late callback completion partially renewed an authority or reset the original claim clock")
 		}
 	})
+}
+
+// The historical generic adapter retains its exact no-acquisition-retry rule.
+func TestCompetitionHeartbeatPgCallbackDeadlineRollsBackWithoutAcquireRetry(t *testing.T) {
+	testCompetitionHeartbeatPgCallbackDeadline(t, false)
+}
+
+// The new job adapter also refuses an actual deadline after the successful
+// slot write. Trigger/sequence witnesses prove that this is not a setup failure.
+func TestCompetitionHeartbeatJobLockPgPostWriteDeadlineRemainsTerminal(t *testing.T) {
+	testCompetitionHeartbeatPgCallbackDeadline(t, true)
 }

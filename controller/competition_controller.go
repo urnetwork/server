@@ -7080,7 +7080,11 @@ type Worker struct {
 	// Nil preserves the production result boundary; tests force shutdown after
 	// the done case won but before it can obtain completion authority.
 	evaluationResultForTest func()
-	heartbeatSettings       competitionHeartbeatSettings
+	// Nil preserves the ready-result probe; tests hold job/host cleanup dispatch.
+	evaluationCleanupForTest func(host bool)
+	// Nil preserves final persistence; tests withdraw parent authority here.
+	evaluationCompletionForTest func()
+	heartbeatSettings           competitionHeartbeatSettings
 	// Only a successful actual host registration can move this conservative
 	// freshness bound. Job lease acknowledgements never refresh it.
 	confirmedHostLeaseExpiresAt time.Time
@@ -7400,55 +7404,158 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	if self.evaluationTickForTest != nil {
 		heartbeatTick = self.evaluationTickForTest
 	}
+	budgetExpired := false
+	evaluationDone := evalCtx.Done()
+	// Scoring never restarts. The same evaluator may still be retaining its
+	// bounded failure archive, whose ownership uses the live parent only.
+	observeBudget := func() bool {
+		if parent.Err() != nil {
+			return false
+		}
+		if !budgetExpired && (evalCtx.Err() == context.DeadlineExceeded || !server.NowUtc().Before(executionDeadline)) {
+			budgetExpired, evaluationDone = true, nil
+			cancel()
+		}
+		return budgetExpired
+	}
+	// Retain immutable original-cause bytes and real archive-failure metadata.
+	// Budget expiry grants neither a late score nor an empty synthetic success.
+	applyBudget := func(outcome *EvaluationOutcome) {
+		if observeBudget() {
+			outcome.Score = nil
+			outcome.Error = terminalInfrastructureError(
+				"evaluation_time_budget_exhausted",
+				"submission exhausted its total evaluation time budget",
+			)
+		}
+	}
+	// Every caller has already joined the evaluator, including its archive.
+	handBackShutdown := func() error {
+		shutdownCause := context.Cause(parent)
+		if shutdownCause == context.Canceled {
+			shutdownCause = nil
+		}
+		if err := self.handBackJob(job, "worker_shutdown", shutdownCause); err != nil {
+			return fmt.Errorf("hand back competition job %s: %w", job.JobId, err)
+		}
+		return parent.Err()
+	}
+	// All result selections, including pre-dispatch probes, share the same
+	// parent/integrity/budget ordering and retain the one joined outcome.
+	finishEvaluation := func(outcome EvaluationOutcome) error {
+		if self.evaluationResultForTest != nil {
+			self.evaluationResultForTest()
+		}
+		if parent.Err() != nil {
+			cancel()
+			return handBackShutdown()
+		}
+		if competitionDistributedEnabled(self.settings) && outcome.distributedIntegrityRejected {
+			if err := self.handBackJob(job, "executor_integrity_rejected"); err != nil {
+				return fmt.Errorf("hold rejected executor job %s: %w", job.JobId, err)
+			}
+			return errCompetitionExecutorIntegrityRejected
+		}
+		applyBudget(&outcome)
+		cancel()
+		if parent.Err() != nil {
+			return handBackShutdown()
+		}
+		if outcome.Score != nil {
+			if err := validateScore(outcome.Score); err != nil {
+				outcome.Score = nil
+				outcome.Error = terminalInfrastructureError(
+					"score_result_invalid",
+					"pinned scorer returned an invalid result",
+				)
+			}
+		}
+		if self.evaluationCompletionForTest != nil {
+			self.evaluationCompletionForTest()
+		}
+		if parent.Err() != nil {
+			return handBackShutdown()
+		}
+		// Result validation or scheduling may have crossed the same immutable
+		// deadline after the first observation. Never refresh that allowance.
+		applyBudget(&outcome)
+		if parent.Err() != nil {
+			return handBackShutdown()
+		}
+		retry, err := self.completeWithRetry(parent, job, confirmedLeaseExpiresAt, outcome)
+		if err != nil {
+			return fmt.Errorf("complete competition job %s: %w", job.JobId, err)
+		}
+		if retry {
+			metricOutcome = "infrastructure_retry"
+			glog.Infof("[competition]job %s retained for infrastructure retry\n", job.JobId)
+		} else if outcome.Score != nil && outcome.Error == nil {
+			metricOutcome = "succeeded"
+		} else if outcome.Error != nil && outcome.Error.Kind == "submission" {
+			metricOutcome = "submission_failed"
+		}
+		return nil
+	}
+	var readyOutcome *EvaluationOutcome
+	evaluationReady := errors.New("competition evaluator result ready before cleanup dispatch")
+	// Capture only: a retry callback must never re-enter completion SQL. The
+	// private nonretryable sentinel withdraws dispatch after the engine unwinds.
+	probeReadyEvaluation := func(host bool) bool {
+		if self.evaluationCleanupForTest != nil {
+			self.evaluationCleanupForTest(host)
+		}
+		select {
+		case result := <-done:
+			readyOutcome = &result.outcome
+			return true
+		default:
+			return false
+		}
+	}
 	for {
 		select {
 		case result := <-done:
-			cancel()
-			if self.evaluationResultForTest != nil {
-				self.evaluationResultForTest()
-			}
-			if competitionDistributedEnabled(self.settings) && parent.Err() != nil {
-				if err := self.handBackJob(job, "worker_shutdown", context.Cause(parent)); err != nil {
-					return fmt.Errorf("hand back canceled executor job %s: %w", job.JobId, err)
-				}
-				return parent.Err()
-			}
-			if competitionDistributedEnabled(self.settings) && result.outcome.distributedIntegrityRejected {
-				if err := self.handBackJob(job, "executor_integrity_rejected"); err != nil {
-					return fmt.Errorf("hold rejected executor job %s: %w", job.JobId, err)
-				}
-				return errCompetitionExecutorIntegrityRejected
-			}
-			if result.outcome.Score != nil {
-				if err := validateScore(result.outcome.Score); err != nil {
-					result.outcome = EvaluationOutcome{
-						Error: terminalInfrastructureError(
-							"score_result_invalid",
-							"pinned scorer returned an invalid result",
-						),
-					}
-				}
-			}
-			retry, err := self.completeWithRetry(parent, job, confirmedLeaseExpiresAt, result.outcome)
-			if err != nil {
-				return fmt.Errorf("complete competition job %s: %w", job.JobId, err)
-			}
-			if retry {
-				metricOutcome = "infrastructure_retry"
-				glog.Infof("[competition]job %s retained for infrastructure retry\n", job.JobId)
-			} else if result.outcome.Score != nil && result.outcome.Error == nil {
-				metricOutcome = "succeeded"
-			} else if result.outcome.Error != nil && result.outcome.Error.Kind == "submission" {
-				metricOutcome = "submission_failed"
-			}
-			return nil
+			return finishEvaluation(result.outcome)
+		case <-evaluationDone:
+			// A closed child channel is one edge, not a spin or a fresh cleanup
+			// allowance. Only the original scoring deadline enters budget cleanup.
+			evaluationDone = nil
+			observeBudget()
 		case <-heartbeatTick:
-			attemptStartedAt, err := retryCompetitionJobHeartbeatOperation(evalCtx, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt, self.heartbeatSettings, func(ctx context.Context) error {
-				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
-			})
-			if err != nil {
+			if parent.Err() != nil {
 				cancel()
 				<-done
+				return handBackShutdown()
+			}
+			if observeBudget() {
+				if probeReadyEvaluation(false) {
+					return finishEvaluation(*readyOutcome)
+				}
+			}
+			// Metadata owns the live worker parent, not the scoring deadline.
+			// Its original per-call/total budgets and confirmed fences still win.
+			observation := newCompetitionHeartbeatOwnerObservation(parent, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt)
+			attemptStartedAt, err := retryCompetitionJobHeartbeatOperationObserved(parent, confirmedLeaseExpiresAt, self.confirmedHostLeaseExpiresAt, self.heartbeatSettings, func(ctx context.Context) error {
+				if observeBudget() && probeReadyEvaluation(false) {
+					return evaluationReady
+				}
+				if err := parent.Err(); err != nil {
+					return err
+				}
+				return self.store.Heartbeat(ctx, self.settings, self.workerId, job.JobId)
+			}, observation)
+			if readyOutcome != nil {
+				return finishEvaluation(*readyOutcome)
+			}
+			if err != nil {
+				if parent.Err() != nil {
+					cancel()
+					<-done
+					return handBackShutdown()
+				}
+				cancel()
+				<-done
+				err = withCompetitionHeartbeatOwner(err, observation)
 				_ = self.handBackJob(job, "heartbeat_failed", err)
 				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
@@ -7456,8 +7563,29 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			// successful public operation's start is a conservative committed bound.
 			confirmedLeaseExpiresAt = attemptStartedAt.Add(time.Duration(self.settings.WorkerLeaseSeconds) * time.Second)
 
-			err = self.refreshHostHeartbeat(evalCtx, confirmedLeaseExpiresAt, hostCheck)
+			if observeBudget() {
+				if probeReadyEvaluation(true) {
+					return finishEvaluation(*readyOutcome)
+				}
+			}
+			err = self.refreshHostHeartbeatWithOperation(parent, confirmedLeaseExpiresAt, func(ctx context.Context) error {
+				if observeBudget() && probeReadyEvaluation(true) {
+					return evaluationReady
+				}
+				if err := parent.Err(); err != nil {
+					return err
+				}
+				return self.store.RegisterHost(ctx, self.settings, hostCheck)
+			})
+			if readyOutcome != nil {
+				return finishEvaluation(*readyOutcome)
+			}
 			if err != nil {
+				if parent.Err() != nil {
+					cancel()
+					<-done
+					return handBackShutdown()
+				}
 				cancel()
 				<-done
 				_ = self.handBackJob(job, "host_heartbeat_failed", err)
@@ -7469,16 +7597,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		case <-parent.Done():
 			cancel()
 			<-done
-			// Ordinary shutdown remains reason-only; a fenced supervisor's
-			// distinct cause retains safe evidence after candidate cleanup joins.
-			shutdownCause := context.Cause(parent)
-			if shutdownCause == context.Canceled {
-				shutdownCause = nil
-			}
-			if err := self.handBackJob(job, "worker_shutdown", shutdownCause); err != nil {
-				return fmt.Errorf("hand back competition job %s: %w", job.JobId, err)
-			}
-			return parent.Err()
+			return handBackShutdown()
 		}
 	}
 }

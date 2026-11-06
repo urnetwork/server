@@ -41,6 +41,7 @@ type competitionHeartbeatFailure struct {
 	DetailSha256      string                                `json:"error_sha256,omitempty"`
 	DatabasePhase     server.DbOperationPhase               `json:"database_phase,omitempty"`
 	HeartbeatDatabase *competitionHeartbeatDatabaseSnapshot `json:"heartbeat_database,omitempty"`
+	HeartbeatOwner    *competitionHeartbeatOwnerSnapshot    `json:"heartbeat_owner,omitempty"`
 }
 
 // Adds finite source-boundary evidence without changing formatting or identity.
@@ -86,6 +87,12 @@ func competitionHeartbeatFailureDetails(err error) competitionHeartbeatFailure {
 	if errors.As(err, &heartbeatError) {
 		snapshot := heartbeatError.snapshot
 		detail.HeartbeatDatabase = &snapshot
+	}
+	var ownerError competitionHeartbeatOwnerError
+	if errors.As(err, &ownerError) {
+		observation := competitionHeartbeatOwnerObservation{snapshot: ownerError.snapshot}
+		snapshot := observation.snapshotCopy()
+		detail.HeartbeatOwner = &snapshot
 	}
 	var sqlError interface{ SQLState() string }
 	var networkError net.Error

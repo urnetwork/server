@@ -35,6 +35,8 @@ type DbTxObservationSnapshot struct {
 
 // These dispositions describe the existing pool owner, not a cleanup join.
 // Unknown includes hooks whose release/destructor lifetime is not established.
+// Idle means protocol-idle eligibility at release entry, not actual reinsertion:
+// pgxpool may destroy a lifetime-expired resource while retaining its capacity.
 type DbTxReleaseDisposition uint8
 
 const (
