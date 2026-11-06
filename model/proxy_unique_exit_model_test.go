@@ -797,6 +797,148 @@ func TestRotateProxyExitAndRemovedProxyRelease(t *testing.T) {
 	})
 }
 
+const testNotAUniqueExitProxy = "Not a unique-exit proxy of this network."
+
+func testRotateExit(t testing.TB, userSession *session.ClientSession, proxyClientId server.Id) *RotateProxyExitResult {
+	result, err := RotateProxyExit(&RotateProxyExitArgs{ClientId: proxyClientId}, userSession)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, result != nil, true)
+	return result
+}
+
+// the provider a proxy's stored device config is pinned to
+func testPinnedProvider(t testing.TB, ctx context.Context, proxyId server.Id) server.Id {
+	config := GetProxyDeviceConfig(ctx, proxyId)
+	connect.AssertEqual(t, config != nil, true)
+	return server.RequireIdFromBytes(config.InitialDeviceState.Location.ConnectLocationId.ClientId.Bytes())
+}
+
+func testRemoveClient(t testing.TB, userSession *session.ClientSession, clientId server.Id) {
+	removed, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: clientId}, userSession)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, removed.Error == nil, true)
+}
+
+// A removed proxy is not a unique-exit proxy of the network. remove-client
+// only deactivates its client: the proxy_unique_exit row and the exit stay
+// until the sweeper releases them. Until then a rotate must neither move the
+// proxy nor repin its stored device config. On 2026-11-06 the production smoke
+// test rotated a removed proxy and got HTTP 200, a new live exit and a
+// repinned config, because the rotate checked only the row and the live exit.
+func TestRotateProxyExitRefusesARemovedProxy(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		signals := newTestExitSignals()
+		defer signals.install()()
+		rotateNow := server.NowUtc()
+		defer Testing_SetUniqueExitRotateNow(func() time.Time { return rotateNow })()
+		providers = testExitProviders(ctx, []string{"192.0.2.180", "192.0.2.181"}, 2)
+		networkId, userSession := testUniqueExitProNetwork(ctx)
+		result := testAuthUniqueExitProxy(t, userSession, "manual")
+		proxyClientId := *result.ClientId
+		first := loadLiveProxyExitAssignment(ctx, proxyClientId)
+
+		testRemoveClient(t, userSession, proxyClientId)
+
+		// no sweep yet, and a second provider is free to move to
+		rotated := testRotateExit(t, userSession, proxyClientId)
+		connect.AssertEqual(t, rotated.Exit == nil, true)
+		connect.AssertEqual(t, rotated.Error != nil && rotated.Error.Message == testNotAUniqueExitProxy, true)
+		live := loadLiveProxyExitAssignment(ctx, proxyClientId)
+		connect.AssertEqual(t, live != nil && live.AssignmentId == first.AssignmentId, true)
+		connect.AssertEqual(t, testPinnedProvider(t, ctx, result.ProxyConfigResult.ProxyId), first.ProviderClientId)
+		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 1)
+
+		// the sweeper releases the exit; the answer stays the same
+		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		connect.AssertEqual(t, sweep.ReleasedCount, 1)
+		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
+		after := testRotateExit(t, userSession, proxyClientId)
+		connect.AssertEqual(t, after.Error != nil && after.Error.Message == testNotAUniqueExitProxy, true)
+	})
+}
+
+// A removal that commits while a rotate is under way, after its checks and
+// before its move: the move's transaction holds the proxy's client row and
+// finds the client removed, so the rotate is refused and leaves no new exit
+// behind.
+func TestRotateProxyExitRefusesAProxyRemovedDuringTheRotate(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		rotateNow := server.NowUtc()
+		defer Testing_SetUniqueExitRotateNow(func() time.Time { return rotateNow })()
+		providers = testExitProviders(ctx, []string{"192.0.2.185", "192.0.2.186"}, 2)
+		networkId, userSession := testUniqueExitProNetwork(ctx)
+		result := testAuthUniqueExitProxy(t, userSession, "")
+		proxyClientId := *result.ClientId
+		first := loadLiveProxyExitAssignment(ctx, proxyClientId)
+
+		// a rotate draws its candidates after its checks and before its move:
+		// the proxy is removed there
+		source := testExitSource(func() []*testExitProvider { return providers })
+		var once sync.Once
+		defer Testing_SetUniqueExitCandidateSource(func(clientSession *session.ClientSession, specs []*ProviderSpec, excludeClientIds []server.Id, count int) ([]*FindProvidersProvider, error) {
+			once.Do(func() {
+				testRemoveClient(t, userSession, proxyClientId)
+			})
+			return source(clientSession, specs, excludeClientIds, count)
+		})()
+
+		rotated := testRotateExit(t, userSession, proxyClientId)
+		connect.AssertEqual(t, rotated.Exit == nil, true)
+		connect.AssertEqual(t, rotated.Error != nil && rotated.Error.Message == testNotAUniqueExitProxy, true)
+		live := loadLiveProxyExitAssignment(ctx, proxyClientId)
+		connect.AssertEqual(t, live != nil && live.AssignmentId == first.AssignmentId, true)
+		connect.AssertEqual(t, testPinnedProvider(t, ctx, result.ProxyConfigResult.ProxyId), first.ProviderClientId)
+		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 1)
+	})
+}
+
+// The same for the sweeper: a proxy removed after the pass read which proxies
+// are active, and before it replaces the proxy's failed exit, is not moved.
+// The next pass releases its exit.
+func TestSweepProxyExitsLeavesAProxyRemovedDuringThePass(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		var providers []*testExitProvider
+		defer testUniqueExitEnv(t, func() []*testExitProvider { return providers })()
+		providers = testExitProviders(ctx, []string{"192.0.2.190", "192.0.2.191"}, 2)
+		networkId, userSession := testUniqueExitProNetwork(ctx)
+		result := testAuthUniqueExitProxy(t, userSession, "")
+		proxyClientId := *result.ClientId
+		first := loadLiveProxyExitAssignment(ctx, proxyClientId)
+
+		// a pass reads the verdicts after the active proxies: the proxy is
+		// removed there, and its provider has a verdict, which replaces at once
+		var once sync.Once
+		defer Testing_SetUniqueExitProviderSignals(
+			func(ctx context.Context, clientIds []server.Id, now time.Time) (map[server.Id]bool, error) {
+				return map[server.Id]bool{}, nil
+			},
+			func(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, error) {
+				once.Do(func() {
+					testRemoveClient(t, userSession, proxyClientId)
+				})
+				return map[server.Id]bool{first.ProviderClientId: true}, nil
+			},
+		)()
+
+		sweep := SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		connect.AssertEqual(t, sweep.ReplacedCount, 0)
+		live := loadLiveProxyExitAssignment(ctx, proxyClientId)
+		connect.AssertEqual(t, live != nil && live.AssignmentId == first.AssignmentId, true)
+		connect.AssertEqual(t, testPinnedProvider(t, ctx, result.ProxyConfigResult.ProxyId), first.ProviderClientId)
+
+		sweep = SweepProxyExits(ctx, server.NowUtc(), DefaultUniqueExitSettings())
+		connect.AssertEqual(t, sweep.ReleasedCount, 1)
+		connect.AssertEqual(t, len(testLiveExitKeys(ctx, networkId)), 0)
+	})
+}
+
 // The ingest's key: a probe seeing the same address again counts it stable, a
 // new address restarts the count, and an older probe never overwrites a newer.
 func TestSetProviderEgressKeyCountsStabilityAndStaysMonotonic(t *testing.T) {
