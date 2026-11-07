@@ -3824,6 +3824,25 @@ direct-file one-shot completion markers. Abrupt termination and other service
 entrypoints have separate lifecycle owners; this is not a blanket instruction
 to restore descriptors before those services have stopped their producers.
 
+The scrubber's retained original destination must remain usable in process,
+but must not escape to exec children. A plain descriptor duplicate is
+inheritable; duplicate atomically with close-on-exec rather than setting the
+flag after duplication. Native subprocess controls require the original
+regular-file destination to be absent in the child while parent forwarding
+and restoration still work; an explicit inherited-file control checks the
+oracle. A descendant holding the destination does not prove that it wrote,
+that the parent is the sole writer, or that the scrubber goroutine progressed.
+Bind any retained capture to its actual immutable observer artifact; changing
+source does not repair existing inherited handles or qualify the running
+watcher's capture.
+
+Descriptor tests must write the descriptor they redirect. Go's JSON test mode
+aliases `os.Stderr` to `os.Stdout`, so that object is not raw fd2. Use checked
+raw-descriptor writes, the scrubber's restoration/drain barrier, and release
+all capture writers before reading to EOF. An isolated subprocess control
+keeps the aliased-object and raw-descriptor destinations distinct; sleeps do
+not establish forwarding completion.
+
 An output destination failure can also stall an otherwise live watcher. On
 2026-10-10, the exact watcher generation retained 64,459 bytes in its 65,536-byte
 stdout pipe across two local frames; its alert file ended midline and stopped

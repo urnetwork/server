@@ -29,6 +29,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // scrubMaxLineSize bounds the data waiting for a newline. A writer that never
@@ -155,7 +157,9 @@ func scrubDescriptor(fd int) (func(), error) {
 	// The original destination has to be kept open under a different number:
 	// once fd is re-pointed at the pipe, it is the only remaining handle on
 	// where the logs actually go.
-	original, err := syscall.Dup(fd)
+	// Duplicate atomically with close-on-exec: only this process may keep the
+	// original destination; exec children still use the scrubbed stdout/stderr.
+	original, err := unix.FcntlInt(uintptr(fd), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
 		return func() {}, fmt.Errorf("dup fd %d: %w", fd, err)
 	}
