@@ -70,6 +70,7 @@ func TestEgressSitePoolGaugesAndEventCountersSitOnTheirDashboards(t *testing.T) 
 		{dashboard: egressProbes, row: counterRowTitle, title: "destination pool fetches", metric: "urnetwork_egress_probe_pool_fetches_total", unit: "short", summedBy: "result"},
 		{dashboard: egressProbes, row: counterRowTitle, title: "site pool refresh runs", metric: "urnetwork_egress_site_refresh_runs_total", unit: "short", summedBy: "result"},
 		{dashboard: egressProbes, row: counterRowTitle, title: "site pool changes", metric: "urnetwork_egress_site_changes_total", unit: "short", summedBy: "change"},
+		{dashboard: egressProbes, row: counterRowTitle, title: "catalog entries kept out of the pool", metric: "urnetwork_egress_site_catalog_refusals_total", unit: "short", summedBy: "stage, reason"},
 	}
 	for _, c := range cases {
 		dashboard := dashboards[c.dashboard]
