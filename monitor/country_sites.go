@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"golang.org/x/net/publicsuffix"
+
+	"github.com/urnetwork/server/controller"
 )
 
 // CountrySiteCandidate is source evidence for a proposed country-specific
@@ -22,7 +24,10 @@ type CountrySiteCandidate struct {
 // variants. It rejects non-HTTPS URLs, credentials, IP literals and invalid
 // hostnames so an untrusted ranking response cannot introduce a raw endpoint.
 // Public Suffix List ownership matters here: example.co.uk must not collapse
-// to co.uk, while www.example.co.uk and shop.example.co.uk must collide.
+// to co.uk, while www.example.co.uk and shop.example.co.uk must collide. The
+// key of a URL it accepts is the server's own disjointness key
+// (controller.ProviderEgressSiteKey), so this signal and the catalog's parse,
+// served pool and refresh judge overlap by one rule.
 func CanonicalSiteKey(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil || u == nil || !strings.EqualFold(u.Scheme, "https") || u.User != nil || u.Host == "" {
@@ -45,11 +50,10 @@ func CanonicalSiteKey(rawURL string) (string, error) {
 			}
 		}
 	}
-	key, err := publicsuffix.EffectiveTLDPlusOne(host)
-	if err != nil {
+	if _, err := publicsuffix.EffectiveTLDPlusOne(host); err != nil {
 		return "", fmt.Errorf("country site has no registrable domain: %w", err)
 	}
-	return key, nil
+	return controller.ProviderEgressSiteKey(rawURL), nil
 }
 
 // FilterCountrySiteCandidates removes every country candidate whose
