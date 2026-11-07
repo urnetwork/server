@@ -9,7 +9,9 @@
 // minted fresh and never reused; and none of the columns the state query binds
 // (network_client.network_id, device_id and source_client_id, and
 // network.admin_user_id) is rewritten after creation. A client the query found
-// missing, inactive, or cut off from an active root therefore stays refused.
+// missing, inactive, or cut off from an active root therefore stays refused, and
+// a removed API key never returns, so a credential that names one stays refused
+// too.
 // The query reads the primary after the mint that issued the credential
 // committed, so a refusal never precedes its client's own row. The key is the
 // client id with every other claim the query binds: another credential of the
@@ -58,6 +60,7 @@ type stateRefusalKey struct {
 	parentClientId server.Id
 	sessionId      server.Id
 	rootClientId   server.Id
+	apiKeyId       server.Id
 	present        uint8
 }
 
@@ -65,6 +68,7 @@ const (
 	stateRefusalParentPresent  uint8 = 1
 	stateRefusalSessionPresent uint8 = 2
 	stateRefusalRootPresent    uint8 = 4
+	stateRefusalApiKeyPresent  uint8 = 8
 )
 
 // Only a client credential has a client row to refuse.
@@ -89,6 +93,10 @@ func newStateRefusalKey(byJwt *ByJwt, parentClientId *server.Id) (stateRefusalKe
 	if byJwt.RootClientId != nil {
 		key.rootClientId = *byJwt.RootClientId
 		key.present |= stateRefusalRootPresent
+	}
+	if byJwt.ApiKeyId != nil {
+		key.apiKeyId = *byJwt.ApiKeyId
+		key.present |= stateRefusalApiKeyPresent
 	}
 	return key, true
 }

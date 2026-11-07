@@ -28,6 +28,12 @@ cd server/cli/api
 ./run-local.sh
 ```
 
+Each of those builds with the `sidecar_pending` tag (`local-env.sh`), so it links
+the sidecar's pending migration groups and is not ready until they have applied:
+run `./run-local.sh db migrate` first. A pending group's versions move with each
+merge of main, so a local database that applied one is rebuilt after a merge
+(`db_migrations_sidecar.go`).
+
 Press `Ctrl-C` in the `run-local.sh` terminal to stop the containers, restore
 `/etc/hosts`, and remove the loopback alias.
 

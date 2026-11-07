@@ -56,6 +56,11 @@ type ClientSession struct {
 	// holds the key, not a token, so no route may sign ByJwt back to it as one.
 	// Only authenticate sets it; a session built any other way never has it.
 	ApiKeyAuthenticated bool
+	// The id of the API key that authenticated the request, set with
+	// ApiKeyAuthenticated. It stays off ByJwt: only a credential that descends
+	// from the key through an auth code carries the key's id as a claim, and a
+	// client token this session mints must not end with the key.
+	ApiKeyId *server.Id
 	// OAuth/MCP request identities are unsigned and cannot be renewed as logins.
 	UnsignedIdentity bool
 }
@@ -222,8 +227,9 @@ type BeforeStateAnswer func(ctx context.Context, clientId server.Id) bool
 // answer may reply to a client credential instead (see BeforeStateAnswer);
 // the request is then not authenticated and ByJwt stays nil.
 func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, answer BeforeStateAnswer) (answered bool, returnErr error) {
-	// only a resolved API key sets it, below
+	// only a resolved API key sets them, below
 	self.ApiKeyAuthenticated = false
+	self.ApiKeyId = nil
 	if auth := req.Header.Get("Authorization"); auth != "" {
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
@@ -250,6 +256,7 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 					false, // pro mode - for api keys we don't need to thread this for now
 				)
 				self.ApiKeyAuthenticated = true
+				self.ApiKeyId = &network.ApiKeyId
 				if glog.V(2) {
 					glog.Infof("[session]authed via api key as (%s %s)\n", network.NetworkName, network.NetworkId)
 				}

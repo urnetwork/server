@@ -214,6 +214,12 @@ type AuthNetworkClientArgs struct {
 	TimeZone string `json:"time_zone,omitempty"`
 	// Locale is the device's BCP 47 locale ("de-DE"); same use, same rules.
 	Locale string `json:"locale,omitempty"`
+
+	// §7.4's marks, which `sidecar` and sdk/sidecar.go always send. A new client
+	// keeps them for life (clientMarks) and its children inherit them; a
+	// re-auth may repeat a client's marks but never add one.
+	AdminRefused bool `json:"admin_refused,omitempty"`
+	StrictExp    bool `json:"strict_exp,omitempty"`
 }
 
 type ProxyConfig struct {
@@ -245,6 +251,10 @@ type AuthNetworkClientResult struct {
 	ClientId          *server.Id              `json:"client_id,omitempty"`
 	Error             *AuthNetworkClientError `json:"error,omitempty"`
 	ProxyConfigResult *ProxyConfigResult      `json:"proxy_config_result,omitempty"`
+	// the client's marks: a sidecar persists its keychain only when the reply
+	// confirms admin_refused (§5.6)
+	AdminRefused bool `json:"admin_refused,omitempty"`
+	StrictExp    bool `json:"strict_exp,omitempty"`
 }
 
 type AuthNetworkClientError struct {
@@ -369,6 +379,17 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 	}
 	if registration != nil {
 		registration.mintCredential = mintCredential
+	}
+
+	// a mark that cannot be kept is a refusal, never a client without it
+	requestedMarks := requestedClientMarks(authClient)
+	if requestedMarks.marked() && !server.SidecarMg0Linked() {
+		authClientResult = &AuthNetworkClientResult{
+			Error: &AuthNetworkClientError{
+				Message: clientMarksUnavailableMessage,
+			},
+		}
+		return
 	}
 
 	if authClient.ClientId == nil {
@@ -698,6 +719,23 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					return
 				}
 			}
+			// the new client's marks: what was asked for, and everything its parent
+			// has. Decided before any write, so a refusal leaves nothing behind.
+			marks := requestedMarks
+			if authClient.SourceClientId != nil {
+				marks = marks.union(readClientMarksInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, *authClient.SourceClientId))
+			}
+			if clientSession.ByJwt.StrictExp {
+				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
+			}
+			if message := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, authClient.ProxyConfig != nil); message != "" {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: message,
+					},
+				}
+				return
+			}
 			if proxyCreateRateExceeded(isPro) {
 				authClientResult = proxyClientCreateRateRefusal(isPro)
 				return
@@ -933,6 +971,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				principal,
 			))
 
+			if marks.marked() {
+				insertClientOwnerInTx(clientSession.Ctx, tx, clientId, clientSession.ByJwt.UserId, marks)
+			}
+
 			if authClient.ProvideIntent && authClient.SourceClientId == nil {
 				// a provider install for its life (NetworkPeerCategoryProvider)
 				server.RaisePgResult(tx.Exec(
@@ -1009,12 +1051,15 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.Pro = isPro
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
+			byJwtWithClientId.SetStrictExp(marks.strictExp)
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
 			server.Raise(mintErr)
 			authClientResult = &AuthNetworkClientResult{
-				ByClientJwt: &byClientJwtSigned,
-				ClientId:    &clientId,
+				ByClientJwt:  &byClientJwtSigned,
+				ClientId:     &clientId,
+				AdminRefused: marks.adminRefused,
+				StrictExp:    marks.strictExp,
 			}
 			if proxyClient != nil {
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
@@ -1135,6 +1180,29 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				return
 			}
 
+			// the token follows the client's marks, whoever asks for it. They are
+			// checked before anything is written, so a refusal writes nothing
+			marks := readClientMarksInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, *authClient.ClientId)
+			if requestedMarks.union(marks) != marks {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: clientMarksImmutableMessage,
+					},
+				}
+				return
+			}
+			if clientSession.ByJwt.StrictExp {
+				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
+			}
+			if message := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, false); message != "" {
+				authClientResult = &AuthNetworkClientResult{
+					Error: &AuthNetworkClientError{
+						Message: message,
+					},
+				}
+				return
+			}
+
 			// The device row is locked as the update would lock it, but its
 			// spec is rewritten only when it changed. A client re-auths with
 			// the same spec almost every time, and rewriting it anyway made a
@@ -1241,12 +1309,15 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.Pro = isPro
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
+			byJwtWithClientId.SetStrictExp(marks.strictExp)
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
 			server.Raise(mintErr)
 			authClientResult = &AuthNetworkClientResult{
-				ByClientJwt: &byClientJwtSigned,
-				ClientId:    authClient.ClientId,
+				ByClientJwt:  &byClientJwtSigned,
+				ClientId:     authClient.ClientId,
+				AdminRefused: marks.adminRefused,
+				StrictExp:    marks.strictExp,
 			}
 		}, server.TxReadCommitted)
 	}
@@ -4732,6 +4803,17 @@ func removeReapedNetworkClientDependents(ctx context.Context, reapedClientIds []
 				`,
 				idStrings(chunk),
 			))
+			// (cascade) and their owner rows, which go with their client (§7.7)
+			if server.SidecarMg0Linked() {
+				server.RaisePgResult(tx.Exec(
+					ctx,
+					`
+					DELETE FROM network_client_owner
+					WHERE client_id = ANY($1::uuid[])
+					`,
+					idStrings(chunk),
+				))
+			}
 		}, server.TxReadCommitted)
 	}
 
@@ -5027,7 +5109,7 @@ func SweepOrphanNetworkClientDataFrom(
 // Step order is the persisted cursor's table identity; keep existing positions
 // stable. Steps that clear mirrors after each committed page supply sweep.
 func sweepOrphanNetworkClientSteps() []sweepOrphanStep {
-	return []sweepOrphanStep{
+	steps := []sweepOrphanStep{
 		// per-connection tables whose connection is gone, keyed by connection_id
 		{
 			table: "network_client_location",
@@ -5219,6 +5301,38 @@ func sweepOrphanNetworkClientSteps() []sweepOrphanStep {
 			newCursorTargets: func() []any { return []any{new(server.Id)} },
 		},
 	}
+	if server.SidecarMg0Linked() {
+		// owner rows whose client is gone, keyed by client_id. A row outlives its
+		// client only when the reap's cascade was interrupted.
+		steps = append(steps, sweepOrphanStep{
+			table: "network_client_owner",
+			sql: `
+		WITH slice AS (
+			SELECT client_id
+			FROM network_client_owner
+			WHERE ($1 OR client_id > $2)
+			ORDER BY client_id
+			LIMIT $3
+		), del AS (
+			DELETE FROM network_client_owner
+			USING slice
+			WHERE
+				network_client_owner.client_id = slice.client_id AND
+				NOT EXISTS (
+					SELECT 1 FROM network_client
+					WHERE network_client.client_id = network_client_owner.client_id
+				)
+			RETURNING 1
+		), bound AS (
+			SELECT client_id FROM slice ORDER BY client_id DESC LIMIT 1
+		)
+		SELECT (SELECT count(*) FROM slice), (SELECT count(*) FROM del), bound.client_id
+		FROM bound
+		`,
+			newCursorTargets: func() []any { return []any{new(server.Id)} },
+		})
+	}
+	return steps
 }
 
 // Proxy device configs whose client is gone, paged by proxy_id. RETURNING

@@ -12,6 +12,7 @@ import (
 )
 
 type NetworkByApiKey struct {
+	ApiKeyId    server.Id
 	NetworkId   server.Id
 	UserId      server.Id
 	NetworkName string
@@ -27,6 +28,7 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 			ctx,
 			`
 				SELECT
+					account_api_key.api_key_id,
 					network.network_id,
 					network.admin_user_id,
 					network.network_name
@@ -41,6 +43,7 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 			if rows.Next() {
 				var r NetworkByApiKey
 				server.RaisePgResult(rows.Scan(
+					&r.ApiKeyId,
 					&r.NetworkId,
 					&r.UserId,
 					&r.NetworkName,

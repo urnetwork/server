@@ -7,22 +7,24 @@ How the server authenticates a request or a connection, and what each credential
 - [REVOKE-OPERATIONS.md](REVOKE-OPERATIONS.md): tracked sessions and revocation.
 - [EMBED1.md](../EMBED1.md): the Embed plan.
 
-State as of 2026-10-13.
+State as of 2026-11-06. What the sidecar's P0 auth fix adds (DESIGN.md §7.4) is built log-only and marked below; §8 says what turns it on.
 
 ## Terms
 
 - **Network credential (admin).** The network's sign-in token, which is a `by_jwt` that names no client, or an API key. It administers the network and the account.
 - **Client token.** The `by_jwt` of one client. It names `client_id` and `device_id`, and it is what an installation runs on. It acts for its own client. On an ordinary network it can still reach the app-admin routes until the hard gate lands (§4).
 - **Embed network.** A network the team ever enabled Embed for, or one that has the Embed plan's client allowance. Its client tokens are in the hands of a third party's users, so none of them administers anything.
+- **Marked client.** A client minted with `admin_refused` or `strict_exp` (§4). A sidecar's client has both. The marks are rows of `network_client_owner`, set at mint, immutable, and inherited by children.
+- **Sidecar token.** The client token of a `strict_exp` client: the `strict_exp` claim, a 7-day `exp`, a route allowlist and a proof of its ClientKey (§4). Only sidecars hold one.
 
 ## 1. Credentials
 
 | Credential | What it is | Where it comes from | Lifetime | Renewal | What ends it |
 |---|---|---|---|---|---|
 | Network token | JWT with no `client_id` | The sign-in routes (all Public), listed below | 30 days | `POST /auth/network-refresh` | Password reset; session revocation (tagged tokens); expiry, once `reject_expired` is on |
-| Client token | JWT with `client_id`, `device_id`, `root_client_id`, and `session_id` when sessions are on | `POST /network/auth-client`; `POST /network/register-client-v1` | 30 days | `GET /auth/refresh` | Removing or deactivating the client; for untagged tokens, any inactive ancestor; password reset; session revocation |
+| Client token | JWT with `client_id`, `device_id`, `root_client_id`, and `session_id` when sessions are on | `POST /network/auth-client`; `POST /network/register-client-v1` | 30 days; 7 for a sidecar token | `GET /auth/refresh`; a sidecar token also proves its ClientKey | Removing or deactivating the client; for untagged tokens, any inactive ancestor; password reset; session revocation |
 | API key | `urn_…`, 56 characters, stored as its SHA-256 | `POST /account/api-key` | Never expires | None: both refresh routes refuse it | `POST /account/api-key/remove`. The key is looked up on every request, so removal takes effect on the next one |
-| Auth code | A sign-in code | `POST /auth/code-create` (at most 24 h and 100 uses) | ≤ 24 h | None | Its expiry or uses |
+| Auth code | A sign-in code | `POST /auth/code-create` (at most 24 h and 100 uses) | ≤ 24 h | None | Its expiry or uses; removing the API key it descends from |
 | MCP OAuth identity | An unsigned request identity (`UnsignedIdentity`, `mcp/auth.go`) | `POST /oauth/authorize`, `POST /oauth/consent` | The OAuth access token's `expires_in` | The OAuth refresh grant (`oauth/grant.go`); both refresh routes refuse it | Expiry of its OAuth tokens |
 | Lag guest token | A client token with the `lag_guest` claim: the one client of a lag.dev guest network | `POST /lag/session` (Public), limited per /24 (/48) of the caller | 30 days as a token; the guest network is removed 24 h after creation | None: lag.dev starts a new guest session | The lag sweep removing the guest network at its expiry |
 
@@ -31,7 +33,7 @@ State as of 2026-10-13.
 **Notes on each credential:**
 
 - **API keys.** An API key authenticates as its network. The request gets a network identity built for that request (`ApiKeyAuthenticated`, Pro false), and it never has a token to refresh.
-- **Auth codes.** `/auth/code-login` returns a network token whose `CreateTime` is that of the root token that created the code. When session creation is on, a redemption starts an independent session.
+- **Auth codes.** `/auth/code-login` returns a network token whose `CreateTime` is that of the root token that created the code. When session creation is on, a redemption starts an independent session. A code created by an API key, or by a credential that descends from one, carries the key's id in `auth_code.api_key_id`, and the token it mints carries it as the `api_key_id` claim. That token and everything derived from it (its renewal, a client it mints, a code it creates) end when the key is removed. A client token an API key mints directly carries no key: an embed backend's installations survive a rotation of the backend's key.
 - **SSO.** Google and Apple id tokens are inputs to `/auth/login`, not credentials. Their audience must be one of our OAuth client ids: the `client_id` key of vault `google.yml` and `apple.yml`. An empty value skips the audience check (`session/sso_jwt.go`). The OAuth callbacks (`/auth/apple/callback`, `/auth/google/callback`) only hand the provider's answer back to the app; they mint nothing.
 - **Internal credentials.** Hosted proxy devices run on hosted session credentials (`MintHostedSession`) and never hold a network credential. Internal probes (`SignInternalProbe`) carry no session and their real client root, with the normal lifetime.
 - **Lag guests** ([lag.dev](../../mmm/lag.dev/PLAN.md) A1). A browser on lag.dev gets a guest network marked to expire after 24 h, with one client, and that client's token. The token carries `lag_guest`, which every credential derived from it and every renewal keeps. It works on the two routes the browser needs, `GET /lag/extenders` and `POST /lag/track`, and nowhere else:
@@ -61,7 +63,7 @@ The reason is the shared domain. Any host under `bringyour.com` can set a cookie
 | `iss` | `urnetwork:byjwt` |
 | `sub` | The user id |
 | `aud` | `urnetwork:api` and `urnetwork:connect` |
-| `exp` | Mint time + 30 days |
+| `exp` | Mint time + 30 days; + 7 days for a sidecar token |
 | `nbf`, `iat` | Mint time |
 | `jti` | Fresh for every mint |
 
@@ -75,6 +77,8 @@ The reason is the shared domain. Any host under `bringyour.com` can set a cookie
 - `pro`: re-derived at every mint.
 - `roles`, `principal`: assigned at client or auth code creation. They mean nothing to the network.
 - `lag_guest`: a lag.dev guest's credential (§1). Limits the token to the lag routes and keeps it off the connect transport.
+- `strict_exp`: a sidecar token. Every renewal and derived credential keeps it, and a mint reads it from the client's owner row, whoever asks.
+- `api_key_id`: the API key this credential descends from through an auth code (§1). Every renewal and derived credential keeps it.
 - `guest_mode`: deprecated, and false on new tokens.
 
 ## 3. Verification
@@ -86,8 +90,8 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
    - A wrong `iss`, `aud` or `sub`, or a future `nbf` or `iat`, is always refused.
    - A token with no `exp` (or other missing claims) is accepted only while vault `auth.yml` `reject_missing_expiration` is false.
    - An expired token is accepted only while `reject_expired` is false, with 30 s of leeway.
-   - Each such acceptance counts in `urnetwork_auth_jwt_legacy_accepts_total{cause,kind}`, where `kind` is `network` or `client`.
-3. **Session horizon.** A token that carries `session_id` or `root_client_id` must have `exp`. It is refused from `exp + 60 days + 30 s`, whatever the gates say.
+   - Each such acceptance counts in `urnetwork_auth_jwt_legacy_accepts_total{cause,kind}`, where `kind` is `network` or `client`. A sidecar token's counts under the cause `strict_expired`.
+3. **Session horizon.** A token that carries `session_id` or `root_client_id` must have `exp`. It is refused from `exp + 60 days + 30 s`, whatever the gates say. A sidecar token must have `exp`, `client_id` and `root_client_id`, and once `p0_enforce` is on (§8) it is refused from `exp` itself, with no leeway, whatever `reject_expired` or the 60 days say. The check runs wherever a credential is accepted, so an authorization lease retires a sidecar's transport at `exp`.
 4. **Session marker.** A `session_id` is checked against its Redis revocation marker. If Redis is unavailable, the token is refused; there is no fallback.
 5. **Account state, in one database read** (`ValidateByJwtState`).
    - The network exists and the user is its admin.
@@ -96,6 +100,7 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
      - the client is active in the network;
      - the device matches;
      - its lineage holds. A token with `root_client_id` requires that root to be active in the same network. A token with neither `session_id` nor `root_client_id` requires every ancestor to be active, in the same network, reaching a top-level client within 1,024 levels.
+   - A token with `api_key_id` also requires that key to exist in the network. No Redis record holds this, so such a token stays on this query with the revocation record on.
 
 **Failures.**
 
@@ -154,6 +159,15 @@ Every route has a class in `api/route_authz.go`: 241 routes as of 2026-10-13.
 
 **The lag guest gate.** Separate from the classes, every route except `GET /lag/extenders` and `POST /lag/track` (`lagGuestRoutes`) refuses a lag guest's token (§1) with **403**, "A lag.dev guest token works only on the lag.dev routes.". This includes the Public routes. The gate reads the `lag_guest` claim unverified, so any other credential costs one decode of its claims. It verifies a token that claims to be a guest's before refusing it; a token that fails verification goes to the handler, as above. `TestLagGuestTokenServesOnlyTheLagRoutes` keeps every route but the two gated.
 
+**The P0 auth fix (DESIGN.md §7.4, stage 1 and D-TEAM-14).** Each of the three `refusal` values below is counted in `urnetwork_auth_child_admin_calls_total{route,refusal,result}`, and until `p0_enforce` is on (§8) that is all it does: `result` is `logged` and the call goes through. Once it is on, `result` is `refused`. None of this changes what a network credential does.
+
+- **Marks.** `POST /network/auth-client` takes `admin_refused: true` and `strict_exp: true` and confirms them in its reply. `strict_exp` implies `admin_refused`. A new client keeps them for life, its children inherit both, and a re-auth may repeat them but never add one. A binary that does not link migration group MG0 refuses a request for a mark rather than dropping it.
+- **`refusal="client_admin"`.** On the 27 AppAdmin and 10 OwnClientPayout routes, a child's token or an `admin_refused` client's token is refused with the client token message (`model.ClientRefusesAdmin`). So is one whose client cannot be read; those count in `urnetwork_auth_client_admin_lookup_errors_total` too. A top-level client with no owner row is a legacy client and keeps the routes until the hard gate. Both facts are immutable, so each process caches the answer.
+- **`refusal="strict_exp_route"`.** A sidecar token reaches only the routes `strictExpRoutes` lists, and every other route, a Public one or an unclassified one included, answers **403**, "A sidecar token cannot call this route.", before its handler. `TestSidecarTokenRoutes` keeps the list exact. The route's own class still applies.
+- **`refusal="strict_exp_proof"`.** On `GET /auth/refresh` and `POST /network/auth-client` a sidecar token also carries a `DPoP` header (RFC 9449, `session/dpop_proof.go`) signed by the client's bound key, or the call is refused with **403**, so the sdk does not sign out. The key lookup (`model.ClientProofPublicKey`) reads tables migration group MG1 creates, so until then no client has a bound key and every proof fails, which is §7.4's rule for a client with none.
+- **Preview.** Until stage 2, a mint that ends in a sidecar token is refused outside `preview_networks` (§8). It is a refusal in every mode.
+- **Payment.** A sidecar token is refused `X-PAYMENT` on `POST /network/auth-client`, in every mode: no client holds one yet, so this needs no log-only days.
+
 **Embed.**
 
 - **Definition.** A network counts as Embed when Embed was ever enabled for it (a `network_embed` row, even a disabled one) or it has the Embed plan's client allowance (`model.NetworkRefusesClientAdmin`). A disable never reopens the admin routes: the client tokens handed out while Embed was on are still valid.
@@ -199,7 +213,9 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 - **API keys.** Removing a key stops it at its next request.
 - **No per-token deny list.** Apart from session markers, a JWT stays valid until expiry, a password reset, or its client's removal.
 
-**Known gap.** A network credential can create an auth code, and that includes an API key. Logging in with the code yields a network token that does not end when the key is removed. Revoke it with a password reset, or with session revocation once sessions are on.
+- **Removing an API key** deletes the auth codes that descend from it, and `/auth/code-login` refuses any that survive a race with the delete. The network token such a code minted names the key, so it stops at its next state check, with everything derived from it.
+
+**Known gap, until MG0 registers.** A network credential can create an auth code, and that includes an API key. Logging in with the code yields a network token that does not end when the key is removed, in a build that does not link migration group MG0, which holds `auth_code.api_key_id`. Revoke such a token with a password reset, or with session revocation once sessions are on. A code created before MG0 applied names no key, so this holds for it too, for its 24 hours.
 
 ## 7. Clients of these rules
 
@@ -231,6 +247,15 @@ The reason: a password reset sets `credential_change_time = now()`, and in Postg
 
 The values are read once per process, so a flip needs a restart.
 
+| config `sidecar.yml` | main, 2026-11-06 | Effect |
+|---|---|---|
+| `p0_enforce: {enabled: …}` | absent (false) | The P0 auth fix (§4) and the sidecar token's `exp` refuse what they otherwise only count. On at M1, after 14 log-only days of `urnetwork_auth_child_admin_calls_total` |
+| `preview_networks: […]` | absent (empty) | The networks that may hold sidecar tokens before stage 2 |
+
+`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse keeps the last good read, and on a process's first read it enforces and previews nothing. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
+
+**Migration group MG0** (`network_client_owner` and the altered `account_api_key` and `auth_code`) stays pending under the `sidecar_pending` build tag, in `db_migrations_sidecar_pending.go`, until its Gn-out moves it into the migrations slice. A build with the tag panics at start outside `local`, `canary` and tests. Code reads the group only where `server.SidecarMg0Linked()` says the binary links it, and then the group is part of the head the binary requires, so without the tables the binary never reports ready.
+
 **Before turning on `reject_expired`:**
 
 - The apps must ship the SDK with network-token renewal (`679a836a` or later), and ur.io must deploy its switch to `/auth/network-refresh`.
@@ -247,6 +272,8 @@ After the flip, a network token that expired unrenewed needs a new sign-in. Turn
 | API authentication, API keys, the unsigned and API-key markers | `session/client_session.go`, `apikey/apikey.go`, `mcp/auth.go` | `session/client_session_*_test.go` |
 | Session mint, renewal, revocation | `session/session_mint.go`, `session/session_operation.go` | `session/session_*_test.go` |
 | Route classes and the gate | `api/route_authz.go`, `router/client_credential.go` | `api/route_authz_test.go`, `api/route_authz_db_test.go` |
+| The P0 auth fix: marks, the client admin check, the allowlist, the proof, the gates | `model/network_client_owner_model.go`, `api/route_authz.go`, `router/strict_exp_credential.go`, `session/dpop_proof.go`, `session/session_state.go`, `sidecar_config.go` | `model/network_client_owner*_test.go`, `api/route_authz_sidecar*_test.go`, `router/strict_exp_credential_test.go`, `session/strict_exp_test.go`, `session/dpop_proof_test.go`, `connect/transport_strict_exp_test.go`, `sidecar_config_test.go` |
+| Pending migration groups | `db_migrations_sidecar*.go` | `db_migrations_sidecar*_test.go` |
 | Embed rules | `model/network_client_admin_model.go`, `model/network_embed_model.go` | `model/network_client_authz_test.go` |
 | Client creation and own-client limits | `model/network_client_model.go` | `model/network_client_authz_test.go` |
 | Refresh routes | `controller/auth_controller.go` | `api/auth_refresh_db_test.go` |

@@ -232,7 +232,10 @@ func ApplyDbMigrationsUpTo(ctx context.Context, upTo int) {
 // style: use varchar not ENUM
 // style: in queries with two+ tables, use fully qualified column names
 // FIXME perf: CREATE INDEX should always use CONCURRENTLY - we need to use raw connections for the sql, and the db to mark raw connections as not read only
-var migrations = []any{
+//
+// The sidecar's pending migration groups end the slice, in its initializer
+// (db_migrations_sidecar.go): never register one here before its own Gn-out.
+var migrations = append([]any{
 	// newSqlMigration(`CREATE TYPE audit_provider_event_type AS ENUM (
 	//  'provider_offline',
 	//  'provider_online_superspeed',
@@ -11360,4 +11363,4 @@ var migrations = []any{
 	newSqlMigration(proxyExitAssignmentProxyReleasedIndexSql),
 	newSqlMigration(proxyExitAssignmentNetworkReleasedIndexSql),
 	newSqlMigration(proxyExitAssignmentReleasedAtIndexSql),
-}
+}, sidecarPendingMigrations()...)

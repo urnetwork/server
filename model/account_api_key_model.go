@@ -121,6 +121,9 @@ func CreateApiKey(createApiKey *CreateApiKeyArgs, session *session.ClientSession
 // (security_notice_api_key.go), with the key's name and creation time, read
 // before the delete. An id the network has no key for deletes nothing and owes
 // nothing.
+//
+// The key's auth codes die with it (§2.8 api-11), and the network token one
+// minted names the key, so it ends with the row (session.ByJwt.ApiKeyId).
 func DeleteApiKey(apiKeyId *server.Id, session *session.ClientSession) error {
 	server.Tx(session.Ctx, func(tx server.PgTx) {
 		watch := watchApiKeyDeleteInTx(session.Ctx, tx, session.ByJwt.NetworkId, apiKeyId)
@@ -135,9 +138,32 @@ func DeleteApiKey(apiKeyId *server.Id, session *session.ClientSession) error {
 		))
 		if tag.RowsAffected() == 1 {
 			watch.noticeInTx(session.Ctx, tx)
+			if server.SidecarMg0Linked() {
+				removeApiKeyAuthCodesInTx(session.Ctx, tx, *apiKeyId)
+			}
 		}
 	})
 	return nil
+}
+
+// Deletes the auth codes that descend from the key, and their roles.
+func removeApiKeyAuthCodesInTx(ctx context.Context, tx server.PgTx, apiKeyId server.Id) {
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			DELETE FROM auth_code_role
+			USING auth_code
+			WHERE
+				auth_code_role.auth_code_id = auth_code.auth_code_id AND
+				auth_code.api_key_id = $1
+		`,
+		apiKeyId,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`DELETE FROM auth_code WHERE api_key_id = $1`,
+		apiKeyId,
+	))
 }
 
 type PublicAccountApiKey struct {
