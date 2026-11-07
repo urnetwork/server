@@ -234,20 +234,6 @@ var sidecarRouteFamilyRefusals = []string{
 	"/mail/direct-mx",
 }
 
-// What §22.7's S1-S10 and an approval cancel call on api, as far as those routes
-// exist. The scenarios run on §5-§21's services, which land with their milestones;
-// each one that lands adds what it calls here, so a route the allowlist lacks
-// fails this test and not a pilot.
-var sidecarScenarioRoutes = []string{
-	// S1, enrolling: the refresher, the pairing child, ur logout
-	"GET /auth/refresh",
-	"POST /network/auth-client",
-	"POST /network/remove-client",
-	// every connected sidecar: the peer key check and the contract path
-	"GET /key/([^/]+)",
-	"POST /connect/control",
-}
-
 func strictExpProofStub(t *testing.T) {
 	t.Helper()
 	previous := clientProofPublicKey
@@ -261,10 +247,16 @@ func strictExpProofStub(t *testing.T) {
 
 // With the allowlist on, a strict_exp bearer reaches exactly §7.4's routes, with
 // its proof where they want one, and every other route answers it 403, with its
-// own message and before its handler, so a route a sidecar needs and the list lacks
-// fails here. The check runs over the served route table, so a new route is covered
-// without a change here: off the list it refuses, and under a sidecar family it
-// fails until it is classified. Reads Redis for the proofs' jtis.
+// own message and before its handler. The check runs over the served route
+// table, so a new route is covered without a change here: off the list it
+// refuses, and under a sidecar family it fails until it is classified. Reads
+// Redis for the proofs' jtis.
+//
+// §7.4 also has this test run §22.7's S1-S10 and an approval cancel with the
+// allowlist on, so that a route a real flow calls and the list lacks fails here.
+// That part is not built: the scenarios run on §5-§21's services, which land from
+// M1 on, and it gates M1-out. Until then nothing here derives the list from what
+// a sidecar calls; it checks the list against §7.4's text alone.
 func TestSidecarTokenRoutes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		self := newStrictExpProofFixture(t)
@@ -292,11 +284,6 @@ func TestSidecarTokenRoutes(t *testing.T) {
 		for _, key := range sidecarAllowlist {
 			if !served[key] {
 				t.Errorf("the allowlist names %s, which no route serves", key)
-			}
-		}
-		for _, key := range sidecarScenarioRoutes {
-			if !strictExpRoutes[key] {
-				t.Errorf("a scenario calls %s, which the allowlist lacks", key)
 			}
 		}
 
