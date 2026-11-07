@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "kind": "epoch2-prospective-native-identity-component-qualification/v1",
+  "status": "synthetic-component-tests-passed",
+  "source_commit": "85f5c5d118b3331b9bd7b2930056b6f35a65d70d",
+  "source_parent": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+  "receipt": {
+    "path": "/home/by/urnetwork/temp/competition-native-collector-20261107.yhBY8FZ6/identity-qualified-goofe-20261107/qualification-receipt.json",
+    "sha256": "bce63c42828ff8d1075c10312f938c2838aefe67a293173cb7fd385a3757691d"
+  },
+  "ordinary": {"passed": 14, "failed": 0, "skipped": 0, "cgo_enabled": 0},
+  "race": {"passed": 14, "failed": 0, "skipped": 0, "race_findings": 0, "cgo_enabled": 1},
+  "coverage": {
+    "prospective_identity_tests": 3,
+    "existing_runtime_native_class_tests": 11,
+    "catalog_matches_discovered_run_and_pass_sets": true,
+    "source_and_dependency_custody_before_after": true,
+    "receipt_required_for_existing_admission": true,
+    "prospective_identity_is_not_acceptance": true
+  },
+  "execution": {
+    "host": "Goofe",
+    "go": "go1.27.3 linux/amd64",
+    "private_network": true,
+    "offline": true,
+    "synthetic_injected_inputs_only": true,
+    "owned_units_and_cgroups_gone": true
+  },
+  "limits": {
+    "actual_native_trials": false,
+    "docker_or_kernel_trials": false,
+    "git_recovery": false,
+    "source_approved": false,
+    "native_accepted": false,
+    "runtime_qualified": false,
+    "installed": false,
+    "live_evaluation_changed": false
+  }
+}
