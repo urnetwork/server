@@ -138,6 +138,12 @@ func waitPhase(ctx context.Context, duration time.Duration) error {
 	}
 }
 
+// This private extraction retains the existing product clock unchanged. It
+// permits a deterministic counterexample without starting real services.
+func runClockNow(coverage *model.CompetitionWorkCoveragePolicy, productClock func() time.Time) time.Time {
+	return productClock()
+}
+
 func Run(options *RunOptions) (retErr error) {
 	if options == nil {
 		return incompleteError("invalid_options", "setup", errors.New("nil run options"))
@@ -319,7 +325,7 @@ func Run(options *RunOptions) (retErr error) {
 		} else if runStats.Metrics == nil {
 			runStats.Metrics = map[string]MetricSummary{}
 		}
-		runStats.CompletedUnixMs = server.NowUtc().UnixMilli()
+		runStats.CompletedUnixMs = runClockNow(options.WorkCoveragePolicy, server.NowUtc).UnixMilli()
 		runStats.CompletionState = "complete"
 		runStats.IncompleteCode = ""
 		runStats.IncompleteMessage = ""
@@ -555,7 +561,7 @@ func Run(options *RunOptions) (retErr error) {
 			return incompleteError("work_inventory_invalid", "measurement setup", err)
 		}
 	}
-	measureStart := server.NowUtc()
+	measureStart := runClockNow(options.WorkCoveragePolicy, server.NowUtc)
 	measureEnd := measureStart.Add(options.Duration)
 	runStats.MeasureStartMs = measureStart.UnixMilli()
 	runStats.MeasureEndMs = measureEnd.UnixMilli()
@@ -600,18 +606,7 @@ func Run(options *RunOptions) (retErr error) {
 	matchmakingProbesDoneMutable := make(chan error, 1)
 	matchmakingProbesDone = matchmakingProbesDoneMutable
 	waitUntil := func(waitCtx context.Context, target time.Time) error {
-		remaining := target.Sub(server.NowUtc())
-		if remaining <= 0 {
-			return nil
-		}
-		timer := time.NewTimer(remaining)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			return nil
-		case <-waitCtx.Done():
-			return waitCtx.Err()
-		}
+		return waitPhase(waitCtx, target.Sub(runClockNow(options.WorkCoveragePolicy, server.NowUtc)))
 	}
 	go func() {
 		matchmakingProbesDoneMutable <- runMatchmakingProbes(
@@ -628,7 +623,7 @@ func Run(options *RunOptions) (retErr error) {
 		startDriver()
 	}
 
-	measureRemaining := measureEnd.Sub(server.NowUtc())
+	measureRemaining := measureEnd.Sub(runClockNow(options.WorkCoveragePolicy, server.NowUtc))
 	if measureRemaining <= 0 {
 		return incompleteError(
 			"matchmaking_probe_timeout",

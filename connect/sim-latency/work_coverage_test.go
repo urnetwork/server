@@ -118,4 +118,8 @@ func TestWorkCoverageLateDriverDoesNotResetPlannedDeadline(t *testing.T) {
 			t.Fatal("late driver extended the original crawl budget", deadline, err)
 		}
 	})
+	// The existing mandatory G7 root also executes both protected-clock
+	// regressions. Newly compiled supplemental files alone are not proof.
+	assertCoverageRunClockCannotShortenAcceptedMeasurement(t)
+	assertCoverageRunClockCannotPruneAcceptedOfferedCohort(t)
 }
