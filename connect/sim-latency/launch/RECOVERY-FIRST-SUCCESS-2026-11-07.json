@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "kind": "competition-controlled-recovery-terminal-observation/v1",
+  "observed_at": "2026-11-07T01:24:31.521878897Z",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "job_id": "01a189ac-2c92-4acb-204f-d37a1a24838b",
+  "evaluation_cycle": 1,
+  "attempt_count": 3,
+  "state": "succeeded",
+  "completed_at": "2026-11-07T01:24:17.853181Z",
+  "candidate_runs_completed": 9,
+  "replicate_count": 9,
+  "owner_poll": {
+    "http_status": 200,
+    "state": "completed",
+    "evaluation_status": "completed",
+    "score_present": true,
+    "response_path": "/home/by/urnetwork/temp/competition-recovered-owner-20261107.P8IFrGZG/response.private.json",
+    "response_sha256": "5293cf6c5a21d7c5fa610178ca647920182515e3f62814e62350988caf5231a9"
+  },
+  "queue": {"total": 69, "succeeded": 61, "running": 1, "queued": 6, "failed": 1},
+  "next_running_job_id": "01a1a3c4-6a91-74a6-e0d6-1caa1f832af2",
+  "next_running_attempt_count": 6,
+  "queue_evidence_path": "/var/lib/urnetwork/competition-six-recovery-preparation-20261106.mxsY9Qvf/audit-status-0124b.private.json",
+  "queue_evidence_sha256": "e024319c456df7326bea35d266fcac59345f21a76105b2a3c50999040b0e1b11",
+  "authority_scope": "Read-only terminal database and authenticated owner-poll observations. No private score values or patches published; no new recovery cycle, fee, worker replacement, winner selection or hold release authorized. Existing E7/CBC recovery execution continues."
+}
