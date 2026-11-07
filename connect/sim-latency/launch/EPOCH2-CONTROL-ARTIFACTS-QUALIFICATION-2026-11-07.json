@@ -1,0 +1,228 @@
+{
+  "schema": 1,
+  "kind": "epoch2-prospective-control-artifacts-qualification/v1",
+  "status": "prepared-scoped-offline-artifacts-qualified-not-accepted",
+  "epoch1_inputs_unchanged": true,
+  "operator_approved": false,
+  "installed": false,
+  "runtime_qualified": false,
+  "native_containment_qualified": false,
+  "source": {
+    "control_server": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "sn": "a62cfef9aa26d3596192aee5718b31a7bf7b3d59",
+    "sdk": "5517f0356d68ca876b8d8087811955a08e3f262d",
+    "connect": "f1e14dda5f0003ae21e2a163661660de30c61bc1",
+    "other_dependencies": "Exact qualified control13c source/module maps; no moving-main or frozen-product dependency substitution",
+    "server_base_files": 7237,
+    "server_base_map_sha256": "aeec8a0a38a257a5089c53fa011a589b0e2f9ebcce98661d545b44f65b0a83c6",
+    "probe_view_files": 7238,
+    "probe_view_map_sha256": "93eb8a0c521aa71d4c38a82d21dc8d456158cc6451f4971326c66deb8356827e",
+    "probe_sha256": "b4b479e0c980fdf7d87757a7b5cd42388e383f9c8a4b27e9c3d0c1dfd4c6cdb2",
+    "plan_sha256": "14ef80118f1fc254e3d8bcc61aad81701857114d1916a599c813f1ce901e7ed1",
+    "critical_entry_17_census_sha256": "0837b1b9ada12dd424de5fbb505b068f6b6a24aeb5dc81fbfa6dfc4c4cb77049",
+    "critical_entry_census_is_not_complete_transitive_tcb": true
+  },
+  "native_artifacts": {
+    "compiler": "go1.27.3 linux/amd64",
+    "cgo": 0,
+    "goexperiment": "greenteagc",
+    "flags": "-mod=readonly -trimpath -p 2 -buildvcs=false",
+    "actual_vcs_stamp": false,
+    "source_archive_provenance_not_invented_vcs_identity": true,
+    "static_no_interpreter_or_dynamic_dependencies": true,
+    "native_module_verification_before_after": true,
+    "competitionpatch": {
+      "bytes": 116996134,
+      "sha256": "f71a665e7147039a7d0c1e798c429dba33c3eabbe76039bd3f28f05c750f3ea7",
+      "buildinfo_sha256": "a71ab73d039ebd0776209f38508913e23cd4d07e08bd8ff292aa46dcb3a0a210"
+    },
+    "host_sim_latency": {
+      "bytes": 143535869,
+      "sha256": "7cc9c6fe55448df19dd2c2290ecae1a673a729a086135f5e3a135b952bddbd94",
+      "buildinfo_sha256": "85803cb1ca69c9657e78b033d18fdd14d971f8b683f54c79c23e300ed5a50623"
+    },
+    "build_carried_without_rebuild": true,
+    "build_log_sha256": "e48b03eabecc4bf891f08bf25f3c9dfed867a0a11feb9acfab3fb667f1df6a93",
+    "actual_native_readonly_census_json_sha256": "a22bcf8c60ed4690b3e7e0e41d605f07f42ddc071030405edace283a992c45c4",
+    "native_census_paths": 6
+  },
+  "tracked_identity": {
+    "host": "Goofe only",
+    "protected_exec_root": "/var/lib/urnetwork/control13c-tracked.pfZek0",
+    "root_uid": 0,
+    "root_mode": "0700",
+    "filesystem": "Actual executable ext4; ancestor UID/mode/findmnt observations retained; no mount or existing-ancestor changes",
+    "direct_original_zero_argument_helper": true,
+    "scope": "Complete synthetic four-field context only, not authenticated runtime ownership",
+    "kind": "sim-latency-submission-builder/tracked-v1",
+    "execution_class": "tracked-create-core-one/v1",
+    "source_materialization": "required-readonly-run-source/v1",
+    "builtin_source_kind": "pristine-evaluator-base",
+    "release_files": 15,
+    "git_source_files": 11,
+    "generated_files": 4,
+    "source_census_sha256": "53dad8f1eeec26d2695b09cdf19e99be2a4cc2448180f0cc981a24dabb0b1a5c",
+    "native_manifest_builder_sha256": "cdae22a370562cc2253613bdedc374ef9512f82dac37bd23da6b5809108840ef",
+    "builder_sha256_convention": "SHA256 of sorted compact manifest without builder_sha256 and without a trailing newline",
+    "raw_identity_json_sha256": "bcc58370320bbc2abfa805887b3a241521fa16c8b5c3f542caf2e35c246e4cd6",
+    "tracked_builder_script_sha256": "48c015d5f2f31a356c460747acf3befcf0616070552b38ecfc70733159b99bfe",
+    "actual_native_manifest_fields": 22,
+    "separate_unscoped_v2_json_sha256": "8a777ea38b017e26875f08ec76adc24b1985795d262f531fc9c13cf5f50a0242",
+    "refusal_controls": [
+      "partial scope",
+      "wrong validator pin",
+      "symlink leaf",
+      "group-writable parent 0770"
+    ],
+    "each_refusal_exit": 2,
+    "each_refusal_stdout_empty": true,
+    "source_files": [
+      {
+        "path": "connect/sim-latency/evaluator/container/submission-builder-identity.sh",
+        "git_mode": "100755",
+        "git_blob": "c7446c1acf45eb19bf2d25721d49805a8b3def14",
+        "sha256": "97281a179b680778c416f708b2d0abb95810eaa84ed15b87d2644b4467a86c49"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/build-submission.sh",
+        "git_mode": "100755",
+        "git_blob": "df3039949e44fd67ea7954accdff0c7f354af12d",
+        "sha256": "7cd460da98c5014e1acd85072e5de9000390acaeb39dc3ca7a783d531cb1bddd"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/Dockerfile.submission",
+        "git_mode": "100644",
+        "git_blob": "7d5b1d39bada2454204b27c87a315b1cb63f732f",
+        "sha256": "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/evaluator.sh",
+        "git_mode": "100755",
+        "git_blob": "b0a9f77241e0a8d142b096420d847db641055998",
+        "sha256": "0cccda1d1dcc227f30fda800ddb9bbb28e29dd48cc62885da637fcd4eb4eb00b"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/prepare-evaluation-source.sh",
+        "git_mode": "100755",
+        "git_blob": "d2ab8308cf9f73e403568a4532cf2c3328ce7b3a",
+        "sha256": "e53d989b3ef2ee2854380768558ed7acf20a35af8a985ec81edbfa63790cdd92"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/subevaluation-ownership.sh",
+        "git_mode": "100755",
+        "git_blob": "a2310da6404ab494ab39be3088e0b9f95a97a2dc",
+        "sha256": "dc697fd97c6b635c419be6724344f9c4bcbad655572c9eaad5af5604cbe1599a"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/compose.subevaluation.yml",
+        "git_mode": "100644",
+        "git_blob": "67ca3e0b07b5b08021add412d71e003d3d217fcc",
+        "sha256": "00279d755378fd98d26189576aa79967e6fee75fd23247ff31e422ee5ea43dde"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/docker-id-map.sh",
+        "git_mode": "100755",
+        "git_blob": "b5d5ec0a11961a3a03db77a605fd7760102ea08d",
+        "sha256": "ecf319fccdd00a2ab76871ec0a29693abca83e3a99ee1ee5c508bc1b076d96a0"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/Dockerfile.submission.tracked",
+        "git_mode": "100644",
+        "git_blob": "fc754af80e973a370211bf178de10efe3705d50f",
+        "sha256": "c871e72ec55f7be8dfa1cbf62049dec0d7974606b3b230755a92d1a8bba84c1b"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/tracked-submission-build.sh",
+        "git_mode": "100644",
+        "git_blob": "7dc273fdb10cf76bae0f90ce5d292cbc4400b9de",
+        "sha256": "48c015d5f2f31a356c460747acf3befcf0616070552b38ecfc70733159b99bfe"
+      },
+      {
+        "path": "connect/sim-latency/evaluator/container/compose.yml",
+        "git_mode": "100644",
+        "git_blob": "41dbcb6dad22cce8ccd78c03372f4f8fcedfb836",
+        "sha256": "f4ca3a5eedfd5f081fbb507fc0102fa03ce11c095b406bcc0f7dc0119b5e0464"
+      }
+    ],
+    "stock_sha256": "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334",
+    "core_sha256": "00ee51c9862878e7eb64f1e26e22e3108a58f4c6f1adc67da55e4976aaac8392",
+    "profile_qualification_receipt_sha256": "df42f3e81c9b95c0fd87de7da4303b8e005e7457d71a30b9e5fdc378440fac28"
+  },
+  "codec_evidence": {
+    "original_attempt": {
+      "pass": 7,
+      "failed_probe_preconditions": 2,
+      "skip": 0,
+      "original_post_verifier_ran": false,
+      "json_sha256": "fc528e3df0f6282ceac42e0df30e0705f526c9386bb81aadee52e3dbcc40a079",
+      "log_sha256": "fe9bacd79c5442d013a9502aae57b4e56c5635e3e76f693eeaa4224dc1cb1498"
+    },
+    "separate_seven_adjacent_posthoc": {
+      "exit": 0,
+      "audit_log_sha256": "cf051b2edda5c483ded9178f1ed50b2e879567eb087b44eacd003fc2ab3afbd9",
+      "tools_sha256": "226655659d705fd6f6bc8b63d774a3539b017741679c57a6377eff0c07ceafd0",
+      "original_post_verifier_ran": false,
+      "tests_cli_helper_rerun": false
+    },
+    "corrected_two_probe_attempt": {
+      "pass": 2,
+      "fail": 0,
+      "skip": 0,
+      "json_sha256": "60083b3da74c0e299dcd447d5a944425ad86240db12facb5279dba94e0ae0ec4",
+      "log_sha256": "ed2d369357ac7be0166a6225580867a13f7da26023e1e6a2d97069870c68972a",
+      "exact_run_and_pass_catalog_sha256": "4ea6593c809db559a5d79218f05f87093150d9d521f83dcc026e26c98e4e9b48",
+      "full_pre_post_source_module_native_custody": true
+    },
+    "writer_loader_cases": 3,
+    "writer_loader_proof_sha256": "77bbcd9a81a842f28d8e89cbff4c27b6eed9ceda9a20b585ab4841fae9a6e1b5",
+    "actual_native_cli_refusals": 8,
+    "native_refusal_proof_sha256": "a990b50d36a99a402a274777266d33764df1b96f60dcca65010b8b753a7dd7af",
+    "source_git_invoked": false,
+    "writer_binary_digest_formatter_only": true,
+    "positive_native_source_or_image_qualification": false,
+    "seven_adjacent_tests_not_rerun": true,
+    "successful_unique_test_roots_after_separate_closure_and_correction": 9
+  },
+  "preserved_findings": {
+    "initial_run_abi": {
+      "exit": 126,
+      "reason": "Host /run noexec prevented native CLI execution",
+      "log_sha256": "9583b790d7c4e57f68a77590d5b34085dee804e710e393d601d22c46b2cdbde4",
+      "original_post_verifier_ran": false,
+      "identity_or_codec_executed": false
+    },
+    "probe_5a0": {
+      "executed": false,
+      "correction": "Three expected-error literals only, corrected before execution; original source retained"
+    },
+    "probe_d06": {
+      "pass": 7,
+      "fail": 2,
+      "reason": "Test-only 128MiB admission cap rejected unchanged143535869B native ELF before both probe cases",
+      "original_post_verifier_ran": false,
+      "correction": "Two expressions reuse existing control13c maximumAutomationExecutableBytes=256MiB and cap+1; no production bound, ELF or input-policy change"
+    }
+  },
+  "receipt": {
+    "path": "/home/by/urnetwork/temp/control13c-tracked-qualified-20261107.qbLtPD/qualification-receipt.json",
+    "sha256": "bd7344145805f649a4d2cc31be34299a9f7b533d7ed1d5497317762fff713f26",
+    "evidence_directory": "/home/by/urnetwork/temp/control13c-tracked-qualified-20261107.qbLtPD",
+    "remote_final_fixture": "/home/by/sim-latency/fixtures/control13c-codec-b4b-20261107",
+    "final_tools_sha256": "e47a83abb7ff07db1018cbe9c24c73441db09b2096f16a3cca26ba9aea7ca590",
+    "final_metadata_sha256": "021a725187fae8f2718366be14bcd1b4c41ad5331211d0baa0394a81b6600c1d",
+    "all_owned_units_and_cgroups_gone": true
+  },
+  "remaining_qualification": [
+    "Actual clean-Git ec322 product plus unapproveda131 trusted-instrument image, exact raw-lock generation and contained mandatory70 execution",
+    "Actual pinned-profile Docker/kernel/native-containment and worker-readable installed-placement proof",
+    "Approved product choice and trusted-instrument/source approval, immutable image and actual API/worker runtime propagation",
+    "Actual epoch2 host equivalence/admission and fresh immutable R9 baseline at the approved boundary"
+  ],
+  "limitations": [
+    "Control13c artifact and codec proof only; not frozen ec322/a131 product-image, whole-main, API, fleet, workload or performance qualification",
+    "Tracked helper identity is an offline source/artifact binding, not tracked container execution or native containment qualification",
+    "Raw-lock positive executes actual compiled formatter and loader with synthetic manifests; full binary VCS/image verification and positive native source-Git acceptance are not claimed",
+    "Seven prior PASS observations retain their failed-unit status and receive only a separately labeled read-only custody closure; no failed unit is relabeled PASS",
+    "No Docker/provider/DB calls, production configuration, source selection, live installation, mount changes or runtime activation"
+  ]
+}
