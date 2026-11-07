@@ -235,8 +235,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
 		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
-		{name: "elected-winner review guard dropped", version: server.CompetitionProductionBenefitMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
-		{name: "elected-winner checkpoint guard dropped", version: server.CompetitionProductionBenefitMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		{name: "elected-winner review guard dropped", version: server.CompetitionIntakeFirstMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: server.CompetitionIntakeFirstMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
 		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
 		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
 		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},
@@ -297,6 +297,15 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`},
 		{name: "retained legacy settlement queue invents an accounting failure", version: server.LegacySettlementIntentRetirementMigrationVersion(),
 			sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`},
+	}
+	// Current-head fault expectations must name a custodian still active at
+	// that head; inherited guards transfer with the published contract.
+	for _, fault := range faults {
+		artifact := migrationCurrentSuffixTestContract(t, fault.version).artifact
+		if artifact.requiredVersion > server.MigrationCount() ||
+			(artifact.removedVersion != 0 && artifact.removedVersion <= server.MigrationCount()) {
+			t.Fatalf("%s expects inactive migration owner %d at head %d", fault.name, fault.version, server.MigrationCount())
+		}
 	}
 	var observed []snMainnetMigrationAlertObservation
 	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
