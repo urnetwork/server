@@ -16,14 +16,11 @@ package grafana
 // <env>-grafana.<domain>/stats (see warp/grafana/main.go)
 
 import (
-	"bytes"
 	"context"
 	"embed"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -58,33 +55,19 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 
 	httpClient := server.NewHttpClient(30 * time.Second)
 
+	// every call retries the load balancer's 429 (and 502-504 for GET); see grafanaSend
 	do := func(method string, path string, requestBody any) (int, []byte, error) {
-		var bodyReader io.Reader
+		var bodyJson []byte
+		headers := map[string]string{}
 		if requestBody != nil {
-			bodyJson, err := json.Marshal(requestBody)
+			var err error
+			bodyJson, err = json.Marshal(requestBody)
 			if err != nil {
 				return 0, nil, err
 			}
-			bodyReader = bytes.NewReader(bodyJson)
+			headers["Content-Type"] = "application/json"
 		}
-		request, err := http.NewRequestWithContext(ctx, method, grafanaUrl+path, bodyReader)
-		if err != nil {
-			return 0, nil, err
-		}
-		request.SetBasicAuth(username, password)
-		if requestBody != nil {
-			request.Header.Set("Content-Type", "application/json")
-		}
-		response, err := httpClient.Do(request)
-		if err != nil {
-			return 0, nil, err
-		}
-		defer response.Body.Close()
-		responseBody, err := io.ReadAll(io.LimitReader(response.Body, 1024*1024))
-		if err != nil {
-			return 0, nil, err
-		}
-		return response.StatusCode, responseBody, nil
+		return grafanaSend(ctx, httpClient, method, grafanaUrl+path, username, password, bodyJson, headers, 1024*1024)
 	}
 
 	// ensure the folder
