@@ -883,6 +883,94 @@ func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
 	}
 }
 
+// The model package's public native-fee roots need the sn release gate's
+// exports and, by design, fail without them. Only a run that sets none of the
+// gate's variables leaves them out, and only from ./model; any one of them
+// set, even empty, runs them exactly as the caller asked.
+func TestServerTestScriptSkipsNativeFeePublicRootsOnlyWithoutGateExports(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "native-fee-skip" {
+		os.Exit(0)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateVariables := []string{
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY",
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER",
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256",
+	}
+	callerArgs := []string{"-run", "^Test selected fixture$", "-short"}
+	packageInvocation := func(directory string, skip bool) []string {
+		invocation := []string{directory, "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}
+		if skip {
+			invocation = append(invocation, "-skip", "TestStNativeFeeSettlementPublic")
+		}
+		return append(invocation, callerArgs...)
+	}
+	for _, test := range []struct {
+		name string
+		set  map[string]string
+		skip bool
+	}{
+		{"no_gate_variable", nil, true},
+		{"fixture_directory", map[string]string{gateVariables[0]: "/synthetic/native-fee"}, false},
+		{"verifier", map[string]string{gateVariables[1]: "/synthetic/native-fee-verifier/mainnet.test"}, false},
+		{"empty_verifier_sha256", map[string]string{gateVariables[2]: ""}, false},
+		{"all_gate_variables", map[string]string{gateVariables[0]: "/synthetic/native-fee", gateVariables[1]: "/synthetic/native-fee-verifier/mainnet.test", gateVariables[2]: "sha256:synthetic"}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexec \"$TEST_SERVER_RUNNER_CAT\"\n")
+			serverDir := filepath.Join(workspaceRoot, "server")
+			if err := os.MkdirAll(filepath.Join(serverDir, "model"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			selector := "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n./model\\n'\n"
+			if err := os.WriteFile(filepath.Join(serverDir, "test-dirs.sh"), []byte(selector), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			overrides := map[string]string{
+				"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"TEST_SERVER_RUNNER_BINARY":           testBinary,
+				"TEST_SERVER_RUNNER_CAT":              catPath,
+				"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptSkipsNativeFeePublicRootsOnlyWithoutGateExports",
+				"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+				"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+				"URNETWORK_ROOT":                      workspaceRoot,
+				"WARP_TEST_ENV_FAIL_FAST":             "0",
+				testServerRunnerChildMode:             "native-fee-skip",
+			}
+			unset := []string{"TEST_SERVER_RUNNER_UPSTREAM_STATUS"}
+			for _, name := range gateVariables {
+				if value, ok := test.set[name]; ok {
+					overrides[name] = value
+				} else {
+					unset = append(unset, name)
+				}
+			}
+			cmd := exec.Command("bash", append([]string{runnerPath}, callerArgs...)...)
+			cmd.Env = testCommandEnvironment(overrides, unset...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("runner failed: %v\n%s", err, output)
+			}
+			requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+				testServerRunnerAdmissionInvocation(),
+				append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
+				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
+				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+				packageInvocation("server/fixture", false),
+				packageInvocation("server/model", test.skip),
+			})
+		})
+	}
+}
+
 // The manifest is an independently pinned description of the exact local
 // vault/config boundary, including resources resolved from config/all.
 func TestSuiteProxyResourceManifestMatchesFullLocalSuiteBoundary(t *testing.T) {

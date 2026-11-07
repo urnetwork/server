@@ -122,17 +122,60 @@ func TestCompetitionSupervisorAcquireRetryPgRejectsEarlierCommittedHistory(t *te
 			server.Tx(ctx, func(tx server.PgTx) {
 				observation.callbackEntered = true
 				server.RaisePgResult(tx.Exec(ctx, `SELECT 1`))
-			}, &observation.phase, &observation.timing, observation.read)
+			}, &observation.phase, &observation.timing, &observation.acquire, observation.read)
 			release = holdCompetitionSupervisorAcquirePgPool(t, ctx)
 			child, stop := context.WithTimeout(ctx, time.Second)
 			defer stop()
 			server.Tx(child, func(server.PgTx) { panic("synthetic later acquire must not admit") },
-				&observation.phase, &observation.timing, observation.read)
+				&observation.phase, &observation.timing, &observation.acquire, observation.read)
 		})
 		proof, ok := err.(competitionSupervisorRenewError)
 		if !ok || !errors.Is(err, context.DeadlineExceeded) || proof.phase != server.DbOperationAcquire || proof.acquire.Admitted ||
 			proof.read.AcquireSucceeded != 1 || !proof.callbackEntered || observation.timing.Phases[server.DbTimingCommit].Count != 1 || competitionSupervisorUnadmittedDeadline(err) {
 			t.Fatal("final acquire erased real earlier commit/callback history", err, proof.read)
+		}
+		// The acquisition option spans both inner transactions; only the last,
+		// refused attempt is retained.
+		if proof.acquire.Attempt != 2 || proof.read.PhaseCounts[server.DbReadAcquireBegin] != 2 || !proof.acquire.Returned ||
+			proof.acquire.PoolEntry.Maximum != 1 || proof.acquire.PoolReturn == nil {
+			t.Fatal("renewal observation lost its acquisition snapshot", proof.acquire)
+		}
+	})
+}
+
+// The worker's fence read supplies the renewal observation's acquisition
+// snapshot as its own option; a real refused acquire must reach the proof.
+func TestCompetitionSupervisorWorkerFencePgObservesUnadmittedAcquire(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
+		fixture := newCompetitionAutomationFixture(t)
+		lease, err := fixture.store.AcquireAutomationLease(ctx, fixture.settings, "synthetic-fence-acquire-owner", time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		restore := competitionSupervisorAcquirePgPool(t)
+		defer restore()
+		release := holdCompetitionSupervisorAcquirePgPool(t, ctx)
+		defer release()
+		child, stop := context.WithTimeout(ctx, time.Second)
+		observed, err := readCompetitionSupervisorWorkerFence(child, fixture.store, fixture.settings, *lease)
+		stop()
+		proof, ok := err.(competitionSupervisorRenewError)
+		if !observed.IsZero() || !ok || !errors.Is(err, context.DeadlineExceeded) || proof.phase != server.DbOperationAcquire || proof.callbackEntered {
+			t.Fatal("refused fence read changed its cause or entered its callback", observed, err)
+		}
+		if proof.acquire.Attempt != 1 || !proof.acquire.Returned || proof.acquire.Admitted || proof.acquire.PoolEntry.Maximum != 1 ||
+			proof.acquire.PoolEntry.Acquired != 1 || proof.acquire.PoolReturn == nil || proof.acquire.AtReturn.State != "deadline" ||
+			proof.read.PhaseCounts[server.DbReadAcquireBegin] != 1 || proof.read.AcquireSucceeded != 0 {
+			t.Fatal("fence read lost its acquisition snapshot", proof.acquire, proof.read)
+		}
+		release()
+		observed, err = readCompetitionSupervisorWorkerFence(ctx, fixture.store, fixture.settings, *lease)
+		if err != nil || !observed.Equal(lease.LeaseExpiresAt) {
+			t.Fatal("released pool did not restore the fence read", observed, err)
 		}
 	})
 }
