@@ -236,6 +236,8 @@ func TestFp2SecurityEventsOrderIndependentlyOfUnmeasuredReports(t *testing.T) {
 		now := server.NowUtc().Truncate(time.Microsecond)
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, MeasuredAt: now, NotMeasuredCount: 1})
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: clientId, MeasuredAt: now.Add(-2 * time.Minute), Total: 1, TLSAuthenticationFailure: true, UrlProbeEvidence: fp2TestUrlEvidence(now.Add(-2*time.Minute), "https://affected.example/", true)})
+		// what follows is the finding's ordering once judged the provider's own
+		testingJudgeTlsFindingsTheProvidersOwn(t, ctx)
 		if !GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[clientId] {
 			t.Fatal("a newer unmeasured report suppressed a delayed TLS finding")
 		}
@@ -310,6 +312,8 @@ func TestFp2UrlSecurityRecoveryIsExactOrderedAndIdempotent(t *testing.T) {
 		submit(now, "https://a.example/", true, 0)
 		submit(now, "https://b.example/", true, 0)
 		submit(now.Add(time.Second), "https://unrelated.example/", false, 1)
+		// what follows is the findings' recovery once judged the provider's own
+		testingJudgeTlsFindingsTheProvidersOwn(t, ctx)
 		assertQuarantine(true)
 		submit(now.Add(2*time.Second), "https://a.example/", false, 0)
 		assertQuarantine(true)
@@ -324,6 +328,7 @@ func TestFp2UrlSecurityRecoveryIsExactOrderedAndIdempotent(t *testing.T) {
 		assertQuarantine(false)
 		submit(now.Add(5*time.Second), "https://b.example/", true, 0)
 		submit(now.Add(5*time.Second), "https://b.example/", false, 1)
+		testingJudgeTlsFindingsTheProvidersOwn(t, ctx)
 		assertQuarantine(true)
 		submit(now.Add(6*time.Second), "https://b.example/", false, 0)
 		assertQuarantine(false)
@@ -348,7 +353,7 @@ func TestFp2LegacyTlsQuarantineCannotClearOnUnrelatedUrl(t *testing.T) {
 			t.Fatal("unidentified legacy security finding was silently cleared")
 		}
 		server.Db(ctx, func(conn server.PgConn) {
-			rows, err := conn.Query(ctx, `SELECT (`+providerHasUrlSecurityExceptionSql("$1")+`)`, clientId)
+			rows, err := conn.Query(ctx, `SELECT (`+providerHasUrlSecurityExclusionSql("$1")+`)`, clientId)
 			server.WithPgResult(rows, err, func() {
 				if !rows.Next() {
 					t.Fatal("missing common-gate verdict")

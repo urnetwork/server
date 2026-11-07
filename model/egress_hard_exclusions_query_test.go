@@ -17,11 +17,14 @@ func hardExclusionUnscopedSqlForTest() string {
 		WHERE client_id = ANY($1) AND NOT (` + providerEgressEligibilitySql("provider_location") + `)
 		UNION SELECT client_id FROM provider_egress_health
 		WHERE client_id = ANY($1) AND tls_authentication_failure = true
-		UNION SELECT client_id FROM provider_egress_url_security
-		WHERE client_id = ANY($1) AND tls_failure`
+		UNION SELECT client_id FROM provider_egress_url_security AS url_security
+		WHERE client_id = ANY($1) AND ` + providerUrlSecurityExcludesSql("url_security")
 }
 
-// The indexed keys and nullability match the four durable input relations.
+// The indexed keys and nullability match the four durable input relations. A
+// URL finding's verdict defaults to the provider's own, the one that excludes
+// (provider_egress_tls_verdict.go), so a fixture that names only tls_failure
+// is a judged finding.
 func testingHardExclusionQueryTables(t testing.TB, tx server.PgTx, temporary bool) {
 	t.Helper()
 	for _, query := range []string{
@@ -29,7 +32,7 @@ func testingHardExclusionQueryTables(t testing.TB, tx server.PgTx, temporary boo
 		`CREATE TEMP TABLE network_client_location_reliability(client_id uuid PRIMARY KEY, arin_risk bool NOT NULL) ON COMMIT DROP`,
 		`CREATE TEMP TABLE client_connection_reliability_score(client_id uuid, lookback_index int, independent_reliability_weight double precision NOT NULL, PRIMARY KEY(client_id,lookback_index)) ON COMMIT DROP`,
 		`CREATE TEMP TABLE provider_egress_health(client_id uuid PRIMARY KEY, tls_authentication_failure bool NOT NULL, legacy_tls_authentication_failure bool NOT NULL) ON COMMIT DROP`,
-		`CREATE TEMP TABLE provider_egress_url_security(client_id uuid, url_key text, tls_failure bool NOT NULL, PRIMARY KEY(client_id,url_key)) ON COMMIT DROP`,
+		`CREATE TEMP TABLE provider_egress_url_security(client_id uuid, url_key text, tls_failure bool NOT NULL, tls_verdict smallint NOT NULL DEFAULT 1, PRIMARY KEY(client_id,url_key)) ON COMMIT DROP`,
 		`CREATE INDEX ON provider_egress_health(client_id) WHERE tls_authentication_failure`,
 		`CREATE INDEX ON provider_egress_url_security(client_id,url_key) WHERE tls_failure`,
 	} {
@@ -59,7 +62,13 @@ func TestProviderHardExclusionsQueryPolicyParity(t *testing.T) {
 				legacyTls bool
 				weights   map[int]float64
 				urls      []bool
-				excluded  bool
+				// the verdict of every URL finding; nil is the judged
+				// provider verdict the table defaults to
+				urlVerdict *ProviderEgressTlsVerdict
+				excluded   bool
+			}
+			verdictOf := func(verdict ProviderEgressTlsVerdict) *ProviderEgressTlsVerdict {
+				return &verdict
 			}
 			minimums := providerReliabilityMinimums()
 			providers := []provider{
@@ -79,6 +88,11 @@ func TestProviderHardExclusionsQueryPolicyParity(t *testing.T) {
 				{name: "no_rollup_legacy", health: true, legacyTls: true},
 				{name: "no_rollup_tls", health: true, tls: true, excluded: true},
 				{name: "no_rollup_url", urls: []bool{true}, excluded: true},
+				// a finding excludes only once judged the provider's own
+				{name: "pending_url_finding", rollup: true, urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictPending)},
+				{name: "site_url_finding", rollup: true, urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictSite)},
+				{name: "no_rollup_place_url_finding", urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictPlace)},
+				{name: "no_rollup_retired_url_finding", urls: []bool{true}, urlVerdict: verdictOf(ProviderEgressTlsVerdictRetired)},
 				{name: "unknown"},
 				{name: "overlapping_failures", rollup: true, risk: true, health: true, tls: true, legacyTls: true, weights: map[int]float64{1: 0, 2: 0, 3: 0}, urls: []bool{true, true}, excluded: true},
 			}
@@ -94,8 +108,12 @@ func TestProviderHardExclusionsQueryPolicyParity(t *testing.T) {
 				for lookback, weight := range fixture.weights {
 					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO client_connection_reliability_score VALUES($1,$2,$3)`, ids[i], lookback, weight))
 				}
+				verdict := ProviderEgressTlsVerdictProvider
+				if fixture.urlVerdict != nil {
+					verdict = *fixture.urlVerdict
+				}
 				for url, failure := range fixture.urls {
-					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security VALUES($1,$2,$3)`, ids[i], fmt.Sprint(url), failure))
+					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security VALUES($1,$2,$3,$4)`, ids[i], fmt.Sprint(url), failure, int16(verdict)))
 				}
 			}
 			outside := server.NewId()

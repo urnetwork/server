@@ -456,7 +456,7 @@ func setProviderEgressProbeAttemptInTx(ctx context.Context, tx server.PgTx, a *P
 			providerUrlProbePacedAttemptSql("provider_egress_probe_cycle", "$2", "0")+`
 			WHERE client_id=$1 AND cycle_started_at <= $2
 			AND ((SELECT run_count < $3 FROM (`+providerUrlProbeRunWindowSql("provider_egress_probe_cycle.client_id", "$2")+`) AS recent)
-				OR (`+providerHasUrlSecurityExceptionSql("provider_egress_probe_cycle.client_id")+`))
+				OR (`+providerHasUrlSecurityRecheckSql("provider_egress_probe_cycle.client_id")+`))
 			AND (latest_result_at IS NULL OR latest_result_at < $2)`,
 			a.ClientId, a.AttemptAt.UTC(), ProviderUrlProbeRunTarget))
 	}

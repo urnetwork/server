@@ -163,6 +163,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleProviderBandwidthProbe(clientSession, tx)
 		work.ScheduleRefreshEgressDestinations(clientSession, tx)
 		work.ScheduleRollupProviderEgressTallies(clientSession, tx)
+		// a URL TLS finding excludes its provider only once judged its own
+		// (model/provider_egress_tls_verdict.go)
+		work.ScheduleJudgeProviderEgressTlsFindings(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
 		// the public seed bundle and its mirror check
@@ -536,6 +539,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RefreshEgressDestinations,
 			work.RefreshEgressDestinationsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.JudgeProviderEgressTlsFindings,
+			work.JudgeProviderEgressTlsFindingsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.ExtenderProbe,

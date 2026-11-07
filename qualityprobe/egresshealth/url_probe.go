@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// The UrlSource of a turn that rechecked one of the provider's stored TLS
+// findings rather than drawing from the pool.
+const UrlSourceSecurityRecheck = "security_recheck"
+
 // A single URL outcome stays visible whether it passes or fails. There are no
 // sleeping retry chains: the server records it and schedules the next turn.
 func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Result, error) {
@@ -33,7 +37,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 	source := "general"
 	if len(opts.SecurityDestinations) > 0 && rng.Intn(2) == 0 {
 		compatible = opts.SecurityDestinations
-		source = "security_recheck"
+		source = UrlSourceSecurityRecheck
 	} else {
 		if len(country) == 0 {
 			source = "general_country_unavailable"
@@ -43,7 +47,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 		}
 	}
 	chosen := compatible[rng.Intn(len(compatible))]
-	if source == "security_recheck" {
+	if source == UrlSourceSecurityRecheck {
 		chosen.Canary = false
 		chosen.Incompatible = nil
 	}

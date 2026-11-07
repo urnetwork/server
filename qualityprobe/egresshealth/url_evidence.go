@@ -20,8 +20,10 @@ type UrlProbeSecurityEvent struct {
 	TlsAuthenticated bool        `json:"tls_authenticated"`
 }
 
-// The configured URL is public catalog data, retained so its exact security
-// exception remains recheckable after a catalog edit. No raw response is kept.
+// The configured URL is public catalog data, retained as the exact target of
+// a security recheck. A finding whose destination leaves the served pool is
+// retired by the server's TLS judge and no longer rechecked. No raw response
+// is kept.
 type UrlProbeEvidence struct {
 	PolicyVersion             int                     `json:"policy_version"`
 	Policy                    UrlProbePolicy          `json:"policy"`

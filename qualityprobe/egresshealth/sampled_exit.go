@@ -44,6 +44,13 @@ var nonExitPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("3fff::/20"),
 }
 
+// PublicAddress is publicExitAddress, exported so a direct server-side check
+// of a probe target (the TLS finding judge) dials only the public addresses a
+// probe target may have.
+func PublicAddress(ip netip.Addr) bool {
+	return publicExitAddress(ip)
+}
+
 // IPv6 exit evidence must be ordinary global allocation, not translation,
 // documentation, benchmarking, loopback, link-local or private address space.
 func publicExitAddress(ip netip.Addr) bool {

@@ -1415,7 +1415,13 @@ func (self *providerEgressFullBatch) release(
 				failure = prober.FailureNotMeasured
 				publicationFailed = true
 			}
-			if (submitted || scored.Total < 1) && recordTally != nil {
+			// A security recheck is aimed at a URL the provider already failed,
+			// not drawn at random, so it is no evidence of how the site does at
+			// the provider's place. The TLS judge reads the place's tally to
+			// tell a site that does not work there from a provider that
+			// intercepts it; an intercepting provider's own rechecks would
+			// otherwise fill its place's tally with its failures.
+			if (submitted || scored.Total < 1) && recordTally != nil && entry.health.UrlSource != egresshealth.UrlSourceSecurityRecheck {
 				loads, runHealthy := egressHealthSiteLoads(entry.health, place, scoring, healthyShare)
 				recordTally(ctx, server.NowUtc(), model.ProviderEgressRunTally{
 					Place:      place,

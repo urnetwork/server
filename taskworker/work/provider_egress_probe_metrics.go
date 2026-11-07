@@ -314,6 +314,13 @@ var egressProbeFleetFlaggedProviders = prometheus.NewGaugeVec(prometheus.GaugeOp
 	Help:      "Providers carrying a flag: blackholed, tls_authentication_failed",
 }, []string{"flag"})
 
+var egressProbeFleetTlsFindings = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_probe",
+	Name:      "fleet_tls_findings",
+	Help:      "Unresolved exact-URL TLS findings by the TLS judge's verdict: pending (not judged yet), provider (excludes its provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the URL is no longer served)",
+}, []string{"verdict"})
+
 var egressProbeFleetDominantFailure = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
@@ -381,6 +388,7 @@ func init() {
 		egressProbeFleetAttemptProviders,
 		egressProbeFleetHealthProviders,
 		egressProbeFleetFlaggedProviders,
+		egressProbeFleetTlsFindings,
 		egressProbeFleetDominantFailure,
 		egressProbeFleetDominantShare,
 		egressProbeFleetDarkShare,
@@ -721,10 +729,12 @@ func lookupProviderEgressCountry(ctx context.Context, providerClientId string) s
 
 // egressProbeFleetSnapshot is what the fleet gauges are set from.
 type egressProbeFleetSnapshot struct {
-	outcomeTally     map[string]int
-	healthStates     map[string]int
-	blackholed       int
-	tlsAuthFailed    int
+	outcomeTally  map[string]int
+	healthStates  map[string]int
+	blackholed    int
+	tlsAuthFailed int
+	// unresolved TLS findings by the TLS judge's verdict
+	tlsFindings      map[model.ProviderEgressTlsVerdict]int
 	dominantClass    string
 	dominantShare    float64
 	knownFailClasses []string
@@ -788,6 +798,9 @@ func setEgressProbeFleetGauges(snapshot egressProbeFleetSnapshot) {
 	}
 	egressProbeFleetFlaggedProviders.WithLabelValues("blackholed").Set(float64(snapshot.blackholed))
 	egressProbeFleetFlaggedProviders.WithLabelValues("tls_authentication_failed").Set(float64(snapshot.tlsAuthFailed))
+	for _, verdict := range model.ProviderEgressTlsVerdicts {
+		egressProbeFleetTlsFindings.WithLabelValues(verdict.String()).Set(float64(snapshot.tlsFindings[verdict]))
+	}
 	classes := append([]string{}, egressProbeKnownFailureClasses...)
 	classes = append(classes, snapshot.knownFailClasses...)
 	if snapshot.dominantClass != "" {
@@ -861,6 +874,7 @@ func refreshEgressProbeFleetMetrics(ctx context.Context) {
 		}
 	}
 	snapshot.tlsAuthFailed = len(model.GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx))
+	snapshot.tlsFindings = model.GetProviderEgressTlsFindingCounts(ctx)
 	if diagnosis := model.AssessProbeFleetOutcomes(tally).Dominant; diagnosis != nil && 0 < diagnosis.Eligible {
 		snapshot.dominantClass = diagnosis.DominantClass
 		snapshot.dominantShare = float64(diagnosis.DominantCount) / float64(diagnosis.Eligible)

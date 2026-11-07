@@ -1,0 +1,214 @@
+package work
+
+import (
+	"context"
+	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"slices"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+)
+
+// A security recheck is aimed at a URL the provider already failed, so it is
+// no evidence of how the site does at the provider's place: it stays out of
+// the site tally the TLS judge's place rule reads, while a drawn turn is
+// tallied as before. Otherwise an intercepting provider's own rechecks would
+// fill its place's tally with failures until the site read as broken there.
+func TestUrlTurnSecurityRecheckIsLeftOutOfTheSiteTally(t *testing.T) {
+	inner := newRecordingEgressProbeIngest()
+	batch := newProviderEgressFullBatch(testFullBatchSink(inner))
+	run := func(source string) *egresshealth.Result {
+		return &egresshealth.Result{UrlSource: source, OkCount: 0, Total: 1,
+			Checks: []egresshealth.CheckResult{{Name: "rechecked-site", Class: egresshealth.ClassSite, StatusCode: 403, ByteCount: 1}}}
+	}
+	ctx := context.Background()
+	for provider, source := range map[string]string{"drawn-provider": "general_country_unavailable", "rechecking-provider": "security_recheck"} {
+		if err := batch.SubmitEgressHealth(ctx, provider, run(source)); err != nil {
+			t.Fatal(err)
+		}
+		if err := batch.ReportAttempt(ctx, provider, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tallied := map[string]int{}
+	var tallyLock sync.Mutex
+	places := map[string]model.ProviderEgressPlace{
+		"drawn-provider":      {CountryCode: "zz"},
+		"rechecking-provider": {CountryCode: "zy"},
+	}
+	batch.release(ctx, false, places, nil, 0.9, func(_ context.Context, _ time.Time, run model.ProviderEgressRunTally, loads []model.ProviderEgressSiteLoad) {
+		tallyLock.Lock()
+		defer tallyLock.Unlock()
+		tallied[run.Place.CountryCode] += len(loads)
+	})
+	if tallied["zz"] != 1 {
+		t.Fatalf("a drawn URL turn was not tallied: %v", tallied)
+	}
+	if tallied["zy"] != 0 {
+		t.Fatalf("a security recheck was tallied as a load of its site at the provider's place: %v", tallied)
+	}
+}
+
+// A direct check calls a certificate the system roots cannot verify a
+// failure, as the probe does, and anything that never reaches a verdict
+// (a refused dial, a peer that hangs up mid-handshake) inconclusive.
+func TestProviderEgressTlsDirectCheckClassifiesOnlyVerificationFailures(t *testing.T) {
+	ctx := context.Background()
+	untrusted := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer untrusted.Close()
+	if outcome := observeProviderEgressTlsDirectAt(ctx, "127.0.0.1", untrusted.Listener.Addr().String()); outcome != model.ProviderEgressTlsDirectFailed {
+		t.Errorf("an unverifiable certificate was %s", outcome)
+	}
+
+	closed, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	refusedAddr := closed.Addr().String()
+	closed.Close()
+	if outcome := observeProviderEgressTlsDirectAt(ctx, "127.0.0.1", refusedAddr); outcome != model.ProviderEgressTlsDirectInconclusive {
+		t.Errorf("a refused dial was %s", outcome)
+	}
+
+	hangup, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hangup.Close()
+	go func() {
+		for {
+			conn, err := hangup.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	if outcome := observeProviderEgressTlsDirectAt(ctx, "127.0.0.1", hangup.Addr().String()); outcome != model.ProviderEgressTlsDirectInconclusive {
+		t.Errorf("a peer that hung up mid-handshake was %s", outcome)
+	}
+	if outcome := observeProviderEgressTlsDirect(ctx, ""); outcome != model.ProviderEgressTlsDirectInconclusive {
+		t.Errorf("an empty host was %s", outcome)
+	}
+}
+
+// A direct check dials a host only at a public address a probe target may
+// have: a literal or a name that is only inward is inconclusive and never
+// dialed from the taskworker.
+func TestProviderEgressTlsDirectCheckDialsOnlyPublicAddresses(t *testing.T) {
+	ctx := context.Background()
+	for _, host := range []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "100.64.0.1", "169.254.169.254", "::1", "fc00::1", "localhost", ""} {
+		if addr, ok := providerEgressTlsDirectAddress(ctx, host); ok {
+			t.Errorf("%q dials %s", host, addr)
+		}
+		if outcome := observeProviderEgressTlsDirect(ctx, host); outcome != model.ProviderEgressTlsDirectInconclusive {
+			t.Errorf("%q was %s", host, outcome)
+		}
+	}
+	for _, host := range []string{"1.1.1.1", "2606:4700:4700::1111"} {
+		if addr, ok := providerEgressTlsDirectAddress(ctx, host); !ok || addr.String() != host {
+			t.Errorf("public literal %q resolved to %s %t", host, addr, ok)
+		}
+	}
+}
+
+// With no served pool the judge changes nothing: retiring every finding, or
+// keeping a stale served set, would both be guesses. It reads no finding.
+func TestProviderEgressTlsJudgeWithoutAPoolChangesNothing(t *testing.T) {
+	before := testutil.ToFloat64(providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable"))
+	result, err := judgeProviderEgressTlsFindings(context.Background(), time.Now(), &providerEgressTlsJudgeSources{
+		served: func(context.Context) (map[string]bool, error) { return nil, errors.New("synthetic pool refusal") },
+		siteSettings: func() (*model.ProviderEgressSiteSettings, error) {
+			t.Fatal("the judge read its settings without a pool")
+			return nil, nil
+		},
+		direct: func(context.Context, string) model.ProviderEgressTlsDirectOutcome {
+			t.Fatal("the judge checked a host without a pool")
+			return model.ProviderEgressTlsDirectInconclusive
+		},
+	})
+	if err != nil || result.Skipped != "pool_unavailable" || result.Findings != 0 {
+		t.Fatalf("judge without a pool: %+v %v", result, err)
+	}
+	if after := testutil.ToFloat64(providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable")); after != before+1 {
+		t.Fatalf("pool_unavailable runs %v -> %v", before, after)
+	}
+}
+
+// One run of the task: the hosts it checks are only those of served findings
+// still to be judged and recent enough for a check now to be close to them;
+// a finding on an unserved destination is retired without a check; and every
+// stored verdict and check is counted.
+func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		report := func(name string, target string, at time.Time) server.Id {
+			clientId := server.NewId()
+			model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
+			destination := egresshealth.Destination{Name: name, Class: egresshealth.ClassSite, Url: target}
+			model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
+				RunId: server.NewId(), ClientId: clientId, MeasuredAt: at, Total: 1, TLSAuthenticationFailure: true,
+				UrlProbeEvidence: &egresshealth.UrlProbeEvidence{
+					PolicyVersion: egresshealth.UrlProbePolicyVersion, Policy: egresshealth.DefaultUrlProbePolicy(),
+					Destination: destination, MeasuredAt: at, ContentMatcherVersion: 1, FailureStage: "request",
+					Security: []egresshealth.UrlProbeSecurityEvent{{Destination: destination, MeasuredAt: at, TlsFailure: true}},
+				},
+			})
+			return clientId
+		}
+		fresh := report("fresh-site", "https://fresh.example/", now.Add(-time.Minute))
+		unserved := report("unserved-site", "https://unserved.example/", now.Add(-time.Minute))
+		old := report("old-site", "https://old.example/", now.Add(-2*time.Hour))
+
+		verdicts := func(verdict model.ProviderEgressTlsVerdict) float64 {
+			return testutil.ToFloat64(providerEgressTlsVerdictsTotal.WithLabelValues(verdict.String()))
+		}
+		providerBefore, retiredBefore := verdicts(model.ProviderEgressTlsVerdictProvider), verdicts(model.ProviderEgressTlsVerdictRetired)
+		verifiedBefore := testutil.ToFloat64(providerEgressTlsDirectChecksTotal.WithLabelValues("verified"))
+		checked := []string{}
+		var checkedLock sync.Mutex
+		result, err := judgeProviderEgressTlsFindings(ctx, now, &providerEgressTlsJudgeSources{
+			served: func(context.Context) (map[string]bool, error) {
+				return map[string]bool{"fresh-site": true, "old-site": true}, nil
+			},
+			siteSettings: func() (*model.ProviderEgressSiteSettings, error) {
+				return model.DefaultProviderEgressSiteSettings(), nil
+			},
+			direct: func(_ context.Context, host string) model.ProviderEgressTlsDirectOutcome {
+				checkedLock.Lock()
+				defer checkedLock.Unlock()
+				checked = append(checked, host)
+				return model.ProviderEgressTlsDirectVerified
+			},
+		})
+		if err != nil || result.Skipped != "" || result.Findings != 3 || result.Changed != 2 {
+			t.Fatalf("judge run: %+v %v", result, err)
+		}
+		if !slices.Equal(checked, []string{"fresh.example"}) {
+			t.Fatalf("checked hosts %v, want only the fresh served finding's", checked)
+		}
+		excluded := model.GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)
+		if !excluded[fresh] || excluded[unserved] || excluded[old] {
+			t.Fatalf("excluded fresh=%t unserved=%t old=%t, want only the corroborated fresh finding", excluded[fresh], excluded[unserved], excluded[old])
+		}
+		if result.Verdicts["provider"] != 1 || result.Verdicts["retired"] != 1 || result.Verdicts["pending"] != 1 {
+			t.Fatalf("run verdicts %v", result.Verdicts)
+		}
+		if verdicts(model.ProviderEgressTlsVerdictProvider) != providerBefore+1 || verdicts(model.ProviderEgressTlsVerdictRetired) != retiredBefore+1 {
+			t.Fatal("stored verdicts were not counted")
+		}
+		if testutil.ToFloat64(providerEgressTlsDirectChecksTotal.WithLabelValues("verified")) != verifiedBefore+1 {
+			t.Fatal("the direct check was not counted")
+		}
+	})
+}

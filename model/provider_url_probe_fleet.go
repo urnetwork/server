@@ -81,7 +81,7 @@ func GetProviderUrlProbeFleetObserved(ctx context.Context, now time.Time, observ
 func providerUrlProbeFleetSql(policy int) string {
 	return `WITH cohort AS MATERIALIZED (
 			SELECT cycle.client_id,cycle.cycle_started_at,cycle.next_attempt_at,recent.run_count,
-				` + providerHasUrlSecurityExceptionSql("provider.client_id") + ` AS security_exception,
+				` + providerHasUrlSecurityRecheckSql("provider.client_id") + ` AS security_exception,
 				EXISTS(SELECT 1 FROM provider_egress_health AS health
 					WHERE health.client_id=provider.client_id AND health.legacy_tls_authentication_failure) AS unknown_security_target
 			FROM network_client_location_reliability AS provider

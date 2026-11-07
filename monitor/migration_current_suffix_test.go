@@ -297,6 +297,14 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE legacy_settlement_intent DROP CONSTRAINT legacy_settlement_intent_check`},
 		{name: "retained legacy settlement queue invents an accounting failure", version: server.LegacySettlementIntentRetirementMigrationVersion(),
 			sql: `ALTER TABLE legacy_settlement_intent ALTER COLUMN failure_code SET DEFAULT 'accounting'`},
+		// A new TLS finding is pending until judged; a provider default would
+		// exclude on arrival, and a missing column breaks every reader.
+		{name: "TLS finding verdict missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict`},
+		{name: "TLS finding verdict defaults to excluding", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security ALTER COLUMN tls_verdict SET DEFAULT 1`},
+		{name: "TLS finding decided failure missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict_measured_at`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

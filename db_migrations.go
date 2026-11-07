@@ -11364,4 +11364,11 @@ var migrations = []any{
 	// A prospective typed operator-stop exception adds an independent guard;
 	// previous recovery classes and published migration bytes stay unchanged.
 	competitionOperatorInterruptionMigration,
+
+	// The stored judgement of each exact-URL TLS finding (D1,
+	// db_provider_egress_tls_verdict.go). Two additive columns, a constant
+	// default and a NULL, under a five-second lock bound; every current
+	// exclusion is kept until the judge reads it. Apply before deploying the
+	// api, alt, taskworker and proxy that use it.
+	providerEgressTlsVerdictMigration,
 }

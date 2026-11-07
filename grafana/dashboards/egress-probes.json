@@ -666,7 +666,7 @@
     {
       "type": "stat",
       "title": "tls authentication failed",
-      "description": "Providers whose egress presented a certificate that could not authenticate the requested host: an interception signal, kept apart from the score.",
+      "description": "Providers hard-excluded by TLS: an exact-URL finding the TLS judge found specific to the provider (the URL verified directly from the server, and no site, prober or country fault explains it), or a retained legacy flag. A finding still pending, or judged a site, prober, country or retired-URL fault, excludes nobody; see the TLS findings panels below.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -7505,6 +7505,110 @@
           "refId": "C",
           "expr": "sum by (step) (rate(urnetwork_egress_probe_bandwidth_readiness_failures_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
           "legendFormat": "readiness {{step}}"
+        }
+      ]
+    },
+    {
+      "id": 149,
+      "type": "row",
+      "title": "tls findings: judged verdicts, direct checks, judge runs",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 492
+      }
+    },
+    {
+      "id": 150,
+      "type": "timeseries",
+      "title": "unresolved TLS findings by verdict",
+      "description": "Unresolved exact-URL TLS findings by the TLS judge's verdict, from the freshest fleet snapshot. pending: not judged yet, excludes nobody. provider: specific to its provider, which is hard-excluded. site: a site or prober fault (the URL failed a direct check from the server, or providers on 16 or more networks failed it within the hour). place: the site does not work from the provider's country. retired: the pool no longer serves the URL. Only provider excludes, and only pending and provider are rechecked.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 493
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (verdict) (urnetwork_egress_probe_fleet_tls_findings{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "legendFormat": "{{verdict}}"
+        }
+      ]
+    },
+    {
+      "id": 151,
+      "type": "timeseries",
+      "title": "TLS judge: verdicts stored, direct checks and runs / hour",
+      "description": "Findings the TLS judge moved to each verdict, its direct server-side TLS checks of recent findings' hosts by outcome (failed is a certificate the server itself cannot verify: a site or prober fault), and its runs (pool_unavailable: the served pool could not be built, so nothing was judged). A burst of site verdicts is one site's certificate, or the prober's CA bundle or clock, failing through many networks at once; the taskworker log names the destination.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 493
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (verdict) (rate(urnetwork_egress_tls_verdicts_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "verdict {{verdict}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (outcome) (rate(urnetwork_egress_tls_direct_checks_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "direct {{outcome}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (result) (rate(urnetwork_egress_tls_judge_runs_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "legendFormat": "run {{result}}"
         }
       ]
     }
