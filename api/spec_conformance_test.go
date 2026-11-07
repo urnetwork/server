@@ -20,7 +20,10 @@ package api
 //   - TestSpecRoutesImplemented: every spec path+method has a matching route in
 //     Routes(), and every route Routes() serves, streaming routes included, is
 //     documented: a /competition/ route in sn/api/competition.yml, every other
-//     route here. An undocumented route fails.
+//     route here. An undocumented route fails. A /gkm/ route is gkm's, served on
+//     its own host and held to sidecar's gkmservice table by
+//     connect/api/check-routes.sh, so the spec's need none in Routes(), and
+//     one in Routes() fails.
 //
 // Security/auth parity is intentionally out of scope (not reflectable).
 
@@ -743,32 +746,12 @@ func TestSpecRegistryRoutesImplemented(t *testing.T) {
 func TestSpecRoutesImplemented(t *testing.T) {
 	spec := loadSpec(t)
 	implKeys := implRouteKeys()
+	specKeys := specOperationKeys(spec)
 
-	specKeys := map[string]bool{}
-	var missing []string
-	for path, methodsAny := range spec.paths {
-		for method := range asMap(methodsAny) {
-			switch method {
-			case "get", "post", "put", "delete", "patch":
-			default:
-				continue
-			}
-			key := strings.ToUpper(method) + " " + normalizePath(path)
-			specKeys[key] = true
-			if !implKeys[key] {
-				// An operation the spec marks `x-status: planned` documents a
-				// route that a later change lands; it is logged, not failed,
-				// so the spec can lead the implementation by one deploy.
-				if asMap(asMap(methodsAny)[method])["x-status"] == "planned" {
-					t.Logf("spec endpoint %q is planned (x-status) and not yet in Routes()", key)
-					continue
-				}
-				missing = append(missing, key)
-			}
-		}
+	missing, planned := unimplementedOperations(spec.paths, implKeys)
+	for _, k := range planned {
+		t.Logf("spec endpoint %q is planned (x-status) and not yet in Routes()", k)
 	}
-
-	sort.Strings(missing)
 	for _, k := range missing {
 		t.Errorf("spec endpoint %q has no matching route in Routes()", k)
 	}
@@ -778,8 +761,96 @@ func TestSpecRoutesImplemented(t *testing.T) {
 		t.Errorf("route %q is served but not documented", k)
 	}
 
+	for _, k := range apiGkmRoutes(implKeys) {
+		t.Errorf("route %q is gkm's, which serves it on its own host, and api must not", k)
+	}
+
 	t.Logf("spec routes: %d spec endpoints, %d impl routes, %d spec endpoints unmatched, %d impl routes undocumented",
 		len(specKeys), len(implKeys), len(missing), len(undocumented))
+}
+
+// gkmRoute reports whether a "METHOD path" key is gkm's. bringyour.yml
+// documents gkm's routes, but server/cli/gkm serves them on gkm's own host from
+// sidecar's gkmservice, never api, so connect/api/check-routes.sh holds them to
+// gkmservice's route table, as this file holds the rest to Routes().
+func gkmRoute(key string) bool {
+	_, path, _ := strings.Cut(key, " ")
+	return strings.HasPrefix(path, "/gkm/")
+}
+
+// unimplementedOperations returns, sorted, the "METHOD path" keys of the spec
+// operations Routes() lacks, and apart from them those it lacks that the spec
+// marks `x-status: planned`: a route a later change lands, logged rather than
+// failed so the spec can lead the implementation by one deploy. A gkm
+// operation is in neither, planned or not, since api never serves one.
+func unimplementedOperations(paths map[string]any, implKeys map[string]bool) (missing []string, planned []string) {
+	for path, methodsAny := range paths {
+		for method, operation := range asMap(methodsAny) {
+			switch method {
+			case "get", "post", "put", "delete", "patch":
+			default:
+				continue
+			}
+			key := strings.ToUpper(method) + " " + normalizePath(path)
+			if implKeys[key] || gkmRoute(key) {
+				continue
+			}
+			if asMap(operation)["x-status"] == "planned" {
+				planned = append(planned, key)
+			} else {
+				missing = append(missing, key)
+			}
+		}
+	}
+	sort.Strings(missing)
+	sort.Strings(planned)
+	return missing, planned
+}
+
+// apiGkmRoutes returns, sorted, the gkm routes Routes() serves, each of them
+// drift whatever the spec says.
+func apiGkmRoutes(implKeys map[string]bool) []string {
+	var gkmKeys []string
+	for key := range implKeys {
+		if gkmRoute(key) {
+			gkmKeys = append(gkmKeys, key)
+		}
+	}
+	sort.Strings(gkmKeys)
+	return gkmKeys
+}
+
+// A gkm operation the spec no longer marks planned is not one api lacks, and an
+// operation api lacks still fails unless it is planned.
+func TestSpecGkmOperationsAreNotApis(t *testing.T) {
+	paths := map[string]any{
+		"/hello":                     map[string]any{"get": map[string]any{}},
+		"/provider-work/v1/cuts":     map[string]any{"post": map[string]any{}},
+		"/provider-work/v1/plans":    map[string]any{"post": map[string]any{"x-status": "planned"}},
+		"/gkm/welcomes":              map[string]any{"get": map[string]any{}},
+		"/gkm/groups/{group_id}":     map[string]any{"get": map[string]any{"x-status": "planned"}},
+		"/gkm/repos/{repo_id}/forms": map[string]any{"get": map[string]any{}, "post": map[string]any{}},
+	}
+	implKeys := map[string]bool{"GET /hello": true}
+	missing, planned := unimplementedOperations(paths, implKeys)
+	if want := []string{"POST /provider-work/v1/cuts"}; !slices.Equal(missing, want) {
+		t.Errorf("missing = %v, want %v", missing, want)
+	}
+	if want := []string{"POST /provider-work/v1/plans"}; !slices.Equal(planned, want) {
+		t.Errorf("planned = %v, want %v", planned, want)
+	}
+}
+
+// A gkm route api registers is drift, documented or not.
+func TestSpecGkmRouteApiServesIsReported(t *testing.T) {
+	implKeys := map[string]bool{
+		"GET /hello":        true,
+		"GET /gkm/welcomes": true,
+		"POST /gkmish":      true,
+	}
+	if got, want := apiGkmRoutes(implKeys), []string{"GET /gkm/welcomes"}; !slices.Equal(got, want) {
+		t.Errorf("api's gkm routes = %v, want %v", got, want)
+	}
 }
 
 // specOperationKeys returns the normalized "METHOD path" key of every
