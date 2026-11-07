@@ -354,10 +354,16 @@ func judgeProviderEgressTlsFindings(
 		}
 		result.Verdicts[verdict.String()] += 1
 	}
+	// A stored judgement that kept its verdict only recorded that it decided
+	// a newer failure; the counts and the log are of verdicts that moved.
+	moved := make([]*model.ProviderEgressTlsJudgement, 0, len(stored))
 	for _, judgement := range stored {
-		providerEgressTlsVerdictsTotal.WithLabelValues(judgement.Verdict.String()).Inc()
+		if judgement.Verdict != judgement.Finding.Verdict {
+			moved = append(moved, judgement)
+			providerEgressTlsVerdictsTotal.WithLabelValues(judgement.Verdict.String()).Inc()
+		}
 	}
-	logProviderEgressTlsJudgements(stored)
+	logProviderEgressTlsJudgements(moved)
 	providerEgressTlsJudgeRunsTotal.WithLabelValues("judged").Inc()
 	glog.Infof(
 		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d verdicts=%s\n",
@@ -379,7 +385,7 @@ func providerEgressTlsVerdictSummary(verdicts map[string]int) string {
 // and country for a place fault, with the evidence. Provider verdicts are
 // counted in the summary and the metric; their providers are in the database,
 // not the log.
-func logProviderEgressTlsJudgements(stored []*model.ProviderEgressTlsJudgement) {
+func logProviderEgressTlsJudgements(moved []*model.ProviderEgressTlsJudgement) {
 	type siteKey struct {
 		urlKey string
 	}
@@ -390,7 +396,7 @@ func logProviderEgressTlsJudgements(stored []*model.ProviderEgressTlsJudgement) 
 	sites := map[siteKey][]*model.ProviderEgressTlsJudgement{}
 	places := map[placeKey][]*model.ProviderEgressTlsJudgement{}
 	retired := map[string]int{}
-	for _, judgement := range stored {
+	for _, judgement := range moved {
 		switch judgement.Verdict {
 		case model.ProviderEgressTlsVerdictSite:
 			key := siteKey{urlKey: judgement.Finding.UrlKey}

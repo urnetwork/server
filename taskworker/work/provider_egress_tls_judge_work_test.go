@@ -152,9 +152,7 @@ func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		now := server.NowUtc().Truncate(time.Microsecond)
-		report := func(name string, target string, at time.Time) server.Id {
-			clientId := server.NewId()
-			model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
+		fail := func(clientId server.Id, name string, target string, at time.Time) {
 			destination := egresshealth.Destination{Name: name, Class: egresshealth.ClassSite, Url: target}
 			model.SetProviderEgressHealth(ctx, &model.ProviderEgressHealth{
 				RunId: server.NewId(), ClientId: clientId, MeasuredAt: at, Total: 1, TLSAuthenticationFailure: true,
@@ -164,6 +162,11 @@ func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
 					Security: []egresshealth.UrlProbeSecurityEvent{{Destination: destination, MeasuredAt: at, TlsFailure: true}},
 				},
 			})
+		}
+		report := func(name string, target string, at time.Time) server.Id {
+			clientId := server.NewId()
+			model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
+			fail(clientId, name, target, at)
 			return clientId
 		}
 		fresh := report("fresh-site", "https://fresh.example/", now.Add(-time.Minute))
@@ -177,7 +180,7 @@ func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
 		verifiedBefore := testutil.ToFloat64(providerEgressTlsDirectChecksTotal.WithLabelValues("verified"))
 		checked := []string{}
 		var checkedLock sync.Mutex
-		result, err := judgeProviderEgressTlsFindings(ctx, now, &providerEgressTlsJudgeSources{
+		sources := &providerEgressTlsJudgeSources{
 			served: func(context.Context) (map[string]bool, error) {
 				return map[string]bool{"fresh-site": true, "old-site": true}, nil
 			},
@@ -190,7 +193,8 @@ func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
 				checked = append(checked, host)
 				return model.ProviderEgressTlsDirectVerified
 			},
-		})
+		}
+		result, err := judgeProviderEgressTlsFindings(ctx, now, sources)
 		if err != nil || result.Skipped != "" || result.Findings != 3 || result.Changed != 2 {
 			t.Fatalf("judge run: %+v %v", result, err)
 		}
@@ -209,6 +213,32 @@ func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
 		}
 		if testutil.ToFloat64(providerEgressTlsDirectChecksTotal.WithLabelValues("verified")) != verifiedBefore+1 {
 			t.Fatal("the direct check was not counted")
+		}
+
+		// The judged provider fails again: the newer failure is judged on its
+		// own evidence and decided provider again, which is stored but moves no
+		// verdict, so nothing is counted as moved. It stays excluded throughout.
+		fail(fresh, "fresh-site", "https://fresh.example/", now.Add(time.Minute))
+		if !model.GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[fresh] {
+			t.Fatal("a repeated failure lapsed the judged provider out of quarantine")
+		}
+		checked = []string{}
+		result, err = judgeProviderEgressTlsFindings(ctx, now.Add(2*time.Minute), sources)
+		if err != nil || result.Changed != 1 || result.Verdicts["provider"] != 1 || !slices.Equal(checked, []string{"fresh.example"}) {
+			t.Fatalf("re-judging a newer failure: %+v %v checked=%v", result, err, checked)
+		}
+		if verdicts(model.ProviderEgressTlsVerdictProvider) != providerBefore+1 {
+			t.Fatal("a re-decided provider verdict was counted as moved")
+		}
+		if !model.GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[fresh] {
+			t.Fatal("re-judging the newer failure released the provider")
+		}
+		// Each failure is judged once: a third run with no newer failure checks
+		// nothing and stores nothing.
+		checked = []string{}
+		result, err = judgeProviderEgressTlsFindings(ctx, now.Add(3*time.Minute), sources)
+		if err != nil || result.Changed != 0 || len(checked) != 0 {
+			t.Fatalf("a decided failure was judged again: %+v %v checked=%v", result, err, checked)
 		}
 	})
 }
