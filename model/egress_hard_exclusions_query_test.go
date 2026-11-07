@@ -31,7 +31,7 @@ func testingHardExclusionQueryTables(t testing.TB, tx server.PgTx, temporary boo
 		`SET LOCAL statement_timeout='30s'`, `SET LOCAL lock_timeout='2s'`,
 		`CREATE TEMP TABLE network_client_location_reliability(client_id uuid PRIMARY KEY, arin_risk bool NOT NULL) ON COMMIT DROP`,
 		`CREATE TEMP TABLE client_connection_reliability_score(client_id uuid, lookback_index int, independent_reliability_weight double precision NOT NULL, PRIMARY KEY(client_id,lookback_index)) ON COMMIT DROP`,
-		`CREATE TEMP TABLE provider_egress_health(client_id uuid PRIMARY KEY, tls_authentication_failure bool NOT NULL, legacy_tls_authentication_failure bool NOT NULL) ON COMMIT DROP`,
+		`CREATE TEMP TABLE provider_egress_health(client_id uuid PRIMARY KEY, tls_authentication_failure bool NOT NULL, legacy_tls_authentication_failure bool NOT NULL, legacy_tls_cleared_at timestamp) ON COMMIT DROP`,
 		`CREATE TEMP TABLE provider_egress_url_security(client_id uuid, url_key text, tls_failure bool NOT NULL, tls_verdict smallint NOT NULL DEFAULT 1, PRIMARY KEY(client_id,url_key)) ON COMMIT DROP`,
 		`CREATE INDEX ON provider_egress_health(client_id) WHERE tls_authentication_failure`,
 		`CREATE INDEX ON provider_egress_url_security(client_id,url_key) WHERE tls_failure`,

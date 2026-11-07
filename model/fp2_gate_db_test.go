@@ -336,7 +336,9 @@ func TestFp2UrlSecurityRecoveryIsExactOrderedAndIdempotent(t *testing.T) {
 }
 
 // An old aggregate bit names no trustworthy URL. Never guess that the next
-// unrelated success authenticated that missing target.
+// unrelated success authenticated that missing target: one clean URL is no
+// clean recheck of the provider, which needs ten distinct catalog sites
+// verified once it is back (clearProviderEgressLegacyTlsInTx).
 func TestFp2LegacyTlsQuarantineCannotClearOnUnrelatedUrl(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -345,7 +347,8 @@ func TestFp2LegacyTlsQuarantineCannotClearOnUnrelatedUrl(t *testing.T) {
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{ClientId: clientId, MeasuredAt: now.Add(-24 * time.Hour), Total: 1, TLSAuthenticationFailure: true})
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{ClientId: clientId, MeasuredAt: now, OKCount: 1, Total: 1, UrlProbeEvidence: fp2TestUrlEvidence(now, "https://unrelated.example/", false)})
 		// During schema/API cutover a legacy writer can still replace the old
-		// projection. The retained quarantine column remains authoritative.
+		// projection. The retained quarantine column, with its clearing,
+		// remains authoritative.
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_health SET tls_authentication_failure=false WHERE client_id=$1`, clientId))
 		})

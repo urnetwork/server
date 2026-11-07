@@ -56,6 +56,8 @@ func TestUrlCompletedLocalRetryPreservesRenewalSecurityAndEligibility(t *testing
 			var tls, legacy bool
 			server.Raise(conn.QueryRow(ctx, `SELECT tls_authentication_failure,legacy_tls_authentication_failure FROM provider_egress_health WHERE client_id=$1`, due[1].ClientId).Scan(&tls, &legacy))
 			if !tls || !legacy {
+				// a local completion carries no URL evidence, so it is no
+				// clean recheck of the legacy flag
 				t.Fatal("local completion cleared security quarantine")
 			}
 		})

@@ -1077,7 +1077,7 @@ func providerHardExclusionsSql() string {
 			SELECT client_id, lookback_index, independent_reliability_weight
 			FROM client_connection_reliability_score WHERE client_id = ANY($1)
 		), provider_egress_health AS MATERIALIZED (
-			SELECT client_id, tls_authentication_failure, legacy_tls_authentication_failure
+			SELECT client_id, tls_authentication_failure, legacy_tls_authentication_failure, legacy_tls_cleared_at
 			FROM provider_egress_health WHERE client_id = ANY($1)
 		), provider_egress_url_security AS MATERIALIZED (
 			SELECT client_id, tls_failure, tls_verdict

@@ -26,10 +26,10 @@ func TestProviderEgressTlsVerdictMigrationIsAppendedAfterTheSecurityTable(t *tes
 	}
 }
 
-// The column is a constant default added under a five-second lock bound, at
-// most once; every unresolved finding starts excluding as before; the
-// projection is recomputed through its partial index; and nothing rewrites,
-// samples or deletes.
+// The columns are a constant default and NULLs added under a five-second
+// lock bound, at most once; every unresolved finding and every legacy flag
+// starts excluding as before; the projection is recomputed through its
+// partial index; and nothing rewrites, samples or deletes.
 func TestProviderEgressTlsVerdictMigrationKeepsExclusionsAndIsBounded(t *testing.T) {
 	sql := providerEgressTlsVerdictMigration.sql
 	for _, marker := range []string{
@@ -37,7 +37,10 @@ func TestProviderEgressTlsVerdictMigrationKeepsExclusionsAndIsBounded(t *testing
 		`PERFORM set_config('lock_timeout', '5s', true);`,
 		`ADD COLUMN tls_verdict smallint NOT NULL DEFAULT 0,`,
 		`ADD COLUMN tls_verdict_measured_at timestamp NULL;`,
+		`ADD COLUMN legacy_tls_recheck_from timestamp NULL,`,
+		`ADD COLUMN legacy_tls_cleared_at timestamp NULL;`,
 		`UPDATE provider_egress_url_security SET tls_verdict = 1 WHERE tls_failure;`,
+		`(health.legacy_tls_authentication_failure AND health.legacy_tls_cleared_at IS NULL) OR EXISTS (`,
 		`WHERE health.tls_authentication_failure = true;`,
 	} {
 		if !strings.Contains(sql, marker) {

@@ -634,7 +634,8 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 // exclusions: absent in both modes, with force_minimum, when named by client
 // id, as a network-only provider of the caller's own network, from the
 // online bucket and from the counts. Clearing risk restores that provider;
-// a clean aggregate cannot clear an unidentified legacy TLS finding. Exact-URL
+// a clean aggregate cannot clear an unidentified legacy TLS finding, which
+// only clean URL rechecks once the provider is back clear. Exact-URL
 // recovery is covered separately by TestFp2UrlSecurityRecoveryIsExactOrderedAndIdempotent.
 func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

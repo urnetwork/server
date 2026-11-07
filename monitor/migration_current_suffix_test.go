@@ -305,6 +305,14 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_url_security ALTER COLUMN tls_verdict SET DEFAULT 1`},
 		{name: "TLS finding decided failure missing", version: server.ProviderEgressTlsVerdictVersion(),
 			sql: `ALTER TABLE provider_egress_url_security DROP COLUMN tls_verdict_measured_at`},
+		// Without the clearing column every legacy flag reader fails; a
+		// default would clear every flag at once.
+		{name: "legacy TLS flag clearing missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_cleared_at`},
+		{name: "legacy TLS flag cleared by default", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health ALTER COLUMN legacy_tls_cleared_at SET DEFAULT now()`},
+		{name: "legacy TLS recheck start missing", version: server.ProviderEgressTlsVerdictVersion(),
+			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_recheck_from`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

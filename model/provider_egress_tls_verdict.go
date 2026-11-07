@@ -905,7 +905,7 @@ func SetProviderEgressTlsVerdicts(ctx context.Context, judgements []*ProviderEgr
 		}
 		server.RaisePgResult(tx.Exec(ctx, `
 			UPDATE provider_egress_health AS health SET
-				tls_authentication_failure = health.legacy_tls_authentication_failure OR EXISTS (
+				tls_authentication_failure = `+providerLegacyTlsUnclearedSql("health")+` OR EXISTS (
 					SELECT 1 FROM provider_egress_url_security AS security
 					WHERE security.client_id = health.client_id AND `+providerUrlSecurityExcludesSql("security")+`
 				)

@@ -83,7 +83,7 @@ func providerUrlProbeFleetSql(policy int) string {
 			SELECT cycle.client_id,cycle.cycle_started_at,cycle.next_attempt_at,recent.run_count,
 				` + providerHasUrlSecurityRecheckSql("provider.client_id") + ` AS security_exception,
 				EXISTS(SELECT 1 FROM provider_egress_health AS health
-					WHERE health.client_id=provider.client_id AND health.legacy_tls_authentication_failure) AS unknown_security_target
+					WHERE health.client_id=provider.client_id AND ` + providerLegacyTlsUnclearedSql("health") + `) AS unknown_security_target
 			FROM network_client_location_reliability AS provider
 			JOIN network_client AS client USING (client_id)
 			LEFT JOIN provider_egress_probe_cycle AS cycle USING (client_id)

@@ -208,7 +208,9 @@ func TestStaleEgressHealthStopsGatingTheProvider(t *testing.T) {
 
 // A hard TLS-authenticity failure does not become safe merely because the
 // prober stalls. An aggregate legacy finding lacks a trustworthy target, so
-// neither age nor an unrelated later passing batch can clear it.
+// neither age nor a later passing aggregate batch clears it: only clean URL
+// rechecks through ten distinct catalog sites, once the provider is back,
+// do (TestLegacyTlsFlagClearsAfterCleanRechecksOnReconnect).
 func TestTLSAuthenticationFailureWithoutUrlRetainsQuarantine(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()

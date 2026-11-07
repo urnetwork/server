@@ -60,6 +60,7 @@ func TestProviderCountCohortExportPopulationAndLoadedPlans(t *testing.T) {
 				cohortTestExec(ctx, `INSERT INTO client_connection_reliability_score(client_id,lookback_index,independent_reliability_weight) VALUES($1,0,1),($1,1,$2)`, id, weight)
 			}
 			if n == 4 {
+				// an uncleared legacy flag excludes, however old
 				cohortTestExec(ctx, `INSERT INTO provider_egress_health(client_id,legacy_tls_authentication_failure,measured_at) VALUES($1,true,now()-interval '30 days')`, id)
 			}
 			cohortTestExec(ctx, `INSERT INTO provider_egress_location VALUES($1,'US',now())`, id)
