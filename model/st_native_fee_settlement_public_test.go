@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/nativefee"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/nativefeefixture"
 )
 
 // Only the independently selected exporter image supplies these original pins.
@@ -40,7 +41,9 @@ type stNativeFeePublicManifest struct {
 }
 
 // The exact exporter image and persistent original directory are selected by
-// qualification. Missing assets fail; an unexecuted fixture is never a skip.
+// qualification, the sn release gate's exports; a run that selects none builds
+// the same exports from ../sn the gate's way first (nativefeefixture.Require).
+// Missing assets fail; an unexecuted fixture is never a skip.
 func stNativeFeePublicFixture(tb testing.TB, mode string, pending bool) (*stNativeFeeModelFixture, stNativeFeePublicManifest) {
 	tb.Helper()
 	directory := os.Getenv("URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY")
@@ -114,6 +117,7 @@ func stNativeFeePublicFixture(tb testing.TB, mode string, pending bool) (*stNati
 }
 
 func TestStNativeFeeSettlementPublicOwnedProofRetainsAllOriginals(t *testing.T) {
+	nativefeefixture.Require(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture, manifest := stNativeFeePublicFixture(tb, "pair", false)
 		ctx, cancel := context.WithTimeout(tb.Context(), 2*time.Minute)
@@ -146,6 +150,7 @@ func TestStNativeFeeSettlementPublicOwnedProofRetainsAllOriginals(t *testing.T) 
 }
 
 func TestStNativeFeeSettlementPublicMissingRefundKeepsFullCeiling(t *testing.T) {
+	nativefeefixture.Require(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture, manifest := stNativeFeePublicFixture(tb, "missing", false)
 		ctx, cancel := context.WithTimeout(tb.Context(), 2*time.Minute)
@@ -162,6 +167,7 @@ func TestStNativeFeeSettlementPublicMissingRefundKeepsFullCeiling(t *testing.T) 
 }
 
 func TestStNativeFeeSettlementPublicProofRecoversLostSignerResult(t *testing.T) {
+	nativefeefixture.Require(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture, manifest := stNativeFeePublicFixture(tb, "pair", true)
 		if len(GetStTransactionAttempts(tb.Context(), fixture.intent.IntentId)) != 0 {
@@ -188,6 +194,7 @@ func TestStNativeFeeSettlementPublicProofRecoversLostSignerResult(t *testing.T) 
 // Both conflicting native statements come from actual owned invocations. The
 // signed ratio admits 750/2 exactly while the later 751/2 stays unknown.
 func TestStNativeFeeSettlementPublicFractionalConflictRevokesCredit(t *testing.T) {
+	nativefeefixture.Require(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		fixture, manifest := stNativeFeePublicFixture(tb, "pair", false)
 		fixture.policy.WeiPerRaoDenominator = "2"

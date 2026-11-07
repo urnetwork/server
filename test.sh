@@ -92,21 +92,25 @@ if [[ -d $baseline_dir ]]; then
     "$baseline_dir/verify.sh" || exit $?
 fi
 
-# The model package's TestStNativeFeeSettlementPublic* roots settle the
-# native-fee fixtures and the mainnet.test verifier that only the sn release
-# gate builds (sn/scripts/build-mainnet-exports.sh). The gate exports them as
-# URNETWORK_NATIVE_FEE_SETTLEMENT_* and runs these roots in its server-db phase
-# (sn/scripts/test-release-1.0-local.sh). By design a missing asset fails them:
-# an unexecuted fixture is never a skip (model/st_native_fee_settlement_public_test.go).
-# An ordinary local or CI run sets none of the gate's variables and cannot
-# execute them, so it leaves them out here instead of reporting four certain
-# failures. With any of the variables set, even empty, the run is the gate or
-# reproduces it: the roots run, and a missing or partial export fails as
-# designed. go test keeps only the last -skip, so a caller's own -skip
-# replaces this one.
-model_skip_args=()
-if [[ -z "${URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256+set}" ]]; then
-    model_skip_args=(-skip TestStNativeFeeSettlementPublic)
+# The six public native-fee roots, four in ./model and two in ./controller,
+# settle the native-fee fixtures with the mainnet.test verifier that exported
+# them. The sn release gate builds both (sn/scripts/build-mainnet-exports.sh)
+# and runs the roots with them exported as URNETWORK_NATIVE_FEE_SETTLEMENT_*.
+# With none of those set, the roots build the same exports from ../sn the
+# gate's way themselves (internal/nativefeefixture), so on Linux they always
+# run. That verifier builds and runs only on Linux (sn's mainnet tests and
+# nativefee.Invoke), and an unexecuted fixture is never a skip, so on another
+# host the roots fail by design. There, with none of the variables set, this
+# leaves exactly those six out of the two package runs and says so; with any
+# of them set, even empty, they run as the caller asked. go test keeps only the
+# last -skip, so a caller's own -skip replaces this one.
+native_fee_model_skip_args=()
+native_fee_controller_skip_args=()
+if [[ "$(uname -s)" != Linux &&
+      -z "${URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256+set}" ]]; then
+    native_fee_model_skip_args=(-skip '^TestStNativeFeeSettlementPublic(OwnedProofRetainsAllOriginals|MissingRefundKeepsFullCeiling|ProofRecoversLostSignerResult|FractionalConflictRevokesCredit)$')
+    native_fee_controller_skip_args=(-skip '^TestNativeFeeControllerPublic(ProofSettlesWithoutSignerConfiguration|UnknownRefundKeepsOriginalCeiling)$')
+    echo "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is $(uname -s)" >&2
 fi
 
 test_directories="$(./test-dirs.sh)" || exit $?
@@ -118,7 +122,9 @@ while IFS= read -r d; do
     fi
     package_args=()
     if [[ $d == ./model ]]; then
-        package_args=("${model_skip_args[@]}")
+        package_args=("${native_fee_model_skip_args[@]}")
+    elif [[ $d == ./controller ]]; then
+        package_args=("${native_fee_controller_skip_args[@]}")
     fi
     # if [[ $1 == "" || $1 == `basename $d` ]]; then
         pushd "$d"
