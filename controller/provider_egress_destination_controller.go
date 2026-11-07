@@ -134,14 +134,23 @@ type ProviderEgressSites struct {
 	// Only these configured URL contracts may be served. Database rows retain
 	// learned retirement state, not authority to invent or retain removed URLs.
 	Destinations []*model.ProviderEgressDestination
-	Countries    map[string][]egresshealth.Destination
+	// Countries are the country lists, disjoint from every destination and
+	// candidate by name and by website (ProviderEgressSiteKey).
+	Countries map[string][]egresshealth.Destination
 	// Profile is the served request profile; the prober module's default when
 	// the file names none.
 	Profile        egresshealth.RequestProfile
 	UrlProbePolicy egresshealth.UrlProbePolicy
 	// Candidates are the file's destinations, each validated as the prober
-	// would run it.
+	// would run it, none named like a destination.
 	Candidates []*model.ProviderEgressDestination
+	// Refused are the entries the parse kept out, each with its reason; the
+	// rest of the file stands. LoadProviderEgressSites counts and logs them.
+	Refused []ProviderEgressCatalogRefusal
+	// listedCountries are the valid country sites under valid keys before the
+	// collision check: the refresh holds back a candidate that collides with
+	// any of them (PromotionConflict).
+	listedCountries map[string][]egresshealth.Destination
 }
 
 // One place of a candidate's incompatible list, as the file spells it.
@@ -182,11 +191,27 @@ type providerEgressSitesYaml struct {
 	Countries    map[string][]providerEgressSitesCandidateYaml `yaml:"countries"`
 }
 
-// Reads one egress-sites.yml. Every candidate must be one the prober can run
-// -- the same Destination.Validate it applies to a served pool -- with a
-// category, and a name unique in the file: a broken candidate is refused with
-// the file rather than promoted into a pool the prober would then refuse
+// Reads one egress-sites.yml. Every destination and candidate must be one the
+// prober can run -- the same Destination.Validate it applies to a served pool
+// -- with a category, and a name unique in its list: a broken one is refused
+// with the file rather than promoted into a pool the prober would then refuse
 // whole.
+//
+// Entries that are each valid but cannot stand together are refused one by
+// one, and the rest of the file stands (each refusal is in Refused):
+//
+//   - a candidate named like a destination: the destination's contract is
+//     authoritative, so a candidate never silently replaces it;
+//   - a country site that repeats the name or the website (ProviderEgressSiteKey)
+//     of any destination or candidate, promoted or not: the served pool holds
+//     whichever candidates the refresh has promoted, and the prober refuses a
+//     pool whose country lists overlap it;
+//   - a country site the prober could not run, or a list under a key that is
+//     not a lower-case country code: a country list is coverage, and its
+//     absence is a coverage gap, never a reason to stop measuring.
+//
+// What the parse accepts is therefore served as parsed, with no candidate
+// promoted or every one.
 func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, error) {
 	settings, err := model.ProviderEgressSiteSettingsFromYaml(unmarshal)
 	if err != nil {
@@ -222,9 +247,16 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 		}
 	}
 
-	parseDestinations := func(entries []providerEgressSitesCandidateYaml) ([]*model.ProviderEgressDestination, error) {
+	// one list's entries converted to rows, each validated as the prober
+	// would run it, with a category and a name unique in the list; a problem
+	// names the entry it refuses
+	type entryProblem struct {
+		name    string
+		problem string
+	}
+	parseDestinations := func(entries []providerEgressSitesCandidateYaml, noun string) ([]*model.ProviderEgressDestination, []entryProblem) {
 		rows := []*model.ProviderEgressDestination{}
-		problems := []string{}
+		problems := []entryProblem{}
 		seen := map[string]bool{}
 		for i, entry := range entries {
 			var expect egresshealth.Expect
@@ -233,7 +265,7 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 				expectWord = "body"
 			}
 			if err := expect.UnmarshalText([]byte(expectWord)); err != nil {
-				problems = append(problems, fmt.Sprintf("candidate %d (%q): %s", i, entry.Name, err))
+				problems = append(problems, entryProblem{entry.Name, fmt.Sprintf("%s %d (%q): %s", noun, i, entry.Name, err)})
 				continue
 			}
 			destination := egresshealth.Destination{
@@ -253,11 +285,11 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 				})
 			}
 			if strings.TrimSpace(entry.Category) == "" {
-				problems = append(problems, fmt.Sprintf("candidate %d (%q): no category", i, entry.Name))
+				problems = append(problems, entryProblem{entry.Name, fmt.Sprintf("%s %d (%q): no category", noun, i, entry.Name)})
 				continue
 			}
 			if seen[entry.Name] {
-				problems = append(problems, fmt.Sprintf("candidate %d repeats the name %q", i, entry.Name))
+				problems = append(problems, entryProblem{entry.Name, fmt.Sprintf("%s %d repeats the name %q", noun, i, entry.Name)})
 				continue
 			}
 			seen[entry.Name] = true
@@ -267,39 +299,111 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 			}
 			row, err := ProviderEgressDestinationFromWire(destination, strings.TrimSpace(entry.Category), region, entry.Revision)
 			if err != nil {
-				problems = append(problems, fmt.Sprintf("candidate %d: %s", i, err))
+				problems = append(problems, entryProblem{entry.Name, fmt.Sprintf("%s %d: %s", noun, i, err)})
 				continue
 			}
 			row.Source = model.ProviderEgressDestinationSourceCandidates
 			rows = append(rows, row)
 		}
+		return rows, problems
+	}
+	// the general lists are refused whole on any problem
+	parseGeneral := func(entries []providerEgressSitesCandidateYaml) ([]*model.ProviderEgressDestination, error) {
+		rows, problems := parseDestinations(entries, "candidate")
 		if 0 < len(problems) {
-			return nil, errors.New("qualityprobe catalog: " + strings.Join(problems, "; "))
+			messages := []string{}
+			for _, problem := range problems {
+				messages = append(messages, problem.problem)
+			}
+			return nil, errors.New("qualityprobe catalog: " + strings.Join(messages, "; "))
 		}
 		return rows, nil
 	}
-	if sites.Destinations, err = parseDestinations(document.Destinations); err != nil {
+	if sites.Destinations, err = parseGeneral(document.Destinations); err != nil {
 		return nil, err
 	}
-	if sites.Candidates, err = parseDestinations(document.Candidates); err != nil {
+	candidates, err := parseGeneral(document.Candidates)
+	if err != nil {
 		return nil, err
 	}
+
+	// a candidate never takes a destination's name
+	general := newProviderEgressGeneralIndex()
+	destinationNames := map[string]bool{}
+	for _, row := range sites.Destinations {
+		destinationNames[row.Name] = true
+		general.add(row.Name, row.Url)
+	}
+	sites.Candidates = []*model.ProviderEgressDestination{}
+	for _, row := range candidates {
+		if destinationNames[row.Name] {
+			sites.Refused = append(sites.Refused, ProviderEgressCatalogRefusal{
+				Reason: ProviderEgressRefusalCandidateName,
+				Name:   row.Name,
+				Detail: "repeats a destination's name: the destination's contract is served (a site retired for good returns as a candidate alone, with a higher revision)",
+			})
+			continue
+		}
+		sites.Candidates = append(sites.Candidates, row)
+		general.add(row.Name, row.Url)
+	}
+
+	// each country site is refused alone: one the prober could not run, or
+	// one that collides with a destination or a candidate
 	sites.Countries = map[string][]egresshealth.Destination{}
-	for country, entries := range document.Countries {
-		rows, err := parseDestinations(entries)
-		if err != nil {
-			return nil, fmt.Errorf("country %s: %w", country, err)
+	sites.listedCountries = map[string][]egresshealth.Destination{}
+	for _, country := range providerEgressCountryCodes(document.Countries) {
+		entries := document.Countries[country]
+		if !providerEgressCountryKeyValid(country) {
+			for _, entry := range entries {
+				sites.Refused = append(sites.Refused, ProviderEgressCatalogRefusal{
+					Reason:  ProviderEgressRefusalCountryInvalid,
+					Country: country,
+					Name:    entry.Name,
+					Detail:  "is listed under a key that is not a lower-case two-letter country code",
+				})
+			}
+			continue
+		}
+		rows, problems := parseDestinations(entries, "entry")
+		for _, problem := range problems {
+			sites.Refused = append(sites.Refused, ProviderEgressCatalogRefusal{
+				Reason:  ProviderEgressRefusalCountryInvalid,
+				Country: country,
+				Name:    problem.name,
+				Detail:  "cannot be run: " + problem.problem,
+			})
 		}
 		for _, row := range rows {
 			destination, err := ProviderEgressDestinationToWire(row)
 			if err != nil {
-				return nil, err
+				sites.Refused = append(sites.Refused, ProviderEgressCatalogRefusal{
+					Reason:  ProviderEgressRefusalCountryInvalid,
+					Country: country,
+					Name:    row.Name,
+					Detail:  "cannot be run: " + err.Error(),
+				})
+				continue
+			}
+			sites.listedCountries[country] = append(sites.listedCountries[country], destination)
+			if conflict := general.conflict(destination.Name, destination.Url); conflict != "" {
+				sites.Refused = append(sites.Refused, ProviderEgressCatalogRefusal{
+					Reason:  ProviderEgressRefusalCountryConflict,
+					Country: country,
+					Name:    destination.Name,
+					Detail:  conflict,
+				})
+				continue
 			}
 			sites.Countries[country] = append(sites.Countries[country], destination)
 		}
 	}
+
+	// the prober's own check, over every general entry the refresh could
+	// serve beside the country lists; the refusals above leave it nothing to
+	// refuse
 	pool := &egresshealth.Pool{Countries: sites.Countries}
-	for _, row := range sites.Destinations {
+	for _, row := range append(append([]*model.ProviderEgressDestination{}, sites.Destinations...), sites.Candidates...) {
 		destination, err := ProviderEgressDestinationToWire(row)
 		if err != nil {
 			return nil, err
@@ -312,13 +416,19 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 	return sites, nil
 }
 
-// Reads qualityprobe.yml; absent or unusable catalogs return an error.
+// Reads qualityprobe.yml; absent or unusable catalogs return an error. The
+// entries the parse refused are counted and logged under the parse stage.
 func LoadProviderEgressSites() (*ProviderEgressSites, error) {
 	resource, err := server.Config.SimpleResource(model.ProviderEgressSitesResourceName)
 	if err != nil {
 		return nil, err
 	}
-	return ParseProviderEgressSites(resource.UnmarshalYamlE)
+	sites, err := ParseProviderEgressSites(resource.UnmarshalYamlE)
+	if err != nil {
+		return nil, err
+	}
+	RecordProviderEgressCatalogRefusals(ProviderEgressRefusalStageParse, sites.Refused)
+	return sites, nil
 }
 
 // The pool the prober is served: every active row, probation included (a site
@@ -389,26 +499,36 @@ func BuildProviderEgressDestinationPool(
 // seeds an empty pool from the configured contracts without waiting for the
 // refresh task; every response intersects stored state with current config.
 func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, error) {
-	if _, err := EnsureProviderEgressDestinationsSeeded(ctx); err != nil {
-		return nil, err
-	}
 	sites, err := LoadProviderEgressSites()
 	if err != nil {
 		return nil, err
 	}
+	model.SeedProviderEgressDestinations(ctx, sites.Destinations)
 	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+	return sites.servePool(model.GetProviderEgressDestinations(ctx), server.NowUtc(), rng)
+}
+
+// The pool served over the stored rows: the general pool of the configured
+// contracts the rows hold active (BuildProviderEgressDestinationPool), and
+// beside it the country lists less any site that collides with a served
+// general entry. A collision drops that one country site, counted and logged
+// under the serve stage, and never refuses the pool: one bad country entry
+// must not stop URL measurement fleet-wide.
+func (self *ProviderEgressSites) servePool(stored []*model.ProviderEgressDestination, now time.Time, rng *rand.Rand) (*egresshealth.Pool, error) {
 	pool, err := BuildProviderEgressDestinationPool(
-		sites.configuredRows(model.GetProviderEgressDestinations(ctx)),
-		sites.Profile,
-		server.NowUtc(),
-		sites.Settings.SiteRegionCanaryShare,
+		self.configuredRows(stored),
+		self.Profile,
+		now,
+		self.Settings.SiteRegionCanaryShare,
 		rng,
 	)
 	if err != nil {
 		return nil, err
 	}
-	pool.Countries = sites.Countries
-	pool.UrlProbePolicy = &sites.UrlProbePolicy
+	countries, dropped := self.servedCountries(pool.Destinations)
+	RecordProviderEgressCatalogRefusals(ProviderEgressRefusalStageServe, dropped)
+	pool.Countries = countries
+	pool.UrlProbePolicy = &self.UrlProbePolicy
 	if err := egresshealth.ValidatePool(pool); err != nil {
 		return nil, err
 	}
@@ -417,7 +537,7 @@ func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, 
 		GeneralVersion int                                   `json:"general_version"`
 		Countries      map[string][]egresshealth.Destination `json:"countries"`
 		UrlProbePolicy egresshealth.UrlProbePolicy           `json:"url_probe_policy"`
-	}{GeneralVersion: pool.Version, Countries: pool.Countries, UrlProbePolicy: sites.UrlProbePolicy})
+	}{GeneralVersion: pool.Version, Countries: pool.Countries, UrlProbePolicy: self.UrlProbePolicy})
 	if err != nil {
 		return nil, err
 	}
@@ -429,6 +549,9 @@ func GetProviderEgressDestinationPool(ctx context.Context) (*egresshealth.Pool, 
 
 // Config owns URL contracts; stored rows contribute only learned pool state.
 // Removing an entry takes effect immediately even if a stale DB row is active.
+// A destination's contract is served under its name whatever the candidates
+// say: a candidate is served only under a name of its own, while its stored
+// row is active.
 func (self *ProviderEgressSites) configuredRows(stored []*model.ProviderEgressDestination) []*model.ProviderEgressDestination {
 	byName := map[string]*model.ProviderEgressDestination{}
 	for _, row := range stored {
@@ -439,10 +562,13 @@ func (self *ProviderEgressSites) configuredRows(stored []*model.ProviderEgressDe
 		configured[row.Name] = row
 	}
 	for _, row := range self.Candidates {
-		if _, active := configured[row.Name]; !active {
-			if existing := byName[row.Name]; existing == nil || !existing.Active {
-				continue
-			}
+		if _, destination := configured[row.Name]; destination {
+			// the parse refuses such a candidate; it never replaces a
+			// destination here either
+			continue
+		}
+		if existing := byName[row.Name]; existing == nil || !existing.Active {
+			continue
 		}
 		configured[row.Name] = row
 	}

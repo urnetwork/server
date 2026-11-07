@@ -813,9 +813,10 @@ type providerEgressProbePass struct {
 	blackholeDue func(context.Context, int) ([]ingest.DueProvider, error)
 	fullDue      func(context.Context, int) ([]ingest.DueProvider, error)
 	loadPins     func(context.Context) (map[string][]string, error)
-	// loadPool fetches the pass's destination pool. It always returns a pool
-	// that can be run -- the built-in table when the server's cannot be had --
-	// and the error only says why it fell back. Nil runs the built-in table.
+	// loadPool fetches the pass's destination pool: one the prober can run, or
+	// an error saying why there is none. There is no built-in table to fall
+	// back to: a pass without a pool measures no destination, and every fetch
+	// is counted by result in urnetwork_egress_probe_pool_fetches_total.
 	loadPool func(context.Context) (*egresshealth.Pool, error)
 	// loadScoring reads which pooled sites may count in a provider's run (see
 	// model.ProviderEgressHealthScoring) and the refresh's settings, for the
@@ -1776,18 +1777,19 @@ func (self *providerEgressProbePass) run(
 	pinSource := func() map[string][]string {
 		return pins
 	}
-	// One pool snapshot for every batch of the pass, like the pins. A fetch
-	// failure is never a reason to stop: the built-in table is always a
-	// well-defined measurement, and the metric and log say it was used.
+	// One pool snapshot for every batch of the pass, like the pins. There is
+	// no built-in table: without a pool every provider of the pass opens with
+	// egresshealth.ErrNoDestinations and nothing is measured, which the metric
+	// and the log say.
 	var pool *egresshealth.Pool
 	if self.loadPool != nil {
 		var poolErr error
 		pool, poolErr = self.loadPool(ctx)
 		if poolErr != nil {
-			egressProbePoolFetchesTotal.WithLabelValues("builtin").Inc()
-			log.Printf("provider-egress task: shard=%d/%d destination pool unavailable, probing the built-in table: %s", args.ShardIndex, args.ShardCount, poolErr)
+			egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolUnavailable).Inc()
+			log.Printf("provider-egress task: shard=%d/%d destination pool unavailable, this pass measures no destination: %s", args.ShardIndex, args.ShardCount, poolErr)
 		} else {
-			egressProbePoolFetchesTotal.WithLabelValues("server").Inc()
+			egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolServed).Inc()
 		}
 	}
 	poolSource := func() *egresshealth.Pool {

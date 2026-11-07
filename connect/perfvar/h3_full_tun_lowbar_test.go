@@ -730,6 +730,11 @@ func subtractH3FullTunRecovery(
 		ContractAheadAcknowledgedCount:              end.ContractAheadAcknowledgedCount - start.ContractAheadAcknowledgedCount,
 		ContractAheadSwitchCount:                    end.ContractAheadSwitchCount - start.ContractAheadSwitchCount,
 		ContractAheadUnacknowledgedSwitchCount:      end.ContractAheadUnacknowledgedSwitchCount - start.ContractAheadUnacknowledgedSwitchCount,
+		NoAckContractAdvanceCount:                   end.NoAckContractAdvanceCount - start.NoAckContractAdvanceCount,
+		NoAckContractHoldCount:                      end.NoAckContractHoldCount - start.NoAckContractHoldCount,
+		NoAckContractExpiredCount:                   end.NoAckContractExpiredCount - start.NoAckContractExpiredCount,
+		NoAckContractPromotedCount:                  end.NoAckContractPromotedCount - start.NoAckContractPromotedCount,
+		NoAckContractHeadroomCount:                  end.NoAckContractHeadroomCount - start.NoAckContractHeadroomCount,
 		SelectiveGapWriteCount:                      end.SelectiveGapWriteCount - start.SelectiveGapWriteCount,
 		AckTailProbeWriteCount:                      end.AckTailProbeWriteCount - start.AckTailProbeWriteCount,
 		CumulativeProbeWriteCount:                   end.CumulativeProbeWriteCount - start.CumulativeProbeWriteCount,
@@ -819,6 +824,9 @@ func subtractH3FullTunReceive(
 		}
 	}
 	return clientconnect.ClientReceiveStatsSnapshot{
+		ReceiveDecodeReservedByteCount:         end.ReceiveDecodeReservedByteCount,
+		ReceiveDecodePressureDropCount:         end.ReceiveDecodePressureDropCount - start.ReceiveDecodePressureDropCount,
+		ForgedSourceDropCount:                  end.ForgedSourceDropCount - start.ForgedSourceDropCount,
 		PackHandoffDropCount:                   end.PackHandoffDropCount - start.PackHandoffDropCount,
 		PackHandoffDropByteCount:               end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
 		PackHandoffWaitCount:                   end.PackHandoffWaitCount - start.PackHandoffWaitCount,

@@ -104,6 +104,9 @@ type RefreshEgressDestinationsResult struct {
 	Unmarked  int    `json:"unmarked"`
 	// Unfilled counts openings no checked candidate loaded cleanly for.
 	Unfilled int `json:"unfilled"`
+	// Held counts the promotable candidates held back because the general
+	// entry they would serve collides with a country site.
+	Held int `json:"held,omitempty"`
 }
 
 // Arms the daily refresh one interval out: a freshly seeded pool is the
@@ -966,6 +969,25 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 		}
 	}
 	taken := map[string]bool{}
+	// a candidate whose general entry would collide with a country site is
+	// never promoted: the served pool would have to drop the country site, and
+	// an api that predates the fail-small pool would refuse the whole pool. It
+	// is held back before the host checks, so its opening goes to the next
+	// candidate in order.
+	if 0 < len(plan.needs) {
+		held := []controller.ProviderEgressCatalogRefusal{}
+		for _, d := range current {
+			if !d.IsCandidate(now, settings.SiteRetireCooldown(), settings.SiteMaxRetirements) {
+				continue
+			}
+			if refusal, conflict := sites.PromotionConflict(d); conflict {
+				taken[d.Name] = true
+				held = append(held, refusal)
+			}
+		}
+		controller.RecordProviderEgressCatalogRefusals(controller.ProviderEgressRefusalStageRefresh, held)
+		result.Held = len(held)
+	}
 	// one opening and the candidates checked for it, in promotion order
 	type opening struct {
 		need       egressPromotionNeed

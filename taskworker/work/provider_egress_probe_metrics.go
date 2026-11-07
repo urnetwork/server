@@ -283,8 +283,15 @@ var egressProbePoolFetchesTotal = prometheus.NewCounterVec(prometheus.CounterOpt
 	Namespace: "urnetwork",
 	Subsystem: "egress_probe",
 	Name:      "pool_fetches_total",
-	Help:      "Destination-pool fetches at the start of a pass by result: server (the served pool) or builtin (the fetch failed and the built-in table was probed instead)",
+	Help:      "Destination-pool fetches at the start of a pass, URL passes included, by result: server (the served pool) or unavailable (no usable pool was served, and the pass measured no destination; there is no built-in table to fall back to)",
 }, []string{"result"})
+
+// The results of a pool fetch, the result label of
+// urnetwork_egress_probe_pool_fetches_total.
+const (
+	egressProbePoolServed      = "server"
+	egressProbePoolUnavailable = "unavailable"
+)
 
 var egressProbePassErrorsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
@@ -406,7 +413,7 @@ func preseedEgressProbePassMetrics() {
 		egressProbePassNotMeasuredTotal.WithLabelValues(schedule)
 		egressProbeBatchGuardTripsTotal.WithLabelValues(schedule)
 	}
-	for _, result := range []string{"server", "builtin"} {
+	for _, result := range []string{egressProbePoolServed, egressProbePoolUnavailable} {
 		egressProbePoolFetchesTotal.WithLabelValues(result)
 	}
 }

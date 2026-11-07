@@ -117,6 +117,7 @@ func NewSignals() []Signal {
 		NewControlRoutePressureSignal(),
 		NewUrlProbeCoverageSignal(),
 		NewCapabilityProbeSignal(),
+		NewEgressDestinationPoolSignal(),
 		NewStaleContractsSignal(),
 		NewPaymentReconciliationSignal(),
 		NewPaymentFailuresSignal(),

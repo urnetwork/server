@@ -20026,7 +20026,11 @@ codes and counts are rendered):
   compatible sites, or a global list under 100;
 - `egress-country-list-overlap`: country sites sharing a registrable domain
   with the global list, sites repeating a registrable domain within a list,
-  and country URLs that are not valid HTTPS sites;
+  and country URLs that are not valid HTTPS sites. The parser now refuses a
+  country site sharing a name or registrable domain with any destination or
+  candidate before the catalog reaches this signal, and §2.19h
+  (`egress-destination-catalog-refused`) reports those refusals, so here the
+  global part stays as a guard and repeats within a list are what remain;
 - `egress-country-draw-split`: at least 400 country-eligible normal draws
   (`general` plus `country`) whose country share is six or more standard
   deviations from an even split. Finite random imbalance stays quiet;
@@ -21888,6 +21892,85 @@ complete. No runtime payload skew is established by these source controls.
 
 The other classes are dashboard reads of the series above, and a probe for
 them belongs in the same file with the class names here.
+
+### 2.19h Destination pool availability and catalog refusals
+Probe: `egress-destination-pool`
+
+Every URL pass, and every legacy full or blackhole pass, starts by fetching
+the destination pool (`GET /network/provider-egress-destinations` on api or
+alt, or the in-process operator with `operator_transport: local`). There is no
+built-in table: a pass without a pool measures no URL, and when the pool route
+fails for every shard URL measurement stops fleet-wide and every provider's
+evidence ages out of the eight-hour window, emptying Quality and Speed.
+
+The pool is built from `qualityprobe.yml`. The prober refuses a whole pool
+whose country lists repeat a general entry's name or host, so the server keeps
+the lists disjoint with one rule at every stage: a country site must not share
+a name or a registrable domain (Public Suffix List eTLD+1 of the host without
+`www.`, `controller.ProviderEgressSiteKey`, the same key §2.19d compares) with
+any destination or candidate, promoted or not, and a candidate must not take
+a destination's name. The registrable-domain key is a function of the
+prober's host key, so a pool disjoint by it is never refused by the prober.
+Each stage keeps a colliding entry out alone rather than refusing the pool:
+the parse refuses the entry and serves the rest of the file (a country entry
+the prober could not run, or a list under a key that is not a lower-case
+country code, is refused the same way, while an unrunnable destination or
+candidate still refuses the whole file); a served pool drops a country site
+that collides with a served general entry; and the daily refresh holds back a
+candidate whose general entry would collide with any country site the file
+lists. Measurement then continues, but what is measured is not the catalog
+that was written, which is what this signal reports.
+
+Implementation (5-minute cadence; `signal_egress_destination_pool.go` and
+`signal_egress_destination_pool_test.go`). The signal reads two sources:
+
+- the configured `qualityprobe.yml` through the API's own parser
+  (`controller.LoadProviderEgressSites`): the entries it refuses, by reason;
+- one loopback Mimir read evaluated two minutes behind now:
+  `sum by (result) (increase(urnetwork_egress_probe_pool_fetches_total{job="taskworker"}[15m]))`
+  (`server`, `unavailable`; `builtin` is the same unavailable result from a
+  Taskworker built before the rename) and
+  `sum by (stage, reason) (increase(urnetwork_egress_site_catalog_refusals_total{stage=~"serve|refresh"}[15m]))`,
+  with per-slot freshness of both counters on every desired Taskworker slot
+  and of the refusal counter on every desired api slot (alt when placed).
+
+Classes (all WARN, target `<env>/egress-destination-pool`; only entry names,
+country codes, reasons and counts are rendered, never a URL or website):
+
+- `egress-destination-pool-unavailable` (sustain 2, PAGE after six failing
+  cadences): half or more of the window's pool fetches unavailable (every
+  window without a served fetch qualifies), and at least two of them. Every
+  pass fetches the pool and each shard chains its passes back to back, so a
+  window holds a few hundred fetches: a pool the server cannot serve fails
+  nearly all of them, while transient failures, or one api or alt instance
+  of several failing, leave most passes measuring. A share under half is
+  read on the egress probes dashboard's destination pool fetches panel and
+  never warns or pages; three failed fetches of 243 resolve healthy;
+- `egress-destination-catalog-refused` (sustain 1): the configured catalog
+  refuses entries (`candidate_name`, `country_conflict`, `country_invalid`),
+  or the fleet counted serve or refresh refusals over the window. A serve or
+  refresh refusal with a clean catalog means the served rows and the parsed
+  catalog have come apart;
+- `egress-destination-pool-unobservable` (visibility, sustain 2): an
+  unreadable catalog, a failed or annotated Mimir read, an unrecognized fetch
+  result or refusal reason, no served fetch series, and a desired slot whose
+  counter is missing, stale (older than three minutes), duplicated or on an
+  excluded or disabled host. A process built before this signal exports no
+  refusal counter, so a fleet partly on an older build stays unobservable.
+
+The opt-in readbacks check a catalog before it is released: with
+`FP2_QUALITY_CATALOG_PATH` naming the file,
+`TestQualityProbeCatalogFromConfiguredPathServesWhatItParses` serves it with
+no candidate promoted and with every one promoted and holds the result to the
+prober's `ValidatePool`, and `TestQualityProbeCatalogFromConfiguredPathRefusesNothing`
+fails naming each entry the parse would refuse. False-positive qualifiers: a
+database failure under the pool route also counts unavailable fetches; the
+log lines (`[pegd]` on api and alt, the pass errors on the taskworker) tell a
+catalog fault from a datastore one. False-negative qualifiers: the parse-stage
+refusal counter follows the readers, so its rate says nothing of how many
+entries are refused; this signal's own parse does. A catalog the monitor's
+configuration checkout does not share with the hosts is judged as the monitor
+reads it.
 
 ### 2.20 Successful contracts to inactive destinations — stale route acceptance
 Probe: `stale-contracts`

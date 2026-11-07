@@ -191,23 +191,33 @@ candidates:
 	}
 }
 
-// The file shipped in the config repository parses with the prober's rules,
-// holds the two cdn overrides and fills every class it names.
-func TestConfiguredCandidateCanUpdateGlobalContract(t *testing.T) {
-	sites, err := testParseProviderEgressSites(`
-candidates:
+// A destination's contract is corrected in its own entry, and served at once;
+// a same-named candidate no longer stands in for it (the parse refuses one,
+// TestParseProviderEgressSitesRefusesACandidateNamedLikeADestination).
+func TestConfiguredDestinationEntryCorrectsItsContract(t *testing.T) {
+	sites, err := testParseProviderEgressSites(`schema_version: 1
+destinations:
   - name: synthetic-catalog-site
     class: site
     category: reference
     url: https://catalog.example/corrected
+candidates:
+  - name: synthetic-catalog-site
+    class: site
+    category: reference
+    url: https://catalog.example/candidate
     revision: 1
 `)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := sites.configuredRows(nil)
-	if len(rows) != 1 || rows[0].Revision != 1 || rows[0].Url != "https://catalog.example/corrected" {
-		t.Fatal("configured correction did not replace the older global contract")
+	stored := []*model.ProviderEgressDestination{{Name: "synthetic-catalog-site", Url: "https://catalog.example/", Active: true}}
+	rows := sites.configuredRows(stored)
+	if len(rows) != 1 || rows[0].Url != "https://catalog.example/corrected" {
+		t.Fatal("the destination entry's correction is not the served contract")
+	}
+	if len(sites.Candidates) != 0 || len(sites.Refused) != 1 || sites.Refused[0].Reason != ProviderEgressRefusalCandidateName {
+		t.Fatalf("the same-named candidate was not refused: candidates=%d refused=%v", len(sites.Candidates), sites.Refused)
 	}
 }
 

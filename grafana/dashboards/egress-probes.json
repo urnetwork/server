@@ -4043,7 +4043,7 @@
       "id": 68,
       "type": "timeseries",
       "title": "destination pool fetches",
-      "description": "Destination pool fetches at the start of each pass, by result: server when the prober loaded the pool the server serves, builtin when that fetch failed and the prober fell back to its built-in table. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any builtin value is passes that probed the built-in sites instead of the refreshed pool.",
+      "description": "Destination pool fetches at the start of each pass, URL passes included, by result: server when the pass loaded the pool the server serves, unavailable when no usable pool was served (the route answered 500, the pool was refused or empty) and the pass measured no destination; there is no built-in table to fall back to. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any unavailable value is passes that measured nothing. When half or more of a 15-minute window's fetches are unavailable, monitor signal §2.19h raises egress-destination-pool-unavailable; a smaller share, transient errors or one failing instance of several, is read here and does not alert. A series named builtin is the same result from a taskworker built before the rename.",
       "gridPos": {
         "h": 8,
         "w": 8,
@@ -4100,7 +4100,7 @@
       "description": "Pool refresh runs by result: refreshed, skipped (the fleet-wide failure share of the loads that reached their provider was over the 20 % prober-fault line, or fewer than the 20 % prober-fault floor of the recent loads reached their provider at all), or failed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a run; a skip is the refresh keeping a prober fault from emptying the pool, and failures with no refresh after them are the refresh-not-running finding of monitor signal §2.19b.",
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 198
       },
@@ -4154,8 +4154,8 @@
       "description": "The changes each refresh made to the pool: sites retired, candidates promoted onto probation, sites graduated from probation, and places marked incompatible for a site or unmarked after their canaries passed. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes: any non-zero value is a change; the refresh is daily, so changes arrive once a day, at most one retirement per class.",
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 198
       },
       "datasource": {
@@ -4198,6 +4198,60 @@
           "expr": "sum by (change) (increase(urnetwork_egress_site_changes_total{env=\"$env\"}[5m]))",
           "refId": "A",
           "legendFormat": "{{change}}"
+        }
+      ]
+    },
+    {
+      "id": 149,
+      "type": "timeseries",
+      "title": "catalog entries kept out of the pool",
+      "description": "qualityprobe.yml entries kept out of the served destination pool, by stage and reason. parse: refused while reading the catalog, counted once per read, so its rate follows the readers (every api pool request, the refresh and the in-process operator) and any non-zero value means the released catalog has entries that are not served. serve: a country site dropped from one served pool because it collides with a served general entry, which the parse should already have kept out. refresh: a candidate held back from promotion because the entry it would serve collides with a country site. Reasons: candidate_name (a candidate repeating a destination's name; the destination is served), country_conflict (a country site sharing a name or registrable domain with a destination or candidate), country_invalid (a country entry or list the prober could not run). Nothing here stops the pool: the rest of the catalog is served. The [egresssites] log line names each entry; monitor signal §2.19h raises egress-destination-catalog-refused.",
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 198
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "stacking": {
+              "mode": "normal"
+            }
+          },
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (stage, reason) (increase(urnetwork_egress_site_catalog_refusals_total{env=\"$env\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{stage}} {{reason}}"
         }
       ]
     },
