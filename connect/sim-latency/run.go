@@ -138,9 +138,12 @@ func waitPhase(ctx context.Context, duration time.Duration) error {
 	}
 }
 
-// This private extraction retains the existing product clock unchanged. It
-// permits a deterministic counterexample without starting real services.
+// Future coverage owns a standard-library monotonic clock inside protected
+// runner source. Historical omission retains the exact product clock value.
 func runClockNow(coverage *model.CompetitionWorkCoveragePolicy, productClock func() time.Time) time.Time {
+	if coverage != nil {
+		return time.Now()
+	}
 	return productClock()
 }
 
