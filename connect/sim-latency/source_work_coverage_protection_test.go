@@ -112,7 +112,7 @@ func TestSourceCoverageSourceCheckRejectsRawLockContractMismatch(t *testing.T) {
 	if err := os.WriteFile(path, content, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifySourceEpoch(manifest, 2, t.TempDir(), path); err == nil || !strings.Contains(err.Error(), "coverage differs") {
+	if err := verifySourceEpoch(manifest, request.SourceGeneration, t.TempDir(), path); err == nil || !strings.Contains(err.Error(), "coverage differs") {
 		t.Fatal("raw-lock downgrade reached Git or passed source checking", err)
 	}
 }
