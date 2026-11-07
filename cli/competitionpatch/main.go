@@ -21,6 +21,7 @@ import (
 	"syscall"
 
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 )
 
 const maxPolicyBytes = 1024 * 1024
@@ -84,6 +85,21 @@ func run(args []string, stdout io.Writer) error {
 
 // Signal/deadline ownership continues through the complete source application.
 func runContext(ctx context.Context, args []string, stdout io.Writer) error {
+	if len(args) == 1 && args[0] == "--work-coverage-protected-paths" {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		coverage := model.DefaultCompetitionWorkCoveragePolicy()
+		paths, err := model.CompetitionWorkCoverageProtectedHelperPaths(&coverage)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(struct {
+			Schema int      `json:"schema"`
+			Kind   string   `json:"kind"`
+			Paths  []string `json:"paths"`
+		}{Schema: 1, Kind: model.CompetitionWorkCoverageProtectedHelpersVersion, Paths: paths})
+	}
 	flags := flag.NewFlagSet("competitionpatch", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	var opts options

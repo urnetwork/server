@@ -795,14 +795,8 @@ func (self *Settings) Validate() error {
 	if _, err := model.CompetitionScorerVersionForWorkCoverage(p.G2VolumePolicy, p.WorkCoveragePolicy); err != nil {
 		return err
 	}
-	if p.WorkCoveragePolicy != nil {
-		dependency := "model/competition_work_coverage_policy.go"
-		if self.PatchPolicy.PathBase == competitionMonoRootPathBase {
-			dependency = "server/" + dependency
-		}
-		if !slices.Contains(self.PatchPolicy.ForbiddenPaths, dependency) {
-			return errors.New("coverage instrument dependency must be explicitly protected by the new frozen patch policy")
-		}
+	if err := model.ValidateCompetitionWorkCoveragePatchPolicy(self.PatchPolicy, p.WorkCoveragePolicy); err != nil {
+		return err
 	}
 	if err := self.validateFutureEpochPolicy(); err != nil {
 		return err
@@ -3322,6 +3316,9 @@ func validateRepositoryPath(value string) error {
 }
 
 func pathAllowed(value string, policy PatchPolicy) bool {
+	if competitionWorkCoveragePathProtected(value, policy) {
+		return false
+	}
 	if policy.PathBase == competitionMonoRootPathBase {
 		if _, _, err := competitionRepositoryPath(value); err != nil || matchAny(policy.ForbiddenPaths, value) {
 			return false
@@ -4437,6 +4434,9 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 	if err != nil || policy.ScorerVersion != scorerVersion || (policy.Schema == 1 && policy.EvaluationPolicy.G2VolumePolicy != "") {
 		return nil, errors.New("round scorer version does not match its frozen g2 volume policy")
 	}
+	if err := model.ValidateCompetitionWorkCoveragePatchPolicy(policy.PatchPolicy, policy.EvaluationPolicy.WorkCoveragePolicy); err != nil {
+		return nil, err
+	}
 	if policy.Schema == 1 {
 		if policy.EvaluatorCommand != "" || policy.EvaluatorCommandSha256 != "" {
 			return nil, errors.New("legacy round policy cannot carry an evaluator command pin")
@@ -4464,6 +4464,9 @@ func decodeRoundPolicySnapshot(stored json.RawMessage) (*roundPolicySnapshot, er
 // Freeze the command path as well as its bytes because it resolves sibling
 // helpers from its immutable release directory.
 func policySnapshot(settings *Settings) ([]byte, error) {
+	if err := model.ValidateCompetitionWorkCoveragePatchPolicy(settings.PatchPolicy, settings.EvaluationPolicy.WorkCoveragePolicy); err != nil {
+		return nil, err
+	}
 	var automationPolicy *model.CompetitionAutomationPolicy
 	if settings.AutomationPolicy.Enabled {
 		copyPolicy := settings.AutomationPolicy

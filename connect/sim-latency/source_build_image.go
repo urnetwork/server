@@ -46,7 +46,11 @@ func sourceBuildImagePlanForDigest(request reviewedSourceBuildRequest, binaryDig
 		return nil, errors.New("source image requires an authenticated binary digest")
 	}
 	commit := request.Proposal.Commits["server"]
-	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits}, "", "  ")
+	coverage := sourceBuildRequestWorkCoverage(request)
+	if coverage != nil && !sourceBuildRequestMinimumWork(request) {
+		return nil, errors.New("coverage source image requires its immutable minimum-work generation")
+	}
+	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, CandidatePathBase: request.Proposal.CandidatePathBase, Repositories: request.Proposal.Commits, WorkCoveragePolicy: coverage.Clone()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

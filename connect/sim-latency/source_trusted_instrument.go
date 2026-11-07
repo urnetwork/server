@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,15 @@ import (
 func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit string, approval *model.CompetitionTrustedInstrumentApproval) (string, error) {
 	if err := controller.ValidateCompetitionTrustedInstrumentApproval(approval); err != nil {
 		return "", err
+	}
+	protectedHelpers, err := model.CompetitionWorkCoverageProtectedHelperPaths(approval.WorkCoveragePolicy)
+	if err != nil {
+		return "", err
+	}
+	for _, path := range protectedHelpers {
+		if !slices.Contains(approval.ProtectedPaths, path) {
+			return "", errors.New("coverage instrument approval omits a fixed dedicated helper preimage")
+		}
 	}
 	if !sourceGitShaPattern.MatchString(selectedCommit) {
 		return "", errors.New("trusted instrument requires the exact selected product commit")
@@ -77,6 +87,18 @@ func trustedInstrumentTree(ctx context.Context, repositoryRoot, selectedCommit s
 	tree, err := runIndex("write-tree")
 	if err != nil {
 		return "", err
+	}
+	for _, path := range protectedHelpers {
+		entry, err := sourceGitBytes(ctx, repositoryRoot, maximumSourceConfigBytes, "--literal-pathspecs", "ls-tree", "-z", "--full-tree", strings.TrimSpace(string(tree)), "--", path)
+		if err != nil {
+			return "", errors.New("coverage instrument helper postimage is unavailable")
+		}
+		metadata, actualPath, found := strings.Cut(strings.TrimSuffix(string(entry), "\x00"), "\t")
+		fields := strings.Fields(metadata)
+		if !found || actualPath != path || len(fields) != 3 || fields[1] != "blob" ||
+			fields[0] != "100644" && fields[0] != "100755" || !sourceGitShaPattern.MatchString(fields[2]) {
+			return "", errors.New("coverage instrument helper postimage is not a regular committed file")
+		}
 	}
 	// Full-index, binary-safe diff bytes are the approval format. Comparison
 	// refuses extra paths, missing hunks, fuzz, offsets and unnoticed changes.

@@ -5,7 +5,6 @@ package controller
 import (
 	"errors"
 	"reflect"
-	"slices"
 
 	"github.com/urnetwork/server/model"
 )
@@ -108,16 +107,11 @@ func (self *Settings) forCompetitionEpoch(epoch int, newActivation bool) (*Setti
 		copy.distributedRoundEpoch = epoch
 		copy.EvaluationPolicy.G2VolumePolicy = p.G2VolumePolicy
 		copy.EvaluationPolicy.WorkCoveragePolicy = p.WorkCoveragePolicy.Clone()
-		if p.WorkCoveragePolicy != nil {
-			dependency := "model/competition_work_coverage_policy.go"
-			if copy.PatchPolicy.PathBase == competitionMonoRootPathBase {
-				dependency = "server/" + dependency
-			}
-			copy.PatchPolicy.ForbiddenPaths = append([]string{}, self.PatchPolicy.ForbiddenPaths...)
-			if !slices.Contains(copy.PatchPolicy.ForbiddenPaths, dependency) {
-				copy.PatchPolicy.ForbiddenPaths = append(copy.PatchPolicy.ForbiddenPaths, dependency)
-			}
+		patchPolicy, err := competitionWorkCoveragePatchPolicy(self.PatchPolicy, p.WorkCoveragePolicy)
+		if err != nil {
+			return nil, err
 		}
+		copy.PatchPolicy = patchPolicy
 		if p.SimulatorSha256 != "" {
 			copy.EvaluationPolicy.SimulatorSha256, copy.EvaluationPolicy.ScorerSha256 = p.SimulatorSha256, p.ScorerSha256
 		}

@@ -49,13 +49,7 @@ func TestCompetitionPatchCliAppliesTextAndEmptyFileCreationDeletion(t *testing.T
 				t.Fatal(err)
 			}
 			identity.Repositories = original
-			var err error
-			content, err = json.Marshal(identity)
-			if err != nil {
-				t.Fatal(err)
-			}
-			digest := sha256.Sum256(content)
-			identityDigest = hex.EncodeToString(digest[:])
+			content, identityDigest = repositoryApplyTestRetainIdentity(t, root, identity)
 		}
 		creation = strings.ReplaceAll(creation, "100644", fixture.mode)
 		deletion = strings.ReplaceAll(deletion, "100644", fixture.mode)

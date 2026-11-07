@@ -145,6 +145,35 @@ validate_worker_request_schema() {
         "$1" >/dev/null
 }
 
+# Derive helper names from the independently pinned host validator, never
+# from candidate code or a caller-selected path list.
+authenticate_work_coverage_patch_policy() {
+    local request="$1" coverage_present
+    coverage_protected_paths_json=""
+    coverage_present="$(jq -r '.evaluation_policy | if type == "object" then has("work_coverage_policy") else error("evaluation policy is missing") end' "$request")" || die "frozen evaluation policy is unreadable"
+    if [ "$coverage_present" = false ]; then
+        return 0
+    fi
+    [ "$coverage_present" = true ] || die "frozen evaluation policy is ambiguous"
+    submission_builder_identity >/dev/null || die "trusted coverage validator identity is unavailable"
+    coverage_protected_paths_json="$("$SCRIPT_DIR/competitionpatch" --work-coverage-protected-paths)" ||
+        die "trusted coverage helper census is unavailable"
+    jq -e --argjson helpers "$coverage_protected_paths_json" '
+        . as $request |
+        (if ($request.patch_policy.path_base // "") == "mono_root_v1" then "server/" else "" end) as $prefix |
+        ($helpers | type == "object" and (keys | sort) == ["kind","paths","schema"] and
+         .schema == 1 and .kind == "seeded-crawl-coverage-protected-helpers/v1" and
+         (.paths | type == "array" and length == 6 and (unique | length == 6) and
+          all(.[]; type == "string" and test("^(controller|model)/competition_[a-z0-9_]+[.]go$")))) and
+        ($request.evaluation_policy.g2_volume_policy == "minimum-work/1") and
+        ($request.evaluation_policy.work_coverage_policy ==
+          {kind:"seeded-crawl-coverage/v1",minimum_page_coverage_ratio:0.95,minimum_byte_coverage_ratio:0.95}) and
+        all($helpers.paths[]; . as $path |
+          ($request.patch_policy.forbidden_paths | index($prefix + $path)) != null) and
+        ($request.patch_policy.forbidden_paths | index($prefix + "connect/sim-latency/**")) != null
+    ' "$request" >/dev/null || die "frozen coverage patch policy omits its fixed trusted helper census"
+}
+
 local_tree_sha256() {
     "$HASH_LOCAL_MOUNT" "$1"
 }
@@ -320,6 +349,7 @@ artifact_dir="$(dirname "$request_path")"
 [ "$result_path" = "$artifact_dir/worker-result.json" ] || die "result path is outside the attempt directory"
 
 validate_worker_request_schema "$request_path" || die "request schema or fields are invalid"
+authenticate_work_coverage_patch_policy "$request_path"
 
 job_id="$(jq -er '.job_id' "$request_path")"
 staging="$(jq -r '.staging // false' "$request_path")"
@@ -789,11 +819,15 @@ authenticate_protected_simulator_tree() {
     [ "$candidate_tree" = "$baseline_tree" ] ||
         die "candidate changed the protected sim-latency source tree"
     if [ "${work_coverage_policy:-null}" != null ]; then
-        local dependency="model/competition_work_coverage_policy.go" baseline_dependency candidate_dependency
-        baseline_dependency="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" -C "$baseline_source_root/server" ls-tree HEAD -- "$dependency")" || die "missing trusted coverage dependency"
-        candidate_dependency="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" -C "$candidate_source_root/server" ls-tree HEAD -- "$dependency")" || die "missing candidate coverage dependency"
-        [[ "$baseline_dependency" =~ ^100644\ blob\ [0-9a-f]{40}$'\t' ]] || die "coverage dependency is not a committed regular Go file"
-        [ "$baseline_dependency" = "$candidate_dependency" ] || die "candidate changed the trusted coverage dependency"
+        local dependencies dependency baseline_dependency candidate_dependency
+        dependencies="$(jq -er '.paths[]' <<<"$coverage_protected_paths_json")" || die "trusted coverage helper census is absent"
+        [ -n "$dependencies" ] || die "trusted coverage helper census is empty"
+        while IFS= read -r dependency; do
+            baseline_dependency="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" -C "$baseline_source_root/server" --literal-pathspecs ls-tree HEAD -- "$dependency")" || die "missing trusted coverage dependency"
+            candidate_dependency="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" -C "$candidate_source_root/server" --literal-pathspecs ls-tree HEAD -- "$dependency")" || die "missing candidate coverage dependency"
+            [[ "$baseline_dependency" =~ ^100644\ blob\ [0-9a-f]{40}$'\t' ]] || die "coverage dependency is not a committed regular Go file"
+            [ "$baseline_dependency" = "$candidate_dependency" ] || die "candidate changed a trusted coverage dependency"
+        done <<<"$dependencies"
     fi
 }
 

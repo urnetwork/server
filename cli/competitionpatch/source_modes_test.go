@@ -50,13 +50,7 @@ func TestCompetitionPatchCliChecksPinnedModesBeforeApplying(t *testing.T) {
 				t.Fatal(err)
 			}
 			identity.Repositories = original
-			var err error
-			identityBytes, err = json.Marshal(identity)
-			if err != nil {
-				t.Fatal(err)
-			}
-			digest := sha256.Sum256(identityBytes)
-			identityDigest = hex.EncodeToString(digest[:])
+			identityBytes, identityDigest = repositoryApplyTestRetainIdentity(t, root, identity)
 		}
 		patch := []byte("diff --git a/connect/source.txt b/connect/source.txt\n--- a/connect/source.txt\n+++ b/connect/source.txt\n@@ -1 +1 @@\n" + body)
 		policy := []byte(`{"path_base":"mono_root_v1","max_patch_bytes":4096,"allowed_paths":["connect/**"],"forbidden_paths":["server/connect/sim-latency/**"]}`)

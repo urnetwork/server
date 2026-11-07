@@ -38,7 +38,10 @@ func newCompetitionInstrumentHostFixture(t *testing.T, promoted bool) competitio
 	f.Settings.FutureEpochPolicy = settings.FutureEpochPolicy
 	f.Settings.EvaluationPolicy.G2VolumePolicy = model.CompetitionG2VolumePolicyMinimumWork
 	f.Settings.EvaluationPolicy.WorkCoveragePolicy = approval.WorkCoveragePolicy
-	f.Settings.PatchPolicy.ForbiddenPaths = append(f.Settings.PatchPolicy.ForbiddenPaths, "model/competition_work_coverage_policy.go")
+	f.Settings.PatchPolicy, err = competitionWorkCoveragePatchPolicy(f.Settings.PatchPolicy, approval.WorkCoveragePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
 	intent.BaseSourceLockSha256 = approval.InstrumentBaseSourceLockSha256
 	intent.EvaluatorImageDigest, intent.HostQualificationSha256 = f.Settings.EvaluatorImageDigest, f.Settings.EvaluationPolicy.HostQualificationSha256
 	if promoted {

@@ -60,7 +60,7 @@ func planG2InstrumentBaseImage(approval model.CompetitionTrustedInstrumentApprov
 	}
 	commits := maps.Clone(approval.InstrumentBaseCommits)
 	commits["server"] = child
-	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, Repositories: commits}, "", "  ")
+	lock, err := json.MarshalIndent(evaluatorSourceLock{Schema: 1, Repositories: commits, WorkCoveragePolicy: approval.WorkCoveragePolicy.Clone()}, "", "  ")
 	if err != nil {
 		return nil, err
 	}

@@ -139,6 +139,12 @@ source_lock_sha256="$(sha256sum "$source_lock_path" | awk '{print $1}')"
 jq -e --argjson repositories "$repository_names_json" '
     type == "object" and .schema == 1 and
     ((.candidate_path_base // "") == "" or .candidate_path_base == "mono_root_v1") and
+    (([keys[] | select(ascii_downcase == "work_coverage_policy")] | length) == (if has("work_coverage_policy") then 1 else 0 end)) and
+    ((has("work_coverage_policy") | not) or
+      (.work_coverage_policy | type == "object" and
+       (keys | sort) == ["kind","minimum_byte_coverage_ratio","minimum_page_coverage_ratio"] and
+       .kind == "seeded-crawl-coverage/v1" and
+       .minimum_page_coverage_ratio == 0.95 and .minimum_byte_coverage_ratio == 0.95)) and
     (.development_snapshot | type == "boolean") and
     (.repositories | type == "object") and
     ((.repositories | keys) == ($repositories | sort)) and
@@ -189,13 +195,16 @@ jq -nS \
     --argjson staging "$staging" --arg branch "$source_branch" \
     --arg source_lock_sha256 "$source_lock_sha256" \
     --arg candidate_path_base "$candidate_path_base" \
+    --argjson coverage_present "$(jq -r 'has("work_coverage_policy")' "$source_lock_path")" \
+    --argjson coverage "$(jq -c '.work_coverage_policy // null' "$source_lock_path")" \
     --argjson repositories "$source_repositories" \
     '{schema:1,kind:"sim-latency-evaluation-source",temporary:true,
       base_image_id:$base_image_id,base_sha:$base_sha,source_epoch:$source_epoch,
       staging:$staging,branch:$branch,source_lock_sha256:$source_lock_sha256,
       repositories:$repositories,
       candidate_patch_sha256:null} +
-      (if $candidate_path_base == "" then {} else {candidate_path_base:$candidate_path_base} end)' > "$identity_path"
+      (if $candidate_path_base == "" then {} else {candidate_path_base:$candidate_path_base} end) +
+      (if $coverage_present then {work_coverage_policy:$coverage} else {} end)' > "$identity_path"
 chmod 0400 "$identity_path"
 rm -f -- "$source_lock_path"
 source_lock_path=""
