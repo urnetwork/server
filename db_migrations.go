@@ -11360,4 +11360,8 @@ var migrations = []any{
 	newSqlMigration(proxyExitAssignmentProxyReleasedIndexSql),
 	newSqlMigration(proxyExitAssignmentNetworkReleasedIndexSql),
 	newSqlMigration(proxyExitAssignmentReleasedAtIndexSql),
+
+	// A prospective typed operator-stop exception adds an independent guard;
+	// previous recovery classes and published migration bytes stay unchanged.
+	competitionOperatorInterruptionMigration,
 }

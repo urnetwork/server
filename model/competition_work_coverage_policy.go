@@ -10,11 +10,17 @@ import (
 	"io"
 	"math"
 	"math/big"
+	"slices"
 	"strconv"
+	"strings"
 )
 
 const CompetitionWorkCoverageScorerVersion = "sim-latency-score/3"
 const CompetitionWorkCoverageKind = "seeded-crawl-coverage/v1"
+
+// This fixed census belongs to coverage v1; callers cannot supply its members.
+// The frozen forbidden-path list binds its actual values without a new field.
+const CompetitionWorkCoverageProtectedHelpersVersion = "seeded-crawl-coverage-protected-helpers/v1"
 
 // The v1 wire object has three small scalar fields; it is not a request body
 // size knob or a source of configurable work-inventory allocation budgets.
@@ -59,6 +65,85 @@ func ValidateCompetitionWorkCoveragePolicy(policy *CompetitionWorkCoveragePolicy
 		return errors.New("unsupported or incomplete seeded crawl coverage policy")
 	}
 	return nil
+}
+
+// Dedicated instrument leaves are separate from mixed product implementations.
+// Each caller receives its own list; historical nil has no added restrictions.
+func CompetitionWorkCoverageProtectedHelperPaths(policy *CompetitionWorkCoveragePolicy) ([]string, error) {
+	if err := ValidateCompetitionWorkCoveragePolicy(policy); err != nil {
+		return nil, err
+	}
+	if policy == nil {
+		return nil, nil
+	}
+	return []string{
+		"controller/competition_trusted_instrument_approval.go",
+		"model/competition_g2_codec_test.go",
+		"model/competition_g2_policy.go",
+		"model/competition_trusted_instrument.go",
+		"model/competition_work_coverage_policy.go",
+		"model/competition_work_coverage_policy_test.go",
+	}, nil
+}
+
+// Only an authenticated full coverage contract selects this additional surface.
+// Extra operator prohibitions remain permitted and historical lists stay exact.
+func ValidateCompetitionWorkCoveragePatchPolicy(policy CompetitionPatchPolicy, coverage *CompetitionWorkCoveragePolicy) error {
+	paths, err := CompetitionWorkCoverageProtectedHelperPaths(coverage)
+	if err != nil || coverage == nil {
+		return err
+	}
+	prefix := ""
+	if policy.PathBase == "mono_root_v1" {
+		prefix = "server/"
+	} else if policy.PathBase != "" {
+		return errors.New("coverage patch policy has an unsupported path base")
+	}
+	paths = append(paths, "connect/sim-latency/**")
+	for _, path := range paths {
+		if !slices.Contains(policy.ForbiddenPaths, prefix+path) {
+			return errors.New("coverage patch policy is missing a fixed protected instrument path")
+		}
+	}
+	return nil
+}
+
+// Optional source leaves preserve omission, but explicit null, aliases and
+// duplicates cannot erase prospective authority before typed JSON decoding.
+func CompetitionWorkCoveragePolicyFromSourceJson(content []byte) (*CompetitionWorkCoveragePolicy, error) {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	if first, err := decoder.Token(); err != nil || first != json.Delim('{') {
+		return nil, errors.New("source identity must be a JSON object")
+	}
+	var policy *CompetitionWorkCoveragePolicy
+	seen := false
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		key, ok := keyToken.(string)
+		if err != nil || !ok {
+			return nil, errors.New("source identity has a malformed field")
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		if !strings.EqualFold(key, "work_coverage_policy") {
+			continue
+		}
+		if key != "work_coverage_policy" || seen || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			return nil, errors.New("source identity has an ambiguous coverage policy")
+		}
+		seen = true
+		var decoded CompetitionWorkCoveragePolicy
+		if err := json.Unmarshal(value, &decoded); err != nil {
+			return nil, err
+		}
+		policy = &decoded
+	}
+	if last, err := decoder.Token(); err != nil || last != json.Delim('}') || decoder.Decode(new(any)) != io.EOF {
+		return nil, errors.New("source identity has trailing or incomplete JSON")
+	}
+	return policy, nil
 }
 
 // Owned policy keys are exact, unique and complete before typed decoding.

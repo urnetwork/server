@@ -241,6 +241,10 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 	if err := controller.ValidateCompetitionTrustedInstrumentApproval(&approval); err != nil {
 		return "", err
 	}
+	suite, err := newSourceCorrectnessSuite(true, approval.WorkCoveragePolicy)
+	if err != nil {
+		return "", err
+	}
 	directory, owner, deadline, err := reserveG2InstrumentBaseAttempt(ctx, config.Sandbox.StateDirectory, approval.ApprovalSha256, approval.InstrumentBaseImageDigest, config.Timeout, time.Now().UTC())
 	if err != nil {
 		return "", err
@@ -378,7 +382,7 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 	if err := os.Mkdir(correctness, 0o700); err != nil {
 		return directory, err
 	}
-	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", MinimumWork: true, ImageId: image, Commit: child,
+	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", MinimumWork: true, WorkCoveragePolicy: approval.WorkCoveragePolicy.Clone(), ImageId: image, Commit: child,
 		SourceDirectory: source, MetadataDirectory: filepath.Join(correctness, "metadata"), OutputDirectory: filepath.Join(correctness, "output")}
 	if err := os.Mkdir(input.OutputDirectory, 0o700); err != nil {
 		return directory, err
@@ -400,7 +404,7 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 	if executionErr != nil {
 		return directory, executionErr
 	}
-	count, err := countSourceCorrectnessTestsForMinimumWork(out, true)
+	count, err := countSourceCorrectnessTestEvents(out, suite.requiredTests)
 	if err != nil {
 		return directory, err
 	}
@@ -415,7 +419,7 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 		return directory, err
 	}
 	logsDigest := sha256.Sum256(logs)
-	execution := sourceTestExecution{ImageId: image, SuiteSha256: sourceCorrectnessSuiteDigestForMinimumWork(true), ExitCode: 0, TestCount: count,
+	execution := sourceTestExecution{ImageId: image, SuiteSha256: suite.sha256, ExitCode: 0, TestCount: count,
 		DurationMillis: time.Since(started).Milliseconds(), TestLogsSha256: hex.EncodeToString(logsDigest[:])}
 	containment, err := retainSourceCorrectnessContainment(input, config.Sandbox, execution)
 	if err != nil {
@@ -430,17 +434,12 @@ func executeG2InstrumentBaseTechnicalQualification(ctx context.Context, config g
 	if json.Unmarshal(identity, &actualIdentity) != nil || json.Unmarshal(plan.Identity, &expectedIdentity) != nil || !reflect.DeepEqual(actualIdentity, expectedIdentity) {
 		return directory, errors.New("technical compiled image returned substituted or production identity")
 	}
-	policy, err := runG2InstrumentBaseTechnicalCli(ctx, directory, owner, image, "policy", config.Sandbox, docker)
+	policy, err := runG2InstrumentBaseTechnicalCli(ctx, directory, owner, image, g2InstrumentBasePolicyPhase(approval.WorkCoveragePolicy), config.Sandbox, docker)
 	if err != nil {
 		return directory, err
 	}
-	var actualPolicy struct {
-		ScoreSchema    int                             `json:"score_schema"`
-		G2VolumePolicy model.CompetitionG2VolumePolicy `json:"g2_volume_policy"`
-		ScorerVersion  string                          `json:"scorer_version"`
-	}
-	if json.Unmarshal(policy, &actualPolicy) != nil || actualPolicy.ScoreSchema != 1 || actualPolicy.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork || actualPolicy.ScorerVersion != model.CompetitionMinimumWorkScorerVersion {
-		return directory, errors.New("technical compiled CLI does not implement the approved scoring policy")
+	if err := validateG2InstrumentBaseScorePolicy(policy, approval.WorkCoveragePolicy); err != nil {
+		return directory, err
 	}
 	if err := ctx.Err(); err != nil {
 		return directory, err

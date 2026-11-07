@@ -1,0 +1,191 @@
+{
+  "schema": 1,
+  "kind": "competition-frozen-overlay-offline-correctness-observation/v1",
+  "recorded_on": "2026-11-07",
+  "status": "ordinary passed; auxiliary race pending; overlay unapproved",
+  "accepted_as_production": false,
+  "instrument_approved": false,
+  "product_selected": false,
+  "instrument_child_created": false,
+  "evaluator_image_built": false,
+  "runtime_qualified": false,
+  "deployed": false,
+  "frozen_product": {
+    "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+    "repositories": {
+      "connect": "e90d59eb404f973dba6e9d0689ecd94e2718c10e",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+      "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+      "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+      "server": "a9e8e1a710b24c749e6499a0606938252c83e136",
+      "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+      "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+      "warp": "8dfa405ec380a60307952778921f05bba1c59a33"
+    },
+    "baseline_evaluator_image": "sha256:98c9061c4a43a25e7b581a5193ca6e7f48e49e7b7fc03b7c1b6190a029befee2",
+    "epoch_one_inputs_unchanged": true
+  },
+  "overlay": {
+    "sha256": "a1314b1948afa7243727f30ddaa4dd1e137dfc8799c409083611baefafe457c9",
+    "bytes": 624577,
+    "paths": 37,
+    "index_tree": "4283786c6049c33d20afa6c5bc34c2992463d85e",
+    "preparation_manifest_sha256": "7d2acf3d94c1cdd05482fe9167e2d032c8ea65fd2087070c881eb38fd763f884",
+    "artifact": "/mnt/data/competition-g2-g7-successor-unapproved-20261107.LMLNEGcy/combined-successor-v4.UNAPPROVED.patch",
+    "manifest": "/mnt/data/competition-g2-g7-successor-unapproved-20261107.LMLNEGcy/successor-v4-manifest.UNAPPROVED.json",
+    "preceding_ff9_sha256": "ff9aae5710c8ce3daadf0d714b74c8eab3d6e17a149abbddc863536c3e5b89ce",
+    "ff9_compile_only_receipt_sha256": "3003dcf60e19a2e6f42397b8bebb9417ed1bacdfc1da52052c24b5d8b201a48d",
+    "v3_test_only_correction_sha256": "7df0c2aa4779c6a30cebd2934d47f28d42e8dc35c2a375c1cc68239a2ea48bcd",
+    "v3_v4_change": "One local staging-fixture TakeoverMarginPercent=0 assignment; all production bytes unchanged."
+  },
+  "approval_separation": {
+    "previous_approved_g2_patch_sha256": "6423d41b5f252ef0304adf6c513653fb5a7e37a55733e1bf56b9d59d4cda7819",
+    "previous_g2_approval_sha256": "f7c1d4c4e825347c70e9c0c5068cec8bef264ede5dad59adf1b8360c9ac0cf50",
+    "previous_approval_does_not_approve_this_overlay": true
+  },
+  "prospective_policy": {
+    "g2": "minimum-work/1: inclusive95% request/byte floors, no upper ceilings",
+    "g7": {
+      "kind": "seeded-crawl-coverage/v1",
+      "minimum_page_coverage_ratio": 0.95,
+      "minimum_byte_coverage_ratio": 0.95
+    },
+    "coverage_is_relative_to_each_baseline_dimension": true,
+    "intentional_workload_suppression_is_not_authorized_by_a_numeric_floor": true
+  },
+  "compiler": {
+    "go_version": "go1.27.3",
+    "platform": "linux/amd64",
+    "ordinary_cgo_enabled": false,
+    "goexperiment": "greenteagc",
+    "offline": true,
+    "module_or_repository_ref_changes": false,
+    "compile_outputs_mode": "0400",
+    "compile_outputs_executed": false,
+    "compile_only_vet": false,
+    "ordinary_test_default_vet": true,
+    "compile_only_targets": 5,
+    "compile_only_duration": "3m8.543s",
+    "artifact_sha256": {
+      "root_test": "f1a09eb425a86167ca63028b3151bb17c9ba90ab9031b5477b5e777f83315f3d",
+      "connect_test": "50c4f18ed1a504a9af3db9d3b3326779e1160c872c83edf584db7f551d046386",
+      "model_test": "b43cdf304c0985b5ad269eb3b784f9bee28cc890b56cd0c71c06eb433e8b0206",
+      "simulator_test": "ac2e2d5cb0b924631ff534efa5e881eb35593e7318a65bca624f65ac0fb726cb",
+      "simulator_binary": "31e53ad8e77eaca468d4a832e1dca240a77ad7bad11efa6af120de19adffc3f7"
+    }
+  },
+  "native_protocol": {
+    "kind": "reviewed-source-work-coverage-correctness-v1",
+    "control_code": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "control_receipt_sha256": "ce7ef6c8e790cd9b2bda254763e500b2bc758838414b2864c5ac130354aff9cf",
+    "probe_sha256": "f1d3a4c7c7f9f79acf5efa57d7acb6268a85a89d27edc9e772b881c968c8c2e8",
+    "suite_sha256": "cda3e6e1436439733aa4090ff1ee5dd142231f5ef6fef3c1dbe06730e335295f",
+    "export_record_sha256": "9c295fabe1ad6ea74ca57910b4f2611d89df87f31223c87681e3fa13ac57184c",
+    "export_carried_from": "/home/by/sim-latency/fixtures/successor-v3-ee71-20261107",
+    "export_not_rerun_on_v4": true,
+    "export_control_map_and_probe_byte_identical": true,
+    "mandatory_package_counts": {
+      "root": 3,
+      "connect": 25,
+      "simulator": 35,
+      "model": 7
+    },
+    "mandatory_total": 70,
+    "supplemental_total": 11,
+    "supplements_do_not_change_the_70_protocol": true,
+    "real_frozen_sn_TestMain_generator_build": true,
+    "inherited_generator_override_unset": true,
+    "component_188_is_not_frozen_product_proof": true
+  },
+  "ordinary": {
+    "status": "pass",
+    "mandatory": 70,
+    "supplemental": 11,
+    "failed": 0,
+    "skipped": 0,
+    "mandatory_duration": "2m51.340s",
+    "mandatory_events_path": "/home/by/sim-latency/fixtures/successor-v4-a131-20261107/native/mandatory70.jsonl",
+    "mandatory_events_sha256": "dd581a0f2be358ab1a9d3478ad7e0a8236ff9b881385397db6aae40de44a1cae",
+    "native_counter_record_path": "/home/by/sim-latency/fixtures/successor-v4-a131-20261107/native/suite.verify.json",
+    "native_counter_record_sha256": "18f76ab36c20bcf26fbdcdd1d269f0dcee72f55b3525d84e636fe22ee9a4943b",
+    "observed_native_count": 70,
+    "legacy48_downgrade_refused": true,
+    "mandatory_skip_refused": true,
+    "supplement_events_sha256": "98d9f55bdef8488e4f06ef554e982a1176205ee2203be2f279bd6003528a89a7",
+    "exact_overlay_envelope_events_sha256": "84d7382c2f9e65b8aa0d4cc4e7d9b195807f9b36bb6388d5147ebbf2e24936dc",
+    "exact_overlay_envelopes_fit_unchanged_existing_bounds": true,
+    "pre_and_post_source_tool_module_custody_passed": true,
+    "owned_units_and_cgroups_removed": true
+  },
+  "causal_controls": [
+    {
+      "name": "raw-policy generation binding",
+      "source": "ff9 plus v3 test-only overlay",
+      "carried_prior_evidence": true,
+      "raw_exit": 1,
+      "intended_named_assertion_verified": true,
+      "pre_and_post_custody_passed": true,
+      "event_sha256": "14f46f880ee193afcda4b84da7a57ff723fa7e248bc651ed1559b2783c69d73e",
+      "log_sha256": "90e55254e529aa310786303e40e58e9e4ddf85fffc2501f63830cc82a4f5a88c"
+    },
+    {
+      "name": "raw-policy codec",
+      "source": "ff9 plus v3 test-only overlay",
+      "carried_prior_evidence": true,
+      "raw_exit": 1,
+      "intended_named_assertion_verified": true,
+      "pre_and_post_custody_passed": true,
+      "event_sha256": "200bc27c6f020aa6ba0656738adf2069a075722a3b43720649c2f43ba13d575b",
+      "log_sha256": "0aa2a8d06b966da59c68bdda3781b49a2ea489ae91dfcca3652bd0419cf95aa5"
+    },
+    {
+      "name": "frozen staging-significance preservation",
+      "source": "rejected v2 source plus corrected v4 test-only overlay",
+      "carried_prior_evidence": false,
+      "raw_exit": 1,
+      "intended_named_assertion_verified": true,
+      "pre_and_post_custody_passed": true,
+      "event_sha256": "2d48ca33d5f3dbc1ec2e88cffab6c82e0997472f87ecac54b8b900cf6cdf6580",
+      "log_sha256": "7eb7ce97c6ea5dd978324c435234fec22a749f8e7509dc25652e64f995f544f6"
+    }
+  ],
+  "retained_failure": {
+    "overlay_sha256": "ee71aed4e815b7bf3e93487d32927631b44c0b3e8c231bb3d2ebd5eebcbbe1ca",
+    "phase": "v3 third causal control",
+    "root": "TestG2DraftSignificancePreservesFrozenStagingRejections",
+    "actual_assertion": "frozen valid staging significance was rejected",
+    "raw_exit": 1,
+    "accepted_causal_control": false,
+    "pre_custody_passed": true,
+    "post_verifier_reached": false,
+    "compiler_and_product70_started": false,
+    "event_sha256": "767b6b5053a8fb11f793993c63e17454788cfa7cec57481bc2b3fe732eec8709",
+    "log_sha256": "50eed36d86e347de8a5c932fb797d20fc4c549e2cf5e77462f19347f02bf1cbc",
+    "path": "/home/by/urnetwork/temp/successor-v3-red-staging-failure-20261107.Ggqwpy",
+    "resolution": "Correct only the staging test precondition from its production16.1 margin to exact0; preserve all statistical fields and production rules."
+  },
+  "auxiliary_race": {
+    "status": "pending",
+    "cgo_enabled": true,
+    "separate_from_production_cgo0_compiler_proof": true,
+    "expected_mandatory": 70,
+    "expected_supplemental": 11,
+    "script_digest_and_census_must_equal_ordinary": true,
+    "tools_sha256": "5066ca5914142fe800a306204f3116ca8268d621d1b281dd861f880c5f228c05"
+  },
+  "custody": {
+    "ordinary_tools_sha256": "e404943e051531cfd0e8e5e15df9b5e580ed28ae54b74f68f8aea05ecbbfc802",
+    "metadata_sha256": "edc922f399233d02998f28771c9ad323e620c85acc68ee949e034ef291229b9b",
+    "product_map_sha256": "6acb8be95e9da43af17191f30ed2554a3e28cc1a5c281042af33cf77bb3db2a0",
+    "product_compiler_closure_files": 5007,
+    "control_plus_probe_map_sha256": "9eed8d4f6937d22ecca5e004c99ef9f2f9efedc21e1dbb29b00d9ee1a09b6a26",
+    "mandatory_catalog_sha256": "45e97e495b9b3a9ee8c4e9f8c69e589c3c4df018879c4ce58b7bef86ee950c0b",
+    "supplement_catalog_sha256": "242c74ab1d459a24afce32362f1cb8db216bab9cbc94274d0414dd62eb45cd52",
+    "receipt_path": "/home/by/urnetwork/temp/successor-v4-a131-qualified-20261107.jVkUvL/ordinary-qualification-receipt.json",
+    "receipt_sha256": "ed3ff18ecd50429765b573ec936560b92e67f5e5087055edd2fdb39b895d4d43",
+    "receipt_review": "Root and source reviewer read the complete ordinary receipt; root independently matched actual event and native verifier records."
+  },
+  "scope": "Selected source-level compiler/correctness proof on the exact frozen product graph in bounded offline Goofe units, including genuine package init and root TestMain. Synthetic fullScore/virtual-owner clock controls are not a live candidate exploit or latency-spoofing demonstration. Not a full suite/full checkout/current-main/API or evaluator-image qualification. No participant rescoring, model/provider calls, database, Docker or workload measurement. Manual genuine product/honesty review, exact instrument approval, new host validator/builder/raw-lock loader artifact pins, image/runtime/admission qualification and an actual fresh immutable R9 baseline remain separate required gates. Epoch-one numeric policy, product sources, runtime and frozen inputs are unchanged by this preparation."
+}

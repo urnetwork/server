@@ -1,5 +1,5 @@
-// Supervisor renewal may recover a completed, wholly unadmitted acquisition
-// deadline. The historical lock budget, confirmed fence and worker stay separate.
+// Supervisor renewal may recover wholly unadmitted or closed read-only
+// deadlines. Historical lock budgets, confirmed fencing and workers stay separate.
 package controller
 
 import (
@@ -14,18 +14,22 @@ import (
 // One renewal invocation owns all observations, across every inner Tx retry.
 // Read them only after capture returns; no mutable observation escapes its owner.
 type competitionSupervisorRenewObservation struct {
-	phase           server.DbPhaseObservation
-	timing          server.DbTiming
-	read            *server.DbReadObservation
-	transaction     server.DbTxObservation
-	step            competitionSupervisorRenewalStep
-	callbacks       uint64
-	callbackEntered bool
+	phase            server.DbPhaseObservation
+	timing           server.DbTiming
+	acquire          server.DbAcquireObservation
+	read             *server.DbReadObservation
+	transaction      server.DbTxObservation
+	step             competitionSupervisorRenewalStep
+	callbacks        uint64
+	callbackEntered  bool
+	readPrefix       competitionSupervisorReadPrefixSnapshot
+	readPrefixBypass *competitionHeartbeatDatabaseObservation
 }
 
 // Fresh cumulative counters cannot forget an earlier admitted inner attempt.
 func newCompetitionSupervisorRenewObservation() *competitionSupervisorRenewObservation {
-	return &competitionSupervisorRenewObservation{timing: server.DbTiming{Acquire: &server.DbAcquireObservation{}}, read: server.NewDbReadObservation()}
+	return &competitionSupervisorRenewObservation{read: server.NewDbReadObservation(),
+		readPrefix: competitionSupervisorReadPrefixSnapshot{valid: true}, readPrefixBypass: &competitionHeartbeatDatabaseObservation{}}
 }
 
 // Immutable proof is private to the trusted store, not an optional driver claim.
@@ -36,6 +40,12 @@ type competitionSupervisorRenewError struct {
 	acquire         server.DbAcquireObservation
 	read            server.DbReadObservationSnapshot
 	callbackEntered bool
+	transaction     server.DbTxObservationSnapshot
+	step            competitionSupervisorRenewalStep
+	callbacks       uint64
+	entered         server.DbContextBudget
+	returned        server.DbContextBudget
+	readPrefix      competitionSupervisorReadPrefixSnapshot
 	database        *CompetitionSupervisorRenewalDatabaseFailure
 }
 
@@ -52,8 +62,11 @@ func (self *competitionSupervisorRenewObservation) capture(run func()) error {
 	if err == nil {
 		return nil
 	}
+	prefix := self.readPrefix
+	prefix.bypasses = self.readPrefixBypass.unknown
 	return competitionSupervisorRenewError{cause: competitionDatabasePhaseError{cause: err, phase: self.phase.Phase()},
-		phase: self.phase.Phase(), acquire: *self.timing.Acquire, read: self.read.Snapshot(), callbackEntered: self.callbackEntered}
+		phase: self.phase.Phase(), acquire: self.acquire, read: self.read.Snapshot(), callbackEntered: self.callbackEntered,
+		transaction: self.transaction.Snapshot(), step: self.step, callbacks: self.callbacks, readPrefix: prefix}
 }
 
 // Exact transparent standard wrappers are allowed; an arbitrary Unwrap/Is/As
@@ -153,7 +166,9 @@ func defaultCompetitionSupervisorRenewalSettings() competitionSupervisorRenewalS
 // A recovery call beyond the old lock deadline needs fresh positive proof from
 // its immediate predecessor. A lock error can never grant that continuation.
 func retryCompetitionSupervisorRenewal(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error) error {
-	return retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, settings, operation, competitionSupervisorUnadmittedDeadline)
+	return retryCompetitionAuthorityRenewal(ctx, leaseExpiresAt, settings, operation, func(err error) bool {
+		return competitionSupervisorUnadmittedDeadline(err) || competitionSupervisorReadLockDeadline(err)
+	})
 }
 
 // Each owner supplies its exact completed-deadline predicate. Supervisor/host
@@ -307,7 +322,9 @@ func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresA
 			observation.returning(competitionHeartbeatOwnerSuccess, ctx, totalCtx)
 			return nil
 		}
-		lockRetry := attemptError == nil && competitionSupervisorLockTimeout(err)
+		// A positively unexecuted pooler refusal shares the historical lock
+		// allowance; it cannot borrow the owned-deadline recovery reserve.
+		lockRetry := attemptError == nil && (competitionSupervisorLockTimeout(err) || competitionLivenessPoolerRefusal(err))
 		deadlineRetry := attemptError == context.DeadlineExceeded && completedDeadline != nil && completedDeadline(err)
 		if !lockRetry && !deadlineRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
 			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= settings.LockRetry.MaximumAttempts {

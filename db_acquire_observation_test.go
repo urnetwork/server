@@ -17,6 +17,25 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// The snapshot is its own Db/Tx option, never a DbTiming field: supplied alone
+// it records on both entry points, and a DbTiming beside it keeps only phases.
+func TestDbAcquireObservationIsItsOwnOption(t *testing.T) {
+	_, pool := newPgPoolWireFixture(t, nil, neverPingTestPool)
+	observation := &DbAcquireObservation{}
+	calls := 0
+	dbWithPool(t.Context(), pool, func(PgConn) { calls++ }, OptNoRetry(), observation)
+	if calls != 1 || observation.Attempt != 1 || !observation.Returned || !observation.Admitted || observation.PoolReturn != nil ||
+		observation.PoolEntry.Maximum != 1 || observation.BeforeOpen.State != "live" || observation.AtReturn.State != "live" {
+		t.Fatal("Db did not record the acquisition snapshot supplied as its own option", calls, observation)
+	}
+	timing := &DbTiming{}
+	txWithPool(t.Context(), pool, func(PgTx) { calls++ }, OptNoRetry(), timing, observation)
+	if calls != 2 || observation.Attempt != 2 || !observation.Admitted || observation.PoolReturn != nil ||
+		timing.Phases[DbTimingAcquire].Count != 1 || timing.Phases[DbTimingBegin].Count != 1 || timing.Phases[DbTimingCommit].Count != 1 {
+		t.Fatal("Tx did not carry the acquisition option beside phase timing", calls, observation, timing)
+	}
+}
+
 // A returned deadline can coexist with a healthy, idle pool. Observation must
 // preserve the exact error and add no wire work before the next healthy caller.
 func TestDbAcquireObservationExpiredCallerKeepsHealthyPool(t *testing.T) {
@@ -32,11 +51,11 @@ func TestDbAcquireObservationExpiredCallerKeepsHealthyPool(t *testing.T) {
 		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 		defer cancel()
 		observation := &DbAcquireObservation{}
-		timing := &DbTiming{Acquire: observation}
+		timing := &DbTiming{}
 		phase := &DbPhaseObservation{}
 		calls := 0
 		original := captureDbErrorPanic(func() {
-			txWithPool(ctx, pool, func(PgTx) { calls++ }, OptNoRetry(), timing, phase)
+			txWithPool(ctx, pool, func(PgTx) { calls++ }, OptNoRetry(), timing, observation, phase)
 		})
 		if original != context.DeadlineExceeded || calls != 0 || phase.Phase() != DbOperationAcquire ||
 			!observation.Returned || observation.Admitted || observation.BeforeOpen.State != "deadline" ||
@@ -56,7 +75,7 @@ func TestDbAcquireObservationExpiredCallerKeepsHealthyPool(t *testing.T) {
 		dbWithPool(t.Context(), pool, func(conn PgConn) {
 			calls++
 			RaisePgResult(conn.Exec(t.Context(), "SELECT 1"))
-		}, OptNoRetry(), timing, phase)
+		}, OptNoRetry(), timing, observation, phase)
 		if calls != 1 || !observation.Admitted || observation.PoolReturn != nil || observation.Attempt != 2 ||
 			fixture.dialCount != beforeDials || fixture.pingCount != beforePings || len(fixture.queries) != beforeQueries+1 {
 			t.Fatal("next healthy acquisition retained a stale refusal or added validation", observation)
@@ -80,13 +99,12 @@ func TestDbAcquireObservationHeldConnectionThenHealthy(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 		observation := &DbAcquireObservation{}
-		timing := &DbTiming{Acquire: observation}
 		phase := &DbPhaseObservation{}
 		calls := 0
 		joined := make(chan any, 1)
 		go func() {
 			joined <- captureDbErrorPanic(func() {
-				txWithPool(ctx, pool, func(PgTx) { calls++ }, OptNoRetry(), timing, phase)
+				txWithPool(ctx, pool, func(PgTx) { calls++ }, OptNoRetry(), observation, phase)
 			})
 		}()
 		synctest.Wait()
@@ -102,7 +120,7 @@ func TestDbAcquireObservationHeldConnectionThenHealthy(t *testing.T) {
 			t.Fatal("held acquisition timing, pool state or callback boundary changed", observation)
 		}
 		release()
-		txWithPool(t.Context(), pool, func(PgTx) { calls++ }, OptNoRetry(), timing, phase)
+		txWithPool(t.Context(), pool, func(PgTx) { calls++ }, OptNoRetry(), observation, phase)
 		if calls != 1 || !observation.Admitted || observation.PoolReturn != nil {
 			t.Fatal("released pool did not recover independently")
 		}
@@ -135,11 +153,10 @@ func TestDbAcquireObservationOpenConsumesCallerBudget(t *testing.T) {
 	defer cancel()
 	ctx := &pgAcquireOpenBudgetContext{Context: caller, entered: make(chan struct{})}
 	observation := &DbAcquireObservation{}
-	timing := &DbTiming{Acquire: observation}
 	joined := make(chan any, 1)
 	go func() {
 		joined <- captureDbErrorPanic(func() {
-			dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), timing)
+			dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), observation)
 		})
 	}()
 	<-ctx.entered
@@ -187,7 +204,7 @@ func TestDbAcquireObservationDoesNotTakeResetMutexOrReplacement(t *testing.T) {
 	joined := make(chan any, 1)
 	go func() {
 		joined <- captureDbErrorPanic(func() {
-			dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), &DbTiming{Acquire: observation})
+			dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), observation)
 		})
 	}()
 	<-ctx.entered
@@ -238,7 +255,7 @@ func TestDbAcquireObservationHeldInitialPing(t *testing.T) {
 		joined := make(chan any, 1)
 		go func() {
 			joined <- captureDbErrorPanic(func() {
-				dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), &DbTiming{Acquire: observation})
+				dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), observation)
 			})
 		}()
 		<-entered
@@ -289,7 +306,7 @@ func TestDbAcquireObservationIdleValidationRemainsBroad(t *testing.T) {
 		joined := make(chan any, 1)
 		go func() {
 			joined <- captureDbErrorPanic(func() {
-				dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), &DbTiming{Acquire: observation}, phase)
+				dbWithPool(ctx, pool, func(PgConn) { panic("synthetic callback must not run") }, OptNoRetry(), observation, phase)
 			})
 		}()
 		<-entered
@@ -333,7 +350,7 @@ func TestDbAcquireObservationPostAcquireRefusalsRemainDistinct(t *testing.T) {
 					if stage == "callback" {
 						panic(original)
 					}
-				}, OptNoRetry(), &DbTiming{Acquire: observation}, phase)
+				}, OptNoRetry(), observation, phase)
 			})
 			if outcome == nil || !observation.Admitted || !observation.Returned || observation.PoolReturn != nil || phase.Phase() == DbOperationAcquire {
 				t.Fatal("post-acquisition refusal became failed admission", outcome, observation)

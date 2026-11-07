@@ -22,6 +22,8 @@ import (
 
 // A private TLS API observes the installed exact envelope and records only its
 // own role. The test runner cannot return success for a host/worker invocation.
+// As in the adapter fixture, the token lives under a link-free directory, since
+// the reader refuses Darwin's /var alias.
 func newCompetitionIntakeFirstPreparationTest(t testing.TB, ready bool) (*competitionPreparationAdapter, CompetitionPreparationRequest, *competitionPreparationTestState, *competitionRuntimeBlobTestStore) {
 	t.Helper()
 	settings, intent, _, now := competitionIntakeFirstTestValues()
@@ -48,7 +50,7 @@ func newCompetitionIntakeFirstPreparationTest(t testing.TB, ready bool) (*compet
 	settings.artifactArchive = archive
 	state := &competitionPreparationTestState{}
 	config := CompetitionPreparationConfig{Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId,
-		ApiImageDigest: testApiImageDigest(), SourcePromoterTokenFile: filepath.Join(t.TempDir(), "source-promoter.token"), TimeoutSeconds: 3600}
+		ApiImageDigest: testApiImageDigest(), SourcePromoterTokenFile: filepath.Join(providerWorkPhysicalTempDir(t), "source-promoter.token"), TimeoutSeconds: 3600}
 	if err := os.WriteFile(config.SourcePromoterTokenFile, []byte("synthetic-source-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

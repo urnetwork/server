@@ -98,7 +98,7 @@ func TestCompetitionSupervisorRenewalDiagnosticsDetachReturnedSnapshot(t *testin
 	defer cancel()
 	confirmed := time.Now().Add(time.Minute)
 	observation := newCompetitionSupervisorRenewObservation()
-	observation.timing.Acquire.PoolReturn = &server.DbAcquirePoolSnapshot{Maximum: 8, Idle: 2}
+	observation.acquire.PoolReturn = &server.DbAcquirePoolSnapshot{Maximum: 8, Idle: 2}
 	cause := errors.New("synthetic private cause")
 	err := observation.captureContext(ctx, confirmed, func() {
 		observation.callbackEntered, observation.callbacks = true, 2
@@ -115,7 +115,7 @@ func TestCompetitionSupervisorRenewalDiagnosticsDetachReturnedSnapshot(t *testin
 		!first.AtEntry.HasDeadline || !first.AtReturn.HasDeadline || first.AtReturn.AtUnixNano < first.AtEntry.AtUnixNano {
 		t.Fatal("completed capture omitted its exact observation boundaries", first)
 	}
-	observation.timing.Acquire.PoolReturn.Idle = 4
+	observation.acquire.PoolReturn.Idle = 4
 	first.Acquire.PoolReturn.Idle = 6
 	first.Transaction.CommitAttempts = 1
 	second := CompetitionSupervisorRenewalFailureDetails(err)

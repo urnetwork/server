@@ -208,7 +208,7 @@ func BindCompetitionJobReevaluationRuntime(settings *Settings, proof model.Compe
 	}
 	seen := map[string]bool{}
 	for _, class := range proof.IncidentClasses {
-		if seen[class] || (class != model.CompetitionJobReevaluationHeartbeatBudget && class != model.CompetitionJobReevaluationBackingService) {
+		if seen[class] || (class != model.CompetitionJobReevaluationHeartbeatBudget && class != model.CompetitionJobReevaluationBackingService && class != model.CompetitionJobReevaluationOperatorInterruption) {
 			return ErrConflict
 		}
 		seen[class] = true
@@ -295,10 +295,17 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 		if validateCompetitionReevaluationBackingServiceShape(settings, a) != nil {
 			return ErrConflict
 		}
+	case model.CompetitionJobReevaluationOperatorInterruption:
+		if validateCompetitionReevaluationOperatorInterruptionShape(a) != nil {
+			return ErrConflict
+		}
 	default:
 		return ErrConflict
 	}
 	if a.IncidentClass != model.CompetitionJobReevaluationBackingService && a.BackingServiceEvidence != nil {
+		return ErrConflict
+	}
+	if a.IncidentClass != model.CompetitionJobReevaluationOperatorInterruption && a.OperatorInterruptionEvidence != nil {
 		return ErrConflict
 	}
 	if err := validateCompetitionReevaluationPostCloseApproval(a); err != nil {
@@ -321,7 +328,7 @@ func validateCompetitionReevaluationRuntime(settings *Settings, a model.Competit
 		proof.WorkerSha256 != a.FixedWorkerSha256 || proof.WorkerImageDigest != a.FixedWorkerImageDigest || proof.ApiImageDigest != a.ApiImageDigest {
 		return ErrConflict
 	}
-	if (a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService) &&
+	if (a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService || a.IncidentClass == model.CompetitionJobReevaluationOperatorInterruption) &&
 		!slices.Contains(proof.IncidentClasses, a.IncidentClass) {
 		return ErrConflict
 	}
@@ -377,6 +384,18 @@ func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.
 	}
 	if json.Unmarshal(payload, &event) != nil || digest != auth.IncidentEventSha256 || at.Before(started) || completed.Before(at) {
 		return ErrConflict
+	}
+	if auth.IncidentClass == model.CompetitionJobReevaluationOperatorInterruption {
+		if eventType != "failed" || event.Attempt != auth.ExpectedAttemptCount || event.Failure != nil || !at.Equal(completed) {
+			return ErrConflict
+		}
+		if len(event.ErrorCode) != 0 {
+			var code string
+			if json.Unmarshal(event.ErrorCode, &code) != nil || code != "evaluation_time_budget_exhausted" {
+				return ErrConflict
+			}
+		}
+		return validateCompetitionReevaluationOperatorInterruptionInTx(ctx, tx, auth, started, completed)
 	}
 	if auth.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget {
 		if eventType != "handed_back" || (event.Reason != "heartbeat_failed" && event.Reason != "host_heartbeat_failed") ||
@@ -542,7 +561,7 @@ func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings
 				panic(ErrConflict)
 			}
 			cycleReceipt := model.CompetitionJobReevaluationCycle{Schema: 1, Environment: a.Environment, CompetitionId: a.CompetitionId, SeasonId: a.SeasonId, JobId: a.JobId, RoundId: a.RoundId, PatchSha256: "", RoundPolicySha256: a.RoundPolicySha256, BaselineSha256: a.BaselineSha256, Cycle: 1, AuthorizationSha256: request.AuthorizationSha256, EvidenceSha256: a.EvidenceSha256, PreviousTerminalSha256: a.ExpectedTerminalSha256, PreviousFailure: model.CompetitionEvaluationFailure{Kind: failure.Kind, Code: failure.Code, Retriable: false}, RuntimeQualificationSha256: a.RuntimeQualificationSha256, FixedSourceCommit: a.FixedSourceCommit, FixedWorkerSha256: a.FixedWorkerSha256, FixedWorkerImageDigest: a.FixedWorkerImageDigest, ApiImageDigest: a.ApiImageDigest, AuthorizedAt: now, ExecutionTimeoutSeconds: settings.EvaluationPolicy.ScoreTimeoutSeconds}
-			if a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService {
+			if a.IncidentClass == model.CompetitionJobReevaluationHeartbeatBudget || a.IncidentClass == model.CompetitionJobReevaluationBackingService || a.IncidentClass == model.CompetitionJobReevaluationOperatorInterruption {
 				cycleReceipt.IncidentClass = a.IncidentClass
 			}
 			server.Raise(tx.QueryRow(ctx, `SELECT patch_sha256 FROM competition_job WHERE job_id=$1`, a.JobId).Scan(&cycleReceipt.PatchSha256))

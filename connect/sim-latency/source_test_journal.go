@@ -178,7 +178,7 @@ func executeJournaledSourceTest(ctx context.Context, directory string, plan sour
 		return nil, errors.New("independent test reservation belongs to changed or corrupt context")
 	}
 	validate := func(execution *sourceTestExecution) error {
-		if execution == nil || execution.ImageId != plan.ImageId || execution.SuiteSha256 != plan.SuiteSha256 || execution.TestCount <= 0 || execution.ExitCode < 0 || execution.DurationMillis < 0 || !validSha256(execution.TestLogsSha256) {
+		if execution == nil || execution.ImageId != plan.ImageId || execution.SuiteSha256 != plan.SuiteSha256 || !sourceCorrectnessExecutionCountValid(*execution) || execution.ExitCode < 0 || execution.DurationMillis < 0 || !validSha256(execution.TestLogsSha256) {
 			return errors.New("independent test observation does not bind complete execution")
 		}
 		return verify(execution)
@@ -276,7 +276,10 @@ func executeJournaledSourceCorrectness(ctx context.Context, request reviewedSour
 	if artifacts.Directory != filepath.Join(sandbox.StateDirectory, owner) || settings.MaximumEvidenceBytes <= 0 || settings.Now == nil || sandbox.Timeout <= 0 {
 		return nil, errors.New("journaled correctness requires the exact private build context")
 	}
-	plan := sourceCorrectnessTestPlan(request, artifacts, owner)
+	plan, err := sourceCorrectnessTestPlan(request, artifacts, owner)
+	if err != nil {
+		return nil, err
+	}
 	return executeJournaledSourceTest(ctx, filepath.Join(artifacts.Directory, "independent-test-journal"), plan, settings.Now().Add(sandbox.Timeout), settings,
 		func(testCtx context.Context) (*sourceTestExecution, error) {
 			return executeSourceCorrectnessSuite(testCtx, request, artifacts, owner, sandbox, docker)

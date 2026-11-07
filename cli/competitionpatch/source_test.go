@@ -48,6 +48,28 @@ func repositoryApplyTestGit(t *testing.T, root string, args ...string) string {
 	return strings.TrimSpace(string(output))
 }
 
+// A changed synthetic base needs a matching retained raw lock and identity.
+// The production caller never manufactures either from candidate checkouts.
+func repositoryApplyTestRetainIdentity(t *testing.T, root string, identity repositorySourceIdentity) ([]byte, string) {
+	t.Helper()
+	lock, err := json.Marshal(repositoryWorkCoverageSourceLock{Schema: 1, CandidatePathBase: identity.CandidatePathBase,
+		Repositories: identity.Repositories, WorkCoveragePolicy: identity.WorkCoveragePolicy})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".evaluation-source-lock.json"), lock, 0600); err != nil {
+		t.Fatal(err)
+	}
+	lockDigest := sha256.Sum256(lock)
+	identity.SourceLockSha256 = hex.EncodeToString(lockDigest[:])
+	content, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	return content, hex.EncodeToString(digest[:])
+}
+
 // Returns exact trusted-preparer bytes and independently observable base heads.
 func repositoryApplyFixture(t *testing.T) (string, []byte, string, map[string]string) {
 	t.Helper()
@@ -88,13 +110,9 @@ func repositoryApplyFixture(t *testing.T) (string, []byte, string, map[string]st
 		repositoryApplyTestGit(t, path, "commit", "--quiet", "-m", "synthetic base")
 		commits[repository] = repositoryApplyTestGit(t, path, "rev-parse", "HEAD")
 	}
-	identity := repositorySourceIdentity{Schema: 1, Kind: "sim-latency-evaluation-source", Temporary: true, BaseImageId: "sha256:" + strings.Repeat("a", 64), BaseSha: commits["server"], Branch: "sim-latency", SourceLockSha256: strings.Repeat("b", 64), CandidatePathBase: "mono_root_v1", Repositories: commits}
-	content, err := json.Marshal(identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(content)
-	return root, content, hex.EncodeToString(digest[:]), commits
+	identity := repositorySourceIdentity{Schema: 1, Kind: "sim-latency-evaluation-source", Temporary: true, BaseImageId: "sha256:" + strings.Repeat("a", 64), BaseSha: commits["server"], Branch: "sim-latency", CandidatePathBase: "mono_root_v1", Repositories: commits}
+	content, digest := repositoryApplyTestRetainIdentity(t, root, identity)
+	return root, content, digest, commits
 }
 
 // Shared routed bytes apply to their own repositories without moving server.

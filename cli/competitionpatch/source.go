@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,18 +68,19 @@ func defaultRepositoryApplySettings() repositoryApplySettings {
 
 // Exactly the trusted preparer's schema; no candidate-derived source paths.
 type repositorySourceIdentity struct {
-	Schema               int               `json:"schema"`
-	Kind                 string            `json:"kind"`
-	Temporary            bool              `json:"temporary"`
-	BaseImageId          string            `json:"base_image_id"`
-	BaseSha              string            `json:"base_sha"`
-	SourceEpoch          int               `json:"source_epoch"`
-	Staging              bool              `json:"staging"`
-	Branch               string            `json:"branch"`
-	SourceLockSha256     string            `json:"source_lock_sha256"`
-	CandidatePathBase    string            `json:"candidate_path_base,omitempty"`
-	Repositories         map[string]string `json:"repositories"`
-	CandidatePatchSha256 *string           `json:"candidate_patch_sha256"`
+	Schema               int                                  `json:"schema"`
+	Kind                 string                               `json:"kind"`
+	Temporary            bool                                 `json:"temporary"`
+	BaseImageId          string                               `json:"base_image_id"`
+	BaseSha              string                               `json:"base_sha"`
+	SourceEpoch          int                                  `json:"source_epoch"`
+	Staging              bool                                 `json:"staging"`
+	Branch               string                               `json:"branch"`
+	SourceLockSha256     string                               `json:"source_lock_sha256"`
+	CandidatePathBase    string                               `json:"candidate_path_base,omitempty"`
+	Repositories         map[string]string                    `json:"repositories"`
+	CandidatePatchSha256 *string                              `json:"candidate_patch_sha256"`
+	WorkCoveragePolicy   *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 }
 
 // Keeps even unexpected Git output within the operation's memory bound.
@@ -151,6 +153,10 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 			operationErr = errors.Join(err, operationErr)
 		}
 	}()
+	coverage, err := authenticateRepositoryWorkCoverage(ctx, root, identityBytes, identity, policy)
+	if err != nil {
+		return nil, err
+	}
 	runGitRaw := func(repository string, args ...string) (string, error) {
 		repositoryRoot := filepath.Join(root, repository)
 		commandArgs := []string{"-C", repositoryRoot, "-c", "safe.directory=" + repositoryRoot, "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", "-c", "protocol.allow=never", "-c", "gc.auto=0", "-c", "maintenance.auto=false"}
@@ -213,6 +219,10 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 	if err != nil || !gitShaPattern.MatchString(protectedTree) {
 		return nil, errors.New("protected evaluator tree is unavailable")
 	}
+	protectedHelpers, err := repositoryWorkCoverageSnapshot(root, coverage, runGit)
+	if err != nil {
+		return nil, err
+	}
 	patchDirectory, err := os.MkdirTemp("", "competition-routed-patches-")
 	if err != nil {
 		return nil, err
@@ -261,6 +271,10 @@ func applyRepositoryPatchesContext(ctx context.Context, root string, identityByt
 	actualTree, err := runGit("server", "rev-parse", "HEAD:connect/sim-latency")
 	if err != nil || actualTree != protectedTree {
 		return nil, errors.New("candidate changed protected evaluator source")
+	}
+	actualHelpers, err := repositoryWorkCoverageSnapshot(root, coverage, runGit)
+	if err != nil || !maps.Equal(protectedHelpers, actualHelpers) {
+		return nil, errors.New("candidate changed protected coverage helper source")
 	}
 	return commits, nil
 }

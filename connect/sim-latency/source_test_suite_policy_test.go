@@ -254,6 +254,7 @@ func TestSourceMinimumWorkCorrectnessCensusMatchesApprovedPatch(t *testing.T) {
 // The constant is the historical protocol's exact source-defined digest, not
 // a new release identity. Legacy requests and later policy inheritance diverge.
 func TestSourceMinimumWorkCorrectnessPreservesLegacySuiteIdentity(t *testing.T) {
+	sourceTestPrivateGlobalIdentity(t, "Synthetic Source Fixture", "source@fixture.example")
 	if sourceCorrectnessSuiteDigestForMinimumWork(false) != "db073c8785827c77de1f9be4c39d864ed0959e47ed10bc291c955f0fe80f82e5" ||
 		sourceCorrectnessSuiteScriptForMinimumWork(false) != sourceCorrectnessSuiteScript() ||
 		!reflect.DeepEqual(sourceCorrectnessRequiredTestsForMinimumWork(false), sourceCorrectnessRequiredTests()) {
@@ -262,7 +263,10 @@ func TestSourceMinimumWorkCorrectnessPreservesLegacySuiteIdentity(t *testing.T) 
 	requests := []reviewedSourceBuildRequest{sourceBuildContextFixture(t), sourceBuildImageMinimumWorkFixture(t, false), sourceBuildImageMinimumWorkFixture(t, true)}
 	for index, request := range requests {
 		artifacts := sourceBuildArtifacts{ImageId: "sha256:" + strings.Repeat("b", 64)}
-		plan := sourceCorrectnessTestPlan(request, artifacts, strings.Repeat("a", 64))
+		plan, err := sourceCorrectnessTestPlan(request, artifacts, strings.Repeat("a", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
 		if plan.SuiteSha256 != sourceCorrectnessSuiteDigestForMinimumWork(index != 0) || (plan.SuiteSha256 == sourceCorrectnessSuiteDigest()) != (index == 0) {
 			t.Fatal("source test plan downgraded its immutable generation policy", index, plan)
 		}
@@ -297,7 +301,10 @@ func TestSourceMinimumWorkIndependentTestsBindPlanExecutionContainmentAndReplay(
 			}
 			return daemon.run(ctx, args, out, diagnostics)
 		}
-		plan := sourceCorrectnessTestPlan(request, artifacts, owner)
+		plan, err := sourceCorrectnessTestPlan(request, artifacts, owner)
+		if err != nil {
+			t.Fatal(err)
+		}
 		client := &http.Client{Transport: winnerReviewTransport(func(request *http.Request) (*http.Response, error) {
 			providerCalls++
 			stream := sourceTestToolStream(t, "run_prescribed_tests", "{}", false)
@@ -337,7 +344,10 @@ func TestSourceMinimumWorkIndependentTestsBindPlanExecutionContainmentAndReplay(
 func TestSourceMinimumWorkCorrectnessRejectsHistoricalJournalWithoutRerun(t *testing.T) {
 	request := sourceBuildImageMinimumWorkFixture(t, false)
 	sandbox, artifacts, owner := sourceMinimumWorkCorrectnessArtifacts(t)
-	plan := sourceCorrectnessTestPlan(request, artifacts, owner)
+	plan, err := sourceCorrectnessTestPlan(request, artifacts, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
 	plan.SuiteSha256 = sourceCorrectnessSuiteDigest()
 	execution := sourceTestExecutionFixture(plan)
 	settings := defaultSourceTestJournalSettings()

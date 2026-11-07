@@ -69,6 +69,7 @@ type competitionHeartbeatDatabaseSnapshot struct {
 type competitionHeartbeatDatabaseObservation struct {
 	phase       server.DbPhaseObservation
 	timing      server.DbTiming
+	acquire     server.DbAcquireObservation
 	transaction server.DbTxObservation
 	step        competitionHeartbeatDatabaseStep
 	ordinal     uint8
@@ -91,7 +92,7 @@ func (self competitionHeartbeatDatabaseError) Unwrap() error { return self.cause
 
 // A fresh observation covers every inner transaction retry in this invocation.
 func captureCompetitionHeartbeatDatabase(ctx context.Context, run func(*competitionHeartbeatDatabaseObservation)) error {
-	observation := &competitionHeartbeatDatabaseObservation{timing: server.DbTiming{Acquire: &server.DbAcquireObservation{}}}
+	observation := &competitionHeartbeatDatabaseObservation{}
 	entered := server.ObserveDbContextBudget(ctx)
 	err := captureDatabaseError(func() { run(observation) })
 	completed := competitionHeartbeatCompletedDatabaseFromContext(ctx)
@@ -100,7 +101,7 @@ func captureCompetitionHeartbeatDatabase(ctx context.Context, run func(*competit
 	}
 	snapshot := competitionHeartbeatDatabaseSnapshot{AtEntry: entered, AtReturn: server.ObserveDbContextBudget(ctx),
 		Step: observation.step, CallbackEntries: observation.callbacks, UnknownStatements: observation.unknown,
-		Acquire: *observation.timing.Acquire, Transaction: observation.transaction.Snapshot(),
+		Acquire: observation.acquire, Transaction: observation.transaction.Snapshot(),
 		SqlShape: observation.sqlShape, SqlStatements: observation.sqlCount, SqlShapeValid: observation.sqlValid}
 	for _, statements := range observation.statements {
 		for _, statement := range statements {

@@ -757,6 +757,7 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 	rwOptions := OptReadOnly()
 	var timing *DbTiming
 	phase := dbPhaseObservation(options)
+	var acquireObservation *DbAcquireObservation
 	var readObservation *DbReadObservation
 	var txObservation *DbTxObservation
 	var ownedConnection *pgOwnedConnection
@@ -770,6 +771,8 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 			rwOptions = v
 		case *DbTiming:
 			timing = v
+		case *DbAcquireObservation:
+			acquireObservation = v
 		case *DbReadObservation:
 			readObservation = v
 		case *DbTxObservation:
@@ -804,7 +807,6 @@ func dbWithPool(ctx context.Context, pool *safePgPool, callback func(PgConn), op
 		connectionRetrySafe := false
 		phase.enter(DbOperationAcquire)
 		acquireStarted := timing.start()
-		acquireObservation := timing.acquireObservation()
 		acquireObservation.begin(ctx)
 		pgPool := pool.open()
 		acquireObservation.opened(ctx, pgPool)

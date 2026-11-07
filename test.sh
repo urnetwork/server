@@ -92,6 +92,27 @@ if [[ -d $baseline_dir ]]; then
     "$baseline_dir/verify.sh" || exit $?
 fi
 
+# The six public native-fee roots, four in ./model and two in ./controller,
+# settle the native-fee fixtures with the mainnet.test verifier that exported
+# them. The sn release gate builds both (sn/scripts/build-mainnet-exports.sh)
+# and runs the roots with them exported as URNETWORK_NATIVE_FEE_SETTLEMENT_*.
+# With none of those set, the roots build the same exports from ../sn the
+# gate's way themselves (internal/nativefeefixture), so on Linux they always
+# run. That verifier builds and runs only on Linux (sn's mainnet tests and
+# nativefee.Invoke), and an unexecuted fixture is never a skip, so on another
+# host the roots fail by design. There, with none of the variables set, this
+# leaves exactly those six out of the two package runs and says so; with any
+# of them set, even empty, they run as the caller asked. go test keeps only the
+# last -skip, so a caller's own -skip replaces this one.
+native_fee_model_skip_args=()
+native_fee_controller_skip_args=()
+if [[ "$(uname -s)" != Linux &&
+      -z "${URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER+set}${URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256+set}" ]]; then
+    native_fee_model_skip_args=(-skip '^TestStNativeFeeSettlementPublic(OwnedProofRetainsAllOriginals|MissingRefundKeepsFullCeiling|ProofRecoversLostSignerResult|FractionalConflictRevokesCredit)$')
+    native_fee_controller_skip_args=(-skip '^TestNativeFeeControllerPublic(ProofSettlesWithoutSignerConfiguration|UnknownRefundKeepsOriginalCeiling)$')
+    echo "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is $(uname -s)" >&2
+fi
+
 test_directories="$(./test-dirs.sh)" || exit $?
 while IFS= read -r d; do
     [[ -n "$d" ]] || continue
@@ -99,12 +120,18 @@ while IFS= read -r d; do
         # run separately above with each integration package's timing contract
         continue
     fi
+    package_args=()
+    if [[ $d == ./model ]]; then
+        package_args=("${native_fee_model_skip_args[@]}")
+    elif [[ $d == ./controller ]]; then
+        package_args=("${native_fee_controller_skip_args[@]}")
+    fi
     # if [[ $1 == "" || $1 == `basename $d` ]]; then
         pushd "$d"
         # highlight source files in this dir
         match="/${PWD##*/}/\\S*\.go\|^\\S*_test.go"
         # go test -v "$@" | grep --color=always -e "^" -e "$match"
-        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
+        GORACE="log_path=profile/race.out halt_on_error=1" go test -timeout 0 -v -race -cpuprofile profile/cpu -memprofile profile/memory "${package_args[@]}" "$@" | grep --binary-files=text --line-buffered --color=always -e "^" -e "$match"
         pipeline_status=("${PIPESTATUS[@]}")
         test_pipeline_status "${pipeline_status[0]}" "${pipeline_status[1]}" || exit $?
         popd

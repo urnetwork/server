@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -157,8 +158,9 @@ type evaluatorSourceLock struct {
 	DevelopmentSnapshot bool `json:"development_snapshot"`
 	// Only a newly qualified trusted image may opt into repository-wide
 	// candidates. Omission preserves every historical server-only identity.
-	CandidatePathBase string            `json:"candidate_path_base,omitempty"`
-	Repositories      map[string]string `json:"repositories"`
+	CandidatePathBase  string                               `json:"candidate_path_base,omitempty"`
+	Repositories       map[string]string                    `json:"repositories"`
+	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 }
 
 type sourceRecord struct {
@@ -456,6 +458,10 @@ func loadEvaluatorSourceLockForMode(path string, staging bool) (*evaluatorSource
 	if decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, errors.New("evaluator source lock contains trailing data")
 	}
+	coverage, err := model.CompetitionWorkCoveragePolicyFromSourceJson(lockBytes)
+	if err != nil || !reflect.DeepEqual(coverage, lock.WorkCoveragePolicy) {
+		return nil, errors.New("evaluator source lock has an ambiguous coverage policy")
+	}
 	if lock.Schema != 1 {
 		return nil, errors.New("evaluator source lock schema must be 1")
 	}
@@ -489,6 +495,9 @@ func verifySourceEpoch(manifest *sourceManifest, epochNumber int, repositoriesRo
 		sourceLock, err = loadEvaluatorSourceLockForMode(sourceLockPath, manifest.Staging)
 		if err != nil {
 			return fmt.Errorf("load evaluator source lock: %w", err)
+		}
+		if !reflect.DeepEqual(sourceLock.WorkCoveragePolicy, epoch.WorkCoveragePolicy) {
+			return errors.New("evaluator source lock coverage differs from its immutable generation")
 		}
 	}
 	for _, repository := range sourceRepositoryNamesForMode(manifest.Staging) {

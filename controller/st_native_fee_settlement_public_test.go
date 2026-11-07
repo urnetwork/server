@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/urfoundation/sn/nativefee"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/internal/nativefeefixture"
 	"github.com/urnetwork/server/model"
 )
 
@@ -37,7 +38,9 @@ type nativeFeeControllerManifest struct {
 }
 
 // Qualification independently selects the persistent exported originals and
-// the exact mainnet.test image. Its nested runtime peer is explicitly synthetic.
+// the exact mainnet.test image, the sn release gate's exports; a run that
+// selects none builds the same exports from ../sn the gate's way first
+// (nativefeefixture.Require). Its nested runtime peer is explicitly synthetic.
 func nativeFeeControllerProofFixture(tb testing.TB, mode string) (nativeFeeControllerManifest, *model.StTransactionIntent, *server.StOperatorGasPolicy) {
 	tb.Helper()
 	directory := os.Getenv("URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY")
@@ -122,6 +125,7 @@ func nativeFeeControllerProofFixture(tb testing.TB, mode string) (nativeFeeContr
 
 // Actual global dispatch releases one exact native fee and retains all originals.
 func TestNativeFeeControllerPublicProofSettlesWithoutSignerConfiguration(t *testing.T) {
+	nativefeefixture.Require(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		manifest, intent, gas := nativeFeeControllerProofFixture(tb, "pair")
 		result, err := SettleNativeTransactionFee(tb.Context(), intent.IntentId, manifest.Request, manifest.TransactionHash, 2*time.Minute)
@@ -144,6 +148,7 @@ func TestNativeFeeControllerPublicProofSettlesWithoutSignerConfiguration(t *test
 
 // Missing original refund never reaches durable credit, through the same API.
 func TestNativeFeeControllerPublicUnknownRefundKeepsOriginalCeiling(t *testing.T) {
+	nativefeefixture.Require(t)
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		manifest, intent, gas := nativeFeeControllerProofFixture(tb, "missing")
 		if result, err := SettleNativeTransactionFee(tb.Context(), intent.IntentId, manifest.Request, manifest.TransactionHash, 2*time.Minute); err == nil || result != nil {

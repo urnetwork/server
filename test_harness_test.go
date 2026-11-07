@@ -883,6 +883,119 @@ func TestServerTestScriptPreservesUpstreamFailure(t *testing.T) {
 	}
 }
 
+// The six public native-fee roots build the sn release gate's exports
+// themselves when none of the gate's variables is set, but their verifier runs
+// only on Linux. So the runner always runs them on Linux, and on any other host
+// leaves out exactly those six, from ./model and ./controller alone, only when
+// none of the variables is set, and says so; any one of them set, even empty,
+// runs them exactly as the caller asked.
+func TestServerTestScriptLeavesNativeFeePublicRootsOutOnlyOffLinuxWithoutGateExports(t *testing.T) {
+	if os.Getenv(testServerRunnerChildMode) == "native-fee-skip" {
+		os.Exit(0)
+	}
+
+	testBinary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	catPath, err := exec.LookPath("cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateVariables := []string{
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_FIXTURE_DIRECTORY",
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER",
+		"URNETWORK_NATIVE_FEE_SETTLEMENT_VERIFIER_SHA256",
+	}
+	// The six roots by exact name: the controller's other public-named test is a
+	// pure unit test and always runs.
+	skips := map[string][]string{
+		"server/model":      {"-skip", "^TestStNativeFeeSettlementPublic(OwnedProofRetainsAllOriginals|MissingRefundKeepsFullCeiling|ProofRecoversLostSignerResult|FractionalConflictRevokesCredit)$"},
+		"server/controller": {"-skip", "^TestNativeFeeControllerPublic(ProofSettlesWithoutSignerConfiguration|UnknownRefundKeepsOriginalCeiling)$"},
+	}
+	callerArgs := []string{"-run", "^Test selected fixture$", "-short"}
+	packageInvocation := func(directory string, skip bool) []string {
+		invocation := []string{directory, "0", "test", "-timeout", "0", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}
+		if skip {
+			invocation = append(invocation, skips[directory]...)
+		}
+		return append(invocation, callerArgs...)
+	}
+	allGateVariables := map[string]string{gateVariables[0]: "/synthetic/native-fee", gateVariables[1]: "/synthetic/native-fee-verifier/mainnet.test", gateVariables[2]: "sha256:synthetic"}
+	for _, test := range []struct {
+		name  string
+		host  string
+		set   map[string]string
+		leave bool
+	}{
+		{"linux_no_gate_variable", "Linux", nil, false},
+		{"linux_all_gate_variables", "Linux", allGateVariables, false},
+		{"darwin_no_gate_variable", "Darwin", nil, true},
+		{"darwin_fixture_directory", "Darwin", map[string]string{gateVariables[0]: "/synthetic/native-fee"}, false},
+		{"darwin_verifier", "Darwin", map[string]string{gateVariables[1]: "/synthetic/native-fee-verifier/mainnet.test"}, false},
+		{"darwin_empty_verifier_sha256", "Darwin", map[string]string{gateVariables[2]: ""}, false},
+		{"darwin_all_gate_variables", "Darwin", allGateVariables, false},
+		{"freebsd_no_gate_variable", "FreeBSD", nil, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runnerPath, binDir, workspaceRoot := writeTestServerRunnerFixture(t, "#!/bin/sh\nexec \"$TEST_SERVER_RUNNER_CAT\"\n")
+			serverDir := filepath.Join(workspaceRoot, "server")
+			for _, directory := range []string{"model", "controller"} {
+				if err := os.MkdirAll(filepath.Join(serverDir, directory), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			selector := "#!/usr/bin/env bash\nprintf './proxy\\n./connect/perfvar\\n./fixture\\n./model\\n./controller\\n'\n"
+			if err := os.WriteFile(filepath.Join(serverDir, "test-dirs.sh"), []byte(selector), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			uname := "#!/bin/sh\n[ \"$#\" -eq 1 ] && [ \"$1\" = -s ] || exit 88\nprintf '%s\\n' \"$TEST_SERVER_RUNNER_UNAME\"\n"
+			if err := os.WriteFile(filepath.Join(binDir, "uname"), []byte(uname), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			overrides := map[string]string{
+				"PATH":                                binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+				"TEST_SERVER_RUNNER_BINARY":           testBinary,
+				"TEST_SERVER_RUNNER_CAT":              catPath,
+				"TEST_SERVER_RUNNER_TEST_NAME":        "TestServerTestScriptLeavesNativeFeePublicRootsOutOnlyOffLinuxWithoutGateExports",
+				"TEST_SERVER_RUNNER_ADMISSION_STATUS": "0",
+				"TEST_SERVER_RUNNER_UNAME":            test.host,
+				"URNETWORK_NETWORK_TEST_LOCK_HELD":    "1",
+				"URNETWORK_ROOT":                      workspaceRoot,
+				"WARP_TEST_ENV_FAIL_FAST":             "0",
+				testServerRunnerChildMode:             "native-fee-skip",
+			}
+			unset := []string{"TEST_SERVER_RUNNER_UPSTREAM_STATUS"}
+			for _, name := range gateVariables {
+				if value, ok := test.set[name]; ok {
+					overrides[name] = value
+				} else {
+					unset = append(unset, name)
+				}
+			}
+			cmd := exec.Command("bash", append([]string{runnerPath}, callerArgs...)...)
+			cmd.Env = testCommandEnvironment(overrides, unset...)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("runner failed: %v\n%s", err, output)
+			}
+			requireTestServerRunnerInvocations(t, workspaceRoot, [][]string{
+				testServerRunnerAdmissionInvocation(),
+				append([]string{"server/proxy", "0", "test", "-timeout", "30m", "-v"}, callerArgs...),
+				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "0", "-p=1", "-parallel=1", "-v"}, callerArgs...),
+				append([]string{"server/connect/perfvar", "0", "test", "-timeout", "30m", "-p=1", "-parallel=1", "-short", "-v", "-race", "-cpuprofile", "profile/cpu", "-memprofile", "profile/memory"}, callerArgs...),
+				packageInvocation("server/fixture", false),
+				packageInvocation("server/model", test.leave),
+				packageInvocation("server/controller", test.leave),
+			})
+			notice := "test.sh: the six public native-fee roots are left out of ./model and ./controller: their sn verifier runs only on Linux, and this host is " + test.host + "\n"
+			if count, want := strings.Count(string(output), notice), map[bool]int{false: 0, true: 1}[test.leave]; count != want {
+				t.Fatalf("notice count = %d; want %d\n%s", count, want, output)
+			}
+		})
+	}
+}
+
 // The manifest is an independently pinned description of the exact local
 // vault/config boundary, including resources resolved from config/all.
 func TestSuiteProxyResourceManifestMatchesFullLocalSuiteBoundary(t *testing.T) {
