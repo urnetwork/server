@@ -41,13 +41,20 @@ func (self *providerEgressProbePass) runUrlProbes(ctx context.Context, args *Pro
 	if self.loadPool == nil {
 		return &ProviderEgressProbeResult{}, fmt.Errorf("URL probe destination catalog is required")
 	}
+	// a pass without a pool measures no URL at all, so every fetch is counted
+	// by result (SIGNALS.md §2.19h); a drain mid-fetch says nothing of the pool
 	pool, err := self.loadPool(ctx)
 	if err != nil {
+		if ctx.Err() == nil {
+			egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolUnavailable).Inc()
+		}
 		return &ProviderEgressProbeResult{}, fmt.Errorf("URL probe destination catalog: %w", err)
 	}
 	if pool == nil || len(pool.Destinations) == 0 {
+		egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolUnavailable).Inc()
 		return &ProviderEgressProbeResult{}, fmt.Errorf("URL probe destination catalog is empty")
 	}
+	egressProbePoolFetchesTotal.WithLabelValues(egressProbePoolServed).Inc()
 	pins, err := self.loadPins(ctx)
 	if err != nil {
 		return &ProviderEgressProbeResult{}, fmt.Errorf("URL probe certificate pins: %w", err)
