@@ -56,7 +56,47 @@ func TestCompetitionWorkCoveragePolicyCopiesAndRoundTripsByValue(t *testing.T) {
 func TestCompetitionWorkCoverageScoreRequiresGateAndExactProvenance(t *testing.T) {
 	policy := DefaultCompetitionWorkCoveragePolicy()
 	makeScore := func() *CompetitionScoreResult {
-		score := validCompetitionScoreForTest()
+		rawScore := 80.0
+		normalizedScore := 125.0
+		baselineVariance := 4.0
+		candidateVariance := 3.0
+		minimumPercent := 3.0
+		requiredPercent := 16.1
+		pValue := 0.01
+		welchT := 4.0
+		degreesOfFreedom := 14.0
+		nextEpochMinimumPercent := 2.0
+		recommendedPercent := 16.1
+		score := &CompetitionScoreResult{
+			ScoreSchema:      CompetitionScoreSchema,
+			RawScore:         &rawScore,
+			NormalizedScore:  &normalizedScore,
+			Placeable:        true,
+			TakeoverEligible: true,
+			Gates: map[string]CompetitionGate{
+				"G1_success": {Passed: true, Details: map[string]any{}},
+			},
+			Significance: &CompetitionScoreSignificance{
+				Method:                                      "one-sided-welch-t",
+				Alpha:                                       0.05,
+				ReplicateCount:                              9,
+				BaselineMeanRawScore:                        100,
+				CandidateMeanRawScore:                       80,
+				BaselineSampleVariance:                      &baselineVariance,
+				CandidateSampleVariance:                     &candidateVariance,
+				ObservedImprovementPercent:                  20,
+				TakeoverMarginPercent:                       16.1,
+				MinimumSignificantImprovementPercent:        &minimumPercent,
+				RequiredImprovementPercent:                  &requiredPercent,
+				OneSidedPValue:                              &pValue,
+				WelchT:                                      &welchT,
+				WelchDegreesOfFreedom:                       &degreesOfFreedom,
+				StatisticallySignificant:                    true,
+				NextEpochMinimumImprovementPercent:          &nextEpochMinimumPercent,
+				RecommendedNextEpochTakeoverMarginPercent:   &recommendedPercent,
+				RecommendedNextEpochTakeoverMarginSupported: true,
+			},
+		}
 		score.Diagnostics = map[string]any{"g2_volume_policy": string(CompetitionG2VolumePolicyMinimumWork), "scorer_version": CompetitionWorkCoverageScorerVersion, "work_coverage_policy": policy}
 		for _, name := range []string{"G1_success", "G2_volume", "G3_path_integrity", "G4_matchmaking", "G5_stability", "G6_resources", "G7_work_coverage"} {
 			score.Gates[name] = CompetitionGate{Passed: true, Details: map[string]any{}}

@@ -44,11 +44,7 @@ func TestCompetitionPatchCliRefusesLocalAttributeFiltersBeforeStatus(t *testing.
 		t.Fatal(err)
 	}
 	identity.Repositories = original
-	identityBytes, err := json.Marshal(identity)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identityDigest := sha256.Sum256(identityBytes)
+	identityBytes, identityDigest := repositoryApplyTestRetainIdentity(t, root, identity)
 	policy := []byte(`{"path_base":"mono_root_v1","max_patch_bytes":4096,"allowed_paths":["connect/**"],"forbidden_paths":["server/connect/sim-latency/**"]}`)
 	patch := []byte("diff --git a/connect/source.txt b/connect/source.txt\n--- a/connect/source.txt\n+++ b/connect/source.txt\n@@ -1 +1 @@\n-original\n+changed\n")
 	patchDigest, policyDigest := sha256.Sum256(patch), sha256.Sum256(policy)
@@ -56,10 +52,10 @@ func TestCompetitionPatchCliRefusesLocalAttributeFiltersBeforeStatus(t *testing.
 	policyPath := writeTestFile(t, inputs, "policy.json", policy)
 	identityPath := writeTestFile(t, inputs, "original-source.json", identityBytes)
 	var output bytes.Buffer
-	err = run([]string{"--base-sha", original["server"], "--policy", policyPath,
+	err := run([]string{"--base-sha", original["server"], "--policy", policyPath,
 		"--expected-policy-sha256", hex.EncodeToString(policyDigest[:]), "--patch", patchPath,
 		"--expected-patch-sha256", hex.EncodeToString(patchDigest[:]), "--apply-source-root", root,
-		"--source-identity", identityPath, "--expected-source-identity-sha256", hex.EncodeToString(identityDigest[:])}, &output)
+		"--source-identity", identityPath, "--expected-source-identity-sha256", identityDigest}, &output)
 	if err == nil || competitionPatchExitCode(err) != 2 || err.Error() != "trusted source application failed: source repository differs from its pristine frozen identity" || output.Len() != 0 {
 		t.Fatalf("configured filter reached source application: %v %q", err, output.String())
 	}
