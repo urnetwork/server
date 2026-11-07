@@ -12,9 +12,18 @@
 //
 // The judge decides each finding on evidence close in time to it:
 //
-//   - retired: its destination is no longer in the served pool. No later
-//     turn can authenticate or re-fail it, so it neither excludes nor drives
-//     rechecks, and nothing is deleted.
+//   - retired: its destination has been out of the served pool on every
+//     judge run for a whole site refresh interval (SiteRefreshIntervalSeconds,
+//     one day). No drawn turn can fail or clear it while the pool does not
+//     serve it, so rather than exclude and be rechecked indefinitely on a
+//     URL nothing else measures, it neither excludes nor drives rechecks,
+//     and nothing is deleted. A name out of the pool for less than that is
+//     judged as if it were served, so a pool read that misses a name, a
+//     configuration release in flight or a refresh that holds a site back
+//     for a while retires nothing. Retirement follows the pool, not the
+//     evidence: once the pool serves the name again the finding is judged
+//     again like a new one, and it is pending, so rechecked, until a fresh
+//     failure or the place rule decides it.
 //   - site: a site or prober fault. Within the prober-fault window
 //     (SiteProberFaultWindowSeconds, one hour) either the URL's host failed a
 //     direct, verified TLS handshake from the server, which shares the
@@ -49,9 +58,12 @@
 // check passes again; a provider verdict holds while its provider is offline;
 // and every failed recheck is judged again on its own evidence. A pending
 // finding older than the direct window keeps waiting for a fresh failure,
-// since evidence taken now says nothing about one hours ago. Retirement does
-// not depend on time: a finding whose destination leaves the pool is retired
-// whenever the judge reads it.
+// since evidence taken now says nothing about one hours ago. Retirement is
+// the one judgement that depends on time between runs: the judge carries
+// from run to run, in its task's arguments, when each finding's destination
+// name was first read out of the pool (NewProviderEgressTlsPool). A lost
+// clock, from a new chain or a rollback, only starts the count again, which
+// delays a retirement and never hastens one.
 //
 // Rechecks follow from the verdict too. Pending and provider findings are
 // rechecked: the claim offers their stored destinations, and their provider
@@ -65,6 +77,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -85,7 +98,8 @@ const (
 	// The site does not work from the provider's place. Excludes nothing;
 	// not rechecked.
 	ProviderEgressTlsVerdictPlace ProviderEgressTlsVerdict = 3
-	// The URL is no longer served. Excludes nothing; not rechecked.
+	// The pool has not served the URL's destination for a refresh interval.
+	// Excludes nothing; not rechecked. Pending again once it is served.
 	ProviderEgressTlsVerdictRetired ProviderEgressTlsVerdict = 4
 )
 
@@ -186,6 +200,10 @@ type ProviderEgressTlsJudgeSettings struct {
 	// The place's failure share over all its scored loads below which its
 	// exits work well enough to judge one site there.
 	PlaceWorkingShare float64
+	// How long a destination name must be out of the served pool, on every
+	// run, before its findings are retired: the refresh interval, so an
+	// absence has outlasted a whole refresh cycle rather than one pool read.
+	RetireAfter time.Duration
 }
 
 // The judge's settings from the pool refresh's site settings, with the URL
@@ -198,6 +216,7 @@ func ProviderEgressTlsJudgeSettingsFor(site *ProviderEgressSiteSettings, commonM
 		PlaceFailShare:         site.SiteRegionFailShare,
 		PlaceMinSamples:        site.SiteRegionMinSamples,
 		PlaceWorkingShare:      site.SiteRetireShare,
+		RetireAfter:            site.SiteRefreshInterval(),
 	}
 }
 
@@ -219,8 +238,10 @@ type ProviderEgressTlsFinding struct {
 }
 
 // Whether the stored verdict already decided the finding's latest failure.
+// Pending decides nothing, and neither does retirement, which follows the
+// pool: a retired finding whose destination is served again is judged again.
 func (self *ProviderEgressTlsFinding) Judged() bool {
-	return self.Verdict != ProviderEgressTlsVerdictPending &&
+	return self.Verdict != ProviderEgressTlsVerdictPending && self.Verdict != ProviderEgressTlsVerdictRetired &&
 		self.VerdictMeasuredAt != nil && self.VerdictMeasuredAt.Equal(self.MeasuredAt)
 }
 
@@ -296,6 +317,122 @@ func GetProviderEgressTlsFindingCounts(ctx context.Context) map[ProviderEgressTl
 		})
 	})
 	return counts
+}
+
+// The most destination names one run's pool clock tracks. The names are the
+// catalog's, about a hundred and fifty; past the bound, names in order start
+// no clock, which delays their retirement and never hastens it.
+const providerEgressTlsUnservedNameLimit = 1024
+
+// The served pool as one judge run reads it.
+type ProviderEgressTlsPool struct {
+	// the destination names the pool serves now, general and every country's
+	Served map[string]bool
+	// for each name of a finding not yet retired that is out of the pool, the
+	// first of the consecutive runs that read it out
+	UnservedSince map[string]time.Time
+}
+
+// This run's pool from the names served now and the clock the previous run
+// carried: a finding's name that is out of the pool keeps the time it was
+// first read out, or starts its clock now. A name served again drops, and so
+// does one whose findings are all retired, which stay retired while it is out
+// anyway. A time ahead of now, another host's clock, starts again.
+func NewProviderEgressTlsPool(
+	now time.Time,
+	findings []*ProviderEgressTlsFinding,
+	served map[string]bool,
+	previous map[string]time.Time,
+) *ProviderEgressTlsPool {
+	nameSet := map[string]bool{}
+	for _, finding := range findings {
+		if !served[finding.Name] && finding.Verdict != ProviderEgressTlsVerdictRetired {
+			nameSet[finding.Name] = true
+		}
+	}
+	names := make([]string, 0, len(nameSet))
+	for name := range nameSet {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if providerEgressTlsUnservedNameLimit < len(names) {
+		names = names[:providerEgressTlsUnservedNameLimit]
+	}
+	unservedSince := make(map[string]time.Time, len(names))
+	for _, name := range names {
+		if since, ok := previous[name]; ok && !since.After(now) {
+			unservedSince[name] = since
+		} else {
+			unservedSince[name] = now
+		}
+	}
+	return &ProviderEgressTlsPool{Served: served, UnservedSince: unservedSince}
+}
+
+// Where a finding's destination name stands against the pool on one run.
+type providerEgressTlsServing int
+
+const (
+	// in the served pool
+	providerEgressTlsServed providerEgressTlsServing = iota
+	// out of the pool, on every run for less than RetireAfter: judged as if
+	// served, so a transient absence changes nothing
+	providerEgressTlsLeaving
+	// out of the pool on every run for at least RetireAfter
+	providerEgressTlsGone
+)
+
+// A name is gone only once an earlier run read it out too, whatever
+// RetireAfter is: one run's read never retires anything.
+func (self *ProviderEgressTlsPool) serving(now time.Time, name string, settings *ProviderEgressTlsJudgeSettings) providerEgressTlsServing {
+	if self.Served[name] {
+		return providerEgressTlsServed
+	}
+	if since, ok := self.UnservedSince[name]; ok && since.Before(now) && settings.RetireAfter <= now.Sub(since) {
+		return providerEgressTlsGone
+	}
+	return providerEgressTlsLeaving
+}
+
+// Whether a run judges the finding on evidence: its latest failure is not
+// decided yet, and it is neither to be retired nor retired and still out of
+// the pool.
+func providerEgressTlsJudgesOnEvidence(finding *ProviderEgressTlsFinding, serving providerEgressTlsServing) bool {
+	switch {
+	case serving == providerEgressTlsGone:
+		return false
+	case finding.Verdict == ProviderEgressTlsVerdictRetired && serving != providerEgressTlsServed:
+		return false
+	default:
+		return !finding.Judged()
+	}
+}
+
+// The hosts this run's direct checks are for: those of the findings it judges
+// on evidence whose failure is recent enough for a check now to be close to
+// it, each once.
+func ProviderEgressTlsDirectHosts(
+	now time.Time,
+	findings []*ProviderEgressTlsFinding,
+	pool *ProviderEgressTlsPool,
+	settings *ProviderEgressTlsJudgeSettings,
+) []string {
+	hostSet := map[string]bool{}
+	for _, finding := range findings {
+		if !settings.DirectCheckJudges(now, finding) ||
+			!providerEgressTlsJudgesOnEvidence(finding, pool.serving(now, finding.Name, settings)) {
+			continue
+		}
+		if host := finding.Host(); host != "" {
+			hostSet[host] = true
+		}
+	}
+	hosts := make([]string, 0, len(hostSet))
+	for host := range hostSet {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+	return hosts
 }
 
 // One site's scored loads at one country, and that country's over every site,
@@ -374,7 +511,7 @@ type ProviderEgressTlsJudgement struct {
 	Verdict ProviderEgressTlsVerdict
 	// Decided says the verdict decided the finding's latest failure, on
 	// evidence close to it, so the failure is not judged again. A pending
-	// verdict, or a finding kept as it was, decided nothing.
+	// verdict, a retirement, or a finding kept as it was, decided nothing.
 	Decided bool
 	// distinct networks failing TLS on the URL within the direct window
 	CommonModeNetworks int
@@ -392,24 +529,30 @@ func (self *ProviderEgressTlsJudgement) Changed() bool {
 }
 
 // Decides one finding: its verdict, and whether that verdict decided its
-// latest failure. served says whether its destination name is in the served
-// pool; commonModeNetworks counts the networks failing TLS on its URL within
-// the direct window; direct is this run's direct check of its host.
+// latest failure. serving says where its destination name stands against the
+// served pool; commonModeNetworks counts the networks failing TLS on its URL
+// within the direct window; direct is this run's direct check of its host.
 func judgeProviderEgressTlsFinding(
 	now time.Time,
 	finding *ProviderEgressTlsFinding,
-	served bool,
+	serving providerEgressTlsServing,
 	commonModeNetworks int,
 	direct ProviderEgressTlsDirectOutcome,
 	place providerEgressTlsPlaceEvidence,
 	settings *ProviderEgressTlsJudgeSettings,
 ) (verdict ProviderEgressTlsVerdict, decided bool) {
-	if !served {
-		return ProviderEgressTlsVerdictRetired, true
-	}
-	if finding.Judged() {
-		// this failure was decided on evidence close to it
-		return finding.Verdict, false
+	if !providerEgressTlsJudgesOnEvidence(finding, serving) {
+		switch {
+		case serving == providerEgressTlsGone:
+			// out of the pool on every run for a refresh interval
+			return ProviderEgressTlsVerdictRetired, false
+		case finding.Verdict == ProviderEgressTlsVerdictRetired:
+			// still out of the pool, on a clock that started again
+			return ProviderEgressTlsVerdictRetired, false
+		default:
+			// this failure was decided on evidence close to it
+			return finding.Verdict, false
+		}
 	}
 	age := now.Sub(finding.MeasuredAt)
 	close := age <= settings.DirectWindow
@@ -426,8 +569,9 @@ func judgeProviderEgressTlsFinding(
 	// that is not close to a failure this old. What is stored stands until
 	// the failure can be judged: a new finding stays pending, and a verdict
 	// decided on an earlier failure holds, so the server's own network
-	// trouble never lifts a quarantine. A finding retired while its URL was
-	// not served waits as pending once the URL is served again.
+	// trouble never lifts a quarantine. A retired finding whose destination
+	// is served again is pending: rechecked again, so a provider that still
+	// intercepts fails a recheck and is judged on that fresh failure.
 	if finding.Verdict == ProviderEgressTlsVerdictRetired {
 		return ProviderEgressTlsVerdictPending, false
 	}
@@ -472,21 +616,23 @@ func providerEgressTlsCommonModeNetworks(
 	return counts
 }
 
-// Judges every finding of one run. served holds the served pool's destination
-// names; direct holds this run's direct check of each host (absent is
-// inconclusive). Reads the site tally once; writes nothing.
+// Judges every finding of one run. pool is the run's served pool
+// (NewProviderEgressTlsPool); direct holds this run's direct check of each
+// host (absent is inconclusive). Reads the site tally once; writes nothing.
 func JudgeProviderEgressTlsFindings(
 	ctx context.Context,
 	now time.Time,
 	findings []*ProviderEgressTlsFinding,
-	served map[string]bool,
+	pool *ProviderEgressTlsPool,
 	direct map[string]ProviderEgressTlsDirectOutcome,
 	settings *ProviderEgressTlsJudgeSettings,
 ) []*ProviderEgressTlsJudgement {
 	commonMode := providerEgressTlsCommonModeNetworks(now, findings, settings)
+	serving := make([]providerEgressTlsServing, len(findings))
 	countrySet := map[string]bool{}
-	for _, finding := range findings {
-		if finding.CountryCode != "" && served[finding.Name] && now.Sub(finding.MeasuredAt) <= settings.PlaceWindow {
+	for i, finding := range findings {
+		serving[i] = pool.serving(now, finding.Name, settings)
+		if finding.CountryCode != "" && providerEgressTlsJudgesOnEvidence(finding, serving[i]) && now.Sub(finding.MeasuredAt) <= settings.PlaceWindow {
 			countrySet[finding.CountryCode] = true
 		}
 	}
@@ -497,7 +643,7 @@ func JudgeProviderEgressTlsFindings(
 	placeEvidence := getProviderEgressTlsPlaceEvidence(ctx, now, settings, countryCodes)
 
 	judgements := make([]*ProviderEgressTlsJudgement, 0, len(findings))
-	for _, finding := range findings {
+	for i, finding := range findings {
 		place := placeEvidence[finding.CountryCode][finding.Name]
 		outcome := direct[finding.Host()]
 		judgement := &ProviderEgressTlsJudgement{
@@ -510,7 +656,7 @@ func JudgeProviderEgressTlsFindings(
 			PlaceFailures:      place.placeFailures,
 		}
 		judgement.Verdict, judgement.Decided = judgeProviderEgressTlsFinding(
-			now, finding, served[finding.Name], commonMode[finding.UrlKey], outcome, place, settings)
+			now, finding, serving[i], commonMode[finding.UrlKey], outcome, place, settings)
 		judgements = append(judgements, judgement)
 	}
 	return judgements
@@ -565,15 +711,20 @@ func SetProviderEgressTlsVerdicts(ctx context.Context, judgements []*ProviderEgr
 		storedClientIds := map[server.Id]bool{}
 		// A verdict that decided nothing keeps the failure an earlier verdict
 		// decided, if any, so a stale finding stays undecided rather than
-		// borrowing that decision. Bounded statements keep each join a short
-		// key lookup even when a fleet-wide fault leaves many findings.
+		// borrowing that decision; a pending one, a retired finding served
+		// again, records none, as a new finding does. Bounded statements keep
+		// each join a short key lookup even when a fleet-wide fault leaves many
+		// findings.
 		const chunk = 1000
 		for start := 0; start < len(clientIds); start += chunk {
 			end := min(start+chunk, len(clientIds))
 			rows, err := tx.Query(ctx, `
 				UPDATE provider_egress_url_security AS security SET
 					tls_verdict = judged.verdict,
-					tls_verdict_measured_at = CASE WHEN judged.decided THEN security.measured_at ELSE security.tls_verdict_measured_at END
+					tls_verdict_measured_at = CASE
+						WHEN judged.decided THEN security.measured_at
+						WHEN judged.verdict = `+fmt.Sprint(int16(ProviderEgressTlsVerdictPending))+` THEN NULL
+						ELSE security.tls_verdict_measured_at END
 				FROM unnest($1::uuid[], $2::varchar[], $3::timestamp[], $4::smallint[], $5::timestamp[], $6::smallint[], $7::boolean[])
 					AS judged(client_id, url_key, measured_at, previous, previous_decided_at, verdict, decided)
 				WHERE security.client_id = judged.client_id AND security.url_key = judged.url_key

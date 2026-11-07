@@ -184,10 +184,14 @@ func TestTlsFailureAcrossManyNetworksIsASiteFaultAndExcludesNone(t *testing.T) {
 	})
 }
 
-// A finding whose destination the pool no longer serves can never be failed
-// or cleared by a drawn turn again, so it is retired: it stops excluding its
+// A finding whose destination the pool stops serving can never be failed or
+// cleared by a drawn turn while it stays out, so once it has stayed out for a
+// whole refresh interval the finding is retired: it stops excluding its
 // provider, the claim no longer offers its stored destination for recheck,
-// and a provider whose quota is met is no longer turned for it.
+// and a provider whose quota is met is no longer turned for it. One judge
+// run that reads the destination out of the pool changes nothing, and a
+// retired finding whose destination is served again is rechecked again, so a
+// provider that still intercepts is excluded again on its next failure.
 func TestTlsFindingForAnUnservedUrlIsRetired(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -207,7 +211,8 @@ func TestTlsFindingForAnUnservedUrlIsRetired(t *testing.T) {
 		}
 		removed := testingTlsSite("removed-site", "https://removed.example/")
 		SetProviderEgressHealth(ctx, testingTlsUrlResult(provider.clientId, time.Time{}, removed, now, true))
-		testingJudgeTlsFindings(t, ctx, now.Add(time.Minute), []string{removed.Name}, map[string]string{"removed.example": "verified"})
+		judge := testingNewTlsJudgeChain()
+		judge.judge(t, ctx, now.Add(time.Minute), []string{removed.Name}, map[string]string{"removed.example": "verified"})
 		clients := []server.Id{provider.clientId}
 		if !testingTlsExcluded(t, ctx, clients)[provider.clientId] {
 			t.Fatal("the precondition failed: a corroborated finding on a served URL did not exclude")
@@ -218,21 +223,59 @@ func TestTlsFindingForAnUnservedUrlIsRetired(t *testing.T) {
 			})
 			return ClaimProviderUrlProbeDue(ctx, at, 1, 0, 1)
 		}
-		due := reclaimAt(now.Add(2 * time.Minute))
-		if len(due) != 1 || len(due[0].SecurityDestinations) != 1 || due[0].SecurityDestinations[0].Url != removed.Url {
+		offered := func(due []ProviderUrlProbeDue) bool {
+			return len(due) == 1 && len(due[0].SecurityDestinations) == 1 && due[0].SecurityDestinations[0].Url == removed.Url
+		}
+		if due := reclaimAt(now.Add(2 * time.Minute)); !offered(due) {
 			t.Fatalf("the precondition failed: a quota-full provider with a served finding was not offered its recheck: %+v", due)
 		}
 
-		// the pool stops serving the destination
-		testingJudgeTlsFindings(t, ctx, now.Add(3*time.Minute), []string{}, nil)
+		// One judge run reads the destination out of the pool: a pool read, a
+		// release in flight, or a refresh holding the site back for a while.
+		leftAt := now.Add(3 * time.Minute)
+		judge.judge(t, ctx, leftAt, []string{}, nil)
+		if !testingTlsExcluded(t, ctx, clients)[provider.clientId] {
+			t.Fatal("a finding whose URL was out of the pool for one judge run stopped excluding its provider")
+		}
+		if due := reclaimAt(now.Add(4 * time.Minute)); !offered(due) {
+			t.Fatalf("a finding whose URL was out of the pool for one judge run is no longer rechecked: %+v", due)
+		}
+		// out of the pool on every run until just short of a refresh interval
+		judge.judge(t, ctx, leftAt.Add(testingTlsRetireAfter()-5*time.Minute), []string{}, nil)
+		if verdict := testingTlsVerdict(t, ctx, provider.clientId, removed.Url); verdict != "provider" {
+			t.Fatalf("a finding whose URL has been out of the pool for less than a refresh interval was judged %q", verdict)
+		}
+
+		// out for a whole refresh interval: retired
+		judge.judge(t, ctx, leftAt.Add(testingTlsRetireAfter()), []string{}, nil)
 		if testingTlsExcluded(t, ctx, clients)[provider.clientId] {
 			t.Fatal("a finding on a URL the pool no longer serves still excludes its provider")
 		}
 		if verdict := testingTlsVerdict(t, ctx, provider.clientId, removed.Url); verdict != "retired" {
 			t.Fatalf("a finding on an unserved URL was judged %q", verdict)
 		}
-		if due := reclaimAt(now.Add(4 * time.Minute)); len(due) != 0 {
+		if due := reclaimAt(now.Add(5 * time.Minute)); len(due) != 0 {
 			t.Fatalf("a retired finding still drives rechecks of a quota-full provider: %+v", due)
+		}
+
+		// The pool serves the destination again: the finding is rechecked
+		// again, and the provider, which still intercepts, fails the recheck
+		// and is judged its own on that failure.
+		servedAgainAt := leftAt.Add(testingTlsRetireAfter() + 5*time.Minute)
+		judge.judge(t, ctx, servedAgainAt, []string{removed.Name}, map[string]string{"removed.example": "verified"})
+		if verdict := testingTlsVerdict(t, ctx, provider.clientId, removed.Url); verdict != "pending" {
+			t.Fatalf("a retired finding whose URL is served again was judged %q", verdict)
+		}
+		if due := reclaimAt(now.Add(6 * time.Minute)); !offered(due) {
+			t.Fatalf("a retired finding whose URL is served again is not rechecked: %+v", due)
+		}
+		// The recheck fails, and a run soon after judges that fresh failure.
+		// (Receipts stay at the test's own clock, inside the stored windows; a
+		// judge run stores no time of its own, only the failure it decides.)
+		SetProviderEgressHealth(ctx, testingTlsUrlResult(provider.clientId, time.Time{}, removed, now.Add(7*time.Minute), true))
+		testingJudgeTlsFindings(t, ctx, now.Add(8*time.Minute), []string{removed.Name}, map[string]string{"removed.example": "verified"})
+		if !testingTlsExcluded(t, ctx, clients)[provider.clientId] {
+			t.Fatal("a provider that still intercepts once its URL is served again was not excluded again")
 		}
 	})
 }

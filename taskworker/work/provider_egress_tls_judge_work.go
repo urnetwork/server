@@ -2,7 +2,8 @@
 // minutes, each unresolved exact-URL TLS finding is judged on evidence close in
 // time to it, and only a finding judged the provider's own excludes the
 // provider. A site or prober fault, a place where the site does not work, and
-// a URL the pool no longer serves are recorded as such and exclude nothing.
+// a URL the pool has not served for a day are recorded as such and exclude
+// nothing.
 package work
 
 import (
@@ -74,7 +75,7 @@ var providerEgressTlsVerdictsTotal = prometheus.NewCounterVec(prometheus.Counter
 	Namespace: "urnetwork",
 	Subsystem: "egress_tls",
 	Name:      "verdicts_total",
-	Help:      "TLS findings the judge moved to each verdict: pending, provider (excludes the provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the URL is no longer served)",
+	Help:      "TLS findings the judge moved to each verdict: pending (including a retired finding whose URL is served again), provider (excludes the provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the pool has not served the URL for a day)",
 }, []string{"verdict"})
 
 func init() {
@@ -96,8 +97,12 @@ func init() {
 	)
 }
 
-// The judge takes no arguments: everything it decides on is read at run time.
-type JudgeProviderEgressTlsFindingsArgs struct{}
+// The one thing a run carries to the next: when each finding's destination
+// name was first read out of the served pool, on every run since
+// (model.NewProviderEgressTlsPool). Everything else is read at run time.
+type JudgeProviderEgressTlsFindingsArgs struct {
+	UnservedSince map[string]time.Time `json:"unserved_since,omitempty"`
+}
 
 // What one run did; the same numbers are logged.
 type JudgeProviderEgressTlsFindingsResult struct {
@@ -106,18 +111,26 @@ type JudgeProviderEgressTlsFindingsResult struct {
 	Findings int            `json:"findings"`
 	Changed  int            `json:"changed"`
 	Verdicts map[string]int `json:"verdicts,omitempty"`
+	// the clock the next run carries; a skipped run carries its own on
+	UnservedSince map[string]time.Time `json:"unserved_since,omitempty"`
 }
 
-// Schedules a run now, coalescing with a pending one.
+// Schedules a run now, coalescing with a pending one, whose arguments, and so
+// whose clock, it keeps.
 func ScheduleJudgeProviderEgressTlsFindings(clientSession *session.ClientSession, tx server.PgTx) {
-	scheduleJudgeProviderEgressTlsFindingsAt(clientSession, tx, server.NowUtc())
+	scheduleJudgeProviderEgressTlsFindingsAt(clientSession, tx, &JudgeProviderEgressTlsFindingsArgs{}, server.NowUtc())
 }
 
-func scheduleJudgeProviderEgressTlsFindingsAt(clientSession *session.ClientSession, tx server.PgTx, runAt time.Time) {
+func scheduleJudgeProviderEgressTlsFindingsAt(
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+	args *JudgeProviderEgressTlsFindingsArgs,
+	runAt time.Time,
+) {
 	task.ScheduleTaskInTx(
 		tx,
 		JudgeProviderEgressTlsFindings,
-		&JudgeProviderEgressTlsFindingsArgs{},
+		args,
 		clientSession,
 		task.RunOnce("judge_provider_egress_tls_findings"),
 		task.RunAt(runAt),
@@ -127,20 +140,25 @@ func scheduleJudgeProviderEgressTlsFindingsAt(clientSession *session.ClientSessi
 
 // One run of the judge.
 func JudgeProviderEgressTlsFindings(
-	_ *JudgeProviderEgressTlsFindingsArgs,
+	args *JudgeProviderEgressTlsFindingsArgs,
 	clientSession *session.ClientSession,
 ) (*JudgeProviderEgressTlsFindingsResult, error) {
-	return judgeProviderEgressTlsFindings(clientSession.Ctx, server.NowUtc(), productionProviderEgressTlsJudgeSources())
+	return judgeProviderEgressTlsFindings(clientSession.Ctx, server.NowUtc(), args, productionProviderEgressTlsJudgeSources())
 }
 
-// Schedules the next run one interval out, whatever this one did.
+// Schedules the next run one interval out, whatever this one did, carrying
+// the clock on.
 func JudgeProviderEgressTlsFindingsPost(
 	_ *JudgeProviderEgressTlsFindingsArgs,
-	_ *JudgeProviderEgressTlsFindingsResult,
+	result *JudgeProviderEgressTlsFindingsResult,
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	scheduleJudgeProviderEgressTlsFindingsAt(clientSession, tx, server.NowUtc().Add(providerEgressTlsJudgeInterval))
+	next := &JudgeProviderEgressTlsFindingsArgs{}
+	if result != nil {
+		next.UnservedSince = result.UnservedSince
+	}
+	scheduleJudgeProviderEgressTlsFindingsAt(clientSession, tx, next, server.NowUtc().Add(providerEgressTlsJudgeInterval))
 	return nil
 }
 
@@ -165,7 +183,7 @@ func productionProviderEgressTlsJudgeSources() *providerEgressTlsJudgeSources {
 
 // The served pool's destination names: what the prober is offered now. A URL
 // whose destination is not among them can no longer be drawn by any provider,
-// so a finding on it is retired.
+// so a finding on it is retired once that has held for a day.
 func servedProviderEgressDestinationNames(ctx context.Context) (map[string]bool, error) {
 	pool, err := controller.GetProviderEgressDestinationPool(ctx)
 	if err != nil {
@@ -296,20 +314,26 @@ func checkProviderEgressTlsHosts(
 	return outcomes
 }
 
-// One run: read the findings, check the hosts of the served ones recent
-// enough to judge, judge each finding, store the changed verdicts, and report.
-// An unavailable pool changes nothing: retiring every finding because the pool
-// could not be built would be a guess, and so would keeping a stale served set.
+// One run: read the findings, check the hosts of those it judges on evidence
+// that are recent enough to judge, judge each finding, store the changed
+// verdicts, and report. An unavailable pool changes nothing and carries the
+// clock on unchanged: retiring every finding because the pool could not be
+// built would be a guess, and so would keeping a stale served set.
 func judgeProviderEgressTlsFindings(
 	ctx context.Context,
 	now time.Time,
+	args *JudgeProviderEgressTlsFindingsArgs,
 	sources *providerEgressTlsJudgeSources,
 ) (*JudgeProviderEgressTlsFindingsResult, error) {
+	var previous map[string]time.Time
+	if args != nil {
+		previous = args.UnservedSince
+	}
 	served, err := sources.served(ctx)
 	if err != nil {
 		providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable").Inc()
 		glog.Errorf("[egress]TLS judge: the served pool is unavailable, so no finding was judged this run: %s\n", err)
-		return &JudgeProviderEgressTlsFindingsResult{Skipped: "pool_unavailable"}, nil
+		return &JudgeProviderEgressTlsFindingsResult{Skipped: "pool_unavailable", UnservedSince: previous}, nil
 	}
 	siteSettings, err := sources.siteSettings()
 	if err != nil {
@@ -318,29 +342,17 @@ func judgeProviderEgressTlsFindings(
 	settings := model.ProviderEgressTlsJudgeSettingsFor(siteSettings, providerUrlProbeCommonModeNetworkCount)
 
 	findings := model.GetProviderEgressTlsFindings(ctx, providerEgressTlsJudgeFindingLimit)
-	// only a failure still to be judged, recent enough for a check now to be
-	// close to it, needs its host checked
-	hostSet := map[string]bool{}
-	for _, finding := range findings {
-		if served[finding.Name] && !finding.Judged() && settings.DirectCheckJudges(now, finding) {
-			if host := finding.Host(); host != "" {
-				hostSet[host] = true
-			}
-		}
-	}
-	hosts := make([]string, 0, len(hostSet))
-	for host := range hostSet {
-		hosts = append(hosts, host)
-	}
-	direct := checkProviderEgressTlsHosts(ctx, hosts, sources.direct)
+	pool := model.NewProviderEgressTlsPool(now, findings, served, previous)
+	direct := checkProviderEgressTlsHosts(ctx, model.ProviderEgressTlsDirectHosts(now, findings, pool, settings), sources.direct)
 
-	judgements := model.JudgeProviderEgressTlsFindings(ctx, now, findings, served, direct, settings)
+	judgements := model.JudgeProviderEgressTlsFindings(ctx, now, findings, pool, direct, settings)
 	stored := model.SetProviderEgressTlsVerdicts(ctx, judgements)
 
 	result := &JudgeProviderEgressTlsFindingsResult{
-		Findings: len(findings),
-		Changed:  len(stored),
-		Verdicts: map[string]int{},
+		Findings:      len(findings),
+		Changed:       len(stored),
+		Verdicts:      map[string]int{},
+		UnservedSince: pool.UnservedSince,
 	}
 	storedSet := make(map[*model.ProviderEgressTlsJudgement]bool, len(stored))
 	for _, judgement := range stored {
@@ -366,8 +378,8 @@ func judgeProviderEgressTlsFindings(
 	logProviderEgressTlsJudgements(moved)
 	providerEgressTlsJudgeRunsTotal.WithLabelValues("judged").Inc()
 	glog.Infof(
-		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d verdicts=%s\n",
-		result.Findings, result.Changed, len(direct), providerEgressTlsVerdictSummary(result.Verdicts),
+		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d unserved_names=%d verdicts=%s\n",
+		result.Findings, result.Changed, len(direct), len(result.UnservedSince), providerEgressTlsVerdictSummary(result.Verdicts),
 	)
 	return result, nil
 }
@@ -396,6 +408,7 @@ func logProviderEgressTlsJudgements(moved []*model.ProviderEgressTlsJudgement) {
 	sites := map[siteKey][]*model.ProviderEgressTlsJudgement{}
 	places := map[placeKey][]*model.ProviderEgressTlsJudgement{}
 	retired := map[string]int{}
+	returned := map[string]int{}
 	for _, judgement := range moved {
 		switch judgement.Verdict {
 		case model.ProviderEgressTlsVerdictSite:
@@ -406,6 +419,10 @@ func logProviderEgressTlsJudgements(moved []*model.ProviderEgressTlsJudgement) {
 			places[key] = append(places[key], judgement)
 		case model.ProviderEgressTlsVerdictRetired:
 			retired[judgement.Finding.Name] += 1
+		case model.ProviderEgressTlsVerdictPending:
+			if judgement.Finding.Verdict == model.ProviderEgressTlsVerdictRetired {
+				returned[judgement.Finding.Name] += 1
+			}
 		}
 	}
 	for _, judgements := range sites {
@@ -425,6 +442,9 @@ func logProviderEgressTlsJudgements(moved []*model.ProviderEgressTlsJudgement) {
 		)
 	}
 	for name, count := range retired {
-		glog.Infof("[egress]TLS findings retired: destination=%s findings=%d; the pool no longer serves it, so they exclude nothing and are not rechecked\n", name, count)
+		glog.Infof("[egress]TLS findings retired: destination=%s findings=%d; the pool has not served it for a whole site refresh interval, so they exclude nothing and are not rechecked until it is served again\n", name, count)
+	}
+	for name, count := range returned {
+		glog.Infof("[egress]TLS findings returned: destination=%s findings=%d; the pool serves it again, so they are pending and rechecked, and a provider that fails a recheck is judged again\n", name, count)
 	}
 }

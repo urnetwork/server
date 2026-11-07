@@ -15,11 +15,21 @@ import (
 // providerUrlProbeCommonModeNetworkCount), which the taskworker passes in.
 const testingTlsCommonModeNetworkCount = 16
 
+// One chain of judge runs, carrying from run to run what the taskworker's
+// task carries in its arguments.
+type testingTlsJudgeChain struct {
+	unservedSince map[string]time.Time
+}
+
+func testingNewTlsJudgeChain() *testingTlsJudgeChain {
+	return &testingTlsJudgeChain{}
+}
+
 // Judges every unresolved finding as one run of the taskworker's judge does:
 // served names the destinations the pool serves, direct maps a host to its
 // direct check ("verified" or "failed"; an absent host is inconclusive), and
 // the windows and shares are the site settings' defaults.
-func testingJudgeTlsFindings(t testing.TB, ctx context.Context, now time.Time, served []string, direct map[string]string) {
+func (self *testingTlsJudgeChain) judge(t testing.TB, ctx context.Context, now time.Time, served []string, direct map[string]string) {
 	t.Helper()
 	servedSet := map[string]bool{}
 	for _, name := range served {
@@ -38,7 +48,21 @@ func testingJudgeTlsFindings(t testing.TB, ctx context.Context, now time.Time, s
 	}
 	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
 	findings := GetProviderEgressTlsFindings(ctx, 100000)
-	SetProviderEgressTlsVerdicts(ctx, JudgeProviderEgressTlsFindings(ctx, now, findings, servedSet, outcomes, settings))
+	pool := NewProviderEgressTlsPool(now, findings, servedSet, self.unservedSince)
+	self.unservedSince = pool.UnservedSince
+	SetProviderEgressTlsVerdicts(ctx, JudgeProviderEgressTlsFindings(ctx, now, findings, pool, outcomes, settings))
+}
+
+// One run of a chain of its own.
+func testingJudgeTlsFindings(t testing.TB, ctx context.Context, now time.Time, served []string, direct map[string]string) {
+	t.Helper()
+	testingNewTlsJudgeChain().judge(t, ctx, now, served, direct)
+}
+
+// How long a destination stays out of the pool before its findings retire:
+// the site refresh interval.
+func testingTlsRetireAfter() time.Duration {
+	return DefaultProviderEgressSiteSettings().SiteRefreshInterval()
 }
 
 // The stored verdict of clientId's unresolved finding on target ("pending",
