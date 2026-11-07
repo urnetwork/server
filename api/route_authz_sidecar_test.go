@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -207,7 +209,6 @@ var sidecarAllowlist = []string{
 	"POST /network/remove-client",
 	"GET /key/([^/]+)",
 	"POST /connect/control",
-	"POST /oauth/token",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
@@ -413,6 +414,45 @@ func TestStrictExpGateIsLogOnlyUntilTheConfigEnforcesIt(t *testing.T) {
 	}
 }
 
+// §7.4 admits a strict_exp bearer to POST /oauth/token's exchange alone, which
+// is not built yet, so the grants the route serves now refuse it, and an
+// exchange sent before its gate exists is refused with them.
+func TestStrictExpTokenIsRefusedOnTheTokenRoute(t *testing.T) {
+	tokens := newStrictExpTokens()
+	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+		return false
+	})
+	pushP0Enforce(t)
+
+	const key = "POST /oauth/token"
+	routes := Routes()
+	i := slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })
+	if i < 0 {
+		t.Fatalf("no route serves %s", key)
+	}
+	route := routes[i]
+	if !route.RefusesStrictExpCredentials() {
+		t.Fatalf("%s serves a strict_exp token", key)
+	}
+	for _, grantType := range []string{
+		"authorization_code",
+		"refresh_token",
+		"urn:ietf:params:oauth:grant-type:token-exchange",
+	} {
+		before := childAdminCallCount(key, p0RefusalStrictExp, "refused")
+		w, reached := serveStubbed(route, "Bearer "+tokens.strictToken, func(r *http.Request) {
+			r.Body = io.NopCloser(strings.NewReader("grant_type=" + url.QueryEscape(grantType)))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		})
+		if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+			t.Errorf("%s: status = %d body = %q, handler ran = %t; want the sidecar refusal", grantType, w.Code, w.Body.String(), reached)
+		}
+		if after := childAdminCallCount(key, p0RefusalStrictExp, "refused"); after != before+1 {
+			t.Errorf("%s: counted %v, want one", grantType, after-before)
+		}
+	}
+}
+
 // An unclassified route is off the list too.
 func TestAnUnclassifiedRouteRefusesAStrictExpToken(t *testing.T) {
 	unclassified := router.NewRoute("POST", "/network/new-route", func(w http.ResponseWriter, r *http.Request) {})
@@ -422,8 +462,8 @@ func TestAnUnclassifiedRouteRefusesAStrictExpToken(t *testing.T) {
 	}
 }
 
-// Only the two routes a sidecar renews and mints on want a proof here, and the
-// third, the exchange, carries its own.
+// Only the two routes a sidecar renews and mints on want a proof here. The third
+// §7.4 names, the exchange, is not built yet.
 func TestStrictExpProofRoutes(t *testing.T) {
 	for _, route := range Routes() {
 		key := routeAccessKey(route)
