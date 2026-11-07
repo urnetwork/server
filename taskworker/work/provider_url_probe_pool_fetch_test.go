@@ -1,5 +1,6 @@
 // A URL pass without a pool measures nothing, so every pool fetch of a pass
 // is counted by result (SIGNALS.md §2.19h alerts on the unavailable ones).
+// The label values are spelled out: the dashboard and the alert read them.
 package work
 
 import (
@@ -16,7 +17,7 @@ func TestUrlProbePassCountsEveryPoolFetch(t *testing.T) {
 	count := func(result string) float64 {
 		return testutil.ToFloat64(egressProbePoolFetchesTotal.WithLabelValues(result))
 	}
-	served, unavailable := count(egressProbePoolServed), count(egressProbePoolUnavailable)
+	served, unavailable := count("server"), count("unavailable")
 
 	pass, args, _ := testUrlProbePass()
 	pass.fullDue = func(context.Context, int) ([]ingest.DueProvider, error) { return nil, nil }
@@ -40,10 +41,10 @@ func TestUrlProbePassCountsEveryPoolFetch(t *testing.T) {
 		t.Fatal("a canceled pass ran")
 	}
 
-	if got := count(egressProbePoolServed) - served; got != 1 {
+	if got := count("server") - served; got != 1 {
 		t.Errorf("served fetches counted %v, want 1", got)
 	}
-	if got := count(egressProbePoolUnavailable) - unavailable; got != 2 {
+	if got := count("unavailable") - unavailable; got != 2 {
 		t.Errorf("unavailable fetches counted %v, want 2", got)
 	}
 }
