@@ -15,7 +15,7 @@ siblings:
   # module from the same revision. Build's sidecar gitlink pins this commit too.
   - repository: urnetwork/sidecar
     path: sidecar
-    ref: 8a4e750cb0769a9d57b7b5a5e4aedc90b8ded9f7
+    ref: 41f51248cff6390ef526284b392c3472461d6171
   - repository: urnetwork/glog
     path: glog
     ref: af8d9e76bfcfa908e785c3c0789d76c90c78302b
