@@ -10,16 +10,21 @@ siblings:
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: f1e14dda5f0003ae21e2a163661660de30c61bc1
+    ref: 69967d8a28f64a867f291f1bdd6c77bd186cfde4
+  # Server and the SDK require this module, and server its nested smtpproof
+  # module from the same revision. Build's sidecar gitlink pins this commit too.
+  - repository: urnetwork/sidecar
+    path: sidecar
+    ref: 41f51248cff6390ef526284b392c3472461d6171
   - repository: urnetwork/glog
     path: glog
-    ref: 1c4954b017d9e8140a4e7020f914eb27410a41c6
+    ref: af8d9e76bfcfa908e785c3c0789d76c90c78302b
   - repository: urnetwork/sdk
     path: sdk
-    ref: 5517f0356d68ca876b8d8087811955a08e3f262d
+    ref: d5672254dbaa6b907b03de943c2ac7fa853b8f71
   - repository: urnetwork/proxy
     path: proxy
-    ref: 1575ad25cb8b10bd42865e630ec09f6823096e64
+    ref: 676ef48f285443c9274cc72de90366c843605eb6
   - repository: urnetwork/goidenticons
     path: goidenticons
     ref: 39ccec1b69db3a6f67e7346d6f44863499e6241d
@@ -28,12 +33,12 @@ siblings:
     ref: 70ecd6e7f97715718f1079cc9be9fd42a8ebe82c
   - repository: urnetwork/warp
     path: warp
-    ref: a3bb2fb5af5c452978b1db80dfb1eb0cf67771b3
+    ref: 809ec81870bf82537f00cda6589ba0b8ba2b361b
   - repository: urfoundation/sn
     path: sn
-    ref: 43ea9f61432965d7a7d5fc17f0258c013259ceb9
+    ref: c35886634c472a4788d3fc3aa97a17fb93d0fc51
   # Server and SN's fixture generator use this same reviewed fork. Published
   # release modules receive an immutable replacement from the builder.
   - repository: urnetwork/gvisor
     path: gvisor
-    ref: 57c9e137f7407ad6cd41dcca1ba304a446e09c79
+    ref: e21e4a40b9c9a5a111f05e2334fabc83c5f2a82a

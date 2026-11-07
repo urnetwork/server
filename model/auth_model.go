@@ -1960,6 +1960,21 @@ func AuthCodeCreate(
 			clientSession.ByJwt.SessionId,
 		))
 
+		// the code ends with the key it descends from (§7.4), and so does the
+		// login it mints
+		apiKeyId := clientSession.ApiKeyId
+		if apiKeyId == nil {
+			apiKeyId = clientSession.ByJwt.ApiKeyId
+		}
+		if apiKeyId != nil && server.SidecarMg0Linked() {
+			server.RaisePgResult(tx.Exec(
+				clientSession.Ctx,
+				`UPDATE auth_code SET api_key_id = $2 WHERE auth_code_id = $1`,
+				authCodeId,
+				apiKeyId,
+			))
+		}
+
 		if 0 < len(roles) {
 			server.BatchInTx(clientSession.Ctx, tx, func(batch server.PgBatch) {
 				for _, role := range roles {

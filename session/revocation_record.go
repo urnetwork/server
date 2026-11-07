@@ -134,8 +134,11 @@ func revocationRecordLineage(byJwt *ByJwt) (server.Id, bool) {
 	return server.Id{}, false
 }
 
+// A credential that descends from an API key ends with the key, which only the
+// SQL state query reads. The record keeps no key state, so such a credential,
+// one logged in with a key's auth code, stays on the query.
 func usesRevocationRecord(byJwt *ByJwt) bool {
-	if !RevocationRecordEnabled() {
+	if !RevocationRecordEnabled() || byJwt.ApiKeyId != nil {
 		return false
 	}
 	_, ok := revocationRecordLineage(byJwt)

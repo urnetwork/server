@@ -49,6 +49,9 @@ func TestStateRefusalCacheServesOnlyItsExactCredential(t *testing.T) {
 	otherUser.UserId = server.NewId()
 	otherNetwork := *legacy
 	otherNetwork.NetworkId = server.NewId()
+	apiKeyClaimed := *legacy
+	apiKeyId := server.NewId()
+	apiKeyClaimed.ApiKeyId = &apiKeyId
 	parentClientId := server.NewId()
 	for _, control := range []struct {
 		name           string
@@ -56,6 +59,7 @@ func TestStateRefusalCacheServesOnlyItsExactCredential(t *testing.T) {
 		parentClientId *server.Id
 	}{
 		{name: "root claim", byJwt: &rootClaimed},
+		{name: "api key claim", byJwt: &apiKeyClaimed},
 		{name: "session claim", byJwt: &sessionClaimed},
 		{name: "device", byJwt: &otherDevice},
 		{name: "user", byJwt: &otherUser},

@@ -161,6 +161,14 @@ func TestReleaseSourceGraphPinsNativeFeeOwner(t *testing.T) {
 	requireReviewedSibling(t, "github.com/centrifuge/go-substrate-rpc-client/v4", "sn", "urfoundation/sn", "third_party/go-substrate-rpc-client")
 }
 
+// Dependency replacements are not inherited, so server repeats sidecar's, and
+// smtpproof is that same reviewed revision's nested module. Build's sidecar
+// gitlink pins this commit too (build/.gitmodules).
+func TestReleaseSourceGraphPinsSidecar(t *testing.T) {
+	requireReviewedSibling(t, "github.com/urnetwork/sidecar", "sidecar", "urnetwork/sidecar", "")
+	requireReviewedSibling(t, "github.com/urnetwork/sidecar/smtpproof", "sidecar", "urnetwork/sidecar", "smtpproof")
+}
+
 // The quality probes live in qualityprobe/ with their history, and their
 // standalone repository is retired. A pin for it would send every clean
 // checkout after source that nothing builds or tests.

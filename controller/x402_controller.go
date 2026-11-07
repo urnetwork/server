@@ -899,6 +899,13 @@ func X402SettleInlineUpgrade(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "Not authorized.", http.StatusUnauthorized)
 		return false
 	}
+	// POST /network/auth-client is on a sidecar's allowlist, and a sidecar token
+	// buys nothing (§7.4). No shipped client holds one, so this needs no
+	// log-only days.
+	if clientSession.ByJwt.StrictExp {
+		http.Error(w, router.StrictExpCredentialRefusedMessage, http.StatusForbidden)
+		return false
+	}
 
 	result, err := X402Purchase(
 		clientSession.Ctx,

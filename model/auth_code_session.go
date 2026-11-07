@@ -13,7 +13,20 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// A code that descends from an API key is refused once the key is removed (§7.4),
+// and the login it mints carries the key's id, so removing the key ends the login
+// too (session.ByJwt.ApiKeyId). DeleteApiKey deletes the key's codes in its own
+// transaction; these reads refuse a code whose key went any other way, and they
+// hold up against that delete in either order: a redemption that locks the code
+// first commits a login the delete then ends, and one that comes second finds no
+// code. A binary that does not link MG0 has no api_key_id to read.
 func authCodeLoginSession(args *AuthCodeLoginArgs, clientSession *session.ClientSession) (response *AuthCodeLoginResult, returnErr error) {
+	apiKeyColumn := "NULL::uuid"
+	liveApiKeySql := ""
+	if server.SidecarMg0Linked() {
+		apiKeyColumn = "c.api_key_id"
+		liveApiKeySql = ` AND (c.api_key_id IS NULL OR EXISTS (SELECT 1 FROM account_api_key k WHERE k.api_key_id=c.api_key_id AND k.network_id=c.network_id))`
+	}
 	return server.HandleError2(func() (*AuthCodeLoginResult, error) {
 		ctx := clientSession.Ctx
 		hash := sha256.Sum256([]byte(args.AuthCode))
@@ -57,9 +70,10 @@ func authCodeLoginSession(args *AuthCodeLoginArgs, clientSession *session.Client
 			var userId server.Id
 			var name, principal string
 			var lineage, end time.Time
+			var apiKeyId *server.Id
 			found := false
 			server.Db(ctx, func(conn server.PgConn) {
-				err := conn.QueryRow(ctx, `SELECT c.network_id,c.user_id,c.create_time,c.end_time,c.principal,n.network_name FROM auth_code c JOIN network n ON n.network_id=c.network_id JOIN network_user u ON u.user_id=c.user_id AND n.admin_user_id=u.user_id WHERE c.auth_code=$1 AND c.active AND c.remaining_uses>0 AND $2<c.end_time AND u.credential_change_time<=c.create_time`, args.AuthCode, server.NowUtc()).Scan(&networkId, &userId, &lineage, &end, &principal, &name)
+				err := conn.QueryRow(ctx, `SELECT c.network_id,c.user_id,c.create_time,c.end_time,c.principal,n.network_name,`+apiKeyColumn+` FROM auth_code c JOIN network n ON n.network_id=c.network_id JOIN network_user u ON u.user_id=c.user_id AND n.admin_user_id=u.user_id WHERE c.auth_code=$1 AND c.active AND c.remaining_uses>0 AND $2<c.end_time AND u.credential_change_time<=c.create_time`+liveApiKeySql, args.AuthCode, server.NowUtc()).Scan(&networkId, &userId, &lineage, &end, &principal, &name, &apiKeyId)
 				if errors.Is(err, pgx.ErrNoRows) {
 					return
 				}
@@ -71,6 +85,7 @@ func authCodeLoginSession(args *AuthCodeLoginArgs, clientSession *session.Client
 			}
 			credential = session.NewByJwtWithCreateTime(networkId, userId, name, lineage, false, IsProFresh(ctx, &networkId))
 			credential.Principal = principal
+			credential.ApiKeyId = apiKeyId
 			session.PrepareSessionMint(credential, true)
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.Raise(session.LockSessionLifecycle(ctx, tx, networkId, false))
@@ -107,7 +122,7 @@ func authCodeLoginSession(args *AuthCodeLoginArgs, clientSession *session.Client
 			var codeId server.Id
 			var origin *server.Id
 			var uses int
-			err := tx.QueryRow(ctx, `SELECT auth_code_id,origin_session_id,remaining_uses FROM auth_code WHERE auth_code=$1 AND network_id=$2 AND active AND $3<end_time AND remaining_uses>0 FOR UPDATE`, args.AuthCode, networkId, server.NowUtc()).Scan(&codeId, &origin, &uses)
+			err := tx.QueryRow(ctx, `SELECT c.auth_code_id,c.origin_session_id,c.remaining_uses FROM auth_code c WHERE c.auth_code=$1 AND c.network_id=$2 AND c.active AND $3<c.end_time AND c.remaining_uses>0`+liveApiKeySql+` FOR UPDATE`, args.AuthCode, networkId, server.NowUtc()).Scan(&codeId, &origin, &uses)
 			if errors.Is(err, pgx.ErrNoRows) {
 				result = &AuthCodeLoginResult{Error: &AuthCodeLoginError{Message: "Invalid auth code."}}
 				return

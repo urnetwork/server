@@ -34,7 +34,14 @@ func (self *ByJwt) AcceptUntil() time.Time {
 	return self.ExpiresAt.Time.Add(SessionGrace + clockLeeway)
 }
 
+// The checks of a credential's lifetime no gate relaxes, made wherever a
+// credential is accepted, so a connection admitted before the end retires too.
 func validateSessionHorizon(byJwt *ByJwt, now time.Time) error {
+	if byJwt.StrictExp {
+		if err := validateStrictExp(byJwt, now); err != nil {
+			return err
+		}
+	}
 	if byJwt.SessionId == nil && byJwt.RootClientId == nil {
 		return nil
 	}
@@ -43,6 +50,21 @@ func validateSessionHorizon(byJwt *ByJwt, now time.Time) error {
 	}
 	if !now.Before(byJwt.AcceptUntil()) {
 		return rejectByJwt(AuthRejectionExpired, "terminal horizon ended")
+	}
+	return nil
+}
+
+// A strict_exp credential ends at its exp, with no grace (owner decision 103):
+// neither reject_expired, nor AcceptUntil, nor the clock leeway extends it. Past
+// its exp it is refused once sidecar.yml's p0_enforce is on, and until then
+// counted, as a passed exp is (ParseByJwtForAudience). Every strict_exp token is
+// minted with exp and its root, so one without them is refused either way.
+func validateStrictExp(byJwt *ByJwt, now time.Time) error {
+	if byJwt.ExpiresAt == nil || byJwt.ClientId == nil || byJwt.RootClientId == nil {
+		return rejectByJwtClaims(AuthRejectionMissingClaims, "strict_exp credential requires exp and its root")
+	}
+	if !now.Before(byJwt.ExpiresAt.Time) && server.CurrentSidecarConfig().P0Enforce {
+		return rejectByJwt(AuthRejectionExpired, "strict_exp token is expired")
 	}
 	return nil
 }

@@ -193,6 +193,13 @@ func startAuthorizationLeaseWithCheck(ctx context.Context, credential *ByJwt, cl
 			terminal = strict
 		}
 	}
+	if credential.StrictExp && credential.ExpiresAt != nil && server.CurrentSidecarConfig().P0Enforce {
+		// the transport ends at exp, not at the next recheck after it
+		// (validateStrictExp)
+		if terminal.IsZero() || credential.ExpiresAt.Time.Before(terminal) {
+			terminal = credential.ExpiresAt.Time
+		}
+	}
 	checkCtx, cancelCheck := context.WithTimeout(ctx, 2*time.Second)
 	err := check(checkCtx, credential)
 	cancelCheck()

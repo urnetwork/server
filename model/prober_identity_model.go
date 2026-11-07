@@ -59,12 +59,11 @@ const (
 	// re-minted.
 	//
 	// It is deliberately NOT derived from the jwt's own lifetime. That lifetime
-	// (session.expiryDuration) is unexported, so this package cannot read it, and it
-	// has already been changed once. A duplicated copy here would drift
-	// silently, and the direction it drifts is the bad one: a shortened lifetime
-	// with a stale copy here means an EXPIRED prober credential. A short,
-	// self-chosen refresh age needs to know nothing about the deadline it is
-	// staying clear of.
+	// (session.ByJwtSettings.Expiry) has already been changed once. A duplicated
+	// copy here would drift silently, and the direction it drifts is the bad
+	// one: a shortened lifetime with a stale copy here means an EXPIRED prober
+	// credential. A short, self-chosen refresh age needs to know nothing about
+	// the deadline it is staying clear of.
 	ProberJwtRefreshAge = 7 * 24 * time.Hour
 
 	// The prober's client is a long-lived server-managed identity, not a user
