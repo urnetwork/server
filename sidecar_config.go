@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -19,10 +20,12 @@ import (
 // §19.11's file is ignored until its readers land.
 //
 // A gate that loosens when the file breaks would drop P0's enforcement on a bad
-// push. So once a read succeeded, a failed or absent read keeps it, and a file
-// that is there but does not parse on a process's first read enforces and
-// previews nothing. Taking a gate back off is an edit to the file, not its
-// removal: a removal holds until the process restarts.
+// push. So once a read succeeded, a failed or absent read keeps it, and on a
+// process's first read a file that is there but cannot be read or parsed
+// enforces and previews nothing. Only a file the resolver finds absent from
+// every home is inert (ErrResourceNotFound): a dangling link, a directory or an
+// inaccessible home is unavailable, not absent. Taking a gate back off is an
+// edit to the file, not its removal: a removal holds until the process restarts.
 
 // The file's name under config/<env>.
 const sidecarConfigResourceName = "sidecar.yml"
@@ -97,6 +100,11 @@ func loadSidecarConfig(previous *SidecarConfig) (config *SidecarConfig) {
 	if r := HandleError(func() {
 		resource, err := Config.SimpleResource(sidecarConfigResourceName)
 		if err != nil {
+			if !errors.Is(err, ErrResourceNotFound) || errors.Is(err, ErrResourceUnavailable) {
+				// there but unreadable, a dangling link or a directory say
+				config = failed(err)
+				return
+			}
 			config = previous
 			if config == nil {
 				config = &SidecarConfig{}

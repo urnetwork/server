@@ -252,7 +252,7 @@ The values are read once per process, so a flip needs a restart.
 | `p0_enforce: {enabled: …}` | absent (false) | The P0 auth fix (§4) and the sidecar token's `exp` refuse what they otherwise only count. On at M1, after 14 log-only days of `urnetwork_auth_child_admin_calls_total` |
 | `preview_networks: […]` | absent (empty) | The networks that may hold sidecar tokens before stage 2 |
 
-`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse keeps the last good read, and on a process's first read it enforces and previews nothing. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
+`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse, or is there but cannot be read (a dangling link, a directory, an inaccessible config home), keeps the last good read, and on a process's first read it enforces and previews nothing. Only a file absent from every config home is inert. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
 
 **Migration group MG0** (`network_client_owner` and the altered `account_api_key` and `auth_code`) stays pending under the `sidecar_pending` build tag, in `db_migrations_sidecar_pending.go`, until its Gn-out moves it into the migrations slice. A build with the tag panics at start outside `local`, `canary` and tests. Code reads the group only where `server.SidecarMg0Linked()` says the binary links it, and then the group is part of the head the binary requires, so without the tables the binary never reports ready.
 
