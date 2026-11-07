@@ -33,8 +33,11 @@ func executeSourceBuildIndependentTests(ctx context.Context, client *http.Client
 		return nil, "", errors.New("independent source test model journal cannot leave its build owner")
 	}
 	settings.ResponseJournalDirectory = journal
-	plan := sourceCorrectnessTestPlan(request, artifacts, owner)
-	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", MinimumWork: sourceBuildRequestMinimumWork(request), ImageId: artifacts.ImageId, Commit: request.Proposal.Commits["server"],
+	plan, err := sourceCorrectnessTestPlan(request, artifacts, owner)
+	if err != nil {
+		return nil, "", err
+	}
+	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", MinimumWork: sourceBuildRequestMinimumWork(request), WorkCoveragePolicy: sourceBuildRequestWorkCoverage(request).Clone(), ImageId: artifacts.ImageId, Commit: request.Proposal.Commits["server"],
 		SourceDirectory: filepath.Join(artifacts.Directory, "source"), MetadataDirectory: filepath.Join(artifacts.Directory, "correctness", "metadata"),
 		OutputDirectory: filepath.Join(artifacts.Directory, "correctness", "output")}
 	observedDocker, err := sourceCorrectnessContainmentDocker(input, sandbox, docker)

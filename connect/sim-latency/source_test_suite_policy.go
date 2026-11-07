@@ -79,11 +79,15 @@ func sourceCorrectnessSuiteDigestForMinimumWork(minimumWork bool) string {
 
 // Only callers that already authenticated the immutable source generation
 // construct this plan. Instrument-proof absence does not downgrade later builds.
-func sourceCorrectnessTestPlan(request reviewedSourceBuildRequest, artifacts sourceBuildArtifacts, owner string) sourceTestPlan {
+func sourceCorrectnessTestPlan(request reviewedSourceBuildRequest, artifacts sourceBuildArtifacts, owner string) (sourceTestPlan, error) {
+	suite, err := sourceCorrectnessSuiteForRequest(request)
+	if err != nil {
+		return sourceTestPlan{}, err
+	}
 	plan := sourceTestPlan{Owner: owner, ImageId: artifacts.ImageId, SourceLockSha256: request.Proposal.SourceLockSha256,
-		PatchSha256: request.Proposal.PatchSha256, SuiteSha256: sourceCorrectnessSuiteDigestForMinimumWork(sourceBuildRequestMinimumWork(request))}
+		PatchSha256: request.Proposal.PatchSha256, SuiteSha256: suite.sha256}
 	if request.Proposal.WinnerReviewPolicy == model.CompetitionSnowWinnerReviewPolicy {
 		plan.WinnerReviewPolicy = request.Proposal.WinnerReviewPolicy
 	}
-	return plan
+	return plan, nil
 }
