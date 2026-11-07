@@ -32,19 +32,29 @@ type minioRunwayTestStore struct {
 	putRate    func(age time.Duration) float64
 }
 
-// The 2026-10-22 store at rest: four 3.84 TB drives, half free, raw use about
-// twice the logical bytes and a steady put rate.
+// The 6+2 store at rest: eight 3.84 TB drives half free, raw use within a
+// terabyte of 8/6 of the logical bytes and a steady put rate.
 func minioRunwayTestHealthy() minioRunwayTestStore {
 	return minioRunwayTestStore{
 		host:       minioRunwayTestHost,
-		drives:     []string{"/mnt/blob1", "/mnt/blob2", "/mnt/blob3", "/mnt/blob4"},
+		drives:     []string{"/mnt/blob1", "/mnt/blob2", "/mnt/blob3", "/mnt/blob4", "/mnt/blob5", "/mnt/blob6", "/mnt/blob7", "/mnt/blob8"},
 		avail:      func(int, time.Duration) float64 { return 2000 * storageRunwayTestGigabyte },
 		size:       minioRunwayTestDrive,
-		driveCount: func(time.Duration) float64 { return 4 },
-		logical:    func(time.Duration) float64 { return 3.5 * minioRunwayTestTerabyte },
+		driveCount: func(time.Duration) float64 { return 8 },
+		logical:    func(time.Duration) float64 { return 10.5 * minioRunwayTestTerabyte },
 		usageAge:   func(time.Duration) float64 { return 1800 },
 		putRate:    func(time.Duration) float64 { return 90 },
 	}
+}
+
+// The 2026-10-22 store: four 3.84 TB drives in one 2+2 set.
+func minioRunwayTestFourDrives() (minioRunwayTestStore, *MinioRunwaySettings) {
+	store := minioRunwayTestHealthy()
+	store.drives = store.drives[:4]
+	store.driveCount = func(time.Duration) float64 { return 4 }
+	settings := DefaultMinioRunwaySettings()
+	settings.ErasureOverhead = 2
+	return store, settings
 }
 
 func minioRunwayTestBody(t *testing.T, grid storageRunwayGrid, stores ...minioRunwayTestStore) string {
@@ -201,7 +211,7 @@ func TestMinioRunwayHealthyStore(t *testing.T) {
 // drives while MinIO's 47%-used accounting stayed quiet, raw use far above
 // twice the logical bytes, and PutObject at 520/s against 90/s.
 func TestMinioRunwaySyntheticIncident(t *testing.T) {
-	store := minioRunwayTestHealthy()
+	store, settings := minioRunwayTestFourDrives()
 	store.avail = func(_ int, age time.Duration) float64 {
 		return 2050*storageRunwayTestGigabyte + 10.25*storageRunwayTestGigabyte*age.Hours()
 	}
@@ -212,7 +222,7 @@ func TestMinioRunwaySyntheticIncident(t *testing.T) {
 		}
 		return 90
 	}
-	alerts := minioRunwayTestRun(t, NewMinioRunwaySignal(), minioRunwayTestSources{body: minioRunwayTestBody(t, minioRunwayTestGrid(), store)})
+	alerts := minioRunwayTestRun(t, NewMinioRunwaySignalWithSettings(settings), minioRunwayTestSources{body: minioRunwayTestBody(t, minioRunwayTestGrid(), store)})
 
 	runway := requireAlertClass(t, alerts, "minio-drive-runway")
 	if runway.Target != "minio-1/drives" || runway.Severity != SeverityWarn || runway.Sustain != 2 || runway.unobservable ||
@@ -233,6 +243,26 @@ func TestMinioRunwaySyntheticIncident(t *testing.T) {
 	requireNoAlertClass(t, alerts, "minio-backup-reserve")
 	for _, alert := range alerts {
 		requireAlertOmits(t, alert, "private-source-canary")
+	}
+}
+
+// Raw use on the 6+2 store is 8/6 of the logical bytes. At the 2+2 overhead
+// of two, 1.5 TB of data beside MinIO on these drives stayed under the
+// divergence line.
+func TestMinioRunwayDivergenceUsesTheSixPlusTwoOverhead(t *testing.T) {
+	store := minioRunwayTestHealthy()
+	store.logical = func(time.Duration) float64 { return 6 * minioRunwayTestTerabyte }
+	// 9.5 TB raw: 8 TB of erasure-coded objects and 1.5 TB beside them
+	store.avail = func(int, time.Duration) float64 { return minioRunwayTestDrive - 9.5*minioRunwayTestTerabyte/8 }
+	alerts := minioRunwayTestRun(t, NewMinioRunwaySignal(), minioRunwayTestSources{body: minioRunwayTestBody(t, minioRunwayTestGrid(), store)})
+	if len(alerts) != 1 {
+		t.Fatalf("1.5 TB beside MinIO produced %d alerts, want the divergence alone", len(alerts))
+	}
+	alert := requireAlertClass(t, alerts, "minio-accounting-divergence")
+	if alert.Target != "minio-1/accounting" || alert.Severity != SeverityWarn ||
+		!strings.Contains(alert.Symptom, "1.50 TB more raw data than 1.333 times its logical bucket bytes") ||
+		!strings.Contains(alert.Observed, "raw_used_bytes=9500000000000 logical_bytes=6000000000000 erasure_overhead=1.333 divergence_bytes=1500000000000 divergence_tb=1.50 drives=8 ") {
+		t.Fatalf("wrong divergence alert: %s %s", alert.Symptom, alert.Observed)
 	}
 }
 
@@ -300,7 +330,7 @@ func TestMinioRunwayBackupReserve(t *testing.T) {
 // accounting and the backup layer unknown, while the put layer still judges.
 func TestMinioRunwayIncompleteCensusStaysUnknown(t *testing.T) {
 	store := minioRunwayTestHealthy()
-	store.drives = store.drives[:3]
+	store.drives = store.drives[:7]
 	store.putRate = func(age time.Duration) float64 {
 		if age <= 2*time.Hour {
 			return 900
@@ -314,7 +344,7 @@ func TestMinioRunwayIncompleteCensusStaysUnknown(t *testing.T) {
 	unknown := map[string]bool{}
 	for _, alert := range alerts {
 		if alert.Class == "minio-runway-unobservable" {
-			if !alert.unobservable || !strings.Contains(alert.Observed, "drive-filesystems=3 minio-drive-count=4") {
+			if !alert.unobservable || !strings.Contains(alert.Observed, "drive-filesystems=7 minio-drive-count=8") {
 				t.Fatalf("census gap lost its reason: %s", alert.Observed)
 			}
 			unknown[alert.Target] = true

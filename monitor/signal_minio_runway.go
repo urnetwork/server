@@ -51,7 +51,8 @@ type MinioRunwaySettings struct {
 	// most this fraction of the total (diskFillFraction 0.99): each drive's
 	// runway counts down to this share of its size.
 	DriveFloorFraction float64
-	// Raw bytes per logical byte of the erasure coding: two for 2+2.
+	// Raw bytes per logical byte of the erasure coding: the drives of the
+	// erasure set over its data shards, 8/6 for 6+2 (two for 2+2).
 	ErasureOverhead float64
 	// Warn when raw used bytes exceed ErasureOverhead times MinIO's logical
 	// bucket bytes by more than this.
@@ -83,9 +84,10 @@ type MinioRunwaySettings struct {
 	BackupMaxOutputBytes int
 }
 
-// The §11.6b defaults on the 2026-10-22 main store: four 3.84 TB drives in
-// one 2+2 erasure set and the backup's inventory settings
-// (pg_basebackup_reserve_bytes 1.5 TiB, pg_basebackup_min_free_bytes 4 TB).
+// The §11.6b defaults on the main store: since 2026-10-24 one 8-drive erasure
+// set at EC:2 (6 data + 2 parity shards, xops MINIO-REBUILD-8.md) of 3.84 TB
+// drives, and the backup's inventory settings (pg_basebackup_reserve_bytes
+// 1.5 TiB, pg_basebackup_min_free_bytes 4 TB).
 func DefaultMinioRunwaySettings() *MinioRunwaySettings {
 	return &MinioRunwaySettings{
 		Estimator:                  DefaultStorageRunwayEstimatorSettings(),
@@ -96,7 +98,7 @@ func DefaultMinioRunwaySettings() *MinioRunwaySettings {
 		PageRunway:                 3 * 24 * time.Hour,
 		DriveMountpointPattern:     "/mnt/blob[0-9]+",
 		DriveFloorFraction:         0.01,
-		ErasureOverhead:            2,
+		ErasureOverhead:            8.0 / 6.0,
 		DivergenceWarnBytes:        1000 * 1000 * 1000 * 1000,
 		PutRateWindow:              time.Hour,
 		PutSurgeMultiple:           3,
@@ -491,6 +493,8 @@ func (self *minioRunwayProbe) accounting(hostName string, observation *minioRunw
 		rawUsed += drive.size - drive.estimate.latest.value
 	}
 	divergence := rawUsed - settings.ErasureOverhead*logical
+	// 1.333 for 6+2, 2 for 2+2
+	overhead := strconv.FormatFloat(settings.ErasureOverhead, 'g', 4, 64)
 	usageAge := "unknown"
 	if age, ageReason := observation.gauge("usage_age", end); ageReason == "" {
 		usageAge = strconv.FormatFloat(age, 'f', 0, 64)
@@ -504,11 +508,11 @@ func (self *minioRunwayProbe) accounting(hostName string, observation *minioRunw
 	return []finding{
 		{
 			probeId: minioRunwayProbeId, tier: tierWarn, class: "minio-accounting-divergence", target: target, sustain: settings.Sustain,
-			symptom:   fmt.Sprintf("MinIO's drives on %s hold %.2f TB more raw data than %.0f times its logical bucket bytes", hostName, divergence/1e12, settings.ErasureOverhead),
-			mechanism: "Raw used space on the drive filesystems should be about the erasure overhead times MinIO's logical bucket bytes. The excess is data beside MinIO on the same drives (the PostgreSQL base backup), scanner lag in a large flat prefix, or small-object overhead: each small object costs a directory and an xl.meta on every drive.",
-			baseline:  fmt.Sprintf("raw_used_bytes - %.0f * logical_bytes <= %.0f bytes.", settings.ErasureOverhead, settings.DivergenceWarnBytes),
-			observed: fmt.Sprintf("raw_used_bytes=%.0f logical_bytes=%.0f erasure_overhead=%.0f divergence_bytes=%.0f divergence_tb=%.2f drives=%d usage_snapshot_age_s=%s",
-				rawUsed, logical, settings.ErasureOverhead, divergence, divergence/1e12, len(drives), usageAge),
+			symptom:   fmt.Sprintf("MinIO's drives on %s hold %.2f TB more raw data than %s times its logical bucket bytes", hostName, divergence/1e12, overhead),
+			mechanism: "Raw used space on the drive filesystems should be about the erasure overhead (the set's drives over its data shards) times MinIO's logical bucket bytes. The excess is data beside MinIO on the same drives (the PostgreSQL base backup), scanner lag in a large flat prefix, or small-object overhead: each small object costs a directory and an xl.meta on every drive.",
+			baseline:  fmt.Sprintf("raw_used_bytes - %s * logical_bytes <= %.0f bytes.", overhead, settings.DivergenceWarnBytes),
+			observed: fmt.Sprintf("raw_used_bytes=%.0f logical_bytes=%.0f erasure_overhead=%s divergence_bytes=%.0f divergence_tb=%.2f drives=%d usage_snapshot_age_s=%s",
+				rawUsed, logical, overhead, divergence, divergence/1e12, len(drives), usageAge),
 			evidence: "Fresh drive filesystem size and available bytes for every drive MinIO counts, and MinIO's own minio_cluster_usage_buckets_total_bytes, through the loopback Mimir gateway " + gateway + ".",
 			context:  "False-positive qualifiers: a scheduled backup's transient second generation, and scanner lag right after a MinIO restart, which leaves the logical figure low. The logical bytes are cluster-wide, so the comparison holds for a single-node store like main's; on a multi-node store each host's drives hold only its share. usage_snapshot_age_s is the objects-path gauge in seconds; this release writes the buckets-path gauge of the same name in nanoseconds.",
 			action:   "Name the excess before acting: the base backup's own journal and inventory (`pg_basebackup_retain`), the scanner's progress (`mc admin scanner status` as root), and the object-count trend of the client-key evidence prefix. The monitor's user cannot read MinIO's or the backup's directories, so `du` from it reads near zero; use the owner's privileged du.",

@@ -33104,6 +33104,10 @@ stayed quiet. Raw free space meanwhile fell from 12.6 TB (10-15) to 12.3 TB
 drive is full, and client-key registration has no fallback when its evidence
 cannot be published, so new identities would stop working.
 
+Since 2026-10-24 the store is one 8-drive set at EC:2 (`/mnt/blob1`..`8`, 6
+data and 2 parity shards per object, about 23 TB usable; xops
+`main/ansible/MINIO-REBUILD-8.md`).
+
 What MinIO's own accounting cannot see:
 1. **Data beside MinIO on the same drives.** The PostgreSQL physical base
    backup (xops `main/ansible/playbook-pg-basebackup.yml`, written to
@@ -33131,8 +33135,10 @@ Checks:
   days, PAGE at ≤ 3 days. These are longer than §2.4f's thresholds because
   adding drives takes days.
 - **Accounting divergence:** raw used (`node_filesystem_size_bytes - avail`
-  over the blob drives) minus twice MinIO's logical bucket bytes (2+2 erasure
-  coding). WARN `minio-accounting-divergence` above 1 TB. It means foreign
+  over the blob drives) minus the erasure overhead times MinIO's logical
+  bucket bytes: the set's drives over its data shards, 2 for the 2+2 set of
+  10-22 and 8/6 for the 6+2 set since 10-24. WARN
+  `minio-accounting-divergence` above 1 TB. It means foreign
   data, scanner lag or small-object overhead; it was about 4.4 TB on 10-22
   against about 0.5 TB a week earlier. Report
   `minio_cluster_usage_buckets_since_last_update_seconds` beside it, and check
@@ -33148,9 +33154,10 @@ Checks:
 
 ```promql
 min(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+# 8 / 6 for the 6+2 set since 2026-10-24; 2 for the 2+2 set of 10-22
 sum(node_filesystem_size_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."}
   - node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
-  - 2 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
+  - 8 / 6 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
 sum(rate(minio_api_requests_total{job="minio",name="PutObject"}[1h]))
 ```
 
@@ -33184,8 +33191,9 @@ decline windows and a fresh size. Classes, targets `<host>/<layer>`:
   WARN at <= 14 days, PAGE at <= 3 days. The §2.4f pace floor does not apply
   here. A violation needs only a fresh drive; healthy needs the full census.
 - `minio-accounting-divergence` (target `<host>/accounting`, sustain 2): raw
-  used bytes over the drives minus twice the logical bucket bytes (2+2
-  erasure overhead) above 1 TB warns. `usage_snapshot_age_s` rides beside it.
+  used bytes over the drives minus `ErasureOverhead` times the logical bucket
+  bytes above 1 TB warns: 8/6 for the 6+2 set (it read 2, the 2+2 overhead,
+  until 2026-11-07). `usage_snapshot_age_s` rides beside it.
   MinIO's logical bytes are cluster-wide, so the per-host comparison holds
   for a single-node store like main's; a multi-node store needs each node's
   share before this layer can judge it.
@@ -33243,6 +33251,16 @@ risk-memory helper, thresholds, time windows and backup policy are unchanged.
 Cancellation after this checkpoint has no rollback guarantee. The source
 counterexample concerns future remembered-risk classification, not an observed
 outage or a canceled RunLoop notification/clear.
+
+Erasure overhead (2026-11-07). `ErasureOverhead` still read 2, the 2+2
+overhead, after the 10-24 rebuild. The 6+2 set writes 8/6 raw bytes per
+logical byte (`minio_cluster_erasure_set_read_quorum` 6 with
+`minio_system_drive_count` 8), so the divergence understated data beside
+MinIO by two thirds of the logical bytes. On 11-07 it read about 8.5 TB at 2
+and about 9.5 TB at 8/6 (11.48 TB raw used, 1.49 TB logical), above the 1 TB
+line either way. Main's inventory has the only `minio` host. A synthetic
+control puts 1.5 TB beside MinIO on the 6+2 store, which an overhead of 2
+hid; the 10-22 replay keeps its own 4-drive 2+2 store.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
