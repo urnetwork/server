@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "kind": "competition-frozen-overlay-auxiliary-race-observation/v1",
+  "recorded_on": "2026-11-07",
+  "status": "auxiliary race passed; overlay remains unapproved",
+  "accepted_as_production": false,
+  "instrument_approved": false,
+  "runtime_qualified": false,
+  "deployed": false,
+  "ordinary_record": {
+    "path": "connect/sim-latency/launch/EPOCH2-FROZEN-OVERLAY-CORRECTNESS-2026-11-07.json",
+    "sha256": "3add2845f8aa4a2f32a25edaf8eb23481dbeda7de9a1bbe242dbabaf5dbbcf5e",
+    "checkpoint": "f7ee56d71",
+    "unchanged": true
+  },
+  "source": {
+    "frozen_product_source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+    "overlay_sha256": "a1314b1948afa7243727f30ddaa4dd1e137dfc8799c409083611baefafe457c9",
+    "overlay_bytes": 624577,
+    "overlay_paths": 37,
+    "overlay_tree": "4283786c6049c33d20afa6c5bc34c2992463d85e",
+    "preparation_manifest_sha256": "7d2acf3d94c1cdd05482fe9167e2d032c8ea65fd2087070c881eb38fd763f884",
+    "all_ten_refs_and_20_module_files_unchanged": true,
+    "control_code": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "probe_sha256": "f1d3a4c7c7f9f79acf5efa57d7acb6268a85a89d27edc9e772b881c968c8c2e8",
+    "epoch_one_inputs_unchanged": true
+  },
+  "execution": {
+    "go": "go1.27.3 linux/amd64",
+    "cgo_enabled": true,
+    "goexperiment": "greenteagc",
+    "goflags": "-mod=readonly -p=2 -race",
+    "auxiliary_not_production_cgo0_compiler_proof": true,
+    "offline_private_network": true,
+    "real_frozen_sn_TestMain_generator_build": true,
+    "inherited_generator_override_unset": true,
+    "owned_cpu_limit": 2,
+    "memory_max": "12GiB",
+    "swap_max": 0,
+    "tasks_max": 512,
+    "phase_runtime_max_seconds": 900
+  },
+  "results": {
+    "mandatory_pass": 70,
+    "package_counts": {
+      "root": 3,
+      "connect": 25,
+      "simulator": 35,
+      "model": 7
+    },
+    "supplemental_pass": 11,
+    "failures": 0,
+    "skips": 0,
+    "race_findings": 0,
+    "mandatory_duration": "7m13.806s",
+    "mandatory_peak_memory": "4.3G",
+    "counter_duration": "19.554s",
+    "supplement_duration": "19.577s",
+    "native_observed_count": 70,
+    "legacy48_downgrade_refused": true,
+    "mandatory_skip_refused": true
+  },
+  "native_protocol": {
+    "suite_sha256": "cda3e6e1436439733aa4090ff1ee5dd142231f5ef6fef3c1dbe06730e335295f",
+    "export_record_sha256": "9c295fabe1ad6ea74ca57910b4f2611d89df87f31223c87681e3fa13ac57184c",
+    "executed_script_sha256": "8b2dbee472b321b92f743faaefa4a1f016ea59b0b017eca8f8b3f8f8bf2564b6",
+    "export_record_script_digest_and_census_byte_equal_ordinary": true
+  },
+  "evidence": {
+    "receipt_path": "/home/by/urnetwork/temp/successor-v4-a131-qualified-20261107.jVkUvL/qualification-receipt.json",
+    "receipt_sha256": "15b5dadab52845cd692e2b6c1cd9a44793a431e17995948d62802264273ca6ab",
+    "ordinary_receipt_sha256": "ed3ff18ecd50429765b573ec936560b92e67f5e5087055edd2fdb39b895d4d43",
+    "race_events_path": "/home/by/sim-latency/fixtures/successor-v4-a131-20261107/native-race/mandatory70.jsonl",
+    "race_events_sha256": "912ad187b6415de92972920510c63d24ac2c37aee8b6d0c63e8abfdd0845fc07",
+    "native_counter_path": "/home/by/sim-latency/fixtures/successor-v4-a131-20261107/native-race/suite.verify.json",
+    "native_counter_sha256": "aefee8ccf9847ce747267722f50b3fa5add9c9e7ad17e03d04a0310a05f77b6c",
+    "supplement_events_sha256": "e217ea25cfd2a8207d30e8ff183e345aa3b98f82558be31f6ce26b39eb5c8890",
+    "auxiliary_tools_sha256": "5066ca5914142fe800a306204f3116ca8268d621d1b281dd861f880c5f228c05",
+    "ordinary_tools_sha256": "e404943e051531cfd0e8e5e15df9b5e580ed28ae54b74f68f8aea05ecbbfc802",
+    "metadata_sha256": "edc922f399233d02998f28771c9ad323e620c85acc68ee949e034ef291229b9b"
+  },
+  "custody": {
+    "all_phase_pre_and_post_source_tool_censuses_passed": true,
+    "final_20_module_sha256_snapshot_identical": true,
+    "all_10_owned_units_and_exact_cgroups_removed": true,
+    "source_reviewer_read_entire_receipt_and_rehashed_all_11_aux_files": true,
+    "root_independently_matched_actual_race_event_and_counter_hashes": true,
+    "ordinary_compile_outputs_remain_0400_unexecuted": true,
+    "prior_causal_controls_and_wrong_v3_failure_preserved_in_ordinary_record": true,
+    "profile_generation_in_this_qualification": false
+  },
+  "scope": "Selected frozen-source synthetic correctness under auxiliary CGO1/race, not a production-CGO0 build equivalence, full suite/current-main/API, image or runtime qualification. The exact ordinary record remains independent. No participant rescore, provider/database/Docker/workload/native-containment execution or source-policy/host deployment. Existing G2 approval6423 does not approve combined a131. Exact instrument/manual product approval, trusted host artifacts, image/runtime/admission proof and an actual fresh immutable R9 baseline remain separate gates."
+}
