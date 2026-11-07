@@ -4043,7 +4043,7 @@
       "id": 68,
       "type": "timeseries",
       "title": "destination pool fetches",
-      "description": "Destination pool fetches at the start of each pass, URL passes included, by result: server when the pass loaded the pool the server serves, unavailable when no usable pool was served (the route answered 500, the pool was refused or empty) and the pass measured no destination; there is no built-in table to fall back to. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any unavailable value is passes that measured nothing, and the egress-destination-pool-unavailable finding of monitor signal §2.19h. A series named builtin is the same result from a taskworker built before the rename.",
+      "description": "Destination pool fetches at the start of each pass, URL passes included, by result: server when the pass loaded the pool the server serves, unavailable when no usable pool was served (the route answered 500, the pool was refused or empty) and the pass measured no destination; there is no built-in table to fall back to. Each is counted once, by the taskworker where it happened, so this is the fleet's total over the trailing five minutes; any unavailable value is passes that measured nothing. When half or more of a 15-minute window's fetches are unavailable, monitor signal §2.19h raises egress-destination-pool-unavailable; a smaller share, transient errors or one failing instance of several, is read here and does not alert. A series named builtin is the same result from a taskworker built before the rename.",
       "gridPos": {
         "h": 8,
         "w": 8,

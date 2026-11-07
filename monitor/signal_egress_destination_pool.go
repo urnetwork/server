@@ -49,9 +49,14 @@ const (
 type EgressDestinationPoolSettings struct {
 	// the trailing window the fleet's fetches and refusals are read over
 	Window time.Duration
-	// the fewest unavailable fetches in the window that alert: a single
-	// failed fetch is a blip, while a pool the server cannot serve fails every
-	// shard's every pass
+	// an unavailable pool alerts only when at least UnavailableShare of the
+	// window's fetches failed -- which every window without a served fetch
+	// does -- and at least MinUnavailableFetches did. Every pass fetches the
+	// pool, so the fleet makes a few hundred fetches a window: a pool the
+	// server cannot serve fails nearly all of them, while transient failures,
+	// or one instance of several failing, leave most passes measuring and are
+	// the dashboard's to show, not a page
+	UnavailableShare      float64
 	MinUnavailableFetches float64
 	// consecutive failing cadences after which an unavailable pool pages
 	UnavailablePageSustain int
@@ -71,6 +76,7 @@ type EgressDestinationPoolSettings struct {
 func DefaultEgressDestinationPoolSettings() *EgressDestinationPoolSettings {
 	return &EgressDestinationPoolSettings{
 		Window:                 15 * time.Minute,
+		UnavailableShare:       0.5,
 		MinUnavailableFetches:  2,
 		UnavailablePageSustain: 6,
 		TaskworkerService:      "taskworker",
@@ -239,23 +245,28 @@ func evaluateEgressDestinationPool(
 		}
 	}
 
-	// the pool could not be had
+	// the pool could not be had: by most of the window's passes, not by a
+	// transient few of the several hundred every window fetches
+	unavailableShare := 0.0
+	shareText := "unknown"
+	if fleet != nil {
+		if total := fleet.served + fleet.unavailable; 0 < total {
+			unavailableShare = fleet.unavailable / total
+			shareText = strconv.FormatFloat(100*unavailableShare, 'f', 1, 64) + "%"
+		}
+	}
 	switch {
-	case fleet != nil && settings.MinUnavailableFetches <= fleet.unavailable:
+	case fleet != nil && settings.MinUnavailableFetches <= fleet.unavailable && settings.UnavailableShare <= unavailableShare:
 		f := newFinding("egress-destination-pool-unavailable", 2)
 		f.pageSustain = settings.UnavailablePageSustain
-		share := "unknown"
-		if total := fleet.served + fleet.unavailable; 0 < total {
-			share = strconv.FormatFloat(100*fleet.unavailable/total, 'f', 1, 64) + "%"
-		}
-		f.symptom = fmt.Sprintf("%.0f URL and probe passes got no destination pool over %s, %s of the passes that fetched one", fleet.unavailable, window, share)
-		f.mechanism = "Every pass starts by fetching the destination pool from the api route or the in-process operator. There is no built-in table: a pass without a pool measures no URL, so while the route answers 500 or serves a pool the prober refuses, the shards measure nothing and every provider's URL evidence ages out of the eight-hour window, emptying the Quality and Speed buckets."
-		f.baseline = fmt.Sprintf("Fewer than %.0f unavailable pool fetches over %s; every pass loads the served pool.", settings.MinUnavailableFetches, window)
-		f.observed = fleetText + " unavailable_share=" + share
+		f.symptom = fmt.Sprintf("%.0f URL and probe passes got no destination pool over %s, %s of the passes that fetched one", fleet.unavailable, window, shareText)
+		f.mechanism = "Every pass starts by fetching the destination pool from the api route or the in-process operator. There is no built-in table: a pass without a pool measures no URL, so while the route answers 500 or serves a pool the prober refuses, most passes measure nothing, and if it lasts every provider's URL evidence ages out of the eight-hour window, emptying the Quality and Speed buckets."
+		f.baseline = fmt.Sprintf("Under %.0f%% of the pool fetches over %s fail (a window without a served fetch fails all of them), or fewer than %.0f do. Transient failures, or one api or alt instance of several failing, leave most passes measuring: the egress probes dashboard shows them, and this alert does not.", 100*settings.UnavailableShare, window, settings.MinUnavailableFetches)
+		f.observed = fmt.Sprintf("%s unavailable_share=%s threshold_share=%.0f%% min_unavailable_fetches=%.0f", fleetText, shareText, 100*settings.UnavailableShare, settings.MinUnavailableFetches)
 		f.evidence = "The Taskworker urnetwork_egress_probe_pool_fetches_total increases by result (server, unavailable; builtin from a Taskworker built before the rename), summed over the env's Taskworker slots through one loopback Mimir read."
 		f.context = "A whole-catalog parse failure in qualityprobe.yml (a destination or candidate the prober cannot run), a database failure under the pool route, or an api or alt build that refuses a pool for an overlap all produce this. A colliding country site alone never does on a build that carries §2.19h's fail-small pool."
 		f.action = "Read the api's and alt's [pegd] \"could not build the egress destination pool\" lines and the taskworker's \"URL probe destination catalog\" pass errors for the cause. Repair qualityprobe.yml through the ordinary configuration release if it no longer parses; do not substitute a hand-made pool."
-		f.verify = "Unavailable fetches fall under the threshold for a window, served fetches advance, and URL outcomes resume in §2.19f."
+		f.verify = "The unavailable share of a window's fetches falls under the threshold, served fetches advance, and URL outcomes resume in §2.19f."
 		findings = append(findings, f)
 	case fleet != nil && fleet.complete:
 		findings = append(findings, healthyFinding(egressDestinationPoolProbeId, tierWarn, "egress-destination-pool-unavailable", target))

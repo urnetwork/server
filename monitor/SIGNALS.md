@@ -21938,9 +21938,14 @@ Classes (all WARN, target `<env>/egress-destination-pool`; only entry names,
 country codes, reasons and counts are rendered, never a URL or website):
 
 - `egress-destination-pool-unavailable` (sustain 2, PAGE after six failing
-  cadences): at least two unavailable pool fetches over the window, with the
-  unavailable share of fetches. One failed fetch is a blip; a pool the server
-  cannot serve fails every shard's every pass;
+  cadences): half or more of the window's pool fetches unavailable (every
+  window without a served fetch qualifies), and at least two of them. Every
+  pass fetches the pool and each shard chains its passes back to back, so a
+  window holds a few hundred fetches: a pool the server cannot serve fails
+  nearly all of them, while transient failures, or one api or alt instance
+  of several failing, leave most passes measuring. A share under half is
+  read on the egress probes dashboard's destination pool fetches panel and
+  never warns or pages; three failed fetches of 243 resolve healthy;
 - `egress-destination-catalog-refused` (sustain 1): the configured catalog
   refuses entries (`candidate_name`, `country_conflict`, `country_invalid`),
   or the fleet counted serve or refresh refusals over the window. A serve or

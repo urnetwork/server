@@ -199,6 +199,103 @@ func TestEgressDestinationPoolUnavailableFetchesAlert(t *testing.T) {
 	}
 }
 
+// The unavailable alert of each cadence over ticks consecutive cadences, as
+// the scheduler's cadence gate releases it: the sustain holds the first one,
+// and the page sustain promotes a lasting one to PAGE.
+func (self *egressDestinationPoolFixture) gated(t *testing.T, ticks int) []Alerts {
+	t.Helper()
+	signal := &signalAdapter{
+		number: "2.19h", key: "egress-destination-pool", name: "Destination pool availability and catalog refusals",
+		probe: self.probe(),
+	}
+	gate := newCadenceAlertGate()
+	released := []Alerts{}
+	for range ticks {
+		alerts, err := signal.Run(context.Background(), self.settings(t))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unavailable := Alerts{}
+		for _, alert := range alerts {
+			if alert.Class == "egress-destination-pool-unavailable" {
+				unavailable = append(unavailable, alert)
+			}
+		}
+		released = append(released, gate.filter(signal, unavailable))
+	}
+	return released
+}
+
+// Every pass fetches the pool, so a window holds a few hundred fetches: three
+// failed of 243 (1.2%) is transient, and over hours of cadences it neither
+// warns nor pages, and the class resolves healthy.
+func TestEgressDestinationPoolTransientFailuresNeitherWarnNorPage(t *testing.T) {
+	fixture := healthyEgressDestinationPoolFixture()
+	fixture.fetches = map[string]float64{"server": 240, "unavailable": 3}
+	for tick, released := range fixture.gated(t, 12) {
+		if 0 < len(released) {
+			t.Fatalf("cadence %d released %+v for 3 of 243 fetches failing", tick+1, released)
+		}
+	}
+	if !fixture.healthy(t)["egress-destination-pool-unavailable"] {
+		t.Fatal("transient failures did not resolve the class as healthy")
+	}
+}
+
+// When most fetches fail, most passes measure nothing: the alert warns from
+// its second cadence and pages from its sixth.
+func TestEgressDestinationPoolMostFetchesFailingPages(t *testing.T) {
+	fixture := healthyEgressDestinationPoolFixture()
+	fixture.fetches = map[string]float64{"server": 20, "unavailable": 220}
+	for tick, released := range fixture.gated(t, 8) {
+		cadence := tick + 1
+		want := SeverityWarn
+		switch {
+		case cadence < 2:
+			if len(released) != 0 {
+				t.Fatalf("cadence %d released %+v before the sustain", cadence, released)
+			}
+			continue
+		case 6 <= cadence:
+			want = SeverityPage
+		}
+		if len(released) != 1 || released[0].Severity != want {
+			t.Fatalf("cadence %d released %+v, want one %s", cadence, released, want)
+		}
+		if !strings.Contains(released[0].Observed, "unavailable_share=91.7%") || !strings.Contains(released[0].Observed, "threshold_share=50%") {
+			t.Fatalf("cadence %d observed %q", cadence, released[0].Observed)
+		}
+	}
+}
+
+// The alert needs half or more of the window's fetches unavailable, and at
+// least two of them.
+func TestEgressDestinationPoolUnavailableShareAndFloor(t *testing.T) {
+	for _, test := range []struct {
+		served, unavailable float64
+		alerts              bool
+	}{
+		{served: 120, unavailable: 120, alerts: true},
+		{served: 123, unavailable: 117, alerts: false},
+		{served: 0, unavailable: 2, alerts: true},
+		{served: 0, unavailable: 1, alerts: false},
+		{served: 0, unavailable: 0, alerts: false},
+	} {
+		fixture := healthyEgressDestinationPoolFixture()
+		fixture.fetches = map[string]float64{"server": test.served, "unavailable": test.unavailable}
+		alerted := false
+		for _, alert := range fixture.run(t) {
+			alerted = alerted || alert.Class == "egress-destination-pool-unavailable"
+		}
+		if alerted != test.alerts {
+			t.Errorf("served=%.0f unavailable=%.0f alerted=%t, want %t", test.served, test.unavailable, alerted, test.alerts)
+		}
+		if !test.alerts && !fixture.healthy(t)["egress-destination-pool-unavailable"] {
+			t.Errorf("served=%.0f unavailable=%.0f did not resolve as healthy", test.served, test.unavailable)
+		}
+	}
+}
+
 // The catalog's own refusals alert by entry name, country code and reason,
 // never by URL or website.
 func TestEgressDestinationPoolCatalogRefusalsAlert(t *testing.T) {
