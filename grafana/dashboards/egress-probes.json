@@ -7524,7 +7524,7 @@
       "id": 151,
       "type": "timeseries",
       "title": "unresolved TLS findings by verdict",
-      "description": "Unresolved exact-URL TLS findings by the TLS judge's verdict, from the freshest fleet snapshot. pending: not judged yet, excludes nobody. provider: specific to its provider, which is hard-excluded. site: a site or prober fault (the URL failed a direct check from the server, or providers on 16 or more networks failed it within the hour). place: the site does not work from the provider's country. retired: the pool no longer serves the URL. Only provider excludes, and only pending and provider are rechecked.",
+      "description": "Unresolved exact-URL TLS findings by the TLS judge's verdict after its newest judged run: the judge runs every five minutes on one taskworker at a time, so each point is the taskworker process whose last-judged timestamp is newest, and the chart goes blank once no run has judged for 15 minutes. pending: not judged yet, excludes nobody. provider: specific to its provider, which is hard-excluded. site: a site or prober fault (the URL failed a direct check from the server, or providers on 16 or more networks failed it within the hour). place: the site does not work from the provider's country. retired: the pool has not served the URL for a whole refresh interval (a day); pending again once it is served. Only provider excludes, and only pending and provider are rechecked. undecided: the pending findings that run left undecided although their failure is inside the one-hour direct window, because the server's direct check of their host was inconclusive. Monitor signal §2.31 raises egress-tls-judge-stale when no run has judged for 20 minutes and egress-tls-findings-undecided when undecided stays above zero for half an hour.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -7556,8 +7556,13 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "max by (verdict) (urnetwork_egress_probe_fleet_tls_findings{env=\"$env\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_probe_fleet_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "expr": "max by (verdict) (urnetwork_egress_tls_findings{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
           "legendFormat": "{{verdict}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max(urnetwork_egress_tls_undecided_findings{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_egress_tls_judge_last_judged_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "legendFormat": "undecided"
         }
       ]
     },
@@ -7565,7 +7570,7 @@
       "id": 152,
       "type": "timeseries",
       "title": "TLS judge: verdicts moved, direct checks and runs / hour",
-      "description": "Findings the TLS judge moved to each verdict, its direct server-side TLS checks of recent findings' hosts by outcome (failed is a certificate the server itself cannot verify: a site or prober fault), and its runs (pool_unavailable: the served pool could not be built, so nothing was judged). A burst of site verdicts is one site's certificate, or the prober's CA bundle or clock, failing through many networks at once; the taskworker log names the destination.",
+      "description": "Findings the TLS judge moved to each verdict (pending includes retired findings whose URL is served again), its direct server-side TLS checks of recent findings' hosts by outcome (failed is a certificate the server itself cannot verify: a site or prober fault; inconclusive leaves a finding pending), and its runs (pool_unavailable: the served pool could not be built, so nothing was judged). A burst of site verdicts is one site's certificate, or the prober's CA bundle or clock, failing through many networks at once; the taskworker log names the destination. A judge that has stopped shows no judged runs at all, and every new finding stays pending meanwhile.",
       "gridPos": {
         "h": 8,
         "w": 12,

@@ -3,7 +3,9 @@
 // time to it, and only a finding judged the provider's own excludes the
 // provider. A site or prober fault, a place where the site does not work, and
 // a URL the pool has not served for a day are recorded as such and exclude
-// nothing.
+// nothing. A finding stays pending, excluding nothing, until a run judges it,
+// so each judged run exports what it left behind and when it ran, and SIGNALS.md
+// §2.31 alerts when no run has judged for a while or a finding stays undecided.
 package work
 
 import (
@@ -78,6 +80,31 @@ var providerEgressTlsVerdictsTotal = prometheus.NewCounterVec(prometheus.Counter
 	Help:      "TLS findings the judge moved to each verdict: pending (including a retired finding whose URL is served again), provider (excludes the provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the pool has not served the URL for a day)",
 }, []string{"verdict"})
 
+// What the newest judged run on this process left behind. The judge runs on
+// one Taskworker at a time, so the fleet's view is the process whose
+// last-judged timestamp is newest; the others keep what their own last run
+// set.
+var providerEgressTlsFindings = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_tls",
+	Name:      "findings",
+	Help:      "Unresolved exact-URL TLS findings by verdict after this process's newest judged run (urnetwork_egress_tls_judge_last_judged_timestamp_seconds): pending (not judged yet, excludes nobody), provider (excludes its provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the pool has not served the URL for a day)",
+}, []string{"verdict"})
+
+var providerEgressTlsUndecidedFindings = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_tls",
+	Name:      "undecided_findings",
+	Help:      "Pending TLS findings this process's newest judged run left undecided although their failure is inside the one-hour direct window, so a direct check could still decide them: the check of their host was inconclusive or not made. They exclude nobody until decided",
+})
+
+var providerEgressTlsJudgeLastJudgedTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_tls",
+	Name:      "judge_last_judged_timestamp_seconds",
+	Help:      "Unix time of this process's newest TLS judge run that judged, 0 until one has. The fleet's newest judged run is the maximum over Taskworker processes; the findings and undecided gauges are that process's",
+})
+
 func init() {
 	for _, result := range []string{"judged", "pool_unavailable"} {
 		providerEgressTlsJudgeRunsTotal.WithLabelValues(result)
@@ -89,11 +116,15 @@ func init() {
 	}
 	for _, verdict := range model.ProviderEgressTlsVerdicts {
 		providerEgressTlsVerdictsTotal.WithLabelValues(verdict.String())
+		providerEgressTlsFindings.WithLabelValues(verdict.String())
 	}
 	prometheus.MustRegister(
 		providerEgressTlsJudgeRunsTotal,
 		providerEgressTlsDirectChecksTotal,
 		providerEgressTlsVerdictsTotal,
+		providerEgressTlsFindings,
+		providerEgressTlsUndecidedFindings,
+		providerEgressTlsJudgeLastJudgedTimestamp,
 	)
 }
 
@@ -111,6 +142,8 @@ type JudgeProviderEgressTlsFindingsResult struct {
 	Findings int            `json:"findings"`
 	Changed  int            `json:"changed"`
 	Verdicts map[string]int `json:"verdicts,omitempty"`
+	// pending findings left undecided inside the direct window
+	Undecided int `json:"undecided"`
 	// the clock the next run carries; a skipped run carries its own on
 	UnservedSince map[string]time.Time `json:"unserved_since,omitempty"`
 }
@@ -316,9 +349,10 @@ func checkProviderEgressTlsHosts(
 
 // One run: read the findings, check the hosts of those it judges on evidence
 // that are recent enough to judge, judge each finding, store the changed
-// verdicts, and report. An unavailable pool changes nothing and carries the
-// clock on unchanged: retiring every finding because the pool could not be
-// built would be a guess, and so would keeping a stale served set.
+// verdicts, export what the run left behind, and report. An unavailable pool
+// changes nothing and carries the clock on unchanged: retiring every finding
+// because the pool could not be built would be a guess, and so would keeping
+// a stale served set.
 func judgeProviderEgressTlsFindings(
 	ctx context.Context,
 	now time.Time,
@@ -365,6 +399,9 @@ func judgeProviderEgressTlsFindings(
 			verdict = judgement.Finding.Verdict
 		}
 		result.Verdicts[verdict.String()] += 1
+		if verdict == model.ProviderEgressTlsVerdictPending && settings.DirectCheckJudges(now, judgement.Finding) {
+			result.Undecided += 1
+		}
 	}
 	// A stored judgement that kept its verdict only recorded that it decided
 	// a newer failure; the counts and the log are of verdicts that moved.
@@ -376,10 +413,15 @@ func judgeProviderEgressTlsFindings(
 		}
 	}
 	logProviderEgressTlsJudgements(moved)
+	for _, verdict := range model.ProviderEgressTlsVerdicts {
+		providerEgressTlsFindings.WithLabelValues(verdict.String()).Set(float64(result.Verdicts[verdict.String()]))
+	}
+	providerEgressTlsUndecidedFindings.Set(float64(result.Undecided))
+	providerEgressTlsJudgeLastJudgedTimestamp.Set(float64(now.UnixMilli()) / 1000)
 	providerEgressTlsJudgeRunsTotal.WithLabelValues("judged").Inc()
 	glog.Infof(
-		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d unserved_names=%d verdicts=%s\n",
-		result.Findings, result.Changed, len(direct), len(result.UnservedSince), providerEgressTlsVerdictSummary(result.Verdicts),
+		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d undecided=%d unserved_names=%d verdicts=%s\n",
+		result.Findings, result.Changed, len(direct), result.Undecided, len(result.UnservedSince), providerEgressTlsVerdictSummary(result.Verdicts),
 	)
 	return result, nil
 }

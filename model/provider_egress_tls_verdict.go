@@ -300,25 +300,6 @@ func GetProviderEgressTlsFindings(ctx context.Context, limit int) []*ProviderEgr
 	return findings
 }
 
-// Counts the unresolved findings by verdict, for the fleet gauge.
-func GetProviderEgressTlsFindingCounts(ctx context.Context) map[ProviderEgressTlsVerdict]int {
-	counts := map[ProviderEgressTlsVerdict]int{}
-	server.Db(ctx, func(conn server.PgConn) {
-		rows, err := conn.Query(ctx, `
-			SELECT tls_verdict, COUNT(*) FROM provider_egress_url_security
-			WHERE tls_failure GROUP BY tls_verdict`)
-		server.WithPgResult(rows, err, func() {
-			for rows.Next() {
-				var verdict int16
-				var count int
-				server.Raise(rows.Scan(&verdict, &count))
-				counts[ProviderEgressTlsVerdict(verdict)] = count
-			}
-		})
-	})
-	return counts
-}
-
 // The most destination names one run's pool clock tracks. The names are the
 // catalog's, about a hundred and fifty; past the bound, names in order start
 // no clock, which delays their retirement and never hastens it.

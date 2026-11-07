@@ -125,9 +125,10 @@ func TestProviderEgressTlsDirectCheckDialsOnlyPublicAddresses(t *testing.T) {
 
 // With no served pool the judge changes nothing: retiring every finding, or
 // keeping a stale served set, would both be guesses. It reads no finding,
-// and carries the clock on as it was.
+// carries the clock on as it was, and is no judged run.
 func TestProviderEgressTlsJudgeWithoutAPoolChangesNothing(t *testing.T) {
 	before := testutil.ToFloat64(providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable"))
+	lastJudged := testutil.ToFloat64(providerEgressTlsJudgeLastJudgedTimestamp)
 	leftAt := time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC)
 	args := &JudgeProviderEgressTlsFindingsArgs{UnservedSince: map[string]time.Time{"left-site": leftAt}}
 	result, err := judgeProviderEgressTlsFindings(context.Background(), time.Now(), args, &providerEgressTlsJudgeSources{
@@ -149,6 +150,9 @@ func TestProviderEgressTlsJudgeWithoutAPoolChangesNothing(t *testing.T) {
 	}
 	if after := testutil.ToFloat64(providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable")); after != before+1 {
 		t.Fatalf("pool_unavailable runs %v -> %v", before, after)
+	}
+	if after := testutil.ToFloat64(providerEgressTlsJudgeLastJudgedTimestamp); after != lastJudged {
+		t.Fatalf("a run without a pool moved the last judged run %v -> %v", lastJudged, after)
 	}
 }
 
