@@ -31,7 +31,20 @@
   "worker_image_archive_sha256": "9b6ba8da22c58e0a0a4cf02464f7cbbc8f832af474ff84b107dddaad29f8d715",
   "observed_goofe_image_oci_id": "sha256:e8c6bbd31b613ab71a0efad1e385ffd9fca617fb42579c31393cdd1020298383",
   "archive_config_digest": "sha256:63b43292a6b0a77eb28055b7abe756608cc776c163bfa825c8dd09a6d7eb1bfe",
-  "actual_sille_loaded_image_id": null,
+  "actual_sille_loaded_image_id": "sha256:63b43292a6b0a77eb28055b7abe756608cc776c163bfa825c8dd09a6d7eb1bfe",
+  "sille_load_observation": {
+    "date": "2026-11-07",
+    "archive_bytes": 53746688,
+    "archive_sha256_reverified_before_load": true,
+    "platform": "linux/amd64",
+    "entrypoint": ["/competitionworker"],
+    "user": "65532:65532",
+    "goofe_oci_manifest_id_not_present_as_sille_image_id": true,
+    "container_executed": false,
+    "worker_activated": false,
+    "recovery_grant_issued": false,
+    "scope": "Actual local Docker load and inspect only. Not native-byte extraction, API compatibility, runtime acceptance or seventh-job authorization."
+  },
   "preserved_earlier_packaging_failures": true,
   "activation_requirements": [
     "Verify the new operator-interruption migration and main API deployment.",
