@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "kind": "competition-frozen-overlay-compile-observation/v1",
+  "recorded_at": "2026-11-07T02:18:00Z",
+  "status": "compile-only passed; overlay remains unapproved",
+  "frozen_product_graph_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+  "frozen_server_commit": "a9e8e1a710b24c749e6499a0606938252c83e136",
+  "overlay_sha256": "ff9aae5710c8ce3daadf0d714b74c8eab3d6e17a149abbddc863536c3e5b89ce",
+  "overlay_bytes": 585265,
+  "overlay_paths": 35,
+  "preparation_manifest_sha256": "c7850fb08ebb73618ee80ac4436774d5c324e1ffc6e940c1f69b7ffdbaa0d35b",
+  "receipt_path": "/tmp/evalres-fixture.CFBCjw/g2g7-compile-unapproved/compile-only-receipt.UNAPPROVED.json",
+  "receipt_sha256": "3003dcf60e19a2e6f42397b8bebb9417ed1bacdfc1da52052c24b5d8b201a48d",
+  "go_version": "go1.27.3",
+  "cgo_enabled": false,
+  "go_experiment": "greenteagc",
+  "platform": "linux/amd64",
+  "offline_compile": true,
+  "compile_phases": [
+    {"package": ".", "command": "go test -c", "exit_status": 0, "duration": "4m07.853s"},
+    {"package": "./connect", "command": "go test -c", "exit_status": 0, "duration": "2m22.446s"},
+    {"package": "./model", "command": "go test -c", "exit_status": 0, "duration": "2m50.465s"},
+    {"package": "./connect/sim-latency", "command": "go test -c", "exit_status": 0, "duration": "1m48.559s"},
+    {"package": "./connect/sim-latency", "command": "go build", "exit_status": 0, "duration": "1m43.424s"}
+  ],
+  "native_binary_sha256": "1eb3bfdad9f3aca94c3e6fecd081eb715f1b304bc800abe63167e59952ecf139",
+  "artifact_policy": "All five artifacts mode 0400 and never executed; source and artifacts mounted noexec during compilation.",
+  "source_integrity": "All ten frozen references, source bytes, Git modes, file censuses, 35 overlay pre/postimages, tool identity and 20 module-file hashes verified before/after. Earlier staging/cache failures retained in the receipt; no source-code fix or dependency version substitution.",
+  "authority_scope": "Compilation only. Zero product test, init, TestMain, vet, native runtime, provider, database, Docker or measurement execution. This is not correctness, full SourceGraph/full-checkout, runtime, host-admission, instrument approval, control-release qualification or deployment evidence. Later protected-helper and clock successors require separate qualification. Epoch-one runtime and inputs remain unchanged."
+}

@@ -17,6 +17,15 @@ import (
 
 const forceCloseDisputeInitialBalance = ByteCount(4 * 1024 * 1024 * 1024)
 
+// Admission selects the payer's balance on this process's clock, then rechecks
+// it against the database clock before it publishes the contract
+// (redisGrantSelectedCurrent). The local database runs in a VM whose clock can
+// trail the host's under load, and a balance that started at the host's now
+// was then not yet current there. Like the package's other admission fixtures,
+// the balance starts well before the host time it is anchored to; an hour
+// leaves ample room for that skew.
+const forceCloseDisputeBalanceClockMargin = time.Hour
+
 // Generated identities and fixed synthetic age keep each case independent of scheduling.
 type forceCloseDisputeFixture struct {
 	contractId           server.Id
@@ -78,20 +87,22 @@ func newLegacyForceCloseDisputeFixture(t testing.TB, ctx context.Context, source
 // the sweep to create a real disagreement from checkpoints uses exact reports.
 func newExactForceCloseDisputeFixture(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
 	sourceByteCount, destinationByteCount, escrowByteCount ByteCount) *forceCloseDisputeFixture {
-	return newForceCloseDisputeFixtureWithReports(t, ctx, sourceCheckpoint, destinationCheckpoint,
+	return newForceCloseDisputeFixtureWithReports(t, ctx, server.NowUtc(), sourceCheckpoint, destinationCheckpoint,
 		sourceByteCount, destinationByteCount, escrowByteCount, false, true)
 }
 
 // Both modes use the actual transaction owners, close reports and expiry sweep.
 func newForceCloseDisputeFixtureWithAdmission(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
 	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool) *forceCloseDisputeFixture {
-	return newForceCloseDisputeFixtureWithReports(t, ctx, sourceCheckpoint, destinationCheckpoint,
+	return newForceCloseDisputeFixtureWithReports(t, ctx, server.NowUtc(), sourceCheckpoint, destinationCheckpoint,
 		sourceByteCount, destinationByteCount, escrowByteCount, legacy, false)
 }
 
 // Id-less reports use the legacy CloseContract entry point; exact reports use
-// CloseContractReport with a fresh report identity.
-func newForceCloseDisputeFixtureWithReports(t testing.TB, ctx context.Context, sourceCheckpoint, destinationCheckpoint bool,
+// CloseContractReport with a fresh report identity. hostNow is the host time
+// the payer's balance is anchored to, so a test can run it ahead of the clocks
+// that judge the balance.
+func newForceCloseDisputeFixtureWithReports(t testing.TB, ctx context.Context, hostNow time.Time, sourceCheckpoint, destinationCheckpoint bool,
 	sourceByteCount, destinationByteCount, escrowByteCount ByteCount, legacy bool, exact bool) *forceCloseDisputeFixture {
 	t.Helper()
 	payerNetworkId := server.NewId()
@@ -105,7 +116,7 @@ func newForceCloseDisputeFixtureWithReports(t testing.TB, ctx context.Context, s
 		destinationId: providerNetworkId,
 	})
 	AddBasicTransferBalance(ctx, payerNetworkId, forceCloseDisputeInitialBalance,
-		server.NowUtc(), server.NowUtc().Add(24*time.Hour))
+		hostNow.Add(-forceCloseDisputeBalanceClockMargin), hostNow.Add(24*time.Hour))
 	balances := GetActiveTransferBalances(ctx, payerNetworkId)
 	connect.AssertEqual(t, 1, len(balances))
 	var contractId server.Id
@@ -244,6 +255,32 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 	return state
 }
 
+// The database clock trailed the host's when both sweep tests failed: the
+// payer's balance started at the host's now, so admission's recheck against
+// the database clock found it not yet current, and the fixture could not
+// reserve. Anchoring the balance a minute ahead of both clocks that judge it,
+// this process's and the database's, reproduces that order on any machine
+// whatever the actual skew. The fixture must still reserve an open contract.
+func TestForceCloseDisputeFixtureReservesWhenHostTimeLeadsDatabase(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		var databaseNow time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT clock_timestamp() AT TIME ZONE 'UTC'`).Scan(&databaseNow))
+		})
+		hostNow := server.MaxTime(server.NowUtc(), databaseNow).Add(time.Minute)
+		for _, exact := range []bool{false, true} {
+			fixture := newForceCloseDisputeFixtureWithReports(t, ctx, hostNow, true, true, 1024, 1024, ByteCount(32*1024*1024), false, exact)
+			state := fixture.state(t, ctx)
+			if !state.open || state.dispute || state.outcome != "" || !state.streamFound || !state.redisReserved {
+				t.Fatalf("exact=%t: fixture anchored ahead of the database clock did not reserve an open contract: %+v", exact, state)
+			}
+		}
+	})
+}
+
 // Both orientations and both-checkpoint pairs finalize in one bounded sweep.
 // Redis-backed debt remains reserved until its durable debit worker commits;
 // repeats before and after that boundary must not duplicate accounting.
@@ -285,7 +322,7 @@ func TestForceCloseCheckpointDisputeConvergesInOneSweep(t *testing.T) {
 			}
 			for _, orientation := range orientations {
 				for _, usage := range usages {
-					fixture := newForceCloseDisputeFixtureWithReports(t, ctx,
+					fixture := newForceCloseDisputeFixtureWithReports(t, ctx, server.NowUtc(),
 						orientation.sourceCheckpoint, orientation.destinationCheckpoint,
 						usage.source, usage.destination, escrow, false, exact)
 					state := fixture.state(t, ctx)
