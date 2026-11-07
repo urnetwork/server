@@ -209,8 +209,8 @@ func (self PostgresStore) SourceReviewPacket(ctx context.Context, settings *Sett
 	if err != nil {
 		return nil, err
 	}
-	var archivedScore model.CompetitionScoreResult
-	if err := json.Unmarshal(packet.Score, &archivedScore); err != nil {
+	archivedScore, err := model.ProjectCompetitionScorerDocument(packet.Score)
+	if err != nil {
 		return nil, errors.New("archived review score is malformed")
 	}
 	actualScoreDigest, actualErr := model.CompetitionAutomationDigest(archivedScore)

@@ -34,6 +34,15 @@ type competitionReviewVersionedFixture struct {
 	server.RetainedBlobStore
 }
 
+// A successful export must not substitute the latest score for its version.
+func (self competitionReviewVersionedFixture) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	if key == "synthetic/score.json" {
+		return nil, errors.New("synthetic score requires an exact version")
+	}
+	return self.RetainedBlobStore.Get(ctx, key)
+}
+
+// Only the declared version can resolve the fixture's immutable score bytes.
 func (self competitionReviewVersionedFixture) GetVersion(ctx context.Context, key, version string) (io.ReadCloser, error) {
 	if version != "synthetic-version" {
 		return nil, errors.New("unexpected synthetic object version")
@@ -43,6 +52,7 @@ func (self competitionReviewVersionedFixture) GetVersion(ctx context.Context, ke
 
 // A reviewer can inspect evidence before approving anything. Archived bytes,
 // scope and seal identities remain mandatory even though approval is absent.
+// The scorer omits the eligibility flag that the worker projects from diagnostics.
 func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -66,7 +76,12 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 		var scoreBytes []byte
 		job := addCompetitionAutomationJobWithManifest(t, fixture, 70, func(job *queuedJob, score *ScoreResult) (json.RawMessage, error) {
 			var err error
-			scoreBytes, err = json.MarshalIndent(score, "", "  ")
+			score.Diagnostics["baseline_takeover_eligible"] = score.TakeoverEligible
+			scoreBytes, err = json.MarshalIndent(map[string]any{
+				"score_schema": score.ScoreSchema, "raw_score": score.RawScore, "normalized_score": score.NormalizedScore,
+				"placeable": score.Placeable, "gates": score.Gates, "significance": score.Significance,
+				"diagnostics": score.Diagnostics, "eval_error": nil,
+			}, "", "  ")
 			if err != nil {
 				return nil, err
 			}
@@ -104,6 +119,11 @@ func TestCompetitionAutomationReviewPacketBeforeApproval(t *testing.T) {
 		packet, err := fixture.store.SourceReviewPacket(ctx, fixture.settings, job.RoundId, job.JobId)
 		if err != nil || packet == nil || !bytes.Equal(packet.Score, scoreBytes) || !bytes.Equal(packet.Patch, job.Patch) {
 			t.Fatalf("pre-approval packet lost authenticated bytes: %+v, %v", packet, err)
+		}
+		var unprojected ScoreResult
+		if json.Unmarshal(scoreBytes, &unprojected) != nil || unprojected.TakeoverEligible || !packet.Entry.Score.TakeoverEligible ||
+			bytes.Contains(scoreBytes, []byte(`"takeover_eligible"`)) {
+			t.Fatal("fixture did not preserve the distinct scorer document and worker projection")
 		}
 		lock, err := model.CompetitionSourceLockDigest(packet.SourceCommits)
 		if err != nil || lock != packet.Entry.BaseSourceLockSha256 || packet.SourceCommits["server"] != packet.BaseSha || packet.ActivationGeneration != 1 {

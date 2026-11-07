@@ -239,8 +239,8 @@ func validateWinnerModelInputIdentity(request winnerReviewBrokerRequest) error {
 		}
 	}
 	if packet.Entry.Score != nil {
-		var score model.CompetitionScoreResult
-		if json.Unmarshal(packet.Score, &score) != nil {
+		score, err := model.ProjectCompetitionScorerDocument(packet.Score)
+		if err != nil {
 			return errors.New("review broker sealed score differs from its authenticated bytes")
 		}
 		actual, actualErr := model.CompetitionAutomationDigest(score)
