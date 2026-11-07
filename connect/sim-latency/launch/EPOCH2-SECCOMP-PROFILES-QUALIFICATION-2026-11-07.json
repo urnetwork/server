@@ -1,0 +1,143 @@
+{
+  "schema": 1,
+  "kind": "epoch2-prospective-seccomp-profile-source-qualification/v1",
+  "status": "prepared-offline-artifacts-qualified-not-accepted",
+  "epoch1_inputs_unchanged": true,
+  "operator_approved": false,
+  "native_runtime_qualified": false,
+  "tracked_builder_qualified": false,
+  "installed": false,
+  "source": {
+    "control_server": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "control_dependency_tuple": {
+      "sn": "a62cfef9aa26d3596192aee5718b31a7bf7b3d59",
+      "sdk": "5517f0356d68ca876b8d8087811955a08e3f262d",
+      "connect": "f1e14dda5f0003ae21e2a163661660de30c61bc1",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "proxy": "1575ad25cb8b10bd42865e630ec09f6823096e64",
+      "userwireguard": "70ecd6e7f97715718f1079cc9be9fd42a8ebe82c"
+    },
+    "official_profiles": "245180c51918481c0525424b3ee025d2b435d46c",
+    "official_source_files": 17,
+    "official_archive_sha256": "d00c83aabc52513f0604437c8b2e7595b00fa2e854e207bff31615aa2ab72cdc",
+    "official_source_map_sha256": "0ab6e8a9bfe0354a37daf25b83c4394a2e76d94b8b42b55349dc118287c06116",
+    "common_prospective_stock_selection": "Reviewed official seccomp/v0.2.4 source, not a historical deployment or daemon-default claim",
+    "moby_source_equality": {
+      "source_29_9_0": "a5b58c94d334674eae3a3207d4f05417643a90d0",
+      "source_29_9_2": "0367cbeb49b9d98cb0b4f51e95f7b54b4803e76c",
+      "scope": "Five vendored seccomp Go/JSON blobs equal the pinned profiles source; engine-version observations are not binary or historical profile-use proof"
+    },
+    "helper_source_sha256": "f556bca4cf8f8d128e15b783dc359f2a7229de980dcd6e5a4b0f32d338b52392",
+    "helper_test_sha256": "c640060e017f4ed014fad020ff1310615399198a2337d0edb1486439964c77fc",
+    "actual_artifact_probe_sha256": "9722ddf4f53611aa7fc04f35a6a5f5763a3177b9e37a557875a61e98474cb663",
+    "plan_sha256": "972c6e906da592d98db8ef2324008c05d9f61dc73d8f6ae823194c61c8beb7a6"
+  },
+  "offline_execution": {
+    "host": "Goofe only",
+    "go": "go1.27.3 linux/amd64",
+    "cgo": 0,
+    "goexperiment": "greenteagc",
+    "goflags": "-mod=readonly -p=2",
+    "private_network": true,
+    "no_real_data_configuration_credentials": true,
+    "existing_controls": 14,
+    "producer_controls": 2,
+    "actual_artifact_controls": 1,
+    "failed_tests": 0,
+    "skipped_tests": 0,
+    "controls_catalog_sha256": "b3a678d43e49b21ac5dd0d6f1e2dfa6c692634713e361155c9c910cfdd1195b4",
+    "controls_event_sha256": "35702972c4f8bffe199517823cd4dc3c0abc2f14caae67ec8643c997239ec824",
+    "producer_event_sha256": "3b0893a81151ed77160604e3f46dde42b2a5e9a063ae189c745dc92c760a251d",
+    "actual_artifact_event_sha256": "473c3ae96efc47dbc5185b696622d5a0a0ad942403cfbeefb81d0542d21423fa",
+    "source_and_module_custody": "Exact control source map, immutable 17-file official reference and working-source maps; native official module verification before generation and in the separately retained post-hoc audit",
+    "cleanup": {
+      "all_owned_units_collected": true,
+      "all_five_v2_exact_cgroup_paths_absent": true,
+      "original_failed_fixture_unchanged": true
+    }
+  },
+  "official_reproduction": {
+    "command": "go generate -x .",
+    "module": "Pinned official profiles seccomp module",
+    "actual_directive": "go run -tags 'seccomp' generate.go",
+    "generator_executions": 1,
+    "generator_command_return_zero_inferred_from_pipefail_control_flow": true,
+    "original_generation_harness_exit": 1,
+    "original_post_verifier_ran": false,
+    "transcript_sha256": "f017dc3e766b05da34c786ee7e7e81ab2bb097a0edc1f3dca1b443d95c9bc181",
+    "failure": "Exact transcript predicate incorrectly expected unquoted seccomp; actual upstream directive retains single quotes",
+    "generator_rerun": false,
+    "separate_posthoc_audit_exit": 0,
+    "separate_posthoc_audit_log_sha256": "06fac4ee8574183eebb3d5ac2df88446e9773510d1052bb8ae8d5457b7be7c77",
+    "separate_posthoc_tools_sha256": "0216359966f2517a87895df8e8dabd372bb82e1f8e78c4fac04022976e09fdc5",
+    "closure_scope": "Actual quoted sole directive, exact stock size/hash/Git blob/reference equality, all 17 source modes/blobs/census, helper/control custody and native offline go mod verify",
+    "observed_metadata_is_not_old_process_proof": true
+  },
+  "artifacts": {
+    "stock": {
+      "bytes": 14122,
+      "sha256": "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334",
+      "git_blob": "77df9d19e844f4403e41e401aca25ab28861e317"
+    },
+    "core": {
+      "bytes": 13637,
+      "sha256": "00ee51c9862878e7eb64f1e26e22e3108a58f4c6f1adc67da55e4976aaac8392",
+      "transformation": "Exact control13c TransformCandidateCoreProfile; only resource-setter allow rules narrowed, default/architecture and nonresource rule predicates preserved"
+    },
+    "producer": {
+      "sha256": "807238249c39396a3dbe757daa5489d8034682f5189572a3ba3707a921646428",
+      "static_elf_linux_amd64": true,
+      "buildinfo_sha256": "27849ad22ad18ca9e05913e6752c967d784ccbb01d6ca9d102fe83018f9ebc7e",
+      "vcs_identity": "none; source-only command-line-arguments build, server dependency (devel)"
+    },
+    "materialization_record_sha256": "329daaffcfebd587955c201e08ffe86a3259a84b5faed06a1cae5586c8cdebc7",
+    "materialization_record_upstream_generator_execution_proved": false,
+    "exact_outputs_root_mode": "0700",
+    "exact_outputs_file_mode": "0400",
+    "output_creation": "Fresh O_EXCL files, exact protected reread and rederivation"
+  },
+  "retained_failures": [
+    {
+      "evidence_directory": "/home/by/urnetwork/temp/seccomp-producer-failed-20261107.KRpiz3",
+      "log_sha256": "90452c923f31194819f07bd6fc7c1300d093954e9b9f8f8b0e84a39da2220f52",
+      "producer_event_sha256": "6debc03d8cee58b13350a7803f7c23bc493c7d8460fccd69996c077f349cb247",
+      "failed_original_test_sha256": "373efb1670698aebf8a3304770663bf664471cc0fff30def69c5fc0bbfd16a07",
+      "result": "Fourteen existing controls passed; one producer positive failed because t.TempDir child permissions were not explicitly private",
+      "pre_custody": true,
+      "post_verifier_reached": false,
+      "original_temp_child_mode_observed": false,
+      "correction": "Owned positive fixture parent explicitly chmod0700 only; producer and 0755 rejection unchanged"
+    },
+    {
+      "evidence_directory": "/home/by/urnetwork/temp/seccomp-producer-v2-transcript-failed-20261107.Gw1rGz",
+      "log_sha256": "a9c9ab49f3c7b4559915a58f1423965abb98f3ed8c9200e033c6bfde8fc4c4cf",
+      "result": "Generator executed and exact output retained; harness transcript predicate failed",
+      "original_post_verifier_ran": false,
+      "later_closure": "Separate read-only post-hoc audit; no generator rerun and no relabeling of the original exit1"
+    }
+  ],
+  "receipt": {
+    "path": "/home/by/urnetwork/temp/seccomp-producer-qualified-20261107.0aleNX/qualification-receipt.json",
+    "sha256": "df42f3e81c9b95c0fd87de7da4303b8e005e7457d71a30b9e5fdc378440fac28",
+    "remote_fixture": "/home/by/sim-latency/fixtures/seccomp-producer-245180c-13c-v2-20261107",
+    "evidence_directory": "/home/by/urnetwork/temp/seccomp-producer-qualified-20261107.0aleNX",
+    "tools_sha256": "02314c9e22c8a3100d17acebb219c1ecda50cd0b8a8f440625e4c4d0b7a46cf2",
+    "metadata_sha256": "b5c47c0764f51f7f7144344a74cbe300b33c618f7462dfa04f9c21962b895ef5",
+    "prerequisite_cache_receipt_path": "/home/by/urnetwork/temp/seccomp-cache-xsys033-qualified-20261107.XTOzHC/cache-receipt.json",
+    "prerequisite_cache_receipt_sha256": "638637524cd01437b819d8d3f3f01f1be3f52872802f325e4f2c47c8a08c1cea"
+  },
+  "pending_authority": [
+    "Exact13c host competitionpatch ELF, raw-lock-aware loader/writer/preparer and tracked-builder identity artifacts",
+    "Root-owned tracked helper/profile binding and independent native Docker/kernel/containment qualification",
+    "Explicit operator instrument/source approval, final product choice, image publication and runtime activation",
+    "Actual fresh epoch2 host admission and immutable R9 baseline at the approved boundary"
+  ],
+  "limitations": [
+    "Offline reproduction, static/interpreted policy controls and derivative bytes only; not native seccomp loading, syscall ABI, core/crash, Docker or runtime containment proof",
+    "No historical generation lineage is established; no moving daemon default was used",
+    "No full-suite, latest-main, API, fleet, performance, workload or model/provider qualification is claimed",
+    "Frozen-product a131 mandatory70 and this control13c artifact graph remain separate proofs"
+  ]
+}
