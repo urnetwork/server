@@ -7509,7 +7509,7 @@
       ]
     },
     {
-      "id": 149,
+      "id": 150,
       "type": "row",
       "title": "tls findings: judged verdicts, direct checks, judge runs",
       "collapsed": false,
@@ -7521,7 +7521,7 @@
       }
     },
     {
-      "id": 150,
+      "id": 151,
       "type": "timeseries",
       "title": "unresolved TLS findings by verdict",
       "description": "Unresolved exact-URL TLS findings by the TLS judge's verdict, from the freshest fleet snapshot. pending: not judged yet, excludes nobody. provider: specific to its provider, which is hard-excluded. site: a site or prober fault (the URL failed a direct check from the server, or providers on 16 or more networks failed it within the hour). place: the site does not work from the provider's country. retired: the pool no longer serves the URL. Only provider excludes, and only pending and provider are rechecked.",
@@ -7562,9 +7562,9 @@
       ]
     },
     {
-      "id": 151,
+      "id": 152,
       "type": "timeseries",
-      "title": "TLS judge: verdicts stored, direct checks and runs / hour",
+      "title": "TLS judge: verdicts moved, direct checks and runs / hour",
       "description": "Findings the TLS judge moved to each verdict, its direct server-side TLS checks of recent findings' hosts by outcome (failed is a certificate the server itself cannot verify: a site or prober fault), and its runs (pool_unavailable: the served pool could not be built, so nothing was judged). A burst of site verdicts is one site's certificate, or the prober's CA bundle or clock, failing through many networks at once; the taskworker log names the destination.",
       "gridPos": {
         "h": 8,
