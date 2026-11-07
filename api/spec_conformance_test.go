@@ -769,20 +769,20 @@ func TestSpecRoutesImplemented(t *testing.T) {
 		len(specKeys), len(implKeys), len(missing), len(undocumented))
 }
 
-// gkmRoute reports whether a "METHOD path" key is gkm's. bringyour.yml
-// documents gkm's routes, but server/cli/gkm serves them on gkm's own host from
-// sidecar's gkmservice, never api, so connect/api/check-routes.sh holds them to
-// gkmservice's route table, as this file holds the rest to Routes().
+// Whether a "METHOD path" key is gkm's. bringyour.yml documents gkm's routes,
+// but server/cli/gkm serves them on gkm's own host from sidecar's gkmservice,
+// never api, so connect/api/check-routes.sh holds them to gkmservice's route
+// table, as this file holds the rest to Routes().
 func gkmRoute(key string) bool {
 	_, path, _ := strings.Cut(key, " ")
 	return strings.HasPrefix(path, "/gkm/")
 }
 
-// unimplementedOperations returns, sorted, the "METHOD path" keys of the spec
-// operations Routes() lacks, and apart from them those it lacks that the spec
-// marks `x-status: planned`: a route a later change lands, logged rather than
-// failed so the spec can lead the implementation by one deploy. A gkm
-// operation is in neither, planned or not, since api never serves one.
+// The "METHOD path" keys, sorted, of the spec operations Routes() lacks, and
+// apart from them those it lacks that the spec marks `x-status: planned`: a
+// route a later change lands, logged rather than failed so the spec can lead
+// the implementation by one deploy. A gkm operation is in neither, planned or
+// not, since api never serves one.
 func unimplementedOperations(paths map[string]any, implKeys map[string]bool) (missing []string, planned []string) {
 	for path, methodsAny := range paths {
 		for method, operation := range asMap(methodsAny) {
@@ -807,8 +807,8 @@ func unimplementedOperations(paths map[string]any, implKeys map[string]bool) (mi
 	return missing, planned
 }
 
-// apiGkmRoutes returns, sorted, the gkm routes Routes() serves, each of them
-// drift whatever the spec says.
+// The gkm routes Routes() serves, sorted, each of them drift whatever the spec
+// says.
 func apiGkmRoutes(implKeys map[string]bool) []string {
 	var gkmKeys []string
 	for key := range implKeys {
