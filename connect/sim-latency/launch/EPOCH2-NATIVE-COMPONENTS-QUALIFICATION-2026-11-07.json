@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "kind": "epoch2-intermediate-native-collector-component-tests/v1",
+  "status": "synthetic-component-tests-passed",
+  "source": {
+    "commit": "13b208b5a67a9fda1b718b8acaca39bdcca27e21",
+    "parent": "85f5c5d118b3331b9bd7b2930056b6f35a65d70d",
+    "base": "13c2345e79329c85c30bee5823a362f6fbee1d60",
+    "selected_source_files": 7245,
+    "source_map_sha256": "d546ac58e64bb2fcd60ef56a1dfa84f76465a46b69094957d3b5e6d696b5d31a",
+    "catalog_sha256": "a99f7e3d2fb3e215b910d64f31529902127f8120e2c1c96b0c9cac30b3316fd8"
+  },
+  "receipt": {
+    "path": "/home/by/urnetwork/temp/competition-native-collector-20261107.yhBY8FZ6/slice13b-qualified-goofe-20261107/qualification-receipt.json",
+    "sha256": "f043ac405e3b95935c6e23802e4df5438e58a526d122bb13fecc1ddcbd0de88b"
+  },
+  "ordinary": {"passed": 42, "failed": 0, "skipped": 0},
+  "race": {"passed": 42, "failed": 0, "skipped": 0, "race_findings": 0},
+  "regression_controls": [
+    {"test": "TestNativeQualificationOwnerTrialDeadlineDispatchesBeforeTotalDeadline", "controlled_reversion_exit": 1, "named_assertion_verified": true},
+    {"test": "TestNativeQualificationKernelReleaseEnforcesAggregateAndCancellation", "controlled_reversion_exit": 1, "named_assertion_verified": true}
+  ],
+  "custody": {
+    "source_and_dependencies_verified_before_after_each_phase": true,
+    "native_module_verification_before_after_each_phase": true,
+    "exact_catalog_run_pass_match": true,
+    "original_logs_and_controlled_reversions_retained": true,
+    "owned_units_and_cgroups_gone": true
+  },
+  "limits": {
+    "synthetic_injected_private_files_only": true,
+    "actual_native_trials": false,
+    "complete_twelve_trial_collector": false,
+    "source_approved": false,
+    "runtime_qualified": false,
+    "installed": false,
+    "production_scoring_changed": false
+  }
+}
