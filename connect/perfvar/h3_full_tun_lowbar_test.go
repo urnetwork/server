@@ -824,6 +824,9 @@ func subtractH3FullTunReceive(
 		}
 	}
 	return clientconnect.ClientReceiveStatsSnapshot{
+		ReceiveDecodeReservedByteCount:         end.ReceiveDecodeReservedByteCount,
+		ReceiveDecodePressureDropCount:         end.ReceiveDecodePressureDropCount - start.ReceiveDecodePressureDropCount,
+		ForgedSourceDropCount:                  end.ForgedSourceDropCount - start.ForgedSourceDropCount,
 		PackHandoffDropCount:                   end.PackHandoffDropCount - start.PackHandoffDropCount,
 		PackHandoffDropByteCount:               end.PackHandoffDropByteCount - start.PackHandoffDropByteCount,
 		PackHandoffWaitCount:                   end.PackHandoffWaitCount - start.PackHandoffWaitCount,

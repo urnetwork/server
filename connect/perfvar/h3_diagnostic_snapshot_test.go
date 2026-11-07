@@ -13,6 +13,7 @@ import (
 // Nested failure counters are intervals; their maximum remains an end gauge.
 func TestH3DiagnosticReceiveCounterDeltasCoverEveryField(t *testing.T) {
 	testH3DiagnosticCounterDeltas(t, subtractH3FullTunReceive, map[string]bool{
+		"ReceiveDecodeReservedByteCount": true,
 		"PackHandoffMaxCount": true, "PackHandoffMaxByteCount": true,
 		"PackHandoffAdaptiveMaxDepth": true, "PackHandoffAdaptiveMaxByteCount": true,
 		"AckRouteWriteMaxWait": true, "AckRouteWriteFailures.MaxWait": true,
