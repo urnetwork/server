@@ -2131,6 +2131,157 @@
       ]
     },
     {
+      "id": 27,
+      "type": "bargauge",
+      "title": "fastest 20 countries by setup p90, last 24 h",
+      "description": "The 20 selected countries with the lowest setup p90 over their last 24 h of samples (urnetwork_proxy_test_phase_seconds_window), fastest first: the counterpart of the slowest 20. A country is absent until it has a successful setup in the runner's current window, for example after a restart. Orange from 15 s, red from 30 s.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 0,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 2,
+          "min": 0,
+          "noValue": "no setup samples in 24 h",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 15
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort(bottomk(20, max by (country) (urnetwork_proxy_test_phase_seconds_window{env=\"main\",country=~\"$country\",phase=\"setup\",stat=\"p90\"})))",
+          "legendFormat": "{{country}}",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "bargauge",
+      "title": "success rate by country, last 24 h (highest 20)",
+      "description": "Share of each selected country's runs in the last 24 h that ended ok, for the 20 highest: the counterpart of the failure-rate panel. Only countries with at least 3 runs in the window are ranked, so one lucky run does not read 100%; ties at the same rate are listed in no particular order, and the per-country table gives the run counts. Red under 50%, orange under 80%.",
+      "gridPos": {
+        "h": 10,
+        "w": 12,
+        "x": 12,
+        "y": 55
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "noValue": "no country with 3 runs in 24 h",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "valueMode": "color",
+        "namePlacement": "auto",
+        "sizing": "auto",
+        "minVizWidth": 8,
+        "minVizHeight": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sort_desc(topk(20, (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\",outcome=\"ok\"}[24h]))) or (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\"}[24h]))) * 0)) / (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\"}[24h]))) >= 3)))",
+          "legendFormat": "{{country}}",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
       "id": 26,
       "type": "table",
       "title": "latest run by country",
@@ -2139,7 +2290,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 55
+        "y": 65
       },
       "datasource": {
         "type": "prometheus",
