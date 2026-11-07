@@ -1,7 +1,8 @@
-// MinIO drive runway, raw-versus-logical accounting divergence, PutObject
-// surge and base-backup headroom: what MinIO's own percentage and quota
-// accounting (§11.6a) cannot see. Drive runway uses the shared §2.4f
-// estimator (storage_runway.go) with this section's longer thresholds.
+// MinIO drive runway in bytes and in inodes, raw-versus-logical accounting
+// divergence, PutObject surge and base-backup headroom: what MinIO's own
+// percentage and quota accounting (§11.6a) cannot see. Both drive runways use
+// the shared §2.4f estimator (storage_runway.go) with this section's longer
+// thresholds.
 package monitor
 
 import (
@@ -82,12 +83,28 @@ type MinioRunwaySettings struct {
 	BackupUnitTimeout    time.Duration
 	BackupCommandTimeout time.Duration
 	BackupMaxOutputBytes int
+	// Inode runway. XFS refuses every new file or directory with ENOSPC once
+	// a drive's inodes reach its imaxpct ceiling, however many bytes are
+	// free, and every object puts a shard on every drive. Each drive's free
+	// inodes count down to zero with the same estimator: warn at or under
+	// InodeWarnRunway or below InodeWarnFree free inodes on any drive, page at
+	// or under InodePageRunway or below InodePageFree. The floors are counts,
+	// not a share of the ceiling, so they hold at any imaxpct.
+	InodeWarnRunway time.Duration
+	InodePageRunway time.Duration
+	InodeWarnFree   float64
+	InodePageFree   float64
+	// An unknown inode layer pages when a drive lost more than this many
+	// inodes an hour over the estimator's unknown-risk window, measured now
+	// or remembered from a run inside it (emission rule 1).
+	InodeUnknownPageDeclinePerHour float64
 }
 
 // The §11.6b defaults on the main store: since 2026-10-24 one 8-drive erasure
 // set at EC:2 (6 data + 2 parity shards, xops MINIO-REBUILD-8.md) of 3.84 TB
-// drives, and the backup's inventory settings (pg_basebackup_reserve_bytes
-// 1.5 TiB, pg_basebackup_min_free_bytes 4 TB).
+// XFS drives; the backup's inventory settings (pg_basebackup_reserve_bytes
+// 1.5 TiB, pg_basebackup_min_free_bytes 4 TB); and inode floors set after
+// the drives reached 89% of their 375.07M-inode ceiling on 2026-11-07.
 func DefaultMinioRunwaySettings() *MinioRunwaySettings {
 	return &MinioRunwaySettings{
 		Estimator:                  DefaultStorageRunwayEstimatorSettings(),
@@ -114,6 +131,13 @@ func DefaultMinioRunwaySettings() *MinioRunwaySettings {
 		BackupUnitTimeout:          5 * time.Second,
 		BackupCommandTimeout:       15 * time.Second,
 		BackupMaxOutputBytes:       4 * 1024,
+		InodeWarnRunway:            7 * 24 * time.Hour,
+		InodePageRunway:            3 * 24 * time.Hour,
+		InodeWarnFree:              30 * 1000 * 1000,
+		InodePageFree:              15 * 1000 * 1000,
+		// above the 7-14 day average before 2026-11-07 (17-20M a day) and
+		// below the 2026-11-01 peak (35M a day)
+		InodeUnknownPageDeclinePerHour: 1000 * 1000,
 	}
 }
 
@@ -128,7 +152,8 @@ func (self *minioRunwayProbe) tier() string             { return tierPage }
 func (self *minioRunwayProbe) cadence() time.Duration   { return self.settings.Cadence }
 func (self *minioRunwayProbe) runBudget() time.Duration { return self.settings.RunBudget }
 
-// One drive's filesystem history.
+// One drive's filesystem history for one layer: available and size bytes, or
+// free and total inodes.
 type minioRunwayDrive struct {
 	mountpoint string
 	avail      []storageRunwaySample
@@ -136,17 +161,21 @@ type minioRunwayDrive struct {
 	reason     string
 }
 
-// One MinIO host's reduced range answer.
+// One MinIO host's reduced range answer. The drives' bytes and inodes are
+// separate layers, so a gap in one never clears or masks the other.
 type minioRunwayHost struct {
 	name       string
 	drives     map[string]*minioRunwayDrive
+	inodes     map[string]*minioRunwayDrive
 	gauges     map[string][]storageRunwaySample
 	gaugeFault map[string]string
 	driveFault string
+	inodeFault string
 }
 
-// One range query: drive filesystems by mountpoint, MinIO's drive count,
-// logical bucket bytes, usage snapshot age and the hourly PutObject rate.
+// One range query: drive filesystem bytes and inodes by mountpoint, MinIO's
+// drive count, logical bucket bytes, usage snapshot age and the hourly
+// PutObject rate.
 func minioRunwayQuery(environment string, hosts []string, settings *MinioRunwaySettings) string {
 	env := strconv.Quote(environment)
 	hostMatcher := strconv.Quote(storageRunwayAlternation(hosts))
@@ -163,6 +192,8 @@ func minioRunwayQuery(environment string, hosts []string, settings *MinioRunwayS
 	return strings.Join([]string{
 		tag(node("node_filesystem_avail_bytes"), "drive_avail"),
 		tag(node("node_filesystem_size_bytes"), "drive_size"),
+		tag(node("node_filesystem_files_free"), "drive_files_free"),
+		tag(node("node_filesystem_files"), "drive_files"),
 		tag("max by (host) ("+minio("minio_system_drive_count", "")+")", "drive_count"),
 		tag("sum by (host) ("+minio("minio_cluster_usage_buckets_total_bytes", "")+")", "logical_bytes"),
 		// The objects path reports seconds; this MinIO release writes the
@@ -178,7 +209,7 @@ func minioRunwayQuery(environment string, hosts []string, settings *MinioRunwayS
 func reduceMinioRunway(seriesList []storageRunwayRangeSeries, environment string, hosts []string, mountpointPattern *regexp.Regexp) map[string]*minioRunwayHost {
 	observations := map[string]*minioRunwayHost{}
 	for _, name := range hosts {
-		observations[name] = &minioRunwayHost{name: name, drives: map[string]*minioRunwayDrive{},
+		observations[name] = &minioRunwayHost{name: name, drives: map[string]*minioRunwayDrive{}, inodes: map[string]*minioRunwayDrive{},
 			gauges: map[string][]storageRunwaySample{}, gaugeFault: map[string]string{}}
 	}
 	for _, series := range seriesList {
@@ -188,27 +219,31 @@ func reduceMinioRunway(seriesList []storageRunwayRangeSeries, environment string
 		}
 		check := series.labels["monitor_check"]
 		switch check {
-		case "drive_avail", "drive_size":
+		case "drive_avail", "drive_size", "drive_files_free", "drive_files":
+			drives, fault, valueReason := observation.drives, &observation.driveFault, "invalid-byte-value"
+			if check == "drive_files_free" || check == "drive_files" {
+				drives, fault, valueReason = observation.inodes, &observation.inodeFault, "invalid-inode-value"
+			}
 			for name := range series.labels {
 				switch name {
 				case "__name__", "env", "job", "host", "device", "fstype", "mountpoint", "instance", "monitor_check":
 				default:
-					observation.driveFault = "unsupported-drive-label"
+					*fault = "unsupported-drive-label"
 				}
 			}
 			mountpoint := series.labels["mountpoint"]
 			if !mountpointPattern.MatchString(mountpoint) || series.labels["env"] != environment || series.labels["job"] != "node" ||
 				series.labels["device"] == "" || series.labels["fstype"] == "" {
-				observation.driveFault = "unowned-drive-series"
+				*fault = "unowned-drive-series"
 				continue
 			}
-			drive := observation.drives[mountpoint]
+			drive := drives[mountpoint]
 			if drive == nil {
 				drive = &minioRunwayDrive{mountpoint: mountpoint}
-				observation.drives[mountpoint] = drive
+				drives[mountpoint] = drive
 			}
 			slot := &drive.avail
-			if check == "drive_size" {
+			if check == "drive_size" || check == "drive_files" {
 				slot = &drive.size
 			}
 			switch {
@@ -217,7 +252,8 @@ func reduceMinioRunway(seriesList []storageRunwayRangeSeries, environment string
 			case series.invalid != "":
 				drive.reason = series.invalid
 			case !storageRunwayWholeBytes(series.samples):
-				drive.reason = "invalid-byte-value"
+				// inode counts are whole numbers below 2^53 too
+				drive.reason = valueReason
 			default:
 				*slot = series.samples
 			}
@@ -303,8 +339,10 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		findings := []finding{}
 		for _, configured := range minioHosts {
 			tier, basis := self.risks.unknownTier(configured.name+"/drives", storageRunwayEstimate{}, now, settings.Estimator)
+			inodeTier, inodeBasis := self.inodeUnknownTier(configured.name+"/inodes", 0, false, now)
 			findings = append(findings,
 				self.unknown(configured.name+"/drives", "drives", reason, tier, basis, err),
+				self.unknown(configured.name+"/inodes", "inodes", reason, inodeTier, inodeBasis, err),
 				self.unknown(configured.name+"/accounting", "accounting", reason, tierWarn, "", err),
 				self.unknown(configured.name+"/puts", "puts", reason, tierWarn, "", err),
 				self.unknown(configured.name+"/backup", "backup", reason, tierWarn, "", err))
@@ -336,6 +374,8 @@ func (self *minioRunwayProbe) check(ctx context.Context, env *probeEnv) ([]findi
 		observation := observations[configured.name]
 		drives, census, censusReason := self.driveEstimates(observation, grid.end)
 		findings = append(findings, self.driveRunway(configured.name, drives, census, censusReason, now, gateway.name, pendingRiskSamples)...)
+		inodes, inodeCensus, inodeCensusReason := self.inodeEstimates(observation, grid.end)
+		findings = append(findings, self.inodeRunway(configured.name, inodes, inodeCensus, inodeCensusReason, now, gateway.name, pendingRiskSamples)...)
 		findings = append(findings, self.accounting(configured.name, observation, drives, census, censusReason, grid.end, gateway.name)...)
 		findings = append(findings, self.putSurge(configured.name, observation, grid, gateway.name)...)
 		backup, err := self.backup(ctx, env, configured, drives, census, censusReason)
@@ -474,6 +514,216 @@ func (self *minioRunwayProbe) driveRunway(hostName string, drives []minioRunwayD
 		findings = append(findings, healthyFinding(minioRunwayProbeId, tierPage, "minio-drive-runway", target))
 	}
 	return append(findings, healthyFinding(minioRunwayProbeId, tierWarn, "minio-runway-unobservable", target))
+}
+
+// Estimate every drive's free inodes, counted down to zero. The inode census
+// is complete when MinIO's own fresh drive count equals the number of drive
+// filesystems with inode series, and each has a fresh, complete free-inode
+// history and a fresh total; otherwise a reason says what is missing.
+func (self *minioRunwayProbe) inodeEstimates(observation *minioRunwayHost, end time.Time) ([]minioRunwayDriveEstimate, bool, string) {
+	settings := self.settings
+	mountpoints := make([]string, 0, len(observation.inodes))
+	for mountpoint := range observation.inodes {
+		mountpoints = append(mountpoints, mountpoint)
+	}
+	sort.Strings(mountpoints)
+	drives := []minioRunwayDriveEstimate{}
+	reason := observation.inodeFault
+	for _, mountpoint := range mountpoints {
+		drive := observation.inodes[mountpoint]
+		if drive.reason != "" {
+			reason = drive.reason
+			continue
+		}
+		if drive.avail == nil {
+			reason = "missing-drive-free-inode-series"
+			continue
+		}
+		if count := len(drive.size); count > 0 && drive.size[count-1].value == 0 {
+			// A filesystem without a fixed inode table reports no inodes at
+			// all: zero free is no wall there, and this layer cannot judge it.
+			reason = "drive-reports-no-inodes"
+			continue
+		}
+		estimate := minioRunwayDriveEstimate{drive: drive}
+		if len(drive.size) > 0 && drive.size[len(drive.size)-1].at.Equal(end) {
+			estimate.size, estimate.sizeKnown = drive.size[len(drive.size)-1].value, true
+		}
+		// The runway counts down to zero; the floors are judged apart.
+		estimate.estimate = estimateStorageRunway(settings.Estimator, drive.avail, end, 0)
+		switch {
+		case reason != "":
+		case !estimate.estimate.fresh:
+			reason = "stale-drive-inode-series"
+		case !estimate.estimate.complete:
+			reason = "incomplete-decline-windows"
+		case !estimate.sizeKnown:
+			reason = "missing-or-stale-drive-inode-total"
+		case estimate.estimate.latest.value > estimate.size:
+			reason = "inconsistent-drive-inodes"
+		}
+		drives = append(drives, estimate)
+	}
+	count, countReason := observation.gauge("drive_count", end)
+	switch {
+	case reason != "":
+	case countReason != "":
+		reason = countReason
+	case count < 1 || count != math.Trunc(count) || int(count) != len(observation.inodes):
+		reason = fmt.Sprintf("drive-filesystems=%d minio-drive-count=%.0f", len(observation.inodes), count)
+	}
+	return drives, reason == "", reason
+}
+
+// Free inodes per drive against the fixed floors, and the shortest days to
+// zero at the fastest measured decline. Every object puts a shard on every
+// drive, so the drives run out together and the first one out fails every
+// write. A violation needs only a fresh drive; healthy needs the full census.
+func (self *minioRunwayProbe) inodeRunway(hostName string, drives []minioRunwayDriveEstimate, census bool, censusReason string, now time.Time, gateway string, pendingRiskSamples map[string]storageRunwaySample) []finding {
+	settings := self.settings
+	target := hostName + "/inodes"
+	var worst, leastFree *minioRunwayDriveEstimate
+	worstRunway := time.Duration(math.MaxInt64)
+	recentRate, recentKnown := 0.0, false
+	for index := range drives {
+		drive := &drives[index]
+		if drive.estimate.recentKnown {
+			recentRate, recentKnown = max(recentRate, drive.estimate.recentRate), true
+		}
+		if !drive.estimate.fresh {
+			continue
+		}
+		if leastFree == nil || drive.estimate.latest.value < leastFree.estimate.latest.value {
+			leastFree = drive
+		}
+		if runway, declining := drive.estimate.runway(); declining && runway < worstRunway {
+			worst, worstRunway = drive, runway
+		}
+	}
+	if recentKnown {
+		pendingRiskSamples[target] = storageRunwaySample{at: now, value: recentRate}
+	}
+	freeBand, runwayBand := "none", "none"
+	if leastFree != nil {
+		switch free := leastFree.estimate.latest.value; {
+		case free < settings.InodePageFree:
+			freeBand = "page"
+		case free < settings.InodeWarnFree:
+			freeBand = "warn"
+		}
+	}
+	if worst != nil {
+		switch {
+		case worstRunway <= settings.InodePageRunway:
+			runwayBand = "page"
+		case worstRunway <= settings.InodeWarnRunway:
+			runwayBand = "warn"
+		}
+	}
+	findings := []finding{}
+	band, tier := "", tierWarn
+	switch {
+	case freeBand == "page" || runwayBand == "page":
+		band, tier = "page", tierPage
+	case freeBand == "warn" || runwayBand == "warn":
+		band = "warn"
+	}
+	if band != "" {
+		warnDays, pageDays := settings.InodeWarnRunway.Hours()/24, settings.InodePageRunway.Hours()/24
+		floor := settings.InodeWarnFree
+		if band == "page" {
+			floor = settings.InodePageFree
+		}
+		shown := leastFree
+		symptom := fmt.Sprintf("MinIO drive %s on %s has %s free inodes, under the %s %s floor",
+			leastFree.drive.mountpoint, hostName, minioRunwayInodeCount(leastFree.estimate.latest.value), minioRunwayInodeCount(floor), band)
+		if runwayBand == band {
+			shown = worst
+			symptom = fmt.Sprintf("MinIO drive %s on %s runs out of inodes in %.1f days at its fastest measured decline, with %s free",
+				worst.drive.mountpoint, hostName, worstRunway.Hours()/24, minioRunwayInodeCount(worst.estimate.latest.value))
+		}
+		parts := []string{}
+		for _, drive := range drives {
+			if drive.estimate.fresh {
+				parts = append(parts, drive.drive.mountpoint+" free_inodes="+strconv.FormatFloat(drive.estimate.latest.value, 'f', 0, 64))
+			}
+		}
+		findings = append(findings, finding{
+			probeId: minioRunwayProbeId, tier: tier, class: "minio-inode-runway", target: target, sustain: settings.Sustain,
+			symptom: symptom,
+			mechanism: "XFS allocates inodes only up to its imaxpct ceiling (node_filesystem_files). Once a drive has no free inode, every new file or directory on it fails with ENOSPC however many bytes are free, and MinIO fails every write: Loki chunks, Mimir blocks and blob objects (SN25 artifacts and evidence). Every object puts a shard, a directory and an xl.meta, on every drive, so the drives run out together, and neither MinIO's bucket accounting nor the byte runway sees it. The rate is the fastest decline over the " +
+				storageRunwayWindowNames(settings.Estimator.Windows) + " windows of the drive's own free-inode count, and the runway counts down to zero.",
+			baseline: fmt.Sprintf("Every drive keeps at least %s free inodes and more than %.0f days of them at its fastest measured decline; WARN under %s or at <= %.0f days, PAGE under %s or at <= %.0f days, each after %d observations.",
+				minioRunwayInodeCount(settings.InodeWarnFree), warnDays, minioRunwayInodeCount(settings.InodeWarnFree), warnDays, minioRunwayInodeCount(settings.InodePageFree), pageDays, settings.Sustain),
+			observed: "band=" + band + " free_band=" + freeBand + " runway_band=" + runwayBand + " worst_drive=" + shown.drive.mountpoint + " " + minioRunwayInodeObserved(shown) +
+				fmt.Sprintf(" least_free_drive=%s least_free_inodes=%.0f census_complete=%t drives=[%s]", leastFree.drive.mountpoint, leastFree.estimate.latest.value, census, strings.Join(parts, "; ")),
+			evidence: "One bounded loopback Mimir range query of node_filesystem_files_free and node_filesystem_files for the inventory MinIO host's drive mountpoints, joined with MinIO's own minio_system_drive_count, through gateway " + gateway + ".",
+			context:  "On 2026-11-07 each of edge-5's eight XFS drives (imaxpct=5, a 375.07M-inode ceiling) had about 42.85M free inodes (89% used) beside terabytes of free bytes, losing about 8M inodes a day and up to 17-20M a day over the two weeks before. False-positive qualifiers: a bulk delete or lifecycle expiry returns inodes in bursts, which shortens the measured decline only in the windows it falls in. False-negative qualifiers: a raised ceiling (xfs_growfs -m) adds free inodes at once, so for up to a day only the windows after it measure the decline, and a burst of small objects can outrun the 15-minute cadence.",
+			action:   "Cut object growth at its source first (§14.8: the client-key evidence history copies and other small-object prefixes, and lifecycle rules for expired copies). Raising the ceiling is the owner's decision: `xfs_growfs -m <percent> /mnt/blobN` on every drive works online and moves no data (15% gives each 3.84 TB drive about 1.13B inodes). Read the drives with `df -i /mnt/blob*`. Do not delete files under a drive's minio directory by hand.",
+			verify:   fmt.Sprintf("Two consecutive complete observations with every drive at or above %s free inodes and over %.0f days of runway.", minioRunwayInodeCount(settings.InodeWarnFree), warnDays),
+			playbook: "SIGNALS.md §11.6b and §2.4f",
+		})
+	}
+	if !census {
+		tier, basis := self.inodeUnknownTier(target, recentRate, recentKnown, now)
+		return append(findings, self.unknown(target, "inodes", censusReason, tier, basis, nil))
+	}
+	if band == "" {
+		findings = append(findings, healthyFinding(minioRunwayProbeId, tierPage, "minio-inode-runway", target))
+	}
+	return append(findings, healthyFinding(minioRunwayProbeId, tierWarn, "minio-runway-unobservable", target))
+}
+
+// Emission rule 1 for the inode layer, as storageRunwayRiskMemory.unknownTier
+// is for bytes: an unknown inode layer pages when a drive lost more than the
+// page line of inodes an hour over the unknown-risk window, measured now or
+// remembered from a run inside it.
+func (self *minioRunwayProbe) inodeUnknownTier(target string, recentRate float64, recentKnown bool, now time.Time) (string, string) {
+	settings := self.settings
+	rate, known, basis := recentRate, recentKnown, "measured"
+	if !known {
+		rate, known = self.risks.recall(target, now, settings.Estimator.UnknownRiskWindow)
+		basis = "remembered"
+	}
+	if !known {
+		return tierWarn, "recent_decline=unknown"
+	}
+	text := "recent_decline_basis=" + basis + " recent_decline_inodes_per_hour=" + strconv.FormatFloat(rate*3600, 'f', 0, 64)
+	if rate*3600 > settings.InodeUnknownPageDeclinePerHour {
+		return tierPage, text
+	}
+	return tierWarn, text
+}
+
+// Fixed public fields of one drive's inode estimate: counts, inodes a day
+// per decline window and days to zero. No device or label value enters them.
+func minioRunwayInodeObserved(drive *minioRunwayDriveEstimate) string {
+	estimate := drive.estimate
+	parts := []string{"free_inodes=" + strconv.FormatFloat(estimate.latest.value, 'f', 0, 64)}
+	if drive.sizeKnown {
+		parts = append(parts, "total_inodes="+strconv.FormatFloat(drive.size, 'f', 0, 64),
+			"used_pct="+strconv.FormatFloat(100*(1-estimate.latest.value/drive.size), 'f', 2, 64))
+	}
+	for _, decline := range estimate.declines {
+		name := "decline_" + storageRunwayWindowName(decline.window) + "_inodes_per_day="
+		if !decline.measured {
+			parts = append(parts, name+"unknown")
+			continue
+		}
+		parts = append(parts, name+strconv.FormatFloat(decline.rate*86400, 'f', 0, 64))
+	}
+	if runway, declining := estimate.runway(); declining {
+		parts = append(parts, "rate_window="+storageRunwayWindowName(estimate.rateWindow),
+			"runway_days="+strconv.FormatFloat(runway.Hours()/24, 'f', 1, 64))
+	} else {
+		parts = append(parts, "runway_days=none-no-decline")
+	}
+	return strings.Join(parts, " ")
+}
+
+// Inode counts in millions with at most two decimals: 42.85M, 15M.
+func minioRunwayInodeCount(count float64) string {
+	return strconv.FormatFloat(math.Round(count/1e4)/100, 'f', -1, 64) + "M"
 }
 
 // Raw used bytes over the drives minus the erasure-coded logical bytes:
@@ -800,8 +1050,8 @@ func (self *minioRunwayProbe) backup(ctx context.Context, env *probeEnv, configu
 	}, nil
 }
 
-// A gap in one layer is unknown for that layer; the drive layer's tier
-// follows emission rule 1 (SIGNALS.md §7).
+// A gap in one layer is unknown for that layer; the drive and inode layers'
+// tiers follow emission rule 1 (SIGNALS.md §7).
 func (self *minioRunwayProbe) unknown(target, frame, reason, tier, basis string, err error) finding {
 	settings := self.settings
 	observed := "layer=" + frame + " reason=" + reason
@@ -815,13 +1065,14 @@ func (self *minioRunwayProbe) unknown(target, frame, reason, tier, basis string,
 	return finding{
 		probeId: minioRunwayProbeId, tier: tier, class: "minio-runway-unobservable", target: target, sustain: sustain,
 		symptom:   "MinIO's " + frame + " layer on " + strings.SplitN(target, "/", 2)[0] + " is unknown",
-		mechanism: "The gateway, the bounded Mimir answer, MinIO's own drive count, a fresh complete drive history, the logical or PutObject series, or the backup unit and slot reads could not be established. A missing series is unknown, never headroom.",
-		baseline:  fmt.Sprintf("Every drive MinIO counts has fresh complete filesystem history and size; logical bytes and the PutObject rate are fresh with at least %s of history; the backup units and slots read cleanly. An unknown drive runway pages when a drive declined more than %.0f GB/h over the last %s.", storageRunwayWindowName(settings.PutSurgeMinimumHistory), gb(settings.Estimator.UnknownPageDeclineBytesPerHour), storageRunwayWindowName(settings.Estimator.UnknownRiskWindow)),
-		observed:  observed,
-		evidence:  "Only fixed reasons, byte and rate figures and error classes are retained; raw answers, labels, devices, unit text and source errors stay private.",
-		context:   "Unknown is not healthy for a safety property. Correlate §11.14 log-shipper and §11.6a minio-storage before treating a dark store as quiet.",
-		action:    observationFailureAction(err, classifyObservationError(err), "Restore the node and MinIO metric shipping and the bounded Mimir, unit and slot reads. While a paging unknown lasts, read the drives' free space on the host directly (df -B1 /mnt/blob*) and treat them as filling at the last measured rate."),
-		verify:    "A fresh complete observation of the layer restores it; only a complete layer outside its bands is healthy.",
-		playbook:  "SIGNALS.md §11.6b and §7",
+		mechanism: "The gateway, the bounded Mimir answer, MinIO's own drive count, a fresh complete drive history of bytes or of inodes, the logical or PutObject series, or the backup unit and slot reads could not be established. A missing series is unknown, never headroom.",
+		baseline: fmt.Sprintf("Every drive MinIO counts has fresh complete filesystem history and size, in bytes and in inodes; logical bytes and the PutObject rate are fresh with at least %s of history; the backup units and slots read cleanly. An unknown drive runway pages when a drive declined more than %.0f GB/h over the last %s, and an unknown inode runway when a drive lost more than %s inodes an hour over it.",
+			storageRunwayWindowName(settings.PutSurgeMinimumHistory), gb(settings.Estimator.UnknownPageDeclineBytesPerHour), storageRunwayWindowName(settings.Estimator.UnknownRiskWindow), minioRunwayInodeCount(settings.InodeUnknownPageDeclinePerHour)),
+		observed: observed,
+		evidence: "Only fixed reasons, byte, inode and rate figures and error classes are retained; raw answers, labels, devices, unit text and source errors stay private.",
+		context:  "Unknown is not healthy for a safety property. Correlate §11.14 log-shipper and §11.6a minio-storage before treating a dark store as quiet.",
+		action:   observationFailureAction(err, classifyObservationError(err), "Restore the node and MinIO metric shipping and the bounded Mimir, unit and slot reads. While a paging unknown lasts, read the drives' free space and inodes on the host directly (df -B1 /mnt/blob* and df -i /mnt/blob*) and treat them as filling at the last measured rate."),
+		verify:   "A fresh complete observation of the layer restores it; only a complete layer outside its bands is healthy.",
+		playbook: "SIGNALS.md §11.6b and §7",
 	}
 }

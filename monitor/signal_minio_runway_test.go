@@ -16,6 +16,9 @@ const (
 	minioRunwayTestHost     = "minio-1"
 	minioRunwayTestDrive    = 3840 * storageRunwayTestGigabyte
 	minioRunwayTestTerabyte = 1000 * storageRunwayTestGigabyte
+	minioRunwayTestMillion  = 1000 * 1000
+	// edge-5's XFS inode ceiling per drive at imaxpct=5 (2026-11-07)
+	minioRunwayTestInodes = 375073792
 )
 
 // One synthetic MinIO host's history. Functions map a grid point's age to a
@@ -26,6 +29,9 @@ type minioRunwayTestStore struct {
 	avail      func(drive int, age time.Duration) float64
 	driveOmit  func(drive int, age time.Duration) bool
 	size       float64
+	freeInodes func(drive int, age time.Duration) float64
+	inodeOmit  func(drive int, age time.Duration) bool
+	inodes     float64
 	driveCount func(age time.Duration) float64
 	logical    func(age time.Duration) float64
 	usageAge   func(age time.Duration) float64
@@ -33,13 +39,16 @@ type minioRunwayTestStore struct {
 }
 
 // The 6+2 store at rest: eight 3.84 TB drives half free, raw use within a
-// terabyte of 8/6 of the logical bytes and a steady put rate.
+// terabyte of 8/6 of the logical bytes, most inodes free and a steady put
+// rate.
 func minioRunwayTestHealthy() minioRunwayTestStore {
 	return minioRunwayTestStore{
 		host:       minioRunwayTestHost,
 		drives:     []string{"/mnt/blob1", "/mnt/blob2", "/mnt/blob3", "/mnt/blob4", "/mnt/blob5", "/mnt/blob6", "/mnt/blob7", "/mnt/blob8"},
 		avail:      func(int, time.Duration) float64 { return 2000 * storageRunwayTestGigabyte },
 		size:       minioRunwayTestDrive,
+		freeInodes: func(int, time.Duration) float64 { return 300 * minioRunwayTestMillion },
+		inodes:     minioRunwayTestInodes,
 		driveCount: func(time.Duration) float64 { return 8 },
 		logical:    func(time.Duration) float64 { return 10.5 * minioRunwayTestTerabyte },
 		usageAge:   func(time.Duration) float64 { return 1800 },
@@ -77,14 +86,23 @@ func minioRunwayTestBody(t *testing.T, grid storageRunwayGrid, stores ...minioRu
 		for index, mountpoint := range store.drives {
 			drive := index
 			omit := func(age time.Duration) bool { return store.driveOmit != nil && store.driveOmit(drive, age) }
-			for _, check := range []string{"drive_avail", "drive_size"} {
+			inodeOmit := func(age time.Duration) bool { return store.inodeOmit != nil && store.inodeOmit(drive, age) }
+			for _, check := range []string{"drive_avail", "drive_size", "drive_files_free", "drive_files"} {
 				labels := map[string]string{"env": "synthetic", "job": "node", "host": store.host, "mountpoint": mountpoint,
 					"device": "/dev/private-source-canary" + strconv.Itoa(drive), "fstype": "xfs", "monitor_check": check}
-				value := func(age time.Duration) float64 { return store.avail(drive, age) }
-				if check == "drive_size" {
+				value, skip := func(age time.Duration) float64 { return store.avail(drive, age) }, omit
+				switch check {
+				case "drive_size":
 					value = func(time.Duration) float64 { return store.size }
+				case "drive_files_free":
+					value, skip = func(age time.Duration) float64 { return store.freeInodes(drive, age) }, inodeOmit
+				case "drive_files":
+					value, skip = func(time.Duration) float64 { return store.inodes }, inodeOmit
 				}
-				series(labels, value, omit)
+				if store.freeInodes == nil && (check == "drive_files_free" || check == "drive_files") {
+					continue
+				}
+				series(labels, value, skip)
 			}
 		}
 		for check, value := range map[string]func(time.Duration) float64{
@@ -100,6 +118,37 @@ func minioRunwayTestBody(t *testing.T, grid storageRunwayGrid, stores ...minioRu
 		t.Fatal("synthetic range encoding failed")
 	}
 	return string(body)
+}
+
+// Mimir answers only the partitions a query selects: drop the synthetic
+// series whose monitor_check the command does not name. Bodies that are not
+// a synthetic matrix pass through unchanged.
+func minioRunwayTestAnswer(body, command string) string {
+	var answer struct {
+		Status string `json:"status"`
+		Data   struct {
+			ResultType string `json:"resultType"`
+			Result     []struct {
+				Metric map[string]string `json:"metric"`
+				Values [][]any           `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if json.Unmarshal([]byte(body), &answer) != nil || answer.Status != "success" || answer.Data.ResultType != "matrix" {
+		return body
+	}
+	selected := answer.Data.Result[:0]
+	for _, series := range answer.Data.Result {
+		if strings.Contains(command, `"monitor_check",`+strconv.Quote(series.Metric["monitor_check"])) {
+			selected = append(selected, series)
+		}
+	}
+	answer.Data.Result = selected
+	filtered, err := json.Marshal(answer)
+	if err != nil {
+		return body
+	}
+	return string(filtered)
 }
 
 // The backup units' fixed systemctl frame.
@@ -135,7 +184,7 @@ func minioRunwayTestSettings(t *testing.T, sources minioRunwayTestSources) Signa
 						t.Fatalf("MinIO runway query lost %q", want)
 					}
 				}
-				return sources.body, nil
+				return minioRunwayTestAnswer(sources.body, command), nil
 			case minioRunwayTestHost:
 				if !strings.HasPrefix(command, `[ "$(hostname -s)" = 'minio-1' ] || exit 74`) || !strings.Contains(command, "'pg-basebackup.service'") {
 					t.Fatal("backup unit read lost its hostname guard or unit")
@@ -326,8 +375,9 @@ func TestMinioRunwayBackupReserve(t *testing.T) {
 	}
 }
 
-// A drive MinIO counts but the node metrics omit leaves the census, the
-// accounting and the backup layer unknown, while the put layer still judges.
+// A drive MinIO counts but the node metrics omit leaves both drive censuses,
+// the accounting and the backup layer unknown, while the put layer still
+// judges.
 func TestMinioRunwayIncompleteCensusStaysUnknown(t *testing.T) {
 	store := minioRunwayTestHealthy()
 	store.drives = store.drives[:7]
@@ -350,7 +400,7 @@ func TestMinioRunwayIncompleteCensusStaysUnknown(t *testing.T) {
 			unknown[alert.Target] = true
 		}
 	}
-	if !unknown["minio-1/drives"] || !unknown["minio-1/accounting"] || !unknown["minio-1/backup"] || unknown["minio-1/puts"] {
+	if !unknown["minio-1/drives"] || !unknown["minio-1/inodes"] || !unknown["minio-1/accounting"] || !unknown["minio-1/backup"] || unknown["minio-1/puts"] {
 		t.Fatalf("census gap reached the wrong layers: %v", unknown)
 	}
 	requireAlertClass(t, alerts, "minio-put-surge")

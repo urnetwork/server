@@ -468,6 +468,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"minio-drive-capacity":                                incidentAlertClass,
 	"minio-drive-offline":                                 incidentAlertClass,
 	"minio-drive-runway":                                  incidentAlertClass,
+	"minio-inode-runway":                                  incidentAlertClass,
 	"minio-put-surge":                                     incidentAlertClass,
 	"minio-read-errors":                                   incidentAlertClass,
 	"minio-write-errors":                                  incidentAlertClass,
