@@ -523,6 +523,80 @@ func TestCompetitionPatchCoverageSnapshotsRejectModesIndexAndRedirection(t *test
 	}
 }
 
+// Actual committed modes pass through both the native physical snapshot and
+// both real G7 shell guards. No fake Git output, image or service is involved.
+func TestCompetitionPatchCoverageNativeAndShellRegularModeParity(t *testing.T) {
+	for _, mode := range []string{"100644", "100755", "120000"} {
+		fixture := repositoryWorkCoverageFixture(t)
+		paths, err := model.CompetitionWorkCoverageProtectedHelperPaths(&fixture.coverage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		absolute := filepath.Join(fixture.root, "server", paths[0])
+		if mode == "120000" {
+			if err := os.Remove(absolute); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("synthetic-target", absolute); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			permission := os.FileMode(0600)
+			if mode == "100755" {
+				permission = 0700
+			}
+			if err := os.Chmod(absolute, permission); err != nil {
+				t.Fatal(err)
+			}
+		}
+		serverRoot := filepath.Join(fixture.root, "server")
+		repositoryApplyTestGit(t, serverRoot, "add", "--all")
+		if mode != "100644" {
+			repositoryApplyTestGit(t, serverRoot, "commit", "--quiet", "--no-gpg-sign", "-m", "synthetic helper mode")
+		}
+		entry := repositoryApplyTestGit(t, serverRoot, "ls-tree", "HEAD", "--", paths[0])
+		if !strings.HasPrefix(entry, mode+" blob ") {
+			t.Fatal("native mode control did not establish its intended committed entry", mode, entry)
+		}
+		_, nativeError := repositoryWorkCoverageSnapshot(fixture.root, &fixture.coverage, repositoryWorkCoverageTestGit(t, fixture.root))
+		regular := mode != "120000"
+		if (nativeError == nil) != regular {
+			t.Fatal("native helper custody disagreed with regular committed mode", mode, nativeError)
+		}
+		census, err := json.Marshal(map[string]any{"paths": paths})
+		if err != nil {
+			t.Fatal(err)
+		}
+		coverage, err := json.Marshal(fixture.coverage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"evaluator-work-coverage.sh", "evaluator-subevaluation.sh"} {
+			content, err := os.ReadFile(filepath.Join("..", "..", "connect", "sim-latency", "evaluator", "container", name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			begin := strings.Index(string(content), "\nauthenticate_protected_simulator_tree() {\n")
+			if begin < 0 {
+				t.Fatal("real G7 tree guard is missing", name)
+			}
+			end := strings.Index(string(content[begin+1:]), "\n}\n")
+			if end < 0 {
+				t.Fatal("real G7 tree guard is incomplete", name)
+			}
+			function := string(content[begin+1 : begin+1+end+3])
+			program := "set -Eeuo pipefail\ndie(){ exit 71; }\nevaluation_git(){ command git \"$@\"; }\n" + function + "\nauthenticate_protected_simulator_tree\n"
+			command := exec.CommandContext(t.Context(), "/bin/bash", "-c", program)
+			command.Env = []string{"PATH=/usr/bin:/bin", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "GIT_CONFIG_NOSYSTEM=1",
+				"baseline_source_root=" + fixture.root, "candidate_source_root=" + fixture.root,
+				"work_coverage_policy=" + string(coverage), "coverage_protected_paths_json=" + string(census)}
+			if output, err := command.CombinedOutput(); (err == nil) != regular {
+				t.Fatal("native/shell dedicated-helper mode parity diverged", name, mode, string(output), err)
+			}
+		}
+	}
+}
+
 // Deliberately inconsistent internal routing bypasses the ordinary canonical
 // parser to prove that the final native helper fence is independently active.
 func TestCompetitionPatchCoveragePostCommitFenceRejectsHelperDrift(t *testing.T) {

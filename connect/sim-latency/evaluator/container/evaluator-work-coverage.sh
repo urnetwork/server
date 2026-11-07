@@ -825,7 +825,7 @@ authenticate_protected_simulator_tree() {
         while IFS= read -r dependency; do
             baseline_dependency="$(git -c safe.directory= -c safe.directory="$baseline_source_root/server" -C "$baseline_source_root/server" --literal-pathspecs ls-tree HEAD -- "$dependency")" || die "missing trusted coverage dependency"
             candidate_dependency="$(git -c safe.directory= -c safe.directory="$candidate_source_root/server" -C "$candidate_source_root/server" --literal-pathspecs ls-tree HEAD -- "$dependency")" || die "missing candidate coverage dependency"
-            [[ "$baseline_dependency" =~ ^100644\ blob\ [0-9a-f]{40}$'\t' ]] || die "coverage dependency is not a committed regular Go file"
+            [[ "$baseline_dependency" =~ ^100(644|755)\ blob\ [0-9a-f]{40}$'\t' ]] || die "coverage dependency is not a committed regular Go file"
             [ "$baseline_dependency" = "$candidate_dependency" ] || die "candidate changed a trusted coverage dependency"
         done <<<"$dependencies"
     fi

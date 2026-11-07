@@ -146,7 +146,7 @@ func TestEvaluatorCoverageBaselinePrefixPinsUpdatedProtectedProducer(t *testing.
 		t.Fatal(err)
 	}
 	digest := sha256.Sum256(content)
-	if hex.EncodeToString(digest[:]) != "3264cdd767d408cb0ae8b9fcce98fec8bb1713b6234d2a914285acc755330a22" {
+	if hex.EncodeToString(digest[:]) != "5d2d9bef902944eb6db166628dd8bc8adc57ce668f118efd493319af63aa8802" {
 		t.Fatal("future baseline producer requires a separately reviewed exact script pin")
 	}
 	function := g2ScriptFunction(t, filepath.Join("evaluator", "container", "prepare-round-baseline-work-coverage.sh"), "round_baseline_control_prefix")

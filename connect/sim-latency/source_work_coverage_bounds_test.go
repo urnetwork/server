@@ -193,9 +193,8 @@ func sourceCoverageMeasureEnvelopes(t *testing.T, patch []byte) {
 // absence is reported, never counted as an executed exact-artifact proof.
 func TestSourceCoverageInstrumentEnvelopesFitExistingBounds(t *testing.T) {
 	sourceTestPrivateGlobalIdentity(t, "Synthetic Envelope", "envelope@fixture.example")
-	t.Run("synthetic_585265_bytes", func(t *testing.T) {
-		sourceCoverageMeasureEnvelopes(t, sourceCoverageSyntheticEnvelopePatch(t, 585265))
-	})
+	t.Log("envelope_input=synthetic raw_patch_bytes=585265")
+	sourceCoverageMeasureEnvelopes(t, sourceCoverageSyntheticEnvelopePatch(t, 585265))
 	path, expected := os.Getenv("SIM_LATENCY_SEALED_OVERLAY_PATCH"), os.Getenv("SIM_LATENCY_SEALED_OVERLAY_PATCH_SHA256")
 	if path == "" && expected == "" {
 		t.Log("exact sealed-patch measurement not requested; only deterministic synthetic envelope bounds were exercised")
@@ -213,6 +212,7 @@ func TestSourceCoverageInstrumentEnvelopesFitExistingBounds(t *testing.T) {
 		if hex.EncodeToString(digest[:]) != expected {
 			t.Fatal("declared source-only patch bytes differ from their precommitted digest")
 		}
+		t.Logf("envelope_input=explicitly_pinned_source_only_patch raw_patch_bytes=%d sha256=%s", len(patch), expected)
 		sourceCoverageMeasureEnvelopes(t, patch)
 	})
 }

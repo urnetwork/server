@@ -41,7 +41,7 @@ baseline_actual_management_affinity="$(awk -F: '$1 == "Cpus_allowed_list" {gsub(
 round_baseline_control_prefix() {
     local source="$1" program prefix count
     [ -f "$source" ] && [ ! -L "$source" ] || return 1
-    [ "$(sha256sum -- "$source" | awk '{print $1}')" = 3264cdd767d408cb0ae8b9fcce98fec8bb1713b6234d2a914285acc755330a22 ] || return 1
+    [ "$(sha256sum -- "$source" | awk '{print $1}')" = 5d2d9bef902944eb6db166628dd8bc8adc57ce668f118efd493319af63aa8802 ] || return 1
     program="$(<"$source")"
     count="$(printf '%s\n' "$program" | awk '$0 == "build_candidate" {n++} END {print n+0}')"
     [ "$count" = 1 ] || return 1
