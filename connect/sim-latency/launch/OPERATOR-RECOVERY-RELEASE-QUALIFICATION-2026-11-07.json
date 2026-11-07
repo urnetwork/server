@@ -18,6 +18,10 @@
     "not_a_standalone_sn_or_complete_product_graph_qualification":true
   },
   "artifacts_directory": "/home/by/urnetwork/temp/competition-operator-release-20261106.zFmyrhQk",
+  "installed_inactive_native_directory": "/usr/local/libexec/urnetwork/competition-operator-1f939c82-20261107-v1",
+  "inactive_native_install_observed_at": "2026-11-07T00:28:30Z",
+  "installed_native_ownership_and_mode": "root:root 0555; all three hashes reverified; no wrapper, service, image-load or runtime activation changed",
+  "main_api_deployment_recommendation": "Use current main cc409c818 or later, including the upstream numeric-only timing-observation fix. The qualified worker remains 1f939c82; this is not a season-wide API freeze. Verify actual serving API compatibility before the seventh grant.",
   "final_addendum_sha256": "321cac89348baf50cf7ddef2324322fcb4c6fc023d7f168f532c834e90d0f2ed",
   "native_qualification_receipt_sha256": "43481fea3e7ba374e6fc06385fd9cd00ec9c02d22497012c009cc1d181104eb7",
   "image_audit_receipt_sha256": "00e6f01bade43d2630c582acd10b47df6a1aff6951fa0fc69e516be6ae5f427d",
