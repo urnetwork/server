@@ -27872,6 +27872,7 @@ Tier-1 (warn):
 | settings-generation-stale / settings-generation-unobservable | local effective settings loader | §1.6 complete in-memory comparison with the immutable startup snapshot | warn immediately; page after 5 consecutive one-minute cadences; never render contents or fingerprints |
 | host-metrics-missing / host-memory-pressure | Mimir node metrics + enabled host inventory | §8.14 complete <=90s node tuple; MemAvailable/MemTotal | missing family for 2 probes, page after 3; available memory <=10% for 2 probes, page after 5 |
 | minio-read-errors / minio-write-rejected / minio-metrics-unobservable | Mimir MinIO v3 metrics + `minio` inventory | §11.6a non-write 5xx, write-API 4xx, complete <=180s drive family and bucket usage snapshot | read 5xx at least 5% and 10 per five minutes for 2 probes, page at 25%; write 4xx at least 10% and 20 per five minutes for 2 probes; drive family missing/stale/incomplete for 2 probes, page after 3; no bucket usage snapshot for 2 probes |
+| minio-inode-runway | Mimir node metrics + MinIO v3 drive count | §11.6b free inodes per MinIO drive (`node_filesystem_files_free` beside `node_filesystem_files`), the §2.4f max-of-windows decline counted down to zero; added 2026-11-07 | WARN under 30M free inodes on any drive or runway ≤ 7 d, PAGE under 15M or ≤ 3 d, each for 2 probes; an unknown inode layer pages after a decline over 1M inodes/h in the last 6 h | per-drive free and total inodes, used %, decline per window in inodes a day, runway days |
 | service-runtime-metrics-incomplete / service-runtime-metrics-invalid | Mimir process metrics + managed service inventory | §8.15 complete exact raw runtime tuple and bounded labels | any fresh incomplete process or rejected unowned/malformed series for 2 probes; raw labels discarded |
 | egress-probe-config-drift / egress-probe-config-unobservable | active monitor Config resource + PostgreSQL durable task arguments | §2.19 complete desired execution settings compared in memory with one coherent shard snapshot | explicit mismatch, or a present desired resource that cannot be compared, for 2 probes; endpoints and raw configuration never leave the process |
 | redis-latencystats-source-drift / redis-latencystats-source-unobservable | bounded host-local Redis source-state reducer | §11.20d exact configured-node census for `CONFIG GET latency-tracking` | any enabled node, or any missing/malformed/unreachable node; immediate; only fixed counts leave the host |
@@ -33104,6 +33105,10 @@ stayed quiet. Raw free space meanwhile fell from 12.6 TB (10-15) to 12.3 TB
 drive is full, and client-key registration has no fallback when its evidence
 cannot be published, so new identities would stop working.
 
+Since 2026-10-24 the store is one 8-drive set at EC:2 (`/mnt/blob1`..`8`, 6
+data and 2 parity shards per object, about 23 TB usable; xops
+`main/ansible/MINIO-REBUILD-8.md`).
+
 What MinIO's own accounting cannot see:
 1. **Data beside MinIO on the same drives.** The PostgreSQL physical base
    backup (xops `main/ansible/playbook-pg-basebackup.yml`, written to
@@ -33130,9 +33135,16 @@ Checks:
   drive with the least free space, with the §2.4f estimator. WARN at ≤ 14
   days, PAGE at ≤ 3 days. These are longer than §2.4f's thresholds because
   adding drives takes days.
+- **Inode runway** (added 2026-11-07) from `node_filesystem_files_free` on
+  `/mnt/blob*`: XFS fails every new file once a drive reaches its `imaxpct`
+  inode ceiling, however many bytes are free. WARN under 30M free inodes on
+  any drive or at ≤ 7 days to zero, PAGE under 15M or at ≤ 3 days. See the
+  inode layer below.
 - **Accounting divergence:** raw used (`node_filesystem_size_bytes - avail`
-  over the blob drives) minus twice MinIO's logical bucket bytes (2+2 erasure
-  coding). WARN `minio-accounting-divergence` above 1 TB. It means foreign
+  over the blob drives) minus the erasure overhead times MinIO's logical
+  bucket bytes: the set's drives over its data shards, 2 for the 2+2 set of
+  10-22 and 8/6 for the 6+2 set since 10-24. WARN
+  `minio-accounting-divergence` above 1 TB. It means foreign
   data, scanner lag or small-object overhead; it was about 4.4 TB on 10-22
   against about 0.5 TB a week earlier. Report
   `minio_cluster_usage_buckets_since_last_update_seconds` beside it, and check
@@ -33148,9 +33160,11 @@ Checks:
 
 ```promql
 min(node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+min(node_filesystem_files_free{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
+# 8 / 6 for the 6+2 set since 2026-10-24; 2 for the 2+2 set of 10-22
 sum(node_filesystem_size_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."}
   - node_filesystem_avail_bytes{host="by-us-fmt-5-edge-5",mountpoint=~"/mnt/blob."})
-  - 2 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
+  - 8 / 6 * sum(minio_cluster_usage_buckets_total_bytes{job="minio"})
 sum(rate(minio_api_requests_total{job="minio",name="PutObject"}[1h]))
 ```
 
@@ -33184,8 +33198,9 @@ decline windows and a fresh size. Classes, targets `<host>/<layer>`:
   WARN at <= 14 days, PAGE at <= 3 days. The §2.4f pace floor does not apply
   here. A violation needs only a fresh drive; healthy needs the full census.
 - `minio-accounting-divergence` (target `<host>/accounting`, sustain 2): raw
-  used bytes over the drives minus twice the logical bucket bytes (2+2
-  erasure overhead) above 1 TB warns. `usage_snapshot_age_s` rides beside it.
+  used bytes over the drives minus `ErasureOverhead` times the logical bucket
+  bytes above 1 TB warns: 8/6 for the 6+2 set (it read 2, the 2+2 overhead,
+  until 2026-11-07). `usage_snapshot_age_s` rides beside it.
   MinIO's logical bytes are cluster-wide, so the per-host comparison holds
   for a single-node store like main's; a multi-node store needs each node's
   share before this layer can judge it.
@@ -33243,6 +33258,68 @@ risk-memory helper, thresholds, time windows and backup policy are unchanged.
 Cancellation after this checkpoint has no rollback guarantee. The source
 counterexample concerns future remembered-risk classification, not an observed
 outage or a canceled RunLoop notification/clear.
+
+Erasure overhead (2026-11-07). `ErasureOverhead` still read 2, the 2+2
+overhead, after the 10-24 rebuild. The 6+2 set writes 8/6 raw bytes per
+logical byte (`minio_cluster_erasure_set_read_quorum` 6 with
+`minio_system_drive_count` 8), so the divergence understated data beside
+MinIO by two thirds of the logical bytes. On 11-07 it read about 8.5 TB at 2
+and about 9.5 TB at 8/6 (11.48 TB raw used, 1.49 TB logical), above the 1 TB
+line either way. Main's inventory has the only `minio` host. A synthetic
+control puts 1.5 TB beside MinIO on the 6+2 store, which an overhead of 2
+hid; the 10-22 replay keeps its own 4-drive 2+2 store.
+
+Inode layer (2026-11-07). Each of the eight drives is XFS with `imaxpct=5`, a
+375.07M-inode ceiling. On 11-07 each had 332.2M inodes used and 42.85M free
+(89%) beside terabytes of free bytes, and lost about 8M inodes a day (17-20M a
+day over the previous one to two weeks, 35M on 11-01). Every object puts a
+shard on every drive, a directory and an `xl.meta`, so the drives move
+together. At zero XFS returns ENOSPC with terabytes free and every MinIO write
+fails: Loki, Mimir and blob (SN25 artifacts and evidence). The byte runway
+and §11.6a read only bytes, so no signal watched it.
+
+The same range query returns `drive_files_free` and `drive_files` partitions
+from `node_filesystem_files_free` and `node_filesystem_files{job="node"}` on
+the same mountpoints, with the same ownership labels. The inode census is a
+layer of its own: complete only when MinIO's fresh drive count equals the
+number of drive filesystems with inode series, and every drive has a fresh,
+unique, whole-number free-inode history with all decline windows and a fresh
+total no smaller than its free count. A gap in the byte layers never clears
+or masks the inode layer, nor the reverse.
+
+- `minio-inode-runway` (target `<host>/inodes`, sustain 2): the §2.4f
+  estimator per drive counting free inodes down to zero, and fixed floors on
+  the drive with the fewest free inodes. WARN under 30M free inodes or at <=
+  7 days, PAGE under 15M or at <= 3 days; `free_band` and `runway_band` say
+  which criterion set `band`. The floors are counts, so they hold at any
+  ceiling: after `xfs_growfs -m 15` (about 1.13B inodes per drive, about 793M
+  free) the layer is healthy at once, and for up to a day only the windows
+  after the raise measure the decline. A violation needs only a fresh drive;
+  healthy needs the full inode census.
+- `minio-runway-unobservable` (target `<host>/inodes`, sustain 2): the inode
+  census's gaps. Following emission rule 1 it pages when a drive lost more
+  than 1M inodes an hour over the last six hours, measured from the remaining
+  history or remembered by the signal instance; otherwise it warns. A
+  filesystem that reports no inodes at all (a zero total) is unknown, never a
+  wall.
+- Public data: inode counts, inodes a day and days. Tunables are the
+  `Inode*` fields of `MinioRunwaySettings`.
+
+Backtest on edge-5's least-free drive over the 15 days to 11-07 01:00Z, from
+Mimir: the layer would have warned on and off from 10-26 (20-40M inodes a
+day), paged on 11-01 from 13:00Z (126.7M free losing 43.5M a day over the last
+hour: 2.9 days) and through most of 11-02 and 11-03, and warned since (about
+5 days at 8M a day). Replayed through the signal, Mimir's own answer warns at
+11-06 23:41Z (`/mnt/blob2` 43.14M free, 4.3 days at 10.1M a day over 6 h).
+The ceiling went to 15% at about 01:15Z on 11-07 (1,125,221,472 inodes per
+drive, about 793M free), and the answer at 01:41Z is healthy.
+
+Synthetic controls add the inode wall beside terabytes of free bytes (PAGE,
+nothing else), the 11-07 shape (WARN at 5.4 days), floor and runway band
+edges, a raised ceiling (healthy), missing inode series, a byte-series gap
+beside a judged inode layer, a stale fast-declining inode layer (PAGE), a
+remembered decline across a failed read, and the dashboard's free-inode
+panel drawing the same floors.
 
 ### 11.7 Redeploy poll DEADLOCK (structural, warpctl)
 On a host with a lingering old container, the new one never converges: the journal
