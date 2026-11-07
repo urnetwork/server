@@ -150,7 +150,16 @@ func runtimeNativeTrialNames() []string {
 // Static validation cannot qualify a host. It only prevents an open-ended
 // selection, candidate-writable evidence or a partial runtime identity.
 func (self *RuntimeNativeClassSelection) validate(boundary RuntimeResourceBoundary) error {
-	if self == nil || self.Profile != runtimeNativeClassProfile || !runtimeNativePin(self.Receipt, boundary) || !namePattern.MatchString(self.Release.HostId) ||
+	if self == nil || !runtimeNativePin(self.Receipt, boundary) {
+		return errors.New("native runtime class omitted its closed static identity")
+	}
+	return self.validateRelease(boundary)
+}
+
+// Prospective collection can bind the exact release before an independent
+// acceptance receipt exists. Admission above still requires its real pin.
+func (self *RuntimeNativeClassSelection) validateRelease(boundary RuntimeResourceBoundary) error {
+	if self == nil || self.Profile != runtimeNativeClassProfile || !namePattern.MatchString(self.Release.HostId) ||
 		!strings.HasPrefix(self.Release.EvaluatorImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(self.Release.EvaluatorImageDigest, "sha256:")) ||
 		!digestPattern.MatchString(self.Release.SourceLockSha256) || !digestPattern.MatchString(self.Release.SubmissionBuilderSha256) ||
 		!digestPattern.MatchString(self.Release.ConfigLocalSha256) || !digestPattern.MatchString(self.Release.VaultLocalSha256) {
@@ -186,6 +195,12 @@ func runtimeNativeIdentity(boundary RuntimeResourceBoundary) (string, error) {
 	if boundary.NativeClass == nil || boundary.NativeClass.validate(boundary) != nil {
 		return "", errors.New("native runtime identity has no complete selection")
 	}
+	return encodeRuntimeNativeIdentity(boundary)
+}
+
+// The unchanged whole-boundary encoding omits exactly the receipt's own pin.
+// Keep this private so no caller can bypass admission validation by accident.
+func encodeRuntimeNativeIdentity(boundary RuntimeResourceBoundary) (string, error) {
 	selection := *boundary.NativeClass
 	selection.Receipt = Pin{}
 	boundary.NativeClass = &selection
