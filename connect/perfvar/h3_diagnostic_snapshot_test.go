@@ -62,6 +62,39 @@ func TestH3DiagnosticRecoveryCounterDeltasCoverEveryField(t *testing.T) {
 	})
 }
 
+// Contract-boundary events belong only to the measured interval. Old events
+// must not reappear, and advancing one counter must not change another.
+func TestH3DiagnosticRecoveryNoAckContractCounterIntervals(t *testing.T) {
+	snapshot := func(advance, hold, expired, promoted, headroom uint64) clientconnect.ClientSendRecoveryStatsSnapshot {
+		return clientconnect.ClientSendRecoveryStatsSnapshot{
+			NoAckContractAdvanceCount:  advance,
+			NoAckContractHoldCount:     hold,
+			NoAckContractExpiredCount:  expired,
+			NoAckContractPromotedCount: promoted,
+			NoAckContractHeadroomCount: headroom,
+		}
+	}
+	baseline := snapshot(11, 17, 23, 29, 31)
+	first := snapshot(2, 5, 7, 11, 13)
+	for _, c := range []struct {
+		name             string
+		start, end, want clientconnect.ClientSendRecoveryStatsSnapshot
+	}{
+		{name: "unchanged", start: baseline, end: baseline},
+		{name: "advance only", start: baseline, end: snapshot(13, 17, 23, 29, 31), want: snapshot(2, 0, 0, 0, 0)},
+		{name: "hold only", start: baseline, end: snapshot(11, 22, 23, 29, 31), want: snapshot(0, 5, 0, 0, 0)},
+		{name: "expired only", start: baseline, end: snapshot(11, 17, 30, 29, 31), want: snapshot(0, 0, 7, 0, 0)},
+		{name: "promoted only", start: baseline, end: snapshot(11, 17, 23, 40, 31), want: snapshot(0, 0, 0, 11, 0)},
+		{name: "headroom only", start: baseline, end: snapshot(11, 17, 23, 29, 44), want: snapshot(0, 0, 0, 0, 13)},
+		{name: "combined", start: baseline, end: snapshot(13, 22, 30, 40, 44), want: first},
+		{name: "first events", end: first, want: first},
+	} {
+		if actual := subtractH3FullTunRecovery(c.start, c.end); !reflect.DeepEqual(actual, c.want) {
+			t.Errorf("%s: recovery interval = %+v, want %+v", c.name, actual, c.want)
+		}
+	}
+}
+
 // Current MTU is a gauge; packet event fields are cumulative counters.
 func TestH3DiagnosticQuicCounterDeltasCoverEveryField(t *testing.T) {
 	testH3DiagnosticCounterDeltas(t, subtractH3FullTunQuic, map[string]bool{"CurrentMtu": true})
