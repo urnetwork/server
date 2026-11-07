@@ -17,7 +17,7 @@ type nativeQualificationReleaseHost interface {
 	NativeClassKernel(context.Context, RuntimeResourceBoundarySettings) (RuntimeNativeKernelIdentity, error)
 	NativeClassImage(context.Context, RuntimeResourceBoundary, string, RuntimeResourceBoundarySettings) ([]byte, error)
 	Document(Pin, int64) ([]byte, error)
-	Executable(Pin) error
+	Executable(context.Context, Pin, int64) (int64, error)
 }
 
 // Hashes retain the private raw observations without exposing environment or
@@ -34,6 +34,7 @@ type nativeQualificationKernelReleaseFacts struct {
 	ExecutablePins         []Pin                       `json:"executable_pins"`
 	DocumentPins           []Pin                       `json:"document_pins"`
 	MetadataBytesRead      int64                       `json:"metadata_bytes_read"`
+	ExecutableBytesRead    int64                       `json:"executable_bytes_read"`
 }
 
 // Both snapshots call the actual protected host methods and re-hash every
@@ -42,7 +43,7 @@ type nativeQualificationKernelReleaseFacts struct {
 func captureNativeQualificationKernelRelease(ctx context.Context, boundary RuntimeResourceBoundary, settings RuntimeResourceBoundarySettings, profileSettings CandidateCoreProfileSettings, host nativeQualificationReleaseHost) (facts nativeQualificationKernelReleaseFacts, resultErr error) {
 	facts.Schema = Schema
 	facts.Kind = "runtime-native-kernel-release-observation/v1"
-	if host == nil || settings.NativeBytes <= 0 || settings.NativeBytes == math.MaxInt64 || settings.DocumentBytes <= 0 || settings.DocumentBytes == math.MaxInt64 || settings.MaximumCorePipeLimit <= 0 {
+	if host == nil || settings.NativeBytes <= 0 || settings.NativeBytes == math.MaxInt64 || settings.DocumentBytes <= 0 || settings.DocumentBytes == math.MaxInt64 || settings.ExecutableBytes <= 0 || settings.ExecutableBytes == math.MaxInt64 || settings.MaximumCorePipeLimit <= 0 {
 		return facts, errors.New("native kernel release capture omitted finite bounds")
 	}
 	identity, err := prospectiveNativeQualificationIdentity(boundary)
@@ -128,8 +129,13 @@ func captureNativeQualificationKernelRelease(ctx context.Context, boundary Runti
 			if err := ctx.Err(); err != nil {
 				return facts, err
 			}
-			if err := host.Executable(pin); err != nil {
-				return facts, err
+			count, err := host.Executable(ctx, pin, settings.ExecutableBytes)
+			if count < 0 || count > settings.ExecutableBytes || count > math.MaxInt64-facts.ExecutableBytesRead {
+				return facts, errors.Join(err, errors.New("native executable read counter outside finite bound"))
+			}
+			facts.ExecutableBytesRead += count
+			if err != nil || count == 0 {
+				return facts, errors.Join(err, errors.New("native protected executable absent or outside owner bound"))
 			}
 			if snapshot == 0 {
 				facts.ExecutablePins = append(facts.ExecutablePins, pin)

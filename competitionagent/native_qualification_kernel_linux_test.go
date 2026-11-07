@@ -70,11 +70,17 @@ func (self *nativeQualificationReleaseTestHost) Document(pin Pin, maximum int64)
 }
 
 // No actual executable is run by this fixture.
-func (self *nativeQualificationReleaseTestHost) Executable(pin Pin) error {
-	if self.executableError != nil {
-		return self.executableError
+func (self *nativeQualificationReleaseTestHost) Executable(ctx context.Context, pin Pin, maximum int64) (int64, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	return self.runtimeNativeClassTestHost.Executable(pin)
+	if maximum <= 0 {
+		return 0, errors.New("synthetic executable bound missing")
+	}
+	if self.executableError != nil {
+		return 0, self.executableError
+	}
+	return 1, self.runtimeNativeClassTestHost.Executable(pin)
 }
 
 // Two actual-operation snapshots and exact profiles are required, but these
