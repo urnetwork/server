@@ -358,50 +358,148 @@ func TestTlsRecheckPaceIsCapped(t *testing.T) {
 	})
 }
 
-// Where the site does not work from the provider's country (its scored loads
-// there fail at the pool refresh's incompatibility share, while the country's
-// exits carry its other sites), a TLS failure on it says nothing about the
-// provider: a national block answering with its own certificate. It excludes
-// nobody and is recorded as a place fault. The same failure from a country
-// where the site works is the provider's own.
-func TestTlsFailureWhereTheSiteDoesNotWorkFromTheCountryIsAPlaceFault(t *testing.T) {
+// One run tally at countryCode: siteLoads loads of siteName, siteFailures of
+// them failed, and otherLoads of a working site, otherFailures of them failed.
+func testingTlsPlaceTally(ctx context.Context, at time.Time, countryCode string, siteName string, siteLoads int, siteFailures int, otherLoads int, otherFailures int) {
+	loads := []ProviderEgressSiteLoad{}
+	for i := range siteLoads {
+		loads = append(loads, ProviderEgressSiteLoad{Name: siteName, Ok: siteFailures <= i})
+	}
+	for i := range otherLoads {
+		loads = append(loads, ProviderEgressSiteLoad{Name: "working-site", Ok: otherFailures <= i})
+	}
+	AddProviderEgressRunTally(ctx, at, ProviderEgressRunTally{Place: ProviderEgressPlace{CountryCode: countryCode}}, loads)
+}
+
+// Where the URL's certificate fails for the providers of at least three other
+// networks in the provider's country, and nearly every TLS outcome on it there
+// failed, while the country's exits carry its other sites, a TLS failure on
+// it says nothing about the provider: a national block answering with its own
+// certificate. It excludes nobody and is recorded as a place fault, even where
+// the blocked site's own failures alone bring the country's failure share to
+// one half, as discord's did in Turkey (REVIEW-D1 R2). The same failure from a
+// country where nobody else fails it is the provider's own.
+func TestTlsFailureAcrossTheCountrysNetworksIsAPlaceFault(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		blockedCity := egressTestCity(ctx, "Blocked City", "Blocked Region", "Blocked Country", "zz")
 		openCity := egressTestCity(ctx, "Open City", "Open Region", "Open Country", "zy")
-		inBlocked := egressTestConnect(ctx, t, blockedCity, egressTestUnsampled, nil, nil)
-		inOpen := egressTestConnect(ctx, t, openCity, egressTestUnsampled, nil, nil)
+		blocked := []server.Id{}
+		for range 4 {
+			blocked = append(blocked, egressTestConnect(ctx, t, blockedCity, egressTestUnsampled, nil, nil).clientId)
+		}
+		inOpen := egressTestConnect(ctx, t, openCity, egressTestUnsampled, nil, nil).clientId
+		all := append(append([]server.Id{}, blocked...), inOpen)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Truncate(time.Microsecond)
 
 		site := testingTlsSite("blocked-site", "https://blocked.example/")
-		tally := func(countryCode string, siteFailures int) {
-			loads := []ProviderEgressSiteLoad{}
-			for i := range 40 {
-				loads = append(loads, ProviderEgressSiteLoad{Name: site.Name, Ok: siteFailures <= i})
-			}
-			for range 200 {
-				loads = append(loads, ProviderEgressSiteLoad{Name: "working-site", Ok: true})
-			}
-			AddProviderEgressRunTally(ctx, now, ProviderEgressRunTally{Place: ProviderEgressPlace{CountryCode: countryCode}}, loads)
+		testingTlsPlaceTally(ctx, now, "zz", site.Name, 400, 400, 600, 100)
+		testingTlsPlaceTally(ctx, now, "zy", site.Name, 400, 2, 600, 10)
+		for i, clientId := range all {
+			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(i)*time.Second), true))
 		}
-		tally("zz", 39)
-		tally("zy", 2)
-
-		SetProviderEgressHealth(ctx, testingTlsUrlResult(inBlocked.clientId, time.Time{}, site, now, true))
-		SetProviderEgressHealth(ctx, testingTlsUrlResult(inOpen.clientId, time.Time{}, site, now, true))
 		testingJudgeTlsFindings(t, ctx, now.Add(time.Minute), []string{site.Name, "working-site"}, map[string]string{"blocked.example": "verified"})
 
-		excluded := testingTlsExcluded(t, ctx, []server.Id{inBlocked.clientId, inOpen.clientId})
-		if excluded[inBlocked.clientId] {
-			t.Fatal("a TLS failure on a site that fails from the whole country excluded the provider")
+		excluded := testingTlsExcluded(t, ctx, all)
+		for _, clientId := range blocked {
+			if excluded[clientId] {
+				t.Fatal("a TLS failure on a URL whose certificate fails across the country's networks excluded the provider")
+			}
+			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "place" {
+				t.Fatalf("a failure the country's other networks share was judged %q", verdict)
+			}
 		}
-		if verdict := testingTlsVerdict(t, ctx, inBlocked.clientId, site.Url); verdict != "place" {
-			t.Fatalf("a failure where the site does not work from the country was judged %q", verdict)
+		if !excluded[inOpen] {
+			t.Fatal("a TLS failure nobody else in the country shares did not exclude the provider")
 		}
-		if !excluded[inOpen.clientId] {
-			t.Fatal("a TLS failure where the site works from the country did not exclude the provider")
+	})
+}
+
+// Seventeen providers on one network can fill a low-volume country's site
+// tally with their own failing draws (REVIEW-D1 R2), which before the
+// hardening read as the site not working from the country, so a provider
+// that intercepts was released. The farm's network is each finding's own,
+// and none of it counts: every farm provider that fails TLS where the URL
+// verifies directly is excluded.
+func TestTlsPlaceCannotBeManufacturedOnOneNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Farm City", "Farm Region", "Farm Country", "zz")
+		network := server.NewId()
+		farm := []server.Id{}
+		for range 5 {
+			farm = append(farm, egressTestConnectOn(ctx, t, network, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		now = server.NowUtc().Truncate(time.Microsecond)
+
+		site := testingTlsSite("bank", "https://bank.example/")
+		// the farm's own draws: every load of the site failed, while the
+		// country's other loads work
+		testingTlsPlaceTally(ctx, now, "zz", site.Name, 40, 40, 200, 0)
+		for i, clientId := range farm {
+			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(i)*time.Second), true))
+		}
+		testingJudgeTlsFindings(t, ctx, now.Add(time.Minute), []string{site.Name, "working-site"}, map[string]string{"bank.example": "verified"})
+
+		excluded := testingTlsExcluded(t, ctx, farm)
+		if len(excluded) != len(farm) {
+			t.Fatalf("a farm on one network manufactured a place fault: %d of %d of its providers excluded", len(excluded), len(farm))
+		}
+		for _, clientId := range farm {
+			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "provider" {
+				t.Fatalf("a farm provider's failure was judged %q", verdict)
+			}
+		}
+	})
+}
+
+// A farm on four networks resets the site's handshakes for days, failing
+// every load of it in the site tally while leaving no TLS finding, then
+// intercepts it. Its providers now see each other's findings on three other
+// networks, but the country's honest providers verify the URL, and only TLS
+// verification outcomes count, never resets: the farm builds no place, and
+// every one of its providers is excluded.
+func TestTlsResetsBeforeAnInterceptionBuildNoPlace(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Farm City", "Farm Region", "Farm Country", "zz")
+		farm := []server.Id{}
+		for range 4 {
+			farm = append(farm, egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		honest := []server.Id{}
+		for range 2 {
+			honest = append(honest, egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		now = server.NowUtc().Truncate(time.Microsecond)
+
+		site := testingTlsSite("bank", "https://bank.example/")
+		// days of resets: every load of the site failed, with no TLS finding
+		testingTlsPlaceTally(ctx, now, "zz", site.Name, 40, 40, 200, 0)
+		for i, clientId := range honest {
+			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(i)*time.Second), false))
+		}
+		for i, clientId := range farm {
+			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(10+i)*time.Second), true))
+		}
+		testingJudgeTlsFindings(t, ctx, now.Add(time.Minute), []string{site.Name, "working-site"}, map[string]string{"bank.example": "verified"})
+
+		excluded := testingTlsExcluded(t, ctx, append(append([]server.Id{}, farm...), honest...))
+		for _, clientId := range farm {
+			if !excluded[clientId] {
+				t.Fatal("days of resets, then an interception, released a farm provider as a place fault")
+			}
+		}
+		for _, clientId := range honest {
+			if excluded[clientId] {
+				t.Fatal("a provider that verified the URL was excluded")
+			}
 		}
 	})
 }

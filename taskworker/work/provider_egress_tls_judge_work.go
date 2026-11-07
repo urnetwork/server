@@ -77,7 +77,7 @@ var providerEgressTlsVerdictsTotal = prometheus.NewCounterVec(prometheus.Counter
 	Namespace: "urnetwork",
 	Subsystem: "egress_tls",
 	Name:      "verdicts_total",
-	Help:      "TLS findings the judge moved to each verdict: pending (including a retired finding whose URL is served again), provider (excludes the provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the pool has not served the URL for a day)",
+	Help:      "TLS findings the judge moved to each verdict: pending (including a retired finding whose URL is served again), provider (excludes the provider), site (site or prober fault), place (a national block: the URL's certificate fails across other networks in the provider's country), retired (the pool has not served the URL for a day)",
 }, []string{"verdict"})
 
 // What the newest judged run on this process left behind. The judge runs on
@@ -88,7 +88,7 @@ var providerEgressTlsFindings = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "egress_tls",
 	Name:      "findings",
-	Help:      "Unresolved exact-URL TLS findings by verdict after this process's newest judged run (urnetwork_egress_tls_judge_last_judged_timestamp_seconds): pending (not judged yet, excludes nobody), provider (excludes its provider), site (site or prober fault), place (the site does not work from the provider's country), retired (the pool has not served the URL for a day)",
+	Help:      "Unresolved exact-URL TLS findings by verdict after this process's newest judged run (urnetwork_egress_tls_judge_last_judged_timestamp_seconds): pending (not judged yet, excludes nobody), provider (excludes its provider), site (site or prober fault), place (a national block: the URL's certificate fails across other networks in the provider's country), retired (the pool has not served the URL for a day)",
 }, []string{"verdict"})
 
 var providerEgressTlsUndecidedFindings = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -479,8 +479,8 @@ func logProviderEgressTlsJudgements(moved []*model.ProviderEgressTlsJudgement) {
 	for key, judgements := range places {
 		first := judgements[0]
 		glog.Infof(
-			"[egress]TLS place fault: destination=%s country=%s site_loads=%d site_failures=%d country_loads=%d country_failures=%d findings=%d; the site does not work from this country, and no provider is excluded for it\n",
-			key.name, key.countryCode, first.SiteLoads, first.SiteFailures, first.PlaceLoads, first.PlaceFailures, len(judgements),
+			"[egress]TLS place fault: destination=%s country=%s other_networks=%d other_failed=%d other_verified=%d country_loads=%d country_failures=%d findings=%d; the URL's certificate fails across this country's networks, and no provider is excluded for it\n",
+			key.name, key.countryCode, first.PlaceNetworks, first.PlaceFailed, first.PlaceVerified, first.CountryLoads, first.CountryFailures, len(judgements),
 		)
 	}
 	for name, count := range retired {

@@ -47,6 +47,12 @@ func TestTlsJudgeSettingsAreTheProbeAndRefreshConventions(t *testing.T) {
 	if settings.PlaceFailShare != 0.9 || settings.PlaceMinSamples != 30 || settings.PlaceWorkingShare != 0.5 {
 		t.Errorf("place rule %v/%d/%v is not the refresh's incompatibility and retirement lines", settings.PlaceFailShare, settings.PlaceMinSamples, settings.PlaceWorkingShare)
 	}
+	if settings.PlaceMinNetworks != ProviderClientVerdictQuorum {
+		t.Errorf("place network floor %d is not the distinct-network quorum", settings.PlaceMinNetworks)
+	}
+	if settings.PlaceMinNetworks != 3 {
+		t.Errorf("place network floor %d is not three", settings.PlaceMinNetworks)
+	}
 	if settings.CommonModeNetworkCount != 16 {
 		t.Errorf("common-mode network count %d is not the URL common-mode guard's", settings.CommonModeNetworkCount)
 	}
@@ -60,8 +66,8 @@ func TestTlsJudgeDecidesEachFindingOnEvidenceCloseToIt(t *testing.T) {
 	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
 	now := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
 	earlier := now.Add(-2 * time.Hour)
-	working := providerEgressTlsPlaceEvidence{siteLoads: 30, siteFailures: 2, placeLoads: 1000, placeFailures: 50}
-	blocked := providerEgressTlsPlaceEvidence{siteLoads: 30, siteFailures: 27, placeLoads: 1000, placeFailures: 80}
+	working := providerEgressTlsPlaceEvidence{networks: 3, failed: 3, verified: 27, countryLoads: 1000, countryFailures: 50}
+	blocked := providerEgressTlsPlaceEvidence{networks: 3, failed: 27, verified: 3, countryLoads: 1000, countryFailures: 80}
 	finding := func(age time.Duration, verdict ProviderEgressTlsVerdict, decidedAt *time.Time) *ProviderEgressTlsFinding {
 		return &ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: "url", Name: "site", Url: "https://site.example/",
 			MeasuredAt: now.Add(-age), Verdict: verdict, VerdictMeasuredAt: decidedAt, CountryCode: "zz"}
@@ -95,13 +101,13 @@ func TestTlsJudgeDecidesEachFindingOnEvidenceCloseToIt(t *testing.T) {
 		{"the server's own check fails", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectFailed, working, ProviderEgressTlsVerdictSite, true},
 		{"inconclusive stays pending", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectInconclusive, working, ProviderEgressTlsVerdictPending, false},
 		{"inconclusive never lifts a quarantine", finding(time.Minute, ProviderEgressTlsVerdictProvider, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectInconclusive, working, ProviderEgressTlsVerdictProvider, false},
-		{"the site does not work from the place", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, blocked, ProviderEgressTlsVerdictPlace, true},
-		{"one load short of the place rule", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified,
-			providerEgressTlsPlaceEvidence{siteLoads: 29, siteFailures: 29, placeLoads: 1000, placeFailures: 80}, ProviderEgressTlsVerdictProvider, true},
+		{"the URL's certificate fails across the place's networks", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, blocked, ProviderEgressTlsVerdictPlace, true},
+		{"one other network short of the place rule", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified,
+			providerEgressTlsPlaceEvidence{networks: 2, failed: 27, verified: 0, countryLoads: 1000, countryFailures: 80}, ProviderEgressTlsVerdictProvider, true},
 		{"below the place failure share", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified,
-			providerEgressTlsPlaceEvidence{siteLoads: 100, siteFailures: 89, placeLoads: 1000, placeFailures: 120}, ProviderEgressTlsVerdictProvider, true},
+			providerEgressTlsPlaceEvidence{networks: 9, failed: 89, verified: 11, countryLoads: 1000, countryFailures: 120}, ProviderEgressTlsVerdictProvider, true},
 		{"a place whose exits fail most sites judges none", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified,
-			providerEgressTlsPlaceEvidence{siteLoads: 30, siteFailures: 30, placeLoads: 100, placeFailures: 50}, ProviderEgressTlsVerdictProvider, true},
+			providerEgressTlsPlaceEvidence{networks: 3, failed: 30, verified: 0, countryLoads: 100, countryFailures: 50}, ProviderEgressTlsVerdictProvider, true},
 		{"an unknown country has no place", &ProviderEgressTlsFinding{Name: "site", Url: "https://site.example/", MeasuredAt: now.Add(-time.Minute)}, served, 1, ProviderEgressTlsDirectVerified, blocked, ProviderEgressTlsVerdictProvider, true},
 		{"a decided failure is not judged again", finding(10*time.Minute, ProviderEgressTlsVerdictSite, decidedAt(10*time.Minute)), served, 1, ProviderEgressTlsDirectVerified, working, ProviderEgressTlsVerdictSite, false},
 		{"a newer failure of a decided finding is judged", finding(time.Minute, ProviderEgressTlsVerdictSite, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectVerified, working, ProviderEgressTlsVerdictProvider, true},
@@ -293,5 +299,108 @@ func TestTlsVerdictsExcludeAndRecheckOnlyWhatMayBeTheProviders(t *testing.T) {
 	}
 	if got := providerUrlSecurityRechecksSql("s"); got != "(s.tls_failure AND s.tls_verdict IN (0, 1))" {
 		t.Errorf("recheck predicate %q", got)
+	}
+}
+
+// The place rule, one condition at a time at its boundary.
+func TestTlsPlaceRuleNeedsOtherNetworksTheirTlsOutcomesAndAWorkingCountry(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	met := providerEgressTlsPlaceEvidence{networks: 3, failed: 9, verified: 1, countryLoads: 30, countryFailures: 14}
+	if !met.broken(settings) {
+		t.Fatalf("evidence meeting every condition at its boundary is not a place fault: %+v", met)
+	}
+	for _, c := range []struct {
+		name   string
+		change func(*providerEgressTlsPlaceEvidence)
+	}{
+		{"two other networks", func(e *providerEgressTlsPlaceEvidence) { e.networks = 2 }},
+		{"no failed outcome among the other networks' providers", func(e *providerEgressTlsPlaceEvidence) { e.failed, e.verified = 0, 0 }},
+		{"just under nine in ten of the other networks' outcomes failed", func(e *providerEgressTlsPlaceEvidence) { e.verified = 2 }},
+		{"fewer than thirty loads of the country's other sites", func(e *providerEgressTlsPlaceEvidence) { e.countryLoads = 29 }},
+		{"the country's exits fail half their other loads", func(e *providerEgressTlsPlaceEvidence) { e.countryFailures = 15 }},
+	} {
+		evidence := met
+		c.change(&evidence)
+		if evidence.broken(settings) {
+			t.Errorf("%s: judged a place fault on %+v", c.name, evidence)
+		}
+	}
+}
+
+// Seeded from the review's proof (REVIEW-D1 R2): about seventeen providers on
+// one network filled the site tally of a low-volume country with their own
+// draws, all failing, and the next failed recheck of a provider already judged
+// its own was released as "place". The farm's network is the finding's own,
+// so none of its findings, outcomes or loads count: the provider verdict holds.
+func TestTlsPlaceCannotBeManufacturedByOneNetwork(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	now := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	network := server.NewId()
+	countryLocationId := server.NewId()
+	decidedAt := now.Add(-2 * time.Hour)
+	findings := []*ProviderEgressTlsFinding{}
+	for range 17 {
+		findings = append(findings, &ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: "u", Name: "bank", Url: "https://bank.example/",
+			MeasuredAt: now.Add(-time.Minute), Verdict: ProviderEgressTlsVerdictProvider, VerdictMeasuredAt: &decidedAt,
+			NetworkId: &network, CountryCode: "zz", CountryLocationId: &countryLocationId})
+	}
+	judged := make([]bool, len(findings))
+	for i := range judged {
+		judged[i] = true
+	}
+	// no read happens: one network never reaches the other-network floor
+	evidence := getProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, judged)
+	for i, place := range evidence {
+		if place.networks != 0 || place.broken(settings) {
+			t.Fatalf("farm finding %d counted its own network as place evidence: %+v", i, place)
+		}
+		verdict, _ := judgeProviderEgressTlsFinding(now, findings[i], providerEgressTlsServed, 0, ProviderEgressTlsDirectVerified, place, settings)
+		if verdict != ProviderEgressTlsVerdictProvider {
+			t.Fatalf("a single-network farm's recheck failure was judged %s", verdict)
+		}
+	}
+}
+
+// Seeded from the review's proof (REVIEW-D1 R2): the country-works share
+// counted the blocked site's own failures. On the live Turkish tally of
+// 2026-11-07 (5458 loads, 2866 failed; discord 1436 of 1436 failed, roblox
+// 973 of 973) the share with discord is 0.525, so the block was never a
+// place fault; over the other sites it is 1430 of 4022, 0.356.
+func TestTlsPlaceWorkingShareLeavesOutTheBlockedSite(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	turkey := providerEgressTlsCountryTally{loads: 5458, failures: 2866, sites: map[string]providerEgressTlsCountryTally{
+		"discord": {loads: 1436, failures: 1436},
+		"roblox":  {loads: 973, failures: 973},
+	}}
+	if share := float64(turkey.failures) / float64(turkey.loads); share < settings.PlaceWorkingShare {
+		t.Fatalf("the precondition failed: Turkey's share with discord is %.3f", share)
+	}
+	loads, failures := turkey.without("discord")
+	if loads != 4022 || failures != 1430 {
+		t.Fatalf("Turkey without discord: %d loads, %d failed", loads, failures)
+	}
+	place := providerEgressTlsPlaceEvidence{networks: 4, failed: 11, verified: 1, countryLoads: loads, countryFailures: failures}
+	if !place.broken(settings) {
+		t.Fatalf("a block whose own failures alone push the country over the line is no place fault: %+v", place)
+	}
+}
+
+// A site whose handshakes were reset for days, then intercepted, fills the
+// site tally with failures but holds no TLS outcome from anyone else, so it
+// builds no place, and neither do resets the other networks see: only their
+// TLS verification outcomes count.
+func TestTlsResetsCountForNothingTowardPlace(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	for _, place := range []providerEgressTlsPlaceEvidence{
+		// the farm alone: its resets are no TLS outcome, and its network is
+		// its own
+		{networks: 0, failed: 0, verified: 0, countryLoads: 4000, countryFailures: 600},
+		// three other networks intercept too, while the honest providers
+		// there verify the URL
+		{networks: 3, failed: 3, verified: 2, countryLoads: 4000, countryFailures: 600},
+	} {
+		if place.broken(settings) {
+			t.Errorf("judged a place fault on %+v", place)
+		}
 	}
 }

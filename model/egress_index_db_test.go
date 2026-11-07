@@ -81,6 +81,20 @@ func egressTestConnect(
 	scores *ConnectionLocationScores,
 ) *egressTestProvider {
 	t.Helper()
+	return egressTestConnectOn(ctx, t, server.NewId(), location, performance, modes, scores)
+}
+
+// The same, on networkId, so several providers can share one network.
+func egressTestConnectOn(
+	ctx context.Context,
+	t testing.TB,
+	networkId server.Id,
+	location *Location,
+	performance egressTestPerformance,
+	modes map[ProvideMode][]byte,
+	scores *ConnectionLocationScores,
+) *egressTestProvider {
+	t.Helper()
 	if modes == nil {
 		modes = egressTestPublicAndNetwork
 	}
@@ -89,7 +103,7 @@ func egressTestConnect(
 	}
 	provider := &egressTestProvider{
 		clientId:  server.NewId(),
-		networkId: server.NewId(),
+		networkId: networkId,
 	}
 	Testing_CreateDevice(ctx, provider.networkId, server.NewId(), provider.clientId, "", "")
 	handlerId := CreateNetworkClientHandler(ctx)
