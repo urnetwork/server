@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "kind": "competition-operator-recovery-prepared-release-qualification/v1",
+  "recorded_at": "2026-11-07T00:18:11Z",
+  "status": "qualified artifacts prepared; runtime activation pending",
+  "server_commit": "1f939c82cb399c075306689976699ccaf26f8cf6",
+  "canonical_sn_commit": "8543b3b8efd6cdd0f0ffd51a827ccccc32d62960",
+  "canonical_sdk_commit": "5517f0356d68ca876b8d8087811955a08e3f262d",
+  "other_canonical_dependencies_unchanged": true,
+  "go_version": "go1.27.3",
+  "qualification": {
+    "ordinary_tests":249,"race_tests":249,"postgres_tests":18,
+    "failures":0,"skips":0,"race_findings":0,
+    "static_service_consumer_builds":6,"static_native_binaries":3,
+    "image_audit_helper_ordinary_roots":4,"image_audit_helper_race_roots":4,
+    "full_go_and_embed_source_continuity_verified":true,
+    "actual_image_build_save_load_and_native_extraction_verified_on_goofe":true,
+    "not_a_standalone_sn_or_complete_product_graph_qualification":true
+  },
+  "artifacts_directory": "/home/by/urnetwork/temp/competition-operator-release-20261106.zFmyrhQk",
+  "final_addendum_sha256": "321cac89348baf50cf7ddef2324322fcb4c6fc023d7f168f532c834e90d0f2ed",
+  "native_qualification_receipt_sha256": "43481fea3e7ba374e6fc06385fd9cd00ec9c02d22497012c009cc1d181104eb7",
+  "image_audit_receipt_sha256": "00e6f01bade43d2630c582acd10b47df6a1aff6951fa0fc69e516be6ae5f427d",
+  "worker_native_sha256": "48e10a2150b36ed17fbbbfecae5b9bcb35a28fde74bf1bc09b78a45287d2e171",
+  "supervisor_native_sha256": "1c0519e4cb5bc57c6a9f9efd80ed89f7c548580c0ec1a1de30be6487f87f59f3",
+  "recovery_cli_native_sha256": "7147f7c2760f4aed17fa0f42e15740c25509d73e2887e3b6119cf6bcd74252db",
+  "worker_image_archive_sha256": "9b6ba8da22c58e0a0a4cf02464f7cbbc8f832af474ff84b107dddaad29f8d715",
+  "observed_goofe_image_oci_id": "sha256:e8c6bbd31b613ab71a0efad1e385ffd9fca617fb42579c31393cdd1020298383",
+  "archive_config_digest": "sha256:63b43292a6b0a77eb28055b7abe756608cc776c163bfa825c8dd09a6d7eb1bfe",
+  "actual_sille_loaded_image_id": null,
+  "preserved_earlier_packaging_failures": true,
+  "activation_requirements": [
+    "Verify the new operator-interruption migration and main API deployment.",
+    "Wait until the six existing CBC-pinned recovery cycles are no longer runnable; never relax or fake the image pin.",
+    "Establish an approved idle/fencing boundary; load and inspect the archive on Sille and observe its actual image identity.",
+    "Install immutable root-owned control artifacts/profile, check exact native identities, settings and live readiness.",
+    "Refresh the seventh job's exact terminal/incident/stop evidence, source/baseline and scoped runtime acceptance before issuing its single-use grant."
+  ],
+  "authority_scope": "Prepared control-release artifacts only: no new production worker, database migration, runtime acceptance, seventh-job grant, epoch-two activation or winner authority is asserted. Existing E7/CBC execution and frozen epoch-one inputs remain unchanged."
+}
