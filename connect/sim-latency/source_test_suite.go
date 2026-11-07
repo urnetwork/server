@@ -70,6 +70,12 @@ func countSourceCorrectnessTests(output []byte) (int, error) {
 // Prospective policies require every additional named root, not a successful
 // historical package run that silently omits the new instrument's tests.
 func countSourceCorrectnessTestsForMinimumWork(output []byte, minimumWork bool) (int, error) {
+	return countSourceCorrectnessTestEvents(output, sourceCorrectnessRequiredTestsForMinimumWork(minimumWork))
+}
+
+// Every required package/name must have one actual passing event. Prefix-only
+// selection, printed summaries and skipped coverage roots confer no authority.
+func countSourceCorrectnessTestEvents(output []byte, required map[string][]string) (int, error) {
 	decoder := json.NewDecoder(bytes.NewReader(output))
 	states, packages := map[string]string{}, map[string]bool{}
 	running := map[string]int{}
@@ -115,7 +121,7 @@ func countSourceCorrectnessTestsForMinimumWork(output []byte, minimumWork bool) 
 			}
 		}
 	}
-	for pkg, names := range sourceCorrectnessRequiredTestsForMinimumWork(minimumWork) {
+	for pkg, names := range required {
 		if !packages[pkg] {
 			return 0, errors.New("correctness suite did not complete a required package")
 		}
@@ -131,7 +137,8 @@ func countSourceCorrectnessTestsForMinimumWork(output []byte, minimumWork bool) 
 // Called only through the prescribed-test tool. No model input selects the
 // command, image mount, cache, credentials or authority of this executor.
 func executeSourceCorrectnessSuite(ctx context.Context, request reviewedSourceBuildRequest, artifacts sourceBuildArtifacts, owner string, settings sourceBuildSandboxSettings, docker sourceBuildDocker) (*sourceTestExecution, error) {
-	if err := validateSourceBuildRequest(request); err != nil {
+	suite, err := sourceCorrectnessSuiteForRequest(request)
+	if err != nil {
 		return nil, err
 	}
 	if artifacts.Directory != filepath.Join(settings.StateDirectory, owner) || !validSha256(owner) ||
@@ -160,8 +167,7 @@ func executeSourceCorrectnessSuite(ctx context.Context, request reviewedSourceBu
 	if err := os.Mkdir(phaseDirectory, 0o700); err != nil {
 		return nil, err
 	}
-	minimumWork := sourceBuildRequestMinimumWork(request)
-	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", MinimumWork: minimumWork, ImageId: artifacts.ImageId, Commit: request.Proposal.Commits["server"],
+	input := sourceBuildSandboxInput{Owner: owner, Phase: "correctness", MinimumWork: suite.minimumWork, WorkCoveragePolicy: suite.workCoveragePolicy.Clone(), ImageId: artifacts.ImageId, Commit: request.Proposal.Commits["server"],
 		SourceDirectory: filepath.Join(artifacts.Directory, "source"), MetadataDirectory: filepath.Join(phaseDirectory, "metadata"), OutputDirectory: filepath.Join(phaseDirectory, "output")}
 	if err := os.Mkdir(input.OutputDirectory, 0o700); err != nil {
 		return nil, err
@@ -179,7 +185,7 @@ func executeSourceCorrectnessSuite(ctx context.Context, request reviewedSourceBu
 	if executionErr != nil {
 		return nil, executionErr
 	}
-	count, err := countSourceCorrectnessTestsForMinimumWork(output, minimumWork)
+	count, err := countSourceCorrectnessTestEvents(output, suite.requiredTests)
 	if err != nil {
 		return nil, err
 	}
@@ -194,6 +200,6 @@ func executeSourceCorrectnessSuite(ctx context.Context, request reviewedSourceBu
 	if err := writePrivateReviewFile(filepath.Join(phaseDirectory, "test-logs.json"), content); err != nil {
 		return nil, err
 	}
-	return &sourceTestExecution{ImageId: artifacts.ImageId, SuiteSha256: sourceCorrectnessSuiteDigestForMinimumWork(minimumWork), ExitCode: 0,
+	return &sourceTestExecution{ImageId: artifacts.ImageId, SuiteSha256: suite.sha256, ExitCode: 0,
 		TestCount: count, DurationMillis: time.Since(started).Milliseconds(), TestLogsSha256: hex.EncodeToString(digest[:])}, nil
 }

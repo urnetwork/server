@@ -71,15 +71,23 @@ func planG2InstrumentBaseImage(approval model.CompetitionTrustedInstrumentApprov
 		return nil, err
 	}
 	sourcePath := g2InstrumentBaseTechnicalNamespace(g2InstrumentBaseTechnicalOwner(approval.ApprovalSha256, approval.InstrumentBaseImageDigest)) + "/source"
-	identity, err := json.MarshalIndent(map[string]any{
+	scorerVersion, err := model.CompetitionScorerVersionForWorkCoverage(approval.G2VolumePolicy, approval.WorkCoveragePolicy)
+	if err != nil {
+		return nil, err
+	}
+	identityFields := map[string]any{
 		"schema": 1, "image_kind": "evaluator-instrument-qualification", "scope": "incumbent-plus-approved-instrument-technical-only",
 		"production_eligible": false, "runtime_qualified": false, "instrument_approval_sha256": approval.ApprovalSha256,
 		"instrument_patch_sha256": approval.PatchSha256, "incumbent_source_lock_sha256": approval.InstrumentBaseSourceLockSha256,
 		"incumbent_image_digest": approval.InstrumentBaseImageDigest, "instrumented_server_commit": child, "instrumented_server_tree": tree,
 		"source_lock_sha256": hex.EncodeToString(lockDigest[:]), "simulator_sha256": binarySha256,
 		"source_lock_file_sha256": hex.EncodeToString(lockDigest[:]), "canonical_child_source_lock_sha256": canonicalLock, "technical_source_path": sourcePath,
-		"g2_volume_policy": model.CompetitionG2VolumePolicyMinimumWork, "scorer_version": model.CompetitionMinimumWorkScorerVersion,
-	}, "", "  ")
+		"g2_volume_policy": model.CompetitionG2VolumePolicyMinimumWork, "scorer_version": scorerVersion,
+	}
+	if approval.WorkCoveragePolicy != nil {
+		identityFields["work_coverage_policy"] = approval.WorkCoveragePolicy.Clone()
+	}
+	identity, err := json.MarshalIndent(identityFields, "", "  ")
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +193,8 @@ func g2InstrumentBaseCliArguments(owner, image, phase string, settings sourceBui
 			"test \"$actual\" = \"$expected\"; " +
 			"status=$(git -c safe.directory=\"$root/$repository\" -c core.hooksPath=/dev/null -c core.fsmonitor=false --no-optional-locks -C \"$root/$repository\" status --porcelain=v1 --untracked-files=all --ignored=matching); " +
 			"test -z \"$status\"; done"}
+	} else if phase == "coverage-policy" {
+		command = append(command, "--work-coverage-policy="+model.CompetitionWorkCoverageKind)
 	} else if phase != "policy" {
 		return nil, errors.New("technical instrument CLI probe command is not permitted")
 	}
@@ -195,6 +205,35 @@ func g2InstrumentBaseCliArguments(owner, image, phase string, settings sourceBui
 		"--label=com.urnetwork.instrument-qualification.owner=" + owner, "--label=com.urnetwork.instrument-qualification.phase=" + phase,
 		"--entrypoint=" + entrypoint, image}
 	return append(args, command...), nil
+}
+
+// Only an explicit validated approval chooses the new fixed CLI operation.
+// The historical nil-policy phase/argv stays byte-for-byte unchanged.
+func g2InstrumentBasePolicyPhase(coverage *model.CompetitionWorkCoveragePolicy) string {
+	if coverage != nil {
+		return "coverage-policy"
+	}
+	return "policy"
+}
+
+// Technical capability output must match the full approved relative policy;
+// neither a version string nor kind-only claim proves page/byte floor support.
+func validateG2InstrumentBaseScorePolicy(content []byte, coverage *model.CompetitionWorkCoveragePolicy) error {
+	expectedVersion, err := model.CompetitionScorerVersionForWorkCoverage(model.CompetitionG2VolumePolicyMinimumWork, coverage)
+	if err != nil {
+		return err
+	}
+	var actual struct {
+		ScoreSchema        int                                  `json:"score_schema"`
+		G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy"`
+		ScorerVersion      string                               `json:"scorer_version"`
+		WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy"`
+	}
+	if json.Unmarshal(content, &actual) != nil || actual.ScoreSchema != 1 || actual.G2VolumePolicy != model.CompetitionG2VolumePolicyMinimumWork ||
+		actual.ScorerVersion != expectedVersion || !reflect.DeepEqual(actual.WorkCoveragePolicy, coverage) {
+		return errors.New("technical compiled CLI does not implement the approved scoring policy")
+	}
+	return nil
 }
 
 // The exact name is checked both before execution and before owned cleanup.
