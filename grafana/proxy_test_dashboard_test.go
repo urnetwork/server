@@ -87,10 +87,12 @@ const (
 	proxyTestSlowestPanel        = 24
 	proxyTestFailureRatePanel    = 25
 	proxyTestLatestRunPanel      = 26
+	proxyTestFastestPanel        = 27
+	proxyTestSuccessRatePanel    = 28
 )
 
 // The panels that follow the country variable, and those over every country.
-var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel}
+var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel, proxyTestFastestPanel, proxyTestSuccessRatePanel}
 var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel}
 
 // The fields of the document that testDashboard does not read.
@@ -618,6 +620,12 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 	expect(proxyTestSlowestPanel, "A", `sort_desc(topk(20, max by (country) (urnetwork_proxy_test_phase_seconds_window{env="main",country=~"$country",phase="setup",stat="p90"})))`)
 	panel(proxyTestFailureRatePanel, "bargauge", "percentunit")
 	contains(proxyTestFailureRatePanel, "A", "topk(20, ", `outcome!="ok"}[24h]`, `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`)
+	// and their counterparts: the fastest 20 by setup p90, and the highest
+	// success rates among countries with at least 3 runs in 24 h
+	panel(proxyTestFastestPanel, "bargauge", "s")
+	expect(proxyTestFastestPanel, "A", `sort(bottomk(20, max by (country) (urnetwork_proxy_test_phase_seconds_window{env="main",country=~"$country",phase="setup",stat="p90"})))`)
+	panel(proxyTestSuccessRatePanel, "bargauge", "percentunit")
+	contains(proxyTestSuccessRatePanel, "A", "sort_desc(topk(20, ", `outcome="ok"}[24h]`, `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`, ">= 3)")
 
 	// the newest values per country
 	panel(proxyTestLatestRunPanel, "table", "")
@@ -867,6 +875,8 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		{proxyTestCountryTablePanel, "K", by("country", map[string]float64{"de": 1440, "fr": 0, "jp": 0, "us": 0})},
 		{proxyTestSlowestPanel, "A", by("country", map[string]float64{"de": 4.5, "jp": 2})},
 		{proxyTestFailureRatePanel, "A", by("country", map[string]float64{"de": 0.25, "fr": 1})},
+		{proxyTestFastestPanel, "A", by("country", map[string]float64{"de": 4.5, "jp": 2})},
+		{proxyTestSuccessRatePanel, "A", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1})},
 		{proxyTestLatestRunPanel, "A", lastTested},
 		{proxyTestLatestRunPanel, "B", by("country", map[string]float64{"de": 0, "jp": 18000, "us": 0})},
 		{proxyTestLatestRunPanel, "C", by("country", map[string]float64{"de": 0.5})},
