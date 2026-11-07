@@ -12,6 +12,7 @@
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "current_observation": {
+    "epoch2_frozen_overlay_compile": {"record":"EPOCH2-FROZEN-OVERLAY-COMPILE-2026-11-07.json","compile_phases_passed":5,"product_code_executed":false,"runtime_qualified":false,"overlay_approved":false,"later_successors_require_separate_qualification":true},
     "observed_at": "2026-11-07T01:24:31.521878897Z",
     "latest_completed_recovery": {"record":"RECOVERY-FIRST-SUCCESS-2026-11-07.json","job_id":"01a189ac-2c92-4acb-204f-d37a1a24838b","cycle":1,"attempt_count":3,"state":"succeeded","completed_at":"2026-11-07T01:24:17.853181Z","owner_score_present":true},
     "latest_connectivity_incident": {"record":"CONNECTIVITY-INTERRUPTION-2026-11-07.json","operator_confirmed_cause":"Internet dropped during maintenance","automatic_reclaim_at":"2026-11-07T00:00:33.876002Z","new_manager_fencing_token":30,"new_cycle_or_fee_created":false,"no_new_code_defect_established":true},
