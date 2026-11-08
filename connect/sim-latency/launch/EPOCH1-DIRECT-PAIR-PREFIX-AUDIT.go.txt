@@ -1,0 +1,92 @@
+// Read-only operator audit; mounted into a test build with the frozen prompt
+// projection. It cannot send inference requests or mutate an existing owner.
+package main
+
+import (
+ "bytes"
+ "context"
+ "encoding/json"
+ "fmt"
+ "io"
+ "os"
+ "path/filepath"
+ "testing"
+ "time"
+
+ "github.com/urnetwork/server"
+)
+
+// Every supplied path/digest is operator-owned input. No live identity is a
+// test fixture and this command never runs without explicit audit opt-in.
+func TestDirectPairExistingPrefixAuditCommand(t *testing.T) {
+ if os.Getenv("DIRECT_PAIR_PREFIX_AUDIT") != "1" { t.Skip("explicit read-only audit only") }
+ readPinned := func(path, digest string) []byte {
+  content, err := os.ReadFile(path)
+  if err != nil || !validSha256(digest) || winnerMultipassSha256(content) != digest { t.Fatalf("pinned audit input differs: %s: %v", filepath.Base(path), err) }
+  return content
+ }
+ directory := os.Getenv("DIRECT_PAIR_AUDIT_DIRECTORY")
+ ownerBytes := readPinned(filepath.Join(directory,"owner.json"),os.Getenv("DIRECT_PAIR_AUDIT_OWNER_SHA256"))
+ _ = ownerBytes // The continuation reader independently compares the clock.
+ planBytes := readPinned(filepath.Join(directory,"plan.json"),os.Getenv("DIRECT_PAIR_AUDIT_PLAN_SHA256"))
+ preparedBytes := readPinned(os.Getenv("DIRECT_PAIR_AUDIT_PREPARED"),os.Getenv("DIRECT_PAIR_AUDIT_PREPARED_SHA256"))
+ var plan winnerMultipassPlan
+ var prepared electedWinnerReviewPrepared
+ if err := decodeStrictJSONBytes(planBytes,&plan,"audit plan"); err != nil { t.Fatal(err) }
+ if err := decodeStrictJSONBytes(preparedBytes,&prepared,"audit prepared source"); err != nil { t.Fatal(err) }
+ config, ok := server.LoadBlobStoreConfig()
+ if !ok { t.Fatal("protected store unavailable") }
+ config.Bucket = os.Getenv("DIRECT_PAIR_AUDIT_BUCKET")
+ blob,err := server.NewBlobStore(config)
+ if err != nil { t.Fatal(err) }
+ store,ok := blob.(server.RetainedBlobStore)
+ if !ok { t.Fatal("exact-version readback unavailable") }
+ ctx,cancel := context.WithTimeout(context.Background(),10*time.Minute)
+ defer cancel()
+ count := 0
+ authenticate := func(item winnerMultipassCallEvidence) error {
+  for _,operation := range []string{"tokenize","generate"} {
+   callDirectory := filepath.Join(directory,item.CallId+"-"+operation)
+   manifest,err := os.ReadFile(filepath.Join(callDirectory,"protected-originals.json"))
+   if err != nil { return err }
+   if operation == "generate" && winnerMultipassSha256(manifest) != item.TransportReceiptSha256 { return fmt.Errorf("generation custody manifest differs") }
+   var receipts []struct { File string `json:"file"`; Bytes int `json:"bytes"`; Sha256 string `json:"sha256"`; Retention server.BlobRetention `json:"retention"` }
+   if err := decodeStrictJSONBytes(manifest,&receipts,"protected originals"); err != nil { return err }
+   names := map[string]bool{}
+   for _,receipt := range receipts {
+    if filepath.Base(receipt.File) != receipt.File || names[receipt.File] || receipt.Bytes <= 0 || receipt.Bytes > 32*1024*1024 || !validSha256(receipt.Sha256) || receipt.Retention.Mode != "COMPLIANCE" || receipt.Retention.Size != int64(receipt.Bytes) || receipt.Retention.VersionId == "" || !receipt.Retention.RetainUntil.After(plan.Owner.Deadline) { return fmt.Errorf("invalid or duplicate protected receipt") }
+    names[receipt.File] = true
+    local,err := os.ReadFile(filepath.Join(callDirectory,receipt.File))
+    if err != nil || len(local) != receipt.Bytes || winnerMultipassSha256(local) != receipt.Sha256 { return fmt.Errorf("local original differs: %s",receipt.File) }
+    reader,err := store.GetVersion(ctx,receipt.Retention.Key,receipt.Retention.VersionId)
+    if err != nil { return err }
+    remote,readErr := io.ReadAll(io.LimitReader(reader,int64(receipt.Bytes)+1))
+    closeErr := reader.Close()
+    if readErr != nil { return readErr }; if closeErr != nil { return closeErr }
+    if !bytes.Equal(local,remote) { return fmt.Errorf("exact-version protected readback differs") }
+   }
+   entries,err := os.ReadDir(callDirectory)
+   if err != nil { return err }
+   for _,entry := range entries {
+    if !entry.Type().IsRegular() || (entry.Name() != "protected-originals.json" && !names[entry.Name()]) { return fmt.Errorf("unprotected or nonregular call original") }
+   }
+   if !names["call.started.json"] || !names["call.complete.json"] { return fmt.Errorf("missing original lifecycle") }
+   completeBytes,err := os.ReadFile(filepath.Join(callDirectory,"call.complete.json"))
+   if err != nil { return err }
+   var result winnerMultipassBrokerResult
+   if err := decodeStrictJSONBytes(completeBytes,&result,"protected original completion"); err != nil { return err }
+   if result.CallId != item.CallId || result.Operation != operation || result.Error != "" || result.RequestSha256 != winnerMultipassSha256(item.Request) || result.Admission == nil || *result.Admission != item.Admission { return fmt.Errorf("completion differs from call evidence") }
+   if operation == "generate" {
+    raw,err := os.ReadFile(filepath.Join(callDirectory,"transport.response"))
+    if err != nil || !names["transport.response"] || winnerMultipassSha256(raw) != item.TransportResponseSha256 || !bytes.Equal(result.VisibleResponse,item.VisibleResponse) || result.ProviderOutput != item.ProviderOutput || result.StartedAt != item.StartedAt || result.CompletedAt != item.CompletedAt { return fmt.Errorf("original generation differs from retained result") }
+   } else if !names["tokenize.request.json"] || !names["tokenize.response.json"] { return fmt.Errorf("missing original tokenizer evidence") }
+  }
+  count++
+  return nil
+ }
+ evidence,err := readWinnerMultipassContinuation(&plan,prepared.Bundle,os.DirFS(directory),time.Now().UTC(),authenticate)
+ if err != nil { t.Fatal(err) }
+ result := map[string]any{"kind":"read-only-direct-pair-prefix-audit/v1","owner":plan.Owner,"verified_calls":count,"planned_calls":len(plan.Calls),"evidence_calls":len(evidence.Calls),"model_calls_sent":0,"native_qualification":false,"winner_approved":false}
+ content,_ := json.Marshal(result)
+ fmt.Println(string(content))
+}
