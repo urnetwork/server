@@ -75,6 +75,52 @@ type winnerMultipassQualificationHooks struct {
 	RetainCase      func(int, winnerMultipassEvidence) (currentQgQualificationPin, error)
 }
 
+// Shared dispatch owns the immutable clock, exclusive claim and single actual
+// wrapper invocation. Storage-specific executors retain/replay afterwards;
+// neither protected spool nor full-local capture can change these semantics.
+func dispatchWinnerMultipassQualification(ctx context.Context, plan *winnerMultipassQualificationPlan, invocation winnerMultipassQualificationInvocation, state *winnerMultipassQualificationState, hooks winnerMultipassQualificationHooks) (*winnerMultipassQualificationCapture, error) {
+	now := hooks.Now().UTC()
+	if now.Before(plan.Owner.StartedAt) || !now.Before(plan.Owner.Deadline) {
+		return nil, errors.New("qualification immutable owner clock does not authorize an unstarted invocation")
+	}
+	deadline := now.Add(defaultWinnerMultipassProviderLimits().GenerationTimeout)
+	if deadline.After(plan.Owner.Deadline) {
+		deadline = plan.Owner.Deadline
+	}
+	envelope, err := winnerMultipassQualificationEnvelope(plan, invocation, state, deadline)
+	if err != nil {
+		return nil, err
+	}
+	planBytes, _ := json.Marshal(plan)
+	admissionBytes, _ := json.Marshal(envelope.Admission)
+	claim := winnerMultipassQualificationClaim{Schema: 1, GroupSha256: winnerMultipassSha256(planBytes), Invocation: invocation, Owner: envelope.Owner, PayloadSha256: winnerMultipassSha256(envelope.Payload), AdmissionSha256: winnerMultipassSha256(admissionBytes), StartedAt: now, CallDeadline: deadline}
+	claimBytes, _ := json.Marshal(claim)
+	claimPin, err := hooks.Claim(invocation, claimBytes)
+	if err != nil {
+		return nil, err
+	}
+	if claimPin.Sha256 != winnerMultipassSha256(claimBytes) {
+		return nil, errors.New("native qualification claim did not retain exact original intent")
+	}
+	if invocation.Operation == "generate" {
+		envelope.AuthorizedClaimSha256 = claimPin.Sha256
+	}
+	input, _ := json.Marshal(envelope)
+	callCtx, cancel := context.WithDeadline(ctx, deadline)
+	output, diagnostics, invokeErr := hooks.Invoke(callCtx, input)
+	cancel()
+	capture := &winnerMultipassQualificationCapture{Invocation: invocation, Claim: claimPin, ClaimContent: claimBytes, Input: input, Output: output, Diagnostics: diagnostics}
+	if invokeErr != nil {
+		capture.InvokeError = invokeErr.Error()
+	}
+	receipt, authErr := hooks.Authenticate(input, output, diagnostics, invocation.Operation == "qualification_cancel_before_provider")
+	capture.Containment = receipt
+	if authErr != nil {
+		capture.AuthenticationError = authErr.Error()
+	}
+	return capture, nil
+}
+
 // Exact record construction and replay share this state, never another
 // candidate's or model's conclusions. All planned leaf admissions precede draws.
 type winnerMultipassQualificationState struct {
@@ -273,43 +319,9 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 			return report, err
 		}
 		if capture == nil {
-			now := hooks.Now().UTC()
-			if now.Before(plan.Owner.StartedAt) || !now.Before(plan.Owner.Deadline) {
-				return report, errors.New("qualification immutable owner clock does not authorize an unstarted invocation")
-			}
-			deadline := now.Add(defaultWinnerMultipassProviderLimits().GenerationTimeout)
-			if deadline.After(plan.Owner.Deadline) {
-				deadline = plan.Owner.Deadline
-			}
-			envelope, err := winnerMultipassQualificationEnvelope(plan, invocation, state, deadline)
+			capture, err = dispatchWinnerMultipassQualification(ctx, plan, invocation, state, hooks)
 			if err != nil {
 				return report, err
-			}
-			admissionBytes, _ := json.Marshal(envelope.Admission)
-			claim := winnerMultipassQualificationClaim{Schema: 1, GroupSha256: digest, Invocation: invocation, Owner: envelope.Owner, PayloadSha256: winnerMultipassSha256(envelope.Payload), AdmissionSha256: winnerMultipassSha256(admissionBytes), StartedAt: now, CallDeadline: deadline}
-			claimBytes, _ := json.Marshal(claim)
-			claimPin, err := hooks.Claim(invocation, claimBytes)
-			if err != nil {
-				return report, err
-			}
-			if claimPin.Sha256 != winnerMultipassSha256(claimBytes) {
-				return report, errors.New("native qualification claim did not retain exact original intent")
-			}
-			if invocation.Operation == "generate" {
-				envelope.AuthorizedClaimSha256 = claimPin.Sha256
-			}
-			input, _ := json.Marshal(envelope)
-			callCtx, cancel := context.WithDeadline(ctx, deadline)
-			output, diagnostics, invokeErr := hooks.Invoke(callCtx, input)
-			cancel()
-			capture = &winnerMultipassQualificationCapture{Invocation: invocation, Claim: claimPin, ClaimContent: claimBytes, Input: input, Output: output, Diagnostics: diagnostics}
-			if invokeErr != nil {
-				capture.InvokeError = invokeErr.Error()
-			}
-			receipt, authErr := hooks.Authenticate(input, output, diagnostics, invocation.Operation == "qualification_cancel_before_provider")
-			capture.Containment = receipt
-			if authErr != nil {
-				capture.AuthenticationError = authErr.Error()
 			}
 			retentionCtx, retentionCancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCurrentQgQualificationSettings().CleanupGrace)
 			pin, err = hooks.Retain(retentionCtx, *capture)
