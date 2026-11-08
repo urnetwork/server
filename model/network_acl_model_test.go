@@ -380,3 +380,66 @@ func TestTopLevelInsertSitesWriteTheirSubject(t *testing.T) {
 		}
 	})
 }
+
+// The backfill fills what clients minted before the column hold: a top-level
+// client itself, a sidecar's own client itself by its binding, a sidecar's child
+// the sidecar, and a window client's child its device, a child waiting for a
+// later pass while its source has none; a filled row is never written again.
+func TestBackfillNetworkClientAclSubjects(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		device := server.NewId()
+		window := server.NewId()
+		sidecar := server.NewId()
+		sidecarChild := server.NewId()
+		windowChild := server.NewId()
+		filled := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			insert := func(clientId server.Id, sourceClientId *server.Id) {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, device_id, source_client_id, active) VALUES ($1, $2, $3, $4, true)`,
+					clientId, networkId, server.NewId(), sourceClientId))
+			}
+			insert(device, nil)
+			insert(window, &device)
+			insert(sidecar, &device)
+			insert(sidecarChild, &sidecar)
+			insert(windowChild, &window)
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, device_id, acl_subject_client_id, active) VALUES ($1, $2, $3, $4, true)`,
+				filled, networkId, server.NewId(), device))
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO sidecar_identity_binding (sidecar_id, generation, client_id, client_public_key, signatures, create_time)
+				VALUES ($1, 1, $2, $3, $4, $5)
+			`, server.NewId(), sidecar, make([]byte, 32), []byte{1}, server.NowUtc()))
+		})
+		passes := 0
+		for {
+			passes += 1
+			after := server.Id{}
+			left := int64(0)
+			for {
+				last, _, leftCount, err := BackfillNetworkClientAclSubjects(ctx, after, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				left += leftCount
+				if last == after {
+					break
+				}
+				after = last
+			}
+			if left == 0 || 5 < passes {
+				break
+			}
+		}
+		want := map[server.Id]server.Id{device: device, window: device, sidecar: sidecar, sidecarChild: sidecar, windowChild: device, filled: device}
+		for clientId, subject := range want {
+			if got := aclTestSubject(t, ctx, clientId); got == nil || *got != subject {
+				t.Errorf("%s: subject %v, want %s", clientId, got, subject)
+			}
+		}
+		if _, _, _, err := BackfillNetworkClientAclSubjects(ctx, server.Id{}, 0); err == nil {
+			t.Error("an empty batch accepted")
+		}
+	})
+}
