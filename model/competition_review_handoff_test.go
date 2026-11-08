@@ -2,6 +2,7 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
 	"github.com/urnetwork/server"
 	"strings"
 	"testing"
@@ -30,6 +31,17 @@ func TestCompetitionReviewHandoffBoundsAndLegacyEncoding(t *testing.T) {
 	plan.CallIds[1] = plan.CallIds[0]
 	if ValidateCompetitionReviewHandoffPlan(plan) == nil {
 		t.Fatal("duplicate call admitted")
+	}
+	plan.CallIds = []string{}
+	for index := range 384 {
+		plan.CallIds = append(plan.CallIds, fmt.Sprintf("call-%03d", index))
+	}
+	if err := ValidateCompetitionReviewHandoffPlan(plan); err != nil {
+		t.Fatal("approved maximum rejected", err)
+	}
+	plan.CallIds = append(plan.CallIds, "call-384")
+	if ValidateCompetitionReviewHandoffPlan(plan) == nil {
+		t.Fatal("385th call exceeded approved global ceiling")
 	}
 	for _, value := range []any{CompetitionIntegrityReviewRequest{}, CompetitionIntegrityReviewResult{}, CompetitionWinnerReviewCheckpoint{}} {
 		content, err := json.Marshal(value)
