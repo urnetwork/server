@@ -28,13 +28,16 @@ func defaultWinnerHandoffCaptureSettings() winnerHandoffCaptureSettings {
 // The contained adapter supplies a real allocated reservation and observes the
 // actual native cgroup limit. This receipt grants neither model nor DB authority.
 type winnerHandoffCapacityReservation struct {
-	CapacitySha256   string   `json:"capacity_sha256"`
-	ReservationPath  string   `json:"reservation_path"`
-	ReservationInode uint64   `json:"reservation_inode"`
-	Device           uint64   `json:"device"`
-	ReservedBytes    int64    `json:"reserved_bytes"`
-	MemoryLimitBytes int64    `json:"memory_limit_bytes"`
-	StoragePaths     []string `json:"storage_paths"`
+	CapacitySha256     string   `json:"capacity_sha256"`
+	ReservationPath    string   `json:"reservation_path"`
+	ReservationInode   uint64   `json:"reservation_inode"`
+	Device             uint64   `json:"device"`
+	ReservedBytes      int64    `json:"reserved_bytes"`
+	MemoryLimitBytes   int64    `json:"memory_limit_bytes"`
+	MemoryCurrentBytes int64    `json:"memory_current_bytes"`
+	HostAvailableBytes int64    `json:"host_available_bytes"`
+	MemoryCgroup       string   `json:"memory_cgroup"`
+	StoragePaths       []string `json:"storage_paths"`
 }
 
 // A descriptor binds exact bytes, archive version and retained-until time.
@@ -79,7 +82,9 @@ type winnerHandoffCustodyManifest struct {
 func validateWinnerHandoffReservation(capacity *winnerMultipassCapacity, reservation winnerHandoffCapacityReservation) error {
 	content, err := json.Marshal(capacity)
 	if err != nil || capacity == nil || reservation.CapacitySha256 != winnerMultipassSha256(content) || reservation.ReservedBytes < capacity.RequiredDurableBytes ||
-		reservation.MemoryLimitBytes < capacity.RequiredMemoryBytes || reservation.MemoryLimitBytes > capacity.Settings.MaximumMemoryBytes || reservation.ReservationInode == 0 ||
+		reservation.MemoryLimitBytes < capacity.RequiredMemoryBytes || reservation.MemoryLimitBytes > capacity.Settings.MaximumMemoryBytes || reservation.MemoryCurrentBytes < 0 ||
+		reservation.MemoryLimitBytes-reservation.MemoryCurrentBytes < capacity.RequiredMemoryBytes || reservation.HostAvailableBytes < capacity.RequiredMemoryBytes ||
+		!filepath.IsAbs(reservation.MemoryCgroup) || filepath.Clean(reservation.MemoryCgroup) != reservation.MemoryCgroup || reservation.ReservationInode == 0 ||
 		!filepath.IsAbs(reservation.ReservationPath) || filepath.Clean(reservation.ReservationPath) != reservation.ReservationPath || len(reservation.StoragePaths) == 0 {
 		return errors.New("native review lacks its actual bounded storage/memory reservation")
 	}
@@ -209,8 +214,8 @@ func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *w
 			if err := validateWinnerHandoffInvocation(invocation, operation, call, requestSha, observation.Admission, observation.TransportResponseSha256, plan); err != nil {
 				return err
 			}
-			if operation == "generate" && invocation.ManifestSha256 != observation.TransportReceiptSha256 {
-				return errors.New("native model evidence is not bound to its original containment manifest")
+			if operation == "generate" && invocation.WrapperReceiptSha256 != observation.TransportReceiptSha256 {
+				return errors.New("native model evidence is not bound to its original containment receipt")
 			}
 		}
 	}

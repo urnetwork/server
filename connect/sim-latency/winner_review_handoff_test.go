@@ -18,16 +18,16 @@ import (
 )
 
 type winnerHandoffFixture struct {
-	owner                                 model.CompetitionReviewHandoff
-	plan                                  *winnerMultipassPlan
-	bundle                                winnerMultipassBundle
-	evidence                              winnerMultipassEvidence
-	now                                   time.Time
-	claims, invokes, retains, completions int
-	claimed                               map[string]bool
-	failInvoke                            bool
-	tooManyTokens                         bool
-	lastCompletion                        *model.CompetitionReviewHandoffCompletion
+	owner                                             model.CompetitionReviewHandoff
+	plan                                              *winnerMultipassPlan
+	bundle                                            winnerMultipassBundle
+	evidence                                          winnerMultipassEvidence
+	now                                               time.Time
+	claims, invokes, retains, completions, admissions int
+	claimed                                           map[string]bool
+	failInvoke                                        bool
+	tooManyTokens                                     bool
+	lastCompletion                                    *model.CompetitionReviewHandoffCompletion
 }
 
 func newWinnerHandoffFixture(t *testing.T, disqualify bool) *winnerHandoffFixture {
@@ -64,9 +64,11 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 		Reserve: func(_ context.Context, capacity *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error) {
 			content, _ := json.Marshal(capacity)
 			return winnerHandoffCapacityReservation{CapacitySha256: winnerMultipassSha256(content), ReservationPath: "/synthetic/review/reservation", ReservationInode: 1,
-				ReservedBytes: capacity.RequiredDurableBytes, MemoryLimitBytes: capacity.Settings.MaximumMemoryBytes, StoragePaths: []string{"/synthetic/review"}}, nil
+				ReservedBytes: capacity.RequiredDurableBytes, MemoryLimitBytes: capacity.Settings.MaximumMemoryBytes, HostAvailableBytes: capacity.Settings.MaximumMemoryBytes,
+				MemoryCgroup: "/synthetic/cgroup", StoragePaths: []string{"/synthetic/review"}}, nil
 		},
 		Admit: func(_ context.Context, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+			self.admissions++
 			count := 100
 			if self.tooManyTokens {
 				count = 1000000
@@ -129,8 +131,8 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 // This is a synthetic archive-receipt seam, not a containment qualification.
 // Separate wrapper tests must prove the actual originals and protected readback.
 func (self *winnerHandoffFixture) custody(operation string, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission, transportSha string) winnerHandoffInvocationCustody {
-	manifestSha := winnerMultipassSha256([]byte("synthetic-transport-proof"))
-	receiptSha := winnerMultipassSha256([]byte("synthetic-wrapper-receipt"))
+	manifestSha := winnerMultipassSha256([]byte("synthetic-wrapper-manifest"))
+	receiptSha := winnerMultipassSha256([]byte("synthetic-transport-proof"))
 	value := winnerHandoffInvocationCustody{Operation: operation, CallId: call.Id, RequestSha256: winnerMultipassSha256(payload), ManifestSha256: manifestSha, WrapperReceiptSha256: receiptSha, Originals: []winnerHandoffCustodyOriginal{}}
 	leaves := map[string]string{"call.started.json": winnerMultipassSha256([]byte("synthetic-started")), "call.complete.json": winnerMultipassSha256([]byte("synthetic-completed")), "evidence-manifest.json": manifestSha, "wrapper-receipt.json": receiptSha}
 	if operation == "tokenize" {
@@ -180,5 +182,66 @@ func TestWinnerHandoffOverLimitPreflightMakesNoClaimOrDraw(t *testing.T) {
 	_, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
 	if err == nil || fixture.claims != 0 || fixture.invokes != 0 || fixture.lastCompletion == nil || fixture.lastCompletion.Proposal != nil {
 		t.Fatal("unadmitted complete input consumed a draw or conferred authority", err)
+	}
+}
+
+func TestWinnerHandoffMissingProtectedTokenizerStopsBeforeAnyClaim(t *testing.T) {
+	fixture := newWinnerHandoffFixture(t, false)
+	hooks := fixture.hooks(t)
+	admit := hooks.Admit
+	hooks.Admit = func(ctx context.Context, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+		value, err := admit(ctx, call, payload)
+		for index := range value.Custody.Originals {
+			if value.Custody.Originals[index].Name == "tokenize.response.json" {
+				value.Custody.Originals[index].Retention.VersionId = ""
+			}
+		}
+		return value, err
+	}
+	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), hooks)
+	if err == nil || fixture.claims != 0 || fixture.invokes != 0 || result.Completion == nil || result.Completion.Proposal != nil {
+		t.Fatal("digest-only tokenizer evidence reached inference or proposal", err)
+	}
+}
+
+func TestWinnerHandoffCapacityRefusesBeforeTokenizerOrDraw(t *testing.T) {
+	for _, memory := range []bool{false, true} {
+		fixture := newWinnerHandoffFixture(t, false)
+		settings := defaultWinnerHandoffCaptureSettings()
+		if memory {
+			settings.Capacity.MaximumMemoryBytes = 1
+		} else {
+			settings.Capacity.MaximumDurableBytes = 1
+		}
+		_, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, settings, fixture.hooks(t))
+		if err == nil || fixture.admissions != 0 || fixture.claims != 0 || fixture.invokes != 0 {
+			t.Fatal("impossible fixed review budget consumed provider work", memory, err)
+		}
+	}
+}
+
+func TestWinnerHandoffCompletionRejectsDisappearingTransportOriginal(t *testing.T) {
+	fixture := newWinnerHandoffFixture(t, false)
+	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := false
+	for index := range result.Custody.Invocations {
+		invocation := &result.Custody.Invocations[index]
+		if invocation.Operation == "generate" && !changed {
+			for originalIndex := range invocation.Originals {
+				if invocation.Originals[originalIndex].Name == "transport.response" {
+					invocation.Originals[originalIndex].Retention.VersionId = ""
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		t.Fatal("synthetic transport original was absent")
+	}
+	if err := validateWinnerHandoffCompletion(&fixture.owner, result.Completion, fixture.plan, fixture.bundle, result.Evidence, result.Custody); err == nil {
+		t.Fatal("a local hash without independently retrievable transport version remained importable")
 	}
 }
