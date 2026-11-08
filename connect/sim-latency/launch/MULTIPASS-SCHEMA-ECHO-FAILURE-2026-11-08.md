@@ -58,3 +58,16 @@ Raw log: `/home/by/urnetwork/temp/schema-echo-validation-20261108.P7Jbq0lJ/focus
 SHA-256: `d7dde67ba4337e9ad157698fe7338cb372ea38fa8979874ee58d3113cede205b`.
 This is offline source validation, not genuine-model qualification or winner
 approval. Broader frozen-source qualification remains required.
+
+The first broader run on `94c5bfb14` completed in 186.624s with 141 top-level
+passes and one failure: `TestWinnerMultipassCompiledQualificationUsesOnlyTopLevelTestEvents`.
+The new regression tests used nested `t.Run` cases, which the immutable native
+release census prohibits. All cases are now retained in flat loops, committed
+on main as `520441e41` and frozen on reviewer branch
+`competition-review-schema-echo-flat-20261108` at
+`4ac7ea6f3b008238a466d41948ead57cc4531861`.
+
+The old race run was deliberately stopped after this deterministic failure;
+its partial log is not qualification evidence. Both broader suites are rerunning
+on the flattened source. The inactive `94c5bfb14` staged release/image is preserved
+but superseded and must not be activated. The installed reviewer remains unchanged.
