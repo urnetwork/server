@@ -92,15 +92,15 @@ func TestWinnerMultipassQualificationLayoutCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var seed controller.CompetitionSourceReviewPacket
-	if err := decodeStrictJSONBytes(packetBytes, &seed, "authenticated frozen layout seed"); err != nil {
+	seed, err := decodeWinnerMultipassInstrumentSeed(packetBytes)
+	if err != nil {
 		t.Fatal(err)
 	}
 	lock, err := model.CompetitionSourceLockDigest(seed.SourceCommits)
-	if err != nil || seed.Seal.Staging || seed.SourceGeneration != 0 || seed.ActivationGeneration != 1 || seed.SourceCommits["server"] != seed.BaseSha || lock != seed.Entry.BaseSourceLockSha256 || controller.ValidateCompetitionReviewInstrument(&seed) != nil {
+	if err != nil || seed.Seal.Staging || seed.SourceGeneration != 0 || seed.ActivationGeneration != 1 || seed.SourceCommits["server"] != seed.BaseSha || lock != seed.Entry.BaseSourceLockSha256 || controller.ValidateCompetitionReviewInstrument(seed) != nil {
 		t.Fatal("layout seed is not authenticated activated frozen context")
 	}
-	instrument, err := loadWinnerWorkloadReviewContext(t.Context(), config.RepositoriesRoot, &seed, defaultWinnerWorkloadReviewSettings())
+	instrument, err := loadWinnerWorkloadReviewContext(t.Context(), config.RepositoriesRoot, seed, defaultWinnerWorkloadReviewSettings())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,11 @@ func TestWinnerMultipassQualificationLayoutCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requests, err := currentQgQualificationRequests(&seed, instrument, sources)
+	fixtureSeed, err := winnerMultipassQualificationInstrumentSeed(seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests, err := currentQgQualificationRequests(fixtureSeed, instrument, sources)
 	if err != nil {
 		t.Fatal(err)
 	}
