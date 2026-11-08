@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "competition-review-runtime-storage-failure/v1",
+  "approval_record": "MULTIPASS-REPLACEMENT-APPROVAL-2026-11-08.json",
+  "source_commit": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "unit": "urnetwork-review-runtime-bootstrap-f866-20261108-v2.service",
+  "terminal_exit": 1,
+  "test_seconds": 21.61,
+  "owner": {
+    "id": "8ed34d765736e83febd7147b8b6751e783aef1131665edd31e6d9ccc760399aa",
+    "started_at": "2026-11-08T06:15:02.098114236Z",
+    "deadline": "2026-11-08T06:25:02.098114236Z",
+    "claim_sha256": "13597b08cce8660eac64c97191bf2406569e4e75aab504b20d94d6cd6fa4f93b",
+    "preserved_not_restarted": true
+  },
+  "configuration_sha256": "6be5bc529c86f574b1a380fe2c0da9baf2ff0a458370249bfe5c500bfc140231",
+  "permission_sha256": "1defd622a1478113aa4eac62e29a82e7c409e957b587f5a349de394d4f8e6dfb",
+  "release_binding_audit": {
+    "reviewer": "Astra max",
+    "preparation_and_fixture_pins_match": true,
+    "owned_sources_verified": 64,
+    "control_requests_authenticated": 19,
+    "complete_release_permission_pins_verified": 11,
+    "no_binding_mismatch_found": true,
+    "runtime_qualified": false
+  },
+  "failure": {
+    "phase": "retain_object",
+    "category": "s3",
+    "http_status": 503,
+    "s3_code": "unknown",
+    "detail_sha256": "b0817954d194565a9c3ef946d67c03f16d4a69675eef8772c64172fc5e64079f",
+    "first_document": "bootstrap-config.json",
+    "document_sha256": "97acccb976a102bdfd64b062ec67ae1689df90cb23d844d0b7c7c1f358acc6a3",
+    "output_directory": "/var/lib/urnetwork/competition-epoch1-review-20261108-v1/runtime-bootstrap-f866-v2",
+    "member_claims": 0,
+    "model_calls": 0,
+    "completed_runtime_report": false
+  },
+  "subsequent_read_only_storage_checks": {
+    "signed_bucket_protection_check": "45-second timeout on HEAD competition bucket",
+    "172.28.208.176:23900": "health requests timed out",
+    "172.28.208.177:23900": "connection refused",
+    "192.168.51.179:23900": "connection refused",
+    "trusted_ssh_to_172.28.208.176": "unknown host key; strict verification preserved",
+    "ops_request_sent": true
+  },
+  "api_observations": {
+    "reviewer_wrong_role_probe": [403, 403],
+    "new_review_operator_probe": [401, 401],
+    "review_import_route_observed_present": true,
+    "all_replica_convergence_proved": false,
+    "vault_009882e_activation_verified": false,
+    "no_review_import_attempted": true
+  },
+  "next_action": "Restore and verify protected storage before an explicitly authorized prospective recovery boundary. Never restart or renew this spent owner or relabel old observations. Verify vault activation and API convergence independently; retain winner, reward and source holds.",
+  "candidate_generation_started": false,
+  "winner_approved": false,
+  "source_promoted": false,
+  "rewards_released": false,
+  "calibration_accepted": false
+}
