@@ -71,6 +71,16 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 		t.Log("handoff fixture: frozen winner policy valid; bootstrap source")
 	}
 	fixture.store = PostgresStore{now: func() time.Time { return fixture.now }}
+	bootstrapStore := fixture.store
+	if !initialNow.IsZero() {
+		// Synthetic round history is independent of current source authority.
+		// Never backdate the lease that the real SQL source guard validates.
+		var databaseNow time.Time
+		server.Db(context.Background(), func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(context.Background(), `SELECT timezone('UTC',clock_timestamp())`).Scan(&databaseNow))
+		})
+		bootstrapStore.now = func() time.Time { return databaseNow }
+	}
 	commits := map[string]string{}
 	for _, repository := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
 		commits[repository] = fixture.settings.BaseSha
@@ -80,7 +90,7 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 		t.Fatal("synthetic source lock", sourceErr)
 	}
 	fixture.settings.AutomationPolicy.SourceLockSha256 = sourceLock
-	lease, sourceErr := fixture.store.AcquireAutomationLease(context.Background(), fixture.settings, "synthetic-supervisor", 5*time.Minute)
+	lease, sourceErr := bootstrapStore.AcquireAutomationLease(context.Background(), fixture.settings, "synthetic-supervisor", 5*time.Minute)
 	if sourceErr != nil {
 		t.Fatal("synthetic bootstrap lease", sourceErr)
 	}
@@ -110,11 +120,11 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 			t.Fatal("frozen winner policy immediately before source intent", err)
 		}
 	}
-	if _, sourceErr = fixture.store.RecordSourceIntent(context.Background(), fixture.settings, *lease, intent); sourceErr != nil {
+	if _, sourceErr = bootstrapStore.RecordSourceIntent(context.Background(), fixture.settings, *lease, intent); sourceErr != nil {
 		t.Fatal("synthetic baseline source intent", sourceErr)
 	}
 	for _, role := range []string{"api", "worker"} {
-		sourceErr = fixture.store.RecordSourceReadiness(context.Background(), fixture.settings, model.CompetitionSourceReadiness{
+		sourceErr = bootstrapStore.RecordSourceReadiness(context.Background(), fixture.settings, model.CompetitionSourceReadiness{
 			Staging:     staging,
 			Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: 1, TargetRoundId: intent.TargetRoundId, Role: role, ActorId: "synthetic-" + role, ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256,
 			SourceLockSha256: sourceLock, RuntimeImageDigest: testWorkerImageDigest(), QualificationSha256: intent.HostQualificationSha256, Ready: true})
@@ -122,7 +132,7 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 			t.Fatal("synthetic baseline readiness", role, sourceErr)
 		}
 	}
-	if _, sourceErr = fixture.store.ActivateSource(context.Background(), fixture.settings, *lease, 1, 0); sourceErr != nil {
+	if _, sourceErr = bootstrapStore.ActivateSource(context.Background(), fixture.settings, *lease, 1, 0); sourceErr != nil {
 		t.Fatal("synthetic baseline activation", sourceErr)
 	}
 	var err error
@@ -133,14 +143,28 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 	}
 	fixture.round.Epoch = 1
 	server.Tx(context.Background(), func(conn server.PgTx) {
-		server.Raise(fixture.store.requireAutomationLeaseInTx(context.Background(), conn, fixture.settings, *lease))
+		server.Raise(bootstrapStore.requireAutomationLeaseInTx(context.Background(), conn, fixture.settings, *lease))
 		round := fixture.round
 		server.RaisePgResult(conn.Exec(context.Background(), `INSERT INTO competition_round(round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled)
 	 VALUES($1,$2,1,$13,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,false)`, round.RoundId, round.CompetitionId, round.WorkloadCommitment, round.SeedNonce, round.SeedCiphertext, round.ProvidersSha256, round.ProvidersPath, string(round.PolicyJson), round.OpensAt, round.ClosesAt, round.RevealAt, round.CreatedAt, staging))
 	})
-	// Bootstrap has finished; advance the owned clock to its lease boundary so
-	// tests can acquire a fresh supervisor without sleeps or shared timing.
-	fixture.now = lease.LeaseExpiresAt
+	if initialNow.IsZero() {
+		// Historical fixtures keep their original synthetic lease boundary.
+		fixture.now = lease.LeaseExpiresAt
+	} else {
+		// Release only this test-owned bootstrap fence after setup. Preserve
+		// historical submission times; later review takes a real fresh lease.
+		server.Tx(context.Background(), func(tx server.PgTx) {
+			automationScopeLockInTx(context.Background(), tx, fixture.settings)
+			updated, err := tx.Exec(context.Background(), `UPDATE competition_supervisor_lease SET lease_expires_at=timezone('UTC',clock_timestamp())
+			 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND owner_id=$4 AND fencing_token=$5`, lease.Environment, lease.CompetitionId, lease.SeasonId, lease.OwnerId, lease.FencingToken)
+			server.Raise(err)
+			if updated.RowsAffected() != 1 {
+				panic(errors.New("synthetic bootstrap lease was not exactly released"))
+			}
+		})
+		fixture.now = fixture.now.Add(5 * time.Minute)
+	}
 	return fixture
 }
 
