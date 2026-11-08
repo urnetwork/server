@@ -53,11 +53,13 @@
 // network than the provider's, and from no egress prober network: the prober
 // opens a fresh network for every pass (prober_shard_run), and its outcome is
 // the URL evidence already. And its client did not report an idle session:
-// a contract whose client's final close report shows nothing sent, neither
-// acknowledged nor unacknowledged bytes (contract_close_report_evidence), is
-// not counted, so clients that open contracts and send nothing never make a
-// provider a zombie. A client that closes with a legacy, unidentified report
-// leaves no such evidence, and its idle contracts still count.
+// a contract that carried nothing and whose client's final close report
+// shows nothing sent, neither acknowledged nor unacknowledged bytes
+// (contract_close_report_evidence), is not counted, so clients that open
+// contracts and send nothing never make a provider a zombie. A contract that
+// carried bytes counts whatever its client reported. A client that closes
+// with a legacy, unidentified report leaves no such evidence, and its idle
+// contracts still count.
 //
 // Why these numbers (Main, 2026-11-08, read only):
 //
@@ -181,10 +183,11 @@ type ProviderZeroCarryEvidence struct {
 	CarriedByteCount ByteCount
 	// the close time of the oldest contract read, nil when none was
 	OldestCloseTime *time.Time
-	// the confirming read only (readProviderZeroCarryConfirmation): the
-	// contracts its clients' close evidence shows idle, which the counts above
-	// leave out, and whether a counted contract closed before the oldest one
-	// read, in the window, carried any byte
+	// the confirming read only (providerZeroCarryConfirmationSql): the
+	// contracts that carried nothing and whose clients' close evidence shows
+	// them idle, which the counts above leave out, and whether a counted
+	// contract closed before the oldest one read, in the window, carried any
+	// byte
 	IdleCount    int
 	OlderCarried bool
 }
@@ -417,8 +420,10 @@ func providerZeroCarryByteCountSql(alias string) string {
 // and nothing unacknowledged. A client that opened the contract and sent
 // nothing, a prefetched successor and a queued contract that expired before
 // use all close that way. A legacy close leaves no report, so it never reads
-// idle. One range of contract_close_original_census (contract_id, ...) per
-// contract.
+// idle. The confirming read asks only of contracts that carried nothing: a
+// client that ever checkpointed would file a final of only what followed
+// its last checkpoint. One range of contract_close_original_census
+// (contract_id, ...) per contract.
 func providerZeroCarryIdleSql(alias string) string {
 	return fmt.Sprintf(`EXISTS (
 						SELECT 1 FROM contract_close_report_evidence AS close_evidence
@@ -469,16 +474,18 @@ func providerZeroCarryEvidenceSql() string {
 
 // The confirming read of the candidates the evidence read found zero-carry,
 // in $1 with their first counted time in $2, over the same window, read and
-// limit as providerZeroCarryEvidenceSql. Each counted contract is checked
-// against its client's close evidence (providerZeroCarryIdleSql), and an idle
-// one is left out of the counts. When the read stops at the limit, the rest
-// of the window, the contracts closed before the oldest one read, is searched
-// for a counted contract that carried any byte: the same index range, below
-// the oldest row, stopping at the first that did. A zombie carried nothing
-// anywhere, so the search reads the rest of its day, a few hundred rows; an
-// honest busy provider stops at its first carrying contract. A tie on the
-// oldest close time is left out of the search, as close times hold
-// microseconds.
+// limit as providerZeroCarryEvidenceSql. Each counted contract that carried
+// nothing is checked against its client's close evidence
+// (providerZeroCarryIdleSql), and an idle one is left out of the counts; a
+// contract that carried bytes is never idle, whatever its client reported,
+// so leaving idle sessions out never removes a byte. When the read stops at
+// the limit, the rest of the window, the contracts closed before the oldest
+// one read, is searched for a counted contract that carried any byte: the
+// same index range, below the oldest row, stopping at the first that did. A
+// zombie carried nothing anywhere, so the search reads the rest of its day, a
+// few hundred rows; an honest busy provider stops at its first carrying
+// contract. A tie on the oldest close time is left out of the search, as
+// close times hold microseconds.
 func providerZeroCarryConfirmationSql() string {
 	return `
 		SELECT
@@ -502,7 +509,8 @@ func providerZeroCarryConfirmationSql() string {
 			FROM (
 				SELECT
 					read_contract.*,
-					CASE WHEN read_contract.counted THEN ` + providerZeroCarryIdleSql("read_contract") + ` ELSE false END AS idle
+					CASE WHEN read_contract.counted AND read_contract.byte_count = 0
+						THEN ` + providerZeroCarryIdleSql("read_contract") + ` ELSE false END AS idle
 				FROM (
 					SELECT
 						contract.contract_id,
@@ -587,11 +595,12 @@ type ProviderZeroCarryJudgement struct {
 	ConfirmedCount int
 	// contracts read, by both reads
 	ContractRowCount int
-	// the confirming read: counted contracts its clients' close evidence
-	// showed idle; the candidates it kept from a verdict because a contract
-	// closed before the read limit carried bytes; and those it kept because
-	// with the idle sessions left out they fell below the rule (or contracts
-	// that closed between the two reads moved them)
+	// the confirming read: counted contracts that carried nothing and its
+	// clients' close evidence showed idle; the candidates it kept from a
+	// verdict because a contract closed before the read limit carried bytes;
+	// and those it kept because with the idle sessions left out they fell
+	// below the rule (or contracts that closed between the two reads moved
+	// them)
 	IdleContractCount     int
 	KeptOlderCarriedCount int
 	KeptIdleCount         int

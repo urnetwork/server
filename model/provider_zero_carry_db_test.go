@@ -550,6 +550,59 @@ func TestZeroCarryTruncatedReadChecksTheRestOfTheDay(t *testing.T) {
 	})
 }
 
+// A contract that carried bytes counts, with its bytes, whatever its client's
+// close report says: a client that checkpointed files a final of only what
+// followed, nothing when it sent nothing more. Only a contract that carried
+// nothing is left out as idle, so leaving idle sessions out never removes a
+// byte from what a provider carried.
+func TestZeroCarryCarryingContractsAreNeverIdle(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Shymkent", "Shymkent", "Kazakhstan", "kz")
+
+		// 25 empty contracts from five networks, and one that carried 50 KB
+		// whose client's final, after a checkpoint, reported nothing more
+		checkpointing := zeroCarryTestCandidate(ctx, t, city)
+		networks := zeroCarryTestNetworks(5)
+		zeroCarryTestContractsWith(ctx, t, checkpointing, networks, 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, checkpointing, networks[:1], 1, zeroCarryTestContract{byteCount: 50 * 1024, closedAgo: 2 * time.Hour, sourceReport: "idle"})
+		// a zombie: 20 empty contracts from four networks, three that settled
+		// at 30 bytes of noise with idle finals, and five empty idle sessions
+		noisy := zeroCarryTestCandidate(ctx, t, city)
+		noisyNetworks := zeroCarryTestNetworks(4)
+		zeroCarryTestContractsWith(ctx, t, noisy, noisyNetworks, 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, noisy, noisyNetworks[:3], 1, zeroCarryTestContract{byteCount: 30, closedAgo: time.Hour, sourceReport: "idle"})
+		zeroCarryTestContractsWith(ctx, t, noisy, noisyNetworks[3:], 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "idle"})
+		egressTestPasses(ctx, t)
+
+		// the confirming read's own answer, not leaning on the evidence read
+		// before it: the 50 KB contract counts with its bytes
+		now := server.NowUtc()
+		settings := zeroCarryTestSettings()
+		confirmed := readProviderZeroCarryEvidence(ctx, now, []providerZeroCarryPageRow{
+			{clientId: checkpointing.clientId, candidate: true},
+			{clientId: noisy.clientId, candidate: true},
+		}, settings.EvidenceBatchSize, settings.ContractReadLimit, providerZeroCarryConfirmationSql())
+		if got := confirmed[checkpointing.clientId]; got.ContractCount != 26 || got.CarriedByteCount != 50*1024 || got.IdleCount != 0 || got.ZeroCarry() {
+			t.Errorf("the confirming read left a carrying contract out as idle: %+v", got)
+		}
+		if got := confirmed[noisy.clientId]; got.ContractCount != 23 || got.NetworkCount != 4 || got.CarriedByteCount != 90 || got.IdleCount != 5 || !got.ZeroCarry() {
+			t.Errorf("the confirming read of the noisy zombie is %+v", got)
+		}
+
+		judgement := JudgeProviderZeroCarry(ctx, now, server.Id{}, settings)
+		if zeroCarryTestHeld(ctx, checkpointing) {
+			t.Error("a provider that carried 50 KB is zero-carry")
+		}
+		verdict := GetProviderZeroCarryVerdict(ctx, noisy.clientId, server.NowUtc())
+		if verdict == nil || verdict.ContractCount != 23 || verdict.CarriedByteCount != 90 {
+			t.Fatalf("the noisy zombie's verdict counts %+v", verdict)
+		}
+		connect.AssertEqual(t, judgement.Created, 1)
+		connect.AssertEqual(t, judgement.IdleContractCount, 5)
+	})
+}
+
 // A contract the old build accepted counts against neither build once the
 // device reports a new version, even when its client's final lands after the
 // upgrade.

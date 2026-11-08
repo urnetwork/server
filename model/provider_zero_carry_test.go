@@ -227,11 +227,11 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 			}
 		}
 	}
-	// only the confirming read reads close evidence, per counted contract,
-	// and searches past its limit for a contract that carried, below the
-	// oldest row it read, over the same window
+	// only the confirming read reads close evidence, per counted contract
+	// that carried nothing, and searches past its limit for a contract that
+	// carried, below the oldest row it read, over the same window
 	for _, part := range []string{
-		"CASE WHEN read_contract.counted THEN EXISTS (",
+		"CASE WHEN read_contract.counted AND read_contract.byte_count = 0\n\t\t\t\t\t\tTHEN EXISTS (",
 		"close_evidence.contract_id = read_contract.contract_id",
 		"close_evidence.party = 'source'",
 		"NOT close_evidence.checkpoint",
