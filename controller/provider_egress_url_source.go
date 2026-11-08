@@ -39,10 +39,25 @@ func (self *providerEgressUrlSources) of(destination egresshealth.Destination) (
 	return model.ProviderEgressUrlSourceGeneral, false
 }
 
+// One qualityprobe.yml version's parse: its country sites, or when it failed
+// to parse.
+type providerEgressUrlSourcesLoad struct {
+	sources  *providerEgressUrlSources
+	failedAt time.Time
+}
+
+// How long a catalog version that failed to parse is left before it is parsed
+// again. Every URL outcome reads the catalog, so a version that does not
+// parse must not be parsed again for each of them.
+const providerEgressUrlSourcesRetry = time.Minute
+
 // The parse of the current qualityprobe.yml, reused while its version is
 // unchanged, so the ingest parses the catalog once per change rather than once
 // per outcome.
-var providerEgressUrlSourcesCache server.ResourceValueCache[server.ResourceVersion, *providerEgressUrlSources]
+var providerEgressUrlSourcesCache server.ResourceValueCache[server.ResourceVersion, providerEgressUrlSourcesLoad]
+
+// The catalog parse; a test counts its calls.
+var providerEgressUrlSourcesParse = ParseProviderEgressSites
 
 // When a catalog that could not be read was last logged; one line a minute.
 var providerEgressUrlSourcesUnreadable = struct {
@@ -60,13 +75,16 @@ func getProviderEgressUrlSources() *providerEgressUrlSources {
 		logProviderEgressUrlSourcesUnreadable(err)
 		return nil
 	}
-	return providerEgressUrlSourcesCache.Get(resource.Version(), nil, func() (*providerEgressUrlSources, bool) {
+	current := func(load providerEgressUrlSourcesLoad) bool {
+		return load.sources != nil || time.Since(load.failedAt) < providerEgressUrlSourcesRetry
+	}
+	return providerEgressUrlSourcesCache.Get(resource.Version(), current, func() (providerEgressUrlSourcesLoad, bool) {
 		// the pool's own parse, without counting its refusals again: the
 		// pool request records those for the same version
-		sites, err := ParseProviderEgressSites(resource.UnmarshalYamlE)
+		sites, err := providerEgressUrlSourcesParse(resource.UnmarshalYamlE)
 		if err != nil {
 			logProviderEgressUrlSourcesUnreadable(err)
-			return nil, false
+			return providerEgressUrlSourcesLoad{failedAt: time.Now()}, true
 		}
 		sources := &providerEgressUrlSources{countrySites: map[string]bool{}}
 		for _, destinations := range sites.Countries {
@@ -74,8 +92,8 @@ func getProviderEgressUrlSources() *providerEgressUrlSources {
 				sources.countrySites[destination.Name] = true
 			}
 		}
-		return sources, true
-	})
+		return providerEgressUrlSourcesLoad{sources: sources}, true
+	}).sources
 }
 
 func logProviderEgressUrlSourcesUnreadable(err error) {

@@ -299,3 +299,57 @@ func TestProviderEgressUrlRecheckOfACountrySiteStaysSecurityOnly(t *testing.T) {
 		}
 	})
 }
+
+// The ingest reads each outcome's source from the served catalog: a name in a
+// country list is a country site, on probation; anything else is general, and
+// what the store makes of it is the pool's (probation) or nothing.
+func TestProviderEgressUrlSourcesOfTheServedCatalog(t *testing.T) {
+	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, providerEgressUrlSourceTestCatalog))
+	sources := getProviderEgressUrlSources()
+	for _, c := range []struct {
+		name      string
+		source    model.ProviderEgressUrlSource
+		probation bool
+	}{
+		{"de-site", model.ProviderEgressUrlSourceCountry, true},
+		{"general-site", model.ProviderEgressUrlSourceGeneral, false},
+		{"promoted-site", model.ProviderEgressUrlSourceGeneral, false},
+		{"unknown-site", model.ProviderEgressUrlSourceGeneral, false},
+	} {
+		source, probation := sources.of(egresshealth.Destination{Name: c.name})
+		if source != c.source || probation != c.probation {
+			t.Errorf("%s: source %s probation %t, want %s %t", c.name, source, probation, c.source, c.probation)
+		}
+	}
+}
+
+// A catalog that does not parse classifies every outcome general, as before
+// the source was recorded, and is parsed once per retry interval rather than
+// once per outcome; a changed catalog is parsed at once.
+func TestProviderEgressUrlSourcesParseAnUnusableCatalogOncePerRetry(t *testing.T) {
+	parses := 0
+	parse := providerEgressUrlSourcesParse
+	providerEgressUrlSourcesParse = func(unmarshal func(any) error) (*ProviderEgressSites, error) {
+		parses += 1
+		return parse(unmarshal)
+	}
+	t.Cleanup(func() { providerEgressUrlSourcesParse = parse })
+
+	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte("schema_version: 2\n")))
+	for range 3 {
+		if source, probation := getProviderEgressUrlSources().of(egresshealth.Destination{Name: "de-site"}); source != model.ProviderEgressUrlSourceGeneral || probation {
+			t.Fatalf("an unusable catalog classified an outcome %s, probation %t", source, probation)
+		}
+	}
+	if parses != 1 {
+		t.Fatalf("an unusable catalog was parsed %d times for three outcomes, want once", parses)
+	}
+
+	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, providerEgressUrlSourceTestCatalog))
+	if source, _ := getProviderEgressUrlSources().of(egresshealth.Destination{Name: "de-site"}); source != model.ProviderEgressUrlSourceCountry {
+		t.Fatalf("a usable catalog after an unusable one classified a country site %s", source)
+	}
+	if parses != 2 {
+		t.Fatalf("the changed catalog was parsed %d times in all, want twice", parses)
+	}
+}
