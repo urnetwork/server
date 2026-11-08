@@ -8,7 +8,7 @@ readonly configuration=/etc/urnetwork/competition-review-multipass-v1.json
 readonly state_root=/var/lib/urnetwork/competition-review-multipass
 readonly input_limit=8388608 output_limit=4194304 error_limit=65536 journal_limit=16777216
 readonly metadata_limit=262144
-readonly invocation_limit_seconds=1800 cleanup_limit_seconds=20 command_limit_seconds=10
+readonly invocation_limit_seconds=1800 tokenizer_limit_seconds=300 cleanup_limit_seconds=20 command_limit_seconds=10
 [[ "$(id -u)" == 0 ]] || exit 1
 [[ $# == 0 ]] || { printf 'review broker accepts stdin only\n' >&2; exit 2; }
 [[ -f "$configuration" && ! -L "$configuration" ]] || exit 1
@@ -216,8 +216,11 @@ active_pid=""
 # review_input_capture_program_end
 deadline="$(jq -er '.call_deadline | strings' "$attempt_directory/input.json")"
 deadline_epoch="$(date -u -d "$deadline" +%s)"
+operation="$(jq -er '.operation | select(.=="tokenize" or .=="generate" or .=="qualification_cancel_before_provider")' "$attempt_directory/input.json")"
+call_limit_seconds=$tokenizer_limit_seconds
+if [[ "$operation" == generate ]]; then call_limit_seconds=$invocation_limit_seconds; fi
 remaining=$((deadline_epoch-$(date -u +%s)))
-((remaining>0 && remaining<=invocation_limit_seconds))
+((remaining>0 && remaining<=call_limit_seconds))
 
 # Snow is one fixed unauthenticated LAN frontend. No DNS, TLS, key or
 # public-provider assertion or alternative credential-bearing mode is implied.

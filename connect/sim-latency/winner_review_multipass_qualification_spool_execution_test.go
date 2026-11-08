@@ -13,21 +13,42 @@ import (
 )
 
 type winnerMultipassQualificationSpoolReport struct {
-	Schema         int                                   `json:"schema"`
-	Kind           string                                `json:"kind"`
-	Protocol       string                                `json:"protocol"`
-	Mode           string                                `json:"mode"`
-	Plan           currentQgQualificationPin             `json:"plan"`
-	PlanSha256     string                                `json:"plan_sha256"`
-	Release        winnerMultipassQualificationRelease   `json:"release"`
-	Owner          winnerMultipassOwner                  `json:"owner"`
-	Capacity       *winnerMultipassQualificationCapacity `json:"full_local_aggregate_capacity"`
-	SpoolCapacity  *winnerMultipassSpoolCapacity         `json:"protected_spool_capacity"`
-	CaptureCommits []currentQgQualificationPin           `json:"compact_protected_capture_commits"`
-	CaseEvidence   map[int]currentQgQualificationPin     `json:"case_evidence"`
-	Complete       bool                                  `json:"complete"`
-	Qualified      bool                                  `json:"qualified"`
-	Error          string                                `json:"error"`
+	Schema               int                                     `json:"schema"`
+	Kind                 string                                  `json:"kind"`
+	Protocol             string                                  `json:"protocol"`
+	Mode                 string                                  `json:"mode"`
+	Plan                 currentQgQualificationPin               `json:"plan"`
+	PlanSha256           string                                  `json:"plan_sha256"`
+	Release              winnerMultipassQualificationRelease     `json:"release"`
+	Owner                winnerMultipassOwner                    `json:"owner"`
+	Capacity             *winnerMultipassQualificationCapacity   `json:"full_local_aggregate_capacity"`
+	SpoolCapacity        *winnerMultipassSpoolCapacity           `json:"protected_spool_capacity"`
+	CaptureCommits       []currentQgQualificationPin             `json:"compact_protected_capture_commits"`
+	FailureCaptureCommit *currentQgQualificationPin              `json:"failure_capture_commit,omitempty"`
+	FailureInvocation    *winnerMultipassQualificationInvocation `json:"failure_invocation,omitempty"`
+	CaseEvidence         map[int]currentQgQualificationPin       `json:"case_evidence"`
+	Complete             bool                                    `json:"complete"`
+	Qualified            bool                                    `json:"qualified"`
+	Error                string                                  `json:"error"`
+}
+
+// Failed authentication has no portable success proof. Native custody may still
+// protect the original bounded host capture and return its compact audit pin.
+// The executor records this terminal failure, never deletes originals or resumes.
+type winnerMultipassQualificationSpoolRetentionError struct {
+	Failure currentQgQualificationPin
+	Cause   error
+}
+
+func (self *winnerMultipassQualificationSpoolRetentionError) Error() string {
+	if self.Cause == nil {
+		return "qualification failed after original failure custody"
+	}
+	return "qualification failed after original failure custody: " + self.Cause.Error()
+}
+
+func (self *winnerMultipassQualificationSpoolRetentionError) Unwrap() error {
+	return self.Cause
 }
 
 // This is transient native replay state, NOT a serialized capture record. All
@@ -144,6 +165,15 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 			value, err = hooks.Retain(retentionCtx, *capture)
 			cancel()
 			if err != nil {
+				var failure *winnerMultipassQualificationSpoolRetentionError
+				if errors.As(err, &failure) && failure != nil {
+					if _, auditErr := readCurrentQgQualificationPin(failure.Failure, winnerMultipassSpoolManifestBytes, true); auditErr != nil {
+						return report, errors.Join(err, errors.New("failed capture custody audit pin cannot be authenticated"), auditErr)
+					}
+					report.FailureCaptureCommit = &failure.Failure
+					originalInvocation := invocation
+					report.FailureInvocation = &originalInvocation
+				}
 				return report, err
 			}
 			if value == nil || !reflect.DeepEqual(value.Capture, capture) {
@@ -193,7 +223,7 @@ func authenticateWinnerMultipassSpoolQualification(reportPin currentQgQualificat
 		return nil, err
 	}
 	var report winnerMultipassQualificationSpoolReport
-	if rejectWinnerReviewCaseAliases(content) != nil || decodeStrictJSONBytes(content, &report, "original protected-spool qualification report") != nil || report.Schema != 1 || report.Kind != "winner-review-multipass-qualification-spool-report/v1" || report.Protocol != winnerMultipassVersion || report.Mode != "genuine_provider" || !report.Complete || !report.Qualified || report.Error != "" || !reflect.DeepEqual(report.Release, release) || report.Capacity == nil || report.Capacity.Cases[2] == nil || report.SpoolCapacity == nil {
+	if rejectWinnerReviewCaseAliases(content) != nil || decodeStrictJSONBytes(content, &report, "original protected-spool qualification report") != nil || report.Schema != 1 || report.Kind != "winner-review-multipass-qualification-spool-report/v1" || report.Protocol != winnerMultipassVersion || report.Mode != "genuine_provider" || !report.Complete || !report.Qualified || report.Error != "" || report.FailureCaptureCommit != nil || report.FailureInvocation != nil || !reflect.DeepEqual(report.Release, release) || report.Capacity == nil || report.Capacity.Cases[2] == nil || report.SpoolCapacity == nil {
 		return nil, errors.New("spool qualification report is partial, offline, historical or from another release")
 	}
 	planBytes, err := readCurrentQgQualificationPin(report.Plan, 8*int64(defaultWinnerMultipassSettings().MaximumBundleBytes), true)

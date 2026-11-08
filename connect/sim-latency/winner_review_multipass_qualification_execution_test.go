@@ -83,7 +83,11 @@ func dispatchWinnerMultipassQualification(ctx context.Context, plan *winnerMulti
 	if now.Before(plan.Owner.StartedAt) || !now.Before(plan.Owner.Deadline) {
 		return nil, errors.New("qualification immutable owner clock does not authorize an unstarted invocation")
 	}
-	deadline := now.Add(defaultWinnerMultipassProviderLimits().GenerationTimeout)
+	operationTimeout, err := winnerMultipassOperationTimeout(invocation.Operation, defaultWinnerMultipassProviderLimits())
+	if err != nil {
+		return nil, err
+	}
+	deadline := now.Add(operationTimeout)
 	if deadline.After(plan.Owner.Deadline) {
 		deadline = plan.Owner.Deadline
 	}
