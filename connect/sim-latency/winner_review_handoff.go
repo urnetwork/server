@@ -23,7 +23,7 @@ import (
 type winnerHandoffCaptureHooks struct {
 	Now      func() time.Time
 	Admit    func(context.Context, winnerMultipassCall, []byte) (winnerMultipassAdmission, error)
-	Invoke   func(context.Context, winnerMultipassCall, []byte, winnerMultipassAdmission) (winnerHandoffTransport, error)
+	Invoke   func(context.Context, winnerMultipassCall, []byte, winnerMultipassAdmission, string) (winnerHandoffTransport, error)
 	Claim    func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
 	Receipt  func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
 	Retain   func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)
@@ -45,6 +45,29 @@ type winnerHandoffCaptureResult struct {
 	PromotionAuthorized bool                                      `json:"promotion_authorized"`
 	Evidence            winnerMultipassEvidence                   `json:"evidence"`
 	Completion          *model.CompetitionReviewHandoffCompletion `json:"completion,omitempty"`
+}
+
+func validateWinnerHandoffIdentity(owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle) error {
+	if owner == nil || plan == nil || model.ValidateCompetitionReviewHandoffArgs(owner.Args) != nil || model.ValidateCompetitionReviewHandoffPlan(owner.Plan) != nil {
+		return errors.New("native handoff identity is incomplete")
+	}
+	if err := validateWinnerMultipassPlan(plan, bundle); err != nil {
+		return err
+	}
+	planBytes, _ := json.Marshal(plan)
+	request, template, args := bundle.Request.Request, bundle.Request.Template, owner.Args
+	if owner.HandoffId.String() != plan.Owner.Id || !owner.StartedAt.Equal(plan.Owner.StartedAt) || !owner.Deadline.Equal(plan.Owner.Deadline) || owner.Deadline.Sub(owner.StartedAt) != time.Duration(args.TimeoutSeconds)*time.Second ||
+		owner.Plan.PlanSha256 != winnerMultipassSha256(planBytes) || owner.Plan.BundleSha256 != plan.BundleSha256 || len(owner.Plan.CallIds) != len(plan.Calls) || template.HandoffId != owner.HandoffId.String() ||
+		request.RoundId != args.RoundId || request.JobId != args.JobId || request.RewardRevision != args.RewardRevision || request.RewardDecisionSha256 != args.DecisionSha256 || request.SealSha256 != args.SealSha256 ||
+		template.PatchSha256 != args.PatchSha256 || template.BaseSourceLockSha256 != args.BaseSourceLockSha256 || template.ScoreSha256 != args.ScoreSha256 || template.ArtifactManifestSha256 != args.ArtifactManifestSha256 || template.BaselineSha256 != args.BaselineSha256 {
+		return errors.New("native handoff owner differs from exact source, decision, plan or clock")
+	}
+	for index, call := range plan.Calls {
+		if owner.Plan.CallIds[index] != call.Id {
+			return errors.New("native handoff call census differs")
+		}
+	}
+	return nil
 }
 
 // Every leaf is counted against the final owner-bound plan before any draw.
@@ -82,7 +105,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	if owner == nil || plan == nil || hooks.Now == nil || hooks.Admit == nil || hooks.Invoke == nil || hooks.Claim == nil || hooks.Receipt == nil || hooks.Retain == nil || hooks.Complete == nil {
 		return nil, errors.New("native capture lacks qualified ownership or transport hooks")
 	}
-	if err := validateWinnerMultipassPlan(plan, bundle); err != nil {
+	if err := validateWinnerHandoffIdentity(owner, plan, bundle); err != nil {
 		return nil, err
 	}
 	planBytes, err := json.Marshal(plan)
@@ -109,6 +132,21 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	defer func() {
 		if resultErr != nil {
 			result.Status = "FAILED_RETAINED"
+			// Even failed/incomplete evidence is retained as an immutable terminal
+			// observation, never an invitation to sample the same owner again.
+			failedBytes, encodeErr := json.Marshal(result.Evidence)
+			if encodeErr == nil {
+				cleanup, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+				retained, retainErr := hooks.Retain(cleanup, failedBytes, winnerMultipassSha256(failedBytes))
+				if retainErr == nil && retained != nil {
+					result.Completion, retainErr = hooks.Complete(cleanup, model.CompetitionReviewHandoffCompletion{HandoffId: owner.HandoffId, PlanSha256: owner.Plan.PlanSha256,
+						Evidence: model.CompetitionReviewHandoffRetention{Key: retained.Key, VersionId: retained.VersionId, Sha256: retained.Sha256, RetainUntil: retained.RetainUntil}, Failure: "capture_failed_or_unresolved"})
+				}
+				cleanupCancel()
+				if retainErr != nil {
+					resultErr = errors.Join(resultErr, errors.New("protected failed-evidence retention or durable completion unavailable; retain local originals"))
+				}
+			}
 		}
 		content, err := json.Marshal(result)
 		if err == nil {
@@ -173,7 +211,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 		if err := writePrivateReviewFile(filepath.Join(directory, prefix+".request.json"), payload); err != nil {
 			return result, err
 		}
-		transport, invokeErr := hooks.Invoke(callCtx, call, payload, admission)
+		transport, invokeErr := hooks.Invoke(callCtx, call, payload, admission, winnerMultipassSha256(claimBytes))
 		observation := winnerMultipassCallEvidence{CallId: call.Id, StartedAt: claimed.RecordedAt, CompletedAt: hooks.Now().UTC(), Request: payload, Admission: admission,
 			VisibleResponse: transport.VisibleResponse, VisibleResponseSha256: winnerMultipassSha256(transport.VisibleResponse), TransportResponseSha256: transport.TransportResponseSha256, TransportReceiptSha256: transport.ContainmentReceiptSha256, Error: transport.Error}
 		if invokeErr != nil && observation.Error == "" {
@@ -242,7 +280,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	}
 	completion := model.CompetitionReviewHandoffCompletion{HandoffId: owner.HandoffId, PlanSha256: owner.Plan.PlanSha256, Evidence: model.CompetitionReviewHandoffRetention{Key: retained.Key, VersionId: retained.VersionId, Sha256: retained.Sha256, RetainUntil: retained.RetainUntil}}
 	broker := winnerSnowBrokerResult(bundle.Request, judgment, evidenceBytes)
-	if judgment.Decision == "approve" || judgment.Decision == "reject" {
+	if judgment.Decision == "approve" || judgment.Decision == "disqualify" {
 		if err := model.ValidateCompetitionIntegrityReview(broker.Review, bundle.Request.Request.Policy); err != nil {
 			completion.Failure = "native_final_proposal_invalid"
 		} else {
@@ -284,6 +322,9 @@ func winnerHandoffPlan(owner model.CompetitionReviewHandoff, bundle winnerMultip
 // Byte-exact comparison, not a local JSON approval marker, binds the durable
 // completion to evidence being presented for later explicit human import.
 func validateWinnerHandoffCompletion(owner *model.CompetitionReviewHandoff, completion *model.CompetitionReviewHandoffCompletion, plan *winnerMultipassPlan, bundle winnerMultipassBundle, evidence winnerMultipassEvidence) error {
+	if err := validateWinnerHandoffIdentity(owner, plan, bundle); err != nil {
+		return err
+	}
 	if owner == nil || completion == nil || completion.HandoffId != owner.HandoffId || completion.PlanSha256 != owner.Plan.PlanSha256 || completion.CompletedAt.Before(owner.StartedAt) || !completion.CompletedAt.Before(owner.Deadline) {
 		return errors.New("handoff completion is absent, stale or outside its fixed clock")
 	}
@@ -295,7 +336,7 @@ func validateWinnerHandoffCompletion(owner *model.CompetitionReviewHandoff, comp
 	if err != nil {
 		return err
 	}
-	if winnerMultipassSha256(content) != completion.Evidence.Sha256 {
+	if completion.Failure != "" || winnerMultipassSha256(content) != completion.Evidence.Sha256 || completion.Evidence.Key == "" || completion.Evidence.VersionId == "" {
 		return errors.New("handoff completion evidence differs")
 	}
 	if completion.Proposal == nil {
@@ -306,6 +347,9 @@ func validateWinnerHandoffCompletion(owner *model.CompetitionReviewHandoff, comp
 	storedBytes, _ := json.Marshal(completion.Proposal)
 	if !bytes.Equal(wantBytes, storedBytes) {
 		return errors.New("pending proposal differs from original model findings")
+	}
+	if winnerMultipassSha256(storedBytes) != completion.ProposalSha256 {
+		return errors.New("pending proposal digest differs")
 	}
 	return model.ValidateCompetitionIntegrityReview(actual.Review, bundle.Request.Request.Policy)
 }
