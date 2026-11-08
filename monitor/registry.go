@@ -129,6 +129,7 @@ func NewSignals() []Signal {
 		NewSignupLivenessSignal(),
 		NewModernGateReadinessSignal(),
 		NewEgressTlsJudgeSignal(),
+		NewZeroCarryVerdictsSignal(),
 		NewRedisMemorySignal(),
 		NewRedisBuffersSignal(),
 		NewKeyFamiliesSignal(),

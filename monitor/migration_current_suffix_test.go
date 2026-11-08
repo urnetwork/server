@@ -358,6 +358,15 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_country_site_tally DROP COLUMN network_id`},
 		{name: "country site pair tally pages filled", version: server.ProviderEgressUrlSourceVersion(),
 			sql: `ALTER TABLE provider_egress_country_site_tally RESET (fillfactor)`},
+		// A zero-carry verdict excludes only until its expiry, one row per
+		// provider: without the expiry every reader fails, and without the
+		// key a provider could hold two verdicts.
+		{name: "zero-carry verdict expiry missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN expire_time`},
+		{name: "zero-carry verdicts unkeyed", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP CONSTRAINT provider_zero_carry_pkey`},
+		{name: "zero-carry upgrade evidence missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN client_version`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
