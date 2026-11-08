@@ -20,7 +20,18 @@
   "validation_at_recording": {
     "focused_tests_passed": 7,
     "ordinary_tests_passed": 136,
-    "race_validation": "running; inspect its original process and terminal evidence",
+    "race_tests_passed": 136,
+    "race_validation": "terminal exit 0; original run completed without restart or timeout extension",
+    "race_wall_seconds": 1346,
+    "race_package_seconds": 1269.805,
+    "race_timeout_seconds": 1500,
+    "nested_tests": 0,
+    "failures": 0,
+    "skips": 0,
+    "race_reports": 0,
+    "focused_log_sha256": "ab86a41edd997d5bc13ccff40c1845fbea35f49995d7fb5f300bfb717fe842eb",
+    "ordinary_log_sha256": "9a3a9d2ba977c80fa9df63903c1fecb976f5fa068a625637ba3aff3feb817af3",
+    "race_log_sha256": "2f18ea26ce55f67a5e0085ffdb51d224a46d80aa086f0679bb4d2b09e55abe73",
     "qualification_complete": false
   },
   "authority": {
