@@ -135,6 +135,14 @@ func (self CompetitionReviewHandoff) Checkpoint() CompetitionWinnerReviewCheckpo
 // Only native storage may populate ModelCompletedAt. The reference must match
 // the durable checkpoint; an absent completion cannot replace the legacy clock.
 func CompetitionReviewWithinCheckpoint(review *CompetitionIntegrityReviewResult, checkpoint *CompetitionWinnerReviewCheckpoint) bool {
+	if review != nil && checkpoint != nil && review.Request.OfficialReviewOverride != nil {
+		proof := review.Request.OfficialReviewOverride
+		return review.RoundId == checkpoint.RoundId && review.Request.JobId == checkpoint.JobId && review.Request.ExpectedRevision == checkpoint.RewardRevision &&
+			review.Request.ExpectedDecisionSha256 == checkpoint.RewardDecisionSha256 && review.Request.HandoffId == "" && review.ModelCompletedAt == nil &&
+			review.Request.ReviewerModel == "gpt-6-astra" && review.Request.ReviewerReasoning == "max" &&
+			competitionAutomationSha256.MatchString(proof.AuthorizationSha256) && proof.NativeQualificationWaived && proof.UnacceptedCalibrationAcknowledged &&
+			!proof.CompletedAt.IsZero() && !proof.CompletedAt.After(review.CreatedAt)
+	}
 	if review == nil || checkpoint == nil || review.Request.HandoffId != checkpoint.HandoffId {
 		return false
 	}

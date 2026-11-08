@@ -332,7 +332,7 @@ func (self PostgresStore) ImportReviewHandoff(ctx context.Context, settings *Set
 	if completion == nil || completion.Proposal == nil {
 		return nil, ErrReviewNotReady
 	}
-	return self.recordIntegrityReview(ctx, settings, request.RoundId, actor, *completion.Proposal, &request)
+	return self.recordIntegrityReview(ctx, settings, request.RoundId, actor, *completion.Proposal, &request, nil)
 }
 
 func validateReviewHandoffImportInTx(ctx context.Context, tx server.PgTx, roundId server.Id, request model.CompetitionIntegrityReviewRequest, expected model.CompetitionReviewHandoffImport) (*time.Time, error) {

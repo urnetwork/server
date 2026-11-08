@@ -580,6 +580,7 @@ var (
 )
 
 type Settings struct {
+	OfficialReviewImportSha256   string `yaml:"official_review_import_sha256,omitempty"`
 	reevaluationRuntime          *model.CompetitionJobReevaluationRuntime
 	reevaluationRuntimeSha256    string
 	AutomationPolicy             model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
@@ -632,6 +633,7 @@ type Settings struct {
 }
 
 type settingsFile struct {
+	OfficialReviewImportSha256 string                              `yaml:"official_review_import_sha256,omitempty"`
 	AutomationPolicy           model.CompetitionAutomationPolicy   `yaml:"automation_policy"`
 	IntakeFirstPolicy          *model.CompetitionIntakeFirstPolicy `yaml:"intake_first_policy,omitempty"`
 	Enabled                    bool                                `yaml:"enabled"`
@@ -696,6 +698,7 @@ func LoadSettings() (*Settings, error) {
 		return nil, fmt.Errorf("seed_key_base64: %w", err)
 	}
 	s := &Settings{
+		OfficialReviewImportSha256: strings.TrimSpace(public.OfficialReviewImportSha256),
 		AutomationPolicy:           public.AutomationPolicy,
 		IntakeFirstPolicy:          public.IntakeFirstPolicy,
 		Enabled:                    public.Enabled,

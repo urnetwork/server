@@ -184,9 +184,13 @@ func winnerReviewState(result *model.CompetitionV2RoundResult, policy model.Comp
 			source = review
 		}
 	}
+	providerMatches := source != nil && source.Request.ReviewerModel == modelName && source.Request.ReviewerReasoning == reasoning
+	if source != nil && source.Request.OfficialReviewOverride != nil {
+		providerMatches = model.ValidateCompetitionOfficialReviewImport(model.CompetitionOfficialReviewImport{RoundId: result.Seal.RoundId, Review: source.Request}, policy) == nil
+	}
 	if reward != nil && source != nil && reward.ReviewId == source.ReviewId &&
 		(reward.Request.RewardDisposition == "approved" || reward.Request.RewardDisposition == "restored") && source.Request.SourceDisposition == "approved" &&
-		source.Request.ReviewerModel == modelName && source.Request.ReviewerReasoning == reasoning && source.Request.ExpectedDecisionSha256 == state.CurrentDecision.DecisionSha256 {
+		providerMatches && source.Request.ExpectedDecisionSha256 == state.CurrentDecision.DecisionSha256 {
 		state.ApprovedReview, state.ApprovedReviewId = source, &source.ReviewId
 	}
 	return state, nil
@@ -254,6 +258,23 @@ func validateWinnerReviewSubmissionInTx(ctx context.Context, tx server.PgTx, res
 	}
 	if decision.SelectedJobId == nil || request.JobId != *decision.SelectedJobId {
 		return ErrConflict
+	}
+	if request.OfficialReviewOverride != nil {
+		if request.OfficialReviewOverride.CompletedAt.Before(result.Seal.PublicationAt) || request.OfficialReviewOverride.CompletedAt.After(now) {
+			return ErrConflict
+		}
+		content, err := json.Marshal(request)
+		if err != nil {
+			return err
+		}
+		var authorized bool
+		if err := tx.QueryRow(ctx, `SELECT competition_official_review_request_authorized($1,$2::jsonb)`, result.Seal.RoundId, string(content)).Scan(&authorized); err != nil {
+			return err
+		}
+		if !authorized {
+			return ErrConflict
+		}
+		return nil
 	}
 	var content []byte
 	if err := tx.QueryRow(ctx, `SELECT transition_json FROM competition_supervisor_transition WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 ORDER BY revision DESC LIMIT 1`, result.Seal.Environment, result.Seal.CompetitionId, result.Seal.SeasonId, result.Seal.Epoch+1).Scan(&content); err != nil {

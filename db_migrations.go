@@ -11392,4 +11392,8 @@ var migrations = []any{
 	// that read it. The judge's URL condition reads the columns the migration
 	// before it adds (url_probation, url_source).
 	providerZeroCarryMigration,
+
+	// A separately pinned operator amendment records the epoch-one official
+	// review without rewriting frozen Snow policies, clocks or scoring evidence.
+	newSqlMigration(competitionOfficialReviewMigration()),
 }

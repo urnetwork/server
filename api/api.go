@@ -91,6 +91,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/competition/v2/holds", handlers.CompetitionV2Hold),
 		router.NewRoute("POST", "/competition/v2/source-handoffs", handlers.CompetitionV2SourceHandoff),
 		router.NewRoute("POST", "/competition/v2/review-handoff-imports", handlers.CompetitionV2ReviewHandoffImport),
+		router.NewRoute("POST", "/competition/v2/official-review-imports", handlers.CompetitionV2OfficialReviewImport),
 		router.NewRoute("POST", "/competition/v2/rounds/([^/]+)/incidents", handlers.CompetitionV2Incident),
 		// /stats/last-90 stays up: it serves a redis-exported blob and does not
 		// touch the db.
