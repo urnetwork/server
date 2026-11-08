@@ -11,6 +11,17 @@
   "first_generation_call": "qwen-scan-0001",
   "first_generation_input_tokens": 45991,
   "generation_started_observed_at": "2026-11-08T19:57:31Z",
+  "first_completed_call": {
+    "call_id": "qwen-scan-0001",
+    "started_at": "2026-11-08T19:57:23.635257035Z",
+    "completed_at": "2026-11-08T20:02:51.54830728Z",
+    "scoped_issues": 0,
+    "deferred_artifact_ids": 0,
+    "generation_originals_exact_version_readback_verified": true,
+    "final_verdict": false
+  },
+  "completed_calls_at_observation": 1,
+  "current_call_at_observation": "qwen-scan-0002",
   "unit": "urnetwork-epoch1-direct-pair-20261108-v3.service",
   "session_id": 73006,
   "main_pid_observed": 3441353,
