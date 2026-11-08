@@ -18,6 +18,11 @@ func TestProviderZeroCarryMigrationIsAppended(t *testing.T) {
 	if ProviderEgressTlsVerdictVersion() >= version {
 		t.Fatalf("zero-carry migration %d is not after the TLS verdict migration %d", version, ProviderEgressTlsVerdictVersion())
 	}
+	// the judge's URL condition reads the outcome columns the URL source
+	// migration adds (url_probation, url_source)
+	if source := ProviderEgressUrlSourceVersion(); source < 1 || version <= source {
+		t.Fatalf("zero-carry migration %d is not after the URL source migration %d", version, source)
+	}
 }
 
 // The table is created only when absent, under a five-second lock bound set
