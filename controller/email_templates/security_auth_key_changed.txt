@@ -1,0 +1,33 @@
+{{define "headline"}}{{.TextHeadline}}{{end}}
+{{define "why"}}Sent to the sign-in email addresses of your URnetwork account
+whenever an auth key is created for your network or revoked from it.{{end}}
+{{define "content"}}
+{{.Subject}}.
+{{range .Rows}}
+When: {{.When}}
+Change: {{.Action}}
+Expires: {{.Expires}}
+Uses: {{.Uses}}
+{{- if .Kind}}
+Kind: {{.Kind}}
+{{- end}}
+{{- if .Tags}}
+Tags: {{.Tags}}
+{{- end}}
+{{- if .Via}}
+Made with: {{.Via}}
+{{- end}}
+{{end}}
+{{- if .MoreChangesText}}
+{{.MoreChangesText}}
+{{end}}
+{{- if .AnyCreated}}
+Anyone with an auth key can add a device to your network until the key expires, its uses run out or it is revoked.
+{{end}}
+{{- if .AnyPreApprovedRevoked}}
+Revoking a pre-approved key stops the key itself, but a copy of its bundle still admits devices until its Delegation is revoked from one of your admin devices.
+{{end}}
+If you didn't make this change, contact security@ur.io right away.
+
+To sign out every other device: https://ur.io/app/account/sessions
+{{end}}

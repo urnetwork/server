@@ -115,6 +115,9 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SecurityApiKeyChangedTemplate{}).Name(): func() Template {
 		return &SecurityApiKeyChangedTemplate{}
 	},
+	(&SecurityAuthKeyChangedTemplate{}).Name(): func() Template {
+		return &SecurityAuthKeyChangedTemplate{}
+	},
 	// the service reminders (service_reminders_controller.go)
 	(&ProEndingTemplate{}).Name(): func() Template {
 		return &ProEndingTemplate{}

@@ -311,6 +311,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /account/api-key":                         routeAccessNetwork,  // creates an API key = a full network credential (escalation)
 	"POST /account/api-key/remove":                  routeAccessNetwork,  // revokes an API key
 	"GET /account/api-keys":                         routeAccessNetwork,  // lists API keys
+	"GET /network/auth-keys":                        routeAccessNetwork,  // lists auth keys (Network until TEAM-M6-03's roles)
+	"POST /network/auth-keys":                       routeAccessNetwork,  // creates an auth key, which enrolls devices (escalation)
+	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,

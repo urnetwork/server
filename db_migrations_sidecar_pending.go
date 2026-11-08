@@ -86,8 +86,10 @@ func sidecarMg0Migrations() []any {
 }
 
 // MG1 (§19.7): what M1 first reads ungated. §7's auth keys and admin event log
-// are here; §5's identity tables, §7's admin_token_use, §18's lease and §20's
-// limit join the group in their own tasks' changes, each before the marker.
+// are here. The rest join in their own tasks' changes, in §19.7's order and
+// before the marker: §5's sidecar_identity and sidecar_identity_binding ahead of
+// §7's tables, then §7's admin_token_use, §18's network_client_lease and §20's
+// network_sidecar_limit after them.
 func sidecarMg1Migrations() []any {
 	return []any{
 		// §7.8's auth keys (§2.8 api-11): the bearer ur-authkey-<id>-<secret> is

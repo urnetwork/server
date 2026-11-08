@@ -18,15 +18,28 @@ type NetworkByApiKey struct {
 	NetworkName string
 }
 
+// The network the key stands for, or nil for no live key. A key past its expiry
+// (§7.8) is no key; a legacy key has none. The expiry is MG0's column, read only
+// where the binary links it.
 func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 	var result *NetworkByApiKey
 
 	server.Db(ctx, func(conn server.PgConn) {
 
 		apiKeyHash := sha256.Sum256([]byte(apiKey))
-		rows, err := conn.Query(
-			ctx,
-			`
+		sql := `
+			SELECT
+				account_api_key.api_key_id,
+				network.network_id,
+				network.admin_user_id,
+				network.network_name
+			FROM account_api_key
+			JOIN network ON network.network_id = account_api_key.network_id
+			WHERE account_api_key.api_key = $1
+		`
+		args := []any{hex.EncodeToString(apiKeyHash[:])}
+		if server.SidecarMg0Linked() {
+			sql = `
 				SELECT
 					account_api_key.api_key_id,
 					network.network_id,
@@ -34,10 +47,13 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 					network.network_name
 				FROM account_api_key
 				JOIN network ON network.network_id = account_api_key.network_id
-				WHERE account_api_key.api_key = $1
-			`,
-			hex.EncodeToString(apiKeyHash[:]),
-		)
+				WHERE
+					account_api_key.api_key = $1 AND
+					(account_api_key.expire_time IS NULL OR $2 < account_api_key.expire_time)
+			`
+			args = append(args, server.NowUtc())
+		}
+		rows, err := conn.Query(ctx, sql, args...)
 
 		server.WithPgResult(rows, err, func() {
 			if rows.Next() {
