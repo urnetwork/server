@@ -845,7 +845,9 @@ type ProviderEgressContactedTotal struct {
 // hour's runs, and is no evidence of a prober fault; it is counted apart. Each
 // accepted run counts once, from the history. A run without URL evidence (a
 // legacy batch) keeps every load, since nothing says which of its failures
-// reached the provider.
+// reached the provider. An outcome on probation is not a scored load
+// (provider_egress_url_source.go): a failing country site or a new candidate
+// must not read as a prober fault.
 func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt time.Time) ProviderEgressContactedTotal {
 	contacted := ProviderEgressContactedTotal{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -867,7 +869,7 @@ func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt ti
 					AND COALESCE(url_probe_evidence -> 'security', 'null'::jsonb) IN ('null'::jsonb, '[]'::jsonb)
 				), 0)::bigint
 			FROM provider_egress_health_history
-			WHERE $1 <= measured_at
+			WHERE $1 <= measured_at AND NOT url_probation
 			`,
 			minMeasuredAt.UTC(),
 			egresshealth.NoContactFailureStages(),
