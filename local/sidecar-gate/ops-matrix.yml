@@ -1,0 +1,113 @@
+# §19's requirements and decisions with their evidence (OPS-M1-07). Each gate's
+# report runs every entry and shows it pass, fail, missing or open: missing
+# means no test shows it yet, which is never a pass, and open means it waits on
+# hardware, production or people (owner decision 194). An entry's tests take
+# gates.yml's form; command runs a non-Go check in a repo's directory, where
+# exit 0 passes and skipped tests read open. The ids other plans build (FS-40,
+# FS-114, FS-63 and FS-61 by EVSB, FS-52 by DNS, FS-53 by EVSB-M2-11) are here as
+# rows only: this matrix runs what shows them, and builds none of them.
+ids:
+  R-OPS-1:
+    title: horizontally scaled services in server
+    external: each server/cli/<svc> block, which OPS-M2-03 and OPS-M5-03 write and the owner applies
+  R-OPS-2:
+    title: the file blobs in MinIO in a new file cluster
+    external: the file-cluster hosts and their in-house MinIO build (EVSB's external list)
+  R-OPS-3:
+    title: storage 1/20/200 GB per tier
+  R-OPS-4:
+    title: servers see only ciphertext and small headers; client IPs never logged
+  R-OPS-5:
+    title: migrations apply before code, compatible with the running release
+    rows: [FS-54, FS-55]
+    tests:
+      - {repo: server, package: ".", names: [TestSidecarGroupCheckRefusesADrop, TestSidecarGroupCheckRefusesSetNotNull, TestSidecarGroupCheckRefusesAPlainIndexOnAnExistingTable]}
+      - {repo: server, package: ./local/fs55, stores: true, names: [TestFs55PassesAGroupThatAddsATableAndAColumn, TestFs55FailsAGroupThatDropsAColumnNReads, TestFs55FailsAGroupThatTightensAConstraintAtTheRollback]}
+  R-OPS-6:
+    title: no PostgreSQL on packet paths; PgBouncer transaction pooling; Redis hash tags
+  R-OPS-7:
+    title: services built, pinned, rollout-classified and dark until enabled
+    tests:
+      - {repo: server, package: ".", names: [TestSidecarGatesAnswerTheGateTable, TestSidecarConfigFilesAreDark, TestSidecarGatesFailClosed]}
+      - {repo: build, dir: all, package: ".", names: [TestEveryReleaseMakefileKeepsThePendingTagOffMain, TestTheReleaseTagGuardFailsOnAMakefileThatSetsTheTag]}
+  R-OPS-8:
+    title: push without repeating the 2026-07-15 pubsub meltdown
+  R-OPS-9:
+    title: one site; sidecar tables dumped daily off site, kept 14 days
+    commands:
+      - {repo: xops, dir: main/ansible, command: [python3, -m, unittest, tests.test_db_archive_sidecar]}
+    external: the dump timer turned on at MG0's Gn-out, and a restore drilled on a real generation
+  R-OPS-10:
+    title: self-hosted DNS on new edge hosts at the site
+    external: two dns edge hosts with addresses on separate HE blocks (D-OPS-15; due M5)
+  R-OPS-11:
+    title: business-hours abuse review, the M5 notice pager, out-of-hours infrastructure pages from M3
+    external: a pager service account and the two-person rota (owner decision 143)
+  R-OPS-12:
+    title: the first metadata cluster, 8 PM9A3 at EC:4, within 0.8 DWPD and 50% of rated IOPS
+    rows: [FS-40, FS-114, FS-116, FS-117, FS-118]
+    external: the PM9A3 set and D-TEST-11's nvme run
+  D-OPS-1:
+    title: engines and jobs per 19.4; only api's oauth issuer mounts signing keys
+  D-OPS-2:
+    title: gkm is its own service from v0
+  D-OPS-3:
+    title: W1, W2 and W4-W11; the 16 MiB limit kept
+  D-OPS-6:
+    title: a group is pending under sidecar_pending until its own Gn-out registers it
+    rows: [FS-54]
+    tests:
+      - {repo: server, package: ".", names: [TestSidecarPendingBuildTags, TestReleaseBuildRegistersNoPendingGroup]}
+      - {repo: server, package: ./local/sidecar-migrations, names: [TestPromoteMovesOnlyItsOwnGroup, TestPromoteRefusesOutOfOrder, TestCheckTablesOnThisCheckout]}
+      - {repo: build, dir: all, package: ".", names: [TestReleaseBuildsUnderMainWithoutThePendingTag, TestEveryReleaseMakefileKeepsThePendingTagOffMain]}
+  D-OPS-7:
+    title: Redis holds only rebuildable state; switches go to Postgres first
+  D-OPS-8:
+    title: metrics and logs carry no identifying labels, names or query strings
+  D-OPS-9:
+    title: 19.8's SLOs and page classes; budget burn stops rollout steps
+    external: the pager service and SLO numbers measured on production
+  D-OPS-10:
+    title: gates and the placement target in config/<env>/sidecar.yml
+    tests:
+      - {repo: server, package: ".", names: [TestSidecarGatesAnswerTheGateTable, TestSidecarGateBucketHoldsTheTablesVectors, TestWriteGateClosedAnswers503WithRetryAfter, FuzzSidecarConfig]}
+      - {repo: sidecar, package: ./sidecartest, names: [TestFakeServiceGatesAnswersTheGateTable]}
+      - {repo: sidecar, package: ".", names: [TestServiceGateBucketHoldsTheTablesVectors, TestAHostWithNoGatesIsClosed]}
+  D-OPS-11:
+    title: releases classified and ordered per 19.11
+  D-OPS-12:
+    title: a builder job renews platform certificates at two thirds of their lifetime
+  D-OPS-14:
+    title: durability per 19.6; site loss takes 19.10's restore
+    rows: [FS-41, FS-42]
+  D-OPS-15:
+    title: addresses and dns edges per 19.4 and 19.5
+    external: the dns edge hosts (due M5)
+  D-OPS-16:
+    title: the Redis bundles leave out 19.7's sidecar families
+    commands:
+      - {repo: xops, dir: main/ansible, command: [python3, -m, unittest, tests.test_redis_sidecar_filter]}
+    external: the filter on a real rdb, on the backup host
+  D-OPS-17:
+    title: the metadata tier sized by drive writes, objects and bytes
+    rows: [FS-119]
+  D-OPS-18:
+    title: a daily off-site dump of the groups' tables, and the main dumps excluding them
+    rows: [FS-42]
+    tests:
+      - {repo: server, package: ./local/sidecar-migrations, names: [TestCheckTablesOnThisCheckout]}
+    commands:
+      - {repo: xops, dir: main/ansible, command: [python3, -m, unittest, tests.test_db_archive_sidecar]}
+  D-OPS-19:
+    title: the metadata set's XFS and MinIO settings and drive counters
+    external: the storage hosts
+  D-OPS-20:
+    title: both clusters on an in-house MinIO build with 19.6's deadline and settle rules
+    rows: [FS-114]
+    external: the fork's release build on the cluster hosts
+  D-OPS-21:
+    title: drop jobs as P2 taskworker work within their read, delete and HDD bounds
+    rows: [FS-70, FS-81, FS-96]
+  D-OPS-22:
+    title: a metadata cluster at 80% raw or 70% inodes takes only what the storage limit accepts
+    rows: [FS-61, FS-63, FS-119]
