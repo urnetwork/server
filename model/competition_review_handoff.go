@@ -106,7 +106,7 @@ func ValidateCompetitionReviewHandoffArgs(value CompetitionReviewHandoffArgs) er
 }
 
 func ValidateCompetitionReviewHandoffPlan(value CompetitionReviewHandoffPlan) error {
-	if !competitionAutomationSha256.MatchString(value.PlanSha256) || !competitionAutomationSha256.MatchString(value.BundleSha256) || len(value.CallIds) < 2 || len(value.CallIds) > 4096 {
+	if !competitionAutomationSha256.MatchString(value.PlanSha256) || !competitionAutomationSha256.MatchString(value.BundleSha256) || len(value.CallIds) < 2 || len(value.CallIds) > 384 {
 		return errors.New("review handoff requires an exact bounded plan and call census")
 	}
 	seen := map[string]bool{}

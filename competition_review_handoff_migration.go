@@ -101,7 +101,7 @@ BEGIN
   OR COALESCE(args->>'authorization_sha256','') !~ '^[0-9a-f]{64}$' OR COALESCE(args->>'provider_sha256','') !~ '^[0-9a-f]{64}$'
   OR COALESCE(NEW.owner_json->'plan'->>'plan_sha256','') !~ '^[0-9a-f]{64}$' OR COALESCE(NEW.owner_json->'plan'->>'bundle_sha256','') !~ '^[0-9a-f]{64}$'
   OR jsonb_typeof(NEW.owner_json->'plan'->'call_ids') IS DISTINCT FROM 'array'
-  OR jsonb_array_length(NEW.owner_json->'plan'->'call_ids') NOT BETWEEN 2 AND 4096
+  OR jsonb_array_length(NEW.owner_json->'plan'->'call_ids') NOT BETWEEN 2 AND 384
   OR EXISTS(SELECT 1 FROM competition_automation_incident WHERE round_id=NEW.round_id AND invalidates_evaluation)
   OR EXISTS(SELECT 1 FROM competition_integrity_review WHERE round_id=NEW.round_id AND job_id=NEW.job_id)
   OR EXISTS(SELECT 1 FROM competition_supervisor_transition WHERE environment=policy->>'environment' AND competition_id=(SELECT competition_id FROM competition_round WHERE round_id=NEW.round_id) AND season_id=policy->>'season_id' AND target_epoch=epoch+1 AND COALESCE(transition_json->'winner_review','null'::jsonb)<>'null'::jsonb) THEN
