@@ -639,7 +639,10 @@ func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, er
 	// is read from the resetting host's clock, and a fresh create time stamped
 	// here, by a clock ahead of that one, would outlive it.
 	runRefreshMintHook(clientSession)
-	signed, err := session.RenewSessionCredential(clientSession, networkName, isPro)
+	// the apps refresh a client token when a client limit hold starts, so its
+	// claim of whether UR Pro raises the limit is current for the hold's prompt
+	clientLimitUpgrade := model.ClientLimitUpgradeClaim(clientSession.Ctx, networkId, isPro)
+	signed, err := session.RenewSessionCredential(clientSession, networkName, isPro, clientLimitUpgrade)
 	if err != nil {
 		return nil, err
 	}
@@ -729,7 +732,8 @@ func NetworkRefreshToken(clientSession *session.ClientSession) (*NetworkRefreshT
 	// does: the password reset that expires the presented token expires the
 	// refreshed one too, whenever the reset commits
 	runRefreshMintHook(clientSession)
-	signed, err := session.RenewSessionCredential(clientSession, network.NetworkName, isPro)
+	// a network token carries no client limit claim; its client tokens do
+	signed, err := session.RenewSessionCredential(clientSession, network.NetworkName, isPro, nil)
 	if err != nil {
 		if session.RenewalRefused(err) {
 			// rotated or revoked after the router's state check: the 401

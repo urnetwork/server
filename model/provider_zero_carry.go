@@ -44,8 +44,9 @@
 //     busy provider is judged on its whole day, not on its newest contracts
 //     alone, and one too busy to read whole makes no verdict; and
 //   - the URL probe measured it at least ProviderOnlineMinMeasuredUrlRuns
-//     times in the URL-success rule's own evidence (providerOnlineUrlEvidenceSql,
-//     ProviderEgressHealthMaxAge) without one success.
+//     times in the URL-success rule's own evidence, the general catalog's
+//     scored outcomes (providerOnlineUrlEvidenceSql, ProviderEgressHealthMaxAge),
+//     without one success.
 //
 // A counted contract is resolved with an ordinary settlement: an outcome, a
 // usage snapshot with a byte count, and not an expiry's unconfirmed snapshot

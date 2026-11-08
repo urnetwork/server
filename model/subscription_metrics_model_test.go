@@ -18,9 +18,31 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 		"GROUP BY network_id, market",
 		"first_paid_deduplicated",
 		"max(end_time) AS latest_end_time",
+		// an App Store sandbox purchase (no revenue, no paid transaction it
+		// holds) is no subscription
+		"renewal.market = 'apple'\n          AND renewal.net_revenue_nano_cents = 0",
+		"paid.transaction_id = renewal.transaction_id",
 	} {
 		if !strings.Contains(subscriptionMetricsAccountQuery, required) {
 			t.Errorf("account query is missing %q", required)
+		}
+	}
+	for _, required := range []string{
+		// a trial is shorter than any paid period and its store period has
+		// not ended; a Play hold (no revenue) and an App Store sandbox
+		// purchase (no revenue) are no trial
+		"AND 0 < renewal.net_revenue_nano_cents\n      AND renewal.start_time <= $1\n      AND $1 < renewal.end_time - interval '24 hours'",
+		"renewal.end_time - interval '24 hours' < renewal.start_time + interval '27 days'",
+		"AND renewal.net_revenue_nano_cents = 0\n      AND renewal.start_time <= $1\n      AND $1 < renewal.end_time - interval '30 days'",
+		"AND ledger.price_milliunits = 0",
+		"SELECT 'deduplicated', plan, count(DISTINCT network_id)::bigint",
+		// a Play purchase with a charged window is no longer in its trial,
+		// though the day Play added before the charge is still current
+		"AND paid.purchase_token = renewal.purchase_token",
+		"AND paid.start_time + interval '27 days' <= paid.end_time - interval '24 hours'",
+	} {
+		if !strings.Contains(subscriptionMetricsTrialQuery, required) {
+			t.Errorf("trial query is missing %q", required)
 		}
 	}
 	for _, required := range []string{
@@ -48,6 +70,7 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 	}
 	for _, query := range []string{
 		subscriptionMetricsAccountQuery,
+		subscriptionMetricsTrialQuery,
 		subscriptionMetricsReconciliationQuery,
 		subscriptionMetricsDataPackQuery,
 	} {

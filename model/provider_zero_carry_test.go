@@ -6,7 +6,6 @@ package model
 
 import (
 	"fmt"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -292,10 +291,13 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 // The judge's URL condition is the URL-success rule's own evidence, through
 // one shared predicate, so the two cannot drift apart when either changes.
 // The window's whole row predicate is the shared one, with nothing after it
-// and nothing between it and the time bounds, and the rule's evidence is
-// within the window. When the rule's tally gains a general-catalog half (D4),
-// the rule decides by that half, and its source condition must be in the
-// shared predicate too; this trips until it is.
+// and nothing between it and the time bounds, and it keeps probation out
+// (D3). The rule decides by the window's general-catalog half (D4,
+// ProviderEgressHealthCounts.General): its evidence is the window's rows and
+// the general source, the same source condition the window's aggregate
+// filters its general half by. The source condition is never in the shared
+// predicate, which Quality and Speed read too, and it names the general
+// source rather than excluding the country one.
 func TestProviderZeroCarryUrlConditionIsTheOnlineRules(t *testing.T) {
 	window := strings.TrimSpace(providerEgressHealthWindowSql())
 	rows := strings.TrimSpace(providerEgressHealthWindowRowsSql(""))
@@ -303,8 +305,8 @@ func TestProviderZeroCarryUrlConditionIsTheOnlineRules(t *testing.T) {
 		t.Fatalf("the URL window's row predicate is not the shared one:\n%s\nwant it to end with\n%s", window, rows)
 	}
 	// and nothing between the time bounds and the shared predicate: a
-	// condition written there, as D3/D4 writes its probation one, would bind
-	// the window and not the judge
+	// condition written there, as D3/D4 first wrote its probation one, would
+	// bind the window and not the judge
 	if bounded := "WHERE measured_at > $1 AND measured_at <= $2 AND " + providerEgressHealthWindowRowsSql("") + "\n"; !strings.Contains(providerEgressHealthWindowSql(), bounded) {
 		t.Fatalf("the URL window's WHERE is not the time bounds and the shared predicate alone:\n%s\nwant it to hold\n%s", providerEgressHealthWindowSql(), bounded)
 	}
@@ -316,8 +318,28 @@ func TestProviderZeroCarryUrlConditionIsTheOnlineRules(t *testing.T) {
 	if providerZeroCarryUrlRunSql("run") != providerOnlineUrlEvidenceSql("run") {
 		t.Error("the judge's URL runs are not the rule's evidence")
 	}
-	if _, general := reflect.TypeOf(ProviderEgressHealthCounts{}).FieldByName("General"); general &&
-		!strings.Contains(providerOnlineUrlEvidenceSql("run"), "url_source") {
-		t.Error("the URL-success rule decides by the general catalog's outcomes, and the shared predicate does not")
+	if !strings.Contains(rows, "AND NOT url_probation") {
+		t.Errorf("the shared predicate lets outcomes on probation into the window: %s", rows)
+	}
+	if strings.Contains(rows, "url_source") {
+		t.Errorf("the shared predicate holds a catalog source condition, which would take scored country outcomes out of Quality and Speed: %s", rows)
+	}
+	for _, alias := range []string{"", "run", "success"} {
+		prefix := ""
+		if alias != "" {
+			prefix = alias + "."
+		}
+		general := providerOnlineUrlSourceSql(alias)
+		if want := fmt.Sprintf("%surl_source = %d", prefix, ProviderEgressUrlSourceGeneral); general != want {
+			t.Errorf("the general source over %q is %q, want %q", alias, general, want)
+		}
+		if want := providerEgressHealthWindowRowsSql(alias) + " AND " + general; providerOnlineUrlEvidenceSql(alias) != want {
+			t.Errorf("the URL-success rule's evidence over %q is %q, want the window's rows and the general source", alias, providerOnlineUrlEvidenceSql(alias))
+		}
+	}
+	counts := providerEgressHealthCountsSql()
+	if want := "SUM(ok_count) FILTER (WHERE " + providerOnlineUrlSourceSql("") + ")"; !strings.Contains(counts, want) ||
+		strings.Count(counts, "FILTER (WHERE "+providerOnlineUrlSourceSql("")+")") != 4 {
+		t.Errorf("the window's general half is not filtered by the general source:\n%s", counts)
 	}
 }

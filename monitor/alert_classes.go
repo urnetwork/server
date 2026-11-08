@@ -383,6 +383,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"egress-country-list-overlap":                         incidentAlertClass,
 	"egress-country-list-underfilled":                     incidentAlertClass,
 	"egress-country-provenance-missing":                   incidentAlertClass,
+	"egress-country-site-tally-stale":                     incidentAlertClass,
 	"egress-country-unreachable":                          incidentAlertClass,
 	"egress-destination-catalog-refused":                  incidentAlertClass,
 	"egress-destination-pool-unavailable":                 incidentAlertClass,

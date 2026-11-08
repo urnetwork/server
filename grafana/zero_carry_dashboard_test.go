@@ -12,7 +12,7 @@ import (
 	"time"
 )
 
-// Evaluate panel 154's own expressions: the zero-carry judge sets its
+// Evaluate panel 159's own expressions: the zero-carry judge sets its
 // providers and verdicts gauges from each run, on whichever taskworker ran
 // it, so the chart reads the process whose last-run timestamp is newest. An
 // older process's values never survive a newer run, and the chart goes blank
@@ -34,7 +34,7 @@ func TestZeroCarryProvidersPanelReadsTheNewestRun(t *testing.T) {
 		t.Fatal("official promtool 3.5.0 is required")
 	}
 
-	panel := dashboardPanelById(readTestDashboard(t, "egress-probes.json"), 154)
+	panel := dashboardPanelById(readTestDashboard(t, "egress-probes.json"), 159)
 	if panel == nil || panel.Title != "zero-carry providers by country" {
 		t.Fatal("missing the zero-carry providers panel")
 	}
@@ -98,7 +98,7 @@ func TestZeroCarryProvidersPanelReadsTheNewestRun(t *testing.T) {
 	if !strings.Contains(panel.Description, "lost all its listed supply") {
 		t.Error("the zero-carry providers panel does not say how to read an emptied country")
 	}
-	changes := dashboardPanelById(readTestDashboard(t, "egress-probes.json"), 155)
+	changes := dashboardPanelById(readTestDashboard(t, "egress-probes.json"), 160)
 	if changes == nil || !strings.Contains(changes.Description, "72 hours") || !strings.Contains(changes.Description, "upgrade") {
 		t.Error("the zero-carry changes panel does not say how verdicts end")
 	}

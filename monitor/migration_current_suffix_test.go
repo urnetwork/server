@@ -332,6 +332,32 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `CREATE OR REPLACE FUNCTION competition_review_handoff_observed(review_json jsonb, legacy_created_at timestamp) RETURNS timestamp LANGUAGE plpgsql STABLE AS 'BEGIN RETURN legacy_created_at; END'`},
 		{name: "winner source authorization accepts any handoff", version: server.CompetitionReviewHandoffMigrationVersion(),
 			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_source_authorized(intent jsonb, predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN true; END'`},
+		// An older release's outcome must read as the scored general outcome
+		// it was counted as; a probation default would take every outcome an
+		// older release stores out of the eight-hour window, and a missing
+		// column breaks every window reader.
+		{name: "URL outcome source missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history DROP COLUMN url_source`},
+		{name: "URL outcome probation defaults to unscored", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation SET DEFAULT true`},
+		{name: "URL outcome probation nullable", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation DROP NOT NULL`},
+		// A country site scores only once the refresh graduates it: a scored
+		// default would score every new site on arrival, and without the
+		// state or the pair tally the ingest fails.
+		{name: "country site state missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site`},
+		{name: "country site scored by default", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site ALTER COLUMN scored SET DEFAULT true`},
+		{name: "country site pair tally missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site_tally`},
+		// The refresh sums the tally by the network each row carries, and a
+		// row is updated about six times a day: without the column the ingest
+		// fails, and full pages turn those updates into index writes.
+		{name: "country site pair tally without its networks", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally DROP COLUMN network_id`},
+		{name: "country site pair tally pages filled", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally RESET (fillfactor)`},
 		// A zero-carry verdict excludes only until its expiry, one row per
 		// provider: without the expiry every reader fails, and without the
 		// key a provider could hold two verdicts.

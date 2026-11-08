@@ -816,9 +816,12 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	document := string(documentBytes)
 	for _, required := range []string{
 		`"query": "24h,7d,30d"`,
-		"upgrades / new paid accounts",
-		"current paid accounts by store",
-		"paid subscriber engagement by store",
+		"new subscriptions (trial starts included)",
+		"current subscriptions by store",
+		"subscriber engagement by store",
+		"current trials by store and plan",
+		"A free trial is a subscription",
+		"App Store sandbox purchases (TestFlight, App Review) record no revenue and are left out",
 		"observed churn: expiry or cancellation",
 		"provider-confirmed terminal events",
 		"reconciliation repairs",
@@ -833,6 +836,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 	for _, metric := range []string{
 		"urnetwork_subscription_active_accounts",
+		"urnetwork_subscription_trials_active",
 		"urnetwork_subscription_new_paid_accounts",
 		"urnetwork_subscription_engaged_accounts",
 		"urnetwork_subscription_churned_accounts",
@@ -903,6 +907,21 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	if upgradeTotal == nil || len(upgradeTotal.Targets) != 1 ||
 		!strings.Contains(upgradeTotal.Targets[0].Expr, `store="deduplicated"`) {
 		t.Fatal("subscriptions dashboard lacks the first-ever deduplicated upgrade total")
+	}
+	// the active trials: a deduplicated total over the closed plan set, and
+	// the stores that sell a trial by plan
+	trialTotal := dashboardPanelById(dashboard, 22)
+	if trialTotal == nil || len(trialTotal.Targets) != 1 ||
+		!strings.Contains(trialTotal.Targets[0].Expr, `sum(urnetwork_subscription_trials_active{`) ||
+		!strings.Contains(trialTotal.Targets[0].Expr, `store="deduplicated"`) {
+		t.Fatal("subscriptions dashboard lacks the deduplicated active trial total")
+	}
+	trials := dashboardPanelById(dashboard, 23)
+	if trials == nil || len(trials.Targets) != 1 ||
+		!strings.Contains(trials.Targets[0].Expr, `max by (store, plan) (urnetwork_subscription_trials_active{`) ||
+		!strings.Contains(trials.Targets[0].Expr, `store=~"apple|google|stripe"`) ||
+		!strings.Contains(trials.Targets[0].Expr, `plan=~"yearly|monthly|unknown"`) {
+		t.Fatal("subscriptions dashboard lacks the bounded active trials by store and plan")
 	}
 	for _, panel := range []*testPanel{engagement, churn} {
 		if panel == nil || len(panel.Targets) != 1 ||

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // The Embed plan's per-network client allowance (EMBED1.md).
@@ -65,12 +66,38 @@ func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, network
 	return limit
 }
 
+// The most active top-level clients the create cap's count reads to find the
+// network's devices among them (countNetworkActiveTopLevelClients). A network
+// whose top-level clients are mostly hosted proxies can hold thousands more of
+// them than devices, and the count skips those, so the read is bounded rather
+// than walking them all on every create. A network with more top-level clients
+// than this is counted from the first this many, which can only undercount: the
+// cap then lets a create through rather than refusing one. An Embed plan row
+// above it reads up to its limit. Variable only so tests can change it.
+var topLevelClientCountExamineBudget = 50_000
+
+// Testing_SetTopLevelClientCountExamineBudget sets the read bound of the create
+// cap's count and returns a function that restores it. Tests that use it must
+// not run in parallel.
+func Testing_SetTopLevelClientCountExamineBudget(budget int) func() {
+	prev := topLevelClientCountExamineBudget
+	topLevelClientCountExamineBudget = budget
+	return func() {
+		topLevelClientCountExamineBudget = prev
+	}
+}
+
 // countNetworkActiveTopLevelClients counts what the AuthNetworkClient create cap
-// counts: the network's active top-level clients (no source_client_id) that are
-// not provider installs. The scan stops at scanLimit rows: the create cap passes
-// its limit + 1, since only the threshold matters there, and GET /network/embed
-// passes the largest allowance + 1, so its count is exact for any allowance.
-func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQuery, networkId server.Id, scanLimit int) int {
+// counts: the network's devices, its active top-level clients (no
+// source_client_id) that are neither provider installs nor hosted proxies. A
+// hosted proxy is governed by its own cap and create rate
+// (network_client_proxy_limit.go), not by this one (owner decision 2026-11-08),
+// so a network with many proxies can still add its devices. The count stops at
+// scanLimit devices: the create cap passes its limit + 1, since only the
+// threshold matters there, and GET /network/embed passes the largest allowance
+// + 1, so its count is exact for any allowance. It reads at most examineLimit
+// top-level clients to find them (topLevelClientCountExamineBudget).
+func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQuery, networkId server.Id, scanLimit int, examineLimit int) int {
 	count := 0
 	result, err := query.Query(
 		ctx,
@@ -78,20 +105,30 @@ func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQu
 			SELECT COUNT(*) AS top_level_client_count
 			FROM (
 				SELECT 1
-				FROM network_client
+				FROM (
+					SELECT network_client.client_id
+					FROM network_client
+					WHERE
+						network_client.network_id = $1 AND
+						network_client.active = true AND
+						network_client.source_client_id IS NULL
+					LIMIT $3
+				) top_level
 				WHERE
-					network_id = $1 AND
-					active = true AND
-					source_client_id IS NULL AND
 					NOT EXISTS (
 						SELECT 1 FROM network_client_provider_intent
-						WHERE network_client_provider_intent.client_id = network_client.client_id
+						WHERE network_client_provider_intent.client_id = top_level.client_id
+					) AND
+					NOT EXISTS (
+						SELECT 1 FROM proxy_device_config
+						WHERE proxy_device_config.client_id = top_level.client_id
 					)
 				LIMIT $2
 			) t
 		`,
 		networkId,
 		scanLimit,
+		max(scanLimit, examineLimit),
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
@@ -272,10 +309,112 @@ func networkClientLimitOverride(ctx context.Context, networkId server.Id) (limit
 // the network has one, otherwise its tier's pro.yml concurrent_clients. Zero or
 // less is unlimited. The tier is only read for a network without a row.
 func networkConcurrentClientLimit(ctx context.Context, networkId server.Id) int {
+	limit, _, _ := networkConcurrentClientLimitTier(ctx, networkId)
+	return limit
+}
+
+// networkConcurrentClientLimitTier is networkConcurrentClientLimit with where
+// the limit comes from: override is true for an Embed plan row, and isPro is
+// the network's tier, read live (never from a jwt claim) and only for a network
+// without a row, so it is false whenever override is true.
+func networkConcurrentClientLimitTier(ctx context.Context, networkId server.Id) (limit int, override bool, isPro bool) {
 	if limit, override := networkClientLimitOverride(ctx, networkId); override {
-		return limit
+		return limit, true, false
 	}
-	return Pro().MaxConcurrentClients(IsProNetwork(ctx, networkId))
+	isPro = IsProNetwork(ctx, networkId)
+	return Pro().MaxConcurrentClients(isPro), false, isPro
+}
+
+// networkConcurrentClientLimitRefusal is the client-creation refusal of a
+// network that already has its plan's full complement of connected top-level
+// clients, or nil when there is room. While enforcement is dark it is nil at
+// once, with no redis and no db lookup. See concurrentClientLimitRefusal for
+// what the refusal offers.
+func networkConcurrentClientLimitRefusal(ctx context.Context, networkId server.Id) *AuthNetworkClientError {
+	// dark, or no pro.yml at all -> no limit, and no i/o to find that out
+	if !Pro().EnforceConcurrentClients {
+		return nil
+	}
+	limit, override, isPro := networkConcurrentClientLimitTier(ctx, networkId)
+	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
+	if !concurrentClientLimitExceeded(limit, connectedCount) {
+		return nil
+	}
+	return concurrentClientLimitRefusal(override, isPro, Pro().MaxConcurrentClients(true), connectedCount)
+}
+
+// ClientLimitUpgradeClaim is the client_limit_upgrade claim of a client token
+// of the network (session.ByJwt.ClientLimitUpgrade): whether UR Pro raises the
+// network's concurrent client limit. The apps' sdk offers the upgrade for a
+// client limit hold only when it is true, since the hold's close says nothing
+// about the plan. Pro is the network's live tier, read by the caller; the
+// Embed allowance comes through the process cache.
+func ClientLimitUpgradeClaim(ctx context.Context, networkId server.Id, isPro bool) *bool {
+	_, override := networkClientLimitOverride(ctx, networkId)
+	return clientLimitUpgradeClaim(override, isPro)
+}
+
+// clientLimitUpgradeClaim is ClientLimitUpgradeClaim from what decides it: no
+// plan lifts an Embed allowance, a Pro network is already on the highest
+// plan, and a free network gains only when Pro's limit is higher than free's
+// (unlimited counts as higher).
+func clientLimitUpgradeClaim(override bool, isPro bool) *bool {
+	freeLimit := Pro().MaxConcurrentClients(false)
+	proLimit := Pro().MaxConcurrentClients(true)
+	raises := !override && !isPro && 0 < freeLimit && (proLimit <= 0 || freeLimit < proLimit)
+	return &raises
+}
+
+// concurrentLimitCreationExempt reports whether a create skips the concurrent
+// client limit's creation gate: the sign-in of a URnetwork app (owner decision
+// 2026-11-08). The app's client is created, and while the network is over its
+// limit the connection gate (CanConnectNetworkPeer) holds the device off, where
+// the app shows what to do: Get Pro, and its device list to free a slot. A
+// creation refused at sign-in left the new device with no session to reach
+// either.
+//
+// An app is a caller whose client info names one of the apps' device types,
+// creating a device rather than a hosted proxy (a proxy keeps the gate, which
+// ur.io and the extension prompt on), with a network token: never an API key,
+// whose caller is an agent. The client info is the caller's own claim. A caller
+// that claims an app only gets clients that the connection gate still holds off
+// past the limit, so it uses no more than the limit, and the top-level client
+// cap still bounds how many it creates. Devices have no create rate (only
+// hosted proxies do): such a caller can create devices up to the cap, remove
+// them and create again, as any network under its limit already could.
+func concurrentLimitCreationExempt(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession) bool {
+	if authClient.ProxyConfig != nil || clientSession.ApiKeyAuthenticated {
+		return false
+	}
+	switch clientSession.ClientInfo.DeviceType {
+	case "android", "ios", "macos", "windows", "linux":
+		return true
+	default:
+		return false
+	}
+}
+
+// concurrentClientLimitRefusal is the refusal of a network over its concurrent
+// connected client limit. It asks for an upgrade only when an upgrade lifts the
+// limit: a network on the free tier, with no Embed plan row, whose Pro tier
+// allows more than `connectedCount` (a `proLimit` of zero or less is
+// unlimited). A Pro network at the Pro tier's limit, and a network whose
+// allowance is an Embed plan row that no plan changes, are told to free a slot
+// instead. The apps show the upgrade flow only for upgrade_required, and the
+// auth-client handler quotes an x402 Pro month only for it, so neither sells a
+// Pro plan that would not let the client connect.
+func concurrentClientLimitRefusal(override bool, isPro bool, proLimit int, connectedCount int) *AuthNetworkClientError {
+	if !override && !isPro && (proLimit <= 0 || connectedCount < proLimit) {
+		return &AuthNetworkClientError{
+			ClientLimitExceeded: true,
+			UpgradeRequired:     true,
+			Message:             "Your plan's concurrent client limit is reached. Upgrade to UR Pro to connect more clients.",
+		}
+	}
+	return &AuthNetworkClientError{
+		ClientLimitExceeded: true,
+		Message:             "Your plan's concurrent client limit is reached. Remove or disconnect another client to connect this one.",
+	}
 }
 
 // concurrentClientLimitExceeded reports whether a network with `connectedCount`

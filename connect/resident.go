@@ -815,6 +815,13 @@ type Exchange struct {
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; registration tests refuse a client's nominations, as
+	// a draining exchange or a failed nomination would, while its connection
+	// stays open, until it returns false.
+	refuseNominationForTest func(clientId server.Id) bool
+	// Nil in production; registration tests wait for a resident's teardown,
+	// its peer registration cleanup included, to finish.
+	afterResidentTeardownForTest func(*Resident)
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -1178,6 +1185,10 @@ func (self *Exchange) nominateLocalResident(
 		return false, false
 	}
 
+	if refuse := self.refuseNominationForTest; refuse != nil && refuse(clientId) {
+		return false, false
+	}
+
 	// Refuse to nominate a resident for a client that would push the network past
 	// its limit, which keeps the client from becoming active. An intent provider
 	// is judged by its provider intent check and a re-nomination of an
@@ -1275,6 +1286,9 @@ func (self *Exchange) nominateLocalResident(
 				clientId,
 				resident.residentId,
 			)
+			if afterTeardown := self.afterResidentTeardownForTest; afterTeardown != nil {
+				defer afterTeardown(resident)
+			}
 			// RemoveNetworkPeer no-ops (no publish) when this resident never
 			// registered, so churny residents that died before announcing
 			// emit nothing here.
@@ -1282,8 +1296,8 @@ func (self *Exchange) nominateLocalResident(
 			// entirely: the member registration ttl converts a non-returning
 			// client to a disconnect anyway, and a returning client refreshes
 			// the entry with no visible blip (CONNECTDRAIN2.md §3.2, MOVE.md
-			// §5.7)
-			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() {
+			// §5.7). So does a replaced resident's (residentReplaced).
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() && !residentReplaced(cleanupCtx, clientId, resident.residentId) {
 				if resident.peerCategory == model.NetworkPeerCategoryProxy {
 					model.RemoveNetworkProxyPeer(
 						cleanupCtx,
@@ -1342,6 +1356,24 @@ func (self *Exchange) nominateLocalResident(
 	self.notifyResidentArrival(resident)
 
 	return true, false
+}
+
+// residentReplaced reports whether another resident now serves the client: a
+// nomination replaced this one, in this process or on another host. The
+// client's peer registration is the replacement's then, though it may still
+// name this resident: registration happens once per connection, at announce,
+// and the replacement re-registers it under its own id only at its first
+// heartbeat (refreshResidentRegistration). Removing it here would leave the
+// connected client uncounted until that heartbeat, up to ExchangeResidentTtl/4,
+// and let one more client past the network's concurrent client limit. Kept,
+// the registration counts the client; if the client leaves before the
+// replacement's heartbeat, the member ttl converts it to a disconnect, as for
+// a drained or moved resident.
+func residentReplaced(ctx context.Context, clientId server.Id, residentId server.Id) bool {
+	return server.HandleErrorWithReturn(func() bool {
+		current := model.GetResidentForClient(ctx, clientId, 0)
+		return current != nil && current.ResidentId != residentId
+	})
 }
 
 // Refreshes metadata for one resident. Transport cancellation must not change

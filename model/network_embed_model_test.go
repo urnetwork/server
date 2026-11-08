@@ -228,7 +228,7 @@ func TestGetNetworkEmbedStatus(t *testing.T) {
 		connect.AssertEqual(t, status(network.rootSession).ActiveClientCount, 4)
 		// the create cap's bounded scan agrees at its threshold
 		server.Tx(ctx, func(tx server.PgTx) {
-			connect.AssertEqual(t, countNetworkActiveTopLevelClients(ctx, tx, network.networkId, 4+1), 4)
+			connect.AssertEqual(t, countNetworkActiveTopLevelClients(ctx, tx, network.networkId, 4+1, topLevelClientCountExamineBudget), 4)
 		})
 
 		// `network client-limit` sets the same allowance

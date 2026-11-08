@@ -5,6 +5,7 @@ package proxy
 import (
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
@@ -169,6 +170,56 @@ func TestProxyDeviceHostedWindowsUseTheHostedEvaluationPoolMultiple(t *testing.T
 		rebuilt := pd.deviceLocal.GetReliabilitySettings()
 		if rebuilt == nil || rebuilt.EvaluationPoolMultiple != 1 || !rebuilt.ScoredPlacement {
 			t.Fatalf("after a rebuilt window: %+v", rebuilt)
+		}
+	})
+}
+
+// A hosted device keeps connect's window outcome watchdog: a window that
+// adds no provider is rebuilt once after the outcome deadline (45 s) and
+// reports Failed after the second. The hosted evaluation pool multiple used
+// to reach the window through an sdk settings struct that did not carry the
+// deadlines, and the write replaced the multi client's whole override with
+// both set to zero, so a hosted window that never formed was never rebuilt
+// and never failed. Here the device has no live provider at all.
+func TestProxyDeviceHostedWindowKeepsTheOutcomeWatchdog(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		opts := defaultProxyTestOptions()
+		opts.controlPlaneOnly = true
+		h := setupProxyTestWithOptions(t, opts)
+		defer h.close(t)
+		pd, err := h.proxyDeviceManager.OpenProxyDevice(h.proxyId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// the hosted multiple is in effect, so its write has happened
+		start := time.Now()
+		for {
+			reliabilitySettings := pd.deviceLocal.GetReliabilitySettings()
+			if reliabilitySettings != nil && reliabilitySettings.EvaluationPoolMultiple == defaultHostedEvaluationPoolMultiple {
+				break
+			}
+			if 30*time.Second < time.Since(start) {
+				t.Fatalf("the hosted multiple was not applied: %+v", reliabilitySettings)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		// two 45 s outcome deadlines with no provider added, the rebuild
+		// between them, and margin for a loaded host
+		for {
+			status := pd.deviceLocal.GetWindowStatus()
+			if status != nil && 0 < status.ProviderStateAdded {
+				t.Fatalf("a window with no live provider added one: %+v", status)
+			}
+			if status != nil && status.Failed {
+				t.Logf("failed after %s: %+v", time.Since(start).Round(time.Second), status)
+				return
+			}
+			if 4*time.Minute < time.Since(start) {
+				t.Fatalf("a window with no provider for %s never reported Failed: the outcome watchdog is off: %+v", time.Since(start).Round(time.Second), status)
+			}
+			time.Sleep(time.Second)
 		}
 	})
 }
