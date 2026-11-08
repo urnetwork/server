@@ -187,6 +187,29 @@ func zeroCarryTestDeadlineCloses(
 	})
 }
 
+// Stores one URL outcome of the provider at measuredAt, of source, scored or
+// on probation, as the probe ingest stores it (provider_egress_url_source.go).
+func zeroCarryTestUrlOutcome(ctx context.Context, clientId server.Id, measuredAt time.Time, ok bool, source ProviderEgressUrlSource, probation bool) {
+	okCount := 0
+	if ok {
+		okCount = 1
+	}
+	evidence := fp2TestUrlProbeEvidence(measuredAt, ok)
+	server.Raise(evidence.ValidateOutcome(okCount, 1, false))
+	encoded, err := json.Marshal(evidence)
+	server.Raise(err)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO provider_egress_health_history (
+				run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure,
+				url_probe_evidence, url_probe_policy_version, url_source, url_probation
+			)
+			VALUES ($1, $2, $3, $4, 1, '{}', false, $5::jsonb, $6, $7, $8)`,
+			server.NewId(), clientId, measuredAt.UTC(), okCount, string(encoded), evidence.PolicyVersion, int(source), probation,
+		))
+	})
+}
+
 // n new client network ids.
 func zeroCarryTestNetworks(n int) []server.Id {
 	networkIds := make([]server.Id, n)
@@ -700,6 +723,71 @@ func TestZeroCarryConfirmsInSmallBatches(t *testing.T) {
 			if !zeroCarryTestHeld(ctx, zombie) {
 				t.Error("a zombie holds no verdict")
 			}
+		}
+	})
+}
+
+// The judge's URL condition is the Online rule's: the general catalog's
+// scored outcomes. A scored country site's success does not keep a provider
+// whose general outcomes all fail from a verdict, nor clear one, as it does
+// not keep the provider in Online; an outcome on probation counts for
+// nothing; and a provider measured only on its country list is no candidate.
+func TestZeroCarryJudgesByTheGeneralCatalog(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Taraz", "Jambyl", "Kazakhstan", "kz")
+		now := server.NowUtc()
+		empty := func(provider *egressTestProvider) {
+			zeroCarryTestContractsWith(ctx, t, provider, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		}
+
+		// three general failures and a scored country site's success
+		countrySuccess := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestHealth(ctx, countrySuccess.clientId, now.Add(-2*time.Hour), 3, 3)
+		zeroCarryTestUrlOutcome(ctx, countrySuccess.clientId, now.Add(-time.Hour), true, ProviderEgressUrlSourceCountry, false)
+		empty(countrySuccess)
+		// three general failures and a general success on probation
+		probationSuccess := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestHealth(ctx, probationSuccess.clientId, now.Add(-2*time.Hour), 3, 3)
+		zeroCarryTestUrlOutcome(ctx, probationSuccess.clientId, now.Add(-time.Hour), true, ProviderEgressUrlSourceGeneral, true)
+		empty(probationSuccess)
+		// three scored country failures and no general outcome
+		countryOnly := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		for i := range 3 {
+			zeroCarryTestUrlOutcome(ctx, countryOnly.clientId, now.Add(-time.Duration(i+1)*time.Hour), false, ProviderEgressUrlSourceCountry, false)
+		}
+		empty(countryOnly)
+		// three general failures and a general success
+		generalSuccess := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
+		egressTestHealth(ctx, generalSuccess.clientId, now.Add(-2*time.Hour), 3, 3)
+		zeroCarryTestUrlOutcome(ctx, generalSuccess.clientId, now.Add(-time.Hour), true, ProviderEgressUrlSourceGeneral, false)
+		empty(generalSuccess)
+		egressTestPasses(ctx, t)
+
+		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
+		if !zeroCarryTestHeld(ctx, countrySuccess) {
+			t.Error("a country site's success kept a provider whose general outcomes fail from a verdict")
+		}
+		if !zeroCarryTestHeld(ctx, probationSuccess) {
+			t.Error("a success on probation kept a provider from a verdict")
+		}
+		if zeroCarryTestHeld(ctx, countryOnly) {
+			t.Error("a provider measured only on its country list is zero-carry")
+		}
+		if zeroCarryTestHeld(ctx, generalSuccess) {
+			t.Error("a provider with a general success is zero-carry")
+		}
+		connect.AssertEqual(t, judgement.Created, 2)
+
+		// another country success clears nothing; a general success clears
+		zeroCarryTestUrlOutcome(ctx, countrySuccess.clientId, server.NowUtc(), true, ProviderEgressUrlSourceCountry, false)
+		judgement = JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
+		connect.AssertEqual(t, judgement.Cleared[ProviderZeroCarryClearUrlSuccess], 0)
+		zeroCarryTestUrlOutcome(ctx, countrySuccess.clientId, server.NowUtc(), true, ProviderEgressUrlSourceGeneral, false)
+		judgement = JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
+		connect.AssertEqual(t, judgement.Cleared[ProviderZeroCarryClearUrlSuccess], 1)
+		if zeroCarryTestHeld(ctx, countrySuccess) || !zeroCarryTestHeld(ctx, probationSuccess) {
+			t.Error("the general success cleared the wrong verdict")
 		}
 	})
 }

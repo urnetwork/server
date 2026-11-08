@@ -24132,7 +24132,7 @@ are rendered, never a provider, a network or a country):
   §2.32, as before the roll, mid-roll and after a rollback), no changes series
   beside it, or an invalid sample (a run time ahead of the clock).
 
-The egress probes dashboard's zero-carry judge row (panels 154 to 156) charts
+The egress probes dashboard's zero-carry judge row (panels 159 to 161) charts
 the verdicts in force by country, the changes by why, the reads, and how the
 confirming reads ended. False-negative qualifiers: a process that ran the
 judge and is not scraped is not counted, so a missing Taskworker slot can hide
