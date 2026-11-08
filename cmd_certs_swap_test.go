@@ -15,6 +15,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -2366,13 +2367,15 @@ func TestSidecarctlMainHelper(t *testing.T) {
 
 // Runs sidecarctl as a process against vaultHome, with the docker PATH finds, and returns all it
 // printed with its exit status. The status is the whole of what a job sees of a swap, and only a
-// process has one.
+// process has one. Its WARP_HOME is an empty directory, since the caller's warp.json would name the
+// vault ahead of WARP_VAULT_HOME.
 func runSidecarctlProcess(t *testing.T, path string, vaultHome string, args ...string) (string, int) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestSidecarctlMainHelper$")
 	cmd.Env = append(
 		os.Environ(),
 		fmt.Sprintf("PATH=%s", path),
+		fmt.Sprintf("WARP_HOME=%s", t.TempDir()),
 		fmt.Sprintf("WARP_VAULT_HOME=%s", vaultHome),
 		fmt.Sprintf("SIDECARCTL_MAIN_HELPER_ARGS=%s", strings.Join(args, " ")),
 	)
@@ -2498,6 +2501,7 @@ func TestCertsSwapCommandExitsTwoOnAMissingVersion(t *testing.T) {
 // missing version, a word more than it takes, and a flag it does not have.
 func TestCertsSwapCommandRefusesALineItCannotTake(t *testing.T) {
 	vaultHome := setupCertsSwapVault(t)
+	t.Setenv("WARP_HOME", t.TempDir())
 	t.Setenv("WARP_VAULT_HOME", vaultHome)
 	for _, args := range [][]string{
 		{"main", "--no-reload"},
@@ -2515,21 +2519,152 @@ func TestCertsSwapCommandRefusesALineItCannotTake(t *testing.T) {
 	}
 }
 
-// The vault is found as warpctl finds it: WARP_VAULT_HOME, else WARP_HOME's vault.
-func TestCertsSwapCommandFindsTheVaultUnderWarpHome(t *testing.T) {
+// The three places warpctl can find a vault, each holding the fixture's versions, so that a swap in
+// any of them would succeed and only where the links land tells them apart: the vault a warp.json
+// names, WARP_VAULT_HOME's and WARP_HOME's own. For the test, WARP_HOME is a new directory and
+// WARP_VAULT_HOME the second vault. A non-empty warpJson is written as WARP_HOME's warp.json, with
+// $VAULT standing for the first vault as a json string.
+func setupWarpVaultHomes(t *testing.T, warpJson string) (jsonVaultHome string, envVaultHome string, warpHomeVaultHome string) {
+	t.Helper()
 	warpHome := t.TempDir()
-	vaultHome := filepath.Join(warpHome, "vault")
+	jsonVaultHome = setupCertsSwapVault(t)
+	envVaultHome = setupCertsSwapVault(t)
+	warpHomeVaultHome = filepath.Join(warpHome, "vault")
 	for _, version := range []string{"1.0.0", "2.0.0"} {
-		generateTestTlsFiles(t, filepath.Join(vaultHome, "tls", version), "example.com", true)
+		generateTestTlsFiles(t, filepath.Join(warpHomeVaultHome, "tls", version), "example.com", true)
 	}
-	t.Setenv("WARP_VAULT_HOME", "")
+	if warpJson != "" {
+		jsonVaultHomeString, err := json.Marshal(jsonVaultHome)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warpJson = strings.ReplaceAll(warpJson, "$VAULT", string(jsonVaultHomeString))
+		if err := os.WriteFile(filepath.Join(warpHome, "warp.json"), []byte(warpJson), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	t.Setenv("WARP_HOME", warpHome)
+	t.Setenv("WARP_VAULT_HOME", envVaultHome)
+	return jsonVaultHome, envVaultHome, warpHomeVaultHome
+}
 
-	if err := runCertsSwap([]string{"main", "2.0.0", "--no-reload"}, io.Discard); err != nil {
-		t.Fatal(err)
+// The vault is the one warpctl mounts into an lb: warp.json's vaultHome, then WARP_VAULT_HOME,
+// then WARP_HOME's vault, as RequireVaultHome finds it. With --no-reload nothing else would notice
+// links moved in a vault no lb mounts, so the swap must land them in that one and in no other.
+func TestCertsSwapCommandFindsTheVaultWarpctlMounts(t *testing.T) {
+	cases := []struct {
+		warpJson string
+		vaultEnv bool
+		// 0 for the warp.json's vault, 1 for WARP_VAULT_HOME's, 2 for WARP_HOME's own
+		wantIndex int
+	}{
+		{warpJson: `{"dockerNamespace": "example", "vaultHome": $VAULT}`, vaultEnv: true, wantIndex: 0},
+		{warpJson: `{"vaultHome": $VAULT}`, vaultEnv: false, wantIndex: 0},
+		{warpJson: `{"dockerNamespace": "example"}`, vaultEnv: true, wantIndex: 1},
+		{warpJson: `{"vaultHome": null}`, vaultEnv: false, wantIndex: 2},
+		{warpJson: "", vaultEnv: true, wantIndex: 1},
+		{warpJson: "", vaultEnv: false, wantIndex: 2},
 	}
+	for _, c := range cases {
+		jsonVaultHome, envVaultHome, warpHomeVaultHome := setupWarpVaultHomes(t, c.warpJson)
+		if !c.vaultEnv {
+			t.Setenv("WARP_VAULT_HOME", "")
+		}
 
-	requireTlsLink(t, vaultHome, "star.example.com", filepath.Join("..", "2.0.0", "star.example.com"))
+		if err := runCertsSwap([]string{"main", "2.0.0", "--no-reload"}, io.Discard); err != nil {
+			t.Errorf("warp.json %q, WARP_VAULT_HOME set %v: %v", c.warpJson, c.vaultEnv, err)
+			continue
+		}
+
+		for index, vaultHome := range []string{jsonVaultHome, envVaultHome, warpHomeVaultHome} {
+			_, err := os.Lstat(tlsCurrentLinkPath(vaultHome, "star.example.com"))
+			if linked := err == nil; linked != (index == c.wantIndex) {
+				t.Errorf("warp.json %q, WARP_VAULT_HOME set %v: vault %d has a link: %v, want %d alone", c.warpJson, c.vaultEnv, index, linked, c.wantIndex)
+			}
+		}
+	}
+}
+
+// Where warpctl could find a vault this cannot, or none docker could mount, the swap refuses and
+// moves no link anywhere: with no WARP_HOME, whose warp.json would outrank WARP_VAULT_HOME, with a
+// warp.json it cannot read or parse, one naming an empty vault, and a vault home that is not
+// absolute. The error carries no byte of a warp.json, which holds a docker hub token, not even the
+// character a json syntax error quotes.
+func TestCertsSwapCommandRefusesAVaultWarpctlMightNotMount(t *testing.T) {
+	cases := []struct {
+		label string
+		// sets up the case after setupWarpVaultHomes
+		setup    func(t *testing.T)
+		warpJson string
+		wantErr  string
+	}{
+		{
+			label:   "no WARP_HOME",
+			setup:   func(t *testing.T) { t.Setenv("WARP_HOME", "") },
+			wantErr: "WARP_HOME is not set",
+		},
+		{
+			label: "an unreadable warp.json",
+			setup: func(t *testing.T) {
+				if err := os.Mkdir(filepath.Join(os.Getenv("WARP_HOME"), "warp.json"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "warp.json",
+		},
+		{
+			label:    "a warp.json that is not json",
+			warpJson: `{"dockerHubToken": synthetic-test-token, "vaultHome": $VAULT}`,
+			wantErr:  "warp.json is not json from byte",
+		},
+		{
+			label:    "a warp.json whose vaultHome is not a string",
+			warpJson: `{"vaultHome": 7}`,
+			wantErr:  "warp.json",
+		},
+		{
+			label:    "a warp.json naming an empty vault",
+			warpJson: `{"vaultHome": ""}`,
+			wantErr:  "names an empty vaultHome",
+		},
+		{
+			label:    "a warp.json naming a relative vault",
+			warpJson: `{"vaultHome": "srv/warp/vault"}`,
+			wantErr:  "srv/warp/vault is not an absolute path",
+		},
+		{
+			label:   "a relative WARP_VAULT_HOME",
+			setup:   func(t *testing.T) { t.Setenv("WARP_VAULT_HOME", "vault") },
+			wantErr: "vault is not an absolute path",
+		},
+		{
+			label: "a relative WARP_HOME",
+			setup: func(t *testing.T) {
+				t.Setenv("WARP_HOME", "warp-home-test")
+				t.Setenv("WARP_VAULT_HOME", "")
+			},
+			wantErr: "warp-home-test/vault is not an absolute path",
+		},
+	}
+	for _, c := range cases {
+		jsonVaultHome, envVaultHome, warpHomeVaultHome := setupWarpVaultHomes(t, c.warpJson)
+		if c.setup != nil {
+			c.setup(t)
+		}
+
+		err := runCertsSwap([]string{"main", "2.0.0", "--no-reload"}, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+			t.Errorf("%s: swap error = %v, want one with %q", c.label, err, c.wantErr)
+		}
+		if err != nil && (strings.Contains(err.Error(), "synthetic") || strings.Contains(err.Error(), "'s'")) {
+			t.Errorf("%s: swap error %q quotes warp.json", c.label, err)
+		}
+		for index, vaultHome := range []string{jsonVaultHome, envVaultHome, warpHomeVaultHome} {
+			if _, err := os.Lstat(filepath.Join(vaultHome, "tls", tlsCurrentDirName)); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("%s: vault %d has tls/current after a refused swap: %v", c.label, index, err)
+			}
+		}
+	}
 }
 
 // With neither set there is no vault to swap in, which is a failure, not a swap of some default.

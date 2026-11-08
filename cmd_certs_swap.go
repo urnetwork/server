@@ -9,14 +9,15 @@
 // versioned paths for now, so no vault entry or lb image reads tls/current. Every lb deployed today
 // reads the version's names from versioned paths, which this refuses before it changes anything.
 //
-// It runs on one lb host, against that host's flat vault ($WARP_VAULT_HOME, else
-// $WARP_HOME/vault, as warpctl finds it), after the version it names has reached the host. Links
-// are relative, because the vault mounts at another path in the lb container, and there is one per
-// name, because a pair has to change in one step and each name's newest version can differ. nginx
-// reads a link only at start and reload, so a moved link changes nothing a client sees until the
-// reload that follows it. Docker Desktop's file sharing has failed an nginx reload right after a
-// link moved, where ext4 did not, so a swap against a macOS bind mount says nothing about one on a
-// host.
+// It runs on one lb host, after the version it names has reached the host, against the flat vault
+// warpctl mounts into an lb there: warp.json's vaultHome, else $WARP_VAULT_HOME, else
+// $WARP_HOME/vault, as warpctl's RequireVaultHome finds it. So it needs the WARP_HOME the host's
+// units run warpctl with, and refuses without one. Links are relative, because the vault mounts at
+// another path in the lb container, and there is one per name, because a pair has to change in one
+// step and each name's newest version can differ. nginx reads a link only at start and reload, so a
+// moved link changes nothing a client sees until the reload that follows it. Docker Desktop's file
+// sharing has failed an nginx reload right after a link moved, where ext4 did not, so a swap
+// against a macOS bind mount says nothing about one on a host.
 //
 // Neither half of that is taken on trust. nginx reloads happily with a config that never reads
 // tls/current, or from a vault that is not this one, and answers 0 to a reload it then ignores. So
@@ -26,8 +27,9 @@
 // them back: a refused version left in the links would stop the next lb start.
 //
 // All it knows of warp is warp's layout, which the constants below name: the labels warpctl run
-// stamps on a container and the vault mount it gives an lb (warpctl/run.go), the config lb/main.go
-// starts nginx from for a block, and the lines `warpctl lb create-config` writes there. warpctl's
+// stamps on a container and the vault mount it gives an lb (warpctl/run.go), where warpctl finds
+// that vault (warpctl/docker.go), the config lb/main.go starts nginx from for a block, and the
+// lines `warpctl lb create-config` writes there. warpctl's
 // TestNginxConfigWritesTlsLinesTheSwapReads holds its pair lines to lbTlsPathRegex's shape, and
 // TestNginxConfigWritesWorkerCountsTheSwapReads its worker count to what lbWorkerProcessesRegex
 // and lbWorkerProcessesLineRegex read.
@@ -43,6 +45,7 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -122,7 +125,8 @@ type certsSwapSettings struct {
 	// Moves the links and touches no lb and no docker daemon, for a host with no lb a reload would
 	// reach: a new host before its first lb start, or a host whose lb is down, where this is the
 	// rollback. Nothing but the pair checks judges the version then, and a running lb keeps its old
-	// pair until its next reload or start.
+	// pair until its next reload or start. Nor does any lb confirm the vault: that rests on finding
+	// it as warpctl does, from the environment the host's units give warpctl (runCertsSwap).
 	noReload bool
 	// Bounds each docker call, so that a wedged daemon fails the swap instead of hanging the job
 	// that ran it. A reload parses the whole lb config first. Non-positive expires every call at
@@ -182,7 +186,8 @@ type lbContainer struct {
 	workerCount int
 }
 
-// `sidecarctl certs swap <env> <version> [--no-reload]`.
+// `sidecarctl certs swap <env> <version> [--no-reload]`, in the vault warpctl would mount into an
+// lb it ran with this environment.
 func runCertsSwap(args []string, out io.Writer) error {
 	flags := flag.NewFlagSet("certs swap", flag.ContinueOnError)
 	noReload := flags.Bool("no-reload", false, "move the links and touch no lb")
@@ -193,13 +198,58 @@ func runCertsSwap(args []string, out io.Writer) error {
 	if len(positionals) != 2 {
 		return sidecarctlUsageErrorf("want <env> and <version>, got %q", positionals)
 	}
-	vaultHome := os.Getenv("WARP_VAULT_HOME")
-	if vaultHome == "" {
+
+	// warpctl's RequireVaultHome (warpctl/docker.go), which every lb's vault mount comes from:
+	// warp.json's vaultHome, then WARP_VAULT_HOME, then WARP_HOME's vault. With --no-reload nothing
+	// after this checks that the links move where an lb reads them, so where warpctl could find
+	// another vault this refuses: with no WARP_HOME, whose warp.json outranks the rest, with a
+	// warp.json it cannot read, which warpctl takes for none, and with a path that is not absolute,
+	// which docker mounts into no container.
+	findVaultHome := func() (string, error) {
 		warpHome := os.Getenv("WARP_HOME")
 		if warpHome == "" {
-			return errors.New("neither WARP_VAULT_HOME nor WARP_HOME is set, so there is no vault to swap in")
+			return "", errors.New("WARP_HOME is not set, so warp.json, which can name the vault warpctl gives an lb, cannot be read")
 		}
-		vaultHome = filepath.Join(warpHome, "vault")
+		vaultHome := ""
+		warpJsonPath := filepath.Join(warpHome, "warp.json")
+		warpJson, err := os.ReadFile(warpJsonPath)
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		if err == nil {
+			// the file holds warpctl's docker hub token too, so only this setting is decoded, and a
+			// syntax error, which would quote a byte of the file, gives only where it is
+			warpSettings := struct {
+				VaultHome *string `json:"vaultHome"`
+			}{}
+			if err := json.Unmarshal(warpJson, &warpSettings); err != nil {
+				syntaxErr := &json.SyntaxError{}
+				if errors.As(err, &syntaxErr) {
+					return "", fmt.Errorf("%s is not json from byte %d", warpJsonPath, syntaxErr.Offset)
+				}
+				return "", fmt.Errorf("%s: %w", warpJsonPath, err)
+			}
+			if warpSettings.VaultHome != nil {
+				if *warpSettings.VaultHome == "" {
+					return "", fmt.Errorf("%s names an empty vaultHome", warpJsonPath)
+				}
+				vaultHome = *warpSettings.VaultHome
+			}
+		}
+		if vaultHome == "" {
+			vaultHome = os.Getenv("WARP_VAULT_HOME")
+		}
+		if vaultHome == "" {
+			vaultHome = filepath.Join(warpHome, "vault")
+		}
+		if !filepath.IsAbs(vaultHome) {
+			return "", fmt.Errorf("the vault home %s is not an absolute path, so no lb can mount it", vaultHome)
+		}
+		return vaultHome, nil
+	}
+	vaultHome, err := findVaultHome()
+	if err != nil {
+		return err
 	}
 	settings := defaultCertsSwapSettings()
 	settings.noReload = *noReload
