@@ -390,6 +390,7 @@ func TestTlsFailureAcrossTheCountrysNetworksIsAPlaceFault(t *testing.T) {
 		}
 		inOpen := egressTestConnect(ctx, t, openCity, egressTestUnsampled, nil, nil).clientId
 		all := append(append([]server.Id{}, blocked...), inOpen)
+		testingTlsEstablishNetworks(ctx, all...)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Truncate(time.Microsecond)
@@ -522,6 +523,7 @@ func TestTlsPlaceReadThatCannotCompleteExcludesUntilItIsRead(t *testing.T) {
 			blocked = append(blocked, egressTestConnect(ctx, t, blockedCity, egressTestUnsampled, nil, nil).clientId)
 		}
 		intercepting := testingTlsProvider(ctx)
+		testingTlsEstablishNetworks(ctx, blocked...)
 		now := server.NowUtc()
 		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
 		now = server.NowUtc().Truncate(time.Microsecond)
@@ -594,6 +596,106 @@ func TestTlsPlaceReadThatCannotCompleteExcludesUntilItIsRead(t *testing.T) {
 		}
 		if excluded := testingTlsExcluded(t, ctx, everyone); len(excluded) != 1 || !excluded[intercepting] {
 			t.Fatalf("excluded %v once the pair was read, want only the provider-specific failure's provider", excluded)
+		}
+	})
+}
+
+// Gives the networks of clientIds a network row created at createdAt: the
+// test providers' networks have none, and place evidence counts only networks
+// two weeks old.
+func testingTlsCreateNetworks(ctx context.Context, createdAt time.Time, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network (network_id, network_name, admin_user_id, create_time)
+			SELECT DISTINCT client.network_id, 'tls-test-' || client.network_id::text, client.network_id, $1::timestamp
+			FROM network_client AS client WHERE client.client_id = ANY($2)
+			ON CONFLICT (network_id) DO UPDATE SET create_time = EXCLUDED.create_time`,
+			createdAt.UTC(), clientIds))
+	})
+}
+
+// Networks that have existed for a month.
+func testingTlsEstablishNetworks(ctx context.Context, clientIds ...server.Id) {
+	testingTlsCreateNetworks(ctx, server.NowUtc().Add(-30*24*time.Hour), clientIds...)
+}
+
+// The review's Turkey case (REVIEW-D1 N10): one network's ten failing
+// providers carried the 0.9 share for its neighbours' findings, so their
+// failures read as a national block although a fourth network verified the
+// URL. Counted by network, three failing networks beside one that verifies
+// fall short of the share, and the findings the direct check verified are the
+// providers' own.
+func TestTlsPlaceIsNotCarriedByOneLargeNetwork(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Large City", "Large Region", "Large Country", "zx")
+		large := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil)
+		failing := []server.Id{large.clientId}
+		for range 9 {
+			failing = append(failing, egressTestConnectOn(ctx, t, large.networkId, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		neighbours := []server.Id{}
+		for range 3 {
+			neighbours = append(neighbours, egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		verifying := egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil).clientId
+		all := append(append(append([]server.Id{}, failing...), neighbours...), verifying)
+		testingTlsEstablishNetworks(ctx, all...)
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		now = server.NowUtc().Truncate(time.Microsecond)
+
+		site := testingTlsSite("contested-site", "https://contested.example/")
+		testingTlsPlaceTally(ctx, now, "zx", site.Name, 400, 400, 600, 100)
+		for i, clientId := range append(append([]server.Id{}, failing...), neighbours...) {
+			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(i)*time.Second), true))
+		}
+		SetProviderEgressHealth(ctx, testingTlsUrlResult(verifying, time.Time{}, site, now, false))
+		testingJudgeTlsFindings(t, ctx, now.Add(time.Minute), []string{site.Name, "working-site"}, map[string]string{"contested.example": "verified"})
+
+		for _, clientId := range neighbours {
+			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "provider" {
+				t.Fatalf("a failure one large network's providers outnumber the verifying network on was judged %q", verdict)
+			}
+		}
+		if excluded := testingTlsExcluded(t, ctx, neighbours); len(excluded) != len(neighbours) {
+			t.Fatalf("excluded %v, want every neighbour whose failure the direct check verified", excluded)
+		}
+	})
+}
+
+// Networks younger than two weeks hold no place evidence (REVIEW-D1 N10): a
+// farm that creates the networks it needs and fails a URL from all of them,
+// where the URL verifies directly, makes no national block, and each of its
+// providers is excluded.
+func TestTlsYoungNetworksMakeNoPlace(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Farm City", "Farm Region", "Farm Country", "zw")
+		farm := []server.Id{}
+		for range 5 {
+			farm = append(farm, egressTestConnect(ctx, t, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		// the farm's networks were made yesterday
+		testingTlsCreateNetworks(ctx, server.NowUtc().Add(-24*time.Hour), farm...)
+		now := server.NowUtc()
+		UpdateClientLocationReliabilities(ctx, now.Add(-time.Hour), now)
+		now = server.NowUtc().Truncate(time.Microsecond)
+
+		site := testingTlsSite("farmed-site", "https://farmed.example/")
+		testingTlsPlaceTally(ctx, now, "zw", site.Name, 400, 400, 600, 100)
+		for i, clientId := range farm {
+			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(i)*time.Second), true))
+		}
+		testingJudgeTlsFindings(t, ctx, now.Add(time.Minute), []string{site.Name, "working-site"}, map[string]string{"farmed.example": "verified"})
+
+		for _, clientId := range farm {
+			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "provider" {
+				t.Fatalf("a failure shared only by networks a day old was judged %q", verdict)
+			}
+		}
+		if excluded := testingTlsExcluded(t, ctx, farm); len(excluded) != len(farm) {
+			t.Fatalf("excluded %v, want every farm provider", excluded)
 		}
 	})
 }

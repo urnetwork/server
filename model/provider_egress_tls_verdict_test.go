@@ -54,6 +54,9 @@ func TestTlsJudgeSettingsAreTheProbeAndRefreshConventions(t *testing.T) {
 	if settings.PlaceMinNetworks != 3 {
 		t.Errorf("place network floor %d is not three", settings.PlaceMinNetworks)
 	}
+	if settings.PlaceMinNetworkAge != 14*24*time.Hour {
+		t.Errorf("place evidence counts networks from %s old, not two weeks", settings.PlaceMinNetworkAge)
+	}
 	if settings.CommonModeNetworkCount != 16 {
 		t.Errorf("common-mode network count %d is not the URL common-mode guard's", settings.CommonModeNetworkCount)
 	}
@@ -441,11 +444,13 @@ func TestTlsSiteFaultsReadNoPlaceEvidence(t *testing.T) {
 // Place-evidence findings in one country: one finding on each of networks
 // networks, all failing the URL a minute ago.
 func testingTlsPlaceFindings(now time.Time, urlKey string, countryCode string, countryLocationId server.Id, networks int) []*ProviderEgressTlsFinding {
+	// networks that have existed for a month, so they count as place evidence
+	established := now.Add(-30 * 24 * time.Hour)
 	findings := []*ProviderEgressTlsFinding{}
 	for range networks {
 		network := server.NewId()
 		findings = append(findings, &ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: urlKey, Name: "site-" + urlKey,
-			Url: "https://" + urlKey + ".example/", MeasuredAt: now.Add(-time.Minute), NetworkId: &network,
+			Url: "https://" + urlKey + ".example/", MeasuredAt: now.Add(-time.Minute), NetworkId: &network, NetworkCreatedAt: &established,
 			CountryCode: countryCode, CountryLocationId: &countryLocationId})
 	}
 	return findings
@@ -473,7 +478,7 @@ func (self *testingTlsPlaceReads) reads() providerEgressTlsPlaceReads {
 			}
 			return tallies
 		},
-		outcomes: func(ctx context.Context, _ time.Time, key providerEgressTlsPlaceKey) map[server.Id]providerEgressTlsPlaceOutcome {
+		outcomes: func(ctx context.Context, _ time.Time, _ time.Time, key providerEgressTlsPlaceKey) map[server.Id]providerEgressTlsPlaceOutcome {
 			self.read = append(self.read, key.urlKey)
 			switch {
 			case self.failing[key.urlKey]:
@@ -521,7 +526,7 @@ func TestTlsPlaceReadsStayInTheirBudgetAndNeverFailTheRun(t *testing.T) {
 		if evidence[i].withheld != want[finding.UrlKey] {
 			t.Errorf("%s: withheld %q, want %q", finding.UrlKey, evidence[i].withheld, want[finding.UrlKey])
 		}
-		if finding.UrlKey == "small" && (evidence[i].failed != 9 || evidence[i].countryLoads != 100) {
+		if finding.UrlKey == "small" && (evidence[i].failed != 1 || evidence[i].countryLoads != 100) {
 			t.Errorf("a pair read in time lost its evidence: %+v", evidence[i])
 		}
 	}
@@ -682,6 +687,91 @@ func TestTlsPlaceReadClockCarriesTheNeededPairsWithinItsBound(t *testing.T) {
 	for i := range providerEgressTlsPlaceClockLimit + 76 {
 		if _, kept := bounded[fmt.Sprintf("pair-%04d", i)]; kept != (i < providerEgressTlsPlaceClockLimit) {
 			t.Fatalf("pair %d kept=%t, want the most recently read kept and the stalest dropped", i, kept)
+		}
+	}
+}
+
+// Place reads with fixed outcomes on each URL, by network, recording the
+// networks-established bound each read was asked for.
+type testingTlsNetworkPlaceReads struct {
+	outcomes      map[string]map[server.Id]providerEgressTlsPlaceOutcome
+	establishedBy []time.Time
+}
+
+func (self *testingTlsNetworkPlaceReads) reads() providerEgressTlsPlaceReads {
+	return providerEgressTlsPlaceReads{
+		tallies: func(_ context.Context, _ time.Time, _ *ProviderEgressTlsJudgeSettings, countryCodes []string) map[string]providerEgressTlsCountryTally {
+			tallies := map[string]providerEgressTlsCountryTally{}
+			for _, countryCode := range countryCodes {
+				tallies[countryCode] = providerEgressTlsCountryTally{loads: 1000, failures: 50}
+			}
+			return tallies
+		},
+		outcomes: func(_ context.Context, _ time.Time, establishedBy time.Time, key providerEgressTlsPlaceKey) map[server.Id]providerEgressTlsPlaceOutcome {
+			self.establishedBy = append(self.establishedBy, establishedBy)
+			return self.outcomes[key.urlKey]
+		},
+	}
+}
+
+// Place evidence counts each other network once, by what most of its
+// providers saw, and only networks two weeks old (REVIEW-D1 N10). In the
+// review's Turkey case one network's ten failing providers carried the 0.9
+// share for its neighbours' findings; counted by network, the three failing
+// networks beside one that verifies make 0.75, and no place. Networks younger
+// than two weeks hold no evidence: a farm's fresh networks meet no floor.
+func TestTlsPlaceCountsEachEstablishedNetworkOnce(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	now := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	country := server.NewId()
+	findings := testingTlsPlaceFindings(now, "turkey", "tr", country, 4)
+	large, verifying := *findings[1].NetworkId, server.NewId()
+	fake := &testingTlsNetworkPlaceReads{outcomes: map[string]map[server.Id]providerEgressTlsPlaceOutcome{
+		"turkey": {
+			*findings[0].NetworkId: {failed: 1},
+			large:                  {failed: 10},
+			*findings[2].NetworkId: {failed: 1},
+			*findings[3].NetworkId: {failed: 1, verified: 2},
+			verifying:              {verified: 1},
+		},
+	}}
+	candidates := []bool{true, true, true, true}
+	evidence, _ := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, nil, fake.reads())
+	// the candidate on the first network: the large network, the second one
+	// failing, the third mostly verifying, and the verifying one
+	if place := evidence[0]; place.networks != 3 || place.failed != 2 || place.verified != 2 || place.broken(settings) {
+		t.Fatalf("the Turkey shape's place evidence %+v, want three networks, two failing and two verifying, and no place", place)
+	}
+	if len(fake.establishedBy) != 1 || !fake.establishedBy[0].Equal(now.Add(-14*24*time.Hour)) {
+		t.Fatalf("outcomes read for networks established by %v, want two weeks before the run", fake.establishedBy)
+	}
+
+	// the same failures on networks a day old make no floor and read nothing
+	young := now.Add(-24 * time.Hour)
+	for _, finding := range findings {
+		finding.NetworkCreatedAt = &young
+	}
+	fake.establishedBy = nil
+	evidence, _ = readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, nil, fake.reads())
+	for i, place := range evidence {
+		if place.networks != 0 || place.broken(settings) {
+			t.Fatalf("finding %d on a young network: place evidence %+v", i, place)
+		}
+	}
+	if len(fake.establishedBy) != 0 {
+		t.Fatal("outcomes were read for a pair no established network holds")
+	}
+
+	// an honest block: every other established network fails
+	findings = testingTlsPlaceFindings(now, "blocked", "zz", country, 4)
+	fake.outcomes["blocked"] = map[server.Id]providerEgressTlsPlaceOutcome{}
+	for _, finding := range findings {
+		fake.outcomes["blocked"][*finding.NetworkId] = providerEgressTlsPlaceOutcome{failed: 2}
+	}
+	evidence, _ = readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, nil, fake.reads())
+	for i, place := range evidence {
+		if place.networks != 3 || place.failed != 3 || place.verified != 0 || !place.broken(settings) {
+			t.Fatalf("finding %d of an honest block: place evidence %+v, want place", i, place)
 		}
 	}
 }

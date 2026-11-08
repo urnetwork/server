@@ -24007,8 +24007,9 @@ Implementation (5-minute cadence; `signal_egress_tls_judge.go` and
 minutes behind now:
 `topk(1, urnetwork_egress_tls_judge_last_judged_timestamp_seconds{job="taskworker"})`,
 `urnetwork_egress_tls_undecided_findings{job="taskworker"} and on(job,host,block,instance)`
-that same `topk(1, ...)`, and the last-judged gauge's per-slot freshness on
-every desired Taskworker slot.
+that same `topk(1, ...)`, the newest `process_start_time_seconds` of the
+Taskworker processes that export the last-judged gauge, and the gauge's
+per-slot freshness on every desired Taskworker slot.
 
 Classes (all WARN, target `<env>/egress-tls-judge`; only counts, ages and
 slot names are rendered, never a URL, a provider or a website):
@@ -24020,8 +24021,14 @@ slot names are rendered, never a URL, a provider or a website):
   fresh last-judged gauge. With a desired slot not reporting, an unread slot
   may hold the newest run, so it is raised only once the newest judged run on
   the slots that report is more than 45 minutes old, when a fully read judge
-  would page, and then it pages from its second cadence; slots that report
-  only zero (new processes not yet judged, as mid-roll) never raise it.
+  would page, and then it pages from its second cadence. Slots that report
+  only zero have not run the judge since their processes started, as just
+  after a roll, which raises nothing. The judge is one fleet task, run every
+  five minutes by whichever process claims it, so the processes that report
+  stay at 0 for 45 minutes after the newest of them started only if none of
+  them has run it; then it is raised and pages from its second cadence too
+  (a judge that never succeeds, or one broken since a fleet restart while a
+  slot is down). Without a start time to read it stays unobservable.
   Resolved healthy whenever a judged run is under 20 minutes old, however
   many slots report;
 - `egress-tls-findings-undecided` (sustain 6, never pages): the newest judged

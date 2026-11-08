@@ -74,6 +74,12 @@ func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, server.CompetitionIntakeFirstMigrationSql())) }, server.OptReadWrite())
 		}
 		query := competitionIntakeFirstCatalogTestQuery(tb)
+		if handoff := server.CompetitionReviewHandoffMigrationVersion(); handoff != 0 && handoff <= actualHead {
+			// The review handoff re-created three winner-review bodies this
+			// custody pins and carries the rest of it on, so at its head the
+			// intake custody is the handoff's.
+			query = snMainnetMigrationProbePrefix(tb) + "SELECT " + competitionReviewHandoffMigrationContract.query
+		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var healthy bool
 			if err := conn.QueryRow(ctx, query).Scan(&healthy); err != nil || !healthy {

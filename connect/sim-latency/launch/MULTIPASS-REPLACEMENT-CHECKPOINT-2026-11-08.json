@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "kind": "competition-review-replacement-progress/v1",
+  "approval_record": "MULTIPASS-REPLACEMENT-APPROVAL-2026-11-08.json",
+  "approval_sha256": "fa8f3ebfbfd01e73bd203ab20befce80aceff5199f57ee967f5342f7c3f45da9",
+  "review_source_commit": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "offline_test_executions_passed": 279,
+  "release_directory": "/usr/local/libexec/urnetwork/competition-review-multipass-f86696bac-20261108-v1",
+  "offline_receipt_sha256": "5b4558b48307e2da212d311a8bbcb050e5b4bcb30a9180335e7f4ae18a65ea81",
+  "static_image_receipt_sha256": "8fa4856ce56cf468a2a3e08332f9cdde1adc442cab0599c748e1dba03a2fbb83",
+  "runtime_observation": {
+    "owner_id": "af9ddfc19c32f464a8a34128647ef5791269f9be30e4dfd152184dff8318fc85",
+    "started_at": "2026-11-08T05:42:01.425436456Z",
+    "deadline": "2026-11-08T05:52:01.425436456Z",
+    "terminal_exit": 0,
+    "test_seconds": 130.40,
+    "report_sha256": "854313082f03521b2366f20cd5c5cc0ea4e942570ad2ede25719c1189fa67cbd",
+    "qwen_capture_sha256": "8ee39b876fe82601c6f5c973967a8d1021dae7f63d10b5ba66e21a92d1c97701",
+    "gemma_capture_sha256": "6bae867e58c9d9fd6e7d2246886eef95867de74fec9c92cf8666c8510b0237d7",
+    "qualified_for_corrected_preparation": false,
+    "reason": "Fresh preparation changed a release pin after these observations. The freeze gate correctly refused before a control owner or generation was created. Preserve observations; do not relabel them or relax release equality.",
+    "corrective_action": "Offline-bind the complete corrected preparation and fixture paths, then prospectively pin a new bounded non-inference probe owner for that exact release under the approved replacement scope. Preserve all prior observations and stop on uncertainty."
+  },
+  "corrected_preparation": {
+    "path": "/var/lib/urnetwork/competition-epoch1-review-20261108-v1/multipass-preparation-f866-v1/preparation.json",
+    "sha256": "2a6e0be2e34e9d4e094e16ce9a9e355193f049cda6cbc404e3b35b411396cac9",
+    "provider_calls": 0,
+    "control_cases": 19
+  },
+  "credential": {
+    "role": "review_operator",
+    "environment": "main",
+    "competition_id": "sim-latency-season-1",
+    "season_id": "sim-latency-production-20261028-r2",
+    "vault_commit": "009882e036024808a9a153f01d93d43fca18590b",
+    "server_cli_fix_commit": "ae0ccf0b0311b5b2f9da38ff2b5ec6be7e2dc0eb",
+    "existing_seed_and_15_tokens_preserved": true,
+    "credential_tests_passed": 10,
+    "deployment_verified": false
+  },
+  "api_deployment": {
+    "operator_reports_api_and_migration_deployed": true,
+    "latest_non_authorizing_review_import_probe_http": 404,
+    "route_availability_verified": false,
+    "direct_main_db_maintenance_port_reachable": false,
+    "pooled_main_migration_attempted": false
+  },
+  "replacement_control_owner_created": false,
+  "candidate_generation_started": false,
+  "winner_approved": false,
+  "source_promoted": false,
+  "rewards_released": false,
+  "calibration_accepted": false
+}
