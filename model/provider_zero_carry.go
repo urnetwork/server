@@ -402,11 +402,9 @@ func getProviderZeroCarryClientIds(ctx context.Context, clientIds []server.Id, n
 			read(`SELECT client_id FROM provider_zero_carry WHERE expire_time > $1`, now.UTC())
 			return
 		}
-		const batchSize = 1024
-		for start := 0; start < len(clientIds); start += batchSize {
-			read(`SELECT client_id FROM provider_zero_carry WHERE client_id = ANY($1) AND expire_time > $2`,
-				clientIds[start:min(start+batchSize, len(clientIds))], now.UTC())
-		}
+		// one statement however large the cohort, as the TLS findings read
+		// does: the table holds a row per verdict, a few hundred on Main
+		read(`SELECT client_id FROM provider_zero_carry WHERE client_id = ANY($1) AND expire_time > $2`, clientIds, now.UTC())
 	})
 	return zeroCarry
 }
