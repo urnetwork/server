@@ -12,8 +12,9 @@ import (
 
 // §21's action pass (ABUSE-M5-05): each minute, finishes the actions and lifts
 // whose effect or off-site record is owed, after a crash between commit and
-// either step or a step that failed (controller.RetryOwedAbuseActions). It does
-// nothing in a binary that does not link MG5.
+// either step or a step that failed (controller.RetryOwedAbuseActions). A
+// binary that does not link MG5 neither schedules it nor, should an older row
+// run, does anything.
 
 type AbuseActionPassArgs struct {
 }
@@ -24,8 +25,13 @@ type AbuseActionPassResult struct {
 	OwedCount    int `json:"owed_count"`
 }
 
-// Schedules the next pass one ActionPassInterval from now, once.
+// Schedules the next pass one ActionPassInterval from now, once. A binary that
+// does not link MG5 schedules nothing, so a release build keeps no task
+// rescheduling itself each minute for tables it lacks.
 func ScheduleAbuseActionPass(clientSession *session.ClientSession, tx server.PgTx) {
+	if !server.SidecarMg5Linked() {
+		return
+	}
 	settings := model.DefaultAbuseSettings()
 	task.ScheduleTaskInTx(
 		tx,

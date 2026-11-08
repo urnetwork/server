@@ -185,7 +185,7 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldNetworkAdminEvents(clientSession, tx)
 		// §8.9's acks past their 7 days; a no-op without MG2
 		work.ScheduleRemoveOldNetworkAclAcks(clientSession, tx)
-		// §21's actions owed an effect or a mailed record; a no-op without MG5
+		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
