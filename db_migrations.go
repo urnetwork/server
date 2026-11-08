@@ -11364,4 +11364,8 @@ var migrations = []any{
 	// A prospective typed operator-stop exception adds an independent guard;
 	// previous recovery classes and published migration bytes stay unchanged.
 	competitionOperatorInterruptionMigration,
+
+	// Prospective one-shot model findings remain pending until a separate human
+	// capability imports their exact timely completion. Existing rows stay intact.
+	newSqlMigration(competitionReviewHandoffMigration()),
 }
