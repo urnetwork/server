@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -106,6 +106,7 @@ func TestCompetitionReviewHandoffDurablePendingThenExactOperatorImport(t *testin
 				t.Fatal("retain original call receipt", id, err)
 			}
 		}
+		testReviewHandoffSqlRejectsPartialProposal(t, fixture, completion)
 		completed, err := fixture.store.CompleteReviewHandoff(ctx, fixture.settings, fixture.round.RoundId, "synthetic-capture", completion)
 		if err != nil {
 			t.Fatal("complete non-authorizing pending proposal", err)
@@ -137,6 +138,45 @@ func TestCompetitionReviewHandoffDurablePendingThenExactOperatorImport(t *testin
 	})
 }
 
+// These bypass the native typed validator deliberately. Every mutation has a
+// complete timely call census, so the SQL proposal predicate itself must refuse
+// absent/null critical fields. Even an unexpected acceptance rolls back.
+func testReviewHandoffSqlRejectsPartialProposal(t testing.TB, fixture *competitionRankingFixture, completion model.CompetitionReviewHandoffCompletion) {
+	t.Helper()
+	ctx := context.Background()
+	rollback := errors.New("synthetic proposal accepted; roll back mutation")
+	paths := [][]string{
+		{"reward_disposition"}, {"source_disposition"}, {"reviewer_model"}, {"reviewer_reasoning"}, {"findings"}, {"reason_codes"},
+		{"findings", "0", "model"}, {"findings", "0", "criterion"}, {"findings", "0", "disposition"},
+		{"findings", "0", "reason_code"}, {"findings", "0", "explanation"}, {"findings", "0", "evidence_sha256"},
+	}
+	for _, path := range paths {
+		for _, omit := range []bool{false, true} {
+			var inserted bool
+			err := captureDatabaseError(func() {
+				server.Tx(ctx, func(tx server.PgTx) {
+					automationScopeLockInTx(ctx, tx, fixture.settings)
+					now, err := reviewHandoffDatabaseTime(ctx, tx)
+					server.Raise(err)
+					server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_review_handoff_actor','synthetic-capture',true)`))
+					completion.CompletedAt = now
+					content, err := json.Marshal(completion)
+					server.Raise(err)
+					fullPath := append([]string{"proposal"}, path...)
+					server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_review_handoff_completion(handoff_id,completion_json,completed_at)
+					 VALUES($1,CASE WHEN $4 THEN $2::jsonb #- $3::text[] ELSE jsonb_set($2::jsonb,$3::text[],'null'::jsonb) END,$5)`,
+						completion.HandoffId, string(content), fullPath, omit, now))
+					inserted = true
+					panic(rollback)
+				}, server.TxReadCommitted)
+			})
+			if inserted || err == nil || !strings.Contains(err.Error(), "only complete timely exact Qwen/Gemma evidence can form a pending proposal") {
+				t.Fatal("direct SQL partial proposal was not refused by its authority guard", strings.Join(path, "."), "omitted", omit, err)
+			}
+		}
+	}
+}
+
 func TestCompetitionReviewHandoffSupervisorNeverResamplesPendingOwner(t *testing.T) {
 	fixture := newWinnerClosingFixture()
 	checkpoint := &model.CompetitionWinnerReviewCheckpoint{HandoffId: server.NewId().String(), RoundId: fixture.snapshot.Round.RoundId, JobId: *fixture.snapshot.WinnerReview.CurrentDecision.SelectedJobId,
@@ -155,70 +195,134 @@ func TestCompetitionReviewHandoffSupervisorNeverResamplesPendingOwner(t *testing
 	}
 }
 
-// Only the disposable TestEnv schema gets this clock seam. The transaction
-// begins before an explicit barrier; time then advances without sleeping. Both
-// the supplied marker and transaction start remain early, so only the guard's
-// fresh post-lock clock can reject the late claim for the right reason.
+// Only the disposable TestEnv schema gets this non-MVCC clock seam. A positive
+// pg_blocking_pids edge proves the claim is waiting on the round row before the
+// clock advances. Both its marker and transaction start remain early; only the
+// guard's fresh post-lock clock can reject it. No elapsed sleep proves expiry.
 func testReviewHandoffClockBoundary(t testing.TB, fixture *competitionRankingFixture, owner *model.CompetitionReviewHandoff) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	clockSql := `CREATE OR REPLACE FUNCTION competition_review_handoff_clock() RETURNS timestamp LANGUAGE sql VOLATILE AS $synthetic_clock$ SELECT COALESCE(NULLIF(current_setting('urnetwork.synthetic_review_time',true),'')::timestamp,timezone('UTC',clock_timestamp())); $synthetic_clock$;`
+	pop := server.Config.PushSimpleResource(server.MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 2\n"))
+	server.PgReset()
+	defer func() { pop(); server.PgReset() }()
+	clockSql := `CREATE SEQUENCE synthetic_review_handoff_clock;
+	 CREATE OR REPLACE FUNCTION competition_review_handoff_clock() RETURNS timestamp LANGUAGE sql VOLATILE AS $synthetic_clock$
+	 SELECT CASE WHEN is_called THEN timestamp 'epoch' + last_value * interval '1 microsecond' ELSE timezone('UTC',clock_timestamp()) END FROM synthetic_review_handoff_clock;
+	 $synthetic_clock$;`
 	server.Db(ctx, func(conn server.PgConn) { server.RaisePgResult(conn.Exec(ctx, clockSql)) })
 	defer server.Db(context.Background(), func(conn server.PgConn) {
-		server.RaisePgResult(conn.Exec(context.Background(), `CREATE OR REPLACE FUNCTION competition_review_handoff_clock() RETURNS timestamp LANGUAGE sql VOLATILE AS $handoff_clock$ SELECT timezone('UTC',clock_timestamp()); $handoff_clock$;`))
+		server.RaisePgResult(conn.Exec(context.Background(), `CREATE OR REPLACE FUNCTION competition_review_handoff_clock() RETURNS timestamp LANGUAGE sql VOLATILE AS $handoff_clock$ SELECT timezone('UTC',clock_timestamp()); $handoff_clock$; DROP SEQUENCE synthetic_review_handoff_clock;`))
 	})
-	barrier := make(chan struct{})
-	resume := make(chan struct{})
-	result := make(chan error, 1)
+	held, waiting := make(chan int32, 1), make(chan int32, 1)
+	release := make(chan struct{})
+	holderResult, holderJoined := make(chan error, 1), make(chan struct{})
+	var releaseOnce sync.Once
+	unlock := func() { releaseOnce.Do(func() { close(release) }) }
 	go func() {
-		result <- captureDatabaseError(func() {
-			server.Tx(ctx, func(tx server.PgTx) {
-				automationScopeLockInTx(ctx, tx, fixture.settings)
-				started, err := reviewHandoffDatabaseTime(ctx, tx)
-				server.Raise(err)
-				server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_review_handoff_actor','synthetic-capture',true)`))
-				call := model.CompetitionReviewHandoffCall{HandoffId: owner.HandoffId, CallId: owner.Plan.CallIds[0], Kind: "claim", RequestSha256: strings.Repeat("e", 64), RecordedAt: started}
-				content, err := json.Marshal(call)
-				server.Raise(err)
-				close(barrier)
+		defer close(holderJoined)
+		holderResult <- captureDatabaseError(func() {
+			server.MaintenanceTx(ctx, func(tx server.PgTx) {
+				var pid int32
+				server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid() FROM competition_round WHERE round_id=$1 FOR UPDATE`, owner.Args.RoundId).Scan(&pid))
+				held <- pid
 				select {
-				case <-resume:
+				case <-release:
 				case <-ctx.Done():
 					panic(ctx.Err())
 				}
-				server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.synthetic_review_time',$1,true)`, owner.Deadline.Add(time.Second).Format(time.RFC3339Nano)))
-				var oldTransaction, timeNow time.Time
-				server.Raise(tx.QueryRow(ctx, `SELECT timezone('UTC',transaction_timestamp()),competition_review_handoff_clock()`).Scan(&oldTransaction, &timeNow))
-				if !oldTransaction.Before(owner.Deadline) || !timeNow.After(owner.Deadline) {
-					panic(errors.New("synthetic transaction clock barrier is invalid"))
-				}
-				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_review_handoff_call(handoff_id,call_id,kind,call_json,recorded_at) VALUES($1,$2,'claim',$3::jsonb,$4)`, owner.HandoffId, call.CallId, string(content), started))
-			}, server.TxReadCommitted)
+			}, server.TxReadCommitted, server.OptNoRetry())
 		})
 	}()
+	defer func() { unlock(); cancel(); <-holderJoined }()
+	var holderPid int32
 	select {
-	case <-barrier:
-		close(resume)
+	case holderPid = <-held:
+	case err := <-holderResult:
+		t.Fatal("claim clock round holder failed", err)
+	case <-ctx.Done():
+		t.Fatal("claim clock round holder unavailable", ctx.Err())
+	}
+	result := make(chan error, 1)
+	waiterJoined := make(chan struct{})
+	go func() {
+		defer close(waiterJoined)
+		result <- captureDatabaseError(func() {
+			server.Tx(ctx, func(tx server.PgTx) {
+				started, err := reviewHandoffDatabaseTime(ctx, tx)
+				server.Raise(err)
+				server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_review_handoff_actor','synthetic-capture',true)`))
+				var pid int32
+				var transactionStarted time.Time
+				server.Raise(tx.QueryRow(ctx, `SELECT pg_backend_pid(),timezone('UTC',transaction_timestamp())`).Scan(&pid, &transactionStarted))
+				if !started.Before(owner.Deadline) || !transactionStarted.Before(owner.Deadline) {
+					panic(errors.New("synthetic transaction clock barrier is invalid"))
+				}
+				call := model.CompetitionReviewHandoffCall{HandoffId: owner.HandoffId, CallId: owner.Plan.CallIds[0], Kind: "claim", RequestSha256: strings.Repeat("e", 64), RecordedAt: started}
+				content, err := json.Marshal(call)
+				server.Raise(err)
+				waiting <- pid
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_review_handoff_call(handoff_id,call_id,kind,call_json,recorded_at) VALUES($1,$2,'claim',$3::jsonb,$4)`, owner.HandoffId, call.CallId, string(content), started))
+			}, server.TxReadCommitted, server.OptNoRetry())
+		})
+	}()
+	defer func() { unlock(); cancel(); <-waiterJoined }()
+	var waiterPid int32
+	select {
+	case waiterPid = <-waiting:
 	case err := <-result:
 		t.Fatal("claim clock transaction failed before barrier", err)
 	case <-ctx.Done():
 		t.Fatal("claim clock barrier unavailable", ctx.Err())
 	}
+	if err := testReviewHandoffAwaitRowWait(ctx, waiterPid, holderPid); err != nil {
+		t.Fatal("claim did not reach the actual round-row lock barrier", err)
+	}
+	server.MaintenanceDb(ctx, func(conn server.PgConn) {
+		server.RaisePgResult(conn.Exec(ctx, `SELECT setval('synthetic_review_handoff_clock',$1,true)`, owner.Deadline.Add(time.Second).UnixMicro()))
+		var observed time.Time
+		server.Raise(conn.QueryRow(ctx, `SELECT competition_review_handoff_clock()`).Scan(&observed))
+		if !observed.After(owner.Deadline) {
+			t.Fatal("synthetic database clock did not advance while claim was blocked")
+		}
+	})
+	unlock()
 	select {
 	case err := <-result:
 		if err == nil || !strings.Contains(err.Error(), "expired, completed or changed review cannot claim a call") {
-			t.Fatal("post-barrier SQL admission used stale transaction time", err)
+			t.Fatal("post-lock SQL admission used stale transaction time", err)
 		}
 	case <-ctx.Done():
 		t.Fatal("claim clock barrier did not finish", ctx.Err())
 	}
+	if err := <-holderResult; err != nil {
+		t.Fatal("claim clock round holder failed on release", err)
+	}
 	// A separate native transaction also reads the current database clock,
 	// independently of the store's injected application clock.
-	constantClock := fmt.Sprintf(`CREATE OR REPLACE FUNCTION competition_review_handoff_clock() RETURNS timestamp LANGUAGE sql VOLATILE AS $synthetic_late$ SELECT '%s'::timestamptz AT TIME ZONE 'UTC'; $synthetic_late$;`, owner.Deadline.Add(time.Second).Format(time.RFC3339Nano))
-	server.Db(ctx, func(conn server.PgConn) { server.RaisePgResult(conn.Exec(ctx, constantClock)) })
 	_, err := fixture.store.RecordReviewHandoffCall(ctx, fixture.settings, fixture.round.RoundId, "synthetic-capture", model.CompetitionReviewHandoffCall{HandoffId: owner.HandoffId, CallId: owner.Plan.CallIds[0], Kind: "claim", RequestSha256: strings.Repeat("e", 64)})
 	if !errors.Is(err, ErrWinnerReviewTimedOut) {
 		t.Fatal("native claim ignored the fresh database deadline", err)
+	}
+}
+
+func testReviewHandoffAwaitRowWait(ctx context.Context, waiterPid, holderPid int32) error {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blocked bool
+		err := captureDatabaseError(func() {
+			server.MaintenanceDb(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid=$1 AND wait_event_type='Lock' AND wait_event IN ('transactionid','tuple') AND $2::integer=ANY(pg_blocking_pids(pid)))`, waiterPid, holderPid).Scan(&blocked))
+			})
+		})
+		if err != nil || blocked {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }

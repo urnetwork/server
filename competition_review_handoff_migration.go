@@ -89,7 +89,7 @@ BEGIN
   OR NEW.owner_json->>'actor_id' IS DISTINCT FROM current_setting('urnetwork.competition_review_handoff_actor',true)
   OR COALESCE(NEW.owner_json->>'actor_id','')='' OR NEW.owner_json->>'handoff_id' IS DISTINCT FROM NEW.handoff_id::text
   OR args->>'protocol' IS DISTINCT FROM 'elected-winner-qg-multipass/1'
-  OR (args->>'timeout_seconds')::integer NOT BETWEEN 60 AND 86400
+  OR NOT COALESCE((args->>'timeout_seconds')::integer BETWEEN 60 AND 86400,false)
   OR NEW.started_at IS DISTINCT FROM NULLIF(current_setting('urnetwork.competition_review_handoff_clock',true),'')::timestamp
   OR competition_review_handoff_clock()>=NEW.deadline
   OR NEW.deadline IS DISTINCT FROM NEW.started_at+make_interval(secs=>(args->>'timeout_seconds')::integer)
@@ -184,9 +184,9 @@ BEGIN
   OR proposal->>'patch_sha256' IS DISTINCT FROM args->>'patch_sha256' OR proposal->>'base_source_lock_sha256' IS DISTINCT FROM args->>'base_source_lock_sha256'
   OR proposal->>'score_sha256' IS DISTINCT FROM args->>'score_sha256' OR proposal->>'artifact_manifest_sha256' IS DISTINCT FROM args->>'artifact_manifest_sha256'
   OR proposal->>'baseline_sha256' IS DISTINCT FROM args->>'baseline_sha256' OR proposal->>'private_evidence_sha256' IS DISTINCT FROM evidence->>'sha256'
-  OR proposal->>'reward_disposition' NOT IN ('approved','disqualified')
-  OR NOT competition_v2_winner_review_provider('elected_winner_snow_union_v2',proposal->>'reviewer_model',proposal->>'reviewer_reasoning')
-  OR NOT competition_v2_snow_review_findings_valid_v2(proposal)
+  OR NOT COALESCE(proposal->>'reward_disposition' IN ('approved','disqualified'),false)
+  OR NOT COALESCE(competition_v2_winner_review_provider('elected_winner_snow_union_v2',proposal->>'reviewer_model',proposal->>'reviewer_reasoning'),false)
+  OR NOT COALESCE(competition_v2_snow_review_findings_valid_v2(proposal),false)
   OR COALESCE(NEW.completion_json->>'proposal_sha256','') !~ '^[0-9a-f]{64}$'
   OR (SELECT count(*) FROM competition_review_handoff_call WHERE handoff_id=NEW.handoff_id AND kind='receipt')<>jsonb_array_length(owner.owner_json->'plan'->'call_ids')
   OR EXISTS(SELECT 1 FROM competition_review_handoff_call WHERE handoff_id=NEW.handoff_id AND kind='receipt' AND (recorded_at>=owner.deadline OR COALESCE(call_json->>'failure','')<>'')) THEN RAISE EXCEPTION 'only complete timely exact Qwen/Gemma evidence can form a pending proposal'; END IF;
