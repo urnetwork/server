@@ -432,9 +432,11 @@ func TestEgressTlsJudgeQueryReadsTheNewestJudgedRun(t *testing.T) {
 
 // A judge that never succeeds pages even with a slot missing (REVIEW-D1 F3):
 // every slot that reports shows 0, no run since its process started, and the
-// newest of those processes started 50 minutes ago, past the page bound. A
-// process judges within minutes of starting, so none of these is going to;
-// stale pages from its second cadence beside the unobservable alert.
+// newest of those processes started 50 minutes ago, past the page bound. The
+// judge is one fleet task, run every five minutes by whichever process claims
+// it, so the processes that report stay at 0 that long only if none of them
+// has run it: stale pages from its second cadence beside the unobservable
+// alert.
 func TestEgressTlsJudgeNeverJudgedWithASlotMissingPagesOnceItsProcessesAreOld(t *testing.T) {
 	fixture := healthyEgressTlsJudgeFixture()
 	fixture.fresh["worker-a.example"] = false

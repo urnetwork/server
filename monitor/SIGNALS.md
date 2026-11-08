@@ -24022,13 +24022,15 @@ slot names are rendered, never a URL, a provider or a website):
   may hold the newest run, so it is raised only once the newest judged run on
   the slots that report is more than 45 minutes old, when a fully read judge
   would page, and then it pages from its second cadence. Slots that report
-  only zero have not judged since their processes started: as mid-roll,
-  where each new process judges within minutes, that raises nothing, but
-  once the newest of those processes started more than 45 minutes ago it is
-  raised and pages from its second cadence too (a judge that never succeeds,
-  or one broken since a fleet restart while a slot is down); without a start
-  time to read it stays unobservable. Resolved healthy whenever a judged run
-  is under 20 minutes old, however many slots report;
+  only zero have not run the judge since their processes started, as just
+  after a roll, which raises nothing. The judge is one fleet task, run every
+  five minutes by whichever process claims it, so the processes that report
+  stay at 0 for 45 minutes after the newest of them started only if none of
+  them has run it; then it is raised and pages from its second cadence too
+  (a judge that never succeeds, or one broken since a fleet restart while a
+  slot is down). Without a start time to read it stays unobservable.
+  Resolved healthy whenever a judged run is under 20 minutes old, however
+  many slots report;
 - `egress-tls-findings-undecided` (sustain 6, never pages): the newest judged
   run, no more than 20 minutes old, left pending findings undecided inside the
   direct window, on every cadence for half an hour. A provider that keeps

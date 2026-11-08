@@ -247,10 +247,11 @@ func evaluateEgressTlsJudge(
 	// is known from StaleAfter. With a slot not reporting, an unread slot may
 	// hold the newest run, so the slots that report must show none for
 	// StalePageAfter, when a fully read judge would page; then it pages at
-	// once. Slots that report only zero have not judged since their processes
-	// started, as mid-roll, where each process judges within minutes; once
-	// the newest of those processes started more than StalePageAfter ago,
-	// none of them is going to, and that pages at once too.
+	// once. Slots that report only zero have not run the judge since their
+	// processes started, as just after a roll. The judge is one fleet task,
+	// run every five minutes by whichever process claims it, so the processes
+	// that report stay at 0 for StalePageAfter after the newest of them
+	// started only if none of them has run it; then that pages at once too.
 	partial := fleet != nil && !fleet.complete && fleet.judged && 0 < fleet.judgedAt && settings.StalePageAfter < age
 	neverJudged := fleet != nil && !fleet.complete && fleet.judged && fleet.judgedAt == 0 &&
 		fleet.hasStarted && 0 < fleet.started && settings.StalePageAfter < startedAge
