@@ -51,6 +51,7 @@ type winnerHandoffCustodyOriginal struct {
 // This is the authenticated wrapper's complete original census, including its
 // manifest and receipt. Operation failures remain present and non-authorizing.
 type winnerHandoffInvocationCustody struct {
+	Phase                string                         `json:"phase"`
 	Operation            string                         `json:"operation"`
 	CallId               string                         `json:"call_id"`
 	RequestSha256        string                         `json:"request_sha256"`
@@ -68,15 +69,16 @@ type winnerHandoffTokenization struct {
 // The completion and public private-evidence digest bind this entire manifest.
 // Evidence and source bytes are separate protected objects, not omitted inputs.
 type winnerHandoffCustodyManifest struct {
-	Schema       int                              `json:"schema"`
-	Kind         string                           `json:"kind"`
-	HandoffId    string                           `json:"handoff_id"`
-	PlanSha256   string                           `json:"plan_sha256"`
-	BundleSha256 string                           `json:"bundle_sha256"`
-	Capacity     winnerMultipassCapacity          `json:"capacity"`
-	Reservation  winnerHandoffCapacityReservation `json:"reservation"`
-	Documents    []winnerHandoffCustodyOriginal   `json:"documents"`
-	Invocations  []winnerHandoffInvocationCustody `json:"invocations"`
+	Schema         int                              `json:"schema"`
+	Kind           string                           `json:"kind"`
+	HandoffId      string                           `json:"handoff_id"`
+	PlanSha256     string                           `json:"plan_sha256"`
+	BundleSha256   string                           `json:"bundle_sha256"`
+	Capacity       winnerMultipassCapacity          `json:"capacity"`
+	Reservation    winnerHandoffCapacityReservation `json:"reservation"`
+	Documents      []winnerHandoffCustodyOriginal   `json:"documents"`
+	LeafAdmissions []winnerMultipassAdmission       `json:"leaf_admissions"`
+	Invocations    []winnerHandoffInvocationCustody `json:"invocations"`
 }
 
 func validateWinnerHandoffReservation(capacity *winnerMultipassCapacity, reservation winnerHandoffCapacityReservation) error {
@@ -104,8 +106,8 @@ func validateWinnerHandoffOriginal(value winnerHandoffCustodyOriginal, minimumRe
 	return nil
 }
 
-func validateWinnerHandoffInvocation(value winnerHandoffInvocationCustody, operation string, call winnerMultipassCall, requestSha string, admission winnerMultipassAdmission, transportSha string, plan *winnerMultipassPlan) error {
-	if value.Operation != operation || value.CallId != call.Id || value.RequestSha256 != requestSha || value.Failure != "" || !validSha256(value.ManifestSha256) || !validSha256(value.WrapperReceiptSha256) || len(value.Originals) == 0 || len(value.Originals) > 40 {
+func validateWinnerHandoffInvocation(value winnerHandoffInvocationCustody, phase, operation string, call winnerMultipassCall, requestSha string, admission winnerMultipassAdmission, transportSha string, plan *winnerMultipassPlan) error {
+	if value.Phase != phase || value.Operation != operation || value.CallId != call.Id || value.RequestSha256 != requestSha || value.Failure != "" || !validSha256(value.ManifestSha256) || !validSha256(value.WrapperReceiptSha256) || len(value.Originals) == 0 || len(value.Originals) > 40 {
 		return errors.New("captured invocation lacks exact authenticated original census")
 	}
 	originals := map[string]winnerHandoffCustodyOriginal{}
@@ -140,6 +142,18 @@ func validateWinnerHandoffInvocation(value winnerHandoffInvocationCustody, opera
 	return nil
 }
 
+// Frozen leaves are counted before any draw and again before their own call.
+// Synthesis requests are known only when their declared predecessors complete.
+func winnerHandoffTokenizerCensus(plan *winnerMultipassPlan) int {
+	count := len(plan.Calls)
+	for _, call := range plan.Calls {
+		if call.Stage == "scan" {
+			count++
+		}
+	}
+	return count
+}
+
 // Used for plan/bundle/evidence documents; wrapper originals take the same
 // protected retaining hook only after independent containment authentication.
 func retainWinnerHandoffDocument(ctx context.Context, name string, content []byte, maximum int, minimumRetention time.Time, retain func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)) (winnerHandoffCustodyOriginal, error) {
@@ -162,10 +176,10 @@ func retainWinnerHandoffDocument(ctx context.Context, name string, content []byt
 // original. An incomplete manifest may be retained but never becomes a proposal.
 func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, evidence winnerMultipassEvidence, custody winnerHandoffCustodyManifest) error {
 	if owner == nil || plan == nil || custody.Schema != 1 || custody.Kind != "elected-winner-review-protected-custody/v1" || custody.HandoffId != owner.HandoffId.String() ||
-		custody.PlanSha256 != owner.Plan.PlanSha256 || custody.BundleSha256 != plan.BundleSha256 || len(custody.Documents) != 4 || len(custody.Invocations) != 2*len(plan.Calls) {
+		custody.PlanSha256 != owner.Plan.PlanSha256 || custody.BundleSha256 != plan.BundleSha256 || len(custody.Documents) != 4 || len(custody.Invocations) != len(plan.Calls)+winnerHandoffTokenizerCensus(plan) {
 		return errors.New("native review custody is incomplete or belongs to another owner")
 	}
-	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, len(plan.Calls), custody.Capacity.Settings)
+	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, winnerHandoffTokenizerCensus(plan), custody.Capacity.Settings)
 	if err != nil {
 		return err
 	}
@@ -192,31 +206,45 @@ func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *w
 		}
 		delete(documents, original.Name)
 	}
-	invocations := map[string]winnerHandoffInvocationCustody{}
-	for _, invocation := range custody.Invocations {
-		key := invocation.Operation + ":" + invocation.CallId
-		if _, exists := invocations[key]; exists {
-			return errors.New("native review custody repeats a tokenizer or generation invocation")
-		}
-		invocations[key] = invocation
-	}
 	if len(evidence.Calls) != len(plan.Calls) {
 		return errors.New("native review custody cannot replace missing model evidence")
+	}
+	if err := validateWinnerMultipassLeafAdmissions(plan, bundle, custody.LeafAdmissions); err != nil {
+		return err
+	}
+	// The receipt order is part of the fixed protocol: every leaf preflight,
+	// then each per-call admission immediately followed by its generation.
+	invocationIndex, leafIndex := 0, 0
+	for _, call := range plan.Calls {
+		if call.Stage != "scan" {
+			continue
+		}
+		payload, err := buildWinnerMultipassCall(plan, bundle, call.Id, map[string]winnerMultipassCallEvidence{})
+		if err != nil {
+			return err
+		}
+		admission := custody.LeafAdmissions[leafIndex]
+		if admission.CallId != call.Id {
+			return errors.New("native leaf preflight order differs from the frozen call census")
+		}
+		if err := validateWinnerHandoffInvocation(custody.Invocations[invocationIndex], "leaf_preflight", "tokenize", call, winnerMultipassSha256(payload), admission, "", plan); err != nil {
+			return err
+		}
+		invocationIndex++
+		leafIndex++
 	}
 	for index, call := range plan.Calls {
 		observation := evidence.Calls[index]
 		requestSha := winnerMultipassSha256(observation.Request)
-		for _, operation := range []string{"tokenize", "generate"} {
-			invocation, found := invocations[operation+":"+call.Id]
-			if !found {
-				return errors.New("native review is missing a tokenizer or generation original")
-			}
-			if err := validateWinnerHandoffInvocation(invocation, operation, call, requestSha, observation.Admission, observation.TransportResponseSha256, plan); err != nil {
+		for _, stage := range []struct{ phase, operation string }{{phase: "call_admission", operation: "tokenize"}, {phase: "capture", operation: "generate"}} {
+			invocation := custody.Invocations[invocationIndex]
+			if err := validateWinnerHandoffInvocation(invocation, stage.phase, stage.operation, call, requestSha, observation.Admission, observation.TransportResponseSha256, plan); err != nil {
 				return err
 			}
-			if operation == "generate" && invocation.WrapperReceiptSha256 != observation.TransportReceiptSha256 {
+			if stage.operation == "generate" && invocation.WrapperReceiptSha256 != observation.TransportReceiptSha256 {
 				return errors.New("native model evidence is not bound to its original containment receipt")
 			}
+			invocationIndex++
 		}
 	}
 	return nil

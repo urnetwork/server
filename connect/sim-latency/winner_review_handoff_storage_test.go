@@ -21,6 +21,7 @@ type winnerHandoffStorage struct {
 	file                *os.File
 	path                string
 	allocated, consumed int64
+	limit               int64
 	blockSize           int64
 	device, inode       uint64
 }
@@ -140,7 +141,7 @@ func allocateWinnerHandoffStorage(directory string, paths []string, required int
 	if err != nil {
 		return nil, err
 	}
-	storage := &winnerHandoffStorage{file: file, path: path, allocated: allocated, blockSize: block, device: device}
+	storage := &winnerHandoffStorage{file: file, path: path, allocated: allocated, limit: required, blockSize: block, device: device}
 	if err := unix.Fallocate(int(file.Fd()), 0, 0, allocated); err != nil {
 		file.Close()
 		os.Remove(path)
@@ -165,7 +166,7 @@ func allocateWinnerHandoffStorage(directory string, paths []string, required int
 // Punch whole blocks only after adding the exact allowance. The final partial
 // block remains reserved until its full allowance or final Close is reached.
 func (self *winnerHandoffStorage) Consume(bytes int64) error {
-	if self == nil || self.file == nil || bytes <= 0 || bytes > self.allocated-self.consumed {
+	if self == nil || self.file == nil || bytes <= 0 || bytes > self.limit-self.consumed {
 		return errors.New("review attempted to spend unreserved capacity")
 	}
 	before := self.consumed / self.blockSize * self.blockSize
@@ -233,5 +234,22 @@ func TestWinnerHandoffStorageRejectsAliasAndNeverReplacesExistingReservation(t *
 	}
 	if _, err := allocateWinnerHandoffStorage(alias, []string{alias}, 4096); err == nil {
 		t.Fatal("symlink storage accepted")
+	}
+}
+
+// Allocation rounds up to filesystem blocks; those padding bytes are not a
+// larger review allowance and may never fund an extra operation.
+func TestWinnerHandoffStorageDoesNotSpendBlockPadding(t *testing.T) {
+	directory := t.TempDir()
+	storage, err := allocateWinnerHandoffStorage(directory, []string{directory}, 4097)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.Consume(4097); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Consume(1); err == nil {
+		t.Fatal("filesystem block rounding silently enlarged the fixed budget")
 	}
 }

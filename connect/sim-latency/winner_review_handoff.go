@@ -23,7 +23,7 @@ import (
 type winnerHandoffCaptureHooks struct {
 	Now      func() time.Time
 	Reserve  func(context.Context, *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error)
-	Admit    func(context.Context, winnerMultipassCall, []byte) (winnerHandoffTokenization, error)
+	Admit    func(context.Context, string, winnerMultipassCall, []byte) (winnerHandoffTokenization, error)
 	Invoke   func(context.Context, winnerMultipassCall, []byte, winnerMultipassAdmission, string) (winnerHandoffTransport, error)
 	Claim    func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
 	Receipt  func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
@@ -135,7 +135,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	}
 	result = &winnerHandoffCaptureResult{Status: "PENDING", Evidence: winnerMultipassEvidence{Version: winnerMultipassVersion, PlanSha256: owner.Plan.PlanSha256, BundleSha256: plan.BundleSha256, Calls: []winnerMultipassCallEvidence{}}}
 	result.Custody = winnerHandoffCustodyManifest{Schema: 1, Kind: "elected-winner-review-protected-custody/v1", HandoffId: owner.HandoffId.String(), PlanSha256: owner.Plan.PlanSha256,
-		BundleSha256: plan.BundleSha256, Documents: []winnerHandoffCustodyOriginal{}, Invocations: []winnerHandoffInvocationCustody{}}
+		BundleSha256: plan.BundleSha256, Documents: []winnerHandoffCustodyOriginal{}, LeafAdmissions: []winnerMultipassAdmission{}, Invocations: []winnerHandoffInvocationCustody{}}
 	retainDocument := func(retentionCtx context.Context, name string, content []byte) error {
 		original, err := retainWinnerHandoffDocument(retentionCtx, name, content, settings.MaximumDocumentBytes, owner.Deadline, hooks.Retain)
 		if err == nil {
@@ -184,7 +184,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 			resultErr = err
 		}
 	}()
-	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, len(plan.Calls), settings.Capacity)
+	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, winnerHandoffTokenizerCensus(plan), settings.Capacity)
 	if capacity != nil {
 		result.Custody.Capacity = *capacity
 	}
@@ -226,15 +226,18 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 			return result, err
 		}
 	}
-	admit := func(admissionCtx context.Context, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
-		value, err := hooks.Admit(admissionCtx, call, payload)
+	admit := func(admissionCtx context.Context, phase string, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
+		value, err := hooks.Admit(admissionCtx, phase, call, payload)
 		result.Custody.Invocations = append(result.Custody.Invocations, value.Custody)
 		if err == nil {
-			err = validateWinnerHandoffInvocation(value.Custody, "tokenize", call, winnerMultipassSha256(payload), value.Admission, "", plan)
+			err = validateWinnerHandoffInvocation(value.Custody, phase, "tokenize", call, winnerMultipassSha256(payload), value.Admission, "", plan)
 		}
 		return value.Admission, err
 	}
-	admissions, err := preflightWinnerHandoffLeaves(callCtx, plan, bundle, admit)
+	admissions, err := preflightWinnerHandoffLeaves(callCtx, plan, bundle, func(admissionCtx context.Context, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
+		return admit(admissionCtx, "leaf_preflight", call, payload)
+	})
+	result.Custody.LeafAdmissions = admissions
 	admissionBytes, marshalErr := json.Marshal(admissions)
 	if marshalErr != nil {
 		return result, marshalErr
@@ -245,10 +248,6 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	if err != nil {
 		return result, err
 	}
-	leafAdmissions := map[string]winnerMultipassAdmission{}
-	for _, admission := range admissions {
-		leafAdmissions[admission.CallId] = admission
-	}
 	completed := map[string]winnerMultipassCallEvidence{}
 	for index, call := range plan.Calls {
 		if !hooks.Now().Before(owner.Deadline) {
@@ -258,12 +257,11 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 		if err != nil {
 			return result, err
 		}
-		admission, knownLeaf := leafAdmissions[call.Id]
-		if !knownLeaf {
-			admission, err = admit(callCtx, call, payload)
-			if err != nil {
-				return result, err
-			}
+		// The final preflight leaves the other member resident. Re-admit every
+		// exact payload before its claim; generation never loads a model itself.
+		admission, err := admit(callCtx, "call_admission", call, payload)
+		if err != nil {
+			return result, err
 		}
 		if err := validateWinnerMultipassAdmission(plan, call, payload, admission); err != nil {
 			return result, err
@@ -287,7 +285,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 		transport, invokeErr := hooks.Invoke(callCtx, call, payload, admission, winnerMultipassSha256(claimBytes))
 		result.Custody.Invocations = append(result.Custody.Invocations, transport.Custody)
 		if invokeErr == nil {
-			invokeErr = validateWinnerHandoffInvocation(transport.Custody, "generate", call, winnerMultipassSha256(payload), admission, transport.TransportResponseSha256, plan)
+			invokeErr = validateWinnerHandoffInvocation(transport.Custody, "capture", "generate", call, winnerMultipassSha256(payload), admission, transport.TransportResponseSha256, plan)
 		}
 		observation := winnerMultipassCallEvidence{CallId: call.Id, StartedAt: claimed.RecordedAt, CompletedAt: hooks.Now().UTC(), Request: payload, Admission: admission,
 			VisibleResponse: transport.VisibleResponse, VisibleResponseSha256: winnerMultipassSha256(transport.VisibleResponse), TransportResponseSha256: transport.TransportResponseSha256, TransportReceiptSha256: transport.ContainmentReceiptSha256, Error: transport.Error}

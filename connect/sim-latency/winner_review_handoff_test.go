@@ -67,14 +67,14 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 				ReservedBytes: capacity.RequiredDurableBytes, MemoryLimitBytes: capacity.Settings.MaximumMemoryBytes, HostAvailableBytes: capacity.Settings.MaximumMemoryBytes,
 				MemoryCgroup: "/synthetic/cgroup", StoragePaths: []string{"/synthetic/review"}}, nil
 		},
-		Admit: func(_ context.Context, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+		Admit: func(_ context.Context, phase string, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
 			self.admissions++
 			count := 100
 			if self.tooManyTokens {
 				count = 1000000
 			}
 			admission := winnerMultipassAdmissionFixture(self.plan, call, payload, count)
-			return winnerHandoffTokenization{Admission: admission, Custody: self.custody("tokenize", call, payload, admission, "")}, nil
+			return winnerHandoffTokenization{Admission: admission, Custody: self.custody(phase, "tokenize", call, payload, admission, "")}, nil
 		},
 		Claim: func(_ context.Context, value model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error) {
 			if self.claimed[value.CallId] {
@@ -99,7 +99,7 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 				return winnerHandoffTransport{VisibleResponse: []byte("synthetic incomplete terminal"), Error: "synthetic_transport_failure"}, errors.New("synthetic failure")
 			}
 			return winnerHandoffTransport{VisibleResponse: original.VisibleResponse, TransportResponseSha256: original.TransportResponseSha256, ContainmentReceiptSha256: original.TransportReceiptSha256,
-				Custody: self.custody("generate", call, payload, admission, original.TransportResponseSha256)}, nil
+				Custody: self.custody("capture", "generate", call, payload, admission, original.TransportResponseSha256)}, nil
 		},
 		Receipt: func(_ context.Context, value model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error) {
 			if !self.claimed[value.CallId] || !validSha256(value.EvidenceSha256) {
@@ -130,10 +130,10 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 
 // This is a synthetic archive-receipt seam, not a containment qualification.
 // Separate wrapper tests must prove the actual originals and protected readback.
-func (self *winnerHandoffFixture) custody(operation string, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission, transportSha string) winnerHandoffInvocationCustody {
+func (self *winnerHandoffFixture) custody(phase, operation string, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission, transportSha string) winnerHandoffInvocationCustody {
 	manifestSha := winnerMultipassSha256([]byte("synthetic-wrapper-manifest"))
 	receiptSha := winnerMultipassSha256([]byte("synthetic-transport-proof"))
-	value := winnerHandoffInvocationCustody{Operation: operation, CallId: call.Id, RequestSha256: winnerMultipassSha256(payload), ManifestSha256: manifestSha, WrapperReceiptSha256: receiptSha, Originals: []winnerHandoffCustodyOriginal{}}
+	value := winnerHandoffInvocationCustody{Phase: phase, Operation: operation, CallId: call.Id, RequestSha256: winnerMultipassSha256(payload), ManifestSha256: manifestSha, WrapperReceiptSha256: receiptSha, Originals: []winnerHandoffCustodyOriginal{}}
 	leaves := map[string]string{"call.started.json": winnerMultipassSha256([]byte("synthetic-started")), "call.complete.json": winnerMultipassSha256([]byte("synthetic-completed")), "evidence-manifest.json": manifestSha, "wrapper-receipt.json": receiptSha}
 	if operation == "tokenize" {
 		leaves["tokenize.request.json"], leaves["tokenize.response.json"] = admission.TokenizerRequestSha256, admission.TokenizerResponseSha256
@@ -189,8 +189,8 @@ func TestWinnerHandoffMissingProtectedTokenizerStopsBeforeAnyClaim(t *testing.T)
 	fixture := newWinnerHandoffFixture(t, false)
 	hooks := fixture.hooks(t)
 	admit := hooks.Admit
-	hooks.Admit = func(ctx context.Context, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
-		value, err := admit(ctx, call, payload)
+	hooks.Admit = func(ctx context.Context, phase string, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+		value, err := admit(ctx, phase, call, payload)
 		for index := range value.Custody.Originals {
 			if value.Custody.Originals[index].Name == "tokenize.response.json" {
 				value.Custody.Originals[index].Retention.VersionId = ""
@@ -243,5 +243,65 @@ func TestWinnerHandoffCompletionRejectsDisappearingTransportOriginal(t *testing.
 	}
 	if err := validateWinnerHandoffCompletion(&fixture.owner, result.Completion, fixture.plan, fixture.bundle, result.Evidence, result.Custody); err == nil {
 		t.Fatal("a local hash without independently retrievable transport version remained importable")
+	}
+}
+
+// The complete leaf preflight ends with the second model resident. Only exact
+// per-call re-admission may switch it back before the first generation.
+func TestWinnerHandoffRecountsEveryCallAfterCompleteLeafPreflight(t *testing.T) {
+	fixture := newWinnerHandoffFixture(t, false)
+	hooks := fixture.hooks(t)
+	admit, invoke := hooks.Admit, hooks.Invoke
+	events := []string{}
+	resident := ""
+	hooks.Admit = func(ctx context.Context, phase string, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+		events = append(events, phase+":"+call.Id)
+		resident = call.Member.Name
+		return admit(ctx, phase, call, payload)
+	}
+	hooks.Invoke = func(ctx context.Context, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission, claimSha string) (winnerHandoffTransport, error) {
+		if resident != call.Member.Name || len(events) == 0 || events[len(events)-1] != "call_admission:"+call.Id {
+			t.Fatal("generation reused stale preflight or loaded its own model")
+		}
+		events = append(events, "capture:"+call.Id)
+		return invoke(ctx, call, payload, admission, claimSha)
+	}
+	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), hooks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := []string{}
+	for _, call := range fixture.plan.Calls {
+		if call.Stage == "scan" {
+			expected = append(expected, "leaf_preflight:"+call.Id)
+		}
+	}
+	for _, call := range fixture.plan.Calls {
+		expected = append(expected, "call_admission:"+call.Id, "capture:"+call.Id)
+	}
+	if fmt.Sprint(events) != fmt.Sprint(expected) || fixture.admissions != winnerHandoffTokenizerCensus(fixture.plan) || result.Custody.Capacity.TokenizerInvocations != fixture.admissions {
+		t.Fatal("native invocation order or reserved tokenizer census differs", events, expected)
+	}
+	// A preflight receipt cannot substitute for its separately retained admission.
+	firstCall := len(result.Custody.LeafAdmissions)
+	result.Custody.Invocations[firstCall] = result.Custody.Invocations[0]
+	if err := validateWinnerHandoffCustody(&fixture.owner, fixture.plan, fixture.bundle, result.Evidence, result.Custody); err == nil {
+		t.Fatal("preflight custody was reused for a later model call")
+	}
+}
+
+// Successful preflight is not permanent admission: an exact later tokenizer
+// result that exceeds context refuses the first draw and remains preserved.
+func TestWinnerHandoffChangedPerCallAdmissionRefusesBeforeClaim(t *testing.T) {
+	fixture := newWinnerHandoffFixture(t, false)
+	hooks := fixture.hooks(t)
+	admit := hooks.Admit
+	hooks.Admit = func(ctx context.Context, phase string, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+		fixture.tooManyTokens = phase == "call_admission"
+		return admit(ctx, phase, call, payload)
+	}
+	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), hooks)
+	if err == nil || fixture.claims != 0 || fixture.invokes != 0 || len(result.Custody.LeafAdmissions) == 0 || fixture.admissions != len(result.Custody.LeafAdmissions)+1 || fixture.lastCompletion == nil || fixture.lastCompletion.Proposal != nil {
+		t.Fatal("later tokenizer refusal reused an earlier leaf admission", err)
 	}
 }
