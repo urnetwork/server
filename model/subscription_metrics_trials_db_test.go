@@ -44,6 +44,22 @@ func TestLoadSubscriptionMetricsSnapshotCountsActiveTrials(t *testing.T) {
 				t.Fatalf("add renewal: %v", err)
 			}
 		}
+		// a Play window of the network's purchase, from its start to the
+		// store's expiry, as the credit writes it
+		addPlayRenewal := func(networkId server.Id, start time.Time, expiry time.Time, netRevenue NanoCents) {
+			t.Helper()
+			if err := AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
+				NetworkId:          networkId,
+				SubscriptionType:   SubscriptionTypeSupporter,
+				SubscriptionMarket: SubscriptionMarketGoogle,
+				StartTime:          start,
+				EndTime:            expiry.Add(storeGrace),
+				NetRevenue:         netRevenue,
+				PurchaseToken:      "play-token-" + networkId.String(),
+			}); err != nil {
+				t.Fatalf("add play renewal: %v", err)
+			}
+		}
 		addAppleLedger := func(networkId server.Id, transactionId string, productId string, priceMilliunits int64) {
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(
@@ -59,31 +75,34 @@ func TestLoadSubscriptionMetricsSnapshotCountsActiveTrials(t *testing.T) {
 		// Google Play: every window starts at the purchase's start
 		playTrial := newNetwork()
 		playStart := now.Add(-3 * day)
-		addRenewal(playTrial, SubscriptionMarketGoogle, "", playStart, playStart.Add(14*day+storeGrace), playRevenue)
+		addPlayRenewal(playTrial, playStart, playStart.Add(14*day), playRevenue)
 
 		// the day Play adds while the trial's first charge is pending
 		playPending := newNetwork()
 		pendingStart := now.Add(-14*day - time.Hour)
-		addRenewal(playPending, SubscriptionMarketGoogle, "", pendingStart, pendingStart.Add(14*day+storeGrace), playRevenue)
-		addRenewal(playPending, SubscriptionMarketGoogle, "", pendingStart, pendingStart.Add(15*day+storeGrace), playRevenue)
+		addPlayRenewal(playPending, pendingStart, pendingStart.Add(14*day), playRevenue)
+		addPlayRenewal(playPending, pendingStart, pendingStart.Add(15*day+time.Second), playRevenue)
 
-		// converted: the trial, then the paid year
+		// converted as conversions land on Main (14, 15, 379 days): the trial
+		// ended 6 hours ago, Play added its pending day, and the charge went
+		// through inside it, so the pending day's window is still current
 		playConverted := newNetwork()
-		convertedStart := now.Add(-20 * day)
-		addRenewal(playConverted, SubscriptionMarketGoogle, "", convertedStart, convertedStart.Add(14*day+storeGrace), playRevenue)
-		addRenewal(playConverted, SubscriptionMarketGoogle, "", convertedStart, convertedStart.Add(379*day+storeGrace), playRevenue)
+		convertedStart := now.Add(-14*day - 6*time.Hour)
+		addPlayRenewal(playConverted, convertedStart, convertedStart.Add(14*day), playRevenue)
+		addPlayRenewal(playConverted, convertedStart, convertedStart.Add(15*day+time.Second), playRevenue)
+		addPlayRenewal(playConverted, convertedStart, convertedStart.Add(379*day), playRevenue)
 
 		// cancelled: the trial ran out
 		playCancelled := newNetwork()
 		cancelledStart := now.Add(-16 * day)
-		addRenewal(playCancelled, SubscriptionMarketGoogle, "", cancelledStart, cancelledStart.Add(14*day+storeGrace), playRevenue)
+		addPlayRenewal(playCancelled, cancelledStart, cancelledStart.Add(14*day), playRevenue)
 
 		// the first charge failed: Play's grace period holds Pro, with no
 		// revenue
 		playGrace := newNetwork()
 		graceStart := now.Add(-17 * day)
-		addRenewal(playGrace, SubscriptionMarketGoogle, "", graceStart, graceStart.Add(14*day+storeGrace), playRevenue)
-		addRenewal(playGrace, SubscriptionMarketGoogle, "", graceStart, graceStart.Add(21*day+storeGrace), 0)
+		addPlayRenewal(playGrace, graceStart, graceStart.Add(14*day), playRevenue)
+		addPlayRenewal(playGrace, graceStart, graceStart.Add(21*day), 0)
 
 		// Stripe: the $0 trial invoice, inside its period
 		stripeTrial := newNetwork()

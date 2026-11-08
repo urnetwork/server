@@ -36,6 +36,10 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 		"AND renewal.net_revenue_nano_cents = 0\n      AND renewal.start_time <= $1\n      AND $1 < renewal.end_time - interval '30 days'",
 		"AND ledger.price_milliunits = 0",
 		"SELECT 'deduplicated', plan, count(DISTINCT network_id)::bigint",
+		// a Play purchase with a charged window is no longer in its trial,
+		// though the day Play added before the charge is still current
+		"AND paid.purchase_token = renewal.purchase_token",
+		"AND paid.start_time + interval '27 days' <= paid.end_time - interval '24 hours'",
 	} {
 		if !strings.Contains(subscriptionMetricsTrialQuery, required) {
 			t.Errorf("trial query is missing %q", required)

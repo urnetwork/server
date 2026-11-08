@@ -260,7 +260,11 @@ ORDER BY kind, store, window_name
 //     has none) from the purchase's start to an expiry 2 to 27 days later:
 //     the 14-day trial, or a day Play added before the trial's first charge.
 //     Every Play window starts at the purchase's start, so a paid window is
-//     never that short. Play sells the trial only on the yearly base plan.
+//     never that short. The trial's first charge usually lands inside the day
+//     Play added, whose window stays current for up to a day after it: once
+//     the purchase has a charged window (an expiry at least 27 days after its
+//     start), none of its windows is a trial. Play sells the trial only on the
+//     yearly base plan.
 //   - Stripe: the trial's $0 invoice, inside its period (its window runs the
 //     30-day manual-payment grace past it). Stripe starts a trial only on the
 //     yearly plan.
@@ -282,6 +286,16 @@ WITH trial AS (
       AND $1 < renewal.end_time - interval '24 hours'
       AND renewal.start_time + interval '2 days' <= renewal.end_time - interval '24 hours'
       AND renewal.end_time - interval '24 hours' < renewal.start_time + interval '27 days'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM subscription_renewal paid
+          WHERE paid.network_id = renewal.network_id
+            AND paid.subscription_type = 'supporter'
+            AND paid.market = 'google'
+            AND paid.purchase_token = renewal.purchase_token
+            AND 0 < paid.net_revenue_nano_cents
+            AND paid.start_time + interval '27 days' <= paid.end_time - interval '24 hours'
+      )
     UNION ALL
     SELECT renewal.network_id, 'stripe'::text, 'yearly'::text
     FROM subscription_renewal renewal
