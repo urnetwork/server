@@ -97,6 +97,11 @@ func TestProviderEgressTlsJudgeExportsWhatEachJudgedRunLeaves(t *testing.T) {
 		if got, ok := testingGatheredTlsJudgeGauge(t, "urnetwork_egress_tls_undecided_findings", map[string]string{}); !ok || got != 1 {
 			t.Errorf("exported undecided findings: %v (exported=%t), want the one a direct check could still decide", got, ok)
 		}
+		for _, reason := range []string{"error", "budget", "limit"} {
+			if got, ok := testingGatheredTlsJudgeGauge(t, "urnetwork_egress_tls_place_withheld_pairs", map[string]string{"reason": reason}); !ok || got != 0 {
+				t.Errorf("exported %s place-withheld pairs: %v (exported=%t), want 0", reason, got, ok)
+			}
+		}
 		judgedAt := float64(now.UnixMilli()) / 1000
 		if got, ok := testingGatheredTlsJudgeGauge(t, "urnetwork_egress_tls_judge_last_judged_timestamp_seconds", map[string]string{}); !ok || math.Abs(got-judgedAt) > 0.001 {
 			t.Fatalf("exported last judged run: %v (exported=%t), want %v", got, ok, judgedAt)

@@ -47,6 +47,12 @@ type EgressTlsJudgeSettings struct {
 	StaleAfter time.Duration
 	// consecutive stale cadences after which the stale alert pages
 	StalePageSustain int
+	// With a desired slot not reporting, the newest judged run on the slots
+	// that report must be older than this to raise stale, which then pages
+	// from its second cadence: when the stale alert pages with every slot
+	// reporting, StaleAfter and five more cadences. A judge on an unread slot
+	// is not ruled out sooner; one stopped is not missed for good.
+	StalePageAfter time.Duration
 	// consecutive cadences on which the newest judged run left a decidable
 	// finding undecided before it warns: thirty minutes at the cadence
 	UndecidedSustain int
@@ -63,6 +69,7 @@ func DefaultEgressTlsJudgeSettings() *EgressTlsJudgeSettings {
 	return &EgressTlsJudgeSettings{
 		StaleAfter:        20 * time.Minute,
 		StalePageSustain:  6,
+		StalePageAfter:    45 * time.Minute,
 		UndecidedSustain:  6,
 		TaskworkerService: "taskworker",
 		FleetReadSettings: FleetReadSettings{
@@ -196,13 +203,14 @@ func evaluateEgressTlsJudge(
 	// the judge now
 	fleetText := "fleet=unknown"
 	fresh := false
+	var age time.Duration
 	ageText := "none"
 	if fleet != nil {
 		newest := "none"
 		undecided := "unknown"
 		if fleet.judged && 0 < fleet.judgedAt {
 			judgedAt := time.Unix(0, int64(fleet.judgedAt*float64(time.Second))).UTC()
-			age := max(0, at.Sub(judgedAt))
+			age = max(0, at.Sub(judgedAt))
 			fresh = age <= settings.StaleAfter
 			newest = judgedAt.Format(time.RFC3339)
 			ageText = age.Truncate(time.Second).String()
@@ -214,15 +222,24 @@ func evaluateEgressTlsJudge(
 			newest, ageText, fleet.judgedSlot, undecided, settings.StaleAfter, fleet.gateway, fleet.coverage)
 	}
 
-	// No run has judged for a while. Only every desired slot's gauge proves
-	// it: a slot unread may hold the newest run.
+	// No run has judged for a while. With every desired slot reporting, that
+	// is known from StaleAfter. With a slot not reporting, an unread slot may
+	// hold the newest run, so the slots that report must show none for
+	// StalePageAfter, when a fully read judge would page; then it pages at
+	// once. A slot that reports only zero has not judged since it started, as
+	// mid-roll, which proves nothing either way.
+	partial := fleet != nil && !fleet.complete && fleet.judged && 0 < fleet.judgedAt && settings.StalePageAfter < age
 	switch {
-	case fleet != nil && fleet.complete && !fresh:
+	case fleet != nil && fleet.complete && !fresh, partial:
 		f := newFinding("egress-tls-judge-stale", 2)
 		f.pageSustain = settings.StalePageSustain
-		if 0 < fleet.judgedAt {
+		switch {
+		case partial:
+			f.pageSustain = 2
+			f.symptom = fmt.Sprintf("No TLS finding judge run has judged for %s on any Taskworker slot that reports, beyond the %s a fully read judge pages at", ageText, settings.StalePageAfter)
+		case 0 < fleet.judgedAt:
 			f.symptom = fmt.Sprintf("No TLS finding judge run has judged for %s", ageText)
-		} else {
+		default:
 			f.symptom = "No Taskworker process has completed a judged TLS finding judge run since it started"
 		}
 		f.mechanism = "A URL turn's TLS failure is stored pending, and a pending finding excludes nobody until the judge (JudgeProviderEgressTlsFindings, every five minutes on one Taskworker) decides it. While no run judges, every new finding stays pending, so a provider that intercepts TLS stays eligible: the exclusion fails open. A run past its ten-minute bound or a panic skips the Post that schedules the next run and retries on a backoff toward an hour; a pool the judge cannot build judges nothing."
@@ -233,7 +250,9 @@ func evaluateEgressTlsJudge(
 		f.action = "Read the Taskworker's [egress]TLS judge lines and the task's reschedule error. For pool_unavailable the served destination pool could not be built, and its own errors on the api and the Taskworker name the cause; a run that times out is most often its direct checks (15 s each, eight at a time, at most 256 hosts). Once fixed, a Taskworker restart schedules a run at once."
 		f.verify = fmt.Sprintf("The fleet's newest judged run is under %s old on two cadences.", settings.StaleAfter)
 		findings = append(findings, f)
-	case fleet != nil && fleet.complete:
+	case fresh:
+		// a recent judged run on any slot proves the judge runs, however many
+		// slots report
 		findings = append(findings, healthyFinding(egressTlsJudgeProbeId, tierWarn, "egress-tls-judge-stale", target))
 	}
 
@@ -271,7 +290,7 @@ func evaluateEgressTlsJudge(
 		f.baseline = "Every desired Taskworker slot exports a fresh urnetwork_egress_tls_judge_last_judged_timestamp_seconds, and the newest judged run's urnetwork_egress_tls_undecided_findings reads."
 		f.observed = "visibility_reason=" + strings.Join(unique, ";") + " " + fleetText
 		f.evidence = "Desired slots come from active services.yml placement, not from surviving series. Findings proven from what was read are reported beside this."
-		f.context = "A Taskworker built before §2.31 exports no judge gauges, so a fleet partly on an older build, during a roll or after a rollback, reads as unobservable rather than stale, and this class never pages."
+		f.context = "A Taskworker built before §2.31 exports no judge gauges, so a fleet partly on an older build, during a roll or after a rollback, reads as unobservable, and this class never pages. Stale is raised beside it only once the slots that report show no judged run for the page bound, and pages then."
 		f.action = "Restore the Mimir path, or finish the Taskworker rollout of the build that exports the gauges, and rerun."
 		f.verify = "Every source reads on two cadences."
 		findings = append(findings, f)

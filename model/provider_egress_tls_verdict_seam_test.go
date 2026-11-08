@@ -19,6 +19,7 @@ const testingTlsCommonModeNetworkCount = 16
 // task carries in its arguments.
 type testingTlsJudgeChain struct {
 	unservedSince map[string]time.Time
+	placeReadAt   map[string]time.Time
 }
 
 func testingNewTlsJudgeChain() *testingTlsJudgeChain {
@@ -49,8 +50,10 @@ func (self *testingTlsJudgeChain) judge(t testing.TB, ctx context.Context, now t
 	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
 	findings := GetProviderEgressTlsFindings(ctx, 100000)
 	pool := NewProviderEgressTlsPool(now, findings, servedSet, self.unservedSince)
+	pool.PlaceReadAt = self.placeReadAt
 	self.unservedSince = pool.UnservedSince
 	SetProviderEgressTlsVerdicts(ctx, JudgeProviderEgressTlsFindings(ctx, now, findings, pool, outcomes, settings))
+	self.placeReadAt = pool.PlaceReadAt
 }
 
 // One run of a chain of its own.
@@ -75,4 +78,23 @@ func testingTlsVerdict(t testing.TB, ctx context.Context, clientId server.Id, ta
 		}
 	}
 	return ""
+}
+
+// One chain of place reads, carrying the place-read clock from run to run as
+// the judge's task carries it in its arguments. The place-read order tests
+// (provider_egress_tls_place_order_test.go) read through it alone.
+type testingTlsPlaceReadChain struct {
+	readAt map[string]time.Time
+}
+
+func (self *testingTlsPlaceReadChain) read(
+	now time.Time,
+	settings *ProviderEgressTlsJudgeSettings,
+	findings []*ProviderEgressTlsFinding,
+	candidates []bool,
+	reads providerEgressTlsPlaceReads,
+) []providerEgressTlsPlaceEvidence {
+	evidence, readAt := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, self.readAt, reads)
+	self.readAt = readAt
+	return evidence
 }

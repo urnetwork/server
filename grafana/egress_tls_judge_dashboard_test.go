@@ -63,6 +63,9 @@ func TestEgressTlsFindingsPanelReadsTheNewestJudgedRun(t *testing.T) {
 		series("urnetwork_egress_tls_findings", "new", `,verdict="retired"`, "0"),
 		series("urnetwork_egress_tls_undecided_findings", "old", "", "7"),
 		series("urnetwork_egress_tls_undecided_findings", "new", "", "1"),
+		series("urnetwork_egress_tls_place_withheld_pairs", "old", `,reason="budget"`, "6"),
+		series("urnetwork_egress_tls_place_withheld_pairs", "new", `,reason="budget"`, "2"),
+		series("urnetwork_egress_tls_place_withheld_pairs", "new", `,reason="error"`, "0"),
 	}
 	// evaluated at 20m: a judged run is fresh after 300 s and no later than 1230 s
 	cases := []struct {
@@ -70,18 +73,23 @@ func TestEgressTlsFindingsPanelReadsTheNewestJudgedRun(t *testing.T) {
 		judged    []map[string]string
 		verdicts  []map[string]any
 		undecided []map[string]any
+		withheld  []map[string]any
 	}{
 		{"the newest judged run replaces an older process's values", judged("1080", "1170"),
 			[]map[string]any{{"labels": `{verdict="pending"}`, "value": 1}, {"labels": `{verdict="provider"}`, "value": 5}, {"labels": `{verdict="retired"}`, "value": 0}},
-			[]map[string]any{{"labels": "{}", "value": 1}}},
-		{"no run judged for fifteen minutes", judged("200", "250"), []map[string]any{}, []map[string]any{}},
-		{"a judged time ahead of the clock", judged("1300", "1300"), []map[string]any{}, []map[string]any{}},
+			[]map[string]any{{"labels": "{}", "value": 1}},
+			[]map[string]any{{"labels": `{reason="budget"}`, "value": 2}, {"labels": `{reason="error"}`, "value": 0}}},
+		{"no run judged for fifteen minutes", judged("200", "250"), []map[string]any{}, []map[string]any{}, []map[string]any{}},
+		{"a judged time ahead of the clock", judged("1300", "1300"), []map[string]any{}, []map[string]any{}, []map[string]any{}},
 	}
 	tests := []map[string]any{}
 	for _, c := range cases {
 		checks := []map[string]any{{"expr": expressions["A"], "eval_time": "20m", "exp_samples": c.verdicts}}
 		if expression, ok := expressions["B"]; ok {
 			checks = append(checks, map[string]any{"expr": expression, "eval_time": "20m", "exp_samples": c.undecided})
+		}
+		if expression, ok := expressions["C"]; ok {
+			checks = append(checks, map[string]any{"expr": expression, "eval_time": "20m", "exp_samples": c.withheld})
 		}
 		tests = append(tests, map[string]any{"name": c.name, "interval": "1m", "input_series": append(c.judged, gauges...), "promql_expr_test": checks})
 	}
@@ -98,6 +106,9 @@ func TestEgressTlsFindingsPanelReadsTheNewestJudgedRun(t *testing.T) {
 	}
 	if _, ok := expressions["B"]; !ok {
 		t.Fatal("the TLS findings panel does not chart the undecided findings")
+	}
+	if _, ok := expressions["C"]; !ok {
+		t.Fatal("the TLS findings panel does not chart the pairs whose place evidence was withheld")
 	}
 	if !strings.Contains(panel.Description, "§2.31") || !strings.Contains(panel.Description, "undecided") {
 		t.Fatal("the TLS findings panel does not point at the judge's monitor signal")
