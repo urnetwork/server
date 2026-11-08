@@ -53,7 +53,7 @@ var proxyTestMetrics = map[string]proxyTestMetric{
 // dashboard selects it only through the country variable, and version is
 // never matched.
 var proxyTestLabelValues = map[string][]string{
-	"outcome": {"ok", "create_error", "ready_timeout", "browser_error", "navigate_timeout", "http_error"},
+	"outcome": {"ok", "create_error", "ready_timeout", "browser_error", "navigate_timeout", "http_error", "site_refused", "load_timeout"},
 	"phase":   {"create", "setup", "connect", "load"},
 	"call":    {"login", "locations", "create", "remove", "list"},
 }
@@ -89,11 +89,18 @@ const (
 	proxyTestLatestRunPanel      = 26
 	proxyTestFastestPanel        = 27
 	proxyTestSuccessRatePanel    = 28
+	proxyTestDeliveredPanel      = 29
 )
+
+// The outcomes in which the page's main document came through the proxy:
+// the page loaded (ok), its load event stalled (load_timeout), or the site
+// answered a refusal (site_refused) or another http error. The others are
+// proxy failures: no byte of the document came.
+const proxyTestDeliveredOutcomes = "ok|load_timeout|site_refused|http_error"
 
 // The panels that follow the country variable, and those over every country.
 var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel, proxyTestFastestPanel, proxyTestSuccessRatePanel}
-var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel}
+var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestDeliveredPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel}
 
 // The fields of the document that testDashboard does not read.
 type proxyTestDatasource struct {
@@ -548,6 +555,9 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 	}
 	panel(proxyTestSuccessPanel, "stat", "percentunit")
 	expect(proxyTestSuccessPanel, "A", `(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main",outcome="ok"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main"}[1h]))) > 0)`)
+	// beside it, the runs whose page's main document came through the proxy
+	panel(proxyTestDeliveredPanel, "stat", "percentunit")
+	expect(proxyTestDeliveredPanel, "A", `(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main",outcome=~"`+proxyTestDeliveredOutcomes+`"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main"}[1h]))) > 0)`)
 
 	// coverage
 	panel(proxyTestCountriesPanel, "stat", "short")
@@ -589,7 +599,7 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 		"E": {"load p50", `phase="load",stat="p50"`},
 		"F": {"load p90", `phase="load",stat="p90"`},
 		"G": {"runs", `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`},
-		"H": {"failures", `outcome!="ok"}[24h]`},
+		"H": {"proxy failures", `outcome!~"` + proxyTestDeliveredOutcomes + `"}[24h]`},
 		"I": {"success", `outcome="ok"}[24h]`},
 		"J": {"last tested", `urnetwork_proxy_test_last_run_timestamp_seconds{env="main",country=~"$country"}`},
 		"K": {"exit mismatches", `increase(urnetwork_proxy_test_exit_country_mismatch_total{env="main",country=~"$country"}[24h])`},
@@ -619,7 +629,7 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 	panel(proxyTestSlowestPanel, "bargauge", "s")
 	expect(proxyTestSlowestPanel, "A", `sort_desc(topk(20, max by (country) (urnetwork_proxy_test_phase_seconds_window{env="main",country=~"$country",phase="setup",stat="p90"})))`)
 	panel(proxyTestFailureRatePanel, "bargauge", "percentunit")
-	contains(proxyTestFailureRatePanel, "A", "topk(20, ", `outcome!="ok"}[24h]`, `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`)
+	contains(proxyTestFailureRatePanel, "A", "topk(20, ", `outcome!~"`+proxyTestDeliveredOutcomes+`"}[24h]`, `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`)
 	// and their counterparts: the fastest 20 by setup p90, and the highest
 	// success rates among countries with at least 3 runs in 24 h
 	panel(proxyTestFastestPanel, "bargauge", "s")
@@ -787,6 +797,10 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		planetoid(runs, `,country="fr",outcome="create_error"`, "0+1x1500"),
 		planetoid(runs, `,country="jp",outcome="ok"`, "0+2x1500"),
 		planetoid(runs, `,country="us",outcome="ok"`, "0+1x1470 1+1x29"),
+		// nl: one site_refused and one load_timeout a minute, delivered pages
+		// that did not load ok
+		planetoid(runs, `,country="nl",outcome="site_refused"`, "0+1x1500"),
+		planetoid(runs, `,country="nl",outcome="load_timeout"`, "0+1x1500"),
 		other(runs, `,country="de",outcome="ok"`, "0+100x1500"),
 		planetoid(mismatch, `,country="de"`, "0+1x1500"),
 
@@ -842,8 +856,10 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		{proxyTestSetupP90Panel, "A", value(6)},
 		{proxyTestConnectP50Panel, "A", value(0.75)},
 		{proxyTestConnectP90Panel, "A", value(1.5)},
-		// (180 de + 120 jp + 60 us ok) / (360 ok + 60 http_error + 60 create_error)
-		{proxyTestSuccessPanel, "A", value(0.75)},
+		// (180 de + 120 jp + 60 us ok) / (360 ok + 60 http_error + 60 create_error + 60 site_refused + 60 load_timeout)
+		{proxyTestSuccessPanel, "A", value(0.6)},
+		// (360 ok + 60 http_error + 60 site_refused + 60 load_timeout) / 600
+		{proxyTestDeliveredPanel, "A", value(0.9)},
 		{proxyTestCountriesPanel, "A", value(5)},
 		{proxyTestTestedPanel, "A", value(4)},
 		{proxyTestCoveragePanel, "A", value(0.8)},
@@ -855,7 +871,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{"labels": `{phase="load",stat="p50"}`, "value": 2},
 			{"labels": `{phase="load",stat="p90"}`, "value": 4},
 		}},
-		{proxyTestOutcomesPanel, "A", by("outcome", map[string]float64{"ok": 360, "http_error": 60, "create_error": 60})},
+		{proxyTestOutcomesPanel, "A", by("outcome", map[string]float64{"ok": 360, "http_error": 60, "create_error": 60, "site_refused": 60, "load_timeout": 60})},
 		{proxyTestMeanPanel, "A", []map[string]any{
 			{"labels": `{country="de",phase="setup"}`, "value": 3},
 			{"labels": `{country="de",phase="connect"}`, "value": 0.5},
@@ -868,15 +884,16 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		{proxyTestCountryTablePanel, "D", by("country", map[string]float64{"de": 2})},
 		{proxyTestCountryTablePanel, "E", by("country", map[string]float64{"de": 3})},
 		{proxyTestCountryTablePanel, "F", by("country", map[string]float64{"de": 5})},
-		{proxyTestCountryTablePanel, "G", by("country", map[string]float64{"de": 5760, "fr": 1440, "jp": 2880, "us": 1440})},
-		{proxyTestCountryTablePanel, "H", by("country", map[string]float64{"de": 1440, "fr": 1440, "jp": 0, "us": 0})},
-		{proxyTestCountryTablePanel, "I", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1})},
+		{proxyTestCountryTablePanel, "G", by("country", map[string]float64{"de": 5760, "fr": 1440, "jp": 2880, "us": 1440, "nl": 2880})},
+		// de's http errors, and all of nl's runs, came through the proxy
+		{proxyTestCountryTablePanel, "H", by("country", map[string]float64{"de": 0, "fr": 1440, "jp": 0, "us": 0, "nl": 0})},
+		{proxyTestCountryTablePanel, "I", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1, "nl": 0})},
 		{proxyTestCountryTablePanel, "J", lastTested},
-		{proxyTestCountryTablePanel, "K", by("country", map[string]float64{"de": 1440, "fr": 0, "jp": 0, "us": 0})},
+		{proxyTestCountryTablePanel, "K", by("country", map[string]float64{"de": 1440, "fr": 0, "jp": 0, "us": 0, "nl": 0})},
 		{proxyTestSlowestPanel, "A", by("country", map[string]float64{"de": 4.5, "jp": 2})},
-		{proxyTestFailureRatePanel, "A", by("country", map[string]float64{"de": 0.25, "fr": 1})},
+		{proxyTestFailureRatePanel, "A", by("country", map[string]float64{"fr": 1})},
 		{proxyTestFastestPanel, "A", by("country", map[string]float64{"de": 4.5, "jp": 2})},
-		{proxyTestSuccessRatePanel, "A", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1})},
+		{proxyTestSuccessRatePanel, "A", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1, "nl": 0})},
 		{proxyTestLatestRunPanel, "A", lastTested},
 		{proxyTestLatestRunPanel, "B", by("country", map[string]float64{"de": 0, "jp": 18000, "us": 0})},
 		{proxyTestLatestRunPanel, "C", by("country", map[string]float64{"de": 0.5})},
@@ -904,6 +921,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{proxyTestApiErrorsPanel, "A", value(0)},
 			{proxyTestSetupP50Panel, "A", none},
 			{proxyTestSuccessPanel, "A", value(0)},
+			{proxyTestDeliveredPanel, "A", value(0)},
 			{proxyTestTestedPanel, "A", value(0)},
 			{proxyTestCoveragePanel, "A", value(0)},
 			{proxyTestCountryTablePanel, "I", by("country", map[string]float64{"fr": 0})},
@@ -917,6 +935,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{proxyTestUpPanel, "A", value(0)},
 			{proxyTestHeartbeatPanel, "A", value(3600)},
 			{proxyTestSuccessPanel, "A", none},
+			{proxyTestDeliveredPanel, "A", none},
 			{proxyTestCountryTablePanel, "G", by("country", map[string]float64{"de": 0})},
 			{proxyTestCountryTablePanel, "H", by("country", map[string]float64{"de": 0})},
 			{proxyTestCountryTablePanel, "I", none},
@@ -936,6 +955,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{proxyTestApiErrorsPanel, "A", none},
 			{proxyTestSetupP50Panel, "A", none},
 			{proxyTestSuccessPanel, "A", none},
+			{proxyTestDeliveredPanel, "A", none},
 			{proxyTestCountriesPanel, "A", none},
 			{proxyTestTestedPanel, "A", value(0)},
 			{proxyTestCoveragePanel, "A", none},
