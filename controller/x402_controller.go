@@ -18,6 +18,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -843,11 +844,15 @@ func x402TransactionGrantedInConn(connOwner server.PgConn, ctx context.Context, 
 // payment terms, so an agent can pay for a Pro month inline and retry the SAME
 // request. Returns true when it wrote the response.
 //
-// It is a no-op (false) when the result is not upgrade-required, or when x402 is off
-// or cannot quote -- and then the normal JSON body with `upgrade_required` is written
+// It is a no-op (false) when the result is not upgrade-required, when the request
+// comes from one of the URnetwork apps (X402QuotesClient), or when x402 is off or
+// cannot quote -- and then the normal JSON body with `upgrade_required` is written
 // instead, which is what a human client shows an upgrade prompt from.
-func WriteX402UpgradeRequired(w http.ResponseWriter, result *model.AuthNetworkClientResult) bool {
+func WriteX402UpgradeRequired(w http.ResponseWriter, r *http.Request, result *model.AuthNetworkClientResult) bool {
 	if result == nil || result.Error == nil || !result.Error.UpgradeRequired {
+		return false
+	}
+	if !X402QuotesClient(r.Header) {
 		return false
 	}
 	if !X402Enabled() {
@@ -868,6 +873,24 @@ func WriteX402UpgradeRequired(w http.ResponseWriter, result *model.AuthNetworkCl
 
 	WriteX402PaymentRequired(w, paymentRequired)
 	return true
+}
+
+// X402QuotesClient reports whether a refusal that an upgrade lifts is answered
+// to this caller with x402 payment terms. The URnetwork apps name their device
+// type in the client info header (connect.ClientInfo): they have a person to
+// show the upgrade prompt to and no x402 signer, so they get the JSON body with
+// upgrade_required, as every client did before x402. A 402 carries the terms
+// instead, which the apps' request layer reads as a failed request and shows
+// as raw json or a generic error. Any other caller (no client info, or "cli",
+// "server", "unknown") is taken for an agent and is quoted. The header is the
+// caller's own claim: a caller that names an app type only gives up the terms.
+func X402QuotesClient(header http.Header) bool {
+	switch connect.ClientInfoFromHeader(header).DeviceType {
+	case "android", "ios", "macos", "windows", "linux", "web":
+		return false
+	default:
+		return true
+	}
 }
 
 // X402SettleInlineUpgrade settles an X-PAYMENT presented on a gated request: the
