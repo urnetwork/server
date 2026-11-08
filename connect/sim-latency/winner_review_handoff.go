@@ -109,6 +109,7 @@ func preflightWinnerHandoffLeaves(ctx context.Context, plan *winnerMultipassPlan
 func captureWinnerHandoff(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, settings winnerHandoffCaptureSettings, hooks winnerHandoffCaptureHooks) (result *winnerHandoffCaptureResult, resultErr error) {
 	if owner == nil || plan == nil || hooks.Now == nil || hooks.Reserve == nil || hooks.Admit == nil || hooks.Invoke == nil || hooks.Claim == nil || hooks.Receipt == nil || hooks.Retain == nil || hooks.Complete == nil ||
 		hooks.Provenance.RunAuthorizationSha256 != owner.Args.AuthorizationSha256 || !validSha256(hooks.Provenance.ReleaseSha256) || !validSha256(hooks.Provenance.QualificationReportSha256) ||
+		!validSha256(hooks.Provenance.CaptureAdmissionSha256) ||
 		settings.CleanupTimeout <= 0 || settings.ReceiptTimeout <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumDocumentBytes > defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes {
 		return nil, errors.New("native capture lacks qualified ownership or transport hooks")
 	}
@@ -177,6 +178,13 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 					resultErr = errors.Join(resultErr, errors.New("protected failed-evidence retention or durable completion unavailable; retain local originals"))
 				}
 			}
+		}
+		if result.Completion != nil {
+			content, err := json.Marshal(result.Completion)
+			if err == nil {
+				err = writePrivateReviewFile(filepath.Join(directory, "completion.json"), content)
+			}
+			resultErr = errors.Join(resultErr, err)
 		}
 		content, err := json.Marshal(result)
 		if err == nil {

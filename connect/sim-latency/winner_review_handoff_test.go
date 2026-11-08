@@ -28,6 +28,7 @@ type winnerHandoffFixture struct {
 	failInvoke                                        bool
 	tooManyTokens                                     bool
 	lastCompletion                                    *model.CompetitionReviewHandoffCompletion
+	journal                                           []model.CompetitionReviewHandoffCall
 }
 
 func newWinnerHandoffFixture(t *testing.T, disqualify bool) *winnerHandoffFixture {
@@ -60,7 +61,7 @@ func newWinnerHandoffFixture(t *testing.T, disqualify bool) *winnerHandoffFixtur
 
 func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks {
 	t.Helper()
-	return winnerHandoffCaptureHooks{Now: func() time.Time { return self.now }, Provenance: winnerHandoffProvenance{RunAuthorizationSha256: self.owner.Args.AuthorizationSha256, ReleaseSha256: winnerMultipassSha256([]byte("synthetic-release")), QualificationReportSha256: winnerMultipassSha256([]byte("synthetic-qualified-report"))},
+	return winnerHandoffCaptureHooks{Now: func() time.Time { return self.now }, Provenance: winnerHandoffProvenance{RunAuthorizationSha256: self.owner.Args.AuthorizationSha256, ReleaseSha256: winnerMultipassSha256([]byte("synthetic-release")), QualificationReportSha256: winnerMultipassSha256([]byte("synthetic-qualified-report")), CaptureAdmissionSha256: winnerMultipassSha256([]byte("synthetic-capture-admission"))},
 		Reserve: func(_ context.Context, capacity *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error) {
 			content, _ := json.Marshal(capacity)
 			return winnerHandoffCapacityReservation{CapacitySha256: winnerMultipassSha256(content), ReservationPath: "/synthetic/review/reservation", ReservationInode: 1,
@@ -82,6 +83,7 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 			}
 			self.claimed[value.CallId] = true
 			value.RecordedAt = self.now
+			self.journal = append(self.journal, value)
 			self.claims++
 			return &value, nil
 		},
@@ -106,6 +108,7 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 				t.Fatal("receipt lacks claim or original evidence")
 			}
 			value.RecordedAt = self.now
+			self.journal = append(self.journal, value)
 			self.now = self.now.Add(time.Second)
 			return &value, nil
 		},
@@ -159,6 +162,34 @@ func TestWinnerHandoffCompleteCaptureLeavesBothPossibleProposalsPending(t *testi
 		}
 		if err := validateWinnerHandoffCompletion(&fixture.owner, result.Completion, fixture.plan, fixture.bundle, result.Evidence, result.Custody); err != nil {
 			t.Fatal(err)
+		}
+		if err := validateWinnerHandoffJournal(&fixture.owner, fixture.plan, result.Evidence, fixture.journal); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A complete-looking local model transcript cannot replace another recorded
+// outcome, even when owner/call ids and all visible response fields look valid.
+func TestWinnerHandoffNativeValidationBindsEveryDurableReceipt(t *testing.T) {
+	fixture := newWinnerHandoffFixture(t, false)
+	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mutate := range []func([]model.CompetitionReviewHandoffCall){
+		func(calls []model.CompetitionReviewHandoffCall) {
+			calls[1].EvidenceSha256 = winnerMultipassSha256([]byte("different original observation"))
+		},
+		func(calls []model.CompetitionReviewHandoffCall) { calls[0], calls[1] = calls[1], calls[0] },
+		func(calls []model.CompetitionReviewHandoffCall) {
+			calls[0].RecordedAt = calls[0].RecordedAt.Add(time.Second)
+		},
+	} {
+		changed := append([]model.CompetitionReviewHandoffCall{}, fixture.journal...)
+		mutate(changed)
+		if err := validateWinnerHandoffJournal(&fixture.owner, fixture.plan, result.Evidence, changed); err == nil {
+			t.Fatal("changed durable claim/receipt remained importable")
 		}
 	}
 }

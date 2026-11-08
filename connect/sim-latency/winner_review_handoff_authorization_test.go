@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 )
 
@@ -30,6 +31,65 @@ type winnerHandoffRunAuthorization struct {
 	WinnerApproval            bool                               `json:"winner_approval"`
 	SourcePromotion           bool                               `json:"source_promotion"`
 	RewardRelease             bool                               `json:"reward_release"`
+}
+
+// This second record can exist only after the DB stamps the immutable owner.
+// Root approves the fixed plan and automatic final-token admission mechanism;
+// actual token receipts are then retained before any generation claim.
+type winnerHandoffCaptureAdmission struct {
+	Schema                        int                         `json:"schema"`
+	Kind                          string                      `json:"kind"`
+	HandoffId                     server.Id                   `json:"handoff_id"`
+	OwnerSha256                   string                      `json:"owner_sha256"`
+	PlanSha256                    string                      `json:"plan_sha256"`
+	BundleSha256                  string                      `json:"bundle_sha256"`
+	Provenance                    winnerHandoffProvenance     `json:"provenance"` // CaptureAdmissionSha256 stays empty inside this self-hashed record.
+	CapacitySha256                string                      `json:"capacity_sha256"`
+	ResourceProofs                []currentQgQualificationPin `json:"resource_proofs"`
+	AuthorizedAt                  time.Time                   `json:"authorized_at"`
+	CompleteLeafPreflightRequired bool                        `json:"complete_leaf_preflight_required"`
+	NoRepackOrRenewal             bool                        `json:"no_repack_or_renewal"`
+	WinnerApproval                bool                        `json:"winner_approval"`
+	SourcePromotion               bool                        `json:"source_promotion"`
+	RewardRelease                 bool                        `json:"reward_release"`
+}
+
+// No model receipts are invented at this point. The native allocator/tokenizer
+// independently enforces this prospective resource/admission decision at capture.
+func validateWinnerHandoffCaptureAdmission(content []byte, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, provenance winnerHandoffProvenance, settings winnerHandoffCaptureSettings, now time.Time) (*winnerHandoffCaptureAdmission, error) {
+	if owner == nil || plan == nil || rejectWinnerReviewCaseAliases(content) != nil {
+		return nil, errors.New("frozen capture admission is absent or malformed")
+	}
+	var admission winnerHandoffCaptureAdmission
+	if decodeStrictJSONBytes(content, &admission, "frozen capture admission") != nil {
+		return nil, errors.New("frozen capture admission cannot be decoded")
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(content, &fields) != nil {
+		return nil, errors.New("frozen capture admission is malformed")
+	}
+	for _, name := range []string{"complete_leaf_preflight_required", "no_repack_or_renewal", "winner_approval", "source_promotion", "reward_release"} {
+		if value, found := fields[name]; !found || string(value) == "null" {
+			return nil, errors.New("frozen capture admission omitted an explicit authority boundary")
+		}
+	}
+	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, winnerHandoffTokenizerCensus(plan), settings.Capacity)
+	if err != nil {
+		return nil, err
+	}
+	capacityBytes, _ := json.Marshal(capacity)
+	ownerBytes, _ := json.Marshal(owner)
+	if admission.Schema != 1 || admission.Kind != "elected-winner-frozen-capture-admission/v1" || admission.HandoffId != owner.HandoffId || admission.OwnerSha256 != winnerMultipassSha256(ownerBytes) ||
+		admission.PlanSha256 != owner.Plan.PlanSha256 || admission.BundleSha256 != plan.BundleSha256 || admission.Provenance != provenance || admission.CapacitySha256 != winnerMultipassSha256(capacityBytes) || len(admission.ResourceProofs) == 0 || len(admission.ResourceProofs) > 16 ||
+		admission.AuthorizedAt.Before(owner.StartedAt) || !admission.AuthorizedAt.Before(owner.Deadline) || admission.AuthorizedAt.After(now) || !admission.CompleteLeafPreflightRequired || !admission.NoRepackOrRenewal || admission.WinnerApproval || admission.SourcePromotion || admission.RewardRelease {
+		return nil, errors.New("capture admission changed exact owner/plan/resources or conferred forbidden winner authority")
+	}
+	for _, pin := range admission.ResourceProofs {
+		if !validSha256(pin.Sha256) {
+			return nil, errors.New("capture admission lacks an original resource evidence identity")
+		}
+	}
+	return &admission, nil
 }
 
 // Pure comparison makes the same binding usable before and after DB ownership.
@@ -124,5 +184,61 @@ func TestWinnerHandoffProspectiveAuthorityBindsExactScopeWithoutWinnerApproval(t
 		check(changed, false)
 		changed[name] = nil
 		check(changed, false)
+	}
+}
+
+// The second permission cannot predate freeze, select another clock/plan or
+// silently turn automatic token admission into a winner decision.
+func TestWinnerHandoffCaptureAdmissionBindsFrozenClockAndResourceCensus(t *testing.T) {
+	fixture := newWinnerHandoffFixture(t, false)
+	settings := defaultWinnerHandoffCaptureSettings()
+	capacity, err := estimateWinnerMultipassCapacity(fixture.plan, fixture.bundle, winnerHandoffTokenizerCensus(fixture.plan), settings.Capacity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerBytes, _ := json.Marshal(fixture.owner)
+	capacityBytes, _ := json.Marshal(capacity)
+	provenance := fixture.hooks(t).Provenance
+	provenance.CaptureAdmissionSha256 = ""
+	admission := winnerHandoffCaptureAdmission{Schema: 1, Kind: "elected-winner-frozen-capture-admission/v1", HandoffId: fixture.owner.HandoffId, OwnerSha256: winnerMultipassSha256(ownerBytes), PlanSha256: fixture.owner.Plan.PlanSha256,
+		BundleSha256: fixture.plan.BundleSha256, Provenance: provenance, CapacitySha256: winnerMultipassSha256(capacityBytes), ResourceProofs: []currentQgQualificationPin{{Path: "/synthetic/resource-proof", Sha256: winnerMultipassSha256([]byte("synthetic-capacity-observation"))}},
+		AuthorizedAt: fixture.owner.StartedAt, CompleteLeafPreflightRequired: true, NoRepackOrRenewal: true}
+	check := func(value any, want bool) {
+		t.Helper()
+		content, _ := json.Marshal(value)
+		_, err := validateWinnerHandoffCaptureAdmission(content, &fixture.owner, fixture.plan, fixture.bundle, provenance, settings, fixture.now)
+		if (err == nil) != want {
+			t.Fatal("frozen admission boundary differs", want, err)
+		}
+	}
+	check(admission, true)
+	for _, mutate := range []func(*winnerHandoffCaptureAdmission){
+		func(value *winnerHandoffCaptureAdmission) {
+			value.AuthorizedAt = fixture.owner.StartedAt.Add(-time.Second)
+		},
+		func(value *winnerHandoffCaptureAdmission) {
+			value.OwnerSha256 = winnerMultipassSha256([]byte("other-owner"))
+		},
+		func(value *winnerHandoffCaptureAdmission) {
+			value.CapacitySha256 = winnerMultipassSha256([]byte("smaller-budget"))
+		},
+		func(value *winnerHandoffCaptureAdmission) { value.WinnerApproval = true },
+		func(value *winnerHandoffCaptureAdmission) { value.CompleteLeafPreflightRequired = false },
+		func(value *winnerHandoffCaptureAdmission) { value.NoRepackOrRenewal = false },
+	} {
+		changed := admission
+		mutate(&changed)
+		check(changed, false)
+	}
+	content, _ := json.Marshal(admission)
+	for _, name := range []string{"winner_approval", "source_promotion", "reward_release", "complete_leaf_preflight_required", "no_repack_or_renewal"} {
+		var fields map[string]any
+		if err := json.Unmarshal(content, &fields); err != nil {
+			t.Fatal(err)
+		}
+		delete(fields, name)
+		check(fields, false)
+		fields[name] = nil
+		check(fields, false)
 	}
 }

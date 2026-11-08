@@ -4,18 +4,97 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"time"
 
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
 )
+
+// The final protected model observations must match every original DB receipt,
+// not only a valid-looking local completion file or provider wrapper manifest.
+func validateWinnerHandoffJournal(owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, evidence winnerMultipassEvidence, calls []model.CompetitionReviewHandoffCall) error {
+	if owner == nil || plan == nil || len(calls) != 2*len(plan.Calls) || len(evidence.Calls) != len(plan.Calls) {
+		return errors.New("native handoff lacks its complete original DB call journal")
+	}
+	for index, call := range plan.Calls {
+		claim, receipt, observation := calls[2*index], calls[2*index+1], evidence.Calls[index]
+		content, _ := json.Marshal(observation)
+		requestSha := winnerMultipassSha256(observation.Request)
+		if claim.HandoffId != owner.HandoffId || receipt.HandoffId != owner.HandoffId || claim.CallId != call.Id || receipt.CallId != call.Id || observation.CallId != call.Id || claim.Kind != "claim" || receipt.Kind != "receipt" ||
+			claim.RequestSha256 != requestSha || receipt.RequestSha256 != requestSha || receipt.EvidenceSha256 != winnerMultipassSha256(content) || claim.Failure != "" || receipt.Failure != "" || !claim.RecordedAt.Equal(observation.StartedAt) ||
+			claim.RecordedAt.Before(owner.StartedAt) || !claim.RecordedAt.Before(owner.Deadline) || receipt.RecordedAt.Before(claim.RecordedAt) || !receipt.RecordedAt.Before(owner.Deadline) {
+			return errors.New("native model evidence differs from its exact ordered DB claim/receipt")
+		}
+	}
+	return nil
+}
+
+// Reload every protected original and replay physical containment while its
+// original local attempt still exists. Eviction is intentionally not supported
+// by this path; a later portable replay must preserve the same original proofs.
+func reloadWinnerHandoffProtectedCustody(ctx context.Context, control *controller.Settings, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, custody winnerHandoffCustodyManifest, completion model.CompetitionReviewHandoffRetention, release winnerMultipassQualificationRelease, calls []model.CompetitionReviewHandoffCall) error {
+	manifest, err := json.Marshal(custody)
+	if err != nil {
+		return err
+	}
+	stored, err := controller.LoadCompetitionReviewHandoffEvidence(ctx, control, owner.Args.RoundId, owner.Args.JobId, completion, int64(len(manifest)))
+	if err != nil || !bytes.Equal(stored, manifest) {
+		return errors.New("protected completion manifest is not its exact retained version")
+	}
+	for _, document := range custody.Documents {
+		if _, err := controller.LoadCompetitionReviewHandoffEvidence(ctx, control, owner.Args.RoundId, owner.Args.JobId, document.Retention, document.Bytes); err != nil {
+			return err
+		}
+	}
+	claimShas := map[string]string{}
+	for _, call := range calls {
+		if call.Kind == "claim" {
+			content, _ := json.Marshal(call)
+			claimShas[call.CallId] = winnerMultipassSha256(content)
+		}
+	}
+	profile := winnerMultipassContainmentProfile{ImageId: release.ImageId, ProviderSettings: release.ProviderSettings, StateRoot: "/var/lib/urnetwork/competition-review-multipass/attempts"}
+	for _, invocation := range custody.Invocations {
+		originals := map[string][]byte{}
+		bindings := map[string]winnerHandoffCustodyOriginal{}
+		for _, original := range invocation.Originals {
+			content, err := controller.LoadCompetitionReviewHandoffEvidence(ctx, control, owner.Args.RoundId, owner.Args.JobId, original.Retention, original.Bytes)
+			if err != nil {
+				return err
+			}
+			originals[original.Name], bindings[original.Name] = content, original
+		}
+		var envelope winnerMultipassBrokerEnvelope
+		if decodeStrictJSONBytes(originals["input.json"], &envelope, "protected original model input") != nil || envelope.Owner != plan.Owner || envelope.PlanSha256 != owner.Plan.PlanSha256 || envelope.BundleSha256 != plan.BundleSha256 ||
+			envelope.Operation != invocation.Operation || envelope.Call.Id != invocation.CallId || winnerMultipassSha256(envelope.Payload) != invocation.RequestSha256 ||
+			envelope.Operation == "generate" && envelope.AuthorizedClaimSha256 != claimShas[envelope.Call.Id] {
+			return errors.New("protected original input differs from the exact owner/plan/DB claim")
+		}
+		if !slices.ContainsFunc(plan.Calls, func(call winnerMultipassCall) bool { return reflect.DeepEqual(call, envelope.Call) }) {
+			return errors.New("protected input contains an unplanned member call")
+		}
+		receipt, err := authenticateWinnerMultipassContainment(originals["input.json"], originals["broker.stdout"], originals["wrapper-receipt.json"], false, profile)
+		if err != nil || receipt.ManifestSha256 != invocation.ManifestSha256 || receipt.WrapperReceiptSha256 != invocation.WrapperReceiptSha256 || len(receipt.Artifacts)+1 != len(originals) {
+			return errors.New("protected original containment does not replay exactly")
+		}
+		for _, binding := range receipt.Artifacts {
+			original, found := bindings[binding.Path]
+			if !found || original.Bytes != binding.Bytes || original.Retention.Sha256 != binding.Sha256 {
+				return errors.New("protected containment original census differs from its authenticated manifest")
+			}
+		}
+	}
+	return nil
+}
 
 // Archive versions, not temporary local paths, own these original bytes. This
 // helper is called only after the qualified authenticator has accepted a receipt.
@@ -55,7 +134,7 @@ func retainWinnerHandoffContainment(ctx context.Context, phase string, envelope 
 
 // One process owns one fixed capture. No resumption, retry, operator import or
 // local-cache eviction is implicit. Close releases only the empty reservation.
-func captureWinnerHandoffNative(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, release winnerMultipassQualificationRelease, qualification, authorization currentQgQualificationPin, settings winnerHandoffCaptureSettings, storagePaths []string, control *controller.Settings, store controller.PostgresStore) (result *winnerHandoffCaptureResult, resultErr error) {
+func captureWinnerHandoffNative(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, release winnerMultipassQualificationRelease, qualification, authorization, captureAdmission currentQgQualificationPin, settings winnerHandoffCaptureSettings, storagePaths []string, control *controller.Settings, store controller.PostgresStore) (result *winnerHandoffCaptureResult, resultErr error) {
 	if err := validateWinnerHandoffIdentity(owner, plan, bundle); err != nil {
 		return nil, err
 	}
@@ -72,6 +151,24 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 	provenance, err := validateWinnerHandoffRunAuthorization(authorityBytes, authorization, owner.ActorId, owner.Args, release, qualification, plan.ScanGroups, settings, storagePaths, time.Now().UTC())
 	if err != nil {
 		return nil, err
+	}
+	admissionBytes, err := readCurrentQgQualificationPin(captureAdmission, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true)
+	if err != nil {
+		return nil, err
+	}
+	admission, err := validateWinnerHandoffCaptureAdmission(admissionBytes, owner, plan, bundle, provenance, settings, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	for _, pin := range admission.ResourceProofs {
+		if _, err := readCurrentQgQualificationPin(pin, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true); err != nil {
+			return nil, err
+		}
+	}
+	provenance.CaptureAdmissionSha256 = captureAdmission.Sha256
+	actual, calls, completion, err := store.ReviewHandoff(ctx, control, owner.Args.RoundId, owner.HandoffId)
+	if err != nil || !reflect.DeepEqual(actual, owner) || len(calls) != 0 || completion != nil {
+		return nil, errors.New("native capture requires its exact existing DB owner with no previous claim or terminal outcome")
 	}
 	profile := winnerMultipassContainmentProfile{ImageId: release.ImageId, ProviderSettings: release.ProviderSettings, StateRoot: "/var/lib/urnetwork/competition-review-multipass/attempts"}
 	for _, required := range []string{directory, os.TempDir(), profile.StateRoot, filepath.Dir(profile.StateRoot)} {

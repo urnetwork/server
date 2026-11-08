@@ -15,6 +15,7 @@ import (
 
 // Limits belong to this native capture owner, not the provider or legacy API.
 type winnerHandoffCaptureSettings struct {
+	FreezeLeaseDuration  time.Duration                   `json:"freeze_lease_duration"` // Positive one-time supervisor fence, ten seconds to five minutes; default five minutes, never a model clock.
 	Capacity             winnerMultipassCapacitySettings `json:"capacity"`
 	CleanupTimeout       time.Duration                   `json:"cleanup_timeout"`        // Positive failed-custody completion budget; default two minutes.
 	ReceiptTimeout       time.Duration                   `json:"receipt_timeout"`        // Positive per-call protected retention budget; default two minutes.
@@ -22,7 +23,7 @@ type winnerHandoffCaptureSettings struct {
 }
 
 func defaultWinnerHandoffCaptureSettings() winnerHandoffCaptureSettings {
-	return winnerHandoffCaptureSettings{Capacity: defaultWinnerMultipassCapacitySettings(), CleanupTimeout: 2 * time.Minute, ReceiptTimeout: 2 * time.Minute, MaximumDocumentBytes: 128 * 1024 * 1024}
+	return winnerHandoffCaptureSettings{FreezeLeaseDuration: 5 * time.Minute, Capacity: defaultWinnerMultipassCapacitySettings(), CleanupTimeout: 2 * time.Minute, ReceiptTimeout: 2 * time.Minute, MaximumDocumentBytes: 128 * 1024 * 1024}
 }
 
 // The contained adapter supplies a real allocated reservation and observes the
@@ -72,6 +73,7 @@ type winnerHandoffProvenance struct {
 	RunAuthorizationSha256    string `json:"run_authorization_sha256"`
 	ReleaseSha256             string `json:"release_sha256"`
 	QualificationReportSha256 string `json:"qualification_report_sha256"`
+	CaptureAdmissionSha256    string `json:"capture_admission_sha256"`
 }
 
 // The completion and public private-evidence digest bind this entire manifest.
@@ -195,6 +197,7 @@ func retainWinnerHandoffOriginal(ctx context.Context, name string, content []byt
 func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, evidence winnerMultipassEvidence, custody winnerHandoffCustodyManifest) error {
 	if owner == nil || plan == nil || custody.Schema != 1 || custody.Kind != "elected-winner-review-protected-custody/v1" || custody.HandoffId != owner.HandoffId.String() ||
 		custody.Provenance.RunAuthorizationSha256 != owner.Args.AuthorizationSha256 || !validSha256(custody.Provenance.ReleaseSha256) || !validSha256(custody.Provenance.QualificationReportSha256) ||
+		!validSha256(custody.Provenance.CaptureAdmissionSha256) ||
 		custody.PlanSha256 != owner.Plan.PlanSha256 || custody.BundleSha256 != plan.BundleSha256 || len(custody.Documents) != 4 || len(custody.Invocations) != len(plan.Calls)+winnerHandoffTokenizerCensus(plan) {
 		return errors.New("native review custody is incomplete or belongs to another owner")
 	}
