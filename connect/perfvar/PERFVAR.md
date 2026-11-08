@@ -720,9 +720,10 @@ go test ./connect/perfvar -run '^TestPerformanceVariations$' \
 ```
 
 The focused H3 lane-selection gate holds the seed, profile, mobile resource
-surrogate, 1,100-byte inner MTU, and exact 64 KiB upload constant. Production
-H3 permits one complete DATAGRAM fragment per message; the fragmented test
-raises the limit explicitly and is never a production-settings assertion:
+surrogate, product 1,280-byte inner MTU (`connect.DefaultMtu`), and exact
+64 KiB upload constant. Production H3 permits one complete DATAGRAM fragment
+per message; the fragmented test raises the limit explicitly and is never a
+production-settings assertion:
 
 ```sh
 go test ./connect/perfvar \
