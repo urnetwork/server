@@ -373,6 +373,15 @@ func RemoveNetworkWithStoreSnapshot(
 		// every revocation record of the network refuses it before the
 		// deletion commits
 		server.Raise(session.RetireNetworkRecords(ctx, networkId))
+		// the deleted network's name is held for no one, as a rename's is
+		// (§7.12): without the tombstone anyone could take it at once
+		var networkName string
+		server.Raise(tx.QueryRow(
+			ctx,
+			`SELECT network_name FROM network WHERE network_id = $1`,
+			networkId,
+		).Scan(&networkName))
+		releaseNetworkNameInTx(ctx, tx, networkName, server.NowUtc().Add(DefaultNetworkRenameSettings().ReclaimCooldown))
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

@@ -4,7 +4,9 @@ package model
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -220,6 +222,71 @@ func TestSessionAdminEventActorAndRequest(t *testing.T) {
 		// a local session made from no request has no request id
 		if event := NewSessionAdminEvent(userSession, AdminEventActionNetworkRename, AdminEventTargetNetwork, &networkId); event.RequestId != nil {
 			t.Fatalf("a local session's event names request %s", event.RequestId)
+		}
+	})
+}
+
+// A rename made from a client address records its admin event, and no column
+// of any event holds that address or its hash (I-13).
+func TestRenameAdminEventHoldsNoClientAddress(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		_, restore := Testing_InMemoryNetworkNameSearch(ctx)
+		defer restore()
+		networkId := server.NewId()
+		userId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "address-free-network", userId)
+		clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{
+			NetworkId: networkId,
+			UserId:    userId,
+		})
+		clientIp := "203.0.113.7"
+		clientSession.ClientAddress = clientIp + ":4567"
+		requestId := server.NewId()
+		clientSession.RequestId = &requestId
+
+		result := RenameNetwork(clientSession, &RenameNetworkArgs{NewName: "address-free-renamed"})
+		if result.Error != nil {
+			t.Fatalf("rename refused: %+v", result.Error)
+		}
+
+		events := GetNetworkAdminEvents(ctx, networkId, 0, 0)
+		if len(events) != 1 {
+			t.Fatalf("%d events, want 1", len(events))
+		}
+		event := events[0]
+		if event.Action != AdminEventActionNetworkRename || event.ActorKind != AdminEventActorUser || *event.ActorId != userId ||
+			event.TargetKind != AdminEventTargetNetwork || *event.TargetId != networkId || event.Result != AdminEventResultOk {
+			t.Fatalf("event %+v", event)
+		}
+		if err := VerifyNetworkAdminEventChain(ctx, networkId); err != nil {
+			t.Fatal(err)
+		}
+
+		ipHash, err := server.ClientIpHash(clientIp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := []string{}
+		server.Db(ctx, func(conn server.PgConn) {
+			result, err := conn.Query(ctx, `SELECT row_to_json(network_admin_event)::text FROM network_admin_event`)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var row string
+					server.Raise(result.Scan(&row))
+					rows = append(rows, row)
+				}
+			})
+		})
+		if len(rows) == 0 {
+			t.Fatal("no event rows to scan")
+		}
+		for _, row := range rows {
+			for _, needle := range []string{clientIp, hex.EncodeToString(ipHash[:])} {
+				if strings.Contains(row, needle) {
+					t.Fatalf("an event holds %q: %s", needle, row)
+				}
+			}
 		}
 	})
 }
