@@ -27,8 +27,17 @@ func newCompetitionAutomationFixtureWithMode(t testing.TB, staging bool) *compet
 
 // Runtime transport is frozen prospectively, before source and round creation.
 func newCompetitionAutomationFixtureWithCapability(t testing.TB, staging bool, capability string) *competitionRankingFixture {
+	return newCompetitionAutomationFixtureWithWinnerPolicy(t, staging, capability, "", time.Time{})
+}
+
+// A new synthetic round freezes its own policy and initial clock before any
+// source or round insertion; historical fixtures retain their original values.
+func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool, capability, winnerPolicy string, initialNow time.Time) *competitionRankingFixture {
 	t.Helper()
 	fixture := &competitionRankingFixture{settings: validSettings(), now: server.NowUtc().Truncate(time.Second)}
+	if !initialNow.IsZero() {
+		fixture.now = initialNow.UTC().Truncate(time.Second)
+	}
 	fixture.settings.CompetitionId = "synthetic-automation-" + server.NewId().String()
 	fixture.settings.ArtifactRoot = t.TempDir()
 	fixture.settings.EvaluationPolicy.Replicates = 9
@@ -38,6 +47,9 @@ func newCompetitionAutomationFixtureWithCapability(t testing.TB, staging bool, c
 	fixture.settings.AutomationPolicy = model.CompetitionAutomationPolicy{Enabled: true, Version: 2, Environment: "synthetic-stage", SeasonId: "synthetic-season", ElectionRule: model.CompetitionElectionRule,
 		ReviewCriteriaVersion: "synthetic-criteria-v1", SettlementPolicyVersion: "synthetic-settlement-v1", BurnPolicyVersion: "synthetic-burn-v1", RepeatRewardPolicy: "exclude_exact_identity", SettlementMode: "shadow", RequiredApiCapability: capability,
 		PolicyApprovalSha256: strings.Repeat("a", 64), SourceLockSha256: strings.Repeat("b", 64), SourceGeneration: 0, SourceActivationGeneration: 1}
+	if winnerPolicy != "" {
+		fixture.settings.AutomationPolicy.WinnerReviewPolicy, fixture.settings.AutomationPolicy.WinnerReviewTimeoutSeconds = winnerPolicy, 600
+	}
 	window, preparation := 7*24*time.Hour, 16*time.Hour
 	if staging {
 		window, preparation = 10*time.Minute, time.Minute
@@ -66,7 +78,8 @@ func newCompetitionAutomationFixtureWithCapability(t testing.TB, staging bool, c
 	manifest := []byte("synthetic immutable source manifest\n")
 	manifestDigest := sha256.Sum256(manifest)
 	intent := model.CompetitionSourceActivation{Environment: fixture.settings.AutomationPolicy.Environment, CompetitionId: fixture.settings.CompetitionId, SeasonId: fixture.settings.AutomationPolicy.SeasonId,
-		Staging: staging, StagingRoundWindowSeconds: fixture.settings.AutomationPolicy.StagingRoundWindowSeconds, StagingPreparationSeconds: fixture.settings.AutomationPolicy.StagingPreparationSeconds,
+		WinnerReviewPolicy: winnerPolicy,
+		Staging:            staging, StagingRoundWindowSeconds: fixture.settings.AutomationPolicy.StagingRoundWindowSeconds, StagingPreparationSeconds: fixture.settings.AutomationPolicy.StagingPreparationSeconds,
 		Generation: 1, ExpectedGeneration: 0, SourceGeneration: 0, TargetEpoch: 1, TargetRoundId: server.NewId(), Kind: "baseline", Reason: "prospectively_approved_baseline", SourceDecisionDigest: strings.Repeat("c", 64), SourceLockSha256: sourceLock, Commits: commits,
 		Manifest: manifest, ManifestSha256: hex.EncodeToString(manifestDigest[:]), ManifestCommit: strings.Repeat("c", 40), ConfigExpectedCommit: strings.Repeat("d", 40), PublicationJournalSha256: strings.Repeat("e", 64),
 		EvaluatorImageDigest: fixture.settings.EvaluatorImageDigest, HostQualificationSha256: fixture.settings.EvaluationPolicy.HostQualificationSha256, Threshold: fixture.settings.EvaluationPolicy.TakeoverMargin, ThresholdEvidenceSha256: strings.Repeat("f", 64), PreparedAt: fixture.now.Add(-preparation), OpensAt: fixture.now, GitRefs: map[string]model.CompetitionSourceGitRef{}}

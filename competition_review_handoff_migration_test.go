@@ -1,0 +1,34 @@
+package server
+
+import (
+	"strings"
+	"testing"
+)
+
+// Rendering must preserve all legacy guards and add only explicit handoff
+// branches. The full native controller fixture exercises the appended DDL.
+func TestCompetitionReviewHandoffMigrationKeepsLegacyAndIndependentAuthority(t *testing.T) {
+	sql := competitionReviewHandoffMigration()
+	for _, required := range []string{"CREATE TABLE competition_review_handoff (", "UNIQUE(round_id,decision_sha256)", "UNIQUE(handoff_id,call_id,kind)", "competition_review_handoff_observed", "competition_review_operator_actor", "timezone('UTC',transaction_timestamp())", "deadline cannot reset", "competition_v2_snow_review_findings_valid_for_policy", "competition_v2_winner_review_provider", "checkpoint IS DISTINCT FROM actual_checkpoint", "make_interval(secs=>(policy->>'winner_review_timeout_seconds')::integer)", "completion.completion_json->'proposal' IS DISTINCT FROM request", "interval '24 hours'"} {
+		if !strings.Contains(sql, required) {
+			t.Fatal("handoff migration omitted authority boundary", required)
+		}
+	}
+	for _, forbidden := range []string{"UPDATE competition_", "DELETE FROM competition_", "DROP TABLE", "ALTER TABLE", "CREATE OR REPLACE FUNCTION competition_v2_source_authorized", "CREATE OR REPLACE FUNCTION competition_v2_snow_review_findings_valid"} {
+		if strings.Contains(sql, forbidden) {
+			t.Fatal("handoff migration broadened scope", forbidden)
+		}
+	}
+	if strings.Contains(competitionWinnerReviewGuards, "handoff_id") || strings.Contains(competitionSnowTwoMemberWinnerReviewMigration(), "handoff_id") {
+		t.Fatal("published legacy migration bytes changed")
+	}
+	count := 0
+	for _, migration := range migrations {
+		if item, ok := migration.(*SqlMigration); ok && item.sql == sql {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatal("additive migration not registered exactly once", count)
+	}
+}
