@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "kind": "competition-bounded-multipass-review-operator-approval/v1",
+  "recorded_at": "2026-11-08T00:10:44Z",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "operator_choice": "Implement and qualify bounded multi-pass Qwen/Gemma review with complete source coverage (recommended; preserves the model pair, but takes more work).",
+  "context_evidence_record": "REVIEW-CONTEXT-FEASIBILITY-2026-11-08.json",
+  "approved_scope": "Implement, test and qualify a new complete-coverage bounded multi-pass review protocol using the same Qwen/Gemma pair and original criteria, retaining every original judgment and authenticated evidence. Present genuine final findings for explicit operator winner approval.",
+  "unchanged": ["frozen epoch-one product source", "accepted evaluation results", "shared baseline", "numerical gates", "statistical significance", "submission order", "three-hour submission evaluation limit", "Qwen/Gemma membership, checkpoints and efforts", "traffic preservation and production benefit requirements"],
+  "implementation_ceiling_proposal": {
+    "artifact_aggregate_bytes": 33554432,
+    "artifact_file_bytes": 2097152,
+    "maximum_leaf_units_per_model": 128,
+    "merge_fan_in": 4,
+    "maximum_total_model_calls": 384,
+    "output_token_reserve_per_call": 32768,
+    "maximum_request_bytes_per_call": 4194304,
+    "maximum_response_bytes_per_call": 16777216,
+    "maximum_prospective_review_owner_seconds": 86400,
+    "actual_plan_must_be_separately_pinned_before_first_draw": true,
+    "ceilings_are_not_live_execution_authorization": true
+  },
+  "requirements": [
+    "Complete authenticated before/after changed-source, patch-hunk, frozen instrument and necessary transitive coverage; no silent truncation or context substitution from moving main.",
+    "Actual rendered prompt tokenizer admission, immutable per-model coverage/scan/synthesis plan and one original fixed owner deadline; no renewed old checkpoint or per-call clock laundering.",
+    "Every original result, issue and unresolved uncertainty retained; no majority vote, favorable resampling, relabeled historical qualification or fabricated Qwen/Gemma provenance.",
+    "Qualify actual revised programs, containment and all existing fixed control cases before winner inference.",
+    "Pending completed findings grant no source/payout authority; explicit operator approval imports only exact authenticated timely completion under current decision.",
+    "Additive compatible database/API changes are tested and pushed before any normal main deployment; no main migration is performed by this record."
+  ],
+  "review_inference_started": false,
+  "winner_approved": false,
+  "reward_release_authorized": false,
+  "source_promotion_authorized": false,
+  "calibration_accepted": false
+}
