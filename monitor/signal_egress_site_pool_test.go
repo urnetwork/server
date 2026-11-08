@@ -62,6 +62,11 @@ type egressSitePoolFixture struct {
 	guardTrips   map[string]float64
 	// mimirDown makes the services host refuse the query
 	mimirDown bool
+	// the country site pair tally: whether its table exists, and its empty
+	// flag and oldest day's age; tallyAgeReads counts the age reads
+	tallyTable    string
+	tallyAge      []string
+	tallyAgeReads int
 }
 
 // A destination row: name, class, active, probation, retired age, retire
@@ -94,6 +99,9 @@ func healthyEgressSitePoolFixture() *egressSitePoolFixture {
 		borrowed:   map[string]float64{"quality": 5, "speed": 1},
 		answered:   map[string]float64{"quality": 100, "speed": 80},
 		guardTrips: map[string]float64{"full": 0, "blackhole": 0},
+		// a tally whose oldest day began eight and a half days ago
+		tallyTable: "true",
+		tallyAge:   []string{"false", strconv.Itoa(8*86400 + 12*3600)},
 	}
 }
 
@@ -155,6 +163,11 @@ func (self *egressSitePoolFixture) source(t *testing.T) *syntheticSource {
 				return rows(self.countries), nil
 			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-task"):
 				return []Row{Row(self.task)}, nil
+			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-country-site-tally-table"):
+				return []Row{{self.tallyTable}}, nil
+			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-country-site-tally-age"):
+				self.tallyAgeReads += 1
+				return []Row{Row(self.tallyAge)}, nil
 			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-retries"):
 				return []Row{Row(self.retries)}, nil
 			case strings.Contains(query, "monitor-signal-2.19b-egress-site-pool-fleet"):
@@ -260,6 +273,56 @@ func TestEgressSitePoolSignalSyntheticRefreshNotRunning(t *testing.T) {
 		}
 		if !slices.Equal(keys, want) {
 			t.Errorf("task %v: alerts = %v, want %v", test.task, keys, want)
+		}
+	}
+}
+
+// The country site pair tally is kept to its retention by every refresh; its
+// oldest day normally reaches nine to ten days just before a refresh (the
+// retention, the day boundary, one interval), so only an oldest day past that
+// by the slack is stale. An empty tally is healthy, and before migration 947
+// creates the tally the condition is not observed at all: no age is read and
+// no finding, healthy or not, is emitted.
+func TestEgressSitePoolSignalSyntheticCountrySiteTallyStale(t *testing.T) {
+	poolContext := testEgressSitePoolContext()
+	staleSeconds := int64(egressSitePoolCountrySiteTallyStaleAge(DefaultEgressSitePoolSettings(), poolContext.siteSettings) / time.Second)
+	if want := int64((8+1+1)*86400 + 2*3600); staleSeconds != want {
+		t.Fatalf("stale age %ds at the defaults, want %ds (retention, day boundary, refresh interval, slack)", staleSeconds, want)
+	}
+	for _, test := range []struct {
+		name  string
+		table string
+		age   []string
+		reads int
+		want  []string
+	}{
+		{"within the retention", "true", []string{"false", strconv.Itoa(8 * 86400)}, 1, []string{}},
+		{"at the stale age", "true", []string{"false", strconv.FormatInt(staleSeconds, 10)}, 1, []string{}},
+		{"past the stale age", "true", []string{"false", strconv.FormatInt(staleSeconds+1, 10)}, 1, []string{"egress-country-site-tally-stale/oldest-day"}},
+		{"empty", "true", []string{"true", "0"}, 1, []string{}},
+		{"a future day under clock skew", "true", []string{"false", "-300"}, 1, []string{}},
+		{"before migration 947", "false", nil, 0, []string{}},
+	} {
+		fixture := healthyEgressSitePoolFixture()
+		fixture.tallyTable, fixture.tallyAge = test.table, test.age
+		alerts, keys := runEgressSitePoolFixture(t, fixture, poolContext)
+		if !slices.Equal(keys, test.want) {
+			t.Errorf("%s: alerts = %v, want %v", test.name, keys, test.want)
+		}
+		if fixture.tallyAgeReads != test.reads {
+			t.Errorf("%s: the tally age was read %d times, want %d", test.name, fixture.tallyAgeReads, test.reads)
+		}
+		if 0 < len(test.want) && !strings.Contains(alerts[0].Observed, fmt.Sprintf("oldest_day_age_seconds=%d threshold=%ds", staleSeconds+1, staleSeconds)) {
+			t.Errorf("%s: observed = %q", test.name, alerts[0].Observed)
+		}
+	}
+
+	// before migration 947 nothing is emitted for the class, so an open
+	// finding cannot be resolved by a tally that is not there
+	observation := egressSitePoolObservation{classLoads: map[string]egressSitePoolClassLoads{}}
+	for _, f := range evaluateEgressSitePool(DefaultEgressSitePoolSettings(), poolContext, "pg/test", observation) {
+		if f.class == "egress-country-site-tally-stale" {
+			t.Fatalf("a missing tally emitted %+v", f)
 		}
 	}
 }
@@ -668,6 +731,14 @@ func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 			placeTally("de", 30, 0)
 			placeTally("ir", 30, 0)
 			placeTally("kp", 40, 40)
+			// a country site tally the refresh stopped deleting: its oldest
+			// day eleven days back, beside today's
+			for _, tallyDay := range []time.Time{day.AddDate(0, 0, -11), day} {
+				server.RaisePgResult(tx.Exec(ctx, `
+					INSERT INTO provider_egress_country_site_tally (tally_day, name, country_code, client_id, network_id, update_time)
+					VALUES ($1, 'de-site', 'de', $2, $3, $4)`,
+					tallyDay, server.NewId(), server.NewId(), now))
+			}
 		})
 
 		poolContext := &egressSitePoolContext{
@@ -687,6 +758,7 @@ func TestEgressSitePoolSignalOnASeededDatabase(t *testing.T) {
 		want := []string{
 			"egress-site-pool-needs-refresh/retiring-site",
 			"egress-site-refresh-not-running/task-missing",
+			"egress-country-site-tally-stale/oldest-day",
 			"egress-site-regional-failure-unmarked/regional-site@de",
 			"egress-site-place-pool-thin/dns@ir",
 			"egress-country-unreachable/kp",
