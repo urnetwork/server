@@ -27,8 +27,10 @@
 //
 // All it knows of warp is warp's layout, which the constants below name: the labels warpctl run
 // stamps on a container and the vault mount it gives an lb (warpctl/run.go), the config lb/main.go
-// starts nginx from for a block, and the lines `warpctl lb create-config` writes for a pair, which
-// warpctl's TestNginxConfigWritesTlsLinesTheSwapReads holds to lbTlsPathRegex's shape.
+// starts nginx from for a block, and the lines `warpctl lb create-config` writes there. warpctl's
+// TestNginxConfigWritesTlsLinesTheSwapReads holds its pair lines to lbTlsPathRegex's shape, and
+// TestNginxConfigWritesWorkerCountsTheSwapReads its worker count to what lbWorkerProcessesRegex
+// and lbWorkerProcessesLineRegex read.
 //
 // tls/current must stay out of what the vault copy ships to a host, which follows links in the
 // destination: it would overwrite the version a host's link points at, and a version's key is also
@@ -86,12 +88,19 @@ const (
 	nginxShutdownWorkerTitle = "nginx: worker process is shutting down"
 )
 
+// How many workers nginx runs for a config that sets no count, its built-in default.
+const nginxDefaultWorkerCount = 1
+
 // A tls path in an lb config. A line that is commented out does not match.
 var lbTlsPathRegex = regexp.MustCompile(`(?m)^\s*ssl_certificate(?:_key)?\s+([^\s;]+)\s*;`)
 
-// How many workers an lb config runs, which warpctl writes as a number for each block. auto, or
-// anything else, does not match.
+// How many workers an lb config runs, as warpctl writes it for a block sized for its load: a
+// number, opening its line. auto, or anything else, does not match.
 var lbWorkerProcessesRegex = regexp.MustCompile(`(?m)^\s*worker_processes\s+([0-9]+)\s*;`)
+
+// A line that sets the worker count in any shape, the directive anywhere before a comment. warpctl
+// writes none for a block without capacity sizing, whose nginx then runs its default.
+var lbWorkerProcessesLineRegex = regexp.MustCompile(`(?m)^[^#\n]*\bworker_processes\b`)
 
 // A version as `warpctl certs issue` names every one it writes, yyyy.m.d: three numbers and nothing
 // else. warp and server take any semver as a version, so refusing the rest fails closed, and it
@@ -168,7 +177,8 @@ type lbContainer struct {
 	block       string
 	// the names of this version the lb reads through tls/current
 	reachedNames []string
-	// the workers its config runs, which an lb with no reload under way runs exactly
+	// the workers it runs exactly when no reload is under way: the count its config sets, or
+	// nginx's default where it sets none
 	workerCount int
 }
 
@@ -361,12 +371,25 @@ func swapTlsCurrent(vaultHome string, env string, version string, settings *cert
 		if err != nil {
 			return fmt.Errorf("read the tls paths of %s: %w", lb.block, err)
 		}
-		workerCountMatches := lbWorkerProcessesRegex.FindAllSubmatch(output, -1)
-		if len(workerCountMatches) == 1 {
-			lb.workerCount, _ = strconv.Atoi(string(workerCountMatches[0][1]))
+		// warpctl writes the count once for a block sized for its load and not at all for one
+		// without capacity sizing, and nginx runs one worker for a config that sets none. A count
+		// set some other way, as auto or twice, cannot be read. One set where this grep does not
+		// look, as in an include, which the lb image leaves empty, would differ from what nginx
+		// runs, and the wait before the signal refuses a count the lb does not settle at.
+		switch len(lbWorkerProcessesLineRegex.FindAll(output, -1)) {
+		case 0:
+			lb.workerCount = nginxDefaultWorkerCount
+		case 1:
+			// a count past an int is refused here, where Atoi would give the largest int with its
+			// error, and the wait before the signal would look for that many workers
+			if match := lbWorkerProcessesRegex.FindSubmatch(output); match != nil {
+				if workerCount, err := strconv.Atoi(string(match[1])); err == nil {
+					lb.workerCount = workerCount
+				}
+			}
 		}
 		if lb.workerCount <= 0 {
-			return fmt.Errorf("%s does not run a fixed number of nginx workers, so its reload cannot be told from an earlier one's", lb.block)
+			return fmt.Errorf("%s sets its count of nginx workers in a way this cannot read, so its reload cannot be told from an earlier one's", lb.block)
 		}
 		currentNames := map[string]bool{}
 		otherNamePaths := map[string]string{}

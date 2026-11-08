@@ -64,6 +64,8 @@ type fakeLbDocker struct {
 	// what successive `docker top` calls print for a container, each taken once, ahead of
 	// everything else
 	containerIdTopSequences map[string][]string
+	// answers `docker top` for a container ahead even of those, as from a real process table
+	containerIdTopFuncs map[string]func() ([]byte, error)
 	// fails `docker top` of a container
 	containerIdTopErrs map[string]error
 	// what `readlink` prints in a container, in place of the links in vaultHome
@@ -104,6 +106,9 @@ func (self *fakeLbDocker) answer(ctx context.Context, args []string) ([]byte, er
 		containerId := args[1]
 		if err := self.containerIdTopErrs[containerId]; err != nil {
 			return nil, err
+		}
+		if topFunc := self.containerIdTopFuncs[containerId]; topFunc != nil {
+			return topFunc()
 		}
 		if sequence := self.containerIdTopSequences[containerId]; 0 < len(sequence) {
 			self.containerIdTopSequences[containerId] = sequence[1:]
@@ -1347,22 +1352,67 @@ func TestCertsSwapSignalsOnlyALbRunningItsOwnCountOfWorkers(t *testing.T) {
 	requireTlsLink(t, vaultHome, "star.example.com", filepath.Join("..", "2.0.0", "star.example.com"))
 }
 
-// The worker count is what tells the lb's own reload from an earlier one's, so an lb config whose
-// count cannot be read, as auto, none, zero or two counts, is refused with nothing moved.
-func TestCertsSwapRefusesAnLbWithoutAWorkerCount(t *testing.T) {
+// The worker count is what tells the lb's own reload from an earlier one's, so an lb config that
+// sets its count in a way this cannot read, as auto, zero, twice, beside another directive or past
+// what an int holds, is refused with nothing moved.
+func TestCertsSwapRefusesAnLbWhoseWorkerCountItCannotRead(t *testing.T) {
 	workerProcessesLines := []string{
-		"", "worker_processes auto;", "worker_processes 0;", "# worker_processes 4;", "worker_processes 1;\nworker_processes 2;",
+		"worker_processes auto;",
+		"worker_processes 0;",
+		"worker_processes 1;\nworker_processes 2;",
+		"events { worker_connections 64; } worker_processes 2;",
+		"worker_processes 99999999999999999999;",
 	}
 	for _, workerProcessesLine := range workerProcessesLines {
 		vaultHome := setupCertsSwapVault(t)
 		fake := newFakeLbDocker(t, vaultHome)
 		fake.containerIdWorkerProcessesLines = map[string]string{"aaaa11": workerProcessesLine}
+		// a count read wrongly would fail at the wait before the signal, and without waiting
+		settings := fake.settings()
+		settings.reloadCheckInterval = 0
 
-		err := swapTlsCurrent(vaultHome, "main", "2.0.0", fake.settings(), io.Discard)
-		if err == nil || !strings.Contains(err.Error(), "edge-0.example.com-eth0") {
-			t.Errorf("worker line %q: swap error = %v, want one naming the lb", workerProcessesLine, err)
+		err := swapTlsCurrent(vaultHome, "main", "2.0.0", settings, io.Discard)
+		if err == nil || !strings.Contains(err.Error(), "edge-0.example.com-eth0 sets its count of nginx workers") {
+			t.Errorf("worker line %q: swap error = %v, want one naming the lb and its count", workerProcessesLine, err)
 		}
 		requireNothingSwapped(t, vaultHome, fake)
+	}
+}
+
+// warpctl writes no worker count for a block without capacity sizing, and nginx then runs its
+// default of one worker, so such an lb swaps as one that says 1 does: the signal waits for exactly
+// one serving worker. A count in a comment sets nothing either. Here the lb is mid-reload at the
+// census and the first look, so the signal comes at the third look at its workers.
+func TestCertsSwapTakesNginxsOneWorkerForAnLbThatSetsNoCount(t *testing.T) {
+	for _, workerProcessesLine := range []string{"", "# worker_processes 4;"} {
+		vaultHome := setupCertsSwapVault(t)
+		fake := newFakeLbDocker(t, vaultHome)
+		fake.containerIdWorkerProcessesLines = map[string]string{"aaaa11": workerProcessesLine}
+		midReload := lbTopOutput([]string{"200", "300"}, nil)
+		fake.containerIdTopSequences = map[string][]string{"aaaa11": {
+			midReload, midReload, lbTopOutput([]string{"300"}, []string{"200"}),
+		}}
+		topCountAtSignal := 0
+		fake.onReload = func(containerId string) error {
+			topCountAtSignal = 3 - len(fake.containerIdTopSequences[containerId])
+			fake.containerIdTopSequences[containerId] = []string{lbTopOutput([]string{"400"}, []string{"300"})}
+			return nil
+		}
+		output := &bytes.Buffer{}
+		settings := fake.settings()
+		settings.reloadCheckInterval = 0
+
+		if err := swapTlsCurrent(vaultHome, "main", "2.0.0", settings, output); err != nil {
+			t.Errorf("worker line %q: %v", workerProcessesLine, err)
+			continue
+		}
+		if topCountAtSignal != 3 {
+			t.Errorf("worker line %q: signalled after %d looks at the workers, want 3: the census and two before the signal", workerProcessesLine, topCountAtSignal)
+		}
+		if !strings.Contains(output.String(), "Reloaded edge-0.example.com-eth0\n") {
+			t.Errorf("worker line %q: output %q does not say it reloaded", workerProcessesLine, output.String())
+		}
+		requireTlsLink(t, vaultHome, "star.example.com", filepath.Join("..", "2.0.0", "star.example.com"))
 	}
 }
 
@@ -1961,11 +2011,13 @@ func TestCertsSwapRunsTheDockerCliAndKeepsItsReason(t *testing.T) {
 // differs from the `_host.conf` that a host-networked lb starts from.
 type tlsTestNginx struct {
 	binary          string
+	vaultHome       string
 	prefixDir       string
 	address         string
 	hostConfigPath  string
 	blockConfigPath string
 	output          *bytes.Buffer
+	masterPid       int
 }
 
 // The installed nginx, which needs its ssl module for these tests, or a skip when there is none.
@@ -2029,6 +2081,7 @@ http {
 
 	self := &tlsTestNginx{
 		binary:          nginxBinary,
+		vaultHome:       vaultHome,
 		prefixDir:       prefixDir,
 		address:         address,
 		hostConfigPath:  hostConfigPath,
@@ -2043,12 +2096,48 @@ http {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	self.masterPid = cmd.Process.Pid
 	t.Cleanup(func() {
 		// the master takes its workers down, where a kill would orphan them
 		cmd.Process.Signal(syscall.SIGTERM)
 		cmd.Wait()
 	})
 	return self
+}
+
+// What `docker top` prints for this nginx were it an lb: its master and the master's children,
+// each by pid and title, read from the process table as docker top reads a container's.
+func (self *tlsTestNginx) top() ([]byte, error) {
+	output, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,args=").Output()
+	if err != nil {
+		return nil, err
+	}
+	masterPid := strconv.Itoa(self.masterPid)
+	top := "PID                 COMMAND\n"
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if 3 <= len(fields) && (fields[0] == masterPid || fields[1] == masterPid) {
+			top += fmt.Sprintf("%-20s%s\n", fields[0], strings.Join(fields[2:], " "))
+		}
+	}
+	return []byte(top), nil
+}
+
+// The lines the swap's grep finds in the config a reload names, with the vault at the path an lb
+// mounts it at.
+func (self *tlsTestNginx) swapGrepLines(t *testing.T) []string {
+	t.Helper()
+	config, err := os.ReadFile(self.blockConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []string{}
+	for _, line := range strings.Split(string(config), "\n") {
+		if strings.Contains(line, "ssl_certificate") || strings.Contains(line, "worker_processes") {
+			lines = append(lines, strings.ReplaceAll(line, self.vaultHome, lbVaultMountPath))
+		}
+	}
+	return lines
 }
 
 // The reload a swap asks for, run here rather than in a container.
@@ -2177,6 +2266,54 @@ func TestCertsSwapSurfacesARefusedNginxReload(t *testing.T) {
 	if err := nginx.checkStart(); err != nil {
 		t.Fatalf("an lb could not start from the links a refused swap left: %v", err)
 	}
+}
+
+// What a real nginx does with a config that sets no worker count, as warpctl writes for a block
+// without capacity sizing: it runs exactly its default of one worker. The swap reads the config the
+// reload names, takes that count, waits for it, signals, and sees the reload through nginx's own
+// titles, read from the process table as docker top reads them, and nginx then serves the new
+// pair.
+func TestCertsSwapReloadsARealNginxThatSetsNoWorkerCount(t *testing.T) {
+	if _, err := exec.LookPath("ps"); err != nil {
+		t.Skip("no ps on PATH to read nginx's workers with")
+	}
+	vaultHome := setupCertsSwapVault(t)
+	fake := newFakeLbDocker(t, vaultHome)
+	if err := swapTlsCurrent(vaultHome, "main", "1.0.0", fake.settings(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+
+	nginx := startTlsTestNginx(t, vaultHome)
+	nginx.waitForLeaf(t, tlsVersionLeaf(t, vaultHome, "1.0.0", "star.example.com"))
+	grepLines := nginx.swapGrepLines(t)
+	if lbWorkerProcessesLineRegex.MatchString(strings.Join(grepLines, "\n")) {
+		t.Fatalf("the test nginx's config sets a worker count: %q", grepLines)
+	}
+	fake.containerIdTlsLines = map[string][]string{"aaaa11": grepLines}
+	fake.containerIdWorkerProcessesLines = map[string]string{"aaaa11": ""}
+	fake.containerIdTopFuncs = map[string]func() ([]byte, error){"aaaa11": nginx.top}
+	fake.onReload = nginx.reload
+	settings := fake.settings()
+	settings.reloadCheckCount = 3000
+	settings.reloadCheckInterval = 10 * time.Millisecond
+
+	workerPids, _, err := readLbWorkers(settings, "aaaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workerPids) != nginxDefaultWorkerCount {
+		top, _ := nginx.top()
+		t.Fatalf("nginx runs %d workers for a config that sets no count, want %d:\n%s", len(workerPids), nginxDefaultWorkerCount, top)
+	}
+
+	output := &bytes.Buffer{}
+	if err := swapTlsCurrent(vaultHome, "main", "2.0.0", settings, output); err != nil {
+		t.Fatalf("%v\n%s", err, nginx.output.String())
+	}
+	if !strings.Contains(output.String(), "Reloaded edge-0.example.com-eth0\n") {
+		t.Errorf("output %q does not say it reloaded", output.String())
+	}
+	nginx.waitForLeaf(t, tlsVersionLeaf(t, vaultHome, "2.0.0", "star.example.com"))
 }
 
 // Answers for the docker a sidecarctl process runs: one lb, with the tls lines and worker in the
