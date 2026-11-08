@@ -51,6 +51,7 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 	groupName := flags.String("group", "", "the group whose Gn-out this checks, MG<n>")
 	vaultHome := flags.String("vault", "", "a vault home whose pg.yml names a disposable database")
 	configHome := flags.String("config", "", "a config home for WARP_ENV=local")
+	extraConfigHome := flags.String("config-extra", "", "a fuller config home whose all/ and missing local/ files fill -config's")
 	workDirectory := flags.String("work", "", "a scratch directory; default a new temporary one")
 	if err := flags.Parse(args); err != nil || *base == "" || *groupName == "" || *vaultHome == "" || *configHome == "" {
 		fmt.Fprintf(errOut, "usage: fs55 -base <ref> -group MG<n> -vault <home> -config <home> [-server <dir>] [-work <dir>]\n")
@@ -66,6 +67,7 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 		groupName:       *groupName,
 		vaultHome:       *vaultHome,
 		configHome:      *configHome,
+		extraConfigHome: *extraConfigHome,
 		workDirectory:   *workDirectory,
 		settings:        defaultFs55Settings(),
 	})
@@ -198,6 +200,7 @@ type fs55ServerOptions struct {
 	groupName       string
 	vaultHome       string
 	configHome      string
+	extraConfigHome string
 	workDirectory   string
 	settings        *fs55Settings
 	// what plans the query shapes on the scratch database; nil plans none
@@ -268,6 +271,16 @@ func runFs55OnServerBinaries(ctx context.Context, options *fs55ServerOptions) (*
 	if err != nil {
 		return nil, err
 	}
+	// the homes go into links and child processes, so each is absolute
+	homes := []*string{&options.vaultHome, &options.configHome, &options.extraConfigHome}
+	for _, home := range homes {
+		if *home == "" {
+			continue
+		}
+		if *home, err = filepath.Abs(*home); err != nil {
+			return nil, err
+		}
+	}
 	pendingGroups, err := fs55PendingGroups(serverDirectory, options.base)
 	if err != nil {
 		return nil, err
@@ -291,8 +304,8 @@ func runFs55OnServerBinaries(ctx context.Context, options *fs55ServerOptions) (*
 	gateYaml, groupRoutes := fs55GroupPlan(options.groupName)
 	plan := &fs55Plan{
 		groupName:   options.groupName,
-		n:           &fs55BuiltRelease{name: "N", binaryDirectory: nBinaries, vaultHome: options.vaultHome, configHome: options.configHome, workDirectory: workDirectory, settings: options.settings},
-		n1:          &fs55BuiltRelease{name: "N+1", binaryDirectory: n1Binaries, vaultHome: options.vaultHome, configHome: options.configHome, workDirectory: workDirectory, settings: options.settings},
+		n:           &fs55BuiltRelease{name: "N", binaryDirectory: nBinaries, vaultHome: options.vaultHome, configHome: options.configHome, extraConfigHome: options.extraConfigHome, workDirectory: workDirectory, settings: options.settings},
+		n1:          &fs55BuiltRelease{name: "N+1", binaryDirectory: n1Binaries, vaultHome: options.vaultHome, configHome: options.configHome, extraConfigHome: options.extraConfigHome, workDirectory: workDirectory, settings: options.settings},
 		routes:      apiSmokeRoutes(),
 		groupRoutes: groupRoutes,
 		gateYaml:    gateYaml,

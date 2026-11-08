@@ -28,11 +28,14 @@ On server binaries, through the private stack:
 ```
 
 `server.TestEnv` gives the run its own database and Redis db, and the binaries run
-as `WARP_ENV=local` processes that test-env.sh's attestation pins. Run directly,
-the command takes vault and config homes that already name a disposable database:
+as `WARP_ENV=local` processes that test-env.sh's attestation pins. The test stack's
+portable config holds only what tests read, so each start's config home links it
+with the monoroot config checkout's `all/` and any `local/` file it lacks
+(`-config-extra`); nothing is copied. Run directly, the command takes vault and
+config homes that already name a disposable database:
 
 ```
-go run ./local/fs55 -base <ref> -group MG1 -vault <home> -config <home>
+go run ./local/fs55 -base <ref> -group MG1 -vault <home> -config <home> [-config-extra <home>]
 ```
 
 Before any build or dial, both refuse an attestation, an authority or a vault that

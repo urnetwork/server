@@ -452,6 +452,7 @@ func TestFs55OnServerBinaries(t *testing.T) {
 			groupName:       *fs55RealGroup,
 			vaultHome:       vaultHome,
 			configHome:      configHome,
+			extraConfigHome: "../../../config",
 			settings:        defaultFs55Settings(),
 			explain:         fixtureExplain,
 		})

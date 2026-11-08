@@ -120,6 +120,8 @@ type fs55BuiltRelease struct {
 	binaryDirectory string
 	vaultHome       string
 	configHome      string
+	// a fuller config home whose all/ and missing local/ files fill the base's
+	extraConfigHome string
 	workDirectory   string
 	queryShapes     []string
 	settings        *fs55Settings
@@ -158,45 +160,72 @@ func (self *fs55BuiltRelease) processEnv(service string, configHome string) []st
 }
 
 func (self *fs55BuiltRelease) Migrate(ctx context.Context) error {
-	return runFs55Command(ctx, self.workDirectory, self.processEnv("bringyourctl", self.configHome),
+	configHome, err := self.configHomeWith("")
+	if err != nil {
+		return err
+	}
+	return runFs55Command(ctx, self.workDirectory, self.processEnv("bringyourctl", configHome),
 		filepath.Join(self.binaryDirectory, "bringyourctl"), "db", "migrate")
 }
 
-// A config home that is the base one with sidecar.yml added under local/.
+// A config home for one start: the base home's entries, with the extra home's
+// all/ and any local/ file the base lacks, as the test stack's portable config
+// holds only what tests read and api reads more (arindb, among others); then
+// sidecar.yml under local/ when given. Every entry is a link, so nothing is
+// copied, and sidecar.yml is never linked from either home.
 func (self *fs55BuiltRelease) configHomeWith(sidecarYaml string) (string, error) {
-	if sidecarYaml == "" {
-		return self.configHome, nil
-	}
 	self.stateLock.Lock()
 	self.startIndex += 1
 	home := filepath.Join(self.workDirectory, fmt.Sprintf("%s-config-%d", self.name, self.startIndex))
 	self.stateLock.Unlock()
-	entries, err := os.ReadDir(self.configHome)
-	if err != nil {
-		return "", err
-	}
 	if err := os.MkdirAll(filepath.Join(home, "local"), 0o700); err != nil {
 		return "", err
 	}
-	for _, entry := range entries {
-		if entry.Name() == "local" {
-			continue
+	linked := map[string]bool{}
+	link := func(source string, name string) error {
+		if linked[name] || filepath.Base(name) == "sidecar.yml" {
+			return nil
 		}
-		if err := os.Symlink(filepath.Join(self.configHome, entry.Name()), filepath.Join(home, entry.Name())); err != nil {
-			return "", err
+		linked[name] = true
+		return os.Symlink(source, filepath.Join(home, name))
+	}
+	homes := []string{self.configHome}
+	if self.extraConfigHome != "" {
+		homes = append(homes, self.extraConfigHome)
+	}
+	// the extra home's all/ first: the base's, where it has one, holds less
+	if self.extraConfigHome != "" {
+		if _, err := os.Stat(filepath.Join(self.extraConfigHome, "all")); err == nil {
+			if err := link(filepath.Join(self.extraConfigHome, "all"), "all"); err != nil {
+				return "", err
+			}
 		}
 	}
-	localEntries, err := os.ReadDir(filepath.Join(self.configHome, "local"))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	for _, entry := range localEntries {
-		if entry.Name() == "sidecar.yml" {
-			continue
-		}
-		if err := os.Symlink(filepath.Join(self.configHome, "local", entry.Name()), filepath.Join(home, "local", entry.Name())); err != nil {
+	for _, configHome := range homes {
+		entries, err := os.ReadDir(configHome)
+		if err != nil {
 			return "", err
 		}
+		for _, entry := range entries {
+			if entry.Name() == "local" || strings.HasPrefix(entry.Name(), ".") || configHome != self.configHome {
+				continue
+			}
+			if err := link(filepath.Join(configHome, entry.Name()), entry.Name()); err != nil {
+				return "", err
+			}
+		}
+		localEntries, err := os.ReadDir(filepath.Join(configHome, "local"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		for _, entry := range localEntries {
+			if err := link(filepath.Join(configHome, "local", entry.Name()), filepath.Join("local", entry.Name())); err != nil {
+				return "", err
+			}
+		}
+	}
+	if sidecarYaml == "" {
+		return home, nil
 	}
 	return home, os.WriteFile(filepath.Join(home, "local", "sidecar.yml"), []byte(sidecarYaml), 0o600)
 }
