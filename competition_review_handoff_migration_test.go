@@ -12,7 +12,7 @@ func TestCompetitionReviewHandoffMigrationKeepsLegacyAndIndependentAuthority(t *
 	if !strings.Contains(sql, "NOT BETWEEN 2 AND 384") || strings.Contains(sql, "NOT BETWEEN 2 AND 4096") {
 		t.Fatal("database does not enforce approved 384-call ceiling")
 	}
-	for _, required := range []string{"CREATE TABLE competition_review_handoff (", "UNIQUE(round_id,decision_sha256)", "UNIQUE(handoff_id,call_id,kind)", "competition_review_handoff_observed", "competition_review_operator_actor", "timezone('UTC',transaction_timestamp())", "deadline cannot reset", "competition_v2_snow_review_findings_valid_for_policy", "competition_v2_winner_review_provider", "checkpoint IS DISTINCT FROM actual_checkpoint", "make_interval(secs=>(policy->>'winner_review_timeout_seconds')::integer)", "completion.completion_json->'proposal' IS DISTINCT FROM request", "interval '24 hours'"} {
+	for _, required := range []string{"CREATE TABLE competition_review_handoff (", "UNIQUE(round_id,decision_sha256)", "UNIQUE(handoff_id,call_id,kind)", "competition_review_handoff_observed", "competition_review_operator_actor", "timezone('UTC',clock_timestamp())", "competition_review_handoff_clock()>=owner.deadline", "claims<>receipts", "'call_ids'->>claims IS DISTINCT FROM NEW.call_id", "deadline cannot reset", "competition_v2_snow_review_findings_valid_for_policy", "competition_v2_winner_review_provider", "checkpoint IS DISTINCT FROM actual_checkpoint", "make_interval(secs=>(policy->>'winner_review_timeout_seconds')::integer)", "completion.completion_json->'proposal' IS DISTINCT FROM request", "interval '24 hours'"} {
 		if !strings.Contains(sql, required) {
 			t.Fatal("handoff migration omitted authority boundary", required)
 		}

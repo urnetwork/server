@@ -44,6 +44,9 @@ func competitionReviewHandoffMigration() string {
 
 const competitionReviewHandoffLedgerSql = `
 SET LOCAL lock_timeout = '5s';
+CREATE FUNCTION competition_review_handoff_clock() RETURNS timestamp LANGUAGE sql VOLATILE AS $handoff_clock$
+ SELECT timezone('UTC',clock_timestamp());
+$handoff_clock$;
 CREATE TABLE competition_review_handoff (
  handoff_id uuid PRIMARY KEY,
  round_id uuid NOT NULL REFERENCES competition_round(round_id),
@@ -87,7 +90,8 @@ BEGIN
   OR COALESCE(NEW.owner_json->>'actor_id','')='' OR NEW.owner_json->>'handoff_id' IS DISTINCT FROM NEW.handoff_id::text
   OR args->>'protocol' IS DISTINCT FROM 'elected-winner-qg-multipass/1'
   OR (args->>'timeout_seconds')::integer NOT BETWEEN 60 AND 86400
-  OR NEW.started_at IS DISTINCT FROM timezone('UTC',transaction_timestamp())
+  OR NEW.started_at IS DISTINCT FROM NULLIF(current_setting('urnetwork.competition_review_handoff_clock',true),'')::timestamp
+  OR competition_review_handoff_clock()>=NEW.deadline
   OR NEW.deadline IS DISTINCT FROM NEW.started_at+make_interval(secs=>(args->>'timeout_seconds')::integer)
   OR (NEW.owner_json->>'started_at')::timestamp IS DISTINCT FROM NEW.started_at OR (NEW.owner_json->>'deadline')::timestamp IS DISTINCT FROM NEW.deadline
   OR args->>'round_id' IS DISTINCT FROM NEW.round_id::text OR args->>'job_id' IS DISTINCT FROM NEW.job_id::text
@@ -116,18 +120,27 @@ END $handoff_owner$;
 CREATE TRIGGER competition_review_handoff_before_insert BEFORE INSERT ON competition_review_handoff FOR EACH ROW EXECUTE FUNCTION competition_review_handoff_owner_guard();
 
 CREATE FUNCTION competition_review_handoff_call_guard() RETURNS trigger LANGUAGE plpgsql AS $handoff_call$
-DECLARE owner competition_review_handoff%ROWTYPE; claim jsonb; decision jsonb;
+DECLARE owner competition_review_handoff%ROWTYPE; claim jsonb; decision jsonb; policy jsonb; claims integer; receipts integer;
 BEGIN
+ SELECT * INTO owner FROM competition_review_handoff WHERE handoff_id=NEW.handoff_id;
+ IF NOT FOUND THEN RAISE EXCEPTION 'review call owner is absent'; END IF;
+ SELECT policy_json INTO policy FROM competition_round WHERE round_id=owner.round_id;
+ PERFORM competition_v2_scope_lock(policy->'automation_policy'->>'environment',policy->>'competition_id',policy->'automation_policy'->>'season_id');
+ PERFORM 1 FROM competition_round WHERE round_id=owner.round_id FOR UPDATE;
  SELECT * INTO owner FROM competition_review_handoff WHERE handoff_id=NEW.handoff_id FOR UPDATE;
  SELECT decision_json INTO decision FROM competition_reward_decision WHERE round_id=owner.round_id ORDER BY revision DESC LIMIT 1;
  IF NOT FOUND OR owner.owner_json->>'actor_id' IS DISTINCT FROM current_setting('urnetwork.competition_review_handoff_actor',true)
-  OR NEW.recorded_at IS DISTINCT FROM timezone('UTC',transaction_timestamp())
+  OR NEW.recorded_at IS DISTINCT FROM NULLIF(current_setting('urnetwork.competition_review_handoff_clock',true),'')::timestamp
   OR NEW.call_json->>'handoff_id' IS DISTINCT FROM NEW.handoff_id::text OR NEW.call_json->>'call_id' IS DISTINCT FROM NEW.call_id
   OR NEW.call_json->>'kind' IS DISTINCT FROM NEW.kind OR (NEW.call_json->>'recorded_at')::timestamp IS DISTINCT FROM NEW.recorded_at
   OR NOT COALESCE((owner.owner_json->'plan'->'call_ids') ? NEW.call_id,false)
   OR COALESCE(NEW.call_json->>'request_sha256','') !~ '^[0-9a-f]{64}$' THEN RAISE EXCEPTION 'review call lacks immutable native ownership'; END IF;
  IF NEW.kind='claim' THEN
-  IF NEW.recorded_at>=owner.deadline OR decision->>'decision_sha256' IS DISTINCT FROM owner.decision_sha256
+  SELECT count(*) FILTER (WHERE kind='claim'),count(*) FILTER (WHERE kind='receipt') INTO claims,receipts FROM competition_review_handoff_call WHERE handoff_id=NEW.handoff_id;
+  IF NEW.recorded_at>=owner.deadline OR competition_review_handoff_clock()>=owner.deadline
+   OR claims<>receipts OR owner.owner_json->'plan'->'call_ids'->>claims IS DISTINCT FROM NEW.call_id
+   OR EXISTS(SELECT 1 FROM competition_review_handoff_call WHERE handoff_id=NEW.handoff_id AND kind='receipt' AND COALESCE(call_json->>'failure','')<>'')
+   OR decision->>'decision_sha256' IS DISTINCT FROM owner.decision_sha256
    OR decision->>'selected_job_id' IS DISTINCT FROM owner.job_id::text
    OR EXISTS(SELECT 1 FROM competition_automation_incident WHERE round_id=owner.round_id AND invalidates_evaluation)
    OR EXISTS(SELECT 1 FROM competition_review_handoff_completion WHERE handoff_id=NEW.handoff_id)
@@ -142,12 +155,17 @@ END $handoff_call$;
 CREATE TRIGGER competition_review_handoff_call_before_insert BEFORE INSERT ON competition_review_handoff_call FOR EACH ROW EXECUTE FUNCTION competition_review_handoff_call_guard();
 
 CREATE FUNCTION competition_review_handoff_completion_guard() RETURNS trigger LANGUAGE plpgsql AS $handoff_complete$
-DECLARE owner competition_review_handoff%ROWTYPE; proposal jsonb; args jsonb; evidence jsonb; decision jsonb;
+DECLARE owner competition_review_handoff%ROWTYPE; proposal jsonb; args jsonb; evidence jsonb; decision jsonb; policy jsonb;
 BEGIN
+ SELECT * INTO owner FROM competition_review_handoff WHERE handoff_id=NEW.handoff_id;
+ IF NOT FOUND THEN RAISE EXCEPTION 'review completion owner is absent'; END IF;
+ SELECT policy_json INTO policy FROM competition_round WHERE round_id=owner.round_id;
+ PERFORM competition_v2_scope_lock(policy->'automation_policy'->>'environment',policy->>'competition_id',policy->'automation_policy'->>'season_id');
+ PERFORM 1 FROM competition_round WHERE round_id=owner.round_id FOR UPDATE;
  SELECT * INTO owner FROM competition_review_handoff WHERE handoff_id=NEW.handoff_id FOR UPDATE;
  args:=owner.owner_json->'args'; proposal:=NULLIF(NEW.completion_json->'proposal','null'::jsonb); evidence:=NEW.completion_json->'evidence';
  IF NOT FOUND OR owner.owner_json->>'actor_id' IS DISTINCT FROM current_setting('urnetwork.competition_review_handoff_actor',true)
-  OR NEW.completed_at IS DISTINCT FROM timezone('UTC',transaction_timestamp())
+  OR NEW.completed_at IS DISTINCT FROM NULLIF(current_setting('urnetwork.competition_review_handoff_clock',true),'')::timestamp
   OR NEW.completion_json->>'handoff_id' IS DISTINCT FROM NEW.handoff_id::text
   OR (NEW.completion_json->>'completed_at')::timestamp IS DISTINCT FROM NEW.completed_at
   OR NEW.completion_json->>'plan_sha256' IS DISTINCT FROM owner.owner_json->'plan'->>'plan_sha256'
@@ -158,7 +176,7 @@ BEGIN
   RETURN NEW;
  END IF;
  SELECT decision_json INTO decision FROM competition_reward_decision WHERE round_id=owner.round_id ORDER BY revision DESC LIMIT 1;
- IF NEW.completed_at>=owner.deadline OR COALESCE(NEW.completion_json->>'failure','')<>''
+ IF NEW.completed_at>=owner.deadline OR competition_review_handoff_clock()>=owner.deadline OR COALESCE(NEW.completion_json->>'failure','')<>''
   OR decision->>'decision_sha256' IS DISTINCT FROM owner.decision_sha256 OR decision->>'selected_job_id' IS DISTINCT FROM owner.job_id::text
   OR EXISTS(SELECT 1 FROM competition_automation_incident WHERE round_id=owner.round_id AND invalidates_evaluation)
   OR proposal->>'handoff_id' IS DISTINCT FROM NEW.handoff_id::text OR proposal->>'job_id' IS DISTINCT FROM owner.job_id::text
@@ -204,7 +222,7 @@ BEGIN
   RETURN NEW;
  END IF;
  IF NEW.actor_id IS DISTINCT FROM current_setting('urnetwork.competition_review_operator_actor',true)
-  OR NEW.created_at IS DISTINCT FROM timezone('UTC',transaction_timestamp())
+  OR NEW.created_at IS DISTINCT FROM NULLIF(current_setting('urnetwork.competition_review_handoff_clock',true),'')::timestamp
   OR competition_review_handoff_observed(NEW.review_json,NEW.created_at) IS NULL THEN
   RAISE EXCEPTION 'exact pending model proposal requires separate explicit operator import';
  END IF;
