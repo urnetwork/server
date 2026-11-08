@@ -167,3 +167,15 @@ func TestSidecarctlParsesFlagsAnywhere(t *testing.T) {
 		}
 	}
 }
+
+// The binary's own registry holds certs swap, which its cmd file's init registers, under the usage
+// its doc gives.
+func TestSidecarctlRegistersCertsSwap(t *testing.T) {
+	command, args := sidecarctlCommands.find([]string{"certs", "swap", "main", "2026.11.5"})
+	if command == nil || command.words != "certs swap" {
+		t.Fatalf("the binary has no certs swap: %v", command)
+	}
+	if command.usage != "<env> <version> [--no-reload]" || !slices.Equal(args, []string{"main", "2026.11.5"}) {
+		t.Fatalf("certs swap's usage is %q, with %v", command.usage, args)
+	}
+}
