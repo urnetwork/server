@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -63,6 +64,15 @@ func authenticateWinnerMultipassQualification(reportPin currentQgQualificationPi
 	canonicalPlan, _ := json.Marshal(plan)
 	if !bytes.Equal(planBytes, canonicalPlan) {
 		return nil, errors.New("qualification plan pin is not the exact canonical precommit")
+	}
+	preparationCtx, preparationCancel := context.WithTimeout(context.Background(), defaultWinnerMultipassProviderLimits().TokenizerTimeout)
+	inputs, inputsErr := authenticateWinnerMultipassQualificationInputs(preparationCtx, expectedRelease)
+	preparationCancel()
+	if inputsErr != nil {
+		return nil, inputsErr
+	}
+	if err := validateWinnerMultipassQualificationOriginalInputs(&plan, inputs); err != nil {
+		return nil, err
 	}
 	capacity, err := estimateWinnerMultipassQualificationCapacity(&plan, report.Capacity.Cases[2].Settings)
 	if err != nil || !reflect.DeepEqual(capacity, report.Capacity) {
