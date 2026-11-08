@@ -13,51 +13,120 @@ import (
 	"time"
 )
 
-// MG0 under the sidecar_pending build tag (§19.7, D-OPS-6).
+// The pending groups under the sidecar_pending build tag (§19.7, D-OPS-6).
 
-// The pending groups end the slice, MG0 then MG1, each marker last in its group,
-// so main's migrations keep their positions below them.
-func TestSidecarMg0EndsTheMigrations(t *testing.T) {
-	mg0 := sidecarMg0Migrations()
-	if len(mg0) != sidecarMg0MigrationCount {
-		t.Fatalf("MG0 holds %d migrations", len(mg0))
+// Each pending group by name, in §19.7's order: the order the slice's tail holds
+// them in, and the order Gn-outs promote them in.
+func sidecarPendingGroups() []struct {
+	name     string
+	markerId string
+	group    []any
+} {
+	return []struct {
+		name     string
+		markerId string
+		group    []any
+	}{
+		{name: "MG0", markerId: sidecarMg0MigrationId, group: sidecarMg0Migrations()},
+		{name: "MG1", markerId: sidecarMg1MigrationId, group: sidecarMg1Migrations()},
+		{name: "MG2", markerId: sidecarMg2MigrationId, group: sidecarMg2Migrations()},
+		{name: "MG5", markerId: sidecarMg5MigrationId, group: sidecarMg5Migrations()},
+		{name: "MG6", markerId: sidecarMg6MigrationId, group: sidecarMg6Migrations()},
+		{name: "MG7", markerId: sidecarMg7MigrationId, group: sidecarMg7Migrations()},
+		{name: "MG8", markerId: sidecarMg8MigrationId, group: sidecarMg8Migrations()},
+		{name: "MG9", markerId: sidecarMg9MigrationId, group: sidecarMg9Migrations()},
 	}
-	mg1 := sidecarMg1Migrations()
-	if len(mg1) != sidecarMg1MigrationCount {
-		t.Fatalf("MG1 holds %d migrations", len(mg1))
-	}
-	group := append(append([]any{}, mg0...), mg1...)
-	head := len(migrations) - len(group)
-	identities := make([]string, 0, len(group))
-	for _, migration := range group {
-		identity, err := migrationIdentity(migration)
-		if err != nil {
-			t.Fatal(err)
+}
+
+// The pending groups end the slice in order, each marker last in its group, so
+// main's migrations keep their positions below them, and each marker reports its
+// group linked at the version its position gives.
+func TestSidecarGroupsEndTheMigrations(t *testing.T) {
+	pending := sidecarPendingMigrations()
+	head := len(migrations) - len(pending)
+	offset := 0
+	for _, group := range sidecarPendingGroups() {
+		if len(group.group) == 0 {
+			t.Fatalf("%s is empty, with no marker", group.name)
 		}
-		identities = append(identities, identity)
-	}
-	for offset, identity := range identities {
-		linked, err := MigrationIdentity(head + offset)
-		if err != nil {
-			t.Fatal(err)
+		marker, ok := group.group[len(group.group)-1].(*CodeMigration)
+		if !ok || marker.id != group.markerId {
+			t.Fatalf("%s does not end with its marker %s", group.name, group.markerId)
 		}
-		if linked != identity {
-			t.Fatalf("migration %d is not the pending groups' entry %d", head+offset, offset)
+		for index, migration := range group.group {
+			identity, err := migrationIdentity(migration)
+			if err != nil {
+				t.Fatal(err)
+			}
+			linked, err := MigrationIdentity(head + offset + index)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if linked != identity {
+				t.Fatalf("migration %d is not %s's entry %d", head+offset+index, group.name, index)
+			}
+		}
+		offset += len(group.group)
+		if got := CodeMigrationVersion(group.markerId); got != head+offset {
+			t.Fatalf("%s's marker is at version %d, not %d", group.name, got, head+offset)
 		}
 	}
-	if !SidecarMg0Linked() || !SidecarMg1Linked() {
-		t.Fatal("a build with the tag does not report MG0 and MG1 linked")
+	if offset != len(pending) {
+		t.Fatalf("the groups hold %d migrations and the pending tail %d", offset, len(pending))
 	}
-	if got := CodeMigrationVersion(sidecarMg0MigrationId); got != MigrationCount()-len(mg1) {
-		t.Fatalf("MG0's marker is at version %d of %d", got, MigrationCount())
-	}
-	if got := CodeMigrationVersion(sidecarMg1MigrationId); got != MigrationCount() {
-		t.Fatalf("MG1's marker is at version %d of %d", got, MigrationCount())
+	for _, linked := range []func() bool{
+		SidecarMg0Linked, SidecarMg1Linked, SidecarMg2Linked, SidecarMg5Linked,
+		SidecarMg6Linked, SidecarMg7Linked, SidecarMg8Linked, SidecarMg9Linked,
+	} {
+		if !linked() {
+			t.Fatal("a build with the tag does not report every group linked")
+		}
 	}
 	// the initializer's alias sees the groups, which an init-time append would escape
 	if len(migrationCatalogMigrations) != len(migrations) {
 		t.Fatalf("the catalog sees %d migrations of %d", len(migrationCatalogMigrations), len(migrations))
 	}
+}
+
+// Every group passes the static check (sidecarGroupFindings): no drop, rename or
+// truncation, no SET NOT NULL, and an existing table indexed only online.
+func TestSidecarGroupsAreAdditive(t *testing.T) {
+	for _, group := range sidecarPendingGroups() {
+		for _, finding := range sidecarGroupFindings(group.name, group.group) {
+			t.Error(finding)
+		}
+	}
+}
+
+// A database that applies every pending group reaches the binary's head, with
+// each group's marker recorded and each table the groups create in place
+// (FS-54's tagged case).
+func TestSidecarGroupsApplyOnAPrivateDatabase(t *testing.T) {
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		if got := DbVersion(ctx); got != MigrationCount() {
+			t.Fatalf("version = %d of %d", got, MigrationCount())
+		}
+		tables := []string{}
+		for _, group := range sidecarPendingGroups() {
+			for _, migration := range group.group {
+				if value, ok := migration.(*SqlMigration); ok {
+					for _, match := range sidecarGroupCreateTablePattern.FindAllStringSubmatch(value.sql, -1) {
+						tables = append(tables, strings.ToLower(match[1]))
+					}
+				}
+			}
+		}
+		MaintenanceDb(ctx, func(conn PgConn) {
+			for _, table := range tables {
+				var found *string
+				Raise(conn.QueryRow(ctx, `SELECT to_regclass($1)::text`, table).Scan(&found))
+				if found == nil {
+					t.Errorf("%s is not in the migrated database", table)
+				}
+			}
+		})
+	})
 }
 
 // Readiness needs the head, MG0 included, so a binary that links it is unready
@@ -146,7 +215,7 @@ func requireRunningReleaseShapes(t testing.TB, ctx context.Context) {
 func TestSidecarMg0RunsBesideTheRunningRelease(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		running := MigrationCount() - sidecarPendingMigrationCount
+		running := MigrationCount() - len(sidecarPendingMigrations())
 		ApplyDbMigrationsUpTo(ctx, running)
 		requireRunningReleaseShapes(t, ctx)
 
@@ -237,11 +306,12 @@ func TestNetworkClientOwnerColumns(t *testing.T) {
 	})
 }
 
-// CODESTYLE's migration rules for MG1: new tables and their indexes only.
-func TestSidecarMg1IsAdditive(t *testing.T) {
+// CODESTYLE's migration rules for MG1's §7 part: new tables and their indexes
+// only.
+func TestSidecarMg1TeamPartIsAdditive(t *testing.T) {
 	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (network_auth_key|network_admin_event)\b|CREATE INDEX (network_auth_key|network_admin_event)_\w+ ON (network_auth_key|network_admin_event)\b)`)
 	refused := regexp.MustCompile(`(?i)\b(DROP|ALTER|RENAME|NOT VALID|TRUNCATE|UPDATE|DELETE|transaction_timeout)\b`)
-	for index, migration := range sidecarMg1Migrations() {
+	for index, migration := range sidecarMg1TeamMigrations() {
 		switch value := migration.(type) {
 		case *SqlMigration:
 			if !statement.MatchString(value.sql) {
@@ -249,10 +319,6 @@ func TestSidecarMg1IsAdditive(t *testing.T) {
 			}
 			if refused.MatchString(value.sql) {
 				t.Errorf("entry %d changes what the running release uses: %s", index, value.sql)
-			}
-		case *CodeMigration:
-			if value.id != sidecarMg1MigrationId {
-				t.Fatalf("entry %d runs code %s", index, value.id)
 			}
 		default:
 			t.Fatalf("entry %d is a %T", index, migration)

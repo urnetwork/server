@@ -7,19 +7,23 @@ import (
 	"testing"
 )
 
-// MG0 and MG1 stay pending until their own Gn-outs. A release build links none of it, so
-// no statement of the migrations slice names what the group creates. A Gn-out
-// that registers the group moves this check with it.
+// Every group stays pending until its own Gn-out. A release build links none of
+// them, so no group reports linked and no statement of the migrations slice names
+// what a group creates or ends with. A Gn-out that registers a group moves its
+// names out of this check with it.
 func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
-	if SidecarMg0Linked() {
-		t.Fatal("a release build links MG0")
-	}
-	if SidecarMg1Linked() {
-		t.Fatal("a release build links MG1")
+	for _, linked := range []func() bool{
+		SidecarMg0Linked, SidecarMg1Linked, SidecarMg2Linked, SidecarMg5Linked,
+		SidecarMg6Linked, SidecarMg7Linked, SidecarMg8Linked, SidecarMg9Linked,
+	} {
+		if linked() {
+			t.Fatal("a release build links a pending group")
+		}
 	}
 	if 0 < len(sidecarPendingMigrations()) {
 		t.Fatal("a release build has pending migrations")
 	}
+	names := append([]string{"network_client_owner", "auth_code_api_key_id", "network_auth_key", "network_admin_event"}, sidecarGroupMarkerIds...)
 	for index, migration := range migrations {
 		sql := ""
 		switch value := migration.(type) {
@@ -30,7 +34,7 @@ func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 		case *CodeMigration:
 			sql = value.id
 		}
-		for _, name := range []string{"network_client_owner", "sidecar_mg0", "auth_code_api_key_id", "network_auth_key", "network_admin_event", "sidecar_mg1"} {
+		for _, name := range names {
 			if strings.Contains(sql, name) {
 				t.Fatalf("migration %d names %s", index, name)
 			}
