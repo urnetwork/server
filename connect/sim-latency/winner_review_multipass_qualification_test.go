@@ -38,6 +38,16 @@ type winnerMultipassQualificationRelease struct {
 // Shape validation is not file authentication or runtime qualification. The
 // native command separately reads all root pins and actual executable identities.
 func validateWinnerMultipassQualificationReleaseShape(release winnerMultipassQualificationRelease) error {
+	return validateWinnerMultipassReleaseShape(release, true)
+}
+
+// Only fixed synthetic runtime probes may use a prospective empty observation.
+// Native artifact authentication is identical, not a fabricated proof digest.
+func validateWinnerMultipassRuntimeProbeReleaseShape(release winnerMultipassQualificationRelease) error {
+	return validateWinnerMultipassReleaseShape(release, false)
+}
+
+func validateWinnerMultipassReleaseShape(release winnerMultipassQualificationRelease, observed bool) error {
 	if release.Protocol != winnerMultipassVersion || !sourceGitShaPattern.MatchString(release.SourceCommit) || !strings.HasPrefix(release.ImageId, "sha256:") || !validSha256(strings.TrimPrefix(release.ImageId, "sha256:")) ||
 		release.CheckpointEvidenceKind != "trusted_deployment_declaration_not_weight_attestation" || len(release.TokenizationProfiles) != 2 {
 		return errors.New("multi-pass qualification release identity is incomplete or overclaims checkpoint attestation")
@@ -50,7 +60,7 @@ func validateWinnerMultipassQualificationReleaseShape(release winnerMultipassQua
 	for index, member := range defaultWinnerSnowProviderSettings().Members {
 		profile, found := release.TokenizationProfiles[member.Name]
 		maximum := []int{98304, 131072}[index]
-		if !found || profile.Member != member || profile.MaximumContextTokens != maximum || profile.TokenizerContractSha256 != winnerMultipassTokenizerContractSha256() || !validSha256(profile.RuntimeEvidenceSha256) {
+		if !found || profile.Member != member || profile.MaximumContextTokens != maximum || profile.TokenizerContractSha256 != winnerMultipassTokenizerContractSha256() || observed && !validSha256(profile.RuntimeEvidenceSha256) || !observed && profile.RuntimeEvidenceSha256 != "" {
 			return errors.New("multi-pass release changed fixed membership, runtime context or rendering contract")
 		}
 	}

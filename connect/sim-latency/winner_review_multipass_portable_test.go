@@ -47,9 +47,10 @@ type winnerMultipassPhysicalAuthentication struct {
 // Unexported fields cannot be populated by decoding an untrusted JSON flag.
 // Only the exact protected-readback constructor below produces this capability.
 type winnerMultipassAuthenticatedPhysicalProof struct {
-	proof     winnerMultipassPhysicalAuthentication
-	retention winnerMultipassProtectedReference
-	validated bool
+	proof        winnerMultipassPhysicalAuthentication
+	retention    winnerMultipassProtectedReference
+	validated    bool
+	runtimeProbe bool
 }
 
 // Read exact private originals only from the original wrapper-owned paths.
@@ -138,7 +139,15 @@ func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics [
 // The creator refuses a different executable even when supplied a plausible
 // driver hash. Native release authentication remains separately mandatory.
 func createWinnerMultipassPhysicalAuthentication(input, output, diagnostics []byte, canceled bool, profile winnerMultipassContainmentProfile, release winnerMultipassQualificationRelease) (*winnerMultipassPhysicalAuthentication, *winnerMultipassContainmentReceipt, []byte, error) {
-	if err := validateWinnerMultipassQualificationReleaseShape(release); err != nil {
+	var envelope winnerMultipassBrokerEnvelope
+	if err := decodeStrictJSONBytes(input, &envelope, "physical original operation"); err != nil {
+		return nil, nil, nil, err
+	}
+	validate := validateWinnerMultipassQualificationReleaseShape
+	if envelope.Kind == winnerMultipassRuntimeProbeKind {
+		validate = validateWinnerMultipassRuntimeProbeReleaseShape
+	}
+	if err := validate(release); err != nil {
 		return nil, nil, nil, err
 	}
 	executable, err := os.Executable()
@@ -171,7 +180,8 @@ func createWinnerMultipassPhysicalAuthentication(input, output, diagnostics []by
 // The callback must perform actual protected exact-version COMPLIANCE readback.
 // No local file, hash-only record or self-asserted physical boolean is accepted.
 func loadWinnerMultipassPhysicalAuthentication(ctx context.Context, reference winnerMultipassProtectedReference, release winnerMultipassQualificationRelease, minimumRetention time.Time, readback func(context.Context, winnerMultipassProtectedReference) ([]byte, error)) (*winnerMultipassAuthenticatedPhysicalProof, error) {
-	if validateWinnerMultipassQualificationReleaseShape(release) != nil || readback == nil || reference.Key == "" || reference.VersionId == "" || !validSha256(reference.Sha256) || reference.Bytes <= 0 || reference.Bytes > int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes) || minimumRetention.IsZero() || reference.RetainUntil.Before(minimumRetention) {
+	runtimeProbe := validateWinnerMultipassRuntimeProbeReleaseShape(release) == nil
+	if !runtimeProbe && validateWinnerMultipassQualificationReleaseShape(release) != nil || readback == nil || reference.Key == "" || reference.VersionId == "" || !validSha256(reference.Sha256) || reference.Bytes <= 0 || reference.Bytes > int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes) || minimumRetention.IsZero() || reference.RetainUntil.Before(minimumRetention) {
 		return nil, errors.New("portable physical proof lacks protected exact-version custody")
 	}
 	content, err := readback(ctx, reference)
@@ -190,7 +200,7 @@ func loadWinnerMultipassPhysicalAuthentication(ctx context.Context, reference wi
 		!validSha256(proof.InputSha256) || !validSha256(proof.OutputSha256) || !validSha256(proof.ManifestSha256) || !validSha256(proof.WrapperReceiptSha256) || !validSha256(proof.AuthenticatedReceiptSha256) || proof.IndependentClaimSha256 != "" && !validSha256(proof.IndependentClaimSha256) {
 		return nil, errors.New("protected physical proof belongs to another release or lacks original identities")
 	}
-	return &winnerMultipassAuthenticatedPhysicalProof{proof: proof, retention: reference, validated: true}, nil
+	return &winnerMultipassAuthenticatedPhysicalProof{proof: proof, retention: reference, validated: true, runtimeProbe: runtimeProbe}, nil
 }
 
 // Pure replay authenticates the immutable proof/manifest/census/raw bytes and
@@ -208,6 +218,10 @@ func replayWinnerMultipassPortableContainmentForProfile(originals map[string][]b
 	}
 	proof := authenticated.proof
 	input, output, diagnostics := originals["input.json"], originals["broker.stdout"], originals["wrapper-receipt.json"]
+	var envelope winnerMultipassBrokerEnvelope
+	if decodeStrictJSONBytes(input, &envelope, "protected original operation") != nil || authenticated.runtimeProbe != (envelope.Kind == winnerMultipassRuntimeProbeKind) {
+		return nil, errors.New("portable runtime bootstrap proof cannot authenticate a normal review call")
+	}
 	if proof.InputSha256 != winnerMultipassSha256(input) || proof.OutputSha256 != winnerMultipassSha256(output) || proof.WrapperReceiptSha256 != winnerMultipassSha256(diagnostics) || proof.ManifestSha256 != winnerMultipassSha256(originals["evidence-manifest.json"]) ||
 		(len(independentClaim) == 0) != (proof.IndependentClaimSha256 == "") || len(independentClaim) != 0 && winnerMultipassSha256(independentClaim) != proof.IndependentClaimSha256 {
 		return nil, errors.New("portable original input/output/manifest/claim changed")
