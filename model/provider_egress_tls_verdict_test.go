@@ -360,7 +360,7 @@ func TestTlsPlaceCannotBeManufacturedByOneNetwork(t *testing.T) {
 		judged[i] = true
 	}
 	// no read happens: one network never reaches the other-network floor
-	evidence := getProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, judged)
+	evidence, _ := getProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, judged, nil)
 	for i, place := range evidence {
 		if place.networks != 0 || place.broken(settings) {
 			t.Fatalf("farm finding %d counted its own network as place evidence: %+v", i, place)
@@ -510,7 +510,7 @@ func TestTlsPlaceReadsStayInTheirBudgetAndNeverFailTheRun(t *testing.T) {
 		failing:      map[string]bool{"medium": true},
 		waiting:      map[string]bool{"large-a": true, "large-b": true},
 	}
-	evidence := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads())
+	evidence, _ := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, nil, fake.reads())
 
 	if len(fake.read) != 3 || fake.read[0] != "small" || fake.read[1] != "medium" {
 		t.Fatalf("pairs read in the order %v, want the small country, the medium one, then one large pair", fake.read)
@@ -535,7 +535,8 @@ func TestTlsPlaceTallyReadFailureWithholdsEveryPair(t *testing.T) {
 	findings := testingTlsPlaceFindings(now, "blocked", "zz", server.NewId(), 4)
 	candidates := []bool{true, true, true, true}
 	fake := &testingTlsPlaceReads{tallyFails: true}
-	for i, place := range readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads()) {
+	evidence, _ := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, nil, fake.reads())
+	for i, place := range evidence {
 		if place.withheld != ProviderEgressTlsPlaceWithheldError || place.broken(settings) {
 			t.Errorf("finding %d: %+v after a failed tally read", i, place)
 		}
@@ -561,7 +562,7 @@ func TestTlsPlaceReadsAreLimitedAndTurnWithinACountry(t *testing.T) {
 		candidates[i] = true
 	}
 	fake := &testingTlsPlaceReads{countryLoads: map[string]int{"zz": 1000}}
-	evidence := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads())
+	evidence, _ := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, nil, fake.reads())
 	limited := map[string]bool{}
 	for i, finding := range findings {
 		if evidence[i].withheld == ProviderEgressTlsPlaceWithheldLimit {
@@ -577,9 +578,9 @@ func TestTlsPlaceReadsAreLimitedAndTurnWithinACountry(t *testing.T) {
 		keys = append(keys, providerEgressTlsPlaceKey{urlKey: fmt.Sprintf("site-%d", i), countryLocationId: country})
 	}
 	sameCost := func(providerEgressTlsPlaceKey) int { return 1 }
-	first := providerEgressTlsPlaceReadOrder(now, keys, sameCost)
-	again := providerEgressTlsPlaceReadOrder(now.Add(time.Minute), keys, sameCost)
-	next := providerEgressTlsPlaceReadOrder(now.Add(5*time.Minute), keys, sameCost)
+	first := providerEgressTlsPlaceReadOrder(now, keys, sameCost, nil)
+	again := providerEgressTlsPlaceReadOrder(now.Add(time.Minute), keys, sameCost, nil)
+	next := providerEgressTlsPlaceReadOrder(now.Add(5*time.Minute), keys, sameCost, nil)
 	if !slices.Equal(first, again) {
 		t.Fatal("the read order changed within one judge interval")
 	}
@@ -600,6 +601,7 @@ func TestTlsWithheldPlaceEvidenceNeverLeavesAVerifiedFailurePending(t *testing.T
 	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
 	cheap, costly := server.NewId(), server.NewId()
 	base := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	chain := &testingTlsPlaceReadChain{}
 	withheldTurns := 0
 	for turn := range 24 {
 		now := base.Add(time.Duration(turn) * 5 * time.Minute)
@@ -613,7 +615,7 @@ func TestTlsWithheldPlaceEvidenceNeverLeavesAVerifiedFailurePending(t *testing.T
 			candidates[i] = true
 		}
 		fake := &testingTlsPlaceReads{countryLoads: map[string]int{"zz": 1000, "us": 9000000}}
-		evidence := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads())
+		evidence := chain.read(now, settings, findings, candidates, fake.reads())
 		withheld := false
 		for i, finding := range findings {
 			if finding.UrlKey != "target" {
@@ -637,5 +639,49 @@ func TestTlsWithheldPlaceEvidenceNeverLeavesAVerifiedFailurePending(t *testing.T
 	}
 	if withheldTurns == 0 {
 		t.Fatal("the costly country's pair was never withheld, so nothing was tested")
+	}
+}
+
+// The place-read clock a run carries on holds every pair the run needed and
+// no other: now for each pair it began to read, completed or not, and the
+// carried time for the rest, a time ahead of now (another host's clock) taken
+// as now. Past its bound it keeps the pairs read most recently.
+func TestTlsPlaceReadClockCarriesTheNeededPairsWithinItsBound(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	settings.PlaceReadBudget = 50 * time.Millisecond
+	now := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	country := server.NewId()
+	findings := append(testingTlsPlaceFindings(now, "stale", "zz", country, 4), testingTlsPlaceFindings(now, "ahead", "zz", country, 4)...)
+	candidates := make([]bool, len(findings))
+	for i := range candidates {
+		candidates[i] = true
+	}
+	stale := providerEgressTlsPlaceKey{urlKey: "stale", countryLocationId: country}.String()
+	ahead := providerEgressTlsPlaceKey{urlKey: "ahead", countryLocationId: country}.String()
+	gone := providerEgressTlsPlaceKey{urlKey: "gone", countryLocationId: country}.String()
+	carried := map[string]time.Time{stale: now.Add(-10 * time.Minute), ahead: now.Add(time.Hour), gone: now.Add(-5 * time.Minute)}
+	// the stale pair is read first and waits out the budget, so the other is
+	// never begun
+	fake := &testingTlsPlaceReads{countryLoads: map[string]int{"zz": 1000}, waiting: map[string]bool{"stale": true}}
+	_, readAt := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, carried, fake.reads())
+	if len(fake.read) != 1 || fake.read[0] != "stale" {
+		t.Fatalf("pairs begun %v, want the stale one alone", fake.read)
+	}
+	if len(readAt) != 2 || !readAt[stale].Equal(now) || !readAt[ahead].Equal(now) {
+		t.Fatalf("clock %v, want the begun pair at now and the one ahead of the clock taken as now, and no pair the run did not need", readAt)
+	}
+
+	many := map[string]time.Time{}
+	for i := range providerEgressTlsPlaceClockLimit + 76 {
+		many[fmt.Sprintf("pair-%04d", i)] = now.Add(-time.Duration(i) * time.Second)
+	}
+	bounded := providerEgressTlsBoundPlaceClock(many)
+	if len(bounded) != providerEgressTlsPlaceClockLimit {
+		t.Fatalf("bounded clock holds %d pairs, want %d", len(bounded), providerEgressTlsPlaceClockLimit)
+	}
+	for i := range providerEgressTlsPlaceClockLimit + 76 {
+		if _, kept := bounded[fmt.Sprintf("pair-%04d", i)]; kept != (i < providerEgressTlsPlaceClockLimit) {
+			t.Fatalf("pair %d kept=%t, want the most recently read kept and the stalest dropped", i, kept)
+		}
 	}
 }

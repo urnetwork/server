@@ -23991,14 +23991,16 @@ findings by verdict after the run) and `urnetwork_egress_tls_undecided_findings`
 the direct window, so a direct check could still decide them). It also sets
 `urnetwork_egress_tls_place_withheld_pairs{reason}`: the URL and country pairs
 whose place evidence the run could not read (`error`, a read failed;
-`budget`, its minute of place reads ran out, cheapest country first;
-`limit`, past its 64 pairs). Their findings are decided nothing for the run:
-a failure the server's direct check verified within the hour still excludes
-its provider, undecided, until the pair is read, and any other stays as
-stored, a new one pending. A pair withheld run after run shows here, and its
-uncorroborated findings inside the direct window as undecided findings. The
-fleet's view is the process with the newest last-judged timestamp; the others
-keep what their own last run set.
+`budget`, its minute of place reads ran out; `limit`, past its 64 pairs). A
+run reads the pairs read longest ago first, carrying when each pair's read
+began to the next run, so no pair is cut on every run: each is read within
+ceil(pairs / 64) runs past the limit. A withheld pair's findings are
+decided nothing for the run: a failure the server's direct check verified
+within the hour still excludes its provider, undecided, until the pair is
+read, and any other stays as stored, a new one pending. A pair withheld run
+after run shows here, and its uncorroborated findings inside the direct
+window as undecided findings. The fleet's view is the process with the
+newest last-judged timestamp; the others keep what their own last run set.
 
 Implementation (5-minute cadence; `signal_egress_tls_judge.go` and
 `signal_egress_tls_judge_test.go`). One loopback Mimir read evaluated two

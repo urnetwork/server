@@ -349,6 +349,13 @@ type ProviderEgressTlsPool struct {
 	// for each name of a finding not yet retired that is out of the pool, the
 	// first of the consecutive runs that read it out
 	UnservedSince map[string]time.Time
+	// When each URL and country pair's place read last began, completed or
+	// not, by providerEgressTlsPlaceKey.String(). The caller sets the clock
+	// the previous run carried, and JudgeProviderEgressTlsFindings replaces it
+	// with this run's, for the next run to carry. A run reads the pairs read
+	// longest ago first, so a binding budget or pair limit never cuts the same
+	// pair on every run (readProviderEgressTlsPlaceEvidence).
+	PlaceReadAt map[string]time.Time
 }
 
 // This run's pool from the names served now and the clock the previous run
@@ -510,6 +517,20 @@ type providerEgressTlsPlaceKey struct {
 	countryLocationId server.Id
 }
 
+// The pair as the place-read clock keys it.
+func (self providerEgressTlsPlaceKey) String() string {
+	return self.countryLocationId.String() + "/" + self.urlKey
+}
+
+// The most pairs one run's place-read clock carries to the next. The clock
+// holds only the pairs the run needed; past the bound the pairs read longest
+// ago drop, and a dropped pair reads as never read, at the front of the order
+// where the stalest pairs belong. Today's runs need nine pairs. Past the
+// bound, pairs that read as never read go cheapest first among themselves,
+// so the costliest of them can wait longer; a pair whose place goes unread
+// never gates its exclusion, so that only delays a release.
+const providerEgressTlsPlaceClockLimit = 1024
+
 // TLS verification outcomes on one URL by one network's providers.
 type providerEgressTlsPlaceOutcome struct {
 	failed   int
@@ -548,15 +569,17 @@ var providerEgressTlsDatabasePlaceReads = providerEgressTlsPlaceReads{
 	outcomes: getProviderEgressTlsPlaceOutcomes,
 }
 
-// The place evidence of each finding, from the database.
+// The place evidence of each finding, from the database, and the place-read
+// clock this run carries on.
 func getProviderEgressTlsPlaceEvidence(
 	ctx context.Context,
 	now time.Time,
 	settings *ProviderEgressTlsJudgeSettings,
 	findings []*ProviderEgressTlsFinding,
 	candidates []bool,
-) []providerEgressTlsPlaceEvidence {
-	return readProviderEgressTlsPlaceEvidence(ctx, now, settings, findings, candidates, providerEgressTlsDatabasePlaceReads)
+	readAt map[string]time.Time,
+) ([]providerEgressTlsPlaceEvidence, map[string]time.Time) {
+	return readProviderEgressTlsPlaceEvidence(ctx, now, settings, findings, candidates, readAt, providerEgressTlsDatabasePlaceReads)
 }
 
 // The place evidence of each finding. Only a candidate (judged on evidence and
@@ -567,20 +590,28 @@ func getProviderEgressTlsPlaceEvidence(
 //
 // The reads are bounded by PlaceReadBudget for the whole run and never fail
 // it. The tally comes first, once for every country; then each URL and
-// country pair's outcomes, cheapest country first, so one large country
-// cannot spend the budget of the small ones. A pair whose read fails, runs
-// past the budget or comes past the pair limit is withheld, and its findings
-// are decided nothing for the run (ProviderEgressTlsPlaceWithheld*), though
-// one the direct check verified still excludes: a failed read once aborted
-// the run, leaving every new finding pending until a run got through.
+// country pair's outcomes, in the order of providerEgressTlsPlaceReadOrder:
+// the pairs whose read began longest ago by readAt, the clock the previous
+// run carried, first. A pair whose read fails, runs past the budget or comes
+// past the pair limit is withheld, and its findings are decided nothing for
+// the run (ProviderEgressTlsPlaceWithheld*), though one the direct check
+// verified still excludes: a failed read once aborted the run, leaving every
+// new finding pending until a run got through.
+//
+// The clock returned holds every pair the run needed: the time its read
+// began, now for each pair this run began to read, whether the read
+// completed or not, so a pair whose read never completes cannot spend every
+// run's budget. A carried time ahead of now, another host's clock, is taken
+// as now.
 func readProviderEgressTlsPlaceEvidence(
 	ctx context.Context,
 	now time.Time,
 	settings *ProviderEgressTlsJudgeSettings,
 	findings []*ProviderEgressTlsFinding,
 	candidates []bool,
+	readAt map[string]time.Time,
 	reads providerEgressTlsPlaceReads,
-) []providerEgressTlsPlaceEvidence {
+) ([]providerEgressTlsPlaceEvidence, map[string]time.Time) {
 	evidence := make([]providerEgressTlsPlaceEvidence, len(findings))
 	inWindow := func(finding *ProviderEgressTlsFinding) bool {
 		return finding.CountryLocationId != nil && now.Sub(finding.MeasuredAt) <= settings.PlaceWindow
@@ -619,8 +650,17 @@ func readProviderEgressTlsPlaceEvidence(
 		keyCountries[key] = finding.CountryCode
 		countrySet[finding.CountryCode] = true
 	}
+	nextReadAt := map[string]time.Time{}
 	if len(needed) == 0 {
-		return evidence
+		return evidence, nextReadAt
+	}
+	for key := range keyCountries {
+		if at, ok := readAt[key.String()]; ok {
+			if now.Before(at) {
+				at = now
+			}
+			nextReadAt[key.String()] = at
+		}
 	}
 
 	// the budget runs on the wall clock: now is the time the evidence is
@@ -638,7 +678,7 @@ func readProviderEgressTlsPlaceEvidence(
 		for _, i := range needed {
 			evidence[i].withheld = reason
 		}
-		return evidence
+		return evidence, providerEgressTlsBoundPlaceClock(nextReadAt)
 	}
 
 	keys := make([]providerEgressTlsPlaceKey, 0, len(keyCountries))
@@ -647,7 +687,7 @@ func readProviderEgressTlsPlaceEvidence(
 	}
 	keys = providerEgressTlsPlaceReadOrder(now, keys, func(key providerEgressTlsPlaceKey) int {
 		return tallies[keyCountries[key]].loads
-	})
+	}, nextReadAt)
 	since := now.Add(-settings.PlaceWindow)
 	outcomes := map[providerEgressTlsPlaceKey]map[server.Id]providerEgressTlsPlaceOutcome{}
 	withheld := map[providerEgressTlsPlaceKey]string{}
@@ -658,6 +698,7 @@ func readProviderEgressTlsPlaceEvidence(
 		case !time.Now().Before(deadline):
 			withheld[key] = ProviderEgressTlsPlaceWithheldBudget
 		default:
+			nextReadAt[key.String()] = now
 			var read map[server.Id]providerEgressTlsPlaceOutcome
 			if reason := providerEgressTlsReadWithin(ctx, deadline, func(readCtx context.Context) {
 				read = reads.outcomes(readCtx, since, key)
@@ -684,34 +725,80 @@ func readProviderEgressTlsPlaceEvidence(
 		}
 		evidence[i].countryLoads, evidence[i].countryFailures = tallies[finding.CountryCode].without(finding.Name)
 	}
-	return evidence
+	return evidence, providerEgressTlsBoundPlaceClock(nextReadAt)
 }
 
-// The pairs in the order a run reads them: by cost, cheapest first, the
+// The pairs in the order a run reads them: stalest first, so that what a
+// budget or the pair limit cuts on one run comes first on the next, and every
+// pair is read within a bounded number of runs, however costly its country.
+// A pair never read comes before one read, and one whose read began longer
+// ago by readAt before one read since. Among equals, cheapest first, the
 // country's scored loads standing in for the connected providers its read
-// probes; and within one cost, in an order that turns every five minutes, the
-// judge's interval, so a budget that runs out inside one large country cuts
-// different pairs on successive runs rather than the same ones every time.
+// probes, so a first run reads as many pairs as its budget allows; and
+// within one cost, in an order that turns every five minutes, the judge's
+// interval.
 func providerEgressTlsPlaceReadOrder(
 	now time.Time,
 	keys []providerEgressTlsPlaceKey,
 	cost func(providerEgressTlsPlaceKey) int,
+	readAt map[string]time.Time,
 ) []providerEgressTlsPlaceKey {
 	turn := strconv.FormatInt(now.Unix()/300, 10)
-	turned := func(key providerEgressTlsPlaceKey) uint64 {
+	type rankedKey struct {
+		key    providerEgressTlsPlaceKey
+		read   bool
+		readAt time.Time
+		cost   int
+		turned uint64
+	}
+	ranked := make([]rankedKey, 0, len(keys))
+	for _, key := range keys {
 		// the turn leads, so every byte after it mixes it in
 		hash := fnv.New64a()
 		hash.Write([]byte(turn + "|" + key.urlKey + "|" + key.countryLocationId.String()))
-		return hash.Sum64()
+		at, read := readAt[key.String()]
+		ranked = append(ranked, rankedKey{key: key, read: read, readAt: at, cost: cost(key), turned: hash.Sum64()})
 	}
-	ordered := append([]providerEgressTlsPlaceKey{}, keys...)
-	sort.SliceStable(ordered, func(a int, b int) bool {
-		if costA, costB := cost(ordered[a]), cost(ordered[b]); costA != costB {
-			return costA < costB
+	sort.SliceStable(ranked, func(a int, b int) bool {
+		switch {
+		case ranked[a].read != ranked[b].read:
+			return !ranked[a].read
+		case !ranked[a].readAt.Equal(ranked[b].readAt):
+			return ranked[a].readAt.Before(ranked[b].readAt)
+		case ranked[a].cost != ranked[b].cost:
+			return ranked[a].cost < ranked[b].cost
+		default:
+			return ranked[a].turned < ranked[b].turned
 		}
-		return turned(ordered[a]) < turned(ordered[b])
 	})
+	ordered := make([]providerEgressTlsPlaceKey, 0, len(ranked))
+	for _, entry := range ranked {
+		ordered = append(ordered, entry.key)
+	}
 	return ordered
+}
+
+// The clock within providerEgressTlsPlaceClockLimit: the pairs read most
+// recently, the stalest dropped.
+func providerEgressTlsBoundPlaceClock(readAt map[string]time.Time) map[string]time.Time {
+	if len(readAt) <= providerEgressTlsPlaceClockLimit {
+		return readAt
+	}
+	keys := make([]string, 0, len(readAt))
+	for key := range readAt {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(a int, b int) bool {
+		if !readAt[keys[a]].Equal(readAt[keys[b]]) {
+			return readAt[keys[b]].Before(readAt[keys[a]])
+		}
+		return keys[a] < keys[b]
+	})
+	bounded := make(map[string]time.Time, providerEgressTlsPlaceClockLimit)
+	for _, key := range keys[:providerEgressTlsPlaceClockLimit] {
+		bounded[key] = readAt[key]
+	}
+	return bounded
 }
 
 // Runs one read within the run's budget: "" when it completed, or why not.
@@ -960,9 +1047,11 @@ func providerEgressTlsCommonModeNetworks(
 }
 
 // Judges every finding of one run. pool is the run's served pool
-// (NewProviderEgressTlsPool); direct holds this run's direct check of each
-// host (absent is inconclusive). Reads the place evidence the run needs once
-// (getProviderEgressTlsPlaceEvidence); writes nothing.
+// (NewProviderEgressTlsPool) with the place-read clock the previous run
+// carried; direct holds this run's direct check of each host (absent is
+// inconclusive). Reads the place evidence the run needs once
+// (getProviderEgressTlsPlaceEvidence) and leaves this run's place-read clock
+// in pool.PlaceReadAt; writes nothing to the database.
 func JudgeProviderEgressTlsFindings(
 	ctx context.Context,
 	now time.Time,
@@ -983,7 +1072,8 @@ func JudgeProviderEgressTlsFindings(
 		placeCandidates[i] = providerEgressTlsJudgesOnEvidence(finding, serving[i]) &&
 			!providerEgressTlsSiteFault(now, finding, commonMode[finding.UrlKey], direct[finding.Host()], settings)
 	}
-	placeEvidence := getProviderEgressTlsPlaceEvidence(ctx, now, settings, findings, placeCandidates)
+	placeEvidence, placeReadAt := getProviderEgressTlsPlaceEvidence(ctx, now, settings, findings, placeCandidates, pool.PlaceReadAt)
+	pool.PlaceReadAt = placeReadAt
 
 	judgements := make([]*ProviderEgressTlsJudgement, 0, len(findings))
 	for i, finding := range findings {

@@ -139,11 +139,14 @@ func init() {
 	)
 }
 
-// The one thing a run carries to the next: when each finding's destination
-// name was first read out of the served pool, on every run since
-// (model.NewProviderEgressTlsPool). Everything else is read at run time.
+// What a run carries to the next: when each finding's destination name was
+// first read out of the served pool, on every run since
+// (model.NewProviderEgressTlsPool), and when each URL and country pair's
+// place read last began (model.ProviderEgressTlsPool.PlaceReadAt). Everything
+// else is read at run time.
 type JudgeProviderEgressTlsFindingsArgs struct {
 	UnservedSince map[string]time.Time `json:"unserved_since,omitempty"`
+	PlaceReadAt   map[string]time.Time `json:"place_read_at,omitempty"`
 }
 
 // What one run did; the same numbers are logged.
@@ -158,8 +161,9 @@ type JudgeProviderEgressTlsFindingsResult struct {
 	// URL and country pairs whose place evidence the run could not read, by
 	// reason (model.ProviderEgressTlsPlaceWithheld*)
 	PlaceWithheld map[string]int `json:"place_withheld,omitempty"`
-	// the clock the next run carries; a skipped run carries its own on
+	// the clocks the next run carries; a skipped run carries its own on
 	UnservedSince map[string]time.Time `json:"unserved_since,omitempty"`
+	PlaceReadAt   map[string]time.Time `json:"place_read_at,omitempty"`
 }
 
 // Schedules a run now, coalescing with a pending one, whose arguments, and so
@@ -194,7 +198,7 @@ func JudgeProviderEgressTlsFindings(
 }
 
 // Schedules the next run one interval out, whatever this one did, carrying
-// the clock on.
+// the clocks on.
 func JudgeProviderEgressTlsFindingsPost(
 	_ *JudgeProviderEgressTlsFindingsArgs,
 	result *JudgeProviderEgressTlsFindingsResult,
@@ -204,6 +208,7 @@ func JudgeProviderEgressTlsFindingsPost(
 	next := &JudgeProviderEgressTlsFindingsArgs{}
 	if result != nil {
 		next.UnservedSince = result.UnservedSince
+		next.PlaceReadAt = result.PlaceReadAt
 	}
 	scheduleJudgeProviderEgressTlsFindingsAt(clientSession, tx, next, server.NowUtc().Add(providerEgressTlsJudgeInterval))
 	return nil
@@ -364,7 +369,7 @@ func checkProviderEgressTlsHosts(
 // One run: read the findings, check the hosts of those it judges on evidence
 // that are recent enough to judge, judge each finding, store the changed
 // verdicts, export what the run left behind, and report. An unavailable pool
-// changes nothing and carries the clock on unchanged: retiring every finding
+// changes nothing and carries the clocks on unchanged: retiring every finding
 // because the pool could not be built would be a guess, and so would keeping
 // a stale served set.
 func judgeProviderEgressTlsFindings(
@@ -374,14 +379,16 @@ func judgeProviderEgressTlsFindings(
 	sources *providerEgressTlsJudgeSources,
 ) (*JudgeProviderEgressTlsFindingsResult, error) {
 	var previous map[string]time.Time
+	var previousPlaceReadAt map[string]time.Time
 	if args != nil {
 		previous = args.UnservedSince
+		previousPlaceReadAt = args.PlaceReadAt
 	}
 	served, err := sources.served(ctx)
 	if err != nil {
 		providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable").Inc()
 		glog.Errorf("[egress]TLS judge: the served pool is unavailable, so no finding was judged this run: %s\n", err)
-		return &JudgeProviderEgressTlsFindingsResult{Skipped: "pool_unavailable", UnservedSince: previous}, nil
+		return &JudgeProviderEgressTlsFindingsResult{Skipped: "pool_unavailable", UnservedSince: previous, PlaceReadAt: previousPlaceReadAt}, nil
 	}
 	siteSettings, err := sources.siteSettings()
 	if err != nil {
@@ -391,6 +398,7 @@ func judgeProviderEgressTlsFindings(
 
 	findings := model.GetProviderEgressTlsFindings(ctx, providerEgressTlsJudgeFindingLimit)
 	pool := model.NewProviderEgressTlsPool(now, findings, served, previous)
+	pool.PlaceReadAt = previousPlaceReadAt
 	direct := checkProviderEgressTlsHosts(ctx, model.ProviderEgressTlsDirectHosts(now, findings, pool, settings), sources.direct)
 
 	judgements := model.JudgeProviderEgressTlsFindings(ctx, now, findings, pool, direct, settings)
@@ -401,6 +409,7 @@ func judgeProviderEgressTlsFindings(
 		Changed:       len(stored),
 		Verdicts:      map[string]int{},
 		UnservedSince: pool.UnservedSince,
+		PlaceReadAt:   pool.PlaceReadAt,
 	}
 	storedSet := make(map[*model.ProviderEgressTlsJudgement]bool, len(stored))
 	for _, judgement := range stored {

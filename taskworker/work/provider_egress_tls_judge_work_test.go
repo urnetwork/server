@@ -130,7 +130,11 @@ func TestProviderEgressTlsJudgeWithoutAPoolChangesNothing(t *testing.T) {
 	before := testutil.ToFloat64(providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable"))
 	lastJudged := testutil.ToFloat64(providerEgressTlsJudgeLastJudgedTimestamp)
 	leftAt := time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC)
-	args := &JudgeProviderEgressTlsFindingsArgs{UnservedSince: map[string]time.Time{"left-site": leftAt}}
+	readAt := leftAt.Add(time.Hour)
+	args := &JudgeProviderEgressTlsFindingsArgs{
+		UnservedSince: map[string]time.Time{"left-site": leftAt},
+		PlaceReadAt:   map[string]time.Time{"country/site": readAt},
+	}
 	result, err := judgeProviderEgressTlsFindings(context.Background(), time.Now(), args, &providerEgressTlsJudgeSources{
 		served: func(context.Context) (map[string]bool, error) { return nil, errors.New("synthetic pool refusal") },
 		siteSettings: func() (*model.ProviderEgressSiteSettings, error) {
@@ -147,6 +151,9 @@ func TestProviderEgressTlsJudgeWithoutAPoolChangesNothing(t *testing.T) {
 	}
 	if len(result.UnservedSince) != 1 || !result.UnservedSince["left-site"].Equal(leftAt) {
 		t.Fatalf("a run without a pool did not carry the clock on: %v", result.UnservedSince)
+	}
+	if len(result.PlaceReadAt) != 1 || !result.PlaceReadAt["country/site"].Equal(readAt) {
+		t.Fatalf("a run without a pool did not carry the place-read clock on: %v", result.PlaceReadAt)
 	}
 	if after := testutil.ToFloat64(providerEgressTlsJudgeRunsTotal.WithLabelValues("pool_unavailable")); after != before+1 {
 		t.Fatalf("pool_unavailable runs %v -> %v", before, after)
@@ -165,6 +172,7 @@ func TestProviderEgressTlsJudgePostCarriesTheClock(t *testing.T) {
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 		defer clientSession.Cancel()
 		leftAt := time.Date(2026, time.November, 7, 9, 0, 0, 0, time.UTC)
+		readAt := leftAt.Add(time.Hour)
 		readArgs := func() (*JudgeProviderEgressTlsFindingsArgs, time.Time) {
 			var argsJson string
 			var runAt time.Time
@@ -180,11 +188,17 @@ func TestProviderEgressTlsJudgePostCarriesTheClock(t *testing.T) {
 			// the evaluator deletes its completed RunOnce row before Post
 			server.RaisePgResult(tx.Exec(ctx, `DELETE FROM pending_task WHERE run_once_key = '["judge_provider_egress_tls_findings"]'`))
 			server.Raise(JudgeProviderEgressTlsFindingsPost(&JudgeProviderEgressTlsFindingsArgs{},
-				&JudgeProviderEgressTlsFindingsResult{UnservedSince: map[string]time.Time{"left-site": leftAt}}, clientSession, tx))
+				&JudgeProviderEgressTlsFindingsResult{
+					UnservedSince: map[string]time.Time{"left-site": leftAt},
+					PlaceReadAt:   map[string]time.Time{"country/site": readAt},
+				}, clientSession, tx))
 		})
 		args, runAt := readArgs()
 		if len(args.UnservedSince) != 1 || !args.UnservedSince["left-site"].Equal(leftAt) {
 			t.Fatalf("the next run's arguments lost the clock: %+v", args)
+		}
+		if len(args.PlaceReadAt) != 1 || !args.PlaceReadAt["country/site"].Equal(readAt) {
+			t.Fatalf("the next run's arguments lost the place-read clock: %+v", args)
 		}
 		if delay := runAt.Sub(before); delay < providerEgressTlsJudgeInterval || providerEgressTlsJudgeInterval+time.Minute < delay {
 			t.Fatalf("the next run is %s out, want %s", delay, providerEgressTlsJudgeInterval)
@@ -194,8 +208,9 @@ func TestProviderEgressTlsJudgePostCarriesTheClock(t *testing.T) {
 			ScheduleJudgeProviderEgressTlsFindings(clientSession, tx)
 		})
 		args, rescheduledAt := readArgs()
-		if len(args.UnservedSince) != 1 || !args.UnservedSince["left-site"].Equal(leftAt) {
-			t.Fatalf("the startup schedule reset the clock: %+v", args)
+		if len(args.UnservedSince) != 1 || !args.UnservedSince["left-site"].Equal(leftAt) ||
+			len(args.PlaceReadAt) != 1 || !args.PlaceReadAt["country/site"].Equal(readAt) {
+			t.Fatalf("the startup schedule reset the clocks: %+v", args)
 		}
 		if !rescheduledAt.Before(runAt) {
 			t.Fatalf("the startup schedule did not bring the run forward: %s, was %s", rescheduledAt, runAt)
