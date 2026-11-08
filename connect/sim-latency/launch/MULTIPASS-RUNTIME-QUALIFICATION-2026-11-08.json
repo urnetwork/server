@@ -1,0 +1,62 @@
+{
+  "schema": 1,
+  "kind": "competition-review-runtime-and-control-capture-checkpoint/v1",
+  "recorded_at": "2026-11-08T04:23:04Z",
+  "qualified_source_commit": "db9b86a272acdff14df2ce19539d5e7a42072e54",
+  "pushed_server_main": "0a1bea9f63b01d06d59b520e7668be39df6e39bd",
+  "offline_qualification": {
+    "focused_passes": 16,
+    "ordinary_passes": 129,
+    "race_passes": 129,
+    "failures": 0,
+    "skips": 0,
+    "nested_events": 0,
+    "race_findings": 0,
+    "summary": "/home/by/urnetwork/temp/native-db9-final-qualified-20261108.zZF5guxR/summary.txt",
+    "summary_sha256": "515cf6b4946875d2b6cfa3881c91c168de81ede51a2c9dc9c41903543067bd39",
+    "merged_tree_narrow_passes": 10,
+    "merged_tree_summary_sha256": "c10e892c929aeb4c577dd2757312e667468b0e160a94f27792509209b85d3906"
+  },
+  "installed_release": "/usr/local/libexec/urnetwork/competition-review-multipass-db9b86a27-20261108-v1",
+  "review_image_id": "sha256:ade1038f2b027d05a510d53d176f7758127c2fa5202cf67e812d9645af6d260c",
+  "runtime_bootstrap": {
+    "complete": true,
+    "tokenize_only": true,
+    "model_generation_calls": 0,
+    "actual_context_limits": {
+      "qwen": 98304,
+      "gemma": 131072
+    },
+    "report": "/var/lib/urnetwork/competition-epoch1-review-20261108-v1/runtime-bootstrap-db9-v1/runtime-report.json",
+    "report_sha256": "9cded4a3fe3ffcaefd621fdf24169a25f22db454ef104729d803372880d8f315",
+    "checkpoint_evidence_kind": "trusted_deployment_declaration_not_weight_attestation",
+    "same_original_owner": true,
+    "no_clock_renewal": true,
+    "pre_owner_vault_guard_refusal_preserved": true
+  },
+  "control_qualification": {
+    "state": "CAPTURE_RUNNING_NOT_YET_QUALIFIED",
+    "unit": "urnetwork-review-qg-controls-db9-20261108-v1.service",
+    "owner_id": "836312ee21ec8af81af0d40f17a765cec42a165a4fc2d5dce8f0885bee2f1e3d",
+    "started_at": "2026-11-08T04:08:27.125227276Z",
+    "deadline": "2026-11-09T04:08:27.125227276Z",
+    "plan_sha256": "72cc144ce30ada89b383d40642fa794a57819b8cf008c4bfea62f5b767c87aed",
+    "cases": 19,
+    "planned_generation_calls": 288,
+    "planned_tokenizer_invocations": 468,
+    "planned_cancellations": 1,
+    "all_frozen_leaf_preflights_before_generation": true,
+    "required_local_peak_bytes": 5000585001,
+    "required_memory_bytes": 4516760934,
+    "protected_byte_ceiling": 137438953472,
+    "protected_capacity_basis": "Bounded allocation below the operator-approved 10TB; not an attestation of backend free capacity.",
+    "source_and_raw_response_limits_unchanged": true,
+    "original_results_must_be_retained": true
+  },
+  "candidate_generation_started": false,
+  "winner_approved": false,
+  "reward_release_authorized": false,
+  "source_promotion_authorized": false,
+  "calibration_accepted": false,
+  "remaining": "Finish and replay the genuine nineteen-control qualification. Only then capture the elected candidate's complete-source review, preserve every finding/uncertainty, and present it for explicit operator winner approval acknowledging unaccepted calibration. Review API rollout and separate review_operator credential remain unverified/pending; never restart an uncertain model draw or renew the frozen owner."
+}
