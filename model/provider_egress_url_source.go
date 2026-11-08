@@ -1,5 +1,12 @@
 package model
 
+import (
+	"context"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+)
+
 // Where a URL outcome's destination came from, and whether it scores (D3,
 // REVIEW-INDEPENDENT.md; db_provider_egress_url_source.go).
 //
@@ -14,7 +21,10 @@ package model
 // The operator ingest decides both at the store, from the catalog, the pool
 // and the country sites' states as they stand, and records them beside the
 // outcome
-// (provider_egress_health_history url_source and url_probation). An outcome on
+// (provider_egress_health_history url_source and url_probation). An outcome
+// whose destination the storing host cannot place, in neither its catalog's
+// country lists nor the pool, is recorded as unrecognized and on probation:
+// the ingest fails closed rather than score it as general. An outcome on
 // probation is a measured run like any other: it is in the history with its
 // outcome and in the rolling quota, which paces turns by measured runs. What
 // it may not do is count: the eight-hour window every bucket, the index and
@@ -33,12 +43,22 @@ const (
 	ProviderEgressUrlSourceGeneral ProviderEgressUrlSource = 0
 	// The country list served for the provider's published country.
 	ProviderEgressUrlSourceCountry ProviderEgressUrlSource = 1
+	// A destination the storing host cannot place: neither one of the
+	// country sites of its catalog nor in the general pool. A country site
+	// arrives this way while a new catalog version has reached the host that
+	// served the prober but not yet the host that stores the outcome (config
+	// hosts lag each other by about two minutes), or while the storing host
+	// cannot parse the current catalog. Such an outcome is stored on
+	// probation, so it fails closed: it can never be scored as a general
+	// outcome or reach the Online rule.
+	ProviderEgressUrlSourceUnrecognized ProviderEgressUrlSource = 2
 )
 
 // Every source, in value order.
 var ProviderEgressUrlSources = []ProviderEgressUrlSource{
 	ProviderEgressUrlSourceGeneral,
 	ProviderEgressUrlSourceCountry,
+	ProviderEgressUrlSourceUnrecognized,
 }
 
 // The source's metric label.
@@ -48,8 +68,43 @@ func (self ProviderEgressUrlSource) String() string {
 		return "general"
 	case ProviderEgressUrlSourceCountry:
 		return "country"
+	case ProviderEgressUrlSourceUnrecognized:
+		return "unrecognized"
 	default:
 		return "unknown"
+	}
+}
+
+// Whether the general pool holds the named destination: it has an active row,
+// served scored or on probation. A general outcome is placed by its pool row,
+// whose probation the store reads; an outcome whose destination has none, and
+// is not one of the host's country sites, is unrecognized
+// (ProviderEgressUrlSourceUnrecognized).
+func ProviderEgressDestinationInPool(ctx context.Context, name string) bool {
+	var inPool bool
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM provider_egress_destination WHERE name = $1 AND active
+		)`, name).Scan(&inPool))
+	})
+	return inPool
+}
+
+// Puts each destination in the general pool, active and scored, as the pool
+// serves a configured destination, so the URL outcomes a test submits through
+// the ingest for it are placed as general (ProviderEgressDestinationInPool).
+func Testing_ServeProviderEgressDestinations(ctx context.Context, destinations ...egresshealth.Destination) {
+	for _, destination := range destinations {
+		SetProviderEgressDestination(ctx, &ProviderEgressDestination{
+			Name:     destination.Name,
+			Class:    string(destination.Class),
+			Url:      destination.Url,
+			Expect:   "body",
+			Category: "reference",
+			Region:   "global",
+			Source:   ProviderEgressDestinationSourceBuiltin,
+			Active:   true,
+		})
 	}
 }
 

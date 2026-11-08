@@ -55,6 +55,11 @@
 // defaults, and their readers count every outcome as before until they are
 // replaced. Apply before deploying the api, alt, taskworker and proxy that use
 // it.
+//
+// Add country lists to qualityprobe.yml only once the release that uses this
+// migration runs on every host that stores outcomes: api, alt, and every
+// taskworker with operator_transport: local. An older host stores a country
+// outcome as a scored general one, Online included.
 package server
 
 // The migration's statement. Every step does nothing once done, so a failed

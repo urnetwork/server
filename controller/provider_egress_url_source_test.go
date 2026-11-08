@@ -301,10 +301,75 @@ func TestProviderEgressUrlRecheckOfACountrySiteStaysSecurityOnly(t *testing.T) {
 	})
 }
 
+// R5: an outcome on a destination this host cannot place, in neither its
+// catalog's country lists nor the pool, is recorded as unrecognized and on
+// probation. It stays out of the eight-hour window, so it is never scored as
+// general and never reaches the Online rule, and it still counts in the
+// rolling quota as the measured run it is. A country site arrives this way
+// while a catalog version that adds it has reached the host that served the
+// prober but not this one, and every country site does while this host
+// cannot parse the current catalog; a destination the pool holds is still
+// general and scored then. Before the fix both country outcomes were stored
+// as scored general outcomes, Online included.
+func TestProviderEgressUrlOutcomeTheHostCannotPlaceFailsClosed(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		pushProviderEgressUrlSourceTestCatalog(t, ctx)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		cycleStartedAt := now.Add(-time.Hour)
+		provider := func() server.Id {
+			clientId := server.NewId()
+			createProviderEgressUrlSourceTestCycle(t, ctx, clientId, cycleStartedAt)
+			return clientId
+		}
+		counter := func(source string, scoring string) float64 {
+			return testutil.ToFloat64(providerEgressUrlOutcomesTotal.WithLabelValues(source, scoring, "success"))
+		}
+		unrecognized, generalScored := counter("unrecognized", "probation"), counter("general", "scored")
+
+		// a country site of a catalog version this host has not received yet
+		lagging := provider()
+		submitProviderEgressUrlSourceTestOutcome(t, ctx, lagging, cycleStartedAt, now.Add(-3*time.Minute), "fr-site", "https://fr-news.example/", true)
+		// this host cannot parse the current catalog: its country sites cannot
+		// be placed, while the pool's sites still can
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte("schema_version: 2\n")))
+		unparsed, pooled := provider(), provider()
+		submitProviderEgressUrlSourceTestOutcome(t, ctx, unparsed, cycleStartedAt, now.Add(-2*time.Minute), "de-site", "https://de-news.example/", true)
+		submitProviderEgressUrlSourceTestOutcome(t, ctx, pooled, cycleStartedAt, now.Add(-time.Minute), "general-site", "https://general.example/", true)
+
+		counts := model.GetAllProviderEgressHealthCounts(ctx)
+		for name, clientId := range map[string]server.Id{"fr-site": lagging, "de-site": unparsed} {
+			if c, ok := counts[clientId]; ok {
+				t.Errorf("%s: an outcome this host cannot place counted %d/%d in the eight-hour window (general %+v)", name, c.OKCount, c.Total, c.General)
+			}
+			var source int
+			var probation, quotaRun bool
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT url_source, url_probation, url_probe AND total_count = 1
+					FROM provider_egress_health_history WHERE client_id = $1`, clientId).Scan(&source, &probation, &quotaRun))
+			})
+			if source != int(model.ProviderEgressUrlSourceUnrecognized) || !probation || !quotaRun {
+				t.Errorf("%s: recorded source %d probation %t quota run %t, want unrecognized on probation and a quota run", name, source, probation, quotaRun)
+			}
+		}
+		// General is nil when every scored outcome is general
+		if c := counts[pooled]; c.OKCount != 1 || c.Total != 1 || c.General != nil {
+			t.Errorf("a pool site's outcome counted %+v while the catalog cannot be parsed, want 1/1, all general", c)
+		}
+		if got := counter("unrecognized", "probation") - unrecognized; got != 2 {
+			t.Errorf("%v unrecognized outcomes counted on probation, want 2", got)
+		}
+		if got := counter("general", "scored") - generalScored; got != 1 {
+			t.Errorf("%v scored general outcomes counted, want only the pool site's", got)
+		}
+	})
+}
+
 // The ingest reads each outcome's source from the served catalog: a name in a
-// country list is a country site of that country; anything else is general.
-// What the store makes of it is the site's graduation state or the pool's
-// probation.
+// country list is a country site of that country; anything else is general
+// here, and the ingest then holds it to the pool
+// (TestProviderEgressUrlOutcomeTheHostCannotPlaceFailsClosed). What the store
+// makes of it is the site's graduation state or the pool's probation.
 func TestProviderEgressUrlSourcesOfTheServedCatalog(t *testing.T) {
 	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, providerEgressUrlSourceTestCatalog))
 	sources := getProviderEgressUrlSources()
@@ -335,9 +400,11 @@ func TestProviderEgressUrlSourcesOfTheServedCatalog(t *testing.T) {
 	}
 }
 
-// A catalog that does not parse classifies every outcome general, as before
-// the source was recorded, and is parsed once per retry interval rather than
-// once per outcome; a changed catalog is parsed at once.
+// A catalog that does not parse names no country site, so the classifier
+// leaves every outcome to the pool (an outcome the pool does not hold is then
+// unrecognized, TestProviderEgressUrlOutcomeTheHostCannotPlaceFailsClosed),
+// and it is parsed once per retry interval rather than once per outcome; a
+// changed catalog is parsed at once.
 func TestProviderEgressUrlSourcesParseAnUnusableCatalogOncePerRetry(t *testing.T) {
 	parses := 0
 	parse := providerEgressUrlSourcesParse

@@ -25,9 +25,12 @@ import (
 // therefore derived here, from the served catalog, which is what decided the
 // draw: a destination named in a country list is a country site (the parse
 // keeps country sites disjoint from every general entry by name and website,
-// ParseProviderEgressSites), anything else general. The store decides
-// probation from the pool and from each country site's graduation state
-// (model/provider_egress_country_site.go).
+// ParseProviderEgressSites), and one the pool holds is general. One that is
+// neither is unrecognized and stored on probation: this host cannot place it,
+// so it fails closed rather than count as general (a country site from a
+// catalog version this host has not received yet, or from one it cannot
+// parse). The store decides probation from the pool and from each country
+// site's graduation state (model/provider_egress_country_site.go).
 
 // The country site names of one qualityprobe.yml version, each with the
 // countries whose lists hold it, in order.
@@ -91,8 +94,9 @@ var providerEgressUrlSourcesUnreadable = struct {
 
 // The country sites of the served catalog. A catalog that cannot be read
 // serves no pool either (GetProviderEgressDestinationPool), so no prober draws
-// a country site from it; its outcomes are general, as every outcome was
-// before the source was recorded.
+// from it; but a prober can still hold a pool drawn from an earlier version,
+// so while it cannot be read only the pool places an outcome, and a country
+// site's outcome is unrecognized, on probation.
 func getProviderEgressUrlSources() *providerEgressUrlSources {
 	resource, err := server.Config.SimpleResource(model.ProviderEgressSitesResourceName)
 	if err != nil {
@@ -128,7 +132,7 @@ func logProviderEgressUrlSourcesUnreadable(err error) {
 	}
 	providerEgressUrlSourcesUnreadable.Unlock()
 	if due {
-		glog.Errorf("[egress]the qualityprobe.yml catalog cannot be read (%v); URL outcomes are stored as general until it can\n", err)
+		glog.Errorf("[egress]the qualityprobe.yml catalog cannot be read (%v); until it can, only the pool places URL outcomes, and a country site's are stored unrecognized, on probation\n", err)
 	}
 }
 
@@ -144,7 +148,7 @@ var providerEgressUrlOutcomesTotal = prometheus.NewCounterVec(prometheus.Counter
 	Namespace: "urnetwork",
 	Subsystem: "egress_url",
 	Name:      "outcomes_total",
-	Help:      "Measured URL outcomes the operator ingest stored, by the catalog their destination came from (source: general or country), how they counted (scoring: scored, in the eight-hour window; probation, a country site or a general site the refresh has not graduated, recorded and in the rolling quota but never scored; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome (success or error)",
+	Help:      "Measured URL outcomes the operator ingest stored, by the catalog their destination came from (source: general or country; unrecognized, in neither the storing host's country lists nor the pool, which fails closed on probation), how they counted (scoring: scored, in the eight-hour window; probation, a country site or a general site the refresh has not graduated, or an unrecognized destination, recorded and in the rolling quota but never scored; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome (success or error)",
 }, []string{"source", "scoring", "outcome"})
 
 // Registers the outcome counter with every label set it can produce.
