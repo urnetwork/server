@@ -32,6 +32,12 @@
     "focused_log_sha256": "ab86a41edd997d5bc13ccff40c1845fbea35f49995d7fb5f300bfb717fe842eb",
     "ordinary_log_sha256": "9a3a9d2ba977c80fa9df63903c1fecb976f5fa068a625637ba3aff3feb817af3",
     "race_log_sha256": "2f18ea26ce55f67a5e0085ffdb51d224a46d80aa086f0679bb4d2b09e55abe73",
+    "summary_sha256": "a8d5499bfe4c2e398e4156307017ece3c8b8cf36e142322322e15fb3256f939f",
+    "dependency_graph_before_and_after_sha256": "d82b582765f2d321dfb7a9966d8ffa6e33525f63de90c8bf74d80538d9c9d096",
+    "dependency_graph_unchanged": true,
+    "source_test_census": 136,
+    "causal_red_regression_git_blob": "615cd9b41f6f14a363a38f6ebc9b03a30586fd76",
+    "causal_regression_unchanged": true,
     "qualification_complete": false
   },
   "authority": {
