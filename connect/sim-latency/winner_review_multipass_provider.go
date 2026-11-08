@@ -84,25 +84,26 @@ type winnerMultipassBrokerEnvelope struct {
 // Fixed artifact names are authenticated by the outer containment manifest.
 // Host capture must retain their original bytes, not only these references.
 type winnerMultipassBrokerResult struct {
-	Schema                    int                        `json:"schema"`
-	Kind                      string                     `json:"kind"`
-	Operation                 string                     `json:"operation"`
-	CallId                    string                     `json:"call_id"`
-	RequestSha256             string                     `json:"request_sha256"`
-	StartedAt                 time.Time                  `json:"started_at"`
-	CompletedAt               time.Time                  `json:"completed_at"`
-	Admission                 *winnerMultipassAdmission  `json:"admission"`
-	TokenizerRequestArtifact  string                     `json:"tokenizer_request_artifact"`
-	TokenizerResponseArtifact string                     `json:"tokenizer_response_artifact"`
-	VisibleResponse           []byte                     `json:"visible_response"`
-	VisibleResponseSha256     string                     `json:"visible_response_sha256"`
-	TransportResponseSha256   string                     `json:"transport_response_sha256"`
-	TransportStatus           int                        `json:"transport_status"`
-	TransportContentType      string                     `json:"transport_content_type"`
-	TransportResponseArtifact string                     `json:"transport_response_artifact"`
-	ProviderOutput            string                     `json:"provider_output"`
-	Observation               winnerMultipassObservation `json:"observation"`
-	Error                     string                     `json:"error"`
+	Schema                    int                                `json:"schema"`
+	Kind                      string                             `json:"kind"`
+	Operation                 string                             `json:"operation"`
+	CallId                    string                             `json:"call_id"`
+	RequestSha256             string                             `json:"request_sha256"`
+	StartedAt                 time.Time                          `json:"started_at"`
+	CompletedAt               time.Time                          `json:"completed_at"`
+	Admission                 *winnerMultipassAdmission          `json:"admission"`
+	TokenizerRequestArtifact  string                             `json:"tokenizer_request_artifact"`
+	TokenizerResponseArtifact string                             `json:"tokenizer_response_artifact"`
+	VisibleResponse           []byte                             `json:"visible_response"`
+	VisibleResponseSha256     string                             `json:"visible_response_sha256"`
+	TransportResponseSha256   string                             `json:"transport_response_sha256"`
+	TransportStatus           int                                `json:"transport_status"`
+	TransportContentType      string                             `json:"transport_content_type"`
+	TransportResponseArtifact string                             `json:"transport_response_artifact"`
+	ProviderOutput            string                             `json:"provider_output"`
+	Observation               winnerMultipassObservation         `json:"observation"`
+	RuntimeObservation        *winnerMultipassRuntimeObservation `json:"runtime_observation,omitempty"`
+	Error                     string                             `json:"error"`
 }
 
 // Only this exact payload shape is renderable/admissible; unsupported Responses
@@ -204,6 +205,9 @@ func validateWinnerMultipassBrokerEnvelope(envelope winnerMultipassBrokerEnvelop
 		limits.MaximumVisibleTerminalBytes <= 0 || limits.MaximumVisibleTerminalBytes > ceiling.MaximumVisibleTerminalBytes || limits.TokenizerTimeout <= 0 || limits.TokenizerTimeout > ceiling.TokenizerTimeout ||
 		limits.GenerationTimeout <= 0 || limits.GenerationTimeout > ceiling.GenerationTimeout {
 		return errors.New("multi-pass provider limits disable or exceed the qualified containment bounds")
+	}
+	if envelope.Kind == winnerMultipassRuntimeProbeKind {
+		return validateWinnerMultipassRuntimeProbeEnvelope(envelope, now, limits)
 	}
 	operationTimeout, err := winnerMultipassOperationTimeout(envelope.Operation, limits)
 	if err != nil {
@@ -478,8 +482,16 @@ func executeWinnerMultipassBroker(ctx context.Context, client *http.Client, enve
 		return result, err
 	}
 	work := func() error {
-		if err := requireWinnerMultipassResident(ctx, client, provider, envelope.Call.Member, limits, envelope.AllowModelLoad); err != nil {
-			return err
+		if envelope.Kind == winnerMultipassRuntimeProbeKind {
+			var err error
+			result.RuntimeObservation, err = observeWinnerMultipassRuntime(ctx, client, envelope, provider, limits)
+			if err != nil {
+				return err
+			}
+		} else {
+			if err := requireWinnerMultipassResident(ctx, client, provider, envelope.Call.Member, limits, envelope.AllowModelLoad); err != nil {
+				return err
+			}
 		}
 		if envelope.Operation == "tokenize" {
 			request, err := winnerMultipassTokenizerPayload(envelope)
@@ -517,6 +529,12 @@ func executeWinnerMultipassBroker(ctx context.Context, client *http.Client, enve
 				return errors.New("Snow tokenizer returned clipped, invalid or changed runtime metadata")
 			}
 			tokenBytes, _ := json.Marshal(decoded.Tokens)
+			if envelope.Kind == winnerMultipassRuntimeProbeKind {
+				observation := result.RuntimeObservation
+				observation.ObservedMaximumContextTokens, observation.InputTokens = decoded.MaximumModelLen, decoded.Count
+				observation.RenderedPromptSha256, observation.TokenizerRequestSha256, observation.TokenizerResponseSha256 = winnerMultipassSha256(tokenBytes), winnerMultipassSha256(request), winnerMultipassSha256(response)
+				return validateWinnerMultipassRuntimeObservation(envelope, observation, request, response)
+			}
 			result.Admission = &winnerMultipassAdmission{CallId: envelope.Call.Id, RequestSha256: result.RequestSha256, Model: envelope.Call.Member.Model, Revision: envelope.Call.Member.Revision,
 				TokenizerContractSha256: winnerMultipassTokenizerContractSha256(), RenderedPromptSha256: winnerMultipassSha256(tokenBytes), TokenizerRequestSha256: winnerMultipassSha256(request),
 				TokenizerResponseSha256: winnerMultipassSha256(response), MaximumContextTokens: decoded.MaximumModelLen, InputTokens: decoded.Count, OutputTokens: envelope.Settings.MaximumOutputTokens, NoTruncation: true}

@@ -103,10 +103,19 @@ func validateWinnerMultipassJournalBytes(artifacts map[string][]byte, pin curren
 	if result.Error != "" {
 		return nil
 	}
+	if envelope.Kind != winnerMultipassRuntimeProbeKind && result.RuntimeObservation != nil {
+		return errors.New("normal review result contains synthetic bootstrap evidence")
+	}
 	if !result.CompletedAt.Before(envelope.Owner.Deadline) || !result.CompletedAt.Before(envelope.CallDeadline) || result.TransportStatus != 200 {
 		return errors.New("successful multi-pass result is late or lacks a successful original HTTP terminal")
 	}
 	if envelope.Operation == "tokenize" {
+		if envelope.Kind == winnerMultipassRuntimeProbeKind {
+			if result.Admission != nil || result.RuntimeObservation == nil || len(leaves) != 4 {
+				return errors.New("runtime probe acquired generation admission or lost original journals")
+			}
+			return validateWinnerMultipassRuntimeObservation(envelope, result.RuntimeObservation, artifacts["tokenize.request.json"], artifacts["tokenize.response.json"])
+		}
 		if result.Admission == nil || len(leaves) != 4 {
 			return errors.New("successful tokenization lacks its complete original census")
 		}
