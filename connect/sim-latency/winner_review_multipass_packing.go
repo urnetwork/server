@@ -20,6 +20,54 @@ type winnerMultipassPacking struct {
 	FinalAdmissions []winnerMultipassAdmission `json:"final_admissions"`
 }
 
+// A caller can batch one fixed member across several closed controls without
+// borrowing any observation or token count from another candidate. Every probe
+// still renders the complete exact local payload, including over-limit counts.
+func packWinnerMultipassMember(ctx context.Context, plan *winnerMultipassPlan, bundle winnerMultipassBundle, member winnerSnowMember, tokenizer winnerMultipassTokenizer) ([]winnerMultipassScanGroup, []winnerMultipassAdmission, error) {
+	groups, probes := []winnerMultipassScanGroup{}, []winnerMultipassAdmission{}
+	if plan == nil || tokenizer == nil || !((len(plan.Provider.Members) == 2) && (member == plan.Provider.Members[0] || member == plan.Provider.Members[1])) {
+		return groups, probes, errors.New("prospective member packing requires one fixed planned reviewer and tokenizer")
+	}
+	index := 0
+	groupNumber := 0
+	for index < len(plan.Units) {
+		groupNumber++
+		if groupNumber > plan.Settings.MaximumLeafUnits {
+			return groups, probes, errors.New("prospective member packing exceeds its predeclared scan-leaf bound")
+		}
+		accepted := []string{}
+		for end := index; end < len(plan.Units); end++ {
+			if err := ctx.Err(); err != nil {
+				return groups, probes, err
+			}
+			candidate := append(append([]string{}, accepted...), plan.Units[end].Id)
+			call := winnerMultipassCall{Id: fmt.Sprintf("%s-scan-%04d", member.Name, groupNumber), Member: member, Stage: "scan", UnitIds: candidate, Parents: []string{}}
+			payload, err := winnerMultipassCallPayload(plan, bundle, call, map[string]winnerMultipassCallEvidence{})
+			if err != nil {
+				return groups, probes, err
+			}
+			admission, err := tokenizer(ctx, call, payload)
+			probes = append(probes, admission)
+			if err != nil {
+				return groups, probes, err
+			}
+			if err := validateWinnerMultipassTokenization(plan, call, payload, admission); err != nil {
+				return groups, probes, err
+			}
+			if admission.InputTokens > admission.MaximumContextTokens-admission.OutputTokens-plan.Settings.PackingTokenReserve {
+				break
+			}
+			accepted = candidate
+		}
+		if len(accepted) == 0 {
+			return groups, probes, errors.New("one complete coverage atom cannot fit; prospective source segmentation must be revised before any inference")
+		}
+		groups = append(groups, winnerMultipassScanGroup{Member: member.Name, UnitIds: accepted})
+		index += len(accepted)
+	}
+	return groups, probes, nil
+}
+
 // Greedily pack contiguous complete units separately per member using actual
 // full-prompt counts. A final re-render/recount removes the plan-digest cycle.
 // Callers must use this only before durable owner/call freezing; it performs no
@@ -35,40 +83,12 @@ func packWinnerMultipass(ctx context.Context, initial *winnerMultipassPlan, bund
 	result := &winnerMultipassPacking{Plan: &plan, Probes: []winnerMultipassAdmission{}, FinalAdmissions: []winnerMultipassAdmission{}}
 	groups := []winnerMultipassScanGroup{}
 	for _, member := range plan.Provider.Members {
-		index := 0
-		groupNumber := 0
-		for index < len(plan.Units) {
-			groupNumber++
-			accepted := []string{}
-			for end := index; end < len(plan.Units); end++ {
-				if err := ctx.Err(); err != nil {
-					return result, err
-				}
-				candidate := append(append([]string{}, accepted...), plan.Units[end].Id)
-				call := winnerMultipassCall{Id: fmt.Sprintf("%s-scan-%04d", member.Name, groupNumber), Member: member, Stage: "scan", UnitIds: candidate, Parents: []string{}}
-				payload, err := winnerMultipassCallPayload(&plan, bundle, call, map[string]winnerMultipassCallEvidence{})
-				if err != nil {
-					return result, err
-				}
-				admission, err := tokenizer(ctx, call, payload)
-				result.Probes = append(result.Probes, admission)
-				if err != nil {
-					return result, err
-				}
-				if err := validateWinnerMultipassTokenization(&plan, call, payload, admission); err != nil {
-					return result, err
-				}
-				if admission.InputTokens > admission.MaximumContextTokens-admission.OutputTokens-plan.Settings.PackingTokenReserve {
-					break
-				}
-				accepted = candidate
-			}
-			if len(accepted) == 0 {
-				return result, errors.New("one complete coverage atom cannot fit; prospective source segmentation must be revised before any inference")
-			}
-			groups = append(groups, winnerMultipassScanGroup{Member: member.Name, UnitIds: accepted})
-			index += len(accepted)
+		memberGroups, probes, err := packWinnerMultipassMember(ctx, &plan, bundle, member, tokenizer)
+		result.Probes = append(result.Probes, probes...)
+		if err != nil {
+			return result, err
 		}
+		groups = append(groups, memberGroups...)
 	}
 	if err := setWinnerMultipassScanGroups(&plan, groups); err != nil {
 		return result, err
