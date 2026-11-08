@@ -24,8 +24,12 @@ func validateWinnerMultipassQualificationClaim(content []byte, plan *winnerMulti
 	}
 	planBytes, _ := json.Marshal(plan)
 	admissionBytes, _ := json.Marshal(envelope.Admission)
+	operationTimeout, err := winnerMultipassOperationTimeout(envelope.Operation, defaultWinnerMultipassProviderLimits())
+	if err != nil {
+		return err
+	}
 	if claim.Schema != 1 || claim.GroupSha256 != winnerMultipassSha256(planBytes) || !reflect.DeepEqual(claim.Invocation, capture.Invocation) || claim.Owner != envelope.Owner || claim.PayloadSha256 != winnerMultipassSha256(envelope.Payload) || claim.AdmissionSha256 != winnerMultipassSha256(admissionBytes) || claim.CallDeadline != envelope.CallDeadline ||
-		claim.StartedAt.Before(plan.Owner.StartedAt) || !claim.StartedAt.Before(plan.Owner.Deadline) || !claim.CallDeadline.After(claim.StartedAt) || claim.CallDeadline.After(plan.Owner.Deadline) || claim.CallDeadline.Sub(claim.StartedAt) > defaultWinnerMultipassProviderLimits().GenerationTimeout ||
+		claim.StartedAt.Before(plan.Owner.StartedAt) || !claim.StartedAt.Before(plan.Owner.Deadline) || !claim.CallDeadline.After(claim.StartedAt) || claim.CallDeadline.Sub(claim.StartedAt) > operationTimeout || claim.CallDeadline.After(plan.Owner.Deadline) ||
 		capture.Claim.Sha256 != winnerMultipassSha256(content) || envelope.Operation == "generate" && envelope.AuthorizedClaimSha256 != capture.Claim.Sha256 {
 		return errors.New("qualification claim substituted its owner, input, operation or deadline")
 	}

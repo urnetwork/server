@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -119,13 +120,14 @@ func TestWinnerMultipassComposedProviderToTwelveOriginalFindings(t *testing.T) {
 		}
 		output, _ := json.Marshal(observation)
 		client := winnerMultipassProviderClient(t, plan, call, string(output), &generations)
-		envelope := winnerMultipassBrokerEnvelope{Schema: 1, Kind: "winner-review-multipass-call/v1", Operation: "tokenize", Owner: plan.Owner, CallDeadline: time.Now().UTC().Add(10 * time.Minute),
+		envelope := winnerMultipassBrokerEnvelope{Schema: 1, Kind: "winner-review-multipass-call/v1", Operation: "tokenize", Owner: plan.Owner, CallDeadline: time.Now().UTC().Add(defaultWinnerMultipassProviderLimits().TokenizerTimeout),
 			PlanSha256: evidence.PlanSha256, BundleSha256: plan.BundleSha256, Call: call, Payload: payload, Settings: plan.Settings}
 		tokenDirectory := winnerMultipassProviderDirectory(t)
 		tokenResult, err := executeWinnerMultipassBroker(context.Background(), client, envelope, plan.Provider, tokenDirectory, defaultWinnerMultipassProviderLimits())
 		if err != nil {
 			t.Fatal(err)
 		}
+		assertWinnerMultipassJournalCensus(t, tokenDirectory, []string{"call.complete.json", "call.started.json", "tokenize.request.json", "tokenize.response.json"})
 		requestBytes, err := os.ReadFile(filepath.Join(tokenDirectory, tokenResult.TokenizerRequestArtifact))
 		if err != nil || winnerMultipassSha256(requestBytes) != tokenResult.Admission.TokenizerRequestSha256 {
 			t.Fatal("original tokenizer request was not retained")
@@ -142,6 +144,7 @@ func TestWinnerMultipassComposedProviderToTwelveOriginalFindings(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		assertWinnerMultipassJournalCensus(t, directory, []string{"call.complete.json", "call.started.json", "transport.response"})
 		raw, err := os.ReadFile(filepath.Join(directory, result.TransportResponseArtifact))
 		if err != nil || winnerMultipassSha256(raw) != result.TransportResponseSha256 {
 			t.Fatal("full original visible transport was lost")
@@ -155,6 +158,24 @@ func TestWinnerMultipassComposedProviderToTwelveOriginalFindings(t *testing.T) {
 	combined, err := validateWinnerMultipassEvidence(plan, bundle, evidence)
 	if err != nil || combined.Decision != "approve" || len(combined.Findings) != 12 || generations != len(plan.Calls) {
 		t.Fatalf("composed evidence failed: %s %v generations=%d", combined.Decision, err, generations)
+	}
+}
+
+func assertWinnerMultipassJournalCensus(t *testing.T, directory string, expected []string) {
+	t.Helper()
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			t.Fatal("journal contained a non-regular leaf")
+		}
+		names = append(names, entry.Name())
+	}
+	if !slices.Equal(names, expected) {
+		t.Fatalf("actual emitted journal census changed: %v expected %v", names, expected)
 	}
 }
 

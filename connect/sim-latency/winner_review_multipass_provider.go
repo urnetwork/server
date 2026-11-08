@@ -49,6 +49,19 @@ func defaultWinnerMultipassProviderLimits() winnerMultipassProviderLimits {
 		TokenizerTimeout: 5 * time.Minute, GenerationTimeout: 30 * time.Minute}
 }
 
+// One operation shares one total deadline across residency, rendering and HTTP.
+// A pre-provider cancellation has the tokenizer bound, never the generation one.
+func winnerMultipassOperationTimeout(operation string, limits winnerMultipassProviderLimits) (time.Duration, error) {
+	switch operation {
+	case "tokenize", "qualification_cancel_before_provider":
+		return limits.TokenizerTimeout, nil
+	case "generate":
+		return limits.GenerationTimeout, nil
+	default:
+		return 0, errors.New("unknown bounded multi-pass operation")
+	}
+}
+
 // The parent binds this exact payload to its durable owner/claim and full plan.
 // Complete source bundles stay outside the provider container; no parent mount
 // or model-selected retrieval can inject additional source.
@@ -192,13 +205,17 @@ func validateWinnerMultipassBrokerEnvelope(envelope winnerMultipassBrokerEnvelop
 		limits.GenerationTimeout <= 0 || limits.GenerationTimeout > ceiling.GenerationTimeout {
 		return errors.New("multi-pass provider limits disable or exceed the qualified containment bounds")
 	}
+	operationTimeout, err := winnerMultipassOperationTimeout(envelope.Operation, limits)
+	if err != nil {
+		return err
+	}
 	if envelope.Schema != 1 || envelope.Kind != "winner-review-multipass-call/v1" || (envelope.Operation != "tokenize" && envelope.Operation != "generate") ||
 		!validSha256(envelope.PlanSha256) || !validSha256(envelope.BundleSha256) || !slices.Contains(provider.Members, envelope.Call.Member) ||
 		!regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`).MatchString(envelope.Call.Id) || !strings.HasPrefix(envelope.Call.Id, envelope.Call.Member.Name+"-") ||
 		(envelope.Call.Stage != "scan" && envelope.Call.Stage != "merge" && envelope.Call.Stage != "final") ||
 		envelope.Owner.Id == "" || envelope.Owner.StartedAt.IsZero() || now.Before(envelope.Owner.StartedAt) || !now.Before(envelope.Owner.Deadline) ||
 		envelope.Owner.Deadline.Sub(envelope.Owner.StartedAt) > envelope.Settings.MaximumOwnerDuration || !envelope.CallDeadline.After(now) ||
-		envelope.CallDeadline.After(envelope.Owner.Deadline) || envelope.CallDeadline.Sub(now) > limits.GenerationTimeout {
+		envelope.CallDeadline.After(envelope.Owner.Deadline) || envelope.CallDeadline.Sub(now) > operationTimeout {
 		return errors.New("multi-pass contained envelope identity or immutable clock is invalid")
 	}
 	profile, found := envelope.Settings.TokenizationProfiles[envelope.Call.Member.Name]
