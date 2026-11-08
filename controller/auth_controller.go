@@ -533,7 +533,14 @@ func enrollAuthVerifyOnboardingPostPrimary(
 
 type RefreshTokenError struct {
 	Message string `json:"message"`
+	// A structured code a client acts on. restore_required alone so far, which
+	// is no refusal (RefreshToken).
+	Code string `json:"code,omitempty"`
 }
+
+// A strict_exp refresh's answer while api lacks the sidecar's identity, binding
+// or a registration, as after a Postgres restore (§5.6, §19.10).
+const RefreshTokenCodeRestoreRequired = "restore_required"
 
 type RefreshTokenResult struct {
 	ByJwt string             `json:"by_jwt,omitempty"`
@@ -598,6 +605,19 @@ func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, er
 		return &RefreshTokenResult{
 			Error: &RefreshTokenError{
 				Message: "Client does not belong to the authenticated network.",
+			},
+		}, nil
+	}
+
+	// §5.6, §19.10: after a Postgres restore api may lack a sidecar's identity,
+	// binding or registrations. That answer is no refusal, and only a strict_exp
+	// bearer, a sidecar's, gets it: the sidecar posts its newest binding again,
+	// re-registers, and refreshes again, its token still good.
+	if clientSession.ByJwt.StrictExp && model.SidecarRestoreRequired(clientSession.Ctx, networkId, *clientSession.ByJwt.ClientId) {
+		return &RefreshTokenResult{
+			Error: &RefreshTokenError{
+				Message: "Re-register this sidecar, then refresh again.",
+				Code:    RefreshTokenCodeRestoreRequired,
 			},
 		}, nil
 	}

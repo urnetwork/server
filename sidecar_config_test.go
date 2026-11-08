@@ -1,13 +1,17 @@
 package server
 
 import (
+	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
 
-// sidecar.yml's reader (sidecar_config.go). Pure: an override stands in for the
-// file, and a fake clock moves the rereads.
+// sidecar.yml's reader (sidecar_config.go). Pure: an override or a config home
+// in the test's own directory stands in for the file, and a fake clock moves the
+// rereads.
 
 func newTestSidecarConfigReader(load func(previous *SidecarConfig) *SidecarConfig) (*sidecarConfigReader, *time.Time) {
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
@@ -17,15 +21,96 @@ func newTestSidecarConfigReader(load func(previous *SidecarConfig) *SidecarConfi
 	return reader, &now
 }
 
+// Points Config at a new, empty config home for the rest of the test.
+func newTestSidecarConfigHome(t *testing.T) string {
+	t.Helper()
+	home := filepath.Join(t.TempDir(), "config")
+	if err := os.Mkdir(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARP_CONFIG_HOME", home)
+	return home
+}
+
 // Absent, the file is inert: nothing enforces and nothing is previewed. Stage 1
-// is log-only, and a strict_exp mint is refused.
+// is log-only, and a strict_exp mint is refused. A home that is not there is
+// absent too.
 func TestSidecarConfigIsInertWhenAbsent(t *testing.T) {
+	home := newTestSidecarConfigHome(t)
 	config := loadSidecarConfig(nil)
 	if config.P0Enforce {
 		t.Fatal("an absent file enforces")
 	}
 	if config.PreviewNetwork(NewId()) {
 		t.Fatal("an absent file previews a network")
+	}
+
+	// the answer came from this home: a file put there is read
+	if err := os.WriteFile(filepath.Join(home, sidecarConfigResourceName), []byte("sidecar:\n  p0_enforce: {enabled: true}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !loadSidecarConfig(nil).P0Enforce {
+		t.Fatal("the test's config home is not the one read")
+	}
+
+	t.Setenv("WARP_CONFIG_HOME", filepath.Join(t.TempDir(), "absent"))
+	if loadSidecarConfig(nil).P0Enforce {
+		t.Fatal("a file in a home that is not there enforces")
+	}
+}
+
+// A file that is there but cannot be read is not an absent one, so it does not
+// loosen a gate: on a process's first read it enforces and previews nothing, and
+// after a good read it keeps that read. The same holds when what cannot be read
+// is the home the file would be in.
+func TestSidecarConfigFailsClosedWhenUnavailable(t *testing.T) {
+	networkId := NewId()
+	for _, c := range []struct {
+		name  string
+		place func(home string) error
+	}{
+		{name: "a dangling link", place: func(home string) error {
+			return os.Symlink(filepath.Join(home, "missing.yml"), filepath.Join(home, sidecarConfigResourceName))
+		}},
+		{name: "a directory", place: func(home string) error {
+			return os.Mkdir(filepath.Join(home, sidecarConfigResourceName), 0o700)
+		}},
+		{name: "a home that is a dangling link", place: func(home string) error {
+			if err := os.Remove(home); err != nil {
+				return err
+			}
+			return os.Symlink(home+".missing", home)
+		}},
+		{name: "a home that is a file", place: func(home string) error {
+			if err := os.Remove(home); err != nil {
+				return err
+			}
+			return os.WriteFile(home, []byte("synthetic: true\n"), 0o600)
+		}},
+	} {
+		home := newTestSidecarConfigHome(t)
+		if err := c.place(home); err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		// the case is what it says: the resolver cannot prove the file absent
+		if _, err := Config.SimpleResource(sidecarConfigResourceName); !errors.Is(err, ErrResourceUnavailable) {
+			t.Fatalf("%s: the resolver answers %v, want an unavailable resource", c.name, err)
+		}
+
+		config := loadSidecarConfig(nil)
+		if !config.P0Enforce {
+			t.Errorf("%s: a first read does not enforce", c.name)
+		}
+		if config.PreviewNetwork(networkId) {
+			t.Errorf("%s: a first read previews a network", c.name)
+		}
+		previous := &SidecarConfig{
+			P0Enforce:         false,
+			previewNetworkIds: map[Id]bool{networkId: true},
+		}
+		if loadSidecarConfig(previous) != previous {
+			t.Errorf("%s: a later read replaced the latest good read", c.name)
+		}
 	}
 }
 

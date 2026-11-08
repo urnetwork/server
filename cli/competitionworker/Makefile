@@ -1,4 +1,6 @@
-GOBUILD=go build -trimpath
+# the sidecar_pending tag for local and canary builds only
+include $(dir $(lastword $(MAKEFILE_LIST)))../sidecar-tags.mk
+GOBUILD=go build -trimpath ${SIDECAR_TAGS}
 
 .PHONY: all clean build test warp_build warp_build_image
 

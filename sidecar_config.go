@@ -1,8 +1,11 @@
 package server
 
 import (
+	"errors"
 	"sync/atomic"
 	"time"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 )
@@ -12,17 +15,37 @@ import (
 // so a gate changes with a config push and no deploy:
 //
 //	sidecar:
-//	  p0_enforce: {enabled: false}  # §7.4 stage 1 and D-TEAM-14: off, each counts what it would refuse
+//	  evs: {enabled: false, writes: true, networks: [], percent: 0}
+//	  format2: {enabled: false, networks: [], percent: 0, purge: observe, drop: observe}
+//	  gkm: {enabled: false, networks: [], percent: 0}  # sockets, tlsedge, mxedge, smtpedge alike
+//	  dns: {enabled: false, writes: true}
+//	  push: {enabled: false}
+//	  wake: {enabled: false}
+//	  bridge: {enabled: false}
+//	  escrow_draw_order: {enabled: false}
+//	  reseed: false
+//	  place_new: meta-1
+//	  drained: []
 //	  preview_networks: []          # §7.4, D-PHASE-3: networks that hold strict_exp clients before stage 2
+//	  sockets_control_qps: {rate: 50, burst: 500}
+//	  urnetwork_edge: <network_id>
+//	  p0_enforce: {enabled: false}  # §7.4 stage 1 and D-TEAM-14: off, each counts what it would refuse
+//	  file_clusters: {<cluster id>: {settle_passed_build: <commit>, hdd_capacity_ops: <n>}}
 //
-// What this reader parses are the gates server code reads so far; the rest of
-// §19.11's file is ignored until its readers land.
+// p0_enforce is not in §19.11's list, which picks it up at the next records pass
+// (plan-OPS-small-readings #3), and file_clusters is plan-EVSB-settle-gate's.
+// sidecar_gates.go holds what each gate answers.
 //
-// A gate that loosens when the file breaks would drop P0's enforcement on a bad
-// push. So once a read succeeded, a failed or absent read keeps it, and a file
-// that is there but does not parse on a process's first read enforces and
-// previews nothing. Taking a gate back off is an edit to the file, not its
-// removal: a removal holds until the process restarts.
+// A gate that loosens when the file breaks would drop P0's enforcement, or open
+// a service, on a bad push. So once a read succeeded, a failed or absent read
+// keeps it, and on a process's first read a file that is there but cannot be
+// read or parsed enforces P0, previews nothing and opens no gate. Only a file
+// the resolver finds absent from every home is inert (ErrResourceNotFound): a
+// dangling link, a directory or an inaccessible home is unavailable, not absent.
+// Taking a gate back off is an edit to the file, not its removal: a removal
+// holds until the process restarts. Within a file that parses, one bad entry
+// costs only itself: an id that does not parse is skipped, a percent out of
+// range reads 0, and a purge or drop that is not exactly on reads observe.
 
 // The file's name under config/<env>.
 const sidecarConfigResourceName = "sidecar.yml"
@@ -42,23 +65,77 @@ func DefaultSidecarConfigSettings() *SidecarConfigSettings {
 	}
 }
 
+// One gate as the file spells it. writes is a pointer, since it defaults true
+// inside a present gate.
+type sidecarGateYaml struct {
+	Enabled  bool     `yaml:"enabled"`
+	Writes   *bool    `yaml:"writes"`
+	Networks []string `yaml:"networks"`
+	Percent  int      `yaml:"percent"`
+	// format2's alone
+	Purge string `yaml:"purge"`
+	Drop  string `yaml:"drop"`
+}
+
+// A key that is only `enabled`.
+type sidecarSwitchYaml struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // The keys this reader reads.
 type sidecarConfigYaml struct {
 	Sidecar struct {
-		P0Enforce struct {
-			Enabled bool `yaml:"enabled"`
-		} `yaml:"p0_enforce"`
-		PreviewNetworks []string `yaml:"preview_networks"`
+		P0Enforce         sidecarSwitchYaml  `yaml:"p0_enforce"`
+		PreviewNetworks   []string           `yaml:"preview_networks"`
+		Evs               *sidecarGateYaml   `yaml:"evs"`
+		Format2           *sidecarGateYaml   `yaml:"format2"`
+		Gkm               *sidecarGateYaml   `yaml:"gkm"`
+		Sockets           *sidecarGateYaml   `yaml:"sockets"`
+		Tlsedge           *sidecarGateYaml   `yaml:"tlsedge"`
+		Mxedge            *sidecarGateYaml   `yaml:"mxedge"`
+		Smtpedge          *sidecarGateYaml   `yaml:"smtpedge"`
+		Dns               *sidecarGateYaml   `yaml:"dns"`
+		Push              *sidecarSwitchYaml `yaml:"push"`
+		Wake              *sidecarSwitchYaml `yaml:"wake"`
+		Bridge            *sidecarSwitchYaml `yaml:"bridge"`
+		EscrowDrawOrder   *sidecarSwitchYaml `yaml:"escrow_draw_order"`
+		Reseed            bool               `yaml:"reseed"`
+		PlaceNew          string             `yaml:"place_new"`
+		Drained           []string           `yaml:"drained"`
+		SocketsControlQps *struct {
+			Rate  float64 `yaml:"rate"`
+			Burst int     `yaml:"burst"`
+		} `yaml:"sockets_control_qps"`
+		UrnetworkEdge string `yaml:"urnetwork_edge"`
+		FileClusters  map[string]struct {
+			SettlePassedBuild string `yaml:"settle_passed_build"`
+			HddCapacityOps    int64  `yaml:"hdd_capacity_ops"`
+		} `yaml:"file_clusters"`
 	} `yaml:"sidecar"`
 }
 
-// One read of sidecar.yml. Immutable once read.
+// One read of sidecar.yml. Immutable once read. The zero value, what a first
+// read of a broken file answers but for P0Enforce, opens nothing.
 type SidecarConfig struct {
 	// §7.4's stage 1 and D-TEAM-14 refuse what they otherwise only count. M1
 	// turns this on.
 	P0Enforce bool
 	// the networks that may hold strict_exp clients before stage 2 (D-TRUST-3)
 	previewNetworkIds map[Id]bool
+
+	// §19.11's service gates by name, a service the file holds none for absent
+	serviceGates map[string]*SidecarServiceGate
+	format2      *SidecarFormat2Gate
+	// the switches by name, each on only when the file says enabled: true
+	switches      map[string]bool
+	reseed        bool
+	placeNew      string
+	drained       []string
+	socketsRate   float64
+	socketsBurst  int
+	socketsSet    bool
+	urnetworkEdge *Id
+	fileClusters  map[string]SidecarFileCluster
 }
 
 // Whether the network is listed in preview_networks.
@@ -66,22 +143,99 @@ func (self *SidecarConfig) PreviewNetwork(networkId Id) bool {
 	return self.previewNetworkIds[networkId]
 }
 
-// One bad preview entry costs only that entry.
+// The ids of a list, each that does not parse skipped and logged, so one bad
+// entry admits nothing and costs no other network its entry.
+func parseSidecarConfigIds(key string, idStrs []string) []Id {
+	ids := []Id{}
+	for _, idStr := range idStrs {
+		id, err := ParseId(idStr)
+		if err != nil {
+			glog.Errorf("[sidecar]%s lists an entry under %s that is not an id\n", sidecarConfigResourceName, key)
+			continue
+		}
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// One bad entry costs only that entry.
 func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 	config := &SidecarConfig{
 		P0Enforce:         y.Sidecar.P0Enforce.Enabled,
 		previewNetworkIds: map[Id]bool{},
+		serviceGates:      map[string]*SidecarServiceGate{},
+		switches:          map[string]bool{},
+		reseed:            y.Sidecar.Reseed,
+		placeNew:          y.Sidecar.PlaceNew,
+		fileClusters:      map[string]SidecarFileCluster{},
 	}
-	for _, networkIdStr := range y.Sidecar.PreviewNetworks {
-		networkId, err := ParseId(networkIdStr)
-		if err != nil {
-			// one bad entry admits nothing and costs no other network its entry
-			glog.Errorf("[sidecar]%s lists a preview network that is not an id\n", sidecarConfigResourceName)
-			continue
-		}
+	for _, networkId := range parseSidecarConfigIds("preview_networks", y.Sidecar.PreviewNetworks) {
 		config.previewNetworkIds[networkId] = true
 	}
+	for name, gate := range map[string]*sidecarGateYaml{
+		SidecarGateEvs:      y.Sidecar.Evs,
+		SidecarGateGkm:      y.Sidecar.Gkm,
+		SidecarGateSockets:  y.Sidecar.Sockets,
+		SidecarGateTlsedge:  y.Sidecar.Tlsedge,
+		SidecarGateMxedge:   y.Sidecar.Mxedge,
+		SidecarGateSmtpedge: y.Sidecar.Smtpedge,
+		SidecarGateDns:      y.Sidecar.Dns,
+	} {
+		if gate != nil {
+			config.serviceGates[name] = newSidecarServiceGate(name, gate)
+		}
+	}
+	if gate := y.Sidecar.Format2; gate != nil {
+		config.format2 = &SidecarFormat2Gate{
+			gate:  newSidecarServiceGate(SidecarGateFormat2, gate),
+			purge: parseSidecarFormat2Mode(gate.Purge),
+			drop:  parseSidecarFormat2Mode(gate.Drop),
+		}
+	}
+	for name, value := range map[string]*sidecarSwitchYaml{
+		SidecarSwitchPush:            y.Sidecar.Push,
+		SidecarSwitchWake:            y.Sidecar.Wake,
+		SidecarSwitchBridge:          y.Sidecar.Bridge,
+		SidecarSwitchEscrowDrawOrder: y.Sidecar.EscrowDrawOrder,
+	} {
+		config.switches[name] = value != nil && value.Enabled
+	}
+	for _, name := range y.Sidecar.Drained {
+		if name != "" {
+			config.drained = append(config.drained, name)
+		}
+	}
+	if qps := y.Sidecar.SocketsControlQps; qps != nil {
+		if 0 < qps.Rate && 0 < qps.Burst {
+			config.socketsRate, config.socketsBurst, config.socketsSet = qps.Rate, qps.Burst, true
+		} else {
+			glog.Errorf("[sidecar]%s sets a sockets_control_qps that is not positive, so the engines keep their own\n", sidecarConfigResourceName)
+		}
+	}
+	if y.Sidecar.UrnetworkEdge != "" {
+		if ids := parseSidecarConfigIds("urnetwork_edge", []string{y.Sidecar.UrnetworkEdge}); len(ids) == 1 {
+			config.urnetworkEdge = &ids[0]
+		}
+	}
+	for clusterId, cluster := range y.Sidecar.FileClusters {
+		if cluster.SettlePassedBuild == "" && cluster.HddCapacityOps <= 0 {
+			continue
+		}
+		config.fileClusters[clusterId] = SidecarFileCluster{
+			SettlePassedBuild: cluster.SettlePassedBuild,
+			HddCapacityOps:    max(cluster.HddCapacityOps, 0),
+		}
+	}
 	return config
+}
+
+// Parses the text of a sidecar.yml as a read of the file does.
+func parseSidecarConfig(data []byte) (*SidecarConfig, error) {
+	y := &sidecarConfigYaml{}
+	if err := yaml.Unmarshal(data, y); err != nil {
+		return nil, err
+	}
+	return newSidecarConfig(y), nil
 }
 
 // Reads the file, keeping previous when the read fails. See the file's header
@@ -97,6 +251,11 @@ func loadSidecarConfig(previous *SidecarConfig) (config *SidecarConfig) {
 	if r := HandleError(func() {
 		resource, err := Config.SimpleResource(sidecarConfigResourceName)
 		if err != nil {
+			if !errors.Is(err, ErrResourceNotFound) || errors.Is(err, ErrResourceUnavailable) {
+				// there but unreadable, a dangling link or a directory say
+				config = failed(err)
+				return
+			}
 			config = previous
 			if config == nil {
 				config = &SidecarConfig{}

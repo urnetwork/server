@@ -49,8 +49,6 @@ const (
 const (
 	AccountActionAddAuthDailyLimit              = 5
 	AccountActionRemoveAuthDailyLimit           = 5
-	AccountActionClaimNetworkNameDailyLimit     = 2
-	AccountActionChangeNetworkNameDailyLimit    = 2
 	AccountActionGenerateSeedphraseDailyLimit   = 5
 	AccountActionRegenerateSeedphraseDailyLimit = 5
 )
@@ -159,22 +157,22 @@ func accountActionWindowText(window time.Duration) string {
 	}
 }
 
-func countRecentAccountActionAttempts(
+// The user's attempts of the action at or after cutoff. The cutoff is computed
+// in Go, not via `now() - INTERVAL ...` in SQL: create_time is a naive
+// `timestamp` column holding UTC wall-clock values (via server.NowUtc()), and
+// `now()` returns `timestamptz`. Comparing the two forces Postgres to cast one
+// side using the session's TimeZone setting -- on a non-UTC session that
+// silently shifts the effective window by the zone offset. Passing an explicit
+// UTC cutoff avoids any zone-dependent cast.
+func countAccountActionAttemptsSince(
 	ctx context.Context,
 	tx server.PgTx,
 	userId server.Id,
 	action string,
-	window time.Duration,
+	cutoff time.Time,
 ) int {
 	var count int
-	// the cutoff is computed here in Go, not via `now() - INTERVAL ...` in
-	// SQL: create_time is a naive `timestamp` column holding UTC wall-clock
-	// values (via server.NowUtc()), and `now()` returns `timestamptz`.
-	// Comparing the two forces Postgres to cast one side using the
-	// session's TimeZone setting -- on a non-UTC session that silently
-	// shifts the effective window by the zone offset. Passing an explicit
-	// UTC cutoff avoids any zone-dependent cast.
-	cutoff := server.NowUtc().Add(-window)
+	cutoff = cutoff.UTC()
 	result, err := tx.Query(
 		ctx,
 		`
@@ -255,9 +253,22 @@ func CheckAndRecordAccountActionRateLimit(
 	limit int,
 	window time.Duration,
 ) error {
+	return checkAndRecordAccountActionRateLimitAt(ctx, userId, action, limit, window, server.NowUtc())
+}
+
+// CheckAndRecordAccountActionRateLimit at a given now, which the window ends at
+// and the attempt is recorded at, so a test can drive the window on a fake clock.
+func checkAndRecordAccountActionRateLimitAt(
+	ctx context.Context,
+	userId server.Id,
+	action string,
+	limit int,
+	window time.Duration,
+	now time.Time,
+) error {
 	var count int
 	server.Tx(ctx, func(tx server.PgTx) {
-		count = countRecentAccountActionAttempts(ctx, tx, userId, action, window)
+		count = countAccountActionAttemptsSince(ctx, tx, userId, action, now.Add(-window))
 		if limit <= count {
 			return
 		}
@@ -267,7 +278,7 @@ func CheckAndRecordAccountActionRateLimit(
 			INSERT INTO network_user_action_attempt (network_user_action_attempt_id, user_id, action, create_time)
 			VALUES ($1, $2, $3, $4)
 			`,
-			server.NewId(), userId, action, server.NowUtc(),
+			server.NewId(), userId, action, now.UTC(),
 		))
 	})
 	if limit <= count {
@@ -351,7 +362,7 @@ func readAccountActionBudgetLimitInTx(
 	budget AccountActionBudget,
 	now time.Time,
 ) (allow bool, retryAfter time.Duration) {
-	// a utc cutoff computed here, as in countRecentAccountActionAttempts
+	// a utc cutoff computed here, as in countAccountActionAttemptsSince
 	cutoff := now.Add(-budget.Window)
 	var count int
 	var oldestTime *time.Time

@@ -311,6 +311,13 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /account/api-key":                         routeAccessNetwork,  // creates an API key = a full network credential (escalation)
 	"POST /account/api-key/remove":                  routeAccessNetwork,  // revokes an API key
 	"GET /account/api-keys":                         routeAccessNetwork,  // lists API keys
+	"GET /network/auth-keys":                        routeAccessNetwork,  // lists auth keys (Network until TEAM-M6-03's roles)
+	"POST /network/auth-keys":                       routeAccessNetwork,  // creates an auth key, which enrolls devices (escalation)
+	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
+	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
+	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
+	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds
+	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
@@ -370,17 +377,27 @@ var lagGuestRoutes = map[string]bool{
 // GET /abuse/status), and TestSidecarTokenRoutes fails a route under those paths
 // that is not here. The route's own class still applies, so /smtp/appeal and
 // /mail/direct-mx stay refused.
+//
+// POST /oauth/token is not here. §7.4 admits only its exchange (§7.8), which M1
+// adds, and the grants the route serves now are not it, so a strict_exp bearer
+// is refused there like anywhere else. The exchange brings the route back with a
+// gate that admits a strict_exp bearer on that grant alone, and with the proof.
 var strictExpRoutes = map[string]bool{
 	"GET /auth/refresh":           true, // with the proof
 	"POST /network/auth-client":   true, // with the proof; its children inherit both marks
 	"POST /network/remove-client": true, // its own client or children (the model)
 	"GET /key/([^/]+)":            true,
 	"POST /connect/control":       true,
-	"POST /oauth/token":           true, // the token exchange, which carries its own proof
+	// §5.15's sidecar routes (CORE-M1-06)
+	"POST /sidecar/bind":            true,
+	"GET /sidecar/identity/([^/]+)": true,
+	"GET /sidecar/identity":         true,
+	// §8.9's ack (ACL-M2-12)
+	"POST /acl/ack": true,
 }
 
-// The routes where a strict_exp bearer proves its ClientKey (§7.4). The third is
-// POST /oauth/token's exchange, whose subject token and proof it checks itself.
+// The routes where a strict_exp bearer proves its ClientKey (§7.4). The third
+// §7.4 names is POST /oauth/token's exchange, which is not built yet (above).
 var strictExpProofRoutes = map[string]bool{
 	"GET /auth/refresh":         true,
 	"POST /network/auth-client": true,

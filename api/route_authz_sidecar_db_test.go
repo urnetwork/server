@@ -24,6 +24,8 @@ import (
 
 	gojwt "github.com/golang-jwt/jwt/v5"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
@@ -141,28 +143,36 @@ type strictExpBearer struct {
 	jti        int
 }
 
-// Mints a strict_exp client with the network credential and binds it a key, which
-// §5's /sidecar/bind does once MG1 lands.
+// Mints a strict_exp client with the network credential and binds it a key with
+// §5's POST /sidecar/bind, as a sidecar does before it refreshes, so its proofs
+// check against the key model.ClientProofPublicKey reads from the binding.
 func mintStrictExpBearer(t *testing.T, self *routeAccessDbFixture) *strictExpBearer {
 	t.Helper()
 	result := self.mintMarked(t, self.root(), map[string]any{"admin_refused": true, "strict_exp": true}, nil)
 	if !result.StrictExp {
 		t.Fatalf("the reply does not confirm strict_exp: %+v", result)
 	}
-	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	server.Raise(err)
 	bearer := &strictExpBearer{clientId: *result.ClientId, token: *result.ByClientJwt, privateKey: privateKey}
 
-	previous := clientProofPublicKey
-	clientProofPublicKey = func(ctx context.Context, clientId server.Id) (ed25519.PublicKey, error) {
-		if clientId != bearer.clientId {
-			return previous(ctx, clientId)
-		}
-		return publicKey, nil
+	byJwt, err := session.ParseByJwt(context.Background(), bearer.token)
+	server.Raise(err)
+	identitySeed := make([]byte, ed25519.SeedSize)
+	_, err = rand.Read(identitySeed)
+	server.Raise(err)
+	signedBinding, err := sidecar.NewSidecarIdentityBinding(&sidecar.SidecarIdentityBinding{
+		NetworkId:  sidecar.Id(byJwt.NetworkId),
+		SidecarId:  sidecar.Id(server.NewId()),
+		ClientId:   sidecar.Id(bearer.clientId),
+		Generation: 1,
+		IssuedAt:   server.NowUtc(),
+	}, identitySeed, privateKey.Seed())
+	server.Raise(err)
+	w := self.serve(http.MethodPost, "/sidecar/bind", bearer.authorization(), map[string]any{"binding": signedBinding})
+	if w.Code != http.StatusOK {
+		t.Fatalf("bind status = %d: %s", w.Code, w.Body.String())
 	}
-	t.Cleanup(func() {
-		clientProofPublicKey = previous
-	})
 	return bearer
 }
 

@@ -1,0 +1,21 @@
+{{define "headline"}}{{.TextHeadline}}{{end}}
+{{define "why"}}Sent to the Owners and Admins of a URnetwork network when an
+abuse action is taken on it or lifted.{{end}}
+{{define "content"}}
+{{if .Lift}}An abuse action on your network has been lifted.{{else}}URnetwork took an abuse action on your network. It holds until a
+person reviews it, and you can appeal it.{{end}}
+
+Action: {{.ActionText}}
+Category: {{.CategoryText}}
+Target: {{.Target}}
+{{- if .UntilText}}
+Until: {{.UntilText}}
+{{- end}}
+Case: {{.CaseId}}
+{{if not .Lift}}
+{{if .AppealUrl}}An Owner or Admin of the network can appeal this action, and a
+second reviewer decides with reasons: {{.AppealUrl}}{{else}}An Owner or Admin of the network can appeal this action by its case
+id, and a second reviewer decides with reasons.{{end}}
+{{end}}
+Questions about this notice can go to support@ur.io with the case id.
+{{end}}

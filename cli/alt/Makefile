@@ -1,4 +1,6 @@
-GOBUILD=go build -trimpath
+# the sidecar_pending tag for local and canary builds only
+include $(dir $(lastword $(MAKEFILE_LIST)))../sidecar-tags.mk
+GOBUILD=go build -trimpath ${SIDECAR_TAGS}
 
 # A release records this input; it never follows the wall clock.
 SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct)

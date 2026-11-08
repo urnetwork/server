@@ -115,12 +115,20 @@ var accountMessageTemplates = map[string]func() Template{
 	(&SecurityApiKeyChangedTemplate{}).Name(): func() Template {
 		return &SecurityApiKeyChangedTemplate{}
 	},
+	(&SecurityAuthKeyChangedTemplate{}).Name(): func() Template {
+		return &SecurityAuthKeyChangedTemplate{}
+	},
 	// the service reminders (service_reminders_controller.go)
 	(&ProEndingTemplate{}).Name(): func() Template {
 		return &ProEndingTemplate{}
 	},
 	(&TrialEndingTemplate{}).Name(): func() Template {
 		return &TrialEndingTemplate{}
+	},
+	// §21.8's notice of an abuse action or lift, owed with the action
+	// (abuse_action_controller.go); email only
+	(&AbuseActionNoticeTemplate{}).Name(): func() Template {
+		return &AbuseActionNoticeTemplate{}
 	},
 }
 

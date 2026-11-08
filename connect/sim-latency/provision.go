@@ -213,10 +213,13 @@ func provisionIdentityBatch(ctx context.Context, entries []ProviderEntry) error 
 					`,
 					deviceId, networkId, "sim-provider", "sim-provider", createTime,
 				)
+				// a top-level client, its own subject, written only when the row is
+				// first inserted (D-ACL-3)
+				subjectColumn, subjectValue := model.NetworkClientAclSubjectInsert("$1")
 				batch.Queue(
 					`
-					INSERT INTO network_client (client_id, network_id, device_id, description, create_time, auth_time)
-					VALUES ($1, $2, $3, $4, $5, $5)
+					INSERT INTO network_client (client_id, network_id, device_id, description, create_time, auth_time`+subjectColumn+`)
+					VALUES ($1, $2, $3, $4, $5, $5`+subjectValue+`)
 					ON CONFLICT (client_id) DO UPDATE
 					SET
 						network_id = EXCLUDED.network_id,
