@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "kind": "competition-review-recoverable-source-checkout-cleanup/v1",
+  "recorded_at": "2026-11-08T00:45:23Z",
+  "purpose": "Recover local space for bounded complete-review evidence without deleting retained artifacts or increasing review limits.",
+  "root_available_bytes_before": 8695902208,
+  "root_available_bytes_after": 13586624512,
+  "observed_available_bytes_increase": 4890722304,
+  "removed_source_checkouts": [
+    {
+      "path": "/home/by/urnetwork/temp/competition-finalization-hold-20261104.t7tft6HJ/server",
+      "commit": "e09f3a2159a62d93e93206b5af8a55c5fa976bea"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/competition-finalization-hold-20261104.t7tft6HJ/server-main-integration",
+      "commit": "71c41f118d16ed1d6fb37784a28696fc6ee77e86"
+    },
+    {
+      "path": "/home/by/urnetwork/temp/competition-supervisor-acquire-retry-20261104.jPLFP8Cl/server",
+      "commit": "108f5b3114ccad3938ddc17190adebdf4ed3613f"
+    }
+  ],
+  "checks_before_each_removal": [
+    "Clean tracked state, no untracked files and no ignored files.",
+    "Recorded commit is an ancestor of main.",
+    "No open file handles reported by privileged lsof for the exact checkout.",
+    "Only the explicit source-checkout path was removed with non-forced git worktree remove."
+  ],
+  "recovery": "All three commits remain in Git; source checkouts can be recreated with git worktree add at the recorded commits. No branch or Git object was removed.",
+  "parent_evidence_directories_preserved": true,
+  "baseline_data_removed": false,
+  "submission_or_review_artifacts_removed": false,
+  "retained_logs_removed": false,
+  "active_checkouts_removed": false,
+  "actual_review_plan_capacity_reserved": false,
+  "review_inference_authorized": false
+}

@@ -572,15 +572,11 @@ func authenticateCompetitionQualification(directory string, request evaluatorReq
 	if err != nil {
 		return err
 	}
-	var scoreDocument struct {
-		ScoreResult
-		EvalError json.RawMessage `json:"eval_error"`
-	}
-	if json.Unmarshal(scoreBytes, &scoreDocument) != nil || len(scoreDocument.EvalError) != 0 && !bytes.Equal(bytes.TrimSpace(scoreDocument.EvalError), []byte("null")) {
+	projectedScore, err := model.ProjectCompetitionScorerDocument(scoreBytes)
+	if err != nil {
 		return errors.New("host-readiness scorer document contains an evaluation error")
 	}
-	scoreDocument.TakeoverEligible, _ = scoreDocument.Diagnostics["baseline_takeover_eligible"].(bool)
-	expectedScore, err := json.Marshal(&scoreDocument.ScoreResult)
+	expectedScore, err := json.Marshal(projectedScore)
 	if err != nil {
 		return err
 	}

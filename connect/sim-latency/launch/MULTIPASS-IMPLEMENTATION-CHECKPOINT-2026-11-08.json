@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "kind": "competition-multipass-implementation-checkpoint/v1",
+  "recorded_at": "2026-11-08T00:26:33Z",
+  "approval_record": "MULTIPASS-REVIEW-APPROVAL-2026-11-08.json",
+  "status": "IMPLEMENTING_NOT_QUALIFIED_NOT_LIVE",
+  "independently_tested_checkpoint": "ca98fadcfd037008e5c3f30948eb0a14a3ded21f",
+  "ordinary_tests": {
+    "cli_selector": "^TestWinnerMultipass",
+    "cli_passed": 22,
+    "model_selector": "^TestCompetitionReviewHandoff",
+    "model_passed": 2,
+    "controller_selector": "^TestCompetitionReviewHandoff",
+    "controller_passed": 3,
+    "controller_failed": 1,
+    "failure_test": "TestCompetitionReviewHandoffDurablePendingThenExactOperatorImport",
+    "failure": "competition state conflict in the composed durable handoff/import test",
+    "root_tests_started_in_first_pass": false,
+    "test_services": "Isolated disposable PostgreSQL and Redis; no main migration or evaluation execution."
+  },
+  "independent_characterization": {
+    "overall_checkpoint_qualified": false,
+    "root_migration_passed": 1,
+    "cli_race_passed": 22,
+    "model_race_passed": 2,
+    "race_findings": 0,
+    "failed_controller_rerun": false,
+    "retained_evidence_directory": "/home/by/urnetwork/temp/multipass-independent-ca98-20261108.c7w984Jj",
+    "original_summary_sha256": "92a07b786ad6347f29c6d329f803a0d06dd2587b97babcb22761153ee3ad1f0c",
+    "count_correction": "Independent root parsing of the retained JSONL found three controller passes plus one failure; the original agent summary reported only two passes. This record uses actual top-level terminal events. Other reported counts match the logs."
+  },
+  "corrected_source": {
+    "checkpoint": "61792531596b410cbcda7d1f56b9b061c352d006",
+    "initial_failure_cause": "The synthetic staging fixture used a 60-second preparation delay, while the existing elected-winner staging policy requires zero. The failure occurred before handoff creation.",
+    "fixture_corrected_before_source_creation": true,
+    "production_policy_weakened": false,
+    "independent_retest_started": true,
+    "qualified": false
+  },
+  "followup": [
+    "Debug and deterministically regress the composed controller conflict before rerunning it at a corrected immutable checkpoint.",
+    "Enforce the approved 384-call ceiling in both model and SQL admission; branch correction exists but has not yet passed independent qualification.",
+    "Use a current database clock after lock acquisition for deadline admission; a transaction-start timestamp must not admit late work.",
+    "Complete exact rendered token admission, contained per-call transport, native evidence custody, separate operator import and genuine revised-protocol qualification."
+  ],
+  "existing_evaluations_changed": false,
+  "winner_inference_started": false,
+  "winner_approved": false,
+  "source_promotion_authorized": false,
+  "reward_release_authorized": false,
+  "main_migration_performed": false,
+  "calibration_accepted": false
+}

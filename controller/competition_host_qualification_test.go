@@ -377,6 +377,22 @@ func TestCompetitionHostQualificationAuthenticatesExactProbeEvidence(t *testing.
 	}
 }
 
+// A diagnostic string cannot masquerade as false after authenticated bytes and
+// the worker result are compared; the evaluator would fail boolean decoding.
+func TestCompetitionHostQualificationRejectsNonBooleanScorerEligibility(t *testing.T) {
+	fixture := newCompetitionQualificationProofFixture(t)
+	fixture.result.Score.Diagnostics["baseline_takeover_eligible"] = "synthetic-invalid"
+	scoreBytes, err := json.Marshal(fixture.result.Score)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.write(t, "score.json", scoreBytes)
+	fixture.publish(t)
+	if err := authenticateCompetitionQualification(fixture.directory, fixture.request, fixture.settings); err == nil || !strings.Contains(err.Error(), "scorer document") {
+		t.Fatalf("non-boolean scorer eligibility was accepted or failed outside scorer projection: %v", err)
+	}
+}
+
 // The real scorer uses six mixed-case gate identifiers and can include
 // mixed-case diagnostic labels. Only those data maps receive the exception.
 func TestCompetitionHostQualificationAuthenticatesMixedCaseScorerData(t *testing.T) {

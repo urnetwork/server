@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "kind": "competition-review-scorer-projection-qualification/v1",
+  "source_commit": "5aefa9e1932307b6ce3f3d8ca17e0cf58864d09f",
+  "root_cause": "The frozen evaluator derives worker takeover_eligible from scorer diagnostics.baseline_takeover_eligible. Raw archived scorer JSON omits that top-level projection; exporter and broker incorrectly compared its direct typed decode to the sealed worker score.",
+  "implementation": "One exact-key scorer projection shared by archive export, provider input identity and host qualification. Original version/length/SHA checks and full projected score comparisons remain mandatory. Invalid diagnostic types and scorer errors refuse review.",
+  "independent_tests": {
+    "model": "Sol 6.1 low",
+    "ordinary_passes": 3,
+    "race_passes": 3,
+    "model_tests_per_pass": 5,
+    "controller_tests_per_pass": 24,
+    "broker_input_tests_per_pass": 11,
+    "total_top_level_passes": 240,
+    "unexpected_test_failures": 0,
+    "skips": 0,
+    "race_findings": 0,
+    "disposable_postgres_schema_head": 944,
+    "main_database_writes": false,
+    "source_hashes_unchanged": true,
+    "module_verification": "all modules verified",
+    "causal_red_controls": [
+      {"restored_code": "original exporter only", "test": "TestCompetitionAutomationReviewPacketBeforeApproval", "exit": 1, "named_failure": "archived review score disagrees with the sealed result"},
+      {"restored_code": "original broker only", "test": "TestWinnerReviewModelInputProjectsAuthenticatedScorerDocument", "exit": 1, "named_failure": "review broker sealed score differs from its authenticated bytes"}
+    ],
+    "evidence_root": "/home/by/urnetwork/temp/exporter-broker-independent-20261107.a3DabGHs",
+    "summary_sha256": "e8eed66b98e0526eb1d22d329afe7856c4f4319b4e2b1de0a662b73b9928b20c",
+    "setup_caveats": "Completed tests used the approved disposable service fixture and offline private module cache. Initial cache-permission/missing-module setup refusals were not test failures. Private cache and clean development checkouts were recoverably relocated to tmpfs; a controller race compile was briefly paused before test execution for disk reserve. Full commands, logs and setup caveats are retained."
+  },
+  "read_only_exporter": {
+    "go_version": "go1.27.3",
+    "platform": "linux/amd64",
+    "statically_linked": true,
+    "path": "/usr/local/libexec/urnetwork/competition-review-export-5aefa9e19-20261108-v1/sim-latency",
+    "sha256": "036ebf127ae50cb7a17a002bd3965726b7308fab6469285a58cb212ee985aaa4",
+    "supervisor_or_evaluator_replaced": false,
+    "earlier_parallel_build": "Owner canceled its compile with SIGINT/exit130 to preserve disk reserve; the later RAM-cache build completed successfully from the same committed source."
+  },
+  "authenticated_export": {
+    "succeeded": true,
+    "job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739",
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "directory": "/var/lib/urnetwork/competition-epoch1-review-20261108-v1/candidate-packet",
+    "directory_owner_mode": "root:0700",
+    "original_score_bytes": 9137,
+    "score_sha256": "ebe45b20f5fc3fc5b5342ebb869714d06de3d132ba68a707497a6918122ff7d8",
+    "patch_sha256": "b8800b3a52176e5e33ccab86536d5751ea0a42cade6f64be0d2586d765573aff",
+    "packet_manifest_sha256": "bb7f7c63e7584f70c06023b17057e8a22ca179464f5d0299c90c97ee02e55538",
+    "candidate_metadata_sha256": "e507baac3a8636457aaa5590f7af8e83b3f584766945ec265c6114d0cc233e95",
+    "promotion_authorized": false
+  },
+  "scope": "Qualifies the narrow trusted-control decoder fix and successful read-only packet export, not provider quality, candidate honesty, runtime performance, calibration acceptance, payout or source promotion. No frozen scorer, source, baseline, gate, result or submission deadline changed."
+}
