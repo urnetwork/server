@@ -552,10 +552,10 @@ func FuzzSidecarConfig(f *testing.F) {
 	})
 }
 
-// config/main/sidecar.yml and config/local/sidecar.yml parse and are dark: no
+// config/main, config/local and config/canary sidecar.yml parse and are dark: no
 // gate open, no switch on, P0 log-only, no network named.
 func TestSidecarConfigFilesAreDark(t *testing.T) {
-	for _, env := range []string{"main", "local"} {
+	for _, env := range []string{"main", "local", "canary"} {
 		path := "../config/" + env + "/sidecar.yml"
 		data, err := os.ReadFile(path)
 		if errors.Is(err, os.ErrNotExist) {
