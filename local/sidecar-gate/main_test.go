@@ -259,6 +259,15 @@ func TestGateChecksRunWithoutTheCallersGoflags(t *testing.T) {
 	}
 }
 
+// §19's ids report in order: requirements, then decisions, each by number.
+func TestGateOrdersOpsIdsByKindAndNumber(t *testing.T) {
+	ids := []string{"D-OPS-12", "R-OPS-10", "D-OPS-9", "R-OPS-2", "D-OPS-1"}
+	slices.SortFunc(ids, compareOpsIds)
+	if want := []string{"R-OPS-2", "R-OPS-10", "D-OPS-1", "D-OPS-9", "D-OPS-12"}; !slices.Equal(ids, want) {
+		t.Fatalf("order %v, want %v", ids, want)
+	}
+}
+
 func TestGateRefusesAGateItDoesNotHold(t *testing.T) {
 	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
 	options.gate = "M42"

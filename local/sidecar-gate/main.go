@@ -285,19 +285,21 @@ func runGate(ctx context.Context, options *gateOptions) (*gateReport, error) {
 
 // R-OPS before D-OPS, each by its number.
 func compareOpsIds(a string, b string) int {
-	parse := func(id string) (string, int) {
-		prefix, number, _ := strings.Cut(strings.TrimPrefix(id, "R-"), "-")
-		value := 0
-		fmt.Sscan(number, &value)
+	parse := func(id string) (int, int) {
+		kind := 1
 		if strings.HasPrefix(id, "R-") {
-			return "0" + prefix, value
+			kind = 0
 		}
-		return "1" + prefix, value
+		number := 0
+		if index := strings.LastIndex(id, "-"); 0 <= index {
+			fmt.Sscan(id[index+1:], &number)
+		}
+		return kind, number
 	}
-	prefixA, numberA := parse(a)
-	prefixB, numberB := parse(b)
-	if prefixA != prefixB {
-		return strings.Compare(prefixA, prefixB)
+	kindA, numberA := parse(a)
+	kindB, numberB := parse(b)
+	if kindA != kindB {
+		return kindA - kindB
 	}
 	return numberA - numberB
 }
