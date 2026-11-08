@@ -55,8 +55,22 @@ func retainWinnerHandoffContainment(ctx context.Context, phase string, envelope 
 
 // One process owns one fixed capture. No resumption, retry, operator import or
 // local-cache eviction is implicit. Close releases only the empty reservation.
-func captureWinnerHandoffNative(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, release winnerMultipassQualificationRelease, settings winnerHandoffCaptureSettings, storagePaths []string, control *controller.Settings, store controller.PostgresStore) (result *winnerHandoffCaptureResult, resultErr error) {
+func captureWinnerHandoffNative(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, release winnerMultipassQualificationRelease, qualification, authorization currentQgQualificationPin, settings winnerHandoffCaptureSettings, storagePaths []string, control *controller.Settings, store controller.PostgresStore) (result *winnerHandoffCaptureResult, resultErr error) {
 	if err := validateWinnerHandoffIdentity(owner, plan, bundle); err != nil {
+		return nil, err
+	}
+	if err := authenticateWinnerMultipassReleaseArtifacts(release); err != nil {
+		return nil, err
+	}
+	if _, err := authenticateWinnerMultipassQualification(qualification, release); err != nil {
+		return nil, err
+	}
+	authorityBytes, err := readCurrentQgQualificationPin(authorization, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true)
+	if err != nil {
+		return nil, err
+	}
+	provenance, err := validateWinnerHandoffRunAuthorization(authorityBytes, authorization, owner.ActorId, owner.Args, release, qualification, plan.ScanGroups, settings, storagePaths, time.Now().UTC())
+	if err != nil {
 		return nil, err
 	}
 	profile := winnerMultipassContainmentProfile{ImageId: release.ImageId, ProviderSettings: release.ProviderSettings, StateRoot: "/var/lib/urnetwork/competition-review-multipass/attempts"}
@@ -135,7 +149,7 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 		}
 		return receipt.Result, custody, errors.Join(invokeErr, retainErr)
 	}
-	hooks := winnerHandoffCaptureHooks{Now: func() time.Time { return time.Now().UTC() }, Retain: retain,
+	hooks := winnerHandoffCaptureHooks{Now: func() time.Time { return time.Now().UTC() }, Retain: retain, Provenance: provenance,
 		Reserve: func(_ context.Context, capacity *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error) {
 			var proof winnerHandoffCapacityReservation
 			var err error

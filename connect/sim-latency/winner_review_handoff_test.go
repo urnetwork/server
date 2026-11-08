@@ -60,7 +60,7 @@ func newWinnerHandoffFixture(t *testing.T, disqualify bool) *winnerHandoffFixtur
 
 func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks {
 	t.Helper()
-	return winnerHandoffCaptureHooks{Now: func() time.Time { return self.now },
+	return winnerHandoffCaptureHooks{Now: func() time.Time { return self.now }, Provenance: winnerHandoffProvenance{RunAuthorizationSha256: self.owner.Args.AuthorizationSha256, ReleaseSha256: winnerMultipassSha256([]byte("synthetic-release")), QualificationReportSha256: winnerMultipassSha256([]byte("synthetic-qualified-report"))},
 		Reserve: func(_ context.Context, capacity *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error) {
 			content, _ := json.Marshal(capacity)
 			return winnerHandoffCapacityReservation{CapacitySha256: winnerMultipassSha256(content), ReservationPath: "/synthetic/review/reservation", ReservationInode: 1,

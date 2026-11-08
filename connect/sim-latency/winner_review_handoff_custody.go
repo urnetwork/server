@@ -66,6 +66,14 @@ type winnerHandoffTokenization struct {
 	Custody   winnerHandoffInvocationCustody `json:"custody"`
 }
 
+// Qualification proves the transport release; run authority binds that exact
+// release and fixed candidate attempt. Neither is an operator winner verdict.
+type winnerHandoffProvenance struct {
+	RunAuthorizationSha256    string `json:"run_authorization_sha256"`
+	ReleaseSha256             string `json:"release_sha256"`
+	QualificationReportSha256 string `json:"qualification_report_sha256"`
+}
+
 // The completion and public private-evidence digest bind this entire manifest.
 // Evidence and source bytes are separate protected objects, not omitted inputs.
 type winnerHandoffCustodyManifest struct {
@@ -74,6 +82,7 @@ type winnerHandoffCustodyManifest struct {
 	HandoffId      string                           `json:"handoff_id"`
 	PlanSha256     string                           `json:"plan_sha256"`
 	BundleSha256   string                           `json:"bundle_sha256"`
+	Provenance     winnerHandoffProvenance          `json:"provenance"`
 	Capacity       winnerMultipassCapacity          `json:"capacity"`
 	Reservation    winnerHandoffCapacityReservation `json:"reservation"`
 	Documents      []winnerHandoffCustodyOriginal   `json:"documents"`
@@ -185,6 +194,7 @@ func retainWinnerHandoffOriginal(ctx context.Context, name string, content []byt
 // original. An incomplete manifest may be retained but never becomes a proposal.
 func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, evidence winnerMultipassEvidence, custody winnerHandoffCustodyManifest) error {
 	if owner == nil || plan == nil || custody.Schema != 1 || custody.Kind != "elected-winner-review-protected-custody/v1" || custody.HandoffId != owner.HandoffId.String() ||
+		custody.Provenance.RunAuthorizationSha256 != owner.Args.AuthorizationSha256 || !validSha256(custody.Provenance.ReleaseSha256) || !validSha256(custody.Provenance.QualificationReportSha256) ||
 		custody.PlanSha256 != owner.Plan.PlanSha256 || custody.BundleSha256 != plan.BundleSha256 || len(custody.Documents) != 4 || len(custody.Invocations) != len(plan.Calls)+winnerHandoffTokenizerCensus(plan) {
 		return errors.New("native review custody is incomplete or belongs to another owner")
 	}

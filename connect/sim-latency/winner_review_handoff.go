@@ -21,14 +21,15 @@ import (
 // non-inference; Invoke authenticates actual wrapper/transport provenance and
 // preserves every visible terminal, including malformed or uncertain output.
 type winnerHandoffCaptureHooks struct {
-	Now      func() time.Time
-	Reserve  func(context.Context, *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error)
-	Admit    func(context.Context, string, winnerMultipassCall, []byte) (winnerHandoffTokenization, error)
-	Invoke   func(context.Context, winnerMultipassCall, []byte, winnerMultipassAdmission, string) (winnerHandoffTransport, error)
-	Claim    func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
-	Receipt  func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
-	Retain   func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)
-	Complete func(context.Context, model.CompetitionReviewHandoffCompletion) (*model.CompetitionReviewHandoffCompletion, error)
+	Provenance winnerHandoffProvenance
+	Now        func() time.Time
+	Reserve    func(context.Context, *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error)
+	Admit      func(context.Context, string, winnerMultipassCall, []byte) (winnerHandoffTokenization, error)
+	Invoke     func(context.Context, winnerMultipassCall, []byte, winnerMultipassAdmission, string) (winnerHandoffTransport, error)
+	Claim      func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
+	Receipt    func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
+	Retain     func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)
+	Complete   func(context.Context, model.CompetitionReviewHandoffCompletion) (*model.CompetitionReviewHandoffCompletion, error)
 }
 
 type winnerHandoffTransport struct {
@@ -107,6 +108,7 @@ func preflightWinnerHandoffLeaves(ctx context.Context, plan *winnerMultipassPlan
 // resample. The database refuses every repeated claim even under a new path.
 func captureWinnerHandoff(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, settings winnerHandoffCaptureSettings, hooks winnerHandoffCaptureHooks) (result *winnerHandoffCaptureResult, resultErr error) {
 	if owner == nil || plan == nil || hooks.Now == nil || hooks.Reserve == nil || hooks.Admit == nil || hooks.Invoke == nil || hooks.Claim == nil || hooks.Receipt == nil || hooks.Retain == nil || hooks.Complete == nil ||
+		hooks.Provenance.RunAuthorizationSha256 != owner.Args.AuthorizationSha256 || !validSha256(hooks.Provenance.ReleaseSha256) || !validSha256(hooks.Provenance.QualificationReportSha256) ||
 		settings.CleanupTimeout <= 0 || settings.ReceiptTimeout <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumDocumentBytes > defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes {
 		return nil, errors.New("native capture lacks qualified ownership or transport hooks")
 	}
@@ -135,7 +137,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	}
 	result = &winnerHandoffCaptureResult{Status: "PENDING", Evidence: winnerMultipassEvidence{Version: winnerMultipassVersion, PlanSha256: owner.Plan.PlanSha256, BundleSha256: plan.BundleSha256, Calls: []winnerMultipassCallEvidence{}}}
 	result.Custody = winnerHandoffCustodyManifest{Schema: 1, Kind: "elected-winner-review-protected-custody/v1", HandoffId: owner.HandoffId.String(), PlanSha256: owner.Plan.PlanSha256,
-		BundleSha256: plan.BundleSha256, Documents: []winnerHandoffCustodyOriginal{}, LeafAdmissions: []winnerMultipassAdmission{}, Invocations: []winnerHandoffInvocationCustody{}}
+		BundleSha256: plan.BundleSha256, Provenance: hooks.Provenance, Documents: []winnerHandoffCustodyOriginal{}, LeafAdmissions: []winnerMultipassAdmission{}, Invocations: []winnerHandoffInvocationCustody{}}
 	retainDocument := func(retentionCtx context.Context, name string, content []byte) error {
 		original, err := retainWinnerHandoffDocument(retentionCtx, name, content, settings.MaximumDocumentBytes, owner.Deadline, hooks.Retain)
 		if err == nil {
