@@ -391,6 +391,14 @@ func (self PostgresStore) AutomationSeal(ctx context.Context, settings *Settings
 
 // A review replay returns the original response. A stale expected revision never creates a second replacement.
 func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest) (result *model.CompetitionIntegrityReviewResult, err error) {
+	if request.HandoffId != "" {
+		return nil, ErrConflict
+	}
+	return self.recordIntegrityReview(ctx, settings, roundId, actorId, request, nil)
+}
+
+// Only the independent operator import may select the timely completion clock.
+func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest, handoff *model.CompetitionReviewHandoffImport) (result *model.CompetitionIntegrityReviewResult, err error) {
 	if !tokenNamePattern.MatchString(actorId) {
 		return nil, errors.New("authenticated reviewer identity is required")
 	}
@@ -404,6 +412,14 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			_, policy, loadErr := loadAutomationRoundInTx(ctx, tx, settings, roundId)
 			server.Raise(loadErr)
 			server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_v2_review_actor',$1,true)`, actorId))
+			var modelCompletedAt *time.Time
+			if handoff != nil {
+				modelCompletedAt, loadErr = validateReviewHandoffImportInTx(ctx, tx, roundId, request, *handoff)
+				server.Raise(loadErr)
+				server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_review_operator_actor',$1,true)`, actorId))
+			} else if request.HandoffId != "" {
+				panic(ErrConflict)
+			}
 			server.Raise(model.ValidateCompetitionIntegrityReview(request, *policy.AutomationPolicy))
 			var storedDigest string
 			var content []byte
@@ -428,7 +444,11 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 				panic(ErrConflict)
 			}
 			if model.IsCompetitionWinnerReviewPolicy(policy.AutomationPolicy.WinnerReviewPolicy) {
-				server.Raise(validateWinnerReviewSubmissionInTx(ctx, tx, current, request, self.nowUtc()))
+				observedAt := self.nowUtc()
+				if modelCompletedAt != nil {
+					observedAt = *modelCompletedAt
+				}
+				server.Raise(validateWinnerReviewSubmissionInTx(ctx, tx, current, request, observedAt))
 			}
 			var entry *model.CompetitionSealedEntry
 			for i := range current.Seal.Entries {
@@ -455,6 +475,12 @@ func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *S
 			}
 			now := self.nowUtc()
 			result = &model.CompetitionIntegrityReviewResult{ReviewId: server.NewId(), RoundId: roundId, ActorId: actorId, CreatedAt: now, Request: request, RequestSha256: requestDigest}
+			result.ModelCompletedAt = modelCompletedAt
+			if modelCompletedAt != nil {
+				now, loadErr = reviewHandoffDatabaseTime(ctx, tx)
+				server.Raise(loadErr)
+				result.CreatedAt = now
+			}
 			previous := current.Decisions[len(current.Decisions)-1]
 			next := automationDecision(&current.Seal, *policy.AutomationPolicy, &previous, append(current.IntegrityReviews, *result), now)
 			changed := (next.SelectedJobId == nil) != (previous.SelectedJobId == nil) || next.SelectedJobId != nil && *next.SelectedJobId != *previous.SelectedJobId

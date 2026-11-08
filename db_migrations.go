@@ -11371,4 +11371,8 @@ var migrations = []any{
 	// exclusion is kept until the judge reads it. Apply before deploying the
 	// api, alt, taskworker and proxy that use it.
 	providerEgressTlsVerdictMigration,
+
+	// Prospective one-shot model findings remain pending until a separate human
+	// capability imports their exact timely completion. Existing rows stay intact.
+	newSqlMigration(competitionReviewHandoffMigration()),
 }
