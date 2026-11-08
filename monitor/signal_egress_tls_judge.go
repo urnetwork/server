@@ -51,7 +51,9 @@ type EgressTlsJudgeSettings struct {
 	// that report must be older than this to raise stale, which then pages
 	// from its second cadence: when the stale alert pages with every slot
 	// reporting, StaleAfter and five more cadences. A judge on an unread slot
-	// is not ruled out sooner; one stopped is not missed for good.
+	// is not ruled out sooner; one stopped is not missed for good. When every
+	// slot that reports has not judged since its process started, the newest
+	// of those processes must have started longer ago than this.
 	StalePageAfter time.Duration
 	// consecutive cadences on which the newest judged run left a decidable
 	// finding undecided before it warns: thirty minutes at the cadence
@@ -103,6 +105,10 @@ type egressTlsJudgeFleet struct {
 	// the pending findings that run left undecided inside the direct window
 	hasUndecided bool
 	undecided    float64
+	// the newest start, Unix seconds, of the processes that export the
+	// last-judged gauge
+	hasStarted bool
+	started    float64
 	// every desired Taskworker slot exports a fresh last-judged gauge
 	complete bool
 	coverage string
@@ -110,14 +116,16 @@ type egressTlsJudgeFleet struct {
 }
 
 // One instant read: the newest last-judged gauge over Taskworker processes,
-// that process's undecided count, and per-slot freshness of the gauge on the
-// slots that must export it.
+// that process's undecided count, the newest start of the processes that
+// export the gauge, and per-slot freshness of the gauge on the slots that must
+// export it.
 func egressTlsJudgeQuery(environment string, settings *EgressTlsJudgeSettings, taskworkers fleetSlotInventory) string {
 	base := "env=" + strconv.Quote(environment) + ",job=" + strconv.Quote(settings.TaskworkerService)
 	newest := "topk(1, " + egressTlsJudgeLastJudgedMetric + "{" + base + "})"
 	parts := []string{
 		fleetPart("judged", newest),
 		fleetPart("undecided", egressTlsJudgeUndecidedMetric+"{"+base+"} and on(job,host,block,instance) "+newest),
+		fleetPart("started", "max(process_start_time_seconds{"+base+"} and on(job,host,block,instance) "+egressTlsJudgeLastJudgedMetric+"{"+base+"})"),
 	}
 	if selector := taskworkers.selector(environment); selector != "" {
 		parts = append(parts, fleetSlotFreshnessPart("judged", egressTlsJudgeLastJudgedMetric, selector))
@@ -167,6 +175,13 @@ func (self egressTlsJudgeProbe) check(ctx context.Context, env *probeEnv) ([]fin
 				}
 				fleet.hasUndecided = true
 				fleet.undecided = sample.value
+			case "started":
+				if !valid || latest < sample.value || fleet.hasStarted {
+					reasons = append(reasons, "invalid_fleet_sample")
+					continue
+				}
+				fleet.hasStarted = true
+				fleet.started = sample.value
 			}
 		}
 		coverage := newFleetSlotCoverage(taskworkers, samples, []string{"judged"}, at, settings.FleetReadSettings, nil)
@@ -205,6 +220,8 @@ func evaluateEgressTlsJudge(
 	fresh := false
 	var age time.Duration
 	ageText := "none"
+	var startedAge time.Duration
+	startedText := "none"
 	if fleet != nil {
 		newest := "none"
 		undecided := "unknown"
@@ -218,22 +235,34 @@ func evaluateEgressTlsJudge(
 		if fleet.hasUndecided {
 			undecided = strconv.FormatFloat(fleet.undecided, 'f', 0, 64)
 		}
-		fleetText = fmt.Sprintf("newest_judged_run=%s newest_judged_age=%s judged_slot=%s undecided_findings=%s stale_after=%s metrics_gateway=%s %s",
-			newest, ageText, fleet.judgedSlot, undecided, settings.StaleAfter, fleet.gateway, fleet.coverage)
+		if fleet.hasStarted && 0 < fleet.started {
+			startedAge = max(0, at.Sub(time.Unix(0, int64(fleet.started*float64(time.Second))).UTC()))
+			startedText = startedAge.Truncate(time.Second).String()
+		}
+		fleetText = fmt.Sprintf("newest_judged_run=%s newest_judged_age=%s judged_slot=%s undecided_findings=%s newest_process_start_age=%s stale_after=%s metrics_gateway=%s %s",
+			newest, ageText, fleet.judgedSlot, undecided, startedText, settings.StaleAfter, fleet.gateway, fleet.coverage)
 	}
 
 	// No run has judged for a while. With every desired slot reporting, that
 	// is known from StaleAfter. With a slot not reporting, an unread slot may
 	// hold the newest run, so the slots that report must show none for
 	// StalePageAfter, when a fully read judge would page; then it pages at
-	// once. A slot that reports only zero has not judged since it started, as
-	// mid-roll, which proves nothing either way.
+	// once. Slots that report only zero have not run the judge since their
+	// processes started, as just after a roll. The judge is one fleet task,
+	// run every five minutes by whichever process claims it, so the processes
+	// that report stay at 0 for StalePageAfter after the newest of them
+	// started only if none of them has run it; then that pages at once too.
 	partial := fleet != nil && !fleet.complete && fleet.judged && 0 < fleet.judgedAt && settings.StalePageAfter < age
+	neverJudged := fleet != nil && !fleet.complete && fleet.judged && fleet.judgedAt == 0 &&
+		fleet.hasStarted && 0 < fleet.started && settings.StalePageAfter < startedAge
 	switch {
-	case fleet != nil && fleet.complete && !fresh, partial:
+	case fleet != nil && fleet.complete && !fresh, partial, neverJudged:
 		f := newFinding("egress-tls-judge-stale", 2)
 		f.pageSustain = settings.StalePageSustain
 		switch {
+		case neverJudged:
+			f.pageSustain = 2
+			f.symptom = fmt.Sprintf("No Taskworker process that reports has completed a judged TLS finding judge run since it started, and the newest of them started %s ago, beyond the %s a fully read judge pages at", startedText, settings.StalePageAfter)
 		case partial:
 			f.pageSustain = 2
 			f.symptom = fmt.Sprintf("No TLS finding judge run has judged for %s on any Taskworker slot that reports, beyond the %s a fully read judge pages at", ageText, settings.StalePageAfter)
