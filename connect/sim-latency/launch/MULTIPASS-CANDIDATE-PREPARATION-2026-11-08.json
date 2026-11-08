@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "kind": "authenticated-elected-candidate-offline-preparation/v1",
+  "source_commit": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "unit": "urnetwork-review-candidate-prepare-f866-20261108-v2.service",
+  "terminal_exit": 0,
+  "test_seconds": 6.05,
+  "prepared": {
+    "path": "/var/lib/urnetwork/competition-epoch1-review-20261108-v1/candidate-preparation-f866-v1/prepared.json",
+    "sha256": "52932c0d7a30ca9a3354a6e1417612ffc8927d24b86311f6e64942a72d49bb2e",
+    "bytes": 7354073,
+    "owner_uid": 0,
+    "mode": "0400",
+    "status": "PREPARED_NO_MODEL_CALLS",
+    "configuration_sha256": "d8d2f0bd425d5e3de6b31497ca05a6d292017752e64959cd6b4857b703407aed",
+    "original_review_authorization_sha256": "e741608daf6d3271066f5af04d5e950b5c6420405161eb61af15254deb0d31bb"
+  },
+  "identity": {
+    "job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739",
+    "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+    "decision_sha256": "a800ecdba04be602f61a904e9626819fa68fcf71191bdf8dda0b7c7989a94e81",
+    "source_lock_sha256": "ec322ed2db023e15ea5dc3eea60a6ca5989661bba737c340fea3477d8d1300cf",
+    "patch_sha256": "b8800b3a52176e5e33ccab86536d5751ea0a42cade6f64be0d2586d765573aff",
+    "score_sha256": "ebe45b20f5fc3fc5b5342ebb869714d06de3d132ba68a707497a6918122ff7d8"
+  },
+  "source_scope": {
+    "private_census_sha256": "135abf53a1a24cab44f7f9f2ce1b5b8c1145f0a8b794e92067b582c00fea596f",
+    "changed_files": 19,
+    "supplemental_files": 206,
+    "required_supplemental_paths": 206,
+    "unresolved_context": [],
+    "native_artifact_validation_passed": true,
+    "token_admission_completed": false,
+    "note": "Preparation authenticates elected state, sealed artifacts and frozen source. It is not behavioral qualification, a complete model verdict or an exhaustive copy of every external dependency. Any newly necessary missing context must be resolved, never silently truncated."
+  },
+  "initial_read_only_admission_refusal": {
+    "unit": "urnetwork-review-candidate-prepare-f866-20261108-v1.service",
+    "reason": "Preparation configuration omitted the required prospective timeout; the native bounded-run validator refused it before output, owner or model calls.",
+    "initial_configuration_sha256": "2947f1d4a2c6b8f6f1666997cbf4fbacc2540114e6eefc1fc45e560b0b0e61a1",
+    "correction": "Declared the already-authorized 86400-second ceiling. No review clock was started or renewed."
+  },
+  "model_calls": 0,
+  "review_owner_created": false,
+  "candidate_code_executed": false,
+  "winner_approved": false,
+  "source_promoted": false,
+  "rewards_released": false
+}
