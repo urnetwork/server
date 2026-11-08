@@ -54,9 +54,9 @@
     "legacy_intake_grant_query_completed": true,
     "legacy_epoch_intake_grants_found": 0,
     "two_incident_runtime_qualification": {"accepted": true, "scope": "Two separately approved singleton epoch-one recovery cases only; not grant, winner, model or calibration authority", "native_bind_valid": true, "typed_canonical_sha256": "4816a59f95a320e703e9d9dff0d519291bdb68078fc937eed269dae0c35ab002", "runtime_file_sha256": "ec5cc5db2786c263394c6e65121438352c6df5c3fc37fecca62217e8c6f65a00", "evidence_sha256": "069d7dd3117fc608748cd051c6815d20423a10aade64bc68442f2ba30536ac56", "root_private_directory": "/mnt/data/competition-two-incident-runtime-accepted-20261105.TWsymI9d", "grants_issued": false},
-    "worker_service_state": "active/running",
-    "worker_main_pid": 2350251,
-    "worker_slot_lease_live": true,
+    "worker_service_state": "inactive/dead; intentionally stopped after all evaluations completed",
+    "worker_main_pid": 0,
+    "worker_slot_lease_live": false,
     "interrupted_attempt": {"reconciled_as_failed_against_original_expired_deadline": true, "clock_reset": false},
     "finalization_hold": {"active": true, "revision": 1, "hold_id": "01a1ada6-3090-c4b5-1f42-0adccfe4423e"},
     "database_version_observed": 943,
@@ -103,7 +103,7 @@
     "api_readiness_operator_authenticated": true,
     "api_readiness_all_eleven_checks_true": true
   },
-  "next_action": "Use current_observation.next_action and OPERATOR-RECOVERY-GRANTED-2026-11-07.json. All seven recoveries are granted; six succeeded and the last is running. Historical observations below do not authorize another restart or retry.",
+  "next_action": "Use current_observation.next_action. All 69 evaluations and all seven controlled recoveries succeeded; the provisional winner's authenticated packet is exported. Complete and qualify the approved bounded Qwen/Gemma multi-pass review, then present findings for explicit operator approval. Keep the idle supervisor stopped and source/reward holds active. Historical observations below do not authorize another restart, retry, approval or promotion.",
   "production": {
     "api": "https://api.bringyour.com",
     "season_id": "sim-latency-production-20261028-r2",
