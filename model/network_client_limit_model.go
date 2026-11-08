@@ -379,7 +379,9 @@ func clientLimitUpgradeClaim(override bool, isPro bool) *bool {
 // whose caller is an agent. The client info is the caller's own claim. A caller
 // that claims an app only gets clients that the connection gate still holds off
 // past the limit, so it uses no more than the limit, and the top-level client
-// cap still bounds how many it creates.
+// cap still bounds how many it creates. Devices have no create rate (only
+// hosted proxies do): such a caller can create devices up to the cap, remove
+// them and create again, as any network under its limit already could.
 func concurrentLimitCreationExempt(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession) bool {
 	if authClient.ProxyConfig != nil || clientSession.ApiKeyAuthenticated {
 		return false
