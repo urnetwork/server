@@ -14,6 +14,7 @@ import (
 	"time"
 
 	servermonitor "github.com/urnetwork/server/monitor"
+	"github.com/urnetwork/server/pager"
 )
 
 type stringFlags []string
@@ -54,6 +55,7 @@ type monitorOptions struct {
 	admissionDiagnosticDirectory string
 	sshAdmissionDirectory        string
 	slackAlerts                  bool
+	pagerAlerts                  bool
 }
 
 // Exit only after the command-owned process lifecycle has returned.
@@ -282,22 +284,31 @@ func runWithInvocationWitness(args []string, stdout io.Writer, loadSettings func
 		}
 		return runErr
 	}
-	// One-shot runs are diagnostics and never notify. The notifier logs its
-	// own startup line and drains its queue for up to 15s at exit.
+	// One-shot runs are diagnostics and never notify. Each notifier logs its
+	// own startup line and drains its queue for up to 15s at exit, the pager
+	// first, since its warn travels through Slack.
 	var notifier *servermonitor.SlackAlertNotifier
 	if opts.slackAlerts {
 		notifier = servermonitor.NewSlackAlertNotifier(slackNotifierSettings(settings, opts))
-		defer drainSlackNotifier(stop, notifier.Close, 15*time.Second)
+		defer drainNotifier(stop, notifier.Close, 15*time.Second)
 	} else {
 		fmt.Fprintln(os.Stderr, "monitor: Slack alert notifications disabled by -slack-alerts=false")
 	}
-	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence, InvocationWitness: invocationWitness, AdmissionDiagnostic: admissionDiagnostic}, continuousAlertHandler(stdout, opts.format, notifier))
+	handler := continuousAlertHandler(stdout, opts.format, notifier)
+	if opts.pagerAlerts {
+		pagerNotifier := servermonitor.NewPagerAlertNotifier(pagerNotifierSettings(settings, notifier))
+		defer drainNotifier(stop, pagerNotifier.Close, 15*time.Second)
+		handler = pagedAlertHandler(pagerNotifier, handler)
+	} else {
+		fmt.Fprintln(os.Stderr, "monitor: pager notifications disabled: -pager-alerts is off")
+	}
+	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence, InvocationWitness: invocationWitness, AdmissionDiagnostic: admissionDiagnostic}, handler)
 }
 
 // Restores default signal handling first, so a second interrupt or SIGTERM
 // ends the process at once, then gives the notifier until timeout to post
 // what it holds.
-func drainSlackNotifier(stopSignals func(), closeNotifier func(context.Context), timeout time.Duration) {
+func drainNotifier(stopSignals func(), closeNotifier func(context.Context), timeout time.Duration) {
 	stopSignals()
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -313,6 +324,36 @@ func slackNotifierSettings(settings servermonitor.SignalSettings, opts monitorOp
 	notifierSettings.Environment = settings.Environment
 	notifierSettings.StartWindow = max(notifierSettings.StartWindow, 3*opts.minimumProbeCadence)
 	return notifierSettings
+}
+
+// The pager notifier's settings for this watcher. A sink that cannot be built
+// leaves the notifier unable to page, which it says on stderr and through
+// slackNotifier, the optional carrier of its warn.
+func pagerNotifierSettings(settings servermonitor.SignalSettings, slackNotifier *servermonitor.SlackAlertNotifier) servermonitor.PagerAlertNotifierSettings {
+	notifierSettings := servermonitor.DefaultPagerAlertNotifierSettings()
+	notifierSettings.Environment = settings.Environment
+	if slackNotifier != nil {
+		notifierSettings.Warn = slackNotifier.Handle
+		notifierSettings.WarnClearRuns = slackNotifier.ClearAfterCompleteRuns()
+	}
+	webhookSettings := pager.DefaultWebhookSinkSettings()
+	webhookSettings.Url = settings.AlertNotifications.PagerWebhookUrl
+	sink, err := pager.NewWebhookSink(webhookSettings)
+	if err != nil {
+		notifierSettings.DisabledReason = err.Error()
+		return notifierSettings
+	}
+	notifierSettings.Sink = sink
+	return notifierSettings
+}
+
+// Hands every gated execution, empty ones included, to the pager first, so an
+// output failure in next cannot hold a page back.
+func pagedAlertHandler(notifier *servermonitor.PagerAlertNotifier, next servermonitor.SignalExecutionHandler) servermonitor.SignalExecutionHandler {
+	return func(ctx context.Context, signal servermonitor.Signal, execution servermonitor.SignalExecution) error {
+		notifier.Handle(signal, execution)
+		return next(ctx, signal, execution)
+	}
 }
 
 // Hands every gated execution, empty ones included (absence from complete
@@ -331,8 +372,9 @@ func continuousAlertHandler(stdout io.Writer, format string, notifier *servermon
 }
 
 // Applies the CLI's settings options. A watcher that never posts to Slack
-// (-slack-alerts=false or -once) drops the webhook from its effective
-// settings, so a webhook rotation does not make it stale.
+// (-slack-alerts=false or -once) drops that webhook from its effective
+// settings, so a webhook rotation does not make it stale, and one that never
+// pages (no -pager-alerts, or -once) drops the pager's.
 func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts monitorOptions) (servermonitor.SignalSettings, error) {
 	if opts.mode != "" {
 		settings.AddressMode = servermonitor.AddressMode(opts.mode)
@@ -341,7 +383,10 @@ func applyMonitorSettingsOptions(settings servermonitor.SignalSettings, opts mon
 		settings.SSHKeyPaths = append([]string(nil), opts.keys...)
 	}
 	if !opts.slackAlerts || opts.once {
-		settings.AlertNotifications = servermonitor.AlertNotificationSettings{}
+		settings.AlertNotifications.SlackWebhookUrl = ""
+	}
+	if !opts.pagerAlerts || opts.once {
+		settings.AlertNotifications.PagerWebhookUrl = ""
 	}
 	settings, err := servermonitor.ExcludeEdgeIPv6Hosts(settings, opts.excludedEdgeIPv6Hosts...)
 	if err != nil {
@@ -370,6 +415,7 @@ func parseMonitorOptions(args []string) (monitorOptions, error) {
 	flags.StringVar(&opts.apiReleaseProofFile, "api-release-proof", "", "private local JSON expectation for the optional bounded API release proof")
 	flags.DurationVar(&opts.minimumProbeCadence, "min-probe-cadence", 0, "continuous active-probe cadence floor and first-run delay; standing logs are unchanged")
 	flags.BoolVar(&opts.slackAlerts, "slack-alerts", true, "in continuous mode, post one Slack message per alert transition to vault monitor.yml alerts.slack_webhook_url (empty disables)")
+	flags.BoolVar(&opts.pagerAlerts, "pager-alerts", false, "in continuous mode, page the rota for page-class alerts through vault monitor.yml alerts.pager_webhook_url; an endpoint that cannot be used warns on Slack")
 	flags.Var(&opts.keys, "ssh-key", "SSH identity path; may be repeated")
 	flags.Var(&opts.includedSignals, "include-signal", "signal key, number, or ID to run; may be repeated; the tier-0 vitals always run too")
 	flags.Var(&opts.excludedSignals, "exclude-signal", "signal key, number, or ID to omit; may be repeated")
