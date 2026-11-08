@@ -306,6 +306,7 @@ func captureWinnerHandoffRuntime(ctx context.Context, config winnerHandoffRuntim
 		},
 	}
 	captures, resultErr := executeWinnerHandoffRuntimeProbes(ctx, owner, hooks)
+	resultErr = errors.Join(resultErr, storage.Close())
 	profiles := map[string]winnerMultipassTokenizationProfile{}
 	if resultErr == nil && len(captures) == len(defaultWinnerSnowProviderSettings().Members) {
 		for index, member := range defaultWinnerSnowProviderSettings().Members {
@@ -326,12 +327,15 @@ func captureWinnerHandoffRuntime(ctx context.Context, config winnerHandoffRuntim
 	if resultErr != nil {
 		report.Error = resultErr.Error()
 	}
-	content, _ := json.Marshal(report)
-	writeErr := writePrivateReviewFile(filepath.Join(config.OutputDirectory, "runtime-report.json"), content)
 	retentionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), config.Settings.ReceiptTimeout)
-	_, retainErr := retainWinnerHandoffDocument(retentionCtx, "runtime-report.json", content, winnerMultipassSpoolManifestBytes, owner.Deadline, retain)
+	_, publicationErr := publishWinnerHandoffProtectedReport(retentionCtx, filepath.Join(config.OutputDirectory, "runtime-report.json"), winnerMultipassSpoolManifestBytes, owner.Deadline, func(publicationErr error) ([]byte, error) {
+		if publicationErr != nil {
+			report.Complete, report.Error, report.Profiles = false, errors.Join(resultErr, publicationErr).Error(), map[string]winnerMultipassTokenizationProfile{}
+		}
+		return json.Marshal(report)
+	}, retain)
 	cancel()
-	return errors.Join(resultErr, writeErr, retainErr, syncWinnerHandoffSpoolDirectory(config.OutputDirectory))
+	return errors.Join(resultErr, publicationErr)
 }
 
 // The default test path performs no operation. Actual execution requires the

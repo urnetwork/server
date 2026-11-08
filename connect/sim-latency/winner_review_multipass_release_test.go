@@ -248,3 +248,49 @@ func TestWinnerMultipassCompiledQualificationCensusIsClosed(t *testing.T) {
 		t.Fatal("compiled qualification census is incomplete", err)
 	}
 }
+
+// Original ordinary/race logs must be accepted without filtering. A nested
+// passing test is not in the compiled top-level census and prevents admission.
+func TestWinnerMultipassCompiledQualificationUsesOnlyTopLevelTestEvents(t *testing.T) {
+	sources, _, err := winnerMultipassCompiledCensus()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range sources {
+		if !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), name, content, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if ok && selector.Sel.Name == "Run" {
+				if receiver, ok := selector.X.(*ast.Ident); ok && receiver.Name == "t" {
+					t.Errorf("%s emits nested test events outside the immutable release census", name)
+				}
+			}
+			return true
+		})
+	}
+}
+
+func TestWinnerMultipassOfflineLogDoesNotDiscardNestedOrUnexpectedEvents(t *testing.T) {
+	name := "TestSyntheticCompleteQualification"
+	content := []byte(`{"Action":"run","Package":"github.com/urnetwork/server/connect/sim-latency","Test":"TestSyntheticCompleteQualification"}
+{"Action":"pass","Package":"github.com/urnetwork/server/connect/sim-latency","Test":"TestSyntheticCompleteQualification"}
+{"Action":"pass","Package":"github.com/urnetwork/server/connect/sim-latency"}`)
+	if err := validateCurrentQgUnitLog(content, []string{name}); err != nil {
+		t.Fatal("complete synthetic top-level log was refused", err)
+	}
+	content = append(content, []byte(`
+{"Action":"pass","Package":"github.com/urnetwork/server/connect/sim-latency","Test":"TestSyntheticCompleteQualification/unprecommitted-child"}`)...)
+	if err := validateCurrentQgUnitLog(content, []string{name}); err == nil {
+		t.Fatal("unexpected nested event was filtered into an admissible release log")
+	}
+}

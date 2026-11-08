@@ -147,6 +147,7 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 	resolve := winnerHandoffQualificationSpoolResolver(config.Release, frozen.Plan.Sha256, plan.Owner.Id, capacitySha, read)
 	var storage *winnerHandoffStorage
 	var report *winnerMultipassQualificationSpoolReport
+	var protectedReport *winnerHandoffCustodyOriginal
 	failures := []winnerHandoffCustodyOriginal{}
 	defer func() {
 		if storage != nil {
@@ -157,24 +158,25 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 				report.Qualified = false
 				report.Error = resultErr.Error()
 			}
-			content, err := json.Marshal(report)
-			if err == nil {
-				err = writePrivateReviewFile(filepath.Join(config.OutputDirectory, "group-report.json"), content)
-			}
-			if err == nil {
-				cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultWinnerHandoffCaptureSettings().ReceiptTimeout)
-				_, err = retainWinnerHandoffDocument(cleanup, "group-report.json", content, defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, retain)
-				cancel()
-			}
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultWinnerHandoffCaptureSettings().ReceiptTimeout)
+			var err error
+			protectedReport, err = publishWinnerHandoffProtectedReport(cleanup, filepath.Join(config.OutputDirectory, "group-report.json"), defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, func(publicationErr error) ([]byte, error) {
+				if publicationErr != nil {
+					report.Complete, report.Qualified, report.Error = false, false, errors.Join(resultErr, publicationErr).Error()
+				}
+				return json.Marshal(report)
+			}, retain)
+			cancel()
 			resultErr = errors.Join(resultErr, err)
 		}
 		outcome, _ := json.Marshal(struct {
 			Schema           int                            `json:"schema"`
 			Kind             string                         `json:"kind"`
 			FailureOriginals []winnerHandoffCustodyOriginal `json:"failed_originals"`
+			ProtectedReport  *winnerHandoffCustodyOriginal  `json:"protected_report,omitempty"`
 			Error            string                         `json:"error"`
 			WinnerApproved   bool                           `json:"winner_approved"`
-		}{Schema: 1, Kind: "winner-review-qualification-native-outcome/v1", FailureOriginals: failures, Error: fmt.Sprint(resultErr)})
+		}{Schema: 1, Kind: "winner-review-qualification-native-outcome/v1", FailureOriginals: failures, ProtectedReport: protectedReport, Error: fmt.Sprint(resultErr)})
 		resultErr = errors.Join(resultErr, writePrivateReviewFile(filepath.Join(config.OutputDirectory, "native-outcome.json"), outcome), syncWinnerHandoffSpoolDirectory(config.OutputDirectory))
 	}()
 	var physical *winnerMultipassPhysicalAuthentication
