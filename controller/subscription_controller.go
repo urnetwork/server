@@ -1728,7 +1728,7 @@ func playCreditSubscriptionInTx(
 	var earlierExpiries []time.Time
 	historyRead := false
 	if !testPurchase {
-		earlierExpiries, historyRead = playEarlierCreditExpiriesInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken)
+		earlierExpiries, historyRead = playEarlierCreditExpiriesInTx(tx, clientSession.Ctx, playSubscriptionRenewal.NetworkId, playSubscriptionRenewal.PurchaseToken)
 	}
 
 	if sku.Supporter {

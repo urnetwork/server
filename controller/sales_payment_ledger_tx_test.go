@@ -55,6 +55,11 @@ type salesLedgerRenewal struct {
 	networkId     server.Id
 	market        string
 	transactionId string
+	purchaseToken string
+	startTime     time.Time
+	endTime       time.Time
+	// a grace period's hold records no revenue
+	netRevenue model.NanoCents
 }
 
 func newSalesLedgerTx(networkIds ...server.Id) *salesLedgerTx {
@@ -133,6 +138,10 @@ func (self *salesLedgerTx) Exec(ctx context.Context, sql string, args ...any) (p
 	case strings.Contains(sql, "INSERT INTO subscription_renewal"):
 		self.renewals = append(self.renewals, salesLedgerRenewal{
 			networkId:     args[0].(server.Id),
+			startTime:     args[2].(time.Time),
+			endTime:       args[3].(time.Time),
+			netRevenue:    args[4].(model.NanoCents),
+			purchaseToken: args[5].(string),
 			market:        args[6].(string),
 			transactionId: args[7].(string),
 		})
@@ -150,15 +159,17 @@ func (self *salesLedgerTx) Query(ctx context.Context, sql string, args ...any) (
 		// HasPreLedgerAppleRenewalInTx: no credit from before the ledger
 		return &salesLedgerRows{rows: [][]any{{false}}}, nil
 
-	case strings.Contains(sql, "purchase-token-credit-end-times"):
-		// GetPurchaseTokenCreditEndTimesInTx: the token's credits with bytes,
-		// latest first
-		self.log = append(self.log, "credit_history "+args[0].(string))
+	case strings.Contains(sql, "play-purchase-credit-end-times"):
+		// GetPlayPurchaseCreditEndTimesInTx: the network's Play purchase's
+		// renewal rows with revenue, latest first
+		networkId := args[0].(server.Id)
+		market := fmt.Sprint(args[2])
+		purchaseToken := args[3].(string)
+		self.log = append(self.log, "credit_history "+purchaseToken)
 		rows := [][]any{}
-		for i := len(self.balances) - 1; 0 <= i; i -= 1 {
-			balance := self.balances[i]
-			if balance.purchaseToken == args[0].(string) && 0 < balance.byteCount {
-				rows = append(rows, []any{balance.endTime})
+		for _, renewal := range self.renewals {
+			if renewal.networkId == networkId && renewal.market == market && renewal.purchaseToken == purchaseToken && 0 < renewal.netRevenue {
+				rows = append(rows, []any{renewal.endTime})
 			}
 		}
 		slices.SortFunc(rows, func(a []any, b []any) int {

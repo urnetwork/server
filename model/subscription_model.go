@@ -1087,16 +1087,24 @@ func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken str
 	return
 }
 
-// How many of a purchase token's latest credits
-// GetPurchaseTokenCreditEndTimesInTx reads.
-const purchaseTokenCreditEndTimesLimit = 100
+// How many of a Play purchase's latest credited windows
+// GetPlayPurchaseCreditEndTimesInTx reads: decades of monthly renewals, each
+// with a day Play added before it.
+const playPurchaseCreditEndTimesLimit = 1000
 
-// GetPurchaseTokenCreditEndTimesInTx is the window end of each balance the
-// purchase token was credited, oldest first, up to the latest
-// purchaseTokenCreditEndTimesLimit. A grace period's zero-byte hold credited
-// nothing and is left out. The Play sales notice reads it before the next
-// credit is added, to tell a newly charged window from one Play only moved.
-func GetPurchaseTokenCreditEndTimesInTx(tx server.PgTx, ctx context.Context, purchaseToken string) []time.Time {
+// GetPlayPurchaseCreditEndTimesInTx is the end of each Pro window the
+// network's Play purchase was credited, oldest first, up to the latest
+// playPurchaseCreditEndTimesLimit. The Play sales notice reads it before the
+// next credit is added, to tell a newly charged window from one Play only
+// moved.
+//
+// It reads the purchase's subscription_renewal rows, which nothing prunes.
+// Its transfer_balance rows are no history: RemoveCompletedContracts deletes
+// a balance 7 days after it ends, so a trial converting after an account hold
+// or a renewal after a week of Play's pending days would be measured from a
+// partial history. A grace period's hold records no revenue and is left out.
+// A data pack's credit writes no renewal row, so it has no history here.
+func GetPlayPurchaseCreditEndTimesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) []time.Time {
 	endTimes := []time.Time{}
 	if purchaseToken == "" {
 		return endTimes
@@ -1104,17 +1112,23 @@ func GetPurchaseTokenCreditEndTimesInTx(tx server.PgTx, ctx context.Context, pur
 	result, err := tx.Query(
 		ctx,
 		`
-		/* purchase-token-credit-end-times */
+		/* play-purchase-credit-end-times */
 		SELECT end_time
-		FROM transfer_balance
+		FROM subscription_renewal
 		WHERE
-			purchase_token = $1 AND
-			0 < start_balance_byte_count
+			network_id = $1 AND
+			subscription_type = $2 AND
+			market = $3 AND
+			purchase_token = $4 AND
+			0 < net_revenue_nano_cents
 		ORDER BY end_time DESC
-		LIMIT $2
+		LIMIT $5
 		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketGoogle,
 		purchaseToken,
-		purchaseTokenCreditEndTimesLimit,
+		playPurchaseCreditEndTimesLimit,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {

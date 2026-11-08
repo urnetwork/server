@@ -700,10 +700,12 @@ func playFirstWindowIsTrial(sub *PlaySubscription, productId string, startTime t
 
 // classifyPlayCredit is what the window credited through maxExpiryTime was.
 // earlierExpiries are the expiries of the purchase's earlier credits, oldest
-// first. A window is charged when it moves the expiry at least
-// playShortestPaidPeriod past the last charged window's. Measuring from the
-// last charged window, not the last credited one, keeps a renewal that
-// follows Play's extra day: a February renewal lands 27 days after that day.
+// first, from its renewal rows, which nothing prunes
+// (playEarlierCreditExpiriesInTx). A window is charged when it moves the
+// expiry at least playShortestPaidPeriod past the last charged window's.
+// Measuring from the last charged window, not the last credited one, keeps a
+// renewal that follows Play's extra days: a February renewal lands 27 days
+// after the first of them, and less after any later one.
 func classifyPlayCredit(
 	sub *PlaySubscription,
 	productId string,
@@ -741,13 +743,17 @@ func classifyPlayCredit(
 }
 
 // playEarlierCreditExpiriesInTx is the expiry of each earlier credit of the
-// purchase, oldest first, read under its own savepoint: a read that fails
-// leaves the credit's transaction usable, ok is false, and the window posts no
-// notice.
-func playEarlierCreditExpiriesInTx(tx server.PgTx, ctx context.Context, purchaseToken string) (expiries []time.Time, ok bool) {
+// network's purchase, oldest first: its renewal rows
+// (model.GetPlayPurchaseCreditEndTimesInTx), which end SubscriptionGracePeriod
+// past the store's expiry. Its balances are no history: retention deletes them
+// 7 days after they end. A data pack writes no renewal row and has none, so
+// its order id alone tells new from renewal. The read runs under its own
+// savepoint: a read that fails leaves the credit's transaction usable, ok is
+// false, and the window posts no notice.
+func playEarlierCreditExpiriesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) (expiries []time.Time, ok bool) {
 	server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT play_sales_history`))
 	if r := server.HandleError(func() {
-		for _, endTime := range model.GetPurchaseTokenCreditEndTimesInTx(tx, ctx, purchaseToken) {
+		for _, endTime := range model.GetPlayPurchaseCreditEndTimesInTx(tx, ctx, networkId, purchaseToken) {
 			expiries = append(expiries, endTime.Add(-SubscriptionGracePeriod))
 		}
 	}); r != nil {
