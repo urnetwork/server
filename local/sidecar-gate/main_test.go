@@ -205,11 +205,13 @@ func TestGateReportNamesTheCommitSet(t *testing.T) {
 }
 
 // An every-Gn-out row that needs a group reads open at a gate that registers
-// none, rather than running with an empty group.
+// none, rather than running with an empty group, and FS-54's M1 rows run at the
+// later gate too.
 func TestGateWithoutAGroupLeavesFs55Open(t *testing.T) {
 	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
 	options.gate = "M3"
-	gates := strings.Replace(fixtureGates, "  M1:", "  M3:", 1)
+	gates := strings.Replace(fixtureGates, "  every:", "  M3:\n    - {row: FS-930}\n  every:", 1)
+	gates = strings.Replace(gates, "    - row: FS-901\n", "    - row: FS-54\n", 1)
 	if err := os.WriteFile(options.gatesPath, []byte(gates), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -217,8 +219,15 @@ func TestGateWithoutAGroupLeavesFs55Open(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome := gateOutcomes(report.rows)["FS-907"]; outcome != gateOpen {
-		t.Fatalf("FS-907 at a gate with no group reads %s", outcome)
+	outcomes := gateOutcomes(report.rows)
+	if outcomes["FS-907"] != gateOpen {
+		t.Fatalf("FS-907 at a gate with no group reads %s", outcomes["FS-907"])
+	}
+	if outcomes["FS-54"] != gatePass || outcomes["FS-930"] != gateMissing {
+		t.Fatalf("M3's rows read %v", outcomes)
+	}
+	if _, ran := outcomes["FS-902"]; ran {
+		t.Fatal("an M1 row other than FS-54 ran at M3")
 	}
 }
 

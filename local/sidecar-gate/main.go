@@ -3,7 +3,7 @@
 // and FS-55 and the dump checks at every Gn-out. Run from a server checkout in
 // the monoroot:
 //
-//	go run ./local/sidecar-gate [-base main] [-out report.md] M2
+//	go run ./local/sidecar-gate [-base sidecar] [-out report.md] M2
 //
 // It reads gates.yml for the gate's §23.6 rows and ops-matrix.yml for §19's ids,
 // runs each row's direct go test on its package, through the private-store
@@ -169,7 +169,7 @@ func main() {
 func run(args []string, out io.Writer, errOut io.Writer) int {
 	flags := flag.NewFlagSet("sidecar-gate", flag.ContinueOnError)
 	flags.SetOutput(errOut)
-	base := flags.String("base", "main", "N's ref for FS-55: the release the gate's group applies beside")
+	base := flags.String("base", "sidecar", "N's ref for FS-55: built as a release leg it is N, and with the gate's groups promoted N+1")
 	outPath := flags.String("out", "", "where the Markdown report goes; default standard output")
 	serverDirectory := flags.String("server", ".", "the server checkout, inside the monoroot")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
@@ -253,9 +253,18 @@ func runGate(ctx context.Context, options *gateOptions) (*gateReport, error) {
 	report := &gateReport{gate: options.gate, base: options.base, group: gateGroup(options.gate), startTime: time.Now().UTC()}
 	report.commits = readCommitSet(options.root, options.repos)
 
+	// every Gn-out also runs FS-55, and FS-54 again, since a later group must
+	// still leave a release leg with main's migrations alone (§23.6; OPS-M1-07)
 	everyRows := []gateRow{}
 	if options.gate != "every" && strings.HasPrefix(options.gate, "M") {
-		everyRows = gates.Gates["every"]
+		everyRows = slices.Clone(gates.Gates["every"])
+		if options.gate != "M1" {
+			for _, row := range gates.Gates["M1"] {
+				if row.Row == "FS-54" {
+					everyRows = append(everyRows, row)
+				}
+			}
+		}
 	}
 	for _, row := range append(slices.Clone(rows), everyRows...) {
 		report.rows = append(report.rows, runGateRow(ctx, options, report, &row))
