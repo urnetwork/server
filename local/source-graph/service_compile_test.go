@@ -30,10 +30,11 @@ func TestReleaseSourceGraphBuildsThePendingLeg(t *testing.T) {
 	}
 }
 
-// No ./cli/<svc> links sidecar yet, so the list above cannot show that sidecar builds
-// on server's module versions. Each service's command joins that list as it lands, and
-// until then this compiles the packages those commands will import. The tools-tagged
-// sidecar_require.go holds the requires and links nothing into any service.
+// Every command above links the root, protocol and protocol/bridge through controller's
+// sidecar identity routes, but none links smtpproof, and no ./cli/<svc> hosting a sidecar
+// engine exists yet. Each such command joins the list above as it lands, with the
+// requires its engine brings, and until then this compiles smtpproof, which the
+// tools-tagged sidecar_require.go holds in the graph, beside the packages already linked.
 func TestReleaseSourceGraphBuildsSidecarPackages(t *testing.T) {
 	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath",
 		"github.com/urnetwork/sidecar", "github.com/urnetwork/sidecar/protocol", "github.com/urnetwork/sidecar/protocol/bridge", "github.com/urnetwork/sidecar/smtpproof")
