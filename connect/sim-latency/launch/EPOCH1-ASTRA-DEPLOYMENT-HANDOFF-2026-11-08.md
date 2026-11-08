@@ -61,3 +61,19 @@ checkouts and the supported reviewed-source/build/qualification flow. The
 existing source-build qualifier separately requires actual fixed tests,
 containment and host evidence; an honesty review is not that evidence. Keep
 that distinction and the still-unaccepted calibration explicit.
+
+The installed old source-build qualifier still references its legacy OpenAI
+test key. An inactive replacement is staged alongside the new CLI as
+`source-build-official` (SHA-256
+`9fd65bde79d4ed3a177dff44d67d85a84ac7b5ec2ca00b614f15acbc7579154f`).
+Its fixed-Go-test broker uses the existing two-member Qwen/Gemma configuration;
+it does not replace or repeat Astra's official honesty review. Sixteen local
+component tests passed, but no real winner build, tests, model calls, host
+qualification or promotion were performed by this preparation. See
+`EPOCH1-OFFICIAL-SOURCE-BUILD-STAGING-2026-11-08.json` for all pins and scope.
+
+The bounded nonmutating readiness monitor is
+`urnetwork-epoch1-official-import-readiness-20261108-v1.service` (started
+22:29:54 UTC, 30-minute bound). Inspect its current process/journal rather than
+assuming it remains live. It only detects the new route; actual import and
+hold release still need the checks above.
