@@ -24,6 +24,9 @@ import (
 //	data amounts 0      -> a "grant" of zero bytes, written as a real balance row.
 //	duration 0          -> a purchased data code expires the instant it is created.
 //	price 0             -> the plan is quoted at $0.00 and given away.
+//	sidecar limit 0     -> "not included", so every creation would be refused.
+//	overage price 0     -> Team overage billed at $0.00 rather than withheld.
+//	closure pacing 0    -> erasure stops at the storage limit.
 //
 // So an absent pro.yml is INERT, not zeroed: nothing is enforced, nothing is granted,
 // everything is allowed, and nothing is for sale.
@@ -49,6 +52,27 @@ func TestProAbsent(t *testing.T) {
 		connect.AssertEqual(t, true, 0 < c.PriceMonthlyUsd())
 		connect.AssertEqual(t, true, 0 < c.MaxReferrals)
 		connect.AssertEqual(t, true, 1.0 <= c.SeekerDataMultiplier())
+
+		// the sidecar limits ship dark, with every tier's block read and its storage in GiB
+		connect.AssertEqual(t, false, c.EnforceSidecarLimits)
+		connect.AssertEqual(t, true, 0 < c.EvsUnpaidReadRate)
+		for _, tier := range []NetworkTier{NetworkTierFree, NetworkTierPro, NetworkTierTeam} {
+			limits := &c.TierFor(tier).Sidecar
+			connect.AssertEqual(t, int64(0), limits.Limit("storage")%Gib)
+			connect.AssertEqual(t, true, 0 < limits.Limit("storage"))
+			connect.AssertEqual(t, true, 0 < limits.Limit("sidecar_clients"))
+			connect.AssertEqual(t, true, 0 < limits.Limit("config_admissions"))
+			connect.AssertEqual(t, true, 0 < limits.Limit("top_level_client_limit"))
+			connect.AssertEqual(t, true, 0 < limits.Limit("directory_requests_pending"))
+		}
+		connect.AssertEqual(t, true, 0 < c.Team.PriceBaseUsd)
+		connect.AssertEqual(t, true, 0 < c.Team.PriceSeatUsd)
+		connect.AssertEqual(t, true, 0 < c.Team.IncludedSeats)
+		_, transferPriced := c.Team.OverageTransferTibUsd()
+		connect.AssertEqual(t, true, transferPriced)
+		// owner decision 122: unset until priced, which withholds it
+		_, storagePriced := c.Team.OverageStorageGibMonthUsd()
+		connect.AssertEqual(t, false, storagePriced)
 		return
 	}
 
@@ -107,6 +131,28 @@ func TestProAbsent(t *testing.T) {
 	//    fire, schedule for now, fire again, forever. A missing config file must not spin
 	//    the task worker.
 	connect.AssertEqual(t, true, 0 < c.ReferralGrantPeriod())
+
+	// 7. no sidecar limit is enforced, so a limit reading zero refuses nothing. Every tier
+	//    answers, and the closure floor and pacing keep reading what erasure needs.
+	connect.AssertEqual(t, false, c.EnforceSidecarLimits)
+	connect.AssertEqual(t, ByteCount(0), c.EvsUnpaidReadRate)
+	for _, tier := range []NetworkTier{NetworkTierFree, NetworkTierPro, NetworkTierTeam, "an-unknown-tier"} {
+		limits := &c.TierFor(tier).Sidecar
+		for i := range proSidecarLimitRows {
+			limitKey := proSidecarLimitRows[i].key
+			connect.AssertEqual(t, proSidecarUnusableReading(limitKey), limits.Limit(limitKey))
+		}
+		connect.AssertEqual(t, len(proSidecarLimitRows), len(limits.Limits()))
+	}
+	connect.AssertEqual(t, int64(0), c.SidecarAbuse.Limit("directory_requests_pending"))
+
+	// 8. Team sells nothing, and each overage is withheld rather than free.
+	connect.AssertEqual(t, 0.0, c.Team.PriceBaseUsd)
+	connect.AssertEqual(t, 0.0, c.Team.PriceSeatUsd)
+	_, transferPriced := c.Team.OverageTransferTibUsd()
+	connect.AssertEqual(t, false, transferPriced)
+	_, storagePriced := c.Team.OverageStorageGibMonthUsd()
+	connect.AssertEqual(t, false, storagePriced)
 }
 
 // skipWithoutProYml skips a test that asserts the CONFIGURED product spec (caps,

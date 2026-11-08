@@ -91,6 +91,8 @@ type ProTier struct {
 	HttpsProxy      bool
 	SocksProxy      bool
 	WireguardProxy  bool
+	// The tier's sidecar: block, with sidecar_abuse: read through it (pro_sidecar.go).
+	Sidecar ProSidecarLimits
 }
 
 type ProDataCodeSku struct {
@@ -153,6 +155,9 @@ func (t *ProPriceTier) hasCountry(countryCode string) bool {
 //	no referral cap      -> referrals UNCAPPED (never capped at zero, which would
 //	                        make `count >= cap` true for everyone and block them all)
 //	no price / duration  -> purchases REFUSED, loudly, rather than sold for nothing
+//	no sidecar limits    -> EnforceSidecarLimits false, so nothing refused; every limit
+//	                        reads zero, and the closure floor and pacing their minimums
+//	no overage price     -> that Team overage withheld, never sold at $0
 //
 // The checks key off the VALUE, never off a "was it loaded" flag. A flag has to be
 // remembered -- and a ProConfig literal that forgot to set it would be silently inert.
@@ -169,8 +174,22 @@ type ProConfig struct {
 	EnforceConcurrentClients bool
 	EnforceFeatures          bool
 
+	// Gates every sidecar limit, and is the only thing that does. While false nothing is
+	// refused, whatever a limit reads. Once true, zero means "not included": it refuses
+	// creation, and never activation, reads, deletes, erasure, export or maintenance. See
+	// pro_sidecar.go.
+	EnforceSidecarLimits bool
+
+	// Bytes a second that a spent network may still read from its own repos. Non-positive
+	// reads as unpaced: a spent network's reads are never refused.
+	EvsUnpaidReadRate ByteCount
+
 	Free ProTier
 	Pro  ProTier
+
+	// Team's tier is TierFor(NetworkTierTeam), which takes Pro's limits and features.
+	Team         ProTeamConfig
+	SidecarAbuse ProSidecarAbuse
 
 	// priceTiers are the regional Pro price tiers in pro.yml order (the first is
 	// the default). Read through PriceTiers/PriceTierForCountry, which synthesize a
@@ -282,7 +301,9 @@ func parseProPriceTiers(ys []proPriceTierYaml) []*ProPriceTier {
 	return tiers
 }
 
-var proConfig = sync.OnceValue(func() *ProConfig {
+var proConfig = sync.OnceValue(loadProConfig)
+
+func loadProConfig() *ProConfig {
 	// OPTIONAL. An environment without pro.yml must not fail to boot — a partial deploy
 	// or an env that has not been updated should degrade to "nothing is enforced", not
 	// take the process down.
@@ -319,7 +340,7 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 		skus = append(skus, ProDataCodeSku{Data: mustParseByteCount(s.Data), PriceUsd: s.PriceUsd})
 	}
 
-	return &ProConfig{
+	c := &ProConfig{
 		EnforceConcurrentClients: y.EnforceConcurrentClients,
 		EnforceFeatures:          y.EnforceFeatures,
 		Free:                     parseProTier(y.Free),
@@ -333,7 +354,9 @@ var proConfig = sync.OnceValue(func() *ProConfig {
 		DataCodeDuration:         mustParseDuration(y.DataCode.Duration),
 		DataCodeSkus:             skus,
 	}
-})
+	parseProSidecarConfig(resource.Bytes(), c)
+	return c
+}
 
 // Pro returns the parsed product spec (cached; parsed once from pro.yml).
 func Pro() *ProConfig {
