@@ -35,10 +35,25 @@ import (
 // over networks with a t bound, the networks being the independent samples.
 // The load-weighted difference is kept beside it as a guard, so a site the
 // biggest operators cannot use does not graduate either.
+//
+// Only networks that have existed for two weeks are evidence, for a site or
+// against it (ProviderEgressCountrySiteMinNetworkAge): their paired outcomes
+// and their TLS findings. A farm can make the ten networks a judgement needs
+// on demand, but not ones two weeks old.
 
 // The judged window: a week, so weekday and weekend exits both count, and a
 // new site (or one demoted) is on probation at least that long.
 const ProviderEgressCountrySiteWindow = 7 * 24 * time.Hour
+
+// The youngest a network may be, at the judgement, for its paired outcomes and
+// its TLS findings to count for or against a country site: the floor place
+// evidence has (providerEgressTlsPlaceMinNetworkAge, the owner's two weeks),
+// for the same reason. A farm can create networks whenever it likes, but not
+// ones that have existed for two weeks, so it cannot stage the networks a
+// graduation needs, tip the load-weighted guard or a collapse with its loads,
+// or demote a site with TLS failures common to its own networks. A network
+// with no network row has no age, so it does not count either.
+const ProviderEgressCountrySiteMinNetworkAge = providerEgressTlsPlaceMinNetworkAge
 
 // The recent window a collapse is judged on: the day in progress and the day
 // before, the tally's day granularity.
@@ -331,11 +346,14 @@ type ProviderEgressCountrySiteNetworkEvidence struct {
 // Each listed site's paired evidence per network: from its window start (a
 // day) and over the recent days from recentStart, leaving out the providers
 // in excluded (those a TLS finding judged their own excludes, which fail every
-// site alike).
+// site alike). Only networks created by establishedBy are read: a younger
+// network, or one with no network row, is no evidence
+// (ProviderEgressCountrySiteMinNetworkAge).
 func GetProviderEgressCountrySiteEvidence(
 	ctx context.Context,
 	windowStarts map[ProviderEgressCountrySiteKey]time.Time,
 	recentStart time.Time,
+	establishedBy time.Time,
 	excluded []server.Id,
 ) map[ProviderEgressCountrySiteKey][]ProviderEgressCountrySiteNetworkEvidence {
 	evidence := map[ProviderEgressCountrySiteKey][]ProviderEgressCountrySiteNetworkEvidence{}
@@ -352,26 +370,36 @@ func GetProviderEgressCountrySiteEvidence(
 		excluded = []server.Id{}
 	}
 	server.Db(ctx, func(conn server.PgConn) {
+		// the network's age is read once per network, after the tally is
+		// summed, not once per tally row
 		result, err := conn.Query(ctx, `
 			WITH site AS (
 				SELECT * FROM unnest($1::varchar[], $2::varchar[], $3::date[]) AS site(name, country_code, window_start)
+			),
+			evidence AS (
+				SELECT tally.name, tally.country_code, client.network_id,
+					COALESCE(SUM(tally.paired_load_count) FILTER (WHERE site.window_start <= tally.tally_day), 0)::bigint AS paired_loads,
+					COALESCE(SUM(tally.paired_ok_count) FILTER (WHERE site.window_start <= tally.tally_day), 0)::bigint AS paired_ok,
+					COALESCE(SUM(tally.expected_ok_sum) FILTER (WHERE site.window_start <= tally.tally_day), 0) AS expected_ok,
+					COUNT(DISTINCT tally.client_id) FILTER (WHERE site.window_start <= tally.tally_day AND 0 < tally.paired_load_count) AS providers,
+					COALESCE(SUM(tally.paired_load_count) FILTER (WHERE $4 <= tally.tally_day), 0)::bigint AS recent_paired_loads,
+					COALESCE(SUM(tally.paired_ok_count) FILTER (WHERE $4 <= tally.tally_day), 0)::bigint AS recent_paired_ok,
+					COALESCE(SUM(tally.expected_ok_sum) FILTER (WHERE $4 <= tally.tally_day), 0) AS recent_expected_ok
+				FROM site
+				JOIN provider_egress_country_site_tally AS tally
+					ON tally.name = site.name AND tally.country_code = site.country_code
+					AND LEAST(site.window_start, $4::date) <= tally.tally_day
+				JOIN network_client AS client ON client.client_id = tally.client_id
+				WHERE NOT (tally.client_id = ANY($5::uuid[]))
+				GROUP BY tally.name, tally.country_code, client.network_id
 			)
-			SELECT tally.name, tally.country_code, client.network_id,
-				COALESCE(SUM(tally.paired_load_count) FILTER (WHERE site.window_start <= tally.tally_day), 0)::bigint,
-				COALESCE(SUM(tally.paired_ok_count) FILTER (WHERE site.window_start <= tally.tally_day), 0)::bigint,
-				COALESCE(SUM(tally.expected_ok_sum) FILTER (WHERE site.window_start <= tally.tally_day), 0),
-				COUNT(DISTINCT tally.client_id) FILTER (WHERE site.window_start <= tally.tally_day AND 0 < tally.paired_load_count),
-				COALESCE(SUM(tally.paired_load_count) FILTER (WHERE $4 <= tally.tally_day), 0)::bigint,
-				COALESCE(SUM(tally.paired_ok_count) FILTER (WHERE $4 <= tally.tally_day), 0)::bigint,
-				COALESCE(SUM(tally.expected_ok_sum) FILTER (WHERE $4 <= tally.tally_day), 0)
-			FROM site
-			JOIN provider_egress_country_site_tally AS tally
-				ON tally.name = site.name AND tally.country_code = site.country_code
-				AND LEAST(site.window_start, $4::date) <= tally.tally_day
-			JOIN network_client AS client ON client.client_id = tally.client_id
-			WHERE NOT (tally.client_id = ANY($5::uuid[]))
-			GROUP BY tally.name, tally.country_code, client.network_id`,
-			names, countryCodes, starts, recentStart.UTC().Truncate(24*time.Hour), excluded,
+			SELECT evidence.name, evidence.country_code, evidence.network_id,
+				evidence.paired_loads, evidence.paired_ok, evidence.expected_ok, evidence.providers,
+				evidence.recent_paired_loads, evidence.recent_paired_ok, evidence.recent_expected_ok
+			FROM evidence
+			JOIN network ON network.network_id = evidence.network_id
+			WHERE network.create_time <= $6`,
+			names, countryCodes, starts, recentStart.UTC().Truncate(24*time.Hour), excluded, establishedBy.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -400,8 +428,13 @@ type ProviderEgressCountrySiteTlsFinding struct {
 
 // The unresolved TLS findings measured from since on the named sites, any hop
 // of them (a redirect hop's finding keeps its site's name), read through the
-// partial index on unresolved findings, a few hundred rows.
-func GetProviderEgressCountrySiteTlsFindings(ctx context.Context, names []string, since time.Time) map[string][]ProviderEgressCountrySiteTlsFinding {
+// partial index on unresolved findings, a few hundred rows. Only findings of
+// providers in networks created by establishedBy are read, as for the paired
+// evidence (ProviderEgressCountrySiteMinNetworkAge): the TLS judge calls a
+// failure common to sixteen networks within an hour a site fault whatever
+// their age, so without the floor a farm of young networks could demote a
+// scored site, or hold one back, by failing it together.
+func GetProviderEgressCountrySiteTlsFindings(ctx context.Context, names []string, since time.Time, establishedBy time.Time) map[string][]ProviderEgressCountrySiteTlsFinding {
 	findings := map[string][]ProviderEgressCountrySiteTlsFinding{}
 	if len(names) == 0 {
 		return findings
@@ -410,9 +443,12 @@ func GetProviderEgressCountrySiteTlsFindings(ctx context.Context, names []string
 		result, err := conn.Query(ctx, `
 			SELECT security.destination->>'name', security.tls_verdict, security.measured_at
 			FROM provider_egress_url_security AS security
+			JOIN network_client AS client ON client.client_id = security.client_id
+			JOIN network ON network.network_id = client.network_id
 			WHERE security.tls_failure AND $2 <= security.measured_at
-			AND security.destination->>'name' = ANY($1::text[])`,
-			names, since.UTC(),
+			AND security.destination->>'name' = ANY($1::text[])
+			AND network.create_time <= $3`,
+			names, since.UTC(), establishedBy.UTC(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -567,7 +603,10 @@ type ProviderEgressCountrySiteJudgement struct {
 // has started over for a site newly listed or whose URL changed; evidence is
 // its paired evidence from its window start (the later of the window's and its
 // probation's start while on probation); findings are its unresolved TLS
-// findings of the window.
+// findings of the window. Both come only from networks that have existed for
+// ProviderEgressCountrySiteMinNetworkAge at now, as the reads return them
+// (GetProviderEgressCountrySiteEvidence, GetProviderEgressCountrySiteTlsFindings),
+// so every network counted below, and every load and finding, is one of those.
 //
 // On probation, it graduates when all of these hold:
 //   - it has been on probation for the whole window;
@@ -651,8 +690,9 @@ func JudgeProviderEgressCountrySite(
 		return unchanged(fmt.Sprintf("on probation for %s of %s; %s", onProbation.Round(time.Hour), ProviderEgressCountrySiteWindow, evidenceText))
 	}
 	if !minimums {
-		return unchanged(fmt.Sprintf("too few samples (needs %d networks of %d paired loads, %d providers, %d loads); %s",
-			ProviderEgressCountrySiteMinNetworks, ProviderEgressCountrySiteMinNetworkLoads, ProviderEgressCountrySiteMinProviders, ProviderEgressCountrySiteMinLoads, evidenceText))
+		return unchanged(fmt.Sprintf("too few samples (needs %d networks at least %d days old with %d paired loads each, %d providers, %d loads); %s",
+			ProviderEgressCountrySiteMinNetworks, int(ProviderEgressCountrySiteMinNetworkAge/(24*time.Hour)), ProviderEgressCountrySiteMinNetworkLoads,
+			ProviderEgressCountrySiteMinProviders, ProviderEgressCountrySiteMinLoads, evidenceText))
 	}
 	for _, finding := range findings {
 		if finding.MeasuredAt.Before(judged.ProbationSince) || finding.Verdict == ProviderEgressTlsVerdictProvider || finding.Verdict == ProviderEgressTlsVerdictRetired {

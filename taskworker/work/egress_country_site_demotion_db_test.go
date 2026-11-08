@@ -40,13 +40,14 @@ func TestEgressCountrySiteThatCollapsesIsDemotedByTheRefresh(t *testing.T) {
 		model.SetProviderEgressCountrySites(ctx, states, listed)
 
 		// today, de-equal succeeds for none of the loads its providers'
-		// general outcomes predict, in twelve networks
+		// general outcomes predict, in twelve networks a month old
 		clientIds := []server.Id{}
 		for range 12 {
 			clientId := server.NewId()
 			model.Testing_CreateDevice(ctx, server.NewId(), server.NewId(), clientId, "", "")
 			clientIds = append(clientIds, clientId)
 		}
+		testingEgressCountrySiteNetworks(ctx, now.Add(-30*24*time.Hour), clientIds...)
 		server.Tx(ctx, func(tx server.PgTx) {
 			for _, clientId := range clientIds {
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_country_site_tally
@@ -60,19 +61,19 @@ func TestEgressCountrySiteThatCollapsesIsDemotedByTheRefresh(t *testing.T) {
 			t.Fatalf("a skipped refresh demoted %d sites", result.demoted)
 		}
 		if state := model.GetProviderEgressCountrySites(ctx)[equal]; state == nil || !state.Scored {
-			t.Fatalf("a skipped refresh changed the state %+v", state)
+			t.Fatalf("a skipped refresh changed the state: %s", describeEgressCountrySiteTestState(state))
 		}
 
 		result := refreshEgressCountrySites(ctx, now, sites, false)
 		stored := model.GetProviderEgressCountrySites(ctx)
 		if state := stored[equal]; result.demoted != 1 || state == nil || state.Scored || state.DemoteCount != 1 || state.State() != "demoted" {
-			t.Fatalf("collapse not demoted: %+v %+v", result, state)
+			t.Fatalf("collapse not demoted: %+v %s", result, describeEgressCountrySiteTestState(state))
 		}
 		if got := testutil.ToFloat64(egressCountrySiteChangesTotal.WithLabelValues("demoted", model.ProviderEgressCountrySiteReasonCollapsed)) - demotions; got != 1 {
 			t.Fatalf("%v collapse demotions counted, want 1", got)
 		}
 		if state := stored[worse]; state == nil || state.Scored || state.Url != urls[worse] || state.DemoteCount != 0 {
-			t.Fatalf("a site whose URL changed did not start over on probation: %+v", state)
+			t.Fatalf("a site whose URL changed did not start over on probation: %s", describeEgressCountrySiteTestState(state))
 		}
 		if got := testutil.ToFloat64(egressCountrySitesGauge.WithLabelValues("demoted")); got != 1 {
 			t.Fatalf("%v demoted sites gauged, want 1", got)

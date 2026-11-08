@@ -1,6 +1,7 @@
 package model
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -80,13 +81,15 @@ func TestProviderEgressCountrySiteTallyPairsOutcomesWithTheirProvidersGeneralOut
 
 		key := ProviderEgressCountrySiteKey{Name: "de-site", CountryCode: "de"}
 		starts := map[ProviderEgressCountrySiteKey]time.Time{key: now.Add(-24 * time.Hour)}
-		evidence := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), nil)
+		establishedBy := now.Add(-ProviderEgressCountrySiteMinNetworkAge)
+		testingTlsEstablishNetworks(ctx, paired, unpaired)
+		evidence := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), establishedBy, nil)
 		if networks := evidence[key]; len(networks) != 1 || networks[0].NetworkId != networkId ||
 			networks[0].PairedLoads != 1 || networks[0].PairedOk != 1 || networks[0].ExpectedOk != 0.75 || networks[0].Providers != 1 ||
 			networks[0].RecentPairedLoads != 1 {
 			t.Fatalf("evidence %+v", networks)
 		}
-		if networks := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), []server.Id{paired})[key]; len(networks) != 1 || networks[0].PairedLoads != 0 {
+		if networks := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), establishedBy, []server.Id{paired})[key]; len(networks) != 1 || networks[0].PairedLoads != 0 {
 			t.Fatalf("evidence without the excluded provider %+v", networks)
 		}
 
@@ -111,6 +114,67 @@ func TestProviderEgressCountrySiteTallyPairsOutcomesWithTheirProvidersGeneralOut
 		SetProviderEgressCountrySites(ctx, nil, nil)
 		if states := GetProviderEgressCountrySites(ctx); len(states) != 0 {
 			t.Fatalf("an unlisted site kept its state: %+v", states)
+		}
+	})
+}
+
+// Only networks two weeks old at the judgement are evidence for or against a
+// country site (ProviderEgressCountrySiteMinNetworkAge): in the paired
+// evidence and in the TLS findings alike, a network exactly two weeks old is
+// read, while a network a minute short of that, and one with no network row,
+// are read as no evidence. Before the floor, all three were read.
+func TestProviderEgressCountrySiteReadsCountOnlyNetworksTwoWeeksOld(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		establishedBy := now.Add(-ProviderEgressCountrySiteMinNetworkAge)
+		key := ProviderEgressCountrySiteKey{Name: "de-site", CountryCode: "de"}
+		destination := egresshealth.Destination{Name: key.Name, Class: egresshealth.ClassSite, Url: "https://de-site.example/"}
+		destinationJson, err := json.Marshal(destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// each network's provider has a day of paired loads on the site and a
+		// TLS failure on it the judge called a site fault
+		provider := func() (server.Id, server.Id) {
+			networkId, clientId := server.NewId(), server.NewId()
+			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_country_site_tally
+					(tally_day, name, country_code, client_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
+					VALUES ($1, $2, $3, $4, 60, 48, 60, 48, 48, $5)`, now.Truncate(24*time.Hour), key.Name, key.CountryCode, clientId, now))
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security
+					(client_id, url_key, destination, measured_at, tls_failure, tls_verdict) VALUES ($1, $2, $3::jsonb, $4, true, $5)`,
+					clientId, egresshealth.UrlProbeDestinationKey(destination), string(destinationJson), now.Add(-time.Hour), int16(ProviderEgressTlsVerdictSite)))
+			})
+			return networkId, clientId
+		}
+		// one exactly two weeks old, one a minute short of that, and one
+		// with no network row
+		agedNetworkId, aged := provider()
+		_, young := provider()
+		provider()
+		testingTlsCreateNetworks(ctx, establishedBy, aged)
+		testingTlsCreateNetworks(ctx, establishedBy.Add(time.Minute), young)
+
+		starts := map[ProviderEgressCountrySiteKey]time.Time{key: now.Add(-ProviderEgressCountrySiteWindow)}
+		evidence := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), establishedBy, nil)[key]
+		if len(evidence) != 1 || evidence[0].NetworkId != agedNetworkId || evidence[0].PairedLoads != 60 || evidence[0].RecentPairedLoads != 60 {
+			t.Fatalf("evidence %+v, want only the network two weeks old", evidence)
+		}
+		findings := GetProviderEgressCountrySiteTlsFindings(ctx, []string{key.Name}, now.Add(-ProviderEgressCountrySiteWindow), establishedBy)[key.Name]
+		if len(findings) != 1 || findings[0].Verdict != ProviderEgressTlsVerdictSite {
+			t.Fatalf("TLS findings %+v, want only the finding of the network two weeks old", findings)
+		}
+
+		// a minute later the young network is two weeks old too
+		later := establishedBy.Add(time.Minute)
+		if evidence := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), later, nil)[key]; len(evidence) != 2 {
+			t.Fatalf("evidence %+v a minute later, want both networks with a network row", evidence)
+		}
+		if findings := GetProviderEgressCountrySiteTlsFindings(ctx, []string{key.Name}, now.Add(-ProviderEgressCountrySiteWindow), later)[key.Name]; len(findings) != 2 {
+			t.Fatalf("TLS findings %+v a minute later, want both networks with a network row", findings)
 		}
 	})
 }

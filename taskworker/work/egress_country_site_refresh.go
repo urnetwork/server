@@ -27,7 +27,7 @@ var egressCountrySitesGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 var egressCountrySiteChangesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Name:      "egress_country_site_changes_total",
-	Help:      "Country sites the pool refresh graduated or demoted, by change and reason: graduated/paired (no worse than the general catalog for the same providers, per network and load-weighted, measured by enough networks, no unexplained TLS failure), demoted/worse (clearly worse per network), demoted/collapsed (failing in the recent days for most loads or most networks), demoted/tls (a TLS failure on it judged a site or place fault)",
+	Help:      "Country sites the pool refresh graduated or demoted, by change and reason: graduated/paired (no worse than the general catalog for the same providers, per network and load-weighted, measured by enough networks, no unexplained TLS failure), demoted/worse (clearly worse per network), demoted/collapsed (failing in the recent days for most loads or most networks), demoted/tls (a TLS failure on it judged a site or place fault); only networks at least two weeks old count as evidence",
 }, []string{"change", "reason"})
 
 // Registers the step's metrics with every bounded label set seeded.
@@ -117,8 +117,11 @@ func refreshEgressCountrySites(ctx context.Context, now time.Time, sites *contro
 	for clientId := range model.GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx) {
 		excluded = append(excluded, clientId)
 	}
-	evidence := model.GetProviderEgressCountrySiteEvidence(ctx, starts, model.ProviderEgressCountrySiteRecentStart(now), excluded)
-	findings := model.GetProviderEgressCountrySiteTlsFindings(ctx, names, windowStart)
+	// only networks two weeks old at now are evidence, for a site or against
+	// it: a farm cannot make those on demand
+	establishedBy := now.Add(-model.ProviderEgressCountrySiteMinNetworkAge)
+	evidence := model.GetProviderEgressCountrySiteEvidence(ctx, starts, model.ProviderEgressCountrySiteRecentStart(now), establishedBy, excluded)
+	findings := model.GetProviderEgressCountrySiteTlsFindings(ctx, names, windowStart, establishedBy)
 
 	for _, key := range listed {
 		judgement := model.JudgeProviderEgressCountrySite(states[key], evidence[key], findings[key.Name], now)

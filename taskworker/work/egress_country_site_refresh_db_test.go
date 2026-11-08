@@ -3,6 +3,7 @@ package work
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -45,6 +46,30 @@ countries:
       url: https://de-tls.example/
 `)
 
+// Gives the networks of clientIds a network row created at createdAt: the
+// test providers' networks have none, and country site evidence counts only
+// networks two weeks old (model.ProviderEgressCountrySiteMinNetworkAge).
+func testingEgressCountrySiteNetworks(ctx context.Context, createdAt time.Time, clientIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network (network_id, network_name, admin_user_id, create_time)
+			SELECT DISTINCT client.network_id, 'country-site-test-' || client.network_id::text, client.network_id, $1::timestamp
+			FROM network_client AS client WHERE client.client_id = ANY($2)
+			ON CONFLICT (network_id) DO UPDATE SET create_time = EXCLUDED.create_time`,
+			createdAt.UTC(), clientIds))
+	})
+}
+
+// A stored state for a failure message: the state embeds its key, whose
+// String would otherwise stand for all of it.
+func describeEgressCountrySiteTestState(state *model.ProviderEgressCountrySite) string {
+	if state == nil {
+		return "no state"
+	}
+	return fmt.Sprintf("%s %s (%s, demoted %d times, %d networks): %s",
+		state.ProviderEgressCountrySiteKey, state.State(), state.Url, state.DemoteCount, state.NetworkCount, state.Judgement)
+}
+
 // One URL outcome of clientId on the named destination, submitted through the
 // operator ingest exactly as the prober submits it.
 func submitEgressCountrySiteRefreshTestOutcome(t testing.TB, ctx context.Context, clientId server.Id, at time.Time, name string, ok bool) {
@@ -80,10 +105,10 @@ func submitEgressCountrySiteRefreshTestOutcome(t testing.TB, ctx context.Context
 
 // Country sites graduate on evidence, with no list to maintain: a week after
 // the refresh first saw the country list, a site that did as well as the
-// general catalog for the same providers, measured by enough networks, scores;
-// a worse site, a site too few networks measured and a site failing TLS stay
-// on probation, recorded and unscored. Before automatic graduation no country
-// site ever scored.
+// general catalog for the same providers, measured by enough networks two
+// weeks old, scores; a worse site, a site too few networks measured and a
+// site failing TLS stay on probation, recorded and unscored. Before automatic
+// graduation no country site ever scored.
 func TestEgressCountrySitesGraduateOnPairedEvidence(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -95,19 +120,21 @@ func TestEgressCountrySitesGraduateOnPairedEvidence(t *testing.T) {
 			t.Fatalf("first refresh: %v", err)
 		}
 
-		// ten networks of two providers each: every general outcome passes, so
-		// a site as good as the general catalog passes too
+		// ten networks a month old, of two providers each: every general
+		// outcome passes, so a site as good as the general catalog passes too
 		const networks, providersPerNetwork, loadsPerSite = 10, 2, 26
 		at := now.Add(-50 * time.Minute)
 		next := func() time.Time {
 			at = at.Add(50 * time.Millisecond)
 			return at
 		}
+		clientIds := []server.Id{}
 		for network := range networks {
 			networkId := server.NewId()
 			for range providersPerNetwork {
 				clientId := server.NewId()
 				model.Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
+				clientIds = append(clientIds, clientId)
 				for range 5 {
 					submitEgressCountrySiteRefreshTestOutcome(t, ctx, clientId, next(), "general-one", true)
 				}
@@ -121,7 +148,8 @@ func TestEgressCountrySitesGraduateOnPairedEvidence(t *testing.T) {
 				}
 			}
 		}
-		// one provider's TLS failure on de-tls, not yet judged
+		testingEgressCountrySiteNetworks(ctx, now.Add(-30*24*time.Hour), clientIds...)
+		// one provider's latest turn on de-tls failed TLS, not yet judged
 		tlsDestination := egresshealth.Destination{Name: "de-tls", Class: egresshealth.ClassSite, Url: "https://de-tls.example/"}
 		tlsDestinationJson, err := json.Marshal(tlsDestination)
 		if err != nil {
@@ -129,7 +157,10 @@ func TestEgressCountrySitesGraduateOnPairedEvidence(t *testing.T) {
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security(client_id,url_key,destination,measured_at,tls_failure)
-				VALUES($1,$2,$3::jsonb,$4,true)`, server.NewId(), egresshealth.UrlProbeDestinationKey(tlsDestination), string(tlsDestinationJson), next()))
+				VALUES($1,$2,$3::jsonb,$4,true)
+				ON CONFLICT (client_id,url_key) DO UPDATE SET destination=EXCLUDED.destination, measured_at=EXCLUDED.measured_at,
+					tls_failure=true, tls_verdict=0, tls_verdict_measured_at=NULL`,
+				clientIds[0], egresshealth.UrlProbeDestinationKey(tlsDestination), string(tlsDestinationJson), next()))
 		})
 
 		// a week after the first refresh
