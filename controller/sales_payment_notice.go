@@ -140,7 +140,9 @@ func stripeSalesPlanForInterval(interval string) string {
 }
 
 // A day shorter than the shortest paid period, a 28-day February month. A
-// subscription period shorter than this is a free trial.
+// subscription period shorter than this is a free trial. The Stripe trial is
+// 14 days (StripeSubscriptionTrialDays); a free period of this length or more
+// would post its start as "new, no charge" and its first charge as a renewal.
 const stripeShortestPaidPeriod = 27 * 24 * time.Hour
 
 // stripeTrialPeriod is whether a subscription period this long is a free
@@ -554,7 +556,9 @@ func coinbaseSalesNotice(
 
 // A day shorter than the shortest paid period, a 28-day February month. A
 // renewal less than this after the subscription's first purchase follows a
-// free trial: no paid period is that short.
+// free trial: no paid period is that short. The App Store trial is 14 days; a
+// free period of this length or more (a month-long offer code) would post its
+// first charge as a renewal.
 const appleShortestPaidPeriod = 27 * 24 * time.Hour
 
 // appleSalesKind is new or renewal: the transaction's reason (PURCHASE or
@@ -651,7 +655,9 @@ func playSalesRenewalOrder(sub *PlaySubscription) bool {
 // A day shorter than the shortest paid period, a 28-day February month. A
 // window that moves the expiry by less than this past the last charged window
 // was not charged, and a purchase's first window shorter than this is a free
-// trial.
+// trial. Every free trial sold is 14 days. A free period of this length or
+// more, should one be sold, posts its start as a trial only when Play names
+// the phase, and its first charge as a renewal.
 const playShortestPaidPeriod = 27 * 24 * time.Hour
 
 // Play's shortest free trial is three days. A first window shorter than this
@@ -725,7 +731,9 @@ func classifyPlayCredit(
 		}
 	}
 	lastCharged := earlierExpiries[0]
-	afterTrial := playWindowHasTrialLength(startTime, earlierExpiries[0])
+	// a purchase that replaces another (an upgrade or downgrade) starts with
+	// a prorated window, never a trial
+	afterTrial := sub.LinkedPurchaseToken == "" && playWindowHasTrialLength(startTime, earlierExpiries[0])
 	for _, expiryTime := range earlierExpiries[1:] {
 		if playShortestPaidPeriod <= expiryTime.Sub(lastCharged) {
 			lastCharged = expiryTime

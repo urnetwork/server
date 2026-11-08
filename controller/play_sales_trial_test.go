@@ -221,3 +221,15 @@ func TestClassifyPlayCredit(t *testing.T) {
 	// nor is a window of minutes
 	connect.AssertEqual(t, classifyPlayCredit(initial(), "supporter", start, start.Add(5*time.Minute), nil), playCreditNew)
 }
+
+// A purchase that replaces another (an upgrade or downgrade, linked to the
+// purchase it replaces) starts with a prorated window: its next charge is a
+// renewal, never the first charge after a trial.
+func TestPlayReplacementPurchaseNeverPostsAfterATrial(t *testing.T) {
+	start := time.Date(2026, 10, 4, 23, 45, 56, 0, time.UTC)
+	day := 24 * time.Hour
+	replacement := playPenguinSubscription(start, start.Add(9*day))
+	replacement.LinkedPurchaseToken = "token-before"
+	replacement.LineItems[0].LatestSuccessfulOrderId += "..0"
+	connect.AssertEqual(t, classifyPlayCredit(replacement, "supporter", start, start.Add(374*day), []time.Time{start.Add(9 * day)}), playCreditRenewal)
+}
