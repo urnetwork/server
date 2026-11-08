@@ -293,10 +293,13 @@ func TestEgressTlsJudgeBeforeTheRollIsUnobservableAndNeverPages(t *testing.T) {
 	}
 }
 
-// Mid-roll, a slot still on the old build exports no gauge: an old newest run
-// cannot prove the judge stopped, since the unread slot may hold a newer one,
-// so it is unobservable and not stale; an undecided finding the newest read
-// run reports is still raised.
+// Mid-roll, a slot still on the old build exports no gauge: a newest run 40
+// minutes old cannot prove the judge stopped, since the unread slot may hold
+// a newer one, so it is unobservable and not stale, and pages nobody; an
+// undecided finding the newest read run reports is still raised. A recent
+// judged run proves the judge runs, so stale resolves healthy even mid-roll,
+// while undecided, which an unread slot's newer run might contradict, does
+// not.
 func TestEgressTlsJudgeMidRollIsUnobservable(t *testing.T) {
 	fixture := healthyEgressTlsJudgeFixture()
 	fixture.fresh["worker-a.example"] = false
@@ -320,8 +323,63 @@ func TestEgressTlsJudgeMidRollIsUnobservable(t *testing.T) {
 	alerts = fixture.run(t)
 	requireAlertClass(t, alerts, "egress-tls-findings-undecided")
 	requireAlertClass(t, alerts, "egress-tls-judge-unobservable")
-	if healthy := fixture.healthy(t); healthy["egress-tls-judge-stale"] || healthy["egress-tls-findings-undecided"] {
-		t.Fatalf("incomplete coverage resolved classes as healthy: %v", healthy)
+	if healthy := fixture.healthy(t); !healthy["egress-tls-judge-stale"] || healthy["egress-tls-findings-undecided"] {
+		t.Fatalf("mid-roll with a recent judged run resolved %v, want stale alone", healthy)
+	}
+}
+
+// A stopped judge pages even while a desired slot is not reporting (REVIEW-D1
+// N11): once the newest judged run on the slots that report is older than a
+// fully read judge would have paged at, stale warns and pages from its second
+// cadence, beside the unobservable visibility alert. It resolves healthy as
+// soon as a judged run is recent again.
+func TestEgressTlsJudgeStalePagesWithASlotMissing(t *testing.T) {
+	fixture := healthyEgressTlsJudgeFixture()
+	fixture.fresh["worker-a.example"] = false
+	fixture.judgedAge = 50 * time.Minute
+	for tick, released := range fixture.gated(t, 4) {
+		cadence := tick + 1
+		classes := egressTlsJudgeReleasedClasses(released)
+		severity, stale := classes["egress-tls-judge-stale"]
+		switch {
+		case cadence < 2 && stale:
+			t.Fatalf("cadence %d released stale before its sustain", cadence)
+		case 2 <= cadence && (!stale || severity != SeverityPage):
+			t.Fatalf("cadence %d released %+v, want stale paging with a slot missing", cadence, released)
+		}
+	}
+	alerts := fixture.run(t)
+	requireAlertClass(t, alerts, "egress-tls-judge-unobservable")
+	if alert := requireAlertClass(t, alerts, "egress-tls-judge-stale"); !strings.Contains(alert.Symptom, "on any Taskworker slot that reports") {
+		t.Fatalf("partial-coverage stale symptom = %q", alert.Symptom)
+	}
+
+	fixture.judgedAge = 2 * time.Minute
+	if !fixture.healthy(t)["egress-tls-judge-stale"] {
+		t.Fatal("a recent judged run did not resolve the stale alert while a slot is missing")
+	}
+}
+
+// The roll stays quiet. With a slot not reporting, new processes that have not
+// judged since they started (every reporting slot at zero), or a newest judged
+// run older than the warning bound but short of the page bound, raise no
+// stale alert, and nothing pages over hours of cadences.
+func TestEgressTlsJudgeRollWithASlotMissingStaysQuiet(t *testing.T) {
+	for name, change := range map[string]func(*egressTlsJudgeFixture){
+		"new processes not yet judged": func(fixture *egressTlsJudgeFixture) { fixture.neverJudged = true },
+		"short of the page bound":      func(fixture *egressTlsJudgeFixture) { fixture.judgedAge = 44 * time.Minute },
+	} {
+		fixture := healthyEgressTlsJudgeFixture()
+		fixture.fresh["worker-a.example"] = false
+		change(fixture)
+		requireNoAlertClass(t, fixture.run(t), "egress-tls-judge-stale")
+		for tick, released := range fixture.gated(t, 24) {
+			for _, alert := range released {
+				if alert.Severity == SeverityPage || alert.Class == "egress-tls-judge-stale" {
+					t.Fatalf("%s: cadence %d released %s %s", name, tick+1, alert.Class, alert.Severity)
+				}
+			}
+		}
 	}
 }
 

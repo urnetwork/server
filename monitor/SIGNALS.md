@@ -24009,11 +24009,17 @@ every desired Taskworker slot.
 Classes (all WARN, target `<env>/egress-tls-judge`; only counts, ages and
 slot names are rendered, never a URL, a provider or a website):
 
-- `egress-tls-judge-stale` (sustain 2, PAGE after six failing cadences): the
+- `egress-tls-judge-stale` (sustain 2, PAGE after six failing cadences, or
+  from the second with a slot missing): the
   fleet's newest judged run is more than 20 minutes old, or no process has
-  judged since it started. Raised only when every desired Taskworker slot
-  exports a fresh last-judged gauge, since an unread slot may hold the newest
-  run, and resolved healthy only then;
+  judged since it started, with every desired Taskworker slot exporting a
+  fresh last-judged gauge. With a desired slot not reporting, an unread slot
+  may hold the newest run, so it is raised only once the newest judged run on
+  the slots that report is more than 45 minutes old, when a fully read judge
+  would page, and then it pages from its second cadence; slots that report
+  only zero (new processes not yet judged, as mid-roll) never raise it.
+  Resolved healthy whenever a judged run is under 20 minutes old, however
+  many slots report;
 - `egress-tls-findings-undecided` (sustain 6, never pages): the newest judged
   run, no more than 20 minutes old, left pending findings undecided inside the
   direct window, on every cadence for half an hour. A provider that keeps
@@ -24026,7 +24032,8 @@ slot names are rendered, never a URL, a provider or a website):
   a desired slot whose gauge is missing, stale (older than three minutes),
   duplicated or on an excluded or disabled host. A Taskworker built before
   §2.31 exports none of the judge gauges, so before the roll, mid-roll and
-  after a rollback the signal is unobservable, never stale, and pages nobody.
+  after a rollback the signal is unobservable and pages nobody; stale pages
+  beside it only on the 45-minute bound above.
 
 The egress probes dashboard's "tls findings" row (panels 151 and 152) charts
 the same gauges from the newest judged process, and the judge's moved
