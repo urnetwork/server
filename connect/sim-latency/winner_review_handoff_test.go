@@ -61,12 +61,18 @@ func newWinnerHandoffFixture(t *testing.T, disqualify bool) *winnerHandoffFixtur
 func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks {
 	t.Helper()
 	return winnerHandoffCaptureHooks{Now: func() time.Time { return self.now },
-		Admit: func(_ context.Context, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
-			count := 200
+		Reserve: func(_ context.Context, capacity *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error) {
+			content, _ := json.Marshal(capacity)
+			return winnerHandoffCapacityReservation{CapacitySha256: winnerMultipassSha256(content), ReservationPath: "/synthetic/review/reservation", ReservationInode: 1,
+				ReservedBytes: capacity.RequiredDurableBytes, MemoryLimitBytes: capacity.Settings.MaximumMemoryBytes, StoragePaths: []string{"/synthetic/review"}}, nil
+		},
+		Admit: func(_ context.Context, call winnerMultipassCall, payload []byte) (winnerHandoffTokenization, error) {
+			count := 100
 			if self.tooManyTokens {
 				count = 1000000
 			}
-			return winnerMultipassAdmissionFixture(self.plan, call, payload, count), nil
+			admission := winnerMultipassAdmissionFixture(self.plan, call, payload, count)
+			return winnerHandoffTokenization{Admission: admission, Custody: self.custody("tokenize", call, payload, admission, "")}, nil
 		},
 		Claim: func(_ context.Context, value model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error) {
 			if self.claimed[value.CallId] {
@@ -77,7 +83,7 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 			self.claims++
 			return &value, nil
 		},
-		Invoke: func(_ context.Context, call winnerMultipassCall, payload []byte, _ winnerMultipassAdmission, claimSha string) (winnerHandoffTransport, error) {
+		Invoke: func(_ context.Context, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission, claimSha string) (winnerHandoffTransport, error) {
 			if !self.claimed[call.Id] || !validSha256(claimSha) {
 				t.Fatal("provider called before its durable claim")
 			}
@@ -90,7 +96,8 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 			if self.failInvoke {
 				return winnerHandoffTransport{VisibleResponse: []byte("synthetic incomplete terminal"), Error: "synthetic_transport_failure"}, errors.New("synthetic failure")
 			}
-			return winnerHandoffTransport{VisibleResponse: original.VisibleResponse, TransportResponseSha256: original.TransportResponseSha256, ContainmentReceiptSha256: original.TransportReceiptSha256}, nil
+			return winnerHandoffTransport{VisibleResponse: original.VisibleResponse, TransportResponseSha256: original.TransportResponseSha256, ContainmentReceiptSha256: original.TransportReceiptSha256,
+				Custody: self.custody("generate", call, payload, admission, original.TransportResponseSha256)}, nil
 		},
 		Receipt: func(_ context.Context, value model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error) {
 			if !self.claimed[value.CallId] || !validSha256(value.EvidenceSha256) {
@@ -119,32 +126,49 @@ func (self *winnerHandoffFixture) hooks(t *testing.T) winnerHandoffCaptureHooks 
 	}
 }
 
+// This is a synthetic archive-receipt seam, not a containment qualification.
+// Separate wrapper tests must prove the actual originals and protected readback.
+func (self *winnerHandoffFixture) custody(operation string, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission, transportSha string) winnerHandoffInvocationCustody {
+	manifestSha := winnerMultipassSha256([]byte("synthetic-transport-proof"))
+	receiptSha := winnerMultipassSha256([]byte("synthetic-wrapper-receipt"))
+	value := winnerHandoffInvocationCustody{Operation: operation, CallId: call.Id, RequestSha256: winnerMultipassSha256(payload), ManifestSha256: manifestSha, WrapperReceiptSha256: receiptSha, Originals: []winnerHandoffCustodyOriginal{}}
+	leaves := map[string]string{"call.started.json": winnerMultipassSha256([]byte("synthetic-started")), "call.complete.json": winnerMultipassSha256([]byte("synthetic-completed")), "evidence-manifest.json": manifestSha, "wrapper-receipt.json": receiptSha}
+	if operation == "tokenize" {
+		leaves["tokenize.request.json"], leaves["tokenize.response.json"] = admission.TokenizerRequestSha256, admission.TokenizerResponseSha256
+	} else {
+		leaves["transport.response"] = transportSha
+	}
+	for name, digest := range leaves {
+		value.Originals = append(value.Originals, winnerHandoffCustodyOriginal{Name: name, Bytes: 1,
+			Retention: model.CompetitionReviewHandoffRetention{Key: "synthetic/original/" + name, VersionId: "synthetic-version", Sha256: digest, RetainUntil: self.owner.Deadline.Add(time.Hour)}})
+	}
+	return value
+}
+
 func TestWinnerHandoffCompleteCaptureLeavesBothPossibleProposalsPending(t *testing.T) {
 	for _, disqualify := range []bool{false, true} {
-		t.Run(fmt.Sprintf("disqualify=%t", disqualify), func(t *testing.T) {
-			fixture := newWinnerHandoffFixture(t, disqualify)
-			result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, fixture.hooks(t))
-			if err != nil || result.Status != "MODEL_FINDINGS_PENDING_OPERATOR" || result.PromotionAuthorized || fixture.invokes != len(fixture.plan.Calls) || fixture.completions != 1 || result.Completion.Proposal == nil {
-				t.Fatal("complete original evidence lost pending-only authority", err)
-			}
-			if disqualify && result.Completion.Proposal.RewardDisposition != "disqualified" {
-				t.Fatal("genuine adverse model proposal was erased")
-			}
-			if err := validateWinnerHandoffCompletion(&fixture.owner, result.Completion, fixture.plan, fixture.bundle, result.Evidence); err != nil {
-				t.Fatal(err)
-			}
-		})
+		fixture := newWinnerHandoffFixture(t, disqualify)
+		result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
+		if err != nil || result.Status != "MODEL_FINDINGS_PENDING_OPERATOR" || result.PromotionAuthorized || fixture.invokes != len(fixture.plan.Calls) || fixture.completions != 1 || result.Completion.Proposal == nil {
+			t.Fatal("complete original evidence lost pending-only authority", err)
+		}
+		if disqualify && result.Completion.Proposal.RewardDisposition != "disqualified" {
+			t.Fatal("genuine adverse model proposal was erased")
+		}
+		if err := validateWinnerHandoffCompletion(&fixture.owner, result.Completion, fixture.plan, fixture.bundle, result.Evidence, result.Custody); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func TestWinnerHandoffFailedOriginalIsRetainedWithoutRetry(t *testing.T) {
 	fixture := newWinnerHandoffFixture(t, false)
 	fixture.failInvoke = true
-	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, fixture.hooks(t))
-	if err == nil || fixture.invokes != 1 || fixture.claims != 1 || fixture.retains != 1 || fixture.lastCompletion == nil || fixture.lastCompletion.Proposal != nil || fixture.lastCompletion.Failure == "" || len(result.Evidence.Calls) != 1 || string(result.Evidence.Calls[0].VisibleResponse) != "synthetic incomplete terminal" {
+	result, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
+	if err == nil || fixture.invokes != 1 || fixture.claims != 1 || fixture.retains < 2 || fixture.lastCompletion == nil || fixture.lastCompletion.Proposal != nil || fixture.lastCompletion.Failure == "" || len(result.Evidence.Calls) != 1 || string(result.Evidence.Calls[0].VisibleResponse) != "synthetic incomplete terminal" {
 		t.Fatal("failed provider original was lost or rerolled", err)
 	}
-	_, err = captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "second-path"), &fixture.owner, fixture.plan, fixture.bundle, fixture.hooks(t))
+	_, err = captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "second-path"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
 	if err == nil || fixture.invokes != 1 {
 		t.Fatal("new local directory resampled the same durable owner")
 	}
@@ -153,7 +177,7 @@ func TestWinnerHandoffFailedOriginalIsRetainedWithoutRetry(t *testing.T) {
 func TestWinnerHandoffOverLimitPreflightMakesNoClaimOrDraw(t *testing.T) {
 	fixture := newWinnerHandoffFixture(t, false)
 	fixture.tooManyTokens = true
-	_, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, fixture.hooks(t))
+	_, err := captureWinnerHandoff(t.Context(), filepath.Join(t.TempDir(), "capture"), &fixture.owner, fixture.plan, fixture.bundle, defaultWinnerHandoffCaptureSettings(), fixture.hooks(t))
 	if err == nil || fixture.claims != 0 || fixture.invokes != 0 || fixture.lastCompletion == nil || fixture.lastCompletion.Proposal != nil {
 		t.Fatal("unadmitted complete input consumed a draw or conferred authority", err)
 	}

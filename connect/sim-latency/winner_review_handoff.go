@@ -22,7 +22,8 @@ import (
 // preserves every visible terminal, including malformed or uncertain output.
 type winnerHandoffCaptureHooks struct {
 	Now      func() time.Time
-	Admit    func(context.Context, winnerMultipassCall, []byte) (winnerMultipassAdmission, error)
+	Reserve  func(context.Context, *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error)
+	Admit    func(context.Context, winnerMultipassCall, []byte) (winnerHandoffTokenization, error)
 	Invoke   func(context.Context, winnerMultipassCall, []byte, winnerMultipassAdmission, string) (winnerHandoffTransport, error)
 	Claim    func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
 	Receipt  func(context.Context, model.CompetitionReviewHandoffCall) (*model.CompetitionReviewHandoffCall, error)
@@ -34,6 +35,7 @@ type winnerHandoffTransport struct {
 	VisibleResponse          []byte
 	TransportResponseSha256  string
 	ContainmentReceiptSha256 string
+	Custody                  winnerHandoffInvocationCustody
 	// Publicly safe classification only; original diagnostic bytes stay private.
 	Error string
 }
@@ -44,6 +46,7 @@ type winnerHandoffCaptureResult struct {
 	Status              string                                    `json:"status"`
 	PromotionAuthorized bool                                      `json:"promotion_authorized"`
 	Evidence            winnerMultipassEvidence                   `json:"evidence"`
+	Custody             winnerHandoffCustodyManifest              `json:"custody"`
 	Completion          *model.CompetitionReviewHandoffCompletion `json:"completion,omitempty"`
 }
 
@@ -55,8 +58,9 @@ func validateWinnerHandoffIdentity(owner *model.CompetitionReviewHandoff, plan *
 		return err
 	}
 	planBytes, _ := json.Marshal(plan)
+	providerBytes, _ := json.Marshal(plan.Provider)
 	request, template, args := bundle.Request.Request, bundle.Request.Template, owner.Args
-	if owner.HandoffId.String() != plan.Owner.Id || !owner.StartedAt.Equal(plan.Owner.StartedAt) || !owner.Deadline.Equal(plan.Owner.Deadline) || owner.Deadline.Sub(owner.StartedAt) != time.Duration(args.TimeoutSeconds)*time.Second ||
+	if args.ProviderSha256 != winnerMultipassSha256(providerBytes) || owner.HandoffId.String() != plan.Owner.Id || !owner.StartedAt.Equal(plan.Owner.StartedAt) || !owner.Deadline.Equal(plan.Owner.Deadline) || owner.Deadline.Sub(owner.StartedAt) != time.Duration(args.TimeoutSeconds)*time.Second ||
 		owner.Plan.PlanSha256 != winnerMultipassSha256(planBytes) || owner.Plan.BundleSha256 != plan.BundleSha256 || len(owner.Plan.CallIds) != len(plan.Calls) || template.HandoffId != owner.HandoffId.String() ||
 		request.RoundId != args.RoundId || request.JobId != args.JobId || request.RewardRevision != args.RewardRevision || request.RewardDecisionSha256 != args.DecisionSha256 || request.SealSha256 != args.SealSha256 ||
 		template.PatchSha256 != args.PatchSha256 || template.BaseSourceLockSha256 != args.BaseSourceLockSha256 || template.ScoreSha256 != args.ScoreSha256 || template.ArtifactManifestSha256 != args.ArtifactManifestSha256 || template.BaselineSha256 != args.BaselineSha256 {
@@ -101,13 +105,16 @@ func preflightWinnerHandoffLeaves(ctx context.Context, plan *winnerMultipassPlan
 // Only a fresh private directory is accepted. A crash after the first DB claim
 // is an explicit recovery hold, never permission to delete this directory and
 // resample. The database refuses every repeated claim even under a new path.
-func captureWinnerHandoff(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, hooks winnerHandoffCaptureHooks) (result *winnerHandoffCaptureResult, resultErr error) {
-	if owner == nil || plan == nil || hooks.Now == nil || hooks.Admit == nil || hooks.Invoke == nil || hooks.Claim == nil || hooks.Receipt == nil || hooks.Retain == nil || hooks.Complete == nil {
+func captureWinnerHandoff(ctx context.Context, directory string, owner *model.CompetitionReviewHandoff, plan *winnerMultipassPlan, bundle winnerMultipassBundle, settings winnerHandoffCaptureSettings, hooks winnerHandoffCaptureHooks) (result *winnerHandoffCaptureResult, resultErr error) {
+	if owner == nil || plan == nil || hooks.Now == nil || hooks.Reserve == nil || hooks.Admit == nil || hooks.Invoke == nil || hooks.Claim == nil || hooks.Receipt == nil || hooks.Retain == nil || hooks.Complete == nil ||
+		settings.CleanupTimeout <= 0 || settings.ReceiptTimeout <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumDocumentBytes > defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes {
 		return nil, errors.New("native capture lacks qualified ownership or transport hooks")
 	}
 	if err := validateWinnerHandoffIdentity(owner, plan, bundle); err != nil {
 		return nil, err
 	}
+	callCtx, cancel := context.WithDeadline(ctx, owner.Deadline)
+	defer cancel()
 	planBytes, err := json.Marshal(plan)
 	if err != nil {
 		return nil, err
@@ -127,6 +134,15 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 		return nil, err
 	}
 	result = &winnerHandoffCaptureResult{Status: "PENDING", Evidence: winnerMultipassEvidence{Version: winnerMultipassVersion, PlanSha256: owner.Plan.PlanSha256, BundleSha256: plan.BundleSha256, Calls: []winnerMultipassCallEvidence{}}}
+	result.Custody = winnerHandoffCustodyManifest{Schema: 1, Kind: "elected-winner-review-protected-custody/v1", HandoffId: owner.HandoffId.String(), PlanSha256: owner.Plan.PlanSha256,
+		BundleSha256: plan.BundleSha256, Documents: []winnerHandoffCustodyOriginal{}, Invocations: []winnerHandoffInvocationCustody{}}
+	retainDocument := func(retentionCtx context.Context, name string, content []byte) error {
+		original, err := retainWinnerHandoffDocument(retentionCtx, name, content, settings.MaximumDocumentBytes, owner.Deadline, hooks.Retain)
+		if err == nil {
+			result.Custody.Documents = append(result.Custody.Documents, original)
+		}
+		return err
+	}
 	// All return paths retain a non-authorizing local outcome, even when the
 	// database/archive is unavailable. It is not automatically retried.
 	defer func() {
@@ -136,8 +152,20 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 			// observation, never an invitation to sample the same owner again.
 			failedBytes, encodeErr := json.Marshal(result.Evidence)
 			if encodeErr == nil {
-				cleanup, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-				retained, retainErr := hooks.Retain(cleanup, failedBytes, winnerMultipassSha256(failedBytes))
+				cleanup, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), settings.CleanupTimeout)
+				found := false
+				for _, document := range result.Custody.Documents {
+					found = found || document.Name == "core-evidence.json"
+				}
+				if !found {
+					encodeErr = retainDocument(cleanup, "core-evidence.json", failedBytes)
+				}
+				failedBytes, marshalErr := json.Marshal(result.Custody)
+				var retained *controller.CompetitionWinnerReviewEvidence
+				retainErr := errors.Join(encodeErr, marshalErr)
+				if retainErr == nil && len(failedBytes) <= settings.MaximumDocumentBytes {
+					retained, retainErr = hooks.Retain(cleanup, failedBytes, winnerMultipassSha256(failedBytes))
+				}
 				if retainErr == nil && retained != nil {
 					result.Completion, retainErr = hooks.Complete(cleanup, model.CompetitionReviewHandoffCompletion{HandoffId: owner.HandoffId, PlanSha256: owner.Plan.PlanSha256,
 						Evidence: model.CompetitionReviewHandoffRetention{Key: retained.Key, VersionId: retained.VersionId, Sha256: retained.Sha256, RetainUntil: retained.RetainUntil}, Failure: "capture_failed_or_unresolved"})
@@ -156,6 +184,30 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 			resultErr = err
 		}
 	}()
+	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, len(plan.Calls), settings.Capacity)
+	if capacity != nil {
+		result.Custody.Capacity = *capacity
+	}
+	if err != nil {
+		return result, err
+	}
+	if capacity.SerializedEvidenceBytes > int64(settings.MaximumDocumentBytes) {
+		return result, errors.New("fixed native evidence census cannot fit protected object bound")
+	}
+	result.Custody.Reservation, err = hooks.Reserve(callCtx, capacity)
+	if err != nil {
+		return result, err
+	}
+	if err := validateWinnerHandoffReservation(capacity, result.Custody.Reservation); err != nil {
+		return result, err
+	}
+	capacityBytes, _ := json.Marshal(struct {
+		Capacity    winnerMultipassCapacity          `json:"capacity"`
+		Reservation winnerHandoffCapacityReservation `json:"reservation"`
+	}{Capacity: *capacity, Reservation: result.Custody.Reservation})
+	if err := retainDocument(callCtx, "capacity.json", capacityBytes); err != nil {
+		return result, err
+	}
 	if err := writePrivateReviewFile(filepath.Join(directory, "plan.json"), planBytes); err != nil {
 		return result, err
 	}
@@ -166,9 +218,23 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	if err := writePrivateReviewFile(filepath.Join(directory, "bundle.json"), bundleBytes); err != nil {
 		return result, err
 	}
-	callCtx, cancel := context.WithDeadline(ctx, owner.Deadline)
-	defer cancel()
-	admissions, err := preflightWinnerHandoffLeaves(callCtx, plan, bundle, hooks.Admit)
+	for _, document := range []struct {
+		name    string
+		content []byte
+	}{{name: "plan.json", content: planBytes}, {name: "bundle.json", content: bundleBytes}} {
+		if err := retainDocument(callCtx, document.name, document.content); err != nil {
+			return result, err
+		}
+	}
+	admit := func(admissionCtx context.Context, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
+		value, err := hooks.Admit(admissionCtx, call, payload)
+		result.Custody.Invocations = append(result.Custody.Invocations, value.Custody)
+		if err == nil {
+			err = validateWinnerHandoffInvocation(value.Custody, "tokenize", call, winnerMultipassSha256(payload), value.Admission, "", plan)
+		}
+		return value.Admission, err
+	}
+	admissions, err := preflightWinnerHandoffLeaves(callCtx, plan, bundle, admit)
 	admissionBytes, marshalErr := json.Marshal(admissions)
 	if marshalErr != nil {
 		return result, marshalErr
@@ -179,6 +245,10 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	if err != nil {
 		return result, err
 	}
+	leafAdmissions := map[string]winnerMultipassAdmission{}
+	for _, admission := range admissions {
+		leafAdmissions[admission.CallId] = admission
+	}
 	completed := map[string]winnerMultipassCallEvidence{}
 	for index, call := range plan.Calls {
 		if !hooks.Now().Before(owner.Deadline) {
@@ -188,9 +258,12 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 		if err != nil {
 			return result, err
 		}
-		admission, err := hooks.Admit(callCtx, call, payload)
-		if err != nil {
-			return result, err
+		admission, knownLeaf := leafAdmissions[call.Id]
+		if !knownLeaf {
+			admission, err = admit(callCtx, call, payload)
+			if err != nil {
+				return result, err
+			}
 		}
 		if err := validateWinnerMultipassAdmission(plan, call, payload, admission); err != nil {
 			return result, err
@@ -212,6 +285,10 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 			return result, err
 		}
 		transport, invokeErr := hooks.Invoke(callCtx, call, payload, admission, winnerMultipassSha256(claimBytes))
+		result.Custody.Invocations = append(result.Custody.Invocations, transport.Custody)
+		if invokeErr == nil {
+			invokeErr = validateWinnerHandoffInvocation(transport.Custody, "generate", call, winnerMultipassSha256(payload), admission, transport.TransportResponseSha256, plan)
+		}
 		observation := winnerMultipassCallEvidence{CallId: call.Id, StartedAt: claimed.RecordedAt, CompletedAt: hooks.Now().UTC(), Request: payload, Admission: admission,
 			VisibleResponse: transport.VisibleResponse, VisibleResponseSha256: winnerMultipassSha256(transport.VisibleResponse), TransportResponseSha256: transport.TransportResponseSha256, TransportReceiptSha256: transport.ContainmentReceiptSha256, Error: transport.Error}
 		if invokeErr != nil && observation.Error == "" {
@@ -251,7 +328,7 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 		}
 		// Retain receipt errors after expiry under a separate bounded cleanup
 		// context. No cleanup operation may issue or retry a provider request.
-		retentionCtx, retentionCancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		retentionCtx, retentionCancel := context.WithTimeout(context.WithoutCancel(ctx), settings.ReceiptTimeout)
 		claim.Kind, claim.EvidenceSha256, claim.Failure = "receipt", winnerMultipassSha256(observationBytes), observation.Error
 		_, receiptErr := hooks.Receipt(retentionCtx, claim)
 		retentionCancel()
@@ -274,12 +351,25 @@ func captureWinnerHandoff(ctx context.Context, directory string, owner *model.Co
 	if err := writePrivateReviewFile(filepath.Join(directory, "complete-evidence.json"), evidenceBytes); err != nil {
 		return result, err
 	}
-	retained, err := hooks.Retain(callCtx, evidenceBytes, winnerMultipassSha256(evidenceBytes))
+	if err := retainDocument(callCtx, "core-evidence.json", evidenceBytes); err != nil {
+		return result, err
+	}
+	if err := validateWinnerHandoffCustody(owner, plan, bundle, result.Evidence, result.Custody); err != nil {
+		return result, err
+	}
+	custodyBytes, err := json.Marshal(result.Custody)
+	if err != nil || len(custodyBytes) > settings.MaximumDocumentBytes {
+		return result, errors.New("complete custody manifest exceeds admitted object bound")
+	}
+	if err := writePrivateReviewFile(filepath.Join(directory, "custody.json"), custodyBytes); err != nil {
+		return result, err
+	}
+	retained, err := retainWinnerHandoffDocument(callCtx, "custody.json", custodyBytes, settings.MaximumDocumentBytes, owner.Deadline, hooks.Retain)
 	if err != nil {
 		return result, err
 	}
-	completion := model.CompetitionReviewHandoffCompletion{HandoffId: owner.HandoffId, PlanSha256: owner.Plan.PlanSha256, Evidence: model.CompetitionReviewHandoffRetention{Key: retained.Key, VersionId: retained.VersionId, Sha256: retained.Sha256, RetainUntil: retained.RetainUntil}}
-	broker := winnerSnowBrokerResult(bundle.Request, judgment, evidenceBytes)
+	completion := model.CompetitionReviewHandoffCompletion{HandoffId: owner.HandoffId, PlanSha256: owner.Plan.PlanSha256, Evidence: retained.Retention}
+	broker := winnerSnowBrokerResult(bundle.Request, judgment, custodyBytes)
 	if judgment.Decision == "approve" || judgment.Decision == "disqualify" {
 		if err := model.ValidateCompetitionIntegrityReview(broker.Review, bundle.Request.Request.Policy); err != nil {
 			completion.Failure = "native_final_proposal_invalid"
@@ -321,7 +411,7 @@ func winnerHandoffPlan(owner model.CompetitionReviewHandoff, bundle winnerMultip
 
 // Byte-exact comparison, not a local JSON approval marker, binds the durable
 // completion to evidence being presented for later explicit human import.
-func validateWinnerHandoffCompletion(owner *model.CompetitionReviewHandoff, completion *model.CompetitionReviewHandoffCompletion, plan *winnerMultipassPlan, bundle winnerMultipassBundle, evidence winnerMultipassEvidence) error {
+func validateWinnerHandoffCompletion(owner *model.CompetitionReviewHandoff, completion *model.CompetitionReviewHandoffCompletion, plan *winnerMultipassPlan, bundle winnerMultipassBundle, evidence winnerMultipassEvidence, custody winnerHandoffCustodyManifest) error {
 	if err := validateWinnerHandoffIdentity(owner, plan, bundle); err != nil {
 		return err
 	}
@@ -332,7 +422,10 @@ func validateWinnerHandoffCompletion(owner *model.CompetitionReviewHandoff, comp
 	if err != nil {
 		return err
 	}
-	content, err := json.Marshal(evidence)
+	if err := validateWinnerHandoffCustody(owner, plan, bundle, evidence, custody); err != nil {
+		return err
+	}
+	content, err := json.Marshal(custody)
 	if err != nil {
 		return err
 	}

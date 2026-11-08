@@ -35,6 +35,7 @@ type electedWinnerReviewHandoffConfig struct {
 	Plan                      currentQgQualificationPin `json:"plan"`
 	Bundle                    currentQgQualificationPin `json:"bundle"`
 	Evidence                  currentQgQualificationPin `json:"evidence"`
+	Custody                   currentQgQualificationPin `json:"custody"`
 	Completion                currentQgQualificationPin `json:"completion"`
 }
 
@@ -100,9 +101,10 @@ func prepareElectedWinnerReview(ctx context.Context, config electedWinnerReviewH
 	if _, err := winnerMultipassArtifacts(bundle, config.MultipassSettings); err != nil {
 		return nil, err
 	}
+	providerBytes, _ := json.Marshal(provider)
 	args := model.CompetitionReviewHandoffArgs{RoundId: config.RoundId, JobId: config.JobId, RewardRevision: decision.Revision, DecisionSha256: decision.DecisionSha256, SealSha256: packet.Seal.SealSha256,
 		PatchSha256: packet.Entry.PatchSha256, BaseSourceLockSha256: packet.Entry.BaseSourceLockSha256, ScoreSha256: packet.Entry.ScoreSha256, ArtifactManifestSha256: packet.Entry.ArtifactManifestSha256, BaselineSha256: packet.Seal.BaselineSha256,
-		AuthorizationSha256: config.AuthorizationSha256, ProviderSha256: config.ProviderSettings.Sha256, Protocol: model.CompetitionReviewHandoffProtocol, TimeoutSeconds: config.TimeoutSeconds}
+		AuthorizationSha256: config.AuthorizationSha256, ProviderSha256: winnerMultipassSha256(providerBytes), Protocol: model.CompetitionReviewHandoffProtocol, TimeoutSeconds: config.TimeoutSeconds}
 	if err := model.ValidateCompetitionReviewHandoffArgs(args); err != nil {
 		return nil, err
 	}
@@ -181,13 +183,15 @@ func TestElectedWinnerReviewHandoffCommand(t *testing.T) {
 	var plan winnerMultipassPlan
 	var bundle winnerMultipassBundle
 	var evidence winnerMultipassEvidence
+	var custody winnerHandoffCustodyManifest
 	var completion model.CompetitionReviewHandoffCompletion
 	read(config.Owner, &owner)
 	read(config.Plan, &plan)
 	read(config.Bundle, &bundle)
 	read(config.Evidence, &evidence)
+	read(config.Custody, &custody)
 	read(config.Completion, &completion)
-	if err := validateWinnerHandoffCompletion(&owner, &completion, &plan, bundle, evidence); err != nil {
+	if err := validateWinnerHandoffCompletion(&owner, &completion, &plan, bundle, evidence, custody); err != nil {
 		t.Fatal("pending evidence not importable; preserve originals: ", err)
 	}
 	t.Log("complete original model findings validated offline; explicit operator import still required; no authority changed")
