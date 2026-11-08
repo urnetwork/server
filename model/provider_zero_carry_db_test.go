@@ -139,6 +139,54 @@ func zeroCarryTestContracts(
 	zeroCarryTestContractsWith(ctx, t, provider, sourceNetworkIds, perNetwork, zeroCarryTestContract{byteCount: byteCount, closedAgo: closedAgo})
 }
 
+// Closes perNetwork contracts from each source network to the provider at
+// their deadline, through the expiry itself: each party filed a checkpoint of
+// nothing and no final, so the deadline close found both parties' reports,
+// credited the lower, 0, and kept the reports as its proof. Such usage is
+// unverified and has no excluded reason (contract_usage_expiry.go,
+// deadlineUsageSnapshot), which this checks of every row.
+func zeroCarryTestDeadlineCloses(
+	ctx context.Context,
+	t testing.TB,
+	provider *egressTestProvider,
+	sourceNetworkIds []server.Id,
+	perNetwork int,
+) {
+	t.Helper()
+	contractIds := []server.Id{}
+	for _, sourceNetworkId := range sourceNetworkIds {
+		for range perNetwork {
+			sourceId := server.NewId()
+			addContractPayoutTestClients(ctx, map[server.Id]server.Id{sourceId: sourceNetworkId})
+			contractId, err := CreateContractNoEscrowWithUsageOrigin(ctx, sourceNetworkId, sourceId, provider.networkId, provider.clientId, 1048576, true)
+			server.Raise(err)
+			server.Raise(CloseContract(ctx, contractId, sourceId, 0, true))
+			server.Raise(CloseContract(ctx, contractId, provider.clientId, 0, true))
+			contractIds = append(contractIds, contractId)
+		}
+	}
+	if _, err := ForceCloseOpenContractIds(ctx, server.NowUtc().Add(time.Hour), len(contractIds)+100, 2, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		var closed, unverified, excluded, bothReports int
+		server.Raise(conn.QueryRow(ctx, `
+			SELECT
+				count(*) FILTER (WHERE outcome IS NOT NULL AND close_time IS NOT NULL),
+				count(*) FILTER (WHERE usage_unverified),
+				count(*) FILTER (WHERE provider_usage ? 'excluded_reason'),
+				count(*) FILTER (WHERE provider_usage->'expiry'->'reports' ?& ARRAY['source', 'destination'])
+			FROM transfer_contract
+			WHERE contract_id = ANY($1)`,
+			contractIds,
+		).Scan(&closed, &unverified, &excluded, &bothReports))
+		if closed != len(contractIds) || unverified != len(contractIds) || excluded != 0 || bothReports != len(contractIds) {
+			t.Fatalf("of %d deadline closes, %d closed, %d unverified, %d with an excluded reason, %d with both reports",
+				len(contractIds), closed, unverified, excluded, bothReports)
+		}
+	})
+}
+
 // n new client network ids.
 func zeroCarryTestNetworks(n int) []server.Id {
 	networkIds := make([]server.Id, n)
@@ -554,7 +602,8 @@ func TestZeroCarryLateUrlSuccessClears(t *testing.T) {
 
 // Each exclusion of the counted contracts, with rows that would make a
 // verdict without it: the provider's own network, companion contracts, an
-// expiry's unconfirmed snapshot and a retained legacy exclusion.
+// expiry's unconfirmed snapshot, a deadline close's unverified usage with no
+// excluded reason, and a retained legacy exclusion.
 func TestZeroCarryExcludedContractsDoNotCount(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -574,11 +623,17 @@ func TestZeroCarryExcludedContractsDoNotCount(t *testing.T) {
 		// 25 retained legacy exclusions from five networks
 		legacy := zeroCarryTestCandidate(ctx, t, city)
 		zeroCarryTestContractsWith(ctx, t, legacy, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, legacy: true, sourceReport: "unacked"})
+		// 25 deadline closes from five networks that found both parties'
+		// reports: unverified usage of 0 bytes with no excluded reason, which
+		// only usage_unverified tells apart from an ordinary settlement
+		deadline := zeroCarryTestCandidate(ctx, t, city)
+		zeroCarryTestDeadlineCloses(ctx, t, deadline, zeroCarryTestNetworks(5), 5)
 		egressTestPasses(ctx, t)
 
 		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
 		for name, provider := range map[string]*egressTestProvider{
 			"own network": selfServed, "companion": companions, "unconfirmed": unconfirmed, "legacy exclusion": legacy,
+			"deadline close": deadline,
 		} {
 			if zeroCarryTestHeld(ctx, provider) {
 				t.Errorf("%s contracts made a provider zero-carry", name)
