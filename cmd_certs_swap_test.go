@@ -668,15 +668,15 @@ func TestCertsSwapRefusesANameThatIsALink(t *testing.T) {
 }
 
 // A real directory cannot be replaced in one step, and something other than this command put it
-// there.
+// there, which the refusal says in those words.
 func TestCertsSwapRefusesEntryThatIsNotALink(t *testing.T) {
 	vaultHome := setupCertsSwapVault(t)
 	fake := newFakeLbDocker(t, vaultHome)
 	generateTestTlsFiles(t, filepath.Join(vaultHome, "tls", tlsCurrentDirName), "example.com", true)
 
 	err := swapTlsCurrent(vaultHome, "main", "2.0.0", fake.settings(), io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "star.example.com") {
-		t.Fatalf("swap error = %v, want one naming the real directory", err)
+	if err == nil || !strings.Contains(err.Error(), "star.example.com is not a link") {
+		t.Fatalf("swap error = %v, want one saying the real directory is not a link", err)
 	}
 	if len(fake.reloadArgs) != 0 {
 		t.Errorf("a refused swap reloaded nginx: %v", fake.reloadArgs)
@@ -1262,9 +1262,9 @@ func lbTopOutput(workerPids []string, shuttingWorkerPids []string) string {
 // A master forks a reload's workers one by one and retires the old ones only after the last. A
 // worker the lb did not have before the signal is therefore no proof: here the first look after
 // the signal shows one beside both old ones, which a real run showed can be a late worker of an
-// earlier reload, holding the pair as it stood then. The reload counts only once as many workers
-// serve as the lb runs and none is from before, so with looks for only that partial picture the
-// swap fails, and with one more it reloads.
+// earlier reload, holding the pair as it stood then. The reload counts only once none of the
+// workers from before serves, so with looks for only that partial picture the swap fails, and
+// with one more it reloads.
 func TestCertsSwapCountsAReloadOnlyWhenEveryWorkerIsReplaced(t *testing.T) {
 	afterSignal := []string{
 		lbTopOutput([]string{"200", "201", "300"}, nil),
@@ -1348,9 +1348,12 @@ func TestCertsSwapSignalsOnlyALbRunningItsOwnCountOfWorkers(t *testing.T) {
 }
 
 // The worker count is what tells the lb's own reload from an earlier one's, so an lb config whose
-// count cannot be read, as auto, none or zero, is refused with nothing moved.
+// count cannot be read, as auto, none, zero or two counts, is refused with nothing moved.
 func TestCertsSwapRefusesAnLbWithoutAWorkerCount(t *testing.T) {
-	for _, workerProcessesLine := range []string{"", "worker_processes auto;", "worker_processes 0;", "# worker_processes 4;"} {
+	workerProcessesLines := []string{
+		"", "worker_processes auto;", "worker_processes 0;", "# worker_processes 4;", "worker_processes 1;\nworker_processes 2;",
+	}
+	for _, workerProcessesLine := range workerProcessesLines {
 		vaultHome := setupCertsSwapVault(t)
 		fake := newFakeLbDocker(t, vaultHome)
 		fake.containerIdWorkerProcessesLines = map[string]string{"aaaa11": workerProcessesLine}
@@ -1361,6 +1364,33 @@ func TestCertsSwapRefusesAnLbWithoutAWorkerCount(t *testing.T) {
 		}
 		requireNothingSwapped(t, vaultHome, fake)
 	}
+}
+
+// A master that starts draining as the signal reaches it retires every worker, and serves with
+// none. Every old worker has stopped serving, as at the end of a reload, but nothing reloaded.
+func TestCertsSwapFailsAReloadWhenTheLbDrainsInstead(t *testing.T) {
+	vaultHome := setupCertsSwapVault(t)
+	fake := newFakeLbDocker(t, vaultHome)
+	if err := swapTlsCurrent(vaultHome, "main", "1.0.0", fake.settings(), io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	fake.onReload = func(containerId string) error {
+		fake.containerIdTopOutputs = map[string]string{containerId: drainingLbTop}
+		return nil
+	}
+	output := &bytes.Buffer{}
+	settings := fake.settings()
+	settings.reloadCheckCount = 3
+	settings.reloadCheckInterval = 0
+
+	err := swapTlsCurrent(vaultHome, "main", "2.0.0", settings, output)
+	if err == nil || !strings.Contains(err.Error(), "did not replace its workers") {
+		t.Fatalf("swap error = %v, want one saying the lb replaced no workers", err)
+	}
+	if strings.Contains(output.String(), "Reloaded edge-0.example.com-eth0\n") {
+		t.Errorf("printed Reloaded for a drain: %q", output.String())
+	}
+	requireTlsLink(t, vaultHome, "star.example.com", filepath.Join("..", "1.0.0", "star.example.com"))
 }
 
 // With no looks allowed no reload can be proven, which its doc says.
@@ -2321,6 +2351,27 @@ func TestCertsSwapCommandExitsTwoOnAMissingVersion(t *testing.T) {
 	}
 	if !strings.Contains(output, "sidecarctl certs swap <env> <version> [--no-reload]") {
 		t.Errorf("output does not give the usage:\n%s", output)
+	}
+	if _, err := os.Lstat(filepath.Join(vaultHome, "tls", tlsCurrentDirName)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a refused command line made tls/current: %v", err)
+	}
+}
+
+// A line the command cannot take is a usage mistake, which exits 2, and it touches nothing: a
+// missing version, a word more than it takes, and a flag it does not have.
+func TestCertsSwapCommandRefusesALineItCannotTake(t *testing.T) {
+	vaultHome := setupCertsSwapVault(t)
+	t.Setenv("WARP_VAULT_HOME", vaultHome)
+	for _, args := range [][]string{
+		{"main", "--no-reload"},
+		{"main", "2.0.0", "1.0.0", "--no-reload"},
+		{"main", "2.0.0", "--no-reload", "--force"},
+	} {
+		err := runCertsSwap(args, io.Discard)
+		usageErr := &sidecarctlUsageError{}
+		if !errors.As(err, &usageErr) {
+			t.Errorf("%v: error = %v, want a usage mistake", args, err)
+		}
 	}
 	if _, err := os.Lstat(filepath.Join(vaultHome, "tls", tlsCurrentDirName)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("a refused command line made tls/current: %v", err)

@@ -123,7 +123,7 @@ type certsSwapSettings struct {
 	// waiting for it, as warpctl's retirement commands allow. Non-positive waits until it closes.
 	dockerWaitDelay time.Duration
 	// How many times to look at an lb's workers before failing its reload: before the signal, for
-	// the lb to run exactly its own count of workers, and again after it, for the reload to replace
+	// the lb to run exactly its own count of workers, and again after it, for the reload to retire
 	// them all. With the interval this bounds how long a master may take to parse its config and
 	// start its workers, which a minute covers many times over. Non-positive never looks, so every
 	// reload fails before its signal.
@@ -168,7 +168,7 @@ type lbContainer struct {
 	block       string
 	// the names of this version the lb reads through tls/current
 	reachedNames []string
-	// the workers its config runs, which a finished reload replaces with as many
+	// the workers its config runs, which an lb with no reload under way runs exactly
 	workerCount int
 }
 
@@ -440,9 +440,10 @@ func swapTlsCurrent(vaultHome string, env string, version string, settings *cert
 	// forks a reload's workers one by one and retires the old ones only after the last, so a worker
 	// that was not there before the signal can be a late one of an earlier reload, which read the
 	// links as they stood then. So the signal waits until the lb runs exactly its own count of
-	// workers, with no reload under way, and the reload is done only when as many serve again and
-	// none of them is one from before the signal. A master slower than every look reads whichever
-	// links stand when it gets there.
+	// workers, with no reload under way, and the reload is done only when every worker from before
+	// the signal has stopped serving while another serves: the end of a whole reload begun after
+	// the signal. A drain stops them all too, with none serving after. A master slower than every
+	// look reads whichever links stand when it gets there.
 	reloadLb := func(lb *lbContainer) error {
 		settledWorkerPids := []string{}
 		for checkIndex := 0; checkIndex < settings.reloadCheckCount; checkIndex += 1 {
@@ -480,10 +481,10 @@ func swapTlsCurrent(vaultHome string, env string, version string, settings *cert
 			if err != nil {
 				return fmt.Errorf("read its workers after the signal: %w", err)
 			}
-			replaced := !slices.ContainsFunc(workerPids, func(workerPid string) bool {
+			retired := !slices.ContainsFunc(workerPids, func(workerPid string) bool {
 				return slices.Contains(settledWorkerPids, workerPid)
 			})
-			if len(workerPids) == lb.workerCount && replaced {
+			if 0 < len(workerPids) && retired {
 				return nil
 			}
 		}
