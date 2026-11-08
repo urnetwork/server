@@ -26,6 +26,10 @@ type egressTlsJudgeFixture struct {
 	// a judged time this far past the evaluation clock (another host's clock)
 	judgedAhead time.Duration
 	undecided   float64
+	// how long ago the newest process exporting the gauges started; and none
+	// exports its start time
+	startedAge time.Duration
+	noStarted  bool
 	// the hosts whose last-judged gauge is scraped fresh
 	fresh    map[string]bool
 	mimirErr error
@@ -34,7 +38,7 @@ type egressTlsJudgeFixture struct {
 // Two Taskworkers on the build that exports the gauges, the newest judged run
 // three minutes old, and nothing left undecided.
 func healthyEgressTlsJudgeFixture() *egressTlsJudgeFixture {
-	fixture := &egressTlsJudgeFixture{judgedAge: 3 * time.Minute, judgedHost: "worker-b.example", fresh: map[string]bool{}}
+	fixture := &egressTlsJudgeFixture{judgedAge: 3 * time.Minute, judgedHost: "worker-b.example", startedAge: 4 * time.Minute, fresh: map[string]bool{}}
 	for _, slot := range egressTlsJudgeSlots {
 		fixture.fresh[slot.host] = true
 	}
@@ -64,6 +68,9 @@ func (self *egressTlsJudgeFixture) settings(t *testing.T) SignalSettings {
 				labels := map[string]string{"job": "taskworker", "host": self.judgedHost, "block": "g1", "instance": self.judgedHost + ":7100"}
 				fixture.labeled("judged", labels, judgedAt)
 				fixture.labeled("undecided", labels, self.undecided)
+				if !self.noStarted {
+					fixture.labeled("started", map[string]string{}, float64(at.Add(-self.startedAge).Unix()))
+				}
 				for _, slot := range egressTlsJudgeSlots {
 					if self.fresh[slot.host] {
 						fixture.fresh("judged", slot, at.Add(-20*time.Second))
@@ -419,6 +426,78 @@ func TestEgressTlsJudgeQueryReadsTheNewestJudgedRun(t *testing.T) {
 	} {
 		if !strings.Contains(query, want) {
 			t.Errorf("query lacks %s:\n%s", want, query)
+		}
+	}
+}
+
+// A judge that never succeeds pages even with a slot missing (REVIEW-D1 F3):
+// every slot that reports shows 0, no run since its process started, and the
+// newest of those processes started 50 minutes ago, past the page bound. A
+// process judges within minutes of starting, so none of these is going to;
+// stale pages from its second cadence beside the unobservable alert.
+func TestEgressTlsJudgeNeverJudgedWithASlotMissingPagesOnceItsProcessesAreOld(t *testing.T) {
+	fixture := healthyEgressTlsJudgeFixture()
+	fixture.fresh["worker-a.example"] = false
+	fixture.neverJudged = true
+	fixture.startedAge = 50 * time.Minute
+	for tick, released := range fixture.gated(t, 4) {
+		cadence := tick + 1
+		severity, stale := egressTlsJudgeReleasedClasses(released)["egress-tls-judge-stale"]
+		switch {
+		case cadence < 2 && stale:
+			t.Fatalf("cadence %d released stale before its sustain", cadence)
+		case 2 <= cadence && (!stale || severity != SeverityPage):
+			t.Fatalf("cadence %d released %+v, want stale paging for a fleet that never judged", cadence, released)
+		}
+	}
+	alerts := fixture.run(t)
+	requireAlertClass(t, alerts, "egress-tls-judge-unobservable")
+	if alert := requireAlertClass(t, alerts, "egress-tls-judge-stale"); !strings.Contains(alert.Symptom, "since it started") ||
+		!strings.Contains(alert.Observed, "newest_process_start_age=50m") {
+		t.Fatalf("never-judged stale symptom %q observed %q", alert.Symptom, alert.Observed)
+	}
+}
+
+// The roll stays quiet: with a slot missing and every reporting process at 0,
+// processes that started minutes ago, or a newest process short of the page
+// bound, or no start time to read, raise no stale alert and page nobody.
+func TestEgressTlsJudgeNeverJudgedRollStaysQuiet(t *testing.T) {
+	for name, change := range map[string]func(*egressTlsJudgeFixture){
+		"processes started minutes ago":     func(fixture *egressTlsJudgeFixture) { fixture.startedAge = 4 * time.Minute },
+		"newest process short of the bound": func(fixture *egressTlsJudgeFixture) { fixture.startedAge = 44 * time.Minute },
+		"no start time to read":             func(fixture *egressTlsJudgeFixture) { fixture.startedAge, fixture.noStarted = 50*time.Minute, true },
+	} {
+		fixture := healthyEgressTlsJudgeFixture()
+		fixture.fresh["worker-a.example"] = false
+		fixture.neverJudged = true
+		change(fixture)
+		requireNoAlertClass(t, fixture.run(t), "egress-tls-judge-stale")
+		for tick, released := range fixture.gated(t, 24) {
+			for _, alert := range released {
+				if alert.Severity == SeverityPage || alert.Class == "egress-tls-judge-stale" {
+					t.Fatalf("%s: cadence %d released %s %s", name, tick+1, alert.Class, alert.Severity)
+				}
+			}
+		}
+	}
+}
+
+// With every slot reporting, a fleet that never judged is stale as before,
+// paging after six cadences whatever its processes' age.
+func TestEgressTlsJudgeNeverJudgedWithFullCoverageIsUnchanged(t *testing.T) {
+	for _, startedAge := range []time.Duration{4 * time.Minute, 50 * time.Minute} {
+		fixture := healthyEgressTlsJudgeFixture()
+		fixture.neverJudged = true
+		fixture.startedAge = startedAge
+		for tick, released := range fixture.gated(t, 6) {
+			cadence := tick + 1
+			severity, stale := egressTlsJudgeReleasedClasses(released)["egress-tls-judge-stale"]
+			switch {
+			case cadence < 2 && stale, 2 <= cadence && !stale:
+				t.Fatalf("started %s ago: cadence %d stale=%t", startedAge, cadence, stale)
+			case cadence < 6 && severity == SeverityPage, cadence == 6 && severity != SeverityPage:
+				t.Fatalf("started %s ago: cadence %d severity %s, want a page at the sixth", startedAge, cadence, severity)
+			}
 		}
 	}
 }
