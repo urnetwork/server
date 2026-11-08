@@ -1,8 +1,6 @@
 package work
 
 import (
-	"time"
-
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -36,7 +34,7 @@ func ScheduleAbuseActionPass(clientSession *session.ClientSession, tx server.PgT
 		clientSession,
 		task.RunOnce("abuse_action_pass"),
 		task.RunAt(server.NowUtc().Add(settings.ActionPassInterval)),
-		task.MaxTime(settings.ActionPassMaxTime+time.Minute),
+		task.MaxTime(settings.ActionPassTaskMaxTime),
 	)
 }
 

@@ -54,6 +54,9 @@ type AbuseSettings struct {
 	ActionPassBatchSize int
 	// One pass's bound; a pass that runs out leaves the rest to the next.
 	ActionPassMaxTime time.Duration
+	// The task runner's bound on one pass, past ActionPassMaxTime, so a pass
+	// ends itself before the runner ends it.
+	ActionPassTaskMaxTime time.Duration
 
 	// Cases, actions and appeals are kept this many calendar months after the
 	// case last closes (§21.10, §2.8 api-14, plan-ABUSE-small-readings #9): 13,
@@ -75,20 +78,21 @@ type AbuseSettings struct {
 // and without them every ladder refuses every target.
 func DefaultAbuseSettings() *AbuseSettings {
 	return &AbuseSettings{
-		AbusePolicySettings: *DefaultAbusePolicySettings(),
-		ProbationAge:        7 * 24 * time.Hour,
-		RestrictedWindow:    30 * 24 * time.Hour,
-		TrustedPaidWindow:   30 * 24 * time.Hour,
-		TrustedCleanWindow:  90 * 24 * time.Hour,
-		CaseCoalesceWindow:  24 * time.Hour,
-		ActionPassInterval:  time.Minute,
-		ActionPassGrace:     time.Minute,
-		ActionPassBatchSize: 100,
-		ActionPassMaxTime:   5 * time.Minute,
-		CaseRetentionMonths: 13,
-		LegalRetentionYears: 3,
-		RetentionBatchSize:  1000,
-		LookupRowLimit:      100,
+		AbusePolicySettings:   *DefaultAbusePolicySettings(),
+		ProbationAge:          7 * 24 * time.Hour,
+		RestrictedWindow:      30 * 24 * time.Hour,
+		TrustedPaidWindow:     30 * 24 * time.Hour,
+		TrustedCleanWindow:    90 * 24 * time.Hour,
+		CaseCoalesceWindow:    24 * time.Hour,
+		ActionPassInterval:    time.Minute,
+		ActionPassGrace:       time.Minute,
+		ActionPassBatchSize:   100,
+		ActionPassMaxTime:     5 * time.Minute,
+		ActionPassTaskMaxTime: 10 * time.Minute,
+		CaseRetentionMonths:   13,
+		LegalRetentionYears:   3,
+		RetentionBatchSize:    1000,
+		LookupRowLimit:        100,
 	}
 }
 
