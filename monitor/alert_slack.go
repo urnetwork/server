@@ -375,6 +375,12 @@ func (self *SlackAlertNotifier) Handle(signal Signal, execution SignalExecution)
 	self.admitWithLock(now, self.observeWithLock(now, signal.Key(), execution))
 }
 
+// The complete runs without an incident it takes to clear it, for a caller
+// that raises its own warn through Handle and must clear it again.
+func (self *SlackAlertNotifier) ClearAfterCompleteRuns() int {
+	return self.settings.ClearAfterCompleteRuns
+}
+
 // Close stops accepting batches, queues a pending start digest and a held
 // summary regardless of the cap, and waits for the sender to post what is
 // queued and a pending undelivered report. When ctx ends first, the remaining
@@ -455,10 +461,34 @@ func isVisibilityAlert(alert Alert) bool {
 	return alert.unobservable
 }
 
-// Applies one signal execution to the incidents and returns its transitions:
-// raises and escalations in severity-then-identity order, then clears in key
-// order.
+// Applies one signal execution to the incidents. A raise is at start when the
+// gate passed it at the first chance this process had: within the first Sustain
+// complete runs, since the gate resets a streak at every run without the alert,
+// or for a failed run, before any complete one. Only within StartWindow of the
+// start: a signal that fails for hours has no start left when it first
+// completes.
 func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string, execution SignalExecution) []slackTransition {
+	if !execution.Failed {
+		self.signalKeyCompleteRuns[signalKey]++
+	}
+	completeRuns := self.signalKeyCompleteRuns[signalKey]
+	atStart := func(alert Alert) bool {
+		if self.settings.StartDigestHold <= 0 || self.settings.StartWindow < now.Sub(self.startTime) {
+			return false
+		}
+		if execution.Failed {
+			return completeRuns == 0
+		}
+		return completeRuns <= max(alert.Sustain, 1)
+	}
+	return observeIncidents(self.keyIncidents, self.settings.ClearAfterCompleteRuns, signalKey, execution, atStart)
+}
+
+// The incident rule every notifier keeps: applies one signal execution to
+// keyIncidents and returns its transitions, raises and escalations in
+// severity-then-identity order, then clears in key order. atStart marks a
+// raise for the start digest. The caller holds whatever guards keyIncidents.
+func observeIncidents(keyIncidents map[string]*slackIncident, clearAfterCompleteRuns int, signalKey string, execution SignalExecution, atStart func(Alert) bool) []slackTransition {
 	complete := !execution.Failed
 	keyAlerts := map[string]Alert{}
 	for _, alert := range execution.Alerts {
@@ -488,7 +518,7 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 	// reporting signal; it only breaks its own existing absence streak.
 	for _, hold := range execution.ClearHolds {
 		key := slackIncidentKey(Alert{SignalID: hold.SignalId, Class: hold.Class, Target: hold.Target})
-		if incident, ok := self.keyIncidents[key]; ok {
+		if incident, ok := keyIncidents[key]; ok {
 			if _, owned := incident.signalKeyAbsentRuns[signalKey]; owned {
 				heldKeys[key] = true
 			}
@@ -498,31 +528,13 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 	for _, alert := range keyAlerts {
 		present = append(present, alert)
 	}
-	if !execution.Failed {
-		self.signalKeyCompleteRuns[signalKey]++
-	}
-	completeRuns := self.signalKeyCompleteRuns[signalKey]
-	// A raise is at start when the gate passed it at the first chance this
-	// process had: within the first Sustain complete runs, since the gate
-	// resets a streak at every run without the alert, or for a failed run,
-	// before any complete one. Only within StartWindow of the start: a signal
-	// that fails for hours has no start left when it first completes.
-	atStart := func(alert Alert) bool {
-		if self.settings.StartDigestHold <= 0 || self.settings.StartWindow < now.Sub(self.startTime) {
-			return false
-		}
-		if execution.Failed {
-			return completeRuns == 0
-		}
-		return completeRuns <= max(alert.Sustain, 1)
-	}
 
 	transitions := []slackTransition{}
 	for _, alert := range orderedAlerts(present) {
 		key := slackIncidentKey(alert)
-		incident, ok := self.keyIncidents[key]
+		incident, ok := keyIncidents[key]
 		if !ok {
-			self.keyIncidents[key] = &slackIncident{
+			keyIncidents[key] = &slackIncident{
 				alert:               alert,
 				severity:            alert.Severity,
 				signalKeyAbsentRuns: map[string]int{signalKey: 0},
@@ -538,13 +550,13 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 		}
 	}
 	for key := range heldKeys {
-		if incident, ok := self.keyIncidents[key]; ok {
+		if incident, ok := keyIncidents[key]; ok {
 			incident.signalKeyAbsentRuns[signalKey] = 0
 		}
 	}
 	if !complete {
 		// Unknown evidence breaks this signal's consecutive absence streak.
-		for _, incident := range self.keyIncidents {
+		for _, incident := range keyIncidents {
 			if _, owned := incident.signalKeyAbsentRuns[signalKey]; owned {
 				incident.signalKeyAbsentRuns[signalKey] = 0
 			}
@@ -552,20 +564,20 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 		return transitions
 	}
 
-	keys := make([]string, 0, len(self.keyIncidents))
-	for key := range self.keyIncidents {
+	keys := make([]string, 0, len(keyIncidents))
+	for key := range keyIncidents {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		incident := self.keyIncidents[key]
+		incident := keyIncidents[key]
 		absentRuns, owned := incident.signalKeyAbsentRuns[signalKey]
 		_, reported := keyAlerts[key]
 		if !owned || reported || heldKeys[key] {
 			continue
 		}
 		absentRuns++
-		if absentRuns < self.settings.ClearAfterCompleteRuns {
+		if absentRuns < clearAfterCompleteRuns {
 			incident.signalKeyAbsentRuns[signalKey] = absentRuns
 			continue
 		}
@@ -574,7 +586,7 @@ func (self *SlackAlertNotifier) observeWithLock(now time.Time, signalKey string,
 			// another signal still reports it
 			continue
 		}
-		delete(self.keyIncidents, key)
+		delete(keyIncidents, key)
 		cleared := incident.alert
 		cleared.Severity = incident.severity
 		transitions = append(transitions, slackTransition{kind: slackCleared, alert: cleared})

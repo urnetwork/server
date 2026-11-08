@@ -1,11 +1,12 @@
 package monitor
 
-// Every alert class the package emits, classified for the Slack notifier. A
+// Every alert class the package emits, classified for the notifiers. A
 // visibility class reports an unknown state in place of an incident: its
 // signal could not observe or evaluate part of its source, so the execution
 // that reported it is no evidence that the signal's other incidents are
 // absent, and none of them clear while it lasts (see SlackAlertNotifier). An
-// incident class reports a measured state.
+// incident class reports a measured state, and a page class is an incident
+// that also wakes the rota: it has a row in pageClasses, §19.8's table.
 //
 // The classification errs toward visibility. Over-marking only delays a
 // signal's other clears while the state lasts; under-marking lets an incident
@@ -21,9 +22,20 @@ type alertClassKind int
 const (
 	incidentAlertClass alertClassKind = iota
 	visibilityAlertClass
+	pageAlertClass
 )
 
 var alertClassKinds = map[string]alertClassKind{
+	// §19.8's page classes
+	"filecluster-key-held":        pageAlertClass,
+	"filecluster-refusing-writes": pageAlertClass,
+	"filecluster-set-at-risk":     pageAlertClass,
+	"postgres-primary-down":       pageAlertClass,
+	"slo-burn-page":               pageAlertClass,
+	"write-budget-p0-past-refill": pageAlertClass,
+	// the pager's own warn, which reaches Slack only
+	"pager-sink-failing": incidentAlertClass,
+
 	"contract-failure-share":               incidentAlertClass,
 	"contract-failure-share-unobservable":  visibilityAlertClass,
 	"contract-stage-inflight-high":         incidentAlertClass,

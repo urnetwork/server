@@ -522,6 +522,22 @@ pg-cpu PAGE is kept while its database host does not answer for two runs; and
 a configured host exclusion without blocked hosts, which settings freshness
 reports every run, leaves the run complete.
 
+Page classes and the rota's pager (MONITOR.md §3.6). With `-pager-alerts`,
+an incident at PAGE of one of the sidecar design's §19.8 page classes, the
+rows of `page_classes.go`, also pages the out-of-hours rota:
+`filecluster-set-at-risk` and `filecluster-refusing-writes` (a set at risk, or
+a cluster refusing writes), `postgres-primary-down`, `slo-burn-page` (2% of a
+30-day budget burned in an hour), `write-budget-p0-past-refill` and
+`filecluster-key-held` (a key held over a minute by a write that cannot
+settle). Each row stands ahead of the signal that reports its class, which
+lands with its own task; until then the row pages nothing. Every other PAGE
+stays on Slack, and a WARN of a page class does not page. The pager keeps the
+Slack notifier's incident rule on its own state, so a failed or unobservable
+run ends no page. `pager-sink-failing` is the pager's own WARN, carried by the
+Slack notifier and never paged: it stands while the pager service does not
+take pages, or for the whole run when a watcher asked to page has no usable
+endpoint, and clears once the service takes a page again.
+
 
 Subnet operators: §17 covers node/gateway infrastructure; §22 covers continuous
 whitepaper-1.0 correctness of pools, head miners, validators, deposits, custody,

@@ -106,9 +106,11 @@ type monitorYaml struct {
 	SubnetReplay yaml.Node `yaml:"subnet_replay"`
 	// Outbound notification. An empty webhook disables the Slack notifier.
 	// bringyourctl reads the same key for Grafana's default contact point
-	// (grafana.AlertRoutingSettingsFromMonitorVault).
+	// (grafana.AlertRoutingSettingsFromMonitorVault). The pager's webhook is
+	// the pager service's event endpoint (alert_pager.go).
 	Alerts struct {
 		SlackWebhookUrl string `yaml:"slack_webhook_url"`
+		PagerWebhookUrl string `yaml:"pager_webhook_url"`
 	} `yaml:"alerts"`
 }
 
@@ -345,6 +347,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		Credentials:     loadCredentialRequirements(env, stConfiguration.status.requiresSTCredentials(), logServices),
 		AlertNotifications: AlertNotificationSettings{
 			SlackWebhookUrl: strings.TrimSpace(y.Alerts.SlackWebhookUrl),
+			PagerWebhookUrl: strings.TrimSpace(y.Alerts.PagerWebhookUrl),
 		},
 	}
 	settings = settings.withDefaults()
