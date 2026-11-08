@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ type winnerMultipassQualificationActor struct {
 func winnerMultipassQualificationActorFixture(t *testing.T, plan *winnerMultipassQualificationPlan) *winnerMultipassQualificationActor {
 	t.Helper()
 	actor := &winnerMultipassQualificationActor{Captures: map[int]winnerMultipassQualificationCapture{}, Pins: map[int]currentQgQualificationPin{}, Claims: map[int][]byte{}, Invoked: []int{}, Clock: plan.Owner.StartedAt}
+	caseDirectory := t.TempDir()
 	judgments := map[int]winnerModelJudgment{}
 	for _, item := range plan.Cases[1:] {
 		content := currentQgExecutionMockResponse(t, item.Bundle.Request, item.Expectation, nil)
@@ -134,7 +136,8 @@ func winnerMultipassQualificationActorFixture(t *testing.T, plan *winnerMultipas
 		},
 		RetainCase: func(position int, value winnerMultipassEvidence) (currentQgQualificationPin, error) {
 			content, _ := json.Marshal(value)
-			return currentQgQualificationPin{Path: fmt.Sprintf("/synthetic/case-%02d.json", position), Sha256: winnerMultipassSha256(content)}, nil
+			path := filepath.Join(caseDirectory, fmt.Sprintf("case-%02d.json", position))
+			return currentQgQualificationPin{Path: path, Sha256: winnerMultipassSha256(content)}, writePrivateReviewFile(path, content)
 		},
 	}
 	return actor
@@ -154,6 +157,11 @@ func TestWinnerMultipassQualificationOfflineExecutionAndResumeNeverQualify(t *te
 		t.Fatalf("offline group execution did not reconstruct exact complete outcomes: %v", err)
 	}
 	originalCalls := len(actor.Invoked)
+	originalPin, err := writeWinnerMultipassQualificationCanonical(filepath.Join(t.TempDir(), "original-completed-report.json"), report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor.Hooks.CompletedReport = &originalPin
 	actor.Hooks.Now = func() time.Time { return plan.Owner.Deadline.Add(time.Hour) }
 	resumed, err := executeWinnerMultipassQualification(context.Background(), plan, pin, capacity, actor.Hooks)
 	if err != nil || !resumed.Complete || resumed.Qualified || len(actor.Invoked) != originalCalls || !reflect.DeepEqual(resumed, report) {

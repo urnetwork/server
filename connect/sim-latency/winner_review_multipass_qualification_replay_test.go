@@ -9,6 +9,7 @@ import (
 	"errors"
 	"path/filepath"
 	"reflect"
+	"time"
 )
 
 // The exact root-owned claim binds its original payload/admission, fixed group,
@@ -56,6 +57,9 @@ func authenticateWinnerMultipassQualification(reportPin currentQgQualificationPi
 	}
 	if report.Schema != 1 || report.Kind != "winner-review-multipass-qualification-report/v1" || report.Protocol != winnerMultipassVersion || report.Mode != "genuine_provider" || !report.Complete || !report.Qualified || report.Error != "" || report.Plan.Sha256 != report.PlanSha256 || !reflect.DeepEqual(report.Release, expectedRelease) {
 		return nil, errors.New("qualification report is partial, offline, historical, failed or for a different release")
+	}
+	if err := validateWinnerMultipassCompletionClock(report.Owner, report.CompletedAt, time.Time{}); err != nil {
+		return nil, err
 	}
 	planBytes, err := readCurrentQgQualificationPin(report.Plan, 8*int64(defaultWinnerMultipassSettings().MaximumBundleBytes), true)
 	if err != nil {
@@ -107,6 +111,9 @@ func authenticateWinnerMultipassQualification(reportPin currentQgQualificationPi
 			return authenticateWinnerMultipassContainment(input, output, diagnostics, canceled, profile)
 		}); err != nil {
 			return nil, err
+		}
+		if capture.Containment.Result != nil && report.CompletedAt.Before(capture.Containment.Result.CompletedAt) {
+			return nil, errors.New("qualification terminal predates an original provider completion")
 		}
 	}
 	delete(state.Evidence, 1)

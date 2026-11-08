@@ -391,13 +391,15 @@ func TestWinnerMultipassSpoolQualificationCompletePipelineAndProtectedReplay(t *
 		t.Fatalf("synthetic full spool pipeline incomplete or falsely qualified: %v invocations=%d generations=%d physical=%d", err, actor.Invocations, actor.Generations, actor.PhysicalChecks)
 	}
 	actor.PastDeadline = true
-	resumed, err := executeWinnerMultipassSpoolQualification(context.Background(), actor.Plan, planPin, settings, spool, actor.hooks())
-	if err != nil || !reflect.DeepEqual(report, resumed) || actor.Invocations != 181 || actor.PhysicalChecks != 181 || actor.Generations != 72 {
-		t.Fatal("completed protected replay changed originals, reacquired physical facts or rerolled", err)
-	}
 	reportPin, err := writeWinnerMultipassQualificationCanonical(filepath.Join(actor.Directory, "offline-spool-report.json"), report)
 	if err != nil {
 		t.Fatal(err)
+	}
+	replayHooks := actor.hooks()
+	replayHooks.CompletedReport = &reportPin
+	resumed, err := executeWinnerMultipassSpoolQualification(context.Background(), actor.Plan, planPin, settings, spool, replayHooks)
+	if err != nil || !reflect.DeepEqual(report, resumed) || actor.Invocations != 181 || actor.PhysicalChecks != 181 || actor.Generations != 72 {
+		t.Fatal("completed protected replay changed originals, reacquired physical facts or rerolled", err)
 	}
 	if _, err := authenticateWinnerMultipassSpoolQualification(reportPin, actor.Plan.Release, actor.resolve); err == nil {
 		t.Fatal("complete synthetic/offline spool pipeline qualified a real release")
@@ -411,7 +413,7 @@ func TestWinnerMultipassSpoolQualificationCompletePipelineAndProtectedReplay(t *
 		t.Fatal(err)
 	}
 	delete(actor.Archive, first.Physical.Key+"/"+first.Physical.VersionId)
-	if _, err := executeWinnerMultipassSpoolQualification(context.Background(), actor.Plan, planPin, settings, spool, actor.hooks()); err == nil || actor.Invocations != 181 || actor.Generations != 72 {
+	if _, err := executeWinnerMultipassSpoolQualification(context.Background(), actor.Plan, planPin, settings, spool, replayHooks); err == nil || actor.Invocations != 181 || actor.Generations != 72 {
 		t.Fatal("missing protected original fell back to nonexistent local evidence or rerolled")
 	}
 }

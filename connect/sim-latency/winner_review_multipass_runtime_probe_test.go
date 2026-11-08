@@ -19,7 +19,7 @@ func TestWinnerMultipassRuntimeProbeObservesDeclaredContextsWithoutAdmission(t *
 	now := time.Now().UTC()
 	owner := winnerMultipassOwner{Id: "synthetic-runtime-bootstrap", StartedAt: now.Add(-time.Minute), Deadline: now.Add(9 * time.Minute)}
 	for _, member := range provider.Members {
-		t.Run(member.Name, func(t *testing.T) {
+		{
 			envelope, err := buildWinnerMultipassRuntimeProbe(owner, member, now.Add(4*time.Minute))
 			if err != nil {
 				t.Fatal(err)
@@ -54,7 +54,7 @@ func TestWinnerMultipassRuntimeProbeObservesDeclaredContextsWithoutAdmission(t *
 			if _, err := executeWinnerMultipassBroker(context.Background(), client, envelope, provider, directory, defaultWinnerMultipassProviderLimits()); err == nil || generations != 0 {
 				t.Fatal("started synthetic probe silently retried")
 			}
-		})
+		}
 	}
 }
 
@@ -108,7 +108,7 @@ func TestWinnerMultipassRuntimeProbeMismatchRetainsOriginalWithoutRetry(t *testi
 		t.Fatal(err)
 	}
 	for _, field := range []string{"context", "version", "resident"} {
-		t.Run(field, func(t *testing.T) {
+		{
 			generations, requests := 0, 0
 			client := winnerMultipassProviderClient(t, &winnerMultipassPlan{Provider: provider, Settings: envelope.Settings}, envelope.Call, "", &generations)
 			original := client.Transport
@@ -148,7 +148,7 @@ func TestWinnerMultipassRuntimeProbeMismatchRetainsOriginalWithoutRetry(t *testi
 			if _, err := executeWinnerMultipassBroker(context.Background(), client, envelope, provider, directory, defaultWinnerMultipassProviderLimits()); err == nil || requests != before {
 				t.Fatal("failed probe rerolled network work")
 			}
-		})
+		}
 	}
 }
 
