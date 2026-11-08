@@ -42,7 +42,7 @@ type winnerMultipassEvidence struct {
 // real usage. A capture implementation must strip no assistant output and must
 // not substitute summaries for these original visible bytes.
 func winnerMultipassVisibleResponse(evidence winnerMultipassCallEvidence, call winnerMultipassCall, settings winnerMultipassSettings) (*winnerModelResponse, error) {
-	if evidence.Error != "" || len(evidence.VisibleResponse) == 0 || len(evidence.VisibleResponse) > settings.MaximumResponseBytes || rejectWinnerReviewCaseAliases(evidence.VisibleResponse) != nil ||
+	if evidence.Error != "" || len(evidence.VisibleResponse) == 0 || len(evidence.VisibleResponse) > settings.MaximumResponseBytes || rejectWinnerMultipassTerminalAliases(evidence.VisibleResponse) != nil ||
 		evidence.VisibleResponseSha256 != winnerMultipassSha256(evidence.VisibleResponse) || !validSha256(evidence.TransportResponseSha256) || !validSha256(evidence.TransportReceiptSha256) {
 		return nil, errors.New("multi-pass provider terminal is failed, absent, unbound or oversized")
 	}
@@ -89,6 +89,25 @@ func winnerMultipassVisibleResponse(evidence winnerMultipassCallEvidence, call w
 		return nil, errors.New("multi-pass decoded observation differs from original provider output")
 	}
 	return &response, nil
+}
+
+// JSON Schema uses camelCase keywords. Exclude only the ignored provider schema
+// echo from alias checking; authenticate and parse the untouched original bytes.
+func rejectWinnerMultipassTerminalAliases(content []byte) error {
+	var response map[string]any
+	if err := json.Unmarshal(content, &response); err != nil {
+		return err
+	}
+	if text, ok := response["text"].(map[string]any); ok {
+		if format, ok := text["format"].(map[string]any); ok {
+			delete(format, "schema")
+		}
+	}
+	checked, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	return rejectWinnerReviewCaseAliases(checked)
 }
 
 // A prefix can be resumed only from its next unstarted planned call. Durable
