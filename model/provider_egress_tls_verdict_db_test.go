@@ -507,10 +507,13 @@ func TestTlsResetsBeforeAnInterceptionBuildNoPlace(t *testing.T) {
 // A place read that cannot complete, here one held behind a lock on the
 // security table until the run's time runs out, once aborted the whole judge
 // run, so every new finding stayed pending until a run got through. Now the
-// run withholds place for that URL and country, decides nothing for its
-// findings, and judges the rest: a failure specific to its provider on
-// another URL is still decided and excluded in the same run.
-func TestTlsPlaceReadThatCannotCompleteLeavesTheFindingPending(t *testing.T) {
+// run withholds place for that URL and country and judges the rest, and a
+// withheld pair never gates the exclusion (REVIEW-D1 F1): its failures, which
+// the server's direct check verified, exclude their providers, undecided,
+// beside a provider-specific failure on another URL decided in the same run.
+// The next run, which can read the pair, judges them again and releases them
+// as a place fault.
+func TestTlsPlaceReadThatCannotCompleteExcludesUntilItIsRead(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		blockedCity := egressTestCity(ctx, "Blocked City", "Blocked Region", "Blocked Country", "zz")
@@ -530,17 +533,19 @@ func TestTlsPlaceReadThatCannotCompleteLeavesTheFindingPending(t *testing.T) {
 			SetProviderEgressHealth(ctx, testingTlsUrlResult(clientId, time.Time{}, site, now.Add(time.Duration(i)*time.Second), true))
 		}
 		SetProviderEgressHealth(ctx, testingTlsUrlResult(intercepting, time.Time{}, other, now, true))
+		everyone := append(append([]server.Id{}, blocked...), intercepting)
 
 		settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
-		judgedAt := now.Add(time.Minute)
-		findings := GetProviderEgressTlsFindings(ctx, 100000)
-		pool := NewProviderEgressTlsPool(judgedAt, findings, map[string]bool{site.Name: true, other.Name: true, "working-site": true}, nil)
+		served := map[string]bool{site.Name: true, other.Name: true, "working-site": true}
 		direct := map[string]ProviderEgressTlsDirectOutcome{
 			"blocked.example":     ProviderEgressTlsDirectVerified,
 			"intercepted.example": ProviderEgressTlsDirectVerified,
 		}
 
-		// hold the table every outcome read probes
+		// the first run, with the table every outcome read probes held
+		judgedAt := now.Add(time.Minute)
+		findings := GetProviderEgressTlsFindings(ctx, 100000)
+		pool := NewProviderEgressTlsPool(judgedAt, findings, served, nil)
 		locked, release, released := make(chan struct{}), make(chan struct{}), make(chan struct{})
 		go func() {
 			defer close(released)
@@ -565,16 +570,30 @@ func TestTlsPlaceReadThatCannotCompleteLeavesTheFindingPending(t *testing.T) {
 		SetProviderEgressTlsVerdicts(ctx, judgements)
 
 		for _, clientId := range blocked {
-			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "pending" {
-				t.Fatalf("a finding whose place evidence could not be read was judged %q", verdict)
+			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "provider" {
+				t.Fatalf("a verified failure whose place evidence could not be read was judged %q, excluding no one", verdict)
 			}
 		}
 		if verdict := testingTlsVerdict(t, ctx, intercepting, other.Url); verdict != "provider" {
 			t.Fatalf("a provider-specific failure judged in the same run was judged %q", verdict)
 		}
-		excluded := testingTlsExcluded(t, ctx, append(append([]server.Id{}, blocked...), intercepting))
-		if len(excluded) != 1 || !excluded[intercepting] {
-			t.Fatalf("excluded %v, want only the provider-specific failure's provider", excluded)
+		if excluded := testingTlsExcluded(t, ctx, everyone); len(excluded) != len(everyone) {
+			t.Fatalf("excluded %v after the withheld run, want every provider whose failure the direct check verified", excluded)
+		}
+
+		// the next run reads the pair
+		judgedAt = now.Add(2 * time.Minute)
+		findings = GetProviderEgressTlsFindings(ctx, 100000)
+		pool = NewProviderEgressTlsPool(judgedAt, findings, served, pool.UnservedSince)
+		SetProviderEgressTlsVerdicts(ctx, JudgeProviderEgressTlsFindings(ctx, judgedAt, findings, pool, direct, settings))
+
+		for _, clientId := range blocked {
+			if verdict := testingTlsVerdict(t, ctx, clientId, site.Url); verdict != "place" {
+				t.Fatalf("a failure excluded while its pair was withheld was judged %q once the pair was read, want place", verdict)
+			}
+		}
+		if excluded := testingTlsExcluded(t, ctx, everyone); len(excluded) != 1 || !excluded[intercepting] {
+			t.Fatalf("excluded %v once the pair was read, want only the provider-specific failure's provider", excluded)
 		}
 	})
 }

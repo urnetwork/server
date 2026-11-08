@@ -483,9 +483,11 @@ func (self providerEgressTlsPlaceEvidence) broken(settings *ProviderEgressTlsJud
 }
 
 // Why a run withheld place from a finding whose evidence it could not read.
-// Such a finding is decided nothing for the run, as on an inconclusive direct
-// check: it stays as it was stored, a new one pending, and the next run reads
-// again. The run itself goes on.
+// Such a finding is decided nothing for the run. One whose failure the
+// server's direct check verified within the direct window is the provider's,
+// undecided, so it excludes until its pair is read; any other stays as it was
+// stored, a new one pending, as on an inconclusive direct check. The next run
+// reads again, and the run itself goes on.
 const (
 	// a read failed
 	ProviderEgressTlsPlaceWithheldError = "error"
@@ -568,9 +570,9 @@ func getProviderEgressTlsPlaceEvidence(
 // country pair's outcomes, cheapest country first, so one large country
 // cannot spend the budget of the small ones. A pair whose read fails, runs
 // past the budget or comes past the pair limit is withheld, and its findings
-// are decided nothing for the run (ProviderEgressTlsPlaceWithheld*): a failed
-// read once aborted the run, leaving every new finding pending until a run
-// got through.
+// are decided nothing for the run (ProviderEgressTlsPlaceWithheld*), though
+// one the direct check verified still excludes: a failed read once aborted
+// the run, leaving every new finding pending until a run got through.
 func readProviderEgressTlsPlaceEvidence(
 	ctx context.Context,
 	now time.Time,
@@ -832,7 +834,8 @@ type ProviderEgressTlsJudgement struct {
 	CountryLoads    int
 	CountryFailures int
 	// why the run could not read the rest of the place evidence, so decided
-	// nothing for the finding (ProviderEgressTlsPlaceWithheld*), "" otherwise
+	// nothing for the finding, at most an undecided provider verdict on a
+	// verified failure (ProviderEgressTlsPlaceWithheld*), "" otherwise
 	PlaceWithheld string
 }
 
@@ -888,12 +891,22 @@ func judgeProviderEgressTlsFinding(
 		return ProviderEgressTlsVerdictSite, true
 	}
 	if place.withheld != "" {
-		// The place evidence this failure needs could not be read this run.
-		// Decide nothing, as on an inconclusive check, and read it next run.
-		if finding.Verdict == ProviderEgressTlsVerdictRetired {
+		// The place evidence this failure needs could not be read this run,
+		// so only the national-block exception cannot be weighed. A failure
+		// the server's own check verified close to it stays the provider's
+		// until that evidence is read: it excludes, undecided, so the next
+		// run judges it again and place can still release it. A withheld
+		// pair never gates the exclusion, as a pair past the run's bound
+		// never did before the bound became a budget. Anything else is
+		// decided nothing, as on an inconclusive check.
+		switch {
+		case close && direct == ProviderEgressTlsDirectVerified:
+			return ProviderEgressTlsVerdictProvider, false
+		case finding.Verdict == ProviderEgressTlsVerdictRetired:
 			return ProviderEgressTlsVerdictPending, false
+		default:
+			return finding.Verdict, false
 		}
-		return finding.Verdict, false
 	}
 	if age <= settings.PlaceWindow && finding.CountryCode != "" && place.broken(settings) {
 		return ProviderEgressTlsVerdictPlace, true

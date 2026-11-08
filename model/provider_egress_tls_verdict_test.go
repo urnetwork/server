@@ -103,10 +103,15 @@ func TestTlsJudgeDecidesEachFindingOnEvidenceCloseToIt(t *testing.T) {
 		{"the server's own check fails", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectFailed, working, ProviderEgressTlsVerdictSite, true},
 		{"inconclusive stays pending", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectInconclusive, working, ProviderEgressTlsVerdictPending, false},
 		{"inconclusive never lifts a quarantine", finding(time.Minute, ProviderEgressTlsVerdictProvider, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectInconclusive, working, ProviderEgressTlsVerdictProvider, false},
-		{"withheld place evidence leaves a new failure pending", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictPending, false},
-		{"withheld place evidence keeps a decided verdict", finding(time.Minute, ProviderEgressTlsVerdictProvider, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictProvider, false},
+		{"withheld place evidence still excludes a failure the direct check verified, undecided", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictProvider, false},
+		{"withheld place evidence leaves an uncorroborated new failure pending", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectInconclusive, withheld, ProviderEgressTlsVerdictPending, false},
+		{"withheld place evidence leaves a failure past the direct window as stored", finding(2*time.Hour, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictPending, false},
+		{"withheld place evidence keeps a decided verdict", finding(time.Minute, ProviderEgressTlsVerdictProvider, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectInconclusive, withheld, ProviderEgressTlsVerdictProvider, false},
+		{"withheld place evidence keeps a place verdict the server cannot recheck", finding(time.Minute, ProviderEgressTlsVerdictPlace, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectInconclusive, withheld, ProviderEgressTlsVerdictPlace, false},
+		{"withheld place evidence excludes a newer verified failure of a place finding, undecided", finding(time.Minute, ProviderEgressTlsVerdictPlace, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictProvider, false},
 		{"withheld place evidence still lets a site fault through", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectFailed, withheld, ProviderEgressTlsVerdictSite, true},
-		{"withheld place evidence leaves a returned finding pending", finding(time.Minute, ProviderEgressTlsVerdictRetired, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictPending, false},
+		{"withheld place evidence leaves an uncorroborated returned finding pending", finding(time.Minute, ProviderEgressTlsVerdictRetired, nil), served, 1, ProviderEgressTlsDirectInconclusive, withheld, ProviderEgressTlsVerdictPending, false},
+		{"withheld place evidence excludes a returned finding the direct check verified, undecided", finding(time.Minute, ProviderEgressTlsVerdictRetired, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictProvider, false},
 		{"the URL's certificate fails across the place's networks", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, blocked, ProviderEgressTlsVerdictPlace, true},
 		{"one other network short of the place rule", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified,
 			providerEgressTlsPlaceEvidence{networks: 2, failed: 27, verified: 0, countryLoads: 1000, countryFailures: 80}, ProviderEgressTlsVerdictProvider, true},
@@ -580,5 +585,57 @@ func TestTlsPlaceReadsAreLimitedAndTurnWithinACountry(t *testing.T) {
 	}
 	if slices.Equal(first, next) {
 		t.Fatal("the read order within one country did not turn with the next judge interval")
+	}
+}
+
+// Seeded from the follow-ups review's proof (REVIEW-D1 F1): with 64 cheap
+// pairs needing place evidence and one in a costly country, the pair limit
+// withholds the costly pair, and a withheld failure that the server's direct
+// check verified was left pending, excluding no one, run after run for as
+// long as the cheaper pairs kept it past the cut. A withheld pair must never
+// gate the exclusion: such a failure is the provider's, undecided, so it
+// excludes and is judged again, and place releases it on a run that reads
+// its pair.
+func TestTlsWithheldPlaceEvidenceNeverLeavesAVerifiedFailurePending(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	cheap, costly := server.NewId(), server.NewId()
+	base := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	withheldTurns := 0
+	for turn := range 24 {
+		now := base.Add(time.Duration(turn) * 5 * time.Minute)
+		findings := []*ProviderEgressTlsFinding{}
+		for i := range providerEgressTlsPlaceKeyLimit {
+			findings = append(findings, testingTlsPlaceFindings(now, fmt.Sprintf("cheap-%03d", i), "zz", cheap, 4)...)
+		}
+		findings = append(findings, testingTlsPlaceFindings(now, "target", "us", costly, 4)...)
+		candidates := make([]bool, len(findings))
+		for i := range candidates {
+			candidates[i] = true
+		}
+		fake := &testingTlsPlaceReads{countryLoads: map[string]int{"zz": 1000, "us": 9000000}}
+		evidence := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads())
+		withheld := false
+		for i, finding := range findings {
+			if finding.UrlKey != "target" {
+				continue
+			}
+			verdict, decided := judgeProviderEgressTlsFinding(now, finding, providerEgressTlsServed, 1, ProviderEgressTlsDirectVerified, evidence[i], settings)
+			switch {
+			case evidence[i].withheld != "":
+				withheld = true
+				if verdict != ProviderEgressTlsVerdictProvider || decided {
+					t.Fatalf("turn %d: a failure the direct check verified, on a pair withheld (%s), was judged %s decided=%t, want provider undecided",
+						turn, evidence[i].withheld, verdict, decided)
+				}
+			case verdict != ProviderEgressTlsVerdictPlace || !decided:
+				t.Fatalf("turn %d: a failure on a pair read as a place fault was judged %s decided=%t, want place", turn, verdict, decided)
+			}
+		}
+		if withheld {
+			withheldTurns += 1
+		}
+	}
+	if withheldTurns == 0 {
+		t.Fatal("the costly country's pair was never withheld, so nothing was tested")
 	}
 }

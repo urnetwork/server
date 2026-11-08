@@ -109,7 +109,7 @@ var providerEgressTlsPlaceWithheldPairs = prometheus.NewGaugeVec(prometheus.Gaug
 	Namespace: "urnetwork",
 	Subsystem: "egress_tls",
 	Name:      "place_withheld_pairs",
-	Help:      "URL and country pairs whose place evidence this process's newest judged run could not read, so their findings were decided nothing for the run and stay as stored, by reason: error (a read failed), budget (the run's minute of place reads ran out), limit (past the run's 64 pairs)",
+	Help:      "URL and country pairs whose place evidence this process's newest judged run could not read, by reason: error (a read failed), budget (the run's minute of place reads ran out), limit (past the run's 64 pairs). Their findings were decided nothing for the run: one the server's direct check verified excludes, undecided, until its pair is read, and any other stays as stored",
 }, []string{"reason"})
 
 func init() {
