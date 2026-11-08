@@ -24094,6 +24094,63 @@ a host that refuses the server is the usual cause. Do not exclude a provider
 by hand on an undecided finding. Verify with a judged run under 20 minutes
 old, and no undecided finding, on two cadences.
 
+### 2.32 Zero-carry verdict spikes
+Probe: `zero-carry-verdicts`
+
+The Taskworker's zero-carry judge (`JudgeProviderZeroCarry`, a RunOnce task
+every two minutes on one Taskworker at a time, `model/provider_zero_carry.go`)
+takes a provider out of every bucket, FindProviders2 answer and
+provider-locations count when its contracts from at least three client
+networks carried nothing in a day, the sessions its clients reported idle left
+out, and every URL probe in eight hours failed. A verdict clears on a URL
+success the verdict did not see, a new app version on the device, or its
+expiry after 72 hours. In a country the URL-success rule exempts, honest
+providers fail the probe too, so nothing but the device's version or the
+expiry clears a verdict there. A burst of verdicts is therefore worth a look:
+either a release whose providers stopped carrying for current clients, or a
+platform fault that stopped acknowledgements and URL probes together.
+
+Every run counts what it made and cleared in
+`urnetwork_provider_zero_carry_changes_total{change}` (`created`, `expired`,
+`url_success`, `upgrade`, `gone`) and sets
+`urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds`.
+
+Implementation (5-minute cadence; `signal_zero_carry_verdicts.go` and
+`signal_zero_carry_verdicts_test.go`). One loopback Mimir read evaluated two
+minutes behind now:
+`sum(increase(urnetwork_provider_zero_carry_changes_total{job="taskworker",change="created"}[1h]))`
+and `max(urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{job="taskworker"})`.
+
+Classes (all WARN, target `<env>/zero-carry-verdicts`; only counts and ages
+are rendered, never a provider, a network or a country):
+
+- `zero-carry-verdict-spike` (sustain 2, never pages): at least 100 verdicts
+  made in the trailing hour, twice the whole standing population the judge's
+  first pass over Main made (52 on 2026-11-08). Resolved healthy below it;
+- `zero-carry-verdicts-unobservable` (visibility, sustain 2, never pages): a
+  failed or annotated Mimir read, no last-run series (a fleet built before
+  §2.32, as before the roll, mid-roll and after a rollback), no changes series
+  beside it, or an invalid sample (a run time ahead of the clock).
+
+The egress probes dashboard's zero-carry judge row (panels 159 to 161) charts
+the verdicts in force by country, the changes by why, the reads, and how the
+confirming reads ended. False-negative qualifiers: a process that ran the
+judge and is not scraped is not counted, so a missing Taskworker slot can hide
+part of a burst; a slow burst under 100 an hour never raises it, and the
+providers by country chart shows it.
+
+ACTION: read the Taskworker's `[zero-carry]` lines for the countries and the
+client versions of the new verdicts. A release of the provider app or of
+connect in the last day points to a build that stopped carrying: roll it back,
+and the verdicts clear as its devices report the old version. A platform fault
+clears outside exempt countries once URL probes succeed again. There is no
+runtime switch: inside exempt countries a wrong verdict holds until its expiry,
+and deleting `provider_zero_carry` rows alone does not help, because the judge
+re-creates them from the same day's contracts. To lift a wrong burst sooner,
+stop the judge first (roll the Taskworker back to a build without it), then
+delete the rows; ask the owner before either. Verify with fewer than 100
+verdicts made in the trailing hour on two cadences.
+
 ---
 
 ## 3. redis signal catalog

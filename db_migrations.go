@@ -11384,4 +11384,12 @@ var migrations = []any{
 	// outcome it was counted as. Apply before deploying the api, alt,
 	// taskworker and proxy that use it.
 	providerEgressUrlSourceMigration,
+
+	// The zero-carry verdicts (db_provider_zero_carry.go,
+	// model/provider_zero_carry.go): one new empty table, under a five-second
+	// lock bound, created only when absent. Nothing existing is locked or
+	// rewritten. Apply before deploying the api, alt, proxy and taskworker
+	// that read it. The judge's URL condition reads the columns the migration
+	// before it adds (url_probation, url_source).
+	providerZeroCarryMigration,
 }

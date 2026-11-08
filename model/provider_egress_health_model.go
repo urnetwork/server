@@ -672,19 +672,57 @@ func (self ProviderEgressHealthCounts) onlineCounts() ProviderEgressHealthCounts
 // Each outcome carries its catalog source, so a reader can tell the general
 // catalog's outcomes from the rest (ProviderEgressHealthCounts.General).
 func providerEgressHealthWindowSql() string {
-	return fmt.Sprintf(`
+	return `
 	SELECT client_id, measured_at, ok_count, total_count, class_results, url_source
 	FROM provider_egress_health_history
-	WHERE measured_at > $1 AND measured_at <= $2 AND total_count = 1
-	AND url_probe_policy_version = %d AND NOT url_probation
-`, SelectedProviderUrlProbePolicyVersion())
+	WHERE measured_at > $1 AND measured_at <= $2 AND ` + providerEgressHealthWindowRowsSql("") + `
+`
+}
+
+// Which history rows the window holds, over the rows aliased alias ("" for
+// the bare table): the window's one row predicate apart from its time bounds.
+// Every condition on what enters the window belongs here, the selected policy
+// and probation among them, so the readers that share it (the Online rule's
+// evidence, providerOnlineUrlEvidenceSql) cannot drift from it. A catalog
+// source condition does not: Quality, Speed and the index score graduated
+// country outcomes too.
+func providerEgressHealthWindowRowsSql(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return fmt.Sprintf(`%[1]stotal_count = 1
+	AND %[1]surl_probe_policy_version = %[2]d
+	AND NOT %[1]surl_probation`, prefix, SelectedProviderUrlProbePolicyVersion())
+}
+
+// The general catalog's outcomes, over the rows aliased alias: the half the
+// Online rule, its URL ratio and its country guard decide by (D4,
+// ProviderEgressHealthCounts.General). The window's aggregate filters its
+// general half by it, and the Online rule's evidence adds it to the window's
+// rows, so the two cannot drift.
+func providerOnlineUrlSourceSql(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return fmt.Sprintf("%surl_source = %d", prefix, ProviderEgressUrlSourceGeneral)
+}
+
+// The history rows the URL-success rule decides by, its URL ratio and its
+// country guard: the window's rows from the general catalog. The zero-carry
+// judge reads its URL condition through this (provider_zero_carry.go), so
+// whatever narrows the rule's evidence narrows the judge's too;
+// TestProviderZeroCarryUrlConditionIsTheOnlineRules pins it.
+func providerOnlineUrlEvidenceSql(alias string) string {
+	return providerEgressHealthWindowRowsSql(alias) + " AND " + providerOnlineUrlSourceSql(alias)
 }
 
 // The window's aggregate per provider: the newest and oldest outcome, the
 // successes and outcomes, and the same over the general catalog's outcomes
 // alone, which getProviderEgressHealthCountsSnapshot reads.
 func providerEgressHealthCountsSql() string {
-	general := fmt.Sprintf("url_source = %d", ProviderEgressUrlSourceGeneral)
+	general := providerOnlineUrlSourceSql("")
 	return `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count),
 			MAX(measured_at) FILTER (WHERE ` + general + `), MIN(measured_at) FILTER (WHERE ` + general + `),
 			COALESCE(SUM(ok_count) FILTER (WHERE ` + general + `), 0), COALESCE(SUM(total_count) FILTER (WHERE ` + general + `), 0)
