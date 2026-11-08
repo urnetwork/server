@@ -35,11 +35,14 @@
 //     fails the URL's TLS verification for every network in the provider's
 //     country and says nothing about the provider. Over the site window
 //     (SiteWindowSeconds, three days), and never counting the provider's own
-//     network, whose providers one farm can fill: at least PlaceMinNetworks
-//     (three, the server's distinct-network quorum) other networks in the
-//     country hold a TLS finding on the exact URL; at least
-//     SiteRegionFailShare (0.9) of the other networks' connected providers
-//     there whose TLS on the URL was verified or failed saw it fail; and the
+//     network, whose providers one farm can fill, nor any network younger
+//     than PlaceMinNetworkAge (14 days), which a farm can make on demand: at
+//     least PlaceMinNetworks (three, the server's distinct-network quorum)
+//     other networks in the country hold a TLS finding on the exact URL; at
+//     least SiteRegionFailShare (0.9) of the other networks whose connected
+//     providers there verified or failed TLS on the URL saw it fail, each
+//     network counting once, by what most of its providers saw, so one large
+//     network cannot carry the share; and the
 //     country's exits work, failing less than SiteRetireShare (0.5) of their
 //     scored loads on every other site, over at least SiteRegionMinSamples
 //     (30) such loads, so a country whose exits fail most sites is not read
@@ -203,9 +206,12 @@ type ProviderEgressTlsJudgeSettings struct {
 	// The fewest other networks in the country holding a TLS finding on the
 	// URL: the server's distinct-network quorum (ProviderClientVerdictQuorum).
 	PlaceMinNetworks int
-	// The share of the other networks' TLS verification outcomes on the URL
-	// at the place that must have failed: the refresh's share for marking a
-	// site broken at a place.
+	// The youngest a network may be for its findings and outcomes to count
+	// as place evidence (providerEgressTlsPlaceMinNetworkAge).
+	PlaceMinNetworkAge time.Duration
+	// The share of the other networks with a TLS verification outcome on the
+	// URL at the place, each counting once, that must have failed: the
+	// refresh's share for marking a site broken at a place.
 	PlaceFailShare float64
 	// The fewest scored loads of the place's other sites its working share
 	// stands on: the refresh's fewest loads at a place a mark stands on.
@@ -221,6 +227,12 @@ type ProviderEgressTlsJudgeSettings struct {
 	// convention (providerEgressTlsPlaceReadBudget).
 	PlaceReadBudget time.Duration
 }
+
+// The youngest a network may be for its findings and outcomes to count as
+// place evidence: two weeks, an owner decision. A farm can create networks
+// whenever it likes, but not ones that have existed for two weeks, so it
+// cannot make the other networks a place needs for a block it stages.
+const providerEgressTlsPlaceMinNetworkAge = 14 * 24 * time.Hour
 
 // The longest one run spends reading place evidence. A URL and country pair
 // costs one primary-key probe per connected provider in the country: 1.4 s for
@@ -238,6 +250,7 @@ func ProviderEgressTlsJudgeSettingsFor(site *ProviderEgressSiteSettings, commonM
 		CommonModeNetworkCount: commonModeNetworkCount,
 		PlaceWindow:            site.SiteWindow(),
 		PlaceMinNetworks:       ProviderClientVerdictQuorum,
+		PlaceMinNetworkAge:     providerEgressTlsPlaceMinNetworkAge,
 		PlaceFailShare:         site.SiteRegionFailShare,
 		PlaceMinSamples:        site.SiteRegionMinSamples,
 		PlaceWorkingShare:      site.SiteRetireShare,
@@ -257,8 +270,10 @@ type ProviderEgressTlsFinding struct {
 	Verdict    ProviderEgressTlsVerdict
 	// the failure the stored verdict was decided on, nil when none was
 	VerdictMeasuredAt *time.Time
-	// the provider's network, nil when its client row is gone
-	NetworkId *server.Id
+	// the provider's network, nil when its client row is gone, and when the
+	// network was created
+	NetworkId        *server.Id
+	NetworkCreatedAt *time.Time
 	// the provider's published country, "" when unknown, and its location
 	CountryCode       string
 	CountryLocationId *server.Id
@@ -309,9 +324,10 @@ func GetProviderEgressTlsFindings(ctx context.Context, limit int) []*ProviderEgr
 			SELECT security.client_id, security.url_key,
 				COALESCE(security.destination->>'name', ''), COALESCE(security.destination->>'url', ''),
 				security.measured_at, security.tls_verdict, security.tls_verdict_measured_at,
-				client.network_id, COALESCE(country.country_code, ''), country.location_id
+				client.network_id, network.create_time, COALESCE(country.country_code, ''), country.location_id
 			FROM provider_egress_url_security AS security
 			LEFT JOIN network_client AS client ON client.client_id = security.client_id
+			LEFT JOIN network ON network.network_id = client.network_id
 			LEFT JOIN network_client_location_reliability AS provider_location ON provider_location.client_id = security.client_id
 			LEFT JOIN location AS country ON country.location_id = provider_location.country_location_id
 			WHERE security.tls_failure
@@ -323,11 +339,13 @@ func GetProviderEgressTlsFindings(ctx context.Context, limit int) []*ProviderEgr
 				var verdict int16
 				var verdictMeasuredAt *time.Time
 				var networkId, countryLocationId *server.Id
+				var networkCreatedAt *time.Time
 				server.Raise(rows.Scan(&finding.ClientId, &finding.UrlKey, &finding.Name, &finding.Url,
-					&finding.MeasuredAt, &verdict, &verdictMeasuredAt, &networkId, &finding.CountryCode, &countryLocationId))
+					&finding.MeasuredAt, &verdict, &verdictMeasuredAt, &networkId, &networkCreatedAt, &finding.CountryCode, &countryLocationId))
 				finding.Verdict = ProviderEgressTlsVerdict(verdict)
 				finding.VerdictMeasuredAt = verdictMeasuredAt
 				finding.NetworkId = networkId
+				finding.NetworkCreatedAt = networkCreatedAt
 				finding.CountryLocationId = countryLocationId
 				finding.CountryCode = strings.ToLower(strings.TrimSpace(finding.CountryCode))
 				findings = append(findings, finding)
@@ -463,11 +481,13 @@ func ProviderEgressTlsDirectHosts(
 // One finding's place evidence over the place window. None of it counts the
 // finding's own network.
 type providerEgressTlsPlaceEvidence struct {
-	// other networks in the country holding a TLS finding on the URL
+	// other established networks in the country holding a TLS finding on
+	// the URL
 	networks int
-	// the other networks' connected, validly located providers in the
-	// country whose latest TLS on the URL failed verification, and whose was
-	// verified
+	// the other established networks whose connected, validly located
+	// providers in the country mostly failed TLS verification on the URL in
+	// their latest outcomes, and the rest of those with an outcome there;
+	// each network counts once
 	failed   int
 	verified int
 	// the country's scored loads, and failures, on every site but this one
@@ -561,7 +581,7 @@ const providerEgressTlsPlaceKeyLimit = 64
 // do: the database's, or a test's.
 type providerEgressTlsPlaceReads struct {
 	tallies  func(ctx context.Context, now time.Time, settings *ProviderEgressTlsJudgeSettings, countryCodes []string) map[string]providerEgressTlsCountryTally
-	outcomes func(ctx context.Context, since time.Time, key providerEgressTlsPlaceKey) map[server.Id]providerEgressTlsPlaceOutcome
+	outcomes func(ctx context.Context, since time.Time, establishedBy time.Time, key providerEgressTlsPlaceKey) map[server.Id]providerEgressTlsPlaceOutcome
 }
 
 var providerEgressTlsDatabasePlaceReads = providerEgressTlsPlaceReads{
@@ -619,9 +639,12 @@ func readProviderEgressTlsPlaceEvidence(
 	keyOf := func(finding *ProviderEgressTlsFinding) providerEgressTlsPlaceKey {
 		return providerEgressTlsPlaceKey{urlKey: finding.UrlKey, countryLocationId: *finding.CountryLocationId}
 	}
+	// only networks that have existed for PlaceMinNetworkAge count, and a
+	// finding whose network is unknown has no age to count
+	establishedBy := now.Add(-settings.PlaceMinNetworkAge)
 	networks := map[providerEgressTlsPlaceKey]map[string]bool{}
 	for _, finding := range findings {
-		if !inWindow(finding) {
+		if !inWindow(finding) || finding.NetworkId == nil || finding.NetworkCreatedAt == nil || finding.NetworkCreatedAt.After(establishedBy) {
 			continue
 		}
 		key := keyOf(finding)
@@ -701,7 +724,7 @@ func readProviderEgressTlsPlaceEvidence(
 			nextReadAt[key.String()] = now
 			var read map[server.Id]providerEgressTlsPlaceOutcome
 			if reason := providerEgressTlsReadWithin(ctx, deadline, func(readCtx context.Context) {
-				read = reads.outcomes(readCtx, since, key)
+				read = reads.outcomes(readCtx, since, establishedBy, key)
 			}); reason != "" {
 				withheld[key] = reason
 			} else {
@@ -716,12 +739,17 @@ func readProviderEgressTlsPlaceEvidence(
 			evidence[i].withheld = reason
 			continue
 		}
+		// each other network counts once, by what most of its providers saw,
+		// so one network's many providers cannot carry the share
 		for networkId, outcome := range outcomes[key] {
 			if finding.NetworkId != nil && networkId == *finding.NetworkId {
 				continue
 			}
-			evidence[i].failed += outcome.failed
-			evidence[i].verified += outcome.verified
+			if outcome.verified < outcome.failed {
+				evidence[i].failed += 1
+			} else {
+				evidence[i].verified += 1
+			}
 		}
 		evidence[i].countryLoads, evidence[i].countryFailures = tallies[finding.CountryCode].without(finding.Name)
 	}
@@ -820,13 +848,15 @@ func providerEgressTlsReadWithin(ctx context.Context, deadline time.Time, read f
 }
 
 // The TLS verification outcomes on one URL since since, by network, of the
-// connected providers with a valid location in its country: each provider's
-// latest outcome on the URL, failed or verified. A reset, a timeout or a
-// block page records no outcome. The country's providers come from the
-// location index, and each one's outcome is one primary-key lookup.
+// connected providers with a valid location in its country, on networks
+// created no later than establishedBy: each provider's latest outcome on the
+// URL, failed or verified. A reset, a timeout or a block page records no
+// outcome. The country's providers come from the location index, and each
+// one's outcome is one primary-key lookup.
 func getProviderEgressTlsPlaceOutcomes(
 	ctx context.Context,
 	since time.Time,
+	establishedBy time.Time,
 	key providerEgressTlsPlaceKey,
 ) map[server.Id]providerEgressTlsPlaceOutcome {
 	outcomes := map[server.Id]providerEgressTlsPlaceOutcome{}
@@ -842,10 +872,12 @@ func getProviderEgressTlsPlaceOutcomes(
 				AND $3 <= security.measured_at
 			) AS outcome
 			JOIN network_client AS client ON client.client_id = provider_location.client_id
+			JOIN network ON network.network_id = client.network_id
 			WHERE provider_location.connected AND provider_location.valid
 			AND provider_location.country_location_id = $2
+			AND network.create_time <= $4
 			GROUP BY client.network_id`,
-			key.urlKey, key.countryLocationId, since.UTC())
+			key.urlKey, key.countryLocationId, since.UTC(), establishedBy.UTC())
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var networkId server.Id
