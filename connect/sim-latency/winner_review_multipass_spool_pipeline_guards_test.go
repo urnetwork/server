@@ -313,11 +313,11 @@ func (self *winnerMultipassSpoolActor) hooks() winnerMultipassQualificationSpool
 			}
 			return pending.Receipt, nil
 		},
-		Retain: func(ctx context.Context, capture winnerMultipassQualificationCapture) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
+		Retain: func(ctx context.Context, capture winnerMultipassQualificationCapture) (currentQgQualificationPin, error) {
 			key := winnerMultipassSha256(capture.Input)
 			pending, found := self.Pending[key]
 			if !found {
-				return nil, errors.New("synthetic physical capture missing before custody")
+				return currentQgQualificationPin{}, errors.New("synthetic physical capture missing before custody")
 			}
 			captureBytes, _ := json.Marshal(capture)
 			releaseBytes, _ := json.Marshal(self.Plan.Release)
@@ -337,23 +337,30 @@ func (self *winnerMultipassSpoolActor) hooks() winnerMultipassQualificationSpool
 			}
 			content, _ := json.Marshal(commit)
 			if len(content) > winnerMultipassSpoolManifestBytes {
-				return nil, errors.New("synthetic compact manifest oversized")
+				return currentQgQualificationPin{}, errors.New("synthetic compact manifest oversized")
 			}
 			path := filepath.Join(self.Directory, fmt.Sprintf("commit-%04d.json", capture.Invocation.Position))
 			if err := writePrivateReviewFile(path, content); err != nil {
-				return nil, err
+				return currentQgQualificationPin{}, err
 			}
 			pin := currentQgQualificationPin{Path: path, Sha256: winnerMultipassSha256(content)}
 			value, err := self.resolve(ctx, pin, content)
 			if err != nil {
-				return nil, err
+				return currentQgQualificationPin{}, err
 			}
 			if _, err := replayWinnerMultipassPortableContainment(value.Originals, value.IndependentGenerationClaim, value.PhysicalAuthentication, self.Profile); err != nil {
-				return nil, err
+				return currentQgQualificationPin{}, err
 			}
 			self.Commits[capture.Invocation.Position] = pin
 			delete(self.Pending, key)
-			return value, nil
+			return pin, nil
+		},
+		Resolve: func(ctx context.Context, pin currentQgQualificationPin) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
+			content, err := readCurrentQgQualificationPin(pin, winnerMultipassSpoolManifestBytes, true)
+			if err != nil {
+				return nil, err
+			}
+			return self.resolve(ctx, pin, content)
 		},
 		RetainCase: func(position int, evidence winnerMultipassEvidence) (currentQgQualificationPin, error) {
 			content, _ := json.Marshal(evidence)
@@ -431,7 +438,7 @@ func TestWinnerMultipassSpoolFailedAuthenticationRetainsTerminalAuditPin(t *test
 		return nil, errors.New("synthetic physical authentication failed")
 	}
 	var failureCapture winnerMultipassProtectedReference
-	hooks.Retain = func(_ context.Context, capture winnerMultipassQualificationCapture) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
+	hooks.Retain = func(_ context.Context, capture winnerMultipassQualificationCapture) (currentQgQualificationPin, error) {
 		if capture.Containment != nil || capture.AuthenticationError == "" {
 			t.Fatal("failed physical authentication acquired a success proof")
 		}
@@ -439,9 +446,9 @@ func TestWinnerMultipassSpoolFailedAuthenticationRetainsTerminalAuditPin(t *test
 		failureCapture = actor.retain(content)
 		pin, err := writeWinnerMultipassQualificationCanonical(filepath.Join(actor.Directory, "failed-capture-audit.json"), map[string]any{"kind": "synthetic-failed-capture-audit/v1", "capture": failureCapture})
 		if err != nil {
-			return nil, err
+			return currentQgQualificationPin{}, err
 		}
-		return nil, &winnerMultipassQualificationSpoolRetentionError{Failure: pin, Cause: errors.New(capture.AuthenticationError)}
+		return currentQgQualificationPin{}, &winnerMultipassQualificationSpoolRetentionError{Failure: pin, Cause: errors.New(capture.AuthenticationError)}
 	}
 	settings := defaultWinnerMultipassCapacitySettings()
 	settings.MaximumDurableBytes = 128 * 1024 * 1024 * 1024
