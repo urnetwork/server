@@ -106,13 +106,32 @@ type SubscriptionMetricsSnapshot struct {
 // `network_client_network_id_top_level` makes each active-subscriber
 // engagement EXISTS probe index-backed; starting from the much smaller active
 // paid cohort avoids scanning the fleet-wide 30-day auth band.
+//
+// An App Store sandbox purchase (TestFlight, App Review) is credited so the
+// tester keeps Pro, with no revenue (controller
+// appleCreditSubscriptionTransactionInTx): it is not a subscription and is
+// left out. An App Store grace period's hold records no revenue either, but
+// beside the paid transaction it holds, whose id it carries, so it stays.
 const subscriptionMetricsAccountQuery = `
 /* subscription-metrics-accounts */
 WITH tracked_renewal AS MATERIALIZED (
-    SELECT network_id, market, start_time, end_time
-    FROM subscription_renewal
-    WHERE subscription_type = 'supporter'
-      AND market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
+    SELECT renewal.network_id, renewal.market, renewal.start_time, renewal.end_time
+    FROM subscription_renewal renewal
+    WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
+      AND NOT (
+          renewal.market = 'apple'
+          AND renewal.net_revenue_nano_cents = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM subscription_renewal paid
+              WHERE paid.network_id = renewal.network_id
+                AND paid.subscription_type = 'supporter'
+                AND paid.market = 'apple'
+                AND paid.transaction_id = renewal.transaction_id
+                AND 0 < paid.net_revenue_nano_cents
+          )
+      )
 ), metric_window(window_name, since_time) AS (
     VALUES ('24h', $2::timestamp), ('7d', $3::timestamp), ('30d', $4::timestamp)
 ), active_by_store AS (
