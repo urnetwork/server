@@ -422,17 +422,19 @@ type CompetitionIntegrityReviewRequest struct {
 	ReviewerModel               string                     `json:"reviewer_model,omitempty"`
 	ReviewerReasoning           string                     `json:"reviewer_reasoning,omitempty"`
 	ProductionBenefitAddendum   *CompetitionReviewAddendum `json:"production_benefit_addendum,omitempty"`
+	HandoffId                   string                     `json:"handoff_id,omitempty"`
 }
 
 // Review records remain separate even when approval does not change the reward recipient.
 type CompetitionIntegrityReviewResult struct {
-	ReviewId       server.Id                         `json:"review_id"`
-	RoundId        server.Id                         `json:"round_id"`
-	ActorId        string                            `json:"actor_id"`
-	CreatedAt      time.Time                         `json:"created_at"`
-	Request        CompetitionIntegrityReviewRequest `json:"request"`
-	RequestSha256  string                            `json:"request_sha256"`
-	RewardDecision CompetitionRewardDecision         `json:"reward_decision"`
+	ReviewId         server.Id                         `json:"review_id"`
+	RoundId          server.Id                         `json:"round_id"`
+	ActorId          string                            `json:"actor_id"`
+	CreatedAt        time.Time                         `json:"created_at"`
+	Request          CompetitionIntegrityReviewRequest `json:"request"`
+	RequestSha256    string                            `json:"request_sha256"`
+	RewardDecision   CompetitionRewardDecision         `json:"reward_decision"`
+	ModelCompletedAt *time.Time                        `json:"model_completed_at,omitempty"`
 }
 
 // Requires complete structured criteria and distinguishes source-only concerns from fraud.
@@ -453,6 +455,11 @@ func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequ
 // The private member context changes only the criterion census, never review
 // authority or the treatment of uncertainty, approval and substantiated failure.
 func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy, snowMember bool) error {
+	if request.HandoffId != "" {
+		if _, err := server.ParseId(request.HandoffId); err != nil || policy.WinnerReviewPolicy != CompetitionSnowWinnerReviewPolicy || request.RewardDisposition == "restored" {
+			return errors.New("review handoff requires the exact two-member policy and native pending proposal")
+		}
+	}
 	if err := ValidateCompetitionProductionBenefitReview(request, false); err != nil {
 		return err
 	}
@@ -740,6 +747,7 @@ type CompetitionSupervisorTransition struct {
 // The elected identity and its original deadline survive restarts and retries.
 // Re-election creates a different checkpoint; pending review never extends one.
 type CompetitionWinnerReviewCheckpoint struct {
+	HandoffId            string    `json:"handoff_id,omitempty"`
 	RoundId              server.Id `json:"round_id"`
 	JobId                server.Id `json:"job_id"`
 	RewardRevision       int       `json:"reward_revision"`
