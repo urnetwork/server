@@ -20,9 +20,9 @@
     "generation_originals_exact_version_readback_verified": true,
     "final_verdict": false
   },
-  "completed_calls_at_observation": 5,
-  "current_call_at_observation": "qwen-scan-0006",
-  "retained_scoped_findings_at_observation": {"uncertain":3,"fail":0,"distinct_calls_with_findings":2,"supplemental_context":"EPOCH1-DIRECT-PAIR-SCOPED-CONTEXT-2026-11-08.md","final_verdict":false},
+  "completed_calls_at_observation": 6,
+  "current_call_at_observation": "qwen-scan-0007",
+  "retained_scoped_findings_at_observation": {"uncertain":5,"fail":0,"distinct_calls_with_findings":3,"supplemental_context":"EPOCH1-DIRECT-PAIR-SCOPED-CONTEXT-2026-11-08.md","final_verdict":false},
   "unit": "urnetwork-epoch1-direct-pair-20261108-v3.service",
   "session_id": 73006,
   "main_pid_observed": 3441353,

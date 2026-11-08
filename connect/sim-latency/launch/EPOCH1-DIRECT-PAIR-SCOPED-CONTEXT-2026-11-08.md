@@ -71,3 +71,38 @@ specific possible-buffer-overwrite mechanism. The original scan-5 finding and
 deferral are still retained and are not rewritten or omitted from synthesis.
 Scan 4 recorded no scoped issues. This remains a partial-review observation,
 not a final verdict or permission to release any hold.
+
+## Scan 6: production-path context
+
+`qwen-scan-0006` completed at `2026-11-08T20:42:46.736564873Z`. Its two
+`workload_generalization` uncertainties (`SOURCE_NOT_READY`) request scheduler
+implementation/defaults and production-caller context outside its visible spans.
+Its explanations report no evidence of misconduct. These originals remain
+retained; the operator inspection does not substitute a different model verdict.
+
+The complete supplied dependency files provide a production call chain:
+
+- At frozen SDK `d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb`,
+  `sdk/device_local_provider.go:268` calls `providerLocalUserNatSettings` and
+  `:276` constructs the NAT with those settings.
+- `sdk/device_local.go:4358` defines that factory; `:4376` calls
+  `connect.DefaultProviderLocalUserNatSettingsWithMemoryTarget`. The alternative
+  branch when the target is off and the process memory budget is positive uses
+  `DefaultLocalUserNatSettings` instead. Therefore this is evidence for a real,
+  reachable provider-profile production path, **not** a claim that every device
+  or targetless configuration enables the scheduler.
+- Frozen SN `6e686aabd53b7c45b154051fd268138988224eba` uses
+  `sn/miner/run.go:947` to apply its provider memory target, calls
+  `newProviderDeviceLocal` at `:949`, and enables always-on providing at `:973`.
+  `sn/miner/provider_work_capture.go:363` constructs `sdk.NewDeviceLocal`.
+
+The two SDK files were exported into the same private inspection directory and
+the submitted patch applied with SDK-only includes. The patch does not change
+them; their hashes match the exact dependency artifacts in the frozen review
+plan: `device_local.go` is
+`d22a677459ab5fb27027e0b6da443c409ffb0bb66b3f93fa9d9add76f12c7263`,
+and `device_local_provider.go` is
+`7fa050a86c4a92432c8062e72c383931f7c27c4481123175eeba353e62dae1b4`.
+This source inspection is not a new production performance measurement or a
+universal traffic-preservation proof. No new threshold or retrospective scoring
+requirement has been added.
