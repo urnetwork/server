@@ -169,8 +169,10 @@ const ProviderZeroCarryOlderSearchLimit = 2000
 
 // The candidates one confirming statement reads. Each may examine its read
 // limit and the search's bound, 3,000 contracts, so five keep a statement at
-// the bound to 15,000, a quarter of what the evidence read's twenty would,
-// and leave room within the statement timeout for a cold cache.
+// the bound to 15,000, a quarter of what the evidence read's twenty would.
+// On Main on 2026-11-08 (16:27Z) the confirming read ran at about 0.23 ms a
+// contract, idle checks included: about 3.4 s for five at the bound, and
+// about 14 s, past the statement timeout, for twenty.
 const ProviderZeroCarryConfirmationBatchSize = 5
 
 // The fewest counted contracts that can show a provider carries nothing.
