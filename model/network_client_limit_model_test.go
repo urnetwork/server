@@ -166,6 +166,52 @@ func TestCountNetworkActiveTopLevelClientsCountsDevices(t *testing.T) {
 	})
 }
 
+// Removing a connected device frees its slot at once, so the device the user
+// adds next connects: the apps' device list removes one and retries this
+// device's hold right away. Before, the removed client's registration held the
+// slot until it expired, up to five minutes, and the retry was refused into a
+// new hold of 15 minutes or more. A hosted proxy's slot frees the same way.
+func TestRemoveNetworkClientReleasesItsConnectedSlotAtOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer Testing_SetEnforceConcurrentClients(true)()
+		defer Testing_SetConcurrentClientsLimit(2, 3)()
+		defer Testing_ClearNetworkClientLimitCache()
+		defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+
+		network := newDataCapTestNetworkWithoutEmbed(ctx, "release-slot")
+		clientIds := []server.Id{}
+		for range 3 {
+			result := provisionTopLevel(t, network)
+			connect.AssertEqual(t, result.Error, (*AuthNetworkClientError)(nil))
+			clientIds = append(clientIds, *result.ClientId)
+		}
+		registerTestPeer(t, ctx, network.networkId, clientIds[0])
+		registerTestPeer(t, ctx, network.networkId, clientIds[1])
+		connect.AssertEqual(t, CanConnectNetworkPeer(ctx, clientIds[2], false), false)
+
+		// the user removes a connected device: the third connects at once
+		removed, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: clientIds[0]}, network.rootSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removed.Error, (*RemoveNetworkClientError)(nil))
+		connect.AssertEqual(t, NetworkConcurrentClientsExceeded(ctx, network.networkId), false)
+		connect.AssertEqual(t, CanConnectNetworkPeer(ctx, clientIds[2], false), true)
+
+		// a connected hosted proxy fills the slot again, and its removal frees it
+		proxy := testAuthProxyClient(t, network.rootSession)
+		if proxy.Error != nil {
+			t.Fatalf("proxy create = %+v", proxy.Error)
+		}
+		AddNetworkProxyPeer(ctx, network.networkId, *proxy.ClientId, time.Minute)
+		connect.AssertEqual(t, CanConnectNetworkPeer(ctx, clientIds[2], false), false)
+		removed, err = RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: *proxy.ClientId}, network.rootSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removed.Error, (*RemoveNetworkClientError)(nil))
+		connect.AssertEqual(t, CanConnectNetworkPeer(ctx, clientIds[2], false), true)
+	})
+}
+
 // The concurrent limit's creation refusal offers an upgrade only to a network
 // an upgrade lets connect: a free network at the free limit. A Pro network at
 // the Pro limit, and a network at its Embed plan row's allowance, are refused

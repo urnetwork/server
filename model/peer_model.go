@@ -1192,6 +1192,38 @@ func RemoveNetworkPeer(
 	})
 }
 
+// releaseRemovedClientSlot drops a removed client from the network's connected
+// registries at once, so the slot it held of the concurrent client limit is free
+// for the next connection: the device a user adds by removing this one (the
+// apps' device list), or the one a sign-out makes room for. The removal closes
+// the client's transports (CLIENTCLOSE.md), but its resident ends only at its
+// idle ttl, and its registration expired up to ExchangeResidentTtl after its
+// last refresh. Until then the slot stayed taken, and the added device's dial
+// was refused again into a new hold of 15 minutes or more.
+//
+// A removed client is inactive and can no longer connect, so no registration of
+// it is a live one to keep: its peer registration goes whatever resident made
+// it, under the client's mutation fence and with the disconnect marker the peer
+// list reads, and its hosted proxy, isolated and provider registrations go from
+// their zsets. A client peer is not added back, since a refresh re-adds only an
+// active client. A hosted proxy or provider heartbeat that raced the removal can
+// add its registration back until the transport close stops its resident's
+// heartbeats; it then expires on its own, as every registration did before.
+func releaseRemovedClientSlot(ctx context.Context, networkId server.Id, clientId server.Id) {
+	operationId := server.NewId()
+	retryNetworkPeerMutation(ctx, func() bool {
+		state := getNetworkPeerMutationState(ctx, networkId, clientId)
+		meta, err := loadNetworkPeerMeta(state.metaBytes)
+		server.Raise(err)
+		if meta == nil {
+			return true
+		}
+		return removeNetworkPeerAtMutationState(ctx, networkId, clientId, state, operationId)
+	})
+	RemoveNetworkProxyPeer(ctx, networkId, clientId)
+	RemoveNetworkProviderPeer(ctx, networkId, clientId)
+}
+
 // AddNetworkProxyPeer registers a connected hosted proxy client. Proxy clients
 // count toward the network's connected total but never appear in the peer list
 // and emit no events; they live in a separate zset (see

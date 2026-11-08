@@ -1342,6 +1342,25 @@ func RemoveNetworkClient(
 		removeClientResult = &RemoveNetworkClientResult{}
 	}, server.TxReadCommitted)
 
+	if removeClientResult != nil && removeClientResult.Error == nil {
+		if clientSession.ByJwt.ClientId == nil {
+			// another device removed with the network credential: a user
+			// freeing a slot (the apps' device list), the web manager or the
+			// api. Logged so support can tell who removed a device.
+			glog.Infof(
+				"[nc]network %s removed client %s with its network credential (%s)\n",
+				clientSession.ByJwt.NetworkId,
+				removeClient.ClientId,
+				clientSession.ClientInfo.DeviceType,
+			)
+		}
+		// the removal committed whatever this does: a failure leaves the slot
+		// to free when the registration expires, as before
+		server.HandleError(func() {
+			releaseRemovedClientSlot(clientSession.Ctx, clientSession.ByJwt.NetworkId, removeClient.ClientId)
+		})
+	}
+
 	return removeClientResult, removeClientErr
 }
 
