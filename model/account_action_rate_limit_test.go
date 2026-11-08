@@ -239,19 +239,20 @@ func TestClaimAndChangeNetworkNameHaveIndependentCounters(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		userId := server.NewId()
+		renameSettings := DefaultNetworkRenameSettings()
 
 		// exhaust the claim budget
-		for i := 0; i < AccountActionClaimNetworkNameDailyLimit; i++ {
-			err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionClaimNetworkName, AccountActionClaimNetworkNameDailyLimit, AccountActionDailyWindow)
+		for i := 0; i < renameSettings.ClaimLimit; i++ {
+			err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionClaimNetworkName, renameSettings.ClaimLimit, renameSettings.LimitWindow)
 			assert.Equal(t, err, nil)
 		}
-		err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionClaimNetworkName, AccountActionClaimNetworkNameDailyLimit, AccountActionDailyWindow)
+		err := CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionClaimNetworkName, renameSettings.ClaimLimit, renameSettings.LimitWindow)
 		assert.NotEqual(t, err, nil)
 
 		// a subsequent rename (a real, separate action) must still be
 		// allowed -- claiming a name during onboarding must not consume the
 		// same-day rename budget
-		err = CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionChangeNetworkName, AccountActionChangeNetworkNameDailyLimit, AccountActionDailyWindow)
+		err = CheckAndRecordAccountActionRateLimit(ctx, userId, AccountActionChangeNetworkName, renameSettings.ChangeLimit, renameSettings.LimitWindow)
 		assert.Equal(t, err, nil)
 	})
 }

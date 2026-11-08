@@ -808,7 +808,7 @@ func networkCreateWalletAuth(
 
 		// NetworkCreate checked the name before this transaction (see
 		// networkNameHeldInTx)
-		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
+		if networkNameTakenForCreateInTx(ctx, tx, validatedNetworkName) {
 			refusalStatus = http.StatusConflict
 			refusalMessage = networkNameNotAvailableMessage
 			return
@@ -950,7 +950,7 @@ func networkCreateAuthJwt(
 
 		// NetworkCreate checked the name before this transaction (see
 		// networkNameHeldInTx)
-		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
+		if networkNameTakenForCreateInTx(ctx, tx, validatedNetworkName) {
 			refusalStatus = http.StatusConflict
 			refusalMessage = networkNameNotAvailableMessage
 			return
@@ -1091,7 +1091,7 @@ func networkCreateUserAuth(
 
 		// the name as it is stored. NetworkCreate checked it before this
 		// transaction (see networkNameHeldInTx).
-		if networkNameHeldInTx(ctx, tx, validatedNetworkName) {
+		if networkNameTakenForCreateInTx(ctx, tx, validatedNetworkName) {
 			refusalStatus = http.StatusConflict
 			refusalMessage = networkNameNotAvailableMessage
 			return
@@ -1403,7 +1403,7 @@ func checkNetworkNameAvailability(
 
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
 		err = nil
-		if networkNameHeldInTx(clientSession.Ctx, tx, validatedNetworkName) {
+		if networkNameTakenForCreateInTx(clientSession.Ctx, tx, validatedNetworkName) {
 			err = errors.New(networkNameNotAvailableMessage)
 		}
 	})
@@ -1417,15 +1417,9 @@ func checkNetworkNameAvailability(
 // luck.
 var networkUpdateBeforeWrite func()
 
-// Renames the session's network to the validated (normalized) form of the
-// name, as network create stores it. A name that fails validation, or that
-// the fuzzy name search or the exact name check finds taken, is refused before
-// anything is written. The exact check is repeated in the write's own
-// transaction, and a write that meets another network holding the name on the
-// unique index (committed after that transaction's snapshot) is refused the
-// same way, instead of failing the call. The rename's transaction also
-// replaces the network's entry in the network name search, and this process's
-// in-memory index follows once it has committed.
+// Renames the session's network through RenameNetwork, which applies §7.12's
+// rules to every rename path. A name the network already has is refused here as
+// not available, as this route always answered it.
 func NetworkUpdate(
 	networkUpdate NetworkUpdateArgs,
 	clientSession *session.ClientSession,
@@ -1438,46 +1432,19 @@ func NetworkUpdate(
 		}, nil
 	}
 
-	validatedNetworkName, err := ValidateNetworkName(networkUpdate.NetworkName)
-	if err != nil {
-		return refusal(err.Error())
-	}
-	if err := checkNetworkNameAvailability(validatedNetworkName, clientSession); err != nil {
-		return refusal(err.Error())
-	}
-
-	held := false
-	var posts []server.PostFunction
-	taken := NetworkNameTx(clientSession.Ctx, func(tx server.PgTx) {
-		// a rerun starts over
-		posts = nil
-		held = networkNameHeldInTx(clientSession.Ctx, tx, validatedNetworkName)
-		if held {
-			return
-		}
-		if networkUpdateBeforeWrite != nil {
-			networkUpdateBeforeWrite()
-		}
-		tag := RaiseNetworkNameWrite(tx.Exec(
-			clientSession.Ctx,
-			`
-				UPDATE network
-				SET network_name = $2
-				WHERE network_id = $1
-			`,
-			clientSession.ByJwt.NetworkId,
-			validatedNetworkName,
-		))
-		if tag.RowsAffected() == 1 {
-			posts = append(posts, IndexNetworkNameInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, validatedNetworkName))
-		}
+	result := RenameNetwork(clientSession, &RenameNetworkArgs{
+		NewName:     networkUpdate.NetworkName,
+		BeforeWrite: networkUpdateBeforeWrite,
 	})
-	if held || taken {
+	if result.Unchanged {
 		return refusal(networkNameNotAvailableMessage)
 	}
-	// the rename committed
-	server.RunPosts(clientSession.Ctx, posts...)
-
+	if result.Error != nil {
+		if result.Error.Code == RenameNetworkRefusalNotAvailable {
+			return refusal(networkNameNotAvailableMessage)
+		}
+		return refusal(result.Error.Message)
+	}
 	return &NetworkUpdateResult{}, nil
 }
 

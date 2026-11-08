@@ -14,14 +14,16 @@ import (
 
 // Every statement in the server's source that creates or deletes an API key is
 // in CreateApiKey or DeleteApiKey, which owe the API key notice in their
-// transaction, or in apikey.Testing_CreateApiKey, a test fixture. A new way to
-// create or delete a key must owe the notice too, and be counted here once it
-// does.
+// transaction, in RemoveExpiredApiKeys, whose expiry is no change anyone made
+// and owes none (§7.8's expiry), or in apikey.Testing_CreateApiKey, a test
+// fixture. A new way to create or delete a key must owe the notice too, and be
+// counted here once it does.
 func TestEveryApiKeyWriteOwesTheSecurityNotice(t *testing.T) {
 	write := regexp.MustCompile(`(?i)\b(insert\s+into|delete\s+from|truncate(\s+table)?)\s+account_api_key\b`)
 	want := map[string]int{
-		// CreateApiKey's insert and DeleteApiKey's delete
-		"model/account_api_key_model.go": 2,
+		// CreateApiKey's insert, with MG0's columns and without them,
+		// DeleteApiKey's delete, and RemoveExpiredApiKeys' delete
+		"model/account_api_key_model.go": 4,
 		// Testing_CreateApiKey
 		"apikey/apikey.go": 1,
 	}

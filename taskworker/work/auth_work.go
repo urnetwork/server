@@ -55,14 +55,20 @@ func RemoveExpiredAuthCodes(
 	resetCount := model.RemoveExpiredUserAuthResets(ctx, now.Add(-model.UserAuthResetRetention))
 	deviceAddCount := model.RemoveExpiredDeviceAddHistory(ctx, now.Add(-model.DeviceAddHistoryRetention))
 	nameReclaimCount := model.RemoveExpiredNetworkNameReclaims(ctx, now.Add(-model.NetworkNameReclaimRetention))
-	if 0 < attemptCount+createAttemptCount+resetCount+deviceAddCount+nameReclaimCount {
+	// §7.8's credentials end at their expiry (§2.8 api-11); each is a no-op in a
+	// binary that does not link its group
+	authKeyCount := model.RemoveExpiredNetworkAuthKeys(ctx, now)
+	apiKeyCount := model.RemoveExpiredApiKeys(ctx, now)
+	if 0 < attemptCount+createAttemptCount+resetCount+deviceAddCount+nameReclaimCount+authKeyCount+apiKeyCount {
 		glog.Infof(
-			"[authw]removed %d account action attempts, %d network create attempts, %d reset codes, %d device adds, %d name cool-downs\n",
+			"[authw]removed %d account action attempts, %d network create attempts, %d reset codes, %d device adds, %d name cool-downs, %d auth keys, %d api keys\n",
 			attemptCount,
 			createAttemptCount,
 			resetCount,
 			deviceAddCount,
 			nameReclaimCount,
+			authKeyCount,
+			apiKeyCount,
 		)
 	}
 	return &RemoveExpiredAuthCodesResult{}, nil
