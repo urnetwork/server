@@ -407,7 +407,6 @@ const (
 	SalesPaymentKindRenewal    = "renewal"
 	SalesPaymentKindPlanChange = "plan change"
 	SalesPaymentKindOneTime    = "one-time"
-	SalesPaymentKindFreeTrial  = "new, free trial"
 	// the first paid period after a free trial: the trial's conversion, the
 	// subscription's first payment
 	SalesPaymentKindAfterTrial = "new, after a free trial"

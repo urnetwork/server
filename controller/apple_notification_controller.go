@@ -113,6 +113,9 @@ type validatedAppleTransaction struct {
 	// originalTransactionId names the subscription across renewals; an
 	// offer-code binding (apple_offer_code_binding) is keyed on it
 	originalTransactionId string
+	// originalPurchaseTime is when the subscription's first transaction was
+	// bought, zero when the claims do not say; read for the sales notice
+	originalPurchaseTime time.Time
 	// transactionReason is PURCHASE (the customer bought) or RENEWAL (the
 	// store renewed), "" when the claims do not say; read for the sales notice
 	transactionReason string
@@ -706,6 +709,9 @@ func validateAppleTransactionAccount(
 	// in UTC, as the timestamp columns these reach hold it
 	validated.purchaseTime = time.UnixMilli(purchaseMillis).UTC()
 	validated.expiresTime = time.UnixMilli(expiresMillis).UTC()
+	if originalMillis, ok := appleControllerInt64Claim(transactionClaims, "originalPurchaseDate"); ok && 0 < originalMillis {
+		validated.originalPurchaseTime = time.UnixMilli(originalMillis).UTC()
+	}
 	if !validated.expiresTime.After(validated.purchaseTime) ||
 		validated.expiresTime.Sub(validated.purchaseTime) > appleMaximumSubscriptionDuration ||
 		validated.purchaseTime.After(time.UnixMilli(notification.SignedDate).Add(appleTransactionPurchaseLead(validated))) {

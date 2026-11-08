@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -334,7 +335,7 @@ func TestAppleSalesNotice(t *testing.T) {
 	transaction.transactionReason = "PURCHASE"
 	transaction.priceMilliunits = 0
 	transaction.offerDiscountType = "FREE_TRIAL"
-	connect.AssertEqual(t, salesNoticeLines(appleSalesNotice(transaction), "acme"), salesNoticeText("Pro monthly (new, free trial)", "acme", "0.00 USD", "Apple App Store"))
+	connect.AssertEqual(t, salesNoticeLines(appleSalesNotice(transaction), "acme"), strings.Replace(salesNoticeText("Pro monthly (new)", "acme", "no charge (free trial until 2026-11-01)", "Apple App Store"), "*Sale:*", "*Trial:*", 1))
 
 	// a price without a currency says so
 	transaction = appleSalesTransaction(networkId, "1009")

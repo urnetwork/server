@@ -452,8 +452,15 @@ func coinbaseSalesNotice(
 
 // ----- apple -----
 
+// A day shorter than the shortest paid period, a 28-day February month. A
+// renewal less than this after the subscription's first purchase follows a
+// free trial: no paid period is that short.
+const appleShortestPaidPeriod = 27 * 24 * time.Hour
+
 // appleSalesKind is new or renewal: the transaction's reason (PURCHASE or
-// RENEWAL), else whether it is the subscription's first transaction.
+// RENEWAL), else whether it is the subscription's first transaction. A
+// charged renewal that comes less than a paid period after the subscription's
+// first purchase is the first charge after a free trial.
 func appleSalesKind(transaction *validatedAppleTransaction) string {
 	kind := ""
 	switch transaction.transactionReason {
@@ -470,16 +477,37 @@ func appleSalesKind(transaction *validatedAppleTransaction) string {
 			}
 		}
 	}
-	if kind == model.SalesPaymentKindNew && transaction.priceMilliunits == 0 && transaction.offerDiscountType == "FREE_TRIAL" {
-		kind = model.SalesPaymentKindFreeTrial
+	if kind == model.SalesPaymentKindRenewal && 0 < transaction.priceMilliunits && appleRenewalFollowsTrial(transaction) {
+		kind = model.SalesPaymentKindAfterTrial
 	}
 	return kind
 }
 
-// appleSalesNotice is the notice of a credited App Store transaction. The
-// transaction reports its price in milliunits of its currency.
+// appleRenewalFollowsTrial is whether the renewal came less than a paid
+// period after the subscription's first purchase: its first period was a
+// free trial. A charge that recovers more than that late, after billing
+// retry, reads as a plain renewal.
+func appleRenewalFollowsTrial(transaction *validatedAppleTransaction) bool {
+	if transaction.originalPurchaseTime.IsZero() {
+		return false
+	}
+	sinceFirst := transaction.purchaseTime.Sub(transaction.originalPurchaseTime)
+	return 0 < sinceFirst && sinceFirst < appleShortestPaidPeriod
+}
+
+// appleTransactionIsFreeTrial is whether the transaction starts a free trial:
+// the subscription's first purchase, free, under a free-trial offer.
+func appleTransactionIsFreeTrial(transaction *validatedAppleTransaction) bool {
+	return appleSalesKind(transaction) == model.SalesPaymentKindNew &&
+		transaction.priceMilliunits == 0 &&
+		transaction.offerDiscountType == "FREE_TRIAL"
+}
+
+// appleSalesNotice is the notice of a credited App Store transaction: a sale
+// at the price the transaction reports, in milliunits of its currency, or a
+// free trial's start.
 func appleSalesNotice(transaction *validatedAppleTransaction) *model.SalesPaymentNotice {
-	return &model.SalesPaymentNotice{
+	notice := &model.SalesPaymentNotice{
 		RecordKey: "apple_transaction/" + transaction.transactionId,
 		NetworkId: &transaction.networkId,
 		Item:      model.SalesProItem(applePlanForProductId(transaction.productId)),
@@ -487,6 +515,11 @@ func appleSalesNotice(transaction *validatedAppleTransaction) *model.SalesPaymen
 		Amount:    model.SalesAmount64(transaction.priceMilliunits, 3, transaction.currency),
 		Method:    "Apple App Store",
 	}
+	if appleTransactionIsFreeTrial(transaction) {
+		notice.Trial = true
+		notice.Amount = model.SalesFreeTrialAmount(transaction.expiresTime)
+	}
+	return notice
 }
 
 // ----- google play -----
