@@ -81,3 +81,40 @@ func TestWinnerMultipassCapacityJournalCensusMatchesOperations(t *testing.T) {
 		t.Fatal("unplanned operation gained custody authority")
 	}
 }
+
+// Releasing planned operation allowances from a real fallocate reservation does
+// not double-count the reservation or consume the protected-document residual.
+func TestWinnerMultipassInvocationAllowancesSumToAggregateReservation(t *testing.T) {
+	bundle, plan, _ := winnerMultipassFixture(t)
+	settings := defaultWinnerMultipassCapacitySettings()
+	capacity, err := estimateWinnerMultipassCapacity(plan, bundle, len(plan.Calls), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := int64(0)
+	for _, call := range plan.Calls {
+		requestBytes := plan.Settings.MaximumRequestBytes
+		if call.Stage == "scan" {
+			payload, err := buildWinnerMultipassCall(plan, bundle, call.Id, map[string]winnerMultipassCallEvidence{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requestBytes = len(payload)
+		}
+		for _, operation := range []string{"tokenize", "generate"} {
+			allowance, err := winnerMultipassInvocationCapacity(plan, call, operation, requestBytes, settings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			total += allowance
+		}
+	}
+	if total != capacity.InvocationAllowanceBytes || total+capacity.DocumentAndTemporaryBytes != capacity.RequiredDurableBytes || capacity.DocumentAndTemporaryBytes <= 0 {
+		t.Fatal("operation/residual capacity formula diverged")
+	}
+	call := plan.Calls[0]
+	call.Id = "synthetic-unplanned"
+	if _, err := winnerMultipassInvocationCapacity(plan, call, "generate", 1, settings); err == nil {
+		t.Fatal("unplanned operation consumed reservation authority")
+	}
+}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 )
@@ -27,19 +28,21 @@ func defaultWinnerMultipassCapacitySettings() winnerMultipassCapacitySettings {
 // Pin this complete receipt alongside the owner before its first generation
 // claim. It is deliberately separate from actual filesystem reservation proof.
 type winnerMultipassCapacity struct {
-	Version                 string                          `json:"version"`
-	PlanSha256              string                          `json:"plan_sha256"`
-	BundleSha256            string                          `json:"bundle_sha256"`
-	Settings                winnerMultipassCapacitySettings `json:"settings"`
-	GenerationCalls         int                             `json:"generation_calls"`
-	TokenizerInvocations    int                             `json:"tokenizer_invocations"`
-	WrapperOriginalBytes    int64                           `json:"wrapper_original_bytes"`
-	ProtectedCopyBytes      int64                           `json:"protected_copy_bytes"`
-	TemporaryBytes          int64                           `json:"temporary_bytes"`
-	CoreEvidenceBytes       int64                           `json:"core_evidence_bytes"`
-	SerializedEvidenceBytes int64                           `json:"serialized_evidence_bytes"`
-	RequiredDurableBytes    int64                           `json:"required_durable_bytes"`
-	RequiredMemoryBytes     int64                           `json:"required_memory_bytes"`
+	Version                   string                          `json:"version"`
+	PlanSha256                string                          `json:"plan_sha256"`
+	BundleSha256              string                          `json:"bundle_sha256"`
+	Settings                  winnerMultipassCapacitySettings `json:"settings"`
+	GenerationCalls           int                             `json:"generation_calls"`
+	TokenizerInvocations      int                             `json:"tokenizer_invocations"`
+	WrapperOriginalBytes      int64                           `json:"wrapper_original_bytes"`
+	ProtectedCopyBytes        int64                           `json:"protected_copy_bytes"`
+	TemporaryBytes            int64                           `json:"temporary_bytes"`
+	CoreEvidenceBytes         int64                           `json:"core_evidence_bytes"`
+	SerializedEvidenceBytes   int64                           `json:"serialized_evidence_bytes"`
+	RequiredDurableBytes      int64                           `json:"required_durable_bytes"`
+	InvocationAllowanceBytes  int64                           `json:"invocation_allowance_bytes"`
+	DocumentAndTemporaryBytes int64                           `json:"document_and_temporary_bytes"`
+	RequiredMemoryBytes       int64                           `json:"required_memory_bytes"`
 }
 
 // Every named artifact has a prospective bound; the new wrapper must authenticate
@@ -88,6 +91,55 @@ func winnerMultipassEnvelopeCapacity(plan *winnerMultipassPlan, call winnerMulti
 	return bound, nil
 }
 
+// One shared formula serves both aggregate reservation and per-operation release
+// of an owned allocation. It never deletes an original transcript or authorizes
+// an extra call. Original state and its captured copy are separate retained bytes.
+func winnerMultipassInvocationStorage(envelope int64, operation string, settings winnerMultipassSettings) (original, capture int64, err error) {
+	limits := defaultWinnerMultipassProviderLimits()
+	metadata := int64(32*limits.MaximumMetadataBytes + 32*4096)
+	stdout := int64(limits.MaximumResultBytes)
+	state := envelope + stdout
+	switch operation {
+	case "generate":
+		state += int64(settings.MaximumResponseBytes)
+	case "tokenize":
+		state += int64(settings.MaximumRequestBytes + limits.MaximumTokenizerBytes)
+	default:
+		return 0, 0, errors.New("unknown operation has no reserved capacity")
+	}
+	capture = envelope + stdout + metadata + state
+	return capture + state, capture, nil
+}
+
+// The host may consume at most this allowance before the exact planned operation
+// writes. Synthesis uses its actual payload here, never more than its predeclared
+// MaximumRequestBytes allowance. The caller must separately enforce invocation
+// census and retain the document/temporary residual until protected completion.
+func winnerMultipassInvocationCapacity(plan *winnerMultipassPlan, call winnerMultipassCall, operation string, exactPayloadBytes int, settings winnerMultipassCapacitySettings) (int64, error) {
+	if plan == nil || validateWinnerMultipassSettings(plan.Settings) != nil || exactPayloadBytes <= 0 || exactPayloadBytes > plan.Settings.MaximumRequestBytes || settings.ProtectedCopies <= 0 || settings.ProtectedCopies > 4 {
+		return 0, errors.New("invalid planned invocation capacity")
+	}
+	found := false
+	for _, entry := range plan.Calls {
+		if reflect.DeepEqual(entry, call) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return 0, errors.New("unplanned call cannot consume a reserved allocation")
+	}
+	envelope, err := winnerMultipassEnvelopeCapacity(plan, call, exactPayloadBytes)
+	if err != nil {
+		return 0, err
+	}
+	original, capture, err := winnerMultipassInvocationStorage(envelope, operation, plan.Settings)
+	if err != nil {
+		return 0, err
+	}
+	return original + int64(settings.ProtectedCopies)*capture, nil
+}
+
 // This calculator performs no I/O. TokenizerInvocations is the explicit future
 // census: include final-leaf preflight, synthesis admission and any planned
 // re-admission, but never silently spend additional probes under this receipt.
@@ -113,13 +165,8 @@ func estimateWinnerMultipassCapacity(plan *winnerMultipassPlan, bundle winnerMul
 	result := &winnerMultipassCapacity{Version: winnerMultipassVersion, PlanSha256: winnerMultipassSha256(planBytes), BundleSha256: plan.BundleSha256,
 		Settings: settings, GenerationCalls: len(plan.Calls), TokenizerInvocations: tokenizerInvocations}
 	limits := defaultWinnerMultipassProviderLimits()
-	// The wrapper has fewer than 32 non-payload leaves, each at most 256 KiB.
-	// File allocation/manifest overhead and fixed native overhead are additional.
-	metadata := int64(32*limits.MaximumMetadataBytes + 32*4096)
-	stdout := int64(limits.MaximumResultBytes)
 	raw := int64(plan.Settings.MaximumResponseBytes)
 	tokenReply := int64(limits.MaximumTokenizerBytes)
-	tokenRequest := int64(plan.Settings.MaximumRequestBytes)
 	visible := int64(limits.MaximumVisibleTerminalBytes)
 	observation := int64(plan.Settings.MaximumObservationBytes)
 	captureBytes, maxEnvelope := int64(0), int64(0)
@@ -137,12 +184,15 @@ func estimateWinnerMultipassCapacity(plan *winnerMultipassPlan, bundle winnerMul
 			return nil, err
 		}
 		maxEnvelope = max(maxEnvelope, envelope)
-		// Original member-state plus the wrapper's authenticated copied leaves.
-		generationState := envelope + stdout + raw
-		generationCapture := envelope + stdout + metadata + generationState
-		tokenState := envelope + stdout + tokenRequest + tokenReply
-		tokenCapture := envelope + stdout + metadata + tokenState
-		result.WrapperOriginalBytes += generationCapture + generationState + tokenCapture + tokenState
+		generationOriginal, generationCapture, err := winnerMultipassInvocationStorage(envelope, "generate", plan.Settings)
+		if err != nil {
+			return nil, err
+		}
+		tokenOriginal, tokenCapture, err := winnerMultipassInvocationStorage(envelope, "tokenize", plan.Settings)
+		if err != nil {
+			return nil, err
+		}
+		result.WrapperOriginalBytes += generationOriginal + tokenOriginal
 		captureBytes += generationCapture + tokenCapture
 		// ProviderOutput and decoded Observation are independent in-memory copies;
 		// JSON text may expand each byte sixfold, unlike []byte base64 fields.
@@ -150,9 +200,11 @@ func estimateWinnerMultipassCapacity(plan *winnerMultipassPlan, bundle winnerMul
 		result.SerializedEvidenceBytes += winnerMultipassEncodedBytes(int64(requestBytes)) + winnerMultipassEncodedBytes(visible) + 7*observation + 16384
 	}
 	extra := int64(tokenizerInvocations - len(plan.Calls))
-	tokenState := maxEnvelope + stdout + tokenRequest + tokenReply
-	tokenCapture := maxEnvelope + stdout + metadata + tokenState
-	result.WrapperOriginalBytes += extra * (tokenCapture + tokenState)
+	tokenOriginal, tokenCapture, err := winnerMultipassInvocationStorage(maxEnvelope, "tokenize", plan.Settings)
+	if err != nil {
+		return nil, err
+	}
+	result.WrapperOriginalBytes += extra * tokenOriginal
 	captureBytes += extra * tokenCapture
 	// Source/plan originals, native evidence and small immutable custody manifests
 	// are retained in addition to the captured wrapper leaves, never instead.
@@ -161,6 +213,8 @@ func estimateWinnerMultipassCapacity(plan *winnerMultipassPlan, bundle winnerMul
 	result.TemporaryBytes = int64(settings.TemporaryCopies) * (nativeDocuments + max(raw, max(tokenReply, int64(limits.MaximumEnvelopeBytes))))
 	fixedReserve := int64(64 * 1024 * 1024)
 	result.RequiredDurableBytes = result.WrapperOriginalBytes + result.ProtectedCopyBytes + result.TemporaryBytes + nativeDocuments + fixedReserve
+	result.InvocationAllowanceBytes = result.WrapperOriginalBytes + int64(settings.ProtectedCopies)*captureBytes
+	result.DocumentAndTemporaryBytes = result.RequiredDurableBytes - result.InvocationAllowanceBytes
 	// Reserve simultaneous evidence encoding/readback plus source-artifact copies,
 	// tokenizer IDs/JSON buffers, and 256 MiB for native runtime/DB overhead.
 	result.RequiredMemoryBytes = result.CoreEvidenceBytes + 3*result.SerializedEvidenceBytes + 4*int64(len(bundleBytes)+len(planBytes)) + int64(plan.Settings.MaximumBundleBytes) + 128*1024*1024 + 256*1024*1024
