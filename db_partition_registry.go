@@ -335,6 +335,15 @@ type PartitionFamily struct {
 	// Each new leaf's storage settings, for example
 	// "autovacuum_vacuum_scale_factor=0". Empty leaves the defaults.
 	LeafReloptions []string
+	// The default create adds to a leaf, just before its attach, every
+	// column the parent has and the leaf lacks, with the parent's type,
+	// default and NOT NULL (partitionReconcileLeafColumnsSql). The default
+	// create copies the parent's columns (LIKE) and attaches in one
+	// transaction, which holds the parent's lock from the copy on, so a
+	// migration adding a column cannot come between them; a leaf made by any
+	// other path before such a migration still attaches. Generated and
+	// identity columns are not added: such a leaf's attach fails as before.
+	ReconcileLeafColumns bool
 	// A closed leaf is analyzed once, this long after its range ends, when
 	// late writes and updates have landed. Zero leaves leaves to autovacuum.
 	LeafAnalyzeDelay time.Duration
@@ -834,6 +843,9 @@ func (self *PartitionFamily) CreateLeafSql(ctx context.Context, conn PgQuerier, 
 		}
 		bounds = fmt.Sprintf("FOR VALUES FROM (%s) TO (%s)", lower, upper)
 	}
+	if self.ReconcileLeafColumns {
+		statements = append(statements, partitionReconcileLeafColumnsSql(table, leaf))
+	}
 	statements = append(statements, fmt.Sprintf(
 		"ALTER TABLE public.%s ATTACH PARTITION public.%s %s",
 		quoteIdentifier(table),
@@ -841,6 +853,37 @@ func (self *PartitionFamily) CreateLeafSql(ctx context.Context, conn PgQuerier, 
 		bounds,
 	))
 	return
+}
+
+// Adds to leaf every column of table it lacks, in the parent's order, with
+// the parent's type, default and NOT NULL, so the leaf attaches whatever
+// columns were added to the parent after the leaf was made. Generated and
+// identity columns are left out. Nothing happens for a leaf that has them all.
+// Both names are the registry's own, never input.
+func partitionReconcileLeafColumnsSql(table string, leaf string) string {
+	return fmt.Sprintf(`DO $reconcile$
+	DECLARE
+		missing record;
+	BEGIN
+		FOR missing IN
+			SELECT parent.attname AS name, format_type(parent.atttypid, parent.atttypmod) AS type_name, parent.attnotnull AS not_null,
+				pg_get_expr(parent_default.adbin, parent_default.adrelid) AS default_expression
+			FROM pg_attribute AS parent
+			LEFT JOIN pg_attrdef AS parent_default ON parent_default.adrelid = parent.attrelid AND parent_default.adnum = parent.attnum
+			WHERE parent.attrelid = '%[1]s'::regclass AND 0 < parent.attnum AND NOT parent.attisdropped
+			AND parent.attgenerated = '' AND parent.attidentity = ''
+			AND NOT EXISTS (
+				SELECT 1 FROM pg_attribute AS existing
+				WHERE existing.attrelid = '%[2]s'::regclass AND existing.attname = parent.attname AND NOT existing.attisdropped
+			)
+			ORDER BY parent.attnum
+		LOOP
+			EXECUTE format('ALTER TABLE %[2]s ADD COLUMN %%I %%s%%s%%s', missing.name, missing.type_name,
+				CASE WHEN missing.default_expression IS NULL THEN '' ELSE ' DEFAULT ' || missing.default_expression END,
+				CASE WHEN missing.not_null THEN ' NOT NULL' ELSE '' END);
+		END LOOP;
+	END
+	$reconcile$`, "public."+quoteIdentifier(table), "public."+quoteIdentifier(leaf))
 }
 
 // Runs callback in one maintenance transaction at read committed, without

@@ -107,6 +107,12 @@ type RefreshEgressDestinationsResult struct {
 	// Held counts the promotable candidates held back because the general
 	// entry they would serve collides with a country site.
 	Held int `json:"held,omitempty"`
+	// The listed country sites judged on their paired evidence, and those
+	// graduated into scoring or demoted to probation
+	// (egress_country_site_refresh.go).
+	CountryJudged    int `json:"country_judged,omitempty"`
+	CountryGraduated int `json:"country_graduated,omitempty"`
+	CountryDemoted   int `json:"country_demoted,omitempty"`
 }
 
 // Arms the daily refresh one interval out: a freshly seeded pool is the
@@ -949,6 +955,9 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 		result.Skipped = plan.skipped
 		model.RemoveExpiredProviderEgressTallies(ctx, retentionStart)
 		recordEgressSitePoolMetrics(destinations, nil, now, settings)
+		// a prober fault fails country sites as it fails the rest: none is
+		// graduated or demoted on it
+		refreshEgressCountrySites(ctx, now, sites, true)
 		return result, nil
 	}
 
@@ -1117,6 +1126,9 @@ func refreshEgressDestinations(ctx context.Context, now time.Time, check egressC
 	result.Graduated = len(plan.graduated)
 	result.Marked = len(plan.marked)
 	result.Unmarked = len(plan.unmarked)
+
+	country := refreshEgressCountrySites(ctx, now, sites, false)
+	result.CountryJudged, result.CountryGraduated, result.CountryDemoted = country.judged, country.graduated, country.demoted
 	return result, nil
 }
 

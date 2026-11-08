@@ -827,6 +827,8 @@ func (self providerCountFilter) egressFacts(
 	observedCountryCode := self.countryCodes[clientId]
 	// Read accepted health directly so an old rollup cannot extend freshness.
 	counts, urlIndex := self.urlIndex(clientId, settings)
+	// the Online rule decides by the general catalog's outcomes alone
+	onlineCounts, onlineUrlIndex := self.onlineUrlIndex(clientId, settings)
 	return &providerEgressFacts{
 		arinRisk:                self.arinRisk[clientId],
 		arinNonQuality:          self.arinNonQuality[clientId],
@@ -846,9 +848,9 @@ func (self providerCountFilter) egressFacts(
 		// the guard carries the kill switch and the ratio it was decided
 		// under: a fleet pass's own settings, or the score export's for a
 		// scoped reader
-		noUrlSuccess: providerCarriesNoUrl(counts, urlIndex) &&
+		noUrlSuccess: providerCarriesNoUrl(onlineCounts, onlineUrlIndex) &&
 			self.onlineSuccessBaseline.noSuccessAppliesIn(publishedCountryCode),
-		lowUrlSuccess: self.onlineSuccessBaseline.belowUrlRatioIn(counts, urlIndex, publishedCountryCode),
+		lowUrlSuccess: self.onlineSuccessBaseline.belowUrlRatioIn(onlineCounts, onlineUrlIndex, publishedCountryCode),
 		modernOutcome: classifyProviderModernEvidence(self.modernEvidence[clientId], self.now),
 		// at the filter's instant, as every reader decides it
 		modernGate: settings.RequiresModernProvider(self.now),
@@ -863,6 +865,19 @@ func (self providerCountFilter) urlIndex(clientId server.Id, settings *EgressInd
 		return counts, EgressIndex{}
 	}
 	return counts, ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, self.now, settings)
+}
+
+// The part of a provider's accepted URL outcomes the Online rule, its URL
+// ratio and its country guard decide by, the general catalog's outcomes
+// (ProviderEgressHealthCounts.General), and the index they give now: no
+// Evidence when there are none, or none current.
+func (self providerCountFilter) onlineUrlIndex(clientId server.Id, settings *EgressIndexSettings) (ProviderEgressHealthCounts, EgressIndex) {
+	counts, ok := self.healthCounts[clientId]
+	if !ok {
+		return counts, EgressIndex{}
+	}
+	online := counts.onlineCounts()
+	return online, ComputeEgressIndex(&EgressHealthRun{MeasuredAt: online.MeasuredAt, OkCount: online.OKCount, Total: online.Total}, self.now, settings)
 }
 
 // Decides bucket membership once. The historical rollout flag has no authority
@@ -1387,6 +1402,11 @@ type ProviderEgressInspection struct {
 	ReliabilityFailed bool
 	UrlSuccessCount   int
 	UrlErrorCount     int
+	// the same over the general catalog's outcomes alone, which the Online
+	// rule, its URL ratio and its country guard read (D4); equal to the above
+	// while every scored outcome is general
+	OnlineUrlSuccessCount int
+	OnlineUrlErrorCount   int
 	// whether the accepted URL runs in the evidence window meet the native
 	// URL-run minimums (egress_native_min_runs.go) for Quality and for Speed
 	QualityUrlRunsMet bool
@@ -1539,15 +1559,19 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	if counts, ok := countFilter.healthCounts[clientId]; ok {
 		inspection.UrlSuccessCount = counts.OKCount
 		inspection.UrlErrorCount = counts.Total - counts.OKCount
+		online := counts.onlineCounts()
+		inspection.OnlineUrlSuccessCount = online.OKCount
+		inspection.OnlineUrlErrorCount = online.Total - online.OKCount
 		run = &EgressHealthRun{
 			MeasuredAt: counts.MeasuredAt,
 			OkCount:    counts.OKCount,
 			Total:      counts.Total,
 		}
 	}
-	inspection.NoUrlSuccess = providerCarriesNoUrl(countFilter.urlIndex(clientId, inspection.Settings))
+	// the Online rule's view: the general catalog's outcomes alone
+	inspection.NoUrlSuccess = providerCarriesNoUrl(countFilter.onlineUrlIndex(clientId, inspection.Settings))
 	if baseline != nil {
-		counts, urlIndex := countFilter.urlIndex(clientId, inspection.Settings)
+		counts, urlIndex := countFilter.onlineUrlIndex(clientId, inspection.Settings)
 		inspection.BelowOnlineUrlRatio = providerBelowOnlineUrlRatio(counts, urlIndex, baseline.urlSuccessRatio)
 	}
 	inspection.CurrentIndex = ComputeEgressIndex(run, server.NowUtc(), inspection.Settings)

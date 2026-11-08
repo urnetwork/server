@@ -422,7 +422,7 @@
       "description": "Nearest-rank p50 of setup over every country's runs in the last hour, computed by the runner (urnetwork_proxy_test_all_phase_seconds_window, phase setup). Setup runs from just before the auth-client create call to the first successful request through the new proxy; only successful probes are samples. The window is in memory, so it is empty for up to an hour after a runner restart. Orange from 15 s, red from 30 s.",
       "gridPos": {
         "h": 4,
-        "w": 5,
+        "w": 4,
         "x": 0,
         "y": 6
       },
@@ -491,8 +491,8 @@
       "description": "Nearest-rank p90 of setup over every country's runs in the last hour, computed by the runner (urnetwork_proxy_test_all_phase_seconds_window, phase setup). Setup runs from just before the auth-client create call to the first successful request through the new proxy; only successful probes are samples. The window is in memory, so it is empty for up to an hour after a runner restart. Orange from 15 s, red from 30 s.",
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 5,
+        "w": 4,
+        "x": 4,
         "y": 6
       },
       "datasource": {
@@ -560,8 +560,8 @@
       "description": "Nearest-rank p50 of connect over every country's runs in the last hour, computed by the runner (urnetwork_proxy_test_all_phase_seconds_window, phase connect). Connect is Chrome's navigation start to the first byte of the page's main document, through the proxy (Navigation Timing responseStart); only navigations that succeeded with a status below 400 are samples. The window is in memory, so it is empty for up to an hour after a runner restart. Orange from 3 s, red from 10 s.",
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 10,
+        "w": 4,
+        "x": 8,
         "y": 6
       },
       "datasource": {
@@ -629,8 +629,8 @@
       "description": "Nearest-rank p90 of connect over every country's runs in the last hour, computed by the runner (urnetwork_proxy_test_all_phase_seconds_window, phase connect). Connect is Chrome's navigation start to the first byte of the page's main document, through the proxy (Navigation Timing responseStart); only navigations that succeeded with a status below 400 are samples. The window is in memory, so it is empty for up to an hour after a runner restart. Orange from 3 s, red from 10 s.",
       "gridPos": {
         "h": 4,
-        "w": 5,
-        "x": 15,
+        "w": 4,
+        "x": 12,
         "y": 6
       },
       "datasource": {
@@ -695,7 +695,78 @@
       "id": 12,
       "type": "stat",
       "title": "success rate, last 1 h",
-      "description": "ok runs over all finished runs in the last hour, every country: increase() of urnetwork_proxy_test_runs_total, deduplicated with max per country and outcome. create_error, ready_timeout, browser_error, navigate_timeout and http_error (status 400 or more) all count against it. It reads 0% when runs finished but none was ok, and no data when no run finished. Red below 50%, orange below 80%.",
+      "description": "ok runs over all finished runs in the last hour, every country: increase() of urnetwork_proxy_test_runs_total, deduplicated with max per country and outcome. Every other outcome counts against it: create_error, ready_timeout, browser_error and navigate_timeout, in which the proxy delivered nothing, and load_timeout, site_refused and http_error, in which it delivered the page's main document (see proxy delivered). It reads 0% when runs finished but none was ok, and no data when no run finished. Red below 50%, orange below 80%.",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 6
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "min": 0,
+          "max": 1,
+          "noValue": "no runs in 1 h",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.5
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",outcome=\"ok\"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\"}[1h]))) > 0)",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "stat",
+      "title": "proxy delivered, last 1 h",
+      "description": "Runs in the last hour in which the page's main document came through the proxy, over all finished runs, every country: ok; load_timeout, the document came but its subresources held the load event past the navigate timeout; site_refused, the site answered 403, 429 or 451 to the exit; and http_error, any other status of 400 or more. The rest are proxy failures, in which no byte of the document came: create_error, ready_timeout, navigate_timeout and browser_error. increase() of urnetwork_proxy_test_runs_total, deduplicated with max per country and outcome. It reads 0% when runs finished but none delivered, and no data when no run finished. Red below 50%, orange below 80%.",
       "gridPos": {
         "h": 4,
         "w": 4,
@@ -752,7 +823,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",outcome=\"ok\"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\"}[1h]))) > 0)",
+          "expr": "(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",outcome=~\"ok|load_timeout|site_refused|http_error\"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\"}[1h]))) > 0)",
           "instant": true,
           "range": false,
           "datasource": {
@@ -1357,7 +1428,7 @@
       "id": 23,
       "type": "table",
       "title": "per country, last 24 h",
-      "description": "One row per selected country over the last 24 h. The p50 and p90 columns are the runner's nearest-rank percentiles over that country's last 24 h of samples (urnetwork_proxy_test_phase_seconds_window); a phase without a completed sample in the window is blank, and the windows start empty after a runner restart. runs, failures (any outcome but ok) and success come from increase() of urnetwork_proxy_test_runs_total. exit mismatches come from increase() of urnetwork_proxy_test_exit_country_mismatch_total: the trace's loc differed from the requested country, which is recorded but is not a failure. last tested is the time since the country's latest run of any outcome, looking back 7 days. Sorted by setup p90, slowest first.",
+      "description": "One row per selected country over the last 24 h. The p50 and p90 columns are the runner's nearest-rank percentiles over that country's last 24 h of samples (urnetwork_proxy_test_phase_seconds_window); a phase without a completed sample in the window is blank, and the windows start empty after a runner restart. runs, proxy failures (create_error, ready_timeout, navigate_timeout and browser_error: no byte of the page's main document came through the proxy) and success (ok over runs) come from increase() of urnetwork_proxy_test_runs_total; load_timeout, site_refused and http_error are neither. exit mismatches come from increase() of urnetwork_proxy_test_exit_country_mismatch_total: the trace's loc differed from the requested country, which is recorded but is not a failure. last tested is the time since the country's latest run of any outcome, looking back 7 days. Sorted by setup p90, slowest first.",
       "gridPos": {
         "h": 12,
         "w": 24,
@@ -1623,7 +1694,7 @@
             "properties": [
               {
                 "id": "displayName",
-                "value": "failures"
+                "value": "proxy failures"
               },
               {
                 "id": "unit",
@@ -1935,7 +2006,7 @@
         },
         {
           "refId": "H",
-          "expr": "sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\",outcome!=\"ok\"}[24h]))) or (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\"}[24h]))) * 0)",
+          "expr": "sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\",outcome!~\"ok|load_timeout|site_refused|http_error\"}[24h]))) or (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\"}[24h]))) * 0)",
           "format": "table",
           "instant": true,
           "range": false,
@@ -2057,8 +2128,8 @@
     {
       "id": 25,
       "type": "bargauge",
-      "title": "failure rate by country, last 24 h (highest 20)",
-      "description": "Share of each selected country's runs in the last 24 h that did not end ok, for the 20 highest; countries without a failed run are not listed. A country tested only a few times reads 100% after one failure; the per-country table gives the run counts. Orange from 20%, red from 50%.",
+      "title": "proxy failure rate by country, last 24 h (highest 20)",
+      "description": "Share of each selected country's runs in the last 24 h in which no byte of the page's main document came through the proxy (create_error, ready_timeout, navigate_timeout and browser_error), for the 20 highest; countries without a proxy failure are not listed. load_timeout, site_refused and http_error are runs the proxy delivered, and the success-rate panel counts them against ok. A country tested only a few times reads 100% after one failure; the per-country table gives the run counts. Orange from 20%, red from 50%.",
       "gridPos": {
         "h": 10,
         "w": 12,
@@ -2075,7 +2146,7 @@
           "decimals": 1,
           "min": 0,
           "max": 1,
-          "noValue": "no failed runs in 24 h",
+          "noValue": "no proxy failures in 24 h",
           "color": {
             "mode": "thresholds"
           },
@@ -2119,7 +2190,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sort_desc(topk(20, sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\",outcome!=\"ok\"}[24h]))) / (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\"}[24h]))) > 0) > 0))",
+          "expr": "sort_desc(topk(20, sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\",outcome!~\"ok|load_timeout|site_refused|http_error\"}[24h]))) / (sum by (country) (max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env=\"main\",country=~\"$country\"}[24h]))) > 0) > 0))",
           "legendFormat": "{{country}}",
           "instant": true,
           "range": false,
@@ -2209,7 +2280,7 @@
       "id": 28,
       "type": "bargauge",
       "title": "success rate by country, last 24 h (highest 20)",
-      "description": "Share of each selected country's runs in the last 24 h that ended ok, for the 20 highest: the counterpart of the failure-rate panel. Only countries with at least 3 runs in the window are ranked, so one lucky run does not read 100%; ties at the same rate are listed in no particular order, and the per-country table gives the run counts. Red under 50%, orange under 80%.",
+      "description": "Share of each selected country's runs in the last 24 h that ended ok, for the 20 highest: strictly ok, so a delivered page that did not load ok (load_timeout, site_refused, http_error) counts against it. Only countries with at least 3 runs in the window are ranked, so one lucky run does not read 100%; ties at the same rate are listed in no particular order, and the per-country table gives the run counts. Red under 50%, orange under 80%.",
       "gridPos": {
         "h": 10,
         "w": 12,

@@ -2874,7 +2874,7 @@ func providerInspect(opts docopt.Opts) {
 		fmt.Printf("  latest health run none\n")
 	}
 	fmt.Print(providerInspectIndexLines(inspection))
-	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
+	fmt.Printf("  url successes %d, errors %d in the evidence window (general catalog, which the online rule reads: %d, %d); no general success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, inspection.OnlineUrlSuccessCount, inspection.OnlineUrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
 	// the decision follows the rule as the score export published it; this
 	// host's provider.yml is shown beside it
 	countryGuard := "no trusted published guard, so the rule applies nowhere"

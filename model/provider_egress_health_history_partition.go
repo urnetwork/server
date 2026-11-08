@@ -64,6 +64,10 @@ func newProviderEgressHealthHistoryPartitionFamily(settings *ProviderEgressHealt
 		Retention:           settings.Retention,
 		ReindexExempt:       true,
 		MonitorRunwayRanges: 2,
+		// a day made before a migration added columns to the history (as
+		// url_source and url_probation were, db_provider_egress_url_source.go)
+		// still attaches with them
+		ReconcileLeafColumns: true,
 		// the cutover's staged table before the swap, and the old table until
 		// --drop-old
 		CutoverTables: []string{providerEgressHealthHistoryStagedTable, providerEgressHealthHistoryOldTable},
