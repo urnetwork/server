@@ -35,8 +35,9 @@
 //     (ProviderZeroCarryWindow), and since its device last reported a new app
 //     version, newest first and at most ProviderZeroCarryContractReadLimit of
 //     them, hold at least ProviderZeroCarryMinContracts counted contracts
-//     from at least ProviderZeroCarryMinNetworks distinct client networks;
-//   - those counted contracts carried at most
+//     from at least ProviderZeroCarryMinNetworks distinct client networks,
+//     each network at least ProviderZeroCarryMinNetworkAge old;
+//   - the counted contracts, from networks of any age, carried at most
 //     ProviderZeroCarryMaxCarriedByteCount bytes in all;
 //   - when the read stopped at its limit, no counted contract closed earlier
 //     in the window carried any byte, and the search for one reached the
@@ -64,6 +65,18 @@
 // with a legacy, unidentified report leaves no such evidence, and its idle
 // contracts still count.
 //
+// Only networks two weeks old are evidence that a provider carries nothing
+// (ProviderZeroCarryMinNetworkAge, the owner's floor for network evidence,
+// which the TLS judge's place rule and the country sites' graduation share):
+// a counted contract from a younger network, or from a network with no row,
+// counts toward neither minimum. A farm can create networks whenever it
+// likes, but not ones that have existed for two weeks, so throwaway networks
+// cannot open the empty contracts that would frame a provider. Evidence that
+// a provider carries is taken from any network: a counted contract that
+// carried bytes counts in the byte sum, and clears in the search past the
+// read limit, whatever its network's age, so the floor only ever withholds a
+// verdict.
+//
 // Why these numbers (Main, 2026-11-08, read only):
 //
 //   - Of 1,000 providers with a URL success in the window, none met the
@@ -80,8 +93,8 @@
 //     the guard exempts: empty contracts from sybil networks never make a
 //     provider that passes the server's own probe zero-carry. In an exempt
 //     country honest providers fail the probe too, and the verdict rests on
-//     contract evidence alone; how far to trust client networks there is the
-//     owner's open decision (network age, or networks that carried elsewhere).
+//     contract evidence alone, which the network age floor keeps to networks
+//     a farm cannot make on demand.
 //
 // The verdict is a hard exclusion (egress_index.go): out of every bucket,
 // FindProviders2 answer and count, force_minimum and an explicit client id
@@ -166,6 +179,14 @@ const ProviderZeroCarryMinContracts = 20
 // The fewest distinct client networks the counted contracts come from.
 const ProviderZeroCarryMinNetworks = 3
 
+// The youngest a client network may be, at the judgement, for its contracts
+// to count toward ProviderZeroCarryMinContracts and
+// ProviderZeroCarryMinNetworks: the owner's two weeks, the floor the TLS
+// judge's place rule and the country sites' graduation give network evidence
+// (providerEgressTlsPlaceMinNetworkAge), so the three cannot drift apart. A
+// network with no row has no age and counts for nothing.
+const ProviderZeroCarryMinNetworkAge = providerEgressTlsPlaceMinNetworkAge
+
 // The most bytes the counted contracts may carry in all.
 const ProviderZeroCarryMaxCarriedByteCount ByteCount = 1024
 
@@ -209,8 +230,9 @@ func DefaultProviderZeroCarrySettings() *ProviderZeroCarrySettings {
 type ProviderZeroCarryEvidence struct {
 	// contracts read, counted or not
 	RowCount int
-	// counted contracts, the distinct client networks they come from, and
-	// what they carried in all
+	// counted contracts from networks at least ProviderZeroCarryMinNetworkAge
+	// old and the distinct networks they come from, and what every counted
+	// contract carried in all, from a network of any age
 	ContractCount    int
 	NetworkCount     int
 	CarriedByteCount ByteCount
@@ -260,7 +282,10 @@ type ProviderZeroCarryVerdict struct {
 	ExpireTime time.Time
 	// the app version the device reported when the verdict was made, nil for
 	// none
-	ClientVersion    *string
+	ClientVersion *string
+	// the evidence: the counted contracts of networks old enough to be
+	// evidence, the networks they come from, and what every counted contract
+	// carried
 	ContractCount    int
 	NetworkCount     int
 	CarriedByteCount ByteCount
@@ -475,11 +500,25 @@ func providerZeroCarryIdleSql(alias string) string {
 					)`, alias, ContractPartySource)
 }
 
+// The contract of the row aliased alias comes from a client network created
+// ProviderZeroCarryMinNetworkAge or more before the judgement, $3. A network
+// with no row is not. One network_pkey lookup per counted contract.
+func providerZeroCarryAgedSql(alias string) string {
+	return fmt.Sprintf(`EXISTS (
+						SELECT 1 FROM network AS source_network
+						WHERE source_network.network_id = %[1]s.source_network_id
+						AND source_network.create_time <= $3::timestamp - interval '%[2]d seconds'
+					)`, alias, int(ProviderZeroCarryMinNetworkAge/time.Second))
+}
+
 // The evidence of each candidate in $1 with its first counted time in $2: its
 // window's contracts (providerZeroCarryWindowSql), newest first, at most $5,
-// and the close time of the oldest one read. Each candidate is one backward
-// range of transfer_contract_destination_id_close_time that stops at the
-// limit; the prober check is a unique-index lookup per row.
+// and the close time of the oldest one read. The minimums count only the
+// counted contracts of aged networks (providerZeroCarryAgedSql); the byte sum
+// counts every counted contract. Each candidate is one backward range of
+// transfer_contract_destination_id_close_time that stops at the limit; the
+// prober check is a unique-index lookup per row, the network age one per
+// counted row.
 func providerZeroCarryEvidenceSql() string {
 	return `
 		SELECT
@@ -493,20 +532,25 @@ func providerZeroCarryEvidenceSql() string {
 		CROSS JOIN LATERAL (
 			SELECT
 				count(*) AS row_count,
-				count(*) FILTER (WHERE recent.counted) AS contract_count,
-				count(DISTINCT recent.source_network_id) FILTER (WHERE recent.counted) AS network_count,
+				count(*) FILTER (WHERE recent.counted AND recent.aged) AS contract_count,
+				count(DISTINCT recent.source_network_id) FILTER (WHERE recent.counted AND recent.aged) AS network_count,
 				COALESCE(sum(recent.byte_count) FILTER (WHERE recent.counted), 0)::bigint AS carried_byte_count,
 				min(recent.close_time) AS oldest_close_time
 			FROM (
 				SELECT
-					contract.source_network_id,
-					contract.close_time,
-					` + providerZeroCarryByteCountSql("contract") + ` AS byte_count,
-					` + providerZeroCarryCountedSql("contract") + ` AS counted
-				FROM transfer_contract AS contract
-				WHERE ` + providerZeroCarryWindowSql("contract") + `
-				ORDER BY contract.close_time DESC
-				LIMIT $5
+					read_contract.*,
+					CASE WHEN read_contract.counted THEN ` + providerZeroCarryAgedSql("read_contract") + ` ELSE false END AS aged
+				FROM (
+					SELECT
+						contract.source_network_id,
+						contract.close_time,
+						` + providerZeroCarryByteCountSql("contract") + ` AS byte_count,
+						` + providerZeroCarryCountedSql("contract") + ` AS counted
+					FROM transfer_contract AS contract
+					WHERE ` + providerZeroCarryWindowSql("contract") + `
+					ORDER BY contract.close_time DESC
+					LIMIT $5
+				) AS read_contract
 			) AS recent
 		) AS evidence
 	`
@@ -518,7 +562,8 @@ func providerZeroCarryEvidenceSql() string {
 // nothing is checked against its client's close evidence
 // (providerZeroCarryIdleSql), and an idle one is left out of the counts; a
 // contract that carried bytes is never idle, whatever its client reported,
-// so leaving idle sessions out never removes a byte. When the read stops at
+// so leaving idle sessions out never removes a byte. The minimums count only
+// aged networks' contracts, as in the evidence read. When the read stops at
 // the limit, the rest of the window, the contracts closed before the oldest
 // one read, newest first and at most $6 of them, is searched for a counted
 // contract that carried any byte: the same index range, below the oldest row.
@@ -542,8 +587,8 @@ func providerZeroCarryConfirmationSql() string {
 		CROSS JOIN LATERAL (
 			SELECT
 				count(*) AS row_count,
-				count(*) FILTER (WHERE recent.counted AND NOT recent.idle) AS contract_count,
-				count(DISTINCT recent.source_network_id) FILTER (WHERE recent.counted AND NOT recent.idle) AS network_count,
+				count(*) FILTER (WHERE recent.counted AND recent.aged AND NOT recent.idle) AS contract_count,
+				count(DISTINCT recent.source_network_id) FILTER (WHERE recent.counted AND recent.aged AND NOT recent.idle) AS network_count,
 				COALESCE(sum(recent.byte_count) FILTER (WHERE recent.counted AND NOT recent.idle), 0)::bigint AS carried_byte_count,
 				min(recent.close_time) AS oldest_close_time,
 				count(*) FILTER (WHERE recent.counted AND recent.idle) AS idle_count
@@ -551,7 +596,8 @@ func providerZeroCarryConfirmationSql() string {
 				SELECT
 					read_contract.*,
 					CASE WHEN read_contract.counted AND read_contract.byte_count = 0
-						THEN ` + providerZeroCarryIdleSql("read_contract") + ` ELSE false END AS idle
+						THEN ` + providerZeroCarryIdleSql("read_contract") + ` ELSE false END AS idle,
+					CASE WHEN read_contract.counted THEN ` + providerZeroCarryAgedSql("read_contract") + ` ELSE false END AS aged
 				FROM (
 					SELECT
 						contract.contract_id,

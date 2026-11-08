@@ -210,8 +210,21 @@ func zeroCarryTestUrlOutcome(ctx context.Context, clientId server.Id, measuredAt
 	})
 }
 
-// n new client network ids.
-func zeroCarryTestNetworks(n int) []server.Id {
+// n new client networks, each with a network row created a month ago: old
+// enough to be evidence (ProviderZeroCarryMinNetworkAge).
+func zeroCarryTestNetworks(ctx context.Context, n int) []server.Id {
+	return zeroCarryTestNetworksCreated(ctx, n, server.NowUtc().Add(-30*24*time.Hour))
+}
+
+// n new client networks, each with a network row created at createdAt.
+func zeroCarryTestNetworksCreated(ctx context.Context, n int, createdAt time.Time) []server.Id {
+	networkIds := zeroCarryTestUnknownNetworks(n)
+	zeroCarryTestAgeNetworks(ctx, createdAt, networkIds...)
+	return networkIds
+}
+
+// n new client network ids with no network row: networks of no known age.
+func zeroCarryTestUnknownNetworks(n int) []server.Id {
 	networkIds := make([]server.Id, n)
 	for i := range networkIds {
 		networkIds[i] = server.NewId()
@@ -219,10 +232,25 @@ func zeroCarryTestNetworks(n int) []server.Id {
 	return networkIds
 }
 
+// Gives each network a network row created at createdAt, or moves its row's
+// creation there.
+func zeroCarryTestAgeNetworks(ctx context.Context, createdAt time.Time, networkIds ...server.Id) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(ctx, `
+			INSERT INTO network (network_id, network_name, admin_user_id, create_time)
+			SELECT network_id, 'zero-carry-test-' || network_id::text, network_id, $2::timestamp
+			FROM unnest($1::uuid[]) AS network_id
+			ON CONFLICT (network_id) DO UPDATE SET create_time = EXCLUDED.create_time`,
+			networkIds, createdAt.UTC(),
+		))
+	})
+}
+
 // n egress prober network ids, registered as the prober registers each pass's
-// network (prober_shard_run).
+// network (prober_shard_run), with network rows a month old, so that only the
+// prober check keeps their contracts out.
 func zeroCarryTestProberNetworks(ctx context.Context, n int) []server.Id {
-	networkIds := zeroCarryTestNetworks(n)
+	networkIds := zeroCarryTestNetworks(ctx, n)
 	now := server.NowUtc()
 	server.Tx(ctx, func(tx server.PgTx) {
 		for _, networkId := range networkIds {
@@ -284,7 +312,7 @@ func TestZeroCarryJudgeExcludesTheZombieAndKeepsTheRest(t *testing.T) {
 		// carries the probe, while its clients' contracts carried nothing
 		probedEmpty := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestProbed(ctx, probedEmpty, city, 0, "kz")
-		zeroCarryTestContracts(ctx, t, probedEmpty, zeroCarryTestNetworks(4), 6, 0, time.Hour)
+		zeroCarryTestContracts(ctx, t, probedEmpty, zeroCarryTestNetworks(ctx, 4), 6, 0, time.Hour)
 
 		// the zombie: every URL probe failed and 24 contracts from three
 		// client networks carried nothing
@@ -293,7 +321,7 @@ func TestZeroCarryJudgeExcludesTheZombieAndKeepsTheRest(t *testing.T) {
 		// the current reliability history URL probe admission requires
 		testingInsertProviderReliabilityWitness(ctx, zombie.clientId)
 		zeroCarryTestVersion(ctx, zombie, "2026.4.6+906996900", server.NowUtc().Add(-30*24*time.Hour))
-		zeroCarryTestContracts(ctx, t, zombie, zeroCarryTestNetworks(3), 8, 0, time.Hour)
+		zeroCarryTestContracts(ctx, t, zombie, zeroCarryTestNetworks(ctx, 3), 8, 0, time.Hour)
 
 		// idle: failing probes, no contracts
 		idle := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
@@ -301,12 +329,12 @@ func TestZeroCarryJudgeExcludesTheZombieAndKeepsTheRest(t *testing.T) {
 		// new: two failed probes, a few empty contracts from two networks
 		fresh := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, fresh.clientId, server.NowUtc(), 2, 2)
-		zeroCarryTestContracts(ctx, t, fresh, zeroCarryTestNetworks(2), 3, 0, time.Hour)
+		zeroCarryTestContracts(ctx, t, fresh, zeroCarryTestNetworks(ctx, 2), 3, 0, time.Hour)
 		// honest, lightly used: failing probes (a blocked catalog), 25
 		// contracts from five networks, two of which carried a page
 		honest := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, honest.clientId, server.NowUtc(), 5, 5)
-		honestNetworks := zeroCarryTestNetworks(5)
+		honestNetworks := zeroCarryTestNetworks(ctx, 5)
 		zeroCarryTestContracts(ctx, t, honest, honestNetworks, 4, 0, 2*time.Hour)
 		zeroCarryTestContracts(ctx, t, honest, honestNetworks[:1], 1, 15*1024, 3*time.Hour)
 		zeroCarryTestContracts(ctx, t, honest, honestNetworks[1:2], 1, 15*1024, 4*time.Hour)
@@ -314,11 +342,12 @@ func TestZeroCarryJudgeExcludesTheZombieAndKeepsTheRest(t *testing.T) {
 		probeOnly := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, probeOnly.clientId, server.NowUtc(), 5, 5)
 		zeroCarryTestContracts(ctx, t, probeOnly, zeroCarryTestProberNetworks(ctx, 30), 1, 0, time.Hour)
+		zeroCarryTestAgeNetworks(ctx, server.NowUtc().Add(-30*24*time.Hour), probeOnly.networkId)
 		zeroCarryTestContracts(ctx, t, probeOnly, []server.Id{probeOnly.networkId}, 30, 0, time.Hour)
 		// empty contracts closed before the window
 		stale := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, stale.clientId, server.NowUtc(), 5, 5)
-		zeroCarryTestContracts(ctx, t, stale, zeroCarryTestNetworks(4), 8, 0, ProviderZeroCarryWindow+time.Hour)
+		zeroCarryTestContracts(ctx, t, stale, zeroCarryTestNetworks(ctx, 4), 8, 0, ProviderZeroCarryWindow+time.Hour)
 
 		kept := []*egressTestProvider{working, probedEmpty, idle, fresh, honest, probeOnly, stale}
 		everyone := append(append([]*egressTestProvider{}, kept...), zombie)
@@ -373,7 +402,7 @@ func TestZeroCarryUpgradeReadmitsTheProvider(t *testing.T) {
 		zombie := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, zombie.clientId, server.NowUtc(), 5, 5)
 		zeroCarryTestVersion(ctx, zombie, "2026.3.23+895075980", server.NowUtc().Add(-30*24*time.Hour))
-		zeroCarryTestContracts(ctx, t, zombie, zeroCarryTestNetworks(3), 20, 0, 2*time.Hour)
+		zeroCarryTestContracts(ctx, t, zombie, zeroCarryTestNetworks(ctx, 3), 20, 0, 2*time.Hour)
 		// a third provider without a success keeps the country exempt
 		other := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, other.clientId, server.NowUtc(), 5, 5)
@@ -411,10 +440,10 @@ func TestZeroCarryUrlSuccessAndExpiryReadmitTheProvider(t *testing.T) {
 
 		recovering := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, recovering.clientId, server.NowUtc().Add(-time.Minute), 5, 5)
-		zeroCarryTestContracts(ctx, t, recovering, zeroCarryTestNetworks(4), 6, 0, time.Hour)
+		zeroCarryTestContracts(ctx, t, recovering, zeroCarryTestNetworks(ctx, 4), 6, 0, time.Hour)
 		lapsing := egressTestConnect(ctx, t, city, egressTestFast, nil, nil)
 		egressTestHealth(ctx, lapsing.clientId, server.NowUtc().Add(-time.Minute), 5, 5)
-		zeroCarryTestContracts(ctx, t, lapsing, zeroCarryTestNetworks(4), 6, 0, time.Hour)
+		zeroCarryTestContracts(ctx, t, lapsing, zeroCarryTestNetworks(ctx, 4), 6, 0, time.Hour)
 		// the rollup publishes the connected providers the judge pages
 		egressTestPasses(ctx, t)
 
@@ -501,20 +530,20 @@ func TestZeroCarryIdleSessionsDoNotCount(t *testing.T) {
 		// 25 empty contracts from five networks, 10 of them idle by their
 		// clients' account: 15 left, under the rule
 		idleHeavy := zeroCarryTestCandidate(ctx, t, city)
-		networks := zeroCarryTestNetworks(5)
+		networks := zeroCarryTestNetworks(ctx, 5)
 		zeroCarryTestContractsWith(ctx, t, idleHeavy, networks, 3, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		zeroCarryTestContractsWith(ctx, t, idleHeavy, networks, 2, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "idle"})
 		// the same contracts with every client having tried to send
 		zombie := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(ctx, 5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		// legacy closes leave no evidence: 20 of them still count
 		legacyCloses := zeroCarryTestCandidate(ctx, t, city)
-		legacyNetworks := zeroCarryTestNetworks(4)
+		legacyNetworks := zeroCarryTestNetworks(ctx, 4)
 		zeroCarryTestContractsWith(ctx, t, legacyCloses, legacyNetworks, 5, zeroCarryTestContract{closedAgo: time.Hour})
 		zeroCarryTestContractsWith(ctx, t, legacyCloses, legacyNetworks[:1], 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "idle"})
 		// an idle checkpoint is no final report
 		checkpointed := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, checkpointed, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "idle_checkpoint"})
+		zeroCarryTestContractsWith(ctx, t, checkpointed, zeroCarryTestNetworks(ctx, 5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "idle_checkpoint"})
 		egressTestPasses(ctx, t)
 
 		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
@@ -551,12 +580,12 @@ func TestZeroCarryTruncatedReadChecksTheRestOfTheDay(t *testing.T) {
 		// 30 empty contracts in the last hour, past the read limit, and one
 		// that carried 50 KB ten hours ago
 		busy := zeroCarryTestCandidate(ctx, t, city)
-		busyNetworks := zeroCarryTestNetworks(3)
+		busyNetworks := zeroCarryTestNetworks(ctx, 3)
 		zeroCarryTestContractsWith(ctx, t, busy, busyNetworks, 10, zeroCarryTestContract{closedAgo: 30 * time.Minute, sourceReport: "unacked"})
 		zeroCarryTestContracts(ctx, t, busy, busyNetworks[:1], 1, 50*1024, 10*time.Hour)
 		// the same, with nothing carried all day
 		zombie := zeroCarryTestCandidate(ctx, t, city)
-		zombieNetworks := zeroCarryTestNetworks(3)
+		zombieNetworks := zeroCarryTestNetworks(ctx, 3)
 		zeroCarryTestContractsWith(ctx, t, zombie, zombieNetworks, 10, zeroCarryTestContract{closedAgo: 30 * time.Minute, sourceReport: "unacked"})
 		zeroCarryTestContractsWith(ctx, t, zombie, zombieNetworks, 2, zeroCarryTestContract{closedAgo: 10 * time.Hour, sourceReport: "unacked"})
 		egressTestPasses(ctx, t)
@@ -586,13 +615,13 @@ func TestZeroCarryCarryingContractsAreNeverIdle(t *testing.T) {
 		// 25 empty contracts from five networks, and one that carried 50 KB
 		// whose client's final, after a checkpoint, reported nothing more
 		checkpointing := zeroCarryTestCandidate(ctx, t, city)
-		networks := zeroCarryTestNetworks(5)
+		networks := zeroCarryTestNetworks(ctx, 5)
 		zeroCarryTestContractsWith(ctx, t, checkpointing, networks, 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		zeroCarryTestContractsWith(ctx, t, checkpointing, networks[:1], 1, zeroCarryTestContract{byteCount: 50 * 1024, closedAgo: 2 * time.Hour, sourceReport: "idle"})
 		// a zombie: 20 empty contracts from four networks, three that settled
 		// at 30 bytes of noise with idle finals, and five empty idle sessions
 		noisy := zeroCarryTestCandidate(ctx, t, city)
-		noisyNetworks := zeroCarryTestNetworks(4)
+		noisyNetworks := zeroCarryTestNetworks(ctx, 4)
 		zeroCarryTestContractsWith(ctx, t, noisy, noisyNetworks, 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		zeroCarryTestContractsWith(ctx, t, noisy, noisyNetworks[:3], 1, zeroCarryTestContract{byteCount: 30, closedAgo: time.Hour, sourceReport: "idle"})
 		zeroCarryTestContractsWith(ctx, t, noisy, noisyNetworks[3:], 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "idle"})
@@ -649,26 +678,26 @@ func TestZeroCarryCappedOlderSearchMakesNoVerdict(t *testing.T) {
 		// then 15 empty contracts five hours ago, past the bound, and one that
 		// carried 50 KB ten hours ago, which the search does not reach
 		busy := zeroCarryTestCandidate(ctx, t, city)
-		busyNetworks := zeroCarryTestNetworks(3)
+		busyNetworks := zeroCarryTestNetworks(ctx, 3)
 		newest(busy, busyNetworks)
 		zeroCarryTestContractsWith(ctx, t, busy, busyNetworks, 5, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
 		zeroCarryTestContracts(ctx, t, busy, busyNetworks[:1], 1, 50*1024, 10*time.Hour)
 		// then exactly the bound, ten empty contracts: the search cannot tell
 		// that it reached the window's start
 		atBound := zeroCarryTestCandidate(ctx, t, city)
-		atBoundNetworks := zeroCarryTestNetworks(3)
+		atBoundNetworks := zeroCarryTestNetworks(ctx, 3)
 		newest(atBound, atBoundNetworks)
 		zeroCarryTestContractsWith(ctx, t, atBound, atBoundNetworks[:2], 5, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
 		// then nine empty contracts, within the bound: a zombie
 		zombie := zeroCarryTestCandidate(ctx, t, city)
-		zombieNetworks := zeroCarryTestNetworks(3)
+		zombieNetworks := zeroCarryTestNetworks(ctx, 3)
 		newest(zombie, zombieNetworks)
 		zeroCarryTestContractsWith(ctx, t, zombie, zombieNetworks, 3, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
 		// 18 empty contracts and, before them, 10 idle sessions: the read
 		// takes the 18 and 7 idle ones, 18 counted once they are left out,
 		// under the rule; 15 empty contracts past the bound
 		idleBusy := zeroCarryTestCandidate(ctx, t, city)
-		idleBusyNetworks := zeroCarryTestNetworks(4)
+		idleBusyNetworks := zeroCarryTestNetworks(ctx, 4)
 		zeroCarryTestContractsWith(ctx, t, idleBusy, idleBusyNetworks[:3], 6, zeroCarryTestContract{closedAgo: 20 * time.Minute, sourceReport: "unacked"})
 		zeroCarryTestContractsWith(ctx, t, idleBusy, idleBusyNetworks[3:], 10, zeroCarryTestContract{closedAgo: 25 * time.Minute, sourceReport: "idle"})
 		zeroCarryTestContractsWith(ctx, t, idleBusy, idleBusyNetworks[:3], 5, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
@@ -711,7 +740,7 @@ func TestZeroCarryConfirmsInSmallBatches(t *testing.T) {
 		zombies := []*egressTestProvider{}
 		for range 2*ProviderZeroCarryConfirmationBatchSize + 1 {
 			zombie := zeroCarryTestCandidate(ctx, t, city)
-			zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(3), 7, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+			zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(ctx, 3), 7, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 			zombies = append(zombies, zombie)
 		}
 		egressTestPasses(ctx, t)
@@ -738,7 +767,7 @@ func TestZeroCarryJudgesByTheGeneralCatalog(t *testing.T) {
 		city := egressTestCity(ctx, "Taraz", "Jambyl", "Kazakhstan", "kz")
 		now := server.NowUtc()
 		empty := func(provider *egressTestProvider) {
-			zeroCarryTestContractsWith(ctx, t, provider, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+			zeroCarryTestContractsWith(ctx, t, provider, zeroCarryTestNetworks(ctx, 5), 5, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		}
 
 		// three general failures and a scored country site's success
@@ -792,6 +821,69 @@ func TestZeroCarryJudgesByTheGeneralCatalog(t *testing.T) {
 	})
 }
 
+// Only networks two weeks old at the judgement count toward the contract and
+// network minimums (ProviderZeroCarryMinNetworkAge): empty contracts from
+// young networks, or from networks with no row, frame no provider, however
+// many there are. A contract that carried bytes clears a provider from a
+// network of any age.
+func TestZeroCarryCountsOnlyNetworksTwoWeeksOld(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Aktobe", "Aktobe", "Kazakhstan", "kz")
+		now := server.NowUtc()
+		aged := func(n int) []server.Id {
+			return zeroCarryTestNetworksCreated(ctx, n, now.Add(-ProviderZeroCarryMinNetworkAge-24*time.Hour))
+		}
+		young := func(n int) []server.Id {
+			return zeroCarryTestNetworksCreated(ctx, n, now.Add(-ProviderZeroCarryMinNetworkAge+24*time.Hour))
+		}
+		empty := func(provider *egressTestProvider, networkIds []server.Id, perNetwork int) {
+			zeroCarryTestContractsWith(ctx, t, provider, networkIds, perNetwork, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		}
+
+		// 30 empty contracts from five networks a day short of two weeks old
+		framedByYoung := zeroCarryTestCandidate(ctx, t, city)
+		empty(framedByYoung, young(5), 6)
+		// the same from five networks with no row
+		framedByUnknown := zeroCarryTestCandidate(ctx, t, city)
+		empty(framedByUnknown, zeroCarryTestUnknownNetworks(5), 6)
+		// 26 from two aged networks and 12 from three young ones: two
+		// networks count, under the network minimum
+		twoAged := zeroCarryTestCandidate(ctx, t, city)
+		empty(twoAged, aged(2), 13)
+		empty(twoAged, young(3), 4)
+		// 15 from three aged networks and 15 from three young ones: 15
+		// contracts count, under the contract minimum
+		fifteenAged := zeroCarryTestCandidate(ctx, t, city)
+		empty(fifteenAged, aged(3), 5)
+		empty(fifteenAged, young(3), 5)
+		// 25 from five aged networks: a zombie
+		zombie := zeroCarryTestCandidate(ctx, t, city)
+		empty(zombie, aged(5), 5)
+		// the same, and one contract that carried 50 KB for a young network
+		carriedForYoung := zeroCarryTestCandidate(ctx, t, city)
+		empty(carriedForYoung, aged(5), 5)
+		zeroCarryTestContracts(ctx, t, carriedForYoung, young(1), 1, 50*1024, 2*time.Hour)
+		egressTestPasses(ctx, t)
+
+		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
+		for name, provider := range map[string]*egressTestProvider{
+			"young networks": framedByYoung, "networks with no row": framedByUnknown,
+			"two aged networks": twoAged, "fifteen aged contracts": fifteenAged,
+			"a contract carried for a young network": carriedForYoung,
+		} {
+			if zeroCarryTestHeld(ctx, provider) {
+				t.Errorf("a provider is zero-carry on %s", name)
+			}
+		}
+		verdict := GetProviderZeroCarryVerdict(ctx, zombie.clientId, server.NowUtc())
+		if verdict == nil || verdict.ContractCount != 25 || verdict.NetworkCount != 5 {
+			t.Fatalf("the zombie's verdict counts %+v", verdict)
+		}
+		connect.AssertEqual(t, judgement.Created, 1)
+	})
+}
+
 // A contract the old build accepted counts against neither build once the
 // device reports a new version, even when its client's final lands after the
 // upgrade.
@@ -803,11 +895,11 @@ func TestZeroCarryCountsOnlyContractsOfTheCurrentBuild(t *testing.T) {
 		upgraded := zeroCarryTestCandidate(ctx, t, city)
 		zeroCarryTestVersion(ctx, upgraded, "2026.11.6-1092062290", server.NowUtc().Add(-2*time.Hour))
 		// created three hours ago under the old build, closed an hour ago
-		zeroCarryTestContractsWith(ctx, t, upgraded, zeroCarryTestNetworks(4), 6, zeroCarryTestContract{closedAgo: time.Hour, openFor: 2 * time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, upgraded, zeroCarryTestNetworks(ctx, 4), 6, zeroCarryTestContract{closedAgo: time.Hour, openFor: 2 * time.Hour, sourceReport: "unacked"})
 		// the same contracts created after the upgrade count
 		current := zeroCarryTestCandidate(ctx, t, city)
 		zeroCarryTestVersion(ctx, current, "2026.11.6-1092062290", server.NowUtc().Add(-2*time.Hour))
-		zeroCarryTestContractsWith(ctx, t, current, zeroCarryTestNetworks(4), 6, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, current, zeroCarryTestNetworks(ctx, 4), 6, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		egressTestPasses(ctx, t)
 
 		JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())
@@ -828,7 +920,7 @@ func TestZeroCarryLateUrlSuccessClears(t *testing.T) {
 		city := egressTestCity(ctx, "Francistown", "North-East", "Botswana", "bw")
 
 		zombie := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(4), 6, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(ctx, 4), 6, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		egressTestPasses(ctx, t)
 		connect.AssertEqual(t, JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings()).Created, 1)
 
@@ -854,22 +946,25 @@ func TestZeroCarryExcludedContractsDoNotCount(t *testing.T) {
 		// 15 empty contracts from two client networks and 10 from its own
 		// network: 25 from three networks if its own counted
 		selfServed := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, selfServed, zeroCarryTestNetworks(2), 8, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, selfServed, zeroCarryTestNetworks(ctx, 2), 8, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+		// its own network is old enough to be evidence: only the own-network
+		// check keeps these out
+		zeroCarryTestAgeNetworks(ctx, server.NowUtc().Add(-30*24*time.Hour), selfServed.networkId)
 		zeroCarryTestContractsWith(ctx, t, selfServed, []server.Id{selfServed.networkId}, 10, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
 		// 25 empty companion contracts from five networks
 		companions := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, companions, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, companion: true, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, companions, zeroCarryTestNetworks(ctx, 5), 5, zeroCarryTestContract{closedAgo: time.Hour, companion: true, sourceReport: "unacked"})
 		// 25 expiries with unconfirmed snapshots from five networks
 		unconfirmed := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, unconfirmed, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, unconfirmed: true, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, unconfirmed, zeroCarryTestNetworks(ctx, 5), 5, zeroCarryTestContract{closedAgo: time.Hour, unconfirmed: true, sourceReport: "unacked"})
 		// 25 retained legacy exclusions from five networks
 		legacy := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestContractsWith(ctx, t, legacy, zeroCarryTestNetworks(5), 5, zeroCarryTestContract{closedAgo: time.Hour, legacy: true, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, legacy, zeroCarryTestNetworks(ctx, 5), 5, zeroCarryTestContract{closedAgo: time.Hour, legacy: true, sourceReport: "unacked"})
 		// 25 deadline closes from five networks that found both parties'
 		// reports: unverified usage of 0 bytes with no excluded reason, which
 		// only usage_unverified tells apart from an ordinary settlement
 		deadline := zeroCarryTestCandidate(ctx, t, city)
-		zeroCarryTestDeadlineCloses(ctx, t, deadline, zeroCarryTestNetworks(5), 5)
+		zeroCarryTestDeadlineCloses(ctx, t, deadline, zeroCarryTestNetworks(ctx, 5), 5)
 		egressTestPasses(ctx, t)
 
 		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, zeroCarryTestSettings())

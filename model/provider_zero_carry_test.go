@@ -223,6 +223,10 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 			"NOT contract.usage_unverified",
 			"WHERE prober.network_id = contract.source_network_id",
 			"min(recent.close_time) AS oldest_close_time",
+			// the minimums count only networks two weeks old at the judgement
+			"count(*) FILTER (WHERE recent.counted AND recent.aged",
+			"count(DISTINCT recent.source_network_id) FILTER (WHERE recent.counted AND recent.aged",
+			"CASE WHEN read_contract.counted THEN " + providerZeroCarryAgedSql("read_contract") + " ELSE false END AS aged",
 		} {
 			if !strings.Contains(read.query, part) {
 				t.Errorf("the %s read lacks %q", read.name, part)
@@ -240,7 +244,9 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 		"NOT close_evidence.checkpoint",
 		"close_evidence.acked_byte_count = 0",
 		"close_evidence.unacked_byte_count = 0",
-		"count(*) FILTER (WHERE recent.counted AND NOT recent.idle) AS contract_count",
+		"count(*) FILTER (WHERE recent.counted AND recent.aged AND NOT recent.idle) AS contract_count",
+		// the byte sum counts every counted contract, whatever its network's age
+		"COALESCE(sum(recent.byte_count) FILTER (WHERE recent.counted AND NOT recent.idle), 0)::bigint AS carried_byte_count",
 		"COALESCE(bool_or(older_contract.carried), false) AS carried",
 		"count(*) AS examined",
 		"WHERE $5 <= confirmed.row_count",
@@ -259,6 +265,19 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 	}
 	if strings.Contains(evidence, "$6") {
 		t.Error("the evidence read takes the confirming read's search bound")
+	}
+	if !strings.Contains(evidence, "COALESCE(sum(recent.byte_count) FILTER (WHERE recent.counted), 0)::bigint AS carried_byte_count") {
+		t.Error("the evidence read's byte sum is not every counted contract's")
+	}
+	// a carrying contract clears in the search whatever its network's age
+	if strings.Contains(confirmation, providerZeroCarryAgedSql("older")) {
+		t.Error("the search past the read limit asks the network's age")
+	}
+	// the age floor is the place rule's, which the country sites'
+	// graduation shares: the owner's two weeks, before the judgement
+	if floor := fmt.Sprintf("source_network.create_time <= $3::timestamp - interval '%d seconds'", int(providerEgressTlsPlaceMinNetworkAge/time.Second)); !strings.Contains(providerZeroCarryAgedSql("read_contract"), floor) ||
+		providerEgressTlsPlaceMinNetworkAge != 14*24*time.Hour {
+		t.Errorf("the network age floor is not the place rule's two weeks: %s", providerZeroCarryAgedSql("read_contract"))
 	}
 	page := providerZeroCarryPageSql()
 	for _, part := range []string{
