@@ -114,13 +114,19 @@ func MintNetworkSession(ctx context.Context, credential *ByJwt, kind string) (si
 // set, sign-out-all) takes exclusively. A rotation or revocation that commits
 // after the router's check refuses the renewal here, and the refusal gets
 // authentication's answer (answerRenewalRefusal).
-func RenewSessionCredential(clientSession *ClientSession, networkName string, pro bool) (signed string, err error) {
+//
+// A non-nil clientLimitUpgrade replaces the presented token's
+// client_limit_upgrade claim (ByJwt.ClientLimitUpgrade); nil keeps it.
+func RenewSessionCredential(clientSession *ClientSession, networkName string, pro bool, clientLimitUpgrade *bool) (signed string, err error) {
 	if clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity {
 		return "", sessionError("current_session_required")
 	}
 	credential := clientSession.ByJwt.Renew()
 	credential.NetworkName = networkName
 	credential.Pro = pro
+	if clientLimitUpgrade != nil {
+		credential.ClientLimitUpgrade = cloneClientLimitUpgrade(clientLimitUpgrade)
+	}
 	PrepareSessionMint(credential, false)
 	err = sessionTx(clientSession.Ctx, func(tx server.PgTx) error {
 		if err := LockSessionLifecycle(clientSession.Ctx, tx, credential.NetworkId, false); err != nil {

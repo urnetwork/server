@@ -634,6 +634,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// snapshot, but neither a separate pool borrower nor a TTL authority.
 		// Read on the transaction's owned connection before BEGIN, and keep
 		// cache publication outside the database connection's lifetime.
+		// the Embed allowance the token's client_limit_upgrade claim reads,
+		// through the process cache, before any connection is checked out
+		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 		var isPro bool
 		var mintEntitlement proEntitlement
 		if validateParent {
@@ -1022,6 +1025,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientId = &clientId
 			byJwtWithClientId.DeviceId = &deviceId
 			byJwtWithClientId.Pro = isPro
+			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
@@ -1091,6 +1095,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// IsProFresh checks PostgreSQL and refreshes Redis, neither of which
 		// may be nested under this transaction's checked-out connection.
 		isPro := IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
+		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 
 		// important: must check `network_id = session network_id`
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
@@ -1254,6 +1259,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientId = authClient.ClientId
 			byJwtWithClientId.DeviceId = deviceId
 			byJwtWithClientId.Pro = isPro
+			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))

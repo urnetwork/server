@@ -189,3 +189,34 @@ func TestNetworkConcurrentClientLimitUsesTheEmbedPlanOverride(t *testing.T) {
 	connect.AssertEqual(t, limit, 5000)
 	connect.AssertEqual(t, override, true)
 }
+
+// The client_limit_upgrade claim is true only when UR Pro raises the
+// network's limit: a free network without an Embed allowance, while Pro's
+// limit is higher than free's (unlimited counts as higher).
+func TestClientLimitUpgradeClaimSaysWhenProRaisesTheLimit(t *testing.T) {
+	claim := func(override bool, isPro bool) bool {
+		return *clientLimitUpgradeClaim(override, isPro)
+	}
+	func() {
+		defer Testing_SetConcurrentClientsLimit(2, 1000)()
+		connect.AssertEqual(t, claim(false, false), true)
+		connect.AssertEqual(t, claim(false, true), false)
+		connect.AssertEqual(t, claim(true, false), false)
+		connect.AssertEqual(t, claim(true, true), false)
+	}()
+	func() {
+		// Pro no higher than free: nothing to gain
+		defer Testing_SetConcurrentClientsLimit(3, 3)()
+		connect.AssertEqual(t, claim(false, false), false)
+	}()
+	func() {
+		// unlimited Pro
+		defer Testing_SetConcurrentClientsLimit(2, 0)()
+		connect.AssertEqual(t, claim(false, false), true)
+	}()
+	func() {
+		// unlimited free: nothing to gain
+		defer Testing_SetConcurrentClientsLimit(0, 1000)()
+		connect.AssertEqual(t, claim(false, false), false)
+	}()
+}

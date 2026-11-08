@@ -343,6 +343,28 @@ func networkConcurrentClientLimitRefusal(ctx context.Context, networkId server.I
 	return concurrentClientLimitRefusal(override, isPro, Pro().MaxConcurrentClients(true), connectedCount)
 }
 
+// ClientLimitUpgradeClaim is the client_limit_upgrade claim of a client token
+// of the network (session.ByJwt.ClientLimitUpgrade): whether UR Pro raises the
+// network's concurrent client limit. The apps' sdk offers the upgrade for a
+// client limit hold only when it is true, since the hold's close says nothing
+// about the plan. Pro is the network's live tier, read by the caller; the
+// Embed allowance comes through the process cache.
+func ClientLimitUpgradeClaim(ctx context.Context, networkId server.Id, isPro bool) *bool {
+	_, override := networkClientLimitOverride(ctx, networkId)
+	return clientLimitUpgradeClaim(override, isPro)
+}
+
+// clientLimitUpgradeClaim is ClientLimitUpgradeClaim from what decides it: no
+// plan lifts an Embed allowance, a Pro network is already on the highest
+// plan, and a free network gains only when Pro's limit is higher than free's
+// (unlimited counts as higher).
+func clientLimitUpgradeClaim(override bool, isPro bool) *bool {
+	freeLimit := Pro().MaxConcurrentClients(false)
+	proLimit := Pro().MaxConcurrentClients(true)
+	raises := !override && !isPro && 0 < freeLimit && (proLimit <= 0 || freeLimit < proLimit)
+	return &raises
+}
+
 // concurrentLimitCreationExempt reports whether a create skips the concurrent
 // client limit's creation gate: the sign-in of a URnetwork app (owner decision
 // 2026-11-08). The app's client is created, and while the network is over its
