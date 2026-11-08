@@ -7,9 +7,41 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // Pure tests: no database or redis.
+
+// An app's sign-in skips the concurrent limit's creation gate: a device
+// create, with a network token, from a caller whose client info names an app.
+// A hosted proxy, an API key, and any other caller keep the gate.
+func TestConcurrentLimitCreationExemptOnlyForAppSignIns(t *testing.T) {
+	sessionFor := func(deviceType string, apiKey bool) *session.ClientSession {
+		return &session.ClientSession{
+			ClientInfo:          connect.ClientInfo{Version: 1, DeviceType: deviceType},
+			ByJwt:               &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()},
+			ApiKeyAuthenticated: apiKey,
+		}
+	}
+	device := &AuthNetworkClientArgs{Description: "device"}
+	proxy := &AuthNetworkClientArgs{Description: "proxy", ProxyConfig: &ProxyConfig{}}
+	for _, deviceType := range []string{"android", "ios", "macos", "windows", "linux"} {
+		if !concurrentLimitCreationExempt(device, sessionFor(deviceType, false)) {
+			t.Errorf("the %s app's sign-in is not exempt", deviceType)
+		}
+		if concurrentLimitCreationExempt(proxy, sessionFor(deviceType, false)) {
+			t.Errorf("the %s app's hosted proxy is exempt", deviceType)
+		}
+		if concurrentLimitCreationExempt(device, sessionFor(deviceType, true)) {
+			t.Errorf("an api key claiming the %s app is exempt", deviceType)
+		}
+	}
+	for _, deviceType := range []string{"", "web", "cli", "server", "unknown"} {
+		if concurrentLimitCreationExempt(device, sessionFor(deviceType, false)) {
+			t.Errorf("a caller with client info device type %q is exempt", deviceType)
+		}
+	}
+}
 
 func TestNetworkClientLimitLocalCache(t *testing.T) {
 	cache := newNetworkClientLimitLocalCache()

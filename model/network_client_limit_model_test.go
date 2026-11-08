@@ -7,6 +7,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // DB-backed tests (postgres + redis). Under the owner rule these run only
@@ -16,6 +17,72 @@ func provisionTopLevel(t testing.TB, network *dataCapTestNetwork) *AuthNetworkCl
 	result, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "install"}, network.rootSession)
 	connect.AssertEqual(t, err, nil)
 	return result
+}
+
+// A session of the network's root token whose client info names deviceType,
+// as an app's sign-in sends it ("" for none, as an agent's).
+func testClientInfoSession(ctx context.Context, network *dataCapTestNetwork, deviceType string) *session.ClientSession {
+	clientSession := session.Testing_CreateClientSession(ctx, &session.ByJwt{NetworkId: network.networkId, UserId: network.userId})
+	if deviceType != "" {
+		clientSession.ClientInfo = connect.ClientInfo{Version: 1, DeviceType: deviceType, AppVersion: "2026.11.8"}
+	}
+	return clientSession
+}
+
+// Owner decision 2026-11-08: a URnetwork app's sign-in creates its client while
+// the network is at its concurrent limit, and the connection gate holds that
+// client off, where the app offers Get Pro and its device list. Every other
+// caller is refused at creation as before: an agent, an app's hosted proxy, and
+// an API key that claims to be an app. Before, the app's sign-in was refused at
+// creation too, with no session left to reach the paywall or the device list.
+func TestAuthNetworkClientAppSignInIsHeldAtConnectNotRefusedAtCreation(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer Testing_SetEnforceConcurrentClients(true)()
+		defer Testing_SetConcurrentClientsLimit(2, 3)()
+		defer Testing_ClearNetworkClientLimitCache()
+		defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+
+		network := newDataCapTestNetworkWithoutEmbed(ctx, "app-sign-in")
+		for range 2 {
+			result := provisionTopLevel(t, network)
+			connect.AssertEqual(t, result.Error, (*AuthNetworkClientError)(nil))
+			registerTestPeer(t, ctx, network.networkId, *result.ClientId)
+		}
+
+		// an agent is refused at creation
+		refused, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "agent"}, testClientInfoSession(ctx, network, ""))
+		connect.AssertEqual(t, err, nil)
+		if refused.Error == nil || !refused.Error.ClientLimitExceeded || !refused.Error.UpgradeRequired {
+			t.Fatalf("agent at the limit = %+v, want the concurrent limit refusal", refused.Error)
+		}
+
+		// every app's sign-in is created, and held off at the connection gate
+		for _, deviceType := range []string{"android", "ios", "macos", "windows", "linux"} {
+			created, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: deviceType}, testClientInfoSession(ctx, network, deviceType))
+			connect.AssertEqual(t, err, nil)
+			if created.Error != nil || created.ClientId == nil {
+				t.Fatalf("the %s app's sign-in at the limit = %+v, want a client", deviceType, created.Error)
+			}
+			connect.AssertEqual(t, CanConnectNetworkPeer(ctx, *created.ClientId, false), false)
+		}
+
+		// an app's hosted proxy keeps the creation gate
+		proxy := testAuthProxyClient(t, testClientInfoSession(ctx, network, "ios"))
+		if proxy.Error == nil || !proxy.Error.ClientLimitExceeded || proxy.ClientId != nil {
+			t.Fatalf("an app's proxy at the limit = %+v, want the concurrent limit refusal", proxy.Error)
+		}
+
+		// an API key that claims to be an app keeps it too
+		apiKeySession := testClientInfoSession(ctx, network, "ios")
+		apiKeySession.ApiKeyAuthenticated = true
+		refused, err = AuthNetworkClient(&AuthNetworkClientArgs{Description: "api key"}, apiKeySession)
+		connect.AssertEqual(t, err, nil)
+		if refused.Error == nil || !refused.Error.ClientLimitExceeded {
+			t.Fatalf("an api key claiming an app at the limit = %+v, want the concurrent limit refusal", refused.Error)
+		}
+	})
 }
 
 // The concurrent limit's creation refusal offers an upgrade only to a network

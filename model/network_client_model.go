@@ -537,9 +537,11 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// Checked before the tx so the lookup does not hold it open. Connection
 		// activation applies the same limit; see CanConnectNetworkPeer. The
 		// refusal asks for an upgrade only when one lifts the limit
-		// (concurrentClientLimitRefusal).
+		// (concurrentClientLimitRefusal). A URnetwork app's sign-in skips this
+		// gate and is held off at connection instead, where the app shows what
+		// to do (concurrentLimitCreationExempt).
 		var concurrentLimitRefusal *AuthNetworkClientError
-		if authClient.SourceClientId == nil && !authClient.ProvideIntent {
+		if authClient.SourceClientId == nil && !authClient.ProvideIntent && !concurrentLimitCreationExempt(authClient, clientSession) {
 			concurrentLimitRefusal = networkConcurrentClientLimitRefusal(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 		}
 		// A hosted proxy is limited on its own, and always

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // The Embed plan's per-network client allowance (EMBED1.md).
@@ -304,6 +305,33 @@ func networkConcurrentClientLimitRefusal(ctx context.Context, networkId server.I
 		return nil
 	}
 	return concurrentClientLimitRefusal(override, isPro, Pro().MaxConcurrentClients(true), connectedCount)
+}
+
+// concurrentLimitCreationExempt reports whether a create skips the concurrent
+// client limit's creation gate: the sign-in of a URnetwork app (owner decision
+// 2026-11-08). The app's client is created, and while the network is over its
+// limit the connection gate (CanConnectNetworkPeer) holds the device off, where
+// the app shows what to do: Get Pro, and its device list to free a slot. A
+// creation refused at sign-in left the new device with no session to reach
+// either.
+//
+// An app is a caller whose client info names one of the apps' device types,
+// creating a device rather than a hosted proxy (a proxy keeps the gate, which
+// ur.io and the extension prompt on), with a network token: never an API key,
+// whose caller is an agent. The client info is the caller's own claim. A caller
+// that claims an app only gets clients that the connection gate still holds off
+// past the limit, so it uses no more than the limit, and the top-level client
+// cap still bounds how many it creates.
+func concurrentLimitCreationExempt(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession) bool {
+	if authClient.ProxyConfig != nil || clientSession.ApiKeyAuthenticated {
+		return false
+	}
+	switch clientSession.ClientInfo.DeviceType {
+	case "android", "ios", "macos", "windows", "linux":
+		return true
+	default:
+		return false
+	}
 }
 
 // concurrentClientLimitRefusal is the refusal of a network over its concurrent
