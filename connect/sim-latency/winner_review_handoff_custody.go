@@ -17,6 +17,7 @@ import (
 type winnerHandoffCaptureSettings struct {
 	FreezeLeaseDuration  time.Duration                   `json:"freeze_lease_duration"` // Positive one-time supervisor fence, ten seconds to five minutes; default five minutes, never a model clock.
 	Capacity             winnerMultipassCapacitySettings `json:"capacity"`
+	Spool                *winnerMultipassSpoolSettings   `json:"spool,omitempty"`        // Nil retains the full-local lifecycle; an explicit typed profile never lowers aggregate custody bounds.
 	CleanupTimeout       time.Duration                   `json:"cleanup_timeout"`        // Positive failed-custody completion budget; default two minutes.
 	ReceiptTimeout       time.Duration                   `json:"receipt_timeout"`        // Positive per-call protected retention budget; default two minutes.
 	MaximumDocumentBytes int                             `json:"maximum_document_bytes"` // Positive native object cap; at most the separately approved 128 MiB archive bound.
@@ -29,16 +30,17 @@ func defaultWinnerHandoffCaptureSettings() winnerHandoffCaptureSettings {
 // The contained adapter supplies a real allocated reservation and observes the
 // actual native cgroup limit. This receipt grants neither model nor DB authority.
 type winnerHandoffCapacityReservation struct {
-	CapacitySha256     string   `json:"capacity_sha256"`
-	ReservationPath    string   `json:"reservation_path"`
-	ReservationInode   uint64   `json:"reservation_inode"`
-	Device             uint64   `json:"device"`
-	ReservedBytes      int64    `json:"reserved_bytes"`
-	MemoryLimitBytes   int64    `json:"memory_limit_bytes"`
-	MemoryCurrentBytes int64    `json:"memory_current_bytes"`
-	HostAvailableBytes int64    `json:"host_available_bytes"`
-	MemoryCgroup       string   `json:"memory_cgroup"`
-	StoragePaths       []string `json:"storage_paths"`
+	CapacitySha256      string   `json:"capacity_sha256"`
+	SpoolCapacitySha256 string   `json:"spool_capacity_sha256,omitempty"`
+	ReservationPath     string   `json:"reservation_path"`
+	ReservationInode    uint64   `json:"reservation_inode"`
+	Device              uint64   `json:"device"`
+	ReservedBytes       int64    `json:"reserved_bytes"`
+	MemoryLimitBytes    int64    `json:"memory_limit_bytes"`
+	MemoryCurrentBytes  int64    `json:"memory_current_bytes"`
+	HostAvailableBytes  int64    `json:"host_available_bytes"`
+	MemoryCgroup        string   `json:"memory_cgroup"`
+	StoragePaths        []string `json:"storage_paths"`
 }
 
 // A descriptor binds exact bytes, archive version and retained-until time.
@@ -60,6 +62,9 @@ type winnerHandoffInvocationCustody struct {
 	WrapperReceiptSha256 string                         `json:"wrapper_receipt_sha256"`
 	Originals            []winnerHandoffCustodyOriginal `json:"originals"`
 	Failure              string                         `json:"failure,omitempty"`
+	SpoolCommit          *winnerHandoffCustodyOriginal  `json:"spool_commit,omitempty"`
+	SpoolReferencePath   string                         `json:"spool_reference_path,omitempty"`
+	SpoolReferenceSha256 string                         `json:"spool_reference_sha256,omitempty"`
 }
 
 type winnerHandoffTokenization struct {
@@ -86,6 +91,7 @@ type winnerHandoffCustodyManifest struct {
 	BundleSha256   string                           `json:"bundle_sha256"`
 	Provenance     winnerHandoffProvenance          `json:"provenance"`
 	Capacity       winnerMultipassCapacity          `json:"capacity"`
+	SpoolCapacity  *winnerMultipassSpoolCapacity    `json:"spool_capacity,omitempty"`
 	Reservation    winnerHandoffCapacityReservation `json:"reservation"`
 	Documents      []winnerHandoffCustodyOriginal   `json:"documents"`
 	LeafAdmissions []winnerMultipassAdmission       `json:"leaf_admissions"`
@@ -93,8 +99,31 @@ type winnerHandoffCustodyManifest struct {
 }
 
 func validateWinnerHandoffReservation(capacity *winnerMultipassCapacity, reservation winnerHandoffCapacityReservation) error {
+	return validateWinnerHandoffStorageReservation(capacity, nil, reservation)
+}
+
+// A spool receipt is a separate admitted lifecycle, never a reinterpretation of
+// the aggregate original byte census. Memory remains the complete-review bound.
+func validateWinnerHandoffStorageReservation(capacity *winnerMultipassCapacity, spool *winnerMultipassSpoolCapacity, reservation winnerHandoffCapacityReservation) error {
+	required := int64(0)
+	if capacity != nil {
+		required = capacity.RequiredDurableBytes
+	}
+	if spool != nil {
+		if capacity == nil {
+			return errors.New("native spool has no aggregate resource census")
+		}
+		content, _ := json.Marshal(spool)
+		aggregate, _ := json.Marshal(capacity)
+		if spool.AggregateCapacitySha256 != winnerMultipassSha256(aggregate) || spool.RequiredMemoryBytes != capacity.RequiredMemoryBytes || reservation.SpoolCapacitySha256 != winnerMultipassSha256(content) {
+			return errors.New("native spool reservation differs from its explicit aggregate/lifecycle census")
+		}
+		required = spool.RequiredLocalPeakBytes
+	} else if reservation.SpoolCapacitySha256 != "" {
+		return errors.New("full-local custody cannot silently use a smaller spool reservation")
+	}
 	content, err := json.Marshal(capacity)
-	if err != nil || capacity == nil || reservation.CapacitySha256 != winnerMultipassSha256(content) || reservation.ReservedBytes < capacity.RequiredDurableBytes ||
+	if err != nil || capacity == nil || required <= 0 || reservation.CapacitySha256 != winnerMultipassSha256(content) || reservation.ReservedBytes < required ||
 		reservation.MemoryLimitBytes < capacity.RequiredMemoryBytes || reservation.MemoryLimitBytes > capacity.Settings.MaximumMemoryBytes || reservation.MemoryCurrentBytes < 0 ||
 		reservation.MemoryLimitBytes-reservation.MemoryCurrentBytes < capacity.RequiredMemoryBytes || reservation.HostAvailableBytes < capacity.RequiredMemoryBytes ||
 		!filepath.IsAbs(reservation.MemoryCgroup) || filepath.Clean(reservation.MemoryCgroup) != reservation.MemoryCgroup || reservation.ReservationInode == 0 ||
@@ -207,7 +236,15 @@ func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *w
 	}
 	expectedCapacity, _ := json.Marshal(capacity)
 	actualCapacity, _ := json.Marshal(custody.Capacity)
-	if string(expectedCapacity) != string(actualCapacity) || validateWinnerHandoffReservation(capacity, custody.Reservation) != nil {
+	if custody.SpoolCapacity != nil {
+		expected, _, err := estimateWinnerMultipassSpoolCapacity(plan, bundle, winnerHandoffTokenizerCensus(plan), custody.Capacity.Settings, custody.SpoolCapacity.Settings)
+		expectedBytes, _ := json.Marshal(expected)
+		actualBytes, _ := json.Marshal(custody.SpoolCapacity)
+		if err != nil || string(expectedBytes) != string(actualBytes) {
+			return errors.New("native spool resource census changed")
+		}
+	}
+	if string(expectedCapacity) != string(actualCapacity) || validateWinnerHandoffStorageReservation(capacity, custody.SpoolCapacity, custody.Reservation) != nil {
 		return errors.New("native review resource census or reservation changed")
 	}
 	documents := map[string][]byte{}
@@ -217,7 +254,8 @@ func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *w
 	documents["capacity.json"], _ = json.Marshal(struct {
 		Capacity    winnerMultipassCapacity          `json:"capacity"`
 		Reservation winnerHandoffCapacityReservation `json:"reservation"`
-	}{Capacity: custody.Capacity, Reservation: custody.Reservation})
+		Spool       *winnerMultipassSpoolCapacity    `json:"spool,omitempty"`
+	}{Capacity: custody.Capacity, Reservation: custody.Reservation, Spool: custody.SpoolCapacity})
 	for _, original := range custody.Documents {
 		content, found := documents[original.Name]
 		if !found || original.Bytes != int64(len(content)) || original.Retention.Sha256 != winnerMultipassSha256(content) {
@@ -230,6 +268,16 @@ func validateWinnerHandoffCustody(owner *model.CompetitionReviewHandoff, plan *w
 	}
 	if len(evidence.Calls) != len(plan.Calls) {
 		return errors.New("native review custody cannot replace missing model evidence")
+	}
+	for _, invocation := range custody.Invocations {
+		if custody.SpoolCapacity != nil {
+			if invocation.SpoolCommit == nil || validateWinnerHandoffOriginal(*invocation.SpoolCommit, owner.Deadline, winnerMultipassSpoolManifestBytes) != nil ||
+				!filepath.IsAbs(invocation.SpoolReferencePath) || filepath.Clean(invocation.SpoolReferencePath) != invocation.SpoolReferencePath || !validSha256(invocation.SpoolReferenceSha256) {
+				return errors.New("spooled invocation lost its protected compact commit/reference")
+			}
+		} else if invocation.SpoolCommit != nil || invocation.SpoolReferencePath != "" || invocation.SpoolReferenceSha256 != "" {
+			return errors.New("full-local invocation unexpectedly changed custody lifecycle")
+		}
 	}
 	if err := validateWinnerMultipassLeafAdmissions(plan, bundle, custody.LeafAdmissions); err != nil {
 		return err

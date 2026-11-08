@@ -63,7 +63,7 @@ func reloadWinnerHandoffProtectedCustody(ctx context.Context, control *controlle
 		}
 	}
 	profile := winnerMultipassContainmentProfile{ImageId: release.ImageId, ProviderSettings: release.ProviderSettings, StateRoot: "/var/lib/urnetwork/competition-review-multipass/attempts"}
-	for _, invocation := range custody.Invocations {
+	for ordinal, invocation := range custody.Invocations {
 		originals := map[string][]byte{}
 		bindings := map[string]winnerHandoffCustodyOriginal{}
 		for _, original := range invocation.Originals {
@@ -81,6 +81,15 @@ func reloadWinnerHandoffProtectedCustody(ctx context.Context, control *controlle
 		}
 		if !slices.ContainsFunc(plan.Calls, func(call winnerMultipassCall) bool { return reflect.DeepEqual(call, envelope.Call) }) {
 			return errors.New("protected input contains an unplanned member call")
+		}
+		if custody.SpoolCapacity != nil {
+			capacityBytes, _ := json.Marshal(custody.SpoolCapacity)
+			binding := winnerHandoffSpoolBinding{RunId: plan.Owner.Id, InvocationPosition: ordinal + 1, PlanSha256: owner.Plan.PlanSha256, BundleSha256: plan.BundleSha256,
+				ReleaseSha256: custody.Provenance.ReleaseSha256, NativeDriverSha256: release.NativeDriver.Sha256, CapacitySha256: winnerMultipassSha256(capacityBytes)}
+			if err := reloadWinnerHandoffSpoolInvocation(ctx, invocation, binding, release, profile, winnerHandoffProtectedReader(control, owner)); err != nil {
+				return err
+			}
+			continue
 		}
 		receipt, err := authenticateWinnerMultipassContainment(originals["input.json"], originals["broker.stdout"], originals["wrapper-receipt.json"], false, profile)
 		if err != nil || receipt.ManifestSha256 != invocation.ManifestSha256 || receipt.WrapperReceiptSha256 != invocation.WrapperReceiptSha256 || len(receipt.Artifacts)+1 != len(originals) {
@@ -100,10 +109,13 @@ func reloadWinnerHandoffProtectedCustody(ctx context.Context, control *controlle
 // helper is called only after the qualified authenticator has accepted a receipt.
 func retainWinnerHandoffContainment(ctx context.Context, phase string, envelope winnerMultipassBrokerEnvelope, receipt *winnerMultipassContainmentReceipt, retain func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)) (winnerHandoffInvocationCustody, error) {
 	value := winnerHandoffInvocationCustody{Phase: phase, Operation: envelope.Operation, CallId: envelope.Call.Id, RequestSha256: winnerMultipassSha256(envelope.Payload), Originals: []winnerHandoffCustodyOriginal{}}
-	if receipt == nil || receipt.Canceled || receipt.Result == nil || !validSha256(receipt.ManifestSha256) || !validSha256(receipt.WrapperReceiptSha256) || len(receipt.Artifacts) == 0 || len(receipt.Artifacts) > 32 {
+	if receipt == nil || !receipt.Canceled && receipt.Result == nil || receipt.Canceled && receipt.Result != nil || !validSha256(receipt.ManifestSha256) || !validSha256(receipt.WrapperReceiptSha256) || len(receipt.Artifacts) == 0 || len(receipt.Artifacts) > 32 {
 		return value, errors.New("native custody has no independently authenticated complete attempt")
 	}
-	value.ManifestSha256, value.WrapperReceiptSha256, value.Failure = receipt.ManifestSha256, receipt.WrapperReceiptSha256, receipt.Result.Error
+	value.ManifestSha256, value.WrapperReceiptSha256 = receipt.ManifestSha256, receipt.WrapperReceiptSha256
+	if receipt.Result != nil {
+		value.Failure = receipt.Result.Error
+	}
 	seen := map[string]bool{}
 	for _, binding := range receipt.Artifacts {
 		path, err := winnerMultipassContainmentArtifactPath(receipt, binding)
@@ -177,6 +189,8 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 		}
 	}
 	var storage *winnerHandoffStorage
+	var spoolCapacity *winnerMultipassSpoolCapacity
+	spoolDirectory := filepath.Join(directory, "protected-spool")
 	defer func() {
 		if storage != nil {
 			resultErr = errors.Join(resultErr, storage.Close())
@@ -193,10 +207,21 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 			return nil, custody, errors.New("native invocation lacks reserved capacity, exact claim or resident model")
 		}
 		allowance, err := winnerMultipassInvocationCapacity(plan, call, operation, len(payload), settings.Capacity)
+		if settings.Spool != nil {
+			allowance, err = winnerMultipassSpoolInvocationCapacity(plan, call, operation, len(payload), settings.Capacity)
+		}
 		if err != nil {
 			return nil, custody, err
 		}
-		if err := storage.Consume(allowance); err != nil {
+		if settings.Spool != nil {
+			if spoolCapacity == nil || allowance > spoolCapacity.ActiveInvocationBytes {
+				return nil, custody, errors.New("native invocation exceeds its fixed single-invocation spool window")
+			}
+			err = storage.Borrow(allowance)
+		} else {
+			err = storage.Consume(allowance)
+		}
+		if err != nil {
 			return nil, custody, err
 		}
 		limits := defaultWinnerMultipassProviderLimits()
@@ -219,7 +244,15 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 		output, diagnostics, invokeErr := invokeWinnerMultipassBroker(bounded, release.Wrapper, input)
 		cancel()
 		ordinal++
-		receipt, authErr := authenticateWinnerMultipassContainment(input, output, diagnostics, false, profile)
+		var receipt *winnerMultipassContainmentReceipt
+		var physical *winnerMultipassPhysicalAuthentication
+		var independentClaim []byte
+		var authErr error
+		if settings.Spool != nil {
+			physical, receipt, independentClaim, authErr = createWinnerMultipassPhysicalAuthentication(input, output, diagnostics, false, profile, release)
+		} else {
+			receipt, authErr = authenticateWinnerMultipassContainment(input, output, diagnostics, false, profile)
+		}
 		retentionCtx, retentionCancel := context.WithTimeout(context.WithoutCancel(ctx), settings.ReceiptTimeout)
 		defer retentionCancel()
 		if authErr != nil {
@@ -237,7 +270,25 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 			custody.Failure = "containment_authentication_failed"
 			return nil, custody, errors.Join(invokeErr, authErr, writeErr, retainErr)
 		}
-		custody, retainErr := retainWinnerHandoffContainment(retentionCtx, phase, envelope, receipt, retain)
+		var retainErr error
+		if settings.Spool != nil {
+			capacityBytes, _ := json.Marshal(spoolCapacity)
+			captureBytes, encodeErr := json.Marshal(struct {
+				Input, Output, Diagnostics []byte
+				Receipt                    *winnerMultipassContainmentReceipt
+			}{Input: input, Output: output, Diagnostics: diagnostics, Receipt: receipt})
+			if encodeErr != nil {
+				return receipt.Result, custody, encodeErr
+			}
+			binding := winnerHandoffSpoolBinding{RunId: plan.Owner.Id, InvocationPosition: ordinal, PlanSha256: owner.Plan.PlanSha256, BundleSha256: plan.BundleSha256,
+				ReleaseSha256: provenance.ReleaseSha256, NativeDriverSha256: release.NativeDriver.Sha256, CapacitySha256: winnerMultipassSha256(capacityBytes)}
+			custody, retainErr = protectWinnerHandoffSpoolInvocation(retentionCtx, spoolDirectory, phase, binding, envelope, receipt, physical, independentClaim, captureBytes, release, retain, winnerHandoffProtectedReader(control, owner))
+			if retainErr == nil {
+				retainErr = storage.Restore()
+			}
+		} else {
+			custody, retainErr = retainWinnerHandoffContainment(retentionCtx, phase, envelope, receipt, retain)
+		}
 		if receipt.Result == nil || receipt.Result.Error != "" {
 			return receipt.Result, custody, errors.Join(invokeErr, retainErr, errors.New("original contained operation failed or is unresolved"))
 		}
@@ -247,6 +298,19 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 		return receipt.Result, custody, errors.Join(invokeErr, retainErr)
 	}
 	hooks := winnerHandoffCaptureHooks{Now: func() time.Time { return time.Now().UTC() }, Retain: retain, Provenance: provenance,
+		ReserveSpool: func(_ context.Context, capacity *winnerMultipassCapacity, spool *winnerMultipassSpoolCapacity) (winnerHandoffCapacityReservation, error) {
+			if err := os.Mkdir(spoolDirectory, 0700); err != nil {
+				return winnerHandoffCapacityReservation{}, err
+			}
+			var proof winnerHandoffCapacityReservation
+			var err error
+			storage, proof, err = reserveWinnerHandoffStorageForLifecycle(directory, storagePaths, capacity, spool)
+			if err == nil {
+				err = storage.Consume(spool.PermanentDocumentsBytes + spool.CompactManifestBytes)
+			}
+			spoolCapacity = spool
+			return proof, err
+		},
 		Reserve: func(_ context.Context, capacity *winnerMultipassCapacity) (winnerHandoffCapacityReservation, error) {
 			var proof winnerHandoffCapacityReservation
 			var err error

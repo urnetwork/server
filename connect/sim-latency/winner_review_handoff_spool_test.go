@@ -338,6 +338,9 @@ func commitWinnerHandoffSpool(ctx context.Context, directory string, commit winn
 	}
 	reference := winnerHandoffSpoolReference{Schema: 1, Kind: "winner-review-protected-spool-reference/v1", Binding: commit.Binding, Commit: original}
 	referenceBytes, _ := json.Marshal(reference)
+	if int64(len(content)+len(referenceBytes)) > commit.Limits.MaximumCommitBytes {
+		return nil, errors.New("combined local compact commit and reference exceed their single invocation allowance")
+	}
 	path := filepath.Join(directory, name+".retention.json")
 	if err := writePrivateReviewFile(path, referenceBytes); err != nil {
 		return nil, err

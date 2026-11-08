@@ -23,6 +23,7 @@ type winnerHandoffStorage struct {
 	allocated, consumed int64
 	limit               int64
 	blockSize           int64
+	borrowed            int64
 	device, inode       uint64
 }
 
@@ -76,6 +77,12 @@ func readWinnerHandoffMemory() (string, int64, int64, int64, error) {
 // The capture directory, wrapper/member-state roots and temporary archive root
 // must all live on this actual reserved filesystem. Unknown extra roots refuse.
 func reserveWinnerHandoffStorage(directory string, paths []string, capacity *winnerMultipassCapacity) (*winnerHandoffStorage, winnerHandoffCapacityReservation, error) {
+	return reserveWinnerHandoffStorageForLifecycle(directory, paths, capacity, nil)
+}
+
+// The explicit spool keeps the unchanged aggregate and memory census, reserving
+// only its independently computed local peak. No capacity fallback is automatic.
+func reserveWinnerHandoffStorageForLifecycle(directory string, paths []string, capacity *winnerMultipassCapacity, spool *winnerMultipassSpoolCapacity) (*winnerHandoffStorage, winnerHandoffCapacityReservation, error) {
 	if capacity == nil || capacity.RequiredDurableBytes <= 0 {
 		return nil, winnerHandoffCapacityReservation{}, errors.New("review storage census is missing")
 	}
@@ -88,12 +95,18 @@ func reserveWinnerHandoffStorage(directory string, paths []string, capacity *win
 	if limit > capacity.Settings.MaximumMemoryBytes || current < 0 || limit-current < capacity.RequiredMemoryBytes || available < capacity.RequiredMemoryBytes {
 		return nil, proof, errors.New("native cgroup or available host memory cannot own the fixed evidence budget")
 	}
-	storage, err := allocateWinnerHandoffStorage(directory, paths, capacity.RequiredDurableBytes)
+	required := capacity.RequiredDurableBytes
+	if spool != nil {
+		content, _ := json.Marshal(spool)
+		proof.SpoolCapacitySha256 = winnerMultipassSha256(content)
+		required = spool.RequiredLocalPeakBytes
+	}
+	storage, err := allocateWinnerHandoffStorage(directory, paths, required)
 	if err != nil {
 		return nil, proof, err
 	}
 	proof.ReservationPath, proof.ReservationInode, proof.Device, proof.ReservedBytes = storage.path, storage.inode, storage.device, storage.allocated
-	if err := validateWinnerHandoffReservation(capacity, proof); err != nil {
+	if err := validateWinnerHandoffStorageReservation(capacity, spool, proof); err != nil {
 		storage.Close()
 		return nil, proof, err
 	}
@@ -166,7 +179,7 @@ func allocateWinnerHandoffStorage(directory string, paths []string, required int
 // Punch whole blocks only after adding the exact allowance. The final partial
 // block remains reserved until its full allowance or final Close is reached.
 func (self *winnerHandoffStorage) Consume(bytes int64) error {
-	if self == nil || self.file == nil || bytes <= 0 || bytes > self.limit-self.consumed {
+	if self == nil || self.file == nil || self.borrowed != 0 || bytes <= 0 || bytes > self.limit-self.consumed {
 		return errors.New("review attempted to spend unreserved capacity")
 	}
 	before := self.consumed / self.blockSize * self.blockSize
@@ -178,6 +191,78 @@ func (self *winnerHandoffStorage) Consume(bytes int64) error {
 	}
 	self.consumed += bytes
 	return nil
+}
+
+// One sequential invocation may temporarily use an admitted window. It cannot
+// take another window until protected custody and owned cleanup have completed.
+func (self *winnerHandoffStorage) Borrow(bytes int64) error {
+	if self == nil || self.file == nil || self.borrowed != 0 || bytes <= 0 || bytes > self.limit-self.consumed {
+		return errors.New("spool attempted an overlapping or unreserved invocation")
+	}
+	before := self.consumed / self.blockSize * self.blockSize
+	after := (self.consumed + bytes) / self.blockSize * self.blockSize
+	if after > before {
+		if err := unix.Fallocate(int(self.file.Fd()), unix.FALLOC_FL_PUNCH_HOLE|unix.FALLOC_FL_KEEP_SIZE, before, after-before); err != nil {
+			return err
+		}
+	}
+	self.borrowed = bytes
+	return nil
+}
+
+// Reallocate real blocks only after the exact protected invocation was evicted.
+// An archive/cleanup/allocation failure leaves the next invocation refused.
+func (self *winnerHandoffStorage) Restore() error {
+	if self == nil || self.file == nil || self.borrowed <= 0 {
+		return errors.New("spool has no outstanding invocation allocation")
+	}
+	before := self.consumed / self.blockSize * self.blockSize
+	after := (self.consumed + self.borrowed) / self.blockSize * self.blockSize
+	if after > before {
+		if err := unix.Fallocate(int(self.file.Fd()), 0, before, after-before); err != nil {
+			return err
+		}
+	}
+	self.borrowed = 0
+	return nil
+}
+
+// A single window is reused only after the caller completed protected custody
+// and cleanup; an outstanding window never permits a second provider attempt.
+func TestWinnerHandoffSpoolStorageRequiresCompletedWindowBeforeNextInvocation(t *testing.T) {
+	directory := t.TempDir()
+	storage, err := allocateWinnerHandoffStorage(directory, []string{directory}, 128*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.Close()
+	if err := storage.Consume(16 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Borrow(32 * 1024); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Borrow(1); err == nil {
+		t.Fatal("second invocation acquired an outstanding custody window")
+	}
+	if err := storage.Consume(1); err == nil {
+		t.Fatal("permanent writes bypassed the outstanding custody window")
+	}
+	if err := storage.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Borrow(storage.limit - storage.consumed + 1); err == nil {
+		t.Fatal("spool exceeded its exact local peak")
+	}
+	if err := storage.Borrow(32 * 1024); err != nil {
+		t.Fatal("restored actual blocks could not own the next invocation", err)
+	}
+	if err := storage.Restore(); err != nil {
+		t.Fatal(err)
+	}
+	if err := storage.Restore(); err == nil {
+		t.Fatal("spool restored a nonexistent outstanding window")
+	}
 }
 
 func (self *winnerHandoffStorage) Close() error {

@@ -78,6 +78,16 @@ func validateWinnerHandoffCaptureAdmission(content []byte, owner *model.Competit
 		return nil, err
 	}
 	capacityBytes, _ := json.Marshal(capacity)
+	if settings.Spool != nil {
+		spool, _, err := estimateWinnerMultipassSpoolCapacity(plan, bundle, winnerHandoffTokenizerCensus(plan), settings.Capacity, *settings.Spool)
+		if err != nil {
+			return nil, err
+		}
+		capacityBytes, _ = json.Marshal(struct {
+			Aggregate *winnerMultipassCapacity      `json:"aggregate"`
+			Spool     *winnerMultipassSpoolCapacity `json:"spool"`
+		}{Aggregate: capacity, Spool: spool})
+	}
 	ownerBytes, _ := json.Marshal(owner)
 	if admission.Schema != 1 || admission.Kind != "elected-winner-frozen-capture-admission/v1" || admission.HandoffId != owner.HandoffId || admission.OwnerSha256 != winnerMultipassSha256(ownerBytes) ||
 		admission.PlanSha256 != owner.Plan.PlanSha256 || admission.BundleSha256 != plan.BundleSha256 || admission.Provenance != provenance || admission.CapacitySha256 != winnerMultipassSha256(capacityBytes) || len(admission.ResourceProofs) == 0 || len(admission.ResourceProofs) > 16 ||
