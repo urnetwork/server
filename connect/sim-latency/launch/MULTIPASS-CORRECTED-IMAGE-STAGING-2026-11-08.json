@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "kind": "winner-review-corrected-image-static-staging-evidence/v1",
+  "source_commit": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "image_id": "sha256:f1265c9faeff6c02c7ea5d6574ada5a38851bc745672a086b6d0ad28e8c1c9fd",
+  "binary_sha256": "85bd6410c087d94807ffc4b0ae142aec1a7c18681715a470106d1586303a958e",
+  "native_driver_sha256": "5aaa352c2cca5089d44d09ac26a53d3277d0167211ae3ae0dbc92dc17f193e6e",
+  "build": {"network": "none", "pull": false, "context": "static binary and Dockerfile only"},
+  "static_inspection": {
+    "container_id": "9c0513b3332afc777a1b02bb7a04ebed37d113706f4ec826f8ac6fd1779efc48",
+    "state_when_inspected": "created",
+    "network": "none",
+    "mounts": [],
+    "user": "65532:65532",
+    "entrypoint": ["/review-broker", "review-multipass-broker"],
+    "extracted_binary_matches_staged_binary": true,
+    "container_started": false,
+    "inspection_container_removed": true
+  },
+  "validation_at_recording": {
+    "focused_tests_passed": 7,
+    "ordinary_tests_passed": 136,
+    "race_validation": "running; inspect its original process and terminal evidence",
+    "qualification_complete": false
+  },
+  "authority": {
+    "static_build_evidence_only": true,
+    "replacement_qualification_approval_pending": true,
+    "runtime_qualification": false,
+    "installed_as_active_release": false,
+    "candidate_model_generation": false,
+    "winner_approved": false,
+    "source_promoted": false,
+    "rewards_released": false,
+    "previous_failed_owner_restarted": false
+  }
+}
