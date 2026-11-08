@@ -100,3 +100,33 @@ func TestStripeTrialConversionIsTheFirstSale(t *testing.T) {
 	notice := stripeInvoiceSalesNotice(networkId, renewal, yearEnd, yearEnd.Add(365*24*time.Hour+manualPaymentGracePeriod))
 	connect.AssertEqual(t, notice.Kind, "renewal")
 }
+
+// The reconciler credits a missed invoice by its id alone: the notice makes
+// no trial verdict from the window, and the read back decides. A charged
+// invoice for a short period is a sale.
+func TestStripeReconcilerCreditLeavesTheTrialToTheReadBack(t *testing.T) {
+	networkId := server.NewId()
+	start := time.Date(2026, 11, 8, 4, 7, 27, 0, time.UTC)
+	shortEnd := start.Add(9 * 24 * time.Hour)
+	stripeSalesApi(t, map[string]string{
+		"/v1/invoices/in_short": fmt.Sprintf(
+			`{"id":"in_short","billing_reason":"subscription_update","amount_paid":1250,"total":1250,"currency":"usd","charge":"ch_short","lines":{"data":[{"period":{"start":%d,"end":%d},"price":{"recurring":{"interval":"year"}}}]}}`,
+			start.Unix(), shortEnd.Unix(),
+		),
+		"/v1/charges/ch_short": `{"id":"ch_short","payment_method_details":{"type":"card"}}`,
+		"/v1/invoices/in_missed_trial": fmt.Sprintf(
+			`{"id":"in_missed_trial","billing_reason":"subscription_create","amount_paid":0,"total":0,"currency":"usd","lines":{"data":[{"period":{"start":%d,"end":%d},"price":{"recurring":{"interval":"year"}}}]}}`,
+			start.Unix(), start.Add(14*24*time.Hour).Unix(),
+		),
+	})
+
+	notice := stripeInvoiceSalesNotice(networkId, &StripeEventInvoiceObject{Id: "in_short"}, start, shortEnd.Add(manualPaymentGracePeriod))
+	connect.AssertEqual(t, notice.Trial, false)
+	notice.Enrich(context.Background(), notice)
+	connect.AssertEqual(t, salesNoticeLines(notice, "acme"), salesNoticeText("Pro yearly (plan change)", "acme", "12.50 USD", "Stripe (card)"))
+
+	notice = stripeInvoiceSalesNotice(networkId, &StripeEventInvoiceObject{Id: "in_missed_trial"}, start, start.Add(14*24*time.Hour+manualPaymentGracePeriod))
+	connect.AssertEqual(t, notice.Trial, false)
+	notice.Enrich(context.Background(), notice)
+	connect.AssertEqual(t, salesNoticeLines(notice, "acme"), stripeSalesTrialText("Trial", "Pro yearly (new)", "no charge (free trial until 2026-11-22)", "Stripe"))
+}

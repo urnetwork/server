@@ -1087,7 +1087,7 @@ func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken str
 	return
 }
 
-// The most earlier credits of one purchase token
+// How many of a purchase token's latest credits
 // GetPurchaseTokenCreditEndTimesInTx reads.
 const purchaseTokenCreditEndTimesLimit = 100
 

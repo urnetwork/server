@@ -210,12 +210,16 @@ func stripeInvoiceSalesNotice(
 	if model.SalesCurrencyCode(invoice.Currency) != "" {
 		notice.Amount = stripeSalesAmount(int64(invoice.Total), invoice.Currency)
 	}
-	// the window runs manualPaymentGracePeriod past the period it paid for
+	// the window runs manualPaymentGracePeriod past the period it paid for.
+	// Only a delivered invoice (it names its currency) is read for a trial
+	// here: the reconciler credits by id alone, and the read back decides.
 	periodEnd := endTime.Add(-manualPaymentGracePeriod)
-	if stripeInvoiceStartsTrial(invoice.BillingReason, int64(invoice.Total), periodEnd.Sub(startTime)) {
-		stripeMarkTrialNotice(notice, periodEnd)
-	} else if stripeInvoiceEndsTrial(invoice.BillingReason, int64(invoice.Total), stripeUnixPeriodLength(int64(invoice.PeriodStart), int64(invoice.PeriodEnd))) {
-		notice.Kind = model.SalesPaymentKindAfterTrial
+	if model.SalesCurrencyCode(invoice.Currency) != "" {
+		if stripeInvoiceStartsTrial(invoice.BillingReason, int64(invoice.Total), periodEnd.Sub(startTime)) {
+			stripeMarkTrialNotice(notice, periodEnd)
+		} else if stripeInvoiceEndsTrial(invoice.BillingReason, int64(invoice.Total), stripeUnixPeriodLength(int64(invoice.PeriodStart), int64(invoice.PeriodEnd))) {
+			notice.Kind = model.SalesPaymentKindAfterTrial
+		}
 	}
 	invoiceId := invoice.Id
 	notice.Enrich = func(ctx context.Context, notice *model.SalesPaymentNotice) {
