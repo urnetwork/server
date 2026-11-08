@@ -1005,6 +1005,12 @@ var playPackageNameFunc = playPackageName
 var playSkusFunc = func() map[string]*Sku { return playSkus() }
 var playAuthHeaderFunc = playAuthHeader
 
+// The onboarding trial outcome writers the webhook calls. Replaceable only by
+// the hermetic Play webhook tests, which record the outcome instead of reading
+// the network's onboarding events; production never mutates them.
+var playStoreTrialCancelled = storeTrialCancelled
+var playStoreTrialConverted = storeTrialConverted
+
 // Replaceable only by the terminal-renewal error-path test. Production always
 // ends through the network-and-purchase-token-scoped model transaction.
 var endPlaySubscriptionEntitlement = func(
@@ -1188,6 +1194,10 @@ func PlayWebhook(
 				}
 			}
 
+			// the trial outcomes' plan is the purchase's base plan: the product
+			// id ("supporter") sells both plans
+			plan := playPlanForSubscription(sub, rtdnMessage.SubscriptionNotification.SubscriptionId)
+
 			acknowledgeAndCheckRenewal := true
 			switch sub.SubscriptionState {
 			case "SUBSCRIPTION_STATE_CANCELED",
@@ -1196,11 +1206,11 @@ func PlayWebhook(
 				acknowledgeAndCheckRenewal = false
 				// the onboarding trial outcome: a trial that stops renewing or
 				// expires before its first paid period is trial.cancelled
-				storeTrialCancelled(
+				playStoreTrialCancelled(
 					clientSession.Ctx,
 					networkId,
 					model.OnboardingStorePlay,
-					planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+					plan,
 					server.NowUtc(),
 				)
 			}
@@ -1249,11 +1259,11 @@ func PlayWebhook(
 				if renewalResult != nil && renewalResult.Renewed {
 					// the onboarding trial outcome: a credited renewal past a
 					// recorded trial's length is trial.converted
-					storeTrialConverted(
+					playStoreTrialConverted(
 						clientSession.Ctx,
 						networkId,
 						model.OnboardingStorePlay,
-						planForProductId(rtdnMessage.SubscriptionNotification.SubscriptionId),
+						plan,
 						server.NowUtc(),
 					)
 				}

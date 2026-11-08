@@ -392,7 +392,7 @@ func appleRecordOnboardingOutcome(ctx context.Context, notificationType string, 
 		}
 	}()
 	now := server.NowUtc()
-	plan := planForProductId(transaction.productId)
+	plan := applePlanForProductId(transaction.productId)
 	switch notificationType {
 	case "DID_RENEW":
 		if processed {

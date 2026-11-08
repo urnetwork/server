@@ -52,15 +52,6 @@ func addSalesPaymentNoticeInTx(tx server.PgTx, build func() *model.SalesPaymentN
 	model.AddSalesPaymentNoticeInTx(tx, notice)
 }
 
-// salesPlanForProductId is the plan a store product id sells. "supporter" is
-// the App Store's monthly plan from 2025-02 (appleLegacySupporterProductIds).
-func salesPlanForProductId(productId string) string {
-	if strings.EqualFold(productId, "supporter") {
-		return model.PlanMonthly
-	}
-	return planForProductId(productId)
-}
-
 // salesConfiguredUsdAmount is a configured USD price, marked as the list
 // price.
 func salesConfiguredUsdAmount(priceUsd float64, store string) string {
@@ -491,7 +482,7 @@ func appleSalesNotice(transaction *validatedAppleTransaction) *model.SalesPaymen
 	return &model.SalesPaymentNotice{
 		RecordKey: "apple_transaction/" + transaction.transactionId,
 		NetworkId: &transaction.networkId,
-		Item:      model.SalesProItem(salesPlanForProductId(transaction.productId)),
+		Item:      model.SalesProItem(applePlanForProductId(transaction.productId)),
 		Kind:      appleSalesKind(transaction),
 		Amount:    model.SalesAmount64(transaction.priceMilliunits, 3, transaction.currency),
 		Method:    "Apple App Store",
@@ -591,7 +582,8 @@ func playSalesNotice(
 		Method:    "Google Play",
 	}
 	if sku.Supporter {
-		notice.Item = model.SalesProItem(salesPlanForProductId(playSubscriptionRenewal.SubscriptionId))
+		// the base plan names the plan: the product id ("supporter") sells both
+		notice.Item = model.SalesProItem(playPlanForSubscription(sub, playSubscriptionRenewal.SubscriptionId))
 	} else {
 		notice.Item = model.SalesDataItem(sku.BalanceByteCount())
 	}
@@ -714,7 +706,7 @@ func cryptoSalesNotice(intent *model.CryptoPaymentIntent, credit *cryptoCredit, 
 		notice.Item = model.SalesProItem(model.PlanYearly)
 		notice.Kind = "one-time, welcome offer"
 	case plan:
-		notice.Item = model.SalesProItem(salesPlanForProductId(intent.Item))
+		notice.Item = model.SalesProItem(planForProductId(intent.Item))
 	default:
 		notice.Item = model.SalesDataItem(byteCount)
 	}
