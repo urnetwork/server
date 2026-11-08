@@ -323,6 +323,15 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation SET DEFAULT true`},
 		{name: "URL outcome probation nullable", version: server.ProviderEgressUrlSourceVersion(),
 			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation DROP NOT NULL`},
+		// A country site scores only once the refresh graduates it: a scored
+		// default would score every new site on arrival, and without the
+		// state or the pair tally the ingest fails.
+		{name: "country site state missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site`},
+		{name: "country site scored by default", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site ALTER COLUMN scored SET DEFAULT true`},
+		{name: "country site pair tally missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `DROP TABLE provider_egress_country_site_tally`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

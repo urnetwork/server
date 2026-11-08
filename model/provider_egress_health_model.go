@@ -101,10 +101,14 @@ type ProviderEgressHealth struct {
 	// (provider_egress_url_source.go). Zero, the general catalog, for a report
 	// without URL evidence.
 	UrlSource ProviderEgressUrlSource
-	// UrlProbation is a URL outcome on a destination that has not graduated
-	// into scoring: the ingest sets it for every country site, and the store
-	// also for a general destination the pool holds on probation. Recorded and
-	// in the rolling quota, never counted.
+	// UrlCountryCode is the country whose list a country outcome's
+	// destination came from: its graduation state and pair tally are that
+	// country's (provider_egress_country_site.go).
+	UrlCountryCode string
+	// UrlProbation keeps a URL outcome out of every score whatever its
+	// destination's state. The store decides probation itself besides: a
+	// general destination the pool holds on probation, or a country site that
+	// has not graduated. Recorded and in the rolling quota, never counted.
 	UrlProbation bool
 }
 
@@ -352,11 +356,12 @@ func storeProviderEgressHealth(
 			)`, health.ClientId, egresshealth.UrlProbeDestinationKey(health.UrlProbeEvidence.Destination)).Scan(&recheck))
 		}
 		// A measured outcome on a destination that has not graduated into
-		// scoring is on probation: a country site, which the ingest marks, or
-		// a general destination the pool holds on probation, read here as the
-		// pool stands. It is a measured run like any other, so the history
-		// keeps it with its outcome, its source and its probation state, and
-		// the rolling quota, which paces turns by measured runs, counts it:
+		// scoring is on probation: a country site the refresh has not
+		// graduated (provider_egress_country_site.go), or a general
+		// destination the pool holds on probation, each read here as it
+		// stands. It is a measured run like any other, so the history keeps it
+		// with its outcome, its source and its probation state, and the
+		// rolling quota, which paces turns by measured runs, counts it:
 		// recording a site unscored costs no extra turns. What it may not do
 		// is count (GEOMAP §11.4): the eight-hour window leaves it out
 		// (providerEgressHealthWindowSql), and the latest-run row takes it out
@@ -364,9 +369,13 @@ func storeProviderEgressHealth(
 		// unscored ones, as a recheck's.
 		probation := health.UrlProbation
 		if health.UrlProbeEvidence != nil && health.Total == 1 && !probation {
-			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (
-				SELECT 1 FROM provider_egress_destination WHERE name = $1 AND probation
-			)`, health.UrlProbeEvidence.Destination.Name).Scan(&probation))
+			if health.UrlSource == ProviderEgressUrlSourceCountry {
+				probation = !providerEgressCountrySiteScoredInTx(ctx, tx, health.UrlProbeEvidence.Destination.Name, health.UrlCountryCode)
+			} else {
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (
+					SELECT 1 FROM provider_egress_destination WHERE name = $1 AND probation
+				)`, health.UrlProbeEvidence.Destination.Name).Scan(&probation))
+			}
 		}
 		// the history row's counts are the rolling quota's: every measured
 		// outcome but a recheck; the latest-run row's are the scored ones
@@ -404,6 +413,13 @@ func storeProviderEgressHealth(
 			return
 		}
 		result = ProviderEgressHealthStored{Stored: true, Recheck: recheck, Probation: probation && !recheck}
+		// a measured country outcome, scored or not, is paired with the same
+		// provider's general outcomes for the refresh's graduation and
+		// demotion judgements; a recheck is no sample of the site
+		if health.UrlSource == ProviderEgressUrlSourceCountry && health.UrlProbeEvidence != nil && health.UrlCountryCode != "" &&
+			measuredTotal == 1 && policyVersion == SelectedProviderUrlProbePolicyVersion() {
+			addProviderEgressCountrySiteTallyInTx(ctx, tx, health, measuredOk, policyVersion)
+		}
 		if health.UrlProbeEvidence != nil {
 			for _, event := range health.UrlProbeEvidence.Security {
 				destinationJson, err := json.Marshal(event.Destination)

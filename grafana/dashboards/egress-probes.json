@@ -7679,7 +7679,7 @@
     {
       "id": 153,
       "type": "row",
-      "title": "URL outcomes by catalog source: country lists and sites on probation, recorded unscored",
+      "title": "URL outcomes by catalog source, and country sites graduating on paired evidence",
       "collapsed": false,
       "gridPos": {
         "h": 1,
@@ -7768,6 +7768,88 @@
           "refId": "A",
           "expr": "sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\",outcome=\"success\"}[1h])) / sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[1h]))",
           "legendFormat": "{{source}} {{scoring}}"
+        }
+      ]
+    },
+    {
+      "id": 156,
+      "type": "timeseries",
+      "title": "country sites by state (latest refresh)",
+      "description": "The listed country sites by state, as the latest daily pool refresh left them (read from the taskworker that ran it): probation, never graduated, recorded and in the rolling quota but never scored; scored, graduated because, over a week, it did no worse than the general catalog for the same providers (per network, at most 3 points worse at one-sided 95%, and load-weighted), with at least 10 networks of 50 paired loads, 20 providers and no TLS failure the judge has not called the provider's own; demoted, on probation again after being clearly worse (6 points at 95%), collapsing (under half the successes its providers' general outcomes predict, for most loads or most networks) or a TLS failure judged a site or place fault. A scored country site counts in Quality, Speed, the index and ranking, never in the Online rule or its country guard. Each site's last judgement is in provider_egress_country_site.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 510
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) (urnetwork_egress_country_sites{env=\"$env\"} and on(env,service,block,host,instance) topk(1, max by (env,service,block,host,instance) (urnetwork_egress_site_refresh_last_run_timestamp_seconds{env=\"$env\"})))",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "id": 157,
+      "type": "timeseries",
+      "title": "country site graduations and demotions / day",
+      "description": "Country sites the daily pool refresh graduated (paired: no worse than the general catalog for the same providers) or demoted (worse: clearly worse per network; collapsed: failing for most loads or networks in the last two days; tls: a TLS failure judged a site or place fault), summed across the taskworkers over a day. A refresh skipped for a prober fault judges no country site. The [egresssites] log line names each site with its evidence.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 510
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (change, reason) (increase(urnetwork_egress_country_site_changes_total{env=\"$env\"}[1d]))",
+          "legendFormat": "{{change}} {{reason}}"
         }
       ]
     }

@@ -1,6 +1,9 @@
 package controller
 
 import (
+	"context"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,21 +25,42 @@ import (
 // therefore derived here, from the served catalog, which is what decided the
 // draw: a destination named in a country list is a country site (the parse
 // keeps country sites disjoint from every general entry by name and website,
-// ParseProviderEgressSites), anything else general. Every country site is on
-// probation, since country sites do not graduate yet; the store adds a general
-// destination the pool holds on probation.
+// ParseProviderEgressSites), anything else general. The store decides
+// probation from the pool and from each country site's graduation state
+// (model/provider_egress_country_site.go).
 
-// The country site names of one qualityprobe.yml version.
+// The country site names of one qualityprobe.yml version, each with the
+// countries whose lists hold it, in order.
 type providerEgressUrlSources struct {
-	countrySites map[string]bool
+	countrySites map[string][]string
 }
 
-// The catalog's sources for the outcome's destination.
-func (self *providerEgressUrlSources) of(destination egresshealth.Destination) (source model.ProviderEgressUrlSource, probation bool) {
-	if self != nil && self.countrySites[destination.Name] {
-		return model.ProviderEgressUrlSourceCountry, true
+// The catalog's source for the outcome's destination, and for a country site
+// the countries whose lists hold it.
+func (self *providerEgressUrlSources) of(destination egresshealth.Destination) (model.ProviderEgressUrlSource, []string) {
+	if self != nil {
+		if countryCodes := self.countrySites[destination.Name]; 0 < len(countryCodes) {
+			return model.ProviderEgressUrlSourceCountry, countryCodes
+		}
 	}
-	return model.ProviderEgressUrlSourceGeneral, false
+	return model.ProviderEgressUrlSourceGeneral, nil
+}
+
+// The country a country outcome's destination came from: its one list, or
+// for a site several countries list, the provider's published country when it
+// is one of them (the list the provider was served), else the first.
+func providerEgressUrlCountryOf(ctx context.Context, clientId server.Id, countryCodes []string) string {
+	switch len(countryCodes) {
+	case 0:
+		return ""
+	case 1:
+		return countryCodes[0]
+	}
+	published := strings.ToLower(strings.TrimSpace(model.GetProviderEgressPlaces(ctx, []server.Id{clientId})[clientId].CountryCode))
+	if slices.Contains(countryCodes, published) {
+		return published
+	}
+	return countryCodes[0]
 }
 
 // One qualityprobe.yml version's parse: its country sites, or when it failed
@@ -86,10 +110,10 @@ func getProviderEgressUrlSources() *providerEgressUrlSources {
 			logProviderEgressUrlSourcesUnreadable(err)
 			return providerEgressUrlSourcesLoad{failedAt: time.Now()}, true
 		}
-		sources := &providerEgressUrlSources{countrySites: map[string]bool{}}
-		for _, destinations := range sites.Countries {
-			for _, destination := range destinations {
-				sources.countrySites[destination.Name] = true
+		sources := &providerEgressUrlSources{countrySites: map[string][]string{}}
+		for _, countryCode := range providerEgressCountryCodes(sites.Countries) {
+			for _, destination := range sites.Countries[countryCode] {
+				sources.countrySites[destination.Name] = append(sources.countrySites[destination.Name], countryCode)
 			}
 		}
 		return providerEgressUrlSourcesLoad{sources: sources}, true

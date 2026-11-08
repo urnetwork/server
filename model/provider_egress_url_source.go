@@ -8,10 +8,12 @@ package model
 // general destination promoted from the candidates serves on probation until
 // the pool refresh graduates it: it is loaded and recorded, but it has to earn
 // the right to cost a provider a tier (GEOMAP §11.4). A country site is in the
-// same position until country sites graduate, which no release does yet.
+// same position until the pool refresh graduates it on paired evidence, and
+// returns to it when demoted (provider_egress_country_site.go).
 //
-// The operator ingest decides both at the store, from the catalog and the pool
-// as they stand, and records them beside the outcome
+// The operator ingest decides both at the store, from the catalog, the pool
+// and the country sites' states as they stand, and records them beside the
+// outcome
 // (provider_egress_health_history url_source and url_probation). An outcome on
 // probation is a measured run like any other: it is in the history with its
 // outcome and in the rolling quota, which paces turns by measured runs. What

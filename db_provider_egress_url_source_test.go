@@ -30,8 +30,9 @@ func TestProviderEgressUrlSourceMigrationIsAppendedAfterTheHistoryColumns(t *tes
 }
 
 // The columns are constant defaults that read as a scored general outcome,
-// added under a five-second lock bound, at most once; and nothing rewrites,
-// samples, backfills or deletes.
+// added under a five-second lock bound, at most once, after the two new
+// country-site tables are created; and nothing rewrites, samples, backfills or
+// deletes.
 func TestProviderEgressUrlSourceMigrationIsAdditiveAndBounded(t *testing.T) {
 	sql := providerEgressUrlSourceMigration.sql
 	for _, marker := range []string{
@@ -40,13 +41,20 @@ func TestProviderEgressUrlSourceMigrationIsAdditiveAndBounded(t *testing.T) {
 		`PERFORM set_config('lock_timeout', '5s', true);`,
 		`ADD COLUMN url_source smallint NOT NULL DEFAULT 0,`,
 		`ADD COLUMN url_probation boolean NOT NULL DEFAULT false;`,
+		`CREATE TABLE IF NOT EXISTS provider_egress_country_site (`,
+		`PRIMARY KEY (name, country_code)`,
+		`CREATE TABLE IF NOT EXISTS provider_egress_country_site_tally (`,
+		`PRIMARY KEY (tally_day, name, country_code, client_id)`,
 	} {
 		if !strings.Contains(sql, marker) {
 			t.Errorf("URL source migration lacks %q", marker)
 		}
 	}
-	if strings.Index(sql, "lock_timeout") > strings.Index(sql, "ALTER TABLE") {
-		t.Error("URL source migration bounds its lock wait after it alters the table")
+	if strings.Index(sql, "lock_timeout") > strings.Index(sql, "CREATE TABLE") {
+		t.Error("URL source migration bounds its lock wait after it creates its tables")
+	}
+	if strings.Index(sql, "ALTER TABLE") < strings.LastIndex(sql, "CREATE TABLE") {
+		t.Error("URL source migration holds the history's lock while it creates its tables")
 	}
 	if regexp.MustCompile(`(?i)\b(ANALYZE|VACUUM|UPDATE|DELETE|TRUNCATE|DROP|CLUSTER|INDEX)\b`).MatchString(sql) {
 		t.Error("URL source migration rewrites, samples, backfills, indexes or deletes")

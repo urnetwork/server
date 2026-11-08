@@ -413,10 +413,11 @@ func refuseProviderEgressHealthTime(args *SubmitProviderEgressHealthArgs, now ti
 //
 // A versioned URL outcome is one load, which its evidence names. Its source,
 // the general catalog or the provider's country list, is read from the served
-// catalog, and an outcome on a destination that has not graduated (every
-// country site, and a general site on probation) is stored measured but
-// unscored: in the history and the rolling quota, out of the eight-hour
-// window (provider_egress_url_source.go).
+// catalog, and an outcome on a destination that has not graduated (a country
+// site the refresh has not graduated, a general site on probation) is stored
+// measured but unscored: in the history and the rolling quota, out of the
+// eight-hour window (provider_egress_url_source.go,
+// model/provider_egress_country_site.go).
 //
 // A "reputation" key inside class_results is still rejected outright. The
 // class dissolved into the sites, so no current prober sends one; a body that
@@ -534,7 +535,9 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 		// where the destination came from, from the served catalog; the store
 		// keeps an outcome on probation out of every score
 		// (provider_egress_url_source.go)
-		health.UrlSource, health.UrlProbation = getProviderEgressUrlSources().of(args.UrlProbeEvidence.Destination)
+		source, countryCodes := getProviderEgressUrlSources().of(args.UrlProbeEvidence.Destination)
+		health.UrlSource = source
+		health.UrlCountryCode = providerEgressUrlCountryOf(ctx, args.ClientId, countryCodes)
 	}
 	// Preserve legacy scoring semantics only for legacy diagnostic reports.
 	// A versioned URL error remains in its policy-version denominator unless

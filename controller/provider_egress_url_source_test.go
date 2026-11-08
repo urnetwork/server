@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -301,25 +302,36 @@ func TestProviderEgressUrlRecheckOfACountrySiteStaysSecurityOnly(t *testing.T) {
 }
 
 // The ingest reads each outcome's source from the served catalog: a name in a
-// country list is a country site, on probation; anything else is general, and
-// what the store makes of it is the pool's (probation) or nothing.
+// country list is a country site of that country; anything else is general.
+// What the store makes of it is the site's graduation state or the pool's
+// probation.
 func TestProviderEgressUrlSourcesOfTheServedCatalog(t *testing.T) {
 	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, providerEgressUrlSourceTestCatalog))
 	sources := getProviderEgressUrlSources()
 	for _, c := range []struct {
 		name      string
 		source    model.ProviderEgressUrlSource
-		probation bool
+		countries []string
 	}{
-		{"de-site", model.ProviderEgressUrlSourceCountry, true},
-		{"general-site", model.ProviderEgressUrlSourceGeneral, false},
-		{"promoted-site", model.ProviderEgressUrlSourceGeneral, false},
-		{"unknown-site", model.ProviderEgressUrlSourceGeneral, false},
+		{"de-site", model.ProviderEgressUrlSourceCountry, []string{"de"}},
+		{"general-site", model.ProviderEgressUrlSourceGeneral, nil},
+		{"promoted-site", model.ProviderEgressUrlSourceGeneral, nil},
+		{"unknown-site", model.ProviderEgressUrlSourceGeneral, nil},
 	} {
-		source, probation := sources.of(egresshealth.Destination{Name: c.name})
-		if source != c.source || probation != c.probation {
-			t.Errorf("%s: source %s probation %t, want %s %t", c.name, source, probation, c.source, c.probation)
+		source, countries := sources.of(egresshealth.Destination{Name: c.name})
+		if source != c.source || !slices.Equal(countries, c.countries) {
+			t.Errorf("%s: source %s countries %v, want %s %v", c.name, source, countries, c.source, c.countries)
 		}
+	}
+	// a site one list holds is that list's, whatever the provider's place
+	countryOf := func(countryCodes ...string) string {
+		return providerEgressUrlCountryOf(t.Context(), server.NewId(), countryCodes)
+	}
+	if got := countryOf("de"); got != "de" {
+		t.Errorf("a site of one list is %q's, want de", got)
+	}
+	if got := countryOf(); got != "" {
+		t.Errorf("a general site has the country %q", got)
 	}
 }
 
@@ -337,8 +349,8 @@ func TestProviderEgressUrlSourcesParseAnUnusableCatalogOncePerRetry(t *testing.T
 
 	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte("schema_version: 2\n")))
 	for range 3 {
-		if source, probation := getProviderEgressUrlSources().of(egresshealth.Destination{Name: "de-site"}); source != model.ProviderEgressUrlSourceGeneral || probation {
-			t.Fatalf("an unusable catalog classified an outcome %s, probation %t", source, probation)
+		if source, countries := getProviderEgressUrlSources().of(egresshealth.Destination{Name: "de-site"}); source != model.ProviderEgressUrlSourceGeneral || countries != nil {
+			t.Fatalf("an unusable catalog classified an outcome %s of %v", source, countries)
 		}
 	}
 	if parses != 1 {
