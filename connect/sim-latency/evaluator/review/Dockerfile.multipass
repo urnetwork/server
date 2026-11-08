@@ -1,0 +1,7 @@
+# Separate prospective profile: the build context contains only this Dockerfile
+# and the trusted static sim-latency binary. Never send a repository root,
+# candidate, config, vault, credential or private review bundle to Docker build.
+FROM scratch
+COPY --chmod=0555 sim-latency /review-broker
+USER 65532:65532
+ENTRYPOINT ["/review-broker", "review-multipass-broker"]

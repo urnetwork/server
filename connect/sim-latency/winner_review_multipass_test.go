@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Reuse the authenticated synthetic native-review fixture, not production data.
@@ -60,7 +61,7 @@ func winnerMultipassEvidenceFixture(t *testing.T, bundle winnerMultipassBundle, 
 		response, _ := json.Marshal(map[string]any{"id": fmt.Sprintf("synthetic-response-%04d", index), "status": "completed", "model": call.Member.Model,
 			"usage": map[string]int{"input_tokens": 100, "output_tokens": 100}, "output": []any{map[string]any{"type": "message", "role": "assistant", "content": []any{map[string]any{"type": "output_text", "text": string(output)}}}}})
 		item := winnerMultipassCallEvidence{CallId: call.Id, StartedAt: plan.Owner.StartedAt.Add(time.Duration(index*2) * time.Second), CompletedAt: plan.Owner.StartedAt.Add(time.Duration(index*2+1) * time.Second),
-			Request: payload, Admission: winnerMultipassAdmissionFixture(plan, call, payload, 200), VisibleResponse: response, VisibleResponseSha256: winnerMultipassSha256(response),
+			Request: payload, Admission: winnerMultipassAdmissionFixture(plan, call, payload, 100), VisibleResponse: response, VisibleResponseSha256: winnerMultipassSha256(response),
 			TransportResponseSha256: winnerMultipassSha256(response), TransportReceiptSha256: winnerMultipassSha256([]byte("synthetic-transport-proof")), ProviderOutput: string(output), Observation: observation}
 		evidence.Calls = append(evidence.Calls, item)
 		completed[call.Id] = item
@@ -379,5 +380,170 @@ func TestWinnerMultipassPackingCancellationMakesNoTokenizerCall(t *testing.T) {
 	})
 	if err == nil || called {
 		t.Fatal("canceled planning invoked tokenizer")
+	}
+}
+
+// Coverage atoms are byte accounting, not a larger per-model inference budget.
+func TestWinnerMultipassMoreThan128AtomsCanPackWithinOriginalLeafBudget(t *testing.T) {
+	bundle, initial, _ := winnerMultipassFixture(t)
+	file := &bundle.Request.WorkloadReview.InstrumentFiles[0]
+	file.Content += strings.Repeat("// synthetic coverage accounting\n", 600)
+	file.Sha256 = winnerMultipassSha256([]byte(file.Content))
+	settings := initial.Settings
+	settings.SpanBytes, settings.OverlapLines, settings.MaximumOverlapBytes = 128, 1, 32
+	plan, err := prepareWinnerMultipass(bundle, initial.Owner, settings, initial.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Units) <= 128 {
+		t.Fatal("fixture does not exercise the separate atom census")
+	}
+	packing, err := packWinnerMultipass(context.Background(), plan, bundle, func(_ context.Context, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
+		return winnerMultipassAdmissionFixture(plan, call, payload, 100+len(call.UnitIds)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateWinnerMultipassPlan(packing.Plan, bundle); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{}
+	for _, unit := range plan.Units {
+		want = append(want, unit.Id)
+	}
+	for _, member := range plan.Provider.Members {
+		got, leaves := []string{}, 0
+		for _, call := range packing.Plan.Calls {
+			if call.Member == member && call.Stage == "scan" {
+				got = append(got, call.UnitIds...)
+				leaves++
+			}
+		}
+		if leaves > 128 || !slices.Equal(got, want) {
+			t.Fatal("complete per-model coverage or fixed scan budget changed")
+		}
+	}
+	if err := validateWinnerMultipassLeafAdmissions(packing.Plan, bundle, packing.FinalAdmissions); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Repacking cannot turn the independent atom allowance into a 129th scan draw.
+func TestWinnerMultipassActual129ScanLeavesAreRejected(t *testing.T) {
+	_, plan, _ := winnerMultipassFixture(t)
+	plan.Units = []winnerMultipassUnit{}
+	groups := []winnerMultipassScanGroup{}
+	for index := 0; index < 129; index++ {
+		plan.Units = append(plan.Units, winnerMultipassUnit{Id: fmt.Sprintf("unit-%04d", index+1), Spans: []winnerMultipassSpan{}})
+	}
+	for _, member := range plan.Provider.Members {
+		for _, unit := range plan.Units {
+			groups = append(groups, winnerMultipassScanGroup{Member: member.Name, UnitIds: []string{unit.Id}})
+		}
+	}
+	if err := setWinnerMultipassScanGroups(plan, groups); err == nil || !strings.Contains(err.Error(), "scan-leaf bound") {
+		t.Fatal("actual model-call allowance silently grew")
+	}
+}
+
+// The separate accounting cap remains bounded before tokenization or inference.
+func TestWinnerMultipassMoreThan1024CoverageAtomsAreRejected(t *testing.T) {
+	bundle, initial, _ := winnerMultipassFixture(t)
+	file := &bundle.Request.WorkloadReview.InstrumentFiles[0]
+	file.Content += strings.Repeat("// synthetic coverage accounting\n", 5000)
+	file.Sha256 = winnerMultipassSha256([]byte(file.Content))
+	settings := initial.Settings
+	settings.SpanBytes, settings.OverlapLines, settings.MaximumOverlapBytes = 128, 1, 32
+	if _, err := prepareWinnerMultipass(bundle, initial.Owner, settings, initial.Provider); err == nil || !strings.Contains(err.Error(), "coverage-atom bound") {
+		t.Fatal("oversized coverage census accepted")
+	}
+	settings.MaximumCoverageAtoms++
+	if validateWinnerMultipassSettings(settings) == nil {
+		t.Fatal("approved atom ceiling was configurable upward")
+	}
+}
+
+// Whole-line boundaries preserve non-ASCII code bytes and bounded context.
+func TestWinnerMultipassMultibyteSpanRoundTrip(t *testing.T) {
+	content := "package example\n" + strings.Repeat("// 漢字 café Ελληνικά 🙂\n", 40)
+	settings := defaultWinnerMultipassSettings()
+	settings.SpanBytes, settings.MaximumOverlapBytes = 101, 55
+	spans, err := splitWinnerMultipassArtifact(winnerMultipassArtifact{Id: "synthetic-utf8", Path: "server/example.go", Content: content}, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := ""
+	for _, span := range spans {
+		core, context := content[span.Start:span.End], content[span.ContextStart:span.ContextEnd]
+		if !utf8.ValidString(core) || !utf8.ValidString(context) || len(core) > settings.SpanBytes {
+			t.Fatal("UTF-8 or core boundary was split")
+		}
+		joined += core
+	}
+	if joined != content {
+		t.Fatal("multibyte source failed complete byte round-trip")
+	}
+}
+
+// This version deliberately refuses an oversized line at preflight. It does not
+// pretend a clipped/minified line is reviewed or make a provider draw to find out.
+func TestWinnerMultipassOversizedSingleLineFailsClosed(t *testing.T) {
+	settings := defaultWinnerMultipassSettings()
+	settings.SpanBytes = 16
+	if _, err := splitWinnerMultipassArtifact(winnerMultipassArtifact{Id: "synthetic-long-line", Content: strings.Repeat("漢", 50)}, settings); err == nil || !strings.Contains(err.Error(), "source line exceeds") {
+		t.Fatal("long source line was silently clipped")
+	}
+}
+
+// DB-issued hexadecimal identity and nanosecond clocks can change BPE counts
+// without changing character counts. Reserve slack prospectively; recount the
+// exact stamped plan without changing its fixed scan groups or retrying a draw.
+func TestWinnerMultipassPackingReservesIdentityVarianceBeforeFrozenRecount(t *testing.T) {
+	bundle, initial, _ := winnerMultipassFixture(t)
+	initial.Settings.SpanBytes = 128
+	plan, err := prepareWinnerMultipass(bundle, initial.Owner, initial.Settings, initial.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packing, err := packWinnerMultipass(context.Background(), plan, bundle, func(_ context.Context, call winnerMultipassCall, payload []byte) (winnerMultipassAdmission, error) {
+		available := plan.Settings.TokenizationProfiles[call.Member.Name].MaximumContextTokens - plan.Settings.MaximumOutputTokens
+		return winnerMultipassAdmissionFixture(plan, call, payload, len(call.UnitIds)*(available/2)), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range packing.Plan.ScanGroups {
+		if len(group.UnitIds) != 1 {
+			t.Fatal("draft packing consumed identity-variance reserve at the exact context edge")
+		}
+	}
+	owner := plan.Owner
+	owner.Id = "abcdef01-2345-6789-abcd-ef0123456789"
+	owner.StartedAt = owner.StartedAt.Add(999999999 * time.Nanosecond)
+	owner.Deadline = owner.Deadline.Add(999999999 * time.Nanosecond)
+	frozen, err := prepareWinnerMultipass(bundle, owner, plan.Settings, plan.Provider)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setWinnerMultipassScanGroups(frozen, packing.Plan.ScanGroups); err != nil {
+		t.Fatal(err)
+	}
+	if validateWinnerMultipassLeafAdmissions(frozen, bundle, packing.FinalAdmissions) == nil {
+		t.Fatal("placeholder plan token proof was accepted after DB stamping")
+	}
+	exact := []winnerMultipassAdmission{}
+	for _, call := range frozen.Calls {
+		if call.Stage != "scan" {
+			continue
+		}
+		payload, err := buildWinnerMultipassCall(frozen, bundle, call.Id, map[string]winnerMultipassCallEvidence{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		available := frozen.Settings.TokenizationProfiles[call.Member.Name].MaximumContextTokens - frozen.Settings.MaximumOutputTokens
+		exact = append(exact, winnerMultipassAdmissionFixture(frozen, call, payload, len(call.UnitIds)*(available/2)+frozen.Settings.PackingTokenReserve))
+	}
+	if err := validateWinnerMultipassLeafAdmissions(frozen, bundle, exact); err != nil {
+		t.Fatal(err)
 	}
 }
