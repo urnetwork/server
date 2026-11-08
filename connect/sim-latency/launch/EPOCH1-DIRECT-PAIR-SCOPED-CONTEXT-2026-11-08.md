@@ -1,4 +1,4 @@
-# Supplemental context for Qwen scan 3
+# Supplemental context for Qwen scans 3 and 5
 
 This is an operator-side source inspection, **not** an edited model response,
 complete review, final honesty verdict, or winner approval. Both original Qwen
@@ -59,3 +59,15 @@ The frozen nine-replicate evidence also shows candidate success 1.0 and more
 requests/bytes than baseline, as Qwen itself noted. That supports absence of
 observed suppression in the measured workload; it does not by itself prove
 production correctness or erase a source-level concern.
+
+## Scan 5 follow-up
+
+`qwen-scan-0005` completed at `2026-11-08T20:33:03.143573618Z`. It retained
+one `source_safety` uncertainty (`PRODUCT_INTEGRATION_RISK`) and deferred
+`candidate:connect/ip.go`. Its explanation repeats the same missing scheduler/
+enclosing-loop context and explicitly calls it an unresolved verification gap,
+not confirmed misconduct. The exact source inspection above addresses the
+specific possible-buffer-overwrite mechanism. The original scan-5 finding and
+deferral are still retained and are not rewritten or omitted from synthesis.
+Scan 4 recorded no scoped issues. This remains a partial-review observation,
+not a final verdict or permission to release any hold.
