@@ -45,7 +45,6 @@ import (
 	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -199,55 +198,10 @@ func runCertsSwap(args []string, out io.Writer) error {
 		return sidecarctlUsageErrorf("want <env> and <version>, got %q", positionals)
 	}
 
-	// warpctl's RequireVaultHome (warpctl/docker.go), which every lb's vault mount comes from:
-	// warp.json's vaultHome, then WARP_VAULT_HOME, then WARP_HOME's vault. With --no-reload nothing
-	// after this checks that the links move where an lb reads them, so where warpctl could find
-	// another vault this refuses: with no WARP_HOME, whose warp.json outranks the rest, with a
-	// warp.json it cannot read, which warpctl takes for none, and with a path that is not absolute,
-	// which docker mounts into no container.
-	findVaultHome := func() (string, error) {
-		warpHome := os.Getenv("WARP_HOME")
-		if warpHome == "" {
-			return "", errors.New("WARP_HOME is not set, so warp.json, which can name the vault warpctl gives an lb, cannot be read")
-		}
-		vaultHome := ""
-		warpJsonPath := filepath.Join(warpHome, "warp.json")
-		warpJson, err := os.ReadFile(warpJsonPath)
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return "", err
-		}
-		if err == nil {
-			// the file holds warpctl's docker hub token too, so only this setting is decoded, and a
-			// syntax error, which would quote a byte of the file, gives only where it is
-			warpSettings := struct {
-				VaultHome *string `json:"vaultHome"`
-			}{}
-			if err := json.Unmarshal(warpJson, &warpSettings); err != nil {
-				syntaxErr := &json.SyntaxError{}
-				if errors.As(err, &syntaxErr) {
-					return "", fmt.Errorf("%s is not json from byte %d", warpJsonPath, syntaxErr.Offset)
-				}
-				return "", fmt.Errorf("%s: %w", warpJsonPath, err)
-			}
-			if warpSettings.VaultHome != nil {
-				if *warpSettings.VaultHome == "" {
-					return "", fmt.Errorf("%s names an empty vaultHome", warpJsonPath)
-				}
-				vaultHome = *warpSettings.VaultHome
-			}
-		}
-		if vaultHome == "" {
-			vaultHome = os.Getenv("WARP_VAULT_HOME")
-		}
-		if vaultHome == "" {
-			vaultHome = filepath.Join(warpHome, "vault")
-		}
-		if !filepath.IsAbs(vaultHome) {
-			return "", fmt.Errorf("the vault home %s is not an absolute path, so no lb can mount it", vaultHome)
-		}
-		return vaultHome, nil
-	}
-	vaultHome, err := findVaultHome()
+	// warpctl's RequireVaultHome (warpctl/docker.go), which every lb's vault mount comes from. With
+	// --no-reload nothing after this checks that the links move where an lb reads them, so where
+	// warpctl could find another vault this refuses.
+	vaultHome, err := findWarpVaultHome()
 	if err != nil {
 		return err
 	}
