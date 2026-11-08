@@ -18,7 +18,7 @@ var ErrReviewCallAlreadyClaimed = errors.New("review call already claimed; retai
 
 func reviewHandoffDatabaseTime(ctx context.Context, tx server.PgTx) (time.Time, error) {
 	var now time.Time
-	err := tx.QueryRow(ctx, `SELECT timezone('UTC',transaction_timestamp())`).Scan(&now)
+	err := tx.QueryRow(ctx, `SELECT set_config('urnetwork.competition_review_handoff_clock',competition_review_handoff_clock()::text,true)::timestamp`).Scan(&now)
 	return now.UTC(), err
 }
 
@@ -221,6 +221,11 @@ func (self PostgresStore) RecordReviewHandoffCall(ctx context.Context, settings 
 				var completed bool
 				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM competition_review_handoff_completion WHERE handoff_id=$1)`, value.HandoffId).Scan(&completed))
 				if completed {
+					panic(ErrConflict)
+				}
+				var claims, receipts, failures int
+				server.Raise(tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE kind='claim'),count(*) FILTER (WHERE kind='receipt'),count(*) FILTER (WHERE kind='receipt' AND COALESCE(call_json->>'failure','')<>'') FROM competition_review_handoff_call WHERE handoff_id=$1`, value.HandoffId).Scan(&claims, &receipts, &failures))
+				if claims != receipts || failures != 0 || claims >= len(owner.Plan.CallIds) || owner.Plan.CallIds[claims] != value.CallId {
 					panic(ErrConflict)
 				}
 			} else {

@@ -61,6 +61,15 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 		fixture.settings.SeasonPolicy.SubmissionFeeUsd = 0
 		fixture.settings.EvaluationPolicy.TakeoverMargin = 0
 	}
+	if winnerPolicy != "" {
+		preparation = 0
+		fixture.settings.AutomationPolicy.StagingPreparationSeconds = 0
+		fixture.settings.SeasonPolicy.PreparationWindowSeconds = 0
+		if err := model.ValidateCompetitionAutomationPolicy(fixture.settings.AutomationPolicy); err != nil {
+			t.Fatal("synthetic frozen winner policy", err)
+		}
+		t.Log("handoff fixture: frozen winner policy valid; bootstrap source")
+	}
 	fixture.store = PostgresStore{now: func() time.Time { return fixture.now }}
 	commits := map[string]string{}
 	for _, repository := range []string{"server", "connect", "sdk", "proxy", "glog", "goidenticons", "userwireguard", "sn", "warp", "gvisor"} {
@@ -68,12 +77,12 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 	}
 	sourceLock, sourceErr := model.CompetitionSourceLockDigest(commits)
 	if sourceErr != nil {
-		t.Fatal(sourceErr)
+		t.Fatal("synthetic source lock", sourceErr)
 	}
 	fixture.settings.AutomationPolicy.SourceLockSha256 = sourceLock
 	lease, sourceErr := fixture.store.AcquireAutomationLease(context.Background(), fixture.settings, "synthetic-supervisor", 5*time.Minute)
 	if sourceErr != nil {
-		t.Fatal(sourceErr)
+		t.Fatal("synthetic bootstrap lease", sourceErr)
 	}
 	manifest := []byte("synthetic immutable source manifest\n")
 	manifestDigest := sha256.Sum256(manifest)
@@ -96,8 +105,13 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 			intent.GitRefs[repository] = ref
 		}
 	}
+	if winnerPolicy != "" {
+		if err := model.ValidateCompetitionAutomationPolicy(fixture.settings.AutomationPolicy); err != nil {
+			t.Fatal("frozen winner policy immediately before source intent", err)
+		}
+	}
 	if _, sourceErr = fixture.store.RecordSourceIntent(context.Background(), fixture.settings, *lease, intent); sourceErr != nil {
-		t.Fatal(sourceErr)
+		t.Fatal("synthetic baseline source intent", sourceErr)
 	}
 	for _, role := range []string{"api", "worker"} {
 		sourceErr = fixture.store.RecordSourceReadiness(context.Background(), fixture.settings, model.CompetitionSourceReadiness{
@@ -105,17 +119,17 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 			Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: 1, TargetRoundId: intent.TargetRoundId, Role: role, ActorId: "synthetic-" + role, ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256,
 			SourceLockSha256: sourceLock, RuntimeImageDigest: testWorkerImageDigest(), QualificationSha256: intent.HostQualificationSha256, Ready: true})
 		if sourceErr != nil {
-			t.Fatal(sourceErr)
+			t.Fatal("synthetic baseline readiness", role, sourceErr)
 		}
 	}
 	if _, sourceErr = fixture.store.ActivateSource(context.Background(), fixture.settings, *lease, 1, 0); sourceErr != nil {
-		t.Fatal(sourceErr)
+		t.Fatal("synthetic baseline activation", sourceErr)
 	}
 	var err error
 	fixture.settings.automationTargetRoundId = intent.TargetRoundId
 	fixture.round, err = fixture.store.prepareRound(context.Background(), fixture.settings, GenerateRoundArgs{OpensAt: fixture.now, ClosesAt: fixture.now.Add(window), RevealAt: fixture.now.Add(window + time.Hour)}, staging)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatal("synthetic immutable round preparation", err)
 	}
 	fixture.round.Epoch = 1
 	server.Tx(context.Background(), func(conn server.PgTx) {
