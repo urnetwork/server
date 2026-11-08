@@ -318,9 +318,139 @@ func sidecarMg5DnsMigrations() []any {
 }
 
 // MG5's §13 part: network_tls_* and tls_connection_*, the hourly partitioned
-// record among them (TLS-M5-12).
+// record among them (TLS-M5-12). Every column is one of §2.8's cert-1, tls-3
+// or tls-4 (I-18); states and reasons are varchar, never ENUM. No column holds
+// a client address (I-13): a visitor shows only as tls-3's keyed hash. Nothing
+// reads these tables unless the binary links MG5 (server.SidecarMg5Linked).
 func sidecarMg5TlsMigrations() []any {
-	return []any{}
+	return []any{
+		// §13.8's orders and certificates (cert-1), written before an order
+		// reaches a CA and kept 30 days past expiry or revocation. An order's
+		// time is its cert_id's, which certs mints. ca, account_uri and profile
+		// are set when an order reaches a CA; serial and the validity when it
+		// issues; the ARI window when the CA gives one. successor_cert_id names
+		// the row that took over. chain holds a Team custom domain's registered
+		// chain (v1), each certificate's DER, leaf first, and stays NULL on any
+		// other row. csr is NULL only on a registered chain no request
+		// preceded.
+		newSqlMigration(`
+			CREATE TABLE network_tls_cert (
+				cert_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				client_id uuid NOT NULL,
+				sidecar_id uuid NOT NULL,
+				identifier_set_sha256 bytea NOT NULL,
+				spki_sha256 bytea NOT NULL,
+				attestation bytea NOT NULL,
+				csr bytea NULL,
+				ca varchar(32) NULL,
+				account_uri varchar(1024) NULL,
+				profile varchar(64) NULL,
+				serial varchar(64) NULL,
+				not_before timestamp NULL,
+				not_after timestamp NULL,
+				ari_window_start timestamp NULL,
+				ari_window_end timestamp NULL,
+				state varchar(16) NOT NULL,
+				successor_cert_id uuid NULL,
+				chain bytea[] NULL,
+
+				PRIMARY KEY (cert_id)
+			)
+		`),
+		// GET /tls/certs: one network's rows
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_network_id ON network_tls_cert (network_id, cert_id)
+		`),
+		// a set's history: §13.8's 5 per 7 days, and the new-set test
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_identifier_set ON network_tls_cert (identifier_set_sha256, cert_id)
+		`),
+		// certs' queue and the rows its chains still owe a step
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_active ON network_tls_cert (state, cert_id) WHERE state IN ('queued', 'ordering', 'waiting_dns', 'revoking')
+		`),
+		// the revocation sweep's removed and revoked sidecars (I-15)
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_sidecar_id ON network_tls_cert (sidecar_id, cert_id)
+		`),
+		// expiry and the 30-day purge
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_not_after ON network_tls_cert (not_after) WHERE not_after IS NOT NULL
+		`),
+		// a replaced certificate, by its serial within its network
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_serial ON network_tls_cert (network_id, serial) WHERE serial IS NOT NULL
+		`),
+		// a CA's budget, rebuilt from its rows when its Redis key is lost
+		newSqlMigration(`
+			CREATE INDEX network_tls_cert_ca ON network_tls_cert (ca, cert_id) WHERE ca IS NOT NULL
+		`),
+
+		// §13.9's kill switch (tls-4): a host of the network, or * for all of
+		// them, with its reason and until_time, NULL while its case holds it.
+		// The row goes with its keys when the case lifts it or until_time
+		// passes.
+		newSqlMigration(`
+			CREATE TABLE network_tls_suspension (
+				network_id uuid NOT NULL,
+				host varchar(253) NOT NULL,
+				reason varchar(256) NOT NULL,
+				until_time timestamp NULL,
+
+				PRIMARY KEY (network_id, host)
+			)
+		`),
+		// the sweep of kills whose until_time passed
+		newSqlMigration(`
+			CREATE INDEX network_tls_suspension_until_time ON network_tls_suspension (until_time) WHERE until_time IS NOT NULL
+		`),
+
+		// tlsedge's connection records (tls-3), in hourly partitions by
+		// end_time, which the partition registry creates ahead and retires at
+		// 24 h once any §21.9 hold has copied its network's rows
+		// (model/tls_connection_model.go). A connection's record is written as
+		// it ends, so a connection that lasted days still lands in a partition
+		// that exists. host is the published host within the network, @ or a
+		// label; visitor_hash is the 16-byte keyed hash of the visitor's /24 or
+		// /48 under the day's key, never an address. The primary key makes a
+		// batch's retry insert nothing twice, and serves the abuse join by
+		// connection_id.
+		newSqlMigration(`
+			CREATE TABLE tls_connection_record (
+				connection_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				host varchar(253) NOT NULL,
+				start_time timestamp NOT NULL,
+				end_time timestamp NOT NULL,
+				byte_count bigint NOT NULL,
+				visitor_hash bytea NOT NULL,
+
+				PRIMARY KEY (connection_id, end_time)
+			) PARTITION BY RANGE (end_time)
+		`),
+		// one network's rows: the roll-up, and a hold's copy
+		newSqlMigration(`
+			CREATE INDEX tls_connection_record_network_id ON tls_connection_record (network_id, end_time)
+		`),
+		// daily counts per network and host (tls-3), kept 13 months: each hour
+		// is added in the transaction that retires it
+		newSqlMigration(`
+			CREATE TABLE tls_connection_day (
+				network_id uuid NOT NULL,
+				host varchar(253) NOT NULL,
+				day date NOT NULL,
+				connection_count bigint NOT NULL,
+				byte_count bigint NOT NULL,
+
+				PRIMARY KEY (network_id, host, day)
+			)
+		`),
+		// the 13-month retention cursor
+		newSqlMigration(`
+			CREATE INDEX tls_connection_day_day ON tls_connection_day (day)
+		`),
+	}
 }
 
 // MG5's §16 part: approval_use, §12.8's DNS gate (MCP's tasks).

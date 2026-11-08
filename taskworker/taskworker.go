@@ -187,6 +187,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldNetworkAclAcks(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
+		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
+		// months; not scheduled without MG5
+		work.ScheduleTlsConnectionRollup(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -602,6 +605,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
 			work.AbuseActionPassPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.TlsConnectionRollup,
+			work.TlsConnectionRollupPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,
