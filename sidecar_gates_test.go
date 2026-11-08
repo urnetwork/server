@@ -365,71 +365,86 @@ func TestSidecarGatesMoveAtTheReread(t *testing.T) {
 	}
 }
 
-// A lookup in a generically decoded YAML mapping, whatever its key type.
-func sidecarYamlLookup(node any, keys ...string) (any, bool) {
+// A node through documents and aliases.
+func sidecarYamlResolve(node *yaml.Node) *yaml.Node {
+	for node != nil && (node.Kind == yaml.DocumentNode || node.Kind == yaml.AliasNode) {
+		if node.Kind == yaml.AliasNode {
+			node = node.Alias
+			continue
+		}
+		if len(node.Content) == 0 {
+			return nil
+		}
+		node = node.Content[0]
+	}
+	return node
+}
+
+// A key's value in a mapping, a direct key before a merged one, as yaml.v3's
+// typed decoding reaches it.
+func sidecarYamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if keyNode := sidecarYamlResolve(mapping.Content[index]); keyNode != nil && keyNode.Kind == yaml.ScalarNode && keyNode.ShortTag() != "!!merge" && keyNode.Value == key {
+			return mapping.Content[index+1]
+		}
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if keyNode := sidecarYamlResolve(mapping.Content[index]); keyNode == nil || keyNode.ShortTag() != "!!merge" {
+			continue
+		}
+		merged := sidecarYamlResolve(mapping.Content[index+1])
+		candidates := []*yaml.Node{merged}
+		if merged != nil && merged.Kind == yaml.SequenceNode {
+			candidates = merged.Content
+		}
+		for _, candidate := range candidates {
+			if candidate = sidecarYamlResolve(candidate); candidate != nil && candidate.Kind == yaml.MappingNode {
+				if value := sidecarYamlMappingValue(candidate, key); value != nil {
+					return value
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// A lookup in the text's node tree. A node reading tolerates what typed decoding
+// skips unread, such as a key given twice where no field reads it, so it judges
+// every text the typed reading takes.
+func sidecarYamlLookup(node *yaml.Node, keys ...string) (*yaml.Node, bool) {
 	for _, key := range keys {
-		switch mapping := node.(type) {
-		case map[string]any:
-			value, ok := mapping[key]
-			if !ok {
-				return nil, false
-			}
-			node = value
-		case map[any]any:
-			value, ok := mapping[key]
-			if !ok {
-				return nil, false
-			}
-			node = value
-		default:
+		node = sidecarYamlResolve(node)
+		if node == nil || node.Kind != yaml.MappingNode {
+			return nil, false
+		}
+		if node = sidecarYamlMappingValue(node, key); node == nil {
 			return nil, false
 		}
 	}
-	return node, true
+	node = sidecarYamlResolve(node)
+	return node, node != nil
 }
 
-// Whether a generic value is true as yaml.v3 decodes one into a bool: true, or an
-// old-style YAML 1.1 true, which a bool field takes and a generic reading keeps as
-// a string.
-func sidecarYamlTrue(node any, keys ...string) bool {
+// Whether a key reads true, by yaml.v3's own decoding of a bool, old-style YAML
+// 1.1 trues included.
+func sidecarYamlTrue(node *yaml.Node, keys ...string) bool {
 	value, ok := sidecarYamlLookup(node, keys...)
 	if !ok {
 		return false
 	}
-	if value == true {
-		return true
-	}
-	valueStr, isStr := value.(string)
-	return isStr && slices.Contains([]string{"y", "Y", "yes", "Yes", "YES", "on", "On", "ON"}, valueStr)
+	decoded := false
+	return value.Decode(&decoded) == nil && decoded
 }
 
-// A generic number as a float, for comparing with a typed field.
-func sidecarYamlNumber(value any) (float64, bool) {
-	switch number := value.(type) {
-	case int:
-		return float64(number), true
-	case int64:
-		return float64(number), true
-	case uint64:
-		return float64(number), true
-	case float64:
-		return number, true
-	}
-	return 0, false
-}
-
-// Whether a generic list holds a string that parses to networkId.
-func sidecarYamlListsId(node any, networkId Id, keys ...string) bool {
+// Whether a sequence holds a string that parses to networkId.
+func sidecarYamlListsId(node *yaml.Node, networkId Id, keys ...string) bool {
 	value, ok := sidecarYamlLookup(node, keys...)
-	if !ok {
+	if !ok || value.Kind != yaml.SequenceNode {
 		return false
 	}
-	list, ok := value.([]any)
-	if !ok {
-		return false
-	}
-	for _, item := range list {
-		if itemStr, ok := item.(string); ok {
+	for _, item := range value.Content {
+		itemStr := ""
+		if item = sidecarYamlResolve(item); item != nil && item.Decode(&itemStr) == nil {
 			if id, err := ParseId(itemStr); err == nil && id == networkId {
 				return true
 			}
@@ -458,9 +473,9 @@ func FuzzSidecarConfig(f *testing.F) {
 		if err != nil {
 			return
 		}
-		var generic any
-		if err := yaml.Unmarshal([]byte(text), &generic); err != nil {
-			t.Fatalf("the typed reading parsed what the generic one refuses: %s", err)
+		generic := &yaml.Node{}
+		if err := yaml.Unmarshal([]byte(text), generic); err != nil {
+			t.Fatalf("the typed reading parsed what a node reading refuses: %s", err)
 		}
 		probeIds := []Id{}
 		for _, gate := range config.serviceGates {
@@ -473,8 +488,8 @@ func FuzzSidecarConfig(f *testing.F) {
 				t.Fatalf("%s is enabled with no enabled: true in %q", name, text)
 			}
 			if gate.Writes() {
-				if writes, ok := sidecarYamlLookup(generic, "sidecar", name, "writes"); ok && writes != nil && !sidecarYamlTrue(generic, "sidecar", name, "writes") {
-					t.Fatalf("%s takes writes with writes %v in %q", name, writes, text)
+				if writes, ok := sidecarYamlLookup(generic, "sidecar", name, "writes"); ok && writes.ShortTag() != "!!null" && !sidecarYamlTrue(generic, "sidecar", name, "writes") {
+					t.Fatalf("%s takes writes with writes %q in %q", name, writes.Value, text)
 				}
 			}
 			for _, networkId := range gate.NetworkIds() {
@@ -483,9 +498,10 @@ func FuzzSidecarConfig(f *testing.F) {
 				}
 			}
 			if 0 < gate.Percent() {
-				percent, _ := sidecarYamlLookup(generic, "sidecar", name, "percent")
-				if number, ok := sidecarYamlNumber(percent); !ok || number != float64(gate.Percent()) {
-					t.Fatalf("%s admits %d%% with percent %v in %q", name, gate.Percent(), percent, text)
+				percent := 0
+				value, ok := sidecarYamlLookup(generic, "sidecar", name, "percent")
+				if !ok || value.Decode(&percent) != nil || percent != gate.Percent() {
+					t.Fatalf("%s admits %d%% with percent %d in %q", name, gate.Percent(), percent, text)
 				}
 			}
 		}
@@ -495,11 +511,16 @@ func FuzzSidecarConfig(f *testing.F) {
 				t.Fatalf("format2 admits with no enabled: true in %q", text)
 			}
 		}
-		for mode, keys := range map[SidecarFormat2Mode][]string{format2.Purge(): {"sidecar", "format2", "purge"}, format2.Drop(): {"sidecar", "format2", "drop"}} {
-			if mode == SidecarFormat2On {
-				if value, ok := sidecarYamlLookup(generic, keys...); !ok || value != "on" {
-					t.Fatalf("format2 deletes with %v in %q", value, text)
-				}
+		for _, c := range []struct {
+			mode SidecarFormat2Mode
+			key  string
+		}{{mode: format2.Purge(), key: "purge"}, {mode: format2.Drop(), key: "drop"}} {
+			if c.mode != SidecarFormat2On {
+				continue
+			}
+			mode := ""
+			if value, ok := sidecarYamlLookup(generic, "sidecar", "format2", c.key); !ok || value.Decode(&mode) != nil || mode != "on" {
+				t.Fatalf("format2's %s deletes with %q in %q", c.key, mode, text)
 			}
 		}
 		for name, on := range config.switches {
@@ -519,20 +540,16 @@ func FuzzSidecarConfig(f *testing.F) {
 			}
 		}
 		if edge, ok := config.UrnetworkEdge(); ok {
-			value, _ := sidecarYamlLookup(generic, "sidecar", "urnetwork_edge")
-			if valueStr, isStr := value.(string); !isStr || requireSidecarIdOrZero(valueStr) != edge {
-				t.Fatalf("urnetwork_edge %s from %v in %q", edge, value, text)
+			edgeStr := ""
+			value, found := sidecarYamlLookup(generic, "sidecar", "urnetwork_edge")
+			if !found || value.Decode(&edgeStr) != nil {
+				t.Fatalf("urnetwork_edge %s with no key in %q", edge, text)
+			}
+			if id, err := ParseId(edgeStr); err != nil || id != edge {
+				t.Fatalf("urnetwork_edge %s from %q in %q", edge, edgeStr, text)
 			}
 		}
 	})
-}
-
-func requireSidecarIdOrZero(idStr string) Id {
-	id, err := ParseId(idStr)
-	if err != nil {
-		return Id{}
-	}
-	return id
 }
 
 // config/main/sidecar.yml and config/local/sidecar.yml parse and are dark: no
