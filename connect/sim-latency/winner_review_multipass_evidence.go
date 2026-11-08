@@ -42,12 +42,16 @@ type winnerMultipassEvidence struct {
 // real usage. A capture implementation must strip no assistant output and must
 // not substitute summaries for these original visible bytes.
 func winnerMultipassVisibleResponse(evidence winnerMultipassCallEvidence, call winnerMultipassCall, settings winnerMultipassSettings) (*winnerModelResponse, error) {
-	if evidence.Error != "" || len(evidence.VisibleResponse) == 0 || len(evidence.VisibleResponse) > settings.MaximumResponseBytes ||
+	if evidence.Error != "" || len(evidence.VisibleResponse) == 0 || len(evidence.VisibleResponse) > settings.MaximumResponseBytes || rejectWinnerReviewCaseAliases(evidence.VisibleResponse) != nil ||
 		evidence.VisibleResponseSha256 != winnerMultipassSha256(evidence.VisibleResponse) || !validSha256(evidence.TransportResponseSha256) || !validSha256(evidence.TransportReceiptSha256) {
 		return nil, errors.New("multi-pass provider terminal is failed, absent, unbound or oversized")
 	}
 	var response winnerModelResponse
-	if err := decodeStrictJSONBytes(evidence.VisibleResponse, &response, "multi-pass visible terminal"); err != nil {
+	var original any
+	if err := decodeStrictJSONBytes(evidence.VisibleResponse, &original, "multi-pass visible terminal"); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(evidence.VisibleResponse, &response); err != nil {
 		return nil, err
 	}
 	if response.Status != "completed" || response.Model != call.Member.Model || strings.TrimSpace(response.Id) == "" {
@@ -57,7 +61,7 @@ func winnerMultipassVisibleResponse(evidence winnerMultipassCallEvidence, call w
 		InputTokens  int `json:"input_tokens"`
 		OutputTokens int `json:"output_tokens"`
 	}
-	if json.Unmarshal(response.Usage, &usage) != nil || usage.InputTokens <= 0 || usage.OutputTokens <= 0 || usage.InputTokens > evidence.Admission.InputTokens || usage.OutputTokens > settings.MaximumOutputTokens {
+	if json.Unmarshal(response.Usage, &usage) != nil || usage.InputTokens <= 0 || usage.OutputTokens <= 0 || usage.InputTokens != evidence.Admission.InputTokens || usage.OutputTokens > settings.MaximumOutputTokens {
 		return nil, errors.New("multi-pass usage is absent or exceeds admitted actual runtime tokens")
 	}
 	output := ""

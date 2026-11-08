@@ -283,7 +283,7 @@ func winnerMultipassCallPayload(plan *winnerMultipassPlan, bundle winnerMultipas
 	if err != nil {
 		return nil, err
 	}
-	payload, err := json.Marshal(map[string]any{"model": call.Member.Model, "reasoning": map[string]any{"effort": call.Member.Reasoning}, "store": false, "stream": true,
+	payload, err := json.Marshal(map[string]any{"model": call.Member.Model, "reasoning": map[string]any{"effort": call.Member.Reasoning}, "include_reasoning": false, "store": false, "stream": true,
 		"tools": []any{}, "tool_choice": "none", "truncation": "disabled", "max_output_tokens": plan.Settings.MaximumOutputTokens,
 		"instructions": winnerMultipassInstructions(bundle, plan.Settings, call.Stage), "input": string(input),
 		"text": map[string]any{"format": map[string]any{"type": "json_schema", "name": "competition_complete_coverage_review", "strict": true, "schema": winnerMultipassSchema(bundle, plan.Settings, call.Stage)}}})

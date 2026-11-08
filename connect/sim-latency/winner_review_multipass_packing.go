@@ -58,7 +58,7 @@ func packWinnerMultipass(ctx context.Context, initial *winnerMultipassPlan, bund
 				if err := validateWinnerMultipassTokenization(&plan, call, payload, admission); err != nil {
 					return result, err
 				}
-				if admission.InputTokens > admission.MaximumContextTokens-admission.OutputTokens {
+				if admission.InputTokens > admission.MaximumContextTokens-admission.OutputTokens-plan.Settings.PackingTokenReserve {
 					break
 				}
 				accepted = candidate

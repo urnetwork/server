@@ -30,7 +30,8 @@ type winnerMultipassSettings struct {
 	SpanBytes               int                                           `json:"span_bytes"`                // Positive target, not token admission; default 64 KiB.
 	OverlapLines            int                                           `json:"overlap_lines"`             // Positive context lines on either side; default 24.
 	MaximumOverlapBytes     int                                           `json:"maximum_overlap_bytes"`     // Positive overlap byte cap; default 8 KiB.
-	MaximumLeafUnits        int                                           `json:"maximum_leaf_units"`        // Positive common leaf census; default 128.
+	MaximumCoverageAtoms    int                                           `json:"maximum_coverage_atoms"`    // Positive byte-coverage census, not model calls; default 1024.
+	MaximumLeafUnits        int                                           `json:"maximum_leaf_units"`        // Positive actual scan-call census per member; default 128.
 	MergeFanIn              int                                           `json:"merge_fan_in"`              // At least two; default four children, no selective pruning.
 	MaximumCalls            int                                           `json:"maximum_calls"`             // Positive combined two-member call census; default 384.
 	MaximumRequestBytes     int                                           `json:"maximum_request_bytes"`     // Positive per-call HTTP bytes; default 4 MiB.
@@ -40,15 +41,16 @@ type winnerMultipassSettings struct {
 	MaximumIssues           int                                           `json:"maximum_issues"`            // Positive new issues per call; default 32, overflow holds.
 	MaximumIssueBytes       int                                           `json:"maximum_issue_bytes"`       // Positive explanation bytes; default 4096.
 	MaximumOutputTokens     int                                           `json:"maximum_output_tokens"`     // Positive fixed allowance; default 32768.
+	PackingTokenReserve     int                                           `json:"packing_token_reserve"`     // Positive prospective identity/render variance reserve; default 1024 tokens.
 	MaximumOwnerDuration    time.Duration                                 `json:"maximum_owner_duration"`    // Positive prospective ceiling; default 24 hours.
 }
 
 // Original output allowance is preserved; all new aggregate bounds are explicit.
 func defaultWinnerMultipassSettings() winnerMultipassSettings {
 	return winnerMultipassSettings{TokenizationProfiles: map[string]winnerMultipassTokenizationProfile{}, MaximumArtifactBytes: 2 * 1024 * 1024, MaximumBundleBytes: 32 * 1024 * 1024, MaximumArtifacts: 256,
-		SpanBytes: 64 * 1024, OverlapLines: 24, MaximumOverlapBytes: 8 * 1024, MaximumLeafUnits: 128, MergeFanIn: 4, MaximumCalls: 384,
+		SpanBytes: 64 * 1024, OverlapLines: 24, MaximumOverlapBytes: 8 * 1024, MaximumCoverageAtoms: 1024, MaximumLeafUnits: 128, MergeFanIn: 4, MaximumCalls: 384,
 		MaximumRequestBytes: 4 * 1024 * 1024, MaximumResponseBytes: 16 * 1024 * 1024, MaximumObservationBytes: 32 * 1024,
-		MaximumSummaryBytes: 4096, MaximumIssues: 32, MaximumIssueBytes: 4096, MaximumOutputTokens: 32768, MaximumOwnerDuration: 24 * time.Hour}
+		MaximumSummaryBytes: 4096, MaximumIssues: 32, MaximumIssueBytes: 4096, MaximumOutputTokens: 32768, PackingTokenReserve: 1024, MaximumOwnerDuration: 24 * time.Hour}
 }
 
 // This clock is independent of the frozen submission deadline and historical
@@ -161,10 +163,17 @@ func winnerMultipassSha256(content []byte) string {
 func validateWinnerMultipassSettings(value winnerMultipassSettings) error {
 	if value.MaximumArtifactBytes <= 0 || value.MaximumBundleBytes < value.MaximumArtifactBytes || value.MaximumArtifacts <= 0 ||
 		value.SpanBytes <= 0 || value.SpanBytes > value.MaximumArtifactBytes || value.OverlapLines <= 0 || value.MaximumOverlapBytes <= 0 ||
-		value.MaximumLeafUnits <= 0 || value.MergeFanIn < 2 || value.MaximumCalls <= 0 || value.MaximumRequestBytes <= 0 ||
+		value.MaximumCoverageAtoms <= 0 || value.MaximumLeafUnits <= 0 || value.MergeFanIn < 2 || value.MaximumCalls <= 0 || value.MaximumRequestBytes <= 0 ||
 		value.MaximumResponseBytes <= 0 || value.MaximumObservationBytes <= 0 || value.MaximumSummaryBytes <= 0 || value.MaximumIssues <= 0 ||
-		value.MaximumIssueBytes <= 0 || value.MaximumOutputTokens != defaultWinnerSnowModelSettings().MaximumOutputTokens || value.MaximumOwnerDuration <= 0 {
+		value.MaximumIssueBytes <= 0 || value.MaximumOutputTokens != defaultWinnerSnowModelSettings().MaximumOutputTokens || value.PackingTokenReserve <= 0 || value.MaximumOwnerDuration <= 0 {
 		return errors.New("multi-pass settings disable a guard or change the original output allowance")
+	}
+	ceiling := defaultWinnerMultipassSettings()
+	if value.MaximumArtifactBytes > ceiling.MaximumArtifactBytes || value.MaximumBundleBytes > ceiling.MaximumBundleBytes || value.MaximumArtifacts > ceiling.MaximumArtifacts ||
+		value.MaximumCoverageAtoms > ceiling.MaximumCoverageAtoms || value.MaximumLeafUnits > ceiling.MaximumLeafUnits || value.MergeFanIn > ceiling.MergeFanIn || value.MaximumCalls > ceiling.MaximumCalls ||
+		value.MaximumRequestBytes > ceiling.MaximumRequestBytes || value.MaximumResponseBytes > ceiling.MaximumResponseBytes || value.MaximumObservationBytes > ceiling.MaximumObservationBytes ||
+		value.MaximumSummaryBytes > ceiling.MaximumSummaryBytes || value.MaximumIssues > ceiling.MaximumIssues || value.MaximumIssueBytes > ceiling.MaximumIssueBytes || value.PackingTokenReserve > ceiling.PackingTokenReserve || value.MaximumOwnerDuration > ceiling.MaximumOwnerDuration {
+		return errors.New("multi-pass settings exceed the prospectively approved protocol ceilings")
 	}
 	return nil
 }
@@ -288,15 +297,22 @@ func prepareWinnerMultipass(bundle winnerMultipassBundle, owner winnerMultipassO
 			last := len(plan.Units) - 1
 			plan.Units[last].Spans = append(plan.Units[last].Spans, span)
 			unitBytes += spanBytes
-			if len(plan.Units) > settings.MaximumLeafUnits {
-				return nil, errors.New("complete source coverage exceeds leaf-unit bound")
+			if len(plan.Units) > settings.MaximumCoverageAtoms {
+				return nil, errors.New("complete source coverage exceeds coverage-atom bound")
 			}
 		}
 	}
 	groups := []winnerMultipassScanGroup{}
+	// This is an offline layout only. A larger source census does not increase
+	// the model-call allowance; prospective real token packing must admit it.
+	atomsPerGroup := max(1, (len(plan.Units)+settings.MaximumLeafUnits-1)/settings.MaximumLeafUnits)
 	for _, member := range provider.Members {
-		for _, unit := range plan.Units {
-			groups = append(groups, winnerMultipassScanGroup{Member: member.Name, UnitIds: []string{unit.Id}})
+		for start := 0; start < len(plan.Units); start += atomsPerGroup {
+			group := winnerMultipassScanGroup{Member: member.Name, UnitIds: []string{}}
+			for _, unit := range plan.Units[start:min(start+atomsPerGroup, len(plan.Units))] {
+				group.UnitIds = append(group.UnitIds, unit.Id)
+			}
+			groups = append(groups, group)
 		}
 	}
 	if err := setWinnerMultipassScanGroups(plan, groups); err != nil {
@@ -326,6 +342,9 @@ func setWinnerMultipassScanGroups(plan *winnerMultipassPlan, groups []winnerMult
 			call := winnerMultipassCall{Id: fmt.Sprintf("%s-scan-%04d", member.Name, len(parents)+1), Member: member, Stage: "scan", UnitIds: append([]string{}, group.UnitIds...), Parents: []string{}}
 			plan.Calls = append(plan.Calls, call)
 			parents = append(parents, call.Id)
+			if len(parents) > plan.Settings.MaximumLeafUnits {
+				return errors.New("multi-pass member exceeds actual scan-leaf bound")
+			}
 			groupIndex++
 		}
 		if !slices.Equal(gotIds, wantIds) {

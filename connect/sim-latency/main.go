@@ -94,6 +94,7 @@ Usage:
   sim-latency source-review-packet --round-id=<id> --job-id=<id> --out-dir=<dir>
   sim-latency review-broker --model-key-file=<path>
   sim-latency review-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
+  sim-latency review-multipass-broker --review-provider-settings=<path> --review-provider-settings-sha256=<sha256> --review-state-directory=<path>
   sim-latency source-build-broker --build-settings=<path> --build-settings-sha256=<digest>
   sim-latency source-qualify-build --qualification-settings=<path> --qualification-settings-sha256=<digest>
   sim-latency launch-preflight --epoch=<n> --evaluator-image=<digest> --operator-token-file=<path> --grafana-url=<url> --grafana-token-file=<path> --metrics-url=<url> --metrics-token-file=<path> [--api-url=<url>] [--openapi=<path>] [--artifact-capacity-bytes=<n>] [--preflight-timeout=<d>] [--source-config=<path>] [--repos-root=<dir>] [--out=<path>]
@@ -323,6 +324,8 @@ func main() {
 		runSourceReviewPacket(opts)
 	case optBool(opts, "review-broker"):
 		runWinnerReviewBroker(opts)
+	case optBool(opts, "review-multipass-broker"):
+		runWinnerMultipassBroker(opts)
 	case optBool(opts, "source-build-broker"):
 		runSourceBuildBroker(opts)
 	case optBool(opts, "source-qualify-build"):
