@@ -815,6 +815,10 @@ type Exchange struct {
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; registration tests refuse a client's nominations, as
+	// a draining exchange or a failed nomination would, while its connection
+	// stays open, until it returns false.
+	refuseNominationForTest func(clientId server.Id) bool
 	// Nil in production; registration tests wait for a resident's teardown,
 	// its peer registration cleanup included, to finish.
 	afterResidentTeardownForTest func(*Resident)
@@ -1178,6 +1182,10 @@ func (self *Exchange) nominateLocalResident(
 		if glog.V(1) {
 			glog.Infof("[exchange]nominate refused: draining\n")
 		}
+		return false, false
+	}
+
+	if refuse := self.refuseNominationForTest; refuse != nil && refuse(clientId) {
 		return false, false
 	}
 

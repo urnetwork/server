@@ -103,6 +103,11 @@ func DefaultConnectionAnnounceSettings() *ConnectionAnnounceSettings {
 		// NewConnectHandler (must equal the heartbeat refresh ttl or
 		// disconnect detection is delayed); this default is a placeholder.
 		PeerRegisterTtl: 300 * time.Second,
+		// a client admitted after its announce: looked for from 100 ms,
+		// doubling to 2 s, for up to 30 s (registerWhenResident)
+		PeerRegisterResidentPollTimeout:    100 * time.Millisecond,
+		PeerRegisterResidentPollMaxTimeout: 2 * time.Second,
+		PeerRegisterResidentWait:           30 * time.Second,
 		// overridden in NewConnectHandler from ExchangeSettings.EnableNetworkPeers
 		// (the single source of truth); this default is only the pre-wiring value.
 		EnableNetworkPeers:       false,
@@ -130,6 +135,13 @@ type ConnectionAnnounceSettings struct {
 	LocationRetryTimeout time.Duration
 	// ttl for the network peer registration made at announce
 	PeerRegisterTtl time.Duration
+	// for a connection whose announce found no resident yet: how soon it looks
+	// again, the backoff's bound, and how long it keeps looking before the
+	// resident's heartbeat is left to register the client
+	// (registerWhenResident)
+	PeerRegisterResidentPollTimeout    time.Duration
+	PeerRegisterResidentPollMaxTimeout time.Duration
+	PeerRegisterResidentWait           time.Duration
 	// set from ExchangeSettings.EnableNetworkPeers in NewConnectHandler (the
 	// single network-peers switch); gates the announce-time peer registration
 	EnableNetworkPeers bool
@@ -168,6 +180,9 @@ type ConnectionAnnounceSettings struct {
 	reliabilityStatsRecordedForTest func(server.Id, model.ClientReliabilityStats)
 	// Runs after the fresh connection identity and initial samples are admitted.
 	connectionRegisteredForTest func(*ConnectionAnnounce)
+	// Runs after the announce looked up the client's resident for its peer
+	// registration, with whether it found one.
+	peerRegisterLookedUpForTest func(found bool)
 	// Runs after the final model cleanup with the connection and the result of
 	// its disconnect.
 	connectionDisconnectedForTest func(server.Id, error)
@@ -643,10 +658,22 @@ func (self *ConnectionAnnounce) run() {
 		} else if peersEnabled && topLevel && peerCategory == model.NetworkPeerCategoryClient && peerProfile != nil {
 			// ttl 0: read-only lookup — extending the resident record's expiry
 			// is the resident keepalive's job, not the announce's
-			if resident := model.GetResidentForClient(self.ctx, self.clientId, 0); resident != nil {
-				model.AddNetworkPeer(self.ctx, peerNetworkId, peerProfile, resident.ResidentId, self.settings.PeerRegisterTtl)
+			resident := model.GetResidentForClient(self.ctx, self.clientId, 0)
+			if lookedUp := self.settings.peerRegisterLookedUpForTest; lookedUp != nil {
+				lookedUp(resident != nil)
 			}
-			// no resident nominated yet: the resident heartbeat registers it
+			if resident != nil {
+				model.AddNetworkPeer(self.ctx, peerNetworkId, peerProfile, resident.ResidentId, self.settings.PeerRegisterTtl)
+			} else {
+				// no resident nominated yet: the transport nominates at its
+				// own pace, a reconnect interval after a refused or failed
+				// first nomination, so register once it exists
+				// (registerWhenResident) rather than leave the admitted client
+				// uncounted until the resident's first heartbeat
+				self.startWorker(func() {
+					self.registerWhenResident(peerNetworkId, peerProfile)
+				})
+			}
 		}
 	}
 
@@ -888,6 +915,36 @@ func (self *ConnectionAnnounce) recoverLiveCall(call func()) (callErr error) {
 // the sync interval for none or one, then doubling up to SyncRetryMaxTimeout.
 // The sync loop waits it between rounds, so a failed round retries at the
 // next regular tick; the workers wait it before retrying a failed write.
+// registerWhenResident registers the client once its resident exists, for a
+// connection whose announce found none: its transport's first nomination was
+// refused or failed (a draining exchange, a nomination race), or is still in
+// flight. The resident's own heartbeat would register it, but only at its
+// first refresh, ExchangeResidentTtl/4 (75 s) after it starts, and until then
+// the admitted client was uncounted, so the network's concurrent client limit
+// let one more client in. It looks with a backoff from
+// PeerRegisterResidentPollTimeout, doubling up to PeerRegisterResidentPollMaxTimeout,
+// for at most PeerRegisterResidentWait; past that the heartbeat registers it.
+// It ends with the connection.
+func (self *ConnectionAnnounce) registerWhenResident(peerNetworkId server.Id, peerProfile *model.NetworkPeer) {
+	deadline := time.Now().Add(self.settings.PeerRegisterResidentWait)
+	poll := self.settings.PeerRegisterResidentPollTimeout
+	for {
+		select {
+		case <-self.ctx.Done():
+			return
+		case <-time.After(poll):
+		}
+		if resident := model.GetResidentForClient(self.ctx, self.clientId, 0); resident != nil {
+			model.AddNetworkPeer(self.ctx, peerNetworkId, peerProfile, resident.ResidentId, self.settings.PeerRegisterTtl)
+			return
+		}
+		if !time.Now().Before(deadline) {
+			return
+		}
+		poll = min(2*poll, self.settings.PeerRegisterResidentPollMaxTimeout)
+	}
+}
+
 func (self *ConnectionAnnounce) retryTimeout(failureCount int) time.Duration {
 	timeout := self.settings.SyncConnectionTimeout
 	maxTimeout := max(self.settings.SyncRetryMaxTimeout, timeout)
