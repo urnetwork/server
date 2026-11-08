@@ -25,7 +25,25 @@ const (
 	SubscriptionMetricsDataPackBalanceCode  = "balance_code"
 	SubscriptionMetricsDataPackDirect       = "direct_balance"
 	SubscriptionMetricsDataPackDeduplicated = "deduplicated"
+
+	// a trial whose product names no plan
+	SubscriptionMetricsPlanUnknown = "unknown"
 )
+
+var subscriptionMetricsPlans = []string{
+	PlanYearly,
+	PlanMonthly,
+	SubscriptionMetricsPlanUnknown,
+}
+
+func SubscriptionMetricsPlans() []string {
+	return append([]string(nil), subscriptionMetricsPlans...)
+}
+
+type SubscriptionMetricsStorePlan struct {
+	Store string
+	Plan  string
+}
 
 var subscriptionMetricsStores = []string{
 	SubscriptionMarketApple,
@@ -80,7 +98,10 @@ type SubscriptionMetricsDataPackWindow struct {
 }
 
 type SubscriptionMetricsSnapshot struct {
-	ActiveAccounts           map[string]int64
+	ActiveAccounts map[string]int64
+	// networks inside a free trial now, by store and plan; they count in
+	// ActiveAccounts too
+	TrialsActive             map[SubscriptionMetricsStorePlan]int64
 	NewPaidAccounts          map[SubscriptionMetricsStoreWindow]int64
 	EngagedAccounts          map[SubscriptionMetricsStoreWindow]int64
 	ChurnedAccounts          map[SubscriptionMetricsStoreWindow]int64
@@ -106,13 +127,32 @@ type SubscriptionMetricsSnapshot struct {
 // `network_client_network_id_top_level` makes each active-subscriber
 // engagement EXISTS probe index-backed; starting from the much smaller active
 // paid cohort avoids scanning the fleet-wide 30-day auth band.
+//
+// An App Store sandbox purchase (TestFlight, App Review) is credited so the
+// tester keeps Pro, with no revenue (controller
+// appleCreditSubscriptionTransactionInTx): it is not a subscription and is
+// left out. An App Store grace period's hold records no revenue either, but
+// beside the paid transaction it holds, whose id it carries, so it stays.
 const subscriptionMetricsAccountQuery = `
 /* subscription-metrics-accounts */
 WITH tracked_renewal AS MATERIALIZED (
-    SELECT network_id, market, start_time, end_time
-    FROM subscription_renewal
-    WHERE subscription_type = 'supporter'
-      AND market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
+    SELECT renewal.network_id, renewal.market, renewal.start_time, renewal.end_time
+    FROM subscription_renewal renewal
+    WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
+      AND NOT (
+          renewal.market = 'apple'
+          AND renewal.net_revenue_nano_cents = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM subscription_renewal paid
+              WHERE paid.network_id = renewal.network_id
+                AND paid.subscription_type = 'supporter'
+                AND paid.market = 'apple'
+                AND paid.transaction_id = renewal.transaction_id
+                AND 0 < paid.net_revenue_nano_cents
+          )
+      )
 ), metric_window(window_name, since_time) AS (
     VALUES ('24h', $2::timestamp), ('7d', $3::timestamp), ('30d', $4::timestamp)
 ), active_by_store AS (
@@ -211,6 +251,91 @@ FROM metric
 ORDER BY kind, store, window_name
 `
 
+// subscriptionMetricsTrialQuery counts the networks inside a free trial now:
+// a credited window, shorter than any paid period (27 days), whose store
+// period has not ended. Trials are subscriptions (owner decision 2026-11-08)
+// and count in the account query too; this splits them out.
+//
+//   - Google Play: a window with its credit's revenue (a grace period's hold
+//     has none) from the purchase's start to an expiry 2 to 27 days later:
+//     the 14-day trial, or a day Play added before the trial's first charge.
+//     Every Play window starts at the purchase's start, so a paid window is
+//     never that short. The trial's first charge usually lands inside the day
+//     Play added, whose window stays current for up to a day after it: once
+//     the purchase has a charged window (an expiry at least 27 days after its
+//     start), none of its windows is a trial. Play sells the trial only on the
+//     yearly base plan.
+//   - Stripe: the trial's $0 invoice, inside its period (its window runs the
+//     30-day manual-payment grace past it). Stripe starts a trial only on the
+//     yearly plan.
+//   - App Store: a free transaction (the ledger's price is 0) that is not a
+//     sandbox purchase (one records no revenue), inside its period; its
+//     product names the plan.
+//
+// Apple and Play windows end SubscriptionGracePeriod (24 hours) past the
+// store's expiry.
+const subscriptionMetricsTrialQuery = `
+/* subscription-metrics-trials */
+WITH trial AS (
+    SELECT renewal.network_id, 'google'::text AS store, 'yearly'::text AS plan
+    FROM subscription_renewal renewal
+    WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market = 'google'
+      AND 0 < renewal.net_revenue_nano_cents
+      AND renewal.start_time <= $1
+      AND $1 < renewal.end_time - interval '24 hours'
+      AND renewal.start_time + interval '2 days' <= renewal.end_time - interval '24 hours'
+      AND renewal.end_time - interval '24 hours' < renewal.start_time + interval '27 days'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM subscription_renewal paid
+          WHERE paid.network_id = renewal.network_id
+            AND paid.subscription_type = 'supporter'
+            AND paid.market = 'google'
+            AND paid.purchase_token = renewal.purchase_token
+            AND 0 < paid.net_revenue_nano_cents
+            AND paid.start_time + interval '27 days' <= paid.end_time - interval '24 hours'
+      )
+    UNION ALL
+    SELECT renewal.network_id, 'stripe'::text, 'yearly'::text
+    FROM subscription_renewal renewal
+    WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market = 'stripe'
+      AND renewal.net_revenue_nano_cents = 0
+      AND renewal.start_time <= $1
+      AND $1 < renewal.end_time - interval '30 days'
+      AND renewal.end_time - interval '30 days' < renewal.start_time + interval '27 days'
+    UNION ALL
+    SELECT renewal.network_id, 'apple'::text,
+           CASE
+               WHEN ledger.product_id ILIKE '%year%' THEN 'yearly'
+               WHEN ledger.product_id ILIKE '%month%' OR ledger.product_id = 'supporter' THEN 'monthly'
+               ELSE 'unknown'
+           END
+    FROM subscription_renewal renewal
+    INNER JOIN apple_subscription_transaction ledger
+      ON ledger.transaction_id = renewal.transaction_id
+    WHERE renewal.subscription_type = 'supporter'
+      AND renewal.market = 'apple'
+      AND 0 < renewal.net_revenue_nano_cents
+      AND ledger.price_milliunits = 0
+      AND renewal.start_time <= $1
+      AND $1 < renewal.end_time - interval '24 hours'
+      AND renewal.end_time - interval '24 hours' < renewal.start_time + interval '27 days'
+), metric AS (
+    SELECT store, plan, count(DISTINCT network_id)::bigint AS value
+    FROM trial
+    GROUP BY store, plan
+    UNION ALL
+    SELECT 'deduplicated', plan, count(DISTINCT network_id)::bigint
+    FROM trial
+    GROUP BY plan
+)
+SELECT store, plan, value
+FROM metric
+ORDER BY store, plan
+`
+
 const subscriptionMetricsReconciliationQuery = `
 /* subscription-metrics-reconciliation */
 WITH metric_window(window_name, since_time) AS (
@@ -285,6 +410,7 @@ ORDER BY source, metric_window.window_name
 func newSubscriptionMetricsSnapshot() *SubscriptionMetricsSnapshot {
 	return &SubscriptionMetricsSnapshot{
 		ActiveAccounts:           map[string]int64{},
+		TrialsActive:             map[SubscriptionMetricsStorePlan]int64{},
 		NewPaidAccounts:          map[SubscriptionMetricsStoreWindow]int64{},
 		EngagedAccounts:          map[SubscriptionMetricsStoreWindow]int64{},
 		ChurnedAccounts:          map[SubscriptionMetricsStoreWindow]int64{},
@@ -332,6 +458,21 @@ func LoadSubscriptionMetricsSnapshot(ctx context.Context, now time.Time) *Subscr
 				case "churned":
 					snapshot.ChurnedAccounts[SubscriptionMetricsStoreWindow{Store: store, Window: window}] = value
 				}
+			}
+		})
+
+		result, err = conn.Query(
+			ctx,
+			subscriptionMetricsTrialQuery,
+			now,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var store string
+				var plan string
+				var value int64
+				server.Raise(result.Scan(&store, &plan, &value))
+				snapshot.TrialsActive[SubscriptionMetricsStorePlan{Store: store, Plan: plan}] = value
 			}
 		})
 

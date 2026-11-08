@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // salesLedgerTx is a transaction over in-memory tables: just enough postgres
@@ -45,12 +47,19 @@ type salesLedgerBalance struct {
 	startTime     time.Time
 	endTime       time.Time
 	pro           bool
+	// a grace period's hold credits no bytes
+	byteCount model.ByteCount
 }
 
 type salesLedgerRenewal struct {
 	networkId     server.Id
 	market        string
 	transactionId string
+	purchaseToken string
+	startTime     time.Time
+	endTime       time.Time
+	// a grace period's hold records no revenue
+	netRevenue model.NanoCents
 }
 
 func newSalesLedgerTx(networkIds ...server.Id) *salesLedgerTx {
@@ -119,6 +128,7 @@ func (self *salesLedgerTx) Exec(ctx context.Context, sql string, args ...any) (p
 			pro: true,
 		}
 		if len(args) == 10 {
+			balance.byteCount = args[4].(model.ByteCount)
 			balance.purchaseToken = args[7].(string)
 			balance.pro = args[9].(bool)
 		}
@@ -128,6 +138,10 @@ func (self *salesLedgerTx) Exec(ctx context.Context, sql string, args ...any) (p
 	case strings.Contains(sql, "INSERT INTO subscription_renewal"):
 		self.renewals = append(self.renewals, salesLedgerRenewal{
 			networkId:     args[0].(server.Id),
+			startTime:     args[2].(time.Time),
+			endTime:       args[3].(time.Time),
+			netRevenue:    args[4].(model.NanoCents),
+			purchaseToken: args[5].(string),
 			market:        args[6].(string),
 			transactionId: args[7].(string),
 		})
@@ -144,6 +158,24 @@ func (self *salesLedgerTx) Query(ctx context.Context, sql string, args ...any) (
 	case strings.Contains(sql, "FROM apple_subscription_transaction ledger"):
 		// HasPreLedgerAppleRenewalInTx: no credit from before the ledger
 		return &salesLedgerRows{rows: [][]any{{false}}}, nil
+
+	case strings.Contains(sql, "play-purchase-credit-end-times"):
+		// GetPlayPurchaseCreditEndTimesInTx: the network's Play purchase's
+		// renewal rows with revenue, latest first
+		networkId := args[0].(server.Id)
+		market := fmt.Sprint(args[2])
+		purchaseToken := args[3].(string)
+		self.log = append(self.log, "credit_history "+purchaseToken)
+		rows := [][]any{}
+		for _, renewal := range self.renewals {
+			if renewal.networkId == networkId && renewal.market == market && renewal.purchaseToken == purchaseToken && 0 < renewal.netRevenue {
+				rows = append(rows, []any{renewal.endTime})
+			}
+		}
+		slices.SortFunc(rows, func(a []any, b []any) int {
+			return b[0].(time.Time).Compare(a[0].(time.Time))
+		})
+		return &salesLedgerRows{rows: rows}, nil
 
 	case strings.Contains(sql, "FROM transfer_balance") && strings.Contains(sql, "purchase_token = $1"):
 		// the overlap read: a balance of the token covering the expiry
