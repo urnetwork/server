@@ -318,7 +318,7 @@ func TestElectedWinnerReviewHandoffCommand(t *testing.T) {
 			if err := authenticateWinnerMultipassReleaseArtifacts(config.Release); err != nil {
 				return winnerHandoffProvenance{}, err
 			}
-			if _, err := authenticateWinnerMultipassQualification(config.Qualification, config.Release); err != nil {
+			if err := authenticateWinnerHandoffQualification(ctx, config.Qualification, config.Release, config.CaptureSettings.Spool != nil, control, owner.Args); err != nil {
 				return winnerHandoffProvenance{}, err
 			}
 			authorityBytes, err := readCurrentQgQualificationPin(config.RunAuthorization, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true)

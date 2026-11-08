@@ -153,7 +153,7 @@ func captureWinnerHandoffNative(ctx context.Context, directory string, owner *mo
 	if err := authenticateWinnerMultipassReleaseArtifacts(release); err != nil {
 		return nil, err
 	}
-	if _, err := authenticateWinnerMultipassQualification(qualification, release); err != nil {
+	if err := authenticateWinnerHandoffQualification(ctx, qualification, release, settings.Spool != nil, control, owner.Args); err != nil {
 		return nil, err
 	}
 	authorityBytes, err := readCurrentQgQualificationPin(authorization, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true)

@@ -36,8 +36,7 @@ func freezeElectedWinnerReview(ctx context.Context, config electedWinnerReviewHa
 			if err := authenticateWinnerMultipassReleaseArtifacts(config.Release); err != nil {
 				return err
 			}
-			_, err := authenticateWinnerMultipassQualification(config.Qualification, config.Release)
-			return err
+			return authenticateWinnerHandoffQualification(ctx, config.Qualification, config.Release, config.CaptureSettings.Spool != nil, control, prepared.Args)
 		},
 		Provider: func() (winnerSnowProviderSettings, error) {
 			return loadWinnerSnowProviderSettings(config.ProviderSettings.Path, config.ProviderSettings.Sha256)
