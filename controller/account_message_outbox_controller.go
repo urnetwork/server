@@ -125,6 +125,11 @@ var accountMessageTemplates = map[string]func() Template{
 	(&TrialEndingTemplate{}).Name(): func() Template {
 		return &TrialEndingTemplate{}
 	},
+	// §21.8's notice of an abuse action or lift, owed with the action
+	// (abuse_action_controller.go); email only
+	(&AbuseActionNoticeTemplate{}).Name(): func() Template {
+		return &AbuseActionNoticeTemplate{}
+	},
 }
 
 // Counts delivery outcomes by template and result (sent, retried, abandoned,
