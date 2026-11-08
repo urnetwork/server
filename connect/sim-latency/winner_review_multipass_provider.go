@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -349,13 +350,36 @@ func winnerMultipassVisibleTransport(content []byte, contentType string, maximum
 		inspect = func(value any) bool {
 			switch item := value.(type) {
 			case map[string]any:
-				if kind, ok := item["type"].(string); ok && (kind == "reasoning" || kind == "reasoning_text" || strings.HasPrefix(kind, "response.reasoning")) {
-					return false
-				}
-				if encrypted, ok := item["encrypted_content"].(string); ok && encrypted != "" {
-					return false
-				}
-				for _, child := range item {
+				for key, child := range item {
+					name := strings.ToLower(key)
+					if name == "type" {
+						kind, _ := child.(string)
+						kind = strings.ToLower(kind)
+						if strings.HasPrefix(kind, "reasoning") || strings.HasPrefix(kind, "response.reasoning") {
+							return false
+						}
+					}
+					// Alternate backend fields are not visible output_text. Empty/null
+					// optional fields carry no reasoning; configuration and token counts
+					// (reasoning.effort, reasoning_tokens) remain ordinary metadata.
+					if slices.Contains([]string{"encrypted_content", "reasoning_content", "reasoning_text", "reasoning_summary", "analysis", "analysis_text"}, name) && child != nil && child != "" {
+						return false
+					}
+					if name == "reasoning" && child != nil && child != "" {
+						configuration, ok := child.(map[string]any)
+						if !ok {
+							return false
+						}
+						for field, value := range configuration {
+							if field == "effort" && (value == "high" || value == "xhigh") || (field == "summary" || field == "generate_summary") && value == nil {
+								continue
+							}
+							return false
+						}
+					}
+					if name == "channel" && (child == "analysis" || child == "reasoning") {
+						return false
+					}
 					if !inspect(child) {
 						return false
 					}
@@ -374,15 +398,33 @@ func winnerMultipassVisibleTransport(content []byte, contentType string, maximum
 		}
 		return nil
 	}
-	if strings.HasPrefix(strings.ToLower(contentType), "application/json") {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return errors.New("provider transport has an invalid media type; not retained")
+	}
+	if mediaType == "application/json" {
 		return check(content)
+	}
+	if mediaType != "text/event-stream" {
+		return errors.New("provider transport has no pinned visible JSON/SSE media type; not retained")
 	}
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	scanner.Buffer(make([]byte, min(4096, maximumEventBytes)), maximumEventBytes)
+	dataEvents := 0
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "data:") {
+		if line == "" {
 			continue
+		}
+		if strings.HasPrefix(line, "event:") {
+			kind := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(line, "event:")))
+			if strings.HasPrefix(kind, "reasoning") || strings.HasPrefix(kind, "response.reasoning") {
+				return errors.New("provider returned a hidden-reasoning SSE event; not retained")
+			}
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") {
+			return errors.New("provider transport contains unparsed SSE bytes; not retained")
 		}
 		value := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if value == "[DONE]" {
@@ -391,8 +433,15 @@ func winnerMultipassVisibleTransport(content []byte, contentType string, maximum
 		if err := check([]byte(value)); err != nil {
 			return err
 		}
+		dataEvents++
 	}
-	return scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return err
+	}
+	if dataEvents == 0 {
+		return errors.New("provider transport contains no parsed visible SSE data; not retained")
+	}
+	return nil
 }
 
 // One invocation has no retry path. The caller retains the result on every
