@@ -30,6 +30,20 @@ func RetainCompetitionWinnerReviewEvidence(ctx context.Context, settings *Settin
 	if settings != nil && model.IsCompetitionSnowWinnerReviewPolicy(settings.AutomationPolicy.WinnerReviewPolicy) {
 		maximumEvidenceBytes = 512 * 1024
 	}
+	return retainCompetitionReviewEvidence(ctx, settings, roundId, jobId, content, expected, maximumEvidenceBytes)
+}
+
+// The approved multi-pass protocol retains complete visible calls rather than
+// squeezing them into the historical single-call report. This separate bound
+// never widens the old API or silently truncates an oversized evidence bundle.
+func RetainCompetitionReviewHandoffEvidence(ctx context.Context, settings *Settings, roundId, jobId server.Id, content []byte, expected string) (*CompetitionWinnerReviewEvidence, error) {
+	if settings == nil || settings.AutomationPolicy.WinnerReviewPolicy != model.CompetitionSnowWinnerReviewPolicy {
+		return nil, errors.New("multi-pass retention requires the exact Qwen/Gemma policy")
+	}
+	return retainCompetitionReviewEvidence(ctx, settings, roundId, jobId, content, expected, 128*1024*1024)
+}
+
+func retainCompetitionReviewEvidence(ctx context.Context, settings *Settings, roundId, jobId server.Id, content []byte, expected string, maximumEvidenceBytes int) (*CompetitionWinnerReviewEvidence, error) {
 	if settings == nil || roundId == (server.Id{}) || jobId == (server.Id{}) || len(content) == 0 || len(content) > maximumEvidenceBytes {
 		return nil, errors.New("winner review evidence identity or size is invalid")
 	}
