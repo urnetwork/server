@@ -421,7 +421,9 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 		command = exec.CommandContext(testCtx, "go", append([]string{"test"}, goArgs...)...)
 	}
 	command.Dir = directory
-	command.Env = options.environ
+	// each repo's tests run as that repo runs them: a GOFLAGS the caller carries,
+	// lowgo's -trimpath among them, would move the paths tests find their files by
+	command.Env = gateChildEnv(options.environ)
 	output, runErr := command.CombinedOutput()
 
 	verdicts := map[string]string{}
@@ -463,6 +465,13 @@ func lastLines(output string, count int) string {
 	return strings.Join(lines, " / ")
 }
 
+// The environment a check runs in: the caller's, without GOFLAGS.
+func gateChildEnv(environ []string) []string {
+	return slices.DeleteFunc(slices.Clone(environ), func(variable string) bool {
+		return strings.HasPrefix(variable, "GOFLAGS=")
+	})
+}
+
 func gateLookup(environ []string, name string) string {
 	for _, variable := range environ {
 		if value, ok := strings.CutPrefix(variable, name+"="); ok {
@@ -482,8 +491,13 @@ func runGateCommand(ctx context.Context, options *gateOptions, command gateComma
 	defer cancel()
 	process := exec.CommandContext(commandCtx, command.Command[0], command.Command[1:]...)
 	process.Dir = filepath.Join(options.root, command.Repo, command.Dir)
-	process.Env = options.environ
+	process.Env = gateChildEnv(options.environ)
 	output, err := process.CombinedOutput()
+	// a host without a module the check imports cannot run it, which says nothing
+	// of what it checks
+	if match := regexp.MustCompile(`ModuleNotFoundError: No module named '([^']+)'`).FindStringSubmatch(string(output)); match != nil {
+		return gateOpen, []string{where + ": this host lacks the Python module " + match[1] + ", so it did not run"}
+	}
 	if err != nil {
 		return gateFail, []string{where + ": " + lastLines(string(output), 3)}
 	}

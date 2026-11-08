@@ -231,6 +231,34 @@ func TestGateWithoutAGroupLeavesFs55Open(t *testing.T) {
 	}
 }
 
+// A check this host cannot run, for want of a Python module, is open, never a
+// failure of what it checks, and a failing command still fails.
+func TestGateCommandsTellAMissingModuleFromAFailure(t *testing.T) {
+	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
+	script := filepath.Join(options.root, "fixture", "check.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho \"ModuleNotFoundError: No module named 'yaml'\"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, details := runGateCommand(context.Background(), options, gateCommand{Repo: "fixture", Command: []string{script}}); outcome != gateOpen {
+		t.Fatalf("a missing module reads %s: %v", outcome, details)
+	}
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'FAILED (failures=1)'\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if outcome, _ := runGateCommand(context.Background(), options, gateCommand{Repo: "fixture", Command: []string{script}}); outcome != gateFail {
+		t.Fatalf("a failing check reads %s", outcome)
+	}
+}
+
+// The checks run without the caller's GOFLAGS, so a -trimpath the caller
+// carries cannot move the paths a repo's tests read their files by.
+func TestGateChecksRunWithoutTheCallersGoflags(t *testing.T) {
+	environ := gateChildEnv([]string{"GOFLAGS=-trimpath", "HOME=/nonexistent"})
+	if slices.ContainsFunc(environ, func(variable string) bool { return strings.HasPrefix(variable, "GOFLAGS=") }) || !slices.Contains(environ, "HOME=/nonexistent") {
+		t.Fatalf("environ %v", environ)
+	}
+}
+
 func TestGateRefusesAGateItDoesNotHold(t *testing.T) {
 	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
 	options.gate = "M42"
