@@ -6,7 +6,7 @@
   "kind": "sim-latency-launch-preparation-checkpoint",
   "objective": "Ready to launch at 2026-10-28T00:00:00Z",
   "requested_launch_deadline_met": false,
-  "status": "R2_epoch1_sealed_provisional_winner_review_pending_rewards_and_source_held",
+  "status": "R2_epoch1_Astra_approved_operator_approval_satisfied_import_qualified_pending_deployment_rewards_and_source_held",
   "production_intake_open": false,
   "grading_started": true,
   "grading_currently_active": false,
