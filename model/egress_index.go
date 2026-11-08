@@ -714,10 +714,10 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 // supply. Unprobed also counts a passing ratio on too few URL runs for a
 // native bucket (egress_native_min_runs.go), out of Quality, and of Speed
 // below its minimum.
-// Zero carry, a verdict that the provider accepted contracts from several
-// networks and carried nothing (provider_zero_carry.go), excludes like a
-// common gate: every bucket, result and count, explicit client ids and
-// force_minimum included.
+// Zero carry, a verdict that the provider's contracts from several networks
+// carried nothing (provider_zero_carry.go), excludes like a common gate:
+// every bucket, result and count, explicit client ids and force_minimum
+// included.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
 	ProviderExcludedBlackhole      = "blackhole"
@@ -894,9 +894,9 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 			hardExcluded: true,
 		}
 	case facts.zeroCarry:
-		// Accepted contracts from several networks and carried nothing
-		// through them, while every URL probe failed: out of every bucket,
-		// result and count, whatever the country guard says. The URL probe
+		// Its contracts from several networks carried nothing, while every
+		// URL probe failed: out of every bucket, result and count, whatever
+		// the country guard says. The URL probe
 		// keeps measuring it, and a success, a new app version or the
 		// verdict's expiry brings it back (provider_zero_carry.go).
 		return providerEgressDecision{

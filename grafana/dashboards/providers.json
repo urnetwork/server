@@ -5808,7 +5808,7 @@
           "legendFormat": "zero_carry"
         }
       ],
-      "description": "Connected providers with a zero-carry verdict in force, as the dashboard counts the pool: in the last day their contracts from at least three client networks (the prober's and their own network's left out) carried at most 1 KiB in all, and every URL probe in the last eight hours failed. A hard exclusion: out of every bucket, answer and provider-locations count, force_minimum and an explicit client id included, in every country, whatever the URL-success rule's exemption. The URL probe keeps measuring them; a success, a new app version on the device or the verdict's expiry after 72 hours brings them back (model/provider_zero_carry.go). The judge's runs, its verdicts by country and its reads are on the egress probes dashboard (zero-carry judge row)."
+      "description": "Connected providers with a zero-carry verdict in force, as the dashboard counts the pool: in the last day their contracts from at least three client networks (the prober's, their own network's and the sessions their clients reported idle left out) carried at most 1 KiB in all, and none earlier that day carried any, and every URL probe in the last eight hours failed. A hard exclusion: out of every bucket, answer and provider-locations count, force_minimum and an explicit client id included, in every country, whatever the URL-success rule's exemption. The URL probe keeps measuring them; a success, a new app version on the device or the verdict's expiry after 72 hours brings them back (model/provider_zero_carry.go). The judge's runs, its verdicts by country and its reads are on the egress probes dashboard (zero-carry judge row)."
     }
   ]
 }

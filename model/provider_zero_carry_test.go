@@ -5,6 +5,8 @@
 package model
 
 import (
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -40,6 +42,9 @@ func TestProviderZeroCarryEvidenceRule(t *testing.T) {
 		{"honest low traffic", ProviderZeroCarryEvidence{RowCount: 25, ContractCount: 25, NetworkCount: 4, CarriedByteCount: 30 * 1024}, false},
 		{"one byte over the floor", ProviderZeroCarryEvidence{ContractCount: 100, NetworkCount: 10, CarriedByteCount: ProviderZeroCarryMaxCarriedByteCount + 1}, false},
 		{"negative bytes", ProviderZeroCarryEvidence{ContractCount: 100, NetworkCount: 10, CarriedByteCount: -1}, false},
+		// the read stopped at its limit, and a contract earlier in the day
+		// carried: a busy honest provider whose newest contracts are empty
+		{"older contract carried", ProviderZeroCarryEvidence{RowCount: 1000, ContractCount: 900, NetworkCount: 40, CarriedByteCount: 0, OlderCarried: true}, false},
 	} {
 		if got := c.evidence.ZeroCarry(); got != c.want {
 			t.Errorf("%s: zero carry %t, want %t", c.name, got, c.want)
@@ -65,9 +70,10 @@ func TestProviderZeroCarryEvidenceFrom(t *testing.T) {
 	}
 }
 
-// A verdict clears on expiry, a URL success, a new app version or a gone
-// client, expiry first; it holds otherwise, whitespace and a missing version
-// read alike.
+// A verdict clears on expiry, a gone client, a URL success or a new app
+// version, in that order; it holds otherwise, whitespace and a missing
+// version read alike. A deleted client's device reads as no version, and
+// clears as gone, not as an upgrade.
 func TestProviderZeroCarryVerdictClearing(t *testing.T) {
 	now := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
 	text := func(s string) *string { return &s }
@@ -88,6 +94,8 @@ func TestProviderZeroCarryVerdictClearing(t *testing.T) {
 		{"version gone", providerZeroCarryVerdictState{verdict: verdict, active: true}, ProviderZeroCarryClearUpgrade},
 		{"url success", providerZeroCarryVerdictState{verdict: verdict, active: true, clientVersion: text("2026.4.6+906996900"), urlSuccess: true}, ProviderZeroCarryClearUrlSuccess},
 		{"client gone", providerZeroCarryVerdictState{verdict: verdict, clientVersion: text("2026.4.6+906996900")}, ProviderZeroCarryClearGone},
+		{"client deleted", providerZeroCarryVerdictState{verdict: verdict}, ProviderZeroCarryClearGone},
+		{"gone with a success", providerZeroCarryVerdictState{verdict: verdict, urlSuccess: true}, ProviderZeroCarryClearGone},
 		{"expired first", providerZeroCarryVerdictState{verdict: ProviderZeroCarryVerdict{ExpireTime: now, ClientVersion: verdict.ClientVersion}, urlSuccess: true}, ProviderZeroCarryClearExpired},
 	} {
 		if got := c.state.clearReason(now); got != c.want {
@@ -193,34 +201,74 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 		}
 	}
 	evidence := providerZeroCarryEvidenceSql()
-	for _, part := range []string{
-		"contract.destination_id = candidate.client_id",
-		"contract.close_time >= candidate.evidence_from",
-		"contract.close_time <= $3",
-		"contract.contract_id >= $4",
-		"ORDER BY contract.close_time DESC",
-		"LIMIT $5",
-		"contract.companion_contract_id IS NULL",
-		"contract.source_network_id <> contract.destination_network_id",
-		"contract.provider_usage->'excluded_reason' IS NULL",
-		"NOT contract.usage_unverified",
-		"WHERE prober.network_id = contract.source_network_id",
-	} {
-		if !strings.Contains(evidence, part) {
-			t.Errorf("the evidence read lacks %q", part)
+	confirmation := providerZeroCarryConfirmationSql()
+	for _, read := range []struct {
+		name  string
+		query string
+	}{{"evidence", evidence}, {"confirming", confirmation}} {
+		for _, part := range []string{
+			"contract.destination_id = candidate.client_id",
+			"contract.close_time >= candidate.evidence_from",
+			"contract.close_time <= $3",
+			"contract.create_time >= candidate.evidence_from",
+			"contract.contract_id >= $4",
+			"ORDER BY contract.close_time DESC",
+			"LIMIT $5",
+			"contract.companion_contract_id IS NULL",
+			"contract.source_network_id <> contract.destination_network_id",
+			"contract.provider_usage->'excluded_reason' IS NULL",
+			"contract.provider_usage->'legacy_exclusion' IS NULL",
+			"NOT contract.usage_unverified",
+			"WHERE prober.network_id = contract.source_network_id",
+			"min(recent.close_time) AS oldest_close_time",
+		} {
+			if !strings.Contains(read.query, part) {
+				t.Errorf("the %s read lacks %q", read.name, part)
+			}
 		}
+	}
+	// only the confirming read reads close evidence, per counted contract,
+	// and searches past its limit for a contract that carried, below the
+	// oldest row it read, over the same window
+	for _, part := range []string{
+		"CASE WHEN read_contract.counted THEN EXISTS (",
+		"close_evidence.contract_id = read_contract.contract_id",
+		"close_evidence.party = 'source'",
+		"NOT close_evidence.checkpoint",
+		"close_evidence.acked_byte_count = 0",
+		"close_evidence.unacked_byte_count = 0",
+		"count(*) FILTER (WHERE recent.counted AND NOT recent.idle) AS contract_count",
+		"CASE WHEN $5 <= confirmed.row_count THEN EXISTS (",
+		"older.destination_id = candidate.client_id",
+		"older.create_time >= candidate.evidence_from",
+		"older.close_time < confirmed.oldest_close_time",
+		"(older.provider_usage->>'byte_count')::numeric END > 0",
+	} {
+		if !strings.Contains(confirmation, part) {
+			t.Errorf("the confirming read lacks %q", part)
+		}
+	}
+	if strings.Contains(evidence, "contract_close_report_evidence") {
+		t.Error("the evidence read reads close evidence for every candidate")
 	}
 	page := providerZeroCarryPageSql()
 	for _, part := range []string{
 		"provider_location.valid AND provider_location.connected AND provider_location.client_id > $1",
 		"ORDER BY provider_location.client_id\n\t\t\tLIMIT $2",
-		"success.total_count = 1 AND success.url_probe_policy_version = ",
-		"run.total_count = 1 AND run.url_probe_policy_version = ",
+		providerOnlineUrlEvidenceSql("success") + " AND success.ok_count = 1",
+		providerOnlineUrlEvidenceSql("run"),
 		"LIMIT 2",
 	} {
 		if !strings.Contains(page, part) {
 			t.Errorf("the page read lacks %q", part)
 		}
+	}
+	// a success the verdict did not see: within the URL window before it or
+	// after it
+	cleared := providerZeroCarryUrlSuccessClearedSql("success", "verdict")
+	if !strings.Contains(cleared, providerOnlineUrlEvidenceSql("success")+" AND success.ok_count = 1") ||
+		!strings.Contains(cleared, fmt.Sprintf("success.measured_at > verdict.create_time - interval '%d seconds'", int(ProviderEgressHealthMaxAge/time.Second))) {
+		t.Errorf("the clearing success is %s", cleared)
 	}
 	// a contract closed at the window's start was created at most a contract
 	// lifetime and the id margin before it
@@ -228,5 +276,31 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 	floor := providerZeroCarryContractIdFloor(from)
 	if got := server.ContractIdTime(floor); !got.Equal(from.Add(-DefaultContractExpiration - ContractIdCreateTimeMargin)) {
 		t.Fatalf("the contract id floor is at %s", got)
+	}
+}
+
+// The judge's URL condition is the URL-success rule's own evidence, through
+// one shared predicate, so the two cannot drift apart when either changes.
+// The window's whole row predicate is the shared one, nothing after it, and
+// the rule's evidence is within the window. When the rule's tally gains a
+// general-catalog half (D4), the rule decides by that half, and its source
+// condition must be in the shared predicate too; this trips until it is.
+func TestProviderZeroCarryUrlConditionIsTheOnlineRules(t *testing.T) {
+	window := strings.TrimSpace(providerEgressHealthWindowSql())
+	rows := strings.TrimSpace(providerEgressHealthWindowRowsSql(""))
+	if !strings.HasSuffix(window, rows) {
+		t.Fatalf("the URL window's row predicate is not the shared one:\n%s\nwant it to end with\n%s", window, rows)
+	}
+	for _, alias := range []string{"run", "success"} {
+		if !strings.Contains(providerOnlineUrlEvidenceSql(alias), providerEgressHealthWindowRowsSql(alias)) {
+			t.Errorf("the URL-success rule's evidence over %s is not within the window", alias)
+		}
+	}
+	if providerZeroCarryUrlRunSql("run") != providerOnlineUrlEvidenceSql("run") {
+		t.Error("the judge's URL runs are not the rule's evidence")
+	}
+	if _, general := reflect.TypeOf(ProviderEgressHealthCounts{}).FieldByName("General"); general &&
+		!strings.Contains(providerOnlineUrlEvidenceSql("run"), "url_source") {
+		t.Error("the URL-success rule decides by the general catalog's outcomes, and the shared predicate does not")
 	}
 }

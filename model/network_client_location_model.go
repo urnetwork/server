@@ -4045,7 +4045,7 @@ type providerCountFilter struct {
 	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
 	// The zero-carry verdicts in force (provider_zero_carry.go): providers
-	// that accepted contracts from several networks and carried nothing.
+	// whose contracts from several networks carried nothing.
 	zeroCarry map[server.Id]bool
 	// The URL-success rule's country guard with the kill switch and floor it
 	// was decided under, set by each consumer after the filter loads: a fleet

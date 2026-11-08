@@ -1,6 +1,6 @@
-// The zero-carry verdicts (model/provider_zero_carry.go): providers that
-// accepted contracts from several client networks and carried nothing through
-// any of them, while every URL probe of theirs failed.
+// The zero-carry verdicts (model/provider_zero_carry.go): providers whose
+// contracts from several client networks carried nothing, idle sessions left
+// out, while every URL probe of theirs failed.
 //
 // One row per provider while its verdict holds. The taskworker's judge
 // (JudgeProviderZeroCarry) inserts a row on the evidence it read and deletes

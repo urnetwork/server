@@ -582,12 +582,36 @@ type ProviderEgressHealthCounts struct {
 // never enters this window: the finding it rechecks is judged on its own, and
 // its failures would otherwise count against the provider twice.
 func providerEgressHealthWindowSql() string {
-	return fmt.Sprintf(`
+	return `
 	SELECT client_id, measured_at, ok_count, total_count, class_results
 	FROM provider_egress_health_history
-	WHERE measured_at > $1 AND measured_at <= $2 AND total_count = 1
-	AND url_probe_policy_version = %d
-`, SelectedProviderUrlProbePolicyVersion())
+	WHERE measured_at > $1 AND measured_at <= $2 AND ` + providerEgressHealthWindowRowsSql("") + `
+`
+}
+
+// Which history rows the window holds, over the rows aliased alias ("" for
+// the bare table): the window's one row predicate apart from its time bounds.
+// Every condition on what enters the window belongs here, so the readers that
+// share it (the Online rule's evidence, providerOnlineUrlEvidenceSql) cannot
+// drift from it.
+func providerEgressHealthWindowRowsSql(alias string) string {
+	prefix := ""
+	if alias != "" {
+		prefix = alias + "."
+	}
+	return fmt.Sprintf(`%[1]stotal_count = 1
+	AND %[1]surl_probe_policy_version = %[2]d`, prefix, SelectedProviderUrlProbePolicyVersion())
+}
+
+// The history rows the URL-success rule decides by, its URL ratio and its
+// country guard: today every row of the window. The zero-carry judge reads
+// its URL condition through this (provider_zero_carry.go), so whatever narrows
+// the rule's evidence narrows the judge's too. A merge that restricts the
+// Online rule to one catalog's outcomes (D4: the general catalog) adds that
+// condition here; TestProviderZeroCarryUrlConditionIsTheOnlineRules trips
+// until it does.
+func providerOnlineUrlEvidenceSql(alias string) string {
+	return providerEgressHealthWindowRowsSql(alias)
 }
 
 // Aggregates accepted URL successes and measured errors in the eight-hour
