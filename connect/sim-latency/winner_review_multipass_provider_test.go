@@ -334,3 +334,69 @@ func TestWinnerMultipassProviderContextOverflowRetainsFailedOriginal(t *testing.
 		return []byte(`{"error":{"type":"context_length_exceeded","message":"synthetic refusal without truncation"}}`), nil
 	})
 }
+
+// JSON Schema's canonical vocabulary deliberately contains camelCase. Its raw
+// schema bytes are payload-bound data, not aliases of our owned transport fields.
+func TestWinnerMultipassGeneratedPayloadAdmitsCanonicalSchemaVocabulary(t *testing.T) {
+	bundle, plan, _ := winnerMultipassProviderFixture(t)
+	call := plan.Calls[0]
+	payload, err := buildWinnerMultipassCall(plan, bundle, call.Id, map[string]winnerMultipassCallEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envelope := winnerMultipassBrokerEnvelope{Call: call, Payload: payload, Settings: plan.Settings}
+	decoded, err := decodeWinnerMultipassPayload(envelope)
+	if err != nil {
+		t.Fatal("canonical generated payload must decode before any provider I/O:", err)
+	}
+	if !strings.Contains(string(decoded.Text.Format.Schema), `"additionalProperties":false`) || !strings.Contains(string(decoded.Text.Format.Schema), `"maxItems"`) {
+		t.Fatal("fixture no longer covers canonical JSON Schema keywords")
+	}
+	if _, err := winnerMultipassTokenizerPayload(envelope); err != nil {
+		t.Fatal("the identical generated payload cannot be tokenized:", err)
+	}
+}
+
+// Only the schema RawMessage is opaque; owned outer/nested keys stay exact.
+func TestWinnerMultipassPayloadRejectsOwnedFieldAliases(t *testing.T) {
+	bundle, plan, _ := winnerMultipassProviderFixture(t)
+	call := plan.Calls[0]
+	payload, err := buildWinnerMultipassCall(plan, bundle, call.Id, map[string]winnerMultipassCallEvidence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, alias := range [][2]string{{`"model":`, `"MODEL":`}, {`"effort":`, `"Effort":`}, {`"format":`, `"Format":`}, {`"strict":`, `"Strict":`}} {
+		changed := strings.Replace(string(payload), alias[0], alias[1], 1)
+		if changed == string(payload) {
+			t.Fatal("alias fixture did not mutate its intended owned key")
+		}
+		if _, err := decodeWinnerMultipassPayload(winnerMultipassBrokerEnvelope{Call: call, Payload: []byte(changed), Settings: plan.Settings}); err == nil {
+			t.Fatalf("owned wire alias accepted: %s", alias[1])
+		}
+	}
+}
+
+// Opaque schema vocabulary never permits substituting a different schema after
+// admission or in full native evidence, even if a caller recomputes a digest.
+func TestWinnerMultipassChangedSchemaRemainsBoundByFullPayload(t *testing.T) {
+	bundle, plan, judgment := winnerMultipassFixture(t)
+	evidence := winnerMultipassEvidenceFixture(t, bundle, plan, judgment)
+	first := &evidence.Calls[0]
+	var payload map[string]any
+	if err := json.Unmarshal(first.Request, &payload); err != nil {
+		t.Fatal(err)
+	}
+	payload["text"].(map[string]any)["format"].(map[string]any)["schema"] = map[string]any{"type": "object", "additionalProperties": true}
+	changed, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validateWinnerMultipassAdmission(plan, plan.Calls[0], changed, first.Admission) == nil {
+		t.Fatal("different output schema retained old token admission")
+	}
+	first.Request = changed
+	first.Admission.RequestSha256 = winnerMultipassSha256(changed)
+	if _, err := validateWinnerMultipassCompletedPrefix(plan, bundle, evidence); err == nil {
+		t.Fatal("rehashed substituted schema replaced the exact native planned payload")
+	}
+}

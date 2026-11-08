@@ -83,6 +83,8 @@ type winnerMultipassBrokerResult struct {
 	VisibleResponse           []byte                     `json:"visible_response"`
 	VisibleResponseSha256     string                     `json:"visible_response_sha256"`
 	TransportResponseSha256   string                     `json:"transport_response_sha256"`
+	TransportStatus           int                        `json:"transport_status"`
+	TransportContentType      string                     `json:"transport_content_type"`
 	TransportResponseArtifact string                     `json:"transport_response_artifact"`
 	ProviderOutput            string                     `json:"provider_output"`
 	Observation               winnerMultipassObservation `json:"observation"`
@@ -115,14 +117,54 @@ type winnerMultipassPayload struct {
 	} `json:"text"`
 }
 
+// Only JSON Schema is an opaque RawMessage here: canonical keywords such as
+// additionalProperties are not aliases of our owned lower-case wire fields.
+// The parent still binds every schema byte through the exact full-payload hash.
+func validateWinnerMultipassPayloadKeys(content []byte) error {
+	object := func(raw []byte, names ...string) (map[string]json.RawMessage, error) {
+		var fields map[string]json.RawMessage
+		if err := decodeStrictJSONBytes(raw, &fields, "multi-pass owned payload object"); err != nil {
+			return nil, err
+		}
+		if len(fields) != len(names) {
+			return nil, errors.New("multi-pass owned payload field census changed")
+		}
+		for _, name := range names {
+			value, found := fields[name]
+			if !found || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+				return nil, errors.New("multi-pass payload has an omitted, null or case-aliased owned field")
+			}
+		}
+		return fields, nil
+	}
+	fields, err := object(content, "model", "reasoning", "include_reasoning", "store", "stream", "tools", "tool_choice", "truncation", "max_output_tokens", "instructions", "input", "text")
+	if err != nil {
+		return err
+	}
+	if _, err := object(fields["reasoning"], "effort"); err != nil {
+		return err
+	}
+	text, err := object(fields["text"], "format")
+	if err != nil {
+		return err
+	}
+	format, err := object(text["format"], "type", "name", "strict", "schema")
+	if err != nil {
+		return err
+	}
+	var schema map[string]json.RawMessage
+	if json.Unmarshal(format["schema"], &schema) != nil || len(schema) == 0 {
+		return errors.New("multi-pass opaque schema must remain a nonempty JSON object")
+	}
+	return nil
+}
+
 // Schema/instruction bytes are separately bound by the parent plan. This guard
 // constrains the entire network protocol before any request, even for tokenization.
 func decodeWinnerMultipassPayload(envelope winnerMultipassBrokerEnvelope) (winnerMultipassPayload, error) {
 	var payload winnerMultipassPayload
-	var fields map[string]json.RawMessage
 	if len(envelope.Payload) == 0 || len(envelope.Payload) > envelope.Settings.MaximumRequestBytes ||
-		rejectWinnerReviewCaseAliases(envelope.Payload) != nil || decodeStrictJSONBytes(envelope.Payload, &payload, "multi-pass exact Responses payload") != nil ||
-		json.Unmarshal(envelope.Payload, &fields) != nil || len(fields) != 12 {
+		validateWinnerMultipassPayloadKeys(envelope.Payload) != nil || decodeStrictJSONBytes(envelope.Payload, &payload, "multi-pass exact Responses payload") != nil {
 		return payload, errors.New("multi-pass provider payload is not the complete fixed tool-free contract")
 	}
 	if payload.Model != envelope.Call.Member.Model || payload.Reasoning.Effort != envelope.Call.Member.Reasoning || payload.IncludeReasoning || payload.Store || !payload.Stream ||
@@ -382,7 +424,8 @@ func executeWinnerMultipassBroker(ctx context.Context, client *http.Client, enve
 				return err
 			}
 			result.TokenizerRequestArtifact = "tokenize.request.json"
-			response, status, _, err := winnerMultipassHttp(ctx, client, provider, envelope.Call.Member, http.MethodPost, "/upstream/"+envelope.Call.Member.Model+"/tokenize", request, limits.MaximumTokenizerBytes, limits.TokenizerTimeout)
+			response, status, contentType, err := winnerMultipassHttp(ctx, client, provider, envelope.Call.Member, http.MethodPost, "/upstream/"+envelope.Call.Member.Model+"/tokenize", request, limits.MaximumTokenizerBytes, limits.TokenizerTimeout)
+			result.TransportStatus, result.TransportContentType = status, contentType
 			result.TransportResponseSha256 = winnerMultipassSha256(response)
 			if err != nil {
 				return err
@@ -415,6 +458,7 @@ func executeWinnerMultipassBroker(ctx context.Context, client *http.Client, enve
 			return validateWinnerMultipassTokenization(&winnerMultipassPlan{Settings: envelope.Settings}, envelope.Call, envelope.Payload, *result.Admission)
 		}
 		response, status, contentType, err := winnerMultipassHttp(ctx, client, provider, envelope.Call.Member, http.MethodPost, "/v1/responses", envelope.Payload, envelope.Settings.MaximumResponseBytes, limits.GenerationTimeout)
+		result.TransportStatus, result.TransportContentType = status, contentType
 		result.TransportResponseSha256 = winnerMultipassSha256(response)
 		if err != nil {
 			return err
