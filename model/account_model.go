@@ -387,6 +387,10 @@ func RemoveNetworkWithStoreSnapshot(
 		if server.SidecarMg1Linked() {
 			removeSidecarIdentitiesInTx(ctx, tx, networkId)
 		}
+		// §8.17's head goes with its network; its clients' acks age out in 7 days
+		if server.SidecarMg2Linked() {
+			removeNetworkAclHeadInTx(ctx, tx, networkId)
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

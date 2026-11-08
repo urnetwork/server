@@ -464,3 +464,120 @@ func TestSidecarMg1ColumnsMapToMetadataRows(t *testing.T) {
 		}
 	})
 }
+
+// CODESTYLE's migration rules for MG2's §8 part: its two new tables and an index
+// on one, and network_client's one nullable column, added with its lock wait
+// bounded.
+func TestSidecarMg2AclPartIsAdditive(t *testing.T) {
+	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (network_acl_head|network_acl_ack)\b|CREATE INDEX network_acl_ack_\w+ ON network_acl_ack\b|SET LOCAL lock_timeout = '2s';\s*ALTER TABLE network_client ADD COLUMN acl_subject_client_id uuid NULL\s*$)`)
+	refused := regexp.MustCompile(`(?i)\b(DROP|RENAME|NOT VALID|NOT NULL DEFAULT gen|TRUNCATE|UPDATE|DELETE|REFERENCES|transaction_timeout)\b`)
+	migrations := sidecarMg2AclMigrations()
+	if len(migrations) != 4 {
+		t.Fatalf("MG2's §8 part holds %d migrations", len(migrations))
+	}
+	for index, migration := range migrations {
+		switch value := migration.(type) {
+		case *SqlMigration:
+			if !statement.MatchString(value.sql) {
+				t.Errorf("entry %d is not an addition: %s", index, value.sql)
+			}
+			if refused.MatchString(value.sql) {
+				t.Errorf("entry %d changes what the running release uses: %s", index, value.sql)
+			}
+		default:
+			t.Fatalf("entry %d is a %T", index, migration)
+		}
+	}
+}
+
+// The metadata row each column of MG2's §8 part shows under (§2.8, I-18), with
+// words of that row's sees that name it.
+var sidecarMg2AclColumnRows = map[string][2]string{
+	"network_acl_head.network_id":   {"api-7", "network_acl_head"},
+	"network_acl_head.version":      {"api-7", "each network's newest position"},
+	"network_acl_head.chain":        {"api-7", "chain digest"},
+	"network_acl_head.has_document": {"api-7", "has_document"},
+
+	"network_acl_ack.client_id": {"api-15", "per client"},
+	"network_acl_ack.version":   {"api-15", "the projection version it applied"},
+	"network_acl_ack.ack_time":  {"api-15", "and when"},
+
+	"network_client.acl_subject_client_id": {"api-4", "acl_subject_client_id"},
+}
+
+// A row of §2.8's list: its id line and the indented lines under it, or "".
+func sidecarMetadataRowText(listBytes []byte, rowId string) string {
+	lines := strings.Split(string(listBytes), "\n")
+	for i, line := range lines {
+		if line != rowId+":" {
+			continue
+		}
+		row := []string{}
+		for _, next := range lines[i+1:] {
+			if !strings.HasPrefix(next, "  ") {
+				break
+			}
+			row = append(row, next)
+		}
+		return strings.Join(row, "\n")
+	}
+	return ""
+}
+
+// Each column MG2's §8 part adds maps to a row of §2.8's list whose store names
+// its table, or its column on an existing table, and whose sees says the mapped
+// words; each mapped column exists.
+func TestSidecarMg2AclColumnsMapToMetadataRows(t *testing.T) {
+	listPath := "../sidecar/metadata_list.yml"
+	listBytes, err := os.ReadFile(listPath)
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skipf("no sidecar checkout beside the server (%s)", listPath)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		columns := map[string]bool{}
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT table_name || '.' || column_name
+				FROM information_schema.columns
+				WHERE
+					table_name IN ('network_acl_head', 'network_acl_ack') OR
+					(table_name = 'network_client' AND column_name = 'acl_subject_client_id')
+			`)
+			WithPgResult(result, err, func() {
+				for result.Next() {
+					var column string
+					Raise(result.Scan(&column))
+					columns[column] = true
+				}
+			})
+		})
+		for column := range columns {
+			mapped, ok := sidecarMg2AclColumnRows[column]
+			if !ok {
+				t.Errorf("%s maps to no row of §2.8's list", column)
+				continue
+			}
+			row := sidecarMetadataRowText(listBytes, mapped[0])
+			table, columnName, _ := strings.Cut(column, ".")
+			stored := table
+			if table == "network_client" {
+				stored = table + "." + columnName
+			}
+			if !strings.Contains(row, stored) {
+				t.Errorf("%s: row %s does not store %s", column, mapped[0], stored)
+			}
+			if !strings.Contains(row, mapped[1]) {
+				t.Errorf("%s: row %s does not say %q", column, mapped[0], mapped[1])
+			}
+		}
+		for column := range sidecarMg2AclColumnRows {
+			if !columns[column] {
+				t.Errorf("%s is mapped but does not exist", column)
+			}
+		}
+	})
+}

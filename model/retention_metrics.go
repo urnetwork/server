@@ -27,6 +27,8 @@ const (
 	RetentionTableNetworkAdminEvent = "network_admin_event"
 	RetentionTableNetworkAuthKey    = "network_auth_key"
 	RetentionTableAccountApiKey     = "account_api_key"
+	// §8's sidecar table (MG2): acks past their 7 days
+	RetentionTableNetworkAclAck = "network_acl_ack"
 )
 
 var retentionTables = []string{
@@ -46,6 +48,7 @@ var retentionTables = []string{
 	RetentionTableNetworkAdminEvent,
 	RetentionTableNetworkAuthKey,
 	RetentionTableAccountApiKey,
+	RetentionTableNetworkAclAck,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,

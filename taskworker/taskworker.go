@@ -183,6 +183,8 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldAuditNetworkEvents(clientSession, tx)
 		// §7.11's admin event log past its 400 days; a no-op without MG1
 		work.ScheduleRemoveOldNetworkAdminEvents(clientSession, tx)
+		// §8.9's acks past their 7 days; a no-op without MG2
+		work.ScheduleRemoveOldNetworkAclAcks(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -590,6 +592,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveOldNetworkAdminEvents,
 			work.RemoveOldNetworkAdminEventsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveOldNetworkAclAcks,
+			work.RemoveOldNetworkAclAcksPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,

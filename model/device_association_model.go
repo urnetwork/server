@@ -926,6 +926,8 @@ func DeviceConfirmAdopt(
 			adoptTime,
 		))
 
+		// an adopted device's client is top-level, its own subject (D-ACL-3)
+		subjectColumn, subjectValue := NetworkClientAclSubjectInsert("$1")
 		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
@@ -935,9 +937,9 @@ func DeviceConfirmAdopt(
                     device_id,
                     description,
                     create_time,
-                    auth_time
+                    auth_time`+subjectColumn+`
                 )
-                VALUES ($1, $2, $3, $4, $5, $5)
+                VALUES ($1, $2, $3, $4, $5, $5`+subjectValue+`)
             `,
 			clientId,
 			networkId,

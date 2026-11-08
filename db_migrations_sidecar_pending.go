@@ -248,7 +248,48 @@ func sidecarMg2Migrations() []any {
 // network_client.acl_subject_client_id, which turns NOT NULL only through a
 // validated NOT VALID check (ACL's tasks).
 func sidecarMg2AclMigrations() []any {
-	return []any{}
+	return []any{
+		// §8.17's head (§2.8 api-7): each network with a config repo, its newest
+		// verified log position n and chain digest A_n, and whether its rows
+		// hold a document. api's append path and §19.10's restore raise it and
+		// nothing lowers it; it goes with its network. A network with no row
+		// costs the contract gate one map miss (R-ACL-8).
+		newSqlMigration(`
+			CREATE TABLE network_acl_head (
+				network_id uuid NOT NULL,
+				version bigint NOT NULL,
+				chain bytea NOT NULL,
+				has_document bool NOT NULL DEFAULT false,
+
+				PRIMARY KEY (network_id)
+			)
+		`),
+		// §8.9's acks (§2.8 api-15): the newest projection version each client
+		// applied and when, one row per client however chatty its network,
+		// kept 7 days by the taskworker's sweep and in no dump (§19.6).
+		newSqlMigration(`
+			CREATE TABLE network_acl_ack (
+				client_id uuid NOT NULL,
+				version bigint NOT NULL,
+				ack_time timestamp NOT NULL,
+
+				PRIMARY KEY (client_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_acl_ack_ack_time ON network_acl_ack (ack_time)
+		`),
+		// D-ACL-3: each client's subject, written once at creation in the
+		// insert's own statement. Nullable until a backfill and a validated NOT
+		// VALID check (§19.7), and until then NULL means itself for a top-level
+		// client, else its source client's subject. Catalog-only, but every
+		// client request reads this table and queues behind ADD COLUMN's lock,
+		// so its wait is bounded as MG0's are.
+		newSqlMigration(`
+			SET LOCAL lock_timeout = '2s';
+			ALTER TABLE network_client ADD COLUMN acl_subject_client_id uuid NULL
+		`),
+	}
 }
 
 // MG2's §20 part: network_quota_state, network_service_usage,
