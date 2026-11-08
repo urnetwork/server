@@ -413,6 +413,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
 		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),
 		router.NewRoute("GET", "/sidecar/identity", handlers.GetSidecarIdentityByClient),
+		// §8.9's acks of the projection a client applied (ACL-M2-12)
+		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),

@@ -317,6 +317,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
 	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
 	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds
+	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
@@ -391,6 +392,8 @@ var strictExpRoutes = map[string]bool{
 	"POST /sidecar/bind":            true,
 	"GET /sidecar/identity/([^/]+)": true,
 	"GET /sidecar/identity":         true,
+	// §8.9's ack (ACL-M2-12)
+	"POST /acl/ack": true,
 }
 
 // The routes where a strict_exp bearer proves its ClientKey (§7.4). The third

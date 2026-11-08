@@ -213,6 +213,8 @@ var sidecarAllowlist = []string{
 	"POST /sidecar/bind",
 	"GET /sidecar/identity/([^/]+)",
 	"GET /sidecar/identity",
+	// §8.9's (ACL-M2-12)
+	"POST /acl/ack",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
