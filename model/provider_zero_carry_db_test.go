@@ -673,6 +673,37 @@ func TestZeroCarryCappedOlderSearchMakesNoVerdict(t *testing.T) {
 	})
 }
 
+// The confirming read takes its candidates ConfirmationBatchSize at a time,
+// fewer than the evidence read's batch: every candidate is confirmed, in
+// whichever batch it falls.
+func TestZeroCarryConfirmsInSmallBatches(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Pavlodar", "Pavlodar", "Kazakhstan", "kz")
+		settings := zeroCarryTestSettings()
+		if settings.ConfirmationBatchSize != ProviderZeroCarryConfirmationBatchSize || settings.EvidenceBatchSize <= settings.ConfirmationBatchSize {
+			t.Fatalf("the default batches are %d to read and %d to confirm", settings.EvidenceBatchSize, settings.ConfirmationBatchSize)
+		}
+		// three confirming batches, the last of one candidate
+		zombies := []*egressTestProvider{}
+		for range 2*ProviderZeroCarryConfirmationBatchSize + 1 {
+			zombie := zeroCarryTestCandidate(ctx, t, city)
+			zeroCarryTestContractsWith(ctx, t, zombie, zeroCarryTestNetworks(3), 7, zeroCarryTestContract{closedAgo: time.Hour, sourceReport: "unacked"})
+			zombies = append(zombies, zombie)
+		}
+		egressTestPasses(ctx, t)
+
+		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, settings)
+		connect.AssertEqual(t, judgement.ConfirmedCount, len(zombies))
+		connect.AssertEqual(t, judgement.Created, len(zombies))
+		for _, zombie := range zombies {
+			if !zeroCarryTestHeld(ctx, zombie) {
+				t.Error("a zombie holds no verdict")
+			}
+		}
+	})
+}
+
 // A contract the old build accepted counts against neither build once the
 // device reports a new version, even when its client's final lands after the
 // upgrade.

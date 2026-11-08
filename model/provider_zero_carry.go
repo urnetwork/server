@@ -147,12 +147,18 @@ const ProviderZeroCarryContractReadLimit = 1000
 // zero-carry held more than the read limit in their windows. Their searches
 // examined 148 to 484 contracts, and their batch read 19,276 in 0.51 s. The
 // bound is over four times the largest search, so it confirms a zombie with
-// up to 3,000 contracts in its day. A batch at the bound reads 60,000, about
-// 1.6 s at that rate and twice that at the slowest seen (the same batch took
-// 1.0 s in an earlier read), within the statement timeout. Without the bound
-// a search reads the rest of any day: of the 6,237 candidates the busiest
-// closed 15,520 contracts.
+// up to 3,000 contracts in its day. A confirming statement at the bound
+// examines 15,000 contracts (ProviderZeroCarryConfirmationBatchSize), and
+// two thirds of them lie past the newest ones the evidence read just read,
+// so they may be cold. Without the bound a search reads the rest of any day:
+// of the 6,237 candidates the busiest closed 15,520 contracts.
 const ProviderZeroCarryOlderSearchLimit = 2000
+
+// The candidates one confirming statement reads. Each may examine its read
+// limit and the search's bound, 3,000 contracts, so five keep a statement at
+// the bound to 15,000, a quarter of what the evidence read's twenty would,
+// and leave room within the statement timeout for a cold cache.
+const ProviderZeroCarryConfirmationBatchSize = 5
 
 // The fewest counted contracts that can show a provider carries nothing.
 const ProviderZeroCarryMinContracts = 20
@@ -176,8 +182,10 @@ const providerZeroCarryStatementTimeout = 10 * time.Second
 type ProviderZeroCarrySettings struct {
 	// connected providers one run reads, in client id order
 	PageSize int
-	// candidates one contract statement reads
+	// candidates one evidence statement reads
 	EvidenceBatchSize int
+	// candidates one confirming statement reads
+	ConfirmationBatchSize int
 	// the most contracts read per candidate
 	ContractReadLimit int
 	// the most contracts the confirming read examines past its read limit
@@ -188,11 +196,12 @@ type ProviderZeroCarrySettings struct {
 
 func DefaultProviderZeroCarrySettings() *ProviderZeroCarrySettings {
 	return &ProviderZeroCarrySettings{
-		PageSize:          5000,
-		EvidenceBatchSize: 20,
-		ContractReadLimit: ProviderZeroCarryContractReadLimit,
-		OlderSearchLimit:  ProviderZeroCarryOlderSearchLimit,
-		VerdictReadLimit:  10000,
+		PageSize:              5000,
+		EvidenceBatchSize:     20,
+		ConfirmationBatchSize: ProviderZeroCarryConfirmationBatchSize,
+		ContractReadLimit:     ProviderZeroCarryContractReadLimit,
+		OlderSearchLimit:      ProviderZeroCarryOlderSearchLimit,
+		VerdictReadLimit:      10000,
 	}
 }
 
@@ -794,11 +803,11 @@ func readProviderZeroCarryPage(ctx context.Context, now time.Time, cursor server
 	return page
 }
 
-// Reads the evidence of every candidate, EvidenceBatchSize at a time: the
-// evidence read (providerZeroCarryEvidenceSql), or when confirming the
-// confirming read (providerZeroCarryConfirmationSql), which returns three
-// columns more. A candidate with no contract in its window has evidence of
-// zero rows.
+// Reads the evidence of every candidate: the evidence read
+// (providerZeroCarryEvidenceSql), EvidenceBatchSize at a time, or when
+// confirming the confirming read (providerZeroCarryConfirmationSql),
+// ConfirmationBatchSize at a time, which returns three columns more. A
+// candidate with no contract in its window has evidence of zero rows.
 func readProviderZeroCarryEvidence(
 	ctx context.Context,
 	now time.Time,
@@ -808,6 +817,9 @@ func readProviderZeroCarryEvidence(
 ) map[server.Id]ProviderZeroCarryEvidence {
 	evidence := map[server.Id]ProviderZeroCarryEvidence{}
 	batchSize := settings.EvidenceBatchSize
+	if confirming {
+		batchSize = settings.ConfirmationBatchSize
+	}
 	readLimit := settings.ContractReadLimit
 	olderSearchLimit := settings.OlderSearchLimit
 	if len(candidates) == 0 || batchSize <= 0 || readLimit <= 0 || (confirming && olderSearchLimit <= 0) {
