@@ -23964,6 +23964,90 @@ fleet-wide: every restart recreates windows and contracts. Verify with a full
 10-minute hold at or under 250 ms on complete slot coverage, PgBouncer queued
 clients at 0 and the `/connect/control` mean back in single-digit milliseconds.
 
+### 2.31 TLS finding judge liveness and undecided findings
+Probe: `egress-tls-judge`
+
+A URL turn whose certificate fails verification stores an exact-URL TLS
+finding (`provider_egress_url_security`). The finding starts pending and
+excludes nobody until the Taskworker's TLS finding judge
+(`JudgeProviderEgressTlsFindings`, a RunOnce task every five minutes on one
+Taskworker at a time, `model/provider_egress_tls_verdict.go`) decides it:
+only a finding judged the provider's own (the URL verified directly from the
+server, and no site, prober or country fault explains it) excludes. The
+exclusion therefore fails open while the judge is not judging. A run past its
+ten-minute bound or a panic skips the Post that schedules the next run and
+retries on a backoff toward an hour, and a run that cannot build the served
+pool judges nothing (`judge_runs_total{result="pool_unavailable"}`). A run
+also cannot decide a fresh failure when its direct, verified TLS handshake
+to the URL's host is inconclusive (a dial error, a timeout, a reset, a host
+past the run's bound): the finding stays pending, and once its failure is
+older than the one-hour direct window no check can decide it.
+
+Every judged run sets, on the process that ran it,
+`urnetwork_egress_tls_judge_last_judged_timestamp_seconds` (0 on a process
+until it has judged), `urnetwork_egress_tls_findings{verdict}` (the unresolved
+findings by verdict after the run) and `urnetwork_egress_tls_undecided_findings`
+(the pending findings the run left undecided although their failure is inside
+the direct window, so a direct check could still decide them). The fleet's
+view is the process with the newest last-judged timestamp; the others keep
+what their own last run set.
+
+Implementation (5-minute cadence; `signal_egress_tls_judge.go` and
+`signal_egress_tls_judge_test.go`). One loopback Mimir read evaluated two
+minutes behind now:
+`topk(1, urnetwork_egress_tls_judge_last_judged_timestamp_seconds{job="taskworker"})`,
+`urnetwork_egress_tls_undecided_findings{job="taskworker"} and on(job,host,block,instance)`
+that same `topk(1, ...)`, and the last-judged gauge's per-slot freshness on
+every desired Taskworker slot.
+
+Classes (all WARN, target `<env>/egress-tls-judge`; only counts, ages and
+slot names are rendered, never a URL, a provider or a website):
+
+- `egress-tls-judge-stale` (sustain 2, PAGE after six failing cadences): the
+  fleet's newest judged run is more than 20 minutes old, or no process has
+  judged since it started. Raised only when every desired Taskworker slot
+  exports a fresh last-judged gauge, since an unread slot may hold the newest
+  run, and resolved healthy only then;
+- `egress-tls-findings-undecided` (sustain 6, never pages): the newest judged
+  run, no more than 20 minutes old, left pending findings undecided inside the
+  direct window, on every cadence for half an hour. A provider that keeps
+  failing its recheck keeps its finding inside the window, so the count holds
+  while the host stays unreachable from the server; a stale count is the
+  stale class's, not this one's;
+- `egress-tls-judge-unobservable` (visibility, sustain 2, never pages): a
+  failed or annotated Mimir read, no last-judged series at all, no undecided
+  series beside it, an invalid sample (a judged time ahead of the clock), and
+  a desired slot whose gauge is missing, stale (older than three minutes),
+  duplicated or on an excluded or disabled host. A Taskworker built before
+  §2.31 exports none of the judge gauges, so before the roll, mid-roll and
+  after a rollback the signal is unobservable, never stale, and pages nobody.
+
+The egress probes dashboard's "tls findings" row (panels 151 and 152) charts
+the same gauges from the newest judged process, and the judge's moved
+verdicts, direct checks by outcome and runs by result. False-positive
+qualifiers: the judge runs on one Taskworker at a time, so a run in flight
+for ten minutes plus the evaluation lag reads as an older newest run; the
+stale bound covers four intervals. Every process exports 0 until it has
+judged, so a fleet restarted all at once reads as never judged until its
+startup schedule's first run, which the sustain absorbs. False-negative
+qualifiers: an undecided finding whose provider goes quiet leaves the
+direct window after an hour and the count with it, though it stays pending
+until a fresh failure; the findings by verdict on panel 151 keep showing it.
+A judge that judges but stores nothing (every optimistic write lost) still
+reads as live; its log line reports changed= per run.
+
+ACTION: for a stale judge, read the Taskworker's `[egress]TLS judge` lines and
+the reschedule error on the `pending_task` row under run_once_key
+`judge_provider_egress_tls_findings`. For `pool_unavailable`, the served
+destination pool could not be built: its own errors on the api and the
+Taskworker name the cause. A run that times out is most often its direct checks (15 s
+each, eight at a time, at most 256 hosts). A Taskworker restart schedules a
+run at once. For undecided findings, check the hosts of the recent pending
+findings from a Taskworker host: an unreachable address family, a firewall or
+a host that refuses the server is the usual cause. Do not exclude a provider
+by hand on an undecided finding. Verify with a judged run under 20 minutes
+old, and no undecided finding, on two cadences.
+
 ---
 
 ## 3. redis signal catalog

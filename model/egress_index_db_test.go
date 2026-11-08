@@ -81,6 +81,20 @@ func egressTestConnect(
 	scores *ConnectionLocationScores,
 ) *egressTestProvider {
 	t.Helper()
+	return egressTestConnectOn(ctx, t, server.NewId(), location, performance, modes, scores)
+}
+
+// The same, on networkId, so several providers can share one network.
+func egressTestConnectOn(
+	ctx context.Context,
+	t testing.TB,
+	networkId server.Id,
+	location *Location,
+	performance egressTestPerformance,
+	modes map[ProvideMode][]byte,
+	scores *ConnectionLocationScores,
+) *egressTestProvider {
+	t.Helper()
 	if modes == nil {
 		modes = egressTestPublicAndNetwork
 	}
@@ -89,7 +103,7 @@ func egressTestConnect(
 	}
 	provider := &egressTestProvider{
 		clientId:  server.NewId(),
-		networkId: server.NewId(),
+		networkId: networkId,
 	}
 	Testing_CreateDevice(ctx, provider.networkId, server.NewId(), provider.clientId, "", "")
 	handlerId := CreateNetworkClientHandler(ctx)
@@ -620,7 +634,8 @@ func TestFindProviders2ArinNonQualityIsSpeedOnly(t *testing.T) {
 // exclusions: absent in both modes, with force_minimum, when named by client
 // id, as a network-only provider of the caller's own network, from the
 // online bucket and from the counts. Clearing risk restores that provider;
-// a clean aggregate cannot clear an unidentified legacy TLS finding. Exact-URL
+// a clean aggregate cannot clear an unidentified legacy TLS finding, which
+// only clean URL rechecks once the provider is back clear. Exact-URL
 // recovery is covered separately by TestFp2UrlSecurityRecoveryIsExactOrderedAndIdempotent.
 func TestFindProviders2HardExclusionsHoldEverywhere(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {

@@ -98,6 +98,8 @@ func TestUrlCompletedPriorityPreservesQuotaSecurityAndFreshness(t *testing.T) {
 		SetProviderEgressHealth(ctx, &ProviderEgressHealth{RunId: server.NewId(), ClientId: clients[1],
 			CycleStartedAt: startedAt, MeasuredAt: now.Add(-time.Minute), Total: 1, TLSAuthenticationFailure: true,
 			UrlProbeEvidence: fp2TestUrlEvidence(now.Add(-time.Minute), "https://affected.example/", true)})
+		// judged the provider's own, so its quarantine is observable below
+		testingJudgeTlsFindingsTheProvidersOwn(t, ctx)
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_probe_cycle SET next_attempt_at=$1`, now))
 			// A stale positive queue hint still needs the authoritative risk check.

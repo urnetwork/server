@@ -20,8 +20,10 @@ import (
 )
 
 // Provider serving eligibility is shared by score export, location counts,
-// request hard exclusions and diagnostics. Reliability, ARIN risk and persistent
-// URL security exceptions gate every bucket. Every bucket also requires a
+// request hard exclusions and diagnostics. Reliability, ARIN risk and URL TLS
+// findings judged the provider's own (provider_egress_tls_verdict.go: a
+// finding excludes only once corroborated, and never for a site, prober,
+// place or retired-URL fault) gate every bucket. Every bucket also requires a
 // measured URL success within eight hours, unless the provider has too little
 // history to show one or its country is one where the probe itself fails (the
 // URL-success rule, egress_online_success.go). That gate is bucket membership
@@ -1075,10 +1077,10 @@ func providerHardExclusionsSql() string {
 			SELECT client_id, lookback_index, independent_reliability_weight
 			FROM client_connection_reliability_score WHERE client_id = ANY($1)
 		), provider_egress_health AS MATERIALIZED (
-			SELECT client_id, tls_authentication_failure, legacy_tls_authentication_failure
+			SELECT client_id, tls_authentication_failure, legacy_tls_authentication_failure, legacy_tls_cleared_at
 			FROM provider_egress_health WHERE client_id = ANY($1)
 		), provider_egress_url_security AS MATERIALIZED (
-			SELECT client_id, tls_failure
+			SELECT client_id, tls_failure, tls_verdict
 			FROM provider_egress_url_security WHERE client_id = ANY($1) AND tls_failure
 		)
 		SELECT client_id
@@ -1089,8 +1091,8 @@ func providerHardExclusionsSql() string {
 		FROM provider_egress_health
 		WHERE client_id = ANY($1) AND tls_authentication_failure = true
 		UNION
-		SELECT client_id FROM provider_egress_url_security
-		WHERE client_id = ANY($1) AND tls_failure
+		SELECT client_id FROM provider_egress_url_security AS url_security
+		WHERE client_id = ANY($1) AND ` + providerUrlSecurityExcludesSql("url_security") + `
 	`
 }
 

@@ -140,6 +140,23 @@ func providerUrlProbePacedAttemptSql(cycleAlias, measuredAtParam, acceptedSucces
 		measuredAtParam, maturity, paced, maturity, paced)
 }
 
+// The pace of a provider with a finding still pending or judged its own
+// (providerHasUrlSecurityRecheckSql): never faster than a fully measured
+// provider is renewed, ProviderUrlProbeRenewalSpacing (24 minutes) after its
+// receipt, with the same stable per-provider jitter as every paced attempt.
+// Such a provider is claimable past its quota and half of its turns are
+// rechecks, so without this cap a failed recheck re-paced it at the failure
+// interval (one minute): a site fault that left one finding on every provider
+// probing a site multiplied fleet probe load and aimed the rechecks at the
+// broken site. At this pace a finding never makes a provider cost more turns
+// than a fully measured one, so no TLS fault, however wide, raises probe load.
+func providerUrlProbeSecurityPacedAttemptSql(cycleAlias, measuredAtParam, pacedExpression string) string {
+	return fmt.Sprintf(`GREATEST((%s), %s::timestamp + (%d
+		* (0.9 + (((hashtext(%s.client_id::text) %% 2001) + 2001) %% 2001)::double precision / 10000)
+		* interval '1 second'))`,
+		pacedExpression, measuredAtParam, int(ProviderUrlProbeRenewalSpacing/time.Second), cycleAlias)
+}
+
 // This success-only projection remains diagnostic. It cannot satisfy the
 // measured-run quota by itself or change the separate eight-hour quality ratio.
 func providerUrlProbeSuccessWindowSql(clientIdExpression, nowExpression string) string {
@@ -383,7 +400,7 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				COALESCE(country.country_code, ''), COALESCE(region.location_name, ''),
 				COALESCE((SELECT jsonb_agg(security.destination ORDER BY security.url_key)
 					FROM provider_egress_url_security AS security
-					WHERE security.client_id=claimed.client_id AND security.tls_failure), '[]'::jsonb),
+					WHERE security.client_id=claimed.client_id AND `+providerUrlSecurityRechecksSql("security")+`), '[]'::jsonb),
 				claimed.claim_ordinal, issued.claimed_at, %s, candidates.network_id
 			FROM claimed JOIN issued USING(client_id,claim_ordinal)
 			JOIN candidates USING (client_id)
@@ -395,6 +412,6 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 			ORDER BY %s
 		`, providerUrlProbeAdmissionSql("provider"), providerUrlProbeRunWindowSql("candidates.client_id", "$1"),
 		providerUrlProbeSuccessWindowSql("candidates.client_id", "$1"),
-		providerHasUrlSecurityExceptionSql("candidates.client_id"), providerUrlProbeRenewalAtSql("measured.oldest_run_at", "measured.latest_result_at"),
+		providerHasUrlSecurityRecheckSql("candidates.client_id"), providerUrlProbeRenewalAtSql("measured.oldest_run_at", "measured.latest_result_at"),
 		countProjection, resultOrder)
 }

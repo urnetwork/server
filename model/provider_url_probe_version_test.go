@@ -76,6 +76,8 @@ func TestFp2UrlPolicyVersionSelectorAndIndependentSecurity(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE provider_egress_health_history SET url_probe_policy_version=0 WHERE run_id=$1`, failure.RunId))
 		})
+		// once judged the provider's own, neither age nor version lifts it
+		testingJudgeTlsFindingsTheProvidersOwn(t, ctx)
 		if !GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx)[clientId] {
 			t.Fatal("old-version/aged security evidence lost quarantine")
 		}

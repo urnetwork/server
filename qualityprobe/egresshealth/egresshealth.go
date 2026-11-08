@@ -1228,6 +1228,13 @@ func fetchWithExitPolicy(ctx context.Context, client *http.Client, d Destination
 // including the provider tunnel's pinning path, which can return the underlying
 // verification error directly.
 func isTlsAuthenticationFailure(err error) bool {
+	return IsTlsAuthenticationFailure(err)
+}
+
+// IsTlsAuthenticationFailure is the probe's own classification, exported so a
+// direct server-side check of a URL (the TLS finding judge) calls the same
+// errors a verification failure that a probe through a provider does.
+func IsTlsAuthenticationFailure(err error) bool {
 	var explicit interface{ TLSAuthenticationFailure() bool }
 	if errors.As(err, &explicit) && explicit.TLSAuthenticationFailure() {
 		return true

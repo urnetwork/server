@@ -935,6 +935,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	proxyUniqueExitMigrationContracts,
 	// Independent prospective stop evidence does not retire prior recovery custody.
 	[]snMainnetMigrationContract{competitionOperatorInterruptionMigrationContract},
+	// the exact-URL TLS finding verdicts, versioned by their position
+	[]snMainnetMigrationContract{providerEgressTlsVerdictMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

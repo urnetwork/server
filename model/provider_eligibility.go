@@ -41,20 +41,45 @@ func providerReliabilityEligibilitySql(clientIdExpression string) string {
 // The caller enforces active identity, connected/valid location and provide-key scope.
 // Non-quality and ordinary probe failures do not exclude URL probes or online supply.
 func providerEgressEligibilitySql(rollupAlias string) string {
-	return fmt.Sprintf(`%s AND NOT (%s)`, providerProbeEligibilitySql(rollupAlias), providerHasUrlSecurityExceptionSql(rollupAlias+".client_id"))
+	return fmt.Sprintf(`%s AND NOT (%s)`, providerProbeEligibilitySql(rollupAlias), providerHasUrlSecurityExclusionSql(rollupAlias+".client_id"))
 }
 
-// Indexed exact-URL findings and the legacy snapshot both quarantine serving;
-// neither may suppress the URL rechecks needed to recover the provider.
-func providerHasUrlSecurityExceptionSql(clientExpression string) string {
+// The legacy snapshot's unidentified finding still holds: the health row's
+// flag is set and its provider's clean rechecks have not cleared it
+// (clearProviderEgressLegacyTlsInTx). The alias names a provider_egress_health
+// row; the flag stays as it was stored.
+func providerLegacyTlsUnclearedSql(healthAlias string) string {
+	return fmt.Sprintf(`(%s.legacy_tls_authentication_failure AND %s.legacy_tls_cleared_at IS NULL)`, healthAlias, healthAlias)
+}
+
+// Serving quarantine: an exact-URL finding judged specific to the provider
+// (provider_egress_tls_verdict.go), or the legacy snapshot's unidentified
+// finding until clean rechecks clear it. A finding still pending, or judged a
+// site, place or retired URL fault, excludes nothing.
+func providerHasUrlSecurityExclusionSql(clientExpression string) string {
 	return fmt.Sprintf(`EXISTS (
 		SELECT 1 FROM provider_egress_health AS provider_security
-		WHERE provider_security.client_id = %s
-		AND (provider_security.tls_authentication_failure OR provider_security.legacy_tls_authentication_failure)
+		WHERE provider_security.client_id = %s AND %s
 	) OR EXISTS (
 		SELECT 1 FROM provider_egress_url_security AS url_security
-		WHERE url_security.client_id = %s AND url_security.tls_failure
-	)`, clientExpression, clientExpression)
+		WHERE url_security.client_id = %s AND %s
+	)`, clientExpression, providerLegacyTlsUnclearedSql("provider_security"), clientExpression, providerUrlSecurityExcludesSql("url_security"))
+}
+
+// Recheck scheduling: a finding still pending or judged the provider's own
+// keeps the provider claimable after its quota, at the capped pace
+// (providerUrlProbeSecurityPacedAttemptSql), as does the legacy snapshot's
+// unidentified finding until its rechecks clear it. Quarantine never
+// suppresses the rechecks that can clear it; a finding judged a site, place
+// or retired URL fault drives none.
+func providerHasUrlSecurityRecheckSql(clientExpression string) string {
+	return fmt.Sprintf(`EXISTS (
+		SELECT 1 FROM provider_egress_health AS provider_security
+		WHERE provider_security.client_id = %s AND %s
+	) OR EXISTS (
+		SELECT 1 FROM provider_egress_url_security AS url_security
+		WHERE url_security.client_id = %s AND %s
+	)`, clientExpression, providerLegacyTlsUnclearedSql("provider_security"), clientExpression, providerUrlSecurityRechecksSql("url_security"))
 }
 
 // Security quarantine affects serving traffic but must remain eligible for a clean recheck.
