@@ -4,6 +4,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"testing"
@@ -68,6 +69,7 @@ func TestTlsJudgeDecidesEachFindingOnEvidenceCloseToIt(t *testing.T) {
 	earlier := now.Add(-2 * time.Hour)
 	working := providerEgressTlsPlaceEvidence{networks: 3, failed: 3, verified: 27, countryLoads: 1000, countryFailures: 50}
 	blocked := providerEgressTlsPlaceEvidence{networks: 3, failed: 27, verified: 3, countryLoads: 1000, countryFailures: 80}
+	withheld := providerEgressTlsPlaceEvidence{networks: 3, withheld: ProviderEgressTlsPlaceWithheldBudget}
 	finding := func(age time.Duration, verdict ProviderEgressTlsVerdict, decidedAt *time.Time) *ProviderEgressTlsFinding {
 		return &ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: "url", Name: "site", Url: "https://site.example/",
 			MeasuredAt: now.Add(-age), Verdict: verdict, VerdictMeasuredAt: decidedAt, CountryCode: "zz"}
@@ -101,6 +103,10 @@ func TestTlsJudgeDecidesEachFindingOnEvidenceCloseToIt(t *testing.T) {
 		{"the server's own check fails", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectFailed, working, ProviderEgressTlsVerdictSite, true},
 		{"inconclusive stays pending", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectInconclusive, working, ProviderEgressTlsVerdictPending, false},
 		{"inconclusive never lifts a quarantine", finding(time.Minute, ProviderEgressTlsVerdictProvider, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectInconclusive, working, ProviderEgressTlsVerdictProvider, false},
+		{"withheld place evidence leaves a new failure pending", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictPending, false},
+		{"withheld place evidence keeps a decided verdict", finding(time.Minute, ProviderEgressTlsVerdictProvider, decidedAt(30*time.Minute)), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictProvider, false},
+		{"withheld place evidence still lets a site fault through", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectFailed, withheld, ProviderEgressTlsVerdictSite, true},
+		{"withheld place evidence leaves a returned finding pending", finding(time.Minute, ProviderEgressTlsVerdictRetired, nil), served, 1, ProviderEgressTlsDirectVerified, withheld, ProviderEgressTlsVerdictPending, false},
 		{"the URL's certificate fails across the place's networks", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified, blocked, ProviderEgressTlsVerdictPlace, true},
 		{"one other network short of the place rule", finding(time.Minute, ProviderEgressTlsVerdictPending, nil), served, 1, ProviderEgressTlsDirectVerified,
 			providerEgressTlsPlaceEvidence{networks: 2, failed: 27, verified: 0, countryLoads: 1000, countryFailures: 80}, ProviderEgressTlsVerdictProvider, true},
@@ -424,5 +430,155 @@ func TestTlsSiteFaultsReadNoPlaceEvidence(t *testing.T) {
 		if judgement.Verdict != ProviderEgressTlsVerdictSite || judgement.PlaceNetworks != 0 {
 			t.Fatalf("a site fault was judged %s with place evidence on %d networks", judgement.Verdict, judgement.PlaceNetworks)
 		}
+	}
+}
+
+// Place-evidence findings in one country: one finding on each of networks
+// networks, all failing the URL a minute ago.
+func testingTlsPlaceFindings(now time.Time, urlKey string, countryCode string, countryLocationId server.Id, networks int) []*ProviderEgressTlsFinding {
+	findings := []*ProviderEgressTlsFinding{}
+	for range networks {
+		network := server.NewId()
+		findings = append(findings, &ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: urlKey, Name: "site-" + urlKey,
+			Url: "https://" + urlKey + ".example/", MeasuredAt: now.Add(-time.Minute), NetworkId: &network,
+			CountryCode: countryCode, CountryLocationId: &countryLocationId})
+	}
+	return findings
+}
+
+// Place reads that are faked: tallies by country, and outcomes that succeed,
+// raise, or wait out their context, recording the order the pairs are read in.
+type testingTlsPlaceReads struct {
+	countryLoads map[string]int
+	tallyFails   bool
+	failing      map[string]bool
+	waiting      map[string]bool
+	read         []string
+}
+
+func (self *testingTlsPlaceReads) reads() providerEgressTlsPlaceReads {
+	return providerEgressTlsPlaceReads{
+		tallies: func(ctx context.Context, _ time.Time, _ *ProviderEgressTlsJudgeSettings, countryCodes []string) map[string]providerEgressTlsCountryTally {
+			if self.tallyFails {
+				panic(errors.New("synthetic tally read failure"))
+			}
+			tallies := map[string]providerEgressTlsCountryTally{}
+			for _, countryCode := range countryCodes {
+				tallies[countryCode] = providerEgressTlsCountryTally{loads: self.countryLoads[countryCode], failures: self.countryLoads[countryCode] / 10}
+			}
+			return tallies
+		},
+		outcomes: func(ctx context.Context, _ time.Time, key providerEgressTlsPlaceKey) map[server.Id]providerEgressTlsPlaceOutcome {
+			self.read = append(self.read, key.urlKey)
+			switch {
+			case self.failing[key.urlKey]:
+				panic(errors.New("synthetic outcome read failure"))
+			case self.waiting[key.urlKey]:
+				<-ctx.Done()
+				server.Raise(ctx.Err())
+			}
+			return map[server.Id]providerEgressTlsPlaceOutcome{server.NewId(): {failed: 9}}
+		},
+	}
+}
+
+// The place reads of one run stay inside their budget and never fail the run.
+// They go cheapest country first, so a large country reads last; a pair whose
+// read fails is withheld as an error, one that runs out the budget, and every
+// pair after it, as budget; and the pairs read in time keep their evidence.
+func TestTlsPlaceReadsStayInTheirBudgetAndNeverFailTheRun(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	settings.PlaceReadBudget = 200 * time.Millisecond
+	now := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	small, medium, large := server.NewId(), server.NewId(), server.NewId()
+	findings := []*ProviderEgressTlsFinding{}
+	findings = append(findings, testingTlsPlaceFindings(now, "large-a", "zl", large, 4)...)
+	findings = append(findings, testingTlsPlaceFindings(now, "medium", "zm", medium, 4)...)
+	findings = append(findings, testingTlsPlaceFindings(now, "small", "zs", small, 4)...)
+	findings = append(findings, testingTlsPlaceFindings(now, "large-b", "zl", large, 4)...)
+	candidates := make([]bool, len(findings))
+	for i := range candidates {
+		candidates[i] = true
+	}
+	fake := &testingTlsPlaceReads{
+		countryLoads: map[string]int{"zs": 100, "zm": 5000, "zl": 80000},
+		failing:      map[string]bool{"medium": true},
+		waiting:      map[string]bool{"large-a": true, "large-b": true},
+	}
+	evidence := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads())
+
+	if len(fake.read) != 3 || fake.read[0] != "small" || fake.read[1] != "medium" {
+		t.Fatalf("pairs read in the order %v, want the small country, the medium one, then one large pair", fake.read)
+	}
+	want := map[string]string{"small": "", "medium": ProviderEgressTlsPlaceWithheldError,
+		"large-a": ProviderEgressTlsPlaceWithheldBudget, "large-b": ProviderEgressTlsPlaceWithheldBudget}
+	for i, finding := range findings {
+		if evidence[i].withheld != want[finding.UrlKey] {
+			t.Errorf("%s: withheld %q, want %q", finding.UrlKey, evidence[i].withheld, want[finding.UrlKey])
+		}
+		if finding.UrlKey == "small" && (evidence[i].failed != 9 || evidence[i].countryLoads != 100) {
+			t.Errorf("a pair read in time lost its evidence: %+v", evidence[i])
+		}
+	}
+}
+
+// A tally read that fails withholds place from every pair of the run, without
+// failing the run or reading any outcome.
+func TestTlsPlaceTallyReadFailureWithholdsEveryPair(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	now := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	findings := testingTlsPlaceFindings(now, "blocked", "zz", server.NewId(), 4)
+	candidates := []bool{true, true, true, true}
+	fake := &testingTlsPlaceReads{tallyFails: true}
+	for i, place := range readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads()) {
+		if place.withheld != ProviderEgressTlsPlaceWithheldError || place.broken(settings) {
+			t.Errorf("finding %d: %+v after a failed tally read", i, place)
+		}
+	}
+	if len(fake.read) != 0 {
+		t.Fatalf("outcomes read after the tally failed: %v", fake.read)
+	}
+}
+
+// Past the run's pair limit, pairs are withheld; and within one country the
+// order turns with the judge's interval, so a budget that runs out inside a
+// large country cuts different pairs on successive runs.
+func TestTlsPlaceReadsAreLimitedAndTurnWithinACountry(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	now := time.Date(2026, time.November, 8, 12, 0, 0, 0, time.UTC)
+	country := server.NewId()
+	findings := []*ProviderEgressTlsFinding{}
+	for i := range providerEgressTlsPlaceKeyLimit + 6 {
+		findings = append(findings, testingTlsPlaceFindings(now, fmt.Sprintf("site-%03d", i), "zz", country, 4)...)
+	}
+	candidates := make([]bool, len(findings))
+	for i := range candidates {
+		candidates[i] = true
+	}
+	fake := &testingTlsPlaceReads{countryLoads: map[string]int{"zz": 1000}}
+	evidence := readProviderEgressTlsPlaceEvidence(context.Background(), now, settings, findings, candidates, fake.reads())
+	limited := map[string]bool{}
+	for i, finding := range findings {
+		if evidence[i].withheld == ProviderEgressTlsPlaceWithheldLimit {
+			limited[finding.UrlKey] = true
+		}
+	}
+	if len(fake.read) != providerEgressTlsPlaceKeyLimit || len(limited) != 6 {
+		t.Fatalf("read %d pairs and limited %d, want %d and 6", len(fake.read), len(limited), providerEgressTlsPlaceKeyLimit)
+	}
+
+	keys := []providerEgressTlsPlaceKey{}
+	for i := range 10 {
+		keys = append(keys, providerEgressTlsPlaceKey{urlKey: fmt.Sprintf("site-%d", i), countryLocationId: country})
+	}
+	sameCost := func(providerEgressTlsPlaceKey) int { return 1 }
+	first := providerEgressTlsPlaceReadOrder(now, keys, sameCost)
+	again := providerEgressTlsPlaceReadOrder(now.Add(time.Minute), keys, sameCost)
+	next := providerEgressTlsPlaceReadOrder(now.Add(5*time.Minute), keys, sameCost)
+	if !slices.Equal(first, again) {
+		t.Fatal("the read order changed within one judge interval")
+	}
+	if slices.Equal(first, next) {
+		t.Fatal("the read order within one country did not turn with the next judge interval")
 	}
 }

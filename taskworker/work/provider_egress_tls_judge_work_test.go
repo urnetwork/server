@@ -324,3 +324,25 @@ func TestProviderEgressTlsJudgeChecksOnlyFindingsItCanJudge(t *testing.T) {
 		}
 	})
 }
+
+// The run counts the URL and country pairs whose place evidence it withheld,
+// once per pair however many findings share it, by reason.
+func TestProviderEgressTlsJudgeCountsWithheldPairsOnce(t *testing.T) {
+	russia, turkey := server.NewId(), server.NewId()
+	judgement := func(urlKey string, country server.Id, reason string) *model.ProviderEgressTlsJudgement {
+		return &model.ProviderEgressTlsJudgement{
+			Finding:       &model.ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: urlKey, CountryLocationId: &country},
+			PlaceWithheld: reason,
+		}
+	}
+	counts := providerEgressTlsPlaceWithheldPairCounts([]*model.ProviderEgressTlsJudgement{
+		judgement("bbc", russia, model.ProviderEgressTlsPlaceWithheldBudget),
+		judgement("bbc", russia, model.ProviderEgressTlsPlaceWithheldBudget),
+		judgement("bbc", turkey, model.ProviderEgressTlsPlaceWithheldError),
+		judgement("line", russia, model.ProviderEgressTlsPlaceWithheldLimit),
+		judgement("discord", turkey, ""),
+	})
+	if counts["budget"] != 1 || counts["error"] != 1 || counts["limit"] != 1 || len(counts) != 3 {
+		t.Fatalf("withheld pairs %v, want one of each reason", counts)
+	}
+}

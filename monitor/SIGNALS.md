@@ -23988,9 +23988,15 @@ Every judged run sets, on the process that ran it,
 until it has judged), `urnetwork_egress_tls_findings{verdict}` (the unresolved
 findings by verdict after the run) and `urnetwork_egress_tls_undecided_findings`
 (the pending findings the run left undecided although their failure is inside
-the direct window, so a direct check could still decide them). The fleet's
-view is the process with the newest last-judged timestamp; the others keep
-what their own last run set.
+the direct window, so a direct check could still decide them). It also sets
+`urnetwork_egress_tls_place_withheld_pairs{reason}`: the URL and country pairs
+whose place evidence the run could not read (`error`, a read failed;
+`budget`, its minute of place reads ran out, cheapest country first;
+`limit`, past its 64 pairs). Their findings are decided nothing for the run
+and stay as stored, a new one pending, so a pair withheld run after run shows
+here and, inside the direct window, as undecided findings. The fleet's view
+is the process with the newest last-judged timestamp; the others keep what
+their own last run set.
 
 Implementation (5-minute cadence; `signal_egress_tls_judge.go` and
 `signal_egress_tls_judge_test.go`). One loopback Mimir read evaluated two

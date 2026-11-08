@@ -105,6 +105,13 @@ var providerEgressTlsJudgeLastJudgedTimestamp = prometheus.NewGauge(prometheus.G
 	Help:      "Unix time of this process's newest TLS judge run that judged, 0 until one has. The fleet's newest judged run is the maximum over Taskworker processes; the findings and undecided gauges are that process's",
 })
 
+var providerEgressTlsPlaceWithheldPairs = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_tls",
+	Name:      "place_withheld_pairs",
+	Help:      "URL and country pairs whose place evidence this process's newest judged run could not read, so their findings were decided nothing for the run and stay as stored, by reason: error (a read failed), budget (the run's minute of place reads ran out), limit (past the run's 64 pairs)",
+}, []string{"reason"})
+
 func init() {
 	for _, result := range []string{"judged", "pool_unavailable"} {
 		providerEgressTlsJudgeRunsTotal.WithLabelValues(result)
@@ -118,6 +125,9 @@ func init() {
 		providerEgressTlsVerdictsTotal.WithLabelValues(verdict.String())
 		providerEgressTlsFindings.WithLabelValues(verdict.String())
 	}
+	for _, reason := range model.ProviderEgressTlsPlaceWithheldReasons {
+		providerEgressTlsPlaceWithheldPairs.WithLabelValues(reason)
+	}
 	prometheus.MustRegister(
 		providerEgressTlsJudgeRunsTotal,
 		providerEgressTlsDirectChecksTotal,
@@ -125,6 +135,7 @@ func init() {
 		providerEgressTlsFindings,
 		providerEgressTlsUndecidedFindings,
 		providerEgressTlsJudgeLastJudgedTimestamp,
+		providerEgressTlsPlaceWithheldPairs,
 	)
 }
 
@@ -144,6 +155,9 @@ type JudgeProviderEgressTlsFindingsResult struct {
 	Verdicts map[string]int `json:"verdicts,omitempty"`
 	// pending findings left undecided inside the direct window
 	Undecided int `json:"undecided"`
+	// URL and country pairs whose place evidence the run could not read, by
+	// reason (model.ProviderEgressTlsPlaceWithheld*)
+	PlaceWithheld map[string]int `json:"place_withheld,omitempty"`
 	// the clock the next run carries; a skipped run carries its own on
 	UnservedSince map[string]time.Time `json:"unserved_since,omitempty"`
 }
@@ -403,6 +417,7 @@ func judgeProviderEgressTlsFindings(
 			result.Undecided += 1
 		}
 	}
+	result.PlaceWithheld = providerEgressTlsPlaceWithheldPairCounts(judgements)
 	// A stored judgement that kept its verdict only recorded that it decided
 	// a newer failure; the counts and the log are of verdicts that moved.
 	moved := make([]*model.ProviderEgressTlsJudgement, 0, len(stored))
@@ -417,13 +432,40 @@ func judgeProviderEgressTlsFindings(
 		providerEgressTlsFindings.WithLabelValues(verdict.String()).Set(float64(result.Verdicts[verdict.String()]))
 	}
 	providerEgressTlsUndecidedFindings.Set(float64(result.Undecided))
+	placeWithheld := []string{}
+	for _, reason := range model.ProviderEgressTlsPlaceWithheldReasons {
+		providerEgressTlsPlaceWithheldPairs.WithLabelValues(reason).Set(float64(result.PlaceWithheld[reason]))
+		placeWithheld = append(placeWithheld, fmt.Sprintf("%s:%d", reason, result.PlaceWithheld[reason]))
+	}
 	providerEgressTlsJudgeLastJudgedTimestamp.Set(float64(now.UnixMilli()) / 1000)
 	providerEgressTlsJudgeRunsTotal.WithLabelValues("judged").Inc()
 	glog.Infof(
-		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d undecided=%d unserved_names=%d verdicts=%s\n",
-		result.Findings, result.Changed, len(direct), result.Undecided, len(result.UnservedSince), providerEgressTlsVerdictSummary(result.Verdicts),
+		"[egress]TLS judge: findings=%d changed=%d hosts_checked=%d undecided=%d unserved_names=%d place_withheld=%s verdicts=%s\n",
+		result.Findings, result.Changed, len(direct), result.Undecided, len(result.UnservedSince),
+		strings.Join(placeWithheld, ","), providerEgressTlsVerdictSummary(result.Verdicts),
 	)
 	return result, nil
+}
+
+// The URL and country pairs whose place evidence the run withheld, by reason:
+// every finding of a pair shares its pair's reason.
+func providerEgressTlsPlaceWithheldPairCounts(judgements []*model.ProviderEgressTlsJudgement) map[string]int {
+	type pairKey struct {
+		urlKey            string
+		countryLocationId server.Id
+	}
+	reasons := map[pairKey]string{}
+	for _, judgement := range judgements {
+		if judgement.PlaceWithheld == "" || judgement.Finding.CountryLocationId == nil {
+			continue
+		}
+		reasons[pairKey{urlKey: judgement.Finding.UrlKey, countryLocationId: *judgement.Finding.CountryLocationId}] = judgement.PlaceWithheld
+	}
+	counts := map[string]int{}
+	for _, reason := range reasons {
+		counts[reason] += 1
+	}
+	return counts
 }
 
 // The verdict counts as one stable log field.
