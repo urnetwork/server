@@ -236,6 +236,9 @@ func authenticateWinnerMultipassInstalledArtifacts(release winnerMultipassQualif
 				return err
 			}
 		}
+		if err := validateWinnerHandoffRuntimePair(runtimePins, release); err != nil {
+			return err
+		}
 	}
 	return nil
 }
