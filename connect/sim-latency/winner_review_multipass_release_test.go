@@ -6,7 +6,6 @@ package main
 import (
 	"bytes"
 	"embed"
-	"encoding/json"
 	"errors"
 	"go/ast"
 	"go/parser"
