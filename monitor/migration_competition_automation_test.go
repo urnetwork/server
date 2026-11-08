@@ -171,10 +171,18 @@ func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArt
 		t.Fatal("v846 does not transfer custody at the registered intake-first boundary")
 	}
 	next := migrationCurrentSuffixTestContract(t, successor).artifact
-	if next.removedVersion != 0 {
-		t.Fatal("intake-first custody has an unreviewed successor")
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	if handoff <= successor || next.removedVersion != handoff {
+		t.Fatal("intake-first custody does not transfer at the registered review handoff boundary")
 	}
-	if head >= successor {
+	last := migrationCurrentSuffixTestContract(t, handoff).artifact
+	if last.removedVersion != 0 {
+		t.Fatal("review handoff custody has an unreviewed successor")
+	}
+	switch {
+	case head >= handoff:
+		return last
+	case head >= successor:
 		return next
 	}
 	return artifact
@@ -182,9 +190,13 @@ func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArt
 
 func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
 	successor := server.CompetitionIntakeFirstMigrationVersion()
-	for _, head := range []int{846, successor - 1, successor} {
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff} {
 		want := 846
-		if head == successor {
+		switch {
+		case head >= handoff:
+			want = handoff
+		case head >= successor:
 			want = successor
 		}
 		if got := migrationAutomationFaultOwner(t, 846, head).requiredVersion; got != want {
@@ -197,12 +209,13 @@ func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
 // move to its exact successor afterward, and roll back to a healthy catalog.
 func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
 	successor := server.CompetitionIntakeFirstMigrationVersion()
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
 	faults := []string{
 		`DROP INDEX competition_source_reserved_round`,
 		`CREATE OR REPLACE FUNCTION competition_v2_source_target_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
 	}
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
-		for _, head := range []int{846, successor - 1, successor} {
+		for _, head := range []int{846, successor - 1, successor, handoff} {
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
 			if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
 				tb.Fatalf("healthy owner prefix %d drift: %s", head, drift)

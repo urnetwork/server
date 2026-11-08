@@ -929,7 +929,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionWorkCoverageMigrationContract().removedAt(server.CompetitionIntakeFirstMigrationVersion())},
 	// The successor retains all four retired composites, replacing only
 	// their exact operative guard bodies with scoped legacy-preserving ones.
-	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery())},
+	// The pending review handoff (below) re-creates three winner-review bodies
+	// this custody pins, and carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{migrationCurrentSuffix(server.CompetitionIntakeFirstMigrationVersion(), "separate published-source intake and qualified grading custody", competitionIntakeFirstArtifactQuery()).removedAt(server.CompetitionReviewHandoffMigrationVersion())},
 	// unique-exit hosted proxies: eleven additive migrations, each versioned by
 	// its position
 	proxyUniqueExitMigrationContracts,
@@ -937,6 +939,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionOperatorInterruptionMigrationContract},
 	// the exact-URL TLS finding verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerEgressTlsVerdictMigrationContract},
+	// the pending review handoff ledger, with the intake-first custody it
+	// carries on; versioned by its position
+	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

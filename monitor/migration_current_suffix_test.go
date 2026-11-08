@@ -235,8 +235,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "required device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET NOT NULL`},
 		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
-		{name: "elected-winner review guard dropped", version: server.CompetitionIntakeFirstMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
-		{name: "elected-winner checkpoint guard dropped", version: server.CompetitionIntakeFirstMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		// the intake-first custody of these guards moved to the review handoff,
+		// which re-created their functions
+		{name: "elected-winner review guard dropped", version: server.CompetitionReviewHandoffMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: server.CompetitionReviewHandoffMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
 		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
 		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
 		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},
@@ -313,6 +315,23 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_health ALTER COLUMN legacy_tls_cleared_at SET DEFAULT now()`},
 		{name: "legacy TLS recheck start missing", version: server.ProviderEgressTlsVerdictVersion(),
 			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_recheck_from`},
+		// The pending review handoff: an owner, call or completion row only
+		// through its guard, an append-only ledger, an operator-only import,
+		// and the exact winner-review bodies it re-created.
+		{name: "review handoff owner guard disabled", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `ALTER TABLE competition_review_handoff DISABLE TRIGGER competition_review_handoff_before_insert`},
+		{name: "review handoff calls made mutable", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `DROP TRIGGER competition_review_handoff_call_immutable ON competition_review_handoff_call`},
+		{name: "review handoff call kinds widened", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `ALTER TABLE competition_review_handoff_call DROP CONSTRAINT competition_review_handoff_call_kind_check`},
+		{name: "review handoff decision made repeatable", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `ALTER TABLE competition_review_handoff DROP CONSTRAINT competition_review_handoff_round_id_decision_sha256_key`},
+		{name: "pending review import unguarded", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `DROP TRIGGER competition_review_handoff_import_before_insert ON competition_integrity_review`},
+		{name: "pending review observed at any time", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `CREATE OR REPLACE FUNCTION competition_review_handoff_observed(review_json jsonb, legacy_created_at timestamp) RETURNS timestamp LANGUAGE plpgsql STABLE AS 'BEGIN RETURN legacy_created_at; END'`},
+		{name: "winner source authorization accepts any handoff", version: server.CompetitionReviewHandoffMigrationVersion(),
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_source_authorized(intent jsonb, predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN true; END'`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
