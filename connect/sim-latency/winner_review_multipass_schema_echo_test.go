@@ -43,7 +43,7 @@ func TestWinnerMultipassVisibleResponseAllowsSchemaEcho(t *testing.T) {
 // the broker, replay independently, and cannot acquire a second provider draw.
 func TestWinnerMultipassSchemaEchoComposedCaptureAndReplay(t *testing.T) {
 	for _, mediaType := range []string{"application/json", "text/event-stream"} {
-		t.Run(mediaType, func(t *testing.T) {
+		func() {
 			bundle, plan, judgment := winnerMultipassProviderFixture(t)
 			call := plan.Calls[0]
 			evidence := winnerMultipassEvidenceFixture(t, bundle, plan, judgment).Calls[0]
@@ -91,7 +91,7 @@ func TestWinnerMultipassSchemaEchoComposedCaptureAndReplay(t *testing.T) {
 			if _, err := executeWinnerMultipassBroker(context.Background(), client, envelope, plan.Provider, directory, defaultWinnerMultipassProviderLimits()); err == nil || generations != 1 {
 				t.Fatal("schema compatibility allowed another provider draw")
 			}
-		})
+		}()
 	}
 }
 
@@ -100,7 +100,7 @@ func TestWinnerMultipassVisibleResponseRejectsAliasesOutsideSchema(t *testing.T)
 	bundle, plan, judgment := winnerMultipassFixture(t)
 	baseline := winnerMultipassEvidenceFixture(t, bundle, plan, judgment).Calls[0]
 	for _, field := range []string{"Status", "Model", "Usage", "Output", "Text", "Format", "Schema", "Observation"} {
-		t.Run(field, func(t *testing.T) {
+		func() {
 			evidence := baseline
 			var response map[string]any
 			if err := json.Unmarshal(evidence.VisibleResponse, &response); err != nil {
@@ -128,6 +128,6 @@ func TestWinnerMultipassVisibleResponseRejectsAliasesOutsideSchema(t *testing.T)
 			if _, err := winnerMultipassVisibleResponse(evidence, plan.Calls[0], plan.Settings); err == nil {
 				t.Fatal("noncanonical field outside ignored schema accepted")
 			}
-		})
+		}()
 	}
 }
