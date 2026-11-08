@@ -278,16 +278,23 @@ func TestEgressSitePoolSignalSyntheticRefreshNotRunning(t *testing.T) {
 }
 
 // The country site pair tally is kept to its retention by every refresh; its
-// oldest day normally reaches nine to ten days just before a refresh (the
-// retention, the day boundary, one interval), so only an oldest day past that
-// by the slack is stale. An empty tally is healthy, and before migration 947
-// creates the tally the condition is not observed at all: no age is read and
-// no finding, healthy or not, is emitted.
+// oldest day normally reaches nine to ten and a half days just before a delete
+// (the retention, the day boundary, one interval, and the run's budget, since
+// the next run starts an interval after the last one ends and deletes after
+// its candidate checks), so only an oldest day past that by the slack is
+// stale, and the stale age follows the budget. An empty tally is healthy, and
+// before migration 947 creates the tally the condition is not observed at
+// all: no age is read and no finding, healthy or not, is emitted.
 func TestEgressSitePoolSignalSyntheticCountrySiteTallyStale(t *testing.T) {
 	poolContext := testEgressSitePoolContext()
 	staleSeconds := int64(egressSitePoolCountrySiteTallyStaleAge(DefaultEgressSitePoolSettings(), poolContext.siteSettings) / time.Second)
-	if want := int64((8+1+1)*86400 + 2*3600); staleSeconds != want {
-		t.Fatalf("stale age %ds at the defaults, want %ds (retention, day boundary, refresh interval, slack)", staleSeconds, want)
+	if want := int64((8+1+1)*86400 + 90*60 + 30*60); staleSeconds != want {
+		t.Fatalf("stale age %ds at the defaults, want %ds (retention, day boundary, refresh interval, 90-minute budget, 30 minutes of slack)", staleSeconds, want)
+	}
+	longerBudget := *poolContext.siteSettings
+	longerBudget.SiteRefreshMaxTimeSeconds = 3 * 3600
+	if got := int64(egressSitePoolCountrySiteTallyStaleAge(DefaultEgressSitePoolSettings(), &longerBudget) / time.Second); got != staleSeconds+90*60 {
+		t.Fatalf("stale age %ds with a three-hour budget, want %ds: it must follow the budget", got, staleSeconds+90*60)
 	}
 	for _, test := range []struct {
 		name  string

@@ -19493,20 +19493,23 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   `oldest-day`): the oldest day of `provider_egress_country_site_tally`, the
   country sites' pair tally, began longer ago than the retention every
   refresh deletes to (`ProviderEgressCountrySiteTallyRetention`, eight days),
-  plus a day for the tally's day boundary, one `SiteRefreshInterval` and two
-  hours of slack (ten days two hours at the defaults). The oldest day normally
-  reaches nine to ten days just before a refresh, so an older one means the
-  deletes stopped. Every `RefreshEgressDestinations` run deletes the expired
-  days in its country-site step, whether it judges the sites or skips them
-  for a prober fault, so this is a refresh that is not running (which
-  `egress-site-refresh-not-running` names first) or one that returns before
-  that step: an unusable `qualityprobe.yml`, a budget refusal, a seed failure
-  or a drain mid-check, none of which another condition reports. The tally
-  then grows by about 500,000 rows a day until a run deletes the backlog in
-  one statement. Migration 947 creates the table, so the schema preflight
-  does not require it: until it exists the condition reads nothing and emits
-  nothing, not even a healthy finding, and an open finding stays open. It
-  reads only the minimum `tally_day`, through the primary key;
+  plus a day for the tally's day boundary, one `SiteRefreshInterval` and one
+  `SiteRefreshMaxTime` (the next run starts an interval after the last one
+  ends, and deletes after its candidate checks), and 30 minutes of slack: ten
+  days two hours at the defaults, following the budget if it grows. The oldest
+  day normally reaches nine to ten and a half days just before a delete, so an
+  older one means the deletes stopped. Every `RefreshEgressDestinations` run
+  deletes the expired days in its country-site step, whether it judges the
+  sites or skips them for a prober fault, so this is a refresh that is not
+  running (which `egress-site-refresh-not-running` names first) or one that
+  returns before that step: an unusable `qualityprobe.yml`, a budget refusal,
+  a seed failure or a drain mid-check, none of which another condition
+  reports. The tally then grows by about 500,000 rows a day until a run
+  deletes the backlog in one statement. Migration 947 creates the table, so
+  the schema preflight does not require it: until it exists the condition
+  reads nothing and emits nothing, not even a healthy finding, and an open
+  finding stays open. It reads only the minimum `tally_day`, through the
+  primary key;
 - **pool thin** (`egress-site-pool-thin`, frames `<class>/below-pool-size`
   and `<class>/candidates-exhausted`): a class's active pool is below
   `SitePoolSize` for that class, or no candidate is left to promote, so the

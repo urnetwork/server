@@ -68,7 +68,8 @@ type EgressSitePoolSettings struct {
 	// the largest Mimir answer, including bounded per-slot source coverage
 	MaxResponseBytes int
 	// country site tally stale: the slack beyond the oldest age the pair
-	// tally's oldest day reaches while the refresh keeps it
+	// tally's oldest day reaches while the refresh keeps it, which already
+	// allows for the refresh's longest run
 	// (egressSitePoolCountrySiteTallyStaleAge)
 	CountrySiteTallySlack time.Duration
 }
@@ -84,33 +85,39 @@ func DefaultEgressSitePoolSettings() *EgressSitePoolSettings {
 		CountryUnreachableShare:  0.9,
 		MaxListed:                20,
 		MaxResponseBytes:         2 * 1024 * 1024,
-		CountrySiteTallySlack:    2 * time.Hour,
+		CountrySiteTallySlack:    30 * time.Minute,
 	}
 }
 
-// A duration in whole days and hours, as a finding states an age.
-func egressSitePoolDays(duration time.Duration) string {
-	hours := int64(duration.Round(time.Hour) / time.Hour)
-	days, hours := hours/24, hours%24
-	switch {
-	case days == 0:
-		return fmt.Sprintf("%dh", hours)
-	case hours == 0:
-		return fmt.Sprintf("%dd", days)
-	default:
-		return fmt.Sprintf("%dd %dh", days, hours)
+// A duration in whole days, hours and minutes, as a finding states an age.
+func egressSitePoolAge(duration time.Duration) string {
+	minutes := int64(duration.Round(time.Minute) / time.Minute)
+	days, hours, minutes := minutes/(24*60), (minutes/60)%24, minutes%60
+	parts := []string{}
+	if 0 < days {
+		parts = append(parts, fmt.Sprintf("%dd", days))
 	}
+	if 0 < hours {
+		parts = append(parts, fmt.Sprintf("%dh", hours))
+	}
+	if 0 < minutes || len(parts) == 0 {
+		parts = append(parts, fmt.Sprintf("%dm", minutes))
+	}
+	return strings.Join(parts, " ")
 }
 
 // The oldest the country site pair tally's oldest day may begin while the
 // refresh keeps it. Each refresh deletes the days before the retention
 // (model.ProviderEgressCountrySiteTallyRetention, eight days), counted from
 // the start of a day, so the day it keeps began up to a day earlier still,
-// and it stays until the next refresh, one interval later: at the defaults
-// the oldest day normally reaches nine to ten days just before a refresh.
-// Past that by the slack, the refresh has stopped deleting.
+// and it stays until the next delete. The next run is scheduled one
+// SiteRefreshInterval after the last one ends, and deletes after its
+// candidate checks, so deletes come an interval plus up to the run's budget
+// (SiteRefreshMaxTime) apart: at the defaults the oldest day normally
+// reaches nine to ten and a half days just before a delete. Past that by the
+// slack, the refresh has stopped deleting.
 func egressSitePoolCountrySiteTallyStaleAge(settings *EgressSitePoolSettings, siteSettings *model.ProviderEgressSiteSettings) time.Duration {
-	return model.ProviderEgressCountrySiteTallyRetention + 24*time.Hour + siteSettings.SiteRefreshInterval() + settings.CountrySiteTallySlack
+	return model.ProviderEgressCountrySiteTallyRetention + 24*time.Hour + siteSettings.SiteRefreshInterval() + siteSettings.SiteRefreshMaxTime() + settings.CountrySiteTallySlack
 }
 
 // Carries the thresholds and the seam that reads the pool's settings, so a
@@ -844,10 +851,10 @@ func evaluateEgressSitePool(
 		if !observation.countrySiteTally.empty && staleSeconds < observation.countrySiteTally.oldestDayAgeSeconds {
 			retentionSeconds := int64(model.ProviderEgressCountrySiteTallyRetention / time.Second)
 			f := egressSitePoolFinding("egress-country-site-tally-stale", target, "oldest-day", 2)
-			f.symptom = fmt.Sprintf("The country site pair tally's oldest day began %s ago, past the %s retention the pool refresh keeps", egressSitePoolDays(time.Duration(observation.countrySiteTally.oldestDayAgeSeconds)*time.Second), egressSitePoolDays(model.ProviderEgressCountrySiteTallyRetention))
+			f.symptom = fmt.Sprintf("The country site pair tally's oldest day began %s ago, past the %s retention the pool refresh keeps", egressSitePoolAge(time.Duration(observation.countrySiteTally.oldestDayAgeSeconds)*time.Second), egressSitePoolAge(model.ProviderEgressCountrySiteTallyRetention))
 			f.mechanism = "Every RefreshEgressDestinations run deletes the tally days older than ProviderEgressCountrySiteTallyRetention in its country-site step, whether it judges the sites or skips them for a prober fault. Only a refresh that does not reach that step keeps them: one that is not running, or one that ends before it (an unusable qualityprobe.yml, a budget refusal, a seed failure, a drain mid-check). The tally then grows by about 500,000 rows a day until a run deletes the backlog in one statement."
-			f.baseline = fmt.Sprintf("The oldest tally day began at most %s ago: the retention, a day for the tally's day boundary, one SiteRefreshInterval between deletions, and %s of slack.", egressSitePoolDays(staleAge), egressSitePoolDays(settings.CountrySiteTallySlack))
-			f.observed = fmt.Sprintf("oldest_day_age_seconds=%d threshold=%ds retention_seconds=%d refresh_interval_seconds=%d", observation.countrySiteTally.oldestDayAgeSeconds, staleSeconds, retentionSeconds, siteSettings.SiteRefreshIntervalSeconds)
+			f.baseline = fmt.Sprintf("The oldest tally day began at most %s ago: the retention, a day for the tally's day boundary, one SiteRefreshInterval and one SiteRefreshMaxTime between deletions, and %s of slack.", egressSitePoolAge(staleAge), egressSitePoolAge(settings.CountrySiteTallySlack))
+			f.observed = fmt.Sprintf("oldest_day_age_seconds=%d threshold=%ds retention_seconds=%d refresh_interval_seconds=%d refresh_max_time_seconds=%d", observation.countrySiteTally.oldestDayAgeSeconds, staleSeconds, retentionSeconds, siteSettings.SiteRefreshIntervalSeconds, siteSettings.SiteRefreshMaxTimeSeconds)
 			f.evidence = "The minimum tally_day of provider_egress_country_site_tally, read through its primary key; no site, provider or network identity is read."
 			f.context = "A refresh that stopped alarms first as egress-site-refresh-not-running; this condition also catches a refresh that keeps running but returns before its country-site step, which nothing else reports."
 			f.action = "Read the taskworker's [egresssites] log lines for the RefreshEgressDestinations runs: an unusable qualityprobe.yml, a budget refusal or a seed failure names itself. Repair the cause and let the next run delete the backlog; do not delete tally rows by hand."
