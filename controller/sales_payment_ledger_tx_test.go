@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // salesLedgerTx is a transaction over in-memory tables: just enough postgres
@@ -45,6 +47,8 @@ type salesLedgerBalance struct {
 	startTime     time.Time
 	endTime       time.Time
 	pro           bool
+	// a grace period's hold credits no bytes
+	byteCount model.ByteCount
 }
 
 type salesLedgerRenewal struct {
@@ -119,6 +123,7 @@ func (self *salesLedgerTx) Exec(ctx context.Context, sql string, args ...any) (p
 			pro: true,
 		}
 		if len(args) == 10 {
+			balance.byteCount = args[4].(model.ByteCount)
 			balance.purchaseToken = args[7].(string)
 			balance.pro = args[9].(bool)
 		}
@@ -144,6 +149,22 @@ func (self *salesLedgerTx) Query(ctx context.Context, sql string, args ...any) (
 	case strings.Contains(sql, "FROM apple_subscription_transaction ledger"):
 		// HasPreLedgerAppleRenewalInTx: no credit from before the ledger
 		return &salesLedgerRows{rows: [][]any{{false}}}, nil
+
+	case strings.Contains(sql, "purchase-token-credit-end-times"):
+		// GetPurchaseTokenCreditEndTimesInTx: the token's credits with bytes,
+		// latest first
+		self.log = append(self.log, "credit_history "+args[0].(string))
+		rows := [][]any{}
+		for i := len(self.balances) - 1; 0 <= i; i -= 1 {
+			balance := self.balances[i]
+			if balance.purchaseToken == args[0].(string) && 0 < balance.byteCount {
+				rows = append(rows, []any{balance.endTime})
+			}
+		}
+		slices.SortFunc(rows, func(a []any, b []any) int {
+			return b[0].(time.Time).Compare(a[0].(time.Time))
+		})
+		return &salesLedgerRows{rows: rows}, nil
 
 	case strings.Contains(sql, "FROM transfer_balance") && strings.Contains(sql, "purchase_token = $1"):
 		// the overlap read: a balance of the token covering the expiry

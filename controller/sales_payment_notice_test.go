@@ -407,7 +407,7 @@ func TestPlayCreditPostsOncePerWindow(t *testing.T) {
 func TestPlaySalesNoticeDataPack(t *testing.T) {
 	networkId := server.NewId()
 	sku := &Sku{BalanceByteCountHumanReadable: "100gib", PriceAmountUsd: 9.99}
-	notice := playSalesNotice(&PlaySubscriptionRenewalArgs{NetworkId: networkId, SubscriptionId: "data_100gib", PurchaseToken: "token-2"}, &PlaySubscription{LatestOrderId: "GPA.1"}, sku, time.Unix(1_800_000_000, 0))
+	notice := playSalesNotice(&PlaySubscriptionRenewalArgs{NetworkId: networkId, SubscriptionId: "data_100gib", PurchaseToken: "token-2"}, &PlaySubscription{LatestOrderId: "GPA.1"}, sku, time.Unix(1_800_000_000, 0), playCreditNew)
 	connect.AssertEqual(t, salesNoticeLines(notice, "acme"), salesNoticeText("100 GiB data (new)", "acme", "9.99 USD (configured list price; Google Play does not report the charged amount)", "Google Play"))
 }
 
@@ -540,7 +540,7 @@ func TestSalesNoticeBuildFailureNeverFailsThePurchase(t *testing.T) {
 	addSalesPaymentNoticeInTx(nil, func() *model.SalesPaymentNotice {
 		var sku *Sku
 		// a nil sku: the builder panics
-		return playSalesNotice(&PlaySubscriptionRenewalArgs{}, &PlaySubscription{}, sku, time.Time{})
+		return playSalesNotice(&PlaySubscriptionRenewalArgs{}, &PlaySubscription{}, sku, time.Time{}, playCreditNew)
 	})
 	connect.AssertEqual(t, len(notices()), 0)
 }

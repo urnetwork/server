@@ -52,21 +52,21 @@ func TestPlaySalesNoticeNamesTheBasePlan(t *testing.T) {
 	expiry := start.Add(14 * 24 * time.Hour)
 
 	sub := playPenguinSubscription(start, expiry)
-	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry).Item, "Pro yearly")
+	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry, playCreditNew).Item, "Pro yearly")
 
 	// the monthly base plan
 	sub.LineItems[0].OfferDetails = &PlayOfferDetails{BasePlanId: "supporter-base"}
-	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry).Item, "Pro monthly")
+	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry, playCreditNew).Item, "Pro monthly")
 
 	// a base plan this server does not know is read by its words
 	sub.LineItems[0].OfferDetails = &PlayOfferDetails{BasePlanId: "pro-annual-2027"}
-	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry).Item, "Pro yearly")
+	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry, playCreditNew).Item, "Pro yearly")
 
 	// and otherwise names no plan, rather than the wrong one
 	sub.LineItems[0].OfferDetails = &PlayOfferDetails{BasePlanId: "pro-2027"}
-	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry).Item, "Pro")
+	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry, playCreditNew).Item, "Pro")
 	sub.LineItems[0].OfferDetails = nil
-	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry).Item, "Pro")
+	connect.AssertEqual(t, playSalesNotice(args, sub, sku, expiry, playCreditNew).Item, "Pro")
 }
 
 // The Play webhook records a trial that stops renewing as trial.cancelled

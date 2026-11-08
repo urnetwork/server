@@ -54,6 +54,10 @@ type SalesPaymentNotice struct {
 	Amount string
 	// Method is how it was paid: "Stripe (card)", "Apple App Store", ...
 	Method string
+	// Trial marks the start of a free trial: nothing was charged, and the
+	// message says "Trial" where a payment says "Sale". The trial's first paid
+	// period is posted as a sale of its own (SalesPaymentKindAfterTrial).
+	Trial bool
 	// Enrich, when set, fills in what the record does not hold (the Stripe
 	// payment method). It runs on the worker after the commit, never in the
 	// purchase transaction, under salesPaymentNoticeEnrichTimeout. What it
@@ -342,8 +346,13 @@ func deliverSalesPaymentNotice(notice *SalesPaymentNotice) string {
 // SalesPaymentNoticeText is the message: a short block naming the network,
 // what was bought, the amount and how it was paid. Every field is
 // Slack-escaped and kept to one line, so a network name cannot mention a
-// channel, disguise a link or add lines of its own.
+// channel, disguise a link or add lines of its own. A trial's start says
+// "Trial" where a sale says "Sale".
 func SalesPaymentNoticeText(notice *SalesPaymentNotice, networkName string) string {
+	headline := "Sale"
+	if notice.Trial {
+		headline = "Trial"
+	}
 	item := salesPaymentNoticeField(notice.Item, "payment")
 	if kind := salesPaymentNoticeField(notice.Kind, ""); kind != "" {
 		item = fmt.Sprintf("%s (%s)", item, kind)
@@ -356,10 +365,11 @@ func SalesPaymentNoticeText(notice *SalesPaymentNotice, networkName string) stri
 		network = salesPaymentNoticeField(networkName, "(name unavailable)")
 	}
 	return fmt.Sprintf(
-		`*Sale:* %s
+		`*%s:* %s
 *Network:* %s
 *Amount:* %s
 *Payment method:* %s`,
+		headline,
 		item,
 		network,
 		salesPaymentNoticeField(notice.Amount, "not reported"),
@@ -398,7 +408,19 @@ const (
 	SalesPaymentKindPlanChange = "plan change"
 	SalesPaymentKindOneTime    = "one-time"
 	SalesPaymentKindFreeTrial  = "new, free trial"
+	// the first paid period after a free trial: the trial's conversion, the
+	// subscription's first payment
+	SalesPaymentKindAfterTrial = "new, after a free trial"
 )
+
+// SalesFreeTrialAmount is a trial's amount: nothing was charged. until is the
+// trial's last day as the store reports it, zero when it does not.
+func SalesFreeTrialAmount(until time.Time) string {
+	if until.IsZero() {
+		return "no charge (free trial)"
+	}
+	return fmt.Sprintf("no charge (free trial until %s)", until.UTC().Format("2006-01-02"))
+}
 
 // SalesProItem names a Pro purchase by its plan (PlanMonthly, PlanYearly).
 func SalesProItem(plan string) string {

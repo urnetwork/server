@@ -151,6 +151,18 @@ func TestSalesPaymentNoticeTextEscapesTheNetworkName(t *testing.T) {
 	connect.AssertEqual(t, strings.Contains(SalesPaymentNoticeText(notice, "acme"), "Stripe (&lt;!everyone&gt;)"), true)
 }
 
+// A free trial's start says Trial, not Sale, and charged nothing.
+func TestSalesPaymentNoticeTextOfATrial(t *testing.T) {
+	notice := salesTestNotice("play_purchase/token/1")
+	notice.Trial = true
+	notice.Item = SalesProItem(PlanYearly)
+	notice.Kind = SalesPaymentKindNew
+	notice.Amount = SalesFreeTrialAmount(time.Date(2026, 11, 22, 4, 7, 25, 0, time.UTC))
+	notice.Method = "Google Play"
+	connect.AssertEqual(t, SalesPaymentNoticeText(notice, "penguin1234"), "*Trial:* Pro yearly (new)\n*Network:* penguin1234\n*Amount:* no charge (free trial until 2026-11-22)\n*Payment method:* Google Play")
+	connect.AssertEqual(t, SalesFreeTrialAmount(time.Time{}), "no charge (free trial)")
+}
+
 func TestSalesPaymentNoticeTextWithoutNetworkOrName(t *testing.T) {
 	notice := salesTestNotice("balance_code/cs_1")
 	notice.NetworkId = nil

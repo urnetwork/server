@@ -508,18 +508,123 @@ func playSalesOrderId(sub *PlaySubscription) string {
 	return sub.LatestOrderId
 }
 
-// playSalesKind is new or renewal from the order id: Play numbers each
-// renewal's order after the first with a ".." suffix (GPA.1234-...-12345..0).
-func playSalesKind(sub *PlaySubscription) string {
-	orderId := playSalesOrderId(sub)
-	switch {
-	case orderId == "":
-		return ""
-	case strings.Contains(orderId, ".."):
-		return model.SalesPaymentKindRenewal
-	default:
-		return model.SalesPaymentKindNew
+// playSalesRenewalOrder is whether the order is a renewal's: Play numbers
+// each renewal's order after the first with a ".." suffix
+// (GPA.1234-...-12345..0). After a free trial, "..0" is the first charge.
+func playSalesRenewalOrder(sub *PlaySubscription) bool {
+	return strings.Contains(playSalesOrderId(sub), "..")
+}
+
+// A day shorter than the shortest paid period, a 28-day February month. A
+// window that moves the expiry by less than this past the last charged window
+// was not charged, and a purchase's first window shorter than this is a free
+// trial.
+const playShortestPaidPeriod = 27 * 24 * time.Hour
+
+// Play's shortest free trial is three days. A first window shorter than this
+// (a license tester's minutes, or a window ended early) is not a trial.
+const playShortestTrial = 2 * 24 * time.Hour
+
+// playCredit is what a credited Play window was, for the sales notice.
+type playCredit int
+
+const (
+	// the purchase's first window, charged
+	playCreditNew playCredit = iota
+	// the purchase's first window, a free trial: nothing was charged
+	playCreditTrial
+	// the first charged window after the free trial
+	playCreditAfterTrial
+	// a later charged window
+	playCreditRenewal
+	// a window Play moved out without a new charge. Before nearly every
+	// renewal Play moves the expiry out by a day while the renewal's charge
+	// is pending: 368 of the Play windows credited by 2026-11-08 were such a
+	// day.
+	playCreditNotCharged
+)
+
+// playWindowHasTrialLength is whether a window from the purchase's start to
+// expiry is shorter than any paid period and long enough for a trial.
+func playWindowHasTrialLength(startTime time.Time, expiryTime time.Time) bool {
+	length := expiryTime.Sub(startTime)
+	return playShortestTrial <= length && length < playShortestPaidPeriod
+}
+
+// playFirstWindowIsTrial is whether the purchase's first credited window is a
+// free trial: the phase Play names, else a window shorter than any paid
+// period on the purchase's own first order, continuing no other purchase.
+func playFirstWindowIsTrial(sub *PlaySubscription, productId string, startTime time.Time, maxExpiryTime time.Time) bool {
+	for _, item := range sub.LineItems {
+		if item != nil && (item.ProductId == productId || productId == "") && item.OfferPhase.reported() {
+			return item.OfferPhase.freeTrial()
+		}
 	}
+	return sub.LinkedPurchaseToken == "" &&
+		!playSalesRenewalOrder(sub) &&
+		playWindowHasTrialLength(startTime, maxExpiryTime)
+}
+
+// classifyPlayCredit is what the window credited through maxExpiryTime was.
+// earlierExpiries are the expiries of the purchase's earlier credits, oldest
+// first. A window is charged when it moves the expiry at least
+// playShortestPaidPeriod past the last charged window's. Measuring from the
+// last charged window, not the last credited one, keeps a renewal that
+// follows Play's extra day: a February renewal lands 27 days after that day.
+func classifyPlayCredit(
+	sub *PlaySubscription,
+	productId string,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+	earlierExpiries []time.Time,
+) playCredit {
+	if len(earlierExpiries) == 0 {
+		switch {
+		case playFirstWindowIsTrial(sub, productId, startTime, maxExpiryTime):
+			return playCreditTrial
+		case playSalesRenewalOrder(sub):
+			// the first window this server credited is a renewal's
+			return playCreditRenewal
+		default:
+			return playCreditNew
+		}
+	}
+	lastCharged := earlierExpiries[0]
+	afterTrial := playWindowHasTrialLength(startTime, earlierExpiries[0])
+	for _, expiryTime := range earlierExpiries[1:] {
+		if playShortestPaidPeriod <= expiryTime.Sub(lastCharged) {
+			lastCharged = expiryTime
+			afterTrial = false
+		}
+	}
+	switch {
+	case maxExpiryTime.Sub(lastCharged) < playShortestPaidPeriod:
+		return playCreditNotCharged
+	case afterTrial:
+		return playCreditAfterTrial
+	default:
+		return playCreditRenewal
+	}
+}
+
+// playEarlierCreditExpiriesInTx is the expiry of each earlier credit of the
+// purchase, oldest first, read under its own savepoint: a read that fails
+// leaves the credit's transaction usable, ok is false, and the window posts no
+// notice.
+func playEarlierCreditExpiriesInTx(tx server.PgTx, ctx context.Context, purchaseToken string) (expiries []time.Time, ok bool) {
+	server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT play_sales_history`))
+	if r := server.HandleError(func() {
+		for _, endTime := range model.GetPurchaseTokenCreditEndTimesInTx(tx, ctx, purchaseToken) {
+			expiries = append(expiries, endTime.Add(-SubscriptionGracePeriod))
+		}
+	}); r != nil {
+		server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT play_sales_history`))
+		model.CountSalesPaymentNotice(model.SalesPaymentNoticeResultBuildError)
+		glog.Errorf("[sales]play purchase history could not be read; the window posts no notice: %v\n", r)
+		return nil, false
+	}
+	server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT play_sales_history`))
+	return expiries, true
 }
 
 // playSalesRecurringPrice is a line item's recurring price as Play reports
@@ -553,39 +658,65 @@ func playSalesRecurringPrice(item *PlaySubscriptionPurchaseLineItem) string {
 	return model.SalesAmount(value, 9, currency)
 }
 
+var playSalesOfferIdPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
 // playSalesAmount is the purchase's recurring price as Google Play reports
 // it, which leaves out tax and discounts; else the configured list price.
-// Play does not report the charged amount here.
-func playSalesAmount(sub *PlaySubscription, sku *Sku, productId string) string {
+// Play does not report the charged amount here. A first charge names the
+// offer the purchase was made under, whose discount may apply to it.
+func playSalesAmount(sub *PlaySubscription, sku *Sku, productId string, firstCharge bool) string {
 	for _, item := range sub.LineItems {
 		if item != nil && (item.ProductId == productId || productId == "") {
 			if price := playSalesRecurringPrice(item); price != "" {
-				return price + " (Google Play list price, before tax and discounts)"
+				note := "Google Play list price, before tax and discounts"
+				if firstCharge && item.OfferDetails != nil && playSalesOfferIdPattern.MatchString(item.OfferDetails.OfferId) {
+					note += "; offer " + item.OfferDetails.OfferId
+				}
+				return price + " (" + note + ")"
 			}
 		}
 	}
 	return salesConfiguredUsdAmount(sku.PriceAmountUsd, "Google Play")
 }
 
-// playSalesNotice is the notice of a credited Play purchase window.
+// playSalesNotice is the notice of a credited Play purchase window: a sale,
+// a trial's start, or nil for a window Play moved out without a charge.
 func playSalesNotice(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	sub *PlaySubscription,
 	sku *Sku,
 	maxExpiryTime time.Time,
+	credit playCredit,
 ) *model.SalesPaymentNotice {
+	if credit == playCreditNotCharged {
+		return nil
+	}
+	productId := playSubscriptionRenewal.SubscriptionId
 	notice := &model.SalesPaymentNotice{
 		RecordKey: fmt.Sprintf("play_purchase/%s/%d", playSubscriptionRenewal.PurchaseToken, maxExpiryTime.Unix()),
 		NetworkId: &playSubscriptionRenewal.NetworkId,
-		Kind:      playSalesKind(sub),
-		Amount:    playSalesAmount(sub, sku, playSubscriptionRenewal.SubscriptionId),
 		Method:    "Google Play",
 	}
 	if sku.Supporter {
 		// the base plan names the plan: the product id ("supporter") sells both
-		notice.Item = model.SalesProItem(playPlanForSubscription(sub, playSubscriptionRenewal.SubscriptionId))
+		notice.Item = model.SalesProItem(playPlanForSubscription(sub, productId))
 	} else {
 		notice.Item = model.SalesDataItem(sku.BalanceByteCount())
+	}
+	switch credit {
+	case playCreditTrial:
+		notice.Trial = true
+		notice.Kind = model.SalesPaymentKindNew
+		notice.Amount = model.SalesFreeTrialAmount(maxExpiryTime)
+	case playCreditAfterTrial:
+		notice.Kind = model.SalesPaymentKindAfterTrial
+		notice.Amount = playSalesAmount(sub, sku, productId, true)
+	case playCreditRenewal:
+		notice.Kind = model.SalesPaymentKindRenewal
+		notice.Amount = playSalesAmount(sub, sku, productId, false)
+	default:
+		notice.Kind = model.SalesPaymentKindNew
+		notice.Amount = playSalesAmount(sub, sku, productId, true)
 	}
 	return notice
 }

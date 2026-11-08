@@ -1087,6 +1087,46 @@ func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken str
 	return
 }
 
+// The most earlier credits of one purchase token
+// GetPurchaseTokenCreditEndTimesInTx reads.
+const purchaseTokenCreditEndTimesLimit = 100
+
+// GetPurchaseTokenCreditEndTimesInTx is the window end of each balance the
+// purchase token was credited, oldest first, up to the latest
+// purchaseTokenCreditEndTimesLimit. A grace period's zero-byte hold credited
+// nothing and is left out. The Play sales notice reads it before the next
+// credit is added, to tell a newly charged window from one Play only moved.
+func GetPurchaseTokenCreditEndTimesInTx(tx server.PgTx, ctx context.Context, purchaseToken string) []time.Time {
+	endTimes := []time.Time{}
+	if purchaseToken == "" {
+		return endTimes
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+		/* purchase-token-credit-end-times */
+		SELECT end_time
+		FROM transfer_balance
+		WHERE
+			purchase_token = $1 AND
+			0 < start_balance_byte_count
+		ORDER BY end_time DESC
+		LIMIT $2
+		`,
+		purchaseToken,
+		purchaseTokenCreditEndTimesLimit,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var endTime time.Time
+			server.Raise(result.Scan(&endTime))
+			endTimes = append(endTimes, endTime.UTC())
+		}
+	})
+	slices.Reverse(endTimes)
+	return endTimes
+}
+
 func AddBasicTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,

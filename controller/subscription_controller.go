@@ -834,6 +834,9 @@ type PlaySubscription struct {
 	// acknowledged. Such a purchase carries no account identifiers of its own
 	// (playOutOfAppNetworkIdInConn).
 	OutOfAppPurchaseContext *PlayOutOfAppPurchaseContext `json:"outOfAppPurchaseContext,omitempty"`
+	// TestPurchase is present only on a license tester's purchase: no money
+	// moves for it, so it posts no sales notice
+	TestPurchase json.RawMessage `json:"testPurchase,omitempty"`
 }
 
 // PlayOutOfAppPurchaseContext names the expired subscription a
@@ -918,6 +921,40 @@ type PlaySubscriptionPurchaseLineItem struct {
 	OfferDetails *PlayOfferDetails `json:"offerDetails,omitempty"`
 	// SignupPromotion is set when a Play promotion code was applied at signup
 	SignupPromotion *PlaySignupPromotion `json:"signupPromotion,omitempty"`
+	// OfferPhase is the phase of the offer the item is in now, when Play
+	// reports it; read by the sales notice only
+	OfferPhase *PlayOfferPhase `json:"offerPhase,omitempty"`
+}
+
+// PlayOfferPhase names exactly one phase: the free trial, an introductory
+// price, the base price, or a proration period. Only which one is set is read.
+type PlayOfferPhase struct {
+	FreeTrial         json.RawMessage `json:"freeTrial,omitempty"`
+	IntroductoryPrice json.RawMessage `json:"introductoryPrice,omitempty"`
+	BasePrice         json.RawMessage `json:"basePrice,omitempty"`
+	ProrationPeriod   json.RawMessage `json:"prorationPeriod,omitempty"`
+}
+
+// reported is whether Play named a phase at all.
+func (self *PlayOfferPhase) reported() bool {
+	return self != nil && (playJsonPresent(self.FreeTrial) || playJsonPresent(self.IntroductoryPrice) ||
+		playJsonPresent(self.BasePrice) || playJsonPresent(self.ProrationPeriod))
+}
+
+// freeTrial is whether Play reports the item in its offer's free trial.
+func (self *PlayOfferPhase) freeTrial() bool {
+	return self != nil && playJsonPresent(self.FreeTrial)
+}
+
+// playJsonPresent is whether a field Play may leave out was there, and not
+// null.
+func playJsonPresent(raw json.RawMessage) bool {
+	return 0 < len(raw) && string(raw) != "null"
+}
+
+// testPurchase is whether the purchase is a license tester's.
+func (self *PlaySubscription) testPurchase() bool {
+	return playJsonPresent(self.TestPurchase)
 }
 
 // PlaySignupPromotion is exactly one of oneTimeCode (a single-use code; the
@@ -1684,6 +1721,16 @@ func playCreditSubscriptionInTx(
 		return false, nil
 	}
 
+	// the purchase's earlier credits, read before this one is added, tell the
+	// sales notice whether Play charged this window. A license tester's
+	// purchase moves no money and reads nothing.
+	testPurchase := sub.testPurchase()
+	var earlierExpiries []time.Time
+	historyRead := false
+	if !testPurchase {
+		earlierExpiries, historyRead = playEarlierCreditExpiriesInTx(tx, clientSession.Ctx, playSubscriptionRenewal.PurchaseToken)
+	}
+
 	if sku.Supporter {
 
 		endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
@@ -1744,11 +1791,15 @@ func playCreditSubscriptionInTx(
 		)
 	}
 
-	// no balance covered this expiry: the window is a new payment, posted once
-	// the caller's transaction commits
-	addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
-		return playSalesNotice(playSubscriptionRenewal, sub, sku, maxExpiryTime)
-	})
+	// no balance covered this expiry. A window Play charged is a sale, and a
+	// free trial's first window a trial, posted once the caller's transaction
+	// commits; a window Play only moved out posts nothing
+	if historyRead {
+		credit := classifyPlayCredit(sub, playSubscriptionRenewal.SubscriptionId, startTime, maxExpiryTime, earlierExpiries)
+		addSalesPaymentNoticeInTx(tx, func() *model.SalesPaymentNotice {
+			return playSalesNotice(playSubscriptionRenewal, sub, sku, maxExpiryTime, credit)
+		})
+	}
 
 	return true, nil
 }
