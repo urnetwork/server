@@ -154,6 +154,13 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 	server.Tx(context.Background(), func(conn server.PgTx) {
 		server.Raise(bootstrapStore.requireAutomationLeaseInTx(context.Background(), conn, fixture.settings, *lease))
 		round := fixture.round
+		var readyBeforeOpen int
+		server.Raise(conn.QueryRow(context.Background(), `SELECT count(*) FROM competition_source_readiness
+		 WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND generation=$4 AND created_at<=$5
+		 AND (receipt_json->>'recorded_at')::timestamp=created_at`, lease.Environment, lease.CompetitionId, lease.SeasonId, intent.Generation, round.OpensAt).Scan(&readyBeforeOpen))
+		if readyBeforeOpen != 2 {
+			panic(errors.New("synthetic source readiness does not precede its round opening"))
+		}
 		server.RaisePgResult(conn.Exec(context.Background(), `INSERT INTO competition_round(round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled)
 	 VALUES($1,$2,1,$13,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,false)`, round.RoundId, round.CompetitionId, round.WorkloadCommitment, round.SeedNonce, round.SeedCiphertext, round.ProvidersSha256, round.ProvidersPath, string(round.PolicyJson), round.OpensAt, round.ClosesAt, round.RevealAt, round.CreatedAt, staging))
 	})
