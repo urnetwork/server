@@ -313,6 +313,16 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_health ALTER COLUMN legacy_tls_cleared_at SET DEFAULT now()`},
 		{name: "legacy TLS recheck start missing", version: server.ProviderEgressTlsVerdictVersion(),
 			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_recheck_from`},
+		// An older release's outcome must read as the scored general outcome
+		// it was counted as; a probation default would take every outcome an
+		// older release stores out of the eight-hour window, and a missing
+		// column breaks every window reader.
+		{name: "URL outcome source missing", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history DROP COLUMN url_source`},
+		{name: "URL outcome probation defaults to unscored", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation SET DEFAULT true`},
+		{name: "URL outcome probation nullable", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_health_history ALTER COLUMN url_probation DROP NOT NULL`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

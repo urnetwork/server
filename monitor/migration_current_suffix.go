@@ -937,6 +937,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionOperatorInterruptionMigrationContract},
 	// the exact-URL TLS finding verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerEgressTlsVerdictMigrationContract},
+	// the URL outcome catalog source and probation, versioned by its position
+	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

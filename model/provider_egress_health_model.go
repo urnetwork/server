@@ -93,8 +93,19 @@ type ProviderEgressHealth struct {
 	// UnscoredFailedNames is the comma-joined failed loads the server left out
 	// of the counts at ingest: a site on probation, or one marked incompatible
 	// with the provider's place (see ScoreProviderEgressHealth), or a security
-	// recheck of a URL with an open TLS finding (storeProviderEgressHealth).
+	// recheck of a URL with an open TLS finding, or a URL outcome on probation
+	// (storeProviderEgressHealth).
 	UnscoredFailedNames string
+	// UrlSource is the catalog a URL outcome's destination came from, which
+	// the operator ingest decides from the served catalog
+	// (provider_egress_url_source.go). Zero, the general catalog, for a report
+	// without URL evidence.
+	UrlSource ProviderEgressUrlSource
+	// UrlProbation is a URL outcome on a destination that has not graduated
+	// into scoring: the ingest sets it for every country site, and the store
+	// also for a general destination the pool holds on probation. Recorded and
+	// in the rolling quota, never counted.
+	UrlProbation bool
 }
 
 // Takes out of a submitted run's counts every failed load the pool says must
@@ -207,9 +218,15 @@ func SetProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) 
 	setProviderEgressHealthAt(ctx, health, server.NowUtc())
 }
 
+// SetProviderEgressHealth, reporting how the store counted the outcome, which
+// the operator ingest's per-source outcome counter reads.
+func StoreProviderEgressHealth(ctx context.Context, health *ProviderEgressHealth) ProviderEgressHealthStored {
+	return setProviderEgressHealthAt(ctx, health, server.NowUtc())
+}
+
 // The store as the clock reads now, which only judges whether a missing day
 // may be created; a test moves it across the retention.
-func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth, now time.Time) {
+func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth, now time.Time) (stored ProviderEgressHealthStored) {
 	if health.UrlProbeEvidence != nil {
 		// Arrival time must not rejuvenate a delayed measurement. Do not mutate
 		// the caller's receipt; publication retries may share the same value.
@@ -245,7 +262,7 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 	}
 
 	store := func() {
-		storeProviderEgressHealth(ctx, health, runId, string(classResultsJson), evidenceJson, policyVersion)
+		stored = storeProviderEgressHealth(ctx, health, runId, string(classResultsJson), evidenceJson, policyVersion)
 	}
 	var partitionMissingErr *providerEgressHealthPartitionMissingError
 	func() {
@@ -271,6 +288,7 @@ func setProviderEgressHealthAt(ctx context.Context, health *ProviderEgressHealth
 	_, err = providerEgressHealthHistoryPartitionFamily.EnsureRangeFor(ctx, health.MeasuredAt)
 	server.Raise(err)
 	store()
+	return
 }
 
 // The store's transaction (see SetProviderEgressHealth).
@@ -281,8 +299,10 @@ func storeProviderEgressHealth(
 	classResultsJson string,
 	evidenceJson any,
 	policyVersion int,
-) {
+) (result ProviderEgressHealthStored) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a retried transaction discards what the rolled-back one decided
+		result = ProviderEgressHealthStored{}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
@@ -331,15 +351,39 @@ func storeProviderEgressHealth(
 				WHERE security.client_id = $1 AND security.url_key = $2 AND `+providerUrlSecurityRechecksSql("security")+`
 			)`, health.ClientId, egresshealth.UrlProbeDestinationKey(health.UrlProbeEvidence.Destination)).Scan(&recheck))
 		}
+		// A measured outcome on a destination that has not graduated into
+		// scoring is on probation: a country site, which the ingest marks, or
+		// a general destination the pool holds on probation, read here as the
+		// pool stands. It is a measured run like any other, so the history
+		// keeps it with its outcome, its source and its probation state, and
+		// the rolling quota, which paces turns by measured runs, counts it:
+		// recording a site unscored costs no extra turns. What it may not do
+		// is count (GEOMAP §11.4): the eight-hour window leaves it out
+		// (providerEgressHealthWindowSql), and the latest-run row takes it out
+		// of the counts and the per-class totals, its failed name among the
+		// unscored ones, as a recheck's.
+		probation := health.UrlProbation
+		if health.UrlProbeEvidence != nil && health.Total == 1 && !probation {
+			server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (
+				SELECT 1 FROM provider_egress_destination WHERE name = $1 AND probation
+			)`, health.UrlProbeEvidence.Destination.Name).Scan(&probation))
+		}
+		// the history row's counts are the rolling quota's: every measured
+		// outcome but a recheck; the latest-run row's are the scored ones
+		measuredOk, measuredTotal, measuredClassResultsJson := health.OKCount, health.Total, classResultsJson
 		countedOk, countedTotal, countedClassResultsJson := health.OKCount, health.Total, classResultsJson
 		countedFailedNames, countedUnscoredFailedNames := health.FailedNames, health.UnscoredFailedNames
-		if recheck {
+		unscoredOutcome := recheck || (probation && health.UrlProbeEvidence != nil && health.Total == 1)
+		if unscoredOutcome {
 			countedOk, countedTotal, countedClassResultsJson = 0, 0, "{}"
 			unscored := splitProviderEgressNames(health.UnscoredFailedNames)
 			unscored = append(unscored, splitProviderEgressNames(health.FailedNames)...)
 			countedFailedNames, countedUnscoredFailedNames = "", strings.Join(unscored, ",")
 		}
-		urlProbe := cycleAdmitted && countedTotal == 1
+		if recheck {
+			measuredOk, measuredTotal, measuredClassResultsJson = 0, 0, "{}"
+		}
+		urlProbe := cycleAdmitted && measuredTotal == 1
 		var securityMeasuredAt *time.Time
 		if health.UrlProbeEvidence == nil && (health.TLSAuthenticationFailure || health.OKCount > 0) {
 			t := health.MeasuredAt.UTC()
@@ -347,17 +391,19 @@ func storeProviderEgressHealth(
 		}
 		inserted, err := tx.Exec(ctx, `
 			INSERT INTO provider_egress_health_history
-				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version)
-			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11)
+				(run_id, client_id, measured_at, ok_count, total_count, class_results, tls_authentication_failure, cycle_started_at, url_probe, url_probe_evidence, url_probe_policy_version, url_source, url_probation)
+			VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10::jsonb,$11,$12,$13)
 			ON CONFLICT DO NOTHING`,
-			runId, health.ClientId, health.MeasuredAt.UTC(), countedOk, countedTotal,
-			countedClassResultsJson, health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion)
+			runId, health.ClientId, health.MeasuredAt.UTC(), measuredOk, measuredTotal,
+			measuredClassResultsJson, health.TLSAuthenticationFailure, cycleStartedAt, urlProbe, evidenceJson, policyVersion,
+			int16(health.UrlSource), probation)
 		if err != nil {
 			raiseProviderEgressHealthInsertErr(err, health.MeasuredAt)
 		}
 		if inserted.RowsAffected() == 0 {
 			return
 		}
+		result = ProviderEgressHealthStored{Stored: true, Recheck: recheck, Probation: probation && !recheck}
 		if health.UrlProbeEvidence != nil {
 			for _, event := range health.UrlProbeEvidence.Security {
 				destinationJson, err := json.Marshal(event.Destination)
@@ -478,7 +524,9 @@ func storeProviderEgressHealth(
 			// A provider with an open finding is turned at the capped pace,
 			// whatever its quota. Pacing reads the receipt's own outcome, so a
 			// recheck that authenticated paces like a success; the counters
-			// take only what was counted, so a recheck adds no error or outcome.
+			// follow the rolling quota, so a recheck adds no error or outcome,
+			// and an outcome on probation adds its own as the measured run it
+			// is.
 			server.RaisePgResult(tx.Exec(ctx, `
 				WITH current AS MATERIALIZED (
 					SELECT client_id, GREATEST(latest_result_at,$5) AS rolling_at
@@ -500,10 +548,11 @@ func storeProviderEgressHealth(
 						WHEN recent.run_count >= $6 THEN `+providerUrlProbeRenewalAtSql("recent.oldest_run_at", "$5::timestamp")+`
 						ELSE `+providerUrlProbePacedAttemptSql("cycle", "$5", "$3", "recent.run_count < $6")+` END
 				FROM recent WHERE cycle.client_id = recent.client_id`,
-				health.ClientId, cycleStartedAt, health.OKCount, countedTotal-countedOk,
-				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, countedTotal))
+				health.ClientId, cycleStartedAt, health.OKCount, measuredTotal-measuredOk,
+				health.MeasuredAt.UTC(), ProviderUrlProbeRunTarget, measuredTotal))
 		}
 	}, server.TxReadCommitted)
+	return
 }
 
 // The distinct catalog destinations a legacy-flagged provider must verify TLS
@@ -580,13 +629,16 @@ type ProviderEgressHealthCounts struct {
 // remain stored; their weaker or unknown success contracts never become quality.
 // A security recheck is stored with no measured outcome (total_count 0), so it
 // never enters this window: the finding it rechecks is judged on its own, and
-// its failures would otherwise count against the provider twice.
+// its failures would otherwise count against the provider twice. An outcome on
+// probation (a country site, or a general site the refresh has not graduated)
+// is a measured run of the rolling quota but never enters this window either:
+// it has to earn the right to cost a provider a tier (provider_egress_url_source.go).
 func providerEgressHealthWindowSql() string {
 	return fmt.Sprintf(`
 	SELECT client_id, measured_at, ok_count, total_count, class_results
 	FROM provider_egress_health_history
 	WHERE measured_at > $1 AND measured_at <= $2 AND total_count = 1
-	AND url_probe_policy_version = %d
+	AND url_probe_policy_version = %d AND NOT url_probation
 `, SelectedProviderUrlProbePolicyVersion())
 }
 

@@ -411,6 +411,13 @@ func refuseProviderEgressHealthTime(args *SubmitProviderEgressHealthArgs, now ti
 // passes included; the cut here is what the wire allows for any other
 // submitter, since a run names its failures and not its passes.
 //
+// A versioned URL outcome is one load, which its evidence names. Its source,
+// the general catalog or the provider's country list, is read from the served
+// catalog, and an outcome on a destination that has not graduated (every
+// country site, and a general site on probation) is stored measured but
+// unscored: in the history and the rolling quota, out of the eight-hour
+// window (provider_egress_url_source.go).
+//
 // A "reputation" key inside class_results is still rejected outright. The
 // class dissolved into the sites, so no current prober sends one; a body that
 // carries one is from a prober that would have scored the class twice, and the
@@ -524,15 +531,20 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 	}
 	if args.UrlProbeEvidence != nil {
 		health.MeasuredAt = args.UrlProbeEvidence.MeasuredAt
+		// where the destination came from, from the served catalog; the store
+		// keeps an outcome on probation out of every score
+		// (provider_egress_url_source.go)
+		health.UrlSource, health.UrlProbation = getProviderEgressUrlSources().of(args.UrlProbeEvidence.Destination)
 	}
 	// Preserve legacy scoring semantics only for legacy diagnostic reports.
-	// Every versioned URL error remains in its policy-version denominator.
+	// A versioned URL error remains in its policy-version denominator unless
+	// its destination is on probation, which the store decides.
 	if args.UrlProbeEvidence == nil {
 		place := model.GetProviderEgressPlaces(ctx, []server.Id{args.ClientId})[args.ClientId]
 		health = model.ScoreProviderEgressHealth(health, place, model.GetProviderEgressHealthScoring(ctx))
 	}
 
-	model.SetProviderEgressHealth(ctx, health)
+	recordProviderEgressUrlOutcome(health, model.StoreProviderEgressHealth(ctx, health))
 	return nil
 }
 

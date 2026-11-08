@@ -7675,6 +7675,101 @@
           "legendFormat": "run {{result}}"
         }
       ]
+    },
+    {
+      "id": 153,
+      "type": "row",
+      "title": "URL outcomes by catalog source: country lists and sites on probation, recorded unscored",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 501
+      }
+    },
+    {
+      "id": 154,
+      "type": "timeseries",
+      "title": "URL outcomes by catalog source / min",
+      "description": "Measured URL outcomes the operator ingest stored (api and alt, or a taskworker with operator_transport: local), by the catalog their destination came from (source: general, the served general pool; country, the provider's country list), how they counted (scoring: scored, in the eight-hour window every bucket, the index and the Online rule read; probation, recorded and in the rolling quota but never scored: every country site, since country sites do not graduate yet, and a general site the pool refresh promoted and has not graduated; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome. The ingest reads the source from the served catalog and the probation from the pool as it stands (model/provider_egress_url_source.go); each outcome's history row keeps both (provider_egress_health_history url_source, url_probation).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 502
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, scoring, outcome) (rate(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{source}} {{scoring}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 155,
+      "type": "timeseries",
+      "title": "URL success share by catalog source (1h)",
+      "description": "The share of the last hour's stored URL outcomes that succeeded, per catalog source and scoring: how a country list, or a site on probation, does beside the scored general pool before anything decides to score it. A country list whose share stays well under the general pool's in the same country would cost its providers buckets if it were scored. Read beside the per-destination series above (urnetwork_egress_probe_health_checks_total) for a single site.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 502
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\",outcome=\"success\"}[1h])) / sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{source}} {{scoring}}"
+        }
+      ]
     }
   ]
 }
