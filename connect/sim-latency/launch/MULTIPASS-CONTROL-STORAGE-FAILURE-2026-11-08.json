@@ -39,6 +39,21 @@
     "validated_replication_targets": 1,
     "proves_historical_outage_absent": false
   },
+  "exact_version_readback_observation": {
+    "completed_at": "2026-11-08T04:45:39.924127807Z",
+    "receipt": "/home/by/urnetwork/temp/review-inv15-exact-read-20261108.7vEhzktJ/receipt.private.json",
+    "receipt_sha256": "f496204d6d4e2169c6192dc8159f2c4f5a4655f7dd9ae870670838c2c5296a20",
+    "fresh_timeout_seconds": 15,
+    "actual_bytes": 1247,
+    "actual_sha256": "91d7128a593d13f20d56bf5b3f0d8f9d054936d66733652c29660b1539a7a860",
+    "elapsed_nanoseconds": 653142153,
+    "exact_version_matches": true,
+    "provider_requests": 0,
+    "database_calls": 0,
+    "archive_writes": 0,
+    "qualification_granted": false,
+    "proves_historical_outage_absent": false
+  },
   "recovery": {
     "frozen_run_restarted": false,
     "deadline_renewed": false,
