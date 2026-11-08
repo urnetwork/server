@@ -5,15 +5,23 @@ package server
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 )
 
 // The migration groups waiting for their own Gn-out (db_migrations_sidecar.go).
 // A Gn-out moves only its own group from here into the migrations slice, in
-// order. Every group is additive and compatible with the running release
-// (connect/CODESTYLE.md, "Database migrations and deploy order"): it adds
-// tables, nullable columns and indexes, and the release that is running when it
-// applies neither reads nor writes any of them.
+// order, with server/local/sidecar-migrations promote. Every group is additive
+// and compatible with the running release (connect/CODESTYLE.md, "Database
+// migrations and deploy order"): it adds tables, nullable columns and indexes,
+// and the release that is running when it applies neither reads nor writes any
+// of them. TestSidecarGroupsAreAdditive holds each group to that.
+//
+// Each group concatenates its owners' parts in §19.7's order, then its marker.
+// An owner adds its migrations to its own part, inside that part's literal, so
+// two tracks adding to one group touch different lines. A part's entries are
+// moved verbatim at promotion, so a part holds only migration values and calls
+// that the migrations slice can make too: no helper declared in this file.
 
 // Panics unless the binary may link a pending group (sidecarPendingAllowed). It
 // runs in the migrations slice's initializer, so a release leg built with the
@@ -23,7 +31,16 @@ func sidecarPendingMigrations() []any {
 	if !sidecarPendingAllowed(env, testing.Testing()) {
 		panic(fmt.Errorf("the sidecar_pending build tag links unregistered migrations and runs only in local, canary or tests, not WARP_ENV=%q", env))
 	}
-	return append(sidecarMg0Migrations(), sidecarMg1Migrations()...)
+	return slices.Concat(
+		sidecarMg0Migrations(),
+		sidecarMg1Migrations(),
+		sidecarMg2Migrations(),
+		sidecarMg5Migrations(),
+		sidecarMg6Migrations(),
+		sidecarMg7Migrations(),
+		sidecarMg8Migrations(),
+		sidecarMg9Migrations(),
+	)
 }
 
 // MG0, §7's P0 (§19.7): the owner row that marks a client, and the columns that
@@ -85,10 +102,28 @@ func sidecarMg0Migrations() []any {
 	}
 }
 
-// MG1 (§19.7): what M1 first reads ungated. §7's auth keys and admin event log
-// are here; §5's identity tables, §7's admin_token_use, §18's lease and §20's
-// limit join the group in their own tasks' changes, each before the marker.
+// MG1 (§19.7): what M1 first reads ungated.
 func sidecarMg1Migrations() []any {
+	return slices.Concat(
+		sidecarMg1CoreMigrations(),
+		sidecarMg1TeamMigrations(),
+		sidecarMg1LeaseMigrations(),
+		sidecarMg1QuotaMigrations(),
+		[]any{
+			// the group's marker (SidecarMg1Linked); it changes nothing
+			newCodeMigration(sidecarMg1MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG1's §5 part: sidecar_identity and sidecar_identity_binding (CORE-M1-06).
+func sidecarMg1CoreMigrations() []any {
+	return []any{}
+}
+
+// MG1's §7 part: auth keys, the admin event log and admin_token_use (TEAM's
+// tasks).
+func sidecarMg1TeamMigrations() []any {
 	return []any{
 		// §7.8's auth keys (§2.8 api-11): the bearer ur-authkey-<id>-<secret> is
 		// stored as the SHA-256 of its secret, never in the clear. tag_ids holds
@@ -143,8 +178,159 @@ func sidecarMg1Migrations() []any {
 		newSqlMigration(`
 			CREATE INDEX network_admin_event_event_time ON network_admin_event (event_time)
 		`),
-
-		// the group's marker (SidecarMg1Linked); it changes nothing
-		newCodeMigration(sidecarMg1MigrationId, func(ctx context.Context) {}),
 	}
+}
+
+// MG1's §18 part: network_client_lease (TEAM-M1-10).
+func sidecarMg1LeaseMigrations() []any {
+	return []any{}
+}
+
+// MG1's §20 part: network_sidecar_limit (QUOTA's tasks).
+func sidecarMg1QuotaMigrations() []any {
+	return []any{}
+}
+
+// MG2 (§19.7): what M2 first reads ungated.
+func sidecarMg2Migrations() []any {
+	return slices.Concat(
+		sidecarMg2AclMigrations(),
+		sidecarMg2QuotaMigrations(),
+		[]any{
+			// the group's marker (SidecarMg2Linked); it changes nothing
+			newCodeMigration(sidecarMg2MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG2's §8 part: network_acl_head, network_acl_ack and
+// network_client.acl_subject_client_id, which turns NOT NULL only through a
+// validated NOT VALID check (ACL's tasks).
+func sidecarMg2AclMigrations() []any {
+	return []any{}
+}
+
+// MG2's §20 part: network_quota_state, network_service_usage,
+// service_debit_journal and service_usage_batch (QUOTA's tasks).
+func sidecarMg2QuotaMigrations() []any {
+	return []any{}
+}
+
+// MG5 (§19.7): what M5 first reads ungated. MG3 and MG4 create nothing.
+func sidecarMg5Migrations() []any {
+	return slices.Concat(
+		sidecarMg5DnsMigrations(),
+		sidecarMg5TlsMigrations(),
+		sidecarMg5ApprovalMigrations(),
+		sidecarMg5AbuseMigrations(),
+		[]any{
+			// the group's marker (SidecarMg5Linked); it changes nothing
+			newCodeMigration(sidecarMg5MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG5's §12 part: dns_* and network_dns_* (DNS's tasks).
+func sidecarMg5DnsMigrations() []any {
+	return []any{}
+}
+
+// MG5's §13 part: network_tls_* and tls_connection_*, the hourly partitioned
+// record among them (TLS-M5-12).
+func sidecarMg5TlsMigrations() []any {
+	return []any{}
+}
+
+// MG5's §16 part: approval_use, §12.8's DNS gate (MCP's tasks).
+func sidecarMg5ApprovalMigrations() []any {
+	return []any{}
+}
+
+// MG5's §21 part: the seven abuse tables (ABUSE-M5-03).
+func sidecarMg5AbuseMigrations() []any {
+	return []any{}
+}
+
+// MG6 (§19.7): what M6 first reads ungated.
+func sidecarMg6Migrations() []any {
+	return slices.Concat(
+		sidecarMg6TeamMigrations(),
+		sidecarMg6AclMigrations(),
+		sidecarMg6BridgeMigrations(),
+		sidecarMg6QuotaMigrations(),
+		[]any{
+			// the group's marker (SidecarMg6Linked); it changes nothing
+			newCodeMigration(sidecarMg6MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG6's §7 part: the Team tables (TEAM's tasks).
+func sidecarMg6TeamMigrations() []any {
+	return []any{}
+}
+
+// MG6's §8 part: network_acl_share (ACL's tasks).
+func sidecarMg6AclMigrations() []any {
+	return []any{}
+}
+
+// MG6's §17 part: network_bridge_share (BRIDGE's tasks).
+func sidecarMg6BridgeMigrations() []any {
+	return []any{}
+}
+
+// MG6's §20 part: transfer_balance.tier, transfer_balance's team_credit index,
+// built concurrently, and stripe_meter_report (QUOTA's tasks).
+func sidecarMg6QuotaMigrations() []any {
+	return []any{}
+}
+
+// MG7 (§19.7): what M7 first reads ungated.
+func sidecarMg7Migrations() []any {
+	return slices.Concat(
+		sidecarMg7MailMigrations(),
+		[]any{
+			// the group's marker (SidecarMg7Linked); it changes nothing
+			newCodeMigration(sidecarMg7MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG7's §15 part: mail_network, mail_host_key, mail_direct_mx and the hourly
+// partitioned mail_connection_record (MAIL-M7-21).
+func sidecarMg7MailMigrations() []any {
+	return []any{}
+}
+
+// MG8 (§19.7): what M8 first reads ungated.
+func sidecarMg8Migrations() []any {
+	return slices.Concat(
+		sidecarMg8PushMigrations(),
+		[]any{
+			// the group's marker (SidecarMg8Linked); it changes nothing
+			newCodeMigration(sidecarMg8MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG8's §18 part: sidecar_push_token (SDK's tasks).
+func sidecarMg8PushMigrations() []any {
+	return []any{}
+}
+
+// MG9 (§19.7): what M9 first reads ungated.
+func sidecarMg9Migrations() []any {
+	return slices.Concat(
+		sidecarMg9SmtpMigrations(),
+		[]any{
+			// the group's marker (SidecarMg9Linked); it changes nothing
+			newCodeMigration(sidecarMg9MigrationId, func(ctx context.Context) {}),
+		},
+	)
+}
+
+// MG9's §14 part: smtp_*, smtp_send partitioned daily (SMTP-M9-17).
+func sidecarMg9SmtpMigrations() []any {
+	return []any{}
 }
