@@ -35,9 +35,12 @@ func TestMigrationsCompetitionIntakeFirstIntegrationRetiresExactlyFourOwners(t *
 			t.Fatalf("predecessor %d was retired early, late or not at all", predecessor)
 		}
 	}
+	// its own custody moves, whole, to the review handoff that re-created three
+	// of its winner-review bodies
 	contract := migrationCurrentSuffixTestContract(t, version)
-	if contract.artifact.removedVersion != 0 || contract.artifact.rowColumn != version-589 || contract.query != competitionIntakeFirstArtifactQuery() {
-		t.Fatal("integrated intake does not pin the exact current complete custody query")
+	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	if handoff <= version || contract.artifact.removedVersion != handoff || contract.artifact.rowColumn != version-589 || contract.query != competitionIntakeFirstArtifactQuery() {
+		t.Fatal("integrated intake does not pin the exact complete custody query until its registered successor")
 	}
 	oldCoverage := migrationCurrentSuffixTestContract(t, server.CompetitionWorkCoverageMigrationVersion())
 	if !strings.Contains(oldCoverage.query, "p.prosrc="+snMainnetMigrationLiteral(server.CompetitionIntakeFirstLegacyCoverageRoundBodySql())) {

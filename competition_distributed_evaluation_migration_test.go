@@ -42,11 +42,14 @@ func TestCompetitionDistributedMigrationIsProspectiveAndPreservesSingleton(t *te
 
 // An unpublished executor append must follow, not displace, the complete
 // published statistics/finalization prefix from the current control release.
+// It was the head when appended; later migrations append after it, so it
+// must sit directly after that prefix and keep its own position, wherever the
+// head now is.
 func TestCompetitionDistributedMigrationFollowsPublishedFinalizationPrefix(t *testing.T) {
 	statistics := TransferContractUnresolvedPredicateStatisticsVersion()
 	finalization := CompetitionFinalizationHoldMigrationVersion()
 	distributed := CompetitionDistributedEvaluationMigrationVersion()
-	if statistics != 926 || finalization != 927 || distributed != finalization+1 || distributed != len(migrations) {
+	if statistics != 926 || finalization != 927 || distributed != finalization+1 || len(migrations) < distributed {
 		t.Fatalf("executor append reordered published authority: statistics=%d finalization=%d distributed=%d head=%d", statistics, finalization, distributed, len(migrations))
 	}
 	for _, published := range []struct {
@@ -55,6 +58,7 @@ func TestCompetitionDistributedMigrationFollowsPublishedFinalizationPrefix(t *te
 	}{
 		{version: statistics, sql: TransferContractUnresolvedPredicateStatisticsSql},
 		{version: finalization, sql: competitionFinalizationHoldMigrationSql},
+		{version: distributed, sql: competitionDistributedEvaluationMigrationSql},
 	} {
 		migration, ok := migrations[published.version-1].(*SqlMigration)
 		if !ok || migration.sql != published.sql {
