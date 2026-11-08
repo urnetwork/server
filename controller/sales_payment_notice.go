@@ -139,10 +139,60 @@ func stripeSalesPlanForInterval(interval string) string {
 	return ""
 }
 
+// A day shorter than the shortest paid period, a 28-day February month. A
+// subscription period shorter than this is a free trial.
+const stripeShortestPaidPeriod = 27 * 24 * time.Hour
+
+// stripeTrialPeriod is whether a subscription period this long is a free
+// trial. Only the yearly plan carries one (StripeSubscriptionTrialDays).
+func stripeTrialPeriod(length time.Duration) bool {
+	return 0 < length && length < stripeShortestPaidPeriod
+}
+
+// stripeInvoiceStartsTrial is whether the invoice starts a free trial: the
+// subscription's first invoice, for nothing, for a trial-length period.
+func stripeInvoiceStartsTrial(billingReason string, amount int64, periodLength time.Duration) bool {
+	return amount == 0 &&
+		(billingReason == "subscription_create" || billingReason == "") &&
+		stripeTrialPeriod(periodLength)
+}
+
+// stripeInvoiceEndsTrial is whether the invoice is the first charge after a
+// free trial: a cycle's charge whose invoice looks back on a trial-length
+// period. A subscription invoice's own period_start and period_end are the
+// period before the one it bills.
+func stripeInvoiceEndsTrial(billingReason string, amount int64, previousPeriodLength time.Duration) bool {
+	return 0 < amount &&
+		billingReason == "subscription_cycle" &&
+		stripeTrialPeriod(previousPeriodLength)
+}
+
+// stripeUnixPeriodLength is the length of a period in unix seconds, zero
+// when either end is missing.
+func stripeUnixPeriodLength(start int64, end int64) time.Duration {
+	if start <= 0 || end <= 0 {
+		return 0
+	}
+	return time.Duration(end-start) * time.Second
+}
+
+// stripeMarkTrialNotice makes the notice a trial's start: nothing charged,
+// through trialEnd (zero when unknown).
+func stripeMarkTrialNotice(notice *model.SalesPaymentNotice, trialEnd time.Time) {
+	notice.Trial = true
+	notice.Kind = model.SalesPaymentKindNew
+	notice.Amount = model.SalesFreeTrialAmount(trialEnd)
+	notice.Method = "Stripe"
+	if notice.Item == model.SalesProItem("") {
+		// both paths that start a Stripe trial start it on the yearly plan
+		notice.Item = model.SalesProItem(model.PlanYearly)
+	}
+}
+
 // stripeInvoiceSalesNotice is the notice of a credited subscription invoice.
 // What the delivered invoice carries is the fallback; the worker reads the
-// invoice back from Stripe for the amount paid, the reason, the plan and the
-// charge's payment method.
+// invoice back from Stripe for the amount paid, the reason, the plan, the
+// trial and the charge's payment method.
 func stripeInvoiceSalesNotice(
 	networkId server.Id,
 	invoice *StripeEventInvoiceObject,
@@ -160,6 +210,13 @@ func stripeInvoiceSalesNotice(
 	if model.SalesCurrencyCode(invoice.Currency) != "" {
 		notice.Amount = stripeSalesAmount(int64(invoice.Total), invoice.Currency)
 	}
+	// the window runs manualPaymentGracePeriod past the period it paid for
+	periodEnd := endTime.Add(-manualPaymentGracePeriod)
+	if stripeInvoiceStartsTrial(invoice.BillingReason, int64(invoice.Total), periodEnd.Sub(startTime)) {
+		stripeMarkTrialNotice(notice, periodEnd)
+	} else if stripeInvoiceEndsTrial(invoice.BillingReason, int64(invoice.Total), stripeUnixPeriodLength(int64(invoice.PeriodStart), int64(invoice.PeriodEnd))) {
+		notice.Kind = model.SalesPaymentKindAfterTrial
+	}
 	invoiceId := invoice.Id
 	notice.Enrich = func(ctx context.Context, notice *model.SalesPaymentNotice) {
 		stripeEnrichInvoiceSalesNotice(ctx, invoiceId, notice)
@@ -176,12 +233,32 @@ type stripeSalesInvoice struct {
 	Currency      string          `json:"currency"`
 	Charge        json.RawMessage `json:"charge"`
 	PaymentIntent json.RawMessage `json:"payment_intent"`
-	Lines         *struct {
+	// the period before the one a subscription invoice bills
+	PeriodStart int64 `json:"period_start"`
+	PeriodEnd   int64 `json:"period_end"`
+	Lines       *struct {
 		Data []*struct {
-			Price json.RawMessage `json:"price"`
-			Plan  json.RawMessage `json:"plan"`
+			Price  json.RawMessage `json:"price"`
+			Plan   json.RawMessage `json:"plan"`
+			Period *struct {
+				Start int64 `json:"start"`
+				End   int64 `json:"end"`
+			} `json:"period"`
 		} `json:"data"`
 	} `json:"lines"`
+}
+
+// linePeriod is the period the invoice's first line with one bills.
+func (self *stripeSalesInvoice) linePeriod() (start int64, end int64, ok bool) {
+	if self.Lines == nil {
+		return 0, 0, false
+	}
+	for _, line := range self.Lines.Data {
+		if line != nil && line.Period != nil && 0 < line.Period.Start && 0 < line.Period.End {
+			return line.Period.Start, line.Period.End, true
+		}
+	}
+	return 0, 0, false
 }
 
 // interval is the first recurring interval of the invoice's lines.
@@ -340,14 +417,33 @@ func stripeEnrichInvoiceSalesNotice(ctx context.Context, invoiceId string, notic
 	if amount == nil {
 		amount = invoice.Total
 	}
+	if plan := stripeSalesPlanForInterval(invoice.interval()); plan != "" {
+		notice.Item = model.SalesProItem(plan)
+	}
+	// a trial's start, as Stripe reports it now: an invoice that charged
+	// something is no trial, and a free one is when it bills a trial-length
+	// period. Without the lines' period the delivered invoice's verdict stands.
+	if amount != nil {
+		if 0 < *amount {
+			notice.Trial = false
+		} else if lineStart, lineEnd, ok := invoice.linePeriod(); ok {
+			notice.Trial = stripeInvoiceStartsTrial(invoice.BillingReason, *amount, stripeUnixPeriodLength(lineStart, lineEnd))
+			if notice.Trial {
+				stripeMarkTrialNotice(notice, time.Unix(lineEnd, 0))
+			}
+		}
+	}
+	if notice.Trial {
+		return
+	}
 	if amount != nil && model.SalesCurrencyCode(invoice.Currency) != "" {
 		notice.Amount = stripeSalesAmount(*amount, invoice.Currency)
 	}
 	if kind := stripeSalesKind(invoice.BillingReason, amount != nil && *amount == 0); kind != "" {
 		notice.Kind = kind
 	}
-	if plan := stripeSalesPlanForInterval(invoice.interval()); plan != "" {
-		notice.Item = model.SalesProItem(plan)
+	if amount != nil && stripeInvoiceEndsTrial(invoice.BillingReason, *amount, stripeUnixPeriodLength(invoice.PeriodStart, invoice.PeriodEnd)) {
+		notice.Kind = model.SalesPaymentKindAfterTrial
 	}
 	if method, ok := stripeSalesChargeMethod(ctx, stripeIdFromRaw(invoice.Charge)); ok {
 		notice.Method = method

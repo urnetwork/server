@@ -127,7 +127,8 @@ func TestStripeInvoiceSalesNoticeReadsThePaymentFromStripe(t *testing.T) {
 		"/v1/invoices/in_wallet":        `{"id":"in_wallet","billing_reason":"subscription_cycle","amount_paid":499,"currency":"eur","charge":null,"payment_intent":"pi_wallet"}`,
 		"/v1/payment_intents/pi_wallet": `{"id":"pi_wallet","latest_charge":"ch_wallet"}`,
 		"/v1/charges/ch_wallet":         `{"id":"ch_wallet","payment_method_details":{"type":"card","card":{"wallet":{"type":"link"}}}}`,
-		"/v1/invoices/in_trial":         `{"id":"in_trial","billing_reason":"subscription_create","amount_paid":0,"total":0,"currency":"usd","charge":null,"payment_intent":null}`,
+		"/v1/invoices/in_trial":         `{"id":"in_trial","billing_reason":"subscription_create","amount_paid":0,"total":0,"currency":"usd","charge":null,"payment_intent":null,"lines":{"data":[{"period":{"start":1790812800,"end":1792022400},"price":{"recurring":{"interval":"year"}}}]}}`,
+		"/v1/invoices/in_coupon":        `{"id":"in_coupon","billing_reason":"subscription_create","amount_paid":0,"total":0,"currency":"usd","charge":null,"payment_intent":null,"lines":{"data":[{"period":{"start":1790812800,"end":1793491200},"price":{"recurring":{"interval":"month"}}}]}}`,
 		"/v1/invoices/in_basil":         `{"id":"in_basil","billing_reason":"subscription_create","amount_paid":499,"currency":"usd","lines":{"data":[{"pricing":{"price_details":{"price":"price_1"}}}]}}`,
 		"/v1/invoice_payments":          `{"data":[{"payment":{"type":"payment_intent","payment_intent":"pi_basil"}}]}`,
 		"/v1/payment_intents/pi_basil":  `{"id":"pi_basil","latest_charge":"ch_basil"}`,
@@ -161,9 +162,16 @@ func TestStripeInvoiceSalesNoticeReadsThePaymentFromStripe(t *testing.T) {
 			want:    salesNoticeText("Pro monthly (renewal)", "acme", "4.99 EUR", "Stripe (Link)"),
 		},
 		{
+			// the yearly plan's 14-day trial: no charge, no sale
 			invoice: &StripeEventInvoiceObject{Id: "in_trial", BillingReason: "subscription_create"},
-			end:     start.Add(14 * 24 * time.Hour),
-			want:    salesNoticeText("Pro (new, no charge)", "acme", "0.00 USD", "Stripe (no charge)"),
+			end:     start.Add(14*24*time.Hour + manualPaymentGracePeriod),
+			want:    strings.Replace(salesNoticeText("Pro yearly (new)", "acme", "no charge (free trial until 2026-10-15)", "Stripe"), "*Sale:*", "*Trial:*", 1),
+		},
+		{
+			// a month for nothing (a 100% coupon) is no trial
+			invoice: &StripeEventInvoiceObject{Id: "in_coupon", BillingReason: "subscription_create"},
+			end:     start.Add(31*24*time.Hour + manualPaymentGracePeriod),
+			want:    salesNoticeText("Pro monthly (new, no charge)", "acme", "0.00 USD", "Stripe (no charge)"),
 		},
 		{
 			// an API version whose invoice names no charge: through its payments
