@@ -281,15 +281,22 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 
 // The judge's URL condition is the URL-success rule's own evidence, through
 // one shared predicate, so the two cannot drift apart when either changes.
-// The window's whole row predicate is the shared one, nothing after it, and
-// the rule's evidence is within the window. When the rule's tally gains a
-// general-catalog half (D4), the rule decides by that half, and its source
-// condition must be in the shared predicate too; this trips until it is.
+// The window's whole row predicate is the shared one, with nothing after it
+// and nothing between it and the time bounds, and the rule's evidence is
+// within the window. When the rule's tally gains a general-catalog half (D4),
+// the rule decides by that half, and its source condition must be in the
+// shared predicate too; this trips until it is.
 func TestProviderZeroCarryUrlConditionIsTheOnlineRules(t *testing.T) {
 	window := strings.TrimSpace(providerEgressHealthWindowSql())
 	rows := strings.TrimSpace(providerEgressHealthWindowRowsSql(""))
 	if !strings.HasSuffix(window, rows) {
 		t.Fatalf("the URL window's row predicate is not the shared one:\n%s\nwant it to end with\n%s", window, rows)
+	}
+	// and nothing between the time bounds and the shared predicate: a
+	// condition written there, as D3/D4 writes its probation one, would bind
+	// the window and not the judge
+	if bounded := "WHERE measured_at > $1 AND measured_at <= $2 AND " + providerEgressHealthWindowRowsSql("") + "\n"; !strings.Contains(providerEgressHealthWindowSql(), bounded) {
+		t.Fatalf("the URL window's WHERE is not the time bounds and the shared predicate alone:\n%s\nwant it to hold\n%s", providerEgressHealthWindowSql(), bounded)
 	}
 	for _, alias := range []string{"run", "success"} {
 		if !strings.Contains(providerOnlineUrlEvidenceSql(alias), providerEgressHealthWindowRowsSql(alias)) {
