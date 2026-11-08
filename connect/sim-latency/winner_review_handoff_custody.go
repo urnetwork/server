@@ -157,7 +157,16 @@ func winnerHandoffTokenizerCensus(plan *winnerMultipassPlan) int {
 // Used for plan/bundle/evidence documents; wrapper originals take the same
 // protected retaining hook only after independent containment authentication.
 func retainWinnerHandoffDocument(ctx context.Context, name string, content []byte, maximum int, minimumRetention time.Time, retain func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)) (winnerHandoffCustodyOriginal, error) {
-	if len(content) == 0 || len(content) > maximum || retain == nil {
+	if len(content) == 0 {
+		return winnerHandoffCustodyOriginal{}, errors.New("native custody document is empty")
+	}
+	return retainWinnerHandoffOriginal(ctx, name, content, maximum, minimumRetention, retain)
+}
+
+// A zero-byte original is meaningful (empty stderr), unlike an absent document.
+// It retains the empty SHA/version and is independently read back like any leaf.
+func retainWinnerHandoffOriginal(ctx context.Context, name string, content []byte, maximum int, minimumRetention time.Time, retain func(context.Context, []byte, string) (*controller.CompetitionWinnerReviewEvidence, error)) (winnerHandoffCustodyOriginal, error) {
+	if len(content) > maximum || retain == nil {
 		return winnerHandoffCustodyOriginal{}, errors.New("native custody document exceeds its admitted archive object bound")
 	}
 	digest := winnerMultipassSha256(content)
