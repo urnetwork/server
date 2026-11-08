@@ -409,6 +409,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/network/auth-keys", handlers.GetNetworkAuthKeys),
 		router.NewRoute("POST", "/network/auth-keys", handlers.CreateNetworkAuthKey),
 		router.NewRoute("POST", "/network/auth-key-revoke", handlers.RevokeNetworkAuthKey),
+		// §5.15's sidecar identities: the binding log and its lookups (CORE-M1-06)
+		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
+		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),
+		router.NewRoute("GET", "/sidecar/identity", handlers.GetSidecarIdentityByClient),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),

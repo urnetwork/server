@@ -314,6 +314,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/auth-keys":                        routeAccessNetwork,  // lists auth keys (Network until TEAM-M6-03's roles)
 	"POST /network/auth-keys":                       routeAccessNetwork,  // creates an auth key, which enrolls devices (escalation)
 	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
+	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
+	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
+	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
@@ -384,6 +387,10 @@ var strictExpRoutes = map[string]bool{
 	"POST /network/remove-client": true, // its own client or children (the model)
 	"GET /key/([^/]+)":            true,
 	"POST /connect/control":       true,
+	// §5.15's sidecar routes (CORE-M1-06)
+	"POST /sidecar/bind":            true,
+	"GET /sidecar/identity/([^/]+)": true,
+	"GET /sidecar/identity":         true,
 }
 
 // The routes where a strict_exp bearer proves its ClientKey (§7.4). The third

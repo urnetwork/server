@@ -209,6 +209,10 @@ var sidecarAllowlist = []string{
 	"POST /network/remove-client",
 	"GET /key/([^/]+)",
 	"POST /connect/control",
+	// §5.15's (CORE-M1-06)
+	"POST /sidecar/bind",
+	"GET /sidecar/identity/([^/]+)",
+	"GET /sidecar/identity",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
