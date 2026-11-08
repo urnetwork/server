@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "kind": "reviewer-null-metadata-offline-validation",
+  "baseline_source": "f86696bac2ba48ea6757b4a8a5aab5a2c0c303b8",
+  "scope": "Isolated frozen dependency checkout with two corrected source/test files overlaid; not a full current-main or live provider qualification.",
+  "source_files": {
+    "winner_review_multipass_provider.go": "0f6c96f36193aaa9742185dff79304ec5a88856184fdeaec1355cec757b1f35d",
+    "winner_review_multipass_privacy_test.go": "f70afb127004bca56d0be381c97cb1dc4e513d2a7d515c2f29a79f5bd8e08840"
+  },
+  "causal_regression": {
+    "original_guard_fails_new_tests": 2,
+    "tests": [
+      "TestWinnerMultipassPrivacyAllowsNullReasoningConfiguration",
+      "TestWinnerMultipassPrivacyRetainsNullReasoningConfigurationTransport"
+    ],
+    "original_incident_discarded_transport_exact_trigger_proven": false
+  },
+  "full_ordinary": {
+    "passed": 139,
+    "failed": 0,
+    "skipped": 0,
+    "elapsed_seconds": 180.303,
+    "log": "/home/by/urnetwork/temp/snow-privacy-null-metadata-20261108.AwKm9xFA/full-private-ordinary.jsonl",
+    "sha256": "3f1f7d880fadf1b6c53429b6cfbf9b1ad5a6894299b049213f9140bd5ff92f83"
+  },
+  "focused_race": {
+    "passed": 15,
+    "includes_separate_diagnostic_controls": 3,
+    "failed": 0,
+    "skipped": 0,
+    "elapsed_seconds": 3.087,
+    "log": "/home/by/urnetwork/temp/snow-privacy-null-metadata-20261108.AwKm9xFA/focused-race.jsonl",
+    "sha256": "19d90e8c74f55aae49a8fdcd7cf32f3308fe2f821f66a5fee09591290da19613"
+  },
+  "initial_environment_failures": {
+    "preserved_logs": ["full-ordinary.jsonl", "full-root-ordinary.jsonl"],
+    "failures_per_run": 4,
+    "cause": "Storage fixture directories inherited a permissive umask and failed the unchanged private-root guard. Root ownership alone did not correct permissions. All four passed under umask 077, as did the full ordinary rerun.",
+    "storage_guard_weakened": false
+  },
+  "full_race": {
+    "status": "RUNNING",
+    "session_id": 25543,
+    "timeout_seconds": 1500,
+    "log": "/home/by/urnetwork/temp/snow-privacy-null-metadata-20261108.AwKm9xFA/full-private-race.jsonl"
+  },
+  "provider_calls": 0,
+  "installed_review_release_changed": false,
+  "replacement_qualification_authorized": false,
+  "qualified": false,
+  "winner_approved": false,
+  "source_promotion_authorized": false
+}
