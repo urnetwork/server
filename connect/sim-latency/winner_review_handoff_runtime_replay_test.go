@@ -29,6 +29,80 @@ type winnerHandoffRuntimeCapture struct {
 	Error                  string                                 `json:"error"`
 }
 
+// The native two-probe owner writes this terminal only after both captures and
+// protected custody complete inside its original deadline. A successful single
+// member capture is not a substitute for this complete paired-owner report.
+type winnerHandoffRuntimeReport struct {
+	Schema   int                                           `json:"schema"`
+	Kind     string                                        `json:"kind"`
+	Owner    winnerMultipassOwner                          `json:"owner"`
+	Captures []currentQgQualificationPin                   `json:"captures"`
+	Profiles map[string]winnerMultipassTokenizationProfile `json:"tokenization_profiles"`
+	Complete bool                                          `json:"complete"`
+	Error    string                                        `json:"error"`
+}
+
+func validateWinnerHandoffRuntimePair(evidence map[string][]byte, release winnerMultipassQualificationRelease) error {
+	return validateWinnerHandoffRuntimePairWithClaims(evidence, release, func(pin currentQgQualificationPin) ([]byte, error) {
+		if err := currentQgQualificationPrivateRoot(filepath.Dir(pin.Path)); err != nil {
+			return nil, err
+		}
+		return readCurrentQgQualificationPin(pin, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true)
+	})
+}
+
+// Every member has already passed the actual physical replay above. This final
+// gate prevents mixing authentic observations from different prospective owners
+// or admitting a pair whose actual native terminal failed after late custody.
+func validateWinnerHandoffRuntimePairWithClaims(evidence map[string][]byte, release winnerMultipassQualificationRelease, readClaim func(currentQgQualificationPin) ([]byte, error)) error {
+	if validateWinnerMultipassQualificationReleaseShape(release) != nil || readClaim == nil {
+		return errors.New("runtime pair has no exact observed release or independent claims")
+	}
+	var report *winnerHandoffRuntimeReport
+	for digest, content := range evidence {
+		var identity struct {
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(content, &identity) != nil || identity.Kind != "winner-review-multipass-runtime-bootstrap-report/v1" {
+			continue
+		}
+		var decoded winnerHandoffRuntimeReport
+		if report != nil || digest != winnerMultipassSha256(content) || rejectWinnerReviewCaseAliases(content) != nil || decodeStrictJSONBytes(content, &decoded, "original paired runtime report") != nil {
+			return errors.New("runtime declaration has ambiguous or malformed paired-owner terminal evidence")
+		}
+		canonical, _ := json.Marshal(decoded)
+		if !bytes.Equal(canonical, content) {
+			return errors.New("runtime paired report is not its complete canonical original")
+		}
+		report = &decoded
+	}
+	if report == nil || report.Schema != 1 || !report.Complete || report.Error != "" || len(report.Captures) != 2 || !reflect.DeepEqual(report.Profiles, release.TokenizationProfiles) {
+		return errors.New("runtime declaration lacks exactly one complete timely two-probe terminal")
+	}
+	var prior *winnerHandoffRuntimeCapture
+	for index, member := range defaultWinnerSnowProviderSettings().Members {
+		pin := report.Captures[index]
+		content, found := evidence[release.TokenizationProfiles[member.Name].RuntimeEvidenceSha256]
+		var capture winnerHandoffRuntimeCapture
+		if !found || !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path || pin.Sha256 != winnerMultipassSha256(content) || pin.Sha256 != release.TokenizationProfiles[member.Name].RuntimeEvidenceSha256 || decodeStrictJSONBytes(content, &capture, "original paired member capture") != nil || capture.Schema != 1 || capture.Kind != "winner-review-multipass-runtime-capture/v1" || capture.Error != "" || capture.Owner != report.Owner || capture.Containment == nil || capture.Containment.Result == nil || capture.PhysicalAuthentication == nil || !capture.PhysicalAuthentication.ObservedAt.Before(report.Owner.Deadline) {
+			return errors.New("runtime pair omitted, reordered or admitted a late/failed member capture")
+		}
+		claimBytes, err := readClaim(capture.Claim)
+		if err != nil {
+			return err
+		}
+		var claim winnerHandoffRuntimeCallClaim
+		if winnerMultipassSha256(claimBytes) != capture.Claim.Sha256 || rejectWinnerReviewCaseAliases(claimBytes) != nil || decodeStrictJSONBytes(claimBytes, &claim, "paired original member claim") != nil || claim.Schema != 1 || claim.Kind != "winner-review-multipass-runtime-call/v1" || claim.Owner != report.Owner || claim.Member != member || claim.InputSha256 != winnerMultipassSha256(capture.Input) || claim.StartedAt.Before(report.Owner.StartedAt) || !claim.StartedAt.Before(report.Owner.Deadline) {
+			return errors.New("runtime pair has a different original member intent or owner clock")
+		}
+		if prior != nil && (capture.OwnerClaim != prior.OwnerClaim || !reflect.DeepEqual(capture.BootstrapRelease, prior.BootstrapRelease) || claim.StartedAt.Before(prior.PhysicalAuthentication.ObservedAt)) {
+			return errors.New("runtime observations came from different owners/releases or overlap their original order")
+		}
+		prior = &capture
+	}
+	return nil
+}
+
 // Only offline tests inject these seams. The native entry below always opens the
 // independent root claims and verifies actual inode/UID/cgroup/fence originals.
 type winnerHandoffRuntimeReplayHooks struct {

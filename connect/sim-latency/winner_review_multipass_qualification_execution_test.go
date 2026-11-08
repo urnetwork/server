@@ -54,6 +54,7 @@ type winnerMultipassQualificationReport struct {
 	Captures     []currentQgQualificationPin           `json:"captures"`
 	CaseEvidence map[int]currentQgQualificationPin     `json:"case_evidence"`
 	Complete     bool                                  `json:"complete"`
+	CompletedAt  time.Time                             `json:"completed_at"`
 	Qualified    bool                                  `json:"qualified"`
 	Error        string                                `json:"error"`
 }
@@ -73,6 +74,7 @@ type winnerMultipassQualificationHooks struct {
 	Authenticate    func([]byte, []byte, []byte, bool) (*winnerMultipassContainmentReceipt, error)
 	Retain          func(context.Context, winnerMultipassQualificationCapture) (currentQgQualificationPin, error)
 	RetainCase      func(int, winnerMultipassEvidence) (currentQgQualificationPin, error)
+	CompletedReport *currentQgQualificationPin // Optional exact original terminal permits read-only full replay, never unstarted dispatch or fresh custody.
 }
 
 // Shared dispatch owns the immutable clock, exclusive claim and single actual
@@ -295,6 +297,7 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 		if resultErr != nil {
 			report.Error = resultErr.Error()
 			report.Qualified = false
+			report.Complete = false
 		}
 	}()
 	if hooks.Mode == "genuine_provider" {
@@ -310,9 +313,16 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 	if err != nil {
 		return report, err
 	}
-	if err := hooks.Reserve(capacity); err != nil {
+	var originalReport *winnerMultipassQualificationReport
+	if hooks.CompletedReport != nil {
+		originalReport = &winnerMultipassQualificationReport{}
+		if err := readWinnerMultipassCompletedReport(*hooks.CompletedReport, originalReport); err != nil {
+			return report, err
+		}
+	} else if err := hooks.Reserve(capacity); err != nil {
 		return report, err
 	}
+	var latestProvider time.Time
 	state := newWinnerMultipassQualificationState(plan)
 	for _, invocation := range plan.Invocations {
 		if err := ctx.Err(); err != nil {
@@ -323,6 +333,9 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 			return report, err
 		}
 		if capture == nil {
+			if originalReport != nil {
+				return report, errors.New("completed original terminal cannot authorize an unstarted invocation")
+			}
 			capture, err = dispatchWinnerMultipassQualification(ctx, plan, invocation, state, hooks)
 			if err != nil {
 				return report, err
@@ -342,11 +355,21 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 		if err := applyWinnerMultipassQualificationCapture(plan, invocation, *capture, state, hooks.Authenticate); err != nil {
 			return report, err
 		}
+		if capture.Containment.Result != nil && capture.Containment.Result.CompletedAt.After(latestProvider) {
+			latestProvider = capture.Containment.Result.CompletedAt
+		}
 		if invocation.Operation == "generate" {
 			item := plan.Cases[invocation.CasePosition-1]
 			value := state.Evidence[item.Position]
 			if len(value.Calls) == len(item.Plan.Calls) {
-				pin, err := hooks.RetainCase(item.Position, value)
+				var pin currentQgQualificationPin
+				var err error
+				if originalReport != nil {
+					pin = originalReport.CaseEvidence[item.Position]
+					err = replayWinnerMultipassCompletedCase(pin, value)
+				} else {
+					pin, err = hooks.RetainCase(item.Position, value)
+				}
 				if err != nil {
 					return report, err
 				}
@@ -362,7 +385,18 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 	if err := validateWinnerMultipassQualificationOutcomes(plan, state.Evidence); err != nil {
 		return report, err
 	}
+	if originalReport != nil {
+		report.CompletedAt = originalReport.CompletedAt
+	} else {
+		report.CompletedAt = hooks.Now().UTC()
+	}
+	if err := validateWinnerMultipassCompletionClock(plan.Owner, report.CompletedAt, latestProvider); err != nil {
+		return report, err
+	}
 	report.Complete = true
 	report.Qualified = hooks.Mode == "genuine_provider"
+	if originalReport != nil && !reflect.DeepEqual(report, originalReport) {
+		return report, errors.New("completed replay changed original qualification terminal")
+	}
 	return report, nil
 }

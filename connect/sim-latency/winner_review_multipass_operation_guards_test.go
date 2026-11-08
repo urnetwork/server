@@ -23,7 +23,7 @@ func TestWinnerMultipassOperationDeadlineAdmissionAndClaimParity(t *testing.T) {
 		operation string
 		bound     time.Duration
 	}{{operation: "tokenize", bound: 5 * time.Minute}, {operation: "generate", bound: 30 * time.Minute}, {operation: "qualification_cancel_before_provider", bound: 5 * time.Minute}} {
-		t.Run(item.operation, func(t *testing.T) {
+		{
 			bound, err := winnerMultipassOperationTimeout(item.operation, limits)
 			if err != nil || bound != item.bound {
 				t.Fatal("operation budget changed", err)
@@ -63,7 +63,7 @@ func TestWinnerMultipassOperationDeadlineAdmissionAndClaimParity(t *testing.T) {
 			if err := validateWinnerMultipassBrokerEnvelope(envelope, plan.Provider, now, limits); err == nil {
 				t.Fatal("overlong operation envelope accepted")
 			}
-		})
+		}
 	}
 	if _, err := winnerMultipassOperationTimeout("synthetic-unknown", limits); err == nil {
 		t.Fatal("unknown operation obtained a deadline")

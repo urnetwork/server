@@ -28,6 +28,7 @@ type winnerMultipassQualificationSpoolReport struct {
 	FailureInvocation    *winnerMultipassQualificationInvocation `json:"failure_invocation,omitempty"`
 	CaseEvidence         map[int]currentQgQualificationPin       `json:"case_evidence"`
 	Complete             bool                                    `json:"complete"`
+	CompletedAt          time.Time                               `json:"completed_at"`
 	Qualified            bool                                    `json:"qualified"`
 	Error                string                                  `json:"error"`
 }
@@ -79,6 +80,7 @@ type winnerMultipassQualificationSpoolHooks struct {
 	Authenticate    func([]byte, []byte, []byte, bool) (*winnerMultipassContainmentReceipt, error)
 	Retain          func(context.Context, winnerMultipassQualificationCapture) (*winnerMultipassQualificationSpoolResolvedCapture, error)
 	RetainCase      func(int, winnerMultipassEvidence) (currentQgQualificationPin, error)
+	CompletedReport *currentQgQualificationPin // Optional original terminal: only fully authenticated read-only replay, no new draw or retention.
 }
 
 // A compact commit must bind the whole canonical capture, not just a desired
@@ -128,6 +130,7 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 		if resultErr != nil {
 			report.Error = resultErr.Error()
 			report.Qualified = false
+			report.Complete = false
 		}
 	}()
 	if hooks.Mode == "genuine_provider" {
@@ -143,9 +146,16 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 	if err != nil {
 		return report, err
 	}
-	if err := hooks.Reserve(spool, aggregate); err != nil {
+	var originalReport *winnerMultipassQualificationSpoolReport
+	if hooks.CompletedReport != nil {
+		originalReport = &winnerMultipassQualificationSpoolReport{}
+		if err := readWinnerMultipassCompletedReport(*hooks.CompletedReport, originalReport); err != nil {
+			return report, err
+		}
+	} else if err := hooks.Reserve(spool, aggregate); err != nil {
 		return report, err
 	}
+	var latestProvider time.Time
 	dispatch := winnerMultipassQualificationHooks{Now: hooks.Now, Claim: hooks.Claim, Invoke: hooks.Invoke, Authenticate: hooks.Authenticate}
 	state := newWinnerMultipassQualificationState(plan)
 	for _, invocation := range plan.Invocations {
@@ -157,6 +167,9 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 			return report, err
 		}
 		if value == nil {
+			if originalReport != nil {
+				return report, errors.New("completed spool terminal cannot authorize an unstarted invocation")
+			}
 			capture, err := dispatchWinnerMultipassQualification(ctx, plan, invocation, state, dispatch)
 			if err != nil {
 				return report, err
@@ -187,11 +200,21 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 		if err := applyWinnerMultipassResolvedSpoolCapture(plan, invocation, value, state); err != nil {
 			return report, err
 		}
+		if value.Capture.Containment.Result != nil && value.Capture.Containment.Result.CompletedAt.After(latestProvider) {
+			latestProvider = value.Capture.Containment.Result.CompletedAt
+		}
 		if invocation.Operation == "generate" {
 			item := plan.Cases[invocation.CasePosition-1]
 			evidence := state.Evidence[item.Position]
 			if len(evidence.Calls) == len(item.Plan.Calls) {
-				pin, err := hooks.RetainCase(item.Position, evidence)
+				var pin currentQgQualificationPin
+				var err error
+				if originalReport != nil {
+					pin = originalReport.CaseEvidence[item.Position]
+					err = replayWinnerMultipassCompletedCase(pin, evidence)
+				} else {
+					pin, err = hooks.RetainCase(item.Position, evidence)
+				}
 				if err != nil {
 					return report, err
 				}
@@ -207,8 +230,19 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 	if err := validateWinnerMultipassQualificationOutcomes(plan, state.Evidence); err != nil {
 		return report, err
 	}
+	if originalReport != nil {
+		report.CompletedAt = originalReport.CompletedAt
+	} else {
+		report.CompletedAt = hooks.Now().UTC()
+	}
+	if err := validateWinnerMultipassCompletionClock(plan.Owner, report.CompletedAt, latestProvider); err != nil {
+		return report, err
+	}
 	report.Complete = true
 	report.Qualified = hooks.Mode == "genuine_provider"
+	if originalReport != nil && !reflect.DeepEqual(report, originalReport) {
+		return report, errors.New("completed spool replay changed original terminal")
+	}
 	return report, nil
 }
 
@@ -225,6 +259,9 @@ func authenticateWinnerMultipassSpoolQualification(reportPin currentQgQualificat
 	var report winnerMultipassQualificationSpoolReport
 	if rejectWinnerReviewCaseAliases(content) != nil || decodeStrictJSONBytes(content, &report, "original protected-spool qualification report") != nil || report.Schema != 1 || report.Kind != "winner-review-multipass-qualification-spool-report/v1" || report.Protocol != winnerMultipassVersion || report.Mode != "genuine_provider" || !report.Complete || !report.Qualified || report.Error != "" || report.FailureCaptureCommit != nil || report.FailureInvocation != nil || !reflect.DeepEqual(report.Release, release) || report.Capacity == nil || report.Capacity.Cases[2] == nil || report.SpoolCapacity == nil {
 		return nil, errors.New("spool qualification report is partial, offline, historical or from another release")
+	}
+	if err := validateWinnerMultipassCompletionClock(report.Owner, report.CompletedAt, time.Time{}); err != nil {
+		return nil, err
 	}
 	planBytes, err := readCurrentQgQualificationPin(report.Plan, 8*int64(defaultWinnerMultipassSettings().MaximumBundleBytes), true)
 	if err != nil {
@@ -274,6 +311,9 @@ func authenticateWinnerMultipassSpoolQualification(reportPin currentQgQualificat
 		}
 		if err := applyWinnerMultipassResolvedSpoolCapture(&plan, invocation, value, state); err != nil {
 			return nil, err
+		}
+		if value.Capture.Containment.Result != nil && report.CompletedAt.Before(value.Capture.Containment.Result.CompletedAt) {
+			return nil, errors.New("spool qualification terminal predates an original provider completion")
 		}
 	}
 	delete(state.Evidence, 1)
