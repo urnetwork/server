@@ -23,28 +23,29 @@ const winnerMultipassVersion = "winner-review-complete-coverage/1"
 // Resource limits belong to the explicitly approved review owner. Defaults are
 // ceilings for preparation, never authority to start an inference or extend time.
 type winnerMultipassSettings struct {
-	MaximumArtifactBytes    int           `json:"maximum_artifact_bytes"`    // Positive per-file bytes; default 2 MiB.
-	MaximumBundleBytes      int           `json:"maximum_bundle_bytes"`      // Positive aggregate artifact bytes; default 32 MiB.
-	MaximumArtifacts        int           `json:"maximum_artifacts"`         // Positive artifact census; default 256.
-	SpanBytes               int           `json:"span_bytes"`                // Positive target, not token admission; default 64 KiB.
-	OverlapLines            int           `json:"overlap_lines"`             // Positive context lines on either side; default 24.
-	MaximumOverlapBytes     int           `json:"maximum_overlap_bytes"`     // Positive overlap byte cap; default 8 KiB.
-	MaximumLeafUnits        int           `json:"maximum_leaf_units"`        // Positive common leaf census; default 128.
-	MergeFanIn              int           `json:"merge_fan_in"`              // At least two; default four children, no selective pruning.
-	MaximumCalls            int           `json:"maximum_calls"`             // Positive combined two-member call census; default 384.
-	MaximumRequestBytes     int           `json:"maximum_request_bytes"`     // Positive per-call HTTP bytes; default 4 MiB.
-	MaximumResponseBytes    int           `json:"maximum_response_bytes"`    // Positive raw response bytes; default 16 MiB.
-	MaximumObservationBytes int           `json:"maximum_observation_bytes"` // Positive structured output bytes; default 32 KiB.
-	MaximumSummaryBytes     int           `json:"maximum_summary_bytes"`     // Positive summary bytes; default 4096.
-	MaximumIssues           int           `json:"maximum_issues"`            // Positive new issues per call; default 32, overflow holds.
-	MaximumIssueBytes       int           `json:"maximum_issue_bytes"`       // Positive explanation bytes; default 4096.
-	MaximumOutputTokens     int           `json:"maximum_output_tokens"`     // Positive fixed allowance; default 32768.
-	MaximumOwnerDuration    time.Duration `json:"maximum_owner_duration"`    // Positive prospective ceiling; default 24 hours.
+	TokenizationProfiles    map[string]winnerMultipassTokenizationProfile `json:"tokenization_profiles"`     // Explicit runtime proofs, keyed by member; empty permits offline layout only.
+	MaximumArtifactBytes    int                                           `json:"maximum_artifact_bytes"`    // Positive per-file bytes; default 2 MiB.
+	MaximumBundleBytes      int                                           `json:"maximum_bundle_bytes"`      // Positive aggregate artifact bytes; default 32 MiB.
+	MaximumArtifacts        int                                           `json:"maximum_artifacts"`         // Positive artifact census; default 256.
+	SpanBytes               int                                           `json:"span_bytes"`                // Positive target, not token admission; default 64 KiB.
+	OverlapLines            int                                           `json:"overlap_lines"`             // Positive context lines on either side; default 24.
+	MaximumOverlapBytes     int                                           `json:"maximum_overlap_bytes"`     // Positive overlap byte cap; default 8 KiB.
+	MaximumLeafUnits        int                                           `json:"maximum_leaf_units"`        // Positive common leaf census; default 128.
+	MergeFanIn              int                                           `json:"merge_fan_in"`              // At least two; default four children, no selective pruning.
+	MaximumCalls            int                                           `json:"maximum_calls"`             // Positive combined two-member call census; default 384.
+	MaximumRequestBytes     int                                           `json:"maximum_request_bytes"`     // Positive per-call HTTP bytes; default 4 MiB.
+	MaximumResponseBytes    int                                           `json:"maximum_response_bytes"`    // Positive raw response bytes; default 16 MiB.
+	MaximumObservationBytes int                                           `json:"maximum_observation_bytes"` // Positive structured output bytes; default 32 KiB.
+	MaximumSummaryBytes     int                                           `json:"maximum_summary_bytes"`     // Positive summary bytes; default 4096.
+	MaximumIssues           int                                           `json:"maximum_issues"`            // Positive new issues per call; default 32, overflow holds.
+	MaximumIssueBytes       int                                           `json:"maximum_issue_bytes"`       // Positive explanation bytes; default 4096.
+	MaximumOutputTokens     int                                           `json:"maximum_output_tokens"`     // Positive fixed allowance; default 32768.
+	MaximumOwnerDuration    time.Duration                                 `json:"maximum_owner_duration"`    // Positive prospective ceiling; default 24 hours.
 }
 
 // Original output allowance is preserved; all new aggregate bounds are explicit.
 func defaultWinnerMultipassSettings() winnerMultipassSettings {
-	return winnerMultipassSettings{MaximumArtifactBytes: 2 * 1024 * 1024, MaximumBundleBytes: 32 * 1024 * 1024, MaximumArtifacts: 256,
+	return winnerMultipassSettings{TokenizationProfiles: map[string]winnerMultipassTokenizationProfile{}, MaximumArtifactBytes: 2 * 1024 * 1024, MaximumBundleBytes: 32 * 1024 * 1024, MaximumArtifacts: 256,
 		SpanBytes: 64 * 1024, OverlapLines: 24, MaximumOverlapBytes: 8 * 1024, MaximumLeafUnits: 128, MergeFanIn: 4, MaximumCalls: 384,
 		MaximumRequestBytes: 4 * 1024 * 1024, MaximumResponseBytes: 16 * 1024 * 1024, MaximumObservationBytes: 32 * 1024,
 		MaximumSummaryBytes: 4096, MaximumIssues: 32, MaximumIssueBytes: 4096, MaximumOutputTokens: 32768, MaximumOwnerDuration: 24 * time.Hour}
@@ -130,6 +131,13 @@ type winnerMultipassCall struct {
 	Parents []string         `json:"parents"`
 }
 
+// Contiguous coverage atoms may be packed differently for each tokenizer before
+// the owner plan freezes. Every atom appears exactly once in each member's scans.
+type winnerMultipassScanGroup struct {
+	Member  string   `json:"member"`
+	UnitIds []string `json:"unit_ids"`
+}
+
 // The plan is a self-contained coverage ledger, not a reviewer qualification.
 type winnerMultipassPlan struct {
 	Version      string                            `json:"version"`
@@ -139,6 +147,7 @@ type winnerMultipassPlan struct {
 	BundleSha256 string                            `json:"bundle_sha256"`
 	Artifacts    []winnerMultipassArtifactIdentity `json:"artifacts"`
 	Units        []winnerMultipassUnit             `json:"units"`
+	ScanGroups   []winnerMultipassScanGroup        `json:"scan_groups"`
 	Calls        []winnerMultipassCall             `json:"calls"`
 }
 
@@ -284,17 +293,48 @@ func prepareWinnerMultipass(bundle winnerMultipassBundle, owner winnerMultipassO
 			}
 		}
 	}
+	groups := []winnerMultipassScanGroup{}
 	for _, member := range provider.Members {
-		parents := []string{}
 		for _, unit := range plan.Units {
-			call := winnerMultipassCall{Id: member.Name + "-" + unit.Id, Member: member, Stage: "scan", UnitIds: []string{unit.Id}, Parents: []string{}}
+			groups = append(groups, winnerMultipassScanGroup{Member: member.Name, UnitIds: []string{unit.Id}})
+		}
+	}
+	if err := setWinnerMultipassScanGroups(plan, groups); err != nil {
+		return nil, err
+	}
+	return plan, nil
+}
+
+// Rebuild the fixed synthesis DAG from a complete ordered grouping. This pure
+// operation is allowed only during preparation, never after a durable call claim.
+func setWinnerMultipassScanGroups(plan *winnerMultipassPlan, groups []winnerMultipassScanGroup) error {
+	plan.Calls = []winnerMultipassCall{}
+	wantIds := []string{}
+	for _, unit := range plan.Units {
+		wantIds = append(wantIds, unit.Id)
+	}
+	groupIndex := 0
+	for _, member := range plan.Provider.Members {
+		parents := []string{}
+		gotIds := []string{}
+		for groupIndex < len(groups) && groups[groupIndex].Member == member.Name {
+			group := groups[groupIndex]
+			if len(group.UnitIds) == 0 {
+				return errors.New("multi-pass scan grouping contains an empty leaf")
+			}
+			gotIds = append(gotIds, group.UnitIds...)
+			call := winnerMultipassCall{Id: fmt.Sprintf("%s-scan-%04d", member.Name, len(parents)+1), Member: member, Stage: "scan", UnitIds: append([]string{}, group.UnitIds...), Parents: []string{}}
 			plan.Calls = append(plan.Calls, call)
 			parents = append(parents, call.Id)
+			groupIndex++
 		}
-		for level := 1; len(parents) > settings.MergeFanIn; level++ {
+		if !slices.Equal(gotIds, wantIds) {
+			return errors.New("multi-pass member scan grouping omits, duplicates or reorders complete coverage")
+		}
+		for level := 1; len(parents) > plan.Settings.MergeFanIn; level++ {
 			next := []string{}
-			for start := 0; start < len(parents); start += settings.MergeFanIn {
-				end := min(start+settings.MergeFanIn, len(parents))
+			for start := 0; start < len(parents); start += plan.Settings.MergeFanIn {
+				end := min(start+plan.Settings.MergeFanIn, len(parents))
 				call := winnerMultipassCall{Id: fmt.Sprintf("%s-merge-%03d-%04d", member.Name, level, len(next)+1), Member: member, Stage: "merge",
 					UnitIds: []string{}, Parents: append([]string{}, parents[start:end]...)}
 				plan.Calls = append(plan.Calls, call)
@@ -304,10 +344,11 @@ func prepareWinnerMultipass(bundle winnerMultipassBundle, owner winnerMultipassO
 		}
 		plan.Calls = append(plan.Calls, winnerMultipassCall{Id: member.Name + "-final", Member: member, Stage: "final", UnitIds: []string{}, Parents: parents})
 	}
-	if len(plan.Calls) > settings.MaximumCalls {
-		return nil, errors.New("complete two-member plan exceeds total call bound")
+	if groupIndex != len(groups) || len(plan.Calls) > plan.Settings.MaximumCalls {
+		return errors.New("complete two-member plan exceeds total call bound or has extra scan groups")
 	}
-	return plan, nil
+	plan.ScanGroups = append([]winnerMultipassScanGroup{}, groups...)
+	return nil
 }
 
 // Recompute rather than trust a hand-edited ledger, call order, clock or digest.
@@ -317,6 +358,9 @@ func validateWinnerMultipassPlan(plan *winnerMultipassPlan, bundle winnerMultipa
 	}
 	want, err := prepareWinnerMultipass(bundle, plan.Owner, plan.Settings, plan.Provider)
 	if err != nil {
+		return err
+	}
+	if err := setWinnerMultipassScanGroups(want, plan.ScanGroups); err != nil {
 		return err
 	}
 	actualBytes, err := json.Marshal(plan)

@@ -58,14 +58,40 @@ type winnerMultipassAdmission struct {
 	NoTruncation            bool   `json:"no_truncation"`
 }
 
+// No guessed context length or tokenizer revision is a runtime admission pin.
+// The handoff's release qualification authenticates these retained proof hashes.
+type winnerMultipassTokenizationProfile struct {
+	Member                  winnerSnowMember `json:"member"`
+	MaximumContextTokens    int              `json:"maximum_context_tokens"`
+	TokenizerContractSha256 string           `json:"tokenizer_contract_sha256"`
+	RuntimeEvidenceSha256   string           `json:"runtime_evidence_sha256"`
+}
+
+// Over-limit counting is useful during prospective packing; identity validation
+// remains mandatory even when a candidate packing does not fit.
+func validateWinnerMultipassTokenization(plan *winnerMultipassPlan, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission) error {
+	if plan == nil {
+		return errors.New("multi-pass tokenization has no owner plan")
+	}
+	profile, found := plan.Settings.TokenizationProfiles[call.Member.Name]
+	if !found || profile.Member != call.Member || !validSha256(profile.RuntimeEvidenceSha256) || !validSha256(profile.TokenizerContractSha256) ||
+		admission.CallId != call.Id || admission.RequestSha256 != winnerMultipassSha256(payload) || admission.Model != call.Member.Model ||
+		admission.Revision != call.Member.Revision || admission.TokenizerContractSha256 != profile.TokenizerContractSha256 || !validSha256(admission.RenderedPromptSha256) ||
+		!validSha256(admission.TokenizerRequestSha256) || !validSha256(admission.TokenizerResponseSha256) || !admission.NoTruncation ||
+		admission.MaximumContextTokens != profile.MaximumContextTokens || admission.OutputTokens != plan.Settings.MaximumOutputTokens || admission.InputTokens <= 0 ||
+		admission.MaximumContextTokens <= admission.OutputTokens || len(payload) > plan.Settings.MaximumRequestBytes {
+		return errors.New("multi-pass tokenizer count lacks exact pinned runtime/render/request identity")
+	}
+	return nil
+}
+
 // Exact envelope equality prevents a count from another prompt, model, output
 // allowance or tokenizer contract from admitting this inference.
 func validateWinnerMultipassAdmission(plan *winnerMultipassPlan, call winnerMultipassCall, payload []byte, admission winnerMultipassAdmission) error {
-	if plan == nil || admission.CallId != call.Id || admission.RequestSha256 != winnerMultipassSha256(payload) || admission.Model != call.Member.Model ||
-		admission.Revision != call.Member.Revision || !validSha256(admission.TokenizerContractSha256) || !validSha256(admission.RenderedPromptSha256) ||
-		!validSha256(admission.TokenizerRequestSha256) || !validSha256(admission.TokenizerResponseSha256) || !admission.NoTruncation ||
-		admission.OutputTokens != plan.Settings.MaximumOutputTokens || admission.InputTokens <= 0 || admission.MaximumContextTokens <= admission.OutputTokens ||
-		admission.InputTokens > admission.MaximumContextTokens-admission.OutputTokens || len(payload) > plan.Settings.MaximumRequestBytes {
+	if err := validateWinnerMultipassTokenization(plan, call, payload, admission); err != nil {
+		return err
+	}
+	if admission.InputTokens > admission.MaximumContextTokens-admission.OutputTokens {
 		return errors.New("multi-pass call lacks exact untruncated runtime-token admission")
 	}
 	return nil
@@ -176,23 +202,28 @@ func buildWinnerMultipassCall(plan *winnerMultipassPlan, bundle winnerMultipassB
 	if err := validateWinnerMultipassPlan(plan, bundle); err != nil {
 		return nil, err
 	}
-	artifacts, err := winnerMultipassArtifacts(bundle, plan.Settings)
-	if err != nil {
-		return nil, err
-	}
 	callIndex := slices.IndexFunc(plan.Calls, func(call winnerMultipassCall) bool { return call.Id == callId })
 	if callIndex < 0 {
 		return nil, errors.New("unplanned multi-pass call")
 	}
 	call := plan.Calls[callIndex]
+	return winnerMultipassCallPayload(plan, bundle, call, completed)
+}
+
+// The prospective packer may render candidate scan groupings before they become
+// planned calls. This helper never executes them or produces admission authority.
+func winnerMultipassCallPayload(plan *winnerMultipassPlan, bundle winnerMultipassBundle, call winnerMultipassCall, completed map[string]winnerMultipassCallEvidence) ([]byte, error) {
+	artifacts, err := winnerMultipassArtifacts(bundle, plan.Settings)
+	if err != nil {
+		return nil, err
+	}
 	issues, err := winnerMultipassInheritedIssues(plan, call, completed)
 	if err != nil {
 		return nil, err
 	}
 	type fragment struct {
-		Span         winnerMultipassSpan `json:"span"`
-		Content      string              `json:"content"`
-		RelatedPatch string              `json:"related_patch"`
+		Span    winnerMultipassSpan `json:"span"`
+		Content string              `json:"content"`
 	}
 	type predecessor struct {
 		CallId         string `json:"call_id"`
@@ -200,6 +231,7 @@ func buildWinnerMultipassCall(plan *winnerMultipassPlan, bundle winnerMultipassB
 		OriginalOutput string `json:"original_output"`
 	}
 	fragments := []fragment{}
+	relatedPatch := map[string]string{}
 	sections := winnerMultipassPatchSections(string(bundle.Request.Packet.Patch))
 	for _, unit := range plan.Units {
 		if !slices.Contains(call.UnitIds, unit.Id) {
@@ -211,7 +243,10 @@ func buildWinnerMultipassCall(plan *winnerMultipassPlan, bundle winnerMultipassB
 				return nil, errors.New("planned artifact is missing")
 			}
 			artifact := artifacts[index]
-			fragments = append(fragments, fragment{Span: span, Content: artifact.Content[span.ContextStart:span.ContextEnd], RelatedPatch: sections[artifact.Path]})
+			fragments = append(fragments, fragment{Span: span, Content: artifact.Content[span.ContextStart:span.ContextEnd]})
+			if section, found := sections[artifact.Path]; found {
+				relatedPatch[artifact.Path] = section
+			}
 		}
 	}
 	predecessors := []predecessor{}
@@ -239,11 +274,12 @@ func buildWinnerMultipassCall(plan *winnerMultipassPlan, bundle winnerMultipassB
 		Metadata          winnerReviewBrokerRequest         `json:"metadata_only_not_source_files"`
 		Ledger            []winnerMultipassArtifactIdentity `json:"complete_artifact_ledger_not_visible_source"`
 		Fragments         []fragment                        `json:"visible_exact_fragments"`
+		RelatedPatch      map[string]string                 `json:"related_patch_sections"`
 		Predecessors      []predecessor                     `json:"predecessors"`
 		Issues            []winnerMultipassAttributedIssue  `json:"inherited_issues"`
 		UnresolvedContext []string                          `json:"unresolved_context"`
 	}{Version: plan.Version, PlanSha256: winnerMultipassSha256(planBytes), Call: call, Metadata: metadata, Ledger: plan.Artifacts,
-		Fragments: fragments, Predecessors: predecessors, Issues: issues, UnresolvedContext: bundle.UnresolvedContext})
+		Fragments: fragments, RelatedPatch: relatedPatch, Predecessors: predecessors, Issues: issues, UnresolvedContext: bundle.UnresolvedContext})
 	if err != nil {
 		return nil, err
 	}

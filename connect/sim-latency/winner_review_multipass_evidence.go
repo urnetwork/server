@@ -103,7 +103,7 @@ func validateWinnerMultipassCompletedPrefix(plan *winnerMultipassPlan, bundle wi
 	previousCompletion := plan.Owner.StartedAt
 	for index, observation := range evidence.Calls {
 		call := plan.Calls[index]
-		if observation.CallId != call.Id || observation.StartedAt.Before(previousCompletion) || observation.CompletedAt.Before(observation.StartedAt) || observation.CompletedAt.After(plan.Owner.Deadline) {
+		if observation.CallId != call.Id || observation.StartedAt.Before(previousCompletion) || observation.CompletedAt.Before(observation.StartedAt) || !observation.CompletedAt.Before(plan.Owner.Deadline) {
 			return nil, fmt.Errorf("multi-pass call %d is reordered, concurrent, late or outside its original owner clock", index+1)
 		}
 		payload, err := buildWinnerMultipassCall(plan, bundle, call.Id, completed)
