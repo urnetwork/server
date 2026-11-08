@@ -51,20 +51,42 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			baselineMissing := []int{676}
 			appendOnlyMissing := []int{676}
 			// Staging approvals, sealed evaluation custody, holds/incidents,
-			// source abandonment and job reevaluation share the baseline's
-			// append-only guard. Its rename must report every published
-			// dependent artifact, while historical heads must not report
-			// dependencies introduced later.
-			for _, dependencyVersion := range []int{721, 842, 843, 845, 922} {
-				if version >= dependencyVersion {
-					appendOnlyMissing = append(appendOnlyMissing, dependencyVersion)
+			// source abandonment, job reevaluation, the finalization hold, the
+			// post-close recovery and the competition custody that the
+			// executor, intake-first and review handoff migrations carry in
+			// turn share the baseline's append-only guard. Its rename must
+			// report every published dependent artifact still active at the
+			// head, the successor that carries a retired one's custody in its
+			// place, while historical heads must not report dependencies
+			// introduced later.
+			type dependency struct{ version, retiredAt int }
+			active := func(dependencies []dependency) []int {
+				versions := []int{}
+				for _, dependency := range dependencies {
+					if dependency.version <= version && (dependency.retiredAt == 0 || version < dependency.retiredAt) {
+						versions = append(versions, dependency.version)
+					}
 				}
+				return versions
 			}
+			executor := server.CompetitionDistributedEvaluationMigrationVersion()
+			intake := server.CompetitionIntakeFirstMigrationVersion()
+			handoff := server.CompetitionReviewHandoffMigrationVersion()
+			postClose := server.CompetitionReevaluationPostCloseMigrationVersion()
+			appendOnlyMissing = append(appendOnlyMissing, active([]dependency{
+				{721, 0}, {842, 0}, {843, 0}, {845, 0},
+				{server.CompetitionJobReevaluationMigrationVersion(), postClose},
+				{server.CompetitionFinalizationHoldMigrationVersion(), 0},
+				{executor, intake}, {postClose, 0}, {intake, handoff}, {handoff, 0},
+			})...)
 			var reviewMissing []int
 			if version == 677 {
 				reviewMissing = []int{677}
 			} else if version >= 678 {
+				// the executor, intake-first and review handoff custody carry
+				// the baseline guard in turn
 				baselineMissing = append(baselineMissing, 678)
+				baselineMissing = append(baselineMissing, active([]dependency{{executor, intake}, {intake, handoff}, {handoff, 0}})...)
 				reviewMissing = []int{678}
 			}
 			for _, fault := range []struct {

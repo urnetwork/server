@@ -49,14 +49,15 @@ func TestMigrationsSourceGraphHistoricalAuthorityCustody(t *testing.T) {
 // Current-head faults belong to its explicitly registered successors.
 const competitionSourceGuardsHeadOwner = "trusted instrument overlay with two-member review, identity and retained source custody@v900"
 
-// Validate the registered 900-to-benefit-to-intake transfers before selecting
-// the current owner. This is the known lineage, never a generic waiver for an
-// unknown successor or an expired predicate.
+// Validate the registered 900-to-benefit-to-intake-to-handoff transfers
+// before selecting the current owner. This is the known lineage, never a
+// generic waiver for an unknown successor or an expired predicate.
 func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	t.Helper()
 	benefitVersion := server.CompetitionProductionBenefitMigrationVersion()
 	intakeVersion := server.CompetitionIntakeFirstMigrationVersion()
-	if benefitVersion <= 900 || intakeVersion <= benefitVersion || server.MigrationCount() < intakeVersion {
+	handoffVersion := server.CompetitionReviewHandoffMigrationVersion()
+	if benefitVersion <= 900 || intakeVersion <= benefitVersion || handoffVersion <= intakeVersion || server.MigrationCount() < handoffVersion {
 		t.Fatal("source guard successors are not published in order")
 	}
 	for _, expected := range []struct {
@@ -66,14 +67,20 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	}{
 		{900, benefitVersion, "trusted instrument overlay with two-member review, identity and retained source custody"},
 		{benefitVersion, intakeVersion, "production-benefit eligibility with retained review and instrument custody"},
-		{intakeVersion, 0, "separate published-source intake and qualified grading custody"},
+		{intakeVersion, handoffVersion, "separate published-source intake and qualified grading custody"},
+		{handoffVersion, 0, "pending review handoff ledger with retained intake and winner-review custody"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("separate published-source intake and qualified grading custody@v%d", intakeVersion)
+	return fmt.Sprintf("pending review handoff ledger with retained intake and winner-review custody@v%d", handoffVersion)
+}
+
+// The intake-first owner, current from its version until the review handoff.
+func competitionSourceGuardsIntakeOwner() string {
+	return fmt.Sprintf("separate published-source intake and qualified grading custody@v%d", server.CompetitionIntakeFirstMigrationVersion())
 }
 
 // Before a registered transfer the old artifact remains required; at the
@@ -84,6 +91,7 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 	benefitVersion := server.CompetitionProductionBenefitMigrationVersion()
 	intakeVersion := server.CompetitionIntakeFirstMigrationVersion()
 	benefitOwner := fmt.Sprintf("production-benefit eligibility with retained review and instrument custody@v%d", benefitVersion)
+	intakeOwner := competitionSourceGuardsIntakeOwner()
 	for _, transfer := range []struct {
 		oldVersion  int
 		nextVersion int
@@ -91,7 +99,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		nextOwner   string
 	}{
 		{900, benefitVersion, competitionSourceGuardsHeadOwner, benefitOwner},
-		{benefitVersion, intakeVersion, benefitOwner, currentOwner},
+		{benefitVersion, intakeVersion, benefitOwner, intakeOwner},
+		{intakeVersion, server.CompetitionReviewHandoffMigrationVersion(), intakeOwner, currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -205,7 +214,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{897, 900, "two-member provider union review, identity and retained source custody@v897"},
 		{900, benefitVersion, competitionSourceGuardsHeadOwner},
 		{benefitVersion, intakeVersion, fmt.Sprintf("production-benefit eligibility with retained review and instrument custody@v%d", benefitVersion)},
-		{intakeVersion, 0, currentOwner},
+		{intakeVersion, server.CompetitionReviewHandoffMigrationVersion(), competitionSourceGuardsIntakeOwner()},
+		{server.CompetitionReviewHandoffMigrationVersion(), 0, currentOwner},
 	}
 	faults := []struct {
 		name string
