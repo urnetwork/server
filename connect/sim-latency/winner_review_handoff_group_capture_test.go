@@ -158,7 +158,7 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 				report.Qualified = false
 				report.Error = resultErr.Error()
 			}
-			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultWinnerHandoffCaptureSettings().ReceiptTimeout)
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), plan.Settings.Custody.ProtectionTimeout)
 			var err error
 			protectedReport, err = publishWinnerHandoffProtectedReport(cleanup, filepath.Join(config.OutputDirectory, "group-report.json"), defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, func(publicationErr error) ([]byte, error) {
 				if publicationErr != nil {
@@ -206,12 +206,14 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 			if err := storage.Consume(spool.PermanentDocumentsBytes + spool.CompactManifestBytes); err != nil {
 				return err
 			}
+			protectionCtx, cancel := context.WithTimeout(ctx, plan.Settings.Custody.ProtectionTimeout)
+			defer cancel()
 			for _, document := range []struct {
 				name  string
 				value any
 			}{{name: "frozen-group.json", value: frozen}, {name: "actual-reservation.json", value: proof}, {name: "group-plan.json", value: plan}, {name: "capture-permission.json", value: json.RawMessage(permission)}} {
 				content, _ := json.Marshal(document.value)
-				if _, err := retainWinnerHandoffDocument(ctx, document.name, content, defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, retain); err != nil {
+				if _, err := retainWinnerHandoffDocument(protectionCtx, document.name, content, defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, retain); err != nil {
 					return err
 				}
 			}
@@ -232,7 +234,9 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 			if err := syncWinnerHandoffSpoolDirectory(claimsDirectory); err != nil {
 				return currentQgQualificationPin{}, err
 			}
-			if _, err := retainWinnerHandoffDocument(ctx, "native-qualification-claim.json", content, int(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), plan.Owner.Deadline, retain); err != nil {
+			protectionCtx, cancel := context.WithTimeout(ctx, plan.Settings.Custody.ProtectionTimeout)
+			defer cancel()
+			if _, err := retainWinnerHandoffDocument(protectionCtx, "native-qualification-claim.json", content, int(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), plan.Owner.Deadline, retain); err != nil {
 				return currentQgQualificationPin{}, err
 			}
 			return currentQgQualificationPin{Path: path, Sha256: winnerMultipassSha256(content)}, nil
@@ -254,37 +258,42 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 			physical, receipt, independentClaim, err = createWinnerMultipassPhysicalAuthentication(input, output, diagnostics, canceled, profile, config.Release)
 			return receipt, err
 		},
-		Retain: func(retentionCtx context.Context, capture winnerMultipassQualificationCapture) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
+		Retain: func(retentionCtx context.Context, capture winnerMultipassQualificationCapture) (currentQgQualificationPin, error) {
 			content, err := json.Marshal(capture)
 			if err != nil || len(content) > winnerMultipassSpoolCaptureBytes {
-				return nil, errors.New("original qualification capture exceeds separately admitted descriptor-record bound")
+				return currentQgQualificationPin{}, errors.New("original qualification capture exceeds separately admitted descriptor-record bound")
 			}
 			if capture.AuthenticationError != "" || capture.Containment == nil || physical == nil {
 				original, failure := retainWinnerHandoffGroupFailure(retentionCtx, config.OutputDirectory, frozen.Plan.Sha256, capture, plan.Owner.Deadline, retain, read)
 				if original.Retention.VersionId != "" {
 					failures = append(failures, original)
 				}
-				return nil, failure
+				return currentQgQualificationPin{}, failure
 			}
 			var envelope winnerMultipassBrokerEnvelope
 			if decodeStrictJSONBytes(capture.Input, &envelope, "original qualification input") != nil {
-				return nil, errors.New("qualification original envelope cannot be decoded")
+				return currentQgQualificationPin{}, errors.New("qualification original envelope cannot be decoded")
 			}
 			releaseBytes, _ := json.Marshal(config.Release)
 			binding := winnerHandoffSpoolBinding{RunId: plan.Owner.Id, InvocationPosition: capture.Invocation.Position, PlanSha256: frozen.Plan.Sha256, BundleSha256: envelope.BundleSha256, ReleaseSha256: winnerMultipassSha256(releaseBytes), NativeDriverSha256: config.Release.NativeDriver.Sha256, CapacitySha256: capacitySha}
 			custody, err := protectWinnerHandoffSpoolInvocation(retentionCtx, spoolDirectory, capture.Invocation.Phase, binding, envelope, capture.Containment, physical, independentClaim, content, config.Release, retain, read)
+			pin := currentQgQualificationPin{Path: custody.SpoolReferencePath, Sha256: custody.SpoolReferenceSha256}
 			if err != nil {
-				return nil, err
+				return pin, winnerHandoffGroupSpoolFailure(pin, err)
 			}
 			if err := storage.Restore(); err != nil {
-				return nil, err
+				return pin, winnerHandoffGroupSpoolFailure(pin, err)
 			}
-			pin := currentQgQualificationPin{Path: custody.SpoolReferencePath, Sha256: custody.SpoolReferenceSha256}
+			// This phase ends at protected custody and payload retirement. The core
+			// separately owns a fresh bounded post-commit replay context below.
+			return pin, nil
+		},
+		Resolve: func(replayCtx context.Context, pin currentQgQualificationPin) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
 			compact, err := readCurrentQgQualificationPin(pin, winnerMultipassSpoolManifestBytes, true)
 			if err != nil {
 				return nil, err
 			}
-			return resolve(retentionCtx, pin, compact)
+			return resolve(replayCtx, pin, compact)
 		},
 		RetainCase: func(position int, evidence winnerMultipassEvidence) (currentQgQualificationPin, error) {
 			content, err := json.Marshal(evidence)
@@ -298,7 +307,9 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 			if err := writePrivateReviewFile(path, content); err != nil {
 				return currentQgQualificationPin{}, err
 			}
-			if _, err := retainWinnerHandoffDocument(ctx, "case-evidence.json", content, defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, retain); err != nil {
+			protectionCtx, cancel := context.WithTimeout(ctx, plan.Settings.Custody.ProtectionTimeout)
+			defer cancel()
+			if _, err := retainWinnerHandoffDocument(protectionCtx, "case-evidence.json", content, defaultWinnerHandoffCaptureSettings().MaximumDocumentBytes, plan.Owner.Deadline, retain); err != nil {
 				return currentQgQualificationPin{}, err
 			}
 			return currentQgQualificationPin{Path: path, Sha256: winnerMultipassSha256(content)}, nil
@@ -308,4 +319,13 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 	defer cancel()
 	report, resultErr = executeWinnerMultipassSpoolQualification(bounded, plan, frozen.Plan, config.Capacity, config.Spool, hooks)
 	return resultErr
+}
+
+// A committed reference remains audit evidence if payload retirement or local
+// reservation restoration fails. It never grants replay success or a new draw.
+func winnerHandoffGroupSpoolFailure(pin currentQgQualificationPin, cause error) error {
+	if !filepath.IsAbs(pin.Path) || filepath.Clean(pin.Path) != pin.Path || !validSha256(pin.Sha256) {
+		return cause
+	}
+	return &winnerMultipassQualificationSpoolRetentionError{Failure: pin, Cause: cause}
 }
