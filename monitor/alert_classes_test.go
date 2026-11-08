@@ -70,6 +70,8 @@ func harvestAlertClasses(t *testing.T, sourceTexts ...string) sourceAlertClasses
 		"sshAdmissionRequest": true, "ticketIdentity": true, "warpctlLogQueryError": true,
 		// Bounded observation-error metadata; its integer class is never an alert class.
 		"mimirBalancePreparedDiagnostic": true,
+		// copies the class of an alert that already has one
+		"pager.Page": true,
 	}
 	// observation error classes, not alert classes
 	deniedFunctions := map[string]bool{"warpctlLogDiagnosticClass": true}
@@ -485,7 +487,7 @@ func TestEveryAlertClassIsClassified(t *testing.T) {
 		// Silent availability and notifier lookup copy existing finding
 		// identities; their literal producers above still define every class.
 		"signal.go Run":                                     nil,
-		"alert_slack.go observeWithLock":                    nil,
+		"alert_slack.go observeIncidents":                   nil,
 		"schema_readiness.go probeSchemaUnavailableFinding": nil,
 		"signal_derived_locations.go check":                 nil,
 		"signal_egress_site_pool.go check":                  nil,

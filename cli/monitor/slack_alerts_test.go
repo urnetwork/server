@@ -141,7 +141,7 @@ func TestSlackNotifierDrainReleasesSignalsBeforeItWaits(t *testing.T) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
-		drainSlackNotifier(func() { close(stopped) }, notifier.Close, 10*time.Minute)
+		drainNotifier(func() { close(stopped) }, notifier.Close, 10*time.Minute)
 	}()
 	select {
 	case <-stopped:

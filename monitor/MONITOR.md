@@ -100,8 +100,10 @@ host, redis-cli on the redis hosts, top/ss/dmesg/journalctl/docker anywhere.
 ssh authentication is delegated to `~/.ssh/config` (host → IdentityFile),
 assumed set up on whatever runs the monitor; no key material lives in
 `vault/<env>/monitor.yml` — it carries only the login user, host roles,
-operator-disabled state, overlay IPs, redis ports, and the optional Slack
-alert webhook (`alerts.slack_webhook_url`, a credential; §3.6).
+operator-disabled state, overlay IPs, redis ports, the optional Slack
+alert webhook (`alerts.slack_webhook_url`, a credential; §3.6), and the
+optional pager event endpoint (`alerts.pager_webhook_url`, a credential;
+§3.6).
 
 **ssh-exec is the universal transport.** Every command in SIGNALS.md is
 written as a run-on-the-host command, and that is exactly how the monitor
@@ -451,6 +453,37 @@ the URL), once per run of failures. A changed webhook makes a running posting
 watcher's settings stale (§1.6 settings freshness). A watcher that never posts
 leaves the webhook out of its compared settings, so a rotation does not make
 it stale.
+
+**Pager notifier** (`alert_pager.go`; the sidecar design's §19.8, D-OPS-9 and
+owner decision 143). With `-pager-alerts`, off by default, the continuous
+handler gives every gated execution, empty ones included, to a second
+notifier first, so a stdout or Slack failure cannot hold a page back. It keeps
+the Slack notifier's incident rule on its own state, and pages only an
+incident at PAGE whose class has a row in `page_classes.go`, §19.8's page
+classes: a set at risk or a cluster refusing writes, the Postgres primary
+down, 2% of a 30-day budget burned in an hour, P0 past the write budget's
+refill, and a file-cluster key held over a minute. Every other PAGE stays on
+Slack, and a WARN never pages. A page triggers when its incident reaches PAGE
+and resolves when the incident clears, so a run that failed or could not
+observe ends no page. A page leaves the site, so it carries its class, the
+time, the environment, an opaque dedup key (a hash of the environment and the
+incident identity) and its row's fixed condition and action, and never a
+target, symptom or evidence: those stay on stdout and Slack. Handle never
+waits on the network. One sender (`pager.RetrySink`) keeps one slot per key,
+so a long outage or a flapping incident cannot grow it past the open
+incidents, and retries each event until the service takes it, backing off
+from 1 s to 30 s; while it cannot, a `pager-sink-failing` WARN stands on
+Slack, and it clears once the service takes a page again. A restarted
+watcher re-raises its open incidents under the same keys, which the service
+deduplicates. Acknowledgment and the second person's page after 30 minutes
+belong to the pager service (plan-OPS-pager-service); `pager.FakeSink` models
+them for FS-50's tests. The endpoint is vault `monitor.yml`
+`alerts.pager_webhook_url`, a credential handled as the Slack webhook is, and
+compared in a paging watcher's settings. Until the service is chosen and the
+sidecar design's §2.8 lists it, the sink takes only a loopback endpoint: any
+other leaves the watcher unable to page, which it says on stderr and as a
+standing Slack WARN. At exit the pager drains for up to 15 s before Slack
+does, since its warn travels through Slack.
 
 Self-health: the monitor distinguishes three states per target — *healthy
 observation*, *broken observation* (ticket about the target), and *cannot
