@@ -96,6 +96,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /competition/v2/source/([^/]+)/readiness": routeAccessPublic,
 	"POST /competition/v2/holds":                    routeAccessPublic,
 	"POST /competition/v2/source-handoffs":          routeAccessPublic,
+	"POST /competition/v2/review-handoff-imports":   routeAccessPublic,
 	"POST /competition/v2/rounds/([^/]+)/incidents": routeAccessPublic,
 	"GET /stats/last-90":                            routeAccessPublic,
 	"GET /stats/providers-map":                      routeAccessPublic,

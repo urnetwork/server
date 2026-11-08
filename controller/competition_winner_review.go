@@ -99,7 +99,7 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 	if state.ApprovedReviewId != nil && state.ApprovedReview != nil {
 		if checkpoint == nil || checkpoint.JobId != *decision.SelectedJobId || checkpoint.RoundId != snapshot.Round.RoundId ||
 			state.ApprovedReview.Request.ExpectedDecisionSha256 != checkpoint.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != checkpoint.RewardRevision ||
-			state.ApprovedReview.CreatedAt.Before(checkpoint.StartedAt) || state.ApprovedReview.CreatedAt.After(checkpoint.Deadline) {
+			!model.CompetitionReviewWithinCheckpoint(state.ApprovedReview, checkpoint) {
 			return block("winner_review_identity_conflict", ErrConflict)
 		}
 		if snapshot.Round.Epoch >= 6 {
@@ -131,6 +131,9 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 			transition = stored
 		}
 		return transition, "winner_review_blocked", ErrWinnerReviewTimedOut, true
+	}
+	if checkpoint.HandoffId != "" {
+		return block("multipass_pending_explicit_operator_review", ErrWinnerReviewPending)
 	}
 	driver, ok := self.Driver.(competitionSupervisorWinnerReviewDriver)
 	if !ok {
@@ -261,7 +264,7 @@ func validateWinnerReviewSubmissionInTx(ctx context.Context, tx server.PgTx, res
 		return err
 	}
 	checkpoint := transition.WinnerReview
-	if checkpoint == nil || checkpoint.RoundId != result.Seal.RoundId || checkpoint.JobId != request.JobId || checkpoint.RewardRevision != request.ExpectedRevision || checkpoint.RewardDecisionSha256 != request.ExpectedDecisionSha256 || now.Before(checkpoint.StartedAt) || !now.Before(checkpoint.Deadline) {
+	if checkpoint == nil || checkpoint.HandoffId != request.HandoffId || checkpoint.RoundId != result.Seal.RoundId || checkpoint.JobId != request.JobId || checkpoint.RewardRevision != request.ExpectedRevision || checkpoint.RewardDecisionSha256 != request.ExpectedDecisionSha256 || now.Before(checkpoint.StartedAt) || !now.Before(checkpoint.Deadline) {
 		return ErrWinnerReviewTimedOut
 	}
 	return nil
@@ -314,7 +317,7 @@ func validateWinnerSourceInTx(ctx context.Context, tx server.PgTx, settings *Set
 		return err
 	}
 	if transition.WinnerReview == nil || *transition.WinnerReview != *intent.WinnerReview ||
-		state.ApprovedReview.CreatedAt.Before(intent.WinnerReview.StartedAt) || state.ApprovedReview.CreatedAt.After(intent.WinnerReview.Deadline) ||
+		!model.CompetitionReviewWithinCheckpoint(state.ApprovedReview, intent.WinnerReview) ||
 		state.ApprovedReview.Request.ExpectedDecisionSha256 != intent.WinnerReview.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != intent.WinnerReview.RewardRevision ||
 		intent.BuildReadyAt.IsZero() || intent.BuildReadyAt.After(intent.PreparedAt) {
 		return ErrConflict
