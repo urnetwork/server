@@ -258,13 +258,11 @@ func captureWinnerHandoffGroup(ctx context.Context, config winnerHandoffGroupCon
 				return nil, errors.New("original qualification capture exceeds separately admitted descriptor-record bound")
 			}
 			if capture.AuthenticationError != "" || capture.Containment == nil || physical == nil {
-				name := fmt.Sprintf("failed-capture-%06d.json", capture.Invocation.Position)
-				writeErr := writePrivateReviewFile(filepath.Join(config.OutputDirectory, name), content)
-				original, retainErr := retainWinnerHandoffDocument(retentionCtx, name, content, winnerMultipassSpoolCaptureBytes, plan.Owner.Deadline, retain)
-				if retainErr == nil {
+				original, failure := retainWinnerHandoffGroupFailure(retentionCtx, config.OutputDirectory, frozen.Plan.Sha256, capture, plan.Owner.Deadline, retain, read)
+				if original.Retention.VersionId != "" {
 					failures = append(failures, original)
 				}
-				return nil, errors.Join(errors.New("failed physical capture retained without cleanup or retry"), writeErr, retainErr)
+				return nil, failure
 			}
 			var envelope winnerMultipassBrokerEnvelope
 			if decodeStrictJSONBytes(capture.Input, &envelope, "original qualification input") != nil {
