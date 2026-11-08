@@ -20,6 +20,12 @@ import (
 // The migrations MG0 adds to a build that links it.
 const sidecarMg0MigrationCount = 5
 
+// The migrations MG1 adds to a build that links it.
+const sidecarMg1MigrationCount = 6
+
+// Every pending group's migrations, which a build with the tag appends in order.
+const sidecarPendingMigrationCount = sidecarMg0MigrationCount + sidecarMg1MigrationCount
+
 func TestSidecarPendingRunsOnlyInLocalCanaryOrTests(t *testing.T) {
 	for _, c := range []struct {
 		env        string
@@ -76,7 +82,7 @@ func sidecarRunProbe(t *testing.T, binary string, env string) (string, string, e
 }
 
 // Both build tags compile, a release build links main's migrations whatever its
-// env, a build with the tag links MG0 at the slice's end, and a build with the
+// env, a build with the tag links the pending groups at the slice's end, and a build with the
 // tag refuses to start anywhere but local or canary (FS-54's first two cases).
 func TestSidecarPendingBuildTags(t *testing.T) {
 	dir := t.TempDir()
@@ -117,7 +123,7 @@ func TestSidecarPendingBuildTags(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pending build, WARP_ENV %q: %s\n%s", env, err, stderr)
 		}
-		if want := fmt.Sprintf("%d true", releaseCount+sidecarMg0MigrationCount); output != want {
+		if want := fmt.Sprintf("%d true", releaseCount+sidecarPendingMigrationCount); output != want {
 			t.Fatalf("pending build, WARP_ENV %q printed %q, want %q", env, output, want)
 		}
 	}

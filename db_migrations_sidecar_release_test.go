@@ -7,12 +7,15 @@ import (
 	"testing"
 )
 
-// MG0 stays pending until its own Gn-out. A release build links none of it, so
+// MG0 and MG1 stay pending until their own Gn-outs. A release build links none of it, so
 // no statement of the migrations slice names what the group creates. A Gn-out
 // that registers the group moves this check with it.
 func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 	if SidecarMg0Linked() {
 		t.Fatal("a release build links MG0")
+	}
+	if SidecarMg1Linked() {
+		t.Fatal("a release build links MG1")
 	}
 	if 0 < len(sidecarPendingMigrations()) {
 		t.Fatal("a release build has pending migrations")
@@ -27,7 +30,7 @@ func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 		case *CodeMigration:
 			sql = value.id
 		}
-		for _, name := range []string{"network_client_owner", "sidecar_mg0", "auth_code_api_key_id"} {
+		for _, name := range []string{"network_client_owner", "sidecar_mg0", "auth_code_api_key_id", "network_auth_key", "network_admin_event", "sidecar_mg1"} {
 			if strings.Contains(sql, name) {
 				t.Fatalf("migration %d names %s", index, name)
 			}

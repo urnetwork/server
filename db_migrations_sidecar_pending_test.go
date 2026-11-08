@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"errors"
+	"os"
 	"regexp"
 	"slices"
 	"strings"
@@ -13,13 +15,18 @@ import (
 
 // MG0 under the sidecar_pending build tag (§19.7, D-OPS-6).
 
-// The group ends the slice, the marker last, so main's migrations keep their
-// positions below it.
+// The pending groups end the slice, MG0 then MG1, each marker last in its group,
+// so main's migrations keep their positions below them.
 func TestSidecarMg0EndsTheMigrations(t *testing.T) {
-	group := sidecarMg0Migrations()
-	if len(group) != sidecarMg0MigrationCount {
-		t.Fatalf("MG0 holds %d migrations", len(group))
+	mg0 := sidecarMg0Migrations()
+	if len(mg0) != sidecarMg0MigrationCount {
+		t.Fatalf("MG0 holds %d migrations", len(mg0))
 	}
+	mg1 := sidecarMg1Migrations()
+	if len(mg1) != sidecarMg1MigrationCount {
+		t.Fatalf("MG1 holds %d migrations", len(mg1))
+	}
+	group := append(append([]any{}, mg0...), mg1...)
 	head := len(migrations) - len(group)
 	identities := make([]string, 0, len(group))
 	for _, migration := range group {
@@ -35,16 +42,19 @@ func TestSidecarMg0EndsTheMigrations(t *testing.T) {
 			t.Fatal(err)
 		}
 		if linked != identity {
-			t.Fatalf("migration %d is not MG0's entry %d", head+offset, offset)
+			t.Fatalf("migration %d is not the pending groups' entry %d", head+offset, offset)
 		}
 	}
-	if !SidecarMg0Linked() {
-		t.Fatal("a build with the tag does not report MG0 linked")
+	if !SidecarMg0Linked() || !SidecarMg1Linked() {
+		t.Fatal("a build with the tag does not report MG0 and MG1 linked")
 	}
-	if got := CodeMigrationVersion(sidecarMg0MigrationId); got != MigrationCount() {
-		t.Fatalf("the marker is at version %d of %d", got, MigrationCount())
+	if got := CodeMigrationVersion(sidecarMg0MigrationId); got != MigrationCount()-len(mg1) {
+		t.Fatalf("MG0's marker is at version %d of %d", got, MigrationCount())
 	}
-	// the initializer's alias sees the group, which an init-time append would escape
+	if got := CodeMigrationVersion(sidecarMg1MigrationId); got != MigrationCount() {
+		t.Fatalf("MG1's marker is at version %d of %d", got, MigrationCount())
+	}
+	// the initializer's alias sees the groups, which an init-time append would escape
 	if len(migrationCatalogMigrations) != len(migrations) {
 		t.Fatalf("the catalog sees %d migrations of %d", len(migrationCatalogMigrations), len(migrations))
 	}
@@ -136,7 +146,7 @@ func requireRunningReleaseShapes(t testing.TB, ctx context.Context) {
 func TestSidecarMg0RunsBesideTheRunningRelease(t *testing.T) {
 	(&TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		running := MigrationCount() - sidecarMg0MigrationCount
+		running := MigrationCount() - sidecarPendingMigrationCount
 		ApplyDbMigrationsUpTo(ctx, running)
 		requireRunningReleaseShapes(t, ctx)
 
@@ -224,5 +234,128 @@ func TestNetworkClientOwnerColumns(t *testing.T) {
 				t.Fatalf("a bare owner row is marked: %t %t", adminRefused, strictExp)
 			}
 		})
+	})
+}
+
+// CODESTYLE's migration rules for MG1: new tables and their indexes only.
+func TestSidecarMg1IsAdditive(t *testing.T) {
+	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (network_auth_key|network_admin_event)\b|CREATE INDEX (network_auth_key|network_admin_event)_\w+ ON (network_auth_key|network_admin_event)\b)`)
+	refused := regexp.MustCompile(`(?i)\b(DROP|ALTER|RENAME|NOT VALID|TRUNCATE|UPDATE|DELETE|transaction_timeout)\b`)
+	for index, migration := range sidecarMg1Migrations() {
+		switch value := migration.(type) {
+		case *SqlMigration:
+			if !statement.MatchString(value.sql) {
+				t.Errorf("entry %d is not an addition: %s", index, value.sql)
+			}
+			if refused.MatchString(value.sql) {
+				t.Errorf("entry %d changes what the running release uses: %s", index, value.sql)
+			}
+		case *CodeMigration:
+			if value.id != sidecarMg1MigrationId {
+				t.Fatalf("entry %d runs code %s", index, value.id)
+			}
+		default:
+			t.Fatalf("entry %d is a %T", index, migration)
+		}
+	}
+}
+
+// The metadata row each column of MG1's tables shows under (§2.8, I-18), with
+// words of that row's sees that name it. The full guard is TEST-M1-03's; this
+// keeps MG1's own columns from growing without a row in the meantime.
+var sidecarMg1ColumnRows = map[string][2]string{
+	"network_auth_key.auth_key_id":     {"api-11", "auth keys"},
+	"network_auth_key.network_id":      {"api-11", "auth keys"},
+	"network_auth_key.secret_sha256":   {"api-11", "hashed secret"},
+	"network_auth_key.creator_user_id": {"api-11", "creator"},
+	"network_auth_key.tag_ids":         {"api-11", "tags"},
+	"network_auth_key.create_time":     {"api-11", "auth keys"},
+	"network_auth_key.expire_time":     {"api-11", "expiry"},
+	"network_auth_key.max_uses":        {"api-11", "uses"},
+	"network_auth_key.use_count":       {"api-11", "uses"},
+	"network_auth_key.ephemeral":       {"api-11", "ephemeral"},
+	"network_auth_key.pre_approved":    {"api-11", "pre-approved"},
+
+	"network_admin_event.network_id":   {"api-8", "admin events"},
+	"network_admin_event.seq":          {"api-8", "per-network seq"},
+	"network_admin_event.event_time":   {"api-8", "admin events"},
+	"network_admin_event.actor_kind":   {"api-8", "actor"},
+	"network_admin_event.actor_id":     {"api-8", "actor"},
+	"network_admin_event.action":       {"api-8", "action"},
+	"network_admin_event.target_kind":  {"api-8", "target"},
+	"network_admin_event.target_id":    {"api-8", "target"},
+	"network_admin_event.result":       {"api-8", "result"},
+	"network_admin_event.request_id":   {"api-8", "request id"},
+	"network_admin_event.prev_sha256":  {"api-8", "hash chain"},
+	"network_admin_event.chain_sha256": {"api-8", "hash chain"},
+}
+
+// Each MG1 column maps to a row of §2.8's list whose store names its table and
+// whose sees says the mapped words, and each mapped column exists.
+func TestSidecarMg1ColumnsMapToMetadataRows(t *testing.T) {
+	listPath := "../sidecar/metadata_list.yml"
+	listBytes, err := os.ReadFile(listPath)
+	if errors.Is(err, os.ErrNotExist) {
+		t.Skipf("no sidecar checkout beside the server (%s)", listPath)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	// a row is its id line and the indented lines under it
+	rowText := func(rowId string) string {
+		lines := strings.Split(string(listBytes), "\n")
+		for i, line := range lines {
+			if line != rowId+":" {
+				continue
+			}
+			row := []string{}
+			for _, next := range lines[i+1:] {
+				if !strings.HasPrefix(next, "  ") {
+					break
+				}
+				row = append(row, next)
+			}
+			return strings.Join(row, "\n")
+		}
+		return ""
+	}
+
+	DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		columns := map[string]bool{}
+		MaintenanceDb(ctx, func(conn PgConn) {
+			result, err := conn.Query(ctx, `
+				SELECT table_name || '.' || column_name
+				FROM information_schema.columns
+				WHERE table_name IN ('network_auth_key', 'network_admin_event')
+			`)
+			WithPgResult(result, err, func() {
+				for result.Next() {
+					var column string
+					Raise(result.Scan(&column))
+					columns[column] = true
+				}
+			})
+		})
+		for column := range columns {
+			mapped, ok := sidecarMg1ColumnRows[column]
+			if !ok {
+				t.Errorf("%s maps to no row of §2.8's list", column)
+				continue
+			}
+			row := rowText(mapped[0])
+			table, _, _ := strings.Cut(column, ".")
+			if !strings.Contains(row, table) {
+				t.Errorf("%s: row %s does not store %s", column, mapped[0], table)
+			}
+			if !strings.Contains(row, mapped[1]) {
+				t.Errorf("%s: row %s does not say %q", column, mapped[0], mapped[1])
+			}
+		}
+		for column := range sidecarMg1ColumnRows {
+			if !columns[column] {
+				t.Errorf("%s is mapped but does not exist", column)
+			}
+		}
 	})
 }

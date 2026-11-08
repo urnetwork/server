@@ -23,7 +23,7 @@ func sidecarPendingMigrations() []any {
 	if !sidecarPendingAllowed(env, testing.Testing()) {
 		panic(fmt.Errorf("the sidecar_pending build tag links unregistered migrations and runs only in local, canary or tests, not WARP_ENV=%q", env))
 	}
-	return sidecarMg0Migrations()
+	return append(sidecarMg0Migrations(), sidecarMg1Migrations()...)
 }
 
 // MG0, §7's P0 (§19.7): the owner row that marks a client, and the columns that
@@ -82,5 +82,69 @@ func sidecarMg0Migrations() []any {
 
 		// the group's marker (SidecarMg0Linked); it changes nothing
 		newCodeMigration(sidecarMg0MigrationId, func(ctx context.Context) {}),
+	}
+}
+
+// MG1 (§19.7): what M1 first reads ungated. §7's auth keys and admin event log
+// are here; §5's identity tables, §7's admin_token_use, §18's lease and §20's
+// limit join the group in their own tasks' changes, each before the marker.
+func sidecarMg1Migrations() []any {
+	return []any{
+		// §7.8's auth keys (§2.8 api-11): the bearer ur-authkey-<id>-<secret> is
+		// stored as the SHA-256 of its secret, never in the clear. tag_ids holds
+		// the opaque ids of §7.9's tags, never names. A row goes when its key is
+		// revoked, or once it expires (the hourly account expiry), so it lives at
+		// most the 90 days a key may.
+		newSqlMigration(`
+			CREATE TABLE network_auth_key (
+				auth_key_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				secret_sha256 bytea NOT NULL,
+				creator_user_id uuid NOT NULL,
+				tag_ids bytea[] NOT NULL DEFAULT '{}',
+				create_time timestamp NOT NULL,
+				expire_time timestamp NOT NULL,
+				max_uses integer NOT NULL,
+				use_count integer NOT NULL DEFAULT 0,
+				ephemeral bool NOT NULL DEFAULT false,
+				pre_approved bool NOT NULL DEFAULT false,
+
+				PRIMARY KEY (auth_key_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_auth_key_network_id ON network_auth_key (network_id, auth_key_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_auth_key_expire_time ON network_auth_key (expire_time)
+		`),
+
+		// §7.11's admin event log (§2.8 api-8): one hash chain per network, seq
+		// and the chain assigned under a per-network lock, with opaque ids only
+		// and no client address. Kept 400 days by the taskworker's sweep.
+		newSqlMigration(`
+			CREATE TABLE network_admin_event (
+				network_id uuid NOT NULL,
+				seq bigint NOT NULL,
+				event_time timestamp NOT NULL,
+				actor_kind varchar(16) NOT NULL,
+				actor_id uuid NULL,
+				action varchar(64) NOT NULL,
+				target_kind varchar(16) NOT NULL,
+				target_id uuid NULL,
+				result varchar(32) NOT NULL,
+				request_id uuid NULL,
+				prev_sha256 bytea NOT NULL,
+				chain_sha256 bytea NOT NULL,
+
+				PRIMARY KEY (network_id, seq)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_admin_event_event_time ON network_admin_event (event_time)
+		`),
+
+		// the group's marker (SidecarMg1Linked); it changes nothing
+		newCodeMigration(sidecarMg1MigrationId, func(ctx context.Context) {}),
 	}
 }

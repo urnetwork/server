@@ -36,6 +36,20 @@ func SidecarMg0Linked() bool {
 	return sidecarMg0Linked()
 }
 
+// The code migration that ends MG1 and marks it linked.
+const sidecarMg1MigrationId = "sidecar_mg1"
+
+var sidecarMg1Linked = sync.OnceValue(func() bool {
+	return 0 < CodeMigrationVersion(sidecarMg1MigrationId)
+})
+
+// Whether this binary links MG1: §7's network_auth_key and network_admin_event,
+// and what M1's other tasks add to the group. Nothing may read or write its
+// tables while it is false.
+func SidecarMg1Linked() bool {
+	return sidecarMg1Linked()
+}
+
 // Whether a binary that links a pending group may run. A pending group's
 // versions are not final, so it must never reach a database that outlives the
 // next merge. An env of "" is a binary with no WARP_ENV. Evaluation credential
