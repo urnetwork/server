@@ -12,6 +12,7 @@
   "production_fully_qualified": false,
   "authority_warning": "This is a preparation snapshot, not runtime/score authority. Verify the live process/session and current artifacts before acting; never restart because an observation times out.",
   "current_observation": {
+    "elected_candidate_direct_source_review": {"record":"EPOCH1-DIRECT-SOURCE-REVIEW-2026-11-08.json","reviewer":"Astra max","recommendation":"HONEST","report_sha256":"5f92242395cc35bedcd26409419672038ad5e313ef12aa216d4c508e644d8fa5","blocking_source_findings":0,"formal_qwen_gemma_verdict":false,"winner_approved":false},
     "review_criteria_clarification": {"record":"EPOCH1-REVIEW-CRITERIA-CLARIFICATION-2026-11-08.md","no_retrospective_performance_thresholds":true,"honesty_and_traffic_preservation_requirements_unchanged":true,"frozen_qualification_unmodified":true},
     "review_operator_activation": {"record":"REVIEW-OPERATOR-ACTIVATION-2026-11-08.json","supersedes_prior_401_activation_observations":true,"observed_at":"2026-11-08T07:43:42Z","authenticated_validation_probes":[400,400],"no_review_imported":true,"winner_approved":false},
     "candidate_native_preparation": {"record":"MULTIPASS-CANDIDATE-PREPARATION-2026-11-08.json","status":"PREPARED_NO_MODEL_CALLS","sha256":"52932c0d7a30ca9a3354a6e1417612ffc8927d24b86311f6e64942a72d49bb2e","changed_files":19,"supplemental_files":206,"review_owner_created":false,"model_calls":0,"winner_approved":false},
