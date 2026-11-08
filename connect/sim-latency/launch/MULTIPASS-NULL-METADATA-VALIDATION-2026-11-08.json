@@ -39,10 +39,17 @@
     "storage_guard_weakened": false
   },
   "full_race": {
-    "status": "RUNNING",
+    "status": "PASS",
     "session_id": 25543,
     "timeout_seconds": 1500,
-    "log": "/home/by/urnetwork/temp/snow-privacy-null-metadata-20261108.AwKm9xFA/full-private-race.jsonl"
+    "passed": 139,
+    "failed": 0,
+    "skipped": 0,
+    "nested_tests": 0,
+    "race_reports": 0,
+    "elapsed_seconds": 1308.889,
+    "log": "/home/by/urnetwork/temp/snow-privacy-null-metadata-20261108.AwKm9xFA/full-private-race.jsonl",
+    "sha256": "7820269d1bb5386bac3225a2580bb78ed2ee3acc48228a94aa83a89b50560504"
   },
   "replacement_source_preparation": {
     "branch": "competition-review-null-metadata-20261108",
