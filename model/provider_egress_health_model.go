@@ -623,6 +623,26 @@ type ProviderEgressHealthCounts struct {
 	FirstMeasuredAt time.Time
 	OKCount         int
 	Total           int
+	// General is the same tally over the general catalog's outcomes alone,
+	// when the window also holds scored outcomes from another source (a
+	// country site that has graduated into scoring); nil when every scored
+	// outcome is general, as every one is while no country site graduates.
+	// Quality, Speed, the index and ranking read the whole tally. The Online
+	// rule, its URL ratio and its country guard read this one (onlineCounts):
+	// in a country where the general catalog fails structurally, a working
+	// country list would otherwise end the exemption while the general half
+	// kept every provider under the ratio, and a failing country site would
+	// take providers whose general outcomes pass out of Online (D4).
+	General *ProviderEgressHealthCounts
+}
+
+// The tally the Online rule, its URL ratio and its country guard decide by:
+// the general catalog's outcomes alone (General).
+func (self ProviderEgressHealthCounts) onlineCounts() ProviderEgressHealthCounts {
+	if self.General != nil {
+		return *self.General
+	}
+	return self
 }
 
 // Only the explicitly selected URL policy contributes. Legacy/unknown versions
@@ -633,13 +653,26 @@ type ProviderEgressHealthCounts struct {
 // probation (a country site, or a general site the refresh has not graduated)
 // is a measured run of the rolling quota but never enters this window either:
 // it has to earn the right to cost a provider a tier (provider_egress_url_source.go).
+// Each outcome carries its catalog source, so a reader can tell the general
+// catalog's outcomes from the rest (ProviderEgressHealthCounts.General).
 func providerEgressHealthWindowSql() string {
 	return fmt.Sprintf(`
-	SELECT client_id, measured_at, ok_count, total_count, class_results
+	SELECT client_id, measured_at, ok_count, total_count, class_results, url_source
 	FROM provider_egress_health_history
 	WHERE measured_at > $1 AND measured_at <= $2 AND total_count = 1
 	AND url_probe_policy_version = %d AND NOT url_probation
 `, SelectedProviderUrlProbePolicyVersion())
+}
+
+// The window's aggregate per provider: the newest and oldest outcome, the
+// successes and outcomes, and the same over the general catalog's outcomes
+// alone, which getProviderEgressHealthCountsSnapshot reads.
+func providerEgressHealthCountsSql() string {
+	general := fmt.Sprintf("url_source = %d", ProviderEgressUrlSourceGeneral)
+	return `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count),
+			MAX(measured_at) FILTER (WHERE ` + general + `), MIN(measured_at) FILTER (WHERE ` + general + `),
+			COALESCE(SUM(ok_count) FILTER (WHERE ` + general + `), 0), COALESCE(SUM(total_count) FILTER (WHERE ` + general + `), 0)
+			FROM (` + providerEgressHealthWindowSql() + `) AS evidence`
 }
 
 // Aggregates accepted URL successes and measured errors in the eight-hour
@@ -663,12 +696,10 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 	now := server.NowUtc()
 	minMeasuredAt := now.Add(-ProviderEgressHealthMaxAge)
 
-	query := `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
-			FROM (` + providerEgressHealthWindowSql() + `) AS evidence GROUP BY client_id`
+	query := providerEgressHealthCountsSql() + ` GROUP BY client_id`
 	args := []any{minMeasuredAt.UTC(), now.UTC()}
 	if clientIds != nil {
-		query = `SELECT client_id, MAX(measured_at), MIN(measured_at), SUM(ok_count), SUM(total_count)
-			FROM (` + providerEgressHealthWindowSql() + `) AS evidence WHERE client_id = ANY($3) GROUP BY client_id`
+		query = providerEgressHealthCountsSql() + ` WHERE client_id = ANY($3) GROUP BY client_id`
 		args = append(args, clientIds)
 	}
 
@@ -682,13 +713,26 @@ func getProviderEgressHealthCountsSnapshot(ctx context.Context, clientIds []serv
 			for result.Next() {
 				var clientId server.Id
 				var counts ProviderEgressHealthCounts
+				var generalMeasuredAt, generalFirstMeasuredAt *time.Time
+				var generalOkCount, generalTotal int
 				server.Raise(result.Scan(
 					&clientId,
 					&counts.MeasuredAt,
 					&counts.FirstMeasuredAt,
 					&counts.OKCount,
 					&counts.Total,
+					&generalMeasuredAt,
+					&generalFirstMeasuredAt,
+					&generalOkCount,
+					&generalTotal,
 				))
+				if generalTotal != counts.Total {
+					general := &ProviderEgressHealthCounts{OKCount: generalOkCount, Total: generalTotal}
+					if generalMeasuredAt != nil && generalFirstMeasuredAt != nil {
+						general.MeasuredAt, general.FirstMeasuredAt = *generalMeasuredAt, *generalFirstMeasuredAt
+					}
+					counts.General = general
+				}
 				healthCounts[clientId] = counts
 			}
 		})
