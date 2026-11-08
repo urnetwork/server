@@ -340,7 +340,7 @@ func executeWinnerMultipassQualification(ctx context.Context, plan *winnerMultip
 			if err != nil {
 				return report, err
 			}
-			retentionCtx, retentionCancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCurrentQgQualificationSettings().CleanupGrace)
+			retentionCtx, retentionCancel := context.WithTimeout(context.WithoutCancel(ctx), plan.Settings.Custody.ProtectionTimeout)
 			pin, err = hooks.Retain(retentionCtx, *capture)
 			retentionCancel()
 			if err != nil {

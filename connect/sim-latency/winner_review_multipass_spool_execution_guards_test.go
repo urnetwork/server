@@ -139,7 +139,10 @@ func TestWinnerMultipassSpoolQualificationRequiresReservationBeforeAnyProviderIn
 		}, Invoke: func(context.Context, []byte) ([]byte, []byte, error) { called++; return nil, nil, nil }, Authenticate: func([]byte, []byte, []byte, bool) (*winnerMultipassContainmentReceipt, error) {
 			called++
 			return nil, nil
-		}, Retain: func(context.Context, winnerMultipassQualificationCapture) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
+		}, Retain: func(context.Context, winnerMultipassQualificationCapture) (currentQgQualificationPin, error) {
+			called++
+			return currentQgQualificationPin{}, nil
+		}, Resolve: func(context.Context, currentQgQualificationPin) (*winnerMultipassQualificationSpoolResolvedCapture, error) {
 			called++
 			return nil, nil
 		}, RetainCase: func(int, winnerMultipassEvidence) (currentQgQualificationPin, error) {

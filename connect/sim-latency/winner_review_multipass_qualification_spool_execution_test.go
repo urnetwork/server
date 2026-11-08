@@ -78,7 +78,8 @@ type winnerMultipassQualificationSpoolHooks struct {
 	Claim           func(winnerMultipassQualificationInvocation, []byte) (currentQgQualificationPin, error)
 	Invoke          func(context.Context, []byte) ([]byte, []byte, error)
 	Authenticate    func([]byte, []byte, []byte, bool) (*winnerMultipassContainmentReceipt, error)
-	Retain          func(context.Context, winnerMultipassQualificationCapture) (*winnerMultipassQualificationSpoolResolvedCapture, error)
+	Retain          func(context.Context, winnerMultipassQualificationCapture) (currentQgQualificationPin, error)               // Exact durable commit only after original protection, retirement and storage restoration.
+	Resolve         func(context.Context, currentQgQualificationPin) (*winnerMultipassQualificationSpoolResolvedCapture, error) // Fresh bounded exact-version replay; never borrows the protection deadline.
 	RetainCase      func(int, winnerMultipassEvidence) (currentQgQualificationPin, error)
 	CompletedReport *currentQgQualificationPin // Optional original terminal: only fully authenticated read-only replay, no new draw or retention.
 }
@@ -118,7 +119,7 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 	if err := validateWinnerMultipassQualificationPlan(plan); err != nil {
 		return nil, err
 	}
-	if hooks.Mode != "offline" && hooks.Mode != "genuine_provider" || hooks.Now == nil || hooks.ValidateRelease == nil || hooks.Reserve == nil || hooks.Load == nil || hooks.Claim == nil || hooks.Invoke == nil || hooks.Authenticate == nil || hooks.Retain == nil || hooks.RetainCase == nil {
+	if hooks.Mode != "offline" && hooks.Mode != "genuine_provider" || hooks.Now == nil || hooks.ValidateRelease == nil || hooks.Reserve == nil || hooks.Load == nil || hooks.Claim == nil || hooks.Invoke == nil || hooks.Authenticate == nil || hooks.Retain == nil || hooks.Resolve == nil || hooks.RetainCase == nil {
 		return nil, errors.New("protected-spool qualification requires complete explicit native lifecycle hooks")
 	}
 	planBytes, _ := json.Marshal(plan)
@@ -166,6 +167,7 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 		if err != nil {
 			return report, err
 		}
+		committed := false
 		if value == nil {
 			if originalReport != nil {
 				return report, errors.New("completed spool terminal cannot authorize an unstarted invocation")
@@ -174,8 +176,8 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 			if err != nil {
 				return report, err
 			}
-			retentionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), defaultCurrentQgQualificationSettings().CleanupGrace)
-			value, err = hooks.Retain(retentionCtx, *capture)
+			retentionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), plan.Settings.Custody.ProtectionTimeout)
+			commit, err := hooks.Retain(retentionCtx, *capture)
 			cancel()
 			if err != nil {
 				var failure *winnerMultipassQualificationSpoolRetentionError
@@ -189,14 +191,32 @@ func executeWinnerMultipassSpoolQualification(ctx context.Context, plan *winnerM
 				}
 				return report, err
 			}
-			if value == nil || !reflect.DeepEqual(value.Capture, capture) {
+			if _, err := readCurrentQgQualificationPin(commit, winnerMultipassSpoolManifestBytes, true); err != nil {
+				return report, errors.Join(errors.New("protected spool returned no authentic durable compact commit"), err)
+			}
+			// The durable reference remains in a failed terminal even if a later
+			// exact-version read times out after all local payloads were retired.
+			report.CaptureCommits = append(report.CaptureCommits, commit)
+			committed = true
+			if err := ctx.Err(); err != nil {
+				return report, err
+			}
+			replayCtx, replayCancel := context.WithTimeout(ctx, plan.Settings.Custody.PostCommitReplayTimeout)
+			value, err = hooks.Resolve(replayCtx, commit)
+			replayCancel()
+			if err != nil {
+				return report, err
+			}
+			if value == nil || value.Commit != commit || !reflect.DeepEqual(value.Capture, capture) {
 				return report, errors.New("protected custody changed original qualification capture")
 			}
 		}
 		if err := validateWinnerMultipassResolvedSpoolCapture(value, plan.Owner); err != nil {
 			return report, err
 		}
-		report.CaptureCommits = append(report.CaptureCommits, value.Commit)
+		if !committed {
+			report.CaptureCommits = append(report.CaptureCommits, value.Commit)
+		}
 		if err := applyWinnerMultipassResolvedSpoolCapture(plan, invocation, value, state); err != nil {
 			return report, err
 		}

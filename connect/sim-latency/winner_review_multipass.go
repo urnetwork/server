@@ -24,6 +24,7 @@ const winnerMultipassVersion = "winner-review-complete-coverage/1"
 // ceilings for preparation, never authority to start an inference or extend time.
 type winnerMultipassSettings struct {
 	TokenizationProfiles    map[string]winnerMultipassTokenizationProfile `json:"tokenization_profiles"`     // Explicit runtime proofs, keyed by member; empty permits offline layout only.
+	Custody                 winnerMultipassCustodySettings                `json:"custody"`                   // Explicit independent qualification custody phases; both are pinned by the prospective plan.
 	MaximumArtifactBytes    int                                           `json:"maximum_artifact_bytes"`    // Positive per-file bytes; default 2 MiB.
 	MaximumBundleBytes      int                                           `json:"maximum_bundle_bytes"`      // Positive aggregate artifact bytes; default 32 MiB.
 	MaximumArtifacts        int                                           `json:"maximum_artifacts"`         // Positive artifact census; default 256.
@@ -45,9 +46,21 @@ type winnerMultipassSettings struct {
 	MaximumOwnerDuration    time.Duration                                 `json:"maximum_owner_duration"`    // Positive prospective ceiling; default 24 hours.
 }
 
+// Protection must finish the current original even after provider cancellation.
+// Subsequent replay is a separate read-only phase and never renews the owner.
+type winnerMultipassCustodySettings struct {
+	ProtectionTimeout       time.Duration `json:"protection_timeout"`         // Positive protection/readback/retirement allowance; default120 seconds. Non-positive refuses preparation.
+	PostCommitReplayTimeout time.Duration `json:"post_commit_replay_timeout"` // Positive fresh exact-version replay allowance; default120 seconds. Non-positive refuses preparation.
+}
+
+// These are independent phase ceilings, not extensions of any model/owner clock.
+func defaultWinnerMultipassCustodySettings() winnerMultipassCustodySettings {
+	return winnerMultipassCustodySettings{ProtectionTimeout: 120 * time.Second, PostCommitReplayTimeout: 120 * time.Second}
+}
+
 // Original output allowance is preserved; all new aggregate bounds are explicit.
 func defaultWinnerMultipassSettings() winnerMultipassSettings {
-	return winnerMultipassSettings{TokenizationProfiles: map[string]winnerMultipassTokenizationProfile{}, MaximumArtifactBytes: 2 * 1024 * 1024, MaximumBundleBytes: 32 * 1024 * 1024, MaximumArtifacts: 256,
+	return winnerMultipassSettings{TokenizationProfiles: map[string]winnerMultipassTokenizationProfile{}, Custody: defaultWinnerMultipassCustodySettings(), MaximumArtifactBytes: 2 * 1024 * 1024, MaximumBundleBytes: 32 * 1024 * 1024, MaximumArtifacts: 256,
 		SpanBytes: 64 * 1024, OverlapLines: 24, MaximumOverlapBytes: 8 * 1024, MaximumCoverageAtoms: 1024, MaximumLeafUnits: 128, MergeFanIn: 4, MaximumCalls: 384,
 		MaximumRequestBytes: 4 * 1024 * 1024, MaximumResponseBytes: 16 * 1024 * 1024, MaximumObservationBytes: 32 * 1024,
 		MaximumSummaryBytes: 4096, MaximumIssues: 32, MaximumIssueBytes: 4096, MaximumOutputTokens: 32768, PackingTokenReserve: 1024, MaximumOwnerDuration: 24 * time.Hour}
@@ -161,6 +174,10 @@ func winnerMultipassSha256(content []byte) string {
 
 // Settings cannot disable a guard or quietly reduce the original output budget.
 func validateWinnerMultipassSettings(value winnerMultipassSettings) error {
+	custodyCeiling := defaultWinnerMultipassCustodySettings()
+	if value.Custody.ProtectionTimeout <= 0 || value.Custody.ProtectionTimeout > custodyCeiling.ProtectionTimeout || value.Custody.PostCommitReplayTimeout <= 0 || value.Custody.PostCommitReplayTimeout > custodyCeiling.PostCommitReplayTimeout {
+		return errors.New("multi-pass custody phases lack positive prospectively bounded independent deadlines")
+	}
 	if value.MaximumArtifactBytes <= 0 || value.MaximumBundleBytes < value.MaximumArtifactBytes || value.MaximumArtifacts <= 0 ||
 		value.SpanBytes <= 0 || value.SpanBytes > value.MaximumArtifactBytes || value.OverlapLines <= 0 || value.MaximumOverlapBytes <= 0 ||
 		value.MaximumCoverageAtoms <= 0 || value.MaximumLeafUnits <= 0 || value.MergeFanIn < 2 || value.MaximumCalls <= 0 || value.MaximumRequestBytes <= 0 ||
