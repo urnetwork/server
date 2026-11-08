@@ -75,17 +75,24 @@ func (self ProviderEgressUrlSource) String() string {
 	}
 }
 
-// Whether the general pool holds the named destination: it has an active row,
-// served scored or on probation. A general outcome is placed by its pool row,
-// whose probation the store reads; an outcome whose destination has none, and
-// is not one of the host's country sites, is unrecognized
+// Whether the general pool holds the named destination, by the rule the pool
+// is served by (controller ProviderEgressSites.configuredRows): its row's
+// active flag (served scored or on probation), or, when it has no row yet,
+// whether the storing host's catalog configures it as a destination
+// (configured), since a configured destination is served as active until a
+// row says otherwise. The seed fills only an empty table and the refresh syncs
+// only the candidates, so a destination added to the catalog after the first
+// seed has no row. While the catalog cannot be read nothing is configured,
+// and rows alone place an outcome. A general outcome is placed by this; one
+// that is not, and is not one of the host's country sites, is unrecognized
 // (ProviderEgressUrlSourceUnrecognized).
-func ProviderEgressDestinationInPool(ctx context.Context, name string) bool {
+func ProviderEgressDestinationInPool(ctx context.Context, name string, configured bool) bool {
 	var inPool bool
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT EXISTS (
-			SELECT 1 FROM provider_egress_destination WHERE name = $1 AND active
-		)`, name).Scan(&inPool))
+		server.Raise(conn.QueryRow(ctx, `SELECT COALESCE(
+			(SELECT active FROM provider_egress_destination WHERE name = $1),
+			$2::boolean
+		)`, name, configured).Scan(&inPool))
 	})
 	return inPool
 }

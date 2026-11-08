@@ -535,12 +535,15 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 		// where the destination came from, from the served catalog; the store
 		// keeps an outcome on probation out of every score
 		// (provider_egress_url_source.go)
-		source, countryCodes := getProviderEgressUrlSources().of(args.UrlProbeEvidence.Destination)
-		if source == model.ProviderEgressUrlSourceGeneral && !model.ProviderEgressDestinationInPool(ctx, args.UrlProbeEvidence.Destination.Name) {
-			// neither one of this host's country sites nor in the pool: a
-			// country site this host's catalog does not list yet, or any
-			// country site while it cannot parse the catalog. Fail closed, so
-			// it is never scored as general or reaches the Online rule.
+		sources := getProviderEgressUrlSources()
+		name := args.UrlProbeEvidence.Destination.Name
+		source, countryCodes := sources.of(args.UrlProbeEvidence.Destination)
+		if source == model.ProviderEgressUrlSourceGeneral && !model.ProviderEgressDestinationInPool(ctx, name, sources.configured(name)) {
+			// neither one of this host's country sites nor in the pool as the
+			// pool serves it: a country site this host's catalog does not list
+			// yet, or any country site while it cannot parse the catalog.
+			// Fail closed, so it is never scored as general or reaches the
+			// Online rule.
 			source = model.ProviderEgressUrlSourceUnrecognized
 			health.UrlProbation = true
 		}

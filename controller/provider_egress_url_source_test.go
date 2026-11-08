@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -365,28 +366,93 @@ func TestProviderEgressUrlOutcomeTheHostCannotPlaceFailsClosed(t *testing.T) {
 	})
 }
 
+// Review D-1: a destination added to the catalog's destinations after the
+// pool table was first seeded has no pool row (the seed fills only an empty
+// table, and the refresh syncs only the candidates), yet the pool serves it
+// as active, as it serves every configured destination without a row. Its
+// outcomes are legitimate general outcomes and score, placed by the rule the
+// pool is served by. Before the fix the ingest found no active row and stored
+// them unrecognized, on probation, for good.
+func TestProviderEgressUrlOutcomeOfAConfiguredDestinationWithoutARowIsGeneral(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		pushProviderEgressUrlSourceTestCatalog(t, ctx)
+
+		// a later catalog version adds late-site to the destinations
+		later := strings.Replace(string(providerEgressUrlSourceTestCatalog), "candidates:\n",
+			"  - name: late-site\n    class: site\n    category: reference\n    url: https://late.example/\ncandidates:\n", 1)
+		t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, []byte(later)))
+		pool, err := GetProviderEgressDestinationPool(ctx)
+		if err != nil {
+			t.Fatalf("pool: %v", err)
+		}
+		served := slices.ContainsFunc(pool.Destinations, func(destination egresshealth.Destination) bool {
+			return destination.Name == "late-site"
+		})
+		hasRow := slices.ContainsFunc(model.GetProviderEgressDestinations(ctx), func(row *model.ProviderEgressDestination) bool {
+			return row.Name == "late-site"
+		})
+		if !served || hasRow {
+			t.Fatalf("late-site served %t with a row %t, want served without a row", served, hasRow)
+		}
+
+		now := server.NowUtc().Truncate(time.Microsecond)
+		cycleStartedAt := now.Add(-time.Hour)
+		clientId := server.NewId()
+		createProviderEgressUrlSourceTestCycle(t, ctx, clientId, cycleStartedAt)
+		unrecognized := testutil.ToFloat64(providerEgressUrlOutcomesTotal.WithLabelValues("unrecognized", "probation", "success"))
+		submitProviderEgressUrlSourceTestOutcome(t, ctx, clientId, cycleStartedAt, now.Add(-time.Minute), "late-site", "https://late.example/", true)
+
+		var source int
+		var probation bool
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT url_source, url_probation FROM provider_egress_health_history WHERE client_id = $1`, clientId).Scan(&source, &probation))
+		})
+		counts := model.GetAllProviderEgressHealthCounts(ctx)[clientId]
+		if source != int(model.ProviderEgressUrlSourceGeneral) || probation || counts.OKCount != 1 || counts.Total != 1 {
+			t.Errorf("a served configured destination's outcome was recorded source %d probation %t (window %d/%d), want general and scored 1/1",
+				source, probation, counts.OKCount, counts.Total)
+		}
+		if got := testutil.ToFloat64(providerEgressUrlOutcomesTotal.WithLabelValues("unrecognized", "probation", "success")) - unrecognized; got != 0 {
+			t.Errorf("%v outcomes of a served configured destination counted unrecognized", got)
+		}
+	})
+}
+
 // The ingest reads each outcome's source from the served catalog: a name in a
 // country list is a country site of that country; anything else is general
-// here, and the ingest then holds it to the pool
-// (TestProviderEgressUrlOutcomeTheHostCannotPlaceFailsClosed). What the store
-// makes of it is the site's graduation state or the pool's probation.
+// here, and the ingest then holds it to the pool as the pool is served: a
+// configured destination counts as in it until its row says otherwise
+// (TestProviderEgressUrlOutcomeTheHostCannotPlaceFailsClosed,
+// TestProviderEgressUrlOutcomeOfAConfiguredDestinationWithoutARowIsGeneral).
+// What the store makes of it is the site's graduation state or the pool's
+// probation.
 func TestProviderEgressUrlSourcesOfTheServedCatalog(t *testing.T) {
 	t.Cleanup(server.Config.PushSimpleResource(model.ProviderEgressSitesResourceName, providerEgressUrlSourceTestCatalog))
 	sources := getProviderEgressUrlSources()
 	for _, c := range []struct {
-		name      string
-		source    model.ProviderEgressUrlSource
-		countries []string
+		name       string
+		source     model.ProviderEgressUrlSource
+		countries  []string
+		configured bool
 	}{
-		{"de-site", model.ProviderEgressUrlSourceCountry, []string{"de"}},
-		{"general-site", model.ProviderEgressUrlSourceGeneral, nil},
-		{"promoted-site", model.ProviderEgressUrlSourceGeneral, nil},
-		{"unknown-site", model.ProviderEgressUrlSourceGeneral, nil},
+		{"de-site", model.ProviderEgressUrlSourceCountry, []string{"de"}, false},
+		{"general-site", model.ProviderEgressUrlSourceGeneral, nil, true},
+		{"promoted-site", model.ProviderEgressUrlSourceGeneral, nil, false},
+		{"unknown-site", model.ProviderEgressUrlSourceGeneral, nil, false},
 	} {
 		source, countries := sources.of(egresshealth.Destination{Name: c.name})
 		if source != c.source || !slices.Equal(countries, c.countries) {
 			t.Errorf("%s: source %s countries %v, want %s %v", c.name, source, countries, c.source, c.countries)
 		}
+		if configured := sources.configured(c.name); configured != c.configured {
+			t.Errorf("%s: configured %t, want %t", c.name, configured, c.configured)
+		}
+	}
+	// a catalog that cannot be read configures nothing
+	var unread *providerEgressUrlSources
+	if unread.configured("general-site") {
+		t.Errorf("an unread catalog configured a destination")
 	}
 	// a site one list holds is that list's, whatever the provider's place
 	countryOf := func(countryCodes ...string) string {

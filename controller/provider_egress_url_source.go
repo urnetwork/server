@@ -25,17 +25,21 @@ import (
 // therefore derived here, from the served catalog, which is what decided the
 // draw: a destination named in a country list is a country site (the parse
 // keeps country sites disjoint from every general entry by name and website,
-// ParseProviderEgressSites), and one the pool holds is general. One that is
-// neither is unrecognized and stored on probation: this host cannot place it,
-// so it fails closed rather than count as general (a country site from a
-// catalog version this host has not received yet, or from one it cannot
-// parse). The store decides probation from the pool and from each country
-// site's graduation state (model/provider_egress_country_site.go).
+// ParseProviderEgressSites), and one the pool holds is general, by the rule
+// the pool is served by: an active row, or a destination the catalog
+// configures that has no row yet (model.ProviderEgressDestinationInPool).
+// One that is neither is unrecognized and stored on probation: this host
+// cannot place it, so it fails closed rather than count as general (a country
+// site from a catalog version this host has not received yet, or from one it
+// cannot parse). The store decides probation from the pool and from each
+// country site's graduation state (model/provider_egress_country_site.go).
 
 // The country site names of one qualityprobe.yml version, each with the
-// countries whose lists hold it, in order.
+// countries whose lists hold it, in order, and the names it configures as
+// general destinations.
 type providerEgressUrlSources struct {
 	countrySites map[string][]string
+	destinations map[string]bool
 }
 
 // The catalog's source for the outcome's destination, and for a country site
@@ -47,6 +51,15 @@ func (self *providerEgressUrlSources) of(destination egresshealth.Destination) (
 		}
 	}
 	return model.ProviderEgressUrlSourceGeneral, nil
+}
+
+// Whether the catalog configures the name as a general destination. The pool
+// serves a configured destination that has no pool row yet as active
+// (ProviderEgressSites.configuredRows): the seed fills only an empty table,
+// and the refresh syncs only the candidates, so a destination added to the
+// catalog later has none. A catalog that cannot be read configures nothing.
+func (self *providerEgressUrlSources) configured(name string) bool {
+	return self != nil && self.destinations[name]
 }
 
 // The country a country outcome's destination came from: its one list, or
@@ -114,11 +127,14 @@ func getProviderEgressUrlSources() *providerEgressUrlSources {
 			logProviderEgressUrlSourcesUnreadable(err)
 			return providerEgressUrlSourcesLoad{failedAt: time.Now()}, true
 		}
-		sources := &providerEgressUrlSources{countrySites: map[string][]string{}}
+		sources := &providerEgressUrlSources{countrySites: map[string][]string{}, destinations: map[string]bool{}}
 		for _, countryCode := range providerEgressCountryCodes(sites.Countries) {
 			for _, destination := range sites.Countries[countryCode] {
 				sources.countrySites[destination.Name] = append(sources.countrySites[destination.Name], countryCode)
 			}
+		}
+		for _, destination := range sites.Destinations {
+			sources.destinations[destination.Name] = true
 		}
 		return providerEgressUrlSourcesLoad{sources: sources}, true
 	}).sources
