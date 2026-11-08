@@ -31,8 +31,8 @@ was executed and no additional model request was sent for this inspection.
 
 References below are to the exact submitted candidate, relative to the mono root.
 
-- `connect/ip.go:5990` reads the socket into `buffer` once in the outer loop.
-  The nested `for i := 0; i < n && !stop` loop retains that buffer while its
+- `connect/ip.go:5989` reads the socket into `buffer` once in the outer loop.
+  The nested `for i := 0; i < n && !stop` loop at `:6011` retains that buffer while its
   chunks are being admitted and sent. The `held` branch at `connect/ip.go:6077`
   waits and continues **that inner loop**, not the outer socket-read loop.
   It therefore does not overwrite the held read or advance `i`. Sequence space
@@ -44,7 +44,7 @@ References below are to the exact submitted candidate, relative to the mono root
 - `connect/ip_tcp_return_recovery.go:586` supplies positive fallback stall/age
   settings if configured values are nonpositive. Defaults are one-second stall,
   four-second age, and 32-KiB age allowance (`:525`). The oldest-progress and
-  age-based allowances are implemented at `:618`; `admit` at `:744` records a
+  age-based allowances are implemented at `:626`; `admit` at `:744` records a
   held flow and returns zero without taking sequence space.
 - `connect/ip_tcp_return_recovery.go:881` waits on a wake signal, context
   cancellation, or the 50-ms periodic recheck. `drained` at `:845` and `close`
