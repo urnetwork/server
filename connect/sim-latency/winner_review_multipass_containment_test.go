@@ -20,7 +20,7 @@ import (
 // Compare fixed original process journals with the outer captured bytes and the
 // independently reread durable root claim. A failed original remains evidence,
 // never a new admission, successful verdict or retry permission.
-func validateWinnerMultipassJournals(artifacts map[string][]byte, pin currentQgQualificationPin, owner, attempt string, settings currentQgQualificationSettings, envelope winnerMultipassBrokerEnvelope, result winnerMultipassBrokerResult) error {
+func validateWinnerMultipassJournalBytes(artifacts map[string][]byte, pin currentQgQualificationPin, owner, attempt string, envelope winnerMultipassBrokerEnvelope, result winnerMultipassBrokerResult, independentClaim []byte) error {
 	var provider winnerSnowProviderSettings
 	if decodeStrictJSONBytes(artifacts["provider-settings.json"], &provider, "multi-pass captured provider") != nil || validateWinnerSnowProviderSettings(provider) != nil || currentQgQualificationHash(artifacts["provider-settings.json"]) != pin.Sha256 {
 		return errors.New("multi-pass journals have different provider pins")
@@ -48,29 +48,10 @@ func validateWinnerMultipassJournals(artifacts map[string][]byte, pin currentQgQ
 			leaves[actual] = artifacts[actual]
 		}
 	}
-	state := filepath.Join(attempt, "member-state")
-	if err := validateCurrentQgSnowQualificationStateCensus(state, len(leaves)); err != nil {
-		return err
-	}
-	mapped, err := currentQgQualificationMappedUid(artifacts["uid-map.txt"], 65532)
-	if err != nil {
-		return err
-	}
-	info, err := os.Lstat(state)
-	if err != nil || info.Sys().(*syscall.Stat_t).Uid != uint32(mapped) || info.Sys().(*syscall.Stat_t).Gid != 0 {
-		return errors.New("multi-pass state directory changed its mapped owner")
-	}
-	for name, content := range leaves {
-		path := filepath.Join(state, name)
-		info, err := os.Lstat(path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Sys().(*syscall.Stat_t).Uid != uint32(mapped) || info.Sys().(*syscall.Stat_t).Nlink != 1 {
-			return errors.New("multi-pass process journal changed owner, mode or file type")
-		}
-		if _, err := readCurrentQgQualificationPin(currentQgQualificationPin{Path: path, Sha256: currentQgQualificationHash(content)}, winnerMultipassCapturedLeafLimit(name, envelope.Settings), false); err != nil {
-			return err
-		}
-	}
 	if envelope.Operation == "generate" {
+		if len(independentClaim) == 0 || !bytes.Equal(independentClaim, artifacts["attempt-claim.json"]) {
+			return errors.New("generation journal differs from its independently authenticated durable claim")
+		}
 		if result.TokenizerRequestArtifact != "" || result.TokenizerResponseArtifact != "" || !reflect.DeepEqual(result.Admission, envelope.Admission) {
 			return errors.New("generation changed or substituted original tokenizer admission")
 		}
@@ -97,18 +78,11 @@ func validateWinnerMultipassJournals(artifacts map[string][]byte, pin currentQgQ
 		if claim.Schema != 1 || claim.Kind != "snow-multipass-single-call-claim" || claim.IdempotencySha256 != key || claim.InputSha256 != winnerMultipassSha256(artifacts["input.json"]) || claim.SettingsSha256 != pin.Sha256 || claim.ModelsSha256 != winnerMultipassSha256(memberBytes) || claim.Owner != owner || claim.Attempt != attempt || claim.AutomaticRetries {
 			return errors.New("generation claim is not the original one-shot owner/call input")
 		}
-		directory := filepath.Join(filepath.Dir(settings.StateRoot), "generation-claims")
-		if err := currentQgQualificationPrivateRoot(directory); err != nil {
-			return err
-		}
-		if _, err := readCurrentQgQualificationPin(currentQgQualificationPin{Path: filepath.Join(directory, key+".json"), Sha256: winnerMultipassSha256(artifacts["attempt-claim.json"])}, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true); err != nil {
-			return err
-		}
 		if result.TransportResponseArtifact != "" && result.TransportResponseSha256 != winnerMultipassSha256(artifacts["transport.response"]) {
 			return errors.New("generation original transport digest changed")
 		}
 	} else if envelope.Operation == "tokenize" {
-		if result.TransportResponseArtifact != "" {
+		if result.TransportResponseArtifact != "" || len(independentClaim) != 0 {
 			return errors.New("tokenizer invocation contains generation transport")
 		}
 		if result.TokenizerRequestArtifact != "" {
@@ -178,6 +152,43 @@ func validateWinnerMultipassJournals(artifacts map[string][]byte, pin currentQgQ
 	return err
 }
 
+// Physical observation is performed only on the actual captured directory.
+// Portable replay never invokes this checker on reconstructed local files.
+func validateWinnerMultipassJournalFilesystem(artifacts map[string][]byte, attempt string, envelope winnerMultipassBrokerEnvelope, result winnerMultipassBrokerResult) error {
+	leaves := map[string][]byte{"call.started.json": artifacts["call.started.json"], "call.complete.json": artifacts["call.complete.json"]}
+	for expected, actual := range map[string]string{"tokenize.request.json": result.TokenizerRequestArtifact, "tokenize.response.json": result.TokenizerResponseArtifact, "transport.response": result.TransportResponseArtifact} {
+		if actual != "" {
+			if actual != expected || len(artifacts[actual]) == 0 {
+				return errors.New("multi-pass physical journal census is incomplete or relabeled")
+			}
+			leaves[actual] = artifacts[actual]
+		}
+	}
+	state := filepath.Join(attempt, "member-state")
+	if err := validateCurrentQgSnowQualificationStateCensus(state, len(leaves)); err != nil {
+		return err
+	}
+	mapped, err := currentQgQualificationMappedUid(artifacts["uid-map.txt"], 65532)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(state)
+	if err != nil || info.Sys().(*syscall.Stat_t).Uid != uint32(mapped) || info.Sys().(*syscall.Stat_t).Gid != 0 {
+		return errors.New("multi-pass state directory changed its mapped owner")
+	}
+	for name, content := range leaves {
+		path := filepath.Join(state, name)
+		info, err := os.Lstat(path)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Sys().(*syscall.Stat_t).Uid != uint32(mapped) || info.Sys().(*syscall.Stat_t).Nlink != 1 {
+			return errors.New("multi-pass process journal changed owner, mode or file type")
+		}
+		if _, err := readCurrentQgQualificationPin(currentQgQualificationPin{Path: path, Sha256: currentQgQualificationHash(content)}, winnerMultipassCapturedLeafLimit(name, envelope.Settings), false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Exact bounded artifact names are shared with protected custody. Unknown names
 // are rejected rather than silently omitted from an otherwise valid manifest.
 func winnerMultipassCapturedLeafLimit(name string, settings winnerMultipassSettings) int64 {
@@ -243,7 +254,7 @@ func authenticateWinnerMultipassContainment(input, output, diagnostics []byte, c
 }
 
 // Independent actual-container verification for the new profile only.
-func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics []byte, canceled bool, image string, settings currentQgQualificationSettings, profile currentQgQualificationProviderProfile) (string, error) {
+func validateWinnerMultipassContainmentBytes(input, output, diagnostics []byte, canceled bool, image string, settings currentQgQualificationSettings, profile currentQgQualificationProviderProfile, originals map[string][]byte, independentClaim []byte) (string, error) {
 	if !profile.Snow {
 		return "", errors.New("multi-pass containment has no historical key profile")
 	}
@@ -253,9 +264,6 @@ func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics [
 	}
 	if canceled != (envelope.Operation == "qualification_cancel_before_provider") || canceled && len(output) != 0 {
 		return "", errors.New("multi-pass cancellation is not the exact pre-input empty-output control")
-	}
-	if err := currentQgQualificationPrivateRoot(settings.StateRoot); err != nil {
-		return "", err
 	}
 	var result winnerMultipassBrokerResult
 	if !canceled && (rejectWinnerReviewCaseAliases(output) != nil || decodeStrictJSONBytes(output, &result, "multi-pass original result") != nil) {
@@ -272,12 +280,9 @@ func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics [
 	if receipt.Schema != 1 || receipt.Kind != "winner-review-container-receipt" || !validSha256(receipt.Owner) || !receipt.CleanupVerified || filepath.Dir(receipt.AttemptDirectory) != settings.StateRoot || !strings.HasPrefix(receipt.AttemptDirectory, settings.StateRoot+"/invocation.") {
 		return "", errors.New("actual wrapper owner/cleanup receipt invalid")
 	}
-	if err := currentQgQualificationPrivateRoot(receipt.AttemptDirectory); err != nil {
-		return "", err
-	}
-	manifestBytes, err := readCurrentQgQualificationPin(currentQgQualificationPin{Path: filepath.Join(receipt.AttemptDirectory, "evidence-manifest.json"), Sha256: receipt.ManifestSha256}, int64(defaultWinnerMultipassProviderLimits().MaximumMetadataBytes), true)
-	if err != nil {
-		return "", err
+	manifestBytes := originals["evidence-manifest.json"]
+	if len(manifestBytes) == 0 || len(manifestBytes) > defaultWinnerMultipassProviderLimits().MaximumMetadataBytes || winnerMultipassSha256(manifestBytes) != receipt.ManifestSha256 {
+		return "", errors.New("original containment manifest bytes differ from their receipt")
 	}
 	var manifest struct {
 		Schema    int                             `json:"schema"`
@@ -287,7 +292,7 @@ func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics [
 	if err := decodeStrictJSONBytes(manifestBytes, &manifest, "actual broker evidence manifest"); err != nil {
 		return "", err
 	}
-	if manifest.Schema != 1 || manifest.Kind != "winner-review-container-evidence" || len(manifest.Artifacts) > 26 {
+	if manifest.Schema != 1 || manifest.Kind != "winner-review-container-evidence" || len(manifest.Artifacts) > 26 || len(originals) != len(manifest.Artifacts)+1 {
 		return "", errors.New("multi-pass actual artifact manifest is malformed")
 	}
 	artifacts := map[string][]byte{}
@@ -295,8 +300,8 @@ func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics [
 		if binding.Path == "" || filepath.Base(binding.Path) != binding.Path || artifacts[binding.Path] != nil || binding.Bytes < 0 || winnerMultipassCapturedLeafLimit(binding.Path, envelope.Settings) <= 0 || binding.Bytes > winnerMultipassCapturedLeafLimit(binding.Path, envelope.Settings) {
 			return "", errors.New("actual wrapper evidence binding invalid")
 		}
-		content, err := readCurrentQgQualificationPin(currentQgQualificationPin{Path: filepath.Join(receipt.AttemptDirectory, binding.Path), Sha256: binding.Sha256}, winnerMultipassCapturedLeafLimit(binding.Path, envelope.Settings), true)
-		if err != nil || int64(len(content)) != binding.Bytes {
+		content, found := originals[binding.Path]
+		if !found || int64(len(content)) != binding.Bytes || winnerMultipassSha256(content) != binding.Sha256 {
 			return "", errors.New("actual wrapper evidence bytes changed")
 		}
 		artifacts[binding.Path] = content
@@ -438,11 +443,11 @@ func authenticateWinnerMultipassContainmentInternal(input, output, diagnostics [
 			return "", err
 		}
 		if !canceled {
-			if err := validateWinnerMultipassJournals(artifacts, profile.Settings, receipt.Owner, receipt.AttemptDirectory, settings, envelope, result); err != nil {
+			if err := validateWinnerMultipassJournalBytes(artifacts, profile.Settings, receipt.Owner, receipt.AttemptDirectory, envelope, result, independentClaim); err != nil {
 				return "", err
 			}
-		} else if err := validateCurrentQgSnowQualificationStateCensus(profile.StateDirectory, 0); err != nil {
-			return "", err
+		} else if len(independentClaim) != 0 {
+			return "", errors.New("canceled containment unexpectedly contains a generation claim")
 		}
 	} else {
 		if err := validateCurrentQgQualificationKeyOwnership(artifacts["uid-map.txt"], artifacts["key-ownership.json"], receipt.Owner, terminal.ContainerId, cgroup.Pid); err != nil {
