@@ -404,3 +404,25 @@ func TestTlsResetsCountForNothingTowardPlace(t *testing.T) {
 		}
 	}
 }
+
+// A site or prober fault is decided before place is asked, so a fault that
+// fails TLS across many networks reads no place evidence at all: this runs
+// with no database, and any read would fail it.
+func TestTlsSiteFaultsReadNoPlaceEvidence(t *testing.T) {
+	settings := ProviderEgressTlsJudgeSettingsFor(DefaultProviderEgressSiteSettings(), testingTlsCommonModeNetworkCount)
+	now := time.Date(2026, time.November, 7, 12, 0, 0, 0, time.UTC)
+	countryLocationId := server.NewId()
+	findings := []*ProviderEgressTlsFinding{}
+	for range 5 {
+		network := server.NewId()
+		findings = append(findings, &ProviderEgressTlsFinding{ClientId: server.NewId(), UrlKey: "u", Name: "expired", Url: "https://expired.example/",
+			MeasuredAt: now.Add(-time.Minute), NetworkId: &network, CountryCode: "zz", CountryLocationId: &countryLocationId})
+	}
+	pool := NewProviderEgressTlsPool(now, findings, map[string]bool{"expired": true}, nil)
+	direct := map[string]ProviderEgressTlsDirectOutcome{"expired.example": ProviderEgressTlsDirectFailed}
+	for _, judgement := range JudgeProviderEgressTlsFindings(context.Background(), now, findings, pool, direct, settings) {
+		if judgement.Verdict != ProviderEgressTlsVerdictSite || judgement.PlaceNetworks != 0 {
+			t.Fatalf("a site fault was judged %s with place evidence on %d networks", judgement.Verdict, judgement.PlaceNetworks)
+		}
+	}
+}

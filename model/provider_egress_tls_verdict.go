@@ -489,18 +489,25 @@ func (self providerEgressTlsCountryTally) without(name string) (loads int, failu
 	return self.loads - site.loads, self.failures - site.failures
 }
 
-// The place evidence of each finding. Only a finding judged on evidence,
-// with a known country and recent enough for the place window, whose URL and
-// country hold findings on at least PlaceMinNetworks other networks, can
-// meet the rule; it alone gets the outcomes and the tally, read once per URL
-// and country and once per country for the whole run. The others get their
-// network count and nothing else.
+// The most URL and country pairs one run reads outcomes for. A national block
+// is about ten URLs in a country, and a fault failing TLS fleet-wide is
+// judged a site fault before place is asked; past the bound, pairs in order
+// get no place evidence for the run, which withholds place and never grants
+// it.
+const providerEgressTlsPlaceKeyLimit = 64
+
+// The place evidence of each finding. Only a candidate (judged on evidence and
+// no site fault), with a known country and recent enough for the place
+// window, whose URL and country hold findings on at least PlaceMinNetworks
+// other networks, can meet the rule; it alone gets the outcomes and the
+// tally, read once per URL and country and once per country for the whole
+// run. The others get their network count and nothing else.
 func getProviderEgressTlsPlaceEvidence(
 	ctx context.Context,
 	now time.Time,
 	settings *ProviderEgressTlsJudgeSettings,
 	findings []*ProviderEgressTlsFinding,
-	judged []bool,
+	candidates []bool,
 ) []providerEgressTlsPlaceEvidence {
 	evidence := make([]providerEgressTlsPlaceEvidence, len(findings))
 	inWindow := func(finding *ProviderEgressTlsFinding) bool {
@@ -519,9 +526,8 @@ func getProviderEgressTlsPlaceEvidence(
 	}
 	needed := []int{}
 	keySet := map[providerEgressTlsPlaceKey]bool{}
-	countrySet := map[string]bool{}
 	for i, finding := range findings {
-		if !judged[i] || finding.CountryCode == "" || !inWindow(finding) {
+		if !candidates[i] || finding.CountryCode == "" || !inWindow(finding) {
 			continue
 		}
 		key := providerEgressTlsPlaceKey{urlKey: finding.UrlKey, countryLocationId: *finding.CountryLocationId}
@@ -535,7 +541,6 @@ func getProviderEgressTlsPlaceEvidence(
 		}
 		needed = append(needed, i)
 		keySet[key] = true
-		countrySet[finding.CountryCode] = true
 	}
 	if len(needed) == 0 {
 		return evidence
@@ -544,6 +549,29 @@ func getProviderEgressTlsPlaceEvidence(
 	for key := range keySet {
 		keys = append(keys, key)
 	}
+	sort.Slice(keys, func(a int, b int) bool {
+		if keys[a].urlKey != keys[b].urlKey {
+			return keys[a].urlKey < keys[b].urlKey
+		}
+		return keys[a].countryLocationId.String() < keys[b].countryLocationId.String()
+	})
+	if providerEgressTlsPlaceKeyLimit < len(keys) {
+		keys = keys[:providerEgressTlsPlaceKeyLimit]
+	}
+	read := map[providerEgressTlsPlaceKey]bool{}
+	for _, key := range keys {
+		read[key] = true
+	}
+	countrySet := map[string]bool{}
+	readable := needed[:0]
+	for _, i := range needed {
+		finding := findings[i]
+		if read[providerEgressTlsPlaceKey{urlKey: finding.UrlKey, countryLocationId: *finding.CountryLocationId}] {
+			readable = append(readable, i)
+			countrySet[finding.CountryCode] = true
+		}
+	}
+	needed = readable
 	countryCodes := make([]string, 0, len(countrySet))
 	for countryCode := range countrySet {
 		countryCodes = append(countryCodes, countryCode)
@@ -689,6 +717,20 @@ func (self *ProviderEgressTlsJudgement) Changed() bool {
 	return self.Verdict != self.Finding.Verdict || self.Decided && !self.Finding.Judged()
 }
 
+// Whether the finding's failure is a site or prober fault: close to it, the
+// URL failed TLS on at least CommonModeNetworkCount networks, or the server's
+// own direct check of its host failed verification.
+func providerEgressTlsSiteFault(
+	now time.Time,
+	finding *ProviderEgressTlsFinding,
+	commonModeNetworks int,
+	direct ProviderEgressTlsDirectOutcome,
+	settings *ProviderEgressTlsJudgeSettings,
+) bool {
+	return now.Sub(finding.MeasuredAt) <= settings.DirectWindow &&
+		(settings.CommonModeNetworkCount <= commonModeNetworks || direct == ProviderEgressTlsDirectFailed)
+}
+
 // Decides one finding: its verdict, and whether that verdict decided its
 // latest failure. serving says where its destination name stands against the
 // served pool; commonModeNetworks counts the networks failing TLS on its URL
@@ -717,7 +759,7 @@ func judgeProviderEgressTlsFinding(
 	}
 	age := now.Sub(finding.MeasuredAt)
 	close := age <= settings.DirectWindow
-	if close && (settings.CommonModeNetworkCount <= commonModeNetworks || direct == ProviderEgressTlsDirectFailed) {
+	if providerEgressTlsSiteFault(now, finding, commonModeNetworks, direct, settings) {
 		return ProviderEgressTlsVerdictSite, true
 	}
 	if age <= settings.PlaceWindow && finding.CountryCode != "" && place.broken(settings) {
@@ -785,12 +827,17 @@ func JudgeProviderEgressTlsFindings(
 ) []*ProviderEgressTlsJudgement {
 	commonMode := providerEgressTlsCommonModeNetworks(now, findings, settings)
 	serving := make([]providerEgressTlsServing, len(findings))
-	judged := make([]bool, len(findings))
+	// Place evidence is read only for findings the place rule could decide:
+	// judged on evidence, and not already a site or prober fault, which the
+	// rule decides first. A fault that fails TLS fleet-wide is one of those,
+	// so it costs no outcome reads.
+	placeCandidates := make([]bool, len(findings))
 	for i, finding := range findings {
 		serving[i] = pool.serving(now, finding.Name, settings)
-		judged[i] = providerEgressTlsJudgesOnEvidence(finding, serving[i])
+		placeCandidates[i] = providerEgressTlsJudgesOnEvidence(finding, serving[i]) &&
+			!providerEgressTlsSiteFault(now, finding, commonMode[finding.UrlKey], direct[finding.Host()], settings)
 	}
-	placeEvidence := getProviderEgressTlsPlaceEvidence(ctx, now, settings, findings, judged)
+	placeEvidence := getProviderEgressTlsPlaceEvidence(ctx, now, settings, findings, placeCandidates)
 
 	judgements := make([]*ProviderEgressTlsJudgement, 0, len(findings))
 	for i, finding := range findings {
