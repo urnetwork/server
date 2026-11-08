@@ -170,6 +170,7 @@ func collectSubscriptionMetrics(collector *subscriptionMetricsCollector) []prome
 func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *model.SubscriptionMetricsSnapshot {
 	snapshot := &model.SubscriptionMetricsSnapshot{
 		ActiveAccounts:           map[string]int64{},
+		TrialsActive:             map[model.SubscriptionMetricsStorePlan]int64{},
 		NewPaidAccounts:          map[model.SubscriptionMetricsStoreWindow]int64{},
 		EngagedAccounts:          map[model.SubscriptionMetricsStoreWindow]int64{},
 		ChurnedAccounts:          map[model.SubscriptionMetricsStoreWindow]int64{},
@@ -182,6 +183,9 @@ func uniformSubscriptionMetricsSnapshot(value int64, sourceTime time.Time) *mode
 	stores := append(model.SubscriptionMetricsStores(), model.SubscriptionMetricsStoreDeduplicated)
 	for _, store := range stores {
 		snapshot.ActiveAccounts[store] = value
+		for _, plan := range model.SubscriptionMetricsPlans() {
+			snapshot.TrialsActive[model.SubscriptionMetricsStorePlan{Store: store, Plan: plan}] = value
+		}
 		for _, window := range model.SubscriptionMetricsWindows() {
 			key := model.SubscriptionMetricsStoreWindow{Store: store, Window: window}
 			snapshot.NewPaidAccounts[key] = value
@@ -224,9 +228,10 @@ func requireSubscriptionMetricsGeneration(
 ) {
 	t.Helper()
 	// six tracked stores (apple, google, stripe, solana, monero, zcash): monero
-	// and zcash added 58 samples to the 152 of four stores
-	if len(metrics) != 210 {
-		t.Fatalf("collected metrics = %d, want 210 bounded samples", len(metrics))
+	// and zcash added 58 samples to the 152 of four stores, and the active
+	// trials 21 (seven stores by three plans)
+	if len(metrics) != 231 {
+		t.Fatalf("collected metrics = %d, want 231 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric

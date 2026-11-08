@@ -24,21 +24,28 @@ const (
 
 var subscriptionMetricsActiveAccountsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_active_accounts",
-	"Distinct networks with a current paid supporter window, per tracked store and deduplicated across stores.",
+	"Distinct networks with a current supporter window (paid, free trial, or a grace period after a failed charge), per tracked store and deduplicated across stores. App Store sandbox purchases are left out.",
 	[]string{"store"},
+	nil,
+)
+
+var subscriptionMetricsTrialsActiveDesc = prometheus.NewDesc(
+	"urnetwork_subscription_trials_active",
+	"Distinct networks inside a free trial now (nothing charged yet), per tracked store and plan, plus deduplicated across stores. They count in urnetwork_subscription_active_accounts too.",
+	[]string{"store", "plan"},
 	nil,
 )
 
 var subscriptionMetricsNewPaidAccountsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_new_paid_accounts",
-	"Distinct networks whose first paid supporter window for a store began inside the rolling window, plus a first-ever deduplicated total across tracked stores.",
+	"Distinct networks whose first supporter window for a store (a free trial's start included) began inside the rolling window, plus a first-ever deduplicated total across tracked stores.",
 	[]string{"store", "window"},
 	nil,
 )
 
 var subscriptionMetricsEngagedAccountsDesc = prometheus.NewDesc(
 	"urnetwork_subscription_engaged_accounts",
-	"Current paid networks with an active top-level client authenticated inside the rolling window, per store and deduplicated.",
+	"Current subscribers (trials included) with an active top-level client authenticated inside the rolling window, per store and deduplicated.",
 	[]string{"store", "window"},
 	nil,
 )
@@ -87,6 +94,7 @@ var subscriptionMetricsSnapshotTimestampDesc = prometheus.NewDesc(
 
 var subscriptionMetricsDescs = []*prometheus.Desc{
 	subscriptionMetricsActiveAccountsDesc,
+	subscriptionMetricsTrialsActiveDesc,
 	subscriptionMetricsNewPaidAccountsDesc,
 	subscriptionMetricsEngagedAccountsDesc,
 	subscriptionMetricsChurnedAccountsDesc,
@@ -188,6 +196,15 @@ func (self *subscriptionMetricsCollector) set(snapshot *model.SubscriptionMetric
 			float64(snapshot.ActiveAccounts[store]),
 			store,
 		))
+		for _, plan := range model.SubscriptionMetricsPlans() {
+			metrics = append(metrics, prometheus.MustNewConstMetric(
+				subscriptionMetricsTrialsActiveDesc,
+				prometheus.GaugeValue,
+				float64(snapshot.TrialsActive[model.SubscriptionMetricsStorePlan{Store: store, Plan: plan}]),
+				store,
+				plan,
+			))
+		}
 		for _, window := range model.SubscriptionMetricsWindows() {
 			key := model.SubscriptionMetricsStoreWindow{Store: store, Window: window}
 			metrics = append(metrics,

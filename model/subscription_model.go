@@ -1087,6 +1087,60 @@ func HasPlayGraceHoldInTx(tx server.PgTx, ctx context.Context, purchaseToken str
 	return
 }
 
+// How many of a Play purchase's latest credited windows
+// GetPlayPurchaseCreditEndTimesInTx reads: decades of monthly renewals, each
+// with a day Play added before it.
+const playPurchaseCreditEndTimesLimit = 1000
+
+// GetPlayPurchaseCreditEndTimesInTx is the end of each Pro window the
+// network's Play purchase was credited, oldest first, up to the latest
+// playPurchaseCreditEndTimesLimit. The Play sales notice reads it before the
+// next credit is added, to tell a newly charged window from one Play only
+// moved.
+//
+// It reads the purchase's subscription_renewal rows, which nothing prunes.
+// Its transfer_balance rows are no history: RemoveCompletedContracts deletes
+// a balance 7 days after it ends, so a trial converting after an account hold
+// or a renewal after a week of Play's pending days would be measured from a
+// partial history. A grace period's hold records no revenue and is left out.
+// A data pack's credit writes no renewal row, so it has no history here.
+func GetPlayPurchaseCreditEndTimesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) []time.Time {
+	endTimes := []time.Time{}
+	if purchaseToken == "" {
+		return endTimes
+	}
+	result, err := tx.Query(
+		ctx,
+		`
+		/* play-purchase-credit-end-times */
+		SELECT end_time
+		FROM subscription_renewal
+		WHERE
+			network_id = $1 AND
+			subscription_type = $2 AND
+			market = $3 AND
+			purchase_token = $4 AND
+			0 < net_revenue_nano_cents
+		ORDER BY end_time DESC
+		LIMIT $5
+		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		SubscriptionMarketGoogle,
+		purchaseToken,
+		playPurchaseCreditEndTimesLimit,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var endTime time.Time
+			server.Raise(result.Scan(&endTime))
+			endTimes = append(endTimes, endTime.UTC())
+		}
+	})
+	slices.Reverse(endTimes)
+	return endTimes
+}
+
 func AddBasicTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,

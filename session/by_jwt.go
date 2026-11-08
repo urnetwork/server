@@ -151,6 +151,14 @@ type ByJwt struct {
 	// client (session/AUTH.md §1). Set when the guest is created; renewal and
 	// every credential derived from it keep it.
 	LagGuest bool `json:"lag_guest,omitempty"`
+	// whether UR Pro raises the network's concurrent client limit: true for a
+	// network on the free plan without an Embed allowance, false for a Pro
+	// network or an Embed allowance (model.ClientLimitUpgradeClaim). Set on
+	// the client tokens auth-client mints and on every client token renewal;
+	// nil on a token minted before it. The apps' sdk offers the upgrade for a
+	// client limit hold only when it is true (sdk client_limit_status.go). The
+	// server never reads it: admission reads the plan live.
+	ClientLimitUpgrade *bool `json:"client_limit_upgrade,omitempty"`
 	gojwt.RegisteredClaims
 }
 
@@ -792,20 +800,21 @@ func (self *ByJwt) Testing_Sign() string {
 // before signing
 func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 	return &ByJwt{
-		NetworkId:        self.NetworkId,
-		UserId:           self.UserId,
-		NetworkName:      self.NetworkName,
-		CreateTime:       self.CreateTime,
-		GuestMode:        self.GuestMode,
-		Pro:              self.Pro,
-		Roles:            self.Roles,
-		Principal:        self.Principal,
-		LagGuest:         self.LagGuest,
-		DeviceId:         &deviceId,
-		ClientId:         &clientId,
-		SessionId:        self.SessionId,
-		RootClientId:     self.clientRoot(clientId),
-		RegisteredClaims: newRegisteredClaims(self.UserId),
+		NetworkId:          self.NetworkId,
+		UserId:             self.UserId,
+		NetworkName:        self.NetworkName,
+		CreateTime:         self.CreateTime,
+		GuestMode:          self.GuestMode,
+		Pro:                self.Pro,
+		Roles:              self.Roles,
+		Principal:          self.Principal,
+		LagGuest:           self.LagGuest,
+		ClientLimitUpgrade: cloneClientLimitUpgrade(self.ClientLimitUpgrade),
+		DeviceId:           &deviceId,
+		ClientId:           &clientId,
+		SessionId:          self.SessionId,
+		RootClientId:       self.clientRoot(clientId),
+		RegisteredClaims:   newRegisteredClaims(self.UserId),
 	}
 }
 
@@ -825,7 +834,16 @@ func (self *ByJwt) Renew() *ByJwt {
 	copy := *self
 	copy.RegisteredClaims = newRegisteredClaims(self.UserId)
 	copy.Roles = slices.Clone(self.Roles)
+	copy.ClientLimitUpgrade = cloneClientLimitUpgrade(self.ClientLimitUpgrade)
 	return &copy
+}
+
+func cloneClientLimitUpgrade(clientLimitUpgrade *bool) *bool {
+	if clientLimitUpgrade == nil {
+		return nil
+	}
+	value := *clientLimitUpgrade
+	return &value
 }
 
 // in some cases, the byJwt might be corrupt

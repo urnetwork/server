@@ -553,6 +553,18 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			return nil, err
 		}
 
+		// As for a CONNECT: a window still forming, or refilling after it lost
+		// every provider, drops the dial's SYNs and its DoH queries, and the
+		// dial would wait out the stack's backoff, missing a provider that
+		// joins late in the budget. Wait for the first one, within ctx.
+		if !pd.WaitForRoute(ctx, connectBudget) {
+			recordProxyAdmissionFailure("socks", false)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			return nil, errProxyDeviceNoRoute
+		}
+
 		conn, err := pd.DialContext(ctx, network, addr)
 		if err != nil {
 			recordProxyAdmissionFailure("socks", false)
