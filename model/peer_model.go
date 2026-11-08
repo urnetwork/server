@@ -1505,17 +1505,12 @@ func isNetworkPeerConnected(ctx context.Context, networkId server.Id, clientId s
 // While enforcement is dark this returns false IMMEDIATELY, with no redis and no db
 // lookup, so shipping the gate costs nothing on the auth hot path -- the cost only
 // arrives with the rollout. Exempt intent providers are not counted, and Pro is
-// read live (never from the jwt's stale claim). This is the client-creation gate;
+// read live (never from the jwt's stale claim). This is the client-creation gate
+// (AuthNetworkClient refuses with networkConcurrentClientLimitRefusal, which
+// decides the same and says whether an upgrade lifts the limit);
 // CanConnectNetworkPeer is the connection-activation gate.
 func NetworkConcurrentClientsExceeded(ctx context.Context, networkId server.Id) bool {
-	// dark, or no pro.yml at all -> no limit, and no i/o to find that out
-	if !Pro().EnforceConcurrentClients {
-		return false
-	}
-
-	limit := networkConcurrentClientLimit(ctx, networkId)
-	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
-	return concurrentClientLimitExceeded(limit, connectedCount)
+	return networkConcurrentClientLimitRefusal(ctx, networkId) != nil
 }
 
 // CanConnectNetworkPeer reports whether `clientId` may become a connected

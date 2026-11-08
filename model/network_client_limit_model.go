@@ -272,10 +272,61 @@ func networkClientLimitOverride(ctx context.Context, networkId server.Id) (limit
 // the network has one, otherwise its tier's pro.yml concurrent_clients. Zero or
 // less is unlimited. The tier is only read for a network without a row.
 func networkConcurrentClientLimit(ctx context.Context, networkId server.Id) int {
+	limit, _, _ := networkConcurrentClientLimitTier(ctx, networkId)
+	return limit
+}
+
+// networkConcurrentClientLimitTier is networkConcurrentClientLimit with where
+// the limit comes from: override is true for an Embed plan row, and isPro is
+// the network's tier, read live (never from a jwt claim) and only for a network
+// without a row, so it is false whenever override is true.
+func networkConcurrentClientLimitTier(ctx context.Context, networkId server.Id) (limit int, override bool, isPro bool) {
 	if limit, override := networkClientLimitOverride(ctx, networkId); override {
-		return limit
+		return limit, true, false
 	}
-	return Pro().MaxConcurrentClients(IsProNetwork(ctx, networkId))
+	isPro = IsProNetwork(ctx, networkId)
+	return Pro().MaxConcurrentClients(isPro), false, isPro
+}
+
+// networkConcurrentClientLimitRefusal is the client-creation refusal of a
+// network that already has its plan's full complement of connected top-level
+// clients, or nil when there is room. While enforcement is dark it is nil at
+// once, with no redis and no db lookup. See concurrentClientLimitRefusal for
+// what the refusal offers.
+func networkConcurrentClientLimitRefusal(ctx context.Context, networkId server.Id) *AuthNetworkClientError {
+	// dark, or no pro.yml at all -> no limit, and no i/o to find that out
+	if !Pro().EnforceConcurrentClients {
+		return nil
+	}
+	limit, override, isPro := networkConcurrentClientLimitTier(ctx, networkId)
+	connectedCount := GetNetworkEnforceableConnectedCount(ctx, networkId)
+	if !concurrentClientLimitExceeded(limit, connectedCount) {
+		return nil
+	}
+	return concurrentClientLimitRefusal(override, isPro, Pro().MaxConcurrentClients(true), connectedCount)
+}
+
+// concurrentClientLimitRefusal is the refusal of a network over its concurrent
+// connected client limit. It asks for an upgrade only when an upgrade lifts the
+// limit: a network on the free tier, with no Embed plan row, whose Pro tier
+// allows more than `connectedCount` (a `proLimit` of zero or less is
+// unlimited). A Pro network at the Pro tier's limit, and a network whose
+// allowance is an Embed plan row that no plan changes, are told to free a slot
+// instead. The apps show the upgrade flow only for upgrade_required, and the
+// auth-client handler quotes an x402 Pro month only for it, so neither sells a
+// Pro plan that would not let the client connect.
+func concurrentClientLimitRefusal(override bool, isPro bool, proLimit int, connectedCount int) *AuthNetworkClientError {
+	if !override && !isPro && (proLimit <= 0 || connectedCount < proLimit) {
+		return &AuthNetworkClientError{
+			ClientLimitExceeded: true,
+			UpgradeRequired:     true,
+			Message:             "Your plan's concurrent client limit is reached. Upgrade to UR Pro to connect more clients.",
+		}
+	}
+	return &AuthNetworkClientError{
+		ClientLimitExceeded: true,
+		Message:             "Your plan's concurrent client limit is reached. Remove or disconnect another client to connect this one.",
+	}
 }
 
 // concurrentClientLimitExceeded reports whether a network with `connectedCount`

@@ -90,6 +90,52 @@ func TestConcurrentClientLimitExceeded(t *testing.T) {
 	connect.AssertEqual(t, concurrentClientLimitExceeded(5000, 5000), true)
 }
 
+// The concurrent limit's refusal asks for an upgrade only when an upgrade lifts
+// the limit: a free network with no Embed plan row whose Pro tier allows more
+// than are connected. Every refusal says the client limit is exceeded, so the
+// apps can tell it from any other refusal and say how to free a slot.
+func TestConcurrentClientLimitRefusalOffersUpgradeOnlyWhenItLiftsTheLimit(t *testing.T) {
+	cases := []struct {
+		override        bool
+		isPro           bool
+		proLimit        int
+		connectedCount  int
+		upgradeRequired bool
+	}{
+		// free at the free limit, the Pro tier has room
+		{override: false, isPro: false, proLimit: 1000, connectedCount: 2, upgradeRequired: true},
+		// free, the Pro tier is unlimited
+		{override: false, isPro: false, proLimit: 0, connectedCount: 2, upgradeRequired: true},
+		// free, but as many are connected as the Pro tier allows
+		{override: false, isPro: false, proLimit: 2, connectedCount: 2, upgradeRequired: false},
+		// Pro at the Pro limit
+		{override: false, isPro: true, proLimit: 1000, connectedCount: 1000, upgradeRequired: false},
+		// an Embed plan row, whatever the tier would allow
+		{override: true, isPro: false, proLimit: 1000, connectedCount: 5, upgradeRequired: false},
+	}
+	for _, c := range cases {
+		refusal := concurrentClientLimitRefusal(c.override, c.isPro, c.proLimit, c.connectedCount)
+		if !refusal.ClientLimitExceeded {
+			t.Errorf("%+v: the refusal does not say the client limit is exceeded", c)
+		}
+		if refusal.UpgradeRequired != c.upgradeRequired {
+			t.Errorf("%+v: upgrade_required = %t, want %t", c, refusal.UpgradeRequired, c.upgradeRequired)
+		}
+		if refusal.Message == "" {
+			t.Errorf("%+v: the refusal has no message", c)
+		}
+	}
+}
+
+// While enforcement is dark the refusal is nil at once, with no lookup: this
+// test has no database or redis for one to reach.
+func TestNetworkConcurrentClientLimitRefusalIsDarkWithoutLookup(t *testing.T) {
+	defer Testing_SetEnforceConcurrentClients(false)()
+	if refusal := networkConcurrentClientLimitRefusal(context.Background(), server.NewId()); refusal != nil {
+		t.Fatalf("refusal while dark = %+v, want none", refusal)
+	}
+}
+
 // With an Embed plan row cached, the network's concurrent limit is the row's
 // limit and the tier is never read (this test has no database to read it from).
 func TestNetworkConcurrentClientLimitUsesTheEmbedPlanOverride(t *testing.T) {

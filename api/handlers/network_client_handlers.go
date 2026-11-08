@@ -17,8 +17,9 @@ import (
 //
 // The retry carries the signed payment on the SAME request, which is settled before
 // the auth runs -- so by the time AuthNetworkClient checks the limit, the network is
-// already Pro and simply succeeds. When x402 is off, the limit still returns the
-// normal JSON body with `upgrade_required` for human clients to prompt on.
+// already Pro and simply succeeds. The URnetwork apps, and every caller while x402
+// is off, get the normal JSON body with `upgrade_required` to prompt on instead
+// (controller.X402QuotesClient).
 func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 	if !controller.X402SettleInlineUpgrade(w, r) {
 		// settlement failed and the response is already written
@@ -30,7 +31,7 @@ func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 		w,
 		r,
 		func(_ *session.ClientSession, result *model.AuthNetworkClientResult) bool {
-			return controller.WriteX402UpgradeRequired(w, result)
+			return controller.WriteX402UpgradeRequired(w, r, result)
 		},
 	)
 }

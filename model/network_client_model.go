@@ -250,10 +250,14 @@ type AuthNetworkClientResult struct {
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
 	ClientLimitExceeded bool `json:"client_limit_exceeded"`
-	// the network is at its plan's limit for concurrent connected top-level
-	// clients (pro.yml concurrent_clients). Unlike ClientLimitExceeded, this is
-	// a plan limit rather than a hard cap: the client should surface an upgrade
-	// prompt. Corresponds to HTTP 402 semantics for the caller.
+	// a plan limit refused the request and UR Pro lifts it: the network is on
+	// the free tier at its concurrent connected top-level client limit
+	// (pro.yml concurrent_clients), its hosted proxy cap or create rate, or a
+	// Pro-only feature. The client should surface an upgrade prompt.
+	// Corresponds to HTTP 402 semantics for an agent. A refusal with
+	// ClientLimitExceeded and without this is one no upgrade lifts: a Pro
+	// network at the Pro limit, an Embed plan's allowance, or the top-level
+	// client cap; the client should say how to free a slot instead.
 	UpgradeRequired bool `json:"upgrade_required,omitempty"`
 	// a unique-exit create found no exit the network could take in the
 	// location. Nothing was created, and neither the proxy cap nor the create
@@ -531,8 +535,13 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// live rather than from the jwt's stale claim; and while the rollout is dark
 		// this does no redis/db work at all. See NetworkConcurrentClientsExceeded.
 		// Checked before the tx so the lookup does not hold it open. Connection
-		// activation applies the same limit; see CanConnectNetworkPeer.
-		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		// activation applies the same limit; see CanConnectNetworkPeer. The
+		// refusal asks for an upgrade only when one lifts the limit
+		// (concurrentClientLimitRefusal).
+		var concurrentLimitRefusal *AuthNetworkClientError
+		if authClient.SourceClientId == nil && !authClient.ProvideIntent {
+			concurrentLimitRefusal = networkConcurrentClientLimitRefusal(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		}
 		// A hosted proxy is limited on its own, and always
 		// (network_client_proxy_limit.go): the network's active proxies are
 		// capped and its proxy creates are rated per minute. The Embed row and
@@ -549,13 +558,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		proxyCreateRateExceeded := func(isPro bool) bool {
 			return proxyCreateCounted && proxyClientCreateRateExceeded(proxyClientCreatesPerMinute(isPro), proxyCreateCount)
 		}
-		if concurrentLimitExceeded && registration == nil {
+		if concurrentLimitRefusal != nil && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
-				Error: &AuthNetworkClientError{
-					ClientLimitExceeded: true,
-					UpgradeRequired:     true,
-					Message:             "Your plan's concurrent client limit is reached. Upgrade to UR Pro to connect more clients.",
-				},
+				Error: concurrentLimitRefusal,
 			}
 			return
 		}
@@ -693,8 +698,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					}
 					return
 				}
-				if concurrentLimitExceeded {
-					authClientResult = &AuthNetworkClientResult{Error: &AuthNetworkClientError{ClientLimitExceeded: true, UpgradeRequired: true, Message: "Your plan's concurrent client limit is reached."}}
+				if concurrentLimitRefusal != nil {
+					authClientResult = &AuthNetworkClientResult{Error: concurrentLimitRefusal}
 					return
 				}
 			}

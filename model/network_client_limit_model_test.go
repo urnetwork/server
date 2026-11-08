@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
@@ -17,6 +18,79 @@ func provisionTopLevel(t testing.TB, network *dataCapTestNetwork) *AuthNetworkCl
 	return result
 }
 
+// The concurrent limit's creation refusal offers an upgrade only to a network
+// an upgrade lets connect: a free network at the free limit. A Pro network at
+// the Pro limit, and a network at its Embed plan row's allowance, are refused
+// with client_limit_exceeded and no upgrade_required, so the apps say how to
+// free a slot and x402 quotes nothing. Before, every refusal asked for an
+// upgrade: the apps put a Pro network at its Pro limit in front of a paywall
+// that sold it nothing, and with x402 on it was quoted another Pro month.
+func TestAuthNetworkClientConcurrentLimitOffersUpgradeOnlyWhenItLiftsTheLimit(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer Testing_SetEnforceConcurrentClients(true)()
+		// free 2 connected, Pro 3
+		defer Testing_SetConcurrentClientsLimit(2, 3)()
+		defer Testing_ClearNetworkClientLimitCache()
+
+		network := newDataCapTestNetworkWithoutEmbed(ctx, "upgrade")
+		clientIds := []server.Id{}
+		for range 3 {
+			result := provisionTopLevel(t, network)
+			connect.AssertEqual(t, result.Error, (*AuthNetworkClientError)(nil))
+			clientIds = append(clientIds, *result.ClientId)
+		}
+
+		// free with two connected: Pro lifts the limit
+		registerTestPeer(t, ctx, network.networkId, clientIds[0])
+		registerTestPeer(t, ctx, network.networkId, clientIds[1])
+		refused := provisionTopLevel(t, network)
+		if refused.Error == nil {
+			t.Fatal("the free tier's concurrent limit did not refuse creation")
+		}
+		connect.AssertEqual(t, refused.Error.ClientLimitExceeded, true)
+		connect.AssertEqual(t, refused.Error.UpgradeRequired, true)
+		connect.AssertEqual(t, refused.ClientId == nil, true)
+
+		// Pro, under the Pro limit: created
+		balanceTime := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(AddProTransferBalanceInTx(tx, ctx, network.networkId, ByteCount(1024*1024), balanceTime, balanceTime.Add(time.Hour)))
+		})
+		connect.AssertEqual(t, IsProFresh(ctx, &network.networkId), true)
+		connect.AssertEqual(t, provisionTopLevel(t, network).Error, (*AuthNetworkClientError)(nil))
+
+		// Pro at the Pro limit: no upgrade lifts it
+		registerTestPeer(t, ctx, network.networkId, clientIds[2])
+		refused = provisionTopLevel(t, network)
+		if refused.Error == nil {
+			t.Fatal("the Pro tier's concurrent limit did not refuse creation")
+		}
+		connect.AssertEqual(t, refused.Error.ClientLimitExceeded, true)
+		connect.AssertEqual(t, refused.Error.UpgradeRequired, false)
+		connect.AssertEqual(t, refused.ClientId == nil, true)
+
+		// a free network at its Embed plan row's allowance: no plan changes it
+		embedNetwork := newDataCapTestNetwork(ctx, "embed-upgrade")
+		embedClientIds := []server.Id{}
+		for range 2 {
+			result := provisionTopLevel(t, embedNetwork)
+			connect.AssertEqual(t, result.Error, (*AuthNetworkClientError)(nil))
+			embedClientIds = append(embedClientIds, *result.ClientId)
+		}
+		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(ctx, embedNetwork.networkId, 2), nil)
+		registerTestPeer(t, ctx, embedNetwork.networkId, embedClientIds[0])
+		registerTestPeer(t, ctx, embedNetwork.networkId, embedClientIds[1])
+		refused = provisionTopLevel(t, embedNetwork)
+		if refused.Error == nil {
+			t.Fatal("the Embed plan's allowance did not refuse creation")
+		}
+		connect.AssertEqual(t, refused.Error.ClientLimitExceeded, true)
+		connect.AssertEqual(t, refused.Error.UpgradeRequired, false)
+	})
+}
+
 // An Embed plan row is the network's allowance for both limits: the create
 // cap and the concurrent connection limit (creation's upgrade_required and
 // connection activation). Without a row the tier's concurrent_clients applies.
@@ -25,8 +99,9 @@ func TestNetworkClientAllowanceAppliesToTheConcurrentLimit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		defer Testing_SetEnforceConcurrentClients(true)()
-		// a free network may hold two connected top-level clients
-		defer Testing_SetConcurrentClientsLimit(2, 2)()
+		// a free network may hold two connected top-level clients, and Pro
+		// three, so the free tier's refusal offers the upgrade
+		defer Testing_SetConcurrentClientsLimit(2, 3)()
 		defer Testing_ClearNetworkClientLimitCache()
 
 		network := newDataCapTestNetwork(ctx, "embed")
