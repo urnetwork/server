@@ -66,12 +66,38 @@ func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, network
 	return limit
 }
 
+// The most active top-level clients the create cap's count reads to find the
+// network's devices among them (countNetworkActiveTopLevelClients). A network
+// whose top-level clients are mostly hosted proxies can hold thousands more of
+// them than devices, and the count skips those, so the read is bounded rather
+// than walking them all on every create. A network with more top-level clients
+// than this is counted from the first this many, which can only undercount: the
+// cap then lets a create through rather than refusing one. An Embed plan row
+// above it reads up to its limit. Variable only so tests can change it.
+var topLevelClientCountExamineBudget = 50_000
+
+// Testing_SetTopLevelClientCountExamineBudget sets the read bound of the create
+// cap's count and returns a function that restores it. Tests that use it must
+// not run in parallel.
+func Testing_SetTopLevelClientCountExamineBudget(budget int) func() {
+	prev := topLevelClientCountExamineBudget
+	topLevelClientCountExamineBudget = budget
+	return func() {
+		topLevelClientCountExamineBudget = prev
+	}
+}
+
 // countNetworkActiveTopLevelClients counts what the AuthNetworkClient create cap
-// counts: the network's active top-level clients (no source_client_id) that are
-// not provider installs. The scan stops at scanLimit rows: the create cap passes
-// its limit + 1, since only the threshold matters there, and GET /network/embed
-// passes the largest allowance + 1, so its count is exact for any allowance.
-func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQuery, networkId server.Id, scanLimit int) int {
+// counts: the network's devices, its active top-level clients (no
+// source_client_id) that are neither provider installs nor hosted proxies. A
+// hosted proxy is governed by its own cap and create rate
+// (network_client_proxy_limit.go), not by this one (owner decision 2026-11-08),
+// so a network with many proxies can still add its devices. The count stops at
+// scanLimit devices: the create cap passes its limit + 1, since only the
+// threshold matters there, and GET /network/embed passes the largest allowance
+// + 1, so its count is exact for any allowance. It reads at most examineLimit
+// top-level clients to find them (topLevelClientCountExamineBudget).
+func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQuery, networkId server.Id, scanLimit int, examineLimit int) int {
 	count := 0
 	result, err := query.Query(
 		ctx,
@@ -79,20 +105,30 @@ func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQu
 			SELECT COUNT(*) AS top_level_client_count
 			FROM (
 				SELECT 1
-				FROM network_client
+				FROM (
+					SELECT network_client.client_id
+					FROM network_client
+					WHERE
+						network_client.network_id = $1 AND
+						network_client.active = true AND
+						network_client.source_client_id IS NULL
+					LIMIT $3
+				) top_level
 				WHERE
-					network_id = $1 AND
-					active = true AND
-					source_client_id IS NULL AND
 					NOT EXISTS (
 						SELECT 1 FROM network_client_provider_intent
-						WHERE network_client_provider_intent.client_id = network_client.client_id
+						WHERE network_client_provider_intent.client_id = top_level.client_id
+					) AND
+					NOT EXISTS (
+						SELECT 1 FROM proxy_device_config
+						WHERE proxy_device_config.client_id = top_level.client_id
 					)
 				LIMIT $2
 			) t
 		`,
 		networkId,
 		scanLimit,
+		max(scanLimit, examineLimit),
 	)
 	server.WithPgResult(result, err, func() {
 		if result.Next() {

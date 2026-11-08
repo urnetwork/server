@@ -768,13 +768,21 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				// is dark, this cap is not enforced and no count runs at all (see
 				// pro.yml). Provisioning must never be refused while dark. A
 				// provider install (provide intent) is exempt and is not counted:
-				// it never becomes a peer (NetworkPeerCategoryProvider). The limit
-				// is per network: an Embed plan raises it (see
+				// it never becomes a peer (NetworkPeerCategoryProvider). A hosted
+				// proxy is neither counted nor capped here: its own cap and create
+				// rate govern it (owner decision 2026-11-08). The limit is per
+				// network: an Embed plan raises it (see
 				// network_client_limit_model.go); the peer valve keeps the constant.
-				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
+				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent && authClient.ProxyConfig == nil {
 					topLevelClientLimit := networkTopLevelClientLimitInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId)
-					// the scan is bounded at the limit since only the threshold matters
-					topLevelClientCount := countNetworkActiveTopLevelClients(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, topLevelClientLimit+1)
+					// the count stops at the limit since only the threshold matters
+					topLevelClientCount := countNetworkActiveTopLevelClients(
+						clientSession.Ctx,
+						tx,
+						clientSession.ByJwt.NetworkId,
+						topLevelClientLimit+1,
+						topLevelClientCountExamineBudget,
+					)
 					if topLevelClientLimit <= topLevelClientCount {
 						authClientResult = &AuthNetworkClientResult{
 							Error: &AuthNetworkClientError{

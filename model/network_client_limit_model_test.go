@@ -85,6 +85,87 @@ func TestAuthNetworkClientAppSignInIsHeldAtConnectNotRefusedAtCreation(t *testin
 	})
 }
 
+// Owner decision 2026-11-08: the top-level client cap counts the network's
+// devices, not its hosted proxies, which their own cap and create rate govern.
+// A network whose proxies fill the cap still adds devices, and a proxy create
+// is not refused by the device cap. Before, every proxy took a slot of the cap,
+// so a Pro network with 100 active proxies could add neither a device nor a
+// proxy once enforcement was on.
+func TestAuthNetworkClientTopLevelCapCountsDevicesNotProxies(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer Testing_SetEnforceConcurrentClients(true)()
+		defer Testing_ClearNetworkClientLimitCache()
+		defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+
+		// an Embed plan row of 3: the top-level cap and the proxy cap are 3
+		network := newDataCapTestNetwork(ctx, "cap-proxies")
+		connect.AssertEqual(t, SetNetworkTopLevelClientLimit(ctx, network.networkId, 3), nil)
+
+		// three proxies fill the proxy cap
+		var proxyClientIds []server.Id
+		for range 3 {
+			proxy := testAuthProxyClient(t, network.rootSession)
+			if proxy.Error != nil {
+				t.Fatalf("proxy create = %+v", proxy.Error)
+			}
+			proxyClientIds = append(proxyClientIds, *proxy.ClientId)
+		}
+		if refused := testAuthProxyClient(t, network.rootSession); refused.Error == nil {
+			t.Fatal("the proxy cap did not refuse a fourth proxy")
+		}
+
+		// the proxies are not devices: three devices fit the cap
+		for range 3 {
+			connect.AssertEqual(t, provisionTopLevel(t, network).Error, (*AuthNetworkClientError)(nil))
+		}
+		refused := provisionTopLevel(t, network)
+		if refused.Error == nil || !refused.Error.ClientLimitExceeded {
+			t.Fatalf("a fourth device = %+v, want the top-level cap refusal", refused.Error)
+		}
+		server.Tx(ctx, func(tx server.PgTx) {
+			connect.AssertEqual(t, countNetworkActiveTopLevelClients(ctx, tx, network.networkId, 3+1, topLevelClientCountExamineBudget), 3)
+		})
+
+		// with the device cap full, a proxy is refused only by the proxy cap:
+		// a removed proxy makes room for the next
+		removed, err := RemoveNetworkClient(&RemoveNetworkClientArgs{ClientId: proxyClientIds[0]}, network.rootSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, removed.Error, (*RemoveNetworkClientError)(nil))
+		if proxy := testAuthProxyClient(t, network.rootSession); proxy.Error != nil {
+			t.Fatalf("a proxy with room in the proxy cap and the device cap full = %+v, want created", proxy.Error)
+		}
+	})
+}
+
+// The count is of devices: hosted proxies and provider installs are skipped.
+// It stops at its scan limit, and its read bound never drops below that limit.
+func TestCountNetworkActiveTopLevelClientsCountsDevices(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		defer Testing_ClearNetworkClientLimitCache()
+		defer Testing_SetProxyClientCreatesPerMinute(0, 0)()
+
+		network := newDataCapTestNetworkWithoutEmbed(ctx, "count-devices")
+		for range 2 {
+			connect.AssertEqual(t, testAuthProxyClient(t, network.rootSession).Error, (*AuthNetworkClientError)(nil))
+			connect.AssertEqual(t, testAuthDeviceClient(t, network.rootSession).Error, (*AuthNetworkClientError)(nil))
+		}
+		provider, err := AuthNetworkClient(&AuthNetworkClientArgs{Description: "provider", ProvideIntent: true}, network.rootSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, provider.Error, (*AuthNetworkClientError)(nil))
+		server.Tx(ctx, func(tx server.PgTx) {
+			connect.AssertEqual(t, countNetworkActiveTopLevelClients(ctx, tx, network.networkId, 100, 100), 2)
+			// the count stops at its scan limit
+			connect.AssertEqual(t, countNetworkActiveTopLevelClients(ctx, tx, network.networkId, 1, 100), 1)
+			// and reads at least as many clients as its scan limit
+			connect.AssertEqual(t, countNetworkActiveTopLevelClients(ctx, tx, network.networkId, 100, 0), 2)
+		})
+	})
+}
+
 // The concurrent limit's creation refusal offers an upgrade only to a network
 // an upgrade lets connect: a free network at the free limit. A Pro network at
 // the Pro limit, and a network at its Embed plan row's allowance, are refused
