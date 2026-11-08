@@ -285,12 +285,11 @@ func captureWinnerHandoffRuntime(ctx context.Context, config winnerHandoffRuntim
 			capture := winnerHandoffRuntimeCapture{Schema: 1, Kind: "winner-review-multipass-runtime-capture/v1", BootstrapRelease: config.Release, Owner: owner, OwnerClaim: ownerClaim, Claim: claim, Input: input, Output: output, Diagnostics: diagnostics, Containment: receipt, PhysicalAuthentication: physical}
 			captureErr := errors.Join(invokeErr, authenticationErr)
 			if authenticationErr == nil {
+				var retainErr error
+				capture.Custody, retainErr = retainWinnerHandoffContainment(retentionCtx, "runtime_probe", envelope, receipt, retain)
+				captureErr = errors.Join(captureErr, retainErr)
 				if receipt == nil || receipt.Result == nil || receipt.Result.RuntimeObservation == nil || receipt.Result.Admission != nil || receipt.Result.Error != "" || len(independent) != 0 {
 					captureErr = errors.Join(captureErr, errors.New("runtime result lacks a complete non-inference observation"))
-				} else {
-					var retainErr error
-					capture.Custody, retainErr = retainWinnerHandoffContainment(retentionCtx, "runtime_probe", envelope, receipt, retain)
-					captureErr = errors.Join(captureErr, retainErr)
 				}
 			}
 			if captureErr != nil {
