@@ -66,7 +66,7 @@ var providerZeroCarryConfirmationsTotal = prometheus.NewCounterVec(prometheus.Co
 	Namespace: "urnetwork",
 	Subsystem: "provider_zero_carry",
 	Name:      "confirmations_total",
-	Help:      "Candidates the zero-carry judge read again before a verdict, by outcome: verdict (confirmed), older_carried (the read stopped at its limit and a contract closed earlier in the day carried bytes), idle (with the sessions their clients reported idle left out, they fell below the rule)",
+	Help:      "Candidates the zero-carry judge read again before a verdict, by outcome: verdict (confirmed), older_carried (the read stopped at its limit and a contract closed earlier in the day carried bytes), capped (the search of the rest of the day examined its bound of contracts and found none that carried, so the provider is too busy to confirm), idle (with the sessions their clients reported idle left out, they fell below the rule)",
 }, []string{"outcome"})
 
 var providerZeroCarryJudgeLastRunTimestamp = prometheus.NewGauge(prometheus.GaugeOpts{
@@ -87,7 +87,7 @@ var providerZeroCarryChanges = []string{"created"}
 
 var providerZeroCarryReadKinds = []string{"providers", "candidates", "evaluated", "confirmed", "contracts"}
 
-var providerZeroCarryConfirmationOutcomes = []string{"verdict", "older_carried", "idle"}
+var providerZeroCarryConfirmationOutcomes = []string{"verdict", "older_carried", "capped", "idle"}
 
 func init() {
 	for _, change := range append(append([]string{}, providerZeroCarryChanges...), model.ProviderZeroCarryClearReasons...) {
@@ -126,6 +126,7 @@ type JudgeProviderZeroCarryResult struct {
 	Confirmed          int            `json:"confirmed"`
 	IdleContracts      int            `json:"idle_contracts"`
 	KeptOlderCarried   int            `json:"kept_older_carried"`
+	KeptCapped         int            `json:"kept_capped"`
 	KeptIdle           int            `json:"kept_idle"`
 	Contracts          int            `json:"contracts"`
 	Created            int            `json:"created"`
@@ -202,9 +203,7 @@ func judgeProviderZeroCarry(
 	providerZeroCarryReadsTotal.WithLabelValues("candidates").Add(float64(judgement.CandidateCount))
 	providerZeroCarryReadsTotal.WithLabelValues("evaluated").Add(float64(judgement.EvaluatedCount))
 	providerZeroCarryReadsTotal.WithLabelValues("confirmed").Add(float64(judgement.ConfirmedCount))
-	providerZeroCarryConfirmationsTotal.WithLabelValues("verdict").Add(float64(judgement.ConfirmedCount - judgement.KeptOlderCarriedCount - judgement.KeptIdleCount))
-	providerZeroCarryConfirmationsTotal.WithLabelValues("older_carried").Add(float64(judgement.KeptOlderCarriedCount))
-	providerZeroCarryConfirmationsTotal.WithLabelValues("idle").Add(float64(judgement.KeptIdleCount))
+	countProviderZeroCarryConfirmations(judgement)
 	providerZeroCarryReadsTotal.WithLabelValues("contracts").Add(float64(judgement.ContractRowCount))
 	// the countries of this run alone: one whose last verdict cleared leaves
 	providerZeroCarryProviders.Reset()
@@ -224,11 +223,11 @@ func judgeProviderZeroCarry(
 	for _, count := range judgement.Cleared {
 		cleared += count
 	}
-	if 0 < judgement.Created || 0 < cleared || 0 < judgement.KeptOlderCarriedCount+judgement.KeptIdleCount {
+	if 0 < judgement.Created || 0 < cleared || 0 < providerZeroCarryKeptCount(judgement) {
 		glog.Infof(
-			"[zero-carry]judged %d providers (%d candidates, %d evaluated, %d confirmed, %d contracts read): %d verdicts made, %d kept by an older carrying contract, %d kept with %d idle contracts left out, cleared %v; %d in force, connected by country: %s\n",
+			"[zero-carry]judged %d providers (%d candidates, %d evaluated, %d confirmed, %d contracts read): %d verdicts made, %d kept by an older carrying contract, %d kept as too busy to confirm, %d kept with %d idle contracts left out, cleared %v; %d in force, connected by country: %s\n",
 			judgement.PageCount, judgement.CandidateCount, judgement.EvaluatedCount, judgement.ConfirmedCount, judgement.ContractRowCount,
-			judgement.Created, judgement.KeptOlderCarriedCount, judgement.KeptIdleCount, judgement.IdleContractCount,
+			judgement.Created, judgement.KeptOlderCarriedCount, judgement.KeptCappedCount, judgement.KeptIdleCount, judgement.IdleContractCount,
 			judgement.Cleared, judgement.ActiveCount, judgement.CountrySummary(),
 		)
 	} else if glog.V(1) {
@@ -248,6 +247,7 @@ func judgeProviderZeroCarry(
 		Confirmed:          judgement.ConfirmedCount,
 		IdleContracts:      judgement.IdleContractCount,
 		KeptOlderCarried:   judgement.KeptOlderCarriedCount,
+		KeptCapped:         judgement.KeptCappedCount,
 		KeptIdle:           judgement.KeptIdleCount,
 		Contracts:          judgement.ContractRowCount,
 		Created:            judgement.Created,
@@ -255,4 +255,18 @@ func judgeProviderZeroCarry(
 		Verdicts:           judgement.ActiveCount,
 		ConnectedByCountry: judgement.CountryCounts,
 	}
+}
+
+// The candidates the confirming read kept from a verdict, for every reason.
+func providerZeroCarryKeptCount(judgement *model.ProviderZeroCarryJudgement) int {
+	return judgement.KeptOlderCarriedCount + judgement.KeptCappedCount + judgement.KeptIdleCount
+}
+
+// Adds one run's confirming reads to the confirmations counter: each
+// candidate read again ends in a verdict or is kept for one reason.
+func countProviderZeroCarryConfirmations(judgement *model.ProviderZeroCarryJudgement) {
+	providerZeroCarryConfirmationsTotal.WithLabelValues("verdict").Add(float64(judgement.ConfirmedCount - providerZeroCarryKeptCount(judgement)))
+	providerZeroCarryConfirmationsTotal.WithLabelValues("older_carried").Add(float64(judgement.KeptOlderCarriedCount))
+	providerZeroCarryConfirmationsTotal.WithLabelValues("capped").Add(float64(judgement.KeptCappedCount))
+	providerZeroCarryConfirmationsTotal.WithLabelValues("idle").Add(float64(judgement.KeptIdleCount))
 }

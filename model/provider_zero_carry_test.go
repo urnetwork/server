@@ -45,6 +45,9 @@ func TestProviderZeroCarryEvidenceRule(t *testing.T) {
 		// the read stopped at its limit, and a contract earlier in the day
 		// carried: a busy honest provider whose newest contracts are empty
 		{"older contract carried", ProviderZeroCarryEvidence{RowCount: 1000, ContractCount: 900, NetworkCount: 40, CarriedByteCount: 0, OlderCarried: true}, false},
+		// the search of the rest of the day reached its bound without a
+		// carrying contract: too busy to confirm, so no verdict
+		{"older search capped", ProviderZeroCarryEvidence{RowCount: 1000, ContractCount: 900, NetworkCount: 40, CarriedByteCount: 0, OlderCapped: true}, false},
 	} {
 		if got := c.evidence.ZeroCarry(); got != c.want {
 			t.Errorf("%s: zero carry %t, want %t", c.name, got, c.want)
@@ -228,8 +231,9 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 		}
 	}
 	// only the confirming read reads close evidence, per counted contract
-	// that carried nothing, and searches past its limit for a contract that
-	// carried, below the oldest row it read, over the same window
+	// that carried nothing, and searches past its limit, newest first and at
+	// most its bound, for a contract that carried, below the oldest row it
+	// read, over the same window
 	for _, part := range []string{
 		"CASE WHEN read_contract.counted AND read_contract.byte_count = 0\n\t\t\t\t\t\tTHEN EXISTS (",
 		"close_evidence.contract_id = read_contract.contract_id",
@@ -238,11 +242,14 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 		"close_evidence.acked_byte_count = 0",
 		"close_evidence.unacked_byte_count = 0",
 		"count(*) FILTER (WHERE recent.counted AND NOT recent.idle) AS contract_count",
-		"CASE WHEN $5 <= confirmed.row_count THEN EXISTS (",
+		"COALESCE(bool_or(older_contract.carried), false) AS carried",
+		"count(*) AS examined",
+		"WHERE $5 <= confirmed.row_count",
 		"older.destination_id = candidate.client_id",
 		"older.create_time >= candidate.evidence_from",
 		"older.close_time < confirmed.oldest_close_time",
-		"(older.provider_usage->>'byte_count')::numeric END > 0",
+		"(older.provider_usage->>'byte_count')::numeric END > 0 AS carried",
+		"ORDER BY older.close_time DESC\n\t\t\t\tLIMIT $6",
 	} {
 		if !strings.Contains(confirmation, part) {
 			t.Errorf("the confirming read lacks %q", part)
@@ -250,6 +257,9 @@ func TestProviderZeroCarrySqlIsBounded(t *testing.T) {
 	}
 	if strings.Contains(evidence, "contract_close_report_evidence") {
 		t.Error("the evidence read reads close evidence for every candidate")
+	}
+	if strings.Contains(evidence, "$6") {
+		t.Error("the evidence read takes the confirming read's search bound")
 	}
 	page := providerZeroCarryPageSql()
 	for _, part := range []string{

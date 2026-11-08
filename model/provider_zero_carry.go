@@ -39,8 +39,10 @@
 //   - those counted contracts carried at most
 //     ProviderZeroCarryMaxCarriedByteCount bytes in all;
 //   - when the read stopped at its limit, no counted contract closed earlier
-//     in the window carried any byte: a busy provider is judged on its whole
-//     day, not on its newest contracts alone; and
+//     in the window carried any byte, and the search for one reached the
+//     window's start within ProviderZeroCarryOlderSearchLimit contracts: a
+//     busy provider is judged on its whole day, not on its newest contracts
+//     alone, and one too busy to read whole makes no verdict; and
 //   - the URL probe measured it at least ProviderOnlineMinMeasuredUrlRuns
 //     times in the URL-success rule's own evidence (providerOnlineUrlEvidenceSql,
 //     ProviderEgressHealthMaxAge) without one success.
@@ -133,6 +135,24 @@ const ProviderZeroCarryWindow = 24 * time.Hour
 // one provider's read short whatever it holds.
 const ProviderZeroCarryContractReadLimit = 1000
 
+// The most contracts the confirming read examines past its read limit, the
+// contracts closed earlier in the day than the oldest one read, when it
+// searches them for one that carried. A search that reaches the bound without
+// finding one makes no verdict: a contract that carried may lie past it, and
+// a provider that busy is not judged on part of its day
+// (ProviderZeroCarryEvidence.OlderCapped).
+//
+// On Main on 2026-11-08, 14 of the 55 providers the evidence read found
+// zero-carry held more than the read limit in their windows. Their searches
+// examined 148 to 484 contracts, and their batch read 19,276 in 0.51 s. The
+// bound is over four times the largest search, so it confirms a zombie with
+// up to 3,000 contracts in its day. A batch at the bound reads 60,000, about
+// 1.6 s at that rate and twice that at the slowest seen (the same batch took
+// 1.0 s in an earlier read), within the statement timeout. Without the bound
+// a search reads the rest of any day: of the 6,237 candidates the busiest
+// closed 15,520 contracts.
+const ProviderZeroCarryOlderSearchLimit = 2000
+
 // The fewest counted contracts that can show a provider carries nothing.
 const ProviderZeroCarryMinContracts = 20
 
@@ -159,6 +179,8 @@ type ProviderZeroCarrySettings struct {
 	EvidenceBatchSize int
 	// the most contracts read per candidate
 	ContractReadLimit int
+	// the most contracts the confirming read examines past its read limit
+	OlderSearchLimit int
 	// the most verdicts one run reads to clear
 	VerdictReadLimit int
 }
@@ -168,6 +190,7 @@ func DefaultProviderZeroCarrySettings() *ProviderZeroCarrySettings {
 		PageSize:          5000,
 		EvidenceBatchSize: 20,
 		ContractReadLimit: ProviderZeroCarryContractReadLimit,
+		OlderSearchLimit:  ProviderZeroCarryOlderSearchLimit,
 		VerdictReadLimit:  10000,
 	}
 }
@@ -185,21 +208,28 @@ type ProviderZeroCarryEvidence struct {
 	OldestCloseTime *time.Time
 	// the confirming read only (providerZeroCarryConfirmationSql): the
 	// contracts that carried nothing and whose clients' close evidence shows
-	// them idle, which the counts above leave out, and whether a counted
-	// contract closed before the oldest one read, in the window, carried any
-	// byte
+	// them idle, which the counts above leave out; whether a counted contract
+	// closed before the oldest one read, in the window, carried any byte; and
+	// whether that search reached its bound without finding one, which makes
+	// no verdict either
 	IdleCount    int
 	OlderCarried bool
+	OlderCapped  bool
 }
 
 // Whether the evidence shows the provider carries nothing. The URL condition
 // is the candidate read's (providerZeroCarryPageSql).
 func (self ProviderZeroCarryEvidence) ZeroCarry() bool {
+	return self.countedZeroCarry() && !self.OlderCarried && !self.OlderCapped
+}
+
+// Whether the counted contracts read show the provider carries nothing,
+// whatever the search past the read limit found.
+func (self ProviderZeroCarryEvidence) countedZeroCarry() bool {
 	return ProviderZeroCarryMinContracts <= self.ContractCount &&
 		ProviderZeroCarryMinNetworks <= self.NetworkCount &&
 		0 <= self.CarriedByteCount &&
-		self.CarriedByteCount <= ProviderZeroCarryMaxCarriedByteCount &&
-		!self.OlderCarried
+		self.CarriedByteCount <= ProviderZeroCarryMaxCarriedByteCount
 }
 
 // The first creation and close time an evaluation counts: the window's start,
@@ -480,12 +510,12 @@ func providerZeroCarryEvidenceSql() string {
 // contract that carried bytes is never idle, whatever its client reported,
 // so leaving idle sessions out never removes a byte. When the read stops at
 // the limit, the rest of the window, the contracts closed before the oldest
-// one read, is searched for a counted contract that carried any byte: the
-// same index range, below the oldest row, stopping at the first that did. A
-// zombie carried nothing anywhere, so the search reads the rest of its day, a
-// few hundred rows; an honest busy provider stops at its first carrying
-// contract. A tie on the oldest close time is left out of the search, as
-// close times hold microseconds.
+// one read, newest first and at most $6 of them, is searched for a counted
+// contract that carried any byte: the same index range, below the oldest row.
+// A zombie carried nothing anywhere, so the search reads the rest of its day,
+// a few hundred rows; one that reaches $6 without a carrying contract leaves
+// the provider unconfirmed. A tie on the oldest close time is left out of the
+// search, as close times hold microseconds.
 func providerZeroCarryConfirmationSql() string {
 	return `
 		SELECT
@@ -496,7 +526,8 @@ func providerZeroCarryConfirmationSql() string {
 			confirmed.carried_byte_count,
 			confirmed.oldest_close_time,
 			confirmed.idle_count,
-			older.carried
+			older.carried,
+			older.examined
 		FROM unnest($1::uuid[], $2::timestamp[]) AS candidate(client_id, evidence_from)
 		CROSS JOIN LATERAL (
 			SELECT
@@ -526,13 +557,19 @@ func providerZeroCarryConfirmationSql() string {
 			) AS recent
 		) AS confirmed
 		CROSS JOIN LATERAL (
-			SELECT CASE WHEN $5 <= confirmed.row_count THEN EXISTS (
-				SELECT 1 FROM transfer_contract AS older
-				WHERE ` + providerZeroCarryWindowSql("older") + `
+			SELECT
+				COALESCE(bool_or(older_contract.carried), false) AS carried,
+				count(*) AS examined
+			FROM (
+				SELECT ` + providerZeroCarryCountedSql("older") + `
+					AND ` + providerZeroCarryByteCountSql("older") + ` > 0 AS carried
+				FROM transfer_contract AS older
+				WHERE $5 <= confirmed.row_count
+				AND ` + providerZeroCarryWindowSql("older") + `
 				AND older.close_time < confirmed.oldest_close_time
-				AND ` + providerZeroCarryCountedSql("older") + `
-				AND ` + providerZeroCarryByteCountSql("older") + ` > 0
-			) ELSE false END AS carried
+				ORDER BY older.close_time DESC
+				LIMIT $6
+			) AS older_contract
 		) AS older
 	`
 }
@@ -598,12 +635,15 @@ type ProviderZeroCarryJudgement struct {
 	// the confirming read: counted contracts that carried nothing and its
 	// clients' close evidence showed idle; the candidates it kept from a
 	// verdict because a contract closed before the read limit carried bytes;
-	// and those it kept because with the idle sessions left out they fell
-	// below the rule (or contracts that closed between the two reads moved
-	// them)
+	// those it kept because with the idle sessions left out they fell below
+	// the rule (or contracts that closed between the two reads moved them);
+	// and those whose counted contracts met the rule but whose search past
+	// the read limit reached ProviderZeroCarryOlderSearchLimit without
+	// finding a carrying contract
 	IdleContractCount     int
 	KeptOlderCarriedCount int
 	KeptIdleCount         int
+	KeptCappedCount       int
 	// verdicts made, and cleared by reason
 	Created int
 	Cleared map[string]int
@@ -654,7 +694,7 @@ func JudgeProviderZeroCarry(ctx context.Context, now time.Time, cursor server.Id
 	// idle sessions and only the newest contracts, both of which can only
 	// raise a provider toward the rule, so a provider it does not find
 	// zero-carry is not one; one it does is read again to confirm.
-	evidence := readProviderZeroCarryEvidence(ctx, now, candidates, settings.EvidenceBatchSize, settings.ContractReadLimit, providerZeroCarryEvidenceSql())
+	evidence := readProviderZeroCarryEvidence(ctx, now, candidates, settings, false)
 	positives := []providerZeroCarryPageRow{}
 	for _, candidate := range candidates {
 		candidateEvidence, ok := evidence[candidate.clientId]
@@ -669,8 +709,9 @@ func JudgeProviderZeroCarry(ctx context.Context, now time.Time, cursor server.Id
 	judgement.ConfirmedCount = len(positives)
 
 	// The confirming read leaves out the idle sessions, and past the read
-	// limit searches the rest of the window for a contract that carried.
-	confirmed := readProviderZeroCarryEvidence(ctx, now, positives, settings.EvidenceBatchSize, settings.ContractReadLimit, providerZeroCarryConfirmationSql())
+	// limit searches the rest of the window, up to its bound, for a contract
+	// that carried.
+	confirmed := readProviderZeroCarryEvidence(ctx, now, positives, settings, true)
 	verdicts := []*ProviderZeroCarryVerdict{}
 	for _, candidate := range positives {
 		confirmedEvidence, ok := confirmed[candidate.clientId]
@@ -679,11 +720,15 @@ func JudgeProviderZeroCarry(ctx context.Context, now time.Time, cursor server.Id
 		}
 		judgement.ContractRowCount += confirmedEvidence.RowCount
 		judgement.IdleContractCount += confirmedEvidence.IdleCount
+		// a search that reached its bound counts as the reason only when the
+		// counted contracts alone would have made a verdict
 		switch {
 		case confirmedEvidence.OlderCarried:
 			judgement.KeptOlderCarriedCount += 1
-		case !confirmedEvidence.ZeroCarry():
+		case !confirmedEvidence.countedZeroCarry():
 			judgement.KeptIdleCount += 1
+		case confirmedEvidence.OlderCapped:
+			judgement.KeptCappedCount += 1
 		}
 		if confirmedEvidence.ZeroCarry() {
 			verdicts = append(verdicts, &ProviderZeroCarryVerdict{
@@ -748,23 +793,29 @@ func readProviderZeroCarryPage(ctx context.Context, now time.Time, cursor server
 	return page
 }
 
-// Reads the evidence of every candidate, batchSize at a time, by query: the
-// evidence read (providerZeroCarryEvidenceSql) or the confirming read
-// (providerZeroCarryConfirmationSql), which returns two columns more. A
-// candidate with no contract in its window has evidence of zero rows.
+// Reads the evidence of every candidate, EvidenceBatchSize at a time: the
+// evidence read (providerZeroCarryEvidenceSql), or when confirming the
+// confirming read (providerZeroCarryConfirmationSql), which returns three
+// columns more. A candidate with no contract in its window has evidence of
+// zero rows.
 func readProviderZeroCarryEvidence(
 	ctx context.Context,
 	now time.Time,
 	candidates []providerZeroCarryPageRow,
-	batchSize int,
-	readLimit int,
-	query string,
+	settings *ProviderZeroCarrySettings,
+	confirming bool,
 ) map[server.Id]ProviderZeroCarryEvidence {
 	evidence := map[server.Id]ProviderZeroCarryEvidence{}
-	if len(candidates) == 0 || batchSize <= 0 || readLimit <= 0 {
+	batchSize := settings.EvidenceBatchSize
+	readLimit := settings.ContractReadLimit
+	olderSearchLimit := settings.OlderSearchLimit
+	if len(candidates) == 0 || batchSize <= 0 || readLimit <= 0 || (confirming && olderSearchLimit <= 0) {
 		return evidence
 	}
-	confirming := query == providerZeroCarryConfirmationSql()
+	query := providerZeroCarryEvidenceSql()
+	if confirming {
+		query = providerZeroCarryConfirmationSql()
+	}
 	contractIdFloor := providerZeroCarryContractIdFloor(now.Add(-ProviderZeroCarryWindow))
 	providerZeroCarryRead(ctx, func(conn server.PgCanQuery) {
 		for start := 0; start < len(candidates); start += batchSize {
@@ -775,12 +826,17 @@ func readProviderZeroCarryEvidence(
 				clientIds = append(clientIds, candidate.clientId)
 				evidenceFroms = append(evidenceFroms, providerZeroCarryEvidenceFrom(now, candidate.clientVersionTime))
 			}
-			rows, err := conn.Query(ctx, query, clientIds, evidenceFroms, now, contractIdFloor, readLimit)
+			args := []any{clientIds, evidenceFroms, now, contractIdFloor, readLimit}
+			if confirming {
+				args = append(args, olderSearchLimit)
+			}
+			rows, err := conn.Query(ctx, query, args...)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					var clientId server.Id
 					var candidateEvidence ProviderZeroCarryEvidence
 					var carried int64
+					var olderExamined int
 					dest := []any{
 						&clientId,
 						&candidateEvidence.RowCount,
@@ -790,10 +846,15 @@ func readProviderZeroCarryEvidence(
 						&candidateEvidence.OldestCloseTime,
 					}
 					if confirming {
-						dest = append(dest, &candidateEvidence.IdleCount, &candidateEvidence.OlderCarried)
+						dest = append(dest, &candidateEvidence.IdleCount, &candidateEvidence.OlderCarried, &olderExamined)
 					}
 					server.Raise(rows.Scan(dest...))
 					candidateEvidence.CarriedByteCount = ByteCount(carried)
+					// a search that examined its bound without a carrying
+					// contract may have stopped short of one
+					candidateEvidence.OlderCapped = confirming &&
+						!candidateEvidence.OlderCarried &&
+						olderSearchLimit <= olderExamined
 					evidence[clientId] = candidateEvidence
 				}
 			})

@@ -582,7 +582,7 @@ func TestZeroCarryCarryingContractsAreNeverIdle(t *testing.T) {
 		confirmed := readProviderZeroCarryEvidence(ctx, now, []providerZeroCarryPageRow{
 			{clientId: checkpointing.clientId, candidate: true},
 			{clientId: noisy.clientId, candidate: true},
-		}, settings.EvidenceBatchSize, settings.ContractReadLimit, providerZeroCarryConfirmationSql())
+		}, settings, true)
 		if got := confirmed[checkpointing.clientId]; got.ContractCount != 26 || got.CarriedByteCount != 50*1024 || got.IdleCount != 0 || got.ZeroCarry() {
 			t.Errorf("the confirming read left a carrying contract out as idle: %+v", got)
 		}
@@ -600,6 +600,76 @@ func TestZeroCarryCarryingContractsAreNeverIdle(t *testing.T) {
 		}
 		connect.AssertEqual(t, judgement.Created, 1)
 		connect.AssertEqual(t, judgement.IdleContractCount, 5)
+	})
+}
+
+// The search of the rest of the day examines a bounded number of contracts.
+// One that reaches its bound without finding a carrying contract makes no
+// verdict: a contract that carried may lie past the bound, and a provider
+// that busy is not judged on part of its day. A zombie whose day fits the
+// bound is still found. The bound is counted as the reason only when the
+// counted contracts alone would have made a verdict.
+func TestZeroCarryCappedOlderSearchMakesNoVerdict(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		city := egressTestCity(ctx, "Karaganda", "Karaganda", "Kazakhstan", "kz")
+		settings := zeroCarryTestSettings()
+		settings.ContractReadLimit = 25
+		settings.OlderSearchLimit = 10
+
+		// each provider: 30 empty contracts closed together half an hour ago,
+		// past the read limit; the five the read leaves at that close time
+		// are left out of the search as a tie
+		newest := func(provider *egressTestProvider, networkIds []server.Id) {
+			zeroCarryTestContractsWith(ctx, t, provider, networkIds, 10, zeroCarryTestContract{closedAgo: 30 * time.Minute, sourceReport: "unacked"})
+		}
+		// then 15 empty contracts five hours ago, past the bound, and one that
+		// carried 50 KB ten hours ago, which the search does not reach
+		busy := zeroCarryTestCandidate(ctx, t, city)
+		busyNetworks := zeroCarryTestNetworks(3)
+		newest(busy, busyNetworks)
+		zeroCarryTestContractsWith(ctx, t, busy, busyNetworks, 5, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
+		zeroCarryTestContracts(ctx, t, busy, busyNetworks[:1], 1, 50*1024, 10*time.Hour)
+		// then exactly the bound, ten empty contracts: the search cannot tell
+		// that it reached the window's start
+		atBound := zeroCarryTestCandidate(ctx, t, city)
+		atBoundNetworks := zeroCarryTestNetworks(3)
+		newest(atBound, atBoundNetworks)
+		zeroCarryTestContractsWith(ctx, t, atBound, atBoundNetworks[:2], 5, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
+		// then nine empty contracts, within the bound: a zombie
+		zombie := zeroCarryTestCandidate(ctx, t, city)
+		zombieNetworks := zeroCarryTestNetworks(3)
+		newest(zombie, zombieNetworks)
+		zeroCarryTestContractsWith(ctx, t, zombie, zombieNetworks, 3, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
+		// 18 empty contracts and, before them, 10 idle sessions: the read
+		// takes the 18 and 7 idle ones, 18 counted once they are left out,
+		// under the rule; 15 empty contracts past the bound
+		idleBusy := zeroCarryTestCandidate(ctx, t, city)
+		idleBusyNetworks := zeroCarryTestNetworks(4)
+		zeroCarryTestContractsWith(ctx, t, idleBusy, idleBusyNetworks[:3], 6, zeroCarryTestContract{closedAgo: 20 * time.Minute, sourceReport: "unacked"})
+		zeroCarryTestContractsWith(ctx, t, idleBusy, idleBusyNetworks[3:], 10, zeroCarryTestContract{closedAgo: 25 * time.Minute, sourceReport: "idle"})
+		zeroCarryTestContractsWith(ctx, t, idleBusy, idleBusyNetworks[:3], 5, zeroCarryTestContract{closedAgo: 5 * time.Hour, sourceReport: "unacked"})
+		egressTestPasses(ctx, t)
+
+		judgement := JudgeProviderZeroCarry(ctx, server.NowUtc(), server.Id{}, settings)
+		if zeroCarryTestHeld(ctx, busy) {
+			t.Error("a provider that carried past the search's bound is zero-carry")
+		}
+		if zeroCarryTestHeld(ctx, atBound) {
+			t.Error("a search that reached its bound made a verdict")
+		}
+		if !zeroCarryTestHeld(ctx, zombie) {
+			t.Error("a zombie whose day fits the search holds no verdict")
+		}
+		if zeroCarryTestHeld(ctx, idleBusy) {
+			t.Error("a provider under the rule once its idle sessions are left out is zero-carry")
+		}
+		connect.AssertEqual(t, judgement.ConfirmedCount, 4)
+		connect.AssertEqual(t, judgement.KeptCappedCount, 2)
+		connect.AssertEqual(t, judgement.KeptIdleCount, 1)
+		connect.AssertEqual(t, judgement.IdleContractCount, 7)
+		connect.AssertEqual(t, judgement.KeptOlderCarriedCount, 0)
+		connect.AssertEqual(t, judgement.Created, 1)
 	})
 }
 
@@ -709,9 +779,10 @@ type zeroCarryPlanNode struct {
 
 // The evidence and confirming statements read each candidate through
 // transfer_contract_destination_id_close_time, as custom and generic plans,
-// and examine no more contracts than the candidates' read limits and the
-// rest of their windows hold: no plan scans the table or its close-time
-// indexes. Plan rows and scans, not timing, decide it.
+// and examine no more contracts than the candidates' read limits and, for
+// the confirming read, the search's bound past them, though each window holds
+// more: no plan scans the table or its close-time indexes. Plan rows and
+// scans, not timing, decide it.
 func TestZeroCarryEvidencePlansAreCandidateBounded(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -719,15 +790,17 @@ func TestZeroCarryEvidencePlansAreCandidateBounded(t *testing.T) {
 		const destinations = 2000
 		const perDestination = 60
 		const readLimit = 40
+		const olderSearchLimit = 10
 		server.Tx(ctx, func(tx server.PgTx) {
 			// contracts of 2,000 destinations, 60 each over the last day, and
-			// as many again a week old
+			// as many again a week old; the day's ids are above any window's
+			// id floor, so no filter adds rows to what the reads examine
 			server.RaisePgResult(tx.Exec(ctx, `
 				INSERT INTO transfer_contract (
 					contract_id, source_network_id, source_id, destination_network_id, destination_id,
 					transfer_byte_count, create_time, close_time, outcome, provider_usage, usage_origin_is_source
 				)
-				SELECT gen_random_uuid(), gen_random_uuid(), gen_random_uuid(),
+				SELECT overlay(gen_random_uuid()::text PLACING 'f' FROM 1 FOR 1)::uuid, gen_random_uuid(), gen_random_uuid(),
 					lpad(to_hex(d), 32, '0')::uuid, lpad(to_hex(d), 32, '0')::uuid,
 					1048576, closed - interval '30 seconds', closed, 'settled',
 					'{"version":1,"byte_count":0,"providers":[]}'::jsonb, true
@@ -766,22 +839,27 @@ func TestZeroCarryEvidencePlansAreCandidateBounded(t *testing.T) {
 		}
 		arguments := fmt.Sprintf("ARRAY[%s]::uuid[], ARRAY[%s]::timestamp[], '%s'::timestamp, '%s'::uuid, %d",
 			strings.Join(idLiterals, ","), strings.Join(fromLiterals, ","), now.Format("2006-01-02 15:04:05.999999"), floor, readLimit)
+		// each candidate's read limit, and for the confirming read the
+		// search's bound past it, whatever the windows hold
 		for _, statement := range []struct {
-			name  string
-			query string
+			name       string
+			query      string
+			parameters string
+			arguments  string
+			bound      int
 		}{
-			{"evidence", providerZeroCarryEvidenceSql()},
-			{"confirmation", providerZeroCarryConfirmationSql()},
+			{"evidence", providerZeroCarryEvidenceSql(), "uuid[], timestamp[], timestamp, uuid, int", arguments, candidates * readLimit},
+			{"confirmation", providerZeroCarryConfirmationSql(), "uuid[], timestamp[], timestamp, uuid, int, int", fmt.Sprintf("%s, %d", arguments, olderSearchLimit), candidates * (readLimit + olderSearchLimit)},
 		} {
 			for _, mode := range []string{"force_custom_plan", "force_generic_plan"} {
 				server.Tx(ctx, func(tx server.PgTx) {
 					server.RaisePgResult(tx.Exec(ctx, "SET LOCAL plan_cache_mode="+mode))
-					server.RaisePgResult(tx.Exec(ctx, "PREPARE zero_carry_plan(uuid[], timestamp[], timestamp, uuid, int) AS "+statement.query))
+					server.RaisePgResult(tx.Exec(ctx, "PREPARE zero_carry_plan("+statement.parameters+") AS "+statement.query))
 					var plans []struct {
 						Plan zeroCarryPlanNode
 					}
 					// EXPLAIN takes no bind parameters: the arguments are literals
-					rows, err := tx.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE zero_carry_plan("+arguments+")")
+					rows, err := tx.Query(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) EXECUTE zero_carry_plan("+statement.arguments+")")
 					server.WithPgResult(rows, err, func() {
 						if !rows.Next() {
 							t.Fatal("missing query plan")
@@ -810,10 +888,8 @@ func TestZeroCarryEvidencePlansAreCandidateBounded(t *testing.T) {
 					}
 					inspect(plans[0].Plan)
 					t.Logf("%s %s: contracts examined=%.0f indexes=%v", statement.name, mode, contractRows, indexes)
-					// each candidate's read limit, and for the confirming read the
-					// rest of its window
-					if bound := float64(candidates * perDestination); bound < contractRows {
-						t.Errorf("%s %s: examined %.0f contracts, more than the candidates' windows hold (%.0f)", statement.name, mode, contractRows, bound)
+					if bound := float64(statement.bound); bound < contractRows {
+						t.Errorf("%s %s: examined %.0f contracts, more than the candidates' bounds (%.0f)", statement.name, mode, contractRows, bound)
 					}
 					for index := range indexes {
 						if index != "transfer_contract_destination_id_close_time" {

@@ -40,3 +40,27 @@ func TestJudgeProviderZeroCarryExportsTheRun(t *testing.T) {
 		}
 	})
 }
+
+// Each candidate read again is one outcome: a verdict, or kept for one
+// reason. A provider too busy to confirm is kept, never counted a verdict.
+func TestProviderZeroCarryConfirmationsCountEachOutcome(t *testing.T) {
+	before := map[string]float64{}
+	for _, outcome := range providerZeroCarryConfirmationOutcomes {
+		before[outcome] = testutil.ToFloat64(providerZeroCarryConfirmationsTotal.WithLabelValues(outcome))
+	}
+	countProviderZeroCarryConfirmations(&model.ProviderZeroCarryJudgement{
+		ConfirmedCount:        10,
+		KeptOlderCarriedCount: 1,
+		KeptCappedCount:       2,
+		KeptIdleCount:         3,
+	})
+	want := map[string]float64{"verdict": 4, "older_carried": 1, "capped": 2, "idle": 3}
+	if len(providerZeroCarryConfirmationOutcomes) != len(want) {
+		t.Fatalf("the outcomes are %v", providerZeroCarryConfirmationOutcomes)
+	}
+	for _, outcome := range providerZeroCarryConfirmationOutcomes {
+		if got := testutil.ToFloat64(providerZeroCarryConfirmationsTotal.WithLabelValues(outcome)) - before[outcome]; got != want[outcome] {
+			t.Errorf("%s counted %v, want %v", outcome, got, want[outcome])
+		}
+	}
+}
