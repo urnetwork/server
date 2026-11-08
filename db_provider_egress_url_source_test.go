@@ -45,6 +45,10 @@ func TestProviderEgressUrlSourceMigrationIsAdditiveAndBounded(t *testing.T) {
 		`PRIMARY KEY (name, country_code)`,
 		`CREATE TABLE IF NOT EXISTS provider_egress_country_site_tally (`,
 		`PRIMARY KEY (tally_day, name, country_code, client_id)`,
+		// a day made like the history but not attached takes the columns
+		`relation.relkind = 'r' AND NOT relation.relispartition`,
+		`relation.relname LIKE 'provider\_egress\_health\_history\_p%'`,
+		`ADD COLUMN IF NOT EXISTS url_source smallint NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS url_probation boolean NOT NULL DEFAULT false`,
 	} {
 		if !strings.Contains(sql, marker) {
 			t.Errorf("URL source migration lacks %q", marker)

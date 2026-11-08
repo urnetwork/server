@@ -38,6 +38,12 @@
 //     turn beside window reads that run for seconds, so the wait is bounded at
 //     five seconds: a migration queued behind a long reader fails for a retry
 //     rather than stall URL ingest behind it.
+//   - Days made around it attach: the partition registry copies the parent's
+//     columns and attaches in one transaction that holds the parent's lock
+//     from the copy on, so the ALTER cannot come between; a day made by any
+//     other path before the ALTER and not attached yet is given the columns
+//     here, and the registry also adds, before every attach of a history day,
+//     any column of the parent the day lacks (ReconcileLeafColumns).
 //
 // Old binaries ignore the columns and the tables: their inserts take the
 // defaults, and their readers count every outcome as before until they are
@@ -49,6 +55,8 @@ package server
 // lock wait is safe to retry.
 const ProviderEgressUrlSourceSql = `
 	DO $source$
+	DECLARE
+		leaf record;
 	BEGIN
 		PERFORM set_config('lock_timeout', '5s', true);
 		CREATE TABLE IF NOT EXISTS provider_egress_country_site (
@@ -95,6 +103,17 @@ const ProviderEgressUrlSourceSql = `
 				ADD COLUMN url_source smallint NOT NULL DEFAULT 0,
 				ADD COLUMN url_probation boolean NOT NULL DEFAULT false;
 		END IF;
+		-- a day made like the history before this migration and not attached
+		-- yet takes the columns too, so its attach still succeeds
+		FOR leaf IN
+			SELECT format('%I.%I', namespace.nspname, relation.relname) AS name
+			FROM pg_catalog.pg_class AS relation
+			JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+			WHERE namespace.nspname = 'public' AND relation.relkind = 'r' AND NOT relation.relispartition
+			AND relation.relname LIKE 'provider\_egress\_health\_history\_p%'
+		LOOP
+			EXECUTE format('ALTER TABLE %s ADD COLUMN IF NOT EXISTS url_source smallint NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS url_probation boolean NOT NULL DEFAULT false', leaf.name);
+		END LOOP;
 	END
 	$source$
 `
