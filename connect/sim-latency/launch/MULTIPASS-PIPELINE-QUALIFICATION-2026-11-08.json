@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "kind": "competition-review-composed-pipeline-qualification/v1",
+  "recorded_at": "2026-11-08T02:36:58Z",
+  "source_commit": "6585bcbcea9727e11c11bf59628aa3fca11bcd44",
+  "independent_evidence": {
+    "directory": "/home/by/urnetwork/temp/native-independent-6585-20261108.koL5LnH5",
+    "summary_sha256": "4f60e5642b9bbe522b013a31f7d1fbc417f3d64915d37869242f16404b42af17",
+    "ordinary_json_sha256": "3771cd5ad0884dcb53507490627bfb39f0405be9b79da9b719861a214106e57b",
+    "race_json_sha256": "dcf7c249b49080053df1c194bf0319ac050789b765a66bffe1b5981b795347fb",
+    "source_test_census_sha256": "36b331159a3d94b7bb67801a7acde75f4f508c4a645942abc45d2cd08870ddf8",
+    "focused_passes": 10,
+    "ordinary_passes": 105,
+    "race_passes": 105,
+    "failures": 0,
+    "skips": 0,
+    "race_findings": 0,
+    "race_package_seconds": 456.748,
+    "test_timeout_seconds": 900,
+    "timeout_approved_prospectively": true,
+    "review_or_submission_deadlines_changed": false
+  },
+  "composed_positive": {
+    "test": "TestWinnerHandoffComposedPrepareFreezeCapturePendingAndProtectedValidate",
+    "ordinary_and_race_passed": true,
+    "coverage": "Preparation, source reads outside the pure transaction planner, immutable owner/deadline, complete leaf preflight before claims, exact-version original retention, pending-only findings, protected replay and missing-original refusal.",
+    "authorities_and_provider_are_synthetic": true,
+    "real_database_provider_or_container_qualification": false
+  },
+  "runtime_preparation": {
+    "new_state_root": "/var/lib/urnetwork/competition-review-multipass",
+    "state_and_attempt_claim_owner_staging_directories": "root:root mode 0700",
+    "provider_settings_sha256": "cb9218b1bf2386b404dabf4996c12adb19c8dc2168c7d9cf297fc31ebc816d37",
+    "provider_settings_owner_mode_links": "0:0:444:1",
+    "cgroup_version": 2,
+    "docker_user_namespaces_and_firewall_chain_available": true,
+    "fresh_containment_qualification": false,
+    "new_runtime_image_installed": false
+  },
+  "remaining": "Qualify the final native group command and tokenizer bootstrap snapshot, install its exact executable/image identities, obtain genuine contained runtime observations and nineteen-control Qwen/Gemma qualification, then review the elected candidate and request explicit winner approval.",
+  "candidate_inference_started": false,
+  "winner_approved": false,
+  "source_promotion_authorized": false,
+  "reward_release_authorized": false,
+  "calibration_accepted": false
+}
