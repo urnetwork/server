@@ -351,6 +351,13 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_country_site ALTER COLUMN scored SET DEFAULT true`},
 		{name: "country site pair tally missing", version: server.ProviderEgressUrlSourceVersion(),
 			sql: `DROP TABLE provider_egress_country_site_tally`},
+		// The refresh sums the tally by the network each row carries, and a
+		// row is updated about six times a day: without the column the ingest
+		// fails, and full pages turn those updates into index writes.
+		{name: "country site pair tally without its networks", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally DROP COLUMN network_id`},
+		{name: "country site pair tally pages filled", version: server.ProviderEgressUrlSourceVersion(),
+			sql: `ALTER TABLE provider_egress_country_site_tally RESET (fillfactor)`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

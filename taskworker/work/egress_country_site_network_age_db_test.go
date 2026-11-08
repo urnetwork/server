@@ -141,8 +141,9 @@ func TestEgressCountrySitesYoungNetworksCanNeitherGraduateNorDemote(t *testing.T
 							ok = 23
 						}
 						server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_country_site_tally
-							(tally_day, name, country_code, client_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
-							VALUES ($1, $2, 'fr', $3, 30, $4, 30, $4, 24, $5)`, day, name, clientId, ok, now))
+							(tally_day, name, country_code, client_id, network_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
+							SELECT $1::date, $2::varchar, 'fr', client.client_id, client.network_id, 30, $4::integer, 30, $4::integer, 24, $5::timestamp
+							FROM network_client AS client WHERE client.client_id = $3`, day, name, clientId, ok, now))
 					}
 				}
 			})

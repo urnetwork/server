@@ -51,8 +51,9 @@ func TestEgressCountrySiteThatCollapsesIsDemotedByTheRefresh(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			for _, clientId := range clientIds {
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_country_site_tally
-					(tally_day, name, country_code, client_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
-					VALUES ($1, 'de-equal', 'de', $2, 60, 0, 60, 0, 48, $3)`, day, clientId, now))
+					(tally_day, name, country_code, client_id, network_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
+					SELECT $1::date, 'de-equal', 'de', client.client_id, client.network_id, 60, 0, 60, 0, 48, $3::timestamp
+					FROM network_client AS client WHERE client.client_id = $2`, day, clientId, now))
 			}
 		})
 

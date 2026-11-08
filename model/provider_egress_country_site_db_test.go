@@ -60,22 +60,23 @@ func TestProviderEgressCountrySiteTallyPairsOutcomesWithTheirProvidersGeneralOut
 		countrySiteDbTestStore(t, unpaired, next(), "de-site", ProviderEgressUrlSourceCountry, "de", false)
 
 		type tally struct {
+			network                          server.Id
 			loads, ok, pairedLoads, pairedOk int
 			expected                         float64
 		}
 		read := func(clientId server.Id) tally {
 			var row tally
 			server.Db(ctx, func(conn server.PgConn) {
-				server.Raise(conn.QueryRow(ctx, `SELECT load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum
+				server.Raise(conn.QueryRow(ctx, `SELECT network_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum
 					FROM provider_egress_country_site_tally WHERE client_id = $1 AND name = 'de-site' AND country_code = 'de'`, clientId).Scan(
-					&row.loads, &row.ok, &row.pairedLoads, &row.pairedOk, &row.expected))
+					&row.network, &row.loads, &row.ok, &row.pairedLoads, &row.pairedOk, &row.expected))
 			})
 			return row
 		}
-		if got := read(paired); got != (tally{loads: 1, ok: 1, pairedLoads: 1, pairedOk: 1, expected: 0.75}) {
+		if got := read(paired); got != (tally{network: networkId, loads: 1, ok: 1, pairedLoads: 1, pairedOk: 1, expected: 0.75}) {
 			t.Fatalf("paired tally %+v", got)
 		}
-		if got := read(unpaired); got != (tally{loads: 1, ok: 0}) {
+		if got := read(unpaired); got != (tally{network: networkId, loads: 1, ok: 0}) {
 			t.Fatalf("unpaired tally %+v", got)
 		}
 
@@ -92,6 +93,18 @@ func TestProviderEgressCountrySiteTallyPairsOutcomesWithTheirProvidersGeneralOut
 		if networks := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), establishedBy, []server.Id{paired})[key]; len(networks) != 1 || networks[0].PairedLoads != 0 {
 			t.Fatalf("evidence without the excluded provider %+v", networks)
 		}
+		// the read sums the tally by the network stored with it and looks no
+		// provider up: loads stay with the network that measured them when
+		// their provider is later moved (before, the read joined every row's
+		// provider to network_client, about 3.5 million lookups a day with a
+		// full catalog, and the loads followed the provider)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id = $2 WHERE client_id = $1`, paired, server.NewId()))
+		})
+		if networks := GetProviderEgressCountrySiteEvidence(ctx, starts, ProviderEgressCountrySiteRecentStart(now), establishedBy, nil)[key]; len(networks) != 1 ||
+			networks[0].NetworkId != networkId || networks[0].PairedLoads != 1 || networks[0].Providers != 1 {
+			t.Fatalf("evidence once the provider moved %+v, want its loads with the network that measured them", networks)
+		}
 
 		// graduated: the next outcome scores
 		SetProviderEgressCountrySites(ctx, []*ProviderEgressCountrySite{{
@@ -105,9 +118,19 @@ func TestProviderEgressCountrySiteTallyPairsOutcomesWithTheirProvidersGeneralOut
 		if counts := GetAllProviderEgressHealthCounts(ctx)[scoredClientId]; counts.OKCount != 1 || counts.Total != 1 {
 			t.Fatalf("a graduated site's outcome counted %d/%d, want 1/1", counts.OKCount, counts.Total)
 		}
-		// the same name listed for another country has a state of its own
-		if stored := countrySiteDbTestStore(t, server.NewId(), now.Add(-time.Minute), "de-site", ProviderEgressUrlSourceCountry, "at", true); !stored.Probation {
+		// the same name listed for another country has a state of its own;
+		// this provider has no network, so its outcome is no evidence and is
+		// not tallied
+		networkless := server.NewId()
+		if stored := countrySiteDbTestStore(t, networkless, now.Add(-time.Minute), "de-site", ProviderEgressUrlSourceCountry, "at", true); !stored.Probation {
 			t.Fatalf("another country's list took de's graduation: %+v", stored)
+		}
+		var networklessRows int
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT COUNT(*) FROM provider_egress_country_site_tally WHERE client_id = $1`, networkless).Scan(&networklessRows))
+		})
+		if networklessRows != 0 {
+			t.Fatalf("a provider with no network was tallied in %d rows", networklessRows)
 		}
 
 		// a state of a site no longer listed is removed
@@ -142,8 +165,8 @@ func TestProviderEgressCountrySiteReadsCountOnlyNetworksTwoWeeksOld(t *testing.T
 			Testing_CreateDevice(ctx, networkId, server.NewId(), clientId, "", "")
 			server.Tx(ctx, func(tx server.PgTx) {
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_country_site_tally
-					(tally_day, name, country_code, client_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
-					VALUES ($1, $2, $3, $4, 60, 48, 60, 48, 48, $5)`, now.Truncate(24*time.Hour), key.Name, key.CountryCode, clientId, now))
+					(tally_day, name, country_code, client_id, network_id, load_count, ok_count, paired_load_count, paired_ok_count, expected_ok_sum, update_time)
+					VALUES ($1, $2, $3, $4, $5, 60, 48, 60, 48, 48, $6)`, now.Truncate(24*time.Hour), key.Name, key.CountryCode, clientId, networkId, now))
 				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO provider_egress_url_security
 					(client_id, url_key, destination, measured_at, tls_failure, tls_verdict) VALUES ($1, $2, $3::jsonb, $4, true, $5)`,
 					clientId, egresshealth.UrlProbeDestinationKey(destination), string(destinationJson), now.Add(-time.Hour), int16(ProviderEgressTlsVerdictSite)))

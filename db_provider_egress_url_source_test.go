@@ -44,7 +44,11 @@ func TestProviderEgressUrlSourceMigrationIsAdditiveAndBounded(t *testing.T) {
 		`CREATE TABLE IF NOT EXISTS provider_egress_country_site (`,
 		`PRIMARY KEY (name, country_code)`,
 		`CREATE TABLE IF NOT EXISTS provider_egress_country_site_tally (`,
+		// the refresh sums the tally by the network stored with each row
+		`network_id uuid NOT NULL,`,
 		`PRIMARY KEY (tally_day, name, country_code, client_id)`,
+		// six updates a row a day stay on their page
+		`) WITH (fillfactor = 70);`,
 		// a day made like the history but not attached takes the columns
 		`relation.relkind = 'r' AND NOT relation.relispartition`,
 		`relation.relname LIKE 'provider\_egress\_health\_history\_p%'`,

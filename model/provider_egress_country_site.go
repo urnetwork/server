@@ -289,7 +289,10 @@ func providerEgressCountrySiteScoredInTx(ctx context.Context, tx server.PgTx, na
 // Adds one measured country outcome to the pair tally, beside the same
 // provider's scored general outcomes of the eight hours before it, read
 // through the provider's own index on the history. An outcome whose provider
-// had too few of them is tallied unpaired.
+// had too few of them is tallied unpaired. The day's row carries the
+// provider's network as it was when the row was first written, so the refresh
+// sums the tally by network without looking each provider up again; a
+// provider with no network is no evidence, and is not tallied.
 func addProviderEgressCountrySiteTallyInTx(ctx context.Context, tx server.PgTx, health *ProviderEgressHealth, ok int, policyVersion int) {
 	measuredAt := health.MeasuredAt.UTC()
 	var generalTotal, generalOk int
@@ -310,10 +313,13 @@ func addProviderEgressCountrySiteTallyInTx(ctx context.Context, tx server.PgTx, 
 	}
 	server.RaisePgResult(tx.Exec(ctx, `
 		INSERT INTO provider_egress_country_site_tally AS tally (
-			tally_day, name, country_code, client_id, load_count, ok_count,
+			tally_day, name, country_code, client_id, network_id, load_count, ok_count,
 			paired_load_count, paired_ok_count, expected_ok_sum, tls_failure_count, update_time
 		)
-		VALUES ($1, $2, $3, $4, 1, $5, $6, $7, $8, $9, $10)
+		SELECT $1::date, $2::varchar, $3::varchar, client.client_id, client.network_id, 1, $5::integer,
+			$6::integer, $7::integer, $8::double precision, $9::integer, $10::timestamp
+		FROM network_client AS client
+		WHERE client.client_id = $4
 		ON CONFLICT (tally_day, name, country_code, client_id) DO UPDATE SET
 			load_count = tally.load_count + 1,
 			ok_count = tally.ok_count + EXCLUDED.ok_count,
@@ -346,8 +352,9 @@ type ProviderEgressCountrySiteNetworkEvidence struct {
 // Each listed site's paired evidence per network: from its window start (a
 // day) and over the recent days from recentStart, leaving out the providers
 // in excluded (those a TLS finding judged their own excludes, which fail every
-// site alike). Only networks created by establishedBy are read: a younger
-// network, or one with no network row, is no evidence
+// site alike). A provider's loads count for the network the tally stored with
+// them. Only networks created by establishedBy are read: a younger network,
+// or one with no network row, is no evidence
 // (ProviderEgressCountrySiteMinNetworkAge).
 func GetProviderEgressCountrySiteEvidence(
 	ctx context.Context,
@@ -370,14 +377,15 @@ func GetProviderEgressCountrySiteEvidence(
 		excluded = []server.Id{}
 	}
 	server.Db(ctx, func(conn server.PgConn) {
-		// the network's age is read once per network, after the tally is
-		// summed, not once per tally row
+		// the tally is summed by the network each row carries, and the
+		// network's age is read once per network after that, so the read looks
+		// up no provider and only as many networks as measured the sites
 		result, err := conn.Query(ctx, `
 			WITH site AS (
 				SELECT * FROM unnest($1::varchar[], $2::varchar[], $3::date[]) AS site(name, country_code, window_start)
 			),
 			evidence AS (
-				SELECT tally.name, tally.country_code, client.network_id,
+				SELECT tally.name, tally.country_code, tally.network_id,
 					COALESCE(SUM(tally.paired_load_count) FILTER (WHERE site.window_start <= tally.tally_day), 0)::bigint AS paired_loads,
 					COALESCE(SUM(tally.paired_ok_count) FILTER (WHERE site.window_start <= tally.tally_day), 0)::bigint AS paired_ok,
 					COALESCE(SUM(tally.expected_ok_sum) FILTER (WHERE site.window_start <= tally.tally_day), 0) AS expected_ok,
@@ -389,9 +397,8 @@ func GetProviderEgressCountrySiteEvidence(
 				JOIN provider_egress_country_site_tally AS tally
 					ON tally.name = site.name AND tally.country_code = site.country_code
 					AND LEAST(site.window_start, $4::date) <= tally.tally_day
-				JOIN network_client AS client ON client.client_id = tally.client_id
 				WHERE NOT (tally.client_id = ANY($5::uuid[]))
-				GROUP BY tally.name, tally.country_code, client.network_id
+				GROUP BY tally.name, tally.country_code, tally.network_id
 			)
 			SELECT evidence.name, evidence.country_code, evidence.network_id,
 				evidence.paired_loads, evidence.paired_ok, evidence.expected_ok, evidence.providers,

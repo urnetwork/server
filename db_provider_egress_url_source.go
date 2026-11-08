@@ -22,6 +22,12 @@
 // per day, site and provider; the pool refresh judges each listed country site
 // on a week of it and keeps the site's state, scored or on probation, in
 // provider_egress_country_site, which the ingest reads for each outcome.
+// Each tally row carries the provider's network, read once when the row is
+// first written, so the refresh sums the week by network without looking up
+// every row's provider (about 3.5 million network_client lookups a day with a
+// full catalog). Its pages are left 30% free: a row is updated about six times
+// a day and only its primary key is indexed, so those updates stay on their
+// page (HOT) rather than add index entries.
 //
 // The migration is additive and changes no stored outcome's meaning:
 //
@@ -85,6 +91,7 @@ const ProviderEgressUrlSourceSql = `
 			name varchar(128) NOT NULL,
 			country_code varchar(2) NOT NULL,
 			client_id uuid NOT NULL,
+			network_id uuid NOT NULL,
 			load_count integer NOT NULL DEFAULT 0,
 			ok_count integer NOT NULL DEFAULT 0,
 			paired_load_count integer NOT NULL DEFAULT 0,
@@ -93,7 +100,7 @@ const ProviderEgressUrlSourceSql = `
 			tls_failure_count integer NOT NULL DEFAULT 0,
 			update_time timestamp NOT NULL,
 			PRIMARY KEY (tally_day, name, country_code, client_id)
-		);
+		) WITH (fillfactor = 70);
 		IF NOT EXISTS (
 			SELECT 1 FROM pg_catalog.pg_attribute
 			WHERE attrelid = 'public.provider_egress_health_history'::regclass
