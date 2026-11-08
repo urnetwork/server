@@ -6,9 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/glog"
 
@@ -278,62 +276,28 @@ func writeTlsConnectionRecordsAt(ctx context.Context, records []*TlsConnectionRe
 	if len(connectionIds) == 0 {
 		return result, nil
 	}
-	insert := func() (err error) {
-		defer func() {
-			if r := recover(); r != nil {
-				if server.IsDoneError(r) {
-					panic(r)
-				}
-				if recoveredErr, ok := r.(error); ok {
-					err = recoveredErr
-				} else {
-					err = fmt.Errorf("%v", r)
-				}
-			}
-		}()
-		server.Tx(ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(
-				ctx,
-				`
-				INSERT INTO tls_connection_record (connection_id, network_id, host, start_time, end_time, byte_count, visitor_hash)
-				SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::varchar[], $4::timestamp[], $5::timestamp[], $6::bigint[], $7::bytea[])
-				ON CONFLICT (connection_id, end_time) DO NOTHING
-				`,
-				connectionIds,
-				networkIds,
-				hosts,
-				startTimes,
-				endTimes,
-				byteCounts,
-				visitorHashes,
-			))
-		}, server.OptNoRetry())
-		return nil
-	}
-	err := insert()
-	if tlsConnectionPartitionMissing(err) {
-		for hour := range hours {
-			if _, createErr := family.EnsureRangeFor(ctx, hour); createErr != nil {
-				return result, createErr
-			}
-		}
-		err = insert()
-	}
+	err := insertConnectionRecordsCreatingHours(ctx, family, tlsConnectionRecordTable, hours, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+			INSERT INTO tls_connection_record (connection_id, network_id, host, start_time, end_time, byte_count, visitor_hash)
+			SELECT * FROM unnest($1::uuid[], $2::uuid[], $3::varchar[], $4::timestamp[], $5::timestamp[], $6::bigint[], $7::bytea[])
+			ON CONFLICT (connection_id, end_time) DO NOTHING
+			`,
+			connectionIds,
+			networkIds,
+			hosts,
+			startTimes,
+			endTimes,
+			byteCounts,
+			visitorHashes,
+		))
+	})
 	if err != nil {
 		return result, err
 	}
 	result.WrittenCount = len(connectionIds)
 	return result, nil
-}
-
-// Whether err is Postgres finding no partition of tls_connection_record for a
-// row, which is a check violation on the parent with no constraint named.
-func tlsConnectionPartitionMissing(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) &&
-		pgErr.Code == pgerrcode.CheckViolation &&
-		pgErr.TableName == tlsConnectionRecordTable &&
-		pgErr.ConstraintName == ""
 }
 
 // The first day tls_connection_day keeps at now: DayRetentionMonths back from

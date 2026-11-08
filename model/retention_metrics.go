@@ -31,6 +31,8 @@ const (
 	RetentionTableNetworkAclAck = "network_acl_ack"
 	// §13's sidecar table (MG5): tls-3's daily counts past their 13 months
 	RetentionTableTlsConnectionDay = "tls_connection_day"
+	// §15's sidecar table (MG7): host keys 30 days after their retirement
+	RetentionTableMailHostKey = "mail_host_key"
 )
 
 var retentionTables = []string{
@@ -52,6 +54,7 @@ var retentionTables = []string{
 	RetentionTableAccountApiKey,
 	RetentionTableNetworkAclAck,
 	RetentionTableTlsConnectionDay,
+	RetentionTableMailHostKey,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,

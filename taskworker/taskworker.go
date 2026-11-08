@@ -190,6 +190,9 @@ func initTaskSchedule(ctx context.Context) {
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
 		// months; not scheduled without MG5
 		work.ScheduleTlsConnectionRollup(clientSession, tx)
+		// mx-2's hours dropped at 24 h and mx-3's retired host keys at 30
+		// days; not scheduled without MG7
+		work.ScheduleMailRetention(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -609,6 +612,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.TlsConnectionRollup,
 			work.TlsConnectionRollupPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.MailRetention,
+			work.MailRetentionPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,

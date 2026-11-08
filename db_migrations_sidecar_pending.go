@@ -719,9 +719,100 @@ func sidecarMg7Migrations() []any {
 }
 
 // MG7's §15 part: mail_network, mail_host_key, mail_direct_mx and the hourly
-// partitioned mail_connection_record (MAIL-M7-21).
+// partitioned mail_connection_record (MAIL-M7-21), §15.15's four tables
+// exactly. Every column is one of §2.8's mx-2 or mx-3 (I-18); states and
+// results are varchar, never ENUM. No column holds a sender's address, a
+// burner label or any per-network mail address (owner decisions 32, 34); the
+// one address here is a Team's own direct-MX receiver, which mx-3 names and
+// §12.8 publishes in an A or AAAA record anyway. Nothing reads these tables
+// unless the binary links MG7 (server.SidecarMg7Linked).
 func sidecarMg7MailMigrations() []any {
-	return []any{}
+	return []any{
+		// mail-enabled networks (mx-3): POST /mail/enable writes the row, and
+		// create_time starts §14.7's 24 h send gate. The row goes when mail is
+		// turned off or its network is deleted.
+		newSqlMigration(`
+			CREATE TABLE mail_network (
+				network_id uuid NOT NULL,
+				create_time timestamp NOT NULL,
+
+				PRIMARY KEY (network_id)
+			)
+		`),
+
+		// receivers' mail host keys (mx-3), one row per key a receiver
+		// published for a host, mx or mx.<scope>, through POST /dns/key-record,
+		// whose TLSA 3 1 1 names it. state is published or retired; a retired
+		// row goes 30 days after retire_time.
+		newSqlMigration(`
+			CREATE TABLE mail_host_key (
+				network_id uuid NOT NULL,
+				host varchar(66) NOT NULL,
+				receiver_sidecar_id uuid NOT NULL,
+				spki_sha256 bytea NOT NULL,
+				state varchar(16) NOT NULL,
+				publish_time timestamp NOT NULL,
+				retire_time timestamp NULL,
+
+				PRIMARY KEY (network_id, host, receiver_sidecar_id, spki_sha256)
+			)
+		`),
+		// the route projection's receivers of a host, newest first
+		// (plan-MAIL-hints #2)
+		newSqlMigration(`
+			CREATE INDEX mail_host_key_network_state ON mail_host_key (network_id, state, publish_time)
+		`),
+		// a removed receiver's keys, retired with it (I-15)
+		newSqlMigration(`
+			CREATE INDEX mail_host_key_receiver_sidecar_id ON mail_host_key (receiver_sidecar_id)
+		`),
+		// the 30-day sweep
+		newSqlMigration(`
+			CREATE INDEX mail_host_key_retire_time ON mail_host_key (retire_time) WHERE retire_time IS NOT NULL
+		`),
+
+		// a Team's direct MX (mx-3; owner decisions 33, 98): up to two of the
+		// network's mail indexers answering TCP 25 themselves, each address the
+		// text of a public unicast address. state is pending, verified or
+		// failing; verify_time is the last probe that passed. A row goes on
+		// DELETE or its receiver's removal.
+		newSqlMigration(`
+			CREATE TABLE mail_direct_mx (
+				network_id uuid NOT NULL,
+				receiver_sidecar_id uuid NOT NULL,
+				address varchar(45) NOT NULL,
+				state varchar(16) NOT NULL,
+				verify_time timestamp NULL,
+
+				PRIMARY KEY (network_id, receiver_sidecar_id, address)
+			)
+		`),
+		// a removed receiver's rows (I-15)
+		newSqlMigration(`
+			CREATE INDEX mail_direct_mx_receiver_sidecar_id ON mail_direct_mx (receiver_sidecar_id)
+		`),
+
+		// the router's sessions (mx-2), one row each for a session whose SNI
+		// named a network (plan-MAIL-small-readings #3), in 10 s batches off the
+		// connection path: receiving network, start, bytes and a result word,
+		// no sender address and no burner label. Hourly partitions of
+		// start_time, unlogged, which the registry creates ahead and work.Mail-
+		// Retention retires at 24 h once any §21.9 hold has copied its network's
+		// rows (model/mail_connection_record_model.go). No row has an identity
+		// of its own, so the table has no primary key.
+		newSqlMigration(`
+			CREATE TABLE mail_connection_record (
+				network_id uuid NOT NULL,
+				start_time timestamp NOT NULL,
+				byte_count bigint NOT NULL,
+				result varchar(32) NOT NULL
+			) PARTITION BY RANGE (start_time)
+		`),
+		// one network's rows: abuse joins, per-network caps and a hold's copy
+		newSqlMigration(`
+			CREATE INDEX mail_connection_record_network_id ON mail_connection_record (network_id, start_time)
+		`),
+	}
 }
 
 // MG8 (§19.7): what M8 first reads ungated.

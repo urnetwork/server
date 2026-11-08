@@ -2,14 +2,21 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/urnetwork/server"
 )
 
+// What the hourly connection-record families share, tls-3's
+// tls_connection_record and mx-2's mail_connection_record: the batch insert
+// that makes a missing hour and stores once more, and the §21.9 hold check.
+//
 // The §21.9 hold check of the hourly connection-record families, tls-3's
 // tls_connection_record and mx-2's mail_connection_record: a range drops
 // whole at 24 h only once every hold has copied out its network's rows (owner
@@ -79,4 +86,48 @@ func connectionRecordRangeHold(ctx context.Context, conn server.PgQuerier, leaf 
 	}
 	// the case id is an opaque id, which a log line may carry (I-13)
 	return fmt.Sprintf("hold of case %s has not copied its network's rows of %s", caseId, leaf)
+}
+
+// Runs insert in one transaction, without retries, and returns what it raised.
+// When the insert found no partition for a row, it creates each of hours that
+// has none (the registry's EnsureRangeFor) and runs insert once more, so a
+// batch never waits for the runway. insert is the whole batch, so a retry
+// stores nothing twice that its statement does not already keep once.
+func insertConnectionRecordsCreatingHours(ctx context.Context, family *server.PartitionFamily, table string, hours map[time.Time]bool, insert func(tx server.PgTx)) error {
+	run := func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				if server.IsDoneError(r) {
+					panic(r)
+				}
+				if recoveredErr, ok := r.(error); ok {
+					err = recoveredErr
+				} else {
+					err = fmt.Errorf("%v", r)
+				}
+			}
+		}()
+		server.Tx(ctx, insert, server.OptNoRetry())
+		return nil
+	}
+	err := run()
+	if !connectionRecordPartitionMissing(err, table) {
+		return err
+	}
+	for hour := range hours {
+		if _, createErr := family.EnsureRangeFor(ctx, hour); createErr != nil {
+			return createErr
+		}
+	}
+	return run()
+}
+
+// Whether err is Postgres finding no partition of table for a row, which is a
+// check violation on the parent with no constraint named.
+func connectionRecordPartitionMissing(err error, table string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) &&
+		pgErr.Code == pgerrcode.CheckViolation &&
+		pgErr.TableName == table &&
+		pgErr.ConstraintName == ""
 }
