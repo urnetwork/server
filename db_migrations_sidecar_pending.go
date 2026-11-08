@@ -118,7 +118,48 @@ func sidecarMg1Migrations() []any {
 
 // MG1's §5 part: sidecar_identity and sidecar_identity_binding (CORE-M1-06).
 func sidecarMg1CoreMigrations() []any {
-	return []any{}
+	return []any{
+		// §5.15's durable identity (§2.8 api-5): one row per sidecar_id, never
+		// reaped, deleted only with its network. No foreign key to
+		// network_client, whose rows the reaper removes. status is active or
+		// revoked, a candidate a client verifies against the config (§5.6).
+		newSqlMigration(`
+			CREATE TABLE sidecar_identity (
+				sidecar_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				identity_public_key bytea NOT NULL,
+				identity_alg varchar(16) NOT NULL,
+				status varchar(16) NOT NULL,
+				create_time timestamp NOT NULL,
+				revoke_time timestamp NULL,
+
+				PRIMARY KEY (sidecar_id)
+			)
+		`),
+		// a network's deletion finds its identities here
+		newSqlMigration(`
+			CREATE INDEX sidecar_identity_network_id ON sidecar_identity (network_id, sidecar_id)
+		`),
+		// §5.15's append-only bindings: one row per client generation, the
+		// wrapper's bytes kept verbatim in signatures, since the other columns
+		// cannot rebuild them (plan-CORE-binding-wire #1). Never reaped.
+		newSqlMigration(`
+			CREATE TABLE sidecar_identity_binding (
+				sidecar_id uuid NOT NULL,
+				generation bigint NOT NULL,
+				client_id uuid NOT NULL,
+				client_public_key bytea NOT NULL,
+				signatures bytea NOT NULL,
+				create_time timestamp NOT NULL,
+
+				PRIMARY KEY (sidecar_id, generation)
+			)
+		`),
+		// a client binds once, whatever its sidecar_id (plan-CORE-binding-wire #2)
+		newSqlMigration(`
+			CREATE UNIQUE INDEX sidecar_identity_binding_client_id ON sidecar_identity_binding (client_id)
+		`),
+	}
 }
 
 // MG1's §7 part: auth keys, the admin event log and admin_token_use (TEAM's

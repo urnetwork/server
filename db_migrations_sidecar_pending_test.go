@@ -326,6 +326,30 @@ func TestSidecarMg1TeamPartIsAdditive(t *testing.T) {
 	}
 }
 
+// CODESTYLE's migration rules for MG1's §5 part: new tables and their indexes
+// only.
+func TestSidecarMg1CorePartIsAdditive(t *testing.T) {
+	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (sidecar_identity|sidecar_identity_binding)\b|CREATE (UNIQUE )?INDEX (sidecar_identity|sidecar_identity_binding)_\w+ ON (sidecar_identity|sidecar_identity_binding)\b)`)
+	refused := regexp.MustCompile(`(?i)\b(DROP|ALTER|RENAME|NOT VALID|TRUNCATE|UPDATE|DELETE|REFERENCES|transaction_timeout)\b`)
+	migrations := sidecarMg1CoreMigrations()
+	if len(migrations) == 0 {
+		t.Fatal("MG1's §5 part is empty")
+	}
+	for index, migration := range migrations {
+		switch value := migration.(type) {
+		case *SqlMigration:
+			if !statement.MatchString(value.sql) {
+				t.Errorf("entry %d is not an addition: %s", index, value.sql)
+			}
+			if refused.MatchString(value.sql) {
+				t.Errorf("entry %d changes what the running release uses, or ties a row to the reaper: %s", index, value.sql)
+			}
+		default:
+			t.Fatalf("entry %d is a %T", index, migration)
+		}
+	}
+}
+
 // The metadata row each column of MG1's tables shows under (§2.8, I-18), with
 // words of that row's sees that name it. The full guard is TEST-M1-03's; this
 // keeps MG1's own columns from growing without a row in the meantime.
@@ -354,6 +378,21 @@ var sidecarMg1ColumnRows = map[string][2]string{
 	"network_admin_event.request_id":   {"api-8", "request id"},
 	"network_admin_event.prev_sha256":  {"api-8", "hash chain"},
 	"network_admin_event.chain_sha256": {"api-8", "hash chain"},
+
+	"sidecar_identity.sidecar_id":          {"api-5", "sidecar_id"},
+	"sidecar_identity.network_id":          {"api-5", "network_id"},
+	"sidecar_identity.identity_public_key": {"api-5", "identity public key"},
+	"sidecar_identity.identity_alg":        {"api-5", "algorithm"},
+	"sidecar_identity.status":              {"api-5", "status"},
+	"sidecar_identity.create_time":         {"api-5", "create and revoke times"},
+	"sidecar_identity.revoke_time":         {"api-5", "create and revoke times"},
+
+	"sidecar_identity_binding.sidecar_id":        {"api-5", "append-only bindings"},
+	"sidecar_identity_binding.generation":        {"api-5", "generation"},
+	"sidecar_identity_binding.client_id":         {"api-5", "client_id"},
+	"sidecar_identity_binding.client_public_key": {"api-5", "client public key"},
+	"sidecar_identity_binding.signatures":        {"api-5", "dual signatures"},
+	"sidecar_identity_binding.create_time":       {"api-5", "time"},
 }
 
 // Each MG1 column maps to a row of §2.8's list whose store names its table and
@@ -393,7 +432,7 @@ func TestSidecarMg1ColumnsMapToMetadataRows(t *testing.T) {
 			result, err := conn.Query(ctx, `
 				SELECT table_name || '.' || column_name
 				FROM information_schema.columns
-				WHERE table_name IN ('network_auth_key', 'network_admin_event')
+				WHERE table_name IN ('network_auth_key', 'network_admin_event', 'sidecar_identity', 'sidecar_identity_binding')
 			`)
 			WithPgResult(result, err, func() {
 				for result.Next() {

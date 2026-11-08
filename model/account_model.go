@@ -382,6 +382,11 @@ func RemoveNetworkWithStoreSnapshot(
 			networkId,
 		).Scan(&networkName))
 		releaseNetworkNameInTx(ctx, tx, networkName, server.NowUtc().Add(DefaultNetworkRenameSettings().ReclaimCooldown))
+		// §5.15's identities are never reaped, so they go only here, with
+		// their network
+		if server.SidecarMg1Linked() {
+			removeSidecarIdentitiesInTx(ctx, tx, networkId)
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`

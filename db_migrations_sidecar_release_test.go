@@ -23,7 +23,7 @@ func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 	if 0 < len(sidecarPendingMigrations()) {
 		t.Fatal("a release build has pending migrations")
 	}
-	names := append([]string{"network_client_owner", "auth_code_api_key_id", "network_auth_key", "network_admin_event"}, sidecarGroupMarkerIds...)
+	names := append([]string{"network_client_owner", "auth_code_api_key_id", "network_auth_key", "network_admin_event", "sidecar_identity"}, sidecarGroupMarkerIds...)
 	for index, migration := range migrations {
 		sql := ""
 		switch value := migration.(type) {
