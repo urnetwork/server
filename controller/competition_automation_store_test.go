@@ -120,11 +120,11 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 			t.Fatal("frozen winner policy immediately before source intent", err)
 		}
 	}
-	if _, sourceErr = bootstrapStore.RecordSourceIntent(context.Background(), fixture.settings, *lease, intent); sourceErr != nil {
+	if _, sourceErr = fixture.store.RecordSourceIntent(context.Background(), fixture.settings, *lease, intent); sourceErr != nil {
 		t.Fatal("synthetic baseline source intent", sourceErr)
 	}
 	for _, role := range []string{"api", "worker"} {
-		sourceErr = bootstrapStore.RecordSourceReadiness(context.Background(), fixture.settings, model.CompetitionSourceReadiness{
+		sourceErr = fixture.store.RecordSourceReadiness(context.Background(), fixture.settings, model.CompetitionSourceReadiness{
 			Staging:     staging,
 			Environment: intent.Environment, CompetitionId: intent.CompetitionId, SeasonId: intent.SeasonId, Generation: 1, TargetRoundId: intent.TargetRoundId, Role: role, ActorId: "synthetic-" + role, ManifestCommit: intent.ManifestCommit, ManifestSha256: intent.ManifestSha256,
 			SourceLockSha256: sourceLock, RuntimeImageDigest: testWorkerImageDigest(), QualificationSha256: intent.HostQualificationSha256, Ready: true})
@@ -132,7 +132,8 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 			t.Fatal("synthetic baseline readiness", role, sourceErr)
 		}
 	}
-	if _, sourceErr = bootstrapStore.ActivateSource(context.Background(), fixture.settings, *lease, 1, 0); sourceErr != nil {
+	activatedSource, sourceErr := fixture.store.ActivateSource(context.Background(), fixture.settings, *lease, 1, 0)
+	if sourceErr != nil {
 		t.Fatal("synthetic baseline activation", sourceErr)
 	}
 	var err error
@@ -142,6 +143,14 @@ func newCompetitionAutomationFixtureWithWinnerPolicy(t testing.TB, staging bool,
 		t.Fatal("synthetic immutable round preparation", err)
 	}
 	fixture.round.Epoch = 1
+	if activatedSource == nil || activatedSource.ActivatedAt == nil || !activatedSource.ActivatedAt.Equal(fixture.now) ||
+		fixture.round.OpensAt.Before(*activatedSource.ActivatedAt) || fixture.round.OpensAt.Before(intent.PreparedAt.Add(preparation)) ||
+		fixture.round.ClosesAt.Sub(fixture.round.OpensAt) != window || fixture.round.RevealAt.Before(fixture.round.ClosesAt) {
+		t.Fatal("synthetic source/round historical schedule differs before guarded insertion")
+	}
+	if winnerPolicy != "" {
+		t.Log("handoff fixture: historical source/round schedule exact; current bootstrap lease separate")
+	}
 	server.Tx(context.Background(), func(conn server.PgTx) {
 		server.Raise(bootstrapStore.requireAutomationLeaseInTx(context.Background(), conn, fixture.settings, *lease))
 		round := fixture.round
