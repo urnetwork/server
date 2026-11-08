@@ -435,7 +435,7 @@ func TestPartitionRegistryValidatesDeclarations(t *testing.T) {
 		{"a table too long to name its leaves", func(family *PartitionFamily) { family.Tables = []string{strings.Repeat("a", 60)} }},
 		{"no key column", func(family *PartitionFamily) { family.KeyColumn = "" }},
 		{"an unknown key kind", func(family *PartitionFamily) { family.KeyKind = "hash" }},
-		{"an unknown granularity", func(family *PartitionFamily) { family.Granularity = "hourly" }},
+		{"an unknown granularity", func(family *PartitionFamily) { family.Granularity = "minutely" }},
 		{"no ranges ahead", func(family *PartitionFamily) { family.AheadRanges = 0 }},
 		{"a negative retention", func(family *PartitionFamily) { family.Retention = -time.Hour }},
 		{"a runway alarm past the runway", func(family *PartitionFamily) { family.MonitorRunwayRanges = 4 }},

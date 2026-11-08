@@ -28,8 +28,8 @@
 //   - the key kind: a utc timestamp (PartitionKeyTimestamp), a uuid id that
 //     leads with its creation millisecond, bounded through contract_id_floor
 //     (PartitionKeyId), or epoch minutes (PartitionKeyEpochMinute);
-//   - the granularity, daily or weekly, and how many ranges after the current
-//     one always exist (AheadRanges);
+//   - the granularity, hourly, daily or weekly, and how many ranges after the
+//     current one always exist (AheadRanges);
 //   - the retention: a range expires once its upper bound is Retention past.
 //     Zero never drops a range;
 //   - optionally a DEFAULT partition (DefaultPartition, <table>_default, never
@@ -38,7 +38,9 @@
 //   - optionally a guarded drop: DropGuardSetting is a GUC the drop
 //     transaction sets on (SET LOCAL <guc> = 'on') before it detaches
 //     anything, DropFence runs next in that transaction (take locks, raise to
-//     refuse), and DropPrecondition says why a range must stay. The
+//     refuse), DropWork runs after it in that transaction (work that must
+//     commit with the drop and only with it, such as rolling up the rows the
+//     drop loses), and DropPrecondition says why a range must stay. The
 //     precondition runs before the drop and again in the drop's transaction
 //     after every leaf is detached, where no other statement can reach them;
 //   - optionally an archive step before a drop (Archive), resumable through a
@@ -50,9 +52,11 @@
 //
 // # What the registry gives every family
 //
-//   - Canonical bounds: daily ranges start at 00:00 UTC and weekly ones at
-//     Monday 00:00 UTC, so a range never straddles two partitions. Leaves are
-//     named <table>_pYYYYMMDD (daily) and <table>_wYYYYMMDD (weekly).
+//   - Canonical bounds: hourly ranges start on the UTC hour, daily ones at
+//     00:00 UTC and weekly ones at Monday 00:00 UTC, so a range never
+//     straddles two partitions, and an hourly range never two days. Leaves are
+//     named <table>_hYYYYMMDDHH (hourly), <table>_pYYYYMMDD (daily) and
+//     <table>_wYYYYMMDD (weekly).
 //   - Create-ahead with catch-up (EnsureRunway): every range from the one
 //     holding CreateFrom(now) (late writes; now by default) through
 //     AheadRanges after the current one is created when no leaf covers it, in
@@ -113,6 +117,9 @@ import (
 type PartitionGranularity string
 
 const (
+	// one range per UTC hour, for records kept a day or less, such as
+	// tls_connection_record and mail_connection_record (§19.7)
+	PartitionGranularityHourly PartitionGranularity = "hourly"
 	// one range per UTC day, from 00:00
 	PartitionGranularityDaily PartitionGranularity = "daily"
 	// one range per week, from Monday 00:00 UTC, as the contract weeks
@@ -120,12 +127,15 @@ const (
 )
 
 func (self PartitionGranularity) valid() bool {
-	return self == PartitionGranularityDaily || self == PartitionGranularityWeekly
+	return self == PartitionGranularityHourly || self == PartitionGranularityDaily || self == PartitionGranularityWeekly
 }
 
 // The canonical start of the range holding t.
 func (self PartitionGranularity) RangeStart(t time.Time) time.Time {
 	t = t.UTC()
+	if self == PartitionGranularityHourly {
+		return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), 0, 0, 0, time.UTC)
+	}
 	day := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 	if self == PartitionGranularityWeekly {
 		return day.AddDate(0, 0, -((int(day.Weekday()) + 6) % 7))
@@ -141,7 +151,10 @@ func (self PartitionGranularity) NextRangeStart(rangeStart time.Time) time.Time 
 // The start of the range count ranges after (before, when negative) the one
 // starting at rangeStart.
 func (self PartitionGranularity) AddRanges(rangeStart time.Time, count int) time.Time {
-	if self == PartitionGranularityWeekly {
+	switch self {
+	case PartitionGranularityHourly:
+		return rangeStart.UTC().Add(time.Duration(count) * time.Hour)
+	case PartitionGranularityWeekly:
 		return rangeStart.UTC().AddDate(0, 0, 7*count)
 	}
 	return rangeStart.UTC().AddDate(0, 0, count)
@@ -155,10 +168,38 @@ func (self PartitionGranularity) RangeOf(t time.Time) PartitionRange {
 
 // The letter between a table's name and the date of its leaves.
 func (self PartitionGranularity) namePrefix() string {
-	if self == PartitionGranularityWeekly {
+	switch self {
+	case PartitionGranularityHourly:
+		return "h"
+	case PartitionGranularityWeekly:
 		return "w"
 	}
 	return "p"
+}
+
+// The layout of a range's start in its leaves' names: the date, and for an
+// hourly range the hour after it.
+func (self PartitionGranularity) nameLayout() string {
+	if self == PartitionGranularityHourly {
+		return "2006010215"
+	}
+	return "20060102"
+}
+
+// The most a leaf name adds to its table's: _default, _legacy, or _ and the
+// range's prefix and start, _hYYYYMMDDHH for an hourly range.
+func (self PartitionGranularity) longestLeafSuffixLength() int {
+	return max(len("_default"), len("_legacy"), len("_")+len(self.namePrefix())+len(self.nameLayout()))
+}
+
+// The name of the range period holding t, which the analyze pass keeps in a
+// family's state: the range's start, as YYYY-MM-DD, or YYYY-MM-DDTHH for an
+// hourly range, so each period has its own name.
+func (self PartitionGranularity) periodName(t time.Time) string {
+	if self == PartitionGranularityHourly {
+		return self.RangeStart(t).Format("2006-01-02T15")
+	}
+	return self.RangeStart(t).Format(time.DateOnly)
 }
 
 // How a family's partition key orders in time.
@@ -335,6 +376,12 @@ type PartitionFamily struct {
 	// Each new leaf's storage settings, for example
 	// "autovacuum_vacuum_scale_factor=0". Empty leaves the defaults.
 	LeafReloptions []string
+	// Each new leaf is UNLOGGED, for records kept a day or less: a physical
+	// copy of the primary (pg_basebackup) holds no data of an unlogged
+	// relation, so no backup outlives their ttl, and a crash of the primary
+	// empties them, as a restore would (xops-dump-physical-copies). The parent
+	// stays as it is, since a partitioned table has no storage of its own.
+	UnloggedLeaves bool
 	// A closed leaf is analyzed once, this long after its range ends, when
 	// late writes and updates have landed. Zero leaves leaves to autovacuum.
 	LeafAnalyzeDelay time.Duration
@@ -385,6 +432,12 @@ type PartitionFamily struct {
 	// any detach: take the locks that fence the range's writers and readers,
 	// and raise to refuse the drop.
 	DropFence func(ctx context.Context, tx PgTx, r PartitionRange)
+	// Runs in the drop transaction after DropFence and before any detach, with
+	// r's leaves still attached: work that must commit with the drop and only
+	// with it, such as rolling up the rows the drop loses. A drop that fails
+	// or is refused after it rolls it back too, so a retried drop does the
+	// work once. Raise to refuse the drop.
+	DropWork func(ctx context.Context, tx PgTx, r PartitionRange)
 	// Why r must stay, or "" when it can be dropped. It runs before the drop
 	// on a maintenance connection, and again on the drop's transaction after
 	// every leaf is detached.
@@ -429,8 +482,10 @@ func validatePartitionFamily(family *PartitionFamily) error {
 		if slices.Contains(family.Tables[:i], table) {
 			return fmt.Errorf("family %s lists %s twice", family.Name, table)
 		}
-		// the longest leaf name is <table>_default
-		if pgMaxIdentifierLength < len(table)+len("_default") {
+		// Postgres cuts a longer name short, so every leaf name must fit:
+		// <table>_default, <table>_legacy and the range's own, whose date or
+		// hour is the longest
+		if pgMaxIdentifierLength < len(table)+family.Granularity.longestLeafSuffixLength() {
 			return fmt.Errorf("family %s table %s is too long to name its leaves", family.Name, table)
 		}
 	}
@@ -565,9 +620,9 @@ func PartitionDefaultLeafName(table string) string {
 	return table + "_default"
 }
 
-// The registry's name for table's leaf of r: <table>_pYYYYMMDD for a daily
-// range, <table>_wYYYYMMDD for a weekly one, or the legacy or DEFAULT
-// partition's name.
+// The registry's name for table's leaf of r: <table>_hYYYYMMDDHH for an
+// hourly range, <table>_pYYYYMMDD for a daily one, <table>_wYYYYMMDD for a
+// weekly one, or the legacy or DEFAULT partition's name.
 func (self *PartitionFamily) LeafName(table string, r PartitionRange) string {
 	switch {
 	case r.Default:
@@ -575,7 +630,7 @@ func (self *PartitionFamily) LeafName(table string, r PartitionRange) string {
 	case r.Legacy:
 		return PartitionLegacyLeafName(table)
 	default:
-		return table + "_" + self.Granularity.namePrefix() + r.Lower.UTC().Format("20060102")
+		return table + "_" + self.Granularity.namePrefix() + r.Lower.UTC().Format(self.Granularity.nameLayout())
 	}
 }
 
@@ -606,10 +661,11 @@ func (self *PartitionFamily) ParseLeafName(table string, name string) (r Partiti
 		return PartitionRange{Default: true}, true
 	}
 	date, found := strings.CutPrefix(suffix, self.Granularity.namePrefix())
-	if !found || len(date) != 8 || strings.Trim(date, "0123456789") != "" {
+	layout := self.Granularity.nameLayout()
+	if !found || len(date) != len(layout) || strings.Trim(date, "0123456789") != "" {
 		return PartitionRange{}, false
 	}
-	lower, err := time.Parse("20060102", date)
+	lower, err := time.Parse(layout, date)
 	if err != nil || !self.Granularity.RangeStart(lower).Equal(lower) {
 		return PartitionRange{}, false
 	}
@@ -782,14 +838,20 @@ func (self *PartitionFamily) Runway(leaves []PartitionLeaf, now time.Time) (curr
 }
 
 // The statements of the registry's default create of table's leaf for r: a
-// standalone table LIKE the parent, the family's leaf storage settings, the
-// parent's TRUNCATE guards repeated on the leaf (a statement trigger on the
-// parent does not fire for a statement that names a partition), then the
-// attach. Read through conn, which may be the create's own transaction.
+// standalone table LIKE the parent, UNLOGGED when the family says so, the
+// family's leaf storage settings, the parent's TRUNCATE guards repeated on the
+// leaf (a statement trigger on the parent does not fire for a statement that
+// names a partition), then the attach. Read through conn, which may be the
+// create's own transaction.
 func (self *PartitionFamily) CreateLeafSql(ctx context.Context, conn PgQuerier, table string, r PartitionRange) (statements []string, err error) {
 	leaf := self.LeafName(table, r)
+	persistence := ""
+	if self.UnloggedLeaves {
+		persistence = "UNLOGGED "
+	}
 	statements = append(statements, fmt.Sprintf(
-		"CREATE TABLE public.%s (LIKE public.%s INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS INCLUDING STORAGE INCLUDING COMPRESSION)",
+		"CREATE %sTABLE public.%s (LIKE public.%s INCLUDING DEFAULTS INCLUDING GENERATED INCLUDING CONSTRAINTS INCLUDING STORAGE INCLUDING COMPRESSION)",
+		persistence,
 		quoteIdentifier(leaf),
 		quoteIdentifier(table),
 	))
@@ -1037,9 +1099,9 @@ func (self *PartitionDropBlockedError) Error() string {
 }
 
 // Detaches and drops r's leaves in one transaction, children first: the
-// guard setting, the fence, every detach, the precondition again on the
-// detached leaves (which no other statement can reach any more), then the
-// drops. A detach takes ACCESS EXCLUSIVE on its parent briefly, so the lock
+// guard setting, the fence, the drop's work, every detach, the precondition
+// again on the detached leaves (which no other statement can reach any more),
+// then the drops. A detach takes ACCESS EXCLUSIVE on its parent briefly, so the lock
 // wait is short and a busy run retries next time.
 func (self *PartitionFamily) DropRange(ctx context.Context, r PartitionRange) (dropped []string, err error) {
 	if r.Default {
@@ -1060,6 +1122,9 @@ func (self *PartitionFamily) DropRange(ctx context.Context, r PartitionRange) (d
 		}
 		if self.DropFence != nil {
 			self.DropFence(ctx, tx, r)
+		}
+		if self.DropWork != nil {
+			self.DropWork(ctx, tx, r)
 		}
 		for _, table := range tables {
 			RaisePgResult(tx.Exec(ctx, fmt.Sprintf(
@@ -1089,8 +1154,8 @@ func (self *PartitionFamily) DropRange(ctx context.Context, r PartitionRange) (d
 // Where a family's interrupted maintenance resumes. The registry keeps one per
 // family in its task's arguments.
 type PartitionFamilyState struct {
-	// the range period (its start, YYYY-MM-DD) whose parents were last
-	// analyzed
+	// the range period (its start, YYYY-MM-DD, or YYYY-MM-DDTHH for an hourly
+	// family) whose parents were last analyzed
 	AnalyzedPeriod string `json:"analyzed_period,omitempty"`
 	// the first table's leaf whose archive step is in progress, and the
 	// step's cursor
@@ -1203,7 +1268,7 @@ func partitionRegistryAnalyze(ctx context.Context, statement string) bool {
 // parent is analyzed, so a failed one is retried.
 func (self *PartitionFamily) AnalyzeParents(ctx context.Context, now time.Time, analyzedPeriod string, deadline time.Time) (analyzed []string, nextAnalyzedPeriod string) {
 	nextAnalyzedPeriod = analyzedPeriod
-	period := self.Granularity.RangeStart(now).Format(time.DateOnly)
+	period := self.Granularity.periodName(now)
 	if period == analyzedPeriod || !time.Now().Before(deadline) {
 		return
 	}
