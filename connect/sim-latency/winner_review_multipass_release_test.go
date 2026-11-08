@@ -117,6 +117,22 @@ func authenticateWinnerMultipassReleaseArtifacts(release winnerMultipassQualific
 	if err := validateWinnerMultipassQualificationReleaseShape(release); err != nil {
 		return err
 	}
+	return authenticateWinnerMultipassInstalledArtifacts(release, false)
+}
+
+// Bootstrap authenticates the same installed source, ordinary/race evidence,
+// image and fixed provider, but permits only absent runtime observations. It
+// cannot be used by a normal review call or issue generation admission.
+func authenticateWinnerMultipassRuntimeProbeArtifacts(release winnerMultipassQualificationRelease) error {
+	if err := validateWinnerMultipassRuntimeProbeReleaseShape(release); err != nil {
+		return err
+	}
+	return authenticateWinnerMultipassInstalledArtifacts(release, true)
+}
+
+// Both callers enforce their mutually exclusive release shapes first. The
+// boolean selects only the declaration format and completed-observation gate.
+func authenticateWinnerMultipassInstalledArtifacts(release winnerMultipassQualificationRelease, runtimeProbe bool) error {
 	if err := validateCurrentQgQualificationRuntime(); err != nil {
 		return err
 	}
@@ -194,20 +210,31 @@ func authenticateWinnerMultipassReleaseArtifacts(release winnerMultipassQualific
 		TokenizationProfiles   map[string]winnerMultipassTokenizationProfile `json:"tokenization_profiles"`
 		Evidence               []currentQgQualificationPin                   `json:"evidence"`
 	}
-	if decodeStrictJSONBytes(content, &declaration, "fixed provider deployment declaration") != nil || declaration.Schema != 1 || declaration.Kind != "winner-review-multipass-deployment-declaration/v1" || declaration.CheckpointEvidenceKind != release.CheckpointEvidenceKind ||
+	declarationKind := "winner-review-multipass-deployment-declaration/v1"
+	if runtimeProbe {
+		declarationKind = "winner-review-multipass-bootstrap-deployment-declaration/v1"
+	}
+	if decodeStrictJSONBytes(content, &declaration, "fixed provider deployment declaration") != nil || declaration.Schema != 1 || declaration.Kind != declarationKind || declaration.CheckpointEvidenceKind != release.CheckpointEvidenceKind ||
 		!reflect.DeepEqual(declaration.Members, defaultWinnerSnowProviderSettings().Members) || !reflect.DeepEqual(declaration.TokenizationProfiles, release.TokenizationProfiles) || len(declaration.Evidence) == 0 {
 		return errors.New("new provider declaration omitted or changed its exact runtime/checkpoint provenance")
 	}
-	runtimePins := map[string]bool{}
+	runtimePins := map[string][]byte{}
 	for _, pin := range declaration.Evidence {
-		if _, err := read(pin); err != nil {
+		original, err := read(pin)
+		if err != nil {
 			return err
 		}
-		runtimePins[pin.Sha256] = true
+		runtimePins[pin.Sha256] = original
 	}
-	for _, profile := range release.TokenizationProfiles {
-		if !runtimePins[profile.RuntimeEvidenceSha256] {
-			return errors.New("runtime tokenization profile has no retained original declaration evidence")
+	if !runtimeProbe {
+		for _, profile := range release.TokenizationProfiles {
+			original, found := runtimePins[profile.RuntimeEvidenceSha256]
+			if !found {
+				return errors.New("runtime tokenization profile has no retained original declaration evidence")
+			}
+			if err := authenticateWinnerHandoffRuntimeEvidence(original, release, profile.Member); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
