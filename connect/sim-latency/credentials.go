@@ -373,7 +373,7 @@ func validateCredentialCapability(role string, scope credentialScope) error {
 			return errors.New("legacy credentials do not use v2 capability scope")
 		}
 		return nil
-	case "scheduler", "reviewer", "settlement", "source_promoter":
+	case "scheduler", "reviewer", "settlement", "source_promoter", "source_handoff", "review_operator":
 		if !credentialNamePattern.MatchString(scope.Environment) ||
 			!credentialNamePattern.MatchString(scope.CompetitionId) || !credentialNamePattern.MatchString(scope.SeasonId) {
 			return errors.New("v2 credentials require exact --environment, --competition-id, and --season-id")

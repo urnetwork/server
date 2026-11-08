@@ -52,15 +52,6 @@ func addSalesPaymentNoticeInTx(tx server.PgTx, build func() *model.SalesPaymentN
 	model.AddSalesPaymentNoticeInTx(tx, notice)
 }
 
-// salesPlanForProductId is the plan a store product id sells. "supporter" is
-// the App Store's monthly plan from 2025-02 (appleLegacySupporterProductIds).
-func salesPlanForProductId(productId string) string {
-	if strings.EqualFold(productId, "supporter") {
-		return model.PlanMonthly
-	}
-	return planForProductId(productId)
-}
-
 // salesConfiguredUsdAmount is a configured USD price, marked as the list
 // price.
 func salesConfiguredUsdAmount(priceUsd float64, store string) string {
@@ -148,10 +139,62 @@ func stripeSalesPlanForInterval(interval string) string {
 	return ""
 }
 
+// A day shorter than the shortest paid period, a 28-day February month. A
+// subscription period shorter than this is a free trial. The Stripe trial is
+// 14 days (StripeSubscriptionTrialDays); a free period of this length or more
+// would post its start as "new, no charge" and its first charge as a renewal.
+const stripeShortestPaidPeriod = 27 * 24 * time.Hour
+
+// stripeTrialPeriod is whether a subscription period this long is a free
+// trial. Only the yearly plan carries one (StripeSubscriptionTrialDays).
+func stripeTrialPeriod(length time.Duration) bool {
+	return 0 < length && length < stripeShortestPaidPeriod
+}
+
+// stripeInvoiceStartsTrial is whether the invoice starts a free trial: the
+// subscription's first invoice, for nothing, for a trial-length period.
+func stripeInvoiceStartsTrial(billingReason string, amount int64, periodLength time.Duration) bool {
+	return amount == 0 &&
+		(billingReason == "subscription_create" || billingReason == "") &&
+		stripeTrialPeriod(periodLength)
+}
+
+// stripeInvoiceEndsTrial is whether the invoice is the first charge after a
+// free trial: a cycle's charge whose invoice looks back on a trial-length
+// period. A subscription invoice's own period_start and period_end are the
+// period before the one it bills.
+func stripeInvoiceEndsTrial(billingReason string, amount int64, previousPeriodLength time.Duration) bool {
+	return 0 < amount &&
+		billingReason == "subscription_cycle" &&
+		stripeTrialPeriod(previousPeriodLength)
+}
+
+// stripeUnixPeriodLength is the length of a period in unix seconds, zero
+// when either end is missing.
+func stripeUnixPeriodLength(start int64, end int64) time.Duration {
+	if start <= 0 || end <= 0 {
+		return 0
+	}
+	return time.Duration(end-start) * time.Second
+}
+
+// stripeMarkTrialNotice makes the notice a trial's start: nothing charged,
+// through trialEnd (zero when unknown).
+func stripeMarkTrialNotice(notice *model.SalesPaymentNotice, trialEnd time.Time) {
+	notice.Trial = true
+	notice.Kind = model.SalesPaymentKindNew
+	notice.Amount = model.SalesFreeTrialAmount(trialEnd)
+	notice.Method = "Stripe"
+	if notice.Item == model.SalesProItem("") {
+		// both paths that start a Stripe trial start it on the yearly plan
+		notice.Item = model.SalesProItem(model.PlanYearly)
+	}
+}
+
 // stripeInvoiceSalesNotice is the notice of a credited subscription invoice.
 // What the delivered invoice carries is the fallback; the worker reads the
-// invoice back from Stripe for the amount paid, the reason, the plan and the
-// charge's payment method.
+// invoice back from Stripe for the amount paid, the reason, the plan, the
+// trial and the charge's payment method.
 func stripeInvoiceSalesNotice(
 	networkId server.Id,
 	invoice *StripeEventInvoiceObject,
@@ -169,6 +212,17 @@ func stripeInvoiceSalesNotice(
 	if model.SalesCurrencyCode(invoice.Currency) != "" {
 		notice.Amount = stripeSalesAmount(int64(invoice.Total), invoice.Currency)
 	}
+	// the window runs manualPaymentGracePeriod past the period it paid for.
+	// Only a delivered invoice (it names its currency) is read for a trial
+	// here: the reconciler credits by id alone, and the read back decides.
+	periodEnd := endTime.Add(-manualPaymentGracePeriod)
+	if model.SalesCurrencyCode(invoice.Currency) != "" {
+		if stripeInvoiceStartsTrial(invoice.BillingReason, int64(invoice.Total), periodEnd.Sub(startTime)) {
+			stripeMarkTrialNotice(notice, periodEnd)
+		} else if stripeInvoiceEndsTrial(invoice.BillingReason, int64(invoice.Total), stripeUnixPeriodLength(int64(invoice.PeriodStart), int64(invoice.PeriodEnd))) {
+			notice.Kind = model.SalesPaymentKindAfterTrial
+		}
+	}
 	invoiceId := invoice.Id
 	notice.Enrich = func(ctx context.Context, notice *model.SalesPaymentNotice) {
 		stripeEnrichInvoiceSalesNotice(ctx, invoiceId, notice)
@@ -185,12 +239,32 @@ type stripeSalesInvoice struct {
 	Currency      string          `json:"currency"`
 	Charge        json.RawMessage `json:"charge"`
 	PaymentIntent json.RawMessage `json:"payment_intent"`
-	Lines         *struct {
+	// the period before the one a subscription invoice bills
+	PeriodStart int64 `json:"period_start"`
+	PeriodEnd   int64 `json:"period_end"`
+	Lines       *struct {
 		Data []*struct {
-			Price json.RawMessage `json:"price"`
-			Plan  json.RawMessage `json:"plan"`
+			Price  json.RawMessage `json:"price"`
+			Plan   json.RawMessage `json:"plan"`
+			Period *struct {
+				Start int64 `json:"start"`
+				End   int64 `json:"end"`
+			} `json:"period"`
 		} `json:"data"`
 	} `json:"lines"`
+}
+
+// linePeriod is the period the invoice's first line with one bills.
+func (self *stripeSalesInvoice) linePeriod() (start int64, end int64, ok bool) {
+	if self.Lines == nil {
+		return 0, 0, false
+	}
+	for _, line := range self.Lines.Data {
+		if line != nil && line.Period != nil && 0 < line.Period.Start && 0 < line.Period.End {
+			return line.Period.Start, line.Period.End, true
+		}
+	}
+	return 0, 0, false
 }
 
 // interval is the first recurring interval of the invoice's lines.
@@ -349,14 +423,33 @@ func stripeEnrichInvoiceSalesNotice(ctx context.Context, invoiceId string, notic
 	if amount == nil {
 		amount = invoice.Total
 	}
+	if plan := stripeSalesPlanForInterval(invoice.interval()); plan != "" {
+		notice.Item = model.SalesProItem(plan)
+	}
+	// a trial's start, as Stripe reports it now: an invoice that charged
+	// something is no trial, and a free one is when it bills a trial-length
+	// period. Without the lines' period the delivered invoice's verdict stands.
+	if amount != nil {
+		if 0 < *amount {
+			notice.Trial = false
+		} else if lineStart, lineEnd, ok := invoice.linePeriod(); ok {
+			notice.Trial = stripeInvoiceStartsTrial(invoice.BillingReason, *amount, stripeUnixPeriodLength(lineStart, lineEnd))
+			if notice.Trial {
+				stripeMarkTrialNotice(notice, time.Unix(lineEnd, 0))
+			}
+		}
+	}
+	if notice.Trial {
+		return
+	}
 	if amount != nil && model.SalesCurrencyCode(invoice.Currency) != "" {
 		notice.Amount = stripeSalesAmount(*amount, invoice.Currency)
 	}
 	if kind := stripeSalesKind(invoice.BillingReason, amount != nil && *amount == 0); kind != "" {
 		notice.Kind = kind
 	}
-	if plan := stripeSalesPlanForInterval(invoice.interval()); plan != "" {
-		notice.Item = model.SalesProItem(plan)
+	if amount != nil && stripeInvoiceEndsTrial(invoice.BillingReason, *amount, stripeUnixPeriodLength(invoice.PeriodStart, invoice.PeriodEnd)) {
+		notice.Kind = model.SalesPaymentKindAfterTrial
 	}
 	if method, ok := stripeSalesChargeMethod(ctx, stripeIdFromRaw(invoice.Charge)); ok {
 		notice.Method = method
@@ -461,8 +554,17 @@ func coinbaseSalesNotice(
 
 // ----- apple -----
 
+// A day shorter than the shortest paid period, a 28-day February month. A
+// renewal less than this after the subscription's first purchase follows a
+// free trial: no paid period is that short. The App Store trial is 14 days; a
+// free period of this length or more (a month-long offer code) would post its
+// first charge as a renewal.
+const appleShortestPaidPeriod = 27 * 24 * time.Hour
+
 // appleSalesKind is new or renewal: the transaction's reason (PURCHASE or
-// RENEWAL), else whether it is the subscription's first transaction.
+// RENEWAL), else whether it is the subscription's first transaction. A
+// charged renewal that comes less than a paid period after the subscription's
+// first purchase is the first charge after a free trial.
 func appleSalesKind(transaction *validatedAppleTransaction) string {
 	kind := ""
 	switch transaction.transactionReason {
@@ -479,23 +581,49 @@ func appleSalesKind(transaction *validatedAppleTransaction) string {
 			}
 		}
 	}
-	if kind == model.SalesPaymentKindNew && transaction.priceMilliunits == 0 && transaction.offerDiscountType == "FREE_TRIAL" {
-		kind = model.SalesPaymentKindFreeTrial
+	if kind == model.SalesPaymentKindRenewal && 0 < transaction.priceMilliunits && appleRenewalFollowsTrial(transaction) {
+		kind = model.SalesPaymentKindAfterTrial
 	}
 	return kind
 }
 
-// appleSalesNotice is the notice of a credited App Store transaction. The
-// transaction reports its price in milliunits of its currency.
+// appleRenewalFollowsTrial is whether the renewal came less than a paid
+// period after the subscription's first purchase: its first period was a
+// free trial. A charge that recovers more than that late, after billing
+// retry, reads as a plain renewal.
+func appleRenewalFollowsTrial(transaction *validatedAppleTransaction) bool {
+	if transaction.originalPurchaseTime.IsZero() {
+		return false
+	}
+	sinceFirst := transaction.purchaseTime.Sub(transaction.originalPurchaseTime)
+	return 0 < sinceFirst && sinceFirst < appleShortestPaidPeriod
+}
+
+// appleTransactionIsFreeTrial is whether the transaction starts a free trial:
+// the subscription's first purchase, free, under a free-trial offer.
+func appleTransactionIsFreeTrial(transaction *validatedAppleTransaction) bool {
+	return appleSalesKind(transaction) == model.SalesPaymentKindNew &&
+		transaction.priceMilliunits == 0 &&
+		transaction.offerDiscountType == "FREE_TRIAL"
+}
+
+// appleSalesNotice is the notice of a credited App Store transaction: a sale
+// at the price the transaction reports, in milliunits of its currency, or a
+// free trial's start.
 func appleSalesNotice(transaction *validatedAppleTransaction) *model.SalesPaymentNotice {
-	return &model.SalesPaymentNotice{
+	notice := &model.SalesPaymentNotice{
 		RecordKey: "apple_transaction/" + transaction.transactionId,
 		NetworkId: &transaction.networkId,
-		Item:      model.SalesProItem(salesPlanForProductId(transaction.productId)),
+		Item:      model.SalesProItem(applePlanForProductId(transaction.productId)),
 		Kind:      appleSalesKind(transaction),
 		Amount:    model.SalesAmount64(transaction.priceMilliunits, 3, transaction.currency),
 		Method:    "Apple App Store",
 	}
+	if appleTransactionIsFreeTrial(transaction) {
+		notice.Trial = true
+		notice.Amount = model.SalesFreeTrialAmount(transaction.expiresTime)
+	}
+	return notice
 }
 
 // ----- google play -----
@@ -517,18 +645,133 @@ func playSalesOrderId(sub *PlaySubscription) string {
 	return sub.LatestOrderId
 }
 
-// playSalesKind is new or renewal from the order id: Play numbers each
-// renewal's order after the first with a ".." suffix (GPA.1234-...-12345..0).
-func playSalesKind(sub *PlaySubscription) string {
-	orderId := playSalesOrderId(sub)
-	switch {
-	case orderId == "":
-		return ""
-	case strings.Contains(orderId, ".."):
-		return model.SalesPaymentKindRenewal
-	default:
-		return model.SalesPaymentKindNew
+// playSalesRenewalOrder is whether the order is a renewal's: Play numbers
+// each renewal's order after the first with a ".." suffix
+// (GPA.1234-...-12345..0). After a free trial, "..0" is the first charge.
+func playSalesRenewalOrder(sub *PlaySubscription) bool {
+	return strings.Contains(playSalesOrderId(sub), "..")
+}
+
+// A day shorter than the shortest paid period, a 28-day February month. A
+// window that moves the expiry by less than this past the last charged window
+// was not charged, and a purchase's first window shorter than this is a free
+// trial. Every free trial sold is 14 days. A free period of this length or
+// more, should one be sold, posts its start as a trial only when Play names
+// the phase, and its first charge as a renewal.
+const playShortestPaidPeriod = 27 * 24 * time.Hour
+
+// Play's shortest free trial is three days. A first window shorter than this
+// (a license tester's minutes, or a window ended early) is not a trial.
+const playShortestTrial = 2 * 24 * time.Hour
+
+// playCredit is what a credited Play window was, for the sales notice.
+type playCredit int
+
+const (
+	// the purchase's first window, charged
+	playCreditNew playCredit = iota
+	// the purchase's first window, a free trial: nothing was charged
+	playCreditTrial
+	// the first charged window after the free trial
+	playCreditAfterTrial
+	// a later charged window
+	playCreditRenewal
+	// a window Play moved out without a new charge. Before nearly every
+	// renewal Play moves the expiry out by a day while the renewal's charge
+	// is pending: 368 of the Play windows credited by 2026-11-08 were such a
+	// day.
+	playCreditNotCharged
+)
+
+// playWindowHasTrialLength is whether a window from the purchase's start to
+// expiry is shorter than any paid period and long enough for a trial.
+func playWindowHasTrialLength(startTime time.Time, expiryTime time.Time) bool {
+	length := expiryTime.Sub(startTime)
+	return playShortestTrial <= length && length < playShortestPaidPeriod
+}
+
+// playFirstWindowIsTrial is whether the purchase's first credited window is a
+// free trial: the phase Play names, else a window shorter than any paid
+// period on the purchase's own first order, continuing no other purchase.
+func playFirstWindowIsTrial(sub *PlaySubscription, productId string, startTime time.Time, maxExpiryTime time.Time) bool {
+	for _, item := range sub.LineItems {
+		if item != nil && (item.ProductId == productId || productId == "") && item.OfferPhase.reported() {
+			return item.OfferPhase.freeTrial()
+		}
 	}
+	return sub.LinkedPurchaseToken == "" &&
+		!playSalesRenewalOrder(sub) &&
+		playWindowHasTrialLength(startTime, maxExpiryTime)
+}
+
+// classifyPlayCredit is what the window credited through maxExpiryTime was.
+// earlierExpiries are the expiries of the purchase's earlier credits, oldest
+// first, from its renewal rows, which nothing prunes
+// (playEarlierCreditExpiriesInTx). A window is charged when it moves the
+// expiry at least playShortestPaidPeriod past the last charged window's.
+// Measuring from the last charged window, not the last credited one, keeps a
+// renewal that follows Play's extra days: a February renewal lands 27 days
+// after the first of them, and less after any later one.
+func classifyPlayCredit(
+	sub *PlaySubscription,
+	productId string,
+	startTime time.Time,
+	maxExpiryTime time.Time,
+	earlierExpiries []time.Time,
+) playCredit {
+	if len(earlierExpiries) == 0 {
+		switch {
+		case playFirstWindowIsTrial(sub, productId, startTime, maxExpiryTime):
+			return playCreditTrial
+		case playSalesRenewalOrder(sub):
+			// the first window this server credited is a renewal's
+			return playCreditRenewal
+		default:
+			return playCreditNew
+		}
+	}
+	lastCharged := earlierExpiries[0]
+	// a purchase that replaces another (an upgrade or downgrade) starts with
+	// a prorated window, never a trial
+	afterTrial := sub.LinkedPurchaseToken == "" && playWindowHasTrialLength(startTime, earlierExpiries[0])
+	for _, expiryTime := range earlierExpiries[1:] {
+		if playShortestPaidPeriod <= expiryTime.Sub(lastCharged) {
+			lastCharged = expiryTime
+			afterTrial = false
+		}
+	}
+	switch {
+	case maxExpiryTime.Sub(lastCharged) < playShortestPaidPeriod:
+		return playCreditNotCharged
+	case afterTrial:
+		return playCreditAfterTrial
+	default:
+		return playCreditRenewal
+	}
+}
+
+// playEarlierCreditExpiriesInTx is the expiry of each earlier credit of the
+// network's purchase, oldest first: its renewal rows
+// (model.GetPlayPurchaseCreditEndTimesInTx), which end SubscriptionGracePeriod
+// past the store's expiry. Its balances are no history: retention deletes them
+// 7 days after they end. A data pack writes no renewal row and has none, so
+// its order id alone tells new from renewal. The read runs under its own
+// savepoint: a read that fails leaves the credit's transaction usable, ok is
+// false, and the window posts no notice.
+func playEarlierCreditExpiriesInTx(tx server.PgTx, ctx context.Context, networkId server.Id, purchaseToken string) (expiries []time.Time, ok bool) {
+	server.RaisePgResult(tx.Exec(ctx, `SAVEPOINT play_sales_history`))
+	if r := server.HandleError(func() {
+		for _, endTime := range model.GetPlayPurchaseCreditEndTimesInTx(tx, ctx, networkId, purchaseToken) {
+			expiries = append(expiries, endTime.Add(-SubscriptionGracePeriod))
+		}
+	}); r != nil {
+		server.RaisePgResult(tx.Exec(ctx, `ROLLBACK TO SAVEPOINT play_sales_history`))
+		model.CountSalesPaymentNotice(model.SalesPaymentNoticeResultBuildError)
+		glog.Errorf("[sales]play purchase history could not be read; the window posts no notice: %v\n", r)
+		return nil, false
+	}
+	server.RaisePgResult(tx.Exec(ctx, `RELEASE SAVEPOINT play_sales_history`))
+	return expiries, true
 }
 
 // playSalesRecurringPrice is a line item's recurring price as Play reports
@@ -562,38 +805,65 @@ func playSalesRecurringPrice(item *PlaySubscriptionPurchaseLineItem) string {
 	return model.SalesAmount(value, 9, currency)
 }
 
+var playSalesOfferIdPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
 // playSalesAmount is the purchase's recurring price as Google Play reports
 // it, which leaves out tax and discounts; else the configured list price.
-// Play does not report the charged amount here.
-func playSalesAmount(sub *PlaySubscription, sku *Sku, productId string) string {
+// Play does not report the charged amount here. A first charge names the
+// offer the purchase was made under, whose discount may apply to it.
+func playSalesAmount(sub *PlaySubscription, sku *Sku, productId string, firstCharge bool) string {
 	for _, item := range sub.LineItems {
 		if item != nil && (item.ProductId == productId || productId == "") {
 			if price := playSalesRecurringPrice(item); price != "" {
-				return price + " (Google Play list price, before tax and discounts)"
+				note := "Google Play list price, before tax and discounts"
+				if firstCharge && item.OfferDetails != nil && playSalesOfferIdPattern.MatchString(item.OfferDetails.OfferId) {
+					note += "; offer " + item.OfferDetails.OfferId
+				}
+				return price + " (" + note + ")"
 			}
 		}
 	}
 	return salesConfiguredUsdAmount(sku.PriceAmountUsd, "Google Play")
 }
 
-// playSalesNotice is the notice of a credited Play purchase window.
+// playSalesNotice is the notice of a credited Play purchase window: a sale,
+// a trial's start, or nil for a window Play moved out without a charge.
 func playSalesNotice(
 	playSubscriptionRenewal *PlaySubscriptionRenewalArgs,
 	sub *PlaySubscription,
 	sku *Sku,
 	maxExpiryTime time.Time,
+	credit playCredit,
 ) *model.SalesPaymentNotice {
+	if credit == playCreditNotCharged {
+		return nil
+	}
+	productId := playSubscriptionRenewal.SubscriptionId
 	notice := &model.SalesPaymentNotice{
 		RecordKey: fmt.Sprintf("play_purchase/%s/%d", playSubscriptionRenewal.PurchaseToken, maxExpiryTime.Unix()),
 		NetworkId: &playSubscriptionRenewal.NetworkId,
-		Kind:      playSalesKind(sub),
-		Amount:    playSalesAmount(sub, sku, playSubscriptionRenewal.SubscriptionId),
 		Method:    "Google Play",
 	}
 	if sku.Supporter {
-		notice.Item = model.SalesProItem(salesPlanForProductId(playSubscriptionRenewal.SubscriptionId))
+		// the base plan names the plan: the product id ("supporter") sells both
+		notice.Item = model.SalesProItem(playPlanForSubscription(sub, productId))
 	} else {
 		notice.Item = model.SalesDataItem(sku.BalanceByteCount())
+	}
+	switch credit {
+	case playCreditTrial:
+		notice.Trial = true
+		notice.Kind = model.SalesPaymentKindNew
+		notice.Amount = model.SalesFreeTrialAmount(maxExpiryTime)
+	case playCreditAfterTrial:
+		notice.Kind = model.SalesPaymentKindAfterTrial
+		notice.Amount = playSalesAmount(sub, sku, productId, true)
+	case playCreditRenewal:
+		notice.Kind = model.SalesPaymentKindRenewal
+		notice.Amount = playSalesAmount(sub, sku, productId, false)
+	default:
+		notice.Kind = model.SalesPaymentKindNew
+		notice.Amount = playSalesAmount(sub, sku, productId, true)
 	}
 	return notice
 }
@@ -714,7 +984,7 @@ func cryptoSalesNotice(intent *model.CryptoPaymentIntent, credit *cryptoCredit, 
 		notice.Item = model.SalesProItem(model.PlanYearly)
 		notice.Kind = "one-time, welcome offer"
 	case plan:
-		notice.Item = model.SalesProItem(salesPlanForProductId(intent.Item))
+		notice.Item = model.SalesProItem(planForProductId(intent.Item))
 	default:
 		notice.Item = model.SalesDataItem(byteCount)
 	}

@@ -120,11 +120,27 @@ func TestResolvedFullTunApplicationMtu(t *testing.T) {
 		t.Fatalf("explicit application MTU=%d want=%d", got, resources.ApplicationMtu)
 	}
 
-	if fullTunQUICInitialPacketSize <= clientconnect.DefaultMtu {
+	// The product MTU carries the QUIC-minimum Initial in one IPv4 packet, as
+	// Connect's product-MTU UDP test pins. A smaller path, such as a
+	// 1,280-byte cell edge's inner MTU, still sends it through the IPv4
+	// fragment path.
+	quicInitialPacketByteCount := clientconnect.Ipv4HeaderSizeWithoutExtensions +
+		clientconnect.UdpHeaderSize +
+		fullTunQUICInitialPacketSize
+	if clientconnect.DefaultMtu < quicInitialPacketByteCount {
 		t.Fatalf(
-			"QUIC Initial=%d must exercise IPv4 fragmentation above product MTU=%d",
-			fullTunQUICInitialPacketSize,
+			"QUIC Initial packet=%dB must fit the product MTU=%d unfragmented",
+			quicInitialPacketByteCount,
 			clientconnect.DefaultMtu,
+		)
+	}
+	cellEdge := cellEdgeNetworkProfiles(20260817)[cellEdge1mDown250kUpName]
+	if got := resolvedFullTunApplicationMtu(cellEdge, defaultTunResourceProfile()); quicInitialPacketByteCount <= got {
+		t.Fatalf(
+			"%s application MTU=%d must still fragment the %dB QUIC Initial packet",
+			cellEdge.Name,
+			got,
+			quicInitialPacketByteCount,
 		)
 	}
 }
