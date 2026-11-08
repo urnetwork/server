@@ -11375,4 +11375,11 @@ var migrations = []any{
 	// Prospective one-shot model findings remain pending until a separate human
 	// capability imports their exact timely completion. Existing rows stay intact.
 	newSqlMigration(competitionReviewHandoffMigration()),
+
+	// The zero-carry verdicts (db_provider_zero_carry.go,
+	// model/provider_zero_carry.go): one new empty table, under a five-second
+	// lock bound, created only when absent. Nothing existing is locked or
+	// rewritten. Apply before deploying the api, alt, proxy and taskworker
+	// that read it.
+	providerZeroCarryMigration,
 }

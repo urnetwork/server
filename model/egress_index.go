@@ -714,6 +714,10 @@ func providerUrlProbeSuccessWeight(counts ProviderEgressHealthCounts) float64 {
 // supply. Unprobed also counts a passing ratio on too few URL runs for a
 // native bucket (egress_native_min_runs.go), out of Quality, and of Speed
 // below its minimum.
+// Zero carry, a verdict that the provider accepted contracts from several
+// networks and carried nothing (provider_zero_carry.go), excludes like a
+// common gate: every bucket, result and count, explicit client ids and
+// force_minimum included.
 // Legacy blackhole/country reason labels remain for metric compatibility only.
 const (
 	ProviderExcludedBlackhole      = "blackhole"
@@ -727,14 +731,15 @@ const (
 	ProviderExcludedNoSuccess      = "no_success"
 	ProviderExcludedNotModern      = "not_modern"
 	ProviderExcludedLowSuccess     = "low_success"
+	ProviderExcludedZeroCarry      = "zero_carry"
 )
 
 // Every reason label, in the order the labels were added. A provider counts
 // under the first reason decideProviderEgress finds, in this precedence:
-// reliability, arin_risk, tls, no_success, low_success, then unprobed for
-// no evidence or health (exclusive of each other), then not_modern, then
-// unprobed for a passing ratio on too few runs (the native URL-run
-// minimums, egress_native_min_runs.go: the provider status's
+// reliability, arin_risk, tls, zero_carry, no_success, low_success, then
+// unprobed for no evidence or health (exclusive of each other), then
+// not_modern, then unprobed for a passing ratio on too few runs (the native
+// URL-run minimums, egress_native_min_runs.go: the provider status's
 // egress_warming_up), then arin_non_quality. Blackhole and country are never
 // reported any more.
 var ProviderExcludedReasons = []string{
@@ -749,6 +754,7 @@ var ProviderExcludedReasons = []string{
 	ProviderExcludedNoSuccess,
 	ProviderExcludedNotModern,
 	ProviderExcludedLowSuccess,
+	ProviderExcludedZeroCarry,
 }
 
 // What the rules read about one provider.
@@ -758,6 +764,8 @@ type providerEgressFacts struct {
 	reliabilityFailed       bool
 	blackholed              bool
 	tlsAuthenticationFailed bool
+	// a zero-carry verdict is in force (provider_zero_carry.go)
+	zeroCarry bool
 	// the native URL-run minimums (egress_native_min_runs.go): the accepted
 	// URL runs behind the ratio are enough, and far enough apart, to decide
 	// Quality, and enough to decide Speed. The zero value has met neither, so
@@ -833,6 +841,7 @@ func (self providerCountFilter) egressFacts(
 		reliabilityFailed:       self.reliabilityFailed[clientId],
 		blackholed:              self.isBlackholed(clientId),
 		tlsAuthenticationFailed: self.tlsAuthenticationFailed[clientId],
+		zeroCarry:               self.zeroCarry[clientId],
 		qualityRunsMet:          providerQualityUrlRunsMet(counts, urlIndex),
 		speedRunsMet:            providerSpeedUrlRunsMet(counts, urlIndex),
 		// a provider nobody has located, or whose own country is unknown,
@@ -882,6 +891,16 @@ func decideProviderEgress(facts *providerEgressFacts, egressTestEnabled bool) pr
 	case facts.tlsAuthenticationFailed:
 		return providerEgressDecision{
 			reason:       ProviderExcludedTls,
+			hardExcluded: true,
+		}
+	case facts.zeroCarry:
+		// Accepted contracts from several networks and carried nothing
+		// through them, while every URL probe failed: out of every bucket,
+		// result and count, whatever the country guard says. The URL probe
+		// keeps measuring it, and a success, a new app version or the
+		// verdict's expiry brings it back (provider_zero_carry.go).
+		return providerEgressDecision{
+			reason:       ProviderExcludedZeroCarry,
 			hardExcluded: true,
 		}
 	}
@@ -1082,6 +1101,8 @@ func providerHardExclusionsSql() string {
 		), provider_egress_url_security AS MATERIALIZED (
 			SELECT client_id, tls_failure, tls_verdict
 			FROM provider_egress_url_security WHERE client_id = ANY($1) AND tls_failure
+		), provider_zero_carry AS MATERIALIZED (
+			` + providerZeroCarryHardExclusionSql() + `
 		)
 		SELECT client_id
 		FROM network_client_location_reliability AS provider_location
@@ -1093,6 +1114,8 @@ func providerHardExclusionsSql() string {
 		UNION
 		SELECT client_id FROM provider_egress_url_security AS url_security
 		WHERE client_id = ANY($1) AND ` + providerUrlSecurityExcludesSql("url_security") + `
+		UNION
+		SELECT client_id FROM provider_zero_carry
 	`
 }
 
@@ -1147,9 +1170,10 @@ func getProviderHardExclusions(ctx context.Context, clientIds []server.Id) (excl
 	return
 }
 
-// Read-through uses the exporter's reliability, ARIN-risk and security rules without loading
-// the fleet. Each query has at most 256 distinct candidates and result rows;
-// it observes the caller's context and never publishes a partial global set.
+// Read-through uses the exporter's reliability, ARIN-risk, security and
+// zero-carry rules without loading the fleet. Each query has at most 256
+// distinct candidates and result rows; it observes the caller's context and
+// never publishes a partial global set.
 func readProviderHardExclusions(ctx context.Context, clientIds []server.Id) (map[server.Id]bool, error) {
 	const chunkSize = 256
 	uniqueClientIds := make([]server.Id, 0, len(clientIds))
@@ -1385,8 +1409,10 @@ type ProviderEgressInspection struct {
 	// provider's latest slot
 	ArinServingEpoch  int64
 	ReliabilityFailed bool
-	UrlSuccessCount   int
-	UrlErrorCount     int
+	// the zero-carry verdict in force (provider_zero_carry.go), nil for none
+	ZeroCarry       *ProviderZeroCarryVerdict
+	UrlSuccessCount int
+	UrlErrorCount   int
 	// whether the accepted URL runs in the evidence window meet the native
 	// URL-run minimums (egress_native_min_runs.go) for Quality and for Speed
 	QualityUrlRunsMet bool
@@ -1521,6 +1547,9 @@ func InspectProviderEgress(ctx context.Context, clientId server.Id) *ProviderEgr
 	inspection.ArinNonQuality = facts.arinNonQuality
 	inspection.ArinServingEpoch = countFilter.arindbServingEpoch
 	inspection.ReliabilityFailed = facts.reliabilityFailed
+	if facts.zeroCarry {
+		inspection.ZeroCarry = GetProviderZeroCarryVerdict(ctx, clientId, countFilter.now)
+	}
 	inspection.QualityUrlRunsMet = facts.qualityRunsMet
 	inspection.SpeedUrlRunsMet = facts.speedRunsMet
 	inspection.ModernEvidence = countFilter.modernEvidence[clientId]

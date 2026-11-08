@@ -942,6 +942,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the pending review handoff ledger, with the intake-first custody it
 	// carries on; versioned by its position
 	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract},
+	// the provider zero-carry verdicts, versioned by their position
+	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

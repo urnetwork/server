@@ -271,7 +271,10 @@ func newProviderOnlineSuccessBaseline(
 		countryCodeCounts:        map[string]providerOnlineSuccessCount{},
 	}
 	for clientId, countryCode := range clientIdCountryCodes {
-		if filter.hasHardEgressFailure(clientId) {
+		// A zero-carry verdict (provider_zero_carry.go) is no common gate
+		// here: its provider stays in the guard as measured without a
+		// success, so a verdict moves no country into or out of exemption.
+		if filter.hasCommonGateFailure(clientId) {
 			continue
 		}
 		counts, urlIndex := filter.urlIndex(clientId, settings)

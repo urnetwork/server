@@ -166,6 +166,9 @@ func initTaskSchedule(ctx context.Context) {
 		// a URL TLS finding excludes its provider only once judged its own
 		// (model/provider_egress_tls_verdict.go)
 		work.ScheduleJudgeProviderEgressTlsFindings(clientSession, tx)
+		// a provider whose contracts carry nothing leaves every bucket and
+		// count until it carries again (model/provider_zero_carry.go)
+		work.ScheduleJudgeProviderZeroCarry(clientSession, tx)
 		work.ScheduleExtenderProbe(clientSession, tx)
 		work.ScheduleExtenderPublish(clientSession, tx)
 		// the public seed bundle and its mirror check
@@ -543,6 +546,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.JudgeProviderEgressTlsFindings,
 			work.JudgeProviderEgressTlsFindingsPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.JudgeProviderZeroCarry,
+			work.JudgeProviderZeroCarryPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.ExtenderProbe,

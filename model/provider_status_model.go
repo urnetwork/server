@@ -225,6 +225,12 @@ var providerStatusOutcomes = map[string]providerStatusOutcome{
 	ProviderExcludedUnprobed:    {ProviderStatusReasonEgressUnprobed, ProviderStatusCodeWarmingUp},
 	ProviderExcludedHealth:      {ProviderStatusReasonEgressFailing, ProviderStatusCodeEgressFailing},
 	ProviderExcludedNotModern:   {ProviderStatusReasonNotModern, ProviderStatusCodeNotModern},
+	// a zero-carry verdict (provider_zero_carry.go): no anti-abuse signal.
+	// It holds only a provider every network check failed through, so it is
+	// told as the URL-success rule's reason, whose fix and way back (a check
+	// that succeeds) are the operator's here too; the spec's reasons are
+	// unchanged, and the operator notice asks for the app update.
+	ProviderExcludedZeroCarry: {ProviderStatusReasonEgressNoSuccess, ProviderStatusCodeEgressFailing},
 	// the anti-abuse signals: ARIN risk, the URL security quarantine and
 	// ARIN non-quality
 	ProviderExcludedArinRisk:       providerStatusWithheld,
@@ -482,6 +488,7 @@ func newProviderCommonFilterForClients(ctx context.Context, clientIds []server.I
 			now: now, healthWindowEnd: now,
 			arinRisk: map[server.Id]bool{}, arinNonQuality: map[server.Id]bool{},
 			reliabilityFailed: map[server.Id]bool{}, tlsAuthenticationFailed: map[server.Id]bool{},
+			zeroCarry:    map[server.Id]bool{},
 			countryCodes: map[server.Id]string{}, healthCounts: map[server.Id]ProviderEgressHealthCounts{},
 			modernEvidence: map[server.Id]*ProviderModernEvidenceRecord{},
 		}
@@ -495,12 +502,14 @@ func newProviderCommonFilterForClients(ctx context.Context, clientIds []server.I
 		}
 	}
 	clientIds = uniqueClientIds
+	now := server.NowUtc()
 	f := providerCountFilter{
-		now:                     server.NowUtc(),
+		now:                     now,
 		arinRisk:                map[server.Id]bool{},
 		arinNonQuality:          map[server.Id]bool{},
 		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: getProviderEgressTlsAuthenticationFailedClientIds(ctx, clientIds),
+		zeroCarry:               getProviderZeroCarryClientIds(ctx, clientIds, now),
 		countryCodes:            getProviderEgressCountryCodes(ctx, clientIds),
 		modernEvidence:          getProviderModernEvidenceRecords(ctx, clientIds),
 	}

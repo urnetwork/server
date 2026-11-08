@@ -34,6 +34,9 @@ var testingProviderStatusToldCauses = map[string]providerStatusOutcome{
 	ProviderExcludedUnprobed:    {ProviderStatusReasonEgressUnprobed, "warming_up"},
 	ProviderExcludedHealth:      {ProviderStatusReasonEgressFailing, "egress_failing"},
 	ProviderExcludedNotModern:   {ProviderStatusReasonNotModern, "not_modern"},
+	// a zero-carry verdict holds only a provider every network check failed
+	// through, so it is told as the URL-success rule's reason
+	ProviderExcludedZeroCarry: {ProviderStatusReasonEgressNoSuccess, "egress_failing"},
 }
 
 // The anti-abuse signals among the selection's exclusion reasons: ARIN risk,

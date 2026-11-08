@@ -7675,6 +7675,205 @@
           "legendFormat": "run {{result}}"
         }
       ]
+    },
+    {
+      "id": 153,
+      "type": "row",
+      "title": "zero-carry judge: verdicts by country, changes, reads",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 501
+      },
+      "panels": []
+    },
+    {
+      "id": 154,
+      "type": "timeseries",
+      "title": "zero-carry providers by country",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 502
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (country_code) (urnetwork_provider_zero_carry_providers{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_provider_zero_carry_verdicts{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "B",
+          "legendFormat": "verdicts in force"
+        }
+      ],
+      "description": "Connected providers with a zero-carry verdict in force by published country, and every verdict in force connected or not, after the zero-carry judge's newest run: the judge runs every two minutes on one taskworker at a time, so each point is the taskworker process whose last-run timestamp is newest, and the chart goes blank once no run has finished for 15 minutes. A country whose count here equals its provider-locations count before the verdicts has lost all its listed supply: every provider it listed accepted contracts and carried nothing."
+    },
+    {
+      "id": 155,
+      "type": "timeseries",
+      "title": "zero-carry judge: changes and reads / hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 502
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (change) (rate(urnetwork_provider_zero_carry_changes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "A",
+          "legendFormat": "{{change}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (kind) (rate(urnetwork_provider_zero_carry_reads_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "B",
+          "legendFormat": "read {{kind}}"
+        }
+      ],
+      "description": "Verdicts the zero-carry judge made (created) and cleared, by why (expired: past 72 hours; url_success: a URL probe succeeded after the verdict; upgrade: the device reported another app version; gone: the client is gone or inactive), and what it read: connected providers paged, the candidates the URL condition left (at least two URL runs in eight hours, none a success), those whose contracts it read, and the contracts read, its load on transfer_contract through the (destination_id, close_time) index. A wave of upgrade clears follows an operator notice; a wave of created after a release is a build that stopped carrying."
+    },
+    {
+      "id": 156,
+      "type": "timeseries",
+      "title": "zero-carry judge: since the last run and pass",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 510
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > 0)",
+          "refId": "A",
+          "legendFormat": "since the last run"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_provider_zero_carry_judge_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > 0)",
+          "refId": "B",
+          "legendFormat": "since the last pass over every connected provider"
+        }
+      ],
+      "description": "Seconds since the newest zero-carry judge run on any taskworker, and since one finished a pass over every connected provider (about an hour on Main). A judge that stops makes no new verdicts, and those in force lapse at their expiry, 72 hours after each was made, so zero-carry providers return to the pool; the pending_task row under run_once_key judge_provider_zero_carry carries its reschedule error."
     }
   ]
 }

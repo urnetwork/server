@@ -332,6 +332,15 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `CREATE OR REPLACE FUNCTION competition_review_handoff_observed(review_json jsonb, legacy_created_at timestamp) RETURNS timestamp LANGUAGE plpgsql STABLE AS 'BEGIN RETURN legacy_created_at; END'`},
 		{name: "winner source authorization accepts any handoff", version: server.CompetitionReviewHandoffMigrationVersion(),
 			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_source_authorized(intent jsonb, predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN true; END'`},
+		// A zero-carry verdict excludes only until its expiry, one row per
+		// provider: without the expiry every reader fails, and without the
+		// key a provider could hold two verdicts.
+		{name: "zero-carry verdict expiry missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN expire_time`},
+		{name: "zero-carry verdicts unkeyed", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP CONSTRAINT provider_zero_carry_pkey`},
+		{name: "zero-carry upgrade evidence missing", version: server.ProviderZeroCarryVersion(),
+			sql: `ALTER TABLE provider_zero_carry DROP COLUMN client_version`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
