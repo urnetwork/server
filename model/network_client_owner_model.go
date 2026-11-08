@@ -226,9 +226,16 @@ var ErrClientProofKeyNotBound = errors.New("Client has no bound key.")
 // The key that proves a strict_exp bearer's ClientKey (§7.4): the client's newest
 // sidecar_identity_binding key, else enroll's client_public_key.
 //
-// Both live in tables migration group MG1 creates, which nothing has written
-// yet, so no client has a bound key and every proof is refused, as §7.4 rules
-// for a client with none bound. MG1's owner reads them here.
+// The binding's key is GetClientBindingKey's, which refuses an older
+// generation's. Enroll's network_client_owner.client_public_key is
+// plan-TEAM-enroll-client-key's MG1 column, which POST /network/enroll
+// (TEAM-M1-04) writes and reads here when it lands; until then a client with no
+// binding has no key, and its proof is refused, as §7.4 rules for a client with
+// none bound.
 func ClientProofPublicKey(ctx context.Context, clientId server.Id) (ed25519.PublicKey, error) {
-	return nil, ErrClientProofKeyNotBound
+	clientPublicKey, err := GetClientBindingKey(ctx, clientId)
+	if err != nil || len(clientPublicKey) != ed25519.PublicKeySize {
+		return nil, ErrClientProofKeyNotBound
+	}
+	return ed25519.PublicKey(clientPublicKey), nil
 }

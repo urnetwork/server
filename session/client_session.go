@@ -63,6 +63,10 @@ type ClientSession struct {
 	ApiKeyId *server.Id
 	// OAuth/MCP request identities are unsigned and cannot be renewed as logins.
 	UnsignedIdentity bool
+	// An opaque id for this request, minted when the session is made from a
+	// request, which an admin event records (§7.11). It names nothing but the
+	// request, and a session not made from a request has none.
+	RequestId *server.Id
 }
 
 // Drops the request's cookie headers (cookies.go) and resolves the
@@ -78,6 +82,7 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		return nil, err
 	}
 
+	requestId := server.NewId()
 	value := &ClientSession{
 		Ctx:           cancelCtx,
 		Cancel:        cancel,
@@ -85,6 +90,7 @@ func NewClientSessionFromRequest(req *http.Request) (*ClientSession, error) {
 		Header:        map[string][]string(req.Header),
 		Host:          req.Host,
 		ClientInfo:    ClientInfoFromHeader(req.Header),
+		RequestId:     &requestId,
 	}
 	value.Ctx = context.WithValue(cancelCtx, clientObservationContextKey{}, value)
 	return value, nil
@@ -100,6 +106,17 @@ func ClientAddressFromContext(ctx context.Context) (string, bool) {
 		return "", false
 	}
 	return clientSession.ClientAddress, true
+}
+
+// The id of the request whose session ctx belongs to (ClientSession.RequestId),
+// for work that runs under the session's context. False under any other
+// context, and for a session not made from a request.
+func RequestIdFromContext(ctx context.Context) (server.Id, bool) {
+	clientSession, ok := ctx.Value(clientObservationContextKey{}).(*ClientSession)
+	if !ok || clientSession == nil || clientSession.RequestId == nil {
+		return server.Id{}, false
+	}
+	return *clientSession.RequestId, true
 }
 
 // Normalizes an ip:port pair, including ipv4-mapped ipv6.
@@ -344,6 +361,7 @@ func (self *ClientSession) WithByJwt(byJwt *ByJwt) *ClientSession {
 		Host:                  self.Host,
 		ClientInfo:            self.ClientInfo,
 		ByJwt:                 byJwt,
+		RequestId:             self.RequestId,
 	}
 }
 

@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -207,7 +209,12 @@ var sidecarAllowlist = []string{
 	"POST /network/remove-client",
 	"GET /key/([^/]+)",
 	"POST /connect/control",
-	"POST /oauth/token",
+	// §5.15's (CORE-M1-06)
+	"POST /sidecar/bind",
+	"GET /sidecar/identity/([^/]+)",
+	"GET /sidecar/identity",
+	// §8.9's (ACL-M2-12)
+	"POST /acl/ack",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
@@ -233,20 +240,6 @@ var sidecarRouteFamilyRefusals = []string{
 	"/mail/direct-mx",
 }
 
-// What §22.7's S1-S10 and an approval cancel call on api, as far as those routes
-// exist. The scenarios run on §5-§21's services, which land with their milestones;
-// each one that lands adds what it calls here, so a route the allowlist lacks
-// fails this test and not a pilot.
-var sidecarScenarioRoutes = []string{
-	// S1, enrolling: the refresher, the pairing child, ur logout
-	"GET /auth/refresh",
-	"POST /network/auth-client",
-	"POST /network/remove-client",
-	// every connected sidecar: the peer key check and the contract path
-	"GET /key/([^/]+)",
-	"POST /connect/control",
-}
-
 func strictExpProofStub(t *testing.T) {
 	t.Helper()
 	previous := clientProofPublicKey
@@ -260,10 +253,16 @@ func strictExpProofStub(t *testing.T) {
 
 // With the allowlist on, a strict_exp bearer reaches exactly §7.4's routes, with
 // its proof where they want one, and every other route answers it 403, with its
-// own message and before its handler, so a route a sidecar needs and the list lacks
-// fails here. The check runs over the served route table, so a new route is covered
-// without a change here: off the list it refuses, and under a sidecar family it
-// fails until it is classified. Reads Redis for the proofs' jtis.
+// own message and before its handler. The check runs over the served route
+// table, so a new route is covered without a change here: off the list it
+// refuses, and under a sidecar family it fails until it is classified. Reads
+// Redis for the proofs' jtis.
+//
+// §7.4 also has this test run §22.7's S1-S10 and an approval cancel with the
+// allowlist on, so that a route a real flow calls and the list lacks fails here.
+// That part is not built: the scenarios run on §5-§21's services, which land from
+// M1 on, and it gates M1-out. Until then nothing here derives the list from what
+// a sidecar calls; it checks the list against §7.4's text alone.
 func TestSidecarTokenRoutes(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		self := newStrictExpProofFixture(t)
@@ -291,11 +290,6 @@ func TestSidecarTokenRoutes(t *testing.T) {
 		for _, key := range sidecarAllowlist {
 			if !served[key] {
 				t.Errorf("the allowlist names %s, which no route serves", key)
-			}
-		}
-		for _, key := range sidecarScenarioRoutes {
-			if !strictExpRoutes[key] {
-				t.Errorf("a scenario calls %s, which the allowlist lacks", key)
 			}
 		}
 
@@ -413,6 +407,45 @@ func TestStrictExpGateIsLogOnlyUntilTheConfigEnforcesIt(t *testing.T) {
 	}
 }
 
+// §7.4 admits a strict_exp bearer to POST /oauth/token's exchange alone, which
+// is not built yet, so the grants the route serves now refuse it, and an
+// exchange sent before its gate exists is refused with them.
+func TestStrictExpTokenIsRefusedOnTheTokenRoute(t *testing.T) {
+	tokens := newStrictExpTokens()
+	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+		return false
+	})
+	pushP0Enforce(t)
+
+	const key = "POST /oauth/token"
+	routes := Routes()
+	i := slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })
+	if i < 0 {
+		t.Fatalf("no route serves %s", key)
+	}
+	route := routes[i]
+	if !route.RefusesStrictExpCredentials() {
+		t.Fatalf("%s serves a strict_exp token", key)
+	}
+	for _, grantType := range []string{
+		"authorization_code",
+		"refresh_token",
+		"urn:ietf:params:oauth:grant-type:token-exchange",
+	} {
+		before := childAdminCallCount(key, p0RefusalStrictExp, "refused")
+		w, reached := serveStubbed(route, "Bearer "+tokens.strictToken, func(r *http.Request) {
+			r.Body = io.NopCloser(strings.NewReader("grant_type=" + url.QueryEscape(grantType)))
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		})
+		if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+			t.Errorf("%s: status = %d body = %q, handler ran = %t; want the sidecar refusal", grantType, w.Code, w.Body.String(), reached)
+		}
+		if after := childAdminCallCount(key, p0RefusalStrictExp, "refused"); after != before+1 {
+			t.Errorf("%s: counted %v, want one", grantType, after-before)
+		}
+	}
+}
+
 // An unclassified route is off the list too.
 func TestAnUnclassifiedRouteRefusesAStrictExpToken(t *testing.T) {
 	unclassified := router.NewRoute("POST", "/network/new-route", func(w http.ResponseWriter, r *http.Request) {})
@@ -422,8 +455,8 @@ func TestAnUnclassifiedRouteRefusesAStrictExpToken(t *testing.T) {
 	}
 }
 
-// Only the two routes a sidecar renews and mints on want a proof here, and the
-// third, the exchange, carries its own.
+// Only the two routes a sidecar renews and mints on want a proof here. The third
+// §7.4 names, the exchange, is not built yet.
 func TestStrictExpProofRoutes(t *testing.T) {
 	for _, route := range Routes() {
 		key := routeAccessKey(route)

@@ -1,0 +1,38 @@
+{{define "title"}}{{.Headline}}{{end}}
+{{define "preheader"}}If you didn't make this change, contact security@ur.io right away.{{end}}
+{{define "eyebrow"}}Security{{end}}
+{{define "accent"}}#d6e6f4{{end}}
+{{define "headline"}}{{.Headline}}{{end}}
+{{define "why"}}Sent to the sign-in email addresses of your URnetwork account whenever an auth key is created for your network or revoked from it.{{end}}
+{{define "content"}}
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{.Subject}}.</p>
+{{range .Rows}}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0;"><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">When</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; border-top:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.When}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Change</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.Action}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Expires</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.Expires}}</td>
+</tr><tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Uses</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.Uses}}</td>
+</tr>{{if .Kind}}<tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Kind</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.Kind}}</td>
+</tr>{{end}}{{if .Tags}}<tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Tags</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.Tags}}</td>
+</tr>{{end}}{{if .Via}}<tr>
+<td class="ur-rule ur-muted" style="padding:12px 0; border-bottom:1px solid #e1e5e9; padding-right:16px; font-family:Geist, Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:12px; line-height:18px; letter-spacing:0.08em; text-transform:uppercase; color:#5f6a74; vertical-align:top; white-space:nowrap;">Made with</td>
+<td class="ur-rule ur-ink" align="right" style="padding:12px 0; border-bottom:1px solid #e1e5e9; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:15px; line-height:22px; color:#101010; text-align:right; word-break:break-word;">{{.Via}}</td>
+</tr>{{end}}</table>
+{{end}}
+{{if .MoreChangesText}}<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">{{.MoreChangesText}}</p>{{end}}
+{{if .AnyCreated}}<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Anyone with an auth key can add a device to your network until the key expires, its uses run out or it is revoked.</p>{{end}}
+{{if .AnyPreApprovedRevoked}}<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">Revoking a pre-approved key stops the key itself, but a copy of its bundle still admits devices until its Delegation is revoked from one of your admin devices.</p>{{end}}
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">If you didn't make this change, contact <a class="ur-link" href="mailto:security@ur.io" style="color:#0039de; text-decoration:underline;">security@ur.io</a> right away.</p>
+<p class="ur-text" style="margin:16px 0 0; font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size:16px; line-height:26px; color:#2b3036;">To sign out every other device, open <a class="ur-link" href="https://ur.io/app/account/sessions" style="color:#0039de; text-decoration:underline;">Sessions</a>.</p>
+{{end}}

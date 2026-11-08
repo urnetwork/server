@@ -394,9 +394,11 @@ func (self *networkExtenderReleaseTx) RecordRelease(identity []byte, keyHex stri
 func Testing_CreateBlockReportClient(ctx context.Context, networkId server.Id) server.Id {
 	clientId := server.NewId()
 	server.Tx(ctx, func(tx server.PgTx) {
+		// a top-level client, its own subject (D-ACL-3)
+		subjectColumn, subjectValue := NetworkClientAclSubjectInsert("$1")
 		server.RaisePgResult(tx.Exec(
 			ctx,
-			`INSERT INTO network_client (client_id, network_id) VALUES ($1, $2)`,
+			`INSERT INTO network_client (client_id, network_id`+subjectColumn+`) VALUES ($1, $2`+subjectValue+`)`,
 			clientId,
 			networkId,
 		))

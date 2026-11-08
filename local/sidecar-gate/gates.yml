@@ -1,0 +1,232 @@
+# §23.6's schedules by gate (OPS-M1-07), which server/local/sidecar-gate runs and reports.
+# Each FS row §23.6 names at a gate is here, and TestGatesListEverySection236Row re-reads the
+# table from design/source/sections/23-PHASE.md, so this list cannot drift from it. When
+# sidecartest/fault/catalog.yml lands (TEST-M0-01), this file is generated from it instead (C-18).
+#
+# A row lists the tests that show it, each a direct go test on one package: repo and package
+# name where; names are the tests, each of which must report PASS, so a test that does not
+# exist reads missing, never pass; tags, a build tag; stores: true runs it through the private-store
+# wrapper named by SIDECAR_GATE_STORE_WRAPPER; args go after the package, {base} and {group}
+# filled from the run. A row with no tests is missing. external says what outside the build
+# (hardware, production, people) the row waits on, and reads open. Rows other plans own carry
+# no tests until those plans name them.
+gates:
+  G0: []
+  M0: []
+  M1:
+    - row: FS-54
+      case: release leg
+      tests:
+        - {repo: server, package: ".", names: [TestSidecarPendingBuildTags, TestReleaseBuildRegistersNoPendingGroup]}
+    - row: FS-54
+      case: tagged build
+      tests:
+        - {repo: server, package: ".", tags: sidecar_pending, stores: true, names: [TestSidecarGroupsEndTheMigrations, TestSidecarGroupsAreAdditive, TestSidecarGroupsApplyOnAPrivateDatabase]}
+    - row: FS-54
+      case: promotion
+      tests:
+        - {repo: server, package: ./local/sidecar-migrations, names: [TestPromoteMovesOnlyItsOwnGroup, TestPromoteRefusesOutOfOrder, TestPromoteResultCompilesOnBothLegs]}
+  M2:
+    - {row: FS-1}
+    - {row: FS-2}
+    - {row: FS-3}
+    - {row: FS-4}
+    - {row: FS-5}
+    - {row: FS-6}
+    - {row: FS-7}
+    - {row: FS-8}
+    - {row: FS-9}
+    - {row: FS-10}
+    - {row: FS-11}
+    - {row: FS-12}
+    - {row: FS-14}
+    - {row: FS-15}
+    - {row: FS-16}
+    - {row: FS-17}
+    - {row: FS-18}
+    - {row: FS-19}
+    - {row: FS-20}
+    - {row: FS-22}
+    - {row: FS-23}
+    - {row: FS-24}
+    - {row: FS-40}
+    - {row: FS-44}
+    - {row: FS-45}
+    - {row: FS-47}
+    - {row: FS-53}
+    - {row: FS-57}
+    - {row: FS-58}
+    - {row: FS-59}
+    - {row: FS-60}
+    - {row: FS-61}
+    - {row: FS-62}
+    - {row: FS-63}
+    - {row: FS-72}
+    - {row: FS-82}
+    - {row: FS-95}
+    - {row: FS-102}
+    - {row: FS-103}
+    - {row: FS-104}
+    - {row: FS-105}
+    - {row: FS-106}
+    - {row: FS-113}
+    - {row: FS-114}
+    - {row: FS-116}
+    - {row: FS-117}
+    - {row: FS-118}
+    - {row: FS-124}
+    - {item: "the nvme run (D-TEST-11)", external: "the production hosts' PM9A3 staging set, before M2's exit"}
+    - {item: "§22.10's 0x0010 interop artifact"}
+  M3:
+    - {row: FS-25}
+    - {row: FS-26}
+    - {row: FS-27}
+    - {row: FS-28}
+    - {row: FS-29}
+    - {row: FS-30}
+    - {row: FS-40}
+    - {row: FS-41}
+    - {row: FS-42}
+    - {row: FS-50}
+    - {row: FS-98}
+    - {row: FS-115}
+    - {row: FS-119}
+    - {row: FS-124}
+    - {item: "FS-40 on production", external: "the production file cluster"}
+    - {item: "the nvme and hdd runs on production, the hdd run's admitted mix included", external: "the production hosts"}
+    - {item: "one restore of a real dump generation", external: "a real sidecar dump generation and the owner's drill"}
+  M4:
+    - {row: FS-19}
+    - {row: FS-21}
+    - {row: FS-37}
+    - {row: FS-38}
+    - {row: FS-56}
+    - {row: FS-97}
+    - {row: FS-106}
+  M5:
+    - {row: FS-34}
+    - {row: FS-39}
+    - {row: FS-41}
+    - {row: FS-42}
+    - {row: FS-47}
+    - {row: FS-48}
+    - {row: FS-49}
+    - {row: FS-52}
+    - {row: FS-66}
+    - {row: FS-69}
+    - {row: FS-76}
+    - {row: FS-78}
+    - {row: FS-92}
+    - {item: "S7's SNI-less abuse@<root> case"}
+  M6:
+    - {row: FS-19}
+    - {row: FS-21}
+    - {row: FS-30}
+    - {row: FS-32}
+    - {row: FS-35}
+    - {row: FS-38}
+    - {row: FS-41}
+    - {row: FS-42}
+    - {row: FS-43}
+    - {row: FS-51}
+    - {row: FS-76}
+    - {row: FS-80}
+    - {row: FS-83}
+    - {row: FS-84}
+    - {row: FS-85}
+    - {row: FS-86}
+    - {row: FS-87}
+    - {row: FS-88}
+    - {row: FS-97}
+    - {row: FS-98}
+    - {row: FS-99}
+    - {row: FS-100}
+    - {row: FS-101}
+    - {row: FS-111}
+    - {row: FS-122}
+    - {row: FS-124}
+  M7:
+    - {row: FS-13}
+    - {row: FS-23}
+    - {row: FS-33}
+    - {row: FS-39}
+    - {row: FS-41}
+    - {row: FS-42}
+    - {row: FS-47}
+    - {row: FS-76}
+    - {row: FS-78}
+    - {row: FS-82}
+    - {row: FS-111}
+    - {row: FS-112}
+    - {row: FS-121}
+    - {item: "D-MAIL-9's census run, with §14's outbound probe", external: "production edges"}
+  M8:
+    - {row: FS-19}
+    - {row: FS-36}
+    - {row: FS-41}
+    - {row: FS-42}
+    - {row: FS-77}
+    - {row: FS-82}
+    - {row: FS-83}
+    - {row: FS-85}
+    - {row: FS-98}
+    - {row: FS-100}
+    - {row: FS-109}
+    - {row: FS-110}
+    - {row: FS-120}
+    - {row: FS-124}
+    - {row: FS-125}
+  M9:
+    - {row: FS-31}
+    - {row: FS-42}
+    - {row: FS-123}
+  M10:
+    - {row: FS-64}
+    - {row: FS-65}
+    - {row: FS-66}
+    - {row: FS-67}
+    - {row: FS-68}
+    - {row: FS-69}
+    - {row: FS-70}
+    - {row: FS-71}
+    - {row: FS-72}
+    - {row: FS-73}
+    - {row: FS-74}
+    - {row: FS-75}
+    - {row: FS-76}
+    - {row: FS-77}
+    - {row: FS-78}
+    - {row: FS-79}
+    - {row: FS-80}
+    - {row: FS-81}
+    - {row: FS-83}
+    - {row: FS-84}
+    - {row: FS-86}
+    - {row: FS-87}
+    - {row: FS-88}
+    - {row: FS-89}
+    - {row: FS-90}
+    - {row: FS-91}
+    - {row: FS-92}
+    - {row: FS-93}
+    - {row: FS-94}
+    - {row: FS-95}
+    - {row: FS-96}
+    - {row: FS-99}
+    - {row: FS-100}
+    - {row: FS-101}
+    - {row: FS-107}
+    - {row: FS-108}
+    - {row: FS-109}
+    - {row: FS-110}
+    - {row: FS-111}
+    - {row: FS-112}
+    - {row: FS-114}
+    - {row: FS-125}
+  every:
+    - row: FS-55
+      tests:
+        - {repo: server, package: ./local/fs55, stores: true, names: [TestFs55OnServerBinaries], args: ["-fs55.base={base}", "-fs55.group={group}"]}
+  next:
+    - {row: FS-63}
+    - {row: FS-119}

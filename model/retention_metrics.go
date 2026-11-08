@@ -22,6 +22,13 @@ const (
 	RetentionTableStClientKeyHistory = "st_client_key_history"
 	RetentionTableStClientKeyHead    = "st_client_key_head"
 	RetentionTableStClientKeyGone    = "st_client_key_gone"
+	// §7's sidecar tables (MG1): the admin event log past its 400 days, and
+	// auth keys and API keys past their expiry
+	RetentionTableNetworkAdminEvent = "network_admin_event"
+	RetentionTableNetworkAuthKey    = "network_auth_key"
+	RetentionTableAccountApiKey     = "account_api_key"
+	// §8's sidecar table (MG2): acks past their 7 days
+	RetentionTableNetworkAclAck = "network_acl_ack"
 )
 
 var retentionTables = []string{
@@ -38,6 +45,10 @@ var retentionTables = []string{
 	RetentionTableStClientKeyHistory,
 	RetentionTableStClientKeyHead,
 	RetentionTableStClientKeyGone,
+	RetentionTableNetworkAdminEvent,
+	RetentionTableNetworkAuthKey,
+	RetentionTableAccountApiKey,
+	RetentionTableNetworkAclAck,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,

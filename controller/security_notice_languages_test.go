@@ -19,6 +19,7 @@ var securityNoticeTemplateNames = []string{
 	"security_payout_wallet_changed",
 	"security_sign_in_changed",
 	"security_api_key_changed",
+	"security_auth_key_changed",
 	"auth_password_set",
 }
 

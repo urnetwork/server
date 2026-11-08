@@ -475,3 +475,165 @@ func (self *AuthPasswordSetTemplate) When() string {
 func (self *AuthPasswordSetTemplate) ViaText() string {
 	return securityNoticeVia(self.Via)
 }
+
+// One auth key change as the auth key notice shows it.
+type SecurityAuthKeyChangeRow struct {
+	When   string
+	Action string
+	// when the key expires
+	Expires string
+	// "1 use", "25 uses", or for a revoked key "3 of 25 uses"
+	Uses string
+	// what kind of key: "Ephemeral, pre-approved", or "" for a plain key
+	Kind string
+	// "2 tags", or "" for an untagged key
+	Tags string
+	// how it was made, or ""
+	Via string
+}
+
+// The auth key notice (model/security_notice_auth_key.go): an auth key, which
+// admits devices to the network, was created or revoked. A key has no name, so
+// the notice describes it, never naming the key or its tags.
+type SecurityAuthKeyChangedTemplate struct {
+	model.SecurityAuthKeyNotice
+	BaseTemplate
+}
+
+func (self *SecurityAuthKeyChangedTemplate) Name() string {
+	return model.SecurityAuthKeyTemplateName
+}
+
+// A count of things as words: "1 use", "2 uses".
+func securityNoticeCount(count int, one string, many string) string {
+	if count == 1 {
+		return "1 " + one
+	}
+	return strconv.Itoa(count) + " " + many
+}
+
+// The changes, oldest first.
+func (self *SecurityAuthKeyChangedTemplate) Rows() []*SecurityAuthKeyChangeRow {
+	rows := []*SecurityAuthKeyChangeRow{}
+	for _, change := range self.Changes {
+		if change == nil {
+			continue
+		}
+		row := &SecurityAuthKeyChangeRow{
+			When:    securityNoticeTime(change.ChangeTime),
+			Expires: securityNoticeTime(change.ExpireTime),
+			Uses:    securityNoticeCount(change.MaxUses, "use", "uses"),
+			Via:     securityNoticeVia(change.Via),
+		}
+		switch change.Action {
+		case model.SecurityAuthKeyCreated:
+			row.Action = "Created"
+		case model.SecurityAuthKeyRevoked:
+			row.Action = "Revoked"
+			row.Uses = strconv.Itoa(change.UseCount) + " of " + row.Uses
+		default:
+			row.Action = "Changed"
+		}
+		kinds := []string{}
+		if change.Ephemeral {
+			kinds = append(kinds, "ephemeral")
+		}
+		if change.PreApproved {
+			kinds = append(kinds, "pre-approved")
+		}
+		if 0 < len(kinds) {
+			kind := strings.Join(kinds, ", ")
+			row.Kind = strings.ToUpper(kind[:1]) + kind[1:]
+		}
+		if 0 < change.TagCount {
+			row.Tags = securityNoticeCount(change.TagCount, "tag", "tags")
+		}
+		rows = append(rows, row)
+	}
+	return rows
+}
+
+// The one action every listed change took, or "" when they differ.
+func (self *SecurityAuthKeyChangedTemplate) onlyAction() string {
+	action := ""
+	for _, change := range self.Changes {
+		if change == nil {
+			continue
+		}
+		if action != "" && action != change.Action {
+			return ""
+		}
+		action = change.Action
+	}
+	return action
+}
+
+// Whether the notice lists more than one change.
+func (self *SecurityAuthKeyChangedTemplate) several() bool {
+	return 1 < len(self.Changes) || 0 < self.MoreCount
+}
+
+// The subject: what happened, without the details.
+func (self *SecurityAuthKeyChangedTemplate) Subject() string {
+	switch self.onlyAction() {
+	case model.SecurityAuthKeyCreated:
+		if self.several() {
+			return "Auth keys were created for your URnetwork network"
+		}
+		return "An auth key was created for your URnetwork network"
+	case model.SecurityAuthKeyRevoked:
+		if self.several() {
+			return "Auth keys were revoked from your URnetwork network"
+		}
+		return "An auth key was revoked from your URnetwork network"
+	default:
+		return "Your URnetwork auth keys were changed"
+	}
+}
+
+// The headline: what happened, in a few words.
+func (self *SecurityAuthKeyChangedTemplate) Headline() string {
+	switch self.onlyAction() {
+	case model.SecurityAuthKeyCreated:
+		if self.several() {
+			return "Auth keys created"
+		}
+		return "Auth key created"
+	case model.SecurityAuthKeyRevoked:
+		if self.several() {
+			return "Auth keys revoked"
+		}
+		return "Auth key revoked"
+	default:
+		return "Auth keys changed"
+	}
+}
+
+// The headline as the plain-text part sets it, in capitals.
+func (self *SecurityAuthKeyChangedTemplate) TextHeadline() string {
+	return strings.ToUpper(self.Headline())
+}
+
+func (self *SecurityAuthKeyChangedTemplate) MoreChangesText() string {
+	return securityNoticeMoreChanges(self.MoreCount)
+}
+
+// Whether a listed change created a key, which can then add devices.
+func (self *SecurityAuthKeyChangedTemplate) AnyCreated() bool {
+	for _, change := range self.Changes {
+		if change != nil && change.Action == model.SecurityAuthKeyCreated {
+			return true
+		}
+	}
+	return false
+}
+
+// Whether a listed change revoked a pre-approved key, whose bundle still admits.
+func (self *SecurityAuthKeyChangedTemplate) AnyPreApprovedRevoked() bool {
+	for _, change := range self.Changes {
+		if change != nil && change.Action == model.SecurityAuthKeyRevoked && change.PreApproved {
+			return true
+		}
+	}
+	return false
+}

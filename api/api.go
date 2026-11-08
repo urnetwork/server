@@ -405,6 +405,16 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),
 		router.NewRoute("POST", "/account/api-key/remove", handlers.DeleteApiKey),
 		router.NewRoute("GET", "/account/api-keys", handlers.GetApiKeys),
+		// §7.8's auth keys, which enroll devices (TEAM-M1-03)
+		router.NewRoute("GET", "/network/auth-keys", handlers.GetNetworkAuthKeys),
+		router.NewRoute("POST", "/network/auth-keys", handlers.CreateNetworkAuthKey),
+		router.NewRoute("POST", "/network/auth-key-revoke", handlers.RevokeNetworkAuthKey),
+		// §5.15's sidecar identities: the binding log and its lookups (CORE-M1-06)
+		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
+		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),
+		router.NewRoute("GET", "/sidecar/identity", handlers.GetSidecarIdentityByClient),
+		// §8.9's acks of the projection a client applied (ACL-M2-12)
+		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),

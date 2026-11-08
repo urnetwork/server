@@ -64,6 +64,8 @@ var intendedNetworkReportedRoutes = []string{
 	"POST /auth/network-refresh",
 	"POST /account/api-key",
 	"POST /account/api-key/remove",
+	"POST /network/auth-keys",
+	"POST /network/auth-key-revoke",
 	"POST /network/revoke-session",
 	"POST /network/revoke-other-sessions",
 	// OAuth authorize and consent

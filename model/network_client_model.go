@@ -722,8 +722,10 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			// the new client's marks: what was asked for, and everything its parent
 			// has. Decided before any write, so a refusal leaves nothing behind.
 			marks := requestedMarks
+			parentMarks := clientMarks{}
 			if authClient.SourceClientId != nil {
-				marks = marks.union(readClientMarksInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, *authClient.SourceClientId))
+				parentMarks = readClientMarksInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, *authClient.SourceClientId)
+				marks = marks.union(parentMarks)
 			}
 			if clientSession.ByJwt.StrictExp {
 				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
@@ -947,6 +949,12 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				))
 			}
 
+			// D-ACL-3's subject in the same statement (network_client_acl_subject.go)
+			subjectColumn, subjectValue := networkClientMintAclSubjectInsert(
+				newClientIsOwnAclSubject(authClient.SourceClientId, requestedMarks, parentMarks),
+				"$1",
+				"$6",
+			)
 			server.RaisePgResult(tx.Exec(
 				clientSession.Ctx,
 				`
@@ -958,9 +966,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						create_time,
 						auth_time,
 						source_client_id,
-						principal
+						principal`+subjectColumn+`
 					)
-					VALUES ($1, $2, $3, $4, $5, $5, $6, $7)
+					VALUES ($1, $2, $3, $4, $5, $5, $6, $7`+subjectValue+`)
 				`,
 				clientId,
 				clientSession.ByJwt.NetworkId,
@@ -5736,6 +5744,8 @@ func Testing_CreateDevice(
 			createTime,
 		))
 
+		// a top-level client, its own subject (D-ACL-3)
+		subjectColumn, subjectValue := NetworkClientAclSubjectInsert("$1")
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -5745,9 +5755,9 @@ func Testing_CreateDevice(
 					device_id,
 					description,
 					create_time,
-					auth_time
+					auth_time`+subjectColumn+`
 				)
-				VALUES ($1, $2, $3, $4, $5, $5)
+				VALUES ($1, $2, $3, $4, $5, $5`+subjectValue+`)
 			`,
 			clientId,
 			networkId,
