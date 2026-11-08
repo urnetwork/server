@@ -29,6 +29,8 @@ const (
 	RetentionTableAccountApiKey     = "account_api_key"
 	// §8's sidecar table (MG2): acks past their 7 days
 	RetentionTableNetworkAclAck = "network_acl_ack"
+	// §13's sidecar table (MG5): tls-3's daily counts past their 13 months
+	RetentionTableTlsConnectionDay = "tls_connection_day"
 )
 
 var retentionTables = []string{
@@ -49,6 +51,7 @@ var retentionTables = []string{
 	RetentionTableNetworkAuthKey,
 	RetentionTableAccountApiKey,
 	RetentionTableNetworkAclAck,
+	RetentionTableTlsConnectionDay,
 }
 
 // Rows the expiry and retention tasks deleted, by table: their rate signal,
