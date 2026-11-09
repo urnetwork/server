@@ -11,10 +11,11 @@
   },
   "private_engine": {
     "service": "urnetwork-competition-docker.service",
-    "config": "/home/by/sim-latency/docker-engine-v1/daemon.json",
-    "config_sha256": "37a8831fdc0d0999d41b5054701cfbf3b962a375f882fe3943abe1758434824a",
-    "service_sha256": "3fb67636327764223459f6987c3a496683b51b0614a9c54642ccd63d3a9f1993",
-    "socket": "unix:///run/urnetwork-competition-docker/docker.sock",
+    "config": "/home/by/sim-latency/docker-engine-v1/daemon-agent-socket-v2.json",
+    "config_sha256": "e1b6d04a90d8ef59cdfe31184b1e9e73ffdbb5a488853f35588e3012e0bf317d",
+    "service_sha256": "a2bccae33871ad2c1a030b6bf6113872bf905367b83ccd9bb93d1530f0a9c2cd",
+    "socket": "unix:///home/by/sim-latency/engine-control/docker.sock",
+    "initial_configuration_preserved": "daemon.json and service-v1.unit retain the initial outside-base socket configuration; the agent policy correctly requires its protected socket within BaseDirectory",
     "data_root": "/home/by/sim-latency/docker-engine-v1/data",
     "driver_observed": "overlay2",
     "containerd_snapshotter": false,
@@ -27,6 +28,9 @@
   },
   "instrument_image_transfer": {"expected_exact_id": "sha256:2693969b85b0434705fce665f2fc0dbf98c4b1dc803f443b1330f58e398591aa", "load_completed": true, "exact_id_verified": true, "verified_at": "2026-11-09T16:07:13Z", "final_epoch2_release": false, "qualification_note": "This candidate passed native70 and both mechanical test attestations, but its host qualification refused the wrong fixture paths. A distinct corrected source-build attempt is in progress; no final release or grading admission is claimed."},
   "runtime_qualified": false,
+  "qualified_source_image_load": {"image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9", "native_load_terminal_status": 0, "native_load_reported_exact_id": true, "transfer": "Docker save, zstd stream over strict known-host SSH, native Docker load into private engine"},
+  "versions_observed": {"sille_docker": "29.9.0", "goofe_docker": "29.9.2", "difference": "patch release; explicitly permitted by the operator"},
+  "before_host_policy_freeze": ["Align private-daemon user-namespace remapping and no-new-privileges controls with Sille", "Install complete pinned agent/resource/recovery inventory", "Collect genuine final prospective host fingerprint; no grading readiness is inferred from image load"],
   "grading_activated": false,
   "production_database_or_vault_main_copied": false
 }

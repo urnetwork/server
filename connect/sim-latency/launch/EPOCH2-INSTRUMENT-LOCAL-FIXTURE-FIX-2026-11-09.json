@@ -1,6 +1,8 @@
 {
   "schema": 1,
-  "status": "FIX_TESTED_PUSHED_INSTALLED_BOUNDED_REPAIR_RUNNING",
+  "status": "FIX_TESTED_PUSHED_INSTALLED_REPAIR_COMPLETED_SUCCESSFULLY",
+  "completed_repair_record": "EPOCH2-QUALIFIED-SOURCE-INTENT-2026-11-09.json",
+  "repair_final_observation": {"main_pid": 0, "unit_exit_status": 0, "source_transition": "source_publication_pending", "database_intent_generation": 2, "native_required_tests_passed": 70, "both_fixed_test_model_attestations_passed": true, "prospective_hardware_fingerprint_passed": true, "runtime_qualified": false},
   "code_commit": "4b06ef94de50555f6923ed20a288aa8a207a3735",
   "root_cause": "Instrument request construction derived config/local and vault/local from repositoriesRoot, unlike reviewed product builds that use configured isolated leaves. The actual host configuration binds a separately provisioned isolated runtime, so prospectiveSourceHostConfig correctly rejected the differing paths before publishing a prospective config.",
   "fix": "The instrument request uses Settings.ConfigLocalDirectory and Settings.VaultLocalDirectory and validates the complete authenticated request before broker invocation. Missing configured leaves refuse; no fallback to checkout-local or main secrets is allowed.",

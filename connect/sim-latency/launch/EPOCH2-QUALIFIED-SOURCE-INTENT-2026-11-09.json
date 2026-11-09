@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "status": "QUALIFIED_BUILD_AND_PROSPECTIVE_FINGERPRINT_SOURCE_PUBLICATION_PENDING",
+  "unit": "urnetwork-epoch2-source-step-20261109-v9.service",
+  "unit_exit_status": 0,
+  "database_intent": {
+    "generation": 2,
+    "source_generation": 1,
+    "target_epoch": 2,
+    "target_round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+    "state": "prepared",
+    "intent_sha256": "e3d5f949027436a5eb67e3d887b14d234be6eb2133696cfbd98fcca0fc23933f",
+    "source_lock_sha256": "4781aac57e052ff048440ac5f0f118d780a76fa1685326fc0b3af1143ae4f0cd",
+    "selected_product_source_lock_sha256": "8a3161faaf700a54f2b7f8bb3036d9e28e7116f18d49381f3699a533c555ccb6",
+    "evaluator_image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9",
+    "host_qualification_sha256": "254caad08799e9928098ea489fc98b4f86cd8fcd76a8c7c7e0c33df799143274",
+    "simulator_and_scorer_sha256": "d8a037d809f23d9ca58ba8b1061d1a3047165fa74069eedaef818bb9dd0bdb94",
+    "commits": {
+      "server": "6c55fc2ca3bf278ae4f94938e4940547844a71f1",
+      "connect": "388d8a153952fe36af1753908f4b21501967f3a8",
+      "sdk": "d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb",
+      "proxy": "af1d364fe34b807c31936642bff7d3fd849ab2a4",
+      "glog": "1c4954b017d9e8140a4e7020f914eb27410a41c6",
+      "goidenticons": "39ccec1b69db3a6f67e7346d6f44863499e6241d",
+      "userwireguard": "f9a92f0e5f5577a80d358065c4d39ca21f971a1c",
+      "sn": "6e686aabd53b7c45b154051fd268138988224eba",
+      "warp": "8dfa405ec380a60307952778921f05bba1c59a33",
+      "gvisor": "57c9e137f7407ad6cd41dcca1ba304a446e09c79"
+    }
+  },
+  "rules": {"g2_volume_policy": "minimum-work/1", "request_and_byte_floor_ratio": 0.95, "g2_upper_bounds": false, "work_coverage_policy": "seeded-crawl-coverage/v1", "page_and_byte_coverage_floor_ratio_of_baseline": 0.95, "takeover_margin": 0.269},
+  "qualification": {"native_required_tests_passed": 70, "exit_code": 0, "test_logs_sha256": "b236d8c1018e47f28d2fb515962b5259b2188ac9f14c8be532f3c80d777c4c13", "qwen_fixed_test_attestation": "passed", "gemma_fixed_test_attestation": "passed", "containment_sha256": "32ccb6af58f5111ea500124252348839bd7727df5a1f81860071e6754fe32c2d", "runtime_qualified": false},
+  "minio_retention": {
+    "recorded_at": "2026-11-09T16:26:38.57829414Z",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "exact_version_readback_verified": true,
+    "objects": [
+      {"kind": "qualification_receipt", "sha256": "e88dabcb77d203364ff4e21e95933d5acc1700a6a45cacdca7a066799c415196", "version_id": "fabde70c-e55e-40dd-be42-6639b04f56fa"},
+      {"kind": "independent_test_model_evidence", "sha256": "705241042f2c10bcbe7707a1206e060cbd63a1bc19b169a983f983791de09ccd", "version_id": "5d978c5e-3352-44a9-9b5e-15b75c9992ce"},
+      {"kind": "prospective_host_profile", "sha256": "7d0aa77874f2f72facd94d7db21839d13673d837a9e04fc7e7cc8b0f25716c30", "version_id": "4a138bd9-a63e-41b9-abed-f34b28106879"},
+      {"kind": "independent_test_containment", "sha256": "32ccb6af58f5111ea500124252348839bd7727df5a1f81860071e6754fe32c2d", "version_id": "4282cc1c-117a-42b1-b630-6a68fff03a1d"}
+    ],
+    "key_prefix": "blob/competition/v2/review-evidence/sim-latency-season-1/main/sim-latency-production-20261028-r2/01a1855d-49bd-0250-90db-d0c0885f0e46/01a1a440-fd2e-538a-365c-f4b23eed4739/",
+    "full_runtime_manifest_publication": "pending native source publication/preparation; these four receipts do not assert that the complete source envelope has been published"
+  },
+  "local_activation_snapshot": {"path": "/var/lib/urnetwork/competition-epoch1-approved-source-20261109-v4/source-2/activation.json", "sha256": "6938be5aa0b07f94b46f6820116c759fbda04dcbfca7813636a44b9aaaf85bb9", "note": "Pre-store snapshot leaves its intent_sha256 empty. The authoritative digest above was independently read from PostgresStore.SourceActivation, not inferred from that local field."},
+  "source_handoff_http_at_20261109T162853Z": 401,
+  "config_deployment_target": "2350c76",
+  "vault_deployment_target": "c0f9893",
+  "remaining": ["Serving API recognizes scoped human-handoff credential and current policy", "Record the already-approved product handoff", "Publish source refs/config through native fenced workflow", "Freeze actual distributed host identities before intake grant", "Publish exact source envelope and obtain real API intake acknowledgment", "Open and verify a fresh full-week epoch 2 with grading unactivated"],
+  "source_promoted": false,
+  "epoch2_open": false,
+  "grading_activated": false,
+  "calibration_accepted": false,
+  "epoch1_official_astra_review_and_user_approval_unchanged": true
+}
