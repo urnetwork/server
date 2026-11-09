@@ -491,7 +491,9 @@ func sidecarMg5DnsMigrations() []any {
 		// lock. apex_version is <root>'s own records' version and
 		// custom_host_map_version the custom-host map's (plan readings 3 and 9),
 		// both serials. reload_diffs holds the diffs edges post after a reload
-		// across a restore, kept for the restore step's lists.
+		// across a restore, kept for the restore step's lists, and restore_lists
+		// those lists (DNS-M5-15): each changed RRset by incident, network, owner
+		// and type, flagged for an open §21 case, kept 400 days.
 		newSqlMigration(`
 			CREATE TABLE dns_root (
 				root varchar(256) NOT NULL,
@@ -502,6 +504,7 @@ func sidecarMg5DnsMigrations() []any {
 				apex_version bigint NOT NULL DEFAULT 0,
 				custom_host_map_version bigint NOT NULL DEFAULT 0,
 				reload_diffs jsonb NOT NULL DEFAULT '[]',
+				restore_lists jsonb NOT NULL DEFAULT '[]',
 
 				PRIMARY KEY (root)
 			)

@@ -564,14 +564,16 @@ func CommitDnsRestore(ctx context.Context, redis DnsSerialRedis, root string, in
 	return restoreSerial, nil
 }
 
-// Keeps an edge's posted diff for the restore step's lists. Until
-// dns_restore_incident has its §2.8 row (plan-DNS-metadata-rows #2) the diffs
-// ride dns_root, the restore's incident record dns-1 names.
+// Keeps an edge's posted diff for the restore step's lists, with when it came,
+// which PurgeDnsRestoreLists holds to 400 days. Until dns_restore_incident has
+// its §2.8 row (plan-DNS-metadata-rows #2) the diffs ride dns_root, the
+// restore's incident record dns-1 names.
 func AddDnsReloadDiff(ctx context.Context, diff *dnsservice.DnsReloadDiff) error {
 	if !server.SidecarMg5Linked() {
 		return ErrDnsUnlinked
 	}
-	diffJson, err := json.Marshal([]*dnsservice.DnsReloadDiff{diff})
+	postTime := server.NowUtc()
+	diffJson, err := json.Marshal([]*dnsReloadDiffRow{{DnsReloadDiff: diff, PostTime: &postTime}})
 	if err != nil {
 		return err
 	}
