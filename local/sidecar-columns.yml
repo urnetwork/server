@@ -98,6 +98,13 @@ tables:
       seq: api-8
       target_id: api-8
       target_kind: api-8
+  network_sidecar_limit:
+    group: MG1
+    columns:
+      limit_key: api-13
+      limit_value: api-13
+      network_id: api-13
+      reason: api-13
   network_acl_head:
     group: MG2
     columns:

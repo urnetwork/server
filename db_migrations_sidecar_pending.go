@@ -249,7 +249,24 @@ func sidecarMg1LeaseMigrations() []any {
 
 // MG1's §20 part: network_sidecar_limit (QUOTA's tasks).
 func sidecarMg1QuotaMigrations() []any {
-	return []any{}
+	return []any{
+		// §20.5's overrides (§2.8 api-13): a row raises one of a network's
+		// limits (ops) or tightens it (§21), by the limit_key QuotaLimits and
+		// QuotaRefusal carry, with a reason citing the ops change or the §21
+		// case. A row lives until it is lifted, and goes with its network.
+		// Readers take the whole table in one snapshot (NetworkSidecarLimits),
+		// so it needs no index past its key.
+		newSqlMigration(`
+			CREATE TABLE network_sidecar_limit (
+				network_id uuid NOT NULL,
+				limit_key varchar(64) NOT NULL,
+				limit_value bigint NOT NULL,
+				reason varchar(256) NOT NULL,
+
+				PRIMARY KEY (network_id, limit_key)
+			)
+		`),
+	}
 }
 
 // MG2 (§19.7): what M2 first reads ungated.
