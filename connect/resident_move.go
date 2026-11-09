@@ -101,6 +101,21 @@ type ResidentTransportEdge struct {
 	// header or the Auth `provide_intent`), so the load table can count
 	// provider residents (MOVE.md §5.4)
 	ProvideIntent bool
+	// the address the client connected from, as the edge resolved it behind
+	// the ingress (session.ResolveClientAddress). The resident sends the
+	// client the set of its transports' addresses
+	// (resident_observed_addresses.go). Invalid from a peer that predates it.
+	ClientIp netip.Addr
+}
+
+// The edge's client ip of a resolved client address; invalid when the
+// address does not parse.
+func residentTransportClientIp(clientAddress string) netip.Addr {
+	addrPort, err := server.ParseClientAddress(clientAddress)
+	if err != nil {
+		return netip.Addr{}
+	}
+	return addrPort.Addr().Unmap()
 }
 
 // The edge's family field of an observed ip version (4 or 6; else unknown).
