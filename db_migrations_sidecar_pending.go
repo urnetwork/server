@@ -236,6 +236,7 @@ func sidecarMg1QuotaMigrations() []any {
 func sidecarMg2Migrations() []any {
 	return slices.Concat(
 		sidecarMg2AclMigrations(),
+		sidecarMg2DnsMigrations(),
 		sidecarMg2QuotaMigrations(),
 		[]any{
 			// the group's marker (SidecarMg2Linked); it changes nothing
@@ -292,6 +293,48 @@ func sidecarMg2AclMigrations() []any {
 	}
 }
 
+// MG2's §12 part: dns_label alone, moved from MG5 by plan-DNS-labels-before-m5
+// so labels exist from M2 (DNS-M5-09, DNS-M5-10). Every column is one of §2.8
+// api-2's: the opaque label or opt-in alias, its network, kind and state, when
+// the state last changed, which starts a retiring name's 90 days (D-DNS-10),
+// and the dns serial of its last change the label map shows (DnsLabelMapSince),
+// zero until its zone exists. A row is never deleted and never reassigned:
+// labels and aliases share the key (root, label) in every state, so no name a
+// row holds can be claimed again (I-14). A restore's CT replay inserts names
+// with no network (§12.5). kind and state are varchar, never ENUM. Nothing reads
+// it unless the binary links MG2 (server.SidecarMg2Linked).
+func sidecarMg2DnsMigrations() []any {
+	return []any{
+		newSqlMigration(`
+			CREATE TABLE dns_label (
+				root varchar(256) NOT NULL,
+				label varchar(63) NOT NULL,
+				network_id uuid NULL,
+				kind varchar(16) NOT NULL,
+				state varchar(16) NOT NULL,
+				state_time timestamp NOT NULL,
+				change_serial bigint NOT NULL DEFAULT 0,
+
+				PRIMARY KEY (root, label)
+			)
+		`),
+		// a network's names: its label in each root, its alias, and a deletion's
+		// tombstones
+		newSqlMigration(`
+			CREATE INDEX dns_label_network_id ON dns_label (network_id, root, kind) WHERE network_id IS NOT NULL
+		`),
+		// the label map's deltas, which tlsedge reads every 5 s
+		// (plan-TLS-edge-data-source)
+		newSqlMigration(`
+			CREATE INDEX dns_label_change_serial ON dns_label (root, change_serial)
+		`),
+		// a name held in any root, which a rename and an alias claim refuse
+		newSqlMigration(`
+			CREATE INDEX dns_label_label ON dns_label (label)
+		`),
+	}
+}
+
 // MG2's §20 part: network_quota_state, network_service_usage,
 // service_debit_journal and service_usage_batch (QUOTA's tasks).
 func sidecarMg2QuotaMigrations() []any {
@@ -312,9 +355,170 @@ func sidecarMg5Migrations() []any {
 	)
 }
 
-// MG5's §12 part: dns_* and network_dns_* (DNS's tasks).
+// MG5's §12 part: dns_* and network_dns_* (DNS-M5-09), M6's custom-host tables
+// included, since a registered group never changes (D-OPS-6). Every column is
+// one of §2.8 dns-1's: records, their kinds and bookkeeping times, serials, the
+// journal of diffs, zone suspensions, the custom-host map and each lb
+// interface's report. No column holds a client address or a query (I-13), and
+// kinds and states are varchar, never ENUM. A serial is a bigint (plan reading
+// 4), whose low 32 bits the SOA carries. dns_label is MG2's
+// (plan-DNS-labels-before-m5). dns_restore_incident, dns_ns, dns_canary_verdict
+// and network_dns_host_suspension wait for §2.8's v9 rows (plan-DNS-metadata-
+// rows), which §22.7's guard needs before a table is created; until then a
+// restore's posted diffs ride dns_root, the restore's incident record v8 names,
+// and a host suspension is a withheld owner's row in network_dns_record.
+// Nothing reads these tables unless the binary links MG5
+// (server.SidecarMg5Linked).
 func sidecarMg5DnsMigrations() []any {
-	return []any{}
+	return []any{
+		// one row a root (D-DNS-1). serial is the last committed write's or
+		// restore's, and only §12.6's one write path raises it, under this row's
+		// lock. apex_version is <root>'s own records' version and
+		// custom_host_map_version the custom-host map's (plan readings 3 and 9),
+		// both serials. reload_diffs holds the diffs edges post after a reload
+		// across a restore, kept for the restore step's lists.
+		newSqlMigration(`
+			CREATE TABLE dns_root (
+				root varchar(256) NOT NULL,
+				serial bigint NOT NULL DEFAULT 0,
+				restore_serial bigint NOT NULL DEFAULT 0,
+				restoring bool NOT NULL DEFAULT false,
+				restore_incident_id uuid NULL,
+				apex_version bigint NOT NULL DEFAULT 0,
+				custom_host_map_version bigint NOT NULL DEFAULT 0,
+				reload_diffs jsonb NOT NULL DEFAULT '[]',
+
+				PRIMARY KEY (root)
+			)
+		`),
+		// a network's zone in a root (plan reading 2: per-network state, not a
+		// DNS zone): its version, the serial of its last write (reading 3), and
+		// the state §12.7's system records are a function of. A zone suspension
+		// (§12.9) is its reason and until.
+		newSqlMigration(`
+			CREATE TABLE network_dns_zone (
+				root varchar(256) NOT NULL,
+				network_id uuid NOT NULL,
+				version bigint NOT NULL DEFAULT 0,
+				create_time timestamp NOT NULL,
+				edge_wildcard bool NOT NULL DEFAULT false,
+				edge_apex bool NOT NULL DEFAULT false,
+				mail bool NOT NULL DEFAULT false,
+				suspend_reason varchar(64) NULL,
+				suspend_until timestamp NULL,
+
+				PRIMARY KEY (root, network_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_dns_zone_network_id ON network_dns_zone (network_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_dns_zone_suspend_until ON network_dns_zone (suspend_until) WHERE suspend_until IS NOT NULL
+		`),
+		// every RRset of a root, one row each (owner, type), with no network for
+		// <root>'s own. rdata is presentation form, one value a record, empty on
+		// copy, edge, router and withheld rows. A challenge or canary expires at
+		// expire_time, and a suspension withholds a row (withheld_time) from the
+		// journal and every snapshot while keeping it for Restore (§12.9).
+		newSqlMigration(`
+			CREATE TABLE network_dns_record (
+				root varchar(256) NOT NULL,
+				owner varchar(256) NOT NULL,
+				rrtype integer NOT NULL,
+				network_id uuid NULL,
+				kind varchar(16) NOT NULL,
+				ttl bigint NOT NULL,
+				rdata text[] NOT NULL DEFAULT '{}',
+				create_time timestamp NOT NULL,
+				expire_time timestamp NULL,
+				withheld_time timestamp NULL,
+
+				PRIMARY KEY (root, owner, rrtype)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_dns_record_network_id ON network_dns_record (network_id, root) WHERE network_id IS NOT NULL
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_dns_record_expire_time ON network_dns_record (expire_time) WHERE expire_time IS NOT NULL
+		`),
+		// one row a serial: the write's diff as the feed carries it (wire.go's
+		// DnsJournalRow), kept 7 days (§12.14). A restore's jump has no row.
+		newSqlMigration(`
+			CREATE TABLE dns_zone_journal (
+				root varchar(256) NOT NULL,
+				serial bigint NOT NULL,
+				network_id uuid NULL,
+				commit_time timestamp NOT NULL,
+				format integer NOT NULL,
+				diff jsonb NOT NULL,
+
+				PRIMARY KEY (root, serial)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX dns_zone_journal_commit_time ON dns_zone_journal (commit_time)
+		`),
+		// a network's writes by time, for §12.7's hourly caps
+		newSqlMigration(`
+			CREATE INDEX dns_zone_journal_network_id ON dns_zone_journal (network_id, commit_time) WHERE network_id IS NOT NULL
+		`),
+		// M6's custom hosts (§12.8, §13.4): a customer's <host>.<domain>, or an
+		// apex <domain>, mapped to a host owner of the network, with its state,
+		// CAA mode, chain check, the map version that last changed it and when
+		// every interface was current for it.
+		newSqlMigration(`
+			CREATE TABLE network_dns_custom_host (
+				host varchar(256) NOT NULL,
+				root varchar(256) NOT NULL,
+				network_id uuid NOT NULL,
+				owner varchar(256) NOT NULL,
+				state varchar(16) NOT NULL,
+				caa_mode varchar(16) NOT NULL,
+				effective_caa_chain_ok bool NOT NULL DEFAULT false,
+				map_version bigint NOT NULL DEFAULT 0,
+				ready_time timestamp NULL,
+				create_time timestamp NOT NULL,
+
+				PRIMARY KEY (host)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_dns_custom_host_network_id ON network_dns_custom_host (network_id)
+		`),
+		// the custom-host map's versions, kept 7 days (§12.14)
+		newSqlMigration(`
+			CREATE TABLE dns_custom_host_map (
+				version bigint NOT NULL,
+				digest bytea NOT NULL,
+				create_time timestamp NOT NULL,
+
+				PRIMARY KEY (version)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX dns_custom_host_map_create_time ON dns_custom_host_map (create_time)
+		`),
+		// each lb interface's report: the version it loaded, its digest and nginx
+		// master, when it last polled, the last version a route probe passed and
+		// when, and each added host's latest probe result, kept while the
+		// interface is in the lb inventory (§12.14)
+		newSqlMigration(`
+			CREATE TABLE dns_custom_host_map_applied (
+				interface_name varchar(128) NOT NULL,
+				reported_version bigint NOT NULL DEFAULT 0,
+				digest bytea NULL,
+				nginx_master varchar(64) NULL,
+				poll_time timestamp NULL,
+				probe_version bigint NOT NULL DEFAULT 0,
+				probe_time timestamp NULL,
+				host_probes jsonb NOT NULL DEFAULT '{}',
+
+				PRIMARY KEY (interface_name)
+			)
+		`),
+	}
 }
 
 // MG5's §13 part: network_tls_* and tls_connection_*, the hourly partitioned

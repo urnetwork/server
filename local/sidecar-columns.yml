@@ -108,6 +108,91 @@ tables:
     existing: true
     columns:
       acl_subject_client_id: api-4
+  dns_label:
+    group: MG2
+    columns:
+      change_serial: api-2
+      kind: api-2
+      label: api-2
+      network_id: api-2
+      root: api-2
+      state: api-2
+      state_time: api-2
+  dns_root:
+    group: MG5
+    columns:
+      apex_version: dns-1
+      custom_host_map_version: dns-1
+      reload_diffs: dns-1
+      restore_incident_id: dns-1
+      restore_serial: dns-1
+      restoring: dns-1
+      root: dns-1
+      serial: dns-1
+  network_dns_zone:
+    group: MG5
+    columns:
+      create_time: dns-1
+      edge_apex: dns-1
+      edge_wildcard: dns-1
+      mail: dns-1
+      network_id: dns-1
+      root: dns-1
+      suspend_reason: dns-1
+      suspend_until: dns-1
+      version: dns-1
+  network_dns_record:
+    group: MG5
+    columns:
+      create_time: dns-1
+      expire_time: dns-1
+      kind: dns-1
+      network_id: dns-1
+      owner: dns-1
+      rdata: dns-1
+      root: dns-1
+      rrtype: dns-1
+      ttl: dns-1
+      withheld_time: dns-1
+  dns_zone_journal:
+    group: MG5
+    columns:
+      commit_time: dns-1
+      diff: dns-1
+      format: dns-1
+      network_id: dns-1
+      root: dns-1
+      serial: dns-1
+  network_dns_custom_host:
+    group: MG5
+    columns:
+      caa_mode: dns-1
+      create_time: dns-1
+      effective_caa_chain_ok: dns-1
+      host: dns-1
+      map_version: dns-1
+      network_id: dns-1
+      owner: dns-1
+      ready_time: dns-1
+      root: dns-1
+      state: dns-1
+  dns_custom_host_map:
+    group: MG5
+    columns:
+      create_time: dns-1
+      digest: dns-1
+      version: dns-1
+  dns_custom_host_map_applied:
+    group: MG5
+    columns:
+      digest: dns-1
+      host_probes: dns-1
+      interface_name: dns-1
+      nginx_master: dns-1
+      poll_time: dns-1
+      probe_time: dns-1
+      probe_version: dns-1
+      reported_version: dns-1
   network_tls_cert:
     group: MG5
     columns:
