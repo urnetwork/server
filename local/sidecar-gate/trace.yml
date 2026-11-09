@@ -1,0 +1,388 @@
+# The design trace (TEST-M1-12; R-ARCH-1, D-CTX-2, D-TRUST-2, D-ARCH-2): each roll-up row of §1.2, §2.2, §2.9,
+# §3.2, §23.2 and the X list, with its first gate and what shows it, which `go run ./local/sidecar-gate trace`
+# reads against the design's own tables. A row the design gains fails the run until it is listed here, and an
+# id listed here that no table holds fails too.
+#
+# rows       one per roll-up id, in the design's order
+#   gate     its first gate: G0, Mn (milestone n's exit) or Mn-in, from its owning sections' milestones (§23.4)
+#   task     the task whose evidence shows it, for a reader
+#   tests    go tests on packages, as gates.yml writes them; each must pass
+#   schedules  FS rows, "FS-n" or "FS-n (case)", run as gates.yml's row for them at their first gate
+#   commands   checks run in a repo's directory; one printing "sidecar-gate outcome: <outcome>" reads that
+#   gates    whole gates of gates.yml
+#   open     what outside the build it waits on: hardware, production or people; it reads open, never pass
+#   out_of_build  §1.7's words, for a row whose work is out of this build (D-CTX-1); it reads open
+#   A row naming nothing reads missing, and so does one naming a test that does not exist.
+# carriers   carriers §3.5's table does not hold that the sidecar blocks or the sidecar may use, each citing
+#            the owner decision that allows it (D-ARCH-2); one citing none allows nothing
+#
+# The evidence is a first cut, from each row's owning sections and the schedules §23.6 puts at its first gate;
+# rows with no evidence yet read missing until a task names what shows them.
+
+rows:
+  # §1.2: R-CTX, whose Owner column is the traceability root (D-CTX-2)
+  - id: R-CTX-1
+    gate: M0
+    task: TEST-M0-05
+    tests:
+      - {repo: sidecar, package: ./check, names: [TestLayering, TestDeps], tags: sidecar_check}
+  - id: R-CTX-2
+    gate: M1
+    task: CORE-M1-13
+    tests:
+      - {repo: sidecar, package: ., names: [TestCoreM1GateRowsHaveTheirTests, TestCoreM1GateEnrollsAndRefreshesEndToEnd]}
+      - {repo: sidecar, package: ./sidecartest, names: [TestSidecarEnrollsToOnline]}
+  - id: R-CTX-3
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: R-CTX-4
+    gate: M1
+    task: CORE-M1-10
+    open: "hardware: the daemon's hand runs on linux and windows hosts (M1-out)"
+    tests:
+      - {repo: sidecar, package: ., names: [TestOtherUidRefused, TestRepliesHoldNoSecret]}
+  - id: R-CTX-5
+    gate: M4
+    schedules: [FS-37, FS-97]
+  - id: R-CTX-6
+    gate: M1
+    task: PROTO-M1-11
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestSubprotocolRequiredRpcAfterTheIdentityCheck, TestSubprotocolNoSessionIsUnavailableEncryption]}
+      - {repo: server, package: ./connect, names: [TestSidecarSubprotocolT3HelloHeadCheckAndClosedData], stores: true}
+  - id: R-CTX-7
+    gate: M1
+    task: CORE-M1-13
+    tests:
+      - {repo: sidecar, package: ., names: [TestCoreM1GateRowsHaveTheirTests, TestCoreM1GateEnrollsAndRefreshesEndToEnd]}
+      - {repo: sidecar, package: ./sidecartest, names: [TestSidecarEnrollsToOnline]}
+  - id: R-CTX-8
+    gate: M1
+    task: TEAM-M1-01
+    tests:
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
+      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+  - {id: R-CTX-9, gate: M1}
+  - {id: R-CTX-10, gate: M1}
+  - id: R-CTX-11
+    gate: M2
+    schedules: [FS-3, FS-14, FS-16, "FS-19 (config-read)", "FS-72 (format-1)", "FS-82 (statement)", "FS-95 (format-1)", FS-102, "FS-102 (forged)", FS-106, FS-113, FS-124, "FS-124 (forged)"]
+  - id: R-CTX-12
+    gate: M2
+    schedules: [FS-15, FS-18, FS-20, FS-22, FS-23, FS-24, FS-62, FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-117]
+  - id: R-CTX-13
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: R-CTX-14
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: R-CTX-15
+    gate: M2
+    schedules: [FS-40, FS-53, FS-61, FS-63, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-118]
+  - id: R-CTX-16
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: R-CTX-17
+    gate: M2
+    schedules: [FS-3, FS-14, FS-15, FS-18, "FS-19 (config-read)", FS-20, FS-22, FS-23, FS-24, FS-62, "FS-95 (format-1)", FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-113, FS-117]
+  - id: R-CTX-18
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - {id: R-CTX-19, gate: M5}
+  - {id: R-CTX-20, gate: M5}
+  - id: R-CTX-21
+    gate: M5
+    schedules: [FS-34]
+  - id: R-CTX-22
+    gate: M5
+    schedules: [FS-34]
+  - id: R-CTX-23
+    gate: M9
+    schedules: [FS-31, FS-123]
+  - id: R-CTX-24
+    gate: M7
+    schedules: [FS-13, FS-33, "FS-39 (labels)", "FS-78 (mailbox)", "FS-82 (mail)", "FS-111 (mailbox)", "FS-112 (mailbox)", FS-121]
+  - id: R-CTX-25
+    gate: M7
+    schedules: [FS-13, FS-33, "FS-39 (labels)", "FS-78 (mailbox)", "FS-82 (mail)", "FS-111 (mailbox)", "FS-112 (mailbox)", FS-121]
+  - id: R-CTX-26
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: R-CTX-27
+    gate: M4
+    schedules: [FS-38, "FS-38 (forged)", FS-56]
+  - id: R-CTX-28
+    gate: M2
+    schedules: [FS-3, FS-14, "FS-19 (config-read)", "FS-95 (format-1)", FS-113]
+  - id: R-CTX-29
+    gate: M1
+    task: TEST-M1-06
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
+      - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
+      - {repo: sidecar, package: ./sidecartest, names: [TestSchemaGuard]}
+      - {repo: sidecar, package: ./check, names: [TestMetadataListIsSection2sBlock], tags: sidecar_check}
+  - {id: R-CTX-30, gate: M1}
+  - {id: R-CTX-31, gate: M5}
+  - id: R-CTX-32
+    gate: M4
+    tests:
+      - {repo: sidecar, package: ./check, names: [TestLayering, TestDeps], tags: sidecar_check}
+    commands:
+      - {repo: server, command: [go, run, ./local/sidecar-gate, RS1]}
+  - id: R-CTX-33
+    gate: M2
+    schedules: [FS-14, FS-16, "FS-72 (format-1)", "FS-82 (statement)", FS-102, "FS-102 (forged)", FS-106, FS-124, "FS-124 (forged)"]
+  - id: R-CTX-34
+    gate: M10
+    schedules: [FS-64, FS-65, FS-66, "FS-66 (hold)", FS-67, FS-68, FS-69, FS-70, FS-71, "FS-72 (migration)", "FS-72 (rollback)", FS-73, FS-74, FS-75, FS-76, "FS-76 (team-record)", "FS-76 (mailbox)", "FS-76 (hold)", FS-77, "FS-77 (app-host)", FS-78, "FS-78 (mailbox)", "FS-78 (hold)", FS-79, FS-81, FS-83, "FS-83 (app-host)", "FS-83 (team)", "FS-84 (cards)", "FS-86 (cards)", FS-89, FS-90, FS-91, FS-92, FS-93, FS-94, FS-95, FS-96, "FS-99 (cards)", FS-107, FS-108, FS-109, "FS-109 (app-host)", FS-111, "FS-111 (mailbox)", "FS-111 (team-record)", FS-112, "FS-112 (mailbox)", "FS-114 (purge)", "FS-114 (drop)"]
+  - id: R-CTX-35
+    gate: M10
+    schedules: [FS-64, FS-65, FS-66, "FS-66 (hold)", FS-67, FS-68, FS-69, FS-70, FS-71, "FS-72 (migration)", "FS-72 (rollback)", FS-73, FS-74, FS-75, FS-76, "FS-76 (team-record)", "FS-76 (mailbox)", "FS-76 (hold)", FS-77, "FS-77 (app-host)", FS-78, "FS-78 (mailbox)", "FS-78 (hold)", FS-79, FS-80, "FS-80 (team-record)", FS-81, FS-83, "FS-83 (app-host)", "FS-83 (team)", "FS-84 (cards)", "FS-86 (cards)", "FS-87 (index)", "FS-88 (searches)", FS-89, FS-90, FS-91, FS-92, FS-93, FS-94, FS-95, FS-96, "FS-99 (cards)", "FS-100 (format-2)", "FS-101 (r-file)", FS-107, FS-108, FS-109, "FS-109 (app-host)", FS-110, "FS-110 (app-host)", FS-111, "FS-111 (mailbox)", "FS-111 (team-record)", FS-112, "FS-112 (mailbox)", "FS-114 (purge)", "FS-114 (drop)"]
+  - id: R-CTX-36
+    gate: M10
+    schedules: [FS-76, "FS-76 (team-record)", "FS-76 (mailbox)", "FS-76 (hold)", FS-80, "FS-80 (team-record)", "FS-84 (cards)", "FS-86 (cards)", "FS-87 (index)", "FS-88 (searches)", "FS-99 (cards)", "FS-100 (format-2)", "FS-101 (r-file)", FS-110, "FS-110 (app-host)", FS-111, "FS-111 (mailbox)", "FS-111 (team-record)"]
+  - id: R-CTX-37
+    gate: M10
+    schedules: [FS-64, FS-65, FS-66, "FS-66 (hold)", FS-67, FS-68, FS-69, FS-70, FS-71, "FS-72 (migration)", "FS-72 (rollback)", FS-73, FS-74, FS-75, FS-76, "FS-76 (team-record)", "FS-76 (mailbox)", "FS-76 (hold)", FS-77, "FS-77 (app-host)", FS-78, "FS-78 (mailbox)", "FS-78 (hold)", FS-79, FS-81, FS-83, "FS-83 (app-host)", "FS-83 (team)", "FS-84 (cards)", "FS-86 (cards)", FS-89, FS-90, FS-91, FS-92, FS-93, FS-94, FS-95, FS-96, "FS-99 (cards)", "FS-100 (format-2)", FS-107, FS-108, FS-109, "FS-109 (app-host)", FS-111, "FS-111 (mailbox)", "FS-111 (team-record)", FS-112, "FS-112 (mailbox)", "FS-114 (purge)", "FS-114 (drop)", FS-125, "FS-125 (app-host)"]
+  - id: R-CTX-38
+    gate: M6
+    schedules: ["FS-30 (audit)", "FS-76 (team-record)", "FS-80 (team-record)", "FS-84 (entries)", "FS-84 (cards)", FS-85, "FS-86 (announce-entries)", "FS-86 (cards)", FS-87, "FS-87 (index)", FS-88, "FS-88 (searches)", "FS-99 (entries)", "FS-99 (cards)", "FS-100 (format-1)", "FS-100 (format-2)", "FS-101 (entries)", "FS-101 (r-file)", "FS-111 (team-record)", "FS-124 (team)"]
+  - id: R-CTX-39
+    gate: M10
+    schedules: [FS-64, FS-65, FS-66, "FS-66 (hold)", FS-67, FS-68, FS-69, FS-70, FS-71, "FS-72 (migration)", "FS-72 (rollback)", FS-73, FS-74, FS-75, FS-76, "FS-76 (team-record)", "FS-76 (mailbox)", "FS-76 (hold)", FS-77, "FS-77 (app-host)", FS-78, "FS-78 (mailbox)", "FS-78 (hold)", FS-79, FS-81, FS-83, "FS-83 (app-host)", "FS-83 (team)", "FS-84 (cards)", "FS-86 (cards)", FS-89, FS-90, FS-91, FS-92, FS-93, FS-94, FS-95, FS-96, "FS-99 (cards)", FS-107, FS-108, FS-109, "FS-109 (app-host)", FS-111, "FS-111 (mailbox)", "FS-111 (team-record)", FS-112, "FS-112 (mailbox)", "FS-114 (purge)", "FS-114 (drop)"]
+
+  # §2.2: R-TRUST
+  - id: R-TRUST-1
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-15, FS-17, FS-18, FS-20, FS-22, FS-23, FS-24, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: R-TRUST-2
+    gate: M1
+    task: TEST-M1-06
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
+      - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
+      - {repo: sidecar, package: ./sidecartest, names: [TestSchemaGuard]}
+      - {repo: sidecar, package: ./check, names: [TestMetadataListIsSection2sBlock], tags: sidecar_check}
+  - {id: R-TRUST-3, gate: M1}
+  - id: R-TRUST-4
+    gate: M5
+    schedules: [FS-34]
+  - id: R-TRUST-5
+    gate: M2
+    schedules: [FS-3, FS-14, "FS-19 (config-read)", "FS-95 (format-1)", FS-113, FS-124, "FS-124 (forged)"]
+  - id: R-TRUST-6
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: R-TRUST-7
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: R-TRUST-8
+    gate: M1
+    task: TEAM-M1-01
+    tests:
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
+      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+
+  # §2.9: the security invariants, which bind every section (D-TRUST-2)
+  - id: I-1
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-15, FS-17, FS-18, FS-20, FS-22, FS-23, FS-24, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: I-2
+    gate: M1
+    task: TEST-M1-06
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
+      - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
+  - id: I-3
+    gate: M1
+    task: PROTO-M1-11
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestSubprotocolRequiredRpcAfterTheIdentityCheck, TestSubprotocolNoSessionIsUnavailableEncryption]}
+      - {repo: server, package: ./connect, names: [TestSidecarSubprotocolT3HelloHeadCheckAndClosedData], stores: true}
+  - id: I-4
+    gate: M1
+    task: PROTO-M1-01
+    tests:
+      - {repo: sidecar, package: ./protocol/bridge, names: [TestVerifySignedRefusesEveryOtherType, TestVerifySignedCoversReceivedBytesNeverAReMarshal]}
+  - id: I-5
+    gate: M2
+    schedules: [FS-3, FS-14, "FS-19 (config-read)", "FS-95 (format-1)", FS-113]
+  - id: I-6
+    gate: M1
+    task: TEAM-M1-01
+    open: "production: the P0 enforced there (D-TRUST-3)"
+    tests:
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
+      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+  - id: I-7
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: I-8
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: I-9
+    gate: M3
+    schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
+  - id: I-10
+    gate: M2
+    schedules: [FS-3, FS-14, "FS-19 (config-read)", "FS-95 (format-1)", FS-113]
+  - id: I-11
+    gate: M7
+    schedules: [FS-13, FS-33, "FS-39 (labels)", "FS-78 (mailbox)", "FS-82 (mail)", "FS-111 (mailbox)", "FS-112 (mailbox)", FS-121]
+  - id: I-12
+    gate: M1
+    task: TEST-M1-09
+    tests:
+      - {repo: server, package: ./sidecart3, names: [TestInlinePathFailsAPlantedPostgresRead, TestInlinePathFailsOneRedisCallOverItsRow], tags: "sidecar_testhooks,sidecar_pending"}
+  - id: I-13
+    gate: M1
+    task: TEST-M1-06
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
+      - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
+  - {id: I-14, gate: M5}
+  - {id: I-15, gate: M1}
+  - id: I-16
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: I-17
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-82 (statement)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: I-18
+    gate: M1
+    task: TEST-M1-02
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestSchemaGuard]}
+      - {repo: sidecar, package: ./check, names: [TestMetadataListIsSection2sBlock], tags: sidecar_check}
+  - id: I-19
+    gate: M10
+    schedules: [FS-64, FS-65, FS-66, "FS-66 (hold)", FS-67, FS-68, FS-69, FS-70, FS-71, "FS-72 (migration)", "FS-72 (rollback)", FS-73, FS-74, FS-75, FS-76, "FS-76 (team-record)", "FS-76 (mailbox)", "FS-76 (hold)", FS-77, "FS-77 (app-host)", FS-78, "FS-78 (mailbox)", "FS-78 (hold)", FS-79, FS-81, FS-83, "FS-83 (app-host)", "FS-83 (team)", "FS-84 (cards)", "FS-86 (cards)", FS-89, FS-90, FS-91, FS-92, FS-93, FS-94, FS-95, FS-96, "FS-99 (cards)", FS-107, FS-108, FS-109, "FS-109 (app-host)", FS-111, "FS-111 (mailbox)", "FS-111 (team-record)", FS-112, "FS-112 (mailbox)", "FS-114 (purge)", "FS-114 (drop)"]
+  - id: I-20
+    gate: M6
+    schedules: ["FS-30 (audit)", "FS-76 (team-record)", "FS-80 (team-record)", "FS-84 (entries)", "FS-84 (cards)", FS-85, "FS-86 (announce-entries)", "FS-86 (cards)", FS-87, "FS-87 (index)", FS-88, "FS-88 (searches)", "FS-99 (entries)", "FS-99 (cards)", "FS-100 (format-1)", "FS-100 (format-2)", "FS-101 (entries)", "FS-101 (r-file)", "FS-111 (team-record)", "FS-124 (team)"]
+
+  # §3.2: R-ARCH
+  - id: R-ARCH-1
+    gate: G0
+    task: TEST-M1-12
+    commands:
+      - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+  - id: R-ARCH-2
+    gate: M0
+    task: TEST-M0-05
+    tests:
+      - {repo: sidecar, package: ./check, names: [TestLayering, TestDeps], tags: sidecar_check}
+  - id: R-ARCH-3
+    gate: M1
+    task: TEST-M1-06
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
+      - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
+  - id: R-ARCH-4
+    gate: M4
+    schedules: [FS-37, FS-97]
+  - id: R-ARCH-5
+    gate: G0
+    task: TEST-M1-12
+    commands:
+      - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+
+  # §23.2: R-PHASE
+  - id: R-PHASE-1
+    gate: G0
+    task: TEST-M1-12
+    commands:
+      - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+  - id: R-PHASE-2
+    gate: M0
+    open: "people: main stays production-ready, which each Gn-out's merge and the owner's approval keep (§23.9)"
+    commands:
+      - {repo: sidecar, command: [.githooks/commit-msg, --scan, main..sidecar]}
+  - id: R-PHASE-3
+    gate: M1
+    task: TEST-M0-05
+    tests:
+      - {repo: sidecar, package: ./check, names: [TestLayering, TestDeps], tags: sidecar_check}
+    commands:
+      - {repo: server, command: [go, run, ./local/sidecar-gate, RS1]}
+  - id: R-PHASE-4
+    gate: M4
+    open: "people: RS3 is Later (§23.4), and a person signs each stage"
+    commands:
+      - {repo: server, command: [go, run, ./local/sidecar-gate, RS1]}
+      - {repo: server, command: [go, run, ./local/sidecar-gate, RS2]}
+  - id: R-PHASE-5
+    gate: M4
+    open: "people: the trust documents, D-TRUST-4's document, §21.11's canary and §2.18's unaudited-cryptography disclosure, which gate the \"end-to-end encrypted\" claim (owner decisions 99, 119)"
+  - id: R-PHASE-6
+    gate: M1
+    task: TEAM-M1-01
+    open: "production: stage 1 and the 7-day tokens live before any sidecar ships (D-TRUST-3)"
+    tests:
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
+      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+  - {id: R-PHASE-7, gate: M8}
+  - id: R-PHASE-8
+    gate: M1
+    task: OPS-M1-01
+    schedules: [FS-54, FS-55]
+  - id: R-PHASE-9
+    gate: M0
+    open: "people: sidecar public as it is, and every touched repo merged at each exit review by the owner (owner decisions 117, 118)"
+  - id: R-PHASE-10
+    gate: M2
+    open: "people: track B with four engineers by M2's exit, and M10's three from M3's entry, or §23.5's fallbacks, which return to the owner"
+  - id: R-PHASE-11
+    gate: M2
+    open: "hardware: §22.8's nvme run on the production hosts' PM9A3 set before M2's exit (D-TEST-11), and format 2's fit confirmed on production after its freeze (D-TEST-13)"
+  - id: R-PHASE-12
+    gate: M3
+    open: "people: the out-of-hours rota from M3 (owner decision 143)"
+  - {id: R-PHASE-13, gate: M10}
+
+  # the X list (DESIGN.md's front matter)
+  - id: X1
+    gate: M5
+    schedules: [FS-34]
+  - id: X2
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - {id: X3, gate: M1}
+  - {id: X4, gate: M5}
+  - {id: X5, gate: M5}
+  - id: X6
+    gate: M7
+    schedules: [FS-13, FS-33, "FS-39 (labels)", "FS-78 (mailbox)", "FS-82 (mail)", "FS-111 (mailbox)", "FS-112 (mailbox)", FS-121]
+  - id: X7
+    gate: M9
+    schedules: [FS-31, FS-123]
+  - {id: X8, gate: M1}
+  - {id: X9, gate: M0}
+  - {id: X10, gate: M1}
+  - {id: X11, gate: M1}
+  - id: X12
+    gate: M2
+    schedules: [FS-15, FS-18, FS-20, FS-22, FS-23, FS-24, FS-62, FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-117]
+  - id: X13
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-40, FS-53, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: X14
+    gate: M4
+    schedules: [FS-37, FS-97]
+  - id: X15
+    gate: M2
+    open: "people: two tracks, a second team on mail and burner (owner decision 9; §23.5)"
+  - {id: X16, gate: M1}
+  - {id: X17, gate: M1}
+  - id: X18
+    gate: M4
+    schedules: [FS-38, "FS-38 (forged)", FS-56]
+  - id: X19
+    gate: M2
+    schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
+  - id: X20
+    gate: M0
+    open: "people: RECORD.md reviewed by M2's entry (owner decision 25)"
+
+carriers: []

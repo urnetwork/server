@@ -22,6 +22,12 @@
 // listed when every test it names is declared there, which is how a sweep is
 // checked before a gate, and never a pass.
 //
+// Three names take a gate's place (TEST-M1-12): trace reports each roll-up id
+// of the design with its first gate and evidence (trace.go, trace.yml), and
+// holds §3.5's planes; assembly runs D-ARCH-4's check, the row every Gn-in
+// carries (assembly.go); and a stage of stages.yml, RS1, RS2 or BS1, reports
+// the stage whole or names what it waits on.
+//
 // It never takes tests/network-intensive-suite-lock.sh, never runs the
 // whole-suite server/test.sh or connect/test.sh, never sets
 // URNETWORK_TEST_REAL_VAULT, and reads nothing under vault: its git metadata
@@ -192,7 +198,7 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 	serverDirectory := flags.String("server", ".", "the server checkout, inside the monoroot")
 	list := flags.Bool("list", false, "resolve each named test from its package's files, and run nothing")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
-		fmt.Fprintf(errOut, "usage: sidecar-gate [-base <ref>] [-out <file>] [-server <dir>] [-list] <gate>\n")
+		fmt.Fprintf(errOut, "usage: sidecar-gate [-base <ref>] [-out <file>] [-server <dir>] [-list] <gate | trace | assembly | stage>\n")
 		return 64
 	}
 	absoluteServer, err := filepath.Abs(*serverDirectory)
@@ -200,35 +206,82 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 		fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
 		return 1
 	}
-	report, err := runGate(context.Background(), &gateOptions{
+	toolDirectory := filepath.Join(absoluteServer, "local", "sidecar-gate")
+	options := &gateOptions{
 		gate:           flags.Arg(0),
 		base:           *base,
 		root:           filepath.Dir(absoluteServer),
 		serverRelative: filepath.Base(absoluteServer),
-		gatesPath:      filepath.Join(absoluteServer, "local", "sidecar-gate", "gates.yml"),
-		matrixPath:     filepath.Join(absoluteServer, "local", "sidecar-gate", "ops-matrix.yml"),
+		gatesPath:      filepath.Join(toolDirectory, "gates.yml"),
+		matrixPath:     filepath.Join(toolDirectory, "ops-matrix.yml"),
 		repos:          gateRepos,
 		environ:        os.Environ(),
 		settings:       defaultGateSettings(),
 		repoChecks:     !*list,
 		list:           *list,
-	})
-	if err != nil {
-		fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
-		return 1
 	}
 	var buffer bytes.Buffer
-	report.Write(&buffer)
+	failed := false
+	switch {
+	case options.gate == "trace":
+		report, err := runTrace(context.Background(), options, filepath.Join(toolDirectory, "trace.yml"))
+		if err != nil {
+			fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
+			return 1
+		}
+		report.Write(&buffer)
+		failed = report.failed()
+	case options.gate == "assembly":
+		result := runAssembly(context.Background(), options.root, defaultAssemblySettings())
+		writeAssembly(&buffer, result)
+		fmt.Fprintf(&buffer, "\n%s%s\n", gateOutcomeLinePrefix, result.outcome)
+		failed = result.outcome == gateFail
+	case isStage(filepath.Join(toolDirectory, "stages.yml"), options.gate):
+		report, err := runStage(context.Background(), options, filepath.Join(toolDirectory, "stages.yml"), options.gate)
+		if err != nil {
+			fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
+			return 1
+		}
+		report.Write(&buffer)
+		outcomes := []string{}
+		for _, item := range report.items {
+			outcomes = append(outcomes, item.outcome)
+		}
+		outcome := combineOutcomes(outcomes)
+		fmt.Fprintf(&buffer, "\n%s%s\n", gateOutcomeLinePrefix, outcome)
+		failed = outcome == gateFail
+	default:
+		report, err := runGate(context.Background(), options)
+		if err != nil {
+			fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
+			return 1
+		}
+		report.Write(&buffer)
+		failed = report.failed()
+	}
 	if *outPath == "" {
 		out.Write(buffer.Bytes())
 	} else if err := os.WriteFile(*outPath, buffer.Bytes(), 0o644); err != nil {
 		fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
 		return 1
 	}
-	if report.failed() {
+	if failed {
 		return 1
 	}
 	return 0
+}
+
+// What a command prints, on a line of its own, to report an outcome other than its exit status gives: the
+// assembly row's and a stage's missing and open, which no exit status can say.
+const gateOutcomeLinePrefix = "sidecar-gate outcome: "
+
+// Whether stages.yml holds a stage of this id.
+func isStage(stagesPath string, id string) bool {
+	stages := &stagesFile{}
+	if err := readYamlFile(stagesPath, stages); err != nil {
+		return false
+	}
+	return slices.ContainsFunc(stages.Stages, func(stage *traceStage) bool { return stage.Id == id })
 }
 
 // The migration group a gate's Gn-out registers, "" for a gate with none.
@@ -533,6 +586,14 @@ func runGateCommand(ctx context.Context, options *gateOptions, command gateComma
 	// of what it checks
 	if match := regexp.MustCompile(`ModuleNotFoundError: No module named '([^']+)'`).FindStringSubmatch(string(output)); match != nil {
 		return gateOpen, []string{where + ": this host lacks the Python module " + match[1] + ", so it did not run"}
+	}
+	// a check that says its outcome: its exit status still fails it
+	if matches := regexp.MustCompile(`(?m)^`+regexp.QuoteMeta(gateOutcomeLinePrefix)+`(pass|fail|missing|open|listed)$`).FindAllStringSubmatch(string(output), -1); 0 < len(matches) {
+		outcome := matches[len(matches)-1][1]
+		if err != nil {
+			outcome = gateFail
+		}
+		return outcome, []string{where + ": " + outcome}
 	}
 	if err != nil {
 		return gateFail, []string{where + ": " + lastLines(string(output), 3)}
