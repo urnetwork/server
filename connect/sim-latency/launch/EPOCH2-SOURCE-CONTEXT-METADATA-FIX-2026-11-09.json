@@ -1,6 +1,10 @@
 {
   "schema": 1,
-  "status": "FIX_PUSHED_ORDINARY_TESTED_RACE_PENDING",
+  "status": "FIX_PUSHED_ORDINARY_AND_RACE_PASSED_BOUNDED_RETRY_SCHEDULED",
+  "race": {"passed": 2, "failed": 0, "skipped": 0, "log_sha256": "03c35347abd6b1a7659de601e3bc548e2a22f5ec33f021e666e85a3f57d7c2a7"},
+  "retry_timer": "urnetwork-epoch2-source-step-20261109-v7.timer",
+  "retry_service": "urnetwork-epoch2-source-step-20261109-v7.service",
+  "retry_scope": "One source-management reconciliation after the existing ten-minute failure backoff; worker/reviewer/preparation hooks remain refusing placeholders, so this cannot start scoring or open intake prematurely.",
   "root_cause": "The isolated source context writer omitted WorkCoveragePolicy while the authenticated image planner included it. Their source-lock.json byte lengths differed, causing source image metadata is missing or redirected after successful offline compilation. This was control-plane build correctness, not winner tampering.",
   "failed_attempt_owner": "ae78137e34efa532ad5d7a2c5e116bb06bb46f06ce10a011c31e805ee311039b",
   "failed_attempt_preserved": true,
