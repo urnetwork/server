@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 )
 
@@ -134,16 +136,16 @@ const (
 	AbuseReviewStateLiftedWrong AbuseReviewState = "lifted_wrong"
 )
 
-// A network's §21.7 state. Takes AbuseStanding's values, which ABUSE-M5-02 declares
-// in the sidecar module once server requires it.
-type AbuseStanding string
+// A network's §21.7 state: the sidecar module's type, so the standing api stores is
+// the one ServiceHost.Abuse and GET /abuse/status give, with no conversion between.
+type AbuseStanding = sidecar.AbuseStanding
 
 const (
-	AbuseStandingProbation  AbuseStanding = "probation"
-	AbuseStandingStandard   AbuseStanding = "standard"
-	AbuseStandingTrusted    AbuseStanding = "trusted"
-	AbuseStandingRestricted AbuseStanding = "restricted"
-	AbuseStandingSuspended  AbuseStanding = "suspended"
+	AbuseStandingProbation  = sidecar.AbuseStandingProbation
+	AbuseStandingStandard   = sidecar.AbuseStandingStandard
+	AbuseStandingTrusted    = sidecar.AbuseStandingTrusted
+	AbuseStandingRestricted = sidecar.AbuseStandingRestricted
+	AbuseStandingSuspended  = sidecar.AbuseStandingSuspended
 )
 
 // A network's tier for §21.8's clocks. Takes NetworkTier's values, which QUOTA-M1-01
