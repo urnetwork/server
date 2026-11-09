@@ -66,18 +66,11 @@ type NetworkLabelHolder interface {
 	HoldsNameInTx(ctx context.Context, query server.PgCanQuery, name string) bool
 }
 
-// The holder before dns_label exists. RESOLUTIONS plan-DNS-labels-before-m5
-// moved the table from MG5 to MG2, which no binary links yet, so no label or
-// alias exists and no name is held. The task that lands dns_label's model
-// replaces defaultNetworkLabelHolder with a lookup of the table.
-type noNetworkLabelHolder struct{}
-
-func (noNetworkLabelHolder) HoldsNameInTx(ctx context.Context, query server.PgCanQuery, name string) bool {
-	return false
-}
-
+// dns_label itself (DNS-M5-10's DnsNameHeldInTx). RESOLUTIONS
+// plan-DNS-labels-before-m5 moved the table from MG5 to MG2: a binary that does
+// not link MG2 has no label or alias, so it holds no name.
 func defaultNetworkLabelHolder() NetworkLabelHolder {
-	return noNetworkLabelHolder{}
+	return dnsLabelHolder{}
 }
 
 // §12.5's label rules a renamed network's name meets beyond ValidateNetworkName,
