@@ -234,7 +234,7 @@ rows:
     gate: M1
     task: TEST-M1-09
     tests:
-      - {repo: server, package: ./sidecart3, names: [TestInlinePathFailsAPlantedPostgresRead, TestInlinePathFailsOneRedisCallOverItsRow], tags: "sidecar_testhooks,sidecar_pending"}
+      - {repo: server, package: ./sidecart3, names: [TestInlinePathFailsAPlantedPostgresRead, TestInlinePathFailsOneRedisCallOverItsRow], tags: "sidecar_testhooks,sidecar_pending", stores: true}
   - id: I-13
     gate: M1
     task: TEST-M1-06
@@ -242,7 +242,9 @@ rows:
       - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
       - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
   - {id: I-14, gate: M5}
-  - {id: I-15, gate: M1}
+  - id: I-15
+    gate: M2
+    schedules: [FS-14, FS-15, FS-16, FS-18, FS-20, FS-22, FS-23, FS-24, FS-62, "FS-72 (format-1)", "FS-82 (statement)", FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-117, FS-124, "FS-124 (forged)"]
   - id: I-16
     gate: M2
     schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
