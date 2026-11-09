@@ -89,6 +89,8 @@ func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
 	}
 	netSettings := *settings.Net
 	netSettings.RefusePlatformFakes = refusePlatformFakes
+	// the oracle's read access to server's tables (store_view.go)
+	netSettings.Postgres = PostgresReader()
 	netSettings.Engines = func(ctx context.Context, net *sidecartest.Net) (*sidecar.ServiceHost, func(), error) {
 		return newHost(ctx, t, net, settings)
 	}
