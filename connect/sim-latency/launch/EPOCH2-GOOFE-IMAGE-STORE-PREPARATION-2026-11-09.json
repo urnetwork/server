@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "status": "PRIVATE_COMPATIBLE_ENGINE_RUNNING_FINAL_IMAGE_LOAD_IN_PROGRESS",
+  "status": "PRIVATE_COMPATIBLE_ENGINE_RUNNING_EXACT_CANDIDATE_IMAGE_ID_VERIFIED",
   "observed_difference": "Sille uses overlay2 image IDs; Goofe's existing Docker engine uses the containerd snapshotter and exposes an OCI manifest digest as its image ID.",
   "native_proof": {
     "source_product_image_id": "sha256:8fb0060994004eb42345b3f97582c044599f22f17ee39e0119c01afbccb01017",
@@ -25,7 +25,7 @@
     "existing_primary_postgres_redis_observation": "Both remained healthy/up for six days after private-engine start",
     "enabled_at_boot": false
   },
-  "final_instrument_image_transfer": {"expected_exact_id": "sha256:2693969b85b0434705fce665f2fc0dbf98c4b1dc803f443b1330f58e398591aa", "load_completed": false, "exact_id_verified": false},
+  "instrument_image_transfer": {"expected_exact_id": "sha256:2693969b85b0434705fce665f2fc0dbf98c4b1dc803f443b1330f58e398591aa", "load_completed": true, "exact_id_verified": true, "verified_at": "2026-11-09T16:07:13Z", "final_epoch2_release": false, "qualification_note": "This candidate passed native70 and both mechanical test attestations, but its host qualification refused the wrong fixture paths. A distinct corrected source-build attempt is in progress; no final release or grading admission is claimed."},
   "runtime_qualified": false,
   "grading_activated": false,
   "production_database_or_vault_main_copied": false

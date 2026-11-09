@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "status": "FIX_TESTED_PUSHED_INSTALLED_BOUNDED_REPAIR_RUNNING",
+  "code_commit": "4b06ef94de50555f6923ed20a288aa8a207a3735",
+  "root_cause": "Instrument request construction derived config/local and vault/local from repositoriesRoot, unlike reviewed product builds that use configured isolated leaves. The actual host configuration binds a separately provisioned isolated runtime, so prospectiveSourceHostConfig correctly rejected the differing paths before publishing a prospective config.",
+  "fix": "The instrument request uses Settings.ConfigLocalDirectory and Settings.VaultLocalDirectory and validates the complete authenticated request before broker invocation. Missing configured leaves refuse; no fallback to checkout-local or main secrets is allowed.",
+  "causal_test": {"old_behavior": "Both relocated-host-admission and absent-configured-leaves controls fail deterministically", "old_log_sha256": "a005e4c2c6e7b74a078fbdc0dc8bb6a636c22ab7a0fc2261da578a9d562d3d02", "fixed_executions": 6, "fixed_log_sha256": "ee85bd753516eb28a97439d5408cd0042e9bf138d4e08203e49be5e1753eef95"},
+  "adjacent": {"passed": 101, "failed": 0, "skipped": 3, "skip_scope": "Explicitly opt-in Docker integration roots, not claimed as passed", "log_sha256": "bf71eccee640845fab7895279d6632a1f7b80d2e69688b1e68a05bb030beca87"},
+  "race": {"passed": 2, "failed": 0, "skipped": 0, "log_sha256": "80101d8de1b88424440348433275294e10673af2f52d9a26ff9e6ee7d4b2991c"},
+  "prior_attempt": {"owner": "23d2c1a842ff4d9c25e61ae527829530f7bac74843b88d8598617a70302adae6", "preserved": true, "image": "sha256:2693969b85b0434705fce665f2fc0dbf98c4b1dc803f443b1330f58e398591aa", "native_required_tests_passed": 70, "suite_sha256": "cda3e6e1436439733aa4090ff1ee5dd142231f5ef6fef3c1dbe06730e335295f", "qwen_test_attestation_passed": true, "gemma_test_attestation_passed": true, "host_qualified": false},
+  "repair": {"release": "/usr/local/libexec/urnetwork/competition-local-fixtures-20261109-v1", "state_directory": "/var/lib/urnetwork/competition-reviewed-builds-local-fixtures-20261109-v1", "unit": "urnetwork-epoch2-source-step-20261109-v9.service", "observed_main_pid": 690648, "timeout_minutes": 20, "build_wrapper_sha256": "7d4a4de67fedd0c0ee8f5f4d9b2ad5f2a4dc6f82ea8e0ada1945ec1c39274133", "qualification_wrapper_sha256": "d3d77e1adadb19f32aa7fe441088c922bffd78474db6d1a62d8bf211993ba51e", "new_journal_reason": "Corrected authenticated fixture inputs require a distinct source-build reservation. Prior reservations, failures, test/model observations and deadlines are untouched. This is source preparation, not a submission retry or changed scoring deadline."},
+  "winner_honesty_review_changed": false,
+  "scoring_policy_or_submission_deadline_changed": false,
+  "source_promoted": false,
+  "epoch2_open": false,
+  "grading_enabled": false
+}
