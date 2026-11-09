@@ -222,7 +222,7 @@ func (self *strictExpBearer) proof() func(r *http.Request) {
 	self.jti += 1
 	jti := fmt.Sprintf("jti-%d", self.jti)
 	return func(r *http.Request) {
-		url := "https://" + r.Host + r.URL.Path
+		url := session.Testing_DpopApiUrl(r.URL.Path)
 		r.Header.Set(session.DpopHeader, session.Testing_SignDpopProof(self.privateKey, r.Method, url, self.token, jti, server.NowUtc()))
 	}
 }
@@ -285,7 +285,7 @@ func TestACopiedStrictExpTokenRenewsAndMintsNothing(t *testing.T) {
 		_, olderKey, err := ed25519.GenerateKey(rand.Reader)
 		server.Raise(err)
 		older := func(r *http.Request) {
-			url := "https://" + r.Host + r.URL.Path
+			url := session.Testing_DpopApiUrl(r.URL.Path)
 			r.Header.Set(session.DpopHeader, session.Testing_SignDpopProof(olderKey, r.Method, url, bearer.token, "jti-older", server.NowUtc()))
 		}
 		replayed := bearer.proof()

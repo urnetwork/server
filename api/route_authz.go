@@ -473,12 +473,18 @@ func refuseClientAdmin(ctx context.Context, routeKey string, byJwt *session.ByJw
 	return false
 }
 
-// Whether the request's proof shows the strict_exp bearer holds its ClientKey.
-// A proof spends its jti here, whatever the gate then decides.
+// Whether the request's proof shows the strict_exp bearer holds its ClientKey:
+// its newest bound key, the proof naming the request's method and its path at
+// the api's public origin. A proof spends its jti here, whatever the gate then
+// decides.
 func strictExpProofHolds(r *http.Request, bearerToken string, byJwt *session.ByJwt) bool {
 	boundKey, err := clientProofPublicKey(r.Context(), *byJwt.ClientId)
 	if err == nil {
-		err = session.VerifyDpopProof(r.Context(), r, bearerToken, *byJwt.ClientId, boundKey)
+		var dpopRequest *session.DpopRequest
+		dpopRequest, err = session.NewApiDpopRequest(r, bearerToken, *byJwt.ClientId, boundKey)
+		if err == nil {
+			err = session.VerifyDpopProof(r.Context(), dpopRequest)
+		}
 	}
 	if err != nil {
 		if glog.V(1) {

@@ -35,9 +35,16 @@ func newDpopTestKey(t testing.TB) (ed25519.PublicKey, ed25519.PrivateKey) {
 	return publicKey, privateKey
 }
 
-func newDpopTestRequest(method string, target string) *http.Request {
-	r := httptest.NewRequest(method, target, nil)
-	return r
+// The check of a proof of a GET of dpopTestUrl by key.
+func newDpopTestCheck(proof string, key ed25519.PublicKey) *DpopRequest {
+	return &DpopRequest{
+		Proof:    proof,
+		Method:   http.MethodGet,
+		Uri:      dpopTestUrl,
+		Token:    dpopTestToken,
+		Key:      key,
+		ReplayId: server.NewId(),
+	}
 }
 
 func dpopTestSettings() *DpopProofSettings {
@@ -62,7 +69,14 @@ func TestDpopProofVerifies(t *testing.T) {
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	proof := Testing_SignDpopProof(privateKey, http.MethodGet, dpopTestUrl, dpopTestToken, "jti-1", now)
 
-	jti, err := verifyDpopProof(proof, newDpopTestRequest(http.MethodGet, dpopTestUrl), dpopTestToken, publicKey, now, dpopTestSettings())
+	jti, err := verifyDpopProof(newDpopTestCheck(proof, publicKey), now, dpopTestSettings())
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, jti, "jti-1")
+
+	// and by the key's thumbprint, as an admin token's cnf.jkt names it
+	check := newDpopTestCheck(proof, nil)
+	check.KeyThumbprint = DpopKeyThumbprint(publicKey)
+	jti, err = verifyDpopProof(check, now, dpopTestSettings())
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, jti, "jti-1")
 }
@@ -80,8 +94,7 @@ func TestDpopProofHtuIgnoresQueryAndNormalizesTheHost(t *testing.T) {
 		"https://api.example:443/auth/refresh",
 	} {
 		proof := Testing_SignDpopProof(privateKey, http.MethodGet, htu, dpopTestToken, "jti-1", now)
-		r := newDpopTestRequest(http.MethodGet, "https://api.example/auth/refresh?other=2")
-		if _, err := verifyDpopProof(proof, r, dpopTestToken, publicKey, now, dpopTestSettings()); err != nil {
+		if _, err := verifyDpopProof(newDpopTestCheck(proof, publicKey), now, dpopTestSettings()); err != nil {
 			t.Errorf("htu %s: %s", htu, err)
 		}
 	}
@@ -92,7 +105,6 @@ func TestDpopProofHtuIgnoresQueryAndNormalizesTheHost(t *testing.T) {
 func TestDpopProofBindsTheRequest(t *testing.T) {
 	publicKey, privateKey := newDpopTestKey(t)
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	request := func() *http.Request { return newDpopTestRequest(http.MethodGet, dpopTestUrl) }
 
 	for _, c := range []struct {
 		name   string
@@ -106,38 +118,80 @@ func TestDpopProofBindsTheRequest(t *testing.T) {
 		{name: "another host", method: http.MethodGet, htu: "https://other.example/auth/refresh", token: dpopTestToken, iat: now},
 		{name: "plain http", method: http.MethodGet, htu: "http://api.example/auth/refresh", token: dpopTestToken, iat: now},
 		{name: "no scheme", method: http.MethodGet, htu: "/auth/refresh", token: dpopTestToken, iat: now},
+		{name: "credentials", method: http.MethodGet, htu: "https://user@api.example/auth/refresh", token: dpopTestToken, iat: now},
 		{name: "another bearer", method: http.MethodGet, htu: dpopTestUrl, token: "another.bearer.token", iat: now},
 		{name: "too old", method: http.MethodGet, htu: dpopTestUrl, token: dpopTestToken, iat: now.Add(-61 * time.Second)},
 		{name: "too new", method: http.MethodGet, htu: dpopTestUrl, token: dpopTestToken, iat: now.Add(61 * time.Second)},
 	} {
 		proof := Testing_SignDpopProof(privateKey, c.method, c.htu, c.token, "jti-1", c.iat)
-		_, err := verifyDpopProof(proof, request(), dpopTestToken, publicKey, now, dpopTestSettings())
+		_, err := verifyDpopProof(newDpopTestCheck(proof, publicKey), now, dpopTestSettings())
 		requireDpopRefused(t, c.name, err)
 	}
 
-	// the edges of the window are inside it
+	// the edges of the window, ±60 s on a fixed clock, are inside it
 	for _, iat := range []time.Time{now.Add(-60 * time.Second), now.Add(60 * time.Second)} {
 		proof := Testing_SignDpopProof(privateKey, http.MethodGet, dpopTestUrl, dpopTestToken, "jti-1", iat)
-		if _, err := verifyDpopProof(proof, request(), dpopTestToken, publicKey, now, dpopTestSettings()); err != nil {
+		if _, err := verifyDpopProof(newDpopTestCheck(proof, publicKey), now, dpopTestSettings()); err != nil {
 			t.Errorf("iat %s: %s", iat, err)
 		}
 	}
 }
 
-// A local stack may name http, and nothing else may.
-func TestDpopProofHttpIsLocalOnly(t *testing.T) {
+// htu is compared with the origin api is configured with, never with the Host
+// the request names or a forwarded header: a proof a client made for another
+// origin, which an attacker relays here naming that origin as its Host, proves
+// nothing. Pure: WARP_DOMAIN is set for the test.
+func TestDpopApiRequestComparesTheConfiguredOrigin(t *testing.T) {
+	t.Setenv("WARP_DOMAIN", "dpop.example")
 	publicKey, privateKey := newDpopTestKey(t)
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	proof := Testing_SignDpopProof(privateKey, http.MethodGet, "http://api.example:80/auth/refresh", dpopTestToken, "jti-1", now)
-	r := newDpopTestRequest(http.MethodGet, dpopTestUrl)
+	clientId := server.NewId()
 
-	_, err := verifyDpopProof(proof, r, dpopTestToken, publicKey, now, dpopTestSettings())
+	request := func(proof string, edit func(r *http.Request)) *DpopRequest {
+		r := httptest.NewRequest(http.MethodGet, "https://elsewhere.example/auth/refresh?after=2", nil)
+		r.Header.Set(DpopHeader, proof)
+		if edit != nil {
+			edit(r)
+		}
+		dpopRequest, err := NewApiDpopRequest(r, dpopTestToken, clientId, publicKey)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, dpopRequest.Uri, "https://api.dpop.example/auth/refresh")
+		connect.AssertEqual(t, dpopRequest.ReplayId, clientId)
+		return dpopRequest
+	}
+
+	good := Testing_SignDpopProof(privateKey, http.MethodGet, "https://api.dpop.example/auth/refresh", dpopTestToken, "jti-1", now)
+	_, err := verifyDpopProof(request(good, nil), now, dpopTestSettings())
+	connect.AssertEqual(t, err, nil)
+
+	elsewhere := Testing_SignDpopProof(privateKey, http.MethodGet, "https://elsewhere.example/auth/refresh", dpopTestToken, "jti-1", now)
+	for name, edit := range map[string]func(r *http.Request){
+		"its own host":       nil,
+		"a forwarded host":   func(r *http.Request) { r.Header.Set("X-Forwarded-Host", "elsewhere.example") },
+		"a forwarded header": func(r *http.Request) { r.Header.Set("Forwarded", "host=elsewhere.example;proto=https") },
+	} {
+		_, err := verifyDpopProof(request(elsewhere, edit), now, dpopTestSettings())
+		requireDpopRefused(t, name, err)
+	}
+
+	// http is never named, a local stack included
+	plain := Testing_SignDpopProof(privateKey, http.MethodGet, "http://api.dpop.example/auth/refresh", dpopTestToken, "jti-1", now)
+	_, err = verifyDpopProof(request(plain, nil), now, dpopTestSettings())
 	requireDpopRefused(t, "http", err)
 
-	settings := dpopTestSettings()
-	settings.AllowHttp = true
-	_, err = verifyDpopProof(proof, r, dpopTestToken, publicKey, now, settings)
+	// with no configured origin there is nothing to check against, so nothing passes
+	t.Setenv("WARP_DOMAIN", "")
+	r := httptest.NewRequest(http.MethodGet, "https://api.dpop.example/auth/refresh", nil)
+	r.Header.Set(DpopHeader, good)
+	_, err = NewApiDpopRequest(r, dpopTestToken, clientId, publicKey)
+	requireDpopRefused(t, "no origin", err)
+}
+
+// RFC 8037 appendix A.3's thumbprint of its Ed25519 example key.
+func TestDpopKeyThumbprintIsRfc7638(t *testing.T) {
+	x, err := base64.RawURLEncoding.DecodeString("11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo")
 	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, DpopKeyThumbprint(ed25519.PublicKey(x)), "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k")
 }
 
 // Only the client's newest bound key counts: a proof by any other, an older
@@ -145,12 +199,11 @@ func TestDpopProofHttpIsLocalOnly(t *testing.T) {
 // and was signed by another.
 func TestDpopProofNeedsTheBoundKey(t *testing.T) {
 	boundKey, boundPrivateKey := newDpopTestKey(t)
-	_, olderPrivateKey := newDpopTestKey(t)
+	olderKey, olderPrivateKey := newDpopTestKey(t)
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	r := newDpopTestRequest(http.MethodGet, dpopTestUrl)
 
 	older := Testing_SignDpopProof(olderPrivateKey, http.MethodGet, dpopTestUrl, dpopTestToken, "jti-1", now)
-	_, err := verifyDpopProof(older, r, dpopTestToken, boundKey, now, dpopTestSettings())
+	_, err := verifyDpopProof(newDpopTestCheck(older, boundKey), now, dpopTestSettings())
 	requireDpopRefused(t, "older generation's key", err)
 
 	// the older key's signature under a header that names the bound key
@@ -158,8 +211,24 @@ func TestDpopProofNeedsTheBoundKey(t *testing.T) {
 	goodParts := strings.Split(good, ".")
 	olderParts := strings.Split(older, ".")
 	forged := goodParts[0] + "." + goodParts[1] + "." + olderParts[2]
-	_, err = verifyDpopProof(forged, r, dpopTestToken, boundKey, now, dpopTestSettings())
+	_, err = verifyDpopProof(newDpopTestCheck(forged, boundKey), now, dpopTestSettings())
 	requireDpopRefused(t, "forged signature", err)
+
+	// by thumbprint, too, only the named key counts
+	check := newDpopTestCheck(good, nil)
+	check.KeyThumbprint = DpopKeyThumbprint(olderKey)
+	_, err = verifyDpopProof(check, now, dpopTestSettings())
+	requireDpopRefused(t, "another key's thumbprint", err)
+
+	// a check names exactly one key
+	check = newDpopTestCheck(good, boundKey)
+	check.KeyThumbprint = DpopKeyThumbprint(boundKey)
+	_, err = verifyDpopProof(check, now, dpopTestSettings())
+	requireDpopRefused(t, "two keys", err)
+	_, err = verifyDpopProof(newDpopTestCheck(good, nil), now, dpopTestSettings())
+	requireDpopRefused(t, "no key", err)
+	_, err = verifyDpopProof(newDpopTestCheck(good, boundKey[:16]), now, dpopTestSettings())
+	requireDpopRefused(t, "a short key", err)
 }
 
 // A proof with a header and claims a test sets.
@@ -189,11 +258,10 @@ func signDpopHeaderProof(t testing.TB, privateKey ed25519.PrivateKey, edit func(
 func TestDpopProofHeaderAndClaimsAreExact(t *testing.T) {
 	publicKey, privateKey := newDpopTestKey(t)
 	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	r := newDpopTestRequest(http.MethodGet, dpopTestUrl)
 
 	// the control: an unedited proof verifies
 	proof := signDpopHeaderProof(t, privateKey, func(token *gojwt.Token, claims *dpopProofClaims) {}, now)
-	_, err := verifyDpopProof(proof, r, dpopTestToken, publicKey, now, dpopTestSettings())
+	_, err := verifyDpopProof(newDpopTestCheck(proof, publicKey), now, dpopTestSettings())
 	connect.AssertEqual(t, err, nil)
 
 	for name, edit := range map[string]func(token *gojwt.Token, claims *dpopProofClaims){
@@ -224,7 +292,7 @@ func TestDpopProofHeaderAndClaimsAreExact(t *testing.T) {
 		"a lowercase": func(token *gojwt.Token, claims *dpopProofClaims) { claims.Htm = "get" },
 	} {
 		proof := signDpopHeaderProof(t, privateKey, edit, now)
-		_, err := verifyDpopProof(proof, r, dpopTestToken, publicKey, now, dpopTestSettings())
+		_, err := verifyDpopProof(newDpopTestCheck(proof, publicKey), now, dpopTestSettings())
 		requireDpopRefused(t, name, err)
 	}
 
@@ -234,38 +302,43 @@ func TestDpopProofHeaderAndClaimsAreExact(t *testing.T) {
 	hmac.Header["typ"] = dpopType
 	signed, err := hmac.SignedString([]byte(publicKey))
 	connect.AssertEqual(t, err, nil)
-	_, err = verifyDpopProof(signed, r, dpopTestToken, publicKey, now, dpopTestSettings())
+	_, err = verifyDpopProof(newDpopTestCheck(signed, publicKey), now, dpopTestSettings())
 	requireDpopRefused(t, "hmac", err)
 
 	none := gojwt.NewWithClaims(gojwt.SigningMethodNone, gojwt.MapClaims{"jti": "jti-1"})
 	none.Header["typ"] = dpopType
 	signed, err = none.SignedString(gojwt.UnsafeAllowNoneSignatureType)
 	connect.AssertEqual(t, err, nil)
-	_, err = verifyDpopProof(signed, r, dpopTestToken, publicKey, now, dpopTestSettings())
+	_, err = verifyDpopProof(newDpopTestCheck(signed, publicKey), now, dpopTestSettings())
 	requireDpopRefused(t, "none", err)
 
-	_, err = verifyDpopProof("not a proof", r, dpopTestToken, publicKey, now, dpopTestSettings())
+	_, err = verifyDpopProof(newDpopTestCheck("not a proof", publicKey), now, dpopTestSettings())
 	requireDpopRefused(t, "not a proof", err)
 }
 
-// The request carries one proof, and a client with no bound key is refused
+// An api request carries one proof, and a client with no bound key is refused
 // without a look at it.
 func TestVerifyDpopProofNeedsOneProofAndABoundKey(t *testing.T) {
 	ctx := context.Background()
 	publicKey, privateKey := newDpopTestKey(t)
 	clientId := server.NewId()
-	proof := Testing_SignDpopProof(privateKey, http.MethodGet, dpopTestUrl, dpopTestToken, "jti-1", server.NowUtc())
+	proof := Testing_SignDpopProof(privateKey, http.MethodGet, Testing_DpopApiUrl("/auth/refresh"), dpopTestToken, "jti-1", server.NowUtc())
 
-	r := newDpopTestRequest(http.MethodGet, dpopTestUrl)
-	requireDpopRefused(t, "no proof", VerifyDpopProof(ctx, r, dpopTestToken, clientId, publicKey))
+	r := httptest.NewRequest(http.MethodGet, "/auth/refresh", nil)
+	_, err := NewApiDpopRequest(r, dpopTestToken, clientId, publicKey)
+	requireDpopRefused(t, "no proof", err)
 
 	r.Header.Add(DpopHeader, proof)
 	r.Header.Add(DpopHeader, proof)
-	requireDpopRefused(t, "two proofs", VerifyDpopProof(ctx, r, dpopTestToken, clientId, publicKey))
+	_, err = NewApiDpopRequest(r, dpopTestToken, clientId, publicKey)
+	requireDpopRefused(t, "two proofs", err)
 
-	r = newDpopTestRequest(http.MethodGet, dpopTestUrl)
+	r = httptest.NewRequest(http.MethodGet, "/auth/refresh", nil)
 	r.Header.Set(DpopHeader, proof)
-	requireDpopRefused(t, "no bound key", VerifyDpopProof(ctx, r, dpopTestToken, clientId, nil))
+	dpopRequest, err := NewApiDpopRequest(r, dpopTestToken, clientId, nil)
+	connect.AssertEqual(t, err, nil)
+	requireDpopRefused(t, "no bound key", VerifyDpopProof(ctx, dpopRequest))
+	requireDpopRefused(t, "no check", VerifyDpopProof(ctx, nil))
 }
 
 // A jti is good once. A proof that fails spends nothing, so a bad proof cannot
@@ -277,26 +350,26 @@ func TestVerifyDpopProofRefusesAReplay(t *testing.T) {
 		clientId := server.NewId()
 		now := server.NowUtc()
 
-		request := func(proof string) *http.Request {
-			r := newDpopTestRequest(http.MethodGet, dpopTestUrl)
-			r.Header.Set(DpopHeader, proof)
-			return r
+		request := func(proof string, replayId server.Id) *DpopRequest {
+			check := newDpopTestCheck(proof, publicKey)
+			check.ReplayId = replayId
+			return check
 		}
 
 		// another bearer's proof with this jti fails before it is spent
 		wrongBearer := Testing_SignDpopProof(privateKey, http.MethodGet, dpopTestUrl, "another.bearer.token", "jti-1", now)
-		requireDpopRefused(t, "wrong bearer", VerifyDpopProof(ctx, request(wrongBearer), dpopTestToken, clientId, publicKey))
+		requireDpopRefused(t, "wrong bearer", VerifyDpopProof(ctx, request(wrongBearer, clientId)))
 
 		proof := Testing_SignDpopProof(privateKey, http.MethodGet, dpopTestUrl, dpopTestToken, "jti-1", now)
-		connect.AssertEqual(t, VerifyDpopProof(ctx, request(proof), dpopTestToken, clientId, publicKey), nil)
-		requireDpopRefused(t, "replay", VerifyDpopProof(ctx, request(proof), dpopTestToken, clientId, publicKey))
+		connect.AssertEqual(t, VerifyDpopProof(ctx, request(proof, clientId)), nil)
+		requireDpopRefused(t, "replay", VerifyDpopProof(ctx, request(proof, clientId)))
 
 		// a new jti is a new proof
 		next := Testing_SignDpopProof(privateKey, http.MethodGet, dpopTestUrl, dpopTestToken, "jti-2", now)
-		connect.AssertEqual(t, VerifyDpopProof(ctx, request(next), dpopTestToken, clientId, publicKey), nil)
+		connect.AssertEqual(t, VerifyDpopProof(ctx, request(next, clientId)), nil)
 
 		// the same jti is another client's to use
-		connect.AssertEqual(t, VerifyDpopProof(ctx, request(proof), dpopTestToken, server.NewId(), publicKey), nil)
+		connect.AssertEqual(t, VerifyDpopProof(ctx, request(proof, server.NewId())), nil)
 
 		// the replay key is §7.4's, and it holds for §7.4's ttl
 		var ttl time.Duration

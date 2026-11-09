@@ -490,7 +490,7 @@ func (self *strictExpProofFixture) proof(route *router.Route, key ed25519.Privat
 	self.jti += 1
 	jti := fmt.Sprintf("jti-%d", self.jti)
 	return func(r *http.Request) {
-		url := "https://" + r.Host + r.URL.Path
+		url := session.Testing_DpopApiUrl(r.URL.Path)
 		r.Header.Set(session.DpopHeader, session.Testing_SignDpopProof(key, r.Method, url, self.tokens.strictToken, jti, server.NowUtc()))
 	}
 }
