@@ -192,6 +192,8 @@ func registry() []specEndpoint {
 		{"GET", "/network/auth-keys", nil, rt(model.GetNetworkAuthKeysResult{})},
 		{"POST", "/network/auth-keys", rt(model.CreateAuthKeyArgs{}), rt(model.CreateAuthKeyResult{})},
 		{"POST", "/network/auth-key-revoke", rt(model.RevokeAuthKeyArgs{}), rt(model.RevokeAuthKeyResult{})},
+		{"POST", "/network/team-create", rt(model.CreateNetworkTeamArgs{}), rt(model.CreateNetworkTeamResult{})},
+		{"GET", "/network/members", nil, rt(model.GetNetworkMembersResult{})},
 		{"POST", "/acl/ack", rt(model.AclAckArgs{}), rt(model.AclAckResult{})},
 		{"POST", "/account/payout-wallet", rt(model.SetPayoutWalletArgs{}), rt(model.SetPayoutWalletResult{})},
 		{"GET", "/account/payout-wallet", nil, rt(controller.GetPayoutWalletResult{})},

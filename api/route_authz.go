@@ -314,6 +314,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/auth-keys":                        routeAccessNetwork,  // lists auth keys (Network until TEAM-M6-03's roles)
 	"POST /network/auth-keys":                       routeAccessNetwork,  // creates an auth key, which enrolls devices (escalation)
 	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
+	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
+	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5; owner-only until TEAM-M6-03's roles)
 	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
 	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
 	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds

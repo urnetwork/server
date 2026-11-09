@@ -76,6 +76,7 @@ var actionDisplayNames = map[string]string{
 	AccountActionGenerateSeedphrase:              "generating a seedphrase",
 	AccountActionRegenerateSeedphrase:            "regenerating a seedphrase",
 	AccountActionVerifyStorePurchase:             "verifying a store purchase",
+	AccountActionTeamCreate:                      "creating a team",
 	AccountActionExtenderActivateV4:              "activating an extender over IPv4",
 	AccountActionExtenderActivateV6:              "activating an extender over IPv6",
 	AccountActionExtenderActivateAddressV4:       "activating an extender from this address over IPv4",

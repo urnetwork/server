@@ -399,6 +399,13 @@ func RemoveNetworkWithStoreSnapshot(
 		// §17.16's shares go with either of their networks
 		if server.SidecarMg6Linked() {
 			removeNetworkBridgeSharesInTx(ctx, tx, networkId)
+			// §7.5's Team rows go with a team network, and the removed users'
+			// memberships in other teams and IdP identities with them (§2.8
+			// api-1, api-3)
+			removeNetworkTeamInTx(ctx, tx, networkId)
+			for userId := range userIds {
+				removeNetworkMembershipsOfUserInTx(ctx, tx, userId)
+			}
 		}
 		// §15.15's mail rows: mail_network and direct MX go, host keys retire
 		// and age out in 30 days

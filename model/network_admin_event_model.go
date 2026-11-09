@@ -71,6 +71,8 @@ const (
 	AdminEventTargetNetwork = "network"
 	AdminEventTargetAuthKey = "auth_key"
 	AdminEventTargetApiKey  = "api_key"
+	// a team network's membership (§7.5), by member_id
+	AdminEventTargetMember = "member"
 )
 
 // The actions. Each is a fixed word, never built from input.
@@ -80,6 +82,9 @@ const (
 	AdminEventActionAuthKeyRevoke = "auth_key.revoke"
 	AdminEventActionApiKeyCreate  = "api_key.create"
 	AdminEventActionApiKeyDelete  = "api_key.delete"
+	// POST /network/team-create, in the new team's own chain
+	AdminEventActionTeamCreate = "team.create"
+	AdminEventActionMemberAdd  = "member.add"
 )
 
 // The results.

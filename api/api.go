@@ -409,6 +409,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/network/auth-keys", handlers.GetNetworkAuthKeys),
 		router.NewRoute("POST", "/network/auth-keys", handlers.CreateNetworkAuthKey),
 		router.NewRoute("POST", "/network/auth-key-revoke", handlers.RevokeNetworkAuthKey),
+		// §7.5's team networks and their members (TEAM-M6-01)
+		router.NewRoute("POST", "/network/team-create", handlers.CreateNetworkTeam),
+		router.NewRoute("GET", "/network/members", handlers.GetNetworkMembers),
 		// §5.15's sidecar identities: the binding log and its lookups (CORE-M1-06)
 		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
 		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),
