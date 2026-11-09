@@ -15,8 +15,14 @@ package server
 //     write (owner decision 145), says whether its build passed the settle suite (SettlePassed), and
 //     feeds the sentinel readiness §19.4's evs and gkm blocks gate on.
 //
-// The clusters are LAN-only, with no presigned URLs (D-OPS-4). No secret is in code or fixtures:
-// credentials come only from vault's file-clusters-<service>.yml (plan-OPS-block-shapes #7).
+// The clusters are LAN-only, with no presigned URLs (D-OPS-4), which TestServerCallsNoPresignedMethod
+// holds for all of server. No secret is in code or fixtures: credentials come only from vault's
+// file-clusters-<service>.yml (plan-OPS-small-readings #7). Each names the block's own MinIO user on
+// each cluster it reaches, which xops makes with the policy templates/file-clusters/policy-<service>.json.j2
+// renders for that cluster (OPS-M2-04, xops's FILE-CLUSTERS.md): api reaches only proj/, projrows/, rev/
+// and hold/ on the first cluster, gkm the metadata clusters, evs and taskworker every cluster, and evs
+// deletes nothing on the segment cluster until §11.13's purge turns that on. Every such user holds
+// admin:ServerInfo, which admin info below needs.
 
 import (
 	"bytes"
@@ -40,14 +46,16 @@ import (
 	"github.com/urnetwork/sidecar"
 )
 
-// The vault file each block reads, by service (plan-OPS-block-shapes #7):
+// The vault file each block reads, by service, one entry per cluster the block reaches
+// (plan-OPS-small-readings #7). It is a basename, since a block's secret_files mount by basename and a
+// block mounts only its own; xops's playbook reads the same file to make the users it names:
 //
 //	clusters:
 //	  meta-1:
 //	    kind: metadata        # or segment
 //	    first: true           # the one metadata cluster holding place/, proj/, rev/ and hold/
 //	    endpoints: [<host>:<port>, ...]
-//	    access_key: <this block's MinIO user>
+//	    access_key: <this block's MinIO user on this cluster>
 //	    secret_key: <its secret>
 //	    bucket: <the cluster's bucket>
 //	    tls: false
