@@ -143,8 +143,8 @@ var _ sidecar.HttpEngine = (*Host)(nil)
 
 // The engine on host, with the segment route's parts built here: the storage gate and usage producer over
 // host.Quota, and the HDD share over host.Redis for the segment cluster. host needs Blobs, Metrics and Budget;
-// what it lacks of Quota and deps' AuthState and receipt keys leaves the host not ready, never an error, so a
-// block serves /status and says why. ctx bounds everything built here and should outlive the drain: RunHost
+// a missing Quota, segment cluster, deps' AuthState or receipt keys leaves the host not ready, never an error, so
+// a block serves /status and says why. ctx bounds everything built here and should outlive the drain: RunHost
 // gives one that ends only at Close.
 func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (*Host, error) {
 	if host == nil || host.Blobs == nil {
@@ -173,8 +173,20 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	}
 	keys := deps.ReceiptKeys
 	if keys == nil {
+		// the block's own, from its vault
+		load := func() (*evsservice.ReceiptKeys, error) {
+			resource, err := server.Vault.SimpleResource(HostReceiptKeysFileName)
+			if err != nil {
+				return nil, err
+			}
+			data, err := resource.BytesE()
+			if err != nil {
+				return nil, err
+			}
+			return evsservice.ParseReceiptKeys(data, nil)
+		}
 		var err error
-		if keys, err = loadReceiptKeys(); err != nil {
+		if keys, err = load(); err != nil {
 			self.missing = append(self.missing, fmt.Sprintf("the receipt keys in %s (%v)", HostReceiptKeysFileName, err))
 		}
 	}
@@ -220,19 +232,6 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		glog.Errorf("[evs]not ready without %s\n", strings.Join(self.missing, "; "))
 	}
 	return self, nil
-}
-
-// The receipt keys from the block's vault.
-func loadReceiptKeys() (*evsservice.ReceiptKeys, error) {
-	resource, err := server.Vault.SimpleResource(HostReceiptKeysFileName)
-	if err != nil {
-		return nil, err
-	}
-	data, err := resource.BytesE()
-	if err != nil {
-		return nil, err
-	}
-	return evsservice.ParseReceiptKeys(data, nil)
 }
 
 // The engine, for a test that drives its parts.

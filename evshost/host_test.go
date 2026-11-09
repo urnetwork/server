@@ -3,6 +3,7 @@ package evshost
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -175,6 +176,30 @@ func TestHostNotReadyWithoutEachSeam(t *testing.T) {
 		if recorder.Code != http.StatusUnauthorized {
 			t.Errorf("%s: an upload with no token answered %d", c.name, recorder.Code)
 		}
+	}
+}
+
+// A block's receipt keys come from its vault's file, as the segment route's MAC keys (§11.13's keys row).
+func TestHostReadsItsReceiptKeysFromItsVault(t *testing.T) {
+	vault := filepath.Join(t.TempDir(), "vault")
+	if err := os.MkdirAll(vault, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyText := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0x5a}, 32))
+	start := sidecartest.DefaultClockStart()
+	file := fmt.Sprintf(`{"keys": [{"key_id": 1, "key": %q, "issue_from_ms": %d}]}`, keyText, start.Add(-time.Hour).UnixMilli())
+	if err := os.WriteFile(filepath.Join(vault, HostReceiptKeysFileName), []byte(file), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("WARP_VAULT_HOME", vault)
+	evsHost := newHostTestHost(t, func(host *sidecar.ServiceHost, deps *HostDeps) {
+		deps.ReceiptKeys = nil
+	})
+	if missing := evsHost.Missing(); len(missing) != 0 {
+		t.Fatalf("missing %v with the keys in the vault", missing)
+	}
+	if !evsHost.Ready() {
+		t.Fatal("not ready with the keys in the vault")
 	}
 }
 
