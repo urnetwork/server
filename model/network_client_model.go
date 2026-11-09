@@ -4805,6 +4805,12 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 				}
 			})
 			server.Raise(session.RevokeRetiredClientRecordsInTx(ctx, tx, retired))
+			// and tombstones their push-token rows in the same write (§18.7's step
+			// 0): this reap deletes active children without §7.10's chain, and a
+			// child, a sidecar's client among them, may hold a token. A no-op
+			// without MG8.
+			_, tombstoneErr := TombstonePushTokenInTx(ctx, tx, batchClientIds)
+			server.Raise(tombstoneErr)
 		}, server.TxReadCommitted)
 		reapedClientIds = append(reapedClientIds, batchClientIds...)
 		reapedDeviceIds = append(reapedDeviceIds, batchDeviceIds...)
