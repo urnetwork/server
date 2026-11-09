@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/urnetwork/server"
@@ -139,4 +140,58 @@ func BackfillNetworkClientAclSubjects(ctx context.Context, afterClientId server.
 		})
 	})
 	return
+}
+
+// A client whose subject cannot be told yet: a child whose stored subject the
+// backfill has not filled and that is no sidecar's own client.
+var ErrNetworkClientAclSubjectUnresolved = errors.New("The client's subject is not known yet.")
+
+// The subject a client of networkId acts as (D-ACL-3), the way the backfill
+// resolves it: its stored subject; else itself when it is top-level or a
+// sidecar's own client, which its binding names; else unresolved, which the
+// caller refuses. A client the network does not have is an error too. The
+// token exchange names it ur_subject_client_id (§7.8).
+func GetNetworkClientAclSubject(ctx context.Context, networkId server.Id, clientId server.Id) (server.Id, error) {
+	subjectSql := `NULL::uuid`
+	if server.SidecarMg2Linked() {
+		subjectSql = `network_client.acl_subject_client_id`
+	}
+	boundSql := `false`
+	if server.SidecarMg1Linked() {
+		boundSql = `EXISTS (SELECT 1 FROM sidecar_identity_binding WHERE sidecar_identity_binding.client_id = network_client.client_id)`
+	}
+	var subject *server.Id
+	var sourceClientId *server.Id
+	bound := false
+	found := false
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT `+subjectSql+`, network_client.source_client_id, `+boundSql+`
+				FROM network_client
+				WHERE
+					network_client.client_id = $1 AND
+					network_client.network_id = $2
+			`,
+			clientId,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&subject, &sourceClientId, &bound))
+				found = true
+			}
+		})
+	})
+	switch {
+	case !found:
+		return server.Id{}, ErrNetworkClientAclSubjectUnresolved
+	case subject != nil:
+		return *subject, nil
+	case sourceClientId == nil || bound:
+		return clientId, nil
+	default:
+		return server.Id{}, ErrNetworkClientAclSubjectUnresolved
+	}
 }

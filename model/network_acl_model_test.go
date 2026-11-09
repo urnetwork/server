@@ -443,3 +443,52 @@ func TestBackfillNetworkClientAclSubjects(t *testing.T) {
 		}
 	})
 }
+
+// The subject the token exchange names (GetNetworkClientAclSubject): a stored
+// subject as it is; with none, a top-level client and a sidecar's own client,
+// which its binding names, are their own; a child with none waits for the
+// backfill and is unresolved, as is a client of another network or none.
+func TestGetNetworkClientAclSubject(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		device := server.NewId()
+		window := server.NewId()
+		sidecar := server.NewId()
+		filled := server.NewId()
+		server.Tx(ctx, func(tx server.PgTx) {
+			insert := func(clientId server.Id, sourceClientId *server.Id) {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, device_id, source_client_id, active) VALUES ($1, $2, $3, $4, true)`,
+					clientId, networkId, server.NewId(), sourceClientId))
+			}
+			insert(device, nil)
+			insert(window, &device)
+			insert(sidecar, &device)
+			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO network_client (client_id, network_id, device_id, source_client_id, acl_subject_client_id, active) VALUES ($1, $2, $3, $4, $5, true)`,
+				filled, networkId, server.NewId(), window, device))
+			server.RaisePgResult(tx.Exec(ctx, `
+				INSERT INTO sidecar_identity_binding (sidecar_id, generation, client_id, client_public_key, signatures, create_time)
+				VALUES ($1, 1, $2, $3, $4, $5)
+			`, server.NewId(), sidecar, make([]byte, 32), []byte{1}, server.NowUtc()))
+		})
+
+		for clientId, want := range map[server.Id]server.Id{device: device, sidecar: sidecar, filled: device} {
+			subject, err := GetNetworkClientAclSubject(ctx, networkId, clientId)
+			if err != nil || subject != want {
+				t.Errorf("%s: subject %s, err %v; want %s", clientId, subject, err, want)
+			}
+		}
+		for name, c := range map[string]struct {
+			networkId server.Id
+			clientId  server.Id
+		}{
+			"a child with no subject yet": {networkId: networkId, clientId: window},
+			"another network's client":    {networkId: server.NewId(), clientId: device},
+			"no client":                   {networkId: networkId, clientId: server.NewId()},
+		} {
+			if _, err := GetNetworkClientAclSubject(ctx, c.networkId, c.clientId); !errors.Is(err, ErrNetworkClientAclSubjectUnresolved) {
+				t.Errorf("%s: err %v", name, err)
+			}
+		}
+	})
+}

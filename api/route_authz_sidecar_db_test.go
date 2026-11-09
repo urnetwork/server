@@ -12,12 +12,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +32,7 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/oauth"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
@@ -371,6 +375,85 @@ func TestNonPreviewNetworkRefusesStrictExpThroughTheRoute(t *testing.T) {
 					t.Fatalf("%q: status = %d: %s", config, w.Code, w.Body.String())
 				}
 			}()
+		}
+	})
+}
+
+// §7.8's token exchange through the router, on a real sidecar client: its token
+// in the form and its key's proof buy a service token for evs with its client's
+// and sidecar's ids, with no bearer on the request; the same token as a bearer
+// is refused on the route, a copy without the proof buys nothing, and the api
+// audience is never issued. The issuer and its keys are the test's own.
+func TestStrictExpClientExchangesItsTokenThroughTheRoute(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(tb, ctx)
+		defer server.Testing_PushSidecarConfig(self.previewYaml())()
+		bearer := mintStrictExpBearer(t, self)
+
+		defer oauth.Testing_SetIssuer("https://auth.exchange.example")()
+		signerKeys := []*oauth.SignerKey{}
+		for _, set := range []oauth.SignerKeySet{oauth.SignerKeySetService, oauth.SignerKeySetMcp} {
+			privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+			server.Raise(err)
+			thumbprint, err := oauth.SignerKid(&privateKey.PublicKey)
+			server.Raise(err)
+			signerKeys = append(signerKeys, &oauth.SignerKey{Kid: set.KidPrefix() + thumbprint, Alg: "ES256", Set: set, PrivateKey: privateKey})
+		}
+		defer oauth.Testing_SetSignerKeys(signerKeys...)()
+
+		exchange := func(authorization string, resource string, proof bool) *httptest.ResponseRecorder {
+			form := url.Values{
+				"grant_type":         {oauth.ExchangeGrantType},
+				"subject_token":      {bearer.token},
+				"subject_token_type": {oauth.ExchangeSubjectTokenType},
+				"resource":           {resource},
+			}
+			r := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()))
+			r.RemoteAddr = "198.51.100.45:4000"
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if authorization != "" {
+				r.Header.Set("Authorization", authorization)
+			}
+			if proof {
+				bearer.jti += 1
+				jti := fmt.Sprintf("exchange-jti-%d", bearer.jti)
+				r.Header.Set(session.DpopHeader, session.Testing_SignDpopProof(bearer.privateKey, http.MethodPost, oauth.TokenEndpoint(), bearer.token, jti, server.NowUtc()))
+			}
+			w := httptest.NewRecorder()
+			self.router.ServeHTTP(w, r)
+			return w
+		}
+		evs := "https://evs." + server.RequireDomain()
+
+		w := exchange("", evs, true)
+		if w.Code != http.StatusOK {
+			t.Fatalf("exchange status = %d: %s", w.Code, w.Body.String())
+		}
+		result := &oauth.ExchangeResult{}
+		server.Raise(json.Unmarshal(w.Body.Bytes(), result))
+		claims, err := oauth.VerifyServiceToken(result.AccessToken, "evs")
+		if err != nil {
+			t.Fatal(err)
+		}
+		byJwt, err := session.ParseByJwt(ctx, bearer.token)
+		server.Raise(err)
+		if claims.ClientId != bearer.clientId || claims.NetworkId != byJwt.NetworkId || claims.SidecarId == nil || claims.SubjectClientId != nil {
+			t.Fatalf("claims = %+v", claims)
+		}
+
+		// as a bearer, the sidecar's token is refused on the route
+		if w := exchange(bearer.authorization(), evs, true); w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+			t.Fatalf("a strict_exp bearer: status = %d: %s", w.Code, w.Body.String())
+		}
+		// a copy without the key's proof buys nothing
+		if w := exchange("", evs, false); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_dpop_proof") {
+			t.Fatalf("no proof: status = %d: %s", w.Code, w.Body.String())
+		}
+		// and the api audience is never issued
+		if w := exchange("", "https://api."+server.RequireDomain(), true); w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid_target") {
+			t.Fatalf("the api audience: status = %d: %s", w.Code, w.Body.String())
 		}
 	})
 }

@@ -104,10 +104,17 @@ func JwksHandler(w http.ResponseWriter, r *http.Request) {
 	writeJson(w, http.StatusOK, Jwks())
 }
 
-// Exchanges a code or refresh token for tokens.
+// Exchanges a code or refresh token for tokens, or a sidecar's client token for
+// a service token. The token exchange names no client_id, so the grant type is
+// read first.
 func TokenHandler(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The form could not be parsed.")
+		return
+	}
+
+	if r.PostFormValue("grant_type") == ExchangeGrantType {
+		ExchangeHandler(w, r)
 		return
 	}
 
@@ -145,7 +152,47 @@ func TokenHandler(w http.ResponseWriter, r *http.Request) {
 		writeJson(w, http.StatusOK, response)
 
 	default:
-		writeOauthError(w, http.StatusBadRequest, "unsupported_grant_type", "Supported: authorization_code, refresh_token.")
+		writeOauthError(w, http.StatusBadRequest, "unsupported_grant_type", "Supported: authorization_code, refresh_token, "+ExchangeGrantType+".")
+	}
+}
+
+// The token exchange (exchange.go), from a parsed form and the request's DPoP
+// headers.
+func ExchangeHandler(w http.ResponseWriter, r *http.Request) {
+	result, err := Exchange(r.Context(), &ExchangeArgs{
+		SubjectToken:     r.PostFormValue("subject_token"),
+		SubjectTokenType: r.PostFormValue("subject_token_type"),
+		Resources:        r.PostForm["resource"],
+		Scope:            r.PostFormValue("scope"),
+		Proofs:           r.Header.Values(session.DpopHeader),
+	})
+	if err != nil {
+		writeExchangeError(w, err)
+		return
+	}
+	writeJson(w, http.StatusOK, result)
+}
+
+// Maps an exchange error to its code. Descriptions are terse and fixed: the
+// detail goes to the service log, never a token, as the errors name none.
+func writeExchangeError(w http.ResponseWriter, err error) {
+	exchangeLogf("[oauth][exchange]refused: %s\n", err)
+
+	switch {
+	case errors.Is(err, ErrInvalidRequest):
+		writeOauthError(w, http.StatusBadRequest, "invalid_request", "The request is malformed.")
+	case errors.Is(err, ErrInvalidTarget):
+		writeOauthError(w, http.StatusBadRequest, "invalid_target", "The resource is not a service this server issues tokens for.")
+	case errors.Is(err, ErrInvalidScope):
+		writeOauthError(w, http.StatusBadRequest, "invalid_scope", "The scope is not granted.")
+	case errors.Is(err, ErrInvalidDpopProof):
+		writeOauthError(w, http.StatusBadRequest, "invalid_dpop_proof", "The DPoP proof is invalid.")
+	case errors.Is(err, ErrInvalidGrant):
+		writeOauthError(w, http.StatusBadRequest, "invalid_grant", "The grant is invalid or expired.")
+	case errors.Is(err, ErrRestoreRequired):
+		writeOauthError(w, http.StatusBadRequest, "restore_required", "The network is being restored. Try again later.")
+	default:
+		writeOauthError(w, http.StatusInternalServerError, "server_error", "Please try again.")
 	}
 }
 

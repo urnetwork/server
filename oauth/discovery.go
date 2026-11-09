@@ -37,6 +37,8 @@ type AuthorizationServerMetadata struct {
 	AuthorizationResponseIssParameterSupported bool     `json:"authorization_response_iss_parameter_supported"`
 	// rfc 8707
 	ResourceIndicatorsSupported bool `json:"resource_indicators_supported"`
+	// rfc 9449 §5.1: the token exchange's proof of the client's key
+	DpopSigningAlgValuesSupported []string `json:"dpop_signing_alg_values_supported,omitempty"`
 }
 
 // rfc 9728 protected resource metadata, served by the mcp server.
@@ -86,7 +88,7 @@ func ServerMetadata() *AuthorizationServerMetadata {
 		// oauth 2.1: authorization code only, no implicit
 		ResponseTypesSupported: []string{"code"},
 		ResponseModesSupported: []string{"query"},
-		GrantTypesSupported:    []string{"authorization_code", "refresh_token"},
+		GrantTypesSupported:    []string{"authorization_code", "refresh_token", ExchangeGrantType},
 		// oauth 2.1 removes `plain`
 		CodeChallengeMethodsSupported: []string{PkceMethodS256},
 		// every client here is public: a native or browser client cannot keep
@@ -103,6 +105,7 @@ func ServerMetadata() *AuthorizationServerMetadata {
 		// defend against mix-up attacks
 		AuthorizationResponseIssParameterSupported: true,
 		ResourceIndicatorsSupported:                true,
+		DpopSigningAlgValuesSupported:              []string{"EdDSA"},
 	}
 }
 

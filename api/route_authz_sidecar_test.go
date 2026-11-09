@@ -385,9 +385,9 @@ func TestStrictExpGateRefusesWhateverTheConfigSays(t *testing.T) {
 	}
 }
 
-// §7.4 admits a strict_exp bearer to POST /oauth/token's exchange alone, which
-// is not built yet, so the grants the route serves now refuse it, and an
-// exchange sent before its gate exists is refused with them.
+// §7.4 admits a sidecar to POST /oauth/token for its exchange alone, which takes
+// the client token in its form, never as a bearer, so a strict_exp bearer is
+// refused there on every grant, the exchange's included.
 func TestStrictExpTokenIsRefusedOnTheTokenRoute(t *testing.T) {
 	tokens := newStrictExpTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
@@ -432,8 +432,8 @@ func TestAnUnclassifiedRouteRefusesAStrictExpToken(t *testing.T) {
 	}
 }
 
-// Only the two routes a sidecar renews and mints on want a proof here. The third
-// §7.4 names, the exchange, is not built yet.
+// Only the two routes a sidecar renews and mints on want a proof at the gate. The
+// third §7.4 names, the exchange, checks its own (oauth/exchange.go).
 func TestStrictExpProofRoutes(t *testing.T) {
 	for _, route := range Routes() {
 		key := routeAccessKey(route)

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -88,8 +89,32 @@ type authConfig struct {
 
 // The oauth block of vault auth.yml. Panics when absent: every route in this
 // package depends on it, and a server that silently issued unsigned or
-// wrongly-issued tokens would be worse than one that fails to start.
-var Config = sync.OnceValue(func() *oauthConfig {
+// wrongly-issued tokens would be worse than one that fails to start. Tests
+// install their own (Testing_SetIssuer).
+func Config() *oauthConfig {
+	if config := configOverride.Load(); config != nil {
+		return config
+	}
+	return vaultConfig()
+}
+
+// A config tests install in place of auth.yml's.
+var configOverride atomic.Pointer[oauthConfig]
+
+// Installs an oauth config naming issuer, with the authorization endpoint under
+// it, in place of auth.yml's until the returned pop. Signer keys come from
+// Testing_SetSignerKeys.
+func Testing_SetIssuer(issuer string) func() {
+	previous := configOverride.Swap(&oauthConfig{
+		Issuer:                issuer,
+		AuthorizationEndpoint: issuer + "/authorize",
+	})
+	return func() {
+		configOverride.Store(previous)
+	}
+}
+
+var vaultConfig = sync.OnceValue(func() *oauthConfig {
 	var auth authConfig
 	server.Vault.RequireSimpleResource("auth.yml").UnmarshalYaml(&auth)
 

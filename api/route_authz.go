@@ -378,10 +378,11 @@ var lagGuestRoutes = map[string]bool{
 // that is not here. The route's own class still applies, so /smtp/appeal and
 // /mail/direct-mx stay refused.
 //
-// POST /oauth/token is not here. §7.4 admits only its exchange (§7.8), which M1
-// adds, and the grants the route serves now are not it, so a strict_exp bearer
-// is refused there like anywhere else. The exchange brings the route back with a
-// gate that admits a strict_exp bearer on that grant alone, and with the proof.
+// POST /oauth/token is not here. §7.4 admits a sidecar there for its exchange
+// alone (§7.8), and the exchange takes the client token in its form as the
+// subject token, with its own DPoP proof (oauth/exchange.go), never as a bearer:
+// the route is Public, so a sidecar's exchange reaches it with no bearer at all,
+// and a strict_exp bearer is refused there on every grant like anywhere else.
 var strictExpRoutes = map[string]bool{
 	"GET /auth/refresh":           true, // with the proof
 	"POST /network/auth-client":   true, // with the proof; its children inherit both marks
@@ -397,7 +398,8 @@ var strictExpRoutes = map[string]bool{
 }
 
 // The routes where a strict_exp bearer proves its ClientKey (§7.4). The third
-// §7.4 names is POST /oauth/token's exchange, which is not built yet (above).
+// §7.4 names, POST /oauth/token's exchange, checks its own proof of its subject
+// token (oauth/exchange.go).
 var strictExpProofRoutes = map[string]bool{
 	"GET /auth/refresh":         true,
 	"POST /network/auth-client": true,
