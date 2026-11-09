@@ -66,7 +66,10 @@
     "signing_keys": "Independent coordinator/Sille/Goofe identities provisioned; Goofe's seed generated and retained only on Goofe",
     "ssh_control": "Dedicated coordinator key reaches a forced handler with no forwarding/shell; incomplete agent inventory refuses safely",
     "runtime_qualified": false,
-    "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json"]
+    "core_policy": "User-approved core.%P applied and persisted; container core limits unchanged",
+    "bounded_storage": "New fully allocated 128 GiB loop-backed ext4 candidate filesystem mounted nosuid,nodev with private propagation; reboot persistence remains pending",
+    "runtime_binary_inventory": "Exact Sille Docker/containerd/shim/runc copies installed separately on Goofe; primary Docker and existing containers unchanged",
+    "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json", "EPOCH2-GOOFE-BOUNDED-STORAGE-2026-11-09.json"]
   },
   "next_actions": [
     "Confirm serving config/vault deployment and restart; record the existing approved product handoff through the scoped API using the prepared idempotent request.",

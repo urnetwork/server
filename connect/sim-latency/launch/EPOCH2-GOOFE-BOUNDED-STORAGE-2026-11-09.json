@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "status": "STORAGE_PROVISIONED_RUNTIME_NOT_QUALIFIED",
+  "host": "goofe",
+  "base_directory": "/home/by/sim-latency",
+  "core_policy": {
+    "user_approved": true,
+    "live_value": "core.%P",
+    "persistent_file": "/etc/sysctl.d/90-urnetwork-competition-core.conf",
+    "file_sha256": "d73bd6969da972d8001e90d06ebb9b2f1fcc73c50ccaf2606256010996eb5131",
+    "services_restarted": false,
+    "container_core_limits_changed": false
+  },
+  "bounded_storage": {
+    "backing_file": "/home/by/sim-latency/runtime-backing-epoch2-v1/candidate.img",
+    "bytes": 137438953472,
+    "fully_allocated": true,
+    "owner_uid": 0,
+    "mode": "0600",
+    "observed_loop_device": "/dev/loop0",
+    "mount": "/home/by/sim-latency/candidate",
+    "filesystem": "ext4",
+    "mount_flags": ["rw", "nosuid", "nodev"],
+    "propagation": "private",
+    "provenance": "Exact file and mount targets were absent; loop backing path and exact byte capacity were checked before formatting. No existing filesystem was formatted.",
+    "reboot_persistence_ready": false
+  },
+  "isolated_runtime_binaries": {
+    "directory": "/home/by/sim-latency/engine-bin-sille-20261109-v1",
+    "source": "Exact copies of Sille executables; system binaries and existing Docker containers were not replaced or restarted.",
+    "dockerd_sha256": "8194f57a46e589e01f1dcbf4d7d2fd75cf54e83fee00ed5c6b5f6864e50bacef",
+    "containerd_sha256": "b4a81bda8b7ed3736882b9fd01d50c7ac606d3b93cefe1677d0710c7fdab703a",
+    "containerd_version": "2.4.1",
+    "containerd_source_commit": "f2551031d7276a770f65f98c9b52e57e7dad07e8",
+    "containerd_shim_sha256": "3be04f12b162d321ed81bb83d03b90229cb873c052381bea9a23aa3de82ad8eb",
+    "runc_sha256": "513bdc1b1dae584fca6a37b5abeb0cefb30211d18aab48db0c0dd46c6a8d80dc"
+  },
+  "configuration_renderer": {
+    "server_commit": "96ee2a78e04796f2537d8eb077bc7aec1926aed7",
+    "ordinary_three_run_passes": 1326,
+    "ordinary_three_run_failures": 0,
+    "ordinary_three_run_subprocess_fixture_skips": 3,
+    "focused_race_passes": 8,
+    "native_qualification_claimed": false
+  },
+  "sille_packages": {
+    "installed": ["uidmap", "libsubid4"],
+    "version": "1:4.13+dfsg1-4ubuntu3.2",
+    "apt_exit_code": 0,
+    "dpkg_audit_clean": true,
+    "packages_upgraded": 0,
+    "services_restarted": false
+  },
+  "remaining": ["Persistent bounded mount and private service lifecycle", "Non-overlapping remap account and closed runtime documents", "Management/recovery ledger and complete agent configuration", "Actual native host fingerprint before freezing the two-host intake policy", "Runtime and cross-host admission before enabling grading"],
+  "grading_activated": false
+}
