@@ -1,5 +1,15 @@
 # Epoch-1 approval: deployment handoff
 
+Update, November 9: deployment and exact approval import succeeded. The public
+result records review `01a1c088-ca60-8cf8-844e-6ff50fff8cb4` with integrity and
+source approval. Reward-delivery and source-activation holds are revision 2,
+inactive. The settlement event feed exposes the unchanged election; payment
+is still pending. Fresh private source staging is running under
+`urnetwork-epoch1-approved-source-20261109-v1.service`. Inspect its actual state
+before any restart. Source build qualification and promotion remain separate.
+See `EPOCH1-APPROVAL-RELEASE-2026-11-09.json`; the deployment instructions and
+pending observations below are retained as historical handoff evidence.
+
 The genuine Astra max review approved the exact elected submission. The user's
 conditional winner approval is satisfied. See the official approval and import
 qualification JSON records in this directory. Do not restart Qwen/Gemma for

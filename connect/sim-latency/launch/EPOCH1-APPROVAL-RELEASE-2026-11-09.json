@@ -38,6 +38,7 @@
   "source_build_attempt": {"unit": "urnetwork-epoch1-approved-source-20261109-v1.service", "invocation_id": "ecb1baab9ab14a72bf8bce5936413acd", "main_pid_at_observation": 466952, "active_at_observation": true, "started_at": "2026-11-09T13:46:07Z", "outer_runtime_bound_seconds": 14400, "management_memory_max_gib": 8, "state_directory": "/var/lib/urnetwork/competition-epoch1-approved-source-20261109-v1", "build_control_record": "EPOCH1-OFFICIAL-SOURCE-BUILD-STAGING-2026-11-08.json", "branch_publication_performed": false},
   "settlement_status": "pending",
   "payment_confirmed": false,
+  "settlement_event_feed_verified": {"http_status": 200, "cursor": 3, "event_id": "01a1b83f-7a5f-9f66-1ff7-c5377e46ac94", "payload_sha256": "f228497431333f8a36511189e85dc64d38ee635fbc2931a69ab4133d20413864", "action": "elect", "selected_job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739", "payment_claim": false},
   "source_promoted": false,
   "winner_image_build_qualified": false,
   "epoch_2_open": false,
