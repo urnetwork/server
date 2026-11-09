@@ -133,16 +133,16 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /auth/password-set":                       routeAccessPublic,
 	"POST /auth/network-check":                      routeAccessPublic,
 	"POST /auth/network-create":                     routeAccessPublic,
-	"POST /auth/network-delete":                     routeAccessAppAdmin, // deletes the account
-	"POST /auth/code-create":                        routeAccessAppAdmin, // auth code → /auth/code-login returns a NETWORK token (escalation)
+	"POST /auth/network-delete":                     routeAccessNetwork, // deletes the account; app admin until §7.4's stage 2 is live (stage2NetworkRoutes)
+	"POST /auth/code-create":                        routeAccessNetwork, // auth code → /auth/code-login returns a NETWORK token (escalation); app admin until stage 2 is live
 	"POST /auth/code-login":                         routeAccessPublic,
 	"POST /auth/apple/callback":                     routeAccessPublic,
 	"GET /auth/apple/callback":                      routeAccessPublic,
 	"GET /auth/google/callback":                     routeAccessPublic,
-	"POST /auth/add-auth":                           routeAccessAppAdmin,  // adds a sign-in method (takeover)
-	"POST /auth/remove-auth":                        routeAccessAppAdmin,  // removes a sign-in method (takeover)
-	"POST /auth/regenerate-seedphrase":              routeAccessAppAdmin,  // returns a sign-in seedphrase (escalation)
-	"POST /auth/generate-seedphrase":                routeAccessAppAdmin,  // returns a sign-in seedphrase (escalation)
+	"POST /auth/add-auth":                           routeAccessNetwork,   // adds a sign-in method (takeover); app admin until stage 2 is live
+	"POST /auth/remove-auth":                        routeAccessNetwork,   // removes a sign-in method (takeover); app admin until stage 2 is live
+	"POST /auth/regenerate-seedphrase":              routeAccessNetwork,   // returns a sign-in seedphrase (escalation); app admin until stage 2 is live
+	"POST /auth/generate-seedphrase":                routeAccessNetwork,   // returns a sign-in seedphrase (escalation); app admin until stage 2 is live
 	"POST /network/auth-client":                     routeAccessOwnClient, // mint/reissue client tokens
 	"POST /network/register-client-v1":              routeAccessNetwork,   // top-level client registration
 	"POST /network/remove-client":                   routeAccessOwnClient, // deactivate a client
@@ -425,12 +425,37 @@ var strictExpProofRoutes = map[string]bool{
 	"POST /network/auth-client": true,
 }
 
+// §7.4's stage 2 (D-TEAM-1, D-TRUST-3): the six routes the shipped desktop app
+// and extension still call with a network credential they persist readably
+// (.auth_state, chrome.storage.local's by_jwt), which the moved routes refuse
+// to app device tokens a same-user agent can read (owner decision 47). The
+// table holds their end state, Network; until stage 2 is live in this binary
+// (model.SidecarStage2Live) they keep the app admin class, so every binary
+// built before D-SDK-11's releases ship keeps stage 1's behavior.
+var stage2NetworkRoutes = map[string]bool{
+	"POST /auth/code-create":           true,
+	"POST /auth/add-auth":              true,
+	"POST /auth/remove-auth":           true,
+	"POST /auth/regenerate-seedphrase": true,
+	"POST /auth/generate-seedphrase":   true,
+	"POST /auth/network-delete":        true,
+}
+
+// Whether stage 2 is live in this binary. Tests replace it.
+var sidecarStage2Live = model.SidecarStage2Live
+
 func routeAccessKey(route *router.Route) string {
 	return route.Method() + " " + route.Pattern()
 }
 
+// The class a route's gates apply: its table entry, and app admin for a stage 2
+// route while stage 2 is not live.
 func routeAccessFor(route *router.Route) routeAccess {
-	if access, ok := routeAccessByRoute[routeAccessKey(route)]; ok {
+	key := routeAccessKey(route)
+	if access, ok := routeAccessByRoute[key]; ok {
+		if access == routeAccessNetwork && stage2NetworkRoutes[key] && !sidecarStage2Live() {
+			return routeAccessAppAdmin
+		}
 		return access
 	}
 	return routeAccessNetwork

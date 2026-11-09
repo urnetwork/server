@@ -219,6 +219,26 @@ func sidecarMg1TeamMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX network_admin_event_event_time ON network_admin_event (event_time)
 		`),
+
+		// §7.8's one-command admin tokens (§2.8 api-11): each token's jti spent
+		// once, in its command's own transaction, with the command's digest and
+		// the answer a retry of the same jti gets. A row goes two hours after its
+		// use, which is at least an hour past its token's exp, since a token
+		// lives an hour and is used within it.
+		newSqlMigration(`
+			CREATE TABLE admin_token_use (
+				jti varchar(64) NOT NULL,
+				member_id uuid NOT NULL,
+				cmd varchar(64) NOT NULL,
+				result bytea NULL,
+				use_time timestamp NOT NULL,
+
+				PRIMARY KEY (jti)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX admin_token_use_use_time ON admin_token_use (use_time)
+		`),
 	}
 }
 

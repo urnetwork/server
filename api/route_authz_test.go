@@ -320,7 +320,7 @@ func TestNonAdminRoutesServeAClientToken(t *testing.T) {
 // the network, are admin routes: while any of them served a client token, a
 // client token could become the network and every other refusal would be
 // moot. The URnetwork apps call the sign-in ones with their client token, so
-// those wait on decision 1 in AUTHZ1.md for an ordinary network.
+// those keep the app admin class until §7.4's stage 2 is live.
 func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 	for key, want := range map[string]routeAccess{
 		"POST /account/api-key":            routeAccessNetwork,
@@ -329,12 +329,14 @@ func TestCredentialMintingRoutesAreAdminRoutes(t *testing.T) {
 		"POST /oauth/authorize":            routeAccessNetwork,
 		"POST /device/add":                 routeAccessNetwork,
 		"POST /network/remove-clients":     routeAccessNetwork,
-		"POST /auth/code-create":           routeAccessAppAdmin,
-		"POST /auth/add-auth":              routeAccessAppAdmin,
-		"POST /auth/remove-auth":           routeAccessAppAdmin,
-		"POST /auth/generate-seedphrase":   routeAccessAppAdmin,
-		"POST /auth/regenerate-seedphrase": routeAccessAppAdmin,
-		"POST /auth/network-delete":        routeAccessAppAdmin,
+		// §7.4's stage 2 six: Network in the table, app admin until stage 2 is
+		// live (TestStage2RoutesRefuseDeviceTokensOnceLive)
+		"POST /auth/code-create":           routeAccessNetwork,
+		"POST /auth/add-auth":              routeAccessNetwork,
+		"POST /auth/remove-auth":           routeAccessNetwork,
+		"POST /auth/generate-seedphrase":   routeAccessNetwork,
+		"POST /auth/regenerate-seedphrase": routeAccessNetwork,
+		"POST /auth/network-delete":        routeAccessNetwork,
 		"POST /network/auth-client":        routeAccessOwnClient,
 		"POST /network/remove-client":      routeAccessOwnClient,
 	} {
@@ -508,5 +510,71 @@ func TestSpecDocumentsTheClientTokenRefusal(t *testing.T) {
 	}
 	if documentedCount == 0 {
 		t.Fatal("no gated route documents the refusal")
+	}
+}
+
+// Sets stage 2's state for the test (stage2NetworkRoutes).
+func setSidecarStage2Live(t *testing.T, live bool) {
+	previous := sidecarStage2Live
+	sidecarStage2Live = func() bool { return live }
+	t.Cleanup(func() {
+		sidecarStage2Live = previous
+	})
+}
+
+// §7.4's stage 2 six are Network in the table, their end state, which sdk's copy
+// matches (TestApiAdminRoutesMatchTheServer); no other route is held back.
+func TestStage2RoutesAreNetworkInTheTable(t *testing.T) {
+	if len(stage2NetworkRoutes) != 6 {
+		t.Fatalf("%d stage 2 routes", len(stage2NetworkRoutes))
+	}
+	for key := range stage2NetworkRoutes {
+		if access, ok := routeAccessByRoute[key]; !ok || access != routeAccessNetwork {
+			t.Errorf("%s is %d in the table", key, access)
+		}
+	}
+}
+
+// Until stage 2 is live the six serve an ordinary network's app device token,
+// as stage 1 left them; once it is, every client token, an unmarked app
+// device's included, is refused there with 403 and the network credential still
+// reaches the handler (§22.5's §7 row, TEAM-M3-01).
+func TestStage2RoutesRefuseDeviceTokensOnceLive(t *testing.T) {
+	tokens := newRouteAccessTokens()
+	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
+		return false
+	})
+	for _, live := range []bool{false, true} {
+		setSidecarStage2Live(t, live)
+		found := 0
+		for _, route := range Routes() {
+			key := routeAccessKey(route)
+			if !stage2NetworkRoutes[key] {
+				continue
+			}
+			found += 1
+			reached := false
+			stubbed := router.Testing_WithHandler(route, func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			routeRouter := router.NewRouter(ctx, []*router.Route{stubbed})
+			w := serveRouteAccess(routeRouter, route.Method(), routeAccessTestPath(route.Pattern()), "Bearer "+tokens.clientToken)
+			switch {
+			case live && (reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage):
+				t.Errorf("%s with stage 2 live: a device token got %d, handler ran = %t", key, w.Code, reached)
+			case !live && (!reached || w.Code != http.StatusOK):
+				t.Errorf("%s before stage 2: a device token got %d, handler ran = %t", key, w.Code, reached)
+			}
+			reached = false
+			if w := serveRouteAccess(routeRouter, route.Method(), routeAccessTestPath(route.Pattern()), "Bearer "+tokens.networkToken); !reached || w.Code != http.StatusOK {
+				t.Errorf("%s (stage 2 live %t): the network credential got %d", key, live, w.Code)
+			}
+			cancel()
+		}
+		if found != 6 {
+			t.Fatalf("Routes() serves %d of the six", found)
+		}
 	}
 }

@@ -309,7 +309,7 @@ func TestNetworkClientOwnerColumns(t *testing.T) {
 // CODESTYLE's migration rules for MG1's §7 part: new tables and their indexes
 // only.
 func TestSidecarMg1TeamPartIsAdditive(t *testing.T) {
-	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (network_auth_key|network_admin_event)\b|CREATE INDEX (network_auth_key|network_admin_event)_\w+ ON (network_auth_key|network_admin_event)\b)`)
+	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (network_auth_key|network_admin_event|admin_token_use)\b|CREATE INDEX (network_auth_key|network_admin_event|admin_token_use)_\w+ ON (network_auth_key|network_admin_event|admin_token_use)\b)`)
 	refused := regexp.MustCompile(`(?i)\b(DROP|ALTER|RENAME|NOT VALID|TRUNCATE|UPDATE|DELETE|transaction_timeout)\b`)
 	for index, migration := range sidecarMg1TeamMigrations() {
 		switch value := migration.(type) {

@@ -361,6 +361,8 @@ func TestApiRefusesAnExpiredStrictExpToken(t *testing.T) {
 // a refusal, not a client without the mark.
 func TestNonPreviewNetworkRefusesStrictExpThroughTheRoute(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the gate stands until stage 2 is live
+		defer model.Testing_SetSidecarStage2Live(false)()
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(t, ctx)

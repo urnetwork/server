@@ -100,6 +100,9 @@ func requestAuthMethod(req *http.Request) string {
 	if authorization == "" {
 		return "none"
 	}
+	if strings.HasPrefix(authorization, authDpopPrefix) {
+		return "admin_token"
+	}
 	if !strings.HasPrefix(authorization, authBearerPrefix) {
 		return "other"
 	}

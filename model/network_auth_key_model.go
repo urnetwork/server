@@ -41,9 +41,11 @@ import (
 	"crypto/subtle"
 	"encoding/base32"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -207,8 +209,20 @@ type CreateAuthKeyResult struct {
 	Error      *CreateAuthKeyError `json:"error,omitempty"`
 }
 
+// ur-cli's one admin command in v0 (§7.8): an admin token reaches this route,
+// and its use is spent in the key's transaction.
+func init() {
+	session.RegisterAdminCommandRoute(http.MethodPost, "/network/auth-keys")
+}
+
+// The scope an admin token needs to create a key (§7.8's OAuth client scopes).
+const authKeysAdminScope = "auth_keys"
+
 // Creates an auth key for the session's network, its creator the session's
-// user, and owes the notice and the admin event in the same transaction.
+// user, and owes the notice and the admin event in the same transaction. A
+// session an admin token authenticated spends the token's use in that same
+// transaction, and a replay of the token answers the first use's result and
+// creates nothing (admin_token_use_model.go).
 func CreateAuthKey(createAuthKey *CreateAuthKeyArgs, clientSession *session.ClientSession) (*CreateAuthKeyResult, error) {
 	return createAuthKeyAt(createAuthKey, clientSession, DefaultNetworkAuthKeySettings(), server.NowUtc())
 }
@@ -221,6 +235,10 @@ func createAuthKeyAt(
 ) (*CreateAuthKeyResult, error) {
 	if !server.SidecarMg1Linked() {
 		return nil, fmt.Errorf("%d %s", http.StatusServiceUnavailable, authKeysUnavailableMessage)
+	}
+	adminCommand := clientSession.AdminCommand
+	if adminCommand != nil && !slices.Contains(adminCommand.Scopes, authKeysAdminScope) {
+		return nil, fmt.Errorf("%d %s", http.StatusForbidden, "The admin token does not carry the auth_keys scope.")
 	}
 	refuse := func(message string) (*CreateAuthKeyResult, error) {
 		return &CreateAuthKeyResult{
@@ -265,7 +283,26 @@ func createAuthKeyAt(
 		PreApproved:   createAuthKey.PreApproved,
 	}
 
+	authKeyId := authKey.AuthKeyId
+	expireTime := authKey.ExpireTime
+	result := &CreateAuthKeyResult{
+		AuthKeyId:  &authKeyId,
+		AuthKey:    authKeyBearer(authKey.AuthKeyId, secret),
+		ExpireTime: &expireTime,
+	}
+	var replayed *CreateAuthKeyResult
 	server.Tx(clientSession.Ctx, func(tx server.PgTx) {
+		replayed = nil
+		if adminCommand != nil {
+			storedResult, first, err := ClaimAdminTokenUseInTx(clientSession.Ctx, tx, adminCommand, now)
+			server.Raise(err)
+			if !first {
+				// a replay of the token: the first use's answer, and nothing runs
+				replayed = &CreateAuthKeyResult{}
+				server.Raise(json.Unmarshal(storedResult, replayed))
+				return
+			}
+		}
 		server.RaisePgResult(tx.Exec(
 			clientSession.Ctx,
 			`
@@ -306,15 +343,16 @@ func createAuthKeyAt(
 			NewSessionAdminEvent(clientSession, AdminEventActionAuthKeyCreate, AdminEventTargetAuthKey, &authKey.AuthKeyId),
 			now,
 		)
+		if adminCommand != nil {
+			resultJson, err := json.Marshal(result)
+			server.Raise(err)
+			server.Raise(StoreAdminTokenUseResultInTx(clientSession.Ctx, tx, adminCommand.Jti, resultJson))
+		}
 	})
-
-	authKeyId := authKey.AuthKeyId
-	expireTime := authKey.ExpireTime
-	return &CreateAuthKeyResult{
-		AuthKeyId:  &authKeyId,
-		AuthKey:    authKeyBearer(authKey.AuthKeyId, secret),
-		ExpireTime: &expireTime,
-	}, nil
+	if replayed != nil {
+		return replayed, nil
+	}
+	return result, nil
 }
 
 // An auth key as the listing shows it.

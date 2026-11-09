@@ -80,6 +80,12 @@ func writeGrantError(w http.ResponseWriter, err error) {
 	case errors.Is(err, ErrPkceFailed), errors.Is(err, ErrInvalidCode),
 		errors.Is(err, ErrInvalidRefreshToken), errors.Is(err, ErrInvalidGrant):
 		writeOauthError(w, http.StatusBadRequest, "invalid_grant", "The grant is invalid or expired.")
+	case errors.Is(err, ErrUrcliReauthenticationRequired):
+		writeOauthError(w, http.StatusUnauthorized, "login_required", "Sign in again to approve this command.")
+	case errors.Is(err, ErrConsentRequired):
+		writeOauthError(w, http.StatusForbidden, "consent_required", "No consent showed this command and its code.")
+	case errors.Is(err, ErrInvalidDpopProof):
+		writeOauthError(w, http.StatusBadRequest, "invalid_dpop_proof", "The DPoP proof is invalid.")
 	case errors.Is(err, ErrUnauthorizedUser):
 		// a declared reason tells the user what to do; any other detail is logged
 		description := ErrUnauthorizedUser.Error()
@@ -126,13 +132,21 @@ func TokenHandler(w http.ResponseWriter, r *http.Request) {
 
 	switch r.PostFormValue("grant_type") {
 	case "authorization_code":
-		response, err := ExchangeCode(r.Context(), &ExchangeCodeArgs{
+		exchangeCodeArgs := &ExchangeCodeArgs{
 			Code:         r.PostFormValue("code"),
 			ClientId:     clientId,
 			RedirectUri:  r.PostFormValue("redirect_uri"),
 			CodeVerifier: r.PostFormValue("code_verifier"),
 			Resource:     r.PostFormValue("resource"),
-		})
+		}
+		var response *TokenResponse
+		var err error
+		if clientId == UrcliClientId {
+			// ur-cli's admin token, bound to the DPoP key its request named
+			response, err = ExchangeUrcliCode(r.Context(), exchangeCodeArgs, r.Header.Values(session.DpopHeader))
+		} else {
+			response, err = ExchangeCode(r.Context(), exchangeCodeArgs)
+		}
 		if err != nil {
 			writeGrantError(w, err)
 			return
@@ -298,6 +312,11 @@ type ConsentRequest struct {
 	Resource            string `json:"resource"`
 	Nonce               string `json:"nonce,omitempty"`
 	Prompt              string `json:"prompt,omitempty"`
+	// ur-cli's alone (urcli.go): its DPoP key's thumbprint, its one command
+	// with the consent code, and on approval the receipt /oauth/consent gave
+	DpopJkt              string `json:"dpop_jkt,omitempty"`
+	AuthorizationDetails string `json:"authorization_details,omitempty"`
+	ConsentReceipt       string `json:"consent_receipt,omitempty"`
 }
 
 type ConsentResult struct {
@@ -312,6 +331,12 @@ type ConsentResult struct {
 	Issuer          string `json:"issuer"`
 	ConsentRequired bool   `json:"consent_required"`
 	Error           string `json:"error,omitempty"`
+	// ur-cli's one command and the code to show beside it, with the receipt the
+	// page returns on approval
+	AdminCommand *UrcliConsent `json:"admin_command,omitempty"`
+	// ur-cli's request on a sign-in older than UrcliSettings.MaxAuthAge: the
+	// page signs the person in again before it shows the command
+	ReauthenticationRequired bool `json:"reauthentication_required,omitempty"`
 }
 
 // Describes an authorization request to the consent page.
@@ -344,6 +369,30 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 	client, err := ValidateAuthorizationRequest(clientSession.Ctx, authorizationRequest)
 	if err != nil {
 		writeGrantError(w, err)
+		return
+	}
+
+	if client.ClientId == UrcliClientId {
+		// never remembered: every command shows, with its code, on a fresh
+		// sign-in
+		result := &ConsentResult{
+			ClientName:      client.ClientName,
+			Scopes:          authorizationRequest.Scopes,
+			NetworkName:     clientSession.ByJwt.NetworkName,
+			Issuer:          Issuer(),
+			ConsentRequired: true,
+		}
+		adminCommand, err := DescribeUrcliConsent(authorizationRequest, clientSession.ByJwt.UserId, clientSession.ByJwt.CreateTime, server.NowUtc())
+		switch {
+		case errors.Is(err, ErrUrcliReauthenticationRequired):
+			result.ReauthenticationRequired = true
+		case err != nil:
+			writeGrantError(w, err)
+			return
+		default:
+			result.AdminCommand = adminCommand
+		}
+		writeJson(w, http.StatusOK, result)
 		return
 	}
 
@@ -398,17 +447,32 @@ func AuthorizeHandler(w http.ResponseWriter, r *http.Request) {
 	authorizationRequest := consentRequest.authorizationRequest()
 
 	byJwt := clientSession.ByJwt
-	code, err := Authorize(clientSession.Ctx, authorizationRequest, &AuthorizingUser{
-		UserId:      byJwt.UserId,
-		NetworkId:   byJwt.NetworkId,
-		NetworkName: byJwt.NetworkName,
-		GuestMode:   byJwt.GuestMode,
-		// the principal identifies the user; roles carry through from the
-		// authorizing session, which for an ordinary login is empty
-		Principal: byJwt.Principal,
-		Roles:     byJwt.Roles,
-		AuthTime:  server.NowUtc(),
-	})
+	var code string
+	if authorizationRequest.ClientId == UrcliClientId {
+		// ur-cli: the sign-in's own time, which must be fresh, and the receipt of
+		// the consent that showed this command and its code
+		code, err = authorizeUrcli(clientSession.Ctx, authorizationRequest, &AuthorizingUser{
+			UserId:      byJwt.UserId,
+			NetworkId:   byJwt.NetworkId,
+			NetworkName: byJwt.NetworkName,
+			GuestMode:   byJwt.GuestMode,
+			Principal:   byJwt.Principal,
+			Roles:       byJwt.Roles,
+			AuthTime:    byJwt.CreateTime,
+		}, consentRequest.ConsentReceipt)
+	} else {
+		code, err = Authorize(clientSession.Ctx, authorizationRequest, &AuthorizingUser{
+			UserId:      byJwt.UserId,
+			NetworkId:   byJwt.NetworkId,
+			NetworkName: byJwt.NetworkName,
+			GuestMode:   byJwt.GuestMode,
+			// the principal identifies the user; roles carry through from the
+			// authorizing session, which for an ordinary login is empty
+			Principal: byJwt.Principal,
+			Roles:     byJwt.Roles,
+			AuthTime:  server.NowUtc(),
+		})
+	}
 	if err != nil {
 		writeGrantError(w, err)
 		return
@@ -454,15 +518,17 @@ func (self *ConsentRequest) authorizationRequest() *AuthorizationRequest {
 	}
 
 	return &AuthorizationRequest{
-		ClientId:            self.ClientId,
-		RedirectUri:         self.RedirectUri,
-		ResponseType:        responseType,
-		Scopes:              ParseScope(self.Scope),
-		State:               self.State,
-		CodeChallenge:       self.CodeChallenge,
-		CodeChallengeMethod: codeChallengeMethod,
-		Resource:            self.Resource,
-		Nonce:               self.Nonce,
+		ClientId:             self.ClientId,
+		RedirectUri:          self.RedirectUri,
+		ResponseType:         responseType,
+		Scopes:               ParseScope(self.Scope),
+		State:                self.State,
+		CodeChallenge:        self.CodeChallenge,
+		CodeChallengeMethod:  codeChallengeMethod,
+		Resource:             self.Resource,
+		Nonce:                self.Nonce,
+		DpopJkt:              self.DpopJkt,
+		AuthorizationDetails: self.AuthorizationDetails,
 	}
 }
 

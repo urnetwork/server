@@ -75,6 +75,14 @@ tables:
       secret_sha256: api-11
       tag_ids: api-11
       use_count: api-11
+  admin_token_use:
+    group: MG1
+    columns:
+      cmd: api-11
+      jti: api-11
+      member_id: api-11
+      result: api-11
+      use_time: api-11
   network_admin_event:
     group: MG1
     columns:

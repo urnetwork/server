@@ -16,6 +16,8 @@ import (
 // allowed and an unlisted one refused; a list that names the network among bad
 // entries still names it.
 func TestSidecarPreviewAllowedOnlyForAListedNetwork(t *testing.T) {
+	// the gate stands until stage 2 is live
+	defer Testing_SetSidecarStage2Live(false)()
 	networkId := server.NewId()
 
 	func() {
@@ -47,6 +49,7 @@ func TestSidecarPreviewAllowedOnlyForAListedNetwork(t *testing.T) {
 // A sidecar.yml that is there but cannot be read previews nothing on a process's
 // first read, so the gate fails closed on a bad push.
 func TestSidecarPreviewRefusesWhenTheFileCannotBeRead(t *testing.T) {
+	defer Testing_SetSidecarStage2Live(false)()
 	// forget this test's read once the home is the process's again, so no other
 	// test answers from it (cleanups run last first)
 	forgetRead := func() {
@@ -67,5 +70,27 @@ func TestSidecarPreviewRefusesWhenTheFileCannotBeRead(t *testing.T) {
 	forgetRead()
 	if SidecarPreviewAllowed(networkId) {
 		t.Fatal("an unreadable sidecar.yml previews a network")
+	}
+}
+
+// Once stage 2 is live, enrollment is open to a network no preview_networks
+// lists (TEAM-M3-01); until then, an unlisted network is refused.
+func TestSidecarPreviewOpensOnceStage2IsLive(t *testing.T) {
+	networkId := server.NewId()
+	defer server.Testing_PushSidecarConfig("sidecar:\n  preview_networks: []\n")()
+	func() {
+		defer Testing_SetSidecarStage2Live(false)()
+		if SidecarPreviewAllowed(networkId) {
+			t.Fatal("an unlisted network enrolls before stage 2")
+		}
+	}()
+	func() {
+		defer Testing_SetSidecarStage2Live(true)()
+		if !SidecarPreviewAllowed(networkId) {
+			t.Fatal("an unlisted network is refused once stage 2 is live")
+		}
+	}()
+	if SidecarStage2Live() != sidecarStage2Build {
+		t.Fatal("the build's stage 2 state did not come back")
 	}
 }
