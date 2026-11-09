@@ -265,6 +265,9 @@ type escrowDrawOrderGate struct {
 	line      bool
 	lineTime  time.Time
 	looking   bool
+	// advanced at each read of the file on, while a line may be written: an answer from a look
+	// that started before it may be stale, and is dropped
+	lineEpoch uint64
 }
 
 func newEscrowDrawOrderGate(settings *EscrowDrawOrderSettings) *escrowDrawOrderGate {
@@ -291,6 +294,7 @@ func (self *escrowDrawOrderGate) enabled() bool {
 	fileOn, fileNamed := self.file()
 	now := self.now()
 	look := false
+	var lookEpoch uint64
 	enabled := func() bool {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
@@ -299,6 +303,9 @@ func (self *escrowDrawOrderGate) enabled() bool {
 				self.on = true
 				self.onSince = now
 			}
+			// a line may be written while the file says on, so no earlier answer stands
+			self.lineKnown = false
+			self.lineEpoch++
 			return true
 		}
 		if !fileNamed && !self.on {
@@ -311,6 +318,7 @@ func (self *escrowDrawOrderGate) enabled() bool {
 			if !self.looking {
 				self.looking = true
 				look = true
+				lookEpoch = self.lineEpoch
 			}
 		}
 		if !self.lineKnown || self.line {
@@ -327,7 +335,9 @@ func (self *escrowDrawOrderGate) enabled() bool {
 		return false
 	}()
 	if look {
-		self.startLook(self.look)
+		self.startLook(func() {
+			self.look(lookEpoch)
+		})
 	}
 	return enabled
 }
@@ -347,26 +357,27 @@ func (self *escrowDrawOrderGate) creditOpen() bool {
 	return self.on && self.settings.CreditOpenDelay <= now.Sub(self.onSince)
 }
 
-// One look for an in-window line, its answer stored for the next reads. A look that fails
-// keeps the last answer and is retried by the next read past the interval.
-func (self *escrowDrawOrderGate) look() {
+// One look for an in-window line, started at epoch, its answer stored for the next reads unless
+// the file has read on since. A look that fails keeps the last answer and is retried by the next
+// read past the interval.
+func (self *escrowDrawOrderGate) look(epoch uint64) {
 	now := self.now()
 	found, ok := false, false
+	timeout := func() time.Duration {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.settings.LineCheckTimeout
+	}()
 	defer func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.looking = false
-		if !ok {
+		if !ok || epoch != self.lineEpoch {
 			return
 		}
 		self.lineKnown = true
 		self.line = found
 		self.lineTime = now
-	}()
-	timeout := func() time.Duration {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		return self.settings.LineCheckTimeout
 	}()
 	server.HandleError(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -384,12 +395,13 @@ func (self *escrowDrawOrderGate) look() {
 
 // Runs a look now, on the caller's goroutine, for tests that need the gate's answer settled.
 func (self *escrowDrawOrderGate) lookNow() {
-	func() {
+	epoch := func() uint64 {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		self.looking = true
+		return self.lineEpoch
 	}()
-	self.look()
+	self.look(epoch)
 }
 
 // Forgets every answer, as a new process would start, and takes new settings.

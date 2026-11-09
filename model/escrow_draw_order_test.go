@@ -462,3 +462,40 @@ func TestEscrowDrawOrderCreditOpensAfterTheReread(t *testing.T) {
 		t.Fatal("credit open while the file says off")
 	}
 }
+
+// An answer of no line from before the file read on is stale once it reads off again, since a line
+// may have been written meanwhile: the gate stays on until a look that started after.
+func TestEscrowDrawOrderGateDropsAStaleAnswer(t *testing.T) {
+	fakes := newTestingEscrowDrawOrderGate()
+	fakes.fileOn, fakes.fileNamed = false, true
+	fakes.gate.enabled()
+	fakes.runLooks()
+	if fakes.gate.enabled() {
+		t.Fatal("no line, and the gate stayed on")
+	}
+
+	// on, a line written, then off again
+	fakes.fileOn = true
+	fakes.gate.enabled()
+	fakes.line = true
+	fakes.fileOn = false
+	if !fakes.gate.enabled() {
+		t.Fatal("the gate turned off on an answer from before it read on")
+	}
+	fakes.runLooks()
+	if !fakes.gate.enabled() {
+		t.Fatal("the gate turned off under the line written while it was on")
+	}
+
+	// a look that started before the file read on answers nothing
+	fakes.line = false
+	fakes.now = fakes.now.Add(time.Hour)
+	fakes.gate.enabled()
+	fakes.fileOn = true
+	fakes.gate.enabled()
+	fakes.runLooks()
+	fakes.fileOn = false
+	if !fakes.gate.enabled() {
+		t.Fatal("a look begun before the file read on decided the gate")
+	}
+}
