@@ -199,6 +199,10 @@ func initTaskSchedule(ctx context.Context) {
 		// mx-2's hours dropped at 24 h and mx-3's retired host keys at 30
 		// days; not scheduled without MG7
 		work.ScheduleMailRetention(clientSession, tx)
+		// §18.7's token pass every 60 s: slots whose master changed reconciled,
+		// lost applies swept, removed rows deleted at 24 h; not scheduled
+		// without MG8
+		work.SchedulePushTokenPass(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -636,6 +640,10 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.MailRetention,
 			work.MailRetentionPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.PushTokenPass,
+			work.PushTokenPassPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,
