@@ -3,15 +3,24 @@
 // and FS-55 and the dump checks at every Gn-out. Run from a server checkout in
 // the monoroot:
 //
-//	go run ./local/sidecar-gate [-base sidecar] [-out report.md] M2
+//	go run ./local/sidecar-gate [-base sidecar] [-out report.md] [-list] M2
 //
-// It reads gates.yml for the gate's §23.6 rows and ops-matrix.yml for §19's ids,
-// runs each row's direct go test on its package, through the private-store
-// wrapper SIDECAR_GATE_STORE_WRAPPER names when the test needs stores, and runs
-// check-tables and each repo's commit-msg scan. It records the commit set the
-// run saw, repo by repo. Each row reports pass, fail, missing or open: missing
-// means no test exists yet, which is never a pass, so nothing looks finished
-// before it is.
+// It reads gates.yml, which sidecar's sidecartest/fault.GateFile generates from
+// catalog.yml (C-18; TEST-M1-11), for the gate's rows, and ops-matrix.yml for
+// §19's ids, runs each row's direct go test on its package, through the
+// private-store wrapper SIDECAR_GATE_STORE_WRAPPER names when the test needs
+// stores, and each row's commands, and runs check-tables and each repo's
+// commit-msg scan. It records the commit set the run saw, repo by repo. Each
+// row reports pass, fail, missing or open: missing means no test exists yet,
+// which is never a pass, so nothing looks finished before it is.
+//
+// A gate is G0, Mn-in for milestone n's entry review, Mn for its exit review,
+// every for each Gn-out's rows alone, or next. An exit review also runs every
+// and M1's FS-54; an entry review does not, since its Gn-out has not come.
+//
+// -list runs nothing: it reads each package's test files and reports a row
+// listed when every test it names is declared there, which is how a sweep is
+// checked before a gate, and never a pass.
 //
 // It never takes tests/network-intensive-suite-lock.sh, never runs the
 // whole-suite server/test.sh or connect/test.sh, never sets
@@ -24,6 +33,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"os/exec"
@@ -74,11 +86,12 @@ type gateCommand struct {
 
 // One row of a gate: an FS row and case, or a named item, with what shows it.
 type gateRow struct {
-	Row      string     `yaml:"row"`
-	Case     string     `yaml:"case"`
-	Item     string     `yaml:"item"`
-	Tests    []gateTest `yaml:"tests"`
-	External string     `yaml:"external"`
+	Row      string        `yaml:"row"`
+	Case     string        `yaml:"case"`
+	Item     string        `yaml:"item"`
+	Tests    []gateTest    `yaml:"tests"`
+	Commands []gateCommand `yaml:"commands"`
+	External string        `yaml:"external"`
 }
 
 func (self *gateRow) label() string {
@@ -109,12 +122,14 @@ type matrixFile struct {
 	Ids map[string]*matrixEntry `yaml:"ids"`
 }
 
-// The outcomes a row or an id reports.
+// The outcomes a row or an id reports. listed is -list's alone: every test the
+// row names is declared, and nothing ran.
 const (
 	gatePass    = "pass"
 	gateFail    = "fail"
 	gateMissing = "missing"
 	gateOpen    = "open"
+	gateListed  = "listed"
 )
 
 // What one row or id reported, and why.
@@ -129,6 +144,7 @@ type gateReport struct {
 	gate      string
 	base      string
 	group     string
+	list      bool
 	commits   []gateCommit
 	rows      []*gateResult
 	checks    []*gateResult
@@ -157,6 +173,8 @@ type gateOptions struct {
 	settings       *gateSettings
 	// runs the commit-msg scans and check-tables; off in a fixture
 	repoChecks bool
+	// resolves each test from its package's files and runs nothing
+	list bool
 }
 
 func main() {
@@ -172,8 +190,9 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 	base := flags.String("base", "sidecar", "N's ref for FS-55: built as a release leg it is N, and with the gate's groups promoted N+1")
 	outPath := flags.String("out", "", "where the Markdown report goes; default standard output")
 	serverDirectory := flags.String("server", ".", "the server checkout, inside the monoroot")
+	list := flags.Bool("list", false, "resolve each named test from its package's files, and run nothing")
 	if err := flags.Parse(args); err != nil || flags.NArg() != 1 {
-		fmt.Fprintf(errOut, "usage: sidecar-gate [-base <ref>] [-out <file>] [-server <dir>] <gate>\n")
+		fmt.Fprintf(errOut, "usage: sidecar-gate [-base <ref>] [-out <file>] [-server <dir>] [-list] <gate>\n")
 		return 64
 	}
 	absoluteServer, err := filepath.Abs(*serverDirectory)
@@ -191,7 +210,8 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 		repos:          gateRepos,
 		environ:        os.Environ(),
 		settings:       defaultGateSettings(),
-		repoChecks:     true,
+		repoChecks:     !*list,
+		list:           *list,
 	})
 	if err != nil {
 		fmt.Fprintf(errOut, "sidecar-gate: %s\n", err)
@@ -250,13 +270,13 @@ func runGate(ctx context.Context, options *gateOptions) (*gateReport, error) {
 	if err := readYamlFile(options.matrixPath, matrix); err != nil {
 		return nil, err
 	}
-	report := &gateReport{gate: options.gate, base: options.base, group: gateGroup(options.gate), startTime: time.Now().UTC()}
+	report := &gateReport{gate: options.gate, base: options.base, group: gateGroup(options.gate), list: options.list, startTime: time.Now().UTC()}
 	report.commits = readCommitSet(options.root, options.repos)
 
 	// every Gn-out also runs FS-55, and FS-54 again, since a later group must
 	// still leave a release leg with main's migrations alone (§23.6; OPS-M1-07)
 	everyRows := []gateRow{}
-	if options.gate != "every" && strings.HasPrefix(options.gate, "M") {
+	if options.gate != "every" && strings.HasPrefix(options.gate, "M") && !strings.HasSuffix(options.gate, "-in") {
 		everyRows = slices.Clone(gates.Gates["every"])
 		if options.gate != "M1" {
 			for _, row := range gates.Gates["M1"] {
@@ -331,16 +351,16 @@ func readCommitSet(root string, repos []string) []gateCommit {
 	return commits
 }
 
-// A row's outcome from its tests: every test must pass; a row with none is
-// missing; a row waiting on the world is open.
+// A row's outcome from its tests and commands: every one must pass; a row with
+// none is missing; a row waiting on the world is open.
 func runGateRow(ctx context.Context, options *gateOptions, report *gateReport, row *gateRow) *gateResult {
 	result := &gateResult{label: row.label()}
-	if row.External != "" && len(row.Tests) == 0 {
+	if row.External != "" && len(row.Tests) == 0 && len(row.Commands) == 0 {
 		result.outcome = gateOpen
 		result.details = append(result.details, "waits on "+row.External)
 		return result
 	}
-	if len(row.Tests) == 0 {
+	if len(row.Tests) == 0 && len(row.Commands) == 0 {
 		result.outcome = gateMissing
 		result.details = append(result.details, "no test shows it yet")
 		return result
@@ -351,19 +371,30 @@ func runGateRow(ctx context.Context, options *gateOptions, report *gateReport, r
 		outcomes = append(outcomes, outcome)
 		result.details = append(result.details, details...)
 	}
+	for _, command := range row.Commands {
+		if options.list {
+			outcomes = append(outcomes, gateListed)
+			result.details = append(result.details, command.Repo+"/"+command.Dir+": "+strings.Join(command.Command, " ")+": not run in list mode")
+			continue
+		}
+		outcome, details := runGateCommand(ctx, options, command)
+		outcomes = append(outcomes, outcome)
+		result.details = append(result.details, details...)
+	}
 	result.outcome = combineOutcomes(outcomes)
 	if row.External != "" {
 		result.details = append(result.details, "also waits on "+row.External)
-		if result.outcome == gatePass {
+		if result.outcome == gatePass || result.outcome == gateListed {
 			result.outcome = gateOpen
 		}
 	}
 	return result
 }
 
-// fail beats missing beats open beats pass: no part of a row passes for the rest.
+// fail beats missing beats open beats listed beats pass: no part of a row
+// passes for the rest.
 func combineOutcomes(outcomes []string) string {
-	for _, outcome := range []string{gateFail, gateMissing, gateOpen} {
+	for _, outcome := range []string{gateFail, gateMissing, gateOpen, gateListed} {
 		if slices.Contains(outcomes, outcome) {
 			return outcome
 		}
@@ -392,6 +423,9 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 	where := test.Repo + "/" + filepath.ToSlash(filepath.Join(test.Dir, test.Package))
 	if len(test.Names) == 0 {
 		return gateMissing, []string{where + " names no test"}
+	}
+	if options.list {
+		return listGateTest(options, test)
 	}
 	for _, arg := range test.Args {
 		if strings.Contains(arg, "{group}") && report.group == "" {
@@ -585,4 +619,54 @@ func (self *gateReport) failed() bool {
 		}
 	}
 	return false
+}
+
+// The functions a package's test files declare, by name, read without building
+// anything: a test behind a build tag counts, since -list asks whether a test
+// exists, and a run is what asks whether it passes.
+func declaredTestNames(directory string) (map[string]bool, error) {
+	paths, err := filepath.Glob(filepath.Join(directory, "*_test.go"))
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	fileSet := token.NewFileSet()
+	for _, path := range paths {
+		file, err := parser.ParseFile(fileSet, path, nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, err
+		}
+		for _, declaration := range file.Decls {
+			if function, ok := declaration.(*ast.FuncDecl); ok && function.Recv == nil {
+				names[function.Name.Name] = true
+			}
+		}
+	}
+	return names, nil
+}
+
+// One test entry in -list: each name declared in its package's files is
+// listed, and one that is not is missing.
+func listGateTest(options *gateOptions, test gateTest) (string, []string) {
+	where := test.Repo + "/" + filepath.ToSlash(filepath.Join(test.Dir, test.Package))
+	directory := filepath.Join(options.root, test.Repo, test.Dir, filepath.FromSlash(test.Package))
+	if info, err := os.Stat(directory); err != nil || !info.IsDir() {
+		return gateMissing, []string{where + ": no such package here"}
+	}
+	declared, err := declaredTestNames(directory)
+	if err != nil {
+		return gateFail, []string{where + ": " + err.Error()}
+	}
+	outcomes := []string{}
+	details := []string{}
+	for _, name := range test.Names {
+		if declared[name] {
+			outcomes = append(outcomes, gateListed)
+			details = append(details, fmt.Sprintf("%s %s: declared", where, name))
+		} else {
+			outcomes = append(outcomes, gateMissing)
+			details = append(details, fmt.Sprintf("%s %s: no such test", where, name))
+		}
+	}
+	return combineOutcomes(outcomes), details
 }
