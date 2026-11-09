@@ -206,6 +206,9 @@ func initTaskSchedule(ctx context.Context) {
 		// §20.6's spent marks cleared once a network holds an in-window
 		// balance with room, every 60 s; not scheduled without MG2
 		work.ScheduleQuotaSpentPass(clientSession, tx)
+		// §20.6's service debits applied to their balances, one chain a
+		// shard; not scheduled without MG2
+		work.ScheduleFlushServiceDebits(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -652,6 +655,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.QuotaSpentPass,
 			work.QuotaSpentPassPost,
+		),
+		// §20.6's service debit flush (model.FlushServiceDebits), its commit
+		// post keeping each shard's idle mark
+		task.NewTaskTargetWithCommitPost(
+			work.FlushServiceDebits,
+			work.FlushServiceDebitsCommitPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,
