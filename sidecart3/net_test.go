@@ -187,6 +187,55 @@ func TestT3ApplyThenDropOnARealPutLeavesTheObject(t *testing.T) {
 	})
 }
 
+// The rest of the blob plans: a DELETE whose answer is lost has deleted, a LIST and a GET that fail
+// before they leave read nothing, and a held key refuses.
+func TestT3BlobPlansReachEveryRequest(t *testing.T) {
+	testEnv().Run(t, func(tb testing.TB) {
+		net := NewNet(t, nil)
+		defer net.Close()
+		cluster, err := net.Host().Blobs.FirstCluster()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := net.Actors().Actor(net.Context(), "writerA").Context()
+		inspect := sidecartest.InspectContext(ctx)
+		prefix := runKey("plans/")
+		deleted := prefix + "/deleted"
+		if _, err := cluster.PutIfNoneMatch(ctx, deleted, []byte("x"), nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, plan := range []*sidecartest.FaultPlan{
+			{Op: sidecartest.FaultOpDelete, KeyPrefix: deleted, Result: sidecartest.ApplyThenDrop},
+			{Op: sidecartest.FaultOpList, KeyPrefix: prefix, Result: sidecartest.FailBeforeApply},
+			{Op: sidecartest.FaultOpGet, KeyPrefix: prefix + "/read", Result: sidecartest.FailBeforeApply},
+			{Op: sidecartest.FaultOpPut, KeyPrefix: prefix + "/held", Result: sidecartest.Held},
+		} {
+			if _, err := net.Faults().Add(plan); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var unknown *sidecar.BlobUnknownError
+		if err := cluster.Delete(ctx, deleted); !errors.As(err, &unknown) {
+			t.Errorf("a DELETE whose answer was lost read %v", err)
+		}
+		if _, err := cluster.Head(inspect, deleted); !errors.Is(err, sidecar.ErrBlobNotFound) {
+			t.Errorf("the DELETE did not apply: %v", err)
+		}
+		if _, _, err := cluster.List(ctx, prefix, "", 10); !errors.Is(err, errTransport) {
+			t.Errorf("a LIST that never left read %v", err)
+		}
+		if _, err := cluster.Get(ctx, prefix+"/read"); !errors.Is(err, errTransport) || errors.As(err, &unknown) {
+			t.Errorf("a GET that never left read %v", err)
+		}
+		if _, err := cluster.PutIfNoneMatch(ctx, prefix+"/held", []byte("x"), nil); !errors.Is(err, sidecar.ErrBlobHeld) {
+			t.Errorf("a held key read %v", err)
+		}
+		if unfired := net.Faults().Unfired(); len(unfired) != 0 {
+			t.Errorf("never fired: %v", unfired)
+		}
+	})
+}
+
 // §22.8's pg-commit fault on server.Tx: a lost commit answer leaves the row committed while its caller
 // sees an error, and a commit that never left leaves none. A commit outside any actor takes no plan.
 func TestT3PgCommitDropLeavesACommittedRow(t *testing.T) {
