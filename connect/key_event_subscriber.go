@@ -49,6 +49,10 @@ var (
 		Name: "urnetwork_key_events_dispatched_sidecar_push_total",
 		Help: "sidecar hint key events (an INCR on {scp_<C>}n) dispatched to resident publishers",
 	})
+	keyEventsDispatchedAclVersion = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "urnetwork_key_events_dispatched_acl_version_total",
+		Help: "authorization log key events (an INCR on {acl_<networkId>}v) dispatched to the gate cache",
+	})
 )
 
 func init() {
@@ -61,6 +65,7 @@ func init() {
 		keyEventsDispatchedClientRemoved,
 		keyEventsDispatchedClientRecycle,
 		keyEventsDispatchedSidecarPush,
+		keyEventsDispatchedAclVersion,
 	)
 }
 
@@ -112,7 +117,16 @@ type keyEventSubscriber struct {
 	// whether the subscription includes every client's {scp_<C>}n, for the
 	// same reason: only an exchange with EnableSidecarPush subscribes it
 	sidecarPushPattern bool
-	newPeerDelta       func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
+	// whether the subscription includes every network's {acl_<networkId>}v,
+	// for the same reason: only a process that hosts §8.9's gate cache
+	// (EnableAclGate) subscribes it
+	aclGatePattern bool
+	// what an INCR on a network's {acl_}v runs, the gate cache's Changed, and
+	// what a (re)subscription runs, its Resync; neither may block. Nil ignores
+	// them (SetAclGate)
+	aclChanged   func(server.Id)
+	aclResync    func()
+	newPeerDelta func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 	// the session revision read behind hints; session.NetworkSessionRevision
 	// when unset
 	sessionRevision func(context.Context, server.Id) (string, int64, error)
@@ -124,7 +138,9 @@ type keyEventSubscriber struct {
 // clientRecyclePattern subscribes the recycle flags' channel; an exchange
 // passes its EnableStuckProviderRecycle. sidecarPushPattern subscribes every
 // client's {scp_<C>}n; an exchange passes its EnableSidecarPush.
-func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings, clientRecyclePattern bool, sidecarPushPattern bool) *keyEventSubscriber {
+// aclGatePattern subscribes every network's {acl_<networkId>}v; an exchange
+// passes its EnableAclGate.
+func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings, clientRecyclePattern bool, sidecarPushPattern bool, aclGatePattern bool) *keyEventSubscriber {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	s := &keyEventSubscriber{
 		ctx:                  cancelCtx,
@@ -136,6 +152,7 @@ func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettin
 		sidecarPushListeners: map[server.Id]map[int64]sidecarPushListener{},
 		clientRecyclePattern: clientRecyclePattern,
 		sidecarPushPattern:   sidecarPushPattern,
+		aclGatePattern:       aclGatePattern,
 		newPeerDelta:         model.NewNetworkPeerDelta,
 	}
 	go server.HandleError(s.run)
@@ -156,6 +173,9 @@ func (self *keyEventSubscriber) patterns(db int) []string {
 	}
 	if self.sidecarPushPattern {
 		patterns = append(patterns, model.ScpHintKeyEventPattern(db))
+	}
+	if self.aclGatePattern {
+		patterns = append(patterns, model.AclVersionKeyEventPattern(db))
 	}
 	return patterns
 }
@@ -263,6 +283,30 @@ func (self *keyEventSubscriber) SetClientRecycle(clientRecycle func(server.Id)) 
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.clientRecycle = clientRecycle
+}
+
+// Sets what a network's {acl_}v INCR runs, the process's gate cache's
+// Changed, and what every (re)subscription runs, its Resync (§8.9). Neither
+// may block. Only a subscriber with aclGatePattern hears the events.
+func (self *keyEventSubscriber) SetAclGate(changed func(server.Id), resync func()) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.aclChanged = changed
+	self.aclResync = resync
+}
+
+// Tells the gate cache the subscription came back: whatever {acl_}v moved in
+// the gap reached no one, so every network it holds reloads.
+func (self *keyEventSubscriber) resyncAclGate() {
+	var resync func()
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		resync = self.aclResync
+	}()
+	if resync != nil {
+		resync()
+	}
 }
 
 // Kicks every close listener, trickled over the resync spread. Requests added
@@ -428,6 +472,12 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 			return
 		}
 	}
+	if self.aclGatePattern {
+		if networkId, ok := model.ParseAclVersionKeyEvent(channel); ok {
+			self.dispatchAclVersion(networkId, event)
+			return
+		}
+	}
 	if networkId, ok := parseSessionEvent(channel); ok {
 		self.kickSession(networkId)
 		return
@@ -551,6 +601,25 @@ func (self *keyEventSubscriber) dispatchSidecarPush(clientId server.Id, event st
 	}
 }
 
+// Tells the gate cache a network's log moved, on api's INCR of its {acl_}v,
+// the one event that is: its ttl's expire is dropped above, and an expiry or a
+// del moves no log.
+func (self *keyEventSubscriber) dispatchAclVersion(networkId server.Id, event string) {
+	if event != "incrby" {
+		return
+	}
+	var changed func(server.Id)
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		changed = self.aclChanged
+	}()
+	if changed != nil {
+		changed(networkId)
+		keyEventsDispatchedAclVersion.Inc()
+	}
+}
+
 // run supervises the subscription set: (re)subscribe, resync everything the
 // gap may have missed, drain until the subscription dies or the topology
 // changes, repeat. Errors back off; the loop only exits with the context.
@@ -587,6 +656,7 @@ func (self *keyEventSubscriber) run() {
 		self.resyncAll()
 		self.resyncCloseListeners()
 		self.resyncSidecarPushListeners()
+		self.resyncAclGate()
 
 		drain := func() {
 			defer unsub()

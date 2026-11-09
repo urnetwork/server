@@ -15,6 +15,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -236,4 +237,42 @@ func configLogGetRows(ctx context.Context, cluster sidecar.BlobCluster, networkI
 		return nil, errors.New("no such rows")
 	}
 	return rows, nil
+}
+
+// §8.8: api alone refuses a directory RepoCreate outside the team tier, 403 with the tip, since readers know no tier;
+// on the team tier it lands, and a general repo's lands whatever the tier.
+func TestConfigLogRefusesTheDirectoryOutsideTheTeamTier(t *testing.T) {
+	ctx := context.Background()
+	cluster := testConfigLogFakeCluster(t)
+	team := false
+	world := sidecartest.NewConfigLogSuiteWorld(ctx, cluster)
+	settings := DefaultConfigLogSettings()
+	settings.Clock = world.Clock()
+	settings.TeamTier = func(ctx context.Context, networkId server.Id) bool {
+		return team
+	}
+	sequencer := NewConfigLogSequencer(cluster, settings, nil)
+	networkId := server.Id(world.NetworkId())
+	signedHeader, rows, genesis, configPushes := world.BaseOne()
+	pin, err := sequencer.AppendBase(ctx, networkId, &ConfigLogBase{SignedHeader: signedHeader, Rows: rows, Genesis: genesis, ConfigPushes: configPushes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	world.SetTip(pin)
+
+	general, err := sequencer.AppendStatement(ctx, networkId, world.RepoCreate(protocol.RepoKind_REPO_KIND_GENERAL))
+	if err != nil {
+		t.Fatalf("a general repo outside the team tier: %v", err)
+	}
+	world.SetTip(general)
+	_, err = sequencer.AppendStatement(ctx, networkId, world.RepoCreate(protocol.RepoKind_REPO_KIND_DIRECTORY))
+	configLogError := &ConfigLogError{}
+	if !errors.As(err, &configLogError) || configLogError.Status != http.StatusForbidden || configLogError.Tip.GetVersion() != general.GetVersion() ||
+		!errors.Is(err, sidecar.ErrConfigRule) {
+		t.Fatalf("the directory outside the team tier: %v", err)
+	}
+	team = true
+	if directory, err := sequencer.AppendStatement(ctx, networkId, world.RepoCreate(protocol.RepoKind_REPO_KIND_DIRECTORY)); err != nil || directory.GetVersion() != general.GetVersion()+1 {
+		t.Fatalf("the directory on the team tier: %v", err)
+	}
 }

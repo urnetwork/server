@@ -85,6 +85,9 @@ type ConfigLogSettings struct {
 	NetworkCount int
 	// The clock entries' time_ms comes from. nil is real time.
 	Clock sidecar.Clock
+	// Whether a network is on the team tier, which a directory RepoCreate needs at api alone (§8.8). nil is
+	// NetworkTierOf's answer, team; a test passes its own.
+	TeamTier func(ctx context.Context, networkId server.Id) bool
 }
 
 func DefaultConfigLogSettings() *ConfigLogSettings {
@@ -617,8 +620,9 @@ func (self *ConfigLogSequencer) advance(ctx context.Context, networkId server.Id
 	}
 }
 
-// §7.9's statement row: the retry identity, then the verdict at the tip, then
-// the append.
+// §7.9's statement row: the retry identity, then the verdict at the tip and,
+// for a directory RepoCreate, the team tier, which api alone checks since
+// readers know no tier (§8.8, §20.5), then the append.
 func (self *ConfigLogSequencer) AppendStatement(ctx context.Context, networkId server.Id, signed []byte) (*bridge.AuthPin, error) {
 	return self.append(ctx, networkId, &configLogAppend{
 		kind: bridge.AuthEntryKindStatement,
@@ -628,9 +632,21 @@ func (self *ConfigLogSequencer) AppendStatement(ctx context.Context, networkId s
 			if pin, found := network.log.FindStatement(verdict.StatementId); found {
 				return pin, nil
 			}
+			if verdict.Refusal == nil && sidecar.AclStatementNeedsTeamTier(signed) && !self.teamTier(ctx, networkId) {
+				return nil, fmt.Errorf("%w: the directory is the team tier's", sidecar.ErrConfigRule)
+			}
 			return nil, verdict.Refusal
 		},
 	})
+}
+
+// Whether the network is on the team tier: the settings' check, else
+// NetworkTierOf's answer.
+func (self *ConfigLogSequencer) teamTier(ctx context.Context, networkId server.Id) bool {
+	if self.settings.TeamTier != nil {
+		return self.settings.TeamTier(ctx, networkId)
+	}
+	return NetworkTierOf(ctx, networkId) == NetworkTierTeam
 }
 
 // A base as POST /network/config/projection carries it.
