@@ -575,6 +575,7 @@
     "evs": "certificates",
     "gossip": "certificates",
     "mcp": "certificates",
+    "mxedge-platform": "certificates",
     "proxy": "proxy",
     "taskworker": "certificates"
   }
