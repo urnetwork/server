@@ -1,0 +1,291 @@
+# §22.7's schema guard, server's half (TEST-M1-03; I-18, R-TEST-3): every column the sidecar migration
+# groups create, or add to a table that exists today, mapped to the row of §2.8's list it shows under.
+# sidecar_schema_guard_test.go applies the groups to a scratch database, reads information_schema.columns
+# for these tables, and fails on a column with no row here, a row that is not live or does not store the
+# table or column, and a mapped column that no longer exists; under -tags sidecar_pending it also reads
+# the groups' SQL, so a table or added column missing here fails before anything reads it.
+#
+# tables      by name.
+#   group     MG0 to MG9, the group that creates the table or adds its columns (§19.7).
+#   existing  the table exists before the sidecar: only the columns listed are the sidecar's.
+#   columns   each column, and its row of §2.8's list; for a column added to an existing table that the
+#             row names in words rather than by name, the row and then those words, which its store or
+#             sees must hold.
+#
+# A row changes only through the design (design-records); a new column needs its row there first, then
+# its line here (the brief's metadata rule).
+
+tables:
+  network_client_owner:
+    group: MG0
+    columns:
+      acl_enforcing: api-4
+      admin_refused: api-4
+      auth_key_id: api-4
+      client_id: api-4
+      declares_no_egress: api-4
+      ephemeral: api-4
+      member_id: api-4
+      owner_user_id: api-4
+      sponsor_user_id: api-4
+      strict_exp: api-4
+      tagged: api-4
+  account_api_key:
+    group: MG0
+    existing: true
+    columns:
+      creator_user_id: api-11 creator
+      expire_time: api-11 expiry
+      scopes: api-11 scopes
+  auth_code:
+    group: MG0
+    existing: true
+    columns:
+      api_key_id: api-11
+  sidecar_identity:
+    group: MG1
+    columns:
+      create_time: api-5
+      identity_alg: api-5
+      identity_public_key: api-5
+      network_id: api-5
+      revoke_time: api-5
+      sidecar_id: api-5
+      status: api-5
+  sidecar_identity_binding:
+    group: MG1
+    columns:
+      client_id: api-5
+      client_public_key: api-5
+      create_time: api-5
+      generation: api-5
+      sidecar_id: api-5
+      signatures: api-5
+  network_auth_key:
+    group: MG1
+    columns:
+      auth_key_id: api-11
+      create_time: api-11
+      creator_user_id: api-11
+      ephemeral: api-11
+      expire_time: api-11
+      max_uses: api-11
+      network_id: api-11
+      pre_approved: api-11
+      secret_sha256: api-11
+      tag_ids: api-11
+      use_count: api-11
+  network_admin_event:
+    group: MG1
+    columns:
+      action: api-8
+      actor_id: api-8
+      actor_kind: api-8
+      chain_sha256: api-8
+      event_time: api-8
+      network_id: api-8
+      prev_sha256: api-8
+      request_id: api-8
+      result: api-8
+      seq: api-8
+      target_id: api-8
+      target_kind: api-8
+  network_acl_head:
+    group: MG2
+    columns:
+      chain: api-7
+      has_document: api-7
+      network_id: api-7
+      version: api-7
+  network_acl_ack:
+    group: MG2
+    columns:
+      ack_time: api-15
+      client_id: api-15
+      version: api-15
+  network_client:
+    group: MG2
+    existing: true
+    columns:
+      acl_subject_client_id: api-4
+  network_tls_cert:
+    group: MG5
+    columns:
+      account_uri: cert-1
+      ari_window_end: cert-1
+      ari_window_start: cert-1
+      attestation: cert-1
+      ca: cert-1
+      cert_id: cert-1
+      chain: cert-1
+      client_id: cert-1
+      csr: cert-1
+      identifier_set_sha256: cert-1
+      network_id: cert-1
+      not_after: cert-1
+      not_before: cert-1
+      profile: cert-1
+      serial: cert-1
+      sidecar_id: cert-1
+      spki_sha256: cert-1
+      state: cert-1
+      successor_cert_id: cert-1
+  network_tls_suspension:
+    group: MG5
+    columns:
+      host: tls-4
+      network_id: tls-4
+      reason: tls-4
+      until_time: tls-4
+  tls_connection_record:
+    group: MG5
+    columns:
+      byte_count: tls-3
+      connection_id: tls-3
+      end_time: tls-3
+      host: tls-3
+      network_id: tls-3
+      start_time: tls-3
+      visitor_hash: tls-3
+  tls_connection_day:
+    group: MG5
+    columns:
+      byte_count: tls-3
+      connection_count: tls-3
+      day: tls-3
+      host: tls-3
+      network_id: tls-3
+  abuse_case:
+    group: MG5
+    columns:
+      barred: api-14
+      case_id: api-14
+      category: api-14
+      close_time: api-14
+      create_time: api-14
+      join_key: api-14
+      join_kind: api-14
+      network_id: api-14
+      reporter_class: api-14
+      review_due_time: api-14
+      state: api-14
+      target: api-14
+      target_kind: api-14
+  abuse_action:
+    group: MG5
+    columns:
+      action_id: api-14
+      applied_time: api-14
+      by_machine: api-14
+      case_id: api-14
+      category: api-14
+      create_time: api-14
+      kind: api-14
+      mailed_time: api-14
+      network_id: api-14
+      review_reason: api-14
+      review_state: api-14
+      review_time: api-14
+      reviewer_id: api-14
+      target: api-14
+      until_time: api-14
+  abuse_appeal:
+    group: MG5
+    columns:
+      appeal_id: api-14
+      case_id: api-14
+      create_time: api-14
+      decide_time: api-14
+      decision_reason: api-14
+      network_id: api-14
+      reason: api-14
+      reviewer_id: api-14
+      state: api-14
+      user_id: api-14
+  network_abuse_state:
+    group: MG5
+    columns:
+      case_id: api-14
+      network_id: api-14
+      state: api-14
+      until_time: api-14
+      update_time: api-14
+  abuse_legal_hold:
+    group: MG5
+    columns:
+      case_id: api-14
+      copied_rows: api-14
+      copy_state: api-14
+      expire_time: api-14
+      kind: api-14
+      network_id: api-14
+      part: api-14
+      place_time: api-14
+      renew_time: api-14
+      report_time: api-14
+      scope: api-14
+  abuse_access_log:
+    group: MG5
+    columns:
+      access_time: api-14
+      case_id: api-14
+      log_id: api-14
+      lookup_kind: api-14
+      reviewer_id: api-14
+  legal_request:
+    group: MG5
+    columns:
+      case_id: api-14
+      close_time: api-14
+      country: api-14
+      create_time: api-14
+      due_time: api-14
+      engineering_signoff_id: api-14
+      instrument: api-14
+      legal_signoff_id: api-14
+      network_ids: api-14
+      production_state: api-14
+      request_id: api-14
+      seal_until: api-14
+      sealed: api-14
+  network_bridge_share:
+    group: MG6
+    columns:
+      accept_status: api-9
+      alias_table: api-9
+      alias_table_version: api-9
+      invited_network_id: api-9
+      network_id: api-9
+      share_id: api-9
+      target_table: api-9
+      target_table_version: api-9
+  mail_network:
+    group: MG7
+    columns:
+      create_time: mx-3
+      network_id: mx-3
+  mail_host_key:
+    group: MG7
+    columns:
+      host: mx-3
+      network_id: mx-3
+      publish_time: mx-3
+      receiver_sidecar_id: mx-3
+      retire_time: mx-3
+      spki_sha256: mx-3
+      state: mx-3
+  mail_direct_mx:
+    group: MG7
+    columns:
+      address: mx-3
+      network_id: mx-3
+      receiver_sidecar_id: mx-3
+      state: mx-3
+      verify_time: mx-3
+  mail_connection_record:
+    group: MG7
+    columns:
+      byte_count: mx-2
+      network_id: mx-2
+      result: mx-2
+      start_time: mx-2
