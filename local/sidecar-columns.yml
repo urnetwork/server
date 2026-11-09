@@ -379,6 +379,80 @@ tables:
       request_id: api-14
       seal_until: api-14
       sealed: api-14
+  network_team:
+    group: MG6
+    columns:
+      network_id: api-2
+      sso_required: api-2
+  network_member:
+    group: MG6
+    columns:
+      email: api-3
+      member_id: api-3
+      network_id: api-3
+      pending: api-3
+      reauth_deadline: api-3
+      role: api-3
+      user_id: api-3
+  network_invite:
+    group: MG6
+    columns:
+      email: api-3
+      expire_time: api-3
+      invite_id: api-3
+      network_id: api-3
+      role: api-3
+      token_sha256: api-3
+  network_idp:
+    group: MG6
+    columns:
+      client_auth: api-3
+      client_id: api-3
+      client_secret_ciphertext: api-3
+      idp_id: api-3
+      issuer: api-3
+      network_id: api-3
+  network_idp_identity:
+    group: MG6
+    columns:
+      idp_id: api-1
+      sub: api-1
+      user_id: api-1
+  network_domain:
+    group: MG6
+    columns:
+      challenge: api-3
+      check_time: api-3
+      domain: api-3
+      fail_time: api-3
+      network_id: api-3
+      verify_time: api-3
+  network_oauth_client:
+    group: MG6
+    columns:
+      creator_member_id: api-11
+      network_id: api-11
+      oauth_client_id: api-11
+      scopes: api-11
+      secret_sha256: api-11
+  network_scim_change:
+    group: MG6
+    columns:
+      change_id: api-3
+      create_time: api-3
+      detail: api-3
+      kind: api-3
+      member_id: api-3
+      network_id: api-3
+  network_audit_webhook:
+    group: MG6
+    columns:
+      delivered_seq: api-8
+      fail_time: api-8
+      next_time: api-8
+      network_id: api-8
+      url: api-8
+      webhook_id: api-8
   network_bridge_share:
     group: MG6
     columns:
