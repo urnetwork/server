@@ -15,8 +15,22 @@ import (
 // Returned counts lazy rows only at Scan, not at QueryRow construction.
 type competitionSupervisorReadPrefixSnapshot struct {
 	workerFence                          bool
+	scopeIndependent                     bool
 	valid                                bool
 	count, returned, succeeded, bypasses uint64
+}
+
+// Retain the old closed shape for historical proofs; the real lease-only
+// renewer explicitly selects its narrower prefix before issuing any statement.
+func competitionSupervisorObservedReadPrefix(prefix competitionSupervisorReadPrefixSnapshot) []struct {
+	step      competitionSupervisorRenewalStep
+	kind, sql string
+} {
+	statements := competitionSupervisorReadPrefixStatements(prefix.workerFence)
+	if prefix.scopeIndependent && !prefix.workerFence {
+		return statements[1:]
+	}
+	return statements
 }
 
 // These are exact current-source statements, not a tunable SQL allowlist. An
@@ -67,7 +81,7 @@ func (self *competitionSupervisorRenewObservation) observeReadPrefix(tx server.P
 func (self *competitionSupervisorReadPrefixTx) enter(kind, sql string) {
 	prefix := &self.observation.readPrefix
 	prefix.count++
-	expected := competitionSupervisorReadPrefixStatements(prefix.workerFence)
+	expected := competitionSupervisorObservedReadPrefix(*prefix)
 	if prefix.count > uint64(len(expected)) {
 		prefix.valid = false
 		return

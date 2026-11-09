@@ -62,7 +62,9 @@ reveal does not mean every submitted patch body is public.
 
 As verified on **November 9, 2026**, the API reports the winner's
 `integrity_review` and `source_approval` as `approved`; settlement is still
-`pending`. Source promotion and opening epoch 2 remain separate operations.
+`pending`. The reviewed epoch-2 checkpoint is now published to all ten
+`sim-latency` branches; intake activation remains pending. See the
+[epoch source index](../EPOCH-SOURCE.md#production-epoch-2--published-checkpoint-intake-not-yet-open).
 The plan is to open epoch 2 for a fresh week with grading paused while its
 fresh baseline and two-host evaluator qualification finish in parallel.
 

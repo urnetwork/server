@@ -36,7 +36,7 @@ func competitionSupervisorReadOnlyDeadline(err error, workerFence bool) bool {
 		return false
 	}
 	prefix := proof.readPrefix
-	expected := competitionSupervisorReadPrefixStatements(workerFence)
+	expected := competitionSupervisorObservedReadPrefix(prefix)
 	if !prefix.valid || prefix.workerFence != workerFence || prefix.bypasses != 0 || prefix.count == 0 || prefix.count > uint64(len(expected)) ||
 		prefix.returned != prefix.count || prefix.succeeded+1 != prefix.count || expected[prefix.count-1].step != proof.step {
 		return false

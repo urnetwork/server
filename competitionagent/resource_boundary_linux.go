@@ -412,12 +412,17 @@ func runtimeBoundaryEngineDocument(boundary RuntimeResourceBoundary, settings Ru
 		"pidfile": filepath.Join(filepath.Dir(boundary.PrivateSocketPath), "dockerd.pid"),
 		"hosts":   []any{"unix://" + boundary.PrivateSocketPath}, "group": "root",
 		"containerd": boundary.ContainerdSocketPath, "containerd-namespace": "urnetwork-evaluation",
-		"containerd-plugins-namespace": "urnetwork-evaluation-plugins",
+		"containerd-plugins-namespace": runtimeBoundaryPluginNamespace(boundary),
 		"bridge":                       "none", "iptables": false, "ip6tables": false, "ip-forward": false, "ip-masq": false, "userland-proxy": false, "ipv6": false,
 		"userns-remap": boundary.UserNamespace + ":" + boundary.UserNamespace,
 		"exec-opts":    []any{"native.cgroupdriver=systemd"}, "default-runtime": boundary.RuntimeName, "live-restore": false,
 		"log-driver": "json-file", "log-opts": map[string]any{"max-size": settings.ContainerLogMaximumSize, "max-file": strconv.Itoa(settings.ContainerLogMaximumFiles)},
 	}
+}
+
+// Stock Docker remapping derives this effective namespace from the root map.
+func runtimeBoundaryPluginNamespace(boundary RuntimeResourceBoundary) string {
+	return fmt.Sprintf("plugins.moby-%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)
 }
 
 // Containerd's root, state and socket are explicit; only its fixed daemon is
@@ -523,7 +528,7 @@ func validateRuntimeBoundaryDaemon(content []byte, boundary RuntimeResourceBound
 		info.DockerRootDir != filepath.Join(boundary.DockerDataRoot, fmt.Sprintf("%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)) ||
 		info.CgroupDriver != "systemd" || info.CgroupVersion != "2" || info.DefaultRuntime != boundary.RuntimeName || info.LiveRestoreEnabled ||
 		info.Containerd == nil || info.Containerd.Address != boundary.ContainerdSocketPath ||
-		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != "urnetwork-evaluation-plugins" {
+		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != runtimeBoundaryPluginNamespace(boundary) {
 		return errors.New("private daemon storage, remap, cgroup or runtime class differs")
 	}
 	userns := false
@@ -589,8 +594,21 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 		root, rootErr := decodeMountField(fields[3])
 		target, targetErr := decodeMountField(fields[4])
 		source, sourceErr := decodeMountField(fields[separator+2])
+		rootValid := filepath.IsAbs(root) && filepath.Clean(root) == root
+		if !rootValid && fields[separator+1] == "nsfs" {
+			// Namespace handles have kernel type/inode roots, not filesystem paths.
+			kind, inodeField, found := strings.Cut(root, ":[")
+			switch kind {
+			case "net", "mnt", "pid", "user", "uts", "ipc", "cgroup", "time":
+				if found && strings.HasSuffix(inodeField, "]") {
+					inodeText := strings.TrimSuffix(inodeField, "]")
+					inode, err := strconv.ParseUint(inodeText, 10, 64)
+					rootValid = err == nil && inode != 0 && strconv.FormatUint(inode, 10) == inodeText
+				}
+			}
+		}
 		if idErr != nil || id == 0 || !found || majorErr != nil || minorErr != nil || rootErr != nil || targetErr != nil || sourceErr != nil ||
-			!filepath.IsAbs(target) || filepath.Clean(target) != target || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+			!filepath.IsAbs(target) || filepath.Clean(target) != target || !rootValid {
 			return nil, errors.New("invalid resource mount identity")
 		}
 		options := map[string]bool{}
@@ -1745,7 +1763,7 @@ func validateRuntimeBoundaryContainerdVersion(content []byte, boundary RuntimeRe
 		return errors.New("private containerd version projection is unqualified")
 	}
 	fields := strings.Fields(string(content))
-	if len(fields) != 4 || fields[0] != "containerd" || fields[1] != "github.com/containerd/containerd/v2" && fields[1] != "containerd.io" ||
+	if len(fields) != 4 || fields[0] != "containerd" || fields[1] != "github.com/containerd/containerd/v2" && fields[1] != "containerd.io" && fields[1] != "containerd" ||
 		strings.TrimPrefix(fields[2], "v") != boundary.ContainerdVersion || fields[3] != boundary.ContainerdSourceCommit {
 		return errors.New("private containerd actual source version differs")
 	}

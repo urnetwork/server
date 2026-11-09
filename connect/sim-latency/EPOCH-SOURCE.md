@@ -15,6 +15,49 @@ identify production source.
 ## Epochs
 
 - [Production epoch 1 — initial baseline](#production-epoch-1--initial-baseline)
+- [Production epoch 2 — published checkpoint, intake not yet open](#production-epoch-2--published-checkpoint-intake-not-yet-open)
+
+## Production epoch 2 — published checkpoint, intake not yet open
+
+Published and independently checked against GitHub branch heads on 2026-11-09.
+**This checkpoint is not yet an open round or permission to start grading.**
+The epoch-1 winner's reviewed product change and the approved prospective G2/G7
+instrument are included. The API still advertises epoch 1 until activation.
+
+| Identity | Value |
+|---|---|
+| Season | `sim-latency-production-20261028-r2` |
+| Reserved target round | `01a1c110-585b-ce38-4f29-ca4860a1c058` |
+| Source generation / activation generation | `1` / `2` |
+| Source-lock SHA-256 | `4781aac57e052ff048440ac5f0f118d780a76fa1685326fc0b3af1143ae4f0cd` |
+| Evaluator image | `sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9` |
+| Compiler | Go `1.27.3` |
+| Takeover margin | `0.269` (26.9%) |
+| G2 | Requests and bytes each at least 95% of baseline; no upper bounds |
+| G7 | Expected pages and bytes each at least 95% of same-epoch baseline coverage |
+
+All ten repositories use `sim-latency`; use these immutable commits rather than
+the moving branch. Runtime qualification and the fresh epoch baseline remain
+separate prerequisites for grading.
+
+| Repository | Exact commit |
+|---|---|
+| [server](https://github.com/urnetwork/server) | `6c55fc2ca3bf278ae4f94938e4940547844a71f1` |
+| [connect](https://github.com/urnetwork/connect) | `388d8a153952fe36af1753908f4b21501967f3a8` |
+| [sdk](https://github.com/urnetwork/sdk) | `d3824aa98c02e3c16ff7abcfe7a7088c8a470cdb` |
+| [proxy](https://github.com/urnetwork/proxy) | `af1d364fe34b807c31936642bff7d3fd849ab2a4` |
+| [glog](https://github.com/urnetwork/glog) | `1c4954b017d9e8140a4e7020f914eb27410a41c6` |
+| [goidenticons](https://github.com/urnetwork/goidenticons) | `39ccec1b69db3a6f67e7346d6f44863499e6241d` |
+| [userwireguard](https://github.com/urnetwork/userwireguard) | `f9a92f0e5f5577a80d358065c4d39ca21f971a1c` |
+| [sn](https://github.com/urfoundation/sn) | `6e686aabd53b7c45b154051fd268138988224eba` |
+| [warp](https://github.com/urnetwork/warp) | `8dfa405ec380a60307952778921f05bba1c59a33` |
+| [gvisor](https://github.com/urnetwork/gvisor) | `57c9e137f7407ad6cd41dcca1ba304a446e09c79` |
+
+The source manifest is published in config commit
+`ff23e28f3a6d0e9067b5024e5127a7bb697d1a0b`; its SHA-256 is
+`f40b65cd3d2d05b9948945f3aa11cbeee794d341675d2c9fdfd9e94797f9225b`.
+Do not distribute operational config or vault files; this index is the public
+source extract.
 
 ## Production epoch 1 — initial baseline
 

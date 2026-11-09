@@ -173,6 +173,45 @@ func CheckCompetitionPreparationFence(ctx context.Context, settings *Settings, r
 	return intent, err
 }
 
+// The watchdog observes revocation without taking the season lock owned by
+// synchronous authorization. Full review/source authorization still runs at
+// every external-operation boundary; this observation never grants authority.
+func checkCompetitionPreparationLiveness(ctx context.Context, settings *Settings, request CompetitionPreparationRequest) error {
+	return captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(checkCompetitionPreparationLivenessInTx(ctx, tx, settings, request))
+		})
+	})
+}
+
+// Read only lifecycle facts on the caller's transaction, without advisory or
+// row locks, so the monitor cannot cancel healthy authorization by contention.
+func checkCompetitionPreparationLivenessInTx(ctx context.Context, tx server.PgTx, settings *Settings, request CompetitionPreparationRequest) error {
+	store := PostgresStore{}
+	if err := store.requireAutomationLeaseInTx(ctx, tx, settings, request.Lease); err != nil {
+		return err
+	}
+	if err := ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"); err != nil {
+		return err
+	}
+	stored, err := sourceActivationInTx(ctx, tx, settings, request.Intent.Generation)
+	if err != nil {
+		return err
+	}
+	digest, err := competitionPreparationIntentDigest(*stored)
+	if err != nil || stored.ActivatedAt != nil || stored.AbandonedAt != nil || stored.IntentSha256 != request.Intent.IntentSha256 || digest != request.Intent.IntentSha256 {
+		return ErrConflict
+	}
+	current, err := currentSourceActivationInTx(ctx, tx, settings)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	if current == nil && stored.ExpectedGeneration != 0 || current != nil && current.Generation != stored.ExpectedGeneration {
+		return ErrConflict
+	}
+	return nil
+}
+
 // Small private seams make cancellation and failure ordering deterministic in
 // tests; the exported entrypoint always binds concrete storage and execution.
 type competitionPreparationAdapter struct {
@@ -252,7 +291,7 @@ func RunCompetitionPreparation(ctx context.Context, settings *Settings, config C
 			case <-time.After(5 * time.Second):
 			}
 			probeCtx, probeCancel := context.WithTimeout(operationCtx, 5*time.Second)
-			_, err := adapter.checkFence(probeCtx, settings, request)
+			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
 			probeCancel()
 			if err != nil {
 				stop(err)

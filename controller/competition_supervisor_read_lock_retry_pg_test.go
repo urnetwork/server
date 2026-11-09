@@ -78,7 +78,7 @@ func TestCompetitionSupervisorReadLockRetryPgAuthenticatesAuthorityPrefix(t *tes
 		})
 		proof, ok := firstError.(competitionSupervisorRenewError)
 		if err != nil || calls != 2 || waits != 1 || authorityEntries != 2 || !ok || proof.step != competitionSupervisorRenewalAuthority ||
-			proof.readPrefix.count != 3 || !proof.readPrefix.valid || proof.transaction.CommitAttempts != 0 || proof.transaction.RollbackAcknowledged != 1 ||
+			proof.readPrefix.count != 2 || !proof.readPrefix.valid || proof.transaction.CommitAttempts != 0 || proof.transaction.RollbackAcknowledged != 1 ||
 			proof.transaction.ReleaseReturned != 1 || proof.transaction.LastRelease.Disposition != server.DbTxReleaseIdle ||
 			next == nil || next.OwnerId != lease.OwnerId || next.FencingToken != lease.FencingToken || !next.LeaseExpiresAt.After(lease.LeaseExpiresAt) || !readExpiry().Equal(next.LeaseExpiresAt) {
 			t.Fatal("real authority-prefix rollback did not recover the original fence", calls, waits, authorityEntries, proof.readPrefix, err)
@@ -122,185 +122,48 @@ func TestCompetitionSupervisorWorkerFencePgObservesExpiryWithoutRenewing(t *test
 	})
 }
 
-// A separate transaction holds the exact scope advisory lock. Positive
-// blocking-pid evidence precedes the owned deadline; releasing only after the
-// actual stop witness produces a real failed step-one read-only prefix.
-func TestCompetitionSupervisorReadLockRetryPgAuthenticatesScopePrefix(t *testing.T) {
+// The source holder stays live until the actual independent renewal returns.
+func TestCompetitionSupervisorRenewalPgProgressesWithSourceScopeHeld(t *testing.T) {
 	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(t testing.TB) {
-		watchdog, stop := context.WithTimeout(t.Context(), 35*time.Second)
-		defer stop()
-		pop := server.Config.PushSimpleResource(server.MaintenancePgConfigResourceName, []byte("min_connections: 0\nmax_connections: 2\n"))
-		server.PgReset()
-		defer func() { pop(); server.PgReset() }()
+		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+		defer cancel()
 		fixture := newCompetitionAutomationFixture(t)
-		lease, err := fixture.store.AcquireAutomationLease(watchdog, fixture.settings, "synthetic-scope-prefix-owner", time.Minute)
+		lease, err := fixture.store.AcquireAutomationLease(ctx, fixture.settings, "synthetic-independent-renew-owner", time.Minute)
 		if err != nil {
 			t.Fatal(err)
 		}
-		held, release := make(chan int32, 1), make(chan struct{})
-		holderDone, holderJoined := make(chan error, 1), make(chan struct{})
-		var holderOnce sync.Once
-		unlock := func() { holderOnce.Do(func() { close(release) }) }
+		held, release := make(chan struct{}), make(chan struct{})
+		done := make(chan error, 1)
+		var releaseOnce sync.Once
+		unlock := func() { releaseOnce.Do(func() { close(release) }) }
+		defer func() {
+			unlock()
+			if err := <-done; err != nil {
+				t.Error("source holder failed", err)
+			}
+		}()
 		go func() {
-			defer close(holderJoined)
-			holderDone <- captureDatabaseError(func() {
-				server.MaintenanceTx(watchdog, func(tx server.PgTx) {
-					automationScopeLockInTx(watchdog, tx, fixture.settings)
-					var pid int32
-					server.Raise(tx.QueryRow(watchdog, `SELECT pg_backend_pid()`).Scan(&pid))
-					held <- pid
+			done <- captureDatabaseError(func() {
+				server.MaintenanceTx(ctx, func(tx server.PgTx) {
+					automationScopeLockInTx(ctx, tx, fixture.settings)
+					close(held)
 					select {
 					case <-release:
-					case <-watchdog.Done():
-						panic(watchdog.Err())
+					case <-ctx.Done():
+						panic(ctx.Err())
 					}
 				}, server.OptNoRetry())
 			})
 		}()
-		operation, cancelOperation := context.WithCancel(watchdog)
-		attempts, stopped := make(chan context.Context, 1), make(chan struct{})
-		proofReady, allowRetry := make(chan error, 1), make(chan struct{})
-		var retryOnce sync.Once
-		releaseRetry := func() { retryOnce.Do(func() { close(allowRetry) }) }
-		type result struct {
-			lease *model.CompetitionSupervisorLease
-			err   error
-			calls int
-		}
-		done, joined := make(chan result, 1), make(chan struct{})
-		started := false
-		defer func() {
-			cancelOperation()
-			unlock()
-			releaseRetry()
-			cleanup, cancel := context.WithTimeout(context.WithoutCancel(watchdog), 40*time.Second)
-			defer cancel()
-			if started {
-				select {
-				case <-joined:
-				case <-cleanup.Done():
-					t.Error("scope-prefix renewal did not join")
-				}
-			}
-			select {
-			case <-holderJoined:
-			case <-cleanup.Done():
-				t.Error("scope advisory holder did not join")
-			}
-		}()
-		var holderPid int32
 		select {
-		case holderPid = <-held:
-		case err := <-holderDone:
-			t.Fatal("scope holder failed", err)
-		case <-watchdog.Done():
-			t.Fatal("scope holder did not acknowledge")
-		}
-		policy := defaultCompetitionSupervisorRenewalSettings()
-		policy.AttemptTimeout = 1500 * time.Millisecond
-		policy.LockRetry.Now = func() time.Time { return fixture.now }
-		var firstError error
-		policy.LockRetry.Wait = func(ctx context.Context, _ time.Duration) error {
-			proofReady <- firstError
-			select {
-			case <-allowRetry:
-				return ctx.Err()
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		}
-		go func() {
-			defer close(joined)
-			calls := 0
-			var next *model.CompetitionSupervisorLease
-			err := retryCompetitionSupervisorRenewal(operation, lease.LeaseExpiresAt, policy, func(ctx context.Context) error {
-				calls++
-				actual := ctx
-				if calls == 1 {
-					actual = &competitionHeartbeatPgDeadlineContext{Context: ctx, stopped: stopped}
-					attempts <- actual
-				}
-				var err error
-				next, err = fixture.store.RenewAutomationLease(actual, fixture.settings, *lease, time.Minute)
-				if calls == 1 {
-					firstError = err
-				}
-				return err
-			})
-			done <- result{lease: next, err: err, calls: calls}
-		}()
-		started = true
-		var attempt context.Context
-		select {
-		case attempt = <-attempts:
-		case returned := <-done:
-			t.Fatal("scope renewal ended before dispatch", returned.err)
-		case <-watchdog.Done():
-			t.Fatal("scope renewal did not dispatch")
-		}
-		waiting := false
-		for !waiting {
-			err := captureDatabaseError(func() {
-				server.MaintenanceDb(watchdog, func(conn server.PgConn) {
-					server.Raise(conn.QueryRow(watchdog, `SELECT EXISTS(SELECT 1 FROM pg_stat_activity a
-					 WHERE a.datname=current_database() AND a.wait_event_type='Lock' AND $1::integer=ANY(pg_blocking_pids(a.pid)))`, holderPid).Scan(&waiting))
-				})
-			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !waiting {
-				select {
-				case returned := <-done:
-					t.Fatal("scope renewal ended before its positive wait", returned.err)
-				case <-watchdog.Done():
-					t.Fatal("scope wait was not observed")
-				case <-time.After(10 * time.Millisecond):
-				}
-			}
-		}
-		if attempt.Err() != nil {
-			t.Fatal("actual scope wait was not observed before the owned deadline")
-		}
-		select {
-		case <-stopped:
-		case <-watchdog.Done():
-			t.Fatal("scope statement did not acknowledge its caller's stop")
-		}
-		unlock()
-		select {
-		case err := <-holderDone:
-			if err != nil {
-				t.Fatal(err)
-			}
-		case <-watchdog.Done():
-			t.Fatal("scope holder did not release")
-		}
-		var failed error
-		select {
-		case failed = <-proofReady:
-		case returned := <-done:
-			t.Fatal("scope prefix did not reach recovery", returned.err)
-		case <-watchdog.Done():
-			t.Fatal("scope rollback did not return")
-		}
-		proof, ok := failed.(competitionSupervisorRenewError)
-		if !ok || !competitionSupervisorReadLockDeadline(failed) || proof.step != competitionSupervisorRenewalScopeLock || proof.readPrefix.count != 1 ||
-			proof.transaction.CommitAttempts != 0 || proof.transaction.RollbackAcknowledged != 1 || proof.transaction.ReleaseReturned != 1 || proof.transaction.LastRelease.Disposition != server.DbTxReleaseIdle {
-			t.Fatal("actual scope failure lost its closed read-only prefix", CompetitionSupervisorRenewalFailureDetails(failed))
-		}
-		var before time.Time
-		server.Db(watchdog, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(watchdog, `SELECT lease_expires_at FROM competition_supervisor_lease WHERE environment=$1 AND competition_id=$2 AND season_id=$3`, lease.Environment, lease.CompetitionId, lease.SeasonId).Scan(&before))
-		})
-		if !before.Equal(lease.LeaseExpiresAt) {
-			t.Fatal("failed scope prefix durably changed authority")
+		case <-held:
+		case <-ctx.Done():
+			t.Fatal("source scope was not acquired", ctx.Err())
 		}
 		fixture.now = fixture.now.Add(time.Second)
-		releaseRetry()
-		returned := <-done
-		if returned.err != nil || returned.calls != 2 || returned.lease == nil || returned.lease.OwnerId != lease.OwnerId || returned.lease.FencingToken != lease.FencingToken || !returned.lease.LeaseExpiresAt.After(lease.LeaseExpiresAt) {
-			t.Fatal("scope-prefix retry did not preserve its original fence", returned.calls, returned.err)
+		next, err := fixture.store.RenewAutomationLease(ctx, fixture.settings, *lease, time.Minute)
+		if err != nil || next == nil || next.FencingToken != lease.FencingToken || next.OwnerId != lease.OwnerId || !next.LeaseExpiresAt.After(lease.LeaseExpiresAt) {
+			t.Fatal("held source scope blocked the unchanged renewal fence", next, err)
 		}
 	})
 }

@@ -303,6 +303,9 @@ type stripeReconcileTestEnv struct {
 	fullInvoices   map[string]map[string]any
 	failList       bool
 	statusRequests atomic.Int64
+	// charge id -> the object GET /v1/charges/{id} serves; any other id is 404
+	charges        map[string]map[string]any
+	chargeRequests atomic.Int64
 	// Overrides exercise invalid, partial, and failed destination lookups.
 	checkoutResponse any
 	checkoutStatus   int
@@ -313,6 +316,7 @@ type stripeReconcileTestEnv struct {
 func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 	env := &stripeReconcileTestEnv{
 		fullInvoices: map[string]map[string]any{},
+		charges:      map[string]map[string]any{},
 	}
 
 	mux := http.NewServeMux()
@@ -336,6 +340,16 @@ func newStripeReconcileTestEnv(t testing.TB) *stripeReconcileTestEnv {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(invoice)
+	})
+	mux.HandleFunc("GET /v1/charges/{chargeId}", func(w http.ResponseWriter, r *http.Request) {
+		env.chargeRequests.Add(1)
+		charge, ok := env.charges[r.PathValue("chargeId")]
+		if !ok {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(charge)
 	})
 	mux.HandleFunc("GET /v1/checkout/sessions", func(w http.ResponseWriter, r *http.Request) {
 		if env.checkoutStatus != 0 {
