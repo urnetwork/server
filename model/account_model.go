@@ -400,6 +400,13 @@ func RemoveNetworkWithStoreSnapshot(
 		if server.SidecarMg7Linked() {
 			removeMailNetworkInTx(ctx, tx, networkId)
 		}
+		// §12.5's withdrawal, last since it takes the dns root's lock: every
+		// record of the network's zones goes in this commit, and its label and
+		// alias are tombstoned, never freed (I-14, D-DNS-10). A restoring root
+		// refuses, and the deletion fails for a retry.
+		if server.SidecarMg2Linked() || server.SidecarMg5Linked() {
+			server.Raise(DnsWithdrawNetworkInTx(ctx, tx, networkId))
+		}
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
