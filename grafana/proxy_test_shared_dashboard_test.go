@@ -62,7 +62,8 @@ func proxyTestDocumentPanels(document map[string]any) []map[string]any {
 // The shared copy as derived from the internal dashboard document: its
 // identity and tags, no variables and no links, every country matcher
 // dropped, and titles that said "selected countries" saying "all countries".
-// Descriptions are the copy's own, and are checked on their own.
+// The tags leave out the internal dashboard's host tag, since public viewers
+// read the tags. Descriptions are the copy's own, and are checked on their own.
 func proxyTestSharedFromInternal(t *testing.T, internal map[string]any) map[string]any {
 	t.Helper()
 	body, err := json.Marshal(internal)
@@ -75,7 +76,7 @@ func proxyTestSharedFromInternal(t *testing.T, internal map[string]any) map[stri
 	}
 	shared["uid"] = "urnetwork-proxy-test-shared"
 	shared["title"] = "urnetwork / proxy test (shared)"
-	shared["tags"] = []any{"urnetwork", "proxy", "planetoid", PublicTag, UnlistedTag}
+	shared["tags"] = []any{"urnetwork", "proxy", PublicTag, UnlistedTag}
 	templating, ok := shared["templating"].(map[string]any)
 	if !ok {
 		t.Fatal("the internal dashboard has no templating")
@@ -163,12 +164,22 @@ func TestProxyTestSharedDashboardIdentity(t *testing.T) {
 	if dashboard.Uid != "urnetwork-proxy-test-shared" || dashboard.Title != "urnetwork / proxy test (shared)" {
 		t.Errorf("uid %q, title %q", dashboard.Uid, dashboard.Title)
 	}
-	if !slices.Equal(dashboard.Tags, []string{"urnetwork", "proxy", "planetoid", PublicTag, UnlistedTag}) {
+	if !slices.Equal(dashboard.Tags, []string{"urnetwork", "proxy", PublicTag, UnlistedTag}) {
 		t.Errorf("tags = %q", dashboard.Tags)
 	}
 	if len(dashboard.Templating.List) != 0 || len(dashboard.Links) != 0 {
 		t.Errorf("the copy has %d variables and %d links, want none", len(dashboard.Templating.List), len(dashboard.Links))
 	}
+
+	// the runner's host, as the internal dashboard's description gives its
+	// host label, is named nowhere in the copy, tags included: public viewers
+	// read the whole document
+	internalDescription, _ := readProxyTestDocumentJson(t, proxyTestDashboardName)["description"].(string)
+	hostLabel := regexp.MustCompile(`host="([^"]+)"`).FindStringSubmatch(internalDescription)
+	if hostLabel == nil {
+		t.Fatal("the internal dashboard's description no longer gives the runner's host label; update this check")
+	}
+	runnerHost := hostLabel[1]
 
 	// no link anywhere: an outside viewer can open no private dashboard and no
 	// explore view
@@ -191,6 +202,9 @@ func TestProxyTestSharedDashboardIdentity(t *testing.T) {
 				if strings.Contains(value, internalPath) {
 					t.Errorf("%s links into grafana (%s): %s", path, internalPath, value)
 				}
+			}
+			if strings.Contains(strings.ToLower(value), strings.ToLower(runnerHost)) {
+				t.Errorf("%s names the runner's host: %s", path, value)
 			}
 		}
 	}
