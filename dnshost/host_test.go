@@ -267,3 +267,12 @@ func TestHostLbInterfacesFromServicesYaml(t *testing.T) {
 		t.Fatalf("interfaces %+v", interfaces)
 	}
 }
+
+// A role that is neither api nor edge is never ready.
+func TestNewHostRefusesAnUnknownRole(t *testing.T) {
+	host := sidecartest.NewFakeHost(t.Context(), nil, nil, nil, nil).ServiceHost()
+	engine, err := NewHost(t.Context(), "both", host, &HostSettings{Dns: hostTestSettings(t, nil)}, nil)
+	if err == nil || engine.Ready() {
+		t.Fatalf("err %v, ready %v", err, engine.Ready())
+	}
+}

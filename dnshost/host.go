@@ -326,3 +326,15 @@ type notReadyStreamEngine struct {
 func (notReadyStreamEngine) Serve(listener net.Listener) error {
 	return listener.Close()
 }
+
+// The engine for role, api or edge: NewApiHost's or NewEdgeHost's, or a
+// not-ready one and why for a role that is neither or cannot start.
+func NewHost(ctx context.Context, role string, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (sidecar.Engine, error) {
+	switch role {
+	case HostRoleApi:
+		return NewApiHost(ctx, host, settings, deps)
+	case HostRoleEdge:
+		return NewEdgeHost(ctx, host, settings, deps)
+	}
+	return notReadyEngine{}, fmt.Errorf("dns host: role %q is neither %s nor %s", role, HostRoleApi, HostRoleEdge)
+}
