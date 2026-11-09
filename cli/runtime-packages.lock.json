@@ -570,6 +570,8 @@
     "alt": "certificates",
     "api": "certificates",
     "connect": "certificates",
+    "dns": "certificates",
+    "dnsedge": "certificates",
     "gossip": "certificates",
     "mcp": "certificates",
     "proxy": "proxy",

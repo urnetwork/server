@@ -1,6 +1,6 @@
 # Service image package inputs
 
-The seven Ubuntu service Dockerfiles pin both the base image and every added or
+The nine Ubuntu service Dockerfiles pin both the base image and every added or
 updated package payload. Their `runtime-packages` stage downloads only literal
 URLs with literal `ADD --checksum=sha256:...` values. The final stage installs the
 selected architecture's packages from a read-only stage mount with
@@ -11,7 +11,7 @@ layers through that mount.
 `runtime-packages.lock.json` records the same inputs, their versions, sizes,
 architectures and signed-index parents. It is a candidate input inventory, not a
 deployment approval, vulnerability assessment or proof of a reproducible image.
-Tests join all seven recipes to this lock and refuse moving package resolution,
+Tests join all nine recipes to this lock and refuse moving package resolution,
 missing hashes/payloads, online installation, tag-only bases, target omissions and
 loss of proxy's curl package. Existing binary paths and service commands remain
 unchanged.
@@ -24,7 +24,7 @@ Inputs were selected from Ubuntu snapshot `20260927T000000Z`.
 
 | Services | Additional or updated packages per target |
 | --- | --- |
-| API, Alt, Connect, Gossip, MCP, Taskworker | `ca-certificates` `20260601~24.04.1`; `openssl` and `libssl3t64` `3.0.13-0ubuntu3.15` |
+| API, Alt, Connect, DNS, DNS edge, Gossip, MCP, Taskworker | `ca-certificates` `20260601~24.04.1`; `openssl` and `libssl3t64` `3.0.13-0ubuntu3.15` |
 | Proxy | The same three packages plus curl `8.5.0-2ubuntu10.15` and its complete selected dependency/recommendation closure: 22 packages per target |
 
 Across amd64 and arm64 there are 40 distinct payloads: four `all` packages and
