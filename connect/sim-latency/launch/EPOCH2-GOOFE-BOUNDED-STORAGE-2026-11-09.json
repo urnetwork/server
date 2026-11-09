@@ -79,6 +79,23 @@
     "services_started": false,
     "runtime_qualified": false
   },
-  "remaining": ["Management/recovery ledger and complete agent configuration", "Start isolated services and collect actual native host fingerprint before freezing the two-host intake policy", "Runtime and cross-host admission before enabling grading"],
+  "management_partition": {
+    "profile": "urnetwork-management-24g/v1",
+    "policy_path": "/etc/urnetwork/competition-goofe-runtime-20261109-v1/management-policy.json",
+    "policy_sha256": "ebe8fb40332f7d78f1f97db03be52a89c48cfcaee3e36b09d282d6b4c33101cb",
+    "rendered_from": "DefaultManagementBoundarySettings with explicit CPU set 20,22; ValidateManagementResourcePolicy passed",
+    "ordinary_parent_bytes": 17179869184,
+    "coordinator_bytes": 8589934592,
+    "private_aggregate_bytes": 8589934592,
+    "independent_cleanup_bytes": 2147483648,
+    "reserved_core_class_bytes": 268435456,
+    "os_and_ambient_reserved_bytes": 6174015488,
+    "systemd_and_kernel_readbacks": "All five exact slice paths active; memory.max, memory.swap.max=0, pids.max and cpuset.cpus.effective=20,22 match the protected profile",
+    "common_urnetwork_slice_memory_and_tasks": "unbounded, so independent cleanup does not inherit the ordinary management cap",
+    "core_handler_installed": false,
+    "recovery_service_installed": false,
+    "pressure_qualification_passed": false
+  },
+  "remaining": ["Independent recovery service and complete agent configuration", "Start isolated services and collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
   "grading_activated": false
 }
