@@ -2800,6 +2800,21 @@ func CreateContractNoEscrowWithExpiration(
 	// the stream state the insert binds is read before the transaction
 	// (contract_stream_binding.go)
 	resolveContractStreamBinding(ctx)
+	return createContractNoEscrowResolved(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId,
+		contractTransferByteCount, usageOriginIsSource)
+}
+
+// CreateContractNoEscrowWithExpiration once its stream binding is resolved, for a caller that read
+// it to decide the path (ReserveRelayedContract).
+func createContractNoEscrowResolved(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount ByteCount,
+	usageOriginIsSource bool,
+) (contractId server.Id, expirationTime time.Time, returnErr error) {
 	leaveTransaction := server.EnterContractCreationStage(ctx, server.ContractStageTransaction)
 	server.Tx(ctx, func(tx server.PgTx) {
 		contractId, expirationTime, returnErr = createContractNoEscrowInTx(
