@@ -1008,9 +1008,193 @@ func sidecarMg6Migrations() []any {
 	)
 }
 
-// MG6's §7 part: the Team tables (TEAM's tasks).
+// MG6's §7 part: the Team tables (TEAM-M6-01 creates all nine, the later TEAM
+// tasks read and write them). Every column is one §2.8's rows name: api-2's
+// team settings, api-3's members, invitations, IdP configuration, verified
+// domains and SCIM changes, api-1's IdP identities, api-11's OAuth clients and
+// api-8's webhooks. Groups, tags, device names and admissions are never here:
+// they live in the config repo (owner decision 46). Roles are §7.5's seven as
+// lowercase words, mirrored from the config repo (TEAM-M6-03). Nothing reads or
+// writes these tables unless the binary links MG6 (server.SidecarMg6Linked), and
+// each goes with its network.
 func sidecarMg6TeamMigrations() []any {
-	return []any{}
+	return []any{
+		// §7.5's team: a network POST /network/team-create made, kept for the
+		// network's life. Its admin_user_id is a synthetic owner-of-record that
+		// never signs in (D-TEAM-2); sso_required is §7.6's sign-in rule, which
+		// refuses every sign-in but the team's IdP
+		newSqlMigration(`
+			CREATE TABLE network_team (
+				network_id uuid NOT NULL,
+				sso_required bool NOT NULL DEFAULT false,
+
+				PRIMARY KEY (network_id)
+			)
+		`),
+
+		// §7.5's members: member_id is new per join and rides in tokens and
+		// rev/ objects, so a re-invite never revives an old token. One live
+		// membership per user and network; a removal deletes the row. pending
+		// is §7.6's JIT state, and reauth_deadline bounds access after an IdP
+		// disables the user where no SCIM runs
+		newSqlMigration(`
+			CREATE TABLE network_member (
+				member_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				user_id uuid NOT NULL,
+				email varchar(256) NULL,
+				role varchar(32) NOT NULL,
+				pending bool NOT NULL DEFAULT false,
+				reauth_deadline timestamp NULL,
+
+				PRIMARY KEY (member_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_member_network_id_user_id ON network_member (network_id, user_id)
+		`),
+		// a user's networks (POST /auth/network-switch, a user's deletion)
+		newSqlMigration(`
+			CREATE INDEX network_member_user_id ON network_member (user_id, network_id)
+		`),
+
+		// §7.5's invitations: only the token's SHA-256 is stored, never the token
+		// or the link's fragment. A row goes when accepted or expired, at most
+		// 30 days on
+		newSqlMigration(`
+			CREATE TABLE network_invite (
+				invite_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				token_sha256 bytea NOT NULL,
+				email varchar(256) NOT NULL,
+				role varchar(32) NOT NULL,
+				expire_time timestamp NOT NULL,
+
+				PRIMARY KEY (invite_id),
+				UNIQUE (token_sha256)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_invite_network_id ON network_invite (network_id, invite_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_invite_expire_time ON network_invite (expire_time, invite_id)
+		`),
+
+		// §7.6's OIDC IdPs: issuer, client, and how the client authenticates,
+		// private_key_jwt or a secret encrypted under a vault key, never in the
+		// clear
+		newSqlMigration(`
+			CREATE TABLE network_idp (
+				idp_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				issuer varchar(1024) NOT NULL,
+				client_id varchar(1024) NOT NULL,
+				client_auth varchar(32) NOT NULL,
+				client_secret_ciphertext bytea NULL,
+
+				PRIMARY KEY (idp_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_idp_network_id ON network_idp (network_id, idp_id)
+		`),
+
+		// §7.6's identity is (idp_id, sub), never an email (D-TEAM-4)
+		newSqlMigration(`
+			CREATE TABLE network_idp_identity (
+				idp_id uuid NOT NULL,
+				sub varchar(255) NOT NULL,
+				user_id uuid NOT NULL,
+
+				PRIMARY KEY (idp_id, sub)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_idp_identity_user_id ON network_idp_identity (user_id, idp_id)
+		`),
+
+		// §7.6's domains: the TXT _urnetwork-challenge.<domain> value a network
+		// proves, checked daily and dropped after 7 failed days (fail_time starts
+		// the failing run). One network per verified domain
+		newSqlMigration(`
+			CREATE TABLE network_domain (
+				network_id uuid NOT NULL,
+				domain varchar(253) NOT NULL,
+				challenge varchar(64) NOT NULL,
+				verify_time timestamp NULL,
+				check_time timestamp NULL,
+				fail_time timestamp NULL,
+
+				PRIMARY KEY (network_id, domain)
+			)
+		`),
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_domain_verified_domain ON network_domain (domain) WHERE verify_time IS NOT NULL
+		`),
+
+		// §7.8's OAuth clients: ur-oauth-<id> with its secret's SHA-256, never
+		// the secret, until revoked. A client's scopes are cut to its creating
+		// member's role (§7.5), so the creator is a member_id, which a re-join
+		// never reuses
+		newSqlMigration(`
+			CREATE TABLE network_oauth_client (
+				oauth_client_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				secret_sha256 bytea NOT NULL,
+				scopes jsonb NOT NULL,
+				creator_member_id uuid NOT NULL,
+
+				PRIMARY KEY (oauth_client_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_oauth_client_network_id ON network_oauth_client (network_id, oauth_client_id)
+		`),
+
+		// §7.6's SCIM changes awaiting an admin device, kept at most 7 days from
+		// create_time; detail is the change as the server normalized it
+		newSqlMigration(`
+			CREATE TABLE network_scim_change (
+				change_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				member_id uuid NULL,
+				kind varchar(32) NOT NULL,
+				detail jsonb NULL,
+				create_time timestamp NOT NULL,
+
+				PRIMARY KEY (change_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_scim_change_network_id ON network_scim_change (network_id, change_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_scim_change_create_time ON network_scim_change (create_time, change_id)
+		`),
+
+		// §7.11's SIEM webhooks: the endpoint and its delivery state, the admin
+		// event seq delivered through, the next try and the start of a failing
+		// run, which retries for 24 hours
+		newSqlMigration(`
+			CREATE TABLE network_audit_webhook (
+				webhook_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				url varchar(2048) NOT NULL,
+				delivered_seq bigint NOT NULL DEFAULT 0,
+				next_time timestamp NULL,
+				fail_time timestamp NULL,
+
+				PRIMARY KEY (webhook_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_audit_webhook_network_id ON network_audit_webhook (network_id, webhook_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_audit_webhook_next_time ON network_audit_webhook (next_time, webhook_id) WHERE next_time IS NOT NULL
+		`),
+	}
 }
 
 // MG6's §8 part: network_acl_share (ACL's tasks).
