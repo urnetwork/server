@@ -162,6 +162,11 @@ func NetworkTierOf(ctx context.Context, networkId server.Id) NetworkTier {
 // neither cache: tx may hold its own uncommitted balance change, which a rollback would
 // leave cached. So call it only where the cache is usually warm.
 func NetworkTierOfInTx(ctx context.Context, tx server.PgTx, networkId server.Id) NetworkTier {
+	return networkTierOfWithQuery(ctx, tx, networkId)
+}
+
+// NetworkTierOfInTx for any connection or transaction the caller holds.
+func networkTierOfWithQuery(ctx context.Context, query server.PgCanQuery, networkId server.Id) NetworkTier {
 	if entitlement, ok := networkTierLocal.get(networkId); ok {
 		return entitlement.tier
 	}
@@ -169,7 +174,7 @@ func NetworkTierOfInTx(ctx context.Context, tx server.PgTx, networkId server.Id)
 		networkTierLocal.set(networkId, entitlement)
 		return entitlement.tier
 	}
-	return networkTierOfProEntitlement(loadProNetworkWithConn(ctx, tx, networkId)).tier
+	return networkTierOfProEntitlement(loadProNetworkWithConn(ctx, query, networkId)).tier
 }
 
 // The tier from the source of truth, refreshing both cache tiers, for anything baked

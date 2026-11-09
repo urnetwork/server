@@ -1212,6 +1212,20 @@ func (self *Exchange) nominateLocalResident(
 		}
 		return false, true
 	}
+	// The same gate for a sidecar client against its network's sidecar_clients
+	// (DESIGN.md 20.7, 20.8): a refusal closes with the same 4001, a
+	// re-nomination of a connected client is no new connection, and connected
+	// clients stay. A no-op, with no I/O, while enforce_sidecar_limits is false.
+	if !model.CanConnectSidecarClient(admissionCtx, clientId) {
+		nominationRefusedCounter.WithLabelValues("sidecar_client_limit").Inc()
+		if glog.V(1) {
+			glog.Infof(
+				"[exchange]nominate refused: client %s is over the network sidecar client limit\n",
+				clientId,
+			)
+		}
+		return false, true
+	}
 
 	if admissionCtx.Err() != nil {
 		return false, false
@@ -1320,6 +1334,9 @@ func (self *Exchange) nominateLocalResident(
 						*resident.peerNetworkId,
 						clientId,
 					)
+				} else if resident.peerCategory == model.NetworkPeerCategorySidecar {
+					// a declared no-egress sidecar registers in no {np_}
+					// zset: its connected entry is the sidecar set's, below
 				} else {
 					model.RemoveNetworkPeer(
 						cleanupCtx,
@@ -1328,6 +1345,13 @@ func (self *Exchange) nominateLocalResident(
 						resident.residentId,
 					)
 				}
+			}
+			// the sidecar set's entry goes with the resident, but for a drain
+			// or a move, whose returning client refreshes it before its ttl
+			if resident.sidecarCountNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() {
+				server.HandleError(func() {
+					model.RemoveNetworkSidecarClient(cleanupCtx, *resident.sidecarCountNetworkId, clientId)
+				})
 			}
 		}()
 
@@ -1418,6 +1442,11 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 				model.AddNetworkIsolatedPeer(peerCtx, *resident.peerNetworkId, clientId, self.settings.ExchangeResidentTtl)
 				return
 			}
+			if resident.peerCategory == model.NetworkPeerCategorySidecar {
+				// a declared no-egress sidecar is in no {np_} zset; the sidecar
+				// set below is its heartbeat
+				return
+			}
 			if !model.RefreshNetworkPeer(peerCtx, *resident.peerNetworkId, clientId, residentId, self.settings.ExchangeResidentTtl) {
 				// the registration was lost (e.g. expired while the
 				// client was disconnected, or pruned at an expiry
@@ -1431,6 +1460,16 @@ func (self *Exchange) refreshResidentRegistration(resident *Resident) bool {
 					model.AddNetworkPeer(peerCtx, *resident.peerNetworkId, peerProfile, residentId, self.settings.ExchangeResidentTtl)
 				}
 			}
+		})
+	}
+	// heartbeat a sidecar client's entry in its network's connected sidecar
+	// set (DESIGN.md 20.8), whatever its category and whether or not peers
+	// are on, while it holds a transport, as the peer registration above
+	if resident.sidecarCountNetworkId != nil && 0 < resident.TransportCount() {
+		sidecarCtx, sidecarCancel := context.WithTimeout(resident.ctx, self.settings.ExchangeResidentTtl/4)
+		defer sidecarCancel()
+		server.HandleError(func() {
+			model.AddNetworkSidecarClient(sidecarCtx, *resident.sidecarCountNetworkId, clientId, self.settings.ExchangeResidentTtl)
 		})
 	}
 	return true
@@ -4280,6 +4319,10 @@ type Resident struct {
 	// the client's §7.4 marks, read with the profile while push is on; a
 	// strict_exp client's resident hosts a publisher (sidecar_publisher.go)
 	sidecarPushMarks model.SidecarPushMarks
+	// set when the client is a sidecar's, strict_exp, and sidecar clients are
+	// counted (model.SidecarClientCountingOn) as the resident is built: its
+	// network, whose connected sidecar set the poll heartbeats it in
+	sidecarCountNetworkId *server.Id
 
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client
@@ -4470,6 +4513,11 @@ func newResidentDuringAdmission(
 	resident.sidecarPushMarks = pushMarks
 	if networkId != (server.Id{}) {
 		resident.sessionNetworkId = &networkId
+		// every marked client counts toward sidecar_clients, child or
+		// top-level, whatever its category (DESIGN.md 20.8)
+		if pushMarks.StrictExp && model.SidecarClientCountingOn() {
+			resident.sidecarCountNetworkId = &networkId
+		}
 	}
 	if topLevel && peersEnabled && peerProfile != nil {
 		resident.peerNetworkId = &networkId

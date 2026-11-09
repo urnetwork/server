@@ -66,7 +66,12 @@ type NetworkPeer struct {
 // fleet of them must not scale the peer fan-out. An isolated client (ACL group
 // "isolated", network_client_acl_group_model.go) is registered like a hosted
 // proxy client: counted toward the client limits, never listed, and given no
-// peer subscription.
+// peer subscription. A sidecar client that declares no egress (DESIGN.md 20.8,
+// network_client_owner.declares_no_egress) is unlisted and given no peer
+// subscription like an isolated client, but registers in no {np_} zset at all:
+// it is exempt from the concurrent client limit, the create cap and the peer
+// valve, and counts only in {sq_}'s connected sidecar set
+// (sidecar_client_count_model.go).
 type NetworkPeerCategory int
 
 const (
@@ -74,6 +79,7 @@ const (
 	NetworkPeerCategoryProxy    NetworkPeerCategory = 1
 	NetworkPeerCategoryProvider NetworkPeerCategory = 2
 	NetworkPeerCategoryIsolated NetworkPeerCategory = 3
+	NetworkPeerCategorySidecar  NetworkPeerCategory = 4
 )
 
 // use gob encoding for `networkPeerMeta` which is more compact than json
@@ -472,7 +478,7 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 							WHERE
 								network_client_acl_group.client_id = network_client.client_id AND
 								network_client_acl_group.acl_group = 'isolated'
-						)
+						)`+notDeclaredNoEgressSql()+`
 					LIMIT $2
 				) t
 			`,
@@ -511,15 +517,24 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 // query when readPushMarks, which only a binary linking MG0 may ask (sidecar_push_model.go). Without it
 // the query is GetNetworkPeerProfile's as it always was.
 func getNetworkPeerProfile(ctx context.Context, clientId server.Id, readPushMarks bool) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool, pushMarks SidecarPushMarks) {
+	// the owner row decides a declared sidecar's category wherever MG0 is linked
+	// (DESIGN.md 20.8), in this query's one LEFT JOIN, so no query is added
+	readDeclaration := server.SidecarMg0Linked()
 	pushMarkColumns := ""
 	pushMarkJoin := ""
+	if readPushMarks || readDeclaration {
+		pushMarkJoin = `
+				LEFT JOIN network_client_owner ON
+					network_client_owner.client_id = network_client.client_id`
+	}
 	if readPushMarks {
 		pushMarkColumns = `,
 					COALESCE(network_client_owner.strict_exp, false) AS strict_exp,
 					COALESCE(network_client_owner.acl_enforcing, false) AS acl_enforcing`
-		pushMarkJoin = `
-				LEFT JOIN network_client_owner ON
-					network_client_owner.client_id = network_client.client_id`
+	}
+	if readDeclaration {
+		pushMarkColumns += `,
+					COALESCE(network_client_owner.declares_no_egress, false) AS declares_no_egress`
 	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -563,6 +578,7 @@ func getNetworkPeerProfile(ctx context.Context, clientId server.Id, readPushMark
 				var isProxy bool
 				var isProvider bool
 				var isIsolated bool
+				var declaresNoEgress bool
 				destinations := []any{
 					&networkId,
 					&sourceClientId,
@@ -576,9 +592,13 @@ func getNetworkPeerProfile(ctx context.Context, clientId server.Id, readPushMark
 				if readPushMarks {
 					destinations = append(destinations, &pushMarks.StrictExp, &pushMarks.AclEnforcing)
 				}
+				if readDeclaration {
+					destinations = append(destinations, &declaresNoEgress)
+				}
 				server.Raise(result.Scan(destinations...))
 				topLevel = sourceClientId == nil
-				category = networkPeerCategory(isProxy, isProvider, isIsolated)
+				// only a top-level client takes a category of the registry's
+				category = networkPeerCategory(isProxy, isProvider, topLevel && declaresNoEgress, isIsolated)
 				peer = &NetworkPeer{
 					ClientId: clientId,
 				}
@@ -632,18 +652,38 @@ func getNetworkPeerProfile(ctx context.Context, clientId server.Id, readPushMark
 
 // networkPeerCategory resolves a client's registry category. A hosted proxy
 // device and a provider install keep their own categories, which are already
-// never listed; the ACL group only changes an ordinary client.
-func networkPeerCategory(isProxy bool, isProvider bool, isIsolated bool) NetworkPeerCategory {
+// never listed. A declared no-egress sidecar is exempt from the client limits,
+// so its category wins over the ACL group, which only changes an ordinary
+// client.
+func networkPeerCategory(isProxy bool, isProvider bool, declaresNoEgress bool, isIsolated bool) NetworkPeerCategory {
 	switch {
 	case isProxy:
 		return NetworkPeerCategoryProxy
 	case isProvider:
 		return NetworkPeerCategoryProvider
+	case declaresNoEgress:
+		return NetworkPeerCategorySidecar
 	case isIsolated:
 		return NetworkPeerCategoryIsolated
 	default:
 		return NetworkPeerCategoryClient
 	}
+}
+
+// The clause a top-level client count adds where MG0 is linked, so a declared
+// no-egress sidecar never counts toward the create cap or the peer valve
+// (DESIGN.md 20.8). Empty on a release leg, which has no owner table.
+func notDeclaredNoEgressSql() string {
+	if !server.SidecarMg0Linked() {
+		return ""
+	}
+	return ` AND
+						NOT EXISTS (
+							SELECT 1 FROM network_client_owner
+							WHERE
+								network_client_owner.client_id = network_client.client_id AND
+								network_client_owner.declares_no_egress
+						)`
 }
 
 func sortedProvideModesList(provideModes map[ProvideMode]bool) []ProvideMode {
@@ -1565,8 +1605,12 @@ func CanConnectNetworkPeer(ctx context.Context, clientId server.Id, provideInten
 		return true
 	}
 
-	networkId, topLevel, _, _, _ := GetNetworkPeerProfile(ctx, clientId)
+	networkId, topLevel, category, _, _ := GetNetworkPeerProfile(ctx, clientId)
 	if !topLevel {
+		return true
+	}
+	// a declared no-egress sidecar is exempt: CanConnectSidecarClient counts it
+	if category == NetworkPeerCategorySidecar {
 		return true
 	}
 	if provideIntent {

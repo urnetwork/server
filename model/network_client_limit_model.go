@@ -13,8 +13,10 @@ import (
 // The Embed plan's per-network client allowance (EMBED1.md).
 //
 // A network without a `network_top_level_client_limit` row uses the defaults:
-// `LimitTopLevelClientIdsPerNetwork` for the AuthNetworkClient create cap and
-// its tier's pro.yml `concurrent_clients` for the concurrent connection limit.
+// its tier's pro.yml `top_level_client_limit` for the AuthNetworkClient create
+// cap (DESIGN.md 20.8), `LimitTopLevelClientIdsPerNetwork` when pro.yml gives
+// none, and its tier's pro.yml `concurrent_clients` for the concurrent
+// connection limit.
 // Ops sets a row for a network on an Embed plan (`bringyourctl network
 // client-limit`), and the row's limit is then the network's client allowance
 // for both: the top-level client limit and the concurrent connection limit
@@ -37,9 +39,11 @@ type NetworkTopLevelClientLimit struct {
 }
 
 // readNetworkTopLevelClientLimit returns the network's top-level client limit
-// and whether it is an Embed plan override rather than the default.
+// and whether it is an Embed plan override rather than the default. The default
+// is the tier's top_level_client_limit (DESIGN.md 20.8), read through query where
+// the tier's caches miss.
 func readNetworkTopLevelClientLimit(ctx context.Context, query server.PgCanQuery, networkId server.Id) (limit int, override bool) {
-	limit = LimitTopLevelClientIdsPerNetwork
+	limit = networkTopLevelClientDefaultLimit(ctx, query, networkId)
 	result, err := query.Query(
 		ctx,
 		`
@@ -58,6 +62,35 @@ func readNetworkTopLevelClientLimit(ctx context.Context, query server.PgCanQuery
 	return
 }
 
+// The create cap a tier gives: pro.yml's top_level_client_limit, `none` as the
+// largest limit ops may set, and LimitTopLevelClientIdsPerNetwork for a value of
+// zero, which is what an absent or unusable pro.yml reads, so an absent pro.yml
+// changes nothing and no value locks a network's clients out (R-QUOTA-5).
+func tierTopLevelClientLimit(tier NetworkTier) int {
+	limit := Pro().TierFor(tier).Sidecar.Limit("top_level_client_limit")
+	switch {
+	case limit == proSidecarLimitNone:
+		return MaxNetworkTopLevelClientLimit
+	case 0 < limit && limit <= MaxNetworkTopLevelClientLimit:
+		return int(limit)
+	case MaxNetworkTopLevelClientLimit < limit:
+		return MaxNetworkTopLevelClientLimit
+	default:
+		return LimitTopLevelClientIdsPerNetwork
+	}
+}
+
+// The network's create cap without an Embed row: its tier's. While every tier
+// gives the same cap, as pro.yml's 100 on each does and an absent pro.yml's
+// default does, the tier is not looked up at all.
+func networkTopLevelClientDefaultLimit(ctx context.Context, query server.PgCanQuery, networkId server.Id) int {
+	freeLimit := tierTopLevelClientLimit(NetworkTierFree)
+	if freeLimit == tierTopLevelClientLimit(NetworkTierPro) && freeLimit == tierTopLevelClientLimit(NetworkTierTeam) {
+		return freeLimit
+	}
+	return tierTopLevelClientLimit(networkTierOfWithQuery(ctx, query, networkId))
+}
+
 // networkTopLevelClientLimitInTx reads the limit inside the provisioning
 // transaction that enforces it.
 func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, networkId server.Id) int {
@@ -67,7 +100,8 @@ func networkTopLevelClientLimitInTx(ctx context.Context, tx server.PgTx, network
 
 // countNetworkActiveTopLevelClients counts what the AuthNetworkClient create cap
 // counts: the network's active top-level clients (no source_client_id) that are
-// not provider installs. The scan stops at scanLimit rows: the create cap passes
+// not provider installs, nor, where MG0 is linked, declared no-egress sidecars
+// (DESIGN.md 20.8). The scan stops at scanLimit rows: the create cap passes
 // its limit + 1, since only the threshold matters there, and GET /network/embed
 // passes the largest allowance + 1, so its count is exact for any allowance.
 func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQuery, networkId server.Id, scanLimit int) int {
@@ -86,7 +120,7 @@ func countNetworkActiveTopLevelClients(ctx context.Context, query server.PgCanQu
 					NOT EXISTS (
 						SELECT 1 FROM network_client_provider_intent
 						WHERE network_client_provider_intent.client_id = network_client.client_id
-					)
+					)`+notDeclaredNoEgressSql()+`
 				LIMIT $2
 			) t
 		`,

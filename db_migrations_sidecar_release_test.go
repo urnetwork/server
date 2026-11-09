@@ -23,7 +23,12 @@ func TestReleaseBuildRegistersNoPendingGroup(t *testing.T) {
 	if 0 < len(sidecarPendingMigrations()) {
 		t.Fatal("a release build has pending migrations")
 	}
-	names := append([]string{"network_client_owner", "auth_code_api_key_id", "network_auth_key", "network_admin_event", "sidecar_identity"}, sidecarGroupMarkerIds...)
+	names := append([]string{
+		"network_client_owner", "auth_code_api_key_id", "network_auth_key", "network_admin_event", "sidecar_identity",
+		// §20's parts of MG1 and MG2 (QUOTA-M1-02, QUOTA-M2-02)
+		"network_sidecar_limit", "network_quota_state", "network_service_usage", "service_debit_journal",
+		"service_usage_batch", "protect_pending_service_debit",
+	}, sidecarGroupMarkerIds...)
 	for index, migration := range migrations {
 		sql := ""
 		switch value := migration.(type) {

@@ -649,6 +649,15 @@ func (self *ConnectionAnnounce) run() {
 			// no resident nominated yet: the resident heartbeat registers it
 		}
 	}
+	// a sidecar's client counts toward its network's sidecar_clients from here, as a
+	// peer registers above, and its resident's poll keeps the entry (DESIGN.md
+	// 20.8). Dark, it reads and writes nothing; a failure leaves the count to the
+	// poll rather than failing the announce
+	if model.SidecarClientCountingOn() {
+		server.HandleError(func() {
+			model.RegisterNetworkSidecarClientIfMarked(self.ctx, self.clientId, self.settings.PeerRegisterTtl)
+		})
+	}
 
 	nextTestTime := server.NowUtc().Add(self.settings.MaxTestTimeout)
 	nextTest := func() time.Duration {
