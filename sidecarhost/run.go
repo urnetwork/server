@@ -366,7 +366,8 @@ func run(ctx context.Context, options *RunOptions, deps *runDependencies) error 
 	go server.HandleError(func() {
 		httpDone <- deps.listenAndServe(serveCtx, statusAddress, httpRouter, false, settings.HttpServer)
 	})
-	glog.Infof("%sserving status on %s\n", logTag, statusAddress)
+	// the port alone: the log carries no address (I-13)
+	glog.Infof("%sserving status on port %d\n", logTag, options.StatusPort)
 
 	readinessCtx, readinessCancel := context.WithCancel(ctx)
 	defer readinessCancel()
