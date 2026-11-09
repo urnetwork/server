@@ -216,6 +216,7 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 	apiDeps := &dnsservice.DnsApiDeps{
 		SoaReader:  dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings.Dns)),
 		Challenges: NewChallenges(),
+		Canaries:   NewCanaries(),
 		KeyWindow:  deps.KeyWindow,
 	}
 	if apiDeps.KeyWindow == nil {

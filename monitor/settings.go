@@ -436,7 +436,10 @@ type SignalSettings struct {
 	// route to inventory overlay addresses (SIGNALS.md §1.7). Empty leaves
 	// overlay route attribution explicitly unknown.
 	ObserverOverlay ObserverOverlaySettings
-	disabledHosts   []HostSettings
+	// DnsCanary is §12.6's dns canary at this monitor (SIGNALS.md §28.1): monitor.yml's dns_canary block
+	// beside dns.yml. nil reports the canary configured off.
+	DnsCanary     *DnsCanarySettings
+	disabledHosts []HostSettings
 	// Private desired-input identity participates only in in-memory generation checks.
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
@@ -525,6 +528,7 @@ func (s SignalSettings) withDefaults() SignalSettings {
 	s.Routers = cloneRouterSettings(s.Routers)
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
 	s.ObserverOverlay = cloneObserverOverlaySettings(s.ObserverOverlay)
+	s.DnsCanary = cloneDnsCanarySettings(s.DnsCanary)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
@@ -776,6 +780,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		pgQuerySampleContinuous:   settings.PGQuerySampleContinuous,
 		publicUdp:                 clonePublicUdpSettings(settings.PublicUdp),
 		observerOverlay:           cloneObserverOverlaySettings(settings.ObserverOverlay),
+		dnsCanary:                 cloneDnsCanarySettings(settings.DnsCanary),
 		stateDir:                  settings.StateDir,
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -17,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -36,7 +39,9 @@ type monitorYaml struct {
 	PublicUdp   PublicUdpSettings `yaml:"public_udp"`
 	// observer_overlay: the operator's observer route contract (SIGNALS.md §1.7)
 	ObserverOverlay ObserverOverlaySettings `yaml:"observer_overlay"`
-	Hosts           []struct {
+	// dns_canary: §12.6's dns canary at this monitor (SIGNALS.md §28.1)
+	DnsCanary *dnsCanaryYaml `yaml:"dns_canary"`
+	Hosts     []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -349,6 +354,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 			SlackWebhookUrl: strings.TrimSpace(y.Alerts.SlackWebhookUrl),
 			PagerWebhookUrl: strings.TrimSpace(y.Alerts.PagerWebhookUrl),
 		},
+		DnsCanary: loadDnsCanarySettings(y.DnsCanary),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -1591,4 +1597,79 @@ func yamlString(v any) string {
 		return s
 	}
 	return ""
+}
+
+// monitor.yml's dns_canary block (SIGNALS.md §28.1): which copy this is and where the dns API block and
+// its bearer are. dns.yml gives the roots, the NS glue and the anchors.
+type dnsCanaryYaml struct {
+	// site or outside
+	Source string `yaml:"source"`
+	ApiUrl string `yaml:"api_url"`
+	// The bearer file in vault: internal-monitor.yml or internal-monitor-outside.yml.
+	BearerFile      string   `yaml:"bearer_file"`
+	UnboundHostPath string   `yaml:"unbound_host"`
+	PublicResolvers []string `yaml:"public_resolvers"`
+	DsPublished     bool     `yaml:"ds_published"`
+}
+
+// The canary's settings from its block, dns.yml and the bearer file, or nil, which reports the canary
+// configured off: no block, an unknown source, or a file that does not read. The bearer goes to no log.
+func loadDnsCanarySettings(block *dnsCanaryYaml) *DnsCanarySettings {
+	if block == nil {
+		return nil
+	}
+	settings := DefaultDnsCanarySettings()
+	settings.Source = strings.TrimSpace(block.Source)
+	if settings.Source != dnsservice.DnsCanarySourceSite && settings.Source != dnsservice.DnsCanarySourceOutside {
+		return nil
+	}
+	settings.ApiUrl = strings.TrimSpace(block.ApiUrl)
+	settings.UnboundHostPath = strings.TrimSpace(block.UnboundHostPath)
+	settings.DsPublished = block.DsPublished
+	for _, text := range block.PublicResolvers {
+		address, err := netip.ParseAddrPort(strings.TrimSpace(text))
+		if err != nil {
+			return nil
+		}
+		settings.PublicResolvers = append(settings.PublicResolvers, address)
+	}
+	dnsResource, err := server.Config.SimpleResource("dns.yml")
+	if err != nil {
+		return nil
+	}
+	dnsData, err := dnsResource.BytesE()
+	if err != nil {
+		return nil
+	}
+	if settings.Dns, err = dnsservice.LoadDnsSettings(dnsData); err != nil {
+		return nil
+	}
+	settings.NsAddresses = dnsCanaryNsAddresses(settings.Dns)
+	bearerResource, err := server.Vault.SimpleResource(strings.TrimSpace(block.BearerFile))
+	if err != nil {
+		return nil
+	}
+	bearerData, err := bearerResource.BytesE()
+	if err != nil {
+		return nil
+	}
+	if settings.Bearer, err = dnsservice.LoadDnsInternalCredential(bearerData); err != nil {
+		return nil
+	}
+	return settings
+}
+
+// Each NS's glue on port 53, from every root's root_records.
+func dnsCanaryNsAddresses(dnsSettings *dnsservice.DnsSettings) map[string][]netip.AddrPort {
+	addresses := map[string][]netip.AddrPort{}
+	for _, records := range dnsSettings.RootRecords {
+		for ns, glue := range records.Glue {
+			for _, text := range glue {
+				if address, err := netip.ParseAddr(text); err == nil {
+					addresses[ns] = append(addresses[ns], netip.AddrPortFrom(address, 53))
+				}
+			}
+		}
+	}
+	return addresses
 }

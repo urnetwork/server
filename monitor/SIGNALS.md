@@ -49051,6 +49051,52 @@ serving someone else's bundle; an older sequence at the mirror's sync. For the
 origin, read the publisher's outcomes (`store_error`, `sign_error`,
 `self_check_failed`: the signing key is not in `root_public_keys_hex`).
 
+## 28. Sidecar DNS — §12.6's monitor
+
+### 28.1 DNS canary, nameservers and the DNSKEY window
+
+Probe: `dns-canary`
+
+DNS-M5-17, §12.6's monitor (D-DNS-5, R-DNS-7, D-OPS-9, FS-50;
+plan-DNS-canary-route-state). One copy runs at the site and one on an outside
+host, each from monitor.yml's `dns_canary` block (`source: site|outside`,
+`api_url`, `bearer_file`, `unbound_host`, `public_resolvers`, `ds_published`)
+beside config's dns.yml, whose roots, NS glue and trust anchors it reads. Each
+minute, for each root:
+
+- the site copy writes `canary.<root>` TXT, its value the writer's unix
+  milliseconds, through the dns API block's journal (`POST
+  /dns/internal/canary`); the outside copy writes nothing;
+- each NS is read directly over TCP, its SOA serial and the DNSKEY RRset's
+  signatures, and the canary is validated through that NS alone by
+  `unbound-host` with a stub zone at the NS and the KSK as its only trust
+  anchor, a second implementation checking what the edge signed;
+- the public resolvers check propagation only, until the DS, then validate;
+- the verdict, ok only when every NS validated a value under 180 s old, goes
+  to `POST /dns/internal/canary-report`, which `GET /dns/ready` reads, so a bad
+  minute pauses certificate orders within the minute.
+
+Classes:
+
+- `dns-canary-signature` **PAGE**, sustained 2 minutes: an NS's canary does
+  not validate against the KSK (bogus or insecure). §19.8's rota at any hour
+  from M5 (owner decision 143); §12.6's runbook.
+- `dns-ns-down` **PAGE**, sustained 2 minutes: every NS fails its SOA read, its
+  validation or serves a canary over 180 s old.
+- `dns-ns-failing` **WARN**, sustained an hour: one NS does. plan-DNS-running-ns
+  asks a business-hours page here, which waits for a business-hours path in the
+  pager; orders hold meanwhile, since ready waits on every running NS.
+- `dns-ns-serial-divergence` **WARN**, sustained 3 minutes: the NS serve
+  different SOA serials.
+- `dns-key-window` **WARN**: the DNSKEY window an NS serves has 7 d or less
+  left; a ceremony's windows are due (DNS-M5-19).
+- `dns-canary-propagation` **WARN**, sustained 5 minutes: a public resolver
+  lacks a fresh canary, or, once the DS is out, does not validate it.
+- `dns-canary-unobservable` (visibility): the check could not run, for no
+  trust anchor, no validator, or a write or report the block refused; while it
+  lasts no other dns-canary incident clears. With no `dns_canary` block the
+  canary reports itself configured off.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress
