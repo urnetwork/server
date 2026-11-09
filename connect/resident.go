@@ -12,6 +12,7 @@ import (
 	// "io"
 	"math/rand"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -552,6 +553,11 @@ type ExchangeSettings struct {
 	// fit the exchange and minimum supported client carrier limits.
 	// Framers below the control sender's 4 KiB envelope leave requests pending.
 	ClientCloseBatchSize int
+	// The most transport addresses one ObservedAddresses frame carries
+	// (resident_observed_addresses.go). 16, the most a client keeps: a client
+	// has a few transports, each seen from one address per family.
+	// Non-positive uses the default.
+	ObservedAddressesMaxCount int
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -701,7 +707,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 			TopologyRefreshInterval: 60 * time.Second,
 			ResyncSpreadTimeout:     30 * time.Second,
 		},
-		ClientCloseBatchSize: 512,
+		ClientCloseBatchSize:      512,
+		ObservedAddressesMaxCount: 16,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -2918,6 +2925,9 @@ type ExchangeHeader struct {
 	Carrier             ResidentCarrier
 	IpFamily            uint8
 	ProvideIntent       bool
+	// the edge's ClientIp, invalid when it has none. Gob encodes it with its
+	// MarshalBinary, and the header stays comparable.
+	ClientIp netip.Addr
 }
 
 func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierProperties {
@@ -2930,12 +2940,16 @@ func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierPr
 }
 
 func (self ExchangeHeader) transportEdge() ResidentTransportEdge {
-	return ResidentTransportEdge{
+	edge := ResidentTransportEdge{
 		ResidentMoveVersion: self.ResidentMoveVersion,
 		Carrier:             self.Carrier,
 		IpFamily:            self.IpFamily,
 		ProvideIntent:       self.ProvideIntent,
 	}
+	if self.ClientIp.IsValid() {
+		edge.ClientIp = self.ClientIp.Unmap()
+	}
+	return edge
 }
 
 type ExchangeConnection struct {
@@ -3684,6 +3698,7 @@ func NewResidentTransportWithEdge(
 		Carrier:                               edge.Carrier,
 		IpFamily:                              edge.IpFamily,
 		ProvideIntent:                         edge.ProvideIntent,
+		ClientIp:                              edge.ClientIp,
 	}
 	transport := newResidentTransport(ctx, exchange, header, clientId, instanceId)
 	transport.admission = admission
@@ -4303,6 +4318,9 @@ type Resident struct {
 	stateLock sync.RWMutex
 
 	transports map[*clientTransport]bool
+	// a coalesced signal that the transports changed, for the observed
+	// addresses listener (resident_observed_addresses.go)
+	observedAddressesKick chan struct{}
 
 	// destination id -> forward
 	forwards map[server.Id]*ResidentForward
@@ -4454,6 +4472,7 @@ func newResidentDuringAdmission(
 		residentContractManager: residentContractManager,
 		residentController:      residentController,
 		transports:              map[*clientTransport]bool{},
+		observedAddressesKick:   make(chan struct{}, 1),
 		forwards:                map[server.Id]*ResidentForward{},
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 		createTime:              time.Now(),
@@ -4773,6 +4792,16 @@ func streamHopsToReset(hops []model.StreamHop) *protocol.StreamReset {
 
 func (self *Resident) Run() {
 	defer self.cancel()
+	// the addresses the client's transports connect from
+	// (resident_observed_addresses.go); a transport attached before Run left
+	// its kick in the signal's buffer
+	observedAddressesListener := newResidentObservedAddressesListener(
+		self.ctx,
+		self.observedAddresses,
+		self.sendListenerFrame,
+		self.observedAddressesKick,
+	)
+	defer observedAddressesListener.CloseAndWait()
 	if self.exchange.keyEventSubscriber != nil && self.sessionNetworkId != nil {
 		networkId := *self.sessionNetworkId
 		hints := make(chan *protocol.NetworkSessionsChanged, 1)
@@ -5365,6 +5394,7 @@ func (self *Resident) addTransportWithEdge(
 		defer self.stateLock.Unlock()
 		self.transports[transport] = true
 	}()
+	self.kickObservedAddresses()
 
 	closeTransport = func() {
 		routeManager := self.client.RouteManager()
@@ -5376,6 +5406,7 @@ func (self *Resident) addTransportWithEdge(
 			defer self.stateLock.Unlock()
 			delete(self.transports, transport)
 		}()
+		self.kickObservedAddresses()
 		if move := self.move.Load(); move != nil {
 			move.notifyTransportClosed()
 		}
