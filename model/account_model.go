@@ -391,6 +391,10 @@ func RemoveNetworkWithStoreSnapshot(
 		if server.SidecarMg2Linked() {
 			removeNetworkAclHeadInTx(ctx, tx, networkId)
 		}
+		// §17.16's shares go with either of their networks
+		if server.SidecarMg6Linked() {
+			removeNetworkBridgeSharesInTx(ctx, tx, networkId)
+		}
 		// §15.15's mail rows: mail_network and direct MX go, host keys retire
 		// and age out in 30 days
 		if server.SidecarMg7Linked() {

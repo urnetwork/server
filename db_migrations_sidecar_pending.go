@@ -696,9 +696,40 @@ func sidecarMg6AclMigrations() []any {
 	return []any{}
 }
 
-// MG6's §17 part: network_bridge_share (BRIDGE's tasks).
+// MG6's §17 part: network_bridge_share (BRIDGE's tasks). Every column is one of
+// §2.8 api-9's: the share, the sharing network and the network it invited, its
+// target and alias tables sealed under a key the invite code derives and the
+// server cannot (§17.9, I-2), their versions, and the accept status, varchar
+// and never ENUM. No prefix, address or key is in the clear. A row is kept until
+// the share is revoked, and goes with either network. Nothing reads it unless
+// the binary links MG6 (server.SidecarMg6Linked).
 func sidecarMg6BridgeMigrations() []any {
-	return []any{}
+	return []any{
+		// network_id shares its targets; invited_network_id, the accepting
+		// network, is bound at accept with its alias table and status, and
+		// stays NULL until then
+		newSqlMigration(`
+			CREATE TABLE network_bridge_share (
+				share_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				invited_network_id uuid NULL,
+				target_table bytea NOT NULL,
+				target_table_version bigint NOT NULL,
+				alias_table bytea NULL,
+				alias_table_version bigint NOT NULL DEFAULT 0,
+				accept_status varchar(32) NULL,
+
+				PRIMARY KEY (share_id)
+			)
+		`),
+		// a network's deletion, either side
+		newSqlMigration(`
+			CREATE INDEX network_bridge_share_network_id ON network_bridge_share (network_id, share_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_bridge_share_invited_network_id ON network_bridge_share (invited_network_id, share_id) WHERE invited_network_id IS NOT NULL
+		`),
+	}
 }
 
 // MG6's §20 part: transfer_balance.tier, transfer_balance's team_credit index,
