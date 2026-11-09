@@ -55,16 +55,16 @@ func TestEvsBudgetLoopsShareALeaseOnTheTestStore(t *testing.T) {
 		runCtx, cancelRun := context.WithCancel(ctx)
 		var lifetime sync.WaitGroup
 		loops := runEvsBudgetLoops(runCtx, &lifetime, host, counters, settings)
-		if len(loops) != 1 {
-			t.Fatalf("%d loops for one metadata cluster", len(loops))
+		if len(loops.budgetLoops) != 1 || len(loops.hddLoops) != 1 {
+			t.Fatalf("%d budget and %d hdd loops for one metadata and one segment cluster", len(loops.budgetLoops), len(loops.hddLoops))
 		}
-		first := loops[0]
-		// Run steps at once and then waits on the fake clock
-		if err := clock.AwaitTimers(ctx, 1); err != nil {
+		first := loops.budgetLoops[0]
+		// each Run steps at once and then waits on the fake clock
+		if err := clock.AwaitTimers(ctx, 2); err != nil {
 			t.Fatal(err)
 		}
-		if !first.Holding() {
-			t.Fatal("the running loop does not hold the lease")
+		if !first.Holding() || !loops.hddLoops[0].Holding() {
+			t.Fatal("a running loop does not hold its lease")
 		}
 
 		second, err := evsservice.NewBudgetLoop(host, "meta-1", counters, nil, settings)

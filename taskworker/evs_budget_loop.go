@@ -1,10 +1,11 @@
 package taskworker
 
-// §19.6's budget loop per metadata cluster (EVSB-M2-07): each taskworker process starts one
-// evsservice.BudgetLoop for every metadata cluster its vault file names, and each loop holds its cluster's
-// lease in Redis, so however many taskworker processes run, one steps each cluster and another takes over
-// within the lease's ttl. They start inside startTaskworkerRuntime and join its lifetime group, ending with
-// its context, the lease released.
+// §19.6's budget loop per metadata cluster (EVSB-M2-07) and hdd loop per segment cluster (EVSB-M2-08): each
+// taskworker process starts an evsservice.BudgetLoop for every metadata cluster its vault file names and an
+// evsservice.HddLoop for its segment cluster, and each loop holds its cluster's lease in Redis, so however
+// many taskworker processes run, one steps each cluster and another takes over within the lease's ttl. They
+// start inside startTaskworkerRuntime and join its lifetime group, ending with its context, the lease
+// released. The hdd loop's capacity comes from sidecar.yml's file_clusters entry, through the host's gates.
 //
 // They start only where vault holds file-clusters-taskworker.yml: a deployment with no file clusters, today's
 // production among them, starts none, and a file that does not load starts none and says so. The loops read no
@@ -45,22 +46,41 @@ func startEvsBudgetLoopsFromVault(ctx context.Context, lifetime *sync.WaitGroup)
 	runEvsBudgetLoops(ctx, lifetime, host, newEvsDriveCounterSource(server.NewFileClusterCounters(clusters, nil)), nil)
 }
 
-// A loop per metadata cluster of host.Blobs, each run on lifetime until ctx ends. settings may be nil for the
-// defaults.
-func runEvsBudgetLoops(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, counters evsservice.DriveCounterSource, settings *evsservice.BudgetLoopSettings) []*evsservice.BudgetLoop {
-	loops := []*evsservice.BudgetLoop{}
+// The loops runEvsBudgetLoops started.
+type evsBudgetLoops struct {
+	budgetLoops []*evsservice.BudgetLoop
+	hddLoops    []*evsservice.HddLoop
+}
+
+// A budget loop per metadata cluster of host.Blobs and an hdd loop for its segment cluster, each run on
+// lifetime until ctx ends. settings may be nil for the defaults.
+func runEvsBudgetLoops(ctx context.Context, lifetime *sync.WaitGroup, host *sidecar.ServiceHost, counters evsservice.DriveCounterSource, settings *evsservice.BudgetLoopSettings) *evsBudgetLoops {
+	loops := &evsBudgetLoops{}
 	for _, clusterId := range host.Blobs.MetadataClusterIds() {
 		loop, err := evsservice.NewBudgetLoop(host, clusterId, counters, evsBudgetLogger{}, settings)
 		if err != nil {
 			glog.Errorf("[evsbudget]%s: no budget loop: %v\n", clusterId, err)
 			continue
 		}
-		loops = append(loops, loop)
+		loops.budgetLoops = append(loops.budgetLoops, loop)
 		lifetime.Go(func() {
 			server.HandleError(func() {
 				loop.Run(ctx)
 			})
 		})
+	}
+	if segmentCluster, err := host.Blobs.SegmentCluster(); err == nil {
+		loop, err := evsservice.NewHddLoop(host, segmentCluster.ClusterId(), counters, evsBudgetLogger{}, nil)
+		if err != nil {
+			glog.Errorf("[evsbudget]%s: no hdd loop: %v\n", segmentCluster.ClusterId(), err)
+		} else {
+			loops.hddLoops = append(loops.hddLoops, loop)
+			lifetime.Go(func() {
+				server.HandleError(func() {
+					loop.Run(ctx)
+				})
+			})
+		}
 	}
 	return loops
 }
