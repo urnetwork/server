@@ -6,6 +6,7 @@ import (
 
 	"github.com/urnetwork/connect"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/sidecartest"
 )
 
@@ -43,7 +44,7 @@ func TestRedisHashSlotVectors(t *testing.T) {
 		{key: "no tag", tag: "no tag"},
 		{key: "open{only", tag: "open{only"},
 	} {
-		if tag := RedisHashTagOf(c.key); tag != c.tag {
+		if tag := sidecar.RedisHashTag(c.key); tag != c.tag || RedisHashSlot(c.key) != int(redisCrc16(c.tag)%RedisSlotCount) {
 			t.Errorf("%q: tag %q, want %q", c.key, tag, c.tag)
 		}
 	}

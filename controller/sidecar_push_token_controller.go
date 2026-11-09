@@ -42,19 +42,14 @@ func (self SidecarPushTokenArgs) GoString() string {
 type SidecarPushTokenResult struct {
 }
 
-// A refusal with its status and, for a closed gate, its Retry-After, as RaiseHttpError reads them.
+// A refusal with its status, as RaiseHttpError reads it.
 type sidecarPushTokenRefusal struct {
-	status            int
-	message           string
-	retryAfterSeconds int
+	status  int
+	message string
 }
 
 func (self *sidecarPushTokenRefusal) Error() string {
 	return fmt.Sprintf("%d %s", self.status, self.message)
-}
-
-func (self *sidecarPushTokenRefusal) RetryAfterSeconds() int {
-	return self.retryAfterSeconds
 }
 
 // Whether the route is open: MG8 in the binary and sidecar.yml's wake switch on. The handler asks before
@@ -64,11 +59,14 @@ func SidecarPushTokenOpen() bool {
 }
 
 // POST /sidecar/push-token: sets or deletes the bearer's own client's token and applies it to the
-// client's slot. 503 with Retry-After while the route is dark, 400 for a platform or token the route does
-// not take, 401 for a client removed since its token was checked.
+// client's slot. 503 while the route is dark, which the handler answers first with the gate's Retry-After,
+// 400 for a platform or token the route does not take, 401 for a client removed since its token was
+// checked.
 func SidecarSetPushToken(args *SidecarPushTokenArgs, clientSession *session.ClientSession) (*SidecarPushTokenResult, error) {
 	if !SidecarPushTokenOpen() {
-		return nil, &sidecarPushTokenRefusal{status: http.StatusServiceUnavailable, message: "Wake tokens are not available yet.", retryAfterSeconds: 60}
+		// the handler answers this with the gate's Retry-After before it reads the body; here only a switch
+		// turned off since then, which a later post meets there
+		return nil, &sidecarPushTokenRefusal{status: http.StatusServiceUnavailable, message: "Wake tokens are not available yet."}
 	}
 	if clientSession.ByJwt == nil || clientSession.ByJwt.ClientId == nil {
 		return nil, &sidecarPushTokenRefusal{status: http.StatusUnauthorized, message: "Not authorized."}
@@ -85,7 +83,7 @@ func SidecarSetPushToken(args *SidecarPushTokenArgs, clientSession *session.Clie
 	case errors.Is(err, model.ErrPushTokenClientRemoved):
 		return nil, &sidecarPushTokenRefusal{status: http.StatusUnauthorized, message: "Not authorized."}
 	case errors.Is(err, model.ErrPushTokenUnavailable):
-		return nil, &sidecarPushTokenRefusal{status: http.StatusServiceUnavailable, message: "Wake tokens are not available yet.", retryAfterSeconds: 60}
+		return nil, &sidecarPushTokenRefusal{status: http.StatusServiceUnavailable, message: "Wake tokens are not available yet."}
 	}
 	return nil, err
 }

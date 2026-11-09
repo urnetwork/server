@@ -265,11 +265,14 @@ func RunPushTokenPass(
 	}
 	errs := []error{}
 	if wake {
+		// a reconcile that read the topology returns what is still found even when a slot of it failed,
+		// so its progress and its findings carry; one that could not read the topology returns nil
 		found, err := pass.reconcile(state.Found)
+		if found != nil {
+			next.Found = found
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("loss: %w", err))
-		} else {
-			next.Found = found
 		}
 		lastCompletedStartTime, sweep, err := pass.sweep(state.LastCompletedStartTime, state.Sweep)
 		next.LastCompletedStartTime, next.Sweep = lastCompletedStartTime, sweep
