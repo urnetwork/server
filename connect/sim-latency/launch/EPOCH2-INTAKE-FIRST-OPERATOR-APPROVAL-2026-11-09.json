@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "prospective-epoch2-intake-first-operator-approval/v1",
+  "environment": "main",
+  "competition_id": "sim-latency-season-1",
+  "season_id": "sim-latency-production-20261028-r2",
+  "from_epoch": 2,
+  "operator_instruction": "The plan is close epoch 1, open epoch 2 with evaluations paused, and in parallel work on turning on epoch 2 evaluations using the new subprocessor host",
+  "intake_policy_kind": "published-source-intake/v1",
+  "evaluation_hold": {"revision": 26, "active": true, "hold_id": "01a1c0a8-84da-7f55-c5fb-c386d74361cc"},
+  "winner_review": "Official Astra/max epoch1 approval remains authoritative and satisfies the operator's conditional winner approval.",
+  "frozen_epoch2_policy": "G2 request and byte floors remain 95% with no upper bounds; G7 expected page and byte coverage floors are each 95% of the same-round baseline. Useful-traffic suppression remains prohibited.",
+  "source_and_policy_identity": "Freeze and publish the actual approved epoch2 source, policy and instrument identity before opening; do not substitute main or alter a round's frozen policy later.",
+  "parallel_after_intake": ["Fresh shared epoch2 baseline", "Goofe sub-evaluator admission and cross-host qualification", "API and worker grading readiness", "Enable claims only after actual grading qualification"],
+  "does_not_claim": ["Epoch2 is already open", "Source build or containment qualification passed", "Fresh baseline measured", "Goofe qualified", "Calibration accepted", "Payment completed"]
+}
