@@ -20,9 +20,9 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// stripeTestCanceledInvoice is stripeTestFullInvoice for a subscription Stripe
-// canceled for reason ("" for none), whose invoice took amountPaid cents
-// through chargeId ("" for no charge).
+// The stripeTestFullInvoice of a subscription Stripe canceled for reason (""
+// for none), whose invoice took amountPaid cents through chargeId ("" for no
+// charge).
 func stripeTestCanceledInvoice(
 	invoiceId string,
 	subscriptionId string,
@@ -44,8 +44,7 @@ func stripeTestCanceledInvoice(
 	return invoice
 }
 
-// stripeTestCharge is a succeeded charge of amount cents, amountRefunded of it
-// given back.
+// A succeeded charge of amount cents, amountRefunded of it given back.
 func stripeTestCharge(chargeId string, amount int64, amountRefunded int64, disputed bool) map[string]any {
 	return map[string]any{
 		"id":              chargeId,
@@ -59,8 +58,8 @@ func stripeTestCharge(chargeId string, amount int64, amountRefunded int64, dispu
 	}
 }
 
-// stripeTestRenewalEnd is the end of the network's Stripe renewal paid by
-// invoiceId, in or out of window, in RFC 3339 so a cut reads plainly.
+// The end of the network's Stripe renewal paid by invoiceId, in or out of
+// window, in RFC 3339 so a cut reads plainly.
 func stripeTestRenewalEnd(ctx context.Context, networkId server.Id, invoiceId string) string {
 	var endTime time.Time
 	server.Db(ctx, func(conn server.PgConn) {
@@ -409,8 +408,8 @@ func TestStripeReconcileInvoiceAndChargeShapes(t *testing.T) {
 	connect.AssertEqual(t, charge, stripeReconcileCharge{Id: "ch_a", Status: "succeeded", Amount: 4000, AmountRefunded: 4000, Refunded: true})
 }
 
-// stripeTestActiveRenewalEnd is the end of the network's in-window Stripe
-// renewal paid by invoiceId; ok false when none is in window.
+// The end of the network's in-window Stripe renewal paid by invoiceId; ok
+// false when none is in window.
 func stripeTestActiveRenewalEnd(ctx context.Context, networkId server.Id, invoiceId string) (time.Time, bool) {
 	for _, renewal := range model.GetActiveSubscriptionRenewals(ctx, networkId, model.SubscriptionTypeSupporter) {
 		if renewal.Market == model.SubscriptionMarketStripe && renewal.TransactionId == invoiceId {
