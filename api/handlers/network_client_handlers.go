@@ -10,15 +10,16 @@ import (
 )
 
 // AuthNetworkClient provisions a client, and is where an agent meets the plan's
-// concurrent-client limit. It carries the full x402 round trip:
+// limits. For an agent that asks for terms it carries the full x402 round trip:
 //
-//	POST /network/auth-client                     -> 402 + payment terms
-//	POST /network/auth-client  X-PAYMENT: <signed> -> 200, Pro active, client returned
+//	POST /network/auth-client  X-UR-X402: 1                      -> 402 + payment terms
+//	POST /network/auth-client  X-UR-X402: 1, X-PAYMENT: <signed> -> 200, Pro active, client returned
 //
 // The retry carries the signed payment on the SAME request, which is settled before
 // the auth runs -- so by the time AuthNetworkClient checks the limit, the network is
-// already Pro and simply succeeds. The URnetwork apps, and every caller while x402
-// is off, get the normal JSON body with `upgrade_required` to prompt on instead
+// already Pro and simply succeeds. Every caller that does not ask (the apps, the
+// browser extensions, ur.io), and every caller while x402 is off, gets the normal
+// JSON body with `upgrade_required` to prompt on instead
 // (controller.X402QuotesClient).
 func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 	if !controller.X402SettleInlineUpgrade(w, r) {

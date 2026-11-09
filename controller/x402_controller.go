@@ -18,7 +18,6 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -64,6 +63,11 @@ const X402PaymentHeader = "X-PAYMENT"
 
 // X402PaymentResponseHeader carries the settlement receipt back to the agent.
 const X402PaymentResponseHeader = "X-PAYMENT-RESPONSE"
+
+// X402QuoteHeader is the request header with which a caller asks auth-client to
+// answer a refusal an upgrade lifts with x402 payment terms (`X-UR-X402: 1`).
+// See X402QuotesClient.
+const X402QuoteHeader = "X-UR-X402"
 
 type x402SkuConfig struct {
 	PriceUsd float64 `yaml:"price_usd"`
@@ -841,13 +845,13 @@ func x402TransactionGrantedInConn(connOwner server.PgConn, ctx context.Context, 
 }
 
 // WriteX402UpgradeRequired turns an "upgrade required" auth result into a 402 with
-// payment terms, so an agent can pay for a Pro month inline and retry the SAME
-// request. Returns true when it wrote the response.
+// payment terms, so an agent that asked for them can pay for a Pro month inline
+// and retry the SAME request. Returns true when it wrote the response.
 //
-// It is a no-op (false) when the result is not upgrade-required, when the request
-// comes from one of the URnetwork apps (X402QuotesClient), or when x402 is off or
-// cannot quote -- and then the normal JSON body with `upgrade_required` is written
-// instead, which is what a human client shows an upgrade prompt from.
+// It is a no-op (false) when the result is not upgrade-required, when the caller
+// did not ask for terms (X402QuotesClient), or when x402 is off or cannot quote --
+// and then the normal JSON body with `upgrade_required` is written instead, which
+// is what the apps, the browser extensions and ur.io show an upgrade prompt from.
 func WriteX402UpgradeRequired(w http.ResponseWriter, r *http.Request, result *model.AuthNetworkClientResult) bool {
 	if result == nil || result.Error == nil || !result.Error.UpgradeRequired {
 		return false
@@ -876,21 +880,28 @@ func WriteX402UpgradeRequired(w http.ResponseWriter, r *http.Request, result *mo
 }
 
 // X402QuotesClient reports whether a refusal that an upgrade lifts is answered
-// to this caller with x402 payment terms. The URnetwork apps name their device
-// type in the client info header (connect.ClientInfo): they have a person to
-// show the upgrade prompt to and no x402 signer, so they get the JSON body with
-// upgrade_required, as every client did before x402. A 402 carries the terms
-// instead, which the apps' request layer reads as a failed request and shows
-// as raw json or a generic error. Any other caller (no client info, or "cli",
-// "server", "unknown") is taken for an agent and is quoted. The header is the
-// caller's own claim: a caller that names an app type only gives up the terms.
+// to this caller with x402 payment terms (402) rather than the JSON body with
+// upgrade_required. Only a caller that asks is quoted: it sends
+// `X-UR-X402: 1` (X402QuoteHeader).
+//
+// x402 has no header a client sends before it holds terms: the reference
+// clients send the first request unchanged and add X-PAYMENT only to the paid
+// retry. So the server cannot pick out an agent that can pay by anything but its
+// own request, and choosing by who is not an agent misses clients. Until
+// 2026-11-10 every caller whose client info named no app was quoted, among them
+// the published browser extensions (no client info at all), which showed
+// "HTTP error! status: 402" at the free plan's hosted proxy cap (support inbox
+// 8244). Every client reads the JSON refusal, and an agent that did not ask can
+// still buy Pro at /x402/purchase and pay on its retry here.
+//
+// A request that already carries a payment (X402PaymentHeader, settled before
+// the auth ran) is never quoted again, so a refusal after a payment never asks
+// for a second one.
 func X402QuotesClient(header http.Header) bool {
-	switch connect.ClientInfoFromHeader(header).DeviceType {
-	case "android", "ios", "macos", "windows", "linux", "web":
+	if header.Get(X402PaymentHeader) != "" {
 		return false
-	default:
-		return true
 	}
+	return strings.TrimSpace(header.Get(X402QuoteHeader)) == "1"
 }
 
 // X402SettleInlineUpgrade settles an X-PAYMENT presented on a gated request: the

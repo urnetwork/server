@@ -335,7 +335,7 @@ Server branch `feat/unique-exit`, connect branch `feat/unique-exit-spec` (the AP
 | `replace_mode` | `auto` or `manual` |
 
 **Create refusals** (HTTP 200, `error.message`, nothing created). They are decided before the create is counted, so none spends the active proxy cap or the create rate:
-- not Pro: `error.upgrade_required`, "Unique exit IPs are a UR Pro feature. Upgrade to UR Pro to create unique-exit proxies." With x402 enabled this answers 402 with the Pro terms, like the other `upgrade_required` refusals.
+- not Pro: `error.upgrade_required`, "Unique exit IPs are a UR Pro feature. Upgrade to UR Pro to create unique-exit proxies." With x402 enabled, a caller that asks for terms (`X-UR-X402: 1`) gets 402 with the Pro terms instead, like the other `upgrade_required` refusals.
 - a client-id location: "A unique exit picks its own provider: use a country, region, city, group or best available location."
 - a bad `unique_exit_replace`: `unique_exit_replace must be "auto" or "manual".`
 - no supply: `error.no_unique_supply`, "No unique exit IP is available in this location right now. Try another location, or best available."
