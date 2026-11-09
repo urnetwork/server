@@ -24,7 +24,7 @@ func RunDockerProbe(ctx context.Context, config *Config, arguments []string, out
 	if err != nil || executable != config.Agent.Path {
 		return errors.New("Docker host audit is not its pinned installed executable")
 	}
-	if err := config.validate(true); err != nil {
+	if err := config.validateForPurpose(true, true); err != nil {
 		return err
 	}
 	settings := defaultDockerClientSettings()

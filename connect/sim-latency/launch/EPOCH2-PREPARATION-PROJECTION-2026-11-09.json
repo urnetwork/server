@@ -1,6 +1,14 @@
 {
   "schema": 1,
-  "status": "PROJECTION_FIX_QUALIFIED_LOCAL_DEPLOYMENT_NEXT",
+  "status": "DEPLOYED_API_PREPARATION_SUCCEEDED",
+  "runner_source_commit": "6e1c371ac617897866bc7a23aedaa0dac018fbf4",
+  "runner_sha256": "5c40ba5b38897d66a778979562f0cd70b0ed9958e6c2258b54cae85e27755634",
+  "unit": "urnetwork-epoch2-api-prepare-projection-20261109-v1.service",
+  "unit_terminal_exit": 0,
+  "transition_revision": 13,
+  "transition_state": "preparation_ready",
+  "api_readiness_recorded_at": "2026-11-09T22:07:43.172783Z",
+  "api_runtime_image_digest": "sha256:cd9ef00c61fb7724ae582636b55029d3f7e408f3027bce5c48d5f93ed86f9e7e",
   "failure": "Preparation's read-only watchdog still transferred the complete immutable intent and incumbent within its five-second budget.",
   "native_read_only_comparison": [
     {"returned_bytes":64,"callback_ms":172,"total_ms":731},

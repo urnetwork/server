@@ -51,6 +51,33 @@ func TestDockerProbePinsPrivateEndpointAndReadOnlyFactGrammar(t *testing.T) {
 	}
 }
 
+// First observation cannot require the final fingerprint it is computing.
+// Neither copying the probe config into execution nor a malformed supplied
+// fingerprint may turn this purpose distinction into an admission waiver.
+func TestDockerProbeCanObserveBeforeExecutionQualificationExists(t *testing.T) {
+	fixture := newAgentTestFixture(t)
+	config := *fixture.config
+	config.QualificationSha256 = ""
+	if err := config.validate(false); err == nil {
+		t.Fatal("unqualified role acquired ordinary agent authority")
+	}
+	if err := config.validateRecoveryConfiguration(DefaultAgentSettings(), false); err == nil {
+		t.Fatal("unqualified role acquired recovery authority")
+	}
+	if err := config.validateForPurpose(false, true); err != nil {
+		t.Fatal("first read-only observation required its own future fingerprint", err)
+	}
+	config.QualificationSha256 = "invalid"
+	if err := config.validateForPurpose(false, true); err == nil {
+		t.Fatal("metadata role accepted a malformed supplied qualification")
+	}
+	config.QualificationSha256 = ""
+	config.SourceLockSha256 = "invalid"
+	if err := config.validateForPurpose(false, true); err == nil {
+		t.Fatal("metadata role relaxed another frozen identity")
+	}
+}
+
 func TestDockerProbeRejectsMutationContainerAndEndpointOverrides(t *testing.T) {
 	config := &Config{DockerSocketPath: "/synthetic/private/docker.sock"}
 	client := &DockerClientConfig{DockerConfigurationDirectory: "/synthetic/protected/docker-client-config"}

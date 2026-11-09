@@ -125,6 +125,21 @@ func DefaultAgentSettings() AgentSettings {
 
 // Only an explicitly pinned path may select the role; unknown fields fail closed.
 func LoadConfig(path string) (*Config, error) {
+	return loadConfigForPurpose(path, false)
+}
+
+// A root-only metadata observer may compute the first genuine fingerprint.
+// Empty qualification is not execution authority and remains invalid for every
+// agent constructor, SSH owner, cleanup owner and candidate-running entrypoint.
+func LoadDockerProbeConfig(path string) (*Config, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("prospective Docker audit requires the root metadata role")
+	}
+	return loadConfigForPurpose(path, true)
+}
+
+// Parsing and all protected path/pin checks are identical for both purposes.
+func loadConfigForPurpose(path string, dockerProbe bool) (*Config, error) {
 	settings := DefaultAgentSettings()
 	if err := protectedRootPath(path, false, true); err != nil {
 		return nil, err
@@ -140,7 +155,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := decodeStrict(content, config); err != nil {
 		return nil, err
 	}
-	if err := config.validate(true); err != nil {
+	if err := config.validateForPurpose(true, dockerProbe); err != nil {
 		return nil, err
 	}
 	return config, nil
@@ -148,8 +163,14 @@ func LoadConfig(path string) (*Config, error) {
 
 // Public construction never bypasses protected path or non-root worker checks.
 func (self *Config) validate(protected bool) error {
+	return self.validateForPurpose(protected, false)
+}
+
+// Only an absent first fingerprint is permitted for read-only observation;
+// malformed supplied fingerprints and every other role invariant still fail.
+func (self *Config) validateForPurpose(protected, dockerProbe bool) error {
 	if self == nil || self.Schema != Schema || !namePattern.MatchString(self.HostId) || self.WorkerUser == "" || self.TrustedOperatorUser == "" || self.ExpectedDataDeviceId == 0 ||
-		!digestPattern.MatchString(self.SourceLockSha256) || !digestPattern.MatchString(self.QualificationSha256) ||
+		!digestPattern.MatchString(self.SourceLockSha256) || (!digestPattern.MatchString(self.QualificationSha256) && !(dockerProbe && self.QualificationSha256 == "")) ||
 		!digestPattern.MatchString(self.SubmissionBuilderSha256) ||
 		!digestPattern.MatchString(self.ConfigLocalSha256) || !digestPattern.MatchString(self.VaultLocalSha256) ||
 		!strings.HasPrefix(self.EvaluatorImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(self.EvaluatorImageDigest, "sha256:")) {
@@ -231,7 +252,7 @@ func (self *Config) validate(protected bool) error {
 	if err := self.DockerRole.validate(self, protected); err != nil {
 		return err
 	}
-	if err := self.validateRecoveryConfiguration(DefaultAgentSettings(), protected); err != nil {
+	if err := self.validateRecoveryRole(DefaultAgentSettings(), protected, dockerProbe); err != nil {
 		return err
 	}
 	key, err := base64.StdEncoding.DecodeString(self.CoordinatorPublicKeyBase64)

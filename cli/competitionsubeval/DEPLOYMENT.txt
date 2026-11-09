@@ -36,6 +36,16 @@ agent journals, public client sockets and private control sockets do not. See
 private-engine/README.md for the inert quota/namespace provisioning inputs.
 No unmounted-root fallback or user-daemon resource sharing is permitted.
 
+For the first prospective host fingerprint, the root-only --docker-probe role
+may load the same protected inventory with qualification_sha256 empty. All
+other protected path, executable, fixture, management and private-engine pins
+still validate. The role accepts only the fixed local metadata queries; it
+cannot create a container, execute a candidate, serve SSH or run recovery.
+Do not insert a placeholder-valid hash to bootstrap this observation. Retain
+the actual host audit, install its genuine fingerprint in both host and agent
+inventories, recompute their file pins, and qualify execution separately.
+Normal execution and recovery continue to reject an empty qualification.
+
 Set the private boundary's explicit management_cpuset and every private unit's
 AllowedCPUs from the unchanged pinned resource helper. Manager metadata alone
 is insufficient: live daemon/keeper/shim membership, configured/effective cgroup

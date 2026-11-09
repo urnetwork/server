@@ -46,6 +46,13 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if parsed.dockerProbe && os.Geteuid() != 0 {
 		return errors.New("Docker host audit requires the fixed root role")
 	}
+	if parsed.dockerProbe {
+		config, err := competitionagent.LoadDockerProbeConfig(parsed.configPath)
+		if err != nil {
+			return err
+		}
+		return competitionagent.RunDockerProbe(ctx, config, parsed.dockerArguments, output)
+	}
 	if parsed.recoverActive {
 		if os.Geteuid() != 0 {
 			return errors.New("independent recovery requires the fixed root role")
@@ -69,9 +76,6 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {
 		return err
-	}
-	if parsed.dockerProbe {
-		return competitionagent.RunDockerProbe(ctx, config, parsed.dockerArguments, output)
 	}
 	settings := competitionagent.DefaultAgentSettings()
 	agent, err := competitionagent.NewAgent(config, competitionagent.NewSystemdRunner(settings), settings)
