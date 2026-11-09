@@ -190,9 +190,28 @@ func CanConnectSidecarClient(ctx context.Context, clientId server.Id) bool {
 	return SidecarClientsExceeded(ctx, networkId) == nil
 }
 
+// A client's network and sidecar mark. Both are written with the client and never
+// change, so a process keeps each answer it read, bounded as ClientRefusesAdmin's are,
+// and a re-nomination asks no query.
+type sidecarClientMark struct {
+	networkId server.Id
+	marked    bool
+}
+
+var sidecarClientMarkAnswers = newBoundedClientMap[sidecarClientMark](DefaultClientAdminSettings().CachedClientMaxCount)
+
 // The client's network and whether its owner row marks it strict_exp. An inactive or
-// unknown client is unmarked. Only while MG0 is linked.
+// unknown client is unmarked, and that answer is not kept. Only while MG0 is linked.
 func getSidecarClientMark(ctx context.Context, clientId server.Id) (networkId server.Id, marked bool) {
+	if answer, ok := sidecarClientMarkAnswers.Load(clientId); ok {
+		return answer.networkId, answer.marked
+	}
+	found := false
+	defer func() {
+		if found {
+			sidecarClientMarkAnswers.Store(clientId, sidecarClientMark{networkId: networkId, marked: marked})
+		}
+	}()
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -212,10 +231,17 @@ func getSidecarClientMark(ctx context.Context, clientId server.Id) (networkId se
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				server.Raise(result.Scan(&networkId, &marked))
+				found = true
 			}
 		})
 	})
 	return
+}
+
+// Drops this process's kept marks, for a test that writes a client's owner row after the
+// client was asked about.
+func Testing_ForgetSidecarClientMarks() {
+	sidecarClientMarkAnswers.Clear()
 }
 
 // Replaces the zset's settings, returning a restore function, for tests.

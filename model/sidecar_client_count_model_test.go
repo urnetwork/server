@@ -220,8 +220,12 @@ func TestSidecarClientsLimitAtEnrollmentAndConnect(t *testing.T) {
 
 		twentyFirst := testingSidecarCountClient(t, ctx, kinds.networkId, nil, true, true, false)
 		connect.AssertEqual(t, CanConnectSidecarClient(ctx, twentyFirst), false)
-		// connected clients stay: a re-nomination is no new connection
+		// connected clients stay: a re-nomination is no new connection, and its
+		// mark, kept from the first ask, costs it no query
+		attempts, stop := server.DenyPostgresForTest(t)
 		connect.AssertEqual(t, CanConnectSidecarClient(ctx, connected[0]), true)
+		stop()
+		connect.AssertEqual(t, attempts(), uint64(0))
 		// the app device carries no mark
 		connect.AssertEqual(t, CanConnectSidecarClient(ctx, kinds.appDevice), true)
 
