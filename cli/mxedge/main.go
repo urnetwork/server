@@ -62,7 +62,7 @@ func main() {
 	// the block's own certificate and stores, and the report intake on smtpedge.yml (report_intake.go), ready
 	// only in a binary that links the groups it reads; without one every recipient gets 451
 	deps := &mxedgehost.HostDeps{}
-	intake, err := newConfiguredReportIntake()
+	intake, err := newConfiguredReportIntake(mxEdgeSettings)
 	if err != nil {
 		glog.Errorf("[mxedge]no report intake, so every recipient the listener answers for gets 451 4.3.0: %v\n", err)
 	} else {

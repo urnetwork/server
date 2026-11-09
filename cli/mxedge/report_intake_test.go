@@ -157,25 +157,40 @@ func TestReportIntakeTakesAnAggregateAndAsksForARetryOnAStoreFailure(t *testing.
 }
 
 // The intake reads smtpedge.yml from config, and a file it refuses leaves the block without one, saying which
-// file and never its values.
+// file and never its values; so does one whose root or report host is not mxedge.yml's, since the listener
+// would take mail the intake cannot route.
 func TestReportIntakeReadsSmtpEdgeYmlFromConfig(t *testing.T) {
-	popValid := server.Config.PushSimpleResource(reportIntakeSettingsName, []byte(
-		"root: root.example\n"+
-			"report_host: rpt.report.example\n"+
-			"sending_addresses:\n"+
-			"  - address: 192.0.2.10\n"+
-			"    helo: o1.out.report.example\n"+
-			"loop_allowlist: [loop.example]\n",
-	))
-	intake, err := newConfiguredReportIntake()
+	mxEdgeSettings := mxedgeservice.DefaultMxEdgeSettings()
+	mxEdgeSettings.PlatformRootDomainName = "Root.Example."
+	mxEdgeSettings.PlatformReportHostName = "rpt.report.example"
+	smtpEdgeYml := func(root string, reportHost string) []byte {
+		return []byte(
+			"root: " + root + "\n" +
+				"report_host: " + reportHost + "\n" +
+				"sending_addresses:\n" +
+				"  - address: 192.0.2.10\n" +
+				"    helo: o1.out.report.example\n" +
+				"loop_allowlist: [loop.example]\n",
+		)
+	}
+	popValid := server.Config.PushSimpleResource(reportIntakeSettingsName, smtpEdgeYml("root.example", "rpt.report.example"))
+	intake, err := newConfiguredReportIntake(mxEdgeSettings)
 	popValid()
 	if err != nil || intake == nil || intake.root != "root.example" {
 		t.Fatalf("a valid smtpedge.yml: %v", err)
 	}
+	for _, mismatch := range [][2]string{{"other-root.example", "rpt.report.example"}, {"root.example", "rpt.other.example"}} {
+		pop := server.Config.PushSimpleResource(reportIntakeSettingsName, smtpEdgeYml(mismatch[0], mismatch[1]))
+		intake, err := newConfiguredReportIntake(mxEdgeSettings)
+		pop()
+		if err == nil || intake != nil || !strings.Contains(err.Error(), "mxedge.yml") {
+			t.Fatalf("names %v that are not mxedge.yml's: %v", mismatch, err)
+		}
+	}
 	// report_host left out, and a planted value that must not reach the error
 	popRefused := server.Config.PushSimpleResource(reportIntakeSettingsName, []byte("root: planted-root-value.example\n"))
 	defer popRefused()
-	intake, err = newConfiguredReportIntake()
+	intake, err = newConfiguredReportIntake(mxEdgeSettings)
 	if err == nil || intake != nil {
 		t.Fatal("an smtpedge.yml with no report_host built an intake")
 	}
