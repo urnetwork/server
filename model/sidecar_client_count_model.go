@@ -109,6 +109,19 @@ func AddNetworkSidecarClient(ctx context.Context, networkId server.Id, clientId 
 	})
 }
 
+// Registers the client as connected until ttl from now when it is a sidecar's, as its
+// connection survives the announce window, so it counts from then rather than from its
+// resident's first poll. Nothing while sidecar clients are not counted.
+func RegisterNetworkSidecarClientIfMarked(ctx context.Context, clientId server.Id, ttl time.Duration) {
+	if !SidecarClientCountingOn() {
+		return
+	}
+	networkId, marked := getSidecarClientMark(ctx, clientId)
+	if marked {
+		AddNetworkSidecarClient(ctx, networkId, clientId, ttl)
+	}
+}
+
 // Removes one marked client, as its resident closes.
 func RemoveNetworkSidecarClient(ctx context.Context, networkId server.Id, clientId server.Id) {
 	member := string(clientId.Bytes())

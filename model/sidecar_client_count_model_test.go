@@ -315,3 +315,25 @@ func TestTopLevelClientCreateCapPerTier(t *testing.T) {
 		connect.AssertEqual(t, limitOf(free), 250)
 	})
 }
+
+// A connection that survives its announce registers a marked client at once, before its
+// resident's first poll, and an unmarked one not at all; dark, nothing is read.
+func TestSidecarClientRegistersAtAnnounce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		kinds := testingSidecarCountKinds(t, ctx)
+
+		defer Testing_SetEnforceSidecarLimits(false)()
+		attempts, stop := server.DenyPostgresForTest(t)
+		RegisterNetworkSidecarClientIfMarked(ctx, kinds.declaredSidecar, time.Hour)
+		stop()
+		connect.AssertEqual(t, attempts(), uint64(0))
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(0))
+
+		Testing_SetEnforceSidecarLimits(true)
+		for _, clientId := range []server.Id{kinds.appDevice, kinds.sidecarChild, kinds.declaredSidecar, kinds.egressSidecar, kinds.ordinaryOccupant} {
+			RegisterNetworkSidecarClientIfMarked(ctx, clientId, time.Hour)
+		}
+		connect.AssertEqual(t, GetNetworkSidecarConnectedCount(ctx, kinds.networkId), int64(3))
+	})
+}
