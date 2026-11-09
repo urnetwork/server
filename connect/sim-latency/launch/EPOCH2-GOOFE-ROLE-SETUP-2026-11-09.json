@@ -19,7 +19,14 @@
     "native_smoke": {"requested_remote_command": "echo unauthorized-shell-marker", "exit_code": 1, "handler_error": "subevaluation operation failed", "shell_marker_executed": false, "meaning": "Dedicated-key authentication reaches the forced handler; incomplete agent inventory fails closed. This is not an admission or execution-readiness receipt."},
     "account_home_warning": "The existing system account has /nonexistent as its home; SSH emits a stderr warning. No shell marker or protocol success was returned."
   },
-  "remaining_before_host_policy_freeze": ["Complete private daemon user-namespace/no-new-privileges configuration", "Install pinned agent, management/recovery, resource-boundary and public client inventories", "Collect actual immutable host fingerprint"],
+  "worker_fixture_access": {
+    "verified_as": "urnetwork-eval-worker",
+    "read_and_hash_config_local": "passed; original hash unchanged",
+    "read_and_hash_vault_local": "passed; original hash unchanged",
+    "permission_scope": "Direct synthetic local mount leaves only: directories0555/files0444 for remapped read-only mounts. Exact protected parent paths have worker traversal ACLs; no recursive home or main/all permission changes.",
+    "private_authority_roots": "state, identities and control remain root-owned0700"
+  },
+  "remaining_before_host_policy_freeze": ["Resolve pending /home/by traversal policy for remapped Docker root", "Complete native agent, public client and recovery arming inventory", "Collect actual immutable host fingerprint"],
   "remaining_before_grading": ["Native containment/cleanup qualification", "Fresh shared epoch baseline", "Five-percent cross-host operational admission and required runtime receipts"],
   "agent_execution_ready": false,
   "baseline_ready": false,
