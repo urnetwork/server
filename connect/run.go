@@ -70,6 +70,12 @@ func exchangeSettingsForRun(options RunOptions) *ExchangeSettings {
 	// (client_recycle.go): StuckProviderRecycleDefault keeps them off until
 	// the control names a block, and alt's exchange keeps the ceiling off.
 	settings.EnableStuckProviderRecycle = true
+	// §6.8's resident publishers, behind sidecar.yml's push switch as it reads
+	// now: only then does the exchange subscribe every client's {scp_<C>}n,
+	// since every keyspace notification on every master is matched against
+	// every pattern. A switch turned on applies at the next start; one turned
+	// off stops new publishers at the file's reread (sidecar_publisher.go).
+	settings.EnableSidecarPush = server.CurrentSidecarConfig().Push()
 	if options.MemoryOwnerLedger {
 		settings.MemoryOwnerLedger = &connectcore.TransferMemoryOwnerLedger{}
 		settings.payloadOwnerLedger = &residentPayloadLedger{}

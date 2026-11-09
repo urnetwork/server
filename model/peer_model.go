@@ -503,6 +503,24 @@ func NetworkPeersEnabled(ctx context.Context, networkId server.Id) bool {
 // row), in that order.
 // `peersEnabled` is false whenever the client is not an active top-level client.
 func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool) {
+	networkId, topLevel, category, peer, peersEnabled, _ = getNetworkPeerProfile(ctx, clientId, false)
+	return
+}
+
+// GetNetworkPeerProfile, with the client's §6.8 push marks from network_client_owner in the same
+// query when readPushMarks, which only a binary linking MG0 may ask (sidecar_push_model.go). Without it
+// the query is GetNetworkPeerProfile's as it always was.
+func getNetworkPeerProfile(ctx context.Context, clientId server.Id, readPushMarks bool) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool, pushMarks SidecarPushMarks) {
+	pushMarkColumns := ""
+	pushMarkJoin := ""
+	if readPushMarks {
+		pushMarkColumns = `,
+					COALESCE(network_client_owner.strict_exp, false) AS strict_exp,
+					COALESCE(network_client_owner.acl_enforcing, false) AS acl_enforcing`
+		pushMarkJoin = `
+				LEFT JOIN network_client_owner ON
+					network_client_owner.client_id = network_client.client_id`
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -526,10 +544,10 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 						WHERE
 							network_client_acl_group.client_id = network_client.client_id AND
 							network_client_acl_group.acl_group = 'isolated'
-					) AS is_isolated
+					) AS is_isolated`+pushMarkColumns+`
 				FROM network_client
 				LEFT JOIN device ON
-					device.device_id = network_client.device_id
+					device.device_id = network_client.device_id`+pushMarkJoin+`
 				WHERE
 					network_client.client_id = $1 AND
 					network_client.active = true
@@ -545,7 +563,7 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 				var isProxy bool
 				var isProvider bool
 				var isIsolated bool
-				server.Raise(result.Scan(
+				destinations := []any{
 					&networkId,
 					&sourceClientId,
 					&principal,
@@ -554,7 +572,11 @@ func GetNetworkPeerProfile(ctx context.Context, clientId server.Id) (networkId s
 					&isProxy,
 					&isProvider,
 					&isIsolated,
-				))
+				}
+				if readPushMarks {
+					destinations = append(destinations, &pushMarks.StrictExp, &pushMarks.AclEnforcing)
+				}
+				server.Raise(result.Scan(destinations...))
 				topLevel = sourceClientId == nil
 				category = networkPeerCategory(isProxy, isProvider, isIsolated)
 				peer = &NetworkPeer{

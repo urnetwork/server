@@ -32,6 +32,8 @@ import (
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/sidecar/pushservice"
+
 	"github.com/urnetwork/server/model"
 )
 
@@ -611,6 +613,8 @@ type ExchangeSettings struct {
 	ExchangeLocalTransportSettings
 
 	ExchangeStuckProviderRecycleSettings
+
+	ExchangeSidecarPushSettings
 }
 
 // Reports one exchange writer ping timer arm to a test.
@@ -736,6 +740,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 		ExchangeLocalTransportSettings: *DefaultExchangeLocalTransportSettings(),
 
 		ExchangeStuckProviderRecycleSettings: *DefaultExchangeStuckProviderRecycleSettings(),
+
+		ExchangeSidecarPushSettings: *DefaultExchangeSidecarPushSettings(),
 	}
 }
 
@@ -812,6 +818,11 @@ type Exchange struct {
 	// Nil in production; composed nomination tests replace only the profile
 	// lookup while retaining resident construction and lifecycle ownership.
 	residentProfileForTest func(context.Context, server.Id) (server.Id, bool, model.NetworkPeerCategory, *model.NetworkPeer, bool)
+	// Nil in production; with residentProfileForTest, the client's push marks
+	// the replaced read would have read (sidecar_publisher.go).
+	residentPushMarksForTest func(server.Id) model.SidecarPushMarks
+	// Nil in production; tests take each resident publisher as it starts.
+	afterSidecarPublisherStartForTest func(*Resident, *pushservice.SidecarPublisher)
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
@@ -844,6 +855,10 @@ type Exchange struct {
 	// KeyEventDelivery.Enabled
 	keyEventSubscriber          *keyEventSubscriber
 	contractOriginNotifications *model.ContractOriginNotifications
+
+	// what resident publishers read and the ack they raise, over server.Redis;
+	// nil while EnableSidecarPush is off (sidecar_publisher.go)
+	sidecarPushRedis pushservice.PublisherRedis
 
 	// set once `Drain` starts. While draining, new connections are refused
 	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
@@ -971,8 +986,11 @@ func newExchange(
 	if settings.KeyEventDelivery.Enabled {
 		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
 		// residents register their listeners with it in `Resident.Run`
-		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle)
+		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle, settings.EnableSidecarPush)
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
+	}
+	if settings.EnableSidecarPush {
+		exchange.sidecarPushRedis = model.NewSidecarPushRedis(nil)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpTransport)
@@ -4259,6 +4277,9 @@ type Resident struct {
 	// the peer category. Proxy clients are registered for counting but get no
 	// peer subscription and never appear in the peer list.
 	peerCategory model.NetworkPeerCategory
+	// the client's §7.4 marks, read with the profile while push is on; a
+	// strict_exp client's resident hosts a publisher (sidecar_publisher.go)
+	sidecarPushMarks model.SidecarPushMarks
 
 	// the client id in the resident is always `connect.ControlId`
 	client                  *connect.Client
@@ -4445,11 +4466,8 @@ func newResidentDuringAdmission(
 	if beforeProfile := exchange.beforeResidentProfileForTest; beforeProfile != nil {
 		beforeProfile(resident)
 	}
-	loadProfile := model.GetNetworkPeerProfile
-	if exchange.residentProfileForTest != nil {
-		loadProfile = exchange.residentProfileForTest
-	}
-	networkId, topLevel, category, peerProfile, peersEnabled := loadProfile(cancelCtx, clientId)
+	networkId, topLevel, category, peerProfile, peersEnabled, pushMarks := exchange.loadResidentProfile(cancelCtx, clientId)
+	resident.sidecarPushMarks = pushMarks
 	if networkId != (server.Id{}) {
 		resident.sessionNetworkId = &networkId
 	}
@@ -4827,6 +4845,10 @@ func (self *Resident) Run() {
 		removeCloseListener := self.exchange.keyEventSubscriber.AddCloseListener(self.clientId, closeListener)
 		defer removeCloseListener()
 		closeListener.Kick()
+
+		// a sidecar's client hears its hints (§6.8), until the resident ends
+		stopSidecarPublisher := self.startSidecarPublisher()
+		defer stopSidecarPublisher()
 	}
 
 	// only top-level client-category peers get network peer updates.

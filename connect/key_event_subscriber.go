@@ -45,6 +45,10 @@ var (
 		Name: "urnetwork_key_events_dispatched_client_recycle_total",
 		Help: "stuck provider recycle flag key events dispatched to the exchange",
 	})
+	keyEventsDispatchedSidecarPush = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "urnetwork_key_events_dispatched_sidecar_push_total",
+		Help: "sidecar hint key events (an INCR on {scp_<C>}n) dispatched to resident publishers",
+	})
 )
 
 func init() {
@@ -56,7 +60,17 @@ func init() {
 		keyEventsDispatchedClientClose,
 		keyEventsDispatchedClientRemoved,
 		keyEventsDispatchedClientRecycle,
+		keyEventsDispatchedSidecarPush,
 	)
+}
+
+// A resident publisher (sidecar_publisher.go), registered under its client's id
+// and kicked by the INCR on its {scp_<C>}n, §6.8's one trigger: HSET and XADD
+// emit nothing under production's classes, and EXPIRE NX's g, an expiry and a
+// del are no hint.
+type sidecarPushListener interface {
+	// Never blocks: the dispatch calls it on the subscription's goroutine.
+	Kick()
 }
 
 // keyEventSubscriber is the exchange's shared consumer of redis keyspace
@@ -83,6 +97,8 @@ type keyEventSubscriber struct {
 	peerListeners    map[server.Id]map[int64]*model.NetworkPeerListener
 	hopListeners     map[server.Id]map[int64]*model.StreamHopListener
 	closeListeners   map[server.Id]map[int64]*clientCloseListener
+	// resident publishers by client (sidecar_publisher.go)
+	sidecarPushListeners map[server.Id]map[int64]sidecarPushListener
 	// closes what this process holds of a client removed through the api
 	// (CLIENTCLOSE.md); it must not block
 	clientRemoved func(server.Id)
@@ -93,7 +109,10 @@ type keyEventSubscriber struct {
 	// keyspace notification on every master is matched against every
 	// pattern, so only an exchange whose recycle ceiling is on subscribes it
 	clientRecyclePattern bool
-	newPeerDelta         func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
+	// whether the subscription includes every client's {scp_<C>}n, for the
+	// same reason: only an exchange with EnableSidecarPush subscribes it
+	sidecarPushPattern bool
+	newPeerDelta       func(context.Context, server.Id, server.Id, string) *model.NetworkPeerDelta
 	// the session revision read behind hints; session.NetworkSessionRevision
 	// when unset
 	sessionRevision func(context.Context, server.Id) (string, int64, error)
@@ -103,8 +122,9 @@ type keyEventSubscriber struct {
 }
 
 // clientRecyclePattern subscribes the recycle flags' channel; an exchange
-// passes its EnableStuckProviderRecycle.
-func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings, clientRecyclePattern bool) *keyEventSubscriber {
+// passes its EnableStuckProviderRecycle. sidecarPushPattern subscribes every
+// client's {scp_<C>}n; an exchange passes its EnableSidecarPush.
+func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettings, clientRecyclePattern bool, sidecarPushPattern bool) *keyEventSubscriber {
 	cancelCtx, cancel := context.WithCancel(ctx)
 	s := &keyEventSubscriber{
 		ctx:                  cancelCtx,
@@ -113,7 +133,9 @@ func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettin
 		peerListeners:        map[server.Id]map[int64]*model.NetworkPeerListener{},
 		hopListeners:         map[server.Id]map[int64]*model.StreamHopListener{},
 		closeListeners:       map[server.Id]map[int64]*clientCloseListener{},
+		sidecarPushListeners: map[server.Id]map[int64]sidecarPushListener{},
 		clientRecyclePattern: clientRecyclePattern,
+		sidecarPushPattern:   sidecarPushPattern,
 		newPeerDelta:         model.NewNetworkPeerDelta,
 	}
 	go server.HandleError(s.run)
@@ -131,6 +153,9 @@ func (self *keyEventSubscriber) patterns(db int) []string {
 	}
 	if self.clientRecyclePattern {
 		patterns = append(patterns, model.ClientRecycleKeyEventPattern(db))
+	}
+	if self.sidecarPushPattern {
+		patterns = append(patterns, model.ScpHintKeyEventPattern(db))
 	}
 	return patterns
 }
@@ -203,6 +228,29 @@ func (self *keyEventSubscriber) AddCloseListener(clientId server.Id, listener *c
 	}
 }
 
+// Registers a resident publisher for its client's {scp_<C>}n events, which
+// kick it, as AddCloseListener does a close listener (sidecar_publisher.go).
+func (self *keyEventSubscriber) AddSidecarPushListener(clientId server.Id, listener sidecarPushListener) (remove func()) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	listenerId := self.nextListenerId
+	self.nextListenerId += 1
+	listeners, ok := self.sidecarPushListeners[clientId]
+	if !ok {
+		listeners = map[int64]sidecarPushListener{}
+		self.sidecarPushListeners[clientId] = listeners
+	}
+	listeners[listenerId] = listener
+	return func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		delete(listeners, listenerId)
+		if len(listeners) == 0 {
+			delete(self.sidecarPushListeners, clientId)
+		}
+	}
+}
+
 // SetClientRemoved sets what a client's removed event runs. It must not block.
 func (self *keyEventSubscriber) SetClientRemoved(clientRemoved func(server.Id)) {
 	self.stateLock.Lock()
@@ -239,6 +287,39 @@ func (self *keyEventSubscriber) resyncCloseListeners() {
 	go server.HandleError(func() {
 		for _, listener := range listeners {
 			listener.Kick()
+			select {
+			case <-self.ctx.Done():
+				return
+			case <-time.After(spacing):
+			}
+		}
+	})
+}
+
+// Kicks every publisher, trickled over the resync spread, so a hint published
+// while unsubscribed costs each one XRANGE: an event lost in the gap has no
+// other way back before the client's hourly resync. As with close listeners,
+// only a (re)subscribe can lose an event, so the corrective poll does not run
+// this.
+func (self *keyEventSubscriber) resyncSidecarPushListeners() {
+	listeners := []sidecarPushListener{}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, clientListeners := range self.sidecarPushListeners {
+			for _, listener := range clientListeners {
+				listeners = append(listeners, listener)
+			}
+		}
+	}()
+	if len(listeners) == 0 {
+		return
+	}
+	spacing := self.settings.ResyncSpreadTimeout / time.Duration(len(listeners))
+	go server.HandleError(func() {
+		for _, listener := range listeners {
+			listener.Kick()
+			keyEventResyncs.Inc()
 			select {
 			case <-self.ctx.Done():
 				return
@@ -340,6 +421,12 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 	if event == "expire" {
 		// a ttl refresh (heartbeat), not a visible change
 		return
+	}
+	if self.sidecarPushPattern {
+		if clientId, ok := model.ParseScpHintKeyEvent(channel); ok {
+			self.dispatchSidecarPush(server.Id(clientId), event)
+			return
+		}
 	}
 	if networkId, ok := parseSessionEvent(channel); ok {
 		self.kickSession(networkId)
@@ -444,6 +531,26 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 	}
 }
 
+// Kicks a client's publishers on its n's INCR (D-PROTO-12), the one event that
+// is a hint: EXPIRE NX's g events, an expiry's expired and a del are none.
+func (self *keyEventSubscriber) dispatchSidecarPush(clientId server.Id, event string) {
+	if event != "incrby" {
+		return
+	}
+	listeners := []sidecarPushListener{}
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, listener := range self.sidecarPushListeners[clientId] {
+			listeners = append(listeners, listener)
+		}
+	}()
+	for _, listener := range listeners {
+		listener.Kick()
+		keyEventsDispatchedSidecarPush.Inc()
+	}
+}
+
 // run supervises the subscription set: (re)subscribe, resync everything the
 // gap may have missed, drain until the subscription dies or the topology
 // changes, repeat. Errors back off; the loop only exits with the context.
@@ -479,6 +586,7 @@ func (self *keyEventSubscriber) run() {
 		keyEventResubscribes.Inc()
 		self.resyncAll()
 		self.resyncCloseListeners()
+		self.resyncSidecarPushListeners()
 
 		drain := func() {
 			defer unsub()

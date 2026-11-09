@@ -452,3 +452,21 @@ func SidecarHint(ctx context.Context, clientIds []server.Id, hint *sidecar.Clien
 	}
 	return writer.Hint(ctx, connectClientIds, hint)
 }
+
+// A client's §7.4 marks that decide what its resident publishes (§6.8, PROTO-M1-09), from its
+// network_client_owner row, read once with the resident's profile (plan-PROTO-small-readings reading 6):
+// a resident is built from a client id and never sees the token. Both false for a client with no
+// owner row, a legacy client, and for any client of a binary that does not link MG0.
+type SidecarPushMarks struct {
+	// The client's tokens are sidecar-held: its resident hosts a publisher of every topic.
+	StrictExp bool
+	// A device client under its network's ACL document, told team alone, from PROTO-M8-01 (§18.6).
+	AclEnforcing bool
+}
+
+// GetNetworkPeerProfile with the client's push marks, from the same query: one LEFT JOIN on
+// network_client_owner, no query of its own. A binary that does not link MG0 makes the profile's query
+// alone and reads no marks.
+func GetNetworkPeerProfileWithPushMarks(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category NetworkPeerCategory, peer *NetworkPeer, peersEnabled bool, marks SidecarPushMarks) {
+	return getNetworkPeerProfile(ctx, clientId, server.SidecarMg0Linked())
+}
