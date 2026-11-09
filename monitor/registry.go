@@ -231,6 +231,12 @@ func NewSignals() []Signal {
 		NewContractStageInflightSignal(),
 		NewExtenderSeedMirrorsSignal(),
 		NewDnsCanarySignal(),
+		NewFileClusterStateSignal(),
+		NewFileClusterWritesSignal(),
+		NewFileClusterSettleSignal(),
+		NewFileClusterWearSignal(),
+		NewWriteBudgetSignal(),
+		NewSidecarDumpSignal(),
 	}
 }
 

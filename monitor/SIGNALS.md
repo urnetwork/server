@@ -49097,6 +49097,182 @@ Classes:
   lasts no other dns-canary incident clears. With no `dns_canary` block the
   canary reports itself configured off.
 
+## 29. Sidecar storage — §19.6's file clusters, §11.13's write budget, D-OPS-18's dump
+
+EVSB-M3-01 (R-OPS-11, R-OPS-12, D-OPS-8, D-OPS-9, D-OPS-14, D-OPS-18, D-OPS-19,
+D-TRUST-7, FS-50, X13). monitor.yml's `file_clusters: {enabled: true}` block
+turns on §29.1-§29.5 and `sidecar_dump: {enabled: true}` turns on §29.6;
+without its block a signal reports itself configured off, which raises no
+incident (today's production has no file cluster). The clusters come from
+vault's `file-clusters-monitor.yml`, whose MinIO user holds admin reads alone
+(OPS-M2-04); a block whose vault file does not load reports the signals blind.
+The other inputs are one bounded loopback Mimir query per run through a
+services host. No series, finding or page names a network or repo: clusters,
+sets, hosts, devices and processes only. The page classes reach §19.8's rota
+at any hour from M3 through the pager (alert_pager.go). §19.8's business-hours
+pages wait for a business-hours path in the pager, and warn on Slack until it
+has one.
+
+This monitor publishes two gauges, pushed with the process's registry under
+warp: `urnetwork_filecluster_set_state{cluster,set,state}` (§29.1), state one
+of `protected`, `degraded`, `at_risk` or `unknown`, 1 under the set's state and
+0 under the others; and `urnetwork_filecluster_drive_rating_days{cluster}`
+(§29.4).
+
+### 29.1 File-cluster protection states
+
+Probe: `filecluster-state`
+
+Every 30 s, each cluster's admin info, by §19.6's table: protected (every drive
+online, no heal pending); degraded (a drive or host offline, a drive
+rebuilding, MinIO's partial-write queue above zero or entries it lost, or an
+outage no full heal has followed); at_risk (degraded and a further drive or
+host failing, or a host offline past the 4 h RTO). A rebuild alone stays
+degraded. A set leaves degraded on a full heal ending with every drive online,
+or, when nothing was offline, on the queue draining with nothing lost
+(g0-recheck-1-s11-degraded-write-debt); it leaves at_risk once repaired and a
+full heal ends.
+
+The heal inputs (the queue's depth, its drops and unclean starts, a full
+heal's end) are the minio fork's, which does not export them yet. Until it
+does, a set's heal debt reads unknown, never zero: no set reads protected, a
+set with every drive online reads `unknown` and reports
+`filecluster-state-unobservable`, so no incident here clears by itself, and a
+set that was degraded or at_risk stays so until the watcher restarts after its
+full heal. Memory is the process's: a host already offline when the watcher
+starts is dated from its first sight.
+
+Classes:
+
+- `filecluster-set-at-risk` **PAGE**, sustained 2 runs: §19.10's cold spare
+  within 1 h of the page, restored within 4 h.
+- `filecluster-set-degraded` **WARN**, sustained 2 runs.
+- `filecluster-heal-debt-lost` **WARN**: the queue lost entries with every
+  drive online; start one full heal (`mc admin heal --recursive`).
+- `filecluster-state-unobservable` (visibility): admin info did not read, or
+  a set's heal debt is unknown.
+
+### 29.2 File-cluster write quorum and pools
+
+Probe: `filecluster-writes`
+
+Every 30 s, each cluster's admin info. A set with fewer drives online than its
+write quorum (N/2 + 1 of N: 5 of 8, 9 of 16), or a cluster showing other than
+one pool, which server.FileCluster refuses every write on, refuses writes.
+While the first metadata cluster refuses writes, every cluster's stop
+(§19.10), and its page says so.
+
+Classes:
+
+- `filecluster-refusing-writes` **PAGE**, sustained 2 runs.
+- `filecluster-multi-pool` **WARN**: more than one pool (owner decision 145,
+  FS-63).
+- `filecluster-writes-unobservable` (visibility): admin info did not read.
+
+### 29.3 File-cluster held keys and clocks
+
+Probe: `filecluster-settle`
+
+Every 30 s, from Mimir: each MinIO host's
+`urnetwork_filecluster_held_key_oldest_seconds` (the fork's node metrics,
+EVSB-M2-18), and every clock §19.6 bounds: each evs, gkm and taskworker
+process's `urnetwork_clock_offset_seconds` (+Inf while unknown), each Redis
+host's (`role="redis"`, -1 while unknown) and each MinIO host's
+`urnetwork_filecluster_clock_offset_seconds` beside
+`urnetwork_filecluster_clock_known`. The MinIO series are read as a scrape of
+each cluster's node metrics labels them, `job="file_cluster_minio"` and
+`cluster="<cluster id>"`: xops runs no such scrape yet, and no evs, gkm or
+taskworker host constructs its clock check yet, so until both land this signal
+reads blind and holds its incidents open.
+
+Classes:
+
+- `filecluster-key-held` **PAGE**: a key held past 1 min by a write that cannot
+  settle; §19.10's held-key row.
+- `filecluster-clock-offset` **WARN**, sustained 2 runs: a clock past 25 ms or
+  unknown.
+- `filecluster-settle-unobservable` (visibility): Mimir did not read, a
+  cluster has no MinIO settle series, or no process exports its clock.
+
+### 29.4 File-cluster drive writes and wear
+
+Probe: `filecluster-wear`
+
+Every 5 min, from Mimir: the busiest drive's
+`urnetwork_filecluster_drive_dwpd{cluster,window}` (the budget loop's), and
+each NVMe drive's hourly SMART log (`urnetwork_filecluster_smart_*`,
+`job="file_cluster"`, xops's smart-textfile.sh). A drive joins its cluster
+where its filesystem's mountpoint (`node_filesystem_size_bytes`) is a drive
+path admin info lists for the cluster. `urnetwork_filecluster_drive_rating_days`
+is the days until the cluster's first drive's percentage used reaches 100 at
+its 30-day rate, +Inf while none wears; a drive without a reading 30 days old
+is not rated yet. P0's forgiven excess over the same 30 days is shown in
+drive-writes against the ~420 five years at the refill leave under the rating:
+`sum by (cluster) (increase(urnetwork_evs_budget_p0_forgiven_bytes_total[30d])) / 1.92e12`.
+
+Classes:
+
+- `filecluster-drive-dwpd-day` **WARN**: the busiest drive's last 24 h past
+  0.8 DWPD.
+- `filecluster-drive-dwpd-week` **WARN**: its 7-day mean over 0.5 DWPD.
+- `filecluster-drive-dwpd-business` **WARN** (§19.8's business-hours page):
+  its 7-day mean over 0.75 DWPD.
+- `filecluster-drive-media-errors` **WARN**: SMART counts media errors.
+- `filecluster-drive-spare-low` **WARN**: available spare under 10%.
+- `filecluster-drive-rating-short` **WARN** (§19.8's business-hours page): at
+  its 30-day rate the drive's whole rated endurance lasts under five years of
+  service.
+- `filecluster-wear-unobservable` (visibility): Mimir or admin info did not
+  read, a metadata cluster's loop publishes no drive writes, or no SMART log
+  reached Mimir for its drives.
+
+### 29.5 Write budget, P0 and HDD admission
+
+Probe: `write-budget`
+
+Each minute, from Mimir, per cluster: `urnetwork_evs_budget_p0_refill_ratio`,
+`urnetwork_evs_budget_bucket_bytes`, `urnetwork_evs_budget_shed_total`,
+`urnetwork_evs_hdd_admission_refused_total` and the segment upload route's
+`urnetwork_evs_requests_total`. P0 is never paced or refused (owner decision
+186); its page asks for capacity, placement and the networks (§19.10's P0
+row). The bucket's depth is the budget's own default, 1 h of the 0.768 DWPD
+refill of a 1.92 TB drive. P0's warn line is half the refill until D-TEST-11's
+nvme run measures its hourly share.
+
+Classes:
+
+- `write-budget-p0-past-refill` **PAGE**, sustained 2 runs: P0's bytes over
+  the last hour above that hour's refill.
+- `write-budget-p0-warn-line` **WARN**: P0 past its warn line for an hour.
+- `write-budget-bucket-empty` **WARN**: the bucket at zero for 5 minutes, P0's
+  excess forgiven.
+- `write-budget-bucket-low` **WARN**: the bucket under 25% of its depth.
+- `write-budget-shedding` **WARN**: P1 work refused as the heaviest network's.
+- `write-budget-hdd-refusals` **WARN**: HDD admission refused more than 0.1%
+  of the day's uploads.
+- `write-budget-unobservable` (visibility): Mimir did not read, or a metadata
+  cluster's loop publishes no bucket or ratio.
+
+### 29.6 Sidecar table dump and its off-site copy
+
+Probe: `sidecar-dump`
+
+Every 5 min, from Mimir: edge-6's `urnetwork_backup_onsite_*{archive="pg-sidecar"}`
+(bringyour-pg-sidecar-dump.sh through db-archive.py) and planetoid's
+`urnetwork_backup_archive_integrity_checked_timestamp_seconds{archive="pg-sidecar"}`,
+the newest generation it checked against the sha256 published beside it. A
+generation's age is the time its name carries.
+
+Classes:
+
+- `sidecar-dump-run-failed` **WARN**: the last run ended skipped, aborted,
+  refused, failed or interrupted, or none ended in 25 h; each costs a day of
+  RPO.
+- `sidecar-dump-offsite-stale` **WARN**: the newest verified off-site
+  generation is older than 26 h, or the newest checked did not verify.
+- `sidecar-dump-unobservable` (visibility): Mimir did not read, or either
+  side publishes nothing.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress
