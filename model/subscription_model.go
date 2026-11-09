@@ -1473,7 +1473,10 @@ func SetContractStream(
 		return
 	}
 
+	// set by a relayed contract's bind, run after the commit (no Redis inside a transaction)
+	var releaseRelayed func()
 	server.Tx(ctx, func(tx server.PgTx) {
+		releaseRelayed = nil
 		participantNetworks := map[server.Id]server.Id{}
 		if 0 < len(intermediaryIds) {
 			// Retries own the retained identity even after directory removal.
@@ -1518,7 +1521,12 @@ func SetContractStream(
 		if !bound {
 			// $3 is the stream id the insert bound, replaced when the joined
 			// stream changed after the read before the creation transaction
-			tag := server.RaisePgResult(tx.Exec(
+			var payerNetworkId, companionContractId *server.Id
+			var sourceNetworkId, destinationNetworkId server.Id
+			var transferByteCount ByteCount
+			var createTime time.Time
+			changed := false
+			rows, err := tx.Query(
 				ctx,
 				`
 					UPDATE transfer_contract
@@ -1527,12 +1535,33 @@ func SetContractStream(
 						contract_id = $1 AND
 						stream_id IS DISTINCT FROM $2 AND
 						(stream_id IS NULL OR stream_id = $3)
+					RETURNING payer_network_id, source_network_id, destination_network_id,
+						transfer_byte_count, companion_contract_id, create_time
 				`,
 				contractId,
 				streamId,
 				boundStreamId,
-			))
-			if tag.RowsAffected() != 1 {
+			)
+			server.WithPgResult(rows, err, func() {
+				for rows.Next() {
+					changed = true
+					server.Raise(rows.Scan(&payerNetworkId, &sourceNetworkId, &destinationNetworkId,
+						&transferByteCount, &companionContractId, &createTime))
+				}
+			})
+			// DESIGN.md 20.6: a relayed contract later bound to a P2P stream
+			// returns all of its reservation, after the commit
+			if changed && relayedContractCandidate(payerNetworkId, sourceNetworkId, destinationNetworkId, transferByteCount, companionContractId) {
+				var hasEscrow bool
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM transfer_escrow WHERE contract_id = $1)`, contractId).Scan(&hasEscrow))
+				if !hasEscrow {
+					payer, created := *payerNetworkId, createTime
+					releaseRelayed = func() {
+						releaseRelayedContractReservations(ctx, contractId, payer, created)
+					}
+				}
+			}
+			if !changed {
 				// already associated: nothing to write
 				var associated bool
 				err := tx.QueryRow(
@@ -1571,6 +1600,9 @@ func SetContractStream(
 		})
 		providerWorkAttachStreamInTx(ctx, tx, contractId, streamId)
 	})
+	if releaseRelayed != nil && returnErr == nil {
+		releaseRelayed()
+	}
 
 	return
 }
@@ -3704,8 +3736,14 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
 	ctx = providerWorkSessionContext(ctx)
 	// Return the database clock from the outcome write, avoiding another round
 	// trip while grants are held. The signed original uses this exact stored time.
+	// The same row says whether the contract is a relayed sidecar contract,
+	// whose debit the claim journals (relayed_contract_settle.go).
 	var closedAt time.Time
 	var sourceId, destinationId server.Id
+	var payerNetworkId, companionContractId *server.Id
+	var sourceNetworkId, destinationNetworkId server.Id
+	var transferByteCount ByteCount
+	var createTime time.Time
 	claimSql := `
             UPDATE transfer_contract
             SET
@@ -3715,7 +3753,9 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
             WHERE
                 contract_id = $1 AND
                 outcome IS NULL
-            RETURNING close_time, source_id, destination_id
+            RETURNING close_time, source_id, destination_id,
+                payer_network_id, source_network_id, destination_network_id,
+                transfer_byte_count, companion_contract_id, create_time
         `
 	claimArgs := []any{contractId, outcome, usage}
 	if retirementTime != nil {
@@ -3731,11 +3771,15 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
             WHERE
                 contract_id = $1 AND
                 outcome IS NULL
-            RETURNING close_time, source_id, destination_id
+            RETURNING close_time, source_id, destination_id,
+                payer_network_id, source_network_id, destination_network_id,
+                transfer_byte_count, companion_contract_id, create_time
         `
 		claimArgs = append(claimArgs, *retirementTime)
 	}
-	err := tx.QueryRow(ctx, claimSql, claimArgs...).Scan(&closedAt, &sourceId, &destinationId)
+	err := tx.QueryRow(ctx, claimSql, claimArgs...).Scan(&closedAt, &sourceId, &destinationId,
+		&payerNetworkId, &sourceNetworkId, &destinationNetworkId,
+		&transferByteCount, &companionContractId, &createTime)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -3749,6 +3793,18 @@ func claimContractOutcomeWithUsageValueInTx(ctx context.Context, tx server.PgTx,
 	}
 	providerWorkRetainOutcomeWithEvidencePolicyInTx(ctx, tx, contractId, outcome, closedAt, reconcile)
 	contractHoleEventInTx(ctx, tx, contractId, sourceId, destinationId, "remove")
+	// DESIGN.md 20.6: a relayed sidecar contract debits its settled count once,
+	// here, whichever close site claimed it. Only a row with the shape pays the
+	// escrow check, so escrow and free contracts add no read.
+	if relayedContractCandidate(payerNetworkId, sourceNetworkId, destinationNetworkId, transferByteCount, companionContractId) {
+		var hasEscrow bool
+		server.Raise(tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM transfer_escrow WHERE contract_id = $1)`, contractId).Scan(&hasEscrow))
+		if !hasEscrow {
+			if err := settleRelayedContractInTx(ctx, tx, contractId, *payerNetworkId, createTime, outcome); err != nil {
+				return false, err
+			}
+		}
+	}
 	return true, nil
 }
 
