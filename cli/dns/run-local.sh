@@ -5,6 +5,10 @@
 # environment is up': local-env.sh attests the launcher's endpoints, and without
 # that attestation this WARP_ENV=local process refuses every PostgreSQL and Redis
 # dial (test_env_dial_guard.go). The edge dials neither.
+#
+# This binary releases no DNSKEY window until DNS-M5-19, so an edge it feeds stays
+# not ready. ../../local/run-local-dns.sh runs both roles on the launcher's alias
+# with a local key set, and that edge answers.
 
 export WARP_HOST="127.0.0.1"
 export WARP_BLOCK="local"
