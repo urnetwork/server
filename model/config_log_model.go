@@ -851,6 +851,27 @@ func (self *ConfigLogSequencer) Admitted(ctx context.Context, networkId server.I
 	return row != nil && row.GetRevokedAt() == 0 && row.GetParkedAt() == 0, nil
 }
 
+// The identity key the network's verified state admits sidecarId under, nil
+// when it holds no live admission of it, revoked and parked rows included:
+// what api asks before it takes a restored sidecar's binding again (§5.6,
+// §19.10), so a binding re-registers only an identity key the log admits.
+func (self *ConfigLogSequencer) AdmittedIdentityKey(ctx context.Context, networkId server.Id, sidecarId sidecar.Id) ([]byte, error) {
+	network := self.network(networkId)
+	network.stateLock.Lock()
+	defer network.stateLock.Unlock()
+	if err := network.loadWithLock(ctx, self, nil); err != nil {
+		return nil, err
+	}
+	if network.log == nil {
+		return nil, nil
+	}
+	row := network.log.State().SidecarRow(sidecarId)
+	if row == nil || row.GetRevokedAt() != 0 || row.GetParkedAt() != 0 || len(row.GetIdentityPublicKey()) == 0 {
+		return nil, nil
+	}
+	return bytes.Clone(row.GetIdentityPublicKey()), nil
+}
+
 // This process's sequencer, which api installs once its first metadata cluster
 // is wired (OPS's ServiceHost.Blobs); until then every log route answers 503,
 // so nothing is taken unverified.
