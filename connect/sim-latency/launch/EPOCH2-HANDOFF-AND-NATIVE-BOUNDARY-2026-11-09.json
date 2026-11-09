@@ -25,8 +25,25 @@
     "postgres_three_repeat_log_sha256": "784a780e202e226fe3ed1f3b6f114e3e5dc6dc2e8553174e9a79e195f8d97ed5",
     "main_database_migration_performed": false,
     "test_services": "Fresh owner-labelled disposable PostgreSQL/Redis, removed after tests using exact verified IDs; existing local and gate services preserved",
-    "corrected_runner_deployed": false,
-    "source_publication_completed": false
+    "corrected_runner_deployed": true,
+    "corrected_runner_commit": "0b334f621bf6aa7269fa9c9b096f55fc9176fbd4",
+    "source_publication_completed": true,
+    "publication_transition_revision": 10,
+    "publication_completed_at": "2026-11-09T20:54:44.493338Z",
+    "config_manifest_commit": "ff23e28f3a6d0e9067b5024e5127a7bb697d1a0b",
+    "following_preparation": "Blocked at revision11 by the preparation watchdog competing with full source authorization. Publication receipts remain valid; no round opened."
+  },
+  "preparation_watchdog_incident": {
+    "observation": "The five-second background full fence takes the same season scope as synchronous source authorization, which independently takes about eleven seconds. The watchdog's own lock/context deadline can cancel healthy preparation.",
+    "fix": "Background observation reads exact lease, source hold, immutable intent digest, activation/abandonment and predecessor pointer without advisory or row locks. Full authorization remains unchanged before and after external operations.",
+    "focused_ordinary_repetitions": 3,
+    "focused_race_repetitions": 3,
+    "isolated_postgres_repetitions": 3,
+    "postgres_log_sha256": "f2dfd1b4a6e92c9d609c4b9bb2903a3ccf295f2a597ee97db2143bdc05355f17",
+    "pre_fix_scope_tripwire": "The previous full-authorization season-lock primitive deterministically refuses while the same fixture's read-only liveness probe succeeds. PostgreSQL holds the real scope until independent lifecycle rejection returns.",
+    "negative_controls": "lost/expired lease authority, source hold, missing/changed/abandoned/activated intent and changed incumbent are refused",
+    "main_database_migration_performed": false,
+    "deployment": "Local immutable preparation runner deployment next; no API build or migration required"
   },
   "goofe_resource_boundary": {
     "base_directory": "/home/by/sim-latency",
