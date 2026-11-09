@@ -273,6 +273,44 @@ launcher's lock or vault files to make a test run.
 | `LOCAL_HOST_IP` | `10.213.0.1` | Loopback-alias IP the hostnames resolve to (must not be `127.0.0.1`). |
 | `LOCAL_DOCKER_SUBNET` | `10.213.1.0/24` | Subnet for the `urnetwork-local` docker network. |
 
+## Test dns edge
+
+The sidecar's local row (DESIGN.md §19.11) adds a test dns edge beside the
+stores. [`run-local-dns.sh`](run-local-dns.sh) runs the dns API block and one
+dns edge from [`testdns`](testdns), each through `dnshost.RunHost` as
+`cli/dns` runs them, as processes on the launcher's loopback alias rather than
+containers, like every other local service:
+
+```sh
+cd server
+./bringyourctl/run-local.sh db migrate   # the API reads MG2's and MG5's tables
+./local/run-local-dns.sh
+dig @10.213.0.1 -p 10053 +dnssec SOA ur.local.example
+```
+
+- It binds only the address the launcher attested, read from
+  `WARP_TEST_ENV_ATTESTED_ADDRS`, never `127.0.0.1`, and refuses the production
+  data tunnel's ports (`5432`, `6432`, `6379`-`6427`) for any of its own.
+- Until DNS-M5-19's key ceremony releases DNSKEY windows, `cli/dns` releases
+  none, and an edge with no window answers nothing. `testdns keys` therefore
+  makes a key set of its own in `LOCAL_DNS_STATE_DIR` (default
+  `$TMPDIR/urnetwork-local-dns-<uid>`, owner-only): a KSK and a ZSK, the ZSK in
+  the edge's secret directory, and the edge's bearer with its digest in the
+  API's. The API signs a 14-day window a week with that KSK, and every root in
+  config's `local/dns.yml` takes it as its trust anchor; a `dns.yml` that names
+  anchors of its own is refused. The KSK's private key stays at the state's top,
+  which neither role's secret directory holds, and no release builds `testdns`.
+- The dns gate in config's `local/sidecar.yml` is closed as checked in, and a
+  closed gate answers 503 to the edge's feed, so the edge stays not ready until
+  `dns: {enabled: true, writes: true}` in your own config checkout.
+
+| Var | Default | Purpose |
+| --- | --- | --- |
+| `LOCAL_DNS_API_PORT` | `10080` | The API block's routes and `/status`. |
+| `LOCAL_DNS_EDGE_STATUS_PORT` | `10081` | The edge's `/status`. |
+| `LOCAL_DNS_PORT` | `10053` | The edge's DNS, UDP and TCP. |
+| `LOCAL_DNS_STATE_DIR` | `$TMPDIR/urnetwork-local-dns-<uid>` | The key set, bearer and snapshots; remove it to start over. |
+
 ## Harness readiness and portable services
 
 Keep `run-local.sh` in the foreground for the entire test or service run. On

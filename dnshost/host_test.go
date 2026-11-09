@@ -268,11 +268,14 @@ func TestHostLbInterfacesFromServicesYaml(t *testing.T) {
 	}
 }
 
-// A role that is neither api nor edge is never ready.
+// A role that is neither api nor edge is never ready, and RunHost runs no block for it.
 func TestNewHostRefusesAnUnknownRole(t *testing.T) {
 	host := sidecartest.NewFakeHost(t.Context(), nil, nil, nil, nil).ServiceHost()
 	engine, err := NewHost(t.Context(), "both", host, &HostSettings{Dns: hostTestSettings(t, nil)}, nil)
 	if err == nil || engine.Ready() {
 		t.Fatalf("err %v, ready %v", err, engine.Ready())
+	}
+	if err := RunHost(t.Context(), "both", &HostSettings{Dns: hostTestSettings(t, nil)}, nil, &HostPorts{Status: 80, Dns: 53}); err == nil {
+		t.Fatal("RunHost ran a role that is neither")
 	}
 }

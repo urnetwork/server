@@ -8,14 +8,11 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"net"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
 
 	"github.com/urnetwork/glog"
-	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/dnsservice"
 
 	"github.com/urnetwork/server"
@@ -70,50 +67,9 @@ func main() {
 	if hostSettings.CredentialFileName == "" {
 		hostSettings.CredentialFileName = "internal-" + os.Getenv("WARP_SERVICE") + ".yml"
 	}
-
-	switch *role {
-	case dnshost.HostRoleApi:
-		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})
-		engine, err := dnshost.NewApiHost(ctx, host, hostSettings, nil)
-		if err != nil {
-			glog.Errorf("[dns]the api role is not ready: %v\n", err)
-		}
-		options := &sidecarhost.RunOptions{
-			Service:    "dns",
-			StatusPort: *port,
-			Engine:     engine,
-			Postgres:   true,
-			Groups: []*sidecarhost.RunGroup{
-				{Name: "MG2", Linked: server.SidecarMg2Linked},
-				{Name: "MG5", Linked: server.SidecarMg5Linked},
-			},
-		}
-		if httpEngine, ok := engine.(sidecar.HttpEngine); ok {
-			options.Http = httpEngine
-		}
-		if err := sidecarhost.Run(ctx, options); err != nil {
-			panic(err)
-		}
-	case dnshost.HostRoleEdge:
-		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{})
-		// an edge holds no Redis or Postgres handle at all (I-12)
-		host.Redis = nil
-		engine, err := dnshost.NewEdgeHost(ctx, host, hostSettings, nil)
-		if err != nil {
-			glog.Errorf("[dns]the edge role is not ready: %v\n", err)
-		}
-		if edgeHost, ok := engine.(*dnshost.EdgeHost); ok {
-			go serveUdp(ctx, edgeHost, *dnsPort)
-		}
-		if err := sidecarhost.Run(ctx, &sidecarhost.RunOptions{
-			Service:    "dnsedge",
-			StatusPort: *port,
-			Engine:     engine,
-			Stream:     engine,
-			Listeners:  []*sidecarhost.RunListener{{Port: *dnsPort}},
-		}); err != nil {
-			panic(err)
-		}
+	// no key windows until DNS-M5-19's KeyWindowRelease, so until then no edge this API feeds is ready
+	if err := dnshost.RunHost(ctx, *role, hostSettings, nil, &dnshost.HostPorts{Status: *port, Dns: *dnsPort}); err != nil {
+		panic(err)
 	}
 }
 
@@ -128,21 +84,4 @@ func loadDnsSettings() (*dnsservice.DnsSettings, error) {
 		return nil, err
 	}
 	return dnsservice.LoadDnsSettings(data)
-}
-
-// Binds the block's UDP port as warp maps it and serves it until ctx ends.
-func serveUdp(ctx context.Context, edgeHost *dnshost.EdgeHost, port int) {
-	ipv4, _, hostPort := server.RequireListenIpPort(port)
-	listenConfig := net.ListenConfig{}
-	conn, err := listenConfig.ListenPacket(ctx, "udp", net.JoinHostPort(ipv4, strconv.Itoa(hostPort)))
-	if err != nil {
-		glog.Errorf("[dns]udp %d: %v\n", port, err)
-		return
-	}
-	context.AfterFunc(ctx, func() {
-		conn.Close()
-	})
-	if err := edgeHost.ServeUdp(conn); err != nil && ctx.Err() == nil {
-		glog.Errorf("[dns]udp %d ended: %v\n", port, err)
-	}
 }
