@@ -107,10 +107,11 @@
     "cause": "/home/by is 0750. A targeted ACL granting traversal to mapped root UID 200000 does not satisfy Docker's graphroot permission check.",
     "base_directory_mode": "0711; exact private identities/state/control children remain 0700",
     "home_acl_added": "Traversal only for mapped root UID 200000 and worker UID 999; other remains ---",
-    "pending_user_approval": "Add only other-execute on /home/by to satisfy the pinned Docker check; do not claim the runtime is ready before retry and native validation",
+    "home_traversal_resolution": "User approved adding only other-execute on /home/by. Applied 0750 to0751; private Docker subsequently started successfully at 2026-11-09T18:38:32Z. This is startup evidence, not native admission or pressure qualification.",
     "diagnostic_services_after_probe": "Stopped; all three process-bearing private units have MainPID=0. Existing primary Docker PostgreSQL and Redis remain healthy.",
     "untrusted_jobs_started": 0,
-    "recovery_service_missing_observed": true
+    "recovery_service_missing_observed": true,
+    "latest_private_engine_state": "active/running after approved permission change; no evaluation job started"
   },
   "evaluator_release": {
     "path": "/usr/local/libexec/urnetwork/competition-e2-g2g7-a131-20261109-v2",
@@ -121,6 +122,6 @@
     "transport_verification": "All manifest entries verified with strict SHA-256 checks at destination; exact file count matched and no symlinks were copied. Root-owned immutable release installed without overwriting an existing path.",
     "job_or_grading_started": false
   },
-  "remaining": ["Resolve approved home traversal policy and repeat private-engine probe", "Complete protected agent configuration and native recovery arming", "Collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
+  "remaining": ["Complete protected agent configuration and native recovery arming", "Collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
   "grading_activated": false
 }

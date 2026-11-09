@@ -70,7 +70,7 @@
     "bounded_storage": "New fully allocated 128 GiB loop-backed ext4 candidate filesystem mounted nosuid,nodev with private propagation; verified systemd mount unit enabled, no reboot test performed",
     "runtime_binary_inventory": "Exact Sille Docker/containerd/shim/runc copies and manifest-verified evaluator release installed separately on Goofe; primary Docker and existing containers unchanged",
     "management": "Explicit 24 GiB ledger installed; five slice limits verified in PID1 and kernel. Independent recovery unit installed but not armed; protected agent configuration remains incomplete.",
-    "live_probe": "Private namespace, network guard and containerd started; Docker refused /home/by traversal despite targeted ACL. Diagnostic services subsequently stopped. User approval for traversal-only other-execute on /home/by remains pending.",
+    "live_probe": "After explicit user approval, /home/by changed from0750 to0751; private namespace, network guard, containerd and Docker now start successfully. This is startup evidence, not native admission or pressure qualification. No evaluation job started.",
     "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json", "EPOCH2-GOOFE-BOUNDED-STORAGE-2026-11-09.json"]
   },
   "intake_transition_launcher": {

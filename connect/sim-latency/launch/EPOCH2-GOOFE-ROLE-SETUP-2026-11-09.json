@@ -26,7 +26,7 @@
     "permission_scope": "Direct synthetic local mount leaves only: directories0555/files0444 for remapped read-only mounts. Exact protected parent paths have worker traversal ACLs; no recursive home or main/all permission changes.",
     "private_authority_roots": "state, identities and control remain root-owned0700"
   },
-  "remaining_before_host_policy_freeze": ["Resolve pending /home/by traversal policy for remapped Docker root", "Complete native agent, public client and recovery arming inventory", "Collect actual immutable host fingerprint"],
+  "remaining_before_host_policy_freeze": ["Complete native agent, public client and recovery arming inventory", "Collect actual immutable host fingerprint"],
   "remaining_before_grading": ["Native containment/cleanup qualification", "Fresh shared epoch baseline", "Five-percent cross-host operational admission and required runtime receipts"],
   "agent_execution_ready": false,
   "baseline_ready": false,
