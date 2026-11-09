@@ -1852,6 +1852,7 @@ func (self *ConnectHandler) Connect(w http.ResponseWriter, r *http.Request) {
 		Carrier:       ResidentCarrierH1,
 		IpFamily:      residentTransportIpFamily(ipVersion),
 		ProvideIntent: provideIntent,
+		ClientIp:      residentTransportClientIp(clientAddress),
 	}
 	defer trackProvideIntentConnection(connectTransportH1, provideIntent)()
 
@@ -2968,6 +2969,7 @@ func (self *ConnectHandler) connectQuicWithCarrier(conn *quic.Conn, carrier Resi
 				Carrier:             carrier,
 				IpFamily:            residentTransportIpFamily(ipVersion),
 				ProvideIntent:       provideIntent,
+				ClientIp:            residentTransportClientIp(clientAddress),
 			},
 		)
 		var datagramFragmenter *connect.H3DatagramFragmenter

@@ -426,7 +426,7 @@ func TestResidentMoveCompulsoryDeadlineClosesH1WithMoved(t *testing.T) {
 			return 0 < resident.TransportCount()
 		})
 		connect.AssertEqual(t, uint32(1), resident.moveVersion.Load())
-		connect.AssertEqual(t, []ResidentTransportEdge{{ResidentMoveVersion: 1, Carrier: ResidentCarrierH1, IpFamily: 4}}, resident.moveCandidate().Transports)
+		connect.AssertEqual(t, []ResidentTransportEdge{{ResidentMoveVersion: 1, Carrier: ResidentCarrierH1, IpFamily: 4, ClientIp: residentMoveTestClientIp}}, resident.moveCandidate().Transports)
 
 		closedBefore := testutil.ToFloat64(residentMovesCompulsoryClosedCounter)
 		closed := make(chan error, 1)
@@ -551,7 +551,7 @@ func TestResidentMoveCompulsoryDeadlineClosesH3WithMoved(t *testing.T) {
 			return 0 < resident.TransportCount()
 		})
 		connect.AssertEqual(t, uint32(1), resident.moveVersion.Load())
-		connect.AssertEqual(t, []ResidentTransportEdge{{ResidentMoveVersion: 1, Carrier: ResidentCarrierH3, IpFamily: 4}}, resident.moveCandidate().Transports)
+		connect.AssertEqual(t, []ResidentTransportEdge{{ResidentMoveVersion: 1, Carrier: ResidentCarrierH3, IpFamily: 4, ClientIp: residentMoveTestClientIp}}, resident.moveCandidate().Transports)
 
 		_, err := env.exchange.SendResidentMove(ctx, ResidentMove{
 			ClientId:   clientId,
@@ -904,6 +904,10 @@ func testExchangeDrainMovesConvergeByIntent(t *testing.T, delivery localDelivery
 // it lives: an H1 transport by header, an H3 transport by its Auth field, and
 // one that forwards from another exchange in the exchange header. The load
 // counts count the provider resident once (MOVE.md §5.4).
+// The address the test connections arrive from, as every edge resolves it
+// (ResidentTransportEdge ClientIp).
+var residentMoveTestClientIp = netip.MustParseAddr("127.0.0.1")
+
 func TestResidentTransportEdgeCarriesProvideIntent(t *testing.T) {
 	if testing.Short() {
 		return
@@ -932,7 +936,7 @@ func TestResidentTransportEdgeCarriesProvideIntent(t *testing.T) {
 		residentH1 := waitForResidentMoveTestResident(ctx, t, envA.exchange, clientIdH1, func(resident *Resident) bool {
 			return 0 < resident.TransportCount()
 		})
-		connect.AssertEqual(t, []ResidentTransportEdge{{Carrier: ResidentCarrierH1, IpFamily: 4, ProvideIntent: true}}, edgesOf(residentH1))
+		connect.AssertEqual(t, []ResidentTransportEdge{{Carrier: ResidentCarrierH1, IpFamily: 4, ProvideIntent: true, ClientIp: residentMoveTestClientIp}}, edgesOf(residentH1))
 
 		// an H3 transport declares it in its Auth frame
 		clientIdH3, byClientJwtH3 := envA.authClient(&model.AuthNetworkClientArgs{
@@ -943,7 +947,7 @@ func TestResidentTransportEdgeCarriesProvideIntent(t *testing.T) {
 		residentH3 := waitForResidentMoveTestResident(ctx, t, envA.exchange, clientIdH3, func(resident *Resident) bool {
 			return 0 < resident.TransportCount()
 		})
-		connect.AssertEqual(t, []ResidentTransportEdge{{Carrier: ResidentCarrierH3, IpFamily: 4, ProvideIntent: true}}, edgesOf(residentH3))
+		connect.AssertEqual(t, []ResidentTransportEdge{{Carrier: ResidentCarrierH3, IpFamily: 4, ProvideIntent: true, ClientIp: residentMoveTestClientIp}}, edgesOf(residentH3))
 
 		// a client without intent, whose resident is on A, opens a provider
 		// transport on B: B forwards it to A in the exchange header
@@ -964,7 +968,7 @@ func TestResidentTransportEdgeCarriesProvideIntent(t *testing.T) {
 		for _, edge := range edgesOf(residentSplit) {
 			if edge.ProvideIntent {
 				forwarded += 1
-				connect.AssertEqual(t, ResidentTransportEdge{ResidentMoveVersion: 1, Carrier: ResidentCarrierH1, IpFamily: 4, ProvideIntent: true}, edge)
+				connect.AssertEqual(t, ResidentTransportEdge{ResidentMoveVersion: 1, Carrier: ResidentCarrierH1, IpFamily: 4, ProvideIntent: true, ClientIp: residentMoveTestClientIp}, edge)
 			}
 		}
 		connect.AssertEqual(t, 1, forwarded)
