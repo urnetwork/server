@@ -20,6 +20,7 @@ import (
 	"time"
 )
 
+// SIGNALS.md §30.3's signal.
 func NewPostgresPrimarySignal() Signal {
 	return &signalAdapter{
 		number: "30.3", key: "postgres-primary", name: "PostgreSQL primary serving",
@@ -53,10 +54,16 @@ const postgresPrimaryQuery = pgPrimaryHostnameMetaCommand + "\nSELECT :'monitor_
 // The sustained runs before the page opens: 2, a minute at 30 s.
 const postgresPrimaryPageSustain = 2
 
+// The signal's probe.
 type postgresPrimaryProbe struct{}
 
-func (postgresPrimaryProbe) id() string             { return postgresPrimaryProbeId }
-func (postgresPrimaryProbe) tier() string           { return tierPage }
+// The probe's alert id.
+func (postgresPrimaryProbe) id() string { return postgresPrimaryProbeId }
+
+// The probe's highest tier.
+func (postgresPrimaryProbe) tier() string { return tierPage }
+
+// How often the probe runs.
 func (postgresPrimaryProbe) cadence() time.Duration { return 30 * time.Second }
 
 // Whether err says psql reached the primary's host and its Postgres refused to serve.
@@ -73,6 +80,7 @@ func postgresPrimaryRefused(err error) bool {
 	return false
 }
 
+// One run's findings.
 func (self postgresPrimaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	primary := env.cfg.hostByRole("pg-primary")
 	if primary == nil {

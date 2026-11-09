@@ -38,6 +38,7 @@ func sidecarServiceFailureTestStates(t *testing.T, settings *SidecarSloSettings,
 	return states
 }
 
+// Past 1% of 100 or more requests warns; at 1%, or under 100 requests, nothing does.
 func TestSidecarServiceFailuresWarnPastOnePercent(t *testing.T) {
 	settings := sloBurnTestSettings("evs", "gkm")
 	for _, c := range []struct {

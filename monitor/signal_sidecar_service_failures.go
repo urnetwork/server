@@ -20,6 +20,7 @@ import (
 	"time"
 )
 
+// SIGNALS.md §30.2's signal.
 func NewSidecarServiceFailuresSignal() Signal {
 	return &signalAdapter{
 		number: "30.2", key: "sidecar-service-failures", name: "Sidecar service failures",
@@ -42,13 +43,19 @@ const (
 	sidecarServiceFailurePartFresh    = "fresh"
 )
 
+// The signal's probe.
 type sidecarServiceFailuresProbe struct {
 	// nil queries Mimir
 	query sidecarStorageQuery
 }
 
-func (sidecarServiceFailuresProbe) id() string             { return sidecarServiceFailuresProbeId }
-func (sidecarServiceFailuresProbe) tier() string           { return tierWarn }
+// The probe's alert id.
+func (sidecarServiceFailuresProbe) id() string { return sidecarServiceFailuresProbeId }
+
+// The probe's highest tier.
+func (sidecarServiceFailuresProbe) tier() string { return tierWarn }
+
+// How often the probe runs.
 func (sidecarServiceFailuresProbe) cadence() time.Duration { return time.Minute }
 
 // Whether the service's row counts its requests as http requests, so its failures read from them.
@@ -83,6 +90,7 @@ func sidecarServiceFailuresQuery(environment string, settings *SidecarSloSetting
 	return sidecarStorageJoin(expressions...)
 }
 
+// One run's findings.
 func (self sidecarServiceFailuresProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	settings := env.cfg.sidecarSlo
 	if gate, ok := sidecarSloSignalGate(settings, sidecarServiceFailuresProbeId, sidecarServiceFailureClassUnobservable); ok {

@@ -83,6 +83,7 @@ func sloBurnTargetStates(findings []finding, target string) []string {
 	return states
 }
 
+// A burn under both lines raises nothing, and clears both classes.
 func TestSloBurnWithinBudgetRaisesNothing(t *testing.T) {
 	findings := sloBurnTestCheck(t, sloBurnTestSettings("evs"), sloBurnTestSamples("evs", "availability"), nil)
 	if got := sloBurnTargetStates(findings, "evs availability"); !slices.Equal(got, []string{"slo-burn-page healthy", "slo-burn-warn healthy"}) {

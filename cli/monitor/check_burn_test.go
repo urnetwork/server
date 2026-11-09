@@ -28,6 +28,7 @@ func loadedCheckBurnSettings() (servermonitor.SignalSettings, error) {
 	return servermonitor.SignalSettings{Environment: "synthetic"}, nil
 }
 
+// Clear exits 0 with each objective's line; burning and unknown are errors.
 func TestCheckBurnExitsZeroOnlyWhenClear(t *testing.T) {
 	stdout := &bytes.Buffer{}
 	if err := runCheckBurnCommand(t.Context(), []string{"--service=evs"}, stdout, loadedCheckBurnSettings, fixedCheckBurn(servermonitor.SloBurnClear, nil, "availability: clear")); err != nil {
@@ -45,6 +46,7 @@ func TestCheckBurnExitsZeroOnlyWhenClear(t *testing.T) {
 	}
 }
 
+// Settings that do not load, a failed check and a wrong command line are each an error.
 func TestCheckBurnFailsClosed(t *testing.T) {
 	broken := func() (servermonitor.SignalSettings, error) {
 		return servermonitor.SignalSettings{}, errors.New("no monitor.yml")

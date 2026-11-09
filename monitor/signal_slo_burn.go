@@ -29,6 +29,7 @@ import (
 	"time"
 )
 
+// SIGNALS.md §30.1's signal.
 func NewSloBurnSignal() Signal {
 	return &signalAdapter{
 		number: "30.1", key: "slo-burn", name: "Sidecar SLO budget burn",
@@ -317,13 +318,19 @@ func sloBurnStates(settings *SidecarSloSettings, services []string, samples []*s
 	return burns
 }
 
+// The signal's probe.
 type sloBurnProbe struct {
 	// nil queries Mimir
 	query sidecarStorageQuery
 }
 
-func (sloBurnProbe) id() string             { return sloBurnProbeId }
-func (sloBurnProbe) tier() string           { return tierPage }
+// The probe's alert id.
+func (sloBurnProbe) id() string { return sloBurnProbeId }
+
+// The probe's highest tier.
+func (sloBurnProbe) tier() string { return tierPage }
+
+// How often the probe runs.
 func (sloBurnProbe) cadence() time.Duration { return time.Minute }
 
 // Reads every listed service's objectives.
@@ -341,6 +348,7 @@ func (self sloBurnProbe) burns(ctx context.Context, env *probeEnv, services []st
 	return sloBurnStates(settings, services, samples, queryErr)
 }
 
+// One run's findings.
 func (self sloBurnProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	settings := env.cfg.sidecarSlo
 	if gate, ok := sidecarSloSignalGate(settings, sloBurnProbeId, sloBurnClassUnobservable); ok {
@@ -429,7 +437,7 @@ var sloBurnDnsCanaryCheck = func(ctx context.Context, env *probeEnv) ([]finding,
 	return dnsCanaryProbe{}.check(ctx, env)
 }
 
-// CheckSloBurn reads one service's burn now, for `monitor check-burn` and so for warp_rollout_gate. A
+// One service's burn now, for `monitor check-burn` and so for warp_rollout_gate. A
 // service whose row has not joined monitor.yml's sidecar_services, or has no row, is unknown. dns and
 // each dns edge also run the dns canary, where an open signature or serial divergence counts as burning
 // (Q-OPS-5); the edges have no SLO row of their own, so the canary is their whole check.

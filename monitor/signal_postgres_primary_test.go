@@ -23,6 +23,7 @@ func runPostgresPrimary(t *testing.T, rows []Row, err error) (Alerts, error) {
 	return NewPostgresPrimarySignal().Run(context.Background(), syntheticSettings(source))
 }
 
+// The primary answering as itself, out of recovery, raises nothing.
 func TestPostgresPrimaryServingIsHealthy(t *testing.T) {
 	alerts, err := runPostgresPrimary(t, []Row{{"pg-1", "f"}}, nil)
 	if err != nil || len(alerts) != 0 {
