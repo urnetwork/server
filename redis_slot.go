@@ -8,22 +8,11 @@ package server
 // {tokgen_<n>} sentinels are the least n whose tag hashes to each slot.
 
 import (
-	"strings"
+	"github.com/urnetwork/sidecar"
 )
 
 // How many hash slots a Redis Cluster has: a protocol value.
 const RedisSlotCount = 16384
-
-// The part of a key Redis Cluster hashes: its tag, or the whole key when it has none. An empty {} is no
-// tag.
-func RedisHashTagOf(key string) string {
-	if start := strings.IndexByte(key, '{'); 0 <= start {
-		if length := strings.IndexByte(key[start+1:], '}'); 0 < length {
-			return key[start+1 : start+1+length]
-		}
-	}
-	return key
-}
 
 // CRC16/XMODEM: polynomial 0x1021, initial value 0, no reflection, as the cluster specification gives it.
 func redisCrc16(data string) uint16 {
@@ -41,7 +30,8 @@ func redisCrc16(data string) uint16 {
 	return crc
 }
 
-// The hash slot of key, 0 to RedisSlotCount - 1: what CLUSTER KEYSLOT answers.
+// The hash slot of key, 0 to RedisSlotCount - 1: what CLUSTER KEYSLOT answers. The tag rule is the
+// root's sidecar.RedisHashTag, the one every engine's keys are held to.
 func RedisHashSlot(key string) int {
-	return int(redisCrc16(RedisHashTagOf(key)) % RedisSlotCount)
+	return int(redisCrc16(sidecar.RedisHashTag(key)) % RedisSlotCount)
 }

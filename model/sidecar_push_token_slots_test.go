@@ -9,6 +9,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strconv"
 	"testing"
@@ -61,6 +62,8 @@ type testPushTokenCluster struct {
 	masters []*PushTokenMaster
 	// slots listed by SlotTimeAndKeys, in order
 	listed []int
+	// slots whose listing fails, with the error
+	failSlots map[int]error
 }
 
 func newTestPushTokenCluster(t testing.TB, start time.Time) *testPushTokenCluster {
@@ -92,6 +95,9 @@ func (self *testPushTokenCluster) master(address string) *PushTokenMaster {
 }
 
 func (self *testPushTokenCluster) SlotTimeAndKeys(ctx context.Context, master *PushTokenMaster, slot int, limit int) (int64, []string, bool, error) {
+	if err, failing := self.failSlots[slot]; failing {
+		return 0, nil, false, err
+	}
 	serving := self.master(master.Address)
 	if serving == nil || serving.RunId != master.RunId || !slices.Contains(serving.Slots, slot) {
 		return 0, nil, false, errPushTokenSlotMoved
@@ -655,4 +661,47 @@ func redisClientOf(ctx context.Context) server.RedisClient {
 		client = c
 	})
 	return client
+}
+
+// A slot whose reconcile fails leaves the rest of its pass's progress in the state the pass returns: the
+// slot it reconciled is no longer found, the slot it newly found is, and the failed slot waits for the next
+// pass.
+func TestReconcileProgressSurvivesAFailedSlot(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		cluster := newTestPushTokenCluster(t, time.Now())
+		lowSlots := []int{0, 1, 2, 3, 4, 5, 6, 7}
+		failingSlot := PushTokenSlot(testPushTokenClientOutside(lowSlots))
+		reconciledSlot := PushTokenSlot(testPushTokenClientOutside(append(slices.Clone(lowSlots), failingSlot)))
+		lateSlot := PushTokenSlot(testPushTokenClientOutside(append(slices.Clone(lowSlots), failingSlot, reconciledSlot)))
+		cluster.twoMasters(t, []int{failingSlot, reconciledSlot})
+		cluster.restart("192.0.2.11:7000", "run-m1-b", nil)
+
+		settings := testPushTokenPassSettings()
+		state, report := cluster.pass(t, ctx, &PushTokenPassState{LastCompletedStartTime: cluster.clock.Now()}, settings)
+		if report.FoundSlotCount != 2 {
+			t.Fatalf("finding pass: %+v", report)
+		}
+		// 90 s on m1 also serves lateSlot, with no sentinel, and failingSlot's listing fails
+		cluster.clock.Advance(90 * time.Second)
+		m1 := cluster.master("192.0.2.11:7000")
+		m1.Slots = append(m1.Slots, lateSlot)
+		cluster.failSlots = map[int]error{failingSlot: errors.New("a listing that fails")}
+		next, report, err := RunPushTokenPass(ctx, state, cluster.clock.Now(), true, cluster.store(), cluster, settings, nil)
+		if err == nil {
+			t.Fatal("the failed slot was no error")
+		}
+		if report.ReconciledSlotCount != 1 || report.FoundSlotCount != 1 || report.WaitingSlotCount != 2 {
+			t.Fatalf("%+v", report)
+		}
+		found := map[int]bool{}
+		for _, group := range next.Found {
+			for _, slot := range group.Slots {
+				found[slot] = true
+			}
+		}
+		if len(found) != 2 || !found[failingSlot] || !found[lateSlot] {
+			t.Fatalf("found %v, want %d and %d", found, failingSlot, lateSlot)
+		}
+	})
 }
