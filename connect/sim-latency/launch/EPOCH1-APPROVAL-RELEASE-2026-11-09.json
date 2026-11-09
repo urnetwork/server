@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "status": "OFFICIAL_APPROVAL_IMPORTED_REWARD_AND_SOURCE_HOLDS_RELEASED",
+  "observed_at": "2026-11-09T13:44:07.792166321Z",
+  "round_id": "01a1855d-49bd-0250-90db-d0c0885f0e46",
+  "winner_job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739",
+  "evaluations_succeeded": 69,
+  "review_id": "01a1c088-ca60-8cf8-844e-6ff50fff8cb4",
+  "review_imported_at": "2026-11-09T13:39:12.608238Z",
+  "official_import_http_status": 200,
+  "reviewer_model": "gpt-6-astra",
+  "reviewer_reasoning": "max",
+  "integrity_review": "approved",
+  "source_approval": "approved",
+  "conditional_user_approval_satisfied": true,
+  "reward_revision": 1,
+  "decision_sha256": "a800ecdba04be602f61a904e9626819fa68fcf71191bdf8dda0b7c7989a94e81",
+  "import_request_sha256": "a33d62757c9cf3d31c0ff72dd04f7885b20067b00581ba77d0a1414d85b5b4be",
+  "import_response": {
+    "sha256": "044301267cff46e6008f886504a857162a04dbfc8dd9caa15c3b12ffaccea315",
+    "bytes": 6265,
+    "bucket": "competition",
+    "object_key": "blob/competition/v2/review-evidence/sim-latency-season-1/main/sim-latency-production-20261028-r2/01a1855d-49bd-0250-90db-d0c0885f0e46/01a1a440-fd2e-538a-365c-f4b23eed4739/044301267cff46e6008f886504a857162a04dbfc8dd9caa15c3b12ffaccea315.txt",
+    "version": "30a43acb-1d73-4a84-a263-b0c07e0604fd",
+    "retention_mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "exact_version_readback_verified": true
+  },
+  "holds_independently_verified": [
+    {"kind": "evaluation", "revision": 25, "active": false},
+    {"kind": "reward_delivery", "revision": 2, "active": false},
+    {"kind": "source_activation", "revision": 2, "active": false}
+  ],
+  "release_receipts": [
+    {"kind": "reward_delivery", "sha256": "ef0e3de27ac4af8c6875440cc0d3572ba533436bc09b6cb81d43a6a8f9c4f377", "version": "3b23c1ff-3886-4710-94ca-3b2b4e2bd168", "retain_until": "2028-01-01T00:00:00Z", "exact_version_readback_verified": true},
+    {"kind": "source_activation", "sha256": "b9be66bc63fd4ce1529772455294526bf0d169b7ba2c1c3a705bfcba5730450e", "version": "1ed0a228-fc1c-4619-b12e-d4ce26708282", "retain_until": "2028-01-01T00:00:00Z", "exact_version_readback_verified": true}
+  ],
+  "source_build_attempt": {"unit": "urnetwork-epoch1-approved-source-20261109-v1.service", "invocation_id": "ecb1baab9ab14a72bf8bce5936413acd", "main_pid_at_observation": 466952, "active_at_observation": true, "started_at": "2026-11-09T13:46:07Z", "outer_runtime_bound_seconds": 14400, "management_memory_max_gib": 8, "state_directory": "/var/lib/urnetwork/competition-epoch1-approved-source-20261109-v1", "build_control_record": "EPOCH1-OFFICIAL-SOURCE-BUILD-STAGING-2026-11-08.json", "branch_publication_performed": false},
+  "settlement_status": "pending",
+  "payment_confirmed": false,
+  "source_promoted": false,
+  "winner_image_build_qualified": false,
+  "epoch_2_open": false,
+  "calibration_accepted": false,
+  "native_snow_review_claimed": false,
+  "remaining": "Stage exact approved source in private temporary checkouts; build and qualify its evaluator; publish source through the supported activation path. Payment requires a separate settlement receipt. Historical failed import attempts are superseded, not erased."
+}
