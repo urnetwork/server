@@ -195,6 +195,10 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/identity",
 	// §8.9's (ACL-M2-12)
 	"POST /acl/ack",
+	// §6.8's sync routes (PROTO-M1-10)
+	"GET /sidecar/sync/poll",
+	"GET /sidecar/sync/versions",
+	"GET /sidecar/sync/([^/]+)",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths

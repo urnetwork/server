@@ -413,6 +413,11 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
 		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),
 		router.NewRoute("GET", "/sidecar/identity", handlers.GetSidecarIdentityByClient),
+		// §6.8's sync routes: the long-poll, the versions reset and core (PROTO-M1-10); the topic route
+		// comes last, so poll and versions win their paths
+		router.NewRoute("GET", "/sidecar/sync/poll", handlers.GetSidecarSyncPoll),
+		router.NewRoute("GET", "/sidecar/sync/versions", handlers.GetSidecarSyncVersions),
+		router.NewRoute("GET", "/sidecar/sync/([^/]+)", handlers.GetSidecarSyncTopic),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),

@@ -54,21 +54,31 @@ func DefaultSidecarPushRedisSettings() *SidecarPushRedisSettings {
 	}
 }
 
-// pushservice.PublisherRedis over server.Redis. Safe for concurrent use.
+// pushservice.PublisherRedis and LongPollRedis over server.Redis. Safe for concurrent use.
 type SidecarPushRedis struct {
 	settings *SidecarPushRedisSettings
 	// *redis.Script by RedisScript.Name, each sending EVALSHA with a fallback to its source
 	scripts sync.Map
+	// the process's shared subscription, which AddKeyEventCallback registers on
+	keyEvents *SidecarPushKeyEvents
 }
 
-// An adapter with settings, nil being the defaults.
+// An adapter with settings, nil being the defaults, whose key events come from the process's one shared
+// subscription.
 func NewSidecarPushRedis(settings *SidecarPushRedisSettings) *SidecarPushRedis {
 	if settings == nil {
 		settings = DefaultSidecarPushRedisSettings()
 	}
 	return &SidecarPushRedis{
-		settings: settings,
+		settings:  settings,
+		keyEvents: sidecarPushProcessKeyEvents(),
 	}
+}
+
+// See sidecar.Redis: on the process's one shared subscription, never one per client. The one family it
+// serves is every client's n, pushservice.HintSeqKeyPattern, the only one a hint's reader watches.
+func (self *SidecarPushRedis) AddKeyEventCallback(keyPattern string, callback sidecar.RedisKeyEventFunction) (remove func(), err error) {
+	return self.keyEvents.AddCallback(keyPattern, callback)
 }
 
 // Runs callback on the deadline pool with no retry and no preflight, bounded by ctx's deadline or
@@ -248,6 +258,147 @@ func (self *SidecarPushRedis) StreamRange(ctx context.Context, key string, after
 		return nil
 	})
 	return
+}
+
+// The shared subscription's tunables.
+type SidecarPushKeyEventSettings struct {
+	// How long to wait before subscribing again after a subscription failed to start: 1 s.
+	ResubscribeTimeout time.Duration
+	// How often the subscription rechecks the cluster's masters, and resubscribes when they changed:
+	// 60 s, as the exchange's subscriber does.
+	TopologyRefreshInterval time.Duration
+}
+
+// The defaults.
+func DefaultSidecarPushKeyEventSettings() *SidecarPushKeyEventSettings {
+	return &SidecarPushKeyEventSettings{
+		ResubscribeTimeout:      1 * time.Second,
+		TopologyRefreshInterval: 60 * time.Second,
+	}
+}
+
+// One subscription to every client's {scp_<C>}n (§6.8; plan-PROTO-small-readings reading 2), which
+// demuxes each event to the callbacks registered in this process: api's long-poll, and the residents'
+// publishers. It runs while a callback is registered and stops with the last one, so a process whose
+// push gate is off holds no subscription. A lost subscription tells every callback Resync at once and
+// again when it is back, since whatever was published in the gap is gone. Safe for concurrent use.
+type SidecarPushKeyEvents struct {
+	settings *SidecarPushKeyEventSettings
+
+	stateLock      sync.Mutex
+	callbacks      map[int64]sidecar.RedisKeyEventFunction
+	nextCallbackId int64
+	// the running subscription's cancel, nil when none runs
+	cancel context.CancelFunc
+}
+
+// A subscription that starts with its first callback.
+func NewSidecarPushKeyEvents(settings *SidecarPushKeyEventSettings) *SidecarPushKeyEvents {
+	if settings == nil {
+		settings = DefaultSidecarPushKeyEventSettings()
+	}
+	return &SidecarPushKeyEvents{
+		settings:  settings,
+		callbacks: map[int64]sidecar.RedisKeyEventFunction{},
+	}
+}
+
+// The process's one, made at first use.
+var sidecarPushProcessKeyEvents = sync.OnceValue(func() *SidecarPushKeyEvents {
+	return NewSidecarPushKeyEvents(nil)
+})
+
+// Registers callback for keyPattern, which must be pushservice.HintSeqKeyPattern, starting the
+// subscription if none runs. callback runs on the subscription's goroutine and must not block.
+func (self *SidecarPushKeyEvents) AddCallback(keyPattern string, callback sidecar.RedisKeyEventFunction) (remove func(), err error) {
+	if keyPattern != pushservice.HintSeqKeyPattern {
+		return nil, fmt.Errorf("sidecar push: the shared subscription serves %s only", pushservice.HintSeqKeyPattern)
+	}
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	callbackId := self.nextCallbackId
+	self.nextCallbackId += 1
+	self.callbacks[callbackId] = callback
+	if self.cancel == nil {
+		ctx, cancel := context.WithCancel(context.Background())
+		self.cancel = cancel
+		go server.HandleError(func() {
+			self.run(ctx)
+		})
+	}
+	removed := false
+	return func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if removed {
+			return
+		}
+		removed = true
+		delete(self.callbacks, callbackId)
+		if len(self.callbacks) == 0 && self.cancel != nil {
+			self.cancel()
+			self.cancel = nil
+		}
+	}, nil
+}
+
+// Hands event to every callback registered now, each outside the lock.
+func (self *SidecarPushKeyEvents) dispatch(event sidecar.RedisKeyEvent) {
+	var callbacks []sidecar.RedisKeyEventFunction
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		callbacks = make([]sidecar.RedisKeyEventFunction, 0, len(self.callbacks))
+		for _, callback := range self.callbacks {
+			callbacks = append(callbacks, callback)
+		}
+	}()
+	for _, callback := range callbacks {
+		callback(event)
+	}
+}
+
+// Subscribes, demuxes and resubscribes until ctx ends.
+func (self *SidecarPushKeyEvents) run(ctx context.Context) {
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		messages, done, unsubscribe, err := server.SubscribeKeyEvents(ctx, self.settings.TopologyRefreshInterval, ScpHintKeyEventPattern(server.RedisDb()))
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(self.settings.ResubscribeTimeout):
+			}
+			continue
+		}
+		// established: what came before is not here, so every reader rereads
+		self.dispatch(sidecar.RedisKeyEvent{Resync: true})
+		func() {
+			defer unsubscribe()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-done:
+					return
+				case message, ok := <-messages:
+					if !ok {
+						return
+					}
+					if key, ok := ParseKeyspaceChannelKey(message.Channel); ok {
+						self.dispatch(sidecar.RedisKeyEvent{Key: key})
+					}
+				}
+			}
+		}()
+		if ctx.Err() != nil {
+			return
+		}
+		// lost: every reader rereads now rather than wait for it to come back
+		self.dispatch(sidecar.RedisKeyEvent{Resync: true})
+	}
 }
 
 // The keyspace channel pattern of every client's {scp_<C>}n on db: the one family api's long-poll and
