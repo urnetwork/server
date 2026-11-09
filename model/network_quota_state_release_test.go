@@ -10,6 +10,9 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/urnetwork/connect"
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 )
 
@@ -38,5 +41,26 @@ func TestNetworkQuotaStateRefusesWithoutMg2(t *testing.T) {
 	}
 	if _, err := GetQuotaOverLimit(ctx); !errors.Is(err, ErrNetworkQuotaStateUnavailable) {
 		t.Fatalf("GetQuotaOverLimit: %v", err)
+	}
+	// a good batch is no place to apply, and the producer drops it after its retries: under-billing only
+	batch := &sidecar.UsageBatch{
+		BatchId:  connect.NewId(),
+		Producer: sidecar.QuotaProducerEvs,
+		Events:   []*sidecar.UsageEvent{{NetworkId: connect.Id(networkId), Meter: sidecar.QuotaMeterEvs, TransferByteCount: 1}},
+	}
+	if applied, err := ApplyUsageBatch(ctx, batch, nil, now); applied || !errors.Is(err, ErrUsageBatchUnavailable) {
+		t.Fatalf("ApplyUsageBatch: %v, %v", applied, err)
+	}
+	// a bad one is still refused as bad
+	batch.Producer = "api"
+	if _, err := ApplyUsageBatch(ctx, batch, nil, now); !errors.Is(err, ErrUsageBatchRefused) {
+		t.Fatalf("ApplyUsageBatch of a bad batch: %v", err)
+	}
+	result, err := FlushServiceDebits(ctx, 0, nil, nil)
+	if err != nil || result != (ServiceDebitFlushResult{}) {
+		t.Fatalf("FlushServiceDebits: %+v, %v", result, err)
+	}
+	if ServiceDebitShardPending(ctx, 0) {
+		t.Fatal("a shard reads pending with no journal")
 	}
 }
