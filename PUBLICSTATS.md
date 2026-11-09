@@ -222,6 +222,23 @@ payouts and balances (auth-gated on the api today), consumer geography
 (only provider geography is published, as `/stats/providers-map` already
 does).
 
+## Unlisted public dashboards
+
+A dashboard tagged both `public` and `unlisted` is published the same way,
+but the warp front leaves it out of `/stats` and `/stats.json`, so only those
+given its link find it. `bringyourctl grafana load-defaults` prints its link
+under "Unlisted public dashboards". `publicDashboardOwnMetrics` in
+`grafana/grafana_test.go` lets one named public dashboard query metrics
+outside `publicSafeMetrics`, each entry a publication decision for that
+dashboard's unlisted share only. The one entry is
+`grafana/dashboards/proxy-test-shared.json`, "urnetwork / proxy test
+(shared)": the proxy test dashboard over all countries with fixed queries,
+including the runner's `urnetwork_proxy_test_build_info` version, for one
+outside viewer (owner decision, 2026-11-09). Its panels show only the
+runner's labels (country, outcome, phase, stat, call, version);
+`grafana/proxy_test_shared_dashboard_test.go` holds it to the internal
+`proxy-test.json`.
+
 ## Grafana public dashboard constraints (verified against 13.x)
 
 - No template variables (`$env`); built-ins `$__range`, `$__rate_interval`,

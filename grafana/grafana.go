@@ -9,11 +9,17 @@ package grafana
 // a dashboard tagged "public" (in its json tags) is additionally published as
 // a grafana public dashboard (read-only, no login) at
 // <grafanaUrl>/public-dashboards/<accessToken>. the tag is the source of
-// truth: LoadDefaults publishes tagged dashboards and unpublishes managed
-// dashboards whose tag was removed. note grafana public dashboards do not
-// support template variables, so public dashboards must use fixed queries.
+// truth: LoadDefaults publishes tagged dashboards, and deletes the share of
+// every managed dashboard without the tag before uploading it, however that
+// share was made (the grafana ui included). note grafana public dashboards do
+// not support template variables, so public dashboards must use fixed queries.
 // the warp go front serves a directory of the public dashboards at
-// <env>-grafana.<domain>/stats (see warp/grafana/main.go)
+// <env>-grafana.<domain>/stats and /stats.json (see warp/grafana/main.go).
+//
+// a dashboard tagged both "public" and "unlisted" is published the same way
+// but left out of that directory: its view link works for whoever is given
+// it, and LoadDefaults returns it marked Unlisted so the operator can pass the
+// link on. "unlisted" without "public" has no effect
 
 import (
 	"context"
@@ -38,18 +44,27 @@ const FolderTitle = "urnetwork"
 // sharing
 const PublicTag = "public"
 
+// the dashboard tag that, beside PublicTag, keeps a published dashboard out of
+// the public directory (/stats and /stats.json). the dashboard is published
+// all the same, and its view link works for whoever is given it
+const UnlistedTag = "unlisted"
+
 // a published public dashboard, returned by LoadDefaults.
 // the public view url is <grafanaUrl>/public-dashboards/<AccessToken>
 type PublicDashboard struct {
 	Title       string
 	Uid         string
 	AccessToken string
+	// tagged UnlistedTag: published, but not in the public directory, so its
+	// link reaches only those it is given to
+	Unlisted bool
 }
 
 // LoadDefaults upserts the default dashboards into the grafana
 // at grafanaUrl, in the urnetwork folder, and reconciles public dashboard
 // sharing from the "public" tag.
-// returns the loaded dashboard titles and the published public dashboards
+// returns the loaded dashboard titles and the published public dashboards,
+// the unlisted ones marked
 func LoadDefaults(ctx context.Context, grafanaUrl string, username string, password string) ([]string, []PublicDashboard, error) {
 	grafanaUrl = strings.TrimSuffix(grafanaUrl, "/")
 
@@ -100,11 +115,12 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 	}
 	slices.Sort(names)
 
-	// a managed dashboard and whether it is tagged public
+	// a managed dashboard and whether it is tagged public, and unlisted
 	type managedDashboard struct {
-		uid    string
-		title  string
-		public bool
+		uid      string
+		title    string
+		public   bool
+		unlisted bool
 	}
 
 	titles := []string{}
@@ -172,15 +188,17 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 		titles = append(titles, title)
 
 		managed = append(managed, managedDashboard{
-			uid:    uid,
-			title:  title,
-			public: publicDashboard,
+			uid:      uid,
+			title:    title,
+			public:   publicDashboard,
+			unlisted: hasTag(dashboard, UnlistedTag),
 		})
 	}
 
 	// reconcile public dashboard sharing. the "public" tag is the source of
-	// truth: publish tagged dashboards, unpublish managed dashboards no longer
-	// tagged. dashboards outside this managed set are never touched
+	// truth: publish tagged dashboards here; the shares of managed dashboards
+	// without the tag were deleted above, before their upload. dashboards
+	// outside this managed set are never touched
 	public := []PublicDashboard{}
 	for _, m := range managed {
 		if m.uid == "" || !m.public {
@@ -224,7 +242,7 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 			if err := json.Unmarshal(postBody, &current); err != nil {
 				return nil, nil, err
 			}
-			public = append(public, PublicDashboard{Title: m.title, Uid: m.uid, AccessToken: current.AccessToken})
+			public = append(public, PublicDashboard{Title: m.title, Uid: m.uid, AccessToken: current.AccessToken, Unlisted: m.unlisted})
 		case m.public && exists:
 			// ensure enabled
 			if !current.IsEnabled {
@@ -241,7 +259,7 @@ func LoadDefaults(ctx context.Context, grafanaUrl string, username string, passw
 					return nil, nil, errors.New(fmt.Sprintf("Could not enable public %s (%d): %s", m.uid, patchStatus, string(patchBody)))
 				}
 			}
-			public = append(public, PublicDashboard{Title: m.title, Uid: m.uid, AccessToken: current.AccessToken})
+			public = append(public, PublicDashboard{Title: m.title, Uid: m.uid, AccessToken: current.AccessToken, Unlisted: m.unlisted})
 		}
 	}
 

@@ -54,12 +54,29 @@ func grafanaLoadDefaultsTo(ctx context.Context, out io.Writer, grafanaUrl string
 	for _, title := range titles {
 		fmt.Fprintf(out, "- %s\n", title)
 	}
-	if 0 < len(public) {
+	// every published dashboard with its view link. the unlisted ones are in
+	// no directory, so this is where the operator gets their links
+	listed := []grafana.PublicDashboard{}
+	unlisted := []grafana.PublicDashboard{}
+	for _, pd := range public {
+		if pd.Unlisted {
+			unlisted = append(unlisted, pd)
+		} else {
+			listed = append(listed, pd)
+		}
+	}
+	if 0 < len(listed) {
 		fmt.Fprintf(out, "\nPublic dashboards (read-only, no login):\n")
-		for _, pd := range public {
+		for _, pd := range listed {
 			fmt.Fprintf(out, "- %s\n    %s/public-dashboards/%s\n", pd.Title, grafanaUrl, pd.AccessToken)
 		}
 		fmt.Fprintf(out, "\nPublic directory: %s/stats\n", grafanaUrl)
+	}
+	if 0 < len(unlisted) {
+		fmt.Fprintf(out, "\nUnlisted public dashboards (read-only, no login; not in %s/stats or /stats.json, so give each link only to its viewers):\n", grafanaUrl)
+		for _, pd := range unlisted {
+			fmt.Fprintf(out, "- %s (unlisted)\n    %s/public-dashboards/%s\n", pd.Title, grafanaUrl, pd.AccessToken)
+		}
 	}
 	return nil
 }

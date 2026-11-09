@@ -716,8 +716,19 @@ func TestProxyTestDashboardPromqlParses(t *testing.T) {
 // restart and another environment's series, then over a crashed runner, a
 // stopped runner and no telemetry from main.
 func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
+	proxyTestEvaluateRunnerFile(t, proxyTestDashboardName, "")
+}
+
+// Evaluates the named dashboard's panels as TestProxyTestDashboardPromqlEvaluatesTheRunnerFile
+// describes, with every country selected. The panels are matched by id and
+// query refId, so a dashboard with the same panels gives the same series.
+// extraLabels (",name=\"value\"...", or empty) is added to every input series,
+// and since each expected sample carries exactly its labels, no panel may pass
+// one of them on.
+func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels string) {
+	t.Helper()
 	promtool, ctx := proxyTestPromtool(t)
-	dashboard := readTestDashboard(t, proxyTestDashboardName)
+	dashboard := readTestDashboard(t, dashboardName)
 	query := func(id int, refId string) string {
 		return proxyTestConcrete(proxyTestTarget(t, dashboard, id, refId).Expr)
 	}
@@ -742,7 +753,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 	// One sample a minute from 0 to 25 h, evaluated at 25 h (time() = 90000).
 	file := func(env string, host string) func(metric, labels, values string) map[string]string {
 		return func(metric, labels, values string) map[string]string {
-			return map[string]string{"series": fmt.Sprintf(`%s{env=%q,host=%q,job="node"%s}`, metric, env, host, labels), "values": values}
+			return map[string]string{"series": fmt.Sprintf(`%s{env=%q,host=%q,job="node"%s%s}`, metric, env, host, extraLabels, labels), "values": values}
 		}
 	}
 	planetoid := file("main", "planetoid")
