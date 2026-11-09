@@ -97,6 +97,22 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 	}
 	checkpoint := transition.WinnerReview
 	if state.ApprovedReviewId != nil && state.ApprovedReview != nil {
+		// A separately authorized official import may predate supervisor startup.
+		// Record adoption now, never invent native review start/completion times
+		// or replace an existing checkpoint (including an expired one).
+		if checkpoint == nil && state.ApprovedReview.Request.OfficialReviewOverride != nil {
+			review := state.ApprovedReview
+			adopted := &model.CompetitionWinnerReviewCheckpoint{
+				RoundId: snapshot.Round.RoundId, JobId: *decision.SelectedJobId, RewardRevision: decision.Revision, RewardDecisionSha256: decision.DecisionSha256,
+				StartedAt: now, Deadline: now.Add(time.Duration(state.Policy.WinnerReviewTimeoutSeconds) * time.Second),
+			}
+			if snapshot.Round.Epoch != 1 || state.Policy.Staging || review.ReviewId != *state.ApprovedReviewId || review.CreatedAt.After(now) ||
+				model.ValidateCompetitionOfficialReviewImport(model.CompetitionOfficialReviewImport{RoundId: snapshot.Round.RoundId, Review: review.Request}, state.Policy) != nil ||
+				!model.CompetitionReviewWithinCheckpoint(review, adopted) {
+				return block("winner_review_identity_conflict", ErrConflict)
+			}
+			return save("winner_review_pending", "official_review_checkpoint_adopted", adopted)
+		}
 		if checkpoint == nil || checkpoint.JobId != *decision.SelectedJobId || checkpoint.RoundId != snapshot.Round.RoundId ||
 			state.ApprovedReview.Request.ExpectedDecisionSha256 != checkpoint.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != checkpoint.RewardRevision ||
 			!model.CompetitionReviewWithinCheckpoint(state.ApprovedReview, checkpoint) {

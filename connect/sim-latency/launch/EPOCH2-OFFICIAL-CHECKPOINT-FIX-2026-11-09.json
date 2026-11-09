@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "status": "ORDINARY_REGRESSIONS_PASSED_RACE_PENDING_NOT_DEPLOYED",
+  "root_cause": "The supervisor started after the official review had been imported. It created a transition without a native review checkpoint, then required that checkpoint to accept the already-approved official review, blocking forever with winner_review_identity_conflict.",
+  "live_readonly_confirmation": {"approved_review_id": "01a1c088-ca60-8cf8-844e-6ff50fff8cb4", "policy_validation": "passed", "transition_state": "winner_review_blocked", "transition_reason": "winner_review_identity_conflict", "checkpoint_present": false},
+  "fix": "Only a complete authorized epoch1 official approval may adopt a missing checkpoint at the actual current reconciliation time. Existing checkpoints are never replaced or renewed; native approvals cannot create a replacement clock. Original official completion metadata stays separate from native model custody.",
+  "deterministic_causal_regression": "With a complete synthetic official import, the pre-fix composed supervisor deterministically returned winner_review_blocked instead of winner_review_pending at checkpoint adoption. After the fix it advances to source choice/publication without a review broker call.",
+  "adjacent_controls": ["Preserve existing expired checkpoint", "Reject conflicting checkpoint", "Reject native approval without owned checkpoint", "Reject incomplete official amendment", "Reject later-epoch adoption", "Reject a future import timestamp"],
+  "ordinary": {"executions_passed": 72, "failed": 0, "skipped": 0, "repetitions": 3, "log_sha256": "302d6e401ed51f6ff8ec7783e52933c140664537923b86c73cec048a1fec99ed"},
+  "race_status": "running",
+  "deployment_scope": "Local supervisor management binary only; no API deployment or migration is required for this fix.",
+  "official_review_or_scoring_changed": false,
+  "source_promoted": false,
+  "epoch2_open": false
+}
