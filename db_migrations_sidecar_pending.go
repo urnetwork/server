@@ -1341,7 +1341,24 @@ func sidecarMg6BridgeMigrations() []any {
 // MG6's §20 part: transfer_balance.tier, transfer_balance's team_credit index,
 // built concurrently, and stripe_meter_report (QUOTA's tasks).
 func sidecarMg6QuotaMigrations() []any {
-	return []any{}
+	return []any{
+		// §20.9's draw order (D-QUOTA-9; QUOTA-M4-02): the escrow keyset pages
+		// order and key by the team_credit flag first, so each page stays one
+		// index scan with no sort, beside today's
+		// transfer_balance_active_network_end_start_id, which the gate-off
+		// pages keep using. The flag's expression is the queries' text
+		// exactly (model.escrowDrawCreditSql), or the planner sorts. Built
+		// concurrently on the existing table; mutable amounts stay out of
+		// INCLUDE, as today's index's comment says, so a reservation update
+		// adds no covering-index work. The escrow_draw_order gate reads false
+		// until this group links, so nothing pages on the index before it is
+		// built.
+		newRestartableOnlineSqlMigration(
+			`DROP INDEX CONCURRENTLY IF EXISTS transfer_balance_active_network_credit_end_start_id`,
+			`CREATE INDEX CONCURRENTLY transfer_balance_active_network_credit_end_start_id ON transfer_balance (network_id, (grant_kind IS NOT DISTINCT FROM 'team_credit'), end_time, start_time, balance_id) WHERE active`,
+			`CREATE INDEX transfer_balance_active_network_credit_end_start_id ON transfer_balance (network_id, (grant_kind IS NOT DISTINCT FROM 'team_credit'), end_time, start_time, balance_id) WHERE active`,
+		),
+	}
 }
 
 // MG7 (§19.7): what M7 first reads ungated.

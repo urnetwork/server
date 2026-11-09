@@ -509,21 +509,28 @@ func zeroEscrowContractPriorityInTx(
 		balanceByteCount ByteCount
 	}
 	grants := []grant{}
+	// the first page in escrow's funding order: behind the escrow_draw_order gate DESIGN.md
+	// 20.9's draw order, the credit line last, which sets the priority
+	read := newEscrowBalanceRead()
+	sql := escrowTransferBalanceSql + ` ORDER BY end_time, start_time, balance_id LIMIT $3`
+	if read.drawOrder {
+		sql = read.sql() + escrowDrawOrderBySql + ` LIMIT $3`
+	}
 	result, err := tx.Query(
 		ctx,
-		escrowTransferBalanceSql+` ORDER BY end_time, start_time, balance_id LIMIT $3`,
+		sql,
 		payerNetworkId,
 		now,
 		redisGrantPageRows,
 	)
 	server.WithPgResult(result, err, func() {
 		for result.Next() {
-			var balanceId server.Id
-			var g grant
-			var startTime time.Time
-			var endTime time.Time
-			server.Raise(result.Scan(&balanceId, &g.paid, &g.balanceByteCount, &startTime, &endTime))
-			grants = append(grants, g)
+			balance := &escrowTransferBalance{}
+			server.Raise(read.scan(result, balance))
+			grants = append(grants, grant{
+				paid:             balance.paid,
+				balanceByteCount: balance.balanceByteCount,
+			})
 		}
 	})
 

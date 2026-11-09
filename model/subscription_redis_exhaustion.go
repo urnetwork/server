@@ -174,24 +174,18 @@ func proveRedisGrantExhaustion(ctx context.Context, admission *redisContractAdmi
 	markedIds := []server.Id{}
 	// every grant of a page in one pipeline
 	probe := redisGrantProbe{contractId: admission.contractId, active: true, width: redisGrantPageRows}
+	// the census's pages, in its order whichever the escrow_draw_order gate gives
+	read := newEscrowBalanceRead()
 	var cursor *escrowTransferBalance
 	for {
-		sql := escrowTransferBalanceSql
-		args := []any{payerNetworkId, now}
-		if cursor == nil {
-			sql += ` ORDER BY end_time,start_time,balance_id LIMIT $3`
-			args = append(args, redisGrantPageRows)
-		} else {
-			sql += ` AND (end_time,start_time,balance_id)>($3,$4,$5) ORDER BY end_time,start_time,balance_id LIMIT $6`
-			args = append(args, cursor.endTime, cursor.startTime, cursor.balanceId, redisGrantPageRows)
-		}
+		sql, args := read.censusPage(payerNetworkId, now, cursor, redisGrantPageRows)
 		page := []*escrowTransferBalance{}
 		readRedisGrants(ctx, func(query server.PgCanQuery) {
 			result, err := query.Query(ctx, sql, args...)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					balance := &escrowTransferBalance{}
-					server.Raise(result.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime))
+					server.Raise(read.scan(result, balance))
 					page = append(page, balance)
 				}
 			})
