@@ -8,7 +8,11 @@
 //
 //   - net.go, the T3 Net: sidecartest.Net whose NetSettings.Engines host its engines on
 //     sidecarhost.NewServiceHost over server's Redis and FileClusters on the local stack's MinIO, in
-//     buckets of the Net's own, and which refuses the fake contract issuer and ControlId sink.
+//     buckets of the Net's own, whose NetSettings.Platform runs its connect clients on server's exchange,
+//     and which refuses the fake contract issuer and ControlId sink.
+//   - exchange.go, that platform: server's exchange and ConnectHandler on loopback listeners of their own,
+//     each client authenticated by a jwt model.AuthNetworkClient mints in a funded network of the Net's,
+//     its control answered by server's controller, so a fake_issuer row runs on what production gives it.
 //   - faults.go, what makes the base's plans happen on real stores: put, get, list and delete on the
 //     Blobs, redis on the Redis, pg-commit through server.Tx's test hook, and http on a client's
 //     transport to server's api.
@@ -23,14 +27,18 @@
 //
 // Not yet here, and failing closed where a row would reach it:
 //
-//   - server's exchange (server/connect/resident.go:902): a T3 Net refuses a row that adds a connect
-//     client or a sidecar, rather than passing it on T2's platform fakes.
-//   - server's api for a T3 sidecar to enroll through: the same refusal covers AddSidecar.
+//   - server's api for a T3 sidecar to enroll through: a T3 Net refuses a row that adds a sidecar, whose
+//     clients would run on T2's platform fakes, rather than passing it there.
+//   - a link's conditions (SetLink) and a contract's class (SetContractClass) on server's exchange, which
+//     takes neither: a row that asks for one fails as unapplied (sidecartest.Net.Unapplied).
+//   - the capture of the exchange's frames (CC2) and of the stores (CC3, TEST-M2-09).
 //   - the 3-master Redis Cluster: test-env.sh attests one Redis node until QD-028's change lands, so
 //     RunCrossslot fails rather than linting on a node that accepts what 3 masters refuse.
 //   - the store clock (TEST-M2-07's clock.go) and T3's MinIO layouts, QuorumLoss and DriveMiss.
 //
-// T3 runs never use t.Parallel: DenyPostgresForTest and the pg-commit hook are process-wide and serial,
-// and a Net installs the process's test hooks. This package imports sidecartest, and sidecartest imports
+// A Net that opens a connect client needs server's schema, so a test of a row with clients runs in a
+// TestEnv that applies the migrations; a Net with none needs no schema. T3 runs never use t.Parallel:
+// DenyPostgresForTest and the pg-commit hook are process-wide and serial, and a Net installs the process's
+// test hooks. This package imports sidecartest, and sidecartest imports
 // no server package, which keeps go-redis and minio-go out of the sidecar module.
 package sidecart3
