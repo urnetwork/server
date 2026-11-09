@@ -99,6 +99,7 @@ type fileClusterStackAdmin struct {
 	secretKey string
 }
 
+// One signed admin request, an error unless it answers 200 or 204.
 func (self *fileClusterStackAdmin) do(ctx context.Context, method string, path string, query url.Values, body []byte) error {
 	endpoint := url.URL{Scheme: "http", Host: self.endpoint, Path: "/minio/admin/v3/" + path, RawQuery: query.Encode()}
 	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), bytes.NewReader(body))

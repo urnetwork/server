@@ -87,6 +87,11 @@ func run(args []string, stdout io.Writer) error {
 		defer stop()
 		return runSshLeaseCommand(ctx, args, os.Stdin, stdout, servermonitor.RunSshAdmissionLease)
 	}
+	if len(args) > 0 && args[0] == "check-burn" {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+		defer stop()
+		return runCheckBurnCommand(ctx, args[1:], stdout, servermonitor.LoadSignalSettings, servermonitor.CheckSloBurn)
+	}
 	return runWithSettingsLoader(args, stdout, servermonitor.LoadSignalSettings)
 }
 

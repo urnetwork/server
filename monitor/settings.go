@@ -442,7 +442,10 @@ type SignalSettings struct {
 	// SidecarStorage is the sidecar's storage signals (SIGNALS.md §29): monitor.yml's file_clusters and
 	// sidecar_dump blocks. nil reports them configured off.
 	SidecarStorage *SidecarStorageSettings
-	disabledHosts  []HostSettings
+	// SidecarSlo is the sidecar services' SLO burn and failure signals (SIGNALS.md §30.1, §30.2):
+	// monitor.yml's sidecar_services block. nil reports them configured off.
+	SidecarSlo    *SidecarSloSettings
+	disabledHosts []HostSettings
 	// Private desired-input identity participates only in in-memory generation checks.
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
@@ -533,6 +536,7 @@ func (s SignalSettings) withDefaults() SignalSettings {
 	s.ObserverOverlay = cloneObserverOverlaySettings(s.ObserverOverlay)
 	s.DnsCanary = cloneDnsCanarySettings(s.DnsCanary)
 	s.SidecarStorage = cloneSidecarStorageSettings(s.SidecarStorage)
+	s.SidecarSlo = cloneSidecarSloSettings(s.SidecarSlo)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
@@ -786,6 +790,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		observerOverlay:           cloneObserverOverlaySettings(settings.ObserverOverlay),
 		dnsCanary:                 cloneDnsCanarySettings(settings.DnsCanary),
 		sidecarStorage:            cloneSidecarStorageSettings(settings.SidecarStorage),
+		sidecarSlo:                cloneSidecarSloSettings(settings.SidecarSlo),
 		stateDir:                  settings.StateDir,
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,

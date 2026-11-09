@@ -38,6 +38,11 @@ var alertClassKinds = map[string]alertClassKind{
 	"dns-ns-down":          pageAlertClass,
 	// the pager's own warn, which reaches Slack only
 	"pager-sink-failing": incidentAlertClass,
+	// SIGNALS.md §30's other sidecar service findings; a blind signal holds the rest open
+	"slo-burn-warn":                        incidentAlertClass,
+	"slo-unobservable":                     visibilityAlertClass,
+	"sidecar-service-failure":              incidentAlertClass,
+	"sidecar-service-failure-unobservable": visibilityAlertClass,
 	// SIGNALS.md §29's other storage findings; a blind signal holds the rest open. The business-hours
 	// classes (dwpd-business, rating-short) warn until the pager has a business-hours path.
 	"filecluster-set-degraded":        incidentAlertClass,
