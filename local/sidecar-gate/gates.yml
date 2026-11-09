@@ -14,10 +14,19 @@
 # A case's T2 test is TestFs<n><Case> in sidecar's sidecartest/fault and its T3 test TestFs<n><Case>OnT3 in
 # server's sidecart3, by convention, so this file does not change as rows land.
 gates:
-  G0: []
-  M0-in: []
+  G0:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
+  M0-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M0: []
   M1-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
     - item: '§23.6''s M1 design closure: typed signing; transport-token states; the keystore result; HTTP liveness; persistent taint and bridge anchor (§5, §6, §7, §18); Q-CORE-4, Q-TEST-6'
       external: 'people: the Gn-in review reads and signs the closure (§23.8)'
   M1:
@@ -64,7 +73,10 @@ gates:
     - item: §22.4's release fixture, from the consumer wiring (build's sidecar release step)
       tests:
         - {repo: build, dir: all, package: ., tags: sidecar_release_fixture, names: [TestSidecarReleaseFixture]}
-  M2-in: []
+  M2-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M2:
     - row: FS-1
       tests:
@@ -269,7 +281,10 @@ gates:
     - item: the nvme run (D-TEST-11)
       external: 'hardware: the production hosts'' PM9A3 staging set, before M2''s exit'
     - item: §22.10's 0x0010 interop artifact
-  M3-in: []
+  M3-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M3:
     - row: FS-25
       tests:
@@ -329,7 +344,10 @@ gates:
       external: 'production: the production hosts'
     - item: one restore of a real dump generation
       external: 'production and people: a real sidecar dump generation and the owner''s drill'
-  M4-in: []
+  M4-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M4:
     - row: FS-19
       case: grant
@@ -370,7 +388,10 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs106PageWorker]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs106PageWorkerOnT3]}
-  M5-in: []
+  M5-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M5:
     - row: FS-34
       tests:
@@ -436,6 +457,9 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs46]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs46OnT3]}
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M6:
     - row: FS-19
       case: team
@@ -595,7 +619,10 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs124Team]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs124TeamOnT3]}
-  M7-in: []
+  M7-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M7:
     - row: FS-13
       tests:
@@ -660,7 +687,10 @@ gates:
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs121OnT3]}
     - item: D-MAIL-9's census run, with §14's outbound probe
       external: 'production: the production edges'
-  M8-in: []
+  M8-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M8:
     - row: FS-19
       case: quick-burner
@@ -736,7 +766,10 @@ gates:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs125AppHost]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs125AppHostOnT3]}
       external: its T4 part, which SDK-M8-15's and SDK-M10-06's cells run and this tool does not; the later of M8-out and M10-out, where it passes (§23.6)
-  M9-in: []
+  M9-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M9:
     - row: FS-31
       tests:
@@ -750,7 +783,10 @@ gates:
       tests:
         - {repo: sidecar, package: ./sidecartest/fault, tags: sidecar_testhooks, names: [TestFs123]}
         - {repo: server, package: ./sidecart3, tags: 'sidecar_testhooks,sidecar_pending', stores: true, names: [TestFs123OnT3]}
-  M10-in: []
+  M10-in:
+    - item: 'D-ARCH-4''s assembly check: DESIGN.md rebuilt from design/source equals the checked-in one, validate.json clean, every superseded-option hit read, <me> only in PLAN quotations, and the Q- items added since the last gate listed (TEST-M1-12)'
+      commands:
+        - {repo: server, command: [go, run, ./local/sidecar-gate, assembly]}
   M10:
     - row: FS-64
       tests:
