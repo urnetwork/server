@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -758,6 +759,61 @@ func TestDefaultDashboardDocumentsAreValid(t *testing.T) {
 		if slices.Contains(dashboard.Tags, PublicTag) && len(dashboard.Templating.List) != 0 {
 			t.Errorf("public dashboard %s uses template variables, which Grafana public dashboards do not support", entry.Name())
 		}
+		// unlisted only keeps a published dashboard out of the public
+		// directory, so without public it publishes nothing
+		if slices.Contains(dashboard.Tags, UnlistedTag) && !slices.Contains(dashboard.Tags, PublicTag) {
+			t.Errorf("%s is tagged %s without %s, which publishes nothing", entry.Name(), UnlistedTag, PublicTag)
+		}
+	}
+}
+
+// A grafana public dashboard resolves no template variable, defined or not:
+// a reference reaches the datasource as literal text and the panel shows no
+// data. Only the built-ins that the prometheus backend interpolates resolve;
+// frontend-only globals such as $__from do not (PUBLICSTATS.md, verified on
+// grafana 13). TestDefaultDashboardDocumentsAreValid checks that no public
+// dashboard defines a variable; this checks that none refers to one, in a
+// query, a title or anywhere else in its document.
+func TestPublicDashboardsReferenceNoTemplateVariables(t *testing.T) {
+	variablePattern := regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)|\[\[([A-Za-z_][A-Za-z0-9_]*)`)
+	backendBuiltins := []string{"__interval", "__interval_ms", "__rate_interval", "__rate_interval_ms", "__range", "__range_s", "__range_ms"}
+	public := 0
+	for _, name := range mustReadDashboardDir(t) {
+		if !slices.Contains(readTestDashboard(t, name).Tags, PublicTag) {
+			continue
+		}
+		public += 1
+		body, err := dashboardsFs.ReadFile("dashboards/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document any
+		if err := json.Unmarshal(body, &document); err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		var walk func(node any)
+		walk = func(node any) {
+			switch value := node.(type) {
+			case string:
+				for _, match := range variablePattern.FindAllStringSubmatch(value, -1) {
+					if variable := match[1] + match[2]; !slices.Contains(backendBuiltins, variable) {
+						t.Errorf("public dashboard %s refers to %s, which a public dashboard does not resolve: %s", name, match[0], value)
+					}
+				}
+			case map[string]any:
+				for _, child := range value {
+					walk(child)
+				}
+			case []any:
+				for _, child := range value {
+					walk(child)
+				}
+			}
+		}
+		walk(document)
+	}
+	if public == 0 {
+		t.Fatal("no public dashboard found")
 	}
 }
 
@@ -1627,6 +1683,16 @@ var publicSafeMetrics = append(append([]string{
 	"urnetwork_connect_connection_new",
 }, networkMeasurementMetrics...), networkLabeledMeasurementMetrics...)
 
+// metrics one public dashboard may query besides publicSafeMetrics, by its
+// file. each entry is a publication decision for that dashboard alone, made
+// for an unlisted share, so the dashboard must stay tagged unlisted
+var publicDashboardOwnMetrics = map[string][]string{
+	// the proxy test runner's measurements, shared unlisted with an outside
+	// viewer (owner decision, 2026-11-09). its panels show only the runner's
+	// own labels (proxy_test_shared_dashboard_test.go)
+	proxyTestSharedDashboardName: slices.Sorted(maps.Keys(proxyTestMetrics)),
+}
+
 var metricNamePattern = regexp.MustCompile(`urnetwork_[a-z0-9_]+`)
 
 // metricOccurrences returns the byte offsets at which the whole metric
@@ -1720,9 +1786,13 @@ func TestPublicDashboardsQueryOnlyPublicSafeMetrics(t *testing.T) {
 			continue
 		}
 		public += 1
+		ownMetrics := publicDashboardOwnMetrics[entry.Name()]
+		if 0 < len(ownMetrics) && !slices.Contains(dashboard.Tags, UnlistedTag) {
+			t.Errorf("%s may query its own metrics only while tagged %s", entry.Name(), UnlistedTag)
+		}
 		for _, expression := range dashboardExpressions(dashboard) {
 			for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-				if !slices.Contains(publicSafeMetrics, metric) {
+				if !slices.Contains(publicSafeMetrics, metric) && !slices.Contains(ownMetrics, metric) {
 					t.Errorf("%s queries %s, which is not a public-safe metric: %s", entry.Name(), metric, expression)
 				}
 			}
