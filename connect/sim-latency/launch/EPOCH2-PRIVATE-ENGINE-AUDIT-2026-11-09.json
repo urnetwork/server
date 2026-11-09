@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "status": "HOST_AUDIT_CORRECTION_QUALIFIED_LOCAL_DEPLOYMENT_NEXT",
+  "root_cause": "The private host audit still required legacy global-daemon logging/network flags. The independently qualified private engine intentionally has a different closed profile, so the audit could never accept it.",
+  "fix": "Root-only engine-profile observation validates all pinned boundary/engine/containerd/network documents with the same native-admission validator. The private host-audit branch compares the exact engine and boundary digests. The legacy global-daemon predicate remains unchanged.",
+  "security_scope": "Configuration observation only: no Docker command, container, namespace, kernel qualification or workload is created. Missing qualification is still invalid for execution and recovery.",
+  "deterministic_regression": "Actual preserved legacy predicate, with ownership alone supplied by a test seam, rejects documents constructed by the real native renderer. The corrected shell branch accepts the genuine native profile and refuses another engine's digest; original global configuration still passes only the global branch.",
+  "negative_controls": "Re-authenticated iptables, proxy, log-driver and extra-field changes are rejected by native document comparison",
+  "full_agent_and_cli_packages": "passed once",
+  "focused_race_repetitions": 3,
+  "goofe": {
+    "candidate_bytes": 103079215104,
+    "candidate_device": "/dev/loop64",
+    "boundary_sha256": "3bf6229954ff142112d2201d47e65f603918b45ed95a3ad5709f9bf639abf5a7",
+    "native_resource_verification_and_recheck": "passed after fresh96 GiB transfer",
+    "old128GiB_store": "Preserved, unmounted; complete original units retained for rollback",
+    "image_ids_verified": ["sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9", "sha256:8d6ed4b5a1f44557313cab42a8951c53d1b86ccc899266bcee2ee1ee84076c14", "sha256:4326c43a061bc3984d6fcb5acd34f6cf363523a76920eee2a405f5b7fd55aa92"],
+    "first_migration_attempt": "Preflight refused GNU sha256sum's escaped mount filename before any store mutation; corrected stdin hashing allowed the fresh second attempt to complete."
+  },
+  "sille": {
+    "candidate_bytes": 103079215104,
+    "candidate_device": "/dev/loop64",
+    "offline_private_engine_running": true,
+    "three_exact_image_ids_match_goofe": true,
+    "direct_synthetic_config_local_sha256": "b8a0996c29195cad1839fa6f7e32933f01f812d573df6e3bb5f9e7b6276430b7",
+    "direct_synthetic_vault_local_sha256": "a68c0e07eaa6d831c9a562128950237e76b0cd0f942afd1fec3d7a32b3aed7c7",
+    "native_resource_check": "Still correctly refuses the existing piped Apport policy. Host-global core.%P approval requested; no unauthorized sysctl change performed.",
+    "normal_docker_daemon_reconfigured_or_restarted": false
+  },
+  "epoch2_open": false,
+  "grading_activated": false,
+  "baseline_ready": false,
+  "main_db_migration_performed": false,
+  "new_api_build_or_migration_required_for_host_audit_fix": false
+}

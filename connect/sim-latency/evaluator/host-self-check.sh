@@ -207,6 +207,24 @@ docker_cgroup_version="$(host_docker info --format '{{.CgroupVersion}}' 2>/dev/n
 docker_security_options="$(host_docker info --format '{{json .SecurityOptions}}' 2>/dev/null | jq -cS . 2>/dev/null || true)"
 docker_daemon_config_secure=false
 docker_daemon_config_sha256=""
+# private_engine_profile_program_begin
+if [ "$private_runtime" = true ]; then
+    # Same closed documents as native admission; legacy daemon flags describe
+    # another runtime and must not invalidate this independently pinned class.
+    private_engine_profile="$(host_docker engine-profile 2>/dev/null || true)"
+    if secure_host_path "$DOCKER_DAEMON_CONFIG" file; then
+        docker_daemon_config_sha256="$(sha256sum <"$DOCKER_DAEMON_CONFIG" | awk '{print $1}')"
+        if jq -e --arg engine_sha256 "$docker_daemon_config_sha256" \
+           --arg boundary_sha256 "$(sha256sum <"$private_boundary" | awk '{print $1}')" '
+            .schema == 1 and .kind == "sim-latency-private-engine-profile/v1" and
+            .engine_config_sha256 == $engine_sha256 and
+            .private_runtime_boundary_sha256 == $boundary_sha256' \
+            <<<"$private_engine_profile" >/dev/null 2>&1; then
+            docker_daemon_config_secure=true
+        fi
+    fi
+else
+# private_engine_profile_program_end
 if [ -f "$DOCKER_DAEMON_CONFIG" ] && [ ! -L "$DOCKER_DAEMON_CONFIG" ] &&
    [ "$(stat -c %u "$DOCKER_DAEMON_CONFIG" 2>/dev/null)" = 0 ] &&
    [ $((8#$(stat -c %a "$DOCKER_DAEMON_CONFIG" 2>/dev/null) & 0022)) -eq 0 ] &&
@@ -219,6 +237,7 @@ if [ -f "$DOCKER_DAEMON_CONFIG" ] && [ ! -L "$DOCKER_DAEMON_CONFIG" ] &&
        "$DOCKER_DAEMON_CONFIG" >/dev/null 2>&1; then
     docker_daemon_config_sha256="$(sha256sum "$DOCKER_DAEMON_CONFIG" | awk '{print $1}')"
     docker_daemon_config_secure=true
+fi
 fi
 docker_id_map_json=""
 docker_uid_map_sha256=""

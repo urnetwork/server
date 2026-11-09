@@ -76,17 +76,17 @@
     "ssh_control": "Dedicated coordinator key reaches an old forced handler with no forwarding/shell; incomplete serving inventory still refuses safely. Separately, the new protected d79f699ca prospective metadata inventory passed a native root-only private-engine query; it has empty qualification and cannot execute or recover.",
     "runtime_qualified": false,
     "core_policy": "User-approved core.%P applied and persisted; user subsequently approved the existing tracked one-byte candidate limit plus pinned inherited seccomp profile",
-    "bounded_storage": "New fully allocated 128 GiB loop-backed ext4 candidate filesystem mounted nosuid,nodev with private propagation; verified systemd mount unit enabled, no reboot test performed",
+    "bounded_storage": "Fresh fully allocated96 GiB loop64 ext4 candidate filesystem active, private/nosuid/nodev; new durable loop/mount units enabled. Original128 GiB store and old unit bytes retained for rollback. Native v5 resource verification/recheck passed; reboot not tested.",
     "runtime_binary_inventory": "Exact Sille Docker/containerd/shim/runc copies and manifest-verified evaluator release installed separately on Goofe; primary Docker and existing containers unchanged",
     "management": "Explicit 24 GiB ledger installed; five slice limits verified in PID1 and kernel. Independent recovery unit installed but not armed; protected agent configuration remains incomplete.",
-    "live_probe": "Native resource-boundary verification and immediate recheck passed with v4 boundary a4214d1676e0bcbac8845422dc699a292a1b29ec13a63971b114a8a6ef74b5e2. This is not complete agent, pressure, baseline or cross-host grading qualification. No evaluation job started.",
+    "live_probe": "Native resource verification/recheck passed with96 GiB v5 boundary3bf6229954ff142112d2201d47e65f603918b45ed95a3ad5709f9bf639abf5a7. All three frozen image IDs verified. Not complete agent, pressure, baseline or cross-host grading qualification; no evaluation job started.",
     "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json", "EPOCH2-GOOFE-BOUNDED-STORAGE-2026-11-09.json", "EPOCH2-STORAGE-AND-PROSPECTIVE-ROLES-2026-11-09.json"]
   },
   "sille_private_executor": {
     "storage": "Fresh96 GiB fully allocated candidate filesystem mounted privately on stable loop64; persistent owner-checked loop service and mount enabled. No old volume reformatted, reboot not tested.",
     "base_directory": "/mnt/data/urnetwork-subeval-sille",
     "backing_headroom": "About46 GiB free after allocation, above required32 GiB",
-    "preparation": "Worker/remap accounts and isolated daemon/management documents installed. Five management slice limits active/read back. Private daemons not started; primary Docker and existing local PostgreSQL/Redis unchanged.",
+    "preparation": "Worker/remap accounts and isolated daemon/management documents installed. Five slice limits active/read back. Offline private daemons running, exact evaluator/PostgreSQL/Redis images verified and only direct synthetic local fixtures copied/hash-verified. Primary Docker and existing local services unchanged.",
     "core_policy": "Sille still uses piped Apport. User approval requested for core.%P, previously approved only on Goofe. No host-global core handling changed without approval.",
     "grading_qualified": false
   },
@@ -97,9 +97,9 @@
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
-    "Finish both actual host inventories/fingerprints. Root-only metadata bootstrap is tested, committed/pushed and natively working on Goofe. API preparation succeeded; do not repeat it or rebuild the qualified image.",
+    "Finish/deploy the qualified private-engine audit correction, then complete both host inventories/fingerprints. Legacy global Docker rules are incompatible with the new private profile; use the shared native document validator. API preparation succeeded; do not repeat it or rebuild the qualified image.",
     "Complete Goofe's immutable host-role/control inventory and genuine prospective fingerprint, then freeze both actual host identities before the intake grant. Do not invent qualification hashes or positive readiness flags.",
-    "Complete Sille private runtime and Goofe's fresh96 GiB transfer, preserving the old128 GiB store. Approved cleanup reclaimed about118 GiB; Sille's96 GiB storage and durable loop/mount are installed. Await Sille core-policy choice; keep candidate execution disabled.",
+    "Both96 GiB volumes and offline image caches are active; Goofe v5 resource verification passed. Await Sille core-policy choice, then verify its complete native boundary. Keep execution disabled until independent grading admission.",
     "Open epoch2 for a fresh full week, verify live API source/rules/status and historical epoch1 publication, and update EPOCH-SOURCE.md only with the actual published checkpoint.",
     "Keep grading unactivated. Fresh baseline, runtime/containment qualification and cross-host operational admission proceed separately; no submission clocks may start before those grading gates."
   ]

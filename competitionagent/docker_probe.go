@@ -6,6 +6,7 @@ package competitionagent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -26,6 +27,22 @@ func RunDockerProbe(ctx context.Context, config *Config, arguments []string, out
 	}
 	if err := config.validateForPurpose(true, true); err != nil {
 		return err
+	}
+	if len(arguments) == 1 && arguments[0] == "engine-profile" {
+		operator, err := trustedOperatorUid(config.TrustedOperatorUser)
+		if err != nil {
+			return err
+		}
+		worker, err := workerCredential(config.WorkerUser)
+		if err != nil {
+			return err
+		}
+		scope := RuntimeResourceScope{BaseDirectory: config.BaseDirectory, StateDirectory: config.StateDirectory, WorkDirectory: config.WorkDirectory, ScratchDirectory: config.DockerRole.ScratchDirectory, TrustedOperatorUid: operator, WorkerUid: worker.Uid, WorkerGid: worker.Gid}
+		profile, err := readDockerEngineProfile(config.DockerRole.ResourceBoundary, scope, runtimeBoundaryNativeHost{}, DefaultRuntimeResourceBoundarySettings())
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(output).Encode(profile)
 	}
 	settings := defaultDockerClientSettings()
 	client, err := loadDockerClientConfig(config.Agent.Path, settings, true)
@@ -50,6 +67,53 @@ func RunDockerProbe(ctx context.Context, config *Config, arguments []string, out
 		return errors.New("bounded private Docker fact query failed")
 	}
 	return writeDockerClientBytes(output, buffer.Bytes())
+}
+
+// Configuration identity is separate from kernel/pressure qualification. The
+// host audit uses the exact native private profile, never the legacy daemon's
+// different log/network settings. This operation executes no Docker command.
+type dockerEngineProfile struct {
+	Schema         int    `json:"schema"`
+	Kind           string `json:"kind"`
+	BoundarySha256 string `json:"private_runtime_boundary_sha256"`
+	EngineSha256   string `json:"engine_config_sha256"`
+}
+
+// The seam replaces protected file I/O only; production policy comparison is
+// shared with native admission and the provisioning renderer.
+func readDockerEngineProfile(pin Pin, scope RuntimeResourceScope, host interface {
+	Document(Pin, int64) ([]byte, error)
+}, settings RuntimeResourceBoundarySettings) (*dockerEngineProfile, error) {
+	if err := validateRuntimeResourceBoundarySettings(settings); err != nil {
+		return nil, err
+	}
+	content, err := host.Document(pin, settings.DocumentBytes)
+	if err != nil {
+		return nil, err
+	}
+	boundary := RuntimeResourceBoundary{}
+	if validateDocumentKeys(content) != nil || decodeStrict(content, &boundary) != nil {
+		return nil, errors.New("invalid private engine audit boundary")
+	}
+	if err = boundary.validate(scope); err != nil {
+		return nil, err
+	}
+	engine, err := host.Document(boundary.EngineConfig, settings.DocumentBytes)
+	if err != nil {
+		return nil, err
+	}
+	containerd, err := host.Document(boundary.ContainerdConfig, settings.DocumentBytes)
+	if err != nil {
+		return nil, err
+	}
+	network, err := host.Document(boundary.NetworkPolicy, settings.DocumentBytes)
+	if err != nil {
+		return nil, err
+	}
+	if err = validateRuntimeBoundaryDocuments(boundary, engine, containerd, network, settings); err != nil {
+		return nil, err
+	}
+	return &dockerEngineProfile{Schema: Schema, Kind: "sim-latency-private-engine-profile/v1", BoundarySha256: pin.Sha256, EngineSha256: boundary.EngineConfig.Sha256}, nil
 }
 
 // Fixed format strings prevent general template evaluation, while immutable
