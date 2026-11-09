@@ -87,6 +87,8 @@ require (
 	github.com/decred/dcrd/crypto/blake256 v1.1.0 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
+	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
+	github.com/emersion/go-smtp v0.25.1 // indirect
 	github.com/emicklei/dot v1.6.2 // indirect
 	github.com/ethereum/c-kzg-4844/v2 v2.1.5 // indirect
 	github.com/fatih/color v1.19.0 // indirect
@@ -232,6 +234,12 @@ replace github.com/urnetwork/sdk => ../sdk
 replace github.com/urnetwork/sidecar => ../sidecar
 
 replace github.com/urnetwork/sidecar/smtpproof => ../sidecar/smtpproof
+
+// sidecar's go-smtp fork and mox subset, which a dependency's replaces cannot carry here
+// (sidecar/third_party/*/URNETWORK.md).
+replace github.com/emersion/go-smtp => ../sidecar/third_party/go-smtp
+
+replace github.com/mjl-/mox => ../sidecar/third_party/mox
 
 replace github.com/urnetwork/glog => ../glog
 
