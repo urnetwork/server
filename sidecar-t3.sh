@@ -79,7 +79,7 @@ suites() {
   go_t3 ./sidecart3 -tags "$tags" -run '^(TestEveryStoreSuiteRunsOnT3|TestSuiteProblemsFailAFakeWithNoSuite|TestSidecarT3RunsEverySuiteTest|TestFailFastLeavesNoRerun|TestCrossslotKeysSpreadOverTheMasters|TestCrossslotCallsKeepEachShapeOnce|TestRunCrossslotRefusesOneNode|TestADialOutsideTheAttestedListIsRefused|TestInlinePathFailsAPlantedPostgresRead|TestInlinePathFailsOneRedisCallOverItsRow|TestInlinePathReadsAnUnsetLimitAsMissing|TestEveryPathRowResolvesOrReadsMissing)$'
   go_t3 ./sidecarhost -tags "$tags" -run '^(TestRedisConformsOnTheTestStore|TestCountingRedisConformsOnTheTestStore)$'
   go_t3 ./model -tags "$tags" -run '^(TestSidecarPushStorePassesItsSuite|TestSocketStorePassesItsSuite|TestMxEdgeStorePassesTheSuite|TestConfigLogSequencerPassesTheStoreSuite)$'
-  go_t3 ./dnshost -tags "$tags" -run '^TestStoreRunsTheDnsStoreSuite$'
+  go_t3 ./dnshost -tags "$tags" -run '^(TestStoreRunsTheDnsStoreSuite|TestRestoreStoreRunsItsSuite)$'
   if [ "$cadence" = nightly ] || stack_up; then
     go_t3 . -tags "$tags,sidecar_localstack" -run '^TestFileClustersConformOnTheLocalStack$'
     go_t3 ./model -tags "$tags,sidecar_localstack" -run '^TestConfigLogSequencerPassesTheStoreSuiteOnMinio$'

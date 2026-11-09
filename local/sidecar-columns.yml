@@ -170,6 +170,7 @@ tables:
       custom_host_map_version: dns-1
       reload_diffs: dns-1
       restore_incident_id: dns-1
+      restore_lists: dns-1
       restore_serial: dns-1
       restoring: dns-1
       root: dns-1

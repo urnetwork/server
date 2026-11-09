@@ -33,8 +33,17 @@ var alertClassKinds = map[string]alertClassKind{
 	"postgres-primary-down":       pageAlertClass,
 	"slo-burn-page":               pageAlertClass,
 	"write-budget-p0-past-refill": pageAlertClass,
+	// §19.8's M5 dns rows (SIGNALS.md §28.1)
+	"dns-canary-signature": pageAlertClass,
+	"dns-ns-down":          pageAlertClass,
 	// the pager's own warn, which reaches Slack only
 	"pager-sink-failing": incidentAlertClass,
+	// SIGNALS.md §28.1's other dns findings; a blind check holds the rest open
+	"dns-ns-failing":           incidentAlertClass,
+	"dns-ns-serial-divergence": incidentAlertClass,
+	"dns-key-window":           incidentAlertClass,
+	"dns-canary-propagation":   incidentAlertClass,
+	"dns-canary-unobservable":  visibilityAlertClass,
 
 	"contract-failure-share":               incidentAlertClass,
 	"contract-failure-share-unobservable":  visibilityAlertClass,

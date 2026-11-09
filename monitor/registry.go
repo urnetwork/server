@@ -230,6 +230,7 @@ func NewSignals() []Signal {
 		NewHostedContractCapSignal(),
 		NewContractStageInflightSignal(),
 		NewExtenderSeedMirrorsSignal(),
+		NewDnsCanarySignal(),
 	}
 }
 

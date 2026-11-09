@@ -206,6 +206,8 @@ type monitorConfig struct {
 	publicUdp               PublicUdpSettings
 	// the operator's observer overlay route contract (§1.7)
 	observerOverlay ObserverOverlaySettings
+	// §12.6's dns canary (SIGNALS.md §28.1), nil where monitor.yml has no dns_canary block
+	dnsCanary *DnsCanarySettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

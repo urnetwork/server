@@ -257,6 +257,54 @@ func TestApiHostNotReadyWithoutItsTables(t *testing.T) {
 	}
 }
 
+// The API role's windows (DNS-M5-19): a root's window file in secret_files is released, verified by
+// dns.yml's anchors; one whose signature was damaged refuses the block; and with no file nothing is
+// released, so no edge becomes ready.
+func TestApiHostReleasesTheWindowFileInItsSecrets(t *testing.T) {
+	start := time.Date(2027, time.February, 3, 12, 0, 0, 0, time.UTC)
+	keys := newHostTestKeys(t, start)
+	host := sidecartest.NewFakeHost(t.Context(), nil, nil, nil, nil).ServiceHost()
+	file := &dnsservice.DnsKeyWindowFile{Format: dnsservice.DnsKeyWindowFileFormat, Root: hostTestRoot, Windows: []dnsservice.DnsKeyWindow{*keys.window}}
+	data, err := file.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &HostSettings{
+		Dns:             hostTestSettings(t, keys),
+		SecretDirectory: hostTestSecrets(t, map[string]string{dnsservice.DnsKeyWindowFileName(hostTestRoot): string(data)}),
+	}
+	release, err := hostKeyWindowRelease(settings, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window := release.Window(hostTestRoot, start); window == nil || !window.NotBefore.Equal(keys.window.NotBefore) {
+		t.Errorf("released %+v", window)
+	}
+
+	// another signature of the right size, made by no key the window publishes
+	other := newHostTestKeys(t, start)
+	damaged := *keys.window
+	damaged.Rrsigs = other.window.Rrsigs
+	file.Windows = []dnsservice.DnsKeyWindow{damaged}
+	damagedData, err := file.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.SecretDirectory = hostTestSecrets(t, map[string]string{dnsservice.DnsKeyWindowFileName(hostTestRoot): string(damagedData)})
+	if _, err := hostKeyWindowRelease(settings, host); !errors.Is(err, dnsservice.ErrDnsKeyWindowRefused) {
+		t.Errorf("a signature by another key: %v", err)
+	}
+
+	settings.SecretDirectory = hostTestSecrets(t, nil)
+	release, err = hostKeyWindowRelease(settings, host)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if window := release.Window(hostTestRoot, start); window != nil {
+		t.Errorf("released %+v with no file", window)
+	}
+}
+
 // The lb inventory as the feed names it: every edge host's public interfaces, by host/interface.
 func TestHostLbInterfacesFromServicesYaml(t *testing.T) {
 	interfaces, err := hostLbInterfaces([]byte("domain: example\nversions:\n  - lb:\n      interfaces:\n        a-edge-1.example:\n          eth0: {ipv4: 192.0.2.10, ipv6: \"2001:db8::10\"}\n          eth1: {ipv4: 192.0.2.11, transparent: true}\n        a-core-1.example:\n          eth0: {ipv4: 192.0.2.20}\n"))

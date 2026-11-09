@@ -93,9 +93,9 @@ type HostDeps struct {
 	// api: the store. nil is Store over host.Redis. Only a Store has <root>'s records written at start,
 	// since they go through model to Postgres, which a fake does not read.
 	Store dnsservice.DnsStore
-	// api: each root's DNSKEY window released at now (§12.6's Keys). nil releases none, so no edge
-	// becomes ready, until DNS-M5-19's KeyWindowRelease reads the windows in secret_files; server/local's
-	// test dns edge signs its own.
+	// api: each root's DNSKEY window released at now (§12.6's Keys). nil is DNS-M5-19's
+	// KeyWindowRelease over the window files in secret_files (hostKeyWindowRelease); server/local's test
+	// dns edge signs its own.
 	KeyWindow func(root string, now time.Time) *dnsservice.DnsKeyWindow
 }
 
@@ -165,6 +165,38 @@ func hostNsAddresses(settings *dnsservice.DnsSettings) map[string][]netip.AddrPo
 	return addresses
 }
 
+// The API role's DNSKEY windows (DNS-M5-19): each root's window file from
+// secret_files (dnsservice.DnsKeyWindowFileName), verified by dns.yml's anchors.
+// A root with no file has no window, so no edge it feeds becomes ready; a file
+// that does not read or verify refuses the block, so a deploy reverts rather
+// than serve a window no edge accepts.
+func hostKeyWindowRelease(settings *HostSettings, host *sidecar.ServiceHost) (*dnsservice.KeyWindowRelease, error) {
+	files := []*dnsservice.DnsKeyWindowFile{}
+	for _, root := range settings.Dns.Roots {
+		data, err := readHostSecret(settings, dnsservice.DnsKeyWindowFileName(root))
+		if errors.Is(err, os.ErrNotExist) {
+			glog.Warningf("[dns]no DNSKEY windows for %s: its edges serve nothing until a ceremony's file is mounted\n", root)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		file, err := dnsservice.ParseDnsKeyWindowFile(data)
+		if err != nil {
+			return nil, fmt.Errorf("dns api: %s: %w", dnsservice.DnsKeyWindowFileName(root), err)
+		}
+		if file.Root != root {
+			return nil, fmt.Errorf("dns api: %s holds %s's windows", dnsservice.DnsKeyWindowFileName(root), file.Root)
+		}
+		files = append(files, file)
+	}
+	metrics := host.Metrics
+	if metrics == nil {
+		return nil, errors.New("dns api: no metrics")
+	}
+	return dnsservice.NewKeyWindowRelease(settings.Dns, files, metrics, nil)
+}
+
 // The API role (see the file header). Returns the block, or a not-ready engine
 // and why when it cannot start.
 func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSettings, deps *HostDeps) (sidecar.Engine, error) {
@@ -184,7 +216,15 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 	apiDeps := &dnsservice.DnsApiDeps{
 		SoaReader:  dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings.Dns)),
 		Challenges: NewChallenges(),
+		Canaries:   NewCanaries(),
 		KeyWindow:  deps.KeyWindow,
+	}
+	if apiDeps.KeyWindow == nil {
+		release, err := hostKeyWindowRelease(settings, host)
+		if err != nil {
+			return notReadyEngine{}, err
+		}
+		apiDeps.KeyWindow = release.Window
 	}
 	if verifyYaml, err := readHostSecret(settings, HostVerifyFileName); err == nil {
 		auth, err := dnsservice.NewDnsInternalVerifier(verifyYaml)

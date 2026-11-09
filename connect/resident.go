@@ -615,6 +615,12 @@ type ExchangeSettings struct {
 	ExchangeStuckProviderRecycleSettings
 
 	ExchangeSidecarPushSettings
+
+	// Whether this exchange hosts §8.9's gate cache, so its key-event
+	// subscriber takes every network's {acl_<networkId>}v and routes each INCR
+	// to the cache through SetAclGate. Off: the contract gate that hosts it
+	// is ACL-M4-01's.
+	EnableAclGate bool
 }
 
 // Reports one exchange writer ping timer arm to a test.
@@ -986,7 +992,7 @@ func newExchange(
 	if settings.KeyEventDelivery.Enabled {
 		// one shared key-event subscriber per exchange (PEERSSTREAMS2.md §5.1):
 		// residents register their listeners with it in `Resident.Run`
-		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle, settings.EnableSidecarPush)
+		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle, settings.EnableSidecarPush, settings.EnableAclGate)
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
 	}
 	if settings.EnableSidecarPush {

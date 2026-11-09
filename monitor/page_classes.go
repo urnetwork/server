@@ -63,6 +63,18 @@ var pageClasses = []pageClass{
 		firstMilestone: "M3",
 		action:         "19.10's held-key row: the host back, or its drives replaced",
 	},
+	{
+		class:          "dns-ns-down",
+		row:            "both dns edges failing probes",
+		firstMilestone: "M5",
+		action:         "§12.6's runbook",
+	},
+	{
+		class:          "dns-canary-signature",
+		row:            "the canary signature failing",
+		firstMilestone: "M5",
+		action:         "§12.6's runbook",
+	},
 }
 
 // The class's row; false for a class that does not page the rota.
