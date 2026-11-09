@@ -5,7 +5,9 @@ package connect
 // test stack. Hello's identity check, the binding against C15's session key and the admission, passes
 // both ways; a HeadCheck exchange runs over the sealed sessions and witnesses; and a data RPC is refused
 // PERMISSION_DENIED, since until CreateContract seals a class (PROTO-M4-02) every contract reads as
-// control, the narrowest. The T2 half, on sidecartest's exchange, is sidecartest/subprotocol_test.go.
+// control, the narrowest. A real resident's push reaches a sidecar's dispatcher over h1 and passes its
+// source guard, which drops anything else the resident sends. The T2 half, on sidecartest's exchange, is
+// sidecartest/subprotocol_test.go and sidecartest/push_test.go.
 
 import (
 	"bytes"
@@ -16,12 +18,15 @@ import (
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	connectlib "github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 
 	"github.com/urnetwork/sidecar"
 	sidecarprotocol "github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
+	"github.com/urnetwork/sidecar/pushservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
@@ -200,6 +205,129 @@ func TestSidecarSubprotocolT3HelloHeadCheckAndClosedData(t *testing.T) {
 		_, err = laptop.subprotocol.Call(helloCtx, sidecar.Id(desktop.clientId), sidecarprotocol.MessageType(0x8031), []byte("ask"), nil)
 		if code, _ := sidecar.SubprotocolErrorCode(err); code != sidecarprotocol.ErrorCode_ERR_PERMISSION_DENIED {
 			t.Errorf("a data RPC on an unclassed contract: %v", err)
+		}
+	})
+}
+
+// §6's row "ControlId push kept over h1" on T3: a real resident's send, the one its publisher uses
+// (Resident.sendPublisherFrame), carries a push frame to a sidecar's client over server's h1 transport,
+// and the sidecar's own dispatcher, registered as production registers it, takes it past its source
+// guard; a frame of another type from the same resident over the same carrier is dropped there,
+// unanswered. Each wait is on the frame's ack, which the client sends once its receive callbacks, the
+// dispatcher's inline checks among them, have run. The P2P half, a forged ControlId over a P2P carrier,
+// is T2's (sidecartest/push_test.go): the in-process exchange runs no P2P carrier a peer could forge
+// on, and FS-126's real P2P runs at M6.
+func TestSidecarPushFromARealResidentKeptByTheDispatcher(t *testing.T) {
+	if testing.Short() {
+		return
+	}
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
+			// the self-signed test identity, not the environment's tls.yml
+			settings.transportTlsLoader = func(tlsSettings *server.TransportTlsSettings) (*server.TransportTls, error) {
+				return server.NewTransportTls(map[string]bool{}, tlsSettings), nil
+			}
+		})
+		defer env.Close()
+		started := make(chan *Resident, 8)
+		env.exchange.afterResidentWorkersStartedForTest = func(resident *Resident) {
+			select {
+			case started <- resident:
+			default:
+			}
+		}
+
+		clientId, clientJwt := env.authClient(&model.AuthNetworkClientArgs{Description: "sidecar", DeviceSpec: "test"})
+		clientSettings := newPeerDiscoveryClientSettings()
+		sidecar.ApplySidecarClientSettings(clientSettings)
+		client := connectlib.NewClient(
+			ctx,
+			connectlib.Id(clientId),
+			Testing_NewControllerOutOfBandControl(ctx, clientId, clientSettings.ContractManagerSettings),
+			clientSettings,
+		)
+		defer client.Cancel()
+		protocolSettings := sidecar.DefaultSidecarProtocolSettings()
+		subprotocol, err := sidecar.NewSubprotocol(ctx, &sidecar.SubprotocolEnv{
+			Client:    client,
+			Store:     sidecartest.NewFakeStore().Root(),
+			Settings:  protocolSettings,
+			Budget:    sidecar.NewSubprotocolBudget(protocolSettings, 64*1024*1024),
+			Inbound:   sidecar.SubprotocolInboundWithoutPolicy,
+			NetworkId: sidecar.Id(env.networkId),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer subprotocol.Close()
+		transport := env.newTransport(clientJwt, server.NewId(), client.RouteManager())
+		defer transport.Close()
+
+		var resident *Resident
+		for resident == nil {
+			select {
+			case startedResident := <-started:
+				if startedResident.clientId == clientId {
+					resident = startedResident
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("no resident started")
+			}
+		}
+		sendAcked := func(frame *protocol.Frame) {
+			t.Helper()
+			acked := make(chan error, 1)
+			if !resident.sendPublisherFrame(frame, func(err error) {
+				select {
+				case acked <- err:
+				default:
+				}
+			}) {
+				connectlib.MessagePoolReturn(frame.MessageBytes)
+				t.Fatal("the resident's send refused the frame")
+			}
+			select {
+			case err := <-acked:
+				if err != nil {
+					t.Fatalf("the frame's ack: %v", err)
+				}
+			case <-time.After(30 * time.Second):
+				t.Fatal("no ack")
+			}
+		}
+		subprotocolId := connectlib.SubprotocolId(sidecar.SubprotocolId)
+
+		// a push, as the resident's publisher sends it: delivered to the dispatcher and queued past its guard
+		before := subprotocol.Stats()
+		receivedBefore := client.SubprotocolStats().ReceivedById[subprotocolId]
+		frame, err := pushservice.PushFrame(sidecarprotocol.MessageType_PUSH_HINT, &sidecarprotocol.PushHint{Seq: 1, Topic: sidecar.PushTopicTeam, Version: 3}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendAcked(frame)
+		after := subprotocol.Stats()
+		if after.QueuedCount != before.QueuedCount+1 || after.SourceDroppedCount != before.SourceDroppedCount {
+			t.Errorf("a real resident's push over h1: queued %d, dropped %d", after.QueuedCount-before.QueuedCount, after.SourceDroppedCount-before.SourceDroppedCount)
+		}
+		if received := client.SubprotocolStats().ReceivedById[subprotocolId]; received != receivedBefore+1 {
+			t.Errorf("connect delivered %d of the resident's frames to 21842", received-receivedBefore)
+		}
+
+		// another type from the same resident over the same carrier: connect hands it on, the guard drops it
+		envelopeBytes, err := proto.Marshal(&sidecarprotocol.Envelope{Version: sidecar.WireVersionMajor, Type: uint32(sidecarprotocol.MessageType_PING), RequestId: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		pingFrame, err := connectlib.ToFrame(&protocol.SubprotocolMessage{SubprotocolId: sidecar.SubprotocolId, MessageBytes: envelopeBytes}, connectlib.DefaultProtocolVersion)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sendAcked(pingFrame)
+		last := subprotocol.Stats()
+		if last.SourceDroppedCount != after.SourceDroppedCount+1 || last.QueuedCount != after.QueuedCount {
+			t.Errorf("a Ping from ControlId: dropped %d, queued %d", last.SourceDroppedCount-after.SourceDroppedCount, last.QueuedCount-after.QueuedCount)
 		}
 	})
 }
