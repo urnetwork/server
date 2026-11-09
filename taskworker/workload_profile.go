@@ -152,6 +152,9 @@ func subnetOperatorTasks() []subnetOperatorTask {
 		{target: task.NewTaskTarget(work.RemoveGoneStClientKeyHistory), schedule: work.ScheduleRemoveGoneStClientKeyHistory},
 		{target: task.NewTaskTarget(work.SweepOrphanNetworkClientData), schedule: work.ScheduleSweepOrphanNetworkClientData},
 		{target: task.NewTaskTarget(model.RemoveNetworkClientsTask)},
+		// Queued by a removal or reap of a sidecar-bound client (§7.8's rev/);
+		// its deletion sweep is production's alone.
+		{target: task.NewTaskTarget(model.WriteSidecarRevTask)},
 		{target: model.NewLegacyProviderTotalsTaskTarget()},
 		// armed by work.ScheduleSettlementAccountingTasks, as in production
 		{target: model.NewLegacyProviderTotalsDrainTaskTarget()},

@@ -185,6 +185,9 @@ func initTaskSchedule(ctx context.Context) {
 		work.ScheduleRemoveOldNetworkAdminEvents(clientSession, tx)
 		// §8.9's acks past their 7 days; a no-op without MG2
 		work.ScheduleRemoveOldNetworkAclAcks(clientSession, tx)
+		// §7.8's rev/ objects 20 minutes after their last write; deletes
+		// nothing in a process with no first metadata cluster
+		work.ScheduleSweepSidecarRev(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
@@ -604,6 +607,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.RemoveOldNetworkAclAcks,
 			work.RemoveOldNetworkAclAcksPost,
+		),
+		// §7.8's rev/ writes a removal owes, retried until each lands, and
+		// their deletion 20 minutes after the last write
+		task.NewTaskTargetWithPost(
+			model.WriteSidecarRevTask,
+			model.WriteSidecarRevTaskPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.SweepSidecarRev,
+			work.SweepSidecarRevPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
