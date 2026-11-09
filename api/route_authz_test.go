@@ -446,20 +446,29 @@ func TestOwnClientPayoutRoutesRefuseOnlyAnEmbedNetworksClientToken(t *testing.T)
 // The spec (connect/api/bringyour.yml) documents the gate's 403 on exactly the
 // gated routes, with the shared response of the route's class:
 // ClientJwtRefused on the network-only routes, EmbedClientJwtRefused on the
-// app admin and own client payout routes. A route that changes class fails
-// here until its documented 403 changes with it. Both shared responses carry
-// the gate's message.
+// app admin and own client payout routes, and SidecarProofRefused on the routes
+// where a sidecar's token proves its key (§7.4). A route that changes class
+// fails here until its documented 403 changes with it. Each shared response
+// carries its gate's message, SidecarTokenRefused too, which every route off a
+// sidecar's allowlist answers and the spec's description names.
 func TestSpecDocumentsTheClientTokenRefusal(t *testing.T) {
 	spec := loadSpec(t)
 	const clientJwtRefused = "#/components/responses/ClientJwtRefused"
 	const embedClientJwtRefused = "#/components/responses/EmbedClientJwtRefused"
+	const sidecarProofRefused = "#/components/responses/SidecarProofRefused"
+	const sidecarTokenRefused = "#/components/responses/SidecarTokenRefused"
 
 	sharedResponses := asMap(asMap(spec.root["components"])["responses"])
-	for _, ref := range []string{clientJwtRefused, embedClientJwtRefused} {
+	for ref, message := range map[string]string{
+		clientJwtRefused:      router.ClientCredentialRefusedMessage,
+		embedClientJwtRefused: router.ClientCredentialRefusedMessage,
+		sidecarProofRefused:   router.StrictExpProofRefusedMessage,
+		sidecarTokenRefused:   router.StrictExpCredentialRefusedMessage,
+	} {
 		name := ref[strings.LastIndex(ref, "/")+1:]
 		example, _ := asMap(asMap(asMap(sharedResponses[name])["content"])["text/plain"])["example"].(string)
-		if example != router.ClientCredentialRefusedMessage {
-			t.Fatalf("%s example = %q, want the gate's message %q", name, example, router.ClientCredentialRefusedMessage)
+		if example != message {
+			t.Fatalf("%s example = %q, want the gate's message %q", name, example, message)
 		}
 	}
 
@@ -478,6 +487,9 @@ func TestSpecDocumentsTheClientTokenRefusal(t *testing.T) {
 			want = clientJwtRefused
 		case routeAccessAppAdmin, routeAccessOwnClientPayout:
 			want = embedClientJwtRefused
+		}
+		if strictExpProofRoutes[routeAccessKey(route)] {
+			want = sidecarProofRefused
 		}
 		operation := specOperations[route.Method()+" "+normalizePath(route.Pattern())]
 		if operation == nil {
