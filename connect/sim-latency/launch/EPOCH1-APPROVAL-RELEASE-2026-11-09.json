@@ -56,6 +56,7 @@
   "settlement_event_feed_verified": {"http_status": 200, "cursor": 3, "event_id": "01a1b83f-7a5f-9f66-1ff7-c5377e46ac94", "payload_sha256": "f228497431333f8a36511189e85dc64d38ee635fbc2931a69ab4133d20413864", "action": "elect", "selected_job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739", "payment_claim": false},
   "source_promoted": false,
   "winner_image_build_qualified": false,
+  "source_build_progress": {"unit": "urnetwork-epoch1-approved-source-20261109-v2.service", "build_owner": "f05bcf130811fb8d1d206b587bf596b575ac64bb0c4862b2243bfd0dc6c89f40", "all_ten_private_clones_complete": true, "private_connect_commit": "388d8a153952fe36af1753908f4b21501967f3a8", "metadata_phase_passed": true, "phase_at_observation": "check", "observed_container_network": "none", "observed_readonly_rootfs": true, "observed_source_mount_readonly": true, "observed_privileged": false, "observed_capabilities_dropped": "ALL", "qualification_claim": false, "remote_competition_branch_modified": false},
   "epoch_2_open": false,
   "calibration_accepted": false,
   "native_snow_review_claimed": false,
