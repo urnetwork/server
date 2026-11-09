@@ -321,6 +321,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /sidecar/sync/versions":                    routeAccessClient,   // the bearer's own client's versions (§6.8)
 	"GET /sidecar/sync/([^/]+)":                     routeAccessClient,   // core: the bearer's own client's state (§6.8)
 	"GET /sidecar/limits":                           routeAccessClient,   // the caller's network's limits (§20.7)
+	"POST /sidecar/push-token":                      routeAccessClient,   // the bearer's own client's wake token (§18.7)
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"GET /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar of either network of the share (§17.16)
 	"PUT /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar's own network's sealed table (§17.16)
@@ -408,6 +409,8 @@ var strictExpRoutes = map[string]bool{
 	"GET /sidecar/sync/([^/]+)":  true,
 	// §20.7's limits (QUOTA-M1-03)
 	"GET /sidecar/limits": true,
+	// §18.7's wake token (SDK-M8-09)
+	"POST /sidecar/push-token": true,
 	// §8.9's ack (ACL-M2-12)
 	"POST /acl/ack": true,
 	// §17.16's share tables (BRIDGE-M6-02)

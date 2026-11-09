@@ -420,6 +420,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sidecar/sync/([^/]+)", handlers.GetSidecarSyncTopic),
 		// §20.7's effective limits, for local pre-checks (QUOTA-M1-03)
 		router.NewRoute("GET", "/sidecar/limits", handlers.GetSidecarLimits),
+		// §18.7's wake token of the bearer's own client, dark until MG8 and the wake switch (SDK-M8-09)
+		router.NewRoute("POST", "/sidecar/push-token", handlers.SidecarPushToken),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)

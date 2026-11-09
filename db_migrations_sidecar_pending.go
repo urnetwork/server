@@ -1176,9 +1176,48 @@ func sidecarMg8Migrations() []any {
 	)
 }
 
-// MG8's §18 part: sidecar_push_token (SDK's tasks).
+// MG8's §18 part: sidecar_push_token (SDK-M8-09), §18.7's step 0 and §18.15's table exactly. Every column
+// is one of §2.8 api-6's: a client's APNs or FCM token and platform, its row's revision, the Redis hash
+// slot of its {scp_<C>} tag, when the row last changed and, after the client's removal, when it was
+// removed. One row per client and no foreign key: each path that removes a client tombstones its row in
+// that transaction (model.TombstonePushTokenInTx), and taskworker deletes it 24 h after the removal. A
+// tombstone keeps client_id, rev and slot, and no platform or token. Nothing reads it unless the binary
+// links MG8 (server.SidecarMg8Linked).
 func sidecarMg8PushMigrations() []any {
-	return []any{}
+	return []any{
+		// rev: a new row's starts at its insert's time in milliseconds, each change adds one in the
+		// statement that makes it, and §19.10's restore adds 2^32, always below 2^53 (§18.7). platform
+		// is apns or fcm, and both it and token are null on a tombstone.
+		newSqlMigration(`
+			CREATE TABLE sidecar_push_token (
+				client_id uuid NOT NULL,
+				platform varchar(8) NULL,
+				token text NULL,
+				rev bigint NOT NULL,
+				update_time timestamp NOT NULL,
+				removed_time timestamp NULL,
+				slot integer NOT NULL,
+
+				PRIMARY KEY (client_id),
+				CHECK ((platform IS NULL) = (token IS NULL)),
+				CHECK (removed_time IS NULL OR token IS NULL),
+				CHECK (0 < rev AND rev < 9007199254740992),
+				CHECK (0 <= slot AND slot < 16384)
+			)
+		`),
+		// §18.7's step 5: a slot's rows, read by a client_id cursor
+		newSqlMigration(`
+			CREATE INDEX sidecar_push_token_slot ON sidecar_push_token (slot, client_id)
+		`),
+		// §18.7's step 6: the rows changed since a time, read by an (update_time, client_id) cursor
+		newSqlMigration(`
+			CREATE INDEX sidecar_push_token_update_time ON sidecar_push_token (update_time, client_id)
+		`),
+		// the deletion 24 h after a client's removal
+		newSqlMigration(`
+			CREATE INDEX sidecar_push_token_removed_time ON sidecar_push_token (removed_time, client_id) WHERE removed_time IS NOT NULL
+		`),
+	}
 }
 
 // MG9 (§19.7): what M9 first reads ungated.

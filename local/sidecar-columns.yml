@@ -419,3 +419,13 @@ tables:
       network_id: mx-2
       result: mx-2
       start_time: mx-2
+  sidecar_push_token:
+    group: MG8
+    columns:
+      client_id: api-6
+      platform: api-6
+      removed_time: api-6
+      rev: api-6
+      slot: api-6
+      token: api-6
+      update_time: api-6
