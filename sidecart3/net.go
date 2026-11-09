@@ -1,8 +1,9 @@
 package sidecart3
 
 // The T3 Net (§22.4): sidecartest's Net with NetSettings.Engines set, so its engines run on a
-// ServiceHost from sidecarhost.NewServiceHost over server's real stores, and with its connect clients
-// refused until server's exchange carries them.
+// ServiceHost from sidecarhost.NewServiceHost over server's real stores, and NetSettings.Platform, so its
+// connect clients run on server's exchange (exchange.go). A sidecar, which enrolls through an api, is
+// refused until server's api carries its enrollment.
 //
 // What is real: Redis is server's (sidecarhost's adapter on server's pools, which test-env.sh pins to
 // the attested private Redis, a database of the test's own); Blobs are server.FileClusters on the local
@@ -38,9 +39,10 @@ import (
 	"github.com/urnetwork/server/sidecarhost"
 )
 
-// Why a T3 Net refuses the fake contract issuer and ControlId sink: its clients belong on server's
-// exchange (server/connect/resident.go:902), which this package does not host yet.
-const refusePlatformFakes = "T3 runs connect clients on server's exchange, which sidecart3 does not host yet: a row with clients or sidecars proves nothing on T3 until it does (TEST-M1-08)"
+// Why a T3 Net refuses the fake contract issuer and ControlId sink, which on T3 only a sidecar reaches: a
+// sidecar enrolls through an api and opens its clients with what that api mints, and sidecart3 hosts
+// server's exchange but not yet an api a sidecar's enrollment runs through.
+const refusePlatformFakes = "a T3 sidecar enrolls through server's api, which sidecart3 does not host yet, so its clients would run on the fake issuer and ControlId sink: a row with sidecars proves nothing on T3 until it does (TEST-M1-08)"
 
 // What a T3 Net is built from.
 type Settings struct {
@@ -58,6 +60,8 @@ type Settings struct {
 	Redis *sidecarhost.RedisSettings
 	// Where each Net's engines record their scripts and multi-key calls, for RunCrossslot.
 	CrossslotCalls *CrossslotCalls
+	// Server's exchange, which each Net's connect clients run on.
+	Exchange *ExchangeSettings
 }
 
 func DefaultSettings() *Settings {
@@ -70,13 +74,15 @@ func DefaultSettings() *Settings {
 		FileClusters:   server.DefaultFileClusterSettings(),
 		Redis:          sidecarhost.DefaultRedisSettings(),
 		CrossslotCalls: NewCrossslotCalls(),
+		Exchange:       DefaultExchangeSettings(),
 	}
 }
 
 // The NetSettings T3's Nets build from, which fault's rules take to run a T3 row: settings.Net with
-// Engines hosting on server's stores and the platform fakes refused. Each Net arms server.Tx's pg-commit
-// hook on t while it is open, so Nets are built one at a time, as sidecartest's hooks already require.
-// settings nil takes the defaults.
+// Engines hosting on server's stores, Platform running the clients on server's exchange, and the platform
+// fakes refused. Each Net arms server.Tx's pg-commit hook on t while it is open, so Nets are built one at
+// a time, as sidecartest's hooks already require. A Net that opens a client needs server's schema, so a
+// row with clients runs in a TestEnv that applies the migrations. settings nil takes the defaults.
 func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
 	if settings == nil {
 		settings = DefaultSettings()
@@ -85,6 +91,9 @@ func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
 	netSettings.RefusePlatformFakes = refusePlatformFakes
 	netSettings.Engines = func(ctx context.Context, net *sidecartest.Net) (*sidecar.ServiceHost, func(), error) {
 		return newHost(ctx, t, net, settings)
+	}
+	netSettings.Platform = func(ctx context.Context, net *sidecartest.Net) (sidecartest.NetPlatform, error) {
+		return newExchangePlatform(ctx, t, settings.Exchange)
 	}
 	return &netSettings
 }

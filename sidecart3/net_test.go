@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
@@ -377,8 +379,9 @@ func TestT3HttpPlansReachTheApi(t *testing.T) {
 	})
 }
 
-// What T3's stores cannot do is refused, not faked: a Delay at the schedule's Add, and a row on the
-// fake contract issuer and ControlId sink, until server's exchange carries T3's clients.
+// What T3 cannot do is refused, not faked: a Delay at the schedule's Add; a sidecar, whose clients would
+// run on the fake contract issuer and ControlId sink until server's api carries its enrollment; and a
+// link's conditions, which server's exchange takes none of.
 func TestT3RefusesWhatItsStoresCannotDo(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
 		func() {
@@ -388,21 +391,37 @@ func TestT3RefusesWhatItsStoresCannotDo(t *testing.T) {
 				t.Errorf("a Delay was armed on T3: %v", err)
 			}
 		}()
-		withClient := func(net *sidecartest.Net) *fault.Schedule {
+		withSidecar := func(net *sidecartest.Net) *fault.Schedule {
 			return &fault.Schedule{
-				Id:    "client",
+				Id:    "sidecar",
 				Tiers: []fault.Tier{fault.TierT2, fault.TierT3},
 				Steps: []*fault.Step{
 					{Actor: "daemonM", Action: func(ctx context.Context, net *sidecartest.Net) error {
-						net.AddClient("m", nil)
+						_, err := net.AddSidecar("m", nil)
+						return err
+					}},
+				},
+			}
+		}
+		result := runOn(t, withSidecar, NetSettings(t, nil))
+		if result.Err == nil || !strings.Contains(result.Err.Error(), refusePlatformFakes) {
+			t.Errorf("a row with a sidecar ran on T3: %s", result)
+		}
+		withPartition := func(net *sidecartest.Net) *fault.Schedule {
+			return &fault.Schedule{
+				Id:    "partition",
+				Tiers: []fault.Tier{fault.TierT2, fault.TierT3},
+				Steps: []*fault.Step{
+					{Actor: "daemonM", Action: func(ctx context.Context, net *sidecartest.Net) error {
+						net.SetLink(connect.NewId(), connect.NewId(), &sidecartest.LinkConditions{Partition: true})
 						return nil
 					}},
 				},
 			}
 		}
-		result := runOn(t, withClient, NetSettings(t, nil))
-		if result.Err == nil || !strings.Contains(result.Err.Error(), refusePlatformFakes) {
-			t.Errorf("a row on the platform fakes ran on T3: %s", result)
+		result = runOn(t, withPartition, NetSettings(t, nil))
+		if result.Err == nil || !strings.Contains(result.Err.Error(), "cannot apply") {
+			t.Errorf("a row partitioning a link ran on T3: %s", result)
 		}
 	})
 }
@@ -449,7 +468,8 @@ func TestT3Rows(t *testing.T) {
 		t.Log("no FS row registers a T3 builder yet: each lands with its row's task")
 		return
 	}
-	testEnv().Run(t, func(tb testing.TB) {
+	// a row's clients run on server's exchange, which needs the schema
+	testEnvWithSchema().Run(t, func(tb testing.TB) {
 		for _, registration := range registrations {
 			RunRow(t, registration.Row, registration.Case, nil)
 		}
