@@ -70,7 +70,7 @@ func Suites() []*Suite {
 		{Name: "RunDnsRestoreStoreSuite", Package: "dnshost", Test: "TestRestoreStoreRunsItsSuite"},
 		{Name: "RunCertsStoreSuite", WaitsOn: "TLS-M5-16"},
 		{Name: "RunMxEdgeStoreSuite", Package: "model", Test: "TestMxEdgeStorePassesTheSuite"},
-		{Name: "RunSmtpEdgeStoreSuite", WaitsOn: "SMTP-M5-06"},
+		{Name: "RunSmtpEdgeStoreSuite", WaitsOn: "SMTP-M9-18"},
 		{Name: "RunConfigLogStoreSuite", Package: "model", Test: "TestConfigLogSequencerPassesTheStoreSuite"},
 	}
 }

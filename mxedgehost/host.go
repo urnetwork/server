@@ -10,9 +10,9 @@
 //     bringyour.com certificate and key come from the block's secret_files (HostCertificateFileName,
 //     HostKeyFileName), and the block is ready only with a pair that loads, names the report host and is
 //     inside its validity. It holds a Postgres pool for §14.8's intake, which runs in-process here
-//     (plan-SMTP-report-intake-home) and which SMTP-M5-06 builds and hands in as HostDeps.Intake; until then
-//     the listener has no intake, and every recipient it answers for gets 451 4.3.0, so a sender retries and
-//     nothing is read.
+//     (plan-SMTP-report-intake-home) and which server/cli/mxedge's report_intake.go builds from smtpedge.yml
+//     and hands in as HostDeps.Intake (SMTP-M5-06); a block given none answers every recipient it takes
+//     451 4.3.0, so a sender retries and nothing is read.
 //   - router, the mxedge service on every other lb interface, is MAIL-M7-19's: RunHost refuses it until then.
 //
 // What the roles share is here: mxedge.yml's settings, the engine's MxEdgeDeps with tlsedgeservice's hello
@@ -87,8 +87,9 @@ func DefaultHostSettings() *HostSettings {
 // The seams a test, or the change that lands a missing part, fills. Each nil takes the block's own, or, where
 // server has none yet, leaves that part closed.
 type HostDeps struct {
-	// platform: SMTP-M5-05's SmtpReportIntake as the listener reaches it, which SMTP-M5-06 builds over this
-	// block's Postgres pool. nil: none yet, so every recipient the listener answers for gets 451 4.3.0.
+	// platform: SMTP-M5-05's SmtpReportIntake as the listener reaches it, which server/cli/mxedge's
+	// report_intake.go builds over this block's Postgres pool (SMTP-M5-06). nil: none, so every recipient the
+	// listener answers for gets 451 4.3.0.
 	Intake mxedgeservice.PlatformIntake
 	// platform: the pending groups whose tables Intake reads (§19.7), so the block is ready only with them.
 	IntakeGroups []*sidecarhost.RunGroup
@@ -238,7 +239,7 @@ func NewPlatformHost(ctx context.Context, host *sidecar.ServiceHost, settings *H
 		glog.Errorf("[%s]the platform certificate is outside its validity, so the block is not ready until a current one is mounted\n", hostPlatformService)
 	}
 	if deps.Intake == nil {
-		glog.Errorf("[%s]no report intake yet (SMTP-M5-06): every recipient the listener answers for gets 451 4.3.0\n", hostPlatformService)
+		glog.Errorf("[%s]no report intake: every recipient the listener answers for gets 451 4.3.0\n", hostPlatformService)
 	}
 	return self, nil
 }
