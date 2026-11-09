@@ -539,3 +539,45 @@ tables:
       slot: api-6
       token: api-6
       update_time: api-6
+  smtp_send:
+    group: MG9
+    columns:
+      byte_count: smtp-3
+      client_id: smtp-3
+      end_time: smtp-3
+      message_byte_count: smtp-3
+      message_id_hash: smtp-3
+      mx_host: smtp-3
+      network_id: smtp-3
+      recipient_count: smtp-3
+      recipient_domain: smtp-3
+      result: smtp-3
+      retry_of_send_id: smtp-3
+      send_day: smtp-3
+      send_id: smtp-3
+      sending_address: smtp-3
+      start_time: smtp-3
+      tls_level: smtp-3
+      tls_version: smtp-3
+      x_ur_ref_key_id: smtp-3
+  smtp_halt:
+    group: MG9
+    columns:
+      halt_id: smtp-4
+      label: smtp-4
+      network_id: smtp-4
+      start_time: smtp-4
+      trigger: smtp-4
+  smtp_dkim_key:
+    group: MG9
+    columns:
+      algorithm: smtp-6
+      domain: smtp-6
+      network_id: smtp-6
+      public_key: smtp-6
+      publish_time: smtp-6
+      remove_time: smtp-6
+      retire_time: smtp-6
+      selector: smtp-6
+      sidecar_id: smtp-6
+      state: smtp-6

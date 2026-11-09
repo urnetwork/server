@@ -35,15 +35,17 @@ import (
 // report tables stays off until M5's Gn-out (§19.7).
 var ErrSmtpReportUnlinked = errors.New("smtp report tables need MG5")
 
-// A complaint or aggregate a row cannot hold: a missing key, a word outside
-// its closed set, or a string past its column or not storable as text.
-var ErrSmtpReportRefused = errors.New("smtp report row refused")
+// A complaint, aggregate, halt or DKIM key a row of smtpedge's tables cannot
+// hold: a missing key, a word outside its closed set, or a string past its
+// column or not storable as text.
+var ErrSmtpRowRefused = errors.New("smtp row refused")
 
-// The column bounds of smtp_complaint and smtp_dmarc_daily, in bytes, which
-// bound characters too. Format values, as the migration fixes them.
+// The column bounds of smtpedge's tables, in bytes, which bound characters
+// too. Format values, as the migrations fix them.
 const (
-	smtpDomainMaxByteCount     = 253
-	smtpSelectorMaxByteCount   = 63
+	smtpDomainMaxByteCount = 253
+	// a DNS label's: a DKIM selector or a burner label
+	smtpLabelMaxByteCount      = 63
 	smtpWordMaxByteCount       = 32
 	smtpXUrRefMaxByteCount     = 64
 	smtpFeedbackIdMaxByteCount = 128
@@ -96,7 +98,7 @@ func smtpCountBigint(count uint64) int64 {
 // Why complaint cannot be a smtp_complaint row, or nil.
 func smtpComplaintRefusal(complaint *smtpedgeservice.SmtpComplaint) error {
 	refuse := func(field string) error {
-		return fmt.Errorf("%w: a complaint's %s", ErrSmtpReportRefused, field)
+		return fmt.Errorf("%w: a complaint's %s", ErrSmtpRowRefused, field)
 	}
 	switch {
 	case complaint == nil:
@@ -115,7 +117,7 @@ func smtpComplaintRefusal(complaint *smtpedgeservice.SmtpComplaint) error {
 		return refuse("domain")
 	case !smtpTextStorable(complaint.DkimDomain, smtpDomainMaxByteCount):
 		return refuse("DKIM domain")
-	case !smtpTextStorable(complaint.DkimSelector, smtpSelectorMaxByteCount):
+	case !smtpTextStorable(complaint.DkimSelector, smtpLabelMaxByteCount):
 		return refuse("DKIM selector")
 	case !smtpTextStorable(complaint.DkimResult, smtpWordMaxByteCount):
 		return refuse("DKIM result")
@@ -131,11 +133,60 @@ func smtpComplaintRefusal(complaint *smtpedgeservice.SmtpComplaint) error {
 	return nil
 }
 
-// Stores complaint, an attributed report's fields and its sealed copy, or an
-// aggregate's sealed copy under type rua or tlsrpt. A complaint id already
-// stored is left as first written, so a retried write stores nothing twice.
-// ErrSmtpReportRefused for a row the table cannot hold.
-func InsertSmtpComplaint(ctx context.Context, complaint *smtpedgeservice.SmtpComplaint) error {
+// Stores complaint in tx: an attributed report's fields and its sealed copy,
+// or an aggregate's sealed copy under type rua or tlsrpt. A complaint id
+// already stored is left as first written, so a retried write stores nothing
+// twice. ErrSmtpRowRefused for a row the table cannot hold.
+func InsertSmtpComplaintInTx(ctx context.Context, tx server.PgTx, complaint *smtpedgeservice.SmtpComplaint) error {
+	if !server.SidecarMg5Linked() {
+		return ErrSmtpReportUnlinked
+	}
+	if err := smtpComplaintRefusal(complaint); err != nil {
+		return err
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		INSERT INTO smtp_complaint (
+			complaint_id,
+			network_id,
+			reporter,
+			complaint_type,
+			arrival_time,
+			domain,
+			dkim_domain,
+			dkim_selector,
+			dkim_result,
+			message_id_hash,
+			x_ur_ref,
+			feedback_id,
+			join_result,
+			sealed_report
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT (complaint_id) DO NOTHING
+		`,
+		server.Id(complaint.ComplaintId),
+		server.Id(complaint.NetworkId),
+		smtpNullableText(complaint.Reporter),
+		complaint.Type,
+		complaint.ArrivalTime.UTC(),
+		smtpNullableText(complaint.Domain),
+		smtpNullableText(complaint.DkimDomain),
+		smtpNullableText(complaint.DkimSelector),
+		smtpNullableText(complaint.DkimResult),
+		smtpNullableBytes(complaint.MessageIdHash),
+		smtpNullableText(complaint.XUrRef),
+		smtpNullableText(complaint.FeedbackId),
+		smtpNullableText(complaint.JoinResult),
+		smtpNullableBytes(complaint.SealedReport),
+	))
+	return nil
+}
+
+// InsertSmtpComplaintInTx in a transaction of its own, opened only for a row
+// it can store.
+func InsertSmtpComplaint(ctx context.Context, complaint *smtpedgeservice.SmtpComplaint) (returnErr error) {
 	if !server.SidecarMg5Linked() {
 		return ErrSmtpReportUnlinked
 	}
@@ -143,45 +194,9 @@ func InsertSmtpComplaint(ctx context.Context, complaint *smtpedgeservice.SmtpCom
 		return err
 	}
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(
-			ctx,
-			`
-			INSERT INTO smtp_complaint (
-				complaint_id,
-				network_id,
-				reporter,
-				complaint_type,
-				arrival_time,
-				domain,
-				dkim_domain,
-				dkim_selector,
-				dkim_result,
-				message_id_hash,
-				x_ur_ref,
-				feedback_id,
-				join_result,
-				sealed_report
-			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-			ON CONFLICT (complaint_id) DO NOTHING
-			`,
-			server.Id(complaint.ComplaintId),
-			server.Id(complaint.NetworkId),
-			smtpNullableText(complaint.Reporter),
-			complaint.Type,
-			complaint.ArrivalTime.UTC(),
-			smtpNullableText(complaint.Domain),
-			smtpNullableText(complaint.DkimDomain),
-			smtpNullableText(complaint.DkimSelector),
-			smtpNullableText(complaint.DkimResult),
-			smtpNullableBytes(complaint.MessageIdHash),
-			smtpNullableText(complaint.XUrRef),
-			smtpNullableText(complaint.FeedbackId),
-			smtpNullableText(complaint.JoinResult),
-			smtpNullableBytes(complaint.SealedReport),
-		))
+		returnErr = InsertSmtpComplaintInTx(ctx, tx, complaint)
 	})
-	return nil
+	return
 }
 
 // One smtp_dmarc_daily row's key within a report.
@@ -204,7 +219,7 @@ func smtpSaturatingAdd(a uint64, b uint64) uint64 {
 // be stored.
 func smtpAggregateRows(report *smtpedgeservice.SmtpAggregateReport) ([]*smtpedgeservice.SmtpAggregateCount, error) {
 	refuse := func(field string) error {
-		return fmt.Errorf("%w: an aggregate's %s", ErrSmtpReportRefused, field)
+		return fmt.Errorf("%w: an aggregate's %s", ErrSmtpRowRefused, field)
 	}
 	switch {
 	case report == nil:
@@ -272,7 +287,7 @@ func smtpAggregateLockKey(reporter string, reportId string) string {
 // any row of that pair is stored, so a replay with other counts counts
 // nothing. Writers of one pair take a transaction-scoped lock on it, then read
 // whether it is stored at read committed, so two blocks taking the same
-// report at once store it once. ErrSmtpReportRefused for a report the table
+// report at once store it once. ErrSmtpRowRefused for a report the table
 // cannot hold.
 func InsertSmtpAggregate(ctx context.Context, report *smtpedgeservice.SmtpAggregateReport) (inserted bool, returnErr error) {
 	if !server.SidecarMg5Linked() {
