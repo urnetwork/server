@@ -66,6 +66,19 @@
     "range_length": 65536,
     "existing_account_and_subordinate_range_overlap_checks": "passed before creation"
   },
-  "remaining": ["Private service lifecycle and closed runtime documents", "Management/recovery ledger and complete agent configuration", "Actual native host fingerprint before freezing the two-host intake policy", "Runtime and cross-host admission before enabling grading"],
+  "closed_runtime_configuration": {
+    "directory": "/etc/urnetwork/competition-goofe-runtime-20261109-v1",
+    "engine_sha256": "5bf5eb923301266f25c00033e6a7d0664d4c3df113371d70375677af44c0bdc2",
+    "containerd_sha256": "277151931ea5f8782dd54ce90f759fa8521fdb022988f15055ad1ca9e03df4d0",
+    "network_policy_sha256": "f0404bd205d5729ac1dc413bc5a134a10d6dc518a265d28a7c6185b27549683a",
+    "boundary_sha256": "6673ea914e132b4037cb8378304d466415c90aa7eb7c6ab7cebbd77fc84651d1",
+    "generated_by": "RenderRuntimeProvisioningDocuments, the same closed-document owner as native admission; fixed private-service templates rendered with actual pinned binary hashes",
+    "docker_config_validation": "passed on Goofe using the separately pinned Sille binary",
+    "systemd_analyze_verify": "passed for all four private service units",
+    "units_installed": true,
+    "services_started": false,
+    "runtime_qualified": false
+  },
+  "remaining": ["Management/recovery ledger and complete agent configuration", "Start isolated services and collect actual native host fingerprint before freezing the two-host intake policy", "Runtime and cross-host admission before enabling grading"],
   "grading_activated": false
 }
