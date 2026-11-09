@@ -67,7 +67,8 @@ func main() {
 	if hostSettings.CredentialFileName == "" {
 		hostSettings.CredentialFileName = "internal-" + os.Getenv("WARP_SERVICE") + ".yml"
 	}
-	// no key windows until DNS-M5-19's KeyWindowRelease, so until then no edge this API feeds is ready
+	// the API releases each root's DNSKEY windows from its secret_files; a root with no window file
+	// feeds no edge a window, so none of them is ready
 	if err := dnshost.RunHost(ctx, *role, hostSettings, nil, &dnshost.HostPorts{Status: *port, Dns: *dnsPort}); err != nil {
 		panic(err)
 	}
