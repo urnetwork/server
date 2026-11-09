@@ -1227,7 +1227,8 @@ func txWithConnection(ctx context.Context, use func(func(PgConn)), callback func
 				phase.enter(DbOperationCommit)
 				commitStarted := timing.start()
 				txObservation.commitEntered(commitCtx)
-				commitErr = commitObservedTx(commitCtx, tx)
+				// nil in production: a test's pg-commit fault (db_tx_fault_test_support.go)
+				commitErr = commitObservedTxWithFault(ctx, commitCtx, tx)
 				txObservation.commitReturned(commitCtx, commitErr == nil)
 				if commitErr == nil {
 					phase.enter(DbOperationAcknowledged)
