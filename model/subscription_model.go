@@ -1779,21 +1779,9 @@ func createTransferEscrowInTx(
 		})
 	}
 
-	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
-		if a.endTime.Before(b.endTime) {
-			return -1
-		} else if b.endTime.Before(a.endTime) {
-			return 1
-		}
-
-		if a.startTime.Before(b.startTime) {
-			return -1
-		} else if b.startTime.Before(a.startTime) {
-			return 1
-		}
-
-		return a.balanceId.Cmp(b.balanceId)
-	})
+	// DESIGN.md 20.9's one order (escrow_draw_order.go). With the escrow_draw_order gate off no
+	// loader reads the flag, so this is today's order by end time, start time and balance id.
+	slices.SortFunc(orderedTransferBalances, escrowDrawCompare)
 
 	netEscrowBalanceByteCount := ByteCount(0)
 
@@ -4101,11 +4089,11 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	// transition, including when a legacy writer does not take balance locks.
 	positiveReservations, redisReservations := lockSettlementReservations(ctx, tx, contractId, lockedBalanceIds)
 
-	// order balances by end date, ascending
-	// take from the earlier before the later
+	// order balances by end date, ascending, and take from the earlier before the later;
+	// behind the escrow_draw_order gate, in DESIGN.md 20.9's draw order, the credit line last
 	result, err = tx.Query(
 		ctx,
-		settlementEscrowReadSql,
+		settlementEscrowReadSqlFor(EscrowDrawOrderEnabled()),
 		contractId,
 	)
 
