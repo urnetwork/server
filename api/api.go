@@ -423,6 +423,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)
 		router.NewRoute("GET", "/network/bridge/share/([^/]+)", handlers.GetNetworkBridgeShare),
 		router.NewRoute("PUT", "/network/bridge/share/([^/]+)", handlers.PutNetworkBridgeShare),
+		// §7.9's authorization log (TEAM-M2-13)
+		router.NewRoute("POST", "/network/config/delta", handlers.NetworkConfigDelta),
+		router.NewRoute("POST", "/network/config/projection", handlers.NetworkConfigProjectionPublish),
+		router.NewRoute("GET", "/network/config/projection", handlers.NetworkConfigProjection),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),

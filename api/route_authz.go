@@ -323,6 +323,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"GET /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar of either network of the share (§17.16)
 	"PUT /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar's own network's sealed table (§17.16)
+	"POST /network/config/delta":                    routeAccessClient,   // a signed statement, verified at the tip (§7.9)
+	"POST /network/config/projection":               routeAccessClient,   // a config writer's signed base (§7.9)
+	"GET /network/config/projection":                routeAccessClient,   // the network's log, which the caller verifies (§7.9)
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
@@ -407,6 +410,11 @@ var strictExpRoutes = map[string]bool{
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)": true,
 	"PUT /network/bridge/share/([^/]+)": true,
+	// §7.9's authorization log (TEAM-M2-13); an unadmitted client reads it and
+	// posts a recovery-signed statement only (the controller)
+	"POST /network/config/delta":      true,
+	"POST /network/config/projection": true,
+	"GET /network/config/projection":  true,
 }
 
 // The routes where a strict_exp bearer proves its ClientKey (§7.4). The third
