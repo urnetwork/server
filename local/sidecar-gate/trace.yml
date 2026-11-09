@@ -359,9 +359,21 @@ rows:
   - id: X7
     gate: M9
     schedules: [FS-31, FS-123]
-  - {id: X8, gate: M1}
-  - {id: X9, gate: M0}
-  - {id: X10, gate: M1}
+  - id: X8
+    gate: M1
+    task: PROTO-M1-11
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestPushResyncsAfterAResidentRestart, TestPushControlIdDroppedOverP2pKeptOverH1]}
+      - {repo: server, package: ./connect, names: [TestSidecarPushFromARealResidentKeptByTheDispatcher], stores: true}
+  - id: X9
+    gate: M0
+    tests:
+      - {repo: sidecar, package: ./check, names: [TestX9, TestX9RowsAreSection46], tags: sidecar_check}
+  - id: X10
+    gate: M1
+    task: CORE-M1-13
+    tests:
+      - {repo: sidecar, package: ., names: [TestEnrollFailsClosedWithoutAdminRefused, TestKeychainPersistedOnlyAfterBind, TestCoreM1GateEnrollsAndRefreshesEndToEnd]}
   - id: X11
     gate: M2
     schedules: [FS-17, FS-44, FS-45, FS-47]
