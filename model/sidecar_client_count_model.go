@@ -150,10 +150,20 @@ func isNetworkSidecarClientConnected(ctx context.Context, networkId server.Id, c
 // room: what TEAM-M1-04 calls at enrollment. Nil, with no I/O, while the limit is dark. A
 // limit of -1 passes, and the refusal's Upgrade says whether a higher tier lifts it.
 func SidecarClientsExceeded(ctx context.Context, networkId server.Id) *sidecar.QuotaRefusal {
+	return sidecarClientsExceeded(ctx, nil, networkId)
+}
+
+// SidecarClientsExceeded for a caller holding a transaction, such as an enrollment that
+// mints the client in it: the limits read through tx where their caches miss.
+func SidecarClientsExceededInTx(ctx context.Context, tx server.PgTx, networkId server.Id) *sidecar.QuotaRefusal {
+	return sidecarClientsExceeded(ctx, tx, networkId)
+}
+
+func sidecarClientsExceeded(ctx context.Context, tx server.PgTx, networkId server.Id) *sidecar.QuotaRefusal {
 	if !SidecarClientCountingOn() {
 		return nil
 	}
-	tier, limits := networkSidecarLimitsWithTier(ctx, nil, networkId)
+	tier, limits := networkSidecarLimitsWithTier(ctx, tx, networkId)
 	limit := limits.Limit("sidecar_clients")
 	if limit == proSidecarLimitNone {
 		return nil
@@ -166,7 +176,7 @@ func SidecarClientsExceeded(ctx context.Context, networkId server.Id) *sidecar.Q
 		LimitKey: "sidecar_clients",
 		Limit:    limit,
 		Used:     usedCount,
-		Upgrade:  quotaRefusalUpgrade(tier, "sidecar_clients", usedCount, networkSidecarLimitHasRow(ctx, nil, networkId, "sidecar_clients")),
+		Upgrade:  quotaRefusalUpgrade(tier, "sidecar_clients", usedCount, networkSidecarLimitHasRow(ctx, tx, networkId, "sidecar_clients")),
 	}
 }
 

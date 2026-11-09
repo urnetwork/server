@@ -218,6 +218,14 @@ func TestSidecarClientsLimitAtEnrollmentAndConnect(t *testing.T) {
 		connect.AssertEqual(t, refusal.Used, int64(20))
 		connect.AssertEqual(t, refusal.Upgrade, true)
 
+		// the same answer inside an enrollment's transaction
+		server.Tx(ctx, func(tx server.PgTx) {
+			inTx := SidecarClientsExceededInTx(ctx, tx, kinds.networkId)
+			if inTx == nil || *inTx != *refusal {
+				t.Fatalf("in a transaction: %+v, want %+v", inTx, refusal)
+			}
+		})
+
 		twentyFirst := testingSidecarCountClient(t, ctx, kinds.networkId, nil, true, true, false)
 		connect.AssertEqual(t, CanConnectSidecarClient(ctx, twentyFirst), false)
 		// connected clients stay: a re-nomination is no new connection, and its
