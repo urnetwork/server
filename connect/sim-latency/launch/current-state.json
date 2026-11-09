@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-09T23:41:12Z",
+  "observed_at": "2026-11-09T23:49:06Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -97,7 +97,7 @@
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
-    "Private-engine audit correction is deployed on both hosts and genuine engine-profile checks passed. Subsequent trusted-image execution exposed separate Docker/containerd mount namespaces. Finish testing/deploying the fixed descriptor-based engine startup and mount-identity admission; details in EPOCH2-PRIVATE-MOUNT-NAMESPACE-2026-11-09.json. API preparation succeeded; do not repeat it or rebuild the qualified image.",
+    "Descriptor-based shared mount startup is deployed on both hosts; exact frozen-image namespace execution now passes and genuine namespace-only receipts are retained. Native Goofe resource recheck found nsenter resetting Docker cwd to /. Finish/deploy the explicit bounded-cwd followup, then complete final host-role inventories/fingerprints. Details in EPOCH2-PRIVATE-MOUNT-NAMESPACE-2026-11-09.json. API preparation succeeded; do not repeat it or rebuild the qualified image.",
     "Complete Goofe's immutable host-role/control inventory and genuine prospective fingerprint, then freeze both actual host identities before the intake grant. Do not invent qualification hashes or positive readiness flags.",
     "Both96 GiB volumes and offline image caches are active; Goofe v5 resource verification passed. Await Sille core-policy choice, then verify its complete native boundary. Keep execution disabled until independent grading admission.",
     "Open epoch2 for a fresh full week, verify live API source/rules/status and historical epoch1 publication, and update EPOCH-SOURCE.md only with the actual published checkpoint.",

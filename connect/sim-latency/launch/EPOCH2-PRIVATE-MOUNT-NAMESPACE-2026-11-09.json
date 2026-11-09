@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-09T23:41:12Z",
-  "status": "CORRECTION_TESTED_NATIVE_DEPLOYMENT_NEXT",
+  "observed_at": "2026-11-09T23:49:06Z",
+  "status": "NATIVE_IMAGE_EXECUTION_PASSED_CWD_FOLLOWUP_NEXT",
   "epoch2_open": false,
   "grading_activated": false,
   "source_image_changed": false,
@@ -19,7 +19,22 @@
     "focused_race": "passed",
     "full_agent_and_cli_packages": "passed once; agent37.156s, CLI0.006s",
     "go_vet_agent_and_cli": "passed",
-    "native_corrected_launch": "not yet deployed or proved"
+    "native_corrected_launch": "Installed on both idle private engines. Frozen image now executes as65532:65532 with network none, read-only rootfs, all capabilities dropped, pinned seccomp, core1, management CPU/memory/PID bounds. Actual UID/GID maps both0:200000:65536. All trusted probes removed; no submission was executed.",
+    "installed_agent_source_commit": "124570e7a34e270773bf99a2fb8ab90f2c7f2b9e",
+    "installed_agent_sha256": "880863c5e166a10d88ec732dbf94ba7ab14df784c04121fd8a97fc8f060b3e99",
+    "sille_shared_mount_namespace_inode": 4026534850,
+    "goofe_shared_mount_namespace_inode": 4026533137,
+    "sille_namespace_only_receipt": "/etc/urnetwork/competition-sille-namespace-proof-20261109-v1/containment.partial.json",
+    "sille_namespace_only_receipt_sha256": "4978afc8fd1fd6739cff882576e490d1c0b847d3009f7ee566b76f6984f3117d",
+    "goofe_namespace_only_receipt": "/etc/urnetwork/competition-goofe-namespace-proof-20261109-v1/containment.partial.json",
+    "goofe_namespace_only_receipt_sha256": "ecdaa8020d13008324829cc2769c66940160801ee533d162630b8fecf2962b67"
   },
-  "remaining": "Finish full package tests, deploy a new immutable agent and prospective boundary/unit inventory on both idle hosts, then repeat exact trusted-image execution. No successful grading/runtime qualification is claimed. Sille core-pattern approval remains pending separately."
+  "adjacent_native_failure": {
+    "check": "Fresh Goofe resource verification with the corrected native verifier refuses daemon cwd outside quota.",
+    "actual_cwd": "Docker /; containerd remains in its candidate root on each host",
+    "cause": "nsenter resets cwd during mount namespace entry unless --wd is explicit; systemd WorkingDirectory alone does not survive the join.",
+    "followup": "Pinned startup arguments now explicitly pass --wd=<candidate_root>. Deterministic argument regression and focused race3 passed; full agent and CLI packages passed once,35.977s and0.006s respectively. Immutable deployment remains next.",
+    "grading_qualified": false
+  },
+  "remaining": "Finish/commit/deploy the bounded-cwd followup, then recheck native resource boundaries and complete final role inventories/fingerprints. Namespace-only receipts are expressly incomplete and cannot prove cleanup pressure, baseline or grading admission. Sille core-pattern approval remains pending separately."
 }

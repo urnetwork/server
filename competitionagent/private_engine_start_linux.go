@@ -139,8 +139,14 @@ func StartPrivateEngine(ctx context.Context, config *Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	launchArguments := []string{boundary.Nsenter.Path, "--mount=/proc/self/fd/" + strconv.FormatUint(uint64(file.Fd()), 10), "--", boundary.Dockerd.Path, "--config-file", boundary.EngineConfig.Path}
+	launchArguments := privateEngineStartupArguments(boundary, file.Fd())
 	return syscall.Exec(boundary.Nsenter.Path, launchArguments, os.Environ())
+}
+
+// nsenter resets cwd when changing mount views unless explicitly pinned.
+// Keep daemon/shim crash output on the bounded candidate filesystem, never /.
+func privateEngineStartupArguments(boundary RuntimeResourceBoundary, namespaceFd uintptr) []string {
+	return []string{boundary.Nsenter.Path, "--mount=/proc/self/fd/" + strconv.FormatUint(uint64(namespaceFd), 10), "--wd=" + boundary.CandidateRoot, "--", boundary.Dockerd.Path, "--config-file", boundary.EngineConfig.Path}
 }
 
 // A missing mount must not place engine writes on the operator data/root
