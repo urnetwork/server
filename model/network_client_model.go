@@ -28,6 +28,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 
@@ -1663,6 +1664,12 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		return 0, err
 	}
 	if err := removeDeactivatedProvideKeysInTx(ctx, tx, deactivatedClientIds); err != nil {
+		return 0, err
+	}
+	// §7.10's removal effects end in this write too, rev/ objects owed among
+	// them (sidecar_removal_model.go)
+	removal := NewClientRemoval(networkId, deactivatedClientIds, sidecar.RevocationReasonRemoved, server.NowUtc())
+	if err := ApplyRemovalEffectsInTx(ctx, tx, removal); err != nil {
 		return 0, err
 	}
 	// the connect and proxy processes close what they hold of the clients, and
@@ -4574,6 +4581,16 @@ func RemoveDisconnectedNetworkClients(ctx context.Context, minConnectionTime tim
 			batchCount = tag.RowsAffected()
 			// as every deactivation (deactivateLockedNetworkClientsInTx)
 			server.Raise(removeDeactivatedProvideKeysInTx(ctx, tx, clientIds))
+			// and §7.10's removal effects, rev/ objects owed among them
+			removal := &Removal{Reason: sidecar.RevocationReasonDeactivated, Time: server.NowUtc()}
+			for _, clientId := range clientIds {
+				removal.Subjects = append(removal.Subjects, &RemovalSubject{
+					NetworkId: clientNetworkIds[clientId],
+					Kind:      sidecar.RevocationKindClient,
+					SubjectId: clientId,
+				})
+			}
+			server.Raise(ApplyRemovalEffectsInTx(ctx, tx, removal))
 		}, server.TxReadCommitted)
 		if 0 < batchCount {
 			glog.Infof("[ncm]marked %d abandoned top level clients inactive\n", batchCount)

@@ -2,8 +2,11 @@ package taskworker
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
@@ -97,6 +100,74 @@ func TestEvsBudgetLoopsShareALeaseOnTheTestStore(t *testing.T) {
 		}
 		if want := min(state.BucketByteCount+allowance.DepthByteCount/720-300, allowance.DepthByteCount); allowance.BucketByteCount < want-1 || want+1 < allowance.BucketByteCount {
 			t.Fatalf("B %d resumed from %d, want about %d", allowance.BucketByteCount, state.BucketByteCount, want)
+		}
+	})
+}
+
+// T3 for the hdd loop's PUT reports on the private test store through server's adapter: an evs process's
+// admission writes its count as its own field of {nvb_seg-1} with that field's ttl, the loop sums it into §19.8's
+// urnetwork_filecluster_hdd_puts, and a report whose ttl never landed is deleted once it is past the loop's bound.
+func TestEvsHddPutReportsOnTheTestStore(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
+		ctx := t.Context()
+		clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+		metrics := sidecartest.NewFakeMetrics(nil)
+		host := &sidecar.ServiceHost{
+			Redis:   sidecarhost.NewRedis(nil),
+			Clock:   clock,
+			Metrics: metrics,
+		}
+		loop, err := evsservice.NewHddLoop(host, "seg-1", &testEvsDriveCounters{}, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		admission, err := evsservice.NewHddAdmission(ctx, host, "seg-1", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer admission.Close()
+		// the admission's goroutine waits on the fake clock
+		if err := clock.AwaitTimers(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+		loop.Step(ctx)
+		if !loop.Holding() {
+			t.Fatal("the loop took no lease")
+		}
+
+		// a process that died between its report's write and its ttl
+		staleReport, err := json.Marshal(&evsservice.HddPutReport{ProcessId: "dead", StartMs: clock.Now().UnixMilli() - 120000, TimeMs: clock.Now().UnixMilli() - 60000, PutCount: 7})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := host.Redis.HashSet(ctx, "{nvb_seg-1}", map[string][]byte{"puts:dead": staleReport}); err != nil {
+			t.Fatal(err)
+		}
+
+		for range 30 {
+			admission.CountPut()
+		}
+		clock.Advance(5 * time.Second)
+		// the admission ticks, writing its report, and waits again
+		if err := clock.AwaitTimers(ctx, 1); err != nil {
+			t.Fatal(err)
+		}
+		loop.Step(ctx)
+		if got := metrics.Value("urnetwork_filecluster_hdd_puts", "seg-1"); got != 6 {
+			t.Fatalf("%v PUTs a second, want 30 over the admission's 5 s", got)
+		}
+		fieldValues, err := host.Redis.HashGetAll(ctx, "{nvb_seg-1}")
+		if err != nil {
+			t.Fatal(err)
+		}
+		putFields := []string{}
+		for field := range fieldValues {
+			if strings.HasPrefix(field, "puts:") {
+				putFields = append(putFields, field)
+			}
+		}
+		if len(putFields) != 1 || putFields[0] == "puts:dead" {
+			t.Fatalf("report fields %v, want the live process's alone", putFields)
 		}
 	})
 }
