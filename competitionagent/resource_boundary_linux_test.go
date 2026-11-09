@@ -214,7 +214,7 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 	info := map[string]any{"Driver": "overlay2", "DriverStatus": [][]string{{"Backing Filesystem", "extfs"}},
 		"DockerRootDir": filepath.Join(boundary.DockerDataRoot, "200000.300000"), "CgroupDriver": "systemd", "CgroupVersion": "2", "DefaultRuntime": "runc",
 		"LiveRestoreEnabled": false, "SecurityOptions": []string{"name=userns"},
-		"Containerd": map[string]any{"Address": boundary.ContainerdSocketPath, "Namespaces": map[string]any{"Containers": "urnetwork-evaluation", "Plugins": "urnetwork-evaluation-plugins"}},
+		"Containerd": map[string]any{"Address": boundary.ContainerdSocketPath, "Namespaces": map[string]any{"Containers": "urnetwork-evaluation", "Plugins": fmt.Sprintf("plugins.moby-%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)}},
 		"Runtimes":   map[string]any{"runc": map[string]any{"path": "runc"}, "io.containerd.runc.v2": map[string]any{"path": "runc"}}}
 	host.daemon, err = json.Marshal(info)
 	if err != nil {

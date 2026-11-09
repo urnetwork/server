@@ -4,9 +4,39 @@ package competitionagent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
+
+// Docker derives its plugin namespace from the exact mapped root identity.
+func TestRuntimeResourceBoundaryBindsRemappedPluginNamespace(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	var info map[string]any
+	if err := json.Unmarshal(fixture.host.daemon, &info); err != nil {
+		t.Fatal(err)
+	}
+	namespaces := info["Containerd"].(map[string]any)["Namespaces"].(map[string]any)
+	namespaces["Plugins"] = fmt.Sprintf("plugins.moby-%d.%d", fixture.boundary.ContainerRootUid, fixture.boundary.ContainerRootGid)
+	content, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRuntimeBoundaryDaemon(content, fixture.boundary, fixture.settings); err != nil {
+		t.Fatal("actual mapped plugin namespace rejected", err)
+	}
+	for _, changed := range []string{"urnetwork-evaluation-plugins", "plugins.moby-1.1", "synthetic-other"} {
+		namespaces["Plugins"] = changed
+		content, err := json.Marshal(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateRuntimeBoundaryDaemon(content, fixture.boundary, fixture.settings); err == nil {
+			t.Fatal("unbound plugin namespace accepted", changed)
+		}
+	}
+}
 
 // Exercise full admission with Docker-style namespace mounts outside the quota.
 func TestRuntimeResourceBoundaryAcceptsForeignNamespaceHandleMounts(t *testing.T) {

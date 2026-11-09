@@ -412,12 +412,17 @@ func runtimeBoundaryEngineDocument(boundary RuntimeResourceBoundary, settings Ru
 		"pidfile": filepath.Join(filepath.Dir(boundary.PrivateSocketPath), "dockerd.pid"),
 		"hosts":   []any{"unix://" + boundary.PrivateSocketPath}, "group": "root",
 		"containerd": boundary.ContainerdSocketPath, "containerd-namespace": "urnetwork-evaluation",
-		"containerd-plugins-namespace": "urnetwork-evaluation-plugins",
+		"containerd-plugins-namespace": runtimeBoundaryPluginNamespace(boundary),
 		"bridge":                       "none", "iptables": false, "ip6tables": false, "ip-forward": false, "ip-masq": false, "userland-proxy": false, "ipv6": false,
 		"userns-remap": boundary.UserNamespace + ":" + boundary.UserNamespace,
 		"exec-opts":    []any{"native.cgroupdriver=systemd"}, "default-runtime": boundary.RuntimeName, "live-restore": false,
 		"log-driver": "json-file", "log-opts": map[string]any{"max-size": settings.ContainerLogMaximumSize, "max-file": strconv.Itoa(settings.ContainerLogMaximumFiles)},
 	}
+}
+
+// Stock Docker remapping derives this effective namespace from the root map.
+func runtimeBoundaryPluginNamespace(boundary RuntimeResourceBoundary) string {
+	return fmt.Sprintf("plugins.moby-%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)
 }
 
 // Containerd's root, state and socket are explicit; only its fixed daemon is
@@ -523,7 +528,7 @@ func validateRuntimeBoundaryDaemon(content []byte, boundary RuntimeResourceBound
 		info.DockerRootDir != filepath.Join(boundary.DockerDataRoot, fmt.Sprintf("%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)) ||
 		info.CgroupDriver != "systemd" || info.CgroupVersion != "2" || info.DefaultRuntime != boundary.RuntimeName || info.LiveRestoreEnabled ||
 		info.Containerd == nil || info.Containerd.Address != boundary.ContainerdSocketPath ||
-		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != "urnetwork-evaluation-plugins" {
+		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != runtimeBoundaryPluginNamespace(boundary) {
 		return errors.New("private daemon storage, remap, cgroup or runtime class differs")
 	}
 	userns := false
