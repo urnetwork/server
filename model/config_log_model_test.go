@@ -2,8 +2,9 @@ package model
 
 // api's log sequencer (TEAM-M2-13): sidecartest's shared store suite, which T2's fake api passes too
 // (TEAM-M2-12), on T2's fake Blobs here and on the local stack's MinIO in
-// config_log_model_localstack_test.go; network_acl_head following each append; a refusal's body; and
-// the gate path, a rows-only verifier reading the log from the store, under the Postgres tripwire (I-12).
+// config_log_model_localstack_test.go; network_acl_head following each append; a refusal's body; the
+// writes spending the write budget as P0; and the gate path, a rows-only verifier reading the log from
+// the store, under the Postgres tripwire (I-12).
 
 import (
 	"context"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -101,6 +103,51 @@ func TestConfigLogAppendsAdvanceTheAclHead(t *testing.T) {
 	}
 	if len(advanced) != 2 || advanced[0] != 1 || advanced[1] != 2 {
 		t.Errorf("the head advanced to %v", advanced)
+	}
+}
+
+// With the process's write budget installed, every proj/ and projrows/ PUT is issued to it as P0 of kind
+// log, priced, before it is sent, so a first cluster that refuses unbudgeted writes takes the appends;
+// without it, that cluster refuses them before anything is sent.
+func TestConfigLogWritesSpendTheBudgetAsP0(t *testing.T) {
+	blobs := sidecartest.NewFakeBlobs(sidecartest.NewFakeClock(sidecartest.DefaultClockStart()), sidecartest.NewFaultQueue(), nil, sidecartest.DefaultFakeBlobsSettings())
+	cluster, err := evsservice.NewBudgetedBlobs(blobs).FirstCluster()
+	if err != nil {
+		t.Fatal(err)
+	}
+	world := sidecartest.NewConfigLogSuiteWorld(t.Context(), cluster)
+	settings := DefaultConfigLogSettings()
+	settings.Clock = world.Clock()
+
+	unbudgeted := testConfigLogSuiteSequencer{sequencer: NewConfigLogSequencer(cluster, settings, nil)}
+	refusal := &sidecartest.ConfigLogRefusal{}
+	if err := world.Start(unbudgeted); !errors.As(err, &refusal) || refusal.Status != http.StatusServiceUnavailable || !errors.Is(err, evsservice.ErrWriteUnbudgeted) {
+		t.Fatalf("an unbudgeted base 1: %v", err)
+	}
+
+	budget := sidecartest.NewFakeWriteBudget(nil)
+	sequencer := NewConfigLogSequencer(cluster, settings, nil)
+	sequencer.SetWriteBudget(budget, func(objectByteCount int64) int64 { return 3 * objectByteCount })
+	suite := testConfigLogSuiteSequencer{sequencer: sequencer}
+	if err := world.Start(suite); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := world.PostMemberAdmit(suite); err != nil {
+		t.Fatal(err)
+	}
+	read, err := sequencer.Read(t.Context(), server.Id(world.NetworkId()), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := len(read.SignedGenesis)
+	for _, object := range append(read.Entries, read.Rows...) {
+		written += len(object)
+	}
+	if got := budget.P0ByteCount(cluster.ClusterId(), sidecar.WriteP0KindLog); got != int64(3*written) {
+		t.Errorf("issued %d priced bytes for %d written", got, written)
+	}
+	if violations := budget.Violations(); len(violations) != 0 {
+		t.Errorf("the budget's violations: %v", violations)
 	}
 }
 

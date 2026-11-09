@@ -57,7 +57,11 @@ import (
 // store, so every api instance reads alike. An append holds its network's lock
 // across its store requests, serializing this instance's appends to one
 // network, while other instances race it at the store as §7.9 says. Writes are
-// P0 and never queued (§11.13): nothing here waits on the write governor.
+// P0 and never queued (§11.13): with a write budget installed
+// (SetWriteBudget), each proj/ and projrows/ PUT is issued to it as P0 of kind
+// log before it is sent, which never waits or refuses, and carries P0 in its
+// ctx, as a cluster evsservice.BudgetedBlobs wraps requires; without one, the
+// bytes are counted in a metric alone.
 // Holds no Postgres connection across store I/O: network_acl_head advances
 // after the append, in its own transaction. Safe for concurrent use.
 //
@@ -102,7 +106,7 @@ var configLogAppendByteCounter = prometheus.NewCounter(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "config_log",
 	Name:      "p0_bytes_total",
-	Help:      "Bytes of proj/ and projrows/ objects api wrote, P0 and never queued (§11.13)",
+	Help:      "Bytes of proj/ and projrows/ objects api sent to the store, each try counted, P0 and never queued (§11.13)",
 })
 
 func init() {
@@ -204,6 +208,10 @@ type ConfigLogSequencer struct {
 
 	stateLock sync.Mutex
 	networks  map[server.Id]*configLogNetwork
+	// the process's write budget, nil for none, and how it prices an object's
+	// create (§11.13's cost rows)
+	budget sidecar.WriteBudget
+	price  func(objectByteCount int64) int64
 }
 
 // A sequencer on cluster, which advances network_acl_head with advanceHead
@@ -223,6 +231,36 @@ func NewConfigLogSequencer(
 		advanceHead: advanceHead,
 		networks:    map[server.Id]*configLogNetwork{},
 	}
+}
+
+// Issues every proj/ and projrows/ write to budget before it is sent, as P0 of
+// kind log on the cluster, priced by price, the bytes of each object it
+// creates (§11.13's reports row; evsservice.PriceTable's create row). OPS
+// installs api's process budget with its first metadata cluster. nil removes
+// it.
+func (self *ConfigLogSequencer) SetWriteBudget(budget sidecar.WriteBudget, price func(objectByteCount int64) int64) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.budget, self.price = budget, price
+}
+
+// ctx for one PUT of an object of byteCount bytes: counted, issued to the
+// budget as P0 when one is installed, and carrying P0.
+func (self *ConfigLogSequencer) issueP0(ctx context.Context, byteCount int) context.Context {
+	configLogAppendByteCounter.Add(float64(byteCount))
+	budget, price := func() (sidecar.WriteBudget, func(int64) int64) {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		return self.budget, self.price
+	}()
+	if budget == nil {
+		return ctx
+	}
+	pricedByteCount := int64(byteCount)
+	if price != nil {
+		pricedByteCount = price(int64(byteCount))
+	}
+	return budget.IssueP0(ctx, self.cluster.ClusterId(), sidecar.WriteP0KindLog, pricedByteCount)
 }
 
 func (self *ConfigLogSequencer) now() time.Time {
@@ -522,11 +560,10 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 // verifies again at the next), or an error.
 func (self *ConfigLogSequencer) put(ctx context.Context, network *configLogNetwork, key string, entryBytes []byte, tip *bridge.AuthPin) (*bridge.AuthPin, error) {
 	for range self.settings.AppendAttemptCount {
-		_, putErr := self.cluster.PutIfNoneMatch(ctx, key, entryBytes, nil)
+		_, putErr := self.cluster.PutIfNoneMatch(self.issueP0(ctx, len(entryBytes)), key, entryBytes, nil)
 		var unknown *sidecar.BlobUnknownError
 		switch {
 		case putErr == nil:
-			configLogAppendByteCounter.Add(float64(len(entryBytes)))
 			if err := network.applyWithLock(ctx, self, entryBytes); err != nil {
 				return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Tip: tip, Err: err}
 			}
@@ -541,7 +578,6 @@ func (self *ConfigLogSequencer) put(ctx context.Context, network *configLogNetwo
 				// nothing: the same bytes again
 				continue
 			case bytes.Equal(held, entryBytes):
-				configLogAppendByteCounter.Add(float64(len(entryBytes)))
 				if err := network.applyWithLock(ctx, self, held); err != nil {
 					return nil, &ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Tip: tip, Err: err}
 				}
@@ -652,16 +688,13 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 		},
 		before: func(ctx context.Context) error {
 			rowsSha256 := sha256.Sum256(base.Rows)
-			if _, err := sidecar.PutImmutable(ctx, self.cluster, sidecar.ConfigRowsKey(sidecar.Id(networkId), rowsSha256[:]), base.Rows, nil); err != nil {
-				return err
-			}
-			configLogAppendByteCounter.Add(float64(len(base.Rows)))
-			return nil
+			_, err := sidecar.PutImmutable(self.issueP0(ctx, len(base.Rows)), self.cluster, sidecar.ConfigRowsKey(sidecar.Id(networkId), rowsSha256[:]), base.Rows, nil)
+			return err
 		},
 	}
 	if base.Genesis != nil {
 		request.after = func(ctx context.Context) error {
-			_, err := sidecar.PutImmutable(ctx, self.cluster, sidecar.ConfigEntryKey(sidecar.Id(networkId), 0), base.Genesis, nil)
+			_, err := sidecar.PutImmutable(self.issueP0(ctx, len(base.Genesis)), self.cluster, sidecar.ConfigEntryKey(sidecar.Id(networkId), 0), base.Genesis, nil)
 			return err
 		}
 	}
