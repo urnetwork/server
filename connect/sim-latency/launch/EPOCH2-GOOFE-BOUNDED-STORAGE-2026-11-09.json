@@ -9,7 +9,8 @@
     "persistent_file": "/etc/sysctl.d/90-urnetwork-competition-core.conf",
     "file_sha256": "d73bd6969da972d8001e90d06ebb9b2f1fcc73c50ccaf2606256010996eb5131",
     "services_restarted": false,
-    "container_core_limits_changed": false
+    "container_core_limits_changed": false,
+    "subevaluation_core_policy": "User explicitly approved retaining the existing tracked execution path's one-byte core limit plus pinned inherited seccomp profile under non-piped core.%P; supersedes the earlier zero-core description. No candidate has been launched."
   },
   "bounded_storage": {
     "backing_file": "/home/by/sim-latency/runtime-backing-epoch2-v1/candidate.img",
@@ -93,7 +94,9 @@
     "systemd_and_kernel_readbacks": "All five exact slice paths active; memory.max, memory.swap.max=0, pids.max and cpuset.cpus.effective=20,22 match the protected profile",
     "common_urnetwork_slice_memory_and_tasks": "unbounded, so independent cleanup does not inherit the ordinary management cap",
     "core_handler_installed": false,
-    "recovery_service_installed": false,
+    "recovery_service_installed": true,
+    "recovery_service_sha256": "15112eab98034f1bc5c9b1c4b3044cd8c02f5b8c560c4c3a3b1dca1af3342b63",
+    "recovery_service_state": "inactive, MainPID=0; syntax and systemd limits checked. Protected agent configuration, arming and actual recovery remain pending.",
     "pressure_qualification_passed": false
   },
   "live_engine_probe": {
@@ -109,6 +112,15 @@
     "untrusted_jobs_started": 0,
     "recovery_service_missing_observed": true
   },
-  "remaining": ["Resolve approved home traversal policy and repeat private-engine probe", "Independent recovery service and complete agent configuration", "Collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
+  "evaluator_release": {
+    "path": "/usr/local/libexec/urnetwork/competition-e2-g2g7-a131-20261109-v2",
+    "release_manifest_sha256": "1d34d45ba7883572f676312c6a9174e3361165c9247354e9175c73d5df3078c2",
+    "evaluator_command_sha256": "5d2d9bef902944eb6db166628dd8bc8adc57ce668f118efd493319af63aa8802",
+    "stock_seccomp_sha256": "785b2429264afba4d594320337cb17f144f3c7d51585f9805eef72e28f4f9334",
+    "candidate_core_profile_sha256": "00ee51c9862878e7eb64f1e26e22e3108a58f4c6f1adc67da55e4976aaac8392",
+    "transport_verification": "All manifest entries verified with strict SHA-256 checks at destination; exact file count matched and no symlinks were copied. Root-owned immutable release installed without overwriting an existing path.",
+    "job_or_grading_started": false
+  },
+  "remaining": ["Resolve approved home traversal policy and repeat private-engine probe", "Complete protected agent configuration and native recovery arming", "Collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
   "grading_activated": false
 }
