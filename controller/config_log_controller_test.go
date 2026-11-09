@@ -47,12 +47,12 @@ func installTestConfigLogSequencer(t testing.TB, clock sidecar.Clock) {
 func TestConfigLogRoutesServeABoundFirstDevice(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		clientSession, _ := newSidecarBindTestClient(t, ctx, "config-log-routes")
+		clientSession, userId := newSidecarBindTestClient(t, ctx, "config-log-routes")
 		keys := newSidecarBindTestKeys(t)
 		if _, err := SidecarBind(&SidecarBindArgs{Binding: keys.bind(t, clientSession, 1)}, clientSession); err != nil {
 			t.Fatal(err)
 		}
-		world := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.Id(keys.sidecarId))
+		world := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.Id(userId), sidecar.Id(keys.sidecarId))
 		installTestConfigLogSequencer(t, world.Clock())
 
 		signedHeader, rows, signedGenesis := world.BaseOne()
@@ -82,14 +82,14 @@ func TestConfigLogRoutesServeABoundFirstDevice(t *testing.T) {
 func TestConfigLogRoutesRefuseAnUnadmittedClient(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
-		clientSession, _ := newSidecarBindTestClient(t, ctx, "config-log-unadmitted")
+		clientSession, userId := newSidecarBindTestClient(t, ctx, "config-log-unadmitted")
 		if _, err := NetworkConfigDelta(&NetworkConfigDeltaArgs{Signed: []byte{1}}, clientSession); err == nil {
 			t.Fatal("a process with no first cluster appended")
 		} else if status, _ := configLogRefusal(err); status != http.StatusServiceUnavailable {
 			t.Errorf("no sequencer: %v", err)
 		}
 
-		world := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.NewId())
+		world := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.Id(userId), sidecar.NewId())
 		installTestConfigLogSequencer(t, world.Clock())
 
 		signedHeader, rows, signedGenesis := world.BaseOne()
@@ -107,6 +107,19 @@ func TestConfigLogRoutesRefuseAnUnadmittedClient(t *testing.T) {
 		}
 		if _, err := NetworkConfigProjection(&NetworkConfigProjectionArgs{}, clientSession); err != nil {
 			t.Errorf("an unadmitted client reads the log: %v", err)
+		}
+
+		// bound now, its genesis naming a member other than the network's owner
+		keys := newSidecarBindTestKeys(t)
+		if _, err := SidecarBind(&SidecarBindArgs{Binding: keys.bind(t, clientSession, 1)}, clientSession); err != nil {
+			t.Fatal(err)
+		}
+		stranger := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.NewId(), sidecar.Id(keys.sidecarId))
+		installTestConfigLogSequencer(t, stranger.Clock())
+		signedHeader, rows, signedGenesis = stranger.BaseOne()
+		_, err = NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis}, clientSession)
+		if status, code := configLogRefusal(err); status != http.StatusForbidden || code != "config_unadmitted" {
+			t.Errorf("base 1 for a genesis naming another owner: %v", err)
 		}
 	})
 }

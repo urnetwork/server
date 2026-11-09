@@ -11,7 +11,9 @@ package controller
 // save that an unadmitted client of a member may read the log and post a
 // recovery-signed statement only (§7.9's Recovery `before admission` row),
 // and base 1 comes from the network's first device, which carries its
-// genesis. The statements themselves are judged by their signatures and the
+// genesis: the owner's top-level client, bound to the sidecar the genesis
+// names. That the device is untagged is enrollment's to keep: before base 1 a
+// tagged enrollment answers no_genesis (TEAM-M1-04, TEAM-M2-16). The statements themselves are judged by their signatures and the
 // log's rules (model/config_log_model.go), so this is defense in depth, not
 // the authority.
 //
@@ -168,6 +170,17 @@ func NetworkConfigProjectionPublish(args *NetworkConfigProjectionPublishArgs, cl
 		if !bytes.Equal(genesis.GetNetworkId(), sidecar.Id(clientSession.ByJwt.NetworkId).Bytes()) ||
 			sidecarId == (server.Id{}) || !bytes.Equal(genesis.GetOwnerSidecarId(), sidecar.Id(sidecarId).Bytes()) {
 			return nil, configUnadmitted("base 1 comes from the device its genesis names, in its own network")
+		}
+		// §7.9's who: the network owner's own top-level client, the genesis naming that owner as its member (its
+		// user in a personal network; a team's first Owner waits on TEAM-M6's members)
+		network := model.GetNetwork(clientSession)
+		if network == nil || network.AdminUserId == nil || *network.AdminUserId != clientSession.ByJwt.UserId ||
+			!bytes.Equal(genesis.GetOwnerMemberId(), sidecar.Id(*network.AdminUserId).Bytes()) {
+			return nil, configUnadmitted("base 1 comes from the network owner's device")
+		}
+		networkClient := model.GetNetworkClient(clientSession.Ctx, *clientSession.ByJwt.ClientId)
+		if networkClient == nil || networkClient.SourceClientId != nil {
+			return nil, configUnadmitted("base 1 comes from a top-level client")
 		}
 	} else {
 		admitted, err := configClientAdmitted(sequencer, clientSession)
