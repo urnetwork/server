@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "status": "HISTORICAL_RESULTS_RESTORED_GRADING_STILL_INACTIVE",
+  "operator_instruction": "Keep epoch1 results live while epoch2 evaluations are paused.",
+  "root_cause": "The existing season-wide evaluation hold intentionally also gates AutomationResult publication. It is not the correct mechanism for pausing a future intake-only round while preserving a prior published result.",
+  "correction": "Release the broad hold; keep evaluation workers stopped and withhold epoch2 grading activation. The intake-first database claim guard requires a real grading activation before any admitted job can be claimed.",
+  "evaluation_hold_revision": 27,
+  "evaluation_hold_active": false,
+  "hold_id": "01a1c0c0-7dcd-62c7-bf66-03a7cc4f6173",
+  "public_result_verified": {"winner_job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739", "integrity_review": "approved", "source_approval": "approved", "settlement_status": "pending", "automation_held_error": false},
+  "running_evaluation_workers_observed": 0,
+  "source_preparation_is_not_a_submission_worker": true,
+  "epoch2_open": false,
+  "epoch2_grading_activated": false,
+  "existing_database_regression": "TestCompetitionIntakeFirstDatabaseOpensFullWeekAfterArchiveAndRetainsClocklessQueue includes a public Claim call that returns no candidate before grading activation; this record does not claim a new execution.",
+  "retained_release_receipt": {"sha256": "ae8d89a110cc26909fb5ec1641bb8b8218aecde8d3920e2f95556601675397d6", "version": "f11bf537-fb2d-499c-b9c0-e262816c90b9", "retain_until": "2028-01-01T00:00:00Z", "exact_version_readback_verified": true},
+  "earlier_hold_revision26_preserved_not_deleted": true,
+  "earlier_intake_first_operator_approval_digest_unchanged": true
+}
