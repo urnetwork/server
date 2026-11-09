@@ -143,10 +143,10 @@ func StartPrivateEngine(ctx context.Context, config *Config) error {
 	return syscall.Exec(boundary.Nsenter.Path, launchArguments, os.Environ())
 }
 
-// nsenter resets cwd when changing mount views unless explicitly pinned.
-// Keep daemon/shim crash output on the bounded candidate filesystem, never /.
+// --wd opens before entry and can retain an unreachable mount from systemd's
+// original namespace. --wdns resolves the bounded cwd inside the joined view.
 func privateEngineStartupArguments(boundary RuntimeResourceBoundary, namespaceFd uintptr) []string {
-	return []string{boundary.Nsenter.Path, "--mount=/proc/self/fd/" + strconv.FormatUint(uint64(namespaceFd), 10), "--wd=" + boundary.CandidateRoot, "--", boundary.Dockerd.Path, "--config-file", boundary.EngineConfig.Path}
+	return []string{boundary.Nsenter.Path, "--mount=/proc/self/fd/" + strconv.FormatUint(uint64(namespaceFd), 10), "--wdns=" + boundary.CandidateRoot, "--", boundary.Dockerd.Path, "--config-file", boundary.EngineConfig.Path}
 }
 
 // A missing mount must not place engine writes on the operator data/root

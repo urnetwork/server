@@ -67,8 +67,8 @@ func TestPrivateEngineStartupRejectsMissingAuthority(t *testing.T) {
 	}
 }
 
-// Joining the correct mount view alone is insufficient: nsenter's default
-// cwd is /, which violates quota-backed daemon diagnostics/core containment.
+// The pre-entry --wd can retain an unreachable original systemd mount. Resolve
+// cwd inside the target view with --wdns; a correct device alone is not enough.
 func TestPrivateEngineStartupKeepsQuotaBackedWorkingDirectory(t *testing.T) {
 	boundary := RuntimeResourceBoundary{
 		CandidateRoot: "/synthetic/executor/candidate",
@@ -76,7 +76,7 @@ func TestPrivateEngineStartupKeepsQuotaBackedWorkingDirectory(t *testing.T) {
 		Dockerd:       Pin{Path: "/synthetic/bin/dockerd"},
 		EngineConfig:  Pin{Path: "/synthetic/config/engine.json"},
 	}
-	want := []string{"/synthetic/bin/nsenter", "--mount=/proc/self/fd/7", "--wd=/synthetic/executor/candidate", "--", "/synthetic/bin/dockerd", "--config-file", "/synthetic/config/engine.json"}
+	want := []string{"/synthetic/bin/nsenter", "--mount=/proc/self/fd/7", "--wdns=/synthetic/executor/candidate", "--", "/synthetic/bin/dockerd", "--config-file", "/synthetic/config/engine.json"}
 	if got := privateEngineStartupArguments(boundary, 7); !reflect.DeepEqual(got, want) {
 		t.Fatalf("startup lost held mount identity, bounded cwd or closed daemon arguments: %q", got)
 	}
