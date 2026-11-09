@@ -252,3 +252,34 @@ func TestNetworkSidecarLimitsLeaveWithTheirNetwork(t *testing.T) {
 		connect.AssertEqual(t, len(rows), 1)
 	})
 }
+
+// A row shows in GET /sidecar/limits's body, and a refusal past a row is no upgrade,
+// since no tier lifts a row.
+func TestNetworkSidecarLimitRowInQuotaLimitsAndRefusals(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		testingNetworkSidecarLimitSetup(t)
+		ctx := context.Background()
+		networkId := testingSidecarLimitNetwork(t, ctx)
+		connect.AssertEqual(t, SetNetworkSidecarLimit(ctx, networkId, "dns_entries", 2, "abuse case 0008"), nil)
+		connect.AssertEqual(t, SetNetworkSidecarLimit(ctx, networkId, "directory_requests_per_day", 7, "abuse case 0008"), nil)
+
+		limits := NetworkQuotaLimits(ctx, networkId)
+		connect.AssertEqual(t, limits.Tier, "free")
+		connect.AssertEqual(t, limits.Limits["dns_entries"], int64(2))
+		connect.AssertEqual(t, limits.Limits["directory_requests_per_day"], int64(7))
+		connect.AssertEqual(t, limits.Limits["sidecar_clients"], int64(20))
+
+		defer Testing_SetEnforceSidecarLimits(true)()
+		server.Tx(ctx, func(tx server.PgTx) {
+			LockNetworkQuotaInTx(ctx, tx, networkId)
+			connect.AssertEqual(t, CheckCapacityInTx(ctx, tx, networkId, "dns_entries", 1), nil)
+			err := CheckCapacityInTx(ctx, tx, networkId, "dns_entries", 2)
+			refusal := &QuotaRefusalError{}
+			if !errors.As(err, &refusal) {
+				t.Fatalf("past the row: %v", err)
+			}
+			connect.AssertEqual(t, refusal.Refusal.Limit, int64(2))
+			connect.AssertEqual(t, refusal.Refusal.Upgrade, false)
+		})
+	})
+}
