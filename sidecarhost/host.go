@@ -9,8 +9,8 @@
 //   - metrics.go, tasks.go, auth.go, gates.go: Metrics, Tasks, Authenticator and Gates.
 //   - run.go, route_metrics.go: Run, the block's lifecycle around one engine.
 //
-// Blobs, Push, Quota, ServiceClient, ClockCheck and Budget come from their own plans' packages, so
-// NewServiceHost takes each as an option and leaves the field nil when it is not given, which every
+// Blobs, Push, Quota, ServiceClient, ClockCheck, Budget and Abuse come from their own plans' packages,
+// so NewServiceHost takes each as an option and leaves the field nil when it is not given, which every
 // engine reads as unavailable.
 package sidecarhost
 
@@ -28,7 +28,7 @@ type ServiceHostOptions struct {
 	// The registry taskworker adds as a target. nil, with Postgres, makes one.
 	Tasks *Tasks
 
-	// The ServiceHost fields other plans' packages implement (EVSB, PROTO, QUOTA, TLS). Each nil
+	// The ServiceHost fields other plans' packages implement (EVSB, PROTO, QUOTA, TLS, ABUSE). Each nil
 	// leaves its field nil.
 	Blobs         sidecar.BlobStore
 	Push          sidecar.Push
@@ -36,6 +36,10 @@ type ServiceHostOptions struct {
 	ServiceClient sidecar.ServiceClientSource
 	ClockCheck    sidecar.ClockCheck
 	Budget        sidecar.WriteBudget
+	// §21.7's standing and network_verified from memory: model.NewAbuseGate where the process holds
+	// Postgres (ABUSE-M5-07), plan-SOCK-gate-data's route where it does not. nil has loaded no
+	// network, so every gate reading it refuses.
+	Abuse sidecar.AbuseGate
 	// The engines' clock. nil is real time.
 	Clock sidecar.Clock
 
@@ -63,6 +67,7 @@ func NewServiceHost(ctx context.Context, options *ServiceHostOptions) *sidecar.S
 		Clock:         options.Clock,
 		Gates:         NewGates(ctx, options.Gates),
 		Budget:        options.Budget,
+		Abuse:         options.Abuse,
 	}
 	if options.Postgres {
 		tasks := options.Tasks

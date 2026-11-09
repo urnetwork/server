@@ -11,6 +11,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
 )
@@ -248,7 +249,7 @@ func TestNewServiceHostAssemblesTheHost(t *testing.T) {
 	if host.Tasks != nil {
 		t.Fatal("a host with no Postgres has Tasks")
 	}
-	if host.Blobs != nil || host.Push != nil || host.Quota != nil || host.ServiceClient != nil || host.ClockCheck != nil || host.Budget != nil {
+	if host.Blobs != nil || host.Push != nil || host.Quota != nil || host.ServiceClient != nil || host.ClockCheck != nil || host.Budget != nil || host.Abuse != nil {
 		t.Fatalf("a field no option gave is set: %+v", host)
 	}
 	if host.Clock != clock {
@@ -263,5 +264,31 @@ func TestNewServiceHostAssemblesTheHost(t *testing.T) {
 	host = NewServiceHost(t.Context(), &ServiceHostOptions{Postgres: true})
 	if host.Tasks == nil {
 		t.Fatal("a host with Postgres has no Tasks")
+	}
+}
+
+// A block's main hands its abuse gate to the engines, and one that hands none has loaded no network, so
+// every gate reading it refuses (ABUSE-M5-02, I-12).
+func TestNewServiceHostTakesTheAbuseGate(t *testing.T) {
+	pop := server.Testing_PushSidecarConfig("")
+	defer pop()
+	networkId := connect.NewId()
+
+	host := NewServiceHost(t.Context(), &ServiceHostOptions{})
+	if standing, ok := host.AbuseOrUnloaded().Standing(networkId); ok || standing != "" {
+		t.Errorf("a host given no gate answers %q, %v", standing, ok)
+	}
+	if verified, ok := host.AbuseOrUnloaded().Verified(networkId); ok || verified {
+		t.Errorf("a host given no gate answers verified %v, %v", verified, ok)
+	}
+
+	abuse := sidecartest.NewFakeAbuseGate()
+	abuse.Set(networkId, sidecar.AbuseStandingRestricted, true)
+	host = NewServiceHost(t.Context(), &ServiceHostOptions{Abuse: abuse})
+	if host.Abuse != abuse {
+		t.Fatal("the gate is not the option's")
+	}
+	if standing, ok := host.AbuseOrUnloaded().Standing(networkId); !ok || standing != sidecar.AbuseStandingRestricted {
+		t.Errorf("standing %q, %v", standing, ok)
 	}
 }
