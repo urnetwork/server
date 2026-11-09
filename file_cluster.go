@@ -15,8 +15,14 @@ package server
 //     write (owner decision 145), says whether its build passed the settle suite (SettlePassed), and
 //     feeds the sentinel readiness §19.4's evs and gkm blocks gate on.
 //
-// The clusters are LAN-only, with no presigned URLs (D-OPS-4). No secret is in code or fixtures:
-// credentials come only from vault's file-clusters-<service>.yml (plan-OPS-block-shapes #7).
+// The clusters are LAN-only, with no presigned URLs (D-OPS-4), which TestServerCallsNoPresignedMethod
+// holds for all of server. No secret is in code or fixtures: credentials come only from vault's
+// file-clusters-<service>.yml (plan-OPS-small-readings #7). Each names the block's own MinIO user on
+// each cluster it reaches, which xops makes with the policy templates/file-clusters/policy-<service>.json.j2
+// renders for that cluster (OPS-M2-04, xops's FILE-CLUSTERS.md): api reaches only proj/, projrows/, rev/
+// and hold/ on the first cluster, gkm the metadata clusters, evs and taskworker every cluster, and evs
+// deletes nothing on the segment cluster until §11.13's purge turns that on. Every such user holds
+// admin:ServerInfo, which admin info below needs.
 
 import (
 	"bytes"
@@ -40,14 +46,16 @@ import (
 	"github.com/urnetwork/sidecar"
 )
 
-// The vault file each block reads, by service (plan-OPS-block-shapes #7):
+// The vault file each block reads, by service, one entry per cluster the block reaches
+// (plan-OPS-small-readings #7). It is a basename, since a block's secret_files mount by basename and a
+// block mounts only its own; xops's playbook reads the same file to make the users it names:
 //
 //	clusters:
 //	  meta-1:
 //	    kind: metadata        # or segment
 //	    first: true           # the one metadata cluster holding place/, proj/, rev/ and hold/
 //	    endpoints: [<host>:<port>, ...]
-//	    access_key: <this block's MinIO user>
+//	    access_key: <this block's MinIO user on this cluster>
 //	    secret_key: <its secret>
 //	    bucket: <the cluster's bucket>
 //	    tls: false
@@ -101,6 +109,11 @@ type FileClusterSettings struct {
 	// The most of an admin info answer read, past which the read fails. 16 MiB: a cluster's answer
 	// is tens of KiB, and a host that sends more is not answering admin info.
 	AdminInfoMaxByteCount int64
+	// Starts no check loop, for a caller that reads admin info itself through ReadAdminInfo: monitor,
+	// whose MinIO user holds admin reads alone (OPS-M2-04), so a sentinel read would only fail.
+	// Readiness, the pool check and SettlePassed then read nothing fresh and fail closed, so such
+	// clusters take no write.
+	NoChecks bool
 	// The clock deadlines and checks read. nil is real time.
 	Clock sidecar.Clock
 }
@@ -315,7 +328,9 @@ func newFileClusters(
 		cancel()
 		return nil, fmt.Errorf("%w: no first metadata cluster", ErrFileClusterConfig)
 	}
-	go self.run()
+	if !settings.NoChecks {
+		go self.run()
+	}
 	return self, nil
 }
 
@@ -357,6 +372,34 @@ func (self *FileClusters) SegmentCluster() (sidecar.BlobCluster, error) {
 
 func (self *FileClusters) MetadataClusterIds() []string {
 	return slices.Clone(self.metadataClusterIds)
+}
+
+// Every cluster: the first first, then the other metadata clusters, then the segment cluster.
+func (self *FileClusters) ClusterIds() []string {
+	clusterIds := slices.Clone(self.metadataClusterIds)
+	if self.segmentClusterId != "" {
+		clusterIds = append(clusterIds, self.segmentClusterId)
+	}
+	return clusterIds
+}
+
+// FileClusterKindMetadata or FileClusterKindSegment; "" for a cluster this block does not hold.
+func (self *FileClusters) ClusterKind(clusterId string) string {
+	cluster, ok := self.clusterIdClusters[clusterId]
+	if !ok {
+		return ""
+	}
+	return cluster.config.Kind
+}
+
+// Reads the cluster's admin info now, in one signed request, without keeping it: what a caller with
+// NoChecks reads in place of the check loop's.
+func (self *FileClusters) ReadAdminInfo(ctx context.Context, clusterId string) (*FileClusterAdminInfo, error) {
+	cluster, ok := self.clusterIdClusters[clusterId]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", sidecar.ErrBlobClusterUnknown, clusterId)
+	}
+	return cluster.AdminInfo(ctx)
 }
 
 // sidecar.yml's place_new, the first when it names none (§19.9). It may name a cluster this block

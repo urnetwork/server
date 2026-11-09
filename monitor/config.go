@@ -6,6 +6,7 @@
 package monitor
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -41,7 +42,11 @@ type monitorYaml struct {
 	ObserverOverlay ObserverOverlaySettings `yaml:"observer_overlay"`
 	// dns_canary: §12.6's dns canary at this monitor (SIGNALS.md §28.1)
 	DnsCanary *dnsCanaryYaml `yaml:"dns_canary"`
-	Hosts     []struct {
+	// file_clusters: §19.6's file clusters and §11.13's write budget at this monitor (SIGNALS.md §29.1-§29.5)
+	FileClusters *fileClustersMonitorYaml `yaml:"file_clusters"`
+	// sidecar_dump: D-OPS-18's nightly dump of the sidecar tables (SIGNALS.md §29.6)
+	SidecarDump *sidecarDumpMonitorYaml `yaml:"sidecar_dump"`
+	Hosts       []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -354,7 +359,8 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 			SlackWebhookUrl: strings.TrimSpace(y.Alerts.SlackWebhookUrl),
 			PagerWebhookUrl: strings.TrimSpace(y.Alerts.PagerWebhookUrl),
 		},
-		DnsCanary: loadDnsCanarySettings(y.DnsCanary),
+		DnsCanary:      loadDnsCanarySettings(y.DnsCanary),
+		SidecarStorage: loadSidecarStorageSettings(y.FileClusters, y.SidecarDump, loadMonitorFileClusters),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -1677,4 +1683,47 @@ func dnsCanaryNsAddresses(dnsSettings *dnsservice.DnsSettings) map[string][]neti
 		}
 	}
 	return addresses
+}
+
+// monitor.yml's file_clusters block (SIGNALS.md §29.1-§29.5). The clusters come from vault's
+// file-clusters-monitor.yml, whose MinIO user holds admin reads alone (OPS-M2-04).
+type fileClustersMonitorYaml struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// monitor.yml's sidecar_dump block (SIGNALS.md §29.6).
+type sidecarDumpMonitorYaml struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// The vault file's service for monitor: file-clusters-monitor.yml.
+const monitorFileClustersService = "monitor"
+
+// The clusters of vault's file-clusters-monitor.yml with no check loop: each signal reads admin info itself.
+func loadMonitorFileClusters() (*server.FileClusters, error) {
+	settings := server.DefaultFileClusterSettings()
+	settings.NoChecks = true
+	return server.LoadFileClusters(context.Background(), monitorFileClustersService, settings)
+}
+
+// The storage signals' settings from the two blocks: without the file_clusters block the file-cluster and
+// budget signals report themselves configured off, and with one whose vault file does not load they report
+// themselves blind, its error naming no credential. Without the sidecar_dump block the dump signal reports
+// itself configured off.
+func loadSidecarStorageSettings(fileClusters *fileClustersMonitorYaml, sidecarDump *sidecarDumpMonitorYaml, load func() (*server.FileClusters, error)) *SidecarStorageSettings {
+	settings := DefaultSidecarStorageSettings()
+	settings.Gauges = defaultSidecarStorageGauges()
+	settings.SidecarDump = sidecarDump != nil && sidecarDump.Enabled
+	if fileClusters == nil || !fileClusters.Enabled {
+		return settings
+	}
+	settings.FileClusters = true
+	clusters, err := load()
+	if err != nil {
+		settings.FileClustersConfigError = "vault's file-clusters-monitor.yml did not load: " + err.Error()
+		return settings
+	}
+	settings.AdminSource = clusters
+	settings.fileClusterIds = clusters.ClusterIds()
+	return settings
 }
