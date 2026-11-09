@@ -1612,16 +1612,20 @@ type dnsCanaryYaml struct {
 	DsPublished     bool     `yaml:"ds_published"`
 }
 
-// The canary's settings from its block, dns.yml and the bearer file, or nil, which reports the canary
-// configured off: no block, an unknown source, or a file that does not read. The bearer goes to no log.
+// The canary's settings from its block, dns.yml and the bearer file: nil with no block, which reports the
+// canary configured off, and ConfigError set for a block that does not read, which reports it blind. The
+// bearer goes to no log and no error.
 func loadDnsCanarySettings(block *dnsCanaryYaml) *DnsCanarySettings {
 	if block == nil {
 		return nil
 	}
+	refuse := func(reason string) *DnsCanarySettings {
+		return &DnsCanarySettings{ConfigError: reason}
+	}
 	settings := DefaultDnsCanarySettings()
 	settings.Source = strings.TrimSpace(block.Source)
 	if settings.Source != dnsservice.DnsCanarySourceSite && settings.Source != dnsservice.DnsCanarySourceOutside {
-		return nil
+		return refuse("dns_canary.source is neither site nor outside")
 	}
 	settings.ApiUrl = strings.TrimSpace(block.ApiUrl)
 	settings.UnboundHostPath = strings.TrimSpace(block.UnboundHostPath)
@@ -1629,32 +1633,33 @@ func loadDnsCanarySettings(block *dnsCanaryYaml) *DnsCanarySettings {
 	for _, text := range block.PublicResolvers {
 		address, err := netip.ParseAddrPort(strings.TrimSpace(text))
 		if err != nil {
-			return nil
+			return refuse("dns_canary.public_resolvers holds a value that is no address and port")
 		}
 		settings.PublicResolvers = append(settings.PublicResolvers, address)
 	}
 	dnsResource, err := server.Config.SimpleResource("dns.yml")
 	if err != nil {
-		return nil
+		return refuse("config has no dns.yml")
 	}
 	dnsData, err := dnsResource.BytesE()
 	if err != nil {
-		return nil
+		return refuse("dns.yml does not read")
 	}
 	if settings.Dns, err = dnsservice.LoadDnsSettings(dnsData); err != nil {
-		return nil
+		return refuse(err.Error())
 	}
 	settings.NsAddresses = dnsCanaryNsAddresses(settings.Dns)
 	bearerResource, err := server.Vault.SimpleResource(strings.TrimSpace(block.BearerFile))
 	if err != nil {
-		return nil
+		return refuse("dns_canary.bearer_file is not in vault")
 	}
 	bearerData, err := bearerResource.BytesE()
 	if err != nil {
-		return nil
+		return refuse("dns_canary.bearer_file does not read")
 	}
 	if settings.Bearer, err = dnsservice.LoadDnsInternalCredential(bearerData); err != nil {
-		return nil
+		// LoadDnsInternalCredential's error names the part, never the bearer
+		return refuse(err.Error())
 	}
 	return settings
 }

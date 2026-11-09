@@ -93,6 +93,10 @@ type DnsCanarySettings struct {
 	NsFailingSustain   int
 	DivergenceSustain  int
 	PropagationSustain int
+	// Why monitor.yml's block, dns.yml or the bearer file did not read. Set, the check reports itself
+	// blind rather than off, since a canary asked for and not running must hold incidents open. Never
+	// holds a bearer.
+	ConfigError string
 }
 
 // The production defaults. Source, ApiUrl, Bearer, Dns and the resolvers are the deployment's.
@@ -170,11 +174,19 @@ func (dnsCanaryProbe) cadence() time.Duration { return time.Minute }
 
 func (dnsCanaryProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	settings := env.cfg.dnsCanary
-	if settings == nil || settings.Dns == nil {
+	if settings == nil {
 		return []finding{{
 			probeId: dnsCanaryProbeId, tier: tierWarn, class: dnsCanaryClassUnobservable, target: "dns-canary",
 			sustain: 1, configuredOff: true,
-			symptom: "monitor.yml has no dns_canary block, or dns.yml is not readable here",
+			symptom: "monitor.yml has no dns_canary block",
+		}}, nil
+	}
+	if settings.ConfigError != "" || settings.Dns == nil {
+		return []finding{{
+			probeId: dnsCanaryProbeId, tier: tierWarn, class: dnsCanaryClassUnobservable, target: "dns-canary",
+			sustain: 1, unobservable: true,
+			symptom:  "the dns canary is asked for and its settings do not read",
+			observed: settings.ConfigError,
 		}}, nil
 	}
 	timeout := settings.Timeout

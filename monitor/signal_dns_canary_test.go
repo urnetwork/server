@@ -311,11 +311,24 @@ func TestDnsCanaryNsDownAt0200PagesAndABlindMinuteHoldsIt(t *testing.T) {
 	}
 }
 
-// With no settings the canary reports itself configured off, which raises no incident.
-func TestDnsCanaryWithNoSettingsIsConfiguredOff(t *testing.T) {
-	findings, err := dnsCanaryProbe{}.check(t.Context(), &probeEnv{cfg: &monitorConfig{}, now: func() time.Time { return dnsCanaryTestNow }})
+// With no block the canary reports itself configured off, which raises no incident; with a block that
+// does not read it reports itself blind, which holds every other incident open.
+func TestDnsCanaryWithNoSettingsIsOffAndWithBadSettingsBlind(t *testing.T) {
+	now := func() time.Time { return dnsCanaryTestNow }
+	findings, err := dnsCanaryProbe{}.check(t.Context(), &probeEnv{cfg: &monitorConfig{}, now: now})
 	if err != nil || len(findings) != 1 || !findings[0].configuredOff || findings[0].class != dnsCanaryClassUnobservable {
-		t.Fatalf("findings %+v %v", findings, err)
+		t.Fatalf("no block: findings %+v %v", findings, err)
+	}
+	broken := &monitorConfig{dnsCanary: &DnsCanarySettings{ConfigError: "dns_canary.bearer_file is not in vault"}}
+	findings, err = dnsCanaryProbe{}.check(t.Context(), &probeEnv{cfg: broken, now: now})
+	if err != nil || len(findings) != 1 || findings[0].configuredOff || !findings[0].unobservable || findings[0].observed != broken.dnsCanary.ConfigError {
+		t.Fatalf("a block that does not read: findings %+v %v", findings, err)
+	}
+	if block := loadDnsCanarySettings(&dnsCanaryYaml{Source: "elsewhere"}); block == nil || block.ConfigError == "" {
+		t.Errorf("an unknown source %+v", block)
+	}
+	if block := loadDnsCanarySettings(nil); block != nil {
+		t.Errorf("no block %+v", block)
 	}
 }
 
