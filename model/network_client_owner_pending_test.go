@@ -199,6 +199,8 @@ func countNetworkClients(self *clientOwnerFixture) (count int) {
 // taken off the list mints no more.
 func TestNonPreviewNetworkRefusesAStrictExpMint(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		// the gate stands until stage 2 is live
+		defer Testing_SetSidecarStage2Live(false)()
 		self := newClientOwnerFixture(t)
 
 		requireRefused := func(args *AuthNetworkClientArgs, caller *session.ClientSession) {

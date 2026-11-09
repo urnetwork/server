@@ -191,6 +191,18 @@ apps. What is implemented now is option (a).
 the network credential (sdk branch `fix/admin-jwt-for-account-calls`), and
 once that SDK is widely installed the App admin routes become Network only.
 
+**Stage 2 (DESIGN.md §7.4, TEAM-M3-01).** The G5 and G6 routes (`/auth/code-create`,
+`/auth/add-auth`, `/auth/remove-auth`, both seedphrase routes and
+`/auth/network-delete`) are `routeAccessNetwork` in `route_authz.go`'s table, their
+end state, and the sdk's copy matches. They refuse every client token only once
+stage 2 is live in the binary (`model.SidecarStage2Live`, the `sidecar_stage2` build
+tag), which waits for the desktop app and extension releases that stop persisting
+a readable network credential (D-SDK-11); until then `stage2NetworkRoutes` keeps
+them App admin, so a binary built today behaves as above. With stage 2 live the
+preview gate opens too. Stage 3, every other App admin route, waits for its
+adoption measurement (§7.4). How stage 2 is switched is question
+team-m1-07-stage2-switch.
+
 **Decision 2: an Embed disable re-opens the App admin routes.** The Embed
 flag has landed, and this branch is merged with it. `GET /network/embed` is
 classified Network only, `NetworkRefusesClientAdmin` reads the flag, and the
