@@ -37,8 +37,8 @@ func (self testConfigLogSuiteSequencer) AppendStatement(ctx context.Context, net
 	return pin, testConfigLogSuiteError(err)
 }
 
-func (self testConfigLogSuiteSequencer) AppendBase(ctx context.Context, networkId sidecar.Id, signedHeader []byte, rows []byte, genesis []byte) (*bridge.AuthPin, error) {
-	pin, err := self.sequencer.AppendBase(ctx, server.Id(networkId), &ConfigLogBase{SignedHeader: signedHeader, Rows: rows, Genesis: genesis})
+func (self testConfigLogSuiteSequencer) AppendBase(ctx context.Context, networkId sidecar.Id, signedHeader []byte, rows []byte, genesis []byte, configPushes [][]byte) (*bridge.AuthPin, error) {
+	pin, err := self.sequencer.AppendBase(ctx, server.Id(networkId), &ConfigLogBase{SignedHeader: signedHeader, Rows: rows, Genesis: genesis, ConfigPushes: configPushes})
 	return pin, testConfigLogSuiteError(err)
 }
 

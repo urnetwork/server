@@ -26,7 +26,10 @@ import (
 // network's statements, bases and ticks to proj/<network_id>/<n>/_ on the first
 // metadata cluster, and the reads readers and gates follow. api holds no config
 // key, so it verifies as a gate does, with a rows-only ConfigLog at its tip:
-// a statement by ConfigLog.Check, a base by ConfigLog.CheckBase.
+// a statement by ConfigLog.Check, a base by ConfigLog.CheckBase, and a base's
+// config head by walking its config_pushes from the newest base's head
+// (ConfigLog.CheckConfigPushes, plan-TEAM-api-config-head-reach), since api
+// never reads the config repo.
 //
 //	verify     the retry identity first: a statement whose id an applied entry
 //	           among the last 4,096 holds, or a base this log holds, answers
@@ -39,10 +42,11 @@ import (
 //	unknown    a timeout or lost response: GET the position; the same bytes are
 //	           success, another entry a loss (apply it and go on at the next
 //	           position), 404 repeats the PUT with the same bytes
-//	base       its rows first (projrows/, an equal object answering 200), then
-//	           the entry; base 1 comes with its Signed Genesis, written at
-//	           position 0 after entry 1, the race's commit point, and a retry of
-//	           base 1 repeats a missing step (plan-TEAM-genesis-custody)
+//	base       its config pushes walk to its head, then its rows (projrows/,
+//	           an equal object answering 200), then the entry; base 1 comes
+//	           with its Signed Genesis, written at position 0 after entry 1,
+//	           the race's commit point, and a retry of base 1 repeats a missing
+//	           step (plan-TEAM-genesis-custody)
 //	after      network_acl_head advances to the new pin (§8.17)
 //
 // sidecartest.FakeApi copies these steps for T2, and sidecartest's
@@ -57,11 +61,9 @@ import (
 // Holds no Postgres connection across store I/O: network_acl_head advances
 // after the append, in its own transaction. Safe for concurrent use.
 //
-// Not built here: the descent check of a base's config head from its
-// config_pushes (plan-TEAM-api-config-head-reach) beyond the two numbers
-// VerifyBaseKeyless checks, so a base whose config_version rises is accepted
-// unwalked and counted; §7.9's append limits, the {acl_}e cache's writes,
-// ticks' schedule and retention (TEAM-M2-14); and reseed (§19.10).
+// Not built here: §7.9's append limits, the {acl_}e cache's writes, ticks'
+// schedule and retention (TEAM-M2-14); and reseed (§19.10), whose own walk
+// from C_0 is TEAM-M3-02's.
 
 // Tunables of the sequencer. §7.9's 4,096 is ConfigLog's.
 type ConfigLogSettings struct {
@@ -103,15 +105,8 @@ var configLogAppendByteCounter = prometheus.NewCounter(prometheus.CounterOpts{
 	Help:      "Bytes of proj/ and projrows/ objects api wrote, P0 and never queued (§11.13)",
 })
 
-var configLogUnwalkedBaseCounter = prometheus.NewCounter(prometheus.CounterOpts{
-	Namespace: "urnetwork",
-	Subsystem: "config_log",
-	Name:      "unwalked_bases_total",
-	Help:      "Bases taken whose config head descent api did not walk from config_pushes (plan-TEAM-api-config-head-reach)",
-})
-
 func init() {
-	prometheus.MustRegister(configLogAppendCounter, configLogAppendByteCounter, configLogUnwalkedBaseCounter)
+	prometheus.MustRegister(configLogAppendCounter, configLogAppendByteCounter)
 }
 
 // Called with the network and position just before an entry's PUT, and just
@@ -610,14 +605,16 @@ type ConfigLogBase struct {
 	Rows []byte
 	// The Signed Genesis, base 1 only (plan-TEAM-genesis-custody).
 	Genesis []byte
-	// The Signed EvsPush of each config version the base adds, oldest first
-	// (plan-TEAM-api-config-head-reach): taken and not yet walked.
+	// The Signed EvsPush of each config version the base adds, oldest first,
+	// at most 4,096, which api walks from the newest base's head to this
+	// one's (plan-TEAM-api-config-head-reach); empty when the version is
+	// unchanged. Not stored.
 	ConfigPushes [][]byte
 }
 
 // §7.9's base row: a retry of the same base answers its entry; else the
-// verdict at the tip, the rows, then the entry, and for base 1 its genesis at
-// position 0 after it.
+// verdict at the tip and the walk of its config pushes, the rows, then the
+// entry, and for base 1 its genesis at position 0 after it.
 func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server.Id, base *ConfigLogBase) (*bridge.AuthPin, error) {
 	malformed := func(err error) error {
 		return &ConfigLogError{Status: http.StatusForbidden, Code: "config_refused", Err: err}
@@ -651,13 +648,7 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 			if err := network.log.CheckBase(base.SignedHeader, base.Rows); err != nil {
 				return nil, err
 			}
-			if previous := network.log.State().Base(); previous == nil || previous.GetConfigVersion() < header.GetConfigVersion() {
-				// the two numbers hold; the walk from config_pushes waits
-				configLogUnwalkedBaseCounter.Inc()
-			} else if !bytes.Equal(previous.GetConfigHeadSha256(), header.GetConfigHeadSha256()) {
-				return nil, fmt.Errorf("%w: config_version %d names another head than the newest base's", sidecar.ErrConfigRule, header.GetConfigVersion())
-			}
-			return nil, nil
+			return nil, network.log.CheckConfigPushes(base.SignedHeader, base.ConfigPushes)
 		},
 		before: func(ctx context.Context) error {
 			rowsSha256 := sha256.Sum256(base.Rows)

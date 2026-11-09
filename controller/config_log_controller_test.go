@@ -55,8 +55,8 @@ func TestConfigLogRoutesServeABoundFirstDevice(t *testing.T) {
 		world := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.Id(userId), sidecar.Id(keys.sidecarId))
 		installTestConfigLogSequencer(t, world.Clock())
 
-		signedHeader, rows, signedGenesis := world.BaseOne()
-		base, err := NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis}, clientSession)
+		signedHeader, rows, signedGenesis, configPushes := world.BaseOne()
+		base, err := NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis, ConfigPushes: configPushes}, clientSession)
 		if err != nil || base.N != 1 {
 			t.Fatalf("base 1: %v %+v", err, base)
 		}
@@ -92,8 +92,8 @@ func TestConfigLogRoutesRefuseAnUnadmittedClient(t *testing.T) {
 		world := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.Id(userId), sidecar.NewId())
 		installTestConfigLogSequencer(t, world.Clock())
 
-		signedHeader, rows, signedGenesis := world.BaseOne()
-		_, err := NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis}, clientSession)
+		signedHeader, rows, signedGenesis, configPushes := world.BaseOne()
+		_, err := NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis, ConfigPushes: configPushes}, clientSession)
 		if status, code := configLogRefusal(err); status != http.StatusForbidden || code != "config_unadmitted" {
 			t.Errorf("base 1 for another device's genesis: %v", err)
 		}
@@ -116,8 +116,8 @@ func TestConfigLogRoutesRefuseAnUnadmittedClient(t *testing.T) {
 		}
 		stranger := sidecartest.NewConfigLogSuiteWorldFor(ctx, nil, sidecar.Id(clientSession.ByJwt.NetworkId), sidecar.NewId(), sidecar.Id(keys.sidecarId))
 		installTestConfigLogSequencer(t, stranger.Clock())
-		signedHeader, rows, signedGenesis = stranger.BaseOne()
-		_, err = NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis}, clientSession)
+		signedHeader, rows, signedGenesis, configPushes = stranger.BaseOne()
+		_, err = NetworkConfigProjectionPublish(&NetworkConfigProjectionPublishArgs{SignedHeader: signedHeader, Rows: rows, Genesis: signedGenesis, ConfigPushes: configPushes}, clientSession)
 		if status, code := configLogRefusal(err); status != http.StatusForbidden || code != "config_unadmitted" {
 			t.Errorf("base 1 for a genesis naming another owner: %v", err)
 		}
