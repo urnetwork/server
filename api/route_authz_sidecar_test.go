@@ -199,6 +199,8 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/sync/poll",
 	"GET /sidecar/sync/versions",
 	"GET /sidecar/sync/([^/]+)",
+	// §20.7's limits (QUOTA-M1-03)
+	"GET /sidecar/limits",
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)",
 	"PUT /network/bridge/share/([^/]+)",

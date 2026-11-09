@@ -249,7 +249,24 @@ func sidecarMg1LeaseMigrations() []any {
 
 // MG1's §20 part: network_sidecar_limit (QUOTA's tasks).
 func sidecarMg1QuotaMigrations() []any {
-	return []any{}
+	return []any{
+		// §20.5's overrides (§2.8 api-13): a row raises one of a network's
+		// limits (ops) or tightens it (§21), by the limit_key QuotaLimits and
+		// QuotaRefusal carry, with a reason citing the ops change or the §21
+		// case. A row lives until it is lifted, and goes with its network.
+		// Readers take the whole table in one snapshot (NetworkSidecarLimits),
+		// so it needs no index past its key.
+		newSqlMigration(`
+			CREATE TABLE network_sidecar_limit (
+				network_id uuid NOT NULL,
+				limit_key varchar(64) NOT NULL,
+				limit_value bigint NOT NULL,
+				reason varchar(256) NOT NULL,
+
+				PRIMARY KEY (network_id, limit_key)
+			)
+		`),
+	}
 }
 
 // MG2 (§19.7): what M2 first reads ungated.
@@ -356,9 +373,87 @@ func sidecarMg2DnsMigrations() []any {
 }
 
 // MG2's §20 part: network_quota_state, network_service_usage,
-// service_debit_journal and service_usage_batch (QUOTA's tasks).
+// service_debit_journal and service_usage_batch (QUOTA's tasks). Every column is
+// one of §20.14's and §2.8 api-13's. Nothing a running release reads or writes:
+// the one change to an existing table is service_debit_journal's delete guard on
+// transfer_balance, which refuses nothing while the journal is empty
+// (db_service_debit_journal.go).
 func sidecarMg2QuotaMigrations() []any {
-	return []any{}
+	return []any{
+		// §20.7's stored count and §20.6's spent mark, one row per network
+		// that has had either, until the network is deleted
+		newSqlMigration(`
+			CREATE TABLE network_quota_state (
+				network_id uuid NOT NULL,
+				stored_byte_count bigint NOT NULL DEFAULT 0,
+				storage_over bool NOT NULL DEFAULT false,
+				spent_time timestamp NULL,
+
+				PRIMARY KEY (network_id)
+			)
+		`),
+		// OverLimit's read every 5 s: only the networks over their storage
+		// limit or spent
+		newSqlMigration(`
+			CREATE INDEX network_quota_state_over_limit ON network_quota_state (network_id) WHERE storage_over OR spent_time IS NOT NULL
+		`),
+		// D-QUOTA-8's daily usage per network and meter, quantity in the
+		// meter's unit (bytes for a transfer meter), kept 13 months
+		newSqlMigration(`
+			CREATE TABLE network_service_usage (
+				network_id uuid NOT NULL,
+				usage_day date NOT NULL,
+				meter varchar(32) NOT NULL,
+				quantity bigint NOT NULL DEFAULT 0,
+
+				PRIMARY KEY (network_id, usage_day, meter)
+			)
+		`),
+		// the 13 months' retention sweeps by day
+		newSqlMigration(`
+			CREATE INDEX network_service_usage_usage_day ON network_service_usage (usage_day)
+		`),
+		// §20.6's debits without payout: a row per (balance, usage), applied
+		// by the flush and deleted once its Redis token is released. No
+		// network or time column; batch_id is NULL for a relayed contract's
+		// row, whose usage_id is its contract_id
+		newSqlMigration(`
+			CREATE TABLE service_debit_journal (
+				usage_id uuid NOT NULL,
+				balance_id uuid NOT NULL,
+				meter varchar(32) NOT NULL,
+				debit_byte_count bigint NOT NULL CHECK (debit_byte_count >= 0),
+				batch_id uuid NULL,
+				applied bool NOT NULL DEFAULT false,
+
+				PRIMARY KEY (balance_id, usage_id)
+			)
+		`),
+		// the flush's 16 shards, each a page by balance key: the shard is
+		// transfer_debit_journal's CHECK, computed, since this journal has no
+		// shard column
+		newSqlMigration(`
+			CREATE INDEX service_debit_journal_shard ON service_debit_journal ((get_byte(uuid_send(balance_id), 15) % 16), balance_id, usage_id)
+		`),
+		// §20.6's batches applied, by id, each producer's retry identity,
+		// kept 24 h
+		newSqlMigration(`
+			CREATE TABLE service_usage_batch (
+				batch_id uuid NOT NULL,
+				producer varchar(32) NOT NULL,
+				window_start timestamp NOT NULL,
+				applied_time timestamp NOT NULL,
+
+				PRIMARY KEY (batch_id)
+			)
+		`),
+		// the 24 h retention sweeps by applied time
+		newSqlMigration(`
+			CREATE INDEX service_usage_batch_applied_time ON service_usage_batch (applied_time)
+		`),
+		// a balance with journal rows is never deleted
+		newSqlMigration(serviceDebitJournalGuardSql),
+	}
 }
 
 // MG5 (§19.7): what M5 first reads ungated. MG3 and MG4 create nothing.

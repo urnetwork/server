@@ -418,6 +418,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sidecar/sync/poll", handlers.GetSidecarSyncPoll),
 		router.NewRoute("GET", "/sidecar/sync/versions", handlers.GetSidecarSyncVersions),
 		router.NewRoute("GET", "/sidecar/sync/([^/]+)", handlers.GetSidecarSyncTopic),
+		// §20.7's effective limits, for local pre-checks (QUOTA-M1-03)
+		router.NewRoute("GET", "/sidecar/limits", handlers.GetSidecarLimits),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
 		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)
