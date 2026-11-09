@@ -43,7 +43,9 @@
     "pre_fix_scope_tripwire": "The previous full-authorization season-lock primitive deterministically refuses while the same fixture's read-only liveness probe succeeds. PostgreSQL holds the real scope until independent lifecycle rejection returns.",
     "negative_controls": "lost/expired lease authority, source hold, missing/changed/abandoned/activated intent and changed incumbent are refused",
     "main_database_migration_performed": false,
-    "deployment": "Local immutable preparation runner deployment next; no API build or migration required"
+    "deployment": "Installed /usr/local/libexec/urnetwork/competition-preparation-liveness-20261109-v1 from clean main 1ecf275a8fe9cc1e304459b45758c7e9a1902dc7. Binary SHA-256 f160e2088541bf22b9825a22a482de7b64fd6e056e75baa782400b5093bdd4a8. Merged-main focused follow-up passed.",
+    "live_attempt": "urnetwork-epoch2-api-prepare-liveness-20261109-v2.service failed, transition revision12 at 21:17:31Z. Private native diagnostic proves the read-only watchdog still exceeded its five-second PostgreSQL connection/transaction deadline; database timing diagnosis remains. Source publication preserved, no opening or grading activation.",
+    "private_diagnostic": "/var/lib/urnetwork/competition-epoch1-approved-source-20261109-v4/preparation-cli-liveness-diagnostic-20261109.stderr"
   },
   "goofe_resource_boundary": {
     "base_directory": "/home/by/sim-latency",

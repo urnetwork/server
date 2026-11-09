@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-09T21:12:00Z",
+  "observed_at": "2026-11-09T21:19:00Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -32,7 +32,7 @@
     "baseline_ready": false,
     "grading_activated": false,
     "transition": "preparation_blocked",
-    "transition_revision": 11,
+    "transition_revision": 12,
     "source_publication_completed": true,
     "published_config_commit": "ff23e28f3a6d0e9067b5024e5127a7bb697d1a0b",
     "intent_generation": 2,
@@ -56,7 +56,7 @@
     "new_api_build_or_migration_required_for_these_fixes": false,
     "source_handoff_last_checked_at": "2026-11-09T20:09:47Z",
     "source_handoff_http": 200,
-    "meaning": "User deployed config/API/vault; the scoped approved source handoff is recorded at revision1. Source publication succeeded at transition revision10. Subsequent API preparation failed on its watchdog competing with its own source authorization. Read-only liveness fix passed focused ordinary/race tests and isolated PostgreSQL three times each; local deployment next.",
+    "meaning": "User deployed config/API/vault; scoped approved source handoff recorded at revision1. Source publication succeeded at revision10. Read-only liveness fix passed ordinary/race/PostgreSQL tests three times each, merged main follow-up passed, clean runner installed locally. Preparation still blocked at revision12: its read-only watchdog exhausted its five-second PostgreSQL connection/transaction deadline. Private diagnostic retained; no API acknowledgment or epoch2 opening claimed.",
     "handoff_request_sha256": "a63f76b782966b2108ae0c4a57a453aaaf093ede84f8aaa7f1bd5a10bedc8025",
     "retained_response_sha256": "de522d88200ed66b03f1f20732842f33710a6706b2483ae75a040ae74150ab34",
     "retained_response_minio_version": "126df67b-facf-4e4f-9f88-2dc721f6f827"
@@ -86,7 +86,7 @@
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
-    "Qualify/deploy the read-only preparation watchdog fix. Supervisor renewal is already race/PostgreSQL qualified and deployed; source publication is complete. Do not rebuild the qualified image.",
+    "Diagnose the corrected preparation observer's five-second PostgreSQL connection/transaction deadline using the retained private diagnostic. Scope-independent renewal and preparation observers are tested/deployed; source publication is complete. Do not rebuild the qualified image.",
     "Complete Goofe's immutable host-role/control inventory and genuine prospective fingerprint, then freeze both actual host identities before the intake grant. Do not invent qualification hashes or positive readiness flags.",
     "Publish the runtime source envelope and obtain a real API intake acknowledgment through the corrected adapter, retaining the same source intent and publication receipts.",
     "Open epoch2 for a fresh full week, verify live API source/rules/status and historical epoch1 publication, and update EPOCH-SOURCE.md only with the actual published checkpoint.",
