@@ -67,7 +67,7 @@
     "ssh_control": "Dedicated coordinator key reaches a forced handler with no forwarding/shell; incomplete agent inventory refuses safely",
     "runtime_qualified": false,
     "core_policy": "User-approved core.%P applied and persisted; container core limits unchanged",
-    "bounded_storage": "New fully allocated 128 GiB loop-backed ext4 candidate filesystem mounted nosuid,nodev with private propagation; reboot persistence remains pending",
+    "bounded_storage": "New fully allocated 128 GiB loop-backed ext4 candidate filesystem mounted nosuid,nodev with private propagation; verified systemd mount unit enabled, no reboot test performed",
     "runtime_binary_inventory": "Exact Sille Docker/containerd/shim/runc copies installed separately on Goofe; primary Docker and existing containers unchanged",
     "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json", "EPOCH2-GOOFE-BOUNDED-STORAGE-2026-11-09.json"]
   },

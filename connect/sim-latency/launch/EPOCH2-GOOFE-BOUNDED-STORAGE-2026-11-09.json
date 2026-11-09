@@ -23,7 +23,11 @@
     "mount_flags": ["rw", "nosuid", "nodev"],
     "propagation": "private",
     "provenance": "Exact file and mount targets were absent; loop backing path and exact byte capacity were checked before formatting. No existing filesystem was formatted.",
-    "reboot_persistence_ready": false
+    "reboot_persistence_ready": true,
+    "mount_unit": "home-by-sim\\x2dlatency-candidate.mount",
+    "mount_unit_sha256": "81788eb841b637d84ff7fab4a533126240fd4b93edfa5cfb461b0df09fb4c019",
+    "mount_unit_validation": "systemd-analyze verify passed; enabled and active/mounted. Unit attaches the exact backing file through loop; native admission must reobserve the actual loop identity after reboot.",
+    "reboot_test_performed": false
   },
   "isolated_runtime_binaries": {
     "directory": "/home/by/sim-latency/engine-bin-sille-20261109-v1",
@@ -51,6 +55,17 @@
     "packages_upgraded": 0,
     "services_restarted": false
   },
-  "remaining": ["Persistent bounded mount and private service lifecycle", "Non-overlapping remap account and closed runtime documents", "Management/recovery ledger and complete agent configuration", "Actual native host fingerprint before freezing the two-host intake policy", "Runtime and cross-host admission before enabling grading"],
+  "remap_account": {
+    "name": "urnetwork-eval-remap",
+    "uid": 995,
+    "gid": 985,
+    "shell": "/usr/sbin/nologin",
+    "home": "/nonexistent",
+    "subuid_start": 200000,
+    "subgid_start": 200000,
+    "range_length": 65536,
+    "existing_account_and_subordinate_range_overlap_checks": "passed before creation"
+  },
+  "remaining": ["Private service lifecycle and closed runtime documents", "Management/recovery ledger and complete agent configuration", "Actual native host fingerprint before freezing the two-host intake policy", "Runtime and cross-host admission before enabling grading"],
   "grading_activated": false
 }
