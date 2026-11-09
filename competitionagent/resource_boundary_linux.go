@@ -200,11 +200,20 @@ func VerifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 }
 
 // The concrete public path always installs native protected-file/kernel checks.
-func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost) (*RuntimeResourceBoundary, error) {
+// Rendering and native admission share one finite settings check.
+func validateRuntimeResourceBoundarySettings(settings RuntimeResourceBoundarySettings) error {
 	if settings.DocumentBytes <= 0 || settings.NativeBytes <= 0 || settings.ExecutableBytes <= 0 || settings.MountCount <= 0 || settings.DocumentDepth <= 0 || settings.CommandTimeout <= 0 ||
 		!dockerProxyMemoryPattern.MatchString(settings.ContainerLogMaximumSize) || settings.ContainerLogMaximumFiles <= 0 ||
 		settings.MaximumNetworkInterfaces <= 0 || settings.MaximumNetworkRoutes <= 0 || settings.MaximumRuntimeProcesses <= 0 {
-		return nil, errors.New("resource boundary requires positive finite settings")
+		return errors.New("resource boundary requires positive finite settings")
+	}
+	return nil
+}
+
+// Native evidence remains mandatory after structural configuration admission.
+func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost) (*RuntimeResourceBoundary, error) {
+	if err := validateRuntimeResourceBoundarySettings(settings); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
