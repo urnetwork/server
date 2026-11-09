@@ -208,6 +208,8 @@ type monitorConfig struct {
 	observerOverlay ObserverOverlaySettings
 	// §12.6's dns canary (SIGNALS.md §28.1), nil where monitor.yml has no dns_canary block
 	dnsCanary *DnsCanarySettings
+	// the sidecar's storage signals (SIGNALS.md §29), nil where monitor.yml has neither block
+	sidecarStorage *SidecarStorageSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string

@@ -438,8 +438,11 @@ type SignalSettings struct {
 	ObserverOverlay ObserverOverlaySettings
 	// DnsCanary is §12.6's dns canary at this monitor (SIGNALS.md §28.1): monitor.yml's dns_canary block
 	// beside dns.yml. nil reports the canary configured off.
-	DnsCanary     *DnsCanarySettings
-	disabledHosts []HostSettings
+	DnsCanary *DnsCanarySettings
+	// SidecarStorage is the sidecar's storage signals (SIGNALS.md §29): monitor.yml's file_clusters and
+	// sidecar_dump blocks. nil reports them configured off.
+	SidecarStorage *SidecarStorageSettings
+	disabledHosts  []HostSettings
 	// Private desired-input identity participates only in in-memory generation checks.
 	routerDesiredGeneration [32]byte
 	// ExcludedHosts is an exact, process-owned observation policy. Hosts remain
@@ -529,6 +532,7 @@ func (s SignalSettings) withDefaults() SignalSettings {
 	s.PublicUdp = clonePublicUdpSettings(s.PublicUdp)
 	s.ObserverOverlay = cloneObserverOverlaySettings(s.ObserverOverlay)
 	s.DnsCanary = cloneDnsCanarySettings(s.DnsCanary)
+	s.SidecarStorage = cloneSidecarStorageSettings(s.SidecarStorage)
 	s.disabledHosts = cloneRouterScopeHosts(s.disabledHosts)
 	if s.AddressMode == "" {
 		s.AddressMode = AddressModeOverlay
@@ -781,6 +785,7 @@ func configFromSignalSettings(settings SignalSettings) *monitorConfig {
 		publicUdp:                 clonePublicUdpSettings(settings.PublicUdp),
 		observerOverlay:           cloneObserverOverlaySettings(settings.ObserverOverlay),
 		dnsCanary:                 cloneDnsCanarySettings(settings.DnsCanary),
+		sidecarStorage:            cloneSidecarStorageSettings(settings.SidecarStorage),
 		stateDir:                  settings.StateDir,
 		sharedSshAdmission:        settings.sharedSshAdmission,
 		sshConnectTimeout:         settings.SSHConnectTimeout,

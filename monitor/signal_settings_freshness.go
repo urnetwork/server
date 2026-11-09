@@ -183,6 +183,7 @@ func comparableSignalSettings(settings SignalSettings) SignalSettings {
 	settings.Now = nil
 	settings.runtime = nil
 	settings.sharedSshAdmission = nil
+	settings.SidecarStorage = comparableSidecarStorageSettings(settings.SidecarStorage)
 	return settings
 }
 
@@ -238,6 +239,7 @@ func settingsMismatchCategories(startup, current SignalSettings) []string {
 		{category: "api_release_proof", startup: startup.APIReleaseProof, current: current.APIReleaseProof},
 		{category: "pg_sampling_policy", startup: []any{startup.PGQuerySampleContinuous, startup.PGQuerySampleUntil}, current: []any{current.PGQuerySampleContinuous, current.PGQuerySampleUntil}},
 		{category: "state_directory", startup: startup.StateDir, current: current.StateDir},
+		{category: "sidecar_storage", startup: startup.SidecarStorage, current: current.SidecarStorage},
 		{category: "command_timeouts", startup: []any{startup.SSHConnectTimeout, startup.CommandTimeout}, current: []any{current.SSHConnectTimeout, current.CommandTimeout}},
 	}
 	categories := []string{}

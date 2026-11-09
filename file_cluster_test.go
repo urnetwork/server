@@ -9,6 +9,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/sidecartest"
 )
 
 func parseFileClustersText(t *testing.T, text string) ([]*FileClusterConfig, error) {
@@ -315,5 +316,54 @@ func TestFileClusterAdminInfoCountsPoolsAsMinioNumbersThem(t *testing.T) {
 		if _, err := parseFileClusterAdminInfo([]byte(body), time.Unix(0, 0)); err == nil {
 			t.Errorf("parsed %s", body)
 		}
+	}
+}
+
+// monitor's clusters (NoChecks): nothing reads on its own, ReadAdminInfo reads once when asked and keeps
+// nothing, so the clusters take no write and are never ready.
+func TestFileClustersWithNoChecksReadOnlyWhenAsked(t *testing.T) {
+	store := newFakeS3(1, "build-1")
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	settings := fileClusterTestSettings(clock)
+	settings.NoChecks = true
+	config, err := parseSidecarConfig([]byte(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clusters, err := newFileClusters(t.Context(), fileClusterTestConfigs("host-a.example:9000"), settings, func(tls bool) (http.RoundTripper, error) {
+		return store.transport("any"), nil
+	}, func() *SidecarConfig { return config })
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(clusters.Close)
+	clock.Advance(2 * settings.CheckInterval)
+	if requests := store.takeRequests(); len(requests) != 0 {
+		t.Fatalf("%d requests with no check loop", len(requests))
+	}
+	if got := clusters.ClusterIds(); len(got) != 2 || got[0] != "meta-1" || got[1] != "seg-1" {
+		t.Errorf("cluster ids %v", got)
+	}
+	if clusters.ClusterKind("meta-1") != FileClusterKindMetadata || clusters.ClusterKind("seg-1") != FileClusterKindSegment || clusters.ClusterKind("meta-9") != "" {
+		t.Errorf("kinds %q %q", clusters.ClusterKind("meta-1"), clusters.ClusterKind("seg-1"))
+	}
+
+	info, err := clusters.ReadAdminInfo(t.Context(), "meta-1")
+	if err != nil || info.PoolCount != 1 {
+		t.Fatalf("admin info %+v %v", info, err)
+	}
+	requests := store.takeRequests()
+	if len(requests) != 1 || requests[0].method != http.MethodGet || requests[0].path != fileClusterAdminInfoPath {
+		t.Fatalf("requests %+v", requests)
+	}
+	cluster := clusters.clusterIdClusters["meta-1"]
+	if _, err := cluster.PutIfNoneMatch(t.Context(), "head/a/_", []byte("v1"), nil); !errors.Is(err, ErrFileClusterPools) {
+		t.Errorf("a write through monitor's clusters: %v", err)
+	}
+	if cluster.Ready() || clusters.Ready() {
+		t.Error("monitor's clusters read ready")
+	}
+	if _, err := clusters.ReadAdminInfo(t.Context(), "meta-9"); !errors.Is(err, sidecar.ErrBlobClusterUnknown) {
+		t.Errorf("an unknown cluster: %v", err)
 	}
 }

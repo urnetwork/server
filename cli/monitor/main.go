@@ -302,6 +302,10 @@ func runWithInvocationWitness(args []string, stdout io.Writer, loadSettings func
 	} else {
 		fmt.Fprintln(os.Stderr, "monitor: pager notifications disabled: -pager-alerts is off")
 	}
+	// The gauges a watcher owns, such as SIGNALS.md §29's urnetwork_filecluster_set_state, reach Mimir from
+	// the process's registry; outside warp this publishes nothing and says so.
+	flushStats := server.StartStatsPusher(ctx)
+	defer flushStats()
 	return monitor.RunExecutionLoop(ctx, servermonitor.RunLoopOptions{MinimumProbeCadence: opts.minimumProbeCadence, InvocationWitness: invocationWitness, AdmissionDiagnostic: admissionDiagnostic}, handler)
 }
 
