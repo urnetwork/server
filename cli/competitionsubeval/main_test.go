@@ -46,11 +46,23 @@ func TestSubevaluationArgumentsRejectExpandedRoles(t *testing.T) {
 		{"--docker-probe", "--", "info", "--format", "{{.CgroupVersion}}"},
 		{"--config", "/synthetic/agent.json", "--docker-probe"},
 		{"--config", "/synthetic/agent.json", "--docker-probe", "--serve", "--", "info", "--format", "{{.CgroupVersion}}"},
+		{"--start-private-engine"},
+		{"--config", "/synthetic/agent.json", "--start-private-engine", "--serve"},
+		{"--config", "/synthetic/agent.json", "--start-private-engine", "--docker-probe", "--", "engine-profile"},
+		{"--config", "/synthetic/agent.json", "--start-private-engine", "/bin/sh"},
 	}
 	for _, args := range cases {
 		if _, err := parseArguments(args, &bytes.Buffer{}); err == nil {
 			t.Fatalf("accepted expanded or incomplete role: %q", args)
 		}
+	}
+}
+
+// Startup cannot accept a caller-selected program or another authority role.
+func TestSubevaluationArgumentsAcceptOnlyFixedPrivateEngineStartup(t *testing.T) {
+	parsed, err := parseArguments([]string{"--config", "/synthetic/agent.json", "--start-private-engine"}, &bytes.Buffer{})
+	if err != nil || !parsed.startPrivateEngine || parsed.configPath != "/synthetic/agent.json" || len(parsed.dockerArguments) != 0 {
+		t.Fatal("fixed engine startup role was not retained", err)
 	}
 }
 

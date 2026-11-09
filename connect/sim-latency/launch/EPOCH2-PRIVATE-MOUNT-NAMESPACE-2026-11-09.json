@@ -1,0 +1,25 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-09T23:41:12Z",
+  "status": "CORRECTION_TESTED_NATIVE_DEPLOYMENT_NEXT",
+  "epoch2_open": false,
+  "grading_activated": false,
+  "source_image_changed": false,
+  "observations": {
+    "both_hosts": "Trusted frozen-image cat probes failed before executing any code; non-root saw permission denied and the root control saw missing file. Offline Docker copy verified the executable exists with mode0755 in the image. All named probe containers auto-removed; explicit image-inspection container removed afterward.",
+    "sille_mount_namespace_inodes": {"dockerd": 4026532992, "containerd": 4026534850},
+    "goofe_mount_namespace_inodes": {"dockerd": 4026533138, "containerd": 4026533137},
+    "explanation": "Independent systemd BindPaths directives create separate slave mount views. Docker's overlay image mount is not visible to containerd's runtime, although both see the same underlying quota-backed shim-socket directory and the same network namespace. Prior admission proved the latter two but omitted image mount identity."
+  },
+  "correction": {
+    "startup": "Only containerd creates the private /run/containerd bind. A separate fixed root-only agent startup role obtains the pinned live containerd mount namespace by descriptor, verifies process birth and network identity, then execs only the pinned Docker/config pair through pinned nsenter. No caller-selected program, numeric-PID namespace join, candidate or SSH authority is accepted.",
+    "admission": "Capture and every recheck require Docker/containerd to share one nonempty mount identity. Socket peers cannot change that captured identity, and managed shims must share their owning containerd's mount view.",
+    "tests": "Deterministic split/missing/device-different mount identities are refused while same-network/same-mount controls pass. Deployment template enforces the fixed startup role rather than a second engine BindPaths. CLI refuses extra arguments and mixed roles; unsupported platforms remain fail closed.",
+    "focused_race_repetitions": 3,
+    "focused_race": "passed",
+    "full_agent_and_cli_packages": "passed once; agent37.156s, CLI0.006s",
+    "go_vet_agent_and_cli": "passed",
+    "native_corrected_launch": "not yet deployed or proved"
+  },
+  "remaining": "Finish full package tests, deploy a new immutable agent and prospective boundary/unit inventory on both idle hosts, then repeat exact trusted-image execution. No successful grading/runtime qualification is claimed. Sille core-pattern approval remains pending separately."
+}

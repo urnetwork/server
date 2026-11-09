@@ -1243,6 +1243,7 @@ type runtimeBoundaryUnit struct {
 	Pid                                                 int
 	ProcessStart                                        uint64
 	Namespace                                           runtimeBoundaryNamespaceId
+	MountNamespace                                      runtimeBoundaryNamespaceId
 }
 
 // Native receipts retain one keeper descriptor. Mutable closure is protected;
@@ -1452,6 +1453,12 @@ func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, boundary RuntimeResour
 	}
 	_ = file.Close()
 	unit.Namespace = identity
+	mountFile, mountIdentity, err := runtimeBoundaryOpenNamespace(filepath.Join(proc, "ns", "mnt"))
+	if err != nil {
+		return unit, err
+	}
+	_ = mountFile.Close()
+	unit.MountNamespace = mountIdentity
 	if err := verifyRuntimeBoundaryManagement(unit, boundary, settings); err != nil {
 		return unit, err
 	}
@@ -1573,6 +1580,11 @@ func validateRuntimeBoundaryNamespacePeers(units map[string]runtimeBoundaryUnit,
 		}
 		pids[unit.Pid] = true
 	}
+	engine := units[runtimeBoundaryEngineUnitName]
+	containerd := units[runtimeBoundaryContainerdUnitName]
+	if engine.MountNamespace.Inode == 0 || engine.MountNamespace != containerd.MountNamespace {
+		return errors.New("private Docker and containerd do not share the image mount namespace")
+	}
 	return nil
 }
 
@@ -1595,7 +1607,7 @@ func (self *runtimeBoundaryNativeNamespace) Peer(pid int, executable Pin) error 
 		return errors.New("private socket peer is not the captured service process")
 	}
 	current, err := runtimeBoundaryParticipant(expected, self.boundary, self.settings)
-	if err != nil || current.ProcessStart != expected.ProcessStart || current.Namespace != self.identity {
+	if err != nil || current.ProcessStart != expected.ProcessStart || current.Namespace != self.identity || current.MountNamespace != expected.MountNamespace {
 		return errors.New("private socket peer changed its process or namespace generation")
 	}
 	return nil
@@ -1629,7 +1641,7 @@ func (self *runtimeBoundaryNativeNamespace) Recheck(ctx context.Context) error {
 		}
 		if unit.Pid != 0 {
 			unit, err = runtimeBoundaryParticipant(unit, self.boundary, self.settings)
-			if err != nil || unit.ProcessStart != expected.ProcessStart {
+			if err != nil || unit.ProcessStart != expected.ProcessStart || unit.MountNamespace != expected.MountNamespace {
 				return errors.New("private namespace process generation changed")
 			}
 		}
@@ -1712,7 +1724,7 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if err != nil || validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
 			return errors.New("managed containerd shim arguments escaped its private runtime")
 		}
-		if participant.Namespace != self.identity {
+		if participant.Namespace != self.identity || participant.MountNamespace != unit.MountNamespace {
 			return errors.New("managed containerd shim escaped its private namespace")
 		}
 		if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {

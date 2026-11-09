@@ -3,7 +3,7 @@ Description=Private bounded evaluation Docker engine
 OnFailure=urnetwork-subeval-recovery.service
 OnFailureJobMode=replace
 Requires=urnetwork-private-containerd.service urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
-BindsTo=urnetwork-private-engine-network-namespace.service
+BindsTo=urnetwork-private-engine-network-namespace.service urnetwork-private-containerd.service
 After=urnetwork-private-containerd.service urnetwork-private-engine-network.service urnetwork-private-engine-network-namespace.service
 JoinsNamespaceOf=urnetwork-private-engine-network-namespace.service
 RequiresMountsFor=@BASE_DIRECTORY@/candidate
@@ -17,13 +17,12 @@ Group=root
 Slice=urnetwork-management-private.slice
 UMask=0077
 PrivateNetwork=yes
-BindPaths=@BASE_DIRECTORY@/candidate/exec/containerd-sockets:/run/containerd
 Environment="PATH=@ENGINE_BIN@"
 Environment="TMPDIR=@BASE_DIRECTORY@/candidate/scratch/engine-tmp"
 Environment="DOCKER_TMPDIR=@BASE_DIRECTORY@/candidate/scratch/docker-tmp"
 Environment="HOME=@BASE_DIRECTORY@/candidate/scratch/engine-home"
 WorkingDirectory=@BASE_DIRECTORY@/candidate
-ExecStart=@ENGINE_BIN@/dockerd --config-file @CONFIG_DIRECTORY@/engine.json
+ExecStart=@PRIVATE_AGENT_PATH@ --config @PRIVATE_AGENT_CONFIG@ --start-private-engine
 ExecStartPost=/usr/bin/chmod 0600 @BASE_DIRECTORY@/control/docker.sock
 Delegate=yes
 KillMode=control-group

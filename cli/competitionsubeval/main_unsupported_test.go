@@ -29,6 +29,7 @@ func TestSubevaluationUnsupportedRolesFailBeforeIo(t *testing.T) {
 		{"--config", config, "--serve"},
 		{"--config", config, "--serve-managed"},
 		{"--config", config, "--recover-active"},
+		{"--config", config, "--start-private-engine"},
 		{"--config", config, "--execute=" + runId},
 		{"--config", config, "--cleanup=" + runId},
 		{"--config", config, "--docker-owner=" + runId},

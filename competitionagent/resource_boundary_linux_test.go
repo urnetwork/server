@@ -708,7 +708,8 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		"CONFIG_DIRECTORY": filepath.Dir(boundary.EngineConfig.Path), "CONTAINER_LOG_MAXIMUM_SIZE": fixture.settings.ContainerLogMaximumSize,
 		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
 		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
-		"MANAGEMENT_CPUSET": boundary.ManagementCpuSet,
+		"MANAGEMENT_CPUSET":  boundary.ManagementCpuSet,
+		"PRIVATE_AGENT_PATH": "/usr/local/libexec/synthetic-agent", "PRIVATE_AGENT_CONFIG": "/etc/synthetic-agent.json",
 	}
 	unresolved := regexp.MustCompile(`@[A-Z0-9_]+@`)
 	render := func(name string) []byte {
@@ -745,7 +746,6 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
 			"AllowedCPUs=" + boundary.ManagementCpuSet,
 			"PrivateNetwork=yes", "BindsTo=" + runtimeBoundaryKeeperUnitName, "JoinsNamespaceOf=" + runtimeBoundaryKeeperUnitName,
-			"BindPaths=" + boundary.EngineExecRoot + "/containerd-sockets:/run/containerd",
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
 			if !strings.Contains(unit, required) {
 				t.Fatalf("private service lost an enforced boundary: %s", name)
@@ -753,6 +753,13 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		}
 		if strings.Contains(unit, "/run/docker.sock") || strings.Contains(unit, "docker.service") {
 			t.Fatal("private unit targets the user's engine")
+		}
+		if name == "urnetwork-private-engine.service.in" {
+			if strings.Contains(unit, "BindPaths=") || !strings.Contains(unit, "ExecStart="+tokens["PRIVATE_AGENT_PATH"]+" --config "+tokens["PRIVATE_AGENT_CONFIG"]+" --start-private-engine") {
+				t.Fatal("Docker must join containerd's image mount namespace through its pinned startup role")
+			}
+		} else if !strings.Contains(unit, "BindPaths="+boundary.EngineExecRoot+"/containerd-sockets:/run/containerd") {
+			t.Fatal("containerd lost its private shim socket mount")
 		}
 	}
 	_ = render("candidate.mount.in")
@@ -775,8 +782,8 @@ func TestRuntimeResourceBoundaryNamespacePeersRequireNonHostIdentity(t *testing.
 	makeUnits := func() map[string]runtimeBoundaryUnit {
 		return map[string]runtimeBoundaryUnit{
 			runtimeBoundaryKeeperUnitName:     {Pid: 101, ProcessStart: 1, Namespace: private},
-			runtimeBoundaryEngineUnitName:     {Pid: 102, ProcessStart: 2, Namespace: private},
-			runtimeBoundaryContainerdUnitName: {Pid: 103, ProcessStart: 3, Namespace: private},
+			runtimeBoundaryEngineUnitName:     {Pid: 102, ProcessStart: 2, Namespace: private, MountNamespace: private},
+			runtimeBoundaryContainerdUnitName: {Pid: 103, ProcessStart: 3, Namespace: private, MountNamespace: private},
 		}
 	}
 	if err := validateRuntimeBoundaryNamespacePeers(makeUnits(), private, host); err != nil {

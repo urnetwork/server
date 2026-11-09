@@ -74,6 +74,7 @@ func TestRuntimeResourceBoundaryManagementCorrectNamespaceCannotHideWrongProcess
 	units := map[string]runtimeBoundaryUnit{}
 	for index, name := range []string{runtimeBoundaryKeeperUnitName, runtimeBoundaryEngineUnitName, runtimeBoundaryContainerdUnitName} {
 		participant := unit
+		participant.MountNamespace = runtimeBoundaryNamespaceId{Device: 4, Inode: 301}
 		participant.Pid, participant.Name = 120+index, name
 		units[name] = participant
 	}
