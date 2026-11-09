@@ -589,8 +589,21 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 		root, rootErr := decodeMountField(fields[3])
 		target, targetErr := decodeMountField(fields[4])
 		source, sourceErr := decodeMountField(fields[separator+2])
+		rootValid := filepath.IsAbs(root) && filepath.Clean(root) == root
+		if !rootValid && fields[separator+1] == "nsfs" {
+			// Namespace handles have kernel type/inode roots, not filesystem paths.
+			kind, inodeField, found := strings.Cut(root, ":[")
+			switch kind {
+			case "net", "mnt", "pid", "user", "uts", "ipc", "cgroup", "time":
+				if found && strings.HasSuffix(inodeField, "]") {
+					inodeText := strings.TrimSuffix(inodeField, "]")
+					inode, err := strconv.ParseUint(inodeText, 10, 64)
+					rootValid = err == nil && inode != 0 && strconv.FormatUint(inode, 10) == inodeText
+				}
+			}
+		}
 		if idErr != nil || id == 0 || !found || majorErr != nil || minorErr != nil || rootErr != nil || targetErr != nil || sourceErr != nil ||
-			!filepath.IsAbs(target) || filepath.Clean(target) != target || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+			!filepath.IsAbs(target) || filepath.Clean(target) != target || !rootValid {
 			return nil, errors.New("invalid resource mount identity")
 		}
 		options := map[string]bool{}
