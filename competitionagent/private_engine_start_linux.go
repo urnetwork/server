@@ -73,6 +73,17 @@ func StartPrivateEngine(ctx context.Context, config *Config) error {
 	if err := decodeStrict(content, &boundary); err != nil {
 		return err
 	}
+	var candidateStat, deviceStat syscall.Stat_t
+	if err := syscall.Lstat(boundary.CandidateRoot, &candidateStat); err != nil {
+		return err
+	}
+	if err := syscall.Lstat(boundary.BlockDevice, &deviceStat); err != nil {
+		return err
+	}
+	if err := validatePrivateEngineStartupDevice(candidateStat, deviceStat); err != nil {
+		return err
+	}
+	boundary.WorkDeviceId = deviceStat.Rdev
 	for _, pin := range []Pin{boundary.Dockerd, boundary.Nsenter} {
 		if err := validatePin(pin, true); err != nil {
 			return err
@@ -91,7 +102,12 @@ func StartPrivateEngine(ctx context.Context, config *Config) error {
 		return err
 	}
 	_ = current.Close()
-	if currentIdentity != unit.Namespace {
+	hostNetwork, hostIdentity, err := runtimeBoundaryOpenNamespace("/proc/1/ns/net")
+	if err != nil {
+		return err
+	}
+	_ = hostNetwork.Close()
+	if currentIdentity != unit.Namespace || currentIdentity == hostIdentity {
 		return errors.New("engine startup is outside containerd's private network")
 	}
 	proc := "/proc/" + strconv.Itoa(unit.Pid)
@@ -125,4 +141,14 @@ func StartPrivateEngine(ctx context.Context, config *Config) error {
 	}
 	launchArguments := []string{boundary.Nsenter.Path, "--mount=/proc/self/fd/" + strconv.FormatUint(uint64(file.Fd()), 10), "--", boundary.Dockerd.Path, "--config-file", boundary.EngineConfig.Path}
 	return syscall.Exec(boundary.Nsenter.Path, launchArguments, os.Environ())
+}
+
+// A missing mount must not place engine writes on the operator data/root
+// filesystem. Full quota/core/pressure admission remains a separate gate.
+func validatePrivateEngineStartupDevice(candidate, device syscall.Stat_t) error {
+	if candidate.Mode&syscall.S_IFMT != syscall.S_IFDIR || candidate.Uid != 0 || candidate.Mode&0022 != 0 ||
+		device.Mode&syscall.S_IFMT != syscall.S_IFBLK || device.Uid != 0 || device.Mode&0077 != 0 || device.Rdev == 0 || candidate.Dev != device.Rdev {
+		return errors.New("private engine startup has no protected candidate block mount")
+	}
+	return nil
 }
