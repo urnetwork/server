@@ -469,8 +469,12 @@ type DnsLabelMap struct {
 	Root string
 	// The highest change serial read: the next DnsLabelMapSince's after. A read
 	// that found nothing new answers its own after.
-	Serial  uint64
-	Entries []*DnsLabelMapEntry
+	Serial uint64
+	// The root's last restore_serial (§12.6). A reader that sees it move takes a
+	// new snapshot, since a Postgres restore can leave its cursor above every
+	// change serial the restored rows hold.
+	RestoreSerial uint64
+	Entries       []*DnsLabelMapEntry
 }
 
 // Every name of root with its suspensions, and the serial to follow from.
@@ -527,8 +531,11 @@ func readDnsLabelMap(ctx context.Context, root string, after *uint64) (*DnsLabel
 				}
 			}
 		})
-		if !server.SidecarMg5Linked() || len(networkEntries) == 0 {
+		if !server.SidecarMg5Linked() {
 			return
+		}
+		if state := getDnsRootStateInTx(ctx, tx, root); state != nil {
+			labelMap.RestoreSerial = state.RestoreSerial
 		}
 		now := server.NowUtc()
 		for networkId, entries := range networkEntries {
