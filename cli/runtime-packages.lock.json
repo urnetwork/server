@@ -572,6 +572,7 @@
     "connect": "certificates",
     "dns": "certificates",
     "dnsedge": "certificates",
+    "evs": "certificates",
     "gossip": "certificates",
     "mcp": "certificates",
     "proxy": "proxy",

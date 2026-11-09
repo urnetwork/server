@@ -10,7 +10,7 @@ import (
 // Actual service entry points expose stale sibling APIs that module pins and
 // dependency-only tests cannot detect, including ALT's admission constructor.
 func TestReleaseSourceGraphBuildsRuntimeConsumers(t *testing.T) {
-	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./bringyourctl")
+	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./cli/evs", "./bringyourctl")
 	command.Dir = serverDirectory(t)
 	command.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "CGO_ENABLED=0", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -22,7 +22,7 @@ func TestReleaseSourceGraphBuildsRuntimeConsumers(t *testing.T) {
 // migration groups linked (cli/sidecar-tags.mk, §19.7), so a group that compiles
 // on one leg alone fails here rather than at a local run or a canary deploy.
 func TestReleaseSourceGraphBuildsThePendingLeg(t *testing.T) {
-	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-tags", "sidecar_pending", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./bringyourctl")
+	command := exec.CommandContext(t.Context(), "go", "build", "-mod=readonly", "-p", "2", "-trimpath", "-tags", "sidecar_pending", "-o", t.TempDir(), "./cli/api", "./cli/alt", "./cli/taskworker", "./cli/connect", "./cli/proxy", "./cli/dns", "./cli/evs", "./bringyourctl")
 	command.Dir = serverDirectory(t)
 	command.Env = append(os.Environ(), "GOWORK=off", "GOTOOLCHAIN=local", "GOENV=off", "CGO_ENABLED=0", "GOFLAGS=-mod=readonly", "GOPROXY=off", "GOSUMDB=off")
 	if output, err := command.CombinedOutput(); err != nil {
@@ -31,8 +31,8 @@ func TestReleaseSourceGraphBuildsThePendingLeg(t *testing.T) {
 }
 
 // Every command above links the root, protocol and protocol/bridge through controller's
-// sidecar identity routes, and ./cli/dns links dnsservice and miekg/dns, but none links
-// smtpproof. Each ./cli/<svc> hosting a sidecar engine joins the list above as it lands,
+// sidecar identity routes, ./cli/dns links dnsservice and miekg/dns, and ./cli/evs links
+// evsservice and pushservice, but none links smtpproof. Each ./cli/<svc> hosting a sidecar engine joins the list above as it lands,
 // with the requires its engine brings, and this compiles smtpproof, which the
 // tools-tagged sidecar_require.go holds in the graph, beside the packages already linked.
 func TestReleaseSourceGraphBuildsSidecarPackages(t *testing.T) {
