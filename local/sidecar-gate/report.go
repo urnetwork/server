@@ -46,6 +46,9 @@ func (self *gateReport) Write(out io.Writer) {
 		fmt.Fprintf(out, ", and the gate's group %s", self.group)
 	}
 	fmt.Fprintf(out, ". Missing means no test shows the item yet, which is never a pass; open means it waits on hardware, production or people (owner decision 194).\n")
+	if self.list {
+		fmt.Fprintf(out, "\nThis is -list: nothing ran. Listed means every test the row names is declared, which is no pass.\n")
+	}
 
 	fmt.Fprintf(out, "\n## Commit set\n\n| repo | branch | commit |\n|---|---|---|\n")
 	for _, commit := range self.commits {
@@ -67,6 +70,10 @@ func (self *gateReport) Write(out io.Writer) {
 		results []*gateResult
 	}{{name: "rows", results: self.rows}, {name: "checks", results: self.checks}, {name: "ids", results: self.matrix}} {
 		counts := countOutcomes(section.results)
+		if self.list {
+			fmt.Fprintf(out, "- %s: %d listed, %d fail, %d missing, %d open\n", section.name, counts[gateListed], counts[gateFail], counts[gateMissing], counts[gateOpen])
+			continue
+		}
 		fmt.Fprintf(out, "- %s: %d pass, %d fail, %d missing, %d open\n", section.name, counts[gatePass], counts[gateFail], counts[gateMissing], counts[gateOpen])
 	}
 	verdict := "nothing failed"

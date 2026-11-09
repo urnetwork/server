@@ -1,0 +1,71 @@
+# The release stages (TEST-M1-12; R-PHASE-4, D-PHASE-1, R-PHASE-3, R-PHASE-5, R-PHASE-10, D-PHASE-4, R-CTX-32, X15):
+# recURd's RS1 and RS2 and the burner launch BS1, each with its milestones, §23.8's Releases conditions and what it
+# waits on. `go run ./local/sidecar-gate RS1` reports a stage whole, every item passing, or incomplete, naming each
+# item that is not. RS3 is Later (§23.4), so it has no stage here.
+#
+# stages     one per stage
+#   items    what the stage waits on, each written as trace.yml writes a row's evidence: tests, schedules,
+#            commands, whole gates of gates.yml, open for hardware, production or people, and sidecar and server
+#            for a vertical slice's two halves, which count only when both pass (R-PHASE-3). A gate's rows each run
+#            their own tests in both repos, so a gate passes only when every slice in it does.
+#
+# A person signs every stage (§23.8), so each stage ends on a people row, which reads open: this reports, and never
+# passes a person's row.
+
+stages:
+  - id: RS1
+    name: "record and reach"
+    milestones: [M0, M1, M2, M3, M4]
+    releases: "§23.8: D-TRUST-3 holds; RS1's copy discloses I-10's no-policy allow-all (owner decision 120); \"end-to-end encrypted\" waits only for D-TRUST-4's document, §21.11's canary and §2.18's unaudited-cryptography disclosure (owner decisions 77, 119)."
+    items:
+      - item: "M0 to M4's exit sweeps, every row's sidecar and server tests"
+        gates: [M0, M1, M2, M3, M4]
+      - item: "D-TRUST-3: stage 1 and D-TEAM-14's 7-day tokens before any sidecar ships, enrollment in preview_networks only"
+        sidecar:
+          tests:
+            - {repo: sidecar, package: ., names: [TestPreviewRefusalSurfaces, TestCoreM1GateEnrollsAndRefreshesEndToEnd]}
+        server:
+          tests:
+            - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
+            - {repo: server, package: ./api, stores: true, names: [TestSidecarTokenRoutes, TestNonPreviewNetworkRefusesStrictExpThroughTheRoute]}
+        open: "production: stage 1 enforced and stage 2 live before the desktop sidecar ships (D-PHASE-3)"
+      - item: "RS1's copy discloses I-10's no-policy allow-all (owner decision 120), in ABUSE-M4-01's trust documents"
+        task: ABUSE-M4-01
+        open: "people: the copy and the trust documents, drafted by ABUSE-M4-01 and approved by a person"
+      - item: "\"end-to-end encrypted\": D-TRUST-4's document, §21.11's canary and §2.18's unaudited-cryptography disclosure (R-PHASE-5)"
+        open: "people and production: the three documents published and the canary live (owner decisions 77, 99, 119)"
+      - item: "track B staffed by M2's exit, or §23.5's fallback (R-PHASE-10, X15)"
+        open: "people: four engineers on mail and burner by M2's exit (owner decision 9), or team A builds M5 before M6 and the owner hears then"
+      - item: "§23.7's M0 lead times and the MLS subset's start in M0 (D-PHASE-4)"
+        open: "people and hardware: the file cluster's hosts and PM9A3 set before M2's exit, urnetwork/minio before any push, the app releases before stage 2, and ur.network renewed past 2027-07-02 (§23.7)"
+      - item: "a person signs RS1 (§23.8)"
+        open: "people: the owner approves the release"
+
+  - id: RS2
+    name: "team layer and TLS edge"
+    milestones: [M5, M6]
+    releases: "§23.8: RS2 ships with M5's TLS edge and M6's team layer; it waits for no format 2 (D-PHASE-8)."
+    items:
+      - item: "M5's and M6's exit sweeps, every row's sidecar and server tests"
+        gates: [M5, M6]
+      - item: "M6's entry: the escrow order frozen on M4's dark build, FS-46 and §20.9's benchmark passing (D-PHASE-7)"
+        gates: [M6-in]
+      - item: "24/7 review and on-call from M6 (§23.7)"
+        open: "people: the abuse review and the rota"
+      - item: "a person signs RS2 (§23.8)"
+        open: "people: the owner approves the release"
+
+  - id: BS1
+    name: "burner launch, receive-only"
+    milestones: [M7, M8]
+    releases: "§23.8: BS1 waits for §23.6's census call and M8's mail-indexer readiness, never for a user's indexer (owner decision 12); it launches receive-only until D-SMTP-16's proofs pass (owner decision 35)."
+    items:
+      - item: "M7's and M8's exit sweeps, every row's sidecar and server tests"
+        gates: [M7, M8]
+      - item: "the census call: the owner accepts the SNI loss D-MAIL-9's M7 census measures (owner decision 34)"
+        open: "production and people: the census on production edges, then the owner's call"
+      - item: "M8's mail-indexer readiness: the desktop, NAS and VPS indexer paths and the apps' indexer prompt pass §22, and the foreground-only copy shows before a first burner"
+        gates: [M8]
+        open: "people: a release-readiness call, never a per-user gate (owner decision 12)"
+      - item: "a person signs BS1 (§23.8)"
+        open: "people: the owner approves the release"
