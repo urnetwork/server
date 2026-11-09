@@ -20,10 +20,11 @@ package api
 //   - TestSpecRoutesImplemented: every spec path+method has a matching route in
 //     Routes(), and every route Routes() serves, streaming routes included, is
 //     documented: a /competition/ route in sn/api/competition.yml, every other
-//     route here. An undocumented route fails. A /gkm/ route is gkm's, served on
-//     its own host and held to sidecar's gkmservice table by
-//     connect/api/check-routes.sh, so the spec's need none in Routes(), and
-//     one in Routes() fails.
+//     route here. An undocumented route fails. A path whose own `servers:`
+//     names none of the spec's top-level servers is another host's: /gkm/'s,
+//     held to sidecar's gkmservice table by connect/api/check-routes.sh, /evs/'s,
+//     held to the engine's by server/evshost's route table test, and
+//     /socket/'s. The spec's need none in Routes(), and one in Routes() fails.
 //
 // Security/auth parity is intentionally out of scope (not reflectable).
 
@@ -751,8 +752,9 @@ func TestSpecRoutesImplemented(t *testing.T) {
 	spec := loadSpec(t)
 	implKeys := implRouteKeys()
 	specKeys := specOperationKeys(spec)
+	otherHostPaths := specOtherHostPaths(spec.root)
 
-	missing, planned := unimplementedOperations(spec.paths, implKeys)
+	missing, planned := unimplementedOperations(spec.paths, implKeys, otherHostPaths)
 	for _, k := range planned {
 		t.Logf("spec endpoint %q is planned (x-status) and not yet in Routes()", k)
 	}
@@ -768,6 +770,9 @@ func TestSpecRoutesImplemented(t *testing.T) {
 	for _, k := range apiGkmRoutes(implKeys) {
 		t.Errorf("route %q is gkm's, which serves it on its own host, and api must not", k)
 	}
+	for _, k := range apiOtherHostRoutes(implKeys, otherHostPaths) {
+		t.Errorf("route %q is on a path the spec gives a host of its own, and api must not serve it", k)
+	}
 
 	t.Logf("spec routes: %d spec endpoints, %d impl routes, %d spec endpoints unmatched, %d impl routes undocumented",
 		len(specKeys), len(implKeys), len(missing), len(undocumented))
@@ -782,12 +787,52 @@ func gkmRoute(key string) bool {
 	return strings.HasPrefix(path, "/gkm/")
 }
 
+// The normalized paths whose own `servers:` entry names none of the spec's
+// top-level servers (connect-m1-c11-route-scope): each is served on a host of
+// its own, never by api. A path whose own servers name one of api's hosts, as
+// api-v4 or api-v6, stays api's.
+func specOtherHostPaths(root map[string]any) map[string]bool {
+	urls := func(servers any) map[string]bool {
+		out := map[string]bool{}
+		for _, server := range asSlice(servers) {
+			if url, ok := asMap(server)["url"].(string); ok {
+				out[url] = true
+			}
+		}
+		return out
+	}
+	apiUrls := urls(root["servers"])
+	otherHostPaths := map[string]bool{}
+	for path, item := range asMap(root["paths"]) {
+		own := urls(asMap(item)["servers"])
+		if len(own) == 0 {
+			continue
+		}
+		onApi := false
+		for url := range own {
+			if apiUrls[url] {
+				onApi = true
+			}
+		}
+		if !onApi {
+			otherHostPaths[normalizePath(path)] = true
+		}
+	}
+	return otherHostPaths
+}
+
+// Whether a "METHOD path" key's path is one otherHostPaths names.
+func otherHostRoute(key string, otherHostPaths map[string]bool) bool {
+	_, path, _ := strings.Cut(key, " ")
+	return otherHostPaths[path]
+}
+
 // The "METHOD path" keys, sorted, of the spec operations Routes() lacks, and
 // apart from them those it lacks that the spec marks `x-status: planned`: a
 // route a later change lands, logged rather than failed so the spec can lead
-// the implementation by one deploy. A gkm operation is in neither, planned or
-// not, since api never serves one.
-func unimplementedOperations(paths map[string]any, implKeys map[string]bool) (missing []string, planned []string) {
+// the implementation by one deploy. A gkm operation, or one on a path another
+// host serves, is in neither, planned or not, since api never serves one.
+func unimplementedOperations(paths map[string]any, implKeys map[string]bool, otherHostPaths map[string]bool) (missing []string, planned []string) {
 	for path, methodsAny := range paths {
 		for method, operation := range asMap(methodsAny) {
 			switch method {
@@ -796,7 +841,7 @@ func unimplementedOperations(paths map[string]any, implKeys map[string]bool) (mi
 				continue
 			}
 			key := strings.ToUpper(method) + " " + normalizePath(path)
-			if implKeys[key] || gkmRoute(key) {
+			if implKeys[key] || gkmRoute(key) || otherHostRoute(key, otherHostPaths) {
 				continue
 			}
 			if asMap(operation)["x-status"] == "planned" {
@@ -809,6 +854,19 @@ func unimplementedOperations(paths map[string]any, implKeys map[string]bool) (mi
 	sort.Strings(missing)
 	sort.Strings(planned)
 	return missing, planned
+}
+
+// The routes Routes() serves on a path the spec gives a host of its own, sorted,
+// each of them drift. gkm's say so under their own name.
+func apiOtherHostRoutes(implKeys map[string]bool, otherHostPaths map[string]bool) []string {
+	var keys []string
+	for key := range implKeys {
+		if otherHostRoute(key, otherHostPaths) && !gkmRoute(key) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // The gkm routes Routes() serves, sorted, each of them drift whatever the spec
@@ -836,12 +894,52 @@ func TestSpecGkmOperationsAreNotApis(t *testing.T) {
 		"/gkm/repos/{repo_id}/forms": map[string]any{"get": map[string]any{}, "post": map[string]any{}},
 	}
 	implKeys := map[string]bool{"GET /hello": true}
-	missing, planned := unimplementedOperations(paths, implKeys)
+	missing, planned := unimplementedOperations(paths, implKeys, nil)
 	if want := []string{"POST /provider-work/v1/cuts"}; !slices.Equal(missing, want) {
 		t.Errorf("missing = %v, want %v", missing, want)
 	}
 	if want := []string{"POST /provider-work/v1/plans"}; !slices.Equal(planned, want) {
 		t.Errorf("planned = %v, want %v", planned, want)
+	}
+}
+
+// A path whose own servers name none of api's is another host's: its
+// operations, planned or served, are not ones api lacks, and api serving one is
+// drift. One whose own servers name an api host stays api's.
+func TestSpecOtherHostOperationsAreNotApis(t *testing.T) {
+	evsServers := []any{map[string]any{"url": "https://evs.example"}}
+	root := map[string]any{
+		"servers": []any{
+			map[string]any{"url": "https://api.example"},
+			map[string]any{"url": "https://api-v4.example"},
+		},
+		"paths": map[string]any{
+			"/hello": map[string]any{"get": map[string]any{}},
+			"/evs/v1/repos/{repo_id}": map[string]any{
+				"servers": evsServers,
+				"put":     map[string]any{},
+				"get":     map[string]any{"x-status": "planned"},
+			},
+			"/network/v4-only": map[string]any{
+				"servers": []any{map[string]any{"url": "https://api-v4.example"}},
+				"post":    map[string]any{},
+			},
+		},
+	}
+	otherHostPaths := specOtherHostPaths(root)
+	if want := map[string]bool{"/evs/v1/repos/{}": true}; len(otherHostPaths) != 1 || !otherHostPaths["/evs/v1/repos/{}"] {
+		t.Fatalf("other hosts' paths %v, want %v", otherHostPaths, want)
+	}
+	implKeys := map[string]bool{"GET /hello": true, "PUT /evs/v1/repos/{}": true}
+	missing, planned := unimplementedOperations(asMap(root["paths"]), implKeys, otherHostPaths)
+	if want := []string{"POST /network/v4-only"}; !slices.Equal(missing, want) {
+		t.Errorf("missing = %v, want %v", missing, want)
+	}
+	if len(planned) != 0 {
+		t.Errorf("planned = %v, want none", planned)
+	}
+	if got, want := apiOtherHostRoutes(implKeys, otherHostPaths), []string{"PUT /evs/v1/repos/{}"}; !slices.Equal(got, want) {
+		t.Errorf("api's other-host routes = %v, want %v", got, want)
 	}
 }
 
