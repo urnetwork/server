@@ -242,9 +242,6 @@ func exchangeSubject(ctx context.Context, subjectToken string) (*session.ByJwt, 
 	if byJwt.ClientId == nil {
 		return nil, fmt.Errorf("%w: the subject token names no client", ErrInvalidGrant)
 	}
-	if byJwt.GuestMode {
-		return nil, fmt.Errorf("%w: a guest's token", ErrInvalidGrant)
-	}
 	if byJwt.ExpiresAt == nil || !server.NowUtc().Before(byJwt.ExpiresAt.Time) {
 		return nil, fmt.Errorf("%w: the subject token is expired", ErrInvalidGrant)
 	}
