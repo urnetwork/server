@@ -461,6 +461,7 @@ func sidecarMg5Migrations() []any {
 	return slices.Concat(
 		sidecarMg5DnsMigrations(),
 		sidecarMg5TlsMigrations(),
+		sidecarMg5SmtpMigrations(),
 		sidecarMg5ApprovalMigrations(),
 		sidecarMg5AbuseMigrations(),
 		[]any{
@@ -771,6 +772,105 @@ func sidecarMg5TlsMigrations() []any {
 		// the 13-month retention cursor
 		newSqlMigration(`
 			CREATE INDEX tls_connection_day_day ON tls_connection_day (day)
+		`),
+	}
+}
+
+// MG5's §14 part: smtp_complaint and smtp_dmarc_daily, §14.14's report tables
+// (SMTP-M5-06), which plan-SMTP-report-intake-home moved here from MG9 so
+// mxedge's platform block counts reports from M5; the rest of smtp_* stays in
+// MG9. Every column is one of §2.8 smtp-5's: a report's reporter, type and
+// arrival, its attribution fields and join result, its sealed copy, and an
+// aggregate's counts per network, day, reporter, header_from and report id, for
+// URnetwork's sending addresses only. No column holds a recipient, a reporter's
+// address, the last-hop Received IP or any other third-party address, a body or
+// report text (D-SMTP-10, I-13). Types, results and kinds are varchar, never
+// ENUM. Nothing reads these tables unless the binary links MG5
+// (server.SidecarMg5Linked).
+func sidecarMg5SmtpMigrations() []any {
+	return []any{
+		// an attributed report (smtp-5), or an aggregate's sealed copy under type
+		// rua or tlsrpt, which counts as no complaint (plan-SMTP-small-readings
+		// #14). reporter is the verified DKIM d= of the operator that sent it,
+		// NULL for role mail, whose sender is never kept. message_id_hash is
+		// SHA-256 of the reported Message-ID. sealed_report is the raw report
+		// under the network mail key, NULL when no key was held and cleared at
+		// 30 days (owner decision 78); the row stays 13 months.
+		newSqlMigration(`
+			CREATE TABLE smtp_complaint (
+				complaint_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				reporter varchar(253) NULL,
+				complaint_type varchar(32) NOT NULL,
+				arrival_time timestamp NOT NULL,
+				domain varchar(253) NULL,
+				dkim_domain varchar(253) NULL,
+				dkim_selector varchar(63) NULL,
+				dkim_result varchar(32) NULL,
+				message_id_hash bytea NULL,
+				x_ur_ref varchar(64) NULL,
+				feedback_id varchar(128) NULL,
+				join_result varchar(32) NULL,
+				sealed_report bytea NULL,
+
+				PRIMARY KEY (complaint_id)
+			)
+		`),
+		// one network's reports by arrival: GET /smtp/reports?since=, and
+		// §14.8's rates and halts
+		newSqlMigration(`
+			CREATE INDEX smtp_complaint_network_id ON smtp_complaint (network_id, arrival_time)
+		`),
+		// §14.8's each (network, Message-ID hash) counting once
+		newSqlMigration(`
+			CREATE INDEX smtp_complaint_message_id_hash ON smtp_complaint (network_id, message_id_hash) WHERE message_id_hash IS NOT NULL
+		`),
+		// the 13-month retention cursor
+		newSqlMigration(`
+			CREATE INDEX smtp_complaint_arrival_time ON smtp_complaint (arrival_time)
+		`),
+		// the 30-day clearing of sealed copies, whose rows leave this index as
+		// they clear
+		newSqlMigration(`
+			CREATE INDEX smtp_complaint_sealed_arrival_time ON smtp_complaint (arrival_time) WHERE sealed_report IS NOT NULL
+		`),
+
+		// an aggregate's counts (smtp-5), DMARC RUA or TLS-RPT by kind, one row
+		// per network, day, reporter, header_from (a TLS-RPT policy domain) and
+		// report id, and for TLS-RPT per policy type, '' for DMARC. day is the UTC
+		// day the report covers. Only rows from URnetwork's sending addresses
+		// reach here, so no third-party address does. A report counts once per
+		// (reporter, report_id) whatever networks its rows name (D-SMTP-23),
+		// which the store holds under a transaction-scoped lock on the pair;
+		// kept 13 months.
+		newSqlMigration(`
+			CREATE TABLE smtp_dmarc_daily (
+				network_id uuid NOT NULL,
+				day date NOT NULL,
+				reporter varchar(253) NOT NULL,
+				header_from varchar(253) NOT NULL,
+				report_id varchar(1024) NOT NULL,
+				policy_type varchar(16) NOT NULL,
+				kind varchar(16) NOT NULL,
+				arrival_time timestamp NOT NULL,
+				message_count bigint NOT NULL,
+				dkim_pass_count bigint NOT NULL,
+				spf_pass_count bigint NOT NULL,
+				quarantine_count bigint NOT NULL,
+				reject_count bigint NOT NULL,
+				success_count bigint NOT NULL,
+				failure_count bigint NOT NULL,
+
+				PRIMARY KEY (network_id, day, reporter, header_from, report_id, policy_type)
+			)
+		`),
+		// a report's rows, whose existence answers InsertAggregate's once
+		newSqlMigration(`
+			CREATE INDEX smtp_dmarc_daily_report ON smtp_dmarc_daily (reporter, report_id)
+		`),
+		// the 13-month retention cursor
+		newSqlMigration(`
+			CREATE INDEX smtp_dmarc_daily_day ON smtp_dmarc_daily (day)
 		`),
 	}
 }

@@ -82,8 +82,9 @@ func SidecarMg2Linked() bool {
 	return sidecarMg2Linked()
 }
 
-// Whether this binary links MG5: §12's dns tables, §13's tls tables, §16's
-// approval_use and §21's seven abuse tables.
+// Whether this binary links MG5: §12's dns tables, §13's tls tables, §14's two
+// report tables (plan-SMTP-report-intake-home), §16's approval_use and §21's
+// seven abuse tables.
 func SidecarMg5Linked() bool {
 	return sidecarMg5Linked()
 }
@@ -104,7 +105,8 @@ func SidecarMg8Linked() bool {
 	return sidecarMg8Linked()
 }
 
-// Whether this binary links MG9: §14's smtp tables.
+// Whether this binary links MG9: §14's smtp tables but the two report tables,
+// which are MG5's.
 func SidecarMg9Linked() bool {
 	return sidecarMg9Linked()
 }
