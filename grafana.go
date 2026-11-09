@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -58,8 +59,49 @@ type grafanaPushUser struct {
 	Roles    []string `yaml:"roles,omitempty"`
 }
 
+// A service's own push-only vault file (plan-OPS-small-readings #5): the one
+// credential a sidecar block mounts in its secret_files, holding one user,
+// which config grafana.yml gives the push role. A new block never mounts
+// vault's grafana.yml, so one hostile-facing block's credential is revoked and
+// rotated alone.
+func grafanaPushResourceName(service string) string {
+	return fmt.Sprintf("grafana-push-%s.yml", service)
+}
+
+// A warp service name, as a vault file name may carry it.
+var grafanaServiceNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// The push credential in a service's own push file: exactly one user, with a
+// password and no roles, whom config grafana.yml gives the push role, so the
+// file cannot add an identity to the ingestion policy any more than vault's
+// grafana.yml can.
+func grafanaScopedPushCredential(resourceName string, resource *SimpleResource, ordinaryUsers map[string]*grafanaPushUser) (username string, password string, err error) {
+	var pushConfig grafanaPushConfig
+	if err := resource.UnmarshalYamlE(&pushConfig); err != nil {
+		return "", "", fmt.Errorf("vault %s: %w", resourceName, err)
+	}
+	if len(pushConfig.Users) != 1 || pushConfig.Users[0] == nil {
+		return "", "", fmt.Errorf("vault %s holds %d users, not one", resourceName, len(pushConfig.Users))
+	}
+	pushUser := pushConfig.Users[0]
+	if pushUser.Name == "" || pushUser.Password == "" {
+		return "", "", fmt.Errorf("vault %s has a user with no name or password", resourceName)
+	}
+	if 0 < len(pushUser.Roles) {
+		return "", "", fmt.Errorf("vault %s contains roles for %q", resourceName, pushUser.Name)
+	}
+	ordinaryUser := ordinaryUsers[pushUser.Name]
+	if ordinaryUser == nil || !slices.Contains(ordinaryUser.Roles, "push") {
+		return "", "", fmt.Errorf("vault %s user %q has no push role in config grafana.yml", resourceName, pushUser.Name)
+	}
+	return pushUser.Name, pushUser.Password, nil
+}
+
 // Resolves ordinary endpoint configuration separately from the scoped push
-// credential.
+// credential. A service's own push file, grafana-push-<service>.yml, comes
+// first; a service without one reads vault's grafana.yml as existing services
+// do. A push file that is there but unreadable, or that does not hold one push
+// user, is an error, never a fall back to another credential.
 func grafanaPushSettings() (localPort int, username string, password string, err error) {
 	localPort = defaultGrafanaLocalPort
 	grafanaResource, err := Config.SimpleResource("grafana.yml")
@@ -84,6 +126,24 @@ func grafanaPushSettings() (localPort int, username string, password string, err
 			return 0, "", "", fmt.Errorf("config grafana.yml repeats user %q", ordinaryUser.Name)
 		}
 		ordinaryUsers[ordinaryUser.Name] = ordinaryUser
+	}
+
+	if service, serviceErr := Service(); serviceErr == nil {
+		if !grafanaServiceNamePattern.MatchString(service) {
+			return 0, "", "", fmt.Errorf("service %q names no push file", service)
+		}
+		pushResourceName := grafanaPushResourceName(service)
+		pushResource, err := Vault.SimpleResource(pushResourceName)
+		if err == nil {
+			username, password, err := grafanaScopedPushCredential(pushResourceName, pushResource, ordinaryUsers)
+			if err != nil {
+				return 0, "", "", err
+			}
+			return localPort, username, password, nil
+		}
+		if !errors.Is(err, ErrResourceNotFound) || errors.Is(err, ErrResourceUnavailable) {
+			return 0, "", "", err
+		}
 	}
 
 	secretResource, err := Vault.SimpleResource("grafana.yml")
@@ -187,6 +247,27 @@ func sourceInfoLabelValues(source sourceBuildInfo, imageDigest string) []string 
 func init() {
 	prometheus.MustRegister(buildInfoGauge)
 	prometheus.MustRegister(sourceInfoGauge)
+}
+
+// Why StartStatsPusher would publish nothing in this process, nil when it
+// would: no warp identity, or no push credential. StartStatsPusher says so only
+// at Info, so a sidecar block's host asks here and logs it loudly, since a block
+// that pushes nothing runs unseen (plan-OPS-small-readings #5).
+func StatsPushUnavailable() error {
+	if _, err := Env(); err != nil {
+		return err
+	}
+	if _, err := Service(); err != nil {
+		return err
+	}
+	if _, err := Block(); err != nil {
+		return err
+	}
+	if _, err := Host(); err != nil {
+		return err
+	}
+	_, _, _, err := grafanaPushSettings()
+	return err
 }
 
 // StartStatsPusher pushes the default prometheus registry
