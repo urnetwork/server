@@ -58,6 +58,7 @@ type fileClusterAdminInfoJson struct {
 		PoolNumbers []int  `json:"poolNumbers"`
 		Drives      []struct {
 			Endpoint   string `json:"endpoint"`
+			Path       string `json:"path"`
 			State      string `json:"state"`
 			Healing    bool   `json:"healing"`
 			TotalSpace uint64 `json:"totalspace"`
@@ -89,12 +90,16 @@ type FileClusterHostInfo struct {
 // One drive as admin info reports it: what §19.6's protection states and the budget loop's
 // busiest-drive-not-healing rule read.
 type FileClusterDriveInfo struct {
-	Endpoint  string
-	State     string
-	Healing   bool
-	PoolIndex int
-	SetIndex  int
-	DiskIndex int
+	Endpoint string
+	// Where the drive is mounted on its host, and the host's endpoint it was listed under: what the drive
+	// counters are matched by (file_cluster_counters.go).
+	Path         string
+	HostEndpoint string
+	State        string
+	Healing      bool
+	PoolIndex    int
+	SetIndex     int
+	DiskIndex    int
 	// Bytes and inodes, for §19.9's raw and inode lines.
 	TotalByteCount uint64
 	UsedByteCount  uint64
@@ -150,6 +155,8 @@ func parseFileClusterAdminInfo(body []byte, readTime time.Time) (*FileClusterAdm
 		for _, drive := range server.Drives {
 			info.Drives = append(info.Drives, &FileClusterDriveInfo{
 				Endpoint:       drive.Endpoint,
+				Path:           drive.Path,
+				HostEndpoint:   server.Endpoint,
 				State:          drive.State,
 				Healing:        drive.Healing,
 				PoolIndex:      drive.PoolIndex,

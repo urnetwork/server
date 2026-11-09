@@ -170,6 +170,9 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// Retention is a best-effort lifetime observer. Its local reaper must not
 	// inherit the finite scheduling attempt, and storage I/O cannot gate work.
 	owner.lifetime.Go(func() { server.HandleError(func() { controller.ApplyBlobRetention(ctx) }) })
+	// §19.6's write-budget loops, one per file cluster vault names, each holding its cluster's Redis lease
+	// (evs_budget_loop.go). Without the vault file none starts.
+	startEvsBudgetLoops(ctx, &owner.lifetime)
 	statsCollected := controller.StartStatsCollector(ctx)
 	queueMetricsDone := task.StartQueueMetrics(ctx)
 	owner.lifetime.Go(func() {
