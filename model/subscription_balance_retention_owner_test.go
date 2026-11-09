@@ -103,7 +103,7 @@ func (o *retentionOwnerTrace) TraceQueryStart(ctx context.Context, conn *pgx.Con
 		o.discoveryStarts++
 		o.discoveryOpen = true
 		o.discoveryConn = conn
-	case data.SQL == completedTransferBalanceDeleteSql:
+	case data.SQL == completedTransferBalanceDeleteQuery():
 		phase = "delete"
 		o.deletes++
 		if o.transactions[conn] != "unclassified" || o.readOnly[conn] {

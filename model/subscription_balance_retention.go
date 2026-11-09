@@ -63,6 +63,37 @@ const completedTransferBalanceDeleteSql = `
 	RETURNING balance.balance_id
 `
 
+// The delete once this binary links MG2, whose service_debit_journal guards its
+// balances as transfer_debit_journal does (server/db_service_debit_journal.go): a
+// balance with a service debit row stays, rather than its guard failing the batch.
+const completedTransferBalanceDeleteWithServiceDebitsSql = `
+	DELETE FROM transfer_balance AS balance
+	WHERE balance.balance_id=ANY($1)
+		AND NOT EXISTS (
+			SELECT 1 FROM prober_shard_run
+			WHERE balance_id=balance.balance_id AND state<>'closed' OFFSET 0
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM prober_identity
+			WHERE singleton AND network_id=balance.network_id OFFSET 0
+		)
+		AND NOT EXISTS (
+			SELECT 1 FROM transfer_escrow
+			WHERE balance_id=balance.balance_id AND NOT settled OFFSET 0
+		)
+		AND NOT EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=balance.balance_id)
+		AND NOT EXISTS (SELECT 1 FROM service_debit_journal WHERE balance_id=balance.balance_id)
+	RETURNING balance.balance_id
+`
+
+// The retention delete this binary runs: a release leg has no service_debit_journal.
+func completedTransferBalanceDeleteQuery() string {
+	if server.SidecarMg2Linked() {
+		return completedTransferBalanceDeleteWithServiceDebitsSql
+	}
+	return completedTransferBalanceDeleteSql
+}
+
 // Expiry ends admission; it does not discharge escrow. Keep every unsettled
 // row, including zero-byte anchors and terminal contracts whose settlement post
 // has not finished. The old shared probe account is retained for separately
@@ -173,7 +204,7 @@ func removeCompletedTransferBalanceBatch(ctx context.Context, candidates []serve
 		// expiry; repeating that predicate here permits a scan of the entire
 		// expired index instead of primary-key reads of this page. Never lock
 		// contracts underneath a balance; settlement owns the opposite order.
-		rows, err = tx.Query(ctx, completedTransferBalanceDeleteSql, lockedIds)
+		rows, err = tx.Query(ctx, completedTransferBalanceDeleteQuery(), lockedIds)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				var id server.Id

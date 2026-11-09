@@ -540,9 +540,18 @@ func reapProberShard(ctx context.Context, key ProberShardKey) (*proberShardReap,
 				return
 			}
 			var blocked bool
-			server.Raise(tx.QueryRow(ctx, `SELECT
+			unsettledSql := `SELECT
 				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=ANY($1) AND NOT settled) OR
-				EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=ANY($1))`, lockedBalanceIds).Scan(&blocked))
+				EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=ANY($1))`
+			if server.SidecarMg2Linked() {
+				// service_debit_journal's guard keeps its balances as
+				// transfer_debit_journal's does (server/db_service_debit_journal.go)
+				unsettledSql = `SELECT
+				EXISTS (SELECT 1 FROM transfer_escrow WHERE balance_id=ANY($1) AND NOT settled) OR
+				EXISTS (SELECT 1 FROM transfer_debit_journal WHERE balance_id=ANY($1)) OR
+				EXISTS (SELECT 1 FROM service_debit_journal WHERE balance_id=ANY($1))`
+			}
+			server.Raise(tx.QueryRow(ctx, unsettledSql, lockedBalanceIds).Scan(&blocked))
 			if blocked {
 				reap.blocked = proberShardReapBlockedUnsettled
 				return
