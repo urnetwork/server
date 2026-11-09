@@ -302,3 +302,39 @@ func TestEscrowDrawOrderSpreadNeverSelectsTheLine(t *testing.T) {
 		connect.AssertEqual(t, preferred[line], false)
 	})
 }
+
+// The Redis admission census and the zero-byte anchor, the sites QUOTA-M4-02 keys by the flag: on,
+// both take the pack before a line that ends first; off, today's order takes the line.
+func TestEscrowDrawOrderCensusAndAnchorTakeThePackFirst(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		for _, drawOrder := range []bool{true, false} {
+			func() {
+				pop := Testing_SetEscrowDrawOrder(drawOrder)
+				defer pop()
+				payer := newTestingEscrowDrawPayer(t, ctx, 4096)
+				first := payer.packId
+				if !drawOrder {
+					first = payer.lineId
+				}
+
+				escrow, err := CreateTransferEscrow(ctx, payer.payerNetworkId, payer.payerId, payer.providerNetworkId, payer.providerId, 1024)
+				if err != nil {
+					t.Fatal(err)
+				}
+				drainRedisContractCompensations(t, ctx)
+				connect.AssertEqual(t, len(escrow.Balances), 1)
+				connect.AssertEqual(t, escrow.Balances[0].BalanceId, first)
+
+				anchor, err := CreateTransferEscrow(ctx, payer.payerNetworkId, payer.payerId, payer.providerNetworkId, payer.providerId, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				escrowed, _ := testingEscrowPayouts(t, ctx, anchor.ContractId)
+				_, anchored := escrowed[first]
+				connect.AssertEqual(t, len(escrowed), 1)
+				connect.AssertEqual(t, anchored, true)
+			}()
+		}
+	})
+}
