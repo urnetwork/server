@@ -96,6 +96,19 @@
     "recovery_service_installed": false,
     "pressure_qualification_passed": false
   },
-  "remaining": ["Independent recovery service and complete agent configuration", "Start isolated services and collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
+  "live_engine_probe": {
+    "attempted_at": "2026-11-09T17:42:39Z",
+    "private_namespace_and_guard": "started successfully",
+    "private_containerd": "started successfully",
+    "private_dockerd": "refused remapped-root traversal of the graphroot parent chain",
+    "cause": "/home/by is 0750. A targeted ACL granting traversal to mapped root UID 200000 does not satisfy Docker's graphroot permission check.",
+    "base_directory_mode": "0711; exact private identities/state/control children remain 0700",
+    "home_acl_added": "Traversal only for mapped root UID 200000 and worker UID 999; other remains ---",
+    "pending_user_approval": "Add only other-execute on /home/by to satisfy the pinned Docker check; do not claim the runtime is ready before retry and native validation",
+    "diagnostic_services_after_probe": "Stopped; all three process-bearing private units have MainPID=0. Existing primary Docker PostgreSQL and Redis remain healthy.",
+    "untrusted_jobs_started": 0,
+    "recovery_service_missing_observed": true
+  },
+  "remaining": ["Resolve approved home traversal policy and repeat private-engine probe", "Independent recovery service and complete agent configuration", "Collect actual native host fingerprint before freezing the two-host intake policy", "Runtime, pressure/cleanup and cross-host admission before enabling grading"],
   "grading_activated": false
 }
