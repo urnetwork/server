@@ -22,39 +22,33 @@ func newExpiredStrictExpToken() *session.ByJwt {
 
 // §22.5's §7 row: with reject_expired off, connect's transport auth refuses a
 // strict_exp token past its exp (D-TEAM-14), on both the h1 and the h3 path, which
-// share the verifier and connectClientAuthentication. A definitive refusal, before
-// any state is read, so a sidecar re-enrolls and does not retry. Pure.
+// share the verifier and connectClientAuthentication, whatever sidecar.yml says
+// about M0's p0_enforce switch. A definitive refusal, before any state is read,
+// so a sidecar re-enrolls and does not retry. Pure.
 func TestConnectRefusesAnExpiredStrictExpToken(t *testing.T) {
 	defer session.Testing_SetRejectExpired(false)()
-	defer server.Testing_PushSidecarConfig("sidecar:\n  p0_enforce: {enabled: true}\n")()
 	ctx := context.Background()
 
-	byJwt := newExpiredStrictExpToken()
-	if _, err := session.ParseByJwtForAudience(ctx, byJwt.Testing_Sign(), session.ByJwtAudienceConnect); err == nil {
-		t.Fatal("the transport's verifier passed an expired strict_exp token")
-	}
+	for _, config := range []string{"", "sidecar:\n  p0_enforce: {enabled: false}\n", "sidecar:\n  p0_enforce: {enabled: true}\n"} {
+		func() {
+			defer server.Testing_PushSidecarConfig(config)()
 
-	// the final read, which is the check a token parsed just before its exp meets
-	_, status, err := connectClientAuthentication(ctx, byJwt, server.NewId().Bytes())
-	if err == nil || status != http.StatusUnauthorized {
-		t.Fatalf("status = %d, err = %v; want 401", status, err)
-	}
-	if !connectCredentialRefused(status) {
-		t.Fatal("the refusal is not a credential refusal")
-	}
-	if connectAuthDependencyUnavailable(err) {
-		t.Fatal("the refusal reads as an outage, which a client retries")
-	}
-}
+			byJwt := newExpiredStrictExpToken()
+			if _, err := session.ParseByJwtForAudience(ctx, byJwt.Testing_Sign(), session.ByJwtAudienceConnect); err == nil {
+				t.Fatalf("%q: the transport's verifier passed an expired strict_exp token", config)
+			}
 
-// Log-only: the transport passes it, as it passes any passed exp while
-// reject_expired is off, and the verifier counts it.
-func TestConnectAcceptsAnExpiredStrictExpTokenWhileLogOnly(t *testing.T) {
-	defer session.Testing_SetRejectExpired(false)()
-	defer server.Testing_PushSidecarConfig("")()
-
-	byJwt := newExpiredStrictExpToken()
-	if _, err := session.ParseByJwtForAudience(context.Background(), byJwt.Testing_Sign(), session.ByJwtAudienceConnect); err != nil {
-		t.Fatalf("log-only refused: %s", err)
+			// the final read, which is the check a token parsed just before its exp meets
+			_, status, err := connectClientAuthentication(ctx, byJwt, server.NewId().Bytes())
+			if err == nil || status != http.StatusUnauthorized {
+				t.Fatalf("%q: status = %d, err = %v; want 401", config, status, err)
+			}
+			if !connectCredentialRefused(status) {
+				t.Fatalf("%q: the refusal is not a credential refusal", config)
+			}
+			if connectAuthDependencyUnavailable(err) {
+				t.Fatalf("%q: the refusal reads as an outage, which a client retries", config)
+			}
+		}()
 	}
 }
