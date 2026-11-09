@@ -499,6 +499,11 @@ tables:
       share_id: api-9
       target_table: api-9
       target_table_version: api-9
+  transfer_balance:
+    group: MG6
+    existing: true
+    columns:
+      tier: api-13
   mail_network:
     group: MG7
     columns:

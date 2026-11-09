@@ -5682,6 +5682,10 @@ type SubscriptionType = string
 
 const SubscriptionTypeSupporter = "supporter"
 
+// A Team network's subscription (DESIGN.md 20.5, 20.9): its renewals confer the team tier
+// through RefreshTeamTransferBalances and AddTeamGrantInTx, never through the supporter grants.
+const SubscriptionTypeTeam = "team"
+
 type SubscriptionMarket = string
 
 const SubscriptionMarketApple = "apple"
@@ -6105,9 +6109,7 @@ func AddFreeTransferBalanceToAllNetworks(
 		}
 		networkIds := []server.Id{}
 
-		result, err := tx.Query(
-			ctx,
-			`
+		freeNetworkSql := `
 				SELECT
 					network.network_id
 				FROM network
@@ -6133,7 +6135,31 @@ func AddFreeTransferBalanceToAllNetworks(
 						SELECT 1 FROM prober_shard_run
 						WHERE prober_shard_run.network_id = network.network_id
 					)
-			`,
+			`
+		if server.SidecarMg6Linked() {
+			// A Team holds no supporter renewal, and its period's grant is written
+			// before its invoice is paid (RefreshTeamTransferBalances), so a Team
+			// is excluded by its in-window team grant, read only for the few
+			// networks with a network_team row (DESIGN.md 20.5; QUOTA-M6-01). A
+			// lapsed Team's grant has ended, so it draws free grants as a lapsed
+			// Pro network does.
+			freeNetworkSql += ` AND
+					NOT EXISTS (
+						SELECT 1
+						FROM network_team
+						INNER JOIN transfer_balance team_balance ON
+							team_balance.network_id = network_team.network_id AND
+							team_balance.pro AND
+							team_balance.tier = 'team' AND
+							team_balance.start_time <= $2 AND
+							$2 < team_balance.end_time
+						WHERE network_team.network_id = network.network_id
+					)
+			`
+		}
+		result, err := tx.Query(
+			ctx,
+			freeNetworkSql,
 			SubscriptionTypeSupporter,
 			server.NowUtc(),
 		)

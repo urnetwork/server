@@ -1342,6 +1342,16 @@ func sidecarMg6BridgeMigrations() []any {
 // built concurrently, and stripe_meter_report (QUOTA's tasks).
 func sidecarMg6QuotaMigrations() []any {
 	return []any{
+		// §20.5's Source (QUOTA-M6-01): the Team grant's mark, 'team' on the
+		// period's grant and NULL on every other balance, the credit line
+		// included, so pro readers stay right and only NetworkTierOf reads it.
+		// Nullable with no default, so adding it rewrites no row. Catalog-only,
+		// but every balance query queues behind ADD COLUMN's lock, so its wait
+		// is bounded as grant_kind's was; a migrate that times out is re-run.
+		newSqlMigration(`
+			SET LOCAL lock_timeout = '2s';
+			ALTER TABLE transfer_balance ADD COLUMN tier varchar(16) NULL
+		`),
 		// §20.9's draw order (D-QUOTA-9; QUOTA-M4-02): the escrow keyset pages
 		// order and key by the team_credit flag first, so each page stays one
 		// index scan with no sort, beside today's
