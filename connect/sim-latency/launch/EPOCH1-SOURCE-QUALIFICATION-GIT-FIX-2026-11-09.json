@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "status": "CONTROL_FIX_TESTED_PENDING_NATIVE_REPLACEMENT",
+  "failed_unit": "urnetwork-epoch1-approved-source-20261109-v2.service",
+  "failed_build_owner": "f05bcf130811fb8d1d206b587bf596b575ac64bb0c4862b2243bfd0dc6c89f40",
+  "failed_test_log_sha256": "5a3a13295408f01bf2809a144cd8eeb5ec93117c49ae681b7d831f6ae2683461",
+  "failure_boundary": "TestMain nested go build of the frozen SN fixture generator, before any correctness test case ran; Git VCS status refused the root-owned SN checkout.",
+  "root_cause": "The sandbox's command-scoped Git policy admitted server only, although authenticated source includes ten independently owned repository roots and test setup builds a sibling-repository helper.",
+  "fix": "Reset inherited safe.directory, then admit each exact /workspace/<competition-repository> root. Retain disabled hooks, fsmonitor, credentials, transport and lazy fetching. Never use wildcard trust or disable Go VCS stamping.",
+  "regression": "TestSourceBuildSandboxNestedHelperRetainsSiblingVcsStamp invokes a real Go build and forced native Git ownership refusal. It verifies clean exact helper revision under the corrected production argv, then reproduces the old server-only refusal. Existing tests retain arbitrary-sibling refusal and readonly/no-helper-execution controls.",
+  "ordinary_tests": {"executions_passed": 96, "failed": 0, "opt_in_integration_skips": 3, "repetitions": 3, "log_sha256": "e7a24f67e35242d8a8cd6b992219354892ca2a0a4059852ad2ab78fe89182a92"},
+  "race_tests": {"executions_passed": 4, "failed": 0, "skipped": 0, "log_sha256": "15139a31a544a481f1a734be9864503f3fcdf726e9e84c5f2f8249863963435f"},
+  "winner_patch_changed": false,
+  "official_astra_approval_unchanged": true,
+  "image_build_succeeded": true,
+  "image_qualification_succeeded": false,
+  "source_promoted": false,
+  "original_build_deadline": "2026-11-09T16:55:40.864704993Z",
+  "replacement_constraint": "Preserve the failed owner and all evidence. The corrected control release must use an explicit fresh private attempt, no fabricated passes or model judgments, and an outer deadline earlier than the original build deadline. No scoring replicate, baseline or honesty review is redrawn."
+}
