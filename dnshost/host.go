@@ -19,6 +19,8 @@ package dnshost
 //
 // A role that cannot start for want of a file or a key is a not-ready engine,
 // so its block serves /status, never answers queries, and a deploy reverts.
+// RunHost runs either as a block, for server/cli/dns and for server/local's
+// test dns edge, which hands the API its own key windows.
 
 import (
 	"context"
@@ -30,7 +32,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 
@@ -40,6 +44,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/sidecarhost"
 )
 
 // The roles.
@@ -85,8 +90,21 @@ type HostDeps struct {
 	ProbeDialer dnsservice.DnsProbeDialer
 	// edge: where route probes go. nil posts to ApiUrl.
 	RouteProbes dnsservice.DnsRouteProbeSink
-	// api: the store. nil is Store over host.Redis.
+	// api: the store. nil is Store over host.Redis. Only a Store has <root>'s records written at start,
+	// since they go through model to Postgres, which a fake does not read.
 	Store dnsservice.DnsStore
+	// api: each root's DNSKEY window released at now (§12.6's Keys). nil releases none, so no edge
+	// becomes ready, until DNS-M5-19's KeyWindowRelease reads the windows in secret_files; server/local's
+	// test dns edge signs its own.
+	KeyWindow func(root string, now time.Time) *dnsservice.DnsKeyWindow
+}
+
+// The ports a role's block serves on, as warp maps them to the host's (WARP_PORTS).
+type HostPorts struct {
+	// GET /status's, which also serves the API's routes: 80 in a block.
+	Status int
+	// edge: DNS over UDP and TCP: 53 in a block.
+	Dns int
 }
 
 // A role that could not start: never ready, and why in its log.
@@ -166,6 +184,7 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 	apiDeps := &dnsservice.DnsApiDeps{
 		SoaReader:  dnsservice.NewDnsTcpSoaReader(hostNsAddresses(settings.Dns)),
 		Challenges: NewChallenges(),
+		KeyWindow:  deps.KeyWindow,
 	}
 	if verifyYaml, err := readHostSecret(settings, HostVerifyFileName); err == nil {
 		auth, err := dnsservice.NewDnsInternalVerifier(verifyYaml)
@@ -193,7 +212,7 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 	}
 	// <root>'s own records, which wait for the next start if they cannot be
 	// written now (a restore, or no tables)
-	if server.SidecarMg5Linked() {
+	if _, postgres := store.(*Store); postgres && server.SidecarMg5Linked() {
 		if err := model.DnsReconcileRootRecords(ctx, settings.Dns); err != nil {
 			glog.Warningf("[dns]root records wait for the next start: %v\n", err)
 		}
@@ -294,6 +313,12 @@ func (self *EdgeHost) Ready() bool {
 	return self.edge.Ready()
 }
 
+// The serial root is served at, zero before any view, and a channel that closes when it changes, so a
+// caller waits for a serial with no sleep.
+func (self *EdgeHost) ServedSerial(root string) (uint64, chan struct{}) {
+	return self.edge.ServedSerial(root)
+}
+
 // Stops new TCP work and lets queries in flight finish.
 func (self *EdgeHost) Drain() {
 	self.edge.Drain()
@@ -337,4 +362,81 @@ func NewHost(ctx context.Context, role string, host *sidecar.ServiceHost, settin
 		return NewEdgeHost(ctx, host, settings, deps)
 	}
 	return notReadyEngine{}, fmt.Errorf("dns host: role %q is neither %s nor %s", role, HostRoleApi, HostRoleEdge)
+}
+
+// Runs role as a block until ctx ends, through sidecarhost.Run (§19.4): the
+// API on a host with Postgres, ready once MG2's and MG5's tables read, or the
+// edge on a host with no Redis or Postgres handle at all (I-12), its UDP port
+// bound beside the host's TCP listener. A role that cannot start logs why and
+// serves /status not ready. Returns early only for a role that is neither, or
+// options no block could run.
+func RunHost(ctx context.Context, role string, settings *HostSettings, deps *HostDeps, ports *HostPorts) error {
+	switch role {
+	case HostRoleApi:
+		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{Postgres: true})
+		engine, err := NewApiHost(ctx, host, settings, deps)
+		if err != nil {
+			glog.Errorf("[dns]the api role is not ready: %v\n", err)
+		}
+		options := &sidecarhost.RunOptions{
+			Service:    "dns",
+			StatusPort: ports.Status,
+			Engine:     engine,
+			Postgres:   true,
+			Groups: []*sidecarhost.RunGroup{
+				{Name: "MG2", Linked: server.SidecarMg2Linked},
+				{Name: "MG5", Linked: server.SidecarMg5Linked},
+			},
+		}
+		if httpEngine, ok := engine.(sidecar.HttpEngine); ok {
+			options.Http = httpEngine
+		}
+		return sidecarhost.Run(ctx, options)
+	case HostRoleEdge:
+		host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{})
+		// an edge holds no Redis or Postgres handle at all (I-12)
+		host.Redis = nil
+		engine, err := NewEdgeHost(ctx, host, settings, deps)
+		if err != nil {
+			glog.Errorf("[dns]the edge role is not ready: %v\n", err)
+		}
+		if edgeHost, ok := engine.(*EdgeHost); ok {
+			go serveHostUdp(ctx, edgeHost, ports.Dns)
+		}
+		return sidecarhost.Run(ctx, &sidecarhost.RunOptions{
+			Service:    "dnsedge",
+			StatusPort: ports.Status,
+			Engine:     engine,
+			Stream:     engine,
+			Listeners:  []*sidecarhost.RunListener{{Port: ports.Dns}},
+		})
+	}
+	return fmt.Errorf("dns host: role %q is neither %s nor %s", role, HostRoleApi, HostRoleEdge)
+}
+
+// Binds the block's UDP port as warp maps it and serves it until ctx ends.
+func serveHostUdp(ctx context.Context, edgeHost *EdgeHost, port int) {
+	ipv4, _, hostPort := server.RequireListenIpPort(port)
+	listenConfig := net.ListenConfig{}
+	conn, err := listenConfig.ListenPacket(ctx, "udp", net.JoinHostPort(ipv4, strconv.Itoa(hostPort)))
+	if err != nil {
+		glog.Errorf("[dns]udp %d: %v\n", port, hostErrorWithoutAddress(err))
+		return
+	}
+	context.AfterFunc(ctx, func() {
+		conn.Close()
+	})
+	if err := edgeHost.ServeUdp(conn); err != nil && ctx.Err() == nil {
+		glog.Errorf("[dns]udp %d ended: %v\n", port, hostErrorWithoutAddress(err))
+	}
+}
+
+// The port alone names a socket in the log, which carries no address (I-13), and a net.OpError prints
+// the addresses it failed on.
+func hostErrorWithoutAddress(err error) error {
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Err != nil {
+		return opErr.Err
+	}
+	return err
 }
