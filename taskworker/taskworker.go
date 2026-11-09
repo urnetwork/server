@@ -871,6 +871,9 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.SweepLag,
 			work.SweepLagPost,
 		),
+		// the sidecar engines' jobs by name, evs's among them, each bound
+		// before the worker claims (evs_jobs.go)
+		sidecarTasks.Target(),
 	)
 
 	return taskWorker

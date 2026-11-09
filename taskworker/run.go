@@ -173,6 +173,11 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// §19.6's write-budget loops, one per file cluster vault names, each holding its cluster's Redis lease
 	// (evs_budget_loop.go). Without the vault file none starts.
 	startEvsBudgetLoops(ctx, &owner.lifetime)
+	// evs's jobs, bound in the sidecar registry the production worker claims
+	// from and run on the process's evs host (evs_jobs.go)
+	if options.WorkloadProfile == WorkloadProfileProduction {
+		startEvsJobs(ctx, &owner.lifetime)
+	}
 	statsCollected := controller.StartStatsCollector(ctx)
 	queueMetricsDone := task.StartQueueMetrics(ctx)
 	owner.lifetime.Go(func() {
