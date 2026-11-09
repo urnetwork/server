@@ -46,7 +46,9 @@ type monitorYaml struct {
 	FileClusters *fileClustersMonitorYaml `yaml:"file_clusters"`
 	// sidecar_dump: D-OPS-18's nightly dump of the sidecar tables (SIGNALS.md §29.6)
 	SidecarDump *sidecarDumpMonitorYaml `yaml:"sidecar_dump"`
-	Hosts       []struct {
+	// sidecar_services: the sidecar services whose §19.8 SLOs and failures this monitor reads (SIGNALS.md §30)
+	SidecarServices *sidecarServicesMonitorYaml `yaml:"sidecar_services"`
+	Hosts           []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -361,6 +363,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		},
 		DnsCanary:      loadDnsCanarySettings(y.DnsCanary),
 		SidecarStorage: loadSidecarStorageSettings(y.FileClusters, y.SidecarDump, loadMonitorFileClusters),
+		SidecarSlo:     loadSidecarSloSettings(y.SidecarServices),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -1725,5 +1728,34 @@ func loadSidecarStorageSettings(fileClusters *fileClustersMonitorYaml, sidecarDu
 	}
 	settings.AdminSource = clusters
 	settings.fileClusterIds = clusters.ClusterIds()
+	return settings
+}
+
+// monitor.yml's sidecar_services block (SIGNALS.md §30): each service whose §19.8 SLO row and failure warn
+// this monitor reads, named as slo_table.go names it, joining as the service does.
+type sidecarServicesMonitorYaml struct {
+	Services []string `yaml:"services"`
+}
+
+// §30's settings from the block: nil without one, so its signals report themselves configured off; with a
+// service that has no SLO row, or one listed twice, its error, so they report themselves blind.
+func loadSidecarSloSettings(block *sidecarServicesMonitorYaml) *SidecarSloSettings {
+	if block == nil {
+		return nil
+	}
+	settings := DefaultSidecarSloSettings()
+	seen := map[string]bool{}
+	for _, service := range block.Services {
+		if _, ok := sloRowOf(service); !ok {
+			settings.ConfigError = fmt.Sprintf("sidecar_services names %q, which §19.8 gives no SLO row", service)
+			return settings
+		}
+		if seen[service] {
+			settings.ConfigError = fmt.Sprintf("sidecar_services names %q twice", service)
+			return settings
+		}
+		seen[service] = true
+		settings.Services = append(settings.Services, service)
+	}
 	return settings
 }

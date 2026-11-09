@@ -49273,6 +49273,88 @@ Classes:
 - `sidecar-dump-unobservable` (visibility): Mimir did not read, or either
   side publishes nothing.
 
+## 30. Sidecar services — §19.8's SLOs, failures and the primary
+
+OPS-M3-02 (R-OPS-7, D-OPS-8, D-OPS-9, FS-50, owner decision 143). monitor.yml's
+`sidecar_services: {services: [evs, gkm]}` block names the services whose
+§19.8 SLO rows (`slo_table.go`) and failure warns this monitor reads, each row
+joining as its service does; without the block §30.1 and §30.2 report
+themselves configured off, which raises no incident, and with a service the
+table has no row for they report themselves blind. Their inputs are one
+bounded loopback Mimir query per run through a services host, every query
+summing its labels away, so no series, finding or page names a network, repo,
+client or route (D-OPS-8). The page classes reach §19.8's rota at any hour from
+M3 through the pager (alert_pager.go).
+
+`monitor check-burn --service=<svc>` reads §30.1's state for one service now
+and exits 0 clear, 1 burning (either line crossed) or unknown (an objective
+unobservable, a service not joined, or no settings); build/all's
+`warp_rollout_gate` runs it before every rollout wave, and an operator
+overrides a stop by naming the service in `ROLLOUT_STOP_OVERRIDE`
+(plan-OPS-small-readings #11). For `dns` and the dns edges it also runs §28.1's
+canary once, an open `dns-canary-signature` or `dns-ns-serial-divergence`
+counting as burning (Q-OPS-5).
+
+### 30.1 Sidecar SLO budget burn
+
+Probe: `slo-burn`
+
+Each minute, from Mimir, for each objective of each listed service's row: its
+events over 30 days, its bad events over the last hour and 6 h, whether its
+series is current, and whether it reaches back 30 days. An availability
+objective counts `urnetwork_<svc>_http_requests_total`, a 5xx bad; a latency
+objective counts its histogram, an event past its bound (which must be one of
+its buckets) bad. The budget is 1 - target of the 30 days' events. Objectives
+whose SLI their owner has not published yet (evs's head to hint, gkm's commit,
+tlsedge's, mxedge's, smtpedge's, dns's, certs', wakes', projections' and the
+file cluster's) read unobservable, never healthy.
+
+Classes:
+
+- `slo-burn-page` **PAGE**, sustained 2 runs: 2% of a 30-day budget burned
+  in 1 h. Roll back or switch off (D-OPS-10).
+- `slo-burn-warn` **WARN**, sustained 2 runs: 10% of it burned in 6 h, so a
+  slow burn only warns.
+- `slo-unobservable` (visibility): no current series, under 30 days of data,
+  no event in 30 days, a bound that is no bucket, an unpublished SLI, or
+  Mimir did not read. A budget is a share of 30 days' requests, so a service
+  younger than that has no denominator, and stops its rollout steps until an
+  operator names it.
+
+### 30.2 Sidecar service failures
+
+Probe: `sidecar-service-failures`
+
+Each minute, from Mimir, for each listed service: its requests and 5xx answers
+over the last 5 minutes from `urnetwork_<svc>_http_requests_total`, every route
+and block summed.
+
+Classes:
+
+- `sidecar-service-failure` **WARN**, sustained 2 runs: past 1% of the
+  service's requests answered 5xx, once the window holds 100.
+- `sidecar-service-failure-unobservable` (visibility): no current series, or
+  failures not published as http requests yet (the push sender, the edges,
+  dns and certs, until their owners publish theirs).
+
+### 30.3 PostgreSQL primary serving
+
+Probe: `postgres-primary`
+
+Every 30 s, the monitor's read-only session asks the pg-primary host's
+Postgres which host answered (`pg_primary_guard.go`) and whether it is in
+recovery.
+
+Classes:
+
+- `postgres-primary-down` **PAGE**, sustained 2 runs: psql reached the host
+  and its Postgres refused (connection refused, starting up, shutting down,
+  in recovery mode), or it answered in recovery, a replica where the primary
+  should be. The token exchange stops with it. Repair or restore (§19.10).
+- A host that cannot be reached, an answer from another host than the
+  inventory's primary, or a malformed answer is a `cannot-observe` visibility
+  alert: neither reads as healthy.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress

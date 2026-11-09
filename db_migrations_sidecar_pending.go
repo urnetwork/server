@@ -1518,7 +1518,134 @@ func sidecarMg9Migrations() []any {
 	)
 }
 
-// MG9's §14 part: smtp_*, smtp_send partitioned daily (SMTP-M9-17).
+// MG9's §14 part: smtp_send, smtp_halt and smtp_dkim_key (SMTP-M9-18), the rest
+// of §14.14's tables after MG5's report tables (plan-SMTP-report-intake-home).
+// Every column is one of §2.8's smtp-3, smtp-4 or smtp-6 (I-18): a send keeps
+// the MX host and never its IP, and no table holds a recipient, a third-party
+// address, a subject, a record length or a key that opens a session
+// (D-SMTP-10). Results, triggers, states and algorithms are varchar, never
+// ENUM. smtp_send is the only partitioned table here, daily by send_day: the
+// registry makes leaves ahead and an insert that finds none makes its day's
+// (model/smtp_send_model.go), and SMTP-M9-17's retention takes a day at 30 days
+// once §21.9's holds have copied their networks' rows. Nothing reads these
+// tables unless the binary links MG9 (server.SidecarMg9Linked).
 func sidecarMg9SmtpMigrations() []any {
-	return []any{}
+	return []any{
+		// one send record (smtp-3), written after its connection ends: send_id
+		// is the 12 random octets X-UR-Ref carries, send_day the UTC day the
+		// connection started, which keys its partition. sending_address is the
+		// edge's own lb address, never a third party's; mx_host the MX's name.
+		// message_id_hash is SHA-256 of the proven Message-ID, x_ur_ref_key_id
+		// the X-UR-Ref key's id, recipient_count and message_byte_count Z4's
+		// proven counts, tls_version the IANA value and tls_level §14.4's 1 to
+		// 4. retry_of_send_id names the send a preamble retried. The primary
+		// key makes a batch's retry insert nothing twice.
+		newSqlMigration(`
+			CREATE TABLE smtp_send (
+				send_day date NOT NULL,
+				send_id bytea NOT NULL,
+				network_id uuid NOT NULL,
+				client_id uuid NOT NULL,
+				sending_address inet NOT NULL,
+				recipient_domain varchar(253) NOT NULL,
+				mx_host varchar(253) NOT NULL,
+				start_time timestamp NOT NULL,
+				end_time timestamp NOT NULL,
+				byte_count bigint NOT NULL,
+				message_id_hash bytea NULL,
+				x_ur_ref_key_id smallint NOT NULL,
+				recipient_count bigint NOT NULL,
+				message_byte_count bigint NOT NULL,
+				tls_version integer NOT NULL,
+				tls_level smallint NOT NULL,
+				result varchar(32) NOT NULL,
+				retry_of_send_id bytea NULL,
+
+				PRIMARY KEY (send_day, send_id),
+				CHECK (send_day = start_time::date)
+			) PARTITION BY RANGE (send_day)
+		`),
+		// SmtpJoinKey's four selective fields (§14.8's joins): a verified
+		// X-UR-Ref's send id, a reported Message-ID's hash, the network whose
+		// selector signed, and the last-hop Received address in a window, the
+		// network's also serving RecipientCount and the RUA reconciliation
+		newSqlMigration(`
+			CREATE INDEX smtp_send_send_id ON smtp_send (send_id)
+		`),
+		newSqlMigration(`
+			CREATE INDEX smtp_send_message_id_hash ON smtp_send (message_id_hash) WHERE message_id_hash IS NOT NULL
+		`),
+		newSqlMigration(`
+			CREATE INDEX smtp_send_network_id ON smtp_send (network_id, start_time)
+		`),
+		newSqlMigration(`
+			CREATE INDEX smtp_send_sending_address ON smtp_send (sending_address, start_time)
+		`),
+
+		// a halt (smtp-4; D-SMTP-9): the network, or one burner label of it,
+		// the §14.8 trigger and the report's arrival, from which it holds 24 h.
+		// A halt set again under its id replaces the row. Kept 13 months.
+		newSqlMigration(`
+			CREATE TABLE smtp_halt (
+				halt_id uuid NOT NULL,
+				network_id uuid NOT NULL,
+				label varchar(63) NULL,
+				trigger varchar(32) NOT NULL,
+				start_time timestamp NOT NULL,
+
+				PRIMARY KEY (halt_id)
+			)
+		`),
+		// the edges' 60 s reload of the halts still holding, and the 13-month
+		// retention cursor
+		newSqlMigration(`
+			CREATE INDEX smtp_halt_start_time ON smtp_halt (start_time)
+		`),
+		// one network's halts: GET /smtp/status and §14.8's 3 halts in 30 days
+		newSqlMigration(`
+			CREATE INDEX smtp_halt_network_id ON smtp_halt (network_id, start_time)
+		`),
+
+		// a sending sidecar's DKIM public key under its opaque selector at its
+		// d= (smtp-6; owner decision 36), a network's or a replying burner's,
+		// both lowercase. algorithm is rsa-sha256 or ed25519-sha256, public_key
+		// the DER SubjectPublicKeyInfo or the 32 Ed25519 octets. state is
+		// published, retired (rotated out and still in DNS for 7 days) or
+		// removed (out of DNS): retire_time is when it was rotated out or its
+		// sidecar removed, remove_time when it left DNS, from which the row
+		// keeps 30 days so late reports still check against it (§14.14).
+		newSqlMigration(`
+			CREATE TABLE smtp_dkim_key (
+				selector varchar(63) NOT NULL,
+				domain varchar(253) NOT NULL,
+				network_id uuid NOT NULL,
+				sidecar_id uuid NOT NULL,
+				algorithm varchar(32) NOT NULL,
+				public_key bytea NOT NULL,
+				state varchar(16) NOT NULL,
+				publish_time timestamp NOT NULL,
+				retire_time timestamp NULL,
+				remove_time timestamp NULL,
+
+				PRIMARY KEY (selector, domain)
+			)
+		`),
+		// a network's selectors, counted against dns_dkim_selectors
+		newSqlMigration(`
+			CREATE INDEX smtp_dkim_key_network_id ON smtp_dkim_key (network_id, state)
+		`),
+		// a removed sidecar's selectors, deleted from DNS in its removal's write
+		// (I-15)
+		newSqlMigration(`
+			CREATE INDEX smtp_dkim_key_sidecar_id ON smtp_dkim_key (sidecar_id)
+		`),
+		// key expiry's two clocks: out of DNS 7 days after retiring, and the
+		// row's end 30 days after that
+		newSqlMigration(`
+			CREATE INDEX smtp_dkim_key_retire_time ON smtp_dkim_key (retire_time) WHERE retire_time IS NOT NULL
+		`),
+		newSqlMigration(`
+			CREATE INDEX smtp_dkim_key_remove_time ON smtp_dkim_key (remove_time) WHERE remove_time IS NOT NULL
+		`),
+	}
 }

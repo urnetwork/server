@@ -329,7 +329,7 @@ func TestSmtpReportRowsRefuseWhatAColumnCannotHold(t *testing.T) {
 			report := smtpTestAggregate("reporter.example", smtpTestReportId(), networkId, 1)
 			change(report)
 			inserted, err := store.InsertAggregate(ctx, report)
-			if inserted || !errors.Is(err, ErrSmtpReportRefused) {
+			if inserted || !errors.Is(err, ErrSmtpRowRefused) {
 				t.Errorf("%s: %t, %v", name, inserted, err)
 			}
 		}
@@ -346,7 +346,7 @@ func TestSmtpReportRowsRefuseWhatAColumnCannotHold(t *testing.T) {
 		for name, change := range complaints {
 			complaint := smtpTestComplaint(networkId, server.NowUtc())
 			change(complaint)
-			if err := store.InsertComplaint(ctx, complaint); !errors.Is(err, ErrSmtpReportRefused) {
+			if err := store.InsertComplaint(ctx, complaint); !errors.Is(err, ErrSmtpRowRefused) {
 				t.Errorf("%s: %v", name, err)
 			}
 		}
