@@ -198,8 +198,8 @@ const (
 	clientMarksUnavailableMessage = "This server cannot mark a client yet."
 	clientMarksImmutableMessage   = "A client's marks are assigned at creation and cannot be changed."
 	// D-TRUST-3: until stage 2 is live, a strict_exp client exists only in a
-	// network sidecar.yml's preview_networks lists
-	clientStrictExpNotPreviewMessage = "This network cannot hold sidecar clients yet."
+	// network sidecar.yml's preview_networks lists (SidecarPreviewAllowed)
+	clientStrictExpNotPreviewMessage = SidecarPreviewRefusedMessage
 	// a hosted proxy's host mints its token with no mark, so a strict_exp client
 	// never has one
 	clientStrictExpProxyMessage = "A sidecar client cannot host a proxy."
@@ -211,7 +211,7 @@ func refuseClientMarks(networkId server.Id, marks clientMarks, proxy bool) strin
 	if !marks.strictExp {
 		return ""
 	}
-	if !server.CurrentSidecarConfig().PreviewNetwork(networkId) {
+	if !SidecarPreviewAllowed(networkId) {
 		return clientStrictExpNotPreviewMessage
 	}
 	if proxy {

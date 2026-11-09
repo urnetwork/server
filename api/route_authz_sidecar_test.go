@@ -26,12 +26,12 @@ import (
 // local vault key, the model's decisions are replaced, and no request reaches a
 // handler.
 
-const p0EnforceYaml = "sidecar:\n  p0_enforce: {enabled: true}\n"
-
-// Turns enforcement on through sidecar.yml for the test, as M1's config push does.
-func pushP0Enforce(t testing.TB) {
-	t.Helper()
-	t.Cleanup(server.Testing_PushSidecarConfig(p0EnforceYaml))
+// What sidecar.yml can say about M0's p0_enforce switch, none of which moves a
+// refusal since M1: absent, off and on.
+var p0EnforceConfigs = []string{
+	"",
+	"sidecar:\n  p0_enforce: {enabled: false}\n",
+	"sidecar:\n  p0_enforce: {enabled: true}\n",
 }
 
 type strictExpTokens struct {
@@ -95,11 +95,10 @@ func childAdminCallCount(routeKey string, refusal string, result string) float64
 	return testutil.ToFloat64(childAdminCallCounter.WithLabelValues(routeKey, refusal, result))
 }
 
-// Stage 1 reaches production log-only: a child or admin_refused client's token
-// keeps being served on each of the 37 routes, and each such call is counted for
-// the 14 days that decide the flip. Turning the gate on in the config, with no
-// other change, refuses them; taking it off serves them again.
-func TestClientAdminRefusalIsLogOnlyUntilTheConfigEnforcesIt(t *testing.T) {
+// Stage 1 enforced: a child or admin_refused client's token is refused with 403
+// on each of the 37 routes, before its handler, and each refusal is counted,
+// whatever sidecar.yml says about M0's switch or whether it is there at all.
+func TestClientAdminRefusalIsEnforcedWhateverTheConfigSays(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return false
@@ -116,69 +115,51 @@ func TestClientAdminRefusalIsLogOnlyUntilTheConfigEnforcesIt(t *testing.T) {
 	}
 	authorization := "Bearer " + tokens.clientToken
 
-	popLogOnly := server.Testing_PushSidecarConfig("")
-	for _, route := range routes {
-		key := routeAccessKey(route)
-		before := childAdminCallCount(key, p0RefusalClientAdmin, "logged")
-		w, reached := serveStubbed(route, authorization, nil)
-		if !reached || w.Code != http.StatusOK {
-			t.Fatalf("log-only %s: status = %d, handler ran = %t; want the handler", key, w.Code, reached)
-		}
-		if after := childAdminCallCount(key, p0RefusalClientAdmin, "logged"); after != before+1 {
-			t.Fatalf("log-only %s: counted %v, want one", key, after-before)
-		}
+	for _, config := range p0EnforceConfigs {
+		func() {
+			defer server.Testing_PushSidecarConfig(config)()
+			for _, route := range routes {
+				key := routeAccessKey(route)
+				before := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused)
+				w, reached := serveStubbed(route, authorization, nil)
+				if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
+					t.Fatalf("%q %s: status = %d body = %q, handler ran = %t; want 403 refused", config, key, w.Code, w.Body.String(), reached)
+				}
+				if after := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused); after != before+1 {
+					t.Fatalf("%q %s: counted %v, want one", config, key, after-before)
+				}
+			}
+		}()
 	}
-	popLogOnly()
 	if !asked[tokens.networkId] {
 		t.Fatal("the client refusal was not asked about the token's network")
 	}
-
-	popEnforce := server.Testing_PushSidecarConfig(p0EnforceYaml)
-	for _, route := range routes {
-		key := routeAccessKey(route)
-		before := childAdminCallCount(key, p0RefusalClientAdmin, "refused")
-		w, reached := serveStubbed(route, authorization, nil)
-		if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
-			t.Fatalf("enforced %s: status = %d body = %q, handler ran = %t; want 403 refused", key, w.Code, w.Body.String(), reached)
-		}
-		if after := childAdminCallCount(key, p0RefusalClientAdmin, "refused"); after != before+1 {
-			t.Fatalf("enforced %s: counted %v, want one", key, after-before)
-		}
-	}
-	popEnforce()
-
-	defer server.Testing_PushSidecarConfig("sidecar:\n  p0_enforce: {enabled: false}\n")()
-	if _, reached := serveStubbed(routes[0], authorization, nil); !reached {
-		t.Fatal("taking the gate off did not serve the token again")
-	}
 }
 
-// Enforced, a legacy client keeps the routes: the shipped apps call them with such
+// A legacy client keeps the routes: the shipped apps call them with such
 // a token until stage 3, so it is neither refused nor counted.
 func TestEnforcementLeavesALegacyClientItsAdminRoutes(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return false
 	})
-	pushP0Enforce(t)
 
 	for _, route := range clientAdminRoutes() {
 		key := routeAccessKey(route)
-		before := childAdminCallCount(key, p0RefusalClientAdmin, "refused")
+		before := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused)
 		w, reached := serveStubbed(route, "Bearer "+tokens.clientToken, nil)
 		if !reached || w.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d, handler ran = %t; want the handler", key, w.Code, reached)
 		}
-		if after := childAdminCallCount(key, p0RefusalClientAdmin, "refused"); after != before {
+		if after := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused); after != before {
 			t.Fatalf("%s: counted a legacy client", key)
 		}
 	}
 }
 
-// What an Embed network already refuses stays refused while stage 1 is log-only,
-// and is not one of stage 1's refusals, so the count stays a measure of what
-// enforcement will add.
-func TestEmbedRefusalIsNotLogOnly(t *testing.T) {
+// What an Embed network already refuses it refuses on its own, and is not one of
+// stage 1's refusals, so the count stays a measure of what stage 1 refuses.
+func TestEmbedRefusalIsNotCountedAsStageOne(t *testing.T) {
 	tokens := newRouteAccessTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return true
@@ -187,15 +168,14 @@ func TestEmbedRefusalIsNotLogOnly(t *testing.T) {
 		t.Fatal("the client refusal was asked about a refused network")
 		return true
 	})
-	defer server.Testing_PushSidecarConfig("")()
 
 	for _, route := range clientAdminRoutes() {
 		key := routeAccessKey(route)
-		before := childAdminCallCount(key, p0RefusalClientAdmin, "logged")
+		before := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused)
 		if w, reached := serveStubbed(route, "Bearer "+tokens.clientToken, nil); reached || w.Code != http.StatusForbidden {
 			t.Fatalf("%s: status = %d, handler ran = %t; want 403", key, w.Code, reached)
 		}
-		if after := childAdminCallCount(key, p0RefusalClientAdmin, "logged"); after != before {
+		if after := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused); after != before {
 			t.Fatalf("%s: counted an Embed refusal", key)
 		}
 	}
@@ -269,7 +249,6 @@ func TestSidecarTokenRoutes(t *testing.T) {
 		setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 			return false
 		})
-		pushP0Enforce(t)
 
 		listed := []string{}
 		for key := range strictExpRoutes {
@@ -344,7 +323,6 @@ func TestStrictExpTokenIsRefusedOnEveryPaymentRoute(t *testing.T) {
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return false
 	})
-	pushP0Enforce(t)
 
 	families := []string{
 		"/pay/", "/stripe/", "/solana/", "/subscription/", "/x402/", "/wallet/", "/test/balance-",
@@ -376,34 +354,34 @@ func TestStrictExpTokenIsRefusedOnEveryPaymentRoute(t *testing.T) {
 	}
 }
 
-// Log-only leaves a strict_exp token where any client token stands: counted off
-// its list, and still refused by whatever already refuses a client token.
-func TestStrictExpGateIsLogOnlyUntilTheConfigEnforcesIt(t *testing.T) {
+// Off its list a strict_exp token is refused and counted, whatever sidecar.yml
+// says about M0's switch, on a route any client token reaches and on one that
+// refuses every client token alike: the sidecar refusal is what it hears.
+func TestStrictExpGateRefusesWhateverTheConfigSays(t *testing.T) {
 	tokens := newStrictExpTokens()
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return false
 	})
-	defer server.Testing_PushSidecarConfig("")()
 
 	routes := Routes()
 	byKey := func(key string) *router.Route {
 		return routes[slices.IndexFunc(routes, func(route *router.Route) bool { return routeAccessKey(route) == key })]
 	}
 
-	for key, want := range map[string]int{
-		"GET /transfer/stats":     http.StatusOK,
-		"POST /stats/leaderboard": http.StatusOK,
-		// a network-only route keeps refusing every client token
-		"POST /account/api-key": http.StatusForbidden,
-	} {
-		before := childAdminCallCount(key, p0RefusalStrictExp, "logged")
-		w, _ := serveStubbed(byKey(key), "Bearer "+tokens.strictToken, nil)
-		if w.Code != want {
-			t.Errorf("%s: status = %d, want %d", key, w.Code, want)
-		}
-		if after := childAdminCallCount(key, p0RefusalStrictExp, "logged"); after != before+1 {
-			t.Errorf("%s: counted %v, want one", key, after-before)
-		}
+	for _, config := range p0EnforceConfigs {
+		func() {
+			defer server.Testing_PushSidecarConfig(config)()
+			for _, key := range []string{"GET /transfer/stats", "POST /stats/leaderboard", "POST /account/api-key"} {
+				before := childAdminCallCount(key, p0RefusalStrictExp, p0ResultRefused)
+				w, reached := serveStubbed(byKey(key), "Bearer "+tokens.strictToken, nil)
+				if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
+					t.Errorf("%q %s: status = %d body = %q, handler ran = %t; want the sidecar refusal", config, key, w.Code, w.Body.String(), reached)
+				}
+				if after := childAdminCallCount(key, p0RefusalStrictExp, p0ResultRefused); after != before+1 {
+					t.Errorf("%q %s: counted %v, want one", config, key, after-before)
+				}
+			}
+		}()
 	}
 }
 
@@ -415,7 +393,6 @@ func TestStrictExpTokenIsRefusedOnTheTokenRoute(t *testing.T) {
 	setNetworkRefusesClientAdmin(t, func(ctx context.Context, networkId server.Id) bool {
 		return false
 	})
-	pushP0Enforce(t)
 
 	const key = "POST /oauth/token"
 	routes := Routes()
@@ -432,7 +409,7 @@ func TestStrictExpTokenIsRefusedOnTheTokenRoute(t *testing.T) {
 		"refresh_token",
 		"urn:ietf:params:oauth:grant-type:token-exchange",
 	} {
-		before := childAdminCallCount(key, p0RefusalStrictExp, "refused")
+		before := childAdminCallCount(key, p0RefusalStrictExp, p0ResultRefused)
 		w, reached := serveStubbed(route, "Bearer "+tokens.strictToken, func(r *http.Request) {
 			r.Body = io.NopCloser(strings.NewReader("grant_type=" + url.QueryEscape(grantType)))
 			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -440,7 +417,7 @@ func TestStrictExpTokenIsRefusedOnTheTokenRoute(t *testing.T) {
 		if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpCredentialRefusedMessage {
 			t.Errorf("%s: status = %d body = %q, handler ran = %t; want the sidecar refusal", grantType, w.Code, w.Body.String(), reached)
 		}
-		if after := childAdminCallCount(key, p0RefusalStrictExp, "refused"); after != before+1 {
+		if after := childAdminCallCount(key, p0RefusalStrictExp, p0ResultRefused); after != before+1 {
 			t.Errorf("%s: counted %v, want one", grantType, after-before)
 		}
 	}
@@ -535,7 +512,6 @@ func proofRoutes() []*router.Route {
 func TestACopiedStrictExpTokenFailsWithoutItsKey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
 		self := newStrictExpProofFixture(t)
-		pushP0Enforce(t)
 		authorization := "Bearer " + self.tokens.strictToken
 
 		routes := proofRoutes()
@@ -546,12 +522,12 @@ func TestACopiedStrictExpTokenFailsWithoutItsKey(t *testing.T) {
 			key := routeAccessKey(route)
 			requireRefused := func(name string, edit func(r *http.Request)) {
 				t.Helper()
-				before := childAdminCallCount(key, p0RefusalProof, "refused")
+				before := childAdminCallCount(key, p0RefusalProof, p0ResultRefused)
 				w, reached := serveStubbed(route, authorization, edit)
 				if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpProofRefusedMessage {
 					t.Fatalf("%s %s: status = %d body = %q, handler ran = %t; want the proof refused", key, name, w.Code, w.Body.String(), reached)
 				}
-				if after := childAdminCallCount(key, p0RefusalProof, "refused"); after != before+1 {
+				if after := childAdminCallCount(key, p0RefusalProof, p0ResultRefused); after != before+1 {
 					t.Fatalf("%s %s: counted %v", key, name, after-before)
 				}
 			}
@@ -568,31 +544,36 @@ func TestACopiedStrictExpTokenFailsWithoutItsKey(t *testing.T) {
 	})
 }
 
-// With no key bound a proof cannot pass (§7.4), and until enforcement the call is
-// counted and served, which keeps M0's bearers working and honest. The network
-// credential and an ordinary client token are never asked for a proof.
-func TestStrictExpProofGateIsLogOnlyUntilTheConfigEnforcesIt(t *testing.T) {
+// With no key bound a proof cannot pass (§7.4), so the call is refused and
+// counted, whatever sidecar.yml says. The network credential and an ordinary
+// client token are never asked for a proof.
+func TestStrictExpProofGateRefusesAClientWithNoBoundKey(t *testing.T) {
 	tokens := newStrictExpTokens()
 	strictExpProofStub(t)
-	defer server.Testing_PushSidecarConfig("")()
 
-	for _, route := range proofRoutes() {
-		key := routeAccessKey(route)
-		before := childAdminCallCount(key, p0RefusalProof, "logged")
-		if w, reached := serveStubbed(route, "Bearer "+tokens.strictToken, nil); !reached || w.Code != http.StatusOK {
-			t.Fatalf("%s: status = %d, handler ran = %t; want the handler", key, w.Code, reached)
-		}
-		if after := childAdminCallCount(key, p0RefusalProof, "logged"); after != before+1 {
-			t.Fatalf("%s: counted %v, want one", key, after-before)
-		}
+	for _, config := range p0EnforceConfigs {
+		func() {
+			defer server.Testing_PushSidecarConfig(config)()
+			for _, route := range proofRoutes() {
+				key := routeAccessKey(route)
+				before := childAdminCallCount(key, p0RefusalProof, p0ResultRefused)
+				w, reached := serveStubbed(route, "Bearer "+tokens.strictToken, nil)
+				if reached || w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.StrictExpProofRefusedMessage {
+					t.Fatalf("%q %s: status = %d body = %q, handler ran = %t; want the proof refused", config, key, w.Code, w.Body.String(), reached)
+				}
+				if after := childAdminCallCount(key, p0RefusalProof, p0ResultRefused); after != before+1 {
+					t.Fatalf("%q %s: counted %v, want one", config, key, after-before)
+				}
 
-		before = childAdminCallCount(key, p0RefusalProof, "logged")
-		if _, reached := serveStubbed(route, "Bearer "+tokens.clientToken, nil); !reached {
-			t.Fatalf("%s: an ordinary client token was refused", key)
-		}
-		if after := childAdminCallCount(key, p0RefusalProof, "logged"); after != before {
-			t.Fatalf("%s: an ordinary client token was counted", key)
-		}
+				before = childAdminCallCount(key, p0RefusalProof, p0ResultRefused)
+				if _, reached := serveStubbed(route, "Bearer "+tokens.clientToken, nil); !reached {
+					t.Fatalf("%s: an ordinary client token was refused", key)
+				}
+				if after := childAdminCallCount(key, p0RefusalProof, p0ResultRefused); after != before {
+					t.Fatalf("%s: an ordinary client token was counted", key)
+				}
+			}
+		}()
 	}
 }
 

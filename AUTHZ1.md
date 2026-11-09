@@ -13,8 +13,8 @@ Branch `fix/client-jwt-admin-authz`, from main `9a89d017`, merged with main `534
 
 The sidecar's P0 auth fix (DESIGN.md §7.4) refuses child and marked clients on
 the App admin and Own client payout routes and confines sidecar tokens to an
-allowlist, log-only until sidecar.yml's `p0_enforce`. session/AUTH.md §4 is the
-reference.
+allowlist. M0 ran it log-only behind sidecar.yml's `p0_enforce`; since M1 it
+refuses in code. session/AUTH.md §4 is the reference.
 
 Follow-up branch `feat/embed-was-enabled`, from main `ef0b9353`: the owner's
 decisions 2 and 3 (migration 802 remembers a network that was Embed-enabled;

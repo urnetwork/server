@@ -7,7 +7,7 @@ How the server authenticates a request or a connection, and what each credential
 - [REVOKE-OPERATIONS.md](REVOKE-OPERATIONS.md): tracked sessions and revocation.
 - [EMBED1.md](../EMBED1.md): the Embed plan.
 
-State as of 2026-11-06. What the sidecar's P0 auth fix adds (DESIGN.md §7.4) is built log-only and marked below; §8 says what turns it on.
+State as of 2026-11-08. What the sidecar's P0 auth fix adds (DESIGN.md §7.4) is marked below. M0 built it log-only behind `p0_enforce` (§8); since M1 it refuses in code.
 
 ## Terms
 
@@ -90,8 +90,8 @@ Every API request (`ClientSession.Auth`) and every connect transport (`connect/t
    - A wrong `iss`, `aud` or `sub`, or a future `nbf` or `iat`, is always refused.
    - A token with no `exp` (or other missing claims) is accepted only while vault `auth.yml` `reject_missing_expiration` is false.
    - An expired token is accepted only while `reject_expired` is false, with 30 s of leeway.
-   - Each such acceptance counts in `urnetwork_auth_jwt_legacy_accepts_total{cause,kind}`, where `kind` is `network` or `client`. A sidecar token's counts under the cause `strict_expired`.
-3. **Session horizon.** A token that carries `session_id` or `root_client_id` must have `exp`. It is refused from `exp + 60 days + 30 s`, whatever the gates say. A sidecar token must have `exp`, `client_id` and `root_client_id`, and once `p0_enforce` is on (§8) it is refused from `exp` itself, with no leeway, whatever `reject_expired` or the 60 days say. The check runs wherever a credential is accepted, so an authorization lease retires a sidecar's transport at `exp`.
+   - Each such acceptance counts in `urnetwork_auth_jwt_legacy_accepts_total{cause,kind}`, where `kind` is `network` or `client`. A sidecar token is never one: the session horizon refuses it at `exp` first. M0's log-only days counted it under the cause `strict_expired`.
+3. **Session horizon.** A token that carries `session_id` or `root_client_id` must have `exp`. It is refused from `exp + 60 days + 30 s`, whatever the gates say. A sidecar token must have `exp`, `client_id` and `root_client_id`, and it is refused from `exp` itself, with no leeway, whatever `reject_expired`, the 60 days or `sidecar.yml` say. The check runs wherever a credential is accepted, so an authorization lease retires a sidecar's transport at `exp`.
 4. **Session marker.** A `session_id` is checked against its Redis revocation marker. If Redis is unavailable, the token is refused; there is no fallback.
 5. **Account state, in one database read** (`ValidateByJwtState`).
    - The network exists and the user is its admin.
@@ -159,14 +159,14 @@ Every route has a class in `api/route_authz.go`: 241 routes as of 2026-10-13.
 
 **The lag guest gate.** Separate from the classes, every route except `GET /lag/extenders` and `POST /lag/track` (`lagGuestRoutes`) refuses a lag guest's token (§1) with **403**, "A lag.dev guest token works only on the lag.dev routes.". This includes the Public routes. The gate reads the `lag_guest` claim unverified, so any other credential costs one decode of its claims. It verifies a token that claims to be a guest's before refusing it; a token that fails verification goes to the handler, as above. `TestLagGuestTokenServesOnlyTheLagRoutes` keeps every route but the two gated.
 
-**The P0 auth fix (DESIGN.md §7.4, stage 1 and D-TEAM-14).** Each of the three `refusal` values below is counted in `urnetwork_auth_child_admin_calls_total{route,refusal,result}`, and until `p0_enforce` is on (§8) that is all it does: `result` is `logged` and the call goes through. Once it is on, `result` is `refused`. None of this changes what a network credential does.
+**The P0 auth fix (DESIGN.md §7.4, stage 1 and D-TEAM-14).** Each of the three `refusal` values below refuses the call and is counted in `urnetwork_auth_child_admin_calls_total{route,refusal,result}` with `result="refused"`. M0 ran them log-only behind `p0_enforce` (§8), counting `result="logged"` and letting the call through, for stage 1's 14 days in production; since M1 they refuse in code, whatever `sidecar.yml` says or whether it is there. None of this changes what a network credential does.
 
 - **Marks.** `POST /network/auth-client` takes `admin_refused: true` and `strict_exp: true` and confirms them in its reply. `strict_exp` implies `admin_refused`. A new client keeps them for life, its children inherit both, and a re-auth may repeat them but never add one. A binary that does not link migration group MG0 refuses a request for a mark rather than dropping it.
 - **`refusal="client_admin"`.** On the 27 AppAdmin and 10 OwnClientPayout routes, a child's token or an `admin_refused` client's token is refused with the client token message (`model.ClientRefusesAdmin`). So is one whose client cannot be read; those count in `urnetwork_auth_client_admin_lookup_errors_total` too. A top-level client with no owner row is a legacy client and keeps the routes until the hard gate. Both facts are immutable, so each process caches the answer.
 - **`refusal="strict_exp_route"`.** A sidecar token reaches only the routes `strictExpRoutes` lists, and every other route, a Public one or an unclassified one included, answers **403**, "A sidecar token cannot call this route.", before its handler. `TestSidecarTokenRoutes` keeps the list exact. The route's own class still applies.
 - **`refusal="strict_exp_proof"`.** On `GET /auth/refresh` and `POST /network/auth-client` a sidecar token also carries a `DPoP` header (RFC 9449, `session/dpop_proof.go`) signed by the client's bound key, or the call is refused with **403**, so the sdk does not sign out. The key lookup (`model.ClientProofPublicKey`) reads tables migration group MG1 creates, so until then no client has a bound key and every proof fails, which is §7.4's rule for a client with none.
-- **Preview.** Until stage 2, a mint that ends in a sidecar token is refused outside `preview_networks` (§8). It is a refusal in every mode.
-- **Payment.** A sidecar token is refused `X-PAYMENT` on `POST /network/auth-client`, in every mode: no client holds one yet, so this needs no log-only days.
+- **Preview.** Until stage 2, a mint that ends in a sidecar token is refused outside `preview_networks` (§8), "This network cannot hold sidecar clients yet." (`model.SidecarPreviewAllowed`). An absent or unreadable `sidecar.yml` lists no network, so it refuses. `POST /network/enroll` asks the same when it lands.
+- **Payment.** A sidecar token is refused `X-PAYMENT` on `POST /network/auth-client`. It never had log-only days: no client held one when it landed.
 
 **Embed.**
 
@@ -249,10 +249,10 @@ The values are read once per process, so a flip needs a restart.
 
 | config `sidecar.yml` | main, 2026-11-06 | Effect |
 |---|---|---|
-| `p0_enforce: {enabled: …}` | absent (false) | The P0 auth fix (§4) and the sidecar token's `exp` refuse what they otherwise only count. On at M1, after 14 log-only days of `urnetwork_auth_child_admin_calls_total` |
+| `p0_enforce: {enabled: …}` | absent (false) | M0's switch: the P0 auth fix (§4) and the sidecar token's `exp` refused only while it was on. Since M1 they refuse in code and nothing reads it |
 | `preview_networks: […]` | absent (empty) | The networks that may hold sidecar tokens before stage 2 |
 
-`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse, or is there but cannot be read (a dangling link, a directory, an inaccessible config home), keeps the last good read, and on a process's first read it enforces and previews nothing. Only a file absent from every config home is inert. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
+`config/<env>/sidecar.yml` is optional and inert when absent. Services reread it every 60 seconds, so a flip needs no restart or deploy (`sidecar_config.go`). A file that does not parse, or is there but cannot be read (a dangling link, a directory, an inaccessible config home), keeps the last good read, and on a process's first read it previews nothing. Only a file absent from every config home is inert. Removing the file keeps the last read until a restart; to turn a gate off, edit it.
 
 **Migration group MG0** (`network_client_owner` and the altered `account_api_key` and `auth_code`) stays pending under the `sidecar_pending` build tag, in `db_migrations_sidecar_pending.go`, until its Gn-out moves it into the migrations slice. A build with the tag panics at start outside `local`, `canary` and tests. Code reads the group only where `server.SidecarMg0Linked()` says the binary links it, and then the group is part of the head the binary requires, so without the tables the binary never reports ready.
 
@@ -272,7 +272,7 @@ After the flip, a network token that expired unrenewed needs a new sign-in. Turn
 | API authentication, API keys, the unsigned and API-key markers | `session/client_session.go`, `apikey/apikey.go`, `mcp/auth.go` | `session/client_session_*_test.go` |
 | Session mint, renewal, revocation | `session/session_mint.go`, `session/session_operation.go` | `session/session_*_test.go` |
 | Route classes and the gate | `api/route_authz.go`, `router/client_credential.go` | `api/route_authz_test.go`, `api/route_authz_db_test.go` |
-| The P0 auth fix: marks, the client admin check, the allowlist, the proof, the gates | `model/network_client_owner_model.go`, `api/route_authz.go`, `router/strict_exp_credential.go`, `session/dpop_proof.go`, `session/session_state.go`, `sidecar_config.go` | `model/network_client_owner*_test.go`, `api/route_authz_sidecar*_test.go`, `router/strict_exp_credential_test.go`, `session/strict_exp_test.go`, `session/dpop_proof_test.go`, `connect/transport_strict_exp_test.go`, `sidecar_config_test.go` |
+| The P0 auth fix: marks, the client admin check, the allowlist, the proof, the preview gate | `model/network_client_owner_model.go`, `model/sidecar_preview_model.go`, `api/route_authz.go`, `router/strict_exp_credential.go`, `session/dpop_proof.go`, `session/session_state.go`, `sidecar_config.go` | `model/network_client_owner*_test.go`, `api/route_authz_sidecar*_test.go`, `router/strict_exp_credential_test.go`, `session/strict_exp_test.go`, `session/dpop_proof_test.go`, `connect/transport_strict_exp_test.go`, `sidecar_config_test.go` |
 | Pending migration groups | `db_migrations_sidecar*.go` | `db_migrations_sidecar*_test.go` |
 | Embed rules | `model/network_client_admin_model.go`, `model/network_embed_model.go` | `model/network_client_authz_test.go` |
 | Client creation and own-client limits | `model/network_client_model.go` | `model/network_client_authz_test.go` |

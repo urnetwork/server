@@ -55,15 +55,15 @@ func validateSessionHorizon(byJwt *ByJwt, now time.Time) error {
 }
 
 // A strict_exp credential ends at its exp, with no grace (owner decision 103):
-// neither reject_expired, nor AcceptUntil, nor the clock leeway extends it. Past
-// its exp it is refused once sidecar.yml's p0_enforce is on, and until then
-// counted, as a passed exp is (ParseByJwtForAudience). Every strict_exp token is
-// minted with exp and its root, so one without them is refused either way.
+// neither reject_expired, nor AcceptUntil, nor the clock leeway extends it, and
+// since M1 (D-TEAM-14 enforced) nothing in sidecar.yml does either. Every
+// strict_exp token is minted with exp and its root, so one without them is
+// refused too.
 func validateStrictExp(byJwt *ByJwt, now time.Time) error {
 	if byJwt.ExpiresAt == nil || byJwt.ClientId == nil || byJwt.RootClientId == nil {
 		return rejectByJwtClaims(AuthRejectionMissingClaims, "strict_exp credential requires exp and its root")
 	}
-	if !now.Before(byJwt.ExpiresAt.Time) && server.CurrentSidecarConfig().P0Enforce {
+	if !now.Before(byJwt.ExpiresAt.Time) {
 		return rejectByJwt(AuthRejectionExpired, "strict_exp token is expired")
 	}
 	return nil

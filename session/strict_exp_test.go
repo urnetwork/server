@@ -15,11 +15,17 @@ import (
 )
 
 // D-TEAM-14: a strict_exp token lasts 7 days, keeps its mark through every
-// derivation, and ends at its exp whatever reject_expired or AcceptUntil say
-// once sidecar.yml's p0_enforce is on. Pure: tokens are signed with the local
-// vault key, and every refusal here comes before any store is read.
+// derivation, and ends at its exp whatever reject_expired, AcceptUntil or
+// sidecar.yml say. Pure: tokens are signed with the local vault key, and every
+// refusal here comes before any store is read.
 
-const strictExpP0EnforceYaml = "sidecar:\n  p0_enforce: {enabled: true}\n"
+// What sidecar.yml can say about M0's p0_enforce switch, none of which moves the
+// expiry since M1: absent, off and on.
+var strictExpP0EnforceConfigs = []string{
+	"",
+	"sidecar:\n  p0_enforce: {enabled: false}\n",
+	"sidecar:\n  p0_enforce: {enabled: true}\n",
+}
 
 func newStrictExpTestClient(t testing.TB) *ByJwt {
 	t.Helper()
@@ -80,23 +86,28 @@ func TestStrictExpClaimIsKeptAndSetsTheLifetime(t *testing.T) {
 	requireExpiryCloseTo(t, strict, 30*24*time.Hour)
 }
 
-// Past its exp a strict_exp token is refused at both audiences with reject_expired
-// off, the state before the fleet flips it, and inside AcceptUntil's 60 days.
+// Past its exp a strict_exp token is refused at both audiences, api's and
+// connect's transport auth, with reject_expired off, the state before the fleet
+// flips it, inside AcceptUntil's 60 days, and whatever sidecar.yml says.
 func TestExpiredStrictExpTokenIsRefusedWithRejectExpiredOff(t *testing.T) {
 	defer Testing_SetRejectExpired(false)()
-	defer server.Testing_PushSidecarConfig(strictExpP0EnforceYaml)()
 
 	expired := withStrictExpExpiry(newStrictExpTestClient(t), server.NowUtc().Add(-time.Hour))
 	if !server.NowUtc().Before(expired.AcceptUntil()) {
 		t.Fatal("the fixture should sit inside AcceptUntil")
 	}
 	signed := expired.Testing_Sign()
-	for _, audience := range []string{ByJwtAudienceApi, ByJwtAudienceConnect} {
-		before := testutil.ToFloat64(authRejectionCounter.WithLabelValues(string(AuthRejectionExpired)))
-		if _, err := ParseByJwtForAudience(context.Background(), signed, audience); err == nil {
-			t.Fatalf("%s: an expired strict_exp token verified", audience)
-		}
-		connect.AssertEqual(t, testutil.ToFloat64(authRejectionCounter.WithLabelValues(string(AuthRejectionExpired))), before+1)
+	for _, config := range strictExpP0EnforceConfigs {
+		func() {
+			defer server.Testing_PushSidecarConfig(config)()
+			for _, audience := range []string{ByJwtAudienceApi, ByJwtAudienceConnect} {
+				before := testutil.ToFloat64(authRejectionCounter.WithLabelValues(string(AuthRejectionExpired)))
+				if _, err := ParseByJwtForAudience(context.Background(), signed, audience); err == nil {
+					t.Fatalf("%q %s: an expired strict_exp token verified", config, audience)
+				}
+				connect.AssertEqual(t, testutil.ToFloat64(authRejectionCounter.WithLabelValues(string(AuthRejectionExpired))), before+1)
+			}
+		}()
 	}
 
 	// the same token without the mark passes today, as the gate's rollout needs
@@ -109,8 +120,6 @@ func TestExpiredStrictExpTokenIsRefusedWithRejectExpiredOff(t *testing.T) {
 // Owner decision 103 grants no grace, so the clock leeway other tokens get is not
 // a strict_exp token's.
 func TestStrictExpTokenHasNoGrace(t *testing.T) {
-	defer server.Testing_PushSidecarConfig(strictExpP0EnforceYaml)()
-
 	byJwt := newStrictExpTestClient(t)
 	exp := byJwt.ExpiresAt.Time
 	connect.AssertEqual(t, validateStrictExp(byJwt, exp.Add(-time.Second)), nil)
@@ -122,41 +131,20 @@ func TestStrictExpTokenHasNoGrace(t *testing.T) {
 	}
 }
 
-// Log-only: until p0_enforce is on, a passed exp is accepted and counted as what
-// it is, so the first days of D-TEAM-14 cost nothing and show everything.
-func TestExpiredStrictExpTokenIsCountedWhileLogOnly(t *testing.T) {
-	defer Testing_SetRejectExpired(false)()
-	defer server.Testing_PushSidecarConfig("")()
-
+// reject_expired needs nothing from sidecar.yml either: on, it refuses an expired
+// strict_exp token too, and either way no strict_exp token is a legacy accept.
+func TestExpiredStrictExpTokenIsNeverALegacyAccept(t *testing.T) {
 	signed := withStrictExpExpiry(newStrictExpTestClient(t), server.NowUtc().Add(-time.Hour)).Testing_Sign()
-	counter := authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyStrictExpired), string(AuthCredentialClient))
-	before := testutil.ToFloat64(counter)
-	parsed, err := ParseByJwtForAudience(context.Background(), signed, ByJwtAudienceConnect)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, parsed.StrictExp, true)
-	connect.AssertEqual(t, testutil.ToFloat64(counter), before+1)
-
-	// reject_expired needs no gate: once it is on it refuses this token too
-	defer Testing_SetRejectExpired(true)()
-	if _, err := ParseByJwtForAudience(context.Background(), signed, ByJwtAudienceApi); err == nil {
-		t.Fatal("reject_expired let an expired strict_exp token through")
-	}
-}
-
-// Enforcement needs only the file: the same binary refuses after a config push.
-func TestStrictExpEnforcementFollowsTheConfig(t *testing.T) {
-	defer Testing_SetRejectExpired(false)()
-	signed := withStrictExpExpiry(newStrictExpTestClient(t), server.NowUtc().Add(-time.Hour)).Testing_Sign()
-
-	popLogOnly := server.Testing_PushSidecarConfig("sidecar:\n  p0_enforce: {enabled: false}\n")
-	_, err := ParseByJwtForAudience(context.Background(), signed, ByJwtAudienceApi)
-	connect.AssertEqual(t, err, nil)
-	popLogOnly()
-
-	popEnforce := server.Testing_PushSidecarConfig(strictExpP0EnforceYaml)
-	defer popEnforce()
-	if _, err := ParseByJwtForAudience(context.Background(), signed, ByJwtAudienceApi); err == nil {
-		t.Fatal("p0_enforce did not refuse the token")
+	counter := authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyExpired), string(AuthCredentialClient))
+	for _, rejectExpired := range []bool{false, true} {
+		func() {
+			defer Testing_SetRejectExpired(rejectExpired)()
+			before := testutil.ToFloat64(counter)
+			if _, err := ParseByJwtForAudience(context.Background(), signed, ByJwtAudienceConnect); err == nil {
+				t.Fatalf("reject_expired %t let an expired strict_exp token through", rejectExpired)
+			}
+			connect.AssertEqual(t, testutil.ToFloat64(counter), before)
+		}()
 	}
 }
 
@@ -164,7 +152,6 @@ func TestStrictExpEnforcementFollowsTheConfig(t *testing.T) {
 // without them, which no mint does, is refused in every mode.
 func TestStrictExpTokenNeedsExpAndItsRoot(t *testing.T) {
 	defer Testing_SetRejectMissingExpiration(false)()
-	defer server.Testing_PushSidecarConfig("")()
 
 	noExp := newStrictExpTestClient(t)
 	noExp.ExpiresAt = nil
@@ -183,8 +170,6 @@ func TestStrictExpTokenNeedsExpAndItsRoot(t *testing.T) {
 // wherever state is checked, which a lease's recheck does: it retires the
 // transport for a definitive refusal, without reading a store.
 func TestStateCheckRefusesAnExpiredStrictExpToken(t *testing.T) {
-	defer server.Testing_PushSidecarConfig(strictExpP0EnforceYaml)()
-
 	expired := withStrictExpExpiry(newStrictExpTestClient(t), server.NowUtc().Add(-time.Hour))
 	err := ValidateByJwtState(context.Background(), expired, true)
 	if err == nil {
@@ -198,23 +183,22 @@ func TestStateCheckRefusesAnExpiredStrictExpToken(t *testing.T) {
 }
 
 // A transport admitted on a strict_exp token ends at its exp, not at the 60-day
-// horizon of its session claims.
+// horizon of its session claims, whatever sidecar.yml says.
 func TestAuthorizationLeaseEndsAtAStrictExpTokensExp(t *testing.T) {
-	byJwt := newStrictExpTestClient(t)
 	check := func(ctx context.Context, credential *ByJwt) error { return nil }
-	start := func() *AuthorizationLease {
+	start := func(byJwt *ByJwt) *AuthorizationLease {
 		lease, err := startAuthorizationLeaseWithCheck(context.Background(), byJwt, func(int) {}, nil, check)
 		connect.AssertEqual(t, err, nil)
 		t.Cleanup(lease.Close)
 		return lease
 	}
 
-	func() {
-		defer server.Testing_PushSidecarConfig(strictExpP0EnforceYaml)()
-		connect.AssertEqual(t, start().terminal.Equal(byJwt.ExpiresAt.Time), true)
-	}()
+	byJwt := newStrictExpTestClient(t)
+	for _, config := range strictExpP0EnforceConfigs {
+		func() {
+			defer server.Testing_PushSidecarConfig(config)()
+			connect.AssertEqual(t, start(byJwt).terminal.Equal(byJwt.ExpiresAt.Time), true)
+		}()
+	}
 
-	// log-only keeps the horizon every client token has
-	defer server.Testing_PushSidecarConfig("")()
-	connect.AssertEqual(t, start().terminal.Equal(byJwt.AcceptUntil()), true)
 }

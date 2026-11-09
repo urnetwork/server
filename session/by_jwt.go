@@ -363,10 +363,9 @@ type AuthLegacyAcceptCause string
 const (
 	AuthLegacyMissingExpiration AuthLegacyAcceptCause = "missing_expiration"
 	AuthLegacyExpired           AuthLegacyAcceptCause = "expired"
-	// a strict_exp token past its exp, accepted while sidecar.yml's p0_enforce
-	// is off (D-TEAM-14's log-only days). Unlike the others it reads no auth.yml
-	// gate, and reject_expired refuses it too.
-	AuthLegacyStrictExpired AuthLegacyAcceptCause = "strict_expired"
+	// M0's log-only days of D-TEAM-14 counted a strict_exp token past its exp
+	// as "strict_expired". Since M1 validateStrictExp refuses one before any
+	// gate is read, so no strict_exp token is a legacy accept.
 )
 
 // AuthCredentialKind is the bounded kind of a credential a migration gate let
@@ -540,11 +539,7 @@ func ParseByJwtForAudience(ctx context.Context, jwtSigned string, audience strin
 		}
 		// gauge of stale-credential traffic, for deciding when to flip
 		// reject_expired on
-		cause := AuthLegacyExpired
-		if byJwt.StrictExp {
-			cause = AuthLegacyStrictExpired
-		}
-		authLegacyAcceptCounter.WithLabelValues(string(cause), string(authCredentialKind(byJwt))).Inc()
+		authLegacyAcceptCounter.WithLabelValues(string(AuthLegacyExpired), string(authCredentialKind(byJwt))).Inc()
 	}
 	if byJwt.NotBefore != nil && now.Before(byJwt.NotBefore.Time.Add(-clockLeeway)) {
 		return nil, rejectByJwt(AuthRejectionNotYetValid, "token is not valid yet")

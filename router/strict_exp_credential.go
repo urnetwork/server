@@ -15,8 +15,8 @@ import (
 // also want a proof of the client's key. The answers are 403, not 401, so the
 // sdk does not sign out (session/AUTH.md §4).
 //
-// The gates only ask. The api decides whether a strict_exp token is refused or
-// only counted (api/route_authz.go), which sidecar.yml's p0_enforce gate moves.
+// The gates only ask. The api decides which strict_exp tokens a route refuses,
+// and counts each refusal (api/route_authz.go).
 
 const StrictExpCredentialRefusedMessage = "A sidecar token cannot call this route."
 

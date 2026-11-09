@@ -4,10 +4,10 @@ package api
 
 // End to end through the router the API serves, against the database with MG0:
 // §22.5's §7 row for the P0 auth fix. A real marked client, minted with POST
-// /network/auth-client, is refused on the 37 routes and changes nothing once the
-// config enforces it, a real strict_exp bearer reaches its allowlist and proves
-// its key to renew and mint, and a login minted with an API key's auth code ends
-// with the key.
+// /network/auth-client, is refused on the 37 routes and changes nothing, a client
+// whose marks cannot be read is refused alike, a real strict_exp bearer reaches
+// its allowlist and proves its key to renew and mint, and a login minted with an
+// API key's auth code ends with the key.
 
 import (
 	"bytes"
@@ -80,19 +80,21 @@ func (self *routeAccessDbFixture) serveEdited(method string, path string, author
 	return w
 }
 
-func (self *routeAccessDbFixture) previewYaml(enforce bool) string {
-	return fmt.Sprintf("sidecar:\n  p0_enforce: {enabled: %t}\n  preview_networks: [%q]\n", enforce, self.networkId)
+// The network as the only preview network.
+func (self *routeAccessDbFixture) previewYaml() string {
+	return fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", self.networkId)
 }
 
-// Stage 1, whole: a child and an admin_refused client serve as they always did
-// while log-only, each call counted; then the same tokens, on the same binary, are
-// refused on every one of the 37 routes once the config says so, changing nothing,
-// and an unmarked top-level client, what the shipped apps hold, is left alone.
-func TestMarkedClientTokensAreRefusedOnceTheConfigEnforcesIt(t *testing.T) {
+// Stage 1, whole: a child and an admin_refused client are refused on every one of
+// the 37 routes, changing nothing and each refusal counted, with no sidecar.yml at
+// all, and an unmarked top-level client, what the shipped apps hold, is left
+// alone.
+func TestMarkedClientTokensAreRefusedOnEveryAdminRoute(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(t, ctx)
+		defer server.Testing_PushSidecarConfig("")()
 
 		legacyClientId, legacyToken := self.mintClient(t, self.root(), nil)
 		_, childToken := self.mintClient(t, self.root(), &legacyClientId)
@@ -100,20 +102,17 @@ func TestMarkedClientTokensAreRefusedOnceTheConfigEnforcesIt(t *testing.T) {
 		victimClientId, _ := self.mintClient(t, self.root(), nil)
 		const codeCreate = "POST /auth/code-create"
 
-		popLogOnly := server.Testing_PushSidecarConfig("")
 		for name, token := range map[string]string{"child": childToken, "admin_refused": *marked.ByClientJwt} {
-			before := childAdminCallCount(codeCreate, p0RefusalClientAdmin, "logged")
+			before := childAdminCallCount(codeCreate, p0RefusalClientAdmin, p0ResultRefused)
 			w := self.serve(http.MethodPost, "/auth/code-create", "Bearer "+token, map[string]any{})
-			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "auth_code") {
-				t.Fatalf("log-only %s: code-create status = %d: %s", name, w.Code, w.Body.String())
+			if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
+				t.Fatalf("%s: code-create status = %d: %s", name, w.Code, w.Body.String())
 			}
-			if after := childAdminCallCount(codeCreate, p0RefusalClientAdmin, "logged"); after != before+1 {
-				t.Fatalf("log-only %s: counted %v", name, after-before)
+			if after := childAdminCallCount(codeCreate, p0RefusalClientAdmin, p0ResultRefused); after != before+1 {
+				t.Fatalf("%s: counted %v", name, after-before)
 			}
 		}
-		popLogOnly()
 
-		defer server.Testing_PushSidecarConfig(p0EnforceYaml)()
 		for _, token := range []string{childToken, *marked.ByClientJwt} {
 			refusedCount := requireClientTokenRefused(t, self, token, victimClientId, clientAdminClasses...)
 			if refusedCount != 37 {
@@ -131,6 +130,44 @@ func TestMarkedClientTokensAreRefusedOnceTheConfigEnforcesIt(t *testing.T) {
 		w = self.serve(http.MethodGet, "/network/clients", "Bearer "+legacyToken, nil)
 		if w.Code != http.StatusOK {
 			t.Fatalf("a legacy client's admin route status = %d: %s", w.Code, w.Body.String())
+		}
+	})
+}
+
+// D-TEAM-1's lookup error through the routes: a client token whose client the
+// check cannot read, here one its network has no row for, is refused with 403 on
+// every one of the 37 routes by the real model check, never a 401 that would sign
+// an sdk out.
+func TestClientWhoseMarksCannotBeReadIsRefusedOnEveryAdminRoute(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		self := newRouteAccessDbFixture(t, ctx)
+		model.Testing_ForgetClientRefusesAdmin()
+
+		byJwt, err := session.ParseByJwt(ctx, strings.TrimPrefix(self.root(), "Bearer "))
+		server.Raise(err)
+		unreadable := "Bearer " + byJwt.Client(server.NewId(), server.NewId()).Testing_Sign()
+		refusedCount := 0
+		for _, route := range Routes() {
+			switch routeAccessFor(route) {
+			case routeAccessAppAdmin, routeAccessOwnClientPayout:
+			default:
+				continue
+			}
+			key := routeAccessKey(route)
+			before := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused)
+			w := self.serve(route.Method(), routeAccessTestPath(route.Pattern()), unreadable, map[string]any{})
+			if w.Code != http.StatusForbidden || strings.TrimSpace(w.Body.String()) != router.ClientCredentialRefusedMessage {
+				t.Fatalf("%s: status = %d body = %q, want the client token refusal", key, w.Code, w.Body.String())
+			}
+			if after := childAdminCallCount(key, p0RefusalClientAdmin, p0ResultRefused); after != before+1 {
+				t.Fatalf("%s: counted %v", key, after-before)
+			}
+			refusedCount += 1
+		}
+		if refusedCount != 37 {
+			t.Fatalf("refused %d routes, want §7.4's 37", refusedCount)
 		}
 	})
 }
@@ -198,7 +235,7 @@ func TestStrictExpBearerLivesOnItsAllowlist(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(tb, ctx)
-		defer server.Testing_PushSidecarConfig(self.previewYaml(true))()
+		defer server.Testing_PushSidecarConfig(self.previewYaml())()
 		bearer := mintStrictExpBearer(t, self)
 
 		w := self.serveEdited(http.MethodGet, "/auth/refresh", bearer.authorization(), nil, bearer.proof())
@@ -242,7 +279,7 @@ func TestACopiedStrictExpTokenRenewsAndMintsNothing(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(tb, ctx)
-		defer server.Testing_PushSidecarConfig(self.previewYaml(true))()
+		defer server.Testing_PushSidecarConfig(self.previewYaml())()
 		bearer := mintStrictExpBearer(t, self)
 
 		_, olderKey, err := ed25519.GenerateKey(rand.Reader)
@@ -289,7 +326,7 @@ func TestApiRefusesAnExpiredStrictExpToken(t *testing.T) {
 		defer cancel()
 		defer session.Testing_SetRejectExpired(false)()
 		self := newRouteAccessDbFixture(tb, ctx)
-		defer server.Testing_PushSidecarConfig(self.previewYaml(true))()
+		defer server.Testing_PushSidecarConfig(self.previewYaml())()
 		bearer := mintStrictExpBearer(t, self)
 
 		byJwt, err := session.ParseByJwt(ctx, bearer.token)
@@ -316,19 +353,24 @@ func TestApiRefusesAnExpiredStrictExpToken(t *testing.T) {
 }
 
 // D-TRUST-3 through the route: a network off preview_networks refuses a strict_exp
-// mint, and the reply is a refusal, not a client without the mark.
+// mint, with no sidecar.yml and with one listing another network, and the reply is
+// a refusal, not a client without the mark.
 func TestNonPreviewNetworkRefusesStrictExpThroughTheRoute(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(t, ctx)
-		defer server.Testing_PushSidecarConfig(p0EnforceYaml)()
 
-		w := self.serve(http.MethodPost, "/network/auth-client", self.root(), map[string]any{"description": "sidecar", "device_spec": "sidecar", "admin_refused": true, "strict_exp": true})
-		result := &model.AuthNetworkClientResult{}
-		server.Raise(json.Unmarshal(w.Body.Bytes(), result))
-		if result.Error == nil || result.ClientId != nil || result.ByClientJwt != nil {
-			t.Fatalf("status = %d: %s", w.Code, w.Body.String())
+		for _, config := range []string{"", fmt.Sprintf("sidecar:\n  preview_networks: [%q]\n", server.NewId())} {
+			func() {
+				defer server.Testing_PushSidecarConfig(config)()
+				w := self.serve(http.MethodPost, "/network/auth-client", self.root(), map[string]any{"description": "sidecar", "device_spec": "sidecar", "admin_refused": true, "strict_exp": true})
+				result := &model.AuthNetworkClientResult{}
+				server.Raise(json.Unmarshal(w.Body.Bytes(), result))
+				if result.Error == nil || result.ClientId != nil || result.ByClientJwt != nil {
+					t.Fatalf("%q: status = %d: %s", config, w.Code, w.Body.String())
+				}
+			}()
 		}
 	})
 }
@@ -340,7 +382,7 @@ func TestStrictExpBearerCannotPayOnAuthClient(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		self := newRouteAccessDbFixture(tb, ctx)
-		defer server.Testing_PushSidecarConfig(self.previewYaml(true))()
+		defer server.Testing_PushSidecarConfig(self.previewYaml())()
 		bearer := mintStrictExpBearer(t, self)
 		controller.SetX402Config(&controller.X402Config{Enabled: true})
 		defer controller.SetX402Config(nil)

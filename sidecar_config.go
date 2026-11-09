@@ -29,7 +29,7 @@ import (
 //	  preview_networks: []          # §7.4, D-PHASE-3: networks that hold strict_exp clients before stage 2
 //	  sockets_control_qps: {rate: 50, burst: 500}
 //	  urnetwork_edge: <network_id>
-//	  p0_enforce: {enabled: false}  # §7.4 stage 1 and D-TEAM-14: off, each counts what it would refuse
+//	  p0_enforce: {enabled: false}  # M0's log-only switch for §7.4 stage 1 and D-TEAM-14; inert since M1
 //	  file_clusters: {<cluster id>: {settle_passed_build: <commit>, hdd_capacity_ops: <n>}}
 //
 // p0_enforce is not in §19.11's list, which picks it up at the next records pass
@@ -117,8 +117,9 @@ type sidecarConfigYaml struct {
 // One read of sidecar.yml. Immutable once read. The zero value, what a first
 // read of a broken file answers but for P0Enforce, opens nothing.
 type SidecarConfig struct {
-	// §7.4's stage 1 and D-TEAM-14 refuse what they otherwise only count. M1
-	// turns this on.
+	// M0's switch for §7.4's stage 1 and D-TEAM-14, which refused only while it
+	// was on. Since M1 (TEAM-M1-01) they refuse in code, and no refusal reads
+	// this (question team-m1-01-retire-p0-enforce).
 	P0Enforce bool
 	// the networks that may hold strict_exp clients before stage 2 (D-TRUST-3)
 	previewNetworkIds map[Id]bool

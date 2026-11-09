@@ -8,7 +8,6 @@ import (
 
 	"github.com/urnetwork/glog"
 
-	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
@@ -27,9 +26,10 @@ import (
 // admin_refused client's token is refused on the app admin and own client
 // payout routes, and a strict_exp token, a sidecar's, reaches only the routes
 // strictExpRoutes lists, with a proof of its ClientKey where it renews or mints.
-// Each refusal is counted in urnetwork_auth_child_admin_calls_total, and until
-// sidecar.yml's p0_enforce is on that is all it does: stage 1 runs log-only for
-// 14 days first, and M1's enforcement changes that one gate and no code.
+// Each refusal is counted in urnetwork_auth_child_admin_calls_total. M0 ran them
+// log-only behind sidecar.yml's p0_enforce for stage 1's 14 days; from M1 they
+// refuse in code, whatever that file says or whether it is there at all, so a
+// missing or mistaken config push cannot reopen the P0 gap (D-TEAM-1).
 
 type routeAccess int
 
@@ -430,6 +430,8 @@ const (
 	p0RefusalClientAdmin = "client_admin"
 	p0RefusalStrictExp   = "strict_exp_route"
 	p0RefusalProof       = "strict_exp_proof"
+	// the one result since M1
+	p0ResultRefused = "refused"
 )
 
 var childAdminCallCounter = prometheus.NewCounterVec(
@@ -437,7 +439,7 @@ var childAdminCallCounter = prometheus.NewCounterVec(
 		Namespace: "urnetwork",
 		Subsystem: "auth",
 		Name:      "child_admin_calls_total",
-		Help:      "Calls the P0 auth fix refuses, by route template, by what refuses them (client_admin: a child or admin_refused client on an app admin or own client payout route; strict_exp_route: a strict_exp token off its allowlist; strict_exp_proof: a strict_exp token without a good proof) and by result: refused, or logged while sidecar.yml's p0_enforce is off. Stage 1's 14 log-only days watch this",
+		Help:      "Calls the P0 auth fix refuses, by route template, by what refuses them (client_admin: a child or admin_refused client on an app admin or own client payout route; strict_exp_route: a strict_exp token off its allowlist; strict_exp_proof: a strict_exp token without a good proof) and by result, refused since M1 enforces stage 1 (logged in M0's log-only days)",
 	},
 	[]string{"route", "refusal", "result"},
 )
@@ -446,24 +448,21 @@ func init() {
 	prometheus.MustRegister(childAdminCallCounter)
 }
 
-// Counts a call the P0 auth fix would refuse and decides it: refused once
-// p0_enforce is on, and until then let through. A refusal is driven by client
-// input, so it is counted, with the detail at V(1).
+// Counts a call the P0 auth fix refuses, and refuses it. A refusal is driven by
+// client input, so it is counted, with the detail at V(1). The result label stays
+// for the series M0's log-only days wrote, which counted "logged" there.
 func refuseP0Call(routeKey string, refusal string, byJwt *session.ByJwt) bool {
-	enforce := server.CurrentSidecarConfig().P0Enforce
-	result := "logged"
-	if enforce {
-		result = "refused"
-	}
-	childAdminCallCounter.WithLabelValues(routeKey, refusal, result).Inc()
+	childAdminCallCounter.WithLabelValues(routeKey, refusal, p0ResultRefused).Inc()
 	if glog.V(1) {
-		glog.Infof("[auth][%s]%s %s: client %s on %s\n", byJwt.NetworkId, refusal, result, byJwt.ClientId, routeKey)
+		glog.Infof("[auth][%s]%s %s: client %s on %s\n", byJwt.NetworkId, refusal, p0ResultRefused, byJwt.ClientId, routeKey)
 	}
-	return enforce
+	return true
 }
 
-// An Embed network's client tokens are refused here outright. Stage 1 adds any
-// network's child and admin_refused clients, log-only until it is enforced.
+// §7.4's check: networkRefusesClientAdmin || clientRefusesAdmin. An Embed
+// network's client tokens are refused outright, and are not stage 1's to count;
+// stage 1 adds any network's child and admin_refused clients, and a client whose
+// marks cannot be read (D-TEAM-1).
 func refuseClientAdmin(ctx context.Context, routeKey string, byJwt *session.ByJwt) bool {
 	if networkRefusesClientAdmin(ctx, byJwt.NetworkId) {
 		return true
