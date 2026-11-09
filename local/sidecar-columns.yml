@@ -286,6 +286,41 @@ tables:
       day: tls-3
       host: tls-3
       network_id: tls-3
+  smtp_complaint:
+    group: MG5
+    columns:
+      arrival_time: smtp-5
+      complaint_id: smtp-5
+      complaint_type: smtp-5
+      dkim_domain: smtp-5
+      dkim_result: smtp-5
+      dkim_selector: smtp-5
+      domain: smtp-5
+      feedback_id: smtp-5
+      join_result: smtp-5
+      message_id_hash: smtp-5
+      network_id: smtp-5
+      reporter: smtp-5
+      sealed_report: smtp-5
+      x_ur_ref: smtp-5
+  smtp_dmarc_daily:
+    group: MG5
+    columns:
+      arrival_time: smtp-5
+      day: smtp-5
+      dkim_pass_count: smtp-5
+      failure_count: smtp-5
+      header_from: smtp-5
+      kind: smtp-5
+      message_count: smtp-5
+      network_id: smtp-5
+      policy_type: smtp-5
+      quarantine_count: smtp-5
+      reject_count: smtp-5
+      report_id: smtp-5
+      reporter: smtp-5
+      spf_pass_count: smtp-5
+      success_count: smtp-5
   abuse_case:
     group: MG5
     columns:

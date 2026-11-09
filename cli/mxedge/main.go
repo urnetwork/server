@@ -3,7 +3,8 @@
 // mxedge-platform, rpt.bringyour.com's listener, whose image server/cli/mxedge-platform builds from this main,
 // and --role router for mxedge, which MAIL-M7-19 builds and which refuses until then. Each is a block run by
 // mxedgehost.RunHost through sidecarhost.Run, with GET /status on port 80, TCP 25 behind the lb's PROXY header,
-// {vault: no, config: yes, site: no} and user 65532. It reads config/<env>/mxedge.yml at start, and
+// {vault: no, config: yes, site: no} and user 65532. It reads config/<env>/mxedge.yml at start, the platform
+// role's report intake reads smtpedge.yml beside it (report_intake.go, SMTP-M5-06), and the host rereads
 // sidecar.yml's mxedge gate every 60 s.
 package main
 
@@ -58,8 +59,17 @@ func main() {
 	settings := mxedgehost.DefaultHostSettings()
 	settings.MxEdge = mxEdgeSettings
 	settings.SecretDirectory = *secretDir
-	// the block's own certificate and stores; no report intake until SMTP-M5-06, so every recipient gets 451
-	if err := mxedgehost.RunHost(ctx, *role, settings, nil, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
+	// the block's own certificate and stores, and the report intake on smtpedge.yml (report_intake.go), ready
+	// only in a binary that links the groups it reads; without one every recipient gets 451
+	deps := &mxedgehost.HostDeps{}
+	intake, err := newConfiguredReportIntake()
+	if err != nil {
+		glog.Errorf("[mxedge]no report intake, so every recipient the listener answers for gets 451 4.3.0: %v\n", err)
+	} else {
+		deps.Intake = intake
+		deps.IntakeGroups = reportIntakeGroups()
+	}
+	if err := mxedgehost.RunHost(ctx, *role, settings, deps, &mxedgehost.HostPorts{Status: *port, Smtp: *smtpPort}); err != nil {
 		panic(err)
 	}
 }
