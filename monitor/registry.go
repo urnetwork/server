@@ -237,6 +237,9 @@ func NewSignals() []Signal {
 		NewFileClusterWearSignal(),
 		NewWriteBudgetSignal(),
 		NewSidecarDumpSignal(),
+		NewSloBurnSignal(),
+		NewSidecarServiceFailuresSignal(),
+		NewPostgresPrimarySignal(),
 	}
 }
 

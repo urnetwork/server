@@ -210,6 +210,8 @@ type monitorConfig struct {
 	dnsCanary *DnsCanarySettings
 	// the sidecar's storage signals (SIGNALS.md §29), nil where monitor.yml has neither block
 	sidecarStorage *SidecarStorageSettings
+	// §30's sidecar service signals (SIGNALS.md §30.1, §30.2): monitor.yml's sidecar_services block
+	sidecarSlo *SidecarSloSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string
