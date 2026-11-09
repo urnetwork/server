@@ -203,6 +203,9 @@ func initTaskSchedule(ctx context.Context) {
 		// lost applies swept, removed rows deleted at 24 h; not scheduled
 		// without MG8
 		work.SchedulePushTokenPass(clientSession, tx)
+		// §20.6's spent marks cleared once a network holds an in-window
+		// balance with room, every 60 s; not scheduled without MG2
+		work.ScheduleQuotaSpentPass(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -644,6 +647,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.PushTokenPass,
 			work.PushTokenPassPost,
+		),
+		// §20.6's spent pass (model.ClearSpentNetworks)
+		task.NewTaskTargetWithPost(
+			work.QuotaSpentPass,
+			work.QuotaSpentPassPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,
