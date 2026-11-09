@@ -59,9 +59,11 @@ func RemoveExpiredAuthCodes(
 	// binary that does not link its group
 	authKeyCount := model.RemoveExpiredNetworkAuthKeys(ctx, now)
 	apiKeyCount := model.RemoveExpiredApiKeys(ctx, now)
-	if 0 < attemptCount+createAttemptCount+resetCount+deviceAddCount+nameReclaimCount+authKeyCount+apiKeyCount {
+	// admin tokens' uses, an hour past their tokens' exp (§2.8 api-11)
+	adminTokenUseCount := model.RemoveOldAdminTokenUses(ctx, now.Add(-model.DefaultAdminTokenUseSettings().Retention))
+	if 0 < attemptCount+createAttemptCount+resetCount+deviceAddCount+nameReclaimCount+authKeyCount+apiKeyCount+adminTokenUseCount {
 		glog.Infof(
-			"[authw]removed %d account action attempts, %d network create attempts, %d reset codes, %d device adds, %d name cool-downs, %d auth keys, %d api keys\n",
+			"[authw]removed %d account action attempts, %d network create attempts, %d reset codes, %d device adds, %d name cool-downs, %d auth keys, %d api keys, %d admin token uses\n",
 			attemptCount,
 			createAttemptCount,
 			resetCount,
@@ -69,6 +71,7 @@ func RemoveExpiredAuthCodes(
 			nameReclaimCount,
 			authKeyCount,
 			apiKeyCount,
+			adminTokenUseCount,
 		)
 	}
 	return &RemoveExpiredAuthCodesResult{}, nil

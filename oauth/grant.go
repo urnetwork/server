@@ -40,6 +40,11 @@ type AuthorizationRequest struct {
 	CodeChallengeMethod string
 	Resource            string
 	Nonce               string
+	// RFC 9449 §10's binding of the code to a DPoP key: ur-cli's alone
+	DpopJkt string
+	// RFC 9396's authorization_details: ur-cli's one command and its consent
+	// code (urcli.go)
+	AuthorizationDetails string
 }
 
 // Validates an authorization request before any user interaction, so a
@@ -105,6 +110,11 @@ func Authorize(
 	request *AuthorizationRequest,
 	user *AuthorizingUser,
 ) (string, error) {
+	// ur-cli authorizes one command only through its own consent (urcli.go)
+	if request.ClientId == UrcliClientId {
+		return "", ErrUrcliConsentRequired
+	}
+
 	client, err := ValidateAuthorizationRequest(ctx, request)
 	if err != nil {
 		return "", err
@@ -176,8 +186,12 @@ type ExchangeCodeArgs struct {
 	Resource     string
 }
 
-// Exchanges an authorization code for tokens.
+// Exchanges an authorization code for tokens. ur-cli's codes redeem only with
+// a DPoP proof, through ExchangeUrcliCode.
 func ExchangeCode(ctx context.Context, args *ExchangeCodeArgs) (*TokenResponse, error) {
+	if args.ClientId == UrcliClientId {
+		return nil, fmt.Errorf("%w: ur-cli's code redeems with a DPoP proof", ErrInvalidRequest)
+	}
 	resource, err := CanonicalResource(args.Resource)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrInvalidRequest, err)

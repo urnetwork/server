@@ -131,6 +131,10 @@ func isLoopbackHost(host string) bool {
 // document url and is fetched (or served from the cached row); anything else
 // must already be registered.
 func GetClient(ctx context.Context, clientId string) (*Client, error) {
+	// preregistered in code, never stored (urcli.go)
+	if clientId == UrcliClientId {
+		return urcliClient(), nil
+	}
 	if isCimdClientId(clientId) {
 		return getCimdClient(ctx, clientId)
 	}

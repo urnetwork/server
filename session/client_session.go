@@ -9,6 +9,9 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/urnetwork/glog"
 
@@ -25,6 +28,66 @@ const apiKeyTokenLength = 56
 
 // The Warp ingress overwrites this with the address accepted from the client.
 const urForwardedForHeader = "X-UR-Forwarded-For"
+
+// A DPoP-bound token is sent with this scheme (RFC 9449 §7.1): an admin token
+// (§7.8), with its proof in the DPoP header.
+const authDpopPrefix = "DPoP "
+
+// One use of a one-command admin token (§7.8, D-TEAM-7): the token verified,
+// its DPoP proof checked and its cmd matched to this request's method, path and
+// body. The route's model spends the jti in the command's own transaction
+// (model.ClaimAdminTokenUseInTx), so a replay returns the stored result and runs
+// nothing.
+type AdminCommandUse struct {
+	NetworkId server.Id
+	// the member the token names: the user in a personal network
+	MemberId server.Id
+	// the token's jti, spent once
+	Jti string
+	// the token's cmd, which this request's digest matched
+	Cmd string
+	// the token's scopes
+	Scopes []string
+	// the token's exp
+	ExpireTime time.Time
+}
+
+// Verifies an admin token sent as "DPoP <token>" against its request: the
+// token, its proof, and its cmd against the request's method, path and body,
+// leaving the body readable again. oauth installs it, since admin tokens are
+// signed by its adm- key set; a process without one refuses every admin token.
+type AdminTokenAuthenticator func(ctx context.Context, req *http.Request, token string) (*AdminCommandUse, error)
+
+var adminTokenAuthenticator atomic.Pointer[AdminTokenAuthenticator]
+
+// Installs the process's admin token check; nil removes it.
+func SetAdminTokenAuthenticator(authenticator AdminTokenAuthenticator) {
+	if authenticator == nil {
+		adminTokenAuthenticator.Store(nil)
+		return
+	}
+	adminTokenAuthenticator.Store(&authenticator)
+}
+
+// The routes whose model spends an admin token's jti in the command's
+// transaction, by "METHOD path". An admin token reaches no other route, since
+// one whose model never spent its jti could run again (v0: POST
+// /network/auth-keys).
+var adminCommandRoutesLock sync.Mutex
+var adminCommandRoutes = map[string]bool{}
+
+// Adds a route whose model spends an admin token's use in its transaction.
+func RegisterAdminCommandRoute(method string, path string) {
+	adminCommandRoutesLock.Lock()
+	defer adminCommandRoutesLock.Unlock()
+	adminCommandRoutes[method+" "+path] = true
+}
+
+func adminCommandRoute(method string, path string) bool {
+	adminCommandRoutesLock.Lock()
+	defer adminCommandRoutesLock.Unlock()
+	return adminCommandRoutes[method+" "+path]
+}
 
 type clientObservationContextKey struct{}
 
@@ -61,8 +124,13 @@ type ClientSession struct {
 	// from the key through an auth code carries the key's id as a claim, and a
 	// client token this session mints must not end with the key.
 	ApiKeyId *server.Id
-	// OAuth/MCP request identities are unsigned and cannot be renewed as logins.
+	// OAuth/MCP request identities and admin tokens are unsigned and cannot be
+	// renewed as logins.
 	UnsignedIdentity bool
+	// The admin token use this request authenticated with, nil for every other
+	// credential. Only authenticate sets it, with UnsignedIdentity, and ByJwt is
+	// then the token's network and member, built for this request only.
+	AdminCommand *AdminCommandUse
 	// An opaque id for this request, minted when the session is made from a
 	// request, which an admin event records (§7.11). It names nothing but the
 	// request, and a session not made from a request has none.
@@ -247,7 +315,30 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 	// only a resolved API key sets them, below
 	self.ApiKeyAuthenticated = false
 	self.ApiKeyId = nil
+	self.AdminCommand = nil
 	if auth := req.Header.Get("Authorization"); auth != "" {
+		if strings.HasPrefix(auth, authDpopPrefix) {
+			// a one-command admin token (§7.8): only on a route whose model
+			// spends its use, and only for the command its cmd names
+			if !adminCommandRoute(req.Method, req.URL.Path) {
+				return false, errors.New("An admin token cannot call this route.")
+			}
+			authenticator := adminTokenAuthenticator.Load()
+			if authenticator == nil {
+				return false, errors.New("Invalid auth.")
+			}
+			use, err := (*authenticator)(ctx, req, auth[len(authDpopPrefix):])
+			if err != nil {
+				return false, err
+			}
+			self.ByJwt = NewByJwt(use.NetworkId, use.MemberId, "", false, false)
+			self.UnsignedIdentity = true
+			self.AdminCommand = use
+			if glog.V(2) {
+				glog.Infof("[session]authed via an admin token as %s (%s)\n", use.MemberId, use.NetworkId)
+			}
+			return false, nil
+		}
 		if strings.HasPrefix(auth, authBearerPrefix) {
 			authStr := auth[len(authBearerPrefix):]
 
