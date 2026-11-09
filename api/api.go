@@ -420,6 +420,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sidecar/sync/([^/]+)", handlers.GetSidecarSyncTopic),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
+		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)
+		router.NewRoute("GET", "/network/bridge/share/([^/]+)", handlers.GetNetworkBridgeShare),
+		router.NewRoute("PUT", "/network/bridge/share/([^/]+)", handlers.PutNetworkBridgeShare),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),
 		router.NewRoute("POST", "/account/circle-wallet", handlers.CircleWebhook),

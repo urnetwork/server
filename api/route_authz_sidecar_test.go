@@ -199,6 +199,9 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/sync/poll",
 	"GET /sidecar/sync/versions",
 	"GET /sidecar/sync/([^/]+)",
+	// §17.16's share tables (BRIDGE-M6-02)
+	"GET /network/bridge/share/([^/]+)",
+	"PUT /network/bridge/share/([^/]+)",
 }
 
 // The route families §7.4 classifies sidecar. A route under one of these paths
