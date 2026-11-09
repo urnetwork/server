@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"regexp"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -231,6 +234,8 @@ type UnfulfilledSolanaPayment struct {
 	// why a payment without a reference was not matched by its amount, with
 	// the candidate intents, for support to credit by hand
 	MatchNote *string
+	// when the webhook recorded it; set only by GetUnfulfilledSolanaPaymentInTx
+	RecordTime time.Time
 }
 
 // RecordUnfulfilledSolanaPayment writes the row. Idempotent on the tx signature
@@ -374,6 +379,114 @@ func RemoveUnfulfilledSolanaPaymentInConn(connOwner server.PgConn,
 		))
 	})
 	return
+}
+
+// RemoveUnfulfilledSolanaPaymentInTx clears a recorded payment of the given
+// reason in the caller's transaction: an operator's credit of it (controller
+// CryptoOperatorCommitUsdcCredit) resolves the record in the credit's own
+// transaction. removed = false when no such record is there; the caller then
+// rolls the credit back.
+func RemoveUnfulfilledSolanaPaymentInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	txSignature string,
+	reason string,
+) (removed bool) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		DELETE FROM solana_unfulfilled_payment
+		WHERE tx_signature = $1 AND reason = $2
+		`,
+		txSignature,
+		reason,
+	))
+	return tag.RowsAffected() == 1
+}
+
+// GetUnfulfilledSolanaPaymentInTx reads one recorded payment by signature in
+// the caller's transaction, with every column; nil when there is none.
+func GetUnfulfilledSolanaPaymentInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	txSignature string,
+) (payment *UnfulfilledSolanaPayment) {
+	result, err := tx.Query(
+		ctx,
+		`
+		SELECT reason, token_amount_usd, expected_amount_usd,
+		       payment_reference, network_id, reference_candidates,
+		       transaction_time, sender_account, match_note, record_time
+		FROM solana_unfulfilled_payment
+		WHERE tx_signature = $1
+		`,
+		txSignature,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			payment = &UnfulfilledSolanaPayment{
+				TxSignature: txSignature,
+			}
+			var referenceCandidates *string
+			server.Raise(result.Scan(
+				&payment.Reason,
+				&payment.TokenAmountUsd,
+				&payment.ExpectedAmountUsd,
+				&payment.PaymentReference,
+				&payment.NetworkId,
+				&referenceCandidates,
+				&payment.TransactionTime,
+				&payment.SenderAccount,
+				&payment.MatchNote,
+				&payment.RecordTime,
+			))
+			if referenceCandidates != nil {
+				json.Unmarshal([]byte(*referenceCandidates), &payment.ReferenceCandidates)
+			}
+		}
+	})
+	return
+}
+
+// SolanaSignatureCredits counts the records that name a transaction signature
+// as the payment of something already granted.
+type SolanaSignatureCredits struct {
+	// the Solana Pay intents it consumed (tx_signature is unique, so at most
+	// one): every webhook, reconcile and crypto invoice credit sets it, and
+	// the retention unlink keeps it
+	IntentCount int
+	// the solana and x402 renewals keyed by it: the Solana credits of
+	// 2025-09-06 to 2025-09-09, and an x402 Pro grant's settle transaction
+	RenewalCount int
+	// the balances bought with it (purchase_token): an x402 data grant
+	BalanceCount int
+}
+
+// Credited reports whether any record names the signature.
+func (self *SolanaSignatureCredits) Credited() bool {
+	return 0 < self.IntentCount || 0 < self.RenewalCount || 0 < self.BalanceCount
+}
+
+// GetSolanaSignatureCreditsInTx counts, in the caller's transaction, where a
+// transaction signature is already credited.
+func GetSolanaSignatureCreditsInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	signature string,
+) *SolanaSignatureCredits {
+	credits := &SolanaSignatureCredits{}
+	server.Raise(tx.QueryRow(
+		ctx,
+		`
+		SELECT
+			(SELECT count(*) FROM solana_payment_intent WHERE tx_signature = $1),
+			(SELECT count(*) FROM subscription_renewal WHERE market = ANY($2) AND transaction_id = $1),
+			(SELECT count(*) FROM transfer_balance WHERE purchase_token = $1)
+		`,
+		signature,
+		[]string{SubscriptionMarketSolana, SubscriptionMarketX402},
+	).Scan(&credits.IntentCount, &credits.RenewalCount, &credits.BalanceCount))
+	return credits
 }
 
 // GetSolanaPaymentIntentSignature returns the tx signature a completed intent
@@ -579,48 +692,67 @@ func GetSolanaPaymentIntent(
 	reference string,
 ) (intent *SolanaPaymentIntent) {
 	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(
-			ctx,
-			`
-			SELECT
-				payment_reference,
-				network_id,
-				expected_amount_usd,
-				subscription_plan,
-				created_at,
-				expires_at,
-				tx_signature
-			FROM solana_payment_intent
-			WHERE payment_reference = $1
-			`,
-			reference,
-		)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				intent = &SolanaPaymentIntent{}
-				var networkId *server.Id
-				var expectedAmountUsd *float64
-				var subscriptionPlan *string
-				server.Raise(result.Scan(
-					&intent.PaymentReference,
-					&networkId,
-					&expectedAmountUsd,
-					&subscriptionPlan,
-					&intent.CreatedAt,
-					&intent.ExpiresAt,
-					&intent.TxSignature,
-				))
-				if networkId != nil {
-					intent.NetworkId = *networkId
-				}
-				if expectedAmountUsd != nil {
-					intent.ExpectedAmountUsd = *expectedAmountUsd
-				}
-				if subscriptionPlan != nil {
-					intent.SubscriptionPlan = *subscriptionPlan
-				}
+		intent = getSolanaPaymentIntent(ctx, conn, reference)
+	})
+	return
+}
+
+// GetSolanaPaymentIntentInTx is GetSolanaPaymentIntent in the caller's
+// transaction.
+func GetSolanaPaymentIntentInTx(
+	tx server.PgTx,
+	ctx context.Context,
+	reference string,
+) *SolanaPaymentIntent {
+	return getSolanaPaymentIntent(ctx, tx, reference)
+}
+
+func getSolanaPaymentIntent(
+	ctx context.Context,
+	query server.PgCanQuery,
+	reference string,
+) (intent *SolanaPaymentIntent) {
+	result, err := query.Query(
+		ctx,
+		`
+		SELECT
+			payment_reference,
+			network_id,
+			expected_amount_usd,
+			subscription_plan,
+			created_at,
+			expires_at,
+			tx_signature
+		FROM solana_payment_intent
+		WHERE payment_reference = $1
+		`,
+		reference,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			intent = &SolanaPaymentIntent{}
+			var networkId *server.Id
+			var expectedAmountUsd *float64
+			var subscriptionPlan *string
+			server.Raise(result.Scan(
+				&intent.PaymentReference,
+				&networkId,
+				&expectedAmountUsd,
+				&subscriptionPlan,
+				&intent.CreatedAt,
+				&intent.ExpiresAt,
+				&intent.TxSignature,
+			))
+			if networkId != nil {
+				intent.NetworkId = *networkId
 			}
-		})
+			if expectedAmountUsd != nil {
+				intent.ExpectedAmountUsd = *expectedAmountUsd
+			}
+			if subscriptionPlan != nil {
+				intent.SubscriptionPlan = *subscriptionPlan
+			}
+		}
 	})
 	return
 }
@@ -898,6 +1030,25 @@ const solanaMatchNoteNetworkPattern = `network [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{
 
 // What an unlinked match note says in place of the network id.
 const solanaMatchNoteNetworkUnlinked = `network (unlinked)`
+
+// solanaMatchNoteNetworkRegexp is solanaMatchNoteNetworkPattern with the id
+// captured, case-insensitive as the unlink's match is.
+var solanaMatchNoteNetworkRegexp = regexp.MustCompile(`(?i)network ([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})`)
+
+// SolanaMatchNoteNetworkIds is every network a match note names, in order,
+// once each, without the zero id (a candidate intent that has no network). A
+// note the unlink rewrote names none.
+func SolanaMatchNoteNetworkIds(note string) []server.Id {
+	networkIds := []server.Id{}
+	for _, match := range solanaMatchNoteNetworkRegexp.FindAllStringSubmatch(note, -1) {
+		networkId, err := server.ParseId(strings.ToLower(match[1]))
+		if err != nil || networkId == (server.Id{}) || slices.Contains(networkIds, networkId) {
+			continue
+		}
+		networkIds = append(networkIds, networkId)
+	}
+	return networkIds
+}
 
 // UnlinkSolanaPaymentIntents drops the link between the old endpoints' paid
 // intents and the networks they paid for, once cutoff has passed since the

@@ -9,7 +9,8 @@ package controller
 //  1. the network lock (LockPaymentNetworkInTx) when the delivery has one
 //  2. the invoice one-shot (credited_at IS NULL AND voided_at IS NULL, rows
 //     affected checked), and for USDC the Solana intent's own one-shot in the
-//     same transaction
+//     same transaction, and an operator's credit of a recorded unfulfilled
+//     USDC payment removes that record there too
 //  3. a plan: the renewal (market monero / zcash / solana), the Pro transfer
 //     balance with the USD value as subsidy revenue, then the price tier on
 //     the renewal and the welcome offer's redemption -- inside the
@@ -48,12 +49,36 @@ type cryptoCredit struct {
 	// usdc_solana: the transaction signature the Solana intent is consumed by
 	solanaSignature string
 	late            bool
+	// usdc_solana, an operator's credit of a recorded unfulfilled payment
+	// (CryptoOperatorCommitUsdcCredit): the no_intent record of
+	// solanaSignature is removed in the credit's transaction, so the credit
+	// and the record's resolution commit together or not at all
+	resolvesUnfulfilled bool
 }
 
 // The invoice one-shot won and the linked Solana intent's lost: the two can
 // only disagree if something credited the Solana intent around the invoice.
 // The credit's transaction is rolled back rather than commit half of it.
 var errCryptoSolanaOneShotDiverged = errors.New("the USDC invoice is open but its Solana intent is already consumed")
+
+// An operator's credit of a recorded payment found the record gone or changed
+// in its transaction: the credit is rolled back with it.
+var errCryptoUnfulfilledPaymentChanged = errors.New("the recorded unfulfilled payment is no longer there as a no_intent record; nothing was written")
+
+// cryptoUsdcCreditUsd is what a USDC payment credits its invoice: the price
+// when it was paid by the quote's expiry, else what arrived, capped at the
+// price. The webhook judges a payment at its delivery; an operator's credit
+// at the payment's own time.
+func cryptoUsdcCreditUsd(
+	intent *model.CryptoPaymentIntent,
+	receivedUsd float64,
+	paidAt time.Time,
+) (usdNanoCents model.NanoCents, late bool) {
+	if intent.ExpiresAt.Before(paidAt) {
+		return min(model.UsdToNanoCents(receivedUsd), intent.PriceUsdNanoCents), true
+	}
+	return intent.PriceUsdNanoCents, false
+}
 
 // cryptoCreditIntent credits an invoice on its own connection.
 func cryptoCreditIntent(
@@ -154,6 +179,10 @@ func cryptoCreditIntentInTx(
 		server.Raise(err)
 		if !completed {
 			server.Raise(errCryptoSolanaOneShotDiverged)
+		}
+		if credit.resolvesUnfulfilled &&
+			!model.RemoveUnfulfilledSolanaPaymentInTx(tx, ctx, credit.solanaSignature, model.SolanaUnfulfilledReasonNoIntent) {
+			server.Raise(errCryptoUnfulfilledPaymentChanged)
 		}
 	}
 
@@ -324,11 +353,7 @@ func cryptoCreditLinkedSolanaIntentInConn(
 	}
 	// the price on time (the webhook already checked the payment against the
 	// quote); a late one is honored at what arrived, capped at the price
-	usdNanoCents := intent.PriceUsdNanoCents
-	late := intent.ExpiresAt.Before(server.NowUtc())
-	if late {
-		usdNanoCents = min(model.UsdToNanoCents(tokenAmountReceivedUsd), intent.PriceUsdNanoCents)
-	}
+	usdNanoCents, late := cryptoUsdcCreditUsd(intent, tokenAmountReceivedUsd, server.NowUtc())
 	if intent.VoidedAt == nil {
 		credited, err := cryptoCreditIntentInConn(connOwner, clientSession, intent, &cryptoCredit{
 			usdNanoCents:    usdNanoCents,

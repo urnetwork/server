@@ -422,10 +422,20 @@ func NetworkExists(ctx context.Context, networkId server.Id) (exists bool) {
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
 func NetworkExistsInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) (exists bool) {
 	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `SELECT 1 FROM network WHERE network_id = $1`, networkId)
-		server.WithPgResult(result, err, func() {
-			exists = result.Next()
-		})
+		exists = networkExists(ctx, conn, networkId)
+	})
+	return
+}
+
+// NetworkExistsInTx is NetworkExists in the caller's transaction.
+func NetworkExistsInTx(tx server.PgTx, ctx context.Context, networkId server.Id) bool {
+	return networkExists(ctx, tx, networkId)
+}
+
+func networkExists(ctx context.Context, query server.PgCanQuery, networkId server.Id) (exists bool) {
+	result, err := query.Query(ctx, `SELECT 1 FROM network WHERE network_id = $1`, networkId)
+	server.WithPgResult(result, err, func() {
+		exists = result.Next()
 	})
 	return
 }
