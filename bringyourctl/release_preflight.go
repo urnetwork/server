@@ -40,6 +40,24 @@ func releasePreflightCommand(opts docopt.Opts) {
 		}}
 		probeErr = checkReleaseHTTP(ctx, client, grafanaURL, password, "https://api.brevo.com/v3", brevoKey, os.Stdout)
 	}
+	if probeErr == nil {
+		// §12.5: every services.yml host label is reserved (release_preflight_dns.go)
+		probeErr = func() error {
+			env, err := server.Env()
+			if err != nil {
+				return fmt.Errorf("Reserved DNS labels: %w", err)
+			}
+			resource, err := server.Vault.SimpleResource("services.yml")
+			if err != nil {
+				return fmt.Errorf("Reserved DNS labels: services.yml: %w", err)
+			}
+			servicesYamlBytes, err := resource.BytesE()
+			if err != nil {
+				return fmt.Errorf("Reserved DNS labels: services.yml: %w", err)
+			}
+			return checkReleaseDnsReservedLabels(servicesYamlBytes, env, os.Stdout)
+		}()
+	}
 	if probeErr != nil {
 		fmt.Fprintln(os.Stderr, probeErr)
 		os.Exit(1)

@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -151,6 +152,28 @@ func TestRenameAppliesTheLabelRules(t *testing.T) {
 			requireRenameRefused(t, renamer.rename(clientSession, &RenameNetworkArgs{NewName: name}), RenameNetworkRefusalInvalid)
 		}
 		requireRenamed(t, ctx, renamer.rename(clientSession, &RenameNetworkArgs{NewName: "lab--elrules"}), networkId, "lab--elrules")
+	})
+}
+
+// §12.5's reserved list and brand rule, through sidecar's ValidateDnsName
+// (DNS-M0-01): a reserved label, a reserved pattern and a brand-confusable
+// token are refused as invalid, with a sentence about the network name.
+func TestRenameRefusesReservedAndBrandNames(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		_, restore := Testing_InMemoryNetworkNameSearch(ctx)
+		defer restore()
+		renamer := testNetworkRenamer(server.NowUtc)
+		networkId, clientSession := testRenameNetwork(t, ctx, "reserved-rules-network")
+
+		for _, name := range []string{"postmaster", "main-reserved", "rules-lb", "urnetw0rk-team", "paypa1-help"} {
+			result := renamer.rename(clientSession, &RenameNetworkArgs{NewName: name})
+			requireRenameRefused(t, result, RenameNetworkRefusalInvalid)
+			if !strings.HasPrefix(result.Error.Message, "Network name ") {
+				t.Fatalf("%q refused with %q", name, result.Error.Message)
+			}
+		}
+		requireRenamed(t, ctx, renamer.rename(clientSession, &RenameNetworkArgs{NewName: "reserved-rules-moved"}), networkId, "reserved-rules-moved")
 	})
 }
 
