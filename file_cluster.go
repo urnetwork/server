@@ -101,6 +101,11 @@ type FileClusterSettings struct {
 	// The most of an admin info answer read, past which the read fails. 16 MiB: a cluster's answer
 	// is tens of KiB, and a host that sends more is not answering admin info.
 	AdminInfoMaxByteCount int64
+	// Starts no check loop, for a caller that reads admin info itself through ReadAdminInfo: monitor,
+	// whose MinIO user holds admin reads alone (OPS-M2-04), so a sentinel read would only fail.
+	// Readiness, the pool check and SettlePassed then read nothing fresh and fail closed, so such
+	// clusters take no write.
+	NoChecks bool
 	// The clock deadlines and checks read. nil is real time.
 	Clock sidecar.Clock
 }
@@ -315,7 +320,9 @@ func newFileClusters(
 		cancel()
 		return nil, fmt.Errorf("%w: no first metadata cluster", ErrFileClusterConfig)
 	}
-	go self.run()
+	if !settings.NoChecks {
+		go self.run()
+	}
 	return self, nil
 }
 
@@ -357,6 +364,34 @@ func (self *FileClusters) SegmentCluster() (sidecar.BlobCluster, error) {
 
 func (self *FileClusters) MetadataClusterIds() []string {
 	return slices.Clone(self.metadataClusterIds)
+}
+
+// Every cluster: the first first, then the other metadata clusters, then the segment cluster.
+func (self *FileClusters) ClusterIds() []string {
+	clusterIds := slices.Clone(self.metadataClusterIds)
+	if self.segmentClusterId != "" {
+		clusterIds = append(clusterIds, self.segmentClusterId)
+	}
+	return clusterIds
+}
+
+// FileClusterKindMetadata or FileClusterKindSegment; "" for a cluster this block does not hold.
+func (self *FileClusters) ClusterKind(clusterId string) string {
+	cluster, ok := self.clusterIdClusters[clusterId]
+	if !ok {
+		return ""
+	}
+	return cluster.config.Kind
+}
+
+// Reads the cluster's admin info now, in one signed request, without keeping it: what a caller with
+// NoChecks reads in place of the check loop's.
+func (self *FileClusters) ReadAdminInfo(ctx context.Context, clusterId string) (*FileClusterAdminInfo, error) {
+	cluster, ok := self.clusterIdClusters[clusterId]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", sidecar.ErrBlobClusterUnknown, clusterId)
+	}
+	return cluster.AdminInfo(ctx)
 }
 
 // sidecar.yml's place_new, the first when it names none (§19.9). It may name a cluster this block
