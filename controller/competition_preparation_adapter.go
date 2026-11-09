@@ -194,19 +194,24 @@ func checkCompetitionPreparationLivenessInTx(ctx context.Context, tx server.PgTx
 	if err := ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"); err != nil {
 		return err
 	}
-	stored, err := sourceActivationInTx(ctx, tx, settings, request.Intent.Generation)
+	// The intent and its digest are immutable under database guards. Fetching
+	// multi-megabyte manifests here consumes the liveness budget on transport;
+	// full digest recomputation remains in synchronous authorization, not here.
+	var valid bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+	 SELECT 1 FROM competition_source_activation a
+	 WHERE a.environment=$1 AND a.competition_id=$2 AND a.season_id=$3 AND a.generation=$4
+	 AND a.intent_sha256::text=$5 AND a.intent_json->>'intent_sha256'=$5
+	 AND (a.intent_json->>'expected_generation')::bigint=$6
+	 AND a.activated_at IS NULL AND a.abandoned_at IS NULL
+	 AND COALESCE((SELECT p.generation FROM competition_source_pointer p
+	  WHERE p.environment=$1 AND p.competition_id=$2 AND p.season_id=$3),0)=$6
+	)`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId,
+		request.Intent.Generation, request.Intent.IntentSha256, request.Intent.ExpectedGeneration).Scan(&valid)
 	if err != nil {
 		return err
 	}
-	digest, err := competitionPreparationIntentDigest(*stored)
-	if err != nil || stored.ActivatedAt != nil || stored.AbandonedAt != nil || stored.IntentSha256 != request.Intent.IntentSha256 || digest != request.Intent.IntentSha256 {
-		return ErrConflict
-	}
-	current, err := currentSourceActivationInTx(ctx, tx, settings)
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		return err
-	}
-	if current == nil && stored.ExpectedGeneration != 0 || current != nil && current.Generation != stored.ExpectedGeneration {
+	if !valid {
 		return ErrConflict
 	}
 	return nil

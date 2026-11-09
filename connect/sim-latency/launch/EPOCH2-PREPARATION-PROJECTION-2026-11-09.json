@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "status": "PROJECTION_FIX_QUALIFIED_LOCAL_DEPLOYMENT_NEXT",
+  "failure": "Preparation's read-only watchdog still transferred the complete immutable intent and incumbent within its five-second budget.",
+  "native_read_only_comparison": [
+    {"returned_bytes":64,"callback_ms":172,"total_ms":731},
+    {"returned_bytes":1971080,"callback_ms":2252,"total_ms":2487},
+    {"returned_bytes":64,"callback_ms":145,"total_ms":434}
+  ],
+  "fix": "Project one lifecycle boolean from scoped generation, immutable column/JSON digest, expected predecessor, activation/abandonment and current pointer. Keep exact lease/hold checks, all synchronous full authorization, the five-second watchdog budget and all grading gates.",
+  "adjacent_fix": "The host-qualification watchdog now uses the same bounded liveness observer; full authorization remains at its synchronous boundaries.",
+  "deterministic_regression": "Synthetic full-payload transfer tripwire refuses the old source reader while the real projection succeeds with a large manifest. No timing/scheduler dependence.",
+  "focused_ordinary_repetitions": 3,
+  "focused_race_repetitions": 3,
+  "latest_race_includes_host_qualification_controls": true,
+  "isolated_postgres_cases": 2,
+  "isolated_postgres_repetitions_each": 3,
+  "postgres_controls": "Real held advisory scope; large JSONB payload with char(64) and JSON digest comparison; zero/nonzero current pointer; changed pointer; abandoned source.",
+  "main_database_migration_performed": false,
+  "grading_started": false,
+  "epoch2_opened": false
+}

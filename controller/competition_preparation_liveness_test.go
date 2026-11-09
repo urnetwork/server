@@ -4,11 +4,9 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -42,7 +40,7 @@ func (self *preparationLivenessTestTx) Exec(_ context.Context, query string, _ .
 }
 
 // Only independent authority and lifecycle reads may reach the monitor.
-func (self *preparationLivenessTestTx) QueryRow(_ context.Context, query string, _ ...any) pgx.Row {
+func (self *preparationLivenessTestTx) QueryRow(_ context.Context, query string, args ...any) pgx.Row {
 	return supervisorScopeRenewTestRow{scan: func(destinations []any) error {
 		switch {
 		case strings.Contains(query, "FOR UPDATE"), strings.Contains(query, "pg_advisory"):
@@ -51,28 +49,13 @@ func (self *preparationLivenessTestTx) QueryRow(_ context.Context, query string,
 			*destinations[0].(*bool) = self.leaseValid
 		case strings.Contains(query, "FROM competition_automation_hold"):
 			*destinations[0].(*bool) = self.held
-		case strings.Contains(query, "FROM competition_source_pointer"):
-			if self.pointer == 0 {
-				return pgx.ErrNoRows
+		case strings.Contains(query, "SELECT intent_json,"):
+			return errors.New("synthetic full-payload transfer exhausted liveness budget")
+		case strings.Contains(query, "FROM competition_source_activation a"):
+			if len(args) != 6 || len(destinations) != 1 || !strings.Contains(query, "SELECT EXISTS") {
+				return errors.New("watchdog must return one lifecycle boolean, not the manifest")
 			}
-			*destinations[0].(*int64) = self.pointer
-		case strings.Contains(query, "FROM competition_source_activation"):
-			if self.missing {
-				return pgx.ErrNoRows
-			}
-			content, err := json.Marshal(self.intent)
-			if err != nil {
-				return err
-			}
-			*destinations[0].(*[]byte) = content
-			if self.activated {
-				now := time.Now()
-				*destinations[1].(**time.Time) = &now
-			}
-			if self.abandoned {
-				now := time.Now()
-				*destinations[2].(**time.Time) = &now
-			}
+			*destinations[0].(*bool) = !self.missing && !self.abandoned && !self.activated && self.intent.IntentSha256 == args[4] && self.intent.ExpectedGeneration == args[5] && self.pointer == self.intent.ExpectedGeneration
 		default:
 			return errors.New("unexpected watchdog statement")
 		}
@@ -112,7 +95,7 @@ func TestCompetitionPreparationLivenessPreservesRevocations(t *testing.T) {
 	for _, failure := range []string{"lease", "hold", "missing", "abandoned", "activated", "digest", "pointer"} {
 		tx := &preparationLivenessTestTx{intent: intent, leaseValid: failure != "lease", held: failure == "hold", missing: failure == "missing", abandoned: failure == "abandoned", activated: failure == "activated"}
 		if failure == "digest" {
-			tx.intent.Reason = "changed"
+			tx.intent.IntentSha256 = strings.Repeat("b", 64)
 		}
 		if failure == "pointer" {
 			tx.pointer = 2
@@ -120,5 +103,26 @@ func TestCompetitionPreparationLivenessPreservesRevocations(t *testing.T) {
 		if err := checkCompetitionPreparationLivenessInTx(t.Context(), tx, settings, request); err == nil {
 			t.Error("revoked observation accepted", failure)
 		}
+	}
+}
+
+// A large immutable manifest cannot consume the five-second monitor budget.
+// The old full-intent reader trips deterministically; the real new projection
+// checks the same lifecycle without transferring that payload at all.
+func TestCompetitionPreparationLivenessDoesNotTransferManifest(t *testing.T) {
+	settings := &Settings{CompetitionId: "synthetic-competition", AutomationPolicy: model.CompetitionAutomationPolicy{Enabled: true, Environment: "local", SeasonId: "synthetic-season"}}
+	intent := model.CompetitionSourceActivation{Environment: "local", CompetitionId: settings.CompetitionId, SeasonId: "synthetic-season", Generation: 1, State: "prepared", Commits: preparationLivenessTestCommits(), Manifest: []byte(strings.Repeat("x", 1024*1024))}
+	digest, err := competitionPreparationIntentDigest(intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent.IntentSha256 = digest
+	request := CompetitionPreparationRequest{Intent: intent, Lease: model.CompetitionSupervisorLease{Environment: "local", CompetitionId: settings.CompetitionId, SeasonId: "synthetic-season", OwnerId: "synthetic-owner", FencingToken: 3}}
+	tx := &preparationLivenessTestTx{intent: intent, leaseValid: true}
+	if _, err := sourceActivationInTx(t.Context(), tx, settings, 1); err == nil {
+		t.Fatal("old payload transfer did not encounter its deterministic budget tripwire")
+	}
+	if err := checkCompetitionPreparationLivenessInTx(t.Context(), tx, settings, request); err != nil {
+		t.Fatal("bounded identity projection transferred the source manifest", err)
 	}
 }

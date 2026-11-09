@@ -847,7 +847,9 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 			case <-time.After(5 * time.Second):
 			}
 			probeCtx, cancel := context.WithTimeout(operationCtx, 5*time.Second)
-			_, err := CheckCompetitionPreparationFence(probeCtx, settings, request)
+			// Observe authority without contending with the synchronous source
+			// fence or repeatedly transporting its immutable manifest.
+			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
 			if err == nil {
 				err = checkCompetitionQualificationSlot(probeCtx, owner)
 			}
