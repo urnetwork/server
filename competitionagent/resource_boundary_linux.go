@@ -1758,7 +1758,7 @@ func validateRuntimeBoundaryContainerdVersion(content []byte, boundary RuntimeRe
 		return errors.New("private containerd version projection is unqualified")
 	}
 	fields := strings.Fields(string(content))
-	if len(fields) != 4 || fields[0] != "containerd" || fields[1] != "github.com/containerd/containerd/v2" && fields[1] != "containerd.io" ||
+	if len(fields) != 4 || fields[0] != "containerd" || fields[1] != "github.com/containerd/containerd/v2" && fields[1] != "containerd.io" && fields[1] != "containerd" ||
 		strings.TrimPrefix(fields[2], "v") != boundary.ContainerdVersion || fields[3] != boundary.ContainerdSourceCommit {
 		return errors.New("private containerd actual source version differs")
 	}

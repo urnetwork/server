@@ -4,6 +4,7 @@ package competitionagent
 import (
 	"bytes"
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -20,6 +21,25 @@ func TestRuntimeResourceBoundaryAcceptsForeignNamespaceHandleMounts(t *testing.T
 		}
 		if err := proof.Close(); err != nil {
 			t.Fatal(err)
+		}
+	}
+}
+
+// Distribution branding does not change the separately pinned version/commit.
+func TestRuntimeBoundaryContainerdAcceptsPinnedDistributionIdentity(t *testing.T) {
+	fixture := newRuntimeBoundaryTest(t)
+	version := "containerd containerd v" + fixture.boundary.ContainerdVersion + " " + fixture.boundary.ContainerdSourceCommit + "\n"
+	if err := validateRuntimeBoundaryContainerdVersion([]byte(version), fixture.boundary, fixture.settings); err != nil {
+		t.Fatal("pinned distribution version was rejected", err)
+	}
+	for _, changed := range []string{
+		strings.Replace(version, fixture.boundary.ContainerdVersion, "9.9.9", 1),
+		strings.Replace(version, fixture.boundary.ContainerdSourceCommit, strings.Repeat("d", 40), 1),
+		strings.Replace(version, "containerd containerd", "containerd synthetic-vendor", 1),
+		version + "extra",
+	} {
+		if err := validateRuntimeBoundaryContainerdVersion([]byte(changed), fixture.boundary, fixture.settings); err == nil {
+			t.Fatalf("changed source identity accepted: %q", changed)
 		}
 	}
 }
