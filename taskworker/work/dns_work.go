@@ -11,10 +11,11 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-// §12's taskworker chain (DNS-M5-09, DNS-M5-13, DNS-M5-14): each run purges
-// dns_zone_journal's rows past their 7 days (§12.14), removes challenges and
-// canaries past their hour through the journal (D-DNS-8), and lifts zone
-// suspensions whose until has passed (§12.9). A binary that does not link MG5
+// §12's taskworker chain (DNS-M5-09, DNS-M5-13, DNS-M5-14, DNS-M5-15): each
+// run purges dns_zone_journal's rows past their 7 days (§12.14), removes
+// challenges and canaries past their hour through the journal (D-DNS-8), lifts
+// zone suspensions whose until has passed (§12.9), and drops a restore's lists
+// and posted diffs past their 400 days (dns-1). A binary that does not link MG5
 // neither schedules the chain nor, should an older row run, touches anything.
 
 // Cadences of the chain.
@@ -40,10 +41,11 @@ type DnsMaintenanceArgs struct {
 }
 
 type DnsMaintenanceResult struct {
-	PurgedJournalCount int  `json:"purged_journal_count"`
-	ExpiredCount       int  `json:"expired_count"`
-	LiftedCount        int  `json:"lifted_count"`
-	More               bool `json:"more"`
+	PurgedJournalCount     int  `json:"purged_journal_count"`
+	ExpiredCount           int  `json:"expired_count"`
+	LiftedCount            int  `json:"lifted_count"`
+	PurgedRestoreListCount int  `json:"purged_restore_list_count"`
+	More                   bool `json:"more"`
 }
 
 // Schedules the chain's first run. A binary that does not link MG5 schedules
@@ -94,6 +96,12 @@ func DnsMaintenance(
 	result.LiftedCount = liftedCount
 	if err != nil {
 		glog.Warningf("[dns]suspension lift: %v\n", err)
+		result.More = true
+	}
+	purgedListCount, err := model.PurgeDnsRestoreLists(ctx, now)
+	result.PurgedRestoreListCount = purgedListCount
+	if err != nil {
+		glog.Warningf("[dns]restore list purge: %v\n", err)
 		result.More = true
 	}
 	return result, nil
