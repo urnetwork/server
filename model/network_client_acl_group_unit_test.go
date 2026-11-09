@@ -27,20 +27,28 @@ func TestParseNetworkClientAclGroup(t *testing.T) {
 }
 
 // A hosted proxy device and a provider install keep their own categories (both
-// are already never listed); the ACL group only changes an ordinary client.
+// are already never listed); a declared no-egress sidecar takes its own over the
+// ACL group (DESIGN.md 20.8); the ACL group only changes an ordinary client.
 func TestNetworkPeerCategory(t *testing.T) {
-	connect.AssertEqual(t, networkPeerCategory(false, false, false), NetworkPeerCategoryClient)
-	connect.AssertEqual(t, networkPeerCategory(false, false, true), NetworkPeerCategoryIsolated)
-	connect.AssertEqual(t, networkPeerCategory(true, false, false), NetworkPeerCategoryProxy)
-	connect.AssertEqual(t, networkPeerCategory(true, false, true), NetworkPeerCategoryProxy)
-	connect.AssertEqual(t, networkPeerCategory(false, true, false), NetworkPeerCategoryProvider)
-	connect.AssertEqual(t, networkPeerCategory(false, true, true), NetworkPeerCategoryProvider)
-	connect.AssertEqual(t, networkPeerCategory(true, true, true), NetworkPeerCategoryProxy)
+	connect.AssertEqual(t, networkPeerCategory(false, false, false, false), NetworkPeerCategoryClient)
+	connect.AssertEqual(t, networkPeerCategory(false, false, false, true), NetworkPeerCategoryIsolated)
+	connect.AssertEqual(t, networkPeerCategory(true, false, false, false), NetworkPeerCategoryProxy)
+	connect.AssertEqual(t, networkPeerCategory(true, false, false, true), NetworkPeerCategoryProxy)
+	connect.AssertEqual(t, networkPeerCategory(false, true, false, false), NetworkPeerCategoryProvider)
+	connect.AssertEqual(t, networkPeerCategory(false, true, false, true), NetworkPeerCategoryProvider)
+	connect.AssertEqual(t, networkPeerCategory(true, true, false, true), NetworkPeerCategoryProxy)
+	connect.AssertEqual(t, networkPeerCategory(false, false, true, false), NetworkPeerCategorySidecar)
+	connect.AssertEqual(t, networkPeerCategory(false, false, true, true), NetworkPeerCategorySidecar)
+	connect.AssertEqual(t, networkPeerCategory(true, false, true, false), NetworkPeerCategoryProxy)
+	connect.AssertEqual(t, networkPeerCategory(false, true, true, false), NetworkPeerCategoryProvider)
 
 	// the categories are distinct values the resident branches on
 	connect.AssertNotEqual(t, NetworkPeerCategoryIsolated, NetworkPeerCategoryClient)
 	connect.AssertNotEqual(t, NetworkPeerCategoryIsolated, NetworkPeerCategoryProxy)
 	connect.AssertNotEqual(t, NetworkPeerCategoryIsolated, NetworkPeerCategoryProvider)
+	for _, category := range []NetworkPeerCategory{NetworkPeerCategoryClient, NetworkPeerCategoryProxy, NetworkPeerCategoryProvider, NetworkPeerCategoryIsolated} {
+		connect.AssertNotEqual(t, NetworkPeerCategorySidecar, category)
+	}
 }
 
 // Every refusal that needs no lookup answers 200 with error.message before any

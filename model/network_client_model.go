@@ -2741,6 +2741,22 @@ type ProvideRelationshipDetails struct {
 	DestinationLifecycle NetworkClientLifecycle
 	SourceOwner          NetworkClientSourceOwner
 	DestinationOwner     NetworkClientSourceOwner
+	// Each end's sidecar mark, and whether the source declares no egress
+	// (network_client_owner, §7.4 and DESIGN.md 20.8), read where MG0 is linked
+	// and false elsewhere. CreateContract refuses a declared source a Public
+	// contract in any network, from these, since it holds a client id and no
+	// token there.
+	SourceStrictExp        bool
+	DestinationStrictExp   bool
+	SourceDeclaresNoEgress bool
+}
+
+// Whether a contract in provideMode is refused because its source is a sidecar
+// that declares no egress (DESIGN.md 20.8): no Public contract, in any network,
+// with or without an ACL head row (plan-QUOTA-small-readings #14). CreateContract
+// asks it, and ACL-M4-01's contract gate calls the same check.
+func (self ProvideRelationshipDetails) DeclaredSourceRefused(provideMode ProvideMode) bool {
+	return provideMode == ProvideModePublic && self.SourceDeclaresNoEgress
 }
 
 func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClientLifecycle {
@@ -2779,6 +2795,20 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 		details.Mode = ProvideModeNetwork
 	}
 
+	// the owner rows ride the same query's LEFT JOINs, so the marks add no query
+	// (DESIGN.md 20.8); a release leg has no owner table
+	readMarks := server.SidecarMg0Linked()
+	markColumns := ""
+	markJoins := ""
+	if readMarks {
+		markColumns = `,
+				COALESCE(owner_a.strict_exp, false),
+				COALESCE(owner_b.strict_exp, false),
+				COALESCE(owner_a.declares_no_egress, false)`
+		markJoins = `
+			LEFT JOIN network_client_owner owner_a ON owner_a.client_id = $1
+			LEFT JOIN network_client_owner owner_b ON owner_b.client_id = $2`
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -2792,11 +2822,11 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				b.source_client_id,
 				prober.network_id,
 				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=a.network_id),
-				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=b.network_id)
+				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=b.network_id)`+markColumns+`
 			FROM (VALUES (true)) AS seed(value)
 			LEFT JOIN network_client a ON a.client_id = $1
 			LEFT JOIN network_client b ON b.client_id = $2
-			LEFT JOIN prober_identity prober ON prober.singleton
+			LEFT JOIN prober_identity prober ON prober.singleton`+markJoins+`
 			`,
 			clientIdA,
 			clientIdB,
@@ -2811,7 +2841,7 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				var sourceClientIdB *server.Id
 				var proberNetworkId *server.Id
 				var shardA, shardB bool
-				server.Raise(result.Scan(
+				destinations := []any{
 					&networkIdA,
 					&activeA,
 					&sourceClientIdA,
@@ -2821,7 +2851,16 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 					&proberNetworkId,
 					&shardA,
 					&shardB,
-				))
+				}
+				if readMarks {
+					destinations = append(
+						destinations,
+						&details.SourceStrictExp,
+						&details.DestinationStrictExp,
+						&details.SourceDeclaresNoEgress,
+					)
+				}
+				server.Raise(result.Scan(destinations...))
 				details.SourceLifecycle = networkClientLifecycle(activeA, sourceClientIdA)
 				details.DestinationLifecycle = networkClientLifecycle(activeB, sourceClientIdB)
 				if networkIdA != nil && (proberNetworkId != nil || shardA) {

@@ -101,7 +101,7 @@ var contractRejectionCauses = []string{
 	"inactive_destination", "provide_mode_unavailable", "provide_secret_unavailable",
 	"insufficient_balance", "missing_companion_origin", "client_not_found",
 	"source_inactive", "canceled", "deadline", "reservation_window_expired",
-	"reservation_released", "other",
+	"reservation_released", "declared_no_egress", "other",
 }
 
 var contractRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -955,6 +955,24 @@ func CreateContract(
 			ctx = withCompanionOriginSingleLookup(ctx)
 			glog.V(2).Infof("[contract][companion-fallback]%s->%s relationship=%d not provided; using companion Stream\n", clientId, destinationId, provideRelationship)
 		}
+	}
+
+	// DESIGN.md 20.8 (plan-QUOTA-small-readings #14): a sidecar that declares no
+	// egress gets no Public contract, in any network, with or without an ACL
+	// head row; ACL-M4-01's gate calls this same check. Refused as no
+	// permission, and never recorded as a route rejection, since the route
+	// stays open to every other source.
+	if relationshipDetails.DeclaredSourceRefused(provideMode) {
+		rejectionCause = "declared_no_egress"
+		resolution.path = contractResolutionRejected
+		glog.V(2).Infof("[contract][reject]%s->%s no-permission (declared no egress)\n", clientId, destinationId)
+		contractError := protocol.ContractError_NoPermission
+		frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+		if err != nil {
+			return nil, err
+		}
+		timingResult = server.ContractCreationRejected
+		return []*protocol.Frame{frame}, nil
 	}
 
 	// Old providers keep returning traffic to windows whose forward contract

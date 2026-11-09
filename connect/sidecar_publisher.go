@@ -75,18 +75,19 @@ func (self *Exchange) sidecarPushOn() bool {
 	return self.settings.EnableSidecarPush && server.SidecarMg0Linked() && server.CurrentSidecarConfig().Push()
 }
 
-// The profile a resident is built from and, while push is on, the client's marks from the same read.
-// A test's profile replaces the read whole, and its marks then come from residentPushMarksForTest.
+// The profile a resident is built from and, while push is on or sidecar clients are counted
+// (model.SidecarClientCountingOn, QUOTA-M1-04), the client's marks from the same read. A test's profile
+// replaces the read whole, and its marks then come from residentPushMarksForTest.
 func (self *Exchange) loadResidentProfile(ctx context.Context, clientId server.Id) (networkId server.Id, topLevel bool, category model.NetworkPeerCategory, peer *model.NetworkPeer, peersEnabled bool, marks model.SidecarPushMarks) {
-	pushOn := self.sidecarPushOn()
+	readMarks := self.sidecarPushOn() || model.SidecarClientCountingOn()
 	if self.residentProfileForTest != nil {
 		networkId, topLevel, category, peer, peersEnabled = self.residentProfileForTest(ctx, clientId)
-		if pushOn && self.residentPushMarksForTest != nil {
+		if readMarks && self.residentPushMarksForTest != nil {
 			marks = self.residentPushMarksForTest(clientId)
 		}
 		return
 	}
-	if pushOn {
+	if readMarks {
 		return model.GetNetworkPeerProfileWithPushMarks(ctx, clientId)
 	}
 	networkId, topLevel, category, peer, peersEnabled = model.GetNetworkPeerProfile(ctx, clientId)
