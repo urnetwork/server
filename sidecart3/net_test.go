@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/sidecartest"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
@@ -187,6 +189,55 @@ func TestT3ApplyThenDropOnARealPutLeavesTheObject(t *testing.T) {
 	})
 }
 
+// The rest of the blob plans: a DELETE whose answer is lost has deleted, a LIST and a GET that fail
+// before they leave read nothing, and a held key refuses.
+func TestT3BlobPlansReachEveryRequest(t *testing.T) {
+	testEnv().Run(t, func(tb testing.TB) {
+		net := NewNet(t, nil)
+		defer net.Close()
+		cluster, err := net.Host().Blobs.FirstCluster()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx := net.Actors().Actor(net.Context(), "writerA").Context()
+		inspect := sidecartest.InspectContext(ctx)
+		prefix := runKey("plans/")
+		deleted := prefix + "/deleted"
+		if _, err := cluster.PutIfNoneMatch(ctx, deleted, []byte("x"), nil); err != nil {
+			t.Fatal(err)
+		}
+		for _, plan := range []*sidecartest.FaultPlan{
+			{Op: sidecartest.FaultOpDelete, KeyPrefix: deleted, Result: sidecartest.ApplyThenDrop},
+			{Op: sidecartest.FaultOpList, KeyPrefix: prefix, Result: sidecartest.FailBeforeApply},
+			{Op: sidecartest.FaultOpGet, KeyPrefix: prefix + "/read", Result: sidecartest.FailBeforeApply},
+			{Op: sidecartest.FaultOpPut, KeyPrefix: prefix + "/held", Result: sidecartest.Held},
+		} {
+			if _, err := net.Faults().Add(plan); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var unknown *sidecar.BlobUnknownError
+		if err := cluster.Delete(ctx, deleted); !errors.As(err, &unknown) {
+			t.Errorf("a DELETE whose answer was lost read %v", err)
+		}
+		if _, err := cluster.Head(inspect, deleted); !errors.Is(err, sidecar.ErrBlobNotFound) {
+			t.Errorf("the DELETE did not apply: %v", err)
+		}
+		if _, _, err := cluster.List(ctx, prefix, "", 10); !errors.Is(err, errTransport) {
+			t.Errorf("a LIST that never left read %v", err)
+		}
+		if _, err := cluster.Get(ctx, prefix+"/read"); !errors.Is(err, errTransport) || errors.As(err, &unknown) {
+			t.Errorf("a GET that never left read %v", err)
+		}
+		if _, err := cluster.PutIfNoneMatch(ctx, prefix+"/held", []byte("x"), nil); !errors.Is(err, sidecar.ErrBlobHeld) {
+			t.Errorf("a held key read %v", err)
+		}
+		if unfired := net.Faults().Unfired(); len(unfired) != 0 {
+			t.Errorf("never fired: %v", unfired)
+		}
+	})
+}
+
 // §22.8's pg-commit fault on server.Tx: a lost commit answer leaves the row committed while its caller
 // sees an error, and a commit that never left leaves none. A commit outside any actor takes no plan.
 func TestT3PgCommitDropLeavesACommittedRow(t *testing.T) {
@@ -328,8 +379,9 @@ func TestT3HttpPlansReachTheApi(t *testing.T) {
 	})
 }
 
-// What T3's stores cannot do is refused, not faked: a Delay at the schedule's Add, and a row on the
-// fake contract issuer and ControlId sink, until server's exchange carries T3's clients.
+// What T3 cannot do is refused, not faked: a Delay at the schedule's Add; a sidecar, whose clients would
+// run on the fake contract issuer and ControlId sink until server's api carries its enrollment; and a
+// link's conditions, which server's exchange takes none of.
 func TestT3RefusesWhatItsStoresCannotDo(t *testing.T) {
 	testEnv().Run(t, func(tb testing.TB) {
 		func() {
@@ -339,21 +391,37 @@ func TestT3RefusesWhatItsStoresCannotDo(t *testing.T) {
 				t.Errorf("a Delay was armed on T3: %v", err)
 			}
 		}()
-		withClient := func(net *sidecartest.Net) *fault.Schedule {
+		withSidecar := func(net *sidecartest.Net) *fault.Schedule {
 			return &fault.Schedule{
-				Id:    "client",
+				Id:    "sidecar",
 				Tiers: []fault.Tier{fault.TierT2, fault.TierT3},
 				Steps: []*fault.Step{
 					{Actor: "daemonM", Action: func(ctx context.Context, net *sidecartest.Net) error {
-						net.AddClient("m", nil)
+						_, err := net.AddSidecar("m", nil)
+						return err
+					}},
+				},
+			}
+		}
+		result := runOn(t, withSidecar, NetSettings(t, nil))
+		if result.Err == nil || !strings.Contains(result.Err.Error(), refusePlatformFakes) {
+			t.Errorf("a row with a sidecar ran on T3: %s", result)
+		}
+		withPartition := func(net *sidecartest.Net) *fault.Schedule {
+			return &fault.Schedule{
+				Id:    "partition",
+				Tiers: []fault.Tier{fault.TierT2, fault.TierT3},
+				Steps: []*fault.Step{
+					{Actor: "daemonM", Action: func(ctx context.Context, net *sidecartest.Net) error {
+						net.SetLink(connect.NewId(), connect.NewId(), &sidecartest.LinkConditions{Partition: true})
 						return nil
 					}},
 				},
 			}
 		}
-		result := runOn(t, withClient, NetSettings(t, nil))
-		if result.Err == nil || !strings.Contains(result.Err.Error(), refusePlatformFakes) {
-			t.Errorf("a row on the platform fakes ran on T3: %s", result)
+		result = runOn(t, withPartition, NetSettings(t, nil))
+		if result.Err == nil || !strings.Contains(result.Err.Error(), "cannot apply") {
+			t.Errorf("a row partitioning a link ran on T3: %s", result)
 		}
 	})
 }
@@ -400,7 +468,8 @@ func TestT3Rows(t *testing.T) {
 		t.Log("no FS row registers a T3 builder yet: each lands with its row's task")
 		return
 	}
-	testEnv().Run(t, func(tb testing.TB) {
+	// a row's clients run on server's exchange, which needs the schema
+	testEnvWithSchema().Run(t, func(tb testing.TB) {
 		for _, registration := range registrations {
 			RunRow(t, registration.Row, registration.Case, nil)
 		}
