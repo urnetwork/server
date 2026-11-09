@@ -191,8 +191,10 @@ func UpdateProNetwork(ctx context.Context, networkId server.Id) bool {
 }
 
 // Reuse the caller's PostgreSQL session; nil selects the outer acquisition boundary.
+// The one load also refreshes the network's tier (pro_tier_model.go), under its own key,
+// so NetworkTierOf sees an upgrade as soon as IsProNetwork does.
 func UpdateProNetworkInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) bool {
-	return refreshProNetworkInConn(connOwner, ctx, networkId)
+	return updateNetworkEntitlementInConn(connOwner, ctx, networkId).tier != NetworkTierFree
 }
 
 // UpdateProNetworks refreshes a batch of networks, used by the monthly Pro grant

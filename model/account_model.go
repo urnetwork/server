@@ -386,10 +386,15 @@ func RemoveNetworkWithStoreSnapshot(
 		// their network
 		if server.SidecarMg1Linked() {
 			removeSidecarIdentitiesInTx(ctx, tx, networkId)
+			// §20.5's overrides live until lifted or their network goes
+			removeNetworkSidecarLimitsInTx(ctx, tx, networkId)
 		}
 		// §8.17's head goes with its network; its clients' acks age out in 7 days
 		if server.SidecarMg2Linked() {
 			removeNetworkAclHeadInTx(ctx, tx, networkId)
+			// §20.7's quota state lives until its network is deleted; its
+			// daily usage keeps its own 13 months (§2.8 api-13)
+			removeNetworkQuotaStateInTx(ctx, tx, networkId)
 		}
 		// §17.16's shares go with either of their networks
 		if server.SidecarMg6Linked() {

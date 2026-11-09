@@ -98,6 +98,43 @@ tables:
       seq: api-8
       target_id: api-8
       target_kind: api-8
+  network_sidecar_limit:
+    group: MG1
+    columns:
+      limit_key: api-13
+      limit_value: api-13
+      network_id: api-13
+      reason: api-13
+  network_quota_state:
+    group: MG2
+    columns:
+      network_id: api-13
+      spent_time: api-13
+      storage_over: api-13
+      stored_byte_count: api-13
+  network_service_usage:
+    group: MG2
+    columns:
+      meter: api-13
+      network_id: api-13
+      quantity: api-13
+      usage_day: api-13
+  service_debit_journal:
+    group: MG2
+    columns:
+      applied: api-13
+      balance_id: api-13
+      batch_id: api-13
+      debit_byte_count: api-13
+      meter: api-13
+      usage_id: api-13
+  service_usage_batch:
+    group: MG2
+    columns:
+      applied_time: api-13
+      batch_id: api-13
+      producer: api-13
+      window_start: api-13
   network_acl_head:
     group: MG2
     columns:

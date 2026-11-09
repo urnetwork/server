@@ -106,21 +106,28 @@ type DbHotVacuumSettings struct {
 // all of them takes seconds, and a compact table's index rebuild takes
 // seconds too.
 func DefaultDbHotVacuumSettings() *DbHotVacuumSettings {
+	tables := []string{
+		"pending_task",
+		"finished_task",
+		"network_client_connection",
+		"network_client_location",
+		"network_client_handler",
+		"transfer_debit_journal",
+		"transfer_balance",
+		"client_connection_reliability_score",
+		"provider_egress_probe_cycle",
+		"provider_url_probe_run",
+		"device",
+		"search_provider_stats",
+	}
+	if SidecarMg2Linked() {
+		// §20.14's service debit journal churns as transfer_debit_journal does:
+		// each row is inserted, marked applied and deleted within seconds
+		// (QUOTA-M2-02). A release leg has no such table.
+		tables = append(tables, "service_debit_journal")
+	}
 	return &DbHotVacuumSettings{
-		Tables: []string{
-			"pending_task",
-			"finished_task",
-			"network_client_connection",
-			"network_client_location",
-			"network_client_handler",
-			"transfer_debit_journal",
-			"transfer_balance",
-			"client_connection_reliability_score",
-			"provider_egress_probe_cycle",
-			"provider_url_probe_run",
-			"device",
-			"search_provider_stats",
-		},
+		Tables:                    tables,
 		Interval:                  5 * time.Minute,
 		RunBudget:                 4 * time.Minute,
 		StatementTimeout:          2 * time.Minute,

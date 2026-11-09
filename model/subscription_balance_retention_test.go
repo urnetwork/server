@@ -311,7 +311,7 @@ func TestCompletedTransferBalanceRetentionConcurrentReservations(t *testing.T) {
 			}
 			server.RaisePgResult(locked.Exec(heldCtx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR UPDATE`, zero.balanceId))
 			wait()
-			rows, err := locked.Query(heldCtx, completedTransferBalanceDeleteSql, []server.Id{zero.balanceId})
+			rows, err := locked.Query(heldCtx, completedTransferBalanceDeleteQuery(), []server.Id{zero.balanceId})
 			server.WithPgResult(rows, err, func() { deletedZero = rows.Next() })
 		})
 		defer abortZero()
@@ -376,7 +376,7 @@ func TestCompletedTransferBalanceRetentionPlansStayIndexed(t *testing.T) {
 			for _, q := range []struct{ name, sql string }{
 				{"retention_candidates", completedTransferBalanceCandidatesSql},
 				{"retention_lock", completedTransferBalanceLockSql},
-				{"retention_delete", completedTransferBalanceDeleteSql},
+				{"retention_delete", completedTransferBalanceDeleteQuery()},
 			} {
 				server.RaisePgResult(conn.Exec(ctx, `PREPARE `+q.name+` AS `+q.sql))
 				defer conn.Exec(context.WithoutCancel(ctx), `DEALLOCATE `+q.name)

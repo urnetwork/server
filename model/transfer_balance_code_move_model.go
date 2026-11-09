@@ -514,13 +514,24 @@ func readRedeemedBalanceMovePlan(
 	if plan.ToNetwork != nil {
 		plan.ToNetworkPro = loadProNetworkWithConn(ctx, tx, toNetworkId).pro
 	}
-	result, err = tx.Query(
-		ctx,
-		`
+	// once this binary links MG2, service_debit_journal's rows count as debit journal
+	// rows too, since its guard keeps their balance as transfer_debit_journal's does
+	debitJournalCountSql := `
 			SELECT
 				(SELECT count(*) FROM transfer_escrow WHERE balance_id = $1),
 				(SELECT count(*) FROM transfer_debit_journal WHERE balance_id = $1)
-		`,
+		`
+	if server.SidecarMg2Linked() {
+		debitJournalCountSql = `
+			SELECT
+				(SELECT count(*) FROM transfer_escrow WHERE balance_id = $1),
+				(SELECT count(*) FROM transfer_debit_journal WHERE balance_id = $1) +
+				(SELECT count(*) FROM service_debit_journal WHERE balance_id = $1)
+		`
+	}
+	result, err = tx.Query(
+		ctx,
+		debitJournalCountSql,
 		balanceId,
 	)
 	server.WithPgResult(result, err, func() {

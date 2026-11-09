@@ -166,7 +166,7 @@ func TestDbHotVacuumParsesPostgres18VerboseText(t *testing.T) {
 // The list and bounds of the plan's A1 and A2.
 func TestDbHotVacuumSettingsFollowThePlan(t *testing.T) {
 	settings := DefaultDbHotVacuumSettings()
-	if !slices.Equal(settings.Tables, []string{
+	wantTables := []string{
 		"pending_task",
 		"finished_task",
 		"network_client_connection",
@@ -179,7 +179,12 @@ func TestDbHotVacuumSettingsFollowThePlan(t *testing.T) {
 		"provider_url_probe_run",
 		"device",
 		"search_provider_stats",
-	}) {
+	}
+	if SidecarMg2Linked() {
+		// MG2's service debit journal, which a release leg does not have
+		wantTables = append(wantTables, "service_debit_journal")
+	}
+	if !slices.Equal(settings.Tables, wantTables) {
 		t.Fatalf("tables = %v", settings.Tables)
 	}
 	if settings.Interval != 5*time.Minute || settings.RunBudget != 4*time.Minute || settings.StatementTimeout != 2*time.Minute ||
