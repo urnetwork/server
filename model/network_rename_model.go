@@ -4,7 +4,7 @@ package model
 // /account/claim-name and POST /network/user/update all rename through
 // RenameNetwork, so every path applies the same rules:
 //
-//   - ValidateNetworkName, then §12.5's label rules (screenRenamedNetworkName);
+//   - ValidateNetworkName, then §12.5's label rules (sidecar.ValidateDnsName);
 //   - only the network's owner renames it (its admin_user_id; roles replace
 //     this at TEAM-M6-03);
 //   - no other network holds the name or one a single edit from it (the
@@ -25,11 +25,11 @@ package model
 import (
 	"context"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
+	"github.com/urnetwork/sidecar"
 )
 
 // Tunables of the rename.
@@ -80,18 +80,14 @@ func defaultNetworkLabelHolder() NetworkLabelHolder {
 	return noNetworkLabelHolder{}
 }
 
-// §12.5's label rules a renamed network's name meets beyond ValidateNetworkName:
-// no edge hyphen, which Boulder refuses, and no "--" at the third and fourth
-// characters, which keeps out xn-- and IDNA homographs. The reserved list and
-// the brand rules are DNS-M0-01's ValidateDnsName, which replaces this once it
-// lands; until then a reserved or brand-confusable name passes as it did before
-// (no name is a DNS name before aliases, §12.5).
+// §12.5's label rules a renamed network's name meets beyond ValidateNetworkName,
+// sidecar's ValidateDnsName (DNS-M0-01): no edge hyphen, which Boulder refuses;
+// no "--" at the third and fourth characters, which keeps out xn-- and IDNA
+// homographs; not reserved; and no token confusable with a brand. Each refusal
+// reads as a sentence about the network name.
 func screenRenamedNetworkName(name string) error {
-	if strings.HasPrefix(name, "-") || strings.HasSuffix(name, "-") {
-		return errors.New("Network name must not start or end with a dash")
-	}
-	if 4 <= len(name) && name[2:4] == "--" {
-		return errors.New("Network name must not have two dashes as its third and fourth characters")
+	if err := sidecar.ValidateDnsName(name); err != nil {
+		return errors.New("Network " + err.Error())
 	}
 	return nil
 }
