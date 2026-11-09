@@ -64,6 +64,9 @@ type DnsModelSettings struct {
 	// How many rows a snapshot's reader may hold unread before the stream waits
 	// for its consumer.
 	SnapshotBufferSize int
+	// The most expired challenges and canaries one taskworker pass removes, so a
+	// backlog costs bounded passes; a full pass asks for the next sooner.
+	ExpiryBatchSize int
 }
 
 func DefaultDnsModelSettings() *DnsModelSettings {
@@ -72,6 +75,7 @@ func DefaultDnsModelSettings() *DnsModelSettings {
 		ChallengeLifetime:  1 * time.Hour,
 		PurgeBatchSize:     10000,
 		SnapshotBufferSize: 256,
+		ExpiryBatchSize:    1000,
 	}
 }
 

@@ -65,7 +65,8 @@ type DnsChallengeArgs struct {
 	Name string
 	// At most two key authorizations' digests. None removes the challenge.
 	Values []string
-	// Seconds: dns.yml's ttl.challenge. Zero takes §12.6's 60.
+	// Seconds: dns.yml's ttl.challenge. Zero takes the process's dns.yml, or
+	// §12.6's 60 without one.
 	Ttl uint32
 }
 
@@ -160,7 +161,7 @@ func DnsPutChallengeInTx(ctx context.Context, tx server.PgTx, args *DnsChallenge
 	}
 	ttl := args.Ttl
 	if ttl == 0 {
-		ttl = 60
+		ttl = dnsZoneTtl().Challenge
 	}
 	// the zone's lock first, so two writes for one name count each other
 	lockDnsZoneInTx(ctx, tx, root, networkId)
@@ -224,9 +225,6 @@ func countDnsChallengeWritesInTx(ctx context.Context, query server.PgCanQuery, r
 	return count
 }
 
-// The most expired rows one pass takes.
-const dnsChallengeExpiryBatchSize = 1000
-
 // Removes every challenge and canary past its hour at now, through the journal,
 // one write a zone (D-DNS-8). Returns how many went and whether more wait. A
 // zone that cannot be written now, restoring or suspended, keeps its rows for
@@ -252,7 +250,7 @@ func RemoveExpiredDnsChallenges(ctx context.Context, now time.Time) (int, bool, 
 				LIMIT $2
 			`,
 			now.UTC(),
-			dnsChallengeExpiryBatchSize,
+			DefaultDnsModelSettings().ExpiryBatchSize,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -299,5 +297,5 @@ func RemoveExpiredDnsChallenges(ctx context.Context, now time.Time) (int, bool, 
 			errs = append(errs, err)
 		}
 	}
-	return removedCount, rowCount == dnsChallengeExpiryBatchSize, errors.Join(errs...)
+	return removedCount, rowCount == DefaultDnsModelSettings().ExpiryBatchSize, errors.Join(errs...)
 }
