@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
 )
@@ -184,22 +186,33 @@ func TestBindRefusesRevokedSidecar(t *testing.T) {
 }
 
 // After a restore lost the identity row, a binding past generation 1 is taken
-// only as the re-registration seam admits it (§5.6, §19.10).
-func TestBindReregistersAfterARestore(t *testing.T) {
+// only once the projection admits its identity key (§5.6, §19.10, CORE-M2-07):
+// with no sequencer installed the default seam refuses, and a projection
+// admitting another key refuses, both as generation_conflict, creating nothing.
+func TestRestoreBindWaitsForProjection(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		networkId := server.NewId()
 		now := server.NowUtc()
 
+		restoreSequencer := configLogSequencer.Swap(nil)
 		refused := testSidecarBindingRecord(t, networkId, server.NewId(), testSidecarKey(t), 3)
-		restore := Testing_SetSidecarReregistrationAdmits(func(context.Context, server.Id, server.Id, []byte) bool { return false })
 		outcome, _ := BindSidecarIdentity(ctx, refused, now)
-		restore()
+		configLogSequencer.Store(restoreSequencer)
 		if outcome != SidecarBindGenerationConflict || sidecarIdentityExists(t, ctx, refused.SidecarId) {
-			t.Fatalf("a refused re-registration: %s", outcome)
+			t.Fatalf("a re-registration with no projection: %s", outcome)
 		}
 
-		admitted := testSidecarBindingRecord(t, networkId, server.NewId(), testSidecarKey(t), 3)
+		admittedKey := testSidecarKey(t)
+		restore := Testing_SetSidecarReregistrationAdmits(func(ctx context.Context, seamNetworkId server.Id, sidecarId server.Id, identityPublicKey []byte) bool {
+			return seamNetworkId == networkId && bytes.Equal(identityPublicKey, admittedKey)
+		})
+		defer restore()
+		otherKey := testSidecarBindingRecord(t, networkId, server.NewId(), testSidecarKey(t), 3)
+		if outcome, _ := BindSidecarIdentity(ctx, otherKey, now); outcome != SidecarBindGenerationConflict || sidecarIdentityExists(t, ctx, otherKey.SidecarId) {
+			t.Fatalf("a key the projection does not admit: %s", outcome)
+		}
+		admitted := testSidecarBindingRecord(t, networkId, server.NewId(), admittedKey, 3)
 		outcome, generation := BindSidecarIdentity(ctx, admitted, now)
 		if outcome != SidecarBindAppended || generation != 3 {
 			t.Fatalf("an admitted re-registration: %s %d", outcome, generation)
@@ -207,6 +220,57 @@ func TestBindReregistersAfterARestore(t *testing.T) {
 		next := testSidecarBindingRecord(t, networkId, admitted.SidecarId, admitted.IdentityPublicKey, 4)
 		if outcome, _ := BindSidecarIdentity(ctx, next, now); outcome != SidecarBindAppended {
 			t.Fatalf("the generation after: %s", outcome)
+		}
+	})
+}
+
+// A landed SidecarRevoke's removal marks the identity revoked through the
+// removal chain (CORE-M2-07), once: a later bind answers sidecar_revoked and
+// the client's proof key is gone, and the effect applied again changes nothing.
+func TestBindRefusesRevoked(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		sidecarId := server.NewId()
+		identityKey := testSidecarKey(t)
+		now := server.NowUtc()
+		first := testSidecarBindingRecord(t, networkId, sidecarId, identityKey, 1)
+		if outcome, _ := BindSidecarIdentity(ctx, first, now); outcome != SidecarBindAppended {
+			t.Fatalf("bind: %s", outcome)
+		}
+		removal := &Removal{
+			Subjects: []*RemovalSubject{{NetworkId: networkId, Kind: sidecar.RevocationKindSidecar, SubjectId: sidecarId}},
+			Reason:   sidecar.RevocationReasonRevoked,
+			Time:     now,
+		}
+		for range 2 {
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.Raise(applySidecarIdentityRemovalEffectInTx(ctx, tx, removal))
+			})
+		}
+		status := ""
+		var revokeTime time.Time
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT status, revoke_time FROM sidecar_identity WHERE sidecar_id = $1`, sidecarId).Scan(&status, &revokeTime))
+		})
+		if status != SidecarIdentityStatusRevoked || !revokeTime.Equal(now) {
+			t.Fatalf("status %q at %v", status, revokeTime)
+		}
+		if outcome, _ := BindSidecarIdentity(ctx, testSidecarBindingRecord(t, networkId, sidecarId, identityKey, 2), now); outcome != SidecarBindSidecarRevoked {
+			t.Fatalf("a revoked sidecar's bind: %s", outcome)
+		}
+		if _, err := GetClientBindingKey(ctx, first.ClientId); err != ErrClientBindingKeyNotFound {
+			t.Fatalf("a revoked identity's key: %v", err)
+		}
+		// a client's removal names no sidecar, and leaves another identity active
+		otherId := server.NewId()
+		other := testSidecarBindingRecord(t, networkId, otherId, testSidecarKey(t), 1)
+		BindSidecarIdentity(ctx, other, now)
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(applySidecarIdentityRemovalEffectInTx(ctx, tx, NewClientRemoval(networkId, []server.Id{other.ClientId}, sidecar.RevocationReasonRemoved, now)))
+		})
+		if _, err := GetClientBindingKey(ctx, other.ClientId); err != nil {
+			t.Fatalf("a client's removal revoked its identity: %v", err)
 		}
 	})
 }

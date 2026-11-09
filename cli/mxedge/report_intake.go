@@ -85,17 +85,33 @@ func newPlatformReportIntake(store smtpedgeservice.SmtpEdgeStore, settings *smtp
 	}
 	return &platformReportIntake{
 		intake: intake,
-		root:   strings.ToLower(strings.TrimSuffix(settings.Root, ".")),
+		root:   reportIntakeName(settings.Root),
 	}, nil
 }
 
+// A name as both files hold it: lowercase, with no final dot.
+func reportIntakeName(name string) string {
+	return strings.ToLower(strings.TrimSuffix(name, "."))
+}
+
 // The platform block's intake from config: smtpedge.yml's settings on model's store, reporters' keys from the
-// process's resolver and no report tokens yet. An error, which names no value of the file, leaves the block
-// without an intake, so every recipient the listener answers for gets 451 4.3.0.
-func newConfiguredReportIntake() (*platformReportIntake, error) {
+// process's resolver and no report tokens yet. smtpedge.yml's root and report host must be mxedge.yml's
+// platform_root and platform_report_host, since the listener takes recipients by the one and the intake routes
+// them by the other: mail one took and the other could not route would be answered 250 and dropped. An error
+// leaves the block without an intake, so every recipient the listener answers for gets 451 4.3.0.
+func newConfiguredReportIntake(mxEdgeSettings *mxedgeservice.MxEdgeSettings) (*platformReportIntake, error) {
 	settings, err := loadReportIntakeSettings()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", reportIntakeSettingsName, err)
+	}
+	if mxEdgeSettings == nil {
+		return nil, errors.New("report intake: no mxedge.yml")
+	}
+	if reportIntakeName(settings.Root) != reportIntakeName(mxEdgeSettings.PlatformRootDomainName) {
+		return nil, fmt.Errorf("%s's root is not mxedge.yml's platform_root", reportIntakeSettingsName)
+	}
+	if reportIntakeName(settings.ReportHostName) != reportIntakeName(mxEdgeSettings.PlatformReportHostName) {
+		return nil, fmt.Errorf("%s's report_host is not mxedge.yml's platform_report_host", reportIntakeSettingsName)
 	}
 	return newPlatformReportIntake(model.NewSmtpEdgeStore(nil), settings, &smtpedgeservice.SmtpResolverTxtSource{}, nil)
 }

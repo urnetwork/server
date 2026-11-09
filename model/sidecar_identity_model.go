@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/glog"
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
 )
@@ -82,14 +83,27 @@ const (
 
 // The re-registration seam (§5.6, §19.10): after a Postgres restore lost a
 // sidecar's identity row, the sidecar posts its newest binding again, whose
-// generation is past 1, and api takes it once the re-published projection
-// admits that identity key as the sidecar_id's. §7.9's projection is not built
-// at M1, so this admits every one, and the binding's own signatures and the
-// once-only client stay the guard: no binding of another sidecar's identity
-// key can be made without that key. TEAM-M2-16 replaces it with the
-// projection's check.
-var sidecarReregistrationAdmits = func(ctx context.Context, networkId server.Id, sidecarId server.Id, identityPublicKey []byte) bool {
-	return true
+// generation is past 1, and api takes it only once the re-published
+// projection admits that identity key as the sidecar_id's (CORE-M2-07):
+// sidecarProjectionAdmitsIdentity. A test replaces it.
+var sidecarReregistrationAdmits = sidecarProjectionAdmitsIdentity
+
+// Whether the network's verified log, as this process's sequencer holds it,
+// admits sidecarId under exactly identityPublicKey: a live, unparked row of
+// that key. No sequencer, a log that does not load, no such row and another
+// key all answer false, so a restored binding waits, refused as
+// generation_conflict, and the sidecar posts it again at its next refresh.
+func sidecarProjectionAdmitsIdentity(ctx context.Context, networkId server.Id, sidecarId server.Id, identityPublicKey []byte) bool {
+	sequencer, err := CurrentConfigLogSequencer()
+	if err != nil {
+		return false
+	}
+	admitted, err := sequencer.AdmittedIdentityKey(ctx, networkId, sidecar.Id(sidecarId))
+	if err != nil {
+		glog.Warningf("[sidecar][%s]the projection did not load for a re-registration: %s\n", networkId, err)
+		return false
+	}
+	return admitted != nil && bytes.Equal(admitted, identityPublicKey)
 }
 
 // Replaces the re-registration seam for a test, returning the restore.
@@ -453,7 +467,14 @@ func SetSidecarIdentityRevoked(ctx context.Context, sidecarId server.Id, revokeT
 
 // SetSidecarIdentityRevoked in the caller's transaction.
 func SetSidecarIdentityRevokedInTx(ctx context.Context, tx server.PgTx, sidecarId server.Id, revokeTime time.Time) bool {
-	tag := server.RaisePgResult(tx.Exec(
+	revoked, err := setSidecarIdentityRevokedInTx(ctx, tx, sidecarId, revokeTime)
+	server.Raise(err)
+	return revoked
+}
+
+// SetSidecarIdentityRevokedInTx, answering the statement's error.
+func setSidecarIdentityRevokedInTx(ctx context.Context, tx server.PgTx, sidecarId server.Id, revokeTime time.Time) (bool, error) {
+	tag, err := tx.Exec(
 		ctx,
 		`
 			UPDATE sidecar_identity
@@ -464,8 +485,38 @@ func SetSidecarIdentityRevokedInTx(ctx context.Context, tx server.PgTx, sidecarI
 		SidecarIdentityStatusRevoked,
 		revokeTime,
 		SidecarIdentityStatusActive,
-	))
-	return tag.RowsAffected() == 1
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// The name the identity's removal effect registers under.
+const RemovalEffectSidecarIdentity = "sidecar_identity"
+
+func init() {
+	RegisterRemovalEffect(RemovalEffectSidecarIdentity, applySidecarIdentityRemovalEffectInTx)
+}
+
+// Marks each sidecar a removal revokes revoked at the removal's time: the step
+// TEAM-M2-16's effects run when a SidecarRevoke that verifies against the log
+// lands (CORE-M2-07), after which its binds answer sidecar_revoked and its
+// clients' proofs stop. Idempotent, as every effect is: a revoked identity
+// stays as it was. Nothing while MG1 is not linked.
+func applySidecarIdentityRemovalEffectInTx(ctx context.Context, tx server.PgTx, removal *Removal) error {
+	if !server.SidecarMg1Linked() {
+		return nil
+	}
+	if removal.Time.IsZero() {
+		return errors.New("a removal with no time")
+	}
+	for _, subject := range removal.SubjectsOf(sidecar.RevocationKindSidecar) {
+		if _, err := setSidecarIdentityRevokedInTx(ctx, tx, subject.SubjectId, removal.Time); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Removes every identity of networkId and its bindings, in the network's
