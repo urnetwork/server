@@ -541,6 +541,35 @@ func ConsumeAuthKeyInTx(ctx context.Context, tx server.PgTx, bearer string) (*Ne
 }
 
 func consumeAuthKeyInTxAt(ctx context.Context, tx server.PgTx, bearer string, now time.Time) (*NetworkAuthKey, error) {
+	authKey, err := readAuthKeyBearer(ctx, tx, bearer, now, true)
+	if err != nil {
+		return nil, err
+	}
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`UPDATE network_auth_key SET use_count = use_count + 1 WHERE auth_key_id = $1`,
+		authKey.AuthKeyId,
+	))
+	authKey.UseCount += 1
+	return authKey, nil
+}
+
+// Checks the bearer's key as ConsumeAuthKeyInTx does, spending nothing: what
+// an enrollment's admission checks before it appends (TEAM-M2-16), since a
+// statement in the log cannot roll back with the mint. A key that passes here
+// may still be refused at the mint, by a racing enrollment that spent its last
+// use. Every refusal wraps ErrAuthKeyRefused and holds none of the bearer's
+// text.
+func PeekAuthKey(ctx context.Context, bearer string) (authKey *NetworkAuthKey, returnErr error) {
+	server.Db(ctx, func(conn server.PgConn) {
+		authKey, returnErr = readAuthKeyBearer(ctx, conn, bearer, server.NowUtc(), false)
+	})
+	return
+}
+
+// The bearer's key when its secret matches, it is unexpired at now and it has
+// a use left; with forUpdate, its row locked in the caller's transaction.
+func readAuthKeyBearer(ctx context.Context, conn server.PgCanQuery, bearer string, now time.Time, forUpdate bool) (*NetworkAuthKey, error) {
 	authKeyId, secret, err := ParseAuthKeyBearer(bearer)
 	if err != nil {
 		return nil, err
@@ -549,9 +578,13 @@ func consumeAuthKeyInTxAt(ctx context.Context, tx server.PgTx, bearer string, no
 		// no key exists in a binary without MG1, so none admits
 		return nil, ErrAuthKeyUnknown
 	}
+	lock := ""
+	if forUpdate {
+		lock = "FOR UPDATE"
+	}
 	var authKey *NetworkAuthKey
 	var secretSha256 []byte
-	result, err := tx.Query(
+	result, err := conn.Query(
 		ctx,
 		`
 			SELECT
@@ -568,8 +601,7 @@ func consumeAuthKeyInTxAt(ctx context.Context, tx server.PgTx, bearer string, no
 				pre_approved
 			FROM network_auth_key
 			WHERE auth_key_id = $1
-			FOR UPDATE
-		`,
+		`+lock,
 		authKeyId,
 	)
 	server.WithPgResult(result, err, func() {
@@ -603,12 +635,6 @@ func consumeAuthKeyInTxAt(ctx context.Context, tx server.PgTx, bearer string, no
 	if authKey.MaxUses <= authKey.UseCount {
 		return nil, ErrAuthKeySpent
 	}
-	server.RaisePgResult(tx.Exec(
-		ctx,
-		`UPDATE network_auth_key SET use_count = use_count + 1 WHERE auth_key_id = $1`,
-		authKey.AuthKeyId,
-	))
-	authKey.UseCount += 1
 	return authKey, nil
 }
 

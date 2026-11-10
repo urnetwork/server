@@ -70,9 +70,14 @@ import (
 // (config_log_redis.go), and the team hints (§7.17). Before a statement or base
 // is appended, never a retry of one, settings' Limiter charges §7.9's append
 // limits, answering 429, and a revocation already in the log answers its entry
-// (config_log_limit.go). api's process installs a sequencer built with
-// NewApiConfigLogSettings, which sets all three; a test's sequencer sets what it
-// tests. Ticks' schedule and retention are config_log_tick.go's and
+// (config_log_limit.go). A statement that takes an admission is refused past
+// config_admissions by settings' AdmissionCap, with QuotaRefusal
+// (sidecar_admission_model.go). settings' Effects schedules §7.10's effects
+// task (config_log_effects.go) once before an append's first PUT, so a process
+// killed after the PUT still owes its effects, and again after each entry this
+// instance lands, so they run at once. api's process installs a sequencer built
+// with NewApiConfigLogSettings, which sets all of these; a test's sequencer sets
+// what it tests. Ticks' schedule and retention are config_log_tick.go's and
 // config_log_retention.go's (TEAM-M2-14); reseed (§19.10), whose own walk from
 // C_0 is TEAM-M3-02's, is not built.
 
@@ -103,6 +108,13 @@ type ConfigLogSettings struct {
 	// Hints the network's clients on topic team after each entry this instance lands (§7.17). nil hints
 	// nothing.
 	Hint func(ctx context.Context, networkId server.Id, pin *bridge.AuthPin, entryBytes []byte)
+	// §20.4's config_admissions at api's verifier: an error refuses a statement that passed at state, the tip,
+	// sequenced at timeMs; a *QuotaRefusalError is answered as the QuotaRefusal itself. nil limits nothing.
+	AdmissionCap func(ctx context.Context, networkId server.Id, state *sidecar.ConfigState, signed []byte, verdict sidecar.ConfigVerdict, timeMs int64) error
+	// Schedules the network's §7.10 effects task: with intent before an append's first PUT, late enough that the
+	// append's own outcome lands first, and without it after an entry lands, to run at once. Best effort: the
+	// task finds what to do from the log. nil schedules nothing.
+	Effects func(ctx context.Context, networkId server.Id, intent bool)
 }
 
 func DefaultConfigLogSettings() *ConfigLogSettings {
@@ -218,6 +230,10 @@ type configLogNetwork struct {
 	// position order: what retention reads (config_log_retention.go)
 	bases   []*configLogBaseInfo
 	lastUse time.Time
+	// the newest position whose §7.10 effects this process applied
+	// (config_log_effects.go); 0 walks every retained entry again, each one
+	// applied before found by its admin event
+	effectsThrough uint64
 }
 
 // A base's facts retention needs.
@@ -560,9 +576,16 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 		return pin, nil
 	}
 	charged := false
+	// whether this request scheduled its effects task's intent
+	intended := false
 	for range self.settings.AppendAttemptCount {
 		found, err := request.verify(network)
 		if err != nil {
+			// a cap's refusal answers as the QuotaRefusal itself (§20.7)
+			quotaRefusal := &QuotaRefusalError{}
+			if errors.As(err, &quotaRefusal) {
+				return nil, quotaRefusal
+			}
 			status, code := http.StatusForbidden, "config_refused"
 			if errors.Is(err, sidecar.ErrConfigTipMoved) {
 				status, code = http.StatusConflict, "config_tip_moved"
@@ -600,6 +623,10 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 				return nil, unavailable(tip, err)
 			}
 		}
+		if !intended && self.settings.Effects != nil {
+			intended = true
+			self.settings.Effects(ctx, networkId, true)
+		}
 		if hook := Testing_ConfigLogBeforePut; hook != nil {
 			hook(networkId, n)
 		}
@@ -632,6 +659,9 @@ func (self *ConfigLogSequencer) published(ctx context.Context, networkId server.
 	}
 	if self.settings.Hint != nil {
 		self.settings.Hint(ctx, networkId, pin, entryBytes)
+	}
+	if self.settings.Effects != nil {
+		self.settings.Effects(ctx, networkId, false)
 	}
 }
 
@@ -705,12 +735,18 @@ func (self *ConfigLogSequencer) AppendStatement(ctx context.Context, networkId s
 		kind: bridge.AuthEntryKindStatement,
 		body: signed,
 		verify: func(network *configLogNetwork) (*bridge.AuthPin, error) {
-			verdict := network.log.Check(signed, self.now().UnixMilli())
+			timeMs := self.now().UnixMilli()
+			verdict := network.log.Check(signed, timeMs)
 			if pin, found := network.log.FindStatement(verdict.StatementId); found {
 				return pin, nil
 			}
 			if verdict.Refusal == nil && sidecar.AclStatementNeedsTeamTier(signed) && !self.teamTier(ctx, networkId) {
 				return nil, fmt.Errorf("%w: the directory is the team tier's", sidecar.ErrConfigRule)
+			}
+			if verdict.Refusal == nil && self.settings.AdmissionCap != nil {
+				if err := self.settings.AdmissionCap(ctx, networkId, network.log.State(), signed, verdict, timeMs); err != nil {
+					return nil, err
+				}
 			}
 			return nil, verdict.Refusal
 		},

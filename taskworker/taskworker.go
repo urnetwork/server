@@ -655,6 +655,12 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.ConfigLogRetention,
 			work.ConfigLogRetentionPost,
 		),
+		// §7.10's effects of each landed entry, which the sequencer schedules
+		// a network at a time (model.ApplyConfigLogEffects)
+		task.NewTaskTargetWithPost(
+			model.ApplyConfigLogEffectsTask,
+			model.ApplyConfigLogEffectsTaskPost,
+		),
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
 			work.AbuseActionPassPost,

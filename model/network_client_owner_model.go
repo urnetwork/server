@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -395,15 +394,22 @@ func getEnrolledClientPublicKeyInTx(ctx context.Context, tx server.PgTx, clientI
 //	bundle    the request has no field for a key's #<bundle>: a bearer holding
 //	          "#", or a urn_ API key, is refused, its text never logged or
 //	          answered back (D-TEAM-22)
-//	admission a pre-approved key's admission is TEAM-M2-16's: until it lands a
-//	          request carrying one is refused
+//	admission a pre-approved key's enrollment may carry its device's own
+//	          SidecarAdmit, signed by the key's Delegation, which api appends
+//	          to the log before the mint (sidecar_admission_model.go,
+//	          TEAM-M2-16)
 //
 // The client starts unadmitted (approval_state pending): admission is the
-// config repo's SidecarAdmit, never api's (§7.9).
+// config repo's SidecarAdmit, never api's (§7.9). With an admission that
+// landed, the answer says approved, naming what the log already holds.
 
-// The approval state of every client an enrollment mints: admission happens in
-// the config repo, not here.
+// The approval state of a client an enrollment mints with no admission:
+// admission happens in the config repo, not here.
 const NetworkEnrollApprovalStatePending = "pending"
+
+// The approval state of a client whose enrollment carried an admission that
+// landed in the log at the tip.
+const NetworkEnrollApprovalStateApproved = "approved"
 
 // The codes of POST /network/enroll's refusals, as SidecarApi reads them
 // (sidecar's identity_credential.go and sidecartest's fake api).
@@ -438,8 +444,10 @@ type NetworkEnrollArgs struct {
 	// both whatever these say.
 	AdminRefused bool `json:"admin_refused,omitempty"`
 	StrictExp    bool `json:"strict_exp,omitempty"`
-	// A pre-approved key's admission, TEAM-M2-16's: refused until it lands.
-	Admission json.RawMessage `json:"admission,omitempty"`
+	// A pre-approved key's admission: the device's own Signed SidecarAdmit,
+	// verbatim, which the key's Delegation signed (§7.8). api appends it to
+	// the log before the mint.
+	Admission []byte `json:"admission,omitempty"`
 }
 
 // Never the key.
@@ -553,6 +561,7 @@ type networkEnrollKey struct {
 	creatorUserId server.Id
 	tagged        bool
 	ephemeral     bool
+	preApproved   bool
 }
 
 func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networkEnrollKey) {
@@ -565,7 +574,8 @@ func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networ
 					network.network_name,
 					network_auth_key.creator_user_id,
 					0 < cardinality(network_auth_key.tag_ids),
-					network_auth_key.ephemeral
+					network_auth_key.ephemeral,
+					network_auth_key.pre_approved
 				FROM network_auth_key
 				INNER JOIN network ON network.network_id = network_auth_key.network_id
 				WHERE network_auth_key.auth_key_id = $1
@@ -575,7 +585,7 @@ func readNetworkEnrollKey(ctx context.Context, authKeyId server.Id) (key *networ
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
 				key = &networkEnrollKey{}
-				server.Raise(result.Scan(&key.networkId, &key.networkName, &key.creatorUserId, &key.tagged, &key.ephemeral))
+				server.Raise(result.Scan(&key.networkId, &key.networkName, &key.creatorUserId, &key.tagged, &key.ephemeral, &key.preApproved))
 			}
 		})
 	})
@@ -610,8 +620,12 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	if len(enroll.ClientPublicKey) != ed25519.PublicKeySize || enroll.DeviceSpec == "" || networkEnrollDeviceSpecMaxLength < len(enroll.DeviceSpec) {
 		return nil, newNetworkEnrollRefusal(http.StatusBadRequest, NetworkEnrollCodeBadRequest, "The client key or device is missing.")
 	}
-	if admission := bytes.TrimSpace(enroll.Admission); 0 < len(admission) && !bytes.Equal(admission, []byte("null")) {
-		return nil, newNetworkEnrollRefusal(http.StatusBadRequest, NetworkEnrollCodeBadRequest, "Admission is not available yet.")
+	var admission *networkEnrollAdmission
+	if 0 < len(enroll.Admission) {
+		admission, err = parseNetworkEnrollAdmission(enroll.Admission)
+		if err != nil {
+			return nil, newNetworkEnrollRefusal(http.StatusBadRequest, NetworkEnrollCodeBadRequest, "The admission is malformed.")
+		}
 	}
 
 	key := readNetworkEnrollKey(ctx, authKeyId)
@@ -632,6 +646,13 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	}
 	if refusal := SidecarClientsExceeded(ctx, key.networkId); refusal != nil {
 		return nil, NewQuotaRefusalError(refusal)
+	}
+	approvalState := NetworkEnrollApprovalStatePending
+	if admission != nil {
+		if _, err := landNetworkEnrollAdmission(ctx, enroll.AuthKey, key, admission); err != nil {
+			return nil, err
+		}
+		approvalState = NetworkEnrollApprovalStateApproved
 	}
 
 	creatorSession := session.NewLocalClientSession(
@@ -673,7 +694,7 @@ func EnrollNetworkClient(ctx context.Context, enroll *NetworkEnrollArgs, clientA
 	return &NetworkEnrollResult{
 		ByClientJwt:   *result.ByClientJwt,
 		ClientId:      *result.ClientId,
-		ApprovalState: NetworkEnrollApprovalStatePending,
+		ApprovalState: approvalState,
 		AdminRefused:  true,
 		Close:         result.Close,
 	}, nil
