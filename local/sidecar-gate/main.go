@@ -161,6 +161,14 @@ type gateReport struct {
 	checks    []*gateResult
 	matrix    []*gateResult
 	startTime time.Time
+	// each test entry's outcome once run, so an entry many rows name runs once
+	testRuns map[string]*gateTestRun
+}
+
+// One test entry's outcome and details, as its run gave them.
+type gateTestRun struct {
+	outcome string
+	details []string
 }
 
 // One repo's commit as the run saw it.
@@ -483,10 +491,11 @@ func expandGateArgs(args []string, report *gateReport) []string {
 	return expanded
 }
 
-// Runs one test entry and reads each name's verdict from go test -v: PASS
-// passes, FAIL fails, SKIP is open, and a name with no verdict at all is
-// missing, unless its package declares it and the run ended early, which fails.
-// A failing name's detail carries the last message it logged.
+// Runs one test entry, once a report, and reads each name's verdict from go
+// test -v: PASS passes, FAIL fails, SKIP is open, and a name with no verdict at
+// all is missing, unless its package declares it and the run ended early, which
+// fails. A failing name's detail carries the last message it logged. An entry
+// whose package declares none of its names reads missing without a run.
 func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, test gateTest) (string, []string) {
 	where := test.Repo + "/" + filepath.ToSlash(filepath.Join(test.Dir, test.Package))
 	if len(test.Names) == 0 {
@@ -499,6 +508,32 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 		if strings.Contains(arg, "{group}") && report.group == "" {
 			return gateOpen, []string{where + ": the gate registers no migration group, so there is no group to check"}
 		}
+	}
+	key := fmt.Sprintf("%s|%s|%s|%s|%t|%q|%q", test.Repo, test.Dir, test.Package, test.Tags, test.Stores, test.Names, expandGateArgs(test.Args, report))
+	if run, ok := report.testRuns[key]; ok {
+		return run.outcome, slices.Clone(run.details)
+	}
+	outcome, details := runGateTestOnce(ctx, options, report, test, where)
+	if report.testRuns == nil {
+		report.testRuns = map[string]*gateTestRun{}
+	}
+	report.testRuns[key] = &gateTestRun{outcome: outcome, details: slices.Clone(details)}
+	return outcome, details
+}
+
+// The run behind runGateTest's record.
+func runGateTestOnce(ctx context.Context, options *gateOptions, report *gateReport, test gateTest, where string) (string, []string) {
+	packageDirectory := filepath.Join(options.root, test.Repo, test.Dir, filepath.FromSlash(test.Package))
+	if info, err := os.Stat(packageDirectory); err != nil || !info.IsDir() {
+		return gateMissing, []string{where + ": no such package here"}
+	}
+	declared, declaredErr := declaredTestNames(packageDirectory)
+	if declaredErr == nil && !slices.ContainsFunc(test.Names, func(name string) bool { return declared[name] }) {
+		details := []string{}
+		for _, name := range test.Names {
+			details = append(details, fmt.Sprintf("%s %s: no such test", where, name))
+		}
+		return gateMissing, details
 	}
 	quoted := []string{}
 	for _, name := range test.Names {
@@ -535,9 +570,6 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 		verdicts[match[2]] = match[1]
 	}
 	messages := lastTestMessages(string(output), options.settings.MessageLimit)
-	// parsed only when a name has no verdict, so a declared test a crash cut off
-	// is not read as one that does not exist
-	var declared map[string]bool
 	outcomes := []string{}
 	details := []string{}
 	for _, name := range test.Names {
@@ -561,9 +593,7 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 				details = append(details, fmt.Sprintf("%s %s: did not build or run: %s", where, name, lastLines(string(output), 3)))
 				continue
 			}
-			if declared == nil {
-				declared, _ = declaredTestNames(filepath.Join(directory, filepath.FromSlash(test.Package)))
-			}
+			// a declared test a crash cut off is not one that does not exist
 			switch {
 			case declared[name] && runErr != nil:
 				outcomes = append(outcomes, gateFail)

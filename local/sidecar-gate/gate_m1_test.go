@@ -186,6 +186,59 @@ func TestGateTestTellsACrashFromAMissingTest(t *testing.T) {
 	}
 }
 
+// An entry many rows name runs once a report, and one whose package declares none of its names reads missing
+// without a run, so the trace's schedules that no thin test shows yet cost no build.
+func TestGateRunsEachEntryOnceAReport(t *testing.T) {
+	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
+	widget := filepath.Join(options.root, "fixture", "widget")
+	runs := filepath.Join(t.TempDir(), "runs")
+	options.environ = append(options.environ, "FIXTURE_RUNS="+runs)
+	counted := "package widget\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\n" +
+		"func TestCountsItsRuns(t *testing.T) {\n" +
+		"\tfile, err := os.OpenFile(os.Getenv(\"FIXTURE_RUNS\"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)\n" +
+		"\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\tdefer file.Close()\n\tfile.WriteString(\"run\\n\")\n}\n"
+	if err := os.WriteFile(filepath.Join(widget, "count_test.go"), []byte(counted), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	countRuns := func() int {
+		data, err := os.ReadFile(runs)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		return bytes.Count(data, []byte("\n"))
+	}
+	entry := gateTest{Repo: "fixture", Package: "./widget", Names: []string{"TestCountsItsRuns"}}
+	report := &gateReport{}
+	for range 3 {
+		if outcome, details := runGateTest(context.Background(), options, report, entry); outcome != gatePass {
+			t.Fatalf("the counted entry: %s, %v", outcome, details)
+		}
+	}
+	if count := countRuns(); count != 1 {
+		t.Fatalf("one report ran the entry %d times", count)
+	}
+	if outcome, _ := runGateTest(context.Background(), options, &gateReport{}, entry); outcome != gatePass || countRuns() != 2 {
+		t.Fatalf("a second report: %s after %d runs", outcome, countRuns())
+	}
+
+	// a package that no longer builds: an entry naming a declared test fails, and one naming none reads missing
+	if err := os.WriteFile(filepath.Join(widget, "broken.go"), []byte("package widget\n\nfunc Broken() int {\n\treturn \"two\"\n}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outcome, details := runGateTest(context.Background(), options, report, gateTest{Repo: "fixture", Package: "./widget", Names: []string{"TestPasses"}})
+	if outcome != gateFail || !strings.Contains(strings.Join(details, "\n"), "did not build or run") {
+		t.Fatalf("a declared test in a broken package: %s, %v", outcome, details)
+	}
+	outcome, details = runGateTest(context.Background(), options, report, gateTest{Repo: "fixture", Package: "./widget", Names: []string{"TestFs901NotYetWritten"}})
+	if outcome != gateMissing || !strings.Contains(strings.Join(details, "\n"), "TestFs901NotYetWritten: no such test") {
+		t.Fatalf("an entry naming no declared test: %s, %v", outcome, details)
+	}
+	outcome, details = runGateTest(context.Background(), options, report, gateTest{Repo: "fixture", Package: "./absent", Names: []string{"TestPasses"}})
+	if outcome != gateMissing || !strings.Contains(strings.Join(details, "\n"), "no such package here") {
+		t.Fatalf("an entry in a package that is not there: %s, %v", outcome, details)
+	}
+}
+
 // sidecar-gate -list M1 on this tree: the path from catalog.yml through gates.yml to the report runs, every
 // row of M1's sweep names tests that are declared, FS-55 rides along as every Gn-out's, and the report names
 // the commit set it read.
