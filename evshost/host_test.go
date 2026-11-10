@@ -583,8 +583,8 @@ func TestEngineRoutesAreBringyourYmlsEvsOperations(t *testing.T) {
 			t.Errorf("bringyour.yml documents %s as served, and the engine has no such route", key)
 		}
 	}
-	// the route §11.20 lacked, whose shape plan-EVS1-repo-activate-route settled, waits on its task (EVS1-M2-19)
-	if planned, documented := operations["POST /evs/v1/repos/{}/activate"]; !documented || !planned {
+	// the route §11.20 lacked, whose shape plan-EVS1-repo-activate-route settled, is served (EVS1-M2-19)
+	if planned, documented := operations["POST /evs/v1/repos/{}/activate"]; !documented || planned {
 		t.Errorf("POST /evs/v1/repos/{}/activate documented %t, planned %t", documented, planned)
 	}
 }
