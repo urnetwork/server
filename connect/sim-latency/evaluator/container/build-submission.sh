@@ -392,6 +392,9 @@ jq -S --argjson candidate_commits "$candidate_commits_json" --arg patch_sha256 "
 mv -f -- "$source_identity.new" "$source_identity"
 chmod 0400 "$source_identity"
 candidate_source_identity_sha256="$(sha256sum "$source_identity" | awk '{print $1}')"
+if [[ "$subevaluation_scoped" = true ]]; then
+    evaluation_seal_build_source "$source_root" || infrastructure_failure "candidate source could not be sealed for the remapped compiler"
+fi
 
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"

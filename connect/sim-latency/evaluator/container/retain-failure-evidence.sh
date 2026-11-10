@@ -42,23 +42,30 @@ destination_parent="$(realpath -e "$(dirname "$destination_dir")")"
 [[ "$FAILURE_EXIT_CODE" =~ ^[1-9][0-9]*$ ]] || die 'exit code is invalid'
 [[ "$FAILURE_EVALUATOR_LINE" =~ ^[0-9]+$ ]] || die 'evaluator line is invalid'
 
+# Compiler caches/output stay under independent broker custody until root
+# cleanup. They are not diagnostic evidence and the worker cannot traverse
+# their remapped ownership. Never widen their permissions to collect logs.
+failure_evidence_find() {
+    evaluation_file find "$source_dir" -path "$source_dir/tracked-build" -prune -o \( "$@" \)
+}
+
 # These paths contain either per-stage throwaway credentials or the hidden
 # workload input. Completed run output remains available for diagnosis.
 if [[ "$subevaluation_scoped" = true ]]; then
     # Only the broker-reclaimed output vocabulary and trusted source checkouts
     # remain here. Worker-owned sealed directories need write permission before
     # this non-root sanitizer can remove its hidden input/source trees.
-    find "$source_dir" -type d -user "$(id -u)" -exec chmod u+rwx {} +
+    failure_evidence_find -type d -user "$(id -u)" -exec chmod u+rwx {} +
 fi
 evaluation_file rm -rf -- \
     "$source_dir/input" \
     "$source_dir/scorer-input" \
     "$source_dir/score-runtime"
-evaluation_file find "$source_dir" -mindepth 1 -maxdepth 1 -type d \
+failure_evidence_find -mindepth 1 -maxdepth 1 -type d \
     -name 'evaluation-sources.*' -exec rm -rf -- {} +
-evaluation_file find "$source_dir" -depth -type d -name runtime -exec rm -rf -- {} +
-evaluation_file find "$source_dir" -type f \
-    \( -name '*.env' -o -name '*.env.new' \) -delete
+failure_evidence_find -type d -name runtime -prune -exec rm -rf -- {} +
+failure_evidence_find -type f \
+    \( -name '*.env' -o -name '*.env.new' \) -exec rm -f -- {} +
 # A raw Docker inspection contains Config.Env and bind source paths. Current
 # evaluators sanitize it in memory, but reject any legacy/partial file rather
 # than trusting its filename during failure recovery.
@@ -72,25 +79,25 @@ while IFS= read -r -d '' inspection; do
     ' "$inspection" >/dev/null 2>&1; then
         evaluation_file rm -f -- "$inspection"
     fi
-done < <(evaluation_file find "$source_dir" -type f -name containers.json -print0)
+done < <(failure_evidence_find -type f -name containers.json -print0)
 # A failed candidate may have created links, devices, sockets, or FIFOs before
 # the normal output validator ran. None are useful evidence and none may cross
 # the retention boundary.
-evaluation_file find "$source_dir" -mindepth 1 ! -type f ! -type d -delete
+failure_evidence_find -mindepth 1 ! -type f ! -type d -exec rm -f -- {} +
 if [[ "$subevaluation_scoped" != true ]]; then
     sudo -n chown -R "$(id -u):$(id -g)" "$source_dir"
 fi
 
-[ -z "$(find "$source_dir" -type d -name runtime -print -quit)" ] || die 'runtime secret directory survived sanitization'
-[ -z "$(find "$source_dir" -type f \( -name '*.env' -o -name '*.env.new' \) -print -quit)" ] ||
+[ -z "$(failure_evidence_find -type d -name runtime -print -quit)" ] || die 'runtime secret directory survived sanitization'
+[ -z "$(failure_evidence_find -type f \( -name '*.env' -o -name '*.env.new' \) -print -quit)" ] ||
     die 'environment secret file survived sanitization'
-[ -z "$(find "$source_dir" -type f -name containers.json -print0 | while IFS= read -r -d '' inspection; do
+[ -z "$(failure_evidence_find -type f -name containers.json -print0 | while IFS= read -r -d '' inspection; do
     jq -e 'type == "array" and all(.[]; has("Config") | not)' "$inspection" >/dev/null 2>&1 || {
         printf '%s\n' "$inspection"
         break
     }
 done)" ] || die 'raw container inspection survived sanitization'
-[ -z "$(find "$source_dir" -mindepth 1 ! -type f ! -type d -print -quit)" ] ||
+[ -z "$(failure_evidence_find -mindepth 1 ! -type f ! -type d -print -quit)" ] ||
     die 'non-regular evidence survived sanitization'
 
 failure_record="$source_dir/failure.json"
@@ -103,13 +110,13 @@ jq -n \
     '{schema:1,kind:"sim-latency-evaluator-failure",job_id:$job_id,
       round_id:$round_id,attempt:$attempt,exit_code:$exit_code,
       evaluator_line:$evaluator_line,sanitized:true,
-      excluded:["input","scorer-input","score-runtime","evaluation-sources.*","runtime","*.env","*.env.new","non-regular entries"]}' \
+      excluded:["input","scorer-input","score-runtime","evaluation-sources.*","runtime","*.env","*.env.new","non-regular entries","tracked-build"]}' \
     > "$failure_record"
 
-find "$source_dir" -type d -exec chmod 0700 {} +
-find "$source_dir" -type f -exec chmod 0400 {} +
+failure_evidence_find -type d -exec chmod 0700 {} +
+failure_evidence_find -type f -exec chmod 0400 {} +
 install -d -m 0700 "$destination_dir"
-cp -a "$source_dir/." "$destination_dir/"
+failure_evidence_find -mindepth 1 -maxdepth 1 -exec cp -a -t "$destination_dir" -- {} +
 
 records="$destination_parent/.failed-evidence-records"
 manifest="$destination_parent/failed-evidence-manifest.json"

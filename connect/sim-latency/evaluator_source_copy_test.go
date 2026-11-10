@@ -1,3 +1,5 @@
+//go:build linux
+
 // Exercise non-root Docker extraction against an inert frozen-image archive.
 package main
 

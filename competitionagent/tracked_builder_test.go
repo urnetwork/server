@@ -30,6 +30,10 @@ func trackedBuilderAsset(t *testing.T, name string) string {
 func runTrackedBuilderProtocol(t *testing.T, fault string) (string, int) {
 	t.Helper()
 	root := t.TempDir()
+	cacheRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheRoot, "seed.mod"), []byte("trusted-cache"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	client := filepath.Join(root, "client")
 	program := `#!/bin/bash
 set -euo pipefail
@@ -63,7 +67,10 @@ case "$1" in
     count=$((count + 1)); printf '%s\n' "$count" > "$SYNTHETIC_BUILD_COUNTER"
     printf '%064d\n' "$count"
     ;;
-  cp) printf 'trusted-cache' > "${@: -1}/seed.mod" ;;
+  cp)
+    [[ "${@: -1}" == - ]] || exit 96
+    tar -C "$SYNTHETIC_CACHE_ROOT" -cf - seed.mod
+    ;;
   container)
     [[ "$2" == start ]] || exit 93
     case "${3: -1}" in
@@ -116,6 +123,7 @@ tracked_submission_build
 `
 	command := exec.CommandContext(t.Context(), "bash", "-eu", "-c", body, "tracked-protocol", evaluatorRoutingHelper(t), trackedBuilderAsset(t, "tracked-submission-build.sh"))
 	command.Env = append(controlEnvironment(), "SYNTHETIC_ROOT="+root, "SYNTHETIC_BUILD_ROOT="+filepath.Join(root, ".evidence-runtime", "tracked-build"),
+		"SYNTHETIC_CACHE_ROOT="+cacheRoot,
 		"SYNTHETIC_BUILD_LOG="+filepath.Join(root, "calls"), "SYNTHETIC_BUILD_COUNTER="+filepath.Join(root, "counter"), "SYNTHETIC_BUILD_FAULT="+fault,
 		"SYNTHETIC_REVISION="+strings.Repeat("c", 40), "SYNTHETIC_DIGEST="+strings.Repeat("d", 64),
 		"URNETWORK_SUBEVALUATION_RUN_ID="+strings.Repeat("a", 64), "URNETWORK_SUBEVALUATION_JOB_ID=00000000-0000-0000-0000-000000000001",

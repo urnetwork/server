@@ -89,6 +89,16 @@ evaluation_docker_copy_tree() {
     fi
 }
 
+# The compiler's remapped uid differs from the host worker that copied/committed
+# this tree. Seal it before the first candidate container, including cache-hit
+# identity probes. The private run ancestor remains 0700; binds remain readonly.
+evaluation_seal_build_source() {
+    [[ "$#" = 1 && -d "$1" && ! -L "$1" ]] || return 2
+    find "$1" -type d -exec chmod 0555 {} + || return
+    find "$1" -type f -perm /111 -exec chmod 0555 {} + || return
+    find "$1" -type f ! -perm /111 -exec chmod 0444 {} +
+}
+
 # Only the root-pinned public role can route prospective Docker calls. Neither
 # an inherited Docker context nor a generic sudo capability is used in scope.
 subevaluation_require_client() {
