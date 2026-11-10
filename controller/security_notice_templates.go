@@ -671,6 +671,8 @@ func securityNetworkAuthorityAction(action string) string {
 		return "A domain was added for verification"
 	case model.SecurityNetworkAuthorityDomainVerified:
 		return "A domain was verified, and its sign-ins now go to the network's sign-in provider"
+	case model.SecurityNetworkAuthorityAuditWebhook:
+		return "A webhook that receives the network's admin events was added"
 	default:
 		return "The network's authority changed"
 	}

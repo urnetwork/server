@@ -107,6 +107,8 @@ func registry() []specEndpoint {
 		{"POST", "/network/domain-verify", rt(model.NetworkDomainArgs{}), rt(model.NetworkDomainResult{})},
 		{"POST", "/network/domain-remove", rt(model.NetworkDomainArgs{}), rt(model.NetworkDomainResult{})},
 		{"POST", "/auth/sso-discover", rt(controller.NetworkSsoDiscoverArgs{}), rt(controller.NetworkSsoDiscoverResult{})},
+		{"GET", "/network/admin-events", nil, rt(model.GetNetworkAdminEventsResult{})},
+		{"POST", "/network/audit-webhook", rt(model.NetworkAuditWebhookArgs{}), rt(model.NetworkAuditWebhookResult{})},
 		{"POST", "/network/remove-client", rt(model.RemoveNetworkClientArgs{}), rt(model.RemoveNetworkClientResult{})},
 		{"GET", "/network/clients", nil, rt(model.NetworkClientsResult{})},
 		{"GET", "/network/peers", nil, rt(model.NetworkPeersResult{})},

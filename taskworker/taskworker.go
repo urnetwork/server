@@ -197,6 +197,9 @@ func initTaskSchedule(ctx context.Context) {
 		// §7.6's verified domains looked up again once a day and dropped
 		// after 7 failed days, a pass every hour; not scheduled without MG6
 		work.ScheduleNetworkDomainRecheck(clientSession, tx)
+		// §7.11's admin events posted to each team's SIEM webhooks every 60 s,
+		// a failing one retried for 24 hours; not scheduled without MG1 and MG6
+		work.ScheduleNetworkAuditWebhookDelivery(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
@@ -662,6 +665,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.NetworkDomainRecheck,
 			work.NetworkDomainRecheckPost,
+		),
+		// §7.11's webhook delivery (model.DeliverNetworkAuditWebhooks)
+		task.NewTaskTargetWithPost(
+			work.NetworkAuditWebhookDelivery,
+			work.NetworkAuditWebhookDeliveryPost,
 		),
 		// §7.10's effects of each landed entry, which the sequencer schedules
 		// a network at a time (model.ApplyConfigLogEffects)

@@ -51,10 +51,11 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	// the Owner's: deletion and the network's sessions
 	"POST /auth/network-delete": model.RolePermissionOwner,
 	"POST /network/idp":         model.RolePermissionOwner,
-	// where the team's sign-ins route
+	// where the team's sign-ins route, and where its admin events are sent
 	"POST /network/domain-add":                model.RolePermissionOwner,
 	"POST /network/domain-verify":             model.RolePermissionOwner,
 	"POST /network/domain-remove":             model.RolePermissionOwner,
+	"POST /network/audit-webhook":             model.RolePermissionOwner,
 	"GET /network/sessions":                   model.RolePermissionOwner,
 	"POST /network/revoke-session":            model.RolePermissionOwner,
 	"POST /network/revoke-other-sessions":     model.RolePermissionOwner,
@@ -134,6 +135,7 @@ var routePermissionByRoute = map[string]model.RolePermission{
 
 	// reading settings, clients and the network's earnings
 	"GET /network/clients":                  model.RolePermissionRead,
+	"GET /network/admin-events":             model.RolePermissionRead,
 	"GET /network/client-data-caps":         model.RolePermissionRead,
 	"GET /network/embed":                    model.RolePermissionRead,
 	"GET /network/proxies":                  model.RolePermissionRead,

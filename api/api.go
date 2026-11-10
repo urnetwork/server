@@ -421,6 +421,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/network/domain-verify", handlers.VerifyNetworkDomain),
 		router.NewRoute("POST", "/network/domain-remove", handlers.RemoveNetworkDomain),
 		router.NewRoute("POST", "/auth/sso-discover", handlers.NetworkSsoDiscover),
+		// §7.11's audit log reads and SIEM webhooks (TEAM-M6-09)
+		router.NewRoute("GET", "/network/admin-events", handlers.GetNetworkAdminEvents),
+		router.NewRoute("POST", "/network/audit-webhook", handlers.SetNetworkAuditWebhook),
 		// §5.15's sidecar identities: the binding log and its lookups (CORE-M1-06)
 		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
 		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),

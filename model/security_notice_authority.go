@@ -13,6 +13,8 @@ package model
 //	domain       a team added a domain to verify, and domain_verified when it
 //	             proved one, from when the domain's sign-ins route to the
 //	             team's IdP (TEAM-M6-06)
+//	audit_webhook  a team gained a webhook its admin events are sent to
+//	             (TEAM-M6-09)
 //
 // The recipients are the sign-in email addresses of the network's Owners and
 // Admins: in a personal network its owner's, the account security notices
@@ -44,6 +46,7 @@ const (
 	SecurityNetworkAuthorityDomain     = "domain"
 	// the domain's TXT record was found
 	SecurityNetworkAuthorityDomainVerified = "domain_verified"
+	SecurityNetworkAuthorityAuditWebhook   = "audit_webhook"
 )
 
 // One change of a network's authority.

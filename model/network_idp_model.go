@@ -498,6 +498,22 @@ func ResolveNetworkSsoLoginInTx(
 		if err != nil {
 			return nil, err
 		}
+		// a membership the server made, pending, is an admin action in the
+		// team's log (§7.11): by the user that signed in, of its own membership
+		actorId, memberId := login.UserId, member.MemberId
+		event := &AdminEvent{
+			NetworkId:  idp.NetworkId,
+			ActorKind:  AdminEventActorUser,
+			ActorId:    &actorId,
+			Action:     AdminEventActionMemberAdd,
+			TargetKind: AdminEventTargetMember,
+			TargetId:   &memberId,
+			Result:     AdminEventResultOk,
+		}
+		if requestId, ok := session.RequestIdFromContext(ctx); ok {
+			event.RequestId = &requestId
+		}
+		AddAdminEventInTx(ctx, tx, event)
 	}
 	login.MemberId, login.Pending = member.MemberId, member.Pending
 	server.RaisePgResult(tx.Exec(

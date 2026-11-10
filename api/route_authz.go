@@ -323,6 +323,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/domain-verify":                   routeAccessNetwork,  // looks a domain's TXT record up, which routes its sign-ins once found
 	"POST /network/domain-remove":                   routeAccessNetwork,  // removes a team's domain
 	"POST /auth/sso-discover":                       routeAccessPublic,   // an address's domain to its team's IdP; says nothing of other addresses (§7.6)
+	"GET /network/admin-events":                     routeAccessNetwork,  // a team's admin events (§7.11), Auditors and above by the role gate
+	"POST /network/audit-webhook":                   routeAccessNetwork,  // sends a team's admin events to a SIEM (§7.11), the Owner's by its role gate
 	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
 	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
 	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds
