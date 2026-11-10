@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-09T23:49:06Z",
-  "status": "NATIVE_IMAGE_EXECUTION_PASSED_CWD_FOLLOWUP_NEXT",
+  "observed_at": "2026-11-09T23:59:47Z",
+  "status": "BOTH_NATIVE_MAPS_AND_GOOFE_RESOURCE_RECHECK_PASSED",
   "epoch2_open": false,
   "grading_activated": false,
   "source_image_changed": false,
@@ -20,21 +20,25 @@
     "full_agent_and_cli_packages": "passed once; agent37.156s, CLI0.006s",
     "go_vet_agent_and_cli": "passed",
     "native_corrected_launch": "Installed on both idle private engines. Frozen image now executes as65532:65532 with network none, read-only rootfs, all capabilities dropped, pinned seccomp, core1, management CPU/memory/PID bounds. Actual UID/GID maps both0:200000:65536. All trusted probes removed; no submission was executed.",
-    "installed_agent_source_commit": "124570e7a34e270773bf99a2fb8ab90f2c7f2b9e",
-    "installed_agent_sha256": "880863c5e166a10d88ec732dbf94ba7ab14df784c04121fd8a97fc8f060b3e99",
+    "installed_agent_source_commit": "12727808e",
+    "installed_agent_sha256": "0f09a084db36cf2a30721c184502c412f5d30a8d96a52fa4b745f014b8ae9596",
     "sille_shared_mount_namespace_inode": 4026534850,
     "goofe_shared_mount_namespace_inode": 4026533137,
-    "sille_namespace_only_receipt": "/etc/urnetwork/competition-sille-namespace-proof-20261109-v1/containment.partial.json",
-    "sille_namespace_only_receipt_sha256": "4978afc8fd1fd6739cff882576e490d1c0b847d3009f7ee566b76f6984f3117d",
-    "goofe_namespace_only_receipt": "/etc/urnetwork/competition-goofe-namespace-proof-20261109-v1/containment.partial.json",
-    "goofe_namespace_only_receipt_sha256": "ecdaa8020d13008324829cc2769c66940160801ee533d162630b8fecf2962b67"
+    "sille_namespace_only_receipt": "/etc/urnetwork/competition-sille-namespace-proof-20261109-v3/containment.partial.json",
+    "sille_namespace_only_receipt_sha256": "23cc1a896bacd23d9327f79946a7943264c72a2d41a253d9070697a70b0e46ff",
+    "goofe_namespace_only_receipt": "/etc/urnetwork/competition-goofe-namespace-proof-20261109-v3/containment.partial.json",
+    "goofe_namespace_only_receipt_sha256": "e3a83fe3fe524686d979ed9f53b51c2f99206f71e9b996b80ee031938b37e7b7",
+    "sille_boundary_sha256": "daf0aedd6e288ff614651ed56fa01017f783e740a120167c704149af4d6c80a5",
+    "goofe_boundary_sha256": "bf5d732935ee9803484c1767442113cb1e1559649d817c99f495adbd7b55306f",
+    "goofe_native_resource_boundary_and_immediate_recheck": "passed with current mount-identity verifier; explicitly grading_qualified=false and baseline_ready=false"
   },
   "adjacent_native_failure": {
     "check": "Fresh Goofe resource verification with the corrected native verifier refuses daemon cwd outside quota.",
-    "actual_cwd": "Docker /; containerd remains in its candidate root on each host",
-    "cause": "nsenter resets cwd during mount namespace entry unless --wd is explicit; systemd WorkingDirectory alone does not survive the join.",
-    "followup": "Pinned startup arguments now explicitly pass --wd=<candidate_root>. Deterministic argument regression and focused race3 passed; full agent and CLI packages passed once,35.977s and0.006s respectively. Immutable deployment remains next.",
+    "actual_cwd": "Before correction, Docker cwd readlink was /, but its actual device/inode matched the candidate root, not host /. Thus the string alone was not proof of writes escaping quota.",
+    "cause": "nsenter --wd opens cwd before entry and retained a mount reference from the original systemd namespace. That mount was unreachable by its canonical path in the joined view. --wdns resolves cwd after entry instead. Both installed util-linux versions explicitly support --wdns.",
+    "followup": "Pinned startup now uses --wdns=<candidate_root>. Deployed immutable v3 on both hosts. Their daemon cwd resolves to the canonical candidate root and the frozen image still executes. Focused race3 and full agent/CLI suites passed,35.840s and0.006s. Goofe's native resource verification plus recheck passed without relaxing any guard.",
+    "diagnostic_evidence": "/mnt/data/urnetwork-subeval-sille/state/startup-cwd-20261109-v1.trace and v2.trace; bounded root-only startup diagnostics were stopped and the canonical private service restored. No candidate or primary daemon was involved.",
     "grading_qualified": false
   },
-  "remaining": "Finish/commit/deploy the bounded-cwd followup, then recheck native resource boundaries and complete final role inventories/fingerprints. Namespace-only receipts are expressly incomplete and cannot prove cleanup pressure, baseline or grading admission. Sille core-pattern approval remains pending separately."
+  "remaining": "Complete final protected startup/recovery/control inventories and genuine host fingerprints before freezing the two-host policy. Keep startup metadata independent of final execution/recovery authority so final recovery-unit pins cannot invalidate the bootstrap loader. Namespace-only receipts cannot prove pressure, baseline or grading admission. Sille core-pattern approval remains pending separately."
 }

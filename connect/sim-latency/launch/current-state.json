@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-09T23:49:06Z",
+  "observed_at": "2026-11-09T23:59:47Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -79,14 +79,14 @@
     "bounded_storage": "Fresh fully allocated96 GiB loop64 ext4 candidate filesystem active, private/nosuid/nodev; new durable loop/mount units enabled. Original128 GiB store and old unit bytes retained for rollback. Native v5 resource verification/recheck passed; reboot not tested.",
     "runtime_binary_inventory": "Exact Sille Docker/containerd/shim/runc copies and manifest-verified evaluator release installed separately on Goofe; primary Docker and existing containers unchanged",
     "management": "Explicit 24 GiB ledger installed; five slice limits verified in PID1 and kernel. Independent recovery unit installed but not armed; protected agent configuration remains incomplete.",
-    "live_probe": "Native resource verification/recheck passed with96 GiB v5 boundary3bf6229954ff142112d2201d47e65f603918b45ed95a3ad5709f9bf639abf5a7. All three frozen image IDs verified. Not complete agent, pressure, baseline or cross-host grading qualification; no evaluation job started.",
+    "live_probe": "Corrected shared mount v3 native resource verification plus recheck passed with96 GiB boundarybf5d732935ee9803484c1767442113cb1e1559649d817c99f495adbd7b55306f. Frozen-image non-root namespace execution passed and exact maps are retained. Not complete agent, pressure, baseline or cross-host grading qualification; no evaluation job started.",
     "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json", "EPOCH2-GOOFE-BOUNDED-STORAGE-2026-11-09.json", "EPOCH2-STORAGE-AND-PROSPECTIVE-ROLES-2026-11-09.json"]
   },
   "sille_private_executor": {
     "storage": "Fresh96 GiB fully allocated candidate filesystem mounted privately on stable loop64; persistent owner-checked loop service and mount enabled. No old volume reformatted, reboot not tested.",
     "base_directory": "/mnt/data/urnetwork-subeval-sille",
     "backing_headroom": "About46 GiB free after allocation, above required32 GiB",
-    "preparation": "Worker/remap accounts and isolated daemon/management documents installed. Five slice limits active/read back. Offline private daemons running, exact evaluator/PostgreSQL/Redis images verified and only direct synthetic local fixtures copied/hash-verified. Primary Docker and existing local services unchanged.",
+    "preparation": "Worker/remap accounts and isolated daemon/management documents installed. Five slice limits active/read back. Offline private daemons running; shared mount v3 fixes image execution and canonical bounded cwd. Exact evaluator/PostgreSQL/Redis images verified and only direct synthetic local fixtures copied/hash-verified. Primary Docker and existing local services unchanged.",
     "core_policy": "Sille still uses piped Apport. User approval requested for core.%P, previously approved only on Goofe. No host-global core handling changed without approval.",
     "grading_qualified": false
   },
@@ -97,7 +97,7 @@
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
-    "Descriptor-based shared mount startup is deployed on both hosts; exact frozen-image namespace execution now passes and genuine namespace-only receipts are retained. Native Goofe resource recheck found nsenter resetting Docker cwd to /. Finish/deploy the explicit bounded-cwd followup, then complete final host-role inventories/fingerprints. Details in EPOCH2-PRIVATE-MOUNT-NAMESPACE-2026-11-09.json. API preparation succeeded; do not repeat it or rebuild the qualified image.",
+    "Shared mount v3 with namespace-local --wdns is deployed on both hosts. Exact frozen-image namespace execution and canonical bounded cwd pass; Goofe's full native resource check/recheck passed. Complete final startup/recovery/control inventories and genuine fingerprints next; keep prospective startup metadata distinct from final recovery authority so changing recovery-unit pins cannot invalidate startup. Details in EPOCH2-PRIVATE-MOUNT-NAMESPACE-2026-11-09.json. Do not rebuild the qualified image.",
     "Complete Goofe's immutable host-role/control inventory and genuine prospective fingerprint, then freeze both actual host identities before the intake grant. Do not invent qualification hashes or positive readiness flags.",
     "Both96 GiB volumes and offline image caches are active; Goofe v5 resource verification passed. Await Sille core-policy choice, then verify its complete native boundary. Keep execution disabled until independent grading admission.",
     "Open epoch2 for a fresh full week, verify live API source/rules/status and historical epoch1 publication, and update EPOCH-SOURCE.md only with the actual published checkpoint.",
