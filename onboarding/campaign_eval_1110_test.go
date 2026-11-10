@@ -230,3 +230,49 @@ func TestE2ProvidersLineEmptyWhileTheCountIsUnknown(t *testing.T) {
 		}
 	}
 }
+
+// T2: E3a's subject is "3 free months of Pro end tomorrow", and it went
+// whenever the in-app offer was active. An offer issued days after sign-up
+// (the offer screen seen late) still had days left at E3a: on Main 10 of 403
+// E3a sends in 60 days had more than 36 hours left. E3a goes only when the
+// offer ends within 36 hours of the send; otherwise the step is skipped (not
+// moved: the schedule is the owner's call).
+func TestE3aOnlyWhenTheOfferEndsWithin36Hours(t *testing.T) {
+	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
+	for _, c := range []struct {
+		left time.Duration
+		want bool
+	}{
+		{20 * time.Hour, true}, {36 * time.Hour, true}, {time.Minute, true},
+		{36*time.Hour + time.Minute, false}, {72 * time.Hour, false}, {0, false}, {-time.Hour, false},
+	} {
+		if got := OfferEndsSoon(now.Add(c.left), now); got != c.want {
+			t.Errorf("an offer with %s left ends soon: %t, want %t", c.left, got, c.want)
+		}
+	}
+
+	f := healthy(PathA)
+	f.OfferState = OfferStateActive
+	// 72 hours left: "end tomorrow" would be false
+	f.OfferEndsSoon = false
+	if d := Decide(StepE3, f); d.Action != ActionSkip || d.NextStep != StepE4 {
+		t.Errorf("e3a with the offer ending in days: %+v", d)
+	}
+	f.OfferEndsSoon = true
+	if d := Decide(StepE3, f); d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningJoined || d.NextStep != StepE4 {
+		t.Errorf("e3a with the offer ending tomorrow: %+v", d)
+	}
+	// ending soon is no reason to send an offer that is not active, or that
+	// may not be emailed
+	for _, state := range []string{OfferStateNone, OfferStateRedeemed, OfferStateExpired} {
+		f.OfferState = state
+		if d := Decide(StepE3, f); d.Action != ActionSkip {
+			t.Errorf("e3a with offer %q: %+v", state, d)
+		}
+	}
+	f.OfferState = OfferStateActive
+	f.NoOfferEmail = true
+	if d := Decide(StepE3, f); d.Action != ActionSkip {
+		t.Errorf("e3a where the offer may not be emailed: %+v", d)
+	}
+}

@@ -541,6 +541,7 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
+		OfferEndsSoon:     offer != nil && onboarding.OfferEndsSoon(offer.ExpiresAt, now),
 		FeedbackSubmitted: model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt) || model.HasOnboardingEvent(ctx, row.NetworkId, model.EventFeedbackSubmitted),
 		EmailOpens:        model.CountOnboardingEvents(ctx, row.NetworkId, model.EventEmailOpened),
 	}

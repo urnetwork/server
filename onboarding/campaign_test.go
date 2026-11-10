@@ -84,9 +84,11 @@ func TestE2(t *testing.T) {
 }
 
 func TestPathA(t *testing.T) {
-	// E3a: the in-app offer's last day
+	// E3a: the in-app offer's last day (it ends within LastChanceWindow;
+	// TestE3aOnlyWhenTheOfferEndsWithin36Hours has the offer with days left)
 	f := healthy(PathA)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	d := Decide(StepE3, f)
 	if d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningJoined || d.NextStep != StepE4 {
 		t.Errorf("e3a active: %+v", d)
@@ -175,6 +177,7 @@ func TestPathB(t *testing.T) {
 func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
 	f := healthy(PathA)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	f.NoOfferEmail = true
 	if d := Decide(StepE3, f); d.Action != ActionSkip || d.NextStep != StepE4 {
 		t.Errorf("e3a without an email offer: %+v", d)

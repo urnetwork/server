@@ -176,9 +176,12 @@ type Facts struct {
 	NoOfferEmail bool
 
 	// ----- step conditions -----
-	HasConnected      bool
-	WidgetAdded       bool
-	OfferState        string // "" (none) | active | redeemed | expired
+	HasConnected bool
+	WidgetAdded  bool
+	OfferState   string // "" (none) | active | redeemed | expired
+	// the offer expires within LastChanceWindow of the send (OfferEndsSoon):
+	// the last-chance email's "end tomorrow" holds
+	OfferEndsSoon     bool
 	FeedbackSubmitted bool
 	// recorded for the status tooling only: opens decide nothing (Apple Mail
 	// Privacy Protection and proxies open every message; REVIEW.md finding 1)
@@ -192,6 +195,17 @@ const (
 	OfferStateRedeemed = "redeemed"
 	OfferStateExpired  = "expired"
 )
+
+// LastChanceWindow is how near its end an offer must be for the last-chance
+// email, whose subject says the free months "end tomorrow".
+const LastChanceWindow = 36 * time.Hour
+
+// OfferEndsSoon reports whether an offer expiring at expiresAt ends within
+// LastChanceWindow of now, and has not ended yet.
+func OfferEndsSoon(expiresAt time.Time, now time.Time) bool {
+	left := expiresAt.Sub(now)
+	return 0 < left && left <= LastChanceWindow
+}
 
 // Decision is what a step does.
 type Decision struct {
@@ -293,8 +307,10 @@ func Decide(step string, f Facts) Decision {
 		return send(TemplateE2Widget, VariantNotActivated)
 	case StepE3:
 		if path == PathA {
-			// E3a day 4: the in-app offer's last day, still free
-			if f.OfferState == OfferStateActive && !f.NoOfferEmail {
+			// E3a day 4: the in-app offer's last day, still free. Only when the
+			// offer does end within LastChanceWindow: an offer issued after
+			// sign-up has days left on day 4, and the subject says "tomorrow"
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail && f.OfferEndsSoon {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningJoined
 				return d
