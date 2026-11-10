@@ -52,6 +52,7 @@ Usage:
     bringyourctl db scrub-client-addresses
     bringyourctl db key-history-floor [--rollback | --restore]
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
+    bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -220,12 +221,24 @@ Options:
     --mode=<mode>  With db close-evidence-retention, set the close evidence
                    row retention's brake: on, or off to stop the row deletes
                    from their next batch. The weekly drops of partitioned
-                   evidence never read it.
+                   evidence never read it. With db usage-archive-export, set
+                   the export control's mode: on drops exported, verified
+                   weeks early, dry_run verifies them and keeps them, off
+                   drops nothing early from the next retention pass.
     --max-rows-per-second=<n>  With db close-evidence-retention, set the
                    brake's rate: rows deleted a second, at most 5000; 0 stops
                    the deletes.
     --remove       With db close-evidence-retention, delete the brake, so the
-                   code's default rate (1000 a second) applies.
+                   code's default rate (1000 a second) applies. With db
+                   usage-archive-export, delete the export control, so no
+                   week of the usage archive drops before its 52 weeks.
+    --close-time-floor=<date>  With db usage-archive-export, the close time
+                   floor (YYYY-MM-DD, UTC): a week leaves early only when it
+                   ends by the floor and every row closed before it. It is
+                   never later than 70 days ago, whatever is set. Move it only
+                   past SN epochs that are recorded with no recovery pending.
+    --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
+                   (or dry-run verifications) of one retention pass, 1 to 4.
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -315,6 +328,8 @@ func main() {
 			dbKeyHistoryFloor(opts)
 		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
 			dbCloseEvidenceRetention(opts)
+		} else if usageArchiveExport, _ := opts.Bool("usage-archive-export"); usageArchiveExport {
+			dbUsageArchiveExport(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -740,6 +755,74 @@ func closeEvidenceRetentionBrakeChange(opts docopt.Opts) (fields map[string]stri
 	}
 	if remove && 0 < len(fields) {
 		return nil, false, errors.New("--remove deletes the brake; set fields without it")
+	}
+	return
+}
+
+// dbUsageArchiveExport prints the usage archive export control
+// ({usage_archive_export}control, server/db_provider_usage_archive_export.go)
+// as stored and as the next retention pass narrows it, after setting its
+// fields with --mode, --close-time-floor and --max-weeks-per-pass, or deleting
+// it with --remove. The control only lets the retention pass drop a week
+// early that a verified export in the ledger holds exactly; its kill switch is
+// --mode=off (or --remove): the next pass drops nothing early. The 52-week
+// drops never read it.
+func dbUsageArchiveExport(opts docopt.Opts) {
+	ctx := context.Background()
+	settings := server.DefaultProviderUsageArchiveExportSettings()
+	fields, remove, err := usageArchiveExportControlChange(opts, settings)
+	if err != nil {
+		panic(err)
+	}
+	if remove || 0 < len(fields) {
+		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if remove {
+			server.Raise(server.RemoveProviderUsageArchiveExportControl(writeCtx))
+		}
+		server.Raise(server.SetProviderUsageArchiveExportControl(writeCtx, fields))
+	}
+	stored, err := server.GetProviderUsageArchiveExportControlFields(ctx, settings)
+	server.Raise(err)
+	control := server.NarrowProviderUsageArchiveExportControl(stored, settings)
+	fmt.Printf("Usage archive export control: %v\n", stored)
+	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s), up to %d weeks a pass",
+		control.Mode, control.CloseTimeFloor.Format(time.DateOnly), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
+	if control.Invalid != "" {
+		fmt.Printf("; off because %s", control.Invalid)
+	}
+	fmt.Println()
+}
+
+// The export control fields and removal the options ask for. Every value is
+// checked as the retention pass narrows it (server.NarrowProviderUsageArchiveExportControl),
+// so the command refuses what the pass would read as off: a mode other than on,
+// dry_run or off, a floor that is not YYYY-MM-DD, and a weekly brake outside 1
+// to the settings' most. --remove with fields is refused.
+func usageArchiveExportControlChange(opts docopt.Opts, settings *server.ProviderUsageArchiveExportSettings) (fields map[string]string, remove bool, err error) {
+	fields = map[string]string{}
+	remove, _ = opts.Bool("--remove")
+	if mode, _ := opts.String("--mode"); mode != "" {
+		if mode != "on" && mode != "dry_run" && mode != "off" {
+			return nil, false, fmt.Errorf("--mode must be on, dry_run or off, not %q", mode)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldMode] = mode
+	}
+	if floor, _ := opts.String("--close-time-floor"); floor != "" {
+		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil {
+			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD, not %q", floor)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldCloseTimeFloor] = floor
+	}
+	if weeks, _ := opts.String("--max-weeks-per-pass"); weeks != "" {
+		value, parseErr := strconv.Atoi(weeks)
+		if parseErr != nil || value < 1 || settings.MaxWeeksPerPass < value {
+			return nil, false, fmt.Errorf("--max-weeks-per-pass must be 1 to %d, not %q", settings.MaxWeeksPerPass, weeks)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldMaxWeeksPerPass] = weeks
+	}
+	if remove && 0 < len(fields) {
+		return nil, false, errors.New("--remove deletes the export control; set fields without it")
 	}
 	return
 }
