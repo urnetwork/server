@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-09T23:59:47Z",
+  "observed_at": "2026-11-10",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -87,7 +87,7 @@
     "base_directory": "/mnt/data/urnetwork-subeval-sille",
     "backing_headroom": "About46 GiB free after allocation, above required32 GiB",
     "preparation": "Worker/remap accounts and isolated daemon/management documents installed. Five slice limits active/read back. Offline private daemons running; shared mount v3 fixes image execution and canonical bounded cwd. Exact evaluator/PostgreSQL/Redis images verified and only direct synthetic local fixtures copied/hash-verified. Primary Docker and existing local services unchanged.",
-    "core_policy": "Sille still uses piped Apport. User approval requested for core.%P, previously approved only on Goofe. No host-global core handling changed without approval.",
+    "core_policy": "User approved core.%P on Sille; applied and persisted. Native private resource verification/recheck passed. Candidate core limit remains the approved one-byte policy with pinned seccomp.",
     "grading_qualified": false
   },
   "intake_transition_launcher": {
@@ -99,7 +99,7 @@
   "next_actions": [
     "Shared mount v3 with namespace-local --wdns is deployed on both hosts. Exact frozen-image namespace execution and canonical bounded cwd pass; Goofe's full native resource check/recheck passed. Complete final startup/recovery/control inventories and genuine fingerprints next; keep prospective startup metadata distinct from final recovery authority so changing recovery-unit pins cannot invalidate startup. Details in EPOCH2-PRIVATE-MOUNT-NAMESPACE-2026-11-09.json. Do not rebuild the qualified image.",
     "Complete Goofe's immutable host-role/control inventory and genuine prospective fingerprint, then freeze both actual host identities before the intake grant. Do not invent qualification hashes or positive readiness flags.",
-    "Both96 GiB volumes and offline image caches are active; Goofe v5 resource verification passed. Await Sille core-policy choice, then verify its complete native boundary. Keep execution disabled until independent grading admission.",
+    "Both96 GiB volumes and offline image caches are active. Sille core policy is approved/applied and its native private boundary passed. Correct inherited-cpuset and canonical recovery-unit fixes are deployed; native ordinary management and independent recovery checks passed. A further missing-unit parser fix passed deterministic, race and native read-only checks: PID1 omits unset ExecStart for nonexistent units. Deploy that corrected immutable control release, verify signed availability on both hosts, then refresh actual host identities/config pins. Keep execution disabled until independent grading admission.",
     "Open epoch2 for a fresh full week, verify live API source/rules/status and historical epoch1 publication, and update EPOCH-SOURCE.md only with the actual published checkpoint.",
     "Keep grading unactivated. Fresh baseline, runtime/containment qualification and cross-host operational admission proceed separately; no submission clocks may start before those grading gates."
   ]

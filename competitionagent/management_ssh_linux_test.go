@@ -131,6 +131,38 @@ func TestManagementSshManagerProjectionPreservesMissingAndRejectsAuthorityChange
 	}
 }
 
+// PID1 omits an unset ExecStart for a nonexistent service, not for an owned
+// invocation. The missing object remains absence, never empty-group proof.
+func TestManagementSshMissingUnitAcceptsOmittedUnsetCommand(t *testing.T) {
+	config, policy, settings := managementSshTestConfig(t)
+	plan := managementSshTestPlan(config, policy, settings)
+	values := managementSshTestProjection(config, policy, plan, settings)
+	values["LoadState"], values["ActiveState"], values["SubState"] = "not-found", "inactive", "dead"
+	values["MainPID"], values["ControlGroup"], values["FragmentPath"] = "0", "", ""
+	delete(values, "ExecStart")
+	unit, err := validateManagementSshUnit(managementSshTestProjectionBytes(values), config, &policy, plan, settings)
+	if err != nil || unit.exists || unit.inactive || unit.completed {
+		t.Fatal("absent unset command was not represented as missing custody", err)
+	}
+	for _, mutate := range []func(map[string]string){
+		func(values map[string]string) { delete(values, "MainPID") },
+		func(values map[string]string) { delete(values, "LoadState") },
+		func(values map[string]string) { values["MainPID"] = "17" },
+		func(values map[string]string) { values["ControlGroup"] = "/synthetic/retained" },
+		func(values map[string]string) { values["ActiveState"] = "active" },
+		func(values map[string]string) { values["LoadState"] = "loaded" },
+	} {
+		changed := make(map[string]string, len(values))
+		for key, value := range values {
+			changed[key] = value
+		}
+		mutate(changed)
+		if _, err := validateManagementSshUnit(managementSshTestProjectionBytes(changed), config, &policy, plan, settings); err == nil {
+			t.Fatal("missing command waived uncertain or loaded custody")
+		}
+	}
+}
+
 // Status is synthetic, not an extraction from the executing host.
 func managementSshTestStatus(plan managementSshPlan) []byte {
 	return []byte(fmt.Sprintf("Name:\tsynthetic-control\nCpus_allowed_list:\t%s\nCapEff:\t%016x\nCapPrm:\t%016x\nCapBnd:\t%016x\nCapAmb:\t%016x\nCapInh:\t%016x\nNoNewPrivs:\t1\n",

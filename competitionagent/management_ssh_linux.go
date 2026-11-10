@@ -301,6 +301,12 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 	}
 	for _, key := range strings.Split(managementSshProperties, ",") {
 		if _, found := values[key]; !found {
+			// PID1 omits the unset command property for a nonexistent unit.
+			// It is never optional for an actual invocation.
+			if key == "ExecStart" && values["LoadState"] == "not-found" {
+				values[key] = ""
+				continue
+			}
 			return unit, errors.New("managed SSH unit properties are incomplete")
 		}
 	}
