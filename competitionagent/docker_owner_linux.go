@@ -461,6 +461,16 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 		return err
 	}
 	defer proxy.Close()
+	if self.protected {
+		boundary, err := self.runtimeAdmission(ctx)
+		if err != nil {
+			return err
+		}
+		if err := proxy.bindRuntimeBoundary(boundary); err != nil {
+			_ = boundary.Close()
+			return err
+		}
+	}
 	if proxy.Snapshot().AdmissionsClosed {
 		return errors.New("persisted Docker custody is already closed or uncertain")
 	}

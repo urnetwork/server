@@ -1,6 +1,22 @@
 {
   "schema": 1,
   "observed_at": "2026-11-10T18:08:34Z",
+  "latest_network_proof_diagnosis": {
+    "v16a_probes_terminal": true,
+    "v16a_score_produced": false,
+    "cleanup_and_stop_cleanup_verified_both_hosts": true,
+    "compiler_correction_confirmed": "Both hosts completed tracked checks, compilation and candidate-image assembly. Candidate PostgreSQL/Redis became healthy; runner admission then refused the native network proof.",
+    "root_cause": "proveHostNetwork invoked fresh VerifyRuntimeResourceBoundary after the run's evidence tmpfs was mounted. Idle admission intentionally rejects nested/aliased candidate mounts, including that active evidence mount. This incorrectly rejected a normal already-admitted run.",
+    "native_counterfactual": "Three passes on each host: initial idle admission succeeds; a fresh bounded1MiB noexec/nosuid/nodev job tmpfs is mounted; original receipt Recheck succeeds; repeated idle admission deterministically rejects nested mount authority. Normal unmount cleanup verified; no job or Docker object created.",
+    "correction": "The independent Docker owner captures runtime admission before listeners/evaluator startup and binds that receipt to the exact base/work/scratch/socket/device scope. Network and namespace proofs recheck the same unit/process/mount generation; no replacement admission is constructed. Receipt closes only after admitted native operations join. All bridge/address/route/network and resource validation remains active.",
+    "composed_regressions": "Owned Docker bridge inspection through retained receipt, stale-generation refusal, scope substitution/rebinding refusal and owner-close custody passed three race repetitions2.041s. A synthetic fixture initially omitted its mandatory network Name; corrected before the final run.",
+    "full_race_tests": "Final agent/CLI suite passed three repetitions205.230s/1.030s",
+    "installed": false,
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false,
+    "next_action": "Publish clean immutable replacement agent, repin both host roles at verified idle boundary, repeat native observations and fresh operator qualification. Do not retry v16a unchanged or relabel their network failures as qualified results."
+  },
   "latest_compiler_exec_activation": {
     "role": "v16",
     "release": "/usr/local/libexec/urnetwork/competition-subeval-control-0bb42f799-20261110-v16",

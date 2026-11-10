@@ -56,6 +56,7 @@ type DockerProxy struct {
 	beforeContextOpen             func(string, string)
 	fileHandoff                   bool
 	hostFiles                     *hostFileBroker
+	runtimeBoundary               *RuntimeResourceBoundary
 	syncSpoolDirectory            func(string) error
 }
 
@@ -289,10 +290,11 @@ func (self *DockerProxy) Close() error {
 		}
 		self.stateLock.Unlock()
 		if inflight == 0 {
+			var journalErr error
 			if journal != nil {
-				return journal.Close()
+				journalErr = journal.Close()
 			}
-			return nil
+			return errors.Join(journalErr, self.runtimeBoundary.Close())
 		}
 		select {
 		case <-ctx.Done():

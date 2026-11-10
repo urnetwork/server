@@ -12,11 +12,41 @@ import (
 	"path/filepath"
 )
 
+// Called once before listeners/worker admission. The Docker owner retains the
+// original proof until every native operation joins; it never renews a lease
+// by repeating idle admission after evidence mounts and containers exist.
+func (self *DockerProxy) bindRuntimeBoundary(boundary *RuntimeResourceBoundary) error {
+	if self.runtimeBoundary != nil || boundary == nil || boundary.namespace == nil || self.plan.HostFiles == nil ||
+		boundary.BaseDirectory != self.plan.BaseDirectory || boundary.PrivateSocketPath != self.plan.UpstreamSocketPath ||
+		boundary.WorkDeviceId != self.plan.HostFiles.WorkDeviceId || boundary.WorkRoot != filepath.Dir(self.plan.ContextRoot) ||
+		boundary.ScratchRoot != filepath.Dir(self.plan.ScratchDirectory) {
+		return errors.New("Docker owner runtime receipt differs from its exact run scope")
+	}
+	self.runtimeBoundary = boundary
+	return nil
+}
+
+// This checks the captured generation, never constructs a replacement proof.
+func (self *DockerProxy) requireRuntimeBoundary(ctx context.Context) (*RuntimeResourceBoundary, error) {
+	boundary := self.runtimeBoundary
+	if boundary == nil {
+		return nil, errors.New("Docker owner has no retained native runtime receipt")
+	}
+	if err := boundary.Recheck(ctx); err != nil {
+		return nil, err
+	}
+	return boundary, nil
+}
+
 // Both the daemon object and the private namespace must match the immutable
 // run. No host-network ip command or default-Docker fallback is available.
 func (self *DockerProxy) proveHostNetwork(ctx context.Context, networkId string) (HostNetworkBoundary, error) {
 	if !digestPattern.MatchString(networkId) || self.plan.HostFiles == nil {
 		return HostNetworkBoundary{}, errors.New("network proof has no complete owned identity")
+	}
+	boundary, err := self.requireRuntimeBoundary(ctx)
+	if err != nil {
+		return HostNetworkBoundary{}, err
 	}
 	owned, err := self.inspectOwnedDocker(ctx, networkId, true)
 	if err != nil || owned != networkId {
@@ -39,18 +69,7 @@ func (self *DockerProxy) proveHostNetwork(ctx context.Context, networkId string)
 	if err != nil {
 		return HostNetworkBoundary{}, err
 	}
-	scope := RuntimeResourceScope{BaseDirectory: self.plan.BaseDirectory, TrustedOperatorUid: self.plan.TrustedOperatorUid,
-		StateDirectory: filepath.Dir(filepath.Dir(self.plan.StateDirectory)), WorkDirectory: filepath.Dir(self.plan.ContextRoot),
-		ScratchDirectory: filepath.Dir(self.plan.ScratchDirectory), WorkerUid: self.plan.WorkerUid, WorkerGid: self.plan.HostFiles.WorkerGid}
 	settings := DefaultRuntimeResourceBoundarySettings()
-	boundary, err := VerifyRuntimeResourceBoundary(ctx, self.plan.HostFiles.ResourceBoundary, scope, settings)
-	if err != nil {
-		return HostNetworkBoundary{}, err
-	}
-	defer boundary.Close()
-	if boundary.PrivateSocketPath != self.plan.UpstreamSocketPath || boundary.WorkDeviceId != self.plan.HostFiles.WorkDeviceId {
-		return HostNetworkBoundary{}, errors.New("network proof changed its admitted private runtime")
-	}
 	link, err := (runtimeBoundaryNativeHost{}).NetworkLink(ctx, *boundary, bridge, settings)
 	if err != nil || validateHostNetworkLink(link, bridge) != nil {
 		return HostNetworkBoundary{}, errors.New("private bridge has an unqualified kernel address")
