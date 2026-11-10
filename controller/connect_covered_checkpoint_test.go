@@ -271,7 +271,7 @@ func newCoveredCheckpointCompanion(t testing.TB) coveredCheckpointContract {
 	return coveredCheckpointContract{f: f, contractId: contractId, senderId: f.providerId, receiverId: f.windowId, escrowed: true}
 }
 
-// A same-network contract, which holds no escrow.
+// A same-network contract, escrowed from the network's balance.
 func newCoveredCheckpointNetwork(t testing.TB) coveredCheckpointContract {
 	t.Helper()
 	f := newTwoPartyCloseFixture(t, true)
@@ -279,10 +279,10 @@ func newCoveredCheckpointNetwork(t testing.TB) coveredCheckpointContract {
 		DestinationId:     f.providerId.Bytes(),
 		TransferByteCount: uint64(MinContractTransferByteCount),
 	})
-	if escrowCount, _ := f.redisReserved(t, contractId); escrowCount != 0 {
-		t.Fatalf("network contract unexpectedly holds %d escrows", escrowCount)
+	if escrowCount, redisReserved := f.redisReserved(t, contractId); escrowCount == 0 || !redisReserved {
+		t.Fatalf("network contract escrow is not Redis reserved: escrows=%d redis=%t", escrowCount, redisReserved)
 	}
-	return coveredCheckpointContract{f: f, contractId: contractId, senderId: f.windowId, receiverId: f.providerId}
+	return coveredCheckpointContract{f: f, contractId: contractId, senderId: f.windowId, receiverId: f.providerId, escrowed: true}
 }
 
 // The receiver checkpoints at receive-sequence exit after the sender's final;
