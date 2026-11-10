@@ -48,7 +48,8 @@ type retentionTestSource struct {
 func retentionTestMicros(at time.Time) string { return strconv.FormatInt(at.UnixMicro(), 10) }
 
 // A healthy main-shaped primary at the synthetic clock: daily partitions
-// inside retention, reaped contracts and no append-only relation.
+// inside retention (10 days since 2026-11-10), reaped contracts and no
+// append-only relation.
 func retentionTestHealthy() retentionTestSource {
 	now := syntheticSettings(nil).Now()
 	source := retentionTestSource{
@@ -57,7 +58,7 @@ func retentionTestHealthy() retentionTestSource {
 		growth:     []retentionTestRelation{{name: "transfer_contract", oid: 16400, total: 1895 * storageRunwayTestGigabyte, inserted: 2000000000, deleted: 1000}},
 		sampled:    5000, old: 400, stamped: 300,
 	}
-	for day := -13; day <= 3; day++ {
+	for day := -9; day <= 3; day++ {
 		at := now.Add(time.Duration(day) * 24 * time.Hour)
 		source.partitions = append(source.partitions, retentionTestPartition{name: "client_reliability_p" + at.Format("20060102"), heap: 8 * 1024 * 1024 * 1024})
 	}
@@ -156,7 +157,9 @@ func TestRetentionLivenessHealthy(t *testing.T) {
 
 // The 2026-10-22 shape: the subsidy epoch ended 10-05, under 1% of old
 // contract rows are stamped, and st_client_key_history only grows. The old
-// subsidy frontier is not a finding: it no longer holds any retention.
+// subsidy frontier is not a finding: it no longer holds any retention. The
+// partitions start 10-11, inside the 10-day retention and its grace, so only
+// the reap is stuck.
 func TestRetentionLivenessSyntheticIncident(t *testing.T) {
 	source := retentionTestHealthy()
 	source.now = time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC)
@@ -164,7 +167,7 @@ func TestRetentionLivenessSyntheticIncident(t *testing.T) {
 	source.statsReset = source.now.Add(-30 * 24 * time.Hour)
 	source.subsidyFrontier = time.Date(2026, 10, 5, 0, 0, 0, 0, time.UTC)
 	source.partitions = nil
-	for day := time.Date(2026, 10, 7, 0, 0, 0, 0, time.UTC); day.Before(source.now.Add(72 * time.Hour)); day = day.Add(24 * time.Hour) {
+	for day := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC); day.Before(source.now.Add(72 * time.Hour)); day = day.Add(24 * time.Hour) {
 		source.partitions = append(source.partitions, retentionTestPartition{name: "client_reliability_p" + day.Format("20060102"), heap: 60 * 1000 * 1000 * 1000})
 	}
 	source.growth = append(source.growth, retentionTestRelation{name: "st_client_key_history", oid: 16500, total: 382 * storageRunwayTestGigabyte, inserted: 81600000})
@@ -205,7 +208,7 @@ func TestRetentionLivenessJudgesByTheRetentionDespiteSubsidyFrontier(t *testing.
 	requireNoAlertClass(t, alerts, "retention-frontier-pinned")
 	stuck := requireAlertClass(t, alerts, "partition-retention-stuck")
 	if stuck.Target != "pg-1/client-reliability-partitions" ||
-		!strings.Contains(stuck.Observed, "oldest_partition=client_reliability_p20261005 upper_bound_age_days=25.8 cutoff_age_days=14.0 days_past_cutoff=11.8") {
+		!strings.Contains(stuck.Observed, "oldest_partition=client_reliability_p20261005 upper_bound_age_days=25.8 cutoff_age_days=10.0 days_past_cutoff=15.8") {
 		t.Fatalf("wrong partition alert: %s", stuck.Observed)
 	}
 }
@@ -223,8 +226,8 @@ func TestRetentionLivenessPartitionCutoffs(t *testing.T) {
 		oldest   string
 		stuck    bool
 	}{
-		{name: "retention passed", oldest: day(-18), stuck: true},
-		{name: "retention inside grace", oldest: day(-16)},
+		{name: "retention passed", oldest: day(-14), stuck: true},
+		{name: "retention inside grace", oldest: day(-12)},
 		{name: "a recent subsidy frontier holds nothing", frontier: now.Add(-25 * 24 * time.Hour), oldest: day(-27), stuck: true},
 		{name: "a stale subsidy frontier holds nothing", frontier: now.Add(-40 * 24 * time.Hour), oldest: day(-26), stuck: true},
 		{name: "no frontier", oldest: day(-25), stuck: true},
