@@ -114,6 +114,7 @@ type RuntimeResourceBoundary struct {
 	ContainerdUnit          Pin                          `json:"containerd_unit"`
 	NetworkUnit             Pin                          `json:"network_unit"`
 	NativeClass             *RuntimeNativeClassSelection `json:"native_class,omitempty"`
+	WorkspaceMount          *RuntimeWorkspaceMount       `json:"workspace_mount,omitempty"`
 	WorkDeviceId            uint64                       `json:"-"`
 	namespace               runtimeBoundaryNamespace
 	nativeClass             *runtimeNativeClassProof
@@ -272,6 +273,19 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 			return nil, err
 		}
 	}
+	if boundary.WorkspaceMount != nil {
+		if err := host.Executable(boundary.WorkspaceMount.MountHelper); err != nil {
+			return nil, err
+		}
+		content, err := host.Document(boundary.WorkspaceMount.Unit, settings.DocumentBytes)
+		if err != nil {
+			return nil, err
+		}
+		expected, err := RenderRuntimeWorkspaceMount(*boundary, settings)
+		if err != nil || !bytes.Equal(content, expected) {
+			return nil, errors.New("workspace bootstrap unit differs from its closed mount policy")
+		}
+	}
 	if err := prepareRuntimeNativeClass(ctx, boundary, scope, settings, host); err != nil {
 		return nil, err
 	}
@@ -324,6 +338,15 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 // All mutable engine paths are distinct children of the one quota filesystem.
 // Socket/control state and durable agent journals cannot consume that budget.
 func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error {
+	if self.WorkspaceMount != nil {
+		if self.WorkspaceMount.Kind != runtimeWorkspacePropagation || self.WorkRoot != scope.WorkDirectory ||
+			filepath.Dir(self.WorkspaceMount.Unit.Path) != "/etc/systemd/system" || !strings.HasSuffix(self.WorkspaceMount.Unit.Path, ".mount") ||
+			self.WorkspaceMount.Unit.Path != "/etc/systemd/system/"+runtimeWorkspaceUnitName(self.WorkRoot) || !digestPattern.MatchString(self.WorkspaceMount.Unit.Sha256) ||
+			self.WorkspaceMount.MountHelper.Path != "/usr/bin/mount" || !digestPattern.MatchString(self.WorkspaceMount.MountHelper.Sha256) ||
+			strings.ContainsAny(self.WorkRoot+self.CandidateRoot, "$%\\ \t\r\n\x00") {
+			return errors.New("workspace propagation is not an explicitly pinned job-only mount class")
+		}
+	}
 	if self.NativeClass != nil {
 		if err := self.NativeClass.validate(*self); err != nil {
 			return err
@@ -559,6 +582,7 @@ type runtimeBoundaryMount struct {
 	Root, Target, Source, Type string
 	Options                    map[string]bool
 	Shared                     bool
+	SharedGroup, MasterGroup   uint64
 }
 
 // This parser bounds both examined bytes and entries, including foreign mounts.
@@ -616,11 +640,24 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 			options[option] = true
 		}
 		shared := false
+		var sharedGroup, masterGroup uint64
 		for _, optional := range fields[6:separator] {
 			shared = shared || strings.HasPrefix(optional, "shared:") || strings.HasPrefix(optional, "master:")
+			kind, value, found := strings.Cut(optional, ":")
+			if found && (kind == "shared" || kind == "master") {
+				group, err := strconv.ParseUint(value, 10, 64)
+				if err != nil || group == 0 || strconv.FormatUint(group, 10) != value || kind == "shared" && sharedGroup != 0 || kind == "master" && masterGroup != 0 {
+					return nil, errors.New("invalid or duplicated mount propagation identity")
+				}
+				if kind == "shared" {
+					sharedGroup = group
+				} else {
+					masterGroup = group
+				}
+			}
 		}
 		device := (major&0xfff)<<8 | minor&0xff | (minor&0xffffff00)<<12 | (major&0xfffff000)<<32
-		mounts = append(mounts, runtimeBoundaryMount{Id: id, DeviceId: device, Root: root, Target: target, Source: source, Type: fields[separator+1], Options: options, Shared: shared})
+		mounts = append(mounts, runtimeBoundaryMount{Id: id, DeviceId: device, Root: root, Target: target, Source: source, Type: fields[separator+1], Options: options, Shared: shared, SharedGroup: sharedGroup, MasterGroup: masterGroup})
 	}
 	if reader.Err() != nil {
 		return nil, errors.New("resource mount inventory is malformed")
@@ -649,6 +686,7 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 	}
 	var owned *runtimeBoundaryMount
 	var root *runtimeBoundaryMount
+	var workspace *runtimeBoundaryMount
 	for index := range mounts {
 		mount := &mounts[index]
 		if mount.Target == "/" {
@@ -662,6 +700,11 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 				return errors.New("candidate filesystem has stacked mount authority")
 			}
 			owned = mount
+		} else if boundary.WorkspaceMount != nil && mount.Target == boundary.WorkRoot {
+			if workspace != nil {
+				return errors.New("workspace has stacked mount authority")
+			}
+			workspace = mount
 		} else if pathWithin(boundary.CandidateRoot, mount.Target) || mount.DeviceId == facts.BlockDeviceId {
 			return errors.New("candidate filesystem has nested or aliased mount authority")
 		}
@@ -669,6 +712,11 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 	if owned == nil || root == nil || owned.DeviceId == root.DeviceId || owned.DeviceId != facts.BlockDeviceId || owned.Type != "ext4" ||
 		owned.Source != boundary.BlockDevice || owned.Root != "/" || owned.Shared || !owned.Options["rw"] || !owned.Options["nosuid"] || !owned.Options["nodev"] || owned.Options["ro"] {
 		return errors.New("candidate mount is not the exact private non-root loop ext4 filesystem")
+	}
+	if boundary.WorkspaceMount != nil {
+		if err := validateRuntimeWorkspaceHost(boundary, *owned, workspace); err != nil {
+			return err
+		}
 	}
 	number, _ := strconv.ParseUint(strings.TrimPrefix(boundary.BlockDevice, "/dev/loop"), 10, 32)
 	if facts.BlockDeviceId == 0 || facts.LoopNumber != uint32(number) || facts.LoopFlags&1 != 0 || facts.LoopOffset != 0 ||
@@ -1256,6 +1304,7 @@ type runtimeBoundaryNativeNamespace struct {
 	settings               RuntimeResourceBoundarySettings
 	identity, hostIdentity runtimeBoundaryNamespaceId
 	units                  map[string]runtimeBoundaryUnit
+	workspace              *runtimeWorkspaceProof
 }
 
 // A duplicate descriptor is a bounded per-command lease; close cannot redirect
@@ -1348,6 +1397,13 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 			}
 		}
 		return false
+	}
+	if boundary.WorkspaceMount != nil && (result.Name == runtimeBoundaryEngineUnitName || result.Name == runtimeBoundaryContainerdUnitName) {
+		for _, property := range []string{"Requires", "BindsTo", "After"} {
+			if !contains(property, filepath.Base(boundary.WorkspaceMount.Unit.Path)) {
+				return result, errors.New("private runtime has no workspace mount lifetime dependency")
+			}
+		}
 	}
 	allowedJoin := map[string]bool{runtimeBoundaryKeeperUnitName: true}
 	if keeper {
@@ -1672,6 +1728,9 @@ func (self *runtimeBoundaryNativeNamespace) Recheck(ctx context.Context) error {
 		}
 	}
 	if err := self.verifyManagedShims(ctx); err != nil {
+		return err
+	}
+	if err := self.verifyWorkspace(ctx, current); err != nil {
 		return err
 	}
 	finalLease, err := self.lease()
