@@ -1518,12 +1518,28 @@ func sidecarMg7MailMigrations() []any {
 // MG8 (§19.7): what M8 first reads ungated.
 func sidecarMg8Migrations() []any {
 	return slices.Concat(
+		sidecarMg8TeamMigrations(),
 		sidecarMg8PushMigrations(),
 		[]any{
 			// the group's marker (SidecarMg8Linked); it changes nothing
 			newCodeMigration(sidecarMg8MigrationId, func(ctx context.Context) {}),
 		},
 	)
+}
+
+// MG8's §7 part: network_client_owner.forward_only (TEAM-M2-20; owner decision 197; §2.8 api-4), the mark of a
+// sidecar's forwarding client, which narrows its routes and its exchange to the config's read (§7.4, §7.8). Set at
+// the mint and deleted with its client, as the row's other marks are. Nullable, so MG0's inserts keep working
+// and NULL reads as unmarked. Nothing reads it unless the binary links MG8 (server.SidecarMg8Linked): the mark,
+// its allowlist and its exchange rule are TEAM-M8-02's.
+func sidecarMg8TeamMigrations() []any {
+	return []any{
+		// Catalog-only, its lock's wait bounded as MG0's are: every marked client's request reads this table.
+		newSqlMigration(`
+			SET LOCAL lock_timeout = '2s';
+			ALTER TABLE network_client_owner ADD COLUMN forward_only bool NULL
+		`),
+	}
 }
 
 // MG8's §18 part: sidecar_push_token (SDK-M8-09), §18.7's step 0 and §18.15's table exactly. Every column

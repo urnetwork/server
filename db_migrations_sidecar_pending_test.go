@@ -289,6 +289,8 @@ func TestNetworkClientOwnerColumns(t *testing.T) {
 		want := []string{
 			"client_id", "owner_user_id", "member_id", "sponsor_user_id", "auth_key_id",
 			"tagged", "ephemeral", "admin_refused", "strict_exp", "acl_enforcing", "declares_no_egress",
+			// MG1's (plan-TEAM-enroll-client-key) and MG8's (owner decision 197), each added nullable
+			"client_public_key", "forward_only",
 		}
 		if !slices.Equal(columns, want) {
 			t.Fatalf("columns = %v, want %v", columns, want)
@@ -302,8 +304,38 @@ func TestNetworkClientOwnerColumns(t *testing.T) {
 			if adminRefused || strictExp {
 				t.Fatalf("a bare owner row is marked: %t %t", adminRefused, strictExp)
 			}
+			// MG8's mark is nullable, and a row minted without it reads as unmarked
+			var forwardOnly *bool
+			Raise(tx.QueryRow(ctx, `SELECT forward_only FROM network_client_owner WHERE client_id = $1`, clientId).Scan(&forwardOnly))
+			if forwardOnly != nil {
+				t.Fatalf("a bare owner row carries forward_only = %t", *forwardOnly)
+			}
 		})
 	})
+}
+
+// CODESTYLE's migration rules for MG8's §7 part (TEAM-M2-20; owner decision 197): one nullable column on MG0's
+// owner row, its lock bounded, ahead of §18's part as §19.7's MG8 line orders them.
+func TestSidecarMg8TeamPartIsAdditive(t *testing.T) {
+	nullableColumn := regexp.MustCompile(`(?is)^\s*SET LOCAL lock_timeout = '\d+s';\s*ALTER TABLE network_client_owner ADD COLUMN forward_only bool NULL\s*$`)
+	part := sidecarMg8TeamMigrations()
+	if len(part) != 1 {
+		t.Fatalf("MG8's §7 part holds %d entries", len(part))
+	}
+	value, ok := part[0].(*SqlMigration)
+	if !ok || !nullableColumn.MatchString(value.sql) {
+		t.Fatalf("MG8's §7 part is not forward_only's nullable column: %v", part[0])
+	}
+	group := sidecarMg8Migrations()
+	if first, ok := group[0].(*SqlMigration); !ok || first.sql != value.sql {
+		t.Fatalf("MG8 does not open with its §7 part")
+	}
+	// never MG0: the group P0 promotes first carries no forward_only
+	for index, migration := range sidecarMg0Migrations() {
+		if sqlMigration, ok := migration.(*SqlMigration); ok && strings.Contains(sqlMigration.sql, "forward_only") {
+			t.Errorf("MG0's entry %d names forward_only", index)
+		}
+	}
 }
 
 // CODESTYLE's migration rules for MG1's §7 part: new tables and their indexes,
