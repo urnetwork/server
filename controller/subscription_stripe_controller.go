@@ -222,6 +222,8 @@ type StripeWebhookResult struct {
 
 type StripeLineItems struct {
 	Data []*StripeLineItem `json:"data"`
+	// more lines than this page holds
+	HasMore bool `json:"has_more,omitempty"`
 }
 
 type StripeSubscription struct {
@@ -245,6 +247,27 @@ type StripeLineItem struct {
 	Type         string                 `json:"type"`
 	Subscription *string                `json:"subscription,omitempty"`
 	Period       *StripeLineItemPeriod  `json:"period,omitempty"`
+	// an invoice line's amount, in the currency's minor unit
+	Amount int64 `json:"amount,omitempty"`
+	// where API versions from 2025-03-31 name an invoice line's price
+	Pricing *StripeLineItemPricing `json:"pricing,omitempty"`
+}
+
+type StripeLineItemPricing struct {
+	PriceDetails *struct {
+		Price string `json:"price"`
+	} `json:"price_details,omitempty"`
+}
+
+// The id of the line's price in either API shape, "" when it names none.
+func (self *StripeLineItem) priceId() string {
+	if self.Price != nil && self.Price.Id != "" {
+		return self.Price.Id
+	}
+	if self.Pricing != nil && self.Pricing.PriceDetails != nil {
+		return self.Pricing.PriceDetails.Price
+	}
+	return ""
 }
 
 type StripeLineItemPeriod struct {
@@ -471,6 +494,12 @@ func StripeWebhook(
 		 */
 
 		glog.Infof("type: customer.subscription.deleted")
+
+		// a Team subscription that ended takes its lines and its unpaid periods
+		// with it, and is granted nothing more (team_stripe_events.go)
+		if err := stripeHandleTeamSubscriptionDeleted(stripeWebhook.Data.Object, clientSession); err != nil {
+			return nil, err
+		}
 
 		// an ended subscription's failed renewals are over: paying them would
 		// not bring it back (subscription_stripe_dunning.go)
@@ -710,6 +739,28 @@ type StripeInvoiceExpanded struct {
 	} `json:"subscription"`
 }
 
+// Whether the invoice bills a Team subscription: the subscription's metadata carries the team
+// mark, or a line is priced at one of the Team prices (team_stripe_events.go).
+func (self *StripeInvoiceExpanded) team() bool {
+	if self.Subscription != nil && stripeTeamMarked(self.Subscription.Metadata) {
+		return true
+	}
+	if self.Lines != nil {
+		prices := stripeTeamPrices()
+		for _, lineItem := range self.Lines.Data {
+			if lineItem == nil {
+				continue
+			}
+			switch lineItem.priceId() {
+			case "":
+			case prices.Base, prices.Seats, prices.TransferOverage, prices.StorageOverage:
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Complete destination reads found no account. This is distinct from a named
 // account's deletion and from incomplete provider or database observations.
 var errStripeInvoiceDestinationUnresolved = errors.New("stripe invoice destination unresolved")
@@ -754,6 +805,10 @@ type stripeInvoiceCredit struct {
 	subscriptionId string
 	startTime      time.Time
 	endTime        time.Time
+	// set for a Team subscription's invoice, which never credits as Pro's
+	// (team_stripe_events.go); startTime and endTime are then the base item's
+	// period with no grace, zero when the invoice has no base line
+	team *stripeTeamInvoice
 }
 
 // Resolves the network from the subscription's network_id metadata, then the
@@ -815,6 +870,15 @@ func stripeResolveInvoiceCredit(
 		}
 	} else {
 		glog.Infof("No lines object found in invoice")
+	}
+
+	// A Team invoice is its subscription's whatever its first line is: the
+	// first line may be last period's metered item or a proration, and the
+	// base item's period is read from its own line below.
+	team := fullInvoice.team()
+	if team && fullInvoice.Subscription != nil && fullInvoice.Subscription.ID != "" {
+		isSubscription = true
+		subscriptionId = fullInvoice.Subscription.ID
 	}
 
 	if !isSubscription {
@@ -891,6 +955,15 @@ func stripeResolveInvoiceCredit(
 		startTime: time.Unix(periodStart, 0).UTC(),
 		endTime:   time.Unix(periodEnd, 0).UTC().Add(manualPaymentGracePeriod),
 	}
+	if team {
+		teamInvoice, err := stripeTeamInvoiceOf(invoiceId, fullInvoice)
+		if err != nil {
+			return nil, err
+		}
+		credit.team = teamInvoice
+		credit.startTime = teamInvoice.periodStart
+		credit.endTime = teamInvoice.periodEnd
+	}
 	return credit, nil
 }
 
@@ -961,6 +1034,11 @@ func stripeHandleInvoicePaidInConn(connOwner server.PgConn,
 	}
 	if credit == nil {
 		return &StripeWebhookResult{}, nil
+	}
+	if credit.team != nil {
+		// a Team invoice branches here, before the supporter credit: it writes
+		// team balances and no supporter renewal
+		return stripeHandleTeamInvoicePaidInConn(connOwner, invoice, credit, clientSession)
 	}
 	feeFraction := 0.3
 	netRevenue := model.UsdToNanoCents((1.0 - feeFraction) * float64(invoice.Total) / 100.0)
