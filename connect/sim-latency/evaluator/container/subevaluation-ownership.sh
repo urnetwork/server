@@ -10,6 +10,7 @@ subevaluation_ownership_init() {
     subevaluation_preflight_cgroup=""
     subevaluation_docker_args=()
     subevaluation_run_label_args=()
+    subevaluation_core_args=()
     subevaluation_probe_args=()
     # Legacy identity calls supply their own security flags; scoped probes
     # already include them and must not duplicate Docker's list-valued options.
@@ -51,13 +52,13 @@ subevaluation_ownership_init() {
     subevaluation_preflight_cgroup="urnetwork-evaluation-${token:0:32}-preflight.slice"
     export URNETWORK_SUBEVALUATION_BRIDGE_NAME="unev-${subevaluation_run_id:0:10}"
     subevaluation_management_args=(--cpuset-cpus "${URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET:-}")
+    subevaluation_core_args=(--ulimit core=1:1 --security-opt "seccomp=$URNETWORK_SUBEVALUATION_CORE_PROFILE")
     subevaluation_docker_args=(
         --label "com.urnetwork.competition.job-id=$URNETWORK_SUBEVALUATION_JOB_ID"
         --label "com.urnetwork.competition.round-id=$URNETWORK_SUBEVALUATION_ROUND_ID"
         --label "com.urnetwork.competition.run-id=$subevaluation_run_id"
         --cgroup-parent "$subevaluation_preflight_cgroup"
-        --ulimit core=1:1
-        --security-opt "seccomp=$URNETWORK_SUBEVALUATION_CORE_PROFILE"
+        "${subevaluation_core_args[@]}"
     )
     subevaluation_probe_args=(
         --network none --read-only --cap-drop ALL

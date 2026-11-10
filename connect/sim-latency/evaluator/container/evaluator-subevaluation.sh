@@ -1232,7 +1232,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
+            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_core_args[@]}" "${subevaluation_run_label_args[@]}" \
             "$base_image_id" score-progress \
             --run "$(join_csv "${candidate_csv[@]}")" \
             --baseline /artifacts/baseline.json)" || die "candidate-$ordinal live comparison failed"
@@ -1247,7 +1247,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
+            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_core_args[@]}" "${subevaluation_run_label_args[@]}" \
             "$base_image_id" compare \
             --a "$(join_csv "${candidate_manifests[@]}")" \
             --b "$(join_csv "${baseline_manifests[@]}")" \

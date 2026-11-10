@@ -1,6 +1,23 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T21:17:03Z",
+  "observed_at": "2026-11-10T21:32:21Z",
+  "latest_live_statistics_core_diagnosis": {
+    "v22_operator_probes_terminal": true,
+    "both_simulator_runs_completed": true,
+    "both_cleanup_and_stop_cleanup_verified": true,
+    "failure_stage": "Post-run live latency/throughput comparison, not simulation or protected-source comparison.",
+    "private_refusal_reason": "Docker candidate omitted its exact core-suppression security class",
+    "root_cause": "The two live comparison branches used their own cgroup and run-label array but omitted the one-byte core ulimit and pinned inherited seccomp profile present in the other scoped helper paths. The Docker guard correctly refused their CREATE before forwarding it.",
+    "correction": "Factor the exact core options into one ownership-initialized array and include it in both shared-baseline and local-baseline comparison commands. Keep the unscoped legacy array empty; do not relax the Docker guard or duplicate cgroups/labels.",
+    "targeted_tests": "Actual Bash comparison functions and ownership initialization pass three race repetitions1.649s, including both comparison branches, legacy behavior and explicit pre-fix counterfactuals. Full agent/CLI/containment race suites passed three repetitions221.964s/1.028s/5.937s; go vet and Bash syntax checks passed.",
+    "shared_baseline_containment": "Added a root-only bounded artifact authenticator and explicit digest-pinned promoter class. It preserves all original score/security/resource checks and legacy two-local-run requirements. Regression coverage executes the real Bash promoter and real evaluator score projection: baseline provenance is retained in the signed completion artifact, not the projected worker score. Implementation remains undeployed.",
+    "signed_idle_before_next_switch": {"sille":"b2c8af242bd4e8d1bf009f1083cd36511dbbcc96b8530aa5513e26974975c390","goofe":"cf1e390d515cad102f9b5678368959fcc858dba7cdf807e18f74c74f095c6f5a"},
+    "epoch2_queue_at_213154z": {"total":8,"queued":8,"running":0,"completed":0,"failed":0,"started":0},
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false,
+    "next_action": "Finish full tests and checkpoint corrected controls, publish a fresh immutable release, repin both idle private roles and repeat full operator qualification with new identities. Preserve terminal v22 evidence; do not replay start or replace its clocks. Then complete full containment evidence, final executor amendment and official R9 baseline/admission. Earlier entries below are historical."
+  },
   "latest_private_dns_activation": {
     "role": "v22",
     "source_commit": "458975b55bb536b50bffddf88f3eeaacc56a3e6a",
