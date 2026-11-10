@@ -21,6 +21,7 @@
     "focused_managed_control_race_runs": 3,
     "native_sille_management_recovery_and_missing_unit_projection": "passed read-only checks",
     "both_host_fingerprints_independently_rechecked": true,
+    "post_deployment_native_resource_boundary_and_recheck_both_hosts": "passed against each role-v3 boundary; no grading admission inferred",
     "signed_availability_both_hosts": "available; signatures verified with independent host keys",
     "restricted_ssh_control": "Goofe dedicated forced handler; no caller executable, forwarding or shell authority",
     "submission_or_evaluation_clock_started": false
