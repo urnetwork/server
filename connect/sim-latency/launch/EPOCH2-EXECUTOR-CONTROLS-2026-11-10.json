@@ -7,6 +7,10 @@
   "agent_sha256": "a0ddfa63c31c5bd98074a9d60e4748ebc1034e33d682f9f40c7f99f000b2cbed",
   "release": "/usr/local/libexec/urnetwork/competition-subeval-management-20261110-v2",
   "coordinator_profile_sha256": "1d4b1113d01e832b8c26564612c83bc3ef82f83e8db20114563c742d1621b94f",
+  "prospective_config_commit": "a1d3981",
+  "distributed_policy_approval_sha256": "f6a7a370de6d088880a09345063eb945e620e6b30ef228690d6b1a14d86228eb",
+  "typed_settings_and_protected_coordinator_validation": "passed; no database or API writes",
+  "deployment": "Config-updater and API restart requested; deployment not yet confirmed. No new API build, migration or vault update required.",
   "fixes": [
     "Use verified inherited effective cpuset only when a descendant has no enabled cpuset controller; fixed role limits remain directly observed.",
     "Render the recovery service through the same closed template contract used by validation.",
