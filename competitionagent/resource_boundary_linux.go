@@ -191,7 +191,7 @@ const runtimeBoundaryEngineUnitName = "urnetwork-private-engine.service"
 const runtimeBoundaryContainerdUnitName = "urnetwork-private-containerd.service"
 const runtimeBoundaryNetworkUnitName = "urnetwork-private-engine-network.service"
 const runtimeBoundaryNsfs = 0x6e736673
-const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs,Slice,OnFailure,OnFailureJobMode"
+const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs,Slice,OnFailure,OnFailureJobMode,UMask"
 
 var runtimeBoundaryBridgeNamePattern = regexp.MustCompile(`^unev-[0-9a-f]{10}$`)
 var runtimeBoundaryVethNamePattern = regexp.MustCompile(`^veth[0-9a-f]+$`)
@@ -1380,9 +1380,13 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 	}
 	keeper := result.Name == runtimeBoundaryKeeperUnitName
 	network := result.Name == runtimeBoundaryNetworkUnitName
+	expectedUmask := "0077"
+	if result.Name == runtimeBoundaryEngineUnitName || result.Name == runtimeBoundaryContainerdUnitName {
+		expectedUmask = "0022"
+	}
 	if properties["Id"] != result.Name || properties["FragmentPath"] != pin.Path || properties["DropInPaths"] != "" ||
 		properties["LoadState"] != "loaded" || properties["ActiveState"] != "active" || properties["PrivateNetwork"] != "yes" ||
-		properties["NetworkNamespacePath"] != "" || properties["User"] != "root" || properties["Group"] != "root" ||
+		properties["NetworkNamespacePath"] != "" || properties["User"] != "root" || properties["Group"] != "root" || properties["UMask"] != expectedUmask ||
 		properties["Restart"] != "no" || properties["KillMode"] != "control-group" ||
 		properties["Slice"] != managementPrivateSliceName || properties["OnFailure"] != managementRecoveryServiceName || properties["OnFailureJobMode"] != "replace" ||
 		network && (properties["SubState"] != "exited" || properties["RemainAfterExit"] != "yes") ||

@@ -71,7 +71,10 @@ type Config struct {
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
 // values are invalid; Now is a test seam and is never accepted from a peer.
 type AgentSettings struct {
-	ControlTimeout   time.Duration
+	ControlTimeout time.Duration
+	// Native runtime admission and owned-service readiness need their own
+	// budget. Nonpositive refuses construction; never extends the job deadline.
+	LaunchTimeout    time.Duration
 	SelfCheckTimeout time.Duration
 	CancelGrace      time.Duration
 	LockPollInterval time.Duration
@@ -112,7 +115,7 @@ type AgentSettings struct {
 
 // Control calls are short; only the detached systemd service owns evaluation.
 func DefaultAgentSettings() AgentSettings {
-	return AgentSettings{ControlTimeout: 30 * time.Second, SelfCheckTimeout: 2 * time.Minute,
+	return AgentSettings{ControlTimeout: 30 * time.Second, LaunchTimeout: 2 * time.Minute, SelfCheckTimeout: 2 * time.Minute,
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
 		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, OutputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,

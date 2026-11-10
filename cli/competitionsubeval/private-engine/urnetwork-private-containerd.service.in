@@ -16,7 +16,7 @@ Type=notify
 User=root
 Group=root
 Slice=urnetwork-management-private.slice
-UMask=0077
+UMask=0022
 PrivateNetwork=yes
 BindPaths=@BASE_DIRECTORY@/candidate/exec/containerd-sockets:/run/containerd
 Environment="PATH=@ENGINE_BIN@"

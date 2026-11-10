@@ -15,7 +15,7 @@ Type=notify
 User=root
 Group=root
 Slice=urnetwork-management-private.slice
-UMask=0077
+UMask=0022
 PrivateNetwork=yes
 Environment="PATH=@ENGINE_BIN@"
 Environment="TMPDIR=@BASE_DIRECTORY@/candidate/scratch/engine-tmp"

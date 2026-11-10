@@ -822,12 +822,16 @@ func TestRuntimeResourceBoundaryNamespacePeersRequireNonHostIdentity(t *testing.
 func runtimeBoundaryTestUnitProperties(boundary RuntimeResourceBoundary, pin Pin) map[string]string {
 	name := filepath.Base(pin.Path)
 	properties := map[string]string{"Id": name, "FragmentPath": pin.Path, "DropInPaths": "", "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+		"UMask":   "0077",
 		"MainPID": "101", "InvocationID": strings.Repeat("a", 32), "ExecMainStartTimestampMonotonic": "123",
 		"ControlGroup": managementPrivateCgroupPath + "/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
 		"Slice": managementPrivateSliceName, "OnFailure": managementRecoveryServiceName, "OnFailureJobMode": "replace",
 		"Restart": "no", "KillMode": "control-group", "RemainAfterExit": "no", "JoinsNamespaceOf": runtimeBoundaryKeeperUnitName,
 		"AllowedCPUs": strings.ReplaceAll(boundary.ManagementCpuSet, ",", " "),
 		"Requires":    runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
+	if name == runtimeBoundaryEngineUnitName || name == runtimeBoundaryContainerdUnitName {
+		properties["UMask"] = "0022"
+	}
 	if name == runtimeBoundaryKeeperUnitName {
 		properties["JoinsNamespaceOf"] = runtimeBoundaryEngineUnitName + " " + runtimeBoundaryContainerdUnitName + " " + runtimeBoundaryNetworkUnitName
 	}

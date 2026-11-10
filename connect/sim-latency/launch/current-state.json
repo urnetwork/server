@@ -1,6 +1,23 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T20:12:07Z",
+  "observed_at": "2026-11-10T20:36:48Z",
+  "latest_mount_parent_and_launch_diagnosis": {
+    "v20_probes_terminal": true,
+    "sille_state": "expired",
+    "goofe_state": "failed",
+    "cleanup_and_stop_cleanup_verified_both_hosts": true,
+    "goofe_progress": "Network and noninteractive migration attach passed. Migrator entrypoint then reported invalid pg.yml authority before any simulation.",
+    "mount_parent_root_cause": "Both local fixtures contain a valid quoted job-service authority and are0555/0444. A trusted nonroot container could not read pg.yml: its runtime-created /runtime parent was0700. The same pristine image without fixture mounts has no /runtime. Private engine/containerd UMask0077 masked the auto-created destination directories, unlike the primary runtime.",
+    "mount_parent_correction": "Only the private engine/containerd units use0022; live unit admission requires the exact role-specific mask. Keeper/network/recovery stay0077. Existing explicit root-only host state/key roots, restricted sockets, remapped nonroot UID, read-only rootfs and the same two direct local mounts remain unchanged.",
+    "launch_budget_evidence": "Sille committed an accepted launch and started its Docker owner but never issued a simulation worker. It remained fenced until its original15-minute deadline and then cleaned up. The launch path shared the short30-second control budget across cgroup preparation and native owner readiness.",
+    "launch_budget_correction": "Add a separately bounded2-minute startup budget, always capped by the original evaluation and parent-context deadlines. Do not replay accepted uncertain attempts or replace their clocks; total public evaluation cap remains3h.",
+    "tests": "Targeted startup/umask controls passed three race repetitions8.920s. Final full agent/CLI race suite passed three repetitions217.078s/1.028s; go vet passed. Existing simulator ownership/resource/coverage tests also passed three repetitions17.813s after isolated compilation (former tool session6899).",
+    "installed": false,
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false,
+    "next_action": "Publish clean immutable correction, stop both idle private daemons, repin/restart engine and containerd with the corrected service masks, reobserve identities, and prove nonroot fixture readback on both hosts before another full operator probe. Preserve terminal v20 evidence."
+  },
   "latest_batch_attach_activation": {
     "role": "v20",
     "source_commit": "3d1955a4cd92c126eade82319a30753c25d3f3f9",

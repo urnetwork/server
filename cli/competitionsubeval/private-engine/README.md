@@ -65,6 +65,12 @@ socket peer executable, configuration argv and helper/temp environment must
 match. The exact protected `chmod` helper makes both control sockets root-only;
 `UMask` alone does not override Docker's explicit socket mode.
 
+Only the engine and containerd services use `UMask=0022`: runtime-created mount
+destination parents inside a container must be traversable by its remapped
+non-root user. Their host data/state roots remain explicitly root-only, control
+sockets remain explicitly restricted, and keeper/network/recovery services keep
+`0077`. This does not expose any additional configuration or vault mount.
+
 Both daemon units set `LimitCORE=0` as defense in depth, not as proof for a piped
 host core collector. Linux ignores that limit for piped `core_pattern` handlers.
 Without a separately selected native class, admission rejects every pipe handler,
