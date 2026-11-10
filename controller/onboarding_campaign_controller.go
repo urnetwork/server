@@ -302,7 +302,10 @@ func localeFromSession(clientSession *session.ClientSession) string {
 }
 
 // normalizeLocale keeps a BCP 47 tag's language and region ("de-DE", "zh-HK"),
-// lower-case language and upper-case region, or "" for junk.
+// lower-case language and upper-case region, or "" for junk. Dropping a
+// Chinese script never switches the characters (onboarding.TraditionalChinese):
+// zh-Hant and zh-Hant-US are kept as zh-Hant, zh-Hans-HK becomes zh, and where
+// the region implies the script it stands in for it (zh-Hant-TW -> zh-TW).
 func normalizeLocale(locale string) string {
 	locale = strings.TrimSpace(strings.ReplaceAll(locale, "_", "-"))
 	if locale == "" || locale == "*" || 32 < len(locale) {
@@ -318,14 +321,22 @@ func normalizeLocale(locale string) string {
 			return ""
 		}
 	}
-	if len(parts) == 1 {
-		return lang
+	normalized := lang
+	if 1 < len(parts) {
+		region := strings.ToUpper(parts[len(parts)-1])
+		if len(region) == 2 || len(region) == 3 {
+			normalized = lang + "-" + region
+		}
 	}
-	region := strings.ToUpper(parts[len(parts)-1])
-	if len(region) == 2 || len(region) == 3 {
-		return lang + "-" + region
+	if lang == "zh" {
+		if traditional := onboarding.TraditionalChinese(locale); traditional != onboarding.TraditionalChinese(normalized) {
+			if traditional {
+				return "zh-Hant"
+			}
+			return "zh"
+		}
 	}
-	return lang
+	return normalized
 }
 
 // ----- the step task -----

@@ -8,6 +8,8 @@ package onboarding
 import (
 	"testing"
 	"time"
+
+	"golang.org/x/text/language"
 )
 
 // T5: E1's footer line ("Your welcome offer, 3 months of Pro free, is
@@ -62,5 +64,65 @@ func TestE1OfferLineFollowsTheOfferRule(t *testing.T) {
 	}
 	if !policy.OfferAllowed("US") {
 		t.Error("an offer may be emailed to US")
+	}
+}
+
+// T6: which Chinese locales read Traditional characters. The script decides
+// where there is one; without one, Hong Kong, Macau and Taiwan do.
+func TestTraditionalChinese(t *testing.T) {
+	for locale, want := range map[string]bool{
+		"zh-TW": true, "zh-HK": true, "zh-MO": true, "zh_TW": true, "zh-tw": true,
+		"zh-Hant": true, "zh-hant": true, "zh-Hant-TW": true, "zh-Hant-US": true, "zh-Hant-CN": true,
+		"zh": false, "zh-CN": false, "zh-SG": false, "zh-US": false,
+		"zh-Hans": false, "zh-Hans-HK": false, "zh-Hans-TW": false,
+		"": false, "en-TW": false, "ja-Hant": false,
+	} {
+		if got := TraditionalChinese(locale); got != want {
+			t.Errorf("TraditionalChinese(%q) = %t, want %t", locale, got, want)
+		}
+	}
+	// the date and device-word styles follow the same rule
+	for _, locale := range []string{"zh-TW", "zh-MO", "zh-Hant", "zh-Hant-US", "zh-Hans-HK", "zh-CN", "zh-SG", "zh"} {
+		want := "zh"
+		if TraditionalChinese(locale) {
+			want = "zh-HK"
+		}
+		if got := EmailLocale(locale); got != want {
+			t.Errorf("EmailLocale(%q) = %q, want %q", locale, got, want)
+		}
+	}
+}
+
+// T6: the store locale a regional tag reads before its bare language. The
+// Spanish and Portuguese region lists are CLDR's parent locales: every listed
+// region's tag has es-419 or pt-PT for its parent in golang.org/x/text's CLDR
+// data.
+func TestRegionalStoreLocale(t *testing.T) {
+	for locale, want := range map[string]string{
+		"zh-TW": "zh-HK", "zh-MO": "zh-HK", "zh-HK": "zh-HK", "zh-Hant": "zh-HK", "zh-Hant-US": "zh-HK", "zh_hant_tw": "zh-HK",
+		"zh": "", "zh-CN": "", "zh-SG": "", "zh-Hans-HK": "",
+		"es-AR": "es-419", "es-us": "es-419", "es_CO": "es-419", "es-MX": "es-419", "es-ES": "", "es-419": "", "es": "",
+		"pt-AO": "pt-PT", "pt-MZ": "pt-PT", "pt-BR": "", "pt-PT": "", "pt": "",
+		"de-AT": "", "en-US": "", "fr-CA": "", "": "",
+	} {
+		if got := RegionalStoreLocale(locale); got != want {
+			t.Errorf("RegionalStoreLocale(%q) = %q, want %q", locale, got, want)
+		}
+	}
+	for region := range latinAmericanSpanishRegions {
+		if parent := language.MustParse("es-" + region).Parent().String(); parent != "es-419" {
+			t.Errorf("es-%s: the CLDR parent is %s, not es-419", region, parent)
+		}
+	}
+	for region := range europeanPortugueseRegions {
+		if parent := language.MustParse("pt-" + region).Parent().String(); parent != "pt-PT" {
+			t.Errorf("pt-%s: the CLDR parent is %s, not pt-PT", region, parent)
+		}
+	}
+	// the regions the evaluation found reading es instead of es-419
+	for _, region := range []string{"AR", "CO", "CL", "PE", "VE", "UY", "EC", "BO", "PY", "CR", "GT", "HN", "NI", "PA", "SV", "DO", "PR", "CU", "US"} {
+		if got := RegionalStoreLocale("es-" + region); got != "es-419" {
+			t.Errorf("es-%s reads %q", region, got)
+		}
 	}
 }

@@ -261,8 +261,10 @@ func TestTemplateId(t *testing.T) {
 	connect.AssertEqual(t, 48, id)
 	id, _ = b.TemplateId("e1_connect", "default", "zh_HK")
 	connect.AssertEqual(t, 57, id)
+	// Traditional Chinese reads the store's Traditional zh-HK, not the
+	// Simplified zh (onboarding/retention evaluation 2026-11-10, T6)
 	id, _ = b.TemplateId("e1_connect", "default", "zh-TW")
-	connect.AssertEqual(t, 56, id)
+	connect.AssertEqual(t, 57, id)
 	id, _ = b.TemplateId("e1_connect", "default", "xx")
 	connect.AssertEqual(t, 30, id)
 	id, _ = b.TemplateId("e1_connect", "default", "")
