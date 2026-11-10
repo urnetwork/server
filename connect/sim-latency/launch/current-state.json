@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T10:27:00Z",
+  "observed_at": "2026-11-10T10:40:26Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -43,6 +43,7 @@
     "worker_acknowledged_at": "2026-11-10T07:49:26.974666Z",
     "worker_release_identity": "sha256:0c4508d4b7b44322851bfd6a21309ae33f758b299b0ef297a653a4101b081ab8; host-native verified OCI distribution payload, not an evaluator image",
     "grading_activated": false,
+    "amendment_capable_worker_staged": "Clean f73d6bfcf Go1.27.3/CGO0 worker built and root-installed, immutable distribution image ea074cff payload independently extracted and matched. Registrar built but not executed. Neither worker started nor existing source readiness receipts replaced. Full simulator-package targeted tests still running. See EPOCH2-AMENDMENT-WORKER-STAGED-2026-11-10.json.",
     "source_runtime_activated": true,
     "source_runtime_activated_at": "2026-11-10T07:56:40.361307Z",
     "source_runtime_activation_evidence": "urnetwork-epoch2-source-runtime-activation-20261110-v1.service invocation cbbcf508b3ee4ddda74368966e7e564a; terminal success, exit0, MainPID0. Generation2 activated with both independent acknowledgments. Baseline remains absent and grading remains false; no submission worker started.",
