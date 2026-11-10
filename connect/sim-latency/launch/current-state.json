@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T05:05:45Z",
+  "observed_at": "2026-11-10T06:14:09Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -55,6 +55,7 @@
     "source_build_unit": "urnetwork-epoch2-source-step-20261109-v9.service",
     "source_build": "terminal success, main PID zero, exit0; native70, both fixed-test model attestations, containment and prospective fingerprint passed",
     "runtime_qualified": false,
+    "baseline_producer_host_preflight": "Read-only source-generation2 check found the active legacy host still bound to epoch1 image98c9061c and qualification08ee3a5a, not the required epoch2 image5e5dfa27 / qualification254caad0. Fresh genuine source-host qualification is required before official R9 controls; no host metadata was relabeled.",
     "qualification_receipts": "Four exact-version MinIO readbacks verified; retention through 2028-01-01. All ten source branches/config published and independently verified. Exact runtime envelope published and genuine API receipt recorded. Worker, baseline and distributed admission remain absent.",
     "rules": "G2 request/byte floors at 95%, no ceilings; G7 separate expected page/byte coverage floors at 95% of same-round baseline; takeover margin 26.9%",
     "full_week_opening": "Recorded604800-second window is now published by the live API. Intake is open; grading remains paused."
@@ -77,6 +78,7 @@
     "retained_response_minio_version": "126df67b-facf-4e4f-9f88-2dc721f6f827"
   },
   "goofe": {
+    "production_size_pressure_cleanup": "Passed on the actual private engine: evaluation CPU set saturated,72GiB child OOM exit137, cleanup430ms, zero containers/networks and empty fixture cgroup. Terminal unit exit0. Exact report retained/read back in MinIO COMPLIANCE through2028-01-01. See EPOCH2-GOOFE-RESOURCE-PRESSURE-2026-11-10.json.",
     "base_directory": "/home/by/sim-latency",
     "image_exact_id_inspect_verified": true,
     "image_location": "Exact image verified in both seed cache and bounded grading engine at 21:12:16Z, size12877538426 bytes. Initial client timed out; a later idempotent check found the completed daemon import, so no duplicate image load was needed.",
@@ -109,6 +111,9 @@
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
+    "Await compiled-cache cleanup approval before Sille memory pressure qualification. A36GiB Go build cache in RAM has no active owner; nothing deleted. Goofe's production-size private-engine CPU/memory cleanup test already passed and is retained.",
+    "Qualify the epoch2 baseline producer host against the new image/source; its active legacy readiness is still epoch1. Keep genuine proof requirements, not edited positive flags. The corrected sealed baseline producer profile is installed and loader-validated.",
+    "Use the user's approved existing two-wave path: official R9 baseline first, then full R9 no-op admission on both private executor hosts concurrently. No measurements have started; preserve one shared official baseline and original qualification deadlines.",
     "Shared private mount and namespace-local --wdns execution pass on both hosts. Final role-v3 inventories keep startup metadata separate from recovery authority and signed control requests now pass. Current evidence supersedes earlier prospective roles: EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Do not rebuild the qualified source image.",
     "Both hosts have role-v3 immutable inventories, independently rechecked genuine fingerprints and verified signed non-job availability. Configa1d3981 was deployed and public intake passed. Do not invent positive grading readiness flags.",
     "Both96 GiB volumes and offline image caches are active. Sille core policy is approved/applied and its native private boundary passed. Inherited-cpuset, canonical recovery-unit and nonexistent-unit ExecStart fixes are deployed/tested. See EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Keep execution disabled until independent grading admission.",
