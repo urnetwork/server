@@ -18,6 +18,11 @@ package controller
 // by their signatures and the log's rules (model/config_log_model.go), so
 // this is defense in depth, not the authority.
 //
+// One check is api's alone: a forwarding Delegation's host client is the
+// source client of its sidecar's current client, with that client's
+// registered key (config_delegation_check.go; D-TEAM-33; owner decision 197),
+// since no reader holds a client row.
+//
 // Refusals answer {"error", "code", "tip"}: 403 config_refused, 409
 // config_tip_moved and config_unadmitted's 403; an unavailable store or a
 // process with no first metadata cluster answers 503.
@@ -151,6 +156,11 @@ func NetworkConfigDelta(args *NetworkConfigDeltaArgs, clientSession *session.Cli
 		if proto.Unmarshal(args.Signed, signed) != nil || len(signed.GetSignerId()) != len(sidecar.Id{}) || len(signed.GetKeyId()) != sha256.Size {
 			return nil, configUnadmitted("an unadmitted client posts a recovery-signed statement only")
 		}
+	}
+	// what the log's rule cannot judge: a forwarding Delegation's host client, against api's own client rows
+	// (config_delegation_check.go; D-TEAM-33)
+	if err := configDelegationHostCheck(clientSession.Ctx, clientSession.ByJwt.NetworkId, args.Signed); err != nil {
+		return nil, err
 	}
 	pin, err := sequencer.AppendStatement(clientSession.Ctx, clientSession.ByJwt.NetworkId, args.Signed)
 	if err != nil {
