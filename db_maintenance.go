@@ -1311,7 +1311,22 @@ func dbMaintenanceDropReindexDebris(ctx context.Context, tableName string, lockT
 // past the application role's transaction_timeout (A6), so the statement runs
 // with it off (WithoutTransactionTimeout). pid names the server backend for
 // the cleanup after a failure; it is zero when the statement never started.
+// The statement is bounded by dbMaintenanceReindexTimeout.
 func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement string, lockTimeout time.Duration) (pid int32, err error) {
+	return dbMaintenanceRunReindexWithin(ctx, tableName, statement, lockTimeout, dbMaintenanceReindexTimeout, 0)
+}
+
+// dbMaintenanceRunReindex with the statement bounded by timeout instead, and
+// parallelWorkers maintenance workers (0: one cpu), for an operator's rebuild
+// of an index whose heap takes longer to read twice (RebuildIndexConcurrently).
+func dbMaintenanceRunReindexWithin(
+	ctx context.Context,
+	tableName string,
+	statement string,
+	lockTimeout time.Duration,
+	timeout time.Duration,
+	parallelWorkers int,
+) (pid int32, err error) {
 	conn, err := AcquireMaintenanceDbConn(ctx)
 	if err != nil {
 		return 0, err
@@ -1321,7 +1336,7 @@ func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement st
 	if _, err = conn.Exec(ctx, fmt.Sprintf("SET lock_timeout = %d", lockTimeout.Milliseconds())); err != nil {
 		return
 	}
-	if _, err = conn.Exec(ctx, "SET max_parallel_maintenance_workers = 0"); err != nil {
+	if _, err = conn.Exec(ctx, fmt.Sprintf("SET max_parallel_maintenance_workers = %d", max(parallelWorkers, 0))); err != nil {
 		return
 	}
 	var backendPid int32
@@ -1337,7 +1352,7 @@ func dbMaintenanceRunReindex(ctx context.Context, tableName string, statement st
 		return 0, &dbMaintenanceLockConflict{reason: reason}
 	}
 	pid = backendPid
-	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, dbMaintenanceReindexTimeout)
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, timeout)
 	defer timeoutCancel()
 	func() {
 		// the setting's own statements raise; the session is discarded either way
