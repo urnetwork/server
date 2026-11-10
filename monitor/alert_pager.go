@@ -216,10 +216,11 @@ func (self *PagerAlertNotifier) page(now time.Time, alert Alert, row pageClass) 
 		observedTime = now
 	}
 	return pager.Page{
-		DedupKey: pagerDedupKey(self.settings.Environment, alert),
-		Class:    row.class,
-		Summary:  fmt.Sprintf("[%s] %s: %s. Then: %s.", slackEnvironment(self.settings.Environment), row.class, row.row, row.action),
-		Time:     observedTime,
+		DedupKey:   pagerDedupKey(self.settings.Environment, alert),
+		Class:      row.class,
+		Summary:    fmt.Sprintf("[%s] %s: %s. Then: %s.", slackEnvironment(self.settings.Environment), row.class, row.row, row.action),
+		Time:       observedTime,
+		BothAtOnce: row.bothAtOnce,
 	}
 }
 

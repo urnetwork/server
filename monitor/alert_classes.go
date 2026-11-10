@@ -36,6 +36,11 @@ var alertClassKinds = map[string]alertClassKind{
 	// §19.8's M5 dns rows (SIGNALS.md §28.1)
 	"dns-canary-signature": pageAlertClass,
 	"dns-ns-down":          pageAlertClass,
+	// §19.8's M5 split row (SIGNALS.md §31.1); a probe that could not run holds the page open
+	"lb-split-probe-failing":      pageAlertClass,
+	"lb-split-probe-unobservable": visibilityAlertClass,
+	// §19.8's notice row, paged by taskworker's abuse worker through pager.PageNotice, never a signal
+	"abuse-notice": pageAlertClass,
 	// the pager's own warn, which reaches Slack only
 	"pager-sink-failing": incidentAlertClass,
 	// SIGNALS.md §30's other sidecar service findings; a blind signal holds the rest open

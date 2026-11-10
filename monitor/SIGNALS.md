@@ -49355,6 +49355,60 @@ Classes:
   inventory's primary, or a malformed answer is a `cannot-observe` visibility
   alert: neither reads as healthy.
 
+## 31. Sidecar edge ingress — W1's SNI split
+
+OPS-M5-05 (§13.4's probes, W1, D-OPS-9, R-OPS-11, FS-50, owner decision 143).
+§19.8's M5 rows reach the rota at any hour through the pager (alert_pager.go):
+an interface's split probe failing (§31.1), both dns edges failing and the
+canary signature (§28.1), and §21.8's registrar, registry and law-enforcement
+notices. A notice is no signal: taskworker's abuse worker files it as a case
+and pages both rota members at once through `pager.PageNotice` under class
+`abuse-notice`, the page holding the notice's kind, the time and the case id
+alone. Monitor's page table carries the notice row too, so §19.8's table is
+whole in one place, and a row marked to page both at once does so from either
+path.
+
+### 31.1 lb interfaces' SNI split
+
+Probe: `lb-split-probe`
+
+Each minute, for each lb interface monitor.yml's `lb_split_probe` block says
+runs §13.4's split (`interfaces`, each `<host>-<interface>` as sidecar.yml's
+`drained` names it, or `"*"` for services.yml's whole lb inventory once every
+interface has flipped; `platform_name`, else services.yml's manager hostname;
+`families`, else both), on each family of its address, on 443 as a visitor
+reaches it:
+
+- a hello for `probe.edge.<root>`, for each root of services.yml's
+  `lb.tls_split`, passes only on tlsedge's answer: one plaintext fatal
+  `unrecognized_name` alert before any ServerHello. A ServerHello is the http
+  branch answering a user name, which is what a broken split looks like; any
+  other alert, a close or a reset with no answer, or bytes that are no TLS
+  record fail too;
+- the monitor's verified handshake for the platform name passes only on a
+  certificate that verifies for it: tlsedge's alert, or any alert, a close, a
+  reset or a certificate that does not verify fails.
+
+The `probe.edge.<root>` hello cannot test the custom-host map, since the
+`*.<root>` wildcard routes it whatever the map holds: the dns edges' route
+probes do, and a map-stale interface pages from M6. Interfaces come from
+`server.ParseServicesLbInventory`, and every finding names an interface by its
+block, never by an address (I-13).
+
+Classes:
+
+- `lb-split-probe-failing` **PAGE**, sustained 2 runs: an interface answered
+  either half wrongly. §19.8's rota at any hour from M5 (owner decision 143):
+  that interface's prior lb version (`warp/lb/SPLIT-ROLLOUT.md`'s rollback). If
+  every interface fails only the platform half alike, the certificate is the
+  cause (§18.2), not the split.
+- `lb-split-probe-unobservable` (visibility): a hello that could not run, for a
+  timeout or a connection that never opened, on an interface where nothing
+  failed; an interface with no address of a probed family; or settings that do
+  not read (no `lb.tls_split`, an inventory that does not parse, a name the
+  inventory lacks). While it lasts no lb-split-probe incident clears. With no
+  `lb_split_probe` block the probe reports itself configured off.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress

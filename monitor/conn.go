@@ -212,6 +212,8 @@ type monitorConfig struct {
 	sidecarStorage *SidecarStorageSettings
 	// §30's sidecar service signals (SIGNALS.md §30.1, §30.2): monitor.yml's sidecar_services block
 	sidecarSlo *SidecarSloSettings
+	// the lb interfaces' split probe (SIGNALS.md §31.1), nil where monitor.yml has no lb_split_probe block
+	lbSplitProbe *LbSplitProbeSettings
 
 	// state dir for baselines and other local persistence
 	stateDir string
