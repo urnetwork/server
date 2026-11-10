@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T15:59:07Z",
+  "observed_at": "2026-11-10T16:03:58Z",
   "latest_executor_diagnosis": {
     "migration_head_verified": 950,
     "v7_native_probes": "Both terminal infrastructure failures before simulation; not running. Preserve their original identities and deadlines.",
     "first_refusal": "Reproduced with the installed Docker CLI against an inert daemon: image tag normalizes the single allowed offline alias with docker.io/. Proxy rejected that exact equivalent spelling.",
     "adjacent_defect": "All three trusted identity callers duplicated cap-drop ALL and no-new-privileges by composing explicit flags with scoped probe arguments. Fixed callers, retaining strict proxy admission and legacy security flags.",
     "regressions": "Real CLI tag failed before correction and passed three times afterward. Actual identity command fragments failed against archived HEAD for all three scoped callers and passed three times after correction, including legacy controls.",
-    "deployment": "v10 active; both fresh R1 probes failed at tracked compiler CREATE with cleanup verified. Corrected sanitizer preserved candidate-build.log: Docker scope rejected; exact private gate still unknown. Composed actual-CLI CREATE passes with sealed source and12g/10g resources. Next action: deploy bounded root-only scope-refusal receipts and the adjacent completed-evidence cache exclusion, then one fresh probe to identify the failed gate; no policy relaxation. Latest full agent/CLI run:482 passed,0 failed,1 intentional descriptor-helper skip; logSHA8f99282f. Expanded helper suite passed three times11.949s; targeted receipt/CLI race controls passed three times2.502s including Unicode-cap regression. Corrections not yet installed. No amendment registered; official shared R9 baseline/admission unstarted; scoring paused. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
+    "deployment": "v10 active; both R1 probes terminal failed at compiler CREATE, cleanup verified. Root cause identified from retained producer metadata: work_coverage_policy is emitted by epoch2's source preparer but absent from the private validator's strict candidateSourceIdentity schema. Deterministic producer-policy test failed before fix, then passed for both compiler stages; malformed/altered/duplicate/unknown policies remain rejected. Actual-CLI composed test now includes the coverage field and sealed source. Latest full agent/CLI:485 passed,0 failed,1 intentional descriptor-helper skip; logSHAf69674a5. Coverage/CLI race tests passed three repetitions3.200s. Next: install immutable corrected agent plus prepared private diagnostics/completed-evidence fixes, collect genuine fingerprints, then fresh R1 probe. No amendment registered; official shared R9 baseline/admission unstarted; scoring paused. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
   },
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,

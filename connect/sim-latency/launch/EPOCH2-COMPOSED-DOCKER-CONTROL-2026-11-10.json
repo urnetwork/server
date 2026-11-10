@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T15:59:07Z",
+  "observed_at": "2026-11-10T16:03:58Z",
   "kind": "epoch2-composed-docker-control-release/v1",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "server_commit": "3ae3f1ecc199b515a92692d9024c6dbc1865d337",
@@ -138,6 +138,18 @@
     "helper_suite": "Expanded success-cache/build-access/failure-cache/source-copy/identity/ownership suite passed three repetitions in11.949s; prior scripts deterministically fail the completed-cache test.",
     "race_tests": "Receipt privacy/size/UTF-8 and actual-CLI tracked CREATE controls passed three repetitions in2.502s after the final UTF-8 fix. The full ordinary run preceded that final UTF-8-only adjustment.",
     "next_action": "Build a clean immutable agent/release, observe genuine new fingerprints on both idle hosts, then run one fresh operator probe to retain the exact live CREATE refusal. Do not register the one-per-round amendment until the final executable path works."
+  },
+  "coverage_identity_root_cause": {
+    "observed_at": "2026-11-10T16:03:58Z",
+    "producer_evidence": "v10 retained candidate-original-source.json contains the exact work_coverage_policy object emitted by prepare-evaluation-source.sh; the trusted builder preserves that field when updating repository/patch identities.",
+    "consumer_defect": "candidateSourceIdentity omitted work_coverage_policy and decodeStrict consequently rejected coverage-enabled source graphs at compiler CREATE. The old generic403 obscured that schema error.",
+    "deterministic_pre_fix_result": "TestCandidateSourceBindingAcceptsProducerCoverageIdentity fails: candidate source identity is not the exact temporary post-patch class.",
+    "fix": "Add an optional raw policy field for legacy compatibility, but strictly decode and validate presence as the exact seeded-crawl-coverage/v1 page/byte95% contract. Null, wrong types, missing values, changed floors/kind, unknown fields and duplicate fields remain invalid. No change to actual scoring gates or workload.",
+    "composed_control": "Actual installed Docker CLI CREATE now uses the producer's coverage object, sealed source,12g memory/10g work and both isolated compiler-stage bindings.",
+    "full_tests": {"passed":485,"failed":0,"skipped":1,"log":"/mnt/data/competition-control-tests-by/remapped-build-controls-20261110.GtACaj3t/coverage-identity-agent-tests.jsonl","sha256":"f69674a5def8b59a3fb03a705e5c9d7a267aa4aecf0518562440a3798cb6a05c"},
+    "race_tests": "Coverage rejection/acceptance and actual-CLI controls passed three repetitions in3.200s.",
+    "installed": false,
+    "next_action": "Build/deploy the corrected immutable agent and prepared shell assets at signed idle boundaries, record repeated actual host fingerprints and run one fresh R1 probe. Keep all previous failures and customer clocks unchanged."
   },
   "provisioning_note": "The Sille provisioner refused an evaluator pin mismatch before unit changes. Its partial role directory was preserved as competition-sille-role-20261110-v8-incomplete-pin-preflight; the explicit expected corrected evaluator SHA was added before successful provisioning. No job was started by the refused operation."
 }

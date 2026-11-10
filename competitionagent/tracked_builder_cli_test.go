@@ -39,6 +39,7 @@ func TestTrackedBuilderActualCliCreateAdmission(t *testing.T) {
 	fragment = fragment[:end]
 	for _, stage := range []string{"check", "compile"} {
 		fixture := newCandidateSourceTest(t)
+		writeCandidateCoverageIdentity(t, fixture, `{"kind":"seeded-crawl-coverage/v1","minimum_page_coverage_ratio":0.95,"minimum_byte_coverage_ratio":0.95}`)
 		resource := testRunResourceIdentity()
 		resource.BuildMemoryLimit, resource.BuildMemoryLimitBytes = "12g", 12*1024*1024*1024
 		resource.BuildWorkLimit, resource.BuildWorkLimitBytes = "10g", 10*1024*1024*1024
