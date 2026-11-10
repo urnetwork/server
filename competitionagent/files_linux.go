@@ -18,8 +18,19 @@ func openDirectoryNoFollow(path string) (*os.File, error) {
 // os.Root.OpenFile follows confined relative symlinks despite O_NOFOLLOW.
 // Exact-inode callers instead reject every path component with raw openat.
 func openRelativeNoFollow(root *os.File, name string, flags int, mode os.FileMode) (*os.File, error) {
-	if root == nil || !fs.ValidPath(name) || strings.ContainsAny(name, "\\\x00\r\n") || mode&0777 != mode {
+	if strings.Contains(name, "\\") {
 		return nil, errors.New("subevaluation descriptor path is not a canonical relative identity")
+	}
+	return openKernelRelativeNoFollow(root, name, flags, mode)
+}
+
+// Native cgroup names can contain literal systemd path-unit escapes. Linux
+// does not interpret those backslashes. Keep them literal while rejecting
+// traversal and every symlink; artifact/journal callers retain the stricter
+// wrapper above. Native callers separately prove the held cgroup filesystem.
+func openKernelRelativeNoFollow(root *os.File, name string, flags int, mode os.FileMode) (*os.File, error) {
+	if root == nil || !fs.ValidPath(name) || strings.ContainsAny(name, "\x00\r\n") || mode&0777 != mode {
+		return nil, errors.New("kernel descriptor path is not a canonical relative identity")
 	}
 	parts := strings.Split(name, "/")
 	parent, held := int(root.Fd()), -1

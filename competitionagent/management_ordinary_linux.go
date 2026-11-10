@@ -130,7 +130,7 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 	if commonPath != "/urnetwork.slice" {
 		return facts, errors.New("ordinary management has an unexpected common ancestor")
 	}
-	common, err := openRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	common, err := openKernelRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return facts, err
 	}
@@ -170,7 +170,7 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 			if len(snapshot.Groups) >= settings.CleanupObjectCount || strings.Count(strings.TrimPrefix(path, policy.Parent.CgroupPath), "/") > settings.ManagementGroupDepth {
 				return snapshot, errors.New("ordinary hierarchy exceeds its finite inventory or depth")
 			}
-			current, err := openRelativeNoFollow(root, strings.TrimPrefix(path, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+			current, err := openKernelRelativeNoFollow(root, strings.TrimPrefix(path, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 			if err != nil {
 				return snapshot, err
 			}
@@ -258,7 +258,7 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 	if err != nil {
 		return facts, err
 	}
-	currentCommon, err := openRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	currentCommon, err := openKernelRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return facts, err
 	}
