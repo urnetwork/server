@@ -15,19 +15,23 @@ identify production source.
 ## Epochs
 
 - [Production epoch 1 — initial baseline](#production-epoch-1--initial-baseline)
-- [Production epoch 2 — published checkpoint, intake not yet open](#production-epoch-2--published-checkpoint-intake-not-yet-open)
+- [Production epoch 2 — round created, public intake pending](#production-epoch-2--round-created-public-intake-pending)
 
-## Production epoch 2 — published checkpoint, intake not yet open
+## Production epoch 2 — round created, public intake pending
 
 Published and independently checked against GitHub branch heads on 2026-11-09.
-**This checkpoint is not yet an open round or permission to start grading.**
+The native transition created the round on 2026-11-10. **Public intake is not
+verified live: the serving API still returns `503 source_not_ready`.** Grading
+remains paused. Do not treat database creation as proof that submissions work.
 The epoch-1 winner's reviewed product change and the approved prospective G2/G7
-instrument are included. The API still advertises epoch 1 until activation.
+instrument are included. The local read-only frozen-grant/runtime-manifest
+diagnostic passes; serving deployment/config convergence is being investigated.
 
 | Identity | Value |
 |---|---|
 | Season | `sim-latency-production-20261028-r2` |
-| Reserved target round | `01a1c110-585b-ce38-4f29-ca4860a1c058` |
+| Created round | `01a1c110-585b-ce38-4f29-ca4860a1c058` |
+| Recorded submission window (UTC) | `2026-11-10T04:28:28.670738Z` to `2026-11-17T04:28:28.670738Z` |
 | Source generation / activation generation | `1` / `2` |
 | Source-lock SHA-256 | `4781aac57e052ff048440ac5f0f118d780a76fa1685326fc0b3af1143ae4f0cd` |
 | Evaluator image | `sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9` |

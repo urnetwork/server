@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T01:32:00Z",
+  "observed_at": "2026-11-10T04:33:20Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -29,10 +29,16 @@
   },
   "epoch2": {
     "open": false,
+    "database_round_created": true,
+    "database_status": "open",
+    "recorded_opens_at": "2026-11-10T04:28:28.670738Z",
+    "recorded_closes_at": "2026-11-17T04:28:28.670738Z",
+    "public_intake_verified": false,
+    "public_api_failure": "503 source_not_ready; applies to discovery and epoch1 public result until serving runtime resolution is restored",
+    "native_read_only_diagnosis": "Passed: current frozen round, intake grant, API receipt and exact retained runtime manifest match local current settings. No grading authority inferred.",
     "baseline_ready": false,
     "grading_activated": false,
-    "transition": "preparation_ready",
-    "transition_revision": 13,
+    "transition": "round_created; public runtime resolution pending",
     "api_intake_acknowledged": true,
     "api_acknowledged_at": "2026-11-09T22:07:43.172783Z",
     "api_runtime_image_digest": "sha256:cd9ef00c61fb7724ae582636b55029d3f7e408f3027bce5c48d5f93ed86f9e7e",
@@ -50,12 +56,13 @@
     "runtime_qualified": false,
     "qualification_receipts": "Four exact-version MinIO readbacks verified; retention through 2028-01-01. All ten source branches/config published and independently verified. Exact runtime envelope published and genuine API receipt recorded. Worker, baseline and distributed admission remain absent.",
     "rules": "G2 request/byte floors at 95%, no ceilings; G7 separate expected page/byte coverage floors at 95% of same-round baseline; takeover margin 26.9%",
-    "full_week_opening": "Not scheduled or backdated; native intake grant must select a fresh complete seven-day opening after source publication and actual API acknowledgment."
+    "full_week_opening": "Native transition recorded a604800-second window at the database clock. Public API serving remains unverified; do not announce intake as live."
   },
   "external_deployment": {
     "epoch2_host_policy_config_requested": "a1d3981",
     "epoch2_host_policy_approval_sha256": "f6a7a370de6d088880a09345063eb945e620e6b30ef228690d6b1a14d86228eb",
     "epoch2_host_policy_deployment_confirmed": false,
+    "user_deployment_report": "User reported API/config-updater deployed; fresh deployment requested after serving API source_not_ready differs from successful local native verification. Exact serving policy digest remains unverified.",
     "epoch2_host_policy_deployment_action": "Deploy config-updater a1d3981 or later and restart serving API processes; no new API build, migration or vault update required.",
     "config_main": "2350c76",
     "vault_main": "c0f9893",
