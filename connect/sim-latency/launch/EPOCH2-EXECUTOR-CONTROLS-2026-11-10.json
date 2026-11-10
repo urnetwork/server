@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "kind": "epoch2-executor-control-checkpoint/v1",
+  "observed_at": "2026-11-10T01:31:00Z",
+  "source_image_unchanged": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9",
+  "control_source_commit": "0e7acb5dd",
+  "agent_sha256": "a0ddfa63c31c5bd98074a9d60e4748ebc1034e33d682f9f40c7f99f000b2cbed",
+  "release": "/usr/local/libexec/urnetwork/competition-subeval-management-20261110-v2",
+  "coordinator_profile_sha256": "1d4b1113d01e832b8c26564612c83bc3ef82f83e8db20114563c742d1621b94f",
+  "fixes": [
+    "Use verified inherited effective cpuset only when a descendant has no enabled cpuset controller; fixed role limits remain directly observed.",
+    "Render the recovery service through the same closed template contract used by validation.",
+    "Accept PID1 omission of unset ExecStart only for a nonexistent managed control service; loaded invocation checks remain mandatory."
+  ],
+  "verification": {
+    "agent_and_cli_tests": "passed",
+    "focused_managed_control_race_runs": 3,
+    "native_sille_management_recovery_and_missing_unit_projection": "passed read-only checks",
+    "both_host_fingerprints_independently_rechecked": true,
+    "signed_availability_both_hosts": "available; signatures verified with independent host keys",
+    "restricted_ssh_control": "Goofe dedicated forced handler; no caller executable, forwarding or shell authority",
+    "submission_or_evaluation_clock_started": false
+  },
+  "hosts": [
+    {
+      "host_id": "sille",
+      "fingerprint_sha256": "6402608c5b8f07172b6b0b6384eb3e6b395636033a58c45ea2add2e5eec8ea4f",
+      "boundary_sha256": "6777746caa65cad97b8d5d3ae329010c284b26ba8fe6fdc092b4ecaaeb5d2e6a",
+      "agent_config_sha256": "0f1895c6f5d88d37853f58ae1c8b1846bcf3a0ea0f64d3e0d20a83c02e817d88",
+      "confirmed_native_audit_sha256": "4c388bd4d0abf08e5cab6dcc401e0fd3a1181c4833f2442860881b2998e3407a",
+      "signed_availability_receipt_sha256": "29813e7207f1c0446f91e67794971d5df4481aeee99ddaa80bdcf30d7e4e4d36"
+    },
+    {
+      "host_id": "goofe",
+      "fingerprint_sha256": "124f8dfbf4104705d0683da055236dc88300ff34af71173deddb6a60824e112f",
+      "boundary_sha256": "4673a5a949a342b7580c9d9273cf3f21eb54d36d8201620959832039c6e285ab",
+      "agent_config_sha256": "40fd8e04762fe3dd18614873046d7c7a155c0b591f373d31f015b39ed31b7459",
+      "confirmed_native_audit_sha256": "4e3e0674b1e3a6a1bcb23ca4d45a0a3a50e83d4fd92e5c9277a1adadd2385a9b",
+      "signed_availability_receipt_sha256": "ae2457f3619966261eea4cfc9ff2ddd7dd19fc17c3a1ec82dbd5a26c0d3b7748"
+    }
+  ],
+  "authority_limits": {
+    "identity_is_not_grading_readiness": true,
+    "native_audit_exit": 1,
+    "full_containment_pressure_qualification_complete": false,
+    "epoch2_baseline_ready": false,
+    "cross_host_measurement_admission_complete": false,
+    "grading_activated": false,
+    "epoch2_open_at_this_checkpoint": false,
+    "next_action": "Deploy prospectively updated actual host-policy fingerprints, then grant a fresh seven-day intake window with grading paused."
+  }
+}
