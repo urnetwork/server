@@ -846,6 +846,7 @@
     {
       "type": "timeseries",
       "title": "webhook events / h by event",
+      "description": "Brevo transactional webhook events of campaign sends. Attributed: matched to a send by its message id and recorded for the network. Unattributed: counted here only. anonymous: Brevo's anonymous tracking (the account's transactional settings, Tracking) posts opens, clicks and spam reports with an an# message id and no email, so they name neither the send nor the recipient. unknown_send: a message id that no send recorded, such as a test send's.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -892,12 +893,22 @@
           "expr": "sum by (event) (increase(urnetwork_onboarding_webhook_events_total{env=\"$env\"}[1h]))",
           "refId": "A",
           "legendFormat": "{{event}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (event, reason) (increase(urnetwork_onboarding_webhook_unattributed_events_total{env=\"$env\"}[1h]))",
+          "refId": "B",
+          "legendFormat": "{{event}} unattributed ({{reason}})"
         }
       ]
     },
     {
       "type": "timeseries",
       "title": "opens and clicks / h by template",
+      "description": "Opens and clicks of each template, attributed to a send or anonymous. Brevo's anonymous tracking (on since 2026-11-03) posts them without a recipient: they are counted by template here, and no network records them.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -953,12 +964,31 @@
           "expr": "sum by (template) (increase(urnetwork_onboarding_webhook_events_total{env=\"$env\",event=\"email.clicked\"}[1h]))",
           "refId": "B",
           "legendFormat": "click {{template}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (template) (increase(urnetwork_onboarding_webhook_unattributed_events_total{env=\"$env\",event=\"email.opened\",reason=\"anonymous\"}[1h]))",
+          "refId": "C",
+          "legendFormat": "anonymous open {{template}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (template) (increase(urnetwork_onboarding_webhook_unattributed_events_total{env=\"$env\",event=\"email.clicked\",reason=\"anonymous\"}[1h]))",
+          "refId": "D",
+          "legendFormat": "anonymous click {{template}}"
         }
       ]
     },
     {
       "type": "timeseries",
       "title": "complaint and unsubscribe rate (per delivered, 1d)",
+      "description": "Complaints count the spam reports of campaign sends, attributed or not: Brevo's anonymous tracking posts them without a recipient, so they suppress no network (Brevo blocks the address itself).",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1002,7 +1032,7 @@
             "type": "prometheus",
             "uid": "warp-mimir"
           },
-          "expr": "sum(increase(urnetwork_onboarding_webhook_events_total{env=\"$env\",event=\"email.complained\"}[1d])) / clamp_min(sum(increase(urnetwork_onboarding_webhook_events_total{env=\"$env\",event=\"email.delivered\"}[1d])), 1)",
+          "expr": "sum(increase(urnetwork_onboarding_webhook_events_total{env=\"$env\",event=\"email.complained\"}[1d]) or increase(urnetwork_onboarding_webhook_unattributed_events_total{env=\"$env\",event=\"email.complained\"}[1d])) / clamp_min(sum(increase(urnetwork_onboarding_webhook_events_total{env=\"$env\",event=\"email.delivered\"}[1d])), 1)",
           "refId": "A",
           "legendFormat": "complaints (guardrail 0.001)"
         },
@@ -1661,7 +1691,7 @@
     {
       "type": "timeseries",
       "title": "re-engagement webhook events / h by event and template",
-      "description": "Brevo transactional webhook events attributed to a re-engagement send. Opens are not counted (Apple Mail Privacy Protection makes them meaningless); a bounce or complaint suppresses the network on every program.",
+      "description": "Brevo transactional webhook events of re-engagement sends. Opens are not counted (Apple Mail Privacy Protection makes them meaningless); a bounce or complaint attributed to a send suppresses the network on every program. Unattributed events are counted by template only: anonymous ones (Brevo's anonymous tracking posts clicks and spam reports with an an# message id and no email) suppress no network, and unknown_send ones name a message id no send recorded.",
       "datasource": {
         "type": "prometheus",
         "uid": "warp-mimir"
@@ -1708,6 +1738,15 @@
           "expr": "sum by (event, template) (increase(urnetwork_reengagement_webhook_events_total{env=\"$env\"}[1h]))",
           "refId": "A",
           "legendFormat": "{{event}} {{template}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (event, template, reason) (increase(urnetwork_reengagement_webhook_unattributed_events_total{env=\"$env\"}[1h]))",
+          "refId": "B",
+          "legendFormat": "{{event}} {{template}} unattributed ({{reason}})"
         }
       ]
     },

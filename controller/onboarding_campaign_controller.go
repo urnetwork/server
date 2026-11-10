@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -60,6 +61,13 @@ var onboardingWebhookEventsTotal = prometheus.NewCounterVec(prometheus.CounterOp
 	Help:      "Brevo transactional webhook events attributed to a campaign send, by campaign event and step template.",
 }, []string{"event", "template"})
 
+var onboardingWebhookUnattributedEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "onboarding",
+	Name:      "webhook_unattributed_events_total",
+	Help:      "Brevo transactional webhook events of campaign sends that name no recorded send, so no network records them, by campaign event, template (from the send's tags) and reason: anonymous (Brevo's anonymous tracking posts opens, clicks and spam reports with an an# message id and no email) or unknown_send (no send recorded the message id, as for a test send).",
+}, []string{"event", "template", "reason"})
+
 var onboardingAppleOfferCodesAvailable = prometheus.NewGauge(prometheus.GaugeOpts{
 	Namespace: "urnetwork",
 	Subsystem: "onboarding",
@@ -80,6 +88,7 @@ func init() {
 		onboardingEmailsTotal,
 		onboardingExitsTotal,
 		onboardingWebhookEventsTotal,
+		onboardingWebhookUnattributedEventsTotal,
 		onboardingAppleOfferCodesAvailable,
 		onboardingAppleOfferCodeBatchesTotal,
 	)
@@ -982,10 +991,69 @@ func webhookTags(args *BrevoWebhookArgs) []string {
 	return nil
 }
 
+// Why a campaign's webhook event names no recorded send, so that no network
+// records it: the reason label of the unattributed counters.
+const (
+	// Brevo's anonymous tracking (the account's transactional settings,
+	// Tracking) posts opens, clicks and spam reports with an "an#<digits>"
+	// message id and an empty email: by design they name neither the send nor
+	// the recipient
+	brevoWebhookUnattributedAnonymous = "anonymous"
+	// a message id that no campaign send recorded, as for a test send
+	brevoWebhookUnattributedUnknownSend = "unknown_send"
+)
+
+// brevoWebhookAnonymous is whether Brevo's anonymous tracking took the
+// event's recipient out: its message id is "an#<digits>" (Brevo's unique
+// proxy open sample in https://developers.brevo.com/docs/transactional-webhooks),
+// or it has neither a message id nor an email. No send has such an id, so the
+// event is not looked up.
+func brevoWebhookAnonymous(args *BrevoWebhookArgs) bool {
+	messageId := strings.TrimSpace(args.MessageId)
+	if strings.HasPrefix(messageId, "an#") {
+		return true
+	}
+	return messageId == "" && strings.TrimSpace(args.Email) == ""
+}
+
+var brevoWebhookTemplateLabelPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// brevoWebhookCampaignTemplate is the template a campaign send's tags name
+// ([<campaign>, <template>, <variant>]) when the event is that campaign's. A
+// second tag that is not a plain template name is "other", so the label stays
+// bounded.
+func brevoWebhookCampaignTemplate(args *BrevoWebhookArgs, campaign string) (template string, ok bool) {
+	tags := webhookTags(args)
+	if len(tags) == 0 || tags[0] != campaign {
+		return "", false
+	}
+	if len(tags) < 2 || !brevoWebhookTemplateLabelPattern.MatchString(tags[1]) {
+		return "other", true
+	}
+	return tags[1], true
+}
+
+// An anonymous spam report suppresses no network: one line a minute says so.
+var brevoWebhookAnonymousComplaintReports = newBoundedReport(time.Minute)
+
+func reportAnonymousBrevoComplaint(campaign string, template string) {
+	if suppressedCount, ok := brevoWebhookAnonymousComplaintReports.Allow(server.NowUtc()); ok {
+		glog.Warningf(
+			"[%s]an anonymous spam report for %s (Brevo's anonymous tracking) names no recipient, so it suppresses no network; Brevo blocks the address itself, and a later send to it comes back blocked, which does. %d more since the last report.\n",
+			campaign,
+			template,
+			suppressedCount,
+		)
+	}
+}
+
 // handleOnboardingBrevoWebhook records a campaign delivery event against the
-// network the message was sent to. Non-campaign messages (the message id is
-// unknown) are ignored here; the caller keeps the account-wide unsubscribe
-// behavior. Never fails the webhook.
+// network the message was sent to. A campaign event that names no recorded
+// send is only counted by template
+// (urnetwork_onboarding_webhook_unattributed_events_total): Brevo's anonymous
+// opens, clicks and spam reports, which are never looked up, and ids that no
+// send recorded. Other senders' messages are ignored here; the caller keeps
+// the account-wide unsubscribe behavior. Never fails the webhook.
 func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -996,15 +1064,21 @@ func handleOnboardingBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 	if name == "" {
 		return
 	}
+	if brevoWebhookAnonymous(args) {
+		if template, ok := brevoWebhookCampaignTemplate(args, "onboarding"); ok {
+			onboardingWebhookUnattributedEventsTotal.WithLabelValues(name, template, brevoWebhookUnattributedAnonymous).Inc()
+			if name == model.EventEmailComplained {
+				reportAnonymousBrevoComplaint("onboarding", template)
+			}
+		}
+		return
+	}
 	email := model.GetNetworkOnboardingEmail(ctx, args.MessageId)
 	if email == nil {
-		tags := webhookTags(args)
-		if len(tags) == 0 || tags[0] != "onboarding" {
-			return
+		if template, ok := brevoWebhookCampaignTemplate(args, "onboarding"); ok {
+			onboardingWebhookUnattributedEventsTotal.WithLabelValues(name, template, brevoWebhookUnattributedUnknownSend).Inc()
+			glog.V(1).Infof("[onboarding]webhook %s for unknown campaign message %q (%v)\n", args.Event, args.MessageId, webhookTags(args))
 		}
-		// a campaign tag without a known message id: attribute by the custom
-		// header when present, otherwise there is no network to record against
-		glog.V(1).Infof("[onboarding]webhook %s for unknown campaign message %q (%v)\n", args.Event, args.MessageId, tags)
 		return
 	}
 	at := server.NowUtc()
