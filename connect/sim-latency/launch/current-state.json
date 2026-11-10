@@ -1,6 +1,21 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T19:52:26Z",
+  "observed_at": "2026-11-10T20:01:43Z",
+  "latest_batch_attach_diagnosis": {
+    "v19_probes_terminal_failed": true,
+    "cleanup_and_stop_cleanup_verified_both_hosts": true,
+    "network_admission_passed_both_hosts": true,
+    "root_cause": "Docker Compose run defaults to interactive stdin even with --no-tty. The authenticated migration create request had OpenStdin/AttachStdin/StdinOnce true; the private proxy deliberately rejects interactive stdin attach. Both attempts reached migration container creation, then HTTP403 before simulation admission.",
+    "correction_under_test": "A private compose_run_with batch wrapper explicitly passes --interactive=false for both migration and runner preflight. Legacy evaluator variants remain unchanged. Adjacent proxy validation allows only omitted/0/false stdin and rejects alternate true spellings, duplicate and malformed flags; no interactive authority is added.",
+    "deterministic_regressions": "Three race repetitions passed1.369s: execute the real trusted Bash wrapper for both batch callers, verify exact arguments and caller wiring; exercise worker HTTP attach admission against a fake owned Docker endpoint, proving disabled stdin reaches the upstream upgrade while interactive/ambiguous values do not.",
+    "private_evaluator_script_sha256": "be9ddb389ba974efb6b5f6431ca629f0d0e5c7985cad6b425cf46650c52f1db9",
+    "full_race_tests": "Running against exact current source.",
+    "installed": false,
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false,
+    "next_action": "Finish exact full tests, checkpoint and publish immutable correction, repin both idle roles and repeat fresh operator qualification. Do not retry or relabel the terminal v19 attempts."
+  },
   "latest_healthcheck_activation": {
     "role": "v19",
     "source_commit": "f2b5130755cfc71925fdb054e5398d324e0259ad",

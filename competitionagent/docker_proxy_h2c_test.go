@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +17,46 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 )
+
+// The fixed batch caller uses false/zero or omits stdin. Alternate true
+// spellings, duplicates and malformed flags cannot bypass read-only attach.
+func TestDockerProxyAttachRequiresUnambiguousDisabledStdin(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	id := strings.Repeat("c", 64)
+	var inspections atomic.Int32
+	var upgrades atomic.Int32
+	fixture.daemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			upgrades.Add(1)
+			http.Error(w, "synthetic upgrade endpoint unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		inspections.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]any{"Id": id,
+			"Config":     map[string]any{"Labels": map[string]string{cleanupJobLabel: fixture.plan.JobId, cleanupRoundLabel: fixture.plan.RoundId, dockerProxyRunLabel: fixture.plan.RunId}},
+			"HostConfig": map[string]string{"CgroupParent": fixture.plan.CgroupNames[0]}})
+	})
+	for _, query := range []string{"", "stdin=0", "stdin=false", "stdin=1", "stdin=true", "stdin=TRUE", "stdin=t", "stdin=", "stdin=invalid", "stdin=0&stdin=true", "stdin=false&stdin=false"} {
+		before, beforeUpgrades := inspections.Load(), upgrades.Load()
+		request := httptest.NewRequest(http.MethodPost, "http://worker/containers/"+id+"/attach?"+query, nil)
+		request.Header.Set("Connection", "Upgrade")
+		request.Header.Set("Upgrade", "tcp")
+		response := httptest.NewRecorder()
+		fixture.proxy.workerHandler(response, request)
+		allowed := query == "" || query == "stdin=0" || query == "stdin=false"
+		if allowed {
+			if response.Code != http.StatusBadGateway || inspections.Load() != before+1 || upgrades.Load() != beforeUpgrades+1 {
+				t.Fatal("read-only attach never reached its owned upgrade", query, response.Code)
+			}
+		} else if response.Code != http.StatusForbidden || inspections.Load() != before || upgrades.Load() != beforeUpgrades {
+			t.Fatal("interactive/ambiguous attach crossed admission", query, response.Code)
+		}
+	}
+}
 
 // A client may already have buffered server settings after the upgrade prelude.
 type dockerProxyTestBufferedConn struct {

@@ -198,7 +198,9 @@ func (self *DockerProxy) buildTransportFault() {
 func (self *DockerProxy) attach(w http.ResponseWriter, r *http.Request) {
 	path := dockerProxyApiPath(r.URL.Path)
 	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
-	if len(parts) != 3 || parts[0] != "containers" || parts[2] != "attach" || r.URL.Query().Get("stdin") == "1" || r.URL.Query().Get("stdin") == "true" {
+	stdinValues := r.URL.Query()["stdin"]
+	if len(parts) != 3 || parts[0] != "containers" || parts[2] != "attach" || len(stdinValues) > 1 ||
+		len(stdinValues) == 1 && stdinValues[0] != "0" && stdinValues[0] != "false" {
 		http.Error(w, "interactive Docker attach rejected", http.StatusForbidden)
 		return
 	}

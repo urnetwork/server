@@ -711,6 +711,14 @@ wall_timeout_seconds="$(
 )" || die "could not calculate the stage timeout budget"
 [ "$score_timeout_seconds" -eq 10800 ] || die "score timeout is not the frozen three-hour submission limit"
 
+compose_run_with() {
+    local project="$1" compose_env="$2"
+    shift 2
+    # Compose run defaults to interactive even with --no-tty. The private
+    # owner permits stdout/stderr attach only; these batch jobs need no stdin.
+    compose_with "$project" "$compose_env" --profile run run --interactive=false "$@"
+}
+
 compose_with() {
     local project="$1" env_file="$2"
     shift 2
@@ -1355,7 +1363,7 @@ run_stage() {
     "$NETWORK_BOUNDARY" "${project}_evaluation" > "$stage_root/network-boundary.json" ||
         die "$stage_token network boundary failed before runner admission"
     local migration_json migration_path migration_sha
-    migration_json="$(compose_with "$project" "$compose_env" --profile run run --rm --no-deps --no-tty migrate)"
+    migration_json="$(compose_run_with "$project" "$compose_env" --rm --no-deps --no-tty migrate)"
     jq -e '.schema == 1 and .database_version > 0 and .database_version == .migration_count' \
         <<<"$migration_json" >/dev/null || die "$stage_token migration gate failed"
     migration_path="$stage_root/migration.json"
@@ -1364,7 +1372,7 @@ run_stage() {
     migration_hashes+=("$migration_sha")
     redis_generations+=("$(new_secret)")
 
-    compose_with "$project" "$compose_env" --profile run run --rm --no-deps --no-tty runner preflight >&2
+    compose_run_with "$project" "$compose_env" --rm --no-deps --no-tty runner preflight >&2
     local runner_id="" postgres_id redis_id runner_cgroup postgres_cgroup redis_cgroup
     local inspect_path="$stage_root/containers.json" inspect_json
     postgres_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet postgres)"
