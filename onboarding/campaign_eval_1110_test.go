@@ -325,3 +325,32 @@ func TestFeedbackEmailGoesOncePerNetwork(t *testing.T) {
 		t.Errorf("e4a: %+v", d)
 	}
 }
+
+// T4: E2's activated variant ("Add URnetwork to your home screen", "on
+// {platform} it is one tap from the lock screen") had no platform check:
+// windows, linux and web rows got it (126 sends in 30 days on Main), and
+// those apps have no widget (the Windows app's WidgetAdded event is never
+// raised). It skips there now. iOS, Android and macOS have widgets (the
+// apple widgets target builds for macOS too); an unknown platform keeps the
+// email. The not-activated variant is a connect nudge and goes everywhere.
+func TestE2WidgetEmailOnlyWhereThereIsAWidget(t *testing.T) {
+	for platform, wantSend := range map[string]bool{
+		"ios": true, "android": true, "macos": true, "": true,
+		"windows": false, "linux": false, "web": false,
+	} {
+		f := healthy(PathB)
+		f.Platform = platform
+		f.HasConnected = true
+		d := Decide(StepE2, f)
+		if wantSend && (d.Action != ActionSend || d.Template != TemplateE2Widget || d.Variant != VariantActivated) {
+			t.Errorf("e2 activated on %q: %+v", platform, d)
+		}
+		if !wantSend && (d.Action != ActionSkip || d.NextStep != StepE3) {
+			t.Errorf("e2 activated on %q, which has no widget: %+v", platform, d)
+		}
+		f.HasConnected = false
+		if d := Decide(StepE2, f); d.Action != ActionSend || d.Variant != VariantNotActivated {
+			t.Errorf("e2 not activated on %q: %+v", platform, d)
+		}
+	}
+}

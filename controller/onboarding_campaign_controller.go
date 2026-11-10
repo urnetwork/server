@@ -541,6 +541,7 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		// while no code reaches it (REVIEW.md finding 2): no offer email until
 		// offer.apple_email_enabled says the codes flow
 		NoOfferEmail:      !offerByCountry || (appleStore && path != onboarding.PathA && !cfg.Offer.AppleEmailEnabled),
+		Platform:          row.Platform,
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,

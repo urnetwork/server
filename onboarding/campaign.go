@@ -176,6 +176,9 @@ type Facts struct {
 	NoOfferEmail bool
 
 	// ----- step conditions -----
+	// the row's platform: ios, macos, android, windows, linux, web, or ""
+	// when unknown
+	Platform     string
 	HasConnected bool
 	WidgetAdded  bool
 	OfferState   string // "" (none) | active | redeemed | expired
@@ -230,6 +233,19 @@ type Decision struct {
 	ExitReason string
 	// NextStep after this one on the effective path ("" = done)
 	NextStep string
+}
+
+// WidgetPlatform reports whether the platform's app has a widget for E2's
+// activated email to point at: the iOS and Android apps, and the macOS app
+// (the apple widgets target builds for macOS too). The Windows and Linux apps
+// and the web have none. An unknown platform ("") keeps the email, as
+// before: Android app rows were often recorded without a platform.
+func WidgetPlatform(platform string) bool {
+	switch platform {
+	case "windows", "linux", "web":
+		return false
+	}
+	return true
 }
 
 // engaged is the feedback-variant rule: the network connected. Opens used to
@@ -304,10 +320,10 @@ func Decide(step string, f Facts) Decision {
 		}
 		return send(TemplateE1Connect, VariantDefault)
 	case StepE2:
-		// day 3: activated -> the widget habit unless a widget exists;
-		// not activated -> another connect nudge
+		// day 3: activated -> the widget habit unless a widget exists or the
+		// platform has none; not activated -> another connect nudge
 		if f.HasConnected {
-			if f.WidgetAdded {
+			if f.WidgetAdded || !WidgetPlatform(f.Platform) {
 				return skip
 			}
 			return send(TemplateE2Widget, VariantActivated)
