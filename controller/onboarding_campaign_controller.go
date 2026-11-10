@@ -266,6 +266,9 @@ func platformFromDeviceSpec(spec string) string {
 	switch {
 	case s == "":
 		return ""
+	// before "ios": a fingerprint's build id can contain it ("NebulaAIOS1.0.3")
+	case androidBuildFingerprintSpec(s):
+		return "android"
 	case strings.Contains(s, "iphone"), strings.Contains(s, "ipad"), strings.Contains(s, "ios"):
 		return "ios"
 	case strings.Contains(s, "android"):
@@ -278,8 +281,69 @@ func platformFromDeviceSpec(spec string) string {
 		return "linux"
 	case strings.Contains(s, "mozilla"), strings.Contains(s, "chrome"), strings.Contains(s, "safari"), strings.Contains(s, "firefox"):
 		return "web"
+	case androidAppModelSpec(s):
+		return "android"
 	}
 	return ""
+}
+
+// androidBuildFingerprintSpec is the spec older Android apps sent:
+// "<os version> <Build.FINGERPRINT>", the fingerprint being
+// brand/product/device:release/id/incremental:type/tags, e.g.
+// "14 tecno/lh7n-ru/tecno-lh7n:14/up1a.231005.007/250416v782:user/release-keys".
+// It never names Android. s is lower case.
+func androidBuildFingerprintSpec(s string) bool {
+	_, fingerprint, ok := strings.Cut(s, " ")
+	if !ok || !leadingOsVersion(s) {
+		return false
+	}
+	if strings.Count(fingerprint, "/") < 5 || strings.Count(fingerprint, ":") < 2 {
+		return false
+	}
+	return strings.HasSuffix(fingerprint, "-keys")
+}
+
+// androidAppModelSpec is the spec the Android app sends now:
+// "<os version> <make model>" (android MainApplication.deviceSpec), e.g.
+// "16 samsung galaxy s24 ultra" or "17.1 pixel 8 pro". The Apple apps send the
+// same shape ("18.1 iphone 16 pro", "15.7.9 macbook air (m1, 2020)"): an
+// iPhone or iPad is decided before this, and an Apple model is left without a
+// platform, as it was. s is lower case.
+func androidAppModelSpec(s string) bool {
+	_, model, ok := strings.Cut(s, " ")
+	if !ok || model == "" || !leadingOsVersion(s) {
+		return false
+	}
+	for _, apple := range []string{"iphone", "ipad", "ipod", "mac", "apple"} {
+		if strings.Contains(model, apple) {
+			return false
+		}
+	}
+	return true
+}
+
+// leadingOsVersion reports whether s starts with an os version and a space:
+// "16 ", "17.1 ", "8.1.0 ".
+func leadingOsVersion(s string) bool {
+	version, _, ok := strings.Cut(s, " ")
+	if !ok || version == "" {
+		return false
+	}
+	parts := strings.Split(version, ".")
+	if 3 < len(parts) {
+		return false
+	}
+	for i, part := range parts {
+		if part == "" || (i == 0 && 2 < len(part)) {
+			return false
+		}
+		for _, r := range part {
+			if r < '0' || '9' < r {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // platformDeviceName is the `platform` template param in English ("iPhone");
