@@ -680,13 +680,24 @@ func runGateCommand(ctx context.Context, options *gateOptions, command gateComma
 	if match := regexp.MustCompile(`ModuleNotFoundError: No module named '([^']+)'`).FindStringSubmatch(string(output)); match != nil {
 		return gateOpen, []string{where + ": this host lacks the Python module " + match[1] + ", so it did not run"}
 	}
-	// a check that says its outcome: its exit status still fails it
-	if matches := regexp.MustCompile(`(?m)^`+regexp.QuoteMeta(gateOutcomeLinePrefix)+`(pass|fail|missing|open|listed)$`).FindAllStringSubmatch(string(output), -1); 0 < len(matches) {
-		outcome := matches[len(matches)-1][1]
+	// a check that says its outcome: its exit status still fails it, and the line
+	// before the outcome, a stage's verdict or the assembly's last finding, says why
+	outcomePattern := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(gateOutcomeLinePrefix) + `(pass|fail|missing|open|listed)$`)
+	if matches := outcomePattern.FindAllStringSubmatchIndex(string(output), -1); 0 < len(matches) {
+		last := matches[len(matches)-1]
+		outcome := string(output[last[2]:last[3]])
 		if err != nil {
 			outcome = gateFail
 		}
-		return outcome, []string{where + ": " + outcome}
+		detail := where + ": " + outcome
+		if reason := lastLines(string(output[:last[0]]), 1); reason != "" {
+			reason = strings.TrimPrefix(reason, "- ")
+			if options.settings.MessageLimit < len(reason) {
+				reason = strings.ToValidUTF8(reason[:options.settings.MessageLimit], "") + "..."
+			}
+			detail += ": " + reason
+		}
+		return outcome, []string{detail}
 	}
 	if err != nil {
 		return gateFail, []string{where + ": " + lastLines(string(output), 3)}
