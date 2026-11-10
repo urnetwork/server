@@ -56,6 +56,13 @@ func (hostTestAuthState) Repo(principal *sidecar.Principal, repoId sidecar.Id) (
 	return nil, evsservice.EvsAuthDenied
 }
 
+// A gate view source with no network loaded: every push answers 503, as a process whose cache has not loaded.
+type hostTestGateViews struct{}
+
+func (hostTestGateViews) View(networkId sidecar.Id) (sidecar.GkmAuthView, evsservice.EvsAuthAnswer) {
+	return nil, evsservice.EvsAuthUnknown
+}
+
 // One synthetic receipt key, issuing from an hour before start.
 func hostTestReceiptKeys(t testing.TB, start time.Time) *evsservice.ReceiptKeys {
 	t.Helper()
@@ -120,6 +127,7 @@ func newHostTestHost(t testing.TB, adjust func(host *sidecar.ServiceHost, deps *
 	host := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil).ServiceHost()
 	deps := &HostDeps{
 		AuthState:   hostTestAuthState{},
+		GateViews:   hostTestGateViews{},
 		ReceiptKeys: hostTestReceiptKeys(t, clock.Now()),
 	}
 	if adjust != nil {
@@ -157,6 +165,7 @@ func TestHostNotReadyWithoutEachSeam(t *testing.T) {
 	}{
 		{"quota", func(host *sidecar.ServiceHost, deps *HostDeps) { host.Quota = nil }, "QUOTA-M2-11"},
 		{"auth state", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.AuthState = nil }, "ACL-M2-14"},
+		{"gate views", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.GateViews = nil }, "NewAclGateViews"},
 		{"receipt keys", func(host *sidecar.ServiceHost, deps *HostDeps) { deps.ReceiptKeys = nil }, HostReceiptKeysFileName},
 		{"segment cluster", func(host *sidecar.ServiceHost, deps *HostDeps) {
 			host.Blobs = hostTestNoSegmentBlobs{BlobStore: host.Blobs}
@@ -365,6 +374,7 @@ func TestRunHostServesStatusOnThePrivateStores(t *testing.T) {
 		clusters := newHostTestClusters(engineClock)
 		deps := &HostDeps{
 			AuthState:   hostTestAuthState{},
+			GateViews:   hostTestGateViews{},
 			ReceiptKeys: hostTestReceiptKeys(tb, engineClock.Now()),
 			Clusters:    clusters,
 			ClockCheck:  sidecartest.NewFakeClockCheck(nil),
