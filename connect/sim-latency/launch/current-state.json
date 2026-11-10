@@ -1,6 +1,25 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T17:01:39Z",
+  "observed_at": "2026-11-10T17:43:36Z",
+  "latest_job_mount_activation": {
+    "approved": true,
+    "applied_both_hosts": true,
+    "active_role_version": "v14",
+    "agent_release": "/usr/local/libexec/urnetwork/competition-subeval-control-a8e0abb56-20261110-v13",
+    "agent_sha256": "9e8b04f79f8d8e022e71d371f0a2c9a3bb1019e3ffbeddd7b0613c5d3c20ad29",
+    "sille_boundary_sha256": "b721693bb4ad6543f423c4890ecb138aba5e3c4b7fb7776f1467d7112fc4b883",
+    "goofe_boundary_sha256": "1a63d4f463913c3057c60f790d62c3a858ec2092f3502c1fc46b98f50ddec7bd",
+    "sille_native_receipt_sha256": "39dd4f08418952903df757ed592778f64840d138071e2c35ec3946a4efbe2c3d",
+    "goofe_native_receipt_sha256": "27e5d34d7ddfa4f7a77c456b492502f08975d948f08fe4e542de8fa51dff040f",
+    "native_boundary_and_recheck_passed_both_hosts": true,
+    "switch_boundary": "Fresh signed availability verified both hosts before original switch. Both engines, containerd services and recovery stopped before each role replacement; no submission attempt running. Original unit bytes retained in root-only backups.",
+    "discovered_adjacent_issues": "systemctl dependency arrays quote escaped path-unit names: narrow canonical comparison fixed in a8e0abb56 with deterministic positive/wrong-unit regression. systemd defaults make peer mounts internally shared: explicit MountFlags=slave on both private daemon units preserves private peer parent and exact host-master/slave jobs. Native default-versus-slave counterfactual passes three times per host; test pushed ecfcbdcec.",
+    "full_agent_cli_race_tests": "Three repetitions passed after dependency correction: agent204.537s, CLI1.030s",
+    "grading_ready": false,
+    "customer_evaluation_started": false,
+    "official_r9_started": false,
+    "next_action": "Record genuine updated namespace and host fingerprints; configure restricted transport for the final roles; run fresh authenticated operator probes. Then complete retention/containment qualification, register exact control amendment, and run official baseline/admission before enabling scoring. Older pending-approval/staged-v12 observations below are historical."
+  },
   "latest_executor_diagnosis": {
     "migration_head_verified": 950,
     "v7_native_probes": "Both terminal infrastructure failures before simulation; not running. Preserve their original identities and deadlines.",
