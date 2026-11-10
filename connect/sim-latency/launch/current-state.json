@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T06:59:09Z",
+  "observed_at": "2026-11-10T07:32:55Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -38,6 +38,7 @@
     "public_verification": "HTTP200 competition/info: epoch2/open, intake_ready=true, grading_ready=false, publication_held=true. Epoch1 result remains200 with69 entries and approved winner. Fee-free authenticated v2 preflight returned200 for the exact source/round; no job or fee created.",
     "native_read_only_diagnosis": "Passed: current frozen round, intake grant, API receipt and exact retained runtime manifest match local current settings. No grading authority inferred.",
     "baseline_ready": false,
+    "baseline_host_probe_progress": "Fresh v3 readiness unit is active with genuine PID1902570 after fixing Docker's detached-source branch metadata and reproducing the short-window sample-span boundary. It uses a versioned120-second readiness-only profile; no gate, frozen source/image or official R9 policy changed. All targeted ordinary/race tests passed three runs and actual offline Docker source-prep passed. Pending runtime proof, not qualified: EPOCH2-IMAGE-BRANCH-AND-READINESS-FIX-2026-11-10.json.",
     "grading_activated": false,
     "transition": "intake_open; grading pending independent qualification",
     "api_intake_acknowledged": true,

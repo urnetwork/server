@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "kind": "epoch2-control-preparation-corrections/v1",
+  "observed_at": "2026-11-10T07:32:55Z",
+  "source_commit": "b080b2ac3",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "image_branch_failure": {
+    "probe": "urnetwork-epoch2-baseline-host-qualification-20261110-v2.service",
+    "terminal_exit_status": 1,
+    "patch": "Trusted comment-only readiness probe, not a public submission",
+    "failure": "candidate_build_failed; trusted source application failed: source repository differs from its pristine frozen identity",
+    "root_cause": "All ten actual frozen-image repositories have clean worktrees and correct locked commits, but detached HEADs. Existing server/connect sim-latency refs point to previous source commits. Host source preparation creates the correct branches; the Docker source-prep layer previously did not.",
+    "correction": "Authenticate the original identity and every current head before materializing branch refs only in the throwaway image build layer. No checkout/reset of source files, no weakening of the strict patch validator, no modification of the frozen base image or local developer repositories.",
+    "actual_offline_docker_replay": "passed source-prep against the exact frozen base, retained harmless patch, pinned original validator and exact original policy; produced the expected candidate commit map",
+    "diagnostic_source_prep_image": "sha256:06f26053299e5067f887af21b9e9a5bded7a9fa61bf3d95d6fbb90c7881bf491",
+    "diagnostic_image_is_an_evaluator_release": false,
+    "regression_controls": "Detached heads with stale refs; all commits and clean trees preserved; real patch application; mismatched sibling refuses before branch mutation; dirty source still refused; wrong attached branch and identity digest refused"
+  },
+  "readiness_span_boundary": {
+    "diagnostic_samples": 10,
+    "diagnostic_empty_pools": 0,
+    "diagnostic_span_fraction": 0.9001666666666667,
+    "required_span_fraction": 0.9,
+    "deterministic_reproduction": "Actual frozen scheduler at30 seconds ends at27 seconds. A one-millisecond first-sample observation delay yields less than90% coverage. The actual sample reducer reproduces the rejection without sleeps.",
+    "original_v1_failure_subcondition_proven": false,
+    "new_readiness_profile": "sim-latency-host-readiness/v2",
+    "new_readiness_duration_ms": 120000,
+    "replicates": 1,
+    "official_r9_duration_or_gates_changed": false,
+    "meaning": "Readiness-only workload gains positive observation headroom under the unchanged capped ten-second native probe cadence; no score or production threshold is relaxed."
+  },
+  "verification": {
+    "full_patch_cli_ordinary_runs": 3,
+    "image_branch_regression_race_runs": 3,
+    "controller_readiness_and_release_ordinary_runs": 3,
+    "controller_readiness_and_release_race_runs": 3,
+    "actual_scheduler_and_sample_reducer_ordinary_runs": 3,
+    "actual_scheduler_and_sample_reducer_race_runs": 3,
+    "result": "passed",
+    "excluded_integration_checks": "Two earlier broad selections included PostgreSQL-only tests and refused at the local-environment preflight before connecting. Corrected pure-test selections passed; no main DB migration or test was run."
+  },
+  "installed_control_release": {
+    "directory": "/usr/local/libexec/urnetwork/competition-e2-g2g7-image-branches-20261110-v1",
+    "only_changed_container_asset": "Dockerfile.submission",
+    "dockerfile_sha256": "3cf1e3e7f5ddb036334106bc107468358c6c9800861d11125b4b1db7882f1c5f",
+    "evaluator_work_coverage_sha256_unchanged": "5d2d9bef902944eb6db166628dd8bc8adc57ce668f118efd493319af63aa8802",
+    "private_producer_release_kind": "coverage-image-branches/1",
+    "producer_profile": "/etc/urnetwork/competition-epoch2-control-baseline-20261110-v2/round-baseline-preparation.json",
+    "producer_profile_sha256": "c47c53673164ebe985c68fe944fe8bffd39fec0d8e9791f9ddabc936d77b35ab",
+    "all_sixteen_dependency_pins_verified": true,
+    "historical_releases_or_pins_rewritten": false
+  },
+  "fresh_readiness_probe": {
+    "unit": "urnetwork-epoch2-baseline-host-qualification-20261110-v3.service",
+    "invocation_id": "a327262eb83f4f12a26045b9d5d1f271",
+    "observed_state": "active/running",
+    "observed_main_pid": 1902570,
+    "result": "pending; an active unit's interim Result=success is not terminal qualification proof"
+  },
+  "authority_limits": {
+    "frozen_source_or_evaluator_image_changed": false,
+    "official_r9_baseline_started": false,
+    "private_r9_admission_started": false,
+    "submission_claimed": false,
+    "grading_activated": false
+  }
+}
