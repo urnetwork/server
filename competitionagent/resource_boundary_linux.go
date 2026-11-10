@@ -1392,7 +1392,9 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 	}
 	contains := func(key, required string) bool {
 		for _, value := range strings.Fields(properties[key]) {
-			if value == required {
+			// systemctl quotes and escapes unit names containing literal
+			// backslashes, including canonical path-unit names with hyphens.
+			if value == required || value == strconv.Quote(required) {
 				return true
 			}
 		}

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -204,6 +205,29 @@ func TestRuntimeWorkspaceDaemonUnitRequiresBootstrapOrdering(t *testing.T) {
 			properties[key] = strings.TrimSuffix(original, " "+name)
 			if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err == nil {
 				t.Fatalf("daemon lost %s boot/lifetime dependency", key)
+			}
+			properties[key] = original
+		}
+	}
+}
+
+// The live manager quotes escaped path-unit names in dependency arrays.
+func TestRuntimeWorkspaceDaemonAcceptsCanonicalQuotedDependency(t *testing.T) {
+	fixture := workspaceBoundaryFixture(t)
+	for _, pin := range []Pin{fixture.boundary.EngineUnit, fixture.boundary.ContainerdUnit} {
+		properties := runtimeBoundaryTestUnitProperties(fixture.boundary, pin)
+		name := filepath.Base(fixture.boundary.WorkspaceMount.Unit.Path)
+		for _, key := range []string{"Requires", "BindsTo", "After"} {
+			properties[key] += " " + strconv.Quote(name)
+		}
+		if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err != nil {
+			t.Fatal("canonical manager dependency projection rejected", err)
+		}
+		for _, key := range []string{"Requires", "BindsTo", "After"} {
+			original := properties[key]
+			properties[key] = strings.TrimSuffix(original, strconv.Quote(name)) + strconv.Quote(name+".other")
+			if _, err := parseRuntimeBoundaryUnit(runtimeBoundaryTestUnitBytes(properties), pin, fixture.boundary, fixture.settings); err == nil {
+				t.Fatalf("different quoted %s dependency admitted", key)
 			}
 			properties[key] = original
 		}
