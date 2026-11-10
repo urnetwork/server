@@ -202,6 +202,10 @@ type Decision struct {
 	Opening string
 	// IssueOffer: issue the welcome offer by email before sending (E4b)
 	IssueOffer bool
+	// NoOfferEmail is Facts.NoOfferEmail at the send: the offer may not be
+	// emailed to the network, so E1 leaves out its offer line (the offer
+	// steps do not send at all then)
+	NoOfferEmail bool
 	// ExitReason when Action == ActionExit
 	ExitReason string
 	// NextStep after this one on the effective path ("" = done)
@@ -257,7 +261,7 @@ func Decide(step string, f Facts) Decision {
 	next := NextStep(step, path)
 	skip := Decision{Action: ActionSkip, NextStep: next}
 	send := func(template string, variant string) Decision {
-		return Decision{Action: ActionSend, Template: template, Variant: variant, NextStep: next}
+		return Decision{Action: ActionSend, Template: template, Variant: variant, NoOfferEmail: f.NoOfferEmail, NextStep: next}
 	}
 	feedback := func() Decision {
 		if f.FeedbackSubmitted {

@@ -38,6 +38,9 @@ type ParamsInput struct {
 
 	// the welcome offer, when one exists
 	OfferExpiresAt *time.Time
+	// the offer may not be emailed to the network (Decision.NoOfferEmail):
+	// E1 leaves out its offer line
+	NoOfferEmail   bool
 	OfferPriceUsd  float64
 	RegularYearUsd float64
 	TrialDays      int
@@ -237,8 +240,13 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["platform"] = in.Platform
-		// path A only: the deadline of the in-app offer; empty hides the line
+		// path A only: the deadline of the in-app offer; empty hides the line.
+		// Never where the offer may not be emailed (no-offer countries, an
+		// unknown country): the offer steps stand down there too
 		p["offer_expires_at"] = offerExpires
+		if in.NoOfferEmail {
+			p["offer_expires_at"] = ""
+		}
 	case TemplateE2Widget:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["providers_online"] = FormatCount(in.ProvidersOnline)
