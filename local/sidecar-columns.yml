@@ -27,6 +27,8 @@ tables:
       client_public_key: api-4
       declares_no_egress: api-4
       ephemeral: api-4
+      # added by MG8 (TEAM-M2-20; owner decision 197), so this line moves when MG0 is promoted ahead of MG8
+      forward_only: api-4
       member_id: api-4
       owner_user_id: api-4
       sponsor_user_id: api-4
