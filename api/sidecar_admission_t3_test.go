@@ -124,6 +124,10 @@ func TestAdmissionCompromiseCascadeOnT3(t *testing.T) {
 	sidecartest.RunAdmissionRow(t, "the compromise cascade", admissionT3Tier(t))
 }
 
+func TestTheCascadeReadsEveryConfirmationOnT3(t *testing.T) {
+	sidecartest.RunAdmissionRow(t, "the cascade reads every confirmation", admissionT3Tier(t))
+}
+
 func TestAdmissionAuthKeysOnT3(t *testing.T) {
 	sidecartest.RunAdmissionRow(t, "auth keys", admissionT3Tier(t))
 }
