@@ -65,9 +65,16 @@ import (
 // Holds no Postgres connection across store I/O: network_acl_head advances
 // after the append, in its own transaction. Safe for concurrent use.
 //
-// Not built here: §7.9's append limits, the {acl_}e cache's writes, ticks'
-// schedule and retention (TEAM-M2-14); and reseed (§19.10), whose own walk
-// from C_0 is TEAM-M3-02's.
+// After each entry this instance lands, settings' hooks run, best effort: the
+// one script that writes {acl_<networkId>}e and INCRs {acl_<networkId>}v
+// (config_log_redis.go), and the team hints (§7.17). Before a statement or base
+// is appended, never a retry of one, settings' Limiter charges §7.9's append
+// limits, answering 429, and a revocation already in the log answers its entry
+// (config_log_limit.go). api's process installs a sequencer built with
+// NewApiConfigLogSettings, which sets all three; a test's sequencer sets what it
+// tests. Ticks' schedule and retention are config_log_tick.go's and
+// config_log_retention.go's (TEAM-M2-14); reseed (§19.10), whose own walk from
+// C_0 is TEAM-M3-02's, is not built.
 
 // Tunables of the sequencer. §7.9's 4,096 is ConfigLog's.
 type ConfigLogSettings struct {
@@ -88,6 +95,14 @@ type ConfigLogSettings struct {
 	// Whether a network is on the team tier, which a directory RepoCreate needs at api alone (§8.8). nil is
 	// NetworkTierOf's answer, team; a test passes its own.
 	TeamTier func(ctx context.Context, networkId server.Id) bool
+	// Writes {acl_<networkId>}e and INCRs {acl_<networkId>}v after each entry this instance lands, with the
+	// newest base's position at it (§7.9's read cache, §8.9). nil writes nothing.
+	EntryCache func(ctx context.Context, networkId server.Id, n uint64, base uint64, entryBytes []byte) error
+	// §7.9's append limits, charged once per statement or base before its append. nil limits nothing.
+	Limiter ConfigLogLimiter
+	// Hints the network's clients on topic team after each entry this instance lands (§7.17). nil hints
+	// nothing.
+	Hint func(ctx context.Context, networkId server.Id, pin *bridge.AuthPin, entryBytes []byte)
 }
 
 func DefaultConfigLogSettings() *ConfigLogSettings {
@@ -199,7 +214,18 @@ type configLogNetwork struct {
 	signedGenesis []byte
 	// each base the verifier applied, by the SHA-256 of its Signed bytes
 	basePins map[[sha256.Size]byte]*bridge.AuthPin
-	lastUse  time.Time
+	// each base the store held at load and this instance applied since, in
+	// position order: what retention reads (config_log_retention.go)
+	bases   []*configLogBaseInfo
+	lastUse time.Time
+}
+
+// A base's facts retention needs.
+type configLogBaseInfo struct {
+	n             uint64
+	timeMs        int64
+	foldedThrough uint64
+	rowsSha256    []byte
 }
 
 // api's log sequencer over the first metadata cluster.
@@ -432,6 +458,20 @@ func (self *configLogNetwork) noteBaseWithLock(entryBytes []byte) {
 		return
 	}
 	self.basePins[sha256.Sum256(entry.GetBody())] = &bridge.AuthPin{Version: entry.GetN(), Chain: chain[:]}
+	signed := &bridge.Signed{}
+	header := &bridge.ProjectionHeader{}
+	if proto.Unmarshal(entry.GetBody(), signed) != nil || proto.Unmarshal(signed.GetBody(), header) != nil {
+		return
+	}
+	if 0 < len(self.bases) && entry.GetN() <= self.bases[len(self.bases)-1].n {
+		return
+	}
+	self.bases = append(self.bases, &configLogBaseInfo{
+		n:             entry.GetN(),
+		timeMs:        entry.GetTimeMs(),
+		foldedThrough: header.GetFoldedThrough(),
+		rowsSha256:    header.GetRowsSha256(),
+	})
 }
 
 // Applies an entry this instance or another wrote to the verifier. One that
@@ -443,6 +483,7 @@ func (self *configLogNetwork) applyWithLock(ctx context.Context, sequencer *Conf
 		glog.Errorf("[config]%s dropping the verifier: %v\n", self.networkId, err)
 		self.log, self.signedGenesis = nil, nil
 		clear(self.basePins)
+		self.bases = nil
 		return err
 	}
 	self.noteBaseWithLock(entryBytes)
@@ -457,6 +498,9 @@ type configLogAppend struct {
 	genesis []byte
 	// the entry a retry finds, or the verdict at the tip
 	verify func(network *configLogNetwork) (*bridge.AuthPin, error)
+	// charged once, after the first verify finds no retry and passes: §7.9's
+	// append limits, a 429, or an entry already in the log to answer with
+	charge func(ctx context.Context, network *configLogNetwork) (*bridge.AuthPin, error)
 	// written before the entry (a base's rows) and after it (base 1's
 	// genesis), each again on a retry
 	before func(ctx context.Context) error
@@ -502,15 +546,20 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 		return nil, &ConfigLogError{Status: http.StatusConflict, Code: "config_tip_moved", Tip: network.log.Pin(), Err: errors.New("the network's log has another genesis")}
 	}
 
-	finish := func(pin *bridge.AuthPin) (*bridge.AuthPin, error) {
+	// landedBytes is the entry this call landed, nil for one a retry found
+	finish := func(pin *bridge.AuthPin, landedBytes []byte) (*bridge.AuthPin, error) {
 		if request.after != nil {
 			if err := request.after(ctx); err != nil {
 				return nil, unavailable(pin, err)
 			}
 		}
 		self.advance(ctx, networkId, network, pin)
+		if landedBytes != nil {
+			self.published(ctx, networkId, network, pin, landedBytes)
+		}
 		return pin, nil
 	}
+	charged := false
 	for range self.settings.AppendAttemptCount {
 		found, err := request.verify(network)
 		if err != nil {
@@ -521,7 +570,17 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 			return nil, &ConfigLogError{Status: status, Code: code, Tip: network.log.Pin(), Err: err}
 		}
 		if found != nil {
-			return finish(found)
+			return finish(found, nil)
+		}
+		if !charged && request.charge != nil {
+			charged = true
+			existing, err := request.charge(ctx, network)
+			if err != nil {
+				return nil, err
+			}
+			if existing != nil {
+				return finish(existing, nil)
+			}
 		}
 		tip := network.log.Pin()
 		n := tip.GetVersion() + 1
@@ -552,10 +611,28 @@ func (self *ConfigLogSequencer) append(ctx context.Context, networkId server.Id,
 			return nil, err
 		}
 		if landed != nil {
-			return finish(landed)
+			return finish(landed, entryBytes)
 		}
 	}
 	return nil, unavailable(network.log.Pin(), errors.New("too many lost positions"))
+}
+
+// After this instance landed entryBytes at pin: the read cache's script and the
+// team hints, each best effort, since a lost cache costs cluster reads and a
+// lost hint a client's resync.
+func (self *ConfigLogSequencer) published(ctx context.Context, networkId server.Id, network *configLogNetwork, pin *bridge.AuthPin, entryBytes []byte) {
+	if self.settings.EntryCache != nil {
+		base := uint64(0)
+		if network.log != nil {
+			base = network.log.State().Base().GetVersion()
+		}
+		if err := self.settings.EntryCache(ctx, networkId, pin.GetVersion(), base, entryBytes); err != nil {
+			glog.Warningf("[config]%s {acl_}e misses %d: %v\n", networkId, pin.GetVersion(), err)
+		}
+	}
+	if self.settings.Hint != nil {
+		self.settings.Hint(ctx, networkId, pin, entryBytes)
+	}
 }
 
 // One entry's PUT at its position until its outcome is known: the new pin when
@@ -637,6 +714,9 @@ func (self *ConfigLogSequencer) AppendStatement(ctx context.Context, networkId s
 			}
 			return nil, verdict.Refusal
 		},
+		charge: func(ctx context.Context, network *configLogNetwork) (*bridge.AuthPin, error) {
+			return self.chargeStatement(ctx, networkId, network, signed)
+		},
 	})
 }
 
@@ -702,6 +782,12 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 			}
 			return nil, network.log.CheckConfigPushes(base.SignedHeader, base.ConfigPushes)
 		},
+		charge: func(ctx context.Context, network *configLogNetwork) (*bridge.AuthPin, error) {
+			if self.settings.Limiter == nil {
+				return nil, nil
+			}
+			return nil, self.settings.Limiter.ChargeBase(ctx, networkId)
+		},
 		before: func(ctx context.Context) error {
 			rowsSha256 := sha256.Sum256(base.Rows)
 			_, err := sidecar.PutImmutable(self.issueP0(ctx, len(base.Rows)), self.cluster, sidecar.ConfigRowsKey(sidecar.Id(networkId), rowsSha256[:]), base.Rows, nil)
@@ -718,8 +804,9 @@ func (self *ConfigLogSequencer) AppendBase(ctx context.Context, networkId server
 }
 
 // §7.9's tick row: api's own facts, a reap or a recovery window's end, which
-// readers check by content. Its schedule, at most once a minute per network,
-// is TEAM-M2-14's.
+// readers check by content, so api appends only a tick its verifier takes at
+// the tip (checkConfigLogTick). Ticks never count against the append limits.
+// Their schedule, at most once a minute per network, is config_log_tick.go's.
 func (self *ConfigLogSequencer) AppendTick(ctx context.Context, networkId server.Id, tick *bridge.ApiTick) (*bridge.AuthPin, error) {
 	body, err := proto.MarshalOptions{Deterministic: true}.Marshal(tick)
 	if err != nil {
@@ -732,7 +819,7 @@ func (self *ConfigLogSequencer) AppendTick(ctx context.Context, networkId server
 			if network.log.State().Base() == nil {
 				return nil, errors.New("no tick before base 1")
 			}
-			return nil, nil
+			return nil, checkConfigLogTick(network.log.State(), tick)
 		},
 	})
 }

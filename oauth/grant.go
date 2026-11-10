@@ -114,6 +114,13 @@ func Authorize(
 	if request.ClientId == UrcliClientId {
 		return "", ErrUrcliConsentRequired
 	}
+	// an edge origin signs in its network's members alone (edge_login.go)
+	if _, isOrigin, err := resolveEdgeOrigin(ctx, request.ClientId); isOrigin || err != nil {
+		if err != nil {
+			return "", err
+		}
+		return AuthorizeEdgeOrigin(ctx, request, user)
+	}
 
 	client, err := ValidateAuthorizationRequest(ctx, request)
 	if err != nil {

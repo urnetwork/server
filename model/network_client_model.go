@@ -221,6 +221,21 @@ type AuthNetworkClientArgs struct {
 	// re-auth may repeat a client's marks but never add one.
 	AdminRefused bool `json:"admin_refused,omitempty"`
 	StrictExp    bool `json:"strict_exp,omitempty"`
+	// §20.8's declaration, which `sidecar` sends unless `ur proxy` or a public
+	// exit is set: kept for life, carried in the client's tokens and inherited
+	// by its children, its window clients among them.
+	DeclaresNoEgress bool `json:"declares_no_egress,omitempty"`
+	// §18.6's mark an sdk sets on its device client once its forwarding role
+	// leaves legacy (owner decision 106): kept for life and inherited.
+	AclEnforcing bool `json:"acl_enforcing,omitempty"`
+	// A new top-level ephemeral client (§7.7): its lease is inserted with it and
+	// the reply returns its close capability once. Refused for a child and a
+	// re-auth.
+	Ephemeral bool `json:"ephemeral,omitempty"`
+
+	// what POST /network/enroll adds to the mint (EnrollNetworkClient), which no
+	// request body can set
+	enrollment *networkClientEnrollment
 }
 
 type ProxyConfig struct {
@@ -254,8 +269,13 @@ type AuthNetworkClientResult struct {
 	ProxyConfigResult *ProxyConfigResult      `json:"proxy_config_result,omitempty"`
 	// the client's marks: a sidecar persists its keychain only when the reply
 	// confirms admin_refused (§5.6)
-	AdminRefused bool `json:"admin_refused,omitempty"`
-	StrictExp    bool `json:"strict_exp,omitempty"`
+	AdminRefused     bool `json:"admin_refused,omitempty"`
+	StrictExp        bool `json:"strict_exp,omitempty"`
+	DeclaresNoEgress bool `json:"declares_no_egress,omitempty"`
+	AclEnforcing     bool `json:"acl_enforcing,omitempty"`
+	// an ephemeral mint's close capability, 128 random bits returned only here
+	// (§7.7); api keeps only its SHA-256
+	Close string `json:"close,omitempty"`
 }
 
 type AuthNetworkClientError struct {
@@ -365,8 +385,10 @@ func authNetworkClient(authClient *AuthNetworkClientArgs, clientSession *session
 func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientSession *session.ClientSession, registration *networkClientRegistrationOwner, validateParent bool, internalProbe ...bool) (authClientResult *AuthNetworkClientResult, authClientError error) {
 	mintCredential := clientSession.ByJwt.Renew()
 	probe := len(internalProbe) > 0 && internalProbe[0]
+	enrollment := authClient.enrollment
 	if !probe {
-		session.PrepareSessionMint(mintCredential, clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity)
+		// an enrollment is a sign-in of its own, by an auth key
+		session.PrepareSessionMint(mintCredential, clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity || enrollment != nil)
 	}
 	mint := func(ctx context.Context, tx server.PgTx, credential *session.ByJwt) (string, error) {
 		if probe {
@@ -376,6 +398,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		if clientSession.ApiKeyAuthenticated {
 			kind = "api_key_client"
 		}
+		if enrollment != nil {
+			kind = "auth_key_client"
+		}
 		return session.RegisterAndSignInTx(ctx, tx, credential, kind, nil, false)
 	}
 	if registration != nil {
@@ -384,10 +409,21 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 
 	// a mark that cannot be kept is a refusal, never a client without it
 	requestedMarks := requestedClientMarks(authClient)
-	if requestedMarks.marked() && !server.SidecarMg0Linked() {
+	if (requestedMarks.marked() || enrollment != nil) && !server.SidecarMg0Linked() ||
+		(authClient.Ephemeral || enrollment != nil) && !server.SidecarMg1Linked() {
 		authClientResult = &AuthNetworkClientResult{
 			Error: &AuthNetworkClientError{
 				Message: clientMarksUnavailableMessage,
+			},
+		}
+		return
+	}
+	// an ephemeral client is a new top-level one, its lease and close capability
+	// minted with it (§7.7)
+	if authClient.Ephemeral && (authClient.ClientId != nil || authClient.SourceClientId != nil) {
+		authClientResult = &AuthNetworkClientResult{
+			Error: &AuthNetworkClientError{
+				Message: clientEphemeralTopLevelMessage,
 			},
 		}
 		return
@@ -554,7 +590,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// this does no redis/db work at all. See NetworkConcurrentClientsExceeded.
 		// Checked before the tx so the lookup does not hold it open. Connection
 		// activation applies the same limit; see CanConnectNetworkPeer.
-		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		// A client declared no-egress is exempt too (§20.8): a top-level mint's
+		// marks are its request's.
+		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && !requestedMarks.declaresNoEgress && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 		// A hosted proxy is limited on its own, and always
 		// (network_client_proxy_limit.go): the network's active proxies are
 		// capped and its proxy creates are rated per minute. The Embed row and
@@ -731,6 +769,11 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			if clientSession.ByJwt.StrictExp {
 				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
 			}
+			if enrollment != nil {
+				// an enrolled client is a sidecar's, whatever the request says
+				// (I-6, D-TEAM-14)
+				marks = marks.union(clientMarks{adminRefused: true, strictExp: true})
+			}
 			if message := refuseClientMarks(clientSession.ByJwt.NetworkId, marks, authClient.ProxyConfig != nil); message != "" {
 				authClientResult = &AuthNetworkClientResult{
 					Error: &AuthNetworkClientError{
@@ -805,7 +848,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				// it never becomes a peer (NetworkPeerCategoryProvider). The limit
 				// is per network: an Embed plan raises it (see
 				// network_client_limit_model.go); the peer valve keeps the constant.
-				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
+				// a declared no-egress client is exempt like a provider (§20.8)
+				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent && !marks.declaresNoEgress {
 					topLevelClientLimit := networkTopLevelClientLimitInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId)
 					// the scan is bounded at the limit since only the threshold matters
 					topLevelClientCount := countNetworkActiveTopLevelClients(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, topLevelClientLimit+1)
@@ -818,6 +862,32 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 						}
 						return
 					}
+				}
+
+				// an enrollment spends its auth key here, the last check before
+				// the first write, so a refusal writes nothing and a key's last
+				// use goes to one of two racing enrollments (ConsumeAuthKeyInTx)
+				if enrollment != nil {
+					if hook := Testing_EnrollBeforeConsume; hook != nil {
+						hook()
+					}
+					authKey, err := ConsumeAuthKeyInTx(clientSession.Ctx, tx, enrollment.bearer)
+					if errors.Is(err, ErrAuthKeyRefused) {
+						enrollment.refusal = err
+						authClientResult = &AuthNetworkClientResult{
+							Error: &AuthNetworkClientError{
+								Message: networkEnrollAuthKeyInvalidMessage,
+							},
+						}
+						return
+					}
+					server.Raise(err)
+					// the key names the network and creator this mint is for;
+					// both are immutable, so a difference rolls the spend back
+					if authKey.AuthKeyId != enrollment.authKeyId || authKey.NetworkId != clientSession.ByJwt.NetworkId || authKey.CreatorUserId != clientSession.ByJwt.UserId {
+						server.Raise(errors.New("an auth key changed its network or creator"))
+					}
+					enrollment.authKey = authKey
 				}
 
 				deviceId = mintedDeviceId
@@ -980,8 +1050,25 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				principal,
 			))
 
-			if marks.marked() {
-				insertClientOwnerInTx(clientSession.Ctx, tx, clientId, clientSession.ByJwt.UserId, marks)
+			// the owner row: an enrollment's whole row (§7.7), else the marks
+			// and an ephemeral mint's mark, owned by the minting user
+			var ownerRow *clientOwnerInsert
+			if enrollment != nil {
+				ownerRow = enrollment.ownerRow(marks)
+			} else if marks.marked() || authClient.Ephemeral {
+				ownerUserId := clientSession.ByJwt.UserId
+				ownerRow = &clientOwnerInsert{
+					ownerUserId: &ownerUserId,
+					ephemeral:   authClient.Ephemeral,
+					marks:       marks,
+				}
+			}
+			closeCapability := ""
+			if ownerRow != nil {
+				insertClientOwnerInTx(clientSession.Ctx, tx, clientId, ownerRow)
+				if ownerRow.ephemeral {
+					closeCapability = InsertClientLeaseInTx(clientSession.Ctx, tx, clientId, createTime)
+				}
 			}
 
 			if authClient.ProvideIntent && authClient.SourceClientId == nil {
@@ -1061,14 +1148,18 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			byJwtWithClientId.SetStrictExp(marks.strictExp)
+			byJwtWithClientId.DeclaresNoEgress = marks.declaresNoEgress
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
 			server.Raise(mintErr)
 			authClientResult = &AuthNetworkClientResult{
-				ByClientJwt:  &byClientJwtSigned,
-				ClientId:     &clientId,
-				AdminRefused: marks.adminRefused,
-				StrictExp:    marks.strictExp,
+				ByClientJwt:      &byClientJwtSigned,
+				ClientId:         &clientId,
+				AdminRefused:     marks.adminRefused,
+				StrictExp:        marks.strictExp,
+				DeclaresNoEgress: marks.declaresNoEgress,
+				AclEnforcing:     marks.aclEnforcing,
+				Close:            closeCapability,
 			}
 			if proxyClient != nil {
 				authClientResult.ProxyConfigResult = &ProxyConfigResult{
@@ -1123,6 +1214,11 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					Message: "Roles and principal are assigned at creation and cannot be changed.",
 				},
 			}
+			return
+		}
+		// an enrollment always mints a new client
+		if enrollment != nil {
+			authClientError = errors.New("an enrollment reissues no client")
 			return
 		}
 
@@ -1319,14 +1415,17 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			byJwtWithClientId.SetStrictExp(marks.strictExp)
+			byJwtWithClientId.DeclaresNoEgress = marks.declaresNoEgress
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
 			byClientJwtSigned, mintErr := mint(clientSession.Ctx, tx, byJwtWithClientId)
 			server.Raise(mintErr)
 			authClientResult = &AuthNetworkClientResult{
-				ByClientJwt:  &byClientJwtSigned,
-				ClientId:     authClient.ClientId,
-				AdminRefused: marks.adminRefused,
-				StrictExp:    marks.strictExp,
+				ByClientJwt:      &byClientJwtSigned,
+				ClientId:         authClient.ClientId,
+				AdminRefused:     marks.adminRefused,
+				StrictExp:        marks.strictExp,
+				DeclaresNoEgress: marks.declaresNoEgress,
+				AclEnforcing:     marks.aclEnforcing,
 			}
 		}, server.TxReadCommitted)
 	}
@@ -2276,6 +2375,11 @@ type NetworkClientsResult struct {
 type NetworkClientInfo struct {
 	NetworkClient
 
+	// §7.7's mark of an sdk's device client whose forwarding role left legacy
+	// (owner decision 106); false for a legacy client and in a binary that does
+	// not link MG0
+	AclEnforcing bool `json:"acl_enforcing"`
+
 	Connections []*NetworkClientConnection `json:"connections,omitempty"`
 
 	// the unique exit of a hosted proxy created with unique_exit, in the
@@ -2375,6 +2479,16 @@ func getNetworkClientList(clientSession *session.ClientSession, kind networkClie
 					)`
 	}
 
+	// §7.7's acl_enforcing, from the owner row MG0 links
+	aclEnforcingColumn := `false`
+	aclEnforcingJoin := ``
+	if server.SidecarMg0Linked() {
+		aclEnforcingColumn = `COALESCE(network_client_owner.acl_enforcing, false)`
+		aclEnforcingJoin = `
+				LEFT JOIN network_client_owner ON
+					network_client_owner.client_id = network_client.client_id`
+	}
+
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			clientSession.Ctx,
@@ -2390,7 +2504,8 @@ func getNetworkClientList(clientSession *session.ClientSession, kind networkClie
 					network_client.auth_time,
 					network_client.principal,
 					provide_key.provide_mode,
-					proxy_client.proxy_client_json
+					proxy_client.proxy_client_json,
+					`+aclEnforcingColumn+`
 				FROM network_client
 				LEFT JOIN provide_key ON
 					provide_key.client_id = network_client.client_id AND
@@ -2398,7 +2513,7 @@ func getNetworkClientList(clientSession *session.ClientSession, kind networkClie
 				LEFT JOIN device ON
 					device.device_id = network_client.device_id
 				LEFT JOIN proxy_client ON
-					proxy_client.client_id = network_client.client_id
+					proxy_client.client_id = network_client.client_id`+aclEnforcingJoin+`
 				WHERE
 					network_client.network_id = $1 AND
 					network_client.active = true AND`+kindFilter+`
@@ -2426,6 +2541,7 @@ func getNetworkClientList(clientSession *session.ClientSession, kind networkClie
 					&clientInfo.Principal,
 					&clientInfo.ProvideMode,
 					&proxyClientJson,
+					&clientInfo.AclEnforcing,
 				))
 				if deviceName_ != nil {
 					clientInfo.DeviceName = *deviceName_

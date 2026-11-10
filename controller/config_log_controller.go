@@ -12,10 +12,11 @@ package controller
 // recovery-signed statement only (§7.9's Recovery `before admission` row),
 // and base 1 comes from the network's first device, which carries its
 // genesis: the owner's top-level client, bound to the sidecar the genesis
-// names. That the device is untagged is enrollment's to keep: before base 1 a
-// tagged enrollment answers no_genesis (TEAM-M1-04, TEAM-M2-16). The statements themselves are judged by their signatures and the
-// log's rules (model/config_log_model.go), so this is defense in depth, not
-// the authority.
+// names, and neither tagged nor ephemeral: before base 1 a tagged or
+// ephemeral enrollment answers no_genesis (TEAM-M1-04), and base 1 refuses
+// such a client whenever it was minted. The statements themselves are judged
+// by their signatures and the log's rules (model/config_log_model.go), so
+// this is defense in depth, not the authority.
 //
 // Refusals answer {"error", "code", "tip"}: 403 config_refused, 409
 // config_tip_moved and config_unadmitted's 403; an unavailable store or a
@@ -181,6 +182,16 @@ func NetworkConfigProjectionPublish(args *NetworkConfigProjectionPublishArgs, cl
 		networkClient := model.GetNetworkClient(clientSession.Ctx, *clientSession.ByJwt.ClientId)
 		if networkClient == nil || networkClient.SourceClientId != nil {
 			return nil, configUnadmitted("base 1 comes from a top-level client")
+		}
+		// and an untagged, lasting one: enrollment refuses a tagged or ephemeral
+		// client before base 1 (no_genesis), and this refuses one minted after
+		// a lost base 1 too
+		taggedOrEphemeral, err := model.ClientTaggedOrEphemeral(clientSession.Ctx, *clientSession.ByJwt.ClientId)
+		if err != nil {
+			return nil, &model.ConfigLogError{Status: http.StatusServiceUnavailable, Code: "unavailable", Err: err}
+		}
+		if taggedOrEphemeral {
+			return nil, configUnadmitted("base 1 comes from an untagged device that is not ephemeral")
 		}
 	} else {
 		admitted, err := configClientAdmitted(sequencer, clientSession)

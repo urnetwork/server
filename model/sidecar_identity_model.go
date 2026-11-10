@@ -159,6 +159,11 @@ func bindSidecarIdentityInTx(ctx context.Context, tx server.PgTx, record *Sideca
 	if outcome, storedGeneration, found := clientBinding(); found {
 		return outcome, storedGeneration
 	}
+	// a client its enrollment keyed binds that key alone, so a copied token
+	// cannot bind a key of its own (plan-TEAM-enroll-client-key)
+	if enrolledKey := getEnrolledClientPublicKeyInTx(ctx, tx, record.ClientId); enrolledKey != nil && !bytes.Equal(enrolledKey, record.ClientPublicKey) {
+		return SidecarBindClientBound, 0
+	}
 
 	// the identity row, locked so this sidecar's binds take their turns
 	type identityRow struct {

@@ -191,6 +191,9 @@ func initTaskSchedule(ctx context.Context) {
 		// §18.8's ephemeral clients reaped every 60 s by their lease and
 		// newest disconnect; not scheduled without MG1
 		work.ScheduleReapEphemeralClients(clientSession, tx)
+		// §7.9's log retention every hour, through the process's sequencer;
+		// not scheduled without MG2
+		work.ScheduleConfigLogRetention(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
@@ -641,6 +644,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.ReapEphemeralClients,
 			work.ReapEphemeralClientsPost,
+		),
+		// §7.9's ticks, which reaps schedule a network at a time, and the
+		// log's retention
+		task.NewTaskTargetWithPost(
+			model.AppendConfigLogTickTask,
+			model.AppendConfigLogTickTaskPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ConfigLogRetention,
+			work.ConfigLogRetentionPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
