@@ -67,6 +67,21 @@ The source manifest is published in config commit
 Do not distribute operational config or vault files; this index is the public
 source extract.
 
+### Executor-control correction (approved 2026-11-10; activation pending)
+
+The operator approved correcting the private executor's namespace-probe user,
+stop/cleanup ordering and trusted-operator directory handling, plus the already
+tested throwaway build-layer branch normalization. These control fixes do not
+change the ten product commits, evaluator image, scoring instrument, workload,
+G2/G7 rules, margin, submission order or clocks above.
+
+Corrected agents must use newly recorded host fingerprints, not impersonate the
+old frozen identities. The implementation records an append-only per-round
+operational amendment, retaining the original round and intake-policy bytes.
+Registration is prohibited after any customer evaluation or official R9 host
+admission starts. Both hosts still need fresh, amendment-bound admission
+receipts. The amendment is not yet active; scoring remains paused.
+
 ## Production epoch 1 — initial baseline
 
 Verified against public `/competition/info` and the source ledger on 2026-11-02.

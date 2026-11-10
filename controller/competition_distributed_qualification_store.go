@@ -55,6 +55,7 @@ func (self PostgresStore) reserveDistributedExecutorQualification(ctx context.Co
 			automationScopeLockInTx(ctx, tx, settings)
 			server.Raise(self.requireAutomationLeaseInTx(ctx, tx, settings, *settings.automationLease))
 			server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
+			server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_executor_control_amendment',$1,true)`, competitionExecutorControlAmendmentSha256(settings)))
 			now := self.nowUtc().Truncate(time.Microsecond)
 			deadline := now.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second)
 			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run

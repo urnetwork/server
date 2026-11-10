@@ -101,7 +101,7 @@ func competitionExecutorQualificationSha256(settings *Settings) string {
 	if settings.DistributedEvaluationPolicy != nil && settings.executorHostId != "" {
 		for _, host := range settings.DistributedEvaluationPolicy.Hosts {
 			if host.HostId == settings.executorHostId && host.SlotId == settings.executorSlotId {
-				return host.QualificationSha256
+				return competitionExecutorControlHost(settings, host).QualificationSha256
 			}
 		}
 		return ""

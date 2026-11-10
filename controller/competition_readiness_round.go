@@ -51,9 +51,13 @@ func readCompetitionReadinessHosts(ctx context.Context, reader competitionIntake
 		             AND self_check_json->>'rebaseline_round_id' =
 		                 COALESCE((SELECT round_id FROM current_round),'')
 		       )
-		FROM competition_evaluator_host
+		FROM competition_evaluator_host evaluator
 		WHERE eligible=true AND hardware_id=$1 AND image_digest=$2
-		  AND self_check_json->>'qualification_sha256'=$3
+		  AND (self_check_json->>'qualification_sha256'=$3 OR EXISTS (
+			SELECT 1 FROM current_round approved
+			WHERE competition_executor_control_host(approved.round_id::uuid,evaluator.host_id)->>'qualification_sha256'
+			  =self_check_json->>'qualification_sha256'
+		  ))
 		  AND heartbeat_at >= $4
 	`, settings.EvaluationPolicy.HardwareId, settings.EvaluatorImageDigest,
 		settings.EvaluationPolicy.HostQualificationSha256,

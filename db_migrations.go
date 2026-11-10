@@ -11396,4 +11396,8 @@ var migrations = []any{
 	// A separately pinned operator amendment records the epoch-one official
 	// review without rewriting frozen Snow policies, clocks or scoring evidence.
 	newSqlMigration(competitionOfficialReviewMigration()),
+
+	// Corrected executor identities are separately audited before any customer
+	// or R9 admission clock; frozen round/source policy bytes remain untouched.
+	newSqlMigration(CompetitionExecutorControlAmendmentMigrationSql()),
 }

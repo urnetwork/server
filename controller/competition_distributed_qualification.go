@@ -46,6 +46,7 @@ type competitionHostMetricScreen struct {
 // The immutable retained receipt binds every host to this exact seed/workload,
 // source, image, local fixtures, full shared baseline and original no-op clock.
 type competitionExecutorEquivalenceReceipt struct {
+	ControlAmendmentSha256            string                               `json:"control_amendment_sha256,omitempty"`
 	WorkCoveragePolicy                *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 	Schema                            int                                  `json:"schema"`
 	Kind                              string                               `json:"kind"`
@@ -99,6 +100,7 @@ func qualifyCompetitionDistributedHosts(ctx context.Context, settings *Settings,
 	}
 	results := make(chan error, len(settings.DistributedEvaluationPolicy.Hosts))
 	for _, host := range settings.DistributedEvaluationPolicy.Hosts {
+		host = competitionExecutorControlHost(settings, host)
 		go func() {
 			results <- qualifyCompetitionDistributedHost(ctx, settings, store.PostgresStore, round, baseline, host)
 		}()
@@ -330,8 +332,9 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 	policy := settings.DistributedEvaluationPolicy
 	manifestDigest := sha256.Sum256(outcome.ArtifactManifest)
 	receipt := &competitionExecutorEquivalenceReceipt{Schema: 1, Kind: "competition-executor-noop-admission/v1", RoundId: job.RoundId.String(), HostId: host.HostId,
-		WorkCoveragePolicy: settings.EvaluationPolicy.Clone().WorkCoveragePolicy,
-		BaselineSha256:     job.RoundBaseline.Sha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256, ProvidersSha256: job.Round.ProvidersSha256,
+		ControlAmendmentSha256: competitionExecutorControlAmendmentSha256(settings),
+		WorkCoveragePolicy:     settings.EvaluationPolicy.Clone().WorkCoveragePolicy,
+		BaselineSha256:         job.RoundBaseline.Sha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256, ProvidersSha256: job.Round.ProvidersSha256,
 		EvaluatorImageDigest: job.EvaluatorImageDigest, QualificationSha256: host.QualificationSha256, ConfigLocalSha256: settings.EvaluationPolicy.ConfigLocalSha256, VaultLocalSha256: settings.EvaluationPolicy.VaultLocalSha256,
 		PolicyApprovalSha256: policy.ApprovalSha256, QualificationJobId: job.JobId.String(), QualificationStartedAt: job.StartedAt.UTC(), QualificationDeadlineAt: job.ExecutionDeadline.UTC(),
 		Noop: true, Passed: true, Replicates: 9, ScreenKind: policy.EquivalencePolicy.ScreenKind, MaximumRawScoreRelativeDifference: policy.EquivalencePolicy.MaximumRawScoreRelativeDifference,
@@ -367,6 +370,7 @@ func competitionExecutorReceiptBytes(receipt *competitionExecutorEquivalenceRece
 // Existing receipts cannot be relabeled as evidence for a later seed or policy.
 func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy, receipt *competitionExecutorEquivalenceReceipt) error {
 	if receipt == nil || receipt.Schema != 1 || receipt.Kind != "competition-executor-noop-admission/v1" || receipt.RoundId != round.RoundId.String() || receipt.HostId != host.HostId ||
+		receipt.ControlAmendmentSha256 != competitionExecutorControlAmendmentSha256(settings) ||
 		receipt.BaselineSha256 != baseline.Sha256 || receipt.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || receipt.ProvidersSha256 != round.ProvidersSha256 ||
 		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.QualificationSha256 != host.QualificationSha256 || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
 		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || !receipt.Passed || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||

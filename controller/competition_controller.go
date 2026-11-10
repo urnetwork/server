@@ -628,6 +628,7 @@ type Settings struct {
 	executorReconcileExpiredOnly bool
 	executorReconcileOnly        bool
 	distributedSourceCommits     map[string]string
+	executorControlAmendment     *competitionExecutorControlAmendmentRecord
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
 }
