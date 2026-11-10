@@ -13,7 +13,8 @@ import (
 // fresh quote. The status and requote calls carry the invoice's status token
 // in the body; it never goes in a url.
 
-// CryptoPaymentAssets lists the coins that are on and what each sells.
+// CryptoPaymentAssets lists the coins that can be paid with now and what each
+// sells, and apart from them the coins that are on but temporarily unavailable.
 func CryptoPaymentAssets(w http.ResponseWriter, r *http.Request) {
 	router.WrapNoAuth(controller.CryptoPaymentAssets, w, r)
 }
