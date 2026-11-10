@@ -1916,8 +1916,8 @@ func validateRuntimeBoundaryInterfaces(content []byte, settings RuntimeResourceB
 			Kind string `json:"info_kind"`
 		} `json:"linkinfo"`
 		Addresses []struct {
-			Family, Local string
-			Prefixlen     int
+			Family, Local, Scope string
+			Prefixlen            int
 		} `json:"addr_info"`
 	}
 	if json.Unmarshal(content, &links) != nil || len(links) == 0 || len(links) > settings.MaximumNetworkInterfaces {
@@ -1945,16 +1945,23 @@ func validateRuntimeBoundaryInterfaces(content []byte, settings RuntimeResourceB
 				}
 			}
 		case runtimeBoundaryBridgeNamePattern.MatchString(link.Ifname):
-			if link.LinkInfo.Kind != "bridge" || link.Master != "" || len(link.Addresses) != 0 {
+			if link.LinkInfo.Kind != "bridge" || link.Master != "" {
 				return errors.New("private bridge is not isolated and address-free")
 			}
 			bridges[link.Ifname] = true
 		case runtimeBoundaryVethNamePattern.MatchString(link.Ifname):
-			if link.LinkInfo.Kind != "veth" || link.LinkNetnsid == nil || *link.LinkNetnsid < 0 || len(link.Addresses) != 0 {
+			if link.LinkInfo.Kind != "veth" || link.LinkNetnsid == nil || *link.LinkNetnsid < 0 {
 				return errors.New("private workload veth is not an isolated peer")
 			}
 		default:
 			return errors.New("private namespace contains an external or unreviewed link")
+		}
+		if link.Ifname != "lo" {
+			for _, address := range link.Addresses {
+				if !isolatedNetworkLinkLocalAddress(address.Family, address.Local, address.Scope, address.Prefixlen) {
+					return errors.New("private interface exposes a non-link-local address")
+				}
+			}
 		}
 	}
 	if !loopback || len(bridges) > 1 {
@@ -1976,6 +1983,7 @@ func validateRuntimeBoundaryRoutes(content []byte, settings RuntimeResourceBound
 	}
 	var routes []struct {
 		Dst, Dev, Gateway, Via string
+		Type, Protocol         string
 		Nexthops               []json.RawMessage
 	}
 	if json.Unmarshal(content, &routes) != nil || len(routes) > settings.MaximumNetworkRoutes {
@@ -1983,8 +1991,19 @@ func validateRuntimeBoundaryRoutes(content []byte, settings RuntimeResourceBound
 	}
 	for _, route := range routes {
 		if route.Dst == "" || route.Dst == "default" || route.Gateway != "" || route.Via != "" || len(route.Nexthops) != 0 ||
-			route.Dev != "lo" && !runtimeBoundaryBridgeNamePattern.MatchString(route.Dev) {
+			route.Dev != "lo" && !runtimeBoundaryBridgeNamePattern.MatchString(route.Dev) && !runtimeBoundaryVethNamePattern.MatchString(route.Dev) {
 			return errors.New("private namespace has an external or default route")
+		}
+		if runtimeBoundaryVethNamePattern.MatchString(route.Dev) {
+			// Only kernel-created IPv6 link-local and multicast entries belong
+			// on these peers. The preceding full link inventory proves custody.
+			local := net.ParseIP(route.Dst)
+			linkLocal := route.Type == "local" && local != nil && local.To4() == nil && local.IsLinkLocalUnicast()
+			linkPrefix := route.Dst == "fe80::/64" && (route.Type == "" || route.Type == "unicast")
+			multicast := route.Dst == "ff00::/8" && route.Type == "multicast"
+			if route.Protocol != "kernel" || !linkLocal && !linkPrefix && !multicast {
+				return errors.New("private veth has a non-kernel or routable entry")
+			}
 		}
 	}
 	return nil

@@ -16,7 +16,8 @@ import (
 // Return only the exact finite ip query families used by the native reader.
 type networkLifetimeNamespace struct {
 	runtimeBoundaryTestNamespace
-	bridge string
+	bridge    string
+	addresses []any
 }
 
 func (self *networkLifetimeNamespace) Run(ctx context.Context, _ Pin, arguments []string) ([]byte, error) {
@@ -28,12 +29,12 @@ func (self *networkLifetimeNamespace) Run(ctx context.Context, _ Pin, arguments 
 	case "-j -d addr show":
 		return json.Marshal([]map[string]any{
 			{"ifindex": 1, "ifname": "lo", "link_type": "loopback", "addr_info": []any{}},
-			{"ifindex": 2, "ifname": self.bridge, "link_type": "ether", "linkinfo": map[string]string{"info_kind": "bridge"}, "addr_info": []any{}},
+			{"ifindex": 2, "ifname": self.bridge, "link_type": "ether", "linkinfo": map[string]string{"info_kind": "bridge"}, "addr_info": self.addresses},
 		})
 	case "-j -4 route show table all", "-j -6 route show table all":
 		return []byte("[]"), nil
 	case "-j addr show dev " + self.bridge:
-		return json.Marshal([]map[string]any{{"ifname": self.bridge, "addr_info": []any{}}})
+		return json.Marshal([]map[string]any{{"ifname": self.bridge, "addr_info": self.addresses}})
 	default:
 		return nil, errors.New("unexpected synthetic native query")
 	}
@@ -45,7 +46,7 @@ func networkLifetimeFixture(t *testing.T) (*dockerProxyTest, *networkLifetimeNam
 	t.Helper()
 	fixture := newDockerProxyTest(t)
 	fixture.proxy.plan.HostFiles = &HostFilesPlan{WorkDeviceId: 123}
-	namespace := &networkLifetimeNamespace{bridge: "unev-" + fixture.plan.RunId[:10]}
+	namespace := &networkLifetimeNamespace{bridge: "unev-" + fixture.plan.RunId[:10], addresses: []any{}}
 	boundary := &RuntimeResourceBoundary{BaseDirectory: fixture.plan.BaseDirectory, WorkRoot: filepath.Dir(fixture.plan.ContextRoot),
 		ScratchRoot: filepath.Dir(fixture.plan.ScratchDirectory), PrivateSocketPath: fixture.plan.UpstreamSocketPath, WorkDeviceId: 123, namespace: namespace}
 	if err := fixture.proxy.bindRuntimeBoundary(boundary); err != nil {
@@ -62,6 +63,28 @@ func networkLifetimeFixture(t *testing.T) (*dockerProxyTest, *networkLifetimeNam
 			"Options": map[string]string{"com.docker.network.bridge.name": namespace.bridge, "com.docker.network.bridge.gateway_mode_ipv4": "isolated", "com.docker.network.bridge.gateway_mode_ipv6": "isolated"}})
 	})
 	return fixture, namespace, networkId
+}
+
+// Docker's bridge gains a kernel link-local address when its first peer starts.
+// The composed proof must apply the same address policy at both inventory reads.
+func TestHostNetworkRetainedReceiptAllowsKernelLinkLocal(t *testing.T) {
+	fixture, namespace, networkId := networkLifetimeFixture(t)
+	namespace.addresses = []any{map[string]any{"family": "inet6", "local": "fe80::1", "scope": "link", "prefixlen": 64}}
+	proof, err := fixture.proxy.proveHostNetwork(t.Context(), networkId)
+	if err != nil || validateHostNetworkProof(proof, fixture.plan.RunId, networkId) != nil {
+		t.Fatal("kernel link-local bridge failed composed proof", err)
+	}
+	for _, address := range []map[string]any{
+		{"family": "inet", "local": "192.0.2.1", "scope": "global", "prefixlen": 24},
+		{"family": "inet6", "local": "2001:db8::1", "scope": "global", "prefixlen": 64},
+		{"family": "inet6", "local": "fe80::1", "scope": "global", "prefixlen": 64},
+		{"family": "inet6", "local": "fe80::1", "scope": "link", "prefixlen": 32},
+	} {
+		namespace.addresses = []any{address}
+		if _, err := fixture.proxy.proveHostNetwork(t.Context(), networkId); err == nil {
+			t.Fatal("composed proof admitted reachable or incorrectly scoped address", address)
+		}
+	}
 }
 
 // This succeeds without opening the idle-admission pin again. A regression to

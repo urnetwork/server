@@ -1,6 +1,22 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T18:08:34Z",
+  "observed_at": "2026-11-10T19:17:10Z",
+  "latest_isolated_link_diagnosis": {
+    "active_role": "v17",
+    "v17_probes_terminal_failed": true,
+    "candidate_build_and_service_health_passed_both_hosts": true,
+    "runner_admitted": false,
+    "root_cause": "The full namespace inventory rejected kernel-assigned IPv6 link-local addresses that the exact bridge validator already allowed. After correcting that contradiction, the route validator rejected the corresponding kernel link-local and multicast routes on owned veth peers.",
+    "correction": "Share the exact inet6/link/64 link-local address predicate between inventory and bridge validation. Permit only kernel-created fe80::/64, local IPv6 link-local and ff00::/8 multicast routes on isolated veth peers. Full inventory, ownership, private namespace, no external/default/gateway/multipath and stale-generation checks remain enabled.",
+    "deterministic_regressions": "Three repetitions passed for composed retained-receipt link-local proof, bridge/veth address controls and bounded kernel-veth route classes. Global addresses, wrong family/scope/prefix, malformed addresses, static/default/global/gateway/multipath routes are refused.",
+    "native_test_binary_sha256": "cc62282ff0cbd742ec51d7eed9885bae78848da14e6b9773fce23e5d6b3db143",
+    "native_tests": "Three consecutive composed native passes per host, exact fixture cleanup: Sille37.82/37.60/37.74s; Goofe29.29/29.23/29.22s. Final full agent/CLI race suite passed three repetitions214.466s/1.028s; go vet passed.",
+    "installed": false,
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false,
+    "next_action": "Finish exact native and race qualification, publish a clean immutable replacement agent, repin both host roles at idle, and repeat fresh end-to-end operator qualification. Then complete containment promotion, record the executor amendment, and run official R9 baseline and parallel admission. Earlier state entries below are historical."
+  },
   "latest_network_proof_diagnosis": {
     "v16a_probes_terminal": true,
     "v16a_score_produced": false,

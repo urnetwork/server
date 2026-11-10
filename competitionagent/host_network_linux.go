@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -71,8 +72,11 @@ func (self *DockerProxy) proveHostNetwork(ctx context.Context, networkId string)
 	}
 	settings := DefaultRuntimeResourceBoundarySettings()
 	link, err := (runtimeBoundaryNativeHost{}).NetworkLink(ctx, *boundary, bridge, settings)
-	if err != nil || validateHostNetworkLink(link, bridge) != nil {
-		return HostNetworkBoundary{}, errors.New("private bridge has an unqualified kernel address")
+	if err != nil {
+		return HostNetworkBoundary{}, fmt.Errorf("private bridge kernel observation: %w", err)
+	}
+	if err := validateHostNetworkLink(link, bridge); err != nil {
+		return HostNetworkBoundary{}, fmt.Errorf("private bridge kernel address: %w", err)
 	}
 	return HostNetworkBoundary{Schema: Schema, NetworkId: networkId, BridgeName: bridge, PrivateNamespace: true,
 		IsolatedGateway: true, LinkSha256: digestDockerBytes(link)}, nil
@@ -117,12 +121,18 @@ func validateHostNetworkLink(content []byte, bridge string) error {
 		return errors.New("private bridge kernel identity is absent or ambiguous")
 	}
 	for _, address := range links[0].Addresses {
-		ip := net.ParseIP(address.Local)
-		if address.Family != "inet6" || address.Scope != "link" || address.PrefixLength != 64 || ip == nil || ip.To4() != nil || !ip.IsLinkLocalUnicast() {
+		if !isolatedNetworkLinkLocalAddress(address.Family, address.Local, address.Scope, address.PrefixLength) {
 			return errors.New("private bridge retains a host-reachable address")
 		}
 	}
 	return nil
+}
+
+// Kernel-assigned IPv6 link-local addresses do not introduce a gateway or an
+// external interface. Both full inventory and exact-bridge proof use this rule.
+func isolatedNetworkLinkLocalAddress(family, local, scope string, prefixLength int) bool {
+	ip := net.ParseIP(local)
+	return family == "inet6" && scope == "link" && prefixLength == 64 && ip != nil && ip.To4() == nil && ip.IsLinkLocalUnicast()
 }
 
 // The public client accepts only the exact finite projection returned for its

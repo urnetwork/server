@@ -969,7 +969,7 @@ func TestRuntimeResourceBoundaryPrivateTemplatesArmFixedRecovery(t *testing.T) {
 	}
 }
 
-// The only allowed links are loopback and one address-free private cohort
+// The only allowed links are loopback and one isolated private cohort
 // bridge with container veths enslaved to it; physical/tunnel/extra bridges fail.
 func TestRuntimeResourceBoundaryOfflineInterfaceInventory(t *testing.T) {
 	settings := DefaultRuntimeResourceBoundarySettings()
@@ -994,6 +994,35 @@ func TestRuntimeResourceBoundaryOfflineInterfaceInventory(t *testing.T) {
 	}
 }
 
+// Bridge and veth IPv6 link-local assignments have identical safety rules;
+// IPv4, globally scoped, malformed and non-/64 addresses remain forbidden.
+func TestRuntimeResourceBoundaryLinkLocalInterfaceInventory(t *testing.T) {
+	settings := DefaultRuntimeResourceBoundarySettings()
+	for _, target := range []string{"bridge", "veth"} {
+		for _, address := range []string{
+			`{"family":"inet6","local":"fe80::1","scope":"link","prefixlen":64}`,
+			`{"family":"inet","local":"192.0.2.1","scope":"global","prefixlen":24}`,
+			`{"family":"inet6","local":"2001:db8::1","scope":"global","prefixlen":64}`,
+			`{"family":"inet6","local":"fe80::1","scope":"global","prefixlen":64}`,
+			`{"family":"inet6","local":"fe80::1","scope":"link","prefixlen":32}`,
+			`{"family":"inet6","local":"invalid","scope":"link","prefixlen":64}`,
+		} {
+			bridgeAddresses, vethAddresses := `[]`, `[]`
+			if target == "bridge" {
+				bridgeAddresses = `[` + address + `]`
+			} else {
+				vethAddresses = `[` + address + `]`
+			}
+			content := `[{"ifindex":1,"ifname":"lo","link_type":"loopback","addr_info":[]},{"ifindex":2,"ifname":"unev-0123456789","linkinfo":{"info_kind":"bridge"},"addr_info":` + bridgeAddresses + `},{"ifindex":3,"ifname":"veth0123abc","master":"unev-0123456789","link_netnsid":0,"linkinfo":{"info_kind":"veth"},"addr_info":` + vethAddresses + `}]`
+			err := validateRuntimeBoundaryInterfaces([]byte(content), settings)
+			wantAllowed := address == `{"family":"inet6","local":"fe80::1","scope":"link","prefixlen":64}`
+			if (err == nil) != wantAllowed {
+				t.Fatalf("%s address %s: allowed=%v, error=%v", target, address, wantAllowed, err)
+			}
+		}
+	}
+}
+
 // Offline routes cannot install a gateway, default, multipath or foreign link.
 func TestRuntimeResourceBoundaryOfflineRouteContract(t *testing.T) {
 	settings := DefaultRuntimeResourceBoundarySettings()
@@ -1008,6 +1037,35 @@ func TestRuntimeResourceBoundaryOfflineRouteContract(t *testing.T) {
 	} {
 		if err := validateRuntimeBoundaryRoutes([]byte(content), settings); err == nil {
 			t.Fatal("external private-namespace route was admitted")
+		}
+	}
+}
+
+// Bringing up an isolated peer creates local and multicast kernel routes, not
+// an external gateway. Only these exact route classes may refer to a veth.
+func TestRuntimeResourceBoundaryKernelVethRoutes(t *testing.T) {
+	settings := DefaultRuntimeResourceBoundarySettings()
+	for _, route := range []string{
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"fe80::1","dev":"veth0123abc","protocol":"kernel","type":"local"}`,
+		`{"dst":"ff00::/8","dev":"veth0123abc","protocol":"kernel","type":"multicast"}`,
+	} {
+		if err := validateRuntimeBoundaryRoutes([]byte(`[`+route+`]`), settings); err != nil {
+			t.Fatal("isolated peer kernel route rejected", route, err)
+		}
+	}
+	for _, route := range []string{
+		`{"dst":"default","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"192.0.2.0/24","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"2001:db8::/64","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"static"}`,
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"kernel","gateway":"fe80::1"}`,
+		`{"dst":"ff00::/8","dev":"veth0123abc","protocol":"kernel","type":"unicast"}`,
+		`{"dst":"fe80::1","dev":"veth0123abc","protocol":"kernel","type":"unicast"}`,
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"kernel","nexthops":[{"dev":"lo"}]}`,
+	} {
+		if err := validateRuntimeBoundaryRoutes([]byte(`[`+route+`]`), settings); err == nil {
+			t.Fatal("routable or untrusted peer route admitted", route)
 		}
 	}
 }
