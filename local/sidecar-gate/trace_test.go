@@ -390,8 +390,13 @@ func TestGateCommandReadsAnOutcomeLine(t *testing.T) {
 		{arguments: []string{"pass", "0"}, want: gatePass},
 		{arguments: []string{"pass", "1"}, want: gateFail},
 	} {
-		if outcome, details := runGateCommand(context.Background(), options, gateCommand{Repo: "fixture", Command: append([]string{script}, check.arguments...)}); outcome != check.want {
+		outcome, details := runGateCommand(context.Background(), options, gateCommand{Repo: "fixture", Command: append([]string{script}, check.arguments...)})
+		if outcome != check.want {
 			t.Errorf("%v: %s (%v), want %s", check.arguments, outcome, details, check.want)
+		}
+		// the line before the outcome says why
+		if len(details) != 1 || !strings.HasSuffix(details[0], ": "+check.want+": report") {
+			t.Errorf("%v: details %v", check.arguments, details)
 		}
 	}
 }
