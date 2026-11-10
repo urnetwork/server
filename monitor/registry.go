@@ -240,6 +240,7 @@ func NewSignals() []Signal {
 		NewSloBurnSignal(),
 		NewSidecarServiceFailuresSignal(),
 		NewPostgresPrimarySignal(),
+		NewLbSplitProbeSignal(),
 	}
 }
 

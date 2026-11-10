@@ -132,22 +132,28 @@ func requirePagedPeople(t *testing.T, sink *pager.FakeSink, want ...string) {
 }
 
 // FS-50's core for every page class in the table: at 02:00 the first person is
-// paged at once, the second at 30 minutes unacknowledged and not before.
+// paged at once, the second at 30 minutes unacknowledged and not before; a row
+// that pages both at once pages both at 02:00 and nobody after.
 func TestPageClassAt0200PagesTheSecondPersonAt30MinutesNotBefore(t *testing.T) {
 	for _, row := range pageClasses {
 		harness := newPagerHarness()
 		notifier := NewPagerAlertNotifier(harness.settings())
 		notifier.Handle(slackTestSignal, SignalExecution{Alerts: Alerts{pagerTestAlert(row.class, SeverityPage)}})
 		flushPager(t, notifier)
-		requirePagedPeople(t, harness.sink, pager.FakeFirstPerson)
-		page := harness.sink.Notifications()[0].Page
-		if page.Class != row.class || page.BothAtOnce || !harness.sink.Notifications()[0].Time.Equal(time.Date(2026, time.November, 7, 2, 0, 0, 0, time.UTC)) {
-			t.Fatalf("%s: paged %+v", row.class, harness.sink.Notifications()[0])
+		atOnce := []string{pager.FakeFirstPerson}
+		if row.bothAtOnce {
+			atOnce = append(atOnce, pager.FakeSecondPerson)
+		}
+		requirePagedPeople(t, harness.sink, atOnce...)
+		for _, notification := range harness.sink.Notifications() {
+			if notification.Page.Class != row.class || notification.Page.BothAtOnce != row.bothAtOnce || !notification.Time.Equal(time.Date(2026, time.November, 7, 2, 0, 0, 0, time.UTC)) {
+				t.Fatalf("%s: paged %+v", row.class, notification)
+			}
 		}
 
 		harness.clock.Advance(30*time.Minute - time.Second)
 		harness.sink.Tick()
-		requirePagedPeople(t, harness.sink, pager.FakeFirstPerson)
+		requirePagedPeople(t, harness.sink, atOnce...)
 		harness.clock.Advance(time.Second)
 		harness.sink.Tick()
 		requirePagedPeople(t, harness.sink, pager.FakeFirstPerson, pager.FakeSecondPerson)
@@ -694,6 +700,39 @@ func TestPageClassesHoldSection19_8sM3Rows(t *testing.T) {
 	}
 	if _, ok := pageClassOf("active-pileup"); ok {
 		t.Error("a class outside §19.8 has a row")
+	}
+}
+
+// §19.8's M5 rows: both dns edges failing and the canary signature (DNS-M5-17's
+// classes), an interface's split probe, and the notices, which page both at
+// once and whose words are the ones pager.PageNotice sends.
+func TestPageClassesHoldSection19_8sM5Rows(t *testing.T) {
+	for class, want := range map[string]pageClass{
+		"dns-ns-down":            {class: "dns-ns-down", row: "both dns edges failing probes", firstMilestone: "M5", action: "§12.6's runbook"},
+		"dns-canary-signature":   {class: "dns-canary-signature", row: "the canary signature failing", firstMilestone: "M5", action: "§12.6's runbook"},
+		"lb-split-probe-failing": {class: "lb-split-probe-failing", row: "an interface's split probe failing (W1)", firstMilestone: "M5", action: "that interface's prior lb version"},
+		"abuse-notice": {
+			class:          "abuse-notice",
+			row:            "registrar, registry, law-enforcement notices",
+			firstMilestone: "M5",
+			action: "§21.8: removal orders and registrar or registry notices handled within 1 h by the rota; " +
+				"production orders go to counsel's out-of-hours contact",
+			bothAtOnce: true,
+		},
+	} {
+		got, ok := pageClassOf(class)
+		if !ok || got != want {
+			t.Errorf("%s: row %+v", class, got)
+		}
+	}
+	notice, _ := pageClassOf(pager.NoticePageClass)
+	if notice.row != pager.NoticePageRow || notice.action != pager.NoticePageAction || !notice.bothAtOnce {
+		t.Fatalf("the notice row and pager's words differ: %+v", notice)
+	}
+	for _, row := range pageClasses {
+		if row.bothAtOnce && row.class != pager.NoticePageClass {
+			t.Errorf("%s pages both at once, which §19.8 asks only of the notices", row.class)
+		}
 	}
 }
 

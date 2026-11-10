@@ -1,5 +1,9 @@
 package monitor
 
+import (
+	"github.com/urnetwork/server/pager"
+)
+
 // §19.8's page classes (D-OPS-9, owner decision 143). Only an alert of a class
 // in this table, at page severity, reaches the rota's pager: every other
 // SeverityPage alert stays on Slack as it always has.
@@ -10,14 +14,21 @@ package monitor
 //
 // The M3 rows are here ahead of their signals, so a signal only has to report
 // its class to page: EVSB-M3-01 reports the file-cluster and write-budget
-// classes, and OPS-M3-02 the burn and primary classes. §19.8's later rows join
-// with their tasks: both dns edges failing, the canary signature, a split probe
-// and the notices at M5, an interface map-stale or a custom host pending at
-// M6, a refused drop job at M10.
+// classes, and OPS-M3-02 the burn and primary classes. M5's rows: dns-canary
+// reports both dns edges failing and the canary signature (DNS-M5-17),
+// lb-split-probe an interface's split probe (OPS-M5-05), and §21.8's notices
+// page through pager.PageNotice from taskworker's abuse worker, never through
+// a signal, so their row's words are pager's and this table holds them only to
+// stay §19.8's whole table. §19.8's later rows join with their tasks: an
+// interface map-stale or a custom host pending at M6, a refused drop job at
+// M10.
 //
 // A row's text leaves the site in the page's summary, so it names a condition
 // and an action and never a target (I-13). The rota's acknowledgment time is
-// the same 30 minutes on every row, so it belongs to the pager service.
+// the same 30 minutes on every row, so it belongs to the pager service. A row
+// marked bothAtOnce pages both rota members at once, as §19.8's rota line asks
+// of the notices, rather than the second only when the first does not
+// acknowledge.
 
 // One alert class and the §19.8 row it pages under.
 type pageClass struct {
@@ -28,6 +39,8 @@ type pageClass struct {
 	firstMilestone string
 	// §19.8's first action, what the person paged does
 	action string
+	// page both rota members at once
+	bothAtOnce bool
 }
 
 // §19.8 gives a set at risk and a cluster refusing writes one row.
@@ -74,6 +87,20 @@ var pageClasses = []pageClass{
 		row:            "the canary signature failing",
 		firstMilestone: "M5",
 		action:         "§12.6's runbook",
+	},
+	{
+		class:          lbSplitProbeClassFailing,
+		row:            "an interface's split probe failing (W1)",
+		firstMilestone: "M5",
+		action:         "that interface's prior lb version",
+	},
+	{
+		// pager.NoticePageClass, named here as every class is named, by its literal
+		class:          "abuse-notice",
+		row:            pager.NoticePageRow,
+		firstMilestone: "M5",
+		action:         pager.NoticePageAction,
+		bothAtOnce:     true,
 	},
 }
 
