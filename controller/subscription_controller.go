@@ -202,9 +202,11 @@ type SubscriptionBalanceResult struct {
 	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
 
 	// ----- crypto payments (crypto_pay_controller.go) -----
-	// CryptoAssets are the coins that are on and what each sells (the list of
-	// GET /pay/crypto/assets). Omitted when none is on, so a client older than
-	// crypto, or a deployment with crypto off, never shows a coin.
+	// CryptoAssets are the coins that can be paid with now and what each sells
+	// (the assets list of GET /pay/crypto/assets: never a coin whose quotes are
+	// refused for now, since every app offers each coin listed here). Omitted
+	// when there is none, so a client older than crypto, or a deployment with
+	// crypto off, never shows a coin.
 	CryptoAssets []*CryptoPaymentAsset `json:"crypto_assets,omitempty"`
 	// CryptoTerm is the network's latest one-time crypto credit (Solana,
 	// Monero or Zcash) whose grace has not ended. Apps show the renewal notice

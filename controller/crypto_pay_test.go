@@ -819,7 +819,9 @@ func TestCryptoIntentEarlyRefusals(t *testing.T) {
 		return nil, os.ErrNotExist
 	}
 	connect.AssertEqual(t, refusal(&CreateCryptoPaymentIntentArgs{Asset: model.CryptoAssetXmr, Plan: model.SolanaPlanYearly}), PurchaseErrorCodeAssetUnavailable)
-	connect.AssertEqual(t, len(cryptoPaymentAssets(cryptoPayConfigFunc())), 1)
+	available, unavailable := cryptoPaymentAssets(context.Background(), cryptoPayConfigFunc())
+	connect.AssertEqual(t, len(available), 1)
+	connect.AssertEqual(t, len(unavailable), 0)
 }
 
 // enabled gates selling only: a coin switched off is not sold but is still
@@ -896,6 +898,19 @@ func TestCryptoPaymentAssetsList(t *testing.T) {
 	config := cryptoTestConfig()
 	config.Assets[model.CryptoAssetZec].Items = append(config.Assets[model.CryptoAssetZec].Items, "data_2tib")
 	cryptoTestEnable(t, config, map[string]*fakeCryptoWallet{})
+	// both scanners caught up: the coins whose quotes are refused are in
+	// crypto_pay_assets_availability_test.go
+	lastSuccessAt := server.NowUtc()
+	walletHeight := int64(1000)
+	cryptoTestScanCursors(t, map[string]*model.CryptoScanCursor{
+		model.CryptoAssetZec: {Asset: model.CryptoAssetZec, LastSuccessAt: &lastSuccessAt, WalletHeight: &walletHeight, NetworkHeight: &walletHeight},
+		model.CryptoAssetXmr: {Asset: model.CryptoAssetXmr, LastSuccessAt: &lastSuccessAt, WalletHeight: &walletHeight, NetworkHeight: &walletHeight},
+	})
+	cryptoPaymentAssets := func(config *CryptoPayConfig) []*CryptoPaymentAsset {
+		available, unavailable := cryptoPaymentAssets(context.Background(), config)
+		connect.AssertEqual(t, len(unavailable), 0)
+		return available
+	}
 	assets := cryptoPaymentAssets(cryptoPayConfigFunc())
 	connect.AssertEqual(t, len(assets), 3)
 	byAsset := map[string]*CryptoPaymentAsset{}
@@ -911,7 +926,9 @@ func TestCryptoPaymentAssetsList(t *testing.T) {
 
 	// a coin that sells no plan still sends its plans as [], never null
 	config.Assets[model.CryptoAssetZec].Plans = nil
-	assetsJson, err := json.Marshal(&CryptoPaymentAssetsResult{Assets: cryptoPaymentAssets(cryptoPayConfigFunc())})
+	listed, err := CryptoPaymentAssets(&session.ClientSession{Ctx: context.Background()})
+	connect.AssertEqual(t, err, nil)
+	assetsJson, err := json.Marshal(listed)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, strings.Contains(string(assetsJson), `"asset":"zec","plans":[],"items":["data_1tib","data_10tib"]`), true)
 	connect.AssertEqual(t, strings.Contains(string(assetsJson), "null"), false)

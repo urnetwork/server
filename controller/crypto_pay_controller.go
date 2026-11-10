@@ -3,7 +3,7 @@ package controller
 // Paying for Pro or data with Zcash, Monero or USDC on Solana: the generic
 // invoice API (mmm/ZCASH-CONTRACT.md §2, mmm/ZCASH.md §0).
 //
-//	GET  /pay/crypto/assets          the coins that are on, and what each sells
+//	GET  /pay/crypto/assets          the coins that can be paid with now, and what each sells
 //	POST /pay/crypto/intent          an invoice for the signed-in caller's network
 //	POST /pay/data/crypto-intent     a data pack for a named network, or a code, without signing in
 //	POST /pay/crypto/status          an invoice's status, by its id and status token
@@ -59,13 +59,28 @@ type CryptoPaymentAsset struct {
 	ConfirmationsRequired int `json:"confirmations_required"`
 	// how long a quote holds
 	QuoteTtlSeconds int `json:"quote_ttl_seconds"`
+	// whether the coin can be paid with now: true for every coin of assets
+	// (and of the balance's crypto_assets), false for one of
+	// unavailable_assets
+	Available bool `json:"available"`
+	// why a coin that is on cannot be paid with now: scanner_lagging (its
+	// wallet scanner has not caught up with the network, or has stopped) or
+	// network_height_unknown (the network's height or the wallet's is not
+	// known, so the lag cannot be judged). Left out when the coin is available.
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
 }
 
 // CryptoPaymentAssetsResult is GET /pay/crypto/assets.
 type CryptoPaymentAssetsResult struct {
-	// only the coins that are on; the order means nothing (every UI orders
-	// the methods Card, USDC, Zcash, Monero)
+	// the coins that can be paid with now, the only ones a client offers. The
+	// order means nothing (every UI orders the methods Card, USDC, Zcash,
+	// Monero)
 	Assets []*CryptoPaymentAsset `json:"assets"`
+	// the coins that are on but whose quotes are refused for now, each with
+	// its unavailable_reason, for a page that shows them as temporarily
+	// unavailable. Never offered: an older client reads only assets. [] when
+	// none
+	UnavailableAssets []*CryptoPaymentAsset `json:"unavailable_assets"`
 }
 
 // CryptoTerm is the network's latest one-time crypto credit whose grace has not
@@ -447,9 +462,17 @@ func cryptoPaymentUri(intent *model.CryptoPaymentIntent) string {
 
 // ----- the coins on offer -----
 
-// cryptoPaymentAssets is the list of §2.1 for the coins that are on.
-func cryptoPaymentAssets(config *CryptoPayConfig) []*CryptoPaymentAsset {
-	assets := []*CryptoPaymentAsset{}
+// cryptoPaymentAssets is the list of §2.1: the coins that are on and can be
+// paid with now (available), and the coins that are on but whose quotes the
+// server refuses for now (unavailable: a scanned coin whose scanner lags the
+// network, has stopped, or does not know a height, cryptoAssetAvailable). A
+// client offers every coin of the first list, so a coin the quote path would
+// refuse is never in it: on 2026-11-10 zec was listed while every zec quote
+// was refused, its wallet about 15,900 blocks behind the network. Both lists
+// read the quote path's own cached decision, so they agree with it.
+func cryptoPaymentAssets(ctx context.Context, config *CryptoPayConfig) (available []*CryptoPaymentAsset, unavailable []*CryptoPaymentAsset) {
+	available = []*CryptoPaymentAsset{}
+	unavailable = []*CryptoPaymentAsset{}
 	for _, asset := range cryptoEnabledAssets(config) {
 		assetConfig := config.Asset(asset)
 		plans := []string{}
@@ -467,15 +490,44 @@ func cryptoPaymentAssets(config *CryptoPayConfig) []*CryptoPaymentAsset {
 		if len(plans) == 0 && len(items) == 0 {
 			continue
 		}
-		assets = append(assets, &CryptoPaymentAsset{
+		listed := &CryptoPaymentAsset{
 			Asset:                 asset,
 			Plans:                 plans,
 			Items:                 items,
 			ConfirmationsRequired: int(assetConfig.CreditConfirmations),
 			QuoteTtlSeconds:       int(cryptoAssetQuoteTtl(config, asset) / time.Second),
-		})
+		}
+		quotable, reason, judged := cryptoListedAvailability(ctx, config, asset)
+		switch {
+		case !judged:
+			// the scanner's state could not be read: offered in neither list
+		case quotable:
+			listed.Available = true
+			available = append(available, listed)
+		default:
+			listed.UnavailableReason = reason
+			unavailable = append(unavailable, listed)
+		}
 	}
-	return assets
+	return available, unavailable
+}
+
+// cryptoListedAvailability is cryptoAssetAvailable for the coins on offer.
+// A cursor read that fails (a database error) is judged = false: that answer
+// leaves the coin out of both lists rather than failing the whole list, or
+// the balance it rides on, and nothing is cached, so the next answer reads
+// again.
+func cryptoListedAvailability(ctx context.Context, config *CryptoPayConfig, asset string) (available bool, reason string, judged bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			cryptoPayRefusalReports.report("listed/"+asset, func() {
+				glog.Errorf("[cryptopay]could not read the %s scanner's state for the coins on offer; it is left out: %v\n", asset, r)
+			})
+			available, reason, judged = false, "", false
+		}
+	}()
+	available, reason = cryptoAssetAvailable(ctx, config, asset)
+	return available, reason, true
 }
 
 // CryptoPaymentAssets answers GET /pay/crypto/assets.
@@ -483,7 +535,8 @@ func CryptoPaymentAssets(clientSession *session.ClientSession) (*CryptoPaymentAs
 	if !payDataLookupLimiter.allow(clientSession) {
 		return nil, errors.New("429 Too many requests from this address. Try again in a minute.")
 	}
-	return &CryptoPaymentAssetsResult{Assets: cryptoPaymentAssets(cryptoPayConfigFunc())}, nil
+	available, unavailable := cryptoPaymentAssets(clientSession.Ctx, cryptoPayConfigFunc())
+	return &CryptoPaymentAssetsResult{Assets: available, UnavailableAssets: unavailable}, nil
 }
 
 // cryptoTermForNetwork is the network's latest one-time crypto credit (Solana,
@@ -505,16 +558,18 @@ func cryptoTermForNetwork(ctx context.Context, networkId server.Id, now time.Tim
 	}
 }
 
-// decorateCryptoPay fills the balance result's crypto fields: the coins on
-// offer and the network's one-time crypto term. Never fails the balance: a
-// failed read leaves them out.
+// decorateCryptoPay fills the balance result's crypto fields: the coins that
+// can be paid with now (the available list of GET /pay/crypto/assets; every
+// app offers each coin it names, so the unavailable ones are not sent) and
+// the network's one-time crypto term. Never fails the balance: a failed read
+// leaves them out.
 func decorateCryptoPay(result *SubscriptionBalanceResult, clientSession *session.ClientSession) {
 	defer func() {
 		if r := recover(); r != nil {
 			glog.Errorf("[cryptopay]could not decorate the balance: %v\n", r)
 		}
 	}()
-	if assets := cryptoPaymentAssets(cryptoPayConfigFunc()); 0 < len(assets) {
+	if assets, _ := cryptoPaymentAssets(clientSession.Ctx, cryptoPayConfigFunc()); 0 < len(assets) {
 		result.CryptoAssets = assets
 	}
 	if clientSession.ByJwt != nil {
@@ -938,7 +993,8 @@ func cryptoConfirmationsRequired(config *CryptoPayConfig, asset string) int {
 
 // ----- scanner health, as the quote path sees it -----
 
-// The quote path re-reads a coin's cursor at most this often per process.
+// The quote path, and the coins on offer with it, re-read a coin's cursor at
+// most this often per process.
 const cryptoAvailabilityCacheTtl = 10 * time.Second
 
 type cryptoAvailability struct {
@@ -953,15 +1009,20 @@ var cryptoAvailabilityByAsset = map[string]*cryptoAvailability{}
 // The cursor read behind the availability. Replaceable only by tests.
 var cryptoGetScanCursor = model.GetCryptoScanCursor
 
+// The clock the availability and its cache read. Replaceable only by tests.
+var cryptoAvailabilityNow = server.NowUtc
+
 // cryptoAssetAvailable reports whether a scanned coin may be quoted now: its
 // scanner succeeded within three scan intervals, it knows the network's
 // height, and its wallet is within max_lag_blocks of it. A coin whose
-// payments would not be seen in time must not be sold.
+// payments would not be seen in time must not be sold, nor offered: the
+// quotes, the re-quotes and the coins on offer (cryptoPaymentAssets) all
+// read this one decision.
 func cryptoAssetAvailable(ctx context.Context, config *CryptoPayConfig, asset string) (bool, string) {
 	if !slices.Contains(cryptoPayScannedAssets, asset) {
 		return true, ""
 	}
-	now := server.NowUtc()
+	now := cryptoAvailabilityNow()
 	cryptoAvailabilityLock.Lock()
 	cached, ok := cryptoAvailabilityByAsset[asset]
 	cryptoAvailabilityLock.Unlock()
