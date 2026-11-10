@@ -203,6 +203,8 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/limits",
 	// §18.7's wake token (SDK-M8-09)
 	"POST /sidecar/push-token",
+	// §18.8's unload beacon (TEAM-M1-10)
+	"POST /sidecar/close",
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)",
 	"PUT /network/bridge/share/([^/]+)",

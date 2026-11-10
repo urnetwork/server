@@ -1667,8 +1667,9 @@ func deactivateLockedNetworkClientsInTx(ctx context.Context, tx server.PgTx, loc
 		return 0, err
 	}
 	// §7.10's removal effects end in this write too, rev/ objects owed among
-	// them (sidecar_removal_model.go)
-	removal := NewClientRemoval(networkId, deactivatedClientIds, sidecar.RevocationReasonRemoved, server.NowUtc())
+	// them (sidecar_removal_model.go), for the reason ctx carries: removed, or
+	// a reap's deactivated (network_client_lease_model.go)
+	removal := NewClientRemoval(networkId, deactivatedClientIds, removalReasonOf(ctx), server.NowUtc())
 	if err := ApplyRemovalEffectsInTx(ctx, tx, removal); err != nil {
 		return 0, err
 	}

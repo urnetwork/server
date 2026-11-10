@@ -76,8 +76,9 @@ func sidecarSyncLongPollIfOpen() (*pushservice.LongPoll, error) {
 		return nil, ErrSidecarSyncGateClosed
 	}
 	if sidecarSyncLongPoll.longPoll == nil {
-		// no lease table yet (TEAM-M1-10): the poll marker alone, and no row to touch
-		longPoll, err := pushservice.NewLongPoll(context.Background(), model.NewSidecarPushRedis(nil), nil, nil, nil)
+		// the poll marker, and an ephemeral client's lease seen_time when it sets or errs (TEAM-M1-10), a
+		// no-op for a client with no lease and in a binary without MG1
+		longPoll, err := pushservice.NewLongPoll(context.Background(), model.NewSidecarPushRedis(nil), nil, nil, model.TouchClientLease)
 		if err != nil {
 			return nil, err
 		}

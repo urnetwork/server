@@ -239,12 +239,42 @@ func sidecarMg1TeamMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX admin_token_use_use_time ON admin_token_use (use_time)
 		`),
+
+		// §7.4's fallback key (plan-TEAM-enroll-client-key; §2.8 api-4): the
+		// Ed25519 public key POST /network/enroll names, 32 bytes, written once
+		// at the mint and deleted with its client. A strict_exp bearer with no
+		// identity binding proves this key. Catalog-only, bounded as MG0's are.
+		newSqlMigration(`
+			SET LOCAL lock_timeout = '2s';
+			ALTER TABLE network_client_owner ADD COLUMN client_public_key bytea NULL
+		`),
 	}
 }
 
 // MG1's §18 part: network_client_lease (TEAM-M1-10).
 func sidecarMg1LeaseMigrations() []any {
-	return []any{}
+	return []any{
+		// §18.8's lease (§2.8 api-4): one row per ephemeral client, inserted at
+		// its mint with the SHA-256 of the close capability the mint returns
+		// once, and deleted with its client. A poll writes seen_time at most once
+		// per 300 s. The reap reads rows in seen_time order past its threshold,
+		// and POST /sidecar/close finds a row by its capability's hash.
+		newSqlMigration(`
+			CREATE TABLE network_client_lease (
+				client_id uuid NOT NULL,
+				seen_time timestamp NOT NULL,
+				close_sha256 bytea NOT NULL,
+
+				PRIMARY KEY (client_id)
+			)
+		`),
+		newSqlMigration(`
+			CREATE UNIQUE INDEX network_client_lease_close_sha256 ON network_client_lease (close_sha256)
+		`),
+		newSqlMigration(`
+			CREATE INDEX network_client_lease_seen_time ON network_client_lease (seen_time, client_id)
+		`),
+	}
 }
 
 // MG1's §20 part: network_sidecar_limit (QUOTA's tasks).

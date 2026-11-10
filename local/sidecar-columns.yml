@@ -23,6 +23,8 @@ tables:
       admin_refused: api-4
       auth_key_id: api-4
       client_id: api-4
+      # added by MG1 (plan-TEAM-enroll-client-key), so MG0 is promoted with MG1 or this line moves
+      client_public_key: api-4
       declares_no_egress: api-4
       ephemeral: api-4
       member_id: api-4
@@ -98,6 +100,12 @@ tables:
       seq: api-8
       target_id: api-8
       target_kind: api-8
+  network_client_lease:
+    group: MG1
+    columns:
+      client_id: api-4
+      close_sha256: api-4
+      seen_time: api-4
   network_sidecar_limit:
     group: MG1
     columns:

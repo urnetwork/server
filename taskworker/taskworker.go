@@ -188,6 +188,9 @@ func initTaskSchedule(ctx context.Context) {
 		// §7.8's rev/ objects 20 minutes after their last write; deletes
 		// nothing in a process with no first metadata cluster
 		work.ScheduleSweepSidecarRev(clientSession, tx)
+		// §18.8's ephemeral clients reaped every 60 s by their lease and
+		// newest disconnect; not scheduled without MG1
+		work.ScheduleReapEphemeralClients(clientSession, tx)
 		// §21's actions owed an effect or a mailed record; not scheduled without MG5
 		work.ScheduleAbuseActionPass(clientSession, tx)
 		// tls-3's hours rolled up and dropped at 24 h, and its days at 13
@@ -633,6 +636,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.SweepSidecarRev,
 			work.SweepSidecarRevPost,
+		),
+		// §18.8's ephemeral reap (model.ReapEphemeralClients)
+		task.NewTaskTargetWithPost(
+			work.ReapEphemeralClients,
+			work.ReapEphemeralClientsPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.AbuseActionPass,
