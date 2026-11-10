@@ -337,7 +337,11 @@ func (self *hostCleaner) runDocker(ctx context.Context, args []string) ([]byte, 
 	if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket || socket == "/" {
 		return nil, errors.New("invalid fixed Docker socket")
 	}
-	if err := protectedRootPath(filepath.Dir(socket), true, false); err != nil {
+	operatorUid, err := trustedOperatorUid(self.config.TrustedOperatorUser)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateCleanupSocketDirectory(self.config, operatorUid, os.Lstat); err != nil {
 		return nil, err
 	}
 	info, err := os.Lstat(socket)
@@ -381,6 +385,19 @@ func (self *hostCleaner) runDocker(ctx context.Context, args []string) ([]byte, 
 		return nil, errors.New("fixed-daemon cleanup output exceeds its bound")
 	}
 	return append([]byte(nil), output.Bytes()...), nil
+}
+
+// Cleanup uses admission's runtime ownership contract: the exact control parent
+// is root-owned inside the base, while ancestors may belong to the named trusted
+// operator. Candidate, scratch and journal paths never become daemon authority.
+func validateCleanupSocketDirectory(config Config, operatorUid uint32, statPath func(string) (os.FileInfo, error)) error {
+	socket := config.DockerSocketPath
+	if !filepath.IsAbs(socket) || filepath.Clean(socket) != socket || socket == "/" ||
+		!pathWithin(config.BaseDirectory, socket) || pathWithin(config.StateDirectory, socket) ||
+		pathWithin(config.WorkDirectory, socket) || pathWithin(config.DockerRole.ScratchDirectory, socket) {
+		return errors.New("cleanup Docker endpoint escaped its independent control directory")
+	}
+	return protectedRuntimePathWithStat(filepath.Dir(socket), config.BaseDirectory, operatorUid, statPath)
 }
 
 // The cgroup v2 filesystem does not permit symlinks; protected ancestor checks

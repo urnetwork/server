@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T08:21:55Z",
+  "observed_at": "2026-11-10T08:30:37Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -85,6 +85,7 @@
     "retained_response_minio_version": "126df67b-facf-4e4f-9f88-2dc721f6f827"
   },
   "goofe": {
+    "cleanup_root_cause": "Read-only native diagnosis authenticates inactive recovery placement, slot/state/manifest, original clock, exact cleanup plan, all frozen-empty containment parents and zero-unknown Docker journal. A further definite cleanup blocker is confirmed: runDocker requires root ownership of every socket ancestor, contradicting admission's explicit trusted-operator ancestor policy for this approved base under /home/by. The old check fails on Goofe; the corrected bounded runtime check passes on the same actual path. No cleanup, slot release, daemon mutation or new attempt was performed by these diagnostics.",
     "native_readiness_probe": "Operator-only R1 probe run934ec6785208965eeb383c10ad4598c084a9946930358659868a495463fb5c07 failed before simulation: scoped Docker rejects the helper's root namespace-inspection container. Its evaluator/owner stop dependency also creates a reverse-order post-stop join. Neither is submission tampering. Corrections and deterministic regressions are in progress; installed frozen agent remains unchanged.",
     "recovery_custody": "Recovery service is terminal failed, MainPID0, systemd has no pending jobs. Run state still records recovery_active=true, cleanup_verified=false, stop_cleanup_verified=false. Do not clear custody or admit new work until actual cleanup is verified. Root-cause diagnostics continue; no duplicate probe or new clock started.",
     "production_size_pressure_cleanup": "Passed on the actual private engine: evaluation CPU set saturated,72GiB child OOM exit137, cleanup430ms, zero containers/networks and empty fixture cgroup. Terminal unit exit0. Exact report retained/read back in MinIO COMPLIANCE through2028-01-01. See EPOCH2-GOOFE-RESOURCE-PRESSURE-2026-11-10.json.",

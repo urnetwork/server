@@ -305,12 +305,18 @@ func (self *Config) requireDataMount() error {
 // Runtime leaves stay root-owned. Only ancestors above the configured base may
 // belong to the explicitly trusted operator; no home directory is chowned.
 func protectedRuntimePath(path, base string, operatorUid uint32) error {
+	return protectedRuntimePathWithStat(path, base, operatorUid, os.Lstat)
+}
+
+// The observation seam lets tests reproduce ownership topology without chown
+// privileges; production always supplies the real non-following filesystem read.
+func protectedRuntimePathWithStat(path, base string, operatorUid uint32, statPath func(string) (os.FileInfo, error)) error {
 	if !pathWithin(base, path) {
 		return errors.New("runtime path escaped its configured base")
 	}
 	inside := true
 	for current := path; ; current = filepath.Dir(current) {
-		info, err := os.Lstat(current)
+		info, err := statPath(current)
 		if err != nil {
 			return err
 		}
