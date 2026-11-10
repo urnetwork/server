@@ -129,7 +129,7 @@ func readRuntimeBoundaryManagementDescriptors(proc, group *os.File, settings Run
 		}
 		if requireKernel {
 			var filesystem syscall.Statfs_t
-			if syscall.Fstatfs(fd, &filesystem) != nil || filesystem.Type != filesystemType {
+			if syscall.Fstatfs(fd, &filesystem) != nil || int64(filesystem.Type) != filesystemType {
 				return nil, errors.New("management kernel property changed its filesystem")
 			}
 		}

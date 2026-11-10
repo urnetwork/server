@@ -924,11 +924,11 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 			var filesystem syscall.Statfs_t
 			err = syscall.Fstatfs(int(file.Fd()), &filesystem)
 			if err == nil {
-				facts.FilesystemType = filesystem.Type
-				facts.FilesystemBytes, err = runtimeBoundaryBytes(filesystem.Blocks, filesystem.Bsize)
+				facts.FilesystemType = int64(filesystem.Type)
+				facts.FilesystemBytes, err = runtimeBoundaryBytes(filesystem.Blocks, int64(filesystem.Bsize))
 			}
 			if err == nil {
-				facts.FreeBytes, err = runtimeBoundaryBytes(filesystem.Bavail, filesystem.Bsize)
+				facts.FreeBytes, err = runtimeBoundaryBytes(filesystem.Bavail, int64(filesystem.Bsize))
 			}
 		}
 		_ = file.Close()
@@ -967,8 +967,8 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 	if err := syscall.Fstatfs(int(backing.Fd()), &backingFilesystem); err != nil {
 		return facts, err
 	}
-	facts.BackingFilesystemType = backingFilesystem.Type
-	facts.BackingFreeBytes, err = runtimeBoundaryBytes(backingFilesystem.Bavail, backingFilesystem.Bsize)
+	facts.BackingFilesystemType = int64(backingFilesystem.Type)
+	facts.BackingFreeBytes, err = runtimeBoundaryBytes(backingFilesystem.Bavail, int64(backingFilesystem.Bsize))
 	if err != nil {
 		return facts, err
 	}

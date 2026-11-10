@@ -470,7 +470,7 @@ func readManagementSshFile(parent *os.File, name string, maximum, magic int64) (
 	defer file.Close()
 	info, err := file.Stat()
 	var filesystem syscall.Statfs_t
-	if err != nil || !info.Mode().IsRegular() || maximum <= 0 || syscall.Fstatfs(int(file.Fd()), &filesystem) != nil || magic != 0 && filesystem.Type != magic {
+	if err != nil || !info.Mode().IsRegular() || maximum <= 0 || syscall.Fstatfs(int(file.Fd()), &filesystem) != nil || magic != 0 && int64(filesystem.Type) != magic {
 		return nil, errors.New("managed SSH native evidence changed its filesystem or type")
 	}
 	content, err := io.ReadAll(io.LimitReader(file, maximum+1))
