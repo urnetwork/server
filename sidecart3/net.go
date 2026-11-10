@@ -33,6 +33,7 @@ import (
 
 	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/sidecartest"
+	"github.com/urnetwork/sidecar/sidecartest/fault"
 	"github.com/urnetwork/sidecar/sidecartest/localstack"
 
 	"github.com/urnetwork/server"
@@ -153,7 +154,11 @@ func newHost(ctx context.Context, t testing.TB, net *sidecartest.Net, settings *
 	host.Gates = fakes.Gates
 	net.Faults().SetCheck(checkPlan)
 	stopPgCommits := armPgCommitFaults(t, net)
+	// an evs world's instances run evshost's block, its devices on oauth's tokens (evs_tier.go)
+	evsTier, removeEvsTier := newEvsTier()
+	fault.SetEvsTier(net, evsTier)
 	closeHost := func() {
+		removeEvsTier()
 		stopPgCommits()
 		clusters.Close()
 		buckets.remove()
