@@ -6,7 +6,8 @@ package dnshost
 //   - api: dnsservice.NewDnsApi over Store, on dns.bringyour.com, with certs'
 //     challenge writer, the bearer digests and services.yml's lb inventory
 //     from its secret_files (reading 6: services.yml is mounted, since
-//     server.Vault has nothing to read under {vault: no}), and each NS's SOA
+//     server.Vault has nothing to read under {vault: no}), the router list
+//     from the same file's stream services (DNS-M7-01), and each NS's SOA
 //     read over TCP at dns.yml's glue. It writes <root>'s own records at start
 //     (DNS-M5-11). Ready on §12.14's tables, read by its store probe.
 //   - edge: dnsservice.NewDnsEdge, a FeedLoop over the block's HTTP feed and a
@@ -37,6 +38,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"gopkg.in/yaml.v3"
 
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
@@ -122,18 +124,60 @@ func readHostSecret(settings *HostSettings, name string) ([]byte, error) {
 	return os.ReadFile(filepath.Join(settings.SecretDirectory, name))
 }
 
+// The warp service W4 sends a router interface's TCP 25 to: mxedge's router
+// (§19.5), as against mxedge-platform on rpt.bringyour.com's two interfaces.
+const hostRouterService = "mxedge"
+
+// What the router list reads of services.yml's active lb version: the
+// version's stream services, and each interface's own, which override the
+// version's port by port (warp's SetDefaultStreamPortServices).
+type hostStreamServicesYaml struct {
+	Domain   string `yaml:"domain"`
+	Versions []struct {
+		Lb struct {
+			TcpStreamPortServices map[int]string `yaml:"tcp_stream_port_services"`
+			Interfaces            map[string]map[string]struct {
+				TcpStreamPortServices map[int]string `yaml:"tcp_stream_port_services"`
+			} `yaml:"interfaces"`
+		} `yaml:"lb"`
+	} `yaml:"versions"`
+}
+
 // The lb inventory's interfaces as a feed answer names them: every edge host's
-// public interfaces, named host/interface. The router list is §19.5's and M7's,
-// so none is a router here.
-func hostLbInterfaces(servicesYaml []byte) ([]dnsservice.DnsLbInterface, error) {
+// public interfaces, named host/interface, each a router (DNS-M7-01) when W4
+// sends its TCP routerPort to mxedge's router, by its own
+// tcp_stream_port_services or else its version's (§19.5). Until W4's M7 half
+// names mxedge no interface is a router, and mx answers no address: the closed
+// direction.
+func hostLbInterfaces(servicesYaml []byte, routerPort int) ([]dnsservice.DnsLbInterface, error) {
 	inventory, err := server.ParseServicesLbInventory(servicesYaml)
 	if err != nil {
 		return nil, err
+	}
+	var streamServices hostStreamServicesYaml
+	if err := yaml.Unmarshal(servicesYaml, &streamServices); err != nil {
+		return nil, fmt.Errorf("services.yml: %w", err)
+	}
+	if len(streamServices.Versions) == 0 {
+		return nil, errors.New("services.yml: no active version")
+	}
+	active := &streamServices.Versions[0].Lb
+	routerNames := map[string]bool{}
+	for configuredHost, configuredInterfaces := range active.Interfaces {
+		host := server.ServicesLbHostName(streamServices.Domain, configuredHost)
+		for interfaceName, configured := range configuredInterfaces {
+			service, ok := configured.TcpStreamPortServices[routerPort]
+			if !ok {
+				service = active.TcpStreamPortServices[routerPort]
+			}
+			routerNames[host+"/"+interfaceName] = service == hostRouterService
+		}
 	}
 	interfaces := []dnsservice.DnsLbInterface{}
 	for host, hostInterfaces := range inventory.Interfaces {
 		for _, lbInterface := range hostInterfaces {
 			entry := dnsservice.DnsLbInterface{Name: host + "/" + lbInterface.Interface}
+			entry.Router = routerNames[entry.Name]
 			if lbInterface.Ipv4 != "" {
 				if entry.Ipv4, err = netip.ParseAddr(lbInterface.Ipv4); err != nil {
 					return nil, err
@@ -236,7 +280,7 @@ func NewApiHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSe
 		return notReadyEngine{}, err
 	}
 	if servicesYaml, err := readHostSecret(settings, HostServicesFileName); err == nil {
-		interfaces, err := hostLbInterfaces(servicesYaml)
+		interfaces, err := hostLbInterfaces(servicesYaml, settings.Dns.Probe.SmtpPort)
 		if err != nil {
 			return notReadyEngine{}, err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
@@ -307,12 +308,67 @@ func TestApiHostReleasesTheWindowFileInItsSecrets(t *testing.T) {
 
 // The lb inventory as the feed names it: every edge host's public interfaces, by host/interface.
 func TestHostLbInterfacesFromServicesYaml(t *testing.T) {
-	interfaces, err := hostLbInterfaces([]byte("domain: example\nversions:\n  - lb:\n      interfaces:\n        a-edge-1.example:\n          eth0: {ipv4: 192.0.2.10, ipv6: \"2001:db8::10\"}\n          eth1: {ipv4: 192.0.2.11, transparent: true}\n        a-core-1.example:\n          eth0: {ipv4: 192.0.2.20}\n"))
+	interfaces, err := hostLbInterfaces([]byte("domain: example\nversions:\n  - lb:\n      interfaces:\n        a-edge-1.example:\n          eth0: {ipv4: 192.0.2.10, ipv6: \"2001:db8::10\"}\n          eth1: {ipv4: 192.0.2.11, transparent: true}\n        a-core-1.example:\n          eth0: {ipv4: 192.0.2.20}\n"), 25)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(interfaces) != 1 || interfaces[0].Name != "a-edge-1/eth0" || interfaces[0].Ipv4 != netip.MustParseAddr("192.0.2.10") || interfaces[0].Ipv6 != netip.MustParseAddr("2001:db8::10") {
 		t.Fatalf("interfaces %+v", interfaces)
+	}
+	if interfaces[0].Router {
+		t.Error("a router where nothing sends 25 to mxedge")
+	}
+}
+
+// W4's router list (§19.5; DNS-M7-01): an interface is a router when its TCP 25 reaches mxedge's
+// router, by the version's stream services or its own, and its own override the version's, so
+// rpt.bringyour.com's two, which reach mxedge-platform, are not; an older version's map counts for
+// nothing.
+func TestHostLbInterfacesMarkW4sRouters(t *testing.T) {
+	servicesYaml := `
+domain: example
+versions:
+  - lb:
+      tcp_stream_port_services:
+        25: mxedge
+        444: other
+      interfaces:
+        a-edge-1.example:
+          eth0: {ipv4: 192.0.2.10, ipv6: "2001:db8::10"}
+          eth1:
+            ipv4: 192.0.2.11
+            tcp_stream_port_services: {25: mxedge-platform}
+        a-edge-2.example:
+          eth0:
+            ipv4: 192.0.2.20
+            tcp_stream_port_services: {8443: tlsedge}
+  - lb:
+      tcp_stream_port_services: {25: mxedge-platform}
+      interfaces:
+        a-edge-1.example:
+          eth0: {ipv4: 192.0.2.10}
+`
+	interfaces, err := hostLbInterfaces([]byte(servicesYaml), 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	routers := map[string]bool{}
+	for _, lbInterface := range interfaces {
+		routers[lbInterface.Name] = lbInterface.Router
+	}
+	want := map[string]bool{"a-edge-1/eth0": true, "a-edge-1/eth1": false, "a-edge-2/eth0": true}
+	if !maps.Equal(routers, want) {
+		t.Errorf("routers %v, want %v", routers, want)
+	}
+	// with no version naming mxedge, none is a router
+	interfaces, err = hostLbInterfaces([]byte(strings.Replace(servicesYaml, "25: mxedge\n", "25: mxedge-platform\n", 1)), 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lbInterface := range interfaces {
+		if lbInterface.Router {
+			t.Errorf("%s is a router with no 25 to mxedge", lbInterface.Name)
+		}
 	}
 }
 
