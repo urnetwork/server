@@ -8625,7 +8625,7 @@ reap share edges and sample sufficiency, malformed frames and failed reads,
 the list's window and name rules, inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
-`client_reliability` days inside the 14-day retention by hand: operator block
+`client_reliability` days inside the 10-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
 provider credit. VERIFY: a complete observation inside each line on the next
 runs (two for the sampled check).
@@ -8942,7 +8942,7 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (14 days,
+(`RetentionSignal`): today `client_reliability` (10 days,
 `ClientReliabilityRetention`, the same cutoff §2.4g's
 `partition-retention-stuck` judges) and `provider_egress_health_history` (7
 days). The contract tables name §2.4i and
