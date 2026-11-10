@@ -4118,6 +4118,35 @@ func Testing_ResetClientAuthTimeGate() {
 	clientAuthTimes.Reset()
 }
 
+// GET /auth/refresh's auth_time refresh for a strict_exp bearer (§18.8's cost
+// row; plan-SDK-http-only-idle-reap, QD-224). An HTTPS-only client, a page
+// Worker or a rung 3 host, never connects, so without this its auth_time stays
+// at its mint and the idle sweep (RemoveDisconnectedNetworkClients) marks it
+// inactive 30 days on, however often it polls and refreshes. It is the connect
+// path's statement under the connect path's one-hour gate, so it also moves the
+// client's source client, and a refresh at 40-50% of a 7-day token costs one
+// narrow write per client per 3 days. No poll writes network_client. A failed
+// write returns its error and changes nothing, and the caller's refresh stands:
+// the next refresh writes it.
+func RefreshStrictExpClientAuthTime(ctx context.Context, clientId server.Id, refreshTime time.Time) (returnErr error) {
+	if clientAuthTimes.KnownFresh(clientId, refreshTime) {
+		return nil
+	}
+	var refresh *clientAuthTimeRefresh
+	if r := server.HandleError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			refresh = refreshClientAuthTimesInTx(ctx, tx, clientId, refreshTime)
+		}, server.TxReadCommitted)
+	}); r != nil {
+		return fmt.Errorf("auth_time refresh: %v", r)
+	}
+	// recorded only once committed, as a connect's is
+	if refresh != nil {
+		clientAuthTimes.Record(refresh)
+	}
+	return nil
+}
+
 // Refreshes the client's auth_time and its source client's in one statement,
 // each only when at least `clientAuthTimeRefreshMinInterval` stale, and
 // returns each row's auth_time afterward. A missing client returns nil.

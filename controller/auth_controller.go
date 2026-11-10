@@ -667,6 +667,15 @@ func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, er
 	if err != nil {
 		return nil, err
 	}
+	// a strict_exp bearer's refresh is its liveness for the idle sweep: an
+	// HTTPS-only client, such as a page Worker, never connects, so auth_time
+	// would stay at its mint (§18.8's cost row; plan-SDK-http-only-idle-reap).
+	// A failed write leaves the renewal standing; the next refresh writes it.
+	if clientSession.ByJwt.StrictExp {
+		if err := model.RefreshStrictExpClientAuthTime(clientSession.Ctx, *clientSession.ByJwt.ClientId, server.NowUtc()); err != nil {
+			glog.Infof("[auth]strict_exp refresh left auth_time: %s\n", err)
+		}
+	}
 	return &RefreshTokenResult{ByJwt: signed}, nil
 
 }
