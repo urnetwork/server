@@ -19,8 +19,8 @@ import (
 
 // §7.9's ticks and retention at api (TEAM-M2-14).
 
-// api appends only a tick its verifier takes at the tip: none empty, every reaped id an ephemeral
-// admission, and no activation until TEAM-M2-05's window lands; a refused tick appends nothing.
+// api appends only a tick its verifier takes at the tip: every reaped id an ephemeral admission, and no
+// activation until TEAM-M2-05's window lands; a refused tick appends nothing.
 func TestConfigLogTickIsCheckedAtTheTip(t *testing.T) {
 	cluster := testConfigLogFakeCluster(t)
 	world := sidecartest.NewConfigLogSuiteWorld(t.Context(), cluster)
@@ -42,7 +42,6 @@ func TestConfigLogTickIsCheckedAtTheTip(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tick := range []*bridge.ApiTick{
-		{},
 		{ReapedSidecarIds: [][]byte{genesis.GetOwnerSidecarId()}},
 		{ReapedSidecarIds: [][]byte{sidecar.NewId().Bytes()}},
 		{ReapedSidecarIds: [][]byte{[]byte("short")}},

@@ -58,13 +58,12 @@ func DefaultConfigLogTickSettings() *ConfigLogTickSettings {
 	}
 }
 
-// What a tick's content must be at the tip, as every reader judges it
-// (sidecar's configCheckTick): every reaped id an ephemeral admission, and no
-// activation until TEAM-M2-05's recovery window lands (section 5).
+// What a tick's content must be at the tip, exactly as every reader judges it
+// (sidecar's configCheckTick), so api appends no tick a reader refuses and
+// refuses none a reader takes: every reaped id an ephemeral admission, and no
+// activation until TEAM-M2-05's recovery window lands (section 5). The tick
+// task never makes an empty one.
 func checkConfigLogTick(state *sidecar.ConfigState, tick *bridge.ApiTick) error {
-	if len(tick.GetReapedSidecarIds()) == 0 && len(tick.GetActivatedProposalIds()) == 0 {
-		return fmt.Errorf("%w: an empty tick", sidecar.ErrConfigRule)
-	}
 	for _, reapedBytes := range tick.GetReapedSidecarIds() {
 		sidecarId, err := sidecar.IdFromBytes(reapedBytes)
 		if err != nil {
