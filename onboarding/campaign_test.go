@@ -358,8 +358,13 @@ func TestFormatting(t *testing.T) {
 	if FormatUsd(29.99) != "$29.99" || FormatUsd(4) != "$4" || FormatUsd(39.999) != "$40" || FormatUsd(0.5) != "$0.50" {
 		t.Errorf("usd: %s %s %s %s", FormatUsd(29.99), FormatUsd(4), FormatUsd(39.999), FormatUsd(0.5))
 	}
-	if FormatCount(4812) != "4,812" || FormatCount(999) != "999" || FormatCount(1234567) != "1,234,567" || FormatCount(0) != "0" {
+	// counts group as the template's locale does (TestCountGroupingFollowsTheLocale);
+	// these are English, and "" is English
+	if FormatCount(4812, "en") != "4,812" || FormatCount(999, "en") != "999" || FormatCount(1234567, "en") != "1,234,567" || FormatCount(0, "en") != "0" || FormatCount(4812, "") != "4,812" {
 		t.Error("count grouping")
+	}
+	if FormatCount(4812, "de") != "4.812" || FormatCount(4812, "fr") != "4\u00a0812" || FormatCount(4812, "ar") != "4,812" || FormatCount(4812, "!!") != "4,812" {
+		t.Errorf("count grouping by locale: %q %q %q %q", FormatCount(4812, "de"), FormatCount(4812, "fr"), FormatCount(4812, "ar"), FormatCount(4812, "!!"))
 	}
 	if FormatGb(30) != "30 GB" || FormatGb(2.5) != "2.5 GB" {
 		t.Error("gb")

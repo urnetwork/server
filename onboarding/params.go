@@ -13,6 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
+	"golang.org/x/text/number"
 )
 
 // ParamsInput is the data a send renders from.
@@ -173,24 +177,23 @@ func FormatUsd(usd float64) string {
 	return fmt.Sprintf("$%.2f", cents/100)
 }
 
-// FormatCount renders an integer with thousands grouping ("4,812").
-func FormatCount(n int) string {
-	s := strconv.Itoa(n)
-	if len(s) <= 3 || n < 0 {
-		return s
-	}
-	var b strings.Builder
-	head := len(s) % 3
-	if head > 0 {
-		b.WriteString(s[:head])
-	}
-	for i := head; i < len(s); i += 3 {
-		if b.Len() > 0 {
-			b.WriteByte(',')
+// FormatCount renders an integer with the thousands grouping of `locale`, the
+// template's locale: "4,812" (en, zh, ja, es-419), "4.812" (de, es, it, pt),
+// "4 812" with a no-break space (fr, ru, cs, pl, sv, uk, pt-PT). The symbols
+// are CLDR's, as golang.org/x/text has them, always in Latin digits as the
+// rest of the copy writes numbers (the Arabic copy too). "" or a malformed
+// locale is English.
+func FormatCount(n int, locale string) string {
+	tag := language.English
+	if l := strings.ReplaceAll(strings.TrimSpace(locale), "_", "-"); l != "" {
+		if parsed, err := language.Parse(l); err == nil {
+			tag = parsed
 		}
-		b.WriteString(s[i : i+3])
 	}
-	return b.String()
+	if latin, err := tag.SetTypeForKey("nu", "latn"); err == nil {
+		tag = latin
+	}
+	return message.NewPrinter(tag).Sprint(number.Decimal(n))
 }
 
 // FormatGb renders "30 GB" (whole) or "2.5 GB".
@@ -249,15 +252,15 @@ func BuildParams(in ParamsInput) map[string]string {
 		}
 	case TemplateE2Widget:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
-		p["providers_online"] = FormatCount(in.ProvidersOnline)
+		p["providers_online"] = FormatCount(in.ProvidersOnline, in.Locale)
 		if in.Variant == VariantActivated {
 			if daysActive < 2 {
 				daysActive = 2
 			}
-			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
-			p["days_active"] = FormatCount(daysActive)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			p["platform"] = in.Platform
-			p["countries_online"] = FormatCount(in.CountriesOnline)
+			p["countries_online"] = FormatCount(in.CountriesOnline, in.Locale)
 		}
 	case TemplateE3LastChance:
 		p["opening"] = in.Opening
@@ -281,8 +284,8 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["trial_end_at"] = trialEnd
 	case TemplateE4Feedback:
 		if in.Variant == VariantEngaged {
-			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
-			p["days_active"] = FormatCount(daysActive)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			for r := 1; r <= 5; r++ {
 				p["rating_url_"+strconv.Itoa(r)] = FeedbackUrl(in.SiteUrl, in.Token, "r="+strconv.Itoa(r))
 			}
@@ -290,7 +293,7 @@ func BuildParams(in ParamsInput) map[string]string {
 			if daysActive < 5 {
 				daysActive = 5
 			}
-			p["days_active"] = FormatCount(daysActive)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			for i, code := range onboardingReasonCodes {
 				p["reason_url_"+strconv.Itoa(i+1)] = FeedbackUrl(in.SiteUrl, in.Token, "why="+code)
 			}

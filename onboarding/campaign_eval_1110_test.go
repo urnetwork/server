@@ -126,3 +126,44 @@ func TestRegionalStoreLocale(t *testing.T) {
 		}
 	}
 }
+
+// C3: the counts the emails quote were grouped with "," in every locale, so
+// "4,812 providers" read as 4.812 in de, es, fr, it, pt, ru and the other
+// locales that write "," as the decimal mark. They group as the template's
+// locale does (CLDR's symbols, as golang.org/x/text has them), in the Latin
+// digits the rest of the copy uses: the Arabic copy writes "3" and "10 TiB"
+// too, so Arabic keeps "4,812" rather than "٤٬٨١٢".
+func TestCountGroupingFollowsTheLocale(t *testing.T) {
+	nbsp := "\u00a0"
+	for locale, want := range map[string]string{
+		"": "4,812", "en": "4,812", "ar": "4,812", "cs": "4" + nbsp + "812", "de": "4.812", "el": "4.812",
+		"es": "4.812", "es-419": "4,812", "es-MX": "4,812", "fr": "4" + nbsp + "812", "he": "4,812",
+		"hi": "4,812", "id": "4.812", "it": "4.812", "ja": "4,812", "ko": "4,812", "nl": "4.812",
+		"pl": "4" + nbsp + "812", "pt": "4.812", "pt-BR": "4.812", "pt-PT": "4" + nbsp + "812",
+		"ru": "4" + nbsp + "812", "sv": "4" + nbsp + "812", "sw": "4,812", "th": "4,812",
+		"uk": "4" + nbsp + "812", "vi": "4.812", "zh": "4,812", "zh-HK": "4,812",
+	} {
+		for _, variant := range []string{VariantActivated, VariantNotActivated} {
+			p := BuildParams(ParamsInput{
+				Template: TemplateE2Widget, Variant: variant, Locale: locale,
+				ProvidersOnline: 4812, CountriesOnline: 91, DaysActive: 3, ConnectDays: 2,
+				Token: "T", SiteUrl: "https://ur.io",
+			})
+			if got := p["providers_online"]; got != want {
+				t.Errorf("%q %s: providers_online %q, want %q", locale, variant, got, want)
+			}
+			if variant == VariantActivated && (p["countries_online"] != "91" || p["connect_days"] != "2" || p["days_active"] != "3") {
+				t.Errorf("%q: small counts %q %q %q", locale, p["countries_online"], p["connect_days"], p["days_active"])
+			}
+		}
+	}
+	// large counts: the locale's grouping all the way, Indian grouping in Hindi
+	for locale, want := range map[string]string{
+		"en": "1,234,567", "de": "1.234.567", "fr": "1" + nbsp + "234" + nbsp + "567", "hi": "12,34,567", "ar": "1,234,567",
+	} {
+		p := BuildParams(ParamsInput{Template: TemplateE2Widget, Variant: VariantNotActivated, Locale: locale, ProvidersOnline: 1234567, Token: "T", SiteUrl: "https://ur.io"})
+		if got := p["providers_online"]; got != want {
+			t.Errorf("%q: providers_online %q, want %q", locale, got, want)
+		}
+	}
+}
