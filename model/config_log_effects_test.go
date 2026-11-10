@@ -10,6 +10,7 @@ package model
 
 import (
 	"context"
+	"crypto/sha256"
 	"testing"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/protocol/bridge"
 	"github.com/urnetwork/sidecar/sidecartest"
 
@@ -285,5 +287,74 @@ func TestSponsorUserIdFollowsTheSponsor(t *testing.T) {
 		writeOwner(removal.clientId, false)
 		reconcile(map[server.Id]*server.Id{removal.sidecarId: &newSponsor}, []server.Id{newSponsor})
 		connect.AssertEqual(t, *sponsorOf(removal.clientId), creatorUserId)
+	})
+}
+
+// §7.8: an AdminSet change carried out from the log owes the network's Owners
+// and Admins the network authority notice, and a second run owes nothing more.
+func TestAnAdminSetChangeOwesItsNoticeOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		self := newTestEffectsLog(t)
+		ownerMemberId := self.world.OwnerMemberId()
+		adminMemberId := sidecar.NewId()
+		if _, err := self.post(self.world.SignAsOwner(bridge.SignedType_SIGNED_MEMBER_ADMIT, &protocol.MemberAdmit{
+			Header: self.world.Header(), MemberId: adminMemberId.Bytes(), Role: bridge.MemberRole_MEMBER_ROLE_MEMBER,
+		})); err != nil {
+			t.Fatalf("the member: %v", err)
+		}
+		if _, err := self.post(self.world.SignAsOwner(bridge.SignedType_SIGNED_ADMIN_SET, &protocol.AdminSet{
+			Header: self.world.Header(), Owners: [][]byte{ownerMemberId.Bytes()}, Admins: [][]byte{adminMemberId.Bytes()},
+		})); err != nil {
+			t.Fatalf("the AdminSet: %v", err)
+		}
+		if _, err := ApplyConfigLogEffects(self.ctx, self.freshSequencer(), self.networkId, DefaultConfigLogEffectsSettings()); err != nil {
+			t.Fatal(err)
+		}
+		notices := unsentTestNotices(t, self.ctx, self.networkId, SecurityNetworkAuthorityTemplateName)
+		if len(notices) != 1 {
+			t.Fatalf("%d notices, want one", len(notices))
+		}
+		if changes := notices[0].changes(t); len(changes) != 1 || changes[0]["action"] != SecurityNetworkAuthorityAdminSet {
+			t.Fatalf("the notice: %s", notices[0].templateJson)
+		}
+		if _, err := ApplyConfigLogEffects(self.ctx, self.freshSequencer(), self.networkId, DefaultConfigLogEffectsSettings()); err != nil {
+			t.Fatal(err)
+		}
+		again := unsentTestNotices(t, self.ctx, self.networkId, SecurityNetworkAuthorityTemplateName)
+		if len(again) != 1 || again[0].templateJson != notices[0].templateJson {
+			t.Fatalf("a second run owed more: %d notices", len(again))
+		}
+	})
+}
+
+// §7.8: an entry that declared a Delegation owes the notice when its effects
+// are applied, and applying the entry again owes nothing more; the notice
+// names neither the Delegation nor its key.
+func TestANewDelegationOwesItsNoticeOnce(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		self := newTestEffectsLog(t)
+		effect := &configLogEntryEffect{
+			n:               7,
+			chain:           sha256.Sum256([]byte("synthetic entry")),
+			timeMs:          self.world.Clock().Now().UnixMilli(),
+			action:          AdminEventActionConfigPrefix + "delegation",
+			delegationCount: 1,
+		}
+		connect.AssertEqual(t, effect.empty(), false)
+		for i := range 2 {
+			server.Tx(self.ctx, func(tx server.PgTx) {
+				applied, err := applyConfigLogEntryEffectInTx(self.ctx, tx, self.networkId, effect)
+				server.Raise(err)
+				connect.AssertEqual(t, applied, i == 0)
+			})
+			notices := unsentTestNotices(t, self.ctx, self.networkId, SecurityNetworkAuthorityTemplateName)
+			if len(notices) != 1 {
+				t.Fatalf("%d notices, want one", len(notices))
+			}
+			changes := notices[0].changes(t)
+			if len(changes) != 1 || changes[0]["action"] != SecurityNetworkAuthorityDelegation || len(changes[0]) != 2 {
+				t.Fatalf("the notice: %s", notices[0].templateJson)
+			}
+		}
 	})
 }

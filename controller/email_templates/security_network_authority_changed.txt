@@ -1,0 +1,20 @@
+{{define "headline"}}{{.TextHeadline}}{{end}}
+{{define "why"}}Sent to the sign-in email addresses of your network's owners
+and admins whenever who can admit devices to it, or sign its members in,
+changes.{{end}}
+{{define "content"}}
+{{.Subject}}.
+{{range .Rows}}
+When: {{.When}}
+Change: {{.Action}}
+{{- if .Via}}
+Made with: {{.Via}}
+{{- end}}
+{{end}}
+{{- if .MoreChangesText}}
+{{.MoreChangesText}}
+{{end}}
+If you didn't make this change, contact security@ur.io right away.
+
+To sign out every other device: https://ur.io/app/account/sessions
+{{end}}

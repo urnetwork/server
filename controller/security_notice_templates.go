@@ -637,3 +637,72 @@ func (self *SecurityAuthKeyChangedTemplate) AnyPreApprovedRevoked() bool {
 	}
 	return false
 }
+
+// One network authority change as the notice shows it.
+type SecurityNetworkAuthorityChangeRow struct {
+	When   string
+	Action string
+	// how it was made, or ""
+	Via string
+}
+
+// The network authority notice (model/security_notice_authority.go): who may
+// admit devices to the network or sign its members in changed. It names no
+// key, delegation, member or IdP.
+type SecurityNetworkAuthorityChangedTemplate struct {
+	model.SecurityNetworkAuthorityNotice
+	BaseTemplate
+}
+
+func (self *SecurityNetworkAuthorityChangedTemplate) Name() string {
+	return model.SecurityNetworkAuthorityTemplateName
+}
+
+// The words of a change.
+func securityNetworkAuthorityAction(action string) string {
+	switch action {
+	case model.SecurityNetworkAuthorityDelegation:
+		return "A delegation that admits devices was added"
+	case model.SecurityNetworkAuthorityAdminSet:
+		return "The network's admins changed"
+	case model.SecurityNetworkAuthorityIdp:
+		return "A sign-in provider was added"
+	default:
+		return "The network's authority changed"
+	}
+}
+
+// The changes, oldest first.
+func (self *SecurityNetworkAuthorityChangedTemplate) Rows() []*SecurityNetworkAuthorityChangeRow {
+	rows := []*SecurityNetworkAuthorityChangeRow{}
+	for _, change := range self.Changes {
+		if change == nil {
+			continue
+		}
+		rows = append(rows, &SecurityNetworkAuthorityChangeRow{
+			When:   securityNoticeTime(change.ChangeTime),
+			Action: securityNetworkAuthorityAction(change.Action),
+			Via:    securityNoticeVia(change.Via),
+		})
+	}
+	return rows
+}
+
+// The subject: what happened, without the details.
+func (self *SecurityNetworkAuthorityChangedTemplate) Subject() string {
+	return "Who can admit devices to your URnetwork network changed"
+}
+
+// The headline: what happened, in a few words.
+func (self *SecurityNetworkAuthorityChangedTemplate) Headline() string {
+	return "Network authority changed"
+}
+
+// The headline as the plain-text part sets it, in capitals.
+func (self *SecurityNetworkAuthorityChangedTemplate) TextHeadline() string {
+	return strings.ToUpper(self.Headline())
+}
+
+func (self *SecurityNetworkAuthorityChangedTemplate) MoreChangesText() string {
+	return securityNoticeMoreChanges(self.MoreCount)
+}
