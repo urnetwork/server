@@ -38,8 +38,8 @@ gates:
         - {repo: server, package: ./local/sidecar-migrations, names: [TestPromoteMovesOnlyItsOwnGroup, TestPromoteRefusesOutOfOrder, TestPromoteResultCompilesOnBothLegs]}
     - item: stage 1 and D-TEAM-14 enforced (§23.4's M1 exit; TEAM-M1-01)
       tests:
-        - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestEmbedRefusalIsNotCountedAsStageOne, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestStrictExpGateRefusesWhateverTheConfigSays]}
-        - {repo: server, package: ./api, stores: true, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute, TestClientWhoseMarksCannotBeReadIsRefusedOnEveryAdminRoute, TestApiRefusesAnExpiredStrictExpToken]}
+        - {repo: server, package: ./api, stores: true, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestEmbedRefusalIsNotCountedAsStageOne, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestStrictExpGateRefusesWhateverTheConfigSays, TestSidecarTokenRoutes]}
+        - {repo: server, package: ./api, tags: sidecar_pending, stores: true, names: [TestMarkedClientTokensAreRefusedOnEveryAdminRoute, TestClientWhoseMarksCannotBeReadIsRefusedOnEveryAdminRoute, TestApiRefusesAnExpiredStrictExpToken]}
       external: 'production: stage 1 enforced there after its 14 log-only days (D-PHASE-3), which no local run shows'
     - item: Required RPC after §6.4's M1 identity check (§23.4's M1 exit; PROTO-M1-11)
       tests:

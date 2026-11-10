@@ -274,8 +274,8 @@ func runTrace(ctx context.Context, options *gateOptions, tracePath string) (*tra
 		if _, ok := lists[row.Id]; !ok {
 			report.findings = append(report.findings, fmt.Sprintf("trace.yml lists %s, which no roll-up list of the design holds", row.Id))
 		}
-		if row.Gate != "" && !traceGatePattern.MatchString(row.Gate) {
-			report.findings = append(report.findings, fmt.Sprintf("%s's first gate %q is no gate", row.Id, row.Gate))
+		if !traceGatePattern.MatchString(row.Gate) {
+			report.findings = append(report.findings, fmt.Sprintf("%s's first gate %q is no gate: each roll-up row names the gate it is first shown at", row.Id, row.Gate))
 		}
 	}
 	gateRun := &gateReport{gate: "trace", base: options.base, list: options.list}

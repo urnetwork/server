@@ -60,8 +60,8 @@ rows:
     gate: M1
     task: TEAM-M1-01
     tests:
-      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
-      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestSidecarTokenRoutes], stores: true}
+      - {repo: server, package: ./api, names: [TestMarkedClientTokensAreRefusedOnEveryAdminRoute], tags: sidecar_pending, stores: true}
   - {id: R-CTX-9, gate: M1}
   - {id: R-CTX-10, gate: M1}
   - id: R-CTX-11
@@ -181,8 +181,8 @@ rows:
     gate: M1
     task: TEAM-M1-01
     tests:
-      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
-      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestSidecarTokenRoutes], stores: true}
+      - {repo: server, package: ./api, names: [TestMarkedClientTokensAreRefusedOnEveryAdminRoute], tags: sidecar_pending, stores: true}
 
   # §2.9: the security invariants, which bind every section (D-TRUST-2)
   - id: I-1
@@ -213,8 +213,8 @@ rows:
     task: TEAM-M1-01
     open: "production: the P0 enforced there (D-TRUST-3)"
     tests:
-      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
-      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestSidecarTokenRoutes], stores: true}
+      - {repo: server, package: ./api, names: [TestMarkedClientTokensAreRefusedOnEveryAdminRoute], tags: sidecar_pending, stores: true}
   - id: I-7
     gate: M3
     schedules: [FS-25, FS-26, FS-27, FS-28, FS-29, FS-30, FS-115, "FS-124 (cli)"]
@@ -322,8 +322,8 @@ rows:
     task: TEAM-M1-01
     open: "production: stage 1 and the 7-day tokens live before any sidecar ships (D-TRUST-3)"
     tests:
-      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
-      - {repo: server, package: ./api, names: [TestSidecarTokenRoutes, TestMarkedClientTokensAreRefusedOnEveryAdminRoute], stores: true}
+      - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestSidecarTokenRoutes], stores: true}
+      - {repo: server, package: ./api, names: [TestMarkedClientTokensAreRefusedOnEveryAdminRoute], tags: sidecar_pending, stores: true}
   - {id: R-PHASE-7, gate: M8}
   - id: R-PHASE-8
     gate: M1

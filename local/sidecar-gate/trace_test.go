@@ -148,7 +148,7 @@ func TestTraceFailsUntilANewDesignRowIsListed(t *testing.T) {
 		t.Fatalf("the unlisted row: %+v", result)
 	}
 
-	listed := strings.Replace(fixtureTrace, "  - {id: R-CTX-2, gate: M1}\n", "  - {id: R-CTX-2, gate: M1}\n  - {id: R-CTX-3, gate: M3}\n  - {id: R-CTX-404, gate: M3}\n", 1)
+	listed := strings.Replace(fixtureTrace, "  - {id: R-CTX-2, gate: M1}\n", "  - {id: R-CTX-2, gate: M1}\n  - {id: R-CTX-3}\n  - {id: R-CTX-404, gate: M3}\n", 1)
 	if err := os.WriteFile(tracePath, []byte(listed), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +156,7 @@ func TestTraceFailsUntilANewDesignRowIsListed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(report.findings) != 1 || !strings.Contains(report.findings[0], "R-CTX-404, which no roll-up list") {
+	if len(report.findings) != 2 || !strings.Contains(report.findings[0], `R-CTX-3's first gate "" is no gate`) || !strings.Contains(report.findings[1], "R-CTX-404, which no roll-up list") {
 		t.Fatalf("findings %v", report.findings)
 	}
 }
