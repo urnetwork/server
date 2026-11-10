@@ -1,0 +1,4 @@
+package skipped
+
+// under a dot directory, which the scan never enters
+const apiHost = "api.user.example"

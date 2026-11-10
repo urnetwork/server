@@ -143,7 +143,10 @@ var networkHealthReasonRules = []struct {
 // Names with a dot and a top level domain; only the public sites may appear.
 var networkHealthHostPattern = regexp.MustCompile(`(?i)\b[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,24}\b`)
 
-var networkHealthPublicHosts = []string{"ur.io", "ur.xyz", "ur.network", "lag.dev", "bringyour.com", "api.bringyour.com"}
+// The public sites. The user root is not one: it carries user content only,
+// and its apex only redirects to ur.io (sidecar DESIGN §12.4), so a reason
+// names ur.io instead.
+var networkHealthPublicHosts = []string{"ur.io", "ur.xyz", "lag.dev", "bringyour.com", "api.bringyour.com"}
 
 // A name and a port, as in "host:8080". The name must have a letter, so a
 // time like 08:10 is not a port.

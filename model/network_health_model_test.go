@@ -73,6 +73,8 @@ func TestValidateNetworkHealthReasonRefusesWhatMustNotBePublished(t *testing.T) 
 		{"Request 123e4567-e89b-12d3-a456-426614174000 failed", "an identifier"},
 		{"Token dGhpc2lzYXZlcnlsb25ndG9rZW52YWx1ZQ leaked", "a token"},
 		{"db.internal.example is down", "a host name"},
+		// the user root is no public site: it carries user content only
+		{"Sites under ur.network are slow to load", "a host name"},
 		{"redis:6379 refuses connections", "a host and port"},
 		{"Fixed in 5ff19aebb", "a commit or hash"},
 	} {

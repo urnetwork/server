@@ -1,0 +1,4 @@
+package clean
+
+// listed in the fixture's allowlist, though no literal here names the root
+const apiHost = "api.platform.example"

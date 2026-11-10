@@ -1,0 +1,4 @@
+package skipped
+
+// under testdata, which the scan never enters
+const apiHost = "api.user.example"
