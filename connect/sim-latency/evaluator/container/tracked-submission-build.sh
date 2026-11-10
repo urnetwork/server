@@ -40,7 +40,7 @@ tracked_submission_run_stage() {
         --mount "type=bind,src=$source_root,dst=/workspace,readonly" \
         --mount "type=bind,src=$cache,dst=/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v" \
         "${output_args[@]}" \
-        --tmpfs "/work:rw,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=$tracked_build_work" \
+        --tmpfs "/work:rw,nosuid,nodev,exec,uid=65532,gid=65532,mode=0700,size=$tracked_build_work" \
         --env GOCACHE=/work/cache --env GOTMPDIR=/work/tmp --env TMPDIR=/work/tmp --env HOME=/work/home \
         --env GOFLAGS=-mod=readonly --env GOPROXY=off --env GOSUMDB=off \
         --entrypoint /bin/bash "$base_image_id" -euc "$script")" || infrastructure_failure "tracked compiler creation is uncertain"

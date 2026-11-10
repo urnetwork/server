@@ -515,7 +515,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 		if err := addTarget(target); err != nil {
 			return err
 		}
-		size, err := self.verifyDockerTmpfs(target, options)
+		size, err := self.verifyDockerTmpfs(target, options, host.CgroupParent == self.plan.BuildCgroupName)
 		if err != nil || size > self.settings.MaximumContainerTmpfsBytes-tmpfsBytes {
 			return errors.New("Docker tmpfs policy exceeds its finite ceiling")
 		}
@@ -572,7 +572,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 				}
 				pieces = append(pieces, strings.Join(option, "="))
 			}
-			size, err := self.verifyDockerTmpfs(mount.Target, strings.Join(pieces, ","))
+			size, err := self.verifyDockerTmpfs(mount.Target, strings.Join(pieces, ","), host.CgroupParent == self.plan.BuildCgroupName)
 			if err != nil || size > self.settings.MaximumContainerTmpfsBytes-tmpfsBytes {
 				return errors.New("Docker structured tmpfs exceeds its finite ceiling")
 			}
@@ -686,7 +686,7 @@ func (self *DockerProxy) verifyDockerBind(source, target string, readOnly bool) 
 
 // The frozen roles use only these private memory filesystems. A size, mapped
 // uid/gid, non-suid/non-device mode and finite total are required on every one.
-func (self *DockerProxy) verifyDockerTmpfs(target, value string) (int64, error) {
+func (self *DockerProxy) verifyDockerTmpfs(target, value string, trackedBuild bool) (int64, error) {
 	switch target {
 	case "/tmp", "/work", "/data", "/var/lib/postgresql", "/var/run/postgresql":
 	default:
@@ -699,7 +699,7 @@ func (self *DockerProxy) verifyDockerTmpfs(target, value string) (int64, error) 
 			return 0, errors.New("Docker tmpfs option is duplicated")
 		}
 		switch name {
-		case "rw", "nosuid", "nodev", "noexec":
+		case "rw", "nosuid", "nodev", "noexec", "exec":
 			if hasValue {
 				return 0, errors.New("Docker tmpfs flag has an unexpected value")
 			}
@@ -712,6 +712,14 @@ func (self *DockerProxy) verifyDockerTmpfs(target, value string) (int64, error) 
 		default:
 			return 0, errors.New("Docker tmpfs requested an unreviewed host option")
 		}
+	}
+	// Docker defaults tmpfs to noexec. Go's check stage must execute its
+	// generated test binaries; only the independently owned compiler work
+	// mount receives this capability. Other roles and evidence stay noexec.
+	if options["exec"] == "true" && (!trackedBuild || target != "/work") ||
+		trackedBuild && target == "/work" && options["exec"] != "true" ||
+		options["exec"] == "true" && options["noexec"] == "true" {
+		return 0, errors.New("Docker executable tmpfs is not the explicit tracked compiler work mount")
 	}
 	mode, err := strconv.ParseUint(options["mode"], 8, 12)
 	if err != nil || mode != 0700 && mode != 0750 && mode != 01770 || options["rw"] != "true" || options["nosuid"] != "true" || options["nodev"] != "true" ||
