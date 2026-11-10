@@ -120,12 +120,12 @@ func TestResolvedFullTunApplicationMtu(t *testing.T) {
 		t.Fatalf("explicit application MTU=%d want=%d", got, resources.ApplicationMtu)
 	}
 
-	if fullTunQUICInitialPacketSize <= clientconnect.DefaultMtu {
-		t.Fatalf(
-			"QUIC Initial=%d must exercise IPv4 fragmentation above product MTU=%d",
-			fullTunQUICInitialPacketSize,
-			clientconnect.DefaultMtu,
-		)
+	// InitialPacketSize is UDP payload; the product MTU includes IP and UDP.
+	// Ordinary QUIC Initials fit even with IPv6 headers at the device MTU.
+	const initialHeaderByteCount = 40 + 8
+	if fullTunQUICInitialPacketSize < 1200 || fullTunQUICInitialPacketSize+initialHeaderByteCount > clientconnect.DefaultMtu {
+		t.Fatalf("QUIC Initial payload=%d plus headers=%d does not fit product MTU=%d",
+			fullTunQUICInitialPacketSize, initialHeaderByteCount, clientconnect.DefaultMtu)
 	}
 }
 
