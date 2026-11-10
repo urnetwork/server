@@ -19,7 +19,7 @@ Slice=urnetwork-management-private.slice
 UMask=0022
 PrivateNetwork=yes
 BindPaths=@BASE_DIRECTORY@/candidate/exec/containerd-sockets:/run/containerd
-Environment="PATH=@ENGINE_BIN@"
+Environment="PATH=@ENGINE_HELPER_PATH@"
 Environment="TMPDIR=@BASE_DIRECTORY@/candidate/scratch/engine-tmp"
 Environment="DOCKER_TMPDIR=@BASE_DIRECTORY@/candidate/scratch/docker-tmp"
 Environment="HOME=@BASE_DIRECTORY@/candidate/scratch/engine-home"

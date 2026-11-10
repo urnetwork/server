@@ -691,6 +691,7 @@ func TestRuntimeResourceBoundaryRejectsUnboundedLiveDaemonLogs(t *testing.T) {
 func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T) {
 	fixture := newRuntimeBoundaryTest(t)
 	boundary := fixture.boundary
+	boundary.Nftables.Path = "/opt/synthetic-system/sbin/nft"
 	tokens := map[string]string{
 		"BASE_DIRECTORY": boundary.BaseDirectory, "BACKING_FILE": boundary.BackingFile, "LOOP_NUMBER": "31",
 		"MAXIMUM_BYTES": strconv.FormatUint(boundary.MaximumBytes, 10), "MINIMUM_FREE_BYTES": strconv.FormatUint(boundary.MinimumFreeBytes, 10),
@@ -709,6 +710,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
 		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
 		"MANAGEMENT_CPUSET":  boundary.ManagementCpuSet,
+		"ENGINE_HELPER_PATH": runtimeBoundaryHelperPath(boundary),
 		"PRIVATE_AGENT_PATH": "/usr/local/libexec/synthetic-agent", "PRIVATE_AGENT_CONFIG": "/etc/synthetic-agent.json",
 	}
 	unresolved := regexp.MustCompile(`@[A-Z0-9_]+@`)
@@ -743,7 +745,7 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	}
 	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
 		unit := string(render(name))
-		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
+		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + runtimeBoundaryHelperPath(boundary),
 			"AllowedCPUs=" + boundary.ManagementCpuSet,
 			"PrivateNetwork=yes", "BindsTo=" + runtimeBoundaryKeeperUnitName, "JoinsNamespaceOf=" + runtimeBoundaryKeeperUnitName,
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {

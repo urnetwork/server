@@ -462,11 +462,22 @@ func runtimeBoundaryTemporaryDirectories(boundary RuntimeResourceBoundary) []str
 	return []string{filepath.Join(boundary.ScratchRoot, "engine-tmp"), filepath.Join(boundary.ScratchRoot, "docker-tmp"), filepath.Join(boundary.ScratchRoot, "engine-home")}
 }
 
-// Both daemons resolve only protected pinned helpers and use bounded temporary
-// roots; systemd supplies incidental invocation/notification metadata separately.
+// Docker also resolves namespace DNS and AppArmor helpers from the protected
+// system-tool directory. Never inherit the launching operator's search path.
+func runtimeBoundaryHelperPath(boundary RuntimeResourceBoundary) string {
+	runtimeDirectory := filepath.Dir(boundary.Runc.Path)
+	systemDirectory := filepath.Dir(boundary.Nftables.Path)
+	if runtimeDirectory == systemDirectory {
+		return runtimeDirectory
+	}
+	return runtimeDirectory + string(os.PathListSeparator) + systemDirectory
+}
+
+// Both daemons resolve helpers only in protected executable directories and use
+// bounded temporary roots; incidental systemd metadata is checked separately.
 func runtimeBoundaryEnvironment(boundary RuntimeResourceBoundary) map[string]string {
 	directories := runtimeBoundaryTemporaryDirectories(boundary)
-	return map[string]string{"PATH": filepath.Dir(boundary.Runc.Path), "TMPDIR": directories[0], "DOCKER_TMPDIR": directories[1], "HOME": directories[2]}
+	return map[string]string{"PATH": runtimeBoundaryHelperPath(boundary), "TMPDIR": directories[0], "DOCKER_TMPDIR": directories[1], "HOME": directories[2]}
 }
 
 // Protected unit configuration is checked against the actual daemon process,

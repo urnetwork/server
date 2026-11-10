@@ -1,6 +1,23 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T20:36:48Z",
+  "observed_at": "2026-11-10T21:08:00Z",
+  "latest_private_dns_diagnosis": {
+    "active_control_role": "v21",
+    "source_commit": "cf6280ade089622ba0361f0f6752e64994dfa974",
+    "agent_sha256": "4ebf72def207ce3d5af1ad9bb85ad883fb46126a28aae9d99ae64a059fe17fb1",
+    "both_operator_probes_terminal_failed": true,
+    "cleanup_and_stop_cleanup_verified_both_hosts": true,
+    "nonroot_local_fixture_readback_passed_both_hosts": true,
+    "sille_run_id": "421769f231128657109dc947a85dbc9e056f1c55822432e4b50a68a2e8378618",
+    "goofe_run_id": "5d9f676bedd992a0875b12c29f682d2ccff77ae5b4096297311f5fc2e379c24a",
+    "root_cause": "Both private daemons have runtime-only PATH=/usr/bin. Docker logs prove embedded DNS cannot start because iptables is installed in /usr/sbin. The adjacent AppArmor parser lookup also fails. Daemon iptables=false does not remove its embedded namespace DNS helper requirement.",
+    "correction": "Derive exact daemon helper PATH from the protected pinned runtime and nft executable directories, without inheriting operator PATH or changing the default-deny network policy. Both service templates and actual-process environment admission must match. Fresh native DNS proof is required before another full operator probe.",
+    "tests": "Focused helper lookup/environment/template race regressions passed three repetitions4.487s. Full agent and CLI race suites passed three repetitions227.846s/1.029s; go vet passed. Signed non-job idle confirmations obtained from both hosts. Correction is not deployed yet.",
+    "epoch2_submissions": {"observed_at":"2026-11-10T21:05:50Z","total":8,"queued":8,"started":0,"running":0,"completed":0,"failed":0},
+    "official_r9_started": false,
+    "grading_ready": false,
+    "next_action": "Finish tests, publish and install immutable corrected controls at idle, prove actual private service-name resolution, then finish full containment qualification and official shared R9 baseline plus parallel host admission. Earlier entries below are historical."
+  },
   "latest_mount_parent_and_launch_diagnosis": {
     "v20_probes_terminal": true,
     "sille_state": "expired",
