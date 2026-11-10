@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T16:13:05Z",
+  "observed_at": "2026-11-10T16:37:43Z",
   "latest_executor_diagnosis": {
     "migration_head_verified": 950,
     "v7_native_probes": "Both terminal infrastructure failures before simulation; not running. Preserve their original identities and deadlines.",
     "first_refusal": "Reproduced with the installed Docker CLI against an inert daemon: image tag normalizes the single allowed offline alias with docker.io/. Proxy rejected that exact equivalent spelling.",
     "adjacent_defect": "All three trusted identity callers duplicated cap-drop ALL and no-new-privileges by composing explicit flags with scoped probe arguments. Fixed callers, retaining strict proxy admission and legacy security flags.",
     "regressions": "Real CLI tag failed before correction and passed three times afterward. Actual identity command fragments failed against archived HEAD for all three scoped callers and passed three times after correction, including legacy controls.",
-    "deployment": "Corrected v11 installed and active on both hosts. Clean083479194 agent5062ce2c fixes the coverage-field schema rejection; private refusal diagnostics and completed-evidence cache fixes included. Both hosts passed actual resource/namespace checks, repeated fingerprints and signed idle checks. Fresh operator probes are active: Sille3c20072c and Goofec6fbe639, original deadlines16:27:54Z; observe these same attempts, do not restart on a poll timeout. Full agent/CLI485 pass/0 fail/1 intentional skip; coverage/CLI race3 repetitions passed. No amendment registered; official shared R9 baseline/admission unstarted; scoring paused and public intake remains open. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
+    "deployment": "v11 active; both operator probes are terminal failed and cleanup verified. Coverage admission is fixed: compiler CREATE now reaches Docker. Remaining failure is mount visibility: host evidence tmpfs is absent from Docker/containerd's separate mount namespace, so Docker cannot bind the existing source path. Versioned Go native regression reproduced the private-parent failure and proved job-only shared/master to slave-peer visibility, exact inode identity, normal unmount propagation and preserved private parent; three passes on both hosts. No production propagation change applied. User approval requested for this narrow topology correction; local admission/boot-order implementation remains to do. Do not rerun unchanged probes. No amendment registered; official shared R9 baseline/admission unstarted; scoring paused and intake open. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
   },
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T16:13:05Z",
+  "observed_at": "2026-11-10T16:37:43Z",
   "kind": "epoch2-composed-docker-control-release/v1",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "server_commit": "3ae3f1ecc199b515a92692d9024c6dbc1865d337",
@@ -171,7 +171,9 @@
       "run_id": "3c20072c9ab830aeca3673b3aa4c59a212f9093349db3c5b86fa433aadfacfc0",
       "started_at": "2026-11-10T16:12:54.477479199Z",
       "deadline_at": "2026-11-10T16:27:54.477479199Z",
-      "last_observed_state": "active operator probe; not customer evaluation"
+      "last_observed_state": "failed: Docker cannot see the source bind path in its mount namespace",
+      "cleanup_verified": true,
+      "stop_cleanup_verified": true
     },
     "goofe": {
       "fingerprint_sha256": "3eeeb3ab8bdb0e101a40899e610bd2f8da60091db3a912fe6605cc7e748f05a4",
@@ -180,11 +182,31 @@
       "run_id": "c6fbe6391f8af378648621ed5333af2dbef0c346d05d4897e3239a6f3a2e1035",
       "started_at": "2026-11-10T16:12:54.174759355Z",
       "deadline_at": "2026-11-10T16:27:54.174759355Z",
-      "last_observed_state": "active operator probe; not customer evaluation"
+      "last_observed_state": "failed: Docker cannot see the source bind path in its mount namespace",
+      "cleanup_verified": true,
+      "stop_cleanup_verified": true
     },
     "grading_ready": false,
     "official_r9_started": false,
     "amendment_registered": false
+  },
+  "work_mount_visibility_diagnosis": {
+    "observed_at": "2026-11-10T16:37:43Z",
+    "native_failure": "Both v11 retained candidate-build.log files show Docker's bind source path does not exist for the host-created .evidence-runtime source tree. This occurs after proxy CREATE admission, not a candidate build rejection. The engine deliberately shares containerd's separate mount namespace; host per-job tmpfs mounts do not propagate through the private candidate filesystem.",
+    "kernel_regression": "competitionagent/workspace_mount_propagation_linux_test.go",
+    "method": "New isolated temporary mounts only. Explicit pipe barriers create the peer before evidence tmpfs, then observe visibility and normal unmount. Private-parent counterfactual hides the path; job-only shared subtree plus slave peer sees matching payload AND exact device/inode; candidate parent stays private and all temporary mounts/processes are cleaned up.",
+    "sille": {"repetitions":3,"passed":true,"log":"/mnt/data/competition-control-tests-by/workspace-native-20261110.4vSytZTN/sille.log","sha256":"a46d949ef5d0f5d1663bbd88a9813c7822e46b3ae8bf234da530250f2b438d6b"},
+    "goofe": {"repetitions":3,"passed":true,"log":"/mnt/data/competition-control-tests-by/workspace-native-20261110.4vSytZTN/goofe.log","sha256":"9cb11bacd88e0778749129328ecde3dcafd179cd4e6303e5ea9643ab7df94f88"},
+    "production_mounts_changed": false,
+    "approval": "Requested narrow job-subtree propagation amendment; not yet answered at this observation.",
+    "implementation_remaining": [
+      "Declare the job-only propagation class explicitly in the protected resource boundary; retain legacy private-parent checks.",
+      "Permit exactly one declared same-device WorkRoot self-bind, not arbitrary nested/aliased mounts; candidate filesystem itself must remain private.",
+      "Verify host work shared-group and one-way runtime slave/master relationship on both daemon views, with unit/process/mount generation fencing and fail-closed rechecks.",
+      "Add durable bounded host-side workspace mount boot ordering before containerd namespace creation; do not create the master inside the already-isolated daemon namespace.",
+      "Qualify native mount/unmount and containment after the approved live change, then record actual new control fingerprints before any official R9 or customer evaluation."
+    ],
+    "do_not": "Do not make the entire candidate/root filesystem shared, remove nested-mount admission wholesale, drop evidence tmpfs limits, change score rules, or replay unchanged v11 probes. The successful isolated fixture is not production host qualification."
   },
   "provisioning_note": "The Sille provisioner refused an evaluator pin mismatch before unit changes. Its partial role directory was preserved as competition-sille-role-20261110-v8-incomplete-pin-preflight; the explicit expected corrected evaluator SHA was added before successful provisioning. No job was started by the refused operation."
 }
