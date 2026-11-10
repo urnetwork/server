@@ -25,10 +25,6 @@ const proxyTestSharedDashboardName = "proxy-test-shared.json"
 // matches every series, so dropping it keeps the query's meaning.
 const proxyTestCountryMatcher = `,country=~"$country"`
 
-// The labels the runner writes, besides the env, host and job that its metrics
-// shipping adds. They are the only labels a panel of the copy may show.
-var proxyTestRunnerLabels = []string{"country", "outcome", "phase", "stat", "call", "version"}
-
 func readProxyTestDocumentJson(t *testing.T, name string) map[string]any {
 	t.Helper()
 	body, err := dashboardsFs.ReadFile("dashboards/" + name)
@@ -263,7 +259,7 @@ func TestProxyTestSharedDashboardShowsOnlyRunnerLabels(t *testing.T) {
 				if label == "" {
 					continue
 				}
-				if !slices.Contains(proxyTestRunnerLabels, label) {
+				if !slices.Contains(proxyTestLabels, label) {
 					t.Errorf("query groups %s %q, which is not a runner label: %s", grouping[1], label, expression)
 				}
 			}
@@ -271,7 +267,7 @@ func TestProxyTestSharedDashboardShowsOnlyRunnerLabels(t *testing.T) {
 		// each read sits directly in a max, which leaves only its grouping
 		for _, read := range proxyTestReads(t, expression) {
 			before := read.before
-			for _, function := range []string{"increase(", "rate(", "max_over_time(", "last_over_time("} {
+			for _, function := range append(slices.Clone(proxyTestCounterFunctions), proxyTestGaugeFunctions...) {
 				before = strings.TrimSuffix(before, function)
 			}
 			if proxyTestMaxPattern.FindStringSubmatch(before) == nil {
@@ -279,6 +275,16 @@ func TestProxyTestSharedDashboardShowsOnlyRunnerLabels(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The copy shows the providers by country to an outside viewer: the total,
+// the age of the counts, the total over time and the table of every listed
+// country, with the internal dashboard's queries over every country, and the
+// table's description says the averages fill in from the deploy.
+func TestProxyTestSharedDashboardShowsProvidersByCountry(t *testing.T) {
+	proxyTestAssertProvidersPanels(t, proxyTestSharedDashboardName, func(query string) string {
+		return strings.ReplaceAll(query, proxyTestCountryMatcher, "")
+	})
 }
 
 // promtool evaluates the copy's panels over the same runner files as the
