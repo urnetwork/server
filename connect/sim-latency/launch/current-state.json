@@ -23,6 +23,12 @@
     "targeted_race_tests": "Three repetitions passed in1.296s after correcting systemd backing-source projection",
     "full_agent_race_tests": "Final exact-code suite passed three repetitions in203.908s",
     "activation_approval": "Narrow shared-job-subtree correction requested; no approval received yet",
+    "prepared_deployment_plans": {
+      "installed": false,
+      "sille": {"path":"/var/lib/urnetwork/competition-sille-workspace-plan-20261110-v12/manifest.json","sha256":"e4be34b298eff0e5d1316afe01938b377be349ce34c73a08c5c92a7e9a92292a"},
+      "goofe": {"path":"/var/lib/urnetwork/competition-goofe-workspace-plan-20261110-v12/manifest.json","sha256":"427de9ef7896623e5eef26e8514c817d8a43de1e2b4998811c9457a68958f64b"},
+      "scope": "Root-only staged files with exact target and predecessor digests. Mount bootstrap, daemon dependencies, startup boundary and recovery bytes prepared; final job-capable agent.json deliberately absent. No live file, service or mount changed."
+    },
     "next_action": "After approval, capture signed idle state, pin mount bootstrap and daemon ordering, recreate daemon mount namespaces, observe genuine new host identities, and run fresh authenticated end-to-end operator probes. Do not reuse v11 failed attempts or claim grading readiness."
   },
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
