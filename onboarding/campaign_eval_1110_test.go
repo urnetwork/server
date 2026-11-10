@@ -190,3 +190,43 @@ func TestDailyDataIsInGiB(t *testing.T) {
 		}
 	}
 }
+
+// T7: providersOnline answers 0/0 until its query succeeds, and E2 printed
+// "0 providers are online right now" (and "across 0 countries"). An unknown
+// count is sent empty, so a template guard ({% if params.providers_online %})
+// can drop the line. The activated line quotes both counts, so it goes empty
+// as a whole when either is unknown; the keys stay (the manifests list them).
+func TestE2ProvidersLineEmptyWhileTheCountIsUnknown(t *testing.T) {
+	for _, c := range []struct {
+		variant              string
+		providers, countries int
+		wantProviders        string
+		wantCountries        string
+	}{
+		{VariantNotActivated, 0, 0, "", ""},
+		{VariantNotActivated, 4812, 0, "4,812", ""},
+		{VariantActivated, 0, 0, "", ""},
+		{VariantActivated, 0, 91, "", ""},
+		{VariantActivated, 4812, 0, "", ""},
+		{VariantActivated, 4812, 91, "4,812", "91"},
+	} {
+		p := BuildParams(ParamsInput{
+			Template: TemplateE2Widget, Variant: c.variant, Locale: "en",
+			ProvidersOnline: c.providers, CountriesOnline: c.countries, DaysActive: 3, ConnectDays: 2,
+			Token: "T", SiteUrl: "https://ur.io",
+		})
+		providers, ok := p["providers_online"]
+		if !ok || providers != c.wantProviders {
+			t.Errorf("%s with %d providers in %d countries: providers_online %q (present %t), want %q",
+				c.variant, c.providers, c.countries, providers, ok, c.wantProviders)
+		}
+		countries, hasCountries := p["countries_online"]
+		if c.variant == VariantActivated && (!hasCountries || countries != c.wantCountries) {
+			t.Errorf("%s with %d providers in %d countries: countries_online %q (present %t), want %q",
+				c.variant, c.providers, c.countries, countries, hasCountries, c.wantCountries)
+		}
+		if c.variant == VariantNotActivated && hasCountries {
+			t.Errorf("not_activated carries countries_online %q", countries)
+		}
+	}
+}

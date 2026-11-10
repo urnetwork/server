@@ -627,7 +627,8 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 
 // providersOnline is the live provider and country count the E2 template
 // quotes, cached for an hour: it is one heavy query and every send in the hour
-// can share it.
+// can share it. 0/0 until a query succeeds, which BuildParams sends as empty
+// counts (the template then leaves the line out).
 var providersOnlineCache struct {
 	sync.Mutex
 	providers int

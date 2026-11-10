@@ -196,6 +196,15 @@ func FormatCount(n int, locale string) string {
 	return message.NewPrinter(tag).Sprint(number.Decimal(n))
 }
 
+// formatKnownCount is FormatCount for a live count, "" when it is not known
+// (0): the templates hide a line whose count is empty.
+func formatKnownCount(n int, locale string) string {
+	if n <= 0 {
+		return ""
+	}
+	return FormatCount(n, locale)
+}
+
 // FormatGb renders an amount of data in GiB, "30 GiB" (whole) or "2.5 GiB":
 // the callers pass bytes / model.Gib, the free grant is 30 GiB a day
 // (config/all/pro.yml free.data: 30gib), and the apps, ur.io and the Pro line
@@ -255,7 +264,15 @@ func BuildParams(in ParamsInput) map[string]string {
 		}
 	case TemplateE2Widget:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
-		p["providers_online"] = FormatCount(in.ProvidersOnline, in.Locale)
+		// the live counts, or "" while they are unknown (the count query has
+		// not succeeded yet): the template drops the line on an empty
+		// providers_online rather than say "0 providers are online". The
+		// activated line quotes both counts, so it needs both.
+		providers, countries := in.ProvidersOnline, in.CountriesOnline
+		if providers <= 0 || (in.Variant == VariantActivated && countries <= 0) {
+			providers, countries = 0, 0
+		}
+		p["providers_online"] = formatKnownCount(providers, in.Locale)
 		if in.Variant == VariantActivated {
 			if daysActive < 2 {
 				daysActive = 2
@@ -263,7 +280,7 @@ func BuildParams(in ParamsInput) map[string]string {
 			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
 			p["days_active"] = FormatCount(daysActive, in.Locale)
 			p["platform"] = in.Platform
-			p["countries_online"] = FormatCount(in.CountriesOnline, in.Locale)
+			p["countries_online"] = formatKnownCount(countries, in.Locale)
 		}
 	case TemplateE3LastChance:
 		p["opening"] = in.Opening
