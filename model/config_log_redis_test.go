@@ -3,7 +3,9 @@ package model
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 	"testing"
 
 	"google.golang.org/protobuf/proto"
@@ -194,4 +196,29 @@ func TestConfigLogHintKinds(t *testing.T) {
 	connect.AssertEqual(t, configLogHintKind(entry(bridge.AuthEntryKindTick, nil)), uint32(ConfigLogHintMembershipChanged))
 	connect.AssertEqual(t, configLogHintKind(entry(bridge.AuthEntryKindStatement, signed(bridge.SignedType_SIGNED_GRANT_REVOKE))), uint32(ConfigLogHintAuthorityHeadChanged))
 	connect.AssertEqual(t, configLogHintKind(entry(bridge.AuthEntryKindBase, nil)), uint32(ConfigLogHintAuthorityHeadChanged))
+}
+
+// A key built inside a script: a brace opening a string literal, or the family's opening.
+var testConfigLogScriptKeyBuilding = regexp.MustCompile(`["']\{|\{acl_`)
+
+// §22.4's slot rule: the cache's script and the limiter's name keys under the network's one {acl_} tag,
+// with {acl_}v, and build none, so no call answers CROSSSLOT on a cluster.
+func TestConfigLogScriptsNameOneTag(t *testing.T) {
+	networkId := sidecar.NewId()
+	connect.AssertEqual(t, sidecar.RedisKeysShareTag([]string{
+		sidecar.AclVersionKey(networkId),
+		sidecar.AclEntryCacheKey(networkId),
+		configLogLimitKey(server.Id(networkId)),
+	}), true)
+	for name, source := range map[string]string{
+		"cache": configLogCacheScriptSource,
+		"limit": configLogLimitScriptSource,
+	} {
+		if testConfigLogScriptKeyBuilding.MatchString(source) {
+			t.Errorf("the %s script builds a key", name)
+		}
+		if strings.Contains(source, "KEYS[3]") {
+			t.Errorf("the %s script reads a third key", name)
+		}
+	}
 }

@@ -145,7 +145,7 @@ type configLogDayCount struct {
 // bucket's, or the day's until the next UTC midnight. Returns {1, '0'} or {0,
 // wait in µs}. Times are written with %.0f, since Lua's default format keeps 14
 // digits and a µs time has 16.
-var configLogLimitScript = redis.NewScript(`
+const configLogLimitScriptSource = `
 local now = tonumber(ARGV[1])
 if now < 0 then
     local time = redis.call('TIME')
@@ -172,7 +172,9 @@ redis.call('HINCRBY', KEYS[1], dayField, 1)
 redis.call('HDEL', KEYS[1], ARGV[5] .. ':' .. string.format('%.0f', day - 1), ARGV[5] .. ':' .. string.format('%.0f', day - 2))
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[7]))
 return {1, '0'}
-`)
+`
+
+var configLogLimitScript = redis.NewScript(configLogLimitScriptSource)
 
 // The limiter on server's Redis, with each network's limits from pro.yml and
 // its rows (NetworkSidecarLimits).

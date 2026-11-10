@@ -65,7 +65,7 @@ func DefaultConfigLogCacheSettings() *ConfigLogCacheSettings {
 // seconds. Positions are log positions, far below what a Lua number holds
 // exactly; {acl_}v's value is written back as INCR answered it. Returns the new
 // {acl_}v.
-var configLogCacheScript = redis.NewScript(`
+const configLogCacheScriptSource = `
 local v = redis.call('INCR', KEYS[1])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[6]))
 local n = tonumber(ARGV[1])
@@ -99,7 +99,9 @@ end
 redis.call('HSET', KEYS[2], 'b', tostring(b), 'm', tostring(m), 'v', tostring(v))
 redis.call('EXPIRE', KEYS[2], tonumber(ARGV[5]))
 return v
-`)
+`
+
+var configLogCacheScript = redis.NewScript(configLogCacheScriptSource)
 
 // The read cache's writer on server's Redis: the sequencer's EntryCache.
 func NewConfigLogRedisEntryCache(settings *ConfigLogCacheSettings) func(ctx context.Context, networkId server.Id, n uint64, base uint64, entryBytes []byte) error {

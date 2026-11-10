@@ -212,8 +212,8 @@ func configLogParseRowsKey(networkId sidecar.Id, key string) ([]byte, bool) {
 
 // Where a retention pass stopped.
 type ConfigLogRetentionResult struct {
-	NetworkCount int        `json:"network_count"`
-	DeletedCount int        `json:"deleted_count"`
+	NetworkCount int `json:"network_count"`
+	DeletedCount int `json:"deleted_count"`
 	// set when the pass stopped short: the next starts after it
 	AfterNetworkId *server.Id `json:"after_network_id,omitempty"`
 }
