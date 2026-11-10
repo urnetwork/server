@@ -494,9 +494,9 @@ func LoadLocation(name string) *time.Location {
 
 // EventForWebhook maps a Brevo transactional webhook event name to the
 // campaign event name (model.EventEmail*), or "" when the event is not one the
-// campaign records. `opened` and `unique_opened` both count as an open (the
-// engaged rule counts opens); `request` is the accepted-for-delivery ack and
-// is not recorded.
+// campaign records. `opened`, `unique_opened` and `proxy_open` each count as
+// an open, which only the reports read (no step decides on opens: engaged);
+// `request` is the accepted-for-delivery ack and is not recorded.
 func EventForWebhook(event string) string {
 	switch strings.ToLower(strings.TrimSpace(event)) {
 	case "delivered":

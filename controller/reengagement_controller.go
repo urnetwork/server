@@ -61,6 +61,13 @@ var reengagementWebhookEventsTotal = prometheus.NewCounterVec(prometheus.Counter
 	Help:      "Brevo transactional webhook events attributed to a re-engagement send, by event and template.",
 }, []string{"event", "template"})
 
+var reengagementWebhookUnattributedEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "reengagement",
+	Name:      "webhook_unattributed_events_total",
+	Help:      "Brevo transactional webhook events of re-engagement sends that name no recorded send, so no network records them, by event, template (from the send's tags) and reason: anonymous (Brevo's anonymous tracking posts clicks and spam reports with an an# message id and no email; opens are never recorded) or unknown_send (no send recorded the message id, as for a test send).",
+}, []string{"event", "template", "reason"})
+
 var reengagementContextSourcesTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "reengagement",
@@ -74,6 +81,7 @@ func init() {
 		reengagementEmailsTotal,
 		reengagementExitsTotal,
 		reengagementWebhookEventsTotal,
+		reengagementWebhookUnattributedEventsTotal,
 		reengagementContextSourcesTotal,
 	)
 }
@@ -701,7 +709,11 @@ func reengagementEventForWebhook(event string) string {
 
 // handleReengagementBrevoWebhook records a delivery event against the send it
 // belongs to. A bounce or complaint suppresses every campaign; an
-// unsubscribe ends the episode (the caller turns product updates off).
+// unsubscribe ends the episode (the caller turns product updates off). An
+// event of a re-engagement send that names no recorded send is only counted
+// by template (urnetwork_reengagement_webhook_unattributed_events_total):
+// Brevo's anonymous clicks and spam reports, which are never looked up, and
+// ids that no send recorded.
 func handleReengagementBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -712,8 +724,20 @@ func handleReengagementBrevoWebhook(ctx context.Context, args *BrevoWebhookArgs)
 	if name == "" {
 		return
 	}
+	if brevoWebhookAnonymous(args) {
+		if template, ok := brevoWebhookCampaignTemplate(args, "reengagement"); ok {
+			reengagementWebhookUnattributedEventsTotal.WithLabelValues(name, template, brevoWebhookUnattributedAnonymous).Inc()
+			if name == model.EventReengageEmailComplained {
+				reportAnonymousBrevoComplaint("reengagement", template)
+			}
+		}
+		return
+	}
 	email := model.GetNetworkReengagementEmail(ctx, args.MessageId)
 	if email == nil {
+		if template, ok := brevoWebhookCampaignTemplate(args, "reengagement"); ok {
+			reengagementWebhookUnattributedEventsTotal.WithLabelValues(name, template, brevoWebhookUnattributedUnknownSend).Inc()
+		}
 		return
 	}
 	at := server.NowUtc()
