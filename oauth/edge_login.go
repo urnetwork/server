@@ -288,9 +288,11 @@ func AuthorizeEdgeOrigin(ctx context.Context, request *AuthorizationRequest, use
 		RedirectUri:         request.RedirectUri,
 		CodeChallenge:       request.CodeChallenge,
 		CodeChallengeMethod: request.CodeChallengeMethod,
-		Scopes:              []string{EdgeScopeOpenid},
-		Nonce:               request.Nonce,
-		AuthTime:            authTime,
+		// the one audience its ID token names
+		Resource: origin.Origin,
+		Scopes:   []string{EdgeScopeOpenid},
+		Nonce:    request.Nonce,
+		AuthTime: authTime,
 	})
 }
 
@@ -325,7 +327,7 @@ func ExchangeEdgeCode(ctx context.Context, args *ExchangeCodeArgs) (*EdgeTokenRe
 	if args.RedirectUri != origin.RedirectUri() {
 		return nil, ErrInvalidRedirect
 	}
-	code, err := RedeemAuthorizationCode(ctx, args.Code, origin.Origin, args.RedirectUri, args.CodeVerifier, "")
+	code, err := RedeemAuthorizationCode(ctx, args.Code, origin.Origin, args.RedirectUri, args.CodeVerifier, origin.Origin)
 	if err != nil {
 		return nil, err
 	}
