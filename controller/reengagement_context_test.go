@@ -127,7 +127,9 @@ func TestResolveReengagementContextPlatformRecency(t *testing.T) {
 		{"the device's report is newer", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "macOS 26.0 arm64", DeviceSpecAt: &now}, "macos", reengagement.ContextSourceDevice},
 		{"the event is newer", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &now, DeviceSpec: "17.1 iPhone", DeviceSpecAt: &older}, "android", reengagement.ContextSourceClientEvent},
 		{"a tie goes to the event", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &now, DeviceSpec: "17.1 iPhone", DeviceSpecAt: &now}, "android", reengagement.ContextSourceClientEvent},
-		{"a spec that names no platform is no report", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "16 Samsung Galaxy S24 Ultra", DeviceSpecAt: &now}, "android", reengagement.ContextSourceClientEvent},
+		{"a spec that names no platform is no report", model.NetworkClientContext{EventPlatform: "android", EventPlatformAt: &older, DeviceSpec: "15.7.9 MacBook Air (M1, 2020)", DeviceSpecAt: &now}, "android", reengagement.ContextSourceClientEvent},
+		// the Android app's "<os version> <make model>" names Android
+		{"the Android app's spec is a report", model.NetworkClientContext{EventPlatform: "ios", EventPlatformAt: &older, DeviceSpec: "16 Samsung Galaxy S24 Ultra", DeviceSpecAt: &now}, "android", reengagement.ContextSourceDevice},
 		{"an event platform outside the vocabulary is no report", model.NetworkClientContext{EventPlatform: "toaster", EventPlatformAt: &now}, "", ""},
 		{"no report", model.NetworkClientContext{}, "", ""},
 	}
@@ -372,7 +374,7 @@ func TestReengagementContextFromStoredSources(t *testing.T) {
 		// does not stand in for it
 		newestId, _ := newNetwork("newest")
 		addDevice(newestId, "17.1 iPhone", now.Add(-40*day), now.Add(-1*day))
-		addDevice(newestId, "16 Samsung Galaxy S24 Ultra", now.Add(-3*day), now.Add(-3*day))
+		addDevice(newestId, "15.7.9 MacBook Air (M1, 2020)", now.Add(-3*day), now.Add(-3*day))
 		expect("newest", newestId, ReengagementContext{})
 
 		// an onboarding row with only a time zone keeps it; the rest falls back
