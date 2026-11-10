@@ -19,6 +19,7 @@ package model
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -171,13 +172,20 @@ func NewNetworkSignInByJwt(signIn *NetworkSignIn, pro bool) *session.ByJwt {
 	return byJwt
 }
 
+// Refused: the team signs in only through its IdP (§7.6).
+var ErrNetworkSsoRequired = errors.New("This team signs in only through its IdP.")
+
 // Mints a network credential for the user's sign-in to networkId, of kind (the
-// session row's), or nil when the user has none there. The caller applies the
-// target's sign-in rule first (SsoRequired).
-func MintNetworkSignIn(ctx context.Context, userId server.Id, networkId server.Id, kind string) (string, *NetworkSignIn, error) {
+// session row's), or nil when the user has none there. viaIdp says the sign-in
+// came through the network's own IdP (network_sso_controller.go); an
+// SSO-required team refuses every other with ErrNetworkSsoRequired (§7.6).
+func MintNetworkSignIn(ctx context.Context, userId server.Id, networkId server.Id, kind string, viaIdp bool) (string, *NetworkSignIn, error) {
 	signIn := ResolveNetworkSignIn(ctx, userId, networkId, server.NowUtc())
 	if signIn == nil {
 		return "", nil, nil
+	}
+	if signIn.SsoRequired && !viaIdp {
+		return "", nil, ErrNetworkSsoRequired
 	}
 	signed, err := session.MintNetworkSession(ctx, NewNetworkSignInByJwt(signIn, IsProFresh(ctx, &networkId)), kind)
 	if err != nil {

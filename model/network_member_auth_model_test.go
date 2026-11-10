@@ -94,7 +94,7 @@ func TestMintNetworkSignInNamesTheMembership(t *testing.T) {
 		teamId, _ := newTestSignInTeam(t, ctx, false)
 		member := addTestSignInMember(t, ctx, teamId, userId, NetworkMemberRoleMember, false)
 
-		signed, signIn, err := MintNetworkSignIn(ctx, userId, teamId, "network_switch")
+		signed, signIn, err := MintNetworkSignIn(ctx, userId, teamId, "network_switch", false)
 		if err != nil || signIn == nil || signed == "" {
 			t.Fatalf("mint: %v %+v", err, signIn)
 		}
@@ -109,7 +109,7 @@ func TestMintNetworkSignInNamesTheMembership(t *testing.T) {
 
 		strangerId := server.NewId()
 		Testing_CreateNetwork(ctx, server.NewId(), "stranger", strangerId)
-		signed, signIn, err = MintNetworkSignIn(ctx, strangerId, teamId, "network_switch")
+		signed, signIn, err = MintNetworkSignIn(ctx, strangerId, teamId, "network_switch", false)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, signIn == nil && signed == "", true)
 	})
