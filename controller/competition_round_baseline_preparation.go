@@ -53,6 +53,7 @@ type roundBaselinePreparationPin struct {
 }
 
 type roundBaselinePreparationConfig struct {
+	ReleaseKind        string                               `json:"release_kind,omitempty"`
 	G2VolumePolicy     model.CompetitionG2VolumePolicy      `json:"g2_volume_policy,omitempty"`
 	WorkCoveragePolicy *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 	Schema             int                                  `json:"schema"`
@@ -238,7 +239,7 @@ func ConfigureCompetitionRoundBaselinePreparation(settings *Settings, path, expe
 		(settings.FutureEpochPolicy == nil || config.G2VolumePolicy != settings.FutureEpochPolicy.G2VolumePolicy || !reflect.DeepEqual(config.WorkCoveragePolicy, settings.FutureEpochPolicy.WorkCoveragePolicy)) {
 		return errors.New("baseline preparation policy is neither current nor explicitly staged for a future epoch")
 	}
-	expectedDependencies, expectedProgram, err := roundBaselinePreparationPolicyDependencies(config.G2VolumePolicy, config.WorkCoveragePolicy)
+	expectedDependencies, expectedProgram, err := roundBaselinePreparationConfiguredDependencies(config)
 	if err != nil {
 		return err
 	}

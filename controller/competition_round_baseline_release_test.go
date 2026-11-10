@@ -1,0 +1,73 @@
+// Explicit producer selection must not silently rewrite historical authority.
+package controller
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+
+	"github.com/urnetwork/server/model"
+)
+
+// The actual tracked fixture-corrected producer differs from the historical
+// release. Selection must authenticate those bytes without changing defaults.
+func TestRoundBaselineExplicitFixtureReleaseMatchesTrackedProducer(t *testing.T) {
+	coverage := model.DefaultCompetitionWorkCoveragePolicy()
+	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
+	dependencies, program, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || program != "prepare-round-baseline-work-coverage.sh" {
+		t.Fatal("explicit producer refused", err)
+	}
+	content, err := os.ReadFile(filepath.Join("..", "connect", "sim-latency", "evaluator", "container", "evaluator-work-coverage.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	actual := hex.EncodeToString(digest[:])
+	if dependencies["evaluator-work-coverage.sh"] != actual {
+		t.Fatal("new release does not authenticate the actual tracked control producer")
+	}
+	for name, expected := range dependencies {
+		// The two compiled patch-helper files have separately sealed build
+		// identities; every textual dependency is checked against its source.
+		if name == "competitionpatch" || name == "competitionpatch.sha256" {
+			continue
+		}
+		asset, err := os.ReadFile(filepath.Join("..", "connect", "sim-latency", "evaluator", "container", name))
+		if err != nil {
+			t.Fatal(name, err)
+		}
+		hash := sha256.Sum256(asset)
+		if hex.EncodeToString(hash[:]) != expected {
+			t.Fatal("new producer release dependency differs from tracked source", name)
+		}
+	}
+	config.ReleaseKind = ""
+	historical, _, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || !reflect.DeepEqual(historical, roundBaselineWorkCoverageDependencyDigests()) || historical["evaluator-work-coverage.sh"] == actual {
+		t.Fatal("historical release authority changed", err)
+	}
+	dependencies["evaluator-work-coverage.sh"] = "changed"
+	config.ReleaseKind = roundBaselineLocalFixturesRelease
+	fresh, _, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || fresh["evaluator-work-coverage.sh"] != actual {
+		t.Fatal("one caller mutated another release inventory", err)
+	}
+}
+
+// Unknown releases and using new coverage assets under old scoring refuse.
+func TestRoundBaselineExplicitReleaseRejectsUnknownOrLegacyPolicy(t *testing.T) {
+	coverage := model.DefaultCompetitionWorkCoveragePolicy()
+	for _, config := range []roundBaselinePreparationConfig{
+		{ReleaseKind: "synthetic-unknown/v1", G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage},
+		{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork},
+		{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy},
+	} {
+		if _, _, err := roundBaselinePreparationConfiguredDependencies(config); err == nil {
+			t.Fatal("unsupported producer/policy combination accepted")
+		}
+	}
+}
