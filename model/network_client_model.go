@@ -3009,40 +3009,62 @@ func (self *provideRelationshipAclScan) end(networkId *server.Id) *ProvideRelati
 // that is no client of x's network reads as none.
 func networkClientAclEndColumns(x string) string {
 	return fmt.Sprintf(`,
-				%[1]s_subject_client.client_id,
-				%[1]s_subject_bound.sidecar_id,
-				%[1]s_subject_owner.member_id,
-				COALESCE(%[1]s_subject_owner.tagged, false),
-				COALESCE(%[1]s_subject_owner.ephemeral, false),
-				COALESCE(%[1]s_subject_owner.strict_exp, false),
-				COALESCE(%[1]s_subject_owner.acl_enforcing, false),
+				%[1]s_subject.client_id,
+				%[1]s_subject.sidecar_id,
+				%[1]s_subject.member_id,
+				COALESCE(%[1]s_subject.tagged, false),
+				COALESCE(%[1]s_subject.ephemeral, false),
+				COALESCE(%[1]s_subject.strict_exp, false),
+				COALESCE(%[1]s_subject.acl_enforcing, false),
 				EXISTS (
 					SELECT 1 FROM proxy_device_config
-					WHERE proxy_device_config.client_id IN (%[1]s.client_id, %[1]s.source_client_id, %[1]s_subject_client.client_id)
+					WHERE proxy_device_config.client_id IN (%[1]s.client_id, %[1]s.source_client_id, %[1]s_subject.client_id)
 				),
-				COALESCE(%[1]s_subject_client.principal, ''),
+				COALESCE(%[1]s_subject.principal, ''),
 				ARRAY(
 					SELECT network_client_role.role FROM network_client_role
-					WHERE network_client_role.client_id = %[1]s_subject_client.client_id
+					WHERE network_client_role.client_id = %[1]s_subject.client_id
 					ORDER BY network_client_role.role
 				)`, x)
 }
 
-// The joins networkClientAclEndColumns reads, each by a primary or unique key.
+// The join networkClientAclEndColumns reads: the subject's row, binding and
+// owner row in one LATERAL subquery whose WHERE pins the subject's primary
+// key and that cannot be flattened, so every lookup is one index probe
+// whatever the planner estimates of the rows around it. A plain join on the
+// computed subject, or a lateral one it could pull up, let it hash all of
+// network_client and sidecar_identity_binding.
 func networkClientAclEndJoins(x string) string {
 	return fmt.Sprintf(`
-			LEFT JOIN sidecar_identity_binding %[1]s_bound ON %[1]s_bound.client_id = %[1]s.client_id
 			LEFT JOIN LATERAL (
-				SELECT COALESCE(
-					%[1]s.acl_subject_client_id,
-					CASE WHEN %[1]s.source_client_id IS NULL OR %[1]s_bound.client_id IS NOT NULL THEN %[1]s.client_id END
-				) AS client_id
-			) %[1]s_subject ON true
-			LEFT JOIN network_client %[1]s_subject_client ON
-				%[1]s_subject_client.client_id = %[1]s_subject.client_id AND
-				%[1]s_subject_client.network_id = %[1]s.network_id
-			LEFT JOIN sidecar_identity_binding %[1]s_subject_bound ON %[1]s_subject_bound.client_id = %[1]s_subject_client.client_id
-			LEFT JOIN network_client_owner %[1]s_subject_owner ON %[1]s_subject_owner.client_id = %[1]s_subject_client.client_id`, x)
+				SELECT
+					subject.client_id,
+					subject.principal,
+					subject_bound.sidecar_id,
+					subject_owner.member_id,
+					subject_owner.tagged,
+					subject_owner.ephemeral,
+					subject_owner.strict_exp,
+					subject_owner.acl_enforcing
+				FROM network_client subject
+				LEFT JOIN sidecar_identity_binding subject_bound ON subject_bound.client_id = subject.client_id
+				LEFT JOIN network_client_owner subject_owner ON subject_owner.client_id = subject.client_id
+				WHERE
+					subject.network_id = %[1]s.network_id AND
+					subject.client_id = COALESCE(
+						%[1]s.acl_subject_client_id,
+						CASE
+							WHEN %[1]s.source_client_id IS NULL THEN %[1]s.client_id
+							WHEN EXISTS (
+								SELECT 1 FROM sidecar_identity_binding bound
+								WHERE bound.client_id = %[1]s.client_id
+							) THEN %[1]s.client_id
+						END
+					)
+				-- the key allows one row; the limit also keeps the planner from
+				-- pulling the subquery up into a join over the whole table
+				LIMIT 1
+			) %[1]s_subject ON true`, x)
 }
 
 func getProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, clientIdB server.Id, withAcl bool) ProvideRelationshipDetails {
