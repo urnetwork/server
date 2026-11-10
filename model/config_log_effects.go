@@ -32,6 +32,9 @@ package model
 //	            a member whose role the entry set (an AdminSet, a MemberAdmit,
 //	            or a completed proposal of either): network_member's role,
 //	            mirrored from the log (TEAM-M6-03)
+//	            a new Delegation, or a change of the AdminSet's roles or
+//	            threshold: the network authority notice to Owners and Admins
+//	            (security_notice_authority.go, §7.8)
 //	          and one admin event naming the entry (§7.11)
 //	sponsors  each run that met a SponsorSet or a member's removal, and a
 //	          process's first run for a network, sets every tagged client's
@@ -49,8 +52,7 @@ package model
 // memory only: a fresh process walks the whole retained run again and finds
 // each applied entry's event.
 //
-// Not here, and listed by TEAM-M2-16's draft: the notice a new Delegation or an
-// AdminSet change owes Owners and Admins (§7.8), Suspend's rev/ object, and an
+// Not here, and listed by TEAM-M2-16's draft: Suspend's rev/ object, and an
 // entry whose states this process's verifier no longer holds (before its
 // previous base), which is logged and passed.
 //
@@ -124,11 +126,16 @@ type configLogEntryEffect struct {
 	// whether the tip's sponsors may have moved, a SponsorSet's or a removed
 	// member's agents'
 	sponsorsMoved bool
+	// the AdminSet's roles or threshold changed
+	adminSetChanged bool
+	// how many Delegations the entry declared
+	delegationCount int
 }
 
 // Whether the entry does anything here.
 func (self *configLogEntryEffect) empty() bool {
-	return len(self.revokedSidecarIds) == 0 && len(self.removedMemberIds) == 0 && len(self.memberRoles) == 0 && !self.sponsorsMoved
+	return len(self.revokedSidecarIds) == 0 && len(self.removedMemberIds) == 0 && len(self.memberRoles) == 0 && !self.sponsorsMoved &&
+		!self.adminSetChanged && self.delegationCount == 0
 }
 
 // The admin event's request id for an entry's effects: the first 16 bytes of
@@ -157,6 +164,7 @@ var configLogEffectTypes = map[bridge.SignedType]bool{
 	bridge.SignedType_SIGNED_ADMIN_SET:          true,
 	bridge.SignedType_SIGNED_MEMBER_ADMIT:       true,
 	bridge.SignedType_SIGNED_SPONSOR_SET:        true,
+	bridge.SignedType_SIGNED_DELEGATION:         true,
 	bridge.SignedType_SIGNED_AUTHORITY_PROPOSAL: true,
 	bridge.SignedType_SIGNED_AUTHORITY_COSIGN:   true,
 }
@@ -340,20 +348,45 @@ func (self *configLogNetwork) entryEffectWithLock(ctx context.Context, sequencer
 		}
 	}
 	effect.memberRoles = map[server.Id]bridge.MemberRole{}
+	adminSetRole := func(role bridge.MemberRole) bool {
+		memberRole, ok := NetworkMemberRoleOfBridge(role)
+		return ok && memberRole.AdminSet()
+	}
 	for _, memberId := range before.MemberIds() {
 		if after.Member(memberId) == nil {
 			effect.removedMemberIds = append(effect.removedMemberIds, server.Id(memberId))
 			effect.sponsorsMoved = true
+			if adminSetRole(before.Member(memberId).GetRole()) {
+				effect.adminSetChanged = true
+			}
 		}
 	}
 	for _, memberId := range after.MemberIds() {
 		role := after.Member(memberId).GetRole()
-		if previous := before.Member(memberId); previous == nil || previous.GetRole() != role {
+		previous := before.Member(memberId)
+		if previous == nil || previous.GetRole() != role {
 			effect.memberRoles[server.Id(memberId)] = role
+			if adminSetRole(role) || previous != nil && adminSetRole(previous.GetRole()) {
+				effect.adminSetChanged = true
+			}
 		}
 	}
-	if verdict.SignedType == bridge.SignedType_SIGNED_SPONSOR_SET {
+	switch verdict.SignedType {
+	case bridge.SignedType_SIGNED_SPONSOR_SET:
 		effect.sponsorsMoved = true
+	case bridge.SignedType_SIGNED_ADMIN_SET:
+		effect.adminSetChanged = true
+	}
+	// a threshold alone changes no role, and a completed proposal carries
+	// another type
+	beforeK, beforeN := before.Threshold()
+	if afterK, afterN := after.Threshold(); afterK != beforeK || afterN != beforeN {
+		effect.adminSetChanged = true
+	}
+	for _, delegation := range after.Delegations() {
+		if before.Delegation(delegation.GetDelegationId()) == nil {
+			effect.delegationCount += 1
+		}
 	}
 	if effect.empty() {
 		return nil, nil
@@ -526,6 +559,12 @@ func applyConfigLogEntryEffectInTx(ctx context.Context, tx server.PgTx, networkI
 	}
 	if err := mirrorConfigMemberRolesInTx(ctx, tx, networkId, effect.memberRoles); err != nil {
 		return false, err
+	}
+	if 0 < effect.delegationCount {
+		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{ChangeTime: at, Action: SecurityNetworkAuthorityDelegation})
+	}
+	if effect.adminSetChanged {
+		oweSecurityNetworkAuthorityNoticeInTx(ctx, tx, networkId, &SecurityNetworkAuthorityChange{ChangeTime: at, Action: SecurityNetworkAuthorityAdminSet})
 	}
 	event := &AdminEvent{
 		NetworkId:  networkId,

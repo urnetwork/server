@@ -25,10 +25,11 @@ package model
 //	           which bounds access after the IdP disables the user where no
 //	           SCIM runs
 //
+// A new IdP owes Owners and Admins the network authority notice (§7.8).
+//
 // Not here, and listed by TEAM-M6-05's draft: a person with no URnetwork account
 // signing in first through an IdP, which needs an account the flow can make;
-// the notice a new IdP owes Owners and Admins (§7.8); and the vault key's
-// provisioning.
+// and the vault key's provisioning.
 
 import (
 	"context"
@@ -340,6 +341,12 @@ func CreateNetworkIdp(createNetworkIdp *CreateNetworkIdpArgs, clientSession *ses
 			sealed,
 		))
 		AddAdminEventInTx(clientSession.Ctx, tx, NewSessionAdminEvent(clientSession, AdminEventActionIdpAdd, AdminEventTargetIdp, &idpId))
+		// a new way to sign people in owes Owners and Admins a notice (§7.8)
+		oweSecurityNetworkAuthorityNoticeInTx(clientSession.Ctx, tx, networkId, &SecurityNetworkAuthorityChange{
+			ChangeTime: server.NowUtc(),
+			Action:     SecurityNetworkAuthorityIdp,
+			Via:        securityNoticeVia(clientSession.Ctx),
+		})
 	})
 	return &CreateNetworkIdpResult{IdpId: &idpId}, nil
 }

@@ -20,6 +20,7 @@ var securityNoticeTemplateNames = []string{
 	"security_sign_in_changed",
 	"security_api_key_changed",
 	"security_auth_key_changed",
+	"security_network_authority_changed",
 	"auth_password_set",
 }
 

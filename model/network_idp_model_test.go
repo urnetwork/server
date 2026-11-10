@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +123,68 @@ func TestCreateNetworkIdpSealsTheSecret(t *testing.T) {
 		}, personalSession)
 		if err != nil || result.Error == nil {
 			t.Fatalf("a personal network took an IdP: %v %+v", err, result)
+		}
+	})
+}
+
+// §7.8: a new IdP owes the team's Owners and Admins the network authority
+// notice, at their own sign-in addresses; a Member, a pending Admin and the
+// team's owner of record, who never signs in, get none, and a refused IdP owes
+// nothing.
+func TestANewIdpOwesOwnersAndAdminsItsNotice(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		networkId, ownerSession := newTestIdpTeam(t, ctx)
+		defer Testing_SetNetworkIdpSecretKey(bytes.Repeat([]byte{7}, 32))()
+		userAuthOf := func(userId server.Id) (userAuth string) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT user_auth FROM network_user WHERE user_id = $1`, userId).Scan(&userAuth))
+			})
+			return
+		}
+		addMember := func(role NetworkMemberRole, pending bool) string {
+			userId := server.NewId()
+			userAuth := Testing_CreateNetwork(ctx, server.NewId(), "member-"+userId.String(), userId)
+			addTestSignInMember(t, ctx, networkId, userId, role, pending)
+			return userAuth
+		}
+		adminUserAuth := addMember(NetworkMemberRoleAdmin, false)
+		addMember(NetworkMemberRoleMember, false)
+		addMember(NetworkMemberRoleAdmin, true)
+
+		refused, err := CreateNetworkIdp(&CreateNetworkIdpArgs{
+			Issuer: "http://idp.example", ClientId: "synthetic-client", ClientAuth: NetworkIdpClientAuthClientSecret, ClientSecret: "synthetic-idp-secret-4f1e",
+		}, ownerSession)
+		if err != nil || refused.Error == nil {
+			t.Fatalf("an http issuer was added: %v %+v", err, refused)
+		}
+		connect.AssertEqual(t, len(unsentTestNotices(t, ctx, networkId, SecurityNetworkAuthorityTemplateName)), 0)
+
+		result, err := CreateNetworkIdp(&CreateNetworkIdpArgs{
+			Issuer: "https://idp.example", ClientId: "synthetic-client", ClientAuth: NetworkIdpClientAuthClientSecret, ClientSecret: "synthetic-idp-secret-4f1e",
+		}, ownerSession)
+		if err != nil || result.Error != nil {
+			t.Fatalf("create: %v %+v", err, result)
+		}
+		got := map[string]bool{}
+		for _, notice := range unsentTestNotices(t, ctx, networkId, SecurityNetworkAuthorityTemplateName) {
+			got[notice.userAuth] = true
+			changes := notice.changes(t)
+			if len(changes) != 1 || changes[0]["action"] != SecurityNetworkAuthorityIdp {
+				t.Fatalf("the notice: %s", notice.templateJson)
+			}
+			if strings.Contains(notice.templateJson, "idp.example") || strings.Contains(notice.templateJson, "synthetic") {
+				t.Fatalf("the notice names the IdP: %s", notice.templateJson)
+			}
+		}
+		want := map[string]bool{userAuthOf(ownerSession.ByJwt.UserId): true, adminUserAuth: true}
+		if len(got) != len(want) {
+			t.Fatalf("notices to %v, want %v", got, want)
+		}
+		for userAuth := range want {
+			if !got[userAuth] {
+				t.Fatalf("no notice to %s: %v", userAuth, got)
+			}
 		}
 	})
 }
