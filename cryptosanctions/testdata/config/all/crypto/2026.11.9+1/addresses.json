@@ -1,0 +1,32 @@
+{
+  "btc": [
+    {"address":"12QtD5BFwRsdNsAZY76UVE1xyCGNTojH9h","ofac_currencies":["XBT"],"sdn":[{"uid":25308,"name":"YAN, Xiaobing"}]},
+    {"address":"16iWn2J1McqjToYLHSsAyS6En3QA8YQ91H","ofac_currencies":["USDT"],"sdn":[{"uid":33151,"name":"SUEX OTC, S.R.O."}]},
+    {"address":"18M8bJWMzWHDBMxoLqjHHAffdRy4SrzkfB","ofac_currencies":["BCH"],"sdn":[{"uid":30518,"name":"SECONDEYE SOLUTION"}]},
+    {"address":"33Kja69SQVc8kozpoP7Qw6HFtGxHkiWzTz","ofac_currencies":["XBT"],"sdn":[{"uid":26323,"name":"ZHENG, Guanghua"}]},
+    {"address":"bc1qv7k70u2zynvem59u88ctdlaw7hc735d8xep9rq","ofac_currencies":["XBT"],"sdn":[{"uid":31212,"name":"SOUTHFRONT"}]}
+  ],
+  "eth": [
+    {"address":"0x1cab8177ace78b1b6b1c393371f4f2dcae40cbeb","ofac_currencies":["ETH"],"sdn":[{"uid":24003,"name":"MESRI, Behzad"}]},
+    {"address":"0x4f47bc496083c727c5fbe3ce9cdf2b0f6496270c","ofac_currencies":["ARB","BSC","ETH"],"sdn":[{"uid":42498,"name":"SIM, Hyon Sop"}]},
+    {"address":"0x983a81ca6fb1e441266d2fbcb7d8e530ac2e05a2","ofac_currencies":["ETH","USDC","USDT"],"sdn":[{"uid":45314,"name":"VALERIAN LABS, INC."}]}
+  ],
+  "sol": [
+    {"address":"42RLPACwZPx3vYYmxSueqsogfynBDqXK298EDsNoyoHi","ofac_currencies":["SOL"],"sdn":[{"uid":56360,"name":"SOKOLOVSKI, Rolan"}]},
+    {"address":"Fc1EwQUZyTEagaDvA1utHXCcZNyG1x2PLt2DfNu1cJdH","ofac_currencies":["SOL"],"sdn":[{"uid":57978,"name":"RASHEVSKYI, Dmytro"}]}
+  ],
+  "usdc_solana": [
+    {"address":"42RLPACwZPx3vYYmxSueqsogfynBDqXK298EDsNoyoHi","ofac_currencies":["SOL"],"sdn":[{"uid":56360,"name":"SOKOLOVSKI, Rolan"}]},
+    {"address":"Fc1EwQUZyTEagaDvA1utHXCcZNyG1x2PLt2DfNu1cJdH","ofac_currencies":["SOL"],"sdn":[{"uid":57978,"name":"RASHEVSKYI, Dmytro"}]}
+  ],
+  "xmr": [
+    {"address":"44dZUJ7w1T3fKAvFW8XyXUVoAGSbFvXef2wcbnsjNKGWYorpLJBjth5VKSFhLGkpYKJb2J341tdZHBnbpv72WL7e8zuxfR2","ofac_currencies":["XMR"],"sdn":[{"uid":18647,"name":"ISIL KHORASAN"}]},
+    {"address":"884Bz8UH63aYsjVdkfWfScRYWZGGNbjFL7pztqvWNSrtYT4reFSwyvkCj9KEGUtheHhhMUj87ciTBFyzoesrMJ4L1FvSoxL","ofac_currencies":["XMR"],"sdn":[{"uid":31212,"name":"SOUTHFRONT"}]}
+  ],
+  "zec": [
+    {"address":"t1g7wowvQ8gn2v8jrU1biyJ26sieNqNsBJy","ofac_currencies":["ZEC"],"sdn":[{"uid":29585,"name":"KARASAVIDI, Dmitrii"}]}
+  ],
+  "tao": [
+    {"address":"5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY","ofac_currencies":["TAO"],"sdn":[{"uid":0,"name":"synthetic fixture entry"}]}
+  ]
+}
