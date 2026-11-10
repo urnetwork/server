@@ -35,3 +35,9 @@ func TestFs63OnT3(t *testing.T) {
 		sidecart3.RunRow(tb, "FS-63", "", nil)
 	})
 }
+
+func TestFs62OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-62", "", nil)
+	})
+}
