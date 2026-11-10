@@ -106,7 +106,8 @@ var contractRejectionCauses = []string{
 	"inactive_destination", "provide_mode_unavailable", "provide_secret_unavailable",
 	"insufficient_balance", "missing_companion_origin", "client_not_found",
 	"source_inactive", "canceled", "deadline", "reservation_window_expired",
-	"reservation_released", "declared_no_egress", "other",
+	"reservation_released", "declared_no_egress", "acl_no_permission",
+	"acl_unavailable", "other",
 }
 
 var contractRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -939,7 +940,7 @@ func CreateContract(
 		return nil, err
 	}
 	if aclRefusal != nil {
-		rejectionCause = "acl_" + aclVerdict.Reason.String()
+		rejectionCause = contractAclRejectionCause(aclVerdict)
 		resolution.path = contractResolutionRejected
 		timingResult = server.ContractCreationRejected
 		return aclRefusal, nil

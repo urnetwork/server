@@ -426,14 +426,15 @@ func TestCreateContractAclNoPermission(t *testing.T) {
 			if verdict := testingAclVerdict(t, ctx, gate, c.source, c.destination, false); verdict.Outcome != sidecar.AclContractRefuse || verdict.Reason != c.reason {
 				t.Errorf("%s: %+v, want %s", c.name, verdict, c.reason)
 			}
-			before := rejectionCount(t, "internal", "acl_"+c.reason.String(), "false")
+			cause := contractAclRejectionCause(sidecar.AclContractVerdict{Reason: c.reason})
+			before := rejectionCount(t, "internal", cause, "false")
 			for i := range 2 {
 				if result := testingAclCreateContract(t, ctx, c.source, c.destination, false); !testingAclContractRefused(result) {
 					t.Errorf("%s, attempt %d: %+v", c.name, i, result)
 				}
 			}
-			if after := rejectionCount(t, "internal", "acl_"+c.reason.String(), "false"); after != before+2 {
-				t.Errorf("%s: %v refusals counted, want 2", c.name, after-before)
+			if after := rejectionCount(t, "internal", cause, "false"); after != before+2 {
+				t.Errorf("%s: %v refusals counted under %s, want 2", c.name, after-before, cause)
 			}
 			if _, recorded := notifications.RouteRejection(c.source, c.destination, false); recorded {
 				t.Errorf("%s: recorded as the route's rejection", c.name)

@@ -170,6 +170,17 @@ func contractAclReplyOrigin(
 	return false, err
 }
 
+// The bounded rejection cause a gate refusal counts under (contractRejectionCauses): acl_unavailable when the gate had
+// no heads snapshot or verified state to decide from, acl_no_permission when the rule refused. The reason itself goes
+// to the V(2) log and the gate's stats, so the counter's reviewed cells stay fixed.
+func contractAclRejectionCause(verdict sidecar.AclContractVerdict) string {
+	switch verdict.Reason {
+	case sidecar.AclContractReasonHeadsUnknown, sidecar.AclContractReasonNotLoaded:
+		return "acl_unavailable"
+	}
+	return "acl_no_permission"
+}
+
 // Runs the gate for CreateContract: nil frames and data when the contract goes on, with the class C13 seals
 // (PROTO-M4-02 writes the seal), or the refusal's frames, NoPermission. A gate of nil goes on as today, class data.
 func contractAclGate(
