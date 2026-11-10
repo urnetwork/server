@@ -132,3 +132,22 @@ func TestEvsNightlyWritesStoredCountsOnlyFromAWholeRun(t *testing.T) {
 		t.Fatalf("a failed write: %v (%d, %v)", written, setCount, err)
 	}
 }
+
+// evs's registry binds marker collection with no chain of its own, the nightly pass queueing it, and a run whose
+// args name no ref is refused.
+func TestEvsJobsBindMarkerCollection(t *testing.T) {
+	var collect *evsJob
+	for _, job := range evsJobs {
+		if job.name == evsservice.EvsCollectTaskName {
+			collect = job
+		}
+	}
+	if collect == nil || collect.first != nil {
+		t.Fatal("no evs.collect job, or one with a chain")
+	}
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	fake := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil)
+	if err := collect.run(t.Context(), fake.ServiceHost(), []byte("meta-1")); err == nil {
+		t.Fatal("a run naming no ref was taken")
+	}
+}
