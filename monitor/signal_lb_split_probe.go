@@ -320,12 +320,21 @@ func (lbSplitProbe) check(ctx context.Context, env *probeEnv) ([]finding, error)
 			symptom: "monitor.yml has no lb_split_probe block, so no interface's split is probed",
 		}}, nil
 	}
-	if settings.ConfigError != "" {
+	configError := settings.ConfigError
+	switch {
+	case configError != "":
+	case len(settings.Roots) == 0:
+		// with no root the probe.edge half would not run, and a broken user split would read as passing
+		configError = "the settings name no tls_split root"
+	case len(settings.Interfaces) == 0:
+		configError = "the settings name no interface"
+	}
+	if configError != "" {
 		return []finding{{
 			probeId: lbSplitProbeId, tier: tierWarn, class: lbSplitProbeClassUnobservable, target: lbSplitProbeTarget,
 			sustain: 1, unobservable: true,
 			symptom:  "the split probe is asked for and its settings do not read",
-			observed: settings.ConfigError,
+			observed: configError,
 			action:   "Fix monitor.yml's lb_split_probe block or services.yml's lb inventory and tls_split, as the observed value says.",
 		}}, nil
 	}
