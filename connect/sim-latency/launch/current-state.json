@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T10:43:00Z",
+  "observed_at": "2026-11-10T11:03:04Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -86,6 +86,7 @@
     "retained_response_minio_version": "126df67b-facf-4e4f-9f88-2dc721f6f827"
   },
   "goofe": {
+    "corrected_cli_release_staged": "Clean51ccb31e9 agentc524449d and bounded namespace helperaa65c930 staged identically on both hosts in immutable v6 release; not activated. Real-CLI/real-proxy composed tests exposed inherited MemorySwappiness=-1 rejection before the separate32 MiB/implicit64 MiB shared-memory mismatch. Both corrected, with no-swap and other containment guards preserved. Full473-test run passed (one intentionally private helper skipped);84 race-test invocations passed with no skips, including actual Docker APIs1.44/1.56. Replacement probe and activation tools built/staged, no new clock. Combined amendment extension approval and RAM-cache cleanup approval pending. Main schema still949 at11:02:58Z;950/API deployment still required. See EPOCH2-DOCKER-CLI-CONTRACT-2026-11-10.json. Do not reuse v4 fingerprints for v6.",
     "latest_private_probe": "Corrected role-v4 operator-only R1 run5dad6382 failed before simulation because32 MiB helper memory cannot contain Docker's implicit64 MiB shared memory. Actual cleanup and stop cleanup both verified; recovery inactive, owner/evaluator inactive. Bounded8 MiB helper fix passes deterministic counterfactual, full agent and repeated race checks. Immutable v5 assets staged on both hosts but not activated; additional operational approval requested. EPOCH2-NAMESPACE-PROBE-MEMORY-2026-11-10.json. Official R9 clocks remain unstarted.",
     "operational_amendment_approved": true,
     "operational_amendment_scope": "Approved: preserve round, source, scoring rules, submissions and clocks. Corrected protected role-v4 agents are active on both hosts; actual new fingerprints independently repeated and signed non-job availability verified on both at10:10Z. Native boundary and namespace checks pass. Main migration950/API deployment and append-only amendment registration remain pending; full containment and R9 admission still required. See EPOCH2-CORRECTED-EXECUTOR-IDENTITIES-2026-11-10.json. Frozen identities are not relabeled.",

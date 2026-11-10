@@ -27,6 +27,7 @@
     "provenance_verification": "Extracted payload matches installed host-native probe; distribution provenance only, not a claim that the coordinator executed in Docker"
   },
   "confirmed_defect": "The non-root namespace helper requests32 MiB total memory but omits shm-size. Docker defaults shared memory to64 MiB; the existing closed proxy correctly refuses total tmpfs/shared memory greater than the container memory budget.",
+  "composed_followup": "The native scope error was generic. Subsequent exact-helper/real-CLI/proxy tests identified an earlier inherited-swappiness sentinel rejection, then deterministically reproduced this independent shared-memory rejection after fixing the sentinel. See EPOCH2-DOCKER-CLI-CONTRACT-2026-11-10.json; do not treat the isolated resource tests as a successful native replacement probe.",
   "correction": "Explicit8 MiB shared memory only for the private probe; retain32 MiB total memory/swap, non-root UID, core/seccomp and all proxy guards. Legacy helper arguments unchanged.",
   "adjacent_audit": "No other32 MiB helper found in evaluator scripts; other scoped direct probes use4 GiB. Positive/negative actual worker-handler policy tests cover explicit bounded shared memory and oversized defaults; legacy argv absence is asserted.",
   "validation": {
