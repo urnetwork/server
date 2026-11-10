@@ -39,6 +39,10 @@ func Routes() []*router.Route {
 		// called by the consent page on the ur.io origin
 		router.NewRoute("POST", "/oauth/authorize", AuthorizeHandler),
 		router.NewRoute("POST", "/oauth/consent", ConsentHandler),
+		// §7.8's edge login: a front sends its visitor here, on to the consent
+		// page; and the id- set's keys its ID tokens verify by (edge_login.go)
+		router.NewRoute("GET", "/oauth/authorize", AuthorizeRedirectHandler),
+		router.NewRoute("GET", "/\\.well-known/ur/id-jwks\\.json", EdgeJwksHandler),
 	}
 }
 
@@ -138,6 +142,21 @@ func TokenHandler(w http.ResponseWriter, r *http.Request) {
 			RedirectUri:  r.PostFormValue("redirect_uri"),
 			CodeVerifier: r.PostFormValue("code_verifier"),
 			Resource:     r.PostFormValue("resource"),
+		}
+		// an edge origin's code redeems for its ID token alone (edge_login.go)
+		if _, isOrigin := edgeOriginHost(clientId); isOrigin {
+			if _, isEdge, err := resolveEdgeOrigin(r.Context(), clientId); isEdge || err != nil {
+				var edgeResponse *EdgeTokenResponse
+				if err == nil {
+					edgeResponse, err = ExchangeEdgeCode(r.Context(), exchangeCodeArgs)
+				}
+				if err != nil {
+					writeGrantError(w, err)
+					return
+				}
+				writeJson(w, http.StatusOK, edgeResponse)
+				return
+			}
 		}
 		var response *TokenResponse
 		var err error
@@ -393,6 +412,20 @@ func ConsentHandler(w http.ResponseWriter, r *http.Request) {
 			result.AdminCommand = adminCommand
 		}
 		writeJson(w, http.StatusOK, result)
+		return
+	}
+
+	if client.ClientType == ClientTypeEdge {
+		// a network's own published name signs in its members: nothing to
+		// consent to, only a sign-in (edge_login.go)
+		writeJson(w, http.StatusOK, &ConsentResult{
+			ClientName:      client.ClientName,
+			ClientUri:       client.ClientUri,
+			Scopes:          []string{EdgeScopeOpenid},
+			NetworkName:     clientSession.ByJwt.NetworkName,
+			Issuer:          Issuer(),
+			ConsentRequired: false,
+		})
 		return
 	}
 

@@ -135,6 +135,14 @@ func GetClient(ctx context.Context, clientId string) (*Client, error) {
 	if clientId == UrcliClientId {
 		return urcliClient(), nil
 	}
+	// an edge origin is its own client while its grant is live, never fetched
+	// (edge_login.go)
+	if origin, isOrigin, err := resolveEdgeOrigin(ctx, clientId); isOrigin {
+		if err != nil {
+			return nil, err
+		}
+		return edgeOriginClient(ctx, origin)
+	}
 	if isCimdClientId(clientId) {
 		return getCimdClient(ctx, clientId)
 	}
