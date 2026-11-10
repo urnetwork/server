@@ -72,6 +72,8 @@ type HostSettings struct {
 	// (§20.6): 10 s, well inside sidecarhost.Run's 60 s shutdown, since a window not sent costs at most a minute
 	// of this process's bytes. Non-positive sends nothing at the drain.
 	UsageDrainTimeout time.Duration
+	// The segment cluster's HDD share. nil: evsservice.DefaultHddAdmissionSettings.
+	Hdd *evsservice.HddAdmissionSettings
 }
 
 // The defaults.
@@ -227,7 +229,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		// every upload would answer 503, so the block says so rather than serve
 		self.missing = append(self.missing, fmt.Sprintf("a segment cluster among the clusters (%v)", err))
 	case host.Redis != nil:
-		hdd, err := evsservice.NewHddAdmission(ctx, host, segmentCluster.ClusterId(), nil)
+		hdd, err := evsservice.NewHddAdmission(ctx, host, segmentCluster.ClusterId(), settings.Hdd)
 		if err != nil {
 			return fail(err)
 		}
