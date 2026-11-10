@@ -96,6 +96,10 @@ type HostDeps struct {
 	// The newest verified authorization state. nil: none until ACL-M2-14's over AclGateCache, and the block
 	// stays not ready, since the engine honors nothing without it.
 	AuthState evsservice.EvsAuthState
+	// The newest verified state of each network as a push's 5b and 5d read it (evsservice.NewAclGateViews over the
+	// process's AclGateCache, C-09). nil: none until a process hosts the cache (ACL-M2-14), and the block stays not
+	// ready, since every push answers 503 without it.
+	GateViews evsservice.EvsGateViews
 	// The upload receipts' keys. nil: HostReceiptKeysFileName from the block's vault, and a block whose file
 	// does not load stays not ready.
 	ReceiptKeys *evsservice.ReceiptKeys
@@ -171,6 +175,9 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 	if deps.AuthState == nil {
 		self.missing = append(self.missing, "the newest verified authorization state, ACL-M2-14's EvsAuthState over AclGateCache (C-09)")
 	}
+	if deps.GateViews == nil {
+		self.missing = append(self.missing, "the gate views a push's 5b and 5d read, evsservice.NewAclGateViews over the process's AclGateCache (C-09)")
+	}
 	keys := deps.ReceiptKeys
 	if keys == nil {
 		// the block's own, from its vault
@@ -223,6 +230,7 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		ServiceLog: deps.ServiceLog,
 		Log:        hostLogger{},
 		Uploads:    uploads,
+		GateViews:  deps.GateViews,
 	})
 	if err != nil {
 		return fail(err)
