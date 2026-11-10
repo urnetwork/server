@@ -11,6 +11,20 @@
   },
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
+  "job_mount_control_checkpoint": {
+    "server_commit": "099716fde22041d418dae69cc1bf758385c58261",
+    "release": "/usr/local/libexec/urnetwork/competition-subeval-control-099716fde-20261110-v12",
+    "agent_sha256": "def117fd9e4ad776045e099e72bf8bd1372f0e22652d0643146aa2761462475e",
+    "agent_build": "go1.27.3 linux/amd64 CGO_ENABLED=0; vcs.modified=false",
+    "staged_both_hosts": true,
+    "activated": false,
+    "live_topology_changed": false,
+    "native_systemd_bootstrap": "Three consecutive passes on each host; synthetic temporary mounts and units only, normal stop/unmount cleanup",
+    "targeted_race_tests": "Three repetitions passed in1.296s after correcting systemd backing-source projection",
+    "full_agent_race_tests": "Final exact-code suite passed three repetitions in203.908s",
+    "activation_approval": "Narrow shared-job-subtree correction requested; no approval received yet",
+    "next_action": "After approval, capture signed idle state, pin mount bootstrap and daemon ordering, recreate daemon mount namespaces, observe genuine new host identities, and run fresh authenticated end-to-end operator probes. Do not reuse v11 failed attempts or claim grading readiness."
+  },
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
   "scope": {"environment": "main", "competition_id": "sim-latency-season-1", "season_id": "sim-latency-production-20261028-r2"},
   "epoch1": {
