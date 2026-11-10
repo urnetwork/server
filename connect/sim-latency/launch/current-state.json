@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T15:18:59Z",
+  "observed_at": "2026-11-10T15:21:27Z",
   "latest_executor_diagnosis": {
     "migration_head_verified": 950,
     "v7_native_probes": "Both terminal infrastructure failures before simulation; not running. Preserve their original identities and deadlines.",
     "first_refusal": "Reproduced with the installed Docker CLI against an inert daemon: image tag normalizes the single allowed offline alias with docker.io/. Proxy rejected that exact equivalent spelling.",
     "adjacent_defect": "All three trusted identity callers duplicated cap-drop ALL and no-new-privileges by composing explicit flags with scoped probe arguments. Fixed callers, retaining strict proxy admission and legacy security flags.",
     "regressions": "Real CLI tag failed before correction and passed three times afterward. Actual identity command fragments failed against archived HEAD for all three scoped callers and passed three times after correction, including legacy controls.",
-    "deployment": "Corrected v8 installed on both hosts; fresh native resource/namespace checks, repeated fingerprints and signed idle checks passed. Both R1 probes are terminal failed with verified cleanup: Docker admission passed, but non-root source extraction failed on readonly parent directory modes. New deterministic real-CLI source-copy regression passes three times; source/cache copy correction not yet deployed. Broader helper tests compiling. No amendment registered; official shared R9 baseline and host admission unstarted; scoring remains paused. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
+    "deployment": "Corrected v8 installed on both hosts; fresh native resource/namespace checks, repeated fingerprints and signed idle checks passed. Both R1 probes are terminal failed with verified cleanup: Docker admission passed, but non-root source extraction failed on readonly parent directory modes. Source/cache copy correction pushed in3ecbc3684; broader ownership/source-copy/identity helper suite passed three repetitions in12.001s. v9 release staged on Sille, not activated. Sille production-size pressure proof retained and exact-version readback verified COMPLIANCE through2028. No amendment registered; official shared R9 baseline and host admission unstarted; scoring remains paused. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
   },
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,

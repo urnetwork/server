@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T15:18:59Z",
+  "observed_at": "2026-11-10T15:21:27Z",
   "kind": "epoch2-composed-docker-control-release/v1",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "server_commit": "3ae3f1ecc199b515a92692d9024c6dbc1865d337",
@@ -49,6 +49,23 @@
       "failure": "Readonly frozen source-directory extraction failed before simulation; cleanup_verified and stop_cleanup_verified true."
     }
   },
-  "subsequent_source_copy_fix": "Actual Docker CLI against an inert archive reproduces premature readonly-parent restoration. Corrected scoped tree copies stream the pristine-image archive to deferred-directory GNU tar extraction, then grant owner write for Git; executable bits and file bytes preserved. Both frozen-cache tree copies use the same correction. Three deterministic repetitions passed; broader helper suite still compiling. Not yet installed on hosts.",
+  "subsequent_source_copy_fix": "Actual Docker CLI against an inert archive reproduces premature readonly-parent restoration. Corrected scoped tree copies stream the pristine-image archive to deferred-directory GNU tar extraction, then grant owner write for Git; executable bits and file bytes preserved. Both frozen-cache tree copies use the same correction. Three deterministic repetitions and three broader ownership/source-copy/identity suite repetitions passed (12.001s). Pushed3ecbc3684. Release v9 staged on Sille, not installed or active on hosts.",
+  "staged_v9": {
+    "release": "/usr/local/libexec/urnetwork/competition-subeval-control-3ecbc3684-20261110-v9",
+    "agent_sha256": "6a5fb296f12d8e5f89d1d743a1e3261ff4981922e7e6da864e2997aa5de53351",
+    "agent_provenance": "Unchanged clean native3ae3f1ecc binary; only trusted shell assets changed in3ecbc3684",
+    "builder_sha256": "586459b1b793271a6d0fc1f21c7b0f31986998baba4cbb59afa1624f95e13cbd",
+    "ownership_sha256": "24271404d85ebcd4bcd0f4ba5268b45b90184a9ad42aa8e2f471b1841c2af733",
+    "active": false
+  },
+  "sille_pressure_retention": {
+    "source_report_sha256": "be2a4c1816cb8ee710c55084b4a97f5902473d40b446373f8f601a6fe2d2a1cc",
+    "receipt_sha256": "c9a1b68972faead6eefc415a835b5ab6fd52e2722781a910e882b3c5c17e018e",
+    "version_id": "a70d5375-61ec-43b2-aec1-268e4a546201",
+    "retention_mode": "COMPLIANCE",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "exact_version_readback_verified": true,
+    "qualification_scope": "Physical72GiB OOM/10-core saturation and935ms cleanup under the prior v6 startup; not a claim that v9 full execution is qualified"
+  },
   "provisioning_note": "The Sille provisioner refused an evaluator pin mismatch before unit changes. Its partial role directory was preserved as competition-sille-role-20261110-v8-incomplete-pin-preflight; the explicit expected corrected evaluator SHA was added before successful provisioning. No job was started by the refused operation."
 }
