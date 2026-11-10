@@ -7,6 +7,12 @@ package server
 // added after signing, so it is unsigned: the fork reads it, and SigV4 checks only the headers it
 // signed.
 //
+// A DELETE that names its object (sidecar.WithBlobUnmodified) carries that object's LastModified as
+// x-ur-if-unmodified-ms, in Unix ms, by the same route and for the same reason: the fork compares it,
+// under the key's lock, with the object it finds, and answers 412 for one stored a second or more
+// later (§19.6, DESIGN-DETAILS 2.2.2). Upstream ignores the header, which is why a cluster's deletes
+// wait on SettlePassed.
+//
 // Two bounds cancel a request here, each only until its response starts, so a body then streams under
 // the caller's ctx alone: http.Transport's ResponseHeaderTimeout, RequestTimeout after the request's
 // last byte with no response (§19.6), and the request's own deadline when that comes first, by this
@@ -35,6 +41,9 @@ import (
 // §19.6's deadline header (D-OPS-20), read by the fork's handlers.
 const fileClusterDeadlineHeader = "X-Ur-Deadline-Ms"
 
+// §19.6's header of a DELETE that names its object, read by the fork's handlers.
+const fileClusterUnmodifiedHeader = "X-Ur-If-Unmodified-Ms"
+
 // Marks a request that carries the deadline header: every operation but PutStream sets it.
 type fileClusterDeadlineKey struct{}
 
@@ -62,6 +71,11 @@ func (self *fileClusterTransport) RoundTrip(request *http.Request) (*http.Respon
 	// RoundTrip must not change the request it was given
 	request = request.Clone(request.Context())
 	request.Header.Set(fileClusterDeadlineHeader, strconv.FormatInt(deadline.UnixMilli(), 10))
+	if request.Method == http.MethodDelete {
+		if lastModified, ok := sidecar.BlobUnmodified(request.Context()); ok {
+			request.Header.Set(fileClusterUnmodifiedHeader, strconv.FormatInt(lastModified.UnixMilli(), 10))
+		}
+	}
 	if !deadline.Before(issued.Add(requestTimeout)) {
 		// ResponseHeaderTimeout is the bound
 		return self.base.RoundTrip(request)

@@ -228,6 +228,16 @@ func (self *fakeS3) serve(host string, request *http.Request) (*http.Response, e
 		response.ContentLength = int64(len(object.body))
 		return response, nil
 	case http.MethodDelete:
+		// the fork's x-ur-if-unmodified-ms: 412 for an object stored a second or more after the time named
+		if named := request.Header.Get(fileClusterUnmodifiedHeader); named != "" && self.objects[key] != nil {
+			namedMs, err := strconv.ParseInt(named, 10, 64)
+			if err != nil {
+				return fakeS3Error(request, http.StatusBadRequest, "InvalidRequest"), nil
+			}
+			if sidecar.BlobUnmodifiedRefuses(time.UnixMilli(namedMs), self.lastModifiedTime) {
+				return fakeS3Error(request, http.StatusPreconditionFailed, "PreconditionFailed"), nil
+			}
+		}
 		delete(self.objects, key)
 		return fakeS3Response(request, http.StatusNoContent, nil, nil), nil
 	}
@@ -516,6 +526,92 @@ func TestFileClusterDeadlineHeaderTakesTheOwnDeadline(t *testing.T) {
 	requests := fixture.store.takeRequests()
 	if len(requests) != 1 || requests[0].deadline != strconv.FormatInt(own.UnixMilli(), 10) {
 		t.Errorf("requests %+v", requests)
+	}
+}
+
+// A DELETE that names its object carries that object's LastModified as x-ur-if-unmodified-ms, in Unix
+// ms, beside its deadline. No other request carries it, and a DELETE that names nothing carries none.
+func TestFileClusterUnmodifiedHeaderRidesANamedDelete(t *testing.T) {
+	fixture := newFileClusterFixture(t, newFakeS3(1, "build-1"), "")
+	ctx := t.Context()
+	listed := fixture.store.lastModifiedTime.Add(250 * time.Millisecond)
+	named := sidecar.WithBlobUnmodified(ctx, listed)
+	if _, err := fixture.cluster.PutIfNoneMatch(named, "seg/r/s", []byte("x"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.cluster.Head(named, "seg/r/s"); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.cluster.Delete(ctx, "seg/r/other"); err != nil {
+		t.Fatal(err)
+	}
+	for _, request := range fixture.store.takeRequests() {
+		if value := request.header.Get(fileClusterUnmodifiedHeader); value != "" {
+			t.Errorf("%s %s carries x-ur-if-unmodified-ms %q", request.method, request.path, value)
+		}
+	}
+
+	if err := fixture.cluster.Delete(named, "seg/r/s"); err != nil {
+		t.Fatal(err)
+	}
+	requests := fixture.store.takeRequests()
+	if len(requests) != 1 || requests[0].method != http.MethodDelete {
+		t.Fatalf("requests %+v", requests)
+	}
+	if got, want := requests[0].header.Get(fileClusterUnmodifiedHeader), strconv.FormatInt(listed.UnixMilli(), 10); got != want {
+		t.Errorf("x-ur-if-unmodified-ms %q, want %q", got, want)
+	}
+	if requests[0].deadline == "" {
+		t.Error("a named DELETE lost its deadline header")
+	}
+	if _, err := fixture.cluster.Head(ctx, "seg/r/s"); !errors.Is(err, sidecar.ErrBlobNotFound) {
+		t.Errorf("the named object after its DELETE: %v", err)
+	}
+}
+
+// The store's 412 for a newer object is ErrBlobPrecondition, a definite answer: nothing was deleted,
+// and the host is not marked failed. A key already gone is nil, named or not.
+func TestFileClusterNamedDeleteOfANewerObjectIsAPrecondition(t *testing.T) {
+	fixture := newFileClusterFixture(t, newFakeS3(1, "build-1"), "", "host-a.example:9000", "host-b.example:9000")
+	ctx := t.Context()
+	if _, err := fixture.cluster.PutIfNoneMatch(ctx, "seg/r/s", []byte("uploaded again"), nil); err != nil {
+		t.Fatal(err)
+	}
+	older := sidecar.WithBlobUnmodified(ctx, fixture.store.lastModifiedTime.Add(-49*time.Hour))
+	err := fixture.cluster.Delete(older, "seg/r/s")
+	if !errors.Is(err, sidecar.ErrBlobPrecondition) {
+		t.Fatalf("a DELETE naming an older object: %v", err)
+	}
+	var unknown *sidecar.BlobUnknownError
+	if errors.As(err, &unknown) {
+		t.Error("a 412 was reported as an unknown outcome")
+	}
+	if _, err := fixture.cluster.Head(ctx, "seg/r/s"); err != nil {
+		t.Errorf("the newer object after a refused DELETE: %v", err)
+	}
+	if err := fixture.cluster.Delete(older, "seg/r/never-written"); err != nil {
+		t.Errorf("a named DELETE of a missing key: %v", err)
+	}
+	// inside the second of slack, as a time read from a HEAD is
+	inside := sidecar.WithBlobUnmodified(ctx, fixture.store.lastModifiedTime.Add(-999*time.Millisecond))
+	if err := fixture.cluster.Delete(inside, "seg/r/s"); err != nil {
+		t.Errorf("a DELETE naming a time inside the slack: %v", err)
+	}
+	if _, err := fixture.cluster.Head(ctx, "seg/r/s"); !errors.Is(err, sidecar.ErrBlobNotFound) {
+		t.Errorf("the object after the DELETE that named it: %v", err)
+	}
+}
+
+// A 412 answering a DELETE that named nothing is no answer this client asked for, so its outcome is
+// unknown like any other failure.
+func TestFileClusterUnnamedDeleteNeverReadsAPrecondition(t *testing.T) {
+	store := newFakeS3(1, "build-1")
+	fixture := newFileClusterFixture(t, store, "")
+	store.failStatus = http.StatusPreconditionFailed
+	err := fixture.cluster.Delete(t.Context(), "idx/r/f/1/t.e")
+	var unknown *sidecar.BlobUnknownError
+	if !errors.As(err, &unknown) || errors.Is(err, sidecar.ErrBlobPrecondition) {
+		t.Errorf("err %v", err)
 	}
 }
 

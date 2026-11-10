@@ -710,18 +710,32 @@ func (self *FileCluster) List(ctx context.Context, keyPrefix string, startAfter 
 	return objects, more, nil
 }
 
-// Unconditional, since the store evaluates no precondition on a DELETE (§11.3), and nil for a key
-// already gone, which MinIO answers 204 too.
+// Unconditional, since upstream evaluates no precondition on a DELETE (§11.3), unless ctx names the
+// object (sidecar.WithBlobUnmodified): the transport then sends x-ur-if-unmodified-ms, and the fork's
+// 412 for a newer object is ErrBlobPrecondition, a definite answer that deleted nothing. nil for a
+// key already gone, which MinIO answers 204 too.
 func (self *FileCluster) Delete(ctx context.Context, key string) error {
 	if err := self.checkPools(); err != nil {
 		return err
 	}
 	host := self.picker.pick()
 	if err := host.core.RemoveObject(withFileClusterDeadline(ctx, self.RequestTimeout()), self.config.Bucket, key, minio.RemoveObjectOptions{}); err != nil {
-		self.noteFailure(ctx, host, err)
-		return &sidecar.BlobUnknownError{Err: err}
+		return fileClusterDeleteError(ctx, self, host, err)
 	}
 	return nil
+}
+
+// What a DELETE's failure means. A 412 answers a DELETE that named its object and found a newer one:
+// definite, and nothing was deleted. It is taken only from a DELETE that sent the condition, so no
+// other 412 can read as one. Everything else leaves the outcome unknown (host_blobs.go).
+func fileClusterDeleteError(ctx context.Context, cluster *FileCluster, host *fileClusterHost, err error) error {
+	if _, named := sidecar.BlobUnmodified(ctx); named {
+		if response, ok := fileClusterErrorResponse(err); ok && response.StatusCode == http.StatusPreconditionFailed {
+			return sidecar.ErrBlobPrecondition
+		}
+	}
+	cluster.noteFailure(ctx, host, err)
+	return &sidecar.BlobUnknownError{Err: err}
 }
 
 // The sentinel xops writes on every cluster, read for readiness.
