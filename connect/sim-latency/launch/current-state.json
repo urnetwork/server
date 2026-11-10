@@ -11,12 +11,13 @@
     "root_cause": "Tracked compiler /work tmpfs omitted exec. Docker defaults tmpfs to noexec, so go test -run ^$ built binaries but fork/exec /work/tmp/.../*.test failed with permission denied on both hosts. Source bind visibility now works and actual compiler containers ran.",
     "correction": "Add explicit exec only to tracked compiler /work tmpfs. Proxy requires it in the exact build cgroup, refuses missing/conflicting flags, and refuses executable tmpfs for other targets/roles. Existing source/image/stage/user/cgroup/resource checks still run before issue. Evidence, runner and backing-service mounts unchanged.",
     "native_counterfactual": "Three passes per host: default Docker tmpfs returns126 for copied trusted coreutils execution; explicit exec returns0 under the same mapped65532 uid, readonly root, network none, all caps dropped, pinned seccomp/core limits, management CPUs and bounded memory/tmpfs. Exact fixture cleanup verified.",
-    "tests": "Policy role/target/flag controls and complete CREATE positive/negative plus actual installed-CLI controls pass three race repetitions4.297s; full agent/CLI race suite running.",
+    "tests": "Policy role/target/flag controls and complete CREATE positive/negative plus actual installed-CLI controls pass three race repetitions4.297s. Full agent/CLI race suite passed three repetitions208.143s/1.030s; the final added CREATE negative controls were separately run three times.",
+    "corrected_release": {"server_commit":"0bb42f799","release":"/usr/local/libexec/urnetwork/competition-subeval-control-0bb42f799-20261110-v16","agent_sha256":"51e60f540c2135cb47cb61fc38cc4eb851586a78478b35be50e645c3a599ded9","builder_sha256":"61fe67fc7f6aeae72fd8a444c080c28f95696285900333914ef18292a1157dd4","tracked_builder_sha256":"27da7315d0495dc1cc84d956a417d86e645d23b074242ce45ceb1442c7c97815","staged_on_sille":true,"activated":false},
     "installed": false,
     "grading_ready": false,
     "official_r9_started": false,
     "customer_evaluation_started": false,
-    "next_action": "Finish tests, publish a clean immutable native agent and builder bundle, repin genuine host identities at the idle boundary, and run fresh bounded operator probes. Preserve both v15 outcomes; do not reuse their identities/deadlines."
+    "next_action": "Stage the same immutable native agent/builder bundle on Goofe, repin genuine host identities at the idle boundary, and run fresh bounded operator probes. Preserve both v15 outcomes; do not reuse their identities/deadlines."
   },
   "latest_private_executor_generation": {
     "role": "v15",
