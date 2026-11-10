@@ -13,6 +13,10 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
+	"golang.org/x/text/number"
 )
 
 // ParamsInput is the data a send renders from.
@@ -27,7 +31,7 @@ type ParamsInput struct {
 	// the template's locale (the store locale the Brevo template was rendered
 	// in); dates and times are formatted for it (localdate.go). "" = en
 	Locale string
-	// free daily data in GB (pro.yml free.data)
+	// free daily data in GiB (pro.yml free.data / model.Gib)
 	DailyDataGb float64
 	// days since sign-up
 	DaysActive int
@@ -38,6 +42,9 @@ type ParamsInput struct {
 
 	// the welcome offer, when one exists
 	OfferExpiresAt *time.Time
+	// the offer may not be emailed to the network (Decision.NoOfferEmail):
+	// E1 leaves out its offer line
+	NoOfferEmail   bool
 	OfferPriceUsd  float64
 	RegularYearUsd float64
 	TrialDays      int
@@ -170,32 +177,43 @@ func FormatUsd(usd float64) string {
 	return fmt.Sprintf("$%.2f", cents/100)
 }
 
-// FormatCount renders an integer with thousands grouping ("4,812").
-func FormatCount(n int) string {
-	s := strconv.Itoa(n)
-	if len(s) <= 3 || n < 0 {
-		return s
-	}
-	var b strings.Builder
-	head := len(s) % 3
-	if head > 0 {
-		b.WriteString(s[:head])
-	}
-	for i := head; i < len(s); i += 3 {
-		if b.Len() > 0 {
-			b.WriteByte(',')
+// FormatCount renders an integer with the thousands grouping of `locale`, the
+// template's locale: "4,812" (en, zh, ja, es-419), "4.812" (de, es, it, pt),
+// "4 812" with a no-break space (fr, ru, cs, pl, sv, uk, pt-PT). The symbols
+// are CLDR's, as golang.org/x/text has them, always in Latin digits as the
+// rest of the copy writes numbers (the Arabic copy too). "" or a malformed
+// locale is English.
+func FormatCount(n int, locale string) string {
+	tag := language.English
+	if l := strings.ReplaceAll(strings.TrimSpace(locale), "_", "-"); l != "" {
+		if parsed, err := language.Parse(l); err == nil {
+			tag = parsed
 		}
-		b.WriteString(s[i : i+3])
 	}
-	return b.String()
+	if latin, err := tag.SetTypeForKey("nu", "latn"); err == nil {
+		tag = latin
+	}
+	return message.NewPrinter(tag).Sprint(number.Decimal(n))
 }
 
-// FormatGb renders "30 GB" (whole) or "2.5 GB".
+// formatKnownCount is FormatCount for a live count, "" when it is not known
+// (0): the templates hide a line whose count is empty.
+func formatKnownCount(n int, locale string) string {
+	if n <= 0 {
+		return ""
+	}
+	return FormatCount(n, locale)
+}
+
+// FormatGb renders an amount of data in GiB, "30 GiB" (whole) or "2.5 GiB":
+// the callers pass bytes / model.Gib, the free grant is 30 GiB a day
+// (config/all/pro.yml free.data: 30gib), and the apps, ur.io and the Pro line
+// ("10 TiB a month") all use the binary units.
 func FormatGb(gb float64) string {
 	if gb == math.Trunc(gb) {
-		return fmt.Sprintf("%d GB", int64(gb))
+		return fmt.Sprintf("%d GiB", int64(gb))
 	}
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", gb), "0"), ".") + " GB"
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", gb), "0"), ".") + " GiB"
 }
 
 // FormatLocalDateTime renders a deadline in the network's zone in English, e.g.
@@ -237,19 +255,32 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
 		p["daily_data_gb"] = FormatGb(in.DailyDataGb)
 		p["platform"] = in.Platform
-		// path A only: the deadline of the in-app offer; empty hides the line
+		// path A only: the deadline of the in-app offer; empty hides the line.
+		// Never where the offer may not be emailed (no-offer countries, an
+		// unknown country): the offer steps stand down there too
 		p["offer_expires_at"] = offerExpires
+		if in.NoOfferEmail {
+			p["offer_expires_at"] = ""
+		}
 	case TemplateE2Widget:
 		p["cta_url"] = CtaUrl(in.SiteUrl, in.Template, in.Token)
-		p["providers_online"] = FormatCount(in.ProvidersOnline)
+		// the live counts, or "" while they are unknown (the count query has
+		// not succeeded yet): the template drops the line on an empty
+		// providers_online rather than say "0 providers are online". The
+		// activated line quotes both counts, so it needs both.
+		providers, countries := in.ProvidersOnline, in.CountriesOnline
+		if providers <= 0 || (in.Variant == VariantActivated && countries <= 0) {
+			providers, countries = 0, 0
+		}
+		p["providers_online"] = formatKnownCount(providers, in.Locale)
 		if in.Variant == VariantActivated {
 			if daysActive < 2 {
 				daysActive = 2
 			}
-			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
-			p["days_active"] = FormatCount(daysActive)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			p["platform"] = in.Platform
-			p["countries_online"] = FormatCount(in.CountriesOnline)
+			p["countries_online"] = formatKnownCount(countries, in.Locale)
 		}
 	case TemplateE3LastChance:
 		p["opening"] = in.Opening
@@ -273,8 +304,8 @@ func BuildParams(in ParamsInput) map[string]string {
 		p["trial_end_at"] = trialEnd
 	case TemplateE4Feedback:
 		if in.Variant == VariantEngaged {
-			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive))
-			p["days_active"] = FormatCount(daysActive)
+			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			for r := 1; r <= 5; r++ {
 				p["rating_url_"+strconv.Itoa(r)] = FeedbackUrl(in.SiteUrl, in.Token, "r="+strconv.Itoa(r))
 			}
@@ -282,7 +313,7 @@ func BuildParams(in ParamsInput) map[string]string {
 			if daysActive < 5 {
 				daysActive = 5
 			}
-			p["days_active"] = FormatCount(daysActive)
+			p["days_active"] = FormatCount(daysActive, in.Locale)
 			for i, code := range onboardingReasonCodes {
 				p["reason_url_"+strconv.Itoa(i+1)] = FeedbackUrl(in.SiteUrl, in.Token, "why="+code)
 			}

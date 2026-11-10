@@ -116,7 +116,7 @@ func reengagementEventPlatform(platform string) string {
 // newestClientPlatform is the platform of the more recent of the two client
 // reports that name one: the newest client event, or the device spec of the
 // newest client as of that client's last authentication. A spec that names no
-// platform (most Android and macOS specs name only a model) is no report. On a
+// platform (a Mac's "<os version> <model>" spec names only a model) is no report. On a
 // tie the event wins: it names its platform outright.
 func newestClientPlatform(client *model.NetworkClientContext) (platform string, source string) {
 	eventPlatform := reengagementEventPlatform(client.EventPlatform)

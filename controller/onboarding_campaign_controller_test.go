@@ -37,6 +37,52 @@ func TestPlatformFromDeviceSpec(t *testing.T) {
 	}
 }
 
+// The specs the apps actually send on auth-client (device_spec on Main,
+// 2026-11-10). The Android app sends "<os version> <make model>", and sent
+// "<os version> <Build.FINGERPRINT>" before; neither names Android, so every
+// Android network was left without a platform: its onboarding mail rendered
+// "your device" and the web-billed branch with USD prices (store_billed off),
+// though Google Play bills it. 1,832 Android networks got 5,465 onboarding
+// sends in the 30 days to 2026-11-10 that way, 1,526 of them an offer email.
+func TestPlatformFromDeviceSpecNamesTheAppsSpecs(t *testing.T) {
+	cases := map[string]string{
+		// Android, "<os version> <make model>" (android MainApplication.deviceSpec)
+		"16 Samsung Galaxy S24 Ultra": "android",
+		"17.1 Pixel 8 Pro":            "android",
+		"10 Samsung SM-A125F":         "android",
+		"8.1.0 Xiaomi Redmi 5 Plus":   "android",
+		// Android, "<os version> <Build.FINGERPRINT>" (older app versions)
+		"14 TECNO/LH7n-RU/TECNO-LH7n:14/UP1A.231005.007/250416V782:user/release-keys":                      "android",
+		"11 Droidlogic/franklin/franklin:11/RD2A.211001.002/eng.ugoos.20231103.070631:userdebug/test-keys": "android",
+		// a fingerprint whose build id contains "ios" is still Android
+		"15 nubia/PQ82A04-UN/PQ82A04:15/AQ3A.240812.002/NebulaAIOS1.0.3_NX725J_GB:user/release-keys": "android",
+		// iOS, "<os version> <model>" and the bare machine id
+		"18.1 iPhone 16 Pro": "ios",
+		"17.1 iPhone":        "ios",
+		"iPhone14,5":         "ios",
+		"iPad11,1":           "ios",
+		// the other apps and the automation keep their answers
+		"windows amd64":  "windows",
+		"Windows 10 x64": "windows",
+		"linux amd64":    "linux",
+		"linux/amd64":    "linux",
+		"macos":          "macos",
+		"macOS Sonoma 14.6.1 (23G93) | Apple M3 8-Core | 24GB Unified Memory | 512GB Storage": "macos",
+		"socks5":                  "",
+		"resident":                "",
+		"urnetwork/egress-prober": "",
+		// a Mac model with only a version still names no platform: the App
+		// Store and the direct-download build send the same spec, and the
+		// platform decides the App Store offer rule (NoOfferEmail)
+		"15.7.9 MacBook Air (M1, 2020)": "",
+	}
+	for in, want := range cases {
+		if got := platformFromDeviceSpec(in); got != want {
+			t.Errorf("platformFromDeviceSpec(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestWebhookTags(t *testing.T) {
 	if tags := webhookTags(&BrevoWebhookArgs{Tags: []string{"onboarding", "e1_connect", "default"}}); len(tags) != 3 {
 		t.Errorf("array form: %v", tags)

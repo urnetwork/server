@@ -176,10 +176,22 @@ type Facts struct {
 	NoOfferEmail bool
 
 	// ----- step conditions -----
-	HasConnected      bool
-	WidgetAdded       bool
-	OfferState        string // "" (none) | active | redeemed | expired
+	// the row's platform: ios, macos, android, windows, linux, web, or ""
+	// when unknown
+	Platform     string
+	HasConnected bool
+	WidgetAdded  bool
+	OfferState   string // "" (none) | active | redeemed | expired
+	// the offer expires within LastChanceWindow of the send (OfferEndsSoon):
+	// the last-chance email's "end tomorrow" holds
+	OfferEndsSoon bool
+	// an answer to the feedback step: the app's feedback form
+	// (account_feedback, feedback.submitted) or a one-tap answer from the
+	// feedback email (feedback.tapped)
 	FeedbackSubmitted bool
+	// a feedback email (e4_feedback) already went to the network: after a
+	// B -> A path flip E3b sent it and E4a would send it again
+	FeedbackEmailSent bool
 	// recorded for the status tooling only: opens decide nothing (Apple Mail
 	// Privacy Protection and proxies open every message; REVIEW.md finding 1)
 	EmailOpens int
@@ -193,6 +205,17 @@ const (
 	OfferStateExpired  = "expired"
 )
 
+// LastChanceWindow is how near its end an offer must be for the last-chance
+// email, whose subject says the free months "end tomorrow".
+const LastChanceWindow = 36 * time.Hour
+
+// OfferEndsSoon reports whether an offer expiring at expiresAt ends within
+// LastChanceWindow of now, and has not ended yet.
+func OfferEndsSoon(expiresAt time.Time, now time.Time) bool {
+	left := expiresAt.Sub(now)
+	return 0 < left && left <= LastChanceWindow
+}
+
 // Decision is what a step does.
 type Decision struct {
 	Action   string
@@ -202,10 +225,27 @@ type Decision struct {
 	Opening string
 	// IssueOffer: issue the welcome offer by email before sending (E4b)
 	IssueOffer bool
+	// NoOfferEmail is Facts.NoOfferEmail at the send: the offer may not be
+	// emailed to the network, so E1 leaves out its offer line (the offer
+	// steps do not send at all then)
+	NoOfferEmail bool
 	// ExitReason when Action == ActionExit
 	ExitReason string
 	// NextStep after this one on the effective path ("" = done)
 	NextStep string
+}
+
+// WidgetPlatform reports whether the platform's app has a widget for E2's
+// activated email to point at: the iOS and Android apps, and the macOS app
+// (the apple widgets target builds for macOS too). The Windows and Linux apps
+// and the web have none. An unknown platform ("") keeps the email, as
+// before: Android app rows were often recorded without a platform.
+func WidgetPlatform(platform string) bool {
+	switch platform {
+	case "windows", "linux", "web":
+		return false
+	}
+	return true
 }
 
 // engaged is the feedback-variant rule: the network connected. Opens used to
@@ -257,10 +297,12 @@ func Decide(step string, f Facts) Decision {
 	next := NextStep(step, path)
 	skip := Decision{Action: ActionSkip, NextStep: next}
 	send := func(template string, variant string) Decision {
-		return Decision{Action: ActionSend, Template: template, Variant: variant, NextStep: next}
+		return Decision{Action: ActionSend, Template: template, Variant: variant, NoOfferEmail: f.NoOfferEmail, NextStep: next}
 	}
 	feedback := func() Decision {
-		if f.FeedbackSubmitted {
+		// once per network: a network that flips from B to A between day 5
+		// and 7 reaches E4a's feedback after E3b's
+		if f.FeedbackSubmitted || f.FeedbackEmailSent {
 			return skip
 		}
 		if engaged(f) {
@@ -278,10 +320,10 @@ func Decide(step string, f Facts) Decision {
 		}
 		return send(TemplateE1Connect, VariantDefault)
 	case StepE2:
-		// day 3: activated -> the widget habit unless a widget exists;
-		// not activated -> another connect nudge
+		// day 3: activated -> the widget habit unless a widget exists or the
+		// platform has none; not activated -> another connect nudge
 		if f.HasConnected {
-			if f.WidgetAdded {
+			if f.WidgetAdded || !WidgetPlatform(f.Platform) {
 				return skip
 			}
 			return send(TemplateE2Widget, VariantActivated)
@@ -289,8 +331,10 @@ func Decide(step string, f Facts) Decision {
 		return send(TemplateE2Widget, VariantNotActivated)
 	case StepE3:
 		if path == PathA {
-			// E3a day 4: the in-app offer's last day, still free
-			if f.OfferState == OfferStateActive && !f.NoOfferEmail {
+			// E3a day 4: the in-app offer's last day, still free. Only when the
+			// offer does end within LastChanceWindow: an offer issued after
+			// sign-up has days left on day 4, and the subject says "tomorrow"
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail && f.OfferEndsSoon {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningJoined
 				return d
@@ -314,8 +358,10 @@ func Decide(step string, f Facts) Decision {
 		return skip
 	case StepE5:
 		if path == PathB {
-			// E5b day 11: the emailed offer's last day, no complaint on E4b
-			if f.OfferState == OfferStateActive && !f.NoOfferEmail && !(f.Complained && f.ComplainedStep == StepE4) {
+			// E5b day 11: the emailed offer's last day, no complaint on E4b. As
+			// E3a (the same "end tomorrow" subject), only when the offer ends
+			// within LastChanceWindow: a late E4b issued it later
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail && f.OfferEndsSoon && !(f.Complained && f.ComplainedStep == StepE4) {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningLastNote
 				return d
