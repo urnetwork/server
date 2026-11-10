@@ -358,6 +358,10 @@ type stripeDunningOutcome struct {
 	HasEmail bool
 	// why no notice is owed, when none is
 	Skip string
+	// the invoice is a failing renewal on file: its failure is recorded and open
+	Failing bool
+	// the subscription is a Team's (team_stripe_events.go)
+	Team bool
 }
 
 // Processes the invoice's current state, read from Stripe: a failing renewal is
@@ -407,6 +411,7 @@ func stripeDunningProcessInvoice(
 	if outcome.CustomerId == "" {
 		outcome.CustomerId = stripeIdFromRaw(sub.Customer)
 	}
+	outcome.Team = stripeTeamMarked(sub.Metadata)
 	if skip := stripeDunningFailingReason(invoice, sub); skip != "" {
 		outcome.Skip = skip
 		return outcome, nil
@@ -492,6 +497,8 @@ func stripeDunningProcessInvoice(
 			},
 		})
 	}, server.TxReadCommitted)
+
+	outcome.Failing = true
 
 	// the past-due notice shows at once
 	clearSubscriptionDetailsCached(ctx, *outcome.NetworkId)
@@ -594,6 +601,14 @@ func stripeHandleInvoicePaymentFailed(object json.RawMessage, clientSession *ses
 		return nil, err
 	}
 	stripeDunningLogOutcome(outcome)
+	if outcome.Team && outcome.Failing && outcome.NetworkId != nil {
+		// a Team's failed renewal ends its credit line: overage refuses at once
+		// while the included bytes run out (team_stripe_events.go)
+		if err := stripeTeamPaymentFailed(clientSession.Ctx, *outcome.NetworkId, stripeDunningNow()); err != nil {
+			glog.Errorf("[stripe]dunning: invoice %s: %s\n", invoice.Id, err)
+			return nil, err
+		}
+	}
 	return &StripeWebhookResult{}, nil
 }
 

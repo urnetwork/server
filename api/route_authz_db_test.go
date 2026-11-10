@@ -317,6 +317,7 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		// the team routes (§7.5, §7.6)
 		"POST /network/team-create":   {path: "/network/team-create", body: map[string]any{"network_name": "attacker" + self.networkName}},
 		"GET /network/members":        {path: "/network/members"},
+		"POST /network/team-checkout": {path: "/network/team-checkout", body: map[string]any{}},
 		"POST /network/idp":           {path: "/network/idp", body: map[string]any{"issuer": "https://attacker.example", "client_id": "attacker", "client_auth": "client_secret", "client_secret": "attacker"}},
 		"POST /network/domain-add":    {path: "/network/domain-add", body: map[string]any{"domain": "attacker.example"}},
 		"POST /network/domain-verify": {path: "/network/domain-verify", body: map[string]any{"domain": "attacker.example"}},

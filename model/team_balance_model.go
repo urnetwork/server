@@ -33,12 +33,15 @@ import (
 // an in-window team grant.
 //
 // Who writes a period (plan-QUOTA-team-renewal-window): invoice.paid writes the first period's
-// renewal and balances (QUOTA-M6-02, through AddTeamGrantInTx). Each later period is written at
-// its anchor by RefreshTeamTransferBalances for every Team whose subscription is live with no
-// unresolved payment failure, before that period's invoice is collected, since a cycle invoice
-// finalizes 72 h into its period. The job writes only the period that follows the newest paid
-// renewal, so a Team whose cycle invoice never pays gets one period more and then lapses: the
-// exposure the resolution accepts.
+// renewal and balances (QUOTA-M6-02, through AddTeamGrantInTx). The first period runs from the
+// checkout to the anchor, under a day and an hour, so the first renewal ends on the anchor and the
+// job reads the anchor's day of the month there. Each later period is written at its anchor by
+// RefreshTeamTransferBalances for every Team whose subscription is live with no unresolved payment
+// failure, before that period's invoice is collected, since a cycle invoice finalizes 72 h into
+// its period. The job writes only the period that follows the newest paid renewal, so a Team whose
+// cycle invoice never pays gets one period more and then lapses: the exposure the resolution
+// accepts. A subscription that ended (MarkTeamSubscriptionEndedInTx, team_subscription_model.go)
+// is not live, so the job writes it nothing more.
 
 // Why a period's line was not written.
 const (
@@ -231,11 +234,11 @@ func RefreshTeamTransferBalances(ctx context.Context, now time.Time, runIds ...s
 			return
 		}
 		type teamRenewal struct {
-			networkId   server.Id
-			startTime   time.Time
-			endTime     time.Time
-			revenue     NanoCents
-			anchorStart time.Time
+			networkId  server.Id
+			startTime  time.Time
+			endTime    time.Time
+			revenue    NanoCents
+			anchorTime time.Time
 		}
 		renewals := []*teamRenewal{}
 		result, err := tx.Query(
@@ -246,7 +249,7 @@ func RefreshTeamTransferBalances(ctx context.Context, now time.Time, runIds ...s
 					renewal.start_time,
 					renewal.end_time,
 					renewal.net_revenue_nano_cents,
-					anchor.start_time
+					anchor.end_time
 				FROM network_team
 				CROSS JOIN LATERAL (
 					SELECT start_time, end_time, net_revenue_nano_cents
@@ -258,17 +261,37 @@ func RefreshTeamTransferBalances(ctx context.Context, now time.Time, runIds ...s
 					LIMIT 1
 				) AS renewal
 				CROSS JOIN LATERAL (
-					SELECT start_time
-					FROM subscription_renewal
+					-- the subscription's first renewal, the newest with none ending where it
+					-- starts: it runs from checkout to the anchor, so it ends on the anchor
+					SELECT head.end_time
+					FROM subscription_renewal head
 					WHERE
-						subscription_renewal.network_id = network_team.network_id AND
-						subscription_renewal.subscription_type = $1
-					ORDER BY start_time
+						head.network_id = network_team.network_id AND
+						head.subscription_type = $1 AND
+						NOT EXISTS (
+							SELECT 1
+							FROM subscription_renewal before
+							WHERE
+								before.network_id = head.network_id AND
+								before.subscription_type = $1 AND
+								before.end_time = head.start_time AND
+								before.start_time < before.end_time
+						)
+					ORDER BY head.start_time DESC
 					LIMIT 1
 				) AS anchor
 				WHERE
 					-- the period after the newest renewal has started and not ended
 					renewal.end_time <= $2 AND
+					-- the subscription has not ended since that renewal began
+					NOT EXISTS (
+						SELECT 1
+						FROM subscription_renewal ended
+						WHERE
+							ended.network_id = network_team.network_id AND
+							ended.subscription_type = $4 AND
+							renewal.start_time <= ended.end_time
+					) AND
 					NOT EXISTS (
 						SELECT 1
 						FROM stripe_invoice_payment_failure failure
@@ -282,6 +305,7 @@ func RefreshTeamTransferBalances(ctx context.Context, now time.Time, runIds ...s
 			SubscriptionTypeTeam,
 			now,
 			teamBalanceSettings.MaxTeamsPerRun,
+			SubscriptionTypeTeamEnded,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
@@ -291,14 +315,14 @@ func RefreshTeamTransferBalances(ctx context.Context, now time.Time, runIds ...s
 					&renewal.startTime,
 					&renewal.endTime,
 					&renewal.revenue,
-					&renewal.anchorStart,
+					&renewal.anchorTime,
 				))
 				renewals = append(renewals, renewal)
 			}
 		})
 		for _, renewal := range renewals {
 			periodStart := renewal.endTime.UTC()
-			periodEnd := teamPeriodEnd(renewal.anchorStart.UTC().Day(), periodStart)
+			periodEnd := teamPeriodEnd(renewal.anchorTime.UTC().Day(), periodStart)
 			if !now.Before(periodEnd) {
 				// a whole period passed with no paid renewal: the Team has lapsed
 				continue

@@ -699,7 +699,8 @@ func stripeHandleInvoicePaidWithOnboarding(
 		}
 		return result, err
 	}
-	if sub != nil {
+	// a Team subscription has no onboarding offer, trial or win-back
+	if sub != nil && !stripeTeamMarked(sub.Metadata) {
 		stripeRecordOnboardingForInvoice(clientSession, sub, invoice.Id)
 		stripeRecordTrialOutcomeForInvoice(clientSession.Ctx, sub, invoice)
 		stripeRecordWinbackForInvoice(clientSession.Ctx, sub)
