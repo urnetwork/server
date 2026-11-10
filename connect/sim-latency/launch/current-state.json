@@ -1,6 +1,29 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T22:21:56Z",
+  "observed_at": "2026-11-10T22:38:21Z",
+  "latest_official_epoch2_baseline_activation": {
+    "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+    "executor_amendment_registered_at": "2026-11-10T22:25:33.639976367Z",
+    "executor_amendment_sha256": "898079cc9a5f9517052de713cf6bc4232762529628b0ec0c556a58935f4248c6",
+    "supervisor_source_commit": "fea47509f8f9324dcd913f6e7dbe448dce72fac4",
+    "supervisor_sha256": "48100ddd00865ebd8a19a7510a5f171b3f0395c4e04a25b4b59eaf73dbc279e7",
+    "worker_launcher_sha256": "bda0eb87485f00d2d0d02f09b8e062c008f544412dbabaa7512a43dbfa4ef845",
+    "worker_native_sha256": "da9c4892cfcde59f9e2d9fb8d13f61625f1846a43dd1b4eaadde5e98cea99bb8",
+    "worker_distribution_image": "sha256:ea074cff6b8e63b18b60092f9bd4ad3763744d198766566b185951503b52e513",
+    "coordinator_full_host_profile_sha256": "f4bdf8e668f6c37fbbc75c4069a86c0f9823b7b7cef00e7ffded5fec9f88d87d",
+    "supervisor_unit": "urnetwork-competition-production-r2.service",
+    "supervisor_lease_renewal_verified_at": "2026-11-10T22:38:06.434707Z",
+    "baseline_reservation_owner": "baseline.01a1c79b-7621-6336-951c-8963b1e5616b",
+    "baseline_preparation_process_verified_live": true,
+    "baseline_preparation_replicates": 9,
+    "baseline_ready": false,
+    "r9_host_admission_started": false,
+    "queued_submissions": 8,
+    "customer_evaluation_clocks_started": 0,
+    "initial_startup_failure": "First launcher stopped before measurement or claims. Historical service configuration and missing worker role environment were replaced with explicit trusted main control paths and worker identity; private stderr is retained. The corrected fenced worker reserved and started official baseline preparation.",
+    "future_source_promotion_not_enabled_by_this_launch": "Supervisor uses --once. Historical review/build adapters are not newly qualified; this launch runs only the current epoch, not automatic future source promotion.",
+    "next_action": "Observe this exact baseline reservation without replacing its deadline. On retained baseline completion, coordinator runs concurrent R9 admission on both hosts; only successful baseline and admission permit customer FIFO claims. Earlier entries below are historical."
+  },
   "latest_private_native_qualification": {
     "evidence": "EPOCH2-PRIVATE-HOST-QUALIFICATION-2026-11-10.json",
     "both_operator_r1_probes_succeeded": true,
@@ -21,7 +44,7 @@
     "r9_host_admission_started": false,
     "customer_evaluation_started": false,
     "grading_ready": false,
-    "next_action": "Checkpoint qualified native evidence; prepare and register the single exact executor amendment, update coordinator profile pins, then start official shared R9 baseline and parallel host admission. Earlier entries below are historical."
+    "next_action": "Completed: amendment registered and official shared R9 baseline preparation started; see latest_official_epoch2_baseline_activation. This entry describes the preceding operator R1 qualification only."
   },
   "latest_live_statistics_core_activation": {
     "role": "v23",
