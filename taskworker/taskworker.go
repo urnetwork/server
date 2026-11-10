@@ -209,6 +209,9 @@ func initTaskSchedule(ctx context.Context) {
 		// §20.6's service debits applied to their balances, one chain a
 		// shard; not scheduled without MG2
 		work.ScheduleFlushServiceDebits(clientSession, tx)
+		// §20.9's Team periods written at their 00:00:00 UTC anchors; not
+		// scheduled without MG6
+		controller.ScheduleRefreshTeamTransferBalances(clientSession, tx)
 		work.ScheduleRemoveOldAuditEvents(clientSession, tx)
 		work.ScheduleSweepProviderAuditEvents(clientSession, tx)
 		work.ScheduleRollupTransferAuditEvents(clientSession, tx)
@@ -661,6 +664,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithCommitPost(
 			work.FlushServiceDebits,
 			work.FlushServiceDebitsCommitPost,
+		),
+		// §20.9's Team periods (model.RefreshTeamTransferBalances)
+		task.NewTaskTargetWithPost(
+			controller.RefreshTeamTransferBalances,
+			controller.RefreshTeamTransferBalancesPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.RemoveOldAuditEvents,

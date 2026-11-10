@@ -147,6 +147,45 @@ func TestGateListResolvesWithoutRunning(t *testing.T) {
 	}
 }
 
+// A failing name says what failed it, a declared test a crash cut off fails where one that does not exist is
+// missing, and a declared test its entry's tags leave out of the build says so.
+func TestGateTestTellsACrashFromAMissingTest(t *testing.T) {
+	options := writeGateFixture(t, fixtureGates, fixtureMatrix)
+	widget := filepath.Join(options.root, "fixture", "widget")
+	files := map[string]string{
+		"crash_test.go": "package widget\n\nimport \"testing\"\n\n" +
+			"func TestCrashes(t *testing.T) {\n\tpanic(\"a planted crash\")\n}\n\n" +
+			"func TestAfterTheCrash(t *testing.T) {\n}\n",
+		"tagged_test.go": "//go:build fixture_tagged\n\npackage widget\n\nimport \"testing\"\n\n" +
+			"func TestTagged(t *testing.T) {\n}\n",
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(widget, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, entry := range []struct {
+		names   []string
+		outcome string
+		details []string
+	}{
+		{[]string{"TestFails"}, gateFail, []string{"TestFails: fail: widget_test.go:", "a planted failure"}},
+		{[]string{"TestCrashes", "TestAfterTheCrash"}, gateFail, []string{"TestCrashes: fail: panic: a planted crash", "TestAfterTheCrash: declared, and the run ended before it reported"}},
+		{[]string{"TestPasses", "TestTagged", "TestDoesNotExist"}, gateMissing, []string{"TestPasses: pass", "TestTagged: declared, but not in this build", "TestDoesNotExist: no such test"}},
+	} {
+		outcome, details := runGateTest(context.Background(), options, &gateReport{}, gateTest{Repo: "fixture", Package: "./widget", Names: entry.names})
+		joined := strings.Join(details, "\n")
+		if outcome != entry.outcome {
+			t.Errorf("%v: %s, want %s:\n%s", entry.names, outcome, entry.outcome, joined)
+		}
+		for _, want := range entry.details {
+			if !strings.Contains(joined, want) {
+				t.Errorf("%v: the details lack %q:\n%s", entry.names, want, joined)
+			}
+		}
+	}
+}
+
 // sidecar-gate -list M1 on this tree: the path from catalog.yml through gates.yml to the report runs, every
 // row of M1's sweep names tests that are declared, FS-55 rides along as every Gn-out's, and the report names
 // the commit set it read.

@@ -66,11 +66,14 @@ const gateStoreWrapperVariable = "SIDECAR_GATE_STORE_WRAPPER"
 type gateSettings struct {
 	// The bound on one go test or command.
 	TestTimeout time.Duration
+	// The most of a failing test's message a report carries.
+	MessageLimit int
 }
 
 func defaultGateSettings() *gateSettings {
 	return &gateSettings{
-		TestTimeout: 40 * time.Minute,
+		TestTimeout:  40 * time.Minute,
+		MessageLimit: 400,
 	}
 }
 
@@ -481,8 +484,9 @@ func expandGateArgs(args []string, report *gateReport) []string {
 }
 
 // Runs one test entry and reads each name's verdict from go test -v: PASS
-// passes, FAIL fails, SKIP is open, and a name with no verdict at all does not
-// exist, which is missing.
+// passes, FAIL fails, SKIP is open, and a name with no verdict at all is
+// missing, unless its package declares it and the run ended early, which fails.
+// A failing name's detail carries the last message it logged.
 func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, test gateTest) (string, []string) {
 	where := test.Repo + "/" + filepath.ToSlash(filepath.Join(test.Dir, test.Package))
 	if len(test.Names) == 0 {
@@ -530,6 +534,10 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 	for _, match := range regexp.MustCompile(`(?m)^\s*--- (PASS|FAIL|SKIP): (\S+)`).FindAllStringSubmatch(string(output), -1) {
 		verdicts[match[2]] = match[1]
 	}
+	messages := lastTestMessages(string(output), options.settings.MessageLimit)
+	// parsed only when a name has no verdict, so a declared test a crash cut off
+	// is not read as one that does not exist
+	var declared map[string]bool
 	outcomes := []string{}
 	details := []string{}
 	for _, name := range test.Names {
@@ -539,7 +547,11 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 			details = append(details, fmt.Sprintf("%s %s: pass", where, name))
 		case "FAIL":
 			outcomes = append(outcomes, gateFail)
-			details = append(details, fmt.Sprintf("%s %s: fail", where, name))
+			if message := messages[name]; message != "" {
+				details = append(details, fmt.Sprintf("%s %s: fail: %s", where, name, message))
+			} else {
+				details = append(details, fmt.Sprintf("%s %s: fail", where, name))
+			}
 		case "SKIP":
 			outcomes = append(outcomes, gateOpen)
 			details = append(details, fmt.Sprintf("%s %s: skipped, so not shown", where, name))
@@ -547,13 +559,53 @@ func runGateTest(ctx context.Context, options *gateOptions, report *gateReport, 
 			if runErr != nil && !strings.Contains(string(output), "=== RUN") {
 				outcomes = append(outcomes, gateFail)
 				details = append(details, fmt.Sprintf("%s %s: did not build or run: %s", where, name, lastLines(string(output), 3)))
-			} else {
+				continue
+			}
+			if declared == nil {
+				declared, _ = declaredTestNames(filepath.Join(directory, filepath.FromSlash(test.Package)))
+			}
+			switch {
+			case declared[name] && runErr != nil:
+				outcomes = append(outcomes, gateFail)
+				details = append(details, fmt.Sprintf("%s %s: declared, and the run ended before it reported: %s", where, name, lastLines(string(output), 3)))
+			case declared[name]:
+				outcomes = append(outcomes, gateMissing)
+				details = append(details, fmt.Sprintf("%s %s: declared, but not in this build: its file's build tags are not this entry's", where, name))
+			default:
 				outcomes = append(outcomes, gateMissing)
 				details = append(details, fmt.Sprintf("%s %s: no such test", where, name))
 			}
 		}
 	}
 	return combineOutcomes(outcomes), details
+}
+
+var (
+	// go test -v's line for the test whose output follows
+	gateTestSwitchPattern = regexp.MustCompile(`^=== (?:RUN|CONT|NAME)\s+(\S+)`)
+	// a test's own message, file:line first, or the panic that ended the binary
+	gateTestMessagePattern = regexp.MustCompile(`^\s+\S+\.go:[0-9]+: |^panic: `)
+)
+
+// The last message each top-level test wrote in go test -v's output, which for
+// a failing test is most often what failed it.
+func lastTestMessages(output string, limit int) map[string]string {
+	messages := map[string]string{}
+	current := ""
+	for _, line := range strings.Split(output, "\n") {
+		if match := gateTestSwitchPattern.FindStringSubmatch(line); match != nil {
+			current, _, _ = strings.Cut(match[1], "/")
+			continue
+		}
+		if current != "" && gateTestMessagePattern.MatchString(line) {
+			message := strings.TrimSpace(line)
+			if limit < len(message) {
+				message = strings.ToValidUTF8(message[:limit], "") + "..."
+			}
+			messages[current] = message
+		}
+	}
+	return messages
 }
 
 // The last lines of a command's output, for a finding.

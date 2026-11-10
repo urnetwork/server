@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
@@ -209,6 +210,28 @@ func recoverRedisReservationWithFenceInTx(ctx context.Context, tx server.PgTx, b
 		EXISTS(SELECT 1 FROM transfer_contract WHERE contract_id=$1 AND outcome IS NOT NULL),
 		EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1 AND balance_id=$2 AND NOT applied)`,
 		candidate.contractId, balanceId, candidate.amount).Scan(&contract, &escrow, &matching, &terminal, &debitPending))
+	// A relayed sidecar contract holds its reservation under its own id with
+	// no escrow row (DESIGN.md 20.6, relayed_contract_model.go): its token
+	// matches when the balance is its payer's, and its debit is pending while
+	// its service journal row is unapplied. Without this, recovery called the
+	// token an identity error and left it to its 24 h lease, 20.15's
+	// "reservations confuse the contract reconciler".
+	relayed := false
+	if contract && !escrow {
+		if isRelayed, payerNetworkId, _ := isRelayedContractInTx(ctx, tx, candidate.contractId); isRelayed {
+			var balanceNetworkId server.Id
+			err := tx.QueryRow(ctx, `SELECT network_id FROM transfer_balance WHERE balance_id=$1`, balanceId).Scan(&balanceNetworkId)
+			if err == nil && balanceNetworkId == payerNetworkId {
+				relayed = true
+				var serviceDebitPending bool
+				server.Raise(tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM service_debit_journal WHERE usage_id=$1 AND balance_id=$2 AND NOT applied)`,
+					candidate.contractId, balanceId).Scan(&serviceDebitPending))
+				debitPending = debitPending || serviceDebitPending
+			} else if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+				server.Raise(err)
+			}
+		}
+	}
 	if debitPending {
 		// The same SQL snapshot must cover outcome and consumption. Terminal
 		// history may be reaped while its durable debit still awaits writeback.
@@ -218,10 +241,14 @@ func recoverRedisReservationWithFenceInTx(ctx context.Context, tx server.PgTx, b
 	}
 	operation := "release-owned"
 	if contract || escrow {
-		if !contract || !matching {
+		if relayed {
+			if !terminal {
+				// a live relayed contract's reservation: forget only its marker
+				operation = "published"
+			}
+		} else if !contract || !matching {
 			return false, errRedisReservationRecoveryIdentity
-		}
-		if !terminal {
+		} else if !terminal {
 			// A lost commit acknowledgement is an existing live reservation,
 			// not abandoned debt. Forget only its recovery marker.
 			operation = "published"

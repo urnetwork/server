@@ -26,8 +26,8 @@ stages:
             - {repo: sidecar, package: ., names: [TestPreviewRefusalSurfaces, TestCoreM1GateEnrollsAndRefreshesEndToEnd]}
         server:
           tests:
-            - {repo: server, package: ./api, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute]}
-            - {repo: server, package: ./api, stores: true, names: [TestSidecarTokenRoutes, TestNonPreviewNetworkRefusesStrictExpThroughTheRoute]}
+            - {repo: server, package: ./api, stores: true, names: [TestClientAdminRefusalIsEnforcedWhateverTheConfigSays, TestStrictExpTokenIsRefusedOnEveryPaymentRoute, TestSidecarTokenRoutes]}
+            - {repo: server, package: ./api, tags: sidecar_pending, stores: true, names: [TestNonPreviewNetworkRefusesStrictExpThroughTheRoute]}
         open: "production: stage 1 enforced and stage 2 live before the desktop sidecar ships (D-PHASE-3)"
       - item: "RS1's copy discloses I-10's no-policy allow-all (owner decision 120), in ABUSE-M4-01's trust documents"
         task: ABUSE-M4-01

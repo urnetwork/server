@@ -33,6 +33,11 @@ var errContractDestinationInactiveAtWrite = fmt.Errorf("%w: %v", errContractDest
 
 type contractOriginFenceKey struct{}
 
+// Set on the request's context when both ends carry the sidecar mark
+// (network_client_owner.strict_exp), for newContract's relayed reservation
+// (DESIGN.md 20.6). Written and read by the one synchronous request.
+type contractRelayedPairKey struct{}
+
 // Carries the update channel that the companion origin wait armed immediately
 // before its final authoritative read, from newContract back to
 // CreateContract. Written and read by the one synchronous request.
@@ -1073,7 +1078,13 @@ func CreateContract(
 	}
 
 	originFence := &contractOriginFence{}
-	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(context.WithValue(ctx, contractOriginFenceKey{}, originFence), clientId, createContract, companion, provideMode, contractManagerSettings)
+	nextCtx := context.WithValue(ctx, contractOriginFenceKey{}, originFence)
+	// DESIGN.md 20.6: a Network contract between two marked sidecar clients of
+	// one network is relayed bytes, reserved from that network's balances
+	if relationshipDetails.SourceStrictExp && relationshipDetails.DestinationStrictExp {
+		nextCtx = context.WithValue(nextCtx, contractRelayedPairKey{}, true)
+	}
+	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(nextCtx, clientId, createContract, companion, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
 
 	if err != nil {
@@ -1255,6 +1266,8 @@ var createTransferEscrow = model.CreateTransferEscrow
 var createCompanionTransferEscrow = model.CreateCompanionTransferEscrow
 var createZeroEscrowContract = model.CreateZeroEscrowContract
 var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
+var reserveRelayedContract = model.ReserveRelayedContract
+var relayedReservationEnabled = model.RelayedReservationEnabled
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
@@ -1321,15 +1334,35 @@ func newContract(
 				ctx = model.WithPairStreamBinding(ctx, sourceId, destinationId, forceStream)
 			}
 		}
-		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
-			ctx,
-			sourceNetworkId,
-			sourceId,
-			destinationNetworkId,
-			destinationId,
-			contractTransferByteCount,
-			usageOriginIsSource,
-		)
+		// DESIGN.md 20.6's relayed bytes: two marked sidecar clients of one
+		// network, a companion normalized to Network included, reserve from
+		// that network's balances and sign the grant; a pair that rides a
+		// stream reserves nothing (model.ReserveRelayedContract). A refusal is
+		// InsufficientBalance, never a route rejection, and the degradation
+		// valve never opens here.
+		relayedPair, _ := ctx.Value(contractRelayedPairKey{}).(bool)
+		if provideMode == model.ProvideModeNetwork && relayedPair && sourceNetworkId == destinationNetworkId &&
+			len(intermediaryIds) == 0 && relayedReservationEnabled() {
+			contractId, contractTransferByteCount, expirationTime, err = reserveRelayedContract(
+				ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationId,
+				contractTransferByteCount,
+				MinContractTransferByteCount,
+				usageOriginIsSource,
+			)
+		} else {
+			contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
+				ctx,
+				sourceNetworkId,
+				sourceId,
+				destinationNetworkId,
+				destinationId,
+				contractTransferByteCount,
+				usageOriginIsSource,
+			)
+		}
 		if err != nil {
 			returnErr = err
 			return

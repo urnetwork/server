@@ -60,6 +60,9 @@ const (
 	GrantKindFree     GrantKind = "free"
 	GrantKindPro      GrantKind = "pro"
 	GrantKindReferral GrantKind = "referral"
+	// a Team period's grant, pro = true and tier 'team' (team_balance_model.go); its credit line
+	// is GrantKindTeamCredit (escrow_draw_order.go)
+	GrantKindTeam GrantKind = "team"
 )
 
 // An optional durable execution identity makes all grants in the caller's
@@ -86,6 +89,9 @@ func grantGrace(grantKind GrantKind) (time.Duration, bool) {
 	case GrantKindFree, GrantKindReferral:
 		return FreeGrantGrace, true
 	case GrantKindPro:
+		return ProGrantGrace, true
+	case GrantKindTeam, GrantKindTeamCredit:
+		// lapse follows Pro (DESIGN.md 20.5): a Team's period windows overlap as Pro's do
 		return ProGrantGrace, true
 	default:
 		return 0, false

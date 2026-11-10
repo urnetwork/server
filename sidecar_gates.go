@@ -232,6 +232,14 @@ func (self *SidecarConfig) EscrowDrawOrder() bool {
 	return self.Switch(SidecarSwitchEscrowDrawOrder)
 }
 
+// Whether the file names escrow_draw_order at all, on or off. A file that names it
+// off is an explicit off, which §20.9's gate refuses while a team_credit balance is
+// in window (model.EscrowDrawOrderEnabled); a file that never named it leaves a
+// process that never read it on in today's order.
+func (self *SidecarConfig) EscrowDrawOrderNamed() bool {
+	return self.escrowDrawOrderNamed
+}
+
 // §19.10: re-seed mode, after site loss only. Absent is false.
 func (self *SidecarConfig) Reseed() bool {
 	return self.reseed

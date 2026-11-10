@@ -27,7 +27,10 @@ type escrowTransferBalance struct {
 	balanceByteCount ByteCount
 	startTime        time.Time
 	endTime          time.Time
-	reservation      netEscrowSnapshot
+	// a team_credit line, drawn after every other balance (escrow_draw_order.go). Read only
+	// while the escrow_draw_order gate is on; false on every balance while it is off.
+	isCredit    bool
+	reservation netEscrowSnapshot
 }
 
 var proberGrantSelectionResults = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -110,7 +113,8 @@ func lockTransferEscrowBalanceRows(
 	if candidateIds != nil && len(candidateIds) == 0 {
 		return nil
 	}
-	sql := escrowTransferBalanceSql
+	read := newEscrowBalanceRead()
+	sql := read.sql()
 	args := []any{payerNetworkId, now}
 	if candidateIds != nil {
 		sql += ` AND balance_id = ANY($3) AND NOT paid AND NOT pro
@@ -160,8 +164,7 @@ func lockTransferEscrowBalanceRows(
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			balance := &escrowTransferBalance{}
-			server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
-				&balance.startTime, &balance.endTime))
+			server.Raise(read.scan(rows, balance))
 			balances = append(balances, balance)
 			lockedBalanceIds = append(lockedBalanceIds, balance.balanceId)
 		}
@@ -196,13 +199,19 @@ func loadTransferEscrowBalances(
 		// without queuing behind a financial allocation or scanning escrow
 		// history for amounts that cannot affect this zero-byte reservation.
 		balances := []*escrowTransferBalance{}
-		rows, err := tx.Query(ctx, escrowTransferBalanceSql+`
-			ORDER BY end_time, start_time, balance_id LIMIT 1`, payerNetworkId, now)
+		// behind the escrow_draw_order gate the anchor is the first balance in DESIGN.md
+		// 20.9's draw order, keyed by the flag first on MG6's index
+		read := newEscrowBalanceRead()
+		sql := escrowTransferBalanceSql + `
+			ORDER BY end_time, start_time, balance_id LIMIT 1`
+		if read.drawOrder {
+			sql = read.sql() + escrowDrawOrderBySql + ` LIMIT 1`
+		}
+		rows, err := tx.Query(ctx, sql, payerNetworkId, now)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				balance := &escrowTransferBalance{}
-				server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
-					&balance.startTime, &balance.endTime))
+				server.Raise(read.scan(rows, balance))
 				balances = append(balances, balance)
 			}
 		})
