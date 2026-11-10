@@ -29,9 +29,14 @@ func firstEvsEvacuate(host *sidecar.ServiceHost) *sidecar.TaskRequest {
 	return evsservice.EvsEvacuateStartTaskRequest(host.ClockOrReal().Now())
 }
 
-// One run: the hourly start, or one cluster's evacuation.
+// One run: the hourly start, or one cluster's evacuation. Format 2's sweep reads §19.11's purge mode from the host's
+// gates (EVSB-M10-02), observe while sidecar.yml sets none. The staged content a run drops reaches no usage batch
+// yet: taskworker hosts no producer of its own, so those deltas alarm and the nightly count corrects them.
 func runEvsEvacuate(ctx context.Context, host *sidecar.ServiceHost, args []byte) error {
-	result, err := evsservice.RunEvacuation(ctx, host, &evsservice.EvacuatorDeps{Log: evsBudgetLogger{}}, args)
+	result, err := evsservice.RunEvacuation(ctx, host, &evsservice.EvacuatorDeps{
+		Log:     evsBudgetLogger{},
+		Format2: evsservice.NewFormat2Gate(host),
+	}, args)
 	if result != nil && glog.V(1) {
 		glog.Infof("[evsjobs]evacuation of %s: %d minutes read, %d deleted, %d waiting; %d kept, %d dead, %d fences; oldest batch %s\n",
 			result.ClusterId, result.MinuteCount, result.MinuteDeletedCount, result.MinuteWaitingCount,
