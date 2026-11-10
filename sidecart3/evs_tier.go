@@ -68,6 +68,7 @@ func newEvsTier() (*fault.EvsTier, func()) {
 		NewHost: func(ctx context.Context, host *sidecar.ServiceHost, settings *evsservice.EvsSettings, deps *fault.EvsTierDeps) (fault.EvsTierHost, error) {
 			hostSettings := evshost.DefaultHostSettings()
 			hostSettings.Evs = settings
+			hostSettings.Hdd = deps.Hdd
 			return evshost.NewHost(ctx, host, hostSettings, &evshost.HostDeps{
 				AuthState:   deps.AuthState,
 				GateViews:   deps.GateViews,

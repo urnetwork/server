@@ -44,3 +44,37 @@ func TestFs1ConcurrentRetriesCommitOnceOnT3(t *testing.T) {
 func TestFs1UnknownDeletesNothingOnT3(t *testing.T) {
 	runClauseOnT3(t, "FS-1", "unknown deletes nothing", fault.Fs1UnknownDeletesNothing)
 }
+
+func TestFs2OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-2", "", nil)
+	})
+}
+
+func TestFs3OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-3", "", nil)
+	})
+}
+
+func TestFs7OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-7", "", nil)
+	})
+}
+
+func TestFs57OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-57", "", nil)
+	})
+}
+
+func TestFs57StoreUnreachableCommitsNothingOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-57", "store unreachable", fault.Fs57StoreUnreachable)
+}
+
+func TestFs113OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-113", "", nil)
+	})
+}
