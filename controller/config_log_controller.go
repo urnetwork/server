@@ -116,6 +116,22 @@ func configClientAdmitted(sequencer *model.ConfigLogSequencer, clientSession *se
 	return sequencer.Admitted(clientSession.Ctx, clientSession.ByJwt.NetworkId, sidecar.Id(sidecarId))
 }
 
+// Whether the bearer is the network's owner as base 1's genesis names it
+// (§7.9's who): a personal network's admin_user_id, whose member_id is its user
+// id, or in a team a live Owner membership, the genesis's member its member_id.
+func configGenesisOwner(clientSession *session.ClientSession, genesis *bridge.Genesis) bool {
+	byJwt := clientSession.ByJwt
+	if byJwt.MemberId != nil {
+		signIn := model.ResolveNetworkSignIn(clientSession.Ctx, byJwt.UserId, byJwt.NetworkId, server.NowUtc())
+		return signIn != nil && signIn.MemberId != nil && *signIn.MemberId == *byJwt.MemberId &&
+			signIn.Role == model.NetworkMemberRoleOwner &&
+			bytes.Equal(genesis.GetOwnerMemberId(), sidecar.Id(*byJwt.MemberId).Bytes())
+	}
+	network := model.GetNetwork(clientSession)
+	return network != nil && network.AdminUserId != nil && *network.AdminUserId == byJwt.UserId &&
+		bytes.Equal(genesis.GetOwnerMemberId(), sidecar.Id(*network.AdminUserId).Bytes())
+}
+
 // POST /network/config/delta: verifies the statement at the tip and appends
 // it, answering {n, A_n}; a retry of the same bytes answers its entry.
 func NetworkConfigDelta(args *NetworkConfigDeltaArgs, clientSession *session.ClientSession) (*NetworkConfigPinResult, error) {
@@ -172,11 +188,10 @@ func NetworkConfigProjectionPublish(args *NetworkConfigProjectionPublishArgs, cl
 			sidecarId == (server.Id{}) || !bytes.Equal(genesis.GetOwnerSidecarId(), sidecar.Id(sidecarId).Bytes()) {
 			return nil, configUnadmitted("base 1 comes from the device its genesis names, in its own network")
 		}
-		// §7.9's who: the network owner's own top-level client, the genesis naming that owner as its member (its
-		// user in a personal network; a team's first Owner waits on TEAM-M6's members)
-		network := model.GetNetwork(clientSession)
-		if network == nil || network.AdminUserId == nil || *network.AdminUserId != clientSession.ByJwt.UserId ||
-			!bytes.Equal(genesis.GetOwnerMemberId(), sidecar.Id(*network.AdminUserId).Bytes()) {
+		// §7.9's who: the network owner's own top-level client, the genesis naming that owner as its member: in
+		// a personal network the owner's user, admin_user_id; in a team an Owner's membership, which the
+		// client's credential names, never the team's synthetic owner of record (TEAM-M6-02)
+		if !configGenesisOwner(clientSession, genesis) {
 			return nil, configUnadmitted("base 1 comes from the network owner's device")
 		}
 		networkClient := model.GetNetworkClient(clientSession.Ctx, *clientSession.ByJwt.ClientId)

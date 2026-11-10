@@ -136,9 +136,12 @@ func revocationRecordLineage(byJwt *ByJwt) (server.Id, bool) {
 
 // A credential that descends from an API key ends with the key, which only the
 // SQL state query reads. The record keeps no key state, so such a credential,
-// one logged in with a key's auth code, stays on the query.
+// one logged in with a key's auth code, stays on the query. A team member's
+// credential stays there too.
 func usesRevocationRecord(byJwt *ByJwt) bool {
-	if !RevocationRecordEnabled() || byJwt.ApiKeyId != nil {
+	// nor does it keep membership: a team member's credential (TEAM-M6-02)
+	// stays on the query, which reads network_member
+	if !RevocationRecordEnabled() || byJwt.ApiKeyId != nil || byJwt.MemberId != nil {
 		return false
 	}
 	_, ok := revocationRecordLineage(byJwt)

@@ -308,6 +308,34 @@ func NewLocalClientSessionWithAddressHash(ctx context.Context, clientAddressHash
 // is over its rate limit. No result of the state query is assumed.
 type BeforeStateAnswer func(ctx context.Context, clientId server.Id) bool
 
+// The user of a live team membership, false when memberId names none in
+// networkId, as in a personal network, whose member_id is its owner's user id,
+// or in a binary that does not link MG6.
+func teamMemberUser(ctx context.Context, networkId server.Id, memberId server.Id) (userId server.Id, ok bool) {
+	if !server.SidecarMg6Linked() {
+		return server.Id{}, false
+	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT user_id
+				FROM network_member
+				WHERE member_id = $1 AND network_id = $2 AND NOT pending
+			`,
+			memberId,
+			networkId,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&userId))
+				ok = true
+			}
+		})
+	})
+	return
+}
+
 // Sets authentication claims or returns an authentication error. A non-nil
 // answer may reply to a client credential instead (see BeforeStateAnswer);
 // the request is then not authenticated and ByJwt stays nil.
@@ -332,6 +360,13 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 				return false, err
 			}
 			self.ByJwt = NewByJwt(use.NetworkId, use.MemberId, "", false, false)
+			// a team's member_id is no user id: the token acts as the
+			// member's user, as that membership (TEAM-M6-02)
+			if memberUserId, ok := teamMemberUser(ctx, use.NetworkId, use.MemberId); ok {
+				memberId := use.MemberId
+				self.ByJwt = NewByJwt(use.NetworkId, memberUserId, "", false, false)
+				self.ByJwt.MemberId = &memberId
+			}
 			self.UnsignedIdentity = true
 			self.AdminCommand = use
 			if glog.V(2) {
@@ -363,6 +398,8 @@ func (self *ClientSession) authenticate(ctx context.Context, req *http.Request, 
 					false,
 					false, // pro mode - for api keys we don't need to thread this for now
 				)
+				// a team key acts as its creator's membership (TEAM-M6-02)
+				self.ByJwt.MemberId = network.MemberId
 				self.ApiKeyAuthenticated = true
 				self.ApiKeyId = &network.ApiKeyId
 				if glog.V(2) {
