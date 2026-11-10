@@ -44,6 +44,38 @@ func dockerPolicyTestDaemon(t *testing.T, fixture *dockerProxyTest) *atomic.Int6
 	return calls
 }
 
+// The actual namespace helper's small memory ceiling must include Docker's
+// implicit shared-memory default; otherwise the closed policy must refuse it.
+func TestDockerPolicyRefusesNamespaceProbeWithOversizedDefaultSharedMemory(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	calls := dockerPolicyTestDaemon(t, fixture)
+	response := dockerPolicyTestCreate(t, fixture, func(object map[string]any) {
+		object["User"] = "65532:65532"
+		host := object["HostConfig"].(map[string]any)
+		host["Memory"], host["MemorySwap"] = 32*1024*1024, 32*1024*1024
+		host["PidsLimit"], host["ShmSize"] = 16, 0
+	})
+	if response.Code != http.StatusForbidden || calls.Load() != 0 {
+		t.Fatal("oversized implicit shared memory reached daemon", response.Code, calls.Load())
+	}
+}
+
+// Explicitly smaller shared memory makes the same non-root helper admissible,
+// preserving all namespace, resource, source and ownership guards.
+func TestDockerPolicyAcceptsNamespaceProbeWithBoundedSharedMemory(t *testing.T) {
+	fixture := newDockerProxyTest(t)
+	calls := dockerPolicyTestDaemon(t, fixture)
+	response := dockerPolicyTestCreate(t, fixture, func(object map[string]any) {
+		object["User"] = "65532:65532"
+		host := object["HostConfig"].(map[string]any)
+		host["Memory"], host["MemorySwap"] = 32*1024*1024, 32*1024*1024
+		host["PidsLimit"], host["ShmSize"] = 16, 8*1024*1024
+	})
+	if response.Code != http.StatusCreated || calls.Load() != 1 {
+		t.Fatal("bounded namespace helper was refused", response.Code, calls.Load())
+	}
+}
+
 // Directory creation is confined to the synthetic run or explicitly pinned
 // local-fixture tree; the production policy never creates a mount source.
 func dockerPolicyTestDirectory(t *testing.T, path string) string {

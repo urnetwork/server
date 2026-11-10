@@ -73,12 +73,16 @@ done
 [[ "$container_gid" =~ ^[0-9]+$ ]] && [ "$container_gid" -le 4294967294 ] ||
     die 'container GID is invalid'
 probe_user=0:0
+probe_shm_args=()
 if [[ "$subevaluation_scoped" = true ]]; then
     [[ "$container_uid" = 65532 && "$container_gid" = 65532 ]] ||
         die 'private role only translates its frozen container identity'
     # Namespace maps describe the namespace, not the probe process's UID.
     # Keep the private probe inside the same non-root role the proxy permits.
     probe_user="$container_uid:$container_gid"
+    # Docker's default 64 MiB shared memory exceeds this 32 MiB helper's
+    # entire memory ceiling; keep it finite without relaxing proxy admission.
+    probe_shm_args=(--shm-size 8m)
 fi
 for command in awk docker jq seq sha256sum sleep sudo; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
@@ -108,6 +112,7 @@ probe_id="$(evaluation_docker run --detach \
     --pids-limit 16 \
     --memory 32m \
     --memory-swap 32m \
+    "${probe_shm_args[@]}" \
     --user "$probe_user" \
     --entrypoint /usr/bin/sleep \
     "${subevaluation_docker_args[@]}" \

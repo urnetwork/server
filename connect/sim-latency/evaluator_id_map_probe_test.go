@@ -73,11 +73,37 @@ func TestPrivateIdMapProbeUsesPermittedNonRootIdentity(t *testing.T) {
 	t.Fatal("private namespace probe omitted its explicit user", arguments)
 }
 
+// The private proxy accounts for shared memory against the helper's entire
+// memory budget. Docker's implicit 64 MiB default cannot fit a 32 MiB probe.
+func TestPrivateIdMapProbeBoundsSharedMemoryWithinMemoryCeiling(t *testing.T) {
+	arguments, _, err := idMapProbeFixture(t, true, "65532", "65532")
+	if err == nil {
+		t.Fatal("inert create unexpectedly succeeded")
+	}
+	values := map[string]string{}
+	for index, argument := range arguments {
+		if argument == "--memory" || argument == "--memory-swap" || argument == "--shm-size" {
+			if index+1 >= len(arguments) {
+				t.Fatal("resource argument omitted its value", arguments)
+			}
+			values[argument] = arguments[index+1]
+		}
+	}
+	if values["--memory"] != "32m" || values["--memory-swap"] != "32m" || values["--shm-size"] != "8m" {
+		t.Fatal("namespace probe exceeds its frozen memory accounting", values)
+	}
+}
+
 // Legacy baseline-producer metadata retains its previous argument bytes.
 func TestLegacyIdMapProbeRetainsRootIdentity(t *testing.T) {
 	arguments, _, err := idMapProbeFixture(t, false, "65532", "65532")
 	if err == nil {
 		t.Fatal("inert create unexpectedly succeeded")
+	}
+	for _, argument := range arguments {
+		if argument == "--shm-size" {
+			t.Fatal("private memory correction changed legacy helper arguments", arguments)
+		}
 	}
 	for index, argument := range arguments {
 		if argument == "--user" {

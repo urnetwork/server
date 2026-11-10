@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T10:15:32Z",
+  "observed_at": "2026-11-10T10:27:00Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -85,6 +85,7 @@
     "retained_response_minio_version": "126df67b-facf-4e4f-9f88-2dc721f6f827"
   },
   "goofe": {
+    "latest_private_probe": "Corrected role-v4 operator-only R1 run5dad6382 failed before simulation because32 MiB helper memory cannot contain Docker's implicit64 MiB shared memory. Actual cleanup and stop cleanup both verified; recovery inactive, owner/evaluator inactive. Bounded8 MiB helper fix passes deterministic counterfactual, full agent and repeated race checks. Immutable v5 assets staged on both hosts but not activated; additional operational approval requested. EPOCH2-NAMESPACE-PROBE-MEMORY-2026-11-10.json. Official R9 clocks remain unstarted.",
     "operational_amendment_approved": true,
     "operational_amendment_scope": "Approved: preserve round, source, scoring rules, submissions and clocks. Corrected protected role-v4 agents are active on both hosts; actual new fingerprints independently repeated and signed non-job availability verified on both at10:10Z. Native boundary and namespace checks pass. Main migration950/API deployment and append-only amendment registration remain pending; full containment and R9 admission still required. See EPOCH2-CORRECTED-EXECUTOR-IDENTITIES-2026-11-10.json. Frozen identities are not relabeled.",
     "post_cleanup_availability": "A fresh coordinator-signed availability request returned independently signature-verified available after original recovery completed. No manifest, patch, seed, attempt or evaluation clock created. Receipt: /var/lib/urnetwork/competition-goofe-idle-after-cleanup-20261110.json.",
