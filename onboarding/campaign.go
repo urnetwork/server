@@ -334,8 +334,10 @@ func Decide(step string, f Facts) Decision {
 		return skip
 	case StepE5:
 		if path == PathB {
-			// E5b day 11: the emailed offer's last day, no complaint on E4b
-			if f.OfferState == OfferStateActive && !f.NoOfferEmail && !(f.Complained && f.ComplainedStep == StepE4) {
+			// E5b day 11: the emailed offer's last day, no complaint on E4b. As
+			// E3a (the same "end tomorrow" subject), only when the offer ends
+			// within LastChanceWindow: a late E4b issued it later
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail && f.OfferEndsSoon && !(f.Complained && f.ComplainedStep == StepE4) {
 				d := send(TemplateE3LastChance, VariantDefault)
 				d.Opening = OpeningLastNote
 				return d

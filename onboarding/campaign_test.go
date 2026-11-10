@@ -145,9 +145,11 @@ func TestPathB(t *testing.T) {
 			t.Errorf("e4b with offer %q: %+v", state, d)
 		}
 	}
-	// E5b: the emailed offer's last day
+	// E5b: the emailed offer's last day (it ends within LastChanceWindow;
+	// TestE5bOnlyWhenTheOfferEndsWithin36Hours has the offer with days left)
 	f = healthy(PathB)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	d = Decide(StepE5, f)
 	if d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningLastNote || d.NextStep != "" {
 		t.Errorf("e5b: %+v", d)
@@ -188,6 +190,7 @@ func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
 		t.Errorf("e4b without an email offer: %+v", d)
 	}
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	if d := Decide(StepE5, f); d.Action != ActionSkip {
 		t.Errorf("e5b without an email offer: %+v", d)
 	}

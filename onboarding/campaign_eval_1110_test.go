@@ -276,3 +276,21 @@ func TestE3aOnlyWhenTheOfferEndsWithin36Hours(t *testing.T) {
 		t.Errorf("e3a where the offer may not be emailed: %+v", d)
 	}
 }
+
+// T2, E5b: the last note on path B is the same template with the same
+// subject ("3 free months of Pro end tomorrow"). The emailed offer is issued
+// at E4b (day 7) and E5b runs on day 11, so a late E4b (retries, a paused
+// engine) leaves the offer more than a day past "tomorrow" at E5b. The same
+// rule applies.
+func TestE5bOnlyWhenTheOfferEndsWithin36Hours(t *testing.T) {
+	f := healthy(PathB)
+	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = false
+	if d := Decide(StepE5, f); d.Action != ActionSkip || d.NextStep != "" {
+		t.Errorf("e5b with the offer ending in days: %+v", d)
+	}
+	f.OfferEndsSoon = true
+	if d := Decide(StepE5, f); d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningLastNote || d.NextStep != "" {
+		t.Errorf("e5b with the offer ending tomorrow: %+v", d)
+	}
+}
