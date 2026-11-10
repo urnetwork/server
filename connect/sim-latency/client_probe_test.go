@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,7 +17,53 @@ import (
 
 	"github.com/urnetwork/sdk"
 	"github.com/urnetwork/server"
+	statspkg "github.com/urnetwork/server/stats"
+	"github.com/urnetwork/server/stats/sample"
+	"google.golang.org/protobuf/proto"
 )
+
+// The real scheduler and sample reducer expose the short readiness fixture's
+// boundary without sleeping: a one-ms first observation loses its exact90%
+// span. The longer readiness fixture clears the unchanged scorer threshold.
+func TestMatchmakingReadinessWindowToleratesFirstObservationLatency(t *testing.T) {
+	for _, test := range []struct {
+		duration time.Duration
+		passed   bool
+	}{
+		{duration: 30 * time.Second, passed: false},
+		{duration: 120 * time.Second, passed: true},
+	} {
+		offsets := matchmakingProbeOffsets(test.duration)
+		path := filepath.Join(t.TempDir(), "synthetic-samples.xz")
+		writer, err := statspkg.NewFlatWriter(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		startMs := int64(1000)
+		for index, offset := range offsets {
+			if index == 0 {
+				offset += time.Millisecond
+			}
+			content, err := proto.Marshal(&sample.FindProviders2Sample{TimeUnixMilli: uint64(startMs + offset.Milliseconds()), LoadMillis: 1, PoolCount: 1, Candidates: []*sample.Candidate{{ClientId: []byte("synthetic-candidate")}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writer.WriteFrame(content); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		metrics, err := readScoreSamples(path, startMs, startMs+test.duration.Milliseconds())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if (metrics.SpanFraction >= minimumFindProvidersSampleSpanFraction) != test.passed {
+			t.Fatal("readiness boundary disagrees with actual scheduling and scoring", test.duration, metrics.SpanFraction)
+		}
+	}
+}
 
 // Captures the exact wire request without relying on scheduler timing.
 type observedMatchmakingProbe struct {

@@ -14,9 +14,9 @@ import (
 
 // The actual tracked fixture-corrected producer differs from the historical
 // release. Selection must authenticate those bytes without changing defaults.
-func TestRoundBaselineExplicitFixtureReleaseMatchesTrackedProducer(t *testing.T) {
+func TestRoundBaselineExplicitImageBranchReleaseMatchesTrackedProducer(t *testing.T) {
 	coverage := model.DefaultCompetitionWorkCoveragePolicy()
-	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
+	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
 	dependencies, program, err := roundBaselinePreparationConfiguredDependencies(config)
 	if err != nil || program != "prepare-round-baseline-work-coverage.sh" {
 		t.Fatal("explicit producer refused", err)
@@ -51,10 +51,31 @@ func TestRoundBaselineExplicitFixtureReleaseMatchesTrackedProducer(t *testing.T)
 		t.Fatal("historical release authority changed", err)
 	}
 	dependencies["evaluator-work-coverage.sh"] = "changed"
-	config.ReleaseKind = roundBaselineLocalFixturesRelease
+	config.ReleaseKind = roundBaselineImageBranchesRelease
 	fresh, _, err := roundBaselinePreparationConfiguredDependencies(config)
 	if err != nil || fresh["evaluator-work-coverage.sh"] != actual {
 		t.Fatal("one caller mutated another release inventory", err)
+	}
+}
+
+// The previous explicit release retains its original Dockerfile pin. A new
+// metadata preparation step cannot silently change a sealed old inventory.
+func TestRoundBaselineImageBranchReleasePreservesFixtureInventory(t *testing.T) {
+	coverage := model.DefaultCompetitionWorkCoveragePolicy()
+	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
+	previous, _, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || previous["Dockerfile.submission"] != "255d1827494c22482bb851323ee13d8ee03fb407fbf40348531b7d2ec32fc034" {
+		t.Fatal("previous explicit producer was reinterpreted", err)
+	}
+	config.ReleaseKind = roundBaselineImageBranchesRelease
+	current, _, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || current["Dockerfile.submission"] == previous["Dockerfile.submission"] {
+		t.Fatal("new release lost its explicit changed asset", err)
+	}
+	delete(current, "Dockerfile.submission")
+	delete(previous, "Dockerfile.submission")
+	if !reflect.DeepEqual(previous, current) {
+		t.Fatal("image branch preparation changed another sealed dependency")
 	}
 }
 
@@ -65,6 +86,8 @@ func TestRoundBaselineExplicitReleaseRejectsUnknownOrLegacyPolicy(t *testing.T) 
 		{ReleaseKind: "synthetic-unknown/v1", G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage},
 		{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork},
 		{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy},
+		{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork},
+		{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy},
 	} {
 		if _, _, err := roundBaselinePreparationConfiguredDependencies(config); err == nil {
 			t.Fatal("unsupported producer/policy combination accepted")

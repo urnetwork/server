@@ -31,7 +31,7 @@ func TestCompetitionHostQualificationProfileIsSeparateFromOfficialPolicy(t *test
 	if !reflect.DeepEqual(settings.EvaluationPolicy, before) || probe == settings {
 		t.Fatal("host-readiness profile mutated its official owner")
 	}
-	if probe.EvaluationPolicy.Replicates != 1 || probe.EvaluationPolicy.ProviderCount != 32 || probe.EvaluationPolicy.DurationMs != 30000 || probe.EvaluationPolicy.PrewarmMs != 5000 || probe.EvaluationPolicy.ImpairmentEnabled {
+	if probe.EvaluationPolicy.Replicates != 1 || probe.EvaluationPolicy.ProviderCount != 32 || probe.EvaluationPolicy.DurationMs != 120000 || probe.EvaluationPolicy.PrewarmMs != 5000 || probe.EvaluationPolicy.ImpairmentEnabled {
 		t.Fatalf("unexpected bounded probe profile: %#v", probe.EvaluationPolicy)
 	}
 	if probe.EvaluationPolicy.TakeoverMargin != before.TakeoverMargin || probe.EvaluationPolicy.ScoreTimeoutSeconds != before.ScoreTimeoutSeconds ||
@@ -43,6 +43,26 @@ func TestCompetitionHostQualificationProfileIsSeparateFromOfficialPolicy(t *test
 	settings.EvaluationPolicy.TakeoverMargin = .12
 	if competitionHostQualificationSettings(settings).EvaluationPolicy.TakeoverMargin != .12 {
 		t.Fatal("production margin was weakened by the probe")
+	}
+}
+
+// The frozen scheduler uses ten intervals, capped at ten seconds. A one-ms
+// delay in the first observed sample must not turn normal readiness into a G4
+// failure. This is a fixed synthetic clock calculation, not a timing test.
+func TestCompetitionHostReadinessHasPositiveMatchmakingObservationHeadroom(t *testing.T) {
+	profile := competitionHostQualificationSettings(validSettings())
+	duration := time.Duration(profile.EvaluationPolicy.DurationMs) * time.Millisecond
+	interval := min(duration/10, 10*time.Second)
+	last := ((duration - time.Nanosecond) / interval) * interval
+	span := float64(last-time.Millisecond) / float64(duration)
+	if span < 0.90 {
+		t.Fatal("readiness requires impossibly exact first-observation timing", span)
+	}
+	legacyDuration := 30 * time.Second
+	legacyInterval := legacyDuration / 10
+	legacyLast := ((legacyDuration - time.Nanosecond) / legacyInterval) * legacyInterval
+	if float64(legacyLast-time.Millisecond)/float64(legacyDuration) >= 0.90 {
+		t.Fatal("synthetic control did not reproduce the old readiness boundary failure")
 	}
 }
 

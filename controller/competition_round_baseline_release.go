@@ -6,6 +6,7 @@ import "errors"
 
 // This names an immutable source release, not an adjustable scoring setting.
 const roundBaselineLocalFixturesRelease = "coverage-local-fixtures/1"
+const roundBaselineImageBranchesRelease = "coverage-image-branches/1"
 
 // An omitted discriminator preserves every historical dependency byte. The
 // explicit new release is usable only with the prospective coverage contract.
@@ -14,7 +15,7 @@ func roundBaselinePreparationConfiguredDependencies(config roundBaselinePreparat
 	if err != nil || config.ReleaseKind == "" {
 		return dependencies, program, err
 	}
-	if config.ReleaseKind != roundBaselineLocalFixturesRelease || config.WorkCoveragePolicy == nil || program != "prepare-round-baseline-work-coverage.sh" {
+	if (config.ReleaseKind != roundBaselineLocalFixturesRelease && config.ReleaseKind != roundBaselineImageBranchesRelease) || config.WorkCoveragePolicy == nil || program != "prepare-round-baseline-work-coverage.sh" {
 		return nil, "", errors.New("unsupported explicit baseline producer release")
 	}
 	// All other files retain the original sealed digests. These changed assets
@@ -32,6 +33,11 @@ func roundBaselinePreparationConfiguredDependencies(config roundBaselinePreparat
 		"competitionpatch.sha256":        "5495244d334d9aa8fdf5ff8e0d42672fbb21ea78b82b624f069989e7801fab53",
 	} {
 		dependencies[name] = digest
+	}
+	if config.ReleaseKind == roundBaselineImageBranchesRelease {
+		// Metadata normalization lives only in the throwaway legacy candidate
+		// build layer. The control producer, scorer and frozen image are unchanged.
+		dependencies["Dockerfile.submission"] = "3cf1e3e7f5ddb036334106bc107468358c6c9800861d11125b4b1db7882f1c5f"
 	}
 	return dependencies, program, nil
 }
