@@ -2866,6 +2866,42 @@ type ProvideRelationshipDetails struct {
 	SourceStrictExp        bool
 	DestinationStrictExp   bool
 	SourceDeclaresNoEgress bool
+	// Each end's facts for §8.10's contract gate (ACL-M4-01) and C13's seals,
+	// read in the same query by GetProvideRelationshipDetailsWithAcl where MG0,
+	// MG1 and MG2 are linked; nil otherwise, and for a client the server does
+	// not have.
+	SourceAcl      *ProvideRelationshipAclEnd
+	DestinationAcl *ProvideRelationshipAclEnd
+}
+
+// One end of a contract as §8.10's gate reads it (D-ACL-3, D-ACL-5, I-10;
+// plan-ACL-nonsidecar-subjects): the client's network and the subject it acts
+// as, all from the relationship's one query, so the gate adds no query
+// (R-ACL-8).
+type ProvideRelationshipAclEnd struct {
+	// The client's network.
+	NetworkId server.Id
+	// The client this one acts as (D-ACL-3): its stored acl_subject_client_id,
+	// else itself when it is top-level or a sidecar's own client, which its
+	// binding names, as GetNetworkClientAclSubject resolves it; nil when
+	// neither tells it, or when the subject is no client of this network.
+	SubjectClientId *server.Id
+	// The sidecar its subject is bound to (sidecar_identity_binding), nil for
+	// none.
+	SidecarId *server.Id
+	// The subject's owner row (network_client_owner, §7.7): its member, nil for
+	// a tagged or legacy client, and its marks, false with no row.
+	MemberId     *server.Id
+	Tagged       bool
+	Ephemeral    bool
+	StrictExp    bool
+	AclEnforcing bool
+	// Whether a hosted proxy device's config (proxy_device_config) names the
+	// client, its source client or its subject: §18's hosted device (I-10).
+	Hosted bool
+	// The subject's identity roles and principal (Embed networks).
+	Roles     []string
+	Principal string
 }
 
 // Whether a contract in provideMode is refused because its source is a sidecar
@@ -2901,6 +2937,137 @@ func networkClientLifecycle(active *bool, sourceClientId *server.Id) NetworkClie
 // arbitrarily nested derived clients retain the same bounded owner without
 // exposing either identity.
 func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideRelationshipDetails {
+	return getProvideRelationshipDetails(ctx, clientIdA, clientIdB, false)
+}
+
+// GetProvideRelationshipDetails with each end's facts for §8.10's contract
+// gate, SourceAcl and DestinationAcl, in the same single query: no query is
+// added (R-ACL-8; this path is the hotspot subscription_model.go warns about).
+// Each end's subject is resolved in the statement, its binding, owner row,
+// roles and principal read by its primary keys, and the hosted mark by
+// proxy_device_config's client index. A binary that does not link MG0, MG1 and
+// MG2 has no such tables or column, so it reads what GetProvideRelationshipDetails
+// reads and leaves both ends nil.
+func GetProvideRelationshipDetailsWithAcl(ctx context.Context, clientIdA server.Id, clientIdB server.Id) ProvideRelationshipDetails {
+	return getProvideRelationshipDetails(ctx, clientIdA, clientIdB, true)
+}
+
+// The facts one end's columns read, for networkClientAclEndColumns' order.
+type provideRelationshipAclScan struct {
+	subjectClientId *server.Id
+	sidecarId       *server.Id
+	memberId        *server.Id
+	tagged          bool
+	ephemeral       bool
+	strictExp       bool
+	aclEnforcing    bool
+	hosted          bool
+	principal       string
+	roles           []string
+}
+
+// The scan's destinations, in the columns' order.
+func (self *provideRelationshipAclScan) destinations() []any {
+	return []any{
+		&self.subjectClientId,
+		&self.sidecarId,
+		&self.memberId,
+		&self.tagged,
+		&self.ephemeral,
+		&self.strictExp,
+		&self.aclEnforcing,
+		&self.hosted,
+		&self.principal,
+		&self.roles,
+	}
+}
+
+// The end, for a client the query found in networkId.
+func (self *provideRelationshipAclScan) end(networkId *server.Id) *ProvideRelationshipAclEnd {
+	if networkId == nil {
+		return nil
+	}
+	return &ProvideRelationshipAclEnd{
+		NetworkId:       *networkId,
+		SubjectClientId: self.subjectClientId,
+		SidecarId:       self.sidecarId,
+		MemberId:        self.memberId,
+		Tagged:          self.tagged,
+		Ephemeral:       self.ephemeral,
+		StrictExp:       self.strictExp,
+		AclEnforcing:    self.aclEnforcing,
+		Hosted:          self.hosted,
+		Roles:           self.roles,
+		Principal:       self.principal,
+	}
+}
+
+// One end's columns for the contract gate, the end's network_client aliased
+// x, in provideRelationshipAclScan's order. The subject is the backfill's
+// rule without its parent step (GetNetworkClientAclSubject): the stored
+// subject, else the client itself when it is top-level or bound. A subject
+// that is no client of x's network reads as none.
+func networkClientAclEndColumns(x string) string {
+	return fmt.Sprintf(`,
+				%[1]s_subject.client_id,
+				%[1]s_subject.sidecar_id,
+				%[1]s_subject.member_id,
+				COALESCE(%[1]s_subject.tagged, false),
+				COALESCE(%[1]s_subject.ephemeral, false),
+				COALESCE(%[1]s_subject.strict_exp, false),
+				COALESCE(%[1]s_subject.acl_enforcing, false),
+				EXISTS (
+					SELECT 1 FROM proxy_device_config
+					WHERE proxy_device_config.client_id IN (%[1]s.client_id, %[1]s.source_client_id, %[1]s_subject.client_id)
+				),
+				COALESCE(%[1]s_subject.principal, ''),
+				ARRAY(
+					SELECT network_client_role.role FROM network_client_role
+					WHERE network_client_role.client_id = %[1]s_subject.client_id
+					ORDER BY network_client_role.role
+				)`, x)
+}
+
+// The join networkClientAclEndColumns reads: the subject's row, binding and
+// owner row in one LATERAL subquery whose WHERE pins the subject's primary
+// key and that cannot be flattened, so every lookup is one index probe
+// whatever the planner estimates of the rows around it. A plain join on the
+// computed subject, or a lateral one it could pull up, let it hash all of
+// network_client and sidecar_identity_binding.
+func networkClientAclEndJoins(x string) string {
+	return fmt.Sprintf(`
+			LEFT JOIN LATERAL (
+				SELECT
+					subject.client_id,
+					subject.principal,
+					subject_bound.sidecar_id,
+					subject_owner.member_id,
+					subject_owner.tagged,
+					subject_owner.ephemeral,
+					subject_owner.strict_exp,
+					subject_owner.acl_enforcing
+				FROM network_client subject
+				LEFT JOIN sidecar_identity_binding subject_bound ON subject_bound.client_id = subject.client_id
+				LEFT JOIN network_client_owner subject_owner ON subject_owner.client_id = subject.client_id
+				WHERE
+					subject.network_id = %[1]s.network_id AND
+					subject.client_id = COALESCE(
+						%[1]s.acl_subject_client_id,
+						CASE
+							WHEN %[1]s.source_client_id IS NULL THEN %[1]s.client_id
+							WHEN EXISTS (
+								SELECT 1 FROM sidecar_identity_binding bound
+								WHERE bound.client_id = %[1]s.client_id
+							) THEN %[1]s.client_id
+						END
+					)
+				-- the key allows one row; the limit also keeps the planner from
+				-- pulling the subquery up into a join over the whole table
+				LIMIT 1
+			) %[1]s_subject ON true`, x)
+}
+
+func getProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, clientIdB server.Id, withAcl bool) ProvideRelationshipDetails {
 	details := ProvideRelationshipDetails{
 		Mode:                 ProvideModePublic,
 		SourceLifecycle:      NetworkClientLifecycleMissing,
@@ -2926,6 +3093,15 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 			LEFT JOIN network_client_owner owner_a ON owner_a.client_id = $1
 			LEFT JOIN network_client_owner owner_b ON owner_b.client_id = $2`
 	}
+	// the gate's facts ride the same query too, where their tables and column
+	// are linked
+	readAcl := withAcl && readMarks && server.SidecarMg1Linked() && server.SidecarMg2Linked()
+	aclColumns := ""
+	aclJoins := ""
+	if readAcl {
+		aclColumns = networkClientAclEndColumns("a") + networkClientAclEndColumns("b")
+		aclJoins = networkClientAclEndJoins("a") + networkClientAclEndJoins("b")
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -2939,11 +3115,11 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 				b.source_client_id,
 				prober.network_id,
 				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=a.network_id),
-				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=b.network_id)`+markColumns+`
+				EXISTS (SELECT 1 FROM prober_shard_run WHERE network_id=b.network_id)`+markColumns+aclColumns+`
 			FROM (VALUES (true)) AS seed(value)
 			LEFT JOIN network_client a ON a.client_id = $1
 			LEFT JOIN network_client b ON b.client_id = $2
-			LEFT JOIN prober_identity prober ON prober.singleton`+markJoins+`
+			LEFT JOIN prober_identity prober ON prober.singleton`+markJoins+aclJoins+`
 			`,
 			clientIdA,
 			clientIdB,
@@ -2977,7 +3153,16 @@ func GetProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 						&details.SourceDeclaresNoEgress,
 					)
 				}
+				var aclA, aclB provideRelationshipAclScan
+				if readAcl {
+					destinations = append(destinations, aclA.destinations()...)
+					destinations = append(destinations, aclB.destinations()...)
+				}
 				server.Raise(result.Scan(destinations...))
+				if readAcl {
+					details.SourceAcl = aclA.end(networkIdA)
+					details.DestinationAcl = aclB.end(networkIdB)
+				}
 				details.SourceLifecycle = networkClientLifecycle(activeA, sourceClientIdA)
 				details.DestinationLifecycle = networkClientLifecycle(activeB, sourceClientIdB)
 				if networkIdA != nil && (proberNetworkId != nil || shardA) {

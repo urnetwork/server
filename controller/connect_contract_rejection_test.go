@@ -39,8 +39,8 @@ func TestContractRejectionCauseSchemaAndErrorClasses(t *testing.T) {
 		if family.GetName() != "urnetwork_connect_contract_rejections_total" {
 			continue
 		}
-		if len(family.Metric) != 52 {
-			t.Fatalf("rejection collector has %d cells, want 52 initialized cells", len(family.Metric))
+		if len(family.Metric) != 60 {
+			t.Fatalf("rejection collector has %d cells, want 60 initialized cells", len(family.Metric))
 		}
 		for _, sample := range family.Metric {
 			if len(sample.Label) != 3 {
