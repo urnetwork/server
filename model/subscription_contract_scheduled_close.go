@@ -58,6 +58,30 @@ var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_coun
 	LEFT JOIN transfer_balance b USING(balance_id)
 	ORDER BY b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
 
+// deadlineEscrowRowsSql in DESIGN.md 20.9's draw order, behind the escrow_draw_order gate: the
+// deadline close feeds the same keep-bytes-in-order settlement as settlementEscrowReadSql, so it
+// keeps bytes on a data pack before the line (plan-QUOTA-draw-order-sites). A missing balance
+// reads the flag false and its times NULL, last among the rest, and pays nothing.
+var deadlineEscrowRowsDrawOrderSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
+	COALESCE(b.net_revenue_nano_cents,0),b.network_id,
+	GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
+	FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND NOT j.applied),0))::bigint,
+	e.settled,e.payout_byte_count,e.redis_reserved,
+	(SELECT debit_byte_count FROM transfer_debit_journal j WHERE j.balance_id=e.balance_id AND j.contract_id=e.contract_id)
+	FROM unnest(ARRAY[$1::uuid]) AS requested(contract_id)
+	CROSS JOIN LATERAL (SELECT contract_id,balance_id,balance_byte_count,settled,payout_byte_count,redis_reserved
+		FROM transfer_escrow WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT %d) AS e
+	LEFT JOIN transfer_balance b USING(balance_id)
+	ORDER BY (b.grant_kind IS NOT DISTINCT FROM 'team_credit'),b.end_time NULLS LAST,b.start_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
+
+// The deadline read the gate gives now.
+func deadlineEscrowRowsSqlFor(drawOrder bool) string {
+	if drawOrder {
+		return deadlineEscrowRowsDrawOrderSql
+	}
+	return deadlineEscrowRowsSql
+}
+
 // The planner still costs the read at the row limit, and each estimated row
 // pays for two debit journal probes. Once dead journal tuples left that small
 // table a few hundred pages, the cost passed the JIT inline and optimize
@@ -216,7 +240,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	reservationSnapshots := readDeadlineNetEscrowSnapshots(ctx, tx, positive)
 	escrows := []contractDeadlineEscrow{}
 	server.RaisePgResult(tx.Exec(ctx, deadlineEscrowRowsJitSql))
-	rows, err = tx.Query(ctx, deadlineEscrowRowsSql, contractId)
+	rows, err = tx.Query(ctx, deadlineEscrowRowsSqlFor(EscrowDrawOrderEnabled()), contractId)
 	server.WithPgResult(rows, err, func() {
 		for rows.Next() {
 			var escrow contractDeadlineEscrow

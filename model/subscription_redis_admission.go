@@ -188,6 +188,13 @@ func redisContractReservationKeys(balanceId server.Id) []string {
 // restarting its pending age. release-pending releases a token only while it
 // is pending. Every release and acknowledgement also removes a pending marker;
 // the recovery page moves pending markers to the recovery marker.
+//
+// reserve-pending-share is reserve-pending for a relayed sidecar contract
+// (DESIGN.md 20.6, relayed_contract_model.go): it reserves at most
+// max(ARGV[6], (this balance's availability + ARGV[7]) / 8), ARGV[4] at most,
+// where ARGV[6] is the smallest contract and ARGV[7] the rest of the network's
+// availability, and answers {amount, share}, so grants shrink as the
+// network's balance nears zero.
 const redisContractReservationScript = `
 local function valid(s)
  return s and string.match(s, '^%d+$') and (s == '0' or string.sub(s,1,1) ~= '0') and
@@ -205,6 +212,26 @@ local function sub(a,b)
  end
  local s=string.gsub(table.concat(out),'^0+',''); if s=='' then return '0' end; return s
 end
+local function add(a,b)
+ local out = {}; local carry=0
+ for i=0,math.max(#a,#b)-1 do
+  local j=#a-i; local x=0; if j>0 then x=tonumber(string.sub(a,j,j)) end
+  local k=#b-i; local y=0; if k>0 then y=tonumber(string.sub(b,k,k)) end
+  local d=x+y+carry
+  if d>9 then d=d-10; carry=1 else carry=0 end
+  table.insert(out,1,tostring(d))
+ end
+ if carry==1 then table.insert(out,1,'1') end
+ local s=string.gsub(table.concat(out),'^0+',''); if s=='' then return '0' end; return s
+end
+local function div8(a)
+ local out = {}; local rest=0
+ for i=1,#a do
+  local x=rest*10+tonumber(string.sub(a,i,i))
+  table.insert(out,tostring(math.floor(x/8))); rest=x%8
+ end
+ local s=string.gsub(table.concat(out),'^0+',''); if s=='' then return '0' end; return s
+end
 local rawTotal=redis.call('GET',KEYS[1])
 local total=rawTotal or '0'
 local legacy=redis.call('GET',KEYS[4]) or '0'
@@ -215,6 +242,11 @@ end
 if not valid(total) or not valid(legacy) or not valid(ARGV[3]) or not valid(ARGV[4]) then
  return redis.error_reply('invalid reservation counter')
 end
+local sharing=ARGV[1]=='reserve-pending-share'
+if sharing and (not valid(ARGV[6]) or not valid(ARGV[7])) then
+ return redis.error_reply('invalid reservation counter')
+end
+local share='0'
 local lease=tonumber(ARGV[5])
 if not lease or lease<1 or lease>86400000 then return redis.error_reply('invalid reservation lease') end
 -- Partial key eviction starts a new approximate generation too. Old releases
@@ -239,7 +271,7 @@ local amount='0'
 if ARGV[1]=='release-owned' and existing and not pending and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
  return redis.error_reply('missing owned reservation marker')
 end
-if (ARGV[1]=='release-pending' or ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full') and existing and not pending then
+if (ARGV[1]=='release-pending' or ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or sharing) and existing and not pending then
  return redis.error_reply('reservation is not pending')
 end
 if (ARGV[1]=='release-owned' or ARGV[1]=='published') and existing and ARGV[4]~='0' and existing~=ARGV[4] then
@@ -260,21 +292,28 @@ elseif ARGV[1]=='settle' then
   redis.call('HSET',KEYS[2],ARGV[2],amount)
  end
 elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full' or
- ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or ARGV[1]=='restore' then
+ ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or sharing or ARGV[1]=='restore' then
  local owned=ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full'
- local marked=ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full'
+ local marked=ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or sharing
  if existing then
   if owned and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
    return redis.error_reply('missing owned reservation marker')
   end
   if less(ARGV[4],existing) then return redis.error_reply('reservation retry changed amount') end
-  amount=existing
+  amount=existing; share=existing
   -- the retry's publication window starts now
   if marked then redis.call('ZADD',KEYS[6],milliseconds,ARGV[2]) end
  else
   local available=sub(sub(ARGV[3],legacy),total)
   if ARGV[1]=='restore' then available=sub('9223372036854775807',total) end
-  amount=ARGV[4]; if less(available,amount) then
+  amount=ARGV[4]
+  if sharing then
+   share=div8(add(available,ARGV[7]))
+   if less(share,ARGV[6]) then share=ARGV[6] end
+   if less(amount,share) then share=amount end
+   amount=share
+  end
+  if less(available,amount) then
    if ARGV[1]=='restore' then return redis.error_reply('reservation recovery overflow') end
    amount=available
    if ARGV[1]=='reserve-owned-full' or ARGV[1]=='reserve-pending-full' then amount='0' end
@@ -300,6 +339,7 @@ redis.call('PEXPIRE',KEYS[2],90000000)
 redis.call('PEXPIRE',KEYS[3],90000000)
 redis.call('PEXPIRE',KEYS[5],90000000)
 redis.call('PEXPIRE',KEYS[6],90000000)
+if sharing then return {amount,share} end
 return amount
 `
 

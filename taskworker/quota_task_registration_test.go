@@ -3,17 +3,19 @@ package taskworker
 import (
 	"testing"
 
+	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
-// The spent pass and the service debit flush are sidecar billing, so only the production registry
-// claims them, as the sidecar engines' jobs: a subnet operator hosts no sidecar service, so it marks no
-// network spent and journals no service debit.
+// The spent pass, the service debit flush and the Team grant job are sidecar billing, so only the
+// production registry claims them, as the sidecar engines' jobs: a subnet operator hosts no sidecar
+// service, so it marks no network spent, journals no service debit and has no Team.
 func TestQuotaTasksAreProductionOnly(t *testing.T) {
 	names := []string{
 		task.NewTaskTarget(work.QuotaSpentPass).TargetFunctionName(),
 		task.NewTaskTarget(work.FlushServiceDebits).TargetFunctionName(),
+		task.NewTaskTarget(controller.RefreshTeamTransferBalances).TargetFunctionName(),
 	}
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
 		worker, err := InitTaskWorkerForProfile(t.Context(), nil, profile)

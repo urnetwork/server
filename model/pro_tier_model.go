@@ -24,10 +24,11 @@ import (
 // commit and never inside its transaction, so an upgrade reaches NetworkTierOf at once
 // in this process and within ProLocalCacheTtl in the others.
 //
-// The tier reads transfer_balance.pro alone until MG6 adds transfer_balance.tier, the
-// Team grant's mark (QUOTA-M6-01), whose read is gated by server.SidecarMg6Linked. Until
-// then a Pro balance answers pro, so team never appears, and since the Team grant also
-// writes pro = true, IsProNetwork's readers stay right once it does.
+// The tier reads transfer_balance.pro alone in a binary that does not link MG6, which adds
+// transfer_balance.tier, the Team grant's mark (QUOTA-M6-01): there a Pro balance answers
+// pro and team never appears. Where MG6 is linked one read answers both, team for an
+// in-window balance with pro = true and tier 'team', and since the Team grant also writes
+// pro = true, IsProNetwork's readers stay right.
 
 func networkTierKey(networkId server.Id) string {
 	return fmt.Sprintf("network_tier_versioned:%s", networkId)
@@ -151,7 +152,7 @@ func NetworkTierOf(ctx context.Context, networkId server.Id) NetworkTier {
 		networkTierLocal.set(networkId, entitlement)
 		return entitlement.tier
 	}
-	entitlement := networkTierOfProEntitlement(loadProNetwork(ctx, networkId))
+	_, entitlement := loadNetworkTierInConn(nil, ctx, networkId)
 	observeProNetworkLoaded(networkId)
 	storeNetworkTier(ctx, networkId, entitlement)
 	return entitlement.tier
@@ -174,7 +175,8 @@ func networkTierOfWithQuery(ctx context.Context, query server.PgCanQuery, networ
 		networkTierLocal.set(networkId, entitlement)
 		return entitlement.tier
 	}
-	return networkTierOfProEntitlement(loadProNetworkWithConn(ctx, query, networkId)).tier
+	_, entitlement := loadNetworkTierWithConn(ctx, query, networkId)
+	return entitlement.tier
 }
 
 // The tier from the source of truth, refreshing both cache tiers, for anything baked
@@ -188,12 +190,72 @@ func NetworkTierOfFresh(ctx context.Context, networkId server.Id) NetworkTier {
 // in both cache tiers, returning what it loaded. UpdateProNetworkInConn's body: call it
 // after the transaction that changed the balances commits, never inside it.
 func updateNetworkEntitlementInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) networkTierEntitlement {
-	entitlement := loadProNetworkInConn(connOwner, ctx, networkId)
+	entitlement, tierEntitlement := loadNetworkTierInConn(connOwner, ctx, networkId)
 	observeProNetworkLoaded(networkId)
 	storeProNetwork(ctx, networkId, entitlement)
-	tierEntitlement := networkTierOfProEntitlement(entitlement)
 	storeNetworkTier(ctx, networkId, tierEntitlement)
 	return tierEntitlement
+}
+
+// Pro's entitlement and the network's tier from one read of the source of truth, with that
+// read's version, on the caller's connection or a new one when connOwner is nil.
+func loadNetworkTierInConn(connOwner server.PgConn, ctx context.Context, networkId server.Id) (entitlement proEntitlement, tierEntitlement networkTierEntitlement) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		entitlement, tierEntitlement = loadNetworkTierWithConn(ctx, conn, networkId)
+	})
+	return
+}
+
+// loadNetworkTierInConn on any connection or transaction the caller holds. Without MG6 it is
+// Pro's own read, and the tier is pro or free; with MG6 the same read also asks for an in-window
+// team grant, which implies pro.
+func loadNetworkTierWithConn(ctx context.Context, query server.PgCanQuery, networkId server.Id) (entitlement proEntitlement, tierEntitlement networkTierEntitlement) {
+	if !server.SidecarMg6Linked() {
+		entitlement = loadProNetworkWithConn(ctx, query, networkId)
+		return entitlement, networkTierOfProEntitlement(entitlement)
+	}
+	now := server.NowUtc()
+	team := false
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT
+				EXISTS (
+					SELECT 1
+					FROM transfer_balance
+					WHERE
+						network_id = $1 AND
+						pro = true AND
+						start_time <= $2 AND
+						$2 < end_time
+				),
+				EXISTS (
+					SELECT 1
+					FROM transfer_balance
+					WHERE
+						network_id = $1 AND
+						pro = true AND
+						tier = 'team' AND
+						start_time <= $2 AND
+						$2 < end_time
+				),
+				transaction_timestamp()
+		`,
+		networkId,
+		now,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			var readTime time.Time
+			server.Raise(result.Scan(&entitlement.pro, &team, &readTime))
+			entitlement.version = readTime.UnixMicro()
+		}
+	})
+	tierEntitlement = networkTierOfProEntitlement(entitlement)
+	if team {
+		tierEntitlement.tier = NetworkTierTeam
+	}
+	return
 }
 
 // Writes a loaded tier to both tiers of the cache, neither of which takes it over a

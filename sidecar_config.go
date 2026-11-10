@@ -137,6 +137,9 @@ type SidecarConfig struct {
 	socketsSet    bool
 	urnetworkEdge *Id
 	fileClusters  map[string]SidecarFileCluster
+
+	// whether the file names escrow_draw_order at all, on or off
+	escrowDrawOrderNamed bool
 }
 
 // Whether the network is listed in preview_networks.
@@ -201,6 +204,7 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 	} {
 		config.switches[name] = value != nil && value.Enabled
 	}
+	config.escrowDrawOrderNamed = y.Sidecar.EscrowDrawOrder != nil
 	for _, name := range y.Sidecar.Drained {
 		if name != "" {
 			config.drained = append(config.drained, name)

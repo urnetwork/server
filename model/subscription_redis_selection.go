@@ -374,8 +374,11 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		proberOutcome = "fallback"
 	}
 
-	// Ordinary/fallback funding keeps exact earliest-expiry order. Keyset
-	// pages avoid repeatedly scanning an offset prefix and bound decoded rows.
+	// Ordinary/fallback funding keeps exact earliest-expiry order, and behind
+	// the escrow_draw_order gate DESIGN.md 20.9's draw order, the credit line
+	// last (escrow_draw_order.go). Keyset pages avoid repeatedly scanning an
+	// offset prefix and bound decoded rows.
+	read := newEscrowBalanceRead()
 	var cursor *escrowTransferBalance
 	for {
 		if err := ctx.Err(); err != nil {
@@ -385,22 +388,14 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 			return nil, 0, capacity()
 		}
 		count := min(redisGrantPageRows, limits.MaxRows-rowsRead)
-		sql := escrowTransferBalanceSql
-		args := []any{payerNetworkId, now}
-		if cursor == nil {
-			sql += ` ORDER BY end_time,start_time,balance_id LIMIT $3`
-			args = append(args, count)
-		} else {
-			sql += ` AND (end_time,start_time,balance_id)>($3,$4,$5) ORDER BY end_time,start_time,balance_id LIMIT $6`
-			args = append(args, cursor.endTime, cursor.startTime, cursor.balanceId, count)
-		}
+		sql, args := read.censusPage(payerNetworkId, now, cursor, count)
 		page := []*escrowTransferBalance{}
 		readRedisGrants(ctx, func(query server.PgCanQuery) {
 			rows, err := query.Query(ctx, sql, args...)
 			server.WithPgResult(rows, err, func() {
 				for rows.Next() {
 					balance := &escrowTransferBalance{}
-					server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime))
+					server.Raise(read.scan(rows, balance))
 					page = append(page, balance)
 					rowsRead++
 				}

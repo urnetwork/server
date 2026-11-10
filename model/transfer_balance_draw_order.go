@@ -1,7 +1,6 @@
 package model
 
 import (
-	"bytes"
 	"context"
 	"slices"
 	"time"
@@ -11,13 +10,14 @@ import (
 
 // A payer's transfer balances in draw order (DESIGN.md 20.9's Draw order, D-QUOTA-9), for the draws
 // sidecar billing makes: evs's bytes at a usage batch's apply (QUOTA-M2-05), which have no reservation,
-// and relayed reservations at CreateContract (QUOTA-M2-08). The order lives here until QUOTA-M4-01's
-// escrowDrawLess replaces compareDrawOrderBalances and puts escrow's sites behind sidecar.yml's
-// escrow_draw_order gate: lexicographic on (credit, end time, start time, balance id), false first, so
-// a team_credit line pays only after every other in-window balance. credit is grant_kind IS NOT
-// DISTINCT FROM 'team_credit', never `=`, which would sort older balances' NULL grant_kind after the
-// line. Until Team checkout writes the first team_credit balance (QUOTA-M6-02, after the gate is on)
-// the flag is false on every balance and the order is escrow's.
+// leases (QUOTA-M2-07) and relayed reservations at CreateContract (QUOTA-M2-08). The order is
+// escrowDrawLess's (escrow_draw_order.go), the one order of a payer's balances: lexicographic on
+// (credit, end time, start time, balance id), false first, so a team_credit line pays only after every
+// other in-window balance. credit is the flag every loader selects, never the equality spelling, which
+// would sort older balances' NULL grant_kind after the line. These draws are sidecar billing's own and
+// read the flag whether or not escrow's sites follow the escrow_draw_order gate: until Team checkout
+// writes the first team_credit balance (QUOTA-M6-02, after the gate is on) the flag is false on every
+// balance and the order is escrow's.
 //
 // The read takes no balance lock: a debit after use draws what the read saw, so two batches applying
 // at once may draw the same room, and the flush overdraws the first balance by the difference while a
@@ -43,21 +43,10 @@ func (self *DrawOrderBalance) RoomByteCount() int64 {
 	return max(0, self.BalanceByteCount-self.PendingByteCount)
 }
 
-// The draw order as a comparison: the credit line last, then by end time, start time and balance id.
+// The draw order as a comparison: escrowDrawLess's keys, the credit line last, then by end time,
+// start time and balance id.
 func compareDrawOrderBalances(a *DrawOrderBalance, b *DrawOrderBalance) int {
-	if a.Credit != b.Credit {
-		if !a.Credit {
-			return -1
-		}
-		return 1
-	}
-	if c := a.EndTime.Compare(b.EndTime); c != 0 {
-		return c
-	}
-	if c := a.StartTime.Compare(b.StartTime); c != 0 {
-		return c
-	}
-	return bytes.Compare(a.BalanceId[:], b.BalanceId[:])
+	return compareEscrowDrawKeys(a.drawKey(), b.drawKey())
 }
 
 type DrawOrderSettings struct {
@@ -106,7 +95,7 @@ func loadDrawOrderBalancesWithQuery(ctx context.Context, query server.PgCanQuery
 				balance.balance_id,
 				balance.start_time,
 				balance.end_time,
-				balance.grant_kind IS NOT DISTINCT FROM 'team_credit',
+				(balance.grant_kind IS NOT DISTINCT FROM 'team_credit'),
 				balance.balance_byte_count,
 				`+servicePending+` + COALESCE((
 					SELECT SUM(transfer.debit_byte_count)
@@ -119,7 +108,7 @@ func loadDrawOrderBalancesWithQuery(ctx context.Context, query server.PgCanQuery
 				balance.start_time <= $2 AND
 				$2 < balance.end_time
 			ORDER BY
-				balance.grant_kind IS NOT DISTINCT FROM 'team_credit',
+				(balance.grant_kind IS NOT DISTINCT FROM 'team_credit'),
 				balance.end_time,
 				balance.start_time,
 				balance.balance_id
