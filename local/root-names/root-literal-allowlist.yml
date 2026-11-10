@@ -1,0 +1,17 @@
+# The Go files of server, connect and sidecar whose string literals may name a
+# user root (config/<env>/dns.yml's roots), each with why. Roots are
+# configuration and platform names live on bringyour.com (sidecar DESIGN §12.4,
+# D-DNS-1; DNS-M5-20), so code names a root only where the name itself is the
+# subject. TestRootLiteralsStayOutOfCode fails on a root in a literal of any
+# other file, and on an entry whose file holds none any more. Paths start with
+# the repository.
+files:
+  connect/blocker/main.go: the feed fetcher's user agent links the root's apex, which redirects to ur.io
+  connect/security/main.go: the feed fetcher's user agent links the root's apex, which redirects to ur.io
+  connect/ip_blocker_test.go: the root's apex, which blocker/allowlist.txt keeps unblocked
+  connect/net_extender_spoof_test.go: the operator's domains, which no spoof name may carry
+  server/test_harness_test.go: test-env.sh's tls resource names, which this lint leaves to test-env.sh
+  server/controller/extender_activate_family_test.go: a host family parse case on a former platform host
+  server/session/intended_network_test.go: a name under the root, refused where only a network id may stand
+  server/local/sidecar-gate/trace_test.go: PLAN.md's mail host under the root, which the design gate's fixture quotes
+  server/model/network_health_model_test.go: a public status reason naming the root, which the reason rules refuse

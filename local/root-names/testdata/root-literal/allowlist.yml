@@ -1,0 +1,4 @@
+# The fixture's allowlist: one file that names the root, and one that no longer does.
+files:
+  connect/allowed_test.go: names the root's apex, the subject of its test
+  connect/clean.go: named here, though it names no root

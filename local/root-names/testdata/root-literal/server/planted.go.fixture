@@ -1,0 +1,17 @@
+package planted
+
+// a comment may name api.user.example: the lint reads only string literals
+/* and user.example in a block comment */
+
+const apiHost = "api.user.example"
+
+var rootHosts = []string{"user.example", "WWW.USER.EXAMPLE."}
+
+const rootPattern = `^(.+)\.user\.example$`
+
+const escapedPattern = "^(.+)\\.user\\.example$"
+
+const keyFile = "user.example.crt"
+
+// none of these is the root or a name under it
+var otherHosts = []string{"superuser.example", "user.examples", "my-user.example", "user-example.example", "user.example-x", "example.user"}

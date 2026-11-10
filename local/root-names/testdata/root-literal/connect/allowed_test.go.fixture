@@ -1,0 +1,4 @@
+package allowed
+
+// the fixture's allowlist lists this file
+const apex = "user.example"
