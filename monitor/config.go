@@ -48,7 +48,9 @@ type monitorYaml struct {
 	SidecarDump *sidecarDumpMonitorYaml `yaml:"sidecar_dump"`
 	// sidecar_services: the sidecar services whose §19.8 SLOs and failures this monitor reads (SIGNALS.md §30)
 	SidecarServices *sidecarServicesMonitorYaml `yaml:"sidecar_services"`
-	Hosts           []struct {
+	// lb_split_probe: the lb interfaces running §13.4's SNI split, which this monitor probes (SIGNALS.md §31.1)
+	LbSplitProbe *lbSplitProbeYaml `yaml:"lb_split_probe"`
+	Hosts        []struct {
 		Name               string    `yaml:"name"`
 		LANIp              string    `yaml:"lan_ip"`
 		OverlayIp          string    `yaml:"overlay_ip"`
@@ -157,6 +159,10 @@ type servicesServiceYaml struct {
 
 type servicesLBYaml struct {
 	Interfaces map[string]map[string]servicesLBInterfaceYaml `yaml:"interfaces"`
+	// §13.4's split of the version (W1): only its roots are read
+	TlsSplit *struct {
+		Roots []string `yaml:"roots"`
+	} `yaml:"tls_split"`
 }
 
 type servicesLBInterfaceYaml struct {
@@ -364,6 +370,7 @@ func loadSignalSettingsSnapshot() (SignalSettings, error) {
 		DnsCanary:      loadDnsCanarySettings(y.DnsCanary),
 		SidecarStorage: loadSidecarStorageSettings(y.FileClusters, y.SidecarDump, loadMonitorFileClusters),
 		SidecarSlo:     loadSidecarSloSettings(y.SidecarServices),
+		LbSplitProbe:   loadLbSplitProbeSettings(y.LbSplitProbe, servicesResource, services),
 	}
 	settings = settings.withDefaults()
 	routes := lanRoutes()
@@ -1756,6 +1763,128 @@ func loadSidecarSloSettings(block *sidecarServicesMonitorYaml) *SidecarSloSettin
 		}
 		seen[service] = true
 		settings.Services = append(settings.Services, service)
+	}
+	return settings
+}
+
+// monitor.yml's lb_split_probe block (SIGNALS.md §31.1). Interfaces flip to the split one lb deploy at a
+// time during W1's rollout, so the block names those that run it until every one does.
+type lbSplitProbeYaml struct {
+	// The interfaces running the split, each as <host>-<interface>, the host without the domain, as
+	// sidecar.yml's drained names them; "*" names every interface of services.yml's inventory.
+	Interfaces []string `yaml:"interfaces"`
+	// A platform name the http servers serve, for the verified handshake. Empty takes services.yml's
+	// manager hostname.
+	PlatformName string `yaml:"platform_name"`
+	// ipv4, ipv6 or both. Empty probes both.
+	Families []string `yaml:"families"`
+}
+
+// The probe's settings from its block and services.yml: nil with no block, which reports the probe
+// configured off, and ConfigError set for a block or inventory that does not read, which reports it
+// blind. No error here holds an address: services.yml's parse errors are reduced to which part failed.
+func loadLbSplitProbeSettings(block *lbSplitProbeYaml, servicesResource *server.SimpleResource, services servicesYaml) *LbSplitProbeSettings {
+	if block == nil {
+		return nil
+	}
+	servicesYamlBytes, err := servicesResource.BytesE()
+	if err != nil {
+		return &LbSplitProbeSettings{ConfigError: "services.yml does not read"}
+	}
+	return lbSplitProbeSettingsFrom(block, servicesYamlBytes, services, activeManagerHostnameFromServices(services))
+}
+
+// The probe's settings from the block, services.yml's bytes and its narrow view, and the manager
+// hostname, which is the platform name when the block names none.
+func lbSplitProbeSettingsFrom(block *lbSplitProbeYaml, servicesYamlBytes []byte, services servicesYaml, managerHostname string) *LbSplitProbeSettings {
+	refuse := func(reason string) *LbSplitProbeSettings {
+		return &LbSplitProbeSettings{ConfigError: reason}
+	}
+	settings := DefaultLbSplitProbeSettings()
+	if 0 < len(block.Families) {
+		settings.Families = []string{}
+		for _, family := range block.Families {
+			family = strings.ToLower(strings.TrimSpace(family))
+			if family != lbSplitFamilyIpv4 && family != lbSplitFamilyIpv6 {
+				return refuse("lb_split_probe.families holds a value that is neither ipv4 nor ipv6")
+			}
+			if !slices.Contains(settings.Families, family) {
+				settings.Families = append(settings.Families, family)
+			}
+		}
+	}
+	settings.PlatformName = strings.ToLower(strings.TrimSpace(block.PlatformName))
+	if settings.PlatformName == "" {
+		settings.PlatformName = managerHostname
+	}
+	if len(services.Versions) == 0 || services.Versions[0].LB.TlsSplit == nil {
+		return refuse("services.yml's newest version has no lb.tls_split, so no interface runs the split")
+	}
+	for _, root := range services.Versions[0].LB.TlsSplit.Roots {
+		root = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(root)), ".")
+		if root == "" {
+			return refuse("services.yml's lb.tls_split holds an empty root")
+		}
+		if !slices.Contains(settings.Roots, root) {
+			settings.Roots = append(settings.Roots, root)
+		}
+	}
+	if len(settings.Roots) == 0 {
+		return refuse("services.yml's lb.tls_split names no root")
+	}
+	inventory, err := server.ParseServicesLbInventory(servicesYamlBytes)
+	if err != nil {
+		return refuse("services.yml's lb inventory does not read")
+	}
+	blockInterfaces := map[string]LbSplitProbeInterface{}
+	for inventoryHost, hostInterfaces := range inventory.Interfaces {
+		for _, lbInterface := range hostInterfaces {
+			probed := LbSplitProbeInterface{Block: lbSplitProbeBlock(inventoryHost, lbInterface.Interface)}
+			if lbInterface.Ipv4 != "" {
+				if probed.Ipv4, err = netip.ParseAddr(lbInterface.Ipv4); err != nil || !probed.Ipv4.Is4() {
+					return refuse("services.yml's lb inventory gives interface " + probed.Block + " an ipv4 that does not parse")
+				}
+			}
+			if lbInterface.Ipv6 != "" {
+				if probed.Ipv6, err = netip.ParseAddr(lbInterface.Ipv6); err != nil || !probed.Ipv6.Is6() {
+					return refuse("services.yml's lb inventory gives interface " + probed.Block + " an ipv6 that does not parse")
+				}
+			}
+			blockInterfaces[probed.Block] = probed
+		}
+	}
+	names := []string{}
+	for _, name := range block.Interfaces {
+		names = append(names, strings.TrimSpace(name))
+	}
+	if len(names) == 0 {
+		return refuse("lb_split_probe.interfaces names no interface: list those running the split, or \"*\"")
+	}
+	if slices.Contains(names, "*") {
+		if len(names) != 1 {
+			return refuse("lb_split_probe.interfaces holds \"*\" beside other names")
+		}
+		names = []string{}
+		for name := range blockInterfaces {
+			names = append(names, name)
+		}
+		if len(names) == 0 {
+			return refuse("services.yml's lb inventory names no interface")
+		}
+	}
+	sort.Strings(names)
+	unknownCount := 0
+	for _, name := range slices.Compact(names) {
+		probed, ok := blockInterfaces[name]
+		if !ok {
+			unknownCount++
+			continue
+		}
+		settings.Interfaces = append(settings.Interfaces, probed)
+	}
+	if 0 < unknownCount {
+		// the names are an operator's text and could hold an address, so only their count is told
+		return refuse(fmt.Sprintf("lb_split_probe.interfaces names %d interface(s) services.yml's lb inventory does not hold as <host>-<interface>", unknownCount))
 	}
 	return settings
 }
