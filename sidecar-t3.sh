@@ -83,9 +83,10 @@ suites() {
   if [ "$cadence" = nightly ] || stack_up; then
     go_t3 . -tags "$tags,sidecar_localstack" -run '^TestFileClustersConformOnTheLocalStack$'
     go_t3 ./model -tags "$tags,sidecar_localstack" -run '^TestConfigLogSequencerPassesTheStoreSuiteOnMinio$'
+    go_t3 ./gkm -tags "$tags,sidecar_localstack" -run '^(TestGkmStoreSuiteOnTheLocalStack|TestGkmRoutesOnTheLocalStack)$'
     go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestT3'
   else
-    skip "blobsuite on FileClusters, the config log on MinIO and T3's Nets: the local stack's MinIO does not answer (sidecar/local/stack.sh up)"
+    skip "blobsuite on FileClusters, the config log on MinIO, gkm's store suite and routes and T3's Nets: the local stack's MinIO does not answer (sidecar/local/stack.sh up)"
   fi
 }
 

@@ -24,7 +24,7 @@ Inputs were selected from Ubuntu snapshot `20260927T000000Z`.
 
 | Services | Additional or updated packages per target |
 | --- | --- |
-| API, Alt, Connect, DNS, DNS edge, evs, Gossip, MCP, mxedge platform, Taskworker | `ca-certificates` `20260601~24.04.1`; `openssl` and `libssl3t64` `3.0.13-0ubuntu3.15` |
+| API, Alt, Connect, DNS, DNS edge, evs, gkm, Gossip, MCP, mxedge platform, Taskworker | `ca-certificates` `20260601~24.04.1`; `openssl` and `libssl3t64` `3.0.13-0ubuntu3.15` |
 | Proxy | The same three packages plus curl `8.5.0-2ubuntu10.15` and its complete selected dependency/recommendation closure: 22 packages per target |
 
 Across amd64 and arm64 there are 40 distinct payloads: four `all` packages and
