@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T04:33:20Z",
+  "observed_at": "2026-11-10T05:05:45Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -28,17 +28,18 @@
     "pause_mechanism": "Submission workers and old supervisor stay stopped; epoch2 grading is not activated. Do not reinstate the global evaluation hold: it hides historical results."
   },
   "epoch2": {
-    "open": false,
+    "open": true,
     "database_round_created": true,
     "database_status": "open",
     "recorded_opens_at": "2026-11-10T04:28:28.670738Z",
     "recorded_closes_at": "2026-11-17T04:28:28.670738Z",
-    "public_intake_verified": false,
-    "public_api_failure": "503 source_not_ready; applies to discovery and epoch1 public result until serving runtime resolution is restored",
+    "public_intake_verified": true,
+    "public_api_failure": null,
+    "public_verification": "HTTP200 competition/info: epoch2/open, intake_ready=true, grading_ready=false, publication_held=true. Epoch1 result remains200 with69 entries and approved winner. Fee-free authenticated v2 preflight returned200 for the exact source/round; no job or fee created.",
     "native_read_only_diagnosis": "Passed: current frozen round, intake grant, API receipt and exact retained runtime manifest match local current settings. No grading authority inferred.",
     "baseline_ready": false,
     "grading_activated": false,
-    "transition": "round_created; public runtime resolution pending",
+    "transition": "intake_open; grading pending independent qualification",
     "api_intake_acknowledged": true,
     "api_acknowledged_at": "2026-11-09T22:07:43.172783Z",
     "api_runtime_image_digest": "sha256:cd9ef00c61fb7724ae582636b55029d3f7e408f3027bce5c48d5f93ed86f9e7e",
@@ -56,14 +57,14 @@
     "runtime_qualified": false,
     "qualification_receipts": "Four exact-version MinIO readbacks verified; retention through 2028-01-01. All ten source branches/config published and independently verified. Exact runtime envelope published and genuine API receipt recorded. Worker, baseline and distributed admission remain absent.",
     "rules": "G2 request/byte floors at 95%, no ceilings; G7 separate expected page/byte coverage floors at 95% of same-round baseline; takeover margin 26.9%",
-    "full_week_opening": "Native transition recorded a604800-second window at the database clock. Public API serving remains unverified; do not announce intake as live."
+    "full_week_opening": "Recorded604800-second window is now published by the live API. Intake is open; grading remains paused."
   },
   "external_deployment": {
     "epoch2_host_policy_config_requested": "a1d3981",
     "epoch2_host_policy_approval_sha256": "f6a7a370de6d088880a09345063eb945e620e6b30ef228690d6b1a14d86228eb",
-    "epoch2_host_policy_deployment_confirmed": false,
-    "user_deployment_report": "User reported API/config-updater deployed; fresh deployment requested after serving API source_not_ready differs from successful local native verification. Exact serving policy digest remains unverified.",
-    "epoch2_host_policy_deployment_action": "Deploy config-updater a1d3981 or later and restart serving API processes; no new API build, migration or vault update required.",
+    "epoch2_host_policy_deployment_confirmed": true,
+    "user_deployment_report": "User confirmed fresh API/config-updater redeployment; live API now resolves the created epoch2 and authenticated v2 preflight succeeds against its exact source identity.",
+    "epoch2_host_policy_deployment_action": "Intake deployment verified; no additional deployment requested at this checkpoint. Independent worker/baseline/two-host admission still required before scoring.",
     "config_main": "2350c76",
     "vault_main": "c0f9893",
     "api_restart_required": false,
@@ -104,14 +105,14 @@
   "intake_transition_launcher": {
     "path": "/usr/local/libexec/urnetwork/competition-scope-renewal-0b334f621-20261109-v1/advance-intake-once",
     "sha256": "01c322a0051b9718a9eda5cc9b28fe91e050f48b740dd44b19a1734aacecd6f4",
-    "purpose": "Pinned clean 0b334f621 runner completed the native round_created transition on2026-11-10. Worker/review commands remain false. Database epoch2 is open, but serving API source resolution fails; no successful public intake is claimed.",
+    "purpose": "Pinned clean 0b334f621 runner completed round_created on2026-11-10. Worker/review commands remain false. Public API intake and exact-identity preflight subsequently passed after redeployment.",
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
     "Shared private mount and namespace-local --wdns execution pass on both hosts. Final role-v3 inventories keep startup metadata separate from recovery authority and signed control requests now pass. Current evidence supersedes earlier prospective roles: EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Do not rebuild the qualified source image.",
-    "Both hosts now have role-v3 immutable inventories, independently rechecked genuine fingerprints and verified signed non-job availability. Deploy replacement future-epoch host policy matching these identities; old config67360e7 pins are obsolete. Do not invent qualification hashes or positive readiness flags.",
+    "Both hosts have role-v3 immutable inventories, independently rechecked genuine fingerprints and verified signed non-job availability. Configa1d3981 was deployed and public intake passed. Do not invent positive grading readiness flags.",
     "Both96 GiB volumes and offline image caches are active. Sille core policy is approved/applied and its native private boundary passed. Inherited-cpuset, canonical recovery-unit and nonexistent-unit ExecStart fixes are deployed/tested. See EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Keep execution disabled until independent grading admission.",
-    "Do not create another epoch2: the reserved round already exists with a full604800-second recorded window. Finish serving API/config convergence, verify public intake source/rules/status and restore public epoch1 result access. Local frozen-grant and retained-manifest checks pass. EPOCH-SOURCE.md records creation, not successful public admission.",
+    "Do not create another epoch2: it is open in the live API with a604800-second window, authenticated fee-free preflight passes, and epoch1 results remain readable. Keep intake live while preparing grading; EPOCH-SOURCE.md records the verified opening.",
     "Keep grading unactivated. Fresh baseline, runtime/containment qualification and cross-host operational admission proceed separately; no submission clocks may start before those grading gates."
   ]
 }

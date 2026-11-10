@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-10T05:14:45Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "epoch": 2,
+  "intake": {
+    "public_info_http": 200,
+    "status": "open",
+    "intake_ready": true,
+    "grading_ready": false,
+    "publication_held": true,
+    "opens_at": "2026-11-10T04:28:28.670738Z",
+    "closes_at": "2026-11-17T04:28:28.670738Z",
+    "authenticated_v2_preflight_http": 200,
+    "preflight_reward_eligible": true,
+    "preflight_patch_sha256": "273ee4fb70ea8fcdb44e6787fb5c54c85cbaf54c9883a66ab8a75e29f7e08e10",
+    "paid_or_queued_test_job_created": false,
+    "epoch1_public_result_http": 200,
+    "epoch1_entries": 69
+  },
+  "native_core_profile_observations": {
+    "scope": "Frozen image, non-root65532, core1:1, pinned inherited seccomp, cap-dropALL, readonly, networknone,128MiB/32pids, private engine, management CPUs. All three set-limit operations returnedEPERM; both query-only operations succeeded and core remained1:1. Probe containers were removed.",
+    "candidate_core_profile_sha256": "00ee51c9862878e7eb64f1e26e22e3108a58f4c6f1adc67da55e4976aaac8392",
+    "receipts": [
+      {"host_id":"sille","architecture":"amd64","sha256":"e6299672a688b0cf4484bbc72dd7f7c9d050b41687411c0c1c0d307d1abff3f7"},
+      {"host_id":"goofe","architecture":"amd64","sha256":"1511cdc0dca86555e6bf0292c2b9f40aca2675490a3e7d4a2103452cdb1ae664"},
+      {"host_id":"sille","architecture":"386","sha256":"2f6458f26fe23b3c87ac9770dbaa26e759623fc52c893712d22cea3ae5ee38cb"},
+      {"host_id":"goofe","architecture":"386","sha256":"4a9e0d76096c5c1941b14c90b429106f6c85747e3b62b401a3908e595942af23"}
+    ],
+    "private_receipt_directory_each_host": "/var/lib/urnetwork/competition-native-core-probe-20261110-v1",
+    "full_containment_or_grading_qualification": false
+  },
+  "compat_build_fix": {
+    "root_cause": "Linux386 Statfs_t Type/Bsize are32-bit; native readers assumed64-bit fields. Explicit widening preserves checked arithmetic and filesystem identity checks.",
+    "deterministic_regression": "TestManagementSshNativeFilesystemWordWidth passed onamd64 and386; pre-fix386 probe build failed with seven incompatible field uses.",
+    "full_agent_and_cli_suites": "passed",
+    "focused_race_runs": 3,
+    "deployed_agent_or_frozen_evaluator_image_changed": false
+  },
+  "parallel_controls_plan": {
+    "official_epoch_baseline_host": "sille",
+    "comparison_host": "goofe",
+    "replicates_per_host": 9,
+    "same_round_seed_source_image_workload_and_fixtures": true,
+    "independent_host_lifetimes": true,
+    "comparison_policy": "existing operational-admission/v1; raw-score relative difference at most5%; retain run-level variance,95% confidence intervals and p-values; do not claim statistical equivalence",
+    "no_host_specific_submission_scoring_baseline": true,
+    "no_measurements_started_at_this_checkpoint": true,
+    "remaining": [
+      "Qualify actual evaluation-path containment and independent cleanup, including safe host memory headroom.",
+      "Provision a scorer-three baseline producer matching the qualified local-fixture release; current historical dependency pins do not match that release.",
+      "Support concurrent host controls without inventing the official baseline digest before it exists; current distributed no-op path expects a baseline first.",
+      "Retain and publish the single Sille baseline, compare Goofe controls, obtain genuine host/worker grading receipts, then activate scoring."
+    ]
+  }
+}

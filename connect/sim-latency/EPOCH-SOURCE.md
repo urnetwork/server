@@ -15,17 +15,21 @@ identify production source.
 ## Epochs
 
 - [Production epoch 1 — initial baseline](#production-epoch-1--initial-baseline)
-- [Production epoch 2 — round created, public intake pending](#production-epoch-2--round-created-public-intake-pending)
+- [Production epoch 2 — intake open, evaluations paused](#production-epoch-2--intake-open-evaluations-paused)
 
-## Production epoch 2 — round created, public intake pending
+## Production epoch 2 — intake open, evaluations paused
 
 Published and independently checked against GitHub branch heads on 2026-11-09.
-The native transition created the round on 2026-11-10. **Public intake is not
-verified live: the serving API still returns `503 source_not_ready`.** Grading
-remains paused. Do not treat database creation as proof that submissions work.
+The native transition created the round on 2026-11-10. **Public intake is open;
+evaluations remain paused.** Verified live at05:05UTC: `/competition/info`
+returned200 with epoch2, `status: open`, `intake_ready: true`, and
+`grading_ready: false`. Authenticated `/competition/v2/score/preflight` also
+returned200 with the exact round/source identity and `reward_eligible: true`;
+this fee-free check created no job and is not a completed evaluation.
 The epoch-1 winner's reviewed product change and the approved prospective G2/G7
-instrument are included. The local read-only frozen-grant/runtime-manifest
-diagnostic passes; serving deployment/config convergence is being investigated.
+instrument are included. The serving source error cleared after API/config
+redeployment. Epoch-1 results remain publicly readable while epoch-2 grading
+and publication are held.
 
 | Identity | Value |
 |---|---|
