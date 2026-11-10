@@ -113,7 +113,7 @@
   },
   "next_actions": [
     "Await compiled-cache cleanup approval before Sille memory pressure qualification. A36GiB Go build cache in RAM has no active owner; nothing deleted. Goofe's production-size private-engine CPU/memory cleanup test already passed and is retained.",
-    "Qualify the epoch2 baseline producer host against the new image/source; its active legacy readiness is still epoch1. Keep genuine proof requirements, not edited positive flags. The corrected sealed baseline producer profile is installed and loader-validated.",
+    "Diagnose the terminal readiness-probe matchmaking-integrity failure before retrying. The independently rechecked baseline-producer image/fingerprint now match epoch2, but exact-round rebaseline is absent and the host is ineligible. The corrected sealed baseline producer profile is installed and loader-validated; no official R9 sample exists.",
     "Use the user's approved existing two-wave path: official R9 baseline first, then full R9 no-op admission on both private executor hosts concurrently. No measurements have started; preserve one shared official baseline and original qualification deadlines.",
     "Shared private mount and namespace-local --wdns execution pass on both hosts. Final role-v3 inventories keep startup metadata separate from recovery authority and signed control requests now pass. Current evidence supersedes earlier prospective roles: EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Do not rebuild the qualified source image.",
     "Both hosts have role-v3 immutable inventories, independently rechecked genuine fingerprints and verified signed non-job availability. Configa1d3981 was deployed and public intake passed. Do not invent positive grading readiness flags.",
