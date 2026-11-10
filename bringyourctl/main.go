@@ -53,6 +53,7 @@ Usage:
     bringyourctl db key-history-floor [--rollback | --restore]
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
     bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
+    bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -239,6 +240,14 @@ Options:
                    past SN epochs that are recorded with no recovery pending.
     --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
                    (or dry-run verifications) of one retention pass, 1 to 4.
+    --lock-timeout=<duration>  With db reindex-index, how long the rebuild
+                   waits for its table's lock to clear before it starts, and
+                   then for each lock and snapshot wait (Go duration, default
+                   1h).
+    --timeout=<duration>  With db reindex-index, the longest the rebuild may
+                   run (Go duration, default 8h).
+    --parallel=<n> With db reindex-index, the build's parallel maintenance
+                   workers, 0 to 8 (default 0: one cpu).
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -330,6 +339,8 @@ func main() {
 			dbCloseEvidenceRetention(opts)
 		} else if usageArchiveExport, _ := opts.Bool("usage-archive-export"); usageArchiveExport {
 			dbUsageArchiveExport(opts)
+		} else if reindexIndex, _ := opts.Bool("reindex-index"); reindexIndex {
+			dbReindexIndex(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -825,6 +836,57 @@ func usageArchiveExportControlChange(opts docopt.Opts, settings *server.Provider
 		return nil, false, errors.New("--remove deletes the export control; set fields without it")
 	}
 	return
+}
+
+// dbReindexIndex rebuilds one index with REINDEX INDEX CONCURRENTLY
+// (server.RebuildIndexConcurrently): reads and writes continue, the rebuild
+// waits for its table's lock to clear rather than queuing behind it, and a
+// failed rebuild's incomplete copy is dropped. --dry-run reads the index and
+// prints the plan. It exits non-zero on any failure, so a caller stops before
+// the next index.
+func dbReindexIndex(opts docopt.Opts) {
+	indexName, options, err := reindexIndexOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	result, err := server.RebuildIndexConcurrently(context.Background(), indexName, options)
+	if result != nil {
+		fmt.Printf("index %s table %s bytes_before %d bytes_after %d compact_estimate %d heap %d rebuilt %t elapsed %s\n",
+			result.IndexName, result.TableName, result.BytesBefore, result.BytesAfter, result.CompactBytes, result.HeapBytes, result.Rebuilt, result.Elapsed.Round(time.Second))
+	}
+	if err != nil {
+		panic(err)
+	}
+}
+
+// The index and the rebuild's bounds the options ask for. Durations are Go
+// durations; the rebuild refuses bounds it cannot honour.
+func reindexIndexOptions(opts docopt.Opts) (indexName string, options *server.IndexRebuildOptions, err error) {
+	indexName, _ = opts.String("<index>")
+	options = server.DefaultIndexRebuildOptions()
+	options.DryRun, _ = opts.Bool("--dry-run")
+	if value, _ := opts.String("--lock-timeout"); value != "" {
+		if options.LockTimeout, err = time.ParseDuration(value); err != nil {
+			return "", nil, fmt.Errorf("--lock-timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--timeout"); value != "" {
+		if options.Timeout, err = time.ParseDuration(value); err != nil {
+			return "", nil, fmt.Errorf("--timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--parallel"); value != "" {
+		if options.ParallelWorkers, err = strconv.Atoi(value); err != nil {
+			return "", nil, fmt.Errorf("--parallel: %w", err)
+		}
+	}
+	if err = options.Validate(); err != nil {
+		return "", nil, err
+	}
+	return indexName, options, nil
 }
 
 // dbAudit compares the live DB schema against the schema its recorded migration

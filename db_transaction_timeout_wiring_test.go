@@ -126,8 +126,10 @@ func TestLongOperationsLiftTransactionTimeout(t *testing.T) {
 		identifiers []string
 		literals    []string
 	}{
-		// a rebuild's discarded session (A1-A3 lift it with the helper)
-		{directory: ".", function: "dbMaintenanceRunReindex", identifiers: []string{"AcquireMaintenanceDbConn", "discardPgConnection"}},
+		// a rebuild's discarded session (A1-A3 lift it with the helper): the
+		// scheduled rebuilds (dbMaintenanceRunReindex) and the operator's
+		// (RebuildIndexConcurrently) both run through it
+		{directory: ".", function: "dbMaintenanceRunReindexWithin", identifiers: []string{"AcquireMaintenanceDbConn", "discardPgConnection"}},
 		// an operator VACUUM FULL's own discarded session
 		{directory: ".", function: "VacuumFullAllTables", identifiers: []string{"AcquireMaintenanceDbConn", "discardPgConnection"}, literals: []string{"SET transaction_timeout = 0"}},
 		// A4: a bounded pgstattuple_approx scan on a discarded session
