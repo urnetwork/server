@@ -336,7 +336,7 @@ func TestParamsMatchManifests(t *testing.T) {
 		}
 	}
 	p := BuildParams(ParamsInput{Template: TemplateR3Keep, Variant: VariantDefault, SiteUrl: "https://ur.io/", Token: "T", DailyDataGb: 30, Now: now})
-	if p["cta_url"] != "https://ur.io/o/keep?t=T" || p["daily_data_gb"] != "30 GB" {
+	if p["cta_url"] != "https://ur.io/o/keep?t=T" || p["daily_data_gb"] != "30 GiB" {
 		t.Errorf("keep params: %v", p)
 	}
 	p = BuildParams(ParamsInput{Template: TemplateR2Reason, Variant: VariantLapsed, SiteUrl: "https://ur.io", Token: "T", LastConnectAt: &last, Locale: "en", Now: now})

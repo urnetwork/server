@@ -366,7 +366,10 @@ func localeFromSession(clientSession *session.ClientSession) string {
 }
 
 // normalizeLocale keeps a BCP 47 tag's language and region ("de-DE", "zh-HK"),
-// lower-case language and upper-case region, or "" for junk.
+// lower-case language and upper-case region, or "" for junk. Dropping a
+// Chinese script never switches the characters (onboarding.TraditionalChinese):
+// zh-Hant and zh-Hant-US are kept as zh-Hant, zh-Hans-HK becomes zh, and where
+// the region implies the script it stands in for it (zh-Hant-TW -> zh-TW).
 func normalizeLocale(locale string) string {
 	locale = strings.TrimSpace(strings.ReplaceAll(locale, "_", "-"))
 	if locale == "" || locale == "*" || 32 < len(locale) {
@@ -382,14 +385,22 @@ func normalizeLocale(locale string) string {
 			return ""
 		}
 	}
-	if len(parts) == 1 {
-		return lang
+	normalized := lang
+	if 1 < len(parts) {
+		region := strings.ToUpper(parts[len(parts)-1])
+		if len(region) == 2 || len(region) == 3 {
+			normalized = lang + "-" + region
+		}
 	}
-	region := strings.ToUpper(parts[len(parts)-1])
-	if len(region) == 2 || len(region) == 3 {
-		return lang + "-" + region
+	if lang == "zh" {
+		if traditional := onboarding.TraditionalChinese(locale); traditional != onboarding.TraditionalChinese(normalized) {
+			if traditional {
+				return "zh-Hant"
+			}
+			return "zh"
+		}
 	}
-	return lang
+	return normalized
 }
 
 // ----- the step task -----
@@ -574,6 +585,9 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		})
 		offerByCountry = policy.OfferAllowed(row.Country)
 	}
+	feedbackSubmitted := onboardingFeedbackAnswered(model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt), func(name string) bool {
+		return model.HasOnboardingEvent(ctx, row.NetworkId, name)
+	})
 	facts := onboarding.Facts{
 		Path:           path,
 		HasEmail:       row.Email,
@@ -591,13 +605,36 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		// while no code reaches it (REVIEW.md finding 2): no offer email until
 		// offer.apple_email_enabled says the codes flow
 		NoOfferEmail:      !offerByCountry || (appleStore && path != onboarding.PathA && !cfg.Offer.AppleEmailEnabled),
+		Platform:          row.Platform,
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
-		FeedbackSubmitted: model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt) || model.HasOnboardingEvent(ctx, row.NetworkId, model.EventFeedbackSubmitted),
+		OfferEndsSoon:     offer != nil && onboarding.OfferEndsSoon(offer.ExpiresAt, now),
+		FeedbackSubmitted: feedbackSubmitted,
+		FeedbackEmailSent: onboardingFeedbackEmailSent(model.ListNetworkOnboardingEmails(ctx, row.NetworkId)),
 		EmailOpens:        model.CountOnboardingEvents(ctx, row.NetworkId, model.EventEmailOpened),
 	}
 	return facts, offer
+}
+
+// onboardingFeedbackEmailSent reports whether a network's campaign sends
+// (network_onboarding_email) include the feedback email.
+func onboardingFeedbackEmailSent(emails []*model.NetworkOnboardingEmail) bool {
+	for _, email := range emails {
+		if email.Template == onboarding.TemplateE4Feedback {
+			return true
+		}
+	}
+	return false
+}
+
+// onboardingFeedbackAnswered is the feedback step's FeedbackSubmitted fact:
+// the app's feedback form since sign-up (appFeedback), its
+// feedback.submitted event, or feedback.tapped, the one-tap answer from the
+// feedback email (recorded when the link resolves, whether or not the
+// reader then sends the app's form).
+func onboardingFeedbackAnswered(appFeedback bool, hasEvent func(name string) bool) bool {
+	return appFeedback || hasEvent(model.EventFeedbackSubmitted) || hasEvent(model.EventFeedbackTapped)
 }
 
 // ----- rendering -----
@@ -657,6 +694,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		ProvidersOnline: providers,
 		CountriesOnline: countries,
 		OfferExpiresAt:  offerExpires,
+		NoOfferEmail:    decision.NoOfferEmail,
 		OfferPriceUsd:   offerPrice,
 		RegularYearUsd:  regular,
 		TrialDays:       14,
@@ -679,7 +717,8 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 
 // providersOnline is the live provider and country count the E2 template
 // quotes, cached for an hour: it is one heavy query and every send in the hour
-// can share it.
+// can share it. 0/0 until a query succeeds, which BuildParams sends as empty
+// counts (the template then leaves the line out).
 var providersOnlineCache struct {
 	sync.Mutex
 	providers int
