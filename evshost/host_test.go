@@ -142,6 +142,34 @@ func newHostTestHost(t testing.TB, adjust func(host *sidecar.ServiceHost, deps *
 	return evsHost
 }
 
+// A write budget whose at_limit flag reads set on one cluster, as the budget loop sets it at the cohort limit.
+type hostTestFullBudget struct {
+	sidecar.WriteBudget
+	fullClusterId string
+}
+
+func (self hostTestFullBudget) AtLimit(clusterId string) bool {
+	return clusterId == self.fullClusterId
+}
+
+// The host holds its uploads to the cohort limit over the process's write budget (EVSB-M3-02): a cluster whose flag
+// reads set is full and no other is, and a budget that keeps no flag is never full.
+func TestHostHoldsUploadsToTheCohortLimit(t *testing.T) {
+	full := newHostTestHost(t, func(host *sidecar.ServiceHost, deps *HostDeps) {
+		host.Budget = hostTestFullBudget{WriteBudget: host.Budget, fullClusterId: "meta-1"}
+	})
+	if !full.clusterLimit.Full("meta-1") || full.clusterLimit.Full("meta-2") {
+		t.Fatal("the cohort limit does not read the budget's flag per cluster")
+	}
+	if refusal := full.clusterLimit.UploadRefusal(); refusal.GetCode() != protocol.EvsRefusalCode_EVS_REFUSAL_CLUSTER_FULL || refusal.GetRetryAfterMs() == 0 {
+		t.Fatalf("refusal %v", refusal)
+	}
+	plain := newHostTestHost(t, nil)
+	if plain.clusterLimit == nil || plain.clusterLimit.Full("meta-1") {
+		t.Fatal("a budget that keeps no flag reads full, or the host built no limit")
+	}
+}
+
 // Every seam given and the first cluster answering: ready, with nothing missing.
 func TestHostReadyWithEverySeam(t *testing.T) {
 	evsHost := newHostTestHost(t, nil)

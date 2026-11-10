@@ -15,7 +15,9 @@
 //   - Push: pushservice's hint writer on the block's Redis, which no sidecar_id resolver feeds yet
 //     (plan-KEYS-hint-addressing);
 //   - Redis, Metrics, Gates and the service token Authenticator from sidecarhost.NewServiceHost;
-//   - the segment route's receipt keys (HostReceiptKeysFileName), storage gate, HDD share and usage producer.
+//   - the segment route's receipt keys (HostReceiptKeysFileName), storage gate, HDD share and usage producer, and
+//     the cohort limit (evsservice.ClusterLimit, EVSB-M3-02) over the write budget's at_limit flags, so a repo on a
+//     metadata cluster at 80% raw or 70% inodes gets 507 CLUSTER_FULL for what §20.7's storage limit refuses.
 //
 // Ready is §19.4's evs row: the engine's probe of the first cluster, every cluster's sentinel read with this
 // block's credentials and one pool shown (server.FileClusters.Ready), and every seam no request is honored without.
@@ -135,9 +137,10 @@ type Host struct {
 	// what the engine cannot honor a request without and the block was not given, each said once
 	missing []string
 
-	quotaGate *evsservice.QuotaGate
-	hdd       *evsservice.HddAdmission
-	usage     *evsservice.UsageBatcher
+	quotaGate    *evsservice.QuotaGate
+	hdd          *evsservice.HddAdmission
+	usage        *evsservice.UsageBatcher
+	clusterLimit *evsservice.ClusterLimit
 	// what RunHost built for the engine, ended after it, in this order
 	closeAfter []func()
 	closeOnce  sync.Once
@@ -197,7 +200,13 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 			self.missing = append(self.missing, fmt.Sprintf("the receipt keys in %s (%v)", HostReceiptKeysFileName, err))
 		}
 	}
-	uploads := &evsservice.EvsUploadDeps{Keys: keys}
+	// the budget's at_limit flags, which a budget that keeps none reads as never full
+	clusterLimit, err := evsservice.NewClusterLimitOfHost(host, nil)
+	if err != nil {
+		return fail(err)
+	}
+	self.clusterLimit = clusterLimit
+	uploads := &evsservice.EvsUploadDeps{Keys: keys, ClusterLimit: clusterLimit}
 	if host.Quota != nil {
 		quotaGate, err := evsservice.NewQuotaGate(ctx, host, nil)
 		if err != nil {

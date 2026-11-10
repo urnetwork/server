@@ -4,6 +4,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/evsservice"
 	"github.com/urnetwork/sidecar/sidecartest"
 )
@@ -57,4 +60,35 @@ func TestEvsJobsBindTheHourlyEvacuation(t *testing.T) {
 	if err := evacuate.run(t.Context(), host, []byte("no-such-cluster")); err == nil {
 		t.Fatal("a run for a cluster this process does not hold ended clean")
 	}
+}
+
+// A cluster's run's usage producer reports a staged delta under producer taskworker through the host's Quota, sent by
+// the time the run's finish returns; a host with no Quota has none, and the evacuator alarms instead.
+func TestEvsEvacuationReportsStagedDeltasUnderTaskworker(t *testing.T) {
+	clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+	fake := sidecartest.NewFakeHost(t.Context(), clock, nil, nil, nil)
+	host := fake.ServiceHost()
+	usage, finish, err := evsEvacuateUsage(t.Context(), host)
+	if err != nil || usage == nil {
+		t.Fatalf("no producer over a host with a Quota: %v", err)
+	}
+	networkId := connect.Id(sidecar.Id{0x5e})
+	if err := usage.AddStoredDelta(networkId, -700); err != nil {
+		t.Fatal(err)
+	}
+	finish()
+	batches := fake.Quota.Batches()
+	if len(batches) != 1 || batches[0].Producer != sidecar.QuotaProducerTaskworker || len(batches[0].Events) != 1 {
+		t.Fatalf("batches %+v", batches)
+	}
+	if event := batches[0].Events[0]; event.NetworkId != networkId || event.StoredByteDelta != -700 || event.TransferByteCount != 0 {
+		t.Fatalf("event %+v", event)
+	}
+
+	host.Quota = nil
+	usage, finish, err = evsEvacuateUsage(t.Context(), host)
+	if err != nil || usage != nil {
+		t.Fatalf("a producer with no Quota: %v", err)
+	}
+	finish()
 }
