@@ -839,7 +839,15 @@ write_compose_env() {
 
 validate_output_tree() {
     local root="$1"
-    [ -z "$(evaluation_file find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ] ||
+    local invalid
+    if [[ "$subevaluation_scoped" = true && "$root" = "$work_dir" ]]; then
+        invalid="$(evaluation_diagnostic_find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ||
+            die "could not validate the diagnostic evidence tree"
+    else
+        invalid="$(evaluation_file find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ||
+            die "could not validate the candidate output tree"
+    fi
+    [ -z "$invalid" ] ||
         die "candidate output contains a non-regular entry"
 }
 
@@ -936,14 +944,18 @@ persist_evidence_tree() {
     if [[ "$subevaluation_scoped" != true ]]; then
         sudo -n chown -R "$worker_uid:$worker_gid" "$work_dir"
     fi
-    find "$work_dir" -type d -exec chmod u+rwx,go-rwx {} +
-    find "$work_dir" -type f -exec chmod 0400 {} +
+    evaluation_diagnostic_find "$work_dir" -type d -exec chmod u+rwx,go-rwx {} +
+    evaluation_diagnostic_find "$work_dir" -type f -exec chmod 0400 {} +
     validate_output_tree "$work_dir"
     local runtime_work_dir="$work_dir"
     work_dir="$artifact_dir/evidence"
     [ ! -e "$work_dir" ] || die "retained evidence directory already exists"
     install -d -m 0700 "$work_dir"
-    cp -a "$runtime_work_dir/." "$work_dir/"
+    if [[ "$subevaluation_scoped" = true ]]; then
+        evaluation_diagnostic_find "$runtime_work_dir" -mindepth 1 -maxdepth 1 -exec cp -a -t "$work_dir" -- {} +
+    else
+        cp -a "$runtime_work_dir/." "$work_dir/"
+    fi
     sync "$work_dir"
     if [[ "$subevaluation_scoped" = true ]]; then
         evaluation_host unmount-evidence

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T15:36:05Z",
+  "observed_at": "2026-11-10T15:59:07Z",
   "kind": "epoch2-composed-docker-control-release/v1",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "server_commit": "3ae3f1ecc199b515a92692d9024c6dbc1865d337",
@@ -57,7 +57,7 @@
     "agent_provenance": "Unchanged clean native3ae3f1ecc binary; only trusted shell assets changed in3ecbc3684",
     "builder_sha256": "586459b1b793271a6d0fc1f21c7b0f31986998baba4cbb59afa1624f95e13cbd",
     "ownership_sha256": "24271404d85ebcd4bcd0f4ba5268b45b90184a9ad42aa8e2f471b1841c2af733",
-    "active": true,
+    "active": false,
     "coordinator_profile_sha256": "e114ebbd9e95277afc178afad648fd64f8c4b57812244c24988d80d9b201f781",
     "sille_fingerprint_sha256": "84bfa6c1ad4d43ddf628969e8dfd26de5c9d7d9c216eeea717a77f492a9f85c2",
     "goofe_fingerprint_sha256": "62cc2383ac683635f2867eb7727dff9a973bdfecca2adf965a40043302c10e17",
@@ -93,6 +93,51 @@
     "retain_until": "2028-01-01T00:00:00Z",
     "exact_version_readback_verified": true,
     "qualification_scope": "Physical72GiB OOM/10-core saturation and935ms cleanup under the prior v6 startup; not a claim that v9 full execution is qualified"
+  },
+  "active_v10": {
+    "release": "/usr/local/libexec/urnetwork/competition-subeval-control-476839c6f-20261110-v10",
+    "shell_source_commit": "476839c6f",
+    "agent_sha256": "6a5fb296f12d8e5f89d1d743a1e3261ff4981922e7e6da864e2997aa5de53351",
+    "builder_sha256": "cd8df88eae20100012ab50023aa5660c72bf819d4fa2477c4ad9b2dd61cee47a",
+    "ownership_sha256": "4053d7f50b03ace2f46eafc3eb4bd22c90d473e0692b5090c9c7e620149f6f50",
+    "coordinator_profile_sha256": "a274405d6d68a8e45f4b1b5c3aaba0ce81b9be6c83c2ccd3c2a00299d42b7f56",
+    "native_boundaries_namespace_and_repeated_fingerprints_verified": true,
+    "signed_idle_verified_before_start": true,
+    "probe_image_digest": "sha256:60cda61f34f170e7580807f73ffd1a22696c411bca991c15e39f65e56901bce6",
+    "probe_payload_sha256": "748dce251f430f4af12ae82c728905f228a26d6452923eb3bcd3351200e011c2",
+    "sille": {
+      "fingerprint_sha256": "4e613e91967edf913e6bca8750239aa4f411627559276491a14a152929cd4c0b",
+      "agent_config_sha256": "20de067a5d077696ec207f1ae8115f70cb574195469feb76202c2da3129af49a",
+      "invocation_id": "4e5587f2061b425aa8a6ca1e35097192",
+      "run_id": "704f6e9e841c01cacf1ab02cdef9272d683e6e7a3273890884f00046b561eb38",
+      "started_at": "2026-11-10T15:42:09.253619565Z",
+      "deadline_at": "2026-11-10T15:57:09.253619565Z",
+      "state": "failed",
+      "cleanup_verified": true,
+      "stop_cleanup_verified": true
+    },
+    "goofe": {
+      "fingerprint_sha256": "df784b3ab48bec0d43a6f3b41d28994f7bea54f0523d4698b8e72051c5908a5e",
+      "agent_config_sha256": "df6c07fa10538981264bdbbdede3e1417c5755173ce3ebacd1beda7bfbb54276",
+      "invocation_id": "6d639340099a46ef8bfbd7e0632e372e",
+      "run_id": "31aa610fe69b924849e9da8ad6e2264d322d5d5df42d7eb23ac7c07f53154a3b",
+      "started_at": "2026-11-10T15:42:08.690614821Z",
+      "deadline_at": "2026-11-10T15:57:08.690614821Z",
+      "state": "failed",
+      "cleanup_verified": true,
+      "stop_cleanup_verified": true
+    },
+    "retained_failure": "Both candidate-build logs preserved. Failure is Docker scope rejection at tracked compiler CREATE; exact gate still unknown. Actual installed-CLI synthetic CREATE passes at12g memory/10g work with sealed source. A bounded root-only policy-refusal receipt is prepared to identify the remaining live difference without exposing request bodies or relaxing policy.",
+    "adjacent_completed_evidence_fix": "Completed evidence also traversed broker-owned compiler caches. The fixed top-level workspace is now excluded from completed snapshots as well as failure snapshots; candidate output subdirectories with the same name remain fully validated. Deterministic old-code failure and positive/hostile-output controls pass three repetitions; not installed yet."
+  },
+  "qualified_next_control_changes": {
+    "installed": false,
+    "private_refusal_receipts": "Before returning the unchanged generic403, persist a root-only receipt with the exact failed policy reason, request digest/size, method/path and no body/header/query data. Owner setting caps reason bytes, preserves a valid UTF-8 boundary and caps receipt count through existing operation admission. No upstream mutation or retry authority is added.",
+    "completed_evidence": "Use the same fixed top-level compiler workspace exclusion for completed evidence; other paths retain ordinary validation. Find failures now fail closed. Same-named nested candidate output does not acquire an exclusion.",
+    "full_agent_cli_tests": {"passed":482,"failed":0,"skipped":1,"log":"/mnt/data/competition-control-tests-by/remapped-build-controls-20261110.GtACaj3t/private-refusal-agent-tests.jsonl","sha256":"8f99282fdc6b748bd9042d87abd11f8873e87efd325ea8f7512897f4a88cc96e"},
+    "helper_suite": "Expanded success-cache/build-access/failure-cache/source-copy/identity/ownership suite passed three repetitions in11.949s; prior scripts deterministically fail the completed-cache test.",
+    "race_tests": "Receipt privacy/size/UTF-8 and actual-CLI tracked CREATE controls passed three repetitions in2.502s after the final UTF-8 fix. The full ordinary run preceded that final UTF-8-only adjustment.",
+    "next_action": "Build a clean immutable agent/release, observe genuine new fingerprints on both idle hosts, then run one fresh operator probe to retain the exact live CREATE refusal. Do not register the one-per-round amendment until the final executable path works."
   },
   "provisioning_note": "The Sille provisioner refused an evaluator pin mismatch before unit changes. Its partial role directory was preserved as competition-sille-role-20261110-v8-incomplete-pin-preflight; the explicit expected corrected evaluator SHA was added before successful provisioning. No job was started by the refused operation."
 }

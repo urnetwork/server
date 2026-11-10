@@ -47,6 +47,7 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 		return err
 	}
 	if settings.MaximumOperations <= 0 || settings.MaximumConnections <= 0 || settings.MaximumHeaderBytes <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumRequestBytes <= 0 ||
+		settings.MaximumRefusalReasonBytes <= 0 || int64(settings.MaximumRefusalReasonBytes) > settings.MaximumDocumentBytes ||
 		settings.MaximumImageLoadBytes <= 0 || settings.MaximumBuildOutputBytes <= 0 || settings.MaximumResponseBytes <= 0 || settings.MaximumSpoolBytes <= 0 || settings.MaximumContextBytes <= 0 || settings.MaximumContextFileBytes <= 0 || settings.MaximumContextEntries <= 0 ||
 		settings.MaximumDocumentDepth <= 0 || settings.MaximumContextDepth <= 0 || settings.DirectoryBatch <= 0 || settings.CopyBufferBytes <= 0 || settings.HeaderTimeout <= 0 || settings.UploadTimeout <= 0 || settings.ClientWriteTimeout <= 0 ||
 		settings.OperationTimeout <= 0 || settings.BuildTimeout <= 0 || settings.BuildStopGrace <= 0 || settings.QuiesceTimeout <= 0 || settings.DrainAllowance <= 0 || settings.Now == nil ||

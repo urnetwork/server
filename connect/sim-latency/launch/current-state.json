@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T15:36:05Z",
+  "observed_at": "2026-11-10T15:59:07Z",
   "latest_executor_diagnosis": {
     "migration_head_verified": 950,
     "v7_native_probes": "Both terminal infrastructure failures before simulation; not running. Preserve their original identities and deadlines.",
     "first_refusal": "Reproduced with the installed Docker CLI against an inert daemon: image tag normalizes the single allowed offline alias with docker.io/. Proxy rejected that exact equivalent spelling.",
     "adjacent_defect": "All three trusted identity callers duplicated cap-drop ALL and no-new-privileges by composing explicit flags with scoped probe arguments. Fixed callers, retaining strict proxy admission and legacy security flags.",
     "regressions": "Real CLI tag failed before correction and passed three times afterward. Actual identity command fragments failed against archived HEAD for all three scoped callers and passed three times after correction, including legacy controls.",
-    "deployment": "v9 activated on both hosts after genuine idle/native checks and repeated fingerprints. Both fresh R1 probes passed source materialization, then failed during candidate build; cleanup_verified and stop_cleanup_verified true. Failure sanitizer could not traverse remapped compiler caches, so the exact initial builder refusal is not yet established. Confirmed adjacent source mode defect: host-worker-owned0700/0400 tree was handed to a different remapped compiler uid before final sealing. New pre-build source sealing and cache-excluding diagnostic retention each reproduce against prior scripts and pass three times; broader helper suite passed three times in12.357s. Full agent tests rerunning after updating the inert cache fixture to stream real tar. No amendment registered; official shared R9 baseline and admission unstarted; scoring remains paused. Sille pressure proof retained COMPLIANCE2028. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
+    "deployment": "v10 active; both fresh R1 probes failed at tracked compiler CREATE with cleanup verified. Corrected sanitizer preserved candidate-build.log: Docker scope rejected; exact private gate still unknown. Composed actual-CLI CREATE passes with sealed source and12g/10g resources. Next action: deploy bounded root-only scope-refusal receipts and the adjacent completed-evidence cache exclusion, then one fresh probe to identify the failed gate; no policy relaxation. Latest full agent/CLI run:482 passed,0 failed,1 intentional descriptor-helper skip; logSHA8f99282f. Expanded helper suite passed three times11.949s; targeted receipt/CLI race controls passed three times2.502s including Unicode-cap regression. Corrections not yet installed. No amendment registered; official shared R9 baseline/admission unstarted; scoring paused. See EPOCH2-COMPOSED-DOCKER-CONTROL-2026-11-10.json."
   },
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,

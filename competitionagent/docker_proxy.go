@@ -477,6 +477,10 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 	if kind == "http" {
 		path, scopeErr := self.verifyMutationScope(r.Context(), r, bodyPath)
 		if scopeErr != nil {
+			if err := self.persistScopeRefusal(id, r, bodyDigest, bodyBytes, scopeErr); err != nil {
+				http.Error(w, "Docker refusal custody unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "Docker scope rejected", http.StatusForbidden)
 			return
 		}

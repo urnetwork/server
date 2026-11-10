@@ -99,6 +99,18 @@ evaluation_seal_build_source() {
     find "$1" -type f ! -perm /111 -exec chmod 0444 {} +
 }
 
+# Only the fixed top-level compiler workspace is excluded from diagnostic
+# snapshots. Same-named paths below candidate output remain fully validated.
+evaluation_diagnostic_find() {
+    local root="$1"
+    shift
+    if [[ "$subevaluation_scoped" = true ]]; then
+        evaluation_file find "$root" -path "$root/tracked-build" -prune -o \( "$@" \)
+    else
+        evaluation_file find "$root" "$@"
+    fi
+}
+
 # Only the root-pinned public role can route prospective Docker calls. Neither
 # an inherited Docker context nor a generic sudo capability is used in scope.
 subevaluation_require_client() {

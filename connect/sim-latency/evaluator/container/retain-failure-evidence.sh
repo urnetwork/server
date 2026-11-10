@@ -46,7 +46,7 @@ destination_parent="$(realpath -e "$(dirname "$destination_dir")")"
 # cleanup. They are not diagnostic evidence and the worker cannot traverse
 # their remapped ownership. Never widen their permissions to collect logs.
 failure_evidence_find() {
-    evaluation_file find "$source_dir" -path "$source_dir/tracked-build" -prune -o \( "$@" \)
+    evaluation_diagnostic_find "$source_dir" "$@"
 }
 
 # These paths contain either per-stage throwaway credentials or the hidden
