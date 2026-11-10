@@ -3,15 +3,18 @@ package taskworker
 import (
 	"testing"
 
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/task"
 	"github.com/urnetwork/server/taskworker/work"
 )
 
 // §7's taskworker jobs are the sidecar's, so only the production registry claims them: a subnet
-// operator hosts no sidecar, so it mints no ephemeral client.
+// operator hosts no sidecar, so it mints no ephemeral client and holds no authorization log.
 func TestTeamTasksAreProductionOnly(t *testing.T) {
 	names := []string{
 		task.NewTaskTarget(work.ReapEphemeralClients).TargetFunctionName(),
+		task.NewTaskTarget(model.AppendConfigLogTickTask).TargetFunctionName(),
+		task.NewTaskTarget(work.ConfigLogRetention).TargetFunctionName(),
 	}
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
 		worker, err := InitTaskWorkerForProfile(t.Context(), nil, profile)
