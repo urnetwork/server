@@ -73,9 +73,13 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 			return errors.New("Docker role paths must be canonical and private")
 		}
 	}
+	workerSocket, buildSocket, socketErr := dockerRunSocketPaths(filepath.Join(plan.BaseDirectory, "clients"), plan.RunId)
+	if socketErr != nil {
+		return socketErr
+	}
 	if !pathWithin(plan.BaseDirectory, plan.StateDirectory) || !pathWithin(plan.BaseDirectory, plan.ScratchDirectory) || !pathWithin(plan.BaseDirectory, plan.ContextRoot) ||
 		!pathWithin(plan.BaseDirectory, plan.UpstreamSocketPath) || pathWithin(plan.StateDirectory, plan.UpstreamSocketPath) || pathWithin(plan.ScratchDirectory, plan.UpstreamSocketPath) || pathWithin(plan.ContextRoot, plan.UpstreamSocketPath) ||
-		plan.SocketPath != filepath.Join(plan.BaseDirectory, "clients", plan.RunId, "docker.sock") || plan.BuildSocketPath != filepath.Join(plan.BaseDirectory, "clients", plan.RunId, "build.sock") {
+		plan.SocketPath != workerSocket || plan.BuildSocketPath != buildSocket {
 		return errors.New("Docker owner endpoints differ from the installed private per-run role")
 	}
 	if len(plan.SocketPath) >= len(syscall.RawSockaddrUnix{}.Path) || len(plan.BuildSocketPath) >= len(syscall.RawSockaddrUnix{}.Path) {

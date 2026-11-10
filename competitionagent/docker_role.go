@@ -12,6 +12,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 // Writable owner scratch and worker jobs must occupy the separately verified
@@ -31,6 +32,9 @@ type DockerRoleConfig struct {
 // Root-pinned public metadata is compared, not generated from an SSH request.
 // No private agent document is made worker-readable to configure Docker.
 func (self DockerRoleConfig) validate(config *Config, protected bool) error {
+	if _, _, err := dockerRunSocketPaths(filepath.Join(config.BaseDirectory, "clients"), strings.Repeat("0", 64)); err != nil {
+		return err
+	}
 	if !filepath.IsAbs(self.ScratchDirectory) || filepath.Clean(self.ScratchDirectory) != self.ScratchDirectory ||
 		self.ScratchDirectory == config.BaseDirectory || !pathWithin(config.BaseDirectory, self.ScratchDirectory) {
 		return errors.New("Docker owner scratch must be beneath the explicit runtime base")

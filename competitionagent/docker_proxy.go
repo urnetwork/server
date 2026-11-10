@@ -634,6 +634,14 @@ func (self *DockerProxy) upstreamRequest(ctx context.Context, r *http.Request, p
 	request.Header = r.Header.Clone()
 	removeDockerHopHeaders(request.Header)
 	request.Body = file
+	if size == 0 {
+		// A non-nil reader with zero length becomes chunked on HTTP/1. Docker
+		// rejects that framing for bodyless actions even when it carries no bytes.
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		request.Body = http.NoBody
+	}
 	request.GetBody = nil
 	request.ContentLength = size
 	request.TransferEncoding = nil

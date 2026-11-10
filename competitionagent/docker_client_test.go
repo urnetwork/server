@@ -67,7 +67,11 @@ func newDockerClientTestFixture(t *testing.T) *dockerClientTestFixture {
 	settings := defaultDockerClientSettings()
 	settings.currentUid = func() uint32 { return config.WorkerUid }
 	runId := strings.Repeat("a", 64)
-	for _, path := range []string{filepath.Join(config.WorkDirectory, runId), filepath.Join(config.SocketDirectory, runId)} {
+	workerSocket, _, err := dockerRunSocketPaths(config.SocketDirectory, runId)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{filepath.Join(config.WorkDirectory, runId), filepath.Dir(workerSocket)} {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -178,7 +182,7 @@ func TestDockerClientExecStripsEnvironmentAndPinsUnixEndpoint(t *testing.T) {
 	if err := runDockerClient(ctx, fixture.config, fixture.runId, []string{"info"}, nil, &output, &diagnostic, fixture.settings); err != nil {
 		t.Fatal(err)
 	}
-	expectedSocket := "unix://" + filepath.Join(fixture.config.SocketDirectory, fixture.runId, "docker.sock")
+	expectedSocket := "unix://" + dockerClientTestSocket(t, fixture)
 	if !strings.HasPrefix(output.String(), "--host\n"+expectedSocket+"\n--config\n"+fixture.config.DockerConfigurationDirectory+"\ninfo\n") ||
 		!strings.Contains(output.String(), "DOCKER_HOST="+expectedSocket+"\n") || strings.Contains(output.String(), "synthetic-host-secret") {
 		t.Fatal("client did not retain its fresh environment and fixed endpoint")
@@ -193,7 +197,7 @@ func TestDockerClientExecStripsEnvironmentAndPinsUnixEndpoint(t *testing.T) {
 // failure is still acknowledged and keeps its exact submission-level status.
 func TestDockerClientBuildUsesTypedOwnerAndPreservesAcknowledgedFailure(t *testing.T) {
 	fixture := newDockerClientTestFixture(t)
-	socket := filepath.Join(fixture.config.SocketDirectory, fixture.runId, "docker.sock")
+	socket := dockerClientTestSocket(t, fixture)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +243,7 @@ func TestDockerClientOutputRequiresCompleteWrite(t *testing.T) {
 // private role metadata, expanding command authority or accepting unknown work.
 func TestHostFilesClientUsesTypedOwnerAndReturnsOnlyNamespaceProof(t *testing.T) {
 	fixture := newDockerClientTestFixture(t)
-	socket := filepath.Join(fixture.config.SocketDirectory, fixture.runId, "docker.sock")
+	socket := dockerClientTestSocket(t, fixture)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
