@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T16:03:58Z",
+  "observed_at": "2026-11-10T16:13:05Z",
   "kind": "epoch2-composed-docker-control-release/v1",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "server_commit": "3ae3f1ecc199b515a92692d9024c6dbc1865d337",
@@ -95,6 +95,7 @@
     "qualification_scope": "Physical72GiB OOM/10-core saturation and935ms cleanup under the prior v6 startup; not a claim that v9 full execution is qualified"
   },
   "active_v10": {
+    "active": false,
     "release": "/usr/local/libexec/urnetwork/competition-subeval-control-476839c6f-20261110-v10",
     "shell_source_commit": "476839c6f",
     "agent_sha256": "6a5fb296f12d8e5f89d1d743a1e3261ff4981922e7e6da864e2997aa5de53351",
@@ -148,8 +149,42 @@
     "composed_control": "Actual installed Docker CLI CREATE now uses the producer's coverage object, sealed source,12g memory/10g work and both isolated compiler-stage bindings.",
     "full_tests": {"passed":485,"failed":0,"skipped":1,"log":"/mnt/data/competition-control-tests-by/remapped-build-controls-20261110.GtACaj3t/coverage-identity-agent-tests.jsonl","sha256":"f69674a5def8b59a3fb03a705e5c9d7a267aa4aecf0518562440a3798cb6a05c"},
     "race_tests": "Coverage rejection/acceptance and actual-CLI controls passed three repetitions in3.200s.",
-    "installed": false,
-    "next_action": "Build/deploy the corrected immutable agent and prepared shell assets at signed idle boundaries, record repeated actual host fingerprints and run one fresh R1 probe. Keep all previous failures and customer clocks unchanged."
+    "installed": true,
+    "next_action": "Observe the active v11 probes through their original deadlines. Preserve all previous failures/customer clocks; register the amendment only after the final runtime path works."
+  },
+  "active_v11": {
+    "active": true,
+    "release": "/usr/local/libexec/urnetwork/competition-subeval-control-083479194-20261110-v11",
+    "server_commit": "083479194946378563e30188a64bd09fd2c1f8f9",
+    "native_agent": {"go_version":"go1.27.3","vcs_modified":false,"sha256":"5062ce2cdd4d1ff6e1a5d9ea1bf22dd3ef74b4b292bb43e102a464f065804255"},
+    "builder_sha256": "f03b7766893a6f449547030ebf7c47b395806e3c043072e0d85035f8eee30ef5",
+    "evaluator_command_sha256": "b4faa6b376d82d56d03b01cb2db06b494ff27ec4822150a2914771c2d589385b",
+    "ownership_sha256": "d13ed203e60e4dd0759e22c72a84faf78414eeeb3fe30a478ebcb496dde04e33",
+    "coordinator_profile_sha256": "c705722c1ee080391b8abe681feb18fb032ac514ee665fbe1d6563abbd4f5eff",
+    "native_resource_namespace_rechecks_and_signed_idle_passed_both": true,
+    "probe_oci_manifest": "sha256:1cb85ccbcbeef68dd21d8bb19eb7840f1d295a18b761885509adcfcbd7b5811c",
+    "probe_oci_payload_matches_installed_sha256": "33bebb5301ec2662925324b7566d090a0949f8d6dffb5dbb16857a461a4ccc35",
+    "sille": {
+      "fingerprint_sha256": "ca1ee8465eb15018e8dc693c965dcffa2634c1c933ca36e183922c56168f2ceb",
+      "agent_config_sha256": "b61c2fff2338be93791b5ede02f633a97b45333ab177375d830b1d2a08306a43",
+      "invocation_id": "21027487a0de4677966f08ecc6804c4a",
+      "run_id": "3c20072c9ab830aeca3673b3aa4c59a212f9093349db3c5b86fa433aadfacfc0",
+      "started_at": "2026-11-10T16:12:54.477479199Z",
+      "deadline_at": "2026-11-10T16:27:54.477479199Z",
+      "last_observed_state": "active operator probe; not customer evaluation"
+    },
+    "goofe": {
+      "fingerprint_sha256": "3eeeb3ab8bdb0e101a40899e610bd2f8da60091db3a912fe6605cc7e748f05a4",
+      "agent_config_sha256": "ba5269782383707ae11ae4eb46bc890a39e19ec4f4f9d67ac2a6bfbddf28073a",
+      "invocation_id": "26dadc7cf19c47dd861d47a6acb656d0",
+      "run_id": "c6fbe6391f8af378648621ed5333af2dbef0c346d05d4897e3239a6f3a2e1035",
+      "started_at": "2026-11-10T16:12:54.174759355Z",
+      "deadline_at": "2026-11-10T16:27:54.174759355Z",
+      "last_observed_state": "active operator probe; not customer evaluation"
+    },
+    "grading_ready": false,
+    "official_r9_started": false,
+    "amendment_registered": false
   },
   "provisioning_note": "The Sille provisioner refused an evaluator pin mismatch before unit changes. Its partial role directory was preserved as competition-sille-role-20261110-v8-incomplete-pin-preflight; the explicit expected corrected evaluator SHA was added before successful provisioning. No job was started by the refused operation."
 }
