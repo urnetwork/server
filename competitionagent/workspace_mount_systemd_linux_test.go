@@ -114,5 +114,75 @@ func TestRuntimeWorkspaceSystemdNative(t *testing.T) {
 	if !present || !shared || slave || parentShared || parentSlave {
 		t.Fatal("bootstrap did not keep shared jobs below a private parent")
 	}
+	// PrivateMounts alone still makes the peer's mounts shared internally.
+	// Exercise the actual manager, then require the explicit slave correction.
+	for _, mode := range []string{"default", "slave"} {
+		peerName := strings.TrimSuffix(name, ".mount") + "-" + mode + ".service"
+		peerPath := filepath.Join("/run/systemd/system", peerName)
+		outputPath := filepath.Join(root, "peer-"+mode+".mountinfo")
+		body := "[Service]\nType=oneshot\nPrivateMounts=yes\nExecStart=/usr/bin/cat /proc/self/mountinfo\nStandardOutput=file:" + outputPath + "\n"
+		if mode == "slave" {
+			body += "MountFlags=slave\n"
+		}
+		peerFile, err := os.OpenFile(peerPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, writeErr := peerFile.WriteString(body)
+		if err := errors.Join(writeErr, peerFile.Close()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
+			defer cleanupCancel()
+			if output, err := exec.CommandContext(cleanupCtx, "systemctl", "stop", "--", peerName).CombinedOutput(); err != nil {
+				t.Errorf("stop synthetic peer: %v: %s", err, output)
+			}
+			if err := os.Remove(peerPath); err != nil {
+				t.Error(err)
+			}
+			if output, err := exec.CommandContext(cleanupCtx, "systemctl", "daemon-reload").CombinedOutput(); err != nil {
+				t.Errorf("reload after peer cleanup: %v: %s", err, output)
+			}
+		})
+		run("daemon-reload")
+		run("start", "--", peerName)
+		peerContent, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		peerMounts, err := parseRuntimeBoundaryMounts(peerContent, fixture.settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostContent, err := os.ReadFile("/proc/self/mountinfo")
+		if err != nil {
+			t.Fatal(err)
+		}
+		hostMounts, err := parseRuntimeBoundaryMounts(hostContent, fixture.settings)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var hostWork, peerWork, peerParent runtimeBoundaryMount
+		for _, mount := range hostMounts {
+			if mount.Target == jobs {
+				hostWork = mount
+			}
+		}
+		for _, mount := range peerMounts {
+			if mount.Target == jobs {
+				peerWork = mount
+			} else if mount.Target == root {
+				peerParent = mount
+			}
+		}
+		peerErr := validateRuntimeWorkspacePeer(hostWork, peerWork)
+		if mode == "default" && (peerErr == nil || !peerParent.Shared || peerWork.SharedGroup == 0) {
+			t.Fatal("counterfactual did not reproduce the manager's internally shared namespace")
+		}
+		if mode == "slave" && (peerErr != nil || peerParent.Shared || peerParent.Id == 0) {
+			t.Fatalf("explicit slave mode did not preserve one-way propagation: %v", peerErr)
+		}
+	}
 	t.Log("native mount manager identity and job-only propagation verified")
 }
