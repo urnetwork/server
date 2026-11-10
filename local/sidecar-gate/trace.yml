@@ -234,7 +234,7 @@ rows:
     gate: M1
     task: TEST-M1-09
     tests:
-      - {repo: server, package: ./sidecart3, names: [TestInlinePathFailsAPlantedPostgresRead, TestInlinePathFailsOneRedisCallOverItsRow], tags: "sidecar_testhooks,sidecar_pending"}
+      - {repo: server, package: ./sidecart3, names: [TestInlinePathFailsAPlantedPostgresRead, TestInlinePathFailsOneRedisCallOverItsRow], tags: "sidecar_testhooks,sidecar_pending", stores: true}
   - id: I-13
     gate: M1
     task: TEST-M1-06
@@ -242,7 +242,9 @@ rows:
       - {repo: sidecar, package: ./sidecartest, names: [TestEveryClassCatchesItsLeak, TestRemovingAFormFromTheScannerFailsTheSelfTest], tags: sidecar_leaktest}
       - {repo: sidecar, package: ./sidecartest, names: [TestTwoSidecarsExchangingCanariesScanClean, TestEachCaptureClassNamesItsLeak]}
   - {id: I-14, gate: M5}
-  - {id: I-15, gate: M1}
+  - id: I-15
+    gate: M2
+    schedules: [FS-14, FS-15, FS-16, FS-18, FS-20, FS-22, FS-23, FS-24, FS-62, "FS-72 (format-1)", "FS-82 (statement)", FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-117, FS-124, "FS-124 (forged)"]
   - id: I-16
     gate: M2
     schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
@@ -348,7 +350,9 @@ rows:
   - id: X2
     gate: M2
     schedules: [FS-1, FS-2, FS-3, FS-4, FS-5, FS-6, FS-7, FS-8, FS-9, FS-10, FS-11, FS-12, FS-17, FS-57, FS-58, FS-59, FS-60, FS-61, FS-62, FS-63, "FS-72 (format-1)", "FS-95 (format-1)", FS-113, "FS-114 (head)", "FS-114 (marker)", FS-116, FS-117, FS-118]
-  - {id: X3, gate: M1}
+  - id: X3
+    gate: M2
+    schedules: [FS-3, FS-14, FS-16, "FS-19 (config-read)", "FS-72 (format-1)", "FS-82 (statement)", "FS-95 (format-1)", FS-102, "FS-102 (forged)", FS-106, FS-113, FS-124, "FS-124 (forged)"]
   - {id: X4, gate: M5}
   - {id: X5, gate: M5}
   - id: X6
@@ -357,10 +361,24 @@ rows:
   - id: X7
     gate: M9
     schedules: [FS-31, FS-123]
-  - {id: X8, gate: M1}
-  - {id: X9, gate: M0}
-  - {id: X10, gate: M1}
-  - {id: X11, gate: M1}
+  - id: X8
+    gate: M1
+    task: PROTO-M1-11
+    tests:
+      - {repo: sidecar, package: ./sidecartest, names: [TestPushResyncsAfterAResidentRestart, TestPushControlIdDroppedOverP2pKeptOverH1]}
+      - {repo: server, package: ./connect, names: [TestSidecarPushFromARealResidentKeptByTheDispatcher], stores: true}
+  - id: X9
+    gate: M0
+    tests:
+      - {repo: sidecar, package: ./check, names: [TestX9, TestX9RowsAreSection46], tags: sidecar_check}
+  - id: X10
+    gate: M1
+    task: CORE-M1-13
+    tests:
+      - {repo: sidecar, package: ., names: [TestEnrollFailsClosedWithoutAdminRefused, TestKeychainPersistedOnlyAfterBind, TestCoreM1GateEnrollsAndRefreshesEndToEnd]}
+  - id: X11
+    gate: M2
+    schedules: [FS-17, FS-44, FS-45, FS-47]
   - id: X12
     gate: M2
     schedules: [FS-15, FS-18, FS-20, FS-22, FS-23, FS-24, FS-62, FS-102, "FS-102 (forged)", FS-103, FS-104, FS-105, FS-106, FS-117]
@@ -374,7 +392,9 @@ rows:
     gate: M2
     open: "people: two tracks, a second team on mail and burner (owner decision 9; §23.5)"
   - {id: X16, gate: M1}
-  - {id: X17, gate: M1}
+  - id: X17
+    gate: M4
+    schedules: [FS-21]
   - id: X18
     gate: M4
     schedules: [FS-38, "FS-38 (forged)", FS-56]

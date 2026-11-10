@@ -52,6 +52,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/urnetwork/sidecar/sidecartest/fault"
 )
 
 // The repos a commit set records, in §4.8's merge order. vault is not read.
@@ -219,6 +221,15 @@ func run(args []string, out io.Writer, errOut io.Writer) int {
 		settings:       defaultGateSettings(),
 		repoChecks:     !*list,
 		list:           *list,
+	}
+	// gates.yml is generated from sidecar's catalog and sweeps (C-18); a stale copy would report rows the design
+	// no longer holds, or miss ones it does, so the tool refuses it
+	if generated, err := fault.GateFile(fault.DefaultCatalog()); err != nil {
+		fmt.Fprintf(errOut, "sidecar-gate: generating gates.yml: %s\n", err)
+		return 1
+	} else if committed, err := os.ReadFile(options.gatesPath); err != nil || !bytes.Equal(committed, generated) {
+		fmt.Fprintf(errOut, "sidecar-gate: %s is not what catalog.yml and the sweeps generate; run SIDECAR_REGENERATE_GATES=1 go test ./local/sidecar-gate -run '^TestGatesYmlIsTheCatalogsGateMap$'\n", options.gatesPath)
+		return 1
 	}
 	var buffer bytes.Buffer
 	failed := false
