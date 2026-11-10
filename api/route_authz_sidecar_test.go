@@ -205,6 +205,8 @@ var sidecarAllowlist = []string{
 	"POST /sidecar/push-token",
 	// §18.8's unload beacon (TEAM-M1-10)
 	"POST /sidecar/close",
+	// §7.8's enrollment (TEAM-M1-04)
+	"POST /network/enroll",
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)",
 	"PUT /network/bridge/share/([^/]+)",

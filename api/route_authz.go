@@ -314,6 +314,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/auth-keys":                        routeAccessNetwork,  // lists auth keys (Network until TEAM-M6-03's roles)
 	"POST /network/auth-keys":                       routeAccessNetwork,  // creates an auth key, which enrolls devices (escalation)
 	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
+	"POST /network/enroll":                          routeAccessPublic,   // an auth key in the body is its credential (§7.8)
 	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5; owner-only until TEAM-M6-03's roles)
 	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
@@ -368,6 +369,8 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /oauth/revoke":                            routeAccessPublic,
 	"GET /oauth/userinfo":                           routeAccessPublic,
 	"POST /oauth/authorize":                         routeAccessNetwork, // grants a third-party OAuth client access to the account
+	"GET /oauth/authorize":                          routeAccessPublic,  // §7.8's edge login: forwards to the advertised consent page
+	"GET /\\.well-known/ur/id-jwks\\.json":          routeAccessPublic,  // the id- set's keys, edge login's ID tokens (§7.8)
 	"POST /oauth/consent":                           routeAccessNetwork, // OAuth consent screen data
 }
 
@@ -416,6 +419,8 @@ var strictExpRoutes = map[string]bool{
 	"POST /sidecar/push-token": true,
 	// §18.8's unload beacon (TEAM-M1-10), Public: a bearer is ignored there
 	"POST /sidecar/close": true,
+	// §7.8's enrollment (TEAM-M1-04), Public: a bearer is ignored there
+	"POST /network/enroll": true,
 	// §8.9's ack (ACL-M2-12)
 	"POST /acl/ack": true,
 	// §17.16's share tables (BRIDGE-M6-02)

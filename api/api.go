@@ -405,6 +405,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/account/api-key", handlers.CreateApiKey),
 		router.NewRoute("POST", "/account/api-key/remove", handlers.DeleteApiKey),
 		router.NewRoute("GET", "/account/api-keys", handlers.GetApiKeys),
+		// §7.8's enrollment of a sidecar's client by an auth key (TEAM-M1-04)
+		router.NewRoute("POST", "/network/enroll", handlers.NetworkEnroll),
 		// §7.8's auth keys, which enroll devices (TEAM-M1-03)
 		router.NewRoute("GET", "/network/auth-keys", handlers.GetNetworkAuthKeys),
 		router.NewRoute("POST", "/network/auth-keys", handlers.CreateNetworkAuthKey),

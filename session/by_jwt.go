@@ -175,6 +175,12 @@ type ByJwt struct {
 	// client's owner row at mint; renewal and every credential derived from it
 	// keep it.
 	StrictExp bool `json:"strict_exp,omitempty"`
+	// the client declares it provides no egress (§20.8): connect reads it here,
+	// so it needs no query to keep the client out of the concurrent and create
+	// caps and refuse it Public contracts. Set from the client's owner row at
+	// mint; renewal and every credential derived from it, window clients
+	// included, keep it.
+	DeclaresNoEgress bool `json:"declares_no_egress,omitempty"`
 	// the API key this credential descends from through an auth code. The
 	// credential ends when the key is removed (ValidateByJwtState). A credential
 	// minted by the key itself, a client token of an embed backend, has none:
@@ -857,6 +863,7 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		Principal:        self.Principal,
 		LagGuest:         self.LagGuest,
 		StrictExp:        self.StrictExp,
+		DeclaresNoEgress: self.DeclaresNoEgress,
 		ApiKeyId:         self.ApiKeyId,
 		DeviceId:         &deviceId,
 		ClientId:         &clientId,

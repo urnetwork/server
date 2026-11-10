@@ -49,6 +49,11 @@ func TestSidecarSyncPollHoldsUntilAHint(t *testing.T) {
 		if err := model.SidecarHint(ctx, []server.Id{clientId}, &sidecar.ClientHint{Topic: sidecar.PushTopicTeam, Version: 4}); err != nil {
 			t.Fatal(err)
 		}
+		// a poll's one PostgreSQL write is an ephemeral client's lease touch, at most once per marker
+		// (TEAM-M1-10's TestSidecarSyncPollTouchesTheLease): with the marker held, the path takes none
+		server.Redis(ctx, func(r server.RedisClient) {
+			server.Raise(r.Set(ctx, pushservice.HintPollKey(connect.Id(clientId)), "1", time.Minute).Err())
+		})
 		attempts, stopDeny := server.DenyPostgresForTest(t)
 		first, err := SidecarSyncPoll(nil, clientSession)
 		if err != nil {
