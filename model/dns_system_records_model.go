@@ -1,16 +1,25 @@
 package model
 
-// §12.7's system records (DNS-M5-11; R-DNS-1, R-DNS-2, R-DNS-9, D-DNS-6,
-// D-SMTP-5, D-SMTP-19): each zone's set is one pure function of its state, so
-// every toggle recomputes the whole set rather than patching it, and M7's and
+// §12.7's system records (DNS-M5-11, DNS-M7-01; R-DNS-1, R-DNS-2, R-DNS-9,
+// D-DNS-6, D-SMTP-5, D-SMTP-19): each zone's set is one pure function of its
+// state, so every toggle recomputes the whole set rather than patching it, and
 // M8's mail rows join this one place.
 //
-//   - <net>.<root> at M5, mail off: @ and * MX 0 . (RFC 7505), @ TXT
+//   - <net>.<root> with mail off (M5): @ and * MX 0 . (RFC 7505), @ TXT
 //     v=spf1 -all, and _dmarc p=reject with strict alignment, never ruf or fo;
 //     * A and AAAA, kind edge, only with an edge grant, and @'s only while the
 //     apex is published (plan-DNS-edge-record-trigger). * is never a CNAME.
 //     _dmarc carries no rua until network_dns_zone.report_token has §2.8's v9
 //     row (plan-DNS-rua-token's interim), and p=reject stands without it.
+//   - <net>.<root> with mail on (M7): @'s and *'s MX 10 mx.<net>.<root>, so
+//     every burner label under * takes mail with no record and no state (F10;
+//     §15.9); mx A and AAAA, kind router, which an edge answers from the router
+//     interfaces whose 25 banner passes (§12.6); and b, the envelope domain
+//     (§14.6), MX 10 mx.<net>.<root> and TXT v=spf1 include:_spf.<root> -all.
+//     @'s SPF stays -all, since SPF never aligns on the header domain
+//     (D-SMTP-5). Mail off takes all of it back to the M5 set. _25._tcp.mx's
+//     TLSA is /dns/key-record's (DNS-M7-02), and a direct MX's addresses at mx
+//     are DNS-M7-03's, which this function's state then carries.
 //   - <root> (reading 19): SOA, NS and their glue, CAA per §13.8 with iodef,
 //     @ TXT v=spf1 -all, @ MX 10 to the report host, @ A and AAAA kind edge
 //     when the apex redirects, _dmarc strict with psd=y once company mail has
@@ -20,8 +29,9 @@ package model
 // A reconcile writes only what differs from the stored rows of the owners and
 // types its set manages, through §12.6's one write path, and writes no
 // journal row when nothing changed. A user row at a managed key is left, since
-// keeping users off system keys is the record API's (DNS-M5-12). Nothing in
-// either set counts against dns_entries: system and edge kinds are free (§12.7).
+// keeping users off system keys is the record API's (DNS-M5-12), and §12.7
+// refuses users b and mx. Nothing in either set counts against dns_entries:
+// system, edge and router kinds are free (§12.7).
 
 import (
 	"context"
@@ -38,10 +48,6 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// A zone whose mail is on, whose records are M7's (DNS-M7-01) and not built
-// here, so nothing publishes a mail-off set for a zone that expects mail.
-var ErrDnsMailRecordsUnbuilt = errors.New("dns mail records are not built")
-
 // _dmarc's policy for every zone (§12.7, §14.6): strict, never ruf or fo.
 const dnsDmarcPolicy = "v=DMARC1; p=reject; sp=reject; np=reject; adkim=s; aspf=s"
 
@@ -52,15 +58,37 @@ const dnsSpfNone = "v=spf1 -all"
 // token can equal (plan-DNS-rua-token).
 const dnsRootReportLocalPart = "root"
 
+// §12.7's mail owners in a network zone: the mail host, which every MX names
+// (owner decision 32), and the envelope domain (§14.6).
+const (
+	dnsMailHostLabel     = "mx"
+	dnsMailEnvelopeLabel = "b"
+)
+
+// The owner below <root> whose TXT lists the sending addresses (§14.6;
+// reading 16), which every envelope domain's SPF includes.
+const dnsSpfIncludeLabel = "_spf"
+
+// RFC 7505's null MX, mail off's answer at @ and *.
+const dnsNullMx = "0 ."
+
+// The preference every mail-on MX takes (§12.7), one host, so any number does.
+const dnsMailMxPreference = 10
+
 // What a network zone's system set is a function of: network_dns_zone's state.
 type DnsZoneState struct {
-	// The zone's name: <label>.<root>, fully qualified.
+	// The root the zone sits in, fully qualified: <root> of _spf.<root>.
+	Root string
+	// The zone's name: <label>.<root>, fully qualified, below Root.
 	Apex string
 	// * A and AAAA: an edge grant in the zone, or the system publish
 	// (plan-DNS-edge-record-trigger).
 	EdgeWildcard bool
 	// @ A and AAAA: the apex itself is published.
 	EdgeApex bool
+	// Mail on: network_dns_zone.mail, which POST /mail/enable sets through
+	// DnsSetMailRecordsInTx (MAIL-M7-22).
+	Mail bool
 }
 
 // A TXT row of one string.
@@ -76,16 +104,36 @@ func dnsSystemEdgeRows(owner string, ttl uint32) []dnsservice.DnsRecordSet {
 	}
 }
 
-// §12.7's <net>.<root> set for state, mail off, in owner then type order.
-func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) []dnsservice.DnsRecordSet {
+// §12.7's <net>.<root> set for state (see the file header), in owner then type
+// order, each row held to the wire's rules. Refuses a state whose apex is not
+// a zone below its root, since mail's SPF names the root.
+func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) ([]dnsservice.DnsRecordSet, error) {
+	root := dns.CanonicalName(state.Root)
 	apex := dns.CanonicalName(state.Apex)
+	if root == "." || apex == root || !dns.IsSubDomain(root, apex) {
+		return nil, fmt.Errorf("%w: %s is no zone below %q", ErrDnsOwnerOutsideZone, apex, state.Root)
+	}
 	wildcard := "*." + apex
-	nullMx := []string{"0 ."}
+	mx := []string{dnsNullMx}
+	if state.Mail {
+		mx = []string{fmt.Sprintf("%d %s.%s", dnsMailMxPreference, dnsMailHostLabel, apex)}
+	}
 	sets := []dnsservice.DnsRecordSet{
-		{Owner: apex, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: nullMx},
+		{Owner: apex, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
 		dnsSystemTxt(apex, dnsSpfNone, ttl.MailPolicy),
-		{Owner: wildcard, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: nullMx},
+		{Owner: wildcard, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
 		dnsSystemTxt("_dmarc."+apex, dnsDmarcPolicy, ttl.MailPolicy),
+	}
+	if state.Mail {
+		mailHost := dnsMailHostLabel + "." + apex
+		envelope := dnsMailEnvelopeLabel + "." + apex
+		spfInclude := dnsSpfIncludeLabel + "." + strings.TrimSuffix(root, ".")
+		sets = append(sets,
+			dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeA, Ttl: ttl.MxHost, Kind: dnsservice.DnsRecordKindRouter},
+			dnsservice.DnsRecordSet{Owner: mailHost, Type: dns.TypeAAAA, Ttl: ttl.MxHost, Kind: dnsservice.DnsRecordKindRouter},
+			dnsservice.DnsRecordSet{Owner: envelope, Type: dns.TypeMX, Ttl: ttl.Mx, Kind: dnsservice.DnsRecordKindSystem, Rdata: mx},
+			dnsSystemTxt(envelope, "v=spf1 include:"+spfInclude+" -all", ttl.MailPolicy),
+		)
 	}
 	if state.EdgeApex {
 		sets = append(sets, dnsSystemEdgeRows(apex, ttl.Edge)...)
@@ -93,15 +141,23 @@ func DnsSystemRecords(state *DnsZoneState, ttl *dnsservice.DnsTtlSettings) []dns
 	if state.EdgeWildcard {
 		sets = append(sets, dnsSystemEdgeRows(wildcard, ttl.Edge)...)
 	}
+	for index := range sets {
+		if err := sets[index].Validate(root); err != nil {
+			return nil, err
+		}
+	}
 	sortDnsRecordSets(sets)
-	return sets
+	return sets, nil
 }
 
 // The keys a network zone's system set manages: what DnsSystemRecords can
-// write at @, * and _dmarc.
+// write at @, *, _dmarc, mx and b, whether mail is on or off, so turning it
+// off deletes what turning it on wrote.
 func dnsZoneSystemKeys(apex string) []dnsservice.DnsRecordKey {
 	apex = dns.CanonicalName(apex)
 	wildcard := "*." + apex
+	mailHost := dnsMailHostLabel + "." + apex
+	envelope := dnsMailEnvelopeLabel + "." + apex
 	return []dnsservice.DnsRecordKey{
 		{Owner: apex, Type: dns.TypeMX},
 		{Owner: apex, Type: dns.TypeTXT},
@@ -111,7 +167,64 @@ func dnsZoneSystemKeys(apex string) []dnsservice.DnsRecordKey {
 		{Owner: wildcard, Type: dns.TypeA},
 		{Owner: wildcard, Type: dns.TypeAAAA},
 		{Owner: "_dmarc." + apex, Type: dns.TypeTXT},
+		{Owner: mailHost, Type: dns.TypeA},
+		{Owner: mailHost, Type: dns.TypeAAAA},
+		{Owner: envelope, Type: dns.TypeMX},
+		{Owner: envelope, Type: dns.TypeTXT},
 	}
+}
+
+// Turns a network's mail records in root on or off (§12.7, §14.6, §15.4;
+// R-DNS-1, R-DNS-9, D-DNS-6) in the caller's transaction, which must be read
+// committed: network_dns_zone.mail, then the zone's whole set recomputed by
+// DnsSystemRecords and written through §12.6's path. The zone and its label
+// come to be on first need, as /mail/enable is one (§12.5). One journal write a
+// transition, none otherwise. POST /mail/enable calls it in the transaction
+// that writes mail_network (MAIL-M7-22), and turning mail off calls it with
+// mail false. A restoring root answers dnsservice.ErrDnsRestoring and a
+// suspended zone ErrDnsZoneSuspended, and the caller rolls back, its own rows
+// with the flag, so mail is never on in one table and off in the other. ttl nil
+// takes dns.yml's. Returns the write, or nil when nothing was written.
+func DnsSetMailRecordsInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, mail bool, ttl *dnsservice.DnsTtlSettings) (*DnsWriteResult, error) {
+	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
+		return nil, ErrDnsUnlinked
+	}
+	root = dnsLabelRoot(root)
+	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them
+	if _, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root); err != nil {
+		return nil, err
+	}
+	lockDnsZoneInTx(ctx, tx, root, networkId)
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			INSERT INTO network_dns_zone (root, network_id, create_time, mail) VALUES ($1, $2, $3, $4)
+			ON CONFLICT (root, network_id) DO UPDATE SET mail = EXCLUDED.mail
+		`,
+		root,
+		networkId,
+		server.NowUtc(),
+		mail,
+	))
+	return EnsureNetworkZoneInTx(ctx, tx, networkId, root, ttl)
+}
+
+// DnsSetMailRecordsInTx in a transaction of its own.
+func DnsSetMailRecords(ctx context.Context, networkId server.Id, root string, mail bool) (*DnsWriteResult, error) {
+	var result *DnsWriteResult
+	var returnErr error
+	err := dnsCatchRefusal(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			result, returnErr = DnsSetMailRecordsInTx(ctx, tx, networkId, root, mail, nil)
+			if returnErr != nil {
+				panic(dnsWriteRefusal{err: returnErr})
+			}
+		}, server.TxReadCommitted)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, returnErr
 }
 
 // §12.7's <root> set (reading 19) from dns.yml's root_records, in owner then

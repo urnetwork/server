@@ -138,6 +138,11 @@ func dnsLabelRoot(root string) string {
 	return root
 }
 
+// Called with the network just before EnsureNetworkLabelInTx takes the label's
+// lock, so a test sees which locks its caller already holds there: a zone
+// writer must hold none of the zone's (dns_zone_model.go). nil in production.
+var Testing_DnsLabelLockBarrier func(networkId server.Id)
+
 // The network's label in root, allocating one on first need (§12.5): read,
 // first publish or order, or /mail/enable. Under the network's label lock, so
 // two first needs at once allocate one label.
@@ -146,6 +151,9 @@ func EnsureNetworkLabelInTx(ctx context.Context, tx server.PgTx, networkId serve
 		return "", ErrDnsLabelUnlinked
 	}
 	root = dnsLabelRoot(root)
+	if barrier := Testing_DnsLabelLockBarrier; barrier != nil {
+		barrier(networkId)
+	}
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`SELECT pg_advisory_xact_lock(hashtextextended('dns_label:' || $1::uuid::text, 0))`,

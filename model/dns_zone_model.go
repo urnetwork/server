@@ -43,8 +43,9 @@ var dnsZoneTtl = sync.OnceValue(func() *dnsservice.DnsTtlSettings {
 	return &settings.Ttl
 })
 
-// The zone's state as its system set reads it, or nil before its row.
-func getDnsZoneStateInTx(ctx context.Context, query server.PgCanQuery, root string, networkId server.Id) (state *DnsZoneState, mail bool) {
+// The zone's state as its system set reads it, with no root or apex, or nil
+// before its row.
+func getDnsZoneStateInTx(ctx context.Context, query server.PgCanQuery, root string, networkId server.Id) (state *DnsZoneState) {
 	result, err := query.Query(
 		ctx,
 		`SELECT edge_wildcard, edge_apex, mail FROM network_dns_zone WHERE root = $1 AND network_id = $2`,
@@ -54,7 +55,7 @@ func getDnsZoneStateInTx(ctx context.Context, query server.PgCanQuery, root stri
 	server.WithPgResult(result, err, func() {
 		if result.Next() {
 			state = &DnsZoneState{}
-			server.Raise(result.Scan(&state.EdgeWildcard, &state.EdgeApex, &mail))
+			server.Raise(result.Scan(&state.EdgeWildcard, &state.EdgeApex, &state.Mail))
 		}
 	})
 	return
@@ -66,6 +67,11 @@ func getDnsZoneStateInTx(ctx context.Context, query server.PgCanQuery, root stri
 // changed. ttl nil takes dns.yml's. Returns the write, or nil when nothing was
 // written. A suspended zone answers ErrDnsZoneSuspended, and its set waits for
 // Restore.
+//
+// The label's lock comes first and the zone's second, here and in every writer
+// of the zone's state, so two of them never wait on each other, and the state
+// is read under both, so a toggle committing meanwhile is read and not
+// written back over.
 func EnsureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server.Id, root string, ttl *dnsservice.DnsTtlSettings) (*DnsWriteResult, error) {
 	if !server.SidecarMg2Linked() || !server.SidecarMg5Linked() {
 		return nil, ErrDnsUnlinked
@@ -78,6 +84,7 @@ func EnsureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server
 	if err != nil {
 		return nil, err
 	}
+	lockDnsZoneInTx(ctx, tx, root, networkId)
 	server.RaisePgResult(tx.Exec(
 		ctx,
 		`
@@ -88,12 +95,14 @@ func EnsureNetworkZoneInTx(ctx context.Context, tx server.PgTx, networkId server
 		networkId,
 		server.NowUtc(),
 	))
-	state, mail := getDnsZoneStateInTx(ctx, tx, root, networkId)
-	if mail {
-		return nil, ErrDnsMailRecordsUnbuilt
-	}
+	state := getDnsZoneStateInTx(ctx, tx, root, networkId)
+	state.Root = root
 	state.Apex = label + "." + root
-	result, err := reconcileDnsSystemRowsInTx(ctx, tx, root, networkId, dnsZoneSystemKeys(state.Apex), DnsSystemRecords(state, ttl))
+	desired, err := DnsSystemRecords(state, ttl)
+	if err != nil {
+		return nil, err
+	}
+	result, err := reconcileDnsSystemRowsInTx(ctx, tx, root, networkId, dnsZoneSystemKeys(state.Apex), desired)
 	if err != nil {
 		return nil, err
 	}
@@ -132,6 +141,10 @@ func DnsSyncEdgeRecordsInTx(ctx context.Context, tx server.PgTx, networkId serve
 		return nil, ErrDnsUnlinked
 	}
 	root = dnsLabelRoot(root)
+	// the label's lock, then the zone's, as EnsureNetworkZoneInTx takes them
+	if _, err := EnsureNetworkLabelInTx(ctx, tx, networkId, root); err != nil {
+		return nil, err
+	}
 	lockDnsZoneInTx(ctx, tx, root, networkId)
 	server.RaisePgResult(tx.Exec(
 		ctx,
