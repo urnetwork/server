@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "kind": "operator-readiness-cleanup-observation/v1",
+  "observed_at": "2026-11-10T08:37:49Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "host_id": "goofe",
+  "run_id": "934ec6785208965eeb383c10ad4598c084a9946930358659868a495463fb5c07",
+  "purpose": "Cleanup of the failed operator-only R1 readiness probe; not a customer submission or official R9 measurement",
+  "manifest_sha256": "db743e4c7051d6af951bdc34a45217caf09d4adcf5da2606244f79dafac0eff2",
+  "cleanup_plan_sha256": "f4305d8daea3d23c38bc5311b7ee938dd48494da5726c4f6e31c43ceaa99bde6",
+  "operator_cleanup": {
+    "source_commit": "d97abc324",
+    "binary_sha256": "afb5cadd55a2e43691c00773a0446b4d7a8c58519b6fbe00ae3e9ef0586f7ef1",
+    "binary_path": "/usr/local/libexec/urnetwork/competition-operator-cleanup-d97abc324-20261110-v1/cleanup",
+    "unit": "urnetwork-goofe-operator-cleanup-20261110-v1.service",
+    "invocation_id": "6caabd231288444b86edf6b1176370d0",
+    "completed_at": "2026-11-10T08:36:44Z",
+    "result": "success",
+    "exit_status": 0,
+    "main_pid": 0,
+    "scope": "Exact authenticated cleanup plan after positive evaluator/owner stop observations; original frozen agent/config retained. No recovery-custody override or grading authority."
+  },
+  "original_recovery": {
+    "unit": "urnetwork-subeval-recovery.service",
+    "started_at": "2026-11-10T08:36:59Z",
+    "completed_at": "2026-11-10T08:37:00Z",
+    "result": "success",
+    "exit_status": 0,
+    "main_pid": 0,
+    "cleanup_verified": true,
+    "stop_cleanup_verified": true,
+    "recovery_active": false
+  },
+  "preserved": {
+    "failed_probe": true,
+    "original_manifest_and_clock": true,
+    "attempt_restarted": false,
+    "frozen_agent_replaced": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false
+  },
+  "operational_amendment": "User approved recording corrected executor-control releases and new host fingerprints, preserving round/source/scoring/submissions/clocks and requiring all containment and R9 admission checks. Amendment implementation and deployment remain pending.",
+  "evidence_limit": "Native unit journal and protected run-state observations; this public observation is not a MinIO retention receipt or host-admission certificate."
+}
