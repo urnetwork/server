@@ -49101,7 +49101,7 @@ Classes:
 
 EVSB-M3-01 (R-OPS-11, R-OPS-12, D-OPS-8, D-OPS-9, D-OPS-14, D-OPS-18, D-OPS-19,
 D-TRUST-7, FS-50, X13). monitor.yml's `file_clusters: {enabled: true}` block
-turns on §29.1-§29.5 and `sidecar_dump: {enabled: true}` turns on §29.6;
+turns on §29.1-§29.5 and §29.7, and `sidecar_dump: {enabled: true}` turns on §29.6;
 without its block a signal reports itself configured off, which raises no
 incident (today's production has no file cluster). The clusters come from
 vault's `file-clusters-monitor.yml`, whose MinIO user holds admin reads alone
@@ -49113,11 +49113,11 @@ at any hour from M3 through the pager (alert_pager.go). §19.8's business-hours
 pages wait for a business-hours path in the pager, and warn on Slack until it
 has one.
 
-This monitor publishes two gauges, pushed with the process's registry under
+This monitor publishes three gauges, pushed with the process's registry under
 warp: `urnetwork_filecluster_set_state{cluster,set,state}` (§29.1), state one
 of `protected`, `degraded`, `at_risk` or `unknown`, 1 under the set's state and
-0 under the others; and `urnetwork_filecluster_drive_rating_days{cluster}`
-(§29.4).
+0 under the others; `urnetwork_filecluster_drive_rating_days{cluster}`
+(§29.4); and `urnetwork_filecluster_exhaustion_days{cluster,resource}` (§29.7).
 
 ### 29.1 File-cluster protection states
 
@@ -49272,6 +49272,51 @@ Classes:
   generation is older than 26 h, or the newest checked did not verify.
 - `sidecar-dump-unobservable` (visibility): Mimir did not read, or either
   side publishes nothing.
+
+### 29.7 File-cluster cohorts and their exhaustion
+
+Probe: `filecluster-cohort`
+
+EVSB-M3-02 (§19.9's cohorts, first and triggers rows, D-OPS-17, D-OPS-22,
+owner decisions 136 and 145, FS-119). A metadata cluster's repos keep growing
+after `place_new` moves on, and a placed repo never moves, so each cluster is
+projected from its own slopes and the estate's free space moves nothing. Every
+30 min, per metadata cluster: raw space and inodes now from admin info (the
+line evs's 507 CLUSTER_FULL reads, through the budget loop's `at_limit`), their
+30-day slopes from each listed drive's `node_filesystem_avail_bytes` and
+`node_filesystem_files_free` now and 30 days back, and the busiest drive's
+`urnetwork_filecluster_drive_dwpd{window="7d"}` now and 30 days back; the first
+cluster's control plane apart, `urnetwork_filecluster_control_plane_bytes`
+(the nightly start's count of place/, proj/, projrows/, rev/, hold/ and the
+per-sidecar gkm/ objects), with its slope. Per segment cluster:
+`urnetwork_filecluster_hdd_drive_ops` and its 30-day trend against half of
+`urnetwork_filecluster_hdd_capacity`. Copy load has no series yet and is not
+projected; each finding says so.
+
+This publishes `urnetwork_filecluster_exhaustion_days{cluster,resource}`
+(resource `raw`, `inodes`, `wear`, `hdd_ops`): the days until the resource
+reaches its line at its 30-day slope, 0 at or past it, +Inf while it does not
+grow, and no series without a reading 30 days old. Lead times are 26 weeks
+until §23.7 sets them (g0-recheck-0-hdd-trigger #3).
+
+Classes:
+
+- `filecluster-cohort-limit` **WARN** (§19.8's business-hours page): the
+  cluster stands at 80% raw or 70% inodes, and evs refuses its repos' payload
+  507 CLUSTER_FULL.
+- `filecluster-cohort-exhaustion` **WARN** (§19.8's business-hours page): the
+  cluster's earliest exhaustion (80% raw, 70% inodes, a 0.75 DWPD 7-day mean)
+  falls inside the move tool's lead time; the finding names the estate's
+  earliest.
+- `filecluster-cohort-trigger` **WARN**: D-OPS-17's 50% raw or 40% inodes
+  reached, or any of its marks projected inside the next metadata cluster's
+  lead time (the 0.5 DWPD mark reached is §29.4's `filecluster-drive-dwpd-week`).
+- `filecluster-hdd-trigger` **WARN** (§19.8's business-hours page): a segment
+  cluster's projected drive operations reach half its measured capacity inside
+  the segment placement's lead time.
+- `filecluster-cohort-unobservable` (visibility): Mimir or admin info did not
+  read, no filesystem of a cluster's drives reached Mimir, or a cluster's
+  budget loop publishes no drive writes.
 
 ## 30. Sidecar services — §19.8's SLOs, failures and the primary
 

@@ -11,9 +11,10 @@ package monitor
 //   - one bounded instant query of the loopback Mimir through a services host, for the series the budget loop,
 //     the processes, the storage hosts and the dumps push. Mimir's lag suits these signals; the budget loop
 //     itself never reads Mimir.
-//   - the two gauges this monitor owns, §19.6's urnetwork_filecluster_set_state and §19.8's
-//     urnetwork_filecluster_drive_rating_days, on SidecarStorageGauges, which by default registers them in the
-//     process's prometheus registry; the continuous CLI pushes that registry under warp (server/grafana.go).
+//   - the gauges this monitor owns, §19.6's urnetwork_filecluster_set_state and §19.8's
+//     urnetwork_filecluster_drive_rating_days on SidecarStorageGauges and urnetwork_filecluster_exhaustion_days on
+//     FileClusterExhaustionGauges, which by default register in the process's prometheus registry; the continuous
+//     CLI pushes that registry under warp (server/grafana.go).
 //
 // No series, finding or page names a network or repo (D-OPS-8, I-13): clusters, sets, hosts, devices and
 // processes only.
@@ -72,7 +73,16 @@ var fileClusterStates = []string{fileClusterStateProtected, fileClusterStateDegr
 const (
 	fileClusterSetStateMetricName        = "urnetwork_filecluster_set_state"
 	fileClusterDriveRatingDaysMetricName = "urnetwork_filecluster_drive_rating_days"
+	fileClusterExhaustionDaysMetricName  = "urnetwork_filecluster_exhaustion_days"
 )
+
+// Where the cohort signal publishes §19.8's urnetwork_filecluster_exhaustion_days (SIGNALS.md §29.7): a gauge set
+// that also meets this publishes them. Implementations are safe for concurrent use.
+type FileClusterExhaustionGauges interface {
+	// Sets the cluster's days until resource is exhausted at its 30-day slope, +Inf while it does not grow, or
+	// with known false removes the series.
+	PublishExhaustionDays(clusterId string, resource string, days float64, known bool)
+}
 
 // The storage signals' settings: monitor.yml's file_clusters and sidecar_dump blocks (config.go) and every
 // line §19.6 and §19.8 draw. DefaultSidecarStorageSettings is the only source of a default.
@@ -149,6 +159,29 @@ type SidecarStorageSettings struct {
 	DumpRunMaxAge time.Duration
 	// The newest verified off-site generation older than this warns: 26 h.
 	DumpOffsiteMaxAge time.Duration
+
+	// §19.9's cohorts row (SIGNALS.md §29.7): a cluster's exhaustion is the first date its own growth reaches 80%
+	// raw, 70% inodes or a 0.75 DWPD 7-day mean on its busiest drive, and its cohort limit, where evs answers 507
+	// CLUSTER_FULL, is 80% raw or 70% inodes. Shares of capacity, and DWPD.
+	CohortRawLimit   float64
+	CohortInodeLimit float64
+	CohortWearLimit  float64
+	// D-OPS-17's marks, which order the next metadata cluster when reached or projected inside its lead time
+	// (§19.9's triggers row, owner decision 136): 50% raw, 40% inodes, a 0.5 DWPD 7-day mean.
+	TriggerRawShare   float64
+	TriggerInodeShare float64
+	TriggerWearDwpd   float64
+	// §19.9's hdd trigger: a segment cluster's 30-day trend of drive operations reaching this share of its
+	// measured capacity inside its lead time (g0-recheck-0-hdd-trigger): 0.5.
+	HddTriggerShare float64
+	// The span each slope is taken over: 30 d.
+	CohortTrendWindow time.Duration
+	// The lead times projections are held to: the move tool's (§19.9's cohorts row), the next metadata cluster's
+	// (§19.9's triggers row) and the segment placement's (hdd_trigger_lead_days), each 26 weeks until §23.7 sets
+	// its own (g0-recheck-0-hdd-trigger #3).
+	MoveToolLeadTime    time.Duration
+	NextClusterLeadTime time.Duration
+	HddTriggerLeadTime  time.Duration
 }
 
 // §19.6's and §19.8's lines, and the write budget's own defaults for its drive and depth.
@@ -182,6 +215,17 @@ func DefaultSidecarStorageSettings() *SidecarStorageSettings {
 		HddRefusalWindow:            24 * time.Hour,
 		DumpRunMaxAge:               25 * time.Hour,
 		DumpOffsiteMaxAge:           26 * time.Hour,
+		CohortRawLimit:              0.8,
+		CohortInodeLimit:            0.7,
+		CohortWearLimit:             0.75,
+		TriggerRawShare:             0.5,
+		TriggerInodeShare:           0.4,
+		TriggerWearDwpd:             0.5,
+		HddTriggerShare:             0.5,
+		CohortTrendWindow:           30 * 24 * time.Hour,
+		MoveToolLeadTime:            182 * 24 * time.Hour,
+		NextClusterLeadTime:         182 * 24 * time.Hour,
+		HddTriggerLeadTime:          182 * 24 * time.Hour,
 	}
 }
 
@@ -334,8 +378,9 @@ func fileClusterIdsOfKind(source FileClusterAdminSource, kind string) []string {
 
 // The gauges in a prometheus registry (see the file header). Safe for concurrent use.
 type prometheusSidecarStorageGauges struct {
-	setStateGauge   *prometheus.GaugeVec
-	ratingDaysGauge *prometheus.GaugeVec
+	setStateGauge       *prometheus.GaugeVec
+	ratingDaysGauge     *prometheus.GaugeVec
+	exhaustionDaysGauge *prometheus.GaugeVec
 
 	stateLock sync.Mutex
 	// the sets each cluster's last publish named
@@ -364,6 +409,10 @@ func NewPrometheusSidecarStorageGauges(registerer prometheus.Registerer) Sidecar
 			Name: fileClusterDriveRatingDaysMetricName,
 			Help: "Days until the cluster's first drive's SMART percentage used reaches 100 at its 30-day rate.",
 		}, []string{"cluster"})),
+		exhaustionDaysGauge: register(prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: fileClusterExhaustionDaysMetricName,
+			Help: "Days until the cluster's own growth reaches its cohort line for the resource at its 30-day slope (§19.9's cohorts row).",
+		}, []string{"cluster", "resource"})),
 		clusterSets: map[string][]string{},
 	}
 }
@@ -391,6 +440,14 @@ func (self *prometheusSidecarStorageGauges) PublishSetStates(clusterId string, s
 	}
 	slices.Sort(sets)
 	self.clusterSets[clusterId] = sets
+}
+
+func (self *prometheusSidecarStorageGauges) PublishExhaustionDays(clusterId string, resource string, days float64, known bool) {
+	if !known {
+		self.exhaustionDaysGauge.DeleteLabelValues(clusterId, resource)
+		return
+	}
+	self.exhaustionDaysGauge.WithLabelValues(clusterId, resource).Set(days)
 }
 
 func (self *prometheusSidecarStorageGauges) PublishDriveRatingDays(clusterId string, days float64, known bool) {
