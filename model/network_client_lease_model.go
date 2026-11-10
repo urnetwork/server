@@ -139,6 +139,12 @@ func TouchClientLease(ctx context.Context, clientId connect.Id) (returnErr error
 	return touchClientLeaseAt(ctx, server.Id(clientId), server.NowUtc())
 }
 
+// Testing_TouchClientLeaseAt is a poll's lease write at now rather than the
+// clock's, for a schedule on a fake clock (FS-37 on T3).
+func Testing_TouchClientLeaseAt(ctx context.Context, clientId server.Id, now time.Time) error {
+	return touchClientLeaseAt(ctx, clientId, now)
+}
+
 func touchClientLeaseAt(ctx context.Context, clientId server.Id, now time.Time) (returnErr error) {
 	if !server.SidecarMg1Linked() {
 		return nil
