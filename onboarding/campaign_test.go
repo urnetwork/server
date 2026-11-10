@@ -366,8 +366,9 @@ func TestFormatting(t *testing.T) {
 	if FormatCount(4812, "de") != "4.812" || FormatCount(4812, "fr") != "4\u00a0812" || FormatCount(4812, "ar") != "4,812" || FormatCount(4812, "!!") != "4,812" {
 		t.Errorf("count grouping by locale: %q %q %q %q", FormatCount(4812, "de"), FormatCount(4812, "fr"), FormatCount(4812, "ar"), FormatCount(4812, "!!"))
 	}
-	if FormatGb(30) != "30 GB" || FormatGb(2.5) != "2.5 GB" {
-		t.Error("gb")
+	// the free grant is 30 GiB (pro.yml free.data: 30gib), not 30 GB
+	if FormatGb(30) != "30 GiB" || FormatGb(2.5) != "2.5 GiB" {
+		t.Error("gib")
 	}
 	la, _ := time.LoadLocation("America/Los_Angeles")
 	at := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
@@ -440,7 +441,7 @@ func TestParamsMatchManifests(t *testing.T) {
 		t.Errorf("reason url / floor: %v", p)
 	}
 	p = BuildParams(ParamsInput{Template: TemplateE1Connect, Token: "T", SiteUrl: "https://ur.io", DailyDataGb: 30})
-	if p["cta_url"] != "https://ur.io/o/connect?t=T" || p["daily_data_gb"] != "30 GB" || p["offer_expires_at"] != "" {
+	if p["cta_url"] != "https://ur.io/o/connect?t=T" || p["daily_data_gb"] != "30 GiB" || p["offer_expires_at"] != "" {
 		t.Errorf("e1 params: %v", p)
 	}
 	if StepLandingSlug(TemplateE3LastChance) != "offer" || StepLandingSlug(TemplateE2Widget) != "widgets" {

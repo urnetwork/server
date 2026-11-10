@@ -167,3 +167,26 @@ func TestCountGroupingFollowsTheLocale(t *testing.T) {
 		}
 	}
 }
+
+// C4: the free grant is 30 GiB a day (config/all/pro.yml free.data: 30gib,
+// model.Gib), the apps and ur.io say GiB, and email_pro_value reads "10 TiB
+// of data a month instead of {daily_data_gb} a day", but daily_data_gb said
+// "30 GB". Every template that quotes it says GiB now.
+func TestDailyDataIsInGiB(t *testing.T) {
+	if got := FormatGb(30); got != "30 GiB" {
+		t.Errorf("FormatGb(30) = %q", got)
+	}
+	if got := FormatGb(2.5); got != "2.5 GiB" {
+		t.Errorf("FormatGb(2.5) = %q", got)
+	}
+	expires := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
+	for _, template := range []string{TemplateE1Connect, TemplateE3LastChance, TemplateE4bOffer} {
+		p := BuildParams(ParamsInput{
+			Template: template, Variant: VariantDefault, DailyDataGb: 30, OfferExpiresAt: &expires,
+			Location: time.UTC, Now: expires.Add(-24 * time.Hour), Token: "T", SiteUrl: "https://ur.io",
+		})
+		if got := p["daily_data_gb"]; got != "30 GiB" {
+			t.Errorf("%s: daily_data_gb %q", template, got)
+		}
+	}
+}

@@ -31,7 +31,7 @@ type ParamsInput struct {
 	// the template's locale (the store locale the Brevo template was rendered
 	// in); dates and times are formatted for it (localdate.go). "" = en
 	Locale string
-	// free daily data in GB (pro.yml free.data)
+	// free daily data in GiB (pro.yml free.data / model.Gib)
 	DailyDataGb float64
 	// days since sign-up
 	DaysActive int
@@ -196,12 +196,15 @@ func FormatCount(n int, locale string) string {
 	return message.NewPrinter(tag).Sprint(number.Decimal(n))
 }
 
-// FormatGb renders "30 GB" (whole) or "2.5 GB".
+// FormatGb renders an amount of data in GiB, "30 GiB" (whole) or "2.5 GiB":
+// the callers pass bytes / model.Gib, the free grant is 30 GiB a day
+// (config/all/pro.yml free.data: 30gib), and the apps, ur.io and the Pro line
+// ("10 TiB a month") all use the binary units.
 func FormatGb(gb float64) string {
 	if gb == math.Trunc(gb) {
-		return fmt.Sprintf("%d GB", int64(gb))
+		return fmt.Sprintf("%d GiB", int64(gb))
 	}
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", gb), "0"), ".") + " GB"
+	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", gb), "0"), ".") + " GiB"
 }
 
 // FormatLocalDateTime renders a deadline in the network's zone in English, e.g.
