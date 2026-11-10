@@ -7,6 +7,7 @@ import "errors"
 // This names an immutable source release, not an adjustable scoring setting.
 const roundBaselineLocalFixturesRelease = "coverage-local-fixtures/1"
 const roundBaselineImageBranchesRelease = "coverage-image-branches/1"
+const roundBaselinePrivateProbeRelease = "coverage-private-probe/1"
 
 // An omitted discriminator preserves every historical dependency byte. The
 // explicit new release is usable only with the prospective coverage contract.
@@ -15,7 +16,7 @@ func roundBaselinePreparationConfiguredDependencies(config roundBaselinePreparat
 	if err != nil || config.ReleaseKind == "" {
 		return dependencies, program, err
 	}
-	if (config.ReleaseKind != roundBaselineLocalFixturesRelease && config.ReleaseKind != roundBaselineImageBranchesRelease) || config.WorkCoveragePolicy == nil || program != "prepare-round-baseline-work-coverage.sh" {
+	if (config.ReleaseKind != roundBaselineLocalFixturesRelease && config.ReleaseKind != roundBaselineImageBranchesRelease && config.ReleaseKind != roundBaselinePrivateProbeRelease) || config.WorkCoveragePolicy == nil || program != "prepare-round-baseline-work-coverage.sh" {
 		return nil, "", errors.New("unsupported explicit baseline producer release")
 	}
 	// All other files retain the original sealed digests. These changed assets
@@ -34,10 +35,15 @@ func roundBaselinePreparationConfiguredDependencies(config roundBaselinePreparat
 	} {
 		dependencies[name] = digest
 	}
-	if config.ReleaseKind == roundBaselineImageBranchesRelease {
+	if config.ReleaseKind == roundBaselineImageBranchesRelease || config.ReleaseKind == roundBaselinePrivateProbeRelease {
 		// Metadata normalization lives only in the throwaway legacy candidate
 		// build layer. The control producer, scorer and frozen image are unchanged.
 		dependencies["Dockerfile.submission"] = "3cf1e3e7f5ddb036334106bc107468358c6c9800861d11125b4b1db7882f1c5f"
+	}
+	if config.ReleaseKind == roundBaselinePrivateProbeRelease {
+		// Scoped namespace inspection uses the proxy's existing non-root role;
+		// old sealed releases retain their original probe bytes.
+		dependencies["docker-id-map.sh"] = "23f0122b6842e6f0fa983d82d3c94e598c94fa2e28675b32bef0821df2950066"
 	}
 	return dependencies, program, nil
 }

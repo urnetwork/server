@@ -72,6 +72,14 @@ done
     die 'container UID is invalid'
 [[ "$container_gid" =~ ^[0-9]+$ ]] && [ "$container_gid" -le 4294967294 ] ||
     die 'container GID is invalid'
+probe_user=0:0
+if [[ "$subevaluation_scoped" = true ]]; then
+    [[ "$container_uid" = 65532 && "$container_gid" = 65532 ]] ||
+        die 'private role only translates its frozen container identity'
+    # Namespace maps describe the namespace, not the probe process's UID.
+    # Keep the private probe inside the same non-root role the proxy permits.
+    probe_user="$container_uid:$container_gid"
+fi
 for command in awk docker jq seq sha256sum sleep sudo; do
     command -v "$command" >/dev/null 2>&1 || die "required command missing: $command"
 done
@@ -100,7 +108,7 @@ probe_id="$(evaluation_docker run --detach \
     --pids-limit 16 \
     --memory 32m \
     --memory-swap 32m \
-    --user 0:0 \
+    --user "$probe_user" \
     --entrypoint /usr/bin/sleep \
     "${subevaluation_docker_args[@]}" \
     "${subevaluation_management_args[@]}" \
@@ -108,7 +116,6 @@ probe_id="$(evaluation_docker run --detach \
 [[ "$probe_id" =~ ^[0-9a-f]{64}$ ]] || die 'namespace-map probe id is invalid'
 
 if [[ "$subevaluation_scoped" = true ]]; then
-    [[ "$container_uid" = 65532 && "$container_gid" = 65532 ]] || die 'private role only translates its frozen container identity'
     namespace=""
     for _ in $(seq 1 100); do
         namespace="$(evaluation_host verify-id-map "$probe_id" 2>/dev/null || true)"

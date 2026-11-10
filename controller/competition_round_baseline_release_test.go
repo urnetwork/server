@@ -14,9 +14,9 @@ import (
 
 // The actual tracked fixture-corrected producer differs from the historical
 // release. Selection must authenticate those bytes without changing defaults.
-func TestRoundBaselineExplicitImageBranchReleaseMatchesTrackedProducer(t *testing.T) {
+func TestRoundBaselineExplicitPrivateProbeReleaseMatchesTrackedProducer(t *testing.T) {
 	coverage := model.DefaultCompetitionWorkCoveragePolicy()
-	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
+	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselinePrivateProbeRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
 	dependencies, program, err := roundBaselinePreparationConfiguredDependencies(config)
 	if err != nil || program != "prepare-round-baseline-work-coverage.sh" {
 		t.Fatal("explicit producer refused", err)
@@ -51,10 +51,30 @@ func TestRoundBaselineExplicitImageBranchReleaseMatchesTrackedProducer(t *testin
 		t.Fatal("historical release authority changed", err)
 	}
 	dependencies["evaluator-work-coverage.sh"] = "changed"
-	config.ReleaseKind = roundBaselineImageBranchesRelease
+	config.ReleaseKind = roundBaselinePrivateProbeRelease
 	fresh, _, err := roundBaselinePreparationConfiguredDependencies(config)
 	if err != nil || fresh["evaluator-work-coverage.sh"] != actual {
 		t.Fatal("one caller mutated another release inventory", err)
+	}
+}
+
+// A private probe correction cannot reinterpret already sealed release bytes.
+func TestRoundBaselinePrivateProbeReleasePreservesImageBranchInventory(t *testing.T) {
+	coverage := model.DefaultCompetitionWorkCoveragePolicy()
+	config := roundBaselinePreparationConfig{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork, WorkCoveragePolicy: &coverage}
+	previous, _, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || previous["docker-id-map.sh"] != "ecf319fccdd00a2ab76871ec0a29693abca83e3a99ee1ee5c508bc1b076d96a0" {
+		t.Fatal("previous probe authority changed", err)
+	}
+	config.ReleaseKind = roundBaselinePrivateProbeRelease
+	current, _, err := roundBaselinePreparationConfiguredDependencies(config)
+	if err != nil || current["docker-id-map.sh"] == previous["docker-id-map.sh"] {
+		t.Fatal("private probe correction not explicitly selected", err)
+	}
+	delete(previous, "docker-id-map.sh")
+	delete(current, "docker-id-map.sh")
+	if !reflect.DeepEqual(previous, current) {
+		t.Fatal("private probe correction changed an unrelated dependency")
 	}
 }
 
@@ -88,6 +108,8 @@ func TestRoundBaselineExplicitReleaseRejectsUnknownOrLegacyPolicy(t *testing.T) 
 		{ReleaseKind: roundBaselineLocalFixturesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy},
 		{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork},
 		{ReleaseKind: roundBaselineImageBranchesRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy},
+		{ReleaseKind: roundBaselinePrivateProbeRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyMinimumWork},
+		{ReleaseKind: roundBaselinePrivateProbeRelease, G2VolumePolicy: model.CompetitionG2VolumePolicyLegacy},
 	} {
 		if _, _, err := roundBaselinePreparationConfiguredDependencies(config); err == nil {
 			t.Fatal("unsupported producer/policy combination accepted")
