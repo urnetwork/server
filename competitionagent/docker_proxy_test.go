@@ -613,6 +613,18 @@ func TestDockerProxyFrozenBaseAliasMatchesMinimumWorkBuilder(t *testing.T) {
 	if response.Code != http.StatusForbidden || calls.Load() != 1 {
 		t.Fatal("foreign base alias reached the daemon")
 	}
+	for _, repository := range []string{
+		"registry.example/urnetwork/sim-latency-evaluator-base-id",
+		"docker.io/foreign/sim-latency-evaluator-base-id",
+		"docker.io/urnetwork/sim-latency-evaluator-base",
+	} {
+		response = httptest.NewRecorder()
+		fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost,
+			strings.Replace(path, "repo=urnetwork/sim-latency-evaluator-base-id", "repo="+repository, 1), http.NoBody))
+		if response.Code != http.StatusForbidden || calls.Load() != 1 {
+			t.Fatalf("foreign normalized alias reached daemon: %s", repository)
+		}
+	}
 }
 
 // Only the established build flags/resources/source identity family is legal.

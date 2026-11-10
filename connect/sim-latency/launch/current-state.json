@@ -1,6 +1,14 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T14:51:12Z",
+  "observed_at": "2026-11-10T15:04:46Z",
+  "latest_executor_diagnosis": {
+    "migration_head_verified": 950,
+    "v7_native_probes": "Both terminal infrastructure failures before simulation; not running. Preserve their original identities and deadlines.",
+    "first_refusal": "Reproduced with the installed Docker CLI against an inert daemon: image tag normalizes the single allowed offline alias with docker.io/. Proxy rejected that exact equivalent spelling.",
+    "adjacent_defect": "All three trusted identity callers duplicated cap-drop ALL and no-new-privileges by composing explicit flags with scoped probe arguments. Fixed callers, retaining strict proxy admission and legacy security flags.",
+    "regressions": "Real CLI tag failed before correction and passed three times afterward. Actual identity command fragments failed against archived HEAD for all three scoped callers and passed three times after correction, including legacy controls.",
+    "deployment": "Corrections not installed on either private host yet. Full competitionagent suite passed (38.980s); targeted tag/alias race tests passed three times (2.051s); identity regression passed three times. No amendment registered; official shared R9 baseline and host admission unstarted; scoring remains paused."
+  },
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",

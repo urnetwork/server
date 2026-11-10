@@ -459,10 +459,7 @@ if [[ "$subevaluation_scoped" = true ]]; then
     candidate_source_mount_args=(--mount "type=bind,src=$source_root,dst=/workspace,readonly")
 fi
 runtime_identity="$(evaluation_docker run --rm \
-    --network none \
-    --read-only \
-    --cap-drop ALL \
-    --security-opt no-new-privileges:true \
+    "${subevaluation_legacy_probe_args[@]}" \
     "${candidate_source_mount_args[@]}" "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$image_id" identity)"
 validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2

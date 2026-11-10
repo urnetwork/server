@@ -226,7 +226,11 @@ func (self *DockerProxy) verifyMutationScope(ctx context.Context, r *http.Reques
 		}
 	}
 	if parts[0] == "images" {
-		if parts[1] != self.plan.BaseImageDigest || r.URL.Query().Get("repo") != "urnetwork/sim-latency-evaluator-base-id" ||
+		// The Docker CLI normalizes the shorthand alias to Docker Hub's
+		// explicit domain. Both name the same single offline daemon alias.
+		repository := r.URL.Query().Get("repo")
+		if parts[1] != self.plan.BaseImageDigest ||
+			(repository != "urnetwork/sim-latency-evaluator-base-id" && repository != "docker.io/urnetwork/sim-latency-evaluator-base-id") ||
 			r.URL.Query().Get("tag") != strings.TrimPrefix(self.plan.BaseImageDigest, "sha256:") {
 			return "", errors.New("Docker image tag is outside the frozen source")
 		}

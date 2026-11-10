@@ -11,6 +11,9 @@ subevaluation_ownership_init() {
     subevaluation_docker_args=()
     subevaluation_run_label_args=()
     subevaluation_probe_args=()
+    # Legacy identity calls supply their own security flags; scoped probes
+    # already include them and must not duplicate Docker's list-valued options.
+    subevaluation_legacy_probe_args=(--network none --read-only --cap-drop ALL --security-opt no-new-privileges:true)
     subevaluation_management_args=()
     subevaluation_compose_args=()
     subevaluation_cleanup_filter_args=()
@@ -62,6 +65,7 @@ subevaluation_ownership_init() {
         --memory 4g --memory-swap 4g --pids-limit 1024
         "${subevaluation_management_args[@]}"
     )
+    subevaluation_legacy_probe_args=()
     subevaluation_run_label_args=(--label "com.urnetwork.competition.run-id=$subevaluation_run_id")
     subevaluation_compose_args=(--file "$directory/compose.subevaluation.yml")
     subevaluation_cleanup_filter_args=(

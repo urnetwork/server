@@ -606,8 +606,8 @@ else
 fi
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
-base_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id" identity)"
+base_identity="$(evaluation_docker run --rm "${subevaluation_legacy_probe_args[@]}" \
+    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id" identity)"
 jq -e --arg base_sha "$base_sha" --arg empty_patch "$EMPTY_PATCH_SHA256" --argjson source_epoch "$source_epoch" \
     '.schema == 1 and .image_kind == "evaluator-base" and
      .base_sha == $base_sha and .build_sha == $base_sha and
@@ -1741,8 +1741,8 @@ jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
     die "temporary candidate checkout does not match the canonical patch"
 [ "$(evaluation_docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
-candidate_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true --mount "type=bind,src=$candidate_source_root,dst=/workspace,readonly" \
+candidate_identity="$(evaluation_docker run --rm "${subevaluation_legacy_probe_args[@]}" \
+    --mount "type=bind,src=$candidate_source_root,dst=/workspace,readonly" \
     "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
 candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity")"
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \
