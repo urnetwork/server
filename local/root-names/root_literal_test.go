@@ -99,6 +99,12 @@ func scanRootLiterals(repos []rootLiteralRepo, roots []string) ([]rootLiteral, e
 	if len(roots) == 0 {
 		return nil, fmt.Errorf("no root to look for")
 	}
+	// an empty root would match nearly every literal, and pass nothing it means
+	for _, root := range roots {
+		if strings.Trim(root, ". ") == "" {
+			return nil, fmt.Errorf("an empty root %q", root)
+		}
+	}
 	pattern := rootLiteralPattern(roots)
 	literals := []rootLiteral{}
 	for _, repo := range repos {
@@ -346,9 +352,12 @@ func TestRootLiteralLintOnAFixture(t *testing.T) {
 	}
 }
 
-// A scan with no root to look for refuses rather than passing everything.
+// A scan with no root to look for, or an empty one, refuses rather than
+// reporting a meaningless result.
 func TestRootLiteralLintRefusesNoRoot(t *testing.T) {
-	if _, err := scanRootLiterals(rootLiteralRepos, nil); err == nil {
-		t.Fatal("a scan for no root passed")
+	for _, roots := range [][]string{nil, {}, {""}, {"user.example", " . "}} {
+		if _, err := scanRootLiterals(rootLiteralRepos, roots); err == nil {
+			t.Errorf("a scan for %q passed", roots)
+		}
 	}
 }
