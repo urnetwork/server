@@ -20,6 +20,7 @@ import (
 	"go/scanner"
 	"go/token"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -49,6 +50,10 @@ var rootLiteralRepos = []rootLiteralRepo{
 // dot: fixtures, other people's trees, and the artifact trees server's
 // test-dirs.sh prunes.
 var rootLiteralSkippedDirs = []string{"testdata", "node_modules", "vendor", "bin", "build", "profile", "temp"}
+
+// Fewer Go files than this in a repository's scan means its checkout is not
+// there; each of the three holds thousands.
+const rootLiteralMinimumGoFiles = 100
 
 // The last labels of the special-use domains (RFC 2606, RFC 6761). A root
 // under one is a test root, which code and tests may name freely.
@@ -93,24 +98,25 @@ func rootLiteralPattern(roots []string) *regexp.Regexp {
 }
 
 // Every string literal of every Go file under the repositories that names one
-// of roots, in walk order. Symbolic links below a repository's directory are
-// not followed.
-func scanRootLiterals(repos []rootLiteralRepo, roots []string) ([]rootLiteral, error) {
+// of roots, in walk order, and how many Go files each repository's scan read,
+// by its name. Symbolic links below a repository's directory are not followed.
+func scanRootLiterals(repos []rootLiteralRepo, roots []string) ([]rootLiteral, map[string]int, error) {
 	if len(roots) == 0 {
-		return nil, fmt.Errorf("no root to look for")
+		return nil, nil, fmt.Errorf("no root to look for")
 	}
 	// an empty root would match nearly every literal, and pass nothing it means
 	for _, root := range roots {
 		if strings.Trim(root, ". ") == "" {
-			return nil, fmt.Errorf("an empty root %q", root)
+			return nil, nil, fmt.Errorf("an empty root %q", root)
 		}
 	}
 	pattern := rootLiteralPattern(roots)
 	literals := []rootLiteral{}
+	repoGoFileCounts := map[string]int{}
 	for _, repo := range repos {
 		repoDir, err := filepath.EvalSymlinks(repo.dir)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", repo.name, err)
+			return nil, nil, fmt.Errorf("%s: %w", repo.name, err)
 		}
 		err = filepath.WalkDir(repoDir, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
@@ -129,6 +135,7 @@ func scanRootLiterals(repos []rootLiteralRepo, roots []string) ([]rootLiteral, e
 			if err != nil {
 				return err
 			}
+			repoGoFileCounts[repo.name] += 1
 			// most files name no root anywhere, so only those that do are tokenized
 			if !pattern.Match(source) {
 				return nil
@@ -161,10 +168,10 @@ func scanRootLiterals(repos []rootLiteralRepo, roots []string) ([]rootLiteral, e
 			return nil
 		})
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", repo.name, err)
+			return nil, nil, fmt.Errorf("%s: %w", repo.name, err)
 		}
 	}
-	return literals, nil
+	return literals, repoGoFileCounts, nil
 }
 
 // What literals break against allowlist, sorted: a literal in a file the list
@@ -295,9 +302,18 @@ func TestRootLiteralsStayOutOfCode(t *testing.T) {
 	if len(roots) == 0 {
 		t.Fatalf("no environment's dns.yml in %s names a root outside the special-use domains, so the lint would look for nothing", rootConfigDir)
 	}
-	literals, err := scanRootLiterals(rootLiteralRepos, roots)
+	literals, repoGoFileCounts, err := scanRootLiterals(rootLiteralRepos, roots)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// a checkout that is missing or empty would otherwise pass for want of code
+	for _, repo := range rootLiteralRepos {
+		if _, err := os.Stat(filepath.Join(repo.dir, "go.mod")); err != nil {
+			t.Errorf("%s at %s is no module checkout: %v", repo.name, repo.dir, err)
+		}
+		if repoGoFileCounts[repo.name] < rootLiteralMinimumGoFiles {
+			t.Errorf("the scan read %d Go files in %s, too few for a checkout of it", repoGoFileCounts[repo.name], repo.name)
+		}
 	}
 	for _, problem := range rootLiteralProblems(literals, readRootLiteralAllowlist(t, rootLiteralAllowlistPath)) {
 		t.Error(problem)
@@ -314,9 +330,13 @@ func TestRootLiteralLintOnAFixture(t *testing.T) {
 	for _, repo := range rootLiteralRepos {
 		repos = append(repos, rootLiteralRepo{name: repo.name, dir: filepath.Join(fixtureDir, repo.name)})
 	}
-	literals, err := scanRootLiterals(repos, []string{"User.Example."})
+	literals, repoGoFileCounts, err := scanRootLiterals(repos, []string{"User.Example."})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// the files under testdata and the dot directory, and the notes, were never read
+	if want := map[string]int{"server": 1, "connect": 2, "sidecar": 1}; !maps.Equal(repoGoFileCounts, want) {
+		t.Errorf("the scan read %v Go files, want %v", repoGoFileCounts, want)
 	}
 	problems := rootLiteralProblems(literals, readRootLiteralAllowlist(t, filepath.Join(fixtureDir, "allowlist.yml")))
 	want := []string{
@@ -356,7 +376,7 @@ func TestRootLiteralLintOnAFixture(t *testing.T) {
 // reporting a meaningless result.
 func TestRootLiteralLintRefusesNoRoot(t *testing.T) {
 	for _, roots := range [][]string{nil, {}, {""}, {"user.example", " . "}} {
-		if _, err := scanRootLiterals(rootLiteralRepos, roots); err == nil {
+		if _, _, err := scanRootLiterals(rootLiteralRepos, roots); err == nil {
 			t.Errorf("a scan for %q passed", roots)
 		}
 	}
