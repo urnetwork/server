@@ -79,8 +79,8 @@ func DefaultSettings() *Settings {
 }
 
 // The NetSettings T3's Nets build from, which fault's rules take to run a T3 row: settings.Net with
-// Engines hosting on server's stores, Platform running the clients on server's exchange, and the platform
-// fakes refused. Each Net arms server.Tx's pg-commit hook on t while it is open, so Nets are built one at
+// Engines hosting on server's stores, Platform running the clients on server's exchange, the platform
+// fakes refused, and a row's authorization log on server's sequencer. Each Net arms server.Tx's pg-commit hook on t while it is open, so Nets are built one at
 // a time, as sidecartest's hooks already require. A Net that opens a client needs server's schema, so a
 // row with clients runs in a TestEnv that applies the migrations. settings nil takes the defaults.
 func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
@@ -97,6 +97,9 @@ func NetSettings(t testing.TB, settings *Settings) *sidecartest.NetSettings {
 	netSettings.Platform = func(ctx context.Context, net *sidecartest.Net) (sidecartest.NetPlatform, error) {
 		return newExchangePlatform(ctx, t, settings.Exchange)
 	}
+	// a row's authorization log on server's sequencer over the Net's first metadata cluster (config_log.go)
+	netSettings.ConfigLogApi = ConfigLogApi()
+	netSettings.ConfigLogSettings = ConfigLogSuiteSettings()
 	return &netSettings
 }
 
