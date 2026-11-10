@@ -38,8 +38,9 @@
     "deployed_agent_or_frozen_evaluator_image_changed": false
   },
   "parallel_controls_plan": {
+    "approved_measurement_waves": "User approved existing two-wave qualification: official R9 baseline first, then independent R9 no-op admission on both private executors concurrently.",
     "official_epoch_baseline_host": "sille",
-    "comparison_host": "goofe",
+    "comparison_hosts": ["sille", "goofe"],
     "replicates_per_host": 9,
     "same_round_seed_source_image_workload_and_fixtures": true,
     "independent_host_lifetimes": true,
@@ -48,8 +49,8 @@
     "no_measurements_started_at_this_checkpoint": true,
     "remaining": [
       "Qualify actual evaluation-path containment and independent cleanup, including safe host memory headroom.",
-      "Provision a scorer-three baseline producer matching the qualified local-fixture release; current historical dependency pins do not match that release.",
-      "Support concurrent host controls without inventing the official baseline digest before it exists; current distributed no-op path expects a baseline first.",
+      "Finish native producer/containment qualification; the explicit scorer-three coverage-local-fixtures/1 dependency inventory is now installed and loader-validated, not measured.",
+      "Keep the existing two-wave protocol: no host-specific baseline, placeholder digest or unrecorded parallel-controls protocol.",
       "Retain and publish the single Sille baseline, compare Goofe controls, obtain genuine host/worker grading receipts, then activate scoring."
     ]
   }
