@@ -306,14 +306,19 @@ func TestNetworkClientOwnerColumns(t *testing.T) {
 	})
 }
 
-// CODESTYLE's migration rules for MG1's §7 part: new tables and their indexes
-// only.
+// CODESTYLE's migration rules for MG1's §7 part: new tables and their indexes,
+// and nullable columns on MG0's owner row, each lock bounded
+// (plan-TEAM-enroll-client-key's client_public_key).
 func TestSidecarMg1TeamPartIsAdditive(t *testing.T) {
 	statement := regexp.MustCompile(`(?is)^\s*(CREATE TABLE (network_auth_key|network_admin_event|admin_token_use)\b|CREATE INDEX (network_auth_key|network_admin_event|admin_token_use)_\w+ ON (network_auth_key|network_admin_event|admin_token_use)\b)`)
+	nullableColumn := regexp.MustCompile(`(?is)^\s*SET LOCAL lock_timeout = '\d+s';\s*ALTER TABLE network_client_owner ADD COLUMN \w+ \w+ NULL\s*$`)
 	refused := regexp.MustCompile(`(?i)\b(DROP|ALTER|RENAME|NOT VALID|TRUNCATE|UPDATE|DELETE|transaction_timeout)\b`)
 	for index, migration := range sidecarMg1TeamMigrations() {
 		switch value := migration.(type) {
 		case *SqlMigration:
+			if nullableColumn.MatchString(value.sql) {
+				continue
+			}
 			if !statement.MatchString(value.sql) {
 				t.Errorf("entry %d is not an addition: %s", index, value.sql)
 			}

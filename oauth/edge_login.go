@@ -49,6 +49,7 @@ import (
 	"github.com/urnetwork/sidecar/protocol"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 const (
@@ -212,40 +213,20 @@ func edgeOriginClient(ctx context.Context, origin *EdgeOrigin) (*Client, error) 
 }
 
 // Whether the user may sign in to the network's origins: an active member of
-// it. In a personal network that is its owner, signed in to that network; a team
-// network's members are TEAM-M6's, so its origins refuse every visitor until
-// they land.
+// it. In a personal network that is its owner, signed in to that network, its
+// member_id its user id; in a team, a live membership of the user's, not JIT
+// pending and inside its reauth_deadline, its member_id the row's (TEAM-M6-02).
+// A team's owner of record never signs in.
 func edgeVisitorIsMember(ctx context.Context, networkId server.Id, user *AuthorizingUser) (memberId server.Id, err error) {
 	if user.GuestMode || user.NetworkId != networkId {
 		return server.Id{}, ErrEdgeVisitorRefused
 	}
-	var adminUserId *server.Id
-	found := false
-	server.Db(ctx, func(conn server.PgConn) {
-		result, err := conn.Query(ctx, `SELECT admin_user_id FROM network WHERE network_id = $1`, networkId)
-		server.WithPgResult(result, err, func() {
-			if result.Next() {
-				server.Raise(result.Scan(&adminUserId))
-				found = true
-			}
-		})
-	})
-	if !found || adminUserId == nil || *adminUserId != user.UserId {
+	signIn := model.ResolveNetworkSignIn(ctx, user.UserId, networkId, server.NowUtc())
+	if signIn == nil {
 		return server.Id{}, ErrEdgeVisitorRefused
 	}
-	if server.SidecarMg6Linked() {
-		team := false
-		server.Db(ctx, func(conn server.PgConn) {
-			result, err := conn.Query(ctx, `SELECT EXISTS (SELECT 1 FROM network_team WHERE network_id = $1)`, networkId)
-			server.WithPgResult(result, err, func() {
-				if result.Next() {
-					server.Raise(result.Scan(&team))
-				}
-			})
-		})
-		if team {
-			return server.Id{}, ErrEdgeVisitorRefused
-		}
+	if signIn.MemberId != nil {
+		return *signIn.MemberId, nil
 	}
 	return user.UserId, nil
 }

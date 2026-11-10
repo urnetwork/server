@@ -316,7 +316,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/auth-key-revoke":                 routeAccessNetwork,  // revokes an auth key
 	"POST /network/enroll":                          routeAccessPublic,   // an auth key in the body is its credential (§7.8)
 	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
-	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5; owner-only until TEAM-M6-03's roles)
+	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
+	"POST /network/idp":                             routeAccessNetwork,  // adds a team's OIDC IdP (§7.6), the Owner's by its role gate
+	"GET /auth/sso/callback":                        routeAccessPublic,   // the state names its flow, taken once (§7.6)
 	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
 	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
 	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds
@@ -576,6 +578,14 @@ func applyRouteAccess(routes []*router.Route) []*router.Route {
 		if strictExpProofRoutes[routeKey] {
 			route = router.RequireStrictExpProof(route, func(r *http.Request, bearerToken string, byJwt *session.ByJwt) bool {
 				return !strictExpProofHolds(r, bearerToken, byJwt) && refuseP0Call(routeKey, p0RefusalProof, byJwt)
+			})
+		}
+		switch access {
+		case routeAccessNetwork, routeAccessAppAdmin:
+			// §7.5's roles: a team member's credential reaches the route only
+			// with its permission (route_permission.go)
+			route = router.RequireRolePermission(route, func(r *http.Request) bool {
+				return refuseRolePermission(r, routeKey)
 			})
 		}
 		switch access {

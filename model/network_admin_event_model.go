@@ -64,6 +64,9 @@ const (
 	AdminEventActorApiKey = "api_key"
 	// the server itself, as in a taskworker job
 	AdminEventActorSystem = "system"
+	// a sidecar whose signed statement the server carried out once it landed
+	// in the network's log (§7.9, §7.10), by sidecar_id
+	AdminEventActorSidecar = "sidecar"
 )
 
 // What an action acted on.
@@ -73,6 +76,8 @@ const (
 	AdminEventTargetApiKey  = "api_key"
 	// a team network's membership (§7.5), by member_id
 	AdminEventTargetMember = "member"
+	// a sidecar of the network (§5), by sidecar_id
+	AdminEventTargetSidecar = "sidecar"
 )
 
 // The actions. Each is a fixed word, never built from input.

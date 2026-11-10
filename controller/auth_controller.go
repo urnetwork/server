@@ -632,15 +632,19 @@ func RefreshToken(clientSession *session.ClientSession) (*RefreshTokenResult, er
 	// baked into the JWT being refreshed, so a rename via
 	// change-name/claim-name would never show up in the client until it
 	// happened to get a truly fresh JWT (e.g. by logging out and back in).
+	//
+	// The token's own network, never the network its user owns: a team
+	// member's token names the team, and its user's personal network is
+	// another network (TEAM-M6-02).
 	networkName := clientSession.ByJwt.NetworkName
 	server.Db(clientSession.Ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			clientSession.Ctx,
 			`
 				SELECT network_name FROM network
-				WHERE admin_user_id = $1
+				WHERE network_id = $1
 			`,
-			clientSession.ByJwt.UserId,
+			clientSession.ByJwt.NetworkId,
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
@@ -737,9 +741,19 @@ func NetworkRefreshToken(clientSession *session.ClientSession) (*NetworkRefreshT
 	// the current name, not the one in the presented token, so a rename shows
 	// on the next refresh
 	network := model.GetNetwork(clientSession)
-	if network == nil || network.AdminUserId == nil || *network.AdminUserId != clientSession.ByJwt.UserId {
-		// the network was removed, or changed admin, after the router's state
-		// check
+	signedIn := false
+	if network != nil {
+		if clientSession.ByJwt.MemberId != nil {
+			// a team member's token: still that membership (TEAM-M6-02)
+			signIn := model.ResolveNetworkSignIn(clientSession.Ctx, clientSession.ByJwt.UserId, networkId, server.NowUtc())
+			signedIn = signIn != nil && signIn.MemberId != nil && *signIn.MemberId == *clientSession.ByJwt.MemberId
+		} else {
+			signedIn = network.AdminUserId != nil && *network.AdminUserId == clientSession.ByJwt.UserId
+		}
+	}
+	if !signedIn {
+		// the network was removed, changed admin, or lost the membership,
+		// after the router's state check
 		networkRefreshCounter.WithLabelValues(networkRefreshStateInvalid).Inc()
 		return nil, fmt.Errorf("%d Not authorized.", http.StatusUnauthorized)
 	}

@@ -188,6 +188,15 @@ type ByJwt struct {
 	// Set at /auth/code-login; renewal and every credential derived from it keep
 	// it.
 	ApiKeyId *server.Id `json:"api_key_id,omitempty"`
+	// a team member's credential (§7.5, TEAM-M6-02): the member_id of
+	// UserId's membership in NetworkId, new per join, so a removal and a
+	// re-invite never revive a credential of the earlier membership. The state
+	// check reads network_member's row for it, never network.admin_user_id,
+	// which in a team is a synthetic owner of record (D-TEAM-2). Nil in a
+	// personal network, whose one member is its owner's user. Set when the
+	// credential is minted for the membership; renewal and every credential
+	// derived from it keep it.
+	MemberId *server.Id `json:"member_id,omitempty"`
 	gojwt.RegisteredClaims
 }
 
@@ -695,6 +704,9 @@ func validateByJwtStateIdentity(byJwt *ByJwt, requireClient bool) error {
 // noActiveRow is the completed query's definitive verdict that no active row
 // matched; a rotated credential is refused without it.
 func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) (noActiveRow bool, err error) {
+	if byJwt.MemberId != nil {
+		return validateMemberByJwtStateQuery(ctx, conn, byJwt, parentClientId)
+	}
 	valid := false
 	var credentialChangeTime time.Time
 	func() {
@@ -760,6 +772,94 @@ func validateByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt 
 	// the caller-facing message stays the same for both branches; the split
 	// (row gone/inactive vs credential rotation) is visible in the counter,
 	// and with ids at V(1)
+	if !valid {
+		return true, rejectNoActiveRow(byJwt)
+	}
+	if byJwt.CreateTime.Before(credentialChangeTime) {
+		return false, rejectRotated(byJwt, credentialChangeTime)
+	}
+	return false, nil
+}
+
+// validateByJwtStateQuery for a team member's credential (TEAM-M6-02): the
+// member's row, not network.admin_user_id, names who it is. The row must hold
+// the credential's member, network and user, be no JIT pending member (§7.6),
+// whose membership reaches nothing until an admin's device admits it, and be
+// inside its reauth_deadline; a client credential's client must be active in
+// the network, with the same lineage checks as the owner's. A binary that does
+// not link MG6 has no members, so it refuses every member credential.
+func validateMemberByJwtStateQuery(ctx context.Context, conn server.PgCanQuery, byJwt *ByJwt, parentClientId *server.Id) (noActiveRow bool, err error) {
+	if !server.SidecarMg6Linked() {
+		return true, rejectNoActiveRow(byJwt)
+	}
+	valid := false
+	var credentialChangeTime time.Time
+	now := server.NowUtc()
+	func() {
+		query := beginStateQuery(ctx, byJwt.ClientId != nil)
+		defer query.finish(ctx)
+		queryFound := false
+		if byJwt.ClientId == nil {
+			result, err := conn.Query(ctx, `
+				SELECT network_user.credential_change_time
+				FROM network_user
+				INNER JOIN network_member ON
+					network_member.member_id = $3 AND
+					network_member.network_id = $2 AND
+					network_member.user_id = network_user.user_id AND
+					NOT network_member.pending AND
+					(network_member.reauth_deadline IS NULL OR $5 < network_member.reauth_deadline)
+				WHERE
+					network_user.user_id = $1 AND
+					($4::uuid IS NULL OR EXISTS (SELECT 1 FROM account_api_key WHERE api_key_id=$4 AND network_id=$2))
+			`, byJwt.UserId, byJwt.NetworkId, *byJwt.MemberId, byJwt.ApiKeyId, now)
+			server.WithPgResult(result, err, func() {
+				if result.Next() {
+					server.Raise(result.Scan(&credentialChangeTime))
+					valid = true
+					queryFound = true
+				}
+			})
+			query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
+			return
+		}
+
+		result, err := conn.Query(ctx, `
+			WITH RECURSIVE ancestors AS (
+			 SELECT client_id, source_client_id, network_id, active, 1 AS depth FROM network_client WHERE client_id=$3 AND $6::uuid IS NULL AND $7::uuid IS NULL
+			 UNION ALL SELECT c.client_id,c.source_client_id,c.network_id,c.active,a.depth+1 FROM network_client c JOIN ancestors a ON c.client_id=a.source_client_id WHERE a.depth < 1024
+			)
+			SELECT network_user.credential_change_time
+			FROM network_user
+			INNER JOIN network_member ON
+				network_member.member_id = $9 AND
+				network_member.network_id = $2 AND
+				network_member.user_id = network_user.user_id AND
+				NOT network_member.pending AND
+				(network_member.reauth_deadline IS NULL OR $10 < network_member.reauth_deadline)
+			INNER JOIN network_client ON
+				network_client.client_id = $3 AND
+				network_client.network_id = $2 AND
+				network_client.active = true
+			WHERE
+				network_user.user_id = $1 AND
+				($4::uuid IS NULL OR network_client.device_id = $4) AND
+				($5::uuid IS NULL OR network_client.source_client_id = $5) AND
+				($8::uuid IS NULL OR EXISTS (SELECT 1 FROM account_api_key WHERE api_key_id=$8 AND network_id=$2)) AND
+				($6::uuid IS NOT NULL OR CASE WHEN $7::uuid IS NOT NULL THEN
+				 EXISTS (SELECT 1 FROM network_client root WHERE root.client_id=$7 AND root.network_id=$2 AND root.active)
+				 ELSE NOT EXISTS (SELECT 1 FROM ancestors WHERE NOT active OR network_id<>$2) AND
+				 EXISTS (SELECT 1 FROM ancestors WHERE source_client_id IS NULL) END)
+		`, byJwt.UserId, byJwt.NetworkId, *byJwt.ClientId, byJwt.DeviceId, parentClientId, byJwt.SessionId, byJwt.RootClientId, byJwt.ApiKeyId, *byJwt.MemberId, now)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&credentialChangeTime))
+				valid = true
+				queryFound = true
+			}
+		})
+		query.complete(queryFound, byJwt.CreateTime, credentialChangeTime)
+	}()
 	if !valid {
 		return true, rejectNoActiveRow(byJwt)
 	}
@@ -865,6 +965,7 @@ func (self *ByJwt) Client(deviceId server.Id, clientId server.Id) *ByJwt {
 		StrictExp:        self.StrictExp,
 		DeclaresNoEgress: self.DeclaresNoEgress,
 		ApiKeyId:         self.ApiKeyId,
+		MemberId:         self.MemberId,
 		DeviceId:         &deviceId,
 		ClientId:         &clientId,
 		SessionId:        self.SessionId,
@@ -906,6 +1007,11 @@ func (self *ByJwt) SetStrictExp(strictExp bool) {
 // in some cases, the byJwt might be corrupt
 // in some of those cases, we can still recover it
 func fixByJwt(ctx context.Context, byJwt *ByJwt) error {
+	if byJwt.NetworkId == (server.Id{}) && byJwt.MemberId != nil {
+		// a member credential names its network when minted; the user's own
+		// network, which the repair below finds, is another network
+		return fmt.Errorf("Missing network_id")
+	}
 	if byJwt.NetworkId == (server.Id{}) {
 		// the NetworkId is missing (FIXME why?)
 		// it can be recovered from the client id or the user id
@@ -982,6 +1088,10 @@ func jwtNetworkIdByUserIdKey(userId server.Id) string {
 	return fmt.Sprintf("jwt_network_id_u_%s", userId)
 }
 
+// The network the user owns, its personal network: a team's admin_user_id is a
+// synthetic owner of record that never signs in (D-TEAM-2), so a user that
+// signs in owns one network at most. Repairs only a legacy credential with no
+// network_id; a member credential is never repaired (fixByJwt).
 func getNetworkIdForUser(ctx context.Context, userId server.Id) (networkId server.Id, returnErr error) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1032,7 +1142,15 @@ func getNetworkIdForClient(ctx context.Context, clientId server.Id) (networkId s
 	return
 }
 
+// A team network's client has no owner credential to stand for: its
+// admin_user_id is a synthetic owner of record (D-TEAM-2), so a credential
+// built from it would pass as the owner. Such a client is refused until a
+// member-aware load lands (TEAM-M6-02's audit).
 func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJwt, returnErr error) {
+	teamColumn := "false"
+	if server.SidecarMg6Linked() {
+		teamColumn = "EXISTS (SELECT 1 FROM network_team WHERE network_team.network_id = network.network_id)"
+	}
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
@@ -1049,7 +1167,8 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 			            AND transfer_balance.pro = true
 			            AND transfer_balance.start_time <= $2
 			            AND $2 < transfer_balance.end_time
-			    ) AS pro
+			    ) AS pro,
+			    `+teamColumn+` AS team
 
 			FROM network_client
 
@@ -1069,6 +1188,7 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 				var deviceId server.Id
 				var principal string
 				var pro bool
+				var team bool
 				server.Raise(result.Scan(
 					&networkId,
 					&userId,
@@ -1076,7 +1196,12 @@ func LoadByJwtFromClientId(ctx context.Context, clientId server.Id) (byJwt *ByJw
 					&deviceId,
 					&principal,
 					&pro,
+					&team,
 				))
+				if team {
+					returnErr = fmt.Errorf("A team network's client has no owner credential.")
+					return
+				}
 
 				guestMode := false
 

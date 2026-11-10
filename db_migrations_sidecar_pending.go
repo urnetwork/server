@@ -219,6 +219,12 @@ func sidecarMg1TeamMigrations() []any {
 		newSqlMigration(`
 			CREATE INDEX network_admin_event_event_time ON network_admin_event (event_time)
 		`),
+		// an entry's §7.10 effects run once: their event carries the log
+		// entry's own id as its request id, which the next run looks up
+		// (model/config_log_effects.go)
+		newSqlMigration(`
+			CREATE INDEX network_admin_event_request_id ON network_admin_event (network_id, request_id)
+		`),
 
 		// §7.8's one-command admin tokens (§2.8 api-11): each token's jti spent
 		// once, in its command's own transaction, with the command's digest and

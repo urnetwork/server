@@ -51,15 +51,18 @@ func (self *Route) Pattern() string {
 }
 
 // Testing_WithHandler returns a copy of the route that serves handler behind
-// the route's gates, the strict_exp proof gate, the client token gate, the
-// strict_exp gate, the lag.dev guest gate and the intended network gate, in the
-// order api.applyRouteAccess applies them, so a test can observe what reaches
-// it.
+// the route's gates, the strict_exp proof gate, the role gate, the client token
+// gate, the strict_exp gate, the lag.dev guest gate and the intended network
+// gate, in the order api.applyRouteAccess applies them, so a test can observe
+// what reaches it.
 func Testing_WithHandler(route *Route, handler http.HandlerFunc) *Route {
 	replaced := *route
 	replaced.handler = handler
 	if route.strictExpProofRefusal != nil {
 		replaced.handler = strictExpProofGate(route.strictExpProofRefusal, replaced.handler)
+	}
+	if route.rolePermissionRefusal != nil {
+		replaced.handler = rolePermissionGate(route.rolePermissionRefusal, replaced.handler)
 	}
 	if route.clientCredentialRefusal != nil {
 		replaced.handler = clientCredentialGate(route.clientCredentialRefusal, replaced.handler)

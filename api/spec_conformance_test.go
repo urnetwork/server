@@ -101,6 +101,8 @@ func registry() []specEndpoint {
 
 		{"POST", "/network/auth-client", rt(model.AuthNetworkClientArgs{}), rt(model.AuthNetworkClientResult{})},
 		{"POST", "/network/enroll", rt(model.NetworkEnrollArgs{}), rt(model.NetworkEnrollResult{})},
+		{"POST", "/network/idp", rt(model.CreateNetworkIdpArgs{}), rt(model.CreateNetworkIdpResult{})},
+		{"GET", "/auth/sso/callback", nil, rt(controller.NetworkSsoCallbackResult{})},
 		{"POST", "/network/remove-client", rt(model.RemoveNetworkClientArgs{}), rt(model.RemoveNetworkClientResult{})},
 		{"GET", "/network/clients", nil, rt(model.NetworkClientsResult{})},
 		{"GET", "/network/peers", nil, rt(model.NetworkPeersResult{})},
