@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T10:40:26Z",
+  "observed_at": "2026-11-10T10:43:00Z",
   "kind": "native-control-worker-distribution-staged/v1",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "source_commit": "f73d6bfcf060bffc48b109b5e3fa497b367ae9ae",
@@ -19,7 +19,15 @@
   "worker_started": false,
   "scoring_enabled": false,
   "official_baseline_started": false,
-  "full_simulator_package_targeted_tests": "Still running at observation time; standalone helper tests and full agent tests already passed. Do not infer package completion from the successful worker build.",
+  "full_simulator_package_targeted_tests": {
+    "command": "go test -p=1 ./connect/sim-latency -run '^Test(PrivateIdMapProbe|LegacyIdMapProbe|SubevaluationOwnership)' -count=3",
+    "exit_status": 0,
+    "test_functions": 8,
+    "repetitions": 3,
+    "package_test_duration_seconds": 0.725,
+    "scope": "Real simulator package compiled; actual helper argv, legacy routing, closed private scope and bounded namespace probe tested. Not a full simulator-suite or live containment claim."
+  },
+  "post_build_cleanup": "Two root ownership probes found zero active users and zero unreadable processes before go clean -cache removed only this turn's rebuildable2.3 GiB epoch2-control-build-cache-20261110-v1. Retained binaries, source, modules and evidence; root available38089920512 bytes, above34359738368-byte minimum. Separate RAM cache untouched.",
   "pending": [
     "Main migration950 and API checkpoint e7a71255a or later",
     "Additional operational approval for bounded8 MiB namespace-helper correction",
