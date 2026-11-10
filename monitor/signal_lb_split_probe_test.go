@@ -568,6 +568,17 @@ func TestLbSplitProbeOffAndUnreadableSettings(t *testing.T) {
 	if len(alerts) != 1 || alerts[0].configuredOff || !alerts[0].unobservable || alerts[0].Observed != "synthetic reason" {
 		t.Fatalf("unreadable: alerts %+v", alerts)
 	}
+	// settings with nothing to probe, however they were built, are blind rather than quietly healthy
+	noRoots := lbSplitTestSettings()
+	noRoots.Roots = nil
+	noInterfaces := lbSplitTestSettings()
+	noInterfaces.Interfaces = nil
+	for _, settings := range []*LbSplitProbeSettings{noRoots, noInterfaces} {
+		alerts = runLbSplitProbe(t, &syntheticSource{}, settings, time.Date(2026, time.November, 7, 2, 0, 0, 0, time.UTC))
+		if len(alerts) != 1 || alerts[0].configuredOff || !alerts[0].unobservable || alerts[0].Target != lbSplitProbeTarget {
+			t.Fatalf("nothing to probe: alerts %+v", alerts)
+		}
+	}
 }
 
 // A synthetic services.yml with the split and three edge interfaces, one IPv4 only, beside a transparent

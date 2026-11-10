@@ -177,6 +177,8 @@ func startTaskworkerRuntime(admission context.Context, ctx context.Context, canc
 	// from and run on the process's evs host (evs_jobs.go)
 	if options.WorkloadProfile == WorkloadProfileProduction {
 		startEvsJobs(ctx, &owner.lifetime)
+		// gkm's reconciler, on the evs host startEvsJobs just built (gkm_reconciler.go)
+		startGkmReconciler(ctx, &owner.lifetime)
 	}
 	statsCollected := controller.StartStatsCollector(ctx)
 	queueMetricsDone := task.StartQueueMetrics(ctx)

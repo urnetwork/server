@@ -73,6 +73,7 @@ func Suites() []*Suite {
 		{Name: "RunMxEdgeStoreSuite", Package: "model", Test: "TestMxEdgeStorePassesTheSuite"},
 		{Name: "RunSmtpEdgeStoreSuite", Package: "model", Test: "TestSmtpEdgeStorePassesTheSuite"},
 		{Name: "RunConfigLogStoreSuite", Package: "model", Test: "TestConfigLogSequencerPassesTheStoreSuite"},
+		{Name: "RunGkmStoreSuite", Package: "gkm", Test: "TestGkmStoreSuiteOnTheLocalStack"},
 	}
 }
 

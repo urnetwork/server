@@ -573,6 +573,7 @@
     "dns": "certificates",
     "dnsedge": "certificates",
     "evs": "certificates",
+    "gkm": "certificates",
     "gossip": "certificates",
     "mcp": "certificates",
     "mxedge-platform": "certificates",
