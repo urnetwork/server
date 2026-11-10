@@ -104,14 +104,14 @@
   "intake_transition_launcher": {
     "path": "/usr/local/libexec/urnetwork/competition-scope-renewal-0b334f621-20261109-v1/advance-intake-once",
     "sha256": "01c322a0051b9718a9eda5cc9b28fe91e050f48b740dd44b19a1734aacecd6f4",
-    "purpose": "Pinned clean 0b334f621 runner published the source intent successfully. Worker/review commands remain false. API-only preparation then failed on watchdog/source-lock contention; no epoch2 opening is claimed.",
+    "purpose": "Pinned clean 0b334f621 runner completed the native round_created transition on2026-11-10. Worker/review commands remain false. Database epoch2 is open, but serving API source resolution fails; no successful public intake is claimed.",
     "verification": "bash -n passed; current controller tests matching ^TestCompetitionIntakeFirst(Preparation|Handoff|PublicHandoff) passed once. These are deterministic synthetic API/authorization tests, not live readiness receipts."
   },
   "next_actions": [
     "Shared private mount and namespace-local --wdns execution pass on both hosts. Final role-v3 inventories keep startup metadata separate from recovery authority and signed control requests now pass. Current evidence supersedes earlier prospective roles: EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Do not rebuild the qualified source image.",
     "Both hosts now have role-v3 immutable inventories, independently rechecked genuine fingerprints and verified signed non-job availability. Deploy replacement future-epoch host policy matching these identities; old config67360e7 pins are obsolete. Do not invent qualification hashes or positive readiness flags.",
     "Both96 GiB volumes and offline image caches are active. Sille core policy is approved/applied and its native private boundary passed. Inherited-cpuset, canonical recovery-unit and nonexistent-unit ExecStart fixes are deployed/tested. See EPOCH2-EXECUTOR-CONTROLS-2026-11-10.json. Keep execution disabled until independent grading admission.",
-    "Open epoch2 for a fresh full week, verify live API source/rules/status and historical epoch1 publication, and update EPOCH-SOURCE.md only with the actual published checkpoint.",
+    "Do not create another epoch2: the reserved round already exists with a full604800-second recorded window. Finish serving API/config convergence, verify public intake source/rules/status and restore public epoch1 result access. Local frozen-grant and retained-manifest checks pass. EPOCH-SOURCE.md records creation, not successful public admission.",
     "Keep grading unactivated. Fresh baseline, runtime/containment qualification and cross-host operational admission proceed separately; no submission clocks may start before those grading gates."
   ]
 }
