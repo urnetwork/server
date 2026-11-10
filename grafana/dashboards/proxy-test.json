@@ -1,7 +1,7 @@
 {
   "uid": "urnetwork-proxy-test",
   "title": "urnetwork / proxy test",
-  "description": "The proxy test runner on planetoid (tests repo, tests/proxy-test) measures hosted proxies on main the way a customer sees them. As the wickymicky Pro test account it creates a hosted proxy in a country, requests cloudflare.com/cdn-cgi/trace through it, opens a random well-known site through it in a fresh headless Chrome, and removes it, over every available country in a shuffled round-robin. setup is the create call to the first successful request through the proxy; connect is Chrome's navigation start to the page's first byte; load is navigation start to loadEventEnd. The runner writes /var/lib/proxy-test/metrics/proxy-test.prom, and Fluent Bit ships it with env=\"main\", host=\"planetoid\" and job=\"node\". Percentiles come from the runner's in-memory windows (1 h for all countries, 24 h per country), which start empty after a restart. Counters are read with increase(), which absorbs restarts, and every query deduplicates with max, so a duplicate scrape or a second host never double-counts.",
+  "description": "The proxy test runner on planetoid (tests repo, tests/proxy-test) measures hosted proxies on main the way a customer sees them. As the wickymicky Pro test account it creates a hosted proxy in a country, requests cloudflare.com/cdn-cgi/trace through it, opens a random well-known site through it in a fresh headless Chrome, and removes it, over every available country in a shuffled round-robin. setup is the create call to the first successful request through the proxy; connect is Chrome's navigation start to the page's first byte; load is navigation start to loadEventEnd. The runner writes /var/lib/proxy-test/metrics/proxy-test.prom, and Fluent Bit ships it with env=\"main\", host=\"planetoid\" and job=\"node\". Percentiles come from the runner's in-memory windows (1 h for all countries, 24 h per country), which start empty after a restart. Counters are read with increase(), which absorbs restarts, and every query deduplicates with max, so a duplicate scrape or a second host never double-counts. The providers section shows the provider count of every country in the public provider-locations list, which the runner reads every minute apart from its test schedule (urnetwork_proxy_test_country_providers, urnetwork_proxy_test_providers and urnetwork_proxy_test_providers_last_success_timestamp_seconds).",
   "tags": [
     "urnetwork",
     "proxy",
@@ -1047,6 +1047,455 @@
       ]
     },
     {
+      "id": 30,
+      "type": "row",
+      "title": "providers",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 15
+      },
+      "panels": []
+    },
+    {
+      "id": 31,
+      "type": "stat",
+      "title": "total providers",
+      "description": "Providers over every country in the runner's latest successful read of the public provider-locations API (urnetwork_proxy_test_providers), the list the apps' location picker shows. The runner reads it every minute, apart from its test schedule. A failed read keeps the last counts, and provider counts age gives their age. NO SIGNAL: nothing reached Mimir in the last 5 minutes. Red at 0.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "noValue": "NO SIGNAL",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_providers{env=\"main\"})",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 32,
+      "type": "stat",
+      "title": "provider counts age",
+      "description": "Seconds since the runner's latest successful provider-locations read (urnetwork_proxy_test_providers_last_success_timestamp_seconds, its newest value within 7 days, so a runner restart does not blank it). The runner reads every minute and Fluent Bit ships its file every 15 s, so a healthy age stays under about 90 s. A failed read keeps the last counts on every providers panel while this age grows; failed reads also count in the API errors, call locations. Orange from 5 minutes, red from 15.",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "noValue": "NO SIGNAL",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 300
+              },
+              {
+                "color": "red",
+                "value": 900
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(max_over_time(urnetwork_proxy_test_providers_last_success_timestamp_seconds{env=\"main\"}[7d]))",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "total providers over time",
+      "description": "Total providers over every country (urnetwork_proxy_test_providers) across the dashboard's time range; the legend gives the latest value and the minimum, mean and maximum over the range. Gaps are times the runner did not report. The history starts with the runner release that exports the counts.",
+      "gridPos": {
+        "h": 8,
+        "w": 18,
+        "x": 6,
+        "y": 16
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "locale",
+          "decimals": 0,
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "pointSize": 4,
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "min",
+            "mean",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_proxy_test_providers{env=\"main\"})",
+          "legendFormat": "providers",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
+      "id": 34,
+      "type": "table",
+      "title": "providers by country",
+      "description": "One row per country the public provider-locations API lists with at least one provider (urnetwork_proxy_test_country_providers, which the runner reads every minute). Every listed country has a row; scroll the table for the rest. Sorted by providers now, most first. providers now is the latest successful read; a country listed in the last 7 days but not now reads 'not listed', and so does every country while no counts arrive at all, when total providers reads NO SIGNAL. 24 h average and 7 d average are avg_over_time over the last 24 hours and 7 days, and 7 d min and 7 d max are the smallest and largest counts in 7 days. They cover only the times the country was listed, since a country without a provider leaves the list. The 24 h and 7 d columns fill in as history accumulates from the deploy time of the runner release that exports these counts: until 24 hours, then 7 days, have passed since it, they cover only the time since. Each column deduplicates with max per country, so a duplicate scrape or a second host never double-counts.",
+      "gridPos": {
+        "h": 20,
+        "w": 24,
+        "x": 0,
+        "y": 24
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "filterable": true,
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #A"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "providers now"
+              },
+              {
+                "id": "unit",
+                "value": "locale"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "not listed",
+                        "index": 0
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #B"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "24 h average"
+              },
+              {
+                "id": "unit",
+                "value": "locale"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #C"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "7 d average"
+              },
+              {
+                "id": "unit",
+                "value": "locale"
+              },
+              {
+                "id": "decimals",
+                "value": 1
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #D"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "7 d min"
+              },
+              {
+                "id": "unit",
+                "value": "locale"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value #E"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "7 d max"
+              },
+              {
+                "id": "unit",
+                "value": "locale"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "providers now",
+            "desc": true
+          }
+        ]
+      },
+      "transformations": [
+        {
+          "id": "merge",
+          "options": {}
+        },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "indexByName": {
+              "country_name": 0,
+              "country": 1,
+              "Value #A": 2,
+              "Value #B": 3,
+              "Value #C": 4,
+              "Value #D": 5,
+              "Value #E": 6
+            },
+            "renameByName": {
+              "country_name": "country",
+              "country": "code"
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (country, country_name) (urnetwork_proxy_test_country_providers{env=\"main\",country=~\"$country\"})",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "B",
+          "expr": "max by (country, country_name) (avg_over_time(urnetwork_proxy_test_country_providers{env=\"main\",country=~\"$country\"}[24h]))",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "C",
+          "expr": "max by (country, country_name) (avg_over_time(urnetwork_proxy_test_country_providers{env=\"main\",country=~\"$country\"}[7d]))",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "D",
+          "expr": "max by (country, country_name) (min_over_time(urnetwork_proxy_test_country_providers{env=\"main\",country=~\"$country\"}[7d]))",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        },
+        {
+          "refId": "E",
+          "expr": "max by (country, country_name) (max_over_time(urnetwork_proxy_test_country_providers{env=\"main\",country=~\"$country\"}[7d]))",
+          "format": "table",
+          "instant": true,
+          "range": false,
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          }
+        }
+      ]
+    },
+    {
       "id": 17,
       "type": "row",
       "title": "trends",
@@ -1055,7 +1504,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 44
       },
       "panels": []
     },
@@ -1068,7 +1517,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 16
+        "y": 45
       },
       "datasource": {
         "type": "prometheus",
@@ -1130,7 +1579,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 16
+        "y": 45
       },
       "datasource": {
         "type": "prometheus",
@@ -1284,7 +1733,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 24
+        "y": 53
       },
       "datasource": {
         "type": "prometheus",
@@ -1348,7 +1797,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 24
+        "y": 53
       },
       "datasource": {
         "type": "prometheus",
@@ -1420,7 +1869,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 61
       },
       "panels": []
     },
@@ -1433,7 +1882,7 @@
         "h": 12,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 62
       },
       "datasource": {
         "type": "prometheus",
@@ -2059,7 +2508,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 74
       },
       "datasource": {
         "type": "prometheus",
@@ -2134,7 +2583,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 74
       },
       "datasource": {
         "type": "prometheus",
@@ -2210,7 +2659,7 @@
         "h": 10,
         "w": 12,
         "x": 0,
-        "y": 55
+        "y": 84
       },
       "datasource": {
         "type": "prometheus",
@@ -2285,7 +2734,7 @@
         "h": 10,
         "w": 12,
         "x": 12,
-        "y": 55
+        "y": 84
       },
       "datasource": {
         "type": "prometheus",
@@ -2361,7 +2810,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 94
       },
       "datasource": {
         "type": "prometheus",
