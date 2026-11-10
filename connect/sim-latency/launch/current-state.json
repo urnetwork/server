@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T06:14:09Z",
+  "observed_at": "2026-11-10T06:46:06Z",
   "objective": "finalize epoch 1 and open epoch 2 with evaluations paused; prepare Goofe evaluation in parallel",
   "goal_complete": false,
   "history": "../old/CURRENT-STATE-HISTORY-2026-11-09.json preserves all previous observations; its running/hold observations are historical, not current authority",
@@ -97,6 +97,7 @@
     "records": ["EPOCH2-INDEPENDENT-AGENT-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-IMAGE-STORE-PREPARATION-2026-11-09.json", "EPOCH2-GOOFE-ROLE-SETUP-2026-11-09.json", "EPOCH2-GOOFE-BOUNDED-STORAGE-2026-11-09.json", "EPOCH2-STORAGE-AND-PROSPECTIVE-ROLES-2026-11-09.json"]
   },
   "sille_private_executor": {
+    "pressure_test_preparation": "Root-owned guarded pressure-test service installed and systemd-verified, offline pinned dependency verification passed. Service remains inactive with main PID0. Native headroom check refused at68861394944 available bytes versus103079215104 required; no bomb started. See EPOCH2-SILLE-PRESSURE-PREPARATION-2026-11-10.json. Cache cleanup approval remains pending; nothing deleted.",
     "storage": "Fresh96 GiB fully allocated candidate filesystem mounted privately on stable loop64; persistent owner-checked loop service and mount enabled. No old volume reformatted, reboot not tested.",
     "base_directory": "/mnt/data/urnetwork-subeval-sille",
     "backing_headroom": "About46 GiB free after allocation, above required32 GiB",
