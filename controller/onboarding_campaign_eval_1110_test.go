@@ -6,9 +6,11 @@ package controller
 // live in the controller. Pure: none of these needs a database.
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/onboarding"
 )
 
 // T6: normalizeLocale keeps the language and the region, so a bare "zh-Hant"
@@ -48,6 +50,46 @@ func TestNormalizeLocaleKeepsTheChineseCharacters(t *testing.T) {
 	} {
 		if _, matched, _ := b.TemplateIdLocale("e1_connect", "default", normalizeLocale(in)); matched != want {
 			t.Errorf("%q (stored %q) reads %q, want %q", in, normalizeLocale(in), matched, want)
+		}
+	}
+}
+
+// T3: what the feedback step reads. A feedback email already sent to the
+// network (network_onboarding_email) stops a second one after a B -> A path
+// flip, and a one-tap answer from the feedback email (feedback.tapped,
+// written when the link resolves) is an answer like the app's form.
+func TestOnboardingFeedbackFacts(t *testing.T) {
+	sent := func(templates ...string) []*model.NetworkOnboardingEmail {
+		emails := []*model.NetworkOnboardingEmail{}
+		for _, template := range templates {
+			emails = append(emails, &model.NetworkOnboardingEmail{Template: template})
+		}
+		return emails
+	}
+	if onboardingFeedbackEmailSent(sent()) || onboardingFeedbackEmailSent(sent(onboarding.TemplateE1Connect, onboarding.TemplateE2Widget, onboarding.TemplateE3LastChance)) {
+		t.Error("no feedback email was sent")
+	}
+	if !onboardingFeedbackEmailSent(sent(onboarding.TemplateE1Connect, onboarding.TemplateE4Feedback)) {
+		t.Error("the feedback email was sent")
+	}
+
+	for _, c := range []struct {
+		name        string
+		appFeedback bool
+		events      []string
+		want        bool
+	}{
+		{"nothing", false, nil, false},
+		{"the app's form", true, nil, true},
+		{"feedback.submitted", false, []string{model.EventFeedbackSubmitted}, true},
+		{"a one-tap answer", false, []string{model.EventFeedbackTapped}, true},
+		{"other events", false, []string{model.EventEmailOpened, model.EventEmailClicked, model.EventWidgetAdded}, false},
+	} {
+		hasEvent := func(name string) bool {
+			return slices.Contains(c.events, name)
+		}
+		if got := onboardingFeedbackAnswered(c.appFeedback, hasEvent); got != c.want {
+			t.Errorf("%s: answered %t, want %t", c.name, got, c.want)
 		}
 	}
 }

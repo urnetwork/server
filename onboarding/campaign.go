@@ -181,8 +181,14 @@ type Facts struct {
 	OfferState   string // "" (none) | active | redeemed | expired
 	// the offer expires within LastChanceWindow of the send (OfferEndsSoon):
 	// the last-chance email's "end tomorrow" holds
-	OfferEndsSoon     bool
+	OfferEndsSoon bool
+	// an answer to the feedback step: the app's feedback form
+	// (account_feedback, feedback.submitted) or a one-tap answer from the
+	// feedback email (feedback.tapped)
 	FeedbackSubmitted bool
+	// a feedback email (e4_feedback) already went to the network: after a
+	// B -> A path flip E3b sent it and E4a would send it again
+	FeedbackEmailSent bool
 	// recorded for the status tooling only: opens decide nothing (Apple Mail
 	// Privacy Protection and proxies open every message; REVIEW.md finding 1)
 	EmailOpens int
@@ -278,7 +284,9 @@ func Decide(step string, f Facts) Decision {
 		return Decision{Action: ActionSend, Template: template, Variant: variant, NoOfferEmail: f.NoOfferEmail, NextStep: next}
 	}
 	feedback := func() Decision {
-		if f.FeedbackSubmitted {
+		// once per network: a network that flips from B to A between day 5
+		// and 7 reaches E4a's feedback after E3b's
+		if f.FeedbackSubmitted || f.FeedbackEmailSent {
 			return skip
 		}
 		if engaged(f) {

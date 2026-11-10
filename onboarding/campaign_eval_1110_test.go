@@ -294,3 +294,34 @@ func TestE5bOnlyWhenTheOfferEndsWithin36Hours(t *testing.T) {
 		t.Errorf("e5b with the offer ending tomorrow: %+v", d)
 	}
 }
+
+// T3: path B sends the feedback email at E3b (day 5) and path A at E4a (day
+// 6). A network that flips from B to A between day 5 and 7 (it sees the
+// in-app offer late) ran both: 15 networks got two or more feedback emails
+// in 60 days on Main. The feedback step goes once per network.
+func TestFeedbackEmailGoesOncePerNetwork(t *testing.T) {
+	f := healthy(PathB)
+	f.HasConnected = true
+	d := Decide(StepE3, f)
+	if d.Action != ActionSend || d.Template != TemplateE4Feedback || d.NextStep != StepE4 {
+		t.Fatalf("e3b: %+v", d)
+	}
+	// the in-app offer appears on day 6: E4 runs on path A, after E3b's send
+	f.Path = PathA
+	f.OfferState = OfferStateActive
+	f.FeedbackEmailSent = true
+	if d := Decide(StepE4, f); d.Action != ActionSkip || d.NextStep != "" {
+		t.Errorf("e4a after e3b sent the feedback email: %+v", d)
+	}
+	// a replayed e3b skips too
+	f.Path = PathB
+	if d := Decide(StepE3, f); d.Action != ActionSkip || d.NextStep != StepE4 {
+		t.Errorf("e3b after the feedback email: %+v", d)
+	}
+	// without an earlier feedback email, E4a is the feedback email
+	f.Path = PathA
+	f.FeedbackEmailSent = false
+	if d := Decide(StepE4, f); d.Action != ActionSend || d.Template != TemplateE4Feedback || d.Variant != VariantEngaged {
+		t.Errorf("e4a: %+v", d)
+	}
+}

@@ -521,6 +521,9 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		})
 		offerByCountry = policy.OfferAllowed(row.Country)
 	}
+	feedbackSubmitted := onboardingFeedbackAnswered(model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt), func(name string) bool {
+		return model.HasOnboardingEvent(ctx, row.NetworkId, name)
+	})
 	facts := onboarding.Facts{
 		Path:           path,
 		HasEmail:       row.Email,
@@ -542,10 +545,31 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
 		OfferEndsSoon:     offer != nil && onboarding.OfferEndsSoon(offer.ExpiresAt, now),
-		FeedbackSubmitted: model.NetworkHasFeedback(ctx, row.NetworkId, row.CreatedAt) || model.HasOnboardingEvent(ctx, row.NetworkId, model.EventFeedbackSubmitted),
+		FeedbackSubmitted: feedbackSubmitted,
+		FeedbackEmailSent: onboardingFeedbackEmailSent(model.ListNetworkOnboardingEmails(ctx, row.NetworkId)),
 		EmailOpens:        model.CountOnboardingEvents(ctx, row.NetworkId, model.EventEmailOpened),
 	}
 	return facts, offer
+}
+
+// onboardingFeedbackEmailSent reports whether a network's campaign sends
+// (network_onboarding_email) include the feedback email.
+func onboardingFeedbackEmailSent(emails []*model.NetworkOnboardingEmail) bool {
+	for _, email := range emails {
+		if email.Template == onboarding.TemplateE4Feedback {
+			return true
+		}
+	}
+	return false
+}
+
+// onboardingFeedbackAnswered is the feedback step's FeedbackSubmitted fact:
+// the app's feedback form since sign-up (appFeedback), its
+// feedback.submitted event, or feedback.tapped, the one-tap answer from the
+// feedback email (recorded when the link resolves, whether or not the
+// reader then sends the app's form).
+func onboardingFeedbackAnswered(appFeedback bool, hasEvent func(name string) bool) bool {
+	return appFeedback || hasEvent(model.EventFeedbackSubmitted) || hasEvent(model.EventFeedbackTapped)
 }
 
 // ----- rendering -----
