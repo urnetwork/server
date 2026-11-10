@@ -82,8 +82,8 @@ tracked_submission_build() {
         infrastructure_failure "trusted module metadata source creation is uncertain"
     [[ "$source_container" =~ ^[0-9a-f]{64}$ ]] || infrastructure_failure "trusted module metadata has no full owned container id"
     tracked_container_ids+=("$source_container")
-    evaluation_docker cp "$source_container:/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/." "$check_cache/"
-    evaluation_docker cp "$source_container:/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/." "$compile_cache/"
+    evaluation_docker_copy_tree "$source_container:/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/." "$check_cache/"
+    evaluation_docker_copy_tree "$source_container:/opt/urnetwork/go/pkg/mod/cache/download/github.com/urnetwork/server/@v/." "$compile_cache/"
     evaluation_docker rm "$source_container" >/dev/null || infrastructure_failure "trusted module metadata source did not join"
     check_receipt="$(evaluation_host prepare-build-check-cache)" || infrastructure_failure "check cache handoff failed"
     compile_receipt="$(evaluation_host prepare-build-compile-cache)" || infrastructure_failure "compile cache handoff failed"

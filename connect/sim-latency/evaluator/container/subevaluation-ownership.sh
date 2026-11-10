@@ -75,6 +75,20 @@ subevaluation_ownership_init() {
     subevaluation_scoped=true
 }
 
+# Copy only a trusted pristine-image tree into a fresh private worker directory.
+# Docker's non-root unpacker applies readonly directory modes before children;
+# GNU tar defers restoration until extraction completes. No candidate archive
+# enters this path. Owner-write enables the subsequent Git checkout/patch step.
+evaluation_docker_copy_tree() {
+    if [[ "$subevaluation_scoped" = true ]]; then
+        evaluation_docker cp "$1" - | tar --extract --file=- --directory="$2" \
+            --no-same-owner --no-same-permissions --delay-directory-restore || return
+        chmod -R u+rwX -- "$2"
+    else
+        evaluation_docker cp "$1" "$2"
+    fi
+}
+
 # Only the root-pinned public role can route prospective Docker calls. Neither
 # an inherited Docker context nor a generic sudo capability is used in scope.
 subevaluation_require_client() {

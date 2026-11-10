@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-10T15:18:59Z",
+  "kind": "epoch2-composed-docker-control-release/v1",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "server_commit": "3ae3f1ecc199b515a92692d9024c6dbc1865d337",
+  "release": "/usr/local/libexec/urnetwork/competition-subeval-control-3ae3f1ecc-20261110-v8",
+  "agent_sha256": "6a5fb296f12d8e5f89d1d743a1e3261ff4981922e7e6da864e2997aa5de53351",
+  "evaluator_command_sha256": "702ac144244754b0de829f503d41e7a03634313a6c571c148475f289e21515c3",
+  "builder_sha256": "844c04427ec656b6f3e90290792f06f36ed8545f3eef1f58c3dc15bf8dc350ec",
+  "ownership_sha256": "b8666a55dac59316586c747b9ac6913868ca244be7360e3a232a09e26b131904",
+  "coordinator_profile_sha256": "d3bb2b730a4f64b48f2b93015cb32979f62929bb543495084b2eaee32af70f03",
+  "migration_head_verified": 950,
+  "controls": {
+    "frozen_source_and_image_unchanged": true,
+    "scoring_rules_unchanged": true,
+    "namespace_and_resource_native_checks_passed": true,
+    "host_fingerprints_repeated_and_matched": true,
+    "signed_availability_verified_both_hosts": true,
+    "previous_failed_probe_cleanup_verified_both_hosts": true,
+    "full_runtime_qualification": false,
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "grading_ready": false
+  },
+  "native_probe": {
+    "purpose": "Operator-only R1 command-path qualification; not the official R9 baseline or admission screen",
+    "binary_sha256": "cda9d2af0eb3c58f2ef2fa31dfeb8a38d983826a21b3be2bc8f96514516e0f06",
+    "oci_manifest_digest": "sha256:620d518517a3bf96fa84a459f44dc33af278fa1e65086f31a05c0c410b3c5497",
+    "oci_layer_payload_matches_installed_binary": true,
+    "sille": {
+      "fingerprint_sha256": "bdd027ff07c1b482e9331beb5749f5a94f31a2bcab68e9c4a26902d1795144e5",
+      "agent_config_sha256": "b9b316261710baf8ad08a1a44051ee4191273369193c007536cb5b9d820a5e4a",
+      "invocation_id": "605c306c2b69401395c3afd1d2f163ec",
+      "run_id": "7c9be554f316dc1a4def06a59690c4fa70adade0e97bf648d093179c71cb0f87",
+      "started_at": "2026-11-10T15:12:25.54461045Z",
+      "deadline_at": "2026-11-10T15:27:25.54461045Z",
+      "last_state": "failed",
+      "failure": "Readonly frozen source-directory extraction failed before simulation; cleanup_verified and stop_cleanup_verified true."
+    },
+    "goofe": {
+      "fingerprint_sha256": "cd002cf187ccac36699eb2a35353c6d9e8a4e79860daf209a1c9048f7ee3a8ee",
+      "agent_config_sha256": "4a353c7b58e2ded9a43e89d84dfbf11c4575ef9d94f9f18a3bffab708db0878d",
+      "invocation_id": "545b5add541d4f8dbed6a22e68a03fda",
+      "run_id": "6fd0a836ef0721577740b0b94e40d37f7132c3451403c0165062acd26233606b",
+      "started_at": "2026-11-10T15:12:25.244398863Z",
+      "deadline_at": "2026-11-10T15:27:25.244398863Z",
+      "last_state": "failed",
+      "failure": "Readonly frozen source-directory extraction failed before simulation; cleanup_verified and stop_cleanup_verified true."
+    }
+  },
+  "subsequent_source_copy_fix": "Actual Docker CLI against an inert archive reproduces premature readonly-parent restoration. Corrected scoped tree copies stream the pristine-image archive to deferred-directory GNU tar extraction, then grant owner write for Git; executable bits and file bytes preserved. Both frozen-cache tree copies use the same correction. Three deterministic repetitions passed; broader helper suite still compiling. Not yet installed on hosts.",
+  "provisioning_note": "The Sille provisioner refused an evaluator pin mismatch before unit changes. Its partial role directory was preserved as competition-sille-role-20261110-v8-incomplete-pin-preflight; the explicit expected corrected evaluator SHA was added before successful provisioning. No job was started by the refused operation."
+}
