@@ -119,6 +119,7 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /account/wallets/remove":        model.RolePermissionBilling,
 	"POST /account/wallets/verify-seeker": model.RolePermissionBilling,
 	"POST /stripe/customer-portal":        model.RolePermissionBilling,
+	"POST /network/team-checkout":         model.RolePermissionBilling,
 	"GET /subscription/details":           model.RolePermissionBilling,
 	"POST /subscription/cancel":           model.RolePermissionBilling,
 	"POST /subscription/resume":           model.RolePermissionBilling,
