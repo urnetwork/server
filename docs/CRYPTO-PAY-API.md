@@ -25,20 +25,42 @@ Response `CryptoPaymentAssetsResult`:
 ```json
 {"assets": [
   {"asset": "usdc_solana", "plans": ["yearly", "yearly_onboarding"], "items": ["data_1tib", "data_10tib"],
-   "confirmations_required": 1, "quote_ttl_seconds": 3600},
+   "confirmations_required": 1, "quote_ttl_seconds": 3600, "available": true},
   {"asset": "xmr", "plans": ["yearly", "yearly_onboarding"], "items": ["data_1tib", "data_10tib"],
-   "confirmations_required": 1, "quote_ttl_seconds": 1800}
+   "confirmations_required": 1, "quote_ttl_seconds": 1800, "available": true}
+ ],
+ "unavailable_assets": [
+  {"asset": "zec", "plans": ["yearly", "yearly_onboarding"], "items": ["data_1tib", "data_10tib"],
+   "confirmations_required": 10, "quote_ttl_seconds": 1800, "available": false, "unavailable_reason": "scanner_lagging"}
 ]}
 ```
 
 `CryptoPaymentAsset`: `asset` (string: `usdc_solana` | `zec` | `xmr`), `plans` (string array, never `monthly`),
-`items` (string array), `confirmations_required` (integer), `quote_ttl_seconds` (integer). `plans` and `items` are
-always arrays, `[]` when the coin sells none, never `null`; a coin that sells neither is not listed. Only coins that
-are on are listed; an empty list is `"assets": []`. The order means nothing.
+`items` (string array), `confirmations_required` (integer), `quote_ttl_seconds` (integer), `available` (boolean),
+`unavailable_reason` (string, left out when `available`). `plans` and `items` are always arrays, `[]` when the coin
+sells none, never `null`; a coin that sells neither is not listed. The order means nothing.
+
+`assets` lists only the coins that can be paid with now: a coin that is on and whose quote the server would make.
+A client offers every coin it names and no other. A Zcash or Monero coin whose wallet scanner has not succeeded
+within three scan intervals, lags the network by more than the coin's `max_lag_blocks`, or does not know the
+network's height or the wallet's is left out: `/pay/crypto/intent` would refuse it (`asset_unavailable`), so it is
+never offered. It is in `unavailable_assets` instead, with `available: false` and the quote path's reason, for a
+page that shows it as temporarily unavailable:
+
+| `unavailable_reason` | When |
+|---|---|
+| `scanner_lagging` | the coin's scanner has not succeeded within three scan intervals (or never), or its wallet lags the network by more than `max_lag_blocks` |
+| `network_height_unknown` | the scanner knows no network height (no node, or a node that answered none) or no wallet height, so the lag cannot be judged |
+
+Every coin of `assets` has `available: true`. A coin switched off is in neither list. Both lists are arrays, `[]`
+when empty. The decision is the quote path's own, cached for 10 seconds per process, so the list, the balance, a new
+invoice and a re-quote agree. A coin that is listed can still be refused at the intent for a reason the list does
+not judge (rates, the address pool, too many open invoices): clients keep handling `asset_unavailable` there.
 
 ## Additions to GET /subscription/balance (`SubscriptionBalanceResult`)
 
-- `crypto_assets`: `[CryptoPaymentAsset]`, the list above. Left out when no coin is on.
+- `crypto_assets`: `[CryptoPaymentAsset]`, the `assets` list above: only the coins that can be paid with now. Left
+  out when there is none. The unavailable ones are not sent here: every app offers each coin this list names.
 - `crypto_term`: `CryptoTerm`, left out when the network has no one-time crypto credit (markets `solana`, `monero`,
   `zcash`) whose grace has not ended:
 
@@ -76,7 +98,7 @@ Refusals, in the order they are checked:
 | `guest_sign_in_required` | plans only: the network has no sign-in method |
 | `offer_unavailable` | `yearly_onboarding` while the welcome offer is not redeemable |
 | `rate_limited` | more than 10 intents a minute for this network (shared with `/solana/payment-intent`) |
-| `asset_unavailable` | the coin cannot be quoted now: fewer than two fresh rates, rates more than 3% apart, the scanner or the node lagging, the address pool empty, too many open invoices |
+| `asset_unavailable` | the coin cannot be quoted now: fewer than two fresh rates, rates more than 3% apart, the scanner or the node lagging (such a coin is in `unavailable_assets`, not `assets`), the address pool empty, too many open invoices |
 | `start_failed` | a database failure; a retry may work |
 
 An open invoice of this network for the same asset, item and delivery (not credited, not expired, nothing in
@@ -231,7 +253,8 @@ No auth; the token is the credential. Limited per client address (10 a minute; `
 - Allowed only while nothing was received (`pending` or `expired`) and the invoice is not closed; otherwise
   `invalid_request`. An unknown invoice or token is `invalid_request`.
 - XMR and ZEC: a new rate, amount and expiry for the **same address**; the old quote is kept in the history.
-  A coin that cannot be quoted now is `asset_unavailable`.
+  A coin that cannot be quoted now is `asset_unavailable`: the same refusal, from the same cached decision, as a
+  new invoice's, and the coin is in `unavailable_assets` of `/pay/crypto/assets` meanwhile.
 - USDC: the amount is already in dollars, so only `expires_at` moves.
 
 ## Error codes added to `PurchaseErrorCode*`
