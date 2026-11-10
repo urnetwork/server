@@ -19,29 +19,34 @@ import (
 )
 
 // The {sq_<network_id>} script behind Quota.CountRate (DESIGN.md 20.7's Counters, closure, allow and
-// wait rows; §11.12's rekey row; plan-QUOTA-small-readings reading 19): one all-or-none call per
-// CountRate, every key under the network's one hash tag, so nothing crosses a slot. Go resolves each
-// rate key through sidecar.ParseQuotaRateKey to its window, its limit and the refusal it would give,
-// and the script counts:
+// wait rows; §11.12's rekey row; DESIGN-DETAILS 13.2.1 and QD-652 for the pacing): one all-or-none call
+// per CountRate, every key under the network's one hash tag, so nothing crosses a slot. Go resolves each
+// rate key through sidecar.ParseQuotaRateKey to its window, its limit and the refusal it would give, and
+// the script counts:
 //
-//	debit    {sq_<n>}rate_debit:<debit_id>   the call's first answer, so a replay answers it again,
-//	                                         a refusal included, however the windows stand by then
+//	debit    {sq_<n>}rate_debit:<debit_id>   written only when the call passes, so a replay of a pass
+//	                                         answers pass and counts nothing, and a refused id, which
+//	                                         counted and recorded nothing, is judged afresh
 //	counter  {sq_<n>}rate:<rate key>         "<window index>:<used>", reset when its window turns
 //	day      {sq_<n>}closure_bytes_day       "<utc day index>:<bytes>", the network's closure bytes
 //	                                         counted today, for §21.7's closure-growth case; no limit
-//	pace     {sq_<n>}closure_pace            hash: tail, the latest slot handed out, and second and
-//	                                         taken, the uploads the network took in that second
-//	turns    {sq_<n>}closure_turns           zset: each asking eraser's next turn, in µs
+//	pace     {sq_<n>}closure_pace            hash: tail, the latest seat handed out; second and taken,
+//	                                         the uploads the network took in that second; and clock,
+//	                                         the latest time any call brought
+//	turns    {sq_<n>}closure_turns           zset: each asking eraser's seat, in µs
 //
-// Every key lives KeyTtl, §20.7's 48 h, past its last write. The pacing is sidecar.QuotaClosurePacing
-// line for line, which is what FakeQuota runs, so quotasuite holds the two to one behavior: an eraser
-// asking holds one slot on a tail spaced 1/R apart, a refused ask keeps its slot, a taken turn takes a
-// new slot at the tail, a slot lapses the horizon past its turn, and a bucket of R a second bounds the
-// network when erasers whose turns have passed come back together.
+// Every key lives KeyTtl, §20.7's 48 h, past its last write. The counters are judged first, and the
+// pacing is asked only when none refused. The pacing is sidecar.QuotaClosurePacing line for line, which
+// is what FakeQuota runs, so quotasuite and quota_rate_pacing_test.go hold the two to one behavior: each
+// asking eraser holds one seat, a cell 1/R s wide (rounded up to the µs) at the tail, good to the end of
+// its calendar second; a seat is handed out only in a second with a free cell, else at the next second's
+// start; an eraser whose seat is due takes, with nothing else checked; and a take seats the eraser again
+// at the tail, its old seat removed before the new seat's second is counted.
 //
 // Times reach the script as whole microseconds since the epoch, the caller's clock (so a fake clock
-// moves every window), and stay below 2^53, where Lua's doubles are exact. The script writes every
-// number it stores with %d, never as Lua would print it.
+// moves every window), and stay below 2^53, where Lua's doubles are exact. The pacing reads the later of
+// the caller's time and the network's clock, so two callers a few ms apart never turn its second back.
+// The script writes every number it stores with %d, never as Lua would print it.
 
 const quotaRateScriptSource = `
 local first = redis.call('GET', KEYS[1])
@@ -53,40 +58,16 @@ local ttl = ARGV[2]
 local count = tonumber(ARGV[3])
 local paced = tonumber(ARGV[4])
 local perS = tonumber(ARGV[5])
-local horizon = tonumber(ARGV[6])
-local eraser = ARGV[7]
+local eraser = ARGV[6]
 
 local function decimal(value)
   return string.format('%d', value)
 end
 
--- a new slot at the tail: 1/R after the latest, and never before now
-local function nextSlot()
-  local slot = now
-  local tail = redis.call('HGET', KEYS[2], 'tail')
-  if tail then
-    local spaced = tonumber(tail) + math.floor(1000000 / perS)
-    if now < spaced then
-      slot = spaced
-    end
-  end
-  redis.call('HSET', KEYS[2], 'tail', decimal(slot))
-  return slot
-end
-
--- the uploads the network took in the second numbered second
-local function taken(second)
-  local state = redis.call('HMGET', KEYS[2], 'second', 'taken')
-  if state[1] and tonumber(state[1]) == second then
-    return tonumber(state[2]) or 0
-  end
-  return 0
-end
-
 local refusal = false
 local useds = {}
 for i = 1, count do
-  local at = 9 + (i - 1) * 5
+  local at = 8 + (i - 1) * 5
   local amount = tonumber(ARGV[at + 1])
   local limit = tonumber(ARGV[at + 2])
   local used = 0
@@ -101,46 +82,76 @@ for i = 1, count do
   if not refusal and limit ~= -1 and limit < used + amount then
     refusal = ARGV[at + 3] .. '\t' .. decimal(used) .. '\t' .. ARGV[at + 4]
   end
-  if i == paced then
-    -- asked even past a refusal, so a refused eraser holds its slot and counts in k until its turn
-    redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', '(' .. decimal(now - horizon))
-    local turn = redis.call('ZSCORE', KEYS[3], eraser)
-    if turn then
-      turn = tonumber(turn)
-    else
-      turn = nextSlot()
-      redis.call('ZADD', KEYS[3], decimal(turn), eraser)
-    end
-    redis.call('PEXPIRE', KEYS[2], ttl)
-    redis.call('PEXPIRE', KEYS[3], ttl)
-    local second = math.floor(now / 1000000)
-    local secondTaken = taken(second)
-    local lift = false
-    if now < turn then
-      lift = turn
-    elseif perS <= secondTaken then
-      lift = (second + 1) * 1000000
-    end
-    if lift and not refusal then
-      local retryMs = math.min(4294967295, math.max(1, math.ceil((lift - now) / 1000)))
-      refusal = ARGV[8] .. '\t' .. decimal(secondTaken) .. '\t' .. decimal(retryMs)
-    end
-  end
 end
 if refusal then
-  redis.call('SET', KEYS[1], refusal, 'PX', ttl)
   return refusal
 end
+
+local tail = false
+local second = false
+local taken = 0
+local function pace()
+  redis.call('HSET', KEYS[2], 'second', decimal(second), 'taken', decimal(taken), 'clock', decimal(now))
+  if tail then
+    redis.call('HSET', KEYS[2], 'tail', decimal(tail))
+  end
+  redis.call('PEXPIRE', KEYS[2], ttl)
+  redis.call('PEXPIRE', KEYS[3], ttl)
+end
+-- a seat at the tail: a cell after the latest seat and never before now, at the next second's start
+-- when its own second has no free cell
+local function nextSeat()
+  local cell = math.floor((1000000 + perS - 1) / perS)
+  local seat = now
+  if tail and now < tail + cell then
+    seat = tail + cell
+  end
+  local seatSecond = math.floor(seat / 1000000)
+  local used = redis.call('ZCOUNT', KEYS[3], decimal(seatSecond * 1000000), '(' .. decimal((seatSecond + 1) * 1000000))
+  if seatSecond == second then
+    used = used + taken
+  end
+  if perS <= used then
+    seat = (seatSecond + 1) * 1000000
+  end
+  tail = seat
+  return seat
+end
+if 0 < paced then
+  local state = redis.call('HMGET', KEYS[2], 'tail', 'second', 'taken', 'clock')
+  tail = tonumber(state[1]) or false
+  local clock = tonumber(state[4])
+  if clock and now < clock then
+    now = clock
+  end
+  second = math.floor(now / 1000000)
+  if tonumber(state[2]) == second then
+    taken = tonumber(state[3]) or 0
+  end
+  -- the seats of earlier seconds have lapsed
+  redis.call('ZREMRANGEBYSCORE', KEYS[3], '-inf', '(' .. decimal(second * 1000000))
+  local seat = redis.call('ZSCORE', KEYS[3], eraser)
+  if seat then
+    seat = tonumber(seat)
+  else
+    seat = nextSeat()
+    redis.call('ZADD', KEYS[3], decimal(seat), eraser)
+  end
+  if now < seat then
+    pace()
+    local retryMs = math.min(4294967295, math.max(1, math.ceil((seat - now) / 1000)))
+    return ARGV[7] .. '\t' .. decimal(taken) .. '\t' .. decimal(retryMs)
+  end
+end
 for i = 1, count do
-  local at = 9 + (i - 1) * 5
+  local at = 8 + (i - 1) * 5
   redis.call('SET', KEYS[3 + i], ARGV[at] .. ':' .. decimal(useds[i] + tonumber(ARGV[at + 1])), 'PX', ttl)
 end
 if 0 < paced then
-  local second = math.floor(now / 1000000)
-  redis.call('HSET', KEYS[2], 'second', decimal(second), 'taken', decimal(taken(second) + 1))
-  redis.call('ZADD', KEYS[3], decimal(nextSlot()), eraser)
-  redis.call('PEXPIRE', KEYS[2], ttl)
-  redis.call('PEXPIRE', KEYS[3], ttl)
+  taken = taken + 1
+  redis.call('ZREM', KEYS[3], eraser)
+  redis.call('ZADD', KEYS[3], decimal(nextSeat()), eraser)
+  pace()
 end
 redis.call('SET', KEYS[1], '0', 'PX', ttl)
 return '0'
@@ -157,7 +168,7 @@ const quotaRatePassedRecord = "0"
 
 // ARGV before the first counter's, and per counter.
 const (
-	quotaRateHeadArgCount    = 8
+	quotaRateHeadArgCount    = 7
 	quotaRateCounterArgCount = 5
 	// KEYS before the first counter's
 	quotaRateHeadKeyCount = 3
@@ -355,7 +366,6 @@ func newQuotaRateCall(
 		strconv.Itoa(len(counts)),
 		strconv.Itoa(pacedIndex),
 		strconv.FormatInt(perS, 10),
-		strconv.FormatInt(settings.ClosureSlotHorizon.Microseconds(), 10),
 		pacedEraser,
 		pacingHead,
 	)

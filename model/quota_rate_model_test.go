@@ -3,7 +3,7 @@ package model
 // QUOTA-M2-03: Quota.CountRate on {sq_<network_id>} against the private stack's Redis, through
 // .stack/server-test.sh. quotasuite's rate cases run here on the real script, so the fake and the
 // server cannot drift apart unseen (§22.4); the rest pins what the suite cannot see from outside:
-// the slot rule, the records the script leaves, the dark switch and the fail-open count.
+// the slot rule, the records the script leaves (a pass's only), the dark switch and the fail-open count.
 
 import (
 	"context"
@@ -375,8 +375,9 @@ func TestQuotaRateCallsShareOneTag(t *testing.T) {
 	})
 }
 
-// All-or-none: a call one key refuses writes no counter of its other keys, and records its refusal under
-// its debit id, so the same id answers it again even once the window turned.
+// All-or-none: a call one key refuses writes no counter of its other keys and records nothing under its
+// debit id, so the same id asked again is judged afresh: counted once its window turned, and answered as
+// passed, counting nothing, after that (DESIGN-DETAILS 13.2.1).
 func TestQuotaRateRefusalCountsNothing(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -389,31 +390,43 @@ func TestQuotaRateRefusalCountsNothing(t *testing.T) {
 			"evs_read_receipts_per_repo_day": 2,
 		})
 		repoId := connect.NewId()
+		// a receipt counted today, so a call adding two is refused
+		refusal, err := network.count(ctx, map[string]int64{sidecar.QuotaRateKeyReadReceipt(repoId): 1})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, refusal, (*sidecar.QuotaRefusal)(nil))
 		debitId := server.NewId()
 		keyAmounts := map[string]int64{
 			sidecar.QuotaRateKeyDrop:                1,
-			sidecar.QuotaRateKeyReadReceipt(repoId): 3,
+			sidecar.QuotaRateKeyReadReceipt(repoId): 2,
 		}
-		refusal, err := network.counter.CountRate(ctx, network.networkId, network.limits, keyAmounts, debitId, clock.Now())
+		refusal, err = network.counter.CountRate(ctx, network.networkId, network.limits, keyAmounts, debitId, clock.Now())
 		connect.AssertEqual(t, err, nil)
-		if refusal == nil || refusal.LimitKey != "evs_read_receipts_per_repo_day" || refusal.Limit != 2 || refusal.Used != 0 {
+		if refusal == nil || refusal.LimitKey != "evs_read_receipts_per_repo_day" || refusal.Limit != 2 || refusal.Used != 1 {
 			t.Fatalf("refusal %+v", refusal)
 		}
 		_, found := testingRedisGet(ctx, quotaRateCounterKey(network.networkId, sidecar.QuotaRateKeyDrop))
 		connect.AssertEqual(t, found, false)
-		record, found := testingRedisGet(ctx, quotaRateDebitKey(network.networkId, debitId))
-		connect.AssertEqual(t, found, true)
-		connect.AssertEqual(t, strings.HasPrefix(record, "evs_read_receipts_per_repo_day\t2\t0\t0\t"), true)
+		_, found = testingRedisGet(ctx, quotaRateDebitKey(network.networkId, debitId))
+		connect.AssertEqual(t, found, false)
 
 		// the drops are all still there
 		passed, err := network.count(ctx, map[string]int64{sidecar.QuotaRateKeyDrop: 3})
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, passed, (*sidecar.QuotaRefusal)(nil))
 
-		clock.Advance(48 * time.Hour)
+		// the next day the same id is judged afresh and counts
+		clock.Advance(24 * time.Hour)
 		replayed, err := network.counter.CountRate(ctx, network.networkId, network.limits, keyAmounts, debitId, clock.Now())
 		connect.AssertEqual(t, err, nil)
-		connect.AssertEqual(t, *replayed, *refusal)
+		connect.AssertEqual(t, replayed, (*sidecar.QuotaRefusal)(nil))
+		record, found := testingRedisGet(ctx, quotaRateDebitKey(network.networkId, debitId))
+		connect.AssertEqual(t, found, true)
+		connect.AssertEqual(t, record, quotaRatePassedRecord)
+		replayed, err = network.counter.CountRate(ctx, network.networkId, network.limits, keyAmounts, debitId, clock.Now())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, replayed, (*sidecar.QuotaRefusal)(nil))
+		value, _ := testingRedisGet(ctx, quotaRateCounterKey(network.networkId, sidecar.QuotaRateKeyReadReceipt(repoId)))
+		connect.AssertEqual(t, strings.HasSuffix(value, ":2"), true)
 	})
 }
 
