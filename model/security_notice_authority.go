@@ -10,6 +10,9 @@ package model
 //	             (TEAM-M2-16's effects)
 //	idp          a team gained an OIDC IdP, which signs members in
 //	             (TEAM-M6-05)
+//	domain       a team added a domain to verify, and domain_verified when it
+//	             proved one, from when the domain's sign-ins route to the
+//	             team's IdP (TEAM-M6-06)
 //
 // The recipients are the sign-in email addresses of the network's Owners and
 // Admins: in a personal network its owner's, the account security notices
@@ -38,6 +41,9 @@ const (
 	SecurityNetworkAuthorityDelegation = "delegation"
 	SecurityNetworkAuthorityAdminSet   = "admin_set"
 	SecurityNetworkAuthorityIdp        = "idp"
+	SecurityNetworkAuthorityDomain     = "domain"
+	// the domain's TXT record was found
+	SecurityNetworkAuthorityDomainVerified = "domain_verified"
 )
 
 // One change of a network's authority.

@@ -416,6 +416,11 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/network/members", handlers.GetNetworkMembers),
 		router.NewRoute("POST", "/network/idp", handlers.CreateNetworkIdp),
 		router.NewRoute("GET", "/auth/sso/callback", handlers.NetworkSsoCallback),
+		// §7.6's verified domains and the discovery that routes them (TEAM-M6-06)
+		router.NewRoute("POST", "/network/domain-add", handlers.AddNetworkDomain),
+		router.NewRoute("POST", "/network/domain-verify", handlers.VerifyNetworkDomain),
+		router.NewRoute("POST", "/network/domain-remove", handlers.RemoveNetworkDomain),
+		router.NewRoute("POST", "/auth/sso-discover", handlers.NetworkSsoDiscover),
 		// §5.15's sidecar identities: the binding log and its lookups (CORE-M1-06)
 		router.NewRoute("POST", "/sidecar/bind", handlers.SidecarBind),
 		router.NewRoute("GET", "/sidecar/identity/([^/]+)", handlers.GetSidecarIdentity),

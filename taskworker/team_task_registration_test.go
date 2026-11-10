@@ -15,6 +15,7 @@ func TestTeamTasksAreProductionOnly(t *testing.T) {
 		task.NewTaskTarget(work.ReapEphemeralClients).TargetFunctionName(),
 		task.NewTaskTarget(model.AppendConfigLogTickTask).TargetFunctionName(),
 		task.NewTaskTarget(work.ConfigLogRetention).TargetFunctionName(),
+		task.NewTaskTarget(work.NetworkDomainRecheck).TargetFunctionName(),
 	}
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
 		worker, err := InitTaskWorkerForProfile(t.Context(), nil, profile)

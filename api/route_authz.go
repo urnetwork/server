@@ -319,6 +319,10 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
 	"POST /network/idp":                             routeAccessNetwork,  // adds a team's OIDC IdP (§7.6), the Owner's by its role gate
 	"GET /auth/sso/callback":                        routeAccessPublic,   // the state names its flow, taken once (§7.6)
+	"POST /network/domain-add":                      routeAccessNetwork,  // adds a team's domain to verify (§7.6), the Owner's by its role gate
+	"POST /network/domain-verify":                   routeAccessNetwork,  // looks a domain's TXT record up, which routes its sign-ins once found
+	"POST /network/domain-remove":                   routeAccessNetwork,  // removes a team's domain
+	"POST /auth/sso-discover":                       routeAccessPublic,   // an address's domain to its team's IdP; says nothing of other addresses (§7.6)
 	"POST /sidecar/bind":                            routeAccessClient,   // appends the bearer's own client generation (§5.15)
 	"GET /sidecar/identity/([^/]+)":                 routeAccessClient,   // a sidecar of the caller's network (§5.15)
 	"GET /sidecar/identity":                         routeAccessClient,   // ?client_id=: the sidecar a client of the caller's network binds

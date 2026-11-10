@@ -315,9 +315,12 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /oauth/consent":                     {path: "/oauth/consent", body: oauthRequest},
 		"POST /auth/network-refresh":              {path: "/auth/network-refresh"},
 		// the team routes (§7.5, §7.6)
-		"POST /network/team-create": {path: "/network/team-create", body: map[string]any{"network_name": "attacker" + self.networkName}},
-		"GET /network/members":      {path: "/network/members"},
-		"POST /network/idp":         {path: "/network/idp", body: map[string]any{"issuer": "https://attacker.example", "client_id": "attacker", "client_auth": "client_secret", "client_secret": "attacker"}},
+		"POST /network/team-create":   {path: "/network/team-create", body: map[string]any{"network_name": "attacker" + self.networkName}},
+		"GET /network/members":        {path: "/network/members"},
+		"POST /network/idp":           {path: "/network/idp", body: map[string]any{"issuer": "https://attacker.example", "client_id": "attacker", "client_auth": "client_secret", "client_secret": "attacker"}},
+		"POST /network/domain-add":    {path: "/network/domain-add", body: map[string]any{"domain": "attacker.example"}},
+		"POST /network/domain-verify": {path: "/network/domain-verify", body: map[string]any{"domain": "attacker.example"}},
+		"POST /network/domain-remove": {path: "/network/domain-remove", body: map[string]any{"domain": "attacker.example"}},
 		// app admin
 		"POST /auth/network-delete":               {path: "/auth/network-delete"},
 		"POST /auth/code-create":                  {path: "/auth/code-create", body: map[string]any{"uses": 1, "duration_minutes": 60}},

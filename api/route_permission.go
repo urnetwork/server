@@ -49,8 +49,12 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"POST /test/balance-restore":       model.RolePermissionAccount,
 
 	// the Owner's: deletion and the network's sessions
-	"POST /auth/network-delete":               model.RolePermissionOwner,
-	"POST /network/idp":                       model.RolePermissionOwner,
+	"POST /auth/network-delete": model.RolePermissionOwner,
+	"POST /network/idp":         model.RolePermissionOwner,
+	// where the team's sign-ins route
+	"POST /network/domain-add":                model.RolePermissionOwner,
+	"POST /network/domain-verify":             model.RolePermissionOwner,
+	"POST /network/domain-remove":             model.RolePermissionOwner,
 	"GET /network/sessions":                   model.RolePermissionOwner,
 	"POST /network/revoke-session":            model.RolePermissionOwner,
 	"POST /network/revoke-other-sessions":     model.RolePermissionOwner,

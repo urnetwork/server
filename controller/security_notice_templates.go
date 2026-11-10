@@ -667,6 +667,10 @@ func securityNetworkAuthorityAction(action string) string {
 		return "The network's admins changed"
 	case model.SecurityNetworkAuthorityIdp:
 		return "A sign-in provider was added"
+	case model.SecurityNetworkAuthorityDomain:
+		return "A domain was added for verification"
+	case model.SecurityNetworkAuthorityDomainVerified:
+		return "A domain was verified, and its sign-ins now go to the network's sign-in provider"
 	default:
 		return "The network's authority changed"
 	}
