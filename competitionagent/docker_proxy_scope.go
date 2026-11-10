@@ -350,6 +350,7 @@ type dockerPolicyHostConfig struct {
 	ReadonlyRootfs, Privileged                       bool
 	CapAdd, CapDrop, SecurityOpt, Binds              []string
 	Memory, MemorySwap, ShmSize                      int64
+	MemorySwappiness                                 *int64
 	PidsLimit                                        *int64
 	CpusetCpus                                       string
 	Ulimits                                          []struct {
@@ -382,7 +383,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 	var hostObject map[string]json.RawMessage
 	var host dockerPolicyHostConfig
 	if json.Unmarshal(object["HostConfig"], &hostObject) != nil || hostObject == nil ||
-		dockerPolicyFields(hostObject, "CgroupParent CgroupnsMode NetworkMode Runtime PidMode IpcMode UTSMode UsernsMode ReadonlyRootfs Privileged CapAdd CapDrop SecurityOpt Binds Memory MemorySwap ShmSize PidsLimit CpusetCpus Ulimits Sysctls Tmpfs MaskedPaths ReadonlyPaths Mounts RestartPolicy AutoRemove") != nil ||
+		dockerPolicyFields(hostObject, "CgroupParent CgroupnsMode NetworkMode Runtime PidMode IpcMode UTSMode UsernsMode ReadonlyRootfs Privileged CapAdd CapDrop SecurityOpt Binds Memory MemorySwap MemorySwappiness ShmSize PidsLimit CpusetCpus Ulimits Sysctls Tmpfs MaskedPaths ReadonlyPaths Mounts RestartPolicy AutoRemove") != nil ||
 		json.Unmarshal(object["HostConfig"], &host) != nil || !self.allowedCgroup(host.CgroupParent) || host.Privileged || !host.ReadonlyRootfs ||
 		host.PidMode != "" || host.UtsMode != "" || host.UsernsMode != "" || host.CgroupnsMode != "" && host.CgroupnsMode != "private" ||
 		host.IpcMode != "" && host.IpcMode != "private" && host.IpcMode != "none" || host.Runtime != "" && host.Runtime != "runc" ||
@@ -405,6 +406,11 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 	if host.Memory <= 0 || host.Memory > self.settings.MaximumContainerMemoryBytes || host.MemorySwap != host.Memory ||
 		host.PidsLimit == nil || *host.PidsLimit <= 0 || *host.PidsLimit > self.settings.MaximumContainerPids {
 		return errors.New("Docker container omitted a finite memory, swap or PID ceiling")
+	}
+	// Docker CLI serializes its unset swappiness as -1, not null. This sentinel
+	// never grants swap: the equal memory/swap ceiling above remains mandatory.
+	if host.MemorySwappiness != nil && *host.MemorySwappiness != -1 && *host.MemorySwappiness != 0 {
+		return errors.New("Docker container changed its inherited swappiness default")
 	}
 	requested, err := dockerPolicyCpuSet(host.CpusetCpus, self.settings.MaximumCpuIndex)
 	if err != nil {

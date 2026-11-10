@@ -76,6 +76,43 @@ func TestDockerPolicyAcceptsNamespaceProbeWithBoundedSharedMemory(t *testing.T) 
 	}
 }
 
+// The real CLI's unset sentinel is not an unbounded resource allocation. Both
+// omitted/null and the historical zero remain accepted without permitting swap.
+func TestDockerPolicyAcceptsInheritedSwappinessWithoutSwap(t *testing.T) {
+	for _, value := range []any{nil, int64(-1), int64(0)} {
+		fixture := newDockerProxyTest(t)
+		calls := dockerPolicyTestDaemon(t, fixture)
+		response := dockerPolicyTestCreate(t, fixture, func(object map[string]any) {
+			object["HostConfig"].(map[string]any)["MemorySwappiness"] = value
+		})
+		if response.Code != http.StatusCreated || calls.Load() != 1 {
+			t.Fatal("unset swappiness refused the no-swap helper", value, response.Code, calls.Load())
+		}
+	}
+}
+
+// Only the specific inherited/default values are compatible; this is not a
+// general exception for negative sentinels or caller-selected tuning fields.
+func TestDockerPolicyRejectsNondefaultSwappinessAndOtherNegativeSentinels(t *testing.T) {
+	for _, mutate := range []func(map[string]any){
+		func(host map[string]any) { host["MemorySwappiness"] = -2 },
+		func(host map[string]any) { host["MemorySwappiness"] = 1 },
+		func(host map[string]any) { host["MemorySwappiness"] = 100 },
+		func(host map[string]any) { host["MemorySwappiness"] = 101 },
+		func(host map[string]any) { host["MemorySwappiness"] = "-1" },
+		func(host map[string]any) { host["MemorySwappiness"], host["MemorySwap"] = -1, -1 },
+		func(host map[string]any) { host["MemorySwappiness"], host["MemorySwap"] = -1, 5*1024*1024*1024 },
+		func(host map[string]any) { host["MemorySwappiness"], host["CpuQuota"] = -1, -1 },
+	} {
+		fixture := newDockerProxyTest(t)
+		calls := dockerPolicyTestDaemon(t, fixture)
+		response := dockerPolicyTestCreate(t, fixture, func(object map[string]any) { mutate(object["HostConfig"].(map[string]any)) })
+		if response.Code != http.StatusForbidden || calls.Load() != 0 {
+			t.Fatal("resource-policy expansion reached daemon", response.Code, calls.Load())
+		}
+	}
+}
+
 // Directory creation is confined to the synthetic run or explicitly pinned
 // local-fixture tree; the production policy never creates a mount source.
 func dockerPolicyTestDirectory(t *testing.T, path string) string {
