@@ -112,21 +112,31 @@ func qualifyCompetitionDistributedHosts(ctx context.Context, settings *Settings,
 	return errors.Join(failures...)
 }
 
-// A durable clock reservation precedes input preparation. Reconnects reconstruct
-// exactly the same signed manifest, never another no-op sample or later clock.
+// Readiness precedes the first durable clock; failed setup cannot spend a
+// measurement budget. Reconnects still return the original immutable clock.
+func reserveCompetitionReadyExecutorAdmission(ctx context.Context, roundId server.Id,
+	check func(context.Context) (HostSelfCheck, error),
+	reserve func(context.Context) (*competitionExecutorQualificationRun, error),
+) (HostSelfCheck, *competitionExecutorQualificationRun, error) {
+	hostCheck, err := check(ctx)
+	if err != nil || !hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != roundId {
+		return hostCheck, nil, errors.New("executor no-op admission requires genuine same-round containment readiness")
+	}
+	if err := ctx.Err(); err != nil {
+		return hostCheck, nil, err
+	}
+	run, err := reserve(ctx)
+	return hostCheck, run, err
+}
+
+// A durable clock reservation follows readiness and precedes input preparation.
+// Reconnects reconstruct the same signed manifest, never a later clock.
 func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, store PostgresStore, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy) error {
 	qualified, err := store.distributedExecutorQualified(ctx, settings, round, baseline, host)
 	if err != nil || qualified {
 		return err
 	}
 	jobId := competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256)
-	run, err := store.reserveDistributedExecutorQualification(ctx, settings, round.RoundId, host.HostId, jobId)
-	if err != nil {
-		return err
-	}
-	startedAt, deadlineAt := run.StartedAt, run.DeadlineAt
-	operationCtx, cancel := context.WithDeadline(ctx, deadlineAt)
-	defer cancel()
 	selected := *settings
 	selected.executorHostId, selected.executorSlotId = host.HostId, host.SlotId
 	transport, err := competitionTransportForHost(&selected, host)
@@ -134,10 +144,17 @@ func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, 
 		return err
 	}
 	evaluator := &competitionAgentEvaluator{host: host, transport: transport}
-	check, err := evaluator.SelfCheck(operationCtx, &selected)
-	if err != nil || !check.RebaselinePassed || check.RebaselineRoundId == nil || *check.RebaselineRoundId != round.RoundId {
-		return errors.New("executor no-op admission requires genuine same-round containment readiness")
+	check, run, err := reserveCompetitionReadyExecutorAdmission(ctx, round.RoundId,
+		func(probeCtx context.Context) (HostSelfCheck, error) { return evaluator.SelfCheck(probeCtx, &selected) },
+		func(reserveCtx context.Context) (*competitionExecutorQualificationRun, error) {
+			return store.reserveDistributedExecutorQualification(reserveCtx, settings, round.RoundId, host.HostId, jobId)
+		})
+	if err != nil {
+		return err
 	}
+	startedAt, deadlineAt := run.StartedAt, run.DeadlineAt
+	operationCtx, cancel := context.WithDeadline(ctx, deadlineAt)
+	defer cancel()
 	if err := store.RegisterHost(operationCtx, &selected, check); err != nil {
 		return err
 	}
