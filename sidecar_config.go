@@ -23,6 +23,7 @@ import (
 //	  wake: {enabled: false}
 //	  bridge: {enabled: false}
 //	  escrow_draw_order: {enabled: false}
+//	  acl_contract_gate: {enabled: false}
 //	  reseed: false
 //	  place_new: meta-1
 //	  drained: []
@@ -34,6 +35,9 @@ import (
 //
 // p0_enforce is not in §19.11's list, which picks it up at the next records pass
 // (plan-OPS-small-readings #3), and file_clusters is plan-EVSB-settle-gate's.
+// acl_contract_gate is not in it either: it is the switch ACL-M4-01's plan keeps
+// CreateContract's §8.10 gate dark behind, which a process consults only where it
+// installed a gate (controller.SetAclContractGate).
 // sidecar_gates.go holds what each gate answers.
 //
 // A gate that loosens when the file breaks would drop P0's enforcement, or open
@@ -99,6 +103,7 @@ type sidecarConfigYaml struct {
 		Wake              *sidecarSwitchYaml `yaml:"wake"`
 		Bridge            *sidecarSwitchYaml `yaml:"bridge"`
 		EscrowDrawOrder   *sidecarSwitchYaml `yaml:"escrow_draw_order"`
+		AclContractGate   *sidecarSwitchYaml `yaml:"acl_contract_gate"`
 		Reseed            bool               `yaml:"reseed"`
 		PlaceNew          string             `yaml:"place_new"`
 		Drained           []string           `yaml:"drained"`
@@ -201,6 +206,7 @@ func newSidecarConfig(y *sidecarConfigYaml) *SidecarConfig {
 		SidecarSwitchWake:            y.Sidecar.Wake,
 		SidecarSwitchBridge:          y.Sidecar.Bridge,
 		SidecarSwitchEscrowDrawOrder: y.Sidecar.EscrowDrawOrder,
+		SidecarSwitchAclContractGate: y.Sidecar.AclContractGate,
 	} {
 		config.switches[name] = value != nil && value.Enabled
 	}

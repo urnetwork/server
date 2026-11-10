@@ -46,6 +46,9 @@ const (
 	// §20.9 (D-QUOTA-9): on only once M6's Gn-out registers MG6's index, and
 	// never off while a team_credit balance is in window
 	SidecarSwitchEscrowDrawOrder = "escrow_draw_order"
+	// §8.10's contract gate (ACL-M4-01): CreateContract consults the gate its
+	// process installed only while this is on
+	SidecarSwitchAclContractGate = "acl_contract_gate"
 )
 
 // A network's bucket, 0 to 99: the first 8 bytes of SHA-256 over the id's 16
@@ -230,6 +233,12 @@ func (self *SidecarConfig) Bridge() bool {
 // §20.9's draw order (D-QUOTA-9), read at every draw and return site.
 func (self *SidecarConfig) EscrowDrawOrder() bool {
 	return self.Switch(SidecarSwitchEscrowDrawOrder)
+}
+
+// §8.10's contract gate, read at every CreateContract of a process that
+// installed one.
+func (self *SidecarConfig) AclContractGate() bool {
+	return self.Switch(SidecarSwitchAclContractGate)
 }
 
 // Whether the file names escrow_draw_order at all, on or off. A file that names it

@@ -619,8 +619,19 @@ func GetProvideRelationship(ctx context.Context, sourceId server.Id, destination
 }
 
 func getProvideRelationshipDetails(ctx context.Context, sourceId server.Id, destinationId server.Id) model.ProvideRelationshipDetails {
+	return getProvideRelationshipDetailsFor(ctx, sourceId, destinationId, false)
+}
+
+// getProvideRelationshipDetails, with each end's facts for §8.10's contract
+// gate when withAcl, in the same single query (connect_acl_gate.go).
+func getProvideRelationshipDetailsFor(ctx context.Context, sourceId server.Id, destinationId server.Id, withAcl bool) model.ProvideRelationshipDetails {
 	defer server.EnterContractCreationStage(ctx, server.ContractStageRelationship)()
-	details := model.GetProvideRelationshipDetails(ctx, sourceId, destinationId)
+	var details model.ProvideRelationshipDetails
+	if withAcl {
+		details = model.GetProvideRelationshipDetailsWithAcl(ctx, sourceId, destinationId)
+	} else {
+		details = model.GetProvideRelationshipDetails(ctx, sourceId, destinationId)
+	}
 	if sourceId == ControlId {
 		details.Mode = model.ProvideModeNetwork
 		details.SourceLifecycle = model.NetworkClientLifecycle("control")
@@ -861,7 +872,10 @@ func CreateContract(
 		timingResult = server.ContractCreationRejected
 		return []*protocol.Frame{frame}, nil
 	}
-	relationshipDetails := getProvideRelationshipDetails(ctx, clientId, destinationId)
+	// §8.10's gate, where this process installed one and sidecar.yml turns it
+	// on: its facts ride the relationship's one query
+	aclGate, aclGateConfig := activeAclContractGate()
+	relationshipDetails := getProvideRelationshipDetailsFor(ctx, clientId, destinationId, aclGate != nil)
 	resolution := contractResolution{
 		path:                 contractResolutionRelationship,
 		relationship:         relationshipDetails.Mode,
@@ -913,6 +927,24 @@ func CreateContract(
 		timingResult = server.ContractCreationRejected
 		return []*protocol.Frame{frame}, nil
 	}
+
+	// §8.10's contract rule for a network with a head row (connect_acl_gate.go),
+	// on the request's own Companion bit, read before a same-network companion
+	// is settled as Network below or a non-companion falls back to a Stream
+	// companion, since either rewrites companion. A refusal is NoPermission and
+	// never recorded as the route's: a grant can activate at any moment. The
+	// class it gives is what C13 seals (PROTO-M4-02).
+	aclVerdict, aclRefusal, err := contractAclGate(ctx, aclGate, aclGateConfig, notifications, clientId, destinationId, createContract, &relationshipDetails, contractManagerSettings)
+	if err != nil {
+		return nil, err
+	}
+	if aclRefusal != nil {
+		rejectionCause = "acl_" + aclVerdict.Reason.String()
+		resolution.path = contractResolutionRejected
+		timingResult = server.ContractCreationRejected
+		return aclRefusal, nil
+	}
+	aclClass := aclVerdict.Class
 
 	if companion {
 		resolution.path = contractResolutionRequestedCompanion
@@ -1067,8 +1099,8 @@ func CreateContract(
 	// V(2) diagnostic: confirm no companion contracts in symmetric mode, and
 	// whether a destination cert is attached (the cert arms sender-side verification).
 	glog.V(2).Infof(
-		"[contract][cert]%s->%s companion=%t provideMode=%s certBlocks=%d certPemLen=%d clientKeySig=%d pubKey=%d\n",
-		clientId, destinationId, createContract.Companion, provideMode,
+		"[contract][cert]%s->%s companion=%t provideMode=%s class=%d certBlocks=%d certPemLen=%d clientKeySig=%d pubKey=%d\n",
+		clientId, destinationId, createContract.Companion, provideMode, aclClass,
 		len(provideTlsCertificate), len(provideTlsCertificatePem),
 		len(clientKeySignedTlsCertificate), len(destinationClientPublicKey),
 	)
