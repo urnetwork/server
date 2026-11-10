@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -84,7 +85,7 @@ func readRuntimeBoundaryManagementFacts(unit runtimeBoundaryUnit, procPath, cgro
 	defer procRoot.Close()
 	proc, err := openRelativeNoFollow(procRoot, strconv.Itoa(unit.Pid), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
-		return facts, err
+		return facts, &os.PathError{Op: "openat", Path: filepath.Join(procPath, strconv.Itoa(unit.Pid)), Err: err}
 	}
 	defer proc.Close()
 	cgroupRoot, err := openDirectoryNoFollow(cgroupPath)
@@ -97,12 +98,12 @@ func readRuntimeBoundaryManagementFacts(unit runtimeBoundaryUnit, procPath, cgro
 		return facts, err
 	}
 	defer group.Close()
-	return readRuntimeBoundaryManagementDescriptors(proc, group, settings, requireKernel)
+	return readRuntimeBoundaryManagementDescriptors(proc, group, filepath.Join(procPath, strconv.Itoa(unit.Pid)), settings, requireKernel)
 }
 
 // Descriptor ownership remains with the caller, including across rename or
 // process-path replacement. Tests use only private regular-file hierarchies.
-func readRuntimeBoundaryManagementDescriptors(proc, group *os.File, settings RuntimeResourceBoundarySettings, requireKernel bool) (runtimeBoundaryManagementFacts, error) {
+func readRuntimeBoundaryManagementDescriptors(proc, group *os.File, procIdentity string, settings RuntimeResourceBoundarySettings, requireKernel bool) (runtimeBoundaryManagementFacts, error) {
 	facts := runtimeBoundaryManagementFacts{}
 	if proc == nil || group == nil || settings.DocumentBytes <= 0 {
 		return facts, errors.New("management evidence has no bounded descriptor ownership")
@@ -119,12 +120,21 @@ func readRuntimeBoundaryManagementDescriptors(proc, group *os.File, settings Run
 	read := func(directory *os.File, name string, filesystemType int64) ([]byte, error) {
 		fd, err := syscall.Openat(int(directory.Fd()), name, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NONBLOCK|syscall.O_NOFOLLOW, 0)
 		if err != nil {
+			if directory == proc {
+				return nil, &os.PathError{Op: "openat", Path: filepath.Join(procIdentity, name), Err: err}
+			}
 			return nil, err
 		}
 		file := os.NewFile(uintptr(fd), "private-management-kernel-property")
 		defer file.Close()
 		info, err := file.Stat()
-		if err != nil || !info.Mode().IsRegular() {
+		if err != nil {
+			if directory == proc {
+				return nil, &os.PathError{Op: "fstat", Path: filepath.Join(procIdentity, name), Err: err}
+			}
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
 			return nil, errors.New("management kernel property is not regular")
 		}
 		if requireKernel {
@@ -134,7 +144,13 @@ func readRuntimeBoundaryManagementDescriptors(proc, group *os.File, settings Run
 			}
 		}
 		content, err := io.ReadAll(io.LimitReader(file, settings.DocumentBytes+1))
-		if err != nil || int64(len(content)) > settings.DocumentBytes {
+		if err != nil {
+			if directory == proc {
+				return nil, &os.PathError{Op: "read", Path: filepath.Join(procIdentity, name), Err: err}
+			}
+			return nil, err
+		}
+		if int64(len(content)) > settings.DocumentBytes {
 			return nil, errors.New("management kernel property is unavailable or oversized")
 		}
 		return content, nil

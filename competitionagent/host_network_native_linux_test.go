@@ -85,11 +85,11 @@ func TestHostNetworkNative(t *testing.T) {
 	if err != nil || !digestPattern.MatchString(networkId) {
 		t.Fatalf("native network create: %v: %s", err, networkId)
 	}
-	var containerId string
+	var containerIds []string
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cleanupCancel()
-		if digestPattern.MatchString(containerId) {
+		for _, containerId := range containerIds {
 			if output, err := exec.CommandContext(cleanupCtx, config.Docker.Path, "--host", "unix://"+config.DockerSocketPath, "rm", "--force", containerId).CombinedOutput(); err != nil {
 				t.Errorf("remove exact native peer: %v: %s", err, output)
 			}
@@ -98,12 +98,16 @@ func TestHostNetworkNative(t *testing.T) {
 			t.Errorf("remove exact native network: %v: %s", err, output)
 		}
 	})
-	containerId, err = command("run", "--detach", "--pull", "never", "--name", name, "--network", networkId, "--read-only", "--cap-drop", "ALL",
-		"--security-opt", "no-new-privileges=true", "--security-opt", "seccomp="+config.DockerRole.CandidateCoreProfile.Path, "--ulimit", "core=1:1", "--user", "65532:65532",
-		"--cpuset-cpus", boundary.ManagementCpuSet, "--cgroup-parent", managementPrivateSliceName, "--memory", "128m", "--memory-swap", "128m", "--pids-limit", "32", "--shm-size", "8m",
-		"--entrypoint", "/usr/bin/sleep", config.EvaluatorImageDigest, "120")
-	if err != nil || !digestPattern.MatchString(containerId) {
-		t.Fatalf("native isolated peer create: %v: %s", err, containerId)
+	for i := range 3 {
+		containerId, err := command("run", "--detach", "--pull", "never", "--name", fmt.Sprintf("%s-%d", name, i), "--network", networkId, "--read-only", "--cap-drop", "ALL",
+			"--health-cmd", "/usr/bin/true", "--health-interval", "1s", "--health-timeout", "1s",
+			"--security-opt", "no-new-privileges=true", "--security-opt", "seccomp="+config.DockerRole.CandidateCoreProfile.Path, "--ulimit", "core=1:1", "--user", "65532:65532",
+			"--cpuset-cpus", boundary.ManagementCpuSet, "--cgroup-parent", managementPrivateSliceName, "--memory", "128m", "--memory-swap", "128m", "--pids-limit", "32", "--shm-size", "8m",
+			"--entrypoint", "/usr/bin/sleep", config.EvaluatorImageDigest, "120")
+		if err != nil || !digestPattern.MatchString(containerId) {
+			t.Fatalf("native isolated peer create: %v: %s", err, containerId)
+		}
+		containerIds = append(containerIds, containerId)
 	}
 	transport := &http.Transport{Proxy: nil, DisableCompression: true, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, "unix", config.DockerSocketPath)

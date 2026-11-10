@@ -1,12 +1,31 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-10T19:23:00Z",
+  "observed_at": "2026-11-10T19:43:23Z",
+  "latest_healthcheck_process_diagnosis": {
+    "v18_probes_terminal_failed": true,
+    "cleanup_verified_both_hosts": true,
+    "smaller_native_three_sleeping_peers": "Passed Sille42.33s and Goofe31.32s, but this omitted health-check subprocess churn.",
+    "native_healthcheck_reproduction": "Three isolated peers with one-second health checks reproduced the refusal: private bridge kernel observation: readlink /proc/<helper-pid>/exe: no such file or directory. No submission or public job was involved.",
+    "root_cause": "The owned containerd cgroup census outlived a normal short-lived health-check helper. Managed-shim validation treated the vanished process as failed containment.",
+    "correction_under_test": "Only ENOENT/ESRCH observations under the exact census PID's /proc subtree may be reconciled, and only when pidfd reports exit or ESRCH confirms absence. Live/reused processes, unsupported/permission/poll failures, observed policy violations, unrelated missing files and other PID paths remain failures. Main service generation checks are unchanged.",
+    "deterministic_regressions": "Exact current-source targeted race controls passed three repetitions4.844s: forced vanished-proc/live/unknown controls, policy/other-path preservation, actual live pipe-blocked child versus joined child via pidfd, descriptor-relative proc-versus-cgroup error provenance, and private bounded native-proof refusal receipts. Final full race suite is running.",
+    "latest_native_healthcheck_tests": "Initial pidfd correction passed three consecutive native health-check reproductions per host: Sille42.41/42.11/42.21s; Goofe31.76/31.58/31.70s. After adjacent descriptor-error provenance correction, exact current-source native tests are running three times per host.",
+    "adjacent_correction": "Descriptor-relative management proc reads preserve exact PID/property paths through open, stat and read errors. Cgroup descriptor failures remain distinct and cannot receive an exited-process waiver.",
+    "installed": false,
+    "grading_ready": false,
+    "official_r9_started": false,
+    "customer_evaluation_started": false,
+    "next_action": "Finish exact current-source tests, publish and install immutable corrected agent at a signed idle boundary, then repeat full operator qualification. Preserve all failed probe identities; do not reset their clocks."
+  },
   "latest_isolated_link_activation": {
     "role": "v18",
     "source_commit": "374c7027e193168fdffc2056007c0af7c4deb0c6",
     "release": "/usr/local/libexec/urnetwork/competition-subeval-control-374c7027e-20261110-v18",
     "agent_sha256": "631422219838696e30d5a3bd75bd5866fe1e759a43abf5504ea077b15e3b153d",
     "active_both_hosts": true,
+    "probes_terminal_failed_both_hosts": true,
+    "cleanup_and_stop_cleanup_verified_both_hosts": true,
+    "probe_failure": "Full three-service attempts again refused the native network proof before runner admission. Both completed compilation/image assembly and PostgreSQL/Redis health checks. Passing one-peer native tests did not establish full composed-path qualification.",
     "signed_idle_verified_before_and_after_switch": true,
     "native_boundary_recheck_and_maps_verified": true,
     "repeated_fingerprints_match": true,
@@ -23,7 +42,7 @@
     "official_r9_started": false,
     "customer_evaluation_started": false,
     "grading_ready": false,
-    "next_action": "Observe exact live v18 identities without resending start or replacing deadlines. Require authenticated score/gates/security and cleanup, not transport success. Complete containment promotion and final executor amendment before official shared R9 baseline and parallel host admission. Earlier entries below are historical."
+    "next_action": "Preserve terminal v18 failures; do not restart them. Diagnose the three-peer composed proof with the expanded native reproducer and bounded root-only proof refusal receipts. Sille backing headroom was also slightly under32GiB after diagnostic builds; five reconstructible diagnostic binaries were moved, not deleted, to /mnt/data/competition-native-network-diagnostics-20261110, restoring the threshold. Goofe has ample backing headroom, so that is not a demonstrated common root cause. Complete actual end-to-end qualification before containment promotion, executor amendment and official shared R9 baseline/admission. Earlier entries below are historical."
   },
   "latest_isolated_link_diagnosis": {
     "active_role": "v17",

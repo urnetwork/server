@@ -16,6 +16,44 @@ import (
 	"unicode/utf8"
 )
 
+// Both native proof paths retain their actual failure while keeping object
+// identities hashed and receipt permissions root-owner-only in production.
+func TestDockerProxyNativeProofRefusalRetainsPrivateReason(t *testing.T) {
+	for _, operation := range []string{"verify-network", "verify-id-map"} {
+		fixture := newDockerProxyTest(t)
+		var err error
+		objectId := strings.Repeat("d", 64)
+		if operation == "verify-network" {
+			_, err = fixture.proxy.proveHostNetworkWithDiagnostics(t.Context(), objectId)
+		} else {
+			_, err = fixture.proxy.proveHostNamespaceWithDiagnostics(t.Context(), objectId)
+		}
+		if err == nil {
+			t.Fatal("missing native authority unexpectedly proved its object")
+		}
+		files, globErr := filepath.Glob(filepath.Join(fixture.plan.StateDirectory, "scope-refusal-*.json"))
+		if globErr != nil || len(files) != 1 {
+			t.Fatal("native refusal disappeared behind generic RPC error", files, globErr)
+		}
+		content, readErr := os.ReadFile(files[0])
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		var receipt struct {
+			Reason, Path string
+			Sha256       string `json:"request_sha256"`
+		}
+		if json.Unmarshal(content, &receipt) != nil || receipt.Reason == "" || !strings.Contains(err.Error(), receipt.Reason) ||
+			receipt.Path != "/_urnetwork/host-files/"+operation || receipt.Sha256 != digestDockerBytes([]byte(objectId)) || bytes.Contains(content, []byte(objectId)) {
+			t.Fatal("native refusal lost private reason or retained plaintext identity", string(content))
+		}
+		info, statErr := os.Stat(files[0])
+		if statErr != nil || info.Mode().Perm()&0077 != 0 {
+			t.Fatal("native refusal receipt is not private", statErr)
+		}
+	}
+}
+
 // The composed handler retains the failed gate but exposes only generic refusal.
 func TestDockerProxyScopeRefusalRetainsReasonWithoutRequestSecrets(t *testing.T) {
 	fixture := newDockerProxyTest(t)

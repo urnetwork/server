@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // These values come only from the protected agent role, never the wire.
@@ -1766,43 +1768,98 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if pid == unit.Pid {
 			continue
 		}
-		proc := "/proc/" + value
-		target, err := os.Readlink(filepath.Join(proc, "exe"))
-		if err != nil {
+		err = func() error {
+			proc := "/proc/" + value
+			target, err := os.Readlink(filepath.Join(proc, "exe"))
+			if err != nil {
+				return err
+			}
+			participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Name: unit.Name, ControlGroup: unit.ControlGroup, Pid: pid}, self.boundary, self.settings)
+			if err != nil {
+				return fmt.Errorf("private containerd helper management observation: %w", err)
+			}
+			if target == self.boundary.Runc.Path {
+				return nil
+			}
+			if target != self.boundary.ContainerdShim.Path {
+				return errors.New("private containerd owns an unpinned helper")
+			}
+			arguments, err := readBounded(filepath.Join(proc, "cmdline"), self.settings.DocumentBytes)
+			if err != nil {
+				return err
+			}
+			if validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
+				return errors.New("managed containerd shim arguments escaped its private runtime")
+			}
+			if participant.Namespace != self.identity || participant.MountNamespace != unit.MountNamespace {
+				return errors.New("managed containerd shim escaped its private namespace")
+			}
+			if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {
+				return err
+			}
+			file, err := os.Open(filepath.Join(proc, "exe"))
+			if err != nil {
+				return err
+			}
+			digest := sha256.New()
+			count, copyErr := io.Copy(digest, io.LimitReader(file, self.settings.ExecutableBytes+1))
+			_ = file.Close()
+			if copyErr != nil || count > self.settings.ExecutableBytes || hex.EncodeToString(digest.Sum(nil)) != self.boundary.ContainerdShim.Sha256 {
+				return errors.New("managed containerd shim content differs")
+			}
+			return nil
+		}()
+		if err := reconcileRuntimeBoundaryProcessExit(err, pid, runtimeBoundaryProcessExited); err != nil {
 			return err
-		}
-		participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Name: unit.Name, ControlGroup: unit.ControlGroup, Pid: pid}, self.boundary, self.settings)
-		if err != nil {
-			return errors.New("private containerd helper escaped its management CPU role")
-		}
-		if target == self.boundary.Runc.Path {
-			continue
-		}
-		if target != self.boundary.ContainerdShim.Path {
-			return errors.New("private containerd owns an unpinned helper")
-		}
-		arguments, err := readBounded(filepath.Join(proc, "cmdline"), self.settings.DocumentBytes)
-		if err != nil || validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
-			return errors.New("managed containerd shim arguments escaped its private runtime")
-		}
-		if participant.Namespace != self.identity || participant.MountNamespace != unit.MountNamespace {
-			return errors.New("managed containerd shim escaped its private namespace")
-		}
-		if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {
-			return err
-		}
-		file, err := os.Open(filepath.Join(proc, "exe"))
-		if err != nil {
-			return err
-		}
-		digest := sha256.New()
-		count, copyErr := io.Copy(digest, io.LimitReader(file, self.settings.ExecutableBytes+1))
-		_ = file.Close()
-		if copyErr != nil || count > self.settings.ExecutableBytes || hex.EncodeToString(digest.Sum(nil)) != self.boundary.ContainerdShim.Sha256 {
-			return errors.New("managed containerd shim content differs")
 		}
 	}
 	return nil
+}
+
+// A census is not a process lifetime: normal health-check helpers may exit
+// before proc reads finish. Only positive kernel exit evidence retires an error.
+func reconcileRuntimeBoundaryProcessExit(observationErr error, pid int, exited func(int) (bool, error)) error {
+	if !errors.Is(observationErr, os.ErrNotExist) && !errors.Is(observationErr, unix.ESRCH) {
+		return observationErr
+	}
+	var pathErr *os.PathError
+	procPath := "/proc/" + strconv.Itoa(pid)
+	if pid <= 1 || !errors.As(observationErr, &pathErr) || pathErr.Path != procPath && !strings.HasPrefix(pathErr.Path, procPath+"/") {
+		return observationErr
+	}
+	terminated, err := exited(pid)
+	if err != nil {
+		return errors.Join(observationErr, err)
+	}
+	if terminated {
+		return nil
+	}
+	return observationErr
+}
+
+// pidfd readiness includes an exited unreaped helper. ESRCH proves absence;
+// permissions, unsupported kernels and poll failures never grant admission.
+func runtimeBoundaryProcessExited(pid int) (bool, error) {
+	if pid <= 1 {
+		return false, errors.New("private helper exit identity is invalid")
+	}
+	fd, err := unix.PidfdOpen(pid, 0)
+	if errors.Is(err, unix.ESRCH) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(fd)
+	items := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	_, err = unix.Poll(items, 0)
+	if err != nil {
+		return false, err
+	}
+	if items[0].Revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
+		return false, errors.New("private helper pidfd observation failed")
+	}
+	return items[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0, nil
 }
 
 // The shim source uses /run/containerd for its socket directory independently
