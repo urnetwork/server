@@ -39,6 +39,19 @@
     "customer_evaluation_started": false,
     "grading_ready": false
   },
-  "operational_amendment": "User approved recording corrected executor-control releases and new host fingerprints, preserving round/source/scoring/submissions/clocks and requiring all containment and R9 admission checks. Amendment implementation and deployment remain pending.",
+  "operational_amendment": "User approved recording corrected executor-control releases and new host fingerprints, preserving round/source/scoring/submissions/clocks and requiring all containment and R9 admission checks. Amendment implementation and active-role deployment remain pending.",
+  "staged_control_release": {
+    "path_on_both_hosts": "/usr/local/libexec/urnetwork/competition-subeval-control-5c664029f-20261110-v4",
+    "source_commit": "5c664029ff1f1d64819ac259ca29c3734ca176bf",
+    "toolchain": "go1.27.3 linux/amd64",
+    "vcs_modified": false,
+    "agent_sha256": "79bc85112de5bfa2ffde8b97f2f20bab41cab9180d0fbc68c694f03c20aa17f7",
+    "docker_id_map_sha256": "23f0122b6842e6f0fa983d82d3c94e598c94fa2e28675b32bef0821df2950066",
+    "submission_dockerfile_sha256": "3cf1e3e7f5ddb036334106bc107468358c6c9800861d11125b4b1db7882f1c5f",
+    "purpose": "Corrected scoped probe UID, shutdown ordering and cleanup ancestry, plus previously tested throwaway build-layer branch metadata normalization. Frozen product commits, image, scoring instrument and workload remain unchanged.",
+    "hashes_rechecked_on_both_hosts": true,
+    "active_roles_switched": false,
+    "grading_qualified": false
+  },
   "evidence_limit": "Native unit journal and protected run-state observations; this public observation is not a MinIO retention receipt or host-admission certificate."
 }
