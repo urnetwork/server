@@ -50,6 +50,9 @@ type Route struct {
 	// X-UR-Intended-Network-Id names another network than its credential's,
 	// before its handler runs
 	intendedNetworkRefused bool
+	// set by RequireRolePermission: decides which requests the route refuses
+	// for their credential's role before its handler runs; nil asks none
+	rolePermissionRefusal RolePermissionRefusal
 }
 
 func NewRoute(method string, pattern string, handler http.HandlerFunc) *Route {

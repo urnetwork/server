@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base32"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 
 	"github.com/urnetwork/server"
@@ -19,6 +20,9 @@ type NetworkByApiKey struct {
 	// in a team network, the membership of the key's creator, whose user is
 	// UserId (TEAM-M6-02); nil in a personal network
 	MemberId *server.Id
+	// §7.8's scopes, which cut what the key's creator may do (TEAM-M6-03);
+	// nil for a legacy key, which keeps its creator's whole reach
+	Scopes []string
 }
 
 // The network the key stands for, or nil for no live key. A key past its expiry
@@ -57,7 +61,8 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 					account_api_key.api_key_id,
 					network.network_id,
 					network.admin_user_id,
-					network.network_name
+					network.network_name,
+					account_api_key.scopes::text
 				FROM account_api_key
 				JOIN network ON network.network_id = account_api_key.network_id
 				WHERE
@@ -71,12 +76,13 @@ func GetNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByApiKey {
 		server.WithPgResult(rows, err, func() {
 			if rows.Next() {
 				var r NetworkByApiKey
-				server.RaisePgResult(rows.Scan(
-					&r.ApiKeyId,
-					&r.NetworkId,
-					&r.UserId,
-					&r.NetworkName,
-				), err)
+				var scopesJson *string
+				destinations := []any{&r.ApiKeyId, &r.NetworkId, &r.UserId, &r.NetworkName}
+				if server.SidecarMg0Linked() {
+					destinations = append(destinations, &scopesJson)
+				}
+				server.RaisePgResult(rows.Scan(destinations...), err)
+				r.Scopes = parseApiKeyScopes(scopesJson)
 				result = &r
 			}
 		})
@@ -100,7 +106,8 @@ func getTeamAwareNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByA
 					network.network_name,
 					network_team.network_id IS NOT NULL,
 					network_member.user_id,
-					network_member.member_id
+					network_member.member_id,
+					account_api_key.scopes::text
 				FROM account_api_key
 				JOIN network ON network.network_id = account_api_key.network_id
 				LEFT JOIN network_team ON network_team.network_id = network.network_id
@@ -121,6 +128,7 @@ func getTeamAwareNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByA
 				var team bool
 				var memberUserId *server.Id
 				var memberId *server.Id
+				var scopesJson *string
 				server.Raise(rows.Scan(
 					&r.ApiKeyId,
 					&r.NetworkId,
@@ -129,7 +137,9 @@ func getTeamAwareNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByA
 					&team,
 					&memberUserId,
 					&memberId,
+					&scopesJson,
 				))
+				r.Scopes = parseApiKeyScopes(scopesJson)
 				if team {
 					if memberUserId == nil || memberId == nil {
 						// the creator holds no live membership: no key
@@ -143,6 +153,19 @@ func getTeamAwareNetworkByApiKey(apiKey string, ctx context.Context) *NetworkByA
 		})
 	})
 	return result
+}
+
+// A key's scopes column, nil for a legacy key's NULL. A column that does not
+// parse reaches nothing: an empty, not a nil, list.
+func parseApiKeyScopes(scopesJson *string) []string {
+	if scopesJson == nil {
+		return nil
+	}
+	scopes := []string{}
+	if err := json.Unmarshal([]byte(*scopesJson), &scopes); err != nil {
+		return []string{}
+	}
+	return scopes
 }
 
 type CreateApiKeyResult struct {

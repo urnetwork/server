@@ -349,14 +349,14 @@ type GetNetworkMembersResult struct {
 }
 
 // The refusal of a member route to a caller that may not use it.
-const networkMembersRefusedMessage = "Only the team's Owner may list its members."
+const networkMembersRefusedMessage = "Only the team's Owners and Admins may list its members."
 
 // GET /network/members: the members of the session's network, a team on the team
 // tier, in member_id order, at most the settings' MemberReadLimit at a time.
 //
-// The team's Owner reads them. TEAM-M6-03's routePermissionByRoute widens this to
-// each role that reads; until then the route is unmapped, which D-TEAM-3 makes
-// owner-only. A pending member reads nothing.
+// A member whose role holds RolePermissionMembers reads them, an Owner or an
+// Admin, as the route's role gate asks too (TEAM-M6-03). A pending member reads
+// nothing.
 func GetNetworkMembers(args *GetNetworkMembersArgs, clientSession *session.ClientSession) (*GetNetworkMembersResult, error) {
 	return newNetworkTeams().getMembers(args, clientSession)
 }
@@ -381,7 +381,7 @@ func (self *networkTeams) getMembers(args *GetNetworkMembersArgs, clientSession 
 	refused := false
 	server.Db(ctx, func(conn server.PgConn) {
 		caller := getNetworkMemberOfUserWithQuery(ctx, conn, byJwt.NetworkId, byJwt.UserId)
-		if caller == nil || caller.Pending || caller.Role != NetworkMemberRoleOwner {
+		if caller == nil || caller.Pending || !caller.Role.Permits(RolePermissionMembers) {
 			refused = true
 			return
 		}
