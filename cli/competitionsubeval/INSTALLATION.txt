@@ -9,7 +9,7 @@ Do not substitute a newer working tree or relabel an old binary's source.
 1. Seal and independently qualify the payload
 
 Build the distinct ./cli/competitionsubeval target on the isolated build host
-using an explicitly pinned Go 1.27.3 executable and offline module inputs. Use
+using an explicitly pinned Go 1.27.4 executable and offline module inputs. Use
 CGO_ENABLED=0, GOOS=linux and GOARCH=amd64. Record all other actual build flags,
 source archive/tree/commit, module closure, compiler digest, output digest and
 the independent qualification manifest. A -buildvcs=false build must say so;
