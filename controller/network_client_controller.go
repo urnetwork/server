@@ -55,6 +55,11 @@ func authNetworkClient(
 	if err == nil && result != nil && result.ClientId != nil && clientSession.ByJwt != nil {
 		recordAuthNetworkClientOnboarding(authClient, clientSession)
 	}
+	if err == nil && result != nil && result.Error != nil && result.Error.UpgradeRequired && clientSession.ByJwt != nil {
+		// a free account that pays with gamma is upgraded to Pro at its
+		// client limit (gamma_auto.go); the refusal itself is unchanged
+		go gammaNoteSeatDemand(clientSession.ByJwt.NetworkId)
+	}
 	if err != nil || result == nil || verifySettings == nil || result.ClientId == nil || result.ProxyConfigResult == nil || result.ProxyConfigResult.WgConfig == nil {
 		return result, err
 	}

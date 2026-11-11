@@ -93,6 +93,14 @@ var accountMessageTemplates = map[string]func() Template{
 	(&X402ReceiptTemplate{}).Name(): func() Template {
 		return &X402ReceiptTemplate{}
 	},
+	// Pay with Gamma (gamma_credit.go): the receipt of each credited intent,
+	// and the one notice of an automatic charge the chain skipped
+	(&GammaReceiptTemplate{}).Name(): func() Template {
+		return &GammaReceiptTemplate{}
+	},
+	(&GammaChargeSkippedTemplate{}).Name(): func() Template {
+		return &GammaChargeSkippedTemplate{}
+	},
 	(&MissingWalletTemplate{}).Name(): func() Template {
 		return &MissingWalletTemplate{}
 	},
