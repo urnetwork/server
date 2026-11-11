@@ -242,10 +242,10 @@ func TestUrlProbeTransportOutcomesSplitTcpAndUdp(t *testing.T) {
 	read := func() counts {
 		return counts{
 			testutil.ToFloat64(urlProbeOutcomes.WithLabelValues("success")), testutil.ToFloat64(urlProbeOutcomes.WithLabelValues("error")),
-			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("tcp", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("tcp", "error")),
-			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "answered")),
-			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "silent")),
-			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "skipped")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "not_measured")),
+			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("tcp", "ipv4", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("tcp", "ipv4", "error")),
+			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "ipv4", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "ipv4", "answered")),
+			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "ipv4", "silent")),
+			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "ipv4", "skipped")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "ipv4", "not_measured")),
 		}
 	}
 	h3 := []egresshealth.Destination{{Name: "synthetic-h3", Class: egresshealth.ClassSite, Url: "https://h3.example/", H3: true}}

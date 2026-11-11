@@ -236,11 +236,11 @@ func TestUrlProbeHealthyClaimStillMeasuresAndPublishes(t *testing.T) {
 // request, even though every individual network phase is capped at 15 seconds.
 func TestUrlProbeAdmissionKeepsRequestAndReservePolicy(t *testing.T) {
 	_, args, _ := urlAdmissionPass()
-	if budget := providerUrlProbeRunBudget(args); budget != 230*time.Second || budget+3*providerEgressControlPlaneTimeout != 320*time.Second {
+	if budget := providerUrlProbeRunBudget(args); budget != 250*time.Second || budget+3*providerEgressControlPlaneTimeout != 340*time.Second {
 		t.Fatalf("reserve policy changed: %s", budget)
 	}
 	reserve := providerUrlProbeRunBudget(args) + 3*providerEgressControlPlaneTimeout
-	if model.ProviderUrlProbeRenewalHeadroom-reserve != 40*time.Second {
+	if model.ProviderUrlProbeRenewalHeadroom-reserve != 20*time.Second {
 		t.Fatal("default turn and publication no longer fit the renewal scheduling margin")
 	}
 	opts := fleetprobe.EgressHealthOptions(time.Duration(args.UrlProbe.ProbeTimeoutSeconds)*time.Second, false)

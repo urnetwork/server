@@ -8078,7 +8078,7 @@
       "id": 163,
       "type": "timeseries",
       "title": "URL legs by transport and outcome / min",
-      "description": "Each acknowledged URL load's legs, counted apart. tcp is every load's HTTPS leg, success or error. udp is the HTTP/3 leg of a URL whose catalog entry declares h3: success; answered (the site answered over QUIC and refused or failed the request, e.g. a TLS alert 0x128 or 0x150 from an edge without h3 for the hostname, which proves the provider carries UDP); silent (nothing answered the QUIC handshake: the one leg that fails the load, and only where the place carries QUIC to the URL); not_measured; or skipped (its HTTPS leg failed first, so no HTTP/3 leg was made). verdict counts the ingest's place judgement of stored silent legs: provider where at least three other established networks in the provider's country reached the URL over QUIC that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its HTTPS leg and both legs are not required there. held counts turns the HTTP/3 common-mode guard kept out of provider history: their only failure was a silent leg while no recently measured network's HTTP/3 leg reached its site, which is the platform's QUIC path rather than each provider's.",
+      "description": "Each acknowledged URL load's legs, counted apart. tcp is every load's HTTPS leg, success or error. udp is the HTTP/3 leg of a URL whose catalog entry declares h3: success; answered (the site answered over QUIC and refused or failed the request, e.g. a TLS alert 0x128 or 0x150 from an edge without h3 for the hostname, which proves the provider carries UDP); silent (nothing answered the QUIC handshake: the one leg that fails the load, and only where the place carries QUIC to the URL); not_measured; or skipped (its HTTPS leg failed first, so no HTTP/3 leg was made). verdict counts the ingest's place judgement of stored silent legs: provider where at least three other established networks in the provider's country reached the URL over QUIC that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its HTTPS leg and both legs are not required there. held counts turns the HTTP/3 common-mode guard kept out of provider history: their only failure was a silent leg while no recently measured network's HTTP/3 leg reached its site, which is the platform's QUIC path rather than each provider's. Both IP families are counted here, each by its transport; the IP family row below splits them.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -8164,6 +8164,117 @@
           "refId": "A",
           "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=\"silent\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=~\"success|answered|silent\"}[1h]))",
           "legendFormat": "silent HTTP/3 legs"
+        }
+      ]
+    },
+    {
+      "id": 165,
+      "type": "row",
+      "title": "URL legs by IP family: IPv4 through A records, IPv6 through AAAA",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 542
+      },
+      "panels": []
+    },
+    {
+      "id": 166,
+      "type": "timeseries",
+      "title": "URL legs by IP family, transport and outcome / min",
+      "description": "Each acknowledged URL load's legs by family and transport. family ipv4 is every load's legs through the URL's A record; ipv6 is a dual-stack provider's legs through the URL's AAAA record, made only for a URL whose catalog entry says ipv6: true and only after the IPv4 HTTPS leg passed. tcp success or error is an HTTPS leg's; udp is the HTTP/3 leg of a URL that declares h3, worded as in the transport row. not_measured is a leg that could not be made or was cut short (an empty AAAA record from the provider's place, a resolver failure, the tunnel's loss); no_url is a dual-stack provider's load on a URL without ipv6: true; country_disabled is a UDP leg not made because the provider's country sets udp_probes: false; skipped is a leg an earlier failed leg kept from being made. None of these is a failure. verdict counts the ingest's place judgement of stored failed IPv6 legs: provider where at least three other established networks in the provider's country reached the URL over IPv6 that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its IPv4 legs. held counts turns the IPv6 common-mode guard kept out of provider history: their only failures were IPv6 legs while no recently measured network's IPv6 leg reached its site, which is the platform's IPv6 path rather than each provider's.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 543
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (family, transport, outcome) (rate(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{family}} {{transport}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (transport) (rate(urnetwork_url_probe_ipv6_common_mode_held_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "held: IPv6 {{transport}} common mode"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (transport, verdict) (rate(urnetwork_egress_url_ipv6_verdicts_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "IPv6 {{transport}} verdict {{verdict}}"
+        }
+      ]
+    },
+    {
+      "id": 167,
+      "type": "timeseries",
+      "title": "failed IPv6 legs after a passed IPv4 leg (1h)",
+      "description": "The share of measured IPv6 HTTPS legs that failed over the last hour, out of those that passed or failed, and the share of measured IPv6 HTTP/3 legs that nothing answered, out of those that passed, were answered or were silent. Every IPv6 leg follows an IPv4 HTTPS leg that passed through the same provider, so the first is the share of dual-stack turns whose provider carries the URL over IPv4 but not over IPv6, before the place judgement excuses the places where IPv6 does not reach the URL. not_measured, no_url, skipped and country_disabled legs are in neither count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 543
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"tcp\",family=\"ipv6\",outcome=\"error\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"tcp\",family=\"ipv6\",outcome=~\"success|error\"}[1h]))",
+          "legendFormat": "failed IPv6 HTTPS legs"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",family=\"ipv6\",outcome=\"silent\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",family=\"ipv6\",outcome=~\"success|answered|silent\"}[1h]))",
+          "legendFormat": "silent IPv6 HTTP/3 legs"
         }
       ]
     }
