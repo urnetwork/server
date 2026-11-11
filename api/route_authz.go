@@ -205,8 +205,14 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/crypto/quote":                        routeAccessPublic, // optional bearer: the network's tier and welcome offer
 	"POST /pay/crypto/intent":                       routeAccessClient,
 	"POST /pay/data/crypto-intent":                  routeAccessPublic,
-	"POST /pay/crypto/status":                       routeAccessPublic,  // the invoice's status token is the credential
-	"POST /pay/crypto/requote":                      routeAccessPublic,  // the invoice's status token is the credential
+	"POST /pay/crypto/status":                       routeAccessPublic, // the invoice's status token is the credential
+	"POST /pay/crypto/requote":                      routeAccessPublic, // the invoice's status token is the credential
+	"GET /pay/gamma/services.json":                  routeAccessPublic,
+	"GET /pay/gamma/terms":                          routeAccessPublic,
+	"POST /pay/gamma/intent":                        routeAccessClient,
+	"POST /pay/gamma/status":                        routeAccessPublic,  // the intent's status token is the credential
+	"GET /pay/gamma/settings":                       routeAccessNetwork, // the automatic charges' switches
+	"POST /pay/gamma/settings":                      routeAccessNetwork,
 	"GET /wallet/balance":                           routeAccessNetwork, // Circle wallet balance
 	"POST /wallet/validate-address":                 routeAccessClient,
 	"POST /wallet/circle-init":                      routeAccessNetwork, // creates the Circle wallet

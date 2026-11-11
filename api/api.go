@@ -295,6 +295,14 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/data/crypto-intent", handlers.PayDataCryptoIntent),
 		router.NewRoute("POST", "/pay/crypto/status", handlers.CryptoPaymentStatus),
 		router.NewRoute("POST", "/pay/crypto/requote", handlers.CryptoPaymentRequote),
+		// Pay with Gamma (controller/gamma_controller.go, mmm/BTCPAY.md §18):
+		// SN25 gamma deposits, charged by our spender; all by API
+		router.NewRoute("GET", "/pay/gamma/services.json", handlers.GammaServices),
+		router.NewRoute("GET", "/pay/gamma/terms", handlers.GammaTerms),
+		router.NewRoute("POST", "/pay/gamma/intent", handlers.GammaPaymentIntent),
+		router.NewRoute("POST", "/pay/gamma/status", handlers.GammaPaymentStatus),
+		router.NewRoute("GET", "/pay/gamma/settings", handlers.GammaSettings),
+		router.NewRoute("POST", "/pay/gamma/settings", handlers.GammaSetSettings),
 		router.NewRoute("GET", "/wallet/balance", handlers.WalletBalance),
 		router.NewRoute("POST", "/wallet/validate-address", handlers.WalletValidateAddress),
 		router.NewRoute("POST", "/wallet/circle-init", handlers.WalletCircleInit),

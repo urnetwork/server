@@ -1,0 +1,48 @@
+{
+ "block": 9479625,
+ "hash": "0xa7ae4acf3815140cc7b2ee6c944be0fd5d756d6865a149d0576da80b9a3ca658",
+ "owner_batch_all": {
+  "call": "0x0b020807a519002830c416368bc539694600e9ed2cb276764452814c591d6740cc737eb673c67bc468747470733a2f2f6170692e6272696e67796f75722e636f6d2f7061792f67616d6d612f73657276696365732e6a736f6e6a8bd268db336135217e27a4e41470e47661996569a757857b1dce2ffc0f49191375190001",
+  "call_hash": "0x390407699ee5f6ab6d9cfef031c145ff32415b56d4ab2ccda111ae145c4c0beb",
+  "info_error": "<nil>",
+  "query_call_info": "0xca82d9c106b8010000e083030000000000"
+ },
+ "sim_mint_gamma_25": {
+  "args": "0x190000ca9a3b00000000",
+  "decoded": {
+   "Alpha": 0,
+   "Error": "GammaDisabled",
+   "Gamma": 0,
+   "Value": 0
+  },
+  "result": "0x010307c0000000"
+ },
+ "sim_mint_gamma_58": {
+  "args": "0x3a0000ca9a3b00000000",
+  "decoded": {
+   "Alpha": 0,
+   "Error": "TaoUsdPriceUnavailable",
+   "Gamma": 0,
+   "Value": 0
+  },
+  "result": "0x010307bf000000"
+ },
+ "source": "read-only JSON-RPC answers of https://entrypoint-finney.opentensor.ai on 2026-11-10: GammaRuntimeApi_sim_mint_gamma, TaggedTransactionQueue_validate_transaction of a spend signed by a random unfunded throwaway key (never submitted), payment_queryInfo and TransactionPaymentCallApi_query_call_info",
+ "spec_version": 490,
+ "spender_add_proxy": {
+  "call": "0x10010016a075a114773fc8cf3b2d26c2de20c04a5e2c421053098d4214d1cad9e51d141600000000",
+  "fee_error": "<nil>",
+  "fee_rao": 98960
+ },
+ "validate_transaction": {
+  "birth": 9479625,
+  "birth_hash": "0xa7ae4acf3815140cc7b2ee6c944be0fd5d756d6865a149d0576da80b9a3ca658",
+  "extrinsic": "0x69038400e018db7029a033e170d5493031b5b5cb1f93b1fb99b9a7c1ac02e6d46a19c66b010696a436aac83c0d256dc272a94b94678cdc2336af955d8da6cfd43523ce06058b4d8d7c2e3bd35bd246c56eca537898f9fdc283a53b87330eb7dfa4b633c18b95000000001000006a8bd268db336135217e27a4e41470e47661996569a757857b1dce2ffc0f4919011607a41900040cd1b2b1ed6d8ddf5a6b975077ab73d7bdfecf933cb0dc5d274c2481fad55d7800f2052a010000009085f8ebb6292d2ec3f9c1314c1bdeb5a5951758693ea6a9cc6018fd73bc26d3",
+  "fee_error": "<nil>",
+  "fee_rao": 204795,
+  "genesis": "0x2f0555cc76fc2840a25a6ea3b9637146806f1f44b090c175ffde2a7e5ab36c03",
+  "hash": "0x50bc05d9d52964fafdb9b2c7d26b9f15b5f2a4fb6dfcc30a91af682d5bc1f94f",
+  "signer": "5H8Xy4nYHACpnRpGL3qH7yHqYEejedLYtNGZtZPknTx3ufDd",
+  "verdict": "0x010001"
+ }
+}
