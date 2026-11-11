@@ -24,8 +24,8 @@ type cacheSettings struct {
 	MaximumEpisodeBytes    int64         `json:"maximum_episode_bytes"`    // At most 1 GiB requested until real headroom returns.
 	MaximumEpisodeAttempts int           `json:"maximum_episode_attempts"` // At most two issued or uncertain requests per episode.
 	PassTimeout            time.Duration `json:"pass_timeout"`             // Fifteen seconds for one observation/reclaim owner.
-	Interval               time.Duration `json:"interval"`                 // Thirty seconds between joined oneshot passes.
-	StopTimeout            time.Duration `json:"stop_timeout"`             // Five seconds before the manager kills a canceled owner.
+	Interval               time.Duration `json:"interval"`                 // Thirty seconds between joined same-cgroup passes.
+	StopTimeout            time.Duration `json:"stop_timeout"`             // Five seconds total for child TERM/KILL and positive join.
 	ServiceMemoryBytes     int64         `json:"service_memory_bytes"`     // The companion's 32 MiB remains inside the private aggregate.
 	ServiceTasksMaximum    int           `json:"service_tasks_maximum"`    // Thirty-two threads/tasks, not an additional aggregate allowance.
 	DocumentBytes          int64         `json:"document_bytes"`           // Bound every kernel, settings and journal document to 64 KiB.
