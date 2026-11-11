@@ -212,16 +212,50 @@ func gammaPlanCoverEnd(ctx context.Context, intent *model.GammaPaymentIntent, no
 	}
 }
 
-// gammaPlanCovered reports whether a gamma plan intent must not be charged
-// now: another Pro subscription pays for, or still bills, part of the term it
-// would buy. It waits; once that subscription ends, while the intent is still
-// open, it is charged, and a renewal then starts where the other Pro ended
-// (gammaCreditIntentInTx). A data pack is never covered.
-func gammaPlanCovered(ctx context.Context, intent *model.GammaPaymentIntent, now time.Time) bool {
+// gammaPlanHold is why a gamma plan intent must not be charged now, as the
+// message its status shows; "" when it may be. A data pack is never held.
+//
+//   - Another Pro subscription pays for, or still bills, part of the term it
+//     would buy (gammaPlanCoverEnd). It waits; once that subscription ends,
+//     while the intent is still open, it is charged, and a renewal then
+//     starts where the other Pro ended (gammaCreditIntentInTx).
+//   - Another Gamma plan was paid at or after it was made: that one paid for
+//     these days, so it is never charged. A purchase ignores the network's own
+//     Gamma windows (it may upgrade a plan), so this is what keeps a purchase
+//     made before a renewal (or another purchase) was paid from being charged
+//     on top of it.
+//   - Another Gamma plan charge of the network is in flight. It waits, and is
+//     charged only if that one is not paid. One plan charge at a time: the
+//     biller would otherwise put both in one batch.
+//   - A renewal or a seat upgrade, while a plan purchase of the network is
+//     open: the purchase replaces it. It waits, is voided once the purchase is
+//     paid (gammaCreditIntentInTx), and goes ahead if the purchase expires
+//     unpaid, so a quote never paid does not cost the customer the renewal.
+func gammaPlanHold(ctx context.Context, intent *model.GammaPaymentIntent, now time.Time) string {
 	if !slices.Contains(gammaKnownPlans, intent.Item) {
-		return false
+		return ""
 	}
-	return gammaPlanCoverEnd(ctx, intent, now).After(now)
+	if gammaPlanCoverEnd(ctx, intent, now).After(now) {
+		return gammaPlanCoveredMessage
+	}
+	createTime := intent.CreateTime
+	charging, paidSince := model.GetGammaPlanChargeState(ctx, intent.NetworkId, gammaKnownPlans, &intent.IntentId, &createTime)
+	switch {
+	case paidSince:
+		return gammaPlanPaidSinceMessage
+	case charging:
+		return gammaPlanChargingMessage
+	}
+	if intent.Automatic() && model.HasOpenGammaPlanPurchase(ctx, intent.NetworkId, gammaKnownPlans, now) {
+		return gammaPlanReplacedMessage
+	}
+	return ""
+}
+
+// gammaPlanCovered reports whether a gamma plan intent must not be charged
+// now (gammaPlanHold).
+func gammaPlanCovered(ctx context.Context, intent *model.GammaPaymentIntent, now time.Time) bool {
+	return gammaPlanHold(ctx, intent, now) != ""
 }
 
 // gammaManageUrl explains the automatic charges and their switches.
