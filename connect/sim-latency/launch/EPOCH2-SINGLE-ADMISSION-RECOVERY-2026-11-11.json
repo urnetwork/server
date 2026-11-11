@@ -38,6 +38,18 @@
   "failed_metric_relative_change_percent": -5.845536434,
   "failed_metric_two_sided_p_value": 0.03933408960004516,
   "other_eight_metric_screens_passed": true,
+  "post_failure_readonly_checks": {
+    "observed_at": "2026-11-11T08:07:00Z",
+    "all_baseline_workload_flags_match_all_nine_replicates": true,
+    "all_nine_established_clients": 200,
+    "all_nine_measurement_duration_ms": 180000,
+    "all_nine_measured_failures": 0,
+    "resource_boundary_documents_identical": true,
+    "all_nine_container_resource_records_clean": true,
+    "workload_or_resource_mismatch_identified": false,
+    "cause_of_throughput_shift_proven": false,
+    "additional_sampling_performed": false
+  },
   "coordinator_stopped_at_idle_boundary_after_admission_failure": true,
   "further_resampling_or_admission_waiver_authorized": false,
   "coordinator_restarts": 0,
