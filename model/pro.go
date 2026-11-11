@@ -479,6 +479,17 @@ func Testing_SetEnforceConcurrentClients(enforce bool) func() {
 	return func() { c.EnforceConcurrentClients = prev }
 }
 
+// Testing_SetEnforceFeatures overrides the feature enforcement flag
+// (enforce_features) on the process's parsed config, returning a function that
+// restores the previous value. Same caveats as
+// Testing_SetEnforceConcurrentClients.
+func Testing_SetEnforceFeatures(enforce bool) func() {
+	c := Pro()
+	prev := c.EnforceFeatures
+	c.EnforceFeatures = enforce
+	return func() { c.EnforceFeatures = prev }
+}
+
 // Testing_SetProviderIntentShadowSampling makes every shadow slot decision
 // sampled (true) or none (false), returning a function that restores the
 // random sampler. Same caveats as Testing_SetEnforceConcurrentClients.
@@ -780,6 +791,14 @@ func (c *ProConfig) FeatureEnabled(pro bool, feature string) bool {
 	default:
 		return false
 	}
+}
+
+// ProOnlyFeature reports whether a feature is in the Pro plan and not in the
+// free plan: what an upgrade adds, and what enforcement takes from a network
+// without Pro. False for every feature when pro.yml is absent, since then no
+// plan lists any.
+func (c *ProConfig) ProOnlyFeature(feature string) bool {
+	return c.FeatureEnabled(true, feature) && !c.FeatureEnabled(false, feature)
 }
 
 // FeatureAllowed reports whether a tier may actually USE a proxy feature right
