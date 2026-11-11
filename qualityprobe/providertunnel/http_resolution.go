@@ -12,11 +12,15 @@ import (
 	"github.com/urnetwork/connect"
 )
 
+// One lookup of a record type and name: the answer, and whether it is
+// authoritative (connect DohCache.QueryResult).
+type providerUrlQuery = func(ctx context.Context, recordType string, host string) ([]netip.Addr, bool)
+
 // Each independent tunnel supplies its own cache and socket dialer. Probe
 // tunnels are IPv4-only; this does not change general Connect resolution.
 type providerUrlResolver struct {
 	waitRoute           func(context.Context) error
-	query               func(context.Context, string, string) ([]netip.Addr, bool)
+	query               providerUrlQuery
 	dial                func(context.Context, string, string, []netip.Addr) (net.Conn, error)
 	observations        *DnsObservations
 	pathState           func() dnsPathState
@@ -170,6 +174,41 @@ resolution:
 	}
 	observation.observe(connect.TunDialDnsAnswered)
 	return self.dialResolved(ctx, network, address, addrs)
+}
+
+// Races one lookup through every query and returns the first answer with
+// addresses, canceling the rest. A miss is not such an answer: the race waits
+// for the other queries, so one resolver's negative (a censor's NXDOMAIN, a
+// server that only refers) cannot end a lookup another may still answer.
+// Without addresses the result is authoritative when any query's was, so an
+// authoritative negative is still not repeated at once (dialContext). Each
+// query runs on its own goroutine, and the race's return cancels the rest.
+func raceProviderUrlQueries(queries ...providerUrlQuery) providerUrlQuery {
+	return func(ctx context.Context, recordType string, host string) ([]netip.Addr, bool) {
+		raceCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		type queryResult struct {
+			addrs         []netip.Addr
+			authoritative bool
+		}
+		// buffered, so a canceled query never blocks on a finished race
+		queryResults := make(chan queryResult, len(queries))
+		for _, query := range queries {
+			go func() {
+				addrs, authoritative := query(raceCtx, recordType, host)
+				queryResults <- queryResult{addrs: addrs, authoritative: authoritative}
+			}()
+		}
+		authoritative := false
+		for range queries {
+			result := <-queryResults
+			if 0 < len(result.addrs) {
+				return result.addrs, result.authoritative
+			}
+			authoritative = authoritative || result.authoritative
+		}
+		return nil, authoritative
+	}
 }
 
 // Starts a fresh socket budget after DNS; it cannot extend a shorter caller

@@ -17096,17 +17096,29 @@ running API **and** Taskworker artifacts before applying these semantics):
   Main's location-specific provider-list incident.
 - Each sampled hostname has an explicit IPv4 name-resolution phase using its
   own tunnel's private resolver, followed by target TCP/TLS and response work.
-  The tunnel takes Connect's existing provider-country regional recommendation
-  where available (as server/proxy does), an explicit safe custom resolver
-  first, and the existing in-tunnel DoH default otherwise. Never use the
-  operator host's DNS for provider targets or share resolver state across
-  providers. A regional plaintext DNS recommendation remains inside that
-  provider tunnel; it is not a new public bootstrap path. The source change
-  requires a new Taskworker artifact before it describes Main behavior. The
-  existing fixed failure stages do not expose resolver selection or join a
-  provider-country cohort, so they cannot prove a regional recommendation
-  caused improvement or failure. Unknown/stale country metadata can select the
-  default or an inapplicable recommendation; retain unknown attribution. Up to
+  An explicit safe custom resolver is used alone. Otherwise the tunnel resolves
+  with the existing in-tunnel DoH default, and where Connect has a
+  provider-country regional recommendation (the plaintext DNS server/proxy
+  uses) its servers race that DoH through the same tunnel: the first answer
+  wins, and one resolver's miss waits for the other. Plaintext DNS reaches a
+  provider over UDP only (the provider drops DNS over TCP), so the
+  recommendation alone made the URL probe a UDP test in the six countries that
+  have one. A Taskworker built from 2026-09-26 (ed4eee921) until the race used
+  it alone: an exit that carries TCP but not UDP, such as a provider identity
+  behind a proxy that only relays TCP, failed every URL there at a 5 s DNS
+  timeout and passed elsewhere.
+  On 2026-11-10 one provider network's exits passed 74% of their URL runs in
+  de, fr, br and gb and 0.1% in ru and 0% in kz, and 93.8% of all ru URL runs
+  ended at DNS. Never use the operator host's DNS for provider targets or
+  share resolver state across providers; each resolver of the race has its own
+  cache, owned and closed by its tunnel. A regional plaintext DNS
+  recommendation remains inside that provider tunnel; it is not a new public
+  bootstrap path. The source change requires a new Taskworker artifact before
+  it describes Main behavior. The existing fixed failure stages do not expose
+  resolver selection, so join the provider country (and the exit's client
+  version, for proxy-only identities) before attributing a country's DNS
+  failures. Unknown/stale country metadata can select the default or an
+  inapplicable recommendation; retain unknown attribution. Up to
   three transient DNS lookup attempts share the request's hard deadline, with
   bounded 50–200 ms jitter and time reserved for the connection. An authoritative
   negative is not immediately repeated; the existing spaced per-site retries
