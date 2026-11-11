@@ -290,6 +290,77 @@ func TestStripeRenewalGrantsAtTheRenewalsOwnStart(t *testing.T) {
 	})
 }
 
+// A Pay with Gamma monthly term gets the full grant at its own start, valid for
+// the term. The renewal the biller charges continues from where the term ends
+// and gets the next full grant at that start. The bug was 600 GiB until the next
+// 1st, then the calendar month's grant.
+func TestGammaRenewalGetsTheFullGrantAtTheRenewalsOwnStart(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		setProCycleTestData(t, 10*model.Tib)
+		f := newGammaDbFixture(t)
+		ctx := f.ctx
+		networkId, _, clientSession := cryptoDbTestNetwork(t, ctx, "pro-cycle-gamma")
+		f.run()
+		coldkey := gammaTestAccount(t, gammaTestColdkey)
+
+		intent := gammaDbIntent(t, clientSession, &CreateGammaPaymentIntentArgs{Plan: model.SolanaPlanMonthly})
+		if intent.Error != nil {
+			t.Fatalf("no intent: %+v", intent.Error)
+		}
+		hotkey := gammaTestAccount(t, intent.DepositHotkey)
+		f.sim.setDeposit(hotkey, &gammaSimDeposit{coldkey: coldkey, spender: f.settings.Spender, balance: 100_000_000_000})
+		f.run()
+		f.sim.mine()
+		f.run()
+		if status := gammaDbStatus(t, clientSession, intent).Status; status != gammaStatusPaid {
+			t.Fatalf("the purchase is %s, want %s", status, gammaStatusPaid)
+		}
+		term := cryptoDbRenewals(t, ctx, networkId, model.SubscriptionMarketGamma)
+		if term.count != 1 {
+			t.Fatalf("%d gamma terms, want 1", term.count)
+		}
+		termStart := term.startTime
+		termEnd := term.endTime.Add(-manualPaymentGracePeriod)
+
+		if got := proCycleTestActiveBytes(ctx, networkId); got != 10*model.Tib {
+			t.Fatalf("the subscriber holds %d bytes, want the full grant %d", got, 10*model.Tib)
+		}
+		_, grants := proCycleTestBalances(t, ctx, networkId)
+		if len(grants) != 1 {
+			t.Fatalf("%d grants after the purchase, want 1", len(grants))
+		}
+		assertProCycleTestGrant(t, "the first term", grants[0], termStart, termEnd, 10*model.Tib)
+
+		// the term ends: the biller renews it from where it ends
+		f.now = termEnd.Add(-30 * time.Minute)
+		f.autoNow()
+		f.run()
+		f.sim.mine()
+		f.run()
+		renewal := cryptoDbRenewals(t, ctx, networkId, model.SubscriptionMarketGamma)
+		if renewal.count != 2 || !renewal.startTime.Equal(termEnd) {
+			t.Fatalf("%d gamma terms, the last from %s, want the renewal from %s", renewal.count, renewal.startTime, termEnd)
+		}
+		renewalEnd := renewal.endTime.Add(-manualPaymentGracePeriod)
+		// charged before its term starts: no second grant inside the running cycle
+		_, grants = proCycleTestBalances(t, ctx, networkId)
+		if len(grants) != 1 {
+			t.Fatalf("%d grants inside the first term, want 1", len(grants))
+		}
+
+		// the sweep at the renewal's start grants its term, once
+		model.Testing_GrantDueProCycles(ctx, termEnd.Add(time.Hour))
+		model.Testing_GrantDueProCycles(ctx, termEnd.Add(2*time.Hour))
+		_, grants = proCycleTestBalances(t, ctx, networkId)
+		if len(grants) != 2 {
+			t.Fatalf("%d grants, want the first term's and the renewal's", len(grants))
+		}
+		assertProCycleTestGrant(t, "the first term", grants[0], termStart, termEnd, 10*model.Tib)
+		assertProCycleTestGrant(t, "the renewal", grants[1], termEnd, renewalEnd, 10*model.Tib)
+	})
+}
+
 // A network paying in two markets at once, Stripe on the web and the App Store
 // on a phone, gets one grant per cycle.
 func TestOverlappingStripeAndAppleGetOneGrantPerCycle(t *testing.T) {
