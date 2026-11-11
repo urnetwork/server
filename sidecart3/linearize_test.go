@@ -22,6 +22,7 @@ type linearizeFixture struct {
 	ref     fault.HistoryRef
 }
 
+// An empty history named name, on a ref of its own.
 func newLinearizeFixture(name string) *linearizeFixture {
 	return &linearizeFixture{
 		history: fault.NewHistory(name),
@@ -64,6 +65,7 @@ func (self *linearizeFixture) unrelatedUnknown(call int64) {
 	self.push("writerC", "evs3", sidecar.NewId(), call, 0, fault.OutcomeUnknown, 0)
 }
 
+// The defaults, rendering into t's artifact directory.
 func linearizeSettings(t *testing.T) *LinearizeSettings {
 	settings := DefaultLinearizeSettings()
 	settings.RenderDirectory = t.ArtifactDir()
@@ -309,19 +311,19 @@ func TestCheckLinearizableRendersTheFailingPrefix(t *testing.T) {
 	if !errors.Is(err, ErrNotLinearizable) {
 		t.Fatalf("%s: %v", report, err)
 	}
-	renderings := report.Refs[0].Renderings
-	if len(renderings) != 2 || filepath.Dir(renderings[0]) != settings.RenderDirectory || !strings.HasSuffix(renderings[0], ".txt") || !strings.HasSuffix(renderings[1], ".html") {
-		t.Fatalf("renderings %v in %s", renderings, settings.RenderDirectory)
+	renderingPaths := report.Refs[0].RenderingPaths
+	if len(renderingPaths) != 2 || filepath.Dir(renderingPaths[0]) != settings.RenderDirectory || !strings.HasSuffix(renderingPaths[0], ".txt") || !strings.HasSuffix(renderingPaths[1], ".html") {
+		t.Fatalf("renderings %v in %s", renderingPaths, settings.RenderDirectory)
 	}
-	if !strings.HasPrefix(filepath.Base(renderings[0]), "FS-0-rendered-") {
-		t.Fatalf("a rendering named %s", renderings[0])
+	if !strings.HasPrefix(filepath.Base(renderingPaths[0]), "FS-0-rendered-") {
+		t.Fatalf("a rendering named %s", renderingPaths[0])
 	}
-	for _, rendering := range renderings {
-		if !strings.Contains(err.Error(), rendering) {
-			t.Errorf("the error does not name %s: %v", rendering, err)
+	for _, renderingPath := range renderingPaths {
+		if !strings.Contains(err.Error(), renderingPath) {
+			t.Errorf("the error does not name %s: %v", renderingPath, err)
 		}
 	}
-	textBytes, err := os.ReadFile(renderings[0])
+	textBytes, err := os.ReadFile(renderingPaths[0])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,22 +341,22 @@ func TestCheckLinearizableRendersTheFailingPrefix(t *testing.T) {
 	if !strings.Contains(unplaced, p1.String()+" at evs2: committed v3") {
 		t.Errorf("the double commit is not among what no order places:\n%s", text)
 	}
-	if info, err := os.Stat(renderings[1]); err != nil || info.Size() == 0 {
+	if info, err := os.Stat(renderingPaths[1]); err != nil || info.Size() == 0 {
 		t.Fatalf("the visualization: %v, %v", info, err)
 	}
 
 	settings.RenderDirectory = ""
 	report, err = CheckLinearizable(fixture.history, settings)
-	if !errors.Is(err, ErrNotLinearizable) || len(report.Refs[0].Renderings) != 2 {
+	if !errors.Is(err, ErrNotLinearizable) || len(report.Refs[0].RenderingPaths) != 2 {
 		t.Fatalf("%s: %v", report, err)
 	}
-	directory := filepath.Dir(report.Refs[0].Renderings[0])
+	directory := filepath.Dir(report.Refs[0].RenderingPaths[0])
 	t.Cleanup(func() { os.RemoveAll(directory) })
 	if !strings.HasPrefix(filepath.Base(directory), "sidecart3-linearize-") || !strings.Contains(err.Error(), directory) {
 		t.Fatalf("rendered into %s: %v", directory, err)
 	}
-	for _, rendering := range report.Refs[0].Renderings {
-		if _, err := os.Stat(rendering); err != nil {
+	for _, renderingPath := range report.Refs[0].RenderingPaths {
+		if _, err := os.Stat(renderingPath); err != nil {
 			t.Fatal(err)
 		}
 	}

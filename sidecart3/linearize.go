@@ -79,8 +79,8 @@ type LinearizeRef struct {
 	OperationCount int
 	UnknownCount   int
 	Result         porcupine.CheckResult
-	// What it rendered, when it did not linearize: the text first, then the visualization.
-	Renderings []string
+	// The files it was rendered to, when it did not linearize: the text first, then the visualization.
+	RenderingPaths []string
 }
 
 // What a check found.
@@ -91,6 +91,7 @@ type LinearizeReport struct {
 	End int64
 }
 
+// Over every ref.
 func (self *LinearizeReport) OperationCount() int {
 	count := 0
 	for _, ref := range self.Refs {
@@ -99,6 +100,7 @@ func (self *LinearizeReport) OperationCount() int {
 	return count
 }
 
+// Over every ref.
 func (self *LinearizeReport) UnknownCount() int {
 	count := 0
 	for _, ref := range self.Refs {
@@ -113,8 +115,8 @@ func (self *LinearizeReport) String() string {
 	fmt.Fprintf(&text, "%s: %d operations on %d refs, %d unknown", self.Name, self.OperationCount(), len(self.Refs), self.UnknownCount())
 	for _, ref := range self.Refs {
 		fmt.Fprintf(&text, "\n  %s: %d operations, %d unknown, %s", ref.Ref, ref.OperationCount, ref.UnknownCount, ref.Result)
-		for _, rendering := range ref.Renderings {
-			fmt.Fprintf(&text, "\n    %s", rendering)
+		for _, renderingPath := range ref.RenderingPaths {
+			fmt.Fprintf(&text, "\n    %s", renderingPath)
 		}
 	}
 	return text.String()
@@ -176,13 +178,13 @@ func CheckLinearizable(history *fault.History, settings *LinearizeSettings) (*Li
 			}
 			renderDirectory = directory
 		}
-		renderings, err := renderLinearization(renderDirectory, history.Name(), ref, model, porcupineOperations, settings.RefTimeout)
-		checked.Renderings = renderings
+		renderingPaths, err := renderLinearization(renderDirectory, history.Name(), ref, model, porcupineOperations, settings.RefTimeout)
+		checked.RenderingPaths = renderingPaths
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s at %s: %w, and its rendering failed: %v", history.Name(), ref, reason, err))
 			continue
 		}
-		errs = append(errs, fmt.Errorf("%s at %s: %w, rendered in %s", history.Name(), ref, reason, strings.Join(renderings, " and ")))
+		errs = append(errs, fmt.Errorf("%s at %s: %w, rendered in %s", history.Name(), ref, reason, strings.Join(renderingPaths, " and ")))
 	}
 	return report, errors.Join(errs...)
 }
@@ -253,10 +255,12 @@ type commitRuleState struct {
 	refusedHash uint64
 }
 
+// A ref with no push yet, at version 0.
 func newCommitRuleState() *commitRuleState {
 	return &commitRuleState{pushIdVersions: map[sidecar.Id]uint64{}, refused: map[sidecar.Id]bool{}}
 }
 
+// The state after pushId commits at the next version.
 func (self *commitRuleState) commit(pushId sidecar.Id) *commitRuleState {
 	next := &commitRuleState{
 		version:        self.version + 1,
@@ -273,6 +277,7 @@ func (self *commitRuleState) commit(pushId sidecar.Id) *commitRuleState {
 	return next
 }
 
+// The state after pushId's refusal.
 func (self *commitRuleState) refuse(pushId sidecar.Id) *commitRuleState {
 	if self.refused[pushId] {
 		return self
@@ -292,12 +297,14 @@ func (self *commitRuleState) refuse(pushId sidecar.Id) *commitRuleState {
 	return next
 }
 
+// An id's part of a state's hash.
 func commitRuleIdHash(id sidecar.Id) uint64 {
 	hash := fnv.New64a()
 	hash.Write(id[:])
 	return hash.Sum64()
 }
 
+// Whether two states committed the same pushes at the same versions and refused the same ones.
 func (self *commitRuleState) equal(other *commitRuleState) bool {
 	if self.version != other.version || self.chain != other.chain || self.refusedHash != other.refusedHash || len(self.refused) != len(other.refused) {
 		return false
@@ -310,6 +317,7 @@ func (self *commitRuleState) equal(other *commitRuleState) bool {
 	return true
 }
 
+// Equal for equal states, as Porcupine's cache needs.
 func (self *commitRuleState) hash() uint64 {
 	return self.version ^ binary.BigEndian.Uint64(self.chain[:8]) ^ self.refusedHash
 }
@@ -423,17 +431,17 @@ func renderLinearization(directory string, name string, ref fault.HistoryRef, mo
 		return nil, err
 	}
 	textPath := textFile.Name()
-	renderings := []string{textPath}
+	renderingPaths := []string{textPath}
 	_, writeErr := textFile.WriteString(linearizeText(name, ref, model, operations, result, info))
 	closeErr := textFile.Close()
 	if err := errors.Join(writeErr, closeErr); err != nil {
-		return renderings, err
+		return renderingPaths, err
 	}
 	htmlPath := strings.TrimSuffix(textPath, ".txt") + ".html"
 	if err := porcupine.VisualizePath(model, info, htmlPath); err != nil {
-		return renderings, err
+		return renderingPaths, err
 	}
-	return append(renderings, htmlPath), nil
+	return append(renderingPaths, htmlPath), nil
 }
 
 // A file name from a history's name and a ref: the name's letters, digits, dots and dashes, the rest dashes, then
@@ -479,13 +487,13 @@ func linearizeText(name string, ref fault.HistoryRef, model porcupine.Model, ope
 	}
 	fmt.Fprintf(&text, "the state it leaves: %s\n", model.DescribeState(state))
 
-	placed := map[*fault.Operation]bool{}
+	placedOperations := map[*fault.Operation]bool{}
 	for _, operation := range prefix {
-		placed[operation.Metadata.(*fault.Operation)] = true
+		placedOperations[operation.Metadata.(*fault.Operation)] = true
 	}
 	fmt.Fprintf(&text, "\nwhat no order places after it, by call\n")
 	for _, operation := range operations {
-		if !placed[operation.Metadata.(*fault.Operation)] {
+		if !placedOperations[operation.Metadata.(*fault.Operation)] {
 			fmt.Fprintf(&text, "        %s\n", linearizeOperationText(operation))
 		}
 	}
@@ -496,6 +504,7 @@ func linearizeText(name string, ref fault.HistoryRef, model porcupine.Model, ope
 	return text.String()
 }
 
+// The history's own text for a Porcupine operation made from it.
 func linearizeOperationText(operation porcupine.Operation) string {
 	return operation.Metadata.(*fault.Operation).String()
 }

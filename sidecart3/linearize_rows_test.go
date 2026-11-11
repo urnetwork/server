@@ -69,6 +69,7 @@ func linearizeRowHasNoEvidence(t testing.TB, history *fault.History) {
 	}
 }
 
+// The defaults, rendering into t's artifact directory.
 func linearizeRowSettings(t testing.TB) *LinearizeSettings {
 	settings := DefaultLinearizeSettings()
 	settings.RenderDirectory = t.ArtifactDir()
@@ -124,18 +125,18 @@ func linearizeFs58Rows(t testing.TB, netSettings func() *sidecartest.NetSettings
 		linearizeRowHasNoEvidence(t, linearizeRowHistory(t, c.builder, netSettings(), "", nil))
 		history := linearizeRowHistory(t, c.builder, netSettings(), c.label, linearizeCrashAtHeadCas("evs1", c.casCount))
 		// the run did what its label says: A's one unknown attempt on evs1, and evs2's answer to A
-		unknowns := []*fault.Operation{}
-		resent := []*fault.Operation{}
+		unknownOperations := []*fault.Operation{}
+		resentOperations := []*fault.Operation{}
 		for _, operation := range history.Operations() {
 			switch {
 			case operation.Outcome == fault.OutcomeUnknown:
-				unknowns = append(unknowns, operation)
+				unknownOperations = append(unknownOperations, operation)
 			case operation.Actor == "writerA" && operation.Instance == "evs2":
-				resent = append(resent, operation)
+				resentOperations = append(resentOperations, operation)
 			}
 		}
-		if len(unknowns) != 1 || unknowns[0].Actor != "writerA" || unknowns[0].Instance != "evs1" || len(resent) != 1 || resent[0].PushId != unknowns[0].PushId || resent[0].Outcome != c.evs2Outcome {
-			t.Fatalf("%s: unknown %v and evs2's %v, want A's attempt on evs1 unknown and evs2's %s", history.Name(), unknowns, resent, c.evs2Outcome)
+		if len(unknownOperations) != 1 || unknownOperations[0].Actor != "writerA" || unknownOperations[0].Instance != "evs1" || len(resentOperations) != 1 || resentOperations[0].PushId != unknownOperations[0].PushId || resentOperations[0].Outcome != c.evs2Outcome {
+			t.Fatalf("%s: unknown %v and evs2's %v, want A's attempt on evs1 unknown and evs2's %s", history.Name(), unknownOperations, resentOperations, c.evs2Outcome)
 		}
 		linearizeRowPasses(t, history)
 	}
