@@ -110,6 +110,14 @@ const gammaMaxWatcherLagBlocks = 100
 // run (gammaCreditReviewRetries), so they never crowd out a new credit.
 const gammaMaxCreditFailures = 10
 
+// What the monitor reads (SIGNALS.md §2.22a, gamma-payment-failures): the
+// failures that hold a credit for review, and the alarm kind of a live batch
+// that carries a charge no credit can reach.
+const (
+	GammaMaxCreditFailures           = gammaMaxCreditFailures
+	GammaAlarmKindBatchUnfulfillable = gammaAlarmBatchUnfulfillable
+)
+
 // The credits each run tries, the fewest failures first.
 const gammaCreditsPerRun = 200
 
