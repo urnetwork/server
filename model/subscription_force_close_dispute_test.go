@@ -215,14 +215,14 @@ func (self *forceCloseDisputeFixture) state(t testing.TB, ctx context.Context) f
 			}
 		})
 	})
-	// Provider earnings commit to their sweep and exact projection payload.
-	// The display projection runs separately; the old Redis counter is not
+	// Provider earnings commit to their sweep alone: settlement publishes no
+	// provider totals (BILLING-SPLIT.md), and the old Redis counter is not
 	// the financial owner for either reservation mode used by this fixture.
 	projection := readForceCloseProviderProjection(t, ctx, self)
-	state.providerEarnedByteCount = projection.accountBytes + projection.unappliedBytes
-	if projection.sweptBytes != state.providerEarnedByteCount ||
-		projection.sweptRevenue != projection.accountRevenue+projection.unappliedRevenue {
-		t.Fatalf("provider earnings lost or duplicated their durable owner: %+v", projection)
+	state.providerEarnedByteCount = projection.sweptBytes
+	if projection.accountBytes != 0 || projection.accountRevenue != 0 || projection.unappliedBytes != 0 ||
+		projection.unappliedRevenue != 0 || projection.owners != 0 {
+		t.Fatalf("settlement published provider totals beside its sweep: %+v", projection)
 	}
 	server.Redis(ctx, func(r server.RedisClient) {
 		value, err := r.Get(ctx, netEscrowKey(self.balanceId)).Int64()

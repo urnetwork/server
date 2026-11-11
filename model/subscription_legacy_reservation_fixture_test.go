@@ -146,10 +146,11 @@ func requireLegacyProviderSwept(t testing.TB, ctx context.Context, f netEscrowOr
 }
 
 // This remains assertion-only: lost acknowledgements and omitted posts must
-// leave exact totals durable without executing their projection. One statement
-// observes the account plus unapplied payloads consistently across an apply commit.
-// The account and its unapplied payloads are the destination network's, so id
-// must be the only contract that pays that network.
+// leave the exact sweep durable. One statement observes the sweep, the account
+// and any unapplied provider total payloads together; since 2026-11-11 the
+// sweep must hold the whole amount and the other two nothing
+// (BILLING-SPLIT.md). The account and its payloads are the destination
+// network's, so id must be the only contract that pays that network.
 func requireLegacyProviderDurability(t testing.TB, ctx context.Context, f netEscrowOrderingTestFixture, id server.Id, bytes int64, expectedRevenue ...int64) {
 	t.Helper()
 	requireLegacyProviderCohortDurability(t, ctx, f, []server.Id{id}, bytes, expectedRevenue...)
@@ -180,8 +181,10 @@ func requireLegacyProviderCohortDurability(t testing.TB, ctx context.Context, f 
 		if len(expectedRevenue) > 0 {
 			revenue = expectedRevenue[0]
 		}
-		if swept != bytes || provided+pendingBytes != bytes || sweptRevenue != revenue || providedRevenue+pendingRevenue != revenue {
-			t.Fatalf("durable provider accounting swept=%d provided=%d pending=%d revenue=%d/%d/%d want=%d/%d", swept, provided, pendingBytes, sweptRevenue, providedRevenue, pendingRevenue, bytes, revenue)
+		// The sweep is the whole durable provider record: settlement credits
+		// no lifetime provider totals and queues none (BILLING-SPLIT.md).
+		if swept != bytes || sweptRevenue != revenue || provided != 0 || pendingBytes != 0 || providedRevenue != 0 || pendingRevenue != 0 {
+			t.Fatalf("durable provider accounting swept=%d provided=%d pending=%d revenue=%d/%d/%d want=%d/%d and no provider totals", swept, provided, pendingBytes, sweptRevenue, providedRevenue, pendingRevenue, bytes, revenue)
 		}
 	})
 	server.Redis(ctx, func(r server.RedisClient) {

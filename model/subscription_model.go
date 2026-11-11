@@ -26,7 +26,6 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
 )
 
 type ByteCount = int64
@@ -3925,16 +3924,17 @@ func evenContractPayoutShare(total int64, participantIndex int, participantCount
 	return share
 }
 
+// The billing split: each funding balance's payout bytes and revenue, divided
+// evenly over the contract's participants into one sweep per balance and
+// provider network. The sweeps are its only output. Settlement stopped
+// projecting them into lifetime provider totals on 2026-11-11, since nothing
+// read those totals (BILLING-SPLIT.md).
 func allocateContractParticipantPayouts(
 	contractParticipants []ContractParticipant,
 	originNetworkId server.Id,
 	sweepPayouts map[server.Id]sweepPayout,
-) (
-	participantSweepPayouts map[participantSweepKey]*participantSweepPayout,
-	accountPayouts map[server.Id]*contractPayout,
-) {
-	participantSweepPayouts = map[participantSweepKey]*participantSweepPayout{}
-	accountPayouts = map[server.Id]*contractPayout{}
+) map[participantSweepKey]*participantSweepPayout {
+	participantSweepPayouts := map[participantSweepKey]*participantSweepPayout{}
 	balanceIds := make([]server.Id, 0, len(sweepPayouts))
 	for balanceId := range sweepPayouts {
 		balanceIds = append(balanceIds, balanceId)
@@ -3995,35 +3995,25 @@ func allocateContractParticipantPayouts(
 				balanceId: balanceId,
 				networkId: participant.NetworkId,
 			}
+			// Payout wallets are network-scoped and the sweep primary key is
+			// per network. If two hops belong to one eligible network, their
+			// shares combine in the network's sweep, and providerPayouts keeps
+			// each client's own share. Every sweep written here carries
+			// providerPayouts, so no reader needs the sweep's destination_id,
+			// which only rows from before provider_payouts use.
 			participantSweep := participantSweepPayouts[key]
 			if participantSweep == nil {
-				participantSweep = &participantSweepPayout{
-					destinationId: participant.ClientId,
-				}
+				participantSweep = &participantSweepPayout{}
 				participantSweepPayouts[key] = participantSweep
-			} else if participant.ClientId.Cmp(participantSweep.destinationId) < 0 {
-				// Payout wallets are network-scoped and the sweep primary key is
-				// per network. If two hops belong to one eligible network, combine
-				// their payment shares and keep only a legacy representative here.
-				// providerPayouts retains every client's actual subnet attribution.
-				participantSweep.destinationId = participant.ClientId
 			}
 			participantSweep.payoutByteCount += participantByteCount
 			participantSweep.payout += participantPayout
 			participantSweep.providerPayouts = append(participantSweep.providerPayouts, contractProviderPayout{
 				ClientId: participant.ClientId, PayoutByteCount: participantByteCount, PayoutNanoCents: participantPayout,
 			})
-
-			accountPayout := accountPayouts[participant.NetworkId]
-			if accountPayout == nil {
-				accountPayout = &contractPayout{}
-				accountPayouts[participant.NetworkId] = accountPayout
-			}
-			accountPayout.payoutByteCount += participantByteCount
-			accountPayout.payout += participantPayout
 		}
 	}
-	return
+	return participantSweepPayouts
 }
 
 // Keep both lookups parameterized: historical contract cardinality estimates
@@ -4092,9 +4082,9 @@ func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.Pg
 // (unmarked) reservation, admitted before Redis admission became the only
 // path, settles in the caller's transaction through its original atomic
 // debit/outcome path. With inlineFinancial that transaction also commits its
-// exact earnings, escrow metadata and durable mirror and provider-total
-// owners, as the retired legacy settlement queue's worker did
-// (PARTITION-MAINTENANCE-PLAN.md, Part B).
+// exact earnings, escrow metadata and durable mirror owners, as the retired
+// legacy settlement queue's worker did (PARTITION-MAINTENANCE-PLAN.md, Part B).
+// Settlement writes no lifetime provider totals (BILLING-SPLIT.md).
 //
 // With wakeDebitFlush, a journaled debit's posts kick its partition's
 // backed-off flush chain.
@@ -4110,16 +4100,8 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
-		// Native close writes no shared grant. Its immutable provider owner
-		// still needs queue admission before publishing the outcome and debt.
-		admitted, ownershipErr := server.TryTxOwnership(ctx, tx,
-			[]server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))})
-		if ownershipErr != nil {
-			return nil, false, ownershipErr
-		}
-		if !admitted {
-			return nil, false, errTransferBalanceOwnershipBusy
-		}
+		// Native close writes no shared grant and publishes no queued task, so
+		// it needs no ownership beyond the contract lock it holds.
 		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
 	} else {
 		admitted, ownershipErr := tryLegacyFinancialOwnershipInTx(ctx, tx, []server.Id{contractId})
@@ -4187,7 +4169,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		return
 	}
 
-	participantSweepPayouts, accountPayouts := allocateContractParticipantPayouts(
+	participantSweepPayouts := allocateContractParticipantPayouts(
 		contractParticipants,
 		originNetworkId,
 		sweepPayouts,
@@ -4265,7 +4247,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 					for key, payout := range participantSweepPayouts {
 						batch.Queue(participantSweepInsertSQL, contractId, key.balanceId, key.networkId,
-							payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
+							payout.payoutByteCount, payout.payout, payout.providerPayouts)
 					}
 				})
 			}
@@ -4330,30 +4312,10 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		})
 	}
 
-	if (inlineFinancial || asyncDebit) && len(accountPayouts) > 0 {
-		// Exact earnings remain in the sweep ledger. Their lifetime display
-		// totals have an independent per-contract durable owner, so a held
-		// provider row cannot retain this transaction. No Redis increment is
-		// added; account totals and the task's replay marker commit together.
-		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
-	} else if 0 < len(accountPayouts) {
-		posts = append(posts, func() any {
-			server.Redis(ctx, func(r server.RedisClient) {
-				// Participant networks occupy independent Redis hash slots. Keep
-				// each network's byte/revenue pair atomic in its own transaction.
-				for networkId, payout := range accountPayouts {
-					_, pipelineErr := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-						pipe.IncrBy(ctx, accountBalanceNetPayoutByteCountKey(networkId), payout.payoutByteCount)
-						pipe.IncrBy(ctx, accountBalanceNetPayout(networkId), payout.payout)
-						return nil
-					})
-					server.Raise(pipelineErr)
-				}
-			})
-			return nil
-		})
-	}
-
+	// Exact earnings remain in the sweep ledger. Settlement no longer adds
+	// them to lifetime provider totals (account_balance.provided_* and the
+	// {account_balance_<id>} Redis counters): nothing read those totals, and
+	// each settled contract queued one task row to write them.
 	return
 }
 
@@ -4370,7 +4332,6 @@ type participantSweepKey struct {
 }
 
 type participantSweepPayout struct {
-	destinationId   server.Id
 	payoutByteCount ByteCount
 	payout          NanoCents
 	providerPayouts []contractProviderPayout
@@ -4382,11 +4343,6 @@ type contractProviderPayout struct {
 	ClientId        server.Id `json:"client_id"`
 	PayoutByteCount ByteCount `json:"payout_byte_count"`
 	PayoutNanoCents NanoCents `json:"payout_nano_cents"`
-}
-
-type contractPayout struct {
-	payoutByteCount ByteCount
-	payout          NanoCents
 }
 
 // `server.ComplexValue`
@@ -5578,7 +5534,11 @@ func GetContractClose(ctx context.Context, contractId server.Id) (contractClose 
 }
 
 // update 2026-01-30: the net payout byte count and net payout are now tracked in redis
-// FIXME this should be merged back into the database at regular checkpoint intervals
+// update 2026-11-11: settlement no longer writes these counters or
+// account_balance.provided_*. The provided totals are frozen history: only
+// the drain of task rows that older binaries queued still adds to the
+// PostgreSQL columns (subscription_provider_totals_drain.go). GetAccountBalance
+// has no production caller (BILLING-SPLIT.md).
 
 func accountBalanceNetPayoutByteCountKey(networkId server.Id) string {
 	return fmt.Sprintf("{account_balance_%s}npbc", networkId)
@@ -6900,10 +6860,15 @@ func derefCursor(ptrs []any) []any {
 
 // BackfillSweepDestinationIds denormalizes transfer_contract.destination_id onto
 // transfer_escrow_sweep for rows created before the column existed, in bounded
-// batches (one maintenance tx each) until a batch comes up short. New sweeps are
-// stamped by settleEscrowInTx, so this only touches the pre-existing set. Orphan
-// sweeps whose contract no longer exists are left NULL (no destination to copy)
-// and are reaped by SweepOrphanContractData; the stats filters exclude NULL.
+// batches (one maintenance tx each) until a batch comes up short. Orphan sweeps
+// whose contract no longer exists are left NULL (no destination to copy) and
+// are reaped by SweepOrphanContractData.
+//
+// Only a sweep without provider_payouts is backfilled: the provider
+// attribution reads destination_id for those rows alone
+// (contract_provider_attribution.go). Every sweep settlement writes carries
+// provider_payouts and, since 2026-11-11, no destination_id
+// (BILLING-SPLIT.md), so the backfill leaves new sweeps alone.
 //
 // Migration 816 dropped transfer_escrow_sweep_destination_id_sweep_time once the
 // provider stats stopped reading sweep destinations (b12af6b3), so each batch
@@ -6923,7 +6888,7 @@ func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCoun
 					SELECT s.contract_id, s.balance_id, s.network_id, tc.destination_id
 					FROM transfer_escrow_sweep s
 					INNER JOIN transfer_contract tc ON tc.contract_id = s.contract_id
-					WHERE s.destination_id IS NULL
+					WHERE s.destination_id IS NULL AND s.provider_payouts IS NULL
 					LIMIT $1
 				)
 				UPDATE transfer_escrow_sweep s

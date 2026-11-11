@@ -190,7 +190,6 @@ func TestEscrow(t *testing.T) {
 		paidByteCount := usedTransferByteCount
 		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, netTransferByteCount, paidByteCount)
-		projectLegacyProviderTotalsForTest(t, ctx)
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -201,12 +200,13 @@ func TestEscrow(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+		assertProviderSweepTotalsForTest(t, sourceSession, 0, 0, 0)
 
+		// the pending payout is the provider's sweeps
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+		assertProviderSweepTotalsForTest(t, destinationSession, paidByteCount, paid, 0)
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		netBalanceByteCount = 0
@@ -258,12 +258,10 @@ func TestEscrow(t *testing.T) {
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
 
-		projectLegacyProviderTotalsForTest(t, ctx)
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+		assertProviderSweepTotalsForTest(t, destinationSession, paidByteCount, paid, 0)
 
 		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
@@ -282,10 +280,9 @@ func TestEscrow(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
+		assertProviderSweepTotalsForTest(t, destinationSession, paidByteCount, paid, 0)
 
 		// repeat escrow until it fails due to no balance
 		contractCount := 0
@@ -318,7 +315,6 @@ func TestEscrow(t *testing.T) {
 		// Prove zero public credit while the exact debit is still queued, then
 		// run the production worker before expecting the raw active row to vanish.
 		assertPayoutDebitTestConsumedAndDrained(t, ctx, balanceId, netTransferByteCount)
-		projectLegacyProviderTotalsForTest(t, ctx)
 
 		transferBalances = GetActiveTransferBalances(ctx, sourceNetworkId)
 		connect.AssertEqual(t, transferBalances, []*TransferBalance{})
@@ -341,11 +337,8 @@ func TestEscrow(t *testing.T) {
 
 		// the revenue from
 		getAccountBalanceResult = GetAccountBalance(destinationSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, netTransferByteCount)
 		// each contract can have a 1 nanocent rounding error
-		if e := getAccountBalanceResult.Balance.ProvidedNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
-			connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)))
-		}
+		assertProviderSweepTotalsForTest(t, destinationSession, netTransferByteCount, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)), int64(contractCount))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)
 		// each contract can have a 1 nanocent rounding error
 		if e := getAccountBalanceResult.Balance.PaidNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
@@ -471,7 +464,6 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		paidByteCount := usedTransferByteCount
 		paid := UsdToNanoCents(ProviderRevenueShare * NanoCentsToUsd(netRevenue) * float64(usedTransferByteCount) / float64(netTransferByteCount))
 		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, paidByteCount)
-		projectLegacyProviderTotalsForTest(t, ctx)
 
 		contractIds = GetOpenContractIds(ctx, sourceId, destinationId)
 		connect.AssertEqual(t, len(contractIds), 0)
@@ -482,12 +474,13 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, NanoCents(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+		assertProviderSweepTotalsForTest(t, destinationSession, 0, 0, 0)
 
+		// the pending payout is the provider's sweeps
 		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+		assertProviderSweepTotalsForTest(t, sourceSession, paidByteCount, paid, 0)
 
 		transferBalances = GetActiveTransferBalances(ctx, destinationNetworkId)
 		netBalanceByteCount = 0
@@ -551,12 +544,10 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, len(contractIds), 0)
 
 		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, paidByteCount)
-		projectLegacyProviderTotalsForTest(t, ctx)
 		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, ByteCount(0))
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
+		assertProviderSweepTotalsForTest(t, sourceSession, paidByteCount, paid, 0)
 
 		paymentPlan, err = planPassThroughPayments(ctx)
 		connect.AssertEqual(t, err, nil)
@@ -577,10 +568,9 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, paidByteCount)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, paid)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, paidByteCount)
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, paid)
+		assertProviderSweepTotalsForTest(t, sourceSession, paidByteCount, paid, 0)
 
 		// repeat escrow until it fails due to no balance
 		contractCount := 0
@@ -634,7 +624,6 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, nil, ForceCloseAllOpenContractIds(ctx, time.Now()))
 		connect.AssertEqual(t, netTransferByteCount, paidByteCount)
 		assertPayoutDebitTestConsumptionAndDrain(t, ctx, balanceId, 2*netTransferByteCount, netTransferByteCount)
-		projectLegacyProviderTotalsForTest(t, ctx)
 
 		// at this point the balance should be half used up
 
@@ -662,12 +651,8 @@ func TestCompanionEscrowAndCheckpoint(t *testing.T) {
 		connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidNetRevenue, NanoCents(0))
 
 		// the revenue from
-		getAccountBalanceResult = GetAccountBalance(sourceSession)
-		connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedByteCount, netTransferByteCount)
 		// each contract can have a 1 nanocent rounding error
-		if e := getAccountBalanceResult.Balance.ProvidedNetRevenue - UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)); e < -int64(contractCount) || int64(contractCount) < e {
-			connect.AssertEqual(t, getAccountBalanceResult.Balance.ProvidedNetRevenue, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)))
-		}
+		assertProviderSweepTotalsForTest(t, sourceSession, netTransferByteCount, UsdToNanoCents(ProviderRevenueShare*NanoCentsToUsd(netRevenue)), int64(contractCount))
 
 		// FIXME this is broken
 		// connect.AssertEqual(t, getAccountBalanceResult.Balance.PaidByteCount, netTransferByteCount)

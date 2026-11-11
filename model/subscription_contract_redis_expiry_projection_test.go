@@ -238,19 +238,15 @@ func TestRedisExpiryRepairProjectionWaitDoesNotBlockLaterContracts(t *testing.T)
 				t.Fatal("durable worker did not repair omitted settlement metadata")
 			}
 		})
-		var ownerId server.Id
+		// The financial commit publishes no provider projection owner: the
+		// sweep is the provider record (BILLING-SPLIT.md).
 		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE run_once_key=$1`, task.RunOnce("legacy_provider_totals", first).String()).Scan(&ownerId))
+			var owners int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE run_once_key=$1`, task.RunOnce("legacy_provider_totals", first).String()).Scan(&owners))
+			if owners != 0 {
+				t.Fatal("financial commit published a provider projection owner", owners)
+			}
 		})
-		owner := task.GetTasks(ctx, ownerId)[ownerId]
-		if owner == nil {
-			t.Fatal("financial commit lost the provider projection owner")
-		}
-		target := task.NewTaskTarget(ApplyLegacyProviderTotals)
-		for range 2 {
-			_, _, err := target.RunSpecific(ctx, owner)
-			server.Raise(err)
-		}
 		requireLegacyProviderDurability(t, ctx, f, first, 14)
 		requireRedisExpiryClock(t, ctx, "11")
 		replay, err := RepairRedisContractExpiry(ctx, request)
