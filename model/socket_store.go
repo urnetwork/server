@@ -1176,15 +1176,45 @@ func (self *SocketStore) RemoveEntries(ctx context.Context, networkId connect.Id
 		if removals, err = self.removeLeases(ctx, client, networkId, cause, position, refs, nowMillis); err != nil {
 			return err
 		}
-		// each client's set forgets a lease that is gone, one key at a time since each set is its own slot
-		pipe := client.Pipeline()
+		// each client's set forgets the leases that are gone and says whether it still holds an edge name: one
+		// script a client, pipelined, since each set is its own slot
+		listenerClientIds := []connect.Id{}
+		listenerClientIdNameKeys := map[connect.Id][]any{}
 		for index, ref := range refs {
-			if !removals[index].Kept {
-				pipe.ZRem(ctx, socketClientSetKey(ref.ListenerClientId), "\x01"+string(ref.NameKey))
+			nameKeys, found := listenerClientIdNameKeys[ref.ListenerClientId]
+			if !found {
+				listenerClientIds = append(listenerClientIds, ref.ListenerClientId)
+				nameKeys = []any{}
 			}
+			if !removals[index].Kept {
+				nameKeys = append(nameKeys, ref.NameKey)
+			}
+			listenerClientIdNameKeys[ref.ListenerClientId] = nameKeys
 		}
-		_, err = pipe.Exec(ctx)
-		return err
+		calls := make([]*socketScriptCall, 0, len(listenerClientIds))
+		for _, listenerClientId := range listenerClientIds {
+			calls = append(calls, &socketScriptCall{
+				name: "set_forget",
+				keys: []string{socketClientSetKey(listenerClientId)},
+				args: listenerClientIdNameKeys[listenerClientId],
+			})
+		}
+		replies, err := self.runScripts(ctx, client, calls)
+		if err != nil {
+			return err
+		}
+		listenerClientIdEdges := map[connect.Id]bool{}
+		for index, reply := range replies {
+			values, err := socketReplyStrings(reply)
+			if err != nil || len(values) != 1 {
+				return fmt.Errorf("socket store: a malformed set reply: %v", err)
+			}
+			listenerClientIdEdges[listenerClientIds[index]] = values[0] == "1"
+		}
+		for index, ref := range refs {
+			removals[index].EdgeEntriesRemain = listenerClientIdEdges[ref.ListenerClientId]
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
