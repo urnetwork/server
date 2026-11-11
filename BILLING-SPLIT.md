@@ -74,7 +74,8 @@ Tests:
   this change.
 - The existing settlement, expiry, deadline and owner-batch tests now assert
   that no provider totals are produced (`assertContractPayoutTestNoProviderTotals`,
-  `requireLegacyProviderDurability`, `assertProviderSweepTotalsForTest`).
+  `requireLegacyProviderDurability`, `requireDeadlineProviderDurability`,
+  `assertProviderSweepTotalsForTest`).
 - Tests that used the provider key to make a settlement busy now hold the
   payer's grant on a legacy reservation, the busy path that remains. Tests that
   used the per-contract keys to see which contracts an owner turn closed use
