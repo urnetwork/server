@@ -379,7 +379,7 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
 
 ### Receiving: Coinbase deposit addresses (TAO, Bitcoin, ETH, SOL)
 
-- The address refill, part of each coin's scan on the taskworker, keeps 40 free addresses per coin. Each is made with
+- The address refill, a taskworker task of every coin run each minute, keeps 40 free addresses per coin. Each is made with
   `POST /v2/accounts/<account_id>/addresses` (`{"name": <invoice id>, "network": <network>}`) with the CDP key of
   `vault/<env>/coinbase.yml` (`api.host`, `api.key_name`, `api.private_key`; the view and receive scopes), signed
   per request by the CDP SDK's JWT. The coin's wallet is looked up by its currency code (`GET /v2/accounts/TAO`,

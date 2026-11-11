@@ -68,6 +68,8 @@ type cryptoTestCoinbaseServer struct {
 	static       bool
 	network      string
 	accountReads int
+	// the addresses the first POSTs answer, in order (then synthetic ones)
+	answers []string
 }
 
 func (self *cryptoTestCoinbaseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +116,9 @@ func (self *cryptoTestCoinbaseServer) ServeHTTP(w http.ResponseWriter, r *http.R
 			network = self.network
 		}
 		address := fmt.Sprintf("bc1qsynthetic%d", len(self.created))
+		if len(self.created) <= len(self.answers) {
+			address = self.answers[len(self.created)-1]
+		}
 		if self.static {
 			address = "bc1qsynthetic1"
 		}
