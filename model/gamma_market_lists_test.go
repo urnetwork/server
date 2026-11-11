@@ -44,8 +44,8 @@ func TestWinbackMarketListsTakeEveryPaidMarket(t *testing.T) {
 			t.Errorf("win-back refund stores %v leave out %s", winbackRefundEventStores, market)
 		}
 		store := market == SubscriptionMarketApple || market == SubscriptionMarketGoogle
-		if slices.Contains(winbackChargedRevenueMarkets, market) == store {
-			t.Errorf("win-back charged-revenue markets %v: %s in = %t, want %t", winbackChargedRevenueMarkets, market, !store, store)
+		if in := slices.Contains(winbackChargedRevenueMarkets, market); in == store {
+			t.Errorf("win-back charged-revenue markets %v: %s in = %t, want %t", winbackChargedRevenueMarkets, market, in, !store)
 		}
 	}
 }
