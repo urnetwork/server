@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T23:13:51Z",
+  "observed_at": "2026-11-11T23:31:55Z",
   "latest_epoch2_prelaunch_closure_progress": {
     "evidence": "EPOCH2-RECOVERY-PROGRESS-2026-11-11.md",
     "succeeded": 2,
@@ -8,16 +8,20 @@
     "queued": 11,
     "claimed": 2,
     "sille_job_id": "01a1c62f-28e4-84aa-5ba5-de4cae9f8ade",
-    "sille_candidate_replicates_completed": 2,
+    "sille_candidate_replicates_completed": 3,
     "sille_cache_service_natively_qualified_and_enabled": true,
     "goofe_cache_service_natively_qualified_and_enabled": true,
     "goofe_candidate_execution_started": false,
     "goofe_legacy_recovery_prepared_and_native_canary_passed": true,
     "goofe_legacy_activation_attempt_passed": false,
     "goofe_historical_inactive_controls_retired": 37,
+    "goofe_temporary_root_coordinator_ssh_hold_installed": true,
+    "goofe_control_user_manager_stopped_and_native_cgroup_absent": true,
+    "goofe_canonical_recovery_attempt_failed_before_cleanup_verification": true,
+    "goofe_recovery_root_cause": "The native ingress parser incorrectly rejects legitimate repeated non-authority sshd -T keys. A read-only probe reproduced legacy effective SSH ingress is ambiguous. Parser fix and an exact one-hop recovery-executable amendment are in progress; original authorization and starting receipt remain intact.",
     "goofe_cleanup_verified": false,
     "goofe_original_deadline": "2026-11-11T23:52:17.050115Z",
-    "next_action": "Continue the approved Goofe-only closure from retained evidence, not by replaying the failed activation. Positively stop new coordinator control connections and join the exact control-user manager before the full cleanup. Preserve all fences, original state/clock and failed activation receipt. Sille continues uninterrupted. Older sections below are historical snapshots."
+    "next_action": "Review and independently test the SSH parser correction and narrowly authenticated one-hop recovery-executable amendment. Do not replay failed operator helpers, overwrite the original authorization/starting receipt, relax native proof or reset the evaluation clock. The temporary Sille OUTPUT hold matches only root-owned TCP to Goofe 192.168.1.236:22, comment competition-goofe-legacy-closure-20261111; remove only that exact rule after genuine cleanup and canonical recovery/ingress restoration. Sille continues uninterrupted. Older sections below are historical snapshots."
   },
   "latest_epoch2_stable_cache_qualification": {
     "evidence": "EPOCH2-STABLE-CACHE-2026-11-11.json",
