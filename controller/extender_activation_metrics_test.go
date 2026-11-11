@@ -62,8 +62,8 @@ func testActivationStepHistogram(t testing.TB, metrics *extenderActivationMetric
 func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := newExtenderActivationMetrics(registry)
-	// the webrtc stage's three outcomes by two families, and the webrtc step's
-	// three outcomes, are the required path of connect/EXTENDER.md S8
+	// main's 37 and the webrtc stage's three outcomes by two families, and the
+	// webrtc step's three outcomes, the required path of connect/EXTENDER.md S8
 	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 43)
 	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 15)
 	for stage, outcomes := range extenderActivationStageOutcomes {
@@ -125,6 +125,8 @@ func TestExtenderActivationRefusalOutcomeByStage(t *testing.T) {
 		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeAddress, want: "address"},
 		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeProvenAddress, want: "proven_address"},
 		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeAccount, want: "account"},
+		{stage: extenderActivationStageBudget, stageOutcome: "unproven_account", want: "unproven_account"},
+		{stage: extenderActivationStageBudget, stageOutcome: extenderActivationOutcomeError, want: "error"},
 		{stage: extenderActivationStageTcp, stageOutcome: extenderProbeStepOutcomeError, want: "error"},
 		{stage: extenderActivationStageTcp, stageOutcome: extenderProbeStepOutcomeTimeout, want: "timeout"},
 		{stage: extenderActivationStageForward, stageOutcome: extenderProbeRefusalOtherFamily, want: "other_family"},
@@ -150,6 +152,32 @@ func TestExtenderActivationBudgetOutcomeNamesTheBudget(t *testing.T) {
 			if got := extenderActivationBudgetOutcome(action); got != want {
 				t.Errorf("a refusal by %s is counted as %s, want %s", action, got, want)
 			}
+		}
+	}
+}
+
+// A refusal is counted under the budget that refused, or as the error it is,
+// never under the account's for want of a better label
+// (research extender-health-2026-11-11 §1.2). A refusal by a budget the
+// activation never spends, and a budget check that failed rather than
+// refused, were both counted as budget/account, the label the account's own
+// refusals of about 96,000 posts a day are read from; each is now budget/error,
+// a series of its own.
+func TestExtenderActivationBudgetOutcomeCountsNoOtherBudgetAsTheAccount(t *testing.T) {
+	for _, action := range []string{
+		"",
+		"ping_report",
+		"extender_block_report",
+		"extender_activate_v5",
+	} {
+		if got := extenderActivationBudgetOutcome(action); got != "error" {
+			t.Errorf("a refusal by %q is counted as %s, want error", action, got)
+		}
+	}
+	outcomes := extenderActivationStageOutcomes[extenderActivationStageBudget]
+	for _, want := range []string{"error", "unproven_account"} {
+		if !slices.Contains(outcomes, want) {
+			t.Errorf("the budget stage has no %s series: %v", want, outcomes)
 		}
 	}
 }

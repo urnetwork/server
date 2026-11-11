@@ -179,6 +179,31 @@ type ExtenderActivateSettings struct {
 	// and account's rows (connect#230). A second is far below every budget's
 	// hour. Non-positive records the spend's time.
 	BudgetAttemptTimeSpread time.Duration
+	// the wait a refusal by the account's budget asks for while none of the
+	// account's hosts has passed activation on the family within
+	// ProvenHostMaxAge (unprovenAccountRetryAfter): the window for the
+	// account's first window's worth of attempts of the family over the last
+	// UnprovenAccountAttemptLookback, twice as long for each window's worth
+	// more, and at most UnprovenAccountRetryAfterMax. An account whose hosts
+	// never pass spends its floor on probes that fail, hour after hour, and
+	// every other post of its fleet is refused; told to come back when the
+	// floor had room again, the fleet came back every hour, and two such
+	// accounts were refused about 96,000 posts a day (research
+	// extender-health-2026-11-11 §1.2). An account any of whose hosts has
+	// passed keeps the wait until its budget has room. Non-positive
+	// UnprovenAccountRetryAfterMax answers every account that way.
+	//
+	// What an activator does with the wait (connect/net_extender_activate.go):
+	// from connect 3a826e16 (2026-11-01) it holds the refused family that long,
+	// at least its MinRetryAfter of a minute and at most its MaxBackoff of six
+	// hours, and leaves its backoff as it was; a restart, a network change or
+	// a revocation still posts at once. One from before, which is every
+	// release up to v2026.10.30, has no retry_after_seconds field and drops
+	// it: it holds its whole loop on its own backoff, ten minutes doubling to
+	// six hours, and shows the refusal's words, so for it nothing changes but
+	// the words, which start as they always did.
+	UnprovenAccountRetryAfterMax   time.Duration
+	UnprovenAccountAttemptLookback time.Duration
 
 	// activations the api process probes at once (connect#230). Each holds a
 	// handler for up to the 10 s probe budget, so a fleet restarting at once
@@ -258,6 +283,80 @@ func (self *ExtenderActivateSettings) provenHostCount(
 		provenHostCount += min(len(addresses), self.ProvenHostsPerBlock)
 	}
 	return provenHostCount
+}
+
+// Whether any of an account's hosts has passed activation on one family, among
+// its proven host candidates (connect#230). An activation is stored only once
+// its required test passed (C2a), and the candidates are the network's hosts
+// that activated the family since a read reaching ProvenHostMaxAge back, less
+// at most the reuse of the read (readProvenHostCandidates), so any candidate
+// of the family is a pass within ProvenHostMaxAge. Unlike a
+// proven host it has no least age and no block cap: a host that passed a
+// minute ago is the account's hosts showing they can pass, and a fleet that
+// is ramping up keeps the answers of any account. A first pass inside the
+// minute a process reuses its read (ProvenHostCountTimeout) is seen at its
+// next read; reading on every refused post instead would read for each post
+// of a fleet that never passes, which is what the reuse is for.
+func (self *ExtenderActivateSettings) accountPassed(
+	candidates []*model.NetworkExtenderProvenHostCandidate,
+	ipVersion int,
+) bool {
+	for _, candidate := range candidates {
+		if server.IpVersionForAddr(candidate.Ip.Unmap()) == ipVersion {
+			return true
+		}
+	}
+	return false
+}
+
+// The wait a refusal by the account's budget asks for while none of the
+// account's hosts has passed activation on the family (connect#230), given
+// `attemptCount`, the account's attempts of the family over the last
+// UnprovenAccountAttemptLookback, each a probe that failed: the window for the
+// first window's worth of them, twice as long for each window's worth more,
+// and at most UnprovenAccountRetryAfterMax. With the defaults, an hour, then
+// two, four, and six hours from four windows' worth on. Zero when the longer
+// wait is off.
+func (self *ExtenderActivateSettings) unprovenAccountRetryAfter(attemptCount int) time.Duration {
+	if self.UnprovenAccountRetryAfterMax <= 0 || self.RateLimitWindow <= 0 {
+		return 0
+	}
+	windowCount := max(1, attemptCount/max(1, self.AccountRateLimit))
+	retryAfter := self.RateLimitWindow
+	for range windowCount - 1 {
+		if self.UnprovenAccountRetryAfterMax <= retryAfter {
+			break
+		}
+		retryAfter *= 2
+	}
+	return min(retryAfter, self.UnprovenAccountRetryAfterMax)
+}
+
+// The most attempts unprovenAccountRetryAfter reads: the windows' worth at
+// which its wait reaches UnprovenAccountRetryAfterMax, so the count of an
+// account that has spent its floor all day reads no further than that. Zero
+// when the longer wait is off.
+func (self *ExtenderActivateSettings) unprovenAccountAttemptCountLimit() int {
+	if self.UnprovenAccountRetryAfterMax <= 0 || self.RateLimitWindow <= 0 {
+		return 0
+	}
+	windowCount := 1
+	for retryAfter := self.RateLimitWindow; retryAfter < self.UnprovenAccountRetryAfterMax; retryAfter *= 2 {
+		windowCount += 1
+	}
+	return windowCount * max(1, self.AccountRateLimit)
+}
+
+// The words of a lookback in a refusal: "7 days" for whole days, else the
+// words of a wait ("23 hours").
+func extenderActivateLookbackText(lookback time.Duration) string {
+	if day := 24 * time.Hour; day <= lookback && lookback%day == 0 {
+		if lookback == day {
+			return "day"
+		}
+		return fmt.Sprintf("%d days", lookback/day)
+	}
+	return model.AccountActionRetryText(lookback)
 }
 
 // The id the address budget of a caller address is recorded under
@@ -378,7 +477,15 @@ func DefaultExtenderActivateSettings() *ExtenderActivateSettings {
 		ProvenHostCountTimeout:            1 * time.Minute,
 		BudgetRetryAfterJitter:            1 * time.Minute,
 		BudgetAttemptTimeSpread:           1 * time.Second,
-		MaxConcurrentProbes:               64,
+		// an hour, two, four, then six: the activator holds a family at most
+		// its MaxBackoff of six hours whatever it is told
+		// (connect/net_extender_activate.go), so a longer wait would be cut
+		// there. The lookback is half the attempts' retention
+		// (model.AccountActionAttemptRetention), so every attempt it counts is
+		// still kept
+		UnprovenAccountRetryAfterMax:   6 * time.Hour,
+		UnprovenAccountAttemptLookback: 24 * time.Hour,
+		MaxConcurrentProbes:            64,
 		// the activator holds a retry at least a minute whatever it is told
 		// (connect/net_extender_activate.go), and three minutes spreads a
 		// fleet's refused posts over three rounds of the guard
@@ -917,20 +1024,23 @@ func newExtenderActivateService(settings *ExtenderActivateSettings) *extenderAct
 }
 
 // The proven hosts of one family of a network (connect#230), read in the
-// caller's transaction, which is the budget spend's (provenHostCount).
+// caller's transaction, which is the budget spend's (provenHostCount), and
+// whether any of its hosts has passed activation on the family
+// (accountPassed), from the same candidates.
 func (self *extenderActivateService) provenHostCountInTx(
 	ctx context.Context,
 	tx server.PgTx,
 	networkId server.Id,
 	ipVersion int,
-) int {
-	return self.provenHostCount(
+) (provenHostCount int, passed bool) {
+	candidates, now := self.readProvenHostCandidates(
 		networkId,
 		ipVersion,
 		func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate {
 			return model.GetNetworkExtenderProvenHostCandidatesInTx(ctx, tx, networkId, ipVersion, minActivateTime)
 		},
 	)
+	return self.settings.provenHostCount(candidates, ipVersion, now), self.settings.accountPassed(candidates, ipVersion)
 }
 
 // The proven hosts of one family of a network at this read's own time, from
@@ -952,6 +1062,18 @@ func (self *extenderActivateService) provenHostCount(
 	ipVersion int,
 	readCandidates func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate,
 ) int {
+	candidates, now := self.readProvenHostCandidates(networkId, ipVersion, readCandidates)
+	return self.settings.provenHostCount(candidates, ipVersion, now)
+}
+
+// The proven host candidates of one family of a network that provenHostCount
+// counts, and the time it counts them at: those `readCandidates` reads since a
+// time, or those this process read within ProvenHostCountTimeout.
+func (self *extenderActivateService) readProvenHostCandidates(
+	networkId server.Id,
+	ipVersion int,
+	readCandidates func(minActivateTime time.Time) []*model.NetworkExtenderProvenHostCandidate,
+) ([]*model.NetworkExtenderProvenHostCandidate, time.Time) {
 	key := extenderProvenHostCountKey{
 		networkId: networkId,
 		ipVersion: ipVersion,
@@ -990,7 +1112,48 @@ func (self *extenderActivateService) provenHostCount(
 			}()
 		}
 	}
-	return self.settings.provenHostCount(candidates, ipVersion, now)
+	return candidates, now
+}
+
+// The answer to a spend one of its budgets refused (connect#230): what the
+// refusal is counted as, the wait it asks for, and its words. A budget asks
+// for the moment it has room, and up to BudgetRetryAfterJitter past it
+// (budgetRetryAfter), so the hosts it refuses together are spread over the
+// minute after rather than told the same second. The account's budget asks
+// for longer while none of the account's hosts has passed activation on the
+// family (`accountUnproven`): the wait unprovenAccountRetryAfter makes of the
+// account's attempts over the last UnprovenAccountAttemptLookback, which
+// `countAccountAttempts` counts, is counted as unproven_account and says why.
+// The words a refusal of each budget had before are kept as its start, which
+// is what an activator that predates the longer wait shows.
+func (self *extenderActivateService) budgetRefusalAnswer(
+	refusal model.AccountActionBudgetRefusal,
+	ipVersion int,
+	accountUnproven bool,
+	countAccountAttempts func(minTime time.Time, maxCount int) int,
+) (outcome string, retryAfter time.Duration, message string) {
+	settings := self.settings
+	outcome = extenderActivationBudgetOutcome(refusal.Action)
+	unproven := accountUnproven && 0 < settings.UnprovenAccountRetryAfterMax
+	retryAfter = refusal.RetryAfter
+	if unproven {
+		outcome = extenderActivationOutcomeUnprovenAccount
+		attemptCount := countAccountAttempts(
+			self.now().Add(-settings.UnprovenAccountAttemptLookback),
+			settings.unprovenAccountAttemptCountLimit(),
+		)
+		retryAfter = max(retryAfter, settings.unprovenAccountRetryAfter(attemptCount))
+	}
+	refusal.RetryAfter = self.budgetRetryAfter(retryAfter)
+	message = refusal.Error()
+	if unproven {
+		message += fmt.Sprintf(
+			" None of your account's extenders has passed activation over IPv%d in the last %s, so its hosts are asked to wait longer between tries. An extender passes once the internet can reach it on its TCP port, 443 by default.",
+			ipVersion,
+			extenderActivateLookbackText(settings.ProvenHostMaxAge),
+		)
+	}
+	return outcome, refusal.RetryAfter, message
 }
 
 // The wait a budget refusal asks for: the moment the budget has room, and up
@@ -1288,6 +1451,12 @@ func (self *extenderActivateService) activate(
 			AttemptTimeSpread: settings.BudgetAttemptTimeSpread,
 		}
 	}
+	// whether the account's limit past its floor was read, and whether any of
+	// its hosts had passed activation on the family when it was
+	// (accountPassed). The spend reads its budgets again under the locks, and
+	// the last read is the one that decided
+	accountLimitRead := false
+	accountPassed := false
 	if err := model.CheckAndRecordAccountActionBudgets(
 		clientSession.Ctx,
 		model.AccountActionBudget{
@@ -1307,7 +1476,10 @@ func (self *extenderActivateService) activate(
 			// past the floor the account's limit is what its proven hosts
 			// raised it to (connect#230)
 			ExtendLimitInTx: func(ctx context.Context, tx server.PgTx) int {
-				return settings.accountRateLimit(self.provenHostCountInTx(ctx, tx, networkId, ipVersion))
+				provenHostCount, passed := self.provenHostCountInTx(ctx, tx, networkId, ipVersion)
+				accountLimitRead = true
+				accountPassed = passed
+				return settings.accountRateLimit(provenHostCount)
 			},
 		},
 	); err != nil {
@@ -1328,14 +1500,30 @@ func (self *extenderActivateService) activate(
 		}
 		var budgetRefusal *model.AccountActionBudgetRefusal
 		if errors.As(err, &budgetRefusal) {
-			stageOutcome = extenderActivationBudgetOutcome(budgetRefusal.Action)
-			// the hosts a budget refuses together are spread over the
-			// minute after it has room, rather than told the same second
-			jitteredRefusal := *budgetRefusal
-			jitteredRefusal.RetryAfter = self.budgetRetryAfter(budgetRefusal.RetryAfter)
-			return refuseWithRetryAfter(jitteredRefusal.Error(), jitteredRefusal.RetryAfter)
+			// the account's budget, refusing an account none of whose hosts
+			// has passed on the family, asks for the longer wait its attempts
+			// make (unprovenAccountRetryAfter)
+			accountUnproven := budgetRefusal.Action == accountRateLimitAction && accountLimitRead && !accountPassed
+			outcome, retryAfter, message := self.budgetRefusalAnswer(
+				*budgetRefusal,
+				ipVersion,
+				accountUnproven,
+				func(minTime time.Time, maxCount int) int {
+					return model.CountAccountActionAttempts(
+						clientSession.Ctx,
+						clientSession.ByJwt.UserId,
+						accountRateLimitAction,
+						minTime,
+						maxCount,
+					)
+				},
+			)
+			stageOutcome = outcome
+			return refuseWithRetryAfter(message, retryAfter)
 		}
-		stageOutcome = extenderActivationOutcomeAccount
+		// the budget check failed rather than refused: counted as the error
+		// it is, never as a refusal by the account's budget
+		stageOutcome = extenderActivationOutcomeError
 		return refuse(err.Error())
 	}
 
