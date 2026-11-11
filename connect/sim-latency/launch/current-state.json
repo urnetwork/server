@@ -3,6 +3,7 @@
   "observed_at": "2026-11-11T03:05:08Z",
   "latest_goofe_r9_admission": {
     "evidence": "EPOCH2-GOOFE-R9-ADMISSION-2026-11-11.json",
+    "remaining_sille_triage": "EPOCH2-SILLE-DRAIN-TRIAGE-2026-11-11.md",
     "passed": true,
     "replicates": 9,
     "receipt_sha256": "bc72546dddaa79c19d9957241380151eb97086948f54809eab49f19f484f939c",
