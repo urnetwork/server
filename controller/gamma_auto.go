@@ -8,15 +8,20 @@ package controller
 // off (POST /pay/gamma/settings): auto_renew renews a plan paid with gamma at
 // the end of its term, at the plan's current price; auto_topup buys the
 // account's top-up item (data_1tib unless it picked another) when its data
-// balance runs out or will within the next check, and upgrades a free account
-// at its client limit to Pro. An optional monthly limit bounds what the
-// automatic charges take in a calendar month (UTC).
+// balance runs out or will within the next check. A free account at its client
+// limit is upgraded to Pro while both are on: the upgrade adds a seat
+// (auto_topup) and is an automatic Pro charge (auto_renew). An optional
+// monthly limit bounds what the automatic charges take in a calendar month
+// (UTC).
 //
 // Each automatic charge is one intent per (account, purpose, period): a
 // renewal per paid term, a top-up per hour (so at most one an hour), a seat
 // upgrade per day. Its charge, receipt and skip notice are the same as a
 // purchase's; a skipped charge sends one notice and is not retried until the
-// deposit changes. Nothing here changes how the network provides.
+// deposit changes. A switch turned off voids the open intents it governs that
+// are not yet being charged (gammaBiller.voidSwitchedOff), and frees their
+// period for the switch turned back on. Nothing here changes how the network
+// provides.
 
 import (
 	"context"
@@ -319,16 +324,20 @@ func (self *gammaBiller) autoTopup(account *model.GammaAccount) {
 	self.newAutoIntent(account, model.GammaPurposeTopup, "topup/"+hour.Format(time.RFC3339), item, priceUsd, "", nil, self.now.Add(gammaTopupTtl))
 }
 
-// autoSeat upgrades a free account that hit its client limit to Pro.
+// autoSeat upgrades a free account that hit its client limit to Pro, while
+// both switches are on: the upgrade adds a seat (auto_topup) and is an
+// automatic Pro charge (auto_renew), so a customer who turned renewal off is
+// never charged for Pro automatically.
 func (self *gammaBiller) autoSeat(account *model.GammaAccount) {
 	if account.SeatDemandAt == nil {
 		return
 	}
-	if !account.AutoTopup || model.IsProNetwork(self.ctx, account.NetworkId) ||
+	if !account.AutoTopup || !account.AutoRenew || model.IsProNetwork(self.ctx, account.NetworkId) ||
 		model.GetGammaProCoverEnd(self.ctx, account.NetworkId, self.now, &time.Time{}).After(self.now) {
 		// Pro already, a Pro subscription that pays for (or still bills) now
-		// without the entitlement showing yet, or the customer turned it off:
-		// the error is final, and no second Pro is bought for the same days
+		// without the entitlement showing yet, or the customer turned a switch
+		// off: the error is final, and no second Pro is bought for the same
+		// days
 		model.ClearGammaSeatDemand(self.ctx, account.NetworkId)
 		return
 	}
