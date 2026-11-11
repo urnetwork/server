@@ -7,6 +7,7 @@
   "queued_submissions": 14,
   "customer_evaluation_clocks_started": 0,
   "main_migration_head_observed": 954,
+  "separate_retained_sille_admission_exception_registered": true,
   "authority": "User explicitly approved Go1.27.4 for epoch2 as a security-hotfix exception and explicitly directed reuse of the existing baseline without fresh statistical calibration.",
   "previous_toolchain": "go1.27.3",
   "approved_toolchain": "go1.27.4",
@@ -28,7 +29,6 @@
     "Complete and verify the Go1.27.4 image rebuild and exact image identity.",
     "Record and authenticate the approved execution-identity amendment without editing historical round/baseline provenance.",
     "Update both private executor releases and verify compatibility and containment.",
-    "Register the separately approved exact retained Sille admission exception.",
     "Start scoring and verify real FIFO execution on Sille and Goofe."
   ]
 }

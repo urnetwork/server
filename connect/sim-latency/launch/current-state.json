@@ -19,7 +19,8 @@
     "user_approved_exact_retained_result_exception": true,
     "failed_receipt_preserved": true,
     "new_samples_or_clocks": false,
-    "exception_registered": false,
+    "exception_registered": true,
+    "registration_success_observed_at": "2026-11-11T14:40:47Z",
     "ordinary_and_race_qualification_passed_three_repetitions": true,
     "additional_retained_read_path_ordinary_passed": true,
     "additional_retained_read_path_race_passed": true,
@@ -30,7 +31,7 @@
     "pinned_worker_installed_not_started": true,
     "grading_ready": false,
     "customer_evaluation_clocks_started": 0,
-    "next_action": "Apply the approved epoch-2 Go1.27.4 security-hotfix exception while preserving the existing baseline and historical Go1.27.3 evidence. Record the new execution identity, verify compatibility and containment, register the approved retained admission exception, then verify actual FIFO scoring on both hosts. No replacement baseline or statistical recalibration. Earlier entries below are historical."
+    "next_action": "The approved retained admission exception is registered. Complete the Go1.27.4 image and authenticated execution-identity change, verify compatibility and containment, then verify actual FIFO scoring on both hosts. Preserve the existing baseline and historical Go1.27.3 evidence; no replacement baseline or statistical recalibration. Earlier entries below are historical."
   },
   "latest_single_admission_recovery": {
     "evidence": "EPOCH2-SINGLE-ADMISSION-RECOVERY-2026-11-11.json",
