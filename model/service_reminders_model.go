@@ -17,7 +17,8 @@ type SupporterWindowEnding struct {
 	Market    string
 	// the coin of a crypto invoice the window was paid with, when its market
 	// does not name it: "sol" for a solana window a native SOL invoice paid
-	// (its transaction id is the invoice id), else ""
+	// (its transaction id is the invoice id, or after the 30-day unlink a
+	// random id with the SOL prefix), else ""
 	CryptoAsset string
 }
 
@@ -30,14 +31,7 @@ func ListLastSupporterWindowsEnding(ctx context.Context, endFrom time.Time, endT
 			ctx,
 			`
 				SELECT DISTINCT ON (s.network_id) s.network_id, s.end_time, s.market,
-					COALESCE((
-						SELECT intent.asset FROM crypto_payment_intent intent
-						WHERE s.market = 'solana'
-						  AND intent.intent_id = (
-							CASE WHEN s.transaction_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
-							THEN s.transaction_id::uuid END
-						  )
-					), '')
+					CASE WHEN `+cryptoRenewalSolSql("s")+` THEN '`+CryptoAssetSol+`' ELSE '' END
 				FROM subscription_renewal s
 				WHERE
 					s.subscription_type = 'supporter' AND

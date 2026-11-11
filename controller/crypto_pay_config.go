@@ -1078,7 +1078,7 @@ func cryptoAssetNetworkWarning(asset string) string {
 	case model.CryptoAssetEth:
 		return "Send ETH on Ethereum mainnet to this address, exactly the amount. ETH on another network (Base, Arbitrum, Optimism) or a token is not credited. A payment is credited once its block is finalized, about 15 minutes."
 	case model.CryptoAssetSol:
-		return "Send native SOL on Solana to this address, exactly the amount. A token (SPL) transfer is not credited. The address alone identifies this invoice; the memo is optional."
+		return "Send native SOL on Solana to this address, exactly the amount. A token (SPL) transfer is not credited. The address alone identifies this invoice: no memo is needed."
 	}
 	return ""
 }

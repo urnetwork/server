@@ -97,8 +97,12 @@ type CryptoPaymentAssetsResult struct {
 // CryptoTerm is the network's latest one-time crypto credit whose grace has not
 // ended (SubscriptionBalanceResult.CryptoTerm).
 type CryptoTerm struct {
-	// solana | zcash | monero
+	// solana | monero | zcash | bittensor | bitcoin | ethereum
 	Market string `json:"market"`
+	// the coin the term was paid with: usdc_solana | sol | xmr | zec | tao |
+	// btc | eth. USDC and native SOL share the solana market; this tells
+	// them apart for the whole term (after the 30-day unlink too)
+	Asset string `json:"asset"`
 	// when the paid term ends and the grace begins; apps show the renewal
 	// notice from here until GraceEndTime, never before
 	TermEndTime  time.Time `json:"term_end_time"`
@@ -637,7 +641,7 @@ func CryptoPaymentAssets(clientSession *session.ClientSession) (*CryptoPaymentAs
 // cryptoTermForNetwork is the network's latest one-time crypto credit (Solana,
 // Monero or Zcash) whose grace has not ended, or nil.
 func cryptoTermForNetwork(ctx context.Context, networkId server.Id, now time.Time) *CryptoTerm {
-	market, endTime, ok := model.GetLatestOneTimeSubscriptionRenewal(
+	market, asset, endTime, ok := model.GetLatestOneTimeSubscriptionRenewal(
 		ctx,
 		networkId,
 		model.SubscriptionOneTimeCryptoMarkets,
@@ -648,6 +652,7 @@ func cryptoTermForNetwork(ctx context.Context, networkId server.Id, now time.Tim
 	}
 	return &CryptoTerm{
 		Market:       market,
+		Asset:        asset,
 		TermEndTime:  endTime.Add(-manualPaymentGracePeriod),
 		GraceEndTime: endTime,
 	}
@@ -1067,10 +1072,11 @@ func cryptoIntentResult(
 		ConfirmationsRequired: cryptoConfirmationsRequired(config, intent.Asset),
 	}
 	if intent.SolanaReference != nil {
+		// USDC only: the merchant address is shared, so a transfer sent by
+		// hand names its invoice with the memo. A SOL invoice has its own
+		// deposit address and no memo: its Solana Pay reference is in the
+		// link only (cryptoSolanaNativeUri)
 		result.Memo = *intent.SolanaReference
-	}
-	if intent.Asset == model.CryptoAssetSol {
-		result.Memo = cryptoSolReference(intent.IntentId)
 	}
 	receipts := []*model.CryptoPaymentReceipt{}
 	if intent.Asset != model.CryptoAssetUsdcSolana && intent.CreditedAt == nil {

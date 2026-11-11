@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -2168,6 +2169,12 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 		for _, row := range rows {
 			if row.networkId != nil {
 				market, transactionId := cryptoPaymentRenewalHandle(row.asset, row.intentId, row.solanaReference)
+				// the renewal keeps no link to the invoice, but a SOL year
+				// keeps its coin: it shares USDC's market (CryptoRenewalAsset)
+				unlinkedTransactionId := server.NewId().String()
+				if row.asset == CryptoAssetSol {
+					unlinkedTransactionId = CryptoUnlinkedSolTransactionPrefix + unlinkedTransactionId
+				}
 				if market != "" && transactionId != "" {
 					server.RaisePgResult(tx.Exec(
 						ctx,
@@ -2179,7 +2186,7 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 						*row.networkId,
 						market,
 						transactionId,
-						server.NewId().String(),
+						unlinkedTransactionId,
 					))
 				}
 			}
@@ -2288,6 +2295,70 @@ func UnlinkCryptoPaymentIntents(ctx context.Context, cutoff time.Time, limit int
 	return
 }
 
+// CryptoUnlinkedSolTransactionPrefix starts the transaction id the 30-day
+// unlink gives a SOL year's renewal: a random id, with no link to the
+// invoice, that keeps the coin (USDC's renewals share the solana market).
+const CryptoUnlinkedSolTransactionPrefix = "sol/"
+
+// The coin of each one-time crypto market but solana, which USDC and native
+// SOL share.
+var cryptoRenewalMarketAssets = map[string]string{
+	SubscriptionMarketMonero:    CryptoAssetXmr,
+	SubscriptionMarketZcash:     CryptoAssetZec,
+	SubscriptionMarketBittensor: CryptoAssetTao,
+	SubscriptionMarketBitcoin:   CryptoAssetBtc,
+	SubscriptionMarketEthereum:  CryptoAssetEth,
+}
+
+// cryptoRenewalAssetOf is a one-time crypto renewal's coin, given whether a
+// solana renewal was paid in native SOL; "" for any other market.
+func cryptoRenewalAssetOf(market string, sol bool) string {
+	if market == SubscriptionMarketSolana {
+		if sol {
+			return CryptoAssetSol
+		}
+		return CryptoAssetUsdcSolana
+	}
+	return cryptoRenewalMarketAssets[market]
+}
+
+// cryptoRenewalSolSql is whether the renewal row of alias was paid in native
+// SOL: a solana renewal whose transaction id is a SOL invoice's id (while
+// linked) or an unlinked SOL renewal's (CryptoUnlinkedSolTransactionPrefix).
+// A USDC renewal's is a Solana Pay reference, never a uuid.
+func cryptoRenewalSolSql(alias string) string {
+	return `(` + alias + `.market = 'solana' AND (
+		` + alias + `.transaction_id LIKE '` + CryptoUnlinkedSolTransactionPrefix + `%' OR EXISTS (
+			SELECT 1 FROM crypto_payment_intent sol_intent
+			WHERE sol_intent.asset = '` + CryptoAssetSol + `'
+			  AND sol_intent.intent_id = (
+				CASE WHEN ` + alias + `.transaction_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+				THEN ` + alias + `.transaction_id::uuid END
+			  )
+		)
+	))`
+}
+
+// CryptoRenewalAsset is the coin a one-time crypto renewal was paid with
+// (usdc_solana, sol, xmr, zec, tao, btc, eth), read from its market and
+// transaction id; "" for a market that is not one-time crypto. Native SOL
+// and USDC share the solana market: a SOL year's transaction id is its
+// invoice's id, and after the 30-day unlink a random id with the SOL prefix.
+func CryptoRenewalAsset(ctx context.Context, market string, transactionId string) string {
+	if market != SubscriptionMarketSolana {
+		return cryptoRenewalMarketAssets[market]
+	}
+	if strings.HasPrefix(transactionId, CryptoUnlinkedSolTransactionPrefix) {
+		return CryptoAssetSol
+	}
+	if intentId, err := server.ParseId(transactionId); err == nil {
+		if intent := GetCryptoPaymentIntent(ctx, intentId); intent != nil && intent.Asset == CryptoAssetSol {
+			return CryptoAssetSol
+		}
+	}
+	return CryptoAssetUsdcSolana
+}
+
 // cryptoPaymentRenewalHandle is where a plan credit's renewal is found: its
 // market and transaction id (the invoice id for every coin but USDC, the
 // Solana reference for USDC so the Solana reconcile leg still finds it).
@@ -2365,12 +2436,12 @@ func GetLatestOneTimeSubscriptionRenewal(
 	networkId server.Id,
 	markets []string,
 	now time.Time,
-) (market string, endTime time.Time, ok bool) {
+) (market string, asset string, endTime time.Time, ok bool) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT market, end_time
+				SELECT market, end_time, `+cryptoRenewalSolSql("subscription_renewal")+`
 				FROM subscription_renewal
 				WHERE network_id = $1
 				  AND subscription_type = $2
@@ -2386,7 +2457,9 @@ func GetLatestOneTimeSubscriptionRenewal(
 		)
 		server.WithPgResult(result, err, func() {
 			if result.Next() {
-				server.Raise(result.Scan(&market, &endTime))
+				var sol bool
+				server.Raise(result.Scan(&market, &endTime, &sol))
+				asset = cryptoRenewalAssetOf(market, sol)
 				ok = true
 			}
 		})
