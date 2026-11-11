@@ -12,6 +12,8 @@ package controller
 //     period, and the Pro balance with the price as its subsidy revenue; the
 //     price tier on the renewal and the welcome offer's redemption. A
 //     renewal's term starts where the paid term ended, so it does not shift.
+//     A plan purchase voids the network's renewal or seat upgrade that waited
+//     for it: it pays for the days they would buy.
 //  4. a data pack to the network: a pro = false balance and the applied note
 //  5. a data pack as a code: the balance code, emailed when the intent has an
 //     email
@@ -146,6 +148,19 @@ func gammaCreditIntentInTx(
 		if renewPlan == model.SolanaPlanYearlyOnboarding {
 			// the offer is once; a renewal is at the regular price
 			renewPlan = model.SolanaPlanYearly
+		}
+		if intent.Purpose == model.GammaPurposePurchase {
+			// the purchase replaces the renewal or seat upgrade that waited
+			// for it (gammaPlanHold): it pays for the days they would buy
+			voided, inFlight := model.VoidReplacedGammaPlanIntentsInTx(tx, ctx, networkId, gammaKnownPlans, now)
+			if 0 < voided {
+				glog.Infof("[gamma]intent %s replaced %d automatic plan charge(s) of network %s\n", intent.IntentId, voided, networkId)
+			}
+			if 0 < inFlight {
+				// gammaPlanHold charges no plan purchase while another plan
+				// charge is in flight, so this must not happen
+				glog.Errorf("[gamma]intent %s was credited while %d automatic plan charge(s) of network %s are in flight\n", intent.IntentId, inFlight, networkId)
+			}
 		}
 
 	case intent.Delivery == model.CryptoDeliveryCode:

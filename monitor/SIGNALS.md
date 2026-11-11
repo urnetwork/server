@@ -22869,6 +22869,78 @@ Google orphan controls also retain the warning for canceled paid history,
 require the implemented deletion capabilities, reject healthy inference from
 unavailable/partial evidence, and keep other markets' guidance separate.
 
+### 2.22a Pay with Gamma payments that cannot be credited
+Probe: `gamma-payment-failures`
+
+Pay with Gamma (mmm/BTCPAY.md §18) charges a customer's SN25 gamma deposit
+with our own `spend_gamma`, and credits the purchase only from our finalized
+`GammaSpent`. Gamma cannot be refunded on chain, so a spend that no credit
+reaches is a customer who paid and got nothing. The biller's alarms for it
+(`gamma_alarm`, `urnetwork_gamma_pay_alarms_total`) reached only the gamma
+dashboard's "alarms / s by kind" panel. This probe reads the gamma tables,
+aggregated to kind, count and oldest/newest age:
+
+- `gamma-credit-unfulfillable` (PAGE): a spent `gamma_charge` whose intent is
+  neither credited nor voided and whose network no longer exists (the biller's
+  alarm `credit_unfulfillable`, raised once per intent; it retries the credit
+  every run). Account deletion waits for a gamma charge in flight (server
+  `57f98311f`), so only a network removed another way, or an older build, gets
+  here. From the alarm (key `credit_unfulfillable/<intent id>`, whose detail
+  names the intent, network, deposit hotkey, block and reference), establish
+  who paid from support evidence and the deposit's coldkey on chain, and bring
+  each to the owner for an authorized disposition: a credit to the customer's
+  verified live account, or a refund in another asset. Never recreate the
+  deleted network, and never credit on an email or name match. Once the
+  disposition is done, record it by voiding the intent
+  (`gamma_payment_intent.voided_at`): the biller stops retrying and the count
+  drops it. There is no operator tool for it yet (`bringyourctl gamma`,
+  BTCPAY §18.9).
+- `gamma-credit-failed` (PAGE): a spent charge whose credit failed
+  `controller.GammaMaxCreditFailures` (10) times or more for a network that
+  still exists; its status says `review` (`credit_failed`). The biller retries
+  ten such credits a run, the least retried first, beside every other credit,
+  the fewest failures first, so they never hold a new credit back. Read the
+  taskworker log line `[gamma]credit of intent <id> failed (<n>): <error>` and
+  fix the cause (the Pro configuration such as the data code duration or the
+  data pack catalog, or the database); the retry then credits the intent once,
+  through its one-shot. Do not credit by hand or edit balances. A cause that
+  cannot be fixed goes to the owner, and the intent is voided once its
+  disposition is done.
+- `gamma-batch-unfulfillable` (WARN): a `batch_unfulfillable` alarm in the last
+  24 hours. The biller found its live spend batch carrying a pending charge
+  whose intent was closed (voided or credited) or whose network is gone, and
+  stopped resubmitting it; no other batch is signed until its era ends (64
+  blocks, about 13 minutes), and the pool may still include it. Look the batch
+  up in `gamma_spend_batch`: expired, its other charges went out again with
+  their references unchanged; included, each of its charges spent for an
+  intent that is voided or credited or whose network is gone is a payment no
+  credit reaches (those of a deleted network are also
+  `gamma-credit-unfulfillable`) and needs the owner's authorized disposition.
+  Then find how the intent was closed or the network removed outside account
+  deletion. The 24-hour window is not a disposition.
+
+The other watcher alarms (`unknown_reference`, `duplicate_reference`,
+`spend_mismatch`, `spender_proxy_changed`, `unknown_billing_transaction`,
+`unexpected_nonce`, `runtime_unsupported`, `undecodable_block`,
+`service_changed`, `stray_tao`) and the readiness gauge have no alert yet
+(BTCPAY §18.9).
+
+The gamma tables exist from the Gamma migration
+(`server.GammaPaySchemaMigrationVersion()`) on. A metadata-only preflight
+reads the successful migration head and the tables' presence first: below the
+Gamma migration nothing can have been spent, so the probe reads nothing more
+and reports nothing; at or past it, missing tables fail the probe rather than
+hiding a payment. Only aggregate kind counts and ages leave PostgreSQL: no
+intent, network, hotkey, coldkey, reference, block or alarm detail enters an
+alert.
+
+Implementation convention: SIGNALS.md §2.22a (`gamma-payment-failures`) maps
+to `signal_gamma_payment_failures.go` and
+`signal_gamma_payment_failures_test.go`. Synthetic tests cover the migration
+gate, every class with its severity and guidance, privacy, and malformed
+aggregates; a SQL test runs the SELECT on tables shaped as the Gamma migration
+makes them.
+
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
 

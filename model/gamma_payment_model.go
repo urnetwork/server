@@ -621,6 +621,140 @@ func getGammaProCoverEnd(ctx context.Context, query server.PgCanQuery, networkId
 	return
 }
 
+// ----- one Gamma plan charge at a time -----
+
+// A network's gamma plan intents (the items in plans: a purchase of a plan, a
+// renewal, a seat upgrade) are charged one at a time, and none is charged for
+// days another one paid for (the owner, 2026-11-11). A purchase ignores the
+// network's own gamma windows, so that a plan can be upgraded; these rules
+// keep a purchase and the plan charges around it from both being charged.
+
+// GetGammaPlanChargeState says, for a gamma plan intent of the network (nil
+// excludeIntentId: one not made yet), whether another of the network's plan
+// intents is being charged: its charge is pending, in a batch or not yet, or
+// spent and not yet credited (a batch can carry it to the chain, so it is in
+// flight); and, with since, whether another was credited at or after since.
+// A plan intent made before another plan was paid is never charged after it:
+// the other one paid for those days.
+func GetGammaPlanChargeState(
+	ctx context.Context,
+	networkId server.Id,
+	plans []string,
+	excludeIntentId *server.Id,
+	since *time.Time,
+) (charging bool, paidSince bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+				SELECT
+					EXISTS (
+						SELECT 1
+						FROM gamma_payment_intent other
+						INNER JOIN gamma_charge ON gamma_charge.intent_id = other.intent_id
+						WHERE other.network_id = $1
+						  AND other.item = ANY($2)
+						  AND ($3::uuid IS NULL OR other.intent_id <> $3::uuid)
+						  AND other.credited_at IS NULL
+						  AND other.voided_at IS NULL
+						  AND gamma_charge.state IN ('pending', 'spent')
+					),
+					$4::timestamp IS NOT NULL AND EXISTS (
+						SELECT 1
+						FROM gamma_payment_intent other
+						WHERE other.network_id = $1
+						  AND other.item = ANY($2)
+						  AND ($3::uuid IS NULL OR other.intent_id <> $3::uuid)
+						  AND $4::timestamp <= other.credited_at
+					)
+			`,
+			networkId,
+			plans,
+			excludeIntentId,
+			since,
+		).Scan(&charging, &paidSince))
+	})
+	return
+}
+
+// HasOpenGammaPlanPurchase reports whether the network has an open purchase
+// of a plan (an item in plans): one the customer may still pay. While it is
+// open, the network's automatic plan charges (a renewal, a seat upgrade) wait,
+// since the purchase replaces them once it is paid.
+func HasOpenGammaPlanPurchase(ctx context.Context, networkId server.Id, plans []string, now time.Time) (open bool) {
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+				SELECT EXISTS (
+					SELECT 1
+					FROM gamma_payment_intent
+					WHERE network_id = $1
+					  AND purpose = 'purchase'
+					  AND item = ANY($2)
+					  AND credited_at IS NULL
+					  AND voided_at IS NULL
+					  AND $3 < expires_at
+				)
+			`,
+			networkId,
+			plans,
+			now,
+		).Scan(&open))
+	})
+	return
+}
+
+// VoidReplacedGammaPlanIntentsInTx voids, in the credit of a plan purchase,
+// the network's open automatic plan intents (a renewal, a seat upgrade: the
+// items in plans): the purchase pays for the days they would buy. Never one
+// whose charge is in flight (pending, in a batch or not yet, or spent and not
+// yet credited): a spend that lands for a voided intent is never credited. The
+// biller held them while the purchase was open, so none is. A voided intent's
+// charge never joins a batch and is never re-armed. Returns how many were
+// voided, and how many were left because their charge is in flight (which
+// the biller's rules should never let happen).
+func VoidReplacedGammaPlanIntentsInTx(tx server.PgTx, ctx context.Context, networkId server.Id, plans []string, now time.Time) (voided int64, inFlight int64) {
+	tag := server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+			UPDATE gamma_payment_intent
+			SET voided_at = $3
+			WHERE network_id = $1
+			  AND purpose IN ('renew', 'seat')
+			  AND item = ANY($2)
+			  AND credited_at IS NULL
+			  AND voided_at IS NULL
+			  AND NOT EXISTS (
+				SELECT 1 FROM gamma_charge
+				WHERE gamma_charge.intent_id = gamma_payment_intent.intent_id
+				  AND gamma_charge.state IN ('pending', 'spent')
+			  )
+		`,
+		networkId,
+		plans,
+		now,
+	))
+	voided = tag.RowsAffected()
+	server.Raise(tx.QueryRow(
+		ctx,
+		`
+			SELECT COUNT(*)
+			FROM gamma_payment_intent
+			INNER JOIN gamma_charge ON gamma_charge.intent_id = gamma_payment_intent.intent_id
+			WHERE gamma_payment_intent.network_id = $1
+			  AND gamma_payment_intent.purpose IN ('renew', 'seat')
+			  AND gamma_payment_intent.item = ANY($2)
+			  AND gamma_payment_intent.credited_at IS NULL
+			  AND gamma_payment_intent.voided_at IS NULL
+			  AND gamma_charge.state IN ('pending', 'spent')
+		`,
+		networkId,
+		plans,
+	).Scan(&inFlight))
+	return
+}
+
 // ----- account deletion -----
 
 // gammaChargeInFlightInTx reports, under the deletion's lock on the network
@@ -1369,23 +1503,35 @@ func MarkGammaChargeNoticeSentInTx(tx server.PgTx, ctx context.Context, referenc
 }
 
 // ListSpentUncreditedGammaCharges are spent charges whose intent is not yet
-// credited (nor voided), oldest first.
-func ListSpentUncreditedGammaCharges(ctx context.Context, limit int) (charges []*GammaCharge) {
+// credited (nor voided) and whose credit failed fewer than maxFailures times,
+// the fewest failures first, then the oldest: a new credit never waits behind
+// credits that keep failing.
+func ListSpentUncreditedGammaCharges(ctx context.Context, maxFailures int, limit int) []*GammaCharge {
+	return listSpentUncreditedGammaCharges(ctx, `gamma_payment_intent.credit_failure_count < $1`, maxFailures, limit)
+}
+
+// ListSpentUncreditedGammaChargesInReview are spent charges whose intent is
+// not yet credited (nor voided) and whose credit failed maxFailures times or
+// more: held for an operator, and retried a few a run, the least retried
+// first, so each is retried in turn and none crowds out a new credit.
+func ListSpentUncreditedGammaChargesInReview(ctx context.Context, maxFailures int, limit int) []*GammaCharge {
+	return listSpentUncreditedGammaCharges(ctx, `$1 <= gamma_payment_intent.credit_failure_count`, maxFailures, limit)
+}
+
+func listSpentUncreditedGammaCharges(ctx context.Context, failures string, maxFailures int, limit int) (charges []*GammaCharge) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT gamma_charge.reference, gamma_charge.intent_id, gamma_charge.hotkey,
-			       gamma_charge.amount, gamma_charge.state, gamma_charge.batch_id,
-			       gamma_charge.attempts, gamma_charge.create_time, gamma_charge.resolved_at,
-			       gamma_charge.block_number, gamma_charge.block_hash, gamma_charge.event_index,
-			       gamma_charge.skip_reason, gamma_charge.skip_deposit, gamma_charge.notice_sent_at
+			`SELECT `+gammaChargeColumnsQualified+`
 			FROM gamma_charge
 			INNER JOIN gamma_payment_intent ON gamma_payment_intent.intent_id = gamma_charge.intent_id
 			WHERE gamma_charge.state = 'spent'
 			  AND gamma_payment_intent.credited_at IS NULL
 			  AND gamma_payment_intent.voided_at IS NULL
-			ORDER BY gamma_charge.create_time
-			LIMIT $1`,
+			  AND `+failures+`
+			ORDER BY gamma_payment_intent.credit_failure_count, gamma_charge.create_time
+			LIMIT $2`,
+			maxFailures,
 			limit,
 		)
 		server.WithPgResult(result, err, func() {

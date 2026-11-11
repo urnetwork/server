@@ -405,8 +405,29 @@ const gammaOtherProRenewsPurchaseMessage = "You already have a Pro subscription 
 const gammaOtherProRenewsSettingsMessage = "You have another Pro subscription that renews, so Gamma renewal was not turned on: both would charge you for the same days. Cancel that subscription, then turn Gamma renewal on once it has ended."
 
 // a plan intent the biller holds while another Pro subscription pays for the
-// days it would buy (gammaPlanCovered)
+// days it would buy (gammaPlanHold)
 const gammaPlanCoveredMessage = "Another Pro subscription pays for these days, so this Gamma payment is not charged while it runs. It is charged only if that subscription ends before this payment expires."
+
+// A Gamma plan is never charged beside another Gamma plan charge for the same
+// days (the owner, 2026-11-11). A plan purchase is refused while another Gamma
+// plan charge of the network is being made: a renewal, a seat upgrade or
+// another plan purchase in a spend batch cannot be voided safely, since its
+// spend may still land. Once it is paid, a plan can be bought again (an
+// upgrade starts at once, as before).
+const gammaPlanChargingPurchaseMessage = "A Gamma payment for your Pro plan is being charged now (its renewal, an upgrade at your client limit, or a plan you bought), so no Gamma payment was started: paying for a plan as well would charge you twice for the same days. Check again in a few minutes, once it is paid."
+
+// the status of a plan intent held while another Gamma plan charge of the
+// network is in flight (gammaPlanHold)
+const gammaPlanChargingMessage = "Another Gamma payment for your Pro plan is being charged now, so this one waits: if that one is paid, this one is not charged, since both would pay for the same days."
+
+// the status of a plan intent made before another Gamma plan of the network
+// was paid (gammaPlanHold)
+const gammaPlanPaidSinceMessage = "Another Gamma payment for your Pro plan was paid after this one was started, so this one is not charged: both would pay for the same days."
+
+// the status of a renewal or seat upgrade while a plan purchase of the
+// network is open (gammaPlanHold); automatic intents hand out no status
+// token, so this is for operators
+const gammaPlanReplacedMessage = "A Gamma plan purchase of this account is open and replaces this automatic charge: it waits while the purchase is open, is voided once the purchase is paid, and goes ahead only if the purchase expires unpaid."
 
 // gammaOtherProRenews reports whether a Pro subscription of the network other
 // than a plan paid with gamma renews or still bills, by card checkout's own
@@ -535,12 +556,33 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		return result, nil
 	}
 
+	var open *model.GammaPaymentIntent
 	if delivery == model.CryptoDeliveryAccount {
-		if open := model.GetOpenGammaPaymentIntentForReuse(ctx, networkId, hotkey.Hotkey, item, delivery, now); open != nil {
-			token, tokenHash := cryptoNewStatusToken()
-			model.AddGammaPaymentIntentStatusToken(ctx, open.IntentId, tokenHash)
-			return gammaIntentResult(clientSession, view, open, hotkey, token, now), nil
+		open = model.GetOpenGammaPaymentIntentForReuse(ctx, networkId, hotkey.Hotkey, item, delivery, now)
+	}
+	if plan != "" {
+		// another Gamma plan charge of the network in flight (a renewal, a
+		// seat upgrade, another plan) cannot be voided: its spend may land.
+		// Asking again for the purchase being charged hands it back.
+		var exclude *server.Id
+		var since *time.Time
+		if open != nil {
+			exclude, since = &open.IntentId, &open.CreateTime
 		}
+		charging, paidSince := model.GetGammaPlanChargeState(ctx, networkId, gammaKnownPlans, exclude, since)
+		if charging {
+			return gammaIntentError(PurchaseErrorCodeAlreadySubscribed, gammaPlanChargingPurchaseMessage), nil
+		}
+		if paidSince {
+			// another plan was paid after the open one was made, so that one
+			// is never charged: this is a new purchase
+			open = nil
+		}
+	}
+	if open != nil {
+		token, tokenHash := cryptoNewStatusToken()
+		model.AddGammaPaymentIntentStatusToken(ctx, open.IntentId, tokenHash)
+		return gammaIntentResult(clientSession, view, open, hotkey, token, now), nil
 	}
 	if gammaMaxOpenIntentsPerNetwork <= model.CountOpenGammaPaymentIntents(ctx, networkId, now) {
 		return gammaIntentError(PurchaseErrorCodeRateLimited, "Too many open Gamma payments. Pay or let one expire first."), nil
@@ -819,14 +861,15 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeQuoteExpired, Message: "The payment expired before the deposit could pay it."}
 		return result
 	}
-	if gammaPlanCovered(ctx, intent, now) {
-		// the biller does not charge it while another Pro subscription pays
-		// for the same days (gamma_auto.go)
+	if hold := gammaPlanHold(ctx, intent, now); hold != "" {
+		// covered: the biller does not charge it while another Pro
+		// subscription or another Gamma plan pays for the same days
+		// (gamma_auto.go)
 		result.Status = gammaStatusSeen
 		if balance < 0 {
 			result.Status = gammaStatusPending
 		}
-		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: gammaPlanCoveredMessage}
+		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: hold}
 		return result
 	}
 	if charge != nil && (charge.State == model.GammaChargeSkipped || charge.State == model.GammaChargeFailed) {
