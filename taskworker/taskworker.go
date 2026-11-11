@@ -218,6 +218,12 @@ func initTaskSchedule(ctx context.Context) {
 		// §20.6's spent marks cleared once a network holds an in-window
 		// balance with room, every 60 s; not scheduled without MG2
 		work.ScheduleQuotaSpentPass(clientSession, tx)
+		// §20.14's usage jobs: each closed day's stored bytes, the nightly
+		// reconcile of storage_over, the connected sets and spent marks, and
+		// the usage tables' retention; not scheduled without MG2
+		work.ScheduleRollupServiceUsage(clientSession, tx)
+		work.ScheduleReconcileSidecarCounters(clientSession, tx)
+		work.ScheduleRemoveExpiredServiceUsage(clientSession, tx)
 		// §20.6's service debits applied to their balances, one chain a
 		// shard; not scheduled without MG2
 		work.ScheduleFlushServiceDebits(clientSession, tx)
@@ -701,6 +707,20 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.QuotaSpentPass,
 			work.QuotaSpentPassPost,
+		),
+		// §20.14's usage jobs (model.RollupServiceUsage,
+		// model.ReconcileSidecarCounters, model.RemoveExpiredServiceUsage)
+		task.NewTaskTargetWithPost(
+			work.RollupServiceUsage,
+			work.RollupServiceUsagePost,
+		),
+		task.NewTaskTargetWithPost(
+			work.ReconcileSidecarCounters,
+			work.ReconcileSidecarCountersPost,
+		),
+		task.NewTaskTargetWithPost(
+			work.RemoveExpiredServiceUsage,
+			work.RemoveExpiredServiceUsagePost,
 		),
 		// §20.6's service debit flush (model.FlushServiceDebits), its commit
 		// post keeping each shard's idle mark

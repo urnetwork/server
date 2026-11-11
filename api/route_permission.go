@@ -137,6 +137,7 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	// reading settings, clients and the network's earnings
 	"GET /network/clients":                  model.RolePermissionRead,
 	"GET /network/admin-events":             model.RolePermissionRead,
+	"GET /network/usage":                    model.RolePermissionRead,
 	"GET /network/client-data-caps":         model.RolePermissionRead,
 	"GET /network/embed":                    model.RolePermissionRead,
 	"GET /network/proxies":                  model.RolePermissionRead,
