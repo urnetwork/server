@@ -199,6 +199,11 @@ type StConfig struct {
 	// V1SweepConfigError says why st.yml's sweep keys were refused. A refused
 	// sweep configuration disables only the sweep, never the st subsystem.
 	V1SweepConfigError string
+	// Amendments and ExtenderPool are st.yml's amendments and extender_pool
+	// blocks, raw: st_ledger_v2_amendments.go reads them, so a malformed one
+	// refuses only the epochs whose rows need it.
+	Amendments   yaml.Node
+	ExtenderPool yaml.Node
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -286,6 +291,10 @@ type stVaultFile struct {
 	// (stV1SweepSelect) instead of failing the whole st.yml decode.
 	V1SweepEpoch          yaml.Node `yaml:"v1_sweep_epoch"`
 	V1SweepRecoveryEpochs yaml.Node `yaml:"v1_sweep_recovery_epochs"`
+	// The amendment fallback lines and the extender pool's networks stay raw
+	// too (st_ledger_v2_amendments.go).
+	Amendments   yaml.Node `yaml:"amendments"`
+	ExtenderPool yaml.Node `yaml:"extender_pool"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -323,6 +332,8 @@ type stVaultFile struct {
 	TestnetValidatorHotkeys       []string                       `yaml:"testnet-validator-hotkeys"`
 	TestnetV1SweepEpoch           yaml.Node                      `yaml:"testnet-v1-sweep-epoch"`
 	TestnetV1SweepRecoveryEpochs  yaml.Node                      `yaml:"testnet-v1-sweep-recovery-epochs"`
+	TestnetAmendments             yaml.Node                      `yaml:"testnet-amendments"`
+	TestnetExtenderPool           yaml.Node                      `yaml:"testnet-extender-pool"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -398,6 +409,7 @@ type stSelectedConfig struct {
 	DepositZeroRateAction                                                                                          string
 	ValidatorHotkeys                                                                                               []string
 	V1SweepEpoch, V1SweepRecoveryEpochs                                                                            yaml.Node
+	Amendments, ExtenderPool                                                                                       yaml.Node
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -426,6 +438,8 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			ValidatorHotkeys:      append([]string(nil), f.TestnetValidatorHotkeys...),
 			V1SweepEpoch:          f.TestnetV1SweepEpoch,
 			V1SweepRecoveryEpochs: f.TestnetV1SweepRecoveryEpochs,
+			Amendments:            f.TestnetAmendments,
+			ExtenderPool:          f.TestnetExtenderPool,
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -449,6 +463,8 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			ValidatorHotkeys:      append([]string(nil), f.ValidatorHotkeys...),
 			V1SweepEpoch:          f.V1SweepEpoch,
 			V1SweepRecoveryEpochs: f.V1SweepRecoveryEpochs,
+			Amendments:            f.Amendments,
+			ExtenderPool:          f.ExtenderPool,
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -469,7 +485,7 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 		DepositTiers:          append([]StDepositTier(nil), s.DepositTiers...),
 		DepositZeroRateAction: s.DepositZeroRateAction,
 		ReliabilityAMin:       s.ReliabilityAMin, BlockSeconds: s.BlockSeconds, DeployBlock: s.DeployBlock,
-		PruneAlertPositions: s.PruneAlertPositions}
+		PruneAlertPositions: s.PruneAlertPositions, Amendments: s.Amendments, ExtenderPool: s.ExtenderPool}
 	if profile == "mainnet" {
 		cfg.LaunchReadinessSha256 = file.LaunchReadinessSha256
 	}

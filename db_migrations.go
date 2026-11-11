@@ -11451,4 +11451,11 @@ var migrations = []any{
 	// locked or rewritten. Apply before deploying the taskworker, api and alt
 	// that use it.
 	providerEgressIpv6PlaceMigration,
+
+	// The SN25 extender pool (db_st_ledger_v2_extenders.go, sn WHITEPAPER.md
+	// §8.6): the verified amendments file, each epoch's extender census and
+	// two nullable columns on st_ledger_v2_epoch_rows, each created only when
+	// absent, under a five-second lock bound. Nothing existing is rewritten.
+	// Apply before deploying the taskworker and api that read them.
+	stLedgerV2ExtenderMigration,
 }

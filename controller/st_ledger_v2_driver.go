@@ -763,6 +763,8 @@ func stLedgerV2Commitment(ctx context.Context, input *StLedgerV2BuildInput, buil
 			return nil, nil, fmt.Errorf("st ledger v2: epoch %d is null without the operator's declaration", covered.Epoch)
 		case covered.Rows != nil && (covered.Rows.Null() != listed.Null || !slices.Equal(covered.Rows.ProviderChunks, listed.ProviderChunks)):
 			return nil, nil, fmt.Errorf("st ledger v2: the build changes epoch %d's recorded provider rows", covered.Epoch)
+		case covered.Rows != nil && !covered.Rows.Extenders.Equal(listed.Extenders):
+			return nil, nil, fmt.Errorf("st ledger v2: the build changes epoch %d's recorded extender component", covered.Epoch)
 		}
 	}
 	return tree, &StLedgerV2Commitment{Root: root, Total: total, LeafCount: tree.LeafCount(), LedgerHash: sha256.Sum256(build.Header)}, nil
@@ -778,7 +780,7 @@ func stLedgerV2Publish(ctx context.Context, cfg *StConfig, input *StLedgerV2Buil
 	}
 	for i, covered := range input.Epochs {
 		if covered.Rows == nil {
-			if err := model.RecordStLedgerV2EpochRows(ctx, cfg.DeploymentKey(), cfg.NoId, covered.Epoch, build.Epochs[i].ProviderChunks); err != nil {
+			if err := model.RecordStLedgerV2EpochComponents(ctx, cfg.DeploymentKey(), cfg.NoId, covered.Epoch, build.Epochs[i].ProviderChunks, build.Epochs[i].Extenders); err != nil {
 				return err
 			}
 		}

@@ -287,11 +287,19 @@ func StLedgerV2UsageSync(ctx context.Context, state *StEpochState) ([]*StLedgerV
 	if committed != nil && committed.Null {
 		giveUp("the root committed for epoch %d declares its rows unrecoverable, so it has no usage statement and the next epoch's priced deposit cannot be sized", epoch)
 	}
-	kind := stLedgerV2UsageDue(record, committed)
-	if kind == "" {
+	steps := []*StLedgerV2UsageStep{}
+	if kind := stLedgerV2UsageDue(record, committed); kind != "" {
+		steps = append(steps, &StLedgerV2UsageStep{Kind: kind, Epoch: epoch, RunAt: server.NowUtc()})
+	}
+	// The extender census is captured beside the users, as close to the
+	// boundary as a failed read allows (st_ledger_v2_extenders.go).
+	if stLedgerV2ExtenderCensusDue(ctx, cfg, epoch) {
+		steps = append(steps, &StLedgerV2UsageStep{Kind: StLedgerV2UsageStepExtenderCensus, Epoch: epoch, RunAt: server.NowUtc()})
+	}
+	if len(steps) == 0 {
 		return nil, nil
 	}
-	return []*StLedgerV2UsageStep{{Kind: kind, Epoch: epoch, RunAt: server.NowUtc()}}, nil
+	return steps, nil
 }
 
 // StLedgerV2RunUsageStep runs one planned usage step. Each is idempotent.
@@ -309,6 +317,8 @@ func StLedgerV2RunUsageStep(ctx context.Context, step *StLedgerV2UsageStep) (*St
 	switch step.Kind {
 	case StLedgerV2UsageStepUsers:
 		return stLedgerV2CaptureUsers(ctx, cfg, client, step.Epoch), nil
+	case StLedgerV2UsageStepExtenderCensus:
+		return stLedgerV2CaptureExtenderCensus(ctx, cfg, client, step.Epoch), nil
 	case StLedgerV2UsageStepStatement:
 		_, v2, err := stLedgerV2Require()
 		if err != nil {
