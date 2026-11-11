@@ -179,6 +179,26 @@ type competitionSecurityToolchainDecision struct {
 	Exception       competitionSecurityToolchainException `json:"exception"`
 }
 
+// API readiness reads the independently authenticated immutable decision, not
+// the private coordinator profile. This authorizes only heartbeat identity;
+// frozen source, baseline, scorer and public policy pins remain historical.
+func (self PostgresStore) loadCompetitionReadinessSecurityToolchain(ctx context.Context, settings *Settings, round *roundRecord, baseline *roundBaselineRecord) error {
+	settings.readinessSecurityToolchainException = nil
+	return captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			decision, err := competitionSecurityToolchainDecisionInTx(ctx, tx, baseline)
+			server.Raise(err)
+			if decision == nil {
+				return
+			}
+			derived := *settings
+			derived.securityToolchainException = &decision.Exception
+			server.Raise(validateCompetitionSecurityToolchainScope(&derived, round, baseline))
+			settings.readinessSecurityToolchainException = &decision.Exception
+		}, server.OptReadOnly(), server.OptNoRetry())
+	})
+}
+
 // A bounded indexed read authenticates canonical typed bytes, not JSONB text.
 // Missing authority is distinct from a conflicting or malformed decision.
 func competitionSecurityToolchainDecisionInTx(ctx context.Context, tx server.PgTx, baseline *roundBaselineRecord) (*competitionSecurityToolchainDecision, error) {

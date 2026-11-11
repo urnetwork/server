@@ -4,6 +4,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -12,6 +13,18 @@ import (
 // API callers retain their existing canonical source/grant authentication;
 // physical host readiness does not introduce another worker-ACK prerequisite.
 func readCompetitionReadinessHosts(ctx context.Context, reader competitionIntakeReader, settings *Settings, now time.Time) (hosts, artifactHosts, rebaselineHosts int, err error) {
+	image, target := "", ""
+	qualifications := map[string]string{}
+	if approval := settings.readinessSecurityToolchainException; approval != nil && approval.RoundId == settings.automationRoundId && approval.Epoch == settings.distributedRoundEpoch && approval.PreviousEvaluatorImageDigest == settings.EvaluatorImageDigest {
+		image, target = approval.EvaluatorImageDigest, approval.RoundId.String()
+		for _, host := range approval.Hosts {
+			qualifications[host.HostId] = host.QualificationSha256
+		}
+	}
+	qualificationJson, err := json.Marshal(qualifications)
+	if err != nil {
+		return 0, 0, 0, err
+	}
 	err = reader.QueryRow(ctx, `
 		WITH configured_round AS (
 			SELECT r.round_id,r.opens_at,r.finalized_at,r.automation_sealed_at,r.policy_json
@@ -43,6 +56,8 @@ func readCompetitionReadinessHosts(ctx context.Context, reader competitionIntake
 			  AND policy_json->>'evaluator_image_digest'=$2
 			  AND policy_json->'evaluation_policy'->>'hardware_id'=$1
 			  AND policy_json->'evaluation_policy'->>'host_qualification_sha256'=$3
+		), execution_authority AS (
+			SELECT $11::text<>'' AND EXISTS(SELECT 1 FROM current_round WHERE round_id=$13::text) AS hotfix
 		)
 		SELECT count(*),
 		       count(*) FILTER (WHERE (self_check_json->>'artifact_storage')::boolean),
@@ -52,17 +67,21 @@ func readCompetitionReadinessHosts(ctx context.Context, reader competitionIntake
 		                 COALESCE((SELECT round_id FROM current_round),'')
 		       )
 		FROM competition_evaluator_host evaluator
-		WHERE eligible=true AND hardware_id=$1 AND image_digest=$2
-		  AND (self_check_json->>'qualification_sha256'=$3 OR EXISTS (
+		WHERE eligible=true AND hardware_id=$1
+		  AND image_digest=CASE WHEN (SELECT hotfix FROM execution_authority) THEN $11 ELSE $2 END
+		  AND CASE WHEN (SELECT hotfix FROM execution_authority) THEN
+			$12::jsonb->>evaluator.host_id=self_check_json->>'qualification_sha256'
+		  ELSE (self_check_json->>'qualification_sha256'=$3 OR EXISTS (
 			SELECT 1 FROM current_round approved
 			WHERE competition_executor_control_host(approved.round_id::uuid,evaluator.host_id)->>'qualification_sha256'
 			  =self_check_json->>'qualification_sha256'
-		  ))
+		  )) END
 		  AND heartbeat_at >= $4
 	`, settings.EvaluationPolicy.HardwareId, settings.EvaluatorImageDigest,
 		settings.EvaluationPolicy.HostQualificationSha256,
 		now.Add(-time.Duration(settings.HostHeartbeatMaxAgeSeconds)*time.Second), now,
 		settings.CompetitionId, settings.AutomationPolicy.Enabled, settings.AutomationPolicy.Staging,
-		settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId).Scan(&hosts, &artifactHosts, &rebaselineHosts)
+		settings.AutomationPolicy.Environment, settings.AutomationPolicy.SeasonId,
+		image, string(qualificationJson), target).Scan(&hosts, &artifactHosts, &rebaselineHosts)
 	return
 }
