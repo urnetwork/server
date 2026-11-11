@@ -87,20 +87,42 @@ type FileClusterSuiteSettings struct {
 	PollInterval time.Duration
 	// The bound on one control-port call: 10 s, and a barrier's wait for its commits, WaitLimit. Positive.
 	HookTimeout time.Duration
-	// How many keys the LIST case writes, 16. Positive.
-	ListKeyCount int
+	// How many keys the LIST case writes, 16, and how many hosts it stops at most, 2: one host's drives are inside the
+	// line a LIST is whole at on a 4 x 2 set and two are past it. Positive.
+	ListKeyCount     int
+	ListStoppedHosts int
+	// The most drives of a set offline at which the fork answers a LIST whole, 2: three or more, or one beside one
+	// healing, answer 503 (§19.6's list row). The store's rule, which this only reads. Positive.
+	ListWholeOfflineDrives int
+	// FS-114's twin's head writes, 20. Positive.
+	TwinRoundCount int
+	// How much past its own deadline a request that must not wait on a held commit may take, for its round trips: 1 s.
+	// Positive.
+	RoundTripSlack time.Duration
+	// The most of a control-port reply read: 64 KiB. Positive.
+	HookReplyByteCount int64
+	// A cleanup's LISTs of what a case wrote, 100, each of at most 1,000 keys. Positive.
+	CleanupListCount int
+	CleanupListLimit int
 }
 
 // Production's drive timeout and the waits a run on it takes.
 func DefaultFileClusterSuiteSettings() *FileClusterSuiteSettings {
 	return &FileClusterSuiteSettings{
-		DriveTimeout:         30 * time.Second,
-		HeldRequestDeadline:  10 * time.Second,
-		ShortRequestDeadline: 1500 * time.Millisecond,
-		WaitLimit:            5 * time.Minute,
-		PollInterval:         50 * time.Millisecond,
-		HookTimeout:          10 * time.Second,
-		ListKeyCount:         16,
+		DriveTimeout:           30 * time.Second,
+		HeldRequestDeadline:    10 * time.Second,
+		ShortRequestDeadline:   1500 * time.Millisecond,
+		WaitLimit:              5 * time.Minute,
+		PollInterval:           50 * time.Millisecond,
+		HookTimeout:            10 * time.Second,
+		ListKeyCount:           16,
+		ListStoppedHosts:       2,
+		ListWholeOfflineDrives: 2,
+		TwinRoundCount:         20,
+		RoundTripSlack:         time.Second,
+		HookReplyByteCount:     64 * 1024,
+		CleanupListCount:       100,
+		CleanupListLimit:       1000,
 	}
 }
 
@@ -477,8 +499,8 @@ func (self *fileClusterSuiteRun) checkNoLifecycle(ctx context.Context) error {
 
 // Best effort: what a failed case leaves stays under its run's prefix.
 func (self *fileClusterSuiteRun) cleanup(ctx context.Context, prefix string) {
-	for range 100 {
-		objects, more, err := self.cluster.List(ctx, prefix, "", 1000)
+	for range self.settings.CleanupListCount {
+		objects, more, err := self.cluster.List(ctx, prefix, "", self.settings.CleanupListLimit)
 		if err != nil {
 			return
 		}
@@ -550,7 +572,7 @@ func (self *fileClusterSuiteHook) call(ctx context.Context, action string, value
 		return 0, nil, fmt.Errorf("the control port %s: %w", action, err)
 	}
 	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	body, err := io.ReadAll(io.LimitReader(response.Body, self.settings.HookReplyByteCount))
 	return response.StatusCode, body, err
 }
 
@@ -718,7 +740,7 @@ func fileClusterSuiteTwin(ctx context.Context, run *fileClusterSuiteRun, prefix 
 		heldBefore = append(heldBefore, state.HeldTotal)
 	}
 	etag := ""
-	for round := range 20 {
+	for round := range run.settings.TwinRoundCount {
 		body := []byte(fmt.Sprintf("twin %d", round))
 		cluster := run.hostClusters[round%len(run.hostClusters)]
 		var err error
@@ -804,7 +826,7 @@ func fileClusterSuiteHeadOneHostHeld(ctx context.Context, run *fileClusterSuiteR
 	if err := run.expectBody(ctx, key, []byte("newer head")); err != nil {
 		return err
 	}
-	if elapsed := time.Since(started); run.settings.ShortRequestDeadline+time.Second < elapsed {
+	if elapsed := time.Since(started); run.settings.ShortRequestDeadline+run.settings.RoundTripSlack < elapsed {
 		return fmt.Errorf("the newer PUT and its reads took %s", elapsed)
 	}
 	released = true
@@ -1049,7 +1071,7 @@ func fileClusterSuiteListWhole(ctx context.Context, run *fileClusterSuiteRun, pr
 		}
 		return listed, nil
 	}
-	for stoppedCount := 1; stoppedCount <= 2 && stoppedCount < len(run.target.Hosts); stoppedCount += 1 {
+	for stoppedCount := 1; stoppedCount <= run.settings.ListStoppedHosts && stoppedCount < len(run.target.Hosts); stoppedCount += 1 {
 		indexes := []int{}
 		for index := range stoppedCount {
 			indexes = append(indexes, len(run.target.Hosts)-1-index)
@@ -1063,7 +1085,7 @@ func fileClusterSuiteListWhole(ctx context.Context, run *fileClusterSuiteRun, pr
 		var caseErr error
 		err = run.waitFor(ctx, "the stopped hosts' drives to read offline", func() bool {
 			listed, err := listedThrough(0)
-			if offline <= 2 {
+			if offline <= run.settings.ListWholeOfflineDrives {
 				caseErr = err
 				if err != nil {
 					return false

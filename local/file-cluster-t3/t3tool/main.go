@@ -96,6 +96,8 @@ func serveNtp(args []string) error {
 func makeBuckets(args []string) error {
 	flags := flag.NewFlagSet("buckets", flag.ContinueOnError)
 	clustersPath := flags.String("clusters", "", "the clusters file")
+	timeout := flags.Duration("timeout", 2*time.Minute, "how long the clusters may take to take a bucket")
+	poll := flags.Duration("poll", time.Second, "how often a cluster not taking one is asked again")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -107,7 +109,7 @@ func makeBuckets(args []string) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 	for _, config := range configs {
 		endpoint := config.Endpoints[0]
@@ -133,7 +135,7 @@ func makeBuckets(args []string) error {
 			select {
 			case <-ctx.Done():
 				return fmt.Errorf("%s: no bucket made: %v", config.ClusterId, err)
-			case <-time.After(time.Second):
+			case <-time.After(*poll):
 			}
 		}
 		fmt.Printf("%s: bucket %s\n", config.ClusterId, config.Bucket)
