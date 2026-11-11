@@ -5,7 +5,8 @@ package proxy
 // the regional recommendation of the day. Until 2026-11-08 both named Google
 // Public DNS. The owner decided on 2026-11-09 that such proxies move to the
 // current recommendation, and that only an exact former recommendation
-// changes. These tests read configs as older servers stored them and check
+// changes. tm has had none since 2026-11-11, so its proxies move to connect's
+// defaults. These tests read configs as older servers stored them and check
 // the settings a hosted device's tun is built with
 // (proxyDeviceDnsResolverSettings).
 
@@ -14,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -48,6 +50,8 @@ var (
 		`{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["217.174.238.141","8.8.4.4"]}`,
 		// connect 588ad5b9, 2026-09-11: Google's v6 address
 		`{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["217.174.238.141","8.8.4.4"],"remote_dns_ipv6":["2001:4860:4860::8844"]}`,
+		// connect b49cbc21, 2026-11-08: Turkmentelecom alone
+		`{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["217.174.238.141"]}`,
 	}
 )
 
@@ -96,7 +100,8 @@ func storedDnsResolverSettingsJson(t testing.TB, dnsResolverSettings *connect.Dn
 
 // A kz or tm proxy stored with a former recommendation of its country builds
 // its tun with the current one, in whatever case the country code is stored
-// (connect matched it in lower case). The stored settings do not change.
+// (connect matched it in lower case): for tm, which has none, with connect's
+// defaults. The stored settings do not change.
 func TestProxyDeviceDnsResolverSettingsReplaceFormerRegionalRecommendations(t *testing.T) {
 	type formerRecommendation struct {
 		countryCode             string
@@ -124,7 +129,7 @@ func TestProxyDeviceDnsResolverSettingsReplaceFormerRegionalRecommendations(t *t
 		initialDeviceState := storedProxyDeviceState(t, former.countryCode, former.dnsResolverSettingsJson)
 		storedJson := storedDnsResolverSettingsJson(t, initialDeviceState.DnsResolverSettings)
 		currentRecommendation := connect.RegionalDnsResolverSettings(former.countryCode)
-		if currentRecommendation == nil {
+		if currentRecommendation == nil && strings.ToLower(former.countryCode) != "tm" {
 			t.Fatalf("connect has no recommendation for %s", former.countryCode)
 		}
 		currentJson := storedDnsResolverSettingsJson(t, hostedDnsResolverSettings(currentRecommendation))
