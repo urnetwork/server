@@ -38,6 +38,7 @@ type routeOwners struct {
 // starts a background owner or dials a provider on an upload request.
 func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLane, owners routeOwners) []*router.Route {
 	providerWork := handlers.NewProviderWorkHandlers()
+	quotaService := handlers.NewQuotaServiceHandlers(nil, nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
 	connectControl := handlers.ConnectControl
@@ -487,5 +488,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	}
 
 	// every route is classified by credential (route_authz.go, AUTHZ1.md)
+	// ServiceHost.Quota's Postgres half for the hosts with none, on their internal bearers (QUOTA-M2-11; QD-055)
+	routes = append(routes, quotaService.Routes()...)
 	return applyRouteAccess(append(routes, oauth.Routes()...))
 }

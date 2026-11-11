@@ -7,7 +7,11 @@ package quotahost
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -285,5 +289,185 @@ func TestApiQuotaReportsUsageThroughItsTransport(t *testing.T) {
 	connect.AssertEqual(t, api.appliedBatches[0].Events[0].TransferByteCount, int64(10))
 	if err := quota.ReportUsage(t.Context(), &sidecar.UsageBatch{Producer: sidecar.QuotaProducerEvs}); err == nil {
 		t.Fatal("a zero batch id was posted")
+	}
+}
+
+// A stub of api's internal surface: each request recorded, each route answering what the test set.
+type testingHttpQuotaApi struct {
+	stateLock     sync.Mutex
+	authorization []string
+	paths         []string
+	status        int
+	body          map[string]string
+	batches       []*QuotaApiUsageBatch
+}
+
+func (self *testingHttpQuotaApi) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.authorization = append(self.authorization, r.Header.Get("Authorization"))
+	self.paths = append(self.paths, r.Method+" "+r.URL.Path)
+	if r.URL.Path == QuotaApiUsageBatchPath {
+		batch := &QuotaApiUsageBatch{}
+		if err := json.NewDecoder(r.Body).Decode(batch); err != nil {
+			w.WriteHeader(http.StatusTeapot)
+			return
+		}
+		self.batches = append(self.batches, batch)
+	}
+	if self.status != 0 && self.status != http.StatusOK {
+		http.Error(w, "refused, as the test asked", self.status)
+		return
+	}
+	for prefix, body := range self.body {
+		if strings.HasPrefix(r.URL.Path, prefix) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+			return
+		}
+	}
+	w.Write([]byte("{}"))
+}
+
+func (self *testingHttpQuotaApi) setStatus(status int) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.status = status
+}
+
+func (self *testingHttpQuotaApi) setBody(pathPrefix string, body string) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.body[pathPrefix] = body
+}
+
+func newTestingHttpQuotaApi(t testing.TB, settings *QuotaApiSettings) (*testingHttpQuotaApi, QuotaApiTransport, string) {
+	t.Helper()
+	stub := &testingHttpQuotaApi{body: map[string]string{}}
+	httpServer := httptest.NewServer(stub)
+	t.Cleanup(httpServer.Close)
+	const bearer = "synthetic-test-bearer-0123456789abcdefghijklmn"
+	transport, err := NewHttpQuotaApi(httpServer.URL+"/", bearer, httpServer.Client(), settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return stub, transport, bearer
+}
+
+// Each call reaches its route with the host's bearer, and api's answers come back as the Quota's types.
+func TestHttpQuotaApiCallsEachRouteWithItsBearer(t *testing.T) {
+	stub, transport, bearer := newTestingHttpQuotaApi(t, nil)
+	ctx := t.Context()
+	networkId := server.NewId()
+	balanceId := server.NewId()
+	spentId := server.NewId()
+	endTime := time.Unix(1_800_000_000, 0).UTC()
+	stub.setBody(QuotaApiLimitsPath, `{"tier":"pro","limits":{"tls_endpoints":10}}`)
+	stub.setBody(QuotaApiOverLimitPath, `{"storage":[],"spent":[{"network_id":"`+spentId.String()+`","refusal":{"limit_key":"data","limit":0,"used":0,"retry_after_ms":0,"upgrade":true}}]}`)
+	stub.setBody(QuotaApiDrawOrderPath, `{"balances":[{"balance_id":"`+balanceId.String()+`","credit_byte_count":-5,"credit":true,"end_time":"`+endTime.Format(time.RFC3339)+`"}]}`)
+
+	limits, err := transport.LoadLimits(ctx, networkId)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, limits, &sidecar.QuotaLimits{Tier: "pro", Limits: map[string]int64{"tls_endpoints": 10}})
+	overLimit, err := transport.LoadOverLimit(ctx)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, len(overLimit.StorageNetworkIdRefusals), 0)
+	connect.AssertEqual(t, overLimit.SpentNetworkIdRefusals[connect.Id(spentId)].Upgrade, true)
+	balances, err := transport.DrawOrder(ctx, networkId)
+	connect.AssertEqual(t, err, nil)
+	// a negative credit never reaches a reservation
+	connect.AssertEqual(t, balances, []*LeaseBalance{{BalanceId: balanceId, CreditByteCount: 0, IsCredit: true, EndTime: endTime}})
+	connect.AssertEqual(t, transport.MarkSpent(ctx, networkId), nil)
+	batch := &sidecar.UsageBatch{
+		BatchId:     connect.NewId(),
+		Producer:    sidecar.QuotaProducerTlsEdge,
+		WindowStart: endTime,
+		Events:      []*sidecar.UsageEvent{{NetworkId: connect.Id(networkId), Meter: sidecar.QuotaMeterTls, TransferByteCount: 7}},
+	}
+	carves := []*model.UsageCarve{{UsageId: server.NewId(), NetworkId: networkId, Meter: sidecar.QuotaMeterTls, BalanceId: balanceId, ByteCount: 7}}
+	connect.AssertEqual(t, transport.ApplyUsageBatch(ctx, batch, carves), nil)
+
+	stub.stateLock.Lock()
+	defer stub.stateLock.Unlock()
+	connect.AssertEqual(t, stub.paths, []string{
+		"GET " + QuotaApiLimitsPath + networkId.String(),
+		"GET " + QuotaApiOverLimitPath,
+		"GET " + QuotaApiDrawOrderPath + networkId.String(),
+		"POST " + QuotaApiSpentPath + networkId.String(),
+		"POST " + QuotaApiUsageBatchPath,
+	})
+	for _, authorization := range stub.authorization {
+		connect.AssertEqual(t, authorization, "Bearer "+bearer)
+	}
+	// the batch arrives as it was sent, carves and all
+	sent, sentCarves, err := stub.batches[0].UsageBatch()
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, sent, batch)
+	connect.AssertEqual(t, sentCarves, carves)
+}
+
+// Every answer but a 200 the Quota can use fails the call with ErrQuotaApiRefused, whose text names the route
+// and never the bearer or a network.
+func TestHttpQuotaApiRefusalsFailTheCall(t *testing.T) {
+	stub, transport, bearer := newTestingHttpQuotaApi(t, &QuotaApiSettings{MaxResponseByteCount: 256, MaxRefusalByteCount: 64})
+	ctx := t.Context()
+	networkId := server.NewId()
+	check := func(err error) {
+		t.Helper()
+		if !errors.Is(err, ErrQuotaApiRefused) {
+			t.Fatalf("answered %v", err)
+		}
+		if strings.Contains(err.Error(), bearer) || strings.Contains(err.Error(), networkId.String()) {
+			t.Fatalf("an error quoted the bearer or the network: %v", err)
+		}
+	}
+	for _, status := range []int{http.StatusForbidden, http.StatusServiceUnavailable, http.StatusBadRequest} {
+		stub.setStatus(status)
+		_, err := transport.LoadLimits(ctx, networkId)
+		check(err)
+		_, err = transport.LoadOverLimit(ctx)
+		check(err)
+		_, err = transport.DrawOrder(ctx, networkId)
+		check(err)
+		check(transport.MarkSpent(ctx, networkId))
+		check(transport.ApplyUsageBatch(ctx, &sidecar.UsageBatch{BatchId: connect.NewId(), Producer: sidecar.QuotaProducerEvs}, nil))
+	}
+	stub.setStatus(http.StatusOK)
+	// answers that do not parse, or that the Quota cannot use
+	stub.setBody(QuotaApiLimitsPath, `{"limits":{}}`)
+	_, err := transport.LoadLimits(ctx, networkId)
+	check(err)
+	stub.setBody(QuotaApiLimitsPath, `{"tier":`)
+	_, err = transport.LoadLimits(ctx, networkId)
+	check(err)
+	stub.setBody(QuotaApiLimitsPath, `{"tier":"free","limits":{"`+strings.Repeat("k", 300)+`":1}}`)
+	_, err = transport.LoadLimits(ctx, networkId)
+	check(err)
+	twice := `{"network_id":"` + networkId.String() + `","refusal":{"limit_key":"data"}}`
+	stub.setBody(QuotaApiOverLimitPath, `{"storage":[`+twice+`,`+twice+`],"spent":[]}`)
+	_, err = transport.LoadOverLimit(ctx)
+	check(err)
+	stub.setBody(QuotaApiOverLimitPath, `{"storage":[{"network_id":"`+networkId.String()+`"}],"spent":[]}`)
+	_, err = transport.LoadOverLimit(ctx)
+	check(err)
+	stub.setBody(QuotaApiDrawOrderPath, `{"balances":[{"credit_byte_count":5}]}`)
+	_, err = transport.DrawOrder(ctx, networkId)
+	check(err)
+}
+
+// A transport needs a url and a bearer, and a block with no credential builds no Quota, so it stays not ready.
+func TestBlockQuotaNeedsItsUrlAndCredential(t *testing.T) {
+	if _, err := NewHttpQuotaApi("api.example", "bearer", nil, nil); err == nil {
+		t.Fatal("a url with no scheme was taken")
+	}
+	if _, err := NewHttpQuotaApi("https://api.example", "", nil, nil); err == nil {
+		t.Fatal("no bearer was taken")
+	}
+	if quota, err := NewBlockQuota(t.Context(), server.InternalGateCallerEvs, "", nil); err == nil || quota != nil {
+		t.Fatal("a block with no api url built a Quota")
+	}
+	// the test vault holds no internal-gate-evs.yml
+	if quota, err := NewBlockQuota(t.Context(), server.InternalGateCallerEvs, "https://api.example", nil); !errors.Is(err, server.ErrInternalGateCredentialRefused) || quota != nil {
+		t.Fatalf("a block with no credential answered %v", err)
 	}
 }

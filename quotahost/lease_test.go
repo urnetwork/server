@@ -25,6 +25,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/sidecarhost"
 	"github.com/urnetwork/server/sidecart3"
 )
 
@@ -67,6 +68,12 @@ func (self *testingBalanceSource) MarkSpent(ctx context.Context, networkId serve
 	defer self.stateLock.Unlock()
 	self.spentNetworkIds = append(self.spentNetworkIds, networkId)
 	return nil
+}
+
+func (self *testingBalanceSource) reads() int {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return self.readCount
 }
 
 func (self *testingBalanceSource) spentMarks() []server.Id {
@@ -270,6 +277,78 @@ func TestLeaseSpendHoldsToItsInlinePathRow(t *testing.T) {
 		})
 		connect.AssertEqual(t, result.RedisCallCount, 0)
 		connect.AssertEqual(t, fixture.redis.callCount(), calls)
+	})
+}
+
+// A QuotaRateRedis whose calls go wherever the test points them: the private stack's Redis, or an inline path's
+// counted one.
+type testingSwitchRedis struct {
+	redis atomic.Pointer[model.QuotaRateRedis]
+}
+
+func (self *testingSwitchRedis) use(redis model.QuotaRateRedis) {
+	self.redis.Store(&redis)
+}
+
+func (self *testingSwitchRedis) RunScript(ctx context.Context, script *sidecar.RedisScript, keys []string, args []string) (*sidecar.RedisReply, error) {
+	return (*self.redis.Load()).RunScript(ctx, script, keys, args)
+}
+
+// budgets.yml's quota.lease row (§22.5: quota leases inline, no PostgreSQL): a lease opened on a balance reading
+// the set already holds reaches no PostgreSQL and no balance source, and makes one Redis call, its first draw's
+// reservation; a second handle on the open lease makes none.
+func TestLeaseOpensWithinItsInlinePathRow(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		stackRedis := model.NewQuotaRateServerRedis(10 * time.Second)
+		redis := &testingSwitchRedis{}
+		redis.use(stackRedis)
+		balances := newTestingBalanceSource()
+		clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
+		set, err := newQuotaLeaseSet(ctx, redis, balances, func(ctx context.Context, networkId server.Id) (string, error) {
+			return string(model.NetworkTierPro), nil
+		}, clock, testingLeaseSettings())
+		if err != nil {
+			t.Fatal(err)
+		}
+		set.manualTicks = true
+		t.Cleanup(func() {
+			set.cancel()
+			set.entryGroup.Wait()
+		})
+		networkId := server.NewId()
+		balance := testingLeaseBalance(5000, false, time.Now().Add(time.Hour))
+		balances.set(networkId, balance)
+		// the reading an earlier lease of the network left
+		if _, _, err := set.readBalances(ctx, networkId); err != nil {
+			t.Fatal(err)
+		}
+		reads := balances.reads()
+		leases := []sidecar.QuotaLease{}
+		result := sidecart3.InlinePath(t, "quota.lease", sidecarhost.NewRedis(nil), func(counted sidecar.Redis) {
+			redis.use(counted)
+			defer redis.use(stackRedis)
+			for range 2 {
+				lease, refusal, err := set.Lease(ctx, connect.Id(networkId), sidecar.QuotaMeterTls)
+				if err != nil || refusal != nil {
+					t.Errorf("the lease: %+v, %v", refusal, err)
+					return
+				}
+				leases = append(leases, lease)
+			}
+		})
+		defer func() {
+			for _, lease := range leases {
+				lease.Close()
+			}
+		}()
+		connect.AssertEqual(t, len(leases), 2)
+		connect.AssertEqual(t, result.RedisCallCount, 1)
+		connect.AssertEqual(t, balances.reads(), reads)
+		connect.AssertEqual(t, testingLeaseReserved(ctx, balance.BalanceId), testingLeaseSettings().DrawByteCount)
+		connect.AssertEqual(t, leases[1].Spend(1), true)
 	})
 }
 
