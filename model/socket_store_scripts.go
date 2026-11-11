@@ -728,17 +728,9 @@ return reply
 // which sorts first and never inside a page's range.
 //
 // KEYS: {sc_<client_id>}set. ARGV: network_id (16 bytes), set_version, key_start, key_end, ttl_ms, then
-// the held name keys. Returns {"stale", stored, edge} or {"ok", set_version, edge}, edge "1" when the
-// set then holds a name key beginning tls/ or smtp/ (DESIGN-DETAILS 13.2.3's step 9).
-const socketStoreSetCommitLua = socketStoreLuaPrelude + `
-local key = KEYS[1]
-local function edge()
-  if #redis.call("ZRANGEBYLEX", key, "[\1tls/", "(\1tls0", "LIMIT", 0, 1) == 1 or
-     #redis.call("ZRANGEBYLEX", key, "[\1smtp/", "(\1smtp0", "LIMIT", 0, 1) == 1 then
-    return "1"
-  end
-  return "0"
-end
+// the held name keys. Returns {"stale", stored, edge} or {"ok", set_version, edge}, edge as
+// socketStoreSetEdgeLua answers it once the set is written.
+const socketStoreSetCommitLua = socketStoreLuaPrelude + socketStoreSetEdgeLua + `
 local meta = redis.call("ZRANGEBYLEX", key, "-", "(\1", "LIMIT", 0, 1)
 if #meta == 1 then
   local stored = string.sub(meta[1], 18)
@@ -767,6 +759,41 @@ end
 redis.call("ZADD", key, 0, "\0" .. ARGV[1] .. ARGV[2])
 redis.call("PEXPIRE", key, ARGV[5])
 return {"ok", ARGV[2], edge()}
+`
+
+// What the set scripts share: key, the client's set, and edge(), "1" when the set holds a name key beginning
+// tls/ or smtp/ and "0" when not, the answer by which the engine removes a client's pairs once its last
+// edge name is gone (DESIGN-DETAILS 13.2.3's registration step 9 and find step 7). "0" is the byte after "/".
+const socketStoreSetEdgeLua = `
+local key = KEYS[1]
+local function edge()
+  if #redis.call("ZRANGEBYLEX", key, "[\1tls/", "(\1tls0", "LIMIT", 0, 1) == 1 or
+     #redis.call("ZRANGEBYLEX", key, "[\1smtp/", "(\1smtp0", "LIMIT", 0, 1) == 1 then
+    return "1"
+  end
+  return "0"
+end
+`
+
+// A removal's step on a client's set: it forgets the name keys whose leases are gone, and says whether the
+// set still holds an edge name. The meta member stays, so the set never empties here, and a set that has
+// lapsed is not made again.
+//
+// KEYS: {sc_<client_id>}set. ARGV: the name keys to forget, none at all for a client whose every lease was
+// kept. Returns {edge}, as socketStoreSetEdgeLua answers it once they are gone.
+const socketStoreSetForgetLua = socketStoreLuaPrelude + socketStoreSetEdgeLua + `
+local members = {}
+for index = 1, #ARGV do
+  members[#members + 1] = "\1" .. ARGV[index]
+  if 400 <= #members then
+    redis.call("ZREM", key, unpack(members))
+    members = {}
+  end
+end
+if 0 < #members then
+  redis.call("ZREM", key, unpack(members))
+end
+return {edge()}
 `
 
 // The network's listing after a page or a removal: each touched name's field holds kind;lease_ms;sealed,
@@ -903,6 +930,7 @@ var socketStoreScriptSources = map[string]string{
 	"read":        socketStoreReadLua,
 	"set_begin":   socketStoreSetBeginLua,
 	"set_commit":  socketStoreSetCommitLua,
+	"set_forget":  socketStoreSetForgetLua,
 	"names":       socketStoreNamesLua,
 	"pair":        socketStorePairLua,
 	"pair_remove": socketStorePairRemoveLua,
