@@ -3,9 +3,9 @@ package connect
 // §6's M1 exit scenarios on T3 (PROTO-M1-11, Q-TEST-1): two sidecars' dispatchers on Required clients
 // that connect through server's in-process exchange, on the controller's own contracts and the private
 // test stack. Hello's identity check, the binding against C15's session key and the admission, passes
-// both ways; a HeadCheck exchange runs over the sealed sessions and witnesses; and a data RPC is refused
-// PERMISSION_DENIED, since until CreateContract seals a class (PROTO-M4-02) every contract reads as
-// control, the narrowest. A real resident's push reaches a sidecar's dispatcher over h1 and passes its
+// both ways; a HeadCheck exchange runs over the sealed sessions and witnesses; and a data RPC is answered,
+// since CreateContract seals every contract's class (PROTO-M4-02), data with no contract gate installed,
+// where before the seal every contract read as control, the narrowest, and refused it. A real resident's push reaches a sidecar's dispatcher over h1 and passes its
 // source guard, which drops anything else the resident sends. The T2 half, on sidecartest's exchange, is
 // sidecartest/subprotocol_test.go and sidecartest/push_test.go.
 
@@ -66,7 +66,7 @@ func testT3Seed(t testing.TB) []byte {
 	return seed
 }
 
-func TestSidecarSubprotocolT3HelloHeadCheckAndClosedData(t *testing.T) {
+func TestSidecarSubprotocolT3HelloHeadCheckAndSealedData(t *testing.T) {
 	if testing.Short() {
 		return
 	}
@@ -195,16 +195,16 @@ func TestSidecarSubprotocolT3HelloHeadCheckAndClosedData(t *testing.T) {
 		if err != nil || !witnessed {
 			t.Errorf("HeadCheck through the exchange: witnessed %t: %v", witnessed, err)
 		}
-		// no contract carries a class yet, so a data RPC is the closed direction
+		// CreateContract seals every contract's class (PROTO-M4-02): with no gate installed, data, so a data RPC
+		// reaches its handler, which the receiver's rule refused while contracts carried none
 		if _, err := desktop.subprotocol.Handle(sidecarprotocol.MessageType(0x8031), func(ctx context.Context, request *sidecar.SubprotocolRequest) ([]byte, error) {
-			t.Errorf("a data RPC reached its handler on an unclassed contract")
-			return nil, nil
+			return []byte("answer"), nil
 		}, nil); err != nil {
 			t.Fatal(err)
 		}
-		_, err = laptop.subprotocol.Call(helloCtx, sidecar.Id(desktop.clientId), sidecarprotocol.MessageType(0x8031), []byte("ask"), nil)
-		if code, _ := sidecar.SubprotocolErrorCode(err); code != sidecarprotocol.ErrorCode_ERR_PERMISSION_DENIED {
-			t.Errorf("a data RPC on an unclassed contract: %v", err)
+		answer, err := laptop.subprotocol.Call(helloCtx, sidecar.Id(desktop.clientId), sidecarprotocol.MessageType(0x8031), []byte("ask"), nil)
+		if err != nil || string(answer) != "answer" {
+			t.Errorf("a data RPC on a data contract: %q, %v", answer, err)
 		}
 	})
 }
