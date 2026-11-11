@@ -4,11 +4,17 @@ package model
 // socketsservice.SocketStore on §2.8's sock-1, sock-3, sock-4 and sock-5, and nothing in Postgres
 // (I-12). Keys:
 //
-//	{sg_<network_id>_<h16>}      a group's hash: per listener m, r, i and e, and v (socket_store_scripts.go)
+//	{sg_<network_id>_<h16>}      a group's hash: per listener m, r, i, e and its tombstone x, and v
+//	                             (socket_store_scripts.go)
 //	{sg_<network_id>_<h16>}ix    the group's leases, a ZSET of listener ids scored by lease end in ms
-//	{svc_<listener_client_id>}   §6.10.1's pairs: field the dialer, value the grant's expiry (sock-3)
-//	{sn_<network_id>}names       the listing: field the name key, value kind;lease_ms;sealed (sock-4)
+//	{svc_<listener_client_id>}   §6.10.1's pairs: field the dialer, value the grant's expiry, and the floor
+//	                             ~f a removal left (sock-3)
+//	{sn_<network_id>}names       the listing: field the name key, value kind;lease_ms;sealed, and the
+//	                             sweep's claim in field 0x00 (sock-4)
 //	{sc_<client_id>}set          the client's set, a ZSET of 0x01 || name key and one meta member (sock-5)
+//
+// The fences are DESIGN-DETAILS 13.2.3's (SOCK-M5-18): a lease's position and set version in m, a removal's
+// tombstone x, a pair floor ~f and the sweep's claim, each kept to the clock this store passes its scripts.
 //
 // h16 is the first 16 hex digits of SHA-256 of the name key, an edge name's bytes or a token path. Hash
 // tags are per group, never per network, so a network's groups spread over the cluster's slots. A Find is
@@ -240,11 +246,40 @@ func socketRegistrationRecord(registration *sidecar.SocketRegistration) string {
 	}, ";")
 }
 
+// What m:<L>'s last three fields hold: the listener's sidecar, the lease's position and its set
+// version. An m of the first twelve fields alone reads as nil, 0 and 0.
+func socketParseLeaseRecord(record string) (*connect.Id, uint64, uint64, error) {
+	fields := strings.Split(record, ";")
+	if len(fields) == 12 {
+		return nil, 0, 0, nil
+	}
+	if len(fields) != 15 {
+		return nil, 0, 0, errors.New("socket store: a malformed registration record")
+	}
+	var sidecarId *connect.Id
+	if fields[12] != "" {
+		id, err := socketParseHexId(fields[12])
+		if err != nil {
+			return nil, 0, 0, err
+		}
+		sidecarId = &id
+	}
+	policyVersion, err := strconv.ParseUint(fields[13], 10, 64)
+	if err != nil {
+		return nil, 0, 0, errors.New("socket store: a malformed lease position")
+	}
+	setVersion, err := strconv.ParseUint(fields[14], 10, 64)
+	if err != nil {
+		return nil, 0, 0, errors.New("socket store: a malformed lease set version")
+	}
+	return sidecarId, policyVersion, setVersion, nil
+}
+
 // What m:<L> and r:<L> hold, back as a registration.
 func socketParseRegistrationRecord(record string, inflightRecord string) (*sidecar.SocketRegistration, int64, error) {
 	malformed := errors.New("socket store: a malformed registration record")
 	fields := strings.Split(record, ";")
-	if len(fields) != 12 {
+	if len(fields) != 12 && len(fields) != 15 {
 		return nil, 0, malformed
 	}
 	hexText := func(text string) (string, error) {
@@ -336,6 +371,10 @@ func socketParseListener(values []string) (*socketsservice.SocketStoreListener, 
 	if err != nil {
 		return nil, err
 	}
+	sidecarId, policyVersion, setVersion, err := socketParseLeaseRecord(values[2])
+	if err != nil {
+		return nil, err
+	}
 	candidate := &socketsservice.SocketCandidate{
 		ListenerClientId:     listenerClientId,
 		ListenId:             *registration.ListenId,
@@ -392,7 +431,13 @@ func socketParseListener(values []string) (*socketsservice.SocketStoreListener, 
 			return nil, malformed
 		}
 	}
-	return &socketsservice.SocketStoreListener{Registration: registration, Candidate: candidate}, nil
+	return &socketsservice.SocketStoreListener{
+		Registration:  registration,
+		Candidate:     candidate,
+		SidecarId:     sidecarId,
+		PolicyVersion: policyVersion,
+		SetVersion:    setVersion,
+	}, nil
 }
 
 // A script's array reply as strings, integers written in decimal.
@@ -422,33 +467,64 @@ func socketInRange(nameKey []byte, keyStart []byte, keyEnd []byte) bool {
 	return 0 <= bytes.Compare(nameKey, keyStart) && (len(keyEnd) == 0 || bytes.Compare(nameKey, keyEnd) < 0)
 }
 
-// One group's del, pipelined with the others.
-func socketDelCall(networkId connect.Id, nameKey []byte, listenerClientId connect.Id, nowMillis int64) *socketScriptCall {
+// A uint64 as the scripts compare it: decimal, no leading zeros.
+func socketDecimal(value uint64) string {
+	return strconv.FormatUint(value, 10)
+}
+
+// How long a tombstone of cause fences, in milliseconds.
+func (self *SocketStore) tombstoneTtlMillis(cause socketsservice.SocketRemoveCause) int64 {
+	ttl := self.settings.Store.TombstoneTtl
+	if cause == socketsservice.SocketRemoveUnlisten {
+		ttl = self.settings.Store.UnlistenFenceTtl
+	}
+	return (ttl + time.Millisecond - 1).Milliseconds()
+}
+
+// One group's del for cause at (setVersion, policyVersion), pipelined with the others. An empty
+// setVersion is the lease's own, as a removal no page carries passes.
+func (self *SocketStore) delCall(networkId connect.Id, nameKey []byte, listenerClientId connect.Id, cause socketsservice.SocketRemoveCause, setVersion string, policyVersion uint64, nowMillis int64) *socketScriptCall {
 	return &socketScriptCall{
 		name: "group",
 		keys: socketGroupKeys(networkId, nameKey),
-		args: []any{"del", nowMillis, socketHexId(listenerClientId)},
+		args: []any{"del", nowMillis, socketHexId(listenerClientId), int(cause), setVersion, socketDecimal(policyVersion), self.tombstoneTtlMillis(cause)},
 	}
 }
 
-// What a group's put or del answered: its two flags, the listeners left and the newest lease.
-func socketGroupReply(reply any) (bool, bool, int64, int64, error) {
+// What a group's put or del answered: its status, its flag, the newest lease and a position, with put's
+// fence cause.
+type socketGroupAnswer struct {
+	status         string
+	flag           bool
+	maxLeaseMillis int64
+	position       uint64
+	cause          socketsservice.SocketRemoveCause
+}
+
+// A put's reply, six values, or a del's, five.
+func socketParseGroupReply(reply any) (*socketGroupAnswer, error) {
 	values, err := socketReplyStrings(reply)
 	if err != nil {
-		return false, false, 0, 0, err
+		return nil, err
 	}
-	if len(values) != 4 {
-		return false, false, 0, 0, errors.New("socket store: a malformed group reply")
+	if len(values) != 5 && len(values) != 6 {
+		return nil, errors.New("socket store: a malformed group reply")
 	}
-	remaining, err := strconv.ParseInt(values[2], 10, 64)
-	if err != nil {
-		return false, false, 0, 0, err
+	answer := &socketGroupAnswer{status: values[0], flag: values[1] == "1"}
+	if answer.maxLeaseMillis, err = strconv.ParseInt(values[3], 10, 64); err != nil {
+		return nil, err
 	}
-	maxLeaseMillis, err := strconv.ParseInt(values[3], 10, 64)
-	if err != nil {
-		return false, false, 0, 0, err
+	if answer.position, err = strconv.ParseUint(values[4], 10, 64); err != nil {
+		return nil, err
 	}
-	return values[0] == "1", values[1] == "1", remaining, maxLeaseMillis, nil
+	if len(values) == 6 {
+		cause, err := strconv.Atoi(values[5])
+		if err != nil {
+			return nil, err
+		}
+		answer.cause = socketsservice.SocketRemoveCause(cause)
+	}
+	return answer, nil
 }
 
 // One name's update to the listing.
@@ -473,24 +549,47 @@ func (self *SocketStore) updateNames(ctx context.Context, client server.RedisCli
 	return err
 }
 
-// See socketsservice.SocketStore.
-func (self *SocketStore) ApplyPage(ctx context.Context, page *socketsservice.SocketStorePage) (*socketsservice.SocketStorePageResult, error) {
+// Whether a page is one the engine could send: entries and refused keys each sorted, inside the range,
+// non-empty, and no name key both allowed and refused.
+func socketPageWellFormed(page *socketsservice.SocketStorePage) error {
 	if page == nil {
-		return nil, fmt.Errorf("%w: no page", socketsservice.ErrSocketStoreRequest)
+		return fmt.Errorf("%w: no page", socketsservice.ErrSocketStoreRequest)
 	}
 	var previousNameKey []byte
+	allowedNameKeys := map[string]bool{}
 	for index, registration := range page.Registrations {
 		nameKey := registration.NameKey()
 		if len(nameKey) == 0 || !socketInRange(nameKey, page.KeyStart, page.KeyEnd) ||
 			(0 < index && bytes.Compare(nameKey, previousNameKey) <= 0) {
-			return nil, fmt.Errorf("%w: entry %d", socketsservice.ErrSocketStoreRequest, index)
+			return fmt.Errorf("%w: entry %d", socketsservice.ErrSocketStoreRequest, index)
 		}
 		previousNameKey = nameKey
+		allowedNameKeys[string(nameKey)] = true
+	}
+	for index, nameKey := range page.RefusedNameKeys {
+		if len(nameKey) == 0 || !socketInRange(nameKey, page.KeyStart, page.KeyEnd) || allowedNameKeys[string(nameKey)] ||
+			(0 < index && bytes.Compare(nameKey, page.RefusedNameKeys[index-1]) <= 0) {
+			return fmt.Errorf("%w: refused entry %d", socketsservice.ErrSocketStoreRequest, index)
+		}
+	}
+	return nil
+}
+
+// See socketsservice.SocketStore. The page's puts, its refused entries' removals and its unlistens run
+// as one pipeline of group scripts between the set's begin and its commit, each group touched once.
+func (self *SocketStore) ApplyPage(ctx context.Context, page *socketsservice.SocketStorePage) (*socketsservice.SocketStorePageResult, error) {
+	if err := socketPageWellFormed(page); err != nil {
+		return nil, err
 	}
 	nowMillis := self.clock.Now().UnixMilli()
 	leaseMillis := self.settings.Store.Lease.Milliseconds()
 	setKey := socketClientSetKey(page.ListenerClientId)
-	setVersion := strconv.FormatUint(page.SetVersion, 10)
+	setVersion := socketDecimal(page.SetVersion)
+	policyVersion := socketDecimal(page.PolicyVersion)
+	sidecarHex := ""
+	if page.SidecarId != nil {
+		sidecarHex = socketHexId(*page.SidecarId)
+	}
 
 	var result *socketsservice.SocketStorePageResult
 	err := self.redis(ctx, func(client server.RedisClient) error {
@@ -510,85 +609,177 @@ func (self *SocketStore) ApplyPage(ctx context.Context, page *socketsservice.Soc
 			result = &socketsservice.SocketStorePageResult{Stale: true, SetVersion: stored}
 			return nil
 		}
-		previousNameKeys := begin[2:]
+		previousNameKeys := map[string]bool{}
+		for _, nameKey := range begin[2:] {
+			if socketInRange([]byte(nameKey), page.KeyStart, page.KeyEnd) {
+				previousNameKeys[nameKey] = true
+			}
+		}
 
-		putCalls := make([]*socketScriptCall, 0, len(page.Registrations))
+		calls := []*socketScriptCall{}
+		pageNameKeys := map[string]bool{}
 		for _, registration := range page.Registrations {
 			exclusive := "0"
 			if registration.Exclusive {
 				exclusive = "1"
 			}
-			putCalls = append(putCalls, &socketScriptCall{
+			pageNameKeys[string(registration.NameKey())] = true
+			calls = append(calls, &socketScriptCall{
 				name: "group",
 				keys: socketGroupKeys(page.NetworkId, registration.NameKey()),
 				args: []any{
 					"put", nowMillis, socketHexId(page.ListenerClientId), leaseMillis,
 					socketRegistrationRecord(registration), registration.Inflight,
 					hex.EncodeToString([]byte(registration.Protocol)), exclusive,
+					sidecarHex, setVersion, policyVersion,
 				},
 			})
 		}
-		putReplies, err := self.runScripts(ctx, client, putCalls)
+		for _, nameKey := range page.RefusedNameKeys {
+			pageNameKeys[string(nameKey)] = true
+			calls = append(calls, self.delCall(page.NetworkId, nameKey, page.ListenerClientId, socketsservice.SocketRemoveRefused, setVersion, page.PolicyVersion, nowMillis))
+		}
+		unlistenNameKeys := []string{}
+		for nameKey := range previousNameKeys {
+			if !pageNameKeys[nameKey] {
+				unlistenNameKeys = append(unlistenNameKeys, nameKey)
+			}
+		}
+		slices.Sort(unlistenNameKeys)
+		for _, nameKey := range unlistenNameKeys {
+			calls = append(calls, self.delCall(page.NetworkId, []byte(nameKey), page.ListenerClientId, socketsservice.SocketRemoveUnlisten, setVersion, 0, nowMillis))
+		}
+		replies, err := self.runScripts(ctx, client, calls)
 		if err != nil {
 			return err
 		}
-		result = &socketsservice.SocketStorePageResult{SetVersion: page.SetVersion}
-		heldNameKeys := map[string]bool{}
-		heldList := []any{}
-		nameUpdates := []*socketNameUpdate{}
-		for index, reply := range putReplies {
-			taken, first, _, maxLeaseMillis, err := socketGroupReply(reply)
-			if err != nil {
+		answers := make([]*socketGroupAnswer, len(replies))
+		for index, reply := range replies {
+			if answers[index], err = socketParseGroupReply(reply); err != nil {
 				return err
 			}
-			result.Outcomes = append(result.Outcomes, &socketsservice.SocketStoreEntryOutcome{Taken: taken, FirstListener: first && !taken})
-			if taken {
-				continue
+		}
+
+		result = &socketsservice.SocketStorePageResult{SetVersion: page.SetVersion}
+		heldNameKeys := map[string]bool{}
+		// a lease a newer page or position wrote, which stays the set's
+		standingNameKeys := map[string]bool{}
+		lastListenerNameKeys := map[string]bool{}
+		refusedRemovedNameKeys := map[string]bool{}
+		nameUpdates := []*socketNameUpdate{}
+		for index, registration := range page.Registrations {
+			answer := answers[index]
+			outcome := &socketsservice.SocketStoreEntryOutcome{}
+			result.Outcomes = append(result.Outcomes, outcome)
+			switch answer.status {
+			case "fenced":
+				outcome.Fenced = true
+				outcome.FencePolicyVersion = answer.position
+				outcome.FenceCause = answer.cause
+			case "stale":
+				outcome.Stale = true
+				outcome.PriorPolicyVersion = answer.position
+				standingNameKeys[string(registration.NameKey())] = true
+			case "taken":
+				outcome.Taken = true
+				outcome.PriorPolicyVersion = answer.position
+			case "ok":
+				outcome.FirstListener = answer.flag
+				outcome.PriorPolicyVersion = answer.position
+				heldNameKeys[string(registration.NameKey())] = true
+				update := &socketNameUpdate{nameKey: registration.NameKey(), maxLeaseMillis: answer.maxLeaseMillis, kind: "e"}
+				if len(registration.NameToken) != 0 {
+					update.kind = "b"
+					update.sealed = registration.SealedName
+				}
+				nameUpdates = append(nameUpdates, update)
+			default:
+				return fmt.Errorf("socket store: a put answered %q", answer.status)
 			}
-			registration := page.Registrations[index]
-			heldNameKeys[string(registration.NameKey())] = true
-			heldList = append(heldList, registration.NameKey())
-			update := &socketNameUpdate{nameKey: registration.NameKey(), maxLeaseMillis: maxLeaseMillis, kind: "e"}
-			if len(registration.NameToken) != 0 {
-				update.kind = "b"
-				update.sealed = registration.SealedName
+		}
+		delAnswers := answers[len(page.Registrations):]
+		for index, nameKey := range page.RefusedNameKeys {
+			answer := delAnswers[index]
+			removal := &socketsservice.SocketStoreRemoval{}
+			switch answer.status {
+			case "removed":
+				removal.Removed = &socketsservice.SocketStoreRemoved{
+					NetworkId:        page.NetworkId,
+					ListenerClientId: page.ListenerClientId,
+					NameKey:          bytes.Clone(nameKey),
+					LastListener:     answer.flag,
+				}
+				refusedRemovedNameKeys[string(nameKey)] = true
+				lastListenerNameKeys[string(nameKey)] = answer.flag
+				nameUpdates = append(nameUpdates, &socketNameUpdate{nameKey: nameKey, maxLeaseMillis: answer.maxLeaseMillis})
+			case "kept":
+				removal.Kept = true
+				removal.PolicyVersion = answer.position
+				standingNameKeys[string(nameKey)] = true
 			}
-			nameUpdates = append(nameUpdates, update)
+			result.RefusedOutcomes = append(result.RefusedOutcomes, removal)
+		}
+		for index, nameKey := range unlistenNameKeys {
+			answer := delAnswers[len(page.RefusedNameKeys)+index]
+			switch answer.status {
+			case "removed":
+				lastListenerNameKeys[nameKey] = answer.flag
+				nameUpdates = append(nameUpdates, &socketNameUpdate{nameKey: []byte(nameKey), maxLeaseMillis: answer.maxLeaseMillis})
+			case "kept":
+				standingNameKeys[nameKey] = true
+			}
 		}
 
 		removedNameKeys := []string{}
-		delCalls := []*socketScriptCall{}
-		for _, nameKey := range previousNameKeys {
-			if !heldNameKeys[nameKey] && socketInRange([]byte(nameKey), page.KeyStart, page.KeyEnd) {
+		for nameKey := range previousNameKeys {
+			if !heldNameKeys[nameKey] && !standingNameKeys[nameKey] {
 				removedNameKeys = append(removedNameKeys, nameKey)
-				delCalls = append(delCalls, socketDelCall(page.NetworkId, []byte(nameKey), page.ListenerClientId, nowMillis))
 			}
 		}
-		delReplies, err := self.runScripts(ctx, client, delCalls)
-		if err != nil {
-			return err
-		}
-		for index, reply := range delReplies {
-			found, last, _, maxLeaseMillis, err := socketGroupReply(reply)
-			if err != nil {
-				return err
+		for nameKey := range refusedRemovedNameKeys {
+			if !previousNameKeys[nameKey] {
+				removedNameKeys = append(removedNameKeys, nameKey)
 			}
+		}
+		slices.Sort(removedNameKeys)
+		for _, nameKey := range removedNameKeys {
 			result.Removed = append(result.Removed, &socketsservice.SocketStoreRemoved{
 				NetworkId:        page.NetworkId,
 				ListenerClientId: page.ListenerClientId,
-				NameKey:          []byte(removedNameKeys[index]),
-				LastListener:     found && last,
+				NameKey:          []byte(nameKey),
+				LastListener:     lastListenerNameKeys[nameKey],
 			})
-			if found {
-				nameUpdates = append(nameUpdates, &socketNameUpdate{nameKey: []byte(removedNameKeys[index]), maxLeaseMillis: maxLeaseMillis})
-			}
 		}
 
 		commitArgs := []any{page.NetworkId[:], setVersion, page.KeyStart, page.KeyEnd, self.settings.Store.ClientSetTtl.Milliseconds()}
-		commitArgs = append(commitArgs, heldList...)
-		if _, err := self.runScript(ctx, client, "set_commit", []string{setKey}, commitArgs...); err != nil {
+		committedNameKeys := []string{}
+		for nameKey := range heldNameKeys {
+			committedNameKeys = append(committedNameKeys, nameKey)
+		}
+		for nameKey := range standingNameKeys {
+			committedNameKeys = append(committedNameKeys, nameKey)
+		}
+		slices.Sort(committedNameKeys)
+		for _, nameKey := range committedNameKeys {
+			commitArgs = append(commitArgs, nameKey)
+		}
+		reply, err = self.runScript(ctx, client, "set_commit", []string{setKey}, commitArgs...)
+		if err != nil {
 			return err
 		}
+		commit, err := socketReplyStrings(reply)
+		if err != nil || len(commit) != 3 {
+			return fmt.Errorf("socket store: a malformed commit reply: %v", err)
+		}
+		if commit[0] == "stale" {
+			stored, err := strconv.ParseUint(commit[1], 10, 64)
+			if err != nil {
+				return err
+			}
+			result.Stale = true
+			result.SetVersion = stored
+		}
+		result.EdgeEntriesRemain = commit[2] == "1"
 		return self.updateNames(ctx, client, page.NetworkId, nowMillis, nameUpdates)
 	})
 	if err != nil {
@@ -756,6 +947,9 @@ func (self *SocketStore) ListNames(ctx context.Context, networkId connect.Id, cu
 		for index := skip; index < end; index += 1 {
 			nameKey := fieldValues[2*index]
 			value := fieldValues[2*index+1]
+			if nameKey == socketSweepClaimField {
+				continue
+			}
 			kind, rest, found := strings.Cut(value, ";")
 			if !found {
 				continue
@@ -788,18 +982,40 @@ func (self *SocketStore) ListNames(ctx context.Context, networkId connect.Id, cu
 	return names, nextCursor, nil
 }
 
+// The listing's field that holds the sweep's claim, which no name key is.
+const socketSweepClaimField = "\x00"
+
+// A ttl in whole milliseconds, rounded up, so a positive ttl never reaches Redis as zero (host_redis.go).
+func socketTtlMillis(ttl time.Duration) int64 {
+	return (ttl + time.Millisecond - 1).Milliseconds()
+}
+
 // See socketsservice.SocketStore.
-func (self *SocketStore) SetServicePair(ctx context.Context, listenerClientId connect.Id, dialerClientId connect.Id, grantExpireMillis uint64, ttl time.Duration) error {
+func (self *SocketStore) SetServicePair(ctx context.Context, listenerClientId connect.Id, dialerClientId connect.Id, grantExpireMillis uint64, ttl time.Duration, position uint64) (bool, uint64, error) {
 	if ttl <= 0 {
-		return fmt.Errorf("%w: a ttl of %v", socketsservice.ErrSocketStoreRequest, ttl)
+		return false, 0, fmt.Errorf("%w: a ttl of %v", socketsservice.ErrSocketStoreRequest, ttl)
 	}
-	// rounded up, so a positive ttl never reaches Redis as zero (host_redis.go)
-	ttlMillis := (ttl + time.Millisecond - 1).Milliseconds()
-	return self.redis(ctx, func(client server.RedisClient) error {
-		_, err := self.runScript(ctx, client, "pair", []string{socketPairKey(listenerClientId)},
-			socketHexId(dialerClientId), strconv.FormatUint(grantExpireMillis, 10), ttlMillis)
+	nowMillis := self.clock.Now().UnixMilli()
+	wrote := false
+	floor := uint64(0)
+	err := self.redis(ctx, func(client server.RedisClient) error {
+		reply, err := self.runScript(ctx, client, "pair", []string{socketPairKey(listenerClientId)},
+			socketHexId(dialerClientId), socketDecimal(grantExpireMillis), socketTtlMillis(ttl), socketDecimal(position), nowMillis)
+		if err != nil {
+			return err
+		}
+		values, err := socketReplyStrings(reply)
+		if err != nil || len(values) != 2 {
+			return fmt.Errorf("socket store: a malformed pair reply: %v", err)
+		}
+		wrote = values[0] == "1"
+		floor, err = strconv.ParseUint(values[1], 10, 64)
 		return err
 	})
+	if err != nil {
+		return false, 0, err
+	}
+	return wrote, floor, nil
 }
 
 // See socketsservice.SocketStore.
@@ -817,81 +1033,125 @@ func (self *SocketStore) GetServicePair(ctx context.Context, listenerClientId co
 	return grantExpireMillis, found, nil
 }
 
+// pair_remove on one listener's key.
+func (self *SocketStore) removePairs(ctx context.Context, client server.RedisClient, listenerClientId connect.Id, position uint64, nowMillis int64) error {
+	_, err := self.runScript(ctx, client, "pair_remove", []string{socketPairKey(listenerClientId)},
+		socketDecimal(position), nowMillis, socketTtlMillis(self.settings.Store.TombstoneTtl))
+	return err
+}
+
 // See socketsservice.SocketStore.
-func (self *SocketStore) RemoveServicePairs(ctx context.Context, listenerClientId connect.Id) error {
+func (self *SocketStore) RemoveServicePairs(ctx context.Context, listenerClientId connect.Id, position uint64) error {
+	nowMillis := self.clock.Now().UnixMilli()
 	return self.redis(ctx, func(client server.RedisClient) error {
-		return client.Del(ctx, socketPairKey(listenerClientId)).Err()
+		return self.removePairs(ctx, client, listenerClientId, position, nowMillis)
 	})
 }
 
-// Ends refs' leases, then tells the listing, and returns what each found.
-func (self *SocketStore) removeLeases(ctx context.Context, client server.RedisClient, networkId connect.Id, refs []*socketsservice.SocketStoreEntryRef, nowMillis int64) ([]*socketsservice.SocketStoreRemoved, error) {
+// See socketsservice.SocketStore.
+func (self *SocketStore) TouchServicePairs(ctx context.Context, listenerClientId connect.Id) error {
+	nowMillis := self.clock.Now().UnixMilli()
+	return self.redis(ctx, func(client server.RedisClient) error {
+		_, err := self.runScript(ctx, client, "pair_touch", []string{socketPairKey(listenerClientId)},
+			socketTtlMillis(self.settings.Store.EdgePairTtl), nowMillis)
+		return err
+	})
+}
+
+// Removes refs' leases for cause at position, then tells the listing, and answers each ref in order.
+func (self *SocketStore) removeLeases(ctx context.Context, client server.RedisClient, networkId connect.Id, cause socketsservice.SocketRemoveCause, position uint64, refs []*socketsservice.SocketStoreEntryRef, nowMillis int64) ([]*socketsservice.SocketStoreRemoval, error) {
 	calls := make([]*socketScriptCall, 0, len(refs))
 	for _, ref := range refs {
-		calls = append(calls, socketDelCall(networkId, ref.NameKey, ref.ListenerClientId, nowMillis))
+		calls = append(calls, self.delCall(networkId, ref.NameKey, ref.ListenerClientId, cause, "", position, nowMillis))
 	}
 	replies, err := self.runScripts(ctx, client, calls)
 	if err != nil {
 		return nil, err
 	}
-	removed := []*socketsservice.SocketStoreRemoved{}
+	removals := make([]*socketsservice.SocketStoreRemoval, 0, len(refs))
 	nameUpdates := []*socketNameUpdate{}
 	for index, reply := range replies {
-		found, last, _, maxLeaseMillis, err := socketGroupReply(reply)
+		answer, err := socketParseGroupReply(reply)
 		if err != nil {
 			return nil, err
 		}
-		if !found {
-			continue
+		removal := &socketsservice.SocketStoreRemoval{}
+		switch answer.status {
+		case "removed":
+			removal.Removed = &socketsservice.SocketStoreRemoved{
+				NetworkId:        networkId,
+				ListenerClientId: refs[index].ListenerClientId,
+				NameKey:          bytes.Clone(refs[index].NameKey),
+				LastListener:     answer.flag,
+			}
+			nameUpdates = append(nameUpdates, &socketNameUpdate{nameKey: refs[index].NameKey, maxLeaseMillis: answer.maxLeaseMillis})
+		case "kept":
+			removal.Kept = true
+			removal.PolicyVersion = answer.position
 		}
-		removed = append(removed, &socketsservice.SocketStoreRemoved{
-			NetworkId:        networkId,
-			ListenerClientId: refs[index].ListenerClientId,
-			NameKey:          bytes.Clone(refs[index].NameKey),
-			LastListener:     last,
-		})
-		nameUpdates = append(nameUpdates, &socketNameUpdate{nameKey: refs[index].NameKey, maxLeaseMillis: maxLeaseMillis})
+		removals = append(removals, removal)
 	}
 	if err := self.updateNames(ctx, client, networkId, nowMillis, nameUpdates); err != nil {
 		return nil, err
 	}
-	return removed, nil
+	return removals, nil
 }
 
-// See socketsservice.SocketStore.
+// See socketsservice.SocketStore. Each batch's leases go first and then the batch leaves the set, so a
+// failure leaves the set naming leases still to remove, never leases it has forgotten.
 func (self *SocketStore) RemoveClient(ctx context.Context, clientId connect.Id) ([]*socketsservice.SocketStoreRemoved, error) {
 	nowMillis := self.clock.Now().UnixMilli()
+	batchCount := self.settings.Store.RemoveClientBatchCount
 	removed := []*socketsservice.SocketStoreRemoved{}
 	err := self.redis(ctx, func(client server.RedisClient) error {
-		if err := client.Del(ctx, socketPairKey(clientId)).Err(); err != nil {
-			return err
-		}
 		setKey := socketClientSetKey(clientId)
-		members, err := client.ZRange(ctx, setKey, 0, -1).Result()
+		meta, err := client.ZRangeByLex(ctx, setKey, &redis.ZRangeBy{Min: "-", Max: "(\x01", Count: 1}).Result()
 		if err != nil {
 			return err
 		}
-		var networkId connect.Id
-		haveNetwork := false
-		refs := []*socketsservice.SocketStoreEntryRef{}
-		for _, member := range members {
-			switch {
-			case strings.HasPrefix(member, "\x00") && 17 <= len(member):
-				copy(networkId[:], member[1:17])
-				haveNetwork = true
-			case strings.HasPrefix(member, "\x01") && 1 < len(member):
-				refs = append(refs, &socketsservice.SocketStoreEntryRef{ListenerClientId: clientId, NameKey: []byte(member[1:])})
+		if len(meta) == 1 && 17 <= len(meta[0]) {
+			var networkId connect.Id
+			copy(networkId[:], meta[0][1:17])
+			setCount, err := client.ZCard(ctx, setKey).Result()
+			if err != nil {
+				return err
+			}
+			// a removed client's pages are refused, so the set only shrinks; the bound stops a loop on
+			// pages already in flight
+			for round := int64(0); round <= setCount/int64(batchCount)+1; round += 1 {
+				members, err := client.ZRangeByLex(ctx, setKey, &redis.ZRangeBy{Min: "[\x01", Max: "+", Count: int64(batchCount)}).Result()
+				if err != nil {
+					return err
+				}
+				if len(members) == 0 {
+					break
+				}
+				refs := make([]*socketsservice.SocketStoreEntryRef, 0, len(members))
+				for _, member := range members {
+					refs = append(refs, &socketsservice.SocketStoreEntryRef{ListenerClientId: clientId, NameKey: []byte(member[1:])})
+				}
+				removals, err := self.removeLeases(ctx, client, networkId, socketsservice.SocketRemoveClientRemoved, socketsservice.SocketRemovedClientPosition, refs, nowMillis)
+				if err != nil {
+					return err
+				}
+				for _, removal := range removals {
+					if removal.Removed != nil {
+						removed = append(removed, removal.Removed)
+					}
+				}
+				memberValues := make([]any, 0, len(members))
+				for _, member := range members {
+					memberValues = append(memberValues, member)
+				}
+				if err := client.ZRem(ctx, setKey, memberValues...).Err(); err != nil {
+					return err
+				}
 			}
 		}
-		if !haveNetwork {
-			return client.Del(ctx, setKey).Err()
-		}
-		// the leases first, then the set, so a failure leaves leases to expire and not a set naming
-		// leases already gone
-		if removed, err = self.removeLeases(ctx, client, networkId, refs, nowMillis); err != nil {
+		if err := client.Del(ctx, setKey).Err(); err != nil {
 			return err
 		}
-		return client.Del(ctx, setKey).Err()
+		return self.removePairs(ctx, client, clientId, socketsservice.SocketRemovedClientPosition, nowMillis)
 	})
 	if err != nil {
 		return nil, err
@@ -900,23 +1160,28 @@ func (self *SocketStore) RemoveClient(ctx context.Context, clientId connect.Id) 
 }
 
 // See socketsservice.SocketStore.
-func (self *SocketStore) RemoveEntries(ctx context.Context, networkId connect.Id, refs []*socketsservice.SocketStoreEntryRef) ([]*socketsservice.SocketStoreRemoved, error) {
+func (self *SocketStore) RemoveEntries(ctx context.Context, networkId connect.Id, cause socketsservice.SocketRemoveCause, position uint64, refs []*socketsservice.SocketStoreEntryRef) ([]*socketsservice.SocketStoreRemoval, error) {
+	if !socketsservice.SocketRemovalAllowed(cause, position) {
+		return nil, fmt.Errorf("%w: a removal of cause %d at %d", socketsservice.ErrSocketStoreRequest, cause, position)
+	}
 	for _, ref := range refs {
 		if len(ref.NameKey) == 0 {
 			return nil, fmt.Errorf("%w: no name key", socketsservice.ErrSocketStoreRequest)
 		}
 	}
 	nowMillis := self.clock.Now().UnixMilli()
-	removed := []*socketsservice.SocketStoreRemoved{}
+	var removals []*socketsservice.SocketStoreRemoval
 	err := self.redis(ctx, func(client server.RedisClient) error {
 		var err error
-		if removed, err = self.removeLeases(ctx, client, networkId, refs, nowMillis); err != nil {
+		if removals, err = self.removeLeases(ctx, client, networkId, cause, position, refs, nowMillis); err != nil {
 			return err
 		}
-		// each client's set forgets the entry, one key at a time since each set is its own slot
+		// each client's set forgets a lease that is gone, one key at a time since each set is its own slot
 		pipe := client.Pipeline()
-		for _, ref := range refs {
-			pipe.ZRem(ctx, socketClientSetKey(ref.ListenerClientId), "\x01"+string(ref.NameKey))
+		for index, ref := range refs {
+			if !removals[index].Kept {
+				pipe.ZRem(ctx, socketClientSetKey(ref.ListenerClientId), "\x01"+string(ref.NameKey))
+			}
 		}
 		_, err = pipe.Exec(ctx)
 		return err
@@ -924,5 +1189,44 @@ func (self *SocketStore) RemoveEntries(ctx context.Context, networkId connect.Id
 	if err != nil {
 		return nil, err
 	}
-	return removed, nil
+	return removals, nil
+}
+
+// See socketsservice.SocketStore.
+func (self *SocketStore) ClaimSweep(ctx context.Context, networkId connect.Id, position uint64, ttl time.Duration, held *socketsservice.SocketSweepClaim) (*socketsservice.SocketSweepClaim, bool, error) {
+	if ttl <= 0 {
+		return nil, false, fmt.Errorf("%w: a ttl of %v", socketsservice.ErrSocketStoreRequest, ttl)
+	}
+	nowMillis := self.clock.Now().UnixMilli()
+	heldPosition, heldUntil := "", ""
+	if held != nil {
+		heldPosition = socketDecimal(held.PolicyVersion)
+		heldUntil = strconv.FormatInt(held.UntilMillis, 10)
+	}
+	var claim *socketsservice.SocketSweepClaim
+	claimed := false
+	err := self.redis(ctx, func(client server.RedisClient) error {
+		reply, err := self.runScript(ctx, client, "claim", []string{socketNamesKey(networkId)},
+			socketDecimal(position), nowMillis, socketTtlMillis(ttl), heldPosition, heldUntil)
+		if err != nil {
+			return err
+		}
+		values, err := socketReplyStrings(reply)
+		if err != nil || len(values) != 3 {
+			return fmt.Errorf("socket store: a malformed claim reply: %v", err)
+		}
+		claim = &socketsservice.SocketSweepClaim{}
+		if claim.PolicyVersion, err = strconv.ParseUint(values[1], 10, 64); err != nil {
+			return err
+		}
+		if claim.UntilMillis, err = strconv.ParseInt(values[2], 10, 64); err != nil {
+			return err
+		}
+		claimed = values[0] == "1"
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	return claim, claimed, nil
 }
