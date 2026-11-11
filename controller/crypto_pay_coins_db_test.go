@@ -174,8 +174,11 @@ func runCryptoCoinFlow(t *testing.T, flow *cryptoCoinFlow) {
 		case model.CryptoAssetEth:
 			connect.AssertEqual(t, result.Uri, "ethereum:"+flow.address+"@1?value="+result.AmountAtomic)
 		case model.CryptoAssetSol:
-			connect.AssertEqual(t, result.Memo, cryptoSolReference(server.RequireParseId(result.IntentId)))
-			connect.AssertEqual(t, strings.HasPrefix(result.Uri, "solana:"+flow.address+"?amount="+result.Amount+"&reference="+result.Memo+"&label=URnetwork&message="), true)
+			// no memo: the invoice's own deposit address identifies it; its
+			// Solana Pay reference is in the link only
+			connect.AssertEqual(t, result.Memo, "")
+			reference := cryptoSolReference(server.RequireParseId(result.IntentId))
+			connect.AssertEqual(t, strings.HasPrefix(result.Uri, "solana:"+flow.address+"?amount="+result.Amount+"&reference="+reference+"&label=URnetwork&message="), true)
 		case model.CryptoAssetTao:
 			connect.AssertEqual(t, result.Uri, "")
 			connect.AssertEqual(t, result.UriNote != "", true)
@@ -205,6 +208,12 @@ func runCryptoCoinFlow(t *testing.T, flow *cryptoCoinFlow) {
 		renewal := cryptoDbRenewals(t, ctx, networkId, flow.market)
 		connect.AssertEqual(t, renewal.count, 1)
 		connect.AssertEqual(t, renewal.netRevenue, model.UsdToNanoCents(result.PriceUsd))
+		// the balance's term and Manage subscription name the coin (SOL is
+		// not USDC, though both are the solana market)
+		term := cryptoTermForNetwork(ctx, networkId, server.NowUtc())
+		connect.AssertEqual(t, term.Market, flow.market)
+		connect.AssertEqual(t, term.Asset, flow.asset)
+		connect.AssertEqual(t, model.CryptoRenewalAsset(ctx, flow.market, renewal.transactionId), flow.asset)
 
 		// scanned again: nothing new, credited once
 		scan, err = RunCryptoPaymentScan(taskSession, flow.asset)
@@ -349,5 +358,129 @@ func TestCryptoCoinFlowBittensor(t *testing.T) {
 			}
 			node.stateLock.Unlock()
 		},
+	})
+}
+
+// cryptoDbCreateCoinbaseIntent stores an open invoice of a Coinbase coin for
+// a network without the controller: its pool row is a deposit address the
+// refill made, named with the invoice id it reserved, and the invoice takes
+// that id when it draws the address.
+func cryptoDbCreateCoinbaseIntent(t testing.TB, ctx context.Context, asset string, networkId *server.Id, item string, priceUsd float64, index int64, address string) *model.CryptoPaymentIntent {
+	reserved := server.NewId()
+	model.AddCryptoPaymentAddresses(ctx, []*model.CryptoPaymentAddress{{Asset: asset, AddressIndex: index, Address: address, ReservedIntentId: &reserved}})
+	_, tokenHash := cryptoNewStatusToken()
+	now := server.NowUtc()
+	rate := 100.0
+	amountAtomic, ok := cryptoAssetQuoteAmountAtomic(asset, priceUsd, rate, 0.5)
+	connect.AssertEqual(t, ok, true)
+	intent := &model.CryptoPaymentIntent{
+		IntentId:                 server.NewId(),
+		StatusTokenHash:          tokenHash,
+		Asset:                    asset,
+		Delivery:                 model.CryptoDeliveryAccount,
+		NetworkId:                networkId,
+		Item:                     item,
+		Tier:                     "standard",
+		PriceUsdNanoCents:        model.UsdToNanoCents(priceUsd),
+		RegularPriceUsdNanoCents: model.UsdToNanoCents(priceUsd),
+		AmountAtomic:             amountAtomic,
+		RateUsd:                  rate,
+		QuotedAt:                 now,
+		ExpiresAt:                now.Add(30 * time.Minute),
+	}
+	connect.AssertEqual(t, model.CreateCryptoPaymentIntentWithAddress(ctx, intent, true), nil)
+	connect.AssertEqual(t, intent.IntentId, reserved)
+	connect.AssertEqual(t, *intent.AddressIndex, index)
+	return intent
+}
+
+// The 30-day unlink covers the Coinbase coins as it covers Monero (ur.io's
+// FAQ: a crypto payment's link to its account is removed after 30 days). A
+// SOL year paid to its own deposit address forgets its network and its exact
+// times and its pool row's, and its renewal keeps only its coin, so the term
+// and Manage subscription still read SOL (not USDC, whose market it shares).
+// A Bitcoin payment held by the sanctions screen forgets its network and
+// exact times and stays held for the owner and counsel. The screen keeps no
+// other record: a hold is its receipts' state and reason, and the senders
+// it read are never stored.
+func TestCryptoRetentionUnlinkCoversTheCoinbaseCoins(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		config := cryptoTestConfig()
+		for _, asset := range []string{model.CryptoAssetSol, model.CryptoAssetBtc} {
+			config.Assets[asset] = &CryptoPayAssetConfig{
+				Enabled: true,
+				Plans:   []string{model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding},
+				Items:   []string{StripeItemData1Tib, StripeItemData10Tib},
+			}
+		}
+		cryptoTestEnable(t, config, map[string]*fakeCryptoWallet{})
+		networkId, _, clientSession := cryptoDbTestNetwork(t, ctx, "cryptounlinkcoinbase")
+
+		sol := cryptoDbCreateCoinbaseIntent(t, ctx, model.CryptoAssetSol, &networkId, model.SolanaPlanYearly, 40, 601, solanaFixtureWallet)
+		solReceipt := cryptoDbReceipt(t, ctx, sol, "sol-unlink-signature", sol.AmountAtomic, 1)
+		credited, err := cryptoCreditIntent(clientSession, sol, &cryptoCredit{usdNanoCents: sol.PriceUsdNanoCents, receipts: []model.CryptoPaymentReceiptKey{solReceipt.Key()}})
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, credited, true)
+		term := cryptoTermForNetwork(ctx, networkId, server.NowUtc())
+		connect.AssertEqual(t, term.Market, model.SubscriptionMarketSolana)
+		connect.AssertEqual(t, term.Asset, model.CryptoAssetSol)
+
+		held := cryptoDbCreateCoinbaseIntent(t, ctx, model.CryptoAssetBtc, &networkId, StripeItemData1Tib, 3, 602, "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u")
+		heldReceipt := cryptoTestReceipt(held, "btc-unlink-held", held.AmountAtomic, 1, server.NowUtc(), model.CryptoReceiptStateReview)
+		heldReceipt.ReviewReason = model.CryptoReviewReasonSanctionsHold
+		inserted, _ := model.UpsertCryptoPaymentReceiptInConn(nil, ctx, heldReceipt)
+		connect.AssertEqual(t, inserted, true)
+
+		// recent ones are kept linked
+		result, err := RunCryptoPaymentUnlink(clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Unlinked, 0)
+		cryptoDbExec(ctx, `UPDATE crypto_payment_intent SET credited_at = $2 WHERE intent_id = $1`, sol.IntentId, server.NowUtc().Add(-721*time.Hour))
+		cryptoDbExec(ctx, `UPDATE crypto_payment_intent SET create_time = $2 WHERE intent_id = $1`, held.IntentId, server.NowUtc().Add(-721*time.Hour))
+		result, err = RunCryptoPaymentUnlink(clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Unlinked, 2)
+
+		day := func(value time.Time) bool { return value.Equal(value.Truncate(24 * time.Hour)) }
+		for _, intentId := range []server.Id{sol.IntentId, held.IntentId} {
+			unlinked := model.GetCryptoPaymentIntent(ctx, intentId)
+			connect.AssertEqual(t, unlinked.NetworkId, (*server.Id)(nil))
+			connect.AssertEqual(t, unlinked.UnlinkedAt != nil, true)
+			connect.AssertEqual(t, day(unlinked.CreateTime), true)
+			for _, receipt := range model.GetCryptoPaymentReceiptsForIntent(ctx, intentId) {
+				connect.AssertEqual(t, day(receipt.FirstSeenAt), true)
+				connect.AssertEqual(t, day(receipt.UpdateTime), true)
+			}
+			// the Coinbase pool row: its allocation is the day; it still
+			// names the invoice it was made for (the address's name at
+			// Coinbase), which names no network now
+			var allocatedAt time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT allocated_at FROM crypto_payment_address WHERE intent_id = $1`, intentId).Scan(&allocatedAt))
+			})
+			connect.AssertEqual(t, day(allocatedAt), true)
+		}
+		// the held payment stays held: the owner and counsel decide it
+		heldReceipts := model.GetCryptoPaymentReceiptsForIntent(ctx, held.IntentId)
+		connect.AssertEqual(t, len(heldReceipts), 1)
+		connect.AssertEqual(t, heldReceipts[0].State, model.CryptoReceiptStateReview)
+		connect.AssertEqual(t, heldReceipts[0].ReviewReason, model.CryptoReviewReasonSanctionsHold)
+
+		// the SOL renewal lost its link to the invoice, not its coin
+		renewal := cryptoDbRenewals(t, ctx, networkId, model.SubscriptionMarketSolana)
+		connect.AssertEqual(t, renewal.count, 1)
+		connect.AssertEqual(t, renewal.transactionId != sol.IntentId.String(), true)
+		connect.AssertEqual(t, strings.HasPrefix(renewal.transactionId, model.CryptoUnlinkedSolTransactionPrefix), true)
+		connect.AssertEqual(t, strings.Contains(renewal.transactionId, sol.IntentId.String()), false)
+		term = cryptoTermForNetwork(ctx, networkId, server.NowUtc())
+		connect.AssertEqual(t, term.Asset, model.CryptoAssetSol)
+		details, err := SubscriptionDetails(clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, len(details.Subscriptions), 1)
+		connect.AssertEqual(t, details.Subscriptions[0].Store, model.SubscriptionMarketSolana)
+		connect.AssertEqual(t, details.Subscriptions[0].CryptoAsset, model.CryptoAssetSol)
+		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 	})
 }

@@ -78,6 +78,10 @@ func TestSubscriptionDetailsCollapsesPerStore(t *testing.T) {
 		t.Fatalf("expected [solana, stripe] (sorted by store), got [%s, %s]", solana.Store, stripe.Store)
 	}
 
+	// the usdc year names its coin; stripe names none
+	if solana.CryptoAsset != model.CryptoAssetUsdcSolana || stripe.CryptoAsset != "" {
+		t.Fatalf("crypto assets: solana %q, stripe %q", solana.CryptoAsset, stripe.CryptoAsset)
+	}
 	if stripe.AutoRenew == nil || !*stripe.AutoRenew {
 		t.Fatal("stripe: expected auto_renew true from the store")
 	}
@@ -704,5 +708,38 @@ func TestStripeFindSubscriptionPrefersTheBillingOne(t *testing.T) {
 	}
 	if len(env.updates) != 2 || env.updates[0] != "true" || env.updates[1] != "false" {
 		t.Fatalf("expected the form updates [true false], got %v", env.updates)
+	}
+}
+
+// A year paid in native SOL shares USDC's solana store: Manage subscription
+// tells them apart by crypto_asset, which an unlinked SOL renewal keeps
+// (its transaction id is a random id with the SOL prefix), as the other
+// coins' stores name theirs.
+func TestSubscriptionDetailsNameTheCryptoCoin(t *testing.T) {
+	now := server.NowUtc()
+	lookups := &subscriptionStoreLookupSet{
+		solana: solanaLookupSubscriptionStateForTest(SubscriptionCadenceYearly),
+	}
+	for _, test := range []struct {
+		market        string
+		transactionId string
+		asset         string
+	}{
+		{model.SubscriptionMarketSolana, model.CryptoUnlinkedSolTransactionPrefix + server.NewId().String(), model.CryptoAssetSol},
+		{model.SubscriptionMarketSolana, "7B1tVMUE6zGyPFsx6fun6VoX1yCwfeX6D1r1CM3L1fct", model.CryptoAssetUsdcSolana},
+		{model.SubscriptionMarketMonero, server.NewId().String(), model.CryptoAssetXmr},
+		{model.SubscriptionMarketZcash, server.NewId().String(), model.CryptoAssetZec},
+		{model.SubscriptionMarketBittensor, server.NewId().String(), model.CryptoAssetTao},
+		{model.SubscriptionMarketBitcoin, server.NewId().String(), model.CryptoAssetBtc},
+		{model.SubscriptionMarketEthereum, server.NewId().String(), model.CryptoAssetEth},
+	} {
+		renewal := subscriptionTestRenewal(test.market, now.Add(-24*time.Hour), now.Add(364*24*time.Hour), test.transactionId, "")
+		result := buildSubscriptionDetails(context.Background(), []*model.ActiveSubscriptionRenewal{renewal}, nil, "", lookups)
+		if len(result.Subscriptions) != 1 {
+			t.Fatalf("%s: %d entries", test.market, len(result.Subscriptions))
+		}
+		if got := result.Subscriptions[0].CryptoAsset; got != test.asset {
+			t.Fatalf("%s %s: crypto_asset %q, want %q", test.market, test.transactionId, got, test.asset)
+		}
 	}
 }
