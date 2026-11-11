@@ -340,6 +340,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /internal/gate/spent/([^/]+)":             routeAccessPublic,   // a host's internal bearer (QD-055)
 	"POST /internal/gate/usage-batch":               routeAccessPublic,   // a host's internal bearer; the batch's producer is its own (QD-055)
 	"POST /sidecar/push-token":                      routeAccessClient,   // the bearer's own client's wake token (§18.7)
+	"POST /sidecar/wake":                            routeAccessClient,   // another admitted device of the bearer's member, by the controller (§6.16)
 	"POST /sidecar/close":                           routeAccessPublic,   // an ephemeral client's close capability, its own credential (§18.8)
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
 	"GET /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar of either network of the share (§17.16)
@@ -432,6 +433,8 @@ var strictExpRoutes = map[string]bool{
 	"GET /sidecar/limits": true,
 	// §18.7's wake token (SDK-M8-09)
 	"POST /sidecar/push-token": true,
+	// §6.16's summons of a silent own app host (PROTO-M8-02)
+	"POST /sidecar/wake": true,
 	// §18.8's unload beacon (TEAM-M1-10), Public: a bearer is ignored there
 	"POST /sidecar/close": true,
 	// §7.8's enrollment (TEAM-M1-04), Public: a bearer is ignored there

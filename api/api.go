@@ -442,6 +442,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("GET", "/sidecar/limits", handlers.GetSidecarLimits),
 		// §18.7's wake token of the bearer's own client, dark until MG8 and the wake switch (SDK-M8-09)
 		router.NewRoute("POST", "/sidecar/push-token", handlers.SidecarPushToken),
+		// §6.16's summons of another admitted device of the caller's member, dark until MG1 and the wake switch
+		// (PROTO-M8-02)
+		router.NewRoute("POST", "/sidecar/wake", handlers.SidecarWake),
 		// §18.8's unload beacon of an ephemeral page, by its close capability (TEAM-M1-10)
 		router.NewRoute("POST", "/sidecar/close", handlers.SidecarClose),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
