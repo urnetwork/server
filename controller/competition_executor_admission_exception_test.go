@@ -65,7 +65,16 @@ func TestExecutorAdmissionExceptionRejectsChangedEvidenceAndOtherFailures(t *tes
 		case "statistics":
 			r.Metrics[0].TwoSidedPValue = 0.12345
 		case "other-metric":
-			m := r.Metrics[0]
+			metricIndex := -1
+			for i, metric := range r.Metrics {
+				if metric.Metric == "ttfb_p95_ms" {
+					metricIndex = i
+				}
+			}
+			if metricIndex < 0 {
+				t.Fatal("synthetic TTFB metric absent")
+			}
+			m := r.Metrics[metricIndex]
 			values := append([]float64(nil), m.CandidateValues...)
 			for i := range values {
 				values[i] *= 0.5
@@ -75,7 +84,7 @@ func TestExecutorAdmissionExceptionRejectsChangedEvidenceAndOtherFailures(t *tes
 				t.Fatal(err)
 			}
 			changed.BaselineWithinRunSe, changed.CandidateWithinRunSe = m.BaselineWithinRunSe, m.CandidateWithinRunSe
-			r.Metrics[0] = *changed
+			r.Metrics[metricIndex] = *changed
 		case "passed":
 			r.Passed = true
 		case "missing-metric":

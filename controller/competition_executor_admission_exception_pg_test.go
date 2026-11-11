@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -56,6 +57,16 @@ func insertAdmissionExceptionPg(tb testing.TB, f *competitionDistributedPgFixtur
 	if err != nil {
 		return err
 	}
+	// The public registration path stores typed canonical bytes, not JSONB or
+	// map-key order. Exercise the same identity on later coordinator reads.
+	var typed competitionExecutorEquivalenceReceipt
+	if err := json.Unmarshal(content, &typed); err != nil {
+		return err
+	}
+	content, err = json.Marshal(&typed)
+	if err != nil {
+		return err
+	}
 	d := sha256.Sum256(content)
 	return captureDatabaseError(func() {
 		server.Tx(tb.Context(), func(tx server.PgTx) {
@@ -65,6 +76,84 @@ func insertAdmissionExceptionPg(tb testing.TB, f *competitionDistributedPgFixtur
 			server.RaisePgResult(tx.Exec(tb.Context(), `SELECT set_config('urnetwork.competition_executor_admission_exception',$1,true)`, hex.EncodeToString(a[:])))
 			server.RaisePgResult(tx.Exec(tb.Context(), `INSERT INTO competition_executor_admission_exception(round_id,host_id,approval_sha256,approval_json,approval_canonical,receipt_json,receipt_canonical,receipt_sha256,baseline_sha256,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, v.RoundId, v.HostId, hex.EncodeToString(a[:]), json.RawMessage(approval), approval, json.RawMessage(content), content, hex.EncodeToString(d[:]), v.BaselineSha256, r["created_at"]))
 		}, server.OptReadWrite())
+	})
+}
+
+// The database approval and retained-object read must compose; a passing SQL
+// readiness projection cannot bypass canonical-byte or archive authentication.
+type admissionExceptionReadArchive struct {
+	artifactArchive
+	expected    string
+	reads       int
+	unavailable bool
+}
+
+func (self *admissionExceptionReadArchive) VerifyExecutorQualification(_ context.Context, retained *retainedArtifact) error {
+	self.reads++
+	if self.unavailable || retained == nil || retained.Sha256 != self.expected || retained.VersionId == "" {
+		return ErrConflict
+	}
+	return nil
+}
+
+func TestExecutorAdmissionExceptionPgCoordinatorReauthenticatesExactFailedReceipt(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		f, v, r := admissionExceptionPgFixture(t, tb)
+		var receipt competitionExecutorEquivalenceReceipt
+		content, err := json.Marshal(r)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if err := json.Unmarshal(content, &receipt); err != nil {
+			tb.Fatal(err)
+		}
+		var baseline roundBaselineManifest
+		if err := json.Unmarshal(f.prepared.BaselineJson, &baseline); err != nil {
+			tb.Fatal(err)
+		}
+		for i, metric := range receipt.Metrics {
+			values := append([]float64(nil), metric.BaselineValues...)
+			if metric.Metric == "throughput_p50_bytes_per_s" {
+				for j := range values {
+					values[j] *= 0.5
+				}
+			}
+			screen, err := compareCompetitionHostMetric(metric.Metric, metric.BaselineValues, values)
+			if err != nil {
+				tb.Fatal(err)
+			}
+			if _, live := roundBaselineLiveMetrics[metric.Metric]; live {
+				for _, run := range baseline.Replicates {
+					screen.BaselineWithinRunSe = append(screen.BaselineWithinRunSe, run.LiveMetrics[metric.Metric].BlockSe)
+					screen.CandidateWithinRunSe = append(screen.CandidateWithinRunSe, run.LiveMetrics[metric.Metric].BlockSe)
+				}
+			}
+			receipt.Metrics[i] = *screen
+		}
+		receipt.RawScoreRelativeDifference = 0
+		sealCompetitionNoopScreenReceipt(tb, f.settings, &receipt)
+		v.ReceiptDocumentSha256 = receipt.Retention.Sha256
+		content, err = json.Marshal(&receipt)
+		if err != nil {
+			tb.Fatal(err)
+		}
+		if err := json.Unmarshal(content, &r); err != nil {
+			tb.Fatal(err)
+		}
+		if err := insertAdmissionExceptionPg(tb, f, v, r, true); err != nil {
+			tb.Fatal(err)
+		}
+		archive := &admissionExceptionReadArchive{artifactArchive: f.settings.artifactArchive, expected: receipt.Retention.Sha256}
+		f.settings.artifactArchive = archive
+		host := f.settings.DistributedEvaluationPolicy.Hosts[0]
+		qualified, err := f.store.distributedExecutorQualified(tb.Context(), f.settings, f.round, &roundBaselineRecord{Sha256: f.prepared.BaselineSha256, Json: f.prepared.BaselineJson}, host)
+		if err != nil || !qualified || archive.reads != 1 {
+			tb.Fatalf("exact failed retained evidence did not compose: qualified=%v reads=%d err=%v", qualified, archive.reads, err)
+		}
+		archive.unavailable = true
+		if qualified, err := f.store.distributedExecutorQualified(tb.Context(), f.settings, f.round, &roundBaselineRecord{Sha256: f.prepared.BaselineSha256, Json: f.prepared.BaselineJson}, host); err == nil || qualified || archive.reads != 2 {
+			tb.Fatal("archive outage bypassed exception reauthentication", err)
+		}
 	})
 }
 
