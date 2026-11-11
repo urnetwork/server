@@ -158,6 +158,8 @@ type probeState struct {
 	pool                 *egresshealth.Pool
 	outcomeCount         int
 	securityDestinations []egresshealth.Destination
+	// the IP families the provider advertises, from its claim
+	ipFamily egresshealth.IpFamily
 }
 
 // Finds a probe's state from the client the prober hands its
@@ -220,13 +222,16 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			tunnelConfig.Pins = options.Pins.pins()
 			tunnelConfig.RedirectPins = tunnelConfig.Pins
 			tunnelConfig.ProviderCountry = provider.Place.Country
+			// a provider that advertises IPv6 gets a tunnel that carries it,
+			// for the URL loads' IPv6 legs (egresshealth url_family.go)
+			tunnelConfig.ProviderIpFamily = connect.IpFamily(provider.IpFamily.Normalize())
 			path, err := openProbePath(ctx, providerTunnelOpener(tunnelConfig, clientId, hosts), hosts, options.ProbeTimeout)
 			if err != nil {
 				return nil, nil, err
 			}
 			client, _ := path.Current()
 			probes.put(client, &probeState{path: path, pool: pool, outcomeCount: provider.OutcomeCount,
-				securityDestinations: provider.SecurityDestinations})
+				securityDestinations: provider.SecurityDestinations, ipFamily: provider.IpFamily.Normalize()})
 			return client, func() error {
 				probes.remove(client)
 				if reopens := path.reopens(); 0 < reopens {
@@ -236,26 +241,10 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			}, nil
 		},
 		Health: func(ctx context.Context, client *http.Client, place egresshealth.Place) (*egresshealth.Result, error) {
-			opts := EgressHealthOptions(options.ProbeTimeout, options.AllDestinations)
-			opts.UrlProbe = options.UrlProbe
-			opts.LoadAttempts = options.LoadAttempts
-			opts.LoadRetryMeanInterval = options.LoadRetryMeanInterval
-			opts.TunnelRecreateAttempts = options.TunnelRecreateAttempts
-			opts.ProviderPlace = place
-			pool := options.Pool.pool()
-			if state := probes.get(client); state != nil {
-				pool = state.pool
-				opts.Path = state.path
-				opts.OutcomeCount = state.outcomeCount
-				opts.SecurityDestinations = state.securityDestinations
+			opts, err := fullHealthOptions(options, probes.get(client), place)
+			if err != nil {
+				return nil, err
 			}
-			if pool == nil || len(pool.Destinations) == 0 {
-				return nil, egresshealth.ErrNoDestinations
-			}
-			opts.Destinations = pool.Destinations
-			opts.UrlProbePolicy = pool.UrlProbePolicy
-			opts.CountryDestinations = pool.Countries[strings.ToLower(place.Country)]
-			opts.Profile = profileOf(pool)
 			return egresshealth.Check(ctx, client, opts)
 		},
 		Submit:        options.Submit,
@@ -269,6 +258,37 @@ func NewFullProber(options FullOptions) *prober.Prober {
 	}
 
 	return providerProber
+}
+
+// The options of one probe's health run: the pass's geometry, the pool its
+// tunnel was opened against with the provider's claim (state, nil for a client
+// no probe opened), and the place it is published under.
+func fullHealthOptions(options FullOptions, state *probeState, place egresshealth.Place) (egresshealth.Options, error) {
+	opts := EgressHealthOptions(options.ProbeTimeout, options.AllDestinations)
+	opts.UrlProbe = options.UrlProbe
+	opts.LoadAttempts = options.LoadAttempts
+	opts.LoadRetryMeanInterval = options.LoadRetryMeanInterval
+	opts.TunnelRecreateAttempts = options.TunnelRecreateAttempts
+	opts.ProviderPlace = place
+	pool := options.Pool.pool()
+	if state != nil {
+		pool = state.pool
+		opts.Path = state.path
+		opts.OutcomeCount = state.outcomeCount
+		opts.SecurityDestinations = state.securityDestinations
+		opts.ProviderIpFamily = state.ipFamily
+	}
+	if pool == nil || len(pool.Destinations) == 0 {
+		return egresshealth.Options{}, egresshealth.ErrNoDestinations
+	}
+	opts.Destinations = pool.Destinations
+	opts.UrlProbePolicy = pool.UrlProbePolicy
+	opts.CountryDestinations = pool.Countries[strings.ToLower(place.Country)]
+	// a country whose national firewall drops QUIC runs no UDP leg
+	// (qualityprobe.yml country_settings udp_probes: false)
+	opts.UdpProbesDisabled = pool.UdpProbesDisabled(place.Country)
+	opts.Profile = profileOf(pool)
+	return opts, nil
 }
 
 // Executes one bounded batch. It owns no timer and schedules nothing;

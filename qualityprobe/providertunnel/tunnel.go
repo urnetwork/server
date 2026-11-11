@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +45,13 @@ type Config struct {
 	// Country of the provider under test, not the operator or API caller.
 	// Only used when no explicit in-tunnel resolver settings were supplied.
 	ProviderCountry string
+	// The IP families the provider under test advertises (its proven
+	// category, connect.IpFamily). A provider that advertises IPv6 gets a
+	// dual-stack inner tun, so a URL request forced to IPv6 can reach its site
+	// through the provider; its resolver still runs over IPv4 alone when the
+	// provider advertises IPv4 (providerResolverForFamily). Every other
+	// provider, legacy included, keeps the IPv4-only tun.
+	ProviderIpFamily connect.IpFamily
 	// Optional immutable override. Host/local resolution is never permitted
 	// for provider probes, even when a caller explicitly asks for it.
 	DnsResolverSettings *connect.DnsResolverSettings
@@ -306,6 +315,74 @@ var createTun = func(ctx context.Context, resolver *connect.DnsResolverSettings)
 	return connect.CreateTunWithResolver(ctx, settings, resolver)
 }
 
+// Builds the dual-stack tun of a tunnel whose provider advertises IPv6, a
+// seam like createTun. The packet path to a fixed provider is the provider's
+// own: the multi-client hands a fixed destination every flow whatever its
+// family (connect multiClientChannel.supportsIpVersion), the platform relays
+// inner packets without reading them, and the provider's NAT dials a v6
+// destination with a v6 socket of its host, as it does for any user's v6
+// flow (connect/IPV6.md §2, C1). The link keeps the shared 1280-byte mtu,
+// which is IPv6's minimum, so the tun carries IPv6 (connect Tun.Ipv6Enabled).
+// Nothing but a URL request forced to IPv6 opens a v6 socket on it: its DNS
+// keeps to IPv4 (providerResolverForFamily) and every other request resolves
+// IPv4 alone (providerUrlRequestFamily).
+var createDualStackTun = func(ctx context.Context, resolver *connect.DnsResolverSettings) (*connect.Tun, error) {
+	settings := connect.DefaultTunSettings()
+	settings.Mtu = min(settings.Mtu, connect.DefaultMtu)
+	settings.DisableIpv6 = false
+	return connect.CreateTunWithResolver(ctx, settings, resolver)
+}
+
+// The tun of a tunnel to a provider of the family: dual-stack when it
+// advertises IPv6, the IPv4-only server tun otherwise.
+func createProviderTun(ctx context.Context, resolver *connect.DnsResolverSettings, family connect.IpFamily) (*connect.Tun, error) {
+	if family.SupportsIpv6() {
+		return createDualStackTun(ctx, resolver)
+	}
+	return createTun(ctx, resolver)
+}
+
+// The resolver of a dual-stack tunnel keeps to one family's servers: IPv4's
+// when the provider advertises IPv4, so a dual-stack provider's DNS rides the
+// same IPv4 path it always did and only the URL's own request is IPv6, and
+// IPv6's for a provider that advertises IPv6 alone. Answers of every record
+// type come back either way; only the servers' family is chosen. A tunnel
+// whose provider does not advertise IPv6 keeps its settings: its IPv4-only
+// tun already leaves its IPv6 servers out (connect Tun.buildDohCache).
+func providerResolverForFamily(resolver *connect.DnsResolverSettings, family connect.IpFamily) *connect.DnsResolverSettings {
+	if resolver == nil || !family.SupportsIpv6() {
+		return resolver
+	}
+	copy := *resolver
+	keep := 4
+	if !family.SupportsIpv4() {
+		keep = 6
+	}
+	if keep == 4 {
+		copy.RemoteDohUrlsIpv6, copy.RemoteDnsIpv6 = nil, nil
+		copy.RemoteDohUrlsIpv4 = slices.Clone(resolver.RemoteDohUrlsIpv4)
+		copy.RemoteDnsIpv4 = slices.Clone(resolver.RemoteDnsIpv4)
+	} else {
+		copy.RemoteDohUrlsIpv4, copy.RemoteDnsIpv4 = nil, nil
+		copy.RemoteDohUrlsIpv6 = slices.Clone(resolver.RemoteDohUrlsIpv6)
+		copy.RemoteDnsIpv6 = slices.Clone(resolver.RemoteDnsIpv6)
+	}
+	if resolver.DohServerHostAddrs != nil {
+		copy.DohServerHostAddrs = map[string][]string{}
+		for host, addrs := range resolver.DohServerHostAddrs {
+			for _, value := range addrs {
+				if addr, err := netip.ParseAddr(value); err == nil && addressFamily(addr) == keep {
+					copy.DohServerHostAddrs[host] = append(copy.DohServerHostAddrs[host], value)
+				}
+			}
+		}
+	}
+	if resolver.TlsConfig != nil {
+		copy.TlsConfig = resolver.TlsConfig.Clone()
+	}
+	return &copy
+}
+
 // The control-plane strategy is a seam so the Open-path test can prove every
 // provider tunnel gets its own strategy from the IPv4-only constructor.
 var newControlplaneClientStrategy = controlplane.NewClientStrategy
@@ -503,6 +580,8 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if err != nil {
 		return nil, err
 	}
+	family := cfg.ProviderIpFamily.Normalize()
+	resolver = providerResolverForFamily(resolver, family)
 
 	// The packet path and the control-plane lifecycle have separate child
 	// contexts. Close must stop Tun traffic first, while keeping the API and
@@ -577,7 +656,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// Do not hoist the TUN or its DoH cache to the Taskworker pass: every full
 	// and blackhole provider probe needs an independently owned DNS cache and
 	// admission state. The constructor creates that cache for this TUN alone.
-	tun, err := createTun(dataCtx, resolver)
+	tun, err := createProviderTun(dataCtx, resolver, family)
 	if err != nil {
 		cancelData()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.closeTimeout())

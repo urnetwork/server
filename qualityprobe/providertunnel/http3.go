@@ -45,15 +45,31 @@ const urlProbeQuicIdleTimeout = urlProbeReadIdleTimeout
 // minimum for a client's first datagram still holds.
 const urlProbeQuicPacketSize = connect.DefaultMtu - 20 - 8
 
-// A fresh QUIC configuration per leg: one version, as HTTP/3 dialing needs, no
-// session resumption, no 0-RTT, no keep-alive, and nothing that outlives the
-// one request.
+// The same over the dual-stack tunnel's IPv6 link (tunnel.go): the 1280-byte
+// MTU less the 40-byte IPv6 and the UDP headers, still above QUIC's 1200.
+// IPv6 is never fragmented by a router, so a datagram that did not fit would
+// be lost on the path rather than split.
+const urlProbeQuicIpv6PacketSize = connect.DefaultMtu - 40 - 8
+
+// A fresh QUIC configuration per IPv4 leg: one version, as HTTP/3 dialing
+// needs, no session resumption, no 0-RTT, no keep-alive, and nothing that
+// outlives the one request.
 func providerUrlProbeQuicConfig() *quic.Config {
+	return providerUrlProbeQuicConfigFor(4)
+}
+
+// The configuration of a leg in one IP family, its first datagram sized to
+// that family's link (urlProbeQuicPacketSize, urlProbeQuicIpv6PacketSize).
+func providerUrlProbeQuicConfigFor(ipVersion int) *quic.Config {
+	packetSize := uint16(urlProbeQuicPacketSize)
+	if ipVersion == 6 {
+		packetSize = urlProbeQuicIpv6PacketSize
+	}
 	return &quic.Config{
 		Versions:                []quic.Version{quic.Version1},
 		HandshakeIdleTimeout:    urlProbeQuicHandshakeIdleTimeout,
 		MaxIdleTimeout:          urlProbeQuicIdleTimeout,
-		InitialPacketSize:       urlProbeQuicPacketSize,
+		InitialPacketSize:       packetSize,
 		DisablePathMTUDiscovery: true,
 	}
 }
@@ -83,6 +99,13 @@ func (self *providerH3RoundTripper) ProviderUrlProbeContext(ctx context.Context,
 	return self.https.ProviderUrlProbeContext(ctx, target, redirect)
 }
 
+// Implements egresshealth's per-request family grant, as the HTTPS leg's: the
+// leg resolves only the family's record and opens a UDP socket of that family
+// alone.
+func (self *providerH3RoundTripper) ProviderUrlProbeFamilyContext(ctx context.Context, target *url.URL, redirect bool, ipVersion int) (context.Context, error) {
+	return self.https.ProviderUrlProbeFamilyContext(ctx, target, redirect, ipVersion)
+}
+
 func (self *providerH3RoundTripper) ProviderMeasurementUnavailable() bool {
 	return self.https.ProviderMeasurementUnavailable()
 }
@@ -100,9 +123,10 @@ func (self *providerH3RoundTripper) ProviderLocalWriteUnavailable() bool {
 // datagrams are the tunnel's.
 func (self *providerH3RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	session := newProviderH3Session(self.https)
+	ipVersion, _ := providerUrlRequestFamily(req.Context())
 	transport := &http3.Transport{
 		Dial:               session.dial,
-		QUICConfig:         providerUrlProbeQuicConfig(),
+		QUICConfig:         providerUrlProbeQuicConfigFor(ipVersion),
 		DisableCompression: true,
 	}
 	release := func() {
@@ -239,9 +263,10 @@ func (self *providerH3Session) close() {
 
 // Dials one QUIC connection to addr through the tunnel. It admits the host as
 // the HTTPS leg's DialTLSContext does (admitTls), resolves it through the
-// tunnel's own resolver to the same public IPv4 answers, and opens a UDP
-// socket of the tunnel's stack connected to the first of them, on the URL's
-// port: a URL probe's target is confined to 443 by its grant
+// tunnel's own resolver to the same public answers of the request's family
+// (IPv4 unless its grant says 6), and opens a UDP socket of the tunnel's stack
+// in that family alone, connected to the first of them, on the URL's port: a
+// URL probe's target is confined to 443 by its grant
 // (ProviderUrlProbeContext), as the HTTPS leg's is. The TLS handshake
 // verifies the chain by WebPKI and the same pins. The request's trace sees
 // the target's DNS, then the handshake as both the connection and the TLS
@@ -275,7 +300,7 @@ func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, qu
 	}
 	remote := netip.AddrPortFrom(addrs[0], uint16(port))
 
-	raw, err := self.dialPacket(ctx, "udp4", remote.String())
+	raw, err := self.dialPacket(ctx, providerUrlDialNetwork(ctx, "udp4"), remote.String())
 	if err != nil {
 		return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
 	}

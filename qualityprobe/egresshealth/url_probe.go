@@ -33,6 +33,19 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 	if len(compatible) == 0 {
 		return nil, ErrNoDestinations
 	}
+	// A load's first leg is its IPv4 HTTPS leg (urlProbeServesProvider): an
+	// IPv6-only provider has none, and is not measured. Otherwise the draw is
+	// the catalog's, less the URLs that serve no IPv4 (ipv4: false), so the
+	// URL a provider is asked for does not depend on the families it
+	// advertises; each family the URL serves then gets its legs.
+	if !opts.ProviderIpFamily.Ipv4() {
+		return nil, ErrNoUrlForProviderFamily
+	}
+	compatible = urlProbeDestinationsForFamily(compatible, opts.ProviderIpFamily)
+	country = urlProbeDestinationsForFamily(country, opts.ProviderIpFamily)
+	if len(compatible) == 0 {
+		return nil, ErrNoUrlForProviderFamily
+	}
 	rng := opts.rng()
 	source := "general"
 	if len(opts.SecurityDestinations) > 0 && rng.Intn(2) == 0 {
@@ -51,8 +64,11 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 		chosen.Canary = false
 		chosen.Incompatible = nil
 		// A recheck asks whether the stored URL's HTTPS identity now
-		// authenticates, and is never scored; it makes no HTTP/3 leg.
+		// authenticates, and is never scored; it makes no HTTP/3 leg and no
+		// IPv6 leg: TLS findings are about the IPv4 HTTPS identity.
 		chosen.H3 = false
+		chosen.Ipv6 = false
+		chosen.Ipv4 = nil
 	}
 	opts.LoadAttempts = 1
 	result, err := check(ctx, client, []Destination{chosen}, opts)
@@ -75,6 +91,11 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 				BodyMillis: float64(check.BodyDuration) / float64(time.Millisecond), BodyBitsPerSecond: check.BodyBytesPerSecond * 8,
 				BodyFirstByteWaitMillis: float64(check.BodyFirstByteWait) / float64(time.Millisecond),
 				H3:                      urlProbeH3EvidenceOf(check.H3),
+				Ipv6:                    urlProbeIpv6EvidenceOf(check.Ipv6),
+				UdpProbesDisabled:       check.UdpProbesDisabled,
+			}
+			if opts.ProviderIpFamily.Ipv6() {
+				result.UrlProbeEvidence.IpFamily = opts.ProviderIpFamily.Normalize()
 			}
 		}
 	}
