@@ -565,25 +565,59 @@ func ClearGammaSeatDemand(ctx context.Context, networkId server.Id) {
 	})
 }
 
-// HasSupporterRenewalEndingAfter reports whether the network has a supporter
-// renewal in a market other than excludeMarket that ends after t: Pro paid
-// elsewhere past a gamma term, which a gamma renewal must not double.
-func HasSupporterRenewalEndingAfter(ctx context.Context, networkId server.Id, t time.Time, excludeMarket string) (has bool) {
+// GetGammaProCoverEnd is when the Pro that the network's other subscriptions
+// pay for, or still bill, ends, for a gamma plan whose term would start at
+// `after`: the latest end of the network's supporter windows that end after
+// `after`, zero when none does. Every market counts but gamma; gamma's own
+// windows count only from gammaFrom on (nil: none of them), so a renewal does
+// not count the term it continues, and does count a gamma plan bought after
+// that term began. A window is the period it paid plus the time its market
+// keeps it open for a payment still coming (Stripe's and the crypto markets'
+// 30-day grace, a store's day), so a subscription that is still retrying a
+// failed renewal still covers; a queued window that has not started covers
+// too. A gamma Pro charge for days such a window covers would charge the
+// customer twice for them (the owner, 2026-11-11).
+func GetGammaProCoverEnd(ctx context.Context, networkId server.Id, after time.Time, gammaFrom *time.Time) (end time.Time) {
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(
-			ctx,
-			`
-				SELECT EXISTS (
-					SELECT 1 FROM subscription_renewal
-					WHERE network_id = $1 AND subscription_type = $2 AND market <> $3 AND $4 < end_time
-				)
-			`,
-			networkId,
-			SubscriptionTypeSupporter,
-			excludeMarket,
-			t,
-		).Scan(&has))
+		end = getGammaProCoverEnd(ctx, conn, networkId, after, gammaFrom)
 	})
+	return
+}
+
+// GetGammaProCoverEndInTx is GetGammaProCoverEnd in the caller's transaction.
+func GetGammaProCoverEndInTx(tx server.PgTx, ctx context.Context, networkId server.Id, after time.Time, gammaFrom *time.Time) time.Time {
+	return getGammaProCoverEnd(ctx, tx, networkId, after, gammaFrom)
+}
+
+func getGammaProCoverEnd(ctx context.Context, query server.PgCanQuery, networkId server.Id, after time.Time, gammaFrom *time.Time) (end time.Time) {
+	var latest *time.Time
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT MAX(end_time)
+			FROM subscription_renewal
+			WHERE network_id = $1
+			  AND subscription_type = $2
+			  AND $3 < end_time
+			  AND (
+				COALESCE(market, '') <> $4
+				OR ($5::timestamp IS NOT NULL AND $5::timestamp <= start_time)
+			  )
+		`,
+		networkId,
+		SubscriptionTypeSupporter,
+		after,
+		SubscriptionMarketGamma,
+		gammaFrom,
+	)
+	server.WithPgResult(result, err, func() {
+		if result.Next() {
+			server.Raise(result.Scan(&latest))
+		}
+	})
+	if latest != nil {
+		end = *latest
+	}
 	return
 }
 

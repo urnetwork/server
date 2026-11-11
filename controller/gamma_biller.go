@@ -861,6 +861,10 @@ func (self *gammaBiller) charge() (charged int) {
 		if fingerprint == charge.SkipDeposit || !gammaDepositCanPay(hotkey, settings, pending[charge.Hotkey], charge.Amount) {
 			continue
 		}
+		if intent := model.GetGammaPaymentIntent(ctx, charge.IntentId); intent == nil || gammaPlanCovered(ctx, intent, self.now) {
+			// another Pro subscription pays for these days: not again
+			continue
+		}
 		if model.ReArmGammaCharge(ctx, charge.Reference) {
 			pending[charge.Hotkey] += charge.Amount
 			glog.Infof("[gamma]charge %s re-armed: its deposit changed\n", gammaHex(charge.Reference))
@@ -875,6 +879,11 @@ func (self *gammaBiller) charge() (charged int) {
 			hotkeys[intent.Hotkey] = hotkey
 		}
 		if hotkey == nil || !gammaDepositCanPay(hotkey, settings, pending[intent.Hotkey], intent.AmountGamma()) {
+			continue
+		}
+		if gammaPlanCovered(ctx, intent, self.now) {
+			// another Pro subscription pays for (or still bills) the term this
+			// would buy: never two charges for the same days; it waits
 			continue
 		}
 		if model.CreateGammaCharge(ctx, intent, self.now) {

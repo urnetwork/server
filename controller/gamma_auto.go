@@ -134,7 +134,10 @@ func gammaAccountRenews(account *model.GammaAccount) bool {
 }
 
 // autoRenew renews a plan paid with gamma when its paid term ends within the
-// lead time, unless another market's Pro runs past it.
+// lead time, unless another Pro subscription covers or still bills the next
+// term (gammaRenewCoverEnd): never two charges for the same days. When that
+// other Pro ended after this term did, within the term's grace, the renewal
+// starts where it ended.
 func (self *gammaBiller) autoRenew(account *model.GammaAccount) {
 	if !gammaAccountRenews(account) {
 		return
@@ -147,16 +150,61 @@ func (self *gammaBiller) autoRenew(account *model.GammaAccount) {
 	if self.now.Before(termEnd.Add(-gammaRenewLead)) {
 		return
 	}
-	if model.HasSupporterRenewalEndingAfter(self.ctx, account.NetworkId, graceEnd, model.SubscriptionMarketGamma) {
-		// paid elsewhere past this term: nothing to renew here
-		return
+	termStart := termEnd
+	if coverEnd := gammaRenewCoverEnd(self.ctx, account.NetworkId, termEnd); coverEnd.After(termEnd) {
+		if coverEnd.After(self.now) {
+			// another subscription pays for (or still bills) these days
+			return
+		}
+		termStart = coverEnd
 	}
 	priceUsd, tier, ok := gammaAutoPlanPrice(account, account.RenewPlan)
 	if !ok {
 		return
 	}
 	periodKey := "renew/" + termEnd.UTC().Format(time.RFC3339)
-	self.newAutoIntent(account, model.GammaPurposeRenew, periodKey, account.RenewPlan, priceUsd, tier.Name, &termEnd, graceEnd)
+	self.newAutoIntent(account, model.GammaPurposeRenew, periodKey, account.RenewPlan, priceUsd, tier.Name, &termStart, graceEnd)
+}
+
+// gammaRenewCoverEnd is when the Pro that covers a renewal's next term from
+// elsewhere ends, for a term that would start at termStart: another
+// market's window, or a gamma plan bought after that term began; zero when
+// none covers any of it.
+func gammaRenewCoverEnd(ctx context.Context, networkId server.Id, termStart time.Time) time.Time {
+	return model.GetGammaProCoverEnd(ctx, networkId, termStart, &termStart)
+}
+
+// gammaPlanCoverEnd is when the Pro that another subscription pays for, or
+// still bills, ends, for the term a gamma plan intent would buy: from its
+// term start for a renewal, from now for a purchase or a seat upgrade. A
+// renewal does not count the gamma term it continues, a purchase counts no
+// gamma window (it may upgrade one), and a seat upgrade counts every one: it
+// is only for an account without Pro. Zero when nothing else covers it.
+func gammaPlanCoverEnd(ctx context.Context, intent *model.GammaPaymentIntent, now time.Time) time.Time {
+	switch intent.Purpose {
+	case model.GammaPurposeRenew:
+		termStart := now
+		if intent.TermStartTime != nil {
+			termStart = *intent.TermStartTime
+		}
+		return gammaRenewCoverEnd(ctx, intent.NetworkId, termStart)
+	case model.GammaPurposeSeat:
+		return model.GetGammaProCoverEnd(ctx, intent.NetworkId, now, &time.Time{})
+	default:
+		return model.GetGammaProCoverEnd(ctx, intent.NetworkId, now, nil)
+	}
+}
+
+// gammaPlanCovered reports whether a gamma plan intent must not be charged
+// now: another Pro subscription pays for, or still bills, part of the term it
+// would buy. It waits; once that subscription ends, while the intent is still
+// open, it is charged, and a renewal then starts where the other Pro ended
+// (gammaCreditIntentInTx). A data pack is never covered.
+func gammaPlanCovered(ctx context.Context, intent *model.GammaPaymentIntent, now time.Time) bool {
+	if !slices.Contains(gammaKnownPlans, intent.Item) {
+		return false
+	}
+	return gammaPlanCoverEnd(ctx, intent, now).After(now)
 }
 
 // gammaManageUrl explains the automatic charges and their switches.
@@ -225,8 +273,11 @@ func (self *gammaBiller) autoSeat(account *model.GammaAccount) {
 	if account.SeatDemandAt == nil {
 		return
 	}
-	if !account.AutoTopup || model.IsProNetwork(self.ctx, account.NetworkId) {
-		// Pro already, or the customer turned it off: the error is final
+	if !account.AutoTopup || model.IsProNetwork(self.ctx, account.NetworkId) ||
+		model.GetGammaProCoverEnd(self.ctx, account.NetworkId, self.now, &time.Time{}).After(self.now) {
+		// Pro already, a Pro subscription that pays for (or still bills) now
+		// without the entitlement showing yet, or the customer turned it off:
+		// the error is final, and no second Pro is bought for the same days
 		model.ClearGammaSeatDemand(self.ctx, account.NetworkId)
 		return
 	}
