@@ -198,19 +198,19 @@ func TestCacheMaintenanceUnitStartsIndependentlyInsideExistingBudget(t *testing.
 		t.Fatal(err)
 	}
 	for _, required := range []string{"Slice=urnetwork-management-private.slice\n", "MemoryMax=33554432\n", "MemorySwapMax=0\n", "Restart=no\n",
+		"Type=exec\n", " --serve\n", "TasksMax=32\n", "TimeoutStopSec=20.000000s\n", "WantedBy=multi-user.target\n",
 		"CapabilityBoundingSet=\n", "ReadOnlyPaths=/sys/fs/cgroup\n", "ReadWritePaths=" + cachePrivatePath + "/" + cacheEngineName + "/memory.reclaim\n"} {
 		if !strings.Contains(service, required) {
 			t.Fatal("bounded companion unit omitted its existing-resource confinement", required)
 		}
 	}
-	for _, forbidden := range []string{"--serve", "--start", "--cancel", "memory.max=", "drop_caches", "Requires=", "ExecStartPre="} {
+	for _, forbidden := range []string{" --once", "--start", "--cancel", "memory.max=", "drop_caches", "Requires=", "ExecStartPre=", "RuntimeMaxSec=", "Type=oneshot", "OnUnitInactiveSec="} {
 		if strings.Contains(service, forbidden) {
 			t.Fatal("maintenance introduced an admission cycle or another mutation", forbidden)
 		}
 	}
-	timer, err := renderCacheUnit(settings, "", false)
-	if err != nil || !strings.Contains(timer, "OnUnitInactiveSec=") || !strings.Contains(timer, "Unit=urnetwork-management-cache.service\n") {
-		t.Fatal("timer can overlap or escape its joined service owner", err)
+	if timer, err := renderCacheUnit(settings, "", false); err == nil || timer != "" {
+		t.Fatal("legacy timer could recreate transient cgroups or restart a held owner", err)
 	}
 	if _, err := renderCacheUnit(settings, "/synthetic/settings%other.json", true); err == nil {
 		t.Fatal("settings path expanded manager authority")

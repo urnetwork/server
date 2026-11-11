@@ -78,6 +78,12 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 		}
 		return agent.RecoverActive(ctx)
 	}
+	if parsed.closeLegacyPrelaunch {
+		if os.Geteuid() != 0 {
+			return errors.New("legacy prelaunch closure requires the fixed root recovery role")
+		}
+		return competitionagent.RecoverLegacyPrelaunch(ctx, parsed.configPath)
+	}
 	if parsed.serve {
 		if err := competitionagent.VerifyManagedControlPlacement(ctx, parsed.configPath); err != nil {
 			return err
