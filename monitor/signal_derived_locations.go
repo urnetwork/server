@@ -63,10 +63,17 @@ type DerivedLocationsSettings struct {
 	// below it the refusal, verdict and wire shares are noise
 	DeriveMinPingSamples int
 
-	// refusals: rejected pings, and rate-limited ones (reason 6), as shares of
-	// the hour's verdicts
+	// refusals: rejected pings, as a share of the hour's verdicts, both
+	// without the refusals that are evidence against no one -- an unknown
+	// pinger (reason 4) and a rate limit (reason 6), which the derive leaves
+	// out of every refusal rate; and rate-limited ones, as a share of every
+	// verdict of the hour
 	DeriveMaxRefusalShare     float64
 	DeriveMaxRateLimitedShare float64
+
+	// stale directories: extender pingers their targets refused as unknown
+	// (reason 4), as a share of the hour's extender-pinger verdicts
+	DeriveMaxUnknownPingerShare float64
 
 	// no verdicts: pings without a verdict, as a share of the hour's pings
 	DeriveMaxUnknownShare float64
@@ -164,6 +171,8 @@ func DefaultDerivedLocationsSettings() *DerivedLocationsSettings {
 		DeriveMaxRefusalShare:     0.10,
 		DeriveMaxRateLimitedShare: 0.05,
 
+		DeriveMaxUnknownPingerShare: 0.30,
+
 		DeriveMaxUnknownShare: 0.30,
 
 		DeriveMinNodeSamples: 20,
@@ -234,13 +243,20 @@ type derivedLocationsTable struct {
 
 // One hour of pings (§2.19c's second query).
 type derivedLocationsPingHour struct {
-	cosigned         int64
-	rejected         int64
-	rateLimited      int64
+	cosigned    int64
+	rejected    int64
+	rateLimited int64
+	// refused because the target does not know the pinger (reason 4), every
+	// pinger kind
+	unknownPinger    int64
 	unknown          int64
 	relayed          int64
 	zeroRtt          int64
 	beyondHalfPlanet int64
+	// the extender pingers' verdicts, and their refusals as unknown pingers
+	extenderCosigned      int64
+	extenderRejected      int64
+	extenderUnknownPinger int64
 }
 
 // Every ping of the hour: co-signed, rejected, or without a verdict.
@@ -253,15 +269,43 @@ func (self derivedLocationsPingHour) verdicts() int64 {
 	return self.cosigned + self.rejected
 }
 
+// The refusals the refused share counts: every refusal but the two that are
+// evidence against no one, a pinger the target does not know (reason 4) --
+// usually a directory that has not caught up -- and a probe refused for rate
+// (reason 6), usually an NLayer front's shared address. The derive leaves
+// both out of every refusal rate (derivePingRefusalIsEvidence), and a stale
+// directory refuses most extender pingers for the first: counted, it reads as
+// targets refusing honest claims. A refusal that names no reason, which a
+// pinger records for an acceptance whose co-signature did not verify, is kept,
+// since that is a key fault.
+func (self derivedLocationsPingHour) countedRefusals() int64 {
+	return max(0, self.rejected-self.unknownPinger-self.rateLimited)
+}
+
+// The verdicts the refused share is over: the co-signed ones and the counted
+// refusals.
+func (self derivedLocationsPingHour) countedVerdicts() int64 {
+	return self.cosigned + self.countedRefusals()
+}
+
+// The extender pingers' pings of the hour a target gave a verdict on.
+func (self derivedLocationsPingHour) extenderVerdicts() int64 {
+	return self.extenderCosigned + self.extenderRejected
+}
+
 // Adds another hour's counts.
 func (self *derivedLocationsPingHour) add(other derivedLocationsPingHour) {
 	self.cosigned += other.cosigned
 	self.rejected += other.rejected
 	self.rateLimited += other.rateLimited
+	self.unknownPinger += other.unknownPinger
 	self.unknown += other.unknown
 	self.relayed += other.relayed
 	self.zeroRtt += other.zeroRtt
 	self.beyondHalfPlanet += other.beyondHalfPlanet
+	self.extenderCosigned += other.extenderCosigned
+	self.extenderRejected += other.extenderRejected
+	self.extenderUnknownPinger += other.extenderUnknownPinger
 }
 
 // The day of pings, by hour.
@@ -430,28 +474,34 @@ func queryDerivedLocationsTable(ctx context.Context, env *probeEnv, settings *De
 // day's partition of network_ping is 275 GiB. The day is the 24 clock hours up
 // to and including the current one, and the beyond-half-planet count is the
 // tally's own, taken at the ingest's threshold, which DeriveHalfPlanetRttMs
-// follows by default.
+// follows by default. The tally keeps the refusal reason and the pinger kind,
+// so the unknown pingers are counted apart, and the extender pingers' too.
 func derivedLocationsPingsQuery(settings *DerivedLocationsSettings) string {
 	return fmt.Sprintf(`
 /* monitor-signal-2.19c-derived-locations-pings */
 SELECT hour,
        hour = date_trunc('hour', now() AT TIME ZONE 'utc') - interval '1 hour' AS last_complete_hour,
-       COALESCE(sum(ping_count) FILTER (WHERE cosign = %d), 0)::bigint AS cosigned,
-       COALESCE(sum(ping_count) FILTER (WHERE cosign = %d), 0)::bigint AS rejected,
-       COALESCE(sum(ping_count) FILTER (WHERE cosign = %d AND cosign_reason = %d), 0)::bigint AS rate_limited,
-       COALESCE(sum(ping_count) FILTER (WHERE cosign = %d), 0)::bigint AS unknown,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = %[1]d), 0)::bigint AS cosigned,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = %[2]d), 0)::bigint AS rejected,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = %[2]d AND cosign_reason = %[4]d), 0)::bigint AS rate_limited,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = %[3]d), 0)::bigint AS unknown,
        COALESCE(sum(ping_count) FILTER (WHERE relayed), 0)::bigint AS relayed,
        sum(zero_rtt_count)::bigint AS zero_rtt,
-       sum(beyond_half_planet_count)::bigint AS beyond_half_planet
+       sum(beyond_half_planet_count)::bigint AS beyond_half_planet,
+       COALESCE(sum(ping_count) FILTER (WHERE cosign = %[2]d AND cosign_reason = %[5]d), 0)::bigint AS unknown_pinger,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = %[6]d AND cosign = %[1]d), 0)::bigint AS extender_cosigned,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = %[6]d AND cosign = %[2]d), 0)::bigint AS extender_rejected,
+       COALESCE(sum(ping_count) FILTER (WHERE pinger_kind = %[6]d AND cosign = %[2]d AND cosign_reason = %[5]d), 0)::bigint AS extender_unknown_pinger
 FROM network_ping_hour_tally
 WHERE date_trunc('hour', now() AT TIME ZONE 'utc') - interval '23 hours' <= hour
 GROUP BY hour ORDER BY hour;
 `,
 		model.NetworkPingCosignCosigned,
 		model.NetworkPingCosignRejected,
-		model.NetworkPingCosignRejected,
-		connect.ExtenderProbeVerdictReasonRateLimited,
 		model.NetworkPingCosignUnknown,
+		connect.ExtenderProbeVerdictReasonRateLimited,
+		connect.ExtenderProbeVerdictReasonUnknownPinger,
+		model.NetworkPingPingerKindExtender,
 	)
 }
 
@@ -465,10 +515,10 @@ func queryDerivedLocationsPings(ctx context.Context, env *probeEnv, settings *De
 	pings := derivedLocationsPings{}
 	lastHours := 0
 	for _, row := range rows {
-		if len(row) != 9 {
-			return derivedLocationsPings{}, fmt.Errorf("derived-location pings: expected 9 columns, got %d", len(row))
+		if len(row) != 13 {
+			return derivedLocationsPings{}, fmt.Errorf("derived-location pings: expected 13 columns, got %d", len(row))
 		}
-		values := [7]int64{}
+		values := [11]int64{}
 		for i := range values {
 			value, err := parseStrictInt64(row.str(2 + i))
 			if err != nil {
@@ -477,13 +527,17 @@ func queryDerivedLocationsPings(ctx context.Context, env *probeEnv, settings *De
 			values[i] = value
 		}
 		hour := derivedLocationsPingHour{
-			cosigned:         values[0],
-			rejected:         values[1],
-			rateLimited:      values[2],
-			unknown:          values[3],
-			relayed:          values[4],
-			zeroRtt:          values[5],
-			beyondHalfPlanet: values[6],
+			cosigned:              values[0],
+			rejected:              values[1],
+			rateLimited:           values[2],
+			unknown:               values[3],
+			relayed:               values[4],
+			zeroRtt:               values[5],
+			beyondHalfPlanet:      values[6],
+			unknownPinger:         values[7],
+			extenderCosigned:      values[8],
+			extenderRejected:      values[9],
+			extenderUnknownPinger: values[10],
 		}
 		pings.day.add(hour)
 		pings.dayHours += 1
@@ -700,7 +754,7 @@ func derivedLocationsFinding(class string, frame string, sustain int) finding {
 	}
 }
 
-// Judges the thirteen conditions of §2.19c. Each condition emits its failing
+// Judges the fourteen conditions of §2.19c. Each condition emits its failing
 // parts, or one healthy finding when none fails, or nothing when its evidence
 // is unobservable: a healthy finding resolves every open part of its class, so
 // it must never stand in for "unknown".
@@ -821,21 +875,28 @@ func evaluateDerivedLocations(
 
 	pingSamples := int64(settings.DeriveMinPingSamples)
 
-	// refusals
+	// refusals: an unknown pinger and a rate limit are evidence against no one,
+	// so the refused share leaves both out, as the derive does; the unknown
+	// pingers are the stale-directory condition's, and the rate limits are the
+	// rate-limited part's, over every verdict
 	{
 		failing := []finding{}
-		verdicts := pings.lastHour.verdicts()
-		if pingSamples <= verdicts {
-			if share := derivedLocationsShare(pings.lastHour.rejected, verdicts); settings.DeriveMaxRefusalShare < share {
+		countedVerdicts := pings.lastHour.countedVerdicts()
+		if pingSamples <= countedVerdicts {
+			countedRefusals := pings.lastHour.countedRefusals()
+			if share := derivedLocationsShare(countedRefusals, countedVerdicts); settings.DeriveMaxRefusalShare < share {
 				f := derivedLocationsFinding("derive-refusals", "rejected", 1)
-				f.symptom = "Targets refuse an unusual share of ping claims"
-				f.mechanism = "A refusal is never a measurement. A high share is targets refusing honest claims -- the gate tolerance, clock skew -- or pingers under-claiming; either way the solve loses the measurements and the refusal rates skew every source's reputation."
-				f.baseline = fmt.Sprintf("Rejected pings at most DeriveMaxRefusalShare=%.2f of the last complete hour's verdicts.", settings.DeriveMaxRefusalShare)
-				f.observed = fmt.Sprintf("rejected_last_hour=%d verdicts_last_hour=%d share=%.4f threshold=DeriveMaxRefusalShare=%.2f", pings.lastHour.rejected, verdicts, share, settings.DeriveMaxRefusalShare)
-				f.action = "Read the refusal reasons on the extenders dashboard: rtt below observed is the gate tolerance or a clock, nonce and wrong extender are the probe path, a bad signature is a key mismatch. Fix the path, not the threshold."
+				f.symptom = "Targets refuse an unusual share of ping claims on their merits"
+				f.mechanism = "A refusal is never a measurement. Left out are the refusals that are evidence against no one, an unknown pinger (reason 4) and a rate limit (reason 6), which the derive leaves out of every refusal rate too. What remains is targets refusing honest claims -- the gate tolerance, clock skew -- pingers under-claiming, the probe path, or a key mismatch; the solve loses the measurements, and the refusals the derive counts as evidence mark down the reputation of the parties involved."
+				f.baseline = fmt.Sprintf("Rejected pings, less unknown pingers and rate limits, at most DeriveMaxRefusalShare=%.2f of the last complete hour's verdicts less the same.", settings.DeriveMaxRefusalShare)
+				f.observed = fmt.Sprintf("rejected_last_hour=%d verdicts_last_hour=%d share=%.4f threshold=DeriveMaxRefusalShare=%.2f excluded_unknown_pinger=%d excluded_rate_limited=%d", countedRefusals, countedVerdicts, share, settings.DeriveMaxRefusalShare, pings.lastHour.unknownPinger, pings.lastHour.rateLimited)
+				f.action = "Read the refusals by reason on the extenders dashboard: rtt_below_observed is the gate tolerance, a clock or a pinger under-claiming; nonce and wrong_extender are the probe path; bad_signature, and a refusal with no reason (none), are a key mismatch. Fix the path, not the threshold."
 				f.verify = "The next complete hour's rejected share falls under the threshold."
 				failing = append(failing, f)
 			}
+		}
+		verdicts := pings.lastHour.verdicts()
+		if pingSamples <= verdicts {
 			if share := derivedLocationsShare(pings.lastHour.rateLimited, verdicts); settings.DeriveMaxRateLimitedShare < share {
 				f := derivedLocationsFinding("derive-refusals", "rate-limited", 1)
 				f.symptom = "Targets refuse an unusual share of ping claims for rate"
@@ -848,6 +909,30 @@ func evaluateDerivedLocations(
 			}
 		}
 		emit("derive-refusals", failing)
+	}
+
+	// stale directories: a target refuses an extender pinger whose record it
+	// does not hold, so a high share of these is record distribution failing.
+	// Gossip publishing stopped on 2026-11-06, the records lapsed a day later,
+	// and unknown pingers became 87% of the extender pingers' verdicts while
+	// nothing alerted
+	{
+		failing := []finding{}
+		extenderVerdicts := pings.lastHour.extenderVerdicts()
+		if pingSamples <= extenderVerdicts {
+			if share := derivedLocationsShare(pings.lastHour.extenderUnknownPinger, extenderVerdicts); settings.DeriveMaxUnknownPingerShare < share {
+				f := derivedLocationsFinding("extender-directories-stale", "", 1)
+				f.symptom = "Extender directories are stale: targets do not know an unusual share of the extenders that ping them"
+				f.mechanism = "A target refuses an extender pinger as unknown (reason 4) when the pinger's operator-signed record is not active in the target's directory. Directories are filled by gossip publishing, the DNS TXT records, extender feeds and each activation's own record and bootstrap sample, and a record lives 24 hours, so about a day after publishing stops every record has lapsed and a target knows only the few peers its own activations returned. These refusals are evidence against no one, and the derive leaves them out, but they are the end-to-end sign that record distribution has failed, and the same lapse leaves new extenders undiscoverable."
+				f.baseline = fmt.Sprintf("Extender pingers refused as unknown at most DeriveMaxUnknownPingerShare=%.2f of the last complete hour's extender-pinger verdicts. With records flowing a target knows its pingers; every refusal of an extender pinger together was 8-12%% of its pings before gossip publishing stopped on 2026-11-06, and unknown pingers alone were 87%% of the verdicts after the records lapsed.", settings.DeriveMaxUnknownPingerShare)
+				f.observed = fmt.Sprintf("unknown_pinger_last_hour=%d extender_verdicts_last_hour=%d share=%.4f threshold=DeriveMaxUnknownPingerShare=%.2f extender_cosigned_last_hour=%d extender_rejected_last_hour=%d", pings.lastHour.extenderUnknownPinger, extenderVerdicts, share, settings.DeriveMaxUnknownPingerShare, pings.lastHour.extenderCosigned, pings.lastHour.extenderRejected)
+				f.context = fmt.Sprintf("day: extender_unknown_pinger=%d extender_verdicts=%d share=%.4f hours_with_pings=%d", pings.day.extenderUnknownPinger, pings.day.extenderVerdicts(), derivedLocationsShare(pings.day.extenderUnknownPinger, pings.day.extenderVerdicts()), pings.dayHours)
+				f.action = "Directories are stale: check gossip and DNS publishing. Gossip: on the extenders dashboard's gossip network row, a growing oldest pending record and no records released in 24 hours mean publishing has stopped; a drained queue reaches the directories only through extender devices that join the gossip mesh. DNS: the extender TXT records the DNS publish serves (the dns records row). The targets are refusing as designed: do not loosen the probe gate."
+				f.verify = "The next complete hour's unknown-pinger share falls under the threshold once records flow again."
+				failing = append(failing, f)
+			}
+		}
+		emit("extender-directories-stale", failing)
 	}
 
 	// no verdicts

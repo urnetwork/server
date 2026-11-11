@@ -66,7 +66,7 @@ func derivedLocationsSchemaContract() probeSchemaContract {
 		"crossed_region", "boolean", "crossed_country", "boolean", "peer_count", "integer",
 		"residual_km", "real", "reputation", "real", "update_time", "timestamp without time zone")
 	schema.table("network_ping_hour_tally",
-		"hour", "timestamp without time zone", "cosign", "smallint", "cosign_reason", "smallint", "relayed", "boolean",
+		"hour", "timestamp without time zone", "pinger_kind", "smallint", "cosign", "smallint", "cosign_reason", "smallint", "relayed", "boolean",
 		"ping_count", "bigint", "zero_rtt_count", "bigint", "beyond_half_planet_count", "bigint")
 	schema.table("pending_task", "function_name", "character varying", "reschedule_error_count", "integer", "run_at", "timestamp without time zone")
 	schema.table("network_extender", "active", "boolean")

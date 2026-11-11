@@ -408,6 +408,7 @@ var alertClassKinds = map[string]alertClassKind{
 	"egress-tls-judge-stale":                              incidentAlertClass,
 	"zero-carry-verdict-spike":                            incidentAlertClass,
 	"escrow-zero-byte-writes":                             incidentAlertClass,
+	"extender-directories-stale":                          incidentAlertClass,
 	"failed_window_events":                                incidentAlertClass,
 	"family-growth":                                       incidentAlertClass,
 	"framer-message-too-large":                            incidentAlertClass,
