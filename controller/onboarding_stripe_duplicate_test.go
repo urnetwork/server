@@ -24,6 +24,13 @@ func TestSubscriptionMarketsBlockNewPurchase(t *testing.T) {
 		{"manual grant only", []model.SubscriptionMarket{model.SubscriptionMarketManual}, false},
 		{"x402 only", []model.SubscriptionMarket{model.SubscriptionMarketX402}, false},
 		{"manual and stripe", []model.SubscriptionMarket{model.SubscriptionMarketManual, model.SubscriptionMarketStripe}, true},
+		{"monero year", []model.SubscriptionMarket{model.SubscriptionMarketMonero}, false},
+		{"zcash year", []model.SubscriptionMarket{model.SubscriptionMarketZcash}, false},
+		// mmm/ONBOARDING-RETENTION.md P17: a USDC year never renews either, and
+		// it blocked the card checkout its own renewal notices sent the buyer
+		// to, through the 30-day grace
+		{"usdc year", []model.SubscriptionMarket{model.SubscriptionMarketSolana}, false},
+		{"usdc year and stripe", []model.SubscriptionMarket{model.SubscriptionMarketSolana, model.SubscriptionMarketStripe}, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
