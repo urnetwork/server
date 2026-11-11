@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"slices"
 	"testing"
 
 	"github.com/urnetwork/server"
@@ -202,7 +203,12 @@ func TestContractExtenderPartiesAreOnlyTheTagsThatCanBeRelays(t *testing.T) {
 			if err != nil {
 				t.Fatalf("%s: create escrow: %v", test.name, err)
 			}
-			assertContractExtenderParties(t, ctx, test.name, escrow.ContractId, test.wantParties)
+			// every case is reported, not only the first that differs
+			want := slices.Clone(test.wantParties)
+			slices.SortFunc(want, compareTestContractExtenderParties)
+			if got := testContractExtenderParties(t, ctx, escrow.ContractId); !slices.Equal(got, want) {
+				t.Errorf("%s: extender parties = %v, want %v", test.name, got, want)
+			}
 		}
 	})
 }
