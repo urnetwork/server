@@ -186,6 +186,12 @@ second grant in one cycle.
 - Order: migrate, then the taskworker, then api and alt. Rows that an old api
   writes in between have no `paid_end_time`; the sweep reads them as legacy
   rows and grants within the hour. No config release.
+- Finish the taskworker rollout before 2026-12-01 00:00 UTC, with no old
+  taskworker left running then. An old binary that claims the monthly task's
+  12-01 row grants every Pro network 10 TiB, deduplicated per run, not per
+  network, on top of the cycle grants the new sweep and api have written. If
+  no new binary is deployed by then, nothing doubles: the 12-01 grant is a
+  legacy grant and the per-cycle grants start on 01-01 instead.
 
 ## Accounting notes
 
