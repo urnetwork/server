@@ -865,3 +865,56 @@ func TestCryptoQuotePricesAnItemWithoutAnInvoice(t *testing.T) {
 	cryptoTestRates(t, map[string]map[string]float64{cryptoRateSourceKraken: {model.CryptoAssetBtc: 73596.90}})
 	connect.AssertEqual(t, refusal(&CryptoPaymentQuoteArgs{Asset: model.CryptoAssetBtc, ItemId: StripeItemData1Tib}), PurchaseErrorCodeAssetUnavailable)
 }
+
+// The screen with the real list loader (cryptosanctions.Match) on its
+// checked-in table of 2026-11-09: a listed Bitcoin input holds the payment
+// with the table's version, an unlisted one passes, an address the list
+// cannot read holds it as unscreenable, and a listed refund destination is
+// refused.
+func TestCryptoScreeningWithTheSanctionsTable(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join("..", "cryptosanctions", "testdata", "config")
+	err := filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		relative, _ := filepath.Rel(source, path)
+		target := filepath.Join(root, relative)
+		if info.IsDir() {
+			return os.MkdirAll(target, 0o755)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		return os.WriteFile(target, data, 0o644)
+	})
+	connect.AssertEqual(t, err, nil)
+	t.Setenv("WARP_CONFIG_HOME", root)
+	t.Setenv("WARP_ENV", "test")
+
+	connect.AssertEqual(t, cryptoScreenRefundDestination(model.CryptoAssetSol, "42RLPACwZPx3vYYmxSueqsogfynBDqXK298EDsNoyoHi") != nil, true)
+	connect.AssertEqual(t, cryptoScreenRefundDestination(model.CryptoAssetSol, "4Fj9RCwJqHLdLNK28DwWHunHqWapxKbbzeYZLmreSYCM"), nil)
+	connect.AssertEqual(t, cryptoScreenRefundDestination(model.CryptoAssetEth, "0x1CAB8177ACE78B1B6B1C393371F4F2DCAE40CBEB") != nil, true)
+
+	outcome, reason, version := cryptoScreenSenders(model.CryptoAssetBtc, []string{"bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u", "12QtD5BFwRsdNsAZY76UVE1xyCGNTojH9h"})
+	connect.AssertEqual(t, outcome, cryptoScreenHeld)
+	connect.AssertEqual(t, reason, model.CryptoReviewReasonSanctionsHold)
+	connect.AssertEqual(t, version, "2026.11.9+1")
+	outcome, _, version = cryptoScreenSenders(model.CryptoAssetBtc, []string{"bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u"})
+	connect.AssertEqual(t, outcome, cryptoScreenClean)
+	connect.AssertEqual(t, version, "2026.11.9+1")
+	outcome, reason, _ = cryptoScreenSenders(model.CryptoAssetBtc, []string{"not-an-address"})
+	connect.AssertEqual(t, outcome, cryptoScreenHeld)
+	connect.AssertEqual(t, reason, model.CryptoReviewReasonScreeningUnavailable)
+	// TAO accounts compare under any SS58 prefix (the table's synthetic entry)
+	outcome, reason, _ = cryptoScreenSenders(model.CryptoAssetTao, []string{"15oF4uVJwmo4TdGW7VfQxNLavjCXviqxT9S1MgbjMNHr6Sp5"})
+	connect.AssertEqual(t, outcome, cryptoScreenHeld)
+	connect.AssertEqual(t, reason, model.CryptoReviewReasonSanctionsHold)
+
+	// no table at all: every screen holds
+	t.Setenv("WARP_CONFIG_HOME", t.TempDir())
+	outcome, reason, _ = cryptoScreenSenders(model.CryptoAssetBtc, []string{"bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u"})
+	connect.AssertEqual(t, outcome, cryptoScreenHeld)
+	connect.AssertEqual(t, reason, model.CryptoReviewReasonScreeningUnavailable)
+}

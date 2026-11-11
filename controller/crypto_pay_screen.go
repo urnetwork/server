@@ -17,9 +17,10 @@ package controller
 //     credit waits for the next scan.
 //
 // The list is the newest config/all/crypto/<release>/ table, which cryptoctl
-// refreshes on every release build; the cryptosanctions package reads it. The
-// buyer sees only "screening" for either hold. Logs name the invoice and the
-// list version, never an address.
+// refreshes on every release build; the cryptosanctions package reads it
+// (Match: a missing or unreadable table, or an address the list cannot read,
+// is an error, and the payment is held). The buyer sees only "screening" for
+// either hold. Logs name the invoice and the list version, never an address.
 
 import (
 	"context"
@@ -29,6 +30,7 @@ import (
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/cryptosanctions"
 	"github.com/urnetwork/server/model"
 )
 
@@ -36,7 +38,7 @@ import (
 // whichever the hold: what the screen found is for the operator.
 const CryptoReviewReasonScreening = "screening"
 
-// The list could not be read: no table in this build or deploy.
+// The list could not be read (tests stand in for cryptosanctions' own errors).
 var errCryptoSanctionsListUnavailable = errors.New("the sanctions list is not loaded")
 
 // The receipts' state write of a hold or a release. Replaceable only by tests.
@@ -45,9 +47,7 @@ var cryptoSetReceiptsState = model.SetCryptoPaymentReceiptsStateInConn
 // cryptoSanctionsMatch looks one address of a coin up in OFAC's list: matched,
 // the list's version, or why the address could not be screened. Replaceable
 // only by tests.
-var cryptoSanctionsMatch = func(asset string, address string) (matched bool, listVersion string, err error) {
-	return false, "", errCryptoSanctionsListUnavailable
-}
+var cryptoSanctionsMatch = cryptosanctions.Match
 
 type cryptoScreenOutcome int
 
