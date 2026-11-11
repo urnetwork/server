@@ -23019,12 +23019,13 @@ disposition.
   TAO only when they ask, to the address in their request (the owner,
   2026-11-11), with the hotkey's key from the deposit master seed on the
   owner's machine.
-- `gamma-billing-paused` (PAGE after three ticks, 15 minutes): the biller's
-  readiness is not `ready` while customers depend on billing: an intent is
-  open, a charge is pending or spent and not credited, or an account that
-  pays with gamma has an automatic charge on (a paused biller makes no
-  renewal, so a term ending meanwhile renews only if billing resumes within
-  its grace). The readiness word names the cause, and the alert the remedy:
+- `gamma-billing-paused` (PAGE once it holds for three five-minute ticks):
+  the biller's readiness is not `ready` while customers depend on billing: an
+  intent is open, a charge is pending or spent and not credited, or an
+  account that pays with gamma has an automatic charge on (a paused biller
+  makes no renewal, so a term ending meanwhile renews only if billing resumes
+  within its grace). The readiness word names the cause, and the alert the
+  remedy:
   `not_configured` (deliver `gamma.yml` with `billing_key_seed` to the
   taskworker hosts), `chain_unreachable` and `watcher_behind` (the RPC
   endpoint), `runtime_unsupported`, `service_not_published` and
