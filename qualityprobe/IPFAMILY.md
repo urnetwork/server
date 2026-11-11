@@ -65,10 +65,11 @@ same rule (`model.ProviderIpFamilyOfProven`, `ClientScore.IpFamily`):
 
 1. the IPv4 HTTPS leg, through the URL's A record (today's leg, unchanged);
 2. its HTTP/3 leg, once it passed, for a URL that declares h3 (H3.md);
-3. for a provider that advertises IPv6, on a URL that declares `ipv6: true`,
-   the IPv6 HTTPS leg through the URL's AAAA record, once the IPv4 HTTPS leg
-   passed;
-4. its HTTP/3 leg over IPv6, once that passed, for an h3 URL.
+3. for a provider that advertises IPv6, the IPv6 HTTPS leg through an AAAA
+   record, once the IPv4 HTTPS leg passed: the URL's own when it declares
+   `ipv6: true`, else a stand-in's (below);
+4. its HTTP/3 leg over IPv6, once that passed, when the URL it loads declares
+   h3.
 
 A silent IPv4 HTTP/3 leg does not stop the IPv6 legs: whether that silence
 counts is the server's place judgement. Every leg after the first gets the
@@ -76,7 +77,9 @@ ordinary per-request timeout (10 s), as the HTTP/3 leg does.
 
 **Forcing a family.** Each leg carries its family on its request context, and
 the provider transport's grant (`ProviderUrlProbeFamilyContext`, the URL
-grant per family) scopes every hop, redirects included. The tunnel's resolver
+grant per family) scopes every hop, redirects included: an IPv6 leg's
+redirect to a host without AAAA (the survey's `mail-ru`, whose probe ends at
+`login.vk.ru`) is never dialed over IPv4. The tunnel's resolver
 then asks only that family's record (A or AAAA), keeps only that family's
 answers (an IPv4-mapped AAAA answer is IPv4, and dropped), refuses any that is
 not public in the family (for IPv6: 2000::/3 outside 2001::/23, 2001:db8::/32,
@@ -104,15 +107,29 @@ was. No connect or sdk change is needed: a real local dual-stack provider
 carries all four legs end to end (`TestIpv6LegsThroughALocalDualStackProvider`).
 
 **Choosing the URL.** The draw is the catalog's, as today, whatever the
-provider advertises, less URLs that serve no IPv4 (`ipv4: false`). Each family
-the URL serves then gets its legs; a family it does not serve is not measured
-on that turn (`no_url`), never failed. So a URL without AAAA is never used for
-an IPv6 leg, the IPv4 judgement of a dual-stack provider rests on the same
-catalog as everyone's, and marking URLs `ipv6: true` raises the share of a
-dual-stack provider's turns that test IPv6 gradually, which is how the rollout
-is staged. (Drawing only URLs that serve both families would put every
-dual-stack turn on the handful of URLs marked first and fail every turn of a
-provider with broken IPv6, which `no_success` turns into an Online removal.)
+provider advertises, less URLs that serve no IPv4 (`ipv4: false`): the IPv4
+judgement of a dual-stack provider rests on the same catalog as everyone's.
+The IPv6 legs load that URL when it declares `ipv6: true`. When it does not,
+the turn's own draw (the same seeded generator, right after the URL) picks a
+**stand-in**: one of the turn's lane's URLs that serve IPv6 alone
+(`ipv6: true`, `ipv4: false`, such as the IPv6-literal twin of the
+IPv4-literal `cloudflare-trace`; the country lane's when it has any, else the
+general lane's, each already filtered by the provider's place). With no such
+URL in the lane the family is not measured on that turn (`no_url`), never
+failed. So a URL without AAAA is never used for an IPv6 leg, an `ipv4: false`
+URL is loaded only as a stand-in and never as a load's URL, and a URL that
+serves both families is loaded as itself and never stands in: a catalog
+without `ipv4: false` URLs (config main today) measures IPv6 exactly on the
+turns whose URL has AAAA, and the `ipv6` marks stage the rollout as `h3`'s
+did. Each `ipv4: false` URL added makes the IPv6 legs of every turn whose URL
+has no AAAA (39% of general destinations at f2a627a's marks) load one, so it
+is a rollout step of its own. The evidence names the stand-in
+(`ipv6.destination`); the IPv6 place evidence and verdicts are the stand-in's
+(`UrlProbeEvidence.Ipv6Destination`), the IPv4 HTTP/3 leg's stay the load's
+URL's. A security recheck makes no IPv6 leg.
+(Drawing only URLs that serve both families would put every dual-stack turn
+on the handful of URLs marked first and fail every turn of a provider with
+broken IPv6, which `no_success` turns into an Online removal.)
 
 **Pass means every leg passes.** A load passes when its IPv4 HTTPS leg passed,
 its IPv4 HTTP/3 leg proved UDP (passed or answered, H3.md), and its IPv6 legs
@@ -121,10 +138,17 @@ load's stage (`h3`, then `ipv6`). An IPv6 leg is **failed** when it resolved
 the AAAA record and dialed the site over IPv6 and did not get the URL's
 contract (connect failure, TLS failure, timeout, content or performance), or
 when its HTTP/3 leg was silent. It is **not measured** when it never reached
-the site: an empty AAAA answer from the provider's place (CDNs answer AAAA in
-some regions only), a resolver failure (it runs over the provider's IPv4 path
-the load just used), a non-public answer, an instrument with no IPv6 path, or
-the tunnel's loss or the run's end cutting it short. Unlike an HTTP/3 leg that
+the site: an empty AAAA answer from the provider's place, for the URL or a
+redirect hop of it (CDNs answer AAAA in some regions or to some resolvers
+only: the survey's `bunny.net` and `flipkart`), a resolver failure (it runs
+over the provider's IPv4 path the load just used), a non-public answer, an
+instrument with no IPv6 path, or the tunnel's loss or the run's end cutting it
+short. An empty AAAA answer is the URL's outcome, never the provider's, as a
+TLS finding judged `site` is: the leg says `no_aaaa` in its evidence, and the
+taskworker counts it against the URL it loaded
+(`urnetwork_url_probe_ipv6_destination_legs_total{destination,outcome}`,
+passed, failed, no_aaaa, not_measured; dashboard "IPv6 legs by URL"), which is
+where a mark that should go shows. Unlike an HTTP/3 leg that
 is not measured, which leaves the whole load unmeasured (H3.md), IPv6 never
 leaves a load unmeasured: the load stands on its IPv4 legs, so a dual-stack
 provider never loses its IPv4 measurement to a URL's AAAA.
@@ -135,9 +159,35 @@ the refresh's prober-fault line, TLS findings and site retirement read. A
 provider that advertises IPv6 alone has none: the claim does not issue such a
 provider (1 public v6-only provider was connected on Main on 2026-11-11), and
 the prober reports it not measured should one be asked for, using no A record
-and making no request. For the same reason a URL with `ipv4: false` is not
-drawn. Probing them needs an outcome whose primary leg is IPv6, which none of
-those readers knows; that is an owner decision (below).
+and making no request. Probing it needs an outcome whose primary leg is IPv6,
+which none of those readers knows; that is an owner decision (below). A URL
+with `ipv4: false` is never a load's URL for the same reason, and serves the
+IPv6 legs of the turns whose URL has no AAAA (above). It has no site tally,
+so the pool refresh never judges, graduates or retires it, and a TLS finding
+over IPv6 is never stored for it.
+
+**HTTP/3 handshakes lost over IPv6.** The survey saw Cloudflare's QUIC edge
+leave 11 of 535 IPv6 handshakes unanswered from one vantage (none of 1494 over
+IPv4; TCP to the same addresses never failed), though quic-go resent the
+Initial. The tunnel makes a handshake that heard not one datagram back within
+its own 3 s bound once more on a fresh socket, so a new source port, to the
+same address, with what is left of the leg's 10 s (`dialQuic`, both
+families); a path without UDP is silent twice and the leg reports `dial_quic`
+after two sockets, a handshake the site answered or the request's deadline
+ended is not retried, and
+`urnetwork_provider_tunnel_quic_handshake_retries_total{family,outcome}`
+(answered, silent, canceled; dashboard "QUIC handshakes retried after
+silence") shows how often a first handshake is lost. A second silence is still
+judged by place. QUIC datagrams over IPv6 are 1232 bytes of UDP payload, 1280
+on the wire, which a link at IPv6's minimum MTU carries; quic-go's default
+(1280 bytes of payload, 1328 on the wire) would not.
+
+**Echo URLs over IPv6.** An echo URL's IPv6 leg returns the exit's IPv6
+address; the leg keeps it to itself. The provider's sampled exit, which the
+prober submits for its location, is read from the loads' IPv4 HTTPS legs
+alone (`collectSampledExit` reads `Result.Checks`, not their nested legs), so
+the families never disagree into no exit, and nothing compares an IPv6 answer
+with an IPv4 address.
 
 ## Judging
 
@@ -219,8 +269,13 @@ this one), and its tests, metric and dashboard target kept.
 document is unchanged:
 
 - `ipv6`: the IPv6 HTTPS leg (`tcp`: passed, failed or not_measured; `verdict`;
-  its classifications, TLS outcome, sizes and timings) and its HTTP/3 leg
-  (`ipv6.h3`, shaped as `h3`);
+  `no_aaaa` when its URL or a redirect hop had no AAAA through the provider;
+  its classifications, TLS outcome, sizes and timings), its HTTP/3 leg
+  (`ipv6.h3`, shaped as `h3`), and `ipv6.destination`, the stand-in the legs
+  loaded when the outcome's URL serves no IPv6 (absent otherwise). The server
+  refuses a stand-in that serves IPv4, one for a URL that serves IPv6 itself,
+  one named like the outcome's URL, an IPv6 HTTP/3 leg on a stand-in without
+  h3, and any outcome whose own URL serves no IPv4;
 - `ip_family`: `dualstack` for a provider that advertised IPv6;
 - `udp_probes_disabled`: true when the country setting turned the UDP legs off.
 
@@ -233,10 +288,21 @@ document is unchanged:
   transport, like the HTTP/3 row's, read as before.
 - `urnetwork_egress_url_ipv6_verdicts_total{transport,verdict}` (ingest).
 - `urnetwork_url_probe_ipv6_common_mode_held_total{transport}`.
+- `urnetwork_url_probe_ipv6_destination_legs_total{destination,outcome}`
+  (taskworker): IPv6 HTTPS legs by the URL they loaded (its own or the
+  stand-in): passed, failed, no_aaaa, not_measured.
+- `urnetwork_provider_tunnel_quic_handshake_retries_total{family,outcome}`
+  (the prober's tunnel): handshakes retried after a silent first one, by how
+  the retry ended.
+- `urnetwork_url_probe_udp_country_disabled_total{country}` (from
+  `qualityprobe/udp-country-switch`): loads the country switch turned UDP off
+  for.
 - The probe log line gains `ipv6=` and `ipv6_h3=`, `h3=` can say
   `country_disabled`, and `failure_stages=` can count `ipv6`; the monitor's
   record pattern (`monitor/tailer.go`) knows all of them.
-- Dashboard "urnetwork / provider quality probes", row "URL legs by IP family".
+- Dashboard "urnetwork / provider quality probes", row "URL legs by IP family":
+  legs by family, transport and outcome; failed IPv6 legs after a passed IPv4
+  leg; IPv6 legs by URL (no AAAA, failed); QUIC handshakes retried.
 
 **Turn budget.** A dual-stack provider's turn can make four legs, so the run
 budget counts four per-request timeouts for it (`Options.RunBudget`), and the
@@ -289,7 +355,11 @@ publication, inside the six-minute renewal headroom with a 20 s margin (was
   `ipv6: true` URL: config main f2a627a marks 74 of the 121 general
   destinations (61%) and 147 of the 211 candidates, so it falls below the 4/5
   ratio into the Online fallback; it is not removed, since its turns on URLs
-  without ipv6 still pass.
+  without ipv6 still pass. Once an `ipv4: false` URL is released (the
+  cloudflare-trace twin, on the config branch), those turns load it over IPv6
+  as a stand-in, so every turn tests IPv6: a provider whose IPv6 is broken
+  where the place rule counts then fails every turn, and `no_success` takes it
+  out of Online, which is what "pass means passing all probes" asks.
 - **Cost.** Each dual-stack turn on a marked URL adds one or two warm-tunnel
   requests; about 1% of turns.
 
@@ -316,7 +386,10 @@ decides the stage:
    GROUP BY 1, 2, 3;
    ```
 
-3. Then mark the rest.
+3. Then mark the rest, and release the `ipv4: false` twin of
+   `cloudflare-trace` (and the six Cloudflare marks the HTTP/3 retry makes
+   safe) from the config branch: from that release every dual-stack turn
+   tests IPv6.
 
 ## Owner decisions
 
@@ -327,9 +400,15 @@ decides the stage:
   networks per country (Sweden's 174 on one), so in most countries IPv6
   failures are excused; a regional or global fallback for countries with fewer
   than 4 dual-stack networks would apply the rule there.
-- Whether to probe IPv6-only providers (and `ipv4: false` URLs): that needs
-  their admission in the claim and eligibility (unchanged since FP2) and an
-  outcome whose primary leg is IPv6, which site tallies, TLS findings and
-  retirement would have to leave out.
+- Whether to probe IPv6-only providers: that needs their admission in the
+  claim and eligibility (unchanged since FP2) and an outcome whose primary leg
+  is IPv6, which site tallies, TLS findings and retirement would have to leave
+  out. (`ipv4: false` URLs are now loaded, as stand-ins.)
+- Whether a URL that serves both families should also stand in for a turn
+  whose URL has no AAAA. That would make every dual-stack turn measure IPv6
+  (today 61% do, at f2a627a's marks) and spread the stand-ins over 74 URLs,
+  but it removes the marks as a rollout lever: any one mark would put IPv6
+  legs on every dual-stack turn. This branch keeps stand-ins to `ipv4: false`
+  URLs; widening them is one line (`urlProbeIpv6StandIns`).
 - Whether an IPv6 transport geolocated to another country than the provider's
   IPv4 one (17 clients today) should affect the provider's place or category.

@@ -473,24 +473,38 @@ type CheckResult struct {
 	// this leg fails, Ok is false, FailureStage is FailureStageH3, Err names
 	// this leg's error, and its own stage is H3.FailureStage (url_h3.go).
 	H3 *CheckResult
-	// Set when a URL probe's provider advertises IPv6 and its URL serves it
-	// (Destination.Ipv6): Ok then needs the IPv6 legs too, unless they were
-	// not measured.
+	// Set when a URL probe's provider advertises IPv6 and the turn has a URL
+	// that serves it, the load's own or its stand-in (url_family.go): Ok then
+	// needs the IPv6 legs too, unless they were not measured.
 	Ipv6Required bool
-	// The IPv6 legs of an Ipv6Required load: its HTTPS leg over the URL's
-	// AAAA record, with that leg's HTTP/3 leg in Ipv6.H3, made only once the
-	// IPv4 HTTPS leg passed. Every other field of this result describes the
-	// IPv4 HTTPS leg; when the IPv6 legs fail, Ok is false, FailureStage is
-	// FailureStageIpv6 unless an IPv4 HTTP/3 leg failed first, and Err names
-	// the IPv6 leg's error (url_family.go).
+	// The IPv6 legs of an Ipv6Required load: the HTTPS leg over the AAAA
+	// record of the URL they load, with that leg's HTTP/3 leg in Ipv6.H3, made
+	// only once the IPv4 HTTPS leg passed. Every other field of this result
+	// describes the IPv4 HTTPS leg; when the IPv6 legs fail, Ok is false,
+	// FailureStage is FailureStageIpv6 unless an IPv4 HTTP/3 leg failed first,
+	// and Err names the IPv6 leg's error (url_family.go).
 	Ipv6 *CheckResult
-	// The provider advertises IPv6 and the URL does not serve it: the family
-	// is not measured on this load, which is judged on its IPv4 legs.
+	// The provider advertises IPv6 and no URL of the turn's lane serves it:
+	// the family is not measured on this load, which is judged on its IPv4
+	// legs.
 	Ipv6NoUrl bool
 	// The URL declares HTTP/3 and the provider's country disables UDP probes
 	// (Pool.CountrySettings): no HTTP/3 leg was made in any family, and the
 	// load is judged on its HTTPS legs alone, as a URL without h3 is.
 	UdpProbesDisabled bool
+	// The same two flags for the URL the IPv6 legs load (Ipv6Required), which
+	// is the load's own URL or its stand-in: Ipv6H3Required when it declares
+	// HTTP/3 and UDP probes run, so an IPv6 HTTP/3 leg is planned;
+	// Ipv6UdpProbesDisabled when it declares HTTP/3 and the provider's country
+	// disables UDP probes.
+	Ipv6H3Required        bool
+	Ipv6UdpProbesDisabled bool
+	// The leg's request found no address record of its family for its host,
+	// or for a redirect hop's: the provider's resolver answered, with no A
+	// record for an IPv4 leg or no AAAA record for an IPv6 one. A URL whose
+	// AAAA comes and goes by resolver and place is the URL's fault, never the
+	// provider's (url_family.go).
+	AddressRecordMissing bool
 }
 
 // Whether the IPv4 HTTPS (TCP) leg of the load passed, whatever its later
@@ -670,6 +684,10 @@ type Options struct {
 	// udp_probes: false): a URL probe makes no HTTP/3 leg in any family, and a
 	// URL that declares h3 is judged on its HTTPS legs alone.
 	UdpProbesDisabled bool
+	// The URL a URL turn's IPv6 legs load when the URL it drew serves no IPv6,
+	// drawn by checkUrlProbe from the lane's URLs that do (url_family.go); nil
+	// otherwise, and for every other probe.
+	urlProbeIpv6StandIn *Destination
 
 	// The run's clock, with Sleep. Nil uses the wall clock and a sleep that
 	// selects on time.After and the context. Tests inject both so a run whose
@@ -1660,9 +1678,9 @@ func (self *Result) Ipv6Summary() string {
 }
 
 // The IPv6 HTTP/3 leg outcomes of a run's loads whose provider advertises
-// IPv6 and whose URL serves it and declares HTTP/3 (urlProbeH3SummaryOrder),
-// each with its count: skipped when an earlier leg failed first, so this leg
-// was not made. Empty when there were none.
+// IPv6 and whose IPv6 legs load a URL that declares HTTP/3
+// (urlProbeH3SummaryOrder), each with its count: skipped when an earlier leg
+// failed first, so this leg was not made. Empty when there were none.
 func (self *Result) Ipv6H3Summary() string {
 	if self == nil {
 		return ""
@@ -1674,9 +1692,9 @@ func (self *Result) Ipv6H3Summary() string {
 			continue
 		}
 		switch {
-		case check.UdpProbesDisabled:
+		case check.Ipv6UdpProbesDisabled:
 			counts["country_disabled"]++
-		case !check.H3Required:
+		case !check.Ipv6H3Required:
 		case check.Ipv6 == nil:
 			counts["skipped"]++
 		case check.Ipv6.H3 == nil && UrlProbeIpv6Tcp(check.Ipv6) == UrlProbeIpv6TcpNotMeasured:

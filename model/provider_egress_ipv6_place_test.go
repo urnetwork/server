@@ -224,3 +224,45 @@ func TestJudgeProviderEgressLegsLeavesOtherOutcomes(t *testing.T) {
 		t.Fatal("a missing outcome came back")
 	}
 }
+
+// An outcome whose URL serves no IPv6 made its IPv6 legs on a stand-in
+// (egresshealth url_family.go): its IPv4 HTTP/3 leg's place is the outcome's
+// URL's, its IPv6 legs' the stand-in's, both for the evidence a reached leg
+// records and for the networks a failed leg is judged against. The judgement
+// is otherwise the same: here three networks reach the stand-in over IPv6, so
+// the failure counts.
+func TestJudgedProviderEgressIpv6LegsOnAStandInUseTheStandInsPlace(t *testing.T) {
+	site := egresshealth.Destination{Name: "v4-site", Class: egresshealth.ClassSite, Url: "https://v4.example/"}
+	standIn := egresshealth.Destination{Name: "v6-trace", Class: egresshealth.ClassConnectivity, Url: "https://[2606:4700:4700::1111]/cdn-cgi/trace", Ipv6: true, H3: true}
+	ipv4Only := false
+	standIn.Ipv4 = &ipv4Only
+	at := time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC)
+	onStandIn := func(health *ProviderEgressHealth) *ProviderEgressHealth {
+		health.UrlProbeEvidence.Destination.Ipv6 = false
+		health.UrlProbeEvidence.Security[0].Destination.Ipv6 = false
+		destination := standIn
+		health.UrlProbeEvidence.Ipv6.Destination = &destination
+		if err := health.UrlProbeEvidence.ValidateOutcome(health.OKCount, health.Total, false); err != nil {
+			t.Fatalf("the stand-in outcome fails validation: %v", err)
+		}
+		return health
+	}
+
+	passed := onStandIn(testingIpv6UrlResult(server.NewId(), site, at, egresshealth.UrlProbeH3UdpPassed, egresshealth.UrlProbeIpv6TcpPassed, egresshealth.UrlProbeH3UdpPassed))
+	places := testingLegPlacesIn("de", nil)
+	judgeProviderEgressLegs(passed, places.places())
+	if want := []string{"h3 v4-site de", "ipv6 tcp v6-trace de", "ipv6 udp v6-trace de"}; !slices.Equal(places.recorded, want) {
+		t.Fatalf("recorded %v, want %v", places.recorded, want)
+	}
+
+	failed := onStandIn(testingIpv6UrlResult(server.NewId(), site, at, "", egresshealth.UrlProbeIpv6TcpFailed, ""))
+	reached := testingLegPlacesIn("de", map[string]int{"tcp": 3})
+	judged := judgeProviderEgressLegs(failed, reached.places())
+	if judged.OKCount != 0 || judged.UrlProbeEvidence.Ipv6.Verdict != egresshealth.UrlProbeH3VerdictProvider ||
+		!slices.Equal(reached.read, []string{"ipv6 tcp v6-trace de"}) {
+		t.Fatalf("ok=%d verdict=%q reads=%v; the stand-in's place decides", judged.OKCount, judged.UrlProbeEvidence.Ipv6.Verdict, reached.read)
+	}
+	if err := judged.UrlProbeEvidence.ValidateOutcome(judged.OKCount, judged.Total, false); err != nil {
+		t.Fatalf("the judged outcome fails validation: %v", err)
+	}
+}

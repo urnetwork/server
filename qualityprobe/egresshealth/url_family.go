@@ -1,13 +1,16 @@
-// A URL load is made over every IP family its provider advertises and its URL
-// serves: IPv4 through the URL's A record, IPv6 through its AAAA record, each
-// leg forced to its family with no fallback to the other. A dual-stack
-// provider's load passes only if its IPv4 and its IPv6 legs pass, over TCP
-// and, for a URL that declares h3, over UDP as well.
+// A URL load is made over every IP family its provider advertises: IPv4
+// through the URL's A record, IPv6 through an AAAA record, each leg forced to
+// its family with no fallback to the other, on every redirect hop. A
+// dual-stack provider's load passes only if its IPv4 and its IPv6 legs pass,
+// over TCP and, for a URL that declares h3, over UDP as well. The IPv6 legs
+// load the turn's URL when it serves IPv6, and otherwise a stand-in the turn
+// draws from its lane's URLs that serve IPv6 alone (ipv4: false).
 package egresshealth
 
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -131,39 +134,62 @@ func urlProbeIpv6LegFailed(leg *CheckResult) bool {
 	return false
 }
 
-// The legs one URL load makes, from the provider's families, the URL's
-// families and h3 flag, and the provider's country's UDP setting.
+// The legs one URL load makes, from the provider's families, the families
+// and h3 flags of the URL and of its IPv6 stand-in, and the provider's
+// country's UDP setting.
 type urlProbeLegPlan struct {
-	// The IPv6 legs: the provider advertises IPv6 and the URL serves it.
-	ipv6 bool
-	// The provider advertises IPv6 and the URL does not serve it: the family
-	// is not measured on this load, never failed.
+	// The URL the IPv6 legs load: the load's own when it serves IPv6, else the
+	// turn's stand-in (Options.urlProbeIpv6StandIn); nil when the provider
+	// advertises no IPv6 or neither exists.
+	ipv6 *Destination
+	// The provider advertises IPv6 and no URL of the turn serves it: the
+	// family is not measured on this load, never failed.
 	ipv6NoUrl bool
-	// The HTTP/3 legs, in every family the load makes: the URL declares h3 and
-	// the provider's country does not disable UDP probes.
+	// The IPv4 HTTP/3 leg: the load's URL declares h3 and the provider's
+	// country does not disable UDP probes.
 	h3 bool
-	// The URL declares h3 and the provider's country disables UDP probes
-	// (Pool.CountrySettings): no HTTP/3 leg in any family, and the load is
-	// judged on its HTTPS legs alone, as a URL without h3 is.
+	// The load's URL declares h3 and the provider's country disables UDP
+	// probes (Pool.CountrySettings): no IPv4 HTTP/3 leg, and the IPv4 legs are
+	// judged on HTTPS alone, as a URL without h3 is.
 	udpProbesDisabled bool
+	// The same for the IPv6 legs' URL.
+	ipv6H3                bool
+	ipv6UdpProbesDisabled bool
 }
 
 // The plan of a load whose primary leg is IPv4 (urlProbeServesProvider holds).
 func (self Options) urlProbeLegPlan(destination Destination) urlProbeLegPlan {
 	family := self.ProviderIpFamily
-	return urlProbeLegPlan{
-		ipv6:              family.Ipv6() && destination.ServesIpv6(),
-		ipv6NoUrl:         family.Ipv6() && !destination.ServesIpv6(),
+	plan := urlProbeLegPlan{
 		h3:                destination.H3 && !self.UdpProbesDisabled,
 		udpProbesDisabled: destination.H3 && self.UdpProbesDisabled,
 	}
+	if !family.Ipv6() {
+		return plan
+	}
+	switch {
+	case destination.ServesIpv6():
+		ipv6 := destination
+		plan.ipv6 = &ipv6
+	case self.urlProbeIpv6StandIn != nil && self.urlProbeIpv6StandIn.ServesIpv6():
+		ipv6 := *self.urlProbeIpv6StandIn
+		plan.ipv6 = &ipv6
+	default:
+		plan.ipv6NoUrl = true
+		return plan
+	}
+	plan.ipv6H3 = plan.ipv6.H3 && !self.UdpProbesDisabled
+	plan.ipv6UdpProbesDisabled = plan.ipv6.H3 && self.UdpProbesDisabled
+	return plan
 }
 
-// Whether a URL can be drawn for the provider: its first leg, the one site
-// tallies, TLS findings and site retirement read, is the IPv4 HTTPS leg, so the
-// provider advertises IPv4 and the URL serves it. IPv6 legs follow it. A
-// provider that advertises IPv6 alone, or a URL whose entry says ipv4: false,
-// has no such leg; the URL lane does not claim IPv6-only providers.
+// Whether a URL can be drawn as a load's URL for the provider: its first leg,
+// the one site tallies, TLS findings and site retirement read, is the IPv4
+// HTTPS leg, so the provider advertises IPv4 and the URL serves it. IPv6 legs
+// follow it. A provider that advertises IPv6 alone has no such leg (the URL
+// lane does not claim IPv6-only providers), and a URL whose entry says
+// ipv4: false is never a load's URL: it serves IPv6 legs only, as a stand-in
+// (urlProbeIpv6StandIns).
 func urlProbeServesProvider(destination Destination, family IpFamily) bool {
 	return family.Ipv4() && destination.ServesIpv4()
 }
@@ -177,6 +203,36 @@ func urlProbeDestinationsForFamily(destinations []Destination, family IpFamily) 
 		}
 	}
 	return served
+}
+
+// The URLs of a lane, already compatible with the provider's place, that an
+// IPv6 leg can stand in on when the URL a turn drew serves no IPv6: the ones
+// that serve IPv6 alone (ipv6: true, ipv4: false), such as the IPv6-literal
+// twin of an IPv4-literal URL. They are never a load's URL, so this is the
+// only way they are loaded. A URL that serves both families is loaded as
+// itself and never stands in, so a catalog without ipv4: false URLs measures
+// IPv6 only on the turns whose URL has AAAA, and the marks stage the rollout.
+func urlProbeIpv6StandIns(destinations []Destination) []Destination {
+	standIns := make([]Destination, 0, len(destinations))
+	for _, destination := range destinations {
+		if destination.ServesIpv6() && !destination.ServesIpv4() {
+			standIns = append(standIns, destination)
+		}
+	}
+	return standIns
+}
+
+// Whether a URL request failed on its host's empty answer for the record of
+// its family: the provider's resolver answered, authoritatively, with no
+// address (providertunnel reports it as a net.DNSError that IsNotFound). For an
+// IPv6 leg that is a URL whose AAAA comes and goes by resolver and place
+// (bunny.net, flipkart), or a redirect hop with no AAAA (mail.ru to
+// login.vk.ru): the URL's outcome, never the provider's. The leg is not
+// measured (dial_dns), and the taskworker counts it against the URL
+// (urnetwork_url_probe_ipv6_destination_legs_total, outcome no_aaaa).
+func urlProbeAddressRecordMissing(err error) bool {
+	var dnsErr *net.DNSError
+	return errors.As(err, &dnsErr) && dnsErr.IsNotFound
 }
 
 // The IP version a URL request is forced to: 4 or 6, carried by the
@@ -205,12 +261,12 @@ type providerUrlProbeFamilyTransport interface {
 
 // One URL load's every leg, in order: the IPv4 HTTPS leg (with the URL's
 // first-request timeout, which can carry a cold tunnel's establishment); its
-// HTTP/3 leg once it passed; then, for a provider that advertises IPv6 on a URL
-// that serves it, the IPv6 HTTPS leg once the IPv4 HTTPS leg passed, and its
-// HTTP/3 leg once that passed. Every leg after the first has the ordinary
-// per-request timeout: the tunnel is warm. An IPv4 HTTP/3 leg that was silent
-// does not stop the IPv6 legs: whether its silence counts is the server's
-// place judgement.
+// HTTP/3 leg once it passed; then, for a provider that advertises IPv6 with a
+// URL of the turn that serves it (urlProbeLegPlan), the IPv6 HTTPS leg once
+// the IPv4 HTTPS leg passed, and its HTTP/3 leg once that passed. Every leg
+// after the first has the ordinary per-request timeout: the tunnel is warm.
+// An IPv4 HTTP/3 leg that was silent does not stop the IPv6 legs: whether its
+// silence counts is the server's place judgement.
 func fetchUrlProbeLoad(ctx context.Context, client *http.Client, destination Destination, firstTimeout time.Duration, legTimeout time.Duration, profile RequestProfile, opts Options) CheckResult {
 	plan := opts.urlProbeLegPlan(destination)
 	ipv4Ctx := withUrlProbeIpVersion(ctx, 4)
@@ -223,18 +279,20 @@ func fetchUrlProbeLoad(ctx context.Context, client *http.Client, destination Des
 		}
 	}
 	result.Ipv6NoUrl = plan.ipv6NoUrl
-	if plan.ipv6 {
+	if plan.ipv6 != nil {
 		result.Ipv6Required = true
+		result.Ipv6H3Required, result.Ipv6UdpProbesDisabled = plan.ipv6H3, plan.ipv6UdpProbesDisabled
 		if result.HttpsOk() && !result.NotMeasured {
-			result = joinUrlProbeIpv6(result, fetchUrlProbeIpv6(ctx, client, destination, legTimeout, profile, opts, plan.h3))
+			result = joinUrlProbeIpv6(result, fetchUrlProbeIpv6(ctx, client, *plan.ipv6, legTimeout, profile, opts, plan.ipv6H3))
 		}
 	}
 	return result
 }
 
-// The IPv6 legs of one load: the HTTPS leg through the URL's AAAA record and,
-// for a URL that declares h3 where UDP probes run, the same request over
-// HTTP/3 over IPv6 once that passed.
+// The IPv6 legs of one load, on the URL they load (the load's own or its
+// stand-in): the HTTPS leg through its AAAA record and, for a URL that
+// declares h3 where UDP probes run, the same request over HTTP/3 over IPv6
+// once that passed.
 func fetchUrlProbeIpv6(ctx context.Context, client *http.Client, destination Destination, timeout time.Duration, profile RequestProfile, opts Options, h3 bool) CheckResult {
 	ipv6Ctx := withUrlProbeIpVersion(ctx, 6)
 	leg := fetchUrlProbe(ipv6Ctx, client, destination, timeout, profile, opts)
@@ -256,6 +314,7 @@ func joinUrlProbeIpv6H3(https CheckResult, h3 CheckResult) CheckResult {
 	result := https
 	h3.Name, h3.Class, h3.H3Required, h3.H3 = https.Name, https.Class, false, nil
 	h3.Ipv6Required, h3.Ipv6, h3.Ipv6NoUrl, h3.UdpProbesDisabled = false, nil, false, false
+	h3.Ipv6H3Required, h3.Ipv6UdpProbesDisabled = false, false
 	result.H3Required = true
 	result.H3 = &h3
 	if UrlProbeH3Udp(&h3) == UrlProbeH3UdpSilent {
@@ -282,6 +341,7 @@ func joinUrlProbeIpv6H3(https CheckResult, h3 CheckResult) CheckResult {
 func joinUrlProbeIpv6(result CheckResult, leg CheckResult) CheckResult {
 	leg.Name, leg.Class = result.Name, result.Class
 	leg.Ipv6Required, leg.Ipv6, leg.Ipv6NoUrl, leg.UdpProbesDisabled = false, nil, false, false
+	leg.Ipv6H3Required, leg.Ipv6UdpProbesDisabled = false, false
 	result.Ipv6 = &leg
 	if !urlProbeIpv6LegFailed(&leg) {
 		return result

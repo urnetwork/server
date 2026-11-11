@@ -8282,6 +8282,93 @@
           "legendFormat": "silent IPv6 HTTP/3 legs"
         }
       ]
+    },
+    {
+      "id": 168,
+      "type": "timeseries",
+      "title": "IPv6 legs by URL: no AAAA and failed / min",
+      "description": "The URLs whose IPv6 HTTPS legs most often came back without an AAAA record through the provider's resolver (no_aaaa: the URL, or a redirect hop of it, publishes AAAA to some resolvers or places only, or not at all; not measured, and the URL's outcome, never the provider's), and the URLs whose IPv6 HTTPS legs most often failed (judged by IPv6 place on the server). destination is the URL the legs loaded: the load's own, or the stand-in its IPv6 legs loaded because its own serves no IPv6. A URL high on the first list is one to drop the ipv6 mark from.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 551
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (destination) (rate(urnetwork_url_probe_ipv6_destination_legs_total{env=\"$env\",service=\"taskworker\",instance!=\"\",outcome=\"no_aaaa\"}[$__rate_interval]))) * 60",
+          "legendFormat": "no AAAA {{destination}}"
+        },
+        {
+          "refId": "B",
+          "expr": "topk(10, sum by (destination) (rate(urnetwork_url_probe_ipv6_destination_legs_total{env=\"$env\",service=\"taskworker\",instance!=\"\",outcome=\"failed\"}[$__rate_interval]))) * 60",
+          "legendFormat": "failed {{destination}}"
+        }
+      ]
+    },
+    {
+      "id": 169,
+      "type": "timeseries",
+      "title": "QUIC handshakes retried after silence / min",
+      "description": "HTTP/3 legs whose first QUIC handshake heard nothing back within its bound and were made once more on a fresh socket, so from a new source port, by IP family and how the second ended: answered (the site answered it, so the first was a lost handshake, not the provider's UDP; Cloudflare's IPv6 edge lost about one in 50 in the 2026-11-11 survey), silent (no answer again: the leg reports silence, which the server judges by place), canceled (the request ended under it). Counted by the prober's tunnel, per leg.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 551
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (family, outcome) (rate(urnetwork_provider_tunnel_quic_handshake_retries_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{family}} {{outcome}}"
+        }
+      ]
     }
   ]
 }

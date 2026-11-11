@@ -59,6 +59,16 @@ var urlProbeIpv6CommonModeHeld = prometheus.NewCounterVec(prometheus.CounterOpts
 	Help: "URL turns held back from provider history because their only failures were IPv6 legs (transport tcp: the HTTPS leg over IPv6 failed; udp: its HTTP/3 leg over IPv6 was silent) while no recently measured network's IPv6 leg of that transport reached its site: the platform's IPv6 path, not each provider's",
 }, []string{"transport"})
 
+// A dual-stack provider's IPv6 HTTPS legs by the URL they loaded (the load's
+// own, or its stand-in), so a URL whose IPv6 fails the fleet shows apart from
+// the providers it is loaded through. no_aaaa is a leg that was not measured
+// because the URL, or a redirect hop of it, had no AAAA record through the
+// provider's resolver: the URL's outcome, never the provider's.
+var urlProbeIpv6DestinationLegs = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_ipv6_destination_legs_total",
+	Help: "IPv6 HTTPS legs of acknowledged dual-stack URL loads by the URL they loaded (destination: the load's own URL, or the stand-in its IPv6 legs loaded because its own serves no IPv6) and outcome: passed; failed (judged by IPv6 place on the server); no_aaaa (the URL, or a redirect hop of it, had no AAAA record through the provider's resolver: not measured, and the URL's outcome, never the provider's); not_measured (any other leg that could not be made)",
+}, []string{"destination", "outcome"})
+
 // The label triples urlProbeTransportOutcomes can carry.
 var urlProbeTransportOutcomeLabels = [...][3]string{
 	{"tcp", "ipv4", "success"}, {"tcp", "ipv4", "error"},
@@ -116,24 +126,37 @@ func observeUrlProbeTransportOutcomes(result *egresshealth.Result) {
 		case check.Ipv6 == nil:
 			observe("tcp", "ipv6", "skipped")
 			switch {
-			case check.UdpProbesDisabled:
+			case check.Ipv6UdpProbesDisabled:
 				observe("udp", "ipv6", "country_disabled")
-			case check.H3Required:
+			case check.Ipv6H3Required:
 				observe("udp", "ipv6", "skipped")
 			}
 		default:
+			destination := check.Name
+			if result.UrlProbeEvidence != nil {
+				destination = result.UrlProbeEvidence.Ipv6Destination().Name
+			}
 			switch egresshealth.UrlProbeIpv6Tcp(check.Ipv6) {
 			case egresshealth.UrlProbeIpv6TcpPassed:
 				observe("tcp", "ipv6", "success")
+				urlProbeIpv6DestinationLegs.WithLabelValues(destination, "passed").Inc()
 			case egresshealth.UrlProbeIpv6TcpNotMeasured:
 				observe("tcp", "ipv6", "not_measured")
+				if check.Ipv6.AddressRecordMissing {
+					urlProbeIpv6DestinationLegs.WithLabelValues(destination, "no_aaaa").Inc()
+				} else {
+					urlProbeIpv6DestinationLegs.WithLabelValues(destination, "not_measured").Inc()
+				}
 			default:
 				observe("tcp", "ipv6", "error")
+				urlProbeIpv6DestinationLegs.WithLabelValues(destination, "failed").Inc()
 			}
+			// the IPv6 legs' URL, the load's own or its stand-in, decides
+			// whether an IPv6 HTTP/3 leg was planned
 			switch {
-			case check.UdpProbesDisabled:
+			case check.Ipv6UdpProbesDisabled:
 				observe("udp", "ipv6", "country_disabled")
-			case !check.H3Required:
+			case !check.Ipv6H3Required:
 			case check.Ipv6.H3 == nil && egresshealth.UrlProbeIpv6Tcp(check.Ipv6) == egresshealth.UrlProbeIpv6TcpNotMeasured:
 				// the family was not measured, its UDP leg with it
 				observe("udp", "ipv6", "not_measured")
@@ -414,6 +437,6 @@ func init() {
 	for _, source := range []string{"general", "country", "general_country_unavailable", "security_recheck"} {
 		urlProbeSources.WithLabelValues(source)
 	}
-	prometheus.MustRegister(urlProbeTurns, urlProbePassSeconds, urlProbeSources, urlProbeOutcomes, urlProbeTransportOutcomes, urlProbeH3CommonModeHeld, urlProbeIpv6CommonModeHeld, urlProbeTurnSeconds,
+	prometheus.MustRegister(urlProbeTurns, urlProbePassSeconds, urlProbeSources, urlProbeOutcomes, urlProbeTransportOutcomes, urlProbeH3CommonModeHeld, urlProbeIpv6CommonModeHeld, urlProbeIpv6DestinationLegs, urlProbeTurnSeconds,
 		urlProbeFleetMetrics, urlProbeConfiguredShards, urlProbeCapability, urlProbeShardObservedAt, urlProbeShardPasses)
 }

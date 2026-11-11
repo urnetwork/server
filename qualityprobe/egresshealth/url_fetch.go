@@ -100,6 +100,7 @@ func fetchUrlProbe(ctx context.Context, client *http.Client, destination Destina
 		if err != nil {
 			progress.recordTiming(&result, start, opts.now())
 			result.Err, result.FailureStage = err.Error(), echoRequestStage(err)
+			result.AddressRecordMissing = urlProbeAddressRecordMissing(err)
 			if result.FailureStage == "request_timeout" {
 				result.FailureStage = progress.timeoutStage()
 			}

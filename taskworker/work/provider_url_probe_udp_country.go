@@ -23,17 +23,18 @@ func init() {
 	prometheus.MustRegister(urlProbeUdpCountryDisabled)
 }
 
-// Counts each measured load of an acknowledged turn whose HTTP/3 leg the
-// provider's country turned off, under country(), which is asked only when
-// there is one. A canary, and a load whose HTTPS leg was not measured, says
-// nothing about either transport and is not counted, as the transport series
-// do not count it.
+// Counts each measured load of an acknowledged turn whose HTTP/3 legs the
+// provider's country turned off, once whichever family's URL declared h3 (the
+// load's own, or the stand-in its IPv6 legs load), under country(), which is
+// asked only when there is one. A canary, and a load whose HTTPS leg was not
+// measured, says nothing about either transport and is not counted, as the
+// transport series do not count it.
 func observeUrlProbeUdpCountryDisabled(result *egresshealth.Result, country func() string) {
 	if result == nil {
 		return
 	}
 	for _, check := range result.Checks {
-		if check.UdpProbesDisabled && !check.Canary && !check.NotMeasured {
+		if (check.UdpProbesDisabled || check.Ipv6UdpProbesDisabled) && !check.Canary && !check.NotMeasured {
 			urlProbeUdpCountryDisabled.WithLabelValues(country()).Inc()
 		}
 	}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -233,4 +234,80 @@ func (self *testFamilyH3Transport) ProviderUrlProbeFamilyContext(ctx context.Con
 
 func (self *testFamilyH3Transport) RoundTrip(request *http.Request) (*http.Response, error) {
 	return self.parent.h3[testFamilyIndex(request)].RoundTrip(request)
+}
+
+// The tunnel's report of an empty AAAA answer: dial_dns over a net.DNSError
+// that IsNotFound.
+type testNoAaaaError struct{ host string }
+
+func (self *testNoAaaaError) Error() string             { return "synthetic no AAAA for " + self.host }
+func (self *testNoAaaaError) ProviderHttpStage() string { return "dial_dns" }
+func (self *testNoAaaaError) Unwrap() error {
+	return &net.DNSError{Err: "provider URL resolution exhausted", Name: self.host, IsNotFound: true}
+}
+
+// The IPv6 HTTPS legs are counted by the URL they loaded: the load's own, or
+// the stand-in its IPv6 legs loaded because its own serves no IPv6. A leg
+// whose URL had no AAAA through the provider counts as no_aaaa against that
+// URL, apart from the providers' passes and failures; an IPv4 provider's turn
+// counts none.
+func TestUrlProbeIpv6LegsAreCountedByTheUrlTheyLoaded(t *testing.T) {
+	content := testH3Leg(http.StatusOK, nil)
+	noAaaa := testH3Leg(0, &testNoAaaaError{host: "dual.example"})
+	failed := testH3Leg(0, &testH3StageError{stage: "dial_tcp"})
+	ipv4Only := false
+	dual := []egresshealth.Destination{{Name: "synthetic-dual", Class: egresshealth.ClassSite, Url: "https://dual.example/", Ipv6: true}}
+	withStandIn := []egresshealth.Destination{
+		{Name: "synthetic-v4", Class: egresshealth.ClassSite, Url: "https://v4.example/"},
+		{Name: "synthetic-v6-trace", Class: egresshealth.ClassSite, Url: "https://[2606:4700:4700::1111]/", Ipv6: true, Ipv4: &ipv4Only},
+	}
+	read := func(destination string, outcome string) float64 {
+		return testutil.ToFloat64(urlProbeIpv6DestinationLegs.WithLabelValues(destination, outcome))
+	}
+	for _, c := range []struct {
+		name         string
+		destinations []egresshealth.Destination
+		ipv6         http.RoundTripper
+		family       egresshealth.IpFamily
+		destination  string
+		outcome      string
+	}{
+		{"its own URL had no AAAA", dual, noAaaa, egresshealth.IpFamilyDualstack, "synthetic-dual", "no_aaaa"},
+		{"its own URL passed", dual, content, egresshealth.IpFamilyDualstack, "synthetic-dual", "passed"},
+		{"its stand-in passed", withStandIn, content, egresshealth.IpFamilyDualstack, "synthetic-v6-trace", "passed"},
+		{"its stand-in failed", withStandIn, failed, egresshealth.IpFamilyDualstack, "synthetic-v6-trace", "failed"},
+		{"an IPv4 provider", dual, content, egresshealth.IpFamilyV4Only, "", ""},
+	} {
+		path := &testFamilyTransport{https: [2]http.RoundTripper{content, c.ipv6}, h3: [2]http.RoundTripper{content, content}}
+		result, err := egresshealth.Check(context.Background(), &http.Client{Transport: path}, egresshealth.Options{
+			UrlProbe: true, Destinations: c.destinations, Rand: rand.New(rand.NewSource(3)), ProviderIpFamily: c.family,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result.CycleStartedAt = time.Date(2026, time.November, 11, 12, 0, 0, 0, time.UTC)
+		names := []string{"synthetic-dual", "synthetic-v4", "synthetic-v6-trace"}
+		outcomes := []string{"passed", "failed", "no_aaaa", "not_measured"}
+		before := map[string]float64{}
+		for _, name := range names {
+			for _, outcome := range outcomes {
+				before[name+" "+outcome] = read(name, outcome)
+			}
+		}
+		reporter := newEgressProbeMetricsReporter(&testH3AckIngest{}, nil)
+		if err := reporter.submitEgressHealthScored(context.Background(), "synthetic-provider", result, result); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range names {
+			for _, outcome := range outcomes {
+				want := 0.0
+				if name == c.destination && outcome == c.outcome {
+					want = 1
+				}
+				if got := read(name, outcome) - before[name+" "+outcome]; got != want {
+					t.Errorf("%s: %s %s counted %v, want %v", c.name, name, outcome, got, want)
+				}
+			}
+		}
+	}
 }

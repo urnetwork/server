@@ -36,11 +36,15 @@ func TestEgressHealthRecordsWithIpv6LegsRemainMeasurement(t *testing.T) {
 			Ipv6: &egresshealth.CheckResult{FailureStage: "dial_dns"}}), "not_measured:1", "", ""},
 		{"IPv6 skipped", timed(egresshealth.CheckResult{FailureStage: "request_timeout", Ipv6Required: true}), "skipped:1", "", ""},
 		{"no AAAA URL", timed(egresshealth.CheckResult{Ok: true, Ipv6NoUrl: true}), "no_url:1", "", ""},
-		{"IPv6 drops UDP", timed(egresshealth.CheckResult{FailureStage: egresshealth.FailureStageIpv6, H3Required: true, H3: &egresshealth.CheckResult{Ok: true}, Ipv6Required: true,
+		{"IPv6 drops UDP", timed(egresshealth.CheckResult{FailureStage: egresshealth.FailureStageIpv6, H3Required: true, H3: &egresshealth.CheckResult{Ok: true}, Ipv6Required: true, Ipv6H3Required: true,
 			Ipv6: &egresshealth.CheckResult{FailureStage: egresshealth.FailureStageH3, H3Required: true, H3: &egresshealth.CheckResult{FailureStage: egresshealth.FailureStageDialQuic}}}),
 			"ok:1", "silent:1", "ok:1"},
-		{"the country disables UDP", timed(egresshealth.CheckResult{Ok: true, UdpProbesDisabled: true, Ipv6Required: true, Ipv6: passedV6}),
+		{"the country disables UDP", timed(egresshealth.CheckResult{Ok: true, UdpProbesDisabled: true, Ipv6Required: true, Ipv6UdpProbesDisabled: true, Ipv6: passedV6}),
 			"ok:1", "country_disabled:1", "country_disabled:1"},
+		// an IPv4 URL without h3 whose IPv6 legs loaded an h3 stand-in
+		{"a stand-in's UDP leg", timed(egresshealth.CheckResult{Ok: true, Ipv6Required: true, Ipv6H3Required: true,
+			Ipv6: &egresshealth.CheckResult{Ok: true, H3Required: true, H3: &egresshealth.CheckResult{Ok: true}}}),
+			"ok:1", "ok:1", ""},
 	} {
 		result := &egresshealth.Result{TableTotal: 139, Checks: []egresshealth.CheckResult{c.check}}
 		result.Total = 1

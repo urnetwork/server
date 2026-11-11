@@ -162,7 +162,11 @@ func JudgeProviderEgressLegs(ctx context.Context, health *ProviderEgressHealth) 
 func judgeProviderEgressLegs(health *ProviderEgressHealth, places providerEgressLegPlaces) *ProviderEgressHealth {
 	evidence := *health.UrlProbeEvidence
 	day := evidence.MeasuredAt.UTC().Truncate(24 * time.Hour)
+	// the IPv4 HTTP/3 leg's place is the outcome's URL's; the IPv6 legs' is
+	// the URL they loaded, the outcome's own or the stand-in for a URL that
+	// serves no IPv6
 	name := evidence.Destination.Name
+	ipv6Name := evidence.Ipv6Destination().Name
 	if evidence.H3 != nil {
 		leg := *evidence.H3
 		evidence.H3 = &leg
@@ -214,22 +218,22 @@ func judgeProviderEgressLegs(health *ProviderEgressHealth, places providerEgress
 	switch ipv6.Tcp {
 	case egresshealth.UrlProbeIpv6TcpPassed:
 		record(func(countryCode string, networkId server.Id) {
-			places.addIpv6(name, countryCode, day, ProviderEgressIpv6PlaceTcp, networkId)
+			places.addIpv6(ipv6Name, countryCode, day, ProviderEgressIpv6PlaceTcp, networkId)
 		})
 	case egresshealth.UrlProbeIpv6TcpFailed:
 		judge(&ipv6.Verdict, func(countryCode string, excludeNetworkId *server.Id) int {
-			return places.countIpv6(name, countryCode, ProviderEgressIpv6PlaceTcp, minDay, excludeNetworkId)
+			return places.countIpv6(ipv6Name, countryCode, ProviderEgressIpv6PlaceTcp, minDay, excludeNetworkId)
 		})
 	}
 	if leg := ipv6.H3; leg != nil {
 		switch leg.Udp {
 		case egresshealth.UrlProbeH3UdpPassed, egresshealth.UrlProbeH3UdpAnswered:
 			record(func(countryCode string, networkId server.Id) {
-				places.addIpv6(name, countryCode, day, ProviderEgressIpv6PlaceUdp, networkId)
+				places.addIpv6(ipv6Name, countryCode, day, ProviderEgressIpv6PlaceUdp, networkId)
 			})
 		case egresshealth.UrlProbeH3UdpSilent:
 			judge(&leg.Verdict, func(countryCode string, excludeNetworkId *server.Id) int {
-				return places.countIpv6(name, countryCode, ProviderEgressIpv6PlaceUdp, minDay, excludeNetworkId)
+				return places.countIpv6(ipv6Name, countryCode, ProviderEgressIpv6PlaceUdp, minDay, excludeNetworkId)
 			})
 		}
 	}

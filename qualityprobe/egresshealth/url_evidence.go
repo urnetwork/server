@@ -56,20 +56,32 @@ type UrlProbeEvidence struct {
 	// every other destination, so a server that predates it sees the same
 	// document it always did.
 	H3 *UrlProbeH3Evidence `json:"h3,omitempty"`
-	// The IPv6 legs of a load whose provider advertises IPv6 and whose URL
-	// serves it (Destination.Ipv6), present once the IPv4 HTTPS leg above
-	// passed: the HTTPS leg over the URL's AAAA record, and its HTTP/3 leg.
-	// Everything above, the HTTP/3 leg in H3 included, is IPv4's. Absent for
-	// every other load.
+	// The IPv6 legs of a load whose provider advertises IPv6 and whose turn
+	// has a URL that serves it (Destination.Ipv6, or the stand-in in
+	// Ipv6.Destination), present once the IPv4 HTTPS leg above passed: the
+	// HTTPS leg over that URL's AAAA record, and its HTTP/3 leg. Everything
+	// above, the HTTP/3 leg in H3 included, is IPv4's. Absent for every other
+	// load.
 	Ipv6 *UrlProbeIpv6Evidence `json:"ipv6,omitempty"`
 	// The families the provider advertised when it was claimed, when they
 	// include IPv6 (dualstack); absent for a provider that advertises IPv4
 	// alone, as every outcome before families were probed reads.
 	IpFamily IpFamily `json:"ip_family,omitempty"`
-	// The URL declares h3 and the provider's country disables UDP probes
-	// (country_settings udp_probes: false): no HTTP/3 leg was made in any
-	// family, and the outcome is judged on its HTTPS legs alone.
+	// A URL of the outcome declares h3, its own or the stand-in its IPv6 legs
+	// loaded, and the provider's country disables UDP probes (country_settings
+	// udp_probes: false): no HTTP/3 leg was made in any family, and the
+	// outcome is judged on its HTTPS legs alone.
 	UdpProbesDisabled bool `json:"udp_probes_disabled,omitempty"`
+}
+
+// The URL the outcome's IPv6 legs loaded: their stand-in when they loaded one
+// (UrlProbeIpv6Evidence.Destination), else the outcome's own. The IPv6 place
+// evidence and verdicts are that URL's.
+func (self *UrlProbeEvidence) Ipv6Destination() Destination {
+	if self.Ipv6 != nil && self.Ipv6.Destination != nil {
+		return *self.Ipv6.Destination
+	}
+	return self.Destination
 }
 
 // The IPv6 legs of one URL outcome (url_family.go): the same request and
@@ -87,8 +99,17 @@ type UrlProbeEvidence struct {
 // over IPv6, judged the same way when silent against networks that reach the
 // URL over QUIC over IPv6. A prober never sets a verdict.
 type UrlProbeIpv6Evidence struct {
-	Tcp                       string              `json:"tcp"`
-	Verdict                   string              `json:"verdict,omitempty"`
+	// The URL the legs loaded when it is not the outcome's own: a stand-in the
+	// turn drew from the URLs of its lane that serve IPv6, because the
+	// outcome's URL serves none (url_family.go). Absent when the legs loaded
+	// the outcome's URL.
+	Destination *Destination `json:"destination,omitempty"`
+	Tcp         string       `json:"tcp"`
+	Verdict     string       `json:"verdict,omitempty"`
+	// The leg was not measured because its URL, or a redirect hop of it, had
+	// no AAAA record through the provider's resolver: the URL's outcome, not
+	// the provider's (urlProbeAddressRecordMissing).
+	NoAaaa                    bool                `json:"no_aaaa,omitempty"`
 	ContentClassification     string              `json:"content_classification"`
 	PerformanceClassification string              `json:"performance_classification"`
 	FailureStage              string              `json:"failure_stage"`
@@ -128,6 +149,7 @@ func urlProbeIpv6EvidenceOf(check *CheckResult) *UrlProbeIpv6Evidence {
 	}
 	return &UrlProbeIpv6Evidence{
 		Tcp:                   UrlProbeIpv6Tcp(check),
+		NoAaaa:                check.AddressRecordMissing && UrlProbeIpv6Tcp(check) == UrlProbeIpv6TcpNotMeasured,
 		ContentClassification: check.ContentClassification, PerformanceClassification: check.PerformanceClassification,
 		FailureStage: stage, NotMeasured: check.NotMeasured,
 		TlsAuthenticated: 0 < check.StatusCode && !check.TlsAuthenticationFailure, TlsFailure: check.TlsAuthenticationFailure,
@@ -305,18 +327,30 @@ func (self *UrlProbeEvidence) Validate() error {
 			return err
 		}
 	}
+	if !self.Destination.ServesIpv4() {
+		return fmt.Errorf("URL evidence's destination serves no IPv4; it can only stand in for an IPv6 leg")
+	}
+	ipv6Destination := self.Ipv6Destination()
 	if leg := self.Ipv6; leg != nil {
-		if !self.Destination.Ipv6 {
+		if standIn := leg.Destination; standIn != nil {
+			if UrlProbeDestinationKey(*standIn) == "" || len(standIn.Name) == 0 || len(standIn.Name) > 256 || len(standIn.Url) > 4096 || standIn.Name == self.Destination.Name {
+				return fmt.Errorf("invalid URL IPv6 stand-in identity")
+			}
+			if self.Destination.ServesIpv6() {
+				return fmt.Errorf("URL evidence carries an IPv6 stand-in for a destination that serves IPv6 itself")
+			}
+		}
+		if !ipv6Destination.ServesIpv6() {
 			return fmt.Errorf("URL evidence carries an IPv6 leg for a destination that declares none")
 		}
 		if err := leg.validate(self.Policy); err != nil {
 			return err
 		}
-		if leg.H3 != nil && !self.Destination.H3 {
+		if leg.H3 != nil && !ipv6Destination.H3 {
 			return fmt.Errorf("URL evidence carries an IPv6 HTTP/3 leg for a destination that declares none")
 		}
 	}
-	if self.UdpProbesDisabled && (!self.Destination.H3 || self.H3 != nil || (self.Ipv6 != nil && self.Ipv6.H3 != nil)) {
+	if self.UdpProbesDisabled && (!(self.Destination.H3 || ipv6Destination.H3) || self.H3 != nil || (self.Ipv6 != nil && self.Ipv6.H3 != nil)) {
 		return fmt.Errorf("URL evidence disables UDP probes for a destination without h3, or carries an HTTP/3 leg beside it")
 	}
 	if self.IpFamily != "" && (self.IpFamily.Normalize() != self.IpFamily || !self.IpFamily.Ipv6() || !self.IpFamily.Ipv4()) {
@@ -416,6 +450,9 @@ func (self *UrlProbeIpv6Evidence) validate(policy UrlProbePolicy) error {
 	case UrlProbeIpv6TcpNotMeasured:
 	default:
 		return fmt.Errorf("URL IPv6 evidence has no TCP classification")
+	}
+	if leg.NoAaaa && (leg.Tcp != UrlProbeIpv6TcpNotMeasured || leg.FailureStage != "dial_dns") {
+		return fmt.Errorf("URL IPv6 evidence says the URL had no AAAA record although the leg resolved it")
 	}
 	if leg.H3 != nil {
 		if leg.Tcp != UrlProbeIpv6TcpPassed {
