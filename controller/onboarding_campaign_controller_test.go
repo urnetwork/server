@@ -3,6 +3,7 @@
 package controller
 
 import (
+	"net/http"
 	"testing"
 	"time"
 
@@ -190,23 +191,77 @@ func TestPlatformFromRequest(t *testing.T) {
 		{"a non-browser client names its platform as a spec does", "", "urnetwork windows amd64", "windows"},
 	}
 	for _, c := range cases {
-		if got := platformFromRequest(request(c.deviceType, c.userAgent)); got != c.want {
-			t.Errorf("%s: platformFromRequest = %q, want %q", c.name, got, c.want)
+		if got, distribution := platformFromRequest(request(c.deviceType, c.userAgent)); got != c.want || distribution != "" {
+			t.Errorf("%s: platformFromRequest = %q, %q, want %q", c.name, got, distribution, c.want)
 		}
 	}
-	if got := platformFromRequest(nil); got != "" {
-		t.Errorf("no session: %q", got)
+	if got, distribution := platformFromRequest(nil); got != "" || distribution != "" {
+		t.Errorf("no session: %q, %q", got, distribution)
 	}
 
 	// a device authenticating: its app's declared type, else its spec
-	if got := devicePlatform(request("macos", goSdk), "15.7.9 MacBook Air (M1, 2020)"); got != "macos" {
+	if got, _ := devicePlatform(request("macos", goSdk), "15.7.9 MacBook Air (M1, 2020)"); got != "macos" {
 		t.Errorf("the macOS app's device: %q", got)
 	}
-	if got := devicePlatform(request("", goSdk), "16 Samsung Galaxy S24 Ultra"); got != "android" {
+	if got, _ := devicePlatform(request("", goSdk), "16 Samsung Galaxy S24 Ultra"); got != "android" {
 		t.Errorf("an older Android app's device: %q", got)
 	}
-	if got := devicePlatform(request("unknown", ""), "socks5"); got != "" {
+	if got, _ := devicePlatform(request("unknown", ""), "socks5"); got != "" {
 		t.Errorf("an automation's device: %q", got)
+	}
+}
+
+// P6: the App Store and direct-download Mac builds send the same device type,
+// spec and version, and their X-UR-ClientInfo distribution is what tells them
+// apart. A sign-up and a device authenticating take it with the platform their
+// app declares, from the header as the apps' sdk sends it; a browser sign-up
+// and a device known only by its spec have no distribution.
+func TestPlatformDistributionFromClientInfo(t *testing.T) {
+	request := func(clientInfo string, userAgent string) *session.ClientSession {
+		header := http.Header{}
+		if clientInfo != "" {
+			header.Set(session.ClientInfoHeader, clientInfo)
+		}
+		if userAgent != "" {
+			header.Set("User-Agent", userAgent)
+		}
+		// as session.NewClientSessionFromRequest reads a request
+		return &session.ClientSession{Header: header, ClientInfo: session.ClientInfoFromHeader(header)}
+	}
+	const (
+		goSdk     = "Go-http-client/2.0"
+		macSafari = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15"
+		macSpec   = "15.7.9 MacBook Air (M1, 2020)"
+	)
+	cases := []struct {
+		name             string
+		clientInfo       string
+		userAgent        string
+		wantPlatform     string
+		wantDistribution string
+	}{
+		{"the direct-download Mac", `{"v":1,"device_type":"macos","app_version":"2026.11.11-1","distribution":"mac_direct"}`, goSdk, "macos", session.ClientDistributionMacDirect},
+		{"the App Store Mac", `{"v":1,"device_type":"macos","app_version":"2026.11.11-1","distribution":"app_store"}`, goSdk, "macos", session.ClientDistributionAppStore},
+		{"a Mac app from before the field", `{"v":1,"device_type":"macos","app_version":"2026.11.10-1"}`, goSdk, "macos", ""},
+		{"the F-Droid build", `{"v":1,"device_type":"android","app_version":"2026.11.11-1","distribution":"android_direct"}`, goSdk, "android", session.ClientDistributionAndroidDirect},
+		{"the Linux AppImage", `{"v":1,"device_type":"linux","app_version":"2026.11.11-1","distribution":"linux_appimage"}`, goSdk, "linux", session.ClientDistributionLinuxAppimage},
+		{"the extension", `{"v":1,"device_type":"web","app_version":"0.1.8","distribution":"extension_chrome"}`, macSafari, "web", session.ClientDistributionExtensionChrome},
+		// a distribution that does not pair with the declared type is unknown
+		{"an iPhone that claims the DMG", `{"v":1,"device_type":"ios","app_version":"1","distribution":"mac_direct"}`, goSdk, "ios", ""},
+		// a type outside the campaign's platforms declares nothing
+		{"the cli", `{"v":1,"device_type":"cli","app_version":"1","distribution":"linux"}`, goSdk, "", ""},
+		{"a Mac's browser", "", macSafari, "web", ""},
+	}
+	for _, c := range cases {
+		if platform, distribution := platformFromRequest(request(c.clientInfo, c.userAgent)); platform != c.wantPlatform || distribution != c.wantDistribution {
+			t.Errorf("%s: sign-up %q, %q, want %q, %q", c.name, platform, distribution, c.wantPlatform, c.wantDistribution)
+		}
+	}
+	if platform, distribution := devicePlatform(request(`{"v":1,"device_type":"macos","app_version":"1","distribution":"mac_direct"}`, goSdk), macSpec); platform != "macos" || distribution != session.ClientDistributionMacDirect {
+		t.Errorf("the direct-download Mac's device: %q, %q", platform, distribution)
+	}
+	if platform, distribution := devicePlatform(request("", goSdk), macSpec); platform != "macos" || distribution != "" {
+		t.Errorf("a Mac known by its spec: %q, %q", platform, distribution)
 	}
 }
 
