@@ -15,21 +15,26 @@ identify production source.
 ## Epochs
 
 - [Production epoch 1 — initial baseline](#production-epoch-1--initial-baseline)
-- [Production epoch 2 — intake open, evaluations paused](#production-epoch-2--intake-open-evaluations-paused)
+- [Production epoch 2 — intake and two-host evaluations open](#production-epoch-2--intake-and-two-host-evaluations-open)
 
-## Production epoch 2 — intake open, evaluations paused
+## Production epoch 2 — intake and two-host evaluations open
 
 Published and independently checked against GitHub branch heads on 2026-11-09.
-The native transition created the round on 2026-11-10. **Public intake is open;
-evaluations remain paused.** Verified live at05:05UTC: `/competition/info`
-returned200 with epoch2, `status: open`, `intake_ready: true`, and
-`grading_ready: false`. Authenticated `/competition/v2/score/preflight` also
-returned200 with the exact round/source identity and `reward_eligible: true`;
-this fee-free check created no job and is not a completed evaluation.
+The native transition created the round on 2026-11-10. **Public intake and
+two-host evaluation execution are open.** The first two customer jobs were
+claimed in submission order on 2026-11-11 at 17:51:52 UTC (Goofe) and
+17:52:08 UTC (Sille). Both native agents authenticated the execution image and
+shared baseline below; both started candidate simulation replicate 1. This is
+execution evidence, not a completed score or an acceptance result.
+At 18:04 UTC, the API still reported `grading_ready: false`; deployment of the
+separately tested public host-proof projection correction remained unverified.
+That discrepancy did not stop these active evaluations. Earlier authenticated
+`/competition/v2/score/preflight` returned 200 with the exact round/source
+identity and `reward_eligible: true`; preflight itself creates no job.
 The epoch-1 winner's reviewed product change and the approved prospective G2/G7
 instrument are included. The serving source error cleared after API/config
-redeployment. Epoch-1 results remain publicly readable while epoch-2 grading
-and publication are held.
+redeployment. Epoch-1 results remain publicly readable. Epoch-2 public rankings
+and winner publication remain held until the round's publication conditions pass.
 
 | Identity | Value |
 |---|---|
@@ -38,15 +43,18 @@ and publication are held.
 | Recorded submission window (UTC) | `2026-11-10T04:28:28.670738Z` to `2026-11-17T04:28:28.670738Z` |
 | Source generation / activation generation | `1` / `2` |
 | Source-lock SHA-256 | `4781aac57e052ff048440ac5f0f118d780a76fa1685326fc0b3af1143ae4f0cd` |
-| Evaluator image | `sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9` |
-| Compiler | Go `1.27.3` |
+| Original policy / baseline evaluator image | `sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9` |
+| Original baseline compiler | Go `1.27.3` |
+| Active security-hotfix execution image | `sha256:98284651822ebe55341d6133ac978aed30c8d18dd5e9c4332136fb4ffca7e702` |
+| Active execution compiler | Go `1.27.4` |
+| Retained shared epoch baseline SHA-256 | `784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340` |
 | Takeover margin | `0.269` (26.9%) |
 | G2 | Requests and bytes each at least 95% of baseline; no upper bounds |
 | G7 | Expected pages and bytes each at least 95% of same-epoch baseline coverage |
 
 All ten repositories use `sim-latency`; use these immutable commits rather than
-the moving branch. Runtime qualification and the fresh epoch baseline remain
-separate prerequisites for grading.
+the moving branch. The shared epoch baseline and host admissions are recorded
+separately from this product source checkpoint.
 
 | Repository | Exact commit |
 |---|---|
@@ -67,7 +75,7 @@ The source manifest is published in config commit
 Do not distribute operational config or vault files; this index is the public
 source extract.
 
-### Executor-control correction (approved 2026-11-10; activation pending)
+### Executor-control correction (approved 2026-11-10; active)
 
 The operator approved correcting the private executor's namespace-probe user,
 stop/cleanup ordering and trusted-operator directory handling, plus the already
@@ -79,8 +87,27 @@ Corrected agents must use newly recorded host fingerprints, not impersonate the
 old frozen identities. The implementation records an append-only per-round
 operational amendment, retaining the original round and intake-policy bytes.
 Registration is prohibited after any customer evaluation or official R9 host
-admission starts. Both hosts still need fresh, amendment-bound admission
-receipts. The amendment is not yet active; scoring remains paused.
+admission starts. The amendment and amendment-bound admissions are now recorded.
+The separate approved Sille admission exception preserves its failed statistical
+admission result rather than relabeling it as a pass.
+
+### Go 1.27.4 security-hotfix exception (active 2026-11-11)
+
+The operator explicitly approved using Go 1.27.4 for epoch-2 execution without
+measuring a replacement baseline or repeating statistical calibration. The
+ten product commits above, shared baseline, scoring gates, margin and original
+submission ordering remain unchanged. The original Go 1.27.3 measurements are
+not presented as Go 1.27.4 measurements.
+
+Both hosts independently passed native containment, CPU/memory-bomb cleanup and
+an operational one-replicate compatibility smoke on the new image. Those checks
+are not a fresh statistical baseline or R9 admission. Execution provenance is
+bound by append-only security-toolchain decision event 540, SHA-256
+`0d31e1c6258cec5c1eb7d45dd4d4f4dd84a948bf21c3c5dd0416f44c389f5787`.
+The [retained exception and execution evidence](launch/EPOCH2-GO1.27.4-SECURITY-EXCEPTION-2026-11-11.json)
+distinguishes the frozen policy/baseline image from the actual execution image.
+Each submission runs its complete candidate evaluation on one host, using the
+same retained epoch baseline; a submission's replicates are not split between hosts.
 
 ## Production epoch 1 — initial baseline
 
