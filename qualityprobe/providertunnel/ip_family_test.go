@@ -356,8 +356,9 @@ func assertInTunnelOnlyResolverFamily(t *testing.T, s *connect.DnsResolverSettin
 	}
 }
 
-// A regional recommendation's resolver, which races the tunnel's own in cn,
-// ru, ir, tr, kz and tm (providerDnsResolvers), keeps to the provider's
+// A regional recommendation's resolver, which races the tunnel's own in the
+// countries connect recommends one for (cn, ir, kz and ru at connect
+// cdbcbf5f; providerDnsResolvers), keeps to the provider's
 // family's servers as the tunnel's own does: a dual-stack provider in cn
 // races cn's IPv4 servers alone, though cn's recommendation has IPv6 servers
 // too, and an IPv4 provider's racing resolver is as it was.

@@ -99,8 +99,10 @@ it does for any user's v6 flow. The resolver of a dual-stack tunnel keeps to
 IPv4's DoH and DNS servers, so a dual-stack provider's DNS rides the same IPv4
 path it always did, and AAAA answers come back over it; only the URL's own
 request is IPv6. So does the regional recommendation's resolver that races the
-tunnel's own in cn, ru, ir, tr, kz and tm (main fe47f8506): its IPv6 servers
-are left out for a provider that advertises IPv4. Every other request on the tunnel resolves IPv4 alone. QUIC
+tunnel's own (main fe47f8506) in the countries connect recommends one for (cn,
+ir, kz and ru since connect cdbcbf5f, which dropped tr and tm): its IPv6
+servers are left out for a provider that advertises IPv4. Every other request
+on the tunnel resolves IPv4 alone. QUIC
 datagrams over IPv6 are 1232 bytes (1280 less 40 and 8). A provider that does
 not advertise IPv6, legacy included, keeps the IPv4-only tun exactly as it
 was. No connect or sdk change is needed: a real local dual-stack provider
