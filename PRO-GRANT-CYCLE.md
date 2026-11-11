@@ -130,7 +130,10 @@ cycle.
   crypto rails and gamma, keeps Pro through the period's marker but starts no
   cycle. The last cycle's grant expires a day after the cycle. The
   renewal that recovers the charge starts the next cycle. (Before, a network
-  in grace on the 1st got a new 10 TiB.)
+  in grace on the 1st got a new 10 TiB.) For the owner to decide: from that
+  expiry until the charge recovers, the network has no new data. It also gets
+  no daily free grant, which still excludes every supporter renewal holder.
+  Before, the 600 GiB credit spanned the grace.
 
 ## The 600 GiB activation credit
 
