@@ -309,6 +309,22 @@ func TestEgressDestinationPoolCatalogRefusalsAlert(t *testing.T) {
 	}
 }
 
+// A country_settings entry the parse refuses (a key that is no country code)
+// is named under country_settings, not as a candidate.
+func TestEgressDestinationPoolCountrySettingsRefusalNamesItsList(t *testing.T) {
+	fixture := healthyEgressDestinationPoolFixture()
+	fixture.catalog = egressDestinationPoolRefusingCatalog + "country_settings:\n  iran:\n    udp_probes: false\n"
+	alert := requireAlertClass(t, fixture.run(t), "egress-destination-catalog-refused")
+	for _, want := range []string{"catalog_refused=3", "country_invalid:1", "country_settings/iran"} {
+		if !strings.Contains(alert.Observed, want) {
+			t.Errorf("refusal alert observed %q lacks %q", alert.Observed, want)
+		}
+	}
+	if strings.Contains(alert.Observed, "candidates/iran") {
+		t.Errorf("refusal alert observed %q names the setting as a candidate", alert.Observed)
+	}
+}
+
 // A serve or refresh refusal counted by the fleet alerts with a clean catalog.
 func TestEgressDestinationPoolFleetRefusalsAlert(t *testing.T) {
 	fixture := healthyEgressDestinationPoolFixture()

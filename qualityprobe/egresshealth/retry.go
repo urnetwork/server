@@ -260,7 +260,13 @@ attempts:
 		attemptCtx, stop := bound(ctx, signal)
 		if self.opts.UrlProbe {
 			result = fetchUrlProbe(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts)
-			if d.H3 {
+			if d.H3 && self.opts.UdpProbesDisabled {
+				// The provider's country disables UDP probes (qualityprobe.yml
+				// country_settings udp_probes: false): no HTTP/3 leg, and the
+				// load is judged on its HTTPS leg alone, as a URL without h3
+				// is. Its evidence records the UDP leg as not measured.
+				result.UdpProbesDisabled = true
+			} else if d.H3 {
 				result.H3Required = true
 				if result.Ok {
 					// The same slot, the same provider and the same loss

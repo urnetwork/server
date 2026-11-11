@@ -462,6 +462,10 @@ type CheckResult struct {
 	// this leg fails, Ok is false, FailureStage is FailureStageH3, Err names
 	// this leg's error, and its own stage is H3.FailureStage (url_h3.go).
 	H3 *CheckResult
+	// The URL declares HTTP/3 and the provider's country disables UDP probes
+	// (Pool.CountrySettings): no HTTP/3 leg was made, and the load is judged
+	// on its HTTPS leg alone, as a URL without h3 is.
+	UdpProbesDisabled bool
 }
 
 // Whether the HTTPS (TCP) leg of the load passed, whatever its HTTP/3 leg
@@ -631,6 +635,10 @@ type Options struct {
 	// are loaded besides (see Destination.Incompatible, Destination.Canary).
 	// The zero Place excludes nothing.
 	ProviderPlace Place
+	// The provider's country disables UDP probes (Pool.CountrySettings,
+	// udp_probes: false): a URL probe makes no HTTP/3 leg, and a URL that
+	// declares h3 is judged on its HTTPS leg alone.
+	UdpProbesDisabled bool
 
 	// The run's clock, with Sleep. Nil uses the wall clock and a sleep that
 	// selects on time.After and the context. Tests inject both so a run whose

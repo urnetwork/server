@@ -51,6 +51,31 @@ type Pool struct {
 	// default (see RequestProfile.orDefault).
 	Profile        RequestProfile  `json:"profile"`
 	UrlProbePolicy *UrlProbePolicy `json:"url_probe_policy,omitempty"`
+	// Per-country probe settings (qualityprobe.yml country_settings), keyed by
+	// lower-case alpha-2 country. Only a country whose settings differ from the
+	// defaults is served, so a pool without any keeps its version; a prober
+	// that predates the field ignores it, as it does any unknown field.
+	CountrySettings map[string]CountrySettings `json:"country_settings,omitempty"`
+}
+
+// One country's probe settings. Every field's zero value is the default.
+type CountrySettings struct {
+	// Nil or true: a URL that declares h3 makes its UDP (HTTP/3) legs as
+	// designed. False (udp_probes: false, for a national firewall that drops
+	// QUIC): a provider whose exit is in the country makes no UDP leg in any
+	// family, and its URLs are judged on their HTTPS legs alone; the legs not
+	// made are counted as country_disabled, never as failures.
+	UdpProbes *bool `json:"udp_probes,omitempty"`
+}
+
+// Whether the country disables UDP probes. An unknown or empty country
+// disables nothing.
+func (self *Pool) UdpProbesDisabled(country string) bool {
+	if self == nil {
+		return false
+	}
+	settings, ok := self.CountrySettings[strings.ToLower(strings.TrimSpace(country))]
+	return ok && settings.UdpProbes != nil && !*settings.UdpProbes
 }
 
 // Reports that the server did not answer the pool endpoint
@@ -146,6 +171,12 @@ func ValidateDestinations(dests []Destination) error {
 	return nil
 }
 
+// Whether a country key is one the prober matches a provider's country to: a
+// lower-case ISO 3166-1 alpha-2 code.
+func CountryCodeValid(country string) bool {
+	return len(country) == 2 && 'a' <= country[0] && country[0] <= 'z' && 'a' <= country[1] && country[1] <= 'z'
+}
+
 // Validates independent country catalogs and prevents global targets from
 // being relabeled country-specific. Missing country coverage stays explicit.
 func ValidatePool(pool *Pool) error {
@@ -159,6 +190,11 @@ func ValidatePool(pool *Pool) error {
 	}
 	if err := ValidateDestinations(pool.Destinations); err != nil {
 		return err
+	}
+	for country := range pool.CountrySettings {
+		if !CountryCodeValid(country) {
+			return fmt.Errorf("country settings key %q must be a lower-case two-letter code", country)
+		}
 	}
 	hosts := map[string]bool{}
 	names := map[string]bool{}

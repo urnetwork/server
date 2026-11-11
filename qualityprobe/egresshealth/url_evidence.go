@@ -56,6 +56,12 @@ type UrlProbeEvidence struct {
 	// every other destination, so a server that predates it sees the same
 	// document it always did.
 	H3 *UrlProbeH3Evidence `json:"h3,omitempty"`
+	// The URL declares h3 and the provider's country disables UDP probes
+	// (country_settings udp_probes: false): no HTTP/3 leg was made, so UDP is
+	// not measured, never a failure or a pass, and the outcome is judged on
+	// its HTTPS leg alone. With no leg, it adds no place evidence and gets no
+	// place verdict (model.JudgeProviderEgressH3).
+	UdpProbesDisabled bool `json:"udp_probes_disabled,omitempty"`
 }
 
 // The HTTP/3 (QUIC over UDP) leg of one URL outcome: the same request and
@@ -230,6 +236,9 @@ func (self *UrlProbeEvidence) Validate() error {
 			return fmt.Errorf("URL HTTP/3 verdict %q is unknown", leg.Verdict)
 		}
 	}
+	if self.UdpProbesDisabled && (!self.Destination.H3 || self.H3 != nil) {
+		return fmt.Errorf("URL evidence disables UDP probes for a destination without h3, or carries an HTTP/3 leg beside it")
+	}
 	return nil
 }
 
@@ -296,7 +305,9 @@ func (self *UrlProbeEvidence) ValidateOutcome(ok, total int, tlsFailure bool) er
 	if err := https(stage).succeeded(self.Policy, "URL"); err != nil {
 		return err
 	}
-	if !self.Destination.H3 {
+	if !self.Destination.H3 || self.UdpProbesDisabled {
+		// a URL without h3, or with UDP probes off in the provider's country,
+		// is judged on its HTTPS leg alone
 		return nil
 	}
 	// A destination that declares HTTP/3 passes only with the HTTPS leg above

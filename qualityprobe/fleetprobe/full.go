@@ -255,6 +255,9 @@ func NewFullProber(options FullOptions) *prober.Prober {
 			opts.Destinations = pool.Destinations
 			opts.UrlProbePolicy = pool.UrlProbePolicy
 			opts.CountryDestinations = pool.Countries[strings.ToLower(place.Country)]
+			// a country whose national firewall drops QUIC runs no UDP leg
+			// (qualityprobe.yml country_settings udp_probes: false)
+			opts.UdpProbesDisabled = pool.UdpProbesDisabled(place.Country)
 			opts.Profile = profileOf(pool)
 			return egresshealth.Check(ctx, client, opts)
 		},

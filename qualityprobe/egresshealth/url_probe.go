@@ -75,6 +75,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 				BodyMillis: float64(check.BodyDuration) / float64(time.Millisecond), BodyBitsPerSecond: check.BodyBytesPerSecond * 8,
 				BodyFirstByteWaitMillis: float64(check.BodyFirstByteWait) / float64(time.Millisecond),
 				H3:                      urlProbeH3EvidenceOf(check.H3),
+				UdpProbesDisabled:       check.UdpProbesDisabled,
 			}
 		}
 	}

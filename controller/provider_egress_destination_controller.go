@@ -149,6 +149,10 @@ type ProviderEgressSites struct {
 	// Refused are the entries the parse kept out, each with its reason; the
 	// rest of the file stands. LoadProviderEgressSites counts and logs them.
 	Refused []ProviderEgressCatalogRefusal
+	// CountrySettings are the countries whose probe settings differ from the
+	// defaults (country_settings), served with the pool: today, the countries
+	// that disable UDP probes.
+	CountrySettings map[string]egresshealth.CountrySettings
 	// listedCountries are the valid country sites under valid keys before the
 	// collision check: the refresh holds back a candidate that collides with
 	// any of them (PromotionConflict).
@@ -184,6 +188,14 @@ type providerEgressSitesCandidateYaml struct {
 	H3 bool `yaml:"h3"`
 }
 
+// One country's settings, as the file spells them (country_settings).
+type providerEgressCountrySettingsYaml struct {
+	// udp_probes: false runs no UDP (HTTP/3) leg for a provider whose exit is
+	// in the country, for a national firewall that drops QUIC; absent or true
+	// runs them as designed (egresshealth.CountrySettings).
+	UdpProbes *bool `yaml:"udp_probes"`
+}
+
 // The file's profile and candidates; the settings block is read apart.
 type providerEgressSitesYaml struct {
 	SchemaVersion  int                          `yaml:"schema_version"`
@@ -195,6 +207,10 @@ type providerEgressSitesYaml struct {
 	Candidates   []providerEgressSitesCandidateYaml            `yaml:"candidates"`
 	Destinations []providerEgressSitesCandidateYaml            `yaml:"destinations"`
 	Countries    map[string][]providerEgressSitesCandidateYaml `yaml:"countries"`
+	// Per-country probe settings, keyed by alpha-2 country in either case
+	// (parseProviderEgressCountrySettings). A binary that predates the key
+	// ignores it: the file is not read strictly.
+	CountrySettings map[string]providerEgressCountrySettingsYaml `yaml:"country_settings"`
 }
 
 // Reads one egress-sites.yml. Every destination and candidate must be one the
@@ -252,6 +268,10 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 			Headers:   document.Profile.Headers,
 		}
 	}
+
+	countrySettings, countrySettingsRefused := parseProviderEgressCountrySettings(document.CountrySettings)
+	sites.CountrySettings = countrySettings
+	sites.Refused = append(sites.Refused, countrySettingsRefused...)
 
 	// one list's entries converted to rows, each validated as the prober
 	// would run it, with a category and a name unique in the list; a problem
@@ -423,6 +443,51 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 	return sites, nil
 }
 
+// Reads country_settings: the countries whose settings differ from the
+// defaults, today those with udp_probes: false. A key is an ISO 3166-1
+// alpha-2 code in either case, read as lower case, as the prober matches a
+// provider's country (egresshealth.Pool.UdpProbesDisabled). A key that is
+// still not a two-letter code, or one that repeats a country another spelling
+// already set, is refused alone (country_invalid, counted and logged with the
+// other refusals) and the rest of the file stands, as for a country list
+// under a bad key: a setting that applies to no country leaves that country's
+// UDP probes on, and must never stop URL measurement fleet-wide. A country
+// whose settings are all defaults is not served, so the pool keeps its
+// version.
+func parseProviderEgressCountrySettings(document map[string]providerEgressCountrySettingsYaml) (map[string]egresshealth.CountrySettings, []ProviderEgressCatalogRefusal) {
+	settings := map[string]egresshealth.CountrySettings{}
+	refused := []ProviderEgressCatalogRefusal{}
+	// the spelling that set each country, in key order
+	setBy := map[string]string{}
+	for _, key := range providerEgressCountryCodes(document) {
+		country := strings.ToLower(strings.TrimSpace(key))
+		if !providerEgressCountryKeyValid(country) {
+			refused = append(refused, ProviderEgressCatalogRefusal{
+				Reason: ProviderEgressRefusalCountryInvalid,
+				List:   "country_settings",
+				Name:   key,
+				Detail: "is not a two-letter country code, so its settings apply to no country",
+			})
+			continue
+		}
+		if first, ok := setBy[country]; ok {
+			refused = append(refused, ProviderEgressCatalogRefusal{
+				Reason: ProviderEgressRefusalCountryInvalid,
+				List:   "country_settings",
+				Name:   key,
+				Detail: fmt.Sprintf("repeats country %s, which %q already sets", country, first),
+			})
+			continue
+		}
+		setBy[country] = key
+		if udpProbes := document[key].UdpProbes; udpProbes != nil && !*udpProbes {
+			disabled := false
+			settings[country] = egresshealth.CountrySettings{UdpProbes: &disabled}
+		}
+	}
+	return settings, refused
+}
+
 // Reads qualityprobe.yml; absent or unusable catalogs return an error. The
 // entries the parse refused are counted and logged under the parse stage.
 func LoadProviderEgressSites() (*ProviderEgressSites, error) {
@@ -538,15 +603,21 @@ func (self *ProviderEgressSites) servePool(stored []*model.ProviderEgressDestina
 	RecordProviderEgressCatalogRefusals(ProviderEgressRefusalStageServe, dropped)
 	pool.Countries = countries
 	pool.UrlProbePolicy = &self.UrlProbePolicy
+	if 0 < len(self.CountrySettings) {
+		pool.CountrySettings = self.CountrySettings
+	}
 	if err := egresshealth.ValidatePool(pool); err != nil {
 		return nil, err
 	}
-	// Country publication is part of the same generation as global contracts.
+	// Country publication is part of the same generation as global contracts,
+	// and so are the country settings; with none, the version is what it was
+	// before they existed.
 	contents, err := json.Marshal(struct {
-		GeneralVersion int                                   `json:"general_version"`
-		Countries      map[string][]egresshealth.Destination `json:"countries"`
-		UrlProbePolicy egresshealth.UrlProbePolicy           `json:"url_probe_policy"`
-	}{GeneralVersion: pool.Version, Countries: pool.Countries, UrlProbePolicy: self.UrlProbePolicy})
+		GeneralVersion  int                                     `json:"general_version"`
+		Countries       map[string][]egresshealth.Destination   `json:"countries"`
+		UrlProbePolicy  egresshealth.UrlProbePolicy             `json:"url_probe_policy"`
+		CountrySettings map[string]egresshealth.CountrySettings `json:"country_settings,omitempty"`
+	}{GeneralVersion: pool.Version, Countries: pool.Countries, UrlProbePolicy: self.UrlProbePolicy, CountrySettings: pool.CountrySettings})
 	if err != nil {
 		return nil, err
 	}
