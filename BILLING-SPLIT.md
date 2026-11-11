@@ -111,10 +111,10 @@ Per settled contract with a provider payout, the removed producer wrote one
 `account_balance` once per provider network per pass. Native settlements also
 spent two statements on the provider key's admission. At about 20M contracts
 a day, that is roughly 28 GB a day of `pending_task` heap and index pages
-written and vacuumed, 40M fewer statements in settlement transactions and
-40M fewer drain row operations; dropping `destination_id` saves another
-320 MB a day of sweep heap. See "Measurements" at the end for how this was
-estimated.
+written and vacuumed, 60M fewer statements in settlement transactions (the
+insert and the two admission statements) and 40M fewer drain row operations;
+dropping `destination_id` saves another 320 MB a day of sweep heap. See
+"Measurements" at the end for how this was estimated.
 
 ### Migration
 
@@ -282,7 +282,8 @@ entries for vacuum. So per day, roughly:
 
 - 9.4 GB of `pending_task` tuples, about 28 GB of heap and index page space,
   written, deleted and vacuumed;
-- 40M fewer statements inside native settlement transactions;
+- 60M fewer statements inside settlement transactions: the row's insert, and
+  the provider key's two admission statements in native settlements;
 - 40M fewer row operations in the drain, plus its `account_balance` upserts;
 - 320 MB of sweep heap for `destination_id`.
 
