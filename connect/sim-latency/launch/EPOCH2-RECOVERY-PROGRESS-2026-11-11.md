@@ -44,3 +44,26 @@ failure proof, and restore ordinary ingress only after the original recovery
 service is restored. Sille continues uninterrupted. No API, configuration, vault,
 database, frozen product source, scoring policy or baseline change is needed for
 this native recovery operation.
+
+## Follow-up at 23:13 UTC
+
+Sille completed two of nine candidate replicates for its next submission. Its
+previous successful score remains committed. The queue observation remains two
+scored, one infrastructure failure and eleven queued; Goofe is claimed but has
+not executed its candidate.
+
+One reviewed Goofe activation was attempted with source SHA-256
+`cfbde0852686875fbc62359584ff2575797006e773a262a464102084383eec77`.
+It installed the in-place ingress fence and exact-run launch denials, positively
+audited and retired 37 inactive historical control units, then stopped on the
+native no-launcher check: a control-user process was present. It did not start
+the canonical recovery, perform the full cleanup, restore ingress or change the
+evaluation clock. The failed receipt and all per-unit fenced/retired audits are
+retained under the prepared profile's `audit` directory. Do not replay this
+activation or delete its receipt.
+
+Read-only follow-up found the exact control user's user manager and PAM process,
+with no sessions and linger disabled. A continuation must suppress new control
+connections and positively join that manager, preserve the old attempt and
+audits, and pass the existing native proof before performing full cleanup.
+No cleanup success is claimed by this snapshot.
