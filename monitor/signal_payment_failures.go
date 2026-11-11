@@ -86,6 +86,35 @@ WITH active_supporter AS (
           )
       )
     GROUP BY event.store, event.action
+), crypto_held AS (
+    -- crypto invoices whose payment an operator holds: a sanctions match, a
+    -- sender the screen could not read, a TAO transfer shape the rail does
+    -- not credit, an amount no invoice of a shared address was quoted
+    SELECT receipt.asset AS target,
+           CASE receipt.review_reason
+               WHEN 'sanctions_hold' THEN 'crypto_sanctions_hold'
+               WHEN 'screening_unavailable' THEN 'crypto_screening_unavailable'
+               ELSE 'crypto_payment_held'
+           END AS kind,
+           count(DISTINCT receipt.intent_id)::bigint AS issue_count,
+           extract(epoch FROM now() - min(receipt.first_seen_at))::bigint AS oldest_age,
+           extract(epoch FROM now() - max(receipt.first_seen_at))::bigint AS newest_age
+    FROM crypto_payment_receipt receipt
+    WHERE receipt.state = 'review'
+      AND receipt.review_reason IN ('sanctions_hold', 'screening_unavailable', 'transfer_shape', 'amount_unmatched')
+      AND receipt.intent_id IS NOT NULL
+      AND receipt.first_seen_at <= now()
+    GROUP BY 1, 2
+), crypto_scanner AS (
+    -- a coin's scanner that succeeded before and has not for 15 minutes:
+    -- payments to its open invoices are not being read
+    SELECT scan.asset AS target,
+           1::bigint AS issue_count,
+           extract(epoch FROM now() - scan.last_success_at)::bigint AS oldest_age,
+           extract(epoch FROM now() - scan.last_success_at)::bigint AS newest_age
+    FROM crypto_scan_cursor scan
+    WHERE scan.last_success_at IS NOT NULL
+      AND scan.last_success_at < now() - interval '15 minutes'
 )
 SELECT 'entitlement_missing' AS kind, target, issue_count, oldest_age, newest_age
 FROM missing_entitlement
@@ -98,8 +127,19 @@ FROM unfulfilled_solana
 UNION ALL
 SELECT kind, target, issue_count, oldest_age, newest_age
 FROM payment_audit
+UNION ALL
+SELECT kind, target, issue_count, oldest_age, newest_age
+FROM crypto_held
+UNION ALL
+SELECT 'crypto_scanner_stalled' AS kind, target, issue_count, oldest_age, newest_age
+FROM crypto_scanner
 ORDER BY kind, target
 `
+
+// The crypto rail's coins (controller/crypto_pay_config.go cryptoPayAssets).
+var paymentFailuresCryptoAssets = map[string]bool{
+	"usdc_solana": true, "zec": true, "xmr": true, "tao": true, "btc": true, "eth": true, "sol": true,
+}
 
 // SIGNALS.md §2.22 maps to signal_payment_failures.go and
 // signal_payment_failures_test.go.
@@ -228,6 +268,43 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.context = "The durable event (payment_reconciliation_event, store=stripe, action=credit_unfulfillable, evidence=invoice id) retains the payment for support. Unresolved-webhook details carry the subscription, customer, customer email, amount and paid period. The count is distinct invoices; the webhook and the reconciler may both record one. The complete unresolved-webhook tuple belongs to this WARN; malformed records remain a separate §2.21 PAGE."
 		common.action = "Using authorized read-only provider tooling and payment/support evidence, establish which account paid. For a verified mapping, set network_id metadata on the Stripe subscription, then resend the invoice.paid event from the Stripe dashboard so the ordinary ledger-gated credit runs; future renewals then resolve by metadata. Otherwise record an authorized refund or support disposition. Email alone is not safe write authority; never edit balances by hand."
 		common.verify = "Each invoice is either credited once through the stripe_invoice ledger after its metadata repair or has a documented refund/support disposition, without a duplicate credit. The audit aggregate can remain until its 24-hour window expires; neither aging out nor a fresh reconciliation watermark proves disposition."
+	case "crypto_sanctions_hold":
+		if !paymentFailuresCryptoAssets[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown crypto asset")
+		}
+		common.class = "crypto-sanctions-hold"
+		common.symptom = fmt.Sprintf("%d %s crypto invoice payment(s) are held because a sender is on OFAC's sanctioned addresses", count, target)
+		common.mechanism = "Before a TAO, Bitcoin, ETH or SOL credit the scanner screens every sender the chain names against the newest config/all/crypto table (cryptosanctions.Match, BTCPAY.md §17.3, §17.5). A match moved the payment's receipts to review (sanctions_hold); nothing was credited, and the buyer sees only \"screening\"."
+		common.action = "Do not credit and do not refund. Bring the invoice (bringyourctl crypto show) to the owner and counsel, who decide. Only a hold they cleared is credited, with bringyourctl crypto credit --sanctions-cleared; never move funds out of Coinbase for it without their go."
+		common.verify = "Each held invoice has the owner's and counsel's documented disposition; a cleared one is credited once; the receipts leave review only through the operator tools."
+	case "crypto_screening_unavailable":
+		if !paymentFailuresCryptoAssets[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown crypto asset")
+		}
+		common.class = "crypto-screening-unavailable"
+		common.symptom = fmt.Sprintf("%d %s crypto invoice payment(s) are held because their senders could not be screened", count, target)
+		common.mechanism = "The sanctions table could not be read (no config/all/crypto/<release>/ table, or one that fails verification), or a sender's address cannot be read on its chain (a Bitcoin input with no address). The scanner never credits unscreened: the receipts are in review (screening_unavailable) and screened again each scan."
+		common.action = "Check the deployed config/all/crypto/<release>/ table and the release's cryptoctl run (build/all/run.sh); restore the table rather than crediting by hand. A payment the table cannot screen at all (an unnamed input) goes to the owner, who may credit it with bringyourctl crypto credit after review."
+		common.verify = "Once the table reads, the held payments screen clean and are credited by the scanner, or become sanctions_hold; the aggregate returns to zero."
+	case "crypto_payment_held":
+		if !paymentFailuresCryptoAssets[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown crypto asset")
+		}
+		common.tier = tierWarn
+		common.class = "crypto-payment-held"
+		common.symptom = fmt.Sprintf("%d %s crypto invoice payment(s) wait for an operator", count, target)
+		common.mechanism = "A TAO transfer of a shape the rail does not credit by itself (a batch, a proxy or multisig call, an EVM precompile send, a stake transfer: transfer_shape), or a payment to a coin's one shared deposit address whose amount no open invoice was quoted (amount_unmatched). Coinbase publishes nothing on which TAO transfer shapes it credits."
+		common.action = "Confirm in our Coinbase account that the funds arrived as the coin, then credit the invoice with bringyourctl crypto credit, or return the coins on the owner's go. Never credit on the chain's word alone for these shapes."
+		common.verify = "Each held invoice is credited once or has a documented refund; the aggregate returns to zero."
+	case "crypto_scanner_stalled":
+		if !paymentFailuresCryptoAssets[target] {
+			return finding{}, fmt.Errorf("payment failures returned an unknown crypto asset")
+		}
+		common.class = "crypto-scanner-stalled"
+		common.symptom = fmt.Sprintf("the %s payment scanner has not completed a scan for %d minutes", target, oldestAge/60)
+		common.mechanism = "The coin's scan chain fails every run (its chain source is down, refuses the key, lags or pauses on a runtime it cannot read, or its vault file is gone): the coin is listed as unavailable, and payments to its open invoices are not read until it recovers. crypto_scan_cursor.last_error holds the reason."
+		common.action = "Read crypto_scan_cursor.last_error for the coin and the taskworker log ([cryptopay]). Restore the chain source (Alchemy, Helius, snow's Finney node, the wallet daemon) or its vault file. For TAO on a new runtime, check that the reader decodes it before forcing anything; never point the scanner at an older block range."
+		common.verify = "The scanner succeeds again, the coin is listed as available, and payments made while it was down are credited from the chain."
 	default:
 		return finding{}, fmt.Errorf("payment failures returned an unknown kind")
 	}
