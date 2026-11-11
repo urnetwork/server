@@ -473,6 +473,17 @@ func TestGammaRenewsTopsUpAndUpgradesAutomatically(t *testing.T) {
 		f.run()
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_payment_intent WHERE network_id = $1 AND purpose = 'renew' AND credited_at IS NOT NULL`, networkId), 1)
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM subscription_renewal WHERE network_id = $1 AND market = 'gamma' AND start_time = $2`, networkId, termEnd), 1)
+		// subscription details say it renews
+		var renewalIntentId string
+		server.Db(ctx, func(conn server.PgConn) {
+			server.Raise(conn.QueryRow(ctx, `SELECT transaction_id FROM subscription_renewal WHERE network_id = $1 AND market = 'gamma' ORDER BY end_time DESC LIMIT 1`, networkId).Scan(&renewalIntentId))
+		})
+		state, err := gammaLookupSubscriptionState(ctx, renewalIntentId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, *state.AutoRenew, true)
+		connect.AssertEqual(t, state.CancelAtPeriodEnd, false)
 
 		// a monthly limit below the price: the next renewal is not made
 		limit := "1"
@@ -500,6 +511,13 @@ func TestGammaRenewsTopsUpAndUpgradesAutomatically(t *testing.T) {
 		}
 		connect.AssertEqual(t, settings.AutoRenew, false)
 		connect.AssertEqual(t, settings.MonthlyLimitGamma, "")
+		// and now that it runs out at the end of the term
+		state, err = gammaLookupSubscriptionState(ctx, renewalIntentId)
+		if err != nil {
+			t.Fatal(err)
+		}
+		connect.AssertEqual(t, *state.AutoRenew, false)
+		connect.AssertEqual(t, state.CancelAtPeriodEnd, true)
 		f.autoNow()
 		f.run()
 		connect.AssertEqual(t, gammaDbCount(t, ctx, `SELECT COUNT(*) FROM gamma_payment_intent WHERE network_id = $1 AND purpose = 'renew'`, networkId), 1)

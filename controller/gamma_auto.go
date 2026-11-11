@@ -20,6 +20,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"slices"
 	"time"
 
@@ -147,6 +148,28 @@ func (self *gammaBiller) autoRenew(account *model.GammaAccount) {
 	}
 	periodKey := "renew/" + termEnd.UTC().Format(time.RFC3339)
 	self.newAutoIntent(account, model.GammaPurposeRenew, periodKey, account.RenewPlan, priceUsd, tier.Name, &termEnd, graceEnd)
+}
+
+// gammaManageUrl explains the automatic charges and their switches.
+const gammaManageUrl = "https://ur.io/gamma"
+
+// gammaLookupSubscriptionState answers subscription details for a plan paid
+// with gamma: it renews at the end of the term unless the account turned
+// automatic renewal off (POST /pay/gamma/settings).
+func gammaLookupSubscriptionState(ctx context.Context, intentId string) (*subscriptionStoreState, error) {
+	id, err := server.ParseId(intentId)
+	if err != nil {
+		return nil, err
+	}
+	intent := model.GetGammaPaymentIntent(ctx, id)
+	if intent == nil {
+		return nil, fmt.Errorf("no gamma intent %s", intentId)
+	}
+	autoRenew := false
+	if account := model.GetGammaAccount(ctx, intent.NetworkId); account != nil {
+		autoRenew = account.AutoRenew
+	}
+	return &subscriptionStoreState{AutoRenew: &autoRenew, CancelAtPeriodEnd: !autoRenew}, nil
 }
 
 // gammaTopupDue reports whether a data balance runs out, or will within the
