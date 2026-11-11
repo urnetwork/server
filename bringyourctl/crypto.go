@@ -88,7 +88,12 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 		fmt.Fprintf(out, "  price $%.2f (regular $%.2f), rate $%g\n",
 			model.NanoCentsToUsd(intent.PriceUsdNanoCents), model.NanoCentsToUsd(intent.RegularPriceUsdNanoCents), intent.RateUsd)
 		fmt.Fprintf(out, "  address %s (index %v)\n", intent.Address, cryptoOptionalInt(intent.AddressIndex))
-		fmt.Fprintf(out, "  quoted %s, expires %s\n", intent.QuotedAt.Format("2006-01-02 15:04:05"), intent.ExpiresAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(out, "  quoted %s, expires %s", intent.QuotedAt.Format("2006-01-02 15:04:05"), intent.ExpiresAt.Format("2006-01-02 15:04:05"))
+		if grace := controller.CryptoAssetConfirmationGrace(intent.Asset); 0 < grace {
+			// Bitcoin: a payment sent in time and mined by then is on time
+			fmt.Fprintf(out, ", on time if mined by %s (a %s confirmation grace)", intent.ExpiresAt.Add(grace).Format("2006-01-02 15:04:05"), grace)
+		}
+		fmt.Fprintf(out, "\n")
 		if intent.CreditedAt != nil {
 			fmt.Fprintf(out, "  credited %s", intent.CreditedAt.Format("2006-01-02 15:04:05"))
 			if intent.CreditedUsdNanoCents != nil {

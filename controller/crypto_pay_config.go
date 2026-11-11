@@ -414,6 +414,13 @@ func (self *CryptoPayConfig) normalize() {
 			if assetConfig.WatchAfter <= 0 {
 				assetConfig.WatchAfter = cryptoDefaultWatchAfter
 			}
+			// Bitcoin's block scan matches an invoice only while it is
+			// watched: a watch that ended within the confirmation grace would
+			// miss the payments the grace credits
+			if grace := cryptoAssetConfirmationGrace(asset); assetConfig.WatchAfter <= grace {
+				glog.Errorf("[cryptopay]crypto_pay.yml watches %s invoices %s after they close, inside the coin's %s confirmation grace; %s is used\n", asset, assetConfig.WatchAfter, grace, cryptoDefaultWatchAfter)
+				assetConfig.WatchAfter = cryptoDefaultWatchAfter
+			}
 		}
 	}
 	if self.Quote.Expiry <= 0 {
@@ -1088,7 +1095,10 @@ func cryptoAssetNetworkWarning(asset string) string {
 	case model.CryptoAssetTao:
 		return "Send TAO on the Bittensor network (Finney) to this address, exactly the amount. TAO has no memo: the address alone identifies this invoice. TAO sent on another network or as a wrapped token is not credited."
 	case model.CryptoAssetBtc:
-		return "Send BTC on the Bitcoin network to this address, exactly the amount. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation."
+		// the confirmation grace: a payment is seen only once mined
+		// (cryptoBitcoinConfirmationGrace)
+		return "Send BTC on the Bitcoin network to this address, exactly the amount, before the quote expires. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation, which can take a while: one sent before the quote expires is credited at the quoted price if it confirms within " +
+			cryptoGraceHours(cryptoAssetConfirmationGrace(model.CryptoAssetBtc)) + " of the expiry."
 	case model.CryptoAssetEth:
 		return "Send ETH on Ethereum mainnet to this address, exactly the amount. ETH on another network (Base, Arbitrum, Optimism) or a token is not credited. A payment is credited once its block is finalized, about 15 minutes."
 	case model.CryptoAssetSol:
@@ -1122,10 +1132,46 @@ func cryptoAssetQuoteDecimals(asset string) int {
 
 // cryptoAssetQuoteTtl is how long a coin's quote holds: the config's expiry
 // for the scanned coins, the plan intent's hour for USDC (the amount is in
-// dollars and its unique suffix stays reserved long after).
+// dollars and its unique suffix stays reserved long after). It is the window
+// to send in, which expires_at states, for every coin: Bitcoin's confirmation
+// grace comes after it (cryptoAssetConfirmationGrace).
 func cryptoAssetQuoteTtl(config *CryptoPayConfig, asset string) time.Duration {
 	if asset == model.CryptoAssetUsdcSolana {
 		return solanaPlanIntentDuration
 	}
 	return config.Quote.Expiry
+}
+
+// cryptoAssetConfirmationGrace is how long past its quote's expiry a coin's
+// payment may first be seen and still count as sent within the quote:
+// credited at the quoted price, with the invoice open (pending, or seen while
+// short) until then, and not re-quoted meanwhile (cryptoRequoteInGrace).
+// Bitcoin's is cryptoBitcoinConfirmationGrace, 3 hours: its scanner sees a
+// payment only once it is mined, at its block's time, so a payment sent before
+// the expiry is first seen up to hours after it. Every other coin's is 0, as
+// it always was: Monero's and Zcash's wallets see a payment in the mempool,
+// and TAO, SOL, USDC and ETH see it within seconds of its block.
+func cryptoAssetConfirmationGrace(asset string) time.Duration {
+	if asset == model.CryptoAssetBtc {
+		return cryptoBitcoinConfirmationGrace
+	}
+	return 0
+}
+
+// CryptoAssetConfirmationGrace is cryptoAssetConfirmationGrace for the
+// operator tools.
+func CryptoAssetConfirmationGrace(asset string) time.Duration {
+	return cryptoAssetConfirmationGrace(asset)
+}
+
+// cryptoGraceHours is a confirmation grace in words: "3 hours".
+func cryptoGraceHours(grace time.Duration) string {
+	hours := int(grace / time.Hour)
+	if grace%time.Hour != 0 {
+		return fmt.Sprintf("%d minutes", int(grace/time.Minute))
+	}
+	if hours == 1 {
+		return "1 hour"
+	}
+	return fmt.Sprintf("%d hours", hours)
 }
