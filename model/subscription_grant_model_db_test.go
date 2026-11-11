@@ -94,7 +94,8 @@ func TestGrantWritersRecordGrantKind(t *testing.T) {
 			return grantKinds
 		}
 		connect.AssertEqual(t, grantKinds(freeNetworkId), []GrantKind{GrantKindFree})
-		connect.AssertEqual(t, grantKinds(proNetworkId), []GrantKind{GrantKindPro})
+		// a Pro network gets the daily free grant on top of its cycle grant
+		connect.AssertEqual(t, grantKinds(proNetworkId), []GrantKind{GrantKindFree, GrantKindPro})
 		connect.AssertEqual(t, grantKinds(referrerNetworkId), []GrantKind{GrantKindFree, GrantKindReferral})
 		connect.AssertEqual(t, grantKinds(refereeNetworkId), []GrantKind{GrantKindFree, GrantKindReferral})
 		connect.AssertEqual(t, grantKinds(otherNetworkId), []GrantKind{GrantKindNone, GrantKindNone, GrantKindNone, GrantKindFree})

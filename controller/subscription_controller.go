@@ -2169,6 +2169,9 @@ func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, aud
 // unless that cycle has had it, and everyone else gets the daily free amount. Used
 // when a network is created and when a subscription changes (bringyourctl
 // upgrade-plan), so the network does not have to wait for the next scheduled grant.
+// A Pro network also gets the daily free amount, from the daily run
+// (RefreshFreeTransferBalances), like every network; a network that becomes Pro
+// keeps the day's free grant it already holds, so a refresh adds no second one.
 //
 // ReadCommitted, which the cycle grant needs (model.GrantProCycleInTx).
 func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
@@ -2261,7 +2264,9 @@ func ScheduleRefreshFreeTransferBalances(clientSession *session.ClientSession, t
 }
 
 // RefreshFreeTransferBalances grants the daily free allowance (pro.yml free.data) to
-// every network without an active subscription.
+// every network, Pro and payment grace included, on top of the Pro cycle grant
+// (model.AddFreeTransferBalanceToAllNetworks). A Pro network spends it after its
+// paid Pro data.
 func RefreshFreeTransferBalances(
 	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
 	clientSession *session.ClientSession,

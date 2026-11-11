@@ -506,7 +506,8 @@ func zeroEscrowCompanionOriginInTx(
 
 // The priority escrow admission would give the would-be payer, without
 // reserving or locking a grant: the blend of paid and unpaid grants it would
-// fund the request from, in its funding order (earliest expiry first). Nothing
+// fund the request from, in its funding order (paid Pro grants first, then
+// the earliest expiry; transfer_balance_funding_order.go). Nothing
 // is reserved, so each active grant counts its whole balance. A zero-byte
 // request takes the first grant, as a zero-byte anchor does, and a payer with
 // no active grant is unpaid. It is never the trusted priority, which no
@@ -528,7 +529,7 @@ func zeroEscrowContractPriorityInTx(
 	grants := []grant{}
 	result, err := tx.Query(
 		ctx,
-		escrowTransferBalanceSql+` ORDER BY end_time, start_time, balance_id LIMIT $3`,
+		transferBalanceFundingPageSql("$3"),
 		payerNetworkId,
 		now,
 		redisGrantPageRows,
@@ -539,7 +540,8 @@ func zeroEscrowContractPriorityInTx(
 			var g grant
 			var startTime time.Time
 			var endTime time.Time
-			server.Raise(result.Scan(&balanceId, &g.paid, &g.balanceByteCount, &startTime, &endTime))
+			var fundsFirst bool
+			server.Raise(result.Scan(&balanceId, &g.paid, &g.balanceByteCount, &startTime, &endTime, &fundsFirst))
 			grants = append(grants, g)
 		}
 	})
