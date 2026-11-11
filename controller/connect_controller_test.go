@@ -967,6 +967,16 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+		// network contracts escrow from the network's balance
+		now := server.NowUtc()
+		model.AddTransferBalance(ctx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now.Add(-time.Minute),
+			EndTime:               now.Add(24 * time.Hour),
+			StartBalanceByteCount: 64 * model.Mib,
+			BalanceByteCount:      64 * model.Mib,
+			NetRevenue:            model.UsdToNanoCents(1),
+		})
 
 		newClient := func() server.Id {
 			clientId := server.NewId()
@@ -979,7 +989,8 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 		provider := newClient()
 
 		// both peers advertise the network mode (and Stream, like real
-		// clients), so both directions settle as network no-escrow contracts
+		// clients), so both directions settle as network contracts, escrowed
+		// from the network's balance
 		for _, clientId := range []server.Id{client, provider} {
 			model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{
 				model.ProvideModeNetwork: networkKey,
