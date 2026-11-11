@@ -6,15 +6,22 @@ Build and review cli/competitionmanagementcache, then install its binary as
 other users. Provision /var/lib/urnetwork/competition-management-cache as root:root
 0700 before starting the hardened service.
 
-Render the two units using the installed binary's --render-service and
---render-timer operations, install their output as urnetwork-management-cache.service
-and urnetwork-management-cache.timer, then inspect systemd-analyze verify before
-daemon-reload and enablement. The service shares the existing private aggregate,
-with its own 32 MiB/32-task cap. It does not call the ordinary admission gate which
-it must keep runnable. No new reserve or relaxed resource ceiling is introduced.
+Keep urnetwork-management-cache.timer disabled. The legacy oneshot timer creates
+and removes cgroups during ordinary management's strict before/after census;
+even a healthy no-op can therefore refuse a one-time evaluator launch. Do not
+weaken that guard. The --render-timer operation now fails closed.
+
+Render --render-service using the reviewed installed binary, install its output
+as urnetwork-management-cache.service, and inspect systemd-analyze verify before
+daemon-reload and direct service enablement. The persistent parent shares the
+existing private aggregate, with one 32 MiB/32-task cap covering parent and child.
+It calls only the same installed image's --once role through /proc/self/exe:
+no systemd-run, delegated cgroup, shell, agent admission or new resource reserve.
+Start it before admission checks; verify its original cgroup inode remains stable
+across repeated passes and the exact original signed agent checks still pass.
 
 An optional --settings path names a canonical, protected root-owned JSON file.
-Render both units with that same argument; omitted fields retain the constructor
+Render the service with that same argument; omitted fields retain the constructor
 defaults. It can tune numeric maintenance bounds, never select another cgroup,
 change the qualified eight-GiB private cap or lower the true control reserve.
 
@@ -33,7 +40,19 @@ reclaim can return less than requested; no requested bytes are subtracted from
 charge and no maintenance result authorizes host or grading readiness. Existing
 admission guards make their own fresh resource and authentication checks.
 
-Validate native startup and a healthy no-op under the actual rendered service
-before enabling the timer. Review finite JSON results and the private durable
+The parent starts at most one pass at a time and waits thirty seconds after its
+positive join before another pass. The default pass deadline is fifteen seconds;
+its five-second stop budget is split between TERM grace and KILL/join. A timeout,
+failed/malformed output, nonzero exit or missing join holds the parent alive in
+its stable cgroup without issuing more passes. Finite JSON reports pass_joined,
+pass_failed_held or pass_unjoined_held, never a raw private error or readiness.
+Restart=no prevents service-manager retries. An explicit operator restart never
+resets the journal; do not restart the owner to circumvent a held episode.
+
+Validate a healthy native --once first and the rendered persistent service under
+its actual confinement before enabling the service directly. Review finite JSON
+results, actual child join, unchanged aggregate limits, and private durable
 episode journal. A blocked episode needs operator investigation, not an unbounded
 reclaim loop, global cache drop, limit change, active-evaluation mutation or rerun.
+Rollback stops/disables the service and leaves the old timer disabled; preserve
+binaries, generated units and the episode journal.
