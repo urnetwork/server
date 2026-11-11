@@ -375,12 +375,8 @@ func TestScheduledContractCloseOwnerReleasedWithinTheWaitClosesInTheClaims(t *te
 			f.addLegacyContracts(t.Context(), others[index], 1)
 		}
 		events := newScheduledCloseOwnerEvents(append([]*scheduledCloseOwnerPayer{held}, others...)...)
-		// A refusal carries its contract's own publication key.
+		// A refused deadline turn names the contracts it would have closed.
 		heldKey := server.NewPgOwnershipKey("transfer_balance", held.balanceId)
-		heldContractKeys := map[server.PgOwnershipKey]server.Id{}
-		for _, contractId := range held.contractIds {
-			heldContractKeys[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
-		}
 		otherKeys := map[server.PgOwnershipKey]bool{}
 		for _, other := range others {
 			otherKeys[server.NewPgOwnershipKey("transfer_balance", other.balanceId)] = true
@@ -390,7 +386,9 @@ func TestScheduledContractCloseOwnerReleasedWithinTheWaitClosesInTheClaims(t *te
 		otherReleases := 0
 		waited := make(chan struct{})
 		var waitedOnce sync.Once
-		ctx := server.Testing_WithPgOwnershipObservation(model.WithProviderWorkSessionSource(t.Context(), nil), func(event server.PgOwnershipEvent) {
+		// Deadline turns report through the turn seam with their members;
+		// every other owned transaction through the context's observation.
+		observe := func(members []server.Id, event server.PgOwnershipEvent) {
 			events.observe(event)
 			if event.TransactionScoped {
 				return
@@ -401,8 +399,8 @@ func TestScheduledContractCloseOwnerReleasedWithinTheWaitClosesInTheClaims(t *te
 				defer stateLock.Unlock()
 				switch {
 				case event.Kind == server.PgOwnershipRefused && slices.Contains(event.Keys, heldKey):
-					for _, key := range event.Keys {
-						if contractId, found := heldContractKeys[key]; found {
+					for _, contractId := range members {
+						if slices.Contains(held.contractIds, contractId) {
 							refusedIds[contractId] = true
 						}
 					}
@@ -418,7 +416,11 @@ func TestScheduledContractCloseOwnerReleasedWithinTheWaitClosesInTheClaims(t *te
 			if ready {
 				waitedOnce.Do(func() { close(waited) })
 			}
+		}
+		ctx := server.Testing_WithPgOwnershipObservation(model.WithProviderWorkSessionSource(t.Context(), nil), func(event server.PgOwnershipEvent) {
+			observe(nil, event)
 		})
+		ctx = model.Testing_WithContractDeadlineOwnerTurnObservation(ctx, observe)
 		publishScheduledCloses(t, ctx)
 		trace := &scheduledCloseLockTrace{}
 		scope, err := server.NewTestPgQueryScope(ctx, trace)

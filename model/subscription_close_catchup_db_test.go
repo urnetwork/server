@@ -121,19 +121,20 @@ func TestExpiryCatchupNativeGapClosesAndRevisitsQuiet(t *testing.T) {
 		if err != nil || replayed.Applied != 0 || replayed.Released != 0 || replayed.Failed != 0 {
 			t.Fatal("gap recheck repeated a settled financial debit", err)
 		}
-		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var conserved bool
 			server.Raise(conn.QueryRow(ctx, `SELECT
 				(SELECT balance_byte_count=972 FROM transfer_balance WHERE balance_id=$1) AND
 				(SELECT sum(payout_byte_count)=28 FROM transfer_escrow_sweep WHERE contract_id=ANY($2)) AND
-				(SELECT provided_byte_count=28 FROM account_balance WHERE network_id=$3) AND
+				NOT EXISTS (SELECT 1 FROM account_balance WHERE network_id=$3) AND
 				(SELECT count(*)=0 FROM transfer_contract WHERE contract_id=ANY($4) AND outcome IS NOT NULL)`,
 				f.balanceId, []server.Id{quiet, active}, f.destinationNetworkId, retainedIds).Scan(&conserved))
 			if !conserved {
 				t.Fatal("gap service changed exact debit, payout, provider total, or active original rows")
 			}
 		})
+		// the sweeps are the provider record; no lifetime totals are produced
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId})
 		if string(neighborBefore) != string(readRedisExpiryRepairTestState(ctx, neighbor.ContractId)) || Testing_NetEscrowByteCount(ctx, f.balanceId) != 37 {
 			t.Fatal("gap service changed an active neighboring reservation")
 		}

@@ -288,9 +288,10 @@ func TestDeadlineReconciliationThroughExpirySweep(t *testing.T) {
 				t.Fatal("expiry sweep overcharged or left the contract open", terminal, balance, charged, provided)
 			}
 		})
+		// the sweep alone holds the provider's earnings (BILLING-SPLIT.md)
 		state := readDeadlineDeferredProjection(t, ctx, f.destinationNetworkId, id)
-		if state.accountBytes != 0 || state.sweptBytes != 7 || state.pendingBytes != 7 {
-			t.Fatal("expiry sweep lost exact pending provider allocation", state.accountBytes, state.sweptBytes, state.pendingBytes)
+		if state.accountBytes != 0 || state.sweptBytes != 7 || state.pendingBytes != 0 || state.owners != 0 {
+			t.Fatal("expiry sweep lost exact earnings or published provider totals", state.accountBytes, state.sweptBytes, state.pendingBytes, state.owners)
 		}
 		if remaining := Testing_NetEscrowByteCount(ctx, f.balanceId); remaining != 0 {
 			t.Fatal("deadline retained a spent reservation", remaining)

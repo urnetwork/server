@@ -11,7 +11,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 const forceCloseOperationalUsage = ByteCount(1024)
@@ -136,32 +135,16 @@ func requireForceCloseOperationalRecovery(t testing.TB, ctx context.Context, f *
 		t.Fatal("recovery changed exact financial settlement", settled)
 	}
 	requireForceCloseAvailableCredit(t, ctx, f, forceCloseDisputeInitialBalance-forceCloseOperationalUsage)
+	// The sweep holds the exact earnings; recovery queues no provider total
+	// (BILLING-SPLIT.md).
 	wantProjection := forceCloseProviderProjection{sweptBytes: forceCloseOperationalUsage,
-		sweptRevenue: NanoCents(forceCloseOperationalUsage), unappliedBytes: forceCloseOperationalUsage,
-		unappliedRevenue: NanoCents(forceCloseOperationalUsage), owners: 1}
+		sweptRevenue: NanoCents(forceCloseOperationalUsage)}
 	if got := readForceCloseProviderProjection(t, ctx, f); got != wantProjection {
-		t.Fatalf("recovery lost exact durable money or payout ownership: got=%+v want=%+v", got, wantProjection)
-	}
-	target := task.NewTaskTarget(ApplyLegacyProviderTotals)
-	var taskId server.Id
-	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$1 AND run_once_key=$2`,
-			target.TargetFunctionName(), task.RunOnce("legacy_provider_totals", f.contractId).String()).Scan(&taskId))
-	})
-	stale := task.GetTasks(ctx, taskId)[taskId]
-	if stale == nil {
-		t.Fatal("recovery lost its provider task")
+		t.Fatalf("recovery lost exact durable money or published provider totals: got=%+v want=%+v", got, wantProjection)
 	}
 	for range 2 {
-		// Repeat the same pre-application arguments to model a lost apply reply.
-		if _, _, err := target.RunSpecific(ctx, stale); err != nil {
-			t.Fatal("provider application or stale retry failed", err)
-		}
-		wantProjection = forceCloseProviderProjection{sweptBytes: forceCloseOperationalUsage,
-			sweptRevenue: NanoCents(forceCloseOperationalUsage), accountBytes: forceCloseOperationalUsage,
-			accountRevenue: NanoCents(forceCloseOperationalUsage), owners: 1, appliedOwners: 1}
 		if got := readForceCloseProviderProjection(t, ctx, f); got != wantProjection {
-			t.Fatalf("provider replay duplicated or lost bytes or money: got=%+v want=%+v", got, wantProjection)
+			t.Fatalf("replay duplicated or lost bytes or money: got=%+v want=%+v", got, wantProjection)
 		}
 		if count, err := ForceCloseOpenContractIds(ctx, f.cutoff, 10, 1, 0, 0); err != nil || count != 0 {
 			t.Fatal("terminal expiry replay repeated financial work", count, err)

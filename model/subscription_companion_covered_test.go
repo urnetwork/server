@@ -197,7 +197,7 @@ func TestCompanionCoveredRequestPaidSettlementAndReplay(t *testing.T) {
 			if got := contractPayoutTestAmounts(t, ctx, child.ContractId); len(got) != 1 || got[f.clients.providerNetworkId] != want[f.clients.providerNetworkId] {
 				t.Fatal("covered request changed provider allocation", got)
 			}
-			assertContractPayoutTestAccounts(t, ctx, []server.Id{f.clients.payerNetworkId, f.clients.providerNetworkId}, want)
+			assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.clients.payerNetworkId, f.clients.providerNetworkId})
 			for _, client := range []server.Id{f.clients.providerId, f.clients.payerId} {
 				if err := CloseContract(ctx, child.ContractId, client, 17, false); !errors.Is(err, errContractAlreadySettled) {
 					t.Fatal("settled companion replay was not terminal", err)
@@ -232,7 +232,7 @@ func TestCompanionCoveredRequestPaidSettlementAndReplay(t *testing.T) {
 					assertCurrentPayoutDebitTestConsumptionAndDrain(t, ctx, balance.BalanceId, 8192, amounts)
 				}
 			}
-			assertContractPayoutTestAccounts(t, ctx, []server.Id{f.clients.payerNetworkId, f.clients.providerNetworkId}, want)
+			assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.clients.payerNetworkId, f.clients.providerNetworkId})
 		}
 	})
 }
