@@ -95,6 +95,11 @@ func UrlProbeH3Udp(leg *CheckResult) string {
 		"local_control_registration", "local_contract_acquisition", "local_transport_admission", "tunnel_unavailable", "run_ended":
 		// the leg never reached the point of sending UDP to the site
 		return UrlProbeH3UdpNotMeasured
+	case "request_canceled":
+		// cut short before any response, by the loss of the tunnel under it
+		// (the attempt's context ends with it) or by the run's end: what came
+		// back, if anything, decides nothing
+		return UrlProbeH3UdpNotMeasured
 	}
 	return UrlProbeH3UdpAnswered
 }

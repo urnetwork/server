@@ -240,6 +240,65 @@ func TestUrlProbeH3AnsweredLegIsJudgedByItsHttpsLeg(t *testing.T) {
 	}
 }
 
+// A path whose tunnel the test loses: Current hands out the one client and
+// the loss signal, and a lost tunnel does not come back.
+type h3TestLosingPath struct {
+	client *http.Client
+	signal context.Context
+}
+
+// Implements Path.
+func (self *h3TestLosingPath) Current() (*http.Client, context.Context) {
+	return self.client, self.signal
+}
+
+// Implements Path.
+func (self *h3TestLosingPath) Reopen(context.Context) error {
+	return errors.New("the provider is not taking contracts")
+}
+
+// An HTTP/3 leg cut short, by the loss of the tunnel under it or by the run's
+// end, heard nothing that proves or disproves the provider's UDP path: it is
+// not measured, so the load is not measured, earns no pass and gives its
+// place no QUIC evidence. Only an answer proves UDP, and only silence until
+// the handshake's own bound fails it.
+func TestUrlProbeH3LegCutShortIsNotMeasured(t *testing.T) {
+	signal, lose := context.WithCancelCause(context.Background())
+	var udpRequests atomic.Int32
+	h3 := roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		udpRequests.Add(1)
+		// the provider disconnects while the QUIC Initial is out; the
+		// attempt's context ends with the tunnel (bound)
+		lose(errTunnelGone)
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	})
+	path := &h3TestLosingPath{client: &http.Client{Transport: &h3TestTransport{https: h3TestContent(nil), h3: h3}}, signal: signal}
+	result, err := Check(context.Background(), nil, Options{
+		UrlProbe: true, Path: path, Sleep: noSleep, Destinations: h3TestDestinations(t, h3TestCatalog), Rand: rand.New(rand.NewSource(3)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if udpRequests.Load() != 1 || len(result.Checks) != 1 {
+		t.Fatalf("udp requests=%d checks=%d; want the one HTTP/3 leg", udpRequests.Load(), len(result.Checks))
+	}
+	check := result.Checks[0]
+	if check.Ok || !check.NotMeasured || result.OkCount != 0 || result.Total != 0 || check.H3 == nil || UrlProbeH3Udp(check.H3) != UrlProbeH3UdpNotMeasured {
+		t.Fatalf("ok=%d/%d check=%+v leg=%+v; a leg the tunnel's loss cut short proves nothing about UDP",
+			result.OkCount, result.Total, check, check.H3)
+	}
+	if err := result.UrlProbeEvidence.ValidateOutcome(result.OkCount, result.Total, result.TlsAuthenticationFailure); err != nil {
+		t.Fatalf("evidence of a leg cut short fails validation: %v", err)
+	}
+	if leg := result.UrlProbeEvidence.H3; leg == nil || leg.Udp != UrlProbeH3UdpNotMeasured {
+		t.Fatalf("evidence %+v", leg)
+	}
+	if summary := result.H3Summary(); summary != "not_measured:1" {
+		t.Fatalf("h3 summary = %q", summary)
+	}
+}
+
 // A security recheck asks only about the stored URL's HTTPS identity: it is
 // never scored and makes no HTTP/3 leg.
 func TestUrlProbeSecurityRecheckMakesNoH3Leg(t *testing.T) {

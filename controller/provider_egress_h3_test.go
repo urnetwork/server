@@ -3,10 +3,13 @@ package controller
 import (
 	"encoding/json"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // The pool exactly as the prober decodes it: each served destination's wire
@@ -124,5 +127,36 @@ destinations:
 	}
 	if versionOf("") != versionOf("    h3: false\n") {
 		t.Fatal("an explicit h3: false changed the pool version")
+	}
+}
+
+// The place judgement of a silent HTTP/3 leg is the server's
+// (model.JudgeProviderEgressH3): an outcome that arrives with a verdict is
+// refused before anything is read or stored, so no prober can buy a place
+// verdict for its provider.
+func TestProviderEgressIngestRefusesAProberHttp3Verdict(t *testing.T) {
+	evidence := statsEgressTestUrlEvidence(time.Now().UTC(), true)
+	evidence.Destination.H3 = true
+	evidence.Security[0].Destination = evidence.Destination
+	evidence.FailureStage = egresshealth.FailureStageH3
+	evidence.H3 = &egresshealth.UrlProbeH3Evidence{Udp: egresshealth.UrlProbeH3UdpSilent, FailureStage: egresshealth.FailureStageDialQuic}
+	if err := evidence.ValidateOutcome(0, 1, false); err != nil {
+		t.Fatalf("the silent leg's evidence is not valid without a verdict: %v", err)
+	}
+	for _, verdict := range []string{egresshealth.UrlProbeH3VerdictPlace, egresshealth.UrlProbeH3VerdictProvider} {
+		evidence.H3.Verdict = verdict
+		args := &SubmitProviderEgressHealthArgs{
+			ClientId:         server.NewId(),
+			RunId:            server.NewId(),
+			UrlProbeEvidence: evidence,
+			OKCount:          0,
+			TotalCount:       1,
+			ClassResults:     map[string]ProviderEgressHealthClassResult{"site": {OK: 0, Total: 1}},
+			FailedNames:      evidence.Destination.Name,
+		}
+		refusal := ProviderEgressIngestRefusalOf(SubmitProviderEgressHealth(t.Context(), args))
+		if refusal == nil || refusal.Status != 400 || !strings.Contains(refusal.Message, "HTTP/3 verdict is judged by the server") {
+			t.Fatalf("verdict %q: the ingest took a prober's verdict: %+v", verdict, refusal)
+		}
 	}
 }

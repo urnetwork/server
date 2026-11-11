@@ -297,11 +297,9 @@ attempts:
 			(result.FailureStage == "response_content" || result.FailureStage == "response_performance") {
 			tunnelGone = false
 		}
-		// The same holds for an HTTP/3 leg's fully received response.
-		if leg := result.H3; self.opts.UrlProbe && leg != nil && !result.NotMeasured && result.FailureStage == FailureStageH3 &&
-			leg.BodyComplete && (leg.FailureStage == "response_content" || leg.FailureStage == "response_performance") {
-			tunnelGone = false
-		}
+		// An HTTP/3 leg fails its load only when it heard nothing back
+		// (joinUrlProbeH3), and silence while the path disappears is the
+		// path's, so such a load is not measured.
 	}
 	if result.Attempts == 0 && result.Err == "" {
 		// The run ended before this load's first attempt could start. On the
