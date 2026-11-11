@@ -14,10 +14,10 @@ package taskworker
 // production among them, and a job run there fails and waits on server/task's backoff: no job runs without its
 // clock check and its budget. The host ends with the runtime's lifetime, after the drain has cancelled the runs.
 //
-// The jobs land with their own tasks, each adding one evsJob to evsJobs: EVSB-M2-11's hourly evacuation,
-// EVSB-M2-12's nightly pass with EVSB-M2-13's orphan GC and EVSB-M2-14's marker collection, EVS1-M2-15's lease
-// sweep, EVS1-M2-17's path-epoch copies, EVS1-M2-19's shreds and reconciler, EVS1-M2-20's erasure finishing, and
-// v1's drop jobs. None of them has landed, so the registry binds no evs name yet.
+// The jobs land with their own tasks, each adding its evsJob to evsJobs: EVSB-M2-11's hourly evacuation,
+// EVSB-M2-12's nightly pass with EVSB-M2-13's orphan GC and EVSB-M2-14's marker collection, EVSB-M2-26's closing
+// job of the nightly count, EVS1-M2-15's lease sweep, EVS1-M2-17's path-epoch copies, EVS1-M2-19's shreds and
+// reconciler, EVS1-M2-20's erasure finishing, and v1's drop jobs. Each binds its name as it lands.
 
 import (
 	"context"
