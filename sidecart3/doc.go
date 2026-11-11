@@ -22,6 +22,9 @@
 //     runtime CROSSSLOT lint over the scripts and multi-key calls T3's engines made.
 //   - store_view.go, the Postgres fault's StoreView reads on T3, read-only, which NetSettings sets on
 //     every T3 Net (TEST-M2-01).
+//   - linearize.go, CheckLinearizable, §22.8's history rule: Porcupine over a fault.History, per ref,
+//     with §11.8's commit rule and each unknown outcome's end open, which only server's tests import
+//     (TEST-M2-02).
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
