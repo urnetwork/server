@@ -5,11 +5,15 @@ package model
 // §7.10's effects of landed entries at api (TEAM-M2-16, §22.7), on Postgres
 // with MG1, T2's FakeBlobs for the log and the rev/ store: a removal's effects
 // run once after a kill between the append and the effect, a statement refused
-// at its position changes no row, the removed client's token is refused, and
-// sponsor_user_id follows the tip's sponsor.
+// at its position changes no row, the removed client's token is refused,
+// sponsor_user_id follows the tip's sponsor, and the network authority notice
+// is owed once for an AdminSet change or a new Delegation, never for a
+// forwarding Delegation (QD-647).
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"testing"
 	"time"
@@ -329,7 +333,10 @@ func TestAnAdminSetChangeOwesItsNoticeOnce(t *testing.T) {
 
 // §7.8: an entry that declared a Delegation owes the notice when its effects
 // are applied, and applying the entry again owes nothing more; the notice
-// names neither the Delegation nor its key.
+// names neither the Delegation nor its key. A forwarding Delegation beside it,
+// which the log carries and every verifier takes, owes none (QD-647): the
+// run over its entry applies nothing, records no event and adds no change to
+// the notice, which joins whatever a notice-worthy entry owes.
 func TestANewDelegationOwesItsNoticeOnce(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		self := newTestEffectsLog(t)
@@ -341,12 +348,8 @@ func TestANewDelegationOwesItsNoticeOnce(t *testing.T) {
 			delegationCount: 1,
 		}
 		connect.AssertEqual(t, effect.empty(), false)
-		for i := range 2 {
-			server.Tx(self.ctx, func(tx server.PgTx) {
-				applied, err := applyConfigLogEntryEffectInTx(self.ctx, tx, self.networkId, effect)
-				server.Raise(err)
-				connect.AssertEqual(t, applied, i == 0)
-			})
+		noticeHasOneChange := func() *testOutboxNotice {
+			t.Helper()
 			notices := unsentTestNotices(t, self.ctx, self.networkId, SecurityNetworkAuthorityTemplateName)
 			if len(notices) != 1 {
 				t.Fatalf("%d notices, want one", len(notices))
@@ -354,6 +357,43 @@ func TestANewDelegationOwesItsNoticeOnce(t *testing.T) {
 			changes := notices[0].changes(t)
 			if len(changes) != 1 || changes[0]["action"] != SecurityNetworkAuthorityDelegation || len(changes[0]) != 2 {
 				t.Fatalf("the notice: %s", notices[0].templateJson)
+			}
+			return notices[0]
+		}
+		for i := range 2 {
+			server.Tx(self.ctx, func(tx server.PgTx) {
+				applied, err := applyConfigLogEntryEffectInTx(self.ctx, tx, self.networkId, effect)
+				server.Raise(err)
+				connect.AssertEqual(t, applied, i == 0)
+			})
+			noticeHasOneChange()
+		}
+		before := noticeHasOneChange()
+
+		// the owner's device files its own forwarding Delegation, which
+		// api's verifier takes at the tip
+		seed := sha256.Sum256([]byte("synthetic forwarding key"))
+		forwarding := self.world.SignAsOwner(bridge.SignedType_SIGNED_DELEGATION, &protocol.Delegation{
+			Header:               self.world.Header(),
+			Pubkey:               ed25519.NewKeyFromSeed(seed[:]).Public().(ed25519.PublicKey),
+			ReaderXwingPublicKey: bytes.Repeat([]byte("synthetic reader key "), 1216/len("synthetic reader key ")+1)[:1216],
+			Forward:              &bridge.ForwardScope{ForwardSidecarId: self.world.OwnerSidecarId().Bytes()},
+		})
+		pin, err := self.post(forwarding)
+		if err != nil {
+			t.Fatalf("the forwarding Delegation: %v", err)
+		}
+		result, err := ApplyConfigLogEffects(self.ctx, self.freshSequencer(), self.networkId, DefaultConfigLogEffectsSettings())
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, result.Through, pin.GetVersion())
+		connect.AssertEqual(t, result.AppliedCount, 0)
+		after := noticeHasOneChange()
+		connect.AssertEqual(t, after.templateJson, before.templateJson)
+		for _, event := range testEffectsEvents(t, self.ctx, self.networkId) {
+			var chain [sha256.Size]byte
+			copy(chain[:], pin.GetChain())
+			if *event.RequestId == configLogEffectRequestId(self.networkId, pin.GetVersion(), chain) {
+				t.Fatalf("the forwarding Delegation's entry recorded %s", event.Action)
 			}
 		}
 	})
