@@ -120,6 +120,47 @@ const (
 	GammaAlarmKindBatchUnfulfillable = gammaAlarmBatchUnfulfillable
 )
 
+// What the monitor reads (SIGNALS.md §2.22b, gamma-watcher): the watcher's
+// other alarm kinds, and the readiness that sells.
+const (
+	GammaAlarmKindCreditUnfulfillable = gammaAlarmCreditUnfulfillable
+	GammaAlarmKindUnknownReference    = gammaAlarmUnknownReference
+	GammaAlarmKindDuplicateReference  = gammaAlarmDuplicateReference
+	GammaAlarmKindSpendMismatch       = gammaAlarmSpendMismatch
+	GammaAlarmKindSpenderProxyChanged = gammaAlarmSpenderProxyChanged
+	GammaAlarmKindUnknownBillingTx    = gammaAlarmUnknownBillingTx
+	GammaAlarmKindUnexpectedNonce     = gammaAlarmUnexpectedNonce
+	GammaAlarmKindRuntimeUnsupported  = gammaAlarmRuntimeUnsupported
+	GammaAlarmKindUndecodableBlock    = gammaAlarmUndecodableBlock
+	GammaAlarmKindServiceChanged      = gammaAlarmServiceChanged
+	GammaAlarmKindStrayTao            = gammaAlarmStrayTao
+	GammaReadinessReady               = gammaReady
+)
+
+// GammaAlarmKinds are every alarm kind the biller records.
+func GammaAlarmKinds() []string {
+	return []string{
+		gammaAlarmUnknownReference,
+		gammaAlarmDuplicateReference,
+		gammaAlarmSpendMismatch,
+		gammaAlarmSpenderProxyChanged,
+		gammaAlarmUnknownBillingTx,
+		gammaAlarmUnexpectedNonce,
+		gammaAlarmRuntimeUnsupported,
+		gammaAlarmUndecodableBlock,
+		gammaAlarmStrayTao,
+		gammaAlarmServiceChanged,
+		gammaAlarmCreditUnfulfillable,
+		gammaAlarmBatchUnfulfillable,
+	}
+}
+
+// GammaReadinessReasons are every readiness the biller records: ready, or
+// why it charges nothing.
+func GammaReadinessReasons() []string {
+	return slices.Clone(gammaReadinessReasons)
+}
+
 // The credits each run tries, the fewest failures first.
 const gammaCreditsPerRun = 200
 

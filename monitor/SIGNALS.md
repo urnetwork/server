@@ -22922,8 +22922,7 @@ aggregated to kind, count and oldest/newest age:
 The other watcher alarms (`unknown_reference`, `duplicate_reference`,
 `spend_mismatch`, `spender_proxy_changed`, `unknown_billing_transaction`,
 `unexpected_nonce`, `runtime_unsupported`, `undecodable_block`,
-`service_changed`, `stray_tao`) and the readiness gauge have no alert yet
-(BTCPAY §18.9).
+`service_changed`, `stray_tao`) and the biller's readiness are §2.22b's.
 
 The gamma tables exist from the Gamma migration
 (`server.GammaPaySchemaMigrationVersion()`) on. A metadata-only preflight
@@ -22940,6 +22939,118 @@ to `signal_gamma_payment_failures.go` and
 gate, every class with its severity and guidance, privacy, and malformed
 aggregates; a SQL test runs the SELECT on tables shaped as the Gamma migration
 makes them.
+
+### 2.22b Pay with Gamma watcher alarms and billing readiness
+Probe: `gamma-watcher`
+
+The Gamma biller (mmm/BTCPAY.md §18.4) records an alarm in `gamma_alarm` for
+what its watcher must never see, and charges nothing while it is not ready;
+both reached only the gamma dashboard ("alarms / s by kind", the readiness
+gauge `urnetwork_gamma_pay_readiness`). This probe (`pg/gamma-watcher`, every
+five minutes) reads the alarms of the last 24 hours by kind, and the
+readiness the biller writes to `gamma_chain_state` each run, aggregated to
+kind, count, oldest/newest age and the readiness word. §2.22a covers the
+alarms of spends no credit reaches (`credit_unfulfillable`,
+`batch_unfulfillable`); every other alarm kind is here. An alarm is recorded
+once per key; the count ages out after 24 hours, and aging out is no
+disposition.
+
+- `gamma-unknown-reference` (PAGE): a spend from our spender with a reference
+  we never issued (`unknown_reference`), the first sign of a leaked billing
+  key. A leaked billing key can burn customers' SN25 gamma up to each
+  deposit's balance and daily cap, never move TAO or alpha. At once, the
+  spender removes the billing key's `GammaSpend` proxy (`Proxy.remove_proxy`,
+  the reverse of BTCPAY §18.7 step 3, on the owner's machine with the seed from
+  `vault/main/gamma_keys.yml`); billing pauses (`billing_proxy_missing`). Stop
+  all but one taskworker if two may run the `gamma_biller` chain. Then a new
+  billing key in `vault/main/gamma.yml` becomes the proxy (§18.7 step 3) and
+  `gamma.yml` goes to the taskworker hosts: rotate the billing key, never the
+  spender. Each customer whose deposit was spent goes to the owner for a
+  disposition; gamma cannot be refunded on chain.
+- `gamma-duplicate-reference` (PAGE): a spend event for the reference of a
+  charge already resolved (`duplicate_reference`). The chain does not
+  deduplicate references, so this is a customer charged twice for one
+  purchase. Find the batches that carried the reference (`gamma_charge`,
+  `gamma_spend_batch`), take the double charge to the owner for a
+  disposition, find how a second extrinsic carried it, and stop the
+  `gamma_biller` chain until the cause is known.
+- `gamma-spend-mismatch` (PAGE): a spend whose reference is a pending charge
+  of ours but whose amount, hotkey or netuid differ (`spend_mismatch`). The
+  biller signs only what it recorded, so the extrinsic was not built from our
+  records. The spend does not resolve the charge, which can fail with its own
+  batch and be re-armed: stop the `gamma_biller` chain, void the intent once
+  its disposition is decided (`gamma_payment_intent.voided_at`) so it is never
+  charged again, and find the extrinsic.
+- `gamma-spender-proxy-changed` (PAGE): a `Proxy.ProxyAdded` or
+  `ProxyRemoved` of our spender (`spender_proxy_changed`). Only the spender's
+  key, kept in the vault and never on a host, can do that: the owner's planned
+  rotation, or a compromised spender. If the owner did not, remove every proxy
+  that is not our billing key with the spender's key and bring it to the owner
+  at once; replacing the spender takes the ur-owner multisig's `set_service`
+  and every customer re-pointing their deposit.
+- `gamma-unknown-billing-transaction` (PAGE): an extrinsic paid for by our
+  billing key that is none of our batches (`unknown_billing_transaction`): a
+  second biller, or a leaked billing key. Check that one taskworker runs the
+  `gamma_biller` chain; otherwise act as for `gamma-unknown-reference`.
+- `gamma-unexpected-nonce` (PAGE): a batch's era ended unseen while the
+  billing key's nonce moved past it (`unexpected_nonce`); the batch is held
+  for review and nothing is signed (`batch_in_review`). Find what used the
+  nonce; if the held batch never landed, with the owner's go expire it as the
+  biller does (`gamma_spend_batch.state` `expired`, its pending charges'
+  `batch_id` cleared) so its charges go out again with their references; if
+  it landed, its spends must be read and credited before anything is signed.
+  There is no operator tool yet (`bringyourctl gamma`, BTCPAY §18.9).
+- `gamma-runtime-unsupported` (WARN): a runtime whose metadata fails the
+  reviewed shape check (`runtime_unsupported`, once per spec version); the
+  biller holds its cursor and pauses. Review the runtime against
+  `controller/gamma_chain.go`'s shape check, extend the reviewed shapes with
+  its metadata as a fixture, and deploy the taskworker.
+- `gamma-undecodable-block` (WARN): a block whose events the runtime that
+  executed it cannot decode (`undecodable_block`); the cursor holds there.
+  Fix the decoder or the shape, or point `gamma.yml`'s `rpc_urls` at another
+  archive node if the RPC answered bad data.
+- `gamma-service-changed` (WARN): SN25's published service names our spender
+  with another services url (`service_changed`). Only the ur-owner multisig
+  can `set_service`: ask the owners; update `services_url` in `gamma.yml`, or
+  publish §18.7 step 5's `set_service` again.
+- `gamma-stray-tao` (WARN): plain TAO sent to a deposit hotkey
+  (`stray_tao`), a customer's mistake that buys nothing. Find the customer
+  through support and point them at their intent's mint command; return the
+  TAO only when they ask, to the address in their request (the owner,
+  2026-11-11), with the hotkey's key from the deposit master seed on the
+  owner's machine.
+- `gamma-billing-paused` (PAGE after three ticks, 15 minutes): the biller's
+  readiness is not `ready` while customers depend on billing: an intent is
+  open, a charge is pending or spent and not credited, or an account that
+  pays with gamma has an automatic charge on (a paused biller makes no
+  renewal, so a term ending meanwhile renews only if billing resumes within
+  its grace). The readiness word names the cause, and the alert the remedy:
+  `not_configured` (deliver `gamma.yml` with `billing_key_seed` to the
+  taskworker hosts), `chain_unreachable` and `watcher_behind` (the RPC
+  endpoint), `runtime_unsupported`, `service_not_published` and
+  `service_spender_mismatch` (the owners' `set_service`),
+  `billing_proxy_missing` (the spender's proxy add, unless it was removed
+  after a leak), `fee_float_low` (the treasury funds the billing key, §18.7
+  step 2), `batch_in_review` (`gamma-unexpected-nonce`).
+- `gamma-biller-stalled` (PAGE): while customers depend on billing,
+  `gamma_chain_state` was not written for 20 minutes (the biller writes it
+  every run, every 12 seconds and at most 10 minutes apart while `gamma.yml`
+  is missing): the taskworker's `gamma_biller` chain is not running.
+
+Before the Gamma migration (`server.GammaPaySchemaMigrationVersion()`) the
+probe reads nothing more; at or past it, missing tables fail it. Before
+go-live nobody depends on billing, so a biller that is not yet ready raises
+nothing. Only kinds, counts, ages and the readiness word leave PostgreSQL: no
+reference, hotkey, coldkey, network, intent, block or alarm detail enters an
+alert. The alarm kinds and the readiness words come from the controller
+(`controller.GammaAlarmKinds`, `controller.GammaReadinessReasons`), and a test
+fails for an alarm kind neither §2.22a nor §2.22b reads.
+
+Implementation convention: SIGNALS.md §2.22b (`gamma-watcher`) maps to
+`signal_gamma_watcher.go` and `signal_gamma_watcher_test.go`. Synthetic tests
+cover the registration, the migration gate, every class with its severity,
+sustain and guidance, privacy, and malformed aggregates; a SQL test runs the
+SELECT on tables shaped as the Gamma migration makes them.
 
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`
