@@ -950,6 +950,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
 	// the Bitcoin block scanner's kept chain, versioned by its position
 	[]snMainnetMigrationContract{cryptoScanChainMigrationContract},
+	// the per-cycle Pro grants, versioned by their position
+	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

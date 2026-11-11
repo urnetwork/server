@@ -1336,12 +1336,17 @@ func TestAddTierTransferBalancesToAllNetworks(t *testing.T) {
 		_, freeHasSupporter := addedFree[networkIdB]
 		connect.AssertEqual(t, freeHasSupporter, false)
 
-		// the pro grant goes to networks WITH an active subscription, and carries
-		// pro = true -- this grant is what confers Pro
-		addedPro := AddProTransferBalanceToAllNetworks(ctx, startTime, endTime, 4*Mib)
-		connect.AssertEqual(t, addedPro[networkIdB], 4*Mib)
-		_, proHasFree := addedPro[networkIdA]
-		connect.AssertEqual(t, proHasFree, false)
+		// the pro grant goes to networks WITH an active subscription, for the
+		// subscription's own cycle, and carries pro = true -- this grant is what
+		// confers Pro. The legacy row has a day of grace, so the cycle is its
+		// window less a day, and the grant its window.
+		config := Pro()
+		previousConfig := *config
+		defer func() { *config = previousConfig }()
+		config.Pro.Data = 4 * Mib
+		grantedPro, _ := grantDueProCycles(ctx, startTime)
+		connect.AssertEqual(t, containsId(grantedPro, networkIdB), true)
+		connect.AssertEqual(t, containsId(grantedPro, networkIdA), false)
 
 		transferBalancesA := GetActiveTransferBalances(ctx, networkIdA)
 		connect.AssertEqual(t, 1, len(transferBalancesA))
@@ -1354,9 +1359,9 @@ func TestAddTierTransferBalancesToAllNetworks(t *testing.T) {
 		transferBalancesB := GetActiveTransferBalances(ctx, networkIdB)
 		connect.AssertEqual(t, 1, len(transferBalancesB))
 		transferBalanceB := transferBalancesB[0]
-		connect.AssertEqual(t, addedPro[networkIdB], transferBalanceB.BalanceByteCount)
-		connect.AssertEqual(t, startTime, transferBalanceB.StartTime)
-		connect.AssertEqual(t, endTime, transferBalanceB.EndTime)
+		connect.AssertEqual(t, 4*Mib, transferBalanceB.BalanceByteCount)
+		connect.AssertEqual(t, subscriptionStartTime, transferBalanceB.StartTime)
+		connect.AssertEqual(t, subscriptionEndTime, transferBalanceB.EndTime)
 		connect.AssertEqual(t, transferBalanceB.Pro, true)
 
 		// the entitlement follows the pro balance, through pro_model

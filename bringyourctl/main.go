@@ -2881,7 +2881,8 @@ func upgradePlan(opts docopt.Opts) {
 
 	subscriptionYearDuration := 365 * 24 * time.Hour
 
-	endTime := startTime.Add(subscriptionYearDuration + subscriptionGracePeriod)
+	paidEndTime := startTime.Add(subscriptionYearDuration)
+	endTime := paidEndTime.Add(subscriptionGracePeriod)
 
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
@@ -2891,10 +2892,13 @@ func upgradePlan(opts docopt.Opts) {
 		NetRevenue:         0,
 		SubscriptionMarket: model.SubscriptionMarketManual,
 		// TransactionId:      paymentSearchResult.PaymentReference,
+		// the year is the period its Pro grant cycles are cut from
+		PaidEndTime: &paidEndTime,
 	}
 
 	model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
 
+	// the first cycle's Pro grant; the sweep grants the year's later cycles
 	controller.AddRefreshTransferBalance(ctx, networkId)
 }
 
@@ -3091,13 +3095,14 @@ func refreshTransferBalances(opts docopt.Opts) {
 	ctx := context.Background()
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
-	// run all three grants (free daily, pro monthly, referral period)
+	// run all three grants (free daily, pro per subscription cycle, referral
+	// period)
 	controller.RefreshFreeTransferBalances(
 		&controller.RefreshFreeTransferBalancesArgs{},
 		clientSession,
 	)
-	controller.RefreshProTransferBalances(
-		&controller.RefreshProTransferBalancesArgs{},
+	controller.RefreshProCycleTransferBalances(
+		&controller.RefreshProCycleTransferBalancesArgs{},
 		clientSession,
 	)
 	controller.RefreshReferralTransferBalances(

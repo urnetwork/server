@@ -385,7 +385,10 @@ func VerifyAppleTransactionClaims(
 		// pointer; a client report has no notification, so it gets a fresh id
 		// (the reconciler does the same)
 		credited = appleCreditSubscriptionTransactionInTx(tx, clientSession.Ctx, server.NewId(), transaction)
-	})
+		// ReadCommitted, like the webhook's and the reconciler's credit: the
+		// ledger gate is insert-then-check, and the period's Pro cycle grant
+		// reads the chain after its lock (model.GrantProCycleInTx)
+	}, server.TxReadCommitted)
 	if creditErr != nil {
 		return nil, creditErr
 	}

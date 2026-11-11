@@ -77,7 +77,9 @@ func countMarketRenewals(ctx context.Context, networkId server.Id, market string
 	return count
 }
 
-// pro balances whose window covers at
+// the paid periods' own pro balances whose window covers at: a Pro cycle grant
+// (pro_grant_cycle) is the network's data, one per cycle whatever its periods,
+// and is not counted
 func countProBalancesCovering(ctx context.Context, networkId server.Id, at time.Time) int {
 	count := 0
 	server.Db(ctx, func(conn server.PgConn) {
@@ -86,6 +88,11 @@ func countProBalancesCovering(ctx context.Context, networkId server.Id, at time.
 			`
 			SELECT COUNT(*) FROM transfer_balance
 			WHERE network_id = $1 AND pro AND start_time <= $2 AND $2 < end_time
+			  AND NOT EXISTS (
+				SELECT 1 FROM pro_grant_cycle AS cycle
+				WHERE cycle.network_id = transfer_balance.network_id
+				  AND cycle.balance_id = transfer_balance.balance_id
+			  )
 			`,
 			networkId,
 			at,
@@ -256,9 +263,9 @@ func TestPaymentReconcileAppleNeverRecreditsPreLedgerWindow(t *testing.T) {
 			NetworkId:             networkId,
 			StartTime:             preLedgerStart,
 			EndTime:               preLedgerEnd,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: legacyActivationTestByteCount,
 			SubsidyNetRevenue:     model.UsdToNanoCents(32.0),
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      legacyActivationTestByteCount,
 			Pro:                   true,
 		})
 		model.UpdateProNetwork(ctx, networkId)

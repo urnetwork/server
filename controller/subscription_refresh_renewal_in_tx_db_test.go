@@ -46,7 +46,9 @@ func TestAddRefreshTransferBalanceInTxSeesItsOwnRenewal(t *testing.T) {
 				return
 			}
 			proGranted, grantErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
-		})
+			// ReadCommitted, as AddRefreshTransferBalance's own tx: the Pro
+			// cycle grant reads the chain after its lock
+		}, server.TxReadCommitted)
 		connect.AssertEqual(t, renewalErr, nil)
 		connect.AssertEqual(t, grantErr, nil)
 		connect.AssertEqual(t, proGranted, true)
@@ -86,7 +88,7 @@ func TestAddRefreshTransferBalanceInTxHoldsOneConnection(t *testing.T) {
 			}()
 			server.Tx(txCtx, func(tx server.PgTx) {
 				proGranted, grantErr = AddRefreshTransferBalanceInTx(tx, txCtx, networkId)
-			})
+			}, server.TxReadCommitted)
 		}()
 		connect.AssertEqual(t, failure, nil)
 		connect.AssertEqual(t, grantErr, nil)
