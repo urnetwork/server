@@ -1,19 +1,15 @@
 package controller
 
-// What the per-address coins' chain readers share (crypto_pay_bitcoin.go,
+// What the Coinbase coins' chain readers share (crypto_pay_bitcoin.go,
 // crypto_pay_ethereum.go, crypto_pay_solana_native.go,
 // crypto_pay_bittensor.go): the invoice addresses the scanner names each
-// scan, and requests to a provider whose url carries its key. Errors name the
-// request and the status, never the url.
+// scan of a per-address coin, and the providers' http client and limits.
+// Errors name the request and the status, never the url, which carries the
+// provider's key.
 
 import (
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
+	"math/big"
 	"net/http"
-	"net/url"
 	"slices"
 	"sync"
 	"time"
@@ -50,65 +46,6 @@ func (self *cryptoAddressWatch) watchedAddresses() []*model.CryptoPaymentWatched
 	return slices.Clone(self.watched)
 }
 
-// cryptoProviderStatusError is a provider's refusal: its status and, when it
-// says, its error text (never the request's url).
-type cryptoProviderStatusError struct {
-	Kind    string
-	Status  int
-	Message string
-}
-
-func (self *cryptoProviderStatusError) Error() string {
-	if self.Message != "" {
-		return fmt.Sprintf("%s: http %d: %s", self.Kind, self.Status, self.Message)
-	}
-	return fmt.Sprintf("%s: http %d", self.Kind, self.Status)
-}
-
-// cryptoProviderGet reads a JSON answer from a url that carries a key. A
-// non-2xx answer is a cryptoProviderStatusError with the provider's `error`
-// text when it gives one.
-func cryptoProviderGet(ctx context.Context, client *http.Client, requestUrl string, kind string, out any) error {
-	requestCtx, cancel := context.WithTimeout(ctx, cryptoProviderTimeout)
-	defer cancel()
-	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, requestUrl, nil)
-	if err != nil {
-		return fmt.Errorf("%s: invalid url", kind)
-	}
-	request.Header.Set("Accept", "application/json")
-	response, err := client.Do(request)
-	if err != nil {
-		var urlErr *url.Error
-		if errors.As(err, &urlErr) {
-			return fmt.Errorf("%s: transport: %w", kind, urlErr.Err)
-		}
-		return fmt.Errorf("%s: transport failed", kind)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, cryptoProviderMaxResponseBytes+1))
-	if err != nil {
-		return fmt.Errorf("%s: read failed", kind)
-	}
-	if cryptoProviderMaxResponseBytes < len(body) {
-		return fmt.Errorf("%s: answer too large", kind)
-	}
-	if response.StatusCode < 200 || 300 <= response.StatusCode {
-		var refusal struct {
-			Error string `json:"error"`
-		}
-		_ = json.Unmarshal(body, &refusal)
-		message := refusal.Error
-		if 200 < len(message) {
-			message = message[:200]
-		}
-		return &cryptoProviderStatusError{Kind: kind, Status: response.StatusCode, Message: message}
-	}
-	if err := json.Unmarshal(body, out); err != nil {
-		return fmt.Errorf("%s: undecodable answer: %w", kind, err)
-	}
-	return nil
-}
-
 // cryptoProviderClient is the http client of the providers' reads.
 func cryptoProviderClient() *http.Client {
 	return server.NewHttpClient(cryptoProviderTimeout)
@@ -118,4 +55,12 @@ func cryptoProviderClient() *http.Client {
 func cryptoIndexOf(index int64) *uint64 {
 	value := uint64(index)
 	return &value
+}
+
+// cryptoClampUint64 is an amount as a uint64, saturated (no payment is near).
+func cryptoClampUint64(value *big.Int) uint64 {
+	if value.IsUint64() {
+		return value.Uint64()
+	}
+	return 1 << 62
 }
