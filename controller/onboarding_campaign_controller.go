@@ -44,7 +44,7 @@ var onboardingEmailsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Namespace: "urnetwork",
 	Subsystem: "onboarding",
 	Name:      "emails_total",
-	Help:      "Campaign step outcomes: sent, skipped (condition not met), dry_run (engine disabled), failed (Brevo error).",
+	Help:      "Campaign step outcomes: sent, skipped (condition not met), deferred (the step waits, as E3a for a late offer's last day), dry_run (engine disabled), failed (Brevo error).",
 }, []string{"step", "template", "variant", "result"})
 
 var onboardingExitsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -573,6 +573,23 @@ func OnboardingCampaignStep(
 		return result, nil
 	}
 
+	loc := onboarding.LoadLocation(row.TimeZone)
+	window := onboardingSendWindow()
+	if decision.Action == onboarding.ActionDefer {
+		// the step waits (E3a for a late offer's last day): the row keeps it as
+		// the next step, and the post schedules it again at its moment
+		at := decision.At
+		if !at.After(now) {
+			at = onboarding.DueSendAt(now, loc, window)
+		}
+		result.NextSendAt = &at
+		onboardingEmailsTotal.WithLabelValues(args.Step, decision.Template, decision.Variant, "deferred").Inc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			model.AdvanceNetworkOnboardingInTx(tx, ctx, row.NetworkId, args.Step, nil, facts.Path, args.Step, result.NextSendAt, now)
+		})
+		return result, nil
+	}
+
 	var sentAt *time.Time
 	if decision.Action == onboarding.ActionSend {
 		if decision.IssueOffer {
@@ -599,13 +616,11 @@ func OnboardingCampaignStep(
 	}
 
 	if decision.NextStep != "" {
+		// a step that is already due (a long retry, a late enable) goes out at
+		// the next window edge rather than immediately, and never within
+		// MinSendGap of the email this step sent (a deferred E3a, then E4a)
 		day := onboardingSchedule().Day(decision.NextStep, facts.Path)
-		at := onboarding.SendAt(row.CreatedAt, day, onboarding.LoadLocation(row.TimeZone), onboardingSendWindow())
-		if at.Before(now) {
-			// a step that is already due (a long retry, a late enable) goes out
-			// at the next window edge rather than immediately
-			at = onboarding.DueSendAt(now, onboarding.LoadLocation(row.TimeZone), onboardingSendWindow())
-		}
+		at := onboarding.NextSendAt(row.CreatedAt, day, sentAt, now, loc, window)
 		result.NextSendAt = &at
 	} else {
 		onboardingExitsTotal.WithLabelValues(onboarding.ExitDone).Inc()
@@ -701,11 +716,26 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
 		OfferEndsSoon:     offer != nil && onboarding.OfferEndsSoon(offer.ExpiresAt, now),
+		LastChanceAt:      onboardingLastChanceAt(offer, offerState, row.TimeZone, now),
 		FeedbackSubmitted: feedbackSubmitted,
 		FeedbackEmailSent: onboardingFeedbackEmailSent(model.ListNetworkOnboardingEmails(ctx, row.NetworkId)),
 		EmailOpens:        model.CountOnboardingEvents(ctx, row.NetworkId, model.EventEmailOpened),
 	}
 	return facts, offer
+}
+
+// onboardingLastChanceAt is the Facts.LastChanceAt of an offer: the moment its
+// last-chance email goes in the network's zone and send window, while that
+// lies ahead; nil without an active offer or once the moment has passed.
+func onboardingLastChanceAt(offer *model.OnboardingOffer, offerState string, timeZone string, now time.Time) *time.Time {
+	if offer == nil || offerState != onboarding.OfferStateActive {
+		return nil
+	}
+	at := onboarding.LastChanceAt(offer.ExpiresAt, onboarding.LoadLocation(timeZone), onboardingSendWindow())
+	if !at.After(now) {
+		return nil
+	}
+	return &at
 }
 
 // onboardingFeedbackEmailSent reports whether a network's campaign sends

@@ -77,6 +77,8 @@ const (
 	ActionSend = "send"
 	ActionSkip = "skip"
 	ActionExit = "exit"
+	// nothing goes now: the same step runs again at Decision.At
+	ActionDefer = "defer"
 )
 
 // Schedule is the day offset of every step from the account email, per path,
@@ -185,6 +187,10 @@ type Facts struct {
 	// the offer expires within LastChanceWindow of the send (OfferEndsSoon):
 	// the last-chance email's "end tomorrow" holds
 	OfferEndsSoon bool
+	// when the active offer's last-chance email goes (LastChanceAt), set only
+	// while that moment lies ahead: an in-app offer issued after sign-up
+	// still has days left on E3a's day 4, and E3a waits for it
+	LastChanceAt *time.Time
 	// an answer to the feedback step: the app's feedback form
 	// (account_feedback, feedback.submitted) or a one-tap answer from the
 	// feedback email (feedback.tapped)
@@ -216,6 +222,21 @@ func OfferEndsSoon(expiresAt time.Time, now time.Time) bool {
 	return 0 < left && left <= LastChanceWindow
 }
 
+// LastChanceAt is when the last-chance email goes for an offer expiring at
+// expiresAt: on the reader's local day before the expiry's, at the expiry's
+// local time, clamped into the send window. "End tomorrow" then names the
+// reader's next day, and with the default window the send falls 16 to 27
+// hours before the expiry, inside LastChanceWindow, so OfferEndsSoon holds
+// when it runs. Day arithmetic goes through time.Date in loc, as SendAt's
+// does.
+func LastChanceAt(expiresAt time.Time, loc *time.Location, w SendWindow) time.Time {
+	if loc == nil {
+		loc = time.UTC
+	}
+	local := expiresAt.In(loc)
+	return w.clampDay(time.Date(local.Year(), local.Month(), local.Day()-1, local.Hour(), local.Minute(), 0, 0, loc)).UTC()
+}
+
 // Decision is what a step does.
 type Decision struct {
 	Action   string
@@ -231,8 +252,11 @@ type Decision struct {
 	NoOfferEmail bool
 	// ExitReason when Action == ActionExit
 	ExitReason string
-	// NextStep after this one on the effective path ("" = done)
+	// NextStep after this one on the effective path ("" = done); for
+	// ActionDefer the step itself
 	NextStep string
+	// At is when a deferred step runs again (ActionDefer)
+	At time.Time
 }
 
 // The web platform: a browser sign-up, whose app is the extension.
@@ -335,12 +359,18 @@ func Decide(step string, f Facts) Decision {
 	case StepE3:
 		if path == PathA {
 			// E3a day 4: the in-app offer's last day, still free. Only when the
-			// offer does end within LastChanceWindow: an offer issued after
-			// sign-up has days left on day 4, and the subject says "tomorrow"
-			if f.OfferState == OfferStateActive && !f.NoOfferEmail && f.OfferEndsSoon {
-				d := send(TemplateE3LastChance, VariantDefault)
-				d.Opening = OpeningJoined
-				return d
+			// offer does end within LastChanceWindow: the subject says
+			// "tomorrow". An offer issued after sign-up has days left on day 4,
+			// so E3a waits for its last day (mmm/ONBOARDING-RETENTION.md P7)
+			if f.OfferState == OfferStateActive && !f.NoOfferEmail {
+				if f.OfferEndsSoon {
+					d := send(TemplateE3LastChance, VariantDefault)
+					d.Opening = OpeningJoined
+					return d
+				}
+				if f.LastChanceAt != nil {
+					return Decision{Action: ActionDefer, Template: TemplateE3LastChance, Variant: VariantDefault, Opening: OpeningJoined, NextStep: StepE3, At: *f.LastChanceAt}
+				}
 			}
 			return skip
 		}
@@ -458,14 +488,20 @@ func SendAt(createdAt time.Time, day int, loc *time.Location, w SendWindow) time
 		loc = time.UTC
 	}
 	local := createdAt.In(loc)
-	at := time.Date(local.Year(), local.Month(), local.Day()+day, local.Hour(), local.Minute(), 0, 0, loc)
+	return w.clampDay(time.Date(local.Year(), local.Month(), local.Day()+day, local.Hour(), local.Minute(), 0, 0, loc)).UTC()
+}
+
+// clampDay moves a local time into the window on its own day: before the
+// window to its start, after it to its end.
+func (w SendWindow) clampDay(at time.Time) time.Time {
 	minutes := at.Hour()*60 + at.Minute()
 	if minutes < w.startMinutes() {
-		at = time.Date(at.Year(), at.Month(), at.Day(), w.StartHour, w.StartMinute, 0, 0, loc)
-	} else if w.endMinutes() < minutes {
-		at = time.Date(at.Year(), at.Month(), at.Day(), w.EndHour, w.EndMinute, 0, 0, loc)
+		return time.Date(at.Year(), at.Month(), at.Day(), w.StartHour, w.StartMinute, 0, 0, at.Location())
 	}
-	return at.UTC()
+	if w.endMinutes() < minutes {
+		return time.Date(at.Year(), at.Month(), at.Day(), w.EndHour, w.EndMinute, 0, 0, at.Location())
+	}
+	return at
 }
 
 // DueSendAt is where a step that is already due goes (a long retry, a late
@@ -479,6 +515,28 @@ func DueSendAt(now time.Time, loc *time.Location, w SendWindow) time.Time {
 		at = now.Add(time.Minute)
 	}
 	return w.NextOpen(at, loc)
+}
+
+// MinSendGap is the least time between two onboarding emails to one network.
+// The schedule's steps are a day or more apart; a step that runs late (an E3a
+// that waited for the offer's last day, a long retry, a late enable) must not
+// send the next one minutes after it.
+const MinSendGap = 20 * time.Hour
+
+// NextSendAt places the next step: its day on the schedule (SendAt), the next
+// window opening when that has passed (DueSendAt), and, when this step sent
+// an email at sentAt, no sooner than MinSendGap after it.
+func NextSendAt(createdAt time.Time, day int, sentAt *time.Time, now time.Time, loc *time.Location, w SendWindow) time.Time {
+	at := SendAt(createdAt, day, loc, w)
+	if at.Before(now) {
+		at = DueSendAt(now, loc, w)
+	}
+	if sentAt != nil {
+		if earliest := sentAt.Add(MinSendGap); at.Before(earliest) {
+			at = DueSendAt(earliest, loc, w)
+		}
+	}
+	return at
 }
 
 // LoadLocation resolves an IANA zone name, falling back to UTC for "" or an
