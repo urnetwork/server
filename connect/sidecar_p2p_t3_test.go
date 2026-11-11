@@ -8,23 +8,14 @@ package connect
 // where each link's carrier is the test's.
 
 import (
-	"bytes"
 	"context"
-	"crypto/ed25519"
-	"crypto/sha256"
 	"testing"
 	"time"
 
-	connectlib "github.com/urnetwork/connect"
-	"github.com/urnetwork/connect/protocol"
-
 	"github.com/urnetwork/sidecar"
 	sidecarprotocol "github.com/urnetwork/sidecar/protocol"
-	"github.com/urnetwork/sidecar/protocol/bridge"
-	"github.com/urnetwork/sidecar/sidecartest"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/model"
 )
 
 // How many of the contracts from source to destination the controller bound to a stream, and how many it made.
@@ -54,65 +45,11 @@ func TestSidecarP2pT3StreamLaneOnlyWhenEnabled(t *testing.T) {
 		server.DefaultTestEnv().Run(t, func(t testing.TB) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			env := testing_newPeerDiscoveryEnvWithAllSettings(ctx, t, nil, func(settings *ConnectHandlerSettings) {
-				settings.transportTlsLoader = func(tlsSettings *server.TransportTlsSettings) (*server.TransportTls, error) {
-					return server.NewTransportTls(map[string]bool{}, tlsSettings), nil
-				}
-			})
+			env := newTestT3StreamEnv(ctx, t)
 			defer env.Close()
-
-			networkId := sidecar.Id(env.networkId)
-			authority := sidecartest.NewFakeAuthority()
-			sides := []*testT3Sidecar{}
-			for _, name := range []string{"laptop", "desktop"} {
-				clientId, clientJwt := env.authClient(&model.AuthNetworkClientArgs{Description: name, DeviceSpec: "test"})
-				clientKeySeed := testT3Seed(t)
-				identitySeed := testT3Seed(t)
-				clientSettings := newPeerDiscoveryClientSettings()
-				sidecar.ApplySidecarClientSettings(clientSettings)
-				clientSettings.ClientKeySeed = bytes.Clone(clientKeySeed)
-				client := connectlib.NewClient(ctx, connectlib.Id(clientId), Testing_NewControllerOutOfBandControl(ctx, clientId, clientSettings.ContractManagerSettings), clientSettings)
-				defer client.Cancel()
-				transport := env.newTransport(clientJwt, server.NewId(), client.RouteManager())
-				defer transport.Close()
-				env.setProvideModes(client, map[protocol.ProvideMode]bool{protocol.ProvideMode_Network: true})
-				sidecarId := sidecar.NewId()
-				binding, err := sidecar.NewSidecarIdentityBinding(&sidecar.SidecarIdentityBinding{
-					NetworkId:  networkId,
-					SidecarId:  sidecarId,
-					ClientId:   sidecar.Id(clientId),
-					Generation: 1,
-					IssuedAt:   time.Now(),
-				}, identitySeed, clientKeySeed)
-				if err != nil {
-					t.Fatal(err)
-				}
-				at := authority.AdmitSidecar(&sidecartest.FakeAuthorityAdmission{
-					SidecarId:         sidecarId,
-					MemberId:          sidecar.NewId(),
-					IdentityPublicKey: ed25519.NewKeyFromSeed(identitySeed).Public().(ed25519.PublicKey),
-				})
-				chain := sha256.Sum256([]byte(name))
-				authority.SetPin(&bridge.AuthPin{Version: at, Chain: chain[:]})
-				protocolSettings := sidecar.DefaultSidecarProtocolSettings()
-				protocolSettings.EnablePeerP2p = enable
-				subprotocol, err := sidecar.NewSubprotocol(ctx, &sidecar.SubprotocolEnv{
-					Client:     client,
-					Store:      sidecartest.NewFakeStore().Root(),
-					Settings:   protocolSettings,
-					Budget:     sidecar.NewSubprotocolBudget(protocolSettings, 64*1024*1024),
-					Inbound:    sidecar.SubprotocolInboundWithoutPolicy,
-					NetworkId:  networkId,
-					Binding:    binding,
-					Admissions: &testT3Admissions{authority: authority, sidecarId: sidecarId},
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				defer subprotocol.Close()
-				sides = append(sides, &testT3Sidecar{clientId: clientId, sidecarId: sidecarId, subprotocol: subprotocol})
-			}
-			laptop, desktop := sides[0], sides[1]
+			laptop, desktop := newTestT3SidecarPair(t, ctx, env, func(settings *sidecar.SidecarProtocolSettings) {
+				settings.EnablePeerP2p = enable
+			})
 
 			callCtx, callCancel := context.WithTimeout(ctx, 60*time.Second)
 			defer callCancel()
