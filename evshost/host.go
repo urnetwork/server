@@ -137,8 +137,8 @@ type Host struct {
 	clock    sidecar.Clock
 	// what this host's readiness also waits on: nil for the engine's probe alone
 	clustersReady func() bool
-	// a Quota's own readiness, for one that reads its over-limit list from api (quotahost.HostQuota): nil until it
-	// has read one. nil for a Quota that says nothing of it.
+	// the Quota's own readiness, for one that says whether it has read an over-limit list (quotahost.HostQuota):
+	// an error until it has. nil for a Quota that says nothing of it.
 	quotaReady func() error
 	// what the engine cannot honor a request without and the block was not given, each said once
 	missing []string
