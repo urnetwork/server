@@ -198,7 +198,7 @@ its own passed the same URL over IPv6 from the same country that day or the
 day before; a silent IPv6 HTTP/3 leg only where they reached it over QUIC over
 IPv6. Elsewhere the verdict is `place` and the outcome counts as its IPv4 legs.
 The evidence is per URL, country, UTC day and transport
-(`provider_egress_ipv6_place`, migration 958, at most 8 networks a day per
+(`provider_egress_ipv6_place`, migration 959, at most 8 networks a day per
 row; expired with the HTTP/3 evidence after two days). Networks that passed
 over IPv6 TCP are no evidence for QUIC over IPv6. The ingest judges the legs
 together (`JudgeProviderEgressLegs`): the outcome passes when every failed
@@ -312,9 +312,11 @@ publication, inside the six-minute renewal headroom with a 20 s margin (was
 
 ## Deploy chain
 
-1. `db migrate` on Main: 957 (HTTP/3 place evidence) and 958 (IPv6 place
+1. `db migrate` on Main: 958 (HTTP/3 place evidence) and 959 (IPv6 place
    evidence), each one new empty table created when absent under a five-second
-   lock bound, after main's own pending migrations.
+   lock bound, after main's own pending migrations (955 to 957 at origin/main
+   b567b5abd). A main that gains another migration before the land moves both
+   by one more; the tests pin their order, not their numbers.
 2. The monitor watcher's build, before the taskworker: its record pattern must
    know `ipv6=`, `ipv6_h3=`, the `ipv6` stage and `country_disabled`.
 3. The taskworker: the URL lane, the claim and the in-process ingest. This is

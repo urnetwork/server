@@ -55,7 +55,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 	// which carries the executor control amendment's, which carries the official
 	// review's, which carries the review handoff's: at the head it owns their
 	// faults.
-	custodian := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	custodian := server.CompetitionExecutorAdmissionClaimMigrationVersion()
 	handoffBodies := server.CompetitionReviewHandoffBodiesSql()
 	_, _, _, _, twoMemberIdentityGuard, _, _, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
 	_, _, _, unamendedEquivalenceGuard, _ := server.CompetitionDistributedEvaluationBodiesSql()

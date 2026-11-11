@@ -969,13 +969,15 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{competitionExecutorQualificationRecoveryMigrationContract.removedAt(server.CompetitionExecutorAdmissionExceptionMigrationVersion())},
 	// the retained host admission exception, with the qualification recovery
 	// custody it carries on; versioned by its position
-	[]snMainnetMigrationContract{competitionExecutorAdmissionExceptionMigrationContract},
+	[]snMainnetMigrationContract{competitionExecutorAdmissionExceptionMigrationContract.removedAt(server.CompetitionExecutorAdmissionClaimMigrationVersion())},
 	// the onboarding platform's distribution, versioned by its position
 	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
 	// the Bitcoin block scanner's kept chain, versioned by its position
 	[]snMainnetMigrationContract{cryptoScanChainMigrationContract},
 	// the per-cycle Pro grants, versioned by their position
 	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
+	// The corrected claim trigger carries every earlier admission guard.
+	[]snMainnetMigrationContract{competitionExecutorAdmissionClaimMigrationContract},
 	// the HTTP/3 place evidence, versioned by its position
 	[]snMainnetMigrationContract{providerEgressH3PlaceMigrationContract},
 	// the IPv6 place evidence, versioned by its position

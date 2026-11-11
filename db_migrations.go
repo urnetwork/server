@@ -11434,6 +11434,10 @@ var migrations = []any{
 	// deploying the api, alt and taskworker that write paid_end_time.
 	proGrantCycleMigration,
 
+	// Claims use the same authenticated whole-host admission projection as
+	// readiness, including separately approved exact retained exceptions.
+	newSqlMigration(CompetitionExecutorAdmissionClaimMigrationSql()),
+
 	// The HTTP/3 place evidence (db_provider_egress_h3_place.go,
 	// model/provider_egress_h3_place.go): one new empty table, under a
 	// five-second lock bound, created only when absent. Nothing existing is
