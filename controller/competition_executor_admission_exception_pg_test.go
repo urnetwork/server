@@ -7,12 +7,79 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/urnetwork/server"
 )
+
+// The old trigger's passing-only lookup rejects a genuinely admitted host.
+// Replacing that predicate must make the same FIFO claim succeed without
+// relabeling evidence, extending clocks, or weakening writer/slot fencing.
+func TestExecutorAdmissionExceptionPgComposesRealClaimAndWriterGuards(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		f, approval, receipt := admissionExceptionPgFixture(t, tb)
+		if err := insertAdmissionExceptionPg(tb, f, approval, receipt, true); err != nil {
+			tb.Fatal(err)
+		}
+		if claimed, err := f.store.Claim(tb.Context(), f.selected(0), "synthetic-worker-a", testWorkerImageDigest()); err != nil || claimed != nil {
+			tb.Fatal("exception bypassed missing sibling qualification", err)
+		}
+		f.qualifyHost(tb, f.settings.DistributedEvaluationPolicy.Hosts[1])
+		second := f.addJob(tb, server.Id{15: 4}, f.clock.Now(), "second")
+		_, original, _, _, _ := server.CompetitionDistributedEvaluationBodiesSql()
+		server.Tx(tb.Context(), func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(tb.Context(), "CREATE OR REPLACE FUNCTION competition_executor_job_guard() RETURNS trigger LANGUAGE plpgsql AS $synthetic_original$"+original+"$synthetic_original$"))
+		})
+		defer func() {
+			// Restore while this fixture still owns its disposable database,
+			// before TestEnv tears it down and restores the outer resources.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			server.Tx(ctx, func(tx server.PgTx) {
+				server.RaisePgResult(tx.Exec(ctx, server.CompetitionExecutorAdmissionClaimMigrationSql()))
+			})
+		}()
+		if _, err := f.store.Claim(tb.Context(), f.selected(0), "synthetic-worker-a", testWorkerImageDigest()); err == nil || !strings.Contains(err.Error(), "distributed work requires its shared baseline") {
+			tb.Fatal("published passing-only guard did not reproduce the approved-exception rejection")
+		}
+		job, err := f.store.GetJob(tb.Context(), f.settings, f.sourceJob.JobId, &Principal{Id: "synthetic-operator", Role: "operator"})
+		if err != nil || job.StartedAt != nil || job.AttemptCount != 0 || job.ExecutionDeadline != nil {
+			tb.Fatal("rolled-back rejection spent a customer clock", err)
+		}
+		server.Tx(tb.Context(), func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(tb.Context(), server.CompetitionExecutorAdmissionClaimMigrationSql()))
+		})
+		first, err := f.store.Claim(tb.Context(), f.selected(0), "synthetic-worker-a", testWorkerImageDigest())
+		if err != nil || first == nil || first.JobId != f.sourceJob.JobId || first.AttemptCount != 1 || first.StartedAt == nil || first.ExecutionDeadline == nil || !first.ExecutionDeadline.Equal(first.StartedAt.Add(3*time.Hour)) {
+			tb.Fatalf("admitted FIFO claim lost original clock/identity: %+v, %v", first, err)
+		}
+		next, err := f.store.Claim(tb.Context(), f.selected(1), "synthetic-worker-b", testWorkerImageDigest())
+		if err != nil || next == nil || next.JobId != second.JobId || next.SlotId == first.SlotId {
+			tb.Fatalf("second host did not retain FIFO/slot isolation: %+v, %v", next, err)
+		}
+		owner := withCompetitionJobAuthority(tb.Context(), first)
+		if err := f.store.Heartbeat(owner, f.selected(0), "synthetic-worker-a", first.JobId); err != nil {
+			tb.Fatal("approved exception could not renew its real fenced job", err)
+		}
+		if err := f.store.Heartbeat(tb.Context(), f.selected(0), "synthetic-worker-a", first.JobId); !errors.Is(err, ErrLeaseLost) {
+			tb.Fatal("claim correction weakened the writer fence", err)
+		}
+		outcome := EvaluationOutcome{Error: submissionError("candidate_build_failed", "synthetic retained failure"), distributedArchiveVerified: true}
+		if _, err := f.store.Complete(owner, f.selected(0), "synthetic-worker-a", first.JobId, outcome); err != nil {
+			tb.Fatal("approved exception could not complete its retained real outcome", err)
+		}
+		server.Db(tb.Context(), func(conn server.PgConn) {
+			var passed bool
+			server.Raise(conn.QueryRow(tb.Context(), `SELECT (receipt_json->>'passed')::boolean FROM competition_executor_admission_exception WHERE round_id=$1 AND host_id=$2`, approval.RoundId, approval.HostId).Scan(&passed))
+			if passed {
+				tb.Fatal("claim correction relabeled the original failed receipt")
+			}
+		})
+	})
+}
 
 // The database tests scope and authority; pure tests recompute all statistics.
 func admissionExceptionPgFixture(t *testing.T, tb testing.TB) (*competitionDistributedPgFixture, CompetitionExecutorAdmissionException, map[string]any) {

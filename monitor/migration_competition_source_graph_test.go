@@ -62,9 +62,10 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	controlVersion := server.CompetitionExecutorControlAmendmentMigrationVersion()
 	recoveryVersion := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
 	exceptionVersion := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	claimVersion := server.CompetitionExecutorAdmissionClaimMigrationVersion()
 	if benefitVersion <= 900 || intakeVersion <= benefitVersion || handoffVersion <= intakeVersion ||
 		officialVersion <= handoffVersion || controlVersion <= officialVersion || recoveryVersion <= controlVersion ||
-		exceptionVersion <= recoveryVersion || server.MigrationCount() < exceptionVersion {
+		exceptionVersion <= recoveryVersion || claimVersion <= exceptionVersion || server.MigrationCount() < claimVersion {
 		t.Fatal("source guard successors are not published in order")
 	}
 	for _, expected := range []struct {
@@ -79,14 +80,15 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{officialVersion, controlVersion, "epoch-one official review authorization with retained review handoff custody"},
 		{controlVersion, recoveryVersion, "operator executor control amendment with retained official review custody"},
 		{recoveryVersion, exceptionVersion, "single-use executor qualification recovery with retained executor control amendment custody"},
-		{exceptionVersion, 0, "retained host admission exception with retained qualification recovery custody"},
+		{exceptionVersion, claimVersion, "retained host admission exception with retained qualification recovery custody"},
+		{claimVersion, 0, "executor claims honor admitted evidence with retained admission custody"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("retained host admission exception with retained qualification recovery custody@v%d", exceptionVersion)
+	return fmt.Sprintf("executor claims honor admitted evidence with retained admission custody@v%d", claimVersion)
 }
 
 // The intake-first owner, current from its version until the review handoff.
@@ -117,6 +119,11 @@ func competitionSourceGuardsQualificationRecoveryOwner() string {
 	return fmt.Sprintf("single-use executor qualification recovery with retained executor control amendment custody@v%d", server.CompetitionExecutorQualificationRecoveryMigrationVersion())
 }
 
+// Historical exception custody remains exact until the claim correction.
+func competitionSourceGuardsAdmissionExceptionOwner() string {
+	return fmt.Sprintf("retained host admission exception with retained qualification recovery custody@v%d", server.CompetitionExecutorAdmissionExceptionMigrationVersion())
+}
+
 // Before a registered transfer the old artifact remains required; at the
 // transfer the successor owns drift. Missing old or future artifact booleans
 // cannot move that boundary, and every result uses the public signal reducer.
@@ -138,7 +145,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		{server.CompetitionReviewHandoffMigrationVersion(), server.CompetitionOfficialReviewMigrationVersion(), competitionSourceGuardsHandoffOwner(), competitionSourceGuardsOfficialReviewOwner()},
 		{server.CompetitionOfficialReviewMigrationVersion(), server.CompetitionExecutorControlAmendmentMigrationVersion(), competitionSourceGuardsOfficialReviewOwner(), competitionSourceGuardsExecutorControlOwner()},
 		{server.CompetitionExecutorControlAmendmentMigrationVersion(), server.CompetitionExecutorQualificationRecoveryMigrationVersion(), competitionSourceGuardsExecutorControlOwner(), competitionSourceGuardsQualificationRecoveryOwner()},
-		{server.CompetitionExecutorQualificationRecoveryMigrationVersion(), server.CompetitionExecutorAdmissionExceptionMigrationVersion(), competitionSourceGuardsQualificationRecoveryOwner(), currentOwner},
+		{server.CompetitionExecutorQualificationRecoveryMigrationVersion(), server.CompetitionExecutorAdmissionExceptionMigrationVersion(), competitionSourceGuardsQualificationRecoveryOwner(), competitionSourceGuardsAdmissionExceptionOwner()},
+		{server.CompetitionExecutorAdmissionExceptionMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion(), competitionSourceGuardsAdmissionExceptionOwner(), currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -257,7 +265,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{server.CompetitionOfficialReviewMigrationVersion(), server.CompetitionExecutorControlAmendmentMigrationVersion(), competitionSourceGuardsOfficialReviewOwner()},
 		{server.CompetitionExecutorControlAmendmentMigrationVersion(), server.CompetitionExecutorQualificationRecoveryMigrationVersion(), competitionSourceGuardsExecutorControlOwner()},
 		{server.CompetitionExecutorQualificationRecoveryMigrationVersion(), server.CompetitionExecutorAdmissionExceptionMigrationVersion(), competitionSourceGuardsQualificationRecoveryOwner()},
-		{server.CompetitionExecutorAdmissionExceptionMigrationVersion(), 0, currentOwner},
+		{server.CompetitionExecutorAdmissionExceptionMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion(), competitionSourceGuardsAdmissionExceptionOwner()},
+		{server.CompetitionExecutorAdmissionClaimMigrationVersion(), 0, currentOwner},
 	}
 	faults := []struct {
 		name string
