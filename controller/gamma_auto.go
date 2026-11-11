@@ -22,6 +22,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/glog"
@@ -30,8 +31,24 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The data items an account may top up with.
-var gammaTopupItems = []string{StripeItemData1Tib, StripeItemData10Tib}
+// gammaTopupItems are the data packs an account may top up with: every pack
+// pro.yml sells with Gamma, the 256 GiB pack included.
+func gammaTopupItems() []string {
+	return gammaKnownItems()
+}
+
+// gammaTopupItemMessage is the refusal of a top-up item Gamma does not sell:
+// "The top-up item is data_1tib, data_10tib or data_256gib."
+func gammaTopupItemMessage() string {
+	items := gammaTopupItems()
+	switch len(items) {
+	case 0:
+		return "No data pack is sold with Gamma now."
+	case 1:
+		return fmt.Sprintf("The top-up item is %s.", items[0])
+	}
+	return fmt.Sprintf("The top-up item is %s or %s.", strings.Join(items[:len(items)-1], ", "), items[len(items)-1])
+}
 
 func (self *gammaBiller) autoDemand() {
 	if self.readiness != gammaReady {
@@ -257,10 +274,10 @@ func (self *gammaBiller) autoTopup(account *model.GammaAccount) {
 		return
 	}
 	item := account.TopupItem
-	if item == "" || !slices.Contains(gammaTopupItems, item) {
+	if item == "" || !slices.Contains(gammaTopupItems(), item) {
 		item = StripeItemData1Tib
 	}
-	priceUsd, ok := dataPackPriceUsd(item)
+	priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma)
 	if !ok {
 		return
 	}

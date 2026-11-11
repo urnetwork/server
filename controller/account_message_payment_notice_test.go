@@ -209,7 +209,7 @@ func TestSolanaDataPackAppliedNoteCommitsWithTheCredit(t *testing.T) {
 		}, pageSession)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, intentResult.Error, (*PayDataCheckoutError)(nil))
-		priceUsd, ok := dataPackPriceUsd(StripeItemData1Tib)
+		priceUsd, ok := dataPackPriceUsd(StripeItemData1Tib, model.DataRailCrypto)
 		connect.AssertEqual(t, ok, true)
 
 		removeFault := failOutboxCommitsForNetwork(t, ctx, networkId)
