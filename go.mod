@@ -1,6 +1,6 @@
 module github.com/urnetwork/sidecar/sidecarctl
 
-go 1.27.3
+go 1.27.4
 
 // §4.7 has every module of this repository repeat the four sibling replaces, so that a require of
 // connect or glog resolves as the root's do. warp is C-23's: certs renew reads services.yml through
