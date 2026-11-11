@@ -45,6 +45,34 @@ func TestCreateContractShareNeverNetwork(t *testing.T) {
 	})
 }
 
+// The same across §8.10's gate: the dialer's network has a head row and a gate is installed, whose Public rule passes
+// the dialer's contract as data, and still no cross-network contract is Network, either way.
+func TestCreateContractShareNeverNetworkAcrossTheGate(t *testing.T) {
+	testingAclRun(t, func(t testing.TB, ctx context.Context) {
+		states := sidecartest.NewFakeAclContractStates()
+		x := newAclGateTestNet(t, ctx, states, true)
+		y := newAclGateTestNet(t, ctx, states, false)
+		x.install()
+		dialer := x.appClient(true)
+		target := y.client(nil)
+		sealTestProvide(ctx, dialer, model.ProvideModeNetwork, model.ProvideModeStream)
+		sealTestProvide(ctx, target, model.ProvideModeNetwork, model.ProvideModeFriendsAndFamily, model.ProvideModePublic, model.ProvideModeStream)
+		testingAclContractGate(t, ctx, states)
+
+		forward, sealed := sealTestCreate(t, ctx, dialer, &protocol.CreateContract{DestinationId: target.Bytes()})
+		if forward.ProvideMode == protocol.ProvideMode_Network {
+			t.Fatalf("a cross-network forward contract is Network across the gate")
+		}
+		if sealed.ContractClass != protocol.ContractClass_ContractClassData {
+			t.Errorf("the gate's Public rule sealed %s", sealed.ContractClass)
+		}
+		companion, _ := sealTestCreate(t, ctx, target, &protocol.CreateContract{DestinationId: dialer.Bytes(), Companion: true})
+		if companion.ProvideMode == protocol.ProvideMode_Network {
+			t.Fatalf("a cross-network companion was normalized to Network across the gate")
+		}
+	})
+}
+
 // A share's companion (return) contract carries its forward contract's seals: the dialer's subject and network, and
 // the forward's class.
 func TestCreateContractShareCompanionKeepsTheForwardSeals(t *testing.T) {
