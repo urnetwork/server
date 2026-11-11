@@ -39,6 +39,9 @@ const CryptoReviewReasonScreening = "screening"
 // The list could not be read: no table in this build or deploy.
 var errCryptoSanctionsListUnavailable = errors.New("the sanctions list is not loaded")
 
+// The receipts' state write of a hold or a release. Replaceable only by tests.
+var cryptoSetReceiptsState = model.SetCryptoPaymentReceiptsStateInConn
+
 // cryptoSanctionsMatch looks one address of a coin up in OFAC's list: matched,
 // the list's version, or why the address could not be screened. Replaceable
 // only by tests.
@@ -149,7 +152,7 @@ func cryptoScreenCredit(
 	outcome, reason, listVersion := cryptoScreenSenders(asset, senders)
 	switch outcome {
 	case cryptoScreenHeld:
-		model.SetCryptoPaymentReceiptsStateInConn(nil, ctx, &intentId, keys, model.CryptoReceiptStateReview, reason)
+		cryptoSetReceiptsState(nil, ctx, &intentId, keys, model.CryptoReceiptStateReview, reason)
 		if reason == model.CryptoReviewReasonSanctionsHold {
 			cryptoPayScreenings.WithLabelValues(asset, "matched").Inc()
 			glog.Errorf("[cryptopay]%s invoice %s held for review: a sender is on the sanctions list (list %s); the owner and counsel decide\n", asset, intentId, listVersion)
@@ -215,14 +218,14 @@ func cryptoRescreenHeld(
 				if receipt.BlockHeight == nil {
 					state = model.CryptoReceiptStateSeen
 				}
-				model.SetCryptoPaymentReceiptsStateInConn(nil, ctx, &intentId, []model.CryptoPaymentReceiptKey{receipt.Key()}, state, "")
+				cryptoSetReceiptsState(nil, ctx, &intentId, []model.CryptoPaymentReceiptKey{receipt.Key()}, state, "")
 			}
 			cryptoPayScreenings.WithLabelValues(asset, "released").Inc()
 			result.ScreeningReleased += 1
 			glog.Infof("[cryptopay]%s invoice %s: its held payment screened clean (list %s); it is judged again\n", asset, intentId, listVersion)
 			moved = append(moved, intentId)
 		case reason == model.CryptoReviewReasonSanctionsHold:
-			model.SetCryptoPaymentReceiptsStateInConn(nil, ctx, &intentId, keys, model.CryptoReceiptStateReview, reason)
+			cryptoSetReceiptsState(nil, ctx, &intentId, keys, model.CryptoReceiptStateReview, reason)
 			cryptoPayScreenings.WithLabelValues(asset, "matched").Inc()
 			glog.Errorf("[cryptopay]%s invoice %s held for review: a sender is on the sanctions list (list %s); the owner and counsel decide\n", asset, intentId, listVersion)
 			moved = append(moved, intentId)

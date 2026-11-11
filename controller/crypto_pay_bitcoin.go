@@ -249,7 +249,7 @@ func (self *bitcoinWallet) Heights(ctx context.Context) (uint64, uint64, uint64,
 		return 0, 0, 0, err
 	}
 	networkHeight := max(info.Blocks, info.Headers)
-	if info.InitialBlockDownload || (0 < info.Time && cryptoBitcoinStaleTip < time.Since(time.Unix(info.Time, 0))) {
+	if info.InitialBlockDownload || (0 < info.Time && cryptoBitcoinStaleTip < cryptoChainNow().Sub(time.Unix(info.Time, 0))) {
 		networkHeight = 0
 	}
 	return info.Blocks, info.Blocks, networkHeight, nil

@@ -28,6 +28,9 @@ const cryptoProviderMaxResponseBytes = 32 * 1024 * 1024
 // A provider request is abandoned after this long.
 const cryptoProviderTimeout = 30 * time.Second
 
+// The clock the readers judge a stalled source by. Replaceable only by tests.
+var cryptoChainNow = time.Now
+
 // cryptoAddressWatch holds the invoice addresses a scan reads.
 type cryptoAddressWatch struct {
 	watchLock sync.Mutex
