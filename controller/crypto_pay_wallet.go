@@ -85,6 +85,11 @@ type cryptoWalletReceipt struct {
 	// "" is a sender the chain does not name (an input without an address),
 	// which cannot be screened. nil for Monero and Zcash, which are shielded.
 	Senders []string
+	// set by a reader that holds this payment for an operator whatever it
+	// pays (a TAO transfer of a shape the rail does not credit,
+	// model.CryptoReviewReasonTransferShape): a new receipt is recorded in
+	// review with this reason
+	ReviewReason string
 }
 
 // cryptoWalletWatched is a per-address coin's chain reader (Bitcoin and ETH

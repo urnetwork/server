@@ -181,7 +181,7 @@ func cryptoValidRefundAddress(asset string, address string) bool {
 	case model.CryptoAssetEth:
 		return cryptoEthereumAddressOk(address)
 	case model.CryptoAssetTao:
-		_, err := cryptoTaoAccountOf(address)
+		_, err := cryptoTaoRefundAddressCanonical(address)
 		return err == nil
 	}
 	return false
@@ -218,6 +218,16 @@ func CryptoOperatorRefund(clientSession *session.ClientSession, intentId server.
 	payoutAddress = strings.TrimSpace(payoutAddress)
 	if !cryptoValidRefundAddress(intent.Asset, payoutAddress) {
 		return nil, fmt.Errorf("that does not look like a %s address", intent.Asset)
+	}
+	if intent.Asset == model.CryptoAssetTao {
+		// the customer's own SS58 address, or a quantum-resistant tao_ address
+		// written as its SS58 account: the destination is never the observed
+		// sender, which may be a mirror, a multisig, a proxy or an exchange
+		canonical, err := cryptoTaoRefundAddressCanonical(payoutAddress)
+		if err != nil {
+			return nil, fmt.Errorf("that does not look like a TAO address: %w", err)
+		}
+		payoutAddress = canonical
 	}
 	// every refund destination is screened against OFAC's addresses first, in
 	// every coin (mmm/BTCPAY.md §17.3): a match, or an address the list cannot

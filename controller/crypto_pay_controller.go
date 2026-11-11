@@ -1469,6 +1469,10 @@ var cryptoHeldReviewReasons = []string{
 	// screening_unavailable through once a screen is clean
 	model.CryptoReviewReasonSanctionsHold,
 	model.CryptoReviewReasonScreeningUnavailable,
+	// a TAO transfer shape the rail does not credit by itself, and a payment
+	// to a shared deposit address that matches no invoice's amount
+	model.CryptoReviewReasonTransferShape,
+	model.CryptoReviewReasonAmountUnmatched,
 	model.CryptoReviewReasonVoided,
 	model.CryptoReviewReasonExtra,
 }

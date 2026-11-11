@@ -502,6 +502,11 @@ func cryptoReceiptOf(
 	case walletReceipt.UnlockTime != 0:
 		receipt.State = model.CryptoReceiptStateIgnored
 		receipt.ReviewReason = model.CryptoReviewReasonLocked
+	case walletReceipt.ReviewReason != "":
+		// the reader holds it for an operator (a TAO transfer shape the rail
+		// does not credit by itself)
+		receipt.State = model.CryptoReceiptStateReview
+		receipt.ReviewReason = walletReceipt.ReviewReason
 	case asset == model.CryptoAssetZec && slices.Contains(splitCryptoPools(walletReceipt.Pool), cryptoZcashPoolTransparent):
 		receipt.State = model.CryptoReceiptStateIgnored
 		receipt.ReviewReason = model.CryptoReviewReasonTransparent

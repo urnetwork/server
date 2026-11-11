@@ -100,6 +100,14 @@ const (
 	// credited unscreened. The scanner screens it again each scan and lets it
 	// through once the screen is clean.
 	CryptoReviewReasonScreeningUnavailable = "screening_unavailable"
+	// a TAO transfer of a shape the rail does not credit by itself (a batch,
+	// a proxy or multisig call, an EVM precompile send, a stake transfer):
+	// Coinbase publishes nothing on which shapes it credits, so an operator
+	// checks the Coinbase account first (controller/crypto_pay_bittensor.go)
+	CryptoReviewReasonTransferShape = "transfer_shape"
+	// a payment to a coin's one shared deposit address (Coinbase gave no
+	// address per invoice) whose amount is no open invoice's unique amount
+	CryptoReviewReasonAmountUnmatched = "amount_unmatched"
 )
 
 // The most status tokens one invoice keeps: the first plus the ones handed to

@@ -21,6 +21,12 @@ func newBittensorWallet(settings *cryptoWalletSettings, assetConfig *CryptoPayAs
 
 var errCryptoTaoReaderPending = errors.New("the TAO reader is not built yet")
 
+// cryptoTaoRefundAddressCanonical is a refund destination a customer gave, as
+// the SS58 address (prefix 42) a refund is sent to: STUB, SS58 only.
+func cryptoTaoRefundAddressCanonical(address string) (string, error) {
+	return cryptoTaoAddressCanonical(address)
+}
+
 func (self *bittensorWallet) IncomingSince(ctx context.Context, minHeight uint64) ([]*cryptoWalletReceipt, uint64, error) {
 	return nil, 0, errCryptoTaoReaderPending
 }
