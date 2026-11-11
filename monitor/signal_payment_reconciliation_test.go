@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 func TestPaymentReconciliationHealthy(t *testing.T) {
@@ -519,4 +522,29 @@ func paymentReconciliationSourceWithUnfulfillable(health []Row, repairs []Row, u
 			return nil, nil
 		}
 	}}
+}
+
+// The health and repair readers expect exactly the reconciler's stores
+// (model.PaymentReconcileStores, which a controller test holds the
+// reconciler's legs to), so a store with a new leg is watched without an edit.
+// Pay with Gamma has no leg, so no watermark is expected from it.
+func TestPaymentReconciliationStoresAreTheReconcilerStores(t *testing.T) {
+	want := slices.Sorted(slices.Values(model.PaymentReconcileStores))
+	if !slices.Equal(paymentReconciliationStores, want) {
+		t.Fatalf("expected stores = %v, want %v", paymentReconciliationStores, want)
+	}
+	if !strings.Contains(paymentReconciliationHealthQuery, "VALUES ('apple'), ('bitcoin'), ('bittensor'), ('ethereum'), ('google'), ('monero'), ('solana'), ('stripe'), ('x402'), ('zcash')\n") {
+		t.Errorf("health query does not expect every reconciled store:\n%s", paymentReconciliationHealthQuery)
+	}
+	if strings.Contains(paymentReconciliationHealthQuery, "'gamma'") {
+		t.Errorf("health query expects a watermark from gamma, which has no reconciliation leg")
+	}
+	for _, store := range want {
+		if _, err := paymentReconciliationRepairFindings([]pgRow{{store, "credited", "1", "60"}}); err != nil {
+			t.Errorf("a %s repair was refused: %v", store, err)
+		}
+	}
+	if _, err := paymentReconciliationRepairFindings([]pgRow{{"gamma", "credited", "1", "60"}}); err == nil {
+		t.Errorf("a gamma repair was accepted, but gamma has no reconciliation leg")
+	}
 }
