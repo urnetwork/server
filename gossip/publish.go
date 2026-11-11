@@ -16,6 +16,13 @@
 // which is the deliberate order: a crash between the publish and the stamp
 // republishes a message, which gossip absorbs, while a stamp before the
 // publish would lose one.
+//
+// The drain outlives the database. A claim or a stamp that raises while the
+// database is away ends its own pass and no more: the next pass runs a backoff
+// later and takes what the raise left. On 2026-11-06 a claim raised during the
+// 07:44Z Main brownout, the raise ended the whole drain, and nothing was
+// published for five days (factury/research/extender-health-2026-11-11.md
+// §1.4).
 
 package gossip
 
@@ -37,7 +44,29 @@ const (
 	// The drain period and the rows one drain claims (C6).
 	publishTimeout   = 5 * time.Second
 	publishBatchSize = 64
+
+	// The longest wait after passes that raised in a row, and between the
+	// readiness checks of a replica that is not ready yet. Short enough that
+	// a database that comes back is drained within a minute, long enough that
+	// one that stays away costs a failed pass a minute rather than one every
+	// period.
+	publishMaxBackoff = 60 * time.Second
 )
+
+// The wait before the next pass: the period after a pass that completed, and
+// after `failures` passes in a row that raised, the period doubled once per
+// failure, up to publishMaxBackoff.
+func publishBackoff(timeout time.Duration, failures int) time.Duration {
+	ceiling := max(timeout, publishMaxBackoff)
+	backoff := timeout
+	for range failures {
+		backoff *= 2
+		if ceiling <= backoff {
+			return ceiling
+		}
+	}
+	return backoff
+}
 
 // What one drain publishes to, which is the node in production and a counter
 // in tests. The node is the only implementation that matters: the mesh is not
@@ -94,6 +123,10 @@ type publishOutcome struct {
 }
 
 // runPublish drains for the life of ctx, one batch every timeout.
+//
+// A pass that raises is logged and retried after publishBackoff, and nothing
+// else: the loop ends only when ctx does. A raise from a canceled ctx is the
+// shutdown, which the wait then ends.
 func runPublish(
 	ctx context.Context,
 	queue publishQueue,
@@ -102,12 +135,39 @@ func runPublish(
 	limit int,
 	wait publishWait,
 ) {
+	failures := 0
 	for {
-		drainQueue(ctx, queue, publisher, limit)
-		if !wait(ctx, timeout) {
+		if r := drainPass(ctx, queue, publisher, limit); r == nil {
+			failures = 0
+		} else {
+			failures += 1
+			if ctx.Err() == nil {
+				glog.Errorf(
+					"[gossip]drain pass failed (%d in a row), the next in %s: %s\n",
+					failures,
+					publishBackoff(timeout, failures),
+					server.ErrorJsonNoStack(r),
+				)
+			}
+		}
+		if !wait(ctx, publishBackoff(timeout, failures)) {
 			return
 		}
 	}
+}
+
+// One pass of the drain. A raise from the claim, a stamp or the publisher ends
+// this pass and is returned, never passed on to the loop: whatever the pass
+// did not stamp is claimed again by the next one.
+func drainPass(
+	ctx context.Context,
+	queue publishQueue,
+	publisher messagePublisher,
+	limit int,
+) any {
+	return server.HandleError(func() {
+		drainQueue(ctx, queue, publisher, limit)
+	})
 }
 
 // drainPublishes drains one batch of the queue table.

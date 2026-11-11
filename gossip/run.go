@@ -266,11 +266,14 @@ func runWithDependencies(
 // the drain has ended.
 //
 // The mesh itself needs no database, so an unready replica still carries what
-// it hears; only the drip waits. Readiness is checked once.
+// it hears; only the drip waits, and only until readiness passes. A replica
+// that started during a database outage, or ahead of the migration its binary
+// needs, checks again a backoff after every failure (publishBackoff), where it
+// used to log once and never drain.
 //
-// A raise, such as a claim or stamp that fails while the database is away,
-// ends the drain only. The mesh keeps carrying what it hears, as on an unready
-// replica, and the pusher runs until ctx ends.
+// The drain retries its own failed passes (runPublish), so it ends only with
+// ctx. Were it to end early all the same, the pusher would still run until ctx
+// ends, as it does on a replica whose drain never started.
 func runPublishWhenReady(
 	ctx context.Context,
 	readiness func(context.Context) error,
@@ -278,11 +281,7 @@ func runPublishWhenReady(
 	drain func(context.Context),
 	wait publishWait,
 ) {
-	if err := readiness(ctx); err != nil {
-		glog.Infof("[gossip]not ready (%s)\n", err)
-		return
-	}
-	if ctx.Err() != nil {
+	if !awaitPublishReadiness(ctx, readiness, wait) {
 		return
 	}
 	flushStats := startStatsPusher(ctx)
@@ -291,4 +290,34 @@ func runPublishWhenReady(
 		drain(ctx)
 	})
 	<-ctx.Done()
+}
+
+// Checks readiness until it passes, waiting publishBackoff between failures.
+// False when ctx ended first.
+func awaitPublishReadiness(
+	ctx context.Context,
+	readiness func(context.Context) error,
+	wait publishWait,
+) bool {
+	for failures := 1; ; failures += 1 {
+		var err error
+		if r := server.HandleError(func() {
+			err = readiness(ctx)
+		}); r != nil {
+			err = fmt.Errorf("readiness raised: %s", server.ErrorJsonNoStack(r))
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		if err == nil {
+			return true
+		}
+		// the mesh itself needs no database, so an unready replica still
+		// carries what it hears; only the drip waits
+		backoff := publishBackoff(publishTimeout, failures)
+		glog.Infof("[gossip]not ready, the drain waits (check %d, the next in %s): %s\n", failures, backoff, err)
+		if !wait(ctx, backoff) {
+			return false
+		}
+	}
 }
