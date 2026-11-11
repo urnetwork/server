@@ -2584,8 +2584,12 @@ func HeliusWebhook(
 	// the reason the transaction was skipped -- reported as the result message for a
 	// single-transaction delivery, so a caller (and the existing tests) can see WHY
 	skipMessage := ""
+	// native SOL payments to SOL invoice addresses: the chain read credits
+	// them, so a delivery only brings that read forward (heliusHintNativeInvoices)
+	nativeHinted := 0
 	lookups := &solanaDbPaymentLookups{clientSession: clientSession}
 	for _, transaction := range transactions {
+		nativeHinted += heliusHintNativeInvoices(clientSession, transaction)
 		decision := solanaDecidePayment(transaction, lookups)
 
 		switch decision.action {
@@ -2648,6 +2652,9 @@ func HeliusWebhook(
 		return nil, firstErr
 	}
 
+	if matched == 0 && 0 < nativeHinted {
+		return &HeliusWebhookResult{Message: fmt.Sprintf("%d SOL invoice payments to read", nativeHinted)}, nil
+	}
 	if matched == 0 {
 		glog.Infof("HeliusWebhook: no matching payments found for %v", transactions)
 		// a single-transaction delivery keeps its specific reason; a batch with
@@ -2658,6 +2665,47 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// heliusHintNativeInvoices is the webhook's native branch: the native SOL
+// transfers of a delivered transaction to SOL invoice addresses (each SOL
+// invoice has a Coinbase deposit address of its own) are read on the SOL
+// scanner's next scan, whatever the invoice's age, and that read of the chain
+// at the finalized commitment credits them (crypto_pay_solana_native.go).
+// The delivery itself credits nothing and changes nothing of the USDC
+// decision. Helius delivers a per-invoice address's transactions only when the
+// address is on its webhook; the scanner's polling is the source of truth
+// either way. Returns how many invoice addresses the transaction paid. A
+// failed lookup is logged, never the delivery's failure: the scan still reads
+// every open invoice.
+func heliusHintNativeInvoices(clientSession *session.ClientSession, transaction *SolanaTransaction) (hinted int) {
+	destinations := []string{}
+	for _, nativeTransfer := range transaction.NativeTransfers {
+		if nativeTransfer.Amount <= 0 || nativeTransfer.ToUserAccount == "" {
+			continue
+		}
+		address, err := cryptoSolanaAddressCanonical(nativeTransfer.ToUserAccount)
+		if err != nil || slices.Contains(destinations, address) {
+			continue
+		}
+		destinations = append(destinations, address)
+	}
+	if len(destinations) == 0 {
+		return 0
+	}
+	server.HandleError(func() {
+		invoiceAddresses := cryptoInvoiceAddresses(clientSession.Ctx, model.CryptoAssetSol, destinations)
+		if len(invoiceAddresses) == 0 {
+			return
+		}
+		cryptoAddScanHints(clientSession.Ctx, model.CryptoAssetSol, invoiceAddresses)
+		cryptoPayWebhookDeliveries.WithLabelValues("helius", model.CryptoAssetSol, "hinted").Inc()
+		hinted = len(invoiceAddresses)
+		glog.Infof("HeliusWebhook: transaction %s pays %d SOL invoice addresses; their scan reads them next\n", transaction.Signature, hinted)
+	}, func(err error) {
+		glog.Warningf("HeliusWebhook: could not look up the SOL invoice addresses of transaction %s: %s\n", transaction.Signature, err)
+	})
+	return
 }
 
 // What the webhook does with one transaction (solanaDecidePayment).
