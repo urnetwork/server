@@ -101,8 +101,16 @@ type bitcoinWallet struct {
 	// the chain as this scan left it, written with the cursor when the scan
 	// completes; nil until IncomingSince read it
 	chain *bitcoinChain
-	// the blocks this scan read, by hash
-	blocks map[string]*bitcoinBlock
+	// the blocks this scan read, by hash: only what the kept chain keeps of
+	// each, never its transactions
+	read map[string]*bitcoinReadBlock
+}
+
+// bitcoinReadBlock is a block as one scan read it: what the kept chain keeps
+// of it, and its parent's hash.
+type bitcoinReadBlock struct {
+	kept     *bitcoinChainBlock
+	previous string
 }
 
 func newBitcoinWallet(settings *cryptoWalletSettings, assetConfig *CryptoPayAssetConfig) *bitcoinWallet {
@@ -111,7 +119,7 @@ func newBitcoinWallet(settings *cryptoWalletSettings, assetConfig *CryptoPayAsse
 		network:                 assetConfig.Network,
 		reorgWindow:             uint64(max(1, assetConfig.ReorgWindowBlocks)),
 		rpc:                     newCryptoRpcClient(settings.ChainRpcUrl, "", "", cryptoRpcAuthNone, "2.0"),
-		blocks:                  map[string]*bitcoinBlock{},
+		read:                    map[string]*bitcoinReadBlock{},
 	}
 }
 
@@ -405,28 +413,40 @@ func (self *bitcoinWallet) blockHash(ctx context.Context, height uint64) (string
 	return hash, nil
 }
 
-// block reads the best chain's block at height, with its transactions.
-func (self *bitcoinWallet) block(ctx context.Context, height uint64) (*bitcoinBlock, error) {
+// readBlock reads the best chain's block at height, at most once a scan: its
+// transactions are matched as soon as they are read, and only what the kept
+// chain keeps of the block is held after (one block's transactions in memory
+// at a time).
+func (self *bitcoinWallet) readBlock(ctx context.Context, height uint64) (*bitcoinReadBlock, error) {
 	hash, err := self.blockHash(ctx, height)
 	if err != nil {
 		return nil, err
 	}
 	self.stateLock.Lock()
-	block := self.blocks[hash]
+	read := self.read[hash]
 	self.stateLock.Unlock()
-	if block != nil {
-		return block, nil
+	if read != nil {
+		return read, nil
 	}
+	var block *bitcoinBlock
 	if err := self.rpc.call(ctx, "getblock", []any{hash, 2}, &block); err != nil {
 		return nil, err
 	}
 	if block == nil || block.Hash != hash || block.Height != height {
 		return nil, fmt.Errorf("getblock %d: the source answered another block than the one asked", height)
 	}
+	payments, err := self.blockPayments(ctx, block)
+	if err != nil {
+		return nil, err
+	}
+	read = &bitcoinReadBlock{
+		kept:     &bitcoinChainBlock{Height: block.Height, Hash: block.Hash, Time: block.Time, Payments: payments},
+		previous: block.PreviousBlockHash,
+	}
 	self.stateLock.Lock()
-	self.blocks[hash] = block
+	self.read[hash] = read
 	self.stateLock.Unlock()
-	return block, nil
+	return read, nil
 }
 
 // blockPayments reads what a block paid the invoice addresses in play: every
@@ -542,11 +562,11 @@ func (self *bitcoinWallet) IncomingSince(ctx context.Context, minHeight uint64) 
 		if tip < height {
 			break
 		}
-		block, err := self.block(ctx, height)
+		read, err := self.readBlock(ctx, height)
 		if err != nil {
 			return nil, 0, err
 		}
-		if kept := chain.tip(); kept != nil && block.PreviousBlockHash != kept.Hash {
+		if kept := chain.tip(); kept != nil && read.previous != kept.Hash {
 			if reorged {
 				// the chain moved again during this scan: what was read
 				// holds, and the next scan goes on from it
@@ -562,11 +582,7 @@ func (self *bitcoinWallet) IncomingSince(ctx context.Context, minHeight uint64) 
 			glog.Warningf("[cryptopay]btc: a reorg replaced blocks %d to %d; the scan reads them again from the fork at %d\n", left[0].Height, left[len(left)-1].Height, fork)
 			continue
 		}
-		payments, err := self.blockPayments(ctx, block)
-		if err != nil {
-			return nil, 0, err
-		}
-		chain.Blocks = append(chain.Blocks, &bitcoinChainBlock{Height: block.Height, Hash: block.Hash, Time: block.Time, Payments: payments})
+		chain.Blocks = append(chain.Blocks, read.kept)
 	}
 	chain.keepRecent(cryptoBitcoinKeptBlocks)
 	if chain.tip() == nil {

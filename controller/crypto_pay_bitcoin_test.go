@@ -861,9 +861,13 @@ func TestCryptoBitcoinScanReorgDropsABlock(t *testing.T) {
 	node.stateLock.Unlock()
 	node.mine(cryptoTestBtcTxTwoOutputs)
 	hashes := node.callCount("getblockhash")
+	reads := node.callCount("getblock")
 	after := state.scan(t, endpoint)
 	connect.AssertEqual(t, after.err, nil)
 	connect.AssertEqual(t, after.walletHeight, uint64(975404))
+	// 975403, which showed the fork, is read once and used again after the
+	// fork point: 975402, 975403 and 975404 of the new chain, three reads
+	connect.AssertEqual(t, node.callCount("getblock")-reads, 3)
 
 	kept := state.kept(t)
 	connect.AssertEqual(t, kept.tip().Height, uint64(975404))
