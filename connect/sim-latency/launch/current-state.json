@@ -1,6 +1,23 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T02:49:03Z",
+  "observed_at": "2026-11-11T03:05:08Z",
+  "latest_goofe_r9_admission": {
+    "evidence": "EPOCH2-GOOFE-R9-ADMISSION-2026-11-11.json",
+    "passed": true,
+    "replicates": 9,
+    "receipt_sha256": "bc72546dddaa79c19d9957241380151eb97086948f54809eab49f19f484f939c",
+    "baseline_sha256": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
+    "raw_score_relative_difference": 0.003471320659202573,
+    "all_nine_metric_screens_without_significant_shift": true,
+    "statistical_equivalence_proven": false,
+    "retained_compliance_until": "2028-01-01T00:00:00Z",
+    "sille_g5_failure_remains": true,
+    "both_hosts_ready": false,
+    "grading_ready": false,
+    "customer_evaluation_clocks_started": 0,
+    "coordinator_stopped_at_idle_boundary_after_reconciliation": true,
+    "next_action": "Resolve Sille's independent pristine-product drain-timeout stability failure. Do not discard replicate 3, reset its immutable admission clock, resample without an explicit recovery plan, waive G5, or enable claims on one host under the frozen two-host policy. Earlier entries below are historical."
+  },
   "latest_private_admission_result": {
     "evidence": "EPOCH2-PRIVATE-ADMISSION-BLOCKER-2026-11-11.json",
     "both_executions_completed_nine_replicates": true,
