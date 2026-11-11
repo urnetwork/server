@@ -27,7 +27,11 @@ type escrowTransferBalance struct {
 	balanceByteCount ByteCount
 	startTime        time.Time
 	endTime          time.Time
-	reservation      netEscrowSnapshot
+	// a paid Pro grant, which funds before the payer's other grants
+	// (transfer_balance_funding_order.go); false on the prober's free-grant
+	// candidate reads, which select only grants that are not Pro
+	fundsFirst  bool
+	reservation netEscrowSnapshot
 }
 
 var proberGrantSelectionResults = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -41,7 +45,7 @@ func init() {
 }
 
 const escrowTransferBalanceSql = `
-	SELECT balance_id, paid, balance_byte_count, start_time, end_time
+	SELECT balance_id, paid, balance_byte_count, start_time, end_time, ` + transferBalanceFundsFirstSql + ` AS funds_first
 	FROM transfer_balance
 	WHERE network_id = $1 AND active AND start_time <= $2 AND $2 < end_time
 `
@@ -50,8 +54,8 @@ const escrowTransferBalanceSql = `
 // The limit precedes free-grant eligibility: unusual paid or small grants
 // cannot turn a bounded candidate read into an unbounded search for a match.
 // Ordinary payers skip discovery and use the complete locked read, then the
-// existing earliest-expiry order. Reading their grants here would duplicate
-// that authoritative read. The persisted singleton is the scope.
+// funding order (transfer_balance_funding_order.go). Reading their grants here
+// would duplicate that authoritative read. The persisted singleton is the scope.
 const proberGrantSelectionSql = `
 	WITH allocation AS MATERIALIZED (
 		SELECT EXISTS (
@@ -161,7 +165,7 @@ func lockTransferEscrowBalanceRows(
 		for rows.Next() {
 			balance := &escrowTransferBalance{}
 			server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
-				&balance.startTime, &balance.endTime))
+				&balance.startTime, &balance.endTime, &balance.fundsFirst))
 			balances = append(balances, balance)
 			lockedBalanceIds = append(lockedBalanceIds, balance.balanceId)
 		}
@@ -192,17 +196,17 @@ func loadTransferEscrowBalances(
 ) []*escrowTransferBalance {
 	defer server.EnterContractCreationStage(ctx, server.ContractStageGrantSelection)()
 	if requestedBytes == 0 {
-		// An anchor consumes no credit. Preserve its earliest-expiry priority
-		// without queuing behind a financial allocation or scanning escrow
-		// history for amounts that cannot affect this zero-byte reservation.
+		// An anchor consumes no credit. Preserve the priority of the grant that
+		// funds first (transfer_balance_funding_order.go) without queuing
+		// behind a financial allocation or scanning escrow history for amounts
+		// that cannot affect this zero-byte reservation.
 		balances := []*escrowTransferBalance{}
-		rows, err := tx.Query(ctx, escrowTransferBalanceSql+`
-			ORDER BY end_time, start_time, balance_id LIMIT 1`, payerNetworkId, now)
+		rows, err := tx.Query(ctx, transferBalanceFundingPageSql("1"), payerNetworkId, now)
 		server.WithPgResult(rows, err, func() {
 			for rows.Next() {
 				balance := &escrowTransferBalance{}
 				server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount,
-					&balance.startTime, &balance.endTime))
+					&balance.startTime, &balance.endTime, &balance.fundsFirst))
 				balances = append(balances, balance)
 			}
 		})

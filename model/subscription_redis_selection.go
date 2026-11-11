@@ -27,9 +27,12 @@ const redisGrantPageRows = 64
 // grants by the payer client's hash. Each grant is its own Redis escrow slot
 // and its own debit shard, so one very large network cannot saturate a single
 // Redis node with every admission and release. A payer with fewer than two
-// such grants reads no candidates and keeps the earliest-expiry order; the
-// LIMIT 2 count bounds the eligibility read. The legacy allocator keeps
-// proberGrantSelectionSql unchanged.
+// such grants reads no candidates and keeps the funding order
+// (transfer_balance_funding_order.go); the LIMIT 2 count bounds the
+// eligibility read. A daily free grant is never large (pro.yml free.data, even
+// scaled by the seeker multiplier, is far below ProberTransferBalanceTopUp), so
+// it never makes a Pro payer spread ahead of its paid Pro grants. The legacy
+// allocator keeps proberGrantSelectionSql unchanged.
 const redisGrantSpreadSelectionSql = `
 	WITH allocation AS MATERIALIZED (
 		SELECT EXISTS (
@@ -374,72 +377,82 @@ func selectRedisTransferBalances(ctx context.Context, admission *redisContractAd
 		proberOutcome = "fallback"
 	}
 
-	// Ordinary/fallback funding keeps exact earliest-expiry order. Keyset
-	// pages avoid repeatedly scanning an offset prefix and bound decoded rows.
-	var cursor *escrowTransferBalance
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, 0, err
-		}
-		if rowsRead == limits.MaxRows || len(selected) == limits.MaxSelected {
-			return nil, 0, capacity()
-		}
-		count := min(redisGrantPageRows, limits.MaxRows-rowsRead)
-		sql := escrowTransferBalanceSql
-		args := []any{payerNetworkId, now}
-		if cursor == nil {
-			sql += ` ORDER BY end_time,start_time,balance_id LIMIT $3`
-			args = append(args, count)
-		} else {
-			sql += ` AND (end_time,start_time,balance_id)>($3,$4,$5) ORDER BY end_time,start_time,balance_id LIMIT $6`
-			args = append(args, cursor.endTime, cursor.startTime, cursor.balanceId, count)
-		}
-		page := []*escrowTransferBalance{}
-		readRedisGrants(ctx, func(query server.PgCanQuery) {
-			rows, err := query.Query(ctx, sql, args...)
-			server.WithPgResult(rows, err, func() {
-				for rows.Next() {
-					balance := &escrowTransferBalance{}
-					server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime))
-					page = append(page, balance)
-					rowsRead++
-				}
-			})
-		})
-		warn()
-		probe.forget()
-		for index, balance := range page {
-			cursor, last = balance, balance.balanceId
-			if len(selected) == limits.MaxSelected {
-				return nil, 0, capacity()
-			}
-			probe.observe(ctx, page[index:])
-			done, err := reserve(balance, false)
-			if err != nil {
+	// Ordinary/fallback funding keeps the exact funding order
+	// (transfer_balance_funding_order.go). A Pro payer's census reads its paid
+	// Pro grants, then the rest; every other payer's is one earliest-expiry
+	// census, with the same statements as before. Each phase's keyset pages
+	// avoid repeatedly scanning an offset prefix and bound decoded rows. The
+	// payer's Pro entitlement is read through its cache, outside any
+	// transaction, as every discovery read here is.
+	for _, phase := range transferBalanceFundingPhases(IsProNetwork(ctx, payerNetworkId)) {
+		var cursor *escrowTransferBalance
+		for {
+			if err := ctx.Err(); err != nil {
 				return nil, 0, err
 			}
-			if done {
-				exhaustedRedisPayers.forget(payerNetworkId, time.Now())
-				return selected, priority / Priority(len(selected)), nil
+			if rowsRead == limits.MaxRows || len(selected) == limits.MaxSelected {
+				return nil, 0, capacity()
 			}
-		}
-		if len(page) < count {
-			if held != nil {
-				return nil, 0, fmt.Errorf("Redis grant funding incomplete because a counter remains unknown: %w", held)
+			count := min(redisGrantPageRows, limits.MaxRows-rowsRead)
+			sql := escrowTransferBalanceSql + phase
+			args := []any{payerNetworkId, now}
+			if cursor == nil {
+				sql += ` ORDER BY end_time,start_time,balance_id LIMIT $3`
+				args = append(args, count)
+			} else {
+				sql += ` AND (end_time,start_time,balance_id)>($3,$4,$5) ORDER BY end_time,start_time,balance_id LIMIT $6`
+				args = append(args, cursor.endTime, cursor.startTime, cursor.balanceId, count)
 			}
-			// Only a complete bounded census can authorize shrink-to-fit. A
-			// capacity refusal or unknown counter is not proof of less funding.
-			if _, ok := grantTransferEscrowByteCount(requested, requested-remaining); ok && len(selected) != 0 {
-				exhaustedRedisPayers.forget(payerNetworkId, time.Now())
-				return selected, priority / Priority(len(selected)), nil
+			page := []*escrowTransferBalance{}
+			readRedisGrants(ctx, func(query server.PgCanQuery) {
+				rows, err := query.Query(ctx, sql, args...)
+				server.WithPgResult(rows, err, func() {
+					for rows.Next() {
+						balance := &escrowTransferBalance{}
+						server.Raise(rows.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime, &balance.fundsFirst))
+						page = append(page, balance)
+						rowsRead++
+					}
+				})
+			})
+			warn()
+			probe.forget()
+			for index, balance := range page {
+				cursor, last = balance, balance.balanceId
+				if len(selected) == limits.MaxSelected {
+					return nil, 0, capacity()
+				}
+				probe.observe(ctx, page[index:])
+				done, err := reserve(balance, false)
+				if err != nil {
+					return nil, 0, err
+				}
+				if done {
+					exhaustedRedisPayers.forget(payerNetworkId, time.Now())
+					return selected, priority / Priority(len(selected)), nil
+				}
 			}
-			// The internal prober keeps its census and selection outcomes.
-			if !internal {
-				exhaustedRedisPayers.note(payerNetworkId, time.Now())
+			if len(page) < count {
+				// this phase is complete
+				break
 			}
-			return nil, 0, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, requested-remaining)
 		}
 	}
+	// the census is complete: every phase read to its end
+	if held != nil {
+		return nil, 0, fmt.Errorf("Redis grant funding incomplete because a counter remains unknown: %w", held)
+	}
+	// Only a complete bounded census can authorize shrink-to-fit. A
+	// capacity refusal or unknown counter is not proof of less funding.
+	if _, ok := grantTransferEscrowByteCount(requested, requested-remaining); ok && len(selected) != 0 {
+		exhaustedRedisPayers.forget(payerNetworkId, time.Now())
+		return selected, priority / Priority(len(selected)), nil
+	}
+	// The internal prober keeps its census and selection outcomes.
+	if !internal {
+		exhaustedRedisPayers.note(payerNetworkId, time.Now())
+	}
+	return nil, 0, fmt.Errorf("%w (%d).", errRedisReservationInsufficient, requested-remaining)
 }
 
 // A blocked endpoint, or the wait for the transaction, can outlive a grant.

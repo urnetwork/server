@@ -1,14 +1,16 @@
 package model
 
-// The daily free grant reaches every account without a Pro plan, whatever
-// else it holds. The owner, 2026-11-11: "sign up codes should still get daily
-// free data. all accounts should get the daily free data." pro.yml's free
-// plan (free.data, daily) goes to every network without an active
-// subscription; Pro's monthly grant replaces it. A redeemed balance code, a
-// purchased data pack, a referral and a guest network from before guest
-// sign-up was retired never take a network out of it. A lag.dev guest gets
-// none (lag.dev/PLAN.md A1, lag_grant_test.go), nor does a prober shard's
-// private network (prober_shard_free_grant_test.go). Needs the test database.
+// The daily free grant reaches every account, whatever else it holds. The
+// owner, 2026-11-11: "sign up codes should still get daily free data. all
+// accounts should get the daily free data." and "pro should get the 1tib per
+// month plus the 30gb per day" (the monthly amount is pro.yml's 10 TiB).
+// pro.yml's free plan (free.data, daily) goes to every network, a Pro
+// subscriber's on top of its cycle grant. A redeemed balance code, a purchased
+// data pack, a referral, a Pro subscription and a guest network from before
+// guest sign-up was retired never take a network out of it. A lag.dev guest
+// gets none (lag.dev/PLAN.md A1, lag_grant_test.go), nor does a prober shard's
+// private network (prober_shard_free_grant_test.go). Payment graces:
+// pro_daily_free_grant_db_test.go. Needs the test database.
 
 import (
 	"context"
@@ -20,7 +22,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-func TestDailyFreeGrantReachesEveryAccountWithoutAProPlan(t *testing.T) {
+func TestDailyFreeGrantReachesEveryAccount(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		now := server.NowUtc()
@@ -68,7 +70,7 @@ func TestDailyFreeGrantReachesEveryAccountWithoutAProPlan(t *testing.T) {
 		legacyGuest := server.NewId()
 		Testing_CreateLegacyGuestNetwork(ctx, legacyGuest, server.NewId())
 
-		// Pro: the monthly Pro grant instead (pro.yml)
+		// Pro: the daily grant on top of the cycle grant (pro.yml)
 		pro := network("freepro")
 		connect.AssertEqual(t, AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
 			NetworkId:          pro,
@@ -95,6 +97,7 @@ func TestDailyFreeGrantReachesEveryAccountWithoutAProPlan(t *testing.T) {
 			{"a referrer", referrer},
 			{"a referee", referee},
 			{"a legacy guest network", legacyGuest},
+			{"a Pro network", pro},
 		} {
 			if added[granted.networkId] != 1*Gib {
 				t.Errorf("%s: daily free grant %d, want %d", granted.name, added[granted.networkId], 1*Gib)
@@ -110,16 +113,8 @@ func TestDailyFreeGrantReachesEveryAccountWithoutAProPlan(t *testing.T) {
 				t.Errorf("%s: %d active daily free grants, want 1", granted.name, grants)
 			}
 		}
-		for _, excluded := range []struct {
-			name      string
-			networkId server.Id
-		}{
-			{"a Pro network", pro},
-			{"a lag.dev guest", lagGuest.NetworkId},
-		} {
-			if _, ok := added[excluded.networkId]; ok {
-				t.Errorf("%s got the daily free grant", excluded.name)
-			}
+		if _, ok := added[lagGuest.NetworkId]; ok {
+			t.Errorf("a lag.dev guest got the daily free grant")
 		}
 	})
 }
