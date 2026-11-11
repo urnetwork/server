@@ -8,7 +8,9 @@ package controller
 //	POST /pay/gamma/intent         bearer: the account's deposit hotkey, the price and the mint command
 //	POST /pay/gamma/status         status token: pending, seen, confirming, paid, expired, review
 //	GET  /pay/gamma/settings       bearer: the automatic renewal and top-up switches
-//	POST /pay/gamma/settings       bearer: set them, the top-up item and the monthly limit
+//	POST /pay/gamma/settings       bearer: set them, the top-up item and the monthly limit; a switch
+//	                               turned off cancels the charges it governs not yet sent, and
+//	                               lists those already sent (charging)
 //
 // The API reads Postgres only: the biller (gamma_biller.go) keeps the chain's
 // view there, so a request never waits on a node. The bearer token is the only
@@ -935,17 +937,46 @@ type GammaSettingsResult struct {
 	// the plan a renewal or a seat upgrade buys; "" before a plan was paid
 	RenewPlan string `json:"renew_plan"`
 	// the deposit hotkey automatic charges draw from; "" before a payment
-	DepositHotkey  string              `json:"deposit_hotkey"`
-	DepositHotkeys []string            `json:"deposit_hotkeys"`
-	Error          *CryptoPaymentError `json:"error,omitempty"`
+	DepositHotkey  string   `json:"deposit_hotkey"`
+	DepositHotkeys []string `json:"deposit_hotkeys"`
+	// the automatic charges whose switch is off that were already being
+	// charged when it was turned off: a payment already sent to the chain
+	// cannot be recalled, so each can still be charged this once; empty when
+	// there is none
+	Charging []*GammaSettingsCharge `json:"charging"`
+	// Charging in a sentence; "" when it is empty
+	Notice string              `json:"notice,omitempty"`
+	Error  *CryptoPaymentError `json:"error,omitempty"`
+}
+
+// GammaSettingsCharge is an automatic charge already being made when its
+// switch was turned off (model.GammaAutomaticChargeInFlight).
+type GammaSettingsCharge struct {
+	IntentId string `json:"intent_id"`
+	// renew, topup or seat
+	Purpose     string `json:"purpose"`
+	Plan        string `json:"plan"`
+	ItemId      string `json:"item_id"`
+	AmountGamma string `json:"amount_gamma"`
+	// confirming: its spend was sent, or landed and is being credited
+	Status string `json:"status"`
 }
 
 // GetGammaSettings answers GET /pay/gamma/settings.
 func GetGammaSettings(clientSession *session.ClientSession) (*GammaSettingsResult, error) {
-	return gammaSettingsResult(clientSession), nil
+	return gammaSettingsResult(clientSession, model.GetGammaSwitchedOffChargesInFlight(clientSession.Ctx, clientSession.ByJwt.NetworkId)), nil
 }
 
-// SetGammaSettings answers POST /pay/gamma/settings.
+// SetGammaSettings answers POST /pay/gamma/settings. A switch turned off
+// (auto_renew: the renewal and the upgrade at the client limit; auto_topup:
+// the data top-up and that upgrade) cancels the open charges it governs that
+// are not yet sent: the biller voids them in its own step, and no spend batch
+// takes them meanwhile. One already sent to the chain cannot be recalled, and
+// voiding it would leave a payment that lands uncredited, so the switch is
+// still turned off and the answer lists that charge (charging) and says
+// plainly that it can still be charged this once (notice). Refusing instead
+// would spare the customer nothing, since the charge lands either way, and
+// would leave the switch on for the charges after it.
 func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSession) (*GammaSettingsResult, error) {
 	settings := &model.GammaAccountSettings{AutoRenew: args.AutoRenew, AutoTopup: args.AutoTopup}
 	if args.TopupItemId != nil {
@@ -965,15 +996,17 @@ func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSess
 	if args.AutoRenew != nil && *args.AutoRenew && gammaOtherProRenews(clientSession) {
 		// a Gamma plan renewing beside Pro paid elsewhere would charge the
 		// customer twice for the same days; nothing in the request is applied
-		result := gammaSettingsResult(clientSession)
+		result := gammaSettingsResult(clientSession, model.GetGammaSwitchedOffChargesInFlight(clientSession.Ctx, clientSession.ByJwt.NetworkId))
 		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: gammaOtherProRenewsSettingsMessage}
 		return result, nil
 	}
-	model.SetGammaAccountSettings(clientSession.Ctx, clientSession.ByJwt.NetworkId, settings, gammaNow())
-	return gammaSettingsResult(clientSession), nil
+	// what was already being charged, read under the account's row lock: a
+	// spend batch made after this sees the switch off
+	inFlight := model.SetGammaAccountSettings(clientSession.Ctx, clientSession.ByJwt.NetworkId, settings, gammaNow())
+	return gammaSettingsResult(clientSession, inFlight), nil
 }
 
-func gammaSettingsResult(clientSession *session.ClientSession) *GammaSettingsResult {
+func gammaSettingsResult(clientSession *session.ClientSession, inFlight []*model.GammaAutomaticChargeInFlight) *GammaSettingsResult {
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
 	result := &GammaSettingsResult{
@@ -981,7 +1014,23 @@ func gammaSettingsResult(clientSession *session.ClientSession) *GammaSettingsRes
 		AutoTopup:      true,
 		TopupItemId:    StripeItemData1Tib,
 		DepositHotkeys: []string{},
+		Charging:       []*GammaSettingsCharge{},
 	}
+	for _, charge := range inFlight {
+		plan, itemId := cryptoSplitItem(charge.Item)
+		if charge.Item == model.SolanaPlanMonthly {
+			plan, itemId = charge.Item, ""
+		}
+		result.Charging = append(result.Charging, &GammaSettingsCharge{
+			IntentId:    charge.IntentId.String(),
+			Purpose:     charge.Purpose,
+			Plan:        plan,
+			ItemId:      itemId,
+			AmountGamma: gammaFormatUnits(charge.Amount),
+			Status:      gammaStatusConfirming,
+		})
+	}
+	result.Notice = gammaSettingsChargingNotice(inFlight)
 	for _, hotkey := range model.GetGammaDepositHotkeys(ctx, networkId) {
 		result.DepositHotkeys = append(result.DepositHotkeys, hotkey.Hotkey)
 	}
@@ -1001,6 +1050,35 @@ func gammaSettingsResult(clientSession *session.ClientSession) *GammaSettingsRes
 	result.RenewPlan = account.RenewPlan
 	result.DepositHotkey = account.Hotkey
 	return result
+}
+
+// gammaSettingsChargingNotice says, in plain words, which automatic charges
+// were already being made when their switch was turned off, and that each can
+// still be charged this once; "" when there is none.
+func gammaSettingsChargingNotice(inFlight []*model.GammaAutomaticChargeInFlight) string {
+	descriptions := []string{}
+	for _, charge := range inFlight {
+		what := fmt.Sprintf("(%s, %s gamma)", gammaItemDescription(charge.Item), gammaFormatUnits(charge.Amount))
+		switch charge.Purpose {
+		case model.GammaPurposeRenew:
+			descriptions = append(descriptions, "the renewal of your plan "+what)
+		case model.GammaPurposeSeat:
+			descriptions = append(descriptions, "the upgrade to Pro at your client limit "+what)
+		case model.GammaPurposeTopup:
+			descriptions = append(descriptions, "the data top-up "+what)
+		default:
+			descriptions = append(descriptions, "an automatic charge "+what)
+		}
+	}
+	switch len(descriptions) {
+	case 0:
+		return ""
+	case 1:
+		text := descriptions[0]
+		return strings.ToUpper(text[:1]) + text[1:] + " was already being charged when you turned this off. A payment already sent to the chain can't be recalled, so it can still be charged this once, but none after it while the switch is off."
+	}
+	list := strings.Join(descriptions[:len(descriptions)-1], ", ") + " and " + descriptions[len(descriptions)-1]
+	return "These automatic charges were already being made when you turned them off: " + list + ". A payment already sent to the chain can't be recalled, so each can still be charged this once, but none after it while its switch is off."
 }
 
 // gammaParseUnits parses a decimal amount of gamma into units (at most 9
