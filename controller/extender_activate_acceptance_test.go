@@ -45,6 +45,11 @@ type testActivationProbes struct {
 	forwardErr           error
 	// answers the forward in place of forwardErr when set
 	forwardAnswer func(ctx context.Context) error
+	// the caller address the webrtc test's forward reports, or its error;
+	// webRtcAnswer answers in place of both when set (connect/EXTENDER.md S8)
+	webRtcClientAddress string
+	webRtcErr           error
+	webRtcAnswer        func(ctx context.Context) (string, error)
 
 	// the clock the activation is judged on, which only the fakes move
 	clock *testActivationClock
@@ -65,6 +70,7 @@ func newTestActivationProbes() *testActivationProbes {
 	return &testActivationProbes{
 		carrierErrs:          map[string]error{},
 		forwardClientAddress: "192.0.2.10:443",
+		webRtcClientAddress:  "192.0.2.10:443",
 		clock:                newTestActivationClock(),
 	}
 }
@@ -102,6 +108,16 @@ func (self *testActivationProbes) activationProbes() *extenderActivationProbes {
 				return "", self.forwardErr
 			}
 			return self.forwardClientAddress, nil
+		},
+		webRtc: func(ctx context.Context) (string, error) {
+			self.logProbe(connect.ExtenderCarrierWebRtc)
+			if self.webRtcAnswer != nil {
+				return self.webRtcAnswer(ctx)
+			}
+			if self.webRtcErr != nil {
+				return "", self.webRtcErr
+			}
+			return self.webRtcClientAddress, nil
 		},
 	}
 }

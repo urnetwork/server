@@ -62,8 +62,10 @@ func testActivationStepHistogram(t testing.TB, metrics *extenderActivationMetric
 func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 	registry := prometheus.NewRegistry()
 	metrics := newExtenderActivationMetrics(registry)
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 33)
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 12)
+	// the webrtc stage's three outcomes by two families, and the webrtc step's
+	// three outcomes, are the required path of connect/EXTENDER.md S8
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 39)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.stepSeconds), 15)
 	for stage, outcomes := range extenderActivationStageOutcomes {
 		for _, outcome := range outcomes {
 			for _, family := range []string{extenderActivationFamilyIpv4, extenderActivationFamilyIpv6} {
@@ -74,7 +76,7 @@ func TestExtenderActivationMetricsAreFixedCardinality(t *testing.T) {
 		}
 	}
 	// the cells above are the ones that already existed
-	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 33)
+	connect.AssertEqual(t, testutil.CollectAndCount(metrics.activations), 39)
 }
 
 // One activation is counted once, where it ended, and each step it probed is

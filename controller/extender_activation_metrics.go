@@ -43,6 +43,11 @@ const (
 	// through it, which is also where a forward on the other family ends
 	extenderActivationStageTcp     = "tcp"
 	extenderActivationStageForward = "forward"
+	// the peer-to-peer webrtc test (C2a, connect/EXTENDER.md S8): the one
+	// dial over the carrier, whose challenge and forward are one step. An
+	// activation that offered both required paths and failed both ends here,
+	// the last of its required steps; the step histogram has both.
+	extenderActivationStageWebRtc = "webrtc"
 	// the required test passed, and the activation was stored, or storing or
 	// signing it failed
 	extenderActivationStageStore = "store"
@@ -104,6 +109,11 @@ var extenderActivationStageOutcomes = map[string][]string{
 		extenderActivationOutcomeTimeout,
 		extenderActivationOutcomeOtherFamily,
 	},
+	extenderActivationStageWebRtc: {
+		extenderActivationOutcomeError,
+		extenderActivationOutcomeTimeout,
+		extenderActivationOutcomeOtherFamily,
+	},
 	extenderActivationStageStore: {
 		extenderActivationOutcomeActivated,
 		extenderActivationOutcomeError,
@@ -114,6 +124,7 @@ var extenderActivationStageOutcomes = map[string][]string{
 var extenderProbeStepNames = []string{
 	connect.ExtenderCarrierTcp,
 	extenderProbeStepForward,
+	connect.ExtenderCarrierWebRtc,
 	connect.ExtenderCarrierDns,
 	connect.ExtenderCarrierQuic,
 }
@@ -137,12 +148,12 @@ func newExtenderActivationMetrics(registerer prometheus.Registerer) *extenderAct
 				"Stages: request, refused before any budget was spent; config, the operator's extender configuration is unusable; owner, the key is registered to another network; " +
 				"busy, the api was too busy to take it before any budget was spent (probes, it was probing as many activations as it takes at once; budget_lock, other spends held a budget past the lock bound); " +
 				"budget, an activation budget refused it, the outcome naming which (client, address, proven_address -- a key's own at the address it was proved at -- or account); " +
-				"tcp and forward, the required test, which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); " +
+				"tcp and forward, the required test over public tcp, and webrtc, the required test over the peer-to-peer webrtc carrier, each of which fails on its own (error), runs out of the 10 s probe budget (timeout), or forwards on the other family (other_family); an activation that failed both required paths ends at webrtc; " +
 				"store, activated, or storing the passed activation failed.",
 		}, []string{"stage", "outcome", "family"}),
 		stepSeconds: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name: "urnetwork_extender_activation_step_seconds",
-			Help: "How long each probe step of an extender activation ran, by step (tcp challenge, forward, each dns port, quic) and outcome (ok; error, failed on its own; timeout, its budget ran out first). " +
+			Help: "How long each probe step of an extender activation ran, by step (tcp challenge, forward, the webrtc dial with its forward, each dns port, quic) and outcome (ok; error, failed on its own; timeout, its budget ran out first). " +
 				"The steps share one 10 s probe budget and a dns port has 3 s of its own, so the buckets end at 10 s.",
 			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 3, 4, 6, 8, 10},
 		}, []string{"step", "outcome"}),
@@ -199,6 +210,7 @@ func extenderActivationRefusalOutcome(stage string, stageOutcome string) string 
 		return extenderActivationOutcomeError
 	case extenderActivationStageTcp,
 		extenderActivationStageForward,
+		extenderActivationStageWebRtc,
 		extenderActivationStageBusy,
 		extenderActivationStageBudget:
 		return stageOutcome
