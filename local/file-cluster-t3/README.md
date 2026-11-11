@@ -25,6 +25,7 @@ The hooked build never ships: a production cluster runs the same commit's releas
 FS-114 cases and so does not pass alone. `settle_passed_build` is recorded once this T3 run and the cluster's own run
 agree on the build (plan-EVSB-settle-gate).
 
-meta-2, the one-process cluster, fails the suite on the fork's build of 2026-11-11: a DELETE past its deadline is
-taken, and the stash sweep dereferences a lock server a one-process set never registers and exits. It names no
+meta-2, the one-process cluster, fails on the fork's build of 2026-11-11: some minutes after any DELETE its stash
+sweep dereferences a lock server a one-process set never registers and the process exits, and in one run of three it
+took a DELETE past its deadline. It names no
 build, which is the gate failing closed, and its FS-114 cases need two hosts, so it never passes alone.
