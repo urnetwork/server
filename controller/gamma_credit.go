@@ -101,6 +101,12 @@ func gammaCreditIntentInTx(
 		if intent.TermStartTime != nil && intent.TermStartTime.Before(now.Add(gammaRenewLead)) {
 			// a renewal continues the paid term
 			start = *intent.TermStartTime
+			// where Pro paid elsewhere ran past it (and has ended: the biller
+			// charges nothing while it runs), the new term starts after it,
+			// so no day is paid for twice
+			if coverEnd := model.GetGammaProCoverEndInTx(tx, ctx, networkId, start, &start); coverEnd.After(start) && !coverEnd.After(now) {
+				start = coverEnd
+			}
 		}
 		endTime := start.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
 		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{

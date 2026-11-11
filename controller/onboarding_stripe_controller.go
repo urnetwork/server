@@ -595,11 +595,47 @@ func stripeNewSubscriptionRefusal(clientSession *session.ClientSession, customer
 		}
 		return stripeAlreadySubscribedMessage
 	}
-	if stripeLastWindowSubscriptionBilling(ctx, networkId) {
+	if stripeNetworkSubscriptionBills(ctx, networkId, customerId) {
 		return stripeAlreadySubscribedMessage
 	}
+	return ""
+}
+
+// stripeNetworkHasBillingSubscription is stripeNetworkSubscriptionBills for
+// a check outside a card purchase (a gamma Pro purchase, gamma's renewal
+// switch): it asks Stripe only when the network has a Stripe customer or a
+// Stripe window, and sets stripe.Key itself before it lists the customer's
+// subscriptions.
+func stripeNetworkHasBillingSubscription(clientSession *session.ClientSession) bool {
+	ctx := clientSession.Ctx
+	networkId := clientSession.ByJwt.NetworkId
+	customerId := ""
+	if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
+		customerId = *existing
+	}
+	if customerId == "" && model.GetLastSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter, model.SubscriptionMarketStripe) == nil {
+		// nothing at Stripe to ask about
+		return false
+	}
+	if customerId != "" {
+		// the customer's subscription list goes through stripe-go
+		stripe.Key = stripeApiToken()
+	}
+	return stripeNetworkSubscriptionBills(ctx, networkId, customerId)
+}
+
+// stripeNetworkSubscriptionBills reports whether Stripe still bills, or is
+// about to bill, a subscription of the network that its recorded windows may
+// not show: the subscription behind its last Stripe window, or a live
+// subscription of its customer (customerId "" for none), which covers a
+// payment made before its webhook landed. A Stripe error counts as not
+// billing. stripe.Key must be set.
+func stripeNetworkSubscriptionBills(ctx context.Context, networkId server.Id, customerId string) bool {
+	if stripeLastWindowSubscriptionBilling(ctx, networkId) {
+		return true
+	}
 	if customerId == "" {
-		return ""
+		return false
 	}
 	iter := subscription.List(&stripe.SubscriptionListParams{
 		Customer: stripe.String(customerId),
@@ -607,13 +643,13 @@ func stripeNewSubscriptionRefusal(clientSession *session.ClientSession, customer
 	})
 	for iter.Next() {
 		if stripeSubscriptionBlocksNewPurchase(iter.Subscription()) {
-			return stripeAlreadySubscribedMessage
+			return true
 		}
 	}
 	if err := iter.Err(); err != nil {
 		glog.Infof("[stripe]could not list subscriptions for customer %s: %s\n", customerId, err)
 	}
-	return ""
+	return false
 }
 
 // Whether Stripe still bills the subscription behind the network's last Stripe
