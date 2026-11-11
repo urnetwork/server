@@ -11408,4 +11408,17 @@ var migrations = []any{
 
 	// One approved host-admission replacement; original clocks stay append-only.
 	newSqlMigration(CompetitionExecutorQualificationRecoveryMigrationSql()),
+
+	// The distribution each network's onboarding platform came with
+	// (mmm/ONBOARDING-RETENTION.md P6): what the app reported in
+	// X-UR-ClientInfo at sign-up or when its device authenticated, which tells
+	// the App Store Mac from the direct-download Mac. A constant default: a
+	// catalog change, no table rewrite, under a five-second lock bound. Old
+	// binaries name their columns, so they neither read nor write it. Apply
+	// before deploying the api, alt and taskworker that use it.
+	newSqlMigration(`
+		SET LOCAL lock_timeout = '5s';
+		ALTER TABLE network_onboarding
+			ADD COLUMN distribution varchar(32) NOT NULL DEFAULT ''
+	`),
 }
