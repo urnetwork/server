@@ -73,14 +73,29 @@ func (self *cryptoUsdcMemoless) send(t testing.TB, ctx context.Context) {
 	connect.AssertEqual(t, recorded.Reason, model.SolanaUnfulfilledReasonNoIntent)
 }
 
-// the network's Pro balances
+// the network's paid periods' own Pro balances: no grant kind, and no data (the
+// period's cycle grants, kind pro, hold it)
 func cryptoUsdcProBalances(ctx context.Context, networkId server.Id) []*model.TransferBalance {
 	balances := []*model.TransferBalance{}
-	for _, balance := range model.GetActiveTransferBalances(ctx, networkId) {
-		if balance.Pro {
-			balances = append(balances, balance)
-		}
-	}
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT balance_id, start_time, end_time, start_balance_byte_count
+				FROM transfer_balance
+				WHERE network_id = $1 AND pro AND grant_kind IS NULL AND start_time <= $2 AND $2 < end_time
+			`,
+			networkId,
+			server.NowUtc(),
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				balance := &model.TransferBalance{NetworkId: networkId, Pro: true}
+				server.Raise(result.Scan(&balance.BalanceId, &balance.StartTime, &balance.EndTime, &balance.StartBalanceByteCount))
+				balances = append(balances, balance)
+			}
+		})
+	})
 	return balances
 }
 
@@ -244,9 +259,10 @@ func TestCryptoOperatorUsdcCreditCreditsAnOverpaidMemolessPaymentOnce(t *testing
 		connect.AssertEqual(t, committed.Digest, plan.Digest)
 		cryptoUsdcCreditedOnce(t, ctx, fixture)
 
-		// a year of Pro with the plan's balance, valued at the price
+		// a year of Pro with the plan's balance, valued at the price; its data
+		// is the year's monthly cycle grants
 		pro := cryptoUsdcProBalances(ctx, fixture.networkId)[0]
-		connect.AssertEqual(t, pro.StartBalanceByteCount, RefreshSupporterTransferBalance)
+		connect.AssertEqual(t, pro.StartBalanceByteCount, SupporterPeriodTransferBalance)
 		connect.AssertEqual(t, pro.EndTime.Sub(pro.StartTime), solanaPlanDuration(model.SolanaPlanYearly)+manualPaymentGracePeriod)
 		connect.AssertEqual(t, !pro.StartTime.Before(before.Add(-time.Second)), true)
 		var subsidyRevenue model.NanoCents

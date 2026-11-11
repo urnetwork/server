@@ -11428,6 +11428,12 @@ var migrations = []any{
 	// reader uses it. Apply before deploying the taskworker that scans Bitcoin.
 	cryptoScanChainMigration,
 
+	// Per-cycle Pro grants (db_pro_grant_cycle.go, PRO-GRANT-CYCLE.md): a
+	// nullable column on subscription_renewal and one new empty table, under
+	// a five-second lock bound. Nothing existing is rewritten. Apply before
+	// deploying the api, alt and taskworker that write paid_end_time.
+	proGrantCycleMigration,
+
 	// The HTTP/3 place evidence (db_provider_egress_h3_place.go,
 	// model/provider_egress_h3_place.go): one new empty table, under a
 	// five-second lock bound, created only when absent. Nothing existing is

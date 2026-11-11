@@ -49,11 +49,11 @@ func TestGrantWritersRecordGrantKind(t *testing.T) {
 		referralCode := CreateNetworkReferralCode(ctx, referrerNetworkId)
 		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, refereeNetworkId, referralCode.ReferralCode), nil)
 
-		// the three grant tasks
+		// the three grant tasks; the Pro grant is the network's cycle grant
 		freeStartTime, freeEndTime := FreeGrantWindow(now)
 		AddFreeTransferBalanceToAllNetworks(ctx, freeStartTime, freeEndTime, 1*Gib)
-		proStartTime, proEndTime := ProGrantWindow(now)
-		AddProTransferBalanceToAllNetworks(ctx, proStartTime, proEndTime, 4*Gib)
+		config.Pro.Data = 4 * Gib
+		grantDueProCycles(ctx, now)
 		referralStartTime, referralEndTime := ReferralGrantWindow(now)
 		AddReferralBonusesToAllNetworks(ctx, referralStartTime, referralEndTime, 2*Gib, 3*Gib)
 

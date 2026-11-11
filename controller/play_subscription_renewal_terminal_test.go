@@ -1116,6 +1116,7 @@ func TestPlaySubscriptionRenewalPostInGraceKeepsPollingWithoutANotice(t *testing
 // when its expiry falls inside the hold's window.
 func TestPlaySubscriptionRenewalRecoveryAfterGraceCredits(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		setProCycleTestData(t, 10*model.Tib)
 		fixture := newPlayGraceFixture(t, "gracerecovers")
 		ctx := fixture.ctx
 		if _, err := PlaySubscriptionRenewal(fixture.args(), fixture.clientSession); err != nil {
@@ -1136,8 +1137,8 @@ func TestPlaySubscriptionRenewalRecoveryAfterGraceCredits(t *testing.T) {
 		for _, row := range fixture.proRows() {
 			credited += row.startByteCount
 		}
-		if credited != int64(RefreshSupporterTransferBalance) {
-			t.Fatalf("credited %d bytes, want one period's %d", credited, RefreshSupporterTransferBalance)
+		if credited != int64(10*model.Tib) {
+			t.Fatalf("credited %d bytes, want one cycle's full grant %d", credited, 10*model.Tib)
 		}
 
 		// and a redelivery of the same state does not credit again

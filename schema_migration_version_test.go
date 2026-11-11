@@ -19,6 +19,7 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"extender activation run", extenderActivationRunSchemaSql, ExtenderActivationRunSchemaMigrationVersion},
 		{"extender measurement api probes", networkExtenderMeasurementProbeSchemaSql, NetworkExtenderMeasurementProbeSchemaMigrationVersion},
 		{"onboarding platform distribution", networkOnboardingDistributionSql, NetworkOnboardingDistributionMigrationVersion},
+		{"per-cycle Pro grants", ProGrantCycleSql, ProGrantCycleVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {

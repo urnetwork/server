@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -786,15 +787,22 @@ func RestoreDisputedStripeEntitlementInTx(
 		return nil, nil
 	}
 
+	// the period's balance, matched by its cut window; a Pro cycle grant has
+	// its own window and comes back with its cycle, below
 	balanceIds := []server.Id{}
 	result, err = tx.Query(
 		ctx,
 		`
-		SELECT balance_id FROM transfer_balance
+		SELECT balance_id FROM transfer_balance AS balance
 		WHERE network_id = $1
 		  AND pro
 		  AND start_time = $2
 		  AND end_time = $3
+		  AND NOT EXISTS (
+			SELECT 1 FROM pro_grant_cycle AS cycle
+			WHERE cycle.network_id = balance.network_id
+			  AND cycle.balance_id = balance.balance_id
+		  )
 		`,
 		networkId,
 		startTime,
@@ -807,7 +815,30 @@ func RestoreDisputedStripeEntitlementInTx(
 			balanceIds = append(balanceIds, balanceId)
 		}
 	})
-	admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, balanceIds)
+	// the Pro cycle the clawback ended with the period
+	// (endReconciledEntitlementInTx), whose grant comes back to its cycle's end
+	cycleBalanceIds := []server.Id{}
+	result, err = tx.Query(
+		ctx,
+		`
+		SELECT cycle.balance_id
+		FROM pro_grant_cycle AS cycle
+		INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
+		WHERE cycle.network_id = $1
+		  AND cycle.ended_time IS NOT NULL
+		  AND balance.end_time = $2
+		`,
+		networkId,
+		cutTime,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			var balanceId server.Id
+			server.Raise(result.Scan(&balanceId))
+			cycleBalanceIds = append(cycleBalanceIds, balanceId)
+		}
+	})
+	admitted, ownershipErr := tryTransferBalanceOwnershipInTx(ctx, tx, append(slices.Clone(balanceIds), cycleBalanceIds...))
 	server.Raise(ownershipErr)
 	if !admitted {
 		server.Raise(errTransferBalanceOwnershipBusy)
@@ -842,6 +873,26 @@ func RestoreDisputedStripeEntitlementInTx(
 		endTime,
 		balanceIds,
 		cutTime,
+	))
+	server.RaisePgResult(tx.Exec(
+		ctx,
+		`
+		WITH restored AS (
+			UPDATE pro_grant_cycle AS cycle SET ended_time = NULL
+			WHERE cycle.network_id = $1
+			  AND cycle.balance_id = ANY($2::uuid[])
+			  AND cycle.ended_time IS NOT NULL
+			RETURNING cycle.balance_id, cycle.cycle_end_time
+		)
+		UPDATE transfer_balance AS balance SET end_time = restored.cycle_end_time + $4::interval
+		FROM restored
+		WHERE balance.balance_id = restored.balance_id
+		  AND balance.end_time = $3
+		`,
+		networkId,
+		cycleBalanceIds,
+		cutTime,
+		fmt.Sprintf("%d seconds", int64(ProGrantGrace/time.Second)),
 	))
 	return &ReconcileSubscriptionRenewal{
 		NetworkId:     networkId,
@@ -1030,10 +1081,13 @@ func EndReconciledEntitlementForNetworkPurchaseTokenInConn(connOwner server.PgCo
 // retroactively -- the market's active supporter renewals matching the scope
 // (networkId nil-able; transactionIds nil = no transaction filter;
 // purchaseToken "" = no token filter) and the pro transfer balances those
-// renewals granted, matched per network by identical window end. Naturally
-// idempotent: every predicate requires end_time > now, so a second delivery
-// of the same refund/revocation finds nothing left to end. Returns the
-// distinct networks whose entitlement was ended.
+// renewals granted, matched per network by identical window end. A network the
+// ending leaves with no supporter renewal open also loses its Pro cycle grant,
+// ended now with its cycle (ended_time), so a refund takes back the cycle's data
+// as it took back the period's balance. Naturally idempotent:
+// every predicate requires end_time > now, so a second delivery of the same
+// refund/revocation finds nothing left to end. Returns the distinct networks
+// whose entitlement was ended.
 func endReconciledEntitlementInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -1043,6 +1097,11 @@ func endReconciledEntitlementInTx(
 	purchaseToken string,
 	now time.Time,
 ) []server.Id {
+	// The period balances the ended renewals granted, matched by window end, and
+	// the running Pro cycle grant (pro_grant_cycle_model.go) of each network the
+	// ending leaves with no supporter renewal open. A cycle's grant has its own
+	// window, so it is never matched by end: a network still paying through
+	// another subscription keeps its cycle's grant.
 	balanceIds := []server.Id{}
 	result, queryErr := tx.Query(
 		ctx,
@@ -1060,6 +1119,38 @@ func endReconciledEntitlementInTx(
 			  AND ($6::varchar = '' OR renewal.purchase_token = $6)
 			  AND renewal.network_id = balance.network_id
 			  AND renewal.end_time = balance.end_time
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM pro_grant_cycle AS cycle
+			WHERE cycle.network_id = balance.network_id
+			  AND cycle.balance_id = balance.balance_id
+		  )
+		UNION
+		SELECT cycle.balance_id
+		FROM pro_grant_cycle AS cycle
+		INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
+		WHERE cycle.ended_time IS NULL
+		  AND balance.end_time > $3
+		  AND EXISTS (
+			SELECT 1 FROM subscription_renewal AS renewal
+			WHERE renewal.subscription_type = $1
+			  AND renewal.market = $2
+			  AND renewal.end_time > $3
+			  AND ($4::uuid IS NULL OR renewal.network_id = $4)
+			  AND ($5::varchar[] IS NULL OR renewal.transaction_id = ANY($5))
+			  AND ($6::varchar = '' OR renewal.purchase_token = $6)
+			  AND renewal.network_id = cycle.network_id
+		  )
+		  AND NOT EXISTS (
+			SELECT 1 FROM subscription_renewal AS other
+			WHERE other.network_id = cycle.network_id
+			  AND other.subscription_type = $1
+			  AND other.start_time <= $3
+			  AND $3 < `+proRenewalOpenEndSql("other")+`
+			  AND (other.market = $2
+				AND other.end_time > $3
+				AND ($5::varchar[] IS NULL OR other.transaction_id = ANY($5))
+				AND ($6::varchar = '' OR other.purchase_token = $6)) IS NOT TRUE
 		  )
 		`,
 		SubscriptionTypeSupporter,
@@ -1105,9 +1196,34 @@ func endReconciledEntitlementInTx(
 			  AND EXISTS (SELECT 1 FROM renewals
 				WHERE renewals.network_id = balance.network_id
 				  AND renewals.end_time = balance.end_time)
+			  AND NOT EXISTS (
+				SELECT 1 FROM pro_grant_cycle AS cycle
+				WHERE cycle.network_id = balance.network_id
+				  AND cycle.balance_id = balance.balance_id
+			  )
+		), cycle_grants AS MATERIALIZED (
+			SELECT cycle.network_id, cycle.cycle_start_time, cycle.balance_id
+			FROM pro_grant_cycle AS cycle
+			INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
+			WHERE cycle.ended_time IS NULL
+			  AND balance.end_time > $3
+			  AND cycle.network_id IN (SELECT network_id FROM renewals)
+			  AND NOT EXISTS (
+				SELECT 1 FROM subscription_renewal AS other
+				WHERE other.network_id = cycle.network_id
+				  AND other.subscription_type = $1
+				  AND other.start_time <= $3
+				  AND $3 < `+proRenewalOpenEndSql("other")+`
+				  AND (other.market = $2
+					AND other.end_time > $3
+					AND ($5::varchar[] IS NULL OR other.transaction_id = ANY($5))
+					AND ($6::varchar = '' OR other.purchase_token = $6)) IS NOT TRUE
+			  )
 		), ownership AS MATERIALIZED (
 			SELECT NOT EXISTS (
 				SELECT 1 FROM grants WHERE NOT (balance_id = ANY($7::uuid[]))
+				UNION ALL
+				SELECT 1 FROM cycle_grants WHERE NOT (balance_id = ANY($7::uuid[]))
 			) AS admitted
 		), ended_renewals AS (
 			UPDATE subscription_renewal AS renewal SET end_time = $3
@@ -1133,6 +1249,23 @@ func endReconciledEntitlementInTx(
 			  AND ($6::varchar = '' OR balance.purchase_token = $6)
 			  AND (SELECT admitted FROM ownership)
 			RETURNING balance.balance_id
+		), ended_cycle_balances AS (
+			UPDATE transfer_balance AS balance SET end_time = $3
+			FROM cycle_grants
+			WHERE balance.balance_id = cycle_grants.balance_id
+			  AND balance.balance_id = ANY($7::uuid[])
+			  AND balance.pro AND balance.end_time > $3
+			  AND (SELECT admitted FROM ownership)
+			RETURNING balance.balance_id
+		), ended_cycles AS (
+			-- a cycle already past its end, in its grant's grace, keeps its end
+			UPDATE pro_grant_cycle AS cycle SET ended_time = LEAST($3, cycle.cycle_end_time)
+			FROM cycle_grants
+			WHERE cycle.network_id = cycle_grants.network_id
+			  AND cycle.cycle_start_time = cycle_grants.cycle_start_time
+			  AND cycle.ended_time IS NULL
+			  AND (SELECT admitted FROM ownership)
+			RETURNING cycle.network_id
 		)
 		SELECT admitted, ARRAY(SELECT DISTINCT network_id FROM ended_renewals)
 		FROM ownership
