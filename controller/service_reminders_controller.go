@@ -9,20 +9,28 @@ package controller
 //   - Pro paid in crypto (USDC, Monero, Zcash) is a one-time payment that never
 //     renews: without a reminder every crypto subscriber lapses by default. A
 //     notice 14 days and 2 days before Pro stops, inside the 30-day grace.
-//   - A free trial ends in a charge: the offer screen promises "a reminder
-//     before the charge" (store key offer_timeline_reminder;
+//   - A free trial ends in a charge: the offer screen and ur.io promise "a
+//     reminder before the charge" (store key offer_timeline_reminder;
 //     mmm/onboarding/REVIEW.md finding 6). A notice 2 days before an App Store
 //     or Play trial (purchase.completed{trial}) ends, unless its outcome is
-//     already recorded. Stripe sends its own when its dashboard setting is on;
-//     service_reminders.trial_ending_stores can add it.
+//     already recorded. A Stripe trial (the web's card checkout and the
+//     desktop apps') gets its notice when Stripe posts
+//     customer.subscription.trial_will_end, 3 days before the trial ends:
+//     the web sends no purchase.completed for a card purchase, so the daily
+//     task never saw those trials, and nobody could confirm Stripe's own
+//     dashboard reminder (mmm/ONBOARDING-RETENTION.md P4). Each store gets
+//     the notice when service_reminders.trial_ending_stores names it.
 //
-// A daily task finds them and adds one outbox message per window and notice;
-// the outbox key makes a replayed run add nothing. Both kinds are off until
+// A daily task finds the crypto years and the store trials and adds one
+// outbox message per window and notice; the outbox key makes a replayed run
+// (or a replayed Stripe event) add nothing. Both kinds are off until
 // reengagement.yml `service_reminders` turns them on; off, the task counts.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -147,6 +155,110 @@ func (self *TrialEndingTemplate) CancelShort() string {
 	}
 }
 
+// NoticeWhen is how long before the trial's end the notice goes, for the
+// footer's "why" line: the daily task's 2 days for a store trial, Stripe's
+// trial_will_end 3 days for a Stripe trial.
+func (self *TrialEndingTemplate) NoticeWhen() string {
+	if self.Stripe() {
+		return "three days"
+	}
+	return "two days"
+}
+
+// ----- the Stripe trial notice -----
+
+// stripeTrialWillEndSubscription is the customer.subscription.trial_will_end
+// payload's fields the notice needs.
+type stripeTrialWillEndSubscription struct {
+	Id                   string            `json:"id"`
+	Status               string            `json:"status"`
+	TrialEnd             int64             `json:"trial_end"`
+	CancelAtPeriodEnd    bool              `json:"cancel_at_period_end"`
+	Metadata             map[string]string `json:"metadata"`
+	DefaultPaymentMethod json.RawMessage   `json:"default_payment_method"`
+}
+
+// stripeTrialEndingMinLead is how far ahead a trial's end must be for its
+// notice: Stripe also posts trial_will_end when a trial is ended at once
+// (trial_end=now), and "ends on" a date already reached would be no notice.
+const stripeTrialEndingMinLead = 24 * time.Hour
+
+// stripeTrialEndingNotice is the trial-ending notice a trial_will_end payload
+// calls for: the network and the trial's end, or ok false when no charge is
+// coming. A trial the customer already cancelled (cancel_at_period_end), a
+// subscription that is no longer trialing, a payment sheet the customer
+// abandoned before adding a card (canceled and replaced, never charged), a
+// trial that ends within stripeTrialEndingMinLead and a subscription with no
+// network get none.
+func stripeTrialEndingNotice(sub *stripeTrialWillEndSubscription, now time.Time) (networkId server.Id, endTime time.Time, ok bool) {
+	if sub == nil || sub.Id == "" || sub.Status != "trialing" || sub.CancelAtPeriodEnd || sub.TrialEnd <= 0 {
+		return
+	}
+	if sub.Metadata[stripeMetadataPaymentSheet] == stripePaymentSheetPending && stripeIdFromRaw(sub.DefaultPaymentMethod) == "" {
+		return
+	}
+	endTime = time.Unix(sub.TrialEnd, 0).UTC()
+	if endTime.Before(now.Add(stripeTrialEndingMinLead)) {
+		return
+	}
+	networkId, err := server.ParseId(sub.Metadata[stripeMetadataNetworkId])
+	if err != nil {
+		return
+	}
+	return networkId, endTime, true
+}
+
+// stripeTrialEndingKey is the outbox key of a Stripe trial's notice: one per
+// subscription, so a replayed event adds nothing.
+func stripeTrialEndingKey(networkId server.Id, subscriptionId string) string {
+	return fmt.Sprintf("trial_ending/%s/stripe/%s", networkId, subscriptionId)
+}
+
+// trialEndingStoreEnabled is whether service_reminders sends the trial-ending
+// notice for a store's trials.
+func trialEndingStoreEnabled(cfg model.ReengagementServiceRemindersConfig, store string) bool {
+	return cfg.TrialEnding && slices.Contains(cfg.EffectiveTrialEndingStores(), store)
+}
+
+// clientRecordedTrialStores are the configured stores whose trials the daily
+// task finds through the app's purchase.completed{trial}. Stripe's are not
+// among them: its trial_will_end decides those (an app's Stripe trial would
+// otherwise get a second notice).
+func clientRecordedTrialStores(stores []string) []string {
+	out := []string{}
+	for _, store := range stores {
+		if store != model.OnboardingStoreStripe {
+			out = append(out, store)
+		}
+	}
+	return out
+}
+
+// stripeHandleSubscriptionTrialWillEnd queues the trial-ending notice when
+// Stripe says a trial ends in three days. Always 200: the webhook endpoint
+// takes every event type, and a refusal would make Stripe retry and in the
+// end disable it.
+func stripeHandleSubscriptionTrialWillEnd(object json.RawMessage, clientSession *session.ClientSession) (*StripeWebhookResult, error) {
+	var sub stripeTrialWillEndSubscription
+	if err := json.Unmarshal(object, &sub); err != nil {
+		glog.Warningf("[service_reminders]could not parse a trial_will_end subscription: %s\n", err)
+		return &StripeWebhookResult{}, nil
+	}
+	cfg := model.Reengagement().ServiceReminders
+	if !trialEndingStoreEnabled(cfg, model.OnboardingStoreStripe) {
+		return &StripeWebhookResult{}, nil
+	}
+	networkId, endTime, ok := stripeTrialEndingNotice(&sub, server.NowUtc())
+	if !ok {
+		return &StripeWebhookResult{}, nil
+	}
+	template := &TrialEndingTemplate{EndTime: endTime, Store: model.OnboardingStoreStripe}
+	if addServiceReminder(clientSession.Ctx, networkId, stripeTrialEndingKey(networkId, sub.Id), template) {
+		glog.Infof("[service_reminders]trial ending on stripe for network %s (subscription %s, ends %s)\n", networkId, sub.Id, endTime.Format(time.RFC3339))
+	}
+	return &StripeWebhookResult{}, nil
+}
+
 // ----- the daily task -----
 
 // The markets whose Pro is a one-time crypto payment.
@@ -238,7 +350,9 @@ func ServiceReminders(args *ServiceRemindersArgs, clientSession *session.ClientS
 		// a trial that already ended gets no "ends on" notice
 		startedFrom = now.Add(-onboarding.TrialLength)
 	}
-	stores := cfg.ServiceReminders.EffectiveTrialEndingStores()
+	// Stripe's trials get their notice from trial_will_end
+	// (stripeHandleSubscriptionTrialWillEnd), not from here
+	stores := clientRecordedTrialStores(cfg.ServiceReminders.EffectiveTrialEndingStores())
 	for _, trial := range model.ListOpenStoreTrialsStarted(ctx, startedFrom, startedTo, stores, 5000) {
 		endTime := trial.StartedAt.Add(onboarding.TrialLength)
 		template := &TrialEndingTemplate{EndTime: endTime, Store: trial.Store}
