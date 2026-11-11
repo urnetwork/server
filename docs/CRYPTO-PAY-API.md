@@ -96,8 +96,25 @@ invoice and a re-quote agree; the rate part is judged from the cached answers al
 rate source. A coin that is listed can still be refused at the intent for a reason the list does not judge (rates
 nobody asked lately, too many open invoices): clients keep handling `asset_unavailable` there.
 
-A crypto_pay.yml that leaves out TAO, Bitcoin, ETH or SOL switches the coin on with every plan and item: it is sold
-once its backend is configured and healthy. A file that names a coin keeps its own `enabled`, the kill switch.
+TAO, Bitcoin, ETH and SOL are switched on by their entry in `config/<env>/crypto_pay.yml`, as Zcash and Monero
+are. Until the file names a coin, the coin is dormant whatever the vault holds: it is in neither list (nor the
+balance's), a quote or an invoice is refused, and its scanner, address refill and reconcile legs return before any
+chain, Coinbase or Finney call. The entry needs only what the coin sells; the coin's own defaults do the rest:
+
+```yaml
+crypto_pay:
+  assets:
+    btc:
+      enabled: true
+      plans: [yearly, yearly_onboarding]
+      items: [data_1tib, data_10tib]
+```
+
+Then the coin is sold once its backend is configured and healthy (the reasons above). `enabled: false` is the kill
+switch: it stops new invoices and re-quotes, while the coin's open invoices are still scanned and credited. A
+process reads crypto_pay.yml when it starts, so api, alt and taskworker are restarted after the config release.
+The order of a coin's launch: ur.io's widget update first, then the config release with the coin's entry, and for
+TAO the first scan only while the SN25 validator's deploy gate allows it.
 
 ## Additions to GET /subscription/balance (`SubscriptionBalanceResult`)
 
