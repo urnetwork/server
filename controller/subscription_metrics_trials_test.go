@@ -38,15 +38,18 @@ func TestSubscriptionMetricsCollectorPublishesActiveTrials(t *testing.T) {
 		{model.SubscriptionMarketApple, model.PlanYearly, 0},
 		{model.SubscriptionMarketApple, model.PlanMonthly, 0},
 		{model.SubscriptionMarketSolana, model.SubscriptionMetricsPlanUnknown, 0},
+		// the crypto rail and gamma sell no trial: a known zero
+		{model.SubscriptionMarketBittensor, model.PlanYearly, 0},
+		{model.SubscriptionMarketGamma, model.PlanYearly, 0},
 	} {
 		got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_trials_active", map[string]string{"store": c.store, "plan": c.plan})
 		if got != c.want {
 			t.Errorf("trials %s/%s = %v, want %v", c.store, c.plan, got, c.want)
 		}
 	}
-	// nine tracked stores plus the deduplicated total, by yearly, monthly and
+	// ten tracked stores plus the deduplicated total, by yearly, monthly and
 	// unknown plans
-	if got := len(metricFamilies["urnetwork_subscription_trials_active"].Metric); got != 30 {
-		t.Errorf("trial series = %d, want 10 stores x 3 plans", got)
+	if got := len(metricFamilies["urnetwork_subscription_trials_active"].Metric); got != 33 {
+		t.Errorf("trial series = %d, want 11 stores x 3 plans", got)
 	}
 }
