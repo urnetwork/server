@@ -33,8 +33,8 @@ func TestWorkloadsRunLedgerV2Steps(t *testing.T) {
 
 // sn CAPTURETHEFLAG.md §11.2 (wiring): both workloads run the capture the
 // flag driver's step task, which plans nothing until st.yml turns it on.
-func TestWorkloadsRunCtfSteps(t *testing.T) {
-	target := task.NewTaskTarget(work.StCtfStep).TargetFunctionName()
+func TestWorkloadsRunCtfDriverSteps(t *testing.T) {
+	target := task.NewTaskTarget(work.StCtfDriverStep).TargetFunctionName()
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
 		worker, err := InitTaskWorkerForProfile(context.Background(), task.DefaultTaskWorkerSettings(), profile)
 		if err != nil {

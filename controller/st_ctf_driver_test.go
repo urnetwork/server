@@ -73,7 +73,7 @@ func TestStCtfDriverRunsAnEpochInOrder(t *testing.T) {
 	f.emission(8, 1_000_000_000_000)
 	f.chain.head = f.chain.end(8)
 
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "census 8")
 	if census := f.chain.census[8]; census.hash != f.census[8].Hash || census.block != f.chain.end(8)+1 {
 		t.Fatalf("committed %x at %d", census.hash, census.block)
@@ -85,7 +85,7 @@ func TestStCtfDriverRunsAnEpochInOrder(t *testing.T) {
 		}
 	}
 
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "close 8", "commit 8 prev 0")
 	result := f.verify(nil)
 	requireCtfAudit(t, result)
@@ -111,21 +111,21 @@ func TestStCtfDriverIsIdempotent(t *testing.T) {
 	f.emission(8, 1_000_000_000_000)
 	f.chain.head = f.chain.end(8)
 
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusConfirmed, false, "")
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusSkipped, false, "is committed at block")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, false, "is committed at block")
 	requireCtfLog(t, f.takeLog(), "census 8")
 
 	// a commit that fails after the publish: the retry builds the same root
 	f.chain.failNext("commit", errors.New("connection reset"))
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusFailed, true, "connection reset")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusFailed, true, "connection reset")
 	requireCtfLog(t, f.takeLog(), "close 8", "commit 8 prev 0")
 	fixed := f.records.fixed[8].ProviderChunks
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "commit 8 prev 0")
 	if !slices.Equal(f.records.fixed[8].ProviderChunks, fixed) {
 		t.Fatal("the retry changed the fixed awards")
 	}
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusSkipped, false, "already committed")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusSkipped, false, "already committed")
 	requireCtfLog(t, f.takeLog())
 	requireCtfAudit(t, f.verify(nil))
 
@@ -133,7 +133,7 @@ func TestStCtfDriverIsIdempotent(t *testing.T) {
 	f.census[9] = ctfTestCensusOf(t, 9, ctfTestCandidates()[:3]...)
 	f.chain.head = f.chain.end(9)
 	f.chain.census[9] = fakeCtfCensus{hash: f.census[9].Hash, block: f.chain.end(9) + 3}
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 9), model.StPublishStatusSkipped, false, "is committed at block")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 9), model.StPublishStatusSkipped, false, "is committed at block")
 	requireCtfLog(t, f.takeLog())
 	requireCtfAlerts(t, f.alerts)
 }
@@ -148,26 +148,26 @@ func TestStCtfDriverCensusWindow(t *testing.T) {
 
 	// not built yet, inside the first quarter: wait, no alert
 	f.chain.head = end + 10
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusSkipped, true, "is not built yet")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, true, "is not built yet")
 	requireCtfAlerts(t, f.alerts)
 	// past a quarter: late
 	f.chain.head = end + 301
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusSkipped, true, "is not built yet")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, true, "is not built yet")
 	requireCtfAlerts(t, f.alerts, StCtfAlertCensusLate+" epoch 8")
 	// the latest block already at the window's end: held, never sent late
 	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
 	f.chain.latest = end + 600
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusSkipped, true, "the census window ends at block")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, true, "the census window ends at block")
 	requireCtfLog(t, f.takeLog())
 	// past the window: missed
 	f.chain.head = end + 601
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusMissed, false, "the census window closed")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusMissed, false, "the census window closed")
 	requireCtfLog(t, f.takeLog())
 	requireCtfAlerts(t, f.alerts, StCtfAlertCensusLate+" epoch 8", StCtfAlertCensusMissed+" epoch 8")
 
 	// the epoch has no draw, and its funding all carries
 	f.chain.latest = 0
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "close 8", "commit 8 prev 0")
 	result := f.verify(nil)
 	requireCtfAudit(t, result)
@@ -188,23 +188,23 @@ func TestStCtfDriverWaitsForTheCensusAndItsRound(t *testing.T) {
 	f.chain.head = end
 
 	// the census may still come: closed, not built
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusSkipped, true, "may be committed until block")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusSkipped, true, "may be committed until block")
 	requireCtfLog(t, f.takeLog(), "close 8")
 
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusConfirmed, false, "")
 	f.takeLog()
 	now := stCtfServerNow
 	t.Cleanup(func() { stCtfServerNow = now })
 	roundAt := stCtfRoundTime(1003)
 	stCtfServerNow = func() time.Time { return roundAt.Add(-time.Second) }
-	outcome := f.run(StCtfStepEpoch, 8)
+	outcome := f.run(StCtfDriverStepEpoch, 8)
 	requireLedgerV2Outcome(t, outcome, model.StPublishStatusSkipped, true, "drand round 1003")
 	if !outcome.RetryAt.After(roundAt) {
 		t.Fatalf("retry at %s, before the round at %s", outcome.RetryAt, roundAt)
 	}
 	requireCtfLog(t, f.takeLog())
 	stCtfServerNow = func() time.Time { return roundAt.Add(time.Second) }
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "commit 8 prev 0")
 	result := f.verify(nil)
 	requireCtfAudit(t, result)
@@ -221,25 +221,25 @@ func TestStCtfDriverRecyclesOnlyFinalRoots(t *testing.T) {
 	f.commitRound(8, 1000)
 	f.emission(8, 1_000_000_000_000)
 	f.chain.head = f.chain.end(8)
-	f.run(StCtfStepCensus, 8)
-	f.run(StCtfStepEpoch, 8)
+	f.run(StCtfDriverStepCensus, 8)
+	f.run(StCtfDriverStepEpoch, 8)
 	f.takeLog()
 
 	// pending, not final: nothing is sent
-	requireLedgerV2Outcome(t, f.runStep(&StCtfStep{Kind: StCtfStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "is not final")
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "is not final")
 	requireCtfLog(t, f.takeLog())
 
 	// final: the carry account is claimed and returned
 	f.chain.approvals = 1
 	f.chain.head += f.chain.challenge
-	requireLedgerV2Outcome(t, f.run(StCtfStepFinalize, 8), model.StPublishStatusConfirmed, false, "")
-	requireLedgerV2Outcome(t, f.runStep(&StCtfStep{Kind: StCtfStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepFinalize, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "finalize 8", "recycle root 0")
 	returned := f.chain.recycled[9]
 	if returned.IsZero() {
 		t.Fatal("nothing returned")
 	}
-	requireLedgerV2Outcome(t, f.runStep(&StCtfStep{Kind: StCtfStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "NothingToRecycle")
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "NothingToRecycle")
 	requireCtfLog(t, f.takeLog(), "recycle root 0")
 
 	// epoch 9 captures it with its emission and is matured
@@ -247,8 +247,8 @@ func TestStCtfDriverRecyclesOnlyFinalRoots(t *testing.T) {
 	f.commitRound(9, 1001)
 	f.emission(9, 1_000_000_000_000)
 	f.chain.head = f.chain.end(9)
-	f.run(StCtfStepCensus, 9)
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 9), model.StPublishStatusConfirmed, false, "")
+	f.run(StCtfDriverStepCensus, 9)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 9), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "census 9", "close 9", "commit 9 prev 1")
 	previous := f.chain.roots[0]
 	result := f.verify(&ledger.Root{Epoch: previous.Epoch, Root: previous.Root, Total: previous.Total, LeafCount: previous.LeafCount, LedgerHash: previous.LedgerHash})
@@ -268,11 +268,11 @@ func TestStCtfDriverPendingAwardsWhenTheCarryIsLate(t *testing.T) {
 	f.commitRound(8, 1000)
 	f.emission(8, 1_000_000_000_000)
 	f.chain.head = f.chain.end(8)
-	f.run(StCtfStepCensus, 8)
-	f.run(StCtfStepEpoch, 8)
+	f.run(StCtfDriverStepCensus, 8)
+	f.run(StCtfDriverStepEpoch, 8)
 	f.chain.approvals = 1
 	f.chain.head += f.chain.challenge
-	f.run(StCtfStepFinalize, 8)
+	f.run(StCtfDriverStepFinalize, 8)
 	f.takeLog()
 
 	// no recycle before epoch 9 closes
@@ -280,8 +280,8 @@ func TestStCtfDriverPendingAwardsWhenTheCarryIsLate(t *testing.T) {
 	f.commitRound(9, 1001)
 	f.emission(9, 1_000_000_000_000)
 	f.chain.head = f.chain.end(9)
-	f.run(StCtfStepCensus, 9)
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 9), model.StPublishStatusConfirmed, false, "")
+	f.run(StCtfDriverStepCensus, 9)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 9), model.StPublishStatusConfirmed, false, "")
 	previous := f.chain.roots[0]
 	result := f.verify(&ledger.Root{Epoch: previous.Epoch, Root: previous.Root, Total: previous.Total, LeafCount: previous.LeafCount, LedgerHash: previous.LedgerHash})
 	requireCtfAudit(t, result)
@@ -318,9 +318,9 @@ func TestStCtfDriverIsGated(t *testing.T) {
 	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
 	f.emission(8, 1_000_000_000_000)
 	f.chain.head = f.chain.end(8)
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusSkipped, false, "not in force for epoch 8")
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusSkipped, false, "not in force for epoch 8")
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 7), model.StPublishStatusSkipped, false, "is not an epoch of capture the flag pool")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, false, "not in force for epoch 8")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusSkipped, false, "not in force for epoch 8")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 7), model.StPublishStatusSkipped, false, "is not an epoch of capture the flag pool")
 	requireCtfLog(t, f.takeLog())
 
 	// unknown terms: wait, never "not in force"
@@ -330,17 +330,17 @@ func TestStCtfDriverIsGated(t *testing.T) {
 	stCtfAmendmentUrl = "http://127.0.0.1:1/amendments.yml"
 	stCtfAmendmentStorer = func(*StConfig) amendment.Store { return &ctfTestAmendmentStore{} }
 	stCtfAmendmentHolders.Clear()
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 9), model.StPublishStatusSkipped, true, "terms for epoch 9 are unknown")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 9), model.StPublishStatusSkipped, true, "terms for epoch 9 are unknown")
 	requireCtfLog(t, f.takeLog())
 
 	// another mode's steps do nothing
 	f.cfg.Ctf.Mode = StCtfModeShadow
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 9), model.StPublishStatusSkipped, false, "not live")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 9), model.StPublishStatusSkipped, false, "not live")
 	f.cfg.Ctf.Mode = StCtfModeOff
-	if steps, err := StCtfSync(f.ctx, &StEpochState{Epoch: 10, HeadBlock: f.chain.head}); err != nil || steps != nil {
+	if steps, err := StCtfDriverSync(f.ctx, &StEpochState{Epoch: 10, HeadBlock: f.chain.head}); err != nil || steps != nil {
 		t.Fatalf("off: %v %v", steps, err)
 	}
-	if _, err := StCtfRunStep(f.ctx, &StCtfStep{Kind: StCtfStepEpoch, Epoch: 9}); !errors.Is(err, errStCtfNotConfigured) {
+	if _, err := StCtfDriverRunStep(f.ctx, &StCtfDriverStep{Kind: StCtfDriverStepEpoch, Epoch: 9}); !errors.Is(err, errStCtfNotConfigured) {
 		t.Fatalf("off: %v", err)
 	}
 	requireCtfLog(t, f.takeLog())
@@ -361,7 +361,7 @@ func TestStCtfDriverInvalidAndLostCensus(t *testing.T) {
 	hash, _ := ledger.ParseRef(ref)
 	f.chain.census[8] = fakeCtfCensus{hash: hash, block: f.chain.end(8) + 2}
 	f.chain.times[f.chain.end(8)+2] = ctfTestCommitTime(1000)
-	requireLedgerV2Outcome(t, f.run(StCtfStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 8), model.StPublishStatusConfirmed, false, "")
 	result := f.verify(nil)
 	requireCtfAudit(t, result)
 	if e := result.Epochs[0]; e.Census == nil || e.CensusErr == nil || e.Drawn {
@@ -376,7 +376,7 @@ func TestStCtfDriverInvalidAndLostCensus(t *testing.T) {
 	lost := ctfTestCensusOf(t, 8, ctfTestCandidates()...)
 	g.chain.census[8] = fakeCtfCensus{hash: lost.Hash, block: g.chain.end(8) + 2}
 	g.chain.times[g.chain.end(8)+2] = ctfTestCommitTime(1000)
-	requireLedgerV2Outcome(t, g.run(StCtfStepEpoch, 8), model.StPublishStatusFailed, true, "")
+	requireLedgerV2Outcome(t, g.run(StCtfDriverStepEpoch, 8), model.StPublishStatusFailed, true, "")
 	requireCtfLog(t, g.takeLog(), "close 8")
 	requireCtfAlerts(t, g.alerts, StCtfAlertCensusUnavailable+" epoch 8")
 }
@@ -393,18 +393,18 @@ func TestStCtfSyncPlansTheSteps(t *testing.T) {
 	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_census 8", "ctf_epoch 8"}) {
 		t.Fatalf("at end(8): %q", got)
 	}
-	f.run(StCtfStepCensus, 8)
+	f.run(StCtfDriverStepCensus, 8)
 	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_epoch 8"}) {
 		t.Fatalf("census committed: %q", got)
 	}
-	f.run(StCtfStepEpoch, 8)
+	f.run(StCtfDriverStepEpoch, 8)
 	f.records.mirror(f.chain)
 	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_finalize 8"}) {
 		t.Fatalf("committed: %q", got)
 	}
 	f.chain.approvals = 1
 	f.chain.head += f.chain.challenge
-	f.run(StCtfStepFinalize, 8)
+	f.run(StCtfDriverStepFinalize, 8)
 	f.records.mirror(f.chain)
 	if got := f.sync(9); !reflect.DeepEqual(got, []string{"ctf_record 8", "ctf_recycle 8"}) {
 		t.Fatalf("final: %q", got)
@@ -416,8 +416,8 @@ func TestStCtfSyncPlansTheSteps(t *testing.T) {
 
 	// recorded and recycled: nothing more
 	root := f.records.roots[0]
-	requireLedgerV2Outcome(t, f.runStep(&StCtfStep{Kind: StCtfStepRecord, Seq: root.Seq}), model.StPublishStatusConfirmed, false, "recorded")
-	requireLedgerV2Outcome(t, f.runStep(&StCtfStep{Kind: StCtfStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecord, Seq: root.Seq}), model.StPublishStatusConfirmed, false, "recorded")
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
 	if got := f.sync(9); len(got) != 0 {
 		t.Fatalf("done: %q", got)
 	}

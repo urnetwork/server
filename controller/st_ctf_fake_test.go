@@ -569,12 +569,12 @@ func resetCtfCaches() {
 
 func (self *ctfFixture) run(kind string, epoch uint64) *StPublishOutcome {
 	self.t.Helper()
-	return self.runStep(&StCtfStep{Kind: kind, Epoch: epoch})
+	return self.runStep(&StCtfDriverStep{Kind: kind, Epoch: epoch})
 }
 
-func (self *ctfFixture) runStep(step *StCtfStep) *StPublishOutcome {
+func (self *ctfFixture) runStep(step *StCtfDriverStep) *StPublishOutcome {
 	self.t.Helper()
-	outcome, err := StCtfRunStep(self.ctx, step)
+	outcome, err := StCtfDriverRunStep(self.ctx, step)
 	if err != nil {
 		self.t.Fatalf("%s step: %v", step.Kind, err)
 	}
@@ -589,7 +589,7 @@ func (self *ctfFixture) takeLog() []string {
 
 func (self *ctfFixture) sync(epoch uint64) []string {
 	self.t.Helper()
-	steps, err := StCtfSync(self.ctx, &StEpochState{Epoch: epoch, HeadBlock: self.chain.head, HeadBlockTime: time.Now().UTC()})
+	steps, err := StCtfDriverSync(self.ctx, &StEpochState{Epoch: epoch, HeadBlock: self.chain.head, HeadBlockTime: time.Now().UTC()})
 	if err != nil {
 		self.t.Fatal(err)
 	}

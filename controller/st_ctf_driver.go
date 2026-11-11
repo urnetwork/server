@@ -50,13 +50,13 @@ import (
 
 // The capture the flag driver's steps, for the task layer.
 const (
-	StCtfStepCensus   = "ctf_census"
-	StCtfStepEpoch    = "ctf_epoch"
-	StCtfStepFinalize = "ctf_finalize"
-	StCtfStepAnswer   = "ctf_answer"
-	StCtfStepRecord   = "ctf_record"
-	StCtfStepRecycle  = "ctf_recycle"
-	StCtfStepShadow   = "ctf_shadow"
+	StCtfDriverStepCensus   = "ctf_commit_census"
+	StCtfDriverStepEpoch    = "ctf_epoch"
+	StCtfDriverStepFinalize = "ctf_finalize"
+	StCtfDriverStepAnswer   = "ctf_answer"
+	StCtfDriverStepRecord   = "ctf_record"
+	StCtfDriverStepRecycle  = "ctf_recycle"
+	StCtfDriverStepShadow   = "ctf_shadow"
 )
 
 // The capture the flag alerts. Each fires once per process and subject.
@@ -89,10 +89,10 @@ const (
 	stCtfCarryLateBlocks = 600
 )
 
-// StCtfStep is one planned driver step. An answer names its demand: the
+// StCtfDriverStep is one planned driver step. An answer names its demand: the
 // pending root's seq, the finalized root RootIndex and the account Index; a
 // recycle names the final root's RootIndex.
-type StCtfStep struct {
+type StCtfDriverStep struct {
 	Kind      string
 	Epoch     uint64
 	Seq       uint64
@@ -185,10 +185,10 @@ func stCtfCheckCarry(ctx context.Context, cfg *StConfig, ctfClient StCtfClient, 
 // Sync turn
 // ---------------------------------------------------------------------------
 
-// StCtfSync plans one sync turn's steps from the epoch clock and the mirror,
+// StCtfDriverSync plans one sync turn's steps from the epoch clock and the mirror,
 // and raises the alerts the mirror shows. Chain reads are limited to the CTF
 // pool's registration and epoch windows, both cached.
-func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
+func StCtfDriverSync(ctx context.Context, state *StEpochState) ([]*StCtfDriverStep, error) {
 	cfg, client, _, err := stCtfRequire()
 	if errors.Is(err, errStCtfNotConfigured) {
 		return nil, nil
@@ -217,7 +217,7 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 		if err != nil {
 			return nil, err
 		}
-		return []*StCtfStep{{Kind: StCtfStepShadow, Epoch: epoch, RunAt: runAt(stCtfShadowCensusBlock(end, window))}}, nil
+		return []*StCtfDriverStep{{Kind: StCtfDriverStepShadow, Epoch: epoch, RunAt: runAt(stCtfShadowCensusBlock(end, window))}}, nil
 	}
 
 	firstEpoch, registered, err := stCtfPool(ctx, cfg, client)
@@ -226,7 +226,7 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 	}
 	poolId, head := ctf.PoolID(cfg.NoId), state.HeadBlock
 	mirrored := records.MirroredBlock(ctx)
-	steps := []*StCtfStep{}
+	steps := []*StCtfDriverStep{}
 
 	if firstEpoch < state.Epoch {
 		epoch := state.Epoch - 1
@@ -236,10 +236,10 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 		}
 		if head <= end+window {
 			if status, _ := records.Outcome(ctx, epoch, model.StPublishKindCtfCensus); status == "" && head <= end+window/2 {
-				steps = append(steps, &StCtfStep{Kind: StCtfStepCensus, Epoch: epoch, RunAt: runAt(end)})
+				steps = append(steps, &StCtfDriverStep{Kind: StCtfDriverStepCensus, Epoch: epoch, RunAt: runAt(end)})
 			}
 			if status, _ := records.Outcome(ctx, epoch, model.StPublishKindCtfCommit); status == "" {
-				steps = append(steps, &StCtfStep{Kind: StCtfStepEpoch, Epoch: epoch, RunAt: runAt(end)})
+				steps = append(steps, &StCtfDriverStep{Kind: StCtfDriverStepEpoch, Epoch: epoch, RunAt: runAt(end)})
 			}
 		} else if end+window < mirrored {
 			// A commit step that ended skipped found the epoch outside capture
@@ -260,11 +260,11 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 
 	if pending := records.PendingRoot(ctx, poolId); pending != nil {
 		if status, _ := records.Outcome(ctx, pending.Epoch, model.StPublishKindCtfFinalize); pending.CommitBlock != nil && status == "" {
-			steps = append(steps, &StCtfStep{Kind: StCtfStepFinalize, Epoch: pending.Epoch, RunAt: runAt(*pending.CommitBlock + stLedgerV2ChallengeBlocks)})
+			steps = append(steps, &StCtfDriverStep{Kind: StCtfDriverStepFinalize, Epoch: pending.Epoch, RunAt: runAt(*pending.CommitBlock + stLedgerV2ChallengeBlocks)})
 		}
 		oneDay := uint64(24*time.Hour/time.Second) / uint64(stLedgerV2BlockSeconds(cfg))
 		for _, demand := range records.OpenDemands(ctx, poolId, pending.Seq) {
-			steps = append(steps, &StCtfStep{Kind: StCtfStepAnswer, Epoch: pending.Epoch, Seq: demand.Seq, RootIndex: demand.RootIndex, Index: demand.Index, RunAt: now})
+			steps = append(steps, &StCtfDriverStep{Kind: StCtfDriverStepAnswer, Epoch: pending.Epoch, Seq: demand.Seq, RootIndex: demand.RootIndex, Index: demand.Index, RunAt: now})
 			if demand.DemandBlock+oneDay < head {
 				stCtfAlert(cfg, StCtfAlertOpenDemand, fmt.Sprintf("seq %d root %d index %d", demand.Seq, demand.RootIndex, demand.Index), "demanded at block %d and still open at block %d", demand.DemandBlock, head)
 			}
@@ -287,7 +287,7 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 	}
 
 	if root := records.NextUnrecordedRoot(ctx, poolId); root != nil {
-		steps = append(steps, &StCtfStep{Kind: StCtfStepRecord, Epoch: root.Epoch, Seq: root.Seq, RunAt: now})
+		steps = append(steps, &StCtfDriverStep{Kind: StCtfDriverStepRecord, Epoch: root.Epoch, Seq: root.Seq, RunAt: now})
 	}
 
 	// The carry of the latest final root goes back before the next close, or
@@ -295,7 +295,7 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 	if latest := records.LatestFinalizedRoot(ctx, poolId); latest != nil && latest.RootIndex != nil {
 		status, _ := records.Outcome(ctx, latest.Epoch, model.StPublishKindCtfRecycle)
 		if status == "" {
-			steps = append(steps, &StCtfStep{Kind: StCtfStepRecycle, Epoch: latest.Epoch, RootIndex: *latest.RootIndex, RunAt: now})
+			steps = append(steps, &StCtfDriverStep{Kind: StCtfDriverStepRecycle, Epoch: latest.Epoch, RootIndex: *latest.RootIndex, RunAt: now})
 		}
 		if status == "" && latest.StatusBlock != nil && *latest.StatusBlock+stCtfCarryLateBlocks < head {
 			stCtfAlert(cfg, StCtfAlertCarryLate, fmt.Sprintf("root %d", *latest.RootIndex), "root %d of epoch %d is final since block %d and its carry is not returned at block %d", *latest.RootIndex, latest.Epoch, *latest.StatusBlock, head)
@@ -308,16 +308,16 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 // Steps
 // ---------------------------------------------------------------------------
 
-// StCtfRunStep runs one planned step. Each step re-reads the chain at the
+// StCtfDriverRunStep runs one planned step. Each step re-reads the chain at the
 // finalized head, so a repeated or late step only does what is still due. A
 // step of the mode not configured does nothing.
-func StCtfRunStep(ctx context.Context, step *StCtfStep) (*StPublishOutcome, error) {
+func StCtfDriverRunStep(ctx context.Context, step *StCtfDriverStep) (*StPublishOutcome, error) {
 	cfg, client, ctfClient, err := stCtfRequire()
 	if err != nil {
 		return nil, err
 	}
 	records := stCtfRecordsFor(cfg)
-	outcome, err := stCtfRunStep(ctx, cfg, client, ctfClient, records, step)
+	outcome, err := stCtfDriverRunStep(ctx, cfg, client, ctfClient, records, step)
 	status := "error"
 	if outcome != nil {
 		status = outcome.Status
@@ -326,8 +326,8 @@ func StCtfRunStep(ctx context.Context, step *StCtfStep) (*StPublishOutcome, erro
 	return outcome, err
 }
 
-func stCtfRunStep(ctx context.Context, cfg *StConfig, client StLedgerV2Client, ctfClient StCtfClient, records stCtfRecords, step *StCtfStep) (*StPublishOutcome, error) {
-	if step.Kind == StCtfStepShadow {
+func stCtfDriverRunStep(ctx context.Context, cfg *StConfig, client StLedgerV2Client, ctfClient StCtfClient, records stCtfRecords, step *StCtfDriverStep) (*StPublishOutcome, error) {
+	if step.Kind == StCtfDriverStepShadow {
 		if cfg.Ctf.Mode != StCtfModeShadow {
 			return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: "capture the flag is not in shadow mode"}, nil
 		}
@@ -341,17 +341,17 @@ func stCtfRunStep(ctx context.Context, cfg *StConfig, client StLedgerV2Client, c
 		return nil, err
 	}
 	switch step.Kind {
-	case StCtfStepCensus:
+	case StCtfDriverStepCensus:
 		return stCtfRunCensus(ctx, cfg, client, ctfClient, records, step.Epoch)
-	case StCtfStepEpoch:
+	case StCtfDriverStepEpoch:
 		return stCtfRunEpoch(ctx, cfg, client, ctfClient, records, step.Epoch)
-	case StCtfStepFinalize:
+	case StCtfDriverStepFinalize:
 		return stCtfRunFinalize(ctx, cfg, client, records, step.Epoch)
-	case StCtfStepAnswer:
+	case StCtfDriverStepAnswer:
 		return stCtfRunAnswer(ctx, cfg, client, records, step.Seq, step.RootIndex, step.Index)
-	case StCtfStepRecord:
+	case StCtfDriverStepRecord:
 		return stCtfRunRecord(ctx, cfg, records, step.Seq)
-	case StCtfStepRecycle:
+	case StCtfDriverStepRecycle:
 		return stCtfRunRecycle(ctx, cfg, client, ctfClient, records, step.RootIndex)
 	}
 	return nil, fmt.Errorf("st ctf: unknown step %q", step.Kind)
@@ -455,7 +455,7 @@ func stCtfRunCensus(ctx context.Context, cfg *StConfig, client StLedgerV2Client,
 		// Every committed census object stays published: a lost one stalls
 		// the epoch's roots.
 		if census != nil && census.Hash == hash {
-			if err := stCtfPublishCensus(ctx, census); err != nil {
+			if err := stCtfRepublishCensus(ctx, census); err != nil {
 				return stLedgerV2Retry(err), nil
 			}
 		}
@@ -477,7 +477,7 @@ func stCtfRunCensus(ctx context.Context, cfg *StConfig, client StLedgerV2Client,
 	}
 	// Publish before committing: whoever reads the commitment can fetch the
 	// census it names.
-	if err := stCtfPublishCensus(ctx, census); err != nil {
+	if err := stCtfRepublishCensus(ctx, census); err != nil {
 		return stLedgerV2Retry(err), nil
 	}
 	if outcome := stLedgerV2LateSend(ctx, cfg, client, state, "census", deadline); outcome != nil {

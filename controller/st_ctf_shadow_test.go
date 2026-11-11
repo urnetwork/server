@@ -41,9 +41,9 @@ func TestStCtfShadowPublishesAnAuditableReport(t *testing.T) {
 		t.Fatalf("planned %q", got)
 	}
 	// the census stand-in block is end(7) + w/2
-	requireLedgerV2Outcome(t, f.run(StCtfStepShadow, 7), model.StPublishStatusSkipped, true, "is block")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepShadow, 7), model.StPublishStatusSkipped, true, "is block")
 	f.chain.head = block
-	outcome := f.run(StCtfStepShadow, 7)
+	outcome := f.run(StCtfDriverStepShadow, 7)
 	requireLedgerV2Outcome(t, outcome, model.StPublishStatusConfirmed, false, "report sha256:")
 	// nothing is sent, and nothing a live root would read is recorded
 	requireCtfLog(t, f.takeLog())
@@ -99,14 +99,14 @@ func TestStCtfShadowPublishesAnAuditableReport(t *testing.T) {
 	if got := f.sync(8); len(got) != 0 {
 		t.Fatalf("planned again %q", got)
 	}
-	requireLedgerV2Outcome(t, f.run(StCtfStepShadow, 7), model.StPublishStatusConfirmed, false, outcome.Reason)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepShadow, 7), model.StPublishStatusConfirmed, false, outcome.Reason)
 	if got := f.records.rows(7); !reflect.DeepEqual(got, []string{"ctfshadow confirmed"}) {
 		t.Fatalf("rows %q", got)
 	}
 	requireCtfLog(t, f.takeLog())
 
 	// a live step does nothing in shadow mode
-	requireLedgerV2Outcome(t, f.run(StCtfStepCensus, 8), model.StPublishStatusSkipped, false, "not live")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, false, "not live")
 	requireCtfLog(t, f.takeLog())
 }
 
@@ -119,7 +119,7 @@ func TestStCtfShadowIsDeterministic(t *testing.T) {
 		block := stCtfShadowCensusBlock(f.chain.end(7), f.chain.window)
 		f.chain.times[block] = ctfTestCommitTime(1002)
 		f.chain.head = block
-		outcome := f.run(StCtfStepShadow, 7)
+		outcome := f.run(StCtfDriverStepShadow, 7)
 		requireLedgerV2Outcome(t, outcome, model.StPublishStatusConfirmed, false, "report sha256:")
 		reports = append(reports, outcome.Reason)
 	}
@@ -137,15 +137,15 @@ func TestStCtfShadowEdges(t *testing.T) {
 	block := stCtfShadowCensusBlock(f.chain.end(7), f.chain.window)
 	f.chain.times[block] = ctfTestCommitTime(1002)
 	f.chain.head = block
-	requireLedgerV2Outcome(t, f.run(StCtfStepShadow, 7), model.StPublishStatusSkipped, true, "is not built yet")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepShadow, 7), model.StPublishStatusSkipped, true, "is not built yet")
 	f.chain.head = f.chain.end(8)
-	requireLedgerV2Outcome(t, f.run(StCtfStepShadow, 7), model.StPublishStatusMissed, false, "no census of epoch 7")
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepShadow, 7), model.StPublishStatusMissed, false, "no census of epoch 7")
 
 	g := newCtfShadowFixture(t)
 	g.chain.providers.funded[7] = g.chain.providers.funded[6]
 	g.chain.times[block] = ctfTestCommitTime(1002)
 	g.chain.head = block
-	requireLedgerV2Outcome(t, g.run(StCtfStepShadow, 7), model.StPublishStatusSkipped, false, "funds nothing")
+	requireLedgerV2Outcome(t, g.run(StCtfDriverStepShadow, 7), model.StPublishStatusSkipped, false, "funds nothing")
 
 	// epoch 8 of a registered pool that vault2 captured: the pool's funding
 	h := newCtfShadowFixture(t)
@@ -159,7 +159,7 @@ func TestStCtfShadowEdges(t *testing.T) {
 	h.chain.times[block8] = ctfTestCommitTime(1003)
 	h.chain.head = block8
 	h.takeLog()
-	outcome := h.run(StCtfStepShadow, 8)
+	outcome := h.run(StCtfDriverStepShadow, 8)
 	requireLedgerV2Outcome(t, outcome, model.StPublishStatusConfirmed, false, "report sha256:")
 	requireCtfLog(t, h.takeLog())
 	report, err := GetStLedgerV2Object(h.ctx, strings.TrimPrefix(outcome.Reason, "report "))

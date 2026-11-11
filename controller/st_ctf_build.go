@@ -321,9 +321,9 @@ func stCtfPublish(ctx context.Context, records stCtfRecords, poolId uint64, in *
 	return err
 }
 
-// stCtfPublishCensus publishes a census's objects, put-if-absent, in
+// stCtfRepublishCensus publishes a census's objects, put-if-absent, in
 // reference order.
-func stCtfPublishCensus(ctx context.Context, census *StCtfCensus) error {
+func stCtfRepublishCensus(ctx context.Context, census *StCtfCensus) error {
 	refs := make([]ledger.Ref, 0, len(census.Objects))
 	for ref := range census.Objects {
 		refs = append(refs, ref)
