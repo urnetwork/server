@@ -4,7 +4,8 @@ package quotahost
 
 // QUOTA-M2-11's T3 run: quotasuite.Run, the same body FakeQuota passes at T2, on the Quota NewLocalQuota
 // builds (model over the private stack's Postgres, its rates and reservations on the test's Redis), so a
-// divergence between the fake and the real thing fails here. And a cached network's Limits reaching no
+// divergence between the fake and the real thing fails here; quota_api_t3_test.go runs it again with api's
+// handlers between the Quota and model. And a cached network's Limits reaching no
 // Postgres under DenyPostgresForTest.
 //
 // The target's levers, each what a real process does on its own time: SetLimits stands in for pro.yml and
@@ -226,11 +227,19 @@ func t3FlushServiceDebits(ctx context.Context, clock sidecar.Clock) error {
 }
 
 func newT3Target(ctx context.Context) quotasuite.NewTarget {
+	return newT3TargetOn(ctx, func(t *testing.T, clock sidecar.Clock) QuotaSource {
+		return NewLocalQuotaSource(clock)
+	})
+}
+
+// The T3 target on the QuotaSource newSource builds for each case at the case's clock: model directly
+// (newT3Target), or api's own handlers over HTTP (quota_api_t3_test.go).
+func newT3TargetOn(ctx context.Context, newSource func(t *testing.T, clock sidecar.Clock) QuotaSource) quotasuite.NewTarget {
 	return func(t *testing.T) *quotasuite.Target {
 		clock := sidecartest.NewFakeClock(sidecartest.DefaultClockStart())
 		faults := sidecartest.NewFaultQueue()
 		redis := &t3FailingRedis{redis: model.NewQuotaRateServerRedis(10 * time.Second)}
-		source := &t3QuotaSource{QuotaSource: NewLocalQuotaSource(clock), networkLimits: map[server.Id]*sidecar.QuotaLimits{}}
+		source := &t3QuotaSource{QuotaSource: newSource(t, clock), networkLimits: map[server.Id]*sidecar.QuotaLimits{}}
 		settings := DefaultQuotaSettings()
 		settings.Lease = t3LeaseSettings()
 		quota, err := newHostQuota(ctx, source, redis, clock, settings)
@@ -282,6 +291,10 @@ func newT3Target(ctx context.Context) quotasuite.NewTarget {
 		}
 	}
 }
+
+// newT3TargetOn for this package's external test, which reaches api's handlers: an import this package's own
+// tests cannot make, since the handlers import quotahost.
+var NewT3TargetOn = newT3TargetOn
 
 // quotasuite on NewLocalQuota's parts at T3: the body FakeQuota passes at T2.
 func TestLocalQuotaConformsToTheSuite(t *testing.T) {
