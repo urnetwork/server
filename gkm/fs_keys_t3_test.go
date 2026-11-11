@@ -24,7 +24,7 @@ import (
 )
 
 // Runs a schedule on a world whose engine and reconciler run on the local stack's clusters and the test Redis.
-func runFsKeysT3(t *testing.T, schedule func(tb testing.TB, newWorld gkmschedule.FsKeysNewWorld)) {
+func runFsKeysT3(t *testing.T, schedule func(t gkmschedule.FsKeysT, newWorld gkmschedule.FsKeysNewWorld)) {
 	clusters := gkmStackClusters(t)
 	(&server.TestEnv{ApplyDbMigrations: false}).Run(t, func(tb testing.TB) {
 		redis := sidecarhost.NewRedis(nil)
