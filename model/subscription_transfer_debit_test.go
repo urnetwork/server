@@ -121,7 +121,8 @@ func (self *asyncDebitReleaseHook) ProcessPipelineHook(next redis.ProcessPipelin
 			a := command.Args()
 			if command.Name() == "eval" && len(a) > 3 {
 				keyCount, ok := a[2].(int)
-				if ok && keyCount > 0 && len(a) > 3+keyCount && a[3] == self.key && a[3+keyCount] == "release" {
+				// the flush releases by release-debited since QUOTA-M2-15
+				if ok && keyCount > 0 && len(a) > 3+keyCount && a[3] == self.key && (a[3+keyCount] == "release" || a[3+keyCount] == "release-debited") {
 					matched = true
 				}
 			}

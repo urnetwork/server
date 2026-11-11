@@ -354,25 +354,72 @@ func TestUsageBatchJournalsCarvesUnderTheirIds(t *testing.T) {
 			BatchId:     connect.NewId(),
 			Producer:    sidecar.QuotaProducerTlsEdge,
 			WindowStart: now,
-			Events:      []*sidecar.UsageEvent{{NetworkId: connect.Id(networkId), Meter: sidecar.QuotaMeterTls, TransferByteCount: 150}},
+			Events:      []*sidecar.UsageEvent{{NetworkId: connect.Id(networkId), Meter: sidecar.QuotaMeterTls, TransferByteCount: 100}},
 		}
 		applied, err := ApplyUsageBatch(ctx, batch, carves, now)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, applied, true)
 		firstDebits := testingServiceDebits(ctx, firstId)
 		secondDebits := testingServiceDebits(ctx, secondId)
-		connect.AssertEqual(t, firstDebits[carves[0].UsageId], int64(60))
-		connect.AssertEqual(t, secondDebits[carves[1].UsageId], int64(40))
-		// the uncarved 50: the first balance's 40 left after its carve, then 10 of the second
-		connect.AssertEqual(t, firstDebits[ServiceUsageId(server.Id(batch.BatchId), networkId, sidecar.QuotaMeterTls, firstId)], int64(40))
-		connect.AssertEqual(t, secondDebits[ServiceUsageId(server.Id(batch.BatchId), networkId, sidecar.QuotaMeterTls, secondId)], int64(10))
-		connect.AssertEqual(t, testingJournaledByteCount(ctx, []server.Id{firstId, secondId}), int64(150))
+		// exactly the carves, each under its own usage id, and nothing drawn at apply
+		connect.AssertEqual(t, firstDebits, map[server.Id]int64{carves[0].UsageId: 60})
+		connect.AssertEqual(t, secondDebits, map[server.Id]int64{carves[1].UsageId: 40})
+		connect.AssertEqual(t, testingJournaledByteCount(ctx, []server.Id{firstId, secondId}), int64(100))
+	})
+}
+
+// QD-653: no lease byte is debited without its carve. A lease meter's event its carves fall short of, or
+// that comes with none, is refused whole, so its host's bytes whose reservation lapsed are never drawn at
+// apply on bytes another host reserved; evs's bytes still draw at apply.
+func TestUsageBatchRefusesALeaseEventItsCarvesDoNotCover(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC)
+		networkId := server.NewId()
+		balance := testingBalance(1000, now.Add(-time.Hour), now.Add(time.Hour))
+		testingSetQuotaBalances(ctx, now, networkId, []*sidecartest.QuotaBalance{balance})
+		balanceId := server.Id(balance.BalanceId)
+		for _, meter := range []string{sidecar.QuotaMeterTls, sidecar.QuotaMeterMx, sidecar.QuotaMeterSmtp} {
+			batch := &sidecar.UsageBatch{
+				BatchId:     connect.NewId(),
+				Producer:    sidecar.QuotaProducerTlsEdge,
+				WindowStart: now,
+				Events:      []*sidecar.UsageEvent{{NetworkId: connect.Id(networkId), Meter: meter, TransferByteCount: 100}},
+			}
+			for _, carves := range [][]*UsageCarve{
+				nil,
+				{{UsageId: server.NewId(), NetworkId: networkId, Meter: meter, BalanceId: balanceId, ByteCount: 99}},
+			} {
+				applied, err := ApplyUsageBatch(ctx, batch, carves, now)
+				if !errors.Is(err, ErrUsageBatchRefused) || applied {
+					t.Fatalf("%s with carves %v answered %v, %v", meter, carves, applied, err)
+				}
+			}
+			connect.AssertEqual(t, testingUsageBatchCount(ctx, server.Id(batch.BatchId)), 0)
+			applied, err := ApplyUsageBatch(ctx, batch, []*UsageCarve{{UsageId: server.NewId(), NetworkId: networkId, Meter: meter, BalanceId: balanceId, ByteCount: 100}}, now)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, applied, true)
+		}
+		connect.AssertEqual(t, testingJournaledByteCount(ctx, []server.Id{balanceId}), int64(300))
+		// a carve on evs's meter, which no lease spends, is refused too
+		evsBatch := testingEvsBatch(networkId, 10, 0)
+		applied, err := ApplyUsageBatch(ctx, evsBatch, []*UsageCarve{{UsageId: server.NewId(), NetworkId: networkId, Meter: sidecar.QuotaMeterEvs, BalanceId: balanceId, ByteCount: 10}}, now)
+		if !errors.Is(err, ErrUsageBatchRefused) || applied {
+			t.Fatalf("a carve on evs answered %v, %v", applied, err)
+		}
+		applied, err = ApplyUsageBatch(ctx, evsBatch, nil, now)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, applied, true)
+		connect.AssertEqual(t, testingJournaledByteCount(ctx, []server.Id{balanceId}), int64(310))
 	})
 }
 
 // A batch refused whole applies nothing and leaves its id unused: a zero id, an unknown producer or
-// meter, a relay event, a negative transfer, a zero network, too many events, or carves that do not
-// fit; and a binary without MG2 is no place to apply one.
+// meter, a relay event, a negative transfer, a zero network, too many events, carves that do not fit,
+// a lease meter's bytes its carves do not cover, or a carve on evs; and a binary without MG2 is no
+// place to apply one.
 func TestUsageBatchRefusedWhole(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -410,6 +457,9 @@ func TestUsageBatchRefusedWhole(t *testing.T) {
 			{batch: batchOf(sidecar.QuotaProducerTlsEdge, tlsEvent), carves: carve(sidecar.QuotaMeterTls, 11)},
 			{batch: batchOf(sidecar.QuotaProducerTlsEdge, tlsEvent), carves: carve(sidecar.QuotaMeterMx, 5)},
 			{batch: batchOf(sidecar.QuotaProducerTlsEdge, tlsEvent), carves: carve(sidecar.QuotaMeterTls, 0)},
+			{batch: batchOf(sidecar.QuotaProducerTlsEdge, tlsEvent), carves: carve(sidecar.QuotaMeterTls, 5)},
+			{batch: batchOf(sidecar.QuotaProducerTlsEdge, tlsEvent)},
+			{batch: batchOf(sidecar.QuotaProducerEvs, good), carves: carve(sidecar.QuotaMeterEvs, 5)},
 		} {
 			applied, err := ApplyUsageBatch(ctx, c.batch, c.carves, now)
 			if !errors.Is(err, ErrUsageBatchRefused) || applied {
