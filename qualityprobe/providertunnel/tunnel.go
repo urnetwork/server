@@ -527,8 +527,11 @@ type Tunnel struct {
 	cancelLifecycle context.CancelFunc
 	// The caller's context, which no longer ends the tunnel; Close only
 	// reads whether it ended first, to label the retirement.
-	callerDone     <-chan struct{}
-	tun            *connect.Tun
+	callerDone <-chan struct{}
+	tun        *connect.Tun
+	// Resolves URL targets in a race with the tun's own cache, or nil
+	// (providerDnsResolvers).
+	raceDohCache   *connect.DohCache
 	returns        *providerReturnDrain
 	multiClient    *connect.RemoteUserNatMultiClient
 	generator      *connect.ApiMultiClientGenerator
@@ -576,12 +579,15 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if err := cfg.CapabilityObservation.validate(); err != nil {
 		return nil, err
 	}
-	resolver, err := providerDnsResolverSettings(cfg)
+	resolver, raceResolver, err := providerDnsResolvers(cfg)
 	if err != nil {
 		return nil, err
 	}
 	family := cfg.ProviderIpFamily.Normalize()
+	// both resolvers keep to the provider's family's servers, the regional
+	// recommendation that races the tunnel's own included
 	resolver = providerResolverForFamily(resolver, family)
+	raceResolver = providerResolverForFamily(raceResolver, family)
 
 	// The packet path and the control-plane lifecycle have separate child
 	// contexts. Close must stop Tun traffic first, while keeping the API and
@@ -673,6 +679,13 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		)
 	}
 
+	// the resolver whose lookups race the tun's own (providerDnsResolvers),
+	// owned by this tunnel alone and closed with the tun's
+	var raceDohCache *connect.DohCache
+	if raceResolver != nil {
+		raceDohCache = newRaceDohCache(tun, raceResolver)
+	}
+
 	registration := &providerRegistrationState{}
 	setup := newProviderSetupState(cfg.SetupObservations, providerClientId)
 	multiClientSettings := providerTunnelMultiClientSettingsForConfig(cfg)
@@ -745,6 +758,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 		cancelLifecycle: cancelLifecycle,
 		callerDone:      ctx.Done(),
 		tun:             tun,
+		raceDohCache:    raceDohCache,
 		returns:         returns,
 		multiClient:     multiClient,
 		generator:       generator,
@@ -932,11 +946,15 @@ func (self *Tunnel) HttpClient(timeout time.Duration) *http.Client {
 // pinned nor in extraHosts is still refused outright by DialTLSContext, so
 // this widens the closed set rather than opening it.
 func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []string) *http.Client {
+	query := self.tun.DohCache().QueryResult
+	if self.raceDohCache != nil {
+		query = raceProviderUrlQueries(query, self.raceDohCache.QueryResult)
+	}
 	resolver := &providerUrlResolver{
 		waitRoute: func(ctx context.Context) error {
 			return waitProviderRoute(ctx, self.lost, self.multiClient.Monitor())
 		},
-		query:               self.tun.DohCache().QueryResult,
+		query:               query,
 		dial:                self.tun.DialResolvedContext,
 		observations:        self.dnsObservations,
 		contractUnavailable: self.multiClient.ProviderContractAcquisitionUnavailable,
@@ -980,7 +998,7 @@ func (self *Tunnel) Close() error {
 			path:          path,
 			closeTimeout:  self.closeTimeout,
 			retirements:   self.retirements,
-			closeResolver: self.tun.DohCache().Close,
+			closeResolver: self.closeResolvers,
 			drainReturns: func(ctx context.Context) {
 				self.returns.wait(ctx, self.dataDone)
 			},
@@ -1008,6 +1026,15 @@ func (self *Tunnel) Close() error {
 		self.setup.finish(self.closeErr)
 	})
 	return self.closeErr
+}
+
+// Retires the tun's DoH cache and the cache racing it, if any. Both dial
+// through the tun, so both close before the drain (tunnelTeardown).
+func (self *Tunnel) closeResolvers() {
+	self.tun.DohCache().Close()
+	if self.raceDohCache != nil {
+		self.raceDohCache.Close()
+	}
 }
 
 // How the tunnel came to be closed, for its retirement's metric: its
@@ -1059,7 +1086,7 @@ func watchProviderAdded(monitor connect.MultiClientMonitor, added *atomic.Bool) 
 // Retirements are testable without a provider.
 //
 // close ends the provider's flows while the whole data path is still live:
-// closeResolver retires the tunnel's private DoH cache, whose pooled TLS
+// closeResolver retires the tunnel's private DoH caches, whose pooled TLS
 // connections would otherwise close only inside a netstack that can no longer
 // send, and drainReturns holds teardown until the provider has gone quiet (see
 // providerReturnDrain). retire then keeps the derived client acknowledging

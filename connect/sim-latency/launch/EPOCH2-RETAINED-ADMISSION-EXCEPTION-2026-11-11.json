@@ -4,7 +4,12 @@
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "epoch": 2,
   "user_approved_exact_retained_result_exception": true,
-  "exception_registered": false,
+  "exception_registered": true,
+  "registration_success_observed_at": "2026-11-11T14:40:47Z",
+  "registration_operator_sha256": "4fa09a6e3ee671293b0e65249589d3fa4922e43ca59f22e900636ee604b6b605",
+  "registration_started_new_evaluation_clock": false,
+  "original_toolchain_host_admission_ready_verified": true,
+  "original_toolchain_host_admission_ready_observed_at": "2026-11-11T14:40:56.788008Z",
   "coordinator_running": false,
   "grading_ready": false,
   "queued_jobs": 11,
@@ -71,8 +76,12 @@
   "subsequent_go1.27.4_request": {
     "evidence": "SYSTEM-GO1.27.4-2026-11-11.json",
     "system_upgrade_verified_on_both_hosts": true,
-    "competition_epoch_timing_choice_pending": true,
+    "competition_epoch_timing_choice_pending": false,
+    "approved_epoch": 2,
+    "security_hotfix_exception_approved": true,
+    "existing_baseline_reuse_explicitly_approved": true,
+    "replacement_baseline_or_statistical_recalibration_required": false,
     "current_frozen_go1.27.3_instrument_not_replaced": true
   },
-  "next_action": "Main migration953 is verified. Obtain the scope of the newly requested competition Go1.27.4 change. If epoch2 keeps its frozen instrument, register the exact approved exception and verify real FIFO execution on both hosts. If Go1.27.4 applies now, prepare and qualify a separately authorized instrument/baseline amendment; the retained Go1.27.3 admission cannot qualify a changed instrument. Do not start old-instrument scoring silently while this decision is pending."
+  "next_action": "The approved retained admission exception is registered and original-toolchain host admission checks pass. Build and record the Go1.27.4 evaluator execution identity under the separately approved security-hotfix exception, preserve the existing baseline and historical measurements, verify compatibility and containment, and verify actual FIFO scoring on both hosts."
 }

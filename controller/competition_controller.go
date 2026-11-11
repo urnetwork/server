@@ -247,6 +247,9 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		manifest.Executor.RunId != competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount)) {
 		return nil, errors.New("distributed archive lost its exact executor custody")
 	}
+	if err := validateCompetitionSecurityToolchainArchive(settings, job, manifest); err != nil {
+		return nil, err
+	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)
 	workerArtifacts := []struct {
 		path   string
@@ -580,6 +583,7 @@ var (
 )
 
 type Settings struct {
+	securityToolchainException    *competitionSecurityToolchainException
 	OfficialReviewImportSha256    string `yaml:"official_review_import_sha256,omitempty"`
 	reevaluationRuntime           *model.CompetitionJobReevaluationRuntime
 	reevaluationRuntimeSha256     string
@@ -1239,24 +1243,26 @@ type evaluationArtifact struct {
 }
 
 type artifactManifest struct {
-	Executor               *competitionExecutorArtifactIdentity `json:"executor,omitempty"`
-	Schema                 int                                  `json:"schema"`
-	JobId                  string                               `json:"job_id"`
-	RoundId                string                               `json:"round_id"`
-	SourceEpoch            int                                  `json:"source_epoch"`
-	Attempt                int                                  `json:"attempt"`
-	EvaluatorImageDigest   string                               `json:"evaluator_image_digest"`
-	ApiImageDigest         string                               `json:"api_image_digest"`
-	WorkerImageDigest      string                               `json:"worker_image_digest"`
-	EvaluatorCommandSha256 string                               `json:"evaluator_command_sha256"`
-	RequestSha256          string                               `json:"request_sha256"`
-	PatchSha256            string                               `json:"patch_sha256"`
-	StderrSha256           string                               `json:"stderr_sha256"`
-	ResultSha256           string                               `json:"result_sha256"`
-	Security               evaluationSecurity                   `json:"security"`
-	Artifacts              []evaluationArtifact                 `json:"artifacts"`
-	Failure                *CompetitionError                    `json:"failure,omitempty"`
-	Retention              *artifactRetention                   `json:"retention,omitempty"`
+	SecurityToolchainException    *competitionSecurityToolchainException `json:"security_toolchain_exception,omitempty"`
+	ExecutionEvaluatorImageDigest string                                 `json:"execution_evaluator_image_digest,omitempty"`
+	Executor                      *competitionExecutorArtifactIdentity   `json:"executor,omitempty"`
+	Schema                        int                                    `json:"schema"`
+	JobId                         string                                 `json:"job_id"`
+	RoundId                       string                                 `json:"round_id"`
+	SourceEpoch                   int                                    `json:"source_epoch"`
+	Attempt                       int                                    `json:"attempt"`
+	EvaluatorImageDigest          string                                 `json:"evaluator_image_digest"`
+	ApiImageDigest                string                                 `json:"api_image_digest"`
+	WorkerImageDigest             string                                 `json:"worker_image_digest"`
+	EvaluatorCommandSha256        string                                 `json:"evaluator_command_sha256"`
+	RequestSha256                 string                                 `json:"request_sha256"`
+	PatchSha256                   string                                 `json:"patch_sha256"`
+	StderrSha256                  string                                 `json:"stderr_sha256"`
+	ResultSha256                  string                                 `json:"result_sha256"`
+	Security                      evaluationSecurity                     `json:"security"`
+	Artifacts                     []evaluationArtifact                   `json:"artifacts"`
+	Failure                       *CompetitionError                      `json:"failure,omitempty"`
+	Retention                     *artifactRetention                     `json:"retention,omitempty"`
 }
 
 func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) (HostSelfCheck, error) {
@@ -7024,7 +7030,7 @@ func (self HostSelfCheck) Eligible(settings *Settings) bool {
 	return self.commonContainmentEligible(settings) &&
 		self.QualificationSha256 == competitionExecutorQualificationSha256(settings) &&
 		(settings.executorHostId == "" || self.HostId == settings.executorHostId) &&
-		self.ImageDigest == settings.EvaluatorImageDigest &&
+		self.ImageDigest == competitionExecutionImageDigest(settings) &&
 		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
 		allChecks(self.Checks)
 }

@@ -14,13 +14,16 @@ package model
 // unchanged, to the next batch. A charge is spent or skipped only by a
 // finalized event carrying its reference, an intent is credited only from a
 // spent charge, and a skipped charge is re-armed only once its deposit has
-// changed.
+// changed. An automatic intent whose switch the account turned off is voided
+// by the biller, unless its charge is already in flight, and no batch takes
+// its charge meanwhile.
 
 import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -60,6 +63,10 @@ const (
 	// the batch landed but spent nothing for the charge (the proxied call
 	// failed); re-armed like a skip
 	GammaChargeFailed = "failed"
+	// a pending charge in no batch whose automatic intent was voided when the
+	// account turned its switch off (VoidSwitchedOffGammaIntents): it never
+	// joins a batch, is never re-armed, and takes nothing
+	GammaChargeVoided = "voided"
 )
 
 // Batch states.
@@ -208,6 +215,14 @@ const gammaDepositHotkeyAllocationLock = 0x67616d6d61 // "gamma"
 // AllocateGammaDepositHotkey gives an account its next deposit hotkey: the
 // next global derivation index, derived by derive. Allocation is serialized,
 // so two accounts never derive the same index.
+//
+// The transaction reads committed, so the index read after the lock is held
+// sees every allocation that held the lock before. At repeatable read the
+// transaction's snapshot is the one the lock statement took when it began,
+// before it waited: an allocation that waited behind another read the
+// indexes from before the other committed, derived the index the other had
+// just taken, and failed on the unique index (only the transaction's rerun
+// of a unique violation recovered it).
 func AllocateGammaDepositHotkey(
 	ctx context.Context,
 	networkId server.Id,
@@ -215,7 +230,13 @@ func AllocateGammaDepositHotkey(
 	now time.Time,
 ) (hotkey *GammaDepositHotkey, returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(gammaDepositHotkeyAllocationLock)))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`/* gamma-deposit-hotkey-allocation-lock */ SELECT pg_advisory_xact_lock($1)`,
+			int64(gammaDepositHotkeyAllocationLock),
+		))
+		// a statement after the lock: its snapshot is taken once the lock is
+		// held
 		var next int64
 		server.Raise(tx.QueryRow(
 			ctx,
@@ -243,7 +264,7 @@ func AllocateGammaDepositHotkey(
 			DerivationIndex: next,
 			CreateTime:      now,
 		}
-	})
+	}, server.TxReadCommitted)
 	return
 }
 
@@ -473,10 +494,117 @@ type GammaAccountSettings struct {
 	MonthlyLimit *int64
 }
 
+// gammaSwitchOffSql is true when the switches of the account row (in table
+// account) forbid the automatic intent (in table intent): a renewal with
+// automatic renewal off; a top-up with automatic top-up off; a seat upgrade,
+// an automatic Pro charge that adds a seat, with either off. A purchase is
+// never switched off.
+func gammaSwitchOffSql(intent string, account string) string {
+	return `(
+		(` + intent + `.purpose = 'renew' AND NOT ` + account + `.auto_renew)
+		OR (` + intent + `.purpose = 'topup' AND NOT ` + account + `.auto_topup)
+		OR (` + intent + `.purpose = 'seat' AND NOT (` + account + `.auto_renew AND ` + account + `.auto_topup))
+	)`
+}
+
+// gammaIntentSwitchedOffSql is true when the account turned off the switch of
+// the row's automatic intent (in table intent): it is never charged.
+func gammaIntentSwitchedOffSql(intent string) string {
+	return `EXISTS (
+		SELECT 1 FROM gamma_account
+		WHERE gamma_account.network_id = ` + intent + `.network_id
+		  AND ` + gammaSwitchOffSql(intent, "gamma_account") + `
+	)`
+}
+
+// gammaChargeInFlightSql is true when the row's charge (table gamma_charge)
+// may still take, or has taken, the customer's gamma: pending in a spend batch
+// that can still land (signed, submitted or in review; an expired batch
+// releases its charges), or spent.
+const gammaChargeInFlightSql = `(
+	(gamma_charge.state = 'pending' AND gamma_charge.batch_id IS NOT NULL)
+	OR gamma_charge.state = 'spent'
+)`
+
+// GammaAutomaticChargeInFlight is an automatic charge whose switch is off but
+// that was already being made when it was turned off: its charge is in a spend
+// batch that can still land, or was spent and is not yet credited. A spend
+// already sent to the chain cannot be recalled, and one that lands for a
+// voided intent is never credited, so it is not voided: if it lands it is
+// charged this once, and credited as usual.
+type GammaAutomaticChargeInFlight struct {
+	IntentId server.Id
+	Purpose  string
+	Item     string
+	Amount   int64
+	// pending (in a batch) or spent (landed; its credit is next)
+	ChargeState string
+}
+
+// GetGammaSwitchedOffChargesInFlight are the account's automatic charges whose
+// switch is off that were already being made (GammaAutomaticChargeInFlight),
+// oldest first.
+func GetGammaSwitchedOffChargesInFlight(ctx context.Context, networkId server.Id) (inFlight []*GammaAutomaticChargeInFlight) {
+	server.Db(ctx, func(conn server.PgConn) {
+		inFlight = getGammaSwitchedOffChargesInFlight(ctx, conn, networkId)
+	})
+	return
+}
+
+func getGammaSwitchedOffChargesInFlight(ctx context.Context, query server.PgCanQuery, networkId server.Id) (inFlight []*GammaAutomaticChargeInFlight) {
+	result, err := query.Query(
+		ctx,
+		`
+			SELECT
+				gamma_payment_intent.intent_id,
+				gamma_payment_intent.purpose,
+				gamma_payment_intent.item,
+				gamma_payment_intent.price_usd_nano_cents,
+				gamma_charge.state
+			FROM gamma_payment_intent
+			INNER JOIN gamma_charge ON gamma_charge.intent_id = gamma_payment_intent.intent_id
+			WHERE gamma_payment_intent.network_id = $1
+			  AND gamma_payment_intent.credited_at IS NULL
+			  AND gamma_payment_intent.voided_at IS NULL
+			  AND `+gammaChargeInFlightSql+`
+			  AND `+gammaIntentSwitchedOffSql("gamma_payment_intent")+`
+			ORDER BY gamma_payment_intent.create_time, gamma_payment_intent.intent_id
+		`,
+		networkId,
+	)
+	server.WithPgResult(result, err, func() {
+		for result.Next() {
+			charge := &GammaAutomaticChargeInFlight{}
+			server.Raise(result.Scan(
+				&charge.IntentId,
+				&charge.Purpose,
+				&charge.Item,
+				&charge.Amount,
+				&charge.ChargeState,
+			))
+			inFlight = append(inFlight, charge)
+		}
+	})
+	return
+}
+
 // SetGammaAccountSettings applies the customer's switches, creating the
-// account's row (both automatic switches on) when it has none.
-func SetGammaAccountSettings(ctx context.Context, networkId server.Id, settings *GammaAccountSettings, now time.Time) {
+// account's row (both automatic switches on) when it has none. It returns the
+// account's automatic charges whose switch is now off but that were already
+// being made (GammaAutomaticChargeInFlight): each is charged this once if its
+// spend lands. Every other open automatic intent whose switch is off is voided
+// by the biller, in its own step before it charges
+// (VoidSwitchedOffGammaIntents), and no spend batch takes its charge
+// meanwhile (CreateGammaSpendBatch).
+//
+// The transaction reads committed and locks the account's row before it
+// looks. A spend batch share-locks the rows of its automatic charges'
+// accounts and reads their switches, so the two are ordered: a batch that
+// locked first has committed when this looks, and its charges are returned;
+// one that locks after this sees the switch off and records nothing.
+func SetGammaAccountSettings(ctx context.Context, networkId server.Id, settings *GammaAccountSettings, now time.Time) (inFlight []*GammaAutomaticChargeInFlight) {
 	server.Tx(ctx, func(tx server.PgTx) {
+		inFlight = nil
 		server.RaisePgResult(tx.Exec(
 			ctx,
 			`
@@ -486,6 +614,11 @@ func SetGammaAccountSettings(ctx context.Context, networkId server.Id, settings 
 			`,
 			networkId,
 			now,
+		))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`/* gamma-account-settings-lock */ SELECT 1 FROM gamma_account WHERE network_id = $1 FOR UPDATE`,
+			networkId,
 		))
 		if settings.AutoRenew != nil {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE gamma_account SET auto_renew = $2, update_time = $3 WHERE network_id = $1`, networkId, *settings.AutoRenew, now))
@@ -503,7 +636,10 @@ func SetGammaAccountSettings(ctx context.Context, networkId server.Id, settings 
 			}
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE gamma_account SET monthly_limit = $2, update_time = $3 WHERE network_id = $1`, networkId, limit, now))
 		}
-	})
+		// a statement after the lock: it sees every batch that locked first
+		inFlight = getGammaSwitchedOffChargesInFlight(ctx, tx, networkId)
+	}, server.TxReadCommitted)
+	return
 }
 
 // RecordGammaAccountPaymentInTx notes, in a credit's transaction, that the
@@ -544,12 +680,13 @@ func SetGammaAccountBalanceSample(ctx context.Context, networkId server.Id, bala
 }
 
 // NoteGammaSeatDemand records that a free account that pays with gamma hit
-// its client limit. noted = false when the account does not pay with gamma.
+// its client limit. noted = false when the account does not pay with gamma,
+// or a switch a seat upgrade needs is off (gammaIntentSwitchedOffSql).
 func NoteGammaSeatDemand(ctx context.Context, networkId server.Id, now time.Time) (noted bool) {
 	server.Tx(ctx, func(tx server.PgTx) {
 		tag := server.RaisePgResult(tx.Exec(
 			ctx,
-			`UPDATE gamma_account SET seat_demand_at = $2 WHERE network_id = $1 AND hotkey IS NOT NULL AND auto_topup`,
+			`UPDATE gamma_account SET seat_demand_at = $2 WHERE network_id = $1 AND hotkey IS NOT NULL AND auto_topup AND auto_renew`,
 			networkId,
 			now,
 		))
@@ -755,6 +892,69 @@ func VoidReplacedGammaPlanIntentsInTx(tx server.PgTx, ctx context.Context, netwo
 	return
 }
 
+// ----- a switch turned off -----
+
+// VoidSwitchedOffGammaIntents voids every open automatic intent whose switch
+// its account turned off (gammaSwitchOffSql): a renewal with automatic
+// renewal off, a top-up with automatic top-up off, a seat upgrade with either
+// off. Never one whose charge is in flight (in a spend batch that can still
+// land, or spent and not yet credited): a spend that lands for a voided intent
+// is never credited, so that charge goes ahead, as the settings answer says
+// (SetGammaAccountSettings). A voided intent's pending charge in no batch is
+// voided with it (GammaChargeVoided), and a skipped or failed one is never
+// re-armed. A voided intent gives up its period (period_key), so the switch
+// turned back on makes a new intent for the same term, hour or day: the voided
+// one can never be charged.
+//
+// Only the biller calls this, in its own step before it charges: no spend
+// batch is being made then, so a charge seen in no batch stays in none. The
+// voided intents are returned.
+func VoidSwitchedOffGammaIntents(ctx context.Context, now time.Time) (voided []*GammaPaymentIntent) {
+	server.Tx(ctx, func(tx server.PgTx) {
+		voided = nil
+		result, err := tx.Query(
+			ctx,
+			`
+				UPDATE gamma_payment_intent
+				SET voided_at = $1, period_key = NULL
+				WHERE credited_at IS NULL
+				  AND voided_at IS NULL
+				  AND purpose IN ('renew', 'topup', 'seat')
+				  AND `+gammaIntentSwitchedOffSql("gamma_payment_intent")+`
+				  AND NOT EXISTS (
+					SELECT 1 FROM gamma_charge
+					WHERE gamma_charge.intent_id = gamma_payment_intent.intent_id
+					  AND `+gammaChargeInFlightSql+`
+				  )
+				RETURNING `+gammaPaymentIntentColumns,
+			now,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				voided = append(voided, scanGammaPaymentIntent(result))
+			}
+		})
+		if len(voided) == 0 {
+			return
+		}
+		intentIds := make([]server.Id, 0, len(voided))
+		for _, intent := range voided {
+			intentIds = append(intentIds, intent.IntentId)
+		}
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				UPDATE gamma_charge
+				SET state = 'voided', resolved_at = $2
+				WHERE intent_id = ANY($1) AND state = 'pending' AND batch_id IS NULL
+			`,
+			intentIds,
+			now,
+		))
+	})
+	return
+}
+
 // ----- account deletion -----
 
 // gammaChargeInFlightInTx reports, under the deletion's lock on the network
@@ -830,7 +1030,9 @@ type GammaPaymentIntent struct {
 	NetworkId              server.Id
 	Hotkey                 string
 	Purpose                string
-	// automatic intents: what period the intent is for; nil for a purchase
+	// automatic intents: what period the intent is for; nil for a purchase,
+	// and for an automatic intent voided when its switch was turned off (it
+	// gives up its period: VoidSwitchedOffGammaIntents)
 	PeriodKey *string
 	// the public 32-byte spend reference, random, made with the intent
 	Reference                []byte
@@ -1065,6 +1267,7 @@ func AddGammaPaymentIntentStatusToken(ctx context.Context, intentId server.Id, t
 
 // ListChargeableGammaPaymentIntents are the open intents with no charge yet
 // whose network still exists, oldest first: what the biller may charge next.
+// An automatic intent whose switch the account turned off is not among them.
 func ListChargeableGammaPaymentIntents(ctx context.Context, now time.Time, limit int) (intents []*GammaPaymentIntent) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1076,6 +1279,7 @@ func ListChargeableGammaPaymentIntents(ctx context.Context, now time.Time, limit
 				SELECT 1 FROM gamma_charge WHERE gamma_charge.intent_id = gamma_payment_intent.intent_id
 			  )
 			  AND `+gammaNetworkLiveSql("gamma_payment_intent")+`
+			  AND NOT `+gammaIntentSwitchedOffSql("gamma_payment_intent")+`
 			ORDER BY create_time
 			LIMIT $2`,
 			now,
@@ -1305,7 +1509,8 @@ const gammaChargePayableSql = `
 // ListUnbatchedGammaCharges are the pending charges in no batch whose intent
 // is still open and whose network still exists, oldest first: the charges the
 // next batch may carry. A pending charge of a deleted account (or of an intent
-// voided with it) stays out of every batch.
+// voided with it) stays out of every batch, and so does one of an automatic
+// intent whose switch the account turned off (the biller voids it).
 func ListUnbatchedGammaCharges(ctx context.Context, limit int) (charges []*GammaCharge) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
@@ -1315,6 +1520,7 @@ func ListUnbatchedGammaCharges(ctx context.Context, limit int) (charges []*Gamma
 			INNER JOIN gamma_payment_intent ON gamma_payment_intent.intent_id = gamma_charge.intent_id
 			WHERE gamma_charge.state = 'pending' AND gamma_charge.batch_id IS NULL
 			  AND `+gammaChargePayableSql+`
+			  AND NOT `+gammaIntentSwitchedOffSql("gamma_payment_intent")+`
 			ORDER BY gamma_charge.create_time
 			LIMIT $1`,
 			limit,
@@ -1605,11 +1811,17 @@ var ErrGammaBatchLive = errors.New("a gamma spend batch is already live, or a ch
 // charge stays out of every batch.
 var ErrGammaChargeNotPayable = errors.New("a gamma charge's intent is no longer open or its network no longer exists")
 
+// ErrGammaChargeSwitchedOff: the account turned off the switch of an
+// automatic charge (SetGammaAccountSettings) after it was recorded; nothing
+// was written, and the biller voids the intent before its next batch
+// (VoidSwitchedOffGammaIntents). It is an ErrGammaChargeNotPayable.
+var ErrGammaChargeSwitchedOff = fmt.Errorf("%w: the account turned an automatic charge's switch off", ErrGammaChargeNotPayable)
+
 // CreateGammaSpendBatch records a signed batch and assigns its charges, in
 // one transaction, before the batch is ever submitted. It fails, writing
 // nothing, when a batch is already live, any charge is no longer a pending
-// charge in no batch, or any charge's intent is no longer open or its network
-// no longer exists.
+// charge in no batch, any charge's intent is no longer open or its network
+// no longer exists, or the account turned an automatic charge's switch off.
 //
 // The charges' networks are key-share locked first, the lock every credit
 // takes, so an account deletion (which locks its network for update) is
@@ -1617,6 +1829,14 @@ var ErrGammaChargeNotPayable = errors.New("a gamma charge's intent is no longer 
 // out of the batch, and one that waits sees them in a live batch and refuses
 // (RemoveNetworkWithStoreSnapshot), so no batch ever carries a charge for an
 // account that is gone.
+//
+// The automatic charges' accounts are then share-locked, and their switches
+// read, so a settings change that turns a switch off is ordered with the
+// batch too: one that waits sees the charges in flight
+// (SetGammaAccountSettings), and one that committed first is read here (a
+// row it changed after this transaction's snapshot fails the lock with a
+// serialization failure, and the transaction runs again with a fresh one), so
+// no batch carries a charge whose switch the customer was told is off.
 func CreateGammaSpendBatch(ctx context.Context, batch *GammaSpendBatch, references [][]byte) (returnErr error) {
 	server.HandleError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
@@ -1651,6 +1871,32 @@ func CreateGammaSpendBatch(ctx context.Context, batch *GammaSpendBatch, referenc
 			})
 			if payable != len(references) {
 				panic(ErrGammaChargeNotPayable)
+			}
+			switchedOff := false
+			result, err = tx.Query(
+				ctx,
+				`
+					/* gamma-spend-batch-account-lock */
+					SELECT `+gammaSwitchOffSql("gamma_payment_intent", "gamma_account")+`
+					FROM gamma_charge
+					INNER JOIN gamma_payment_intent ON gamma_payment_intent.intent_id = gamma_charge.intent_id
+					INNER JOIN gamma_account ON gamma_account.network_id = gamma_payment_intent.network_id
+					WHERE gamma_charge.reference = ANY($1)
+					  AND gamma_payment_intent.purpose <> 'purchase'
+					ORDER BY gamma_account.network_id
+					FOR SHARE OF gamma_account
+				`,
+				references,
+			)
+			server.WithPgResult(result, err, func() {
+				for result.Next() {
+					var off bool
+					server.Raise(result.Scan(&off))
+					switchedOff = switchedOff || off
+				}
+			})
+			if switchedOff {
+				panic(ErrGammaChargeSwitchedOff)
 			}
 			tag := server.RaisePgResult(tx.Exec(
 				ctx,

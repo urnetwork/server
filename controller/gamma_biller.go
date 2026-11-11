@@ -30,8 +30,10 @@ package controller
 //     charge for each open intent its deposit can pay (spendable, our
 //     spender, nothing else pending ahead of it); then signs at most one batch
 //     of up to 512 charges, records it with its exact bytes, and submits it
-//  6. credits every intent whose charge was spent (the one-shot), and sends
-//     the notice of a skipped automatic charge once
+//  6. credits every intent whose charge was spent (the one-shot); voids the
+//     automatic intents whose switch the account turned off, unless their
+//     charge is already in flight; and sends the notice of a skipped
+//     automatic charge once
 //  7. every few minutes, the automatic demand: renewals at the end of a term,
 //     data top-ups when the balance runs out, Pro for a free account at its
 //     client limit, each one intent per (account, purpose, period) and
@@ -117,6 +119,47 @@ const (
 	GammaMaxCreditFailures           = gammaMaxCreditFailures
 	GammaAlarmKindBatchUnfulfillable = gammaAlarmBatchUnfulfillable
 )
+
+// What the monitor reads (SIGNALS.md §2.22b, gamma-watcher): the watcher's
+// other alarm kinds, and the readiness that sells.
+const (
+	GammaAlarmKindCreditUnfulfillable = gammaAlarmCreditUnfulfillable
+	GammaAlarmKindUnknownReference    = gammaAlarmUnknownReference
+	GammaAlarmKindDuplicateReference  = gammaAlarmDuplicateReference
+	GammaAlarmKindSpendMismatch       = gammaAlarmSpendMismatch
+	GammaAlarmKindSpenderProxyChanged = gammaAlarmSpenderProxyChanged
+	GammaAlarmKindUnknownBillingTx    = gammaAlarmUnknownBillingTx
+	GammaAlarmKindUnexpectedNonce     = gammaAlarmUnexpectedNonce
+	GammaAlarmKindRuntimeUnsupported  = gammaAlarmRuntimeUnsupported
+	GammaAlarmKindUndecodableBlock    = gammaAlarmUndecodableBlock
+	GammaAlarmKindServiceChanged      = gammaAlarmServiceChanged
+	GammaAlarmKindStrayTao            = gammaAlarmStrayTao
+	GammaReadinessReady               = gammaReady
+)
+
+// GammaAlarmKinds are every alarm kind the biller records.
+func GammaAlarmKinds() []string {
+	return []string{
+		gammaAlarmUnknownReference,
+		gammaAlarmDuplicateReference,
+		gammaAlarmSpendMismatch,
+		gammaAlarmSpenderProxyChanged,
+		gammaAlarmUnknownBillingTx,
+		gammaAlarmUnexpectedNonce,
+		gammaAlarmRuntimeUnsupported,
+		gammaAlarmUndecodableBlock,
+		gammaAlarmStrayTao,
+		gammaAlarmServiceChanged,
+		gammaAlarmCreditUnfulfillable,
+		gammaAlarmBatchUnfulfillable,
+	}
+}
+
+// GammaReadinessReasons are every readiness the biller records: ready, or
+// why it charges nothing.
+func GammaReadinessReasons() []string {
+	return slices.Clone(gammaReadinessReasons)
+}
 
 // The credits each run tries, the fewest failures first.
 const gammaCreditsPerRun = 200
@@ -299,6 +342,9 @@ func (self *gammaBiller) run(result *GammaBillerResult) {
 	}
 	self.observe()
 	result.Credited = self.credit()
+	// before anything is charged, and before a skip notice for a charge the
+	// customer turned off goes out
+	self.voidSwitchedOff()
 	self.sendSkipNotices()
 	self.autoDemand()
 	if self.readiness == gammaReady {
@@ -1043,6 +1089,20 @@ func (self *gammaBiller) credit() (credited int) {
 		}
 	}
 	return
+}
+
+// voidSwitchedOff voids the automatic intents whose switch the account
+// turned off (POST /pay/gamma/settings): a renewal with automatic renewal
+// off, a top-up with automatic top-up off, a seat upgrade with either off.
+// It runs in the biller's own step, before charge, which is the only place a
+// spend batch is made: a charge in no batch now stays in none, and one in a
+// batch that can still land is left to land (the settings answer said so).
+// A switch turned off after this step is read again by the batch itself
+// (model.CreateGammaSpendBatch).
+func (self *gammaBiller) voidSwitchedOff() {
+	for _, intent := range model.VoidSwitchedOffGammaIntents(self.ctx, self.now) {
+		glog.Infof("[gamma]%s intent %s of network %s voided: its switch is off\n", intent.Purpose, intent.IntentId, intent.NetworkId)
+	}
 }
 
 func (self *gammaBiller) sendSkipNotices() {

@@ -355,3 +355,39 @@ func assertInTunnelOnlyResolverFamily(t *testing.T, s *connect.DnsResolverSettin
 		t.Fatalf("a family-kept resolver gained a host-side path: %+v", s)
 	}
 }
+
+// A regional recommendation's resolver, which races the tunnel's own in cn,
+// ru, ir, tr, kz and tm (providerDnsResolvers), keeps to the provider's
+// family's servers as the tunnel's own does: a dual-stack provider in cn
+// races cn's IPv4 servers alone, though cn's recommendation has IPv6 servers
+// too, and an IPv4 provider's racing resolver is as it was.
+func TestDualStackTunnelRaceResolverKeepsToOneFamilysServers(t *testing.T) {
+	if len(connect.RegionalDnsServerIpv6s("cn")) == 0 || len(connect.RegionalDnsServerIps("cn")) == 0 {
+		t.Fatal("the fixture needs cn's recommendation to name servers of both families")
+	}
+	original := newRaceDohCache
+	t.Cleanup(func() { newRaceDohCache = original })
+	for _, c := range []struct {
+		family connect.IpFamily
+		ipv6   bool
+	}{
+		{connect.IpFamilyDualstack, false},
+		{connect.IpFamilyV4Only, true},
+	} {
+		var raced *connect.DnsResolverSettings
+		newRaceDohCache = func(tun *connect.Tun, resolver *connect.DnsResolverSettings) *connect.DohCache {
+			raced = resolver
+			return original(tun, resolver)
+		}
+		cfg := dummyOpenConfig()
+		cfg.ProviderIpFamily, cfg.ProviderCountry = c.family, "cn"
+		tunnel, err := Open(context.Background(), cfg, connect.NewId())
+		if err != nil {
+			t.Fatal(err)
+		}
+		tunnel.Close()
+		if raced == nil || len(raced.RemoteDnsIpv4) == 0 || (0 < len(raced.RemoteDnsIpv6)) != c.ipv6 {
+			t.Fatalf("%q: racing resolver %+v; IPv6 servers kept %t, want %t", c.family, raced, raced != nil && 0 < len(raced.RemoteDnsIpv6), c.ipv6)
+		}
+	}
+}

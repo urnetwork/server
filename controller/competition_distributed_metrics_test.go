@@ -57,6 +57,9 @@ func insertCompetitionDistributedMetricTestRound(t testing.TB, fixture *competit
 	server.Tx(t.Context(), func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(t.Context(), `ALTER TABLE competition_round DISABLE TRIGGER competition_v2_round_source`))
 		server.RaisePgResult(tx.Exec(t.Context(), `ALTER TABLE competition_round DISABLE TRIGGER competition_v2_round_reserved_identity`))
+		// Like the shared future-round fixture, this synthetic row has no
+		// activated source. Only source-installation guards are suspended here.
+		server.RaisePgResult(tx.Exec(t.Context(), `ALTER TABLE competition_round DISABLE TRIGGER competition_work_coverage_round`))
 		server.RaisePgResult(tx.Exec(t.Context(), `INSERT INTO competition_round(round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,
 		 seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled,finalized_at,automation_sealed_at)
 		 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,false,$15,$16)`,
@@ -64,6 +67,7 @@ func insertCompetitionDistributedMetricTestRound(t testing.TB, fixture *competit
 			round.ProvidersSha256, round.ProvidersPath, string(round.PolicyJson), round.OpensAt, round.ClosesAt, round.RevealAt, round.CreatedAt, finalizedAt, sealedAt))
 		server.RaisePgResult(tx.Exec(t.Context(), `ALTER TABLE competition_round ENABLE TRIGGER competition_v2_round_source`))
 		server.RaisePgResult(tx.Exec(t.Context(), `ALTER TABLE competition_round ENABLE TRIGGER competition_v2_round_reserved_identity`))
+		server.RaisePgResult(tx.Exec(t.Context(), `ALTER TABLE competition_round ENABLE TRIGGER competition_work_coverage_round`))
 	})
 }
 
@@ -82,6 +86,7 @@ func TestCompetitionDistributedMetricsIgnorePriorSeasonForCurrentSingleton(t *te
 		current.AutomationPolicy.SeasonId = "synthetic-current-season"
 		current.DistributedEvaluationPolicy = nil
 		current.EvaluationPolicy.G2VolumePolicy = model.CompetitionG2VolumePolicyLegacy
+		current.EvaluationPolicy.WorkCoveragePolicy = nil
 		insertCompetitionDistributedMetricTestRound(tb, fixture, &current, 1, fixture.clock.Now(), nil, nil)
 		competitionExecutorRemoteState.WithLabelValues("synthetic-prior-executor").Set(3)
 		competitionWorkerHeartbeatAge.Set(37)

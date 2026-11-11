@@ -285,6 +285,12 @@ func TestCompetitionDistributedMergedCompletionRechecksDeadlineAfterBaseline(t *
 		outcome := testSharedBaselineOutcome(tb, settings, job, EvaluationOutcome{Score: competitionRankingScore(90, 110), distributedArchiveVerified: true})
 		outcome.Score.Diagnostics["g2_volume_policy"] = string(settings.EvaluationPolicy.G2VolumePolicy)
 		outcome.Score.Diagnostics["scorer_version"] = settings.scorerVersion()
+		// Exercise the deadline boundary with a valid frozen coverage score,
+		// rather than failing policy validation before the baseline hook.
+		if settings.EvaluationPolicy.WorkCoveragePolicy != nil {
+			outcome.Score.Diagnostics["work_coverage_policy"] = settings.EvaluationPolicy.WorkCoveragePolicy
+			outcome.Score.Gates["G7_work_coverage"] = Gate{Passed: true, Details: map[string]any{"policy": settings.EvaluationPolicy.WorkCoveragePolicy}}
+		}
 		hookCalls := 0
 		fixture.store.afterCompletionBaselineForTest = func() {
 			hookCalls++

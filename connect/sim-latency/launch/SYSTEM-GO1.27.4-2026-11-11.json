@@ -29,7 +29,13 @@
     "frozen_image_version_verified_by_readonly_network_disabled_container": true,
     "verified_image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9",
     "frozen_image_or_baseline_not_silently_replaced": true,
-    "user_choice_of_epoch2_amendment_or_epoch3_start_pending": true,
+    "user_choice_of_epoch2_amendment_or_epoch3_start_pending": false,
+    "approved_epoch": 2,
+    "security_hotfix_exception_approved": true,
+    "existing_baseline_reuse_explicitly_approved": true,
+    "replacement_baseline_or_statistical_recalibration_required": false,
+    "preserved_baseline_sha256": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
+    "remaining_work": "Build and identify the Go1.27.4 evaluator, record the explicit execution-identity amendment without relabeling existing Go1.27.3 measurements, and verify compatibility and containment before starting scoring.",
     "scoring_not_started": true
   }
 }

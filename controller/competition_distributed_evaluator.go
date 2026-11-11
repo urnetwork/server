@@ -87,6 +87,9 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 		return failure("round_policy_mismatch", "distributed evaluation does not match its immutable round and shared baseline")
 	}
 	settings = frozen
+	if err := validateCompetitionSecurityToolchainScope(settings, &job.Round, job.RoundBaseline); err != nil {
+		return failure("round_policy_mismatch", "security toolchain exception does not match the retained epoch control")
+	}
 	ctx, cancel := context.WithDeadline(parent, *job.ExecutionDeadline)
 	defer cancel()
 	manifest, inputDirectory, err := prepareCompetitionAgentBundle(ctx, settings, job, self.host)
@@ -212,7 +215,12 @@ func prepareCompetitionAgentBundle(ctx context.Context, settings *Settings, job 
 	}
 	request := evaluatorRequestForJob(settings, job, seed, ".", "canonical.patch", "providers.yml")
 	request.RoundBaselinePath, request.ConfigLocalDirectory, request.VaultLocalDirectory = "round-baseline.json", "@config-local", "@vault-local"
-	request.EvaluationPolicy.HostQualificationSha256 = host.QualificationSha256
+	request.EvaluationPolicy.HostQualificationSha256 = manifest.QualificationSha256
+	request.EvaluatorImageDigest = manifest.EvaluatorImageDigest
+	if value := competitionExecutionSecurityToolchain(settings); value != nil {
+		request.EvaluationPolicy.SimulatorSha256 = value.InstrumentSha256
+		request.EvaluationPolicy.ScorerSha256 = value.InstrumentSha256
+	}
 	manifest.EvaluatorRequest, err = json.Marshal(request)
 	request.RoundSeedHex = ""
 	return manifest, directory, err
@@ -324,6 +332,7 @@ func authenticateDistributedCompetitionAttempt(ctx context.Context, settings *Se
 		return failure("artifact_authentication_failed", "executor changed the canonical patch or omitted stderr")
 	}
 	manifest := artifactManifest{Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(), SourceEpoch: evaluationSourceEpoch(&job.Round), Attempt: job.AttemptCount,
+		SecurityToolchainException: competitionExecutionSecurityToolchain(settings), ExecutionEvaluatorImageDigest: competitionSecurityToolchainExecutionDigest(settings),
 		EvaluatorImageDigest: job.EvaluatorImageDigest, ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest, EvaluatorCommandSha256: start.EvaluatorCommandSha256,
 		RequestSha256: response.RequestSha256, PatchSha256: patchHash, StderrSha256: stderrHash, ResultSha256: hex.EncodeToString(resultDigest[:]), Security: result.Security, Artifacts: artifacts, Executor: executor}
 	if err := sealArtifactDirectory(directory); err != nil || settings.artifactArchive == nil {
@@ -428,6 +437,7 @@ func archiveDistributedCompetitionFailure(ctx context.Context, settings *Setting
 		return EvaluationOutcome{Error: failure}
 	}
 	manifest := artifactManifest{Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(), SourceEpoch: evaluationSourceEpoch(&job.Round), Attempt: job.AttemptCount,
+		SecurityToolchainException: competitionExecutionSecurityToolchain(settings), ExecutionEvaluatorImageDigest: competitionSecurityToolchainExecutionDigest(settings),
 		EvaluatorImageDigest: job.EvaluatorImageDigest, ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest, EvaluatorCommandSha256: start.EvaluatorCommandSha256,
 		RequestSha256: response.RequestSha256, PatchSha256: patchHash, StderrSha256: stderrHash, Executor: executor, Failure: failure, Artifacts: []evaluationArtifact{receipt}}
 	archived, err := settings.artifactArchive.ArchiveAttempt(ctx, settings, job, directory, manifest)

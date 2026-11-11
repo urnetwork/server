@@ -56,6 +56,9 @@ func runCompetitionDistributedCoordinator(ctx context.Context, settings *Setting
 		if baseline != nil {
 			break
 		}
+		if settings.securityToolchainException != nil {
+			return errors.New("security toolchain exception requires the existing baseline; it cannot prepare a replacement")
+		}
 		if _, err := bootstrap.claimWithPreparedRoundBaseline(ctx, hostCheck); err != nil && !errors.Is(err, ErrAutomationHeld) {
 			return err
 		}
@@ -67,6 +70,16 @@ func runCompetitionDistributedCoordinator(ctx context.Context, settings *Setting
 			return ctx.Err()
 		case <-time.After(settings.distributedCoordinator.Config.Settings.PollInterval):
 		}
+	}
+	round, err := store.GetRound(ctx, settings, store.roundId)
+	if err != nil {
+		return err
+	}
+	if err := validateCompetitionSecurityToolchainScope(settings, round, baseline); err != nil {
+		return err
+	}
+	if err := store.PostgresStore.recordCompetitionSecurityToolchainException(ctx, settings, round, baseline); err != nil {
+		return err
 	}
 	if err := qualifyCompetitionDistributedHosts(ctx, settings, store, baseline); err != nil {
 		return err

@@ -1,0 +1,26 @@
+# An explicitly approved toolchain-only exception starts from the exact frozen
+# image. Product sources, dependencies and workload inputs are not refreshed.
+# This build does not authorize execution or replace historical measurements.
+ARG FROZEN_IMAGE
+FROM ${FROZEN_IMAGE}
+USER 0:0
+COPY toolchain/ /opt/urnetwork/security-toolchain/
+ARG MANAGEMENT_CPUS=20,22
+ENV GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOMAXPROCS=2 \
+    GOROOT=/opt/urnetwork/security-toolchain \
+    PATH=/opt/urnetwork/security-toolchain/bin:/usr/local/go/bin:/opt/urnetwork/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+WORKDIR /workspace/server
+RUN --network=none test "$(go env GOVERSION)" = go1.27.4 \
+    && taskset -c "${MANAGEMENT_CPUS}" go build -p=1 -mod=readonly -trimpath -o /usr/local/libexec/competitionpatch ./cli/competitionpatch \
+    && taskset -c "${MANAGEMENT_CPUS}" go build -p=1 -mod=readonly -trimpath -o /usr/local/libexec/competitiondbinit ./cli/competitiondbinit \
+    && taskset -c "${MANAGEMENT_CPUS}" go build -p=1 -mod=readonly -trimpath -o /opt/urnetwork/bin/sim-latency ./connect/sim-latency \
+    && taskset -c "${MANAGEMENT_CPUS}" go test -p=1 -mod=readonly -list '^TestScoreProducesSharedContract$' ./connect/sim-latency | grep -Fx TestScoreProducesSharedContract \
+    && taskset -c "${MANAGEMENT_CPUS}" go test -p=1 -mod=readonly -run '^TestScoreProducesSharedContract$' -count=1 ./connect/sim-latency \
+    && test -z "$(git status --porcelain --untracked-files=all)" \
+    && jq --arg simulator_sha256 "$(sha256sum /opt/urnetwork/bin/sim-latency | awk '{print $1}')" \
+        '.simulator_sha256 = $simulator_sha256' /opt/urnetwork/image-identity.json > /opt/urnetwork/image-identity.hotfix.json \
+    && mv /opt/urnetwork/image-identity.hotfix.json /opt/urnetwork/image-identity.json \
+    && chmod 0444 /opt/urnetwork/image-identity.json
+LABEL com.urnetwork.competition.toolchain-exception="security-hotfix" \
+      com.urnetwork.competition.toolchain="go1.27.4"
+USER 65532:65532

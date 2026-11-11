@@ -162,6 +162,8 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 			server.Raise(baselineErr)
 			server.Raise(validateRoundBaselineRecord(settings, &job.Round, baseline))
 			job.RoundBaseline = baseline
+			server.Raise(validateCompetitionSecurityToolchainScope(settings, &job.Round, baseline))
+			server.Raise(requireCompetitionSecurityToolchainDecisionInTx(ctx, tx, settings, baseline))
 			if settings.roundBaselinePreparation != nil {
 				allowed, gateErr := self.allowPreparedRoundBaselineClaimInTx(ctx, tx, settings, job, baseline)
 				server.Raise(gateErr)
