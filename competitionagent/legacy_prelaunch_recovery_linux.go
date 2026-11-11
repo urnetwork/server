@@ -76,6 +76,9 @@ func newLegacyPrelaunchNativeHost(agent *Agent, authorization LegacyPrelaunchAut
 	if agent == nil || !agent.recoveryOnly || authorization.Sshd.Path != "/usr/sbin/sshd" || filepath.Base(authorization.RecoveryService.Path) != managementRecoveryServiceName {
 		return nil, errors.New("legacy closure omitted its fixed native role")
 	}
+	if _, err := validateLegacyPrelaunchPrior(path, authorization, agent.settings, agent.protected); err != nil {
+		return nil, err
+	}
 	manager, err := recoverySystemctlPin(agent.config, agent.settings, agent.protected)
 	if err != nil {
 		return nil, err
@@ -120,6 +123,9 @@ func (self *legacyPrelaunchNativeHost) command(ctx context.Context, pin Pin, arg
 // Key bytes and effective configuration never leave the native proof owner.
 func (self *legacyPrelaunchNativeHost) ingress(ctx context.Context) error {
 	authorization := self.authorization
+	if _, err := validateLegacyPrelaunchPrior(self.authorizationPath, authorization, self.agent.settings, self.agent.protected); err != nil {
+		return err
+	}
 	if err := validateLegacyPrelaunchIngressPins(authorization, self.agent.settings, self.agent.protected); err != nil {
 		return err
 	}
@@ -139,18 +145,35 @@ func (self *legacyPrelaunchNativeHost) ingress(ctx context.Context) error {
 	if err != nil {
 		return errors.New("legacy effective SSH ingress is unavailable")
 	}
+	if err := validateLegacyPrelaunchSshdProjection(content, authorization, self.agent.settings.DiagnosticBytes); err != nil {
+		return err
+	}
+	return self.boot(ctx)
+}
+
+// sshd -T legitimately repeats unrelated list keys such as hostkey. Only the
+// three exact routing-authority keys must be present once and match their pins.
+func validateLegacyPrelaunchSshdProjection(content []byte, authorization LegacyPrelaunchAuthorization, maximum int64) error {
+	if maximum <= 0 || int64(len(content)) > maximum {
+		return errors.New("legacy effective SSH ingress exceeded its owner bound")
+	}
 	values := map[string]string{}
 	for _, line := range strings.Split(strings.TrimSuffix(string(content), "\n"), "\n") {
 		key, value, found := strings.Cut(line, " ")
-		if !found || values[key] != "" {
+		if !found || key == "" {
 			return errors.New("legacy effective SSH ingress is ambiguous")
 		}
-		values[key] = value
+		if key == "forcecommand" || key == "authorizedkeysfile" || key == "authorizedkeyscommand" {
+			if _, duplicate := values[key]; duplicate {
+				return errors.New("legacy effective SSH ingress repeats routing authority")
+			}
+			values[key] = value
+		}
 	}
 	if values["forcecommand"] != "/usr/bin/sudo -n -- "+authorization.IngressWrapper.Path || values["authorizedkeysfile"] != authorization.AuthorizedKeys.Path || values["authorizedkeyscommand"] != "none" {
 		return errors.New("legacy effective SSH ingress differs from its exact fixed route")
 	}
-	return self.boot(ctx)
+	return nil
 }
 
 // Executable pins and document pins retain their different existing bounds.
@@ -560,7 +583,11 @@ func (self *legacyPrelaunchNativeHost) Verify(ctx context.Context) ([]byte, erro
 	if err := self.noLaunchers(ctx); err != nil {
 		return nil, err
 	}
-	expected, err := RenderLegacyPrelaunchOwnerDenial(self.authorizationPath)
+	fenceAuthorizationPath := self.authorizationPath
+	if self.authorization.PriorAuthorization != nil {
+		fenceAuthorizationPath = self.authorization.PriorAuthorization.Path
+	}
+	expected, err := RenderLegacyPrelaunchOwnerDenial(fenceAuthorizationPath)
 	content, readErr := readRecoveryAuthority(self.authorization.OwnerStartDenial, self.agent.settings.ConfigBytes, self.agent.protected)
 	owner := dockerOwnerUnitName(self.authorization.RunId)
 	if err != nil || readErr != nil || !bytes.Equal(expected, content) || self.authorization.OwnerStartDenial.Path != "/etc/systemd/system/"+owner+".d/99-legacy-prelaunch-closure.conf" {
