@@ -71,8 +71,12 @@
   "subsequent_go1.27.4_request": {
     "evidence": "SYSTEM-GO1.27.4-2026-11-11.json",
     "system_upgrade_verified_on_both_hosts": true,
-    "competition_epoch_timing_choice_pending": true,
+    "competition_epoch_timing_choice_pending": false,
+    "approved_epoch": 2,
+    "security_hotfix_exception_approved": true,
+    "existing_baseline_reuse_explicitly_approved": true,
+    "replacement_baseline_or_statistical_recalibration_required": false,
     "current_frozen_go1.27.3_instrument_not_replaced": true
   },
-  "next_action": "Main migration953 is verified. Obtain the scope of the newly requested competition Go1.27.4 change. If epoch2 keeps its frozen instrument, register the exact approved exception and verify real FIFO execution on both hosts. If Go1.27.4 applies now, prepare and qualify a separately authorized instrument/baseline amendment; the retained Go1.27.3 admission cannot qualify a changed instrument. Do not start old-instrument scoring silently while this decision is pending."
+  "next_action": "Main migration953 is verified. The user explicitly approved Go1.27.4 for epoch2 as a security-hotfix exception with the existing baseline, without fresh statistical calibration. Build and record the new evaluator execution identity, retain original Go1.27.3 measurement provenance, verify compatibility and containment, register the approved retained admission exception, and verify actual FIFO scoring on both hosts."
 }

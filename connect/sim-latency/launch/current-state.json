@@ -3,9 +3,14 @@
   "observed_at": "2026-11-11T09:18:03Z",
   "latest_system_go1_27_4": {
     "evidence": "SYSTEM-GO1.27.4-2026-11-11.json",
+    "epoch2_exception_evidence": "EPOCH2-GO1.27.4-SECURITY-EXCEPTION-2026-11-11.json",
     "system_upgrade_complete_on_sille_and_goofe": true,
     "old_toolchains_preserved": true,
-    "competition_epoch_timing_choice_pending": true,
+    "competition_epoch_timing_choice_pending": false,
+    "approved_epoch": 2,
+    "security_hotfix_exception_approved": true,
+    "existing_baseline_reuse_explicitly_approved": true,
+    "replacement_baseline_or_statistical_recalibration_required": false,
     "current_frozen_go1_27_3_instrument_not_replaced": true,
     "scoring_not_started": true
   },
@@ -25,7 +30,7 @@
     "pinned_worker_installed_not_started": true,
     "grading_ready": false,
     "customer_evaluation_clocks_started": 0,
-    "next_action": "All checks and migration953 passed. Await the epoch scope of the newly requested Go1.27.4 competition change before activation. Preserve the current frozen instrument and retained failed judgement. Earlier entries below are historical."
+    "next_action": "Apply the approved epoch-2 Go1.27.4 security-hotfix exception while preserving the existing baseline and historical Go1.27.3 evidence. Record the new execution identity, verify compatibility and containment, register the approved retained admission exception, then verify actual FIFO scoring on both hosts. No replacement baseline or statistical recalibration. Earlier entries below are historical."
   },
   "latest_single_admission_recovery": {
     "evidence": "EPOCH2-SINGLE-ADMISSION-RECOVERY-2026-11-11.json",
