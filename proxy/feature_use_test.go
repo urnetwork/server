@@ -48,12 +48,32 @@ func (self *testFeatureUseNotes) taken() []testFeatureUseNote {
 	return notes
 }
 
+// pro.yml's proxy plans as they ship: SOCKS and WireGuard in Pro and not in
+// free, enforcement dark. model.Pro() parses pro.yml once per process, and a
+// test before this one may have parsed a pro.yml of its own
+// (configureHttpBudgetTest), so a test that depends on the plans sets them on
+// the parsed config until it ends.
+func testFeatureUseProOnlyPlans(t testing.TB) {
+	c := model.Pro()
+	free, pro, enforce := c.Free, c.Pro, c.EnforceFeatures
+	c.Free.SocksProxy, c.Free.WireguardProxy = false, false
+	c.Pro.SocksProxy, c.Pro.WireguardProxy = true, true
+	c.EnforceFeatures = false
+	t.Cleanup(func() {
+		c.Free.SocksProxy, c.Free.WireguardProxy = free.SocksProxy, free.WireguardProxy
+		c.Pro.SocksProxy, c.Pro.WireguardProxy = pro.SocksProxy, pro.WireguardProxy
+		c.EnforceFeatures = enforce
+	})
+}
+
 // A sign-in with the proxy's signed credentials notes SOCKS use, whether the
 // plan admits it or refuses it: once enforcement is on, a network still
 // signing in is told SOCKS stopped. A credential that is not a proxy's signed
 // id, or a malformed caller, notes nothing.
 func TestSocksSignInNotesSocksUseWhateverThePlanAnswers(t *testing.T) {
-	configureHttpBudgetTest(t)
+	// only the signing secret: the plan is read through the manager's reader
+	// below, so this test never parses pro.yml for the process
+	t.Cleanup(server.Vault.PushSimpleResource("proxy.yml", []byte("secrets:\n  - synthetic-feature-use-secret\n")))
 	manager := newHttpConnectTestManager(t)
 	notes := &testFeatureUseNotes{}
 	manager.featureUseNoter = notes.note
@@ -234,6 +254,7 @@ func TestProxyRecordsSocksAndWireguardUseForTheProFeaturesNotice(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
+		testFeatureUseProOnlyPlans(t)
 		featureUses := model.NewProxyFeatureUses(context.Background(), model.DefaultProxyFeatureUseSettings())
 		defer featureUses.Close()
 		opts := defaultProxyTestOptions()

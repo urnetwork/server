@@ -69,6 +69,23 @@ func testProFeaturesWgAddresses(t testing.TB, ctx context.Context) {
 	})
 }
 
+// pro.yml's proxy plans as they ship: SOCKS and WireGuard in Pro and not in
+// free, enforcement dark. Pro() parses pro.yml once per process, so a test
+// that depends on them must not depend on which test parsed it first; this
+// sets them on the parsed config until the test ends.
+func testProFeaturesProOnlyPlans(t testing.TB) {
+	c := Pro()
+	free, pro, enforce := c.Free, c.Pro, c.EnforceFeatures
+	c.Free.SocksProxy, c.Free.WireguardProxy = false, false
+	c.Pro.SocksProxy, c.Pro.WireguardProxy = true, true
+	c.EnforceFeatures = false
+	t.Cleanup(func() {
+		c.Free.SocksProxy, c.Free.WireguardProxy = free.SocksProxy, free.WireguardProxy
+		c.Pro.SocksProxy, c.Pro.WireguardProxy = pro.SocksProxy, pro.WireguardProxy
+		c.EnforceFeatures = enforce
+	})
+}
+
 // The proxies list as JSON, decoded into the sdk's own types and read by the
 // sdk's own rule (sdk pro_features_status.go): the notice exactly as the apps
 // and ur.io decide it, and each proxy's pro_features by client id.
@@ -106,6 +123,7 @@ func TestNetworkProxiesNeverUsedOverSocksOrWireguardShowNoNotice(t *testing.T) {
 		ctx := context.Background()
 		testProFeaturesWgAddresses(t, ctx)
 		// enforcement dark, as pro.yml ships today
+		testProFeaturesProOnlyPlans(t)
 		connect.AssertEqual(t, Pro().EnforceFeatures, false)
 		connect.AssertEqual(t, Pro().ProOnlyFeature(FeatureSocksProxy), true)
 		connect.AssertEqual(t, Pro().ProOnlyFeature(FeatureWireguardProxy), true)

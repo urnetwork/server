@@ -37,6 +37,7 @@ func TestNetworkProxiesNoticeFollowsSocksAndWireguardUse(t *testing.T) {
 		beforeWindow := now.Add(-ProxyFeatureUseWindow - time.Hour)
 
 		// enforcement dark, as pro.yml ships today
+		testProFeaturesProOnlyPlans(t)
 		connect.AssertEqual(t, Pro().EnforceFeatures, false)
 
 		// SOCKS: a free network whose SOCKS proxy signed in yesterday sees the
