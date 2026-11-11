@@ -591,38 +591,38 @@ func TestCtfMemberClientIds(t *testing.T) {
 
 // The sync plans the quarter hour's sample once, from the block it is at, and
 // nothing while capture the flag is off.
-func TestStCtfSyncPlansEachSampleOnce(t *testing.T) {
+func TestStCtfDataSyncPlansEachSampleOnce(t *testing.T) {
 	cfg := &StConfig{Enabled: true, ChainId: 964, ContractAddress: [20]byte{1}, NoId: 1}
 	SetStConfig(cfg)
 	SetStClient(newStubStClient(&StEpochState{}))
 	defer SetStConfig(nil)
 	defer SetStClient(nil)
 	defer model.Testing_SetCtfDataSettings(nil)
-	defer ctfPlannedSample.Delete(string(cfg.DeploymentKey()) + "|1")
+	defer ctfDataPlannedSample.Delete(string(cfg.DeploymentKey()) + "|1")
 
 	state := &StEpochState{Epoch: 8, EpochStartBlock: 9_600_028, TEpochBlocks: 50_400, HeadBlock: 9_600_028 + 75*10 + 3}
 	model.Testing_SetCtfDataSettings(&model.CtfDataConfig{})
-	if steps, err := StCtfSync(t.Context(), state); err != nil || len(steps) != 0 {
+	if steps, err := StCtfDataSync(t.Context(), state); err != nil || len(steps) != 0 {
 		t.Fatalf("off: %v %v", steps, err)
 	}
 	model.Testing_SetCtfDataSettings(&model.CtfDataConfig{Presence: model.CtfPresenceConfig{Enabled: true}})
-	steps, err := StCtfSync(t.Context(), state)
-	if err != nil || len(steps) != 1 || steps[0].Kind != StCtfStepSample || steps[0].Epoch != 8 || steps[0].Index != 10 || steps[0].HeadBlock != state.HeadBlock {
+	steps, err := StCtfDataSync(t.Context(), state)
+	if err != nil || len(steps) != 1 || steps[0].Kind != StCtfDataStepSample || steps[0].Epoch != 8 || steps[0].Index != 10 || steps[0].HeadBlock != state.HeadBlock {
 		t.Fatalf("first turn planned %+v %v", steps, err)
 	}
 	if time.Since(steps[0].PlannedTime) > time.Minute {
 		t.Fatal("the sample is not planned now")
 	}
-	if steps, _ := StCtfSync(t.Context(), state); len(steps) != 0 {
+	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 0 {
 		t.Fatalf("a second turn in the same quarter hour planned %+v", steps)
 	}
 	state.HeadBlock += 75
-	if steps, _ := StCtfSync(t.Context(), state); len(steps) != 1 || steps[0].Index != 11 {
+	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 1 || steps[0].Index != 11 {
 		t.Fatalf("the next quarter hour planned %+v", steps)
 	}
 	// past the epoch's blocks the mirror has not rolled yet: nothing
 	state.HeadBlock = state.EpochStartBlock + state.TEpochBlocks
-	if steps, _ := StCtfSync(t.Context(), state); len(steps) != 0 {
+	if steps, _ := StCtfDataSync(t.Context(), state); len(steps) != 0 {
 		t.Fatalf("a block past the epoch planned %+v", steps)
 	}
 }

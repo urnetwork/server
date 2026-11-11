@@ -48,7 +48,7 @@ func ctfRoleLabel(role int) string {
 	return "provider"
 }
 
-type ctfMetricSet struct {
+type ctfDataMetricSet struct {
 	samples         *prometheus.CounterVec
 	lastSample      prometheus.Gauge
 	samplePresent   *prometheus.GaugeVec
@@ -64,7 +64,7 @@ type ctfMetricSet struct {
 	censusLag       prometheus.Gauge
 }
 
-var ctfMetrics = &ctfMetricSet{
+var ctfDataMetrics = &ctfDataMetricSet{
 	samples: prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "urnetwork", Subsystem: "sn_ctf", Name: "presence_samples_total",
 		Help: "Quarter-hour presence samples, by result: taken, no_providers (taken, but the score export's online set was stale, so no provider was found), late (its quarter hour passed before it ran; not taken).",
@@ -121,33 +121,33 @@ var ctfMetrics = &ctfMetricSet{
 
 func init() {
 	for _, result := range []string{ctfSampleResultTaken, ctfSampleResultNoProviders, ctfSampleResultLate} {
-		ctfMetrics.samples.WithLabelValues(result)
+		ctfDataMetrics.samples.WithLabelValues(result)
 	}
 	for _, result := range []string{ctfCensusResultBuilt, ctfCensusResultRetry, ctfCensusResultGivenUp, ctfCensusResultPublished} {
-		ctfMetrics.censuses.WithLabelValues(result)
+		ctfDataMetrics.censuses.WithLabelValues(result)
 	}
 	for _, role := range []int{model.CtfRoleProvider, model.CtfRoleExtender} {
-		ctfMetrics.samplePresent.WithLabelValues(ctfRoleLabel(role))
-		ctfMetrics.censusMembers.WithLabelValues(ctfRoleLabel(role))
-		ctfMetrics.censusCandidate.WithLabelValues(ctfRoleLabel(role))
-		ctfMetrics.censusUnits.WithLabelValues(ctfRoleLabel(role))
+		ctfDataMetrics.samplePresent.WithLabelValues(ctfRoleLabel(role))
+		ctfDataMetrics.censusMembers.WithLabelValues(ctfRoleLabel(role))
+		ctfDataMetrics.censusCandidate.WithLabelValues(ctfRoleLabel(role))
+		ctfDataMetrics.censusUnits.WithLabelValues(ctfRoleLabel(role))
 		for _, reason := range ctfReasonLabels {
-			ctfMetrics.censusExcluded.WithLabelValues(ctfRoleLabel(role), reason)
+			ctfDataMetrics.censusExcluded.WithLabelValues(ctfRoleLabel(role), reason)
 		}
 	}
 	prometheus.MustRegister(
-		ctfMetrics.samples,
-		ctfMetrics.lastSample,
-		ctfMetrics.samplePresent,
-		ctfMetrics.sampleSourceAge,
-		ctfMetrics.censuses,
-		ctfMetrics.lastCensusEpoch,
-		ctfMetrics.censusMembers,
-		ctfMetrics.censusCandidate,
-		ctfMetrics.censusUnits,
-		ctfMetrics.censusExcluded,
-		ctfMetrics.censusTaken,
-		ctfMetrics.censusExcused,
-		ctfMetrics.censusLag,
+		ctfDataMetrics.samples,
+		ctfDataMetrics.lastSample,
+		ctfDataMetrics.samplePresent,
+		ctfDataMetrics.sampleSourceAge,
+		ctfDataMetrics.censuses,
+		ctfDataMetrics.lastCensusEpoch,
+		ctfDataMetrics.censusMembers,
+		ctfDataMetrics.censusCandidate,
+		ctfDataMetrics.censusUnits,
+		ctfDataMetrics.censusExcluded,
+		ctfDataMetrics.censusTaken,
+		ctfDataMetrics.censusExcused,
+		ctfDataMetrics.censusLag,
 	)
 }

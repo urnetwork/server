@@ -39,14 +39,14 @@ const ctfExtenderChallengeWindow = 15 * time.Minute
 const ctfSampleMaxDelay = 15 * time.Minute
 
 // stCtfTakeSample takes one sample of the epoch, unless it is taken.
-func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfStep) *StPublishOutcome {
+func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfDataStep) *StPublishOutcome {
 	deploymentKey := cfg.DeploymentKey()
 	if model.HasCtfPresenceSample(ctx, deploymentKey, cfg.NoId, step.Epoch, step.Index) {
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d sample %d already taken", step.Epoch, step.Index)}
 	}
 	now := server.NowUtc()
 	if ctfSampleMaxDelay < now.Sub(step.PlannedTime) {
-		ctfMetrics.samples.WithLabelValues(ctfSampleResultLate).Inc()
+		ctfDataMetrics.samples.WithLabelValues(ctfSampleResultLate).Inc()
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d sample %d is %s late; its quarter hour has passed", step.Epoch, step.Index, now.Sub(step.PlannedTime).Round(time.Second))}
 	}
 
@@ -110,12 +110,12 @@ func stCtfTakeSample(ctx context.Context, cfg *StConfig, step *StCtfStep) *StPub
 	if sample.ProviderSourceTime == nil {
 		result = ctfSampleResultNoProviders
 	}
-	ctfMetrics.samples.WithLabelValues(result).Inc()
-	ctfMetrics.lastSample.Set(float64(now.Unix()))
-	ctfMetrics.samplePresent.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(sample.Providers))
-	ctfMetrics.samplePresent.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(sample.Extenders))
+	ctfDataMetrics.samples.WithLabelValues(result).Inc()
+	ctfDataMetrics.lastSample.Set(float64(now.Unix()))
+	ctfDataMetrics.samplePresent.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(sample.Providers))
+	ctfDataMetrics.samplePresent.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(sample.Extenders))
 	if sample.ProviderSourceTime != nil {
-		ctfMetrics.sampleSourceAge.Set(now.Sub(*sample.ProviderSourceTime).Seconds())
+		ctfDataMetrics.sampleSourceAge.Set(now.Sub(*sample.ProviderSourceTime).Seconds())
 	}
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d sample %d: %d providers, %d extender records present", step.Epoch, step.Index, sample.Providers, sample.Extenders)}
 }

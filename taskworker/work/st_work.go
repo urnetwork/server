@@ -165,7 +165,7 @@ func StSyncChain(
 	// Capture the flag's quarter-hour sample, and its census right after the
 	// boundary, as the users count. Off unless ctf.yml turns it on; it cannot
 	// stop the steps below.
-	scheduleStCtfSteps(clientSession, deploymentKey, state)
+	scheduleStCtfDataSteps(clientSession, deploymentKey, state)
 	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
 	scheduleStV1Sweep(clientSession, deploymentKey)
 

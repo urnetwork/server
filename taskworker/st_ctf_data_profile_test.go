@@ -9,8 +9,8 @@ import (
 
 // Pure: both workload profiles run capture the flag's samples and census, since
 // a sync turn on either can start them.
-func TestStCtfStepRegisteredInBothProfiles(t *testing.T) {
-	name := task.NewTaskTarget(work.StCtfStep).TargetFunctionName()
+func TestStCtfDataStepRegisteredInBothProfiles(t *testing.T) {
+	name := task.NewTaskTarget(work.StCtfDataStep).TargetFunctionName()
 	for _, profile := range []WorkloadProfile{WorkloadProfileProduction, WorkloadProfileSubnetOperator} {
 		worker, err := InitTaskWorkerForProfile(t.Context(), nil, profile)
 		if err != nil {

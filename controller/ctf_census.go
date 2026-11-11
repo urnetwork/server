@@ -15,6 +15,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -31,18 +32,18 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// The capture the flag steps, for the task layer.
+// The steps of capture the flag's data, for the task layer.
 const (
-	StCtfStepSample = "ctf_sample"
-	StCtfStepCensus = "ctf_census"
+	StCtfDataStepSample = "ctf_sample"
+	StCtfDataStepCensus = "ctf_census"
 )
 
-// StCtfAlertCensus is raised once per epoch when its census cannot be built for
-// a reason that retrying will not change, and StCtfAlertSamples when its census
+// StCtfDataAlertCensus is raised once per epoch when its census cannot be built for
+// a reason that retrying will not change, and StCtfDataAlertSamples when its census
 // is built from fewer samples than the epoch had.
 const (
-	StCtfAlertCensus  = "ctf_census"
-	StCtfAlertSamples = "ctf_samples"
+	StCtfDataAlertCensus  = "ctf_census_build"
+	StCtfDataAlertSamples = "ctf_census_samples"
 )
 
 // How long after an epoch's end its census may still be read: within it a
@@ -58,8 +59,8 @@ const ctfCensusRetryDelay = time.Minute
 // authenticated time and alerts.
 const ctfCensusPlanGrace = 10 * time.Minute
 
-// StCtfStep is one planned capture the flag step.
-type StCtfStep struct {
+// StCtfDataStep is one planned capture the flag step.
+type StCtfDataStep struct {
 	Kind  string
 	Epoch uint64
 	// the sample's index and the block and time it was planned at (samples)
@@ -71,16 +72,16 @@ type StCtfStep struct {
 
 // The samples planned by this process, the last per deployment, so a sync turn
 // plans each sample once; the task's run-once key keeps workers to one.
-var ctfPlannedSample sync.Map
+var ctfDataPlannedSample sync.Map
 
 // The epochs whose census this process saw built or given up.
-var ctfCensusConcluded sync.Map
+var ctfDataCensusConcluded sync.Map
 
-// StCtfSync plans one sync turn's capture the flag steps: the current
+// StCtfDataSync plans one sync turn's capture the flag steps: the current
 // quarter hour's sample while presence is on, and the census of the epoch that
 // has just ended while the census is on, from its first epoch. Nothing is due
 // while ctf.yml leaves both off.
-func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
+func StCtfDataSync(ctx context.Context, state *StEpochState) ([]*StCtfDataStep, error) {
 	settings := model.CtfDataSettings()
 	if !settings.Presence.Enabled && !settings.Census.Enabled {
 		return nil, nil
@@ -94,19 +95,19 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 	}
 	deploymentKey := cfg.DeploymentKey()
 	now := server.NowUtc()
-	steps := []*StCtfStep{}
+	steps := []*StCtfDataStep{}
 	if settings.Presence.Enabled {
 		if index, ok := model.CtfSampleIndex(state.EpochStartBlock, state.TEpochBlocks, state.HeadBlock); ok {
 			planned := fmt.Sprintf("%d|%d", state.Epoch, index)
-			if previous, loaded := ctfPlannedSample.Swap(fmt.Sprintf("%s|%d", deploymentKey, cfg.NoId), planned); !loaded || previous != planned {
-				steps = append(steps, &StCtfStep{Kind: StCtfStepSample, Epoch: state.Epoch, Index: index, HeadBlock: state.HeadBlock, PlannedTime: now, RunAt: now})
+			if previous, loaded := ctfDataPlannedSample.Swap(fmt.Sprintf("%s|%d", deploymentKey, cfg.NoId), planned); !loaded || previous != planned {
+				steps = append(steps, &StCtfDataStep{Kind: StCtfDataStepSample, Epoch: state.Epoch, Index: index, HeadBlock: state.HeadBlock, PlannedTime: now, RunAt: now})
 			}
 		}
 	}
 	if settings.Census.Enabled && 1 < state.Epoch {
 		epoch := state.Epoch - 1
 		concludedKey := fmt.Sprintf("%s|%d|%d", deploymentKey, cfg.NoId, epoch)
-		if _, concluded := ctfCensusConcluded.Load(concludedKey); !concluded && settings.Census.FirstEpoch <= epoch {
+		if _, concluded := ctfDataCensusConcluded.Load(concludedKey); !concluded && settings.Census.FirstEpoch <= epoch {
 			// the epoch ended when the current one started; past its capture
 			// window an epoch without a census gets none, so a step that keeps
 			// failing is not planned again (a built census is still published)
@@ -114,19 +115,19 @@ func StCtfSync(ctx context.Context, state *StEpochState) ([]*StCtfStep, error) {
 			pastWindow := !state.HeadBlockTime.IsZero() && ctfCensusCaptureWindow+ctfCensusPlanGrace < now.Sub(ended)
 			switch census := model.GetCtfCensus(ctx, deploymentKey, cfg.NoId, epoch); {
 			case census != nil && census.PublishedTime != nil:
-				ctfCensusConcluded.Store(concludedKey, true)
+				ctfDataCensusConcluded.Store(concludedKey, true)
 			case census == nil && pastWindow:
-				ctfCensusConcluded.Store(concludedKey, true)
+				ctfDataCensusConcluded.Store(concludedKey, true)
 			default:
-				steps = append(steps, &StCtfStep{Kind: StCtfStepCensus, Epoch: epoch, RunAt: now})
+				steps = append(steps, &StCtfDataStep{Kind: StCtfDataStepCensus, Epoch: epoch, RunAt: now})
 			}
 		}
 	}
 	return steps, nil
 }
 
-// StCtfRunStep runs one planned step. Each is idempotent.
-func StCtfRunStep(ctx context.Context, step *StCtfStep) (*StPublishOutcome, error) {
+// StCtfDataRunStep runs one planned step. Each is idempotent.
+func StCtfDataRunStep(ctx context.Context, step *StCtfDataStep) (*StPublishOutcome, error) {
 	cfg, client, err := stRequire()
 	if err != nil {
 		return nil, err
@@ -136,12 +137,12 @@ func StCtfRunStep(ctx context.Context, step *StCtfStep) (*StPublishOutcome, erro
 	}
 	settings := model.CtfDataSettings()
 	switch step.Kind {
-	case StCtfStepSample:
+	case StCtfDataStepSample:
 		if !settings.Presence.Enabled {
 			return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: "presence is off"}, nil
 		}
 		return stCtfTakeSample(ctx, cfg, step), nil
-	case StCtfStepCensus:
+	case StCtfDataStepCensus:
 		if !settings.Census.Enabled {
 			return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: "the census is off"}, nil
 		}
@@ -154,7 +155,7 @@ func StCtfRunStep(ctx context.Context, step *StCtfStep) (*StPublishOutcome, erro
 }
 
 func stCtfCensusRetry(reason string) *StPublishOutcome {
-	ctfMetrics.censuses.WithLabelValues(ctfCensusResultRetry).Inc()
+	ctfDataMetrics.censuses.WithLabelValues(ctfCensusResultRetry).Inc()
 	return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: stScrubEndpoints(reason), Retry: true, RetryAt: server.NowUtc().Add(ctfCensusRetryDelay)}
 }
 
@@ -174,9 +175,9 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 	}
 	captureTime := server.NowUtc()
 	if lag := captureTime.Sub(authority.EndTime); ctfCensusCaptureWindow < lag {
-		ctfCensusConcluded.Store(concludedKey, true)
-		ctfMetrics.censuses.WithLabelValues(ctfCensusResultGivenUp).Inc()
-		stLedgerV2Alert(cfg, StCtfAlertCensus, fmt.Sprintf("epoch %d", epoch), "epoch %d has no census: its end passed %s ago, past the %s its boundary can still be read in, so every slot of it carries", epoch, lag.Round(time.Second), ctfCensusCaptureWindow)
+		ctfDataCensusConcluded.Store(concludedKey, true)
+		ctfDataMetrics.censuses.WithLabelValues(ctfCensusResultGivenUp).Inc()
+		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d", epoch), "epoch %d has no census: its end passed %s ago, past the %s its boundary can still be read in, so every slot of it carries", epoch, lag.Round(time.Second), ctfCensusCaptureWindow)
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d's capture window has passed", epoch)}
 	}
 
@@ -284,9 +285,9 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 	encoded, err := encodeCtfCensus(cfg.NoId, epoch, &excused, decision)
 	if err != nil {
 		// the rules give a canonical census; one that is not is a fault here
-		ctfCensusConcluded.Store(concludedKey, true)
-		ctfMetrics.censuses.WithLabelValues(ctfCensusResultGivenUp).Inc()
-		stLedgerV2Alert(cfg, StCtfAlertCensus, fmt.Sprintf("epoch %d", epoch), "epoch %d's census does not encode, so it has none and every slot of it carries: %s", epoch, err)
+		ctfDataCensusConcluded.Store(concludedKey, true)
+		ctfDataMetrics.censuses.WithLabelValues(ctfCensusResultGivenUp).Inc()
+		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d", epoch), "epoch %d's census does not encode, so it has none and every slot of it carries: %s", epoch, err)
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d's census does not encode: %s", epoch, err)}
 	}
 
@@ -336,10 +337,10 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 		// another worker built it first; publish what it stored
 		return stCtfPublishCensus(ctx, cfg, model.GetCtfCensus(ctx, deploymentKey, cfg.NoId, epoch))
 	}
-	ctfMetrics.censuses.WithLabelValues(ctfCensusResultBuilt).Inc()
+	ctfDataMetrics.censuses.WithLabelValues(ctfCensusResultBuilt).Inc()
 	stCtfCensusMetrics(census, decision, excused.Count(), captureTime.Sub(authority.EndTime))
 	if len(samples) < model.CtfSamplesPerEpoch {
-		stLedgerV2Alert(cfg, StCtfAlertSamples, fmt.Sprintf("epoch %d", epoch), "epoch %d's census counts %d of its %d samples taken (%d with the providers' half) and excuses %d: a missing sample found nobody; declare the outage before the census if the platform was down", epoch, len(samples), model.CtfSamplesPerEpoch, providerSamples, excused.Count())
+		stLedgerV2Alert(cfg, StCtfDataAlertSamples, fmt.Sprintf("epoch %d", epoch), "epoch %d's census counts %d of its %d samples taken (%d with the providers' half) and excuses %d: a missing sample found nobody; declare the outage before the census if the platform was down", epoch, len(samples), model.CtfSamplesPerEpoch, providerSamples, excused.Count())
 	}
 	glog.Infof("[ctf]epoch %d census %s: %d candidates (%d providers in %d units, %d extenders in %d units) of %d members, %d samples taken, %d excused, required %d\n", epoch, ledger.Ref(census.CensusHash), census.Candidates, census.ProviderCandidates, census.ProviderUnits, census.ExtenderCandidates, census.ExtenderUnits, census.ProviderMembers+census.ExtenderMembers, len(samples), excused.Count(), facts.Required)
 	stCtfCensusRetention(ctx, cfg, settings, epoch)
@@ -390,7 +391,7 @@ func stCtfPublishCensus(ctx context.Context, cfg *StConfig, census *model.CtfCen
 	}
 	concludedKey := fmt.Sprintf("%s|%d|%d", cfg.DeploymentKey(), cfg.NoId, census.Epoch)
 	if census.PublishedTime != nil {
-		ctfCensusConcluded.Store(concludedKey, true)
+		ctfDataCensusConcluded.Store(concludedKey, true)
 		return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf("epoch %d census %s already published", census.Epoch, ledger.Ref(census.CensusHash))}
 	}
 	objects := model.GetCtfCensusObjects(ctx, cfg.DeploymentKey(), cfg.NoId, census.Epoch)
@@ -409,8 +410,8 @@ func stCtfPublishCensus(ctx context.Context, cfg *StConfig, census *model.CtfCen
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d census header: %s", census.Epoch, err))
 	}
 	model.SetCtfCensusPublished(ctx, cfg.DeploymentKey(), cfg.NoId, census.Epoch, server.NowUtc())
-	ctfCensusConcluded.Store(concludedKey, true)
-	ctfMetrics.censuses.WithLabelValues(ctfCensusResultPublished).Inc()
+	ctfDataCensusConcluded.Store(concludedKey, true)
+	ctfDataMetrics.censuses.WithLabelValues(ctfCensusResultPublished).Inc()
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d census %s published: %d candidates", census.Epoch, ledger.Ref(census.CensusHash), census.Candidates)}
 }
 
@@ -557,25 +558,25 @@ func stCtfColdkeys(ctx context.Context, cfg *StConfig, authority *StPayoutEpochA
 }
 
 func stCtfCensusMetrics(census *model.CtfCensus, decision *ctfCensusDecision, excused int, lag time.Duration) {
-	ctfMetrics.lastCensusEpoch.Set(float64(census.Epoch))
-	ctfMetrics.censusMembers.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(census.ProviderMembers))
-	ctfMetrics.censusMembers.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(census.ExtenderMembers))
-	ctfMetrics.censusCandidate.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(census.ProviderCandidates))
-	ctfMetrics.censusCandidate.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(census.ExtenderCandidates))
-	ctfMetrics.censusUnits.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(census.ProviderUnits))
-	ctfMetrics.censusUnits.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(census.ExtenderUnits))
+	ctfDataMetrics.lastCensusEpoch.Set(float64(census.Epoch))
+	ctfDataMetrics.censusMembers.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(census.ProviderMembers))
+	ctfDataMetrics.censusMembers.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(census.ExtenderMembers))
+	ctfDataMetrics.censusCandidate.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(census.ProviderCandidates))
+	ctfDataMetrics.censusCandidate.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(census.ExtenderCandidates))
+	ctfDataMetrics.censusUnits.WithLabelValues(ctfRoleLabel(model.CtfRoleProvider)).Set(float64(census.ProviderUnits))
+	ctfDataMetrics.censusUnits.WithLabelValues(ctfRoleLabel(model.CtfRoleExtender)).Set(float64(census.ExtenderUnits))
 	excluded := map[int]map[int]int{model.CtfRoleProvider: {}, model.CtfRoleExtender: {}}
 	for _, exclusion := range decision.Exclusions {
 		excluded[exclusion.Role][exclusion.Reason] += exclusion.Count
 	}
 	for role, reasons := range excluded {
 		for reason, label := range ctfReasonLabels {
-			ctfMetrics.censusExcluded.WithLabelValues(ctfRoleLabel(role), label).Set(float64(reasons[reason]))
+			ctfDataMetrics.censusExcluded.WithLabelValues(ctfRoleLabel(role), label).Set(float64(reasons[reason]))
 		}
 	}
-	ctfMetrics.censusTaken.Set(float64(census.SamplesTaken))
-	ctfMetrics.censusExcused.Set(float64(excused))
-	ctfMetrics.censusLag.Set(lag.Seconds())
+	ctfDataMetrics.censusTaken.Set(float64(census.SamplesTaken))
+	ctfDataMetrics.censusExcused.Set(float64(excused))
+	ctfDataMetrics.censusLag.Set(lag.Seconds())
 }
 
 // stCtfCensusRetention prunes, once an epoch's census is built, the samples,
@@ -649,4 +650,54 @@ func StCtfDeclareOutage(ctx context.Context, startTime time.Time, endTime time.T
 		}
 	}
 	return outageId, late, nil
+}
+
+// StCtfCensus is an epoch's census as the driver commits it and builds the
+// epoch's ledger from it (sn ctf.CensusInput, ctf.EpochInput.Coldkeys).
+type StCtfCensus struct {
+	Epoch uint64
+	// sha256 of the header, what commitCtfCensus commits
+	Hash ledger.Ref
+	// the header, the row chunks, the exclusion object and the countries
+	// object
+	Objects ledger.Objects
+	// every candidate's payout coldkey (P5); never published
+	Coldkeys map[[16]byte][32]byte
+	// every object is in the ledger object store
+	Published bool
+}
+
+// ErrStCtfCensusObjectsGone is a census whose stored objects retention has
+// removed, once a finalized root covered its epoch. The ledger object store
+// keeps them under the census hash.
+var ErrStCtfCensusObjectsGone = errors.New("st ctf: the census's stored objects are gone; read them from the ledger object store")
+
+// GetStCtfCensus returns the census of an epoch for the configured operator,
+// nil while it is not built.
+func GetStCtfCensus(ctx context.Context, epoch uint64) (*StCtfCensus, error) {
+	cfg, _, err := stRequire()
+	if err != nil {
+		return nil, err
+	}
+	deploymentKey := cfg.DeploymentKey()
+	if deploymentKey == "" {
+		return nil, errStNotConfigured
+	}
+	census := model.GetCtfCensus(ctx, deploymentKey, cfg.NoId, epoch)
+	if census == nil {
+		return nil, nil
+	}
+	stored := model.GetCtfCensusObjects(ctx, deploymentKey, cfg.NoId, epoch)
+	if _, ok := stored[census.CensusHash]; !ok {
+		return nil, fmt.Errorf("%w: epoch %d census %s", ErrStCtfCensusObjectsGone, epoch, ledger.Ref(census.CensusHash))
+	}
+	objects := ledger.Objects{}
+	for ref, data := range stored {
+		objects[ledger.Ref(ref)] = data
+	}
+	coldkeys := map[[16]byte][32]byte{}
+	for clientId, coldkey := range model.GetCtfCensusColdkeys(ctx, deploymentKey, cfg.NoId, epoch) {
+		coldkeys[[16]byte(clientId)] = coldkey
+	}
+	return &StCtfCensus{Epoch: epoch, Hash: ledger.Ref(census.CensusHash), Objects: objects, Coldkeys: coldkeys, Published: census.PublishedTime != nil}, nil
 }

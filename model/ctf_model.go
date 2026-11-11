@@ -626,12 +626,39 @@ func GetCtfCensusExclusions(ctx context.Context, deploymentKey StDeploymentKey, 
 	return exclusions
 }
 
+// A census epoch a finalized CTF root covers: a finalized ledger the driver
+// recorded over it, or a finalized root of the CTF pool (no_id 2^32 + n) in
+// the v2 mirror at or after it. Roots cover consecutive epochs from the last
+// finalized one, so a finalized root of epoch e means every epoch through e
+// was covered by a finalized root, or precedes the pool and never had a
+// committed census. The epoch column is named by the caller's alias.
+func ctfFinalizedRootCoversSql(alias string) string {
+	return fmt.Sprintf(`(
+		EXISTS (
+			SELECT 1 FROM ctf_ledger
+			WHERE
+				ctf_ledger.deployment_key = %[1]s.deployment_key AND
+				ctf_ledger.no_id = %[1]s.no_id AND
+				ctf_ledger.status = 'finalized' AND
+				ctf_ledger.first_epoch <= %[1]s.epoch AND
+				%[1]s.epoch <= ctf_ledger.epoch
+		) OR EXISTS (
+			SELECT 1 FROM st_ledger_v2_root
+			WHERE
+				st_ledger_v2_root.deployment_key = %[1]s.deployment_key AND
+				st_ledger_v2_root.no_id = %[1]s.no_id + 4294967296 AND
+				st_ledger_v2_root.status = 'finalized' AND
+				%[1]s.epoch <= st_ledger_v2_root.epoch
+		)
+	)`, alias)
+}
+
 // RemoveCtfCensusObjectsBefore deletes the stored objects of every census
-// before epoch that was published and whose epoch a finalized CTF ledger
+// before epoch that was published and whose epoch a finalized CTF root
 // covers. A committed census is a fixed input of every root that covers its
 // epoch until one is final (§5), so its objects are kept here, as well as in
-// the ledger object store, until then; a census no finalized ledger covers,
-// such as a shadow run's, is kept.
+// the ledger object store, until then; a census no finalized root covers is
+// kept.
 func RemoveCtfCensusObjectsBefore(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64) (removed int64) {
 	key := requireStDeploymentKey(deploymentKey)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -646,15 +673,7 @@ func RemoveCtfCensusObjectsBefore(ctx context.Context, deploymentKey StDeploymen
 				ctf_census.no_id = ctf_census_object.no_id AND
 				ctf_census.epoch = ctf_census_object.epoch AND
 				ctf_census.published_time IS NOT NULL AND
-				EXISTS (
-					SELECT 1 FROM ctf_ledger
-					WHERE
-						ctf_ledger.deployment_key = ctf_census.deployment_key AND
-						ctf_ledger.no_id = ctf_census.no_id AND
-						ctf_ledger.status = 'finalized' AND
-						ctf_ledger.first_epoch <= ctf_census.epoch AND
-						ctf_census.epoch <= ctf_ledger.epoch
-				)
+				`+ctfFinalizedRootCoversSql("ctf_census")+`
 			`,
 			key, int64(noId), int64(epoch),
 		)
@@ -665,13 +684,20 @@ func RemoveCtfCensusObjectsBefore(ctx context.Context, deploymentKey StDeploymen
 }
 
 // RemoveCtfCensusMembersBefore deletes the census members of every epoch
-// before epoch. The census, its pots and exclusions stay.
+// before epoch that a finalized CTF root covers: the coldkeys a first build of
+// the epoch is paid from stay until then. The census, its pots and exclusions
+// stay.
 func RemoveCtfCensusMembersBefore(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64) (removed int64) {
 	key := requireStDeploymentKey(deploymentKey)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
 		tag, err := tx.Exec(
 			ctx,
-			`DELETE FROM ctf_census_member WHERE deployment_key = $1 AND no_id = $2 AND epoch < $3`,
+			`
+			DELETE FROM ctf_census_member
+			WHERE
+				ctf_census_member.deployment_key = $1 AND ctf_census_member.no_id = $2 AND ctf_census_member.epoch < $3 AND
+				`+ctfFinalizedRootCoversSql("ctf_census_member")+`
+			`,
 			key, int64(noId), int64(epoch),
 		)
 		server.Raise(err)

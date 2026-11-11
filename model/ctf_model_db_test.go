@@ -182,8 +182,9 @@ func TestCtfCensusIsWrittenOnce(t *testing.T) {
 	})
 }
 
-// A committed census's objects stay until a finalized ledger covers its
-// epoch; members go by age alone, the census itself never.
+// A committed census's objects and members stay until a finalized CTF root
+// covers its epoch, recorded by the driver as a ctf_ledger or mirrored as an
+// st_ledger_v2_root of the CTF pool; the census itself is never removed.
 func TestCtfCensusRetentionWaitsForAFinalizedLedger(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -211,8 +212,30 @@ func TestCtfCensusRetentionWaitsForAFinalizedLedger(t *testing.T) {
 				t.Errorf("epoch %d keeps %d objects, want %d", epoch, got, want)
 			}
 		}
-		if removed := RemoveCtfCensusMembersBefore(ctx, key, 1, 9); removed != 6 || GetCtfCensus(ctx, key, 1, 7) == nil {
+		// members go once a finalized root covers their epoch: 8, not 7
+		if removed := RemoveCtfCensusMembersBefore(ctx, key, 1, 9); removed != 3 || GetCtfCensus(ctx, key, 1, 7) == nil {
 			t.Fatalf("member retention removed %d", removed)
+		}
+		// the driver's v2 mirror of the CTF pool (no_id 2^32 + 1): a finalized
+		// root of epoch 10 covers every epoch through 10
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`
+				INSERT INTO st_ledger_v2_root (deployment_key, no_id, seq, epoch, root, total, leaf_count, ledger_hash, status, root_index)
+				VALUES ($1, 4294967297, 1, 10, $2, 0, 0, $2, 'finalized', 0)
+				`,
+				string(key), make([]byte, 32),
+			))
+		})
+		if removed := RemoveCtfCensusObjectsBefore(ctx, key, 1, 11); removed != 6 {
+			t.Fatalf("removed %d objects, want epochs 7 and 10's 6", removed)
+		}
+		if removed := RemoveCtfCensusMembersBefore(ctx, key, 1, 11); removed != 9 {
+			t.Fatalf("member retention removed %d, want epochs 7, 9 and 10's 9", removed)
+		}
+		if len(GetCtfCensuses(ctx, key, 1, 7, 10)) != 4 {
+			t.Fatal("retention removed a census")
 		}
 	})
 }
