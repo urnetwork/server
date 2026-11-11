@@ -141,10 +141,19 @@ func (self *gammaBiller) newAutoIntent(account *model.GammaAccount, purpose stri
 	return true
 }
 
+// gammaAccountRenews reports whether the biller renews the account's plan paid
+// with gamma at the end of its term: automatic renewal on, with a plan to
+// renew. Card checkout is refused beside a plan paid with gamma only while it
+// renews (stripeNewSubscriptionRefusal). nil: the network never paid with
+// gamma.
+func gammaAccountRenews(account *model.GammaAccount) bool {
+	return account != nil && account.AutoRenew && account.RenewPlan != ""
+}
+
 // autoRenew renews a plan paid with gamma when its paid term ends within the
 // lead time, unless another market's Pro runs past it.
 func (self *gammaBiller) autoRenew(account *model.GammaAccount) {
-	if !account.AutoRenew || account.RenewPlan == "" {
+	if !gammaAccountRenews(account) {
 		return
 	}
 	_, _, graceEnd, ok := model.GetLatestOneTimeSubscriptionRenewal(self.ctx, account.NetworkId, []string{model.SubscriptionMarketGamma}, self.now)

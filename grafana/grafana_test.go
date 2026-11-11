@@ -946,16 +946,18 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		}
 	}
 
+	// the exporter's tracked store labels (subscriptions_dashboard_stores_test.go)
+	trackedStores := `store=~"` + subscriptionsDashboardStores() + `"`
 	active := dashboardPanelById(dashboard, 8)
 	engagement := dashboardPanelById(dashboard, 9)
 	upgrades := dashboardPanelById(dashboard, 21)
 	churn := dashboardPanelById(dashboard, 11)
 	if active == nil || len(active.Targets) != 1 ||
-		!strings.Contains(active.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash"`) {
+		!strings.Contains(active.Targets[0].Expr, trackedStores) {
 		t.Fatal("subscriptions dashboard lacks the bounded tracked-store active view")
 	}
 	if upgrades == nil || len(upgrades.Targets) != 1 ||
-		!strings.Contains(upgrades.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash"`) ||
+		!strings.Contains(upgrades.Targets[0].Expr, trackedStores) ||
 		!strings.Contains(upgrades.Targets[0].Expr, `window="$window"`) {
 		t.Fatal("subscriptions dashboard lacks the bounded tracked-store upgrade view")
 	}
@@ -981,7 +983,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 	}
 	for _, panel := range []*testPanel{engagement, churn} {
 		if panel == nil || len(panel.Targets) != 1 ||
-			!strings.Contains(panel.Targets[0].Expr, `store=~"apple|google|stripe|solana|monero|zcash|deduplicated"`) ||
+			!strings.Contains(panel.Targets[0].Expr, `store=~"`+subscriptionsDashboardStores()+`|deduplicated"`) ||
 			!strings.Contains(panel.Targets[0].Expr, `window="$window"`) {
 			t.Fatal("subscriptions dashboard lacks a bounded store/window account view")
 		}
@@ -996,7 +998,7 @@ func TestSubscriptionsDashboardUsesFreshPrivacySafeLedgerSnapshot(t *testing.T) 
 		expression := panel.Targets[0].Expr
 		for _, required := range []string{
 			`store="all"`,
-			`store=~"apple|google|stripe|solana|monero|zcash"`,
+			trackedStores,
 			"time() - 9000",
 			"time() - 10800",
 			"and on(env,service,block,host,instance,store)",

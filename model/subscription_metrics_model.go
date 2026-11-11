@@ -9,6 +9,8 @@ package model
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/urnetwork/server"
@@ -45,16 +47,29 @@ type SubscriptionMetricsStorePlan struct {
 	Plan  string
 }
 
-var subscriptionMetricsStores = []string{
-	SubscriptionMarketApple,
-	SubscriptionMarketGoogle,
-	SubscriptionMarketStripe,
-	SubscriptionMarketSolana,
-	SubscriptionMarketMonero,
-	SubscriptionMarketZcash,
-	SubscriptionMarketBittensor,
-	SubscriptionMarketBitcoin,
-	SubscriptionMarketEthereum,
+// subscriptionMetricsStores is the closed store label set: every
+// subscription market (SubscriptionMarkets). The queries' market and store
+// lists are made from it, so a series is never published for a market the
+// queries leave out. A market with no reconciliation leg (gamma) has no
+// watermark, so the dashboard's reconciliation panels show it as no data.
+var subscriptionMetricsStores = SubscriptionMarkets
+
+// subscriptionMetricsStoresSql is subscriptionMetricsStores as the SQL string
+// literals of an IN list: 'apple', 'google', ...
+var subscriptionMetricsStoresSql = subscriptionMetricsSqlList(subscriptionMetricsStores)
+
+// subscriptionMetricsSqlList renders source-owned market names, never input, as
+// SQL string literals. A name that is not plain lowercase letters, digits and
+// underscores panics at package init instead of reaching SQL.
+func subscriptionMetricsSqlList(values []string) string {
+	quoted := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" || strings.Trim(value, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			panic(fmt.Sprintf("subscription metrics: market %q is not a plain name", value))
+		}
+		quoted = append(quoted, "'"+value+"'")
+	}
+	return strings.Join(quoted, ", ")
 }
 
 var subscriptionMetricsWindows = []string{
@@ -136,13 +151,15 @@ type SubscriptionMetricsSnapshot struct {
 // appleCreditSubscriptionTransactionInTx): it is not a subscription and is
 // left out. An App Store grace period's hold records no revenue either, but
 // beside the paid transaction it holds, whose id it carries, so it stays.
-const subscriptionMetricsAccountQuery = `
+//
+// The tracked stores are subscriptionMetricsStores.
+var subscriptionMetricsAccountQuery = `
 /* subscription-metrics-accounts */
 WITH tracked_renewal AS MATERIALIZED (
     SELECT renewal.network_id, renewal.market, renewal.start_time, renewal.end_time
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
-      AND renewal.market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
+      AND renewal.market IN (` + subscriptionMetricsStoresSql + `)
       AND NOT (
           renewal.market = 'apple'
           AND renewal.net_revenue_nano_cents = 0
@@ -339,7 +356,7 @@ FROM metric
 ORDER BY store, plan
 `
 
-const subscriptionMetricsReconciliationQuery = `
+var subscriptionMetricsReconciliationQuery = `
 /* subscription-metrics-reconciliation */
 WITH metric_window(window_name, since_time) AS (
     VALUES ('24h', $2::timestamp), ('7d', $3::timestamp), ('30d', $4::timestamp)
@@ -347,7 +364,7 @@ WITH metric_window(window_name, since_time) AS (
 SELECT event.store, event.action, metric_window.window_name, count(*)::bigint
 FROM payment_reconciliation_event event
 CROSS JOIN metric_window
-WHERE event.store IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
+WHERE event.store IN (` + subscriptionMetricsStoresSql + `)
   AND event.action IN ('credited', 'ended', 'entitlement_repaired', 'refunded', 'disputed', 'revoked')
   AND NOT event.dry_run
   AND metric_window.since_time <= event.event_time
@@ -355,6 +372,9 @@ WHERE event.store IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')
 GROUP BY event.store, event.action, metric_window.window_name
 ORDER BY event.store, event.action, metric_window.window_name
 `
+
+// Each store's last successful reconciliation watermark.
+var subscriptionMetricsWatermarkQuery = `SELECT store, update_time FROM payment_reconciliation_watermark WHERE store IN (` + subscriptionMetricsStoresSql + `) ORDER BY store`
 
 // A balance code is the fulfillment ledger for the Stripe/Coinbase/manual
 // code-backed paths. A paid non-Pro transfer_balance is a direct data grant;
@@ -512,7 +532,7 @@ func LoadSubscriptionMetricsSnapshot(ctx context.Context, now time.Time) *Subscr
 
 		result, err = conn.Query(
 			ctx,
-			`SELECT store, update_time FROM payment_reconciliation_watermark WHERE store IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash') ORDER BY store`,
+			subscriptionMetricsWatermarkQuery,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {

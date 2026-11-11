@@ -11,7 +11,8 @@ package controller
 //	Google Play (Pro and data)              purchase-token lock and overlap re-check
 //	x402 (Pro and data)                     settle-transaction lock and grant re-check
 //	Solana Pay (Pro and data)               solana_payment_intent one-shot
-//	crypto invoices (Monero, Zcash, USDC)   crypto_payment_intent one-shot
+//	crypto invoices (every rail coin)       crypto_payment_intent one-shot
+//	Pay with Gamma (Pro and data)           gamma_payment_intent credited mark
 //
 // The webhooks, the client reports, the scheduled renewals and the payment
 // reconciler all credit through these gates, so each payment is posted once
@@ -946,6 +947,8 @@ func solanaSalesNotice(
 
 // ----- crypto invoices -----
 
+// cryptoSalesSymbol is the coin's ticker for the quoted amount; every coin of
+// the rail (cryptoPayAssets) has one, and a test holds them to it.
 func cryptoSalesSymbol(asset string) string {
 	switch asset {
 	case model.CryptoAssetXmr:
@@ -954,10 +957,20 @@ func cryptoSalesSymbol(asset string) string {
 		return "ZEC"
 	case model.CryptoAssetUsdcSolana:
 		return "USDC"
+	case model.CryptoAssetTao:
+		return "TAO"
+	case model.CryptoAssetBtc:
+		return "BTC"
+	case model.CryptoAssetEth:
+		return "ETH"
+	case model.CryptoAssetSol:
+		return "SOL"
 	}
 	return ""
 }
 
+// cryptoSalesMethod names the coin the notice was paid with, as
+// docs/CRYPTO-PAY-API.md names it.
 func cryptoSalesMethod(asset string) string {
 	switch asset {
 	case model.CryptoAssetXmr:
@@ -966,6 +979,14 @@ func cryptoSalesMethod(asset string) string {
 		return "Zcash (shielded)"
 	case model.CryptoAssetUsdcSolana:
 		return "USDC on Solana (crypto invoice)"
+	case model.CryptoAssetTao:
+		return "TAO"
+	case model.CryptoAssetBtc:
+		return "Bitcoin"
+	case model.CryptoAssetEth:
+		return "ETH"
+	case model.CryptoAssetSol:
+		return "native SOL"
 	}
 	return "crypto"
 }

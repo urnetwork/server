@@ -11408,4 +11408,7 @@ var migrations = []any{
 
 	// One approved host-admission replacement; original clocks stay append-only.
 	newSqlMigration(CompetitionExecutorQualificationRecoveryMigrationSql()),
+
+	// Explicit operator admission over exact failed retained evidence; no resampling.
+	newSqlMigration(CompetitionExecutorAdmissionExceptionMigrationSql()),
 }

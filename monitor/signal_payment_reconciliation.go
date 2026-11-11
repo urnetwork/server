@@ -3,15 +3,33 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
-const paymentReconciliationHealthQuery = `
+// The stores the hourly reconciler passes over (model.PaymentReconcileStores),
+// sorted: the health reader expects a watermark from each and the repair
+// reader accepts a repair from each.
+var paymentReconciliationStores = slices.Sorted(slices.Values(model.PaymentReconcileStores))
+
+// paymentReconciliationValuesSql renders the stores as the rows of a VALUES
+// list: ('apple'), ('bitcoin'), ...
+func paymentReconciliationValuesSql(stores []string) string {
+	rows := make([]string, 0, len(stores))
+	for _, store := range stores {
+		rows = append(rows, "("+paymentFailuresSqlList([]string{store})+")")
+	}
+	return strings.Join(rows, ", ")
+}
+
+var paymentReconciliationHealthQuery = `
 /* monitor-signal-2.21-payment-reconciliation-health */
 WITH expected_store(store) AS (
-    VALUES ('apple'), ('bitcoin'), ('bittensor'), ('ethereum'), ('google'), ('monero'), ('solana'), ('stripe'), ('x402'), ('zcash')
+    VALUES ` + paymentReconciliationValuesSql(paymentReconciliationStores) + `
 ), heartbeat AS (
     SELECT max(event_time) AS event_time
     FROM payment_reconciliation_event
@@ -198,7 +216,10 @@ func (paymentReconciliationProbe) check(ctx context.Context, env *probeEnv) ([]f
 // Counts and ages must match their source domains, and the single heartbeat
 // and task aggregates must repeat identically across the complete store set.
 func parsePaymentReconciliationStates(rows []pgRow) ([]paymentReconciliationStoreState, error) {
-	expected := map[string]bool{"apple": false, "bitcoin": false, "bittensor": false, "ethereum": false, "google": false, "monero": false, "solana": false, "stripe": false, "x402": false, "zcash": false}
+	expected := make(map[string]bool, len(paymentReconciliationStores))
+	for _, store := range paymentReconciliationStores {
+		expected[store] = false
+	}
 	states := make([]paymentReconciliationStoreState, 0, len(expected))
 	for _, row := range rows {
 		if len(row) != 9 {
@@ -361,7 +382,6 @@ func paymentReconciliationHealthFindings(states []paymentReconciliationStoreStat
 }
 
 func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
-	allowedStores := map[string]bool{"apple": true, "bitcoin": true, "bittensor": true, "ethereum": true, "google": true, "monero": true, "solana": true, "stripe": true, "x402": true, "zcash": true}
 	allowedActions := map[string]bool{"credited": true, "ended": true, "entitlement_repaired": true}
 	findings := make([]finding, 0, len(rows))
 	seen := map[string]bool{}
@@ -370,7 +390,7 @@ func paymentReconciliationRepairFindings(rows []pgRow) ([]finding, error) {
 			return nil, fmt.Errorf("payment reconciliation repairs returned %d columns, want 4", len(row))
 		}
 		store, action := strings.TrimSpace(row.str(0)), strings.TrimSpace(row.str(1))
-		if !allowedStores[store] || !allowedActions[action] {
+		if !slices.Contains(paymentReconciliationStores, store) || !allowedActions[action] {
 			return nil, fmt.Errorf("payment reconciliation repairs returned an unknown group")
 		}
 		frame := store + "/" + action

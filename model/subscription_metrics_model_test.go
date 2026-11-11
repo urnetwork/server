@@ -10,8 +10,13 @@ import (
 )
 
 func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
+	// every subscription market, from the one list
+	trackedMarkets := subscriptionMetricsSqlList(SubscriptionMarkets)
+	if !strings.Contains(trackedMarkets, "'gamma'") || !strings.Contains(trackedMarkets, "'bittensor'") {
+		t.Fatalf("tracked markets = %s, want every subscription market", trackedMarkets)
+	}
 	for _, required := range []string{
-		"market IN ('apple', 'google', 'stripe', 'solana', 'monero', 'zcash')",
+		"renewal.market IN (" + trackedMarkets + ")",
 		"network_client.active = true",
 		"network_client.source_client_id IS NULL",
 		"metric_window.since_time <= network_client.auth_time",
@@ -47,11 +52,26 @@ func TestSubscriptionMetricsQueriesKeepBoundedAggregateContracts(t *testing.T) {
 	}
 	for _, required := range []string{
 		"AND NOT event.dry_run",
+		"event.store IN (" + trackedMarkets + ")",
 		"event.action IN ('credited', 'ended', 'entitlement_repaired', 'refunded', 'disputed', 'revoked')",
 	} {
 		if !strings.Contains(subscriptionMetricsReconciliationQuery, required) {
 			t.Errorf("reconciliation query is missing %q", required)
 		}
+	}
+	if !strings.Contains(subscriptionMetricsWatermarkQuery, "WHERE store IN ("+trackedMarkets+")") {
+		t.Errorf("watermark query does not read every tracked store: %s", subscriptionMetricsWatermarkQuery)
+	}
+	// a market name reaches SQL only as a plain literal
+	for _, unsafe := range []string{"", "o'brien", "Apple", "apple, 'x"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("market name %q was rendered into SQL", unsafe)
+				}
+			}()
+			subscriptionMetricsSqlList([]string{unsafe})
+		}()
 	}
 	for _, required := range []string{
 		"transfer_balance.paid",

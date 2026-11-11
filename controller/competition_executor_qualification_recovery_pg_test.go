@@ -199,5 +199,15 @@ func TestExecutorQualificationRecoveryPgRejectsOldReceiptAndAcceptsBoundReplacem
 		if err := insert(value.ReplacementJobId, authority); err != nil {
 			tb.Fatal("valid replacement receipt refused", err)
 		}
+		// Whole-host readiness must use the selected replacement clock too,
+		// not require this new job id to equal the original expired job id.
+		f.qualifyHost(tb, f.settings.DistributedEvaluationPolicy.Hosts[1])
+		server.Db(tb.Context(), func(conn server.PgConn) {
+			var ready bool
+			server.Raise(conn.QueryRow(tb.Context(), `SELECT competition_executor_control_hosts_ready($1)`, f.round.RoundId).Scan(&ready))
+			if !ready {
+				tb.Fatal("passing replacement and original sibling did not admit the whole host set")
+			}
+		}, server.OptReadOnly())
 	})
 }

@@ -2336,9 +2336,9 @@ func StripeCreateCheckoutSession(
 		if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
 			customerId = *existing
 		}
-		if stripeNetworkHasActiveSubscription(clientSession, customerId) {
+		if refusal := stripeNewSubscriptionRefusal(clientSession, customerId); refusal != "" {
 			glog.Infof("[stripe]checkout: network %s already has an active subscription\n", networkId)
-			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage), nil
+			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, refusal), nil
 		}
 
 		// the caller's regional tier price, the welcome-offer coupon when the

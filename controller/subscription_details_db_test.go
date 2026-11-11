@@ -629,7 +629,7 @@ func TestStripePurchaseGuardSeesARetriedRenewalWithNoCustomer(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if blocks := stripeNetworkHasActiveSubscription(clientSession, ""); blocks != c.blocks {
+			if blocks := stripeNewSubscriptionRefusal(clientSession, "") != ""; blocks != c.blocks {
 				t.Errorf("last window's subscription %s: blocks = %t, want %t", c.status, blocks, c.blocks)
 			}
 		}
@@ -652,7 +652,7 @@ func TestStripePurchaseGuardWithNoLastWindowOrNoAnswer(t *testing.T) {
 			ClientId:  &clientId,
 			UserId:    userId,
 		})
-		if stripeNetworkHasActiveSubscription(clientSession, "") {
+		if stripeNewSubscriptionRefusal(clientSession, "") != "" {
 			t.Error("a network with no Stripe window was refused")
 		}
 		if err := model.AddSubscriptionRenewal(ctx, &model.SubscriptionRenewal{
@@ -667,7 +667,7 @@ func TestStripePurchaseGuardWithNoLastWindowOrNoAnswer(t *testing.T) {
 			t.Fatal(err)
 		}
 		// the fake knows no such invoice
-		if stripeNetworkHasActiveSubscription(clientSession, "") {
+		if stripeNewSubscriptionRefusal(clientSession, "") != "" {
 			t.Error("a Stripe error blocked the purchase")
 		}
 	})
