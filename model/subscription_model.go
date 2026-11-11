@@ -6043,9 +6043,17 @@ func IsProFresh(
 // of each of its own subscription cycles (GrantProCycleInTx, PRO-GRANT-CYCLE.md).
 
 // AddFreeTransferBalanceToAllNetworks grants the free-tier data allowance to every
-// network WITHOUT an active supporter subscription, for the window
-// [startTime, endTime). The balance is unpaid and carries pro = false, so the free
-// grant can never confer Pro.
+// network, Pro included, for the window [startTime, endTime). The owner,
+// 2026-11-11: "pro should get the 1tib per month plus the 30gb per day" (the
+// monthly amount is pro.yml's 10 TiB), and "extend daily data in grace". So a
+// network in a billing-grace hold or in a manual-payment grace, which keeps Pro
+// but starts no cycle (PRO-GRANT-CYCLE.md), still gets the day's free data after
+// its last cycle grant expires. Only a lag.dev guest and a prober shard's private
+// network are left out.
+//
+// The balance is unpaid and carries pro = false, so the free grant can never
+// confer Pro. A Pro network spends it only after its paid Pro grants: paid Pro
+// data funds first (transfer_balance_funding_order.go).
 // A supplied task run id commits a replay receipt with all grants; omit it for
 // an intentional independent refresh.
 func AddFreeTransferBalanceToAllNetworks(
@@ -6075,14 +6083,7 @@ func AddFreeTransferBalanceToAllNetworks(
 					network.network_id
 				FROM network
 
-				LEFT JOIN subscription_renewal ON
-					subscription_renewal.network_id = network.network_id AND
-					subscription_renewal.subscription_type = $1 AND
-					subscription_renewal.start_time <= $2 AND
-					$2 < subscription_renewal.end_time
-
 				WHERE
-					subscription_renewal.network_id IS NULL AND
 					-- a lag.dev guest gets no free data (lag.dev/PLAN.md A1)
 					NOT EXISTS (
 						SELECT 1 FROM lag_guest
@@ -6097,8 +6098,6 @@ func AddFreeTransferBalanceToAllNetworks(
 						WHERE prober_shard_run.network_id = network.network_id
 					)
 			`,
-			SubscriptionTypeSupporter,
-			server.NowUtc(),
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
