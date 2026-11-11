@@ -360,6 +360,12 @@ func cryptoNewSolanaReference() string {
 
 // cryptoItemDescription is the fixed English description a wallet shows.
 func cryptoItemDescription(item string) string {
+	if isDataPackItem(item) {
+		// "URnetwork 1 TiB data", "URnetwork 256 GiB data" (a Gamma receipt)
+		if byteCount, ok := dataPackByteCount(item); ok {
+			return "URnetwork " + model.SalesDataItem(byteCount)
+		}
+	}
 	switch item {
 	case model.SolanaPlanYearly:
 		return "URnetwork Pro yearly"
@@ -569,7 +575,7 @@ func cryptoPaymentAssets(ctx context.Context, config *CryptoPayConfig) (availabl
 			}
 		}
 		items := []string{}
-		for _, item := range cryptoPayKnownItems {
+		for _, item := range cryptoPayKnownItems() {
 			if assetConfig.SellsItem(item) {
 				items = append(items, item)
 			}
@@ -704,13 +710,18 @@ type cryptoIntentRequest struct {
 }
 
 // CreateCryptoPaymentIntent answers POST /pay/crypto/intent: an invoice for
-// the signed-in caller's network. The rules, in order (§2.3): the asset, the
-// plan or item it sells, the guest guard, the welcome offer, the per-network
-// limit, the price, open-invoice reuse, then the quote and the address.
+// the signed-in caller's network. The rules, in order (§2.3): a pack pro.yml
+// does not sell with crypto, the asset, the plan or item it sells, the guest
+// guard, the welcome offer, the per-network limit, the price, open-invoice
+// reuse, then the quote and the address.
 func CreateCryptoPaymentIntent(
 	args *CreateCryptoPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*CryptoPaymentIntentResult, error) {
+	// whatever the coin: the 256 GiB pack is x402 and Gamma only
+	if refusal := dataPackRefusal(strings.TrimSpace(args.ItemId), model.DataRailCrypto); refusal != "" {
+		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+	}
 	config := cryptoPayConfigFunc()
 	asset := strings.TrimSpace(args.Asset)
 	if !slices.Contains(cryptoPayAssets, asset) {
@@ -775,7 +786,7 @@ func CreateCryptoPaymentIntent(
 		}
 		request.tier = tier.Tier.Name
 	} else {
-		priceUsd, ok := dataPackPriceUsd(itemId)
+		priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 		if !ok {
 			glog.Errorf("[cryptopay]no usable price in pro.yml for data pack %s\n", itemId)
 			return cryptoIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
@@ -795,6 +806,10 @@ func CreateDataCryptoPaymentIntent(
 	args *CreateDataCryptoPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*CryptoPaymentIntentResult, error) {
+	// whatever the coin: the 256 GiB pack is x402 and Gamma only
+	if refusal := dataPackRefusal(strings.TrimSpace(args.ItemId), model.DataRailCrypto); refusal != "" {
+		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+	}
 	config := cryptoPayConfigFunc()
 	asset := strings.TrimSpace(args.Asset)
 	if !slices.Contains(cryptoPayAssets, asset) {
@@ -838,7 +853,7 @@ func CreateDataCryptoPaymentIntent(
 		), nil
 	}
 
-	priceUsd, ok := dataPackPriceUsd(itemId)
+	priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 	if !ok {
 		glog.Errorf("[cryptopay]no usable price in pro.yml for data pack %s\n", itemId)
 		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil

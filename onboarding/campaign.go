@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/session"
 )
 
 // Steps of the sequence. Paths share the step names; the day offset and the
@@ -184,7 +186,11 @@ type Facts struct {
 	// ----- step conditions -----
 	// the row's platform: ios, macos, android, windows, linux, web, or ""
 	// when unknown
-	Platform     string
+	Platform string
+	// the distribution the platform's app reported with it
+	// (session.ClientDistribution*), "" when unknown: it tells the App Store
+	// Mac from the direct-download Mac
+	Distribution string
 	HasConnected bool
 	WidgetAdded  bool
 	OfferState   string // "" (none) | active | redeemed | expired
@@ -269,16 +275,22 @@ type Decision struct {
 // The web platform: a browser sign-up, whose app is the extension.
 const PlatformWeb = "web"
 
-// WidgetPlatform reports whether the platform's app has a widget for E2's
-// activated email to point at: the iOS and Android apps, and the macOS app
-// (the apple widgets target builds for macOS too). The Windows and Linux apps
-// and the web have none; they get the desktop email (VariantDesktop). An
-// unknown platform ("") keeps the widget email, as before: Android app rows
-// were often recorded without a platform.
-func WidgetPlatform(platform string) bool {
+// WidgetPlatform reports whether the platform's app, as its distribution
+// (session.ClientDistribution*) says, has a widget for E2's activated email
+// to point at: the iOS and Android apps, and the macOS App Store app (the
+// apple widgets target builds for macOS too). The Windows and Linux apps, the
+// web and the direct-download macOS build (mac_direct: the URnetworkDirect
+// target embeds no widgets extension) have none; they get the desktop email
+// (VariantDesktop). An unknown platform ("") keeps the widget email, as
+// before: Android app rows were often recorded without a platform. So does a
+// Mac app of unknown distribution: until the apps reported it, a Mac app was
+// taken for the App Store build, the one with a stable release.
+func WidgetPlatform(platform string, distribution string) bool {
 	switch platform {
 	case "windows", "linux", PlatformWeb:
 		return false
+	case "macos":
+		return distribution != session.ClientDistributionMacDirect
 	}
 	return true
 }
@@ -359,9 +371,10 @@ func Decide(step string, f Facts) Decision {
 		// a platform without one the desktop habit; not activated -> another
 		// connect nudge
 		if f.HasConnected {
-			if !WidgetPlatform(f.Platform) {
-				// windows and linux: the desktop email, the app started with
-				// the computer; the web: the extension pinned to the toolbar,
+			if !WidgetPlatform(f.Platform, f.Distribution) {
+				// windows, linux and the direct-download Mac: the desktop
+				// email, the app started with the computer; the web: the
+				// extension pinned to the toolbar,
 				// once the extension is linked (widget.added on the web). Each
 				// once its template is uploaded (mmm/ONBOARDING-RETENTION.md
 				// P18)
