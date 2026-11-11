@@ -1,7 +1,24 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T00:20:09Z",
+  "observed_at": "2026-11-11T00:45:04Z",
+  "latest_private_dispatch_fix": {
+    "evidence": "EPOCH2-PRIVATE-DISPATCH-FIX-2026-11-11.json",
+    "deployed_source_commit": "63478fa88065512680a2c0b0d5b027c26e968d52",
+    "private_script_pin_independent_of_baseline_producer": true,
+    "both_exact_agent_role_snapshots_validated": true,
+    "normal_and_race_regressions_passed_three_times": true,
+    "race_includes_owned_disposable_postgres_redis_integration": true,
+    "temporary_fixture_containers_and_network_cleaned": true,
+    "both_original_admission_executions_committed_and_running": true,
+    "both_actual_manifests_use_private_script_and_r9": true,
+    "shared_baseline_digest_unchanged": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
+    "original_admission_deadlines_unchanged": true,
+    "customer_evaluation_clocks_started": 0,
+    "grading_ready": false,
+    "next_action": "Observe the two actual R9 admission executions to retained, authenticated completion against the shared baseline; only both passing receipts allow customer FIFO claims. Do not replace deadlines, regenerate the baseline, or mistake running services for successful qualification. Earlier entries below are historical."
+  },
   "latest_shared_baseline_and_admission": {
+    "observed_at": "2026-11-11T00:20:09Z",
     "evidence": "EPOCH2-SHARED-BASELINE-2026-11-11.json",
     "baseline_published": true,
     "baseline_replicates_completed": 9,
@@ -16,7 +33,7 @@
     "coordinator_stopped_at_verified_idle_boundary": true,
     "dispatch_correction": "Use each independently pinned private script identity in dispatch and success/failure provenance. Keep the baseline producer script independent; verify the private pin against a byte-identical root-owned snapshot of the already pinned agent config.",
     "customer_evaluation_clocks_started": 0,
-    "next_action": "Finish deterministic regression tests, checkpoint the coordinator fix, qualify and deploy it locally, then resume the same uncommitted admission identities with their original clocks. Do not regenerate the shared baseline, replace admission clocks, or change product source/scoring policy. Earlier entries below are historical."
+    "next_action": "Historical pre-deployment checkpoint; the correction is now deployed and both original admissions are executing. See latest_private_dispatch_fix."
   },
   "latest_official_epoch2_baseline_activation": {
     "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
