@@ -22184,7 +22184,13 @@ and rejection of the prior false causal claim.
 Probe: `payment-reconciliation`
 
 The hourly `PaymentReconcile` task is the lost-notification safety net for
-Apple, Google Play, Stripe, Solana, and x402. A run-level heartbeat is necessary but
+every store in `model.PaymentReconcileStores`: Apple, Google Play, Stripe,
+Solana, x402, Monero, Zcash, TAO (`bittensor`), Bitcoin and ETH (`ethereum`).
+The health and repair readers take their expected stores from that list, and a
+controller test holds the reconciler's legs to it, so a store with a new leg is
+expected without an edit here. Pay with Gamma has no leg: no `gamma`
+watermark is expected, and a `gamma` repair row fails closed as an unsupported
+store. A run-level heartbeat is necessary but
 not sufficient: the controller deliberately continues after one store is
 skipped or errors, then still records its global heartbeat. Observe all layers:
 
@@ -22201,16 +22207,16 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
   reduced to distinct provider evidence, observation/run counts, and age;
   the complete unresolved-webhook tuple belongs to the separate §2.22 WARN.
 
-The default publisher and health/repair readers recognize all five stores,
-including `x402`. Its local leg is always enabled and needs no external store
-credentials: it retries retained `settled_not_granted` grants. An empty local
+The default publisher and health/repair readers recognize every reconciled
+store, including `x402`. Its local leg is always enabled and needs no external
+store credentials: it retries retained `settled_not_granted` grants. An empty local
 pass can complete and advance its watermark. A recorded x402 skip is unexpected
 under that default contract; compare the executing artifact, explicit store
 selection and audit writer before changing anything. Do not invent an external
 x402 credential requirement. Explicit manual store selection does not establish
 the deployed recurring task's configuration or completion.
 
-Fresh global heartbeat and four healthy siblings cannot establish x402 health.
+Fresh global heartbeat and healthy siblings cannot establish x402 health.
 Its non-dry-run local errors retain the existing one-event WARN/two-event PAGE
 policy; missing and stale watermarks retain the same strict age boundaries as
 other stores. Local validation/grant/persistence may fail while heartbeat stays
@@ -22238,7 +22244,7 @@ sustain. Complete sibling aggregates retain their own PAGE or WARN findings,
 including when the health query fails first. Queries remain sequential and
 bounded by the existing observation context; parent cancellation ends the run.
 
-The complete five-store health receipt also requires nonnegative skip, error,
+The complete every-store health receipt also requires nonnegative skip, error,
 and task counts. Ages must be nonnegative or exactly the existing `-1` absent
 sentinel. Claimed and errored task counts are each subsets of the total task
 count; they can overlap. Because one SQL snapshot cross-joins one heartbeat
@@ -22562,13 +22568,21 @@ This probe checks business outcomes that ordinary API/process liveness cannot
 establish:
 
 - `payment-entitlement-missing` (PAGE): an in-window supporter renewal exists
-  for Apple, Google, Stripe, or Solana on an existing network, but the same
-  network has no in-window `transfer_balance.pro=true`. This is the exact
-  “paying but shown as free” invariant. The check uses entitlement time, not
-  remaining bytes. Reconciliation may repair it only after that provider
-  independently confirms the renewal remains entitled.
-- `payment-renewal-orphan` (WARN): an in-window Apple, Google, or Stripe
-  supporter renewal belongs to a deleted network. The count is distinct
+  in a subscription market on an existing network, but the same network has
+  no in-window `transfer_balance.pro=true`. The markets are
+  `model.SubscriptionMarkets`, the list the subscription dashboard counts:
+  Apple, Google, Stripe, Solana, Monero, Zcash, TAO (`bittensor`), Bitcoin,
+  ETH (`ethereum`) and Pay with Gamma (`gamma`); manual and x402 renewals are
+  not checked. This is the exact “paying but shown as free” invariant. The
+  check uses entitlement time, not remaining bytes. For Apple, Google, Stripe
+  and Solana, reconciliation may repair it only after that provider
+  independently confirms the renewal remains entitled. The other markets'
+  credit writes the renewal and its Pro window in one transaction and
+  reconciliation never repairs their Pro window, so the alert says so: find
+  the later write that ended or removed the window, and restore it only through
+  an authorized repair with the owner's go.
+- `payment-renewal-orphan` (WARN): an in-window Apple, Google, Stripe, or
+  gamma supporter renewal belongs to a deleted network. The count is distinct
   deleted owners, not physical renewal rows; sequential windows for one owner
   remain one lifecycle boundary. It is deliberately excluded from
   paying-account and Pro-repair counts: recreating a deleted account from
@@ -22588,7 +22602,18 @@ establish:
   a failed cancellation or newly credited, unchecked renewal retains the
   network. Successful cancellation preserves paid local history, so this WARN
   alone cannot establish a Google billing failure. The Apple and Google store
-  workflows remain separate from Stripe cancellation.
+  workflows remain separate from Stripe cancellation. A gamma plan renews
+  through our own biller, not a store: account deletion neither refuses nor
+  cancels it, the account's `gamma_account` row (automatic renewal, plan,
+  deposit hotkey) survives, and the biller renews from that row near the end
+  of the term without reading the network, so it can charge the deposit for an
+  account the credit can no longer reach. Before the term ends, stop that
+  owner's automatic renewal with the owner's go and give any renewal already
+  charged and never credited an authorized refund or support disposition. The
+  other one-time crypto markets (Monero, Zcash, TAO, Bitcoin, ETH) are
+  excluded like Solana: a prepaid year that never renews. The recurring set is
+  `model.SubscriptionMarkets` less `model.SubscriptionOneTimeCryptoMarkets`; a
+  test fails until a new recurring market gets its own disposition.
 - `payment-solana-unfulfilled` (PAGE): a confirmed received transfer remains in
   `solana_unfulfilled_payment`, grouped as `no_intent` or `underpaid`. The
   provider webhook was already acknowledged; never delete this recovery row.
@@ -22621,8 +22646,9 @@ establish:
   or refund disposition. Do not infer this failure from balance-code rows.
 
 The crypto invoice rail (mmm/BTCPAY.md §17, server docs/CRYPTO-PAY-API.md) adds
-four classes, aggregated per coin (`usdc_solana`, `zec`, `xmr`, `tao`, `btc`,
-`eth`, `sol`) from `crypto_payment_receipt` in review and `crypto_scan_cursor`.
+four classes, aggregated per coin of `model.CryptoAssets`, the rail's own list
+(`usdc_solana`, `zec`, `xmr`, `tao`, `btc`, `eth`, `sol`), from
+`crypto_payment_receipt` in review and `crypto_scan_cursor`.
 The count is distinct invoices; the ages are first-seen ages:
 
 - `crypto-sanctions-hold` (PAGE): before a TAO, Bitcoin, ETH or SOL credit the

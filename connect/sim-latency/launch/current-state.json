@@ -1,13 +1,22 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T06:21:19Z",
+  "observed_at": "2026-11-11T08:03:29Z",
   "latest_single_admission_recovery": {
     "evidence": "EPOCH2-SINGLE-ADMISSION-RECOVERY-2026-11-11.json",
     "user_approved": true,
     "recovery_registered": true,
     "replacement_clock_started": true,
-    "replacement_agent_state": "running",
+    "replacement_agent_state": "succeeded",
     "replacement_execution_started": true,
+    "replacement_replicates_completed": 9,
+    "replacement_current_replicate": 9,
+    "replacement_full_r9_verdict_available": true,
+    "all_seven_score_gates_passed": true,
+    "retained_admission_passed": false,
+    "failed_admission_metric": "throughput_p50_bytes_per_s",
+    "failed_metric_relative_change_percent": -5.845536434,
+    "failed_metric_two_sided_p_value": 0.03933408960004516,
+    "coordinator_stopped_at_idle_boundary": true,
     "replacement_run_id": "0f7d6ce27edb1066bd998896be31fba5553d9a68f06ba673aa2212c808da5b86",
     "replacement_deadline_at": "2026-11-11T09:17:08.071036Z",
     "goofe_passing_admission_preserved": true,
@@ -20,7 +29,7 @@
     "observed_main_migration": 952,
     "grading_ready": false,
     "customer_evaluation_clocks_started": 0,
-    "next_action": "Recovery registered and coordinator active. Observe actual Sille replacement dispatch and complete R9 qualification under its new clock. Both authenticated retained admission receipts are required before customer scoring. Earlier entries below are historical."
+    "next_action": "Obtain explicit direction on the failed operational host-admission screen. Preserve this completed R9 sample and failed retained receipt; no automatic resampling or waiver. Both hosts must be admitted before customer scoring under the frozen policy. Earlier entries below are historical."
   },
   "latest_goofe_r9_admission": {
     "evidence": "EPOCH2-GOOFE-R9-ADMISSION-2026-11-11.json",

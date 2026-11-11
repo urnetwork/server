@@ -5754,6 +5754,24 @@ var SubscriptionOneTimeCryptoMarkets = []string{
 	SubscriptionMarketEthereum,
 }
 
+// SubscriptionMarkets are the markets whose supporter window is a
+// subscription: the App Store, Google Play, Stripe, every one-time crypto
+// market and gamma. It is the one list the subscription dashboard counts
+// (subscription_metrics_model.go, grafana/dashboards/subscriptions.json) and
+// the payment monitor checks for a Pro entitlement
+// (monitor/signal_payment_failures.go), so a market added here or to
+// SubscriptionOneTimeCryptoMarkets is counted and watched. The manual and x402
+// markets stay out of both, as before.
+var SubscriptionMarkets = slices.Clip(slices.Concat(
+	[]string{
+		SubscriptionMarketApple,
+		SubscriptionMarketGoogle,
+		SubscriptionMarketStripe,
+	},
+	SubscriptionOneTimeCryptoMarkets,
+	[]string{SubscriptionMarketGamma},
+))
+
 type SubscriptionRenewal struct {
 	NetworkId          server.Id
 	SubscriptionType   SubscriptionType
