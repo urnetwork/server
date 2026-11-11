@@ -2,7 +2,7 @@
   "schema": 1,
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "epoch": 2,
-  "status": "corrected_image_loaded_on_both_hosts_pressure_checks_passed_native_smoke_runs_in_progress_not_activated",
+  "status": "both_hosts_fully_qualified_and_evidence_retained_pending_coordinator_activation",
   "execution_image_digest": "sha256:98284651822ebe55341d6133ac978aed30c8d18dd5e9c4332136fb4ffca7e702",
   "rejected_prepared_image_digest": "sha256:b1097b266ddb62eb767c54a1f68fe88a8dabca93a7c212f14824a6ec479499c2",
   "rejected_prepared_image_reason": "Build-only GOMAXPROCS=2 and other compiler-stage environment changes escaped into runtime. Never activated or used for customer scoring.",
@@ -42,8 +42,15 @@
       "pressure_test_residual_containers": 0,
       "pressure_test_residual_networks": 0,
       "native_smoke_run_id": "0425891539aa56af0d5c24321fba15709350802a43f05f3a46e3219a21aa9a2e",
-      "native_smoke_state": "running",
-      "full_native_qualification_passed": false
+      "native_smoke_state": "succeeded",
+      "full_native_qualification_passed": true,
+      "all_seven_scoring_gates_passed": true,
+      "all_fifteen_security_checks_passed": true,
+      "final_agent_config_sha256": "e88bcf12539246da396de5a5e16ca1dce64add32d854450285d73fc7437a1046",
+      "final_native_audit_sha256": "e930ab873ea7f6355a6e8f46f4d7aa59a413d440c08c2571c41c108cc48a0d20",
+      "retained_packet_sha256": "ad113e5b3e0bb4d2d06049e985b232923f350b9efe1ddd551e3086a5245ccc0c",
+      "retention_receipt_sha256": "f6abe5adcd076dfbd3ebf0f17d06901c8c8498a15594b50584a9f5d6e3dc4d47",
+      "compliance_exact_version_readback_verified": true
     },
     {
       "host_id": "goofe",
@@ -55,11 +62,18 @@
       "pressure_test_residual_containers": 0,
       "pressure_test_residual_networks": 0,
       "native_smoke_run_id": "90a20080ac2657e230c689f0cf66183dd0b6ba73db421b6ddcf5370f69fbaeda",
-      "native_smoke_state": "running",
-      "full_native_qualification_passed": false
+      "native_smoke_state": "succeeded",
+      "full_native_qualification_passed": true,
+      "all_seven_scoring_gates_passed": true,
+      "all_fifteen_security_checks_passed": true,
+      "final_agent_config_sha256": "85b6cb89a35b5c3b0aca89fdda7661d3b888a786b3f5ebf3ba8d08e36fc711bd",
+      "final_native_audit_sha256": "3d1339df21b07f52079ca9a10f1d5e4657d3615ee72d338cd9fce7280a76bd1c",
+      "retained_packet_sha256": "2fe6537d8a7c13f6550cd685d47f8641cb968214a5928aa823f813b62af8ef9b",
+      "retention_receipt_sha256": "7b25537bbb54d92821b3b3f2d0ca0a69e109339f58a02602af861c881bd83a3e",
+      "compliance_exact_version_readback_verified": true
     }
   ],
-  "native_hotfix_containment_and_compatibility_not_yet_qualified": true,
+  "native_hotfix_containment_and_compatibility_not_yet_qualified": false,
   "old_coordinator_inactive_and_boot_autostart_disabled": true,
   "old_coordinator_pause_verified_at": "2026-11-11T15:23:35Z",
   "qualified_replacement_must_reenable_boot_autostart": true,
@@ -85,10 +99,10 @@
   "host_patch_validator_sha256": "633985915917d91076d9af36cc13df40ba3849b6e4c02057bf2df63ee313c8cd",
   "initial_broader_test_failures": "Five older fixture tests were stale relative to G7: a legacy metric fixture retained the future coverage policy; synthetic later-round metrics fixtures did not suspend their source-installation coverage guard; a deadline fixture omitted frozen coverage score evidence. Fixtures corrected; ordinary/PostgreSQL and race reruns each passed 249 checks over three repetitions.",
   "durable_runtime_authority_design": "A root-pinned closed compiler exception is recorded once in the existing append-only job-event ledger before any customer claim. Claims authenticate the same decision; archive metadata names both the frozen control image and actual execution image. Historical policy, baseline and admission rows remain unchanged.",
-  "queue_observed_at": "2026-11-11T14:35:53.615692Z",
+  "queue_observed_at": "2026-11-11T16:45:05.477844Z",
   "queued_submissions": 14,
   "customer_evaluation_clocks_started": 0,
-  "main_migration_head_observed": 954,
+  "main_migration_head_observed": 956,
   "separate_retained_sille_admission_exception_registered": true,
   "authority": "User explicitly approved Go1.27.4 for epoch2 as a security-hotfix exception and explicitly directed reuse of the existing baseline without fresh statistical calibration.",
   "previous_toolchain": "go1.27.3",
@@ -109,7 +123,6 @@
   "build_guard_test_scope": "Executed compiler refusal/acceptance boundary and checked offline rebuild requirements; not runtime containment or distributed-lifecycle qualification.",
   "activation_remaining": [
     "Record and authenticate the approved execution-identity amendment without editing historical round/baseline provenance.",
-    "Complete both running native smoke checks, authenticate their artifacts, and bind fresh compatibility/containment markers.",
     "Start scoring and verify real FIFO execution on Sille and Goofe."
   ]
 }
