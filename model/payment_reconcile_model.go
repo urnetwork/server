@@ -825,7 +825,7 @@ func RestoreDisputedStripeEntitlementInTx(
 		FROM pro_grant_cycle AS cycle
 		INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
 		WHERE cycle.network_id = $1
-		  AND cycle.ended_time = $2
+		  AND cycle.ended_time IS NOT NULL
 		  AND balance.end_time = $2
 		`,
 		networkId,
@@ -881,7 +881,7 @@ func RestoreDisputedStripeEntitlementInTx(
 			UPDATE pro_grant_cycle AS cycle SET ended_time = NULL
 			WHERE cycle.network_id = $1
 			  AND cycle.balance_id = ANY($2::uuid[])
-			  AND cycle.ended_time = $3
+			  AND cycle.ended_time IS NOT NULL
 			RETURNING cycle.balance_id, cycle.cycle_end_time
 		)
 		UPDATE transfer_balance AS balance SET end_time = restored.cycle_end_time + $4::interval
@@ -1082,9 +1082,9 @@ func EndReconciledEntitlementForNetworkPurchaseTokenInConn(connOwner server.PgCo
 // (networkId nil-able; transactionIds nil = no transaction filter;
 // purchaseToken "" = no token filter) and the pro transfer balances those
 // renewals granted, matched per network by identical window end. A network the
-// ending leaves with no supporter renewal open also loses its running Pro cycle
-// grant, ended now with its cycle (ended_time), so a refund takes back the
-// cycle's data as it took back the period's balance. Naturally idempotent:
+// ending leaves with no supporter renewal open also loses its Pro cycle grant,
+// ended now with its cycle (ended_time), so a refund takes back the cycle's data
+// as it took back the period's balance. Naturally idempotent:
 // every predicate requires end_time > now, so a second delivery of the same
 // refund/revocation finds nothing left to end. Returns the distinct networks
 // whose entitlement was ended.
@@ -1130,7 +1130,6 @@ func endReconciledEntitlementInTx(
 		FROM pro_grant_cycle AS cycle
 		INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
 		WHERE cycle.ended_time IS NULL
-		  AND cycle.cycle_end_time > $3
 		  AND balance.end_time > $3
 		  AND EXISTS (
 			SELECT 1 FROM subscription_renewal AS renewal
@@ -1207,7 +1206,6 @@ func endReconciledEntitlementInTx(
 			FROM pro_grant_cycle AS cycle
 			INNER JOIN transfer_balance AS balance ON balance.balance_id = cycle.balance_id
 			WHERE cycle.ended_time IS NULL
-			  AND cycle.cycle_end_time > $3
 			  AND balance.end_time > $3
 			  AND cycle.network_id IN (SELECT network_id FROM renewals)
 			  AND NOT EXISTS (
@@ -1260,7 +1258,8 @@ func endReconciledEntitlementInTx(
 			  AND (SELECT admitted FROM ownership)
 			RETURNING balance.balance_id
 		), ended_cycles AS (
-			UPDATE pro_grant_cycle AS cycle SET ended_time = $3
+			-- a cycle already past its end, in its grant's grace, keeps its end
+			UPDATE pro_grant_cycle AS cycle SET ended_time = LEAST($3, cycle.cycle_end_time)
 			FROM cycle_grants
 			WHERE cycle.network_id = cycle_grants.network_id
 			  AND cycle.cycle_start_time = cycle_grants.cycle_start_time

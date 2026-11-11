@@ -106,8 +106,9 @@ cycle.
   through `endReconciledEntitlementInTx`. It ended the period's renewal and
   the balance matched by its window end, which used to be the 600 GiB credit
   and so ended Pro at once. Under the same single ownership admission, it now
-  also ends the running cycle grant of a network the ending leaves with no
-  supporter renewal open, and marks the cycle `ended_time`. A network still
+  also ends the cycle grant of a network the ending leaves with no supporter
+  renewal open, even one in its last day of grace, and marks the cycle
+  `ended_time`. A network still
   paying through another subscription keeps its cycle's grant. A cycle
   grant is never matched by window end. A won dispute
   (`RestoreDisputedStripeEntitlementInTx`) gives the cycle back: it clears
