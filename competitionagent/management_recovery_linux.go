@@ -108,6 +108,15 @@ func recoveryServiceTimeout(settings AgentSettings) (time.Duration, error) {
 // One owner supplies exact argv quoting, duration precision and resource values
 // to both provisioning and admission. Rendering proves no native readiness.
 func recoveryServiceTextProperties(config Config, policy *ManagementResourcePolicy, settings AgentSettings) (map[string]string, error) {
+	return recoveryServiceTextPropertiesForRole(config, policy, settings, "--recover-active")
+}
+
+// Only the ordinary recovery role and the separately authorized legacy closure
+// share this independent service; neither accepts an arbitrary executable role.
+func recoveryServiceTextPropertiesForRole(config Config, policy *ManagementResourcePolicy, settings AgentSettings, role string) (map[string]string, error) {
+	if role != "--recover-active" && role != "--close-legacy-prelaunch" {
+		return nil, errors.New("unknown independent recovery role")
+	}
 	if policy == nil || !recoveryAuthorityPath(config.Agent.Path) || !recoveryAuthorityPath(config.configPath) ||
 		settings.ConfigBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 || settings.ContainmentCpuPeriodMicros <= 0 {
 		return nil, errors.New("recovery service omitted exact role or bounded settings")
@@ -120,7 +129,7 @@ func recoveryServiceTextProperties(config Config, policy *ManagementResourcePoli
 		"Unit.Description": "Independent subevaluation recovery outside ordinary management ancestry",
 		"Unit.Requires":    managementCleanupSliceName, "Unit.After": managementCleanupSliceName, "Unit.StartLimitIntervalSec": "0",
 		"Service.Type": "oneshot", "Service.User": "root", "Service.Group": "root", "Service.Slice": managementCleanupSliceName,
-		"Service.ExecStart": systemdCommandWord(config.Agent.Path) + " --config " + systemdCommandWord(config.configPath) + " --recover-active",
+		"Service.ExecStart": systemdCommandWord(config.Agent.Path) + " --config " + systemdCommandWord(config.configPath) + " " + role,
 		"Service.Restart":   "no", "Service.KillMode": "control-group", "Service.OOMPolicy": "kill", "Service.LimitCORE": "0", "Service.UMask": "0077",
 		"Service.MemoryMax": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupMemoryBytes, 10), "Service.MemorySwapMax": "0",
 		"Service.TasksMax": strconv.FormatInt(DefaultManagementBoundarySettings().CleanupTasksMaximum, 10), "Service.CPUQuota": strconv.Itoa(settings.ManagementCpuQuotaPercent) + "%",
@@ -137,10 +146,21 @@ func recoveryServiceTextProperties(config Config, policy *ManagementResourcePoli
 // Generates inert unit bytes from the same closed contract admission checks.
 // No file is written, service started, host inspected or qualification granted.
 func RenderRecoveryService(agentPath, configPath string, policy ManagementResourcePolicy, settings AgentSettings) ([]byte, error) {
+	return renderRecoveryServiceForRole(agentPath, configPath, policy, settings, "--recover-active")
+}
+
+// The authorization document replaces the ordinary config argument only for
+// the explicit operator closure role. Rendering grants no native permission.
+func RenderLegacyPrelaunchRecoveryService(agentPath, authorizationPath string, policy ManagementResourcePolicy, settings AgentSettings) ([]byte, error) {
+	return renderRecoveryServiceForRole(agentPath, authorizationPath, policy, settings, "--close-legacy-prelaunch")
+}
+
+// Both closed roles use identical resource and independent-placement limits.
+func renderRecoveryServiceForRole(agentPath, configPath string, policy ManagementResourcePolicy, settings AgentSettings, role string) ([]byte, error) {
 	if err := ValidateManagementResourcePolicy(policy, DefaultManagementBoundarySettings()); err != nil {
 		return nil, err
 	}
-	expected, err := recoveryServiceTextProperties(Config{Agent: Pin{Path: agentPath}, configPath: configPath}, &policy, settings)
+	expected, err := recoveryServiceTextPropertiesForRole(Config{Agent: Pin{Path: agentPath}, configPath: configPath}, &policy, settings, role)
 	if err != nil {
 		return nil, err
 	}
@@ -168,10 +188,15 @@ func RenderRecoveryService(agentPath, configPath string, policy ManagementResour
 // Pinned unit text is closed as well as hashed. Extra programs, command prefixes,
 // environment files, namespaces and reverse dependency hooks cannot hide in it.
 func validateRecoveryServiceText(content []byte, config Config, policy *ManagementResourcePolicy, settings AgentSettings) error {
+	return validateRecoveryServiceTextForRole(content, config, policy, settings, "--recover-active")
+}
+
+// The role is selected by native code, never by a signed evaluator request.
+func validateRecoveryServiceTextForRole(content []byte, config Config, policy *ManagementResourcePolicy, settings AgentSettings, role string) error {
 	if int64(len(content)) > settings.ConfigBytes {
 		return errors.New("recovery service text exceeds its fixed role")
 	}
-	expected, err := recoveryServiceTextProperties(config, policy, settings)
+	expected, err := recoveryServiceTextPropertiesForRole(config, policy, settings, role)
 	if err != nil {
 		return err
 	}
@@ -202,6 +227,15 @@ func validateRecoveryServiceText(content []byte, config Config, policy *Manageme
 // Manager ExecStart rendering is unquoted strv_join; authority paths are
 // deliberately whitespace-free so exact argv boundaries remain unambiguous.
 func validateRecoveryExecStart(value string, config Config, current bool) error {
+	return validateRecoveryExecStartForRole(value, config, current, "--recover-active")
+}
+
+// The legacy role is an explicit new authority, not a changed interpretation
+// of the ordinary recovery command's missing-unit guard.
+func validateRecoveryExecStartForRole(value string, config Config, current bool, role string) error {
+	if role != "--recover-active" && role != "--close-legacy-prelaunch" {
+		return errors.New("unknown independent recovery executable role")
+	}
 	if !strings.HasPrefix(value, "{ ") || !strings.HasSuffix(value, " }") {
 		return errors.New("recovery manager omitted exact executable metadata")
 	}
@@ -213,7 +247,7 @@ func validateRecoveryExecStart(value string, config Config, current bool) error 
 		}
 		fields[key] = value
 	}
-	if len(fields) != 8 || fields["path"] != config.Agent.Path || fields["argv[]"] != strings.Join([]string{config.Agent.Path, "--config", config.configPath, "--recover-active"}, " ") || fields["ignore_errors"] != "no" {
+	if len(fields) != 8 || fields["path"] != config.Agent.Path || fields["argv[]"] != strings.Join([]string{config.Agent.Path, "--config", config.configPath, role}, " ") || fields["ignore_errors"] != "no" {
 		return errors.New("recovery manager executable differs from the closed pinned role")
 	}
 	pid, err := strconv.ParseUint(fields["pid"], 10, 32)
@@ -237,6 +271,11 @@ func validateRecoveryExecStart(value string, config Config, current bool) error 
 // Exact fields/allowed boot dependencies refuse a target which would die with
 // the ordinary engine, management aggregate or another run's evaluator.
 func validateRecoveryServiceProjection(content []byte, config Config, policy *ManagementResourcePolicy, settings AgentSettings, current bool) error {
+	return validateRecoveryServiceProjectionForRole(content, config, policy, settings, current, "--recover-active")
+}
+
+// Placement stays identical for both finite recovery-only roles.
+func validateRecoveryServiceProjectionForRole(content []byte, config Config, policy *ManagementResourcePolicy, settings AgentSettings, current bool, role string) error {
 	values := map[string]string{}
 	if int64(len(content)) > settings.DiagnosticBytes {
 		return errors.New("recovery service projection exceeds its bound")
@@ -329,7 +368,7 @@ func validateRecoveryServiceProjection(content []byte, config Config, policy *Ma
 			return errors.New("recovery target owner timeout or CPU quota differs")
 		}
 	}
-	return validateRecoveryExecStart(values["ExecStart"], config, current)
+	return validateRecoveryExecStartForRole(values["ExecStart"], config, current, role)
 }
 
 // Arming verifies the independent target and role natively, without starting it
@@ -361,6 +400,12 @@ func (self *Agent) verifyRecoveryPlacement(ctx context.Context, current bool) er
 // Both protected documents and manager/kernel proof are sampled afresh. A
 // changed config/pin or manager role invalidates the old admission receipt.
 func verifyRecoveryService(ctx context.Context, config Config, settings AgentSettings, protected, current bool, boundary func(context.Context, *ManagementResourcePolicy, Pin, AgentSettings, bool, bool) error, command func(context.Context, Pin, []string, AgentSettings) ([]byte, error)) error {
+	return verifyRecoveryServiceForRole(ctx, config, settings, protected, current, boundary, command, "--recover-active")
+}
+
+// Original config and service authority remain untouched; the legacy role
+// supplies its separately pinned operator authorization as its config argument.
+func verifyRecoveryServiceForRole(ctx context.Context, config Config, settings AgentSettings, protected, current bool, boundary func(context.Context, *ManagementResourcePolicy, Pin, AgentSettings, bool, bool) error, command func(context.Context, Pin, []string, AgentSettings) ([]byte, error), role string) error {
 	if settings.ControlTimeout <= 0 || boundary == nil || command == nil {
 		return errors.New("recovery proof has no bounded concrete owner")
 	}
@@ -375,7 +420,7 @@ func verifyRecoveryService(ctx context.Context, config Config, settings AgentSet
 		return err
 	}
 	content, err := readRecoveryAuthority(config.RecoveryService, settings.ConfigBytes, protected)
-	if err != nil || validateRecoveryServiceText(content, config, policy, settings) != nil {
+	if err != nil || validateRecoveryServiceTextForRole(content, config, policy, settings, role) != nil {
 		return errors.New("recovery service is not the closed protected template")
 	}
 	manager, err := recoverySystemctlPin(config, settings, protected)
@@ -387,7 +432,7 @@ func verifyRecoveryService(ctx context.Context, config Config, settings AgentSet
 	if err != nil {
 		return err
 	}
-	if err := validateRecoveryServiceProjection(projection, config, policy, settings, current); err != nil {
+	if err := validateRecoveryServiceProjectionForRole(projection, config, policy, settings, current, role); err != nil {
 		return err
 	}
 	if err := boundary(ctx, policy, manager, settings, protected, current); err != nil {
