@@ -11400,4 +11400,9 @@ var migrations = []any{
 	// Corrected executor identities are separately audited before any customer
 	// or R9 admission clock; frozen round/source policy bytes remain untouched.
 	newSqlMigration(CompetitionExecutorControlAmendmentMigrationSql()),
+
+	// Pay with Gamma (gamma_pay_schema.go, mmm/BTCPAY.md §18): seven new empty
+	// tables. Nothing existing is locked or rewritten. Apply before deploying
+	// the api and the taskworker that use them.
+	newSqlMigration(gammaPaySchemaSql),
 }

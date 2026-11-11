@@ -1,0 +1,307 @@
+{
+  "uid": "urnetwork-gamma-pay",
+  "title": "urnetwork / gamma payments",
+  "description": "Pay with Gamma (mmm/BTCPAY.md §18): the taskworker's biller and watcher. SN25 gamma deposits are charged by our spender through the GammaSpend billing key; a purchase is credited only on our own finalized GammaSpent.",
+  "tags": [
+    "urnetwork",
+    "payments"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "env",
+        "label": "env",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "warp-mimir"
+        },
+        "query": "label_values(urnetwork_gamma_pay_readiness, env)",
+        "definition": "label_values(urnetwork_gamma_pay_readiness, env)",
+        "refresh": 2,
+        "sort": 1,
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "biller readiness",
+      "description": "The biller's readiness: 1 for the current reason. Anything but ready pauses new charges (not_configured until gamma.yml and the on-chain setup exist; runtime_unsupported pauses on an unreviewed runtime; batch_in_review waits for an operator).",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (reason) (urnetwork_gamma_pay_readiness{env=\"$env\",service=\"taskworker\",instance!=\"\"}) == 1",
+          "legendFormat": "{{reason}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "billing key fee float",
+      "description": "What the GammaSpend billing key can pay fees from. Purchases pause below min_float_rao (gamma.yml, 0.001 TAO by default); a one-entry spend costs about 0.0002 TAO.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_gamma_pay_billing_float_rao{env=\"$env\",service=\"taskworker\",instance!=\"\"}) / 1e9",
+          "legendFormat": "TAO",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "TAO/USD oracle age",
+      "description": "Blocks since the chain's TAO/USD oracle last fed. Every mint fails past 300 (TaoUsdPriceUnavailable); spending existing deposits does not need it.",
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_gamma_pay_price_age_blocks{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "blocks",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "watcher lag",
+      "description": "Finalized blocks the watcher has not read yet. Selling pauses (watcher_behind) past 100.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(urnetwork_gamma_pay_scan_lag_blocks{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "lag"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "alarms / s by kind",
+      "description": "Watcher alarms: unknown_reference (a spend from our spender we never issued: the earliest sign of a leaked billing key), duplicate_reference, spender_proxy_changed, unknown_billing_transaction, unexpected_nonce, runtime_unsupported, undecodable_block, service_changed, and stray_tao (plain TAO sent to a deposit hotkey, recoverable). Any but stray_tao needs the owner.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (kind) (rate(urnetwork_gamma_pay_alarms_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{kind}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "intents made / s by purpose",
+      "description": "Gamma intents: purchase (POST /pay/gamma/intent, on the api) and the biller's automatic renew, topup and seat.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose) (rate(urnetwork_gamma_pay_intents_created_total{env=\"$env\",service=~\"api|alt|taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{purpose}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "charges resolved / s",
+      "description": "Charges resolved by a finalized event: spent, or skipped with the chain's reason (insufficient_gamma, daily_cap_exceeded, wrong_spender, no_deposit).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state, reason) (rate(urnetwork_gamma_pay_charges_resolved_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{state}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "credits / s",
+      "description": "Intents credited on our finalized GammaSpent, by purpose and delivery.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (purpose, delivery) (rate(urnetwork_gamma_pay_credits_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{purpose}} {{delivery}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "batches submitted and their fees",
+      "description": "Spend batches signed and submitted (at most one live at a time), and the mean fee of the batches that landed, in rao.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 21
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(rate(urnetwork_gamma_pay_batches_submitted_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "batches / s"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_gamma_pay_batch_fee_rao_sum{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) / sum(rate(urnetwork_gamma_pay_batch_fee_rao_count{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "mean fee (rao)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none"
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

@@ -226,6 +226,13 @@ func registry() []specEndpoint {
 		{method: "POST", path: "/pay/crypto/requote", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
 		{method: "POST", path: "/pay/crypto/quote", argType: rt(controller.CryptoPaymentQuoteArgs{}), resultType: rt(controller.CryptoPaymentQuoteResult{})},
 		{method: "POST", path: "/pay/alchemy", argType: rt(controller.AlchemyWebhookArgs{}), resultType: rt(controller.AlchemyWebhookResult{})},
+		// Pay with Gamma (controller/gamma_controller.go)
+		{method: "GET", path: "/pay/gamma/services.json", argType: nil, resultType: rt(controller.GammaServicesDocument{})},
+		{method: "GET", path: "/pay/gamma/terms", argType: nil, resultType: rt(controller.GammaTermsResult{})},
+		{method: "POST", path: "/pay/gamma/intent", argType: rt(controller.CreateGammaPaymentIntentArgs{}), resultType: rt(controller.GammaPaymentIntentResult{})},
+		{method: "POST", path: "/pay/gamma/status", argType: rt(controller.GammaPaymentStatusArgs{}), resultType: rt(controller.GammaPaymentStatusResult{})},
+		{method: "GET", path: "/pay/gamma/settings", argType: nil, resultType: rt(controller.GammaSettingsResult{})},
+		{method: "POST", path: "/pay/gamma/settings", argType: rt(controller.GammaSettingsArgs{}), resultType: rt(controller.GammaSettingsResult{})},
 
 		{"GET", "/verify/keys", nil, rt(controller.GetVerifyKeysResult{})},
 		{"POST", "/sn/wallet", rt(controller.SnSetWalletArgs{}), rt(controller.SnSetWalletResult{})},

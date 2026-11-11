@@ -230,6 +230,9 @@ func initTaskSchedule(ctx context.Context) {
 		// unlink
 		work.ScheduleCryptoPaymentScans(clientSession, tx)
 		work.ScheduleCryptoPaymentUnlink(clientSession, tx)
+		// Pay with Gamma (controller/gamma_biller.go): the biller and the
+		// watcher, one chain
+		work.ScheduleGammaBiller(clientSession, tx)
 		// lag.dev guest expiry and result retention (lag.dev/PLAN.md A2, A5)
 		work.ScheduleSweepLag(clientSession, tx)
 	}, server.TxReadCommitted)
@@ -827,6 +830,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.CryptoPaymentUnlink,
 			work.CryptoPaymentUnlinkPost,
+		),
+		// Pay with Gamma (controller/gamma_biller.go)
+		task.NewTaskTargetWithPost(
+			work.GammaBiller,
+			work.GammaBillerPost,
 		),
 		// lag.dev/PLAN.md A2, A5
 		task.NewTaskTargetWithPost(

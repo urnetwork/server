@@ -121,6 +121,8 @@ type subscriptionStoreLookupSet struct {
 	apple  func(ctx context.Context, originalTransactionId string) (*subscriptionStoreState, error)
 	google func(ctx context.Context, purchaseToken string) (*subscriptionStoreState, error)
 	solana func(ctx context.Context, reference string) (*subscriptionStoreState, error)
+	// intentId is the renewal's transaction id (gamma_credit.go)
+	gamma func(ctx context.Context, intentId string) (*subscriptionStoreState, error)
 }
 
 var subscriptionStoreLookups = subscriptionStoreLookupSet{
@@ -128,6 +130,7 @@ var subscriptionStoreLookups = subscriptionStoreLookupSet{
 	apple:  appleLookupSubscriptionState,
 	google: playLookupSubscriptionState,
 	solana: solanaLookupSubscriptionState,
+	gamma:  gammaLookupSubscriptionState,
 }
 
 func subscriptionDetailsCacheKey(networkId server.Id) string {
@@ -324,6 +327,10 @@ func buildSubscriptionDetails(
 			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 			detail.TransactionId = renewal.TransactionId
 			detail.CryptoAsset = model.CryptoRenewalAsset(ctx, store, renewal.TransactionId)
+		case model.SubscriptionMarketGamma:
+			// renewal is switched with POST /pay/gamma/settings
+			detail.ManageUrl = gammaManageUrl
+			detail.TransactionId = renewal.TransactionId
 		}
 
 		state, ok := storeStates[store]
@@ -385,6 +392,12 @@ func lookupSubscriptionStoreState(
 		}
 		state.AutoRenew = boolPtr(false)
 		return state, nil
+	case model.SubscriptionMarketGamma:
+		// renews from the deposit unless the account turned it off
+		if lookups.gamma == nil {
+			return nil, errors.New("no gamma lookup")
+		}
+		return lookups.gamma(lookupCtx, renewal.TransactionId)
 	default:
 		return &subscriptionStoreState{AutoRenew: boolPtr(false)}, nil
 	}
@@ -1008,6 +1021,12 @@ func subscriptionCancelRefusal(store string) *SubscriptionCancelResult {
 			SubscriptionErrorCodeDoesNotRenew,
 			"A crypto payment covers one period and does not renew. There is nothing to cancel.",
 			"",
+		)
+	case model.SubscriptionMarketGamma:
+		return subscriptionCancelError(
+			SubscriptionErrorCodeNotCancelable,
+			"A plan paid with Gamma renews from your deposit. Turn renewal off with POST /pay/gamma/settings and auto_renew false.",
+			gammaManageUrl,
 		)
 	default:
 		return subscriptionCancelError(SubscriptionErrorCodeNotCancelable, "This subscription cannot be cancelled here.", "")
