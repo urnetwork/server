@@ -8060,6 +8060,315 @@
         }
       ],
       "description": "Seconds since the newest zero-carry judge run on any taskworker, and since one finished a pass over every connected provider (about an hour on Main). A judge that stops makes no new verdicts, and those in force lapse at their expiry, 72 hours after each was made, so zero-carry providers return to the pool; the pending_task row under run_once_key judge_provider_zero_carry carries its reschedule error."
+    },
+    {
+      "id": 162,
+      "type": "row",
+      "title": "URL legs by transport: HTTPS over TCP, HTTP/3 over UDP",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 533
+      },
+      "panels": []
+    },
+    {
+      "id": 163,
+      "type": "timeseries",
+      "title": "URL legs by transport and outcome / min",
+      "description": "Each acknowledged URL load's legs, counted apart. tcp is every load's HTTPS leg, success or error. udp is the HTTP/3 leg of a URL whose catalog entry declares h3: success; answered (the site answered over QUIC and refused or failed the request, e.g. a TLS alert 0x128 or 0x150 from an edge without h3 for the hostname, which proves the provider carries UDP); silent (nothing answered the QUIC handshake: the one leg that fails the load, and only where the place carries QUIC to the URL); not_measured; or skipped (its HTTPS leg failed first, so no HTTP/3 leg was made). verdict counts the ingest's place judgement of stored silent legs: provider where at least three other established networks in the provider's country reached the URL over QUIC that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its HTTPS leg and both legs are not required there. held counts turns the HTTP/3 common-mode guard kept out of provider history: their only failure was a silent leg while no recently measured network's HTTP/3 leg reached its site, which is the platform's QUIC path rather than each provider's. Both IP families are counted here, each by its transport; the IP family row below splits them.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 534
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (transport, outcome) (rate(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{transport}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_url_probe_h3_common_mode_held_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "held: HTTP/3 common mode"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (verdict) (rate(urnetwork_egress_url_h3_verdicts_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "silent verdict {{verdict}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_udp_country_disabled_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "udp country_disabled {{country}}"
+        }
+      ]
+    },
+    {
+      "id": 164,
+      "type": "timeseries",
+      "title": "silent HTTP/3 legs after a passed HTTPS leg (1h)",
+      "description": "The share of measured HTTP/3 legs that nothing answered over the last hour, out of the legs that passed, were answered by their site, or were silent. Every HTTP/3 leg follows an HTTPS leg that passed through the same provider, so this is the share of turns whose provider path carries TCP but not UDP to the site, before the place judgement excuses the places that block QUIC. An unmeasured or skipped leg is in neither count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 534
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=\"silent\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=~\"success|answered|silent\"}[1h]))",
+          "legendFormat": "silent HTTP/3 legs"
+        }
+      ]
+    },
+    {
+      "id": 165,
+      "type": "row",
+      "title": "URL legs by IP family: IPv4 through A records, IPv6 through AAAA",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 542
+      },
+      "panels": []
+    },
+    {
+      "id": 166,
+      "type": "timeseries",
+      "title": "URL legs by IP family, transport and outcome / min",
+      "description": "Each acknowledged URL load's legs by family and transport. family ipv4 is every load's legs through the URL's A record; ipv6 is a dual-stack provider's legs through the URL's AAAA record, made only for a URL whose catalog entry says ipv6: true and only after the IPv4 HTTPS leg passed. tcp success or error is an HTTPS leg's; udp is the HTTP/3 leg of a URL that declares h3, worded as in the transport row. not_measured is a leg that could not be made or was cut short (an empty AAAA record from the provider's place, a resolver failure, the tunnel's loss); no_url is a dual-stack provider's load on a URL without ipv6: true; country_disabled is a UDP leg not made because the provider's country sets udp_probes: false; skipped is a leg an earlier failed leg kept from being made. None of these is a failure. verdict counts the ingest's place judgement of stored failed IPv6 legs: provider where at least three other established networks in the provider's country reached the URL over IPv6 that day or the day before, so the outcome fails; place where they did not, so the outcome counts as its IPv4 legs. held counts turns the IPv6 common-mode guard kept out of provider history: their only failures were IPv6 legs while no recently measured network's IPv6 leg reached its site, which is the platform's IPv6 path rather than each provider's.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 543
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (family, transport, outcome) (rate(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{family}} {{transport}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (transport) (rate(urnetwork_url_probe_ipv6_common_mode_held_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "held: IPv6 {{transport}} common mode"
+        },
+        {
+          "refId": "C",
+          "expr": "sum by (transport, verdict) (rate(urnetwork_egress_url_ipv6_verdicts_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "IPv6 {{transport}} verdict {{verdict}}"
+        }
+      ]
+    },
+    {
+      "id": 167,
+      "type": "timeseries",
+      "title": "failed IPv6 legs after a passed IPv4 leg (1h)",
+      "description": "The share of measured IPv6 HTTPS legs that failed over the last hour, out of those that passed or failed, and the share of measured IPv6 HTTP/3 legs that nothing answered, out of those that passed, were answered or were silent. Every IPv6 leg follows an IPv4 HTTPS leg that passed through the same provider, so the first is the share of dual-stack turns whose provider carries the URL over IPv4 but not over IPv6, before the place judgement excuses the places where IPv6 does not reach the URL. not_measured, no_url, skipped and country_disabled legs are in neither count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 543
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"tcp\",family=\"ipv6\",outcome=\"error\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"tcp\",family=\"ipv6\",outcome=~\"success|error\"}[1h]))",
+          "legendFormat": "failed IPv6 HTTPS legs"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",family=\"ipv6\",outcome=\"silent\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",family=\"ipv6\",outcome=~\"success|answered|silent\"}[1h]))",
+          "legendFormat": "silent IPv6 HTTP/3 legs"
+        }
+      ]
+    },
+    {
+      "id": 168,
+      "type": "timeseries",
+      "title": "IPv6 legs by URL: no AAAA and failed / min",
+      "description": "The URLs whose IPv6 HTTPS legs most often came back without an AAAA record through the provider's resolver (no_aaaa: the URL, or a redirect hop of it, publishes AAAA to some resolvers or places only, or not at all; not measured, and the URL's outcome, never the provider's), and the URLs whose IPv6 HTTPS legs most often failed (judged by IPv6 place on the server). destination is the URL the legs loaded: the load's own, or the stand-in its IPv6 legs loaded because its own serves no IPv6. A URL high on the first list is one to drop the ipv6 mark from.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 551
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "topk(10, sum by (destination) (rate(urnetwork_url_probe_ipv6_destination_legs_total{env=\"$env\",service=\"taskworker\",instance!=\"\",outcome=\"no_aaaa\"}[$__rate_interval]))) * 60",
+          "legendFormat": "no AAAA {{destination}}"
+        },
+        {
+          "refId": "B",
+          "expr": "topk(10, sum by (destination) (rate(urnetwork_url_probe_ipv6_destination_legs_total{env=\"$env\",service=\"taskworker\",instance!=\"\",outcome=\"failed\"}[$__rate_interval]))) * 60",
+          "legendFormat": "failed {{destination}}"
+        }
+      ]
+    },
+    {
+      "id": 169,
+      "type": "timeseries",
+      "title": "QUIC handshakes retried after silence / min",
+      "description": "HTTP/3 legs whose first QUIC handshake heard nothing back within its bound and were made once more on a fresh socket, so from a new source port, by IP family and how the second ended: answered (the site answered it, so the first was a lost handshake, not the provider's UDP; Cloudflare's IPv6 edge lost about one in 50 in the 2026-11-11 survey), silent (no answer again: the leg reports silence, which the server judges by place), canceled (the request ended under it). Counted by the prober's tunnel, per leg.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 551
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (family, outcome) (rate(urnetwork_provider_tunnel_quic_handshake_retries_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{family}} {{outcome}}"
+        }
+      ]
     }
   ]
 }

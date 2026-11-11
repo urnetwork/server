@@ -415,10 +415,16 @@ func storeProviderEgressHealth(
 		result = ProviderEgressHealthStored{Stored: true, Recheck: recheck, Probation: probation && !recheck}
 		// a measured country outcome, scored or not, is paired with the same
 		// provider's general outcomes for the refresh's graduation and
-		// demotion judgements; a recheck is no sample of the site
+		// demotion judgements; a recheck is no sample of the site. The pair
+		// judges the site, so both sides count HTTPS legs: an outcome that
+		// failed only its HTTP/3 leg is the provider not carrying UDP.
 		if health.UrlSource == ProviderEgressUrlSourceCountry && health.UrlProbeEvidence != nil && health.UrlCountryCode != "" &&
 			measuredTotal == 1 && policyVersion == SelectedProviderUrlProbePolicyVersion() {
-			addProviderEgressCountrySiteTallyInTx(ctx, tx, health, measuredOk, policyVersion)
+			httpsOk := 0
+			if health.UrlProbeEvidence.HttpsOk(measuredOk) {
+				httpsOk = 1
+			}
+			addProviderEgressCountrySiteTallyInTx(ctx, tx, health, httpsOk, policyVersion)
 		}
 		if health.UrlProbeEvidence != nil {
 			for _, event := range health.UrlProbeEvidence.Security {

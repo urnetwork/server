@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/urnetwork/connect"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -165,7 +166,7 @@ func TestDueProvidersMatchTheClientDecode(t *testing.T) {
 	providers := []model.ProviderUrlProbeDue{
 		{ClientId: server.NewId(), CountryCode: "us", Region: "California", CycleStartedAt: claimedAt.Add(-time.Hour),
 			RunsNeeded: 10, SuccessesNeeded: 10, OutcomeCount: 3, ClaimOrdinal: 41, ClaimedAt: claimedAt,
-			CompletedRunCount: &completed, NetworkId: &networkId,
+			CompletedRunCount: &completed, NetworkId: &networkId, IpFamily: connect.IpFamilyDualstack,
 			SecurityDestinations: []egresshealth.Destination{{Name: "recheck", Class: egresshealth.ClassSite, Url: "https://recheck.example/"}}},
 		{ClientId: server.NewId(), ClaimOrdinal: 42, ClaimedAt: claimedAt, SecurityDestinations: []egresshealth.Destination{}},
 		{ClientId: server.NewId(), ClaimOrdinal: 43},
@@ -182,6 +183,10 @@ func TestDueProvidersMatchTheClientDecode(t *testing.T) {
 	}
 	if got := DueProvidersOf(providers); !reflect.DeepEqual(got, decoded) {
 		t.Fatalf("in-process due list differs from the client's decode:\n in-process: %+v\n    decoded: %+v", got, decoded)
+	}
+	// the advertised families reach the prober both ways, legacy as empty
+	if decoded[0].IpFamily != egresshealth.IpFamilyDualstack || decoded[1].IpFamily != "" {
+		t.Fatalf("families decoded as %q and %q", decoded[0].IpFamily, decoded[1].IpFamily)
 	}
 	// independent of the model's slices: a pass may keep the list
 	got := DueProvidersOf(providers)

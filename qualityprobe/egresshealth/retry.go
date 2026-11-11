@@ -259,7 +259,11 @@ attempts:
 		}
 		attemptCtx, stop := bound(ctx, signal)
 		if self.opts.UrlProbe {
-			result = fetchUrlProbe(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts)
+			// Every leg -- each family the provider advertises and the URL
+			// serves, over TCP and, for h3, UDP -- rides the same slot, the
+			// same provider and the same loss signal: the legs are part of
+			// this attempt (url_family.go).
+			result = fetchUrlProbeLoad(attemptCtx, client, d, self.requestTimeout(client), self.perRequestTimeout, self.profile, self.opts)
 		} else {
 			result = fetchWithExitPolicy(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts.now, self.opts.exitAddressAllowed)
 		}
@@ -289,6 +293,10 @@ attempts:
 			(result.FailureStage == "response_content" || result.FailureStage == "response_performance") {
 			tunnelGone = false
 		}
+		// An HTTP/3 leg fails its load only when it heard nothing back
+		// (joinUrlProbeH3), and an IPv6 leg only with a measured failure
+		// (joinUrlProbeIpv6); either while the path disappears is the path's,
+		// so such a load is not measured.
 	}
 	if result.Attempts == 0 && result.Err == "" {
 		// The run ended before this load's first attempt could start. On the

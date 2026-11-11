@@ -41,7 +41,21 @@ func fetchUrlProbe(ctx context.Context, client *http.Client, destination Destina
 			return result
 		}
 		hopCtx := ctx
-		if authorizer, ok := client.Transport.(providerUrlProbeTransport); ok {
+		// Every hop of the request is forced to the load's IP family
+		// (url_family.go). Without a transport that can force it, the request
+		// keeps the transport's own family, which is IPv4: an IPv6 leg cannot
+		// be made, and is not measured.
+		ipVersion := urlProbeIpVersion(ctx)
+		if authorizer, ok := client.Transport.(providerUrlProbeFamilyTransport); ok {
+			hopCtx, err = authorizer.ProviderUrlProbeFamilyContext(ctx, target, redirects > 0, ipVersion)
+			if err != nil {
+				result.Err, result.FailureStage = err.Error(), "redirect_policy"
+				return result
+			}
+		} else if ipVersion == 6 {
+			result.Err, result.FailureStage, result.NotMeasured = "the provider path cannot force IPv6", FailureStageIpv6Unavailable, true
+			return result
+		} else if authorizer, ok := client.Transport.(providerUrlProbeTransport); ok {
 			hopCtx, err = authorizer.ProviderUrlProbeContext(ctx, target, redirects > 0)
 			if err != nil {
 				result.Err, result.FailureStage = err.Error(), "redirect_policy"
@@ -86,6 +100,7 @@ func fetchUrlProbe(ctx context.Context, client *http.Client, destination Destina
 		if err != nil {
 			progress.recordTiming(&result, start, opts.now())
 			result.Err, result.FailureStage = err.Error(), echoRequestStage(err)
+			result.AddressRecordMissing = urlProbeAddressRecordMissing(err)
 			if result.FailureStage == "request_timeout" {
 				result.FailureStage = progress.timeoutStage()
 			}

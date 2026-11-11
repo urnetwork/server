@@ -12,6 +12,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,6 +45,13 @@ type Config struct {
 	// Country of the provider under test, not the operator or API caller.
 	// Only used when no explicit in-tunnel resolver settings were supplied.
 	ProviderCountry string
+	// The IP families the provider under test advertises (its proven
+	// category, connect.IpFamily). A provider that advertises IPv6 gets a
+	// dual-stack inner tun, so a URL request forced to IPv6 can reach its site
+	// through the provider; its resolver still runs over IPv4 alone when the
+	// provider advertises IPv4 (providerResolverForFamily). Every other
+	// provider, legacy included, keeps the IPv4-only tun.
+	ProviderIpFamily connect.IpFamily
 	// Optional immutable override. Host/local resolution is never permitted
 	// for provider probes, even when a caller explicitly asks for it.
 	DnsResolverSettings *connect.DnsResolverSettings
@@ -306,6 +315,74 @@ var createTun = func(ctx context.Context, resolver *connect.DnsResolverSettings)
 	return connect.CreateTunWithResolver(ctx, settings, resolver)
 }
 
+// Builds the dual-stack tun of a tunnel whose provider advertises IPv6, a
+// seam like createTun. The packet path to a fixed provider is the provider's
+// own: the multi-client hands a fixed destination every flow whatever its
+// family (connect multiClientChannel.supportsIpVersion), the platform relays
+// inner packets without reading them, and the provider's NAT dials a v6
+// destination with a v6 socket of its host, as it does for any user's v6
+// flow (connect/IPV6.md §2, C1). The link keeps the shared 1280-byte mtu,
+// which is IPv6's minimum, so the tun carries IPv6 (connect Tun.Ipv6Enabled).
+// Nothing but a URL request forced to IPv6 opens a v6 socket on it: its DNS
+// keeps to IPv4 (providerResolverForFamily) and every other request resolves
+// IPv4 alone (providerUrlRequestFamily).
+var createDualStackTun = func(ctx context.Context, resolver *connect.DnsResolverSettings) (*connect.Tun, error) {
+	settings := connect.DefaultTunSettings()
+	settings.Mtu = min(settings.Mtu, connect.DefaultMtu)
+	settings.DisableIpv6 = false
+	return connect.CreateTunWithResolver(ctx, settings, resolver)
+}
+
+// The tun of a tunnel to a provider of the family: dual-stack when it
+// advertises IPv6, the IPv4-only server tun otherwise.
+func createProviderTun(ctx context.Context, resolver *connect.DnsResolverSettings, family connect.IpFamily) (*connect.Tun, error) {
+	if family.SupportsIpv6() {
+		return createDualStackTun(ctx, resolver)
+	}
+	return createTun(ctx, resolver)
+}
+
+// The resolver of a dual-stack tunnel keeps to one family's servers: IPv4's
+// when the provider advertises IPv4, so a dual-stack provider's DNS rides the
+// same IPv4 path it always did and only the URL's own request is IPv6, and
+// IPv6's for a provider that advertises IPv6 alone. Answers of every record
+// type come back either way; only the servers' family is chosen. A tunnel
+// whose provider does not advertise IPv6 keeps its settings: its IPv4-only
+// tun already leaves its IPv6 servers out (connect Tun.buildDohCache).
+func providerResolverForFamily(resolver *connect.DnsResolverSettings, family connect.IpFamily) *connect.DnsResolverSettings {
+	if resolver == nil || !family.SupportsIpv6() {
+		return resolver
+	}
+	copy := *resolver
+	keep := 4
+	if !family.SupportsIpv4() {
+		keep = 6
+	}
+	if keep == 4 {
+		copy.RemoteDohUrlsIpv6, copy.RemoteDnsIpv6 = nil, nil
+		copy.RemoteDohUrlsIpv4 = slices.Clone(resolver.RemoteDohUrlsIpv4)
+		copy.RemoteDnsIpv4 = slices.Clone(resolver.RemoteDnsIpv4)
+	} else {
+		copy.RemoteDohUrlsIpv4, copy.RemoteDnsIpv4 = nil, nil
+		copy.RemoteDohUrlsIpv6 = slices.Clone(resolver.RemoteDohUrlsIpv6)
+		copy.RemoteDnsIpv6 = slices.Clone(resolver.RemoteDnsIpv6)
+	}
+	if resolver.DohServerHostAddrs != nil {
+		copy.DohServerHostAddrs = map[string][]string{}
+		for host, addrs := range resolver.DohServerHostAddrs {
+			for _, value := range addrs {
+				if addr, err := netip.ParseAddr(value); err == nil && addressFamily(addr) == keep {
+					copy.DohServerHostAddrs[host] = append(copy.DohServerHostAddrs[host], value)
+				}
+			}
+		}
+	}
+	if resolver.TlsConfig != nil {
+		copy.TlsConfig = resolver.TlsConfig.Clone()
+	}
+	return &copy
+}
+
 // The control-plane strategy is a seam so the Open-path test can prove every
 // provider tunnel gets its own strategy from the IPv4-only constructor.
 var newControlplaneClientStrategy = controlplane.NewClientStrategy
@@ -506,6 +583,11 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	if err != nil {
 		return nil, err
 	}
+	family := cfg.ProviderIpFamily.Normalize()
+	// both resolvers keep to the provider's family's servers, the regional
+	// recommendation that races the tunnel's own included
+	resolver = providerResolverForFamily(resolver, family)
+	raceResolver = providerResolverForFamily(raceResolver, family)
 
 	// The packet path and the control-plane lifecycle have separate child
 	// contexts. Close must stop Tun traffic first, while keeping the API and
@@ -580,7 +662,7 @@ func Open(ctx context.Context, cfg Config, providerClientId connect.Id) (*Tunnel
 	// Do not hoist the TUN or its DoH cache to the Taskworker pass: every full
 	// and blackhole provider probe needs an independently owned DNS cache and
 	// admission state. The constructor creates that cache for this TUN alone.
-	tun, err := createTun(dataCtx, resolver)
+	tun, err := createProviderTun(dataCtx, resolver, family)
 	if err != nil {
 		cancelData()
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), cfg.closeTimeout())
@@ -886,6 +968,9 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 	client.Transport.(*providerHttpTransport).contractAcquisition = self.multiClient
 	client.Transport.(*providerHttpTransport).localWrite = self.multiClient
 	client.Transport.(*providerHttpTransport).redirectPins = self.redirectPins
+	// A URL request's HTTP/3 leg rides the same tun: a connected UDP socket
+	// of its own stack, never one of the host's (http3.go).
+	client.Transport.(*providerHttpTransport).dialPacket = self.tun.DialContext
 	return client
 }
 
@@ -1111,6 +1196,39 @@ func wrapCloseError(owner string, err error) error {
 // The signature of net.Dialer.DialContext, which the tunnel's dialer has.
 type dialContextFunc func(ctx context.Context, network string, address string) (net.Conn, error)
 
+// Admits one TLS dial of host and returns the pins its handshake verifies
+// against, and whether the dial belongs to a scoped URL-probe request. Both
+// legs of a URL request admit through it: the HTTPS leg's DialTLSContext and
+// the HTTP/3 leg's QUIC dial (http3.go).
+//
+// Allowlist-only: the set of hosts a probe dials is closed and known, so any
+// host outside it is refused outright rather than allowed to connect at all.
+// This is deliberately enforced here, not in checkPin/PinnedTlsConfig
+// (pinning.go), because checkPin's "unpinned host passes" behavior is a
+// documented, tested contract other callers may rely on for a general-purpose
+// pinning verifier. This tunnel is the layer that actually knows the endpoint
+// set is closed, so it is where "unknown host" can safely mean "reject"
+// instead of "pass through". A URL request's redirect grant admits exactly
+// its own target host, and is verified against the redirect pins.
+func (self *providerHttpTransport) admitTls(ctx context.Context, host string) (map[string][]string, bool, error) {
+	_, admitted := self.allowed[normalizeHost(host)]
+	target, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget)
+	if scoped {
+		if target.host != normalizeHost(host) || self.resolver == nil {
+			return nil, scoped, &providerHttpStageError{stage: "policy", err: errors.New("provider URL request lost its exact target or private resolver")}
+		}
+		admitted = admitted || target.redirect
+	}
+	if !admitted {
+		return nil, scoped, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
+	}
+	tlsPins := self.pins
+	if scoped && target.redirect && len(self.redirectPins) > 0 {
+		tlsPins = self.redirectPins
+	}
+	return tlsPins, scoped, nil
+}
+
 // Builds an http.Client that dials exclusively through
 // dial and applies certificate pinning per pins.
 //
@@ -1203,7 +1321,7 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		// regardless of what those two later become.
 		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
-	probeTransport := &providerHttpTransport{Transport: tr, redirectPins: pins}
+	probeTransport := &providerHttpTransport{Transport: tr, redirectPins: pins, allowed: allowed, pins: pins, resolver: resolver}
 	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		ctx, done, err := beginProviderHttpDial(ctx)
 		if err != nil {
@@ -1215,25 +1333,9 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 			host = addr
 		}
 
-		// Allowlist-only: the set of hosts a probe dials is closed and known,
-		// so any host outside it is refused outright rather than allowed to
-		// connect at all. This is deliberately enforced
-		// here, not in checkPin/PinnedTlsConfig (pinning.go), because
-		// checkPin's "unpinned host passes" behavior is a documented,
-		// tested contract other callers may rely on for a general-purpose
-		// pinning verifier. This tunnel is the layer that actually knows
-		// the endpoint set is closed, so it is where "unknown host" can
-		// safely mean "reject" instead of "pass through".
-		_, admitted := allowed[normalizeHost(host)]
-		target, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget)
-		if scoped {
-			if target.host != normalizeHost(host) || resolver == nil {
-				return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL request lost its exact target or private resolver")}
-			}
-			admitted = admitted || target.redirect
-		}
-		if !admitted {
-			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
+		tlsPins, scoped, err := probeTransport.admitTls(ctx, host)
+		if err != nil {
+			return nil, err
 		}
 
 		// The tunnel reports its own target DNS/TCP boundaries; its private DoH
@@ -1268,10 +1370,6 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 			raw = readConn
 		}
 
-		tlsPins := pins
-		if scoped && target.redirect && len(probeTransport.redirectPins) > 0 {
-			tlsPins = probeTransport.redirectPins
-		}
 		cfg := PinnedTlsConfigForHost(tlsPins, host)
 		tlsConn := tls.Client(raw, cfg)
 		if trace != nil && trace.TLSHandshakeStart != nil {

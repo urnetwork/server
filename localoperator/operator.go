@@ -302,6 +302,7 @@ func DueProvidersOf(providers []model.ProviderUrlProbeDue) []ingest.DueProvider 
 		if provider.NetworkId != nil {
 			entry.NetworkId = provider.NetworkId.String()
 		}
+		entry.IpFamily = egresshealth.IpFamily(provider.IpFamily)
 		due = append(due, entry)
 	}
 	return due

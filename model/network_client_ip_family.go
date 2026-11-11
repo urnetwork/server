@@ -68,6 +68,16 @@ func clientScoreIpFamilies(ipv4Proven bool, ipv6Proven bool) uint8 {
 	return families
 }
 
+// The category of a provider whose reliability row proves these families
+// (network_client_location_reliability.ipv4_proven and ipv6_proven): exactly
+// what find-providers2 serves for it from its cached score (ClientScore.IpFamily),
+// so a reader of the row, such as the URL probe's claim, and a client routing
+// a flow's family agree by construction.
+func ProviderIpFamilyOfProven(ipv4Proven bool, ipv6Proven bool) connect.IpFamily {
+	score := ClientScore{IpFamilies: clientScoreIpFamilies(ipv4Proven, ipv6Proven)}
+	return score.IpFamily()
+}
+
 // IpFamily is the provider's category as the client vocabulary names it.
 // Zero (legacy, or nothing proven) is v4-only; see the file comment.
 func (self *ClientScore) IpFamily() connect.IpFamily {

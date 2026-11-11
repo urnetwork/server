@@ -155,6 +155,11 @@ type DueProvider struct {
 	// The provider's network, empty from a server that predates it. It only
 	// groups providers for the URL common-mode guard and is never reported.
 	NetworkId string `json:"network_id,omitempty"`
+	// The IP families the provider advertises (its proven category: dualstack,
+	// v4-only or v6-only), empty from a server that predates it, which reads
+	// as legacy: IPv4 alone. It decides which IP families the provider's URL
+	// loads are made over (egresshealth url_family.go).
+	IpFamily egresshealth.IpFamily `json:"ip_family,omitempty"`
 }
 
 // Mirrors the server's due results. A server that knows where its

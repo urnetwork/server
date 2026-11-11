@@ -341,7 +341,9 @@ func TestProviderResolutionRegionalRaceSurvivesAnExitWithoutUdp(t *testing.T) {
 				query: query,
 				dial: func(_ context.Context, network string, address string, addrs []netip.Addr) (net.Conn, error) {
 					dials++
-					if network != "tcp" || address != "sample.example:443" || len(addrs) != 1 || addrs[0] != target {
+					// a URL probe request dials on its family's network alone
+					// (providerUrlDialNetwork)
+					if network != "tcp4" || address != "sample.example:443" || len(addrs) != 1 || addrs[0] != target {
 						return nil, errors.New("wrong resolution handoff")
 					}
 					return left, nil
