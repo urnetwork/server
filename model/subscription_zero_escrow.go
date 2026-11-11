@@ -3,9 +3,11 @@
 // every open contract keeps the escrow it reserved from its payer's balance,
 // and a payer whose balance is held that way is refused new contracts.
 // Contract creation always tries escrow first, so a payer is charged,
-// shrink-to-fit included, while anything is left. Only when escrow admission
-// refuses with ErrContractBalanceExhausted and the valve is open is the
-// contract created here instead, the way network contracts are
+// shrink-to-fit included, while anything is left. That holds for public,
+// companion, network and friends-and-family contracts alike
+// (subscription_network_escrow.go). Only when escrow admission refuses with
+// ErrContractBalanceExhausted and the valve is open is the contract created
+// here instead, the way the no-escrow path creates contracts
 // (createContractNoEscrowInTx): no transfer_escrow row, no payer_network_id and
 // no change to any transfer_balance. These contracts settle through the
 // existing no-escrow path, which claims a terminal outcome with no sweep,
@@ -70,13 +72,13 @@ var ErrContractBalanceExhausted = errRedisReservationInsufficient
 
 var zeroEscrowContractsCreated = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_zero_escrow_contracts_total",
-	Help: "Free contracts created without escrow for a payer whose balance was exhausted while the contract degradation valve was open, by kind.",
+	Help: "Free contracts created without escrow for a payer whose balance was exhausted while the contract degradation valve was open, by kind: public (a plain contract between two networks), network (a plain contract between two clients of one network) or companion.",
 }, []string{"kind"})
 
-// Materializes both kinds, so an explicit zero is visible before the first
+// Materializes every kind, so an explicit zero is visible before the first
 // free contract.
 func init() {
-	for _, kind := range []string{"public", "companion"} {
+	for _, kind := range []string{"public", "network", "companion"} {
 		zeroEscrowContractsCreated.WithLabelValues(kind)
 	}
 	prometheus.MustRegister(zeroEscrowContractsCreated)
@@ -197,8 +199,10 @@ var zeroEscrowChainedOriginSql = `
 // The escrow insert of createTransferEscrowInTx without a payer. A null
 // payer_network_id and no transfer_escrow row are what settle the contract on
 // the no-escrow path (validateContractFreeSettlementOwnerInTx). $7 is the
-// companion origin, which also decides the usage origin. $10 is the stream id
-// bound at insert (see contract_stream_binding.go), or null.
+// companion origin, which also decides the usage origin unless $11, a
+// normalized same-network companion's explicit usage origin, is set
+// (subscription_network_escrow.go). $10 is the stream id bound at insert (see
+// contract_stream_binding.go), or null.
 const zeroEscrowContractInsertSql = `
 	WITH creation_clock AS MATERIALIZED (
 		SELECT clock_timestamp() AT TIME ZONE 'UTC' AS create_time
@@ -218,7 +222,7 @@ const zeroEscrowContractInsertSql = `
 		stream_id
 	)
 	SELECT
-		$1, $2, $3, $4, $5, $6, $7, ($7::uuid IS NULL),
+		$1, $2, $3, $4, $5, $6, $7, COALESCE($11::boolean, $7::uuid IS NULL),
 		create_time, $8,
 		date_trunc('milliseconds', create_time) + $9 * INTERVAL '1 millisecond',
 		$10
@@ -226,8 +230,10 @@ const zeroEscrowContractInsertSql = `
 	RETURNING expiration_time
 `
 
-// Creates a public contract that escrow would have charged to the source
-// network. The result has no balances; its size is the request.
+// Creates a plain contract that escrow would have charged to the source
+// network: a public or friends-and-family contract, or a network contract
+// between two clients of one network. The result has no balances; its size is
+// the request.
 func CreateZeroEscrowContract(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -263,11 +269,20 @@ func CreateZeroEscrowContract(
 	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	leavePosts()
-	zeroEscrowContractsCreated.WithLabelValues("public").Inc()
+	zeroEscrowContractsCreated.WithLabelValues(zeroEscrowPlainContractKind(sourceNetworkId, destinationNetworkId)).Inc()
 	defer server.EnterContractCreationStage(ctx, server.ContractStageClientStamp)()
 	// the identity escrow would have charged, as createTransferEscrow stamps it
 	StampTopLevelClientContractTime(ctx, sourceId)
 	return
+}
+
+// The metric kind of a plain zero escrow contract: network between two clients
+// of one network, else public.
+func zeroEscrowPlainContractKind(sourceNetworkId server.Id, destinationNetworkId server.Id) string {
+	if sourceNetworkId == destinationNetworkId {
+		return "network"
+	}
+	return "public"
 }
 
 // Creates a companion contract answering the earliest reverse origin, which
@@ -415,6 +430,7 @@ func createZeroEscrowContractInTx(
 			priority,
 			DefaultContractExpiration.Milliseconds(),
 			streamId,
+			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionContractId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 		batch.Queue(
 			contractExtenderInsertSql,
@@ -493,9 +509,10 @@ func zeroEscrowCompanionOriginInTx(
 // fund the request from, in its funding order (earliest expiry first). Nothing
 // is reserved, so each active grant counts its whole balance. A zero-byte
 // request takes the first grant, as a zero-byte anchor does, and a payer with
-// no active grant is unpaid. It is never the trusted priority of network and
-// friends-and-family contracts. One page of grants bounds the read; a request
-// that page does not cover blends the page.
+// no active grant is unpaid. It is never the trusted priority, which no
+// escrowed contract carries, network and friends-and-family contracts included.
+// One page of grants bounds the read; a request that page does not cover blends
+// the page.
 func zeroEscrowContractPriorityInTx(
 	ctx context.Context,
 	tx server.PgTx,

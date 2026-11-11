@@ -44,8 +44,10 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
-// x402 resource identifier quoted in payment terms for this tool
-const fetchX402Resource = "mcp:fetch"
+// The x402 resource quoted in this tool's payment terms, named the way the
+// x402 MCP transport names a tool (x402-foundation/x402 go/mcp/server.go
+// buildToolResourceInfo: "mcp://tool/" + the tool's name).
+const fetchX402Resource = "mcp://tool/fetch"
 
 // The device spec of the proxies this tool provisions, which is also how it
 // finds them again; changing it orphans the proxies created under the old one.
@@ -68,7 +70,7 @@ type acquiredProxy struct {
 // the terms are quoted so the caller can pay and retry in one round trip.
 type upgradeRequired struct {
 	message string
-	terms   *controller.X402PaymentRequired
+	terms   *controller.X402Terms
 }
 
 type sealedProxyHandle struct {
@@ -77,19 +79,21 @@ type sealedProxyHandle struct {
 
 // Settles an x402 payment presented on a fetch call, so the retry that carries
 // it finds the network already upgraded. Mirrors the inline settle the
-// /network/auth-client route performs on the X-PAYMENT header.
-func settleFetchPayment(clientSession *session.ClientSession, payment string) error {
+// /network/auth-client route performs on the PAYMENT-SIGNATURE (v2) or
+// X-PAYMENT (v1) header. payment is base64 of the PaymentPayload JSON, in
+// either protocol version.
+func settleFetchPayment(clientSession *session.ClientSession, payment string) (*controller.X402PurchaseResult, error) {
 	if !controller.X402Enabled() {
-		return fmt.Errorf("payments are not enabled")
+		return nil, fmt.Errorf("payments are not enabled")
 	}
 
-	_, err := controller.X402Purchase(
+	return controller.X402Purchase(
 		clientSession.Ctx,
 		clientSession.ByJwt.NetworkId,
 		payment,
 		&controller.X402PurchaseArgs{SkuId: controller.X402SkuProMonth},
+		fetchX402Resource,
 	)
-	return err
 }
 
 // Reuses the proxy named by signedProxyId, or provisions one for
@@ -210,7 +214,7 @@ func createProxy(
 				message: authClientResult.Error.Message,
 			}
 			if controller.X402Enabled() {
-				terms, err := controller.X402PaymentRequiredFor(
+				terms, err := controller.X402TermsFor(
 					fetchX402Resource,
 					controller.X402SkuProMonth,
 					authClientResult.Error.Message,

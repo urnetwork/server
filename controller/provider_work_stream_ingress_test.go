@@ -32,6 +32,15 @@ func TestProviderWorkOriginalIngressOwnsActualStreamAndClose(t *testing.T) {
 		ctx := model.WithProviderWorkSessionSource(t.Context(), source)
 		networkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "original-stream.example", server.NewId())
+		// network contracts escrow from the network's balance
+		model.AddTransferBalance(ctx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now.Add(-time.Minute),
+			EndTime:               now.Add(24 * time.Hour),
+			StartBalanceByteCount: 64 * model.Mib,
+			BalanceByteCount:      64 * model.Mib,
+			NetRevenue:            model.UsdToNanoCents(1),
+		})
 		sourceId, destinationId, intermediaryId := server.NewId(), server.NewId(), server.NewId()
 		for _, id := range []server.Id{sourceId, destinationId, intermediaryId} {
 			model.Testing_CreateDevice(ctx, networkId, server.NewId(), id, "synthetic", "synthetic")

@@ -969,20 +969,20 @@ func TestX402PaymentResponseHeaderIsTheSettlementResponse(t *testing.T) {
 			request := httptest.NewRequest(http.MethodPost, "/x402/purchase", strings.NewReader(fmt.Sprintf(`{"sku_id":%q}`, entry.skuId)))
 			request.RemoteAddr = "192.0.2.53:4500"
 			request.Header.Set("Authorization", "Bearer "+session.NewByJwt(networkId, userId, networkName, false, false).Testing_Sign())
-			request.Header.Set(X402PaymentHeader, payment)
+			request.Header.Set(X402V1PaymentHeader, payment)
 			w := httptest.NewRecorder()
 			if !entry.serve(w, request) || w.Code != http.StatusOK {
 				tb.Fatalf("%s: answered %d %q", entry.name, w.Code, w.Body.String())
 			}
 
-			header := w.Header().Get(X402PaymentResponseHeader)
+			header := w.Header().Get(X402V1PaymentResponseHeader)
 			decoded, err := base64.StdEncoding.DecodeString(header)
 			if err != nil {
-				tb.Fatalf("%s: %s is not base64: %q", entry.name, X402PaymentResponseHeader, header)
+				tb.Fatalf("%s: %s is not base64: %q", entry.name, X402V1PaymentResponseHeader, header)
 			}
 			settlement := map[string]any{}
 			if err := json.Unmarshal(decoded, &settlement); err != nil {
-				tb.Fatalf("%s: %s is not base64 json: %v", entry.name, X402PaymentResponseHeader, err)
+				tb.Fatalf("%s: %s is not base64 json: %v", entry.name, X402V1PaymentResponseHeader, err)
 			}
 			want := map[string]any{
 				"success":     true,

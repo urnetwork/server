@@ -1967,7 +1967,7 @@ func createTransferEscrowInTx(
 	                stream_id
 	            )
 	            SELECT
-	                $1, $2, $3, $4, $5, $6, $7, $8, ($7::uuid IS NULL),
+	                $1, $2, $3, $4, $5, $6, $7, $8, COALESCE($12::boolean, $7::uuid IS NULL),
 	                create_time, $9,
 	                date_trunc('milliseconds', create_time) + $10 * INTERVAL '1 millisecond',
 	                $11
@@ -1985,6 +1985,9 @@ func createTransferEscrowInTx(
 			priority,
 			DefaultContractExpiration.Milliseconds(),
 			streamId,
+			// a normalized same-network companion keeps its destination as
+			// its usage origin (subscription_network_escrow.go)
+			contractUsageOriginInsertArg(ctx, sourceNetworkId, destinationNetworkId, companionContractId),
 		).QueryRow(func(row pgx.Row) error { return row.Scan(&expirationTime) })
 
 		batch.Queue(
@@ -2820,8 +2823,14 @@ func GetTransferEscrow(ctx context.Context, contractId server.Id) (transferEscro
 	return
 }
 
-// some clients - platform, friends and family, etc - do not need an escrow
-// typically `provide_mode < Public` does not use an escrow1
+// Creates a contract without escrow or payer, which settles through the
+// no-escrow path with no debit or payout. Contract creation no longer takes
+// it: network and friends-and-family contracts escrow from their source's
+// balance (subscription_network_escrow.go), and only an exhausted payer while
+// the degradation valve is open gets a free contract
+// (subscription_zero_escrow.go). It remains the creator of the no-escrow
+// contracts that tests and fixtures need, such as the network contracts that
+// were still open when escrow took over.
 func CreateContractNoEscrow(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -2834,8 +2843,9 @@ func CreateContractNoEscrow(
 		destinationNetworkId, destinationId, contractTransferByteCount, true)
 }
 
-// Preserves the service origin before a same-network companion is normalized
-// onto the no-escrow transport path. The funding mode never determines usage.
+// Records an explicit service origin, as a same-network companion normalized
+// to a network contract needs (WithContractUsageOrigin is the escrowed
+// equivalent). The funding mode never determines usage.
 func CreateContractNoEscrowWithUsageOrigin(
 	ctx context.Context,
 	sourceNetworkId server.Id,
@@ -2883,9 +2893,8 @@ func CreateContractNoEscrowWithExpiration(
 	if returnErr != nil {
 		return
 	}
-	// network / friends-and-family egress has no payer but is still
-	// contract-creating usage: count the source's top-level identity in the
-	// block users stat
+	// a contract without a payer is still contract-creating usage: count the
+	// source's top-level identity in the block users stat
 	leavePosts := server.EnterContractCreationStage(ctx, server.ContractStagePostCommit)
 	notifyCommittedContractOrigin(ctx, sourceId, destinationId)
 	leavePosts()
@@ -3974,8 +3983,10 @@ func allocateContractParticipantPayouts(
 
 			// A service hop on the payer/origin network represents
 			// same-network traffic. Its precomputed even share is omitted, not
-			// transferred to the remaining participants.
-			if participant.NetworkId == originNetworkId ||
+			// transferred to the remaining participants. Every network
+			// contract has its network as payer, so its receiving client and
+			// any same-network hop earn nothing (subscription_network_escrow.go).
+			if contractShareIsIntraNetwork(participant.NetworkId, originNetworkId) ||
 				(participantByteCount <= 0 && participantPayout <= 0) {
 				continue
 			}

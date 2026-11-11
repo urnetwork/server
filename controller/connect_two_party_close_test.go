@@ -36,9 +36,10 @@ type twoPartyCloseFixture struct {
 	providerId        server.Id
 }
 
-// sameNetwork puts both clients in one network, which takes the no-escrow
-// network-mode path. Otherwise the provider advertises public provide and the
-// contract takes a Redis-admitted escrow.
+// sameNetwork puts both clients in one network, which takes the network-mode
+// path, escrowed from that network's balance like any other contract.
+// Otherwise the provider advertises public provide. Either way the contract
+// takes a Redis-admitted escrow.
 func newTwoPartyCloseFixture(t testing.TB, sameNetwork bool) *twoPartyCloseFixture {
 	t.Helper()
 	ctx := t.Context()
@@ -271,7 +272,8 @@ func TestTwoPartyFinalCloseSettlesCompanionContract(t *testing.T) {
 	})
 }
 
-// A same-network contract carries no escrow and settles as a free close.
+// A same-network contract is escrowed from the network's balance, Redis
+// reserved like an origin, and settles as soon as both parties are final.
 func TestTwoPartyFinalCloseSettlesNetworkContract(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -281,8 +283,8 @@ func TestTwoPartyFinalCloseSettlesNetworkContract(t *testing.T) {
 			DestinationId:     f.providerId.Bytes(),
 			TransferByteCount: uint64(MinContractTransferByteCount),
 		})
-		if escrowCount, _ := f.redisReserved(t, contractId); escrowCount != 0 {
-			t.Fatalf("network contract unexpectedly holds %d escrows", escrowCount)
+		if escrowCount, redisReserved := f.redisReserved(t, contractId); escrowCount == 0 || !redisReserved {
+			t.Fatalf("network contract escrow is not Redis reserved: escrows=%d redis=%t", escrowCount, redisReserved)
 		}
 		const byteCount = model.ByteCount(16 * 1024)
 		f.closeContract(t, f.windowId, contractId, byteCount, false, true)

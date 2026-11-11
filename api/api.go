@@ -335,8 +335,9 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// gates as the webhooks and the payment reconciler
 		router.NewRoute("POST", "/subscription/verify-play-purchase", handlers.SubscriptionVerifyPlayPurchase),
 		router.NewRoute("POST", "/subscription/verify-apple-transaction", handlers.SubscriptionVerifyAppleTransaction),
-		// x402: agents pay inline (HTTP 402 + X-PAYMENT). Both 404 while x402 is
-		// not configured/enabled -- see vault/<env>/x402.yml.
+		// x402: agents pay inline (HTTP 402 + PAYMENT-SIGNATURE in v2, X-PAYMENT in
+		// v1). Both 404 while x402 is not configured/enabled -- see
+		// vault/<env>/x402.yml.
 		router.NewRoute("GET", "/x402/skus", handlers.X402Skus),
 		router.NewRoute("POST", "/x402/purchase", handlers.X402Purchase),
 		router.NewRoute("POST", "/device/add", handlers.DeviceAdd),
