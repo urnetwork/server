@@ -208,6 +208,14 @@ const gammaDepositHotkeyAllocationLock = 0x67616d6d61 // "gamma"
 // AllocateGammaDepositHotkey gives an account its next deposit hotkey: the
 // next global derivation index, derived by derive. Allocation is serialized,
 // so two accounts never derive the same index.
+//
+// The transaction reads committed, so the index read after the lock is held
+// sees every allocation that held the lock before. At repeatable read the
+// transaction's snapshot is the one the lock statement took when it began,
+// before it waited: an allocation that waited behind another read the
+// indexes from before the other committed, derived the index the other had
+// just taken, and failed on the unique index (only the transaction's rerun
+// of a unique violation recovered it).
 func AllocateGammaDepositHotkey(
 	ctx context.Context,
 	networkId server.Id,
@@ -215,7 +223,13 @@ func AllocateGammaDepositHotkey(
 	now time.Time,
 ) (hotkey *GammaDepositHotkey, returnErr error) {
 	server.Tx(ctx, func(tx server.PgTx) {
-		server.RaisePgResult(tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, int64(gammaDepositHotkeyAllocationLock)))
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`/* gamma-deposit-hotkey-allocation-lock */ SELECT pg_advisory_xact_lock($1)`,
+			int64(gammaDepositHotkeyAllocationLock),
+		))
+		// a statement after the lock: its snapshot is taken once the lock is
+		// held
 		var next int64
 		server.Raise(tx.QueryRow(
 			ctx,
@@ -243,7 +257,7 @@ func AllocateGammaDepositHotkey(
 			DerivationIndex: next,
 			CreateTime:      now,
 		}
-	})
+	}, server.TxReadCommitted)
 	return
 }
 
