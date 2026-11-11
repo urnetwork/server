@@ -169,6 +169,19 @@ func TestStEpochAmendedUsageRefusesWhatItCannotClassify(t *testing.T) {
 	if usages, pool := reader.result(); len(usages) != 0 || *pool != (StEpochExtenderPool{}) {
 		t.Fatalf("refused contracts added %+v and %+v", usages, pool)
 	}
+	// A zero-byte contract with hops moves no bytes: archived or without an
+	// origin, it adds its hops' zero usage as the reader before the amendment
+	// does, the same-network hop's included, and pools nothing.
+	zero, _ := stExtenderTestSnapshot(t, 0, origin, egress, x)
+	for _, row := range []*stEpochUsageRow{{contractId: contractPayoutTestId(252)}, {contractId: contractPayoutTestId(253), live: true}} {
+		if err := reader.add(row, zero); err != nil {
+			t.Fatalf("a zero-byte contract: %v", err)
+		}
+	}
+	usages, pool := reader.result()
+	if len(usages) != 2 || usages[0].PayoutByteCount != 0 || usages[1].PayoutByteCount != 0 || *pool != (StEpochExtenderPool{}) {
+		t.Fatalf("zero-byte contracts added %+v and %+v", usages, pool)
+	}
 }
 
 // The amendment's first epoch comes from its signed entry, as the server

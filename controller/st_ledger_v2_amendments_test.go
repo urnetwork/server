@@ -243,6 +243,38 @@ func TestStLedgerV2AmendmentsUnpinnedDeployment(t *testing.T) {
 	}
 }
 
+// Testing_SetStAmendments unpins every deployment for another package's test,
+// such as sn's end-to-end chain, which borrows mainnet's identity: nothing is
+// fetched and no amendment is in force, and the restore pins mainnet again.
+func TestStLedgerV2AmendmentsTestingHook(t *testing.T) {
+	site := newStAmendmentTestSite(t)
+	site.publish(t, 8)
+	cfg := stAmendmentTestConfig(t, "enabled: false\n")
+	pinnedUrl, pinnedSigner := stAmendmentUrl, stAmendmentSigner
+	restore := Testing_SetStAmendments("", common.Address{}, 0, 0)
+	amendments, err := stLedgerV2ReadAmendments(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := amendments.extenders(8); got.InForce(8) {
+		t.Fatalf("an unpinned deployment read the published entry: %+v", got)
+	}
+	restore()
+	if stAmendmentUrl != pinnedUrl {
+		t.Fatal("the restore did not restore the published address")
+	}
+	if _, pinned := stAmendmentSigner(964, 25); !pinned {
+		t.Fatal("the restore did not pin the deployment again")
+	}
+	stAmendmentSigner = pinnedSigner
+	if amendments, err = stLedgerV2ReadAmendments(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := amendments.extenders(8); got.FirstEpoch != 8 {
+		t.Fatalf("after the restore: %+v", got)
+	}
+}
+
 // st.yml's extender_pool block: the measurement networks Z leaves out, and
 // the networks the operator declares it controls (E5). An entry that is not a
 // network id refuses the block rather than counting what it meant to leave

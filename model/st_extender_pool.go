@@ -82,11 +82,12 @@ func addStEpochPoolBytes(total *ByteCount, bytes ByteCount) error {
 // Adds one contract of the epoch's earning window. A contract's shares are
 // read once (stContractSharesForEpoch): each provider share is added to its
 // provider's usage, and the pooled shares to one part of the pool by the
-// contract's payer. A contract without shares adds nothing. One with shares
-// needs its usage origin network, which only the live contract row holds.
+// contract's payer. A contract with bytes needs its usage origin network,
+// which only the live contract row holds. A zero-byte contract moves nothing,
+// so it is added exactly as the reader before the amendment adds it.
 func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsageSnapshot) error {
-	if len(snapshot.Providers) == 0 {
-		return nil
+	if snapshot.ByteCount == 0 {
+		return self.addProviders(snapshot.Providers)
 	}
 	if !row.live {
 		return fmt.Errorf("subnet contract %s is archived without the origin network the extender amendment classifies its shares by; epoch %d must be built within the contract horizon", row.contractId, self.epoch)
@@ -98,16 +99,8 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 	if err != nil {
 		return fmt.Errorf("subnet contract %s: %w", row.contractId, err)
 	}
-	for _, provider := range shares.Providers {
-		usage := self.usages[provider.ClientId]
-		if usage == nil {
-			usage = &StProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId}
-			self.usages[provider.ClientId] = usage
-		}
-		if usage.NetworkId != provider.NetworkId || int64(provider.ByteCount) > math.MaxInt64-usage.PayoutByteCount {
-			return fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
-		}
-		usage.PayoutByteCount += int64(provider.ByteCount)
+	if err := self.addProviders(shares.Providers); err != nil {
+		return err
 	}
 	pooled := shares.ExtenderPoolBytes()
 	if pooled == 0 {
@@ -132,6 +125,23 @@ func (self *stEpochAmendedUsage) add(row *stEpochUsageRow, snapshot *contractUsa
 	}
 	self.pool.Contracts++
 	self.payers[*row.payerNetworkId] = true
+	return nil
+}
+
+// Adds provider shares to their providers' usage, as the reader before the
+// amendment adds a snapshot's shares.
+func (self *stEpochAmendedUsage) addProviders(providers []contractProviderUsage) error {
+	for _, provider := range providers {
+		usage := self.usages[provider.ClientId]
+		if usage == nil {
+			usage = &StProviderUsage{ClientId: provider.ClientId, NetworkId: provider.NetworkId}
+			self.usages[provider.ClientId] = usage
+		}
+		if usage.NetworkId != provider.NetworkId || int64(provider.ByteCount) > math.MaxInt64-usage.PayoutByteCount {
+			return fmt.Errorf("subnet provider usage has ambiguous network or overflowing total")
+		}
+		usage.PayoutByteCount += int64(provider.ByteCount)
+	}
 	return nil
 }
 

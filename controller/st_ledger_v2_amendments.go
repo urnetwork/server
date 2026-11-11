@@ -65,14 +65,15 @@ func (self *stAmendmentStore) Save(ctx context.Context, raw []byte) (err error) 
 	return nil
 }
 
-// The seams tests replace: the pinned signers, the published address and the
-// store.
+// The seams tests replace: the pinned signers, the published address, the
+// store, and the file of a deployment without a pinned signer.
 var (
 	stAmendmentSigner = amendment.SignerFor
 	stAmendmentUrl    = amendment.URL
 	stAmendmentStorer = func(cfg *StConfig) amendment.Store {
 		return &stAmendmentStore{deploymentKey: cfg.DeploymentKey()}
 	}
+	stAmendmentUnpublished = amendment.Unpublished
 )
 
 // One source per deployment for the process's life: a source holds the newest
@@ -81,6 +82,33 @@ var (
 	stAmendmentSourcesLock sync.Mutex
 	stAmendmentSources     = map[model.StDeploymentKey]*amendment.Source{}
 )
+
+// Testing_SetStAmendments points the amendments file's published address and
+// pinned signer at a test's own, for the tests of other packages, and returns
+// what restores them. Only the deployment of chainId and netuid is pinned, so
+// a zero chainId pins none: every deployment then publishes no amendments.
+func Testing_SetStAmendments(url string, signer common.Address, chainId uint64, netuid uint16) (restore func()) {
+	previousUrl, previousSigner, previousUnpublished := stAmendmentUrl, stAmendmentSigner, stAmendmentUnpublished
+	stAmendmentUrl = url
+	stAmendmentSigner = func(chain uint64, sn uint16) (common.Address, bool) {
+		return signer, chainId != 0 && chain == chainId && sn == netuid
+	}
+	// amendment.Unpublished refuses a deployment the amendment package pins,
+	// such as mainnet, which a test that unpins it still names: its file is
+	// then the verified file with no entries.
+	stAmendmentUnpublished = func(chain uint64, sn uint16) (*amendment.File, error) {
+		return amendment.ParseVerified(fmt.Appendf(nil, "sn: %d\n", sn), chain, sn, common.Address{})
+	}
+	stAmendmentSourcesLock.Lock()
+	stAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
+	stAmendmentSourcesLock.Unlock()
+	return func() {
+		stAmendmentUrl, stAmendmentSigner, stAmendmentUnpublished = previousUrl, previousSigner, previousUnpublished
+		stAmendmentSourcesLock.Lock()
+		stAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
+		stAmendmentSourcesLock.Unlock()
+	}
+}
 
 func stAmendmentSource(cfg *StConfig, signer common.Address) *amendment.Source {
 	stAmendmentSourcesLock.Lock()
@@ -124,7 +152,7 @@ func stLedgerV2ReadAmendments(ctx context.Context, cfg *StConfig) (*stLedgerV2Am
 	read := &stLedgerV2Amendments{noId: cfg.NoId, fallback: fallback, pool: pool}
 	signer, pinned := stAmendmentSigner(cfg.ChainId, uint16(cfg.Netuid))
 	if !pinned {
-		if read.file, err = amendment.Unpublished(cfg.ChainId, uint16(cfg.Netuid)); err != nil {
+		if read.file, err = stAmendmentUnpublished(cfg.ChainId, uint16(cfg.Netuid)); err != nil {
 			return nil, err
 		}
 		return read, nil
