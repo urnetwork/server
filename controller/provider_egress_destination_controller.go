@@ -226,8 +226,9 @@ type providerEgressSitesYaml struct {
 	Candidates   []providerEgressSitesCandidateYaml            `yaml:"candidates"`
 	Destinations []providerEgressSitesCandidateYaml            `yaml:"destinations"`
 	Countries    map[string][]providerEgressSitesCandidateYaml `yaml:"countries"`
-	// Per-country probe settings, keyed by lower-case alpha-2 country. A
-	// binary that predates the key ignores it: the file is not read strictly.
+	// Per-country probe settings, keyed by alpha-2 country in either case
+	// (parseProviderEgressCountrySettings). A binary that predates the key
+	// ignores it: the file is not read strictly.
 	CountrySettings map[string]providerEgressCountrySettingsYaml `yaml:"country_settings"`
 }
 
@@ -287,11 +288,9 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 		}
 	}
 
-	countrySettings, err := parseProviderEgressCountrySettings(document.CountrySettings)
-	if err != nil {
-		return nil, err
-	}
+	countrySettings, countrySettingsRefused := parseProviderEgressCountrySettings(document.CountrySettings)
 	sites.CountrySettings = countrySettings
+	sites.Refused = append(sites.Refused, countrySettingsRefused...)
 
 	// one list's entries converted to rows, each validated as the prober
 	// would run it, with a category and a name unique in the list; a problem
@@ -469,32 +468,52 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 }
 
 // Reads country_settings: the countries whose settings differ from the
-// defaults, today those with udp_probes: false. A key that is not a lower-case
-// two-letter country code refuses the file, naming every such key, as any
-// other catalog error does: a setting meant for a country must not silently
-// match none. A well-formed code ISO 3166-1 does not assign matches no
-// provider, and is ignored. A country whose settings are all defaults is not
-// served, so the pool keeps its version.
-func parseProviderEgressCountrySettings(document map[string]providerEgressCountrySettingsYaml) (map[string]egresshealth.CountrySettings, error) {
+// defaults, today those with udp_probes: false. A key is an ISO 3166-1
+// alpha-2 code in either case, read as lower case, as the prober matches a
+// provider's country (egresshealth.Pool.UdpProbesDisabled). A key that is
+// still not a two-letter code, or one that repeats a country another spelling
+// already set, is refused alone (country_invalid, counted and logged with the
+// other refusals) and the rest of the file stands, as for a country list
+// under a bad key: a setting that applies to no country leaves that country's
+// UDP probes on, and must never stop URL measurement fleet-wide. A
+// well-formed code ISO 3166-1 does not assign (zz) matches no provider, and is
+// ignored. A country whose settings are all defaults is not served, so the
+// pool keeps its version.
+func parseProviderEgressCountrySettings(document map[string]providerEgressCountrySettingsYaml) (map[string]egresshealth.CountrySettings, []ProviderEgressCatalogRefusal) {
 	settings := map[string]egresshealth.CountrySettings{}
-	invalid := []string{}
-	for _, country := range providerEgressCountryCodes(document) {
+	refused := []ProviderEgressCatalogRefusal{}
+	// the spelling that set each country, in key order
+	setBy := map[string]string{}
+	for _, key := range providerEgressCountryCodes(document) {
+		country := strings.ToLower(strings.TrimSpace(key))
 		if !providerEgressCountryKeyValid(country) {
-			invalid = append(invalid, fmt.Sprintf("%q", country))
+			refused = append(refused, ProviderEgressCatalogRefusal{
+				Reason: ProviderEgressRefusalCountryInvalid,
+				List:   "country_settings",
+				Name:   key,
+				Detail: "is not a two-letter country code, so its settings apply to no country",
+			})
 			continue
 		}
 		if _, assigned := model.ISOCountryName(country); !assigned {
 			continue
 		}
-		if udpProbes := document[country].UdpProbes; udpProbes != nil && !*udpProbes {
+		if first, ok := setBy[country]; ok {
+			refused = append(refused, ProviderEgressCatalogRefusal{
+				Reason: ProviderEgressRefusalCountryInvalid,
+				List:   "country_settings",
+				Name:   key,
+				Detail: fmt.Sprintf("repeats country %s, which %q already sets", country, first),
+			})
+			continue
+		}
+		setBy[country] = key
+		if udpProbes := document[key].UdpProbes; udpProbes != nil && !*udpProbes {
 			disabled := false
 			settings[country] = egresshealth.CountrySettings{UdpProbes: &disabled}
 		}
 	}
-	if 0 < len(invalid) {
-		return nil, fmt.Errorf("qualityprobe.yml country_settings: keys %s are not lower-case two-letter country codes", strings.Join(invalid, ", "))
-	}
-	return settings, nil
+	return settings, refused
 }
 
 // Reads qualityprobe.yml; absent or unusable catalogs return an error. The

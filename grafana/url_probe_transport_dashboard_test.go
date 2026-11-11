@@ -9,7 +9,8 @@ import (
 // leg over TCP and, for a URL that declares h3, the HTTP/3 leg over UDP, each
 // counted apart by the taskworker that ran the turn, so the share of
 // providers that carry TCP and not UDP is read directly; beside them, the
-// turns the HTTP/3 common-mode guard held back.
+// turns the HTTP/3 common-mode guard held back, and by country the HTTP/3
+// legs a country's udp_probes: false turned off.
 func TestEgressProbeDashboardChartsUrlLegsByTransport(t *testing.T) {
 	dashboard := readTestDashboard(t, "egress-probes.json")
 	const selector = `{env="$env",service="taskworker",instance!=""`
@@ -35,6 +36,8 @@ func TestEgressProbeDashboardChartsUrlLegsByTransport(t *testing.T) {
 			"sum by (transport, outcome) (rate(" + metric + selector + "}[$__rate_interval])) * 60",
 			"sum(rate(urnetwork_url_probe_h3_common_mode_held_total" + selector + "}[$__rate_interval])) * 60",
 			`sum by (verdict) (rate(urnetwork_egress_url_h3_verdicts_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
+			// the HTTP/3 legs a country's udp_probes: false turned off, by country
+			"sum by (country) (rate(urnetwork_url_probe_udp_country_disabled_total" + selector + "}[$__rate_interval])) * 60",
 		}, []string{"tcp", "udp", "h3", "answered", "silent", "not_measured", "skipped", "verdict", "provider", "place", "held"}},
 		{"silent HTTP/3 legs after a passed HTTPS leg (1h)", "percentunit", []string{
 			"sum(increase(" + metric + selector + `,transport="udp",outcome="silent"}[1h])) / sum(increase(` + metric + selector + `,transport="udp",outcome=~"success|answered|silent"}[1h]))`,

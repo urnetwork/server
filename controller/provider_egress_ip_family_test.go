@@ -116,16 +116,51 @@ func TestQualityprobeCatalogServesCountrySettings(t *testing.T) {
 	}
 }
 
-// A country key that is not a lower-case two-letter code refuses the file at
-// load, naming every such key: a setting meant for a country must not
-// silently match none.
+// country_settings keys are read in either case. A key that is no two-letter
+// code after case folding, or that repeats a country another spelling already
+// set, is refused alone (country_invalid, under country_settings) and the rest
+// of the file stands: one bad key must never refuse the catalog and stop URL
+// probing. A well-formed code ISO 3166-1 does not assign (zz, ZZ) matches no
+// provider and is ignored, refused or not. A value that is not a boolean is a
+// catalog error like any other.
 func TestQualityprobeCatalogRefusesInvalidCountrySettingsCodes(t *testing.T) {
-	for _, key := range []string{"RU", "rus", "r1", "r", `""`} {
-		text := strings.Replace(testIpFamilyCatalog, "  ru:\n", "  "+key+":\n", 1)
-		_, err := ParseProviderEgressSites(func(out any) error { return yaml.Unmarshal([]byte(text), out) })
-		if err == nil || !strings.Contains(err.Error(), "country_settings") || !strings.Contains(err.Error(), "not lower-case two-letter country codes") {
-			t.Fatalf("%s: err=%v; want the invalid code refused at load", key, err)
+	parse := func(text string) *ProviderEgressSites {
+		t.Helper()
+		sites, err := ParseProviderEgressSites(func(out any) error { return yaml.Unmarshal([]byte(text), out) })
+		if err != nil {
+			t.Fatalf("one country key refused the whole catalog: %v", err)
 		}
+		return sites
+	}
+	countryRefusals := func(sites *ProviderEgressSites) []ProviderEgressCatalogRefusal {
+		refusals := []ProviderEgressCatalogRefusal{}
+		for _, refusal := range sites.Refused {
+			if refusal.List == "country_settings" {
+				refusals = append(refusals, refusal)
+			}
+		}
+		return refusals
+	}
+	for _, key := range []string{"rus", "r1", "r", `""`, "r-u"} {
+		sites := parse(strings.Replace(testIpFamilyCatalog, "  ru:\n", "  "+key+":\n", 1))
+		refusals := countryRefusals(sites)
+		if len(refusals) != 1 || refusals[0].Reason != ProviderEgressRefusalCountryInvalid || len(sites.CountrySettings) != 0 || len(sites.Destinations) != 4 {
+			t.Fatalf("%s: refusals %v, settings %+v, destinations %d; want the key refused alone", key, refusals, sites.CountrySettings, len(sites.Destinations))
+		}
+	}
+	upper := parse(strings.Replace(testIpFamilyCatalog, "  ru:\n", "  RU:\n", 1))
+	if refusals := countryRefusals(upper); len(refusals) != 0 || len(upper.CountrySettings) != 1 || upper.CountrySettings["ru"].UdpProbes == nil || *upper.CountrySettings["ru"].UdpProbes {
+		t.Fatalf("RU: refusals %v, settings %+v; want it read as ru", refusals, upper.CountrySettings)
+	}
+	repeated := parse(strings.Replace(testIpFamilyCatalog, "  ru:\n    udp_probes: false\n", "  RU:\n    udp_probes: false\n  ru:\n    udp_probes: true\n", 1))
+	refusals := countryRefusals(repeated)
+	if len(refusals) != 1 || refusals[0].Name != "ru" || refusals[0].String() != `country_settings entry "ru" repeats country ru, which "RU" already sets` ||
+		len(repeated.CountrySettings) != 1 || *repeated.CountrySettings["ru"].UdpProbes {
+		t.Fatalf("a repeated country: refusals %v, settings %+v; want the second spelling refused alone", refusals, repeated.CountrySettings)
+	}
+	unassigned := parse(strings.Replace(testIpFamilyCatalog, "  zz:\n", "  ZZ:\n", 1) + "")
+	if refusals := countryRefusals(unassigned); len(refusals) != 0 || len(unassigned.CountrySettings) != 1 {
+		t.Fatalf("an unassigned code: refusals %v, settings %+v; want it ignored", refusals, unassigned.CountrySettings)
 	}
 	text := strings.Replace(testIpFamilyCatalog, "  ru:\n    udp_probes: false\n", "  ru:\n    udp_probes: maybe\n", 1)
 	if _, err := ParseProviderEgressSites(func(out any) error { return yaml.Unmarshal([]byte(text), out) }); err == nil {

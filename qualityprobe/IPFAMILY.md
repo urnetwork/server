@@ -188,10 +188,22 @@ failures. With no UDP leg there is no place evidence from that country and no
 silent leg to judge. The setting is served with the pool
 (`Pool.CountrySettings`, JSON `country_settings`, only countries that differ
 from the default, in the pool version), and the evidence records
-`udp_probes_disabled`. A key that is not a lower-case two-letter code refuses
-the file at load, naming it; a well-formed code ISO 3166-1 does not assign is
-ignored. Binaries that predate the key ignore it (gopkg.in/yaml.v3's
-Unmarshal is not strict; checked against the h3-udp parser too).
+`udp_probes_disabled`. Keys are read in either case (`RU` is `ru`). A key
+that is no two-letter code, or that repeats a country another spelling already
+set, is refused alone (`country_invalid` under `country_settings`, logged and
+counted with the other catalog refusals) and the rest of the file stands: one
+bad key never refuses the catalog and stops URL probing. A well-formed code
+ISO 3166-1 does not assign (`zz`) is ignored; a value that is not a boolean is
+a catalog error like any other. Binaries that predate the key ignore it
+(gopkg.in/yaml.v3's Unmarshal is not strict; checked against the h3-udp
+parser too). `urnetwork_url_probe_udp_country_disabled_total{country}` counts
+the loads the switch turned UDP off for, by the claim's country.
+
+This switch was built twice on 2026-11-11, here and on
+`qualityprobe/udp-country-switch` (454e5724e, on h3-udp); that branch is merged
+into this one (`--no-ff`), with this branch's prober side and its parse rule
+for keys (per-entry refusal, from that branch; unassigned codes ignored, from
+this one), and its tests, metric and dashboard target kept.
 
 ## The URL schema
 

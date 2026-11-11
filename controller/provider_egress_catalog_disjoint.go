@@ -63,7 +63,8 @@ const (
 	// a country site repeating a general entry's name or website
 	ProviderEgressRefusalCountryConflict = "country_conflict"
 	// a country entry, or a whole list under a key that is not a country
-	// code, the prober could not run
+	// code, the prober could not run; or a country_settings entry under such
+	// a key, or repeating a country
 	ProviderEgressRefusalCountryInvalid = "country_invalid"
 )
 
@@ -86,12 +87,18 @@ type ProviderEgressCatalogRefusal struct {
 	Name    string
 	// Detail says what the entry collides with or why it cannot run
 	Detail string
+	// List names the file's key the entry is under when that is neither the
+	// candidates nor a country list: country_settings
+	List string
 }
 
 func (self ProviderEgressCatalogRefusal) String() string {
 	list := "candidates"
 	if self.Country != "" {
 		list = "countries." + self.Country
+	}
+	if self.List != "" {
+		list = self.List
 	}
 	return fmt.Sprintf("%s entry %q %s", list, self.Name, self.Detail)
 }
@@ -100,7 +107,7 @@ var providerEgressCatalogRefusalsTotal = prometheus.NewCounterVec(prometheus.Cou
 	Namespace: "urnetwork",
 	Subsystem: "egress_site",
 	Name:      "catalog_refusals_total",
-	Help:      "qualityprobe.yml entries kept out of the served destination pool, by stage (parse: refused reading the catalog, once per read; serve: dropped from one served pool; refresh: a candidate held back from promotion) and reason (candidate_name: a candidate repeating a destination's name; country_conflict: a country site repeating a general entry's name or registrable domain, or a candidate one would collide with; country_invalid: a country entry or list the prober could not run)",
+	Help:      "qualityprobe.yml entries kept out of the served destination pool, by stage (parse: refused reading the catalog, once per read; serve: dropped from one served pool; refresh: a candidate held back from promotion) and reason (candidate_name: a candidate repeating a destination's name; country_conflict: a country site repeating a general entry's name or registrable domain, or a candidate one would collide with; country_invalid: a country entry or list the prober could not run, or a country_settings entry under a key that is not a country code or that repeats a country)",
 }, []string{"stage", "reason"})
 
 // Registers the refusal counter with every label pair a stage can produce.

@@ -8122,6 +8122,11 @@
           "refId": "C",
           "expr": "sum by (verdict) (rate(urnetwork_egress_url_h3_verdicts_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
           "legendFormat": "silent verdict {{verdict}}"
+        },
+        {
+          "refId": "D",
+          "expr": "sum by (country) (rate(urnetwork_url_probe_udp_country_disabled_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "udp country_disabled {{country}}"
         }
       ]
     },

@@ -298,6 +298,9 @@ func evaluateEgressDestinationPool(
 			if refusal.Country != "" {
 				list = refusal.Country
 			}
+			if refusal.List != "" {
+				list = refusal.List
+			}
 			entries = append(entries, list+"/"+refusal.Name)
 		}
 		reasonText := []string{}
