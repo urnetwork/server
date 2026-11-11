@@ -44,9 +44,9 @@ func TestSubscriptionMetricsCollectorPublishesActiveTrials(t *testing.T) {
 			t.Errorf("trials %s/%s = %v, want %v", c.store, c.plan, got, c.want)
 		}
 	}
-	// six tracked stores plus the deduplicated total, by yearly, monthly and
+	// nine tracked stores plus the deduplicated total, by yearly, monthly and
 	// unknown plans
-	if got := len(metricFamilies["urnetwork_subscription_trials_active"].Metric); got != 21 {
-		t.Errorf("trial series = %d, want 7 stores x 3 plans", got)
+	if got := len(metricFamilies["urnetwork_subscription_trials_active"].Metric); got != 30 {
+		t.Errorf("trial series = %d, want 10 stores x 3 plans", got)
 	}
 }
