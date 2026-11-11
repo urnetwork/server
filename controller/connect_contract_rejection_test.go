@@ -39,8 +39,10 @@ func TestContractRejectionCauseSchemaAndErrorClasses(t *testing.T) {
 		if family.GetName() != "urnetwork_connect_contract_rejections_total" {
 			continue
 		}
-		if len(family.Metric) != 60 {
-			t.Fatalf("rejection collector has %d cells, want 60 initialized cells", len(family.Metric))
+		// every cause, each ingress and each companion bit: §6.10.1's Service rule and D-PROTO-9's guard added three
+		// causes (PROTO-M5-04)
+		if want := len(contractRejectionCauses) * 2 * 2; len(family.Metric) != want || want != 72 {
+			t.Fatalf("rejection collector has %d cells, want %d initialized cells", len(family.Metric), want)
 		}
 		for _, sample := range family.Metric {
 			if len(sample.Label) != 3 {
