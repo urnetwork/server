@@ -569,7 +569,7 @@ type solanaSignatureStatusesResponse struct {
 // ----- run orchestration -----
 
 // PaymentReconcileRunOptions selects how a reconcile pass runs. The zero
-// value (or nil) is the hourly task's behavior: all four stores, repairs
+// value (or nil) is the hourly task's behavior: every store, repairs
 // applied.
 type PaymentReconcileRunOptions struct {
 	// DryRun audits without repairing: every store API READ happens for real,
@@ -580,11 +580,9 @@ type PaymentReconcileRunOptions struct {
 	// would_repair_entitlement audit event with the same evidence and details
 	// the real repair would carry, tagged dry_run.
 	DryRun bool
-	// Stores limits the pass to the named stores
-	// (model.SubscriptionMarketStripe | Apple | Google | Solana | X402 | Monero
-	// | Zcash); empty
-	// runs all of them. Filtered-out stores are untouched entirely: no events, no
-	// watermark.
+	// Stores limits the pass to the named stores (model.PaymentReconcileStores);
+	// empty runs all of them. Filtered-out stores are untouched entirely: no
+	// events, no watermark.
 	Stores []string
 }
 
@@ -985,7 +983,7 @@ var ErrPaymentReconcileRunInProgress = errors.New("another payment reconciliatio
 // point.
 const paymentReconcileRunLockKey = "payment_reconciliation_run"
 
-// RunPaymentReconciliation is one reconcile pass over all four stores with
+// RunPaymentReconciliation is one reconcile pass over every store with
 // the default options (the hourly task's entry point). Always returns a
 // result: a store failing (or panicking) is recorded and the other stores
 // still run.
@@ -1059,6 +1057,33 @@ func RunPaymentReconciliationWithOptions(
 	return result, nil
 }
 
+// paymentReconcileStoreLeg is one store's pass of a reconciliation run.
+type paymentReconcileStoreLeg struct {
+	store          string
+	hasCredentials func() bool
+	// reconcile returns complete = false when it stopped early (budget);
+	// the watermark only advances on a complete, error-free pass
+	reconcile func(run *paymentReconcileRun, since time.Time) (complete bool, err error)
+}
+
+// paymentReconcileStoreLegs are the stores' legs, one per
+// model.PaymentReconcileStores entry in its order (a test holds them to it),
+// made for each run.
+func paymentReconcileStoreLegs() []paymentReconcileStoreLeg {
+	return []paymentReconcileStoreLeg{
+		{model.SubscriptionMarketStripe, stripeReconcileHasCredentials, reconcileStripe},
+		{model.SubscriptionMarketApple, appleReconcileHasCredentials, reconcileApple},
+		{model.SubscriptionMarketGoogle, playReconcileHasCredentials, reconcilePlay},
+		{model.SubscriptionMarketSolana, solanaReconcileHasCredentials, reconcileSolana},
+		{model.SubscriptionMarketX402, x402ReconcileHasCredentials, reconcileX402},
+		{model.SubscriptionMarketMonero, moneroReconcileHasCredentials, reconcileMonero},
+		{model.SubscriptionMarketZcash, zcashReconcileHasCredentials, reconcileZcash},
+		{model.SubscriptionMarketBittensor, cryptoRailReconcileHasCredentials, reconcileBittensor},
+		{model.SubscriptionMarketBitcoin, cryptoRailReconcileHasCredentials, reconcileBitcoin},
+		{model.SubscriptionMarketEthereum, cryptoRailReconcileHasCredentials, reconcileEthereum},
+	}
+}
+
 func runPaymentReconciliation(
 	connOwner server.PgConn,
 	clientSession *session.ClientSession,
@@ -1074,32 +1099,13 @@ func runPaymentReconciliation(
 		storeResults:  map[string]*PaymentReconcileStoreResult{},
 	}
 
-	type storeReconciler struct {
-		store          string
-		hasCredentials func() bool
-		// reconcile returns complete = false when it stopped early (budget);
-		// the watermark only advances on a complete, error-free pass
-		reconcile func(run *paymentReconcileRun, since time.Time) (complete bool, err error)
-	}
-
-	stores := []storeReconciler{
-		{model.SubscriptionMarketStripe, stripeReconcileHasCredentials, reconcileStripe},
-		{model.SubscriptionMarketApple, appleReconcileHasCredentials, reconcileApple},
-		{model.SubscriptionMarketGoogle, playReconcileHasCredentials, reconcilePlay},
-		{model.SubscriptionMarketSolana, solanaReconcileHasCredentials, reconcileSolana},
-		{model.SubscriptionMarketX402, x402ReconcileHasCredentials, reconcileX402},
-		{model.SubscriptionMarketMonero, moneroReconcileHasCredentials, reconcileMonero},
-		{model.SubscriptionMarketZcash, zcashReconcileHasCredentials, reconcileZcash},
-		{model.SubscriptionMarketBittensor, cryptoRailReconcileHasCredentials, reconcileBittensor},
-		{model.SubscriptionMarketBitcoin, cryptoRailReconcileHasCredentials, reconcileBitcoin},
-		{model.SubscriptionMarketEthereum, cryptoRailReconcileHasCredentials, reconcileEthereum},
-	}
+	stores := paymentReconcileStoreLegs()
 	if 0 < len(options.Stores) {
 		selected := map[string]bool{}
 		for _, store := range options.Stores {
 			selected[store] = true
 		}
-		stores = slices.DeleteFunc(stores, func(storeReconcile storeReconciler) bool {
+		stores = slices.DeleteFunc(stores, func(storeReconcile paymentReconcileStoreLeg) bool {
 			return !selected[storeReconcile.store]
 		})
 	}

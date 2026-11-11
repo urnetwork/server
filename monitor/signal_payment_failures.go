@@ -3,17 +3,52 @@ package monitor
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/urnetwork/server/model"
 )
 
-const paymentFailuresQuery = `
+// The markets whose in-window supporter renewal must carry a Pro window: every
+// subscription market (model.SubscriptionMarkets), so each market the
+// subscription dashboard counts is watched here too.
+var paymentFailuresEntitlementMarkets = slices.Sorted(slices.Values(model.SubscriptionMarkets))
+
+// The markets whose missing Pro window the hourly reconciler repairs
+// (controller/payment_reconcile_controller.go, repairEntitlement). The other
+// markets' credit writes the renewal and its Pro window in one transaction,
+// and nothing restores a lost window.
+var paymentFailuresRepairedEntitlementMarkets = []string{"apple", "google", "solana", "stripe"}
+
+// The recurring markets, whose renewal can still bill once its account is
+// deleted: the subscription markets but the one-time crypto ones, which are
+// prepaid fixed windows. Each has its own disposition (paymentFailureFinding);
+// a test holds this list to the model's markets.
+var paymentFailuresOrphanMarkets = []string{"apple", "gamma", "google", "stripe"}
+
+// paymentFailuresSqlList renders source-owned market names, never input, as
+// the SQL string literals of an IN list. A name that is not plain lowercase
+// letters, digits and underscores panics at package init instead of reaching
+// SQL.
+func paymentFailuresSqlList(names []string) string {
+	quoted := make([]string, 0, len(names))
+	for _, name := range names {
+		if name == "" || strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
+			panic(fmt.Sprintf("payment failures: market %q is not a plain name", name))
+		}
+		quoted = append(quoted, "'"+name+"'")
+	}
+	return strings.Join(quoted, ", ")
+}
+
+var paymentFailuresQuery = `
 /* monitor-signal-2.22-payment-failures */
 WITH active_supporter AS (
     SELECT DISTINCT renewal.network_id, renewal.market, min(renewal.start_time) OVER (PARTITION BY renewal.network_id, renewal.market) AS first_start
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
-      AND renewal.market IN ('apple', 'bitcoin', 'bittensor', 'ethereum', 'google', 'monero', 'solana', 'stripe', 'zcash')
+      AND renewal.market IN (` + paymentFailuresSqlList(paymentFailuresEntitlementMarkets) + `)
       AND renewal.start_time <= now()
       AND now() < renewal.end_time
       AND EXISTS (
@@ -42,7 +77,7 @@ WITH active_supporter AS (
            extract(epoch FROM now() - max(renewal.start_time))::bigint AS newest_age
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
-      AND renewal.market IN ('apple', 'google', 'stripe')
+      AND renewal.market IN (` + paymentFailuresSqlList(paymentFailuresOrphanMarkets) + `)
       AND renewal.start_time <= now()
       AND now() < renewal.end_time
       AND NOT EXISTS (
@@ -138,9 +173,15 @@ FROM crypto_scanner
 ORDER BY kind, target
 `
 
-// The crypto rail's coins (controller/crypto_pay_config.go cryptoPayAssets).
-var paymentFailuresCryptoAssets = map[string]bool{
-	"usdc_solana": true, "zec": true, "xmr": true, "tao": true, "btc": true, "eth": true, "sol": true,
+// The crypto rail's coins (model.CryptoAssets).
+var paymentFailuresCryptoAssets = paymentFailuresNameSet(model.CryptoAssets)
+
+func paymentFailuresNameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
 }
 
 // SIGNALS.md §2.22 maps to signal_payment_failures.go and
@@ -208,7 +249,7 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 	}
 	switch kind {
 	case "entitlement_missing":
-		if !map[string]bool{"apple": true, "bitcoin": true, "bittensor": true, "ethereum": true, "google": true, "monero": true, "solana": true, "stripe": true, "zcash": true}[target] {
+		if !slices.Contains(paymentFailuresEntitlementMarkets, target) {
 			return finding{}, fmt.Errorf("payment failures returned an unknown entitlement market")
 		}
 		common.class = "payment-entitlement-missing"
@@ -216,8 +257,13 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		common.mechanism = "The authoritative local renewal window says the store is still billing, but no in-window transfer_balance with pro=true exists. Clients therefore receive free-tier behavior even though the account remains paid."
 		common.action = "Confirm this store's reconciliation credentials and authoritative lookup are healthy, then allow the ordinary reconciler to validate the exact renewal and restore only its missing Pro metadata. Trace and fix the earlier write-path loss. Never grant from the local renewal alone or expose account identifiers in the alert."
 		common.verify = "The provider-confirmed reconciliation records one entitlement_repaired event, the Pro cache and a refreshed client JWT report Pro, and the aggregate remains zero through two later reconciliation runs without changing purchased bytes or revenue."
+		if !slices.Contains(paymentFailuresRepairedEntitlementMarkets, target) {
+			common.mechanism = fmt.Sprintf("The %s credit writes the renewal and its Pro window (transfer_balance with pro=true) in one transaction, and the hourly reconciler repairs a Pro window only for Apple, Google Play, Stripe and Solana. A renewal still in its paid window with no Pro window means a later write ended or removed the window, and nothing restores it: the account is paid but gets free-tier behavior.", target)
+			common.action = "Find and fix the write that ended or removed the Pro window. Restore the window only through an authorized repair with the owner's go; waiting for reconciliation does not restore it. Never grant from the local renewal alone or expose account identifiers in the alert."
+			common.verify = "The account's Pro window covers its paid renewal again, a refreshed client JWT reports Pro, and the aggregate remains zero through two later runs without changing purchased bytes or revenue."
+		}
 	case "orphan_renewal":
-		if !map[string]bool{"apple": true, "google": true, "stripe": true}[target] {
+		if !slices.Contains(paymentFailuresOrphanMarkets, target) {
 			return finding{}, fmt.Errorf("payment failures returned an unknown orphan-renewal market")
 		}
 		common.tier = tierWarn
@@ -231,6 +277,11 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 			common.mechanism = "Account deletion removed the owner while its local Google renewal remains in the paid window. The aggregate counts distinct deleted owners rather than renewal rows. Google Play cancellation stops future payments without ending the paid local window, so successful cancellation before deletion can produce this same aggregate. Local history alone establishes neither current provider billing nor the deletion's artifact or ordering."
 			common.action = "Establish each deleted owner's Google Play provider-side disposition with authorized tooling, including whether future payments are stopped. Compare the exact running API artifact with Server commit 1a67d9d3 (Google Play cancellation before deletion) and commit cd881b22 (one store snapshot plus renewal recheck under the deletion lock); repair or deploy only where those capabilities are absent. Verify the shared payment network-row fence from commit 2b28387a separately in API and Taskworker. A source checkout or renewal start age does not establish the historical deletion artifact or deletion time. Retain financial history; do not recreate the network, grant Pro, or infer current billing from the local row alone."
 			common.verify = "Every affected deleted owner has a Google Play provider-side disposition; failed Play cancellation or a renewal outside the checked snapshot retains the network; and no new unresolved provider disposition appears through two reconciliation/deletion windows. Confirmed canceled paid-window history may remain in the aggregate until expiry. Alert disappearance from natural expiry alone is not causal closure."
+		}
+		if target == "gamma" {
+			common.mechanism = "Account deletion removed the owner while its local gamma renewal is still in its paid window. The aggregate counts distinct deleted owners rather than renewal rows. A plan paid with gamma renews through our own biller, not a store: deletion neither refuses nor cancels it, and the account's gamma_account row (automatic renewal, plan and deposit hotkey) survives it. The biller renews from that row near the end of the term without reading the network, so it can charge the deposit for an account the credit can no longer reach: the credit stops on the missing network."
+			common.action = "Before the term ends, stop the deleted owner's automatic gamma renewal with the owner's go, and check whether the biller already made and charged a renew intent for it that was never credited: that payment needs an authorized refund or support disposition. Fix account deletion so it ends gamma's automatic renewal. Retain financial history; do not recreate the network, grant Pro, or credit another account from the local row."
+			common.verify = "No renew intent is made for a deleted owner, every affected deleted owner has a documented disposition, and no new deleted owner enters this aggregate through two term ends. Alert disappearance from natural expiry alone is not causal closure."
 		}
 	case "solana_unfulfilled":
 		if target != "no_intent" && target != "underpaid" {

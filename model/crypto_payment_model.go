@@ -39,6 +39,21 @@ const (
 	CryptoAssetSol = "sol"
 )
 
+// CryptoAssets are the rail's coins, in the order every UI shows them: the main
+// selector's USDC, Zcash and Monero, then "More coins": TAO, Bitcoin, ETH, SOL
+// (mmm/BTCPAY.md §17.6). The rail sells these (controller/crypto_pay_config.go)
+// and the payment monitor accepts exactly these as a held or stalled coin
+// (monitor/signal_payment_failures.go).
+var CryptoAssets = []string{
+	CryptoAssetUsdcSolana,
+	CryptoAssetZec,
+	CryptoAssetXmr,
+	CryptoAssetTao,
+	CryptoAssetBtc,
+	CryptoAssetEth,
+	CryptoAssetSol,
+}
+
 // Where a paid invoice delivers: the signed-in caller's network, a network
 // named without signing in, or a balance code shown on the page (and emailed
 // when an address was given).
