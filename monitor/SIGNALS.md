@@ -9342,6 +9342,13 @@ Reproducing the same stale expectation on unchanged baseline and candidate
 separates an inherited test issue from a new regression; it does not make the
 broad suite green or excuse a distinct conservation/custody failure.
 
+Update 2026-11-11: settlement no longer queues the provider-total projection
+(server BILLING-SPLIT.md). Nothing in production read `account_balance.provided_*`
+or its Redis deltas. The drain and the per-task reader stay only to consume the
+rows already queued and those older binaries queue during a rollout, so the
+provider totals drain panels fall to zero once those are gone. Tests now assert
+that settlement produces no provider totals.
+
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
 claiming the outcome. Rollback restores all state. An old writer that wins before
