@@ -5,7 +5,8 @@
 // buckets of this test's own and sidecarhost.Redis on the private test Redis that test-env.sh attests. gkm's group
 // client on the real MLS subset drives gkmservice's engine through each: FS-15's wrapped rotation, its race for one
 // generation, its lost and killed claims and a commit below its predecessor's generation, FS-24's hints, FS-62's acks
-// lost with Redis, and FS-23's depositor. Like the other T3 tests here it carries the sidecar_localstack tag and
+// lost with Redis, FS-23's depositor and FS-102's key legs, a copied Delegation bundle after a compromise and after a
+// removal. Like the other T3 tests here it carries the sidecar_localstack tag and
 // fails, rather than skips, when the stack is down.
 
 package gkm
@@ -79,4 +80,12 @@ func TestFsKeysT3ADepositOnlyPrincipalFollowsTheDropKeyAndReadsNothing(t *testin
 
 func TestFsKeysT3ADepositorRefusesAnOlderGenRotateAfterARemoval(t *testing.T) {
 	runFsKeysT3(t, gkmschedule.FsKeysScheduleDepositorReplay)
+}
+
+func TestFsKeysT3ACopiedBundleAfterACompromiseOpensNothingNew(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleCopiedBundleCompromise)
+}
+
+func TestFsKeysT3ACopiedBundleAfterARemovalAdmitsOnlyUncoveredReaders(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleCopiedBundleRemoved)
 }
