@@ -422,7 +422,7 @@ func (self *Agent) EmergencyFreeze(ctx context.Context, runId string) error {
 // This root-only entrypoint is launched once in its own immutable systemd
 // unit. It never executes candidate code, loads main credentials, or restarts
 // an issued build after process loss. ExecStopPost owns emergency freezing.
-func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
+func (self *Agent) RunDockerOwner(ctx context.Context, runId string) (operationErr error) {
 	if self.recoveryOnly {
 		return errors.New("recovery role cannot launch or resume a Docker owner")
 	}
@@ -433,10 +433,17 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 	if err != nil {
 		return err
 	}
+	stage := dockerOwnerFailureAuthority
+	defer func() {
+		if operationErr != nil {
+			operationErr = errors.Join(operationErr, self.recordDockerOwnerFailure(runId, state, stage, operationErr))
+		}
+	}()
 	reaped, err := self.loadResourcesReaped(runId, state.CleanupPlanSha256)
 	if err != nil || reaped || state.RecoveryActive || state.CleanupVerified || state.StopCleanupVerified || state.CancelRequested || terminalState(state.State) || !self.settings.Now().Before(manifest.Identity.DeadlineAt) {
 		return errors.New("Docker owner execution authority is closed")
 	}
+	stage = dockerOwnerFailureMarker
 	marker, err := json.Marshal(struct {
 		RunId      string `json:"run_id"`
 		PlanSha256 string `json:"plan_sha256"`
@@ -451,16 +458,19 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 		return err
 	}
 	directory := filepath.Dir(plan.DockerOwner.SocketPath)
+	stage = dockerOwnerFailureSocket
 	if self.protected {
 		if err := protectedRuntimePath(directory, self.config.BaseDirectory, plan.DockerOwner.TrustedOperatorUid); err != nil {
 			return err
 		}
 	}
+	stage = dockerOwnerFailureProxy
 	proxy, err := newDockerProxy(*plan.DockerOwner, DefaultDockerProxySettings(), self.protected)
 	if err != nil {
 		return err
 	}
 	defer proxy.Close()
+	stage = dockerOwnerFailureRuntime
 	if self.protected {
 		boundary, err := self.runtimeAdmission(ctx)
 		if err != nil {
@@ -491,21 +501,25 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 		}
 		return listener, nil
 	}
+	stage = dockerOwnerFailureWorker
 	worker, err := listen(plan.DockerOwner.SocketPath, true)
 	if err != nil {
 		return err
 	}
 	defer worker.Close()
+	stage = dockerOwnerFailureBuild
 	build, err := listen(plan.DockerOwner.BuildSocketPath, false)
 	if err != nil {
 		return err
 	}
 	defer build.Close()
+	stage = dockerOwnerFailureDurability
 	if err := syncDirectory(directory); err != nil {
 		return err
 	}
 	issueCtx, stopIssue := context.WithDeadline(ctx, manifest.Identity.DeadlineAt)
 	defer stopIssue()
+	stage = dockerOwnerFailureServe
 	return proxy.serve(issueCtx, worker, build, func(closingCtx context.Context) error {
 		return self.containment.EmergencyFreeze(closingCtx, *plan)
 	})
