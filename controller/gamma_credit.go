@@ -47,7 +47,8 @@ func gammaCreditIntent(clientSession *session.ClientSession, intent *model.Gamma
 	duration := model.Pro().DataCodeDuration
 	if !plan {
 		var ok bool
-		byteCount, ok = stripeDataPackByteCount(intent.Item)
+		// what the charged pack grants, whatever its rails say now
+		byteCount, ok = dataPackByteCount(intent.Item)
 		if !ok || byteCount <= 0 {
 			return false, fmt.Errorf("intent %s names an unknown data pack", intent.IntentId)
 		}

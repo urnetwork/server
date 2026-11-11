@@ -88,9 +88,16 @@ import (
 )
 
 // The items a coin can sell. Monthly is card only (decision 6): no coin sells
-// it, whatever the config lists.
+// it, whatever the config lists. The data packs a coin can sell are the ones
+// pro.yml sells on the crypto rail (cryptoPayKnownItems); the 256 GiB pack is
+// not among them, whatever crypto_pay.yml lists.
 var cryptoPayKnownPlans = []string{model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
-var cryptoPayKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
+
+// cryptoPayKnownItems are the data packs pro.yml sells with crypto, in its
+// order.
+func cryptoPayKnownItems() []string {
+	return dataPackIdsOn(model.DataRailCrypto)
+}
 
 // The coins, in the order every UI shows them (model.CryptoAssets, which the
 // payment monitor reads too).
@@ -283,8 +290,19 @@ func (self *CryptoPayConfig) normalize() {
 		assetConfig.Plans = slices.DeleteFunc(slices.Clone(assetConfig.Plans), func(plan string) bool {
 			return !slices.Contains(cryptoPayKnownPlans, plan)
 		})
+		// a name that is not a data pack is never sold, and neither is a pack
+		// pro.yml does not sell with crypto (the 256 GiB pack is x402 and
+		// Gamma only), whatever this file lists. SellsItem asks pro.yml again
+		// when it sells.
 		assetConfig.Items = slices.DeleteFunc(slices.Clone(assetConfig.Items), func(item string) bool {
-			return !slices.Contains(cryptoPayKnownItems, item)
+			if !isDataPackItem(item) {
+				return true
+			}
+			if refusal := dataPackRefusal(item, model.DataRailCrypto); refusal != "" {
+				glog.Errorf("[cryptopay]crypto_pay.yml lists %s for %s, which pro.yml does not sell with crypto; it is not offered\n", item, asset)
+				return true
+			}
+			return false
 		})
 		// a source the coin may not be quoted from is dropped (CoinGecko for
 		// every coin but Monero, mmm/BTCPAY.md §17.4), and a list left with
@@ -504,9 +522,10 @@ func (self *CryptoPayAssetConfig) SellsPlan(plan string) bool {
 	return self != nil && slices.Contains(self.Plans, plan) && slices.Contains(cryptoPayKnownPlans, plan)
 }
 
-// SellsItem reports whether the coin sells the data item.
+// SellsItem reports whether the coin sells the data item: crypto_pay.yml
+// lists it for the coin, and pro.yml sells it with crypto.
 func (self *CryptoPayAssetConfig) SellsItem(item string) bool {
-	return self != nil && slices.Contains(self.Items, item) && slices.Contains(cryptoPayKnownItems, item)
+	return self != nil && slices.Contains(self.Items, item) && dataPackSoldOn(item, model.DataRailCrypto)
 }
 
 var cryptoPayConfigOnce = sync.OnceValue(func() *CryptoPayConfig {

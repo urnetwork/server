@@ -838,7 +838,7 @@ func TestCryptoQuotePricesAnItemWithoutAnInvoice(t *testing.T) {
 	quote, err := CryptoPaymentQuote(&CryptoPaymentQuoteArgs{Asset: model.CryptoAssetBtc, ItemId: StripeItemData1Tib}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, quote.Error, (*CryptoPaymentError)(nil))
-	price, _ := dataPackPriceUsd(StripeItemData1Tib)
+	price, _ := dataPackPriceUsd(StripeItemData1Tib, model.DataRailCrypto)
 	connect.AssertEqual(t, quote.PriceUsd, price)
 	want, _ := cryptoAssetQuoteAmountAtomic(model.CryptoAssetBtc, price, 73596.90, 0.5)
 	connect.AssertEqual(t, quote.AmountAtomic, fmt.Sprintf("%d", want))
