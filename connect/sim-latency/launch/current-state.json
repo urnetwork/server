@@ -1,6 +1,17 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T21:11:50Z",
+  "observed_at": "2026-11-11T21:48:37Z",
+  "latest_epoch2_stable_cache_qualification": {
+    "evidence": "EPOCH2-STABLE-CACHE-2026-11-11.json",
+    "api_ready": true,
+    "sille_candidate_replicates_completed": 4,
+    "goofe_cache_service_natively_qualified_and_enabled": true,
+    "goofe_host_ready": false,
+    "goofe_prelaunch_cleanup_amendment_approved": true,
+    "goofe_prelaunch_cleanup_fix_deployed": false,
+    "sille_cache_upgrade_staged_only": true,
+    "next_action": "Complete independent qualification and review of the approved Goofe-only prelaunch closure; do not extend its deadline or relaunch its attempted owner. Upgrade Sille's cache service only at the staged, positively verified physical-idle boundary after its current measurements and cleanup finish. Earlier entries below are historical snapshots."
+  },
   "latest_epoch2_launch_followup": {
     "evidence": "EPOCH2-OWNER-LAUNCH-FOLLOWUP-2026-11-11.json",
     "api_ready": true,
