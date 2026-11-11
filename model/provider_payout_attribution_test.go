@@ -5,6 +5,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"maps"
 	"testing"
 	"time"
 
@@ -53,8 +54,11 @@ func TestStatsProviderPayoutsPreserveSharedNetworkSettlement(t *testing.T) {
 		assertProviderPayoutStats(t, clientSession, map[server.Id]map[string]NanoCents{
 			firstId: {day: 61}, secondId: {day: 60},
 		}, map[string]NanoCents{day: 121})
-		wantAccounts := map[server.Id]contractPayoutTestAmount{providerNetworkId: {byteCount: 121, payout: 121}}
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{originNetworkId, providerNetworkId, movedNetworkId}, wantAccounts)
+		wantSweeps := map[server.Id]contractPayoutTestAmount{providerNetworkId: {byteCount: 121, payout: 121}}
+		if got := contractPayoutTestAmounts(t, ctx, escrow.ContractId); !maps.Equal(got, wantSweeps) {
+			t.Fatalf("network settlement = %v, want %v", got, wantSweeps)
+		}
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{originNetworkId, providerNetworkId, movedNetworkId})
 		assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, 121)
 
 		// The representative client moves; the remaining provider still owns
@@ -71,11 +75,14 @@ func TestStatsProviderPayoutsPreserveSharedNetworkSettlement(t *testing.T) {
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `UPDATE network_client SET network_id = $1 WHERE client_id = $2`, movedNetworkId, secondId))
 		})
-		// This is the current provider view. The account ledger below retains
+		// This is the current provider view. The sweep ledger below retains
 		// the full historical payment after both clients leave that view.
 		assertProviderPayoutStats(t, clientSession, map[server.Id]map[string]NanoCents{}, map[string]NanoCents{})
 		assertProviderPayoutStats(t, movedSession, map[server.Id]map[string]NanoCents{firstId: {}, secondId: {}}, map[string]NanoCents{})
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{originNetworkId, providerNetworkId, movedNetworkId}, wantAccounts)
+		if got := contractPayoutTestAmounts(t, ctx, escrow.ContractId); !maps.Equal(got, wantSweeps) {
+			t.Fatalf("network settlement after membership moved = %v, want %v", got, wantSweeps)
+		}
+		assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{originNetworkId, providerNetworkId, movedNetworkId})
 	})
 }
 

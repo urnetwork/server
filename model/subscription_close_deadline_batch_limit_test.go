@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 // The context lowers the compiled 4 or turns batching off; any other value
@@ -84,26 +83,12 @@ func TestForceClosePageRunsAtMostItsOwnerBatchLimitAtOnce(t *testing.T) {
 		for _, f := range fixtures {
 			contractIds = append(contractIds, newForceCloseOwnerBatchRows(t, ctx, f, 2, now)...)
 		}
-		keyContractIds := map[server.PgOwnershipKey]server.Id{}
-		for _, contractId := range contractIds {
-			keyContractIds[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
-		}
-		batchCovered := func(event server.PgOwnershipEvent) int {
-			covered := 0
-			for _, key := range event.Keys {
-				if _, ok := keyContractIds[key]; ok {
-					covered += 1
-				}
-			}
-			return covered
-		}
-
 		slotWaited, secondAdmitted := make(chan struct{}), make(chan struct{})
 		var slotWaitedOnce, secondAdmittedOnce sync.Once
 		var stateLock sync.Mutex
 		admittedCount, activeCount, maxActiveCount := 0, 0, 0
-		observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
-			if batchCovered(event) < 2 {
+		observed := Testing_WithContractDeadlineOwnerTurnObservation(ctx, func(members []server.Id, event server.PgOwnershipEvent) {
+			if len(forceCloseOwnerTurnCovered(members, contractIds)) < 2 {
 				return
 			}
 			first := false

@@ -267,6 +267,12 @@ func removeExpiredLagGuest(ctx context.Context, networkId server.Id, now time.Ti
 				kept = true
 				return
 			}
+			// a gamma payment that can still land, or landed and is not yet
+			// credited: a later sweep decides, once it is credited (kept) or
+			// not taken
+			if gammaChargeInFlightInTx(tx, ctx, networkId) {
+				return
+			}
 
 			clientIds := []server.Id{}
 			rows, err = tx.Query(
@@ -292,6 +298,7 @@ func removeExpiredLagGuest(ctx context.Context, networkId server.Id, now time.Ti
 
 			// as RemoveNetworkWithStoreSnapshot deletes an account. A lag guest
 			// has no sign-in method, so there are no auth rows to delete.
+			endGammaAutomaticChargesInTx(tx, ctx, networkId, now.UTC())
 			server.RaisePgResult(tx.Exec(
 				ctx,
 				`DELETE FROM network_user WHERE user_id = $1`,

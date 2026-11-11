@@ -273,9 +273,10 @@ func TestAppleGraceHoldEndsOnRefund(t *testing.T) {
 }
 
 // The charge goes through in the grace period: the recovered period is credited
-// as usual, with its bytes and revenue.
+// as usual, with its revenue, and starts a cycle with its full Pro grant.
 func TestAppleGraceRecoveryCreditsTheNextPeriod(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		setProCycleTestData(t, 10*model.Tib)
 		fixture := newAppleGraceFixture(t, "applegracerecovers")
 		fixture.process(t, fixture.graceNotification(t, fixture.graceExpires))
 
@@ -298,8 +299,8 @@ func TestAppleGraceRecoveryCreditsTheNextPeriod(t *testing.T) {
 		for _, row := range fixture.proRows() {
 			credited += row.startByteCount
 		}
-		if credited != int64(RefreshSupporterTransferBalance) {
-			t.Fatalf("credited %d bytes, want one period's %d", credited, RefreshSupporterTransferBalance)
+		if credited != int64(10*model.Tib) {
+			t.Fatalf("credited %d bytes, want one cycle's full grant %d", credited, 10*model.Tib)
 		}
 		if !model.IsProNetwork(fixture.ctx, fixture.networkId) {
 			t.Fatal("recovered, but not Pro")

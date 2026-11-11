@@ -1581,9 +1581,11 @@ func x402AlreadyGrantedForTransaction(
 }
 
 // x402GrantProMonth grants Pro for one ROLLING month from the purchase: a
-// subscription renewal (so the monthly Pro grant task keeps renewing the data
-// allowance) plus the Pro balance itself (pro = true), which is what actually
-// confers the entitlement.
+// subscription renewal plus the Pro balance itself (pro = true), which confers the
+// entitlement and holds the month's full data (pro.data). An agent buys data where
+// it pays, so each purchase carries its own month's data: x402 months are not Pro
+// grant cycles (model.GrantProCycleInTx leaves the x402 market out), and a second
+// purchase in the same month gets its data at once.
 //
 // Each purchase gets its own window starting at ITS purchase time, so a second
 // purchase lands a second renewal row (the renewal key includes market and the
@@ -1658,6 +1660,9 @@ func x402GrantProMonthInTx(
 		return false, nil
 	}
 
+	// the paid month, without the manual-payment grace the caller added to
+	// endTime (x402GrantProMonthInConn)
+	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
 	err := model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
 		NetworkId:          networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -1666,11 +1671,13 @@ func x402GrantProMonthInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketX402,
 		TransactionId:      settleResponse.Transaction,
+		PaidEndTime:        &paidEndTime,
 	})
 	if err != nil {
 		return false, err
 	}
 
+	// the month's Pro balance carries its own data, the full amount
 	returnErr = model.AddProTransferBalanceInTx(
 		tx,
 		ctx,

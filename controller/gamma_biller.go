@@ -94,13 +94,36 @@ const (
 	gammaAlarmUndecodableBlock    = "undecodable_block"
 	gammaAlarmStrayTao            = "stray_tao"
 	gammaAlarmServiceChanged      = "service_changed"
+	// a spent charge whose network no longer exists: the customer paid and
+	// nothing can be credited
+	gammaAlarmCreditUnfulfillable = "credit_unfulfillable"
+	// the live batch carries a charge that can no longer be credited: it is
+	// not (re)submitted
+	gammaAlarmBatchUnfulfillable = "batch_unfulfillable"
 )
 
 // The watcher may trail the finalized head by this many blocks and still sell.
 const gammaMaxWatcherLagBlocks = 100
 
-// A credit that failed this many times is held for an operator.
+// A credit that failed this many times is held for an operator: its status
+// says review (credit_failed), and the biller retries only a few of those a
+// run (gammaCreditReviewRetries), so they never crowd out a new credit.
 const gammaMaxCreditFailures = 10
+
+// What the monitor reads (SIGNALS.md §2.22a, gamma-payment-failures): the
+// failures that hold a credit for review, and the alarm kind of a live batch
+// that carries a charge no credit can reach.
+const (
+	GammaMaxCreditFailures           = gammaMaxCreditFailures
+	GammaAlarmKindBatchUnfulfillable = gammaAlarmBatchUnfulfillable
+)
+
+// The credits each run tries, the fewest failures first.
+const gammaCreditsPerRun = 200
+
+// The credits held for review each run retries besides, the least retried
+// first: each is retried in turn, and one whose cause was fixed is credited.
+const gammaCreditReviewRetries = 10
 
 // The renewal is charged this long before the paid term ends.
 const gammaRenewLead = 1 * time.Hour
@@ -738,6 +761,18 @@ func (self *gammaBiller) handleLiveBatch() {
 		model.ReviewGammaSpendBatch(ctx, batch.BatchId, note, self.now)
 		return
 	}
+	// a charge in the batch that can no longer be credited (its account was
+	// deleted another way than account deletion, which waits for the batch, or
+	// its intent was closed by hand): the batch is never sent again. Unless the
+	// pool still has it, its era runs out and it expires, and its other charges
+	// go out in the next batch with their references unchanged.
+	if unfulfillable := model.CountUnpayableGammaChargesInBatch(ctx, batch.BatchId); 0 < unfulfillable {
+		self.alarm("batch_unfulfillable/"+batch.BatchId.String(), gammaAlarmBatchUnfulfillable, nil, fmt.Sprintf(
+			"live batch %s (nonce %d) carries %d charge(s) whose intent is closed or whose network no longer exists: not resubmitted; if it lands from the pool, those spends cannot be credited",
+			batch.BatchId, batch.Nonce, unfulfillable,
+		))
+		return
+	}
 	// within its era: (re)submit the exact bytes. The pool knows them by hash,
 	// and a landed batch cannot land twice: its nonce is used.
 	if err := self.chain.Submit(ctx, batch.Extrinsic); err != nil {
@@ -843,6 +878,10 @@ func (self *gammaBiller) charge() (charged int) {
 		if fingerprint == charge.SkipDeposit || !gammaDepositCanPay(hotkey, settings, pending[charge.Hotkey], charge.Amount) {
 			continue
 		}
+		if intent := model.GetGammaPaymentIntent(ctx, charge.IntentId); intent == nil || gammaPlanCovered(ctx, intent, self.now) {
+			// another Pro subscription pays for these days: not again
+			continue
+		}
 		if model.ReArmGammaCharge(ctx, charge.Reference) {
 			pending[charge.Hotkey] += charge.Amount
 			glog.Infof("[gamma]charge %s re-armed: its deposit changed\n", gammaHex(charge.Reference))
@@ -857,6 +896,11 @@ func (self *gammaBiller) charge() (charged int) {
 			hotkeys[intent.Hotkey] = hotkey
 		}
 		if hotkey == nil || !gammaDepositCanPay(hotkey, settings, pending[intent.Hotkey], intent.AmountGamma()) {
+			continue
+		}
+		if gammaPlanCovered(ctx, intent, self.now) {
+			// another Pro subscription pays for (or still bills) the term this
+			// would buy: never two charges for the same days; it waits
 			continue
 		}
 		if model.CreateGammaCharge(ctx, intent, self.now) {
@@ -961,9 +1005,16 @@ func gammaDepositCanPay(hotkey *model.GammaDepositHotkey, settings *gammaSetting
 
 // ----- credit and notices -----
 
+// credit credits the intents whose charge was spent. A credit that fails is
+// retried every run, the fewest failures first, so a credit that keeps
+// failing (a spend for a network that is gone fails for good) never keeps a
+// new one waiting; past gammaMaxCreditFailures it is held for review and
+// retried only a few a run.
 func (self *gammaBiller) credit() (credited int) {
 	ctx := self.ctx
-	for _, charge := range model.ListSpentUncreditedGammaCharges(ctx, 200) {
+	charges := model.ListSpentUncreditedGammaCharges(ctx, gammaMaxCreditFailures, gammaCreditsPerRun)
+	charges = append(charges, model.ListSpentUncreditedGammaChargesInReview(ctx, gammaMaxCreditFailures, gammaCreditReviewRetries)...)
+	for _, charge := range charges {
 		intent := model.GetGammaPaymentIntent(ctx, charge.IntentId)
 		if intent == nil {
 			continue
@@ -972,6 +1023,19 @@ func (self *gammaBiller) credit() (credited int) {
 		if err != nil {
 			count := model.AddGammaPaymentIntentCreditFailure(ctx, intent.IntentId)
 			glog.Errorf("[gamma]credit of intent %s failed (%d): %s\n", intent.IntentId, count, err)
+			if errors.Is(err, model.ErrPaymentNetworkNotFound) {
+				// account deletion waits for a charge in flight, so only a
+				// network removed another way gets here: the customer paid and
+				// nothing can be credited, and gamma cannot be refunded on chain
+				block := "?"
+				if charge.BlockNumber != nil {
+					block = fmt.Sprintf("%d", *charge.BlockNumber)
+				}
+				self.alarm("credit_unfulfillable/"+intent.IntentId.String(), gammaAlarmCreditUnfulfillable, charge.BlockNumber, fmt.Sprintf(
+					"intent %s (%s %s) spent %s gamma from %s at block %s, reference %s, but its network %s no longer exists: nothing was credited; the payment needs an authorized disposition",
+					intent.IntentId, intent.Purpose, intent.Item, gammaFormatUnits(intent.AmountGamma()), intent.Hotkey, block, gammaHex(intent.Reference), intent.NetworkId,
+				))
+			}
 			continue
 		}
 		if ok {

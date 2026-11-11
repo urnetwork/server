@@ -11421,4 +11421,16 @@ var migrations = []any{
 	// read nor write it. Apply before deploying the api, alt and taskworker
 	// that use it.
 	newSqlMigration(networkOnboardingDistributionSql),
+
+	// The Bitcoin block scanner's kept chain (db_crypto_scan_chain.go,
+	// mmm/BTCPAY.md §16.7): one nullable jsonb column on crypto_scan_cursor, a
+	// catalog change only, under a five-second lock bound. Only the Bitcoin
+	// reader uses it. Apply before deploying the taskworker that scans Bitcoin.
+	cryptoScanChainMigration,
+
+	// Per-cycle Pro grants (db_pro_grant_cycle.go, PRO-GRANT-CYCLE.md): a
+	// nullable column on subscription_renewal and one new empty table, under
+	// a five-second lock bound. Nothing existing is rewritten. Apply before
+	// deploying the api, alt and taskworker that write paid_end_time.
+	proGrantCycleMigration,
 }

@@ -273,9 +273,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook), // todo - deprecate this
 		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
 		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
-		// every Alchemy webhook (ETH Address Activity; Bitcoin's when Alchemy
-		// offers one), routed by its webhook id: a fast path that only brings
-		// the coin's chain read forward (controller/crypto_pay_alchemy.go)
+		// the Alchemy webhook (ETH Address Activity; Bitcoin has none, its
+		// scanner reads every block), routed by its webhook id: a fast path
+		// that only brings ETH's chain read forward
+		// (controller/crypto_pay_alchemy.go)
 		router.NewRoute("POST", "/pay/alchemy", handlers.AlchemyWebhook),
 		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
 		router.NewRoute("POST", "/solana/payment-transaction", handlers.CreateSolanaPaymentTransaction),

@@ -187,6 +187,7 @@ func playTestSubscription(networkId server.Id, productId string, startTime time.
 func TestPlayWebhookCreditsAndAcknowledges(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		setProCycleTestData(t, 10*model.Tib)
 
 		env := newPlayWebhookTestEnv(t, map[string]*Sku{
 			"supporter_monthly": {
@@ -222,12 +223,14 @@ func TestPlayWebhookCreditsAndAcknowledges(t *testing.T) {
 		// the purchase was acknowledged with Google
 		connect.AssertEqual(t, env.acknowledgeCount(purchaseToken), int64(1))
 
-		// the credit landed inline: a pro balance against the purchase token, and
-		// the entitlement is visible immediately
+		// the credit landed inline: a pro balance against the purchase token
+		// (no data), the cycle's full Pro grant, and the entitlement is visible
+		// immediately
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].Pro, true)
-		connect.AssertEqual(t, balances[0].BalanceByteCount, RefreshSupporterTransferBalance)
+		connect.AssertEqual(t, balances[0].BalanceByteCount, model.Pro().DataAmount(true))
+		connect.AssertEqual(t, balances[0].GrantKind, model.GrantKindPro)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 
 		// the renewal row names the google market
