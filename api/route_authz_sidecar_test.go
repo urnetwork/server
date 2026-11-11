@@ -195,6 +195,8 @@ var sidecarAllowlist = []string{
 	"GET /sidecar/identity",
 	// §8.9's (ACL-M2-12)
 	"POST /acl/ack",
+	// §16.6's cancel (MCP-M3-23)
+	"POST /approval/cancel",
 	// §6.8's sync routes (PROTO-M1-10)
 	"GET /sidecar/sync/poll",
 	"GET /sidecar/sync/versions",

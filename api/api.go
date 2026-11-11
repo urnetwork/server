@@ -449,6 +449,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/sidecar/close", handlers.SidecarClose),
 		// §8.9's acks of the projection a client applied (ACL-M2-12)
 		router.NewRoute("POST", "/acl/ack", handlers.AclAck),
+		// §16.6's cancel of a server-gated approval's remaining uses (MCP-M3-23)
+		router.NewRoute("POST", "/approval/cancel", handlers.ApprovalCancel),
 		// §17.16's cross-network share tables, sealed (BRIDGE-M6-02)
 		router.NewRoute("GET", "/network/bridge/share/([^/]+)", handlers.GetNetworkBridgeShare),
 		router.NewRoute("PUT", "/network/bridge/share/([^/]+)", handlers.PutNetworkBridgeShare),

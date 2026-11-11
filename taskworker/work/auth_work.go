@@ -61,9 +61,11 @@ func RemoveExpiredAuthCodes(
 	apiKeyCount := model.RemoveExpiredApiKeys(ctx, now)
 	// admin tokens' uses, an hour past their tokens' exp (§2.8 api-11)
 	adminTokenUseCount := model.RemoveOldAdminTokenUses(ctx, now.Add(-model.DefaultAdminTokenUseSettings().Retention))
-	if 0 < attemptCount+createAttemptCount+resetCount+deviceAddCount+nameReclaimCount+authKeyCount+apiKeyCount+adminTokenUseCount {
+	// server-gated approvals' uses, a day past their decisions' not_after (§2.8 api-10)
+	approvalUseCount := removeExpiredApprovalUses(ctx, now)
+	if 0 < attemptCount+createAttemptCount+resetCount+deviceAddCount+nameReclaimCount+authKeyCount+apiKeyCount+adminTokenUseCount+approvalUseCount {
 		glog.Infof(
-			"[authw]removed %d account action attempts, %d network create attempts, %d reset codes, %d device adds, %d name cool-downs, %d auth keys, %d api keys, %d admin token uses\n",
+			"[authw]removed %d account action attempts, %d network create attempts, %d reset codes, %d device adds, %d name cool-downs, %d auth keys, %d api keys, %d admin token uses, %d approval uses\n",
 			attemptCount,
 			createAttemptCount,
 			resetCount,
@@ -72,6 +74,7 @@ func RemoveExpiredAuthCodes(
 			authKeyCount,
 			apiKeyCount,
 			adminTokenUseCount,
+			approvalUseCount,
 		)
 	}
 	return &RemoveExpiredAuthCodesResult{}, nil

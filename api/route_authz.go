@@ -343,6 +343,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /sidecar/wake":                            routeAccessClient,   // another admitted device of the bearer's member, by the controller (§6.16)
 	"POST /sidecar/close":                           routeAccessPublic,   // an ephemeral client's close capability, its own credential (§18.8)
 	"POST /acl/ack":                                 routeAccessClient,   // the bearer's own client's applied projection version (§8.9)
+	"POST /approval/cancel":                         routeAccessClient,   // an approver's signed cancel of its own decision's uses (§16.6)
 	"GET /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar of either network of the share (§17.16)
 	"PUT /network/bridge/share/([^/]+)":             routeAccessClient,   // a sidecar's own network's sealed table (§17.16)
 	"POST /network/config/delta":                    routeAccessClient,   // a signed statement, verified at the tip (§7.9)
@@ -441,6 +442,8 @@ var strictExpRoutes = map[string]bool{
 	"POST /network/enroll": true,
 	// §8.9's ack (ACL-M2-12)
 	"POST /acl/ack": true,
+	// §16.6's cancel (MCP-M3-23)
+	"POST /approval/cancel": true,
 	// §17.16's share tables (BRIDGE-M6-02)
 	"GET /network/bridge/share/([^/]+)": true,
 	"PUT /network/bridge/share/([^/]+)": true,

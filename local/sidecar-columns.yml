@@ -331,6 +331,17 @@ tables:
       reporter: smtp-5
       spf_pass_count: smtp-5
       success_count: smtp-5
+  approval_use:
+    group: MG5
+    columns:
+      approval_id: api-10 approval id
+      create_time: api-10 time
+      effect_key: api-10 effect key
+      network_id: api-10
+      not_after: api-10 expiry
+      result: api-10 result
+      state: api-10 state
+      use_index: api-10 index
   abuse_case:
     group: MG5
     columns:

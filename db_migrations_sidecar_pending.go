@@ -911,9 +911,38 @@ func sidecarMg5SmtpMigrations() []any {
 	}
 }
 
-// MG5's §16 part: approval_use, §12.8's DNS gate (MCP's tasks).
+// MG5's §16 part: approval_use, §12.8's DNS gate (MCP-M3-23), built dark at M3
+// and registered with MG5 at M5's Gn-out (plan-MCP-fs25-gate-before-dns). Every
+// column is one of §2.8 api-10's: per use of a server-gated approval, its index,
+// the effect key the request named (its Idempotency-Key, a hash), its state,
+// done or cancelled, the effect's result, its time, and the decision's expiry
+// the gate checked, the earliest under k approvers (QD-100). A cancelled row has
+// no effect key (QD-503), and UNIQUE treats NULLs as distinct, so many fit.
+// state is varchar, never ENUM. Nothing reads it unless the binary links MG5
+// (server.SidecarMg5Linked).
 func sidecarMg5ApprovalMigrations() []any {
-	return []any{}
+	return []any{
+		newSqlMigration(`
+			CREATE TABLE approval_use (
+				network_id uuid NOT NULL,
+				approval_id uuid NOT NULL,
+				use_index integer NOT NULL,
+				effect_key bytea NULL,
+				state varchar(16) NOT NULL,
+				result bytea NULL,
+				create_time timestamp NOT NULL,
+				not_after timestamp NOT NULL,
+
+				PRIMARY KEY (approval_id, use_index),
+				UNIQUE (approval_id, effect_key),
+				CHECK (state = 'cancelled' OR effect_key IS NOT NULL)
+			)
+		`),
+		// the hourly sweep's cursor: rows a day past their decision's not_after
+		newSqlMigration(`
+			CREATE INDEX approval_use_not_after ON approval_use (not_after)
+		`),
+	}
 }
 
 // MG5's §21 part: the seven abuse tables (ABUSE-M5-03), all of §2.8 api-14 and
