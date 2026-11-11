@@ -51,6 +51,11 @@ type cryptoCoinFlow struct {
 	// called at the start of each attempt: the chain clock and the recorded
 	// chain's times
 	start func(t testing.TB)
+	// a coin whose reader scans blocks (Bitcoin): it watches no address list
+	blockScanner bool
+	// called before the scan that credits: a block scanner's chain moves on
+	// to the block that holds the payment, mined after the invoice was made
+	beforeCredit func(t testing.TB)
 }
 
 // cryptoCoinFlowConfig is the coin alone, on, with the contract's numbers and
@@ -185,14 +190,22 @@ func runCryptoCoinFlow(t *testing.T, flow *cryptoCoinFlow) {
 		}
 		connect.AssertEqual(t, result.Status.Status, CryptoPaymentStatusPending)
 
-		// the scan reads the invoice's address on the chain: the recorded
-		// payment is final, screened clean and credited
+		// the scan reads the invoice's address on the chain (a block scanner:
+		// the next block, which holds the payment): the recorded payment is
+		// screened clean and credited
+		if flow.beforeCredit != nil {
+			flow.beforeCredit(t)
+		}
 		scan, err = RunCryptoPaymentScan(taskSession, flow.asset)
 		connect.AssertEqual(t, err, nil)
 		if scan.Error != "" {
 			t.Fatalf("%s scan: %s", flow.asset, scan.Error)
 		}
-		connect.AssertEqual(t, scan.Watched, 1)
+		if flow.blockScanner {
+			connect.AssertEqual(t, scan.Watched, 0)
+		} else {
+			connect.AssertEqual(t, scan.Watched, 1)
+		}
 		connect.AssertEqual(t, scan.Credited, 1)
 
 		status, err := CryptoPaymentStatus(&CryptoPaymentStatusArgs{IntentId: result.IntentId, StatusToken: result.StatusToken}, clientSession)
@@ -224,27 +237,36 @@ func runCryptoCoinFlow(t *testing.T, flow *cryptoCoinFlow) {
 	})
 }
 
-// Bitcoin: the recorded payment of 17,657,843 sats to
-// bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u (block 860860), read from the
-// address history of Alchemy's UTXO API.
+// Bitcoin: the recorded payment of 140,682 sats to
+// bc1qxpjhlx9w22nccplvvtpxs5hlv768c92409cvew in block 975401, found by the
+// block scanner reading the block through Alchemy's JSON-RPC (getblock at
+// verbosity 2), its sender read from the transaction's prevout
+// (getrawtransaction at verbosity 2). The first scan reads up to 975400,
+// before the invoice; 975401 is mined after it.
 func TestCryptoCoinFlowBitcoin(t *testing.T) {
+	var node *cryptoTestBitcoinNode
 	var endpoint string
 	runCryptoCoinFlow(t, &cryptoCoinFlow{
-		asset:      model.CryptoAssetBtc,
-		code:       "BTC",
-		network:    "bitcoin",
-		address:    "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u",
-		rate:       73596.9,
-		paidAtomic: 17_657_843,
-		market:     model.SubscriptionMarketBitcoin,
+		asset:        model.CryptoAssetBtc,
+		code:         "BTC",
+		network:      "bitcoin",
+		address:      cryptoTestBtcP2wpkhSingle,
+		rate:         1_000_000,
+		paidAtomic:   140_682,
+		market:       model.SubscriptionMarketBitcoin,
+		blockScanner: true,
 		settings: func() *cryptoWalletSettings {
 			return &cryptoWalletSettings{Asset: model.CryptoAssetBtc, ChainRpcUrl: endpoint}
 		},
 		start: func(t testing.TB) {
-			testServer := cryptoTestBitcoinServer(t, false)
-			endpoint = testServer.URL + "/v2/synthetic-key"
-			// the recorded tip's time
-			cryptoTestChainClock(t, time.Unix(1794350912, 0).Add(10*time.Minute))
+			node = newCryptoTestBitcoinNode(t, 975400)
+			// the recorded blocks read as mined in the last minutes: 975401
+			// a minute ago
+			node.shift = time.Now().Unix() - 1794380897 - 60
+			endpoint = node.serve()
+		},
+		beforeCredit: func(t testing.TB) {
+			node.setTip(975401)
 		},
 	})
 }
