@@ -163,6 +163,8 @@ func StSyncChain(
 	// boundary. It cannot stop the steps below.
 	scheduleStLedgerV2UsageSteps(clientSession, deploymentKey, state)
 	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
+	// Capture the flag's own chains, off unless st.yml turns them on.
+	scheduleStCtfSteps(clientSession, deploymentKey, state)
 	scheduleStV1Sweep(clientSession, deploymentKey)
 
 	return &StSyncChainResult{}, nil
