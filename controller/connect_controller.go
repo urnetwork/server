@@ -18,6 +18,8 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/sidecar"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/session"
@@ -874,9 +876,12 @@ func CreateContract(
 		return []*protocol.Frame{frame}, nil
 	}
 	// §8.10's gate, where this process installed one and sidecar.yml turns it
-	// on: its facts ride the relationship's one query
+	// on. Its facts ride the relationship's one query, read whether or not a
+	// gate is on, since C13 seals the subject they carry into every contract
+	// (D-PROTO-19): where MG0, MG1 and MG2 are linked the query grows by its
+	// columns, and elsewhere it is today's.
 	aclGate, aclGateConfig := activeAclContractGate()
-	relationshipDetails := getProvideRelationshipDetailsFor(ctx, clientId, destinationId, aclGate != nil)
+	relationshipDetails := getProvideRelationshipDetailsFor(ctx, clientId, destinationId, true)
 	resolution := contractResolution{
 		path:                 contractResolutionRelationship,
 		relationship:         relationshipDetails.Mode,
@@ -1187,6 +1192,8 @@ func CreateContract(
 			storedContract.Principal = identity.Principal
 		}
 	}
+	// C13's seals, in every provide mode, from what this request already read
+	contractSealsFor(clientId, destinationId, &relationshipDetails, createContract, companion, aclClass).seal(storedContract)
 	storedContractBytes, _ := proto.Marshal(storedContract)
 
 	storedContractHmac := connect.SignStoredContract(contractManagerSettings, provideSecretKey, storedContractBytes)
@@ -1219,6 +1226,78 @@ func CreateContract(
 	// server.Logger().Printf("CONTROL CREATE CONTRACT SENT\n")
 	timingResult = server.ContractCreationReply
 	return []*protocol.Frame{frame}, nil
+}
+
+// C13's seals for one contract (D-PROTO-19, §6.10.1 item 4, D-ACL-3): the subject the platform stored for the
+// source client, the source's network, the contract class and the source window client's WindowDelegation. A value.
+//
+// Every seal but the delegation comes from the platform's own records, the relationship's one query, never from a
+// request field, since a client-asserted subject is forgeable; the delegation is the customer-signed statement the
+// window client passed, copied unchanged, which the receiving host verifies itself (§17.9's verify row). A reply,
+// which is a companion request, a Stream fallback settled as a companion of the reverse origin, or a same-network
+// companion normalized to Network, carries the seals of the forward contract it answers: that contract's source is
+// this request's destination, so the subject and network are the destination's. The forward contract's delegation is
+// held nowhere the signer can read it, and a companion request carries none (BRIDGE-M4-04), so a reply seals no
+// delegation: a host admits a native flow only from a delegation whose window_client_id is the contract's own
+// source, which an inherited copy never names on a reply either, so the empty seal changes no host's verdict.
+// Contracts with the control id are left as they are.
+type contractSeals struct {
+	// nil when the platform does not know the subject: no subject row, or MG2 not linked
+	sourceSubjectClientId *server.Id
+	// nil for a client the server does not have
+	sourceNetworkId  *server.Id
+	contractClass    protocol.ContractClass
+	windowDelegation []byte
+}
+
+// The seals for a contract from clientId to destinationId, settled with companion and classed aclClass by §8.10's
+// gate (data while no gate runs), from details, which the request already read. Reads nothing.
+func contractSealsFor(
+	clientId server.Id,
+	destinationId server.Id,
+	details *model.ProvideRelationshipDetails,
+	createContract *protocol.CreateContract,
+	companion bool,
+	aclClass sidecar.AclContractClass,
+) contractSeals {
+	if clientId == ControlId || destinationId == ControlId {
+		return contractSeals{}
+	}
+	seals := contractSeals{}
+	switch aclClass {
+	case sidecar.AclContractClassData:
+		seals.contractClass = protocol.ContractClass_ContractClassData
+	case sidecar.AclContractClassControl:
+		seals.contractClass = protocol.ContractClass_ContractClassControl
+	}
+	if createContract.Companion || companion {
+		// the forward contract's source is this request's destination
+		seals.sourceNetworkId = details.DestinationNetworkId
+		if details.DestinationAcl != nil {
+			seals.sourceSubjectClientId = details.DestinationAcl.SubjectClientId
+		}
+		return seals
+	}
+	seals.sourceNetworkId = details.SourceNetworkId
+	if details.SourceAcl != nil {
+		seals.sourceSubjectClientId = details.SourceAcl.SubjectClientId
+	}
+	if 0 < len(createContract.WindowDelegation) {
+		seals.windowDelegation = createContract.WindowDelegation
+	}
+	return seals
+}
+
+// Writes the seals into storedContract, inside the bytes the platform signs.
+func (self contractSeals) seal(storedContract *protocol.StoredContract) {
+	if self.sourceSubjectClientId != nil {
+		storedContract.SourceSubjectClientId = self.sourceSubjectClientId.Bytes()
+	}
+	if self.sourceNetworkId != nil {
+		storedContract.SourceNetworkId = self.sourceNetworkId.Bytes()
+	}
+	storedContract.ContractClass = self.contractClass
+	storedContract.WindowDelegation = self.windowDelegation
 }
 
 // Carries the committed creation result through to signing without another read.

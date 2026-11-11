@@ -3,10 +3,11 @@ package controller
 // §8.10's contract gate in CreateContract (ACL-M4-01; D-ACL-4, D-ACL-5, D-PROTO-18, R-ACL-8, I-10, I-12). A process
 // that hosts §8.9's gate cache installs one sidecar.AclContractGate over it (SetAclContractGate), and CreateContract
 // consults it while sidecar.yml's acl_contract_gate switch is on; with no gate, or the switch off, every network takes
-// today's path and the relationship's query is today's.
+// today's path.
 //
-// With a gate, the relationship's one query also reads each end's facts (model.GetProvideRelationshipDetailsWithAcl),
-// so the gate adds no query, and decideContractAcl turns them into the gate's request with no I/O: the gate answers
+// The relationship's one query reads each end's facts (model.GetProvideRelationshipDetailsWithAcl) whether or not a
+// gate is on, since C13 seals the subject among them (PROTO-M4-02), so the gate adds no query, and decideContractAcl
+// turns them into the gate's request with no I/O: the gate answers
 // from its heads snapshot and the cache's state alone, under DenyPostgresForTest and with no Redis call. Only a reply,
 // a non-companion that b's reach to a alone allows, reads Postgres again: CreateContract then waits for b's origin
 // contract to a with the companion path's bounded wait, and only with a head row and only when reach(a,b) failed

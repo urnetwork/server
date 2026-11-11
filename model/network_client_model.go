@@ -2858,6 +2858,11 @@ type ProvideRelationshipDetails struct {
 	DestinationLifecycle NetworkClientLifecycle
 	SourceOwner          NetworkClientSourceOwner
 	DestinationOwner     NetworkClientSourceOwner
+	// Each end's network, read on every leg in the same query, nil for a client
+	// the server does not have: what C13 seals as source_network_id (D-PROTO-19),
+	// and how §6.10.1's Service rule finds an urnetwork-edge end.
+	SourceNetworkId      *server.Id
+	DestinationNetworkId *server.Id
 	// Each end's sidecar mark, and whether the source declares no egress
 	// (network_client_owner, §7.4 and DESIGN.md 20.8), read where MG0 is linked
 	// and false elsewhere. CreateContract refuses a declared source a Public
@@ -3163,6 +3168,8 @@ func getProvideRelationshipDetails(ctx context.Context, clientIdA server.Id, cli
 					details.SourceAcl = aclA.end(networkIdA)
 					details.DestinationAcl = aclB.end(networkIdB)
 				}
+				details.SourceNetworkId = networkIdA
+				details.DestinationNetworkId = networkIdB
 				details.SourceLifecycle = networkClientLifecycle(activeA, sourceClientIdA)
 				details.DestinationLifecycle = networkClientLifecycle(activeB, sourceClientIdB)
 				if networkIdA != nil && (proberNetworkId != nil || shardA) {
