@@ -1,6 +1,18 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T20:57:55Z",
+  "observed_at": "2026-11-11T21:11:50Z",
+  "latest_epoch2_launch_followup": {
+    "evidence": "EPOCH2-OWNER-LAUNCH-FOLLOWUP-2026-11-11.json",
+    "api_ready": true,
+    "sille_candidate_phase": "building",
+    "goofe_candidate_execution_started": false,
+    "goofe_docker_owner_failed": true,
+    "goofe_independent_cleanup_pending": true,
+    "cache_timers_enabled": false,
+    "persistent_cache_companion_fix_in_progress": true,
+    "queued_observed_at_211109": 12,
+    "next_action": "Qualify a persistent bounded cache service without transient management cgroup churn. Diagnose and positively prove Goofe prelaunch cleanup; do not restart its attempted owner, infer cleanup from a missing evaluator unit, or refresh its original deadline. Monitor Sille's active build and actual memory reserve. Earlier entries below retain their observation times and are historical."
+  },
   "latest_epoch2_runtime_recovery": {
     "evidence": "EPOCH2-RUNTIME-RECOVERY-2026-11-11.json",
     "api_ready": true,
