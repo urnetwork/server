@@ -136,3 +136,11 @@ func (self *quotaLeaseSet) forgetOldBalanceReadsWithLock(now time.Time) {
 		}
 	}
 }
+
+// Forgets the network's held reading, so the next reservation reads its source: a test's lever for
+// balances it changed by hand.
+func (self *quotaLeaseSet) forgetBalanceRead(networkId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	delete(self.balanceReads, networkId)
+}
