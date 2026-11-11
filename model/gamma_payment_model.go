@@ -1503,23 +1503,35 @@ func MarkGammaChargeNoticeSentInTx(tx server.PgTx, ctx context.Context, referenc
 }
 
 // ListSpentUncreditedGammaCharges are spent charges whose intent is not yet
-// credited (nor voided), oldest first.
-func ListSpentUncreditedGammaCharges(ctx context.Context, limit int) (charges []*GammaCharge) {
+// credited (nor voided) and whose credit failed fewer than maxFailures times,
+// the fewest failures first, then the oldest: a new credit never waits behind
+// credits that keep failing.
+func ListSpentUncreditedGammaCharges(ctx context.Context, maxFailures int, limit int) []*GammaCharge {
+	return listSpentUncreditedGammaCharges(ctx, `gamma_payment_intent.credit_failure_count < $1`, maxFailures, limit)
+}
+
+// ListSpentUncreditedGammaChargesInReview are spent charges whose intent is
+// not yet credited (nor voided) and whose credit failed maxFailures times or
+// more: held for an operator, and retried a few a run, the least retried
+// first, so each is retried in turn and none crowds out a new credit.
+func ListSpentUncreditedGammaChargesInReview(ctx context.Context, maxFailures int, limit int) []*GammaCharge {
+	return listSpentUncreditedGammaCharges(ctx, `$1 <= gamma_payment_intent.credit_failure_count`, maxFailures, limit)
+}
+
+func listSpentUncreditedGammaCharges(ctx context.Context, failures string, maxFailures int, limit int) (charges []*GammaCharge) {
 	server.Db(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
-			`SELECT gamma_charge.reference, gamma_charge.intent_id, gamma_charge.hotkey,
-			       gamma_charge.amount, gamma_charge.state, gamma_charge.batch_id,
-			       gamma_charge.attempts, gamma_charge.create_time, gamma_charge.resolved_at,
-			       gamma_charge.block_number, gamma_charge.block_hash, gamma_charge.event_index,
-			       gamma_charge.skip_reason, gamma_charge.skip_deposit, gamma_charge.notice_sent_at
+			`SELECT `+gammaChargeColumnsQualified+`
 			FROM gamma_charge
 			INNER JOIN gamma_payment_intent ON gamma_payment_intent.intent_id = gamma_charge.intent_id
 			WHERE gamma_charge.state = 'spent'
 			  AND gamma_payment_intent.credited_at IS NULL
 			  AND gamma_payment_intent.voided_at IS NULL
-			ORDER BY gamma_charge.create_time
-			LIMIT $1`,
+			  AND `+failures+`
+			ORDER BY gamma_payment_intent.credit_failure_count, gamma_charge.create_time
+			LIMIT $2`,
+			maxFailures,
 			limit,
 		)
 		server.WithPgResult(result, err, func() {
