@@ -77,6 +77,11 @@ const (
 	ProvideModeFriendsAndFamily ProvideMode = 2
 	ProvideModePublic           ProvideMode = 3
 	ProvideModeStream           ProvideMode = 4
+	// C9's Service (protocol.ProvideMode_Service): an urnetwork-edge platform
+	// client and a sidecar, only for a pair a Find recorded, subprotocol only,
+	// with no escrow or payout (§6.10.1, sidecar_service_contract.go). 5 is
+	// connect's PublicStream, which nothing here mints.
+	ProvideModeService ProvideMode = 6
 )
 
 // client_ids are globally unique addressess tantamount to IPv6

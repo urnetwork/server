@@ -109,7 +109,7 @@ var contractRejectionCauses = []string{
 	"insufficient_balance", "missing_companion_origin", "client_not_found",
 	"source_inactive", "canceled", "deadline", "reservation_window_expired",
 	"reservation_released", "declared_no_egress", "acl_no_permission",
-	"acl_unavailable", "other",
+	"acl_unavailable", "service_no_pair", "service_unavailable", "network_mode_refused", "other",
 }
 
 var contractRejectionCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -662,6 +662,8 @@ const (
 	contractResolutionNetworkNormalized  = "network_normalized"
 	contractResolutionRelationship       = "relationship"
 	contractResolutionRejected           = "rejected"
+	// §6.10.1's Service rule settled it, either direction
+	contractResolutionService = "service"
 )
 
 func contractResolutionLabel(path string) string {
@@ -670,7 +672,8 @@ func contractResolutionLabel(path string) string {
 		contractResolutionStreamFallback,
 		contractResolutionNetworkNormalized,
 		contractResolutionRelationship,
-		contractResolutionRejected:
+		contractResolutionRejected,
+		contractResolutionService:
 		return path
 	default:
 		return "unknown"
@@ -952,7 +955,35 @@ func CreateContract(
 	}
 	aclClass := aclVerdict.Class
 
-	if companion {
+	// §6.10.1's Service rule (C9, D-PROTO-9, D-PROTO-15): a contract with an
+	// urnetwork-edge end is Service, for a pair a Find recorded, or nothing,
+	// in either direction and on either Companion bit, since an edge's replies
+	// settle as Service as same-network replies settle as Network. The
+	// destination must advertise Service: without its key the secret read
+	// below refuses. A refusal is never the route's: a Find can record the
+	// pair at any moment.
+	service := decideServiceContract(ctx, clientId, destinationId, &relationshipDetails, server.CurrentSidecarConfig(), server.NowUtc())
+	switch service.outcome {
+	case contractServiceRefuse:
+		rejectionCause = service.cause
+		resolution.path = contractResolutionRejected
+		glog.V(2).Infof("[contract][reject]%s->%s no-permission (service %s, companion=%t)\n", clientId, destinationId, service.cause, createContract.Companion)
+		contractError := protocol.ContractError_NoPermission
+		frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+		if err != nil {
+			return nil, err
+		}
+		timingResult = server.ContractCreationRejected
+		return []*protocol.Frame{frame}, nil
+	case contractServiceIssue:
+		provideMode = model.ProvideModeService
+		companion = false
+		resolution.path = contractResolutionService
+	}
+
+	if service.outcome == contractServiceIssue {
+		// settled above
+	} else if companion {
 		resolution.path = contractResolutionRequestedCompanion
 		// companion contracts use `ProvideModeStream`
 		provideMode = model.ProvideModeStream
@@ -998,6 +1029,22 @@ func CreateContract(
 			ctx = withCompanionOriginSingleLookup(ctx)
 			glog.V(2).Infof("[contract][companion-fallback]%s->%s relationship=%d not provided; using companion Stream\n", clientId, destinationId, provideRelationship)
 		}
+	}
+
+	// D-PROTO-9: Network grants LAN and loopback egress, so it is minted only
+	// for two clients the query found in one network, neither in urnetwork-edge,
+	// whatever the mode selection above returned
+	if provideMode == model.ProvideModeNetwork && !contractNetworkModeAllowed(clientId, destinationId, &relationshipDetails, server.CurrentSidecarConfig()) {
+		rejectionCause = "network_mode_refused"
+		resolution.path = contractResolutionRejected
+		glog.V(2).Infof("[contract][reject]%s->%s no-permission (network mode across networks or with an edge)\n", clientId, destinationId)
+		contractError := protocol.ContractError_NoPermission
+		frame, err := connect.ToFrame(&protocol.CreateContractResult{Error: &contractError}, connect.DefaultProtocolVersion)
+		if err != nil {
+			return nil, err
+		}
+		timingResult = server.ContractCreationRejected
+		return []*protocol.Frame{frame}, nil
 	}
 
 	// DESIGN.md 20.8 (plan-QUOTA-small-readings #14): a sidecar that declares no
@@ -1121,6 +1168,10 @@ func CreateContract(
 	// one network is relayed bytes, reserved from that network's balances
 	if relationshipDetails.SourceStrictExp && relationshipDetails.DestinationStrictExp {
 		nextCtx = context.WithValue(nextCtx, contractRelayedPairKey{}, true)
+	}
+	// a Service contract ends with its pair's grant, within the hour
+	if service.outcome == contractServiceIssue {
+		nextCtx = model.WithContractDeadline(nextCtx, service.deadline)
 	}
 	contractId, transferByteCount, priority, streamId, expirationTime, err := nextContract(nextCtx, clientId, createContract, companion, provideMode, contractManagerSettings)
 	// server.Logger().Printf("CONTROL CREATE CONTRACT TRANSFER BYTE COUNT %d %d %d\n", model.ByteCount(createContract.TransferByteCount), transferByteCount, uint64(transferByteCount))
@@ -1288,6 +1339,102 @@ func contractSealsFor(
 	return seals
 }
 
+// What §6.10.1's Service rule decided for one CreateContract.
+type contractServiceOutcome int
+
+const (
+	// neither end is in urnetwork-edge, or sidecar.yml names no urnetwork-edge: the rule does not apply
+	contractServiceNone contractServiceOutcome = iota
+	// Service, ending at the decision's deadline
+	contractServiceIssue
+	// an urnetwork-edge end with no live pair, or one that could not be read: no contract in any mode
+	contractServiceRefuse
+)
+
+// One request's Service verdict. A value.
+type contractServiceDecision struct {
+	outcome contractServiceOutcome
+	// the earlier of the pair's grant expiry and the contract's hour, for an issue
+	deadline time.Time
+	// a refusal's bounded rejection cause (contractRejectionCauses)
+	cause string
+}
+
+// The pair's one Redis read, and the bound on it: tests replace the read to count it, and the settings to bound it.
+var getSocketServicePair = model.GetSocketServicePair
+var serviceContractSettings = model.DefaultServiceContractSettings()
+
+// §6.10.1 items 1-3 for a contract from clientId to destinationId (C9, D-PROTO-9, D-PROTO-15, I-12): when exactly one
+// end is a platform client of config's urnetwork-edge network, the contract is Service only while field
+// <edge client> of {svc_<other client>} lives, the pair an edge's Find records with its grant expiry, read once,
+// whichever end sends, so both directions read the same field. A missing, expired, malformed or unavailable pair
+// refuses (connect/CODESTYLE.md, packet flow), and so do two edge ends, which no Find pairs. An edge end means
+// Service or nothing: never Network, which grants LAN and loopback egress, and never Public, since edges run
+// relay-only toward sidecars (D-PROTO-6). The ends' networks come from the relationship's one query, so the decision
+// adds no PostgreSQL query and one Redis read; the control id's contracts are left as they are.
+//
+// The pair is keyed by the end that is not the edge, as tls/ and smtp/ Finds write it, an edge dialing a sidecar's
+// listener. A ur/ Find (SOCK-M9-01) has an edge listen and a sidecar dial, which keys {svc_<edge>}: no contract this
+// reads it for issues, so a ur/ stream is refused until question proto-m5-04-ur-pair-key is answered.
+func decideServiceContract(
+	ctx context.Context,
+	clientId server.Id,
+	destinationId server.Id,
+	details *model.ProvideRelationshipDetails,
+	config *server.SidecarConfig,
+	now time.Time,
+) contractServiceDecision {
+	if clientId == ControlId || destinationId == ControlId {
+		return contractServiceDecision{outcome: contractServiceNone}
+	}
+	edgeNetworkId, ok := config.UrnetworkEdge()
+	if !ok {
+		return contractServiceDecision{outcome: contractServiceNone}
+	}
+	sourceEdge := details.SourceNetworkId != nil && *details.SourceNetworkId == edgeNetworkId
+	destinationEdge := details.DestinationNetworkId != nil && *details.DestinationNetworkId == edgeNetworkId
+	var listenerId, dialerId server.Id
+	switch {
+	case sourceEdge && destinationEdge:
+		return contractServiceDecision{outcome: contractServiceRefuse, cause: "service_no_pair"}
+	case sourceEdge:
+		listenerId, dialerId = destinationId, clientId
+	case destinationEdge:
+		listenerId, dialerId = clientId, destinationId
+	default:
+		return contractServiceDecision{outcome: contractServiceNone}
+	}
+	pairCtx, cancel := context.WithTimeout(ctx, serviceContractSettings.PairReadTimeout)
+	defer cancel()
+	grantExpireMillis, found, err := getSocketServicePair(pairCtx, connect.Id(listenerId), connect.Id(dialerId))
+	switch {
+	case err != nil:
+		return contractServiceDecision{outcome: contractServiceRefuse, cause: "service_unavailable"}
+	case !found:
+		return contractServiceDecision{outcome: contractServiceRefuse, cause: "service_no_pair"}
+	}
+	deadline, live := model.ServiceContractDeadline(now, grantExpireMillis)
+	if !live {
+		return contractServiceDecision{outcome: contractServiceRefuse, cause: "service_no_pair"}
+	}
+	return contractServiceDecision{outcome: contractServiceIssue, deadline: deadline}
+}
+
+// Whether a contract from clientId to destinationId may be Network (D-PROTO-9): the control id's and a client's own,
+// or two clients the relationship's query found in one network that is not urnetwork-edge.
+func contractNetworkModeAllowed(clientId server.Id, destinationId server.Id, details *model.ProvideRelationshipDetails, config *server.SidecarConfig) bool {
+	if clientId == ControlId || destinationId == ControlId || clientId == destinationId {
+		return true
+	}
+	if details.SourceNetworkId == nil || details.DestinationNetworkId == nil || *details.SourceNetworkId != *details.DestinationNetworkId {
+		return false
+	}
+	if edgeNetworkId, ok := config.UrnetworkEdge(); ok && *details.SourceNetworkId == edgeNetworkId {
+		return false
+	}
+	return true
+}
+
 // Writes the seals into storedContract, inside the bytes the platform signs.
 func (self contractSeals) seal(storedContract *protocol.StoredContract) {
 	if self.sourceSubjectClientId != nil {
@@ -1436,7 +1583,9 @@ func newContract(
 		MaxContractTransferByteCount,
 	) * model.ByteCount(len(intermediaryIds)+1)
 
-	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily {
+	// Service has no escrow or payout either: §20's leases bill its bytes
+	// (§6.10.1 item 1)
+	if provideMode == model.ProvideModeNetwork || provideMode == model.ProvideModeFriendsAndFamily || provideMode == model.ProvideModeService {
 		// the insert writes the stream the contract joins below
 		// (model/contract_stream_binding.go)
 		if streamVersion != 0 {

@@ -2903,6 +2903,13 @@ func createContractNoEscrowInTx(
 		return server.Id{}, time.Time{}, err
 	}
 
+	// the hour, or less for a Service contract whose pair's grant ends sooner,
+	// which the insert also caps at that deadline exactly, whatever the two
+	// clocks' skew (sidecar_service_contract.go); NULL caps nothing
+	expiration, deadline, err := contractExpirationFor(ctx, server.NowUtc())
+	if err != nil {
+		return server.Id{}, time.Time{}, err
+	}
 	contractId = server.NewId()
 	streamId := bindContractStreamAtInsert(ctx, contractId)
 	server.Raise(tx.QueryRow(
@@ -2925,7 +2932,7 @@ func createContractNoEscrowInTx(
                 )
 	            SELECT
 	                $1, $2, $3, $4, $5, $6, $7,
-	                create_time, date_trunc('milliseconds', create_time) + $8 * INTERVAL '1 millisecond',
+	                create_time, LEAST(date_trunc('milliseconds', create_time) + $8 * INTERVAL '1 millisecond', $10::timestamp),
 	                $9
 	            FROM creation_clock
 	            RETURNING expiration_time
@@ -2937,8 +2944,9 @@ func createContractNoEscrowInTx(
 		destinationId,
 		contractTransferByteCount,
 		usageOriginIsSource,
-		DefaultContractExpiration.Milliseconds(),
+		expiration.Milliseconds(),
 		streamId,
+		deadline,
 	).Scan(&expirationTime))
 	server.RaisePgResult(tx.Exec(
 		ctx,
