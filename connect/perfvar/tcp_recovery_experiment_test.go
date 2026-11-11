@@ -769,7 +769,7 @@ func TestTCPRecoveryExperimentLowEdgeProfileCannotSilentlyMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 	profile := scenario.Profile
-	if profile.Seed != 20260810 || profile.InnerMtu != 1200 || profile.Forward.OuterMtu != 1280 ||
+	if profile.Seed != 20260810 || profile.InnerMtu != clientconnect.DefaultMtu || profile.Forward.OuterMtu != 1280 ||
 		profile.Forward.RateBitsPerSecond != 64_000 || profile.Reverse.RateBitsPerSecond != 256_000 ||
 		profile.Forward.BaseDelay != 400*time.Millisecond || profile.Reverse.BaseDelay != 400*time.Millisecond ||
 		profile.Forward.LossModel != lossModelBurst || profile.Reverse.LossModel != lossModelBurst {
