@@ -16,6 +16,7 @@ import (
 type proCycleGrantRow struct {
 	cycleStartTime time.Time
 	cycleEndTime   time.Time
+	endedTime      *time.Time
 	granted        bool
 	startTime      time.Time
 	endTime        time.Time
@@ -34,6 +35,7 @@ func testingProCycleGrants(t testing.TB, ctx context.Context, networkId server.I
 				SELECT
 					cycle.cycle_start_time,
 					cycle.cycle_end_time,
+					cycle.ended_time,
 					cycle.balance_id IS NOT NULL,
 					COALESCE(balance.start_time, cycle.cycle_start_time),
 					COALESCE(balance.end_time, cycle.cycle_end_time),
@@ -54,6 +56,7 @@ func testingProCycleGrants(t testing.TB, ctx context.Context, networkId server.I
 				server.Raise(result.Scan(
 					&row.cycleStartTime,
 					&row.cycleEndTime,
+					&row.endedTime,
 					&row.granted,
 					&row.startTime,
 					&row.endTime,
@@ -275,9 +278,11 @@ func TestProCycleOverlappingMarketsGrantOncePerCycle(t *testing.T) {
 			t.Fatalf("%d grants, want 1", len(rows))
 		}
 		assertProCycleGrant(t, "the first market's cycle", rows[0], stripeStart, addProCycleMonths(stripeStart, 1), 10*Tib)
-		// both markets' revenue: the App Store's month overlaps the cycle
-		if rows[0].subsidy <= UsdToNanoCents(3.5) {
-			t.Fatalf("the grant carries %d, want both markets' shares", rows[0].subsidy)
+		// the grant was written at the first market's credit, with its month's
+		// revenue; the App Store period credited inside the cycle counts toward
+		// the cycles after it
+		if rows[0].subsidy != UsdToNanoCents(3.5) {
+			t.Fatalf("the grant carries %d, want the first market's month %d", rows[0].subsidy, UsdToNanoCents(3.5))
 		}
 	})
 }
@@ -472,60 +477,89 @@ func TestProCycleGraceHoldStartsNoCycle(t *testing.T) {
 	})
 }
 
-// A refund ends the paid period early; the next sweep ends the running cycle's
-// grant there too, and a later subscription starts a new chain with its own grant.
-func TestProCycleSweepClawsBackAGrantWhoseRenewalEnded(t *testing.T) {
+// A refund ends the paid period early, and the end path ends the running cycle's
+// grant with it, at once, as it ended the 600 GiB credit; a later subscription
+// starts a new chain with its own grant. A renewal ended any other way is caught
+// by the sweep.
+func TestProCycleRefundEndsTheRunningGrant(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		testingSetProData(t, 10*Tib)
-		networkId := server.NewId()
-		Testing_CreateNetwork(ctx, networkId, "pro-cycle-refund", server.NewId())
 		now := testingProCycleClock()
-		start := now.Add(-2 * 24 * time.Hour)
-		invoiceId := "in_refund_" + server.NewId().String()
-		paidEnd := addProCycleMonths(start, 1)
-		if err := AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
-			NetworkId:          networkId,
-			SubscriptionType:   SubscriptionTypeSupporter,
-			StartTime:          start,
-			EndTime:            paidEnd.Add(30 * 24 * time.Hour),
-			NetRevenue:         UsdToNanoCents(3.5),
-			SubscriptionMarket: SubscriptionMarketStripe,
-			TransactionId:      invoiceId,
-			PaidEndTime:        &paidEnd,
-		}); err != nil {
-			t.Fatal(err)
-		}
-		if !testingGrantProCycle(ctx, networkId, now.Add(-time.Hour)) {
-			t.Fatal("no grant for the paid month")
+
+		addPaidMonth := func(networkId server.Id, transactionId string, start time.Time) {
+			paidEnd := addProCycleMonths(start, 1)
+			if err := AddSubscriptionRenewal(ctx, &SubscriptionRenewal{
+				NetworkId:          networkId,
+				SubscriptionType:   SubscriptionTypeSupporter,
+				StartTime:          start,
+				EndTime:            paidEnd.Add(30 * 24 * time.Hour),
+				NetRevenue:         UsdToNanoCents(3.5),
+				SubscriptionMarket: SubscriptionMarketStripe,
+				TransactionId:      transactionId,
+				PaidEndTime:        &paidEnd,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if !testingGrantProCycle(ctx, networkId, now.Add(-time.Hour)) {
+				t.Fatal("no grant for the paid month")
+			}
 		}
 
-		// the refund ends the renewal (and its marker) now
+		networkId := server.NewId()
+		Testing_CreateNetwork(ctx, networkId, "pro-cycle-refund", server.NewId())
+		invoiceId := "in_refund_" + server.NewId().String()
+		addPaidMonth(networkId, invoiceId, now.Add(-2*24*time.Hour))
+
+		// the refund ends the renewal, its balance and the cycle's grant now
 		refundedAt := server.NowUtc()
 		if ended, err := EndReconciledEntitlementForNetworkTransactions(ctx, networkId, SubscriptionMarketStripe, []string{invoiceId}, refundedAt); err != nil || !ended {
 			t.Fatalf("the refund ended nothing: %t %v", ended, err)
 		}
-		sweepAt := refundedAt.Add(time.Minute)
-		_, ended := grantDueProCycles(ctx, sweepAt)
-		if !containsId(ended, networkId) {
-			t.Fatal("the sweep left the refunded cycle's grant running")
-		}
 		rows := testingProCycleGrantedRows(t, ctx, networkId)
-		if len(rows) != 1 || rows[0].endTime.After(sweepAt) || rows[0].cycleEndTime.After(sweepAt) {
-			t.Fatalf("the refunded grant still runs: %+v", rows)
+		if len(rows) != 1 || !rows[0].endTime.Equal(refundedAt) || rows[0].endedTime == nil || !rows[0].endedTime.Equal(refundedAt) {
+			t.Fatalf("the refunded cycle's grant still runs: %+v", rows)
 		}
-		if _, ended = grantDueProCycles(ctx, sweepAt.Add(time.Minute)); containsId(ended, networkId) {
-			t.Fatal("the clawback ran twice")
+		if IsProNetworkFresh(ctx, networkId) {
+			t.Fatal("still Pro after the refund")
+		}
+		// nothing left for the sweep: no second clawback, no new grant
+		granted, ended := grantDueProCycles(ctx, refundedAt.Add(time.Minute))
+		if containsId(ended, networkId) || containsId(granted, networkId) {
+			t.Fatalf("the sweep acted on a refunded network: granted %t ended %t", containsId(granted, networkId), containsId(ended, networkId))
 		}
 
 		// resubscribed: a new chain, granted at its own start
-		resubscribed := sweepAt.Add(time.Hour)
+		resubscribed := refundedAt.Add(time.Hour).Truncate(time.Second)
 		testingProCycleRenewal(t, ctx, networkId, SubscriptionMarketStripe, resubscribed, addProCycleMonths(resubscribed, 1), 30*24*time.Hour, UsdToNanoCents(3.5))
 		if !testingGrantProCycle(ctx, networkId, resubscribed.Add(time.Minute)) {
 			t.Fatal("the resubscription did not grant")
 		}
 		rows = testingProCycleGrantedRows(t, ctx, networkId)
 		assertProCycleGrant(t, "resubscribed", rows[1], resubscribed, addProCycleMonths(resubscribed, 1), 10*Tib)
+
+		// a renewal ended outside the end paths: the sweep ends the grant
+		otherNetworkId := server.NewId()
+		Testing_CreateNetwork(ctx, otherNetworkId, "pro-cycle-ended-elsewhere", server.NewId())
+		otherInvoiceId := "in_ended_" + server.NewId().String()
+		addPaidMonth(otherNetworkId, otherInvoiceId, now.Add(-3*24*time.Hour))
+		endedAt := server.NowUtc()
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(ctx,
+				`UPDATE subscription_renewal SET end_time = $2 WHERE network_id = $1 AND transaction_id = $3`,
+				otherNetworkId, endedAt, otherInvoiceId))
+		})
+		sweepAt := endedAt.Add(time.Minute)
+		if _, ended = grantDueProCycles(ctx, sweepAt); !containsId(ended, otherNetworkId) {
+			t.Fatal("the sweep left a grant running with no renewal open")
+		}
+		rows = testingProCycleGrantedRows(t, ctx, otherNetworkId)
+		if len(rows) != 1 || !rows[0].endTime.Equal(sweepAt) || rows[0].endedTime == nil {
+			t.Fatalf("the sweep's clawback: %+v", rows)
+		}
+		if _, ended = grantDueProCycles(ctx, sweepAt.Add(time.Minute)); containsId(ended, otherNetworkId) {
+			t.Fatal("the clawback ran twice")
+		}
 	})
 }
 

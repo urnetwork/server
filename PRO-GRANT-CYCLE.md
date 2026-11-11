@@ -193,6 +193,10 @@ second grant in one cycle.
   subscription's first start). Now it counts once, through the cycle grants,
   each carrying its exact share. The provider subsidy pool's revenue input
   changes accordingly.
+- A cycle grant's revenue is read when the grant is written. A second market's
+  period credited inside a running cycle therefore adds its revenue to the
+  cycles after it, not to the running one. That part of an overlapping
+  subscription's revenue is not counted.
 - A cycle grant of a paid period carries revenue, so it is `paid` (paid
   contract priority), like the monthly grant. A period recorded without
   revenue (an App Store sandbox purchase, a Stripe trial's $0 invoice, a
