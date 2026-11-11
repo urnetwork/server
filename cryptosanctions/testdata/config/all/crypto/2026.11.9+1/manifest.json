@@ -1,0 +1,89 @@
+{
+  "format": "urnetwork-crypto-sanctions-1",
+  "generator": "cryptosanctions test fixture",
+  "source": {
+    "url": "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML",
+    "publish_date": "2026-11-09",
+    "record_count": 19563,
+    "sha256": "329a9b9c6e554518639e979c28c6867d00b72b4175352dd8869766092bb3ed0c",
+    "bytes": 29555843,
+    "retrieved_at": "2026-11-10T22:53:35Z"
+  },
+  "addresses": {
+    "name": "addresses.json",
+    "sha256": "66c76f5265e42adac4a04e7543b4bd3a7c28608d9a52f0e3df2c2c8f94fd0164",
+    "bytes": 2392
+  },
+  "assets": {
+    "btc": {
+      "count": 5,
+      "ofac_currencies": {
+        "BCH": 1,
+        "USDT": 1,
+        "XBT": 3
+      }
+    },
+    "eth": {
+      "count": 3,
+      "ofac_currencies": {
+        "ARB": 1,
+        "BSC": 1,
+        "ETH": 3,
+        "USDC": 1,
+        "USDT": 1
+      }
+    },
+    "sol": {
+      "count": 2,
+      "ofac_currencies": {
+        "SOL": 2
+      }
+    },
+    "tao": {
+      "count": 1,
+      "ofac_currencies": {
+        "TAO": 1
+      }
+    },
+    "usdc_solana": {
+      "count": 2,
+      "ofac_currencies": {
+        "SOL": 2
+      }
+    },
+    "xmr": {
+      "count": 2,
+      "ofac_currencies": {
+        "XMR": 2
+      }
+    },
+    "zec": {
+      "count": 1,
+      "ofac_currencies": {
+        "ZEC": 1
+      }
+    }
+  },
+  "ofac_digital_currency_ids": {
+    "ARB": 1,
+    "BCH": 1,
+    "BSC": 1,
+    "ETH": 3,
+    "SOL": 2,
+    "TRX": 1,
+    "USDC": 1,
+    "USDT": 2,
+    "XBT": 4,
+    "XMR": 3,
+    "ZEC": 1
+  },
+  "unrecognized": [
+    {
+      "asset": "btc",
+      "ofac_currency": "XBT",
+      "address": "TUCsTq7TofTCJRRoHk6RvhMoS2mJLm5Yzq",
+      "sdn_uid": 165924,
+      "reason": "a TRON address"
+    }
+  ]
+}
