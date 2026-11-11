@@ -24,7 +24,7 @@ func TestSourceBuildSandboxPinsCompetitionToolchain(t *testing.T) {
 		if !slices.Contains(args, "--env=GOTOOLCHAIN=local") {
 			t.Fatalf("%s permits automatic compiler selection", phase)
 		}
-		if phase != "metadata" && !strings.HasPrefix(args[len(args)-1], `test "$(go env GOVERSION)" = go1.27.3;`) {
+		if phase != "metadata" && !strings.HasPrefix(args[len(args)-1], `test "$(go env GOVERSION)" = go1.27.4;`) {
 			t.Fatalf("%s does not reject a mismatched compiler before work", phase)
 		}
 	}
@@ -41,7 +41,8 @@ func TestHostMakeBuildRequiresExactCompetitionToolchain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, version := range []string{"go1.26.6", "go1.27.2", "go1.27.4", "go1.27.3"} {
+	// go1.27.3 has GO-2026-6859 (net/http HTTP/1 server crash).
+	for _, version := range []string{"go1.26.6", "go1.27.3", "go1.27.5", "go1.27.4"} {
 		root := t.TempDir()
 		if err := os.WriteFile(filepath.Join(root, "Makefile"), makefile, 0600); err != nil {
 			t.Fatal(err)
@@ -66,11 +67,11 @@ esac
 		command.Env = append(os.Environ(), "SYNTHETIC_GO_VERSION="+version, "SYNTHETIC_BUILD_MARKER="+marker)
 		output, runErr := command.CombinedOutput()
 		_, markerErr := os.Stat(marker)
-		if version == "go1.27.3" {
+		if version == "go1.27.4" {
 			if runErr != nil || markerErr != nil {
 				t.Fatalf("required compiler did not build: %v, %v: %s", runErr, markerErr, output)
 			}
-		} else if runErr == nil || !os.IsNotExist(markerErr) || !strings.Contains(string(output), "requires Go 1.27.3") {
+		} else if runErr == nil || !os.IsNotExist(markerErr) || !strings.Contains(string(output), "requires Go 1.27.4") {
 			t.Fatalf("wrong compiler %s reached build: %v, %v: %s", version, runErr, markerErr, output)
 		}
 	}
@@ -83,7 +84,7 @@ func TestCompetitionEntrypointsPinLocalToolchain(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(content), "GOTOOLCHAIN=local") || !strings.Contains(string(content), "go env GOVERSION") || !strings.Contains(string(content), "go1.27.3") {
+		if !strings.Contains(string(content), "GOTOOLCHAIN=local") || !strings.Contains(string(content), "go env GOVERSION") || !strings.Contains(string(content), "go1.27.4") {
 			t.Errorf("%s does not enforce the competition compiler", name)
 		}
 	}
@@ -96,9 +97,9 @@ func TestEvaluatorBasePinsExactCompetitionToolchain(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:",
+		"ARG GO_IMAGE=golang:1.27.4-bookworm@sha256:",
 		"GOTOOLCHAIN=local",
-		`RUN test "$(go env GOVERSION)" = go1.27.3`,
+		`RUN test "$(go env GOVERSION)" = go1.27.4`,
 	} {
 		if !strings.Contains(string(content), required) {
 			t.Errorf("base image is missing exact toolchain enforcement: %s", required)
@@ -121,7 +122,7 @@ func TestResourceBombBuildOwnsModuleAndToolchain(t *testing.T) {
 	if !found {
 		t.Fatal("resource-bomb image boundary is missing")
 	}
-	for _, version := range []string{"go1.27.3", "go1.26.6", "go1.27.4"} {
+	for _, version := range []string{"go1.27.4", "go1.26.6", "go1.27.3"} {
 		root := t.TempDir()
 		module := filepath.Join(root, "snapshot", "server")
 		caller := filepath.Join(root, "unrelated")
@@ -161,11 +162,11 @@ esac
 		)
 		output, runErr := command.CombinedOutput()
 		_, markerErr := os.Stat(marker)
-		if version == "go1.27.3" {
+		if version == "go1.27.4" {
 			if runErr != nil || markerErr != nil {
 				t.Fatalf("snapshot fixture did not build in its own module: %v, %v: %s", runErr, markerErr, output)
 			}
-		} else if runErr == nil || !os.IsNotExist(markerErr) || !strings.Contains(string(output), "requires Go 1.27.3") {
+		} else if runErr == nil || !os.IsNotExist(markerErr) || !strings.Contains(string(output), "requires Go 1.27.4") {
 			t.Fatalf("wrong fixture compiler %s reached build: %v, %v: %s", version, runErr, markerErr, output)
 		}
 	}
