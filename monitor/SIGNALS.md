@@ -11300,9 +11300,11 @@ an exhausted payer's new contract is funded.
   `resuming` (healthy, zero cost held for one more check) and `charging`; the
   failures `measurement_failed`, `state_read_failed`, `publish_failed` and
   `superseded` publish nothing, and the published state ages out within its TTL.
-- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
-  contract-creating service (api, connect, taskworker, proxy): the free
-  contracts actually created for exhausted payers.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"network"|"companion"}`
+  on every contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers. `network` counts plain
+  contracts between two clients of one network, which escrow from that
+  network's balance like public contracts since 2026-11-10.
 - `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
   second cache refreshes, read only after an exhausted refusal. Only
   `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,

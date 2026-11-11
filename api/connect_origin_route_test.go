@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
@@ -34,6 +35,16 @@ func TestConnectControlOwnedRouterPublishesCommittedOrigins(t *testing.T) {
 		model.Testing_CreateDevice(ctx, networkId, deviceId, sourceId, "origin-route-source", "test")
 		model.Testing_CreateDevice(ctx, networkId, server.NewId(), destinationId, "origin-route-destination", "test")
 		model.SetProvide(ctx, destinationId, map[model.ProvideMode][]byte{model.ProvideModeNetwork: bytes.Repeat([]byte{1}, 32)})
+		// network contracts escrow from the network's balance
+		now := server.NowUtc()
+		model.AddTransferBalance(ctx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now.Add(-time.Minute),
+			EndTime:               now.Add(24 * time.Hour),
+			StartBalanceByteCount: 64 * model.Mib,
+			BalanceByteCount:      64 * model.Mib,
+			NetRevenue:            model.UsdToNanoCents(1),
+		})
 		token := session.NewByJwt(networkId, userId, "origin-route", false, false).Client(deviceId, sourceId).Testing_Sign()
 		owned, closeOwned, err := NewRouter(ctx, ctx)
 		if err != nil {
