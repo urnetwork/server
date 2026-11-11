@@ -177,6 +177,14 @@ func redisContractReservationKeys(balanceId server.Id) []string {
 	return []string{base + "approx_reserved", base + "approx_contracts", base + "approx_expiry", netEscrowKey(balanceId), base + "approx_recovery_v2", base + "approx_pending_v3"}
 }
 
+// An edge lease's and a flush's keys (DESIGN-DETAILS 13.2.2): the six, then the balance's floor, the
+// lowest credit any caller showed within its ttl, which the script reads and lowers only for a caller
+// that names it (quota_lease_reservation.go). api's contract admission keeps six keys and its own fresh
+// reading of the balance.
+func redisLeaseReservationKeys(balanceId server.Id) []string {
+	return append(redisContractReservationKeys(balanceId), fmt.Sprintf("{escrow_%s}approx_floor", balanceId))
+}
+
 // All keys occupy one Redis cluster slot. Monetary arithmetic uses decimal
 // strings and Redis's signed integer operations, never Lua's floating point.
 // Each operation expires at most 32 abandoned reservations; no history scan or
@@ -195,6 +203,31 @@ func redisContractReservationKeys(balanceId server.Id) []string {
 // where ARGV[6] is the smallest contract and ARGV[7] the rest of the network's
 // availability, and answers {amount, share}, so grants shrink as the
 // network's balance nears zero.
+//
+// Edge leases (DESIGN-DETAILS 13.2.2; quota_lease_reservation.go) pass a
+// seventh key, the balance's floor {escrow_<balance_id>}approx_floor: the
+// lowest credit any caller showed within its ttl. Callers that pass six keys
+// behave as before, bit for bit. With seven keys a reserving operation grants
+// against the lower of ARGV[3] and the floor, and lowers the floor to ARGV[3]
+// when that is lower or the floor is absent, with the ttl ARGV[6] (ARGV[8] for
+// reserve-pending-share): a floor is lowered, never raised, and its ttl is set
+// only when it is. Three operations serve leases and the flushes:
+//
+//	extend          ARGV[2] a token, ARGV[5] its lease: sets the token's expiry
+//	                afresh and answers its amount, 0 when it is gone
+//	carve           ARGV[2] the destination svc/<usage_id>, ARGV[4] the sum,
+//	                ARGV[5] the destination's lease, ARGV[6] the sources'
+//	                lease, then triples (source token, amount, expect): {1, the
+//	                destination's amount} when the destination exists, else,
+//	                when every source holds exactly its expect, each shrinks by
+//	                its amount and the destination is written with the sum,
+//	                {1, sum}; else {0, 0}, moving nothing. The total is unchanged.
+//	release-debited release, and with seven keys the floor rule on ARGV[3],
+//	                the balance the debit left, with the ttl ARGV[6]
+//
+// Every lease operation lies below the local rawTotal= line, where
+// redisGrantProbeScript cuts its shared prelude, and compares amounts as the
+// script's decimal strings, never through tonumber.
 const redisContractReservationScript = `
 local function valid(s)
  return s and string.match(s, '^%d+$') and (s == '0' or string.sub(s,1,1) ~= '0') and
@@ -242,6 +275,24 @@ end
 if not valid(total) or not valid(legacy) or not valid(ARGV[3]) or not valid(ARGV[4]) then
  return redis.error_reply('invalid reservation counter')
 end
+-- the floor a seven-key caller keeps: read here, lowered by the operations below
+local floored=#KEYS>=7
+local floor=false
+if floored then
+ local kind=redis.call('TYPE',KEYS[7]).ok
+ if kind~='none' and kind~='string' then return redis.error_reply('invalid reservation key type') end
+ floor=redis.call('GET',KEYS[7])
+ if floor and not valid(floor) then return redis.error_reply('invalid reservation floor') end
+end
+local function lowerFloor(credit,ttlArgument)
+ local ttl=tonumber(ttlArgument)
+ if not ttl or ttl<1 or ttl>86400000 then return false end
+ if not floor or less(credit,floor) then
+  floor=credit; redis.call('SET',KEYS[7],floor,'PX',ttl)
+ end
+ return true
+end
+local carved=false
 local sharing=ARGV[1]=='reserve-pending-share'
 if sharing and (not valid(ARGV[6]) or not valid(ARGV[7])) then
  return redis.error_reply('invalid reservation counter')
@@ -277,12 +328,56 @@ end
 if (ARGV[1]=='release-owned' or ARGV[1]=='published') and existing and ARGV[4]~='0' and existing~=ARGV[4] then
  return redis.error_reply('reservation recovery amount changed')
 end
-if ARGV[1]=='release' or ARGV[1]=='release-owned' or ARGV[1]=='release-pending' then
+if ARGV[1]=='release' or ARGV[1]=='release-owned' or ARGV[1]=='release-pending' or ARGV[1]=='release-debited' then
+ if ARGV[1]=='release-debited' and floored and not lowerFloor(ARGV[3],ARGV[6]) then
+  return redis.error_reply('invalid reservation floor')
+ end
  if existing then
-  if ARGV[1]~='release' then amount=existing end
+  if ARGV[1]=='release-owned' or ARGV[1]=='release-pending' then amount=existing end
   total=sub(total,existing); redis.call('HDEL',KEYS[2],ARGV[2]); redis.call('ZREM',KEYS[3],ARGV[2])
  end
  redis.call('ZREM',KEYS[5],ARGV[2]); redis.call('ZREM',KEYS[6],ARGV[2])
+elseif ARGV[1]=='extend' then
+ if existing then
+  redis.call('ZADD',KEYS[3],milliseconds+lease,ARGV[2]); amount=existing
+ end
+elseif ARGV[1]=='carve' then
+ local sourceLease=tonumber(ARGV[6])
+ if not sourceLease or sourceLease<1 or sourceLease>86400000 then return redis.error_reply('invalid reservation lease') end
+ if #ARGV<9 or (#ARGV-6)%3~=0 or ARGV[4]=='0' then return redis.error_reply('invalid reservation carve') end
+ local sum='0'; local moves=true; local named={}
+ for i=7,#ARGV,3 do
+  local token=ARGV[i]; local part=ARGV[i+1]; local expect=ARGV[i+2]
+  if token==ARGV[2] or named[token] or not valid(part) or not valid(expect) or part=='0' or less(expect,part) then
+   return redis.error_reply('invalid reservation carve')
+  end
+  named[token]=true
+  sum=add(sum,part)
+  local held=redis.call('HGET',KEYS[2],token)
+  if held and not valid(held) then return redis.error_reply('invalid reservation token') end
+  if held and (redis.call('ZSCORE',KEYS[5],token) or redis.call('ZSCORE',KEYS[6],token)) then
+   return redis.error_reply('invalid reservation carve')
+  end
+  if held~=expect then moves=false end
+ end
+ if sum~=ARGV[4] then return redis.error_reply('invalid reservation carve') end
+ if existing then
+  -- an earlier try ran
+  carved={1,existing}
+ elseif moves then
+  for i=7,#ARGV,3 do
+   local token=ARGV[i]; local rest=sub(ARGV[i+2],ARGV[i+1])
+   if rest=='0' then
+    redis.call('HDEL',KEYS[2],token); redis.call('ZREM',KEYS[3],token)
+   else
+    redis.call('HSET',KEYS[2],token,rest); redis.call('ZADD',KEYS[3],milliseconds+sourceLease,token)
+   end
+  end
+  redis.call('HSET',KEYS[2],ARGV[2],sum); redis.call('ZADD',KEYS[3],milliseconds+lease,ARGV[2])
+  carved={1,sum}
+ else
+  carved={0,'0'}
+ end
 elseif ARGV[1]=='settle' then
  -- Never resurrect a token after the durable batch already released it.
  -- A missing/expired Redis generation retains its documented approximation.
@@ -295,6 +390,11 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned
  ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or sharing or ARGV[1]=='restore' then
  local owned=ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned-full'
  local marked=ARGV[1]=='reserve-pending' or ARGV[1]=='reserve-pending-full' or sharing
+ local floorTtl=ARGV[6]
+ if sharing then floorTtl=ARGV[8] end
+ if floored and ARGV[1]~='restore' and not lowerFloor(ARGV[3],floorTtl) then
+  return redis.error_reply('invalid reservation floor')
+ end
  if existing then
   if owned and not redis.call('ZSCORE',KEYS[5],ARGV[2]) then
    return redis.error_reply('missing owned reservation marker')
@@ -306,6 +406,7 @@ elseif ARGV[1]=='reserve' or ARGV[1]=='reserve-owned' or ARGV[1]=='reserve-owned
  else
   local available=sub(sub(ARGV[3],legacy),total)
   if ARGV[1]=='restore' then available=sub('9223372036854775807',total) end
+  if floored and ARGV[1]~='restore' then available=sub(sub(floor,legacy),total) end
   amount=ARGV[4]
   if sharing then
    share=div8(add(available,ARGV[7]))
@@ -340,6 +441,7 @@ redis.call('PEXPIRE',KEYS[3],90000000)
 redis.call('PEXPIRE',KEYS[5],90000000)
 redis.call('PEXPIRE',KEYS[6],90000000)
 if sharing then return {amount,share} end
+if carved then return carved end
 return amount
 `
 

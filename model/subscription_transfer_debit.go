@@ -1,6 +1,12 @@
 // Current settlements append independent consumption records. PostgreSQL credit
 // catches up in bounded batches; Redis continues to reserve the consumed bytes
 // until a batch commits. Lost callbacks cannot erase or repeat a durable debit.
+//
+// Each release after a commit is release-debited on the balance's seven keys
+// (DESIGN-DETAILS 13.2.2): in the script that removes the debited contract's
+// token it lowers the balance's floor to the balance the debit left, read with
+// RETURNING in the debit's statement, so an edge lease's older reading of the
+// balance can never grant what this debit consumed.
 package model
 
 import (
@@ -18,6 +24,23 @@ import (
 
 const transferDebitBatchSize = 512
 const TransferDebitShardCount = 16
+
+// What the release after a commit takes.
+type TransferDebitFlushSettings struct {
+	// The bound on one balance's token releases.
+	ReleaseTimeout time.Duration
+	// The ttl a release lowers a balance's floor with: DefaultLeaseReservationSettings' FloorTtl.
+	FloorTtl time.Duration
+}
+
+func DefaultTransferDebitFlushSettings() *TransferDebitFlushSettings {
+	return &TransferDebitFlushSettings{
+		ReleaseTimeout: time.Second,
+		FloorTtl:       DefaultLeaseReservationSettings().FloorTtl,
+	}
+}
+
+var transferDebitFlushSettings = DefaultTransferDebitFlushSettings()
 
 // A balance with a full batch flushes again in the same page, up to this many
 // batches, while the page has at least transferDebitRepeatMargin left. One
@@ -216,7 +239,11 @@ func flushTransferDebitPage(ctx, bounded context.Context, shard int, after *serv
 // No Redis I/O occurs while PostgreSQL rows are locked. An ambiguous SQL commit
 // is safe: a retry observes applied=true before attempting another debit.
 func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (appliedCount, releasedCount int, busy bool, returnErr error) {
+	settings := transferDebitFlushSettings
 	var records []transferDebit
+	// What the debit left, or the balance read when the rows were applied
+	// before; each release lowers the floor to it, a negative balance as 0.
+	var balanceByteCount int64
 	committed := false
 	server.HandleError(func() {
 		admitted := server.TryOwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
@@ -225,8 +252,13 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 			busy = false
 			server.RaisePgResult(tx.Exec(ctx, `SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='250ms'`))
 			var found bool
-			rows, err := tx.Query(ctx, `SELECT balance_id FROM transfer_balance WHERE balance_id=$1 FOR NO KEY UPDATE SKIP LOCKED`, balanceId)
-			server.WithPgResult(rows, err, func() { found = rows.Next() })
+			rows, err := tx.Query(ctx, `SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$1 FOR NO KEY UPDATE SKIP LOCKED`, balanceId)
+			server.WithPgResult(rows, err, func() {
+				if rows.Next() {
+					server.Raise(rows.Scan(&balanceByteCount))
+					found = true
+				}
+			})
 			if !found {
 				// A deleted balance is an invariant failure, not permission to discard debt.
 				var exists bool
@@ -264,8 +296,15 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 				amounts = append(amounts, record.amount)
 			}
 			if amount > 0 {
-				tag := server.RaisePgResult(tx.Exec(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1`, balanceId, amount))
-				if tag.RowsAffected() != 1 {
+				debited := false
+				rows, err := tx.Query(ctx, `UPDATE transfer_balance SET balance_byte_count=balance_byte_count-$2 WHERE balance_id=$1 RETURNING balance_byte_count`, balanceId, amount)
+				server.WithPgResult(rows, err, func() {
+					if rows.Next() {
+						server.Raise(rows.Scan(&balanceByteCount))
+						debited = true
+					}
+				})
+				if !debited {
 					server.Raise(fmt.Errorf("debit balance disappeared"))
 				}
 			}
@@ -291,14 +330,16 @@ func flushTransferDebitBalance(ctx context.Context, balanceId server.Id) (applie
 		transferDebitResults.WithLabelValues("committed").Inc()
 		// A partially executed Redis pipeline is replayable. Keep ALL applied rows
 		// until every release was acknowledged; the applied flag prevents re-debit.
-		bounded, cancel := context.WithTimeout(ctx, time.Second)
+		bounded, cancel := context.WithTimeout(ctx, settings.ReleaseTimeout)
 		defer cancel()
+		floorByteCount := strconv.FormatInt(max(balanceByteCount, 0), 10)
+		floorMs := max(settings.FloorTtl.Milliseconds(), 1)
 		// no preflight PING, as for redisContractReservation, and outside a transaction
 		server.Raise(server.RedisWithDeadline(bounded, func(r server.RedisClient) error {
 			_, err := r.Pipelined(bounded, func(pipe redis.Pipeliner) error {
 				for _, record := range records {
-					pipe.Eval(bounded, redisContractReservationScript, redisContractReservationKeys(balanceId),
-						"release", record.contractId.String(), "0", "0", redisContractReservationLease.Milliseconds())
+					pipe.Eval(bounded, redisContractReservationScript, redisLeaseReservationKeys(balanceId),
+						"release-debited", record.contractId.String(), floorByteCount, "0", redisContractReservationLease.Milliseconds(), floorMs)
 				}
 				return nil
 			})

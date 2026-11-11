@@ -463,18 +463,35 @@ func (self *quotaRateServerRedis) RunScript(ctx context.Context, script *sidecar
 		if err != nil {
 			return err
 		}
-		switch result := result.(type) {
-		case string:
-			reply = &sidecar.RedisReply{Kind: sidecar.RedisReplyBulk, Bulk: []byte(result)}
-		case int64:
-			reply = &sidecar.RedisReply{Kind: sidecar.RedisReplyInteger, Integer: result}
-		default:
-			return fmt.Errorf("quota rate: a script reply of %T", result)
-		}
-		return nil
+		reply, err = quotaRateScriptReply(result)
+		return err
 	}, server.OptRedisNoPreflight())
 	if err != nil {
 		return nil, err
 	}
 	return reply, nil
+}
+
+// A script's reply as a RedisReply: a string, an integer, a nil, or an array of them, as the lease
+// operations' {flag, amount} (quota_lease_reservation.go).
+func quotaRateScriptReply(value any) (*sidecar.RedisReply, error) {
+	switch value := value.(type) {
+	case nil:
+		return &sidecar.RedisReply{Kind: sidecar.RedisReplyNil}, nil
+	case string:
+		return &sidecar.RedisReply{Kind: sidecar.RedisReplyBulk, Bulk: []byte(value)}, nil
+	case int64:
+		return &sidecar.RedisReply{Kind: sidecar.RedisReplyInteger, Integer: value}, nil
+	case []any:
+		replies := make([]*sidecar.RedisReply, 0, len(value))
+		for _, element := range value {
+			reply, err := quotaRateScriptReply(element)
+			if err != nil {
+				return nil, err
+			}
+			replies = append(replies, reply)
+		}
+		return &sidecar.RedisReply{Kind: sidecar.RedisReplyArray, Replies: replies}, nil
+	}
+	return nil, fmt.Errorf("quota rate: a script reply of %T", value)
 }

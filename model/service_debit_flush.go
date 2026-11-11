@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/urnetwork/glog"
 	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server"
@@ -25,17 +26,24 @@ import (
 // transferBalanceOwnershipKeys) and locks it FOR NO KEY UPDATE SKIP LOCKED, so a busy balance is
 // skipped and revisited, never waited on.
 //
-//	commit   one transaction subtracts the page's unapplied debits from balance_byte_count, adds each
-//	         meter's bytes to network_service_usage for (network, the UTC day of this apply, meter),
-//	         since a debit counts on the day it was applied (§20.9) and the journal has no time column
-//	         (plan-QUOTA-overage-accounting), and sets applied
-//	release  after the commit, each row's Redis token is released: svc/<usage_id> for a lease's carved
-//	         row, the contract id, which is the usage id, for meter relay; evs's rows hold no token
+//	commit   one transaction subtracts the page's unapplied debits from balance_byte_count, reading
+//	         the balance the debit left (RETURNING), adds each meter's bytes to network_service_usage
+//	         for (network, the UTC day of this apply, meter), since a debit counts on the day it was
+//	         applied (§20.9) and the journal has no time column (plan-QUOTA-overage-accounting), and
+//	         sets applied
+//	release  after the commit, each row's Redis token is released by release-debited, which lowers
+//	         the balance's floor to what the debit left in the same script (DESIGN-DETAILS 13.2.2):
+//	         svc/<usage_id> for a lease's carved row, the contract id, which is the usage id, for
+//	         meter relay; evs's rows hold no token
 //	delete   a second owned transaction deletes the applied rows
 //
 // Every applied row stays until all its releases are acknowledged: the applied flag stops a second
 // debit, and a partly run pipeline is replayable, so a kill at any step reruns to the same end with
-// nothing debited twice. A balance that is gone while it has rows is an invariant failure, never leave
+// nothing debited twice. A rerun that finds its rows applied releases them with the balance its own
+// transaction read, which is at most what the earlier debit left, since a balance only falls: the
+// floor is lowered too far at worst, the safe side. urnetwork_service_debit_oldest_seconds is the age
+// of each shard's oldest row, pending or awaiting its release: past 24 h a carved token lapses before
+// its debit and the bytes could be granted twice, so it alerts long before (13.5's flush behind). A balance that is gone while it has rows is an invariant failure, never leave
 // to discard the debt; the delete guard on transfer_balance keeps it from happening. There is no
 // transfer_escrow repair and no provider write: service debits pay no one (D-QUOTA-4).
 //
@@ -59,6 +67,14 @@ type ServiceDebitFlushSettings struct {
 	LockTimeout      time.Duration
 	// The bound on one balance's token releases.
 	ReleaseTimeout time.Duration
+	// The ttl a release lowers a balance's floor with: DefaultLeaseReservationSettings' FloorTtl.
+	FloorTtl time.Duration
+	// The rows of a shard's state the oldest-age gauge reads at most, so a long backlog costs one bounded
+	// read a page; past it the gauge is the oldest of the rows it read.
+	OldestExaminedRowCount int
+	// The age a batch row reads whose service_usage_batch row retention already removed: at least
+	// service_usage_batch's 24 h.
+	OldestBatchlessAge time.Duration
 }
 
 func DefaultServiceDebitFlushSettings() *ServiceDebitFlushSettings {
@@ -71,6 +87,10 @@ func DefaultServiceDebitFlushSettings() *ServiceDebitFlushSettings {
 		StatementTimeout:  2 * time.Second,
 		LockTimeout:       250 * time.Millisecond,
 		ReleaseTimeout:    time.Second,
+		FloorTtl:          DefaultLeaseReservationSettings().FloorTtl,
+		// a shard's 16th of a minute of 10,000 busy leases' carves
+		OldestExaminedRowCount: 4096,
+		OldestBatchlessAge:     24 * time.Hour,
 	}
 }
 
@@ -92,8 +112,64 @@ var serviceDebitFlushResults = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Help: "Service debit flush batches by finite result: committed, released, busy or error. No payout.",
 }, []string{"result"})
 
+var serviceDebitOldestAge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	Name: "urnetwork_service_debit_oldest_seconds",
+	Help: "Oldest service debit journal row's age by shard and state, pending or awaiting its Redis release; a carved token lapses at 24 h, so it alerts at 10 min.",
+}, []string{"shard", "state"})
+
 func init() {
-	prometheus.MustRegister(serviceDebitFlushResults)
+	prometheus.MustRegister(serviceDebitFlushResults, serviceDebitOldestAge)
+}
+
+// The age of a shard's oldest journal row in one applied state, 0 for none, over at most $3 of its rows.
+// The journal has no time column: a batch row dates from its batch's applied_time, or reads $4 when
+// retention removed the batch row, and a relayed row from its contract id, which is its usage id and a
+// ULID holding its contract's creation in its first 48 bits.
+const serviceDebitOldestAgeSql = `
+	SELECT COALESCE(GREATEST(0, EXTRACT(epoch FROM ((clock_timestamp() AT TIME ZONE 'UTC') - MIN(row_time))))::double precision, 0)
+	FROM (
+		SELECT CASE
+			WHEN journal.batch_id IS NULL THEN
+				to_timestamp((('x' || substr(replace(journal.usage_id::text, '-', ''), 1, 12))::bit(48)::bigint)::double precision / 1000) AT TIME ZONE 'UTC'
+			ELSE COALESCE(batch.applied_time, $4)
+		END AS row_time
+		FROM (
+			SELECT usage_id, batch_id
+			FROM service_debit_journal
+			WHERE (get_byte(uuid_send(balance_id), 15) % 16) = $1 AND applied = $2
+			LIMIT $3
+		) journal
+		LEFT JOIN service_usage_batch batch ON batch.batch_id = journal.batch_id
+	) row_times
+`
+
+// Sets the shard's oldest-age gauge for both states. A failed read leaves the last value.
+func sampleServiceDebitOldestAge(ctx context.Context, shard int, now time.Time) {
+	settings := serviceDebitFlushSettings
+	label := strconv.Itoa(shard)
+	server.HandleError(func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			for _, state := range []struct {
+				name    string
+				applied bool
+			}{{"pending", false}, {"redis_release", true}} {
+				var age float64
+				server.Raise(conn.QueryRow(
+					ctx,
+					serviceDebitOldestAgeSql,
+					shard,
+					state.applied,
+					max(settings.OldestExaminedRowCount, 1),
+					now.UTC().Add(-settings.OldestBatchlessAge),
+				).Scan(&age))
+				serviceDebitOldestAge.WithLabelValues(label, state.name).Set(age)
+			}
+		}, server.OptNoRetry())
+	}, func(err error) {
+		if glog.V(1) {
+			glog.Infof("[quota]service debit shard %d's oldest age not read: %s\n", shard, err)
+		}
+	})
 }
 
 // The shard a balance's service debits flush in: transfer_debit_journal's, computed, since this
@@ -201,6 +277,7 @@ func flushServiceDebits(ctx context.Context, shard int, after *server.Id, clock 
 	}
 	bounded, cancel := context.WithTimeoutCause(ctx, settings.PageTimeout, errServiceDebitPageDeadline)
 	defer cancel()
+	sampleServiceDebitOldestAge(bounded, shard, clock.Now())
 	hasTime := func() bool {
 		if bounded.Err() != nil {
 			return false
@@ -303,6 +380,9 @@ func serviceUsageDay(now time.Time) time.Time {
 func flushServiceDebitBalance(ctx context.Context, balanceId server.Id, clock sidecar.Clock, hooks *serviceDebitFlushHooks) (appliedCount int, releasedCount int, busy bool, returnErr error) {
 	settings := serviceDebitFlushSettings
 	var records []*serviceDebit
+	// the balance the transaction's debit left, or read when its rows were applied before: the floor
+	// each release lowers to, a negative balance shown as 0
+	var balanceByteCount int64
 	committed := false
 	server.HandleError(func() {
 		admitted := server.TryOwnedTx(ctx, transferBalanceOwnershipKeys([]server.Id{balanceId}), func(tx server.PgTx) {
@@ -316,10 +396,10 @@ func flushServiceDebitBalance(ctx context.Context, balanceId server.Id, clock si
 			)))
 			var networkId server.Id
 			found := false
-			result, err := tx.Query(ctx, `SELECT network_id FROM transfer_balance WHERE balance_id = $1 FOR NO KEY UPDATE SKIP LOCKED`, balanceId)
+			result, err := tx.Query(ctx, `SELECT network_id, balance_byte_count FROM transfer_balance WHERE balance_id = $1 FOR NO KEY UPDATE SKIP LOCKED`, balanceId)
 			server.WithPgResult(result, err, func() {
 				if result.Next() {
-					server.Raise(result.Scan(&networkId))
+					server.Raise(result.Scan(&networkId, &balanceByteCount))
 					found = true
 				}
 			})
@@ -367,13 +447,20 @@ func flushServiceDebitBalance(ctx context.Context, balanceId server.Id, clock si
 				return
 			}
 			if 0 < byteCount {
-				tag := server.RaisePgResult(tx.Exec(
+				debited := false
+				result, err := tx.Query(
 					ctx,
-					`UPDATE transfer_balance SET balance_byte_count = balance_byte_count - $2 WHERE balance_id = $1`,
+					`UPDATE transfer_balance SET balance_byte_count = balance_byte_count - $2 WHERE balance_id = $1 RETURNING balance_byte_count`,
 					balanceId,
 					byteCount,
-				))
-				if tag.RowsAffected() != 1 {
+				)
+				server.WithPgResult(result, err, func() {
+					if result.Next() {
+						server.Raise(result.Scan(&balanceByteCount))
+						debited = true
+					}
+				})
+				if !debited {
 					server.Raise(fmt.Errorf("the debited balance disappeared"))
 				}
 				meters := make([]string, 0, len(meterByteCounts))
@@ -441,12 +528,14 @@ func flushServiceDebitBalance(ctx context.Context, balanceId server.Id, clock si
 		if 0 < len(tokens) {
 			bounded, cancel := context.WithTimeout(ctx, settings.ReleaseTimeout)
 			defer cancel()
+			floorByteCount := strconv.FormatInt(max(balanceByteCount, 0), 10)
+			floorMs := strconv.FormatInt(max(settings.FloorTtl.Milliseconds(), 1), 10)
 			// no preflight PING, as for the transfer debits, and outside a transaction
 			server.Raise(server.RedisWithDeadline(bounded, func(client server.RedisClient) error {
 				commands, err := client.Pipelined(bounded, func(pipe redis.Pipeliner) error {
 					for _, token := range tokens {
-						pipe.Eval(bounded, redisContractReservationScript, redisContractReservationKeys(balanceId),
-							"release", token, "0", "0", strconv.FormatInt(redisContractReservationLease.Milliseconds(), 10))
+						pipe.Eval(bounded, redisContractReservationScript, redisLeaseReservationKeys(balanceId),
+							"release-debited", token, floorByteCount, "0", strconv.FormatInt(redisContractReservationLease.Milliseconds(), 10), floorMs)
 					}
 					return nil
 				})
