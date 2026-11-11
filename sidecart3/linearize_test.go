@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
 )
 
@@ -207,6 +208,35 @@ func TestCheckLinearizableFailsWhatTheRuleForbids(t *testing.T) {
 		report, err := CheckLinearizable(fixture.history, linearizeSettings(t))
 		if !errors.Is(err, ErrNotLinearizable) {
 			t.Errorf("%s: %v, want it not linearizable (%s)", c.name, err, report)
+		}
+	}
+}
+
+// An attempt validated before its repo's shred began commits after another attempt of its push id was refused
+// SHREDDING, which FI-2 allows since the shred destroys it; the same after any other refusal fails.
+func TestCheckLinearizableLetsAShredRefusalBindNothing(t *testing.T) {
+	type refusal struct {
+		code   protocol.EvsRefusalCode
+		passes bool
+	}
+	for _, r := range []refusal{
+		{code: protocol.EvsRefusalCode_EVS_REFUSAL_SHREDDING, passes: true},
+		{code: protocol.EvsRefusalCode_EVS_REFUSAL_GATE_CLOSED, passes: false},
+		{code: protocol.EvsRefusalCode(0), passes: false},
+	} {
+		fixture := newLinearizeFixture("refused " + r.code.String())
+		p1, p2 := sidecar.NewId(), sidecar.NewId()
+		fixture.push("writerA", "evs1", p1, 1, 2, fault.OutcomeCommitted, 1)
+		fixture.history.Record(&fault.Operation{Kind: fault.OperationPush, Actor: "writerB", Instance: "evs3", Ref: fixture.ref, PushId: p2, Call: 3, Return: 4, Outcome: fault.OutcomeAborted, Code: r.code})
+		fixture.push("writerB", "evs2", p2, 2, 6, fault.OutcomeCommitted, 2)
+		fixture.read(7, 8, 2, p2)
+		fixture.unrelatedUnknown(9)
+		report, err := CheckLinearizable(fixture.history, linearizeSettings(t))
+		if r.passes && err != nil {
+			t.Errorf("after a %s refusal: %v (%s)", r.code, err, report)
+		}
+		if !r.passes && !errors.Is(err, ErrNotLinearizable) {
+			t.Errorf("after a %s refusal: %v, want it not linearizable (%s)", r.code, err, report)
 		}
 	}
 }

@@ -15,7 +15,10 @@ package sidecart3
 //	          refused, which commits it there; or its push id committed at v already, a retry answering its original
 //	          version (§11.8's 5a). A second version for one push id, a version another push holds, and a skipped
 //	          version are no step.
-//	abort     a push answered refused: its push id has not committed, and from here never does (I-EVS-3).
+//	abort     a push answered refused: its push id has not committed, and from here never does (I-EVS-3). A SHREDDING
+//	          refusal binds nothing: FI-2 lets an attempt validated before its repo's shred began commit after another's
+//	          SHREDDING refusal, since the shred destroys it, and which attempt was validated when is FI-2's oracle's to
+//	          judge (TEST-M2-04), not a history's.
 //	unknown   a push of unknown outcome matches either: it commits at the next version, or does nothing. Once its push
 //	          id has committed or been refused it does nothing.
 //	read      a head read served v: the ref is at v, and v's push is the one the read names, when it names one. A read
@@ -45,6 +48,7 @@ import (
 	"github.com/anishathalye/porcupine"
 
 	"github.com/urnetwork/sidecar"
+	"github.com/urnetwork/sidecar/protocol"
 	"github.com/urnetwork/sidecar/sidecartest/fault"
 )
 
@@ -195,11 +199,13 @@ type linearizeInput struct {
 	pushId sidecar.Id
 }
 
-// What the model is answered: the outcome, a commit's or a read's version, and the push a read's version names.
+// What the model is answered: the outcome, a commit's or a read's version, the push a read's version names, and a
+// refusal's code.
 type linearizeOutput struct {
 	outcome fault.Outcome
 	version uint64
 	pushId  sidecar.Id
+	code    protocol.EvsRefusalCode
 }
 
 // One ref's operations as Porcupine's, each unknown outcome's end open at end. Each operation runs on the lowest
@@ -223,7 +229,7 @@ func linearizeOperations(operations []*fault.Operation, end int64) []porcupine.O
 		}
 		laneEnds[lane] = returned
 		input := linearizeInput{kind: operation.Kind}
-		output := linearizeOutput{outcome: operation.Outcome, version: operation.Version}
+		output := linearizeOutput{outcome: operation.Outcome, version: operation.Version, code: operation.Code}
 		if operation.Kind == fault.OperationPush {
 			input.pushId = operation.PushId
 		} else {
@@ -356,6 +362,9 @@ func commitRuleStep(state *commitRuleState, input linearizeInput, output lineari
 		}
 		return nil
 	case fault.OutcomeAborted:
+		if output.code == protocol.EvsRefusalCode_EVS_REFUSAL_SHREDDING {
+			return []*commitRuleState{state}
+		}
 		if committed {
 			return nil
 		}
