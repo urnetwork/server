@@ -122,7 +122,10 @@ type GammaServicesPayment struct {
 }
 
 const gammaApiEndpoint = "https://api.bringyour.com"
-const gammaApiSpecUrl = "https://ur.io/api/bringyour.yml"
+
+// the spec as ur.io publishes it (connect/api/bringyour.yml without its
+// x-internal operations); ur.io serves no /api/bringyour.yml
+const gammaApiSpecUrl = "https://ur.io/openapi.yml"
 
 // GammaServices answers GET /pay/gamma/services.json.
 func GammaServices(clientSession *session.ClientSession) (*GammaServicesDocument, error) {
