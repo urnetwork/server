@@ -9,11 +9,29 @@ package evshost_test
 import (
 	"testing"
 
+	"github.com/urnetwork/sidecar/sidecartest/fault"
+
 	"github.com/urnetwork/server/sidecart3"
 )
 
 func TestFs4OnT3(t *testing.T) {
 	fsCommitTestEnv().Run(t, func(tb testing.TB) {
 		sidecart3.RunRow(tb, "FS-4", "", nil)
+	})
+}
+
+func TestFs58OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-58", "", nil)
+	})
+}
+
+func TestFs58FoldKilledAndRacedOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-58", "folds killed and raced", fault.Fs58FoldKilledAndRaced)
+}
+
+func TestFs63OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-63", "", nil)
 	})
 }
