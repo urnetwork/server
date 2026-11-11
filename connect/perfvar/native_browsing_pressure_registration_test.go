@@ -21,7 +21,7 @@ func TestNativeBrowsingPressureRegistrationPreservesFrozenWorkload(t *testing.T)
 	}
 	if plan.profile.Name != cellEdge5mDown1mUpName || plan.profile.Seed != 4013 ||
 		plan.profile.Forward.RateBitsPerSecond != 1_000_000 || plan.profile.Reverse.RateBitsPerSecond != 5_000_000 ||
-		plan.profile.InnerMtu != 1320 {
+		plan.profile.InnerMtu != clientconnect.DefaultMtu {
 		t.Fatalf("pressure access profile changed: %+v", plan.profile)
 	}
 	for _, direction := range []linkProfile{plan.profile.Forward, plan.profile.Reverse} {

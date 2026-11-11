@@ -39,9 +39,10 @@ type contractUsageLegacyExclusion struct {
 }
 
 // Includes same-network service clients; monetary eligibility is unrelated.
-// Their shares stay provider usage until the draft SN25 extender amendment
-// takes effect, and its epoch reader, not this snapshot, moves them to the
-// extender pool (subscription_network_escrow.go).
+// Their shares stay provider usage until the SN25 extender amendment takes
+// effect, and from its first epoch the epoch reader, not this snapshot, moves
+// them to the extender pool (stContractSharesForEpoch). An extender party is
+// one of the snapshot's hops like any other, and its share stays its own.
 type contractProviderUsage struct {
 	ClientId  server.Id `json:"client_id"`
 	NetworkId server.Id `json:"network_id"`

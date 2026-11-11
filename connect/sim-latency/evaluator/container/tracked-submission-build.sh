@@ -101,7 +101,7 @@ tracked_submission_build() {
         "$compile_cache" "$output"
     binary_receipt="$(evaluation_host reclaim-build-output)" || infrastructure_failure "joined compiler output reclaim failed"
     jq -e --arg revision "$candidate_sha" '
-        .go_version == "go1.27.3" and .go_package == "github.com/urnetwork/server/connect/sim-latency" and
+        .go_version == "go1.27.4" and .go_package == "github.com/urnetwork/server/connect/sim-latency" and
         .vcs_revision == $revision and .vcs_modified == "false" and
         (.sha256 | test("^[0-9a-f]{64}$")) and (.bytes | type == "number" and . > 0 and floor == .)' \
         <<<"$binary_receipt" >/dev/null || infrastructure_failure "joined binary metadata differs from the frozen compiler/source tuple"

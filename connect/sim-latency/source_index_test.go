@@ -86,7 +86,7 @@ func TestSourceIndexSeparatesPreparedIntakeAndGradingPurposes(t *testing.T) {
 		activatedAt := time.Unix(2000000010, 0).UTC()
 		status.Intent.ActivatedAt = &activatedAt
 		checkpoint, err := newSourceIndexCheckpoint(status)
-		if err != nil || checkpoint.Status != fixture.want || checkpoint.CompilerVerified || checkpoint.CompilerRequirement != "go1.27.3" ||
+		if err != nil || checkpoint.Status != fixture.want || checkpoint.CompilerVerified || checkpoint.CompilerRequirement != "go1.27.4" ||
 			checkpoint.GradingReady != (fixture.purpose == controller.CompetitionSourceLifecycleGrading) {
 			t.Fatalf("purpose %s was inferred from unrelated activation metadata: %+v, %v", fixture.purpose, checkpoint, err)
 		}

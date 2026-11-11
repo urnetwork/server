@@ -13,7 +13,7 @@ clean:
 	rm -rf build
 
 build:
-	@test "$$(GOTOOLCHAIN=local $(GO) env GOVERSION)" = go1.27.3 || { echo "sim-latency requires Go 1.27.3" >&2; exit 1; }
+	@test "$$(GOTOOLCHAIN=local $(GO) env GOVERSION)" = go1.27.4 || { echo "sim-latency requires Go 1.27.4" >&2; exit 1; }
 	mkdir -p $(BUILD_DIR)
 	env GOTOOLCHAIN=local GOOS=$(GOOS) GOARCH=$(GOARCH) CGO_ENABLED=0 \
 		$(GO) build -trimpath -buildvcs=true -o $(BINARY) .

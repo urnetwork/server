@@ -49,15 +49,12 @@ func NetworkCreate(
 	}
 	enrollNetworkCreateOnboardingPostPrimary(result, clientSession)
 
-	/**
-	 * we only add transfer balance if the user is not pro (no balance code redeemed)
-	 *
-	 * redeeming a balance code successfully automatically adds paid transfer balance for the network
-	 */
-	if !result.IsPro {
-		// add regular balance
-		AddRefreshTransferBalance(clientSession.Ctx, result.Network.NetworkId)
-	}
+	// Every new network gets the day's free data (pro.yml free.data), and a
+	// balance code redeemed at sign-up does not change that: the code adds its
+	// own data-only balance beside it. The owner, 2026-11-11: "sign up codes
+	// should still get daily free data. all accounts should get the daily free
+	// data." The daily run (RefreshFreeTransferBalances) grants it again.
+	AddRefreshTransferBalance(clientSession.Ctx, result.Network.NetworkId)
 
 	if networkCreate.ReferralCode != nil {
 		model.CreateNetworkReferral(
