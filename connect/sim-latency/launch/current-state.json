@@ -1,6 +1,19 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T09:18:03Z",
+  "observed_at": "2026-11-11T20:57:55Z",
+  "latest_epoch2_runtime_recovery": {
+    "evidence": "EPOCH2-RUNTIME-RECOVERY-2026-11-11.json",
+    "api_ready": true,
+    "grading_active_on_both_hosts": true,
+    "succeeded": 1,
+    "failed": 1,
+    "running": 2,
+    "queued": 11,
+    "deployed_control_source": "68817f6d3ea96b7a8179c7af63808d504560af32",
+    "frozen_product_source_and_baseline_unchanged": true,
+    "failed_job_recovery_authorized": false,
+    "next_action": "Monitor both fresh FIFO attempts. Prepare a narrowly scoped recovery amendment for the evaluator-caused timeout; do not reuse an inapplicable recovery class, extend the original deadline, or interrupt active work. Earlier entries below are historical snapshots, not the current launch state."
+  },
   "latest_system_go1_27_4": {
     "evidence": "SYSTEM-GO1.27.4-2026-11-11.json",
     "epoch2_exception_evidence": "EPOCH2-GO1.27.4-SECURITY-EXCEPTION-2026-11-11.json",
