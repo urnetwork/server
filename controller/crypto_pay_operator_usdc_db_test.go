@@ -180,7 +180,7 @@ func TestCryptoUsdcOverpaidMemolessPaymentStaysUncreditedUntilTheOperatorCredit(
 		cryptoUsdcUncredited(t, ctx, fixture)
 
 		// `crypto credit`: a USDC invoice is not its to credit
-		_, err = CryptoOperatorCredit(fixture.clientSession, fixture.intent.IntentId)
+		_, err = CryptoOperatorCredit(fixture.clientSession, fixture.intent.IntentId, false)
 		connect.AssertEqual(t, err != nil && strings.Contains(err.Error(), "a USDC invoice is credited by its Solana payment"), true)
 		cryptoUsdcUncredited(t, ctx, fixture)
 

@@ -31,6 +31,11 @@ func TestSubscriptionMarketsBlockNewPurchase(t *testing.T) {
 		// to, through the 30-day grace
 		{"usdc year", []model.SubscriptionMarket{model.SubscriptionMarketSolana}, false},
 		{"usdc year and stripe", []model.SubscriptionMarket{model.SubscriptionMarketSolana, model.SubscriptionMarketStripe}, true},
+		// the TAO, Bitcoin and ETH years are one-time too (mmm/BTCPAY.md §17)
+		{"tao year", []model.SubscriptionMarket{model.SubscriptionMarketBittensor}, false},
+		{"bitcoin year", []model.SubscriptionMarket{model.SubscriptionMarketBitcoin}, false},
+		{"eth year", []model.SubscriptionMarket{model.SubscriptionMarketEthereum}, false},
+		{"bitcoin year and apple", []model.SubscriptionMarket{model.SubscriptionMarketBitcoin, model.SubscriptionMarketApple}, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -38,6 +43,47 @@ func TestSubscriptionMarketsBlockNewPurchase(t *testing.T) {
 				t.Fatalf("block = %t, want %t", got, test.want)
 			}
 		})
+	}
+}
+
+// The full list: every market but the store subscriptions (Apple, Google,
+// Stripe) leaves a new purchase open. Manual grants, x402 and every one-time
+// crypto market (Solana from P17, Monero, Zcash, and TAO, Bitcoin and ETH)
+// never renew, so a card checkout is never a second charge. A one-time crypto
+// market added later must join the list.
+func TestSubscriptionMarketsBlockNewPurchaseFullList(t *testing.T) {
+	open := []model.SubscriptionMarket{
+		model.SubscriptionMarketManual,
+		model.SubscriptionMarketX402,
+		model.SubscriptionMarketSolana,
+		model.SubscriptionMarketMonero,
+		model.SubscriptionMarketZcash,
+		model.SubscriptionMarketBittensor,
+		model.SubscriptionMarketBitcoin,
+		model.SubscriptionMarketEthereum,
+	}
+	blocking := []model.SubscriptionMarket{
+		model.SubscriptionMarketApple,
+		model.SubscriptionMarketGoogle,
+		model.SubscriptionMarketStripe,
+	}
+	for _, market := range open {
+		if subscriptionMarketsBlockNewPurchase([]model.SubscriptionMarket{market}) {
+			t.Fatalf("%s blocks a new purchase", market)
+		}
+	}
+	for _, market := range blocking {
+		if !subscriptionMarketsBlockNewPurchase([]model.SubscriptionMarket{market}) {
+			t.Fatalf("%s does not block a new purchase", market)
+		}
+	}
+	for _, market := range model.SubscriptionOneTimeCryptoMarkets {
+		if subscriptionMarketsBlockNewPurchase([]model.SubscriptionMarket{market}) {
+			t.Fatalf("the one-time crypto market %s blocks a new purchase", market)
+		}
+	}
+	if subscriptionMarketsBlockNewPurchase(open) {
+		t.Fatalf("the open markets together block a new purchase")
 	}
 }
 

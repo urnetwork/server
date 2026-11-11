@@ -15,6 +15,10 @@ type SupporterWindowEnding struct {
 	NetworkId server.Id
 	EndTime   time.Time
 	Market    string
+	// the coin of a crypto invoice the window was paid with, when its market
+	// does not name it: "sol" for a solana window a native SOL invoice paid
+	// (its transaction id is the invoice id), else ""
+	CryptoAsset string
 }
 
 // ListLastSupporterWindowsEnding are the supporter windows on `markets` that
@@ -25,7 +29,15 @@ func ListLastSupporterWindowsEnding(ctx context.Context, endFrom time.Time, endT
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT DISTINCT ON (s.network_id) s.network_id, s.end_time, s.market
+				SELECT DISTINCT ON (s.network_id) s.network_id, s.end_time, s.market,
+					COALESCE((
+						SELECT intent.asset FROM crypto_payment_intent intent
+						WHERE s.market = 'solana'
+						  AND intent.intent_id = (
+							CASE WHEN s.transaction_id ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+							THEN s.transaction_id::uuid END
+						  )
+					), '')
 				FROM subscription_renewal s
 				WHERE
 					s.subscription_type = 'supporter' AND
@@ -49,7 +61,7 @@ func ListLastSupporterWindowsEnding(ctx context.Context, endFrom time.Time, endT
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				w := &SupporterWindowEnding{}
-				server.Raise(result.Scan(&w.NetworkId, &w.EndTime, &w.Market))
+				server.Raise(result.Scan(&w.NetworkId, &w.EndTime, &w.Market, &w.CryptoAsset))
 				windows = append(windows, w)
 			}
 		})

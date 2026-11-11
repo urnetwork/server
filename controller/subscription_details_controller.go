@@ -316,7 +316,8 @@ func buildSubscriptionDetails(
 		case model.SubscriptionMarketGoogle:
 			detail.ManageUrl = googleManageSubscriptionsUrl
 			detail.TransactionId = renewal.PurchaseToken
-		case model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+		case model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
+			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 			detail.TransactionId = renewal.TransactionId
 		}
 
@@ -996,7 +997,8 @@ func subscriptionCancelRefusal(store string) *SubscriptionCancelResult {
 			"A USDC payment covers one period and does not renew. There is nothing to cancel.",
 			"",
 		)
-	case model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+	case model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
+		model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 		return subscriptionCancelError(
 			SubscriptionErrorCodeDoesNotRenew,
 			"A crypto payment covers one period and does not renew. There is nothing to cancel.",

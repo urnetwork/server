@@ -10,11 +10,11 @@ import (
 	"testing"
 )
 
-// The existing fake PostgreSQL source supplies the complete seven-store
+// The existing fake PostgreSQL source supplies the complete ten-store
 // health census and no repair events; only its terminal aggregate varies.
 func paymentMixedSettings(terminal []Row) SignalSettings {
 	health := []Row{}
-	for _, store := range []string{"apple", "google", "monero", "solana", "stripe", "x402", "zcash"} {
+	for _, store := range []string{"apple", "bitcoin", "bittensor", "ethereum", "google", "monero", "solana", "stripe", "x402", "zcash"} {
 		health = append(health, Row{store, "600", "600", "0", "0", "600", "1", "0", "0"})
 	}
 	settings := syntheticSettings(paymentReconciliationSourceWithUnfulfillable(health, nil, terminal))

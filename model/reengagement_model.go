@@ -546,7 +546,7 @@ func ListPendingReengagementFixes(ctx context.Context, answeredAfter time.Time, 
 // crypto_pay_credit.go and payment_reconcile_controller.go add it to
 // end_time), so Pro stops at end_time; the App Store and Play end theirs at the
 // store's expiry and may retry a failed renewal after it.
-var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "x402", "manual"}
+var reengagementGraceMarkets = []string{"stripe", "solana", "monero", "zcash", "bittensor", "bitcoin", "ethereum", "x402", "manual"}
 
 // ReengagementGraceMarkets are the markets whose end_time includes the grace.
 func ReengagementGraceMarkets() []string {

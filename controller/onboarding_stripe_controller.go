@@ -514,17 +514,18 @@ const stripeAlreadySubscribedMessage = "You already have an active Pro subscript
 
 // subscriptionMarketsBlockNewPurchase reports whether the network's active
 // supporter subscription markets mean it is already paying for Pro. Manual
-// grants, x402 agent payments and the one-time crypto payments (USDC on
-// Solana, Monero, Zcash) are not a store subscription the customer would be
-// charged for twice: a crypto year never renews. A USDC year used to block
-// card checkout through its 30-day grace, so the renewal notices
-// (service_reminders pro_ending) sent its buyers to a card checkout that
-// refused them (mmm/ONBOARDING-RETENTION.md P17).
+// grants, x402 agent payments and the one-time crypto payments (USDC and SOL
+// on Solana, Monero, Zcash, TAO, Bitcoin, ETH) are not a store subscription
+// the customer would be charged for twice: a crypto year never renews. A USDC
+// year used to block card checkout through its 30-day grace, so the renewal
+// notices (service_reminders pro_ending) sent its buyers to a card checkout
+// that refused them (mmm/ONBOARDING-RETENTION.md P17).
 func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket) bool {
 	for _, market := range markets {
 		switch market {
 		case model.SubscriptionMarketManual, model.SubscriptionMarketX402,
-			model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+			model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
+			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 			continue
 		}
 		return true

@@ -78,14 +78,26 @@ func (self *ProEndingTemplate) TermEndDate() string {
 
 func (self *ProEndingTemplate) AssetName() string {
 	switch self.Asset {
-	case "monero":
+	case model.SubscriptionMarketMonero:
 		return "Monero"
-	case "zcash":
+	case model.SubscriptionMarketZcash:
 		return "Zcash"
+	case model.SubscriptionMarketBittensor:
+		return "TAO"
+	case model.SubscriptionMarketBitcoin:
+		return "Bitcoin"
+	case model.SubscriptionMarketEthereum:
+		return "ETH"
+	case cryptoReminderAssetSol:
+		return "SOL"
 	default:
 		return "USDC"
 	}
 }
+
+// The reminder's asset for a term paid in native SOL: its market is solana,
+// like USDC's, so the reminder names the coin from the invoice.
+const cryptoReminderAssetSol = "solana_sol"
 
 func (self *ProEndingTemplate) RenewUrl() string {
 	return "https://ur.io/app/subscription"
@@ -262,11 +274,7 @@ func stripeHandleSubscriptionTrialWillEnd(object json.RawMessage, clientSession 
 // ----- the daily task -----
 
 // The markets whose Pro is a one-time crypto payment.
-var serviceReminderCryptoMarkets = []string{
-	model.SubscriptionMarketSolana,
-	model.SubscriptionMarketMonero,
-	model.SubscriptionMarketZcash,
-}
+var serviceReminderCryptoMarkets = model.SubscriptionOneTimeCryptoMarkets
 
 // The notices before a crypto Pro stops, in days: both inside the 30-day grace.
 var proEndingNoticeDays = []int{14, 2}
@@ -333,6 +341,9 @@ func ServiceReminders(args *ServiceRemindersArgs, clientSession *session.ClientS
 				TermEndTime: w.EndTime.Add(-manualPaymentGracePeriod),
 				EndTime:     w.EndTime,
 				Asset:       w.Market,
+			}
+			if w.CryptoAsset == model.CryptoAssetSol {
+				template.Asset = cryptoReminderAssetSol
 			}
 			key := fmt.Sprintf("pro_ending/%s/%d/%d", w.NetworkId, w.EndTime.Unix(), days)
 			if !proSend {

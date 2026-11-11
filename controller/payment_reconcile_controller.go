@@ -191,6 +191,13 @@ var zcashReconcileHasCredentials = func() bool {
 	return true
 }
 
+// The TAO, Bitcoin and ETH legs always run, like Monero's and Zcash's: the
+// first reads only our receipts, and the chain legs run when the coin's
+// chain source is in the vault.
+var cryptoRailReconcileHasCredentials = func() bool {
+	return true
+}
+
 // ----- apple App Store Server API client -----
 
 // The only genuinely new credential reconciliation needs: App Store Server
@@ -1083,6 +1090,9 @@ func runPaymentReconciliation(
 		{model.SubscriptionMarketX402, x402ReconcileHasCredentials, reconcileX402},
 		{model.SubscriptionMarketMonero, moneroReconcileHasCredentials, reconcileMonero},
 		{model.SubscriptionMarketZcash, zcashReconcileHasCredentials, reconcileZcash},
+		{model.SubscriptionMarketBittensor, cryptoRailReconcileHasCredentials, reconcileBittensor},
+		{model.SubscriptionMarketBitcoin, cryptoRailReconcileHasCredentials, reconcileBitcoin},
+		{model.SubscriptionMarketEthereum, cryptoRailReconcileHasCredentials, reconcileEthereum},
 	}
 	if 0 < len(options.Stores) {
 		selected := map[string]bool{}
@@ -2472,7 +2482,17 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 	}
 
-	return true, nil
+	// leg 3: the chain itself, for every open USDC intent's reference: a
+	// payment whose Helius delivery was lost is found and credited through the
+	// webhook's own decision (mmm/BTCPAY.md §17.3, closing the gap of §2.5)
+	if complete, err := reconcileSolanaChainReferences(run); err != nil || !complete {
+		return complete, err
+	}
+
+	// leg 4: native SOL invoices, on the rail's own legs (credited from the
+	// chain by the scanner; this re-judges held receipts and re-verifies
+	// credits) under the solana store
+	return reconcileCryptoAsset(run, model.CryptoAssetSol)
 }
 
 func solanaStatusConfirmsPayment(statusErr any, confirmationStatus *string) bool {
@@ -2634,6 +2654,18 @@ func reconcileZcash(run *paymentReconcileRun, since time.Time) (bool, error) {
 	return reconcileCryptoAsset(run, model.CryptoAssetZec)
 }
 
+func reconcileBittensor(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetTao)
+}
+
+func reconcileBitcoin(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetBtc)
+}
+
+func reconcileEthereum(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetEth)
+}
+
 func reconcileCryptoAsset(run *paymentReconcileRun, asset string) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := cryptoAssetMarket(asset)
@@ -2708,8 +2740,14 @@ func reconcileCryptoAsset(run *paymentReconcileRun, asset string) (bool, error) 
 	}
 
 	// leg 2: credited receipts must still be on the chain, by the word of a
-	// wallet that can be trusted to know
-	if 0 < len(toVerify) {
+	// wallet that can be trusted to know. A reader of final transactions only
+	// (TAO's finalized blocks, SOL's finalized commitment) credited nothing
+	// that can leave the chain, so it is not asked again
+	irreversible := false
+	if final, ok := wallet.(cryptoWalletIrreversible); ok {
+		irreversible = final.Irreversible()
+	}
+	if 0 < len(toVerify) && !irreversible {
 		cursor := model.GetCryptoScanCursorInConn(run.connOwner, ctx, asset)
 		refused := ""
 		if err := cryptoCheckWallet(ctx, run.connOwner, asset, wallet); err != nil {
@@ -2943,7 +2981,7 @@ func cryptoReconcileLedger(
 	assetConfig := config.Asset(asset)
 	cursor := model.GetCryptoScanCursorInConn(run.connOwner, ctx, asset)
 	if cursor == nil || cursor.LastSuccessAt == nil || cursor.WalletHeight == nil ||
-		3*config.ScanInterval < run.now.Sub(*cursor.LastSuccessAt) {
+		3*config.ScanIntervalFor(asset) < run.now.Sub(*cursor.LastSuccessAt) {
 		// the scanner is behind; the quote path already stops selling
 		return nil
 	}

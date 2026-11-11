@@ -273,6 +273,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/circle", handlers.CircleWebhook), // todo - deprecate this
 		router.NewRoute("POST", "/pay/play", handlers.PlayWebhook),
 		router.NewRoute("POST", "/pay/solana", handlers.HeliusWebhook),
+		// every Alchemy webhook (ETH Address Activity; Bitcoin's when Alchemy
+		// offers one), routed by its webhook id: a fast path that only brings
+		// the coin's chain read forward (controller/crypto_pay_alchemy.go)
+		router.NewRoute("POST", "/pay/alchemy", handlers.AlchemyWebhook),
 		router.NewRoute("POST", "/solana/payment-intent", handlers.CreateSolanaPaymentIntent),
 		router.NewRoute("POST", "/solana/payment-transaction", handlers.CreateSolanaPaymentTransaction),
 		router.NewRoute("POST", "/stripe/payment-intent", handlers.CreateStripePaymentIntent),
@@ -282,9 +286,11 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		router.NewRoute("POST", "/pay/data/network-lookup", handlers.PayDataNetworkLookup),
 		router.NewRoute("POST", "/pay/data/solana-intent", handlers.PayDataSolanaIntent),
 		router.NewRoute("POST", "/pay/data/solana-status", handlers.PayDataSolanaStatus),
-		// crypto payments (docs/CRYPTO-PAY-API.md): Zcash, Monero and USDC on
-		// one invoice API; the Solana routes above stay for shipped clients
+		// crypto payments (docs/CRYPTO-PAY-API.md): USDC on Solana, Zcash,
+		// Monero, TAO, Bitcoin, ETH and SOL on one invoice API; the Solana
+		// routes above stay for shipped clients
 		router.NewRoute("GET", "/pay/crypto/assets", handlers.CryptoPaymentAssets),
+		router.NewRoute("POST", "/pay/crypto/quote", handlers.CryptoPaymentQuote),
 		router.NewRoute("POST", "/pay/crypto/intent", handlers.CryptoPaymentIntent),
 		router.NewRoute("POST", "/pay/data/crypto-intent", handlers.PayDataCryptoIntent),
 		router.NewRoute("POST", "/pay/crypto/status", handlers.CryptoPaymentStatus),
