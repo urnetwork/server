@@ -454,3 +454,28 @@ func TestH3DialStageTellsSilenceFromAnAnswer(t *testing.T) {
 		}
 	}
 }
+
+// A request deadline that ends the leg while its handshake still hears
+// nothing is the same silence the handshake's own bound reports: dial_quic,
+// not an answered leg's timeout.
+func TestH3LegDeadlineDuringASilentHandshakeIsSilence(t *testing.T) {
+	saved := urlProbeQuicHandshakeIdleTimeout
+	urlProbeQuicHandshakeIdleTimeout = time.Minute
+	t.Cleanup(func() { urlProbeQuicHandshakeIdleTimeout = saved })
+
+	blackhole := startH3TestBlackhole(t)
+	path := &h3TestPacketPath{target: blackhole.conn.LocalAddr().(*net.UDPAddr)}
+	_, client := h3TestClient(t, path, h3TestResolver("203.0.113.7", nil), nil, []string{"h3.example"})
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://h3.example/", nil)
+	response, err := client.Do(request)
+	if response != nil {
+		response.Body.Close()
+		t.Fatal("a provider that drops UDP answered HTTP/3")
+	}
+	var staged interface{ ProviderHttpStage() string }
+	if !errors.As(err, &staged) || staged.ProviderHttpStage() != egresshealth.FailureStageDialQuic || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v; want the request deadline over a silent handshake, classified dial_quic", err)
+	}
+}

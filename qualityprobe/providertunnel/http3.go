@@ -112,6 +112,16 @@ func (self *providerH3RoundTripper) RoundTrip(req *http.Request) (*http.Response
 	response, err := transport.RoundTrip(req)
 	if err != nil {
 		release()
+		// A request deadline that ends the leg while its handshake still
+		// waits returns the context's error, not the dial's. With nothing
+		// back from the site that is the same silence the handshake's own
+		// bound reports, and keeps its stage.
+		var staged *providerHttpStageError
+		var timed interface{ Timeout() bool }
+		if !errors.As(err, &staged) && session.received() == 0 && session.dialed() &&
+			(errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &timed) && timed.Timeout())) {
+			err = &providerHttpStageError{stage: "dial_quic", err: err}
+		}
 		return nil, err
 	}
 	response.Body = &providerH3Body{ReadCloser: response.Body, release: release}
@@ -141,10 +151,29 @@ type providerH3Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	stateLock sync.Mutex
-	closed    bool
-	dials     sync.WaitGroup
-	owned     []io.Closer
+	stateLock   sync.Mutex
+	closed      bool
+	dials       sync.WaitGroup
+	owned       []io.Closer
+	packetConns []*providerH3PacketConn
+}
+
+// Whether a dial of the session opened a UDP socket to the site.
+func (self *providerH3Session) dialed() bool {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	return 0 < len(self.packetConns)
+}
+
+// The datagrams that came back to the session's sockets.
+func (self *providerH3Session) received() int64 {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	var received int64
+	for _, packetConn := range self.packetConns {
+		received += packetConn.received.Load()
+	}
+	return received
 }
 
 func newProviderH3Session(https *providerHttpTransport) *providerH3Session {
@@ -174,8 +203,8 @@ func (self *providerH3Session) dial(ctx context.Context, addr string, _ *tls.Con
 	return self.https.dialQuic(ctx, addr, quicConfig, self.own)
 }
 
-// Records something a dial opened, for close; closes it at once, and says so,
-// when the session is already closed.
+// Records something a dial opened, for close, and a socket also for its count
+// of datagrams; closes it at once, and says so, when the session is closed.
 func (self *providerH3Session) own(closer io.Closer) bool {
 	self.stateLock.Lock()
 	if self.closed {
@@ -184,6 +213,9 @@ func (self *providerH3Session) own(closer io.Closer) bool {
 		return false
 	}
 	self.owned = append(self.owned, closer)
+	if packetConn, ok := closer.(*providerH3PacketConn); ok {
+		self.packetConns = append(self.packetConns, packetConn)
+	}
 	self.stateLock.Unlock()
 	return true
 }
