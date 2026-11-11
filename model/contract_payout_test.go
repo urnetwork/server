@@ -932,11 +932,13 @@ func TestContractParticipantOrphanSweep(t *testing.T) {
 	})
 }
 
-// One extender party of a contract under settlement, described by how its
+// One extender tag of a contract under settlement, described by how its
 // provider identity overlaps the contract's own.
 type contractExtenderPayoutSpec struct {
-	// the extender's provider network is the payer's, so it is the
-	// same-network case the eligibility rule suppresses
+	// the extender's provider network is the payer's. Tagged on the origin,
+	// which is of its own network, it relays nothing and is no party
+	// (contractExtenderInsertSql); tagged on the egress it is a party of the
+	// payer's network, the case the eligibility rule suppresses
 	payerNetwork bool
 	// the extender's provider client is the egress client, so the two roles
 	// collapse to one participant
@@ -952,6 +954,13 @@ type contractExtenderPayoutSpec struct {
 // unchanged. The byte count is odd and the participant counts do not divide it,
 // which keeps the at-most-one-unit remainder observable, and the extenders are
 // attached to alternating sides to show the payout does not depend on the party.
+//
+// An extender tagged on an endpoint of its own network is no hop at all
+// (owner, 2026-11-11): it relays nothing to its own network, so the endpoints
+// split as if it were not there. Before, the payer network's extender on the
+// origin took a share, the egress was paid half the contract, and the other
+// half was paid to no one by the sweep and credited to the payer's own network
+// in the SN usage.
 func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 	useSyntheticIpDb(t)
 
@@ -969,7 +978,7 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				extenders: []contractExtenderPayoutSpec{{}},
 			},
 			{
-				name:      "an extender on the payer network earns nothing",
+				name:      "an extender of the payer's network on its own origin is no hop",
 				extenders: []contractExtenderPayoutSpec{{payerNetwork: true}},
 			},
 			{
@@ -999,6 +1008,8 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				intermediary: true,
 			},
 			{
+				// the one on the origin is no hop; the one on the egress is a
+				// hop of the payer's network, which earns nothing
 				name:      "two extenders on the payer network leave the egress alone",
 				extenders: []contractExtenderPayoutSpec{{payerNetwork: true}, {payerNetwork: true}},
 			},
@@ -1067,12 +1078,16 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 					extenderNetworkId,
 					ip,
 				)
-				endpointId := originClientId
+				endpointId, endpointNetworkId := originClientId, originNetworkId
 				if extenderIndex%2 == 1 {
-					endpointId = egressClientId
+					endpointId, endpointNetworkId = egressClientId, egressNetworkId
 				}
 				extenderEndpointIps[endpointId] = append(extenderEndpointIps[endpointId], ip)
-				addParticipant(extenderClientId, extenderNetworkId)
+				// a tag on an endpoint of the extender's own network relays
+				// nothing and is no party (contractExtenderInsertSql)
+				if extenderNetworkId != endpointNetworkId {
+					addParticipant(extenderClientId, extenderNetworkId)
+				}
 			}
 
 			addContractPayoutTestClients(ctx, clients)
