@@ -892,6 +892,14 @@ func stLedgerV2CachedTree(ctx context.Context, ledgerHash [32]byte, root [32]byt
 		}
 		accounts, err := builder.Accounts(ctx, ledgerHash)
 		if err != nil {
+			// A capture the flag pool's ledger has its own header
+			// (st_ctf_build.go); either kind is checked against the chain
+			// below.
+			if ctfAccounts, ctfErr := stCtfAccounts(ctx, ledgerHash); ctfErr == nil {
+				accounts, err = ctfAccounts, nil
+			}
+		}
+		if err != nil {
 			return nil, err
 		}
 		tree, err := merkle.BuildLedgerSumTree(ctx, accounts)
