@@ -145,3 +145,24 @@ Future Docker-owner entry failures can retain
 and cause digest. The first record is preserved; it contains no raw error or
 private material and cannot reconstruct any older discarded error. Failures
 before the native entrypoint ran still require genuine PID1 evidence.
+
+## Correcting a failed recovery executable
+
+An already retained starting receipt must not be rewritten when a recovery-code
+defect requires a corrected executable. A separately reviewed replacement
+authorization may use `prior_authorization` (the exact root-protected original
+path and digest) and `retained_started_sha256` to resume that same cleanup.
+Only the recovery executable and canonical recovery service pins may differ;
+all original attempt, clock, approval, ingress, owner-denial and source facts
+must remain identical. A missing starting receipt, changed prior authority or
+another amendment in the chain refuses recovery.
+
+Keep the original authorization, executable, starting receipt and failed
+operation receipts intact. The owner-denial condition continues referencing the
+original authorization path, which must remain present. The new native role
+authenticates both authorities and the retained starting bytes before cleanup,
+and rechecks them before publishing a closure. The closure records the new and
+prior authorization digests plus the original starting-receipt digest. This is
+not permission to replay an operator helper, restart an evaluator, grant a retry
+or extend an evaluation deadline. Native proof and the full cleanup chain are
+unchanged.
