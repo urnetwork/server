@@ -6104,6 +6104,10 @@ func (self PostgresStore) GetJob(ctx context.Context, settings *Settings, jobId 
 }
 
 func (self PostgresStore) Readiness(ctx context.Context, settings *Settings) (checks map[string]bool, err error) {
+	settings, err = self.competitionReadinessExecutionSettings(ctx, settings)
+	if err != nil {
+		return nil, err
+	}
 	checks = map[string]bool{
 		"configuration":                true,
 		"frozen_policy":                true,

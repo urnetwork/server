@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 )
 
 // Exercise the real register/read boundary with a new image and fingerprint.
@@ -53,6 +54,20 @@ func TestCompetitionSecurityToolchainReadinessPgAuthenticatesExecutionHeartbeat(
 		}
 		if h, a, r := counts(&api); h != 1 || a != 1 || r != 1 {
 			tb.Fatal("authenticated execution image lost API readiness", h, a, r)
+		}
+		// Info and Readyz first call Store.Readiness with the API-purpose
+		// settings; the later lifecycle projection owns a different copy.
+		// This composed boundary must independently authenticate the decision.
+		outer := api
+		outer.readinessSecurityToolchainException = nil
+		outer.intakeFirstActivation = &model.CompetitionSourceIntakeActivation{TargetRoundId: f.round.RoundId, TargetEpoch: 2}
+		service := newServiceWithImageDigest(&outer, f.store, testApiImageDigest(), nil)
+		checks, err := service.readinessChecks(tb.Context(), &outer)
+		if err != nil || !checks["authoritative_evaluator_host"] || !checks["artifact_storage"] || !checks["host_rebaseline"] {
+			tb.Fatal("outer public readiness lost the genuine execution heartbeat", checks, err)
+		}
+		if outer.readinessSecurityToolchainException != nil || outer.EvaluatorImageDigest != approval.PreviousEvaluatorImageDigest {
+			tb.Fatal("shared readiness mutated its caller's frozen settings")
 		}
 		if api.EvaluatorImageDigest != approval.PreviousEvaluatorImageDigest || api.securityToolchainException != nil || api.EvaluationPolicy.SimulatorSha256 != approval.PreviousInstrumentSha256 {
 			tb.Fatal("heartbeat authority rewrote the frozen control or enabled execution")
