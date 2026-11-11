@@ -4,7 +4,8 @@ package onboarding
 
 // The proposals of mmm/ONBOARDING-RETENTION.md section 8 that the owner
 // approved on 2026-11-10 and that live in the campaign engine: P7 (a late
-// in-app offer's last-chance email waits for its last day).
+// in-app offer's last-chance email waits for its last day) and P18 (a desktop
+// habit email where E2's widget email has nothing to point at).
 
 import (
 	"testing"
@@ -166,5 +167,97 @@ func TestNextStepWaitsAfterASend(t *testing.T) {
 				t.Errorf("path %s, %s after %s: %s, want %s", path, next, step, got.In(ny), want.In(ny))
 			}
 		}
+	}
+}
+
+// P18: E2's widget email skips windows, linux and web, which have no widget
+// (2026-11-10, e38589c28), so a connected desktop reader got nothing on day 3.
+// It gets the desktop habit email now: the app started with the computer, or
+// on the web the linked extension pinned to the toolbar. Only once the
+// release has uploaded its template: until then the step skips as before.
+func TestE2DesktopEmail(t *testing.T) {
+	for _, c := range []struct {
+		platform    string
+		widgetAdded bool
+		template    bool
+		want        string
+	}{
+		{"windows", false, true, VariantDesktop},
+		{"linux", false, true, VariantDesktop},
+		{"web", true, true, VariantDesktop},
+		// the web reader connects through the extension; without it linked
+		// the pin line would name something they lack
+		{"web", false, true, ""},
+		// not uploaded yet
+		{"windows", false, false, ""},
+		{"linux", false, false, ""},
+		{"web", true, false, ""},
+		// the widget platforms keep the widget email, and skip once a widget
+		// exists
+		{"ios", false, true, VariantActivated},
+		{"android", false, true, VariantActivated},
+		{"macos", false, true, VariantActivated},
+		{"", false, true, VariantActivated},
+		{"ios", true, true, ""},
+		{"macos", true, true, ""},
+	} {
+		f := healthy(PathB)
+		f.Platform = c.platform
+		f.HasConnected = true
+		f.WidgetAdded = c.widgetAdded
+		f.DesktopTemplate = c.template
+		d := Decide(StepE2, f)
+		if c.want == "" {
+			if d.Action != ActionSkip || d.NextStep != StepE3 {
+				t.Errorf("e2 on %q (widget %t, desktop template %t): %+v, want a skip", c.platform, c.widgetAdded, c.template, d)
+			}
+		} else if d.Action != ActionSend || d.Template != TemplateE2Widget || d.Variant != c.want || d.NextStep != StepE3 {
+			t.Errorf("e2 on %q (widget %t, desktop template %t): %+v, want %s", c.platform, c.widgetAdded, c.template, d, c.want)
+		}
+		// a reader who never connected gets the connect nudge, everywhere
+		f.HasConnected = false
+		if d := Decide(StepE2, f); d.Action != ActionSend || d.Variant != VariantNotActivated {
+			t.Errorf("e2 not activated on %q: %+v", c.platform, d)
+		}
+	}
+}
+
+// The desktop email's params: the activated line's counts, and which branch
+// (the browser's extension or the app's start with the computer).
+func TestE2DesktopParams(t *testing.T) {
+	in := ParamsInput{
+		Template: TemplateE2Widget, Variant: VariantDesktop, Locale: "en",
+		DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
+		Location: time.UTC, Now: time.Date(2026, 11, 13, 15, 0, 0, 0, time.UTC),
+		Token: "T", SiteUrl: "https://ur.io/", CompanyLine: "co",
+	}
+	for _, browser := range []bool{true, false} {
+		in.Browser = browser
+		p := BuildParams(in)
+		want := map[string]string{
+			"cta_url": "https://ur.io/o/widgets?t=T", "connect_days": "2", "days_active": "3",
+			"providers_online": "4,812", "countries_online": "91", "company_line": "co", "browser": "",
+		}
+		if browser {
+			want["browser"] = "1"
+		}
+		if len(p) != len(want) {
+			t.Errorf("browser %t: params %v, want %v", browser, p, want)
+		}
+		for k, v := range want {
+			if p[k] != v {
+				t.Errorf("browser %t: %s = %q, want %q", browser, k, p[k], v)
+			}
+		}
+	}
+	// the line quotes both counts: with either unknown it is left out
+	in.CountriesOnline = 0
+	if p := BuildParams(in); p["providers_online"] != "" || p["countries_online"] != "" {
+		t.Errorf("unknown country count: %v", p)
+	}
+	// a first day still reads "2 of your first 2 days" at most
+	in.DaysActive, in.ConnectDays = 0, 5
+	if p := BuildParams(in); p["connect_days"] != "2" || p["days_active"] != "2" {
+		t.Errorf("first days: %v", p)
 	}
 }

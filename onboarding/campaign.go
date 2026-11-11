@@ -48,6 +48,10 @@ const (
 	VariantActivated    = "activated"
 	VariantNotActivated = "not_activated"
 	VariantEngaged      = "engaged"
+	// E2's habit email on a platform without a widget (windows, linux, web):
+	// the browser extension pinned to the toolbar, or the app started with
+	// the computer (mmm/ONBOARDING-RETENTION.md P18)
+	VariantDesktop = "desktop"
 )
 
 // Openings of the shared last-chance template (params.opening).
@@ -191,6 +195,9 @@ type Facts struct {
 	// while that moment lies ahead: an in-app offer issued after sign-up
 	// still has days left on E3a's day 4, and E3a waits for it
 	LastChanceAt *time.Time
+	// the desktop habit email (e2_widget/desktop) has a Brevo template: until
+	// the release uploads it, a desktop network's E2 is skipped as before
+	DesktopTemplate bool
 	// an answer to the feedback step: the app's feedback form
 	// (account_feedback, feedback.submitted) or a one-tap answer from the
 	// feedback email (feedback.tapped)
@@ -265,8 +272,9 @@ const PlatformWeb = "web"
 // WidgetPlatform reports whether the platform's app has a widget for E2's
 // activated email to point at: the iOS and Android apps, and the macOS app
 // (the apple widgets target builds for macOS too). The Windows and Linux apps
-// and the web have none. An unknown platform ("") keeps the email, as
-// before: Android app rows were often recorded without a platform.
+// and the web have none; they get the desktop email (VariantDesktop). An
+// unknown platform ("") keeps the widget email, as before: Android app rows
+// were often recorded without a platform.
 func WidgetPlatform(platform string) bool {
 	switch platform {
 	case "windows", "linux", PlatformWeb:
@@ -347,10 +355,22 @@ func Decide(step string, f Facts) Decision {
 		}
 		return send(TemplateE1Connect, VariantDefault)
 	case StepE2:
-		// day 3: activated -> the widget habit unless a widget exists or the
-		// platform has none; not activated -> another connect nudge
+		// day 3: activated -> the widget habit unless a widget exists, or on
+		// a platform without one the desktop habit; not activated -> another
+		// connect nudge
 		if f.HasConnected {
-			if f.WidgetAdded || !WidgetPlatform(f.Platform) {
+			if !WidgetPlatform(f.Platform) {
+				// windows and linux: the desktop email, the app started with
+				// the computer; the web: the extension pinned to the toolbar,
+				// once the extension is linked (widget.added on the web). Each
+				// once its template is uploaded (mmm/ONBOARDING-RETENTION.md
+				// P18)
+				if f.DesktopTemplate && (f.Platform != PlatformWeb || f.WidgetAdded) {
+					return send(TemplateE2Widget, VariantDesktop)
+				}
+				return skip
+			}
+			if f.WidgetAdded {
 				return skip
 			}
 			return send(TemplateE2Widget, VariantActivated)

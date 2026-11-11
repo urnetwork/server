@@ -400,9 +400,12 @@ func TestParamsMatchManifests(t *testing.T) {
 		Platform: "iPhone", StoreBilled: true, DailyDataGb: 30, DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
 		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99, TrialDays: 14,
 		Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
+		// the desktop email's browser branch (TestE2DesktopParams has the app's)
+		Browser: true,
 	}
 	for _, tv := range [][2]string{
 		{TemplateE1Connect, VariantDefault}, {TemplateE2Widget, VariantActivated}, {TemplateE2Widget, VariantNotActivated},
+		{TemplateE2Widget, VariantDesktop},
 		{TemplateE3LastChance, VariantDefault}, {TemplateE4Feedback, VariantEngaged}, {TemplateE4Feedback, VariantNotActivated},
 		{TemplateE4bOffer, VariantDefault},
 	} {

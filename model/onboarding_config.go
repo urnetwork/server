@@ -141,6 +141,19 @@ func (c *OnboardingBrevoConfig) TemplateIdLocale(step string, variant string, lo
 	return 0, "", false
 }
 
+// HasTemplateVariant reports whether the step's variant itself has an uploaded
+// template in some locale, without the `default` fallback: a new variant
+// (e2_widget/desktop) goes only once the release has uploaded it and written
+// its ids.
+func (c *OnboardingBrevoConfig) HasTemplateVariant(step string, variant string) bool {
+	for _, id := range c.Templates[step][variant] {
+		if 0 < id {
+			return true
+		}
+	}
+	return false
+}
+
 // TemplateLocaleCandidates orders the locales to try for a recipient: the exact
 // tag, the store locale its region reads (onboarding.RegionalStoreLocale:
 // zh-TW and zh-Hant read zh-HK, es-AR reads es-419, pt-AO reads pt-PT), its
