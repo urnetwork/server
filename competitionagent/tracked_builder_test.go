@@ -53,7 +53,7 @@ if [[ "$role" == --host-operation ]]; then
       printf 'synthetic verified bytes' > "$SYNTHETIC_BUILD_ROOT/assembly/sim-latency"
       hash="$(sha256sum "$SYNTHETIC_BUILD_ROOT/assembly/sim-latency")"; hash="${hash%% *}"
       size="$(stat -c %s "$SYNTHETIC_BUILD_ROOT/assembly/sim-latency")"
-      printf '{"sha256":"%s","bytes":%s,"go_version":"go1.27.3","go_package":"github.com/urnetwork/server/connect/sim-latency","vcs_revision":"%s","vcs_modified":"false"}\n' "$hash" "$size" "$SYNTHETIC_REVISION"
+      printf '{"sha256":"%s","bytes":%s,"go_version":"go1.27.4","go_package":"github.com/urnetwork/server/connect/sim-latency","vcs_revision":"%s","vcs_modified":"false"}\n' "$hash" "$size" "$SYNTHETIC_REVISION"
       ;;
     *) exit 91 ;;
   esac
