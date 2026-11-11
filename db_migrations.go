@@ -11405,4 +11405,7 @@ var migrations = []any{
 	// tables. Nothing existing is locked or rewritten. Apply before deploying
 	// the api and the taskworker that use them.
 	newSqlMigration(gammaPaySchemaSql),
+
+	// One approved host-admission replacement; original clocks stay append-only.
+	newSqlMigration(CompetitionExecutorQualificationRecoveryMigrationSql()),
 }
