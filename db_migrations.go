@@ -11409,6 +11409,19 @@ var migrations = []any{
 	// One approved host-admission replacement; original clocks stay append-only.
 	newSqlMigration(CompetitionExecutorQualificationRecoveryMigrationSql()),
 
+	// Explicit operator admission over exact failed retained evidence; no resampling.
+	newSqlMigration(CompetitionExecutorAdmissionExceptionMigrationSql()),
+
+	// The distribution each network's onboarding platform came with
+	// (db_network_onboarding_distribution.go, mmm/ONBOARDING-RETENTION.md P6):
+	// what the app reported in X-UR-ClientInfo at sign-up or when its device
+	// authenticated, which tells the App Store Mac from the direct-download
+	// Mac. A constant default: a catalog change, no table rewrite, under a
+	// five-second lock bound. Old binaries name their columns, so they neither
+	// read nor write it. Apply before deploying the api, alt and taskworker
+	// that use it.
+	newSqlMigration(networkOnboardingDistributionSql),
+
 	// Per-cycle Pro grants (db_pro_grant_cycle.go, PRO-GRANT-CYCLE.md): a
 	// nullable column on subscription_renewal and one new empty table, under
 	// a five-second lock bound. Nothing existing is rewritten. Apply before

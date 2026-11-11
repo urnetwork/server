@@ -946,6 +946,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
 	// the provider zero-carry verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
+	// the onboarding platform's distribution, versioned by its position
+	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
 	// the per-cycle Pro grants, versioned by their position
 	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 )
