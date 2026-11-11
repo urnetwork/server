@@ -940,12 +940,23 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the exact-URL TLS finding verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerEgressTlsVerdictMigrationContract},
 	// the pending review handoff ledger, with the intake-first custody it
-	// carries on; versioned by its position
-	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract},
+	// carries on; versioned by its position. The official review (below)
+	// re-creates two winner-review bodies this custody pins and the review
+	// identity body it carries, and carries the rest of it on from its own
+	// version.
+	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract.removedAt(server.CompetitionOfficialReviewMigrationVersion())},
 	// the URL outcome catalog source and probation, versioned by its position
 	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
 	// the provider zero-carry verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
+	// the epoch-one official review authorization, with the handoff custody it
+	// carries on; versioned by its position. The executor control amendment
+	// (below) re-creates the equivalence guard and intake grading readiness
+	// this custody carries, and carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{competitionOfficialReviewMigrationContract.removedAt(server.CompetitionExecutorControlAmendmentMigrationVersion())},
+	// the operator's executor control amendment, with the official review
+	// custody it carries on; versioned by its position
+	[]snMainnetMigrationContract{competitionExecutorControlAmendmentMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

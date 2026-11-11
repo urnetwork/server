@@ -175,13 +175,27 @@ func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArt
 	if handoff <= successor || next.removedVersion != handoff {
 		t.Fatal("intake-first custody does not transfer at the registered review handoff boundary")
 	}
-	last := migrationCurrentSuffixTestContract(t, handoff).artifact
+	handoffArtifact := migrationCurrentSuffixTestContract(t, handoff).artifact
+	official := server.CompetitionOfficialReviewMigrationVersion()
+	if official <= handoff || handoffArtifact.removedVersion != official {
+		t.Fatal("review handoff custody does not transfer at the registered official review boundary")
+	}
+	officialArtifact := migrationCurrentSuffixTestContract(t, official).artifact
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	if control <= official || officialArtifact.removedVersion != control {
+		t.Fatal("official review custody does not transfer at the registered executor control boundary")
+	}
+	last := migrationCurrentSuffixTestContract(t, control).artifact
 	if last.removedVersion != 0 {
-		t.Fatal("review handoff custody has an unreviewed successor")
+		t.Fatal("executor control custody has an unreviewed successor")
 	}
 	switch {
-	case head >= handoff:
+	case head >= control:
 		return last
+	case head >= official:
+		return officialArtifact
+	case head >= handoff:
+		return handoffArtifact
 	case head >= successor:
 		return next
 	}
@@ -191,9 +205,15 @@ func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArt
 func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
 	successor := server.CompetitionIntakeFirstMigrationVersion()
 	handoff := server.CompetitionReviewHandoffMigrationVersion()
-	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff} {
+	official := server.CompetitionOfficialReviewMigrationVersion()
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff, official - 1, official, control - 1, control} {
 		want := 846
 		switch {
+		case head >= control:
+			want = control
+		case head >= official:
+			want = official
 		case head >= handoff:
 			want = handoff
 		case head >= successor:
@@ -210,12 +230,14 @@ func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
 func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
 	successor := server.CompetitionIntakeFirstMigrationVersion()
 	handoff := server.CompetitionReviewHandoffMigrationVersion()
+	official := server.CompetitionOfficialReviewMigrationVersion()
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
 	faults := []string{
 		`DROP INDEX competition_source_reserved_round`,
 		`CREATE OR REPLACE FUNCTION competition_v2_source_target_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
 	}
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
-		for _, head := range []int{846, successor - 1, successor, handoff} {
+		for _, head := range []int{846, successor - 1, successor, handoff, official, control} {
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
 			if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
 				tb.Fatalf("healthy owner prefix %d drift: %s", head, drift)

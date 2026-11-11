@@ -74,11 +74,19 @@ func TestMigrationsCompetitionIntakeFirstActualCatalogFaults(t *testing.T) {
 			server.Tx(ctx, func(tx server.PgTx) { server.RaisePgResult(tx.Exec(ctx, server.CompetitionIntakeFirstMigrationSql())) }, server.OptReadWrite())
 		}
 		query := competitionIntakeFirstCatalogTestQuery(tb)
-		if handoff := server.CompetitionReviewHandoffMigrationVersion(); handoff != 0 && handoff <= actualHead {
-			// The review handoff re-created three winner-review bodies this
-			// custody pins and carries the rest of it on, so at its head the
-			// intake custody is the handoff's.
-			query = snMainnetMigrationProbePrefix(tb) + "SELECT " + competitionReviewHandoffMigrationContract.query
+		// The review handoff re-created three winner-review bodies this custody
+		// pins, the official review two of those and the review identity body,
+		// and the executor control amendment the equivalence guard and the
+		// grading readiness. Each carries the rest of its predecessor on, so
+		// at the head the intake custody is the latest of them that applied.
+		for _, successor := range []snMainnetMigrationContract{
+			competitionReviewHandoffMigrationContract,
+			competitionOfficialReviewMigrationContract,
+			competitionExecutorControlAmendmentMigrationContract,
+		} {
+			if version := successor.artifact.requiredVersion; version != 0 && version <= actualHead {
+				query = snMainnetMigrationProbePrefix(tb) + "SELECT " + successor.query
+			}
 		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var healthy bool

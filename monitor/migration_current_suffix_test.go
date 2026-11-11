@@ -51,6 +51,12 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 }
 
 func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
+	// The executor control amendment carries the official review's custody on,
+	// which carries the review handoff's: at the head it owns their faults.
+	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	handoffBodies := server.CompetitionReviewHandoffBodiesSql()
+	_, _, _, _, twoMemberIdentityGuard, _, _, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
+	_, _, _, unamendedEquivalenceGuard, _ := server.CompetitionDistributedEvaluationBodiesSql()
 	faults := []struct {
 		name    string
 		version int
@@ -236,9 +242,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "invented device client version", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version SET DEFAULT 'synthetic-version'`},
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
 		// the intake-first custody of these guards moved to the review handoff,
-		// which re-created their functions
-		{name: "elected-winner review guard dropped", version: server.CompetitionReviewHandoffMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
-		{name: "elected-winner checkpoint guard dropped", version: server.CompetitionReviewHandoffMigrationVersion(), sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
+		// which re-created their functions, and on with the handoff's custody
+		// to the official review and the executor control amendment
+		{name: "elected-winner review guard dropped", version: control, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
+		{name: "elected-winner checkpoint guard dropped", version: control, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
 		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
 		{name: "nullable post-quantum declaration", version: 894, sql: `ALTER TABLE provide_capability ALTER COLUMN post_quantum_encryption DROP NOT NULL`},
 		{name: "provider capability declarations without their key", version: 894, sql: `ALTER TABLE provide_capability DROP CONSTRAINT provide_capability_pkey`},
@@ -317,20 +324,21 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_egress_health DROP COLUMN legacy_tls_recheck_from`},
 		// The pending review handoff: an owner, call or completion row only
 		// through its guard, an append-only ledger, an operator-only import,
-		// and the exact winner-review bodies it re-created.
-		{name: "review handoff owner guard disabled", version: server.CompetitionReviewHandoffMigrationVersion(),
+		// and the exact winner-review bodies it re-created. The official review
+		// and then the executor control amendment carry this custody on.
+		{name: "review handoff owner guard disabled", version: control,
 			sql: `ALTER TABLE competition_review_handoff DISABLE TRIGGER competition_review_handoff_before_insert`},
-		{name: "review handoff calls made mutable", version: server.CompetitionReviewHandoffMigrationVersion(),
+		{name: "review handoff calls made mutable", version: control,
 			sql: `DROP TRIGGER competition_review_handoff_call_immutable ON competition_review_handoff_call`},
-		{name: "review handoff call kinds widened", version: server.CompetitionReviewHandoffMigrationVersion(),
+		{name: "review handoff call kinds widened", version: control,
 			sql: `ALTER TABLE competition_review_handoff_call DROP CONSTRAINT competition_review_handoff_call_kind_check`},
-		{name: "review handoff decision made repeatable", version: server.CompetitionReviewHandoffMigrationVersion(),
+		{name: "review handoff decision made repeatable", version: control,
 			sql: `ALTER TABLE competition_review_handoff DROP CONSTRAINT competition_review_handoff_round_id_decision_sha256_key`},
-		{name: "pending review import unguarded", version: server.CompetitionReviewHandoffMigrationVersion(),
+		{name: "pending review import unguarded", version: control,
 			sql: `DROP TRIGGER competition_review_handoff_import_before_insert ON competition_integrity_review`},
-		{name: "pending review observed at any time", version: server.CompetitionReviewHandoffMigrationVersion(),
+		{name: "pending review observed at any time", version: control,
 			sql: `CREATE OR REPLACE FUNCTION competition_review_handoff_observed(review_json jsonb, legacy_created_at timestamp) RETURNS timestamp LANGUAGE plpgsql STABLE AS 'BEGIN RETURN legacy_created_at; END'`},
-		{name: "winner source authorization accepts any handoff", version: server.CompetitionReviewHandoffMigrationVersion(),
+		{name: "winner source authorization accepts any handoff", version: control,
 			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_source_authorized(intent jsonb, predecessor_id uuid) RETURNS boolean LANGUAGE plpgsql AS 'BEGIN RETURN true; END'`},
 		// An older release's outcome must read as the scored general outcome
 		// it was counted as; a probation default would take every outcome an
@@ -367,6 +375,50 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_zero_carry DROP CONSTRAINT provider_zero_carry_pkey`},
 		{name: "zero-carry upgrade evidence missing", version: server.ProviderZeroCarryVersion(),
 			sql: `ALTER TABLE provider_zero_carry DROP COLUMN client_version`},
+		// The epoch-one official review: an authorization row only through its
+		// guard and never changed, bound to its round, and the exact review
+		// bodies it re-created with the official review exception, so the
+		// handoff's winner review body and the two-member identity body are
+		// drift from it on. The executor control amendment carries this
+		// custody on.
+		{name: "official review authorization unguarded", version: control,
+			sql: `DROP TRIGGER competition_official_review_authorization_before_insert ON competition_official_review_authorization`},
+		{name: "official review authorization made mutable", version: control,
+			sql: `DROP TRIGGER competition_official_review_immutable ON competition_official_review_authorization`},
+		{name: "official review authorization without its round", version: control,
+			sql: `ALTER TABLE competition_official_review_authorization DROP CONSTRAINT competition_official_review_authorization_round_id_fkey`},
+		{name: "official review findings accept anything", version: control,
+			sql: `CREATE OR REPLACE FUNCTION competition_official_review_findings_valid(request jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE PARALLEL SAFE AS 'SELECT true'`},
+		{name: "official review authorized without its import", version: control,
+			sql: `CREATE OR REPLACE FUNCTION competition_official_review_request_authorized(round_uuid uuid, request jsonb) RETURNS boolean LANGUAGE sql STABLE AS 'SELECT true'`},
+		{name: "winner review guard back on the handoff body", version: control,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_winner_review_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(handoffBodies.WinnerReviewGuard)},
+		{name: "review identity guard back on the two-member body", version: control,
+			sql: `CREATE OR REPLACE FUNCTION competition_v2_review_identity_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(twoMemberIdentityGuard)},
+		// The executor control amendment: an amendment only through its guard,
+		// never changed or truncated, its canonical bytes bound to its JSON; a
+		// no-op receipt and a qualification clock bound to the current
+		// amendment; the amended host identity and its started-job lookup; and
+		// the exact equivalence guard it re-created, so the unamended host
+		// lookup is drift from it on.
+		{name: "executor control amendment unguarded", version: control,
+			sql: `DROP TRIGGER competition_executor_control_amendment_identity ON competition_executor_control_amendment`},
+		{name: "executor control amendment made mutable", version: control,
+			sql: `DROP TRIGGER competition_executor_control_amendment_append_only ON competition_executor_control_amendment`},
+		{name: "executor control amendment truncatable", version: control,
+			sql: `ALTER TABLE competition_executor_control_amendment DISABLE TRIGGER competition_executor_control_amendment_no_truncate`},
+		{name: "executor control amendment canonical bytes unbound", version: control,
+			sql: `ALTER TABLE competition_executor_control_amendment DROP CONSTRAINT competition_executor_control_amendment_check`},
+		{name: "no-op receipt ignores the amendment", version: control,
+			sql: `DROP TRIGGER competition_executor_control_receipt_identity ON competition_executor_equivalence`},
+		{name: "stale coordinator starts a host-admission clock", version: control,
+			sql: `ALTER TABLE competition_executor_qualification_run DISABLE TRIGGER competition_executor_control_qualification_identity`},
+		{name: "amended host identity ignored", version: control,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_host(target uuid, identity text) RETURNS jsonb LANGUAGE sql STABLE AS 'SELECT NULL::jsonb'`},
+		{name: "started job lookup missing", version: control,
+			sql: `DROP INDEX competition_executor_control_started_job`},
+		{name: "equivalence guard back on the unamended host lookup", version: control,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(unamendedEquivalenceGuard)},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
