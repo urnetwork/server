@@ -758,13 +758,27 @@ func TestGammaSettingsParsing(t *testing.T) {
 	connect.AssertEqual(t, settings.MaxFeeRao, uint64(gammaDefaultMaxFeeRao))
 	connect.AssertEqual(t, settings.EraPeriod, uint64(64))
 	connect.AssertEqual(t, settings.IntentTtl, gammaDefaultIntentTtl)
+	connect.AssertEqual(t, settings.canSign, true)
+
+	// the api's copy may leave the seed out: it serves, and cannot bill
+	serving, err := parseGammaSettings(gammaTestYaml(func(y *gammaYaml) {
+		y.Gamma.BillingKeySeed = ""
+		y.Gamma.BillingAddress = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connect.AssertEqual(t, serving.canSign, false)
+	connect.AssertEqual(t, serving.BillingPublicKey, settings.BillingPublicKey)
+	connect.AssertEqual(t, serving.DepositHotkeyMaster, settings.DepositHotkeyMaster)
 
 	for _, test := range []struct {
 		name   string
 		mutate func(*gammaYaml)
 		key    string
 	}{
-		{"no billing key", func(y *gammaYaml) { y.Gamma.BillingKeySeed = "" }, "billing_key_seed"},
+		{"no billing key or address", func(y *gammaYaml) { y.Gamma.BillingKeySeed = ""; y.Gamma.BillingAddress = "" }, "billing_key_seed"},
+		{"a serving copy with a bad billing address", func(y *gammaYaml) { y.Gamma.BillingKeySeed = ""; y.Gamma.BillingAddress = "5Gx" }, "billing_address"},
 		{"billing address of another key", func(y *gammaYaml) { y.Gamma.BillingAddress = "5CyQFykVpfa9xgZVGgBsiNUpjbo1EihBTSkPvDC1FZbL1wxG" }, "billing_address"},
 		{"no spender", func(y *gammaYaml) { y.Gamma.Spender = "" }, "spender"},
 		{"the billing key as the spender", func(y *gammaYaml) { y.Gamma.Spender = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY" }, "spender"},

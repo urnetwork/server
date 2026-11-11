@@ -346,6 +346,25 @@ func TestGammaUnavailableUntilTheOnChainSetupExists(t *testing.T) {
 		f := newGammaDbFixture(t)
 		ctx := f.ctx
 		_, _, clientSession := cryptoDbTestNetwork(t, ctx, "gammasetup")
+
+		// a serving copy of gamma.yml (no billing seed) never bills, but
+		// serves: an api host does not need the billing key
+		serving, err := parseGammaSettings(gammaTestYaml(func(y *gammaYaml) {
+			y.Gamma.BillingKeySeed = ""
+			y.Gamma.BillingAddress = f.settings.BillingAddress
+			y.Gamma.DepositHotkeyMaster = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY"
+			y.Gamma.RpcUrls = []string{"sim://gamma"}
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		restoreServing := setGammaSettingsForTest(serving, nil)
+		result := f.run()
+		connect.AssertEqual(t, result.Configured, false)
+		connect.AssertEqual(t, result.Readiness, gammaNotConfigured)
+		connect.AssertEqual(t, len(f.sim.submitted), 0)
+		restoreServing()
+
 		for _, test := range []struct {
 			setup func()
 			want  string

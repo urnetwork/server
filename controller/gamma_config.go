@@ -92,7 +92,9 @@ type gammaYaml struct {
 
 // gammaSettings is gamma.yml, checked.
 type gammaSettings struct {
-	billingKey       signature.KeyringPair
+	billingKey signature.KeyringPair
+	// the billing key's seed is present: this process can bill
+	canSign          bool
 	BillingPublicKey [32]byte
 	BillingAddress   string
 	// the public key every deposit hotkey derives from
@@ -138,19 +140,32 @@ func parseGammaSettings(y *gammaYaml) (*gammaSettings, error) {
 	}
 	settings := &gammaSettings{}
 
+	// The seed is needed only where the biller runs (the taskworker). The api
+	// and alt serve from the public fields, so their copy may leave it out
+	// and name billing_address instead.
+	var err error
 	seed := strings.TrimSpace(g.BillingKeySeed)
-	if seed == "" {
-		return nil, missing("billing_key_seed")
-	}
-	billingKey, err := signature.KeyringPairFromSecret(seed, model.BittensorSS58Prefix)
-	if err != nil || len(billingKey.PublicKey) != 32 {
-		return nil, invalid("billing_key_seed")
-	}
-	settings.billingKey = billingKey
-	copy(settings.BillingPublicKey[:], billingKey.PublicKey)
-	settings.BillingAddress = billingKey.Address
-	if address := strings.TrimSpace(g.BillingAddress); address != "" && address != settings.BillingAddress {
-		return nil, fmt.Errorf("%w: %s: gamma.billing_address is not the address of gamma.billing_key_seed", errGammaNotConfigured, gammaVaultResource)
+	if seed != "" {
+		billingKey, err := signature.KeyringPairFromSecret(seed, model.BittensorSS58Prefix)
+		if err != nil || len(billingKey.PublicKey) != 32 {
+			return nil, invalid("billing_key_seed")
+		}
+		settings.billingKey = billingKey
+		settings.canSign = true
+		copy(settings.BillingPublicKey[:], billingKey.PublicKey)
+		settings.BillingAddress = billingKey.Address
+		if address := strings.TrimSpace(g.BillingAddress); address != "" && address != settings.BillingAddress {
+			return nil, fmt.Errorf("%w: %s: gamma.billing_address is not the address of gamma.billing_key_seed", errGammaNotConfigured, gammaVaultResource)
+		}
+	} else {
+		address := strings.TrimSpace(g.BillingAddress)
+		if address == "" {
+			return nil, missing("billing_key_seed")
+		}
+		if settings.BillingPublicKey, err = model.DecodeBittensorAddress(address); err != nil {
+			return nil, invalid("billing_address")
+		}
+		settings.BillingAddress = address
 	}
 
 	if strings.TrimSpace(g.DepositHotkeyMaster) == "" {

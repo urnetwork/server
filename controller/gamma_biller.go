@@ -183,6 +183,15 @@ func RunGammaBiller(clientSession *session.ClientSession) (result *GammaBillerRe
 		})
 		return result, nil
 	}
+	if !settings.canSign {
+		// a serving copy of gamma.yml (no billing_key_seed): nothing here bills
+		result.Readiness = gammaNotConfigured
+		gammaRecordReadiness(ctx, nil, gammaNotConfigured, gammaNotConfigured, nil)
+		gammaReports.report("no_billing_key", func() {
+			glog.Infof("[gamma]not configured: gamma.yml names no billing_key_seed, so this process does not bill\n")
+		})
+		return result, nil
+	}
 	result.Configured = true
 	result.Interval = settings.RunInterval
 	endpoints := settings.Endpoints()
