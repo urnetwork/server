@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -71,6 +72,12 @@ crypto_pay:
   scan_interval: 20s
 `
 
+// cryptoTestMainConfigWithCoinbaseCoins is the production file with the
+// entries that switch TAO, Bitcoin, ETH and SOL on.
+func cryptoTestMainConfigWithCoinbaseCoins() string {
+	return strings.Replace(cryptoTestMainConfigYaml, "  assets:\n", "  assets:\n"+cryptoTestCoinbaseEntriesYaml, 1)
+}
+
 func cryptoTestParseConfig(t testing.TB, yaml string) *CryptoPayConfig {
 	t.Helper()
 	pop := server.Config.PushSimpleResource("crypto_pay.yml", []byte(yaml))
@@ -82,12 +89,43 @@ func cryptoTestParseConfig(t testing.TB, yaml string) *CryptoPayConfig {
 	return parseCryptoPayConfig(resource)
 }
 
-// A crypto_pay.yml that leaves the Coinbase coins out switches them on with
-// everything a coin sells, at the coins' own decimals, buffers, depths and
-// cadences (mmm/BTCPAY.md §17.4, §17.7). CoinGecko is dropped for every coin
-// but Monero, which keeps it as its second source.
-func TestCryptoCoinbaseCoinsAreOnWithTheirDefaults(t *testing.T) {
-	config := cryptoTestParseConfig(t, cryptoTestMainConfigYaml)
+// The entries that switch the Coinbase coins on: what each sells, and nothing
+// else (the coin's own defaults do the rest).
+const cryptoTestCoinbaseEntriesYaml = `    tao:
+      enabled: true
+      plans: [yearly, yearly_onboarding]
+      items: [data_1tib, data_10tib]
+    btc:
+      enabled: true
+      plans: [yearly, yearly_onboarding]
+      items: [data_1tib, data_10tib]
+    eth:
+      enabled: true
+      plans: [yearly, yearly_onboarding]
+      items: [data_1tib, data_10tib]
+    sol:
+      enabled: true
+      plans: [yearly, yearly_onboarding]
+      items: [data_1tib, data_10tib]
+`
+
+// A crypto_pay.yml that leaves the Coinbase coins out has no policy for them:
+// they are not listed, sold, scanned or reconciled, and no deposit address is
+// asked of Coinbase, until the release that switches a coin on names it. A
+// file that names them with what they sell gets each coin's own decimals,
+// buffers, depths and cadences (mmm/BTCPAY.md §17.4, §17.7). CoinGecko is
+// dropped for every coin but Monero, which keeps it as its second source.
+func TestCryptoCoinbaseCoinsWaitForTheirEntry(t *testing.T) {
+	left := cryptoTestParseConfig(t, cryptoTestMainConfigYaml)
+	for _, asset := range cryptoPayCoinbaseAssets {
+		connect.AssertEqual(t, left.Asset(asset), (*CryptoPayAssetConfig)(nil))
+		connect.AssertEqual(t, cryptoAssetSwitchedOn(left, asset), false)
+		connect.AssertEqual(t, cryptoAssetScannable(left, asset) != nil, true)
+	}
+	// the wallet-daemon coins keep their policies as the file names them
+	connect.AssertEqual(t, left.Asset(model.CryptoAssetXmr).Enabled, true)
+
+	config := cryptoTestParseConfig(t, cryptoTestMainConfigWithCoinbaseCoins())
 	for _, asset := range []string{model.CryptoAssetTao, model.CryptoAssetBtc, model.CryptoAssetEth, model.CryptoAssetSol} {
 		assetConfig := config.Asset(asset)
 		if assetConfig == nil {
@@ -136,27 +174,37 @@ func TestCryptoCoinbaseCoinsAreOnWithTheirDefaults(t *testing.T) {
 	connect.AssertEqual(t, config.MaxOpenCodeIntentsFor(model.CryptoAssetXmr), 100)
 	connect.AssertEqual(t, config.MaxOpenCodeIntentsFor(model.CryptoAssetBtc), cryptoCoinbasePoolTarget/2)
 
-	// a file that names a coin keeps its own switch
+	// a file that names a coin off keeps its own switch: not sold, but its
+	// open invoices are still scanned and credited; the coins it leaves out
+	// stay dormant
 	named := cryptoTestParseConfig(t, strings.Replace(cryptoTestMainConfigYaml, "  assets:\n", "  assets:\n    btc:\n      enabled: false\n", 1))
 	connect.AssertEqual(t, named.Asset(model.CryptoAssetBtc).Enabled, false)
-	connect.AssertEqual(t, named.Asset(model.CryptoAssetTao).Enabled, true)
+	connect.AssertEqual(t, named.Asset(model.CryptoAssetTao), (*CryptoPayAssetConfig)(nil))
 
-	// no file at all is every coin off
+	// no file at all is every coin off, and the Coinbase coins dormant
 	empty := &CryptoPayConfig{}
 	empty.normalize()
-	connect.AssertEqual(t, empty.Asset(model.CryptoAssetBtc).Enabled, false)
-	connect.AssertEqual(t, empty.Asset(model.CryptoAssetTao).Enabled, false)
+	connect.AssertEqual(t, empty.Asset(model.CryptoAssetXmr).Enabled, false)
+	connect.AssertEqual(t, empty.Asset(model.CryptoAssetBtc), (*CryptoPayAssetConfig)(nil))
+	connect.AssertEqual(t, empty.Asset(model.CryptoAssetTao), (*CryptoPayAssetConfig)(nil))
 }
 
-// The production file, as committed in the config repo, reads the same way.
-func TestCryptoMainConfigSwitchesTheCoinbaseCoinsOn(t *testing.T) {
+// The production file, as committed in the config repo, reads the same way:
+// a Coinbase coin it names is on mainnet with the coin's own defaults, and
+// one it leaves out is dormant until the release that switches it on.
+func TestCryptoMainConfigReadsTheCoinbaseCoins(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "config", "main", "crypto_pay.yml"))
 	if err != nil {
 		t.Skipf("config/main is not beside the server checkout: %s", err)
 	}
 	config := cryptoTestParseConfig(t, string(data))
 	for _, asset := range cryptoPayCoinbaseAssets {
-		connect.AssertEqual(t, config.Asset(asset).Enabled, true)
+		if assetConfig := config.Asset(asset); assetConfig != nil {
+			connect.AssertEqual(t, assetConfig.Network, cryptoNetworkMainnet)
+			connect.AssertEqual(t, config.AddressPoolTargetFor(asset), cryptoCoinbasePoolTarget)
+		} else {
+			connect.AssertEqual(t, cryptoAssetScannable(config, asset) != nil, true)
+		}
 	}
 	connect.AssertEqual(t, config.Asset(model.CryptoAssetXmr).RateSources, []string{cryptoRateSourceKraken, cryptoRateSourceCoingecko})
 }
@@ -164,7 +212,7 @@ func TestCryptoMainConfigSwitchesTheCoinbaseCoinsOn(t *testing.T) {
 // Quotes at each coin's decimals: Bitcoin to the satoshi, the others to 6
 // decimals, TAO with its 1% buffer.
 func TestCryptoCoinbaseCoinsQuoteMath(t *testing.T) {
-	config := cryptoTestParseConfig(t, cryptoTestMainConfigYaml)
+	config := cryptoTestParseConfig(t, cryptoTestMainConfigWithCoinbaseCoins())
 	quote := func(asset string, priceUsd float64, rateUsd float64) int64 {
 		t.Helper()
 		amount, ok := cryptoAssetQuoteAmountAtomic(asset, priceUsd, rateUsd, config.BufferPercentFor(asset))
@@ -327,7 +375,7 @@ func (self *cryptoTestCoinbaseRates) FetchExchangeRates(ctx context.Context, cur
 // lately is not judged, one whose sources were just asked and left fewer than
 // two fresh answers that agree is unavailable, and it never asks a source.
 func TestCryptoListedRatesAreJudgedFromTheCacheAlone(t *testing.T) {
-	config := cryptoTestParseConfig(t, cryptoTestMainConfigYaml)
+	config := cryptoTestParseConfig(t, cryptoTestMainConfigWithCoinbaseCoins())
 	fetches := 0
 	previousFetchers := cryptoRateFetchers
 	cryptoRateFetchers = map[string]cryptoRateFetch{
@@ -492,7 +540,7 @@ func TestCryptoCoinbaseCoinAddressForms(t *testing.T) {
 // The status of an overpaid invoice says how much more arrived; the review a
 // sanctions screen holds reads "screening" to the buyer.
 func TestCryptoStatusShowsExcessAndScreening(t *testing.T) {
-	config := cryptoTestParseConfig(t, cryptoTestMainConfigYaml)
+	config := cryptoTestParseConfig(t, cryptoTestMainConfigWithCoinbaseCoins())
 	intent := cryptoTestCoinIntent(model.CryptoAssetBtc, "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u", 54622)
 	intentId := intent.IntentId
 	height := int64(975000)
@@ -518,4 +566,54 @@ func TestCryptoStatusShowsExcessAndScreening(t *testing.T) {
 	connect.AssertEqual(t, status.ReviewReason, model.CryptoReviewReasonTransferShape)
 	statusJson, _ := json.Marshal(status)
 	connect.AssertEqual(t, strings.Contains(string(statusJson), `"excess":"0.00005378","excess_atomic":"5378","network":"bitcoin"`), true)
+}
+
+// Until crypto_pay.yml names a Coinbase coin it is dormant, even with every
+// vault file in place: no deposit address is asked of Coinbase, no chain is
+// read, it is in neither list, and a quote or an invoice is refused.
+func TestCryptoCoinbaseCoinsLeftOutAskNothing(t *testing.T) {
+	fake, coinbaseSettings := cryptoTestCoinbase(t)
+	for _, code := range []string{"TAO", "ETH", "SOL"} {
+		fake.accounts[code] = "33333333-3333-3333-3333-333333333333"
+	}
+	// the production file, which names none of them
+	restoreConfig := setCryptoPayConfigForTest(cryptoTestParseConfig(t, cryptoTestMainConfigYaml))
+	t.Cleanup(restoreConfig)
+	previousSettings := cryptoWalletSettingsFunc
+	previousWalletFor := cryptoWalletFor
+	walletsBuilt := 0
+	cryptoWalletSettingsFunc = func(asset string) (*cryptoWalletSettings, error) {
+		// every vault file complete
+		return &cryptoWalletSettings{Asset: asset, ChainRpcUrl: "http://127.0.0.1:1/v2/synthetic", ChainProfile: cryptoNetworkMainnet, Coinbase: coinbaseSettings}, nil
+	}
+	cryptoWalletFor = func(asset string, settings *cryptoWalletSettings, assetConfig *CryptoPayAssetConfig) (cryptoWallet, error) {
+		walletsBuilt += 1
+		return previousWalletFor(asset, settings, assetConfig)
+	}
+	t.Cleanup(func() {
+		cryptoWalletSettingsFunc = previousSettings
+		cryptoWalletFor = previousWalletFor
+	})
+	restoreSeams := cryptoTestHermeticSeams()
+	t.Cleanup(restoreSeams)
+	resetCryptoAvailability()
+	t.Cleanup(resetCryptoAvailability)
+
+	clientSession := &session.ClientSession{Ctx: context.Background()}
+	for _, asset := range cryptoPayCoinbaseAssets {
+		refill, err := RunCryptoAddressRefill(clientSession, asset)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, refill.Configured, false)
+		scan, err := RunCryptoPaymentScan(clientSession, asset)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, scan.Configured, false)
+		connect.AssertEqual(t, cryptoAssetEnabled(cryptoPayConfigFunc(), asset), false)
+	}
+	connect.AssertEqual(t, len(fake.created), 0)
+	connect.AssertEqual(t, fake.accountReads, 0)
+	connect.AssertEqual(t, walletsBuilt, 0)
+	available, unavailable := cryptoPaymentAssets(context.Background(), cryptoPayConfigFunc())
+	for _, listed := range append(available, unavailable...) {
+		connect.AssertEqual(t, slices.Contains(cryptoPayCoinbaseAssets, listed.Asset), false)
+	}
 }

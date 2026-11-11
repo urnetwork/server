@@ -373,6 +373,14 @@ func (self *fakeSolanaChainLookups) intentsByAmountMicro(amountMicro int64, minE
 func TestHeliusNativeBranchHintsInvoiceAddresses(t *testing.T) {
 	restore := cryptoTestHermeticSeams()
 	t.Cleanup(restore)
+	// native SOL switched on (crypto_pay.yml names it)
+	config := cryptoTestConfig()
+	config.Assets[model.CryptoAssetSol] = &CryptoPayAssetConfig{
+		Enabled: true,
+		Plans:   []string{model.SolanaPlanYearly},
+		Items:   []string{StripeItemData1Tib},
+	}
+	t.Cleanup(setCryptoPayConfigForTest(config))
 	invoices := []string{solanaFixtureWallet}
 	cryptoInvoiceAddresses = func(ctx context.Context, asset string, addresses []string) []string {
 		connect.AssertEqual(t, asset, model.CryptoAssetSol)
@@ -422,6 +430,20 @@ func TestHeliusNativeBranchHintsInvoiceAddresses(t *testing.T) {
 	result, err = HeliusWebhook(transactions, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, result.Message, "Ignoring transaction with no token transfers")
+
+	// native SOL not switched on (crypto_pay.yml leaves it out): the branch
+	// asks nothing
+	t.Cleanup(setCryptoPayConfigForTest(cryptoTestConfig()))
+	asked := 0
+	invoices = []string{solanaFixtureWallet}
+	cryptoInvoiceAddresses = func(ctx context.Context, asset string, addresses []string) []string {
+		asked += 1
+		return addresses
+	}
+	result, err = HeliusWebhook(transactions, clientSession)
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, result.Message, "Ignoring transaction with no token transfers")
+	connect.AssertEqual(t, asked, 0)
 }
 
 // solanaChainLegTest installs the chain leg's seams for one test.

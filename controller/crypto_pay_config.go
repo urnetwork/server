@@ -269,10 +269,14 @@ func (self *CryptoPayConfig) normalize() {
 	if self.Assets == nil {
 		self.Assets = map[string]*CryptoPayAssetConfig{}
 	}
-	// a scanned coin the file leaves out is off, with the default policy: its
-	// scanner still runs when its daemon is in the vault
+	// a wallet-daemon coin (Zcash, Monero) the file leaves out is off, with
+	// the default policy: its scanner still runs when its daemon is in the
+	// vault. A Coinbase coin (TAO, Bitcoin, ETH, SOL) the file leaves out has
+	// no policy at all: it is not sold, scanned or reconciled, and no
+	// deposit address is asked of Coinbase. The release that switches one on
+	// adds its entry (cryptoPayCoinbaseAssets, docs/CRYPTO-PAY-API.md).
 	for _, asset := range cryptoPayScannedAssets {
-		if self.Assets[asset] == nil {
+		if self.Assets[asset] == nil && !cryptoAssetCoinbase(asset) {
 			self.Assets[asset] = &CryptoPayAssetConfig{}
 		}
 	}
@@ -537,31 +541,8 @@ func parseCryptoPayConfig(resource *server.SimpleResource) *CryptoPayConfig {
 		return config
 	}
 	config := &y.CryptoPay
-	cryptoPayDefaultOnAssets(config)
 	config.normalize()
 	return config
-}
-
-// cryptoPayDefaultOnAssets switches on, with every plan and item, each
-// Coinbase coin a parsed crypto_pay.yml leaves out: those coins turn on when
-// their backend is configured and healthy, with no switch to remember
-// (mmm/BTCPAY.md §17, the owner's "no hidden settings"). A file that names a
-// coin keeps its own `enabled`, which stays the kill switch. A missing or
-// malformed file is still every coin off.
-func cryptoPayDefaultOnAssets(config *CryptoPayConfig) {
-	if config.Assets == nil {
-		config.Assets = map[string]*CryptoPayAssetConfig{}
-	}
-	for _, asset := range cryptoPayCoinbaseAssets {
-		if _, named := config.Assets[asset]; named {
-			continue
-		}
-		config.Assets[asset] = &CryptoPayAssetConfig{
-			Enabled: true,
-			Plans:   slices.Clone(cryptoPayKnownPlans),
-			Items:   slices.Clone(cryptoPayKnownItems),
-		}
-	}
 }
 
 // BufferPercentFor is the quote buffer of a coin, percent.

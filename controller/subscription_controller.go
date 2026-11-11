@@ -2679,6 +2679,10 @@ func HeliusWebhook(
 // failed lookup is logged, never the delivery's failure: the scan still reads
 // every open invoice.
 func heliusHintNativeInvoices(clientSession *session.ClientSession, transaction *SolanaTransaction) (hinted int) {
+	if cryptoPayConfigFunc().Asset(model.CryptoAssetSol) == nil {
+		// native SOL is not switched on: there is no SOL invoice to hint
+		return 0
+	}
 	destinations := []string{}
 	for _, nativeTransfer := range transaction.NativeTransfers {
 		if nativeTransfer.Amount <= 0 || nativeTransfer.ToUserAccount == "" {
