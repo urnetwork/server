@@ -260,6 +260,14 @@ attempts:
 		attemptCtx, stop := bound(ctx, signal)
 		if self.opts.UrlProbe {
 			result = fetchUrlProbe(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts)
+			if d.H3 {
+				result.H3Required = true
+				if result.Ok {
+					// The same slot, the same provider and the same loss
+					// signal: the leg is part of this attempt.
+					result = joinUrlProbeH3(result, fetchUrlProbeH3(attemptCtx, client, d, self.perRequestTimeout, self.profile, self.opts))
+				}
+			}
 		} else {
 			result = fetchWithExitPolicy(attemptCtx, client, d, self.requestTimeout(client), self.profile, self.opts.now, self.opts.exitAddressAllowed)
 		}
@@ -287,6 +295,11 @@ attempts:
 		// Partial bodies and missing clocks still lack measurement authority.
 		if self.opts.UrlProbe && !result.NotMeasured && result.BodyComplete &&
 			(result.FailureStage == "response_content" || result.FailureStage == "response_performance") {
+			tunnelGone = false
+		}
+		// The same holds for an HTTP/3 leg's fully received response.
+		if leg := result.H3; self.opts.UrlProbe && leg != nil && !result.NotMeasured && result.FailureStage == FailureStageH3 &&
+			leg.BodyComplete && (leg.FailureStage == "response_content" || leg.FailureStage == "response_performance") {
 			tunnelGone = false
 		}
 	}

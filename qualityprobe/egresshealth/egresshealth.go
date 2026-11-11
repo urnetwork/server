@@ -267,6 +267,13 @@ type Destination struct {
 	// (CheckResult.Canary) -- so the server can tell when the site works there
 	// again. Where the destination is compatible it changes nothing.
 	Canary bool `json:"canary,omitempty"`
+	// Declares that the URL serves the same probe over HTTP/3 (QUIC over UDP).
+	// A URL probe of such a destination makes the HTTPS (TCP) fetch and then
+	// the same request over HTTP/3 through the same provider, under the same
+	// contract, and the load passes only when both do (url_h3.go). False, the
+	// default and what a catalog entry without the key means, keeps the HTTPS
+	// fetch the whole judgement.
+	H3 bool `json:"h3,omitempty"`
 }
 
 // The ceiling on any single body read, and the clamp on
@@ -445,6 +452,23 @@ type CheckResult struct {
 	// the server's request (Destination.Canary): unscored, and reported apart
 	// so the server keeps it out of the counts.
 	Canary bool
+	// Set when a URL probe loaded a destination that declares HTTP/3
+	// (Destination.H3): Ok then needs the HTTP/3 leg too.
+	H3Required bool
+	// The HTTP/3 (QUIC over UDP) leg of an H3Required load: the same request
+	// and contract through the same provider, made only once the HTTPS leg
+	// passed. Nil when the destination declares no HTTP/3 or the HTTPS leg
+	// failed. Every other field of this result describes the HTTPS leg; when
+	// this leg fails, Ok is false, FailureStage is FailureStageH3, Err names
+	// this leg's error, and its own stage is H3.FailureStage (url_h3.go).
+	H3 *CheckResult
+}
+
+// Whether the HTTPS (TCP) leg of the load passed, whatever its HTTP/3 leg
+// did: what the site's own health at this exit is judged by. Ok is the
+// load's verdict. An HTTP/3 leg is only ever made after the HTTPS leg passed.
+func (self CheckResult) HttpsOk() bool {
+	return self.Ok || self.H3 != nil
 }
 
 // The ok/total tally for one class.
@@ -826,6 +850,11 @@ func SamplePerRunOf(dests []Destination) int {
 // last attempt off every chain that drew long delays -- a load failed for the
 // prober's arithmetic, not the provider's traffic -- and one far longer would
 // hold a swallowing provider's tunnel open for nothing.
+//
+// A URL probe attempt of a destination that declares HTTP/3 makes its HTTP/3
+// leg in the same slot right after its HTTPS leg, bounded by one more
+// per-request timeout (url_h3.go), so in URL mode every attempt round is
+// counted twice: any drawn URL may declare it.
 func (self Options) RunBudget(loads int) time.Duration {
 	if loads < 1 {
 		loads = 1
@@ -833,7 +862,11 @@ func (self Options) RunBudget(loads int) time.Duration {
 	concurrency := self.concurrency()
 	rounds := (loads + concurrency - 1) / concurrency
 	attempts := self.loadAttempts()
-	budget := time.Duration(attempts*rounds) * self.perRequestTimeout()
+	legs := 1
+	if self.UrlProbe {
+		legs = 2
+	}
+	budget := time.Duration(attempts*rounds*legs) * self.perRequestTimeout()
 	budget += time.Duration(attempts-1) * retryDelayCapFactor * self.loadRetryMeanInterval()
 	generations := 1 + self.tunnelRecreateAttempts()
 	budget += time.Duration(generations) * max(0, self.coldStartTimeout()-self.perRequestTimeout())
@@ -1452,7 +1485,7 @@ func (self *Result) FailureStageSummary() string {
 }
 
 func failureStageSummary(checks []CheckResult) string {
-	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended", "unknown"}
+	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", FailureStageH3, "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended", "unknown"}
 	counts := map[string]int{}
 	for _, check := range checks {
 		if check.Ok {
@@ -1460,7 +1493,7 @@ func failureStageSummary(checks []CheckResult) string {
 		}
 		stage := check.FailureStage
 		switch stage {
-		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended":
+		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", FailureStageH3, "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended":
 		default:
 			stage = "unknown"
 		}
@@ -1470,6 +1503,46 @@ func failureStageSummary(checks []CheckResult) string {
 	for _, stage := range order {
 		if count := counts[stage]; count > 0 {
 			parts = append(parts, fmt.Sprintf("%s:%d", stage, count))
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+// The HTTP/3 leg outcomes of a run's loads whose destination declares HTTP/3,
+// finite and identity-free like FailureStageSummary: ok, skipped (the HTTPS
+// leg failed first, so no leg was made), not_measured, or the failed leg's
+// own stage, each with its count. Empty when no load declared HTTP/3.
+func (self *Result) H3Summary() string {
+	if self == nil {
+		return ""
+	}
+	order := []string{"ok", "skipped", "not_measured", FailureStageDialQuic, FailureStageQuic, "tls", "dial_dns", "dial_dns_or_socket", "policy", "redirect_policy", "redirect_limit", "redirect_location", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_eof", "request_unknown", "response_encoding", "response_body", "response_content", "response_performance", "unknown"}
+	known := map[string]bool{}
+	for _, outcome := range order {
+		known[outcome] = true
+	}
+	counts := map[string]int{}
+	for _, check := range self.Checks {
+		if !check.H3Required || check.Canary {
+			continue
+		}
+		outcome := "unknown"
+		switch leg := check.H3; {
+		case leg == nil:
+			outcome = "skipped"
+		case leg.NotMeasured:
+			outcome = "not_measured"
+		case leg.Ok:
+			outcome = "ok"
+		case known[leg.FailureStage]:
+			outcome = leg.FailureStage
+		}
+		counts[outcome]++
+	}
+	parts := make([]string, 0, len(counts))
+	for _, outcome := range order {
+		if count := counts[outcome]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", outcome, count))
 		}
 	}
 	return strings.Join(parts, ",")

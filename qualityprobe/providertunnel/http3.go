@@ -1,0 +1,329 @@
+// A URL request's HTTP/3 leg: the same request as its HTTPS leg, over QUIC on
+// a UDP socket of the provider tunnel's own stack. It is what tells a
+// provider that carries UDP from one that carries only TCP.
+package providertunnel
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptrace"
+	"net/netip"
+	"net/url"
+	"strconv"
+	"sync"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
+
+	"github.com/urnetwork/connect"
+)
+
+// The leg's QUIC bounds, in line with its HTTPS leg's (url_phase_timeout.go).
+//
+// The handshake idle bound is the HTTPS leg's TCP connect bound. quic-go
+// aborts a handshake that hears nothing from the peer for that long, and one
+// that has not completed in twice it, which is the HTTPS leg's connect and
+// TLS bounds together. A provider path that carries no UDP answers no QUIC
+// Initial, so the leg fails at the first bound, well inside its request
+// timeout and the turn's slot. It is a var so a test can shorten it.
+var urlProbeQuicHandshakeIdleTimeout = urlProbeTcpTimeout
+
+// After the handshake a connection that hears nothing for the HTTPS leg's
+// read-idle bound is over, as a stalled HTTPS read is.
+const urlProbeQuicIdleTimeout = urlProbeReadIdleTimeout
+
+// The largest QUIC datagram the probe tunnel's IPv4 link carries in one
+// packet: its 1280-byte MTU (connect.DefaultMtu, server.CapServerTunIPv4) less
+// the IPv4 and UDP headers. quic-go's default first packet (1280 bytes of UDP
+// payload) would need IP fragmentation, and path MTU discovery would probe
+// past the link; both are kept off the provider path. QUIC's 1200-byte
+// minimum for a client's first datagram still holds.
+const urlProbeQuicPacketSize = connect.DefaultMtu - 20 - 8
+
+// A fresh QUIC configuration per leg: one version, as HTTP/3 dialing needs, no
+// session resumption, no 0-RTT, no keep-alive, and nothing that outlives the
+// one request.
+func providerUrlProbeQuicConfig() *quic.Config {
+	return &quic.Config{
+		Versions:                []quic.Version{quic.Version1},
+		HandshakeIdleTimeout:    urlProbeQuicHandshakeIdleTimeout,
+		MaxIdleTimeout:          urlProbeQuicIdleTimeout,
+		InitialPacketSize:       urlProbeQuicPacketSize,
+		DisablePathMTUDiscovery: true,
+	}
+}
+
+// Implements egresshealth's HTTP/3 transport hook: a round tripper for one
+// URL request's HTTP/3 leg through this transport's tunnel, admitted,
+// resolved and verified exactly as its HTTPS requests are. Nil when the
+// transport was built over a bare dialer, which has no UDP path.
+func (self *providerHttpTransport) ProviderUrlProbeH3RoundTripper() http.RoundTripper {
+	if self == nil || self.dialPacket == nil || self.resolver == nil {
+		return nil
+	}
+	return &providerH3RoundTripper{https: self}
+}
+
+// One URL request's HTTP/3 transport. Every RoundTrip dials its own QUIC
+// connection on its own UDP socket, and releases both when its response body
+// is closed or the request fails: no connection is reused, as the HTTPS
+// leg's keep-alives are off. The probes egresshealth asks of a transport are
+// answered by the HTTPS transport of the same tunnel.
+type providerH3RoundTripper struct {
+	https *providerHttpTransport
+}
+
+// Implements egresshealth's per-request URL grant, as the HTTPS leg's.
+func (self *providerH3RoundTripper) ProviderUrlProbeContext(ctx context.Context, target *url.URL, redirect bool) (context.Context, error) {
+	return self.https.ProviderUrlProbeContext(ctx, target, redirect)
+}
+
+func (self *providerH3RoundTripper) ProviderMeasurementUnavailable() bool {
+	return self.https.ProviderMeasurementUnavailable()
+}
+
+func (self *providerH3RoundTripper) ProviderContractAcquisitionUnavailable() bool {
+	return self.https.ProviderContractAcquisitionUnavailable()
+}
+
+func (self *providerH3RoundTripper) ProviderLocalWriteUnavailable() bool {
+	return self.https.ProviderLocalWriteUnavailable()
+}
+
+// Sends one request over a QUIC connection of its own. The transport's Dial is
+// always set, so http3 never opens a socket of the host's: the leg's only
+// datagrams are the tunnel's.
+func (self *providerH3RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	session := newProviderH3Session(self.https)
+	transport := &http3.Transport{
+		Dial:               session.dial,
+		QUICConfig:         providerUrlProbeQuicConfig(),
+		DisableCompression: true,
+	}
+	release := func() {
+		transport.Close()
+		session.close()
+	}
+	response, err := transport.RoundTrip(req)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	response.Body = &providerH3Body{ReadCloser: response.Body, release: release}
+	return response, nil
+}
+
+// A response body that releases its request's QUIC connection and UDP socket
+// when it is closed.
+type providerH3Body struct {
+	io.ReadCloser
+	once    sync.Once
+	release func()
+}
+
+func (self *providerH3Body) Close() error {
+	err := self.ReadCloser.Close()
+	self.once.Do(self.release)
+	return err
+}
+
+// What one HTTP/3 request owns: the dials http3 makes for it (one, or two
+// when it retries a refused request), and each dial's QUIC transport and UDP
+// socket. Close cancels a dial still in flight, joins it, and closes what the
+// dials opened, newest first.
+type providerH3Session struct {
+	https  *providerHttpTransport
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	stateLock sync.Mutex
+	closed    bool
+	dials     sync.WaitGroup
+	owned     []io.Closer
+}
+
+func newProviderH3Session(https *providerHttpTransport) *providerH3Session {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &providerH3Session{https: https, ctx: ctx, cancel: cancel}
+}
+
+// Implements http3.Transport.Dial for this request.
+func (self *providerH3Session) dial(ctx context.Context, addr string, _ *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
+	admitted := func() bool {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		if self.closed {
+			return false
+		}
+		self.dials.Add(1)
+		return true
+	}()
+	if !admitted {
+		return nil, net.ErrClosed
+	}
+	defer self.dials.Done()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stop := context.AfterFunc(self.ctx, cancel)
+	defer stop()
+	return self.https.dialQuic(ctx, addr, quicConfig, self.own)
+}
+
+// Records something a dial opened, for close; closes it at once, and says so,
+// when the session is already closed.
+func (self *providerH3Session) own(closer io.Closer) bool {
+	self.stateLock.Lock()
+	if self.closed {
+		self.stateLock.Unlock()
+		closer.Close()
+		return false
+	}
+	self.owned = append(self.owned, closer)
+	self.stateLock.Unlock()
+	return true
+}
+
+func (self *providerH3Session) close() {
+	var owned []io.Closer
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		self.closed = true
+		owned = self.owned
+		self.owned = nil
+	}()
+	self.cancel()
+	self.dials.Wait()
+	// a QUIC transport first, so its read loop stops before its socket closes
+	for i := len(owned) - 1; 0 <= i; i-- {
+		owned[i].Close()
+	}
+}
+
+// Dials one QUIC connection to addr through the tunnel. It admits the host as
+// the HTTPS leg's DialTLSContext does (admitTls), resolves it through the
+// tunnel's own resolver to the same public IPv4 answers, and opens a UDP
+// socket of the tunnel's stack connected to the first of them, on the URL's
+// port: a URL probe's target is confined to 443 by its grant
+// (ProviderUrlProbeContext), as the HTTPS leg's is. The TLS handshake
+// verifies the chain by WebPKI and the same pins. The request's trace sees
+// the target's DNS, then the handshake as both the connection and the TLS
+// interval: QUIC sets up its transport and TLS together.
+func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, quicConfig *quic.Config, own func(io.Closer) bool) (*quic.Conn, error) {
+	host, portText, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, &providerHttpStageError{stage: "policy", err: err}
+	}
+	port, err := strconv.ParseUint(portText, 10, 16)
+	if err != nil || port == 0 {
+		return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider HTTP/3 request has no valid port")}
+	}
+	tlsPins, _, err := self.admitTls(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+
+	trace := httptrace.ContextClientTrace(ctx)
+	resolveCtx, dialTrace := traceProviderHttpDial(ctx, "udp", addr)
+	addrs, err := self.resolver.resolve(resolveCtx, addr, dialTrace)
+	if stage := dialTrace.finish(err); err != nil {
+		var staged *providerHttpStageError
+		if errors.As(err, &staged) {
+			return nil, err
+		}
+		return nil, &providerHttpStageError{stage: stage, err: err}
+	}
+	if len(addrs) == 0 {
+		return nil, &providerHttpStageError{stage: "dial_dns", err: errors.New("provider URL resolution returned no address")}
+	}
+	remote := netip.AddrPortFrom(addrs[0], uint16(port))
+
+	raw, err := self.dialPacket(ctx, "udp4", remote.String())
+	if err != nil {
+		return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
+	}
+	packetConn := &providerH3PacketConn{Conn: raw, remote: net.UDPAddrFromAddrPort(remote)}
+	if !own(packetConn) {
+		return nil, net.ErrClosed
+	}
+	transport := &quic.Transport{Conn: packetConn}
+	if !own(transport) {
+		return nil, net.ErrClosed
+	}
+
+	tlsConfig := PinnedTlsConfigForHost(tlsPins, host)
+	tlsConfig.NextProtos = []string{http3.NextProtoH3}
+	if trace != nil && trace.ConnectStart != nil {
+		trace.ConnectStart("udp", remote.String())
+	}
+	if trace != nil && trace.TLSHandshakeStart != nil {
+		trace.TLSHandshakeStart()
+	}
+	conn, err := transport.Dial(ctx, packetConn.remote, tlsConfig, quicConfig)
+	var state tls.ConnectionState
+	if conn != nil {
+		state = conn.ConnectionState().TLS
+	}
+	if trace != nil && trace.TLSHandshakeDone != nil {
+		trace.TLSHandshakeDone(state, err)
+	}
+	if trace != nil && trace.ConnectDone != nil {
+		trace.ConnectDone("udp", remote.String(), err)
+	}
+	if err != nil {
+		if stage := providerQuicDialStage(err); stage != "" {
+			return nil, &providerHttpStageError{stage: stage, err: err}
+		}
+		return nil, err
+	}
+	return conn, nil
+}
+
+// The stage a failed QUIC handshake reports. A handshake that heard nothing in
+// time, or ran out of its request's deadline, is dial_quic: a provider path
+// that does not carry UDP ends there. A certificate or TLS alert is tls, as
+// on the HTTPS leg, and its error still unwraps to the verification failure.
+// Any other refusal is quic. A canceled dial keeps its own classification.
+func providerQuicDialStage(err error) string {
+	var handshakeTimeout *quic.HandshakeTimeoutError
+	var idleTimeout *quic.IdleTimeoutError
+	var transportErr *quic.TransportError
+	switch {
+	case errors.Is(err, context.Canceled):
+		return ""
+	case errors.As(err, &handshakeTimeout), errors.As(err, &idleTimeout), errors.Is(err, context.DeadlineExceeded):
+		return "dial_quic"
+	case errors.As(err, &transportErr) && transportErr.ErrorCode.IsCryptoError():
+		return "tls"
+	default:
+		return "quic"
+	}
+}
+
+// A connected UDP socket of the tunnel's stack as the net.PacketConn quic-go
+// reads and writes: every datagram goes to, and comes only from, the one
+// address it was connected to.
+type providerH3PacketConn struct {
+	net.Conn
+	remote *net.UDPAddr
+}
+
+func (self *providerH3PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, err := self.Conn.Read(p)
+	return n, self.remote, err
+}
+
+func (self *providerH3PacketConn) WriteTo(p []byte, _ net.Addr) (int, error) {
+	return self.Conn.Write(p)
+}
+
+// quic-go asks for larger socket buffers. The tun sizes its UDP endpoints
+// itself (connect.TunSettings), so the request is accepted as it stands.
+func (self *providerH3PacketConn) SetReadBuffer(int) error  { return nil }
+func (self *providerH3PacketConn) SetWriteBuffer(int) error { return nil }
+
+var _ net.PacketConn = (*providerH3PacketConn)(nil)

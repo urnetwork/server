@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 var urlProbeTurns = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -34,6 +35,60 @@ var urlProbeOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_url_probe_outcomes_total",
 	Help: "Acknowledged measured URL outcomes by success or error",
 }, []string{"outcome"})
+
+// The two legs of acknowledged URL loads, kept apart so the share of providers
+// that carry TCP but not UDP is visible. urlProbeOutcomes counts the verdict,
+// which for a URL that declares HTTP/3 needs both legs.
+var urlProbeTransportOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_transport_outcomes_total",
+	Help: "Measured URL loads of acknowledged outcomes by transport leg: tcp is every load's HTTPS leg (success or error); udp is the HTTP/3 leg of a URL that declares it (success, error, not_measured, or skipped when its HTTPS leg failed first and no leg was made). Such a URL passes only with both legs",
+}, []string{"transport", "outcome"})
+
+// URL turns the HTTP/3 common-mode guard held back: their only failure was
+// the HTTP/3 leg while no recent network's HTTP/3 leg passed
+// (provider_url_probe_common_mode.go).
+var urlProbeH3CommonModeHeld = prometheus.NewCounter(prometheus.CounterOpts{
+	Name: "urnetwork_url_probe_h3_common_mode_held_total",
+	Help: "URL turns held back from provider history because their only failure was the HTTP/3 leg while no recently measured network's HTTP/3 leg passed: the platform's QUIC path, not each provider's UDP",
+})
+
+// The label pairs urlProbeTransportOutcomes can carry.
+var urlProbeTransportOutcomeLabels = [...][2]string{
+	{"tcp", "success"}, {"tcp", "error"},
+	{"udp", "success"}, {"udp", "error"}, {"udp", "not_measured"}, {"udp", "skipped"},
+}
+
+// Counts each load's legs: its HTTPS leg when it was measured, and its HTTP/3
+// leg when its URL declares one. A canary, and a load whose HTTPS leg was not
+// measured, says nothing about either transport.
+func observeUrlProbeTransportOutcomes(result *egresshealth.Result) {
+	if result == nil {
+		return
+	}
+	for _, check := range result.Checks {
+		if check.Canary || (check.NotMeasured && check.H3 == nil) {
+			continue
+		}
+		tcp := "error"
+		if check.HttpsOk() {
+			tcp = "success"
+		}
+		urlProbeTransportOutcomes.WithLabelValues("tcp", tcp).Inc()
+		if !check.H3Required {
+			continue
+		}
+		udp := "error"
+		switch leg := check.H3; {
+		case leg == nil:
+			udp = "skipped"
+		case leg.NotMeasured:
+			udp = "not_measured"
+		case leg.Ok:
+			udp = "success"
+		}
+		urlProbeTransportOutcomes.WithLabelValues("udp", udp).Inc()
+	}
+}
 
 var urlProbeTurnSeconds = prometheus.NewHistogram(prometheus.HistogramOpts{
 	Name:    "urnetwork_url_probe_turn_seconds",
@@ -296,9 +351,12 @@ func init() {
 	for _, outcome := range []string{"success", "error"} {
 		urlProbeOutcomes.WithLabelValues(outcome)
 	}
+	for _, labels := range urlProbeTransportOutcomeLabels {
+		urlProbeTransportOutcomes.WithLabelValues(labels[0], labels[1])
+	}
 	for _, source := range []string{"general", "country", "general_country_unavailable", "security_recheck"} {
 		urlProbeSources.WithLabelValues(source)
 	}
-	prometheus.MustRegister(urlProbeTurns, urlProbePassSeconds, urlProbeSources, urlProbeOutcomes, urlProbeTurnSeconds,
+	prometheus.MustRegister(urlProbeTurns, urlProbePassSeconds, urlProbeSources, urlProbeOutcomes, urlProbeTransportOutcomes, urlProbeH3CommonModeHeld, urlProbeTurnSeconds,
 		urlProbeFleetMetrics, urlProbeConfiguredShards, urlProbeCapability, urlProbeShardObservedAt, urlProbeShardPasses)
 }

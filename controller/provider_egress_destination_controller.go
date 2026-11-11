@@ -60,6 +60,7 @@ func ProviderEgressDestinationFromWire(
 		Expect:   string(expect),
 		Status:   destination.Status,
 		MaxBytes: destination.MaxBytes,
+		H3:       destination.H3,
 		Headers:  headers,
 		Verify: model.ProviderEgressDestinationVerify{
 			Kind: string(destination.Verify.Kind),
@@ -100,6 +101,7 @@ func ProviderEgressDestinationToWire(row *model.ProviderEgressDestination) (egre
 		MaxBytes:     row.MaxBytes,
 		Verify:       egresshealth.BodyCheck{Kind: egresshealth.BodyCheckKind(row.Verify.Kind), Text: row.Verify.Text},
 		Incompatible: incompatible,
+		H3:           row.H3,
 	}
 	if err := destination.Validate(); err != nil {
 		return egresshealth.Destination{}, fmt.Errorf("destination %q: %w", row.Name, err)
@@ -176,6 +178,10 @@ type providerEgressSitesCandidateYaml struct {
 	} `yaml:"verify"`
 	Incompatible []providerEgressSitesPlaceYaml `yaml:"incompatible"`
 	Revision     int                            `yaml:"revision"`
+	// h3: true declares that the URL serves the same probe over HTTP/3, so a
+	// provider passes it only with both its HTTPS and its HTTP/3 legs
+	// (egresshealth.Destination.H3). A missing key is false.
+	H3 bool `yaml:"h3"`
 }
 
 // The file's profile and candidates; the settings block is read apart.
@@ -277,6 +283,7 @@ func ParseProviderEgressSites(unmarshal func(any) error) (*ProviderEgressSites, 
 				Status:   entry.Status,
 				MaxBytes: entry.MaxBytes,
 				Verify:   egresshealth.BodyCheck{Kind: egresshealth.BodyCheckKind(entry.Verify.Kind), Text: entry.Verify.Text},
+				H3:       entry.H3,
 			}
 			for _, place := range entry.Incompatible {
 				destination.Incompatible = append(destination.Incompatible, egresshealth.Place{

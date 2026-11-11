@@ -293,11 +293,16 @@ func providerEgressCountrySiteScoredInTx(ctx context.Context, tx server.PgTx, na
 // provider's network as it was when the row was first written, so the refresh
 // sums the tally by network without looking each provider up again; a
 // provider with no network is no evidence, and is not tallied.
+//
+// The pair judges the site, so ok is the outcome's HTTPS leg and the general
+// side counts HTTPS legs too: a stored HTTP/3 leg follows only a passed HTTPS
+// leg (egresshealth.UrlProbeEvidence.HttpsOk), and a URL that failed only its
+// HTTP/3 leg says the provider does not carry UDP, not how the site does.
 func addProviderEgressCountrySiteTallyInTx(ctx context.Context, tx server.PgTx, health *ProviderEgressHealth, ok int, policyVersion int) {
 	measuredAt := health.MeasuredAt.UTC()
 	var generalTotal, generalOk int
 	server.Raise(tx.QueryRow(ctx, `
-		SELECT COUNT(*)::integer, COALESCE(SUM(ok_count), 0)::integer
+		SELECT COUNT(*)::integer, COALESCE(SUM(CASE WHEN 0 < ok_count OR (url_probe_evidence -> 'h3') IS NOT NULL THEN 1 ELSE 0 END), 0)::integer
 		FROM provider_egress_health_history
 		WHERE client_id = $1 AND measured_at > $2::timestamp - interval '8 hours' AND measured_at < $2
 		AND total_count = 1 AND url_probe_policy_version = $3 AND NOT url_probation AND url_source = $4`,

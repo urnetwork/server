@@ -78,8 +78,15 @@ type ProviderEgressDestination struct {
 	Expect   string
 	Status   int
 	MaxBytes int
-	Headers  map[string]string
-	Verify   ProviderEgressDestinationVerify
+	// H3 is whether the URL serves the same probe over HTTP/3, so a provider
+	// passes it only over both TCP and UDP (egresshealth.Destination.H3). It
+	// is configuration alone and has no column: the pool route serves every
+	// contract from qualityprobe.yml (ProviderEgressSites.configuredRows), and
+	// a stored row lends only its pool state, so a stored row reads false and
+	// the configured value is what the prober is served.
+	H3      bool
+	Headers map[string]string
+	Verify  ProviderEgressDestinationVerify
 	// Category and Region say what the site is representative of (search,
 	// news, ... ; global, europe, ...). The refresh promotes a candidate of
 	// the category a retired site leaves.

@@ -50,6 +50,61 @@ type UrlProbeEvidence struct {
 	BodyMillis                float64                 `json:"body_ms"`
 	BodyFirstByteWaitMillis   float64                 `json:"body_first_byte_wait_ms"`
 	BodyBitsPerSecond         float64                 `json:"body_bits_per_second"`
+	// The HTTP/3 leg of a destination that declares it (Destination.H3),
+	// present once the HTTPS leg above passed. The outcome is a success only
+	// when both legs are; everything above is the HTTPS leg's. Absent for
+	// every other destination, so a server that predates it sees the same
+	// document it always did.
+	H3 *UrlProbeH3Evidence `json:"h3,omitempty"`
+}
+
+// The HTTP/3 (QUIC over UDP) leg of one URL outcome: the same request and
+// contract as its HTTPS leg, through the same provider. It is bounded
+// diagnostic data like the rest of the evidence: no body, no address. Its
+// certificate outcome is recorded here and never as URL security evidence:
+// TLS findings and their judge stay about the HTTPS identity.
+type UrlProbeH3Evidence struct {
+	ContentClassification     string  `json:"content_classification"`
+	PerformanceClassification string  `json:"performance_classification"`
+	FailureStage              string  `json:"failure_stage"`
+	NotMeasured               bool    `json:"not_measured"`
+	TlsAuthenticated          bool    `json:"tls_authenticated"`
+	TlsFailure                bool    `json:"tls_failure"`
+	StatusCode                int     `json:"status_code"`
+	RedirectCount             int     `json:"redirect_count"`
+	ByteCount                 int64   `json:"byte_count"`
+	WireByteCount             int64   `json:"wire_byte_count"`
+	WireSampleByteCount       int64   `json:"wire_sample_byte_count"`
+	BodyComplete              bool    `json:"body_complete"`
+	BodySampled               bool    `json:"body_sampled"`
+	RequestWritten            bool    `json:"request_written"`
+	FirstByteReceived         bool    `json:"first_byte_received"`
+	DnsMillis                 float64 `json:"dns_ms"`
+	HandshakeMillis           float64 `json:"handshake_ms"`
+	TtfbMillis                float64 `json:"ttfb_ms"`
+	BodyMillis                float64 `json:"body_ms"`
+	BodyFirstByteWaitMillis   float64 `json:"body_first_byte_wait_ms"`
+	BodyBitsPerSecond         float64 `json:"body_bits_per_second"`
+}
+
+// The evidence of one HTTP/3 leg, or nil when the load made none.
+func urlProbeH3EvidenceOf(check *CheckResult) *UrlProbeH3Evidence {
+	if check == nil {
+		return nil
+	}
+	millis := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+	return &UrlProbeH3Evidence{
+		ContentClassification: check.ContentClassification, PerformanceClassification: check.PerformanceClassification,
+		FailureStage: check.FailureStage, NotMeasured: check.NotMeasured,
+		TlsAuthenticated: 0 < check.StatusCode && !check.TlsAuthenticationFailure, TlsFailure: check.TlsAuthenticationFailure,
+		StatusCode: check.StatusCode, RedirectCount: check.RedirectCount,
+		ByteCount: check.ByteCount, WireByteCount: check.WireByteCount, WireSampleByteCount: check.WireSampleByteCount,
+		BodyComplete: check.BodyComplete, BodySampled: check.BodySampled,
+		RequestWritten: check.RequestWritten, FirstByteReceived: check.FirstByteReceived,
+		DnsMillis: millis(check.DnsLookupLatency), HandshakeMillis: millis(check.TlsHandshakeLatency),
+		TtfbMillis: millis(check.RequestTimeToFirstByte), BodyMillis: millis(check.BodyDuration),
+		BodyFirstByteWaitMillis: millis(check.BodyFirstByteWait), BodyBitsPerSecond: check.BodyBytesPerSecond * 8,
+	}
 }
 
 // Normalization changes only origin spelling and the irrelevant fragment;
@@ -110,6 +165,28 @@ func (self *UrlProbeEvidence) Validate() error {
 			return fmt.Errorf("URL security evidence requires exactly one authentication outcome")
 		}
 	}
+	if leg := self.H3; leg != nil {
+		if !self.Destination.H3 {
+			return fmt.Errorf("URL evidence carries an HTTP/3 leg for a destination that declares none")
+		}
+		if leg.RedirectCount < 0 || leg.RedirectCount > self.Policy.MaxRedirects || leg.ByteCount < 0 || leg.ByteCount > int64(self.Policy.MaxBodyBytes) || leg.WireByteCount < 0 || leg.WireByteCount > int64(self.Policy.MaxBodyBytes) {
+			return fmt.Errorf("URL HTTP/3 evidence exceeds its bounds")
+		}
+		if leg.WireSampleByteCount != max(0, leg.WireByteCount-1) {
+			return fmt.Errorf("URL HTTP/3 wire sample must exclude the first byte that starts its clock")
+		}
+		for _, value := range []float64{leg.DnsMillis, leg.HandshakeMillis, leg.TtfbMillis, leg.BodyMillis, leg.BodyFirstByteWaitMillis, leg.BodyBitsPerSecond} {
+			if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+				return fmt.Errorf("URL HTTP/3 timing evidence must be finite and nonnegative")
+			}
+		}
+		if len(leg.ContentClassification) > 64 || len(leg.PerformanceClassification) > 64 || len(leg.FailureStage) > 64 {
+			return fmt.Errorf("URL HTTP/3 outcome classification is too long")
+		}
+		if leg.TlsAuthenticated && leg.TlsFailure {
+			return fmt.Errorf("URL HTTP/3 evidence cannot both authenticate and fail TLS")
+		}
+	}
 	return nil
 }
 
@@ -129,32 +206,110 @@ func (self *UrlProbeEvidence) ValidateOutcome(ok, total int, tlsFailure bool) er
 	if hasTlsFailure != tlsFailure {
 		return fmt.Errorf("URL security evidence disagrees with its aggregate TLS flag")
 	}
+	https := func(failureStage string) urlProbeLegEvidence {
+		return urlProbeLegEvidence{
+			authenticated:         !tlsFailure && len(self.Security) == self.RedirectCount+1,
+			contentClassification: self.ContentClassification, performanceClassification: self.PerformanceClassification,
+			failureStage: failureStage, statusCode: self.StatusCode, byteCount: self.ByteCount, wireByteCount: self.WireByteCount,
+			wireSampleByteCount: self.WireSampleByteCount, bodyComplete: self.BodyComplete, bodySampled: self.BodySampled,
+			requestWritten: self.RequestWritten, firstByteReceived: self.FirstByteReceived,
+			ttfbMillis: self.TtfbMillis, bodyMillis: self.BodyMillis, bodyBitsPerSecond: self.BodyBitsPerSecond,
+		}
+	}
+	if leg := self.H3; leg != nil {
+		// An HTTP/3 leg is made only after the HTTPS leg passed, so its
+		// presence is itself a claim the HTTPS evidence must bear out, whatever
+		// the outcome counts: a stored HTTP/3 leg always means the provider
+		// carried the site over TCP. Its stage names the leg's verdict.
+		if self.FailureStage != "" && self.FailureStage != FailureStageH3 {
+			return fmt.Errorf("URL HTTP/3 evidence follows an HTTPS leg that failed")
+		}
+		if err := https("").succeeded(self.Policy, "URL"); err != nil {
+			return fmt.Errorf("URL HTTP/3 evidence follows an HTTPS leg without success evidence: %w", err)
+		}
+		legSucceeded := !leg.NotMeasured && leg.succeeded(self.Policy) == nil
+		if legSucceeded != (self.FailureStage == "") {
+			return fmt.Errorf("URL failure stage disagrees with its HTTP/3 leg")
+		}
+	}
 	if ok == 0 {
 		return nil
 	}
-	if tlsFailure || self.ContentClassification != "content" || self.FailureStage != "" ||
-		self.StatusCode < 200 || self.StatusCode >= 300 || self.ByteCount == 0 || self.WireByteCount == 0 ||
-		!self.RequestWritten || !self.FirstByteReceived || len(self.Security) != self.RedirectCount+1 {
-		return fmt.Errorf("URL success is missing authenticated real-content or final-request timing evidence")
+	if err := https(self.FailureStage).succeeded(self.Policy, "URL"); err != nil {
+		return err
 	}
-	if self.TtfbMillis > float64(self.Policy.MaxTtfbMillis) {
-		return fmt.Errorf("URL success exceeded its final-request TTFB policy")
+	if !self.Destination.H3 {
+		return nil
 	}
-	if self.WireSampleByteCount < int64(self.Policy.MinThroughputBytes) {
-		if !self.BodyComplete || self.StatusCode == 206 || self.PerformanceClassification != "insufficient_sample" {
-			return fmt.Errorf("a small URL success requires a confirmed complete body and insufficient-sample classification")
+	// A destination that declares HTTP/3 passes only with both legs: the
+	// HTTPS leg above, and this one under the same contract.
+	leg := self.H3
+	if leg == nil || leg.NotMeasured {
+		return fmt.Errorf("URL success of an HTTP/3 destination is missing its HTTP/3 leg")
+	}
+	return leg.succeeded(self.Policy)
+}
+
+// Whether the HTTP/3 leg's final response meets the contract its HTTPS leg's
+// does.
+func (self *UrlProbeH3Evidence) succeeded(policy UrlProbePolicy) error {
+	return (urlProbeLegEvidence{
+		authenticated:         self.TlsAuthenticated && !self.TlsFailure,
+		contentClassification: self.ContentClassification, performanceClassification: self.PerformanceClassification,
+		failureStage: self.FailureStage, statusCode: self.StatusCode, byteCount: self.ByteCount, wireByteCount: self.WireByteCount,
+		wireSampleByteCount: self.WireSampleByteCount, bodyComplete: self.BodyComplete, bodySampled: self.BodySampled,
+		requestWritten: self.RequestWritten, firstByteReceived: self.FirstByteReceived,
+		ttfbMillis: self.TtfbMillis, bodyMillis: self.BodyMillis, bodyBitsPerSecond: self.BodyBitsPerSecond,
+	}).succeeded(policy, "URL HTTP/3")
+}
+
+// Whether the HTTPS leg of the outcome passed, which is what a site's own
+// health is judged by: a success, or an outcome whose HTTP/3 leg was made,
+// which needs a passed HTTPS leg (ValidateOutcome). Only meaningful for
+// evidence that validated.
+func (self *UrlProbeEvidence) HttpsOk(ok int) bool {
+	return 0 < ok || (self != nil && self.H3 != nil)
+}
+
+// One leg's final response, as the success contract reads it.
+type urlProbeLegEvidence struct {
+	authenticated                                    bool
+	contentClassification, performanceClassification string
+	failureStage                                     string
+	statusCode                                       int
+	byteCount, wireByteCount, wireSampleByteCount    int64
+	bodyComplete, bodySampled                        bool
+	requestWritten, firstByteReceived                bool
+	ttfbMillis, bodyMillis, bodyBitsPerSecond        float64
+}
+
+// The contract every leg's success meets, HTTPS or HTTP/3: authenticated real
+// content, the final request's TTFB under the policy, and either a confirmed
+// complete small body or a measured wire throughput over the policy's bar.
+func (self urlProbeLegEvidence) succeeded(policy UrlProbePolicy, noun string) error {
+	if !self.authenticated || self.contentClassification != "content" || self.failureStage != "" ||
+		self.statusCode < 200 || self.statusCode >= 300 || self.byteCount == 0 || self.wireByteCount == 0 ||
+		!self.requestWritten || !self.firstByteReceived {
+		return fmt.Errorf("%s success is missing authenticated real-content or final-request timing evidence", noun)
+	}
+	if self.ttfbMillis > float64(policy.MaxTtfbMillis) {
+		return fmt.Errorf("%s success exceeded its final-request TTFB policy", noun)
+	}
+	if self.wireSampleByteCount < int64(policy.MinThroughputBytes) {
+		if !self.bodyComplete || self.statusCode == 206 || self.performanceClassification != "insufficient_sample" {
+			return fmt.Errorf("a small %s success requires a confirmed complete body and insufficient-sample classification", noun)
 		}
 		return nil
 	}
-	if self.BodyMillis <= 0 {
-		return fmt.Errorf("URL success is missing its body transfer clock")
+	if self.bodyMillis <= 0 {
+		return fmt.Errorf("%s success is missing its body transfer clock", noun)
 	}
-	if !self.BodyComplete && !self.BodySampled {
-		return fmt.Errorf("URL success is neither complete nor an intentional bounded sample")
+	if !self.bodyComplete && !self.bodySampled {
+		return fmt.Errorf("%s success is neither complete nor an intentional bounded sample", noun)
 	}
-	bitsPerSecond := float64(self.WireSampleByteCount) * 8 * 1000 / self.BodyMillis
-	if self.PerformanceClassification != "passed" || float64(self.WireSampleByteCount)*8*1000 < float64(self.Policy.MinThroughputBps)*self.BodyMillis || math.Abs(bitsPerSecond-self.BodyBitsPerSecond) > max(1, bitsPerSecond)*1e-6 {
-		return fmt.Errorf("URL success did not meet its measured wire-throughput policy")
+	bitsPerSecond := float64(self.wireSampleByteCount) * 8 * 1000 / self.bodyMillis
+	if self.performanceClassification != "passed" || float64(self.wireSampleByteCount)*8*1000 < float64(policy.MinThroughputBps)*self.bodyMillis || math.Abs(bitsPerSecond-self.bodyBitsPerSecond) > max(1, bitsPerSecond)*1e-6 {
+		return fmt.Errorf("%s success did not meet its measured wire-throughput policy", noun)
 	}
 	return nil
 }

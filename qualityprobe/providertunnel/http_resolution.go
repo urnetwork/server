@@ -28,6 +28,18 @@ type providerUrlResolver struct {
 // HTTP request's hard deadline; one timeout cannot consume every retry or the
 // final connection allowance. Outer sampled-load retries remain independent.
 func (self *providerUrlResolver) dialContext(ctx context.Context, network, address string, observation *providerHttpDialTrace) (net.Conn, error) {
+	addrs, err := self.resolve(ctx, address, observation)
+	if err != nil {
+		return nil, err
+	}
+	return self.dialResolved(ctx, network, address, addrs)
+}
+
+// The bounded resolution phase alone: the IPv4 answers a target socket may be
+// dialed to, through this tunnel's own resolver, every one public when the
+// request is a scoped URL probe. The HTTPS leg dials them over TCP and the
+// HTTP/3 leg over UDP, so both legs of a URL resolve the same way.
+func (self *providerUrlResolver) resolve(ctx context.Context, address string, observation *providerHttpDialTrace) ([]netip.Addr, error) {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
@@ -36,7 +48,7 @@ func (self *providerUrlResolver) dialContext(ctx context.Context, network, addre
 		if _, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget); scoped && !publicUrlProbeAddress(literal) {
 			return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL resolved to a nonpublic address")}
 		}
-		return self.dialResolved(ctx, network, address, []netip.Addr{literal.Unmap()})
+		return []netip.Addr{literal.Unmap()}, nil
 	}
 	observation.observe(connect.TunDialDnsStarted)
 	// One URL-only budget covers route waiting, all resolver waves and jitter.
@@ -169,7 +181,7 @@ resolution:
 		}
 	}
 	observation.observe(connect.TunDialDnsAnswered)
-	return self.dialResolved(ctx, network, address, addrs)
+	return addrs, nil
 }
 
 // Starts a fresh socket budget after DNS; it cannot extend a shorter caller

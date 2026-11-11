@@ -871,6 +871,9 @@ func (self *Tunnel) HttpClientForHosts(timeout time.Duration, extraHosts []strin
 	client.Transport.(*providerHttpTransport).contractAcquisition = self.multiClient
 	client.Transport.(*providerHttpTransport).localWrite = self.multiClient
 	client.Transport.(*providerHttpTransport).redirectPins = self.redirectPins
+	// A URL request's HTTP/3 leg rides the same tun: a connected UDP socket
+	// of its own stack, never one of the host's (http3.go).
+	client.Transport.(*providerHttpTransport).dialPacket = self.tun.DialContext
 	return client
 }
 
@@ -1087,6 +1090,39 @@ func wrapCloseError(owner string, err error) error {
 // The signature of net.Dialer.DialContext, which the tunnel's dialer has.
 type dialContextFunc func(ctx context.Context, network string, address string) (net.Conn, error)
 
+// Admits one TLS dial of host and returns the pins its handshake verifies
+// against, and whether the dial belongs to a scoped URL-probe request. Both
+// legs of a URL request admit through it: the HTTPS leg's DialTLSContext and
+// the HTTP/3 leg's QUIC dial (http3.go).
+//
+// Allowlist-only: the set of hosts a probe dials is closed and known, so any
+// host outside it is refused outright rather than allowed to connect at all.
+// This is deliberately enforced here, not in checkPin/PinnedTlsConfig
+// (pinning.go), because checkPin's "unpinned host passes" behavior is a
+// documented, tested contract other callers may rely on for a general-purpose
+// pinning verifier. This tunnel is the layer that actually knows the endpoint
+// set is closed, so it is where "unknown host" can safely mean "reject"
+// instead of "pass through". A URL request's redirect grant admits exactly
+// its own target host, and is verified against the redirect pins.
+func (self *providerHttpTransport) admitTls(ctx context.Context, host string) (map[string][]string, bool, error) {
+	_, admitted := self.allowed[normalizeHost(host)]
+	target, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget)
+	if scoped {
+		if target.host != normalizeHost(host) || self.resolver == nil {
+			return nil, scoped, &providerHttpStageError{stage: "policy", err: errors.New("provider URL request lost its exact target or private resolver")}
+		}
+		admitted = admitted || target.redirect
+	}
+	if !admitted {
+		return nil, scoped, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
+	}
+	tlsPins := self.pins
+	if scoped && target.redirect && len(self.redirectPins) > 0 {
+		tlsPins = self.redirectPins
+	}
+	return tlsPins, scoped, nil
+}
+
 // Builds an http.Client that dials exclusively through
 // dial and applies certificate pinning per pins.
 //
@@ -1179,7 +1215,7 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 		// regardless of what those two later become.
 		TLSNextProto: map[string]func(string, *tls.Conn) http.RoundTripper{},
 	}
-	probeTransport := &providerHttpTransport{Transport: tr, redirectPins: pins}
+	probeTransport := &providerHttpTransport{Transport: tr, redirectPins: pins, allowed: allowed, pins: pins, resolver: resolver}
 	tr.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 		ctx, done, err := beginProviderHttpDial(ctx)
 		if err != nil {
@@ -1191,25 +1227,9 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 			host = addr
 		}
 
-		// Allowlist-only: the set of hosts a probe dials is closed and known,
-		// so any host outside it is refused outright rather than allowed to
-		// connect at all. This is deliberately enforced
-		// here, not in checkPin/PinnedTlsConfig (pinning.go), because
-		// checkPin's "unpinned host passes" behavior is a documented,
-		// tested contract other callers may rely on for a general-purpose
-		// pinning verifier. This tunnel is the layer that actually knows
-		// the endpoint set is closed, so it is where "unknown host" can
-		// safely mean "reject" instead of "pass through".
-		_, admitted := allowed[normalizeHost(host)]
-		target, scoped := ctx.Value(providerUrlProbeKey{}).(providerUrlProbeTarget)
-		if scoped {
-			if target.host != normalizeHost(host) || resolver == nil {
-				return nil, &providerHttpStageError{stage: "policy", err: errors.New("provider URL request lost its exact target or private resolver")}
-			}
-			admitted = admitted || target.redirect
-		}
-		if !admitted {
-			return nil, &providerHttpStageError{stage: "policy", err: fmt.Errorf("%w: %s", ErrPinHostUnknown, host)}
+		tlsPins, scoped, err := probeTransport.admitTls(ctx, host)
+		if err != nil {
+			return nil, err
 		}
 
 		// The tunnel reports its own target DNS/TCP boundaries; its private DoH
@@ -1244,10 +1264,6 @@ func httpClientOverDialerWithResolver(dial dialContextFunc, resolver *providerUr
 			raw = readConn
 		}
 
-		tlsPins := pins
-		if scoped && target.redirect && len(probeTransport.redirectPins) > 0 {
-			tlsPins = probeTransport.redirectPins
-		}
 		cfg := PinnedTlsConfigForHost(tlsPins, host)
 		tlsConn := tls.Client(raw, cfg)
 		if trace != nil && trace.TLSHandshakeStart != nil {

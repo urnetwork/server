@@ -39,8 +39,8 @@ type ProviderUrlProbeDue struct {
 const ProviderUrlProbeSlotCount = 1024
 
 // Replace measurements before they leave the four-hour window. This covers
-// the default 220-second URL turn plus 90 seconds for control/publication and
-// 50 seconds of scheduling margin. It is not extra quota credit or a promise
+// the default 230-second URL turn (its HTTP/3 leg included) plus 90 seconds
+// for control/publication and 40 seconds of scheduling margin. It is not extra quota credit or a promise
 // that a stalled worker finishes. Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 

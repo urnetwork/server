@@ -8060,6 +8060,107 @@
         }
       ],
       "description": "Seconds since the newest zero-carry judge run on any taskworker, and since one finished a pass over every connected provider (about an hour on Main). A judge that stops makes no new verdicts, and those in force lapse at their expiry, 72 hours after each was made, so zero-carry providers return to the pool; the pending_task row under run_once_key judge_provider_zero_carry carries its reschedule error."
+    },
+    {
+      "id": 162,
+      "type": "row",
+      "title": "URL legs by transport: HTTPS over TCP, HTTP/3 over UDP",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 533
+      },
+      "panels": []
+    },
+    {
+      "id": 163,
+      "type": "timeseries",
+      "title": "URL legs by transport and outcome / min",
+      "description": "Each acknowledged URL load's legs, counted apart. tcp is every load's HTTPS leg, success or error. udp is the HTTP/3 leg of a URL whose catalog entry declares h3: success, error, not_measured (the leg's path or instrument was unavailable), or skipped (its HTTPS leg failed first, so no HTTP/3 leg was made). Such a URL passes only with both legs, so a provider that routes TCP and not UDP shows as tcp success with udp error, and fails the URL. held counts turns the HTTP/3 common-mode guard kept out of provider history: their only failure was the HTTP/3 leg while no recently measured network's HTTP/3 leg passed, which is the platform's QUIC path rather than each provider's.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 534
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (transport, outcome) (rate(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{transport}} {{outcome}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(rate(urnetwork_url_probe_h3_common_mode_held_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "held: HTTP/3 common mode"
+        }
+      ]
+    },
+    {
+      "id": 164,
+      "type": "timeseries",
+      "title": "HTTP/3 legs failing after a passed HTTPS leg (1h)",
+      "description": "The share of measured HTTP/3 legs that failed over the last hour. Every HTTP/3 leg follows an HTTPS leg that passed through the same provider, so this is the share of providers' turns that carry TCP but not UDP to the site. An unmeasured or skipped leg is in neither count.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 534
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=\"error\"}[1h])) / sum(increase(urnetwork_url_probe_transport_outcomes_total{env=\"$env\",service=\"taskworker\",instance!=\"\",transport=\"udp\",outcome=~\"success|error\"}[1h]))",
+          "legendFormat": "HTTP/3 legs failing"
+        }
+      ]
     }
   ]
 }

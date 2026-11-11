@@ -21034,8 +21034,8 @@ expiries allow only the number of replacements needed, with one live claim per
 provider. Coverage still uses actual policy-valid measurements in `(now-4h,
 now]`; setup completions, replay, other providers and future measurements add
 no credit. Success and measured failure count equally, and TLS rechecks remain
-independent. The six-minute headroom covers the default 220-second turn plus
-90-second control/publication reserve and 50-second scheduling margin, not
+independent. The six-minute headroom covers the default 230-second turn (an HTTP/3 leg
+included) plus 90-second control/publication reserve and 40-second scheduling margin, not
 unbounded queueing or alternate longer configurations. Existing persisted
 expiry deadlines are refreshed when touched, so deployment is not instant
 full-cohort repair. A modeled latency-gap repair is not Main coverage proof;

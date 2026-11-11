@@ -50,6 +50,9 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 	if source == UrlSourceSecurityRecheck {
 		chosen.Canary = false
 		chosen.Incompatible = nil
+		// A recheck asks whether the stored URL's HTTPS identity now
+		// authenticates, and is never scored; it makes no HTTP/3 leg.
+		chosen.H3 = false
 	}
 	opts.LoadAttempts = 1
 	result, err := check(ctx, client, []Destination{chosen}, opts)
@@ -71,6 +74,7 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 				TlsMillis: float64(check.TlsHandshakeLatency) / float64(time.Millisecond), TtfbMillis: float64(check.RequestTimeToFirstByte) / float64(time.Millisecond),
 				BodyMillis: float64(check.BodyDuration) / float64(time.Millisecond), BodyBitsPerSecond: check.BodyBytesPerSecond * 8,
 				BodyFirstByteWaitMillis: float64(check.BodyFirstByteWait) / float64(time.Millisecond),
+				H3:                      urlProbeH3EvidenceOf(check.H3),
 			}
 		}
 	}

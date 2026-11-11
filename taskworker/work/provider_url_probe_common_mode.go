@@ -49,6 +49,32 @@ func providerUrlProbePreResponseFailure(run *egresshealth.Result) bool {
 	return countedLoadCount == run.Total
 }
 
+// The measured HTTP/3 leg of a run's one counted load, or nil: none was made,
+// it was not measured, or the run is not one counted URL load.
+func providerUrlProbeCountedH3Leg(run *egresshealth.Result) *egresshealth.CheckResult {
+	if run == nil || run.Total != 1 {
+		return nil
+	}
+	var leg *egresshealth.CheckResult
+	for _, check := range run.Checks {
+		if check.NotMeasured || check.Canary {
+			continue
+		}
+		if leg != nil || !check.H3Required || check.H3 == nil || check.H3.NotMeasured {
+			return nil
+		}
+		leg = check.H3
+	}
+	return leg
+}
+
+// A failed run whose only failure is its HTTP/3 leg: its URL declares HTTP/3,
+// its HTTPS leg passed, and its measured HTTP/3 leg did not.
+func providerUrlProbeH3OnlyFailure(run *egresshealth.Result) bool {
+	leg := providerUrlProbeCountedH3Leg(run)
+	return leg != nil && !leg.Ok && run.OkCount == 0 && !run.TlsAuthenticationFailure
+}
+
 // The latest measured turn of each of one pass's most recently measured
 // networks. The window is common-mode when it holds
 // providerUrlProbeCommonModeNetworkCount networks, at most
@@ -72,6 +98,18 @@ func providerUrlProbePreResponseFailure(run *egresshealth.Result) bool {
 // pass that starts inside a platform failure publishes the turns that fill
 // it, and an episode that starts mid-pass publishes the turns that push the
 // last pass out. Safe for concurrent use by the pass's turns.
+//
+// A second window holds the latest measured HTTP/3 leg of each of the pass's
+// most recently measured networks (url_h3.go). Every such leg follows an
+// HTTPS leg that passed, so a fleet whose HTTP/3 legs all fail while their
+// HTTPS legs pass is failing on the platform's own QUIC path, not on each
+// provider's UDP: the provider path is the same one the HTTPS leg just
+// proved. When that window is full and at most
+// providerUrlProbeCommonModePassShare of it passed, a run whose only failure
+// is its HTTP/3 leg is held back the same way, so a prober-side HTTP/3 fault
+// can never fail every provider at once. A passed HTTP/3 leg ends the episode
+// as soon as it is recorded; a real share of providers that carry no UDP
+// leaves the window holding passes, and every outcome is published.
 type providerUrlProbeCommonMode struct {
 	shardIndex int
 	shardCount int
@@ -82,6 +120,12 @@ type providerUrlProbeCommonMode struct {
 	networkTurns map[providerUrlProbeCommonModeNetwork]providerUrlProbeCommonModeTurn
 	tripped      bool
 	heldCount    int
+	// the HTTP/3 window: oldest first, each network's latest leg passed
+	h3Networks     []providerUrlProbeCommonModeNetwork
+	h3NetworkPass  map[providerUrlProbeCommonModeNetwork]bool
+	h3Tripped      bool
+	h3HeldCount    int
+	observeH3Holds func()
 }
 
 // One network of the window: its id, or for a provider whose network is
@@ -100,15 +144,18 @@ type providerUrlProbeCommonModeTurn struct {
 // An empty window for one shard pass.
 func newProviderUrlProbeCommonMode(shardIndex int, shardCount int) *providerUrlProbeCommonMode {
 	return &providerUrlProbeCommonMode{
-		shardIndex:   shardIndex,
-		shardCount:   shardCount,
-		networkTurns: map[providerUrlProbeCommonModeNetwork]providerUrlProbeCommonModeTurn{},
+		shardIndex:     shardIndex,
+		shardCount:     shardCount,
+		networkTurns:   map[providerUrlProbeCommonModeNetwork]providerUrlProbeCommonModeTurn{},
+		h3NetworkPass:  map[providerUrlProbeCommonModeNetwork]bool{},
+		observeH3Holds: func() { urlProbeH3CommonModeHeld.Inc() },
 	}
 }
 
 // Records the batch's measured runs as turns of each provider's network, then
 // returns the window's failed share and whether the batch is held back: it
 // measured something, all of it pre-response failures, and the window is
+// common-mode; or all of it HTTP/3-only failures, and the HTTP/3 window is
 // common-mode. A provider absent from providerClientIdNetworkIds stands as
 // its own network. A batch that measured nothing changes nothing. The start
 // and end of each episode are logged.
@@ -118,11 +165,15 @@ func (self *providerUrlProbeCommonMode) judge(
 ) (failureShare float64, held bool) {
 	entered, released := false, false
 	networkCount, passCount, preResponseCount, episodeHeldCount := 0, 0, 0, 0
+	h3Entered, h3Released := false, false
+	h3NetworkCount, h3PassCount, h3EpisodeHeldCount := 0, 0, 0
+	h3Held := false
 	func() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
-		measuredCount, measuredPreResponseCount := 0, 0
+		measuredCount, measuredPreResponseCount, measuredH3OnlyFailureCount := 0, 0, 0
 		batchNetworkTurns := map[providerUrlProbeCommonModeNetwork]providerUrlProbeCommonModeTurn{}
+		batchH3Pass := map[providerUrlProbeCommonModeNetwork]bool{}
 		// sorted, so a batch of several providers evicts deterministically
 		for _, providerClientId := range slices.Sorted(maps.Keys(providerClientIdRuns)) {
 			run := providerClientIdRuns[providerClientId]
@@ -137,9 +188,31 @@ func (self *providerUrlProbeCommonMode) judge(
 			if turn.preResponse {
 				measuredPreResponseCount++
 			}
+			if providerUrlProbeH3OnlyFailure(run) {
+				measuredH3OnlyFailureCount++
+			}
 			network := providerUrlProbeCommonModeNetwork{networkId: providerClientIdNetworkIds[providerClientId]}
 			if network.networkId == "" {
 				network.providerClientId = providerClientId
+			}
+			if leg := providerUrlProbeCountedH3Leg(run); leg != nil {
+				pass := leg.Ok
+				if batchPass, ok := batchH3Pass[network]; ok {
+					// as above: one network's providers are one turn
+					pass = pass || batchPass
+				}
+				batchH3Pass[network] = pass
+				if _, ok := self.h3NetworkPass[network]; ok {
+					self.h3Networks = slices.DeleteFunc(self.h3Networks, func(windowNetwork providerUrlProbeCommonModeNetwork) bool {
+						return windowNetwork == network
+					})
+				}
+				self.h3Networks = append(self.h3Networks, network)
+				self.h3NetworkPass[network] = pass
+				for providerUrlProbeCommonModeNetworkCount < len(self.h3Networks) {
+					delete(self.h3NetworkPass, self.h3Networks[0])
+					self.h3Networks = slices.Delete(self.h3Networks, 0, 1)
+				}
 			}
 			if batchTurn, ok := batchNetworkTurns[network]; ok {
 				// a batch's providers of one network are one turn: a pass or
@@ -172,6 +245,12 @@ func (self *providerUrlProbeCommonMode) judge(
 		if 0 < networkCount {
 			failureShare = float64(networkCount-passCount) / float64(networkCount)
 		}
+		h3NetworkCount = len(self.h3Networks)
+		for _, pass := range self.h3NetworkPass {
+			if pass {
+				h3PassCount++
+			}
+		}
 		if measuredCount == 0 {
 			return
 		}
@@ -190,7 +269,43 @@ func (self *providerUrlProbeCommonMode) judge(
 				self.heldCount = 0
 			}
 		}
+		h3CommonMode := providerUrlProbeCommonModeNetworkCount <= h3NetworkCount &&
+			float64(h3PassCount) <= providerUrlProbeCommonModePassShare*float64(h3NetworkCount)
+		h3Held = !held && h3CommonMode && measuredH3OnlyFailureCount == measuredCount
+		if h3Held {
+			self.h3HeldCount++
+			held = true
+		}
+		if h3CommonMode != self.h3Tripped {
+			self.h3Tripped = h3CommonMode
+			h3Entered, h3Released = h3CommonMode, !h3CommonMode
+			h3EpisodeHeldCount = self.h3HeldCount
+			if h3Released {
+				self.h3HeldCount = 0
+			}
+		}
 	}()
+	if h3Held && self.observeH3Holds != nil {
+		self.observeH3Holds()
+	}
+	if h3Entered {
+		// alert class: every recent HTTP/3 leg fails after its HTTPS leg passed
+		glog.Errorf(
+			"[egress]URL HTTP/3 common-mode guard tripped: shard=%d/%d networks=%d h3_passes=%d; URL outcomes that failed only their HTTP/3 leg are held back from provider history and their claims retried without measured credit until an HTTP/3 leg passes\n",
+			self.shardIndex,
+			self.shardCount,
+			h3NetworkCount,
+			h3PassCount,
+		)
+	}
+	if h3Released {
+		glog.Infof(
+			"[egress]URL HTTP/3 common-mode guard released: shard=%d/%d held=%d; HTTP/3 outcomes are published again\n",
+			self.shardIndex,
+			self.shardCount,
+			h3EpisodeHeldCount,
+		)
+	}
 
 	if entered {
 		// alert class: the fleet is failing before any destination answers
