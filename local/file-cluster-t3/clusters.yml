@@ -1,0 +1,29 @@
+# T3's clusters as a block's vault file names them (file-clusters-<service>.yml's shape), on loopback above port 50000,
+# with the compose file's synthetic root user, which reaches nothing but T3's containers. filecluster-suite and
+# t3tool buckets read it; no vault holds it.
+clusters:
+  meta-1:
+    kind: metadata
+    first: true
+    endpoints: [127.0.0.1:52101, 127.0.0.1:52102, 127.0.0.1:52103, 127.0.0.1:52104]
+    access_key: sidecar-t3-filecluster
+    secret_key: sidecar-t3-filecluster-only
+    bucket: sidecar-t3-meta-1
+    tls: false
+    region: us-east-1
+  meta-2:
+    kind: metadata
+    endpoints: [127.0.0.1:52301]
+    access_key: sidecar-t3-filecluster
+    secret_key: sidecar-t3-filecluster-only
+    bucket: sidecar-t3-meta-2
+    tls: false
+    region: us-east-1
+  seg-1:
+    kind: segment
+    endpoints: [127.0.0.1:52201, 127.0.0.1:52202, 127.0.0.1:52203, 127.0.0.1:52204]
+    access_key: sidecar-t3-filecluster
+    secret_key: sidecar-t3-filecluster-only
+    bucket: sidecar-t3-seg-1
+    tls: false
+    region: us-east-1
