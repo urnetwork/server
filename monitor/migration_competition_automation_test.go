@@ -190,13 +190,20 @@ func migrationAutomationFaultOwner(t testing.TB, version, head int) migrationArt
 	if recovery <= control || controlArtifact.removedVersion != recovery {
 		t.Fatal("executor control custody does not transfer at the registered qualification recovery boundary")
 	}
-	last := migrationCurrentSuffixTestContract(t, recovery).artifact
+	recoveryArtifact := migrationCurrentSuffixTestContract(t, recovery).artifact
+	exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	if exception <= recovery || recoveryArtifact.removedVersion != exception {
+		t.Fatal("qualification recovery custody does not transfer at the registered admission exception boundary")
+	}
+	last := migrationCurrentSuffixTestContract(t, exception).artifact
 	if last.removedVersion != 0 {
-		t.Fatal("qualification recovery custody has an unreviewed successor")
+		t.Fatal("admission exception custody has an unreviewed successor")
 	}
 	switch {
-	case head >= recovery:
+	case head >= exception:
 		return last
+	case head >= recovery:
+		return recoveryArtifact
 	case head >= control:
 		return controlArtifact
 	case head >= official:
@@ -215,9 +222,12 @@ func TestMigrationsAutomation846OwnershipBoundary(t *testing.T) {
 	official := server.CompetitionOfficialReviewMigrationVersion()
 	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
 	recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
-	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff, official - 1, official, control - 1, control, recovery - 1, recovery} {
+	exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
+	for _, head := range []int{846, successor - 1, successor, handoff - 1, handoff, official - 1, official, control - 1, control, recovery - 1, recovery, exception - 1, exception} {
 		want := 846
 		switch {
+		case head >= exception:
+			want = exception
 		case head >= recovery:
 			want = recovery
 		case head >= control:
@@ -243,12 +253,13 @@ func TestMigrationsAutomation846FaultsFollowPublishedOwner(t *testing.T) {
 	official := server.CompetitionOfficialReviewMigrationVersion()
 	control := server.CompetitionExecutorControlAmendmentMigrationVersion()
 	recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
+	exception := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
 	faults := []string{
 		`DROP INDEX competition_source_reserved_round`,
 		`CREATE OR REPLACE FUNCTION competition_v2_source_target_guard() RETURNS trigger LANGUAGE plpgsql AS 'BEGIN RETURN NEW; END'`,
 	}
 	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(tb testing.TB) {
-		for _, head := range []int{846, successor - 1, successor, handoff, official, control, recovery} {
+		for _, head := range []int{846, successor - 1, successor, handoff, official, control, recovery, exception} {
 			server.ApplyDbMigrationsUpTo(tb.Context(), head)
 			if _, drift := migrationPingDatabaseCheck(tb, tb.Context()); drift != "" {
 				tb.Fatalf("healthy owner prefix %d drift: %s", head, drift)

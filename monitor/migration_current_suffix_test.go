@@ -51,14 +51,16 @@ func TestMigrationsCurrentSuffixExactSchemaPrefixes(t *testing.T) {
 }
 
 func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
-	// The qualification recovery carries the executor control amendment's
-	// custody on, which carries the official review's, which carries the review
-	// handoff's: at the head it owns their faults.
-	custodian := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
+	// The admission exception carries the qualification recovery's custody on,
+	// which carries the executor control amendment's, which carries the official
+	// review's, which carries the review handoff's: at the head it owns their
+	// faults.
+	custodian := server.CompetitionExecutorAdmissionExceptionMigrationVersion()
 	handoffBodies := server.CompetitionReviewHandoffBodiesSql()
 	_, _, _, _, twoMemberIdentityGuard, _, _, _ := server.CompetitionSnowTwoMemberWinnerReviewBodiesSql()
 	_, _, _, unamendedEquivalenceGuard, _ := server.CompetitionDistributedEvaluationBodiesSql()
 	amendedEquivalenceGuard := server.CompetitionExecutorControlAmendmentBodiesSql().EquivalenceGuard
+	amendedHostsReady := server.CompetitionExecutorControlAmendmentBodiesSql().HostsReady
 	faults := []struct {
 		name    string
 		version int
@@ -245,8 +247,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		{name: "invented device client version time", version: 852, sql: `ALTER TABLE device ALTER COLUMN client_version_time SET DEFAULT now()`},
 		// the intake-first custody of these guards moved to the review handoff,
 		// which re-created their functions, and on with the handoff's custody
-		// to the official review, the executor control amendment and the
-		// qualification recovery
+		// to the official review, the executor control amendment, the
+		// qualification recovery and the admission exception
 		{name: "elected-winner review guard dropped", version: custodian, sql: `DROP TRIGGER competition_v2_winner_review_before_insert ON competition_integrity_review`},
 		{name: "elected-winner checkpoint guard dropped", version: custodian, sql: `DROP TRIGGER competition_v2_winner_checkpoint_before_insert ON competition_supervisor_transition`},
 		{name: "missing provider capability declarations", version: 894, sql: `DROP TABLE provide_capability`},
@@ -328,8 +330,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		// The pending review handoff: an owner, call or completion row only
 		// through its guard, an append-only ledger, an operator-only import,
 		// and the exact winner-review bodies it re-created. The official review,
-		// the executor control amendment and the qualification recovery carry
-		// this custody on.
+		// the executor control amendment, the qualification recovery and the
+		// admission exception carry this custody on.
 		{name: "review handoff owner guard disabled", version: custodian,
 			sql: `ALTER TABLE competition_review_handoff DISABLE TRIGGER competition_review_handoff_before_insert`},
 		{name: "review handoff calls made mutable", version: custodian,
@@ -383,8 +385,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		// guard and never changed, bound to its round, and the exact review
 		// bodies it re-created with the official review exception, so the
 		// handoff's winner review body and the two-member identity body are
-		// drift from it on. The executor control amendment and the
-		// qualification recovery carry this custody on.
+		// drift from it on. The executor control amendment, the qualification
+		// recovery and the admission exception carry this custody on.
 		{name: "official review authorization unguarded", version: custodian,
 			sql: `DROP TRIGGER competition_official_review_authorization_before_insert ON competition_official_review_authorization`},
 		{name: "official review authorization made mutable", version: custodian,
@@ -404,8 +406,8 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		// no-op receipt and a qualification clock bound to the current
 		// amendment; the amended host identity and its started-job lookup; and
 		// the exact equivalence guard it re-created, so the unamended host
-		// lookup is drift from it on. The qualification recovery carries this
-		// custody on.
+		// lookup is drift from it on. The qualification recovery and the
+		// admission exception carry this custody on.
 		{name: "executor control amendment unguarded", version: custodian,
 			sql: `DROP TRIGGER competition_executor_control_amendment_identity ON competition_executor_control_amendment`},
 		{name: "executor control amendment made mutable", version: custodian,
@@ -448,7 +450,7 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		// exact digest; one replacement job per host that never becomes a public
 		// submission; a clock that reads the replacement; and the exact
 		// equivalence guard it re-created, so the amendment's body is drift from
-		// it on.
+		// it on. The admission exception carries this custody on.
 		{name: "qualification recovery unguarded", version: custodian,
 			sql: `DROP TRIGGER competition_executor_qualification_recovery_identity ON competition_executor_qualification_recovery`},
 		{name: "qualification recovery made mutable", version: custodian,
@@ -467,6 +469,25 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `CREATE OR REPLACE FUNCTION competition_executor_qualification_clock(target uuid, identity text) RETURNS TABLE(job_id uuid, started_at timestamp, deadline_at timestamp, api_image_digest varchar, worker_image_digest varchar) LANGUAGE sql STABLE AS 'SELECT q.job_id, q.started_at, q.deadline_at, q.api_image_digest, q.worker_image_digest FROM competition_executor_qualification_run q WHERE q.round_id=target AND q.host_id=identity'`},
 		{name: "equivalence guard back on the amendment body", version: custodian,
 			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedEquivalenceGuard)},
+		// The retained host admission exception: an exception only through its
+		// guard, never changed or truncated, bound to its round and to its exact
+		// receipt digest; the admitted evidence view over both receipt sources;
+		// and the exact whole-host readiness it re-created, so the amendment's
+		// readiness body is drift from it on.
+		{name: "admission exception unguarded", version: custodian,
+			sql: `DROP TRIGGER competition_executor_admission_exception_identity ON competition_executor_admission_exception`},
+		{name: "admission exception made mutable", version: custodian,
+			sql: `DROP TRIGGER competition_executor_admission_exception_append_only ON competition_executor_admission_exception`},
+		{name: "admission exception truncatable", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DISABLE TRIGGER competition_executor_admission_exception_no_truncate`},
+		{name: "admission exception without its round", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DROP CONSTRAINT competition_executor_admission_exception_round_id_fkey`},
+		{name: "admission exception receipt digest unbound", version: custodian,
+			sql: `ALTER TABLE competition_executor_admission_exception DROP CONSTRAINT competition_executor_admission_exception_check3`},
+		{name: "admitted evidence omits the exceptions", version: custodian,
+			sql: `CREATE OR REPLACE VIEW competition_executor_admitted_evidence AS SELECT round_id, host_id, receipt_json, receipt_sha256, baseline_sha256, created_at FROM competition_executor_equivalence`},
+		{name: "whole-host readiness back on the amendment body", version: custodian,
+			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_hosts_ready(target uuid) RETURNS boolean LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedHostsReady)},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

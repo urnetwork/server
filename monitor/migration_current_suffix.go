@@ -962,8 +962,14 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the Pay with Gamma tables, versioned by their position
 	[]snMainnetMigrationContract{gammaPayMigrationContract},
 	// the single-use executor qualification recovery, with the executor
-	// control amendment custody it carries on; versioned by its position
-	[]snMainnetMigrationContract{competitionExecutorQualificationRecoveryMigrationContract},
+	// control amendment custody it carries on; versioned by its position. The
+	// admission exception (below) re-creates the whole-host readiness this
+	// custody carries from the amendment, and carries the rest of it on from
+	// its own version.
+	[]snMainnetMigrationContract{competitionExecutorQualificationRecoveryMigrationContract.removedAt(server.CompetitionExecutorAdmissionExceptionMigrationVersion())},
+	// the retained host admission exception, with the qualification recovery
+	// custody it carries on; versioned by its position
+	[]snMainnetMigrationContract{competitionExecutorAdmissionExceptionMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
