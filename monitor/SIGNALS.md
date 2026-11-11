@@ -22177,7 +22177,13 @@ and rejection of the prior false causal claim.
 Probe: `payment-reconciliation`
 
 The hourly `PaymentReconcile` task is the lost-notification safety net for
-Apple, Google Play, Stripe, Solana, and x402. A run-level heartbeat is necessary but
+every store in `model.PaymentReconcileStores`: Apple, Google Play, Stripe,
+Solana, x402, Monero, Zcash, TAO (`bittensor`), Bitcoin and ETH (`ethereum`).
+The health and repair readers take their expected stores from that list, and a
+controller test holds the reconciler's legs to it, so a store with a new leg is
+expected without an edit here. Pay with Gamma has no leg: no `gamma`
+watermark is expected, and a `gamma` repair row fails closed as an unsupported
+store. A run-level heartbeat is necessary but
 not sufficient: the controller deliberately continues after one store is
 skipped or errors, then still records its global heartbeat. Observe all layers:
 
@@ -22194,16 +22200,16 @@ skipped or errors, then still records its global heartbeat. Observe all layers:
   reduced to distinct provider evidence, observation/run counts, and age;
   the complete unresolved-webhook tuple belongs to the separate §2.22 WARN.
 
-The default publisher and health/repair readers recognize all five stores,
-including `x402`. Its local leg is always enabled and needs no external store
-credentials: it retries retained `settled_not_granted` grants. An empty local
+The default publisher and health/repair readers recognize every reconciled
+store, including `x402`. Its local leg is always enabled and needs no external
+store credentials: it retries retained `settled_not_granted` grants. An empty local
 pass can complete and advance its watermark. A recorded x402 skip is unexpected
 under that default contract; compare the executing artifact, explicit store
 selection and audit writer before changing anything. Do not invent an external
 x402 credential requirement. Explicit manual store selection does not establish
 the deployed recurring task's configuration or completion.
 
-Fresh global heartbeat and four healthy siblings cannot establish x402 health.
+Fresh global heartbeat and healthy siblings cannot establish x402 health.
 Its non-dry-run local errors retain the existing one-event WARN/two-event PAGE
 policy; missing and stale watermarks retain the same strict age boundaries as
 other stores. Local validation/grant/persistence may fail while heartbeat stays
@@ -22231,7 +22237,7 @@ sustain. Complete sibling aggregates retain their own PAGE or WARN findings,
 including when the health query fails first. Queries remain sequential and
 bounded by the existing observation context; parent cancellation ends the run.
 
-The complete five-store health receipt also requires nonnegative skip, error,
+The complete every-store health receipt also requires nonnegative skip, error,
 and task counts. Ages must be nonnegative or exactly the existing `-1` absent
 sentinel. Claimed and errored task counts are each subsets of the total task
 count; they can overlap. Because one SQL snapshot cross-joins one heartbeat
