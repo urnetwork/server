@@ -361,7 +361,8 @@ func cryptoScan(
 		if view.NeedsRate {
 			if rate := rateNow(); rate != nil {
 				for _, receipt := range receipts {
-					if receipt.FirstSeenRateUsd == nil && receipt.FirstSeenAt.After(intent.ExpiresAt) {
+					// late: first seen past the quote and the coin's grace
+					if receipt.FirstSeenRateUsd == nil && receipt.FirstSeenAt.After(policy.onTimeUntil(intent)) {
 						model.SetCryptoPaymentReceiptFirstSeenRateInConn(nil, ctx, receipt.Key(), *rate)
 					}
 				}
