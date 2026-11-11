@@ -7,11 +7,12 @@ import (
 // The ping report's refusals (connect/GEOMAP.md §2.5): the claims
 // `POST /network/ping-report` refused before storing, by why. Before this
 // counter a refused claim was counted only in the `rejected` of the reporter's
-// own result, which the reporter at most logs on the extender's host: it was
-// not stored, logged or metered, so how many claims the operator itself
-// turned away, and why, could not be told from the operator's side -- for
-// example the reports of an extender slot that shares its identity key with
-// the slot that last activated it, which are refused as another client's.
+// own result, which connect's reporter does not log (it logs a refused report,
+// on the pinger's host): it was not stored, logged or metered, so how many
+// claims the operator itself turned away, and why, could not be told from the
+// operator's side -- for example the reports of an extender slot that shares
+// its identity key with the slot that last activated it, which are refused as
+// another client's.
 //
 // The counter is fixed cardinality: every label value is one of the constants
 // here, never something a reporter sent, and every series is created at zero,
