@@ -12,16 +12,28 @@ package model
 //
 // Records, all strings a script splits by hand, so that no number passes through cjson:
 //
-//	m:<L>  listen_id;protocol;version;weight;max_streams;flags;alpns;app_mode;name;token;sealed;claim
+//	m:<L>  listen_id;protocol;version;weight;max_streams;flags;alpns;app_mode;name;token;sealed;claim;
+//	       sidecar;pv;sv
 //	       ids, protocol, ALPN ids (comma separated), app mode, name and token in hex, sealed and claim
-//	       in base64; flags 1 exclusive, 2 affinity, 4 serving, 8 draining
+//	       in base64; flags 1 exclusive, 2 affinity, 4 serving, 8 draining; sidecar the listener's
+//	       sidecar_id in hex, empty for ur/; pv the highest authorization log position the lease was
+//	       admitted at and sv the set_version of the page that last wrote it (DESIGN-DETAILS 13.2.3). An m
+//	       of the first twelve fields alone, written before positions were kept, reads as "", 0 and 0.
 //	r:<L>  inflight;report_ms
 //	i:<L>  dialer;exclusion_count;exclusion_start_ms;issue_ms,issue_ms,... per dialer, joined by |
 //	e:<L>  ejection_count;ejection_start_ms;network:report_ms,network:report_ms,...
+//	x:<L>  sv;pv;cause;until_ms, the tombstone a removal of L's lease left: cause 0 an unlisten (pv 0),
+//	       1 a removal for cause, 2 the client's removal (pv 2^64 - 1); it fences until until_ms on the
+//	       store's clock, and its field ttl is that life's backstop. It outlives the group's last listener.
 //	v      the group version, raised by each change of who listens
 //
+//	{svc_<L>} ~f    pv;until_ms, the pair floor a removal of L's pairs left
+//	{sn_<N>}  0x00  pv;until_ms, the network's revocation sweep claim, which no listing shows
+//
 // Ids are lowercase hex, compared byte by byte and never through tonumber or the locale's collation,
-// so a script orders listeners as connect.Id.Cmp does.
+// so a script orders listeners as connect.Id.Cmp does. Positions and set versions are uint64s in
+// decimal with no leading zeros, compared by length and then bytes (version_less) and never through
+// tonumber, which would round them past 2^53, and every reply carries them as strings.
 
 import (
 	"github.com/redis/go-redis/v9"
@@ -75,7 +87,10 @@ local function parse_m(s)
     exclusive = bit.band(flags, 1) ~= 0,
     serving = bit.band(flags, 4) ~= 0,
     draining = bit.band(flags, 8) ~= 0,
-    alpns = alpns
+    alpns = alpns,
+    sidecar = f[13] or "",
+    pv = f[14] or "0",
+    sv = f[15] or "0"
   }
 end
 
@@ -164,16 +179,52 @@ local function version_less(a, b)
   end
   return less(a, b)
 end
+
+local function version_max(a, b)
+  if version_less(a, b) then
+    return b
+  end
+  return a
+end
+
+-- A fence's two numbers, a position and an until_ms on the store's clock, or nil once it has lapsed.
+local function live_fence(text, now)
+  if not text then
+    return nil
+  end
+  local f = split(text, ";")
+  local until_ms = tonumber(f[#f])
+  if not until_ms or until_ms <= now then
+    return nil
+  end
+  return f, until_ms
+end
+
+-- L's live tombstone in the group: {sv, pv, cause, until_ms}, or nil.
+local function live_tombstone(group, listener, now)
+  local f, until_ms = live_fence(redis.call("HGET", group, "x:" .. listener), now)
+  if not f or #f ~= 4 then
+    return nil
+  end
+  return {sv = f[1], pv = f[2], cause = tonumber(f[3]), until_ms = until_ms}
+end
 `
 
-// One group's put or del, a page's step (§9.5).
+// One group's put or del, a page's step or a removal (§9.5; DESIGN-DETAILS 13.2.3).
 //
-// KEYS: group, ix. ARGV: op ("put" or "del"), now_ms, listener, lease_ms, m record, inflight,
-// protocol, exclusive ("1" or "0").
+// KEYS: group, ix. put's ARGV: "put", now_ms, listener, lease_ms, m's first twelve fields, inflight,
+// protocol, exclusive ("1" or "0"), sidecar, sv, pv. del's ARGV: "del", now_ms, listener, cause, sv (""
+// for the lease's own, as a removal no page carries passes), pv, the tombstone's ttl_ms.
 //
-// put returns {taken, first_listener, remaining, max_lease_ms}; del returns {found, last_listener,
-// remaining, max_lease_ms}. A heartbeat of a live listener whose protocol and exclusive flag stand
-// skips the taken check, since each later joiner was checked against it, so a heartbeat costs no scan.
+// put returns {status, first_listener, remaining, max_lease_ms, position, cause}: "fenced" with the
+// tombstone's position and cause when one stands at a newer position or set; "stale" with the lease's
+// position when a newer page of the client wrote it; "taken"; or "ok" with the lease's position before
+// the write, "0" for none. A put that writes keeps the higher position and clears the tombstone. del
+// returns {status, last_listener, remaining, max_lease_ms, position}: "absent", "kept" with the lease's
+// position when a newer page or position wrote it, or "removed", leaving a tombstone merged with any
+// there by the higher of each number and the longer life. A heartbeat of a live listener whose protocol
+// and exclusive flag stand skips the taken check, since each later joiner was checked against it, so a
+// heartbeat costs no scan.
 const socketStoreGroupLua = socketStoreLuaPrelude + `
 local group = KEYS[1]
 local ix = KEYS[2]
@@ -184,16 +235,47 @@ trim(group, ix, now)
 local self_score = redis.call("ZSCORE", ix, listener)
 
 if op == "del" then
+  local cause = tonumber(ARGV[4])
+  local sv = ARGV[5]
+  local pv = ARGV[6]
+  local ttl = tonumber(ARGV[7])
   if not self_score then
-    return {0, 0, redis.call("ZCARD", ix), int(max_lease(ix))}
+    return {"absent", "0", int(redis.call("ZCARD", ix)), int(max_lease(ix)), "0"}
+  end
+  local m = {pv = "0", sv = "0"}
+  local self_m = redis.call("HGET", group, "m:" .. listener)
+  if self_m then
+    m = parse_m(self_m)
+  end
+  if sv == "" then
+    sv = m.sv
+  end
+  if cause == 0 and version_less(sv, m.sv) then
+    return {"kept", "0", int(redis.call("ZCARD", ix)), int(max_lease(ix)), m.pv}
+  end
+  if cause == 1 and (version_less(pv, m.pv) or version_less(sv, m.sv)) then
+    return {"kept", "0", int(redis.call("ZCARD", ix)), int(max_lease(ix)), m.pv}
   end
   remove_listener(group, ix, listener)
+  local written = {sv = sv, pv = pv, cause = cause, until_ms = now + ttl}
+  local tombstone = live_tombstone(group, listener, now)
+  if tombstone then
+    written.sv = version_max(written.sv, tombstone.sv)
+    written.pv = version_max(written.pv, tombstone.pv)
+    written.cause = math.max(written.cause, tombstone.cause)
+    written.until_ms = math.max(written.until_ms, tombstone.until_ms)
+  end
+  local field = "x:" .. listener
+  redis.call("HSET", group, field, written.sv .. ";" .. written.pv .. ";" .. int(written.cause) .. ";" .. int(written.until_ms))
+  redis.call("HPEXPIRE", group, written.until_ms - now, "FIELDS", 1, field)
   local remaining = redis.call("ZCARD", ix)
   if remaining == 0 then
-    redis.call("DEL", group, ix)
-    return {1, 1, 0, "0"}
+    -- the hash keeps its tombstones until their ttls end it
+    redis.call("DEL", ix)
+    redis.call("HDEL", group, "v")
+    return {"removed", "1", "0", "0", "0"}
   end
-  return {1, 0, remaining, int(max_lease(ix))}
+  return {"removed", "0", int(remaining), int(max_lease(ix)), "0"}
 end
 
 local lease = tonumber(ARGV[4])
@@ -201,15 +283,31 @@ local record = ARGV[5]
 local inflight = ARGV[6]
 local protocol = ARGV[7]
 local exclusive = ARGV[8] == "1"
+local sidecar = ARGV[9]
+local sv = ARGV[10]
+local pv = ARGV[11]
 
-local need_check = true
+local tombstone = live_tombstone(group, listener, now)
+if tombstone and (version_less(pv, tombstone.pv) or version_less(sv, tombstone.sv)) then
+  return {"fenced", "0", int(redis.call("ZCARD", ix)), int(max_lease(ix)), tombstone.pv, int(tombstone.cause)}
+end
+
+local m = nil
 if self_score then
   local self_m = redis.call("HGET", group, "m:" .. listener)
   if self_m then
-    local m = parse_m(self_m)
-    if m.protocol == protocol and m.exclusive == exclusive then
-      need_check = false
-    end
+    m = parse_m(self_m)
+  end
+end
+local prior = "0"
+local need_check = true
+if m then
+  prior = m.pv
+  if version_less(sv, m.sv) then
+    return {"stale", "0", int(redis.call("ZCARD", ix)), int(max_lease(ix)), prior, "0"}
+  end
+  if m.protocol == protocol and m.exclusive == exclusive then
+    need_check = false
   end
 end
 if need_check then
@@ -217,31 +315,36 @@ if need_check then
     if member ~= listener then
       local other = redis.call("HGET", group, "m:" .. member)
       if other then
-        local m = parse_m(other)
-        if m.exclusive or exclusive or m.protocol ~= protocol then
+        local other_m = parse_m(other)
+        if other_m.exclusive or exclusive or other_m.protocol ~= protocol then
           if self_score then
             remove_listener(group, ix, listener)
           end
-          return {1, 0, redis.call("ZCARD", ix), int(max_lease(ix))}
+          return {"taken", "0", int(redis.call("ZCARD", ix)), int(max_lease(ix)), prior, "0"}
         end
       end
     end
   end
 end
 
+local written_pv = pv
+if m then
+  written_pv = version_max(pv, m.pv)
+end
 local first = 0
 if redis.call("ZCARD", ix) == 0 then
   first = 1
 end
-redis.call("HSET", group, "m:" .. listener, record, "r:" .. listener, inflight .. ";" .. int(now))
+redis.call("HSET", group, "m:" .. listener, record .. ";" .. sidecar .. ";" .. written_pv .. ";" .. sv, "r:" .. listener, inflight .. ";" .. int(now))
 redis.call("HPEXPIRE", group, lease, "FIELDS", 2, "m:" .. listener, "r:" .. listener)
+redis.call("HDEL", group, "x:" .. listener)
 redis.call("ZADD", ix, now + lease, listener)
 redis.call("PEXPIRE", ix, lease)
 if not self_score then
   redis.call("HINCRBY", group, "v", 1)
 end
 redis.call("HPEXPIRE", group, lease, "FIELDS", 1, "v")
-return {0, first, redis.call("ZCARD", ix), int(now + lease)}
+return {"ok", int(first), int(redis.call("ZCARD", ix)), int(now + lease), prior, "0"}
 `
 
 // One Find (§9.6's step 4, §9.8): trim, apply the failed-ticket reports, filter or sample, pick, and add
@@ -625,14 +728,22 @@ return reply
 // which sorts first and never inside a page's range.
 //
 // KEYS: {sc_<client_id>}set. ARGV: network_id (16 bytes), set_version, key_start, key_end, ttl_ms, then
-// the held name keys. Returns {"stale", stored} or {"ok", set_version}.
+// the held name keys. Returns {"stale", stored, edge} or {"ok", set_version, edge}, edge "1" when the
+// set then holds a name key beginning tls/ or smtp/ (DESIGN-DETAILS 13.2.3's step 9).
 const socketStoreSetCommitLua = socketStoreLuaPrelude + `
 local key = KEYS[1]
+local function edge()
+  if #redis.call("ZRANGEBYLEX", key, "[\1tls/", "(\1tls0", "LIMIT", 0, 1) == 1 or
+     #redis.call("ZRANGEBYLEX", key, "[\1smtp/", "(\1smtp0", "LIMIT", 0, 1) == 1 then
+    return "1"
+  end
+  return "0"
+end
 local meta = redis.call("ZRANGEBYLEX", key, "-", "(\1", "LIMIT", 0, 1)
 if #meta == 1 then
   local stored = string.sub(meta[1], 18)
   if version_less(ARGV[2], stored) then
-    return {"stale", stored}
+    return {"stale", stored, edge()}
   end
 end
 local max = "+"
@@ -655,7 +766,7 @@ if 0 < #members then
 end
 redis.call("ZADD", key, 0, "\0" .. ARGV[1] .. ARGV[2])
 redis.call("PEXPIRE", key, ARGV[5])
-return {"ok", ARGV[2]}
+return {"ok", ARGV[2], edge()}
 `
 
 // The network's listing after a page or a removal: each touched name's field holds kind;lease_ms;sealed,
@@ -692,23 +803,111 @@ end
 return 1
 `
 
-// §6.10.1's pair: one field and its ttl in one step. KEYS: {svc_<listener_client_id>}. ARGV: dialer,
-// grant_expire_ms, ttl_ms.
-const socketStorePairLua = `
-redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
-redis.call("HPEXPIRE", KEYS[1], ARGV[3], "FIELDS", 1, ARGV[1])
+// §6.10.1's pair: one field and its ttl in one step, refused below a live floor. KEYS:
+// {svc_<listener_client_id>}. ARGV: dialer, grant_expire_ms, ttl_ms, position, now_ms. Returns {"1",
+// floor} when written, {"0", floor} when the position is below the floor, floor "0" for none.
+const socketStorePairLua = socketStoreLuaPrelude + `
+local key = KEYS[1]
+local floor = "0"
+local f = live_fence(redis.call("HGET", key, "~f"), tonumber(ARGV[5]))
+if f then
+  floor = f[1]
+  if version_less(ARGV[4], floor) then
+    return {"0", floor}
+  end
+end
+redis.call("HSET", key, ARGV[1], ARGV[2])
+redis.call("HPEXPIRE", key, ARGV[3], "FIELDS", 1, ARGV[1])
+return {"1", floor}
+`
+
+// Every pair of a listener goes, leaving the floor ~f at the higher of position and a live floor, for
+// the longer of ttl_ms and what it had left. KEYS: {svc_<listener_client_id>}. ARGV: position, now_ms,
+// ttl_ms.
+const socketStorePairRemoveLua = socketStoreLuaPrelude + `
+local key = KEYS[1]
+local now = tonumber(ARGV[2])
+local floor = ARGV[1]
+local until_ms = now + tonumber(ARGV[3])
+local f, live_until = live_fence(redis.call("HGET", key, "~f"), now)
+if f then
+  floor = version_max(floor, f[1])
+  until_ms = math.max(until_ms, live_until)
+end
+redis.call("DEL", key)
+redis.call("HSET", key, "~f", floor .. ";" .. int(until_ms))
+redis.call("HPEXPIRE", key, until_ms - now, "FIELDS", 1, "~f")
 return 1
+`
+
+// A listener's renewal of its pairs (QD-656): each dialer field lives the lesser of ttl_max_ms and its
+// grant's remaining life, and one whose grant has ended goes. KEYS: {svc_<listener_client_id>}. ARGV:
+// ttl_max_ms, now_ms.
+const socketStorePairTouchLua = socketStoreLuaPrelude + `
+local key = KEYS[1]
+local ttl_max = tonumber(ARGV[1])
+local now = tonumber(ARGV[2])
+local values = redis.call("HGETALL", key)
+local ended = {}
+for index = 1, #values, 2 do
+  local field = values[index]
+  if field ~= "~f" then
+    local ttl = ttl_max
+    local grant = tonumber(values[index + 1])
+    if grant and grant ~= 0 then
+      ttl = math.min(ttl_max, grant - now)
+    end
+    if ttl <= 0 then
+      ended[#ended + 1] = field
+      if 400 <= #ended then
+        redis.call("HDEL", key, unpack(ended))
+        ended = {}
+      end
+    else
+      redis.call("HPEXPIRE", key, ttl, "FIELDS", 1, field)
+    end
+  end
+end
+if 0 < #ended then
+  redis.call("HDEL", key, unpack(ended))
+end
+return 1
+`
+
+// A network's revocation sweep claim, field 0x00 of its listing (DESIGN-DETAILS 13.2.3): taken unless
+// an unexpired claim at the position or above is another's. KEYS: {sn_<network_id>}names. ARGV:
+// position, now_ms, ttl_ms, held_position and held_until_ms ("" for a first claim). Returns {"1",
+// position, until_ms} when taken or renewed, {"0", position, until_ms} of the standing claim when not.
+const socketStoreClaimLua = socketStoreLuaPrelude + `
+local key = KEYS[1]
+local position = ARGV[1]
+local now = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local f = live_fence(redis.call("HGET", key, "\0"), now)
+if f then
+  local mine = ARGV[4] ~= "" and f[1] == ARGV[4] and f[2] == ARGV[5]
+  if not mine and not version_less(f[1], position) then
+    return {"0", f[1], f[2]}
+  end
+end
+local until_ms = int(now + ttl)
+redis.call("HSET", key, "\0", position .. ";" .. until_ms)
+redis.call("HPEXPIRE", key, ttl, "FIELDS", 1, "\0")
+return {"1", position, until_ms}
 `
 
 // Every script's source, by name, which the slot check reads.
 var socketStoreScriptSources = map[string]string{
-	"group":      socketStoreGroupLua,
-	"pick":       socketStorePickLua,
-	"read":       socketStoreReadLua,
-	"set_begin":  socketStoreSetBeginLua,
-	"set_commit": socketStoreSetCommitLua,
-	"names":      socketStoreNamesLua,
-	"pair":       socketStorePairLua,
+	"group":       socketStoreGroupLua,
+	"pick":        socketStorePickLua,
+	"read":        socketStoreReadLua,
+	"set_begin":   socketStoreSetBeginLua,
+	"set_commit":  socketStoreSetCommitLua,
+	"names":       socketStoreNamesLua,
+	"pair":        socketStorePairLua,
+	"pair_remove": socketStorePairRemoveLua,
+	"pair_touch":  socketStorePairTouchLua,
+	"claim":       socketStoreClaimLua,
 }
 
 // Every script, by name, made once.

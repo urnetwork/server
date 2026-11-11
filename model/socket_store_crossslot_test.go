@@ -47,7 +47,7 @@ func TestSocketStoreCallsShareOneTag(t *testing.T) {
 				}
 				calls = append(calls, name)
 			}
-			return store
+			return &testSuiteSocketStore{SocketStore: store}
 		})
 		seen := map[string]bool{}
 		for _, name := range calls {

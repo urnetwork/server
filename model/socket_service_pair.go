@@ -2,9 +2,11 @@ package model
 
 // §6.10.1's pair, {svc_<listener_client_id>} field <dialer_client_id>, which an edge's or a ur/ Find
 // writes (§9.6, D-SOCK-12) and CreateContract reads to issue a Service contract only for a pair a Find
-// recorded (C9). Its value is the grant's expiry in milliseconds, 0 for none; its field ttl is capped at
-// 24 h, 60 min for ur/, and refreshed per Find; revocation or the last edge unlisten deletes the key
-// (§2.8's sock-3). Only the sockets store writes it.
+// recorded (C9). Its value is the grant's expiry in milliseconds, 0 for none. A tls/ or smtp/ pair's
+// field ttl is the lesser of the grant's remaining life and 15 min, renewed by the listener's accepted
+// registration; a ur/ pair's is capped at 60 min and refreshed per Find (QD-656, §2.8's sock-3).
+// Revocation or the last edge unlisten removes the key's pairs and leaves the floor field ~f, which no
+// dialer's field is, refusing a pair written at an older position. Only the sockets store writes it.
 
 import (
 	"context"
