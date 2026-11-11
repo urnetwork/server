@@ -500,8 +500,9 @@ func TestRecordNetworkExtenderProbeResultSpendsAConsecutiveBudget(t *testing.T) 
 		connect.AssertEqual(t, publishes[1].Kind, NetworkExtenderPublishKindRevocation)
 		connect.AssertEqual(t, string(publishes[1].Message), "revocation")
 
-		// a deactivated address is out of the probe set entirely; only a new
-		// activation puts it back
+		// a deactivated address is out of the active probe set; a new
+		// activation puts it back, or a probe for its return
+		// (network_extender_recovery_model_test.go)
 		targets := GetActiveNetworkExtenderProbeTargets(ctx)
 		connect.AssertEqual(t, len(targets), 0)
 
