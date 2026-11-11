@@ -508,6 +508,12 @@ func (self *socks5Server) newSocksProxy() *proxy.SocksProxy {
 			return false
 		}
 
+		// A sign-in with the proxy's own signed credentials is SOCKS use, for
+		// the Pro features notice (model ProxyFeatureUses), whatever the plan
+		// answers below: a network still signing in once enforcement refuses
+		// it keeps being told why. In process only; no I/O on this path.
+		self.proxyDeviceManager.noteFeatureUse(proxyId, model.FeatureSocksProxy, time.Now())
+
 		// SOCKS is a Pro-only feature (pro.yml). Enforced at the CONNECTION, not just
 		// at credential issuance -- otherwise a client that already holds SOCKS
 		// credentials keeps using them after its plan stops including the feature.
@@ -865,6 +871,14 @@ type wgServer struct {
 
 	handoffPrepareOnce sync.Once
 	handoffGeneration  string
+
+	// The proxy of each registered client's tunnel address, so the session
+	// sampler, which reads the device's peers by address, can note each
+	// proxy's WireGuard use (noteWgFeatureUses). An entry is replaced when its
+	// address goes to another proxy and is never removed: the addresses come
+	// from the host and block's bounded pool (proxy_client_ipv4).
+	wgProxyIdsLock sync.Mutex
+	wgProxyIds     map[netip.Addr]server.Id
 }
 
 func NewWgServer(
@@ -1149,8 +1163,64 @@ func (self *wgServer) logAppliedClients(op string, applied map[netip.Addr]*proxy
 	logAppliedClientDetails(op, applied, bool(glog.V(1)), glog.Infof)
 }
 
+// indexWgProxyIds records the proxy of each valid client's tunnel address
+// (wgProxyIds), from the proxy clients validWgClients turned into clients.
+func (self *wgServer) indexWgProxyIds(proxyClients []*model.ProxyClient, clients map[netip.Addr]*proxy.WgClient) {
+	if len(clients) == 0 {
+		return
+	}
+	self.wgProxyIdsLock.Lock()
+	defer self.wgProxyIdsLock.Unlock()
+	if self.wgProxyIds == nil {
+		self.wgProxyIds = map[netip.Addr]server.Id{}
+	}
+	for _, proxyClient := range proxyClients {
+		if proxyClient == nil || proxyClient.WgConfig == nil {
+			continue
+		}
+		addr := proxyClient.WgConfig.ClientIpv4
+		if client, ok := clients[addr]; ok && client.PublicKey == proxyClient.WgConfig.ClientPublicKey {
+			self.wgProxyIds[addr] = proxyClient.ProxyId
+		}
+	}
+}
+
+// noteWgFeatureUses notes a WireGuard use, for the Pro features notice (model
+// ProxyFeatureUses), of each proxy whose peer is in session at now: its newest
+// completed handshake is inside the session window, and that handshake is the
+// use. A peer that never completed one, or whose address no registered client
+// holds, notes nothing. Runs on the session sampler's cadence, never on the
+// packet path.
+func (self *wgServer) noteWgFeatureUses(statuses map[netip.Addr]*proxy.WgPeerStatus, now time.Time) {
+	if self.proxyDeviceManager == nil || self.settings == nil || len(statuses) == 0 {
+		return
+	}
+	windowStart := now.Add(-self.settings.WgSessionWindow)
+	type wgUse struct {
+		proxyId       server.Id
+		lastHandshake time.Time
+	}
+	uses := []wgUse{}
+	func() {
+		self.wgProxyIdsLock.Lock()
+		defer self.wgProxyIdsLock.Unlock()
+		for addr, status := range statuses {
+			if status == nil || status.LastHandshake.IsZero() || status.LastHandshake.Before(windowStart) {
+				continue
+			}
+			if proxyId, ok := self.wgProxyIds[addr]; ok {
+				uses = append(uses, wgUse{proxyId: proxyId, lastHandshake: status.LastHandshake})
+			}
+		}
+	}()
+	for _, use := range uses {
+		self.proxyDeviceManager.noteFeatureUse(use.proxyId, model.FeatureWireguardProxy, use.lastHandshake)
+	}
+}
+
 func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error {
 	clients, counts := self.validWgClients(proxyClients)
+	self.indexWgProxyIds(proxyClients, clients)
 
 	if len(clients) == 0 {
 		if 0 < counts.total {
@@ -1183,6 +1253,7 @@ func (self *wgServer) AddProxyClients(proxyClients ...*model.ProxyClient) error 
 // concurrently with the db snapshot is never removed.
 func (self *wgServer) SyncProxyClients(proxyClients []*model.ProxyClient, syncStartTime time.Time) error {
 	clients, counts := self.validWgClients(proxyClients)
+	self.indexWgProxyIds(proxyClients, clients)
 
 	applied, addErr := self.wgProxy.AddClients(clients)
 	if addErr != nil {

@@ -2,7 +2,8 @@
 # image. Product sources, dependencies and workload inputs are not refreshed.
 # This build does not authorize execution or replace historical measurements.
 ARG FROZEN_IMAGE
-FROM ${FROZEN_IMAGE}
+ARG BUILD_IMAGE
+FROM ${BUILD_IMAGE} AS security-toolchain-build
 USER 0:0
 COPY toolchain/ /opt/urnetwork/security-toolchain/
 ARG MANAGEMENT_CPUS=20,22
@@ -21,6 +22,20 @@ RUN --network=none test "$(go env GOVERSION)" = go1.27.4 \
         '.simulator_sha256 = $simulator_sha256' /opt/urnetwork/image-identity.json > /opt/urnetwork/image-identity.hotfix.json \
     && mv /opt/urnetwork/image-identity.hotfix.json /opt/urnetwork/image-identity.json \
     && chmod 0444 /opt/urnetwork/image-identity.json
+# Start again from the original runtime, not the compiler stage. None of the
+# build-only GOMAXPROCS, GOROOT, PATH or module-network overrides may escape.
+FROM ${FROZEN_IMAGE} AS security-toolchain-runtime
+USER 0:0
+RUN --network=none rm -rf /usr/local/go
+COPY --from=security-toolchain-build /opt/urnetwork/security-toolchain/ /usr/local/go/
+COPY --from=security-toolchain-build /usr/local/libexec/competitionpatch /usr/local/libexec/competitionpatch
+COPY --from=security-toolchain-build /usr/local/libexec/competitiondbinit /usr/local/libexec/competitiondbinit
+COPY --from=security-toolchain-build /opt/urnetwork/bin/sim-latency /opt/urnetwork/bin/sim-latency
+COPY --from=security-toolchain-build /opt/urnetwork/image-identity.json /opt/urnetwork/image-identity.json
+RUN --network=none test "$(go env GOVERSION)" = go1.27.4 \
+    && test -z "${GOMAXPROCS:-}" \
+    && test "$(sha256sum /opt/urnetwork/bin/sim-latency | awk '{print $1}')" = "$(jq -er .simulator_sha256 /opt/urnetwork/image-identity.json)" \
+    && test -z "$(git -C /workspace/server status --porcelain --untracked-files=all)"
 LABEL com.urnetwork.competition.toolchain-exception="security-hotfix" \
       com.urnetwork.competition.toolchain="go1.27.4"
 USER 65532:65532

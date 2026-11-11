@@ -146,6 +146,38 @@ func TestProxyMainUsesCombinedDeploymentHandoff(t *testing.T) {
 	}
 }
 
+// The Pro features notice reaches only the networks whose proxies use SOCKS or
+// WireGuard, which the proxy process records: main owns one feature use
+// recorder, hands it to the device manager the SOCKS and WireGuard servers
+// note into, writes what is left at the end of the drain, and closes it after
+// the manager. Without it no network would ever see the notice.
+func TestProxyMainRecordsProFeatureUse(t *testing.T) {
+	source, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mainStart := strings.Index(string(source), "func main()")
+	if mainStart < 0 {
+		t.Fatal("main function not found")
+	}
+	mainSource := string(source[mainStart:])
+	for _, wiring := range []string{
+		"proxyFeatureUses := model.NewProxyFeatureUses(ctx, model.DefaultProxyFeatureUseSettings())",
+		"defer proxyFeatureUses.Close()",
+		"proxyDeviceManagerSettings.FeatureUses = proxyFeatureUses",
+		"proxy.NewProxyDeviceManager(model.WithProviderAppearances(ctx, providerAppearances), proxyDeviceManagerSettings)",
+		"drainCoordinator.AddBeforeExit(proxyFeatureUses.Flush)",
+	} {
+		if !strings.Contains(mainSource, wiring) {
+			t.Fatalf("production main does not record Pro feature use: missing %q", wiring)
+		}
+	}
+	// closed after the manager: deferred before it, so it runs after
+	if strings.Index(mainSource, "defer proxyFeatureUses.Close()") > strings.Index(mainSource, "proxyDeviceManager.CloseAndWait(") {
+		t.Fatal("the feature use recorder closes before the device manager, so the final write misses the last notes")
+	}
+}
+
 // The environment variable that makes this test binary run the proxy's main
 // with the arguments it holds, as the proxy binary would.
 const proxyMainTestArgsEnvironment = "URNETWORK_PROXY_MAIN_TEST_ARGS"

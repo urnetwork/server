@@ -59,3 +59,34 @@ func TestSecurityToolchainImageRejectsCompilerMismatch(t *testing.T) {
 		}
 	}
 }
+
+// Inheriting the builder capped the simulator at two processors and changed
+// its environment. A fresh original-runtime stage must inherit none of that.
+func TestSecurityToolchainRuntimeDoesNotInheritBuildEnvironment(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("evaluator", "container", "Dockerfile.security-toolchain"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(content)
+	build, runtime, found := strings.Cut(text, "FROM ${FROZEN_IMAGE} AS security-toolchain-runtime\n")
+	if !found || !strings.Contains(build, "FROM ${BUILD_IMAGE} AS security-toolchain-build") || !strings.Contains(build, "GOMAXPROCS=2") {
+		t.Fatal("build and original-runtime stages are not independently selected")
+	}
+	for _, line := range strings.Split(runtime, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "ENV ") {
+			t.Fatalf("runtime environment was changed by the compiler-only exception: %s", line)
+		}
+	}
+	for _, required := range []string{
+		"RUN --network=none rm -rf /usr/local/go",
+		"COPY --from=security-toolchain-build /opt/urnetwork/security-toolchain/ /usr/local/go/",
+		"COPY --from=security-toolchain-build /opt/urnetwork/bin/sim-latency /opt/urnetwork/bin/sim-latency",
+		`test "$(go env GOVERSION)" = go1.27.4`,
+		`test -z "${GOMAXPROCS:-}"`,
+		"USER 65532:65532",
+	} {
+		if !strings.Contains(runtime, required) {
+			t.Fatalf("runtime stage lost a required isolation boundary: %s", required)
+		}
+	}
+}
