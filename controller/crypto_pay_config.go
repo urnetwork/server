@@ -92,18 +92,9 @@ import (
 var cryptoPayKnownPlans = []string{model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
 var cryptoPayKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
 
-// The coins, in the order every UI shows them: the main selector's USDC,
-// Zcash and Monero, then "More coins": TAO, Bitcoin, ETH, SOL (mmm/BTCPAY.md
-// §17.6).
-var cryptoPayAssets = []string{
-	model.CryptoAssetUsdcSolana,
-	model.CryptoAssetZec,
-	model.CryptoAssetXmr,
-	model.CryptoAssetTao,
-	model.CryptoAssetBtc,
-	model.CryptoAssetEth,
-	model.CryptoAssetSol,
-}
+// The coins, in the order every UI shows them (model.CryptoAssets, which the
+// payment monitor reads too).
+var cryptoPayAssets = model.CryptoAssets
 
 // The coins the scanner watches: USDC arrives by webhook.
 var cryptoPayScannedAssets = []string{
