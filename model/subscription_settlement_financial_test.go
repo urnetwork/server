@@ -230,7 +230,6 @@ func settlementReadFinancialArm(
 			}
 		})
 		server.Redis(ctx, func(r server.RedisClient) {
-			var wantBytes, wantRevenue int64
 			for index, balance := range balances {
 				state := &states[index]
 				server.Raise(r.Get(ctx, netEscrowKey(balanceIds[index])).Scan(&state.reservation))
@@ -246,16 +245,15 @@ func settlementReadFinancialArm(
 					state.siblingSettled || state.siblingPayout != 0 {
 					t.Fatalf("financial result mismatch at synthetic balance index %d", index)
 				}
-				wantBytes += balance.payout
-				wantRevenue += balance.payoutRevenue
 			}
-			for key, want := range map[string]int64{
-				accountBalanceNetPayoutByteCountKey(fixture.providerNetworkId): wantBytes,
-				accountBalanceNetPayout(fixture.providerNetworkId):             wantRevenue,
+			// The sweeps above hold the provider's earnings; settlement posts
+			// no provider account totals (BILLING-SPLIT.md).
+			for _, key := range []string{
+				accountBalanceNetPayoutByteCountKey(fixture.providerNetworkId),
+				accountBalanceNetPayout(fixture.providerNetworkId),
 			} {
-				got, err := r.Get(ctx, key).Int64()
-				if (err != nil && !(want == 0 && errors.Is(err, redis.Nil))) || got != want {
-					t.Fatal("provider account posts changed financial totals")
+				if !errors.Is(r.Get(ctx, key).Err(), redis.Nil) {
+					t.Fatal("settlement posted provider account totals")
 				}
 			}
 		})

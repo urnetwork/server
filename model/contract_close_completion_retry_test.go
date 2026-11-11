@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 // A public report stops after admission committed and before settlement begins.
@@ -39,8 +38,12 @@ func readContractCompletionTestState(t testing.TB, ctx context.Context, contract
 	return
 }
 
-// The production Redis admission and public report owners expose both the lost
-// continuation and a settlement rollback, with no scheduler-dependent timing.
+// The production Redis admission and public report owners expose the lost
+// continuation, and the public report owners a settlement rollback, with no
+// scheduler-dependent timing. A Redis reservation's settlement takes no
+// ownership since it stopped publishing provider totals (BILLING-SPLIT.md),
+// so the rollback is a legacy reservation's, whose settlement still owns its
+// grant and is refused while another owner holds it.
 func exerciseContractCompletionRetry(t *testing.T, completion contractCheckpointCompletion, busySettlement bool) {
 	t.Helper()
 	env := server.DefaultTestEnv()
@@ -48,7 +51,14 @@ func exerciseContractCompletionRetry(t *testing.T, completion contractCheckpoint
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		f := newNetEscrowOrderingTestFixture(t, ctx)
-		contract := createRedisAdmissionTest(ctx, f, 40)
+		var contract *TransferEscrow
+		if busySettlement {
+			var posts []func() any
+			contract, posts = createNetEscrowOrderingTestContract(ctx, f, 40)
+			server.RunPosts(ctx, posts...)
+		} else {
+			contract = createRedisAdmissionTest(ctx, f, 40)
+		}
 		report := ContractCloseReport{ReportId: server.NewId(), ContractId: contract.ContractId, ClientId: f.sourceId}
 		prior := report
 		prior.ReportId = server.NewId()
@@ -66,9 +76,7 @@ func exerciseContractCompletionRetry(t *testing.T, completion contractCheckpoint
 			}
 		}
 		if busySettlement {
-			release := holdFinancialTestOwner(t, ctx, []server.PgOwnershipKey{
-				task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contract.ContractId)),
-			})
+			release := holdFinancialTestOwner(t, ctx, transferBalanceOwnershipKeys([]server.Id{f.balanceId}))
 			applied, err := CloseContractWithReport(ctx, report)
 			release()
 			if !applied || !errors.Is(err, errTransferBalanceOwnershipBusy) {
@@ -86,10 +94,17 @@ func exerciseContractCompletionRetry(t *testing.T, completion contractCheckpoint
 		if applied, err := CloseContractWithReport(ctx, report); applied || err != nil {
 			t.Fatalf("exact retry changed report custody: applied=%t err=%v", applied, err)
 		}
-		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome == nil || *outcome != ContractOutcomeSettled || journals != 1 {
+		// a legacy reservation debits its grant inline; a Redis one journals
+		wantJournals := 1
+		if busySettlement {
+			wantJournals = 0
+		}
+		if outcome, journals := readContractCompletionTestState(t, ctx, contract.ContractId); outcome == nil || *outcome != ContractOutcomeSettled || journals != wantJournals {
 			t.Fatalf("exact retry did not finish settlement: outcome=%v journals=%d", outcome, journals)
 		}
-		flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
+		if !busySettlement {
+			flushRedisAdmissionTestDebits(t, ctx, f.balanceId, 1, 1)
+		}
 		if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 0 {
 			t.Fatalf("resumed settlement left reservation=%d", reserved)
 		}

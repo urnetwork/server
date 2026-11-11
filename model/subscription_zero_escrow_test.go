@@ -266,10 +266,12 @@ func TestZeroEscrowContractSettlesWithoutPayout(t *testing.T) {
 		if !usageRecorded {
 			t.Fatal("zero escrow settlement dropped the usage snapshot a network contract keeps")
 		}
+		// The escrowed control pays its provider in its sweep alone: settlement
+		// queues no provider totals (BILLING-SPLIT.md).
 		escrowedState := readZeroEscrowTestState(t, ctx, escrowed.ContractId)
 		if escrowedState.outcome == nil || *escrowedState.outcome != ContractOutcomeSettled ||
-			escrowedState.escrowCount == 0 || escrowedState.sweepCount == 0 || !escrowedState.providerTotalsTask {
-			t.Fatalf("the escrowed control did not pay its provider: %+v", escrowedState)
+			escrowedState.escrowCount == 0 || escrowedState.sweepCount == 0 || escrowedState.providerTotalsTask {
+			t.Fatalf("the escrowed control did not pay its provider in its sweep alone: %+v", escrowedState)
 		}
 	})
 }

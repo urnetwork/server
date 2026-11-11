@@ -275,10 +275,32 @@ func TestAccountPointsPerPayout(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 
 		/**
+		 * Pin the plan's subsidy window. The window runs from the earliest
+		 * contract create to the latest close on the database clock
+		 * (paymentPlanSubsidyRangeSQL), and creating and closing these ~1,000
+		 * contracts takes from seconds to minutes on a shared Postgres. With a
+		 * 1-day period and no minimum window, k whole minutes plan a subsidy
+		 * scaled k/1440 whose points replace the forced points, so the total
+		 * came out as 1/1440, 1/720 or 1/480 of the points per payout. A
+		 * settled contract's close time is immutable (the usage guard), so
+		 * every create moves to the latest close: the empty window plans no
+		 * subsidy, and ForcePoints awards exactly AccountPointsPerPayout
+		 * however long the setup took.
+		 */
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(
+				ctx,
+				`UPDATE transfer_contract SET create_time = (SELECT MAX(close_time) FROM transfer_contract)`,
+			))
+		})
+
+		/**
 		 * Plan payments
 		 */
 		paymentPlan, err := PlanPaymentsWithConfig(ctx, subsidyConfig)
 		connect.AssertEqual(t, err, nil)
+		// the forced points apply only to a plan without a subsidy
+		connect.AssertEqual(t, paymentPlan.SubsidyPayment, nil)
 
 		connect.AssertEqual(t, len(paymentPlan.NetworkPayments), 2)
 

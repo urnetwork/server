@@ -12,6 +12,8 @@ package controller
 //     period, and the Pro balance with the price as its subsidy revenue; the
 //     price tier on the renewal and the welcome offer's redemption. A
 //     renewal's term starts where the paid term ended, so it does not shift.
+//     A plan purchase voids the network's renewal or seat upgrade that waited
+//     for it: it pays for the days they would buy.
 //  4. a data pack to the network: a pro = false balance and the applied note
 //  5. a data pack as a code: the balance code, emailed when the intent has an
 //     email
@@ -47,7 +49,8 @@ func gammaCreditIntent(clientSession *session.ClientSession, intent *model.Gamma
 	duration := model.Pro().DataCodeDuration
 	if !plan {
 		var ok bool
-		byteCount, ok = stripeDataPackByteCount(intent.Item)
+		// what the charged pack grants, whatever its rails say now
+		byteCount, ok = dataPackByteCount(intent.Item)
 		if !ok || byteCount <= 0 {
 			return false, fmt.Errorf("intent %s names an unknown data pack", intent.IntentId)
 		}
@@ -100,8 +103,15 @@ func gammaCreditIntentInTx(
 		if intent.TermStartTime != nil && intent.TermStartTime.Before(now.Add(gammaRenewLead)) {
 			// a renewal continues the paid term
 			start = *intent.TermStartTime
+			// where Pro paid elsewhere ran past it (and has ended: the biller
+			// charges nothing while it runs), the new term starts after it,
+			// so no day is paid for twice
+			if coverEnd := model.GetGammaProCoverEndInTx(tx, ctx, networkId, start, &start); coverEnd.After(start) && !coverEnd.After(now) {
+				start = coverEnd
+			}
 		}
-		endTime := start.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
+		paidEndTime := start.Add(solanaPlanDuration(intent.Item))
+		endTime := paidEndTime.Add(manualPaymentGracePeriod)
 		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
 			NetworkId:          networkId,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -110,18 +120,24 @@ func gammaCreditIntentInTx(
 			NetRevenue:         amount,
 			SubscriptionMarket: model.SubscriptionMarketGamma,
 			TransactionId:      intent.IntentId.String(),
+			PaidEndTime:        &paidEndTime,
 		}))
+		// the term's Pro marker holds no data (SupporterPeriodTransferBalance)
 		transferBalance := &model.TransferBalance{
 			NetworkId:             networkId,
 			StartTime:             start,
 			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: SupporterPeriodTransferBalance,
 			SubsidyNetRevenue:     amount,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      SupporterPeriodTransferBalance,
 			Pro:                   true,
 		}
 		model.AddTransferBalanceInTx(ctx, tx, transferBalance)
 		balanceId = &transferBalance.BalanceId
+		// the term's data: the full Pro grant for the cycle it starts. A
+		// renewal continuing the term starts its cycle at the term's start,
+		// granted then (the sweep) when it is still ahead.
+		model.GrantProCycleInTx(tx, ctx, networkId)
 		model.SetSubscriptionRenewalPriceTierByTransactionInTx(tx, ctx, networkId, model.SubscriptionMarketGamma, intent.IntentId.String(), intent.Tier)
 		if intent.Item == model.SolanaPlanYearlyOnboarding {
 			if model.RedeemOnboardingOfferInTx(tx, ctx, networkId, model.OnboardingStoreGamma, now) {
@@ -132,6 +148,19 @@ func gammaCreditIntentInTx(
 		if renewPlan == model.SolanaPlanYearlyOnboarding {
 			// the offer is once; a renewal is at the regular price
 			renewPlan = model.SolanaPlanYearly
+		}
+		if intent.Purpose == model.GammaPurposePurchase {
+			// the purchase replaces the renewal or seat upgrade that waited
+			// for it (gammaPlanHold): it pays for the days they would buy
+			voided, inFlight := model.VoidReplacedGammaPlanIntentsInTx(tx, ctx, networkId, gammaKnownPlans, now)
+			if 0 < voided {
+				glog.Infof("[gamma]intent %s replaced %d automatic plan charge(s) of network %s\n", intent.IntentId, voided, networkId)
+			}
+			if 0 < inFlight {
+				// gammaPlanHold charges no plan purchase while another plan
+				// charge is in flight, so this must not happen
+				glog.Errorf("[gamma]intent %s was credited while %d automatic plan charge(s) of network %s are in flight\n", intent.IntentId, inFlight, networkId)
+			}
 		}
 
 	case intent.Delivery == model.CryptoDeliveryCode:

@@ -309,9 +309,9 @@ func LatestWinbackOfferForStoreInTx(tx server.PgTx, ctx context.Context, network
 // ----- the facts the offer decision reads -----
 
 // The markets whose renewal revenue is the amount the customer was charged:
-// a Stripe trial invoice records zero, and the crypto, x402 and manual markets
-// only ever record a payment. The App Store and Play are not here: an App
-// Store trial records a paid marker and a Play window records the plan's
+// a Stripe trial invoice records zero, and the crypto, Gamma, x402 and manual
+// markets only ever record a payment. The App Store and Play are not here: an
+// App Store trial records a paid marker and a Play window records the plan's
 // price whatever the store charged (NetworkHasPaidSupporterPeriod).
 var winbackChargedRevenueMarkets = []string{
 	SubscriptionMarketStripe,
@@ -321,13 +321,16 @@ var winbackChargedRevenueMarkets = []string{
 	SubscriptionMarketBittensor,
 	SubscriptionMarketBitcoin,
 	SubscriptionMarketEthereum,
+	SubscriptionMarketGamma,
 	SubscriptionMarketX402,
 	SubscriptionMarketManual,
 }
 
 // The markets and actions of the operator events a refund, a dispute or a
 // store revocation writes (payment_reconciliation_event), read through the
-// (store, action, event_time) index.
+// (store, action, event_time) index. Gamma has no reconciliation leg and
+// cannot be refunded on chain; an event an operator writes for it counts like
+// any other.
 var winbackRefundEventStores = []string{
 	SubscriptionMarketStripe,
 	SubscriptionMarketApple,
@@ -338,6 +341,7 @@ var winbackRefundEventStores = []string{
 	SubscriptionMarketBittensor,
 	SubscriptionMarketBitcoin,
 	SubscriptionMarketEthereum,
+	SubscriptionMarketGamma,
 	SubscriptionMarketX402,
 	SubscriptionMarketManual,
 }
@@ -352,7 +356,7 @@ var winbackRefundEventActions = []string{
 // one Pro period and nothing was given back: no Stripe refund or dispute and no
 // refund, dispute or store revocation on any market. A period is paid when:
 //
-//   - Stripe, crypto, x402, manual: its recorded revenue is above zero;
+//   - Stripe, crypto, Gamma, x402, manual: its recorded revenue is above zero;
 //   - App Store: its transaction's price in the ledger is above zero (a free
 //     trial or free offer is priced zero, and a sandbox purchase records no
 //     revenue);

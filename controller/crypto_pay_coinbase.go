@@ -48,11 +48,13 @@ var cryptoCoinbaseCurrencies = map[string]string{
 
 // Each coin's Coinbase network, named explicitly so a coin Coinbase also
 // takes on other networks (Bitcoin and ETH on Base, SOL on Base) is always
-// received on its own chain. TAO's is "bittensor": the id Coinbase
+// received on its own chain. TAO's is "bittensor", the id Coinbase
 // Exchange's public currency data gives its one network
-// (api.exchange.coinbase.com/currencies/TAO, read 2026-11-10). The App API's
-// first live address request confirms it: a refused network fails the
-// refill, and TAO stays unavailable, with the error in the log.
+// (api.exchange.coinbase.com/currencies/TAO, read 2026-11-10), confirmed live
+// on 2026-11-11: the App API made per-invoice TAO addresses on "bittensor",
+// a new one each time, as it does for SOL on "solana". A refused network
+// still fails the refill, and the coin stays unavailable, with the error in
+// the log.
 var cryptoCoinbaseNetworks = map[string]string{
 	model.CryptoAssetTao: "bittensor",
 	model.CryptoAssetBtc: "bitcoin",

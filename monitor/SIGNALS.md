@@ -9342,6 +9342,13 @@ Reproducing the same stale expectation on unchanged baseline and candidate
 separates an inherited test issue from a new regression; it does not make the
 broad suite green or excuse a distinct conservation/custody failure.
 
+Update 2026-11-11: settlement no longer queues the provider-total projection
+(server BILLING-SPLIT.md). Nothing in production read `account_balance.provided_*`
+or its Redis deltas. The drain and the per-task reader stay only to consume the
+rows already queued and those older binaries queue during a rollout, so the
+provider totals drain panels fall to zero once those are gone. Tests now assert
+that settlement produces no provider totals.
+
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
 claiming the outcome. Rollback restores all state. An old writer that wins before
@@ -17089,17 +17096,29 @@ running API **and** Taskworker artifacts before applying these semantics):
   Main's location-specific provider-list incident.
 - Each sampled hostname has an explicit IPv4 name-resolution phase using its
   own tunnel's private resolver, followed by target TCP/TLS and response work.
-  The tunnel takes Connect's existing provider-country regional recommendation
-  where available (as server/proxy does), an explicit safe custom resolver
-  first, and the existing in-tunnel DoH default otherwise. Never use the
-  operator host's DNS for provider targets or share resolver state across
-  providers. A regional plaintext DNS recommendation remains inside that
-  provider tunnel; it is not a new public bootstrap path. The source change
-  requires a new Taskworker artifact before it describes Main behavior. The
-  existing fixed failure stages do not expose resolver selection or join a
-  provider-country cohort, so they cannot prove a regional recommendation
-  caused improvement or failure. Unknown/stale country metadata can select the
-  default or an inapplicable recommendation; retain unknown attribution. Up to
+  An explicit safe custom resolver is used alone. Otherwise the tunnel resolves
+  with the existing in-tunnel DoH default, and where Connect has a
+  provider-country regional recommendation (the plaintext DNS server/proxy
+  uses) its servers race that DoH through the same tunnel: the first answer
+  wins, and one resolver's miss waits for the other. Plaintext DNS reaches a
+  provider over UDP only (the provider drops DNS over TCP), so the
+  recommendation alone made the URL probe a UDP test in the six countries that
+  have one. A Taskworker built from 2026-09-26 (ed4eee921) until the race used
+  it alone: an exit that carries TCP but not UDP, such as a provider identity
+  behind a proxy that only relays TCP, failed every URL there at a 5 s DNS
+  timeout and passed elsewhere.
+  On 2026-11-10 one provider network's exits passed 74% of their URL runs in
+  de, fr, br and gb and 0.1% in ru and 0% in kz, and 93.8% of all ru URL runs
+  ended at DNS. Never use the operator host's DNS for provider targets or
+  share resolver state across providers; each resolver of the race has its own
+  cache, owned and closed by its tunnel. A regional plaintext DNS
+  recommendation remains inside that provider tunnel; it is not a new public
+  bootstrap path. The source change requires a new Taskworker artifact before
+  it describes Main behavior. The existing fixed failure stages do not expose
+  resolver selection, so join the provider country (and the exit's client
+  version, for proxy-only identities) before attributing a country's DNS
+  failures. Unknown/stale country metadata can select the default or an
+  inapplicable recommendation; retain unknown attribution. Up to
   three transient DNS lookup attempts share the request's hard deadline, with
   bounded 50–200 ms jitter and time reserved for the connection. An authoritative
   negative is not immediately repeated; the existing spaced per-site retries
@@ -22596,13 +22615,21 @@ establish:
   network. Successful cancellation preserves paid local history, so this WARN
   alone cannot establish a Google billing failure. The Apple and Google store
   workflows remain separate from Stripe cancellation. A gamma plan renews
-  through our own biller, not a store: account deletion neither refuses nor
-  cancels it, the account's `gamma_account` row (automatic renewal, plan,
-  deposit hotkey) survives, and the biller renews from that row near the end
-  of the term without reading the network, so it can charge the deposit for an
-  account the credit can no longer reach. Before the term ends, stop that
-  owner's automatic renewal with the owner's go and give any renewal already
-  charged and never credited an authorized refund or support disposition. The
+  through our own biller, not a store. Before server commit `57f98311f`,
+  account deletion neither refused nor cancelled it, the account's
+  `gamma_account` row (automatic renewal, plan, deposit hotkey) survived
+  switched on, and the biller renewed from that row near the end of the term
+  without reading the network, so it could charge the deposit for an account
+  the credit can no longer reach. From `57f98311f`, deletion turns the row's
+  renewal, top-up and seat upgrade off, voids the account's open intents and
+  waits for a gamma charge in flight to be credited, and the biller charges no
+  intent whose network is gone; a spend that still lands for one raises the
+  gamma alarm `credit_unfulfillable`. On a build older than that, stop the
+  deleted owner's automatic renewal with the owner's go before the term ends.
+  On any build, give a gamma payment charged and never credited an authorized
+  refund or support disposition (gamma itself cannot be refunded on chain). A
+  deleted owner's paid gamma term may then stay in this WARN until it expires,
+  as cancelled store history does. The
   other one-time crypto markets (Monero, Zcash, TAO, Bitcoin, ETH) are
   excluded like Solana: a prepaid year that never renews. The recurring set is
   `model.SubscriptionMarkets` less `model.SubscriptionOneTimeCryptoMarkets`; a
@@ -22664,9 +22691,13 @@ The count is distinct invoices; the ages are first-seen ages:
 - `crypto-scanner-stalled` (PAGE): a coin's scanner succeeded in the last week
   and has not for 15 minutes (its chain source down or refusing the key, a vault file
   gone, or the TAO reader paused on a runtime it cannot decode, gauge
-  `urnetwork_crypto_pay_tao_reader_paused`). The coin is listed as unavailable
-  and payments to its open invoices wait. `crypto_scan_cursor.last_error`
-  names the reason; never point a scanner at an older block range to recover.
+  `urnetwork_crypto_pay_tao_reader_paused`; for Bitcoin also a source behind the
+  scanner's kept chain, or a chain changed below all 24 blocks it keeps). The coin
+  is listed as unavailable and payments to its open invoices wait.
+  `crypto_scan_cursor.last_error` names the reason; never point a scanner at an
+  older block range to recover. After a Bitcoin reorg deeper than the kept chain,
+  check the chain on a second source, then clear `crypto_scan_cursor.recent_blocks`
+  for `btc`: the scan reads its reorg window again from the cursor.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
@@ -22849,6 +22880,190 @@ numeric validation, privacy boundaries, severity, and Markdown rendering.
 Google orphan controls also retain the warning for canceled paid history,
 require the implemented deletion capabilities, reject healthy inference from
 unavailable/partial evidence, and keep other markets' guidance separate.
+
+### 2.22a Pay with Gamma payments that cannot be credited
+Probe: `gamma-payment-failures`
+
+Pay with Gamma (mmm/BTCPAY.md §18) charges a customer's SN25 gamma deposit
+with our own `spend_gamma`, and credits the purchase only from our finalized
+`GammaSpent`. Gamma cannot be refunded on chain, so a spend that no credit
+reaches is a customer who paid and got nothing. The biller's alarms for it
+(`gamma_alarm`, `urnetwork_gamma_pay_alarms_total`) reached only the gamma
+dashboard's "alarms / s by kind" panel. This probe reads the gamma tables,
+aggregated to kind, count and oldest/newest age:
+
+- `gamma-credit-unfulfillable` (PAGE): a spent `gamma_charge` whose intent is
+  neither credited nor voided and whose network no longer exists (the biller's
+  alarm `credit_unfulfillable`, raised once per intent; it retries the credit
+  every run). Account deletion waits for a gamma charge in flight (server
+  `57f98311f`), so only a network removed another way, or an older build, gets
+  here. From the alarm (key `credit_unfulfillable/<intent id>`, whose detail
+  names the intent, network, deposit hotkey, block and reference), establish
+  who paid from support evidence and the deposit's coldkey on chain, and bring
+  each to the owner for an authorized disposition: a credit to the customer's
+  verified live account, or a refund in another asset. Never recreate the
+  deleted network, and never credit on an email or name match. Once the
+  disposition is done, record it by voiding the intent
+  (`gamma_payment_intent.voided_at`): the biller stops retrying and the count
+  drops it. There is no operator tool for it yet (`bringyourctl gamma`,
+  BTCPAY §18.9).
+- `gamma-credit-failed` (PAGE): a spent charge whose credit failed
+  `controller.GammaMaxCreditFailures` (10) times or more for a network that
+  still exists; its status says `review` (`credit_failed`). The biller retries
+  ten such credits a run, the least retried first, beside every other credit,
+  the fewest failures first, so they never hold a new credit back. Read the
+  taskworker log line `[gamma]credit of intent <id> failed (<n>): <error>` and
+  fix the cause (the Pro configuration such as the data code duration or the
+  data pack catalog, or the database); the retry then credits the intent once,
+  through its one-shot. Do not credit by hand or edit balances. A cause that
+  cannot be fixed goes to the owner, and the intent is voided once its
+  disposition is done.
+- `gamma-batch-unfulfillable` (WARN): a `batch_unfulfillable` alarm in the last
+  24 hours. The biller found its live spend batch carrying a pending charge
+  whose intent was closed (voided or credited) or whose network is gone, and
+  stopped resubmitting it; no other batch is signed until its era ends (64
+  blocks, about 13 minutes), and the pool may still include it. Look the batch
+  up in `gamma_spend_batch`: expired, its other charges went out again with
+  their references unchanged; included, each of its charges spent for an
+  intent that is voided or credited or whose network is gone is a payment no
+  credit reaches (those of a deleted network are also
+  `gamma-credit-unfulfillable`) and needs the owner's authorized disposition.
+  Then find how the intent was closed or the network removed outside account
+  deletion. The 24-hour window is not a disposition.
+
+The other watcher alarms (`unknown_reference`, `duplicate_reference`,
+`spend_mismatch`, `spender_proxy_changed`, `unknown_billing_transaction`,
+`unexpected_nonce`, `runtime_unsupported`, `undecodable_block`,
+`service_changed`, `stray_tao`) and the biller's readiness are §2.22b's.
+
+The gamma tables exist from the Gamma migration
+(`server.GammaPaySchemaMigrationVersion()`) on. A metadata-only preflight
+reads the successful migration head and the tables' presence first: below the
+Gamma migration nothing can have been spent, so the probe reads nothing more
+and reports nothing; at or past it, missing tables fail the probe rather than
+hiding a payment. Only aggregate kind counts and ages leave PostgreSQL: no
+intent, network, hotkey, coldkey, reference, block or alarm detail enters an
+alert.
+
+Implementation convention: SIGNALS.md §2.22a (`gamma-payment-failures`) maps
+to `signal_gamma_payment_failures.go` and
+`signal_gamma_payment_failures_test.go`. Synthetic tests cover the migration
+gate, every class with its severity and guidance, privacy, and malformed
+aggregates; a SQL test runs the SELECT on tables shaped as the Gamma migration
+makes them.
+
+### 2.22b Pay with Gamma watcher alarms and billing readiness
+Probe: `gamma-watcher`
+
+The Gamma biller (mmm/BTCPAY.md §18.4) records an alarm in `gamma_alarm` for
+what its watcher must never see, and charges nothing while it is not ready;
+both reached only the gamma dashboard ("alarms / s by kind", the readiness
+gauge `urnetwork_gamma_pay_readiness`). This probe (`pg/gamma-watcher`, every
+five minutes) reads the alarms of the last 24 hours by kind, and the
+readiness the biller writes to `gamma_chain_state` each run, aggregated to
+kind, count, oldest/newest age and the readiness word. §2.22a covers the
+alarms of spends no credit reaches (`credit_unfulfillable`,
+`batch_unfulfillable`); every other alarm kind is here. An alarm is recorded
+once per key; the count ages out after 24 hours, and aging out is no
+disposition.
+
+- `gamma-unknown-reference` (PAGE): a spend from our spender with a reference
+  we never issued (`unknown_reference`), the first sign of a leaked billing
+  key. A leaked billing key can burn customers' SN25 gamma up to each
+  deposit's balance and daily cap, never move TAO or alpha. At once, the
+  spender removes the billing key's `GammaSpend` proxy (`Proxy.remove_proxy`,
+  the reverse of BTCPAY §18.7 step 3, on the owner's machine with the seed from
+  `vault/main/gamma_keys.yml`); billing pauses (`billing_proxy_missing`). Stop
+  all but one taskworker if two may run the `gamma_biller` chain. Then a new
+  billing key in `vault/main/gamma.yml` becomes the proxy (§18.7 step 3) and
+  `gamma.yml` goes to the taskworker hosts: rotate the billing key, never the
+  spender. Each customer whose deposit was spent goes to the owner for a
+  disposition; gamma cannot be refunded on chain.
+- `gamma-duplicate-reference` (PAGE): a spend event for the reference of a
+  charge already resolved (`duplicate_reference`). The chain does not
+  deduplicate references, so this is a customer charged twice for one
+  purchase. Find the batches that carried the reference (`gamma_charge`,
+  `gamma_spend_batch`), take the double charge to the owner for a
+  disposition, find how a second extrinsic carried it, and stop the
+  `gamma_biller` chain until the cause is known.
+- `gamma-spend-mismatch` (PAGE): a spend whose reference is a pending charge
+  of ours but whose amount, hotkey or netuid differ (`spend_mismatch`). The
+  biller signs only what it recorded, so the extrinsic was not built from our
+  records. The spend does not resolve the charge, which can fail with its own
+  batch and be re-armed: stop the `gamma_biller` chain, void the intent once
+  its disposition is decided (`gamma_payment_intent.voided_at`) so it is never
+  charged again, and find the extrinsic.
+- `gamma-spender-proxy-changed` (PAGE): a `Proxy.ProxyAdded` or
+  `ProxyRemoved` of our spender (`spender_proxy_changed`). Only the spender's
+  key, kept in the vault and never on a host, can do that: the owner's planned
+  rotation, or a compromised spender. If the owner did not, remove every proxy
+  that is not our billing key with the spender's key and bring it to the owner
+  at once; replacing the spender takes the ur-owner multisig's `set_service`
+  and every customer re-pointing their deposit.
+- `gamma-unknown-billing-transaction` (PAGE): an extrinsic paid for by our
+  billing key that is none of our batches (`unknown_billing_transaction`): a
+  second biller, or a leaked billing key. Check that one taskworker runs the
+  `gamma_biller` chain; otherwise act as for `gamma-unknown-reference`.
+- `gamma-unexpected-nonce` (PAGE): a batch's era ended unseen while the
+  billing key's nonce moved past it (`unexpected_nonce`); the batch is held
+  for review and nothing is signed (`batch_in_review`). Find what used the
+  nonce; if the held batch never landed, with the owner's go expire it as the
+  biller does (`gamma_spend_batch.state` `expired`, its pending charges'
+  `batch_id` cleared) so its charges go out again with their references; if
+  it landed, its spends must be read and credited before anything is signed.
+  There is no operator tool yet (`bringyourctl gamma`, BTCPAY §18.9).
+- `gamma-runtime-unsupported` (WARN): a runtime whose metadata fails the
+  reviewed shape check (`runtime_unsupported`, once per spec version); the
+  biller holds its cursor and pauses. Review the runtime against
+  `controller/gamma_chain.go`'s shape check, extend the reviewed shapes with
+  its metadata as a fixture, and deploy the taskworker.
+- `gamma-undecodable-block` (WARN): a block whose events the runtime that
+  executed it cannot decode (`undecodable_block`); the cursor holds there.
+  Fix the decoder or the shape, or point `gamma.yml`'s `rpc_urls` at another
+  archive node if the RPC answered bad data.
+- `gamma-service-changed` (WARN): SN25's published service names our spender
+  with another services url (`service_changed`). Only the ur-owner multisig
+  can `set_service`: ask the owners; update `services_url` in `gamma.yml`, or
+  publish §18.7 step 5's `set_service` again.
+- `gamma-stray-tao` (WARN): plain TAO sent to a deposit hotkey
+  (`stray_tao`), a customer's mistake that buys nothing. Find the customer
+  through support and point them at their intent's mint command; return the
+  TAO only when they ask, to the address in their request (the owner,
+  2026-11-11), with the hotkey's key from the deposit master seed on the
+  owner's machine.
+- `gamma-billing-paused` (PAGE once it holds for three five-minute ticks):
+  the biller's readiness is not `ready` while customers depend on billing: an
+  intent is open, a charge is pending or spent and not credited, or an
+  account that pays with gamma has an automatic charge on (a paused biller
+  makes no renewal, so a term ending meanwhile renews only if billing resumes
+  within its grace). The readiness word names the cause, and the alert the
+  remedy:
+  `not_configured` (deliver `gamma.yml` with `billing_key_seed` to the
+  taskworker hosts), `chain_unreachable` and `watcher_behind` (the RPC
+  endpoint), `runtime_unsupported`, `service_not_published` and
+  `service_spender_mismatch` (the owners' `set_service`),
+  `billing_proxy_missing` (the spender's proxy add, unless it was removed
+  after a leak), `fee_float_low` (the treasury funds the billing key, §18.7
+  step 2), `batch_in_review` (`gamma-unexpected-nonce`).
+- `gamma-biller-stalled` (PAGE): while customers depend on billing,
+  `gamma_chain_state` was not written for 20 minutes (the biller writes it
+  every run, every 12 seconds and at most 10 minutes apart while `gamma.yml`
+  is missing): the taskworker's `gamma_biller` chain is not running.
+
+Before the Gamma migration (`server.GammaPaySchemaMigrationVersion()`) the
+probe reads nothing more; at or past it, missing tables fail it. Before
+go-live nobody depends on billing, so a biller that is not yet ready raises
+nothing. Only kinds, counts, ages and the readiness word leave PostgreSQL: no
+reference, hotkey, coldkey, network, intent, block or alarm detail enters an
+alert. The alarm kinds and the readiness words come from the controller
+(`controller.GammaAlarmKinds`, `controller.GammaReadinessReasons`), and a test
+fails for an alarm kind neither §2.22a nor §2.22b reads.
+
+Implementation convention: SIGNALS.md §2.22b (`gamma-watcher`) maps to
+`signal_gamma_watcher.go` and `signal_gamma_watcher_test.go`. Synthetic tests
+cover the registration, the migration gate, every class with its severity,
+sustain and guidance, privacy, and malformed aggregates; a SQL test runs the
+SELECT on tables shaped as the Gamma migration makes them.
 
 ### 2.23 Provider egress probe outcome distribution
 Probe: `egress-outcomes`

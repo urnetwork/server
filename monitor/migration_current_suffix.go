@@ -940,12 +940,42 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the exact-URL TLS finding verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerEgressTlsVerdictMigrationContract},
 	// the pending review handoff ledger, with the intake-first custody it
-	// carries on; versioned by its position
-	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract},
+	// carries on; versioned by its position. The official review (below)
+	// re-creates two winner-review bodies this custody pins and the review
+	// identity body it carries, and carries the rest of it on from its own
+	// version.
+	[]snMainnetMigrationContract{competitionReviewHandoffMigrationContract.removedAt(server.CompetitionOfficialReviewMigrationVersion())},
 	// the URL outcome catalog source and probation, versioned by its position
 	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
 	// the provider zero-carry verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
+	// the epoch-one official review authorization, with the handoff custody it
+	// carries on; versioned by its position. The executor control amendment
+	// (below) re-creates the equivalence guard and intake grading readiness
+	// this custody carries, and carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{competitionOfficialReviewMigrationContract.removedAt(server.CompetitionExecutorControlAmendmentMigrationVersion())},
+	// the operator's executor control amendment, with the official review
+	// custody it carries on; versioned by its position. The qualification
+	// recovery (below) re-creates the equivalence guard this custody pins, and
+	// carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{competitionExecutorControlAmendmentMigrationContract.removedAt(server.CompetitionExecutorQualificationRecoveryMigrationVersion())},
+	// the Pay with Gamma tables, versioned by their position
+	[]snMainnetMigrationContract{gammaPayMigrationContract},
+	// the single-use executor qualification recovery, with the executor
+	// control amendment custody it carries on; versioned by its position. The
+	// admission exception (below) re-creates the whole-host readiness this
+	// custody carries from the amendment, and carries the rest of it on from
+	// its own version.
+	[]snMainnetMigrationContract{competitionExecutorQualificationRecoveryMigrationContract.removedAt(server.CompetitionExecutorAdmissionExceptionMigrationVersion())},
+	// the retained host admission exception, with the qualification recovery
+	// custody it carries on; versioned by its position
+	[]snMainnetMigrationContract{competitionExecutorAdmissionExceptionMigrationContract},
+	// the onboarding platform's distribution, versioned by its position
+	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
+	// the Bitcoin block scanner's kept chain, versioned by its position
+	[]snMainnetMigrationContract{cryptoScanChainMigrationContract},
+	// the per-cycle Pro grants, versioned by their position
+	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

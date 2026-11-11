@@ -472,6 +472,15 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		sends := []capturedSend{}
 		sendErr := error(nil)
 
+		// Circle's idempotency: a key always names the same transfer, and a
+		// fresh key creates a new transfer with its own id. A replacement
+		// attempt is never handed its predecessor's transfer; the processor
+		// record ownership fence refuses one that is (7d088ea09), so each
+		// transfer id here is derived from its idempotency key.
+		transferId := func(idempotencyKey server.Id) string {
+			return fmt.Sprintf("%s-%s", sendPaymentTransactionId, idempotencyKey)
+		}
+
 		mockCircleClient := &mockCircleApiClient{
 			GetTransactionFunc: defaultGetTransactionDataHandler,
 			CreateTransferTransactionFunc: func(
@@ -489,7 +498,7 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 					return nil, sendErr
 				}
 				return &CreateTransferTransactionResult{
-					Id:    sendPaymentTransactionId,
+					Id:    transferId(idempotencyKey),
 					State: "INITIATED",
 				}, nil
 			},
@@ -629,7 +638,7 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, *sentPayment.WalletId, *wallet3Id)
 		connect.AssertEqual(t, *sentPayment.WalletAddress, wallet3Address)
-		connect.AssertEqual(t, *sentPayment.PaymentRecord, sendPaymentTransactionId)
+		connect.AssertEqual(t, *sentPayment.PaymentRecord, transferId(sends[2].idempotencyKey))
 
 		// a failed transaction resets the record and gets a fresh
 		// idempotency key, so a new transaction can be created
@@ -653,6 +662,14 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		connect.AssertNotEqual(t, sends[3].idempotencyKey, sends[1].idempotencyKey)
 		connect.AssertEqual(t, sends[3].address, wallet3Address)
 
+		// the replacement binds its own transfer, never the failed one
+		replacementPayment, err := model.GetPayment(ctx, payment.PaymentId)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, *replacementPayment.WalletId, *wallet3Id)
+		connect.AssertEqual(t, *replacementPayment.PaymentRecord, transferId(sends[3].idempotencyKey))
+		connect.AssertNotEqual(t, *replacementPayment.PaymentRecord, *sentPayment.PaymentRecord)
+		connect.AssertEqual(t, replacementPayment.AttributionReviewRequired, false)
+
 		// complete the payment
 		mockTxHash := "0xabcdef"
 		mockCircleClient.GetTransactionFunc = func(ctx context.Context, transactionId string) (*GetTransactionResult, error) {
@@ -675,6 +692,8 @@ func TestAdvancePaymentWalletSafetyAndIdempotency(t *testing.T) {
 		connect.AssertEqual(t, completedPayment.Completed, true)
 		connect.AssertEqual(t, *completedPayment.WalletId, *wallet3Id)
 		connect.AssertEqual(t, *completedPayment.WalletAddress, wallet3Address)
+		connect.AssertEqual(t, *completedPayment.PaymentRecord, transferId(sends[3].idempotencyKey))
+		connect.AssertEqual(t, completedPayment.AttributionReviewRequired, false)
 
 	})
 }

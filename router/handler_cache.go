@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	mathrand "math/rand/v2"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -19,7 +20,7 @@ import (
 // A key's fill lease has two roles, each with its own limit. While a fill
 // runs, it makes overlapping misses wait instead of starting duplicate fills,
 // so it must cover a normal fill. After a fill fails, it fences retries. Every
-// API process answers a leased key's misses with 503, so a fence as long as
+// API process answers a fenced key's misses with 503, so a fence as long as
 // the fill lease would close a key fleet-wide for minutes after a brief Redis
 // or database stall.
 const (
@@ -34,7 +35,36 @@ const (
 	handlerCacheFenceRedisTimeout = 2 * time.Second
 	// A stored value expires up to ttl/divisor early; see handlerCacheValueTtl.
 	handlerCacheValueTtlJitterDivisor = 10
+	// How long a miss waits for the fill in progress under another request's
+	// lease before it answers 503. The apps send one GET over several
+	// connections at once and take the first answer, any status, so
+	// overlapping misses of one key are the normal case, not a race: answered
+	// 503 at once, they were 9% of GET /network/reliability and a third of GET
+	// /transfer/stats on 2026-11-11. A fast 503 can also win the app's race,
+	// and the app then cancels the owner, whose fence closes the key for every
+	// caller. A fill takes milliseconds (network reliability) to a few seconds
+	// (transfer stats). The lb retries a 503 once on a sibling and the app
+	// once more, so a wait this long still ends inside the apps' 15s request
+	// timeout.
+	handlerCacheFillWaitLimit = 5 * time.Second
+	// The first and the longest pause between two reads of a waiting miss.
+	handlerCacheFillWaitFirstPoll = 10 * time.Millisecond
+	handlerCacheFillWaitMaxPoll   = 200 * time.Millisecond
+	// A fenced lease holds this prefix and its failed owner's token, so a miss
+	// can tell a failed fill, which it answers at once, from one in progress,
+	// which it waits for. No owner token has the prefix.
+	handlerCacheFencePrefix = "fence:"
 )
+
+// The lease value a fence leaves in place of its owner's token.
+func handlerCacheFenceToken(token string) string {
+	return handlerCacheFencePrefix + token
+}
+
+// Whether a lease value is a failure fence rather than a fill in progress.
+func isHandlerCacheFence(owner string) bool {
+	return strings.HasPrefix(owner, handlerCacheFencePrefix)
+}
 
 // Keeps a fill-in-progress lease proportional to the cache lifetime.
 func handlerCacheFillLeaseTtl(cacheTtl time.Duration) time.Duration {
@@ -220,24 +250,33 @@ func (self redisHandlerCacheStore) release(ctx context.Context, key string, toke
 	})
 }
 
-// Cuts a failed owner's lease to the failure fence. Only the token's own lease
-// changes, and only toward expiry: a lease due sooner keeps its time, and a
-// replacement owner's lease is never touched. The deadline pool bounds the
-// call, which runs on failure paths while Redis may be stalled.
+// Cuts a failed owner's lease to the failure fence and marks it fenced
+// (handlerCacheFenceToken), so overlapping misses answer at once instead of
+// waiting for a fill that ended. Only the token's own lease changes, and only
+// toward expiry: a lease due sooner keeps its time, and a replacement owner's
+// lease is never touched. The deadline pool bounds the call, which runs on
+// failure paths while Redis may be stalled.
 func (self redisHandlerCacheStore) fence(
 	ctx context.Context,
 	key string,
 	token string,
 	ttl time.Duration,
 ) (fenced bool, returnErr error) {
+	// PTTL is 0 for a lease within a millisecond of expiry: it keeps its
+	// time, which no PX can express.
 	const script = `
 		if redis.call('GET', KEYS[1]) ~= ARGV[1] then
 			return 0
 		end
 		local remaining = redis.call('PTTL', KEYS[1])
-		if remaining < 0 or tonumber(ARGV[2]) < remaining then
-			redis.call('PEXPIRE', KEYS[1], ARGV[2])
+		if remaining == 0 then
+			return 1
 		end
+		local fence = tonumber(ARGV[2])
+		if 0 < remaining and remaining < fence then
+			fence = remaining
+		end
+		redis.call('SET', KEYS[1], ARGV[3], 'PX', fence)
 		return 1
 	`
 	operationCtx, cancel := context.WithTimeout(ctx, handlerCacheFenceRedisTimeout)
@@ -249,6 +288,7 @@ func (self redisHandlerCacheStore) fence(
 			[]string{key},
 			token,
 			max(int64(1), ttl.Milliseconds()),
+			handlerCacheFenceToken(token),
 		).Int64()
 		fenced = result == 1
 		return err
@@ -288,9 +328,11 @@ func fenceHandlerCacheFill(
 }
 
 // Coordinates one cold fill across every API process sharing Redis. A loser
-// rechecks once in case the winner published during acquisition, then fails
-// explicitly; it never returns a nil success. Fill and publication failures
-// keep the lease, cut to the short failure fence, bounding retry pressure.
+// waits for the owner's publication (waitForHandlerCacheFill) and takes a new
+// lease if the owner's lapses unpublished; it answers 503 once the lease is
+// fenced, Redis fails or the wait limit passes, and it never returns a nil
+// success. Fill and publication failures keep the lease, cut to the short
+// failure fence, bounding retry pressure.
 func cacheJson[R any](
 	ctx context.Context,
 	store handlerCacheStore,
@@ -305,30 +347,115 @@ func cacheJson[R any](
 		return cachedValue, nil
 	}
 
-	token := server.NewId().String()
-	acquired, acquireErr := store.acquire(ctx, keys.fill, token, handlerCacheFillLeaseTtl(ttl))
-	if !acquired {
-		// SETNX can apply and lose its response; only this unique token proves
-		// this request owns that ambiguous acquisition.
-		owner, exists, ownerErr := store.get(ctx, keys.fill)
-		if ownerErr == nil && exists && owner == token {
-			acquired = true
-		} else if acquireErr != nil || ownerErr != nil {
-			if acquireErr != nil && ownerErr != nil {
-				// The lost SETNX may still have set this token: a lease that
-				// nobody fills under.
-				fenceHandlerCacheFill(ctx, store, keys, token, ttl)
+	var waitDeadline time.Time
+	for attempt := 0; ; attempt += 1 {
+		token := server.NewId().String()
+		acquired, acquireErr := store.acquire(ctx, keys.fill, token, handlerCacheFillLeaseTtl(ttl))
+		owner, leased := "", false
+		if !acquired {
+			// SETNX can apply and lose its response; only this unique token
+			// proves this request owns that ambiguous acquisition.
+			var ownerErr error
+			owner, leased, ownerErr = store.get(ctx, keys.fill)
+			if ownerErr == nil && leased && owner == token {
+				acquired = true
+			} else if acquireErr != nil || ownerErr != nil {
+				if acquireErr != nil && ownerErr != nil {
+					// The lost SETNX may still have set this token: a lease
+					// that nobody fills under.
+					fenceHandlerCacheFill(ctx, store, keys, token, ttl)
+				}
+				return nil, &handlerCacheUnavailableError{}
 			}
-			return nil, &handlerCacheUnavailableError{}
 		}
-	}
-	if !acquired {
-		if cachedValue, ok, err := getCachedJson[R](ctx, store, keys.value); err == nil && ok {
+		if acquired {
+			return fillHandlerCache(ctx, store, keys, token, ttl, fill)
+		}
+
+		if attempt == 0 {
+			waitDeadline = time.Now().Add(handlerCacheFillWaitLimit)
+		}
+		cachedValue, published, lapsed := waitForHandlerCacheFill[R](ctx, store, keys, owner, leased, attempt == 0, waitDeadline)
+		if published {
 			return cachedValue, nil
 		}
-		return nil, &handlerCacheUnavailableError{}
+		if !lapsed || !time.Now().Before(waitDeadline) {
+			return nil, &handlerCacheUnavailableError{}
+		}
+		// The lease lapsed with no value: take a new one, as a miss would.
 	}
+}
 
+// Waits for the fill another request's lease covers to publish, reading the
+// value and then the lease at a backoff. It returns the published value, or
+// lapsed when the lease is gone with no value, after which the caller may take
+// a new lease. A fenced lease, a failed read, the caller's stop and the wait
+// deadline each end the wait with neither. first rechecks the value at once,
+// in case the owner published during this request's acquisition, and lets a
+// lease already gone count as lapsed without a pause; a later attempt pauses
+// before every read.
+func waitForHandlerCacheFill[R any](
+	ctx context.Context,
+	store handlerCacheStore,
+	keys handlerCacheKeys,
+	owner string,
+	leased bool,
+	first bool,
+	deadline time.Time,
+) (cachedValue *R, published bool, lapsed bool) {
+	if first {
+		if cachedValue, ok, err := getCachedJson[R](ctx, store, keys.value); err != nil {
+			return nil, false, false
+		} else if ok {
+			return cachedValue, true, false
+		}
+		if !leased {
+			return nil, false, true
+		}
+	}
+	poll := handlerCacheFillWaitFirstPoll
+	for {
+		if leased && isHandlerCacheFence(owner) {
+			return nil, false, false
+		}
+		pause := min(poll, time.Until(deadline))
+		if pause <= 0 {
+			return nil, false, false
+		}
+		timer := time.NewTimer(pause)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, false, false
+		case <-timer.C:
+		}
+		poll = min(2*poll, handlerCacheFillWaitMaxPoll)
+
+		if cachedValue, ok, err := getCachedJson[R](ctx, store, keys.value); err != nil {
+			return nil, false, false
+		} else if ok {
+			return cachedValue, true, false
+		}
+		var err error
+		owner, leased, err = store.get(ctx, keys.fill)
+		if err != nil {
+			return nil, false, false
+		}
+		if !leased {
+			return nil, false, true
+		}
+	}
+}
+
+// Fills and publishes the value under the lease this request owns.
+func fillHandlerCache[R any](
+	ctx context.Context,
+	store handlerCacheStore,
+	keys handlerCacheKeys,
+	token string,
+	ttl time.Duration,
+	fill func() (*R, error),
+) (*R, error) {
 	// This request owns the lease from here. Every exit that neither publishes
 	// nor releases it, a panicking fill included, cuts it to the failure fence.
 	settled := false

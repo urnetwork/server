@@ -198,134 +198,12 @@ func TestCryptoCoinbaseMakesANamedAddressPerInvoice(t *testing.T) {
 	connect.AssertEqual(t, strings.Contains(fmt.Sprint(err), keyPem), false)
 }
 
-// ----- Bitcoin -----
-
-// cryptoTestBitcoinServer answers Alchemy's Bitcoin endpoint: the UTXO API
-// (Blockbook) and the JSON-RPC, from recorded answers.
-func cryptoTestBitcoinServer(t testing.TB, utxoRefused bool) *httptest.Server {
-	t.Helper()
-	address := cryptoTestFixture(t, "btc_blockbook_address.json")
-	info := cryptoTestFixture(t, "btc_blockchaininfo.json")
-	testServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodPost:
-			var request struct {
-				Method string `json:"method"`
-			}
-			json.NewDecoder(r.Body).Decode(&request)
-			if request.Method != "getblockchaininfo" {
-				w.Write([]byte(`{"jsonrpc":"2.0","id":"0","error":{"code":-32601,"message":"Method not found"}}`))
-				return
-			}
-			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":"0","result":%s}`, info)
-		case utxoRefused:
-			w.WriteHeader(http.StatusUnauthorized)
-			w.Write([]byte(`{"error":"UTXO requests are not allowed."}`))
-		case strings.HasPrefix(r.URL.Path, "/v2/synthetic-key/api/v2/address/bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u"):
-			w.Write(address)
-		case strings.HasPrefix(r.URL.Path, "/v2/synthetic-key/api/v2/address/"):
-			w.Write([]byte(`{"page":1,"totalPages":1,"itemsOnPage":0,"txs":0,"transactions":[]}`))
-		case r.URL.Path == "/v2/synthetic-key/api/v2/tx/877266da537525669e890666f60e282f074f3414566487734abd2ab37ee33b68":
-			var history bitcoinBlockbookAddress
-			json.Unmarshal(address, &history)
-			for _, tx := range history.Transactions {
-				if tx.Txid == "877266da537525669e890666f60e282f074f3414566487734abd2ab37ee33b68" {
-					json.NewEncoder(w).Encode(tx)
-					return
-				}
-			}
-		default:
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte(`{"error":"not found"}`))
-		}
-	}))
-	t.Cleanup(testServer.Close)
-	return testServer
-}
+// ----- the chain clock -----
 
 func cryptoTestChainClock(t testing.TB, now time.Time) {
 	previous := cryptoChainNow
 	cryptoChainNow = func() time.Time { return now }
 	t.Cleanup(func() { cryptoChainNow = previous })
-}
-
-// The address's history is the source of truth: only outputs to the invoice
-// address count (Coinbase's sweep spends them; that is never a payment), each
-// payment names its inputs for the screen, and the heights come from the
-// RPC.
-func TestCryptoBitcoinReaderReadsTheAddressHistory(t *testing.T) {
-	testServer := cryptoTestBitcoinServer(t, false)
-	restore := cryptoTestHermeticSeams()
-	t.Cleanup(restore)
-	wallet := newBitcoinWallet(
-		&cryptoWalletSettings{Asset: model.CryptoAssetBtc, ChainRpcUrl: testServer.URL + "/v2/synthetic-key"},
-		&CryptoPayAssetConfig{Network: cryptoNetworkMainnet},
-	)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u", AddressIndex: 7, Hot: true}})
-	receipts, _, err := wallet.IncomingSince(context.Background(), 0)
-	connect.AssertEqual(t, err, nil)
-	if len(receipts) != 1 {
-		t.Fatalf("receipts = %d, want the one payment to the address", len(receipts))
-	}
-	receipt := receipts[0]
-	connect.AssertEqual(t, receipt.TxId, "877266da537525669e890666f60e282f074f3414566487734abd2ab37ee33b68")
-	connect.AssertEqual(t, receipt.OutputKey, "7")
-	connect.AssertEqual(t, *receipt.AddressIndex, uint64(7))
-	connect.AssertEqual(t, receipt.Address, "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u")
-	connect.AssertEqual(t, 0 < receipt.AmountAtomic, true)
-	connect.AssertEqual(t, 0 < receipt.BlockHeight, true)
-	connect.AssertEqual(t, 1 <= receipt.Confirmations, true)
-	connect.AssertEqual(t, len(receipt.Senders), 1)
-	connect.AssertEqual(t, receipt.Senders[0] != "", true)
-
-	// the heights: Alchemy's best block, with a tip of its time
-	cryptoTestChainClock(t, time.Unix(1794350912, 0).Add(10*time.Minute))
-	walletHeight, nodeHeight, networkHeight, err := wallet.Heights(context.Background())
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, walletHeight, uint64(975356))
-	connect.AssertEqual(t, nodeHeight, uint64(975356))
-	connect.AssertEqual(t, networkHeight, uint64(975356))
-	connect.AssertEqual(t, wallet.CheckNetwork(context.Background()), nil)
-	// a best block hours old is a stalled source: the network height is unknown
-	cryptoTestChainClock(t, time.Unix(1794350912, 0).Add(4*time.Hour))
-	_, _, networkHeight, _ = wallet.Heights(context.Background())
-	connect.AssertEqual(t, networkHeight, uint64(0))
-
-	// a transaction read again, for the screen and the reconciler
-	cryptoResolveAddresses = func(ctx context.Context, asset string, addresses []string) map[string]int64 {
-		resolved := map[string]int64{}
-		for _, address := range addresses {
-			if address == "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u" {
-				resolved[address] = 7
-			}
-		}
-		return resolved
-	}
-	again, found, err := wallet.Transaction(context.Background(), receipt.TxId)
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, found, true)
-	connect.AssertEqual(t, len(again), 1)
-	connect.AssertEqual(t, again[0].AmountAtomic, receipt.AmountAtomic)
-	connect.AssertEqual(t, again[0].Senders, receipt.Senders)
-	_, found, err = wallet.Transaction(context.Background(), strings.Repeat("ab", 32))
-	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, found, false)
-}
-
-// Without Alchemy's UTXO add-on every scan fails, naming the add-on, and the
-// url (which carries the key) is in no error.
-func TestCryptoBitcoinReaderNamesTheMissingUtxoAddOn(t *testing.T) {
-	testServer := cryptoTestBitcoinServer(t, true)
-	wallet := newBitcoinWallet(
-		&cryptoWalletSettings{Asset: model.CryptoAssetBtc, ChainRpcUrl: testServer.URL + "/v2/synthetic-key"},
-		&CryptoPayAssetConfig{Network: cryptoNetworkMainnet},
-	)
-	wallet.SetWatched([]*model.CryptoPaymentWatchedAddress{{Address: "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u", AddressIndex: 7, Hot: true}})
-	_, _, err := wallet.IncomingSince(context.Background(), 0)
-	connect.AssertEqual(t, err != nil, true)
-	connect.AssertEqual(t, strings.Contains(err.Error(), "UTXO API is an add-on"), true)
-	connect.AssertEqual(t, strings.Contains(err.Error(), "synthetic-key"), false)
-	connect.AssertEqual(t, strings.Contains(err.Error(), testServer.URL), false)
 }
 
 // ----- ETH -----
@@ -532,7 +410,7 @@ func TestCryptoAlchemyWebhookVerifiesAndHints(t *testing.T) {
 	t.Cleanup(restore)
 	cryptoTestAlchemyWebhooks(t,
 		&cryptoAlchemyWebhook{asset: model.CryptoAssetEth, id: "wh_eth", signingKey: "whsec_eth"},
-		&cryptoAlchemyWebhook{asset: model.CryptoAssetBtc, id: "wh_btc", signingKey: "whsec_btc"},
+		&cryptoAlchemyWebhook{asset: model.CryptoAssetEth, id: "wh_eth_other", signingKey: "whsec_other"},
 	)
 	hinted := map[string][]string{}
 	cryptoAddScanHints = func(ctx context.Context, asset string, addresses []string) {
@@ -561,7 +439,7 @@ func TestCryptoAlchemyWebhookVerifiesAndHints(t *testing.T) {
 	read, _ := io.ReadAll(reader)
 	connect.AssertEqual(t, string(read), string(body))
 	// another webhook's key, a bad signature, an unknown webhook: refused
-	_, err = VerifyAlchemyBody(nil, request(body, cryptoTestAlchemySign(body, "whsec_btc")))
+	_, err = VerifyAlchemyBody(nil, request(body, cryptoTestAlchemySign(body, "whsec_other")))
 	connect.AssertEqual(t, err != nil, true)
 	_, err = VerifyAlchemyBody(nil, request(body, "00"))
 	connect.AssertEqual(t, err != nil, true)
@@ -585,6 +463,41 @@ func TestCryptoAlchemyWebhookVerifiesAndHints(t *testing.T) {
 	// no webhook configured: refused before any body is read
 	cryptoTestAlchemyWebhooks(t)
 	connect.AssertEqual(t, AlchemyWebhookVerifiable() != nil, true)
+}
+
+// The webhooks come from the ETH settings alone: Bitcoin has none (its block
+// scanner reads every block, mmm/BTCPAY.md §16.7), whatever a vault file
+// names for it.
+func TestCryptoAlchemyWebhooksAreEthOnly(t *testing.T) {
+	previousSettings := cryptoWalletSettingsFunc
+	t.Cleanup(func() { cryptoWalletSettingsFunc = previousSettings })
+	cryptoWalletSettingsFunc = func(asset string) (*cryptoWalletSettings, error) {
+		return &cryptoWalletSettings{
+			Asset:                    asset,
+			ChainRpcUrl:              "https://alchemy.invalid/v2/synthetic-key",
+			AlchemyWebhookId:         "wh_" + asset,
+			AlchemyWebhookSigningKey: "whsec_" + asset,
+		}, nil
+	}
+	webhooks := cryptoAlchemyWebhooks()
+	connect.AssertEqual(t, len(webhooks), 1)
+	connect.AssertEqual(t, webhooks[0].asset, model.CryptoAssetEth)
+	connect.AssertEqual(t, webhooks[0].id, "wh_eth")
+
+	// a delivery for a webhook that is not the ETH one is never read for
+	// addresses
+	restore := cryptoTestHermeticSeams()
+	t.Cleanup(restore)
+	hinted := 0
+	cryptoAddScanHints = func(ctx context.Context, asset string, addresses []string) { hinted += 1 }
+	cryptoTestAlchemyWebhooks(t, &cryptoAlchemyWebhook{asset: model.CryptoAssetBtc, id: "wh_btc", signingKey: "whsec_btc"})
+	var args AlchemyWebhookArgs
+	args.WebhookId = "wh_btc"
+	args.Event.Network = cryptoAlchemyEthNetwork
+	result, err := AlchemyWebhook(&args, &session.ClientSession{Ctx: context.Background()})
+	connect.AssertEqual(t, err, nil)
+	connect.AssertEqual(t, result.Message, "Not an Ethereum mainnet delivery")
+	connect.AssertEqual(t, hinted, 0)
 }
 
 // cryptoTestAlchemyDashboard answers the Notify API.
@@ -838,7 +751,7 @@ func TestCryptoQuotePricesAnItemWithoutAnInvoice(t *testing.T) {
 	quote, err := CryptoPaymentQuote(&CryptoPaymentQuoteArgs{Asset: model.CryptoAssetBtc, ItemId: StripeItemData1Tib}, clientSession)
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, quote.Error, (*CryptoPaymentError)(nil))
-	price, _ := dataPackPriceUsd(StripeItemData1Tib)
+	price, _ := dataPackPriceUsd(StripeItemData1Tib, model.DataRailCrypto)
 	connect.AssertEqual(t, quote.PriceUsd, price)
 	want, _ := cryptoAssetQuoteAmountAtomic(model.CryptoAssetBtc, price, 73596.90, 0.5)
 	connect.AssertEqual(t, quote.AmountAtomic, fmt.Sprintf("%d", want))

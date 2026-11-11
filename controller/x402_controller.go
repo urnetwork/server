@@ -76,11 +76,16 @@ const (
 // X402Versions are the versions this server speaks, newest first.
 var X402Versions = []int{X402VersionV2, X402VersionV1}
 
-// X402 sku ids. Amounts come from pro.yml; only the prices live in x402.yml.
+// X402 sku ids. Prices and amounts come from pro.yml. x402.yml turns on the
+// Pro month; the data skus are pro.yml's data packs sold over x402
+// (data_code.skus with rails x402): data_1tib, data_10tib and data_256gib.
 const (
 	X402SkuProMonth  = "pro_1month"
 	X402SkuData1Tib  = "data_1tib"
 	X402SkuData10Tib = "data_10tib"
+	// 256 GiB for $0.75: the pack for clients with a $1 per-payment cap, sold
+	// over x402 and Gamma only (pro.yml)
+	X402SkuData256Gib = "data_256gib"
 )
 
 // UsdcDecimals is the atomic-unit scale for USDC. Terms quote integer atomic units,
@@ -413,8 +418,9 @@ func (self *X402Terms) withError(v1Error string, v2Error string) *X402Terms {
 	return terms
 }
 
-// X402Sku is a thing an agent can buy, with availability from x402.yml and price and
-// amount from pro.yml.
+// X402Sku is a thing an agent can buy, with price and amount from pro.yml. The Pro
+// month is on when x402.yml lists it; a data sku is on when pro.yml sells its pack over
+// x402.
 type X402Sku struct {
 	SkuId       string  `json:"sku_id"`
 	Description string  `json:"description"`
@@ -442,7 +448,8 @@ func X402SkuById(skuId string) *X402Sku {
 func x402SkusForConfig(c *X402Config) []*X402Sku {
 	skus := []*X402Sku{}
 
-	// x402.yml declares WHICH skus are offered; pro.yml is the only place a PRICE lives.
+	// x402.yml turns on the Pro month; pro.yml is the only place a PRICE lives, and the
+	// only list of data packs and where each is sold.
 	//
 	// The price used to be duplicated in x402.yml, so it could drift from pro.yml and an
 	// agent would be quoted a different number than a human paying by card for the same
@@ -468,46 +475,31 @@ func x402SkusForConfig(c *X402Config) []*X402Sku {
 		}
 	}
 
-	// the data skus mirror pro.yml data_code.skus (1 TiB, 10 TiB). Kept as an ordered
-	// slice, not a map, so the catalog we serve is stable across calls.
-	for _, dataSku := range []struct {
-		SkuId     string
-		ByteCount model.ByteCount
-	}{
-		{X402SkuData1Tib, 1 * model.Tib},
-		{X402SkuData10Tib, 10 * model.Tib},
-	} {
-		if _, ok := c.Skus[dataSku.SkuId]; ok {
-			// the price comes from pro.yml data_code.skus -- the same number the site
-			// quotes and the same number Stripe charges
-			priceUsd, ok := proDataCodePriceUsd(dataSku.ByteCount)
-			if !ok || priceUsd <= 0 {
-				glog.Errorf("[x402]no price in pro.yml for %s; not offering it\n", dataSku.SkuId)
-				continue
-			}
-			skus = append(skus, &X402Sku{
-				SkuId:       dataSku.SkuId,
-				Description: fmt.Sprintf("URnetwork data, %s", model.ByteCountHumanReadable(dataSku.ByteCount)),
-				PriceUsd:    priceUsd,
-				Amount:      usdToAtomic(priceUsd),
-				Pro:         false,
-				ByteCount:   dataSku.ByteCount,
-			})
+	// The data skus are pro.yml's data packs that its rails sell over x402
+	// (data_code.skus, model.DataRailX402), in pro.yml order, so the catalog is stable
+	// across calls: data_1tib, data_10tib and data_256gib, the 256 GiB pack at $0.75 for
+	// clients with a $1 per-payment cap. A pack pro.yml does not sell over x402 is not
+	// in the catalog, so it is never quoted or settled. x402.yml does not list them: an
+	// x402.yml written before rails still names data_1tib and data_10tib, which change
+	// nothing.
+	for _, dataSku := range model.Pro().DataCodeSkusOn(model.DataRailX402) {
+		// the price comes from pro.yml data_code.skus -- the same number every rail
+		// that sells the pack quotes
+		if dataSku.PriceUsd <= 0 || dataSku.Data <= 0 {
+			glog.Errorf("[x402]no price/amount in pro.yml for %s; not offering it\n", dataSku.Sku)
+			continue
 		}
+		skus = append(skus, &X402Sku{
+			SkuId:       dataSku.Sku,
+			Description: fmt.Sprintf("URnetwork data, %s", model.ByteCountHumanReadable(dataSku.Data)),
+			PriceUsd:    dataSku.PriceUsd,
+			Amount:      usdToAtomic(dataSku.PriceUsd),
+			Pro:         false,
+			ByteCount:   dataSku.Data,
+		})
 	}
 
 	return skus
-}
-
-// proDataCodePriceUsd is the price of a data amount, from pro.yml. One source of truth,
-// shared by the site, Stripe checkout and x402.
-func proDataCodePriceUsd(byteCount model.ByteCount) (float64, bool) {
-	for _, sku := range model.Pro().DataCodeSkus {
-		if sku.Data == byteCount {
-			return sku.PriceUsd, true
-		}
-	}
-	return 0, false
 }
 
 func x402SkuByIdForConfig(c *X402Config, skuId string) *X402Sku {
@@ -1589,9 +1581,11 @@ func x402AlreadyGrantedForTransaction(
 }
 
 // x402GrantProMonth grants Pro for one ROLLING month from the purchase: a
-// subscription renewal (so the monthly Pro grant task keeps renewing the data
-// allowance) plus the Pro balance itself (pro = true), which is what actually
-// confers the entitlement.
+// subscription renewal plus the Pro balance itself (pro = true), which confers the
+// entitlement and holds the month's full data (pro.data). An agent buys data where
+// it pays, so each purchase carries its own month's data: x402 months are not Pro
+// grant cycles (model.GrantProCycleInTx leaves the x402 market out), and a second
+// purchase in the same month gets its data at once.
 //
 // Each purchase gets its own window starting at ITS purchase time, so a second
 // purchase lands a second renewal row (the renewal key includes market and the
@@ -1666,6 +1660,9 @@ func x402GrantProMonthInTx(
 		return false, nil
 	}
 
+	// the paid month, without the manual-payment grace the caller added to
+	// endTime (x402GrantProMonthInConn)
+	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
 	err := model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
 		NetworkId:          networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -1674,11 +1671,13 @@ func x402GrantProMonthInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketX402,
 		TransactionId:      settleResponse.Transaction,
+		PaidEndTime:        &paidEndTime,
 	})
 	if err != nil {
 		return false, err
 	}
 
+	// the month's Pro balance carries its own data, the full amount
 	returnErr = model.AddProTransferBalanceInTx(
 		tx,
 		ctx,

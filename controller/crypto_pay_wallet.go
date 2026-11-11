@@ -92,13 +92,31 @@ type cryptoWalletReceipt struct {
 	ReviewReason string
 }
 
-// cryptoWalletWatched is a per-address coin's chain reader (Bitcoin and ETH
-// through Alchemy, SOL through Helius, TAO through snow's node): no daemon of
-// ours knows every invoice address, so the scanner names the addresses to
-// read before each scan, and IncomingSince and Transaction report only
-// transfers to addresses the pool holds.
+// cryptoWalletWatched is a per-address coin's chain reader (ETH through
+// Alchemy, SOL through Helius, TAO through snow's node): no daemon of ours
+// knows every invoice address, so the scanner names the addresses to read
+// before each scan, and IncomingSince and Transaction report only transfers
+// to addresses the pool holds. Bitcoin is not one: its reader scans every
+// block and looks the invoice addresses up itself (crypto_pay_bitcoin.go).
 type cryptoWalletWatched interface {
 	SetWatched(addresses []*model.CryptoPaymentWatchedAddress)
+}
+
+// cryptoWalletChain is a block reader that keeps the chain it read with the
+// coin's cursor (Bitcoin's block scanner): a complete scan writes it with the
+// cursor in one write (model.SetCryptoScanCursorChainSuccessInConn), so the
+// next scan, on whichever taskworker it runs, finds the fork point of a reorg
+// from it. nil: nothing to keep.
+type cryptoWalletChain interface {
+	ScanChain() *model.CryptoScanChain
+}
+
+// cryptoWalletKeepsCredits is a reader whose credited payments stand whatever
+// the chain does after (Bitcoin, mmm/BTCPAY.md §16.7: no credit is taken back
+// over a reorg). The reconciler reports a credited payment such a reader no
+// longer finds to an operator, and ends nothing.
+type cryptoWalletKeepsCredits interface {
+	KeepsCredits() bool
 }
 
 // cryptoWalletNamedAddress is a coin whose addresses are made for one invoice

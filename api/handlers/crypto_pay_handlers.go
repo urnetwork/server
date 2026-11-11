@@ -25,9 +25,9 @@ func CryptoPaymentQuote(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputOptionalAuth(controller.CryptoPaymentQuote, w, r)
 }
 
-// AlchemyWebhook is every Alchemy webhook's delivery (ETH Address Activity,
-// and Bitcoin's if Alchemy offers one): verified by the webhook's own signing
-// key, it only brings the coin's next chain read forward.
+// AlchemyWebhook is the Alchemy webhook's delivery (ETH Address Activity;
+// Bitcoin has none): verified by the webhook's own signing key, it only brings
+// ETH's next chain read forward.
 func AlchemyWebhook(w http.ResponseWriter, r *http.Request) {
 	if !webhookVerifiable(w, "alchemy", controller.AlchemyWebhookVerifiable) {
 		return

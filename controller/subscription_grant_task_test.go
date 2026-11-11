@@ -64,6 +64,75 @@ func assertTransferGrantTaskReplay[A, R any](t testing.TB, owner *session.Client
 	verify(2)
 }
 
+// The Pro grant is keyed by network and cycle (pro_grant_cycle), so neither a
+// replay of the sweep after a lost handback nor a distinct run grants the cycle
+// a second time; the sweep schedules its successor. The retired calendar-month
+// task grants nothing and schedules nothing.
+func assertProCycleGrantTaskReplay(t testing.TB, owner *session.ClientSession, proId server.Id, expectedBytes int64) {
+	ctx := owner.Ctx
+	target := task.NewTaskTargetWithPost(RefreshProCycleTransferBalances, RefreshProCycleTransferBalancesPost)
+	settings := task.DefaultTaskWorkerSettings()
+	settings.ClaimRegisteredTargetsOnly = true
+	worker := task.NewTaskWorker(ctx, settings)
+	defer worker.Close()
+	worker.AddTargets(target)
+	verify := func() {
+		server.Db(ctx, func(conn server.PgConn) {
+			var rows int
+			var total int64
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*),COALESCE(sum(start_balance_byte_count),0)
+				FROM transfer_balance WHERE grant_kind=$1`, model.GrantKindPro).Scan(&rows, &total))
+			if rows != 1 || total != expectedBytes {
+				t.Errorf("pro cycle task duplicated or lost grants: rows=%d bytes=%d", rows, total)
+			}
+			var cycles int
+			server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pro_grant_cycle WHERE network_id=$1`, proId).Scan(&cycles))
+			if cycles != 1 {
+				t.Errorf("pro cycles=%d, want 1", cycles)
+			}
+		})
+	}
+	id := task.ScheduleTask(RefreshProCycleTransferBalances, &RefreshProCycleTransferBalancesArgs{}, owner, task.RunAt(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
+	if _, _, err := target.RunSpecific(ctx, task.GetTasks(ctx, id)[id]); err != nil {
+		t.Fatal("first pro cycle grant failed", err)
+	}
+	verify()
+	finished, retried, posts, err := worker.EvalTasks(1)
+	if err != nil || len(finished) != 1 || finished[0] != id || len(retried)+len(posts) != 0 {
+		t.Fatal("pro cycle replay failed to complete", finished, retried, posts, err)
+	}
+	verify()
+	server.Db(ctx, func(conn server.PgConn) {
+		var pending int
+		var future bool
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*),bool_and(run_at>$2) FROM pending_task WHERE function_name=$1`,
+			target.TargetFunctionName(), server.NowUtc()).Scan(&pending, &future))
+		if pending != 1 || !future {
+			t.Fatal("pro cycle replay lost its future successor", pending, future)
+		}
+	})
+	newId := task.ScheduleTask(RefreshProCycleTransferBalances, &RefreshProCycleTransferBalancesArgs{}, owner, task.RunAt(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
+	if _, _, err := target.RunSpecific(ctx, task.GetTasks(ctx, newId)[newId]); err != nil {
+		t.Fatal("distinct pro cycle run failed", err)
+	}
+	verify()
+
+	retired := task.NewTaskTargetWithPost(RefreshProTransferBalances, RefreshProTransferBalancesPost)
+	retiredId := task.ScheduleTask(RefreshProTransferBalances, &RefreshProTransferBalancesArgs{}, owner, task.RunAt(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)))
+	if _, _, err := retired.RunSpecific(ctx, task.GetTasks(ctx, retiredId)[retiredId]); err != nil {
+		t.Fatal("the retired monthly task failed", err)
+	}
+	verify()
+	server.Db(ctx, func(conn server.PgConn) {
+		var pending int
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$1 AND run_at>$2`,
+			retired.TargetFunctionName(), server.NowUtc()).Scan(&pending))
+		if pending != 0 {
+			t.Fatal("the retired monthly task scheduled a successor", pending)
+		}
+	})
+}
+
 // All three grants used to mint again after a crash between body commit and
 // task handback. Include paid/free classification and both referral sides.
 func TestRecurringGrantTasksDoNotDuplicateCommittedBodyOnReplay(t *testing.T) {
@@ -93,8 +162,7 @@ func TestRecurringGrantTasksDoNotDuplicateCommittedBodyOnReplay(t *testing.T) {
 		defer owner.Cancel()
 		assertTransferGrantTaskReplay(t, owner, RefreshFreeTransferBalances, RefreshFreeTransferBalancesPost,
 			&RefreshFreeTransferBalancesArgs{}, model.GrantKindFree, 3, 300)
-		assertTransferGrantTaskReplay(t, owner, RefreshProTransferBalances, RefreshProTransferBalancesPost,
-			&RefreshProTransferBalancesArgs{}, model.GrantKindPro, 1, 400)
+		assertProCycleGrantTaskReplay(t, owner, proId, 400)
 		assertTransferGrantTaskReplay(t, owner, RefreshReferralTransferBalances, RefreshReferralTransferBalancesPost,
 			&RefreshReferralTransferBalancesArgs{}, model.GrantKindReferral, 2, 500)
 	})

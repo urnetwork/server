@@ -50,24 +50,20 @@ func asyncPayoutRecoveryState(t testing.TB, ctx context.Context, contractId serv
 	return
 }
 
-// The durable task's row is the restart authority; captured callbacks are absent.
-func asyncPayoutRecoveryProject(t testing.TB, ctx context.Context, contractId server.Id) server.Id {
+// The sweep is the provider's durable record: settlement queues no provider
+// owner for restart to run and credits no provider totals (BILLING-SPLIT.md).
+func asyncPayoutRecoveryRequireNoProjection(t testing.TB, ctx context.Context, contractId, providerNetworkId server.Id) {
 	t.Helper()
-	var taskId server.Id
+	var owners int
 	server.Db(ctx, func(conn server.PgConn) {
-		server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE function_name=$2 AND args_json::jsonb->>'contract_id'=$1::text`, contractId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&taskId))
+		server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=$2 AND args_json::jsonb->>'contract_id'=$1::text`, contractId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&owners))
 	})
-	target := task.NewTaskTarget(ApplyLegacyProviderTotals)
-	stale := task.GetTasks(ctx, taskId)[taskId]
-	if stale == nil {
-		t.Fatal("durable provider owner disappeared before recovery")
+	if owners != 0 {
+		t.Fatal("settlement queued a provider owner", owners)
 	}
-	for range 2 {
-		if _, _, err := target.RunSpecific(ctx, stale); err != nil {
-			t.Fatal("actual provider owner or stale replay failed", err)
-		}
+	if got := contractPayoutTestAccountAmount(t, ctx, providerNetworkId); got != (contractPayoutTestAmount{}) {
+		t.Fatal("settlement credited provider totals", got)
 	}
-	return taskId
 }
 
 // Commit is the explicit crash barrier: no callback runs before durable restart.
@@ -137,7 +133,7 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 		}
 		// Simulate process loss after commit by handing no callback to recovery.
 		terminal, journals, sweeps, owners, earned, revenue := asyncPayoutRecoveryState(t, ctx, contract.ContractId)
-		if !terminal || journals != 1 || sweeps != 1 || owners != 1 || earned != 11 || revenue != 11 {
+		if !terminal || journals != 1 || sweeps != 1 || owners != 0 || earned != 11 || revenue != 11 {
 			t.Fatalf("committed settlement lost payout ownership before callbacks: terminal=%t journals=%d sweeps=%d owners=%d earned=%d revenue=%d", terminal, journals, sweeps, owners, earned, revenue)
 		}
 		credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
@@ -151,8 +147,7 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 				t.Fatal("lost commit reply allocated a second settlement")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
-		taskId := asyncPayoutRecoveryProject(t, ctx, contract.ContractId)
-		requireProviderTotalsTestState(t, ctx, taskId, f.destinationNetworkId, true, 11, 11)
+		asyncPayoutRecoveryRequireNoProjection(t, ctx, contract.ContractId, f.destinationNetworkId)
 		for range 2 {
 			_, _, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
 			server.Raise(err)
@@ -178,18 +173,18 @@ func TestRedisSettlementCrashRetainsEarnedPayoutAndProjection(t *testing.T) {
 		if postCalls.Load() != int32(2*len(posts)) {
 			t.Fatal("late callback replay did not execute both exact deliveries")
 		}
-		requireProviderTotalsTestState(t, ctx, taskId, f.destinationNetworkId, true, 11, 11)
+		asyncPayoutRecoveryRequireNoProjection(t, ctx, contract.ContractId, f.destinationNetworkId)
 		terminal, journals, sweeps, owners, earned, revenue = asyncPayoutRecoveryState(t, ctx, contract.ContractId)
-		if !terminal || journals != 0 || sweeps != 1 || owners != 1 || earned != 11 || revenue != 11 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 37 {
+		if !terminal || journals != 0 || sweeps != 1 || owners != 0 || earned != 11 || revenue != 11 || Testing_NetEscrowByteCount(ctx, f.balanceId) != 37 {
 			t.Fatal("late callback replay changed durable allocation or the neighbor")
 		}
 	})
 }
 
 // Rollback must discard every required financial owner, then admit one retry.
-// Settlement takes transaction ownership, so like every production caller the
-// attempt runs in a fresh read-committed no-retry server transaction, which a
-// sentinel failure rolls back after the owner has written its whole outcome.
+// Like every production caller, the attempt runs in a fresh read-committed
+// no-retry server transaction, which a sentinel failure rolls back after the
+// owner has written its whole outcome.
 func TestRedisSettlementRollbackKeepsPayoutAndProjectionAtomic(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f := asyncPayoutRecoveryFixture(t, ctx)
@@ -223,8 +218,8 @@ func TestRedisSettlementRollbackKeepsPayoutAndProjectionAtomic(t *testing.T) {
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
 		terminal, journals, sweeps, owners, earned, revenue = asyncPayoutRecoveryState(t, ctx, contract.ContractId)
-		if !terminal || journals != 1 || sweeps != 1 || owners != 1 || earned != 11 || revenue != 11 {
-			t.Fatal("retry did not commit one exact allocation")
+		if !terminal || journals != 1 || sweeps != 1 || owners != 0 || earned != 11 || revenue != 11 {
+			t.Fatal("retry did not commit one exact allocation alone")
 		}
 	})
 }
@@ -261,8 +256,7 @@ func TestRedisSettlementInsufficientEscrowRetainsLiabilityAndNeighbor(t *testing
 				t.Fatal("accounting hold blocked a healthy neighbor")
 			}
 		}, server.TxReadCommitted, server.OptNoRetry())
-		taskId := asyncPayoutRecoveryProject(t, ctx, neighbor.ContractId)
-		requireProviderTotalsTestState(t, ctx, taskId, f.destinationNetworkId, true, 11, 11)
+		asyncPayoutRecoveryRequireNoProjection(t, ctx, neighbor.ContractId, f.destinationNetworkId)
 		_, _, _, err := flushTransferDebitBalance(ctx, f.balanceId)
 		server.Raise(err)
 		credit, pending, applied := asyncDebitTestState(t, ctx, f.balanceId)
@@ -346,10 +340,10 @@ func TestRedisSettlementPayoutOwnersDoNotLockSharedFinancialRows(t *testing.T) {
 		server.Raise(held.Rollback(ctx))
 		for _, id := range []server.Id{first.ContractId, second.ContractId} {
 			terminal, journals, sweeps, owners, _, _ := asyncPayoutRecoveryState(t, ctx, id)
-			if !terminal || journals != 1 || sweeps != 1 || owners != 1 {
+			if !terminal || journals != 1 || sweeps != 1 || owners != 0 {
 				t.Fatal("concurrent close lost its independent durable owners")
 			}
-			asyncPayoutRecoveryProject(t, ctx, id)
+			asyncPayoutRecoveryRequireNoProjection(t, ctx, id, f.destinationNetworkId)
 		}
 		_, _, _, err = flushTransferDebitBalance(ctx, f.balanceId)
 		server.Raise(err)
