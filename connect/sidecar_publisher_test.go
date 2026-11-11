@@ -177,7 +177,7 @@ func TestResidentReadsNoMarkWhilePushIsOff(t *testing.T) {
 	}
 }
 
-// A resident starts a publisher only for a strict_exp client while push reads on: a client without the
+// A resident starts a publisher only for a strict_exp or acl_enforcing client while push reads on: a client with neither
 // mark, or one whose switch went off after its marks were read, gets none and registers nothing.
 func TestResidentWithoutTheMarkStartsNoPublisher(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -188,7 +188,7 @@ func TestResidentWithoutTheMarkStartsNoPublisher(t *testing.T) {
 		start  bool
 	}{
 		{marks: model.SidecarPushMarks{}, config: "sidecar:\n  push: {enabled: true}\n", start: false},
-		{marks: model.SidecarPushMarks{AclEnforcing: true}, config: "sidecar:\n  push: {enabled: true}\n", start: false},
+		{marks: model.SidecarPushMarks{AclEnforcing: true}, config: "sidecar:\n  push: {enabled: true}\n", start: true},
 		{marks: model.SidecarPushMarks{StrictExp: true}, config: "sidecar:\n  push: {enabled: false}\n", start: false},
 		{marks: model.SidecarPushMarks{StrictExp: true}, config: "sidecar:\n  push: {enabled: true}\n", start: true},
 	}

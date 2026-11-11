@@ -416,7 +416,15 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 		budget = client
 	}
 	host.Budget = budget
-	push, err := pushservice.NewHintWriter(host.Redis, nil, nil, host.Metrics)
+	// evs's topics are a wake class: a hint to a token holder is followed by §18.7's enqueue while the
+	// wake switch is on (PROTO-M8-01)
+	wake, err := pushservice.NewWakeEnqueuer(host.Redis, nil, host.ClockOrReal(), func() bool {
+		return host.GatesOrClosed().Switch(sidecar.GateSwitchWake)
+	}, host.Metrics)
+	if err != nil {
+		return notReady(fmt.Errorf("the wake enqueuer: %w", err))
+	}
+	push, err := pushservice.NewWakingHintWriter(host.Redis, nil, nil, host.Metrics, wake)
 	if err != nil {
 		return notReady(fmt.Errorf("the hint writer: %w", err))
 	}

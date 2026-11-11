@@ -29,6 +29,7 @@ import (
 )
 
 var _ pushservice.PublisherRedis = (*SidecarPushRedis)(nil)
+var _ pushservice.WakeQueueRedis = (*SidecarPushRedis)(nil)
 
 var (
 	// A call whose keys share no one tag, which production's cluster answers CROSSSLOT, so this
@@ -225,6 +226,27 @@ func (self *SidecarPushRedis) HashGetAll(ctx context.Context, key string) (field
 			fieldValues[field] = []byte(value)
 		}
 		return nil
+	})
+	return
+}
+
+// See sidecar.Redis: XADD with MAXLEN ~ maxLength, §18.7's wake queue entry, alone on its stream's slot.
+func (self *SidecarPushRedis) StreamAdd(ctx context.Context, key string, maxLength int64, fieldValues map[string][]byte) (entryId string, returnErr error) {
+	if maxLength < 0 || len(fieldValues) == 0 {
+		return "", fmt.Errorf("sidecar push: a stream add of %d fields, length %d", len(fieldValues), maxLength)
+	}
+	values := make([]any, 0, 2*len(fieldValues))
+	for field, value := range fieldValues {
+		values = append(values, field, value)
+	}
+	returnErr = self.redis(ctx, func(client server.RedisClient) error {
+		args := &redis.XAddArgs{Stream: key, Values: values}
+		if 0 < maxLength {
+			args.MaxLen, args.Approx = maxLength, true
+		}
+		var err error
+		entryId, err = client.XAdd(ctx, args).Result()
+		return err
 	})
 	return
 }
@@ -429,9 +451,18 @@ func ParseScpHintKeyEvent(channel string) (connect.Id, bool) {
 	return pushservice.ParseHintSeqKey(key)
 }
 
-// api's one hint writer for its own topics, made at first use.
+// api's one hint writer for its own topics, made at first use. Both are wake classes (§18.7), so it
+// follows each hint to a token holder with the wake queue's enqueue while sidecar.yml's wake switch is
+// on, which it reads at each enqueue.
 var sidecarHintWriter = sync.OnceValues(func() (*pushservice.HintWriter, error) {
-	return pushservice.NewHintWriter(NewSidecarPushRedis(nil), pushservice.DefaultHintWriterSettings(), nil, nil)
+	redis := NewSidecarPushRedis(nil)
+	wake, err := pushservice.NewWakeEnqueuer(redis, pushservice.DefaultWakeQueueSettings(), nil, func() bool {
+		return server.CurrentSidecarConfig().Wake()
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return pushservice.NewWakingHintWriter(redis, pushservice.DefaultHintWriterSettings(), nil, nil, wake)
 })
 
 // Hints each client of a change to a topic api owns: core (§5; plan-CORE-core-hint-body) and team

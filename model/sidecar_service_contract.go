@@ -11,13 +11,9 @@ package model
 
 import (
 	"context"
-	"errors"
 	"math"
 	"time"
 )
-
-// A deadline that passed before the contract's insert: the pair's grant ended under the request.
-var ErrContractDeadlinePassed = errors.New("Contract deadline passed before creation.")
 
 // CreateContract's Service rule's tunables.
 type ServiceContractSettings struct {
@@ -63,20 +59,15 @@ func WithContractDeadline(ctx context.Context, deadline time.Time) context.Conte
 	return context.WithValue(ctx, contractDeadlineKey{}, deadline)
 }
 
-// How long a contract inserted at now on ctx lives: DefaultContractExpiration, or less to end by ctx's deadline, in
-// whole milliseconds as the insert takes it, with that deadline in UTC to the millisecond, which the insert caps the
-// row's expiration_time at, since the database's clock runs on from now; nil for none. ErrContractDeadlinePassed when
-// the deadline is not a millisecond away.
-func contractExpirationFor(ctx context.Context, now time.Time) (time.Duration, *time.Time, error) {
-	expiration := DefaultContractExpiration
+// The latest end of a contract inserted on ctx, in UTC to the millisecond, which the insert caps the row's
+// expiration_time at beside its database-clock hour; nil for none. The insert takes no time of the application's:
+// the deadline is the pair's grant expiry, an absolute time, and CreateContract checked it against its own clock
+// before it got this far.
+func contractDeadlineFor(ctx context.Context) *time.Time {
 	deadline, ok := ctx.Value(contractDeadlineKey{}).(time.Time)
 	if !ok {
-		return expiration, nil, nil
+		return nil
 	}
 	deadline = deadline.UTC().Truncate(time.Millisecond)
-	remaining := deadline.Sub(now).Truncate(time.Millisecond)
-	if remaining < time.Millisecond {
-		return 0, nil, ErrContractDeadlinePassed
-	}
-	return min(expiration, remaining), &deadline, nil
+	return &deadline
 }

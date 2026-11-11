@@ -189,6 +189,65 @@ func TestSidecarHintOnlyApiTopics(t *testing.T) {
 	})
 }
 
+// api's topics are wake classes (§18.7's step 2, PROTO-M8-01): a hint to a token holder adds a wake-queue
+// entry on the real Redis while sidecar.yml's wake switch is on, and none while it is off; the entry is
+// due now, since no resident is live, and names the class and version only.
+func TestSidecarHintEnqueuesWakesWhileTheSwitchIsOn(t *testing.T) {
+	testEnv := server.DefaultTestEnv()
+	testEnv.Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		redis := NewSidecarPushRedis(nil)
+		clientId := server.NewId()
+		token := pushservice.WakeTokenValue(sidecar.PushTokenPlatformFcm, "synthetic-fcm-token-0123456789")
+		if err := redis.Set(ctx, pushservice.HintTokenKey(connect.Id(clientId)), token, 0); err != nil {
+			t.Fatal(err)
+		}
+		queueKey := pushservice.WakeQueueKey(pushservice.WakeQueueShard(connect.Id(clientId), pushservice.DefaultWakeQueueSettings().ShardCount))
+		queued := func() []*pushservice.WakeEntry {
+			t.Helper()
+			streamEntries, err := redis.StreamRange(ctx, queueKey, "", 100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries := []*pushservice.WakeEntry{}
+			for _, streamEntry := range streamEntries {
+				entry, err := pushservice.ParseWakeEntry(streamEntry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if entry.ClientId == connect.Id(clientId) {
+					entries = append(entries, entry)
+				}
+			}
+			return entries
+		}
+
+		func() {
+			defer server.Testing_PushSidecarConfig("sidecar:\n  wake: {enabled: false}\n")()
+			if err := SidecarHint(ctx, []server.Id{clientId}, &sidecar.ClientHint{Topic: sidecar.PushTopicCore, Version: 3}); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		if entries := queued(); len(entries) != 0 {
+			t.Fatalf("the switch off queued %d", len(entries))
+		}
+
+		defer server.Testing_PushSidecarConfig("sidecar:\n  wake: {enabled: true}\n")()
+		before := time.Now().UnixMilli()
+		if err := SidecarHint(ctx, []server.Id{clientId}, &sidecar.ClientHint{Topic: sidecar.PushTopicTeam, Version: 8}); err != nil {
+			t.Fatal(err)
+		}
+		entries := queued()
+		if len(entries) != 1 {
+			t.Fatalf("%d entries", len(entries))
+		}
+		entry := entries[0]
+		if entry.TopicClass != sidecar.PushTopicTeam || entry.Version != 8 || entry.DueMs < before || time.Now().UnixMilli() < entry.DueMs {
+			t.Errorf("entry %+v", entry)
+		}
+	})
+}
+
 func TestScpHintKeyEventParses(t *testing.T) {
 	clientId := connect.NewId()
 	channel := "__keyspace@3__:" + pushservice.HintSeqKey(clientId)

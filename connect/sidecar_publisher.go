@@ -16,8 +16,10 @@ package connect
 // resident is built from a client id and never sees the token.
 //
 // Drain, moves and migration need nothing of their own: a new resident starts a new publisher, whose
-// reset is what resyncs the client. PROTO-M8-01 adds acl_enforcing device clients, told team alone,
-// and {scp_<C>}live.
+// reset is what resyncs the client. A resident of an acl_enforcing device client, which carries no
+// strict_exp mark, hosts a publisher of team alone (PROTO-M8-01, §18.6): the forwarding role on the
+// device follows its network's config from those hints. Every publisher keeps {scp_<C>}live while it
+// runs (pushservice's publisher.go), the marker §18.7's wake step reads.
 
 import (
 	"context"
@@ -28,6 +30,7 @@ import (
 	"github.com/urnetwork/connect/protocol"
 	"github.com/urnetwork/glog"
 
+	"github.com/urnetwork/sidecar"
 	"github.com/urnetwork/sidecar/pushservice"
 
 	"github.com/urnetwork/server"
@@ -37,7 +40,7 @@ import (
 var (
 	sidecarPublishersStarted = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "urnetwork_sidecar_publishers_started_total",
-		Help: "resident publishers started for strict_exp clients (§6.8)",
+		Help: "resident publishers started for strict_exp clients and acl_enforcing device clients (§6.8)",
 	})
 	sidecarPublisherSettingsRefused = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "urnetwork_sidecar_publisher_settings_refused_total",
@@ -94,12 +97,26 @@ func (self *Exchange) loadResidentProfile(ctx context.Context, clientId server.I
 	return
 }
 
-// Starts the resident's publisher when its client is marked strict_exp and push is on, and answers how
-// to stop it: the listener first, so no kick lands on a closing publisher, then Close, which waits for
-// its run. Nothing to stop answers a no-op.
+// The topics a resident's publisher tells its client, and whether it hosts one at all: every topic for
+// a strict_exp client, a sidecar's own; team alone for an acl_enforcing device client (§6.8, §18.6),
+// whose forwarding follows its network's config from those hints; none for any other client.
+func sidecarPublisherTopics(marks model.SidecarPushMarks) (topics []string, hosted bool) {
+	switch {
+	case marks.StrictExp:
+		return nil, true
+	case marks.AclEnforcing:
+		return []string{sidecar.PushTopicTeam}, true
+	}
+	return nil, false
+}
+
+// Starts the resident's publisher when its client is marked strict_exp or acl_enforcing and push is on,
+// and answers how to stop it: the listener first, so no kick lands on a closing publisher, then Close,
+// which waits for its run. Nothing to stop answers a no-op.
 func (self *Resident) startSidecarPublisher() (stop func()) {
 	stop = func() {}
-	if !self.sidecarPushMarks.StrictExp || self.exchange.keyEventSubscriber == nil || self.exchange.sidecarPushRedis == nil {
+	topics, hosted := sidecarPublisherTopics(self.sidecarPushMarks)
+	if !hosted || self.exchange.keyEventSubscriber == nil || self.exchange.sidecarPushRedis == nil {
 		return
 	}
 	if !server.CurrentSidecarConfig().Push() {
@@ -123,8 +140,7 @@ func (self *Resident) startSidecarPublisher() (stop func()) {
 		NetworkId: connect.Id(networkId),
 		Send:      self.sendPublisherFrame,
 		Redis:     self.exchange.sidecarPushRedis,
-		// every topic: a sidecar's client
-		Topics: nil,
+		Topics:    topics,
 	})
 	sidecarPublishersStarted.Inc()
 	if self.exchange.afterSidecarPublisherStartForTest != nil {
