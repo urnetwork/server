@@ -1,6 +1,24 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T21:48:37Z",
+  "observed_at": "2026-11-11T23:13:51Z",
+  "latest_epoch2_prelaunch_closure_progress": {
+    "evidence": "EPOCH2-RECOVERY-PROGRESS-2026-11-11.md",
+    "succeeded": 2,
+    "failed": 1,
+    "queued": 11,
+    "claimed": 2,
+    "sille_job_id": "01a1c62f-28e4-84aa-5ba5-de4cae9f8ade",
+    "sille_candidate_replicates_completed": 2,
+    "sille_cache_service_natively_qualified_and_enabled": true,
+    "goofe_cache_service_natively_qualified_and_enabled": true,
+    "goofe_candidate_execution_started": false,
+    "goofe_legacy_recovery_prepared_and_native_canary_passed": true,
+    "goofe_legacy_activation_attempt_passed": false,
+    "goofe_historical_inactive_controls_retired": 37,
+    "goofe_cleanup_verified": false,
+    "goofe_original_deadline": "2026-11-11T23:52:17.050115Z",
+    "next_action": "Continue the approved Goofe-only closure from retained evidence, not by replaying the failed activation. Positively stop new coordinator control connections and join the exact control-user manager before the full cleanup. Preserve all fences, original state/clock and failed activation receipt. Sille continues uninterrupted. Older sections below are historical snapshots."
+  },
   "latest_epoch2_stable_cache_qualification": {
     "evidence": "EPOCH2-STABLE-CACHE-2026-11-11.json",
     "api_ready": true,
