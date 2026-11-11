@@ -97,6 +97,10 @@ type HostDeps struct {
 	Clusters HostClusters
 	// The write budget: evsservice.NewWriteBudget over the clusters' metadata clusters.
 	Budget sidecar.WriteBudget
+	// ServiceHost.Quota, whose limits weigh each network's writes in the write budget (store_weight):
+	// server/cli/gkm's quotahost.NewBlockQuota over api's internal gate (QUOTA-M2-11). nil weighs every network as
+	// Community's, and readiness does not wait on it.
+	Quota sidecar.Quota
 	// The hint writer: pushservice's on the block's Redis, with no resolver (plan-KEYS-hint-addressing).
 	Push sidecar.Push
 	// The engine's clock: real time.
@@ -269,6 +273,7 @@ func newBlockEngine(ctx context.Context, settings *HostSettings, deps *HostDeps)
 	closers = append(closers, clusters.Close)
 	host := sidecarhost.NewServiceHost(hostCtx, &sidecarhost.ServiceHostOptions{
 		Blobs: clusters,
+		Quota: deps.Quota,
 		Clock: deps.Clock,
 	})
 	budget := deps.Budget

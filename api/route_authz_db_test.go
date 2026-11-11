@@ -323,6 +323,7 @@ func routeAccessAdminRequests(self *routeAccessDbFixture, victimClientId server.
 		"POST /network/domain-verify": {path: "/network/domain-verify", body: map[string]any{"domain": "attacker.example"}},
 		"POST /network/domain-remove": {path: "/network/domain-remove", body: map[string]any{"domain": "attacker.example"}},
 		"GET /network/admin-events":   {path: "/network/admin-events"},
+		"GET /network/usage":          {path: "/network/usage"},
 		"POST /network/audit-webhook": {path: "/network/audit-webhook", body: map[string]any{"url": "https://attacker.example/hook"}},
 		// app admin
 		"POST /auth/network-delete":               {path: "/auth/network-delete"},

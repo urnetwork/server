@@ -45,11 +45,13 @@ import (
 	"github.com/urfoundation/sn/payoutartifact"
 	snprotocol "github.com/urfoundation/sn/protocol"
 	"github.com/urnetwork/connect/protocol"
+	"github.com/urnetwork/sidecar"
 
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 
 	"github.com/urnetwork/server/controller"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/quotahost"
 )
 
 // ----------------------------------------------------------------------------
@@ -275,6 +277,11 @@ func registry() []specEndpoint {
 		{"POST", "/sn/fleet/top-up", nil, rt(controller.SnFleetTopUpResult{})},
 		{"POST", "/sn/head-summary", rt(controller.SnHeadSummary{}), nil},
 		{"GET", "/account/epochs", nil, rt(controller.AccountEpochsResult{})},
+		// the internal gate's quota routes (QUOTA-M2-11), whose bodies are quotahost's wire
+		{"GET", "/internal/gate/limits/{network_id}", nil, rt(sidecar.QuotaLimits{})},
+		{"GET", "/internal/gate/over-limit", nil, rt(quotahost.QuotaApiOverLimit{})},
+		{"GET", "/internal/gate/draw-order/{network_id}", nil, rt(quotahost.QuotaApiDrawOrder{})},
+		{"POST", "/internal/gate/usage-batch", rt(quotahost.QuotaApiUsageBatch{}), rt(quotahost.QuotaApiUsageBatchResult{})},
 	}
 }
 
