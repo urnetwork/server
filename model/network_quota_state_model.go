@@ -299,8 +299,9 @@ func ApplyStoredByteDeltaInTx(ctx context.Context, tx server.PgTx, networkId ser
 }
 
 // The nightly pass's absolute write (§20.7's count row): the network's stored count is byteCount, and
-// storage_over follows it. EVSB-M2-12's server/taskworker/evs_nightly.go calls it with the count it
-// lists, so Quota keeps §20.7's five methods.
+// storage_over follows it. server/taskworker/evs_nightly.go's closing job calls it once a night for each
+// network, with the sum of every shard of every metadata cluster (owner decision 198; EVSB-M2-26), so
+// Quota keeps §20.7's five methods.
 func SetNetworkStoredByteCount(ctx context.Context, networkId server.Id, storedByteCount int64) (returnErr error) {
 	if !server.SidecarMg2Linked() {
 		return ErrNetworkQuotaStateUnavailable
@@ -324,6 +325,47 @@ func SetNetworkStoredByteCount(ctx context.Context, networkId server.Id, storedB
 			storedByteCount,
 			networkStorageOver(storedByteCount, limitByteCount),
 		))
+	})
+	return
+}
+
+// Up to limit networks whose stored count is above zero, in network order after after (nil: from the
+// first): the nightly closing job writes zero for each one that night's sums do not name (§20.7's count
+// row; owner decision 198). Each page is one statement on the primary key, so a pass over every network
+// is bounded per statement and resumes from the last id it read.
+func NetworkIdsWithStoredByteCount(ctx context.Context, after *server.Id, limit int) (networkIds []server.Id, returnErr error) {
+	if !server.SidecarMg2Linked() {
+		return nil, ErrNetworkQuotaStateUnavailable
+	}
+	if limit <= 0 {
+		return nil, fmt.Errorf("a page of %d networks", limit)
+	}
+	networkIds = []server.Id{}
+	server.Db(ctx, func(conn server.PgConn) {
+		args := []any{limit}
+		cursor := ``
+		if after != nil {
+			args = append(args, *after)
+			cursor = ` AND network_id > $2`
+		}
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT network_id
+				FROM network_quota_state
+				WHERE stored_byte_count > 0`+cursor+`
+				ORDER BY network_id
+				LIMIT $1
+			`,
+			args...,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var networkId server.Id
+				server.Raise(result.Scan(&networkId))
+				networkIds = append(networkIds, networkId)
+			}
+		})
 	})
 	return
 }

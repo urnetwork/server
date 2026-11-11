@@ -7,6 +7,7 @@ package model
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -194,6 +195,49 @@ func TestNightlyCountCorrectsAnInjectedDrift(t *testing.T) {
 		connect.AssertEqual(t, SetNetworkStoredByteCount(ctx, networkId, 990), nil)
 		connect.AssertEqual(t, *testingNetworkQuotaState(t, ctx, networkId), NetworkQuotaState{NetworkId: networkId, StoredByteCount: 990})
 		connect.AssertEqual(t, SetNetworkStoredByteCount(ctx, networkId, -1) != nil, true)
+	})
+}
+
+// The closing job's zero write reads every network holding a count above zero, a page at a time in id order: a
+// count of zero, and a row that only a spent mark made, are not listed (owner decision 198).
+func TestNetworkIdsWithStoredByteCountPagesThroughTheCounts(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		counted := []server.Id{}
+		for i := range 5 {
+			networkId := server.NewId()
+			connect.AssertEqual(t, SetNetworkStoredByteCount(ctx, networkId, int64(100+i)), nil)
+			counted = append(counted, networkId)
+		}
+		// written back to zero by an earlier night, and marked spent with no count
+		zeroed := server.NewId()
+		connect.AssertEqual(t, SetNetworkStoredByteCount(ctx, zeroed, 10), nil)
+		connect.AssertEqual(t, SetNetworkStoredByteCount(ctx, zeroed, 0), nil)
+		connect.AssertEqual(t, MarkNetworkSpent(ctx, server.NewId(), server.NowUtc()), nil)
+
+		listed := []server.Id{}
+		var after *server.Id
+		pageCount := 0
+		for {
+			page, err := NetworkIdsWithStoredByteCount(ctx, after, 2)
+			connect.AssertEqual(t, err, nil)
+			connect.AssertEqual(t, len(page) <= 2, true)
+			pageCount += 1
+			if len(page) == 0 {
+				break
+			}
+			listed = append(listed, page...)
+			last := page[len(page)-1]
+			after = &last
+		}
+		slices.SortFunc(counted, func(a server.Id, b server.Id) int { return a.Cmp(b) })
+		connect.AssertEqual(t, listed, counted)
+		connect.AssertEqual(t, pageCount, 4)
+
+		_, err := NetworkIdsWithStoredByteCount(ctx, nil, 0)
+		connect.AssertEqual(t, err != nil, true)
 	})
 }
 
