@@ -138,7 +138,7 @@ func newSourceIndexCheckpoint(status *controller.CompetitionSourceLifecycleStatu
 	result := &sourceIndexCheckpoint{Schema: 1, Capability: status.Capability, Staging: intent.Staging, CompetitionId: intent.CompetitionId,
 		SeasonId: intent.SeasonId, RoundId: intent.TargetRoundId, Epoch: intent.TargetEpoch, SourceGeneration: intent.SourceGeneration,
 		ActivationGeneration: intent.Generation, Kind: intent.Kind, Branch: sourceBranch(intent.Staging), SourceLockSha256: lockDigest,
-		EvaluatorImageDigest: intent.EvaluatorImageDigest, CompilerRequirement: "go1.27.3", InitialTakeoverMargin: intent.Threshold,
+		EvaluatorImageDigest: intent.EvaluatorImageDigest, CompilerRequirement: "go1.27.4", InitialTakeoverMargin: intent.Threshold,
 		ApiAcknowledged: status.ApiAcknowledged, WorkerAcknowledged: status.WorkerAcknowledged, GradingRuntimeActivated: status.GradingRuntimeActivated,
 		HostAdmissionReady: status.HostAdmissionReady, GradingReady: status.GradingReady, BaselineSha256: status.BaselineSha256,
 		Repositories: []sourceIndexRepository{}}

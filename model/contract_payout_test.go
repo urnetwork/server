@@ -1141,6 +1141,10 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 			assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, wantProviders)
 			assertContractPayoutTestAccounts(t, ctx, networkIds, want)
 			assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, usedByteCount)
+			// SN usage is not billing: the snapshot keeps every hop's even
+			// share, the payer network's too, and an extender is one of the
+			// hops (sn WHITEPAPER.md §8.6.2, Q7)
+			assertStContractUsageSnapshotHops(t, ctx, escrow.ContractId, sortedParticipants, usedByteCount, originNetworkId)
 		}
 	})
 }

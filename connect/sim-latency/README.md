@@ -22,7 +22,7 @@ make
 `make` writes `build/<goos>/<goarch>/sim-latency`. The package test gate is
 Go-only and runs under the race detector against the local PostgreSQL and Redis
 services, like the other server packages.
-The actual compiler must be **Go 1.27.3**. Select that installed toolchain on
+The actual compiler must be **Go 1.27.4**. Select that installed toolchain on
 `PATH` and use `GOTOOLCHAIN=local`; build/test launchers reject other versions.
 
 ## Current competition contract
