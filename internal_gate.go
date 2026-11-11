@@ -1,8 +1,8 @@
 package server
 
 // api's internal surface for the hosts with no Postgres (QD-055: plan-SOCK-gate-data, plan-QUOTA-host-reach):
-// every route under InternalGatePathPrefix, which the lb refuses from outside, takes one caller's bearer,
-// verified by hash. The scheme is the one plan-TLS-internal-credentials and plan-DNS-internal-route-credential
+// every route under InternalGatePathPrefix takes one caller's bearer, verified by hash. QD-055 also has the lb
+// refuse the prefix from outside, which warp does not do yet, so until it does the bearer is the gate alone. The scheme is the one plan-TLS-internal-credentials and plan-DNS-internal-route-credential
 // settle for the dns API's internal routes (QD-027):
 //
 //   - each caller holds 256 random bits, its current bearer and during a rotation its previous one, in

@@ -18,7 +18,8 @@ package handlers
 // no host reports another's bytes. Bodies are quotahost's QuotaApi* types in JSON. A model that cannot answer
 // (MG2 not linked, Postgres away) answers 503, and a batch the model refuses answers 400 with nothing applied.
 //
-// The lb refuses the prefix from outside (QD-055); the bearer is the gate either way. Safe for concurrent use.
+// QD-055 also has the lb refuse the prefix from outside, which warp does not do yet, so the bearer is the gate
+// alone until it does. Safe for concurrent use.
 
 import (
 	"encoding/json"
