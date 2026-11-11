@@ -1,6 +1,24 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T03:05:08Z",
+  "observed_at": "2026-11-11T06:18:05Z",
+  "latest_single_admission_recovery": {
+    "evidence": "EPOCH2-SINGLE-ADMISSION-RECOVERY-2026-11-11.json",
+    "user_approved": true,
+    "recovery_registered": true,
+    "replacement_clock_started": true,
+    "replacement_deadline_at": "2026-11-11T09:17:08.071036Z",
+    "goofe_passing_admission_preserved": true,
+    "original_sille_failure_preserved": true,
+    "ordinary_and_race_tests_passed_three_repetitions": true,
+    "post_pull_dependency_ordinary_tests_passed_three_repetitions": true,
+    "post_pull_dependency_race_tests_passed_three_repetitions": true,
+    "recovery_worker_activated": true,
+    "required_main_migration": 952,
+    "observed_main_migration": 952,
+    "grading_ready": false,
+    "customer_evaluation_clocks_started": 0,
+    "next_action": "Recovery registered and coordinator active. Observe actual Sille replacement dispatch and complete R9 qualification under its new clock. Both authenticated retained admission receipts are required before customer scoring. Earlier entries below are historical."
+  },
   "latest_goofe_r9_admission": {
     "evidence": "EPOCH2-GOOFE-R9-ADMISSION-2026-11-11.json",
     "remaining_sille_triage": "EPOCH2-SILLE-DRAIN-TRIAGE-2026-11-11.md",
