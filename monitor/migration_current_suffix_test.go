@@ -488,6 +488,13 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `CREATE OR REPLACE VIEW competition_executor_admitted_evidence AS SELECT round_id, host_id, receipt_json, receipt_sha256, baseline_sha256, created_at FROM competition_executor_equivalence`},
 		{name: "whole-host readiness back on the amendment body", version: custodian,
 			sql: `CREATE OR REPLACE FUNCTION competition_executor_control_hosts_ready(target uuid) RETURNS boolean LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(amendedHostsReady)},
+		// The onboarding distribution is required with an empty default, so an
+		// older release's insert, which does not name it, stores the empty
+		// distribution; through the signal now that the catalog reaches it.
+		{name: "onboarding distribution nullable", version: server.NetworkOnboardingDistributionMigrationVersion(),
+			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP NOT NULL`},
+		{name: "onboarding distribution without its default", version: server.NetworkOnboardingDistributionMigrationVersion(),
+			sql: `ALTER TABLE network_onboarding ALTER COLUMN distribution DROP DEFAULT`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.
