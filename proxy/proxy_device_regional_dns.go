@@ -18,7 +18,9 @@ package proxy
 // cannot answer an exit until 2026-11-11: ir 403.online's private
 // 10.202.10.10, and tr the resolvers of TTNET and Turkcell Superonline, which
 // answer only their own customers, so a tr proxy stored with them resolved
-// nothing on an exit of any other network.
+// nothing on an exit of any other network. tr has had no recommendation since
+// (DoH works in Turkey), so a tr proxy stored with one builds its tun with
+// connect's defaults, as a tm proxy does.
 //
 // The replacement happens when a device reads its settings, not in storage.
 // The device is the only user of the stored resolver settings, so the stored
@@ -169,13 +171,8 @@ var countryCodeRegionalDnsRecommendations = map[string][]*connect.DnsResolverSet
 			DnsUpgradeMaskAddress: "65.49.70.65",
 			RemoteDnsIpv4:         []string{"195.175.39.39", "212.252.114.8"},
 		},
-		// connect 8e0fe91e, 2026-11-11: Cloudflare and Quad9's unfiltered 9.9.9.10
-		{
-			EnableRemoteDns:       true,
-			DnsUpgradeMaskAddress: "65.49.70.65",
-			RemoteDnsIpv4:         []string{"1.1.1.1", "9.9.9.10"},
-			RemoteDnsIpv6:         []string{"2606:4700:4700::1111", "2620:fe::10"},
-		},
+		// connect 1a3a71b8, 2026-11-11: none
+		nil,
 	},
 }
 
