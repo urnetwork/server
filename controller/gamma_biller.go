@@ -105,8 +105,25 @@ const (
 // The watcher may trail the finalized head by this many blocks and still sell.
 const gammaMaxWatcherLagBlocks = 100
 
-// A credit that failed this many times is held for an operator.
+// A credit that failed this many times is held for an operator: its status
+// says review (credit_failed), and the biller retries only a few of those a
+// run (gammaCreditReviewRetries), so they never crowd out a new credit.
 const gammaMaxCreditFailures = 10
+
+// What the monitor reads (SIGNALS.md §2.22a, gamma-payment-failures): the
+// failures that hold a credit for review, and the alarm kind of a live batch
+// that carries a charge no credit can reach.
+const (
+	GammaMaxCreditFailures           = gammaMaxCreditFailures
+	GammaAlarmKindBatchUnfulfillable = gammaAlarmBatchUnfulfillable
+)
+
+// The credits each run tries, the fewest failures first.
+const gammaCreditsPerRun = 200
+
+// The credits held for review each run retries besides, the least retried
+// first: each is retried in turn, and one whose cause was fixed is credited.
+const gammaCreditReviewRetries = 10
 
 // The renewal is charged this long before the paid term ends.
 const gammaRenewLead = 1 * time.Hour
@@ -988,9 +1005,16 @@ func gammaDepositCanPay(hotkey *model.GammaDepositHotkey, settings *gammaSetting
 
 // ----- credit and notices -----
 
+// credit credits the intents whose charge was spent. A credit that fails is
+// retried every run, the fewest failures first, so a credit that keeps
+// failing (a spend for a network that is gone fails for good) never keeps a
+// new one waiting; past gammaMaxCreditFailures it is held for review and
+// retried only a few a run.
 func (self *gammaBiller) credit() (credited int) {
 	ctx := self.ctx
-	for _, charge := range model.ListSpentUncreditedGammaCharges(ctx, 200) {
+	charges := model.ListSpentUncreditedGammaCharges(ctx, gammaMaxCreditFailures, gammaCreditsPerRun)
+	charges = append(charges, model.ListSpentUncreditedGammaChargesInReview(ctx, gammaMaxCreditFailures, gammaCreditReviewRetries)...)
+	for _, charge := range charges {
 		intent := model.GetGammaPaymentIntent(ctx, charge.IntentId)
 		if intent == nil {
 			continue
