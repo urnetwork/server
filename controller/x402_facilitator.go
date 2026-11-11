@@ -21,15 +21,20 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The x402 facilitator: the CDP facilitator, and the x402 v1 wire format.
+// The x402 facilitator: the CDP facilitator, and the x402 wire formats, v2 and
+// v1.
 //
 // Stripe settles x402 mainnet payments through the Coinbase Developer Platform
 // facilitator (docs.stripe.com/payments/machine/x402). Its x402 API lives
 // under https://api.cdp.coinbase.com/platform/v2/x402: POST /verify, POST
-// /settle and GET /supported. Every request authenticates with a CDP JWT, a
-// bearer token signed by the CDP secret API key, valid for 120 s, whose `uris`
-// claim scopes it to exactly one method, host and path. A token is minted for
-// each request, the way the CDP SDKs do it (coinbase/x402
+// /settle and GET /supported, and it takes both protocol versions: the request
+// body's x402Version says which one the payment and the requirements are
+// written in (docs.cdp.coinbase.com api-reference x402-facilitator
+// verify-payment: x402PaymentPayload is oneOf x402V2PaymentPayload and
+// x402V1PaymentPayload). Every request authenticates with a CDP JWT, a bearer
+// token signed by the CDP secret API key, valid for 120 s, whose `uris` claim
+// scopes it to exactly one method, host and path. A token is minted for each
+// request, the way the CDP SDKs do it (coinbase/x402
 // go/legacy/pkg/coinbasefacilitator/cdp.go CreateAuthHeader, which calls
 // github.com/coinbase/cdp-sdk/go/auth GenerateJWT, the package used here).
 
@@ -41,6 +46,12 @@ const (
 	// the most of a facilitator answer that is read
 	x402FacilitatorMaxBody = 1 << 20
 )
+
+// x402SettlementPending is the settle errorReason for a transaction the
+// facilitator broadcast but could not confirm (specs/x402-specification-v2.md
+// 9: non-terminal, "the transaction may still confirm on chain", and it MUST
+// carry the broadcast transaction). CDP's x402SettleErrorReason enum has it.
+const x402SettlementPending = "settlement_pending"
 
 // x402FacilitatorConfigured reports whether the facilitator settings are
 // filled in at all. x402ConfigProblem checks them properly at load; this is
@@ -149,14 +160,25 @@ type x402FacilitatorAnswer interface {
 	// rejected reports whether the answer is the scheme's structured
 	// rejection of the payment
 	rejected() bool
+	// pending reports whether the answer is a settlement the facilitator
+	// broadcast but could not confirm
+	pending() bool
 }
 
 func (self *X402VerifyResponse) rejected() bool {
 	return !self.IsValid && self.InvalidReason != ""
 }
 
+func (self *X402VerifyResponse) pending() bool {
+	return false
+}
+
 func (self *X402SettleResponse) rejected() bool {
 	return !self.Success && self.ErrorReason != ""
+}
+
+func (self *X402SettleResponse) pending() bool {
+	return !self.Success && self.ErrorReason == x402SettlementPending && self.Transaction != ""
 }
 
 // x402FacilitatorPost posts a verify or settle request and decodes the answer.
@@ -164,23 +186,125 @@ func (self *X402SettleResponse) rejected() bool {
 // A 2xx is the answer. So is a 400 that carries the scheme's rejection: CDP
 // answers a payment it finds invalid with 400 and {isValid: false,
 // invalidReason} from /verify, {success: false, errorReason} from /settle,
-// which is a verdict on the payment rather than a failure to reach one.
-// Anything else is an error quoting the facilitator's answer, for the log and
-// never for the agent.
+// which is a verdict on the payment rather than a failure to reach one. And so
+// is a settle answer of any status that says settlement_pending with the
+// broadcast transaction: the money may move, so it must not be mistaken for a
+// failure to reach the facilitator (the reference facilitator client reads
+// any non-200 with an errorReason as the settle's outcome, x402-foundation/x402
+// go/http/facilitator_client.go settleHTTP). Anything else is an error quoting
+// the facilitator's answer, for the log and never for the agent.
 func x402FacilitatorPost(ctx context.Context, path string, request any, answer x402FacilitatorAnswer) error {
 	status, body, err := x402FacilitatorDo(ctx, X402(), http.MethodPost, path, request, x402FacilitatorTimeout)
 	if err != nil {
 		return err
 	}
-	switch {
-	case 200 <= status && status < 300:
+	if 200 <= status && status < 300 {
 		return json.Unmarshal(body, answer)
-	case status == http.StatusBadRequest:
-		if json.Unmarshal(body, answer) == nil && answer.rejected() {
-			return nil
-		}
+	}
+	if json.Unmarshal(body, answer) == nil && (answer.pending() || status == http.StatusBadRequest && answer.rejected()) {
+		return nil
 	}
 	return fmt.Errorf("facilitator %s: %d %s", path, status, string(body))
+}
+
+// x402FacilitatorRequest is what we send to /verify and /settle: the agent's
+// signed payment plus the exact terms we quoted, both in the payment's protocol
+// version, so the facilitator can check the payment matches what we asked for
+// (specs/x402-specification-v1.md 7.1, specs/x402-specification-v2.md 7.1).
+// The payment is the decoded PaymentPayload object, not the header string; the
+// requirements are always ours (X402Accept for v1, X402AcceptV2 for v2), never
+// the terms the agent says it accepted.
+type x402FacilitatorRequest struct {
+	X402Version         int `json:"x402Version"`
+	PaymentPayload      any `json:"paymentPayload"`
+	PaymentRequirements any `json:"paymentRequirements"`
+}
+
+// x402PreparedPayment is one payment ready for the facilitator: decoded,
+// matched to the terms we quoted, and with those terms to check it against.
+type x402PreparedPayment struct {
+	version int
+	// our name for the network
+	network string
+	// the atomic amount of the asset, as quoted
+	amount string
+	// *x402PaymentPayload (v1) or *x402PaymentPayloadV2 (v2), as forwarded
+	payload any
+	// X402Accept (v1) or X402AcceptV2 (v2): ours
+	requirements any
+}
+
+func (self *x402PreparedPayment) facilitatorRequest() *x402FacilitatorRequest {
+	return &x402FacilitatorRequest{
+		X402Version:         self.version,
+		PaymentPayload:      self.payload,
+		PaymentRequirements: self.requirements,
+	}
+}
+
+// X402Verify asks the facilitator whether a signed x402 v1 payment (an
+// X-PAYMENT header) is valid for v1 terms we quoted. Verify BEFORE settling so
+// a bad payment costs nothing. A payment the facilitator rejects is an answer
+// (IsValid false, with its reason), not an error.
+func X402Verify(ctx context.Context, payment string, requirements X402Accept) (*X402VerifyResponse, error) {
+	if !x402FacilitatorConfigured(X402()) {
+		return nil, errX402FacilitatorNotConfigured
+	}
+	prepared, err := x402PrepareV1PaymentFor(payment, requirements)
+	if err != nil {
+		return nil, err
+	}
+	return x402Verify(ctx, prepared)
+}
+
+func x402Verify(ctx context.Context, prepared *x402PreparedPayment) (*X402VerifyResponse, error) {
+	verifyResponse := &X402VerifyResponse{}
+	if err := x402FacilitatorPost(ctx, "/verify", prepared.facilitatorRequest(), verifyResponse); err != nil {
+		return nil, err
+	}
+	return verifyResponse, nil
+}
+
+// X402Settle moves the funds of a signed x402 v1 payment. Only call this after
+// X402Verify succeeds, and only grant the entitlement after this succeeds. A
+// settlement the facilitator rejects is an answer (Success false, with its
+// reason), not an error.
+func X402Settle(ctx context.Context, payment string, requirements X402Accept) (*X402SettleResponse, error) {
+	if !x402FacilitatorConfigured(X402()) {
+		return nil, errX402FacilitatorNotConfigured
+	}
+	prepared, err := x402PrepareV1PaymentFor(payment, requirements)
+	if err != nil {
+		return nil, err
+	}
+	return x402Settle(ctx, prepared)
+}
+
+// x402Settle settles a prepared payment. An answer of settlement_pending is
+// asked again exactly once with the same request, the way the reference
+// resource servers do (x402-foundation/x402 go/server.go
+// settleWithPendingRetry): a facilitator that remembers the broadcast
+// reconciles against it instead of broadcasting a second transaction. If that
+// second ask cannot be made, the first answer stands.
+func x402Settle(ctx context.Context, prepared *x402PreparedPayment) (*X402SettleResponse, error) {
+	request := prepared.facilitatorRequest()
+	settleResponse := &X402SettleResponse{}
+	if err := x402FacilitatorPost(ctx, "/settle", request, settleResponse); err != nil {
+		return nil, err
+	}
+	if !settleResponse.pending() {
+		return settleResponse, nil
+	}
+	glog.Infof(
+		"[x402]settle answered %s for tx %s on %s; asking once more\n",
+		x402SettlementPending, settleResponse.Transaction, prepared.network,
+	)
+	retryResponse := &X402SettleResponse{}
+	if err := x402FacilitatorPost(ctx, "/settle", request, retryResponse); err != nil {
+		glog.Errorf("[x402]settle retry for pending tx %s failed: %s\n", settleResponse.Transaction, err)
+		return settleResponse, nil
+	}
+	return retryResponse, nil
 }
 
 // ----- the payment the agent signed -----
@@ -198,50 +322,178 @@ type x402PaymentPayload struct {
 	Payload     json.RawMessage `json:"payload"`
 }
 
-// x402DecodePayment reads an X-PAYMENT header: an x402 v1 exact payment on a
-// named network, with a payload object. Anything else is refused here, before
-// it can reach the facilitator.
-func x402DecodePayment(payment string) (*x402PaymentPayload, error) {
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payment))
-	if err != nil {
-		return nil, errors.New("x402 payment is not base64")
-	}
-	paymentPayload := &x402PaymentPayload{}
-	if err := json.Unmarshal(raw, paymentPayload); err != nil {
-		return nil, errors.New("x402 payment is not an x402 PaymentPayload")
-	}
-	if paymentPayload.X402Version != X402Version {
-		return nil, fmt.Errorf(
-			"x402 payment is for x402 version %d; this server takes version %d",
-			paymentPayload.X402Version, X402Version,
-		)
-	}
-	if paymentPayload.Scheme != "exact" {
-		return nil, errors.New("x402 payment scheme is not exact")
-	}
-	if paymentPayload.Network == "" {
-		return nil, errors.New("x402 payment names no network")
-	}
-	if !bytes.HasPrefix(bytes.TrimSpace(paymentPayload.Payload), []byte("{")) {
-		return nil, errors.New("x402 payment carries no payload")
-	}
-	return paymentPayload, nil
+// x402PaymentPayloadV2 is the x402 v2 PaymentPayload
+// (specs/x402-specification-v2.md 5.2): the terms the client chose
+// (`accepted`), what it signed for them (`payload`) and, optionally, the
+// resource it was told it pays for. The PAYMENT-SIGNATURE header carries it as
+// base64 of its JSON (specs/transports-v2/http.md), and /verify and /settle
+// take it as a JSON object.
+//
+// Each part is forwarded to the facilitator exactly as the client sent it.
+// Its `extensions` are not: this server declares none, and a facilitator
+// should not act on extension data we never offered.
+type x402PaymentPayloadV2 struct {
+	X402Version int             `json:"x402Version"`
+	Resource    json.RawMessage `json:"resource,omitempty"`
+	Accepted    json.RawMessage `json:"accepted"`
+	Payload     json.RawMessage `json:"payload"`
 }
 
-// x402DecodePaymentFor decodes a payment and checks it was made for these
-// terms' scheme and network.
-func x402DecodePaymentFor(payment string, requirements X402Accept) (*x402PaymentPayload, error) {
-	paymentPayload, err := x402DecodePayment(payment)
+// x402Payment is a payment as a client presented it, in either protocol
+// version, decoded but not yet matched to any terms.
+type x402Payment struct {
+	version int
+	scheme  string
+	// the network as the payment names it: a v1 name, or a v2 CAIP-2 id
+	network string
+	v1      *x402PaymentPayload
+	v2      *x402PaymentPayloadV2
+	// v2: the terms the client says it accepted, decoded for matching
+	accepted *X402AcceptV2
+}
+
+// errX402PaymentMalformed marks a payment that is not a well-formed x402
+// payment at all: the HTTP transport answers it 400 (specs/transports-v2/http.md
+// and specs/transports-v1/http.md, "Error Handling": Invalid Payment).
+var errX402PaymentMalformed = errors.New("x402 payment is malformed")
+
+func x402Malformed(message string) error {
+	return fmt.Errorf("%w: %s", errX402PaymentMalformed, message)
+}
+
+// x402MalformedText is the agent-facing text of a malformed payment: its
+// reason, without the marker.
+func x402MalformedText(err error) string {
+	return strings.TrimPrefix(err.Error(), errX402PaymentMalformed.Error()+": ")
+}
+
+// x402DecodePayment reads a presented payment: the value of a
+// PAYMENT-SIGNATURE (v2) or X-PAYMENT (v1) header, base64 of the
+// PaymentPayload JSON. Either version is read from either header, since the
+// version is in the payment itself. A payment that is not an x402 exact
+// payment with a payload object is refused here, before it can reach the
+// facilitator.
+func x402DecodePayment(payment string) (*x402Payment, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payment))
+	if err != nil {
+		return nil, x402Malformed("x402 payment is not base64")
+	}
+	return x402DecodePaymentJson(raw)
+}
+
+// x402DecodePaymentJson reads a PaymentPayload JSON object, as the MCP
+// transport carries it in _meta["x402/payment"] (specs/transports-v2/mcp.md)
+// and the HTTP transport inside its base64.
+func x402DecodePaymentJson(raw []byte) (*x402Payment, error) {
+	version := struct {
+		X402Version *int `json:"x402Version"`
+	}{}
+	if err := json.Unmarshal(raw, &version); err != nil || version.X402Version == nil {
+		return nil, x402Malformed("x402 payment is not an x402 PaymentPayload")
+	}
+	switch *version.X402Version {
+	case X402VersionV1:
+		return x402DecodePaymentV1(raw)
+	case X402VersionV2:
+		return x402DecodePaymentV2(raw)
+	default:
+		return nil, x402Malformed(fmt.Sprintf(
+			"x402 payment is for x402 version %d; this server takes versions %d and %d",
+			*version.X402Version, X402VersionV2, X402VersionV1,
+		))
+	}
+}
+
+func x402DecodePaymentV1(raw []byte) (*x402Payment, error) {
+	paymentPayload := &x402PaymentPayload{}
+	if err := json.Unmarshal(raw, paymentPayload); err != nil {
+		return nil, x402Malformed("x402 payment is not an x402 PaymentPayload")
+	}
+	if paymentPayload.Scheme != "exact" {
+		return nil, x402Malformed("x402 payment scheme is not exact")
+	}
+	if paymentPayload.Network == "" {
+		return nil, x402Malformed("x402 payment names no network")
+	}
+	if !x402JsonObject(paymentPayload.Payload) {
+		return nil, x402Malformed("x402 payment carries no payload")
+	}
+	return &x402Payment{
+		version: X402VersionV1,
+		scheme:  paymentPayload.Scheme,
+		network: paymentPayload.Network,
+		v1:      paymentPayload,
+	}, nil
+}
+
+func x402DecodePaymentV2(raw []byte) (*x402Payment, error) {
+	paymentPayload := &x402PaymentPayloadV2{}
+	if err := json.Unmarshal(raw, paymentPayload); err != nil {
+		return nil, x402Malformed("x402 payment is not an x402 PaymentPayload")
+	}
+	if !x402JsonObject(paymentPayload.Accepted) {
+		return nil, x402Malformed("x402 payment names no accepted terms")
+	}
+	accepted := &X402AcceptV2{}
+	if err := json.Unmarshal(paymentPayload.Accepted, accepted); err != nil {
+		return nil, x402Malformed("x402 payment's accepted terms are not x402 PaymentRequirements")
+	}
+	if accepted.Scheme != "exact" {
+		return nil, x402Malformed("x402 payment scheme is not exact")
+	}
+	if accepted.Network == "" {
+		return nil, x402Malformed("x402 payment names no network")
+	}
+	if !x402JsonObject(paymentPayload.Payload) {
+		return nil, x402Malformed("x402 payment carries no payload")
+	}
+	if len(bytes.TrimSpace(paymentPayload.Resource)) != 0 && !x402JsonObject(paymentPayload.Resource) &&
+		string(bytes.TrimSpace(paymentPayload.Resource)) != "null" {
+		return nil, x402Malformed("x402 payment's resource is not an x402 ResourceInfo")
+	}
+	if string(bytes.TrimSpace(paymentPayload.Resource)) == "null" {
+		paymentPayload.Resource = nil
+	}
+	return &x402Payment{
+		version:  X402VersionV2,
+		scheme:   accepted.Scheme,
+		network:  accepted.Network,
+		v2:       paymentPayload,
+		accepted: accepted,
+	}, nil
+}
+
+// x402JsonObject reports whether raw JSON is an object.
+func x402JsonObject(raw json.RawMessage) bool {
+	return bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{"))
+}
+
+// x402PrepareV1PaymentFor decodes an x402 v1 payment and checks it was made
+// for these v1 terms' scheme and network.
+func x402PrepareV1PaymentFor(payment string, requirements X402Accept) (*x402PreparedPayment, error) {
+	decoded, err := x402DecodePayment(payment)
 	if err != nil {
 		return nil, err
 	}
-	if paymentPayload.Scheme != requirements.Scheme || paymentPayload.Network != requirements.Network {
+	if decoded.version != X402VersionV1 {
 		return nil, fmt.Errorf(
-			"x402 payment is for %s on %s, not the quoted %s on %s",
-			paymentPayload.Scheme, paymentPayload.Network, requirements.Scheme, requirements.Network,
+			"x402 payment is for x402 version %d; these terms are x402 version %d",
+			decoded.version, X402VersionV1,
 		)
 	}
-	return paymentPayload, nil
+	if decoded.scheme != requirements.Scheme || decoded.network != requirements.Network {
+		return nil, fmt.Errorf(
+			"x402 payment is for %s on %s, not the quoted %s on %s",
+			decoded.scheme, decoded.network, requirements.Scheme, requirements.Network,
+		)
+	}
+	return &x402PreparedPayment{
+		version:      X402VersionV1,
+		network:      requirements.Network,
+		amount:       requirements.MaxAmountRequired,
+		payload:      decoded.v1,
+		requirements: requirements,
+	}, nil
 }
 
 // ----- the Solana fee payer, from /supported -----
@@ -249,10 +501,15 @@ func x402DecodePaymentFor(payment string, requirements X402Accept) (*x402Payment
 // The SVM exact scheme quotes the facilitator's fee payer as extra.feePayer
 // (specs/schemes/exact/scheme_exact_svm.md): the client builds its
 // transaction with that account paying the network fee, and the facilitator
-// co-signs as it at settlement. CDP advertises it in GET /supported, on the
-// v1 exact solana kind. It changes rarely, so the answer is cached per
-// facilitator, at most one fetch is in flight, and a network whose fee payer
-// is not known is not quoted.
+// co-signs as it at settlement. The facilitator also says which Solana
+// transaction message versions it accepts, as extra.transactionVersions, and
+// "the server MUST copy that value into PaymentRequirements.extra.
+// transactionVersions" (same spec, 1.5). CDP advertises both in GET
+// /supported, on each version's exact solana kind: the v1 kind names the
+// network "solana", the v2 kind by its CAIP-2 id, and each version is quoted
+// only with its own kind's fee payer. They change rarely, so the answer is
+// cached per facilitator, at most one fetch is in flight, and a network whose
+// fee payer is not known is not quoted in that version.
 const (
 	// how long a fetched answer is used before it is fetched again
 	x402SupportedTtl = 10 * time.Minute
@@ -267,9 +524,27 @@ const (
 // x402Now is the cache's clock; tests move it.
 var x402Now = time.Now
 
+// x402SupportedSvm is what the facilitator advertised for one version's exact
+// kind on a Solana network: the extra a quote on it must carry.
+type x402SupportedSvm struct {
+	feePayer string
+	// as advertised, each 0 or 1; nil when the kind did not say (the
+	// accepted set is then [0], and the quote leaves the key out)
+	transactionVersions []int
+}
+
+// extra is the part of a quote's extra this kind supplies.
+func (self x402SupportedSvm) extra() map[string]any {
+	extra := map[string]any{"feePayer": self.feePayer}
+	if self.transactionVersions != nil {
+		extra["transactionVersions"] = append([]int{}, self.transactionVersions...)
+	}
+	return extra
+}
+
 type x402SupportedEntry struct {
-	// v1 exact network -> fee payer
-	feePayers map[string]string
+	// x402 version -> our network name -> the kind's Solana extra
+	svm       map[int]map[string]x402SupportedSvm
 	fetchTime time.Time
 	failTime  time.Time
 	fetching  bool
@@ -285,20 +560,27 @@ var x402Supported = &x402SupportedCache{
 	entries: map[string]*x402SupportedEntry{},
 }
 
-// x402FeePayer is the facilitator's fee payer for a network, when one is
-// known.
+// x402FeePayer is the facilitator's x402 v1 fee payer for a network, when one
+// is known.
 func x402FeePayer(c *X402Config, network string) (string, bool) {
-	return x402Supported.feePayer(c, network)
+	svm, ok := x402Supported.svm(c, X402VersionV1, network)
+	return svm.feePayer, ok
 }
 
-func (self *x402SupportedCache) feePayer(c *X402Config, network string) (string, bool) {
+// x402SupportedSvmFor is what one version's quote on a Solana network carries
+// from the facilitator's /supported, when it is known.
+func x402SupportedSvmFor(c *X402Config, version int, network string) (x402SupportedSvm, bool) {
+	return x402Supported.svm(c, version, network)
+}
+
+func (self *x402SupportedCache) svm(c *X402Config, version int, network string) (x402SupportedSvm, bool) {
 	entry, fetch := self.claimFetch(c)
 	if fetch {
 		// fetched without the lock: concurrent quotes keep using what is known
-		feePayers, err := x402FetchFeePayersRecovered(c)
-		self.finishFetch(entry, feePayers, err)
+		svm, err := x402FetchSupportedRecovered(c)
+		self.finishFetch(entry, svm, err)
 	}
-	return self.lookup(entry, network)
+	return self.lookup(entry, version, network)
 }
 
 // claimFetch returns the facilitator's entry, and whether the caller should
@@ -323,7 +605,7 @@ func (self *x402SupportedCache) claimFetch(c *X402Config) (*x402SupportedEntry, 
 	return entry, true
 }
 
-func (self *x402SupportedCache) finishFetch(entry *x402SupportedEntry, feePayers map[string]string, err error) {
+func (self *x402SupportedCache) finishFetch(entry *x402SupportedEntry, svm map[int]map[string]x402SupportedSvm, err error) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
@@ -336,45 +618,78 @@ func (self *x402SupportedCache) finishFetch(entry *x402SupportedEntry, feePayers
 		)
 		return
 	}
-	entry.feePayers = feePayers
+	entry.svm = svm
 	entry.fetchTime = x402Now()
 	entry.failTime = time.Time{}
 }
 
-func (self *x402SupportedCache) lookup(entry *x402SupportedEntry, network string) (string, bool) {
+func (self *x402SupportedCache) lookup(entry *x402SupportedEntry, version int, network string) (x402SupportedSvm, bool) {
 	self.mutex.Lock()
 	defer self.mutex.Unlock()
 
 	if entry.fetchTime.IsZero() || x402SupportedMaxAge <= x402Now().Sub(entry.fetchTime) {
-		return "", false
+		return x402SupportedSvm{}, false
 	}
-	feePayer := entry.feePayers[network]
-	return feePayer, feePayer != ""
+	svm, ok := entry.svm[version][network]
+	return svm, ok && svm.feePayer != ""
 }
 
-// x402FetchFeePayersRecovered is x402FetchFeePayers on the quote path, where
-// a panic must not take the quote down or leave the fetch claimed forever.
-func x402FetchFeePayersRecovered(c *X402Config) (feePayers map[string]string, err error) {
+// x402FetchSupportedRecovered is x402FetchSupported on the quote path, where a
+// panic must not take the quote down or leave the fetch claimed forever.
+func x402FetchSupportedRecovered(c *X402Config) (svm map[int]map[string]x402SupportedSvm, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			feePayers, err = nil, fmt.Errorf("panic: %v", r)
+			svm, err = nil, fmt.Errorf("panic: %v", r)
 		}
 	}()
-	return x402FetchFeePayers(c)
+	return x402FetchSupported(c)
 }
 
-// x402SupportedKind is one entry of the facilitator's GET /supported answer.
+// x402SupportedKind is one entry of the facilitator's GET /supported answer
+// (specs/x402-specification-v2.md 7.3). Extra is kept raw, so its integers can
+// be told apart from anything else.
 type x402SupportedKind struct {
-	X402Version int            `json:"x402Version"`
-	Scheme      string         `json:"scheme"`
-	Network     string         `json:"network"`
-	Extra       map[string]any `json:"extra,omitempty"`
+	X402Version int                        `json:"x402Version"`
+	Scheme      string                     `json:"scheme"`
+	Network     string                     `json:"network"`
+	Extra       map[string]json.RawMessage `json:"extra,omitempty"`
 }
 
-// x402FetchFeePayers asks the facilitator for the fee payer of each x402 v1
-// exact network that has one. Only Solana networks do, so a fee payer that is
-// not a Solana address is ignored.
-func x402FetchFeePayers(c *X402Config) (map[string]string, error) {
+// x402SupportedKindSvm reads a Solana exact kind's extra: a fee payer that is
+// a Solana address, and transactionVersions when present. Entries "MUST be the
+// JSON integers 0 and 1 only", and a field with anything else is invalid and
+// fails closed (scheme_exact_svm.md 1.5), so such a kind is not used at all.
+func x402SupportedKindSvm(kind x402SupportedKind) (x402SupportedSvm, bool) {
+	feePayer := ""
+	if err := json.Unmarshal(kind.Extra["feePayer"], &feePayer); err != nil || !x402AddressValid(x402AddressSolana, feePayer) {
+		return x402SupportedSvm{}, false
+	}
+	svm := x402SupportedSvm{feePayer: feePayer}
+	if raw, ok := kind.Extra["transactionVersions"]; ok {
+		entries := []json.RawMessage{}
+		if err := json.Unmarshal(raw, &entries); err != nil {
+			return x402SupportedSvm{}, false
+		}
+		svm.transactionVersions = []int{}
+		for _, entry := range entries {
+			switch string(bytes.TrimSpace(entry)) {
+			case "0":
+				svm.transactionVersions = append(svm.transactionVersions, 0)
+			case "1":
+				svm.transactionVersions = append(svm.transactionVersions, 1)
+			default:
+				return x402SupportedSvm{}, false
+			}
+		}
+	}
+	return svm, true
+}
+
+// x402FetchSupported asks the facilitator for the Solana extra of each exact
+// kind it supports, by protocol version and our network name. Only the
+// networks we quote are kept: a v1 kind by its name, a v2 kind by its CAIP-2
+// id.
+func x402FetchSupported(c *X402Config) (map[int]map[string]x402SupportedSvm, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), x402SupportedTimeout)
 	defer cancel()
 
@@ -392,23 +707,49 @@ func x402FetchFeePayers(c *X402Config) (map[string]string, error) {
 		return nil, fmt.Errorf("facilitator /supported answered something other than kinds: %w", err)
 	}
 
-	feePayers := map[string]string{}
+	svm := map[int]map[string]x402SupportedSvm{
+		X402VersionV1: {},
+		X402VersionV2: {},
+	}
 	for _, kind := range supported.Kinds {
-		if kind.X402Version != X402Version || kind.Scheme != "exact" {
+		if kind.Scheme != "exact" {
 			continue
 		}
-		feePayer, _ := kind.Extra["feePayer"].(string)
-		if feePayer != "" && x402AddressValid(x402AddressSolana, feePayer) {
-			feePayers[kind.Network] = feePayer
+		network := ""
+		switch kind.X402Version {
+		case X402VersionV1:
+			if _, ok := x402Caip2Network(kind.Network); ok {
+				network = kind.Network
+			}
+		case X402VersionV2:
+			network, _ = x402NetworkForCaip2(kind.Network)
+		}
+		if network == "" {
+			continue
+		}
+		if token, err := x402TokenFor(network, X402AssetUsdc); err != nil || !token.feePayerRequired {
+			continue
+		}
+		if kindSvm, ok := x402SupportedKindSvm(kind); ok {
+			svm[kind.X402Version][network] = kindSvm
 		}
 	}
 
 	// a configured network the facilitator gave no fee payer for is not
-	// quoted; say so once per fetch rather than once per quote
+	// quoted in that version; say so once per fetch rather than once per quote
 	for _, network := range c.Networks {
-		if token, err := x402TokenFor(network, c.Asset); err == nil && token.feePayerRequired && feePayers[network] == "" {
-			glog.Errorf("[x402]facilitator /supported names no x402 v1 fee payer for %s; %s is not quoted\n", network, network)
+		token, err := x402TokenFor(network, c.Asset)
+		if err != nil || !token.feePayerRequired {
+			continue
+		}
+		for _, version := range []int{X402VersionV2, X402VersionV1} {
+			if _, ok := svm[version][network]; !ok {
+				glog.Errorf(
+					"[x402]facilitator /supported names no usable x402 v%d fee payer for %s; %s is not quoted in v%d\n",
+					version, network, network, version,
+				)
+			}
 		}
 	}
-	return feePayers, nil
+	return svm, nil
 }

@@ -72,6 +72,13 @@ const (
 	// the reconciler found a settled_not_granted transaction already granted
 	// (an agent retry got there first): resolved without a new credit
 	PaymentReconcileActionAlreadyCredited = "already_credited"
+	// X402Purchase's settlement came back settlement_pending twice: the
+	// facilitator broadcast the transaction and could not confirm it, so it
+	// may still move the money (x402 v2 spec §9). Nothing was granted.
+	// Evidence is the broadcast transaction; details carry what was bought.
+	// An operator disposition: the reconciler does not grant from it, since
+	// a broadcast transaction can still fail on chain.
+	PaymentReconcileActionSettlementPending = "settlement_pending"
 )
 
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).
