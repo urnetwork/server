@@ -2,8 +2,11 @@ package monitor
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/urnetwork/server/model"
 )
 
 func TestPaymentFailuresHealthy(t *testing.T) {
@@ -110,10 +113,10 @@ func TestPaymentFailuresClassifiesTheCryptoRail(t *testing.T) {
 }
 
 func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'bitcoin', 'bittensor', 'ethereum', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'bitcoin', 'bittensor', 'ethereum', 'gamma', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
 		t.Fatal("payment failures query does not limit entitlement checks to authoritative provider markets")
 	}
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'stripe')") != 1 {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'gamma', 'google', 'stripe')") != 1 {
 		t.Fatal("payment failures query does not limit orphan-renewal checks to recurring provider markets")
 	}
 	if !strings.Contains(paymentFailuresQuery, "AND EXISTS (\n          SELECT 1 FROM network") {
@@ -159,6 +162,45 @@ func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
 	}
 	if strings.Contains(rendered, "retain an active stripe renewal") {
 		t.Fatalf("orphan renewal alert overclaims provider state:\n%s", rendered)
+	}
+}
+
+// The markets and coins the signal accepts come from the model's one list of
+// each, so the next market the dashboard counts or the next coin the rail
+// sells is watched here without an edit, and a row for it is never refused as
+// unknown (which fails the whole probe).
+func TestPaymentFailuresMarketsAreTheModelMarkets(t *testing.T) {
+	if want := slices.Sorted(slices.Values(model.SubscriptionMarkets)); !slices.Equal(paymentFailuresEntitlementMarkets, want) {
+		t.Errorf("entitlement markets = %v, want every subscription market %v", paymentFailuresEntitlementMarkets, want)
+	}
+	recurring := slices.DeleteFunc(slices.Clone(model.SubscriptionMarkets), func(market string) bool {
+		return slices.Contains(model.SubscriptionOneTimeCryptoMarkets, market)
+	})
+	if want := slices.Sorted(slices.Values(recurring)); !slices.Equal(paymentFailuresOrphanMarkets, want) {
+		t.Errorf("orphan-renewal markets = %v, want the recurring markets %v; give a new one its own disposition in paymentFailureFinding", paymentFailuresOrphanMarkets, want)
+	}
+	for _, market := range paymentFailuresRepairedEntitlementMarkets {
+		if !slices.Contains(paymentFailuresEntitlementMarkets, market) {
+			t.Errorf("repaired market %s is not an entitlement market", market)
+		}
+	}
+	if len(paymentFailuresCryptoAssets) != len(model.CryptoAssets) {
+		t.Errorf("crypto coins = %v, want the rail's %v", paymentFailuresCryptoAssets, model.CryptoAssets)
+	}
+	for _, asset := range model.CryptoAssets {
+		if !paymentFailuresCryptoAssets[asset] {
+			t.Errorf("the rail's coin %s is refused as unknown", asset)
+		}
+	}
+	for _, unsafe := range []string{"", "o'brien", "Apple", "apple', 'x"} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Errorf("market name %q was rendered into SQL", unsafe)
+				}
+			}()
+			paymentFailuresSqlList([]string{unsafe})
+		}()
 	}
 }
 
