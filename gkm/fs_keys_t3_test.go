@@ -4,9 +4,10 @@
 // builders sidecartest's T2 tests run, on server's real stores, server.FileClusters over the local stack's MinIO in
 // buckets of this test's own and sidecarhost.Redis on the private test Redis that test-env.sh attests. gkm's group
 // client on the real MLS subset drives gkmservice's engine through each: FS-15's wrapped rotation, its race for one
-// generation, its lost and killed claims and a commit below its predecessor's generation, FS-24's hints, FS-62's acks
-// lost with Redis, FS-23's depositor and FS-102's key legs, a copied Delegation bundle after a compromise and after a
-// removal. Like the other T3 tests here it carries the sidecar_localstack tag and
+// generation, its lost and killed claims, a commit below its predecessor's generation, a delivery to a non-holder, a
+// claim at a stale tip, a last-resort KeyPackage in two groups and the kills around its wrap, gen/ and epoch/ writes,
+// FS-24's hints with H1 and H2, FS-62's acks lost with Redis, FS-23's depositor and FS-102's key legs, a copied
+// Delegation bundle after a compromise and after a removal. Like the other T3 tests here it carries the sidecar_localstack tag and
 // fails, rather than skips, when the stack is down.
 
 package gkm
@@ -88,4 +89,28 @@ func TestFsKeysT3ACopiedBundleAfterACompromiseOpensNothingNew(t *testing.T) {
 
 func TestFsKeysT3ACopiedBundleAfterARemovalAdmitsOnlyUncoveredReaders(t *testing.T) {
 	runFsKeysT3(t, gkmschedule.FsKeysScheduleCopiedBundleRemoved)
+}
+
+func TestFsKeysT3ADeliveryToANonHolderMakesMembersAlarmAndRotate(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleDeliveryToANonHolder)
+}
+
+func TestFsKeysT3AClaimAtAStaleTipIsRefused(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleStaleTipClaimRefused)
+}
+
+func TestFsKeysT3ALastResortKeyPackageServesTwoGroups(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleLastResortInTwoGroups)
+}
+
+func TestFsKeysT3AKillAroundTheWrapGenAndEpochWritesResumes(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleKillsBetweenWrites)
+}
+
+func TestFsKeysT3PendingRepeatsWhileADroppedLeafStandsAndStopsPastIt(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleDroppedHolderHint)
+}
+
+func TestFsKeysT3AWaitingLeafsWantRaisesWrapPending(t *testing.T) {
+	runFsKeysT3(t, gkmschedule.FsKeysScheduleWaitingLeafWant)
 }
