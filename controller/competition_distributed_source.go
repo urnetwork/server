@@ -89,7 +89,7 @@ func authenticateDistributedCompetitionSources(settings *Settings, job *queuedJo
 	identityMatches := func(identity competitionDistributedSourceIdentity) bool {
 		return identity.Schema == 1 && identity.Kind == "sim-latency-evaluation-source" && identity.Temporary && !identity.Staging && identity.Branch == "sim-latency" &&
 			model.ValidateCompetitionWorkCoveragePolicy(identity.WorkCoveragePolicy) == nil && reflect.DeepEqual(identity.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) &&
-			identity.BaseImageId == job.EvaluatorImageDigest && identity.BaseSha == settings.BaseSha && identity.SourceEpoch == evaluationSourceEpoch(&job.Round) &&
+			identity.BaseImageId == competitionExecutionImageForJob(settings, job) && identity.BaseSha == settings.BaseSha && identity.SourceEpoch == evaluationSourceEpoch(&job.Round) &&
 			sha256Pattern.MatchString(identity.SourceLockSha256) && validateDistributedMeasuredCommits(identity.Repositories) == nil &&
 			(identity.CandidatePathBase == "" || identity.CandidatePathBase == competitionMonoRootPathBase) &&
 			(settings.PatchPolicy.PathBase == "" || identity.CandidatePathBase == settings.PatchPolicy.PathBase)
@@ -138,7 +138,7 @@ func authenticateDistributedCompetitionSources(settings *Settings, job *queuedJo
 		return err
 	}
 	originalDigest := sha256.Sum256(originalBytes)
-	if build.Schema != 1 || build.BaseImageId != job.EvaluatorImageDigest || build.BaseSha != settings.BaseSha || build.PatchSha256 != job.PatchSha256 ||
+	if build.Schema != 1 || build.BaseImageId != competitionExecutionImageForJob(settings, job) || build.BaseSha != settings.BaseSha || build.PatchSha256 != job.PatchSha256 ||
 		build.OriginalSourceIdentitySha256 != hex.EncodeToString(originalDigest[:]) || validateDistributedMeasuredCommits(build.CandidateCommits) != nil || build.CandidateSha != build.CandidateCommits["server"] || !imageDigestPattern.MatchString(build.ImageId) {
 		return errors.New("candidate build evidence changed source, patch or original checkout")
 	}

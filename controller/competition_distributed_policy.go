@@ -101,7 +101,7 @@ func competitionExecutorQualificationSha256(settings *Settings) string {
 	if settings.DistributedEvaluationPolicy != nil && settings.executorHostId != "" {
 		for _, host := range settings.DistributedEvaluationPolicy.Hosts {
 			if host.HostId == settings.executorHostId && host.SlotId == settings.executorSlotId {
-				return competitionExecutorControlHost(settings, host).QualificationSha256
+				return competitionExecutionQualificationSha256(settings, competitionExecutorControlHost(settings, host).QualificationSha256)
 			}
 		}
 		return ""
@@ -160,6 +160,7 @@ func defaultCompetitionDistributedCoordinatorSettings() competitionDistributedCo
 // Private, root-pinned deployment role. The approved public policy separately
 // freezes response keys and hosts; this file only says how to reach those hosts.
 type competitionDistributedCoordinatorConfig struct {
+	SecurityToolchainException  *competitionSecurityToolchainException    `json:"security_toolchain_exception,omitempty"`
 	Schema                      int                                       `json:"schema"`
 	Kind                        string                                    `json:"kind"`
 	CoordinatorId               string                                    `json:"coordinator_id"`
@@ -201,6 +202,9 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 		return err
 	}
 	policy := settings.FutureEpochPolicy.DistributedEvaluationPolicy
+	if err := validateCompetitionSecurityToolchainShape(config.SecurityToolchainException); err != nil {
+		return err
+	}
 	if err := validateCompetitionDistributedPolicy(policy); err != nil {
 		return err
 	}
@@ -268,5 +272,6 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 		return errors.New("distributed coordinator signing key failed authentication")
 	}
 	settings.distributedCoordinator = &competitionDistributedCoordinatorProfile{Config: config, PrivateKey: privateKey}
+	settings.securityToolchainException = config.SecurityToolchainException
 	return nil
 }

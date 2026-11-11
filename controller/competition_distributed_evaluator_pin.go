@@ -71,9 +71,9 @@ func competitionAgentManifestForJob(settings *Settings, job *queuedJob, host Com
 	}
 	manifest := competitionagent.StartManifest{Identity: competitionagent.Identity{HostId: host.HostId, RunId: competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount),
 		JobId: job.JobId.String(), RoundId: job.RoundId.String(), RoundEpoch: job.Round.Epoch, SourceEpoch: evaluationSourceEpoch(&job.Round), Cycle: job.EvaluationCycle, Attempt: job.AttemptCount,
-		StartedAt: startedAt.UTC(), DeadlineAt: job.ExecutionDeadline.UTC()}, EvaluatorImageDigest: job.EvaluatorImageDigest,
+		StartedAt: startedAt.UTC(), DeadlineAt: job.ExecutionDeadline.UTC()}, EvaluatorImageDigest: competitionExecutionImageForJob(settings, job),
 		EvaluatorCommandSha256: digest, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256,
-		QualificationSha256: host.QualificationSha256, ConfigLocalSha256: settings.EvaluationPolicy.ConfigLocalSha256,
+		QualificationSha256: competitionExecutionQualificationSha256(settings, host.QualificationSha256), ConfigLocalSha256: settings.EvaluationPolicy.ConfigLocalSha256,
 		VaultLocalSha256: settings.EvaluationPolicy.VaultLocalSha256, RoundBaselineSha256: job.RoundBaseline.Sha256}
 	return manifest, manifest.Identity.Validate(settings.distributedCoordinator.Config.Settings.Limits)
 }

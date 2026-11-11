@@ -139,6 +139,9 @@ func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, 
 	if err != nil || qualified {
 		return err
 	}
+	if settings.securityToolchainException != nil {
+		return errors.New("security toolchain exception requires retained admission evidence; it cannot resample a host")
+	}
 	jobId := competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256)
 	selected := *settings
 	selected.executorHostId, selected.executorSlotId = host.HostId, host.SlotId
