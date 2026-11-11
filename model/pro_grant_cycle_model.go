@@ -16,9 +16,12 @@ package model
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/urnetwork/glog"
 
@@ -426,9 +429,16 @@ func lockProGrantCycleInTx(tx server.PgTx, ctx context.Context, networkId server
 // Whether the tx reads at ReadCommitted, which the cycle grant needs: it reads
 // the chain after taking the network's lock, so it must see what an earlier
 // holder committed. A RepeatableRead snapshot from before the lock would not.
+// The statement always returns a row; a stand-in tx that answers no row (the
+// sales notice tests' in-memory ledger) reads as not ReadCommitted, and the
+// cycle is left to the sweep.
 func isReadCommittedInTx(tx server.PgTx, ctx context.Context) bool {
 	var isolation string
-	server.Raise(tx.QueryRow(ctx, `SELECT current_setting('transaction_isolation')`).Scan(&isolation))
+	err := tx.QueryRow(ctx, `SELECT current_setting('transaction_isolation')`).Scan(&isolation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false
+	}
+	server.Raise(err)
 	return isolation == "read committed"
 }
 
