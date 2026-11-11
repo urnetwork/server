@@ -108,6 +108,11 @@ func (self *hostTestAuthState) DelegationReads(principal *sidecar.Principal, rep
 	return gkmservice.GkmAuthDenied
 }
 
+// No Delegation in these tests' state, so no forwarding key object either.
+func (self *hostTestAuthState) DelegationKey(principal *sidecar.Principal, delegationId []byte) (*gkmservice.GkmDelegationKeyFacts, gkmservice.GkmAuthAnswer) {
+	return nil, gkmservice.GkmAuthDenied
+}
+
 func (self *hostTestAuthState) LateHolders(principal *sidecar.Principal, repoId sidecar.Id, recipient string, now time.Time) ([]sidecar.Id, gkmservice.GkmAuthAnswer) {
 	return nil, gkmservice.GkmAuthAllowed
 }
