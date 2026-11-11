@@ -1,6 +1,20 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T00:45:04Z",
+  "observed_at": "2026-11-11T02:24:28Z",
+  "latest_private_admission_result": {
+    "evidence": "EPOCH2-PRIVATE-ADMISSION-BLOCKER-2026-11-11.json",
+    "both_executions_completed_nine_replicates": true,
+    "sille_failed_gate": "G5_stability",
+    "sille_failure": "Replicate 3 logged a recovered PostgreSQL statement-cache deallocation read timeout during drain, 44.287 seconds after the measurement window. Zero measured failures does not waive this frozen stability gate.",
+    "goofe_score_gates_passed": true,
+    "goofe_full_host_admission_not_proven": true,
+    "both_retained_passing_admission_receipts": false,
+    "coordinator_stopped_at_idle_boundary": true,
+    "queued_submissions": 10,
+    "customer_evaluation_clocks_started": 0,
+    "grading_ready": false,
+    "next_action": "Diagnose the frozen product's disconnect-cleanup timeout and central admission processing. Preserve both original R9 samples and deadlines; do not resample, waive G5, replace the shared baseline, or claim Goofe admission from passing score gates alone. Earlier entries below are historical."
+  },
   "latest_private_dispatch_fix": {
     "evidence": "EPOCH2-PRIVATE-DISPATCH-FIX-2026-11-11.json",
     "deployed_source_commit": "63478fa88065512680a2c0b0d5b027c26e968d52",
