@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T09:11:35Z",
+  "observed_at": "2026-11-11T09:18:03Z",
   "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
   "epoch": 2,
   "user_approved_exact_retained_result_exception": true,
@@ -32,11 +32,11 @@
   "migration": {
     "required": 953,
     "checkpoint": "85c22a014e8e81db77e18e90b8f79e64b971901b",
-    "operator_reports_rollout_in_progress": true,
+    "operator_reports_rollout_in_progress": false,
     "requested_recheck_at": "2026-11-11T09:00:09Z",
     "requested_recheck_completed_at": "2026-11-11T09:00:33Z",
-    "latest_main_migration_observed_at": "2026-11-11T09:11:35Z",
-    "latest_main_migration_observed": 952,
+    "latest_main_migration_observed_at": "2026-11-11T09:16:59Z",
+    "latest_main_migration_observed": 953,
     "main_api_config_vault_and_evaluator_image_rollout_required": false,
     "replacement_clock_readiness_fix_included": true
   },
@@ -74,5 +74,5 @@
     "competition_epoch_timing_choice_pending": true,
     "current_frozen_go1.27.3_instrument_not_replaced": true
   },
-  "next_action": "Verify main migration953 and obtain the scope of the newly requested competition Go1.27.4 change. If epoch2 keeps its frozen instrument, register the exact approved exception and verify real FIFO execution on both hosts. If Go1.27.4 applies now, prepare and qualify a separately authorized instrument/baseline amendment; the retained Go1.27.3 admission cannot qualify a changed instrument. Do not start old-instrument scoring silently while this decision is pending."
+  "next_action": "Main migration953 is verified. Obtain the scope of the newly requested competition Go1.27.4 change. If epoch2 keeps its frozen instrument, register the exact approved exception and verify real FIFO execution on both hosts. If Go1.27.4 applies now, prepare and qualify a separately authorized instrument/baseline amendment; the retained Go1.27.3 admission cannot qualify a changed instrument. Do not start old-instrument scoring silently while this decision is pending."
 }

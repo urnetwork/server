@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T09:11:35Z",
+  "observed_at": "2026-11-11T09:18:03Z",
   "user_requested_system_and_competition_toolchain": "go1.27.4",
   "system_upgrade_complete": true,
   "hosts": ["sille", "goofe"],
@@ -26,6 +26,8 @@
   "competition": {
     "prepared_coordinator_worker_uses_go1.27.4": true,
     "epoch2_frozen_product_evaluator_still_go1.27.3": true,
+    "frozen_image_version_verified_by_readonly_network_disabled_container": true,
+    "verified_image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9",
     "frozen_image_or_baseline_not_silently_replaced": true,
     "user_choice_of_epoch2_amendment_or_epoch3_start_pending": true,
     "scoring_not_started": true

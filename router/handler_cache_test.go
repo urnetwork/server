@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -138,7 +139,7 @@ func (self *handlerCacheTestStore) release(
 }
 
 // Models the token-guarded fence script. This store has no clock, so a fence
-// keeps the lease and records the ttl it was cut to.
+// keeps the lease, marked fenced, and records the ttl it was cut to.
 func (self *handlerCacheTestStore) fence(
 	_ context.Context,
 	key string,
@@ -150,6 +151,7 @@ func (self *handlerCacheTestStore) fence(
 	if self.fillTokens[key] != token {
 		return false, nil
 	}
+	self.fillTokens[key] = handlerCacheFenceToken(token)
 	self.fenceTtls = append(self.fenceTtls, ttl)
 	return true, nil
 }
@@ -179,59 +181,70 @@ type handlerCacheTestCallResult struct {
 }
 
 // A held fill is the deterministic concurrency barrier. Every overlapping
-// miss must skip the database-producing callback, while the winner publishes
-// one value that all later requests reuse.
+// miss must skip the database-producing callback and wait for the winner,
+// whose one published value the overlapping miss and all later requests
+// reuse. The overlapping miss used to answer 503 at once. The bubble's clock
+// runs the miss's polls without real waits.
 func TestHandlerCacheCoalescesConcurrentMisses(t *testing.T) {
-	ctx := context.Background()
-	store := newHandlerCacheTestStore()
-	logicalKey := "synthetic-cache-key"
-	fillStarted := make(chan struct{})
-	allowFill := make(chan struct{})
-	winnerResult := make(chan handlerCacheTestCallResult, 1)
-	var fillCount atomic.Int64
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		store := newHandlerCacheTestStore()
+		logicalKey := "synthetic-cache-key"
+		fillStarted := make(chan struct{})
+		allowFill := make(chan struct{})
+		winnerResult := make(chan handlerCacheTestCallResult, 1)
+		loserResult := make(chan handlerCacheTestCallResult, 1)
+		var fillCount atomic.Int64
 
-	go func() {
-		value, err := cacheJson(ctx, store, logicalKey, 30*time.Second, func() (*handlerCacheTestResult, error) {
+		go func() {
+			value, err := cacheJson(ctx, store, logicalKey, 30*time.Second, func() (*handlerCacheTestResult, error) {
+				fillCount.Add(1)
+				close(fillStarted)
+				<-allowFill
+				return &handlerCacheTestResult{Message: "published"}, nil
+			})
+			winnerResult <- handlerCacheTestCallResult{value: value, err: err}
+		}()
+
+		<-fillStarted
+		go func() {
+			value, err := cacheJson(ctx, store, logicalKey, 30*time.Second, func() (*handlerCacheTestResult, error) {
+				fillCount.Add(1)
+				return &handlerCacheTestResult{Message: "duplicate"}, nil
+			})
+			loserResult <- handlerCacheTestCallResult{value: value, err: err}
+		}()
+		time.Sleep(time.Second)
+		select {
+		case loser := <-loserResult:
+			t.Fatalf("overlapping loser answered (%#v, %v) a second into the winner's fill, want it still waiting", loser.value, loser.err)
+		default:
+		}
+
+		close(allowFill)
+		winner := <-winnerResult
+		if winner.err != nil || winner.value == nil || winner.value.Message != "published" {
+			t.Fatalf("winner result = (%#v, %v), want published value", winner.value, winner.err)
+		}
+		loser := <-loserResult
+		if loser.err != nil || loser.value == nil || loser.value.Message != "published" {
+			t.Fatalf("overlapping loser result = (%#v, %v), want the winner's published value", loser.value, loser.err)
+		}
+
+		cachedValue, cachedErr := cacheJson(ctx, store, logicalKey, 30*time.Second, func() (*handlerCacheTestResult, error) {
 			fillCount.Add(1)
-			close(fillStarted)
-			<-allowFill
-			return &handlerCacheTestResult{Message: "published"}, nil
+			return &handlerCacheTestResult{Message: "unexpected-refill"}, nil
 		})
-		winnerResult <- handlerCacheTestCallResult{value: value, err: err}
-	}()
-
-	<-fillStarted
-	loserValue, loserErr := cacheJson(ctx, store, logicalKey, 30*time.Second, func() (*handlerCacheTestResult, error) {
-		fillCount.Add(1)
-		return &handlerCacheTestResult{Message: "duplicate"}, nil
+		if cachedErr != nil || cachedValue == nil || cachedValue.Message != "published" {
+			t.Fatalf("cached result = (%#v, %v), want published value", cachedValue, cachedErr)
+		}
+		if got := fillCount.Load(); got != 1 {
+			t.Fatalf("fill calls = %d, want 1", got)
+		}
+		if len(store.acquireTtls) != 2 || store.acquireTtls[0] != 30*time.Second || store.acquireTtls[1] != 30*time.Second {
+			t.Fatalf("acquire ttls = %v, want two 30s attempts", store.acquireTtls)
+		}
 	})
-	if loserValue != nil {
-		t.Fatalf("overlapping loser value = %#v, want nil", loserValue)
-	}
-	var unavailableErr *handlerCacheUnavailableError
-	if !errors.As(loserErr, &unavailableErr) {
-		t.Fatalf("overlapping loser error = %v, want cache-unavailable error", loserErr)
-	}
-
-	close(allowFill)
-	winner := <-winnerResult
-	if winner.err != nil || winner.value == nil || winner.value.Message != "published" {
-		t.Fatalf("winner result = (%#v, %v), want published value", winner.value, winner.err)
-	}
-
-	cachedValue, cachedErr := cacheJson(ctx, store, logicalKey, 30*time.Second, func() (*handlerCacheTestResult, error) {
-		fillCount.Add(1)
-		return &handlerCacheTestResult{Message: "unexpected-refill"}, nil
-	})
-	if cachedErr != nil || cachedValue == nil || cachedValue.Message != "published" {
-		t.Fatalf("cached result = (%#v, %v), want published value", cachedValue, cachedErr)
-	}
-	if got := fillCount.Load(); got != 1 {
-		t.Fatalf("fill calls = %d, want 1", got)
-	}
-	if len(store.acquireTtls) != 2 || store.acquireTtls[0] != 30*time.Second || store.acquireTtls[1] != 30*time.Second {
-		t.Fatalf("acquire ttls = %v, want two 30s attempts", store.acquireTtls)
-	}
 }
 
 // A failed producer keeps its lease, cut to the short failure fence, until
