@@ -122,7 +122,8 @@ func (self *renewingCacheTestStore) renew(ctx context.Context, key string, token
 	return true, nil
 }
 
-// Models the fence script: only the current token's lease, only toward expiry.
+// Models the fence script: only the current token's lease, only toward
+// expiry, marked fenced.
 func (self *renewingCacheTestStore) fence(_ context.Context, key string, token string, ttl time.Duration) (bool, error) {
 	self.mu.Lock()
 	defer self.mu.Unlock()
@@ -130,9 +131,11 @@ func (self *renewingCacheTestStore) fence(_ context.Context, key string, token s
 	if !ok || current != token {
 		return false, nil
 	}
-	if expires := time.Now().Add(ttl); expires.Before(self.entries[key].expires) {
-		self.entries[key] = renewingCacheTestEntry{token, expires}
+	expires := self.entries[key].expires
+	if fenced := time.Now().Add(ttl); fenced.Before(expires) {
+		expires = fenced
 	}
+	self.entries[key] = renewingCacheTestEntry{handlerCacheFenceToken(token), expires}
 	return true, nil
 }
 
@@ -183,19 +186,32 @@ func TestHandlerCacheRenewingSlowFillPairedControl(t *testing.T) {
 					owner <- handlerCacheTestCallResult{value, err}
 				}()
 				<-started
+				begin := time.Now()
 				time.Sleep(31 * time.Second)
-				for range 8 {
-					value, err := call(func(context.Context) (*handlerCacheTestResult, error) {
-						fills.Add(1)
-						return &handlerCacheTestResult{Message: "replacement"}, nil
-					})
+				// Overlapping misses wait for the fill in progress: a renewed
+				// lease outlasts their wait, and they answer 503 after it.
+				var overlapping sync.WaitGroup
+				results := make([]handlerCacheTestCallResult, 8)
+				for i := range results {
+					overlapping.Add(1)
+					go func() {
+						defer overlapping.Done()
+						value, err := call(func(context.Context) (*handlerCacheTestResult, error) {
+							fills.Add(1)
+							return &handlerCacheTestResult{Message: "replacement"}, nil
+						})
+						results[i] = handlerCacheTestCallResult{value, err}
+					}()
+				}
+				overlapping.Wait()
+				for _, result := range results {
 					if renewing {
 						var unavailable *handlerCacheUnavailableError
-						if value != nil || !errors.As(err, &unavailable) {
-							t.Fatalf("renewing overlapping result = (%v, %v)", value, err)
+						if result.value != nil || !errors.As(result.err, &unavailable) {
+							t.Fatalf("renewing overlapping result = (%v, %v)", result.value, result.err)
 						}
-					} else if err != nil || value == nil || value.Message != "replacement" {
-						t.Fatalf("baseline replacement = (%v, %v)", value, err)
+					} else if result.err != nil || result.value == nil || result.value.Message != "replacement" {
+						t.Fatalf("baseline replacement = (%v, %v)", result.value, result.err)
 					}
 				}
 				want := int64(2)
@@ -205,7 +221,7 @@ func TestHandlerCacheRenewingSlowFillPairedControl(t *testing.T) {
 				if fills.Load() != want {
 					t.Fatalf("at 31s: fills=%d want=%d", fills.Load(), want)
 				}
-				time.Sleep(39 * time.Second)
+				time.Sleep(70*time.Second - time.Since(begin))
 				releaseOwner()
 				result := <-owner
 				if renewing {
