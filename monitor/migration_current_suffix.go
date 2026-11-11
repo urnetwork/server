@@ -948,6 +948,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
 	// the onboarding platform's distribution, versioned by its position
 	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
+	// the Bitcoin block scanner's kept chain, versioned by its position
+	[]snMainnetMigrationContract{cryptoScanChainMigrationContract},
 	// the per-cycle Pro grants, versioned by their position
 	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 )

@@ -963,10 +963,11 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows. A db migration adds the column; this command changes no
-// schema. The provider payout stats that needed it now read provider_payouts,
-// and migration 816 dropped the column's covering index, so each batch scans
-// the sweep table. It is idempotent and safe to re-run.
+// on existing rows without provider_payouts, the only rows whose provider
+// attribution reads it (BILLING-SPLIT.md). A db migration adds the column; this
+// command changes no schema. The provider payout stats that needed it now read
+// provider_payouts, and migration 816 dropped the column's covering index, so
+// each batch scans the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 

@@ -54,7 +54,7 @@ func TestDeadlineCloseZeroPayoutReleaseSurvivesLostPost(t *testing.T) {
 			return
 		}
 		before, _ := readCredit()
-		keys := deadlineFinancialOwnershipKeys(escrow.ContractId, readDeadlineBalanceIds(ctx, escrow.ContractId))
+		keys := deadlineFinancialOwnershipKeys(readDeadlineBalanceIds(ctx, escrow.ContractId))
 		var result *ContractDeadlineReconciliation
 		server.OwnedTx(ctx, keys, func(tx server.PgTx) {
 			// The process stops right after this commit, so every post is lost.

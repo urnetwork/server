@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 // Creates count reserved contracts on the fixture's one balance, created a
@@ -34,31 +33,33 @@ func newForceCloseOwnerBatchRows(t testing.TB, ctx context.Context, f netEscrowO
 }
 
 // The owner turns one balance saw for the given contracts: each admitted or
-// refused turn lists the contracts whose provider totals keys it carried, so
-// a turn that closes several rows lists each of them.
+// refused turn lists the given contracts among its members, so a turn that
+// closes several rows lists each of them.
 type forceCloseOwnerTurns struct {
 	stateLock sync.Mutex
 	admitted  [][]server.Id
 	refused   [][]server.Id
 }
 
+// The given contracts among an owned turn's members, in member order.
+func forceCloseOwnerTurnCovered(members []server.Id, contractIds []server.Id) []server.Id {
+	covered := []server.Id{}
+	for _, member := range members {
+		if slices.Contains(contractIds, member) {
+			covered = append(covered, member)
+		}
+	}
+	return covered
+}
+
 func observeForceCloseOwnerTurns(ctx context.Context, balanceId server.Id, contractIds []server.Id) (context.Context, *forceCloseOwnerTurns) {
 	grant := server.NewPgOwnershipKey("transfer_balance", balanceId)
-	keyContractIds := map[server.PgOwnershipKey]server.Id{}
-	for _, contractId := range contractIds {
-		keyContractIds[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
-	}
 	turns := &forceCloseOwnerTurns{}
-	observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+	observed := Testing_WithContractDeadlineOwnerTurnObservation(ctx, func(members []server.Id, event server.PgOwnershipEvent) {
 		if !slices.Contains(event.Keys, grant) {
 			return
 		}
-		covered := []server.Id{}
-		for _, key := range event.Keys {
-			if contractId, ok := keyContractIds[key]; ok {
-				covered = append(covered, contractId)
-			}
-		}
+		covered := forceCloseOwnerTurnCovered(members, contractIds)
 		if len(covered) == 0 {
 			return
 		}
@@ -328,23 +329,14 @@ func TestForceClosePageLeavesRowsOpenWhenOwnerBatchFailsBeforeItsMembers(t *test
 		f := newNetEscrowOrderingTestFixture(t, ctx)
 		now := server.NowUtc()
 		contractIds := newForceCloseOwnerBatchRows(t, ctx, f, 3, now)
-		keyContractIds := map[server.PgOwnershipKey]server.Id{}
-		for _, contractId := range contractIds {
-			keyContractIds[task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))] = contractId
-		}
 		synthetic := errors.New("synthetic owner batch route failure")
 		var stateLock sync.Mutex
 		batchAdmissions, aloneAdmissions := 0, 0
-		observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
+		observed := Testing_WithContractDeadlineOwnerTurnObservation(ctx, func(members []server.Id, event server.PgOwnershipEvent) {
 			if event.Kind != server.PgOwnershipAdmitted {
 				return
 			}
-			covered := 0
-			for _, key := range event.Keys {
-				if _, ok := keyContractIds[key]; ok {
-					covered += 1
-				}
-			}
+			covered := len(forceCloseOwnerTurnCovered(members, contractIds))
 			stateLock.Lock()
 			first := false
 			switch {

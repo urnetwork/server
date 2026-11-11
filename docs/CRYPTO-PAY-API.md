@@ -32,7 +32,7 @@ Conventions:
 | `zec` | Zcash (shielded) | `zcash` | 8 | 6 | 0.5% | ZIP-321 | 10 confirmations | our zecd (watch-only) |
 | `xmr` | Monero | `monero` | 12 | 6 | 0.5% | `monero:` | 1 confirmation | our monero-wallet-rpc (view-only) |
 | `tao` | TAO | `bittensor` | 9 | 6 | 1% | none: address and amount | finalized | snow's Finney node (finalized blocks) |
-| `btc` | Bitcoin | `bitcoin` | 8 | 8 | 0.5% | BIP 21 | 1 confirmation, final at 6 | Alchemy (address history, UTXO API) |
+| `btc` | Bitcoin | `bitcoin` | 8 | 8 | 0.5% | BIP 21 | 1 confirmation, final at 6 | Alchemy's JSON-RPC, free tier (every block, scanned) |
 | `eth` | ETH | `ethereum` (mainnet) | 18 | 6 | 0.5% | EIP-681 | finalized (about 15 minutes) | Alchemy (incoming transfers, finalized tag) |
 | `sol` | native SOL | `solana` | 9 | 6 | 0.5% | Solana Pay, no `spl-token` | finalized | Helius RPC (signatures of the address) |
 
@@ -114,7 +114,9 @@ Then the coin is sold once its backend is configured and healthy (the reasons ab
 switch: it stops new invoices and re-quotes, while the coin's open invoices are still scanned and credited. A
 process reads crypto_pay.yml when it starts, so api, alt and taskworker are restarted after the config release.
 The order of a coin's launch: ur.io's widget update first, then the config release with the coin's entry, and for
-TAO the first scan only while the SN25 validator's deploy gate allows it.
+TAO the first scan only while the SN25 validator's deploy gate allows it. Bitcoin's scanner keeps its recent chain
+in `crypto_scan_cursor.recent_blocks`, a column the migration of `db_crypto_scan_chain.go` adds: that migration is
+applied before a taskworker that scans Bitcoin is deployed.
 
 ## Additions to GET /subscription/balance (`SubscriptionBalanceResult`)
 
@@ -380,12 +382,12 @@ No auth; the token is the credential. Limited per client address (10 a minute; `
 
 ## POST /pay/alchemy (internal)
 
-Every Alchemy webhook delivers here: ETH's Address Activity webhook, and Bitcoin's if Alchemy offers one. A delivery
-is verified with its own webhook's signing key (`X-Alchemy-Signature`, the hex HMAC-SHA256 of the raw body) before
-anything is read; an unknown webhook id or a bad signature is refused, and with no webhook configured every delivery
-is refused with 503. A verified delivery only brings the coin's next chain read forward: the invoice addresses it
-names as recipients are read on the coin's next scan, whatever their age. Polling the chain is the source of truth,
-so neither coin's availability depends on a webhook.
+ETH's Address Activity webhook delivers here; Bitcoin has none (its scanner reads every block; BTCPAY.md §16.7). A
+delivery is verified with its own webhook's signing key (`X-Alchemy-Signature`, the hex HMAC-SHA256 of the raw body)
+before anything is read; an unknown webhook id or a bad signature is refused, and with no webhook configured every
+delivery is refused with 503. A verified delivery only brings ETH's next chain read forward: the invoice addresses it
+names as recipients are read on the next ETH scan, whatever their age. Polling the chain is the source of truth, so
+ETH's availability does not depend on the webhook.
 
 ## Error codes added to `PurchaseErrorCode*`
 
@@ -414,7 +416,8 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   `vault/<env>/coinbase.yml` (`api.host`, `api.key_name`, `api.private_key`; the view and receive scopes), signed
   per request by the CDP SDK's JWT. The coin's wallet is looked up by its currency code (`GET /v2/accounts/TAO`,
   `BTC`, `ETH`, `SOL`): `api.account_id` is none of these wallets. The networks are `bittensor` (TAO: from Coinbase
-  Exchange's public currency data; the first live address request confirms it), `bitcoin`, `ethereum` and `solana`.
+  Exchange's public currency data, confirmed by live address requests on 2026-11-11), `bitcoin`, `ethereum` and
+  `solana`.
 - The invoice id the address is named with is reserved on its pool row, and the invoice that draws the address takes
   that id.
 - Coinbase answering an address the pool already holds stops the refill with an error
@@ -422,19 +425,37 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   If Coinbase turns out to give one static address for a coin, the coin's pool drains and it shows
   `address_pool_empty`; matching invoices on one shared address by unique amounts is designed (BTCPAY.md §17,
   `amount_unmatched`) but needs a schema change to the invoice's address uniqueness and is not built.
-- On 2026-11-10 our Coinbase account had no TAO wallet (`GET /v2/accounts/TAO` answered 404): TAO is unavailable
-  until one is opened (Receive TAO in the Coinbase app).
+- Our Coinbase account's TAO wallet exists since 2026-11-11 07:08Z (on 2026-11-10 `GET /v2/accounts/TAO` still
+  answered 404). Checked live that day with the rail's own `NewNamedAddress`: each per-invoice request on network
+  `bittensor` returns a new address, and so does each on `solana` for SOL. Coinbase issued a P2SH address (`3…`)
+  for BTC; the Bitcoin scanner matches every address type by the output's address.
 - Coinbase's own crediting of deposits is not on the path: trackers listed seven Coinbase TAO send and receive delays
   in 2026, one of 4.5 days on Prime, and a credit here comes from the chain, so such a delay does not keep a customer
   waiting.
 
 ### Detection, coin by coin
 
-- **Bitcoin** (Alchemy only, `vault/<env>/alchemy.yml`): each invoice address's transaction history, polled every
-  minute, from Alchemy's Blockbook-compatible UTXO API (`<btc_endpoint>/api/v2/address/<address>?details=txs`); only
-  outputs to the address count, and each payment's inputs are read for the screen. Heights from Alchemy's JSON-RPC
-  (`getblockchaininfo`). The UTXO API is an Alchemy add-on: the owner's key answered "UTXO requests are not allowed"
-  (401) on 2026-11-10, and Bitcoin stays unavailable (`scanner_lagging`) until the add-on is on.
+- **Bitcoin** (Alchemy's JSON-RPC alone, on the free tier, `vault/<env>/alchemy.yml`; BTCPAY.md §16.7): a block
+  scanner. Each scan (every minute) reads the tip (`getblockchaininfo`); each new block is read once
+  (`getblockhash`, then `getblock` at verbosity 2), and every address its outputs pay is matched against the invoice
+  addresses in play in one indexed lookup per block, as of the block's own time (open, or closed in the 24 hours
+  before it, or with a receipt still unconfirmed; never one made more than 3 hours after the block). Only outputs
+  count, summed per transaction and address, every script type (P2PKH, P2SH, P2WPKH, P2WSH, P2TR). Confirmations count
+  from the block's height. The recent blocks read (24), with their hashes and what each paid, are kept with the cursor
+  (`crypto_scan_cursor.recent_blocks`, written only when a scan completes): a block that is not a child of the kept tip
+  is a reorg, and the scan compares the kept hashes with the chain's back to the fork point and reads the blocks
+  after it again. A payment of a replaced block that the new chain does not hold is looked up
+  (`getrawtransaction` at verbosity 2): mined elsewhere it is reported there, back in the mempool it is seen again,
+  gone it is left to the scanner's vanished-receipt check (an invoice not yet credited only); a credited payment is
+  never taken back, and the reconciler reports one the chain no longer shows as an error instead of ending it. A
+  source behind the kept tip, or a chain changed below every kept block, fails the scan
+  (`crypto_scan_cursor.last_error`, the scanner-stalled page after 15 minutes). At most 10 blocks a scan and never
+  more than a week behind the tip (older blocks are passed over and counted in
+  `urnetwork_crypto_pay_scan_blocks_skipped_total`). The screen reads each payment's senders from its inputs'
+  prevouts (`getrawtransaction` at verbosity 2). No mempool read: an invoice goes from pending to confirming or paid
+  when its payment is mined, and a payment sent before its quote expired but mined after it is valued as late, at
+  its block's time. About 1 million compute units a month of the free tier's 30 million (every method costs 10):
+  the tip, read by each scan and by each address refill's network check, once a minute each, and each block once.
 - **ETH** (Alchemy only): each invoice address's incoming transfers (`alchemy_getAssetTransfers`, `toAddress`, the
   external and internal categories), polled every 30 seconds, in exact wei; each paying transaction's receipt status
   (a reverted one moved nothing); credited once its block is at the `finalized` tag. The Address Activity webhook is
@@ -455,9 +476,9 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   counted; a runtime the reader cannot read pauses it (`urnetwork_crypto_pay_tao_reader_paused`) without
   crash-looping. **The TAO scanner's first run on mainnet must pass the SN25 validator's deploy gate**: snow's node is
   shared with the validator.
-- **Watch windows** (TAO, Bitcoin, ETH, SOL): an open invoice's address is read every scan; one that expired, was
-  credited or was voided in the last 24 hours once every ten scan intervals; an address a webhook names, at the next
-  scan whatever its age.
+- **Watch windows** (TAO, ETH, SOL): an open invoice's address is read every scan; one that expired, was credited or
+  was voided in the last 24 hours once every ten scan intervals; an address a webhook names, at the next scan
+  whatever its age. Bitcoin matches the same invoices in every block, as of the block's time.
 
 ### Rates
 

@@ -1,8 +1,8 @@
 // Scheduled closes that share one financial owner retire in two owned turns.
 // The first admits the primary contract's owner without waiting, closes it and
 // reads the owner's due siblings inside the same transaction; a held owner is
-// refused before any read or write. The second admits the owner again with the
-// siblings' publication keys and closes them together. Each member runs the
+// refused before any read or write. The second admits the owner again and
+// closes the siblings together. Each member runs the
 // ordinary locked deadline reconciliation. A failed sibling batch rolls back and
 // each sibling is retried alone, so one bad contract cannot hold the rest.
 package model
@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 // Bounds the contracts closed per owner turn pair and the balances of one owner.
@@ -270,10 +269,11 @@ func readContractDeadlineOwnerSiblingsInTx(ctx context.Context, tx server.PgTx, 
 // from a failed member. Discovery reads precede every row lock. Member posts
 // run only after an acknowledged commit; postCtx carries their coalescers.
 func reconcileContractOwnerBatchAtDeadline(ctx context.Context, postCtx context.Context, balanceIds []server.Id, members []ContractDeadline, discover func(server.PgTx) []ContractDeadline) (results map[server.Id]*ContractDeadlineReconciliation, discovered []ContractDeadline, busy bool, entered bool, returnErr error) {
+	// The owner's grants are the whole key set: a member close publishes no
+	// provider totals (BILLING-SPLIT.md).
 	keys := transferBalanceOwnershipKeys(balanceIds)
 	contractIds := make([]server.Id, 0, len(members))
 	for _, member := range members {
-		keys = append(keys, task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", member.ContractId)))
 		contractIds = append(contractIds, member.ContractId)
 	}
 	var posts []server.PostFunction
@@ -309,7 +309,7 @@ func reconcileContractOwnerBatchAtDeadline(ctx context.Context, postCtx context.
 					posts = append(posts, memberPosts...)
 				}
 			}
-		}, server.TxReadCommitted, server.OptNoRetry())
+		}, contractDeadlineOwnerTurnTxOptions(ctx, contractIds)...)
 		if !admitted {
 			results, busy = nil, true
 			return
@@ -319,6 +319,32 @@ func reconcileContractOwnerBatchAtDeadline(ctx context.Context, postCtx context.
 		}
 	}, func(err error) { results, discovered, returnErr = nil, nil, err })
 	return
+}
+
+// A private test seam: each owned turn of a deadline close reports its
+// ownership events with the contracts it closes. The turn's keys are its
+// grants alone, so they no longer name its members, as the per-contract
+// provider totals keys did before 2026-11-11 (BILLING-SPLIT.md). Production
+// contexts carry none.
+type contractDeadlineOwnerTurnObservationKey struct{}
+
+// Testing_WithContractDeadlineOwnerTurnObservation observes every owned turn
+// of a deadline close: each ownership event with the turn's member contracts.
+// It replaces the context's server.Testing_WithPgOwnershipObservation for
+// those turns.
+func Testing_WithContractDeadlineOwnerTurnObservation(ctx context.Context, observe func(members []server.Id, event server.PgOwnershipEvent)) context.Context {
+	return context.WithValue(ctx, contractDeadlineOwnerTurnObservationKey{}, observe)
+}
+
+// The options of a deadline close's owned turn: read committed, no retry,
+// and the test seam's observation when the context carries one.
+func contractDeadlineOwnerTurnTxOptions(ctx context.Context, members []server.Id) []any {
+	options := []any{server.TxReadCommitted, server.OptNoRetry()}
+	if observe, ok := ctx.Value(contractDeadlineOwnerTurnObservationKey{}).(func([]server.Id, server.PgOwnershipEvent)); ok {
+		members = slices.Clone(members)
+		options = append(options, &server.PgOwnershipObservation{Observe: func(event server.PgOwnershipEvent) { observe(members, event) }})
+	}
+	return options
 }
 
 // Every member of one owner batch refreshes the same balance mirrors. Collect

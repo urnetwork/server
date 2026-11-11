@@ -55,13 +55,13 @@ func tryReconcileContractAtDeadline(ctx context.Context, contractId server.Id, d
 	}
 	var posts []server.PostFunction
 	server.HandleError(func() {
-		keys := deadlineFinancialOwnershipKeys(contractId, balanceIds)
+		keys := deadlineFinancialOwnershipKeys(balanceIds)
 		body := func(tx server.PgTx) {
 			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true)
 		}
 		if len(keys) == 0 {
 			server.Tx(ctx, body, server.TxReadCommitted, server.OptNoRetry())
-		} else if !server.TryOwnedTx(ctx, keys, body, server.TxReadCommitted, server.OptNoRetry()) {
+		} else if !server.TryOwnedTx(ctx, keys, body, contractDeadlineOwnerTurnTxOptions(ctx, []server.Id{contractId})...) {
 			busy = true
 			return
 		}

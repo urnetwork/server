@@ -84,8 +84,14 @@ const appleUsdCurrency = "USD"
 var appleLegacySupporterProductIds = []string{"supporter", "supporter_yearly"}
 
 // appleProductAllowed reports whether a verified transaction's product is a
-// Pro subscription this server credits.
+// Pro subscription this server credits. The App Store sells UR Pro only: a
+// product named like a data pack (data_*) is never credited, whatever apple.yml
+// lists. The packs are sold on the rails pro.yml names (data_pack_rails.go),
+// and the stores are not one, so the 256 GiB pack cannot be sold here.
 func appleProductAllowed(allowedProductIds []string, productId string) bool {
+	if isDataPackItem(productId) {
+		return false
+	}
 	return slices.Contains(allowedProductIds, productId) ||
 		slices.Contains(appleLegacySupporterProductIds, productId)
 }

@@ -133,8 +133,18 @@ func TestGammaPlanCardCheckoutOpenWithRenewalOff(t *testing.T) {
 		if storeCheckout.Error == nil || storeCheckout.Error.Code != PurchaseErrorCodeAlreadySubscribed || storeCheckout.Error.Message != stripeAlreadySubscribedMessage {
 			t.Fatalf("checkout beside an App Store subscription: %+v, want the general refusal", storeCheckout.Error)
 		}
-		// with renewal on as well, the store subscription is still the reason given
-		gammaCardTestSetAutoRenew(t, clientSession, true)
+		// beside the App Store subscription, Gamma renewal is not turned back
+		// on (both would charge for the same days)
+		autoRenew := true
+		refused, err := SetGammaSettings(&GammaSettingsArgs{AutoRenew: &autoRenew}, clientSession)
+		connect.AssertEqual(t, err, nil)
+		if refused.Error == nil || refused.Error.Code != PurchaseErrorCodeAlreadySubscribed {
+			t.Fatalf("Gamma renewal turned on beside an App Store subscription: %+v", refused)
+		}
+		// with renewal on as well (an App Store purchase made while the Gamma
+		// plan renewed: the store does not ask us), the store subscription is
+		// still the reason given
+		model.SetGammaAccountSettings(ctx, networkId, &model.GammaAccountSettings{AutoRenew: &autoRenew}, server.NowUtc())
 		bothSheet := gammaCardTestSheet(t, clientSession)
 		if bothSheet.Error == nil || bothSheet.Error.Message != stripeAlreadySubscribedMessage {
 			t.Fatalf("payment sheet beside an App Store subscription and a renewing Gamma plan: %+v, want the general refusal", bothSheet.Error)

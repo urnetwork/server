@@ -60,12 +60,13 @@ package controller
 //	  alchemy:
 //	    api_key: ...                                      # the endpoints are built from it when not given
 //	    eth_endpoint: https://eth-mainnet.g.alchemy.com/v2/...      # optional
-//	    btc_endpoint: https://bitcoin-mainnet.g.alchemy.com/v2/...  # optional; the address history needs Alchemy's UTXO add-on
-//	    notify_auth_token: ...                            # optional: registers each new address with the webhook
+//	    btc_endpoint: https://bitcoin-mainnet.g.alchemy.com/v2/...  # optional; the JSON-RPC alone, which the free tier serves (§16.7)
+//	    notify_auth_token: ...                            # optional: registers each new ETH address with the webhook
 //	    eth_webhook_id: wh_...                            # optional: the Address Activity webhook, a fast path only
 //	    eth_webhook_signing_key: whsec_...
-//	    btc_webhook_id: ...                               # optional, if Alchemy offers Bitcoin notifications there
-//	    btc_webhook_signing_key: ...
+//
+// Bitcoin needs no Alchemy add-on and has no webhook: its scanner reads every
+// block through the JSON-RPC (crypto_pay_bitcoin.go).
 //
 //	vault/<env>/helius.yml          # sol: helius.api_key, the RPC the scanner reads
 //	vault/<env>/st.yml              # tao: snow's Finney node (st.GetConnection, URNETWORK_ST_PROFILE)
@@ -88,9 +89,16 @@ import (
 )
 
 // The items a coin can sell. Monthly is card only (decision 6): no coin sells
-// it, whatever the config lists.
+// it, whatever the config lists. The data packs a coin can sell are the ones
+// pro.yml sells on the crypto rail (cryptoPayKnownItems); the 256 GiB pack is
+// not among them, whatever crypto_pay.yml lists.
 var cryptoPayKnownPlans = []string{model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
-var cryptoPayKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
+
+// cryptoPayKnownItems are the data packs pro.yml sells with crypto, in its
+// order.
+func cryptoPayKnownItems() []string {
+	return dataPackIdsOn(model.DataRailCrypto)
+}
 
 // The coins, in the order every UI shows them (model.CryptoAssets, which the
 // payment monitor reads too).
@@ -201,8 +209,8 @@ type CryptoPayAssetConfig struct {
 	// §17.4)
 	BufferPercent float64 `yaml:"buffer_percent"`
 	// how often this coin is scanned; 0 = scan_interval. Bitcoin's 10-minute
-	// blocks and ETH's 15-minute finality need no 20 s polling of every
-	// invoice address
+	// blocks (a scan reads the tip, and a block only when one is new) and
+	// ETH's 15-minute finality need no 20 s polling
 	ScanInterval time.Duration `yaml:"scan_interval"`
 	// the free addresses this coin's pool keeps; 0 = address_pool_target. A
 	// Coinbase coin's addresses are made one request each, so its pool is
@@ -210,7 +218,9 @@ type CryptoPayAssetConfig struct {
 	AddressPoolTarget int `yaml:"address_pool_target"`
 	// a per-address coin's scanner still reads an invoice's address this long
 	// after the invoice expired, was credited or was voided, for a late or an
-	// extra payment (24 h), less often than an open invoice's
+	// extra payment (24 h), less often than an open invoice's. Bitcoin's block
+	// scanner matches such an invoice's address in every block mined within
+	// this long of its close
 	WatchAfter time.Duration `yaml:"watch_after"`
 }
 
@@ -283,8 +293,19 @@ func (self *CryptoPayConfig) normalize() {
 		assetConfig.Plans = slices.DeleteFunc(slices.Clone(assetConfig.Plans), func(plan string) bool {
 			return !slices.Contains(cryptoPayKnownPlans, plan)
 		})
+		// a name that is not a data pack is never sold, and neither is a pack
+		// pro.yml does not sell with crypto (the 256 GiB pack is x402 and
+		// Gamma only), whatever this file lists. SellsItem asks pro.yml again
+		// when it sells.
 		assetConfig.Items = slices.DeleteFunc(slices.Clone(assetConfig.Items), func(item string) bool {
-			return !slices.Contains(cryptoPayKnownItems, item)
+			if !isDataPackItem(item) {
+				return true
+			}
+			if refusal := dataPackRefusal(item, model.DataRailCrypto); refusal != "" {
+				glog.Errorf("[cryptopay]crypto_pay.yml lists %s for %s, which pro.yml does not sell with crypto; it is not offered\n", item, asset)
+				return true
+			}
+			return false
 		})
 		// a source the coin may not be quoted from is dropped (CoinGecko for
 		// every coin but Monero, mmm/BTCPAY.md §17.4), and a list left with
@@ -504,9 +525,10 @@ func (self *CryptoPayAssetConfig) SellsPlan(plan string) bool {
 	return self != nil && slices.Contains(self.Plans, plan) && slices.Contains(cryptoPayKnownPlans, plan)
 }
 
-// SellsItem reports whether the coin sells the data item.
+// SellsItem reports whether the coin sells the data item: crypto_pay.yml
+// lists it for the coin, and pro.yml sells it with crypto.
 func (self *CryptoPayAssetConfig) SellsItem(item string) bool {
-	return self != nil && slices.Contains(self.Items, item) && slices.Contains(cryptoPayKnownItems, item)
+	return self != nil && slices.Contains(self.Items, item) && dataPackSoldOn(item, model.DataRailCrypto)
 }
 
 var cryptoPayConfigOnce = sync.OnceValue(func() *CryptoPayConfig {
@@ -625,8 +647,8 @@ type cryptoWalletSettings struct {
 	// tao: the st profile the Finney connection was resolved for (mainnet,
 	// testnet)
 	ChainProfile string
-	// btc, eth: the Alchemy webhook, an optional fast path, and the Notify
-	// API token that registers new addresses with it
+	// eth: the Alchemy webhook, an optional fast path, and the Notify API
+	// token that registers new addresses with it
 	AlchemyWebhookId         string
 	AlchemyWebhookSigningKey string
 	AlchemyNotifyToken       string
@@ -734,10 +756,8 @@ func cryptoChainSettingsFromVault(asset string) (*cryptoWalletSettings, error) {
 			return strings.TrimSpace(value)
 		}
 		endpointKey := "eth_endpoint"
-		webhookKey := "eth_webhook"
 		if asset == model.CryptoAssetBtc {
 			endpointKey = "btc_endpoint"
-			webhookKey = "btc_webhook"
 		}
 		settings.ChainRpcUrl = optional("alchemy", endpointKey)
 		if settings.ChainRpcUrl == "" {
@@ -750,9 +770,12 @@ func cryptoChainSettingsFromVault(asset string) (*cryptoWalletSettings, error) {
 		if !strings.HasPrefix(settings.ChainRpcUrl, "https://") {
 			return nil, fmt.Errorf("alchemy.yml: alchemy.%s is not an https url", endpointKey)
 		}
-		settings.AlchemyWebhookId = optional("alchemy", webhookKey+"_id")
-		settings.AlchemyWebhookSigningKey = optional("alchemy", webhookKey+"_signing_key")
-		settings.AlchemyNotifyToken = optional("alchemy", "notify_auth_token")
+		if asset == model.CryptoAssetEth {
+			// the ETH webhook, a fast path only; Bitcoin has none
+			settings.AlchemyWebhookId = optional("alchemy", "eth_webhook_id")
+			settings.AlchemyWebhookSigningKey = optional("alchemy", "eth_webhook_signing_key")
+			settings.AlchemyNotifyToken = optional("alchemy", "notify_auth_token")
+		}
 	case model.CryptoAssetSol:
 		apiKey, err := vaultNonblankString("helius.yml", "helius", "api_key")
 		if err != nil {

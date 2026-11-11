@@ -122,16 +122,17 @@ func TestReportReplayThenCanceledClientExpiryConservesGrant(t *testing.T) {
 			server.Raise(CloseContract(ctx, healthy.ContractId, f.sourceId, 11, false))
 			server.Raise(CloseContract(ctx, healthy.ContractId, f.destinationId, 11, false))
 			requireLegacySettlementTestState(t, ctx, f, healthy.ContractId, true, 189, 0)
-			projectLegacyProviderTotalsForTest(t, ctx)
-			projectLegacyProviderTotalsForTest(t, ctx)
+			// The provider's whole earnings are its sweeps; recovery publishes
+			// no provider totals (BILLING-SPLIT.md).
 			server.Db(ctx, func(conn server.PgConn) {
 				var exact bool
-				server.Raise(conn.QueryRow(ctx, `SELECT provided_byte_count=811 AND provided_net_revenue_nano_cents=811
-					FROM account_balance WHERE network_id=$1`, f.destinationNetworkId).Scan(&exact))
+				server.Raise(conn.QueryRow(ctx, `SELECT sum(payout_byte_count)=811 AND sum(payout_net_revenue_nano_cents)=811
+					FROM transfer_escrow_sweep WHERE network_id=$1`, f.destinationNetworkId).Scan(&exact))
 				if !exact {
-					t.Fatal("recovery duplicated or lost the durable provider projection")
+					t.Fatal("recovery duplicated or lost the durable provider earnings")
 				}
 			})
+			assertContractPayoutTestNoProviderTotals(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId})
 		}
 	})
 }

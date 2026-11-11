@@ -2220,6 +2220,25 @@ func RemoveNetworkClientsTaskPost(
 
 type NetworkClientsResult struct {
 	Clients []*NetworkClientInfo `json:"clients"`
+
+	// what the network's plan does with the Pro-only proxy features, in the
+	// proxies list only (GetNetworkProxies)
+	Plan *NetworkProxiesPlan `json:"plan,omitempty"`
+}
+
+// NetworkProxiesPlan is the plan beside the network's proxies, so an app can
+// say what a proxy's Pro-only features (NetworkClientInfo.ProFeatures) will do
+// on this plan: the apps' "Pro features in use" notice.
+type NetworkProxiesPlan struct {
+	// the network holds Pro now, read live (IsProNetwork), never from the
+	// jwt's pro claim, which is stale after an upgrade or a lapse
+	Pro bool `json:"pro"`
+	// pro.yml enforce_features: a network without Pro is refused the Pro-only
+	// features, at issuance (auth-client issues no SOCKS url and no WireGuard
+	// config) and at the proxy, for the credentials it already holds (a SOCKS
+	// sign-in is refused, a WireGuard peer is dropped). While false, every
+	// plan uses them.
+	ProFeaturesEnforced bool `json:"pro_features_enforced"`
 }
 
 // NetworkClientInfo is one row of the network's device list. The client's
@@ -2234,6 +2253,12 @@ type NetworkClientInfo struct {
 	// the unique exit of a hosted proxy created with unique_exit, in the
 	// proxies list only
 	Exit *ProxyExit `json:"exit,omitempty"`
+
+	// the Pro-only features (FeatureSocksProxy, FeatureWireguardProxy) the
+	// hosted proxy holds credentials for, in the proxies list only: what the
+	// proxy stops serving to a network without Pro once enforce_features is on
+	// (proxyClientProFeatures)
+	ProFeatures []string `json:"pro_features,omitempty"`
 }
 
 type NetworkClientConnection struct {
@@ -2281,14 +2306,54 @@ func GetNetworkClients(clientSession *session.ClientSession) (*NetworkClientsRes
 // GetNetworkProxies lists the network's hosted proxy devices (clients with a
 // `proxy_device_config` row) with their `proxy_client` credentials. Everything
 // else about a row (resident, connections, roles, provide mode) reads the same
-// as GetNetworkClients.
+// as GetNetworkClients. Each proxy also says which Pro-only features it holds,
+// and the list carries the network's plan (addProxyProFeaturesToClientList).
 func GetNetworkProxies(clientSession *session.ClientSession) (*NetworkClientsResult, error) {
 	result, err := getNetworkClientList(clientSession, networkClientListProxies)
 	if err != nil || result == nil {
 		return result, err
 	}
 	addProxyExitsToClientList(clientSession.Ctx, result)
+	addProxyProFeaturesToClientList(clientSession.Ctx, clientSession.ByJwt.NetworkId, result)
 	return result, nil
+}
+
+// addProxyProFeaturesToClientList marks each proxy with the Pro-only features
+// it holds and reports the network's plan beside them. The plan's Pro is read
+// live and does not depend on the rollout switch, so an app can warn a network
+// without Pro before enforce_features turns on (pro.yml): the apps' "Pro
+// features in use" notice.
+func addProxyProFeaturesToClientList(ctx context.Context, networkId server.Id, result *NetworkClientsResult) {
+	c := Pro()
+	for _, client := range result.Clients {
+		client.ProFeatures = proxyClientProFeatures(c, client.ProxyClient)
+	}
+	result.Plan = &NetworkProxiesPlan{
+		Pro:                 IsProNetwork(ctx, networkId),
+		ProFeaturesEnforced: c.EnforceFeatures,
+	}
+}
+
+// proxyClientProFeatures lists the Pro-only features a proxy holds credentials
+// for: FeatureSocksProxy for a SOCKS url, FeatureWireguardProxy for a WireGuard
+// config. These are exactly what the proxy gates per network once
+// enforce_features is on: a SOCKS sign-in (proxy/server.go validUser) and a
+// WireGuard peer (validWgClients). Every proxy issued while enforcement was
+// dark holds a SOCKS url, whatever it is used for, so each one lists SOCKS.
+// A feature the free plan also includes is no Pro feature, and neither is one
+// no plan includes (no pro.yml). Nil for a proxy with neither.
+func proxyClientProFeatures(c *ProConfig, proxyClient *ProxyClient) []string {
+	if proxyClient == nil {
+		return nil
+	}
+	var features []string
+	if proxyClient.SocksProxyUrl != "" && c.ProOnlyFeature(FeatureSocksProxy) {
+		features = append(features, FeatureSocksProxy)
+	}
+	if proxyClient.WgConfig != nil && c.ProOnlyFeature(FeatureWireguardProxy) {
+		features = append(features, FeatureWireguardProxy)
+	}
+	return features
 }
 
 // addProxyExitsToClientList reports each unique-exit proxy's exit in the list.
