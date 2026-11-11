@@ -49,3 +49,25 @@ func TestGammaSubscriptionDetailsReportTheRenewal(t *testing.T) {
 		t.Fatalf("gamma cancel refusal %+v", refusal)
 	}
 }
+
+// The services document SN25's on-chain service record points at names the
+// spec where ur.io publishes it (/openapi.yml; /api/bringyour.yml is a 404),
+// our endpoint, and the publisher from gamma.yml.
+func TestGammaServicesDocumentPointsAtThePublishedSpec(t *testing.T) {
+	skipWithoutProYml(t)
+	settings := gammaTestSettings(t)
+	defer setGammaSettingsForTest(settings, nil)()
+	document, err := GammaServices(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(document.Services) != 1 || document.Services[0].Type != "openapi" || document.Services[0].Spec != "https://ur.io/openapi.yml" || document.Services[0].Endpoint != "https://api.bringyour.com" {
+		t.Fatalf("services %+v", document.Services)
+	}
+	if len(document.Publishers) != 1 || document.Publishers[0].Netuid != 25 || document.Publishers[0].Hotkey != settings.ServiceAddress {
+		t.Fatalf("publishers %+v", document.Publishers)
+	}
+	if len(document.Payments) != 2 || document.Payments[0].Type != "gamma" || document.Payments[0].Terms != "https://api.bringyour.com/pay/gamma/terms" || document.Payments[1].Type != "x402" {
+		t.Fatalf("payments %+v", document.Payments)
+	}
+}
