@@ -82,17 +82,9 @@ func TestGammaDeletedAccountIsNeverRenewed(t *testing.T) {
 
 		connect.AssertEqual(t, gammaDeletedTestRemove(t, ctx, clientSession), model.RemoveNetworkRemoved)
 		connect.AssertEqual(t, gammaDeletedTestNetworkExists(t, ctx, networkId), false)
-		// the account's gamma row is kept, with its automatic charges off
-		account := model.GetGammaAccount(ctx, networkId)
-		if account == nil {
-			t.Fatal("deletion removed the gamma account row")
-		}
-		connect.AssertEqual(t, account.AutoRenew, false)
-		connect.AssertEqual(t, account.AutoTopup, false)
-		// its deposit hotkey stays assigned, for support
-		connect.AssertEqual(t, len(model.GetGammaDepositHotkeys(ctx, networkId)), 1)
 
-		// the end of the term, inside the renewal's lead time
+		// the end of the term, inside the renewal's lead time: nothing is
+		// charged, and the deposit keeps its gamma
 		renewal := cryptoDbRenewals(t, ctx, networkId, model.SubscriptionMarketGamma)
 		connect.AssertEqual(t, renewal.count, 1)
 		termEnd := renewal.endTime.Add(-manualPaymentGracePeriod)
@@ -104,6 +96,16 @@ func TestGammaDeletedAccountIsNeverRenewed(t *testing.T) {
 		f.sim.mine()
 		f.run()
 		connect.AssertEqual(t, f.sim.deposit(hotkey).balance, paidBalance)
+
+		// the account's gamma row is kept, with its automatic charges off
+		account := model.GetGammaAccount(ctx, networkId)
+		if account == nil {
+			t.Fatal("deletion removed the gamma account row")
+		}
+		connect.AssertEqual(t, account.AutoRenew, false)
+		connect.AssertEqual(t, account.AutoTopup, false)
+		// its deposit hotkey stays assigned, for support
+		connect.AssertEqual(t, len(model.GetGammaDepositHotkeys(ctx, networkId)), 1)
 	})
 }
 
