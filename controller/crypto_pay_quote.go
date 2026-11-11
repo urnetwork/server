@@ -73,6 +73,10 @@ func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.Cli
 	if !payDataLookupLimiter.allow(clientSession) {
 		return nil, errors.New("429 Too many requests from this address. Try again in a minute.")
 	}
+	// whatever the coin: the 256 GiB pack is x402 and Gamma only
+	if refusal := dataPackRefusal(strings.TrimSpace(args.ItemId), model.DataRailCrypto); refusal != "" {
+		return cryptoQuoteError(PurchaseErrorCodeItemUnavailable, refusal), nil
+	}
 	ctx := clientSession.Ctx
 	config := cryptoPayConfigFunc()
 	asset := strings.TrimSpace(args.Asset)
@@ -127,7 +131,7 @@ func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.Cli
 			result.RegularPriceUsd = tier.Tier.YearlyUsd
 		}
 	} else {
-		priceUsd, ok := dataPackPriceUsd(itemId)
+		priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 		if !ok {
 			glog.Errorf("[cryptopay]no usable price in pro.yml for data pack %s\n", itemId)
 			return cryptoQuoteError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil

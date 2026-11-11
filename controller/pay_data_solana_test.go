@@ -24,28 +24,51 @@ import (
 func TestDataPackPriceUsd(t *testing.T) {
 	skipWithoutProYml(t)
 
-	price, ok := dataPackPriceUsd(StripeItemData1Tib)
+	price, ok := dataPackPriceUsd(StripeItemData1Tib, model.DataRailCrypto)
 	connect.AssertEqual(t, ok, true)
 	connect.AssertEqual(t, price, float64(3))
 
-	price, ok = dataPackPriceUsd(StripeItemData10Tib)
+	price, ok = dataPackPriceUsd(StripeItemData10Tib, model.DataRailCrypto)
 	connect.AssertEqual(t, ok, true)
 	connect.AssertEqual(t, price, float64(20))
 
 	// plans and unknown items have no data pack price
-	_, ok = dataPackPriceUsd(StripeItemProMonthly)
+	_, ok = dataPackPriceUsd(StripeItemProMonthly, model.DataRailCrypto)
 	connect.AssertEqual(t, ok, false)
-	_, ok = dataPackPriceUsd("data_2tib")
+	_, ok = dataPackPriceUsd("data_2tib", model.DataRailCrypto)
 	connect.AssertEqual(t, ok, false)
-	_, ok = dataPackPriceUsd("")
+	_, ok = dataPackPriceUsd("", model.DataRailCrypto)
+	connect.AssertEqual(t, ok, false)
+	// nor does a pack pro.yml does not sell with crypto
+	_, ok = dataPackPriceUsd(X402SkuData256Gib, model.DataRailCrypto)
 	connect.AssertEqual(t, ok, false)
 
-	// the webhook tells a data pack intent from a plan by the same table
+	// the webhook tells a data pack intent from a plan by its id's form
 	connect.AssertEqual(t, solanaIsDataPackPlan(StripeItemData1Tib), true)
 	connect.AssertEqual(t, solanaIsDataPackPlan(StripeItemData10Tib), true)
 	connect.AssertEqual(t, solanaIsDataPackPlan(model.SolanaPlanMonthly), false)
 	connect.AssertEqual(t, solanaIsDataPackPlan(model.SolanaPlanYearly), false)
+	connect.AssertEqual(t, solanaIsDataPackPlan(model.SolanaPlanYearlyOnboarding), false)
 	connect.AssertEqual(t, solanaIsDataPackPlan(""), false)
+}
+
+// A data pack intent whose pack pro.yml no longer lists is still a data pack:
+// its credit is refused (and stays open, visible), never credited as a plan,
+// which for an unknown plan would be a year of Pro (solanaPlanDuration).
+//
+// Before the packs moved into pro.yml the id table was in code, so a pack could
+// not drop out from under an open intent; now it can.
+func TestSolanaDataPackIntentIsNeverReadAsAPlan(t *testing.T) {
+	t.Cleanup(model.Testing_SetDataCodeSkus(
+		model.ProDataCodeSku{Sku: "data_1tib", Data: model.Tib, PriceUsd: 3, Rails: []string{model.DataRailCrypto}},
+	))
+	connect.AssertEqual(t, solanaIsDataPackPlan(StripeItemData10Tib), true)
+	connect.AssertEqual(t, solanaIsDataPackPlan("data_2tib"), true)
+	_, ok := dataPackByteCount(StripeItemData10Tib)
+	connect.AssertEqual(t, ok, false)
+	byteCount, ok := dataPackByteCount(StripeItemData1Tib)
+	connect.AssertEqual(t, ok, true)
+	connect.AssertEqual(t, byteCount, model.Tib)
 }
 
 func TestPayDataSolanaValidReference(t *testing.T) {

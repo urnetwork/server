@@ -117,8 +117,24 @@ var playPackageName = sync.OnceValue(func() string {
 var playSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
 	server.Config.RequireSimpleResource("play.yml").UnmarshalYaml(&skus)
-	return skus.Skus
+	return playCreditableSkus(skus.Skus)
 })
+
+// playCreditableSkus are the Play products this server credits: play.yml's,
+// except any named like a data pack (data_*). Google Play sells UR Pro only; the
+// packs are sold on the rails pro.yml names (data_pack_rails.go), and the stores
+// are not one, so the 256 GiB pack cannot be sold through Play.
+func playCreditableSkus(skus map[string]*Sku) map[string]*Sku {
+	creditable := map[string]*Sku{}
+	for productId, sku := range skus {
+		if isDataPackItem(productId) {
+			glog.Errorf("[sub]play.yml lists %s, a data pack; Google Play sells UR Pro only, so it is never credited\n", productId)
+			continue
+		}
+		creditable[productId] = sku
+	}
+	return creditable
+}
 
 // var companySenderEmail = sync.OnceValue(func() string {
 // 	c := server.Config.RequireSimpleResource("email.yml").Parse()

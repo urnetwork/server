@@ -4,7 +4,11 @@ package controller
 // removes the network, and refuses deletion for a renewal it cannot stop.
 // Stripe and Google Play subscriptions are cancelled through their APIs. An
 // App Store subscription can only be cancelled by the customer, so deletion
-// waits until the App Store reports that it will not renew.
+// waits until the App Store reports that it will not renew. Pay with Gamma is
+// our own biller: the removal itself turns its automatic renewal, top-up and
+// seat upgrade off and voids the account's open intents, and waits for a
+// gamma charge already in flight to be credited (model
+// RemoveNetworkWithStoreSnapshot).
 
 import (
 	"context"
@@ -23,6 +27,7 @@ const networkRemoveStripeFailedMessage = "Failed to unsubscribe Stripe"
 const networkRemovePlayFailedMessage = "Could not cancel your Google Play subscription. Please try again."
 const networkRemoveAppleRenewingMessage = "Your subscription is billed through the App Store and cannot be cancelled by URnetwork. Cancel it in your App Store subscriptions (Settings > your name > Subscriptions), then delete your account."
 const networkRemoveStoreRenewalChangedMessage = "Your subscription changed while your account was being deleted. Please try again."
+const networkRemoveGammaChargeInFlightMessage = "A Gamma payment for your account is still being processed, so your account was not deleted. Please try again in a few minutes."
 
 // networkRemoveSteps are the store and storage steps of an account deletion.
 // NetworkRemove runs them in this order: the store snapshot, the App Store
@@ -122,6 +127,11 @@ func networkRemoveWithSteps(
 		// new renewal
 		glog.Infof("[network]remove %s refused: a store renewal was credited during the deletion\n", clientSession.ByJwt.NetworkId)
 		return networkRemoveError(networkRemoveStoreRenewalChangedMessage), nil
+	case model.RemoveNetworkGammaChargeInFlight:
+		// the biller credits the charge within minutes; a retry then deletes
+		// the account and ends its automatic gamma charges
+		glog.Infof("[network]remove %s refused: a gamma charge is in flight\n", clientSession.ByJwt.NetworkId)
+		return networkRemoveError(networkRemoveGammaChargeInFlightMessage), nil
 	case model.RemoveNetworkNotFound:
 		// the caller is not the network's admin, or the network is gone
 		return nil, fmt.Errorf("403 Could not remove network")

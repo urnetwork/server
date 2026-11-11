@@ -22596,13 +22596,21 @@ establish:
   network. Successful cancellation preserves paid local history, so this WARN
   alone cannot establish a Google billing failure. The Apple and Google store
   workflows remain separate from Stripe cancellation. A gamma plan renews
-  through our own biller, not a store: account deletion neither refuses nor
-  cancels it, the account's `gamma_account` row (automatic renewal, plan,
-  deposit hotkey) survives, and the biller renews from that row near the end
-  of the term without reading the network, so it can charge the deposit for an
-  account the credit can no longer reach. Before the term ends, stop that
-  owner's automatic renewal with the owner's go and give any renewal already
-  charged and never credited an authorized refund or support disposition. The
+  through our own biller, not a store. Before server commit `57f98311f`,
+  account deletion neither refused nor cancelled it, the account's
+  `gamma_account` row (automatic renewal, plan, deposit hotkey) survived
+  switched on, and the biller renewed from that row near the end of the term
+  without reading the network, so it could charge the deposit for an account
+  the credit can no longer reach. From `57f98311f`, deletion turns the row's
+  renewal, top-up and seat upgrade off, voids the account's open intents and
+  waits for a gamma charge in flight to be credited, and the biller charges no
+  intent whose network is gone; a spend that still lands for one raises the
+  gamma alarm `credit_unfulfillable`. On a build older than that, stop the
+  deleted owner's automatic renewal with the owner's go before the term ends.
+  On any build, give a gamma payment charged and never credited an authorized
+  refund or support disposition (gamma itself cannot be refunded on chain). A
+  deleted owner's paid gamma term may then stay in this WARN until it expires,
+  as cancelled store history does. The
   other one-time crypto markets (Monero, Zcash, TAO, Bitcoin, ETH) are
   excluded like Solana: a prepaid year that never renews. The recurring set is
   `model.SubscriptionMarkets` less `model.SubscriptionOneTimeCryptoMarkets`; a
