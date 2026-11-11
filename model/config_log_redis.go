@@ -239,14 +239,15 @@ func NewConfigLogTeamHint(settings *ConfigLogHintSettings) func(ctx context.Cont
 
 // api's sequencer settings: the defaults, with the read cache's script, the
 // append limits and the team hints on server's Redis, the config_admissions
-// cap and §7.10's effects task. What api's process builds
+// cap with the grant activation limits (tls_endpoints, quota_grant_limit_model.go)
+// and §7.10's effects task. What api's process builds
 // its sequencer with when it installs one (SetConfigLogSequencer).
 func NewApiConfigLogSettings() *ConfigLogSettings {
 	settings := DefaultConfigLogSettings()
 	settings.EntryCache = NewConfigLogRedisEntryCache(nil)
 	settings.Limiter = NewConfigLogRedisLimiter(nil)
 	settings.Hint = NewConfigLogTeamHint(nil)
-	settings.AdmissionCap = CheckConfigAdmissionCap
+	settings.AdmissionCap = CheckConfigAppendLimits
 	settings.Effects = ScheduleConfigLogEffects
 	return settings
 }

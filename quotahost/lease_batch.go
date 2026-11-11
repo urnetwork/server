@@ -254,8 +254,8 @@ func (self *quotaLeaseSet) reportUsage(ctx context.Context, batch *sidecar.Usage
 	if batch == nil {
 		return errors.New("quota lease: no batch")
 	}
-	if batch.BatchId == (connect.Id{}) {
-		return errors.New("quota lease: a zero batch id")
+	if err := checkUsageBatchShape(batch); err != nil {
+		return err
 	}
 	plan := self.planBatch(batch)
 	// each part's state as its carve left it, read under its lane's lock
@@ -336,6 +336,34 @@ func (self *quotaLeaseSet) reportUsage(ctx context.Context, batch *sidecar.Usage
 			// again: planning it again would attribute spent bytes twice (LeaseTwin-Replan)
 		}
 	}()
+	return nil
+}
+
+// What ApplyUsageBatch refuses whole, refused before a plan is made, so no plan is ever kept under the id
+// of a batch api would refuse: a zero batch or network id, an unknown producer or meter, a negative
+// transfer, or too many events.
+func checkUsageBatchShape(batch *sidecar.UsageBatch) error {
+	if batch.BatchId == (connect.Id{}) {
+		return errors.New("quota lease: a zero batch id")
+	}
+	if !sidecar.IsQuotaProducer(batch.Producer) {
+		return fmt.Errorf("quota lease: no producer %q", batch.Producer)
+	}
+	if sidecar.QuotaUsageBatchMaxEventCount < len(batch.Events) {
+		return fmt.Errorf("quota lease: %d events, past %d", len(batch.Events), sidecar.QuotaUsageBatchMaxEventCount)
+	}
+	for _, event := range batch.Events {
+		switch {
+		case event == nil:
+			return errors.New("quota lease: a nil event")
+		case event.NetworkId == (connect.Id{}):
+			return errors.New("quota lease: an event with a zero network id")
+		case !sidecar.IsQuotaMeter(event.Meter):
+			return fmt.Errorf("quota lease: no meter %q", event.Meter)
+		case event.TransferByteCount < 0:
+			return fmt.Errorf("quota lease: a negative transfer %d", event.TransferByteCount)
+		}
+	}
 	return nil
 }
 
