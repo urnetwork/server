@@ -1,0 +1,37 @@
+{
+  "x402Version": 2,
+  "error": "payment required for data_1tib. URnetwork data, 1tib costs $3.00 in USDC. x402 clients refuse a payment over $1 by default: raise your client's per-payment cap to $3.00 or more to pay (see https://ur.io/agents.md).",
+  "resource": {
+    "url": "https://api.x402.example/x402/purchase",
+    "description": "URnetwork data, 1tib",
+    "mimeType": "application/json"
+  },
+  "accepts": [
+    {
+      "scheme": "exact",
+      "network": "eip155:8453",
+      "amount": "3000000",
+      "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "payTo": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+      "maxTimeoutSeconds": 300,
+      "extra": {
+        "name": "USD Coin",
+        "version": "2"
+      }
+    },
+    {
+      "scheme": "exact",
+      "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+      "amount": "3000000",
+      "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+      "payTo": "SynthPayTo11111111111111111111111111111111",
+      "maxTimeoutSeconds": 300,
+      "extra": {
+        "feePayer": "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP",
+        "transactionVersions": [
+          0
+        ]
+      }
+    }
+  ]
+}

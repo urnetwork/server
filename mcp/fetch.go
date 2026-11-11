@@ -16,6 +16,9 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,8 +98,17 @@ type FetchArgs struct {
 	MaxResources     int    `json:"max_resources,omitempty" jsonschema:"Maximum number of referenced resources to return. Defaults to 8."`
 	MaxResourceBytes int    `json:"max_resource_bytes,omitempty" jsonschema:"Maximum bytes for any single embedded resource; larger ones are returned as links instead. Defaults to 524288."`
 
-	Payment string `json:"payment,omitempty" jsonschema:"A signed x402 payment. Send this only when a previous fetch result returned payment_required, retrying the same call with the signed payment to settle the upgrade and continue."`
+	Payment string `json:"payment,omitempty" jsonschema:"A signed x402 payment for terms a previous fetch result quoted (accepts, or payment_required): base64 of the PaymentPayload JSON, as the PAYMENT-SIGNATURE header carries it, x402 v2 or v1. Retry the same call with it to settle the upgrade and continue. An x402 MCP client sends the payment in _meta x402/payment instead; send it in one place only."`
 }
+
+// The x402 MCP transport's _meta keys (specs/transports-v2/mcp.md): the
+// client sends its PaymentPayload in the tool call's _meta["x402/payment"],
+// and the server answers a settled payment's SettlementResponse in the
+// result's _meta["x402/payment-response"].
+const (
+	x402MetaPayment         = "x402/payment"
+	x402MetaPaymentResponse = "x402/payment-response"
+)
 
 // One resource the page referenced.
 type FetchResourceEntry struct {
@@ -123,6 +135,16 @@ type FetchResult struct {
 
 	Resources []*FetchResourceEntry `json:"resources"`
 
+	// When a plan limit needs a payment, the result is the x402 MCP
+	// transport's PaymentRequired (specs/transports-v2/mcp.md): it sits at
+	// the top level of the structured output, where an x402 MCP client looks
+	// for x402Version and accepts (in v2, with v1 only when no network can be
+	// quoted in v2), and its JSON is the first text content.
+	X402Version int                          `json:"x402Version,omitempty"`
+	Error       string                       `json:"error,omitempty"`
+	Resource    *controller.X402ResourceInfo `json:"resource,omitempty"`
+	Accepts     any                          `json:"accepts,omitempty"`
+	// the same terms in x402 v1, as earlier results carried them
 	PaymentRequired *controller.X402PaymentRequired `json:"payment_required,omitempty"`
 
 	// what the caller should do next, restated in the structured output as
@@ -164,7 +186,20 @@ func fetchTool(
 	args FetchArgs,
 ) (callResult *mcpsdk.CallToolResult, out *FetchResult, err error) {
 	mcpToolBytesTotal.WithLabelValues("fetch", "input").Add(float64(fetchInputBytes(args)))
-	callResult, out, err = fetchToolImpl(ctx, req, args)
+	purchase := &fetchPurchase{}
+	callResult, out, err = fetchToolImpl(ctx, req, args, purchase)
+	// A payment that settled is reported on whatever the call answers, even
+	// when the fetch after it failed: the money moved and Pro is granted
+	// (specs/transports-v2/mcp.md, "Settlement Response Delivery").
+	if err == nil && purchase.settlement != nil {
+		if callResult == nil {
+			callResult = &mcpsdk.CallToolResult{}
+		}
+		if callResult.Meta == nil {
+			callResult.Meta = mcpsdk.Meta{}
+		}
+		callResult.Meta[x402MetaPaymentResponse] = purchase.settlement
+	}
 	resultClass := "succeeded"
 	if err != nil {
 		resultClass = "error"
@@ -182,7 +217,7 @@ func fetchTool(
 		status = out.Status
 		truncated = out.Truncated
 		continuation = out.Continuation != ""
-		payment = out.PaymentRequired != nil
+		payment = out.X402Version != 0
 		for _, resource := range out.Resources {
 			itemClass := "link"
 			if resource.Error != "" {
@@ -203,11 +238,47 @@ func fetchTool(
 	return callResult, out, err
 }
 
+// fetchPurchase is what a fetch call's payment settled, for the result's
+// _meta: the SettlementResponse, in the payment's protocol version.
+type fetchPurchase struct {
+	settlement any
+}
+
+// fetchPayment is the x402 payment a fetch call presents, as base64 of the
+// PaymentPayload JSON (the form X402Purchase reads), or "" when it presents
+// none. An x402 MCP client sends the PaymentPayload object in
+// _meta["x402/payment"] (specs/transports-v2/mcp.md); a caller following the
+// tool's own schema sends the header form in the payment argument, or the
+// JSON object as text. A call that sends both is refused: which one would be
+// settled is not the server's guess to make.
+func fetchPayment(req *mcpsdk.CallToolRequest, args FetchArgs) (string, error) {
+	var metaPayment any
+	if req != nil && req.Params != nil && req.Params.Meta != nil {
+		metaPayment = req.Params.Meta[x402MetaPayment]
+	}
+	argPayment := strings.TrimSpace(args.Payment)
+	if metaPayment != nil && argPayment != "" {
+		return "", errors.New(`Send the payment once: in _meta["x402/payment"] or in payment, not both.`)
+	}
+	if metaPayment != nil {
+		encoded, err := json.Marshal(metaPayment)
+		if err != nil {
+			return "", errors.New(`The payment in _meta["x402/payment"] is not an x402 PaymentPayload.`)
+		}
+		return base64.StdEncoding.EncodeToString(encoded), nil
+	}
+	if strings.HasPrefix(argPayment, "{") {
+		return base64.StdEncoding.EncodeToString([]byte(argPayment)), nil
+	}
+	return argPayment, nil
+}
+
 // fetchToolImpl executes one bounded fetch operation.
 func fetchToolImpl(
 	ctx context.Context,
 	req *mcpsdk.CallToolRequest,
 	args FetchArgs,
+	purchase *fetchPurchase,
 ) (*mcpsdk.CallToolResult, *FetchResult, error) {
 	startTime := time.Now()
 
@@ -239,11 +310,17 @@ func fetchToolImpl(
 		return fetchErrorResult(err.Error()), nil, nil
 	}
 
-	if args.Payment != "" {
-		if err := settleFetchPayment(clientSession, args.Payment); err != nil {
+	payment, err := fetchPayment(req, args)
+	if err != nil {
+		return fetchErrorResult(err.Error()), nil, nil
+	}
+	if payment != "" {
+		result, err := settleFetchPayment(clientSession, payment)
+		if err != nil {
 			glog.Infof("[mcp]fetch payment settle error = %s\n", err)
-			return fetchErrorResult(fmt.Sprintf("The payment could not be settled: %s", err)), nil, nil
+			return fetchPaymentFailedResult(err)
 		}
+		purchase.settlement = result.SettlementResponse()
 	}
 
 	var continuation *fetchContinuation
@@ -745,23 +822,97 @@ func fetchUpgradeResult(upgrade *upgradeRequired) (*mcpsdk.CallToolResult, *Fetc
 	if message == "" {
 		message = MsgFetchUpgradeRequired
 	}
+	if upgrade.terms == nil {
+		out := &FetchResult{
+			Resources: []*FetchResourceEntry{},
+			NextStep:  "The network is at its plan's client limit. Reuse an existing signed_proxy_id, or upgrade the network's plan, then retry.",
+		}
+		return &mcpsdk.CallToolResult{
+			IsError: true,
+			Content: []mcpsdk.Content{
+				&mcpsdk.TextContent{Text: message},
+				&mcpsdk.TextContent{Text: out.NextStep},
+			},
+		}, out, nil
+	}
+	result, out := fetchPaymentRequiredResult(upgrade.terms, message, fetchPayNextStep(upgrade.terms))
+	return result, out, nil
+}
 
+// fetchPayNextStep says how to pay the terms: the price, how to let a
+// default x402 client pay it, and where the signed payment goes.
+func fetchPayNextStep(terms *controller.X402Terms) string {
+	step := "Payment is required to open another egress proxy."
+	if priceUsd := terms.PriceUsd(); 0 < priceUsd {
+		step += fmt.Sprintf(" %s costs $%.2f in USDC.", terms.Description(), priceUsd)
+		if 1 < priceUsd {
+			step += fmt.Sprintf(
+				" x402 clients refuse a payment over $1 by default, so raise your client's per-payment cap to $%.2f or more first.",
+				priceUsd,
+			)
+		}
+	}
+	step += ` Sign one of the quoted terms (accepts) and call fetch again with the same arguments and the signed payment: an x402 MCP client sends it in _meta["x402/payment"] itself; otherwise set payment to it, base64 as for the PAYMENT-SIGNATURE header. The upgrade is settled inline and the fetch proceeds.`
+	return step
+}
+
+// fetchPaymentRequiredResult is the x402 MCP transport's payment required
+// result (specs/transports-v2/mcp.md, "Payment Required Signaling"): isError,
+// the PaymentRequired at the top level of the structured content, and its
+// JSON as the first text content. The terms are v2's, or v1's when no
+// network can be quoted in v2; payment_required keeps the v1 terms earlier
+// results carried.
+func fetchPaymentRequiredResult(terms *controller.X402Terms, message string, nextStep string) (*mcpsdk.CallToolResult, *FetchResult) {
 	out := &FetchResult{
 		Resources:       []*FetchResourceEntry{},
-		PaymentRequired: upgrade.terms,
+		PaymentRequired: terms.V1,
+		NextStep:        nextStep,
 	}
-
-	if upgrade.terms != nil {
-		out.NextStep = "Payment is required to open another egress proxy. Sign the payment described in payment_required and call fetch again with the same arguments plus payment set to the signed payment. The upgrade is settled inline and the fetch proceeds."
-	} else {
-		out.NextStep = "The network is at its plan's client limit. Reuse an existing signed_proxy_id, or upgrade the network's plan, then retry."
+	var paymentRequired any
+	switch {
+	case terms.V2 != nil:
+		paymentRequired = terms.V2
+		out.X402Version = terms.V2.X402Version
+		out.Error = terms.V2.Error
+		out.Resource = &terms.V2.Resource
+		out.Accepts = terms.V2.Accepts
+	case terms.V1 != nil:
+		paymentRequired = terms.V1
+		out.X402Version = terms.V1.X402Version
+		out.Error = terms.V1.Error
+		out.Accepts = terms.V1.Accepts
 	}
+	contents := []mcpsdk.Content{}
+	if paymentRequired != nil {
+		if encoded, err := json.Marshal(paymentRequired); err == nil {
+			contents = append(contents, &mcpsdk.TextContent{Text: string(encoded)})
+		}
+	}
+	contents = append(contents,
+		&mcpsdk.TextContent{Text: message},
+		&mcpsdk.TextContent{Text: nextStep},
+	)
+	return &mcpsdk.CallToolResult{IsError: true, Content: contents}, out
+}
 
-	return &mcpsdk.CallToolResult{
-		IsError: true,
-		Content: []mcpsdk.Content{
-			&mcpsdk.TextContent{Text: message},
-			&mcpsdk.TextContent{Text: out.NextStep},
-		},
-	}, out, nil
+// fetchPaymentFailedResult answers a payment that bought nothing. A payment
+// the terms or the facilitator refused is answered the way payment required
+// is, with the reason as the terms' error and a failed settlement in
+// _meta["x402/payment-response"] (specs/transports-v2/mcp.md, "Settlement
+// Failure"); anything else is a plain tool error.
+func fetchPaymentFailedResult(err error) (*mcpsdk.CallToolResult, *FetchResult, error) {
+	paymentError := &controller.X402PaymentError{}
+	if !errors.As(err, &paymentError) || paymentError.QuotedTerms() == nil {
+		return fetchErrorResult(fmt.Sprintf("The payment could not be settled: %s", err)), nil, nil
+	}
+	terms := paymentError.QuotedTerms()
+	nextStep := "The payment was not accepted, so nothing was charged for it. Sign a new payment for the terms quoted here and call fetch again."
+	if paymentError.Reason == "settlement_pending" {
+		nextStep = "The payment's transaction was broadcast and is not confirmed yet. Do not sign another payment for it. If it confirms, the upgrade is granted after review; write to support@ur.io with the transaction if it does not show up."
+	}
+	result, out := fetchPaymentRequiredResult(terms, paymentError.Message, nextStep)
+	if settlement := paymentError.SettlementResponse(); settlement != nil {
+		result.Meta = mcpsdk.Meta{x402MetaPaymentResponse: settlement}
+	}
+	return result, out, nil
 }
