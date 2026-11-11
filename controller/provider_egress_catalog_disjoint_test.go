@@ -210,7 +210,17 @@ func TestQualityProbeCatalogFromConfiguredPathServesWhatItParses(t *testing.T) {
 		siteCount += len(destinations)
 	}
 	sort.Strings(countries)
-	t.Logf("served as parsed: general=%d candidates=%d countries=%d country_sites=%d", len(sites.Destinations), len(sites.Candidates), len(countries), siteCount)
+	h3 := func(rows []*model.ProviderEgressDestination) int {
+		count := 0
+		for _, row := range rows {
+			if row.H3 {
+				count++
+			}
+		}
+		return count
+	}
+	t.Logf("served as parsed: general=%d (h3 %d) candidates=%d (h3 %d) countries=%d country_sites=%d",
+		len(sites.Destinations), h3(sites.Destinations), len(sites.Candidates), h3(sites.Candidates), len(countries), siteCount)
 }
 
 // The served pool keeps every country list the general entries leave alone
