@@ -11433,4 +11433,8 @@ var migrations = []any{
 	// a five-second lock bound. Nothing existing is rewritten. Apply before
 	// deploying the api, alt and taskworker that write paid_end_time.
 	proGrantCycleMigration,
+
+	// Claims use the same authenticated whole-host admission projection as
+	// readiness, including separately approved exact retained exceptions.
+	newSqlMigration(CompetitionExecutorAdmissionClaimMigrationSql()),
 }

@@ -105,6 +105,15 @@ func (self PostgresStore) SourceLifecycleStatus(ctx context.Context, settings *S
 	if frozen.artifactArchive == nil {
 		return nil, ErrReviewNotReady
 	}
+	if policy := frozen.DistributedEvaluationPolicy; policy != nil && round.Epoch >= policy.FromEpoch {
+		frozen.automationRoundId = round.RoundId
+		if err := self.loadExecutorControlAmendment(ctx, frozen, round); err != nil {
+			return nil, err
+		}
+		if err := self.loadCompetitionReadinessSecurityToolchain(ctx, frozen, round, baseline); err != nil {
+			return nil, err
+		}
+	}
 	if err := frozen.artifactArchive.Check(ctx); err != nil {
 		return nil, err
 	}
@@ -114,10 +123,6 @@ func (self PostgresStore) SourceLifecycleStatus(ctx context.Context, settings *S
 	}
 	status.HostAdmissionReady = secureEvaluatorChecksPass(checks)
 	if policy := frozen.DistributedEvaluationPolicy; policy != nil && round.Epoch >= policy.FromEpoch {
-		frozen.automationRoundId = round.RoundId
-		if err := self.loadExecutorControlAmendment(ctx, frozen, round); err != nil {
-			return nil, err
-		}
 		for _, host := range policy.Hosts {
 			host = competitionExecutorControlHost(frozen, host)
 			qualified, err := self.distributedExecutorQualified(ctx, frozen, round, baseline, host)
