@@ -201,7 +201,23 @@ func recordProviderEgressUrlOutcome(health *model.ProviderEgressHealth, stored m
 	if leg := health.UrlProbeEvidence.H3; leg != nil && leg.Verdict != "" {
 		providerEgressUrlH3VerdictsTotal.WithLabelValues(leg.Verdict).Inc()
 	}
+	if leg := health.UrlProbeEvidence.Ipv6; leg != nil {
+		if leg.Verdict != "" {
+			providerEgressUrlIpv6VerdictsTotal.WithLabelValues(model.ProviderEgressIpv6PlaceTcp, leg.Verdict).Inc()
+		}
+		if leg.H3 != nil && leg.H3.Verdict != "" {
+			providerEgressUrlIpv6VerdictsTotal.WithLabelValues(model.ProviderEgressIpv6PlaceUdp, leg.H3.Verdict).Inc()
+		}
+	}
 }
+
+// The place verdicts of stored failed IPv6 legs (model.JudgeProviderEgressLegs).
+var providerEgressUrlIpv6VerdictsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_url",
+	Name:      "ipv6_verdicts_total",
+	Help:      "Stored URL outcomes of dual-stack providers whose IPv6 leg failed (transport tcp: the HTTPS leg over the URL's AAAA record failed; udp: its HTTP/3 leg over IPv6 was silent), by the ingest's place verdict: provider, where at least three other established networks in the provider's country reached the same URL over IPv6 (over QUIC, for udp) that day or the day before, so the outcome fails; place, where they did not, so the outcome counts as its IPv4 legs",
+}, []string{"transport", "verdict"})
 
 // The place verdicts of stored silent HTTP/3 legs (model.JudgeProviderEgressH3).
 var providerEgressUrlH3VerdictsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -214,6 +230,9 @@ var providerEgressUrlH3VerdictsTotal = prometheus.NewCounterVec(prometheus.Count
 func init() {
 	for _, verdict := range []string{egresshealth.UrlProbeH3VerdictProvider, egresshealth.UrlProbeH3VerdictPlace} {
 		providerEgressUrlH3VerdictsTotal.WithLabelValues(verdict)
+		for _, transport := range []string{model.ProviderEgressIpv6PlaceTcp, model.ProviderEgressIpv6PlaceUdp} {
+			providerEgressUrlIpv6VerdictsTotal.WithLabelValues(transport, verdict)
+		}
 	}
-	prometheus.MustRegister(providerEgressUrlH3VerdictsTotal)
+	prometheus.MustRegister(providerEgressUrlH3VerdictsTotal, providerEgressUrlIpv6VerdictsTotal)
 }

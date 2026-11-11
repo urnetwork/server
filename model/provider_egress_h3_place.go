@@ -192,8 +192,16 @@ func judgedProviderEgressH3(health *ProviderEgressHealth, otherNetworks int) *Pr
 		return &judged
 	}
 	leg.Verdict = egresshealth.UrlProbeH3VerdictPlace
+	passedByPlace(&judged, health)
+	return &judged
+}
+
+// Counts a judged outcome whose every failed later leg was the place's as the
+// IPv4 HTTPS leg that passed: the one load a success in its class and no failed
+// name. health is the outcome as it came, which is not modified.
+func passedByPlace(judged *ProviderEgressHealth, health *ProviderEgressHealth) {
 	judged.OKCount = 1
-	class := string(evidence.Destination.Class)
+	class := string(judged.UrlProbeEvidence.Destination.Class)
 	judged.ClassResults = map[string]ProviderEgressHealthClassResult{}
 	for name, tally := range health.ClassResults {
 		judged.ClassResults[name] = tally
@@ -203,12 +211,11 @@ func judgedProviderEgressH3(health *ProviderEgressHealth, otherNetworks int) *Pr
 	judged.ClassResults[class] = tally
 	failed := []string{}
 	for _, name := range splitProviderEgressNames(health.FailedNames) {
-		if name != evidence.Destination.Name {
+		if name != judged.UrlProbeEvidence.Destination.Name {
 			failed = append(failed, name)
 		}
 	}
 	judged.FailedNames = strings.Join(failed, ",")
-	return &judged
 }
 
 // Removes the HTTP/3 place evidence older than the judgement reads: the day

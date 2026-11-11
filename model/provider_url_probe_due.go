@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
@@ -32,6 +34,13 @@ type ProviderUrlProbeDue struct {
 	// share an operator and often one failure, so the prober's URL common-mode
 	// guard counts one turn per network.
 	NetworkId *server.Id `json:"network_id,omitempty"`
+	// The IP families the provider advertises (ProviderIpFamilyOfProven over
+	// its reliability row's proven families), the category find-providers2
+	// serves for it: dualstack, v4-only, or v6-only, which the claim never
+	// issues. The prober makes its URL loads over each family it names
+	// (qualityprobe/egresshealth url_family.go); a prober that predates it
+	// ignores it and probes IPv4.
+	IpFamily connect.IpFamily `json:"ip_family,omitempty"`
 }
 
 // A stable provider slot belongs to one logical shard, independently of the
@@ -39,9 +48,10 @@ type ProviderUrlProbeDue struct {
 const ProviderUrlProbeSlotCount = 1024
 
 // Replace measurements before they leave the four-hour window. This covers
-// the default 230-second URL turn (its HTTP/3 leg included) plus 90 seconds
-// for control/publication and 40 seconds of scheduling margin. It is not extra quota credit or a promise
-// that a stalled worker finishes. Admission still owns one 15-minute claim.
+// the default 250-second URL turn (a dual-stack provider's, its HTTP/3 and
+// IPv6 legs included) plus 90 seconds for control/publication and 20 seconds
+// of scheduling margin. It is not extra quota credit or a promise that a
+// stalled worker finishes. Admission still owns one 15-minute claim.
 const ProviderUrlProbeRenewalHeadroom = 6 * time.Minute
 
 // Owner decision 2026-10-15 (task #57, option A): a quota-full renewal is due
@@ -266,11 +276,14 @@ func claimProviderUrlProbeDue(ctx context.Context, now time.Time, limit, shardIn
 								var provider ProviderUrlProbeDue
 								var securityDestinations []byte
 								var networkId server.Id
+								var ipv4Proven, ipv6Proven bool
 								server.Raise(rows.Scan(&provider.ClientId, &provider.CycleStartedAt, &provider.RunsNeeded, &provider.OutcomeCount,
 									&provider.CountryCode, &provider.Region, &securityDestinations,
-									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount, &networkId))
+									&provider.ClaimOrdinal, &provider.ClaimedAt, &provider.CompletedRunCount, &networkId,
+									&ipv4Proven, &ipv6Proven))
 								server.Raise(json.Unmarshal(securityDestinations, &provider.SecurityDestinations))
 								provider.NetworkId = &networkId
+								provider.IpFamily = ProviderIpFamilyOfProven(ipv4Proven, ipv6Proven)
 								provider.SuccessesNeeded = provider.RunsNeeded
 								result.Providers = append(result.Providers, provider)
 							}
@@ -350,10 +363,12 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 	// Keep admission lookups parameterized by each head row, and give UPDATE
 	// targets explicit bounded key arrays as well as their exact identity joins.
 	return fmt.Sprintf(head+`, candidates AS MATERIALIZED (
-				SELECT head.*, provider.country_location_id, provider.region_location_id, provider.network_id
+				SELECT head.*, provider.country_location_id, provider.region_location_id, provider.network_id,
+					provider.ipv4_proven, provider.ipv6_proven
 				FROM head
 				CROSS JOIN LATERAL (
-					SELECT provider.country_location_id, provider.region_location_id, client.network_id
+					SELECT provider.country_location_id, provider.region_location_id, client.network_id,
+						provider.ipv4_proven, provider.ipv6_proven
 					FROM network_client_location_reliability AS provider
 					JOIN network_client AS client USING (client_id)
 					WHERE provider.client_id=head.client_id
@@ -401,7 +416,8 @@ func providerUrlProbeDueSql(shardIndex, shardCount int, priorities ...bool) stri
 				COALESCE((SELECT jsonb_agg(security.destination ORDER BY security.url_key)
 					FROM provider_egress_url_security AS security
 					WHERE security.client_id=claimed.client_id AND `+providerUrlSecurityRechecksSql("security")+`), '[]'::jsonb),
-				claimed.claim_ordinal, issued.claimed_at, %s, candidates.network_id
+				claimed.claim_ordinal, issued.claimed_at, %s, candidates.network_id,
+				candidates.ipv4_proven, candidates.ipv6_proven
 			FROM claimed JOIN issued USING(client_id,claim_ordinal)
 			JOIN candidates USING (client_id)
 			LEFT JOIN LATERAL (SELECT country_code FROM location
