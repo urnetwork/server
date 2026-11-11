@@ -11411,4 +11411,11 @@ var migrations = []any{
 
 	// Explicit operator admission over exact failed retained evidence; no resampling.
 	newSqlMigration(CompetitionExecutorAdmissionExceptionMigrationSql()),
+
+	// The HTTP/3 place evidence (db_provider_egress_h3_place.go,
+	// model/provider_egress_h3_place.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten. Apply before deploying the taskworker, api and alt
+	// that use it.
+	providerEgressH3PlaceMigration,
 }

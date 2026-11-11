@@ -63,7 +63,18 @@ type UrlProbeEvidence struct {
 // diagnostic data like the rest of the evidence: no body, no address. Its
 // certificate outcome is recorded here and never as URL security evidence:
 // TLS findings and their judge stay about the HTTPS identity.
+//
+// Udp is what the leg says about the provider's UDP path (UrlProbeH3Udp*):
+// passed, answered (the site answered over QUIC and refused or failed the
+// request: UDP works), silent (nothing came back: the only evidence against
+// the provider), or not_measured. Verdict is the server's place judgement of
+// a silent leg (model.JudgeProviderEgressH3): provider, where established
+// networks in the same country reach the URL over QUIC, so the silence counts
+// against the provider; or place, where they do not, so the outcome counts
+// as its HTTPS leg. A prober never sets it.
 type UrlProbeH3Evidence struct {
+	Udp                       string  `json:"udp"`
+	Verdict                   string  `json:"verdict,omitempty"`
 	ContentClassification     string  `json:"content_classification"`
 	PerformanceClassification string  `json:"performance_classification"`
 	FailureStage              string  `json:"failure_stage"`
@@ -94,6 +105,7 @@ func urlProbeH3EvidenceOf(check *CheckResult) *UrlProbeH3Evidence {
 	}
 	millis := func(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
 	return &UrlProbeH3Evidence{
+		Udp:                   UrlProbeH3Udp(check),
 		ContentClassification: check.ContentClassification, PerformanceClassification: check.PerformanceClassification,
 		FailureStage: check.FailureStage, NotMeasured: check.NotMeasured,
 		TlsAuthenticated: 0 < check.StatusCode && !check.TlsAuthenticationFailure, TlsFailure: check.TlsAuthenticationFailure,
@@ -186,9 +198,46 @@ func (self *UrlProbeEvidence) Validate() error {
 		if leg.TlsAuthenticated && leg.TlsFailure {
 			return fmt.Errorf("URL HTTP/3 evidence cannot both authenticate and fail TLS")
 		}
+		// the UDP classification follows from the leg's own record
+		// (UrlProbeH3Udp), and only a silent leg can carry a place verdict
+		switch leg.Udp {
+		case UrlProbeH3UdpPassed:
+			if leg.NotMeasured || leg.FailureStage != "" || leg.succeeded(self.Policy) != nil {
+				return fmt.Errorf("URL HTTP/3 evidence passed without success evidence")
+			}
+		case UrlProbeH3UdpAnswered:
+			if leg.NotMeasured || leg.FailureStage == "" || leg.FailureStage == FailureStageDialQuic {
+				return fmt.Errorf("URL HTTP/3 evidence answered without a failure the site gave")
+			}
+		case UrlProbeH3UdpSilent:
+			if leg.NotMeasured || leg.FailureStage != FailureStageDialQuic || leg.StatusCode != 0 || leg.FirstByteReceived || leg.TlsAuthenticated || leg.TlsFailure {
+				return fmt.Errorf("URL HTTP/3 evidence is silent although the site answered")
+			}
+		case UrlProbeH3UdpNotMeasured:
+			if !leg.NotMeasured && leg.FailureStage == FailureStageDialQuic {
+				return fmt.Errorf("URL HTTP/3 evidence calls a silent leg unmeasured")
+			}
+		default:
+			return fmt.Errorf("URL HTTP/3 evidence has no UDP classification")
+		}
+		switch leg.Verdict {
+		case "":
+		case UrlProbeH3VerdictProvider, UrlProbeH3VerdictPlace:
+			if leg.Udp != UrlProbeH3UdpSilent {
+				return fmt.Errorf("URL HTTP/3 place verdict on a leg that was not silent")
+			}
+		default:
+			return fmt.Errorf("URL HTTP/3 verdict %q is unknown", leg.Verdict)
+		}
 	}
 	return nil
 }
+
+// The server's place judgement of a silent HTTP/3 leg (UrlProbeH3Evidence).
+const (
+	UrlProbeH3VerdictProvider = "provider"
+	UrlProbeH3VerdictPlace    = "place"
+)
 
 // The operator report must carry the actual versioned success evidence. Legacy
 // nil evidence can be stored for audit but never becomes a URL-policy receipt.
@@ -220,34 +269,43 @@ func (self *UrlProbeEvidence) ValidateOutcome(ok, total int, tlsFailure bool) er
 		// An HTTP/3 leg is made only after the HTTPS leg passed, so its
 		// presence is itself a claim the HTTPS evidence must bear out, whatever
 		// the outcome counts: a stored HTTP/3 leg always means the provider
-		// carried the site over TCP. Its stage names the leg's verdict.
+		// carried the site over TCP. The outcome's stage names the leg's
+		// verdict: none when the leg proved the provider's UDP path, h3 when
+		// it was silent or not measured.
 		if self.FailureStage != "" && self.FailureStage != FailureStageH3 {
 			return fmt.Errorf("URL HTTP/3 evidence follows an HTTPS leg that failed")
 		}
 		if err := https("").succeeded(self.Policy, "URL"); err != nil {
 			return fmt.Errorf("URL HTTP/3 evidence follows an HTTPS leg without success evidence: %w", err)
 		}
-		legSucceeded := !leg.NotMeasured && leg.succeeded(self.Policy) == nil
-		if legSucceeded != (self.FailureStage == "") {
+		udpProven := leg.Udp == UrlProbeH3UdpPassed || leg.Udp == UrlProbeH3UdpAnswered
+		if udpProven != (self.FailureStage == "") {
 			return fmt.Errorf("URL failure stage disagrees with its HTTP/3 leg")
 		}
 	}
 	if ok == 0 {
 		return nil
 	}
-	if err := https(self.FailureStage).succeeded(self.Policy, "URL"); err != nil {
+	leg := self.H3
+	// a silent leg the server judged the place's counts as its HTTPS leg
+	placeJudged := leg != nil && leg.Udp == UrlProbeH3UdpSilent && leg.Verdict == UrlProbeH3VerdictPlace
+	stage := self.FailureStage
+	if placeJudged {
+		stage = ""
+	}
+	if err := https(stage).succeeded(self.Policy, "URL"); err != nil {
 		return err
 	}
 	if !self.Destination.H3 {
 		return nil
 	}
-	// A destination that declares HTTP/3 passes only with both legs: the
-	// HTTPS leg above, and this one under the same contract.
-	leg := self.H3
-	if leg == nil || leg.NotMeasured {
-		return fmt.Errorf("URL success of an HTTP/3 destination is missing its HTTP/3 leg")
+	// A destination that declares HTTP/3 passes only with the HTTPS leg above
+	// and an HTTP/3 leg that proved the provider's UDP path, or one the
+	// server judged silent for its place.
+	if leg == nil || !(leg.Udp == UrlProbeH3UdpPassed || leg.Udp == UrlProbeH3UdpAnswered || placeJudged) {
+		return fmt.Errorf("URL success of an HTTP/3 destination is missing an HTTP/3 leg that reached the site")
 	}
-	return leg.succeeded(self.Policy)
+	return nil
 }
 
 // Whether the HTTP/3 leg's final response meets the contract its HTTPS leg's

@@ -1509,14 +1509,17 @@ func failureStageSummary(checks []CheckResult) string {
 }
 
 // The HTTP/3 leg outcomes of a run's loads whose destination declares HTTP/3,
-// finite and identity-free like FailureStageSummary: ok, skipped (the HTTPS
-// leg failed first, so no leg was made), not_measured, or the failed leg's
-// own stage, each with its count. Empty when no load declared HTTP/3.
+// finite and identity-free like FailureStageSummary (UrlProbeH3Udp): ok,
+// silent (nothing answered the QUIC handshake: the one outcome that fails the
+// load), skipped (the HTTPS leg failed first, so no leg was made),
+// not_measured, or, for a leg the site answered and refused or failed, that
+// leg's own stage -- tls for a TLS alert, quic, response_content and the
+// like. Each comes with its count. Empty when no load declared HTTP/3.
 func (self *Result) H3Summary() string {
 	if self == nil {
 		return ""
 	}
-	order := []string{"ok", "skipped", "not_measured", FailureStageDialQuic, FailureStageQuic, "tls", "dial_dns", "dial_dns_or_socket", "policy", "redirect_policy", "redirect_limit", "redirect_location", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_eof", "request_unknown", "response_encoding", "response_body", "response_content", "response_performance", "unknown"}
+	order := []string{"ok", "silent", "skipped", "not_measured", "tls", FailureStageQuic, "redirect_policy", "redirect_limit", "redirect_location", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_eof", "request_unknown", "response_encoding", "response_body", "response_content", "response_performance", "unknown"}
 	known := map[string]bool{}
 	for _, outcome := range order {
 		known[outcome] = true
@@ -1527,15 +1530,19 @@ func (self *Result) H3Summary() string {
 			continue
 		}
 		outcome := "unknown"
-		switch leg := check.H3; {
-		case leg == nil:
+		switch UrlProbeH3Udp(check.H3) {
+		case "":
 			outcome = "skipped"
-		case leg.NotMeasured:
-			outcome = "not_measured"
-		case leg.Ok:
+		case UrlProbeH3UdpPassed:
 			outcome = "ok"
-		case known[leg.FailureStage]:
-			outcome = leg.FailureStage
+		case UrlProbeH3UdpSilent:
+			outcome = "silent"
+		case UrlProbeH3UdpNotMeasured:
+			outcome = "not_measured"
+		default:
+			if known[check.H3.FailureStage] {
+				outcome = check.H3.FailureStage
+			}
 		}
 		counts[outcome]++
 	}

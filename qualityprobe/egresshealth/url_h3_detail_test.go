@@ -5,6 +5,7 @@ package egresshealth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"math/rand"
 	"net/http"
@@ -30,7 +31,8 @@ func TestUrlProbeH3FailureKeepsTheLegsApart(t *testing.T) {
 	}
 	evidence := result.UrlProbeEvidence
 	if !evidence.Destination.H3 || evidence.FailureStage != FailureStageH3 || evidence.ContentClassification != "content" || evidence.StatusCode != http.StatusOK ||
-		evidence.H3 == nil || evidence.H3.FailureStage != FailureStageDialQuic || evidence.H3.StatusCode != 0 || evidence.H3.TlsAuthenticated || evidence.H3.TlsFailure {
+		evidence.H3 == nil || evidence.H3.FailureStage != FailureStageDialQuic || evidence.H3.StatusCode != 0 || evidence.H3.TlsAuthenticated || evidence.H3.TlsFailure ||
+		evidence.H3.Udp != UrlProbeH3UdpSilent || evidence.H3.Verdict != "" {
 		t.Fatalf("evidence did not keep the legs apart: %+v h3=%+v", evidence, evidence.H3)
 	}
 	if !evidence.HttpsOk(result.OkCount) {
@@ -39,7 +41,7 @@ func TestUrlProbeH3FailureKeepsTheLegsApart(t *testing.T) {
 	if len(evidence.Security) != 1 || !evidence.Security[0].TlsAuthenticated {
 		t.Fatalf("HTTPS security evidence changed: %+v", evidence.Security)
 	}
-	if summary := result.H3Summary(); summary != "dial_quic:1" {
+	if summary := result.H3Summary(); summary != "silent:1" {
 		t.Fatalf("h3 summary = %q", summary)
 	}
 	if stages := result.FailureStageSummary(); stages != "h3:1" {
@@ -56,7 +58,7 @@ func TestUrlProbeH3SuccessRecordsTheLeg(t *testing.T) {
 		t.Fatalf("passed legs: %+v leg=%+v", check, check.H3)
 	}
 	leg := result.UrlProbeEvidence.H3
-	if leg == nil || leg.FailureStage != "" || leg.ContentClassification != "content" || leg.StatusCode != http.StatusOK || !leg.TlsAuthenticated ||
+	if leg == nil || leg.Udp != UrlProbeH3UdpPassed || leg.FailureStage != "" || leg.ContentClassification != "content" || leg.StatusCode != http.StatusOK || !leg.TlsAuthenticated ||
 		!leg.RequestWritten || !leg.FirstByteReceived || leg.ByteCount == 0 {
 		t.Fatalf("HTTP/3 success evidence: %+v", leg)
 	}
@@ -164,9 +166,76 @@ func TestUrlProbeH3EvidenceValidation(t *testing.T) {
 		evidence *UrlProbeEvidence
 		ok       int
 	}{unauthenticated, 1}
+	proverSet := clone(passed.UrlProbeEvidence)
+	proverSet.H3.Verdict = UrlProbeH3VerdictPlace
+	cases["a place verdict on a leg that reached its site"] = struct {
+		evidence *UrlProbeEvidence
+		ok       int
+	}{proverSet, 1}
+	provider := clone(failed.UrlProbeEvidence)
+	provider.H3.Verdict = UrlProbeH3VerdictProvider
+	cases["a success of a silent leg judged the provider's"] = struct {
+		evidence *UrlProbeEvidence
+		ok       int
+	}{provider, 1}
+	unjudged := clone(failed.UrlProbeEvidence)
+	cases["a success of a silent leg nobody judged"] = struct {
+		evidence *UrlProbeEvidence
+		ok       int
+	}{unjudged, 1}
+	mislabeled := clone(failed.UrlProbeEvidence)
+	mislabeled.H3.Udp = UrlProbeH3UdpAnswered
+	cases["a silent leg called answered"] = struct {
+		evidence *UrlProbeEvidence
+		ok       int
+	}{mislabeled, 1}
 	for name, c := range cases {
 		if err := c.evidence.ValidateOutcome(c.ok, 1, false); err == nil {
 			t.Errorf("%s was accepted", name)
+		}
+	}
+	// the stored forms of the server's two verdicts on a silent leg
+	place := clone(failed.UrlProbeEvidence)
+	place.H3.Verdict = UrlProbeH3VerdictPlace
+	if err := place.ValidateOutcome(1, 1, false); err != nil {
+		t.Fatalf("a silent leg the place does not carry is not its HTTPS success: %v", err)
+	}
+	provider.H3.Verdict = UrlProbeH3VerdictProvider
+	if err := provider.ValidateOutcome(0, 1, false); err != nil {
+		t.Fatalf("a silent leg judged the provider's is not its failure: %v", err)
+	}
+}
+
+// A site that answers the QUIC handshake and refuses it proves the provider
+// carries UDP: the TLS alerts that QUIC edges without h3 for a hostname send
+// (0x128, 0x150), a reset, or a response that fails the contract over HTTP/3.
+// The load is judged by its HTTPS leg, and the leg is recorded as answered.
+func TestUrlProbeH3AnsweredLegIsJudgedByItsHttpsLeg(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		h3    http.RoundTripper
+		stage string
+	}{
+		{"a TLS alert", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &echoStageSyntheticError{stage: "tls", cause: errors.New("CRYPTO_ERROR 0x128 (remote): tls: handshake failure")}
+		}), "tls"},
+		{"a reset handshake", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return nil, &echoStageSyntheticError{stage: FailureStageQuic, cause: errors.New("received a stateless reset")}
+		}), FailureStageQuic},
+		{"a refusing response", roundTripperFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusForbidden, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("synthetic refusal"))}, nil
+		}), "response_content"},
+	} {
+		result := h3TestCheck(t, &h3TestTransport{https: h3TestContent(nil), h3: c.h3}, h3TestDestinations(t, h3TestCatalog))
+		check := result.Checks[0]
+		if !check.Ok || result.OkCount != 1 || check.FailureStage != "" || check.H3 == nil || check.H3.Ok || UrlProbeH3Udp(check.H3) != UrlProbeH3UdpAnswered {
+			t.Fatalf("%s: ok=%d/%d check=%+v leg=%+v; an answer over QUIC proves the provider's UDP path", c.name, result.OkCount, result.Total, check, check.H3)
+		}
+		if leg := result.UrlProbeEvidence.H3; leg == nil || leg.Udp != UrlProbeH3UdpAnswered || leg.FailureStage != c.stage {
+			t.Fatalf("%s: evidence %+v", c.name, leg)
+		}
+		if summary := result.H3Summary(); summary != c.stage+":1" {
+			t.Fatalf("%s: h3 summary = %q", c.name, summary)
 		}
 	}
 }

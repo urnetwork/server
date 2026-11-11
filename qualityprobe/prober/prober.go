@@ -358,10 +358,11 @@ func (self *Prober) probeOne(ctx context.Context, provider Provider, timing *pro
 		if stages := res.FailureStageSummary(); stages != "" {
 			line += " failure_stages=" + stages
 		}
-		// h3= is the HTTP/3 leg of each load whose URL declares it, which
-		// passes only with both legs: ok, skipped (its HTTPS leg failed),
-		// not_measured, or the failed leg's fixed stage, e.g. dial_quic for a
-		// provider path that answered no QUIC handshake.
+		// h3= is the HTTP/3 leg of each load whose URL declares it: ok;
+		// silent, nothing answered its QUIC handshake, the one outcome that
+		// fails the load (and the server then judges it by place); skipped,
+		// its HTTPS leg failed first; not_measured; or, for a leg the site
+		// answered and refused, that leg's fixed stage, e.g. tls for an alert.
 		if h3 := res.H3Summary(); h3 != "" {
 			line += " h3=" + h3
 		}

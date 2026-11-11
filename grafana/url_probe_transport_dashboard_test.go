@@ -34,10 +34,11 @@ func TestEgressProbeDashboardChartsUrlLegsByTransport(t *testing.T) {
 		{"URL legs by transport and outcome / min", "short", []string{
 			"sum by (transport, outcome) (rate(" + metric + selector + "}[$__rate_interval])) * 60",
 			"sum(rate(urnetwork_url_probe_h3_common_mode_held_total" + selector + "}[$__rate_interval])) * 60",
-		}, []string{"tcp", "udp", "h3", "not_measured", "skipped", "held", "both legs"}},
-		{"HTTP/3 legs failing after a passed HTTPS leg (1h)", "percentunit", []string{
-			"sum(increase(" + metric + selector + `,transport="udp",outcome="error"}[1h])) / sum(increase(` + metric + selector + `,transport="udp",outcome=~"success|error"}[1h]))`,
-		}, []string{"TCP but not UDP", "unmeasured", "skipped"}},
+			`sum by (verdict) (rate(urnetwork_egress_url_h3_verdicts_total{env="$env",instance!=""}[$__rate_interval])) * 60`,
+		}, []string{"tcp", "udp", "h3", "answered", "silent", "not_measured", "skipped", "verdict", "provider", "place", "held"}},
+		{"silent HTTP/3 legs after a passed HTTPS leg (1h)", "percentunit", []string{
+			"sum(increase(" + metric + selector + `,transport="udp",outcome="silent"}[1h])) / sum(increase(` + metric + selector + `,transport="udp",outcome=~"success|answered|silent"}[1h]))`,
+		}, []string{"TCP but not UDP", "place judgement", "unmeasured", "skipped"}},
 	} {
 		panels := []testPanel{}
 		for _, panel := range dashboard.Panels {

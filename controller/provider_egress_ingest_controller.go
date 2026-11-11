@@ -448,6 +448,11 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 		if tlsFailure != args.TLSAuthenticationFailure {
 			return refuseProviderEgressIngest("URL security evidence disagrees with the aggregate TLS flag.")
 		}
+		if args.UrlProbeEvidence.H3 != nil && args.UrlProbeEvidence.H3.Verdict != "" {
+			// the place judgement of a silent HTTP/3 leg is this server's
+			// (model.JudgeProviderEgressH3), never a prober's
+			return refuseProviderEgressIngest("An HTTP/3 verdict is judged by the server.")
+		}
 	}
 	if args.OKCount < 0 || args.TotalCount < 0 {
 		return refuseProviderEgressIngest("ok_count and total_count must be non-negative.")
@@ -557,6 +562,9 @@ func SubmitProviderEgressHealth(ctx context.Context, args *SubmitProviderEgressH
 		place := model.GetProviderEgressPlaces(ctx, []server.Id{args.ClientId})[args.ClientId]
 		health = model.ScoreProviderEgressHealth(health, place, model.GetProviderEgressHealthScoring(ctx))
 	}
+	// A silent HTTP/3 leg counts against the provider only where its place
+	// carries QUIC to the URL; elsewhere the outcome counts as its HTTPS leg.
+	health = model.JudgeProviderEgressH3(ctx, health)
 
 	recordProviderEgressUrlOutcome(health, model.StoreProviderEgressHealth(ctx, health))
 	return nil

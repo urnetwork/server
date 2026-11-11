@@ -69,10 +69,20 @@ func providerUrlProbeCountedH3Leg(run *egresshealth.Result) *egresshealth.CheckR
 }
 
 // A failed run whose only failure is its HTTP/3 leg: its URL declares HTTP/3,
-// its HTTPS leg passed, and its measured HTTP/3 leg did not.
+// its HTTPS leg passed, and nothing answered its HTTP/3 leg's QUIC handshake
+// (egresshealth.UrlProbeH3UdpSilent), the one HTTP/3 outcome that fails a
+// load.
 func providerUrlProbeH3OnlyFailure(run *egresshealth.Result) bool {
 	leg := providerUrlProbeCountedH3Leg(run)
-	return leg != nil && !leg.Ok && run.OkCount == 0 && !run.TlsAuthenticationFailure
+	return leg != nil && egresshealth.UrlProbeH3Udp(leg) == egresshealth.UrlProbeH3UdpSilent && run.OkCount == 0 && !run.TlsAuthenticationFailure
+}
+
+// Whether a measured HTTP/3 leg reached its site over QUIC: it passed, or the
+// site answered it. Either proves the platform's QUIC path through the
+// provider, whatever the site then did.
+func providerUrlProbeH3LegReachedSite(leg *egresshealth.CheckResult) bool {
+	udp := egresshealth.UrlProbeH3Udp(leg)
+	return udp == egresshealth.UrlProbeH3UdpPassed || udp == egresshealth.UrlProbeH3UdpAnswered
 }
 
 // The latest measured turn of each of one pass's most recently measured
@@ -101,15 +111,16 @@ func providerUrlProbeH3OnlyFailure(run *egresshealth.Result) bool {
 //
 // A second window holds the latest measured HTTP/3 leg of each of the pass's
 // most recently measured networks (url_h3.go). Every such leg follows an
-// HTTPS leg that passed, so a fleet whose HTTP/3 legs all fail while their
-// HTTPS legs pass is failing on the platform's own QUIC path, not on each
-// provider's UDP: the provider path is the same one the HTTPS leg just
+// HTTPS leg that passed, so a fleet whose HTTP/3 legs all go unanswered while
+// their HTTPS legs pass is failing on the platform's own QUIC path, not on
+// each provider's UDP: the provider path is the same one the HTTPS leg just
 // proved. When that window is full and at most
-// providerUrlProbeCommonModePassShare of it passed, a run whose only failure
-// is its HTTP/3 leg is held back the same way, so a prober-side HTTP/3 fault
-// can never fail every provider at once. A passed HTTP/3 leg ends the episode
-// as soon as it is recorded; a real share of providers that carry no UDP
-// leaves the window holding passes, and every outcome is published.
+// providerUrlProbeCommonModePassShare of its legs reached their sites (passed,
+// or answered by the site), a run whose only failure is a silent HTTP/3 leg
+// is held back the same way, so a prober-side HTTP/3 fault can never fail
+// every provider at once. A leg that reaches its site ends the episode as
+// soon as it is recorded; a real share of providers that carry no UDP leaves
+// the window holding such legs, and every outcome is published.
 type providerUrlProbeCommonMode struct {
 	shardIndex int
 	shardCount int
@@ -196,7 +207,7 @@ func (self *providerUrlProbeCommonMode) judge(
 				network.providerClientId = providerClientId
 			}
 			if leg := providerUrlProbeCountedH3Leg(run); leg != nil {
-				pass := leg.Ok
+				pass := providerUrlProbeH3LegReachedSite(leg)
 				if batchPass, ok := batchH3Pass[network]; ok {
 					// as above: one network's providers are one turn
 					pass = pass || batchPass

@@ -101,6 +101,26 @@ func TestUrlProbeH3CommonModeReleasesOnAnH3Pass(t *testing.T) {
 	}
 }
 
+// A site that answers QUIC and refuses it proves the platform's QUIC path as
+// a pass does: fifteen silent legs and one answered leg are no common mode.
+func TestUrlProbeH3CommonModeCountsAnAnsweredLegAsReachingItsSite(t *testing.T) {
+	answered := testUrlCommonModeRun(egresshealth.CheckResult{
+		Ok: true, StatusCode: http.StatusOK, RequestWritten: true, FirstByteReceived: true, DnsMeasured: true,
+		ContentClassification: "content", ByteCount: 64 * 1024, WireByteCount: 64 * 1024,
+		UrlProbeSecurity: []egresshealth.UrlProbeSecurityEvent{{TlsAuthenticated: true}},
+		H3Required:       true,
+		H3:               &egresshealth.CheckResult{FailureStage: "tls", Err: "CRYPTO_ERROR 0x128 (remote)"},
+	})
+	turns := testUrlCommonModeTurns("synthetic-silent", 0, 15, testUrlH3OnlyFailure())
+	turns = append(turns, testUrlCommonModeTurn{providerClientId: "synthetic-answered", run: answered})
+	turns = append(turns, testUrlCommonModeTurns("synthetic-after", 0, 8, testUrlH3OnlyFailure())...)
+	_, releases := testRunUrlCommonModeTurns(t, 1, turns)
+	publishedCount, heldCount, unexpected := testUrlCommonModeCount(releases, testUrlCommonModeNoneHeld)
+	if publishedCount != 24 || heldCount != 0 || len(unexpected) != 0 {
+		t.Fatalf("an answered leg in the window: published %d held %d (unexpected turns %v), want every turn published", publishedCount, heldCount, unexpected)
+	}
+}
+
 // URLs without HTTP/3 never enter the HTTP/3 window: their passes do not hide
 // a fleet-wide HTTP/3 fault, and they are published as ever.
 func TestUrlProbeH3CommonModeJudgesHttp3LegsApart(t *testing.T) {
@@ -216,12 +236,15 @@ func (*testH3AckIngest) SubmitEgressHealth(context.Context, string, *egresshealt
 // series count each leg apart, so the providers that carry TCP and not UDP
 // are visible, and the legacy outcome series keeps counting the verdict.
 func TestUrlProbeTransportOutcomesSplitTcpAndUdp(t *testing.T) {
-	type counts struct{ success, failure, tcpSuccess, tcpError, udpSuccess, udpError, udpSkipped, udpNotMeasured float64 }
+	type counts struct {
+		success, failure, tcpSuccess, tcpError, udpSuccess, udpAnswered, udpSilent, udpSkipped, udpNotMeasured float64
+	}
 	read := func() counts {
 		return counts{
 			testutil.ToFloat64(urlProbeOutcomes.WithLabelValues("success")), testutil.ToFloat64(urlProbeOutcomes.WithLabelValues("error")),
 			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("tcp", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("tcp", "error")),
-			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "error")),
+			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "success")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "answered")),
+			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "silent")),
 			testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "skipped")), testutil.ToFloat64(urlProbeTransportOutcomes.WithLabelValues("udp", "not_measured")),
 		}
 	}
@@ -235,7 +258,8 @@ func TestUrlProbeTransportOutcomesSplitTcpAndUdp(t *testing.T) {
 		want         counts
 	}{
 		{"both legs pass", h3, &testH3Transport{https: testH3Leg(http.StatusOK, nil), h3: testH3Leg(http.StatusOK, nil)}, counts{success: 1, tcpSuccess: 1, udpSuccess: 1}},
-		{"UDP dropped", h3, &testH3Transport{https: testH3Leg(http.StatusOK, nil), h3: testH3Leg(0, &testH3StageError{stage: egresshealth.FailureStageDialQuic})}, counts{failure: 1, tcpSuccess: 1, udpError: 1}},
+		{"UDP dropped", h3, &testH3Transport{https: testH3Leg(http.StatusOK, nil), h3: testH3Leg(0, &testH3StageError{stage: egresshealth.FailureStageDialQuic})}, counts{failure: 1, tcpSuccess: 1, udpSilent: 1}},
+		{"the site refused QUIC", h3, &testH3Transport{https: testH3Leg(http.StatusOK, nil), h3: testH3Leg(0, &testH3StageError{stage: "tls"})}, counts{success: 1, tcpSuccess: 1, udpAnswered: 1}},
 		{"HTTPS failed first", h3, &testH3Transport{https: refusing, h3: testH3Leg(http.StatusOK, nil)}, counts{failure: 1, tcpError: 1, udpSkipped: 1}},
 		{"no HTTP/3 path", h3, &testH3Transport{https: testH3Leg(http.StatusOK, nil)}, counts{tcpSuccess: 1, udpNotMeasured: 1}},
 		{"a URL without HTTP/3", tcp, &testH3Transport{https: testH3Leg(http.StatusOK, nil), h3: testH3Leg(0, errors.New("never asked"))}, counts{success: 1, tcpSuccess: 1}},
@@ -256,7 +280,7 @@ func TestUrlProbeTransportOutcomesSplitTcpAndUdp(t *testing.T) {
 		got := counts{
 			after.success - before.success, after.failure - before.failure,
 			after.tcpSuccess - before.tcpSuccess, after.tcpError - before.tcpError,
-			after.udpSuccess - before.udpSuccess, after.udpError - before.udpError,
+			after.udpSuccess - before.udpSuccess, after.udpAnswered - before.udpAnswered, after.udpSilent - before.udpSilent,
 			after.udpSkipped - before.udpSkipped, after.udpNotMeasured - before.udpNotMeasured,
 		}
 		if got != c.want {

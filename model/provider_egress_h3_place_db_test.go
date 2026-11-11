@@ -1,0 +1,229 @@
+package model
+
+import (
+	"testing"
+	"time"
+
+	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
+)
+
+// One URL outcome of clientId on site at `at` whose HTTPS leg passed and
+// whose HTTP/3 leg was udp: passed, answered by the site, or silent.
+func testingH3UrlResult(clientId server.Id, site egresshealth.Destination, at time.Time, udp string) *ProviderEgressHealth {
+	evidence := fp2TestUrlProbeEvidence(at, true)
+	site.H3 = true
+	evidence.Destination = site
+	evidence.Security = []egresshealth.UrlProbeSecurityEvent{{Destination: site, MeasuredAt: at, TlsAuthenticated: true}}
+	ok := 1
+	switch udp {
+	case egresshealth.UrlProbeH3UdpPassed:
+		evidence.H3 = &egresshealth.UrlProbeH3Evidence{Udp: udp, ContentClassification: "content", PerformanceClassification: "insufficient_sample",
+			TlsAuthenticated: true, StatusCode: 200, ByteCount: 32, WireByteCount: 32, WireSampleByteCount: 31, BodyComplete: true,
+			RequestWritten: true, FirstByteReceived: true, TtfbMillis: 10, BodyMillis: 1, BodyBitsPerSecond: 248000}
+	case egresshealth.UrlProbeH3UdpAnswered:
+		evidence.H3 = &egresshealth.UrlProbeH3Evidence{Udp: udp, FailureStage: "tls"}
+	case egresshealth.UrlProbeH3UdpSilent:
+		ok = 0
+		evidence.FailureStage = egresshealth.FailureStageH3
+		evidence.H3 = &egresshealth.UrlProbeH3Evidence{Udp: udp, FailureStage: egresshealth.FailureStageDialQuic}
+	}
+	failed := ""
+	if ok == 0 {
+		failed = site.Name
+	}
+	return &ProviderEgressHealth{
+		RunId: server.NewId(), ClientId: clientId, MeasuredAt: at, OKCount: ok, Total: 1, UrlProbeEvidence: evidence,
+		ClassResults: map[string]ProviderEgressHealthClassResult{string(site.Class): {OK: ok, Total: 1}}, FailedNames: failed,
+	}
+}
+
+// Providers connected in a new country, each on a network of its own unless
+// they share networkId, with their reliability rows (and so their countries)
+// written.
+func testingH3Providers(t testing.TB, location *Location, count int) []server.Id {
+	ctx := t.Context()
+	providers := []server.Id{}
+	for range count {
+		providers = append(providers, egressTestConnect(ctx, t, location, egressTestUnsampled, nil, nil).clientId)
+	}
+	return providers
+}
+
+func testingH3Locate(t testing.TB) {
+	now := server.NowUtc()
+	UpdateClientLocationReliabilities(t.Context(), now.Add(-time.Hour), now)
+}
+
+// The judgement of a silent leg, and its outcome as stored: the history row's
+// ok_count and the verdict kept in its evidence.
+func testingH3JudgeAndStore(t testing.TB, health *ProviderEgressHealth) (*ProviderEgressHealth, int, string) {
+	t.Helper()
+	ctx := t.Context()
+	judged := JudgeProviderEgressH3(ctx, health)
+	if err := judged.UrlProbeEvidence.ValidateOutcome(judged.OKCount, judged.Total, judged.TLSAuthenticationFailure); err != nil {
+		t.Fatalf("the judged outcome fails validation: %v", err)
+	}
+	if !StoreProviderEgressHealth(ctx, judged).Stored {
+		t.Fatal("the judged outcome was not stored")
+	}
+	var ok int
+	var verdict string
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `SELECT ok_count, COALESCE(url_probe_evidence -> 'h3' ->> 'verdict', '')
+			FROM provider_egress_health_history WHERE run_id = $1`, judged.RunId).Scan(&ok, &verdict))
+	})
+	return judged, ok, verdict
+}
+
+// Where three other established networks in the provider's country reach the
+// same URL over QUIC, a silent leg is the provider's: its outcome fails.
+func TestH3SilentLegWhereThePlaceReachesTheUrlIsTheProviders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "H3 City", "H3 Region", "H3 Country", "zx")
+		providers := testingH3Providers(t, city, 4)
+		testingTlsEstablishNetworks(ctx, providers...)
+		testingH3Locate(t)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		site := testingTlsSite("h3-site", "https://h3.example/")
+		for i, clientId := range providers[:3] {
+			udp := egresshealth.UrlProbeH3UdpPassed
+			if i == 2 {
+				// a site answering and refusing proves the place carries QUIC too
+				udp = egresshealth.UrlProbeH3UdpAnswered
+			}
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, site, now.Add(time.Duration(i)*time.Second), udp))
+		}
+		judged, ok, verdict := testingH3JudgeAndStore(t, testingH3UrlResult(providers[3], site, now.Add(time.Minute), egresshealth.UrlProbeH3UdpSilent))
+		if judged.OKCount != 0 || ok != 0 || verdict != egresshealth.UrlProbeH3VerdictProvider || judged.FailedNames != site.Name {
+			t.Fatalf("ok=%d stored=%d verdict=%q failed=%q; the silence is the provider's where its place reaches the URL", judged.OKCount, ok, verdict, judged.FailedNames)
+		}
+	})
+}
+
+// Where the place does not reach the URL over QUIC -- fewer than three other
+// networks did -- a silent leg is the place's, and the outcome counts as its
+// HTTPS leg, which passed.
+func TestH3SilentLegWhereThePlaceDoesNotReachTheUrlCountsItsHttpsLeg(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Blocked H3 City", "Blocked H3 Region", "Blocked H3 Country", "zw")
+		providers := testingH3Providers(t, city, 3)
+		testingTlsEstablishNetworks(ctx, providers...)
+		testingH3Locate(t)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		site := testingTlsSite("h3-site", "https://h3.example/")
+		for i, clientId := range providers[:2] {
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, site, now.Add(time.Duration(i)*time.Second), egresshealth.UrlProbeH3UdpPassed))
+		}
+		judged, ok, verdict := testingH3JudgeAndStore(t, testingH3UrlResult(providers[2], site, now.Add(time.Minute), egresshealth.UrlProbeH3UdpSilent))
+		if judged.OKCount != 1 || ok != 1 || verdict != egresshealth.UrlProbeH3VerdictPlace || judged.FailedNames != "" ||
+			judged.ClassResults["site"] != (ProviderEgressHealthClassResult{OK: 1, Total: 1}) {
+			t.Fatalf("ok=%d stored=%d verdict=%q failed=%q classes=%v; a place that does not reach the URL over QUIC must not fail the provider",
+				judged.OKCount, ok, verdict, judged.FailedNames, judged.ClassResults)
+		}
+	})
+}
+
+// The place is made only by other, established networks: providers on the
+// judged provider's own network, and networks younger than two weeks, never
+// count toward it, however many of them reach the URL.
+func TestH3PlaceIsNotMadeByTheProvidersOwnNetworkOrYoungNetworks(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Farm H3 City", "Farm H3 Region", "Farm H3 Country", "zv")
+		farm := server.NewId()
+		own := []server.Id{}
+		for range 5 {
+			own = append(own, egressTestConnectOn(ctx, t, farm, city, egressTestUnsampled, nil, nil).clientId)
+		}
+		young := testingH3Providers(t, city, 3)
+		established := testingH3Providers(t, city, 2)
+		testingTlsEstablishNetworks(ctx, append(append([]server.Id{}, own...), established...)...)
+		testingTlsCreateNetworks(ctx, server.NowUtc().Add(-24*time.Hour), young...)
+		testingH3Locate(t)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		site := testingTlsSite("h3-site", "https://h3.example/")
+		at := now
+		for _, clientId := range append(append(append([]server.Id{}, own[1:]...), young...), established...) {
+			at = at.Add(time.Second)
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, site, at, egresshealth.UrlProbeH3UdpPassed))
+		}
+		judged, ok, verdict := testingH3JudgeAndStore(t, testingH3UrlResult(own[0], site, now.Add(time.Minute), egresshealth.UrlProbeH3UdpSilent))
+		if ok != 1 || verdict != egresshealth.UrlProbeH3VerdictPlace {
+			t.Fatalf("ok=%d verdict=%q; only two other established networks reach the URL, which makes no place", judged.OKCount, verdict)
+		}
+	})
+}
+
+// The place is per URL and country: other URLs reached over QUIC, and the
+// same URL reached from another country, are no evidence for this one.
+func TestH3PlaceIsPerUrlAndCountry(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		home := egressTestCity(ctx, "Home H3 City", "Home H3 Region", "Home H3 Country", "zu")
+		abroad := egressTestCity(ctx, "Abroad H3 City", "Abroad H3 Region", "Abroad H3 Country", "zt")
+		homeProviders := testingH3Providers(t, home, 4)
+		abroadProviders := testingH3Providers(t, abroad, 3)
+		testingTlsEstablishNetworks(ctx, append(append([]server.Id{}, homeProviders...), abroadProviders...)...)
+		testingH3Locate(t)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		site := testingTlsSite("h3-site", "https://h3.example/")
+		other := testingTlsSite("other-h3-site", "https://other-h3.example/")
+		at := now
+		for _, clientId := range homeProviders[:3] {
+			at = at.Add(time.Second)
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, other, at, egresshealth.UrlProbeH3UdpPassed))
+		}
+		for _, clientId := range abroadProviders {
+			at = at.Add(time.Second)
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, site, at, egresshealth.UrlProbeH3UdpPassed))
+		}
+		judged, ok, verdict := testingH3JudgeAndStore(t, testingH3UrlResult(homeProviders[3], site, now.Add(time.Minute), egresshealth.UrlProbeH3UdpSilent))
+		if ok != 1 || verdict != egresshealth.UrlProbeH3VerdictPlace {
+			t.Fatalf("ok=%d verdict=%q; evidence for another URL or another country made this place", judged.OKCount, verdict)
+		}
+		// and from the provider's own country, the same URL is the evidence
+		for _, clientId := range homeProviders[:3] {
+			at = at.Add(time.Second)
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, site, at, egresshealth.UrlProbeH3UdpPassed))
+		}
+		_, ok, verdict = testingH3JudgeAndStore(t, testingH3UrlResult(homeProviders[3], site, at.Add(time.Minute), egresshealth.UrlProbeH3UdpSilent))
+		if ok != 0 || verdict != egresshealth.UrlProbeH3VerdictProvider {
+			t.Fatalf("ok=%d verdict=%q; three other home networks reaching the URL make the place", ok, verdict)
+		}
+	})
+}
+
+// A day keeps at most eight networks of a URL's place, so the evidence costs
+// a bounded number of writes whatever the traffic, and the oldest days are
+// removed with the tallies.
+func TestH3PlaceEvidenceIsBoundedAndExpires(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		city := egressTestCity(ctx, "Busy H3 City", "Busy H3 Region", "Busy H3 Country", "zs")
+		providers := testingH3Providers(t, city, 12)
+		testingTlsEstablishNetworks(ctx, providers...)
+		testingH3Locate(t)
+		now := server.NowUtc().Truncate(time.Microsecond)
+		site := testingTlsSite("h3-site", "https://h3.example/")
+		for i, clientId := range providers {
+			testingH3JudgeAndStore(t, testingH3UrlResult(clientId, site, now.Add(time.Duration(i)*time.Second), egresshealth.UrlProbeH3UdpPassed))
+		}
+		count := func() (rows int, networks int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT count(*)::integer, COALESCE(max(cardinality(network_ids)), 0)::integer
+					FROM provider_egress_h3_place WHERE country_code = 'zs'`).Scan(&rows, &networks))
+			})
+			return
+		}
+		if rows, networks := count(); rows != 1 || networks != providerEgressH3PlaceNetworkCap {
+			t.Fatalf("rows=%d networks=%d; a day of one URL's place keeps %d networks", rows, networks, providerEgressH3PlaceNetworkCap)
+		}
+		RemoveExpiredProviderEgressH3Places(ctx, now.Add(48*time.Hour))
+		if rows, _ := count(); rows != 0 {
+			t.Fatalf("rows=%d after the place evidence expired", rows)
+		}
+	})
+}

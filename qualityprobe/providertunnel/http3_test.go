@@ -378,3 +378,79 @@ func TestH3LegKeepsCertificatePins(t *testing.T) {
 		t.Fatalf("err = %v; want the pin mismatch", err)
 	}
 }
+
+// A site whose QUIC edge answers and refuses the hostname -- here with the
+// no_application_protocol alert (0x178) a listener without h3 sends -- proves
+// the provider carried UDP to it: the leg is the tls stage, not the silence
+// that counts against a provider, and the datagrams that came back are seen.
+func TestH3LegRefusalBySiteIsNotSilence(t *testing.T) {
+	leaf, key := issueLeaf(t, "h3.example")
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &quic.Transport{Conn: udp}
+	listener, err := transport.Listen(&tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{leaf.Raw}, PrivateKey: key}},
+		NextProtos:   []string{"not-h3"},
+	}, &quic.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		listener.Close()
+		transport.Close()
+		udp.Close()
+	})
+	go func() {
+		for {
+			if _, err := listener.Accept(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	path := &h3TestPacketPath{target: udp.LocalAddr().(*net.UDPAddr)}
+	_, client := h3TestClient(t, path, h3TestResolver("203.0.113.7", nil), nil, []string{"h3.example"})
+	response, err := client.Get("https://h3.example/")
+	if response != nil {
+		response.Body.Close()
+		t.Fatal("a QUIC edge without h3 answered HTTP/3")
+	}
+	var staged interface{ ProviderHttpStage() string }
+	var transportErr *quic.TransportError
+	if !errors.As(err, &staged) || staged.ProviderHttpStage() != "tls" || !errors.As(err, &transportErr) || !transportErr.Remote ||
+		transportErr.ErrorCode != quic.TransportErrorCode(0x178) {
+		t.Fatalf("err = %v; want the site's no_application_protocol alert as the tls stage", err)
+	}
+	if _, conns := path.snapshot(); len(conns) != 1 || !conns[0].closed.Load() {
+		t.Fatal("a refused leg left its tunnel UDP socket open")
+	}
+}
+
+// Silence is only silence: once any datagram came back, a handshake that then
+// times out is the quic stage, because the site answered; with nothing back it
+// is dial_quic, the one stage that counts against the provider.
+func TestH3DialStageTellsSilenceFromAnAnswer(t *testing.T) {
+	timeout := &quic.HandshakeTimeoutError{}
+	idle := &quic.IdleTimeoutError{}
+	alert := &quic.TransportError{ErrorCode: quic.TransportErrorCode(0x150), Remote: true}
+	for _, c := range []struct {
+		err      error
+		received int64
+		want     string
+	}{
+		{timeout, 0, "dial_quic"},
+		{idle, 0, "dial_quic"},
+		{context.DeadlineExceeded, 0, "dial_quic"},
+		{timeout, 1, "quic"},
+		{idle, 3, "quic"},
+		{alert, 1, "tls"},
+		{alert, 0, "tls"},
+		{&quic.StatelessResetError{}, 1, "quic"},
+		{context.Canceled, 0, ""},
+	} {
+		if got := providerQuicDialStage(c.err, c.received); got != c.want {
+			t.Errorf("stage of %v after %d datagrams = %q, want %q", c.err, c.received, got, c.want)
+		}
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -275,7 +276,7 @@ func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, qu
 		trace.ConnectDone("udp", remote.String(), err)
 	}
 	if err != nil {
-		if stage := providerQuicDialStage(err); stage != "" {
+		if stage := providerQuicDialStage(err, packetConn.received.Load()); stage != "" {
 			return nil, &providerHttpStageError{stage: stage, err: err}
 		}
 		return nil, err
@@ -283,22 +284,26 @@ func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, qu
 	return conn, nil
 }
 
-// The stage a failed QUIC handshake reports. A handshake that heard nothing in
-// time, or ran out of its request's deadline, is dial_quic: a provider path
-// that does not carry UDP ends there. A certificate or TLS alert is tls, as
-// on the HTTPS leg, and its error still unwraps to the verification failure.
-// Any other refusal is quic. A canceled dial keeps its own classification.
-func providerQuicDialStage(err error) string {
+// The stage a failed QUIC handshake reports, from the error and how many
+// datagrams came back. Silence -- not one datagram back before the handshake
+// timed out or ran out of its request's deadline -- is dial_quic: a provider
+// path that does not carry UDP ends there, and nothing else does. Once the
+// peer answered at all, the provider carried UDP to it: a TLS alert or a
+// certificate that does not authenticate is tls, as on the HTTPS leg (its
+// error still unwraps to the cause, the alert from 0x128 handshake_failure to
+// 0x178 no_application_protocol), and any other refusal, reset or stall after
+// an answer is quic. A canceled dial keeps its own classification.
+func providerQuicDialStage(err error, received int64) string {
 	var handshakeTimeout *quic.HandshakeTimeoutError
 	var idleTimeout *quic.IdleTimeoutError
 	var transportErr *quic.TransportError
 	switch {
 	case errors.Is(err, context.Canceled):
 		return ""
-	case errors.As(err, &handshakeTimeout), errors.As(err, &idleTimeout), errors.Is(err, context.DeadlineExceeded):
-		return "dial_quic"
 	case errors.As(err, &transportErr) && transportErr.ErrorCode.IsCryptoError():
 		return "tls"
+	case received == 0 && (errors.As(err, &handshakeTimeout) || errors.As(err, &idleTimeout) || errors.Is(err, context.DeadlineExceeded)):
+		return "dial_quic"
 	default:
 		return "quic"
 	}
@@ -306,14 +311,19 @@ func providerQuicDialStage(err error) string {
 
 // A connected UDP socket of the tunnel's stack as the net.PacketConn quic-go
 // reads and writes: every datagram goes to, and comes only from, the one
-// address it was connected to.
+// address it was connected to. It counts the datagrams that came back, which
+// is what tells a silent path from one the site answered.
 type providerH3PacketConn struct {
 	net.Conn
-	remote *net.UDPAddr
+	remote   *net.UDPAddr
+	received atomic.Int64
 }
 
 func (self *providerH3PacketConn) ReadFrom(p []byte) (int, net.Addr, error) {
 	n, err := self.Conn.Read(p)
+	if 0 < n {
+		self.received.Add(1)
+	}
 	return n, self.remote, err
 }
 

@@ -787,6 +787,10 @@ func RemoveExpiredProviderEgressTallies(ctx context.Context, minDay time.Time) {
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_site_tally WHERE tally_day < $1`, day))
 		server.RaisePgResult(tx.Exec(ctx, `DELETE FROM provider_egress_place_tally WHERE tally_day < $1`, day))
 	})
+	// the HTTP/3 place judgement reads a day and the day before it
+	// (provider_egress_h3_place.go); keep one more for an outcome that
+	// arrives late
+	RemoveExpiredProviderEgressH3Places(ctx, server.NowUtc().Add(-2*24*time.Hour))
 }
 
 // Ok/total of one class over a set of runs.

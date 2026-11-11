@@ -198,4 +198,22 @@ func recordProviderEgressUrlOutcome(health *model.ProviderEgressHealth, stored m
 		outcome = "success"
 	}
 	providerEgressUrlOutcomesTotal.WithLabelValues(health.UrlSource.String(), scoring, outcome).Inc()
+	if leg := health.UrlProbeEvidence.H3; leg != nil && leg.Verdict != "" {
+		providerEgressUrlH3VerdictsTotal.WithLabelValues(leg.Verdict).Inc()
+	}
+}
+
+// The place verdicts of stored silent HTTP/3 legs (model.JudgeProviderEgressH3).
+var providerEgressUrlH3VerdictsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "egress_url",
+	Name:      "h3_verdicts_total",
+	Help:      "Stored URL outcomes whose HTTP/3 leg was silent (nothing answered its QUIC handshake), by the ingest's place verdict: provider, where at least three other established networks in the provider's country reached the same URL over QUIC that day or the day before, so the outcome fails; place, where they did not, so the outcome counts as its HTTPS leg",
+}, []string{"verdict"})
+
+func init() {
+	for _, verdict := range []string{egresshealth.UrlProbeH3VerdictProvider, egresshealth.UrlProbeH3VerdictPlace} {
+		providerEgressUrlH3VerdictsTotal.WithLabelValues(verdict)
+	}
+	prometheus.MustRegister(providerEgressUrlH3VerdictsTotal)
 }

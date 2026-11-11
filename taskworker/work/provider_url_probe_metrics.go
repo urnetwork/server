@@ -41,21 +41,21 @@ var urlProbeOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
 // which for a URL that declares HTTP/3 needs both legs.
 var urlProbeTransportOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "urnetwork_url_probe_transport_outcomes_total",
-	Help: "Measured URL loads of acknowledged outcomes by transport leg: tcp is every load's HTTPS leg (success or error); udp is the HTTP/3 leg of a URL that declares it (success, error, not_measured, or skipped when its HTTPS leg failed first and no leg was made). Such a URL passes only with both legs",
+	Help: "Measured URL loads of acknowledged outcomes by transport leg: tcp is every load's HTTPS leg (success or error); udp is the HTTP/3 leg of a URL that declares it: success, answered (the site answered over QUIC and refused or failed the request, which proves the provider carries UDP), silent (nothing answered the QUIC handshake, the one leg that fails a load, judged by place on the server), not_measured, or skipped (its HTTPS leg failed first and no leg was made)",
 }, []string{"transport", "outcome"})
 
-// URL turns the HTTP/3 common-mode guard held back: their only failure was
-// the HTTP/3 leg while no recent network's HTTP/3 leg passed
+// URL turns the HTTP/3 common-mode guard held back: their only failure was a
+// silent HTTP/3 leg while no recent network's HTTP/3 leg reached its site
 // (provider_url_probe_common_mode.go).
 var urlProbeH3CommonModeHeld = prometheus.NewCounter(prometheus.CounterOpts{
 	Name: "urnetwork_url_probe_h3_common_mode_held_total",
-	Help: "URL turns held back from provider history because their only failure was the HTTP/3 leg while no recently measured network's HTTP/3 leg passed: the platform's QUIC path, not each provider's UDP",
+	Help: "URL turns held back from provider history because their only failure was a silent HTTP/3 leg while no recently measured network's HTTP/3 leg reached its site: the platform's QUIC path, not each provider's UDP",
 })
 
 // The label pairs urlProbeTransportOutcomes can carry.
 var urlProbeTransportOutcomeLabels = [...][2]string{
 	{"tcp", "success"}, {"tcp", "error"},
-	{"udp", "success"}, {"udp", "error"}, {"udp", "not_measured"}, {"udp", "skipped"},
+	{"udp", "success"}, {"udp", "answered"}, {"udp", "silent"}, {"udp", "not_measured"}, {"udp", "skipped"},
 }
 
 // Counts each load's legs: its HTTPS leg when it was measured, and its HTTP/3
@@ -77,14 +77,16 @@ func observeUrlProbeTransportOutcomes(result *egresshealth.Result) {
 		if !check.H3Required {
 			continue
 		}
-		udp := "error"
-		switch leg := check.H3; {
-		case leg == nil:
-			udp = "skipped"
-		case leg.NotMeasured:
-			udp = "not_measured"
-		case leg.Ok:
+		udp := "skipped"
+		switch egresshealth.UrlProbeH3Udp(check.H3) {
+		case egresshealth.UrlProbeH3UdpPassed:
 			udp = "success"
+		case egresshealth.UrlProbeH3UdpAnswered:
+			udp = "answered"
+		case egresshealth.UrlProbeH3UdpSilent:
+			udp = "silent"
+		case egresshealth.UrlProbeH3UdpNotMeasured:
+			udp = "not_measured"
 		}
 		urlProbeTransportOutcomes.WithLabelValues("udp", udp).Inc()
 	}
