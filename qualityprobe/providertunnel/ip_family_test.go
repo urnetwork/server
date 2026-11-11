@@ -243,8 +243,8 @@ func TestH3LegOverIpv6DialsUdp6AndFitsTheIpv6Link(t *testing.T) {
 		t.Fatal("a blackholed path answered HTTP/3")
 	}
 	dials, _ := path.snapshot()
-	if !slices.Equal(dials, []string{"udp6 [2606:4700:4700::1111]:443"}) {
-		t.Fatalf("dials=%v; want one IPv6 UDP socket to the AAAA answer", dials)
+	if !slices.Equal(dials, []string{"udp6 [2606:4700:4700::1111]:443", "udp6 [2606:4700:4700::1111]:443"}) {
+		t.Fatalf("dials=%v; want IPv6 UDP sockets to the AAAA answer alone: the handshake and its one retry", dials)
 	}
 	if _, a := asked.Load("A"); a {
 		t.Fatal("an IPv6 HTTP/3 leg asked for the A record")

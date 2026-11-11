@@ -17,11 +17,53 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
 	"github.com/urnetwork/connect"
 )
+
+// The outcomes of a retried QUIC handshake (dialQuic): answered, the site
+// answered the second handshake, which is the first's loss the retry made up
+// for; silent, the second heard nothing either, within its bound or what was
+// left of the request's; canceled, the request ended under it.
+const (
+	providerQuicRetryAnswered = "answered"
+	providerQuicRetrySilent   = "silent"
+	providerQuicRetryCanceled = "canceled"
+)
+
+var providerQuicHandshakeRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "urnetwork_provider_tunnel_quic_handshake_retries_total",
+	Help: "URL probe HTTP/3 legs whose first QUIC handshake heard nothing back within its bound and was made once more on a fresh socket, by the leg's IP family (ipv4, ipv6) and how the second ended: answered (the site answered it, so the first was a lost handshake, not the provider's UDP), silent (no answer again; the leg reports silence), canceled (the request ended under it)",
+}, []string{"family", "outcome"})
+
+// Registers the retry counter with every label pair at zero.
+func init() {
+	for _, family := range []string{"ipv4", "ipv6"} {
+		for _, outcome := range []string{providerQuicRetryAnswered, providerQuicRetrySilent, providerQuicRetryCanceled} {
+			providerQuicHandshakeRetries.WithLabelValues(family, outcome)
+		}
+	}
+	prometheus.MustRegister(providerQuicHandshakeRetries)
+}
+
+// Counts one retried handshake by its request's family and how it ended.
+func observeProviderQuicHandshakeRetry(ctx context.Context, err error, received int64) {
+	family := "ipv4"
+	if ipVersion, _ := providerUrlRequestFamily(ctx); ipVersion == 6 {
+		family = "ipv6"
+	}
+	outcome := providerQuicRetrySilent
+	switch {
+	case err == nil || 0 < received:
+		outcome = providerQuicRetryAnswered
+	case errors.Is(err, context.Canceled):
+		outcome = providerQuicRetryCanceled
+	}
+	providerQuicHandshakeRetries.WithLabelValues(family, outcome).Inc()
+}
 
 // The leg's QUIC bounds, in line with its HTTPS leg's (url_phase_timeout.go).
 //
@@ -29,8 +71,9 @@ import (
 // aborts a handshake that hears nothing from the peer for that long, and one
 // that has not completed in twice it, which is the HTTPS leg's connect and
 // TLS bounds together. A provider path that carries no UDP answers no QUIC
-// Initial, so the leg fails at the first bound, well inside its request
-// timeout and the turn's slot. It is a var so a test can shorten it.
+// Initial, so the leg fails at the bound of its second handshake (dialQuic
+// makes a silent one once more), two bounds well inside its request timeout
+// and the turn's slot. It is a var so a test can shorten it.
 var urlProbeQuicHandshakeIdleTimeout = urlProbeTcpTimeout
 
 // After the handshake a connection that hears nothing for the HTTPS leg's
@@ -299,18 +342,28 @@ func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, qu
 		return nil, &providerHttpStageError{stage: "dial_dns", err: errors.New("provider URL resolution returned no address")}
 	}
 	remote := netip.AddrPortFrom(addrs[0], uint16(port))
+	network := providerUrlDialNetwork(ctx, "udp4")
 
-	raw, err := self.dialPacket(ctx, providerUrlDialNetwork(ctx, "udp4"), remote.String())
+	// One handshake's own UDP socket of the tunnel's stack, connected to the
+	// site, and the QUIC transport over it, both owned by the request.
+	open := func() (*quic.Transport, *providerH3PacketConn, error) {
+		raw, err := self.dialPacket(ctx, network, remote.String())
+		if err != nil {
+			return nil, nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
+		}
+		packetConn := &providerH3PacketConn{Conn: raw, remote: net.UDPAddrFromAddrPort(remote)}
+		if !own(packetConn) {
+			return nil, nil, net.ErrClosed
+		}
+		transport := &quic.Transport{Conn: packetConn}
+		if !own(transport) {
+			return nil, nil, net.ErrClosed
+		}
+		return transport, packetConn, nil
+	}
+	transport, packetConn, err := open()
 	if err != nil {
-		return nil, &providerHttpStageError{stage: "dial_dns_or_socket", err: err}
-	}
-	packetConn := &providerH3PacketConn{Conn: raw, remote: net.UDPAddrFromAddrPort(remote)}
-	if !own(packetConn) {
-		return nil, net.ErrClosed
-	}
-	transport := &quic.Transport{Conn: packetConn}
-	if !own(transport) {
-		return nil, net.ErrClosed
+		return nil, err
 	}
 
 	tlsConfig := PinnedTlsConfigForHost(tlsPins, host)
@@ -322,6 +375,24 @@ func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, qu
 		trace.TLSHandshakeStart()
 	}
 	conn, err := transport.Dial(ctx, packetConn.remote, tlsConfig, quicConfig)
+	if err != nil && providerQuicHandshakeUnanswered(ctx, err, packetConn.received.Load()) {
+		// A first handshake that heard nothing back within its own bound is
+		// made once more, on a fresh socket, so from a new source port, before
+		// the leg reports silence: some QUIC edges lose a handshake now and
+		// then on one path while the next one gets through (Cloudflare over
+		// IPv6 left 11 of 535 unanswered from one vantage on 2026-11-11, with
+		// none of 1494 over IPv4 and every TCP connect to the same addresses
+		// answered). A provider path that carries no UDP is silent twice. The
+		// retry has what is left of the leg's deadline, and the trace sees one
+		// handshake that took both attempts.
+		if retryTransport, retryPacketConn, retryErr := open(); retryErr == nil {
+			transport.Close()
+			packetConn.Close()
+			conn, err = retryTransport.Dial(ctx, retryPacketConn.remote, tlsConfig, quicConfig)
+			transport, packetConn = retryTransport, retryPacketConn
+			observeProviderQuicHandshakeRetry(ctx, err, retryPacketConn.received.Load())
+		}
+	}
 	var state tls.ConnectionState
 	if conn != nil {
 		state = conn.ConnectionState().TLS
@@ -339,6 +410,19 @@ func (self *providerHttpTransport) dialQuic(ctx context.Context, addr string, qu
 		return nil, err
 	}
 	return conn, nil
+}
+
+// Whether a failed handshake is one the site never answered within the
+// handshake's own bound, with time left on the request for another: not one
+// datagram back, and a QUIC handshake or idle timeout rather than the
+// request's own end.
+func providerQuicHandshakeUnanswered(ctx context.Context, err error, received int64) bool {
+	if received != 0 || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var handshakeTimeout *quic.HandshakeTimeoutError
+	var idleTimeout *quic.IdleTimeoutError
+	return errors.As(err, &handshakeTimeout) || errors.As(err, &idleTimeout)
 }
 
 // The stage a failed QUIC handshake reports, from the error and how many

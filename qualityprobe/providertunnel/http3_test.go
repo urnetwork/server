@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
@@ -28,8 +29,11 @@ import (
 )
 
 // What a test's HTTP/3 leg dialed through the tunnel, and its sockets' fate.
+// The nth socket goes to targets[n] when the test names one, else to target:
+// a path that loses one handshake and carries the next.
 type h3TestPacketPath struct {
 	target    *net.UDPAddr
+	targets   []*net.UDPAddr
 	stateLock sync.Mutex
 	dials     []string
 	conns     []*h3TestPacketConn
@@ -40,7 +44,13 @@ type h3TestPacketPath struct {
 // socket to the test's target instead, as the tunnel decides where datagrams
 // go.
 func (self *h3TestPacketPath) dial(ctx context.Context, network, address string) (net.Conn, error) {
-	conn, err := net.DialUDP("udp4", nil, self.target)
+	self.stateLock.Lock()
+	target := self.target
+	if n := len(self.dials); n < len(self.targets) {
+		target = self.targets[n]
+	}
+	self.stateLock.Unlock()
+	conn, err := net.DialUDP("udp4", nil, target)
 	if err != nil {
 		return nil, err
 	}
@@ -253,9 +263,10 @@ func TestH3LegHonorsTheUrlProbeScope(t *testing.T) {
 	}
 }
 
-// The provider path drops UDP: nothing answers the QUIC Initial. The leg ends
-// at the handshake's idle bound with the dial_quic stage, its datagrams each
-// fit the tunnel link, and its socket is closed.
+// The provider path drops UDP: nothing answers the QUIC Initial, on the first
+// socket or on the one the handshake is retried on. The leg ends at the second
+// handshake's idle bound with the dial_quic stage, its datagrams each fit the
+// tunnel link, and both sockets are closed.
 func TestH3LegFailsFastWhenTheProviderDropsUdp(t *testing.T) {
 	saved := urlProbeQuicHandshakeIdleTimeout
 	urlProbeQuicHandshakeIdleTimeout = 300 * time.Millisecond
@@ -282,8 +293,8 @@ func TestH3LegFailsFastWhenTheProviderDropsUdp(t *testing.T) {
 		t.Fatalf("err = %v; want the QUIC handshake's own idle bound, classified dial_quic", err)
 	}
 	dials, conns := path.snapshot()
-	if len(dials) != 1 || dials[0] != "udp4 203.0.113.7:443" || queries.Load() != 1 {
-		t.Fatalf("dials=%v queries=%d; want one tunnel UDP socket to the resolved address on 443", dials, queries.Load())
+	if len(dials) != 2 || dials[0] != "udp4 203.0.113.7:443" || dials[1] != dials[0] || queries.Load() != 1 {
+		t.Fatalf("dials=%v queries=%d; want two tunnel UDP sockets, the handshake and its one retry, to the resolved address on 443", dials, queries.Load())
 	}
 	for _, conn := range conns {
 		if !conn.closed.Load() {
@@ -477,5 +488,155 @@ func TestH3LegDeadlineDuringASilentHandshakeIsSilence(t *testing.T) {
 	var staged interface{ ProviderHttpStage() string }
 	if !errors.As(err, &staged) || staged.ProviderHttpStage() != egresshealth.FailureStageDialQuic || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v; want the request deadline over a silent handshake, classified dial_quic", err)
+	}
+}
+
+// A QUIC listener that answers every handshake and refuses it (ALPN not-h3,
+// the no_application_protocol alert): a site that heard the provider.
+func startH3TestRefusingListener(t *testing.T) *net.UDPAddr {
+	t.Helper()
+	leaf, key := issueLeaf(t, "h3.example")
+	udp, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := &quic.Transport{Conn: udp}
+	listener, err := transport.Listen(&tls.Config{
+		Certificates: []tls.Certificate{{Certificate: [][]byte{leaf.Raw}, PrivateKey: key}},
+		NextProtos:   []string{"not-h3"},
+	}, &quic.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		listener.Close()
+		transport.Close()
+		udp.Close()
+	})
+	go func() {
+		for {
+			if _, err := listener.Accept(context.Background()); err != nil {
+				return
+			}
+		}
+	}()
+	return udp.LocalAddr().(*net.UDPAddr)
+}
+
+// One HTTP/3 request of the given family over path, as a URL leg grants it.
+func h3TestFamilyRequest(t *testing.T, path *h3TestPacketPath, ipVersion int, timeout time.Duration) error {
+	t.Helper()
+	resolver := &providerUrlResolver{query: func(_ context.Context, recordType string, _ string) ([]netip.Addr, bool) {
+		if recordType == "AAAA" {
+			return []netip.Addr{netip.MustParseAddr("2606:4700:4700::1111")}, true
+		}
+		return []netip.Addr{netip.MustParseAddr("8.8.4.4")}, true
+	}}
+	_, client := h3TestClient(t, path, resolver, nil, []string{"h3.example"})
+	target, _ := url.Parse("https://h3.example/")
+	ctx, err := client.Transport.(*providerH3RoundTripper).ProviderUrlProbeFamilyContext(context.Background(), target, false, ipVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	response, err := client.Do(request)
+	if response != nil {
+		response.Body.Close()
+		t.Fatal("the test origin answered HTTP/3")
+	}
+	return err
+}
+
+// The survey's finding (factury reports/Quality probe IPv6 support.md):
+// Cloudflare's QUIC edge left about one IPv6 handshake in 50 unanswered,
+// though quic-go resent the Initial, while the next handshake got through. A
+// first handshake that hears nothing within its bound is therefore made once
+// more on a fresh socket, so from a new source port, in either family, before
+// the leg reports silence: here the first socket's path is a blackhole and
+// the second's reaches the site, so the leg is the site's answer (the tls
+// stage of its refusal), not the silence that counts against a provider.
+func TestH3LegRetriesAnUnansweredHandshakeOnceOnAFreshSocket(t *testing.T) {
+	saved := urlProbeQuicHandshakeIdleTimeout
+	urlProbeQuicHandshakeIdleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { urlProbeQuicHandshakeIdleTimeout = saved })
+
+	for _, c := range []struct {
+		ipVersion int
+		family    string
+		dial      string
+	}{
+		{4, "ipv4", "udp4 8.8.4.4:443"},
+		{6, "ipv6", "udp6 [2606:4700:4700::1111]:443"},
+	} {
+		blackhole := startH3TestBlackhole(t)
+		site := startH3TestRefusingListener(t)
+		path := &h3TestPacketPath{targets: []*net.UDPAddr{blackhole.conn.LocalAddr().(*net.UDPAddr), site}, target: site}
+		answered := testutil.ToFloat64(providerQuicHandshakeRetries.WithLabelValues(c.family, providerQuicRetryAnswered))
+		err := h3TestFamilyRequest(t, path, c.ipVersion, 30*time.Second)
+		var staged interface{ ProviderHttpStage() string }
+		if !errors.As(err, &staged) || staged.ProviderHttpStage() != "tls" {
+			t.Fatalf("%s: err = %v; want the retried handshake's answer (the site's tls refusal), not silence", c.family, err)
+		}
+		dials, conns := path.snapshot()
+		if len(dials) != 2 || dials[0] != c.dial || dials[1] != c.dial || conns[0] == conns[1] {
+			t.Fatalf("%s: dials=%v; want the handshake and one retry, each on a socket of its own, to the same address", c.family, dials)
+		}
+		for _, conn := range conns {
+			if !conn.closed.Load() {
+				t.Fatalf("%s: a socket of the leg was left open", c.family)
+			}
+		}
+		if len(blackhole.datagramSizes()) == 0 {
+			t.Fatalf("%s: the first handshake never reached the path that lost it", c.family)
+		}
+		if got := testutil.ToFloat64(providerQuicHandshakeRetries.WithLabelValues(c.family, providerQuicRetryAnswered)) - answered; got != 1 {
+			t.Fatalf("%s: answered retries counted %v, want 1", c.family, got)
+		}
+	}
+}
+
+// The retry is made once, and only for silence within the handshake's own
+// bound: a path that drops UDP is silent twice and the leg reports dial_quic
+// after two sockets, never a third; a handshake the site answered is never
+// retried; and a request deadline that ends the first handshake leaves no
+// time for another.
+func TestH3LegRetriesASilentHandshakeOnceAndOnlyForSilence(t *testing.T) {
+	saved := urlProbeQuicHandshakeIdleTimeout
+	urlProbeQuicHandshakeIdleTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { urlProbeQuicHandshakeIdleTimeout = saved })
+	var staged interface{ ProviderHttpStage() string }
+
+	blackhole := startH3TestBlackhole(t)
+	dark := &h3TestPacketPath{target: blackhole.conn.LocalAddr().(*net.UDPAddr)}
+	silent := testutil.ToFloat64(providerQuicHandshakeRetries.WithLabelValues("ipv6", providerQuicRetrySilent))
+	err := h3TestFamilyRequest(t, dark, 6, 30*time.Second)
+	if !errors.As(err, &staged) || staged.ProviderHttpStage() != egresshealth.FailureStageDialQuic {
+		t.Fatalf("a dark path: err = %v; want dial_quic", err)
+	}
+	if dials, _ := dark.snapshot(); len(dials) != 2 {
+		t.Fatalf("a dark path: dials=%v; want the handshake and exactly one retry", dials)
+	}
+	if got := testutil.ToFloat64(providerQuicHandshakeRetries.WithLabelValues("ipv6", providerQuicRetrySilent)) - silent; got != 1 {
+		t.Fatalf("silent retries counted %v, want 1", got)
+	}
+
+	site := startH3TestRefusingListener(t)
+	answering := &h3TestPacketPath{target: site}
+	if err := h3TestFamilyRequest(t, answering, 4, 30*time.Second); !errors.As(err, &staged) || staged.ProviderHttpStage() != "tls" {
+		t.Fatalf("an answering site: err = %v; want its tls refusal", err)
+	}
+	if dials, _ := answering.snapshot(); len(dials) != 1 {
+		t.Fatalf("an answered handshake was retried: dials=%v", dials)
+	}
+
+	urlProbeQuicHandshakeIdleTimeout = time.Minute
+	cut := &h3TestPacketPath{target: blackhole.conn.LocalAddr().(*net.UDPAddr)}
+	if err := h3TestFamilyRequest(t, cut, 4, 300*time.Millisecond); !errors.As(err, &staged) || staged.ProviderHttpStage() != egresshealth.FailureStageDialQuic || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a request deadline over a silent handshake: err = %v; want dial_quic at the deadline", err)
+	}
+	if dials, _ := cut.snapshot(); len(dials) != 1 {
+		t.Fatalf("a handshake the request's deadline ended was retried: dials=%v", dials)
 	}
 }
