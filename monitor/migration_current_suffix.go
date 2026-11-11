@@ -955,10 +955,15 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// this custody carries, and carries the rest of it on from its own version.
 	[]snMainnetMigrationContract{competitionOfficialReviewMigrationContract.removedAt(server.CompetitionExecutorControlAmendmentMigrationVersion())},
 	// the operator's executor control amendment, with the official review
-	// custody it carries on; versioned by its position
-	[]snMainnetMigrationContract{competitionExecutorControlAmendmentMigrationContract},
+	// custody it carries on; versioned by its position. The qualification
+	// recovery (below) re-creates the equivalence guard this custody pins, and
+	// carries the rest of it on from its own version.
+	[]snMainnetMigrationContract{competitionExecutorControlAmendmentMigrationContract.removedAt(server.CompetitionExecutorQualificationRecoveryMigrationVersion())},
 	// the Pay with Gamma tables, versioned by their position
 	[]snMainnetMigrationContract{gammaPayMigrationContract},
+	// the single-use executor qualification recovery, with the executor
+	// control amendment custody it carries on; versioned by its position
+	[]snMainnetMigrationContract{competitionExecutorQualificationRecoveryMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

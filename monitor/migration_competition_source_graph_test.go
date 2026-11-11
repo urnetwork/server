@@ -50,9 +50,9 @@ func TestMigrationsSourceGraphHistoricalAuthorityCustody(t *testing.T) {
 const competitionSourceGuardsHeadOwner = "trusted instrument overlay with two-member review, identity and retained source custody@v900"
 
 // Validate the registered 900-to-benefit-to-intake-to-handoff-to-official
-// review-to-executor control transfers before selecting the current owner.
-// This is the known lineage, never a generic waiver for an unknown successor
-// or an expired predicate.
+// review-to-executor control-to-qualification recovery transfers before
+// selecting the current owner. This is the known lineage, never a generic
+// waiver for an unknown successor or an expired predicate.
 func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	t.Helper()
 	benefitVersion := server.CompetitionProductionBenefitMigrationVersion()
@@ -60,8 +60,10 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 	handoffVersion := server.CompetitionReviewHandoffMigrationVersion()
 	officialVersion := server.CompetitionOfficialReviewMigrationVersion()
 	controlVersion := server.CompetitionExecutorControlAmendmentMigrationVersion()
+	recoveryVersion := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
 	if benefitVersion <= 900 || intakeVersion <= benefitVersion || handoffVersion <= intakeVersion ||
-		officialVersion <= handoffVersion || controlVersion <= officialVersion || server.MigrationCount() < controlVersion {
+		officialVersion <= handoffVersion || controlVersion <= officialVersion || recoveryVersion <= controlVersion ||
+		server.MigrationCount() < recoveryVersion {
 		t.Fatal("source guard successors are not published in order")
 	}
 	for _, expected := range []struct {
@@ -74,14 +76,15 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{intakeVersion, handoffVersion, "separate published-source intake and qualified grading custody"},
 		{handoffVersion, officialVersion, "pending review handoff ledger with retained intake and winner-review custody"},
 		{officialVersion, controlVersion, "epoch-one official review authorization with retained review handoff custody"},
-		{controlVersion, 0, "operator executor control amendment with retained official review custody"},
+		{controlVersion, recoveryVersion, "operator executor control amendment with retained official review custody"},
+		{recoveryVersion, 0, "single-use executor qualification recovery with retained executor control amendment custody"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("operator executor control amendment with retained official review custody@v%d", controlVersion)
+	return fmt.Sprintf("single-use executor qualification recovery with retained executor control amendment custody@v%d", recoveryVersion)
 }
 
 // The intake-first owner, current from its version until the review handoff.
@@ -98,6 +101,12 @@ func competitionSourceGuardsHandoffOwner() string {
 // control amendment.
 func competitionSourceGuardsOfficialReviewOwner() string {
 	return fmt.Sprintf("epoch-one official review authorization with retained review handoff custody@v%d", server.CompetitionOfficialReviewMigrationVersion())
+}
+
+// The executor control amendment owner, current from its version until the
+// qualification recovery.
+func competitionSourceGuardsExecutorControlOwner() string {
+	return fmt.Sprintf("operator executor control amendment with retained official review custody@v%d", server.CompetitionExecutorControlAmendmentMigrationVersion())
 }
 
 // Before a registered transfer the old artifact remains required; at the
@@ -119,7 +128,8 @@ func TestMigrationsSourceGuardRegisteredSuccessorCustody(t *testing.T) {
 		{benefitVersion, intakeVersion, benefitOwner, intakeOwner},
 		{intakeVersion, server.CompetitionReviewHandoffMigrationVersion(), intakeOwner, competitionSourceGuardsHandoffOwner()},
 		{server.CompetitionReviewHandoffMigrationVersion(), server.CompetitionOfficialReviewMigrationVersion(), competitionSourceGuardsHandoffOwner(), competitionSourceGuardsOfficialReviewOwner()},
-		{server.CompetitionOfficialReviewMigrationVersion(), server.CompetitionExecutorControlAmendmentMigrationVersion(), competitionSourceGuardsOfficialReviewOwner(), currentOwner},
+		{server.CompetitionOfficialReviewMigrationVersion(), server.CompetitionExecutorControlAmendmentMigrationVersion(), competitionSourceGuardsOfficialReviewOwner(), competitionSourceGuardsExecutorControlOwner()},
+		{server.CompetitionExecutorControlAmendmentMigrationVersion(), server.CompetitionExecutorQualificationRecoveryMigrationVersion(), competitionSourceGuardsExecutorControlOwner(), currentOwner},
 	} {
 		for _, control := range []struct {
 			head           int
@@ -236,7 +246,8 @@ func TestMigrationsSourceGuardPublishedOwnerTransfers(t *testing.T) {
 		{intakeVersion, server.CompetitionReviewHandoffMigrationVersion(), competitionSourceGuardsIntakeOwner()},
 		{server.CompetitionReviewHandoffMigrationVersion(), server.CompetitionOfficialReviewMigrationVersion(), competitionSourceGuardsHandoffOwner()},
 		{server.CompetitionOfficialReviewMigrationVersion(), server.CompetitionExecutorControlAmendmentMigrationVersion(), competitionSourceGuardsOfficialReviewOwner()},
-		{server.CompetitionExecutorControlAmendmentMigrationVersion(), 0, currentOwner},
+		{server.CompetitionExecutorControlAmendmentMigrationVersion(), server.CompetitionExecutorQualificationRecoveryMigrationVersion(), competitionSourceGuardsExecutorControlOwner()},
+		{server.CompetitionExecutorQualificationRecoveryMigrationVersion(), 0, currentOwner},
 	}
 	faults := []struct {
 		name string

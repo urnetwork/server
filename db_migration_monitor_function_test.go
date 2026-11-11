@@ -53,13 +53,13 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			// Staging approvals, sealed evaluation custody, holds/incidents,
 			// source abandonment, job reevaluation, the finalization hold, the
 			// post-close recovery and the competition custody that the
-			// executor, intake-first, review handoff, official review and
-			// executor control amendment migrations carry in turn share the
-			// baseline's append-only guard. Its rename must report every
-			// published dependent artifact still active at the head, the
-			// successor that carries a retired one's custody in its place,
-			// while historical heads must not report dependencies introduced
-			// later.
+			// executor, intake-first, review handoff, official review, executor
+			// control amendment and qualification recovery migrations carry in
+			// turn share the baseline's append-only guard. Its rename must
+			// report every published dependent artifact still active at the
+			// head, the successor that carries a retired one's custody in its
+			// place, while historical heads must not report dependencies
+			// introduced later.
 			type dependency struct{ version, retiredAt int }
 			active := func(dependencies []dependency) []int {
 				versions := []int{}
@@ -75,24 +75,25 @@ func TestPublishedMigrationMonitorCompetitionFunctionArtifacts(t *testing.T) {
 			handoff := server.CompetitionReviewHandoffMigrationVersion()
 			official := server.CompetitionOfficialReviewMigrationVersion()
 			control := server.CompetitionExecutorControlAmendmentMigrationVersion()
+			recovery := server.CompetitionExecutorQualificationRecoveryMigrationVersion()
 			postClose := server.CompetitionReevaluationPostCloseMigrationVersion()
 			appendOnlyMissing = append(appendOnlyMissing, active([]dependency{
 				{721, 0}, {842, 0}, {843, 0}, {845, 0},
 				{server.CompetitionJobReevaluationMigrationVersion(), postClose},
 				{server.CompetitionFinalizationHoldMigrationVersion(), 0},
 				{executor, intake}, {postClose, 0}, {intake, handoff}, {handoff, official},
-				{official, control}, {control, 0},
+				{official, control}, {control, recovery}, {recovery, 0},
 			})...)
 			var reviewMissing []int
 			if version == 677 {
 				reviewMissing = []int{677}
 			} else if version >= 678 {
-				// the executor, intake-first, review handoff, official review and
-				// executor control amendment custody carry the baseline guard in
-				// turn
+				// the executor, intake-first, review handoff, official review,
+				// executor control amendment and qualification recovery custody
+				// carry the baseline guard in turn
 				baselineMissing = append(baselineMissing, 678)
 				baselineMissing = append(baselineMissing, active([]dependency{
-					{executor, intake}, {intake, handoff}, {handoff, official}, {official, control}, {control, 0},
+					{executor, intake}, {intake, handoff}, {handoff, official}, {official, control}, {control, recovery}, {recovery, 0},
 				})...)
 				reviewMissing = []int{678}
 			}
