@@ -77,5 +77,5 @@ var competitionExecutorControlAmendmentMigrationContract = func() snMainnetMigra
 	} {
 		queries = append(queries, snMainnetMigrationTrigger(trigger.table, trigger.name, trigger.function, trigger.kind))
 	}
-	return migrationCurrentSuffix(server.CompetitionExecutorControlAmendmentMigrationVersion(), "operator executor control amendment with retained official review, handoff, intake and winner-review custody", queries...)
+	return migrationCurrentSuffix(server.CompetitionExecutorControlAmendmentMigrationVersion(), "operator executor control amendment with retained official review custody", queries...)
 }()

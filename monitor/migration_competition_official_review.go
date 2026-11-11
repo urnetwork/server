@@ -56,5 +56,5 @@ var competitionOfficialReviewMigrationContract = func() snMainnetMigrationContra
 		snMainnetMigrationTrigger("competition_official_review_authorization", "competition_official_review_immutable", "competition_append_only_guard", 27),
 		snMainnetMigrationTrigger("competition_official_review_authorization", "competition_official_review_authorization_before_insert", "competition_official_review_authorization_guard", 7),
 	}
-	return migrationCurrentSuffix(server.CompetitionOfficialReviewMigrationVersion(), "epoch-one official review authorization with retained handoff, intake and winner-review custody", queries...)
+	return migrationCurrentSuffix(server.CompetitionOfficialReviewMigrationVersion(), "epoch-one official review authorization with retained review handoff custody", queries...)
 }()

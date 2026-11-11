@@ -73,15 +73,15 @@ func competitionSourceGuardsCurrentOwner(t testing.TB) string {
 		{benefitVersion, intakeVersion, "production-benefit eligibility with retained review and instrument custody"},
 		{intakeVersion, handoffVersion, "separate published-source intake and qualified grading custody"},
 		{handoffVersion, officialVersion, "pending review handoff ledger with retained intake and winner-review custody"},
-		{officialVersion, controlVersion, "epoch-one official review authorization with retained handoff, intake and winner-review custody"},
-		{controlVersion, 0, "operator executor control amendment with retained official review, handoff, intake and winner-review custody"},
+		{officialVersion, controlVersion, "epoch-one official review authorization with retained review handoff custody"},
+		{controlVersion, 0, "operator executor control amendment with retained official review custody"},
 	} {
 		contract := migrationCurrentSuffixTestContract(t, expected.version)
 		if contract.artifact.name != expected.name || contract.artifact.removedVersion != expected.removedAt {
 			t.Fatalf("source guard owner %d has an unexpected name or retirement", expected.version)
 		}
 	}
-	return fmt.Sprintf("operator executor control amendment with retained official review, handoff, intake and winner-review custody@v%d", controlVersion)
+	return fmt.Sprintf("operator executor control amendment with retained official review custody@v%d", controlVersion)
 }
 
 // The intake-first owner, current from its version until the review handoff.
@@ -97,7 +97,7 @@ func competitionSourceGuardsHandoffOwner() string {
 // The official review owner, current from its version until the executor
 // control amendment.
 func competitionSourceGuardsOfficialReviewOwner() string {
-	return fmt.Sprintf("epoch-one official review authorization with retained handoff, intake and winner-review custody@v%d", server.CompetitionOfficialReviewMigrationVersion())
+	return fmt.Sprintf("epoch-one official review authorization with retained review handoff custody@v%d", server.CompetitionOfficialReviewMigrationVersion())
 }
 
 // Before a registered transfer the old artifact remains required; at the
