@@ -35,3 +35,55 @@ func TestFs63OnT3(t *testing.T) {
 		sidecart3.RunRow(tb, "FS-63", "", nil)
 	})
 }
+
+func TestFs62OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-62", "", nil)
+	})
+}
+
+func TestFs62LeaseHolderResyncOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-62", "lease holder resync", fault.Fs62LeaseHolderResync)
+}
+
+func TestFs4ThreeSourcesOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-4", "three sources", fault.Fs4ThreeSources)
+}
+
+func TestFs6OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-6", "", nil)
+	})
+}
+
+func TestFs6SevenDayStartOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-6", "seven-day start", fault.Fs6SevenDayStart)
+}
+
+func TestFs6KilledAtEachPhaseOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-6", "killed at each phase", fault.Fs6KilledAtEachPhase)
+}
+
+func TestFs6StaleJobOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-6", "stale job", fault.Fs6StaleJob)
+}
+
+// FS-10 forges server state, so its cases run on T2 alone and their twins, which must succeed, here (§22.8's cadence
+// rule).
+func TestFs10TwinOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-10", "twin", fault.Fs10WriterChange)
+}
+
+func TestFs10RollbackTwinOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-10", "rollback refused twin", fault.Fs10RollbackTwin)
+}
+
+func TestFs12OnT3(t *testing.T) {
+	fsCommitTestEnv().Run(t, func(tb testing.TB) {
+		sidecart3.RunRow(tb, "FS-12", "", nil)
+	})
+}
+
+func TestFs4BatchedEpochOnT3(t *testing.T) {
+	runClauseOnT3(t, "FS-4", "batched epoch", fault.Fs4BatchedEpoch)
+}

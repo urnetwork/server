@@ -31,6 +31,7 @@ import (
 	"github.com/urnetwork/sidecar/evsservice"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/quotahost"
 	"github.com/urnetwork/server/sidecarhost"
 )
 
@@ -94,21 +95,31 @@ func startEvsJobsFromVault(ctx context.Context, lifetime *sync.WaitGroup) {
 	}
 	// one to a process, ending with the runtime's lifetime (server.ChronyClockCheck)
 	clockCheck := server.NewChronyClockCheck(ctx, nil)
+	// §20.7's Quota over model, this process holding Postgres (QUOTA-M2-11)
+	quota, err := quotahost.NewLocalQuota(ctx, nil, nil, nil)
+	if err != nil {
+		glog.Errorf("[evsjobs]no quota, so evs's jobs wait: %v\n", err)
+		clusters.Close()
+		return
+	}
 	host := sidecarhost.NewServiceHost(ctx, &sidecarhost.ServiceHostOptions{
 		Postgres:   true,
 		Tasks:      sidecarTasks,
 		Blobs:      clusters,
 		ClockCheck: clockCheck,
+		Quota:      quota,
 	})
 	budget, err := evsservice.NewWriteBudget(ctx, host, nil, nil)
 	if err != nil {
 		glog.Errorf("[evsjobs]no write budget, so evs's jobs wait: %v\n", err)
+		quota.Drain(ctx)
 		clusters.Close()
 		return
 	}
 	host.Budget = budget
 	startEvsJobsOnHost(ctx, lifetime, host, evsJobs, func() {
 		budget.Close()
+		quota.Drain(context.Background())
 		clusters.Close()
 	})
 }

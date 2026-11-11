@@ -25,6 +25,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/sidecart3"
 )
 
 // Balances a test sets by hand, and the spent marks a lease writes.
@@ -245,6 +246,30 @@ func TestLeaseSpendIsAtomicWithNoIo(t *testing.T) {
 		}
 		connect.AssertEqual(t, fixture.redis.callCount(), calls)
 		connect.AssertEqual(t, attempts(), uint64(0))
+	})
+}
+
+// §22.5's hot-path gate on Spend's composed entry, budgets.yml's quota.spend row: no PostgreSQL acquisition
+// and no Redis call, a lease holding bytes.
+func TestLeaseSpendHoldsToItsInlinePathRow(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		fixture := newTestingLeaseFixture(t, nil)
+		networkId := server.NewId()
+		fixture.balances.set(networkId, testingLeaseBalance(5000, false, time.Now().Add(time.Hour)))
+		handle := testingOpenLease(t, fixture, networkId)
+		defer handle.Close()
+		calls := fixture.redis.callCount()
+		result := sidecart3.InlinePath(t, "quota.spend", sidecartest.NewFakeRedis(t.Context(), nil, nil, nil, nil), func(redis sidecar.Redis) {
+			for range 100 {
+				if !handle.Spend(1) {
+					t.Error("a spend within the draw refused")
+				}
+			}
+		})
+		connect.AssertEqual(t, result.RedisCallCount, 0)
+		connect.AssertEqual(t, fixture.redis.callCount(), calls)
 	})
 }
 
