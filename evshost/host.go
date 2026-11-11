@@ -21,10 +21,11 @@
 //
 // Ready is §19.4's evs row: the engine's probe of the first cluster, every cluster's sentinel read with this
 // block's credentials and one pool shown (server.FileClusters.Ready), and every seam no request is honored without.
-// Server has no implementation yet of two of them, so a real block stays not ready, failing closed, until each
-// lands: ServiceHost.Quota, which QUOTA-M2-11's NewApiQuota gives a host with no Postgres once
-// plan-QUOTA-host-reach's route exists, and the EvsAuthState ACL-M2-14 builds over AclGateCache (C-09: a real host
-// with no projection source stays not ready). HostDeps hands each to a test, or to the change that lands it.
+// ServiceHost.Quota is server/cli/evs's quotahost.NewBlockQuota over api's internal gate (QUOTA-M2-11, QD-055), which
+// a block builds only once it holds its bearer and api's url, and which is ready only once it has read its first
+// over-limit list; and the EvsAuthState ACL-M2-14 builds over AclGateCache has no implementation yet (C-09: a real
+// host with no projection source stays not ready), so a real block stays not ready, failing closed, until it lands.
+// HostDeps hands each to a test, or to the change that lands it.
 //
 // The block's parts run on a context of the host's own, which ends only at Close, so a SIGTERM's drain still has
 // its clusters, clock check, budget and batches while requests in flight finish.
@@ -119,7 +120,7 @@ type HostDeps struct {
 	Clusters HostClusters
 	// The clock check: chronyd at HostSettings.Chrony's address.
 	ClockCheck sidecar.ClockCheck
-	// ServiceHost.Quota: none until QUOTA-M2-11's NewApiQuota, and the block stays not ready.
+	// ServiceHost.Quota: server/cli/evs's quotahost.NewBlockQuota. nil leaves the block not ready.
 	Quota sidecar.Quota
 	// The write budget: evsservice.NewWriteBudget over the clusters' metadata clusters.
 	Budget sidecar.WriteBudget
@@ -136,6 +137,9 @@ type Host struct {
 	clock    sidecar.Clock
 	// what this host's readiness also waits on: nil for the engine's probe alone
 	clustersReady func() bool
+	// a Quota's own readiness, for one that reads its over-limit list from api (quotahost.HostQuota): nil until it
+	// has read one. nil for a Quota that says nothing of it.
+	quotaReady func() error
 	// what the engine cannot honor a request without and the block was not given, each said once
 	missing []string
 
@@ -175,7 +179,10 @@ func NewHost(ctx context.Context, host *sidecar.ServiceHost, settings *HostSetti
 		return nil, err
 	}
 	if host.Quota == nil {
-		self.missing = append(self.missing, "ServiceHost.Quota, which QUOTA-M2-11's NewApiQuota gives a host with no Postgres (plan-QUOTA-host-reach)")
+		self.missing = append(self.missing, "ServiceHost.Quota, which server/cli/evs builds over api's internal gate once the block holds its bearer and api's url (QUOTA-M2-11's quotahost.NewBlockQuota)")
+	} else if readiness, ok := host.Quota.(interface{ Ready() error }); ok {
+		// a process that has never loaded the over-limit list stays not ready (plan-SOCK-gate-data)
+		self.quotaReady = readiness.Ready
 	}
 	if deps.AuthState == nil {
 		self.missing = append(self.missing, "the newest verified authorization state, ACL-M2-14's EvsAuthState over AclGateCache (C-09)")
@@ -264,12 +271,16 @@ func (self *Host) Missing() []string {
 	return append([]string{}, self.missing...)
 }
 
-// §19.4's evs row: every seam given, the clusters ready and the engine's probe of the first answered.
+// §19.4's evs row: every seam given, the clusters ready, the Quota's first over-limit list read and the engine's
+// probe of the first cluster answered.
 func (self *Host) Ready() bool {
 	if 0 < len(self.missing) {
 		return false
 	}
 	if self.clustersReady != nil && !self.clustersReady() {
+		return false
+	}
+	if self.quotaReady != nil && self.quotaReady() != nil {
 		return false
 	}
 	return self.engine.Ready()

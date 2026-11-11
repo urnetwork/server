@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -237,6 +238,38 @@ func TestHostReadsItsReceiptKeysFromItsVault(t *testing.T) {
 	}
 	if !evsHost.Ready() {
 		t.Fatal("not ready with the keys in the vault")
+	}
+}
+
+// A Quota that says whether it has read its over-limit list, as quotahost.HostQuota does.
+type hostTestReadyQuota struct {
+	sidecar.Quota
+	ready *atomic.Bool
+}
+
+func (self hostTestReadyQuota) Ready() error {
+	if !self.ready.Load() {
+		return errors.New("no over-limit list read yet")
+	}
+	return nil
+}
+
+// A Quota that reads its over-limit list from api keeps the block not ready until it has read one, so a block
+// never serves on an empty list it did not read (QUOTA-M2-11; plan-SOCK-gate-data).
+func TestHostWaitsForItsQuotasFirstList(t *testing.T) {
+	var ready atomic.Bool
+	evsHost := newHostTestHost(t, func(host *sidecar.ServiceHost, deps *HostDeps) {
+		host.Quota = hostTestReadyQuota{Quota: host.Quota, ready: &ready}
+	})
+	if missing := evsHost.Missing(); len(missing) != 0 {
+		t.Fatalf("missing %v", missing)
+	}
+	if evsHost.Ready() {
+		t.Fatal("ready before the Quota read its first list")
+	}
+	ready.Store(true)
+	if !evsHost.Ready() {
+		t.Fatal("not ready once the Quota read its list")
 	}
 }
 
