@@ -473,6 +473,12 @@ func validateCompetitionExecutorReceiptWithException(settings *Settings, round *
 				return errors.New("host admission changed within-run uncertainty records")
 			}
 		}
+		// math.Exp dispatches on CPU FMA support even within the same Go
+		// amd64 binary. Only bounded p-value roundoff may differ; the original
+		// canonical receipt and all recomputed admission decisions stay exact.
+		if competitionHostProbabilityRoundoffMatches(expected.TwoSidedPValue, metric.TwoSidedPValue) {
+			expected.TwoSidedPValue = metric.TwoSidedPValue
+		}
 		expectedBytes, expectedErr := json.Marshal(expected)
 		actualBytes, actualErr := json.Marshal(metric)
 		if expectedErr != nil || actualErr != nil || !bytes.Equal(expectedBytes, actualBytes) {

@@ -1,0 +1,39 @@
+The companion is independent of the frozen agent, profile, recovery service and
+native qualification. Do not replace or repin any of those artifacts to use it.
+
+Build and review cli/competitionmanagementcache, then install its binary as
+/usr/local/libexec/competitionmanagementcache, owned by root and not writable by
+other users. Provision /var/lib/urnetwork/competition-management-cache as root:root
+0700 before starting the hardened service.
+
+Render the two units using the installed binary's --render-service and
+--render-timer operations, install their output as urnetwork-management-cache.service
+and urnetwork-management-cache.timer, then inspect systemd-analyze verify before
+daemon-reload and enablement. The service shares the existing private aggregate,
+with its own 32 MiB/32-task cap. It does not call the ordinary admission gate which
+it must keep runnable. No new reserve or relaxed resource ceiling is introduced.
+
+An optional --settings path names a canonical, protected root-owned JSON file.
+Render both units with that same argument; omitted fields retain the constructor
+defaults. It can tune numeric maintenance bounds, never select another cgroup,
+change the qualified eight-GiB private cap or lower the true control reserve.
+
+Each pass issues at most one request and rereads actual memory.current afterward.
+The default episode permits two requests totaling at most one GiB; its debit is
+fsynced before a kernel write. Lost acknowledgments consume the budget. Exhausted
+episodes remain held until an independent fresh observation proves the full
+target headroom. Do not delete/reset the journal to force automatic retries.
+An interrupted state.pending commit blocks further writes and remains available
+for operator audit instead of accumulating orphan files or silently retrying.
+
+Only clean inactive file-cache evidence from the fixed engine cgroup bounds a
+request. Engine shmem, swap, populated control children, unknown descendants,
+changed generations, aliases or missing kernel evidence refuse mutation. Kernel
+reclaim can return less than requested; no requested bytes are subtracted from
+charge and no maintenance result authorizes host or grading readiness. Existing
+admission guards make their own fresh resource and authentication checks.
+
+Validate native startup and a healthy no-op under the actual rendered service
+before enabling the timer. Review finite JSON results and the private durable
+episode journal. A blocked episode needs operator investigation, not an unbounded
+reclaim loop, global cache drop, limit change, active-evaluation mutation or rerun.

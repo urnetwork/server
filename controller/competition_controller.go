@@ -6643,7 +6643,20 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if baselineSha256 != outcome.RoundBaselineSha256 {
 					panic(errors.New("round baseline outcome digest does not match its bytes"))
 				}
-				insertResult, insertErr := tx.Exec(ctx, `
+				readBaseline := func() (*roundBaselineRecord, error) {
+					return scanRoundBaseline(tx.QueryRow(ctx, `
+						SELECT round_id, baseline_json, baseline_sha256, source_job_id,
+						       source_attempt, source_artifact_manifest_sha256, base_sha,
+						       providers_sha256, evaluator_image_digest, scorer_version,
+						       hardware_id, host_qualification_sha256, created_at
+						FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
+					`, roundId))
+				}
+				storedBaseline, storedErr := readBaseline()
+				if errors.Is(storedErr, pgx.ErrNoRows) {
+					// A prepared control is authenticated below, not republished by
+					// each candidate. Before-insert guards also run on conflict no-ops.
+					insertResult, insertErr := tx.Exec(ctx, `
 					INSERT INTO competition_round_baseline (
 						round_id, baseline_json, baseline_sha256, source_job_id,
 						source_attempt, source_artifact_manifest_sha256, base_sha,
@@ -6652,23 +6665,18 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 					ON CONFLICT (round_id) DO NOTHING
 				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
-					manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
-					roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
-					settings.EvaluationPolicy.HostQualificationSha256, now)
-				server.Raise(insertErr)
-				if insertResult.RowsAffected() == 1 {
-					appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
-						"round_id": roundId.String(), "baseline_sha256": baselineSha256,
-						"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
-					})
+						manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
+						roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
+						settings.EvaluationPolicy.HostQualificationSha256, now)
+					server.Raise(insertErr)
+					if insertResult.RowsAffected() == 1 {
+						appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
+							"round_id": roundId.String(), "baseline_sha256": baselineSha256,
+							"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
+						})
+					}
+					storedBaseline, storedErr = readBaseline()
 				}
-				storedBaseline, storedErr := scanRoundBaseline(tx.QueryRow(ctx, `
-					SELECT round_id, baseline_json, baseline_sha256, source_job_id,
-					       source_attempt, source_artifact_manifest_sha256, base_sha,
-					       providers_sha256, evaluator_image_digest, scorer_version,
-					       hardware_id, host_qualification_sha256, created_at
-					FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
-				`, roundId))
 				server.Raise(storedErr)
 				server.Raise(validateRoundBaselineRecord(roundSettings, round, storedBaseline))
 				if storedBaseline.Sha256 != baselineSha256 ||
