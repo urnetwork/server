@@ -79,7 +79,7 @@ cleanup_job_objects
 (
     cd "$SERVER_ROOT"
     export GOWORK=off GOTOOLCHAIN=local
-    [ "$(go env GOVERSION)" = go1.27.3 ] || die "resource fixture requires Go 1.27.3"
+    [ "$(go env GOVERSION)" = go1.27.4 ] || die "resource fixture requires Go 1.27.4"
     CGO_ENABLED=0 go build -trimpath -o "$build_context/resource-bomb" \
         ./connect/sim-latency/evaluator/container/testdata/resource-bomb
 )

@@ -4,36 +4,36 @@
 # complete source revisions makes one server commit select one reproducible
 # graph. Bump the refs together after compiling the service commands. The tests
 # in this directory read the refs from here.
-go: 1.27.3
+go: 1.27.4
 siblings:
   # Connect's tracked sctp/ directory supplies the SCTP fork from the same
   # revision.
   - repository: urnetwork/connect
     path: connect
-    ref: f1e14dda5f0003ae21e2a163661660de30c61bc1
+    ref: 511734052f57b24d072a2f429640fdae68f0b98a
   - repository: urnetwork/glog
     path: glog
-    ref: 1c4954b017d9e8140a4e7020f914eb27410a41c6
+    ref: 818f60489ac279ab01f2a625b6428ab1b4e24dd2
   - repository: urnetwork/sdk
     path: sdk
-    ref: 5517f0356d68ca876b8d8087811955a08e3f262d
+    ref: 62d6921b9d070f5f2ba85c001f7df211e924ba67
   - repository: urnetwork/proxy
     path: proxy
-    ref: 1575ad25cb8b10bd42865e630ec09f6823096e64
+    ref: 6d1ea2eee1c74d37443f4508501b0ac2bd3fd5d2
   - repository: urnetwork/goidenticons
     path: goidenticons
-    ref: 39ccec1b69db3a6f67e7346d6f44863499e6241d
+    ref: 2b481b95d2837bc4588c4f00abd52b7901cdc310
   - repository: urnetwork/userwireguard
     path: userwireguard
-    ref: 70ecd6e7f97715718f1079cc9be9fd42a8ebe82c
+    ref: 71a010e4ce06b949104b88b4c4a1992f35d192ed
   - repository: urnetwork/warp
     path: warp
-    ref: a3bb2fb5af5c452978b1db80dfb1eb0cf67771b3
+    ref: 2df4358e3b54acc6740873cdfb193f3795cafeab
   - repository: urfoundation/sn
     path: sn
-    ref: f2d5e6049be6f4a57aa3e2fdf73a5549b562948d
+    ref: 86962bcf0fc860cc8c963420b327bb3f7d3722d1
   # Server and SN's fixture generator use this same reviewed fork. Published
   # release modules receive an immutable replacement from the builder.
   - repository: urnetwork/gvisor
     path: gvisor
-    ref: 57c9e137f7407ad6cd41dcca1ba304a446e09c79
+    ref: 814dbfaec57a208ac8127c49eab03915a8432251

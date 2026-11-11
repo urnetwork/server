@@ -278,11 +278,12 @@ func TestEvaluatorBaseGoPinSupportsFrozenServerModule(t *testing.T) {
 }
 
 // Patch releases also change the minimum toolchain: the old digest-pinned
-// 1.27.2 image must not satisfy a module that now requires 1.27.3.
+// 1.27.3 image, whose net/http has GO-2026-6859, must not satisfy a module
+// that now requires 1.27.4.
 func TestEvaluatorGoPinRejectsPreviousPatchRelease(t *testing.T) {
-	module := []byte("module synthetic.example/server\n\ngo 1.27.3\n")
-	stale := []byte("ARG GO_IMAGE=golang:1.27.2-bookworm@sha256:" + strings.Repeat("a", 64) + "\n")
-	current := []byte("ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:" + strings.Repeat("b", 64) + "\n")
+	module := []byte("module synthetic.example/server\n\ngo 1.27.4\n")
+	stale := []byte("ARG GO_IMAGE=golang:1.27.3-bookworm@sha256:" + strings.Repeat("a", 64) + "\n")
+	current := []byte("ARG GO_IMAGE=golang:1.27.4-bookworm@sha256:" + strings.Repeat("b", 64) + "\n")
 	if evaluatorGoPinSupportsModule(module, stale) || !evaluatorGoPinSupportsModule(module, current) {
 		t.Fatal("patch-level module requirement did not reject the previous compiler")
 	}
