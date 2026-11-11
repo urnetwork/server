@@ -45,6 +45,9 @@ type ContractDeadlineReconciliation struct {
 // closed instead of being truncated.
 const deadlineEscrowRowLimit = 1024
 
+// The escrows are charged in the funding order (transfer_balance_funding_order.go),
+// as settlement charges them: a paid Pro grant first, then the earliest expiry.
+// A missing grant sorts last, as before.
 var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
 	COALESCE(b.net_revenue_nano_cents,0),b.network_id,
 	GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
@@ -55,7 +58,7 @@ var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_coun
 	CROSS JOIN LATERAL (SELECT contract_id,balance_id,balance_byte_count,settled,payout_byte_count,redis_reserved
 		FROM transfer_escrow WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT %d) AS e
 	LEFT JOIN transfer_balance b USING(balance_id)
-	ORDER BY b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
+	ORDER BY COALESCE(%s,false) DESC,b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1, transferBalanceFundsFirstSqlOf("b"))
 
 // The planner still costs the read at the row limit, and each estimated row
 // pays for two debit journal probes. Once dead journal tuples left that small

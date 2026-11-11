@@ -1725,13 +1725,16 @@ func grantTransferEscrowByteCount(
 	return availableByteCount, true
 }
 
-// Ordinary payers reserve from the earliest available grants. The persisted
+// Ordinary payers reserve from their available grants in the funding order:
+// paid Pro grants first, then the earliest expiry
+// (transfer_balance_funding_order.go). The persisted
 // internal prober first tries a bounded whole-request free grant. Both paths
 // hold balance locks through commit for positive-byte admission and read
 // reservations afterward in read committed, so a lock wait cannot authorize
 // already-reserved credit.
-// Zero-byte contracts read their earliest-grant anchor and priority without
-// taking financial locks; their client lifecycle fences precede this read.
+// Zero-byte contracts read the anchor and priority of the grant that funds
+// first without taking financial locks; their client lifecycle fences precede
+// this read.
 // A positive request larger than the available balance is granted for the
 // available balance when it is at least the shrink floor (see
 // grantTransferEscrowByteCount); the returned escrow's TransferByteCount is the
@@ -1832,21 +1835,9 @@ func createTransferEscrowInTx(
 		})
 	}
 
-	slices.SortFunc(orderedTransferBalances, func(a *escrow, b *escrow) int {
-		if a.endTime.Before(b.endTime) {
-			return -1
-		} else if b.endTime.Before(a.endTime) {
-			return 1
-		}
-
-		if a.startTime.Before(b.startTime) {
-			return -1
-		} else if b.startTime.Before(a.startTime) {
-			return 1
-		}
-
-		return a.balanceId.Cmp(b.balanceId)
-	})
+	// paid Pro grants first, then the earliest expiry
+	// (transfer_balance_funding_order.go)
+	slices.SortFunc(orderedTransferBalances, compareTransferBalanceFunding)
 
 	netEscrowBalanceByteCount := ByteCount(0)
 
@@ -4019,6 +4010,9 @@ func allocateContractParticipantPayouts(
 // Keep both lookups parameterized: historical contract cardinality estimates
 // can otherwise launch parallel workers for a single contract's small escrow.
 // The offset fences prevent flattening without limiting rows or ordering ties.
+// The escrows are charged in the funding order (transfer_balance_funding_order.go):
+// a contract that a paid Pro grant and a later grant funded together charges the
+// paid Pro grant first, as admission reserved it first.
 const settlementEscrowReadSql = `
     SELECT
         selected_escrow.balance_id,
@@ -4033,12 +4027,13 @@ const settlementEscrowReadSql = `
         OFFSET 0
     ) AS selected_escrow
     CROSS JOIN LATERAL (
-        SELECT start_balance_byte_count, net_revenue_nano_cents, end_time
+        SELECT start_balance_byte_count, net_revenue_nano_cents, end_time,
+            ` + transferBalanceFundsFirstSql + ` AS funds_first
         FROM transfer_balance
         WHERE balance_id = selected_escrow.balance_id
         OFFSET 0
     ) AS selected_balance
-    ORDER BY selected_balance.end_time ASC
+    ORDER BY selected_balance.funds_first DESC, selected_balance.end_time ASC
 `
 
 // Computes the floor mean of two non-negative reports without summing them.
@@ -4148,8 +4143,8 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	// transition, including when a legacy writer does not take balance locks.
 	positiveReservations, redisReservations := lockSettlementReservations(ctx, tx, contractId, lockedBalanceIds)
 
-	// order balances by end date, ascending
-	// take from the earlier before the later
+	// order balances in the funding order: paid Pro grants first, then by end
+	// date, ascending; take from the earlier before the later
 	result, err = tx.Query(
 		ctx,
 		settlementEscrowReadSql,
