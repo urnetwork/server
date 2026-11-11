@@ -118,7 +118,9 @@ func (self *wgSessionMetrics) sample(
 
 // runSessionMetrics samples the peer table on the session cadence while the
 // server lives. A read that fails leaves the open sessions as they are rather
-// than ending them: the failure says nothing about the peers.
+// than ending them: the failure says nothing about the peers. Each sample also
+// notes the WireGuard use of the proxies in session, for the Pro features
+// notice (noteWgFeatureUses).
 func (self *wgServer) runSessionMetrics() {
 	if self.settings.WgSessionSampleTimeout <= 0 || self.settings.WgSessionWindow <= 0 {
 		return
@@ -133,6 +135,8 @@ func (self *wgServer) runSessionMetrics() {
 		if err != nil {
 			continue
 		}
-		defaultWgSessionMetrics.sample(statuses, time.Now(), self.settings.WgSessionWindow)
+		now := time.Now()
+		defaultWgSessionMetrics.sample(statuses, now, self.settings.WgSessionWindow)
+		self.noteWgFeatureUses(statuses, now)
 	}
 }
