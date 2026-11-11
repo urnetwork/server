@@ -318,6 +318,9 @@ var winbackChargedRevenueMarkets = []string{
 	SubscriptionMarketSolana,
 	SubscriptionMarketMonero,
 	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
 	SubscriptionMarketX402,
 	SubscriptionMarketManual,
 }
@@ -332,6 +335,9 @@ var winbackRefundEventStores = []string{
 	SubscriptionMarketSolana,
 	SubscriptionMarketMonero,
 	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
 	SubscriptionMarketX402,
 	SubscriptionMarketManual,
 }

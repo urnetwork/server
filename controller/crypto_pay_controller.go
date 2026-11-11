@@ -49,8 +49,19 @@ import (
 
 // CryptoPaymentAsset is one coin that is on, and what it sells.
 type CryptoPaymentAsset struct {
-	// usdc_solana | zec | xmr
+	// usdc_solana | zec | xmr | tao | btc | eth | sol
 	Asset string `json:"asset"`
+	// the chain the coin is paid on: solana (usdc_solana and sol), zcash,
+	// monero, bittensor (tao), bitcoin, ethereum (eth, Ethereum mainnet only)
+	Network string `json:"network"`
+	// the decimals of the coin's atomic unit (amount_atomic = amount × 10^decimals)
+	Decimals int `json:"decimals"`
+	// the most decimals a quoted amount has: 8 for btc, 6 for every other coin
+	QuoteDecimals int `json:"quote_decimals"`
+	// whether the coin's invoices carry a payment uri: false for tao, which
+	// has no payment link standard (the invoice gives the address and the
+	// amount)
+	PaymentLink bool `json:"payment_link"`
 	// the plans the coin sells (yearly, yearly_onboarding; never monthly)
 	Plans []string `json:"plans"`
 	// the data items the coin sells (data_1tib, data_10tib)
@@ -152,6 +163,13 @@ type CryptoPaymentStatusResult struct {
 	ReceivedAtomic  string `json:"received_atomic"`
 	Remaining       string `json:"remaining"`
 	RemainingAtomic string `json:"remaining_atomic"`
+	// what was received beyond the amount ("0" when nothing was): an
+	// overpayment is credited as paid, and the surplus is returned on request
+	// to support, in the same coin
+	Excess       string `json:"excess"`
+	ExcessAtomic string `json:"excess_atomic"`
+	// the chain the payment is sent on (as CryptoPaymentAsset.network)
+	Network string `json:"network"`
 	// the lowest among the receipts that make up the payment (0 in the mempool)
 	Confirmations         int        `json:"confirmations"`
 	ConfirmationsRequired int        `json:"confirmations_required"`
@@ -188,8 +206,18 @@ type CryptoPaymentIntentResult struct {
 	AmountAtomic string `json:"amount_atomic"`
 	// usdc_solana only: the reference, as the memo of a transfer sent by hand
 	Memo string `json:"memo"`
-	// the payment URI to show as a QR and open; never built by a client
-	Uri                   string                     `json:"uri"`
+	// the payment URI to show as a QR and open; never built by a client. ""
+	// for tao, which has no payment link standard (uri_note says so)
+	Uri string `json:"uri"`
+	// when uri is "": why, in English ("TAO has no payment link standard: ...");
+	// else ""
+	UriNote string `json:"uri_note"`
+	// the chain the payment must be sent on (as CryptoPaymentAsset.network)
+	Network string `json:"network"`
+	// what to send and on which network, in English, for a person or an agent
+	// paying by hand (a coin sent on another network, or a token instead of
+	// the coin, is not credited)
+	NetworkWarning        string                     `json:"network_warning"`
 	QuotedAt              *time.Time                 `json:"quoted_at"`
 	ExpiresAt             *time.Time                 `json:"expires_at"`
 	ConfirmationsRequired int                        `json:"confirmations_required"`
@@ -438,8 +466,52 @@ func cryptoSolanaPayUri(recipient string, amount string, mint string, reference 
 	)
 }
 
+// cryptoBitcoinUri is the BIP 21 request
+// bitcoin:<address>?amount=<amount>&label=URnetwork&message=<description>:
+// the amount in BTC, at most 8 decimals; label and message percent-encoded
+// per RFC 3986 (BIP 21 allows no '+' for a space).
+func cryptoBitcoinUri(address string, amount string, description string) string {
+	return fmt.Sprintf(
+		"bitcoin:%s?amount=%s&label=%s&message=%s",
+		address, amount, cryptoUriEscape("URnetwork"), cryptoUriEscape(description),
+	)
+}
+
+// cryptoEthereumUri is the EIP-681 request ethereum:<address>@1?value=<wei>:
+// native ETH on Ethereum mainnet (chain id 1), the value in wei as an
+// integer. EIP-681 has no description; the invoice shows the item.
+func cryptoEthereumUri(address string, amountWei int64) string {
+	return fmt.Sprintf("ethereum:%s@1?value=%d", address, amountWei)
+}
+
+// cryptoSolanaNativeUri is the Solana Pay transfer request for native SOL:
+// solana:<recipient>?amount=<amount>&reference=<reference>&label=URnetwork&message=<description>,
+// without spl-token (Solana Pay 1.1). The recipient is the invoice's own
+// address, which alone finds the payment; the reference is Solana Pay's
+// usual extra, and the invoice's memo, as for USDC.
+func cryptoSolanaNativeUri(recipient string, amount string, reference string, description string) string {
+	return fmt.Sprintf(
+		"solana:%s?amount=%s&reference=%s&label=%s&message=%s",
+		recipient,
+		cryptoUriEscape(amount),
+		cryptoUriEscape(reference),
+		cryptoUriEscape("URnetwork"),
+		cryptoUriEscape(description),
+	)
+}
+
+// cryptoSolReference is a native SOL invoice's Solana Pay reference: 32
+// bytes derived from the invoice id, base58, so it needs no storage and is the
+// same on every read.
+func cryptoSolReference(intentId server.Id) string {
+	sum := sha256.Sum256(append([]byte("urnetwork/sol-reference/"), intentId.Bytes()...))
+	return base58.Encode(sum[:])
+}
+
 // cryptoPaymentUri is the URI for an invoice, or "" when its address cannot
-// be put in one (it never is: every address comes from our own daemons).
+// be put in one (it never is: every address comes from our own daemons or
+// from Coinbase), or when the coin has no payment link standard (TAO: the
+// invoice shows the address and the amount, mmm/BTCPAY.md §17.6).
 func cryptoPaymentUri(intent *model.CryptoPaymentIntent) string {
 	if !cryptoUriAddressOk(intent.Address) {
 		return ""
@@ -456,6 +528,14 @@ func cryptoPaymentUri(intent *model.CryptoPaymentIntent) string {
 			return ""
 		}
 		return cryptoSolanaPayUri(intent.Address, amount, solanaUsdcMint, *intent.SolanaReference, description)
+	case model.CryptoAssetBtc:
+		return cryptoBitcoinUri(intent.Address, amount, description)
+	case model.CryptoAssetEth:
+		return cryptoEthereumUri(intent.Address, intent.AmountAtomic)
+	case model.CryptoAssetSol:
+		return cryptoSolanaNativeUri(intent.Address, amount, cryptoSolReference(intent.IntentId), description)
+	case model.CryptoAssetTao:
+		return ""
 	}
 	return ""
 }
@@ -473,7 +553,10 @@ func cryptoPaymentUri(intent *model.CryptoPaymentIntent) string {
 func cryptoPaymentAssets(ctx context.Context, config *CryptoPayConfig) (available []*CryptoPaymentAsset, unavailable []*CryptoPaymentAsset) {
 	available = []*CryptoPaymentAsset{}
 	unavailable = []*CryptoPaymentAsset{}
-	for _, asset := range cryptoEnabledAssets(config) {
+	for _, asset := range cryptoPayAssets {
+		if !cryptoAssetSwitchedOn(config, asset) {
+			continue
+		}
 		assetConfig := config.Asset(asset)
 		plans := []string{}
 		for _, plan := range cryptoPayKnownPlans {
@@ -492,10 +575,22 @@ func cryptoPaymentAssets(ctx context.Context, config *CryptoPayConfig) (availabl
 		}
 		listed := &CryptoPaymentAsset{
 			Asset:                 asset,
+			Network:               cryptoAssetNetwork(asset),
+			Decimals:              cryptoAssetDecimals(asset),
+			QuoteDecimals:         cryptoAssetQuoteDecimals(asset),
+			PaymentLink:           cryptoAssetPaymentLink(asset),
 			Plans:                 plans,
 			Items:                 items,
 			ConfirmationsRequired: int(assetConfig.CreditConfirmations),
 			QuoteTtlSeconds:       int(cryptoAssetQuoteTtl(config, asset) / time.Second),
+		}
+		if cryptoAssetConfigured(config, asset) != nil {
+			// switched on, but the vault does not name everything selling it
+			// needs (Bitcoin and ETH before alchemy.yml is filled in): shown
+			// as unavailable, never sold
+			listed.UnavailableReason = cryptoQuoteRefusedNotConfigured
+			unavailable = append(unavailable, listed)
+			continue
 		}
 		quotable, reason, judged := cryptoListedAvailability(ctx, config, asset)
 		switch {
@@ -545,7 +640,7 @@ func cryptoTermForNetwork(ctx context.Context, networkId server.Id, now time.Tim
 	market, endTime, ok := model.GetLatestOneTimeSubscriptionRenewal(
 		ctx,
 		networkId,
-		[]string{model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash},
+		model.SubscriptionOneTimeCryptoMarkets,
 		now,
 	)
 	if !ok {
@@ -569,8 +664,12 @@ func decorateCryptoPay(result *SubscriptionBalanceResult, clientSession *session
 			glog.Errorf("[cryptopay]could not decorate the balance: %v\n", r)
 		}
 	}()
-	if assets, _ := cryptoPaymentAssets(clientSession.Ctx, cryptoPayConfigFunc()); 0 < len(assets) {
+	assets, unavailable := cryptoPaymentAssets(clientSession.Ctx, cryptoPayConfigFunc())
+	if 0 < len(assets) {
 		result.CryptoAssets = assets
+	}
+	if 0 < len(unavailable) {
+		result.CryptoUnavailableAssets = unavailable
 	}
 	if clientSession.ByJwt != nil {
 		result.CryptoTerm = cryptoTermForNetwork(clientSession.Ctx, clientSession.ByJwt.NetworkId, server.NowUtc())
@@ -798,9 +897,9 @@ func cryptoStartIntent(
 	}
 
 	if request.delivery == model.CryptoDeliveryCode &&
-		config.MaxOpenCodeIntentsPerAsset <= model.CountOpenCryptoPaymentIntents(ctx, asset, model.CryptoDeliveryCode, now) {
+		config.MaxOpenCodeIntentsFor(asset) <= model.CountOpenCryptoPaymentIntents(ctx, asset, model.CryptoDeliveryCode, now) {
 		cryptoPayRefusalReports.report("too_many_codes/"+asset, func() {
-			glog.Errorf("[cryptopay]%s has %d open code invoices or more; refusing new ones\n", asset, config.MaxOpenCodeIntentsPerAsset)
+			glog.Errorf("[cryptopay]%s has %d open code invoices or more; refusing new ones\n", asset, config.MaxOpenCodeIntentsFor(asset))
 		})
 		cryptoPayQuoteResults.WithLabelValues(asset, cryptoQuoteRefusedTooManyCodes).Inc()
 		return cryptoIntentError(PurchaseErrorCodeAssetUnavailable, cryptoAssetUnavailableMessage)
@@ -831,7 +930,7 @@ func cryptoStartIntent(
 		return cryptoIntentError(PurchaseErrorCodeAssetUnavailable, cryptoAssetUnavailableMessage)
 	}
 	cryptoPayRateSpread.WithLabelValues(asset).Set(rateQuote.SpreadPercent)
-	amountAtomic, ok := cryptoQuoteAmountAtomic(request.priceUsd, rateQuote.RateUsd, config.Quote.BufferPercent, cryptoAssetDecimals(asset))
+	amountAtomic, ok := cryptoAssetQuoteAmountAtomic(asset, request.priceUsd, rateQuote.RateUsd, config.BufferPercentFor(asset))
 	if !ok {
 		cryptoPayQuoteResults.WithLabelValues(asset, cryptoQuoteRefusedBadAmount).Inc()
 		return cryptoIntentError(PurchaseErrorCodeAssetUnavailable, cryptoAssetUnavailableMessage)
@@ -960,12 +1059,18 @@ func cryptoIntentResult(
 		Amount:                cryptoFormatAtomic(intent.AmountAtomic, decimals),
 		AmountAtomic:          fmt.Sprintf("%d", intent.AmountAtomic),
 		Uri:                   cryptoPaymentUri(intent),
+		UriNote:               cryptoAssetUriNote(intent.Asset),
+		Network:               cryptoAssetNetwork(intent.Asset),
+		NetworkWarning:        cryptoAssetNetworkWarning(intent.Asset),
 		QuotedAt:              &quotedAt,
 		ExpiresAt:             &expiresAt,
 		ConfirmationsRequired: cryptoConfirmationsRequired(config, intent.Asset),
 	}
 	if intent.SolanaReference != nil {
 		result.Memo = *intent.SolanaReference
+	}
+	if intent.Asset == model.CryptoAssetSol {
+		result.Memo = cryptoSolReference(intent.IntentId)
 	}
 	receipts := []*model.CryptoPaymentReceipt{}
 	if intent.Asset != model.CryptoAssetUsdcSolana && intent.CreditedAt == nil {
@@ -1009,15 +1114,20 @@ var cryptoAvailabilityByAsset = map[string]*cryptoAvailability{}
 // The cursor read behind the availability. Replaceable only by tests.
 var cryptoGetScanCursor = model.GetCryptoScanCursor
 
+// The pool depth behind the availability. Replaceable only by tests.
+var cryptoCountFreeAddresses = model.CountFreeCryptoPaymentAddresses
+
 // The clock the availability and its cache read. Replaceable only by tests.
 var cryptoAvailabilityNow = server.NowUtc
 
 // cryptoAssetAvailable reports whether a scanned coin may be quoted now: its
 // scanner succeeded within three scan intervals, it knows the network's
-// height, and its wallet is within max_lag_blocks of it. A coin whose
-// payments would not be seen in time must not be sold, nor offered: the
-// quotes, the re-quotes and the coins on offer (cryptoPaymentAssets) all
-// read this one decision.
+// height, its wallet is within max_lag_blocks of it, its address pool has a
+// free address (a Coinbase coin whose wallet Coinbase has not opened yet has
+// none), and its rates were not found stale or divergent lately
+// (cryptoCachedRateAvailable). A coin whose payments would not be seen in
+// time must not be sold, nor offered: the quotes, the re-quotes and the coins
+// on offer (cryptoPaymentAssets) all read this one decision.
 func cryptoAssetAvailable(ctx context.Context, config *CryptoPayConfig, asset string) (bool, string) {
 	if !slices.Contains(cryptoPayScannedAssets, asset) {
 		return true, ""
@@ -1030,6 +1140,12 @@ func cryptoAssetAvailable(ctx context.Context, config *CryptoPayConfig, asset st
 		return cached.available, cached.reason
 	}
 	available, reason := cryptoDecideAvailability(cryptoGetScanCursor(ctx, asset), config, asset, now)
+	if available && cryptoCountFreeAddresses(ctx, asset) <= 0 {
+		available, reason = false, cryptoQuoteRefusedPoolEmpty
+	}
+	if available {
+		available, reason = cryptoCachedRateAvailable(config, asset, now)
+	}
 	cryptoAvailabilityLock.Lock()
 	cryptoAvailabilityByAsset[asset] = &cryptoAvailability{checkedAt: now, available: available, reason: reason}
 	cryptoAvailabilityLock.Unlock()
@@ -1052,10 +1168,10 @@ func cryptoDecideAvailability(cursor *model.CryptoScanCursor, config *CryptoPayC
 	return true, ""
 }
 
-// cryptoCursorFresh reports a scanner that succeeded within three scan
-// intervals.
+// cryptoCursorFresh reports a scanner that succeeded within three of its
+// coin's scan intervals.
 func cryptoCursorFresh(cursor *model.CryptoScanCursor, config *CryptoPayConfig, now time.Time) bool {
-	return cursor != nil && cursor.LastSuccessAt != nil && now.Sub(*cursor.LastSuccessAt) <= 3*config.ScanInterval
+	return cursor != nil && cursor.LastSuccessAt != nil && now.Sub(*cursor.LastSuccessAt) <= 3*config.ScanIntervalFor(cursor.Asset)
 }
 
 // cryptoWalletCaughtUp reports a wallet within the coin's max lag of a known
@@ -1152,13 +1268,16 @@ func cryptoStatusResult(
 		Delivery:              intent.Delivery,
 		NetworkName:           networkName,
 		Status:                view.Status,
-		ReviewReason:          view.ReviewReason,
+		ReviewReason:          cryptoBuyerReviewReason(view.ReviewReason),
 		Amount:                cryptoFormatAtomic(intent.AmountAtomic, decimals),
 		AmountAtomic:          fmt.Sprintf("%d", intent.AmountAtomic),
 		Received:              cryptoFormatAtomic(view.ReceivedAtomic, decimals),
 		ReceivedAtomic:        fmt.Sprintf("%d", view.ReceivedAtomic),
 		Remaining:             cryptoFormatAtomic(view.RemainingAtomic, decimals),
 		RemainingAtomic:       fmt.Sprintf("%d", view.RemainingAtomic),
+		Excess:                cryptoFormatAtomic(max(0, view.ReceivedAtomic-intent.AmountAtomic), decimals),
+		ExcessAtomic:          fmt.Sprintf("%d", max(0, view.ReceivedAtomic-intent.AmountAtomic)),
+		Network:               cryptoAssetNetwork(intent.Asset),
 		Confirmations:         view.Confirmations,
 		ConfirmationsRequired: cryptoConfirmationsRequired(config, intent.Asset),
 		ExpiresAt:             &expiresAt,
@@ -1236,7 +1355,7 @@ func CryptoPaymentRequote(
 		}
 		cryptoPayRateSpread.WithLabelValues(intent.Asset).Set(rateQuote.SpreadPercent)
 		priceUsd := model.NanoCentsToUsd(intent.PriceUsdNanoCents)
-		amountAtomic, ok := cryptoQuoteAmountAtomic(priceUsd, rateQuote.RateUsd, config.Quote.BufferPercent, cryptoAssetDecimals(intent.Asset))
+		amountAtomic, ok := cryptoAssetQuoteAmountAtomic(intent.Asset, priceUsd, rateQuote.RateUsd, config.BufferPercentFor(intent.Asset))
 		if !ok {
 			cryptoPayQuoteResults.WithLabelValues(intent.Asset, cryptoQuoteRefusedBadAmount).Inc()
 			return cryptoIntentError(PurchaseErrorCodeAssetUnavailable, cryptoAssetUnavailableMessage), nil
@@ -1346,8 +1465,22 @@ func cryptoReceiptCounts(receipt *model.CryptoPaymentReceipt) bool {
 var cryptoHeldReviewReasons = []string{
 	model.CryptoReviewReasonOrphaned,
 	model.CryptoReviewReasonCreditFailed,
+	// held by the sanctions screen (crypto_pay_screen.go); the scanner lets
+	// screening_unavailable through once a screen is clean
+	model.CryptoReviewReasonSanctionsHold,
+	model.CryptoReviewReasonScreeningUnavailable,
 	model.CryptoReviewReasonVoided,
 	model.CryptoReviewReasonExtra,
+}
+
+// cryptoBuyerReviewReason is the review reason a buyer is shown: either
+// sanctions screen hold reads "screening", whichever it is.
+func cryptoBuyerReviewReason(reason string) string {
+	switch reason {
+	case model.CryptoReviewReasonSanctionsHold, model.CryptoReviewReasonScreeningUnavailable:
+		return CryptoReviewReasonScreening
+	}
+	return reason
 }
 
 // cryptoReceiptHeld reports a receipt an operator holds: in review for a

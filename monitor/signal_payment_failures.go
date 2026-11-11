@@ -13,7 +13,7 @@ WITH active_supporter AS (
     SELECT DISTINCT renewal.network_id, renewal.market, min(renewal.start_time) OVER (PARTITION BY renewal.network_id, renewal.market) AS first_start
     FROM subscription_renewal renewal
     WHERE renewal.subscription_type = 'supporter'
-      AND renewal.market IN ('apple', 'google', 'monero', 'solana', 'stripe', 'zcash')
+      AND renewal.market IN ('apple', 'bitcoin', 'bittensor', 'ethereum', 'google', 'monero', 'solana', 'stripe', 'zcash')
       AND renewal.start_time <= now()
       AND now() < renewal.end_time
       AND EXISTS (
@@ -166,7 +166,7 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 	}
 	switch kind {
 	case "entitlement_missing":
-		if !map[string]bool{"apple": true, "google": true, "monero": true, "solana": true, "stripe": true, "zcash": true}[target] {
+		if !map[string]bool{"apple": true, "bitcoin": true, "bittensor": true, "ethereum": true, "google": true, "monero": true, "solana": true, "stripe": true, "zcash": true}[target] {
 			return finding{}, fmt.Errorf("payment failures returned an unknown entitlement market")
 		}
 		common.class = "payment-entitlement-missing"

@@ -5765,6 +5765,24 @@ const SubscriptionMarketX402 = "x402"
 const SubscriptionMarketMonero = "monero"
 const SubscriptionMarketZcash = "zcash"
 
+// one-time payments in TAO, Bitcoin and ETH, received into our Coinbase
+// account (mmm/BTCPAY.md §17), named for the chain like solana, monero and
+// zcash. Native SOL credits under SubscriptionMarketSolana.
+const SubscriptionMarketBittensor = "bittensor"
+const SubscriptionMarketBitcoin = "bitcoin"
+const SubscriptionMarketEthereum = "ethereum"
+
+// SubscriptionOneTimeCryptoMarkets are the markets whose Pro is a one-time
+// crypto payment: a term that never renews.
+var SubscriptionOneTimeCryptoMarkets = []string{
+	SubscriptionMarketSolana,
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
+}
+
 type SubscriptionRenewal struct {
 	NetworkId          server.Id
 	SubscriptionType   SubscriptionType

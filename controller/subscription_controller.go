@@ -208,9 +208,16 @@ type SubscriptionBalanceResult struct {
 	// when there is none, so a client older than crypto, or a deployment with
 	// crypto off, never shows a coin.
 	CryptoAssets []*CryptoPaymentAsset `json:"crypto_assets,omitempty"`
+	// CryptoUnavailableAssets are the coins that are on but cannot be paid with
+	// now (the unavailable_assets list of GET /pay/crypto/assets), each with
+	// available false and its unavailable_reason, for an app that shows a coin
+	// greyed out (the "More coins" tab while all four of its coins are
+	// unavailable). Never offered. Omitted when there is none.
+	CryptoUnavailableAssets []*CryptoPaymentAsset `json:"crypto_unavailable_assets,omitempty"`
 	// CryptoTerm is the network's latest one-time crypto credit (Solana,
-	// Monero or Zcash) whose grace has not ended. Apps show the renewal notice
-	// while term_end_time <= now < grace_end_time, and never before.
+	// Monero, Zcash, Bittensor, Bitcoin or Ethereum) whose grace has not
+	// ended. Apps show the renewal notice while term_end_time <= now <
+	// grace_end_time, and never before.
 	CryptoTerm *CryptoTerm `json:"crypto_term,omitempty"`
 
 	// ----- failed renewals (subscription_stripe_dunning.go) -----

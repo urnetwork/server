@@ -521,7 +521,8 @@ func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket) boo
 	for _, market := range markets {
 		switch market {
 		case model.SubscriptionMarketManual, model.SubscriptionMarketX402,
-			model.SubscriptionMarketMonero, model.SubscriptionMarketZcash:
+			model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
+			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 			continue
 		}
 		return true

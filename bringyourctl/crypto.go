@@ -131,7 +131,8 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 		if !ok {
 			return 1
 		}
-		credited, err := controller.CryptoOperatorCredit(clientSession, id)
+		sanctionsCleared, _ := opts.Bool("--sanctions-cleared")
+		credited, err := controller.CryptoOperatorCredit(clientSession, id, sanctionsCleared)
 		if err != nil {
 			fmt.Fprintf(out, "could not credit: %s\n", err)
 			return 1
@@ -186,6 +187,27 @@ func cryptoCommand(opts docopt.Opts, out io.Writer) int {
 		return 0
 	}
 
+	if alchemyWebhook, _ := opts.Bool("alchemy-webhook"); alchemyWebhook {
+		signingKeyPath, _ := opts.String("--signing-key-file")
+		result, err := controller.CryptoAlchemyEnsureEthWebhook(ctx, strings.TrimSpace(signingKeyPath))
+		if err != nil {
+			fmt.Fprintf(out, "could not set up the Alchemy webhook: %s\n", err)
+			return 1
+		}
+		if result.Created {
+			fmt.Fprintf(out, "created the ETH Address Activity webhook %s for %s\n", result.WebhookId, result.WebhookUrl)
+		} else {
+			fmt.Fprintf(out, "found the ETH Address Activity webhook %s for %s\n", result.WebhookId, result.WebhookUrl)
+		}
+		if result.SigningKeyWritten {
+			fmt.Fprintf(out, "its signing key is in %s (mode 0600); it was not printed\n", signingKeyPath)
+		} else {
+			fmt.Fprintf(out, "Alchemy did not return its signing key: copy it from the webhook's page in the Alchemy dashboard\n")
+		}
+		fmt.Fprintf(out, "store the id as alchemy.eth_webhook_id and the signing key as alchemy.eth_webhook_signing_key in vault/<env>/alchemy.yml\n")
+		return 0
+	}
+
 	fmt.Fprintf(out, "unknown crypto command\n")
 	return 1
 }
@@ -217,20 +239,13 @@ func cryptoTicker(asset string) string {
 	case model.CryptoAssetUsdcSolana:
 		return "usdc"
 	}
+	// tao, btc, eth and sol are their own tickers
 	return asset
 }
 
 // cryptoFormatAmount prints an atomic amount in coin units with its ticker.
 func cryptoFormatAmount(asset string, amountAtomic int64) string {
-	decimals := 0
-	switch asset {
-	case model.CryptoAssetXmr:
-		decimals = 12
-	case model.CryptoAssetZec:
-		decimals = 8
-	case model.CryptoAssetUsdcSolana:
-		decimals = 6
-	}
+	decimals := controller.CryptoAssetDecimals(asset)
 	text := strconv.FormatInt(amountAtomic, 10)
 	if decimals == 0 {
 		return text + " " + cryptoTicker(asset)

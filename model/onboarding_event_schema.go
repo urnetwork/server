@@ -174,7 +174,7 @@ func propText(maxLen int) *EventPropSpec {
 // Shared prop vocabularies.
 var (
 	EventPlans          = []string{PlanYearly, PlanMonthly}
-	EventStores         = []string{OnboardingStoreApple, OnboardingStorePlay, OnboardingStoreStripe, OnboardingStoreSolana, OnboardingStoreZcash, OnboardingStoreMonero}
+	EventStores         = []string{OnboardingStoreApple, OnboardingStorePlay, OnboardingStoreStripe, OnboardingStoreSolana, OnboardingStoreZcash, OnboardingStoreMonero, OnboardingStoreBittensor, OnboardingStoreBitcoin, OnboardingStoreEthereum}
 	EventOfferSurfaces  = []string{OnboardingOfferSurfaceIntroStep, OnboardingOfferSurfaceFinalScreen, OnboardingOfferSurfaceEmailLink, OnboardingOfferSurfaceAccount}
 	EventDeclineControl = []string{"free_plan_link", "back", "system_dismiss"}
 	EventTiers          = []string{"standard", "regional"}

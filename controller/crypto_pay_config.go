@@ -43,6 +43,35 @@ package controller
 //
 // USDC on Solana needs neither: its payments arrive through the Helius webhook
 // (helius.yml), as they always have.
+//
+// TAO, Bitcoin, ETH and native SOL are received into our Coinbase account,
+// one deposit address per invoice (mmm/BTCPAY.md §17.2), and credited from
+// the chain alone (§17.3). Each reads two vault files: coinbase.yml for the
+// addresses (selling needs it) and its chain source (scanning needs it):
+//
+//	vault/<env>/coinbase.yml        # every one of the four coins
+//	  api:
+//	    host: api.coinbase.com
+//	    key_name: organizations/.../apiKeys/...           # a CDP key with the view and receive scopes
+//	    private_key: -----BEGIN EC PRIVATE KEY-----...   # ES256
+//	    account_id: ...                                   # not used here: each coin's wallet is looked up by its code
+//
+//	vault/<env>/alchemy.yml         # btc and eth (Alchemy only, §17.3)
+//	  alchemy:
+//	    api_key: ...                                      # the endpoints are built from it when not given
+//	    eth_endpoint: https://eth-mainnet.g.alchemy.com/v2/...      # optional
+//	    btc_endpoint: https://bitcoin-mainnet.g.alchemy.com/v2/...  # optional; the address history needs Alchemy's UTXO add-on
+//	    notify_auth_token: ...                            # optional: registers each new address with the webhook
+//	    eth_webhook_id: wh_...                            # optional: the Address Activity webhook, a fast path only
+//	    eth_webhook_signing_key: whsec_...
+//	    btc_webhook_id: ...                               # optional, if Alchemy offers Bitcoin notifications there
+//	    btc_webhook_signing_key: ...
+//
+//	vault/<env>/helius.yml          # sol: helius.api_key, the RPC the scanner reads
+//	vault/<env>/st.yml              # tao: snow's Finney node (st.GetConnection, URNETWORK_ST_PROFILE)
+//
+// Polling the chain is the source of truth for all four, so neither coin's
+// availability depends on a webhook.
 
 import (
 	"fmt"
@@ -55,6 +84,7 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/st"
 )
 
 // The items a coin can sell. Monthly is card only (decision 6): no coin sells
@@ -62,11 +92,54 @@ import (
 var cryptoPayKnownPlans = []string{model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
 var cryptoPayKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
 
-// The coins, in the order every UI shows them.
-var cryptoPayAssets = []string{model.CryptoAssetUsdcSolana, model.CryptoAssetZec, model.CryptoAssetXmr}
+// The coins, in the order every UI shows them: the main selector's USDC,
+// Zcash and Monero, then "More coins": TAO, Bitcoin, ETH, SOL (mmm/BTCPAY.md
+// §17.6).
+var cryptoPayAssets = []string{
+	model.CryptoAssetUsdcSolana,
+	model.CryptoAssetZec,
+	model.CryptoAssetXmr,
+	model.CryptoAssetTao,
+	model.CryptoAssetBtc,
+	model.CryptoAssetEth,
+	model.CryptoAssetSol,
+}
 
 // The coins the scanner watches: USDC arrives by webhook.
-var cryptoPayScannedAssets = []string{model.CryptoAssetZec, model.CryptoAssetXmr}
+var cryptoPayScannedAssets = []string{
+	model.CryptoAssetZec,
+	model.CryptoAssetXmr,
+	model.CryptoAssetTao,
+	model.CryptoAssetBtc,
+	model.CryptoAssetEth,
+	model.CryptoAssetSol,
+}
+
+// The coins received into our Coinbase account, each invoice at a deposit
+// address of its own that Coinbase creates (mmm/BTCPAY.md §17.2). Their
+// scanners read the chain per invoice address, never an address's balance:
+// Coinbase moves funds out of its deposit addresses at any time.
+var cryptoPayCoinbaseAssets = []string{
+	model.CryptoAssetTao,
+	model.CryptoAssetBtc,
+	model.CryptoAssetEth,
+	model.CryptoAssetSol,
+}
+
+// cryptoAssetCoinbase reports a coin received into our Coinbase account.
+func cryptoAssetCoinbase(asset string) bool {
+	return slices.Contains(cryptoPayCoinbaseAssets, asset)
+}
+
+// The coins whose payments are screened against OFAC's addresses before
+// credit (mmm/BTCPAY.md §17.3): their senders are public on the chain.
+// Monero and Zcash are shielded, and USDC keeps its own path.
+var cryptoPayScreenedAssets = []string{
+	model.CryptoAssetTao,
+	model.CryptoAssetBtc,
+	model.CryptoAssetEth,
+	model.CryptoAssetSol,
+}
 
 // Networks a wallet daemon may serve, per coin. regtest is zec's private test
 // chain (local/crypto-regtest); Monero's regtest uses mainnet's addresses.
@@ -79,10 +152,31 @@ const (
 
 // Rate sources by config name.
 const (
-	cryptoRateSourceKraken    = "kraken"
+	cryptoRateSourceKraken   = "kraken"
+	cryptoRateSourceCoinbase = "coinbase"
+	// Monero's second source until the owner names its replacement: CoinGecko
+	// is dropped for every other coin (mmm/BTCPAY.md §17.4, its keyless terms
+	// exclude production use), and CoinPaprika's keyless tier, the planned
+	// replacement, is licensed for personal use only (coinpaprika.com/api/pricing,
+	// read 2026-11-10: "Personal use only. Commercial use starts with
+	// Starter", $99 a month; showing the data to customers needs Enterprise).
+	// Without a second source Monero could not be quoted at all.
 	cryptoRateSourceCoingecko = "coingecko"
-	cryptoRateSourceCoinbase  = "coinbase"
 )
+
+// cryptoAssetRateSources are the sources a coin may be quoted from, in the
+// order its default list names them: Kraken and Coinbase for every coin they
+// list (mmm/BTCPAY.md §17.4). Coinbase lists no Monero, and Monero keeps
+// CoinGecko (cryptoRateSourceCoingecko).
+func cryptoAssetRateSources(asset string) []string {
+	switch asset {
+	case model.CryptoAssetXmr:
+		return []string{cryptoRateSourceKraken, cryptoRateSourceCoingecko}
+	case model.CryptoAssetZec, model.CryptoAssetTao, model.CryptoAssetBtc, model.CryptoAssetEth, model.CryptoAssetSol:
+		return []string{cryptoRateSourceKraken, cryptoRateSourceCoinbase}
+	}
+	return []string{}
+}
 
 // CryptoPayAssetConfig is one coin's policy.
 type CryptoPayAssetConfig struct {
@@ -111,7 +205,29 @@ type CryptoPayAssetConfig struct {
 	// config/main sets it false for usdc_solana until every server runs a
 	// build with migration 853 (mmm/ZCASH-CONTRACT.md §3.13.14)
 	CodeDelivery *bool `yaml:"code_delivery"`
+	// the quote's buffer for this coin, percent; 0 = the quote's
+	// buffer_percent. TAO's default is 1% for its volatility (mmm/BTCPAY.md
+	// §17.4)
+	BufferPercent float64 `yaml:"buffer_percent"`
+	// how often this coin is scanned; 0 = scan_interval. Bitcoin's 10-minute
+	// blocks and ETH's 15-minute finality need no 20 s polling of every
+	// invoice address
+	ScanInterval time.Duration `yaml:"scan_interval"`
+	// the free addresses this coin's pool keeps; 0 = address_pool_target. A
+	// Coinbase coin's addresses are made one request each, so its pool is
+	// smaller (40)
+	AddressPoolTarget int `yaml:"address_pool_target"`
+	// a per-address coin's scanner still reads an invoice's address this long
+	// after the invoice expired, was credited or was voided, for a late or an
+	// extra payment (24 h), less often than an open invoice's
+	WatchAfter time.Duration `yaml:"watch_after"`
 }
+
+// The pool of a Coinbase coin: each address is one request to Coinbase.
+const cryptoCoinbasePoolTarget = 40
+
+// How long a per-address coin's closed invoices are still read.
+const cryptoDefaultWatchAfter = 24 * time.Hour
 
 // CodeDeliveryEnabled reports whether the coin sells balance codes.
 func (self *CryptoPayAssetConfig) CodeDeliveryEnabled() bool {
@@ -175,6 +291,19 @@ func (self *CryptoPayConfig) normalize() {
 		assetConfig.Items = slices.DeleteFunc(slices.Clone(assetConfig.Items), func(item string) bool {
 			return !slices.Contains(cryptoPayKnownItems, item)
 		})
+		// a source the coin may not be quoted from is dropped (CoinGecko for
+		// every coin but Monero, mmm/BTCPAY.md §17.4), and a list left with
+		// fewer than the two a quote needs takes the coin's own
+		assetConfig.RateSources = slices.DeleteFunc(slices.Clone(assetConfig.RateSources), func(source string) bool {
+			if slices.Contains(cryptoAssetRateSources(asset), source) {
+				return false
+			}
+			glog.Errorf("[cryptopay]crypto_pay.yml names rate source %q for %s, which it is not quoted from; it is ignored\n", source, asset)
+			return true
+		})
+		if len(assetConfig.RateSources) < 2 {
+			assetConfig.RateSources = cryptoAssetRateSources(asset)
+		}
 		switch asset {
 		case model.CryptoAssetXmr:
 			if assetConfig.CreditConfirmations <= 0 {
@@ -186,8 +315,49 @@ func (self *CryptoPayConfig) normalize() {
 			if assetConfig.ReorgWindowBlocks <= 0 {
 				assetConfig.ReorgWindowBlocks = 10
 			}
-			if len(assetConfig.RateSources) == 0 {
-				assetConfig.RateSources = []string{cryptoRateSourceKraken, cryptoRateSourceCoingecko}
+		case model.CryptoAssetTao:
+			// snow's finalized blocks only: credited and final at finality
+			// (one "confirmation" is a finalized block)
+			assetConfig.CreditConfirmations = 1
+			assetConfig.FinalConfirmations = 1
+			if assetConfig.ReorgWindowBlocks <= 0 {
+				assetConfig.ReorgWindowBlocks = 1
+			}
+			if assetConfig.BufferPercent <= 0 {
+				assetConfig.BufferPercent = 1
+			}
+		case model.CryptoAssetBtc:
+			if assetConfig.CreditConfirmations <= 0 {
+				assetConfig.CreditConfirmations = 1
+			}
+			if assetConfig.FinalConfirmations <= 0 {
+				assetConfig.FinalConfirmations = 6
+			}
+			if assetConfig.ReorgWindowBlocks <= 0 {
+				assetConfig.ReorgWindowBlocks = 6
+			}
+			if assetConfig.ScanInterval <= 0 {
+				assetConfig.ScanInterval = time.Minute
+			}
+		case model.CryptoAssetEth:
+			// credited at finality: one "confirmation" is a block the
+			// finalized tag covers; the window reaches past it (about 64
+			// blocks), so a payment in a block that is reorged away before
+			// finality is noticed
+			assetConfig.CreditConfirmations = 1
+			assetConfig.FinalConfirmations = 1
+			if assetConfig.ReorgWindowBlocks <= 0 {
+				assetConfig.ReorgWindowBlocks = 128
+			}
+			if assetConfig.ScanInterval <= 0 {
+				assetConfig.ScanInterval = 30 * time.Second
+			}
+		case model.CryptoAssetSol:
+			// the finalized commitment: one "confirmation" is a finalized slot
+			assetConfig.CreditConfirmations = 1
+			assetConfig.FinalConfirmations = 1
+			if assetConfig.ReorgWindowBlocks <= 0 {
+				assetConfig.ReorgWindowBlocks = 150
 			}
 		case model.CryptoAssetZec:
 			if assetConfig.CreditConfirmations <= 0 {
@@ -208,9 +378,6 @@ func (self *CryptoPayConfig) normalize() {
 			if assetConfig.MaxLagBlocksAfterNu7 <= 0 {
 				assetConfig.MaxLagBlocksAfterNu7 = 60
 			}
-			if len(assetConfig.RateSources) == 0 {
-				assetConfig.RateSources = []string{cryptoRateSourceKraken, cryptoRateSourceCoingecko, cryptoRateSourceCoinbase}
-			}
 		case model.CryptoAssetUsdcSolana:
 			// Helius reports confirmed transfers only
 			assetConfig.CreditConfirmations = 1
@@ -219,9 +386,18 @@ func (self *CryptoPayConfig) normalize() {
 		if assetConfig.Network == "" {
 			assetConfig.Network = cryptoNetworkMainnet
 		}
-		if asset == model.CryptoAssetUsdcSolana {
-			// the Helius webhook watches mainnet only
+		if asset == model.CryptoAssetUsdcSolana || cryptoAssetCoinbase(asset) {
+			// the Helius webhook watches mainnet only, and Coinbase gives no
+			// testnet deposit addresses (mmm/BTCPAY.md §17.8)
 			assetConfig.Network = cryptoNetworkMainnet
+		}
+		if cryptoAssetCoinbase(asset) {
+			if assetConfig.AddressPoolTarget <= 0 {
+				assetConfig.AddressPoolTarget = cryptoCoinbasePoolTarget
+			}
+			if assetConfig.WatchAfter <= 0 {
+				assetConfig.WatchAfter = cryptoDefaultWatchAfter
+			}
 		}
 	}
 	if self.Quote.Expiry <= 0 {
@@ -267,6 +443,24 @@ func (self *CryptoPayConfig) normalize() {
 	}
 	if self.MaxLagBlocks[model.CryptoAssetZec] <= 0 {
 		self.MaxLagBlocks[model.CryptoAssetZec] = 20
+	}
+	// TAO: snow's finalized head behind its best head (2-3 blocks normally)
+	// plus the scanner's own lag, about 6 minutes of 12 s blocks
+	if self.MaxLagBlocks[model.CryptoAssetTao] <= 0 {
+		self.MaxLagBlocks[model.CryptoAssetTao] = 30
+	}
+	// Bitcoin and ETH: the scanner reads Alchemy's head itself, so its height
+	// is the network's; a little slack for a block that lands mid-scan
+	if self.MaxLagBlocks[model.CryptoAssetBtc] <= 0 {
+		self.MaxLagBlocks[model.CryptoAssetBtc] = 2
+	}
+	if self.MaxLagBlocks[model.CryptoAssetEth] <= 0 {
+		self.MaxLagBlocks[model.CryptoAssetEth] = 16
+	}
+	// SOL: the finalized slot behind the confirmed one, about 2 minutes of
+	// 400 ms slots
+	if self.MaxLagBlocks[model.CryptoAssetSol] <= 0 {
+		self.MaxLagBlocks[model.CryptoAssetSol] = 300
 	}
 	if self.UnlinkAfter <= 0 {
 		self.UnlinkAfter = 720 * time.Hour
@@ -343,8 +537,73 @@ func parseCryptoPayConfig(resource *server.SimpleResource) *CryptoPayConfig {
 		return config
 	}
 	config := &y.CryptoPay
+	cryptoPayDefaultOnAssets(config)
 	config.normalize()
 	return config
+}
+
+// cryptoPayDefaultOnAssets switches on, with every plan and item, each
+// Coinbase coin a parsed crypto_pay.yml leaves out: those coins turn on when
+// their backend is configured and healthy, with no switch to remember
+// (mmm/BTCPAY.md §17, the owner's "no hidden settings"). A file that names a
+// coin keeps its own `enabled`, which stays the kill switch. A missing or
+// malformed file is still every coin off.
+func cryptoPayDefaultOnAssets(config *CryptoPayConfig) {
+	if config.Assets == nil {
+		config.Assets = map[string]*CryptoPayAssetConfig{}
+	}
+	for _, asset := range cryptoPayCoinbaseAssets {
+		if _, named := config.Assets[asset]; named {
+			continue
+		}
+		config.Assets[asset] = &CryptoPayAssetConfig{
+			Enabled: true,
+			Plans:   slices.Clone(cryptoPayKnownPlans),
+			Items:   slices.Clone(cryptoPayKnownItems),
+		}
+	}
+}
+
+// BufferPercentFor is the quote buffer of a coin, percent.
+func (self *CryptoPayConfig) BufferPercentFor(asset string) float64 {
+	if assetConfig := self.Asset(asset); assetConfig != nil && 0 < assetConfig.BufferPercent {
+		return assetConfig.BufferPercent
+	}
+	return self.Quote.BufferPercent
+}
+
+// ScanIntervalFor is how often a coin is scanned.
+func (self *CryptoPayConfig) ScanIntervalFor(asset string) time.Duration {
+	if assetConfig := self.Asset(asset); assetConfig != nil && 0 < assetConfig.ScanInterval {
+		return assetConfig.ScanInterval
+	}
+	return self.ScanInterval
+}
+
+// AddressPoolTargetFor is the free addresses a coin's pool keeps.
+func (self *CryptoPayConfig) AddressPoolTargetFor(asset string) int {
+	if assetConfig := self.Asset(asset); assetConfig != nil && 0 < assetConfig.AddressPoolTarget {
+		return assetConfig.AddressPoolTarget
+	}
+	return self.AddressPoolTarget
+}
+
+// MaxOpenCodeIntentsFor is the most open code-delivery invoices of a coin. A
+// Coinbase coin's smaller pool allows at most half of it, so anonymous
+// invoices cannot drain it.
+func (self *CryptoPayConfig) MaxOpenCodeIntentsFor(asset string) int {
+	if cryptoAssetCoinbase(asset) {
+		return max(1, min(self.MaxOpenCodeIntentsPerAsset, self.AddressPoolTargetFor(asset)/2))
+	}
+	return self.MaxOpenCodeIntentsPerAsset
+}
+
+// WatchAfterFor is how long a per-address coin's closed invoice is still read.
+func (self *CryptoPayConfig) WatchAfterFor(asset string) time.Duration {
+	if assetConfig := self.Asset(asset); assetConfig != nil && 0 < assetConfig.WatchAfter {
+		return assetConfig.WatchAfter
+	}
+	return cryptoDefaultWatchAfter
 }
 
 // The parsed crypto_pay.yml (cached for the process). Replaceable only by
@@ -370,7 +629,9 @@ func setCryptoPayConfigForTest(config *CryptoPayConfig) func() {
 
 // ----- the wallet daemons' vault settings -----
 
-// cryptoWalletSettings is a coin's wallet daemon connection, from the vault.
+// cryptoWalletSettings is a coin's wallet daemon connection, from the vault,
+// or for a Coinbase coin its chain source and the Coinbase key. Never logged:
+// every field may be a credential or carry one.
 type cryptoWalletSettings struct {
 	Asset          string
 	WalletRpcUrl   string
@@ -384,6 +645,30 @@ type cryptoWalletSettings struct {
 	NodeRpcUrl  string
 	NodeRpcUser string
 	NodeRpcPass string
+
+	// a Coinbase coin's chain source, which scanning needs: the Alchemy
+	// endpoint (btc, eth, with the key in its path), the Helius RPC (sol, with
+	// the key in its query), snow's Finney WebSocket (tao)
+	ChainRpcUrl string
+	// tao: the st profile the Finney connection was resolved for (mainnet,
+	// testnet)
+	ChainProfile string
+	// btc, eth: the Alchemy webhook, an optional fast path, and the Notify
+	// API token that registers new addresses with it
+	AlchemyWebhookId         string
+	AlchemyWebhookSigningKey string
+	AlchemyNotifyToken       string
+	// a Coinbase coin's deposit addresses: the CDP key of coinbase.yml.
+	// Selling needs it; nil when coinbase.yml does not name a complete key
+	Coinbase *cryptoCoinbaseSettings
+}
+
+// cryptoCoinbaseSettings is the Coinbase App API key that creates deposit
+// addresses (the view and receive scopes, mmm/BTCPAY.md §17.2).
+type cryptoCoinbaseSettings struct {
+	Host       string
+	KeyName    string
+	PrivateKey string
 }
 
 // The vault resource and its top-level key, per scanned coin.
@@ -393,13 +678,137 @@ func cryptoWalletVaultResource(asset string) (resource string, root string, ok b
 		return "monero.yml", "monero", true
 	case model.CryptoAssetZec:
 		return "zcash.yml", "zcash", true
+	case model.CryptoAssetBtc, model.CryptoAssetEth:
+		return "alchemy.yml", "alchemy", true
+	case model.CryptoAssetSol:
+		return "helius.yml", "helius", true
+	case model.CryptoAssetTao:
+		return st.VaultResourceName, "", true
 	}
 	return "", "", false
+}
+
+// The Alchemy endpoints built from the api key when alchemy.yml gives none.
+var cryptoAlchemyDefaultEndpoints = map[string]string{
+	model.CryptoAssetEth: "https://eth-mainnet.g.alchemy.com/v2/",
+	model.CryptoAssetBtc: "https://bitcoin-mainnet.g.alchemy.com/v2/",
+}
+
+// The Helius RPC, with the api key in its query.
+const cryptoHeliusRpcBaseUrl = "https://mainnet.helius-rpc.com/?api-key="
+
+// The snow Finney connection, resolved from st.yml. Replaceable only by tests.
+var cryptoTaoConnection = func() (wsUrl string, profile string, err error) {
+	profile, err = st.ActiveProfile()
+	if err != nil {
+		return "", "", err
+	}
+	connection, err := st.GetConnection()
+	if err != nil {
+		return "", "", err
+	}
+	if connection.WsUrl == "" {
+		return "", "", fmt.Errorf("st.yml names no subtensor WebSocket")
+	}
+	return connection.WsUrl, profile, nil
+}
+
+// cryptoCoinbaseSettingsFromVault reads the Coinbase key, or why it is not
+// complete. The error names the path, never a value.
+func cryptoCoinbaseSettingsFromVault() (*cryptoCoinbaseSettings, error) {
+	resource, err := server.Vault.SimpleResource("coinbase.yml")
+	if err != nil {
+		return nil, err
+	}
+	required := func(path ...string) (string, error) {
+		value, err := simpleResourceNonblankStringValue(resource, path...)
+		if err != nil {
+			return "", fmt.Errorf("coinbase.yml: %w", err)
+		}
+		return strings.TrimSpace(value), nil
+	}
+	settings := &cryptoCoinbaseSettings{}
+	if settings.Host, err = required("api", "host"); err != nil {
+		return nil, err
+	}
+	if settings.KeyName, err = required("api", "key_name"); err != nil {
+		return nil, err
+	}
+	// a PEM keeps its line breaks: only the surrounding space is trimmed
+	if settings.PrivateKey, err = required("api", "private_key"); err != nil {
+		return nil, err
+	}
+	return settings, nil
+}
+
+// cryptoChainSettingsFromVault reads a Coinbase coin's chain source and,
+// when complete, its Coinbase key. An error is a chain source that is
+// missing: the coin is neither scanned nor sold. A missing Coinbase key
+// leaves the coin scanned (its open invoices are still credited) but not
+// sold.
+func cryptoChainSettingsFromVault(asset string) (*cryptoWalletSettings, error) {
+	settings := &cryptoWalletSettings{Asset: asset}
+	switch asset {
+	case model.CryptoAssetBtc, model.CryptoAssetEth:
+		resource, err := server.Vault.SimpleResource("alchemy.yml")
+		if err != nil {
+			return nil, err
+		}
+		optional := func(path ...string) string {
+			value, err := simpleResourceNonblankStringValue(resource, path...)
+			if err != nil {
+				return ""
+			}
+			return strings.TrimSpace(value)
+		}
+		endpointKey := "eth_endpoint"
+		webhookKey := "eth_webhook"
+		if asset == model.CryptoAssetBtc {
+			endpointKey = "btc_endpoint"
+			webhookKey = "btc_webhook"
+		}
+		settings.ChainRpcUrl = optional("alchemy", endpointKey)
+		if settings.ChainRpcUrl == "" {
+			apiKey := optional("alchemy", "api_key")
+			if apiKey == "" {
+				return nil, fmt.Errorf("alchemy.yml: alchemy.%s and alchemy.api_key are missing", endpointKey)
+			}
+			settings.ChainRpcUrl = cryptoAlchemyDefaultEndpoints[asset] + apiKey
+		}
+		if !strings.HasPrefix(settings.ChainRpcUrl, "https://") {
+			return nil, fmt.Errorf("alchemy.yml: alchemy.%s is not an https url", endpointKey)
+		}
+		settings.AlchemyWebhookId = optional("alchemy", webhookKey+"_id")
+		settings.AlchemyWebhookSigningKey = optional("alchemy", webhookKey+"_signing_key")
+		settings.AlchemyNotifyToken = optional("alchemy", "notify_auth_token")
+	case model.CryptoAssetSol:
+		apiKey, err := vaultNonblankString("helius.yml", "helius", "api_key")
+		if err != nil {
+			return nil, err
+		}
+		settings.ChainRpcUrl = cryptoHeliusRpcBaseUrl + strings.TrimSpace(apiKey)
+	case model.CryptoAssetTao:
+		wsUrl, profile, err := cryptoTaoConnection()
+		if err != nil {
+			return nil, fmt.Errorf("st.yml: %w", err)
+		}
+		settings.ChainRpcUrl = wsUrl
+		settings.ChainProfile = profile
+	default:
+		return nil, fmt.Errorf("%s has no chain source", asset)
+	}
+	if coinbase, err := cryptoCoinbaseSettingsFromVault(); err == nil {
+		settings.Coinbase = coinbase
+	}
+	return settings, nil
 }
 
 // cryptoWalletSettingsFromVault reads a coin's daemon settings, or why they
 // are unusable. The error names the resource and the path, never a value.
 func cryptoWalletSettingsFromVault(asset string) (*cryptoWalletSettings, error) {
+	if cryptoAssetCoinbase(asset) {
+		return cryptoChainSettingsFromVault(asset)
+	}
 	resourceName, root, ok := cryptoWalletVaultResource(asset)
 	if !ok {
 		return nil, fmt.Errorf("%s has no wallet daemon", asset)
@@ -471,6 +880,16 @@ func cryptoWalletSettingsSellable(asset string, settings *cryptoWalletSettings, 
 		if settings.NodeRpcUrl == "" && network != cryptoNetworkRegtest {
 			return fmt.Errorf("zcash.yml: zcash.node_rpc_url is missing (the lag check needs zebrad)")
 		}
+	case model.CryptoAssetTao, model.CryptoAssetBtc, model.CryptoAssetEth, model.CryptoAssetSol:
+		if settings.ChainRpcUrl == "" {
+			return fmt.Errorf("%s has no chain source", asset)
+		}
+		if settings.Coinbase == nil {
+			return fmt.Errorf("coinbase.yml: api.host, api.key_name and api.private_key are not all set (the deposit addresses need them)")
+		}
+		if asset == model.CryptoAssetTao && settings.ChainProfile != network {
+			return fmt.Errorf("st.yml: the subtensor connection serves %s, the coin's network is %s", settings.ChainProfile, network)
+		}
 	}
 	return nil
 }
@@ -483,24 +902,42 @@ func cryptoWalletSettingsSellable(asset string, settings *cryptoWalletSettings, 
 // off is not listed, quoted or re-quoted, but its scanner, credits and
 // reconcile legs go on (cryptoAssetScannable).
 func cryptoAssetEnabled(config *CryptoPayConfig, asset string) bool {
+	return cryptoAssetSwitchedOn(config, asset) && cryptoAssetConfigured(config, asset) == nil
+}
+
+// cryptoAssetSwitchedOn reports a coin the config switches on, whatever the
+// vault holds.
+func cryptoAssetSwitchedOn(config *CryptoPayConfig, asset string) bool {
 	assetConfig := config.Asset(asset)
-	if assetConfig == nil || !assetConfig.Enabled {
-		return false
-	}
+	return assetConfig != nil && assetConfig.Enabled
+}
+
+// cryptoAssetConfigured is nil when the vault names everything selling the
+// coin needs, else why not (the resource and path, never a value). USDC needs
+// nothing beyond its webhook. A coin switched on but not configured is listed
+// as unavailable (not_configured) and not sold; the reason is logged once a
+// minute.
+func cryptoAssetConfigured(config *CryptoPayConfig, asset string) error {
 	if !slices.Contains(cryptoPayScannedAssets, asset) {
-		return true
+		return nil
+	}
+	assetConfig := config.Asset(asset)
+	if assetConfig == nil {
+		return fmt.Errorf("%s has no policy", asset)
 	}
 	settings, err := cryptoWalletSettingsFunc(asset)
 	if err == nil {
 		err = cryptoWalletSettingsSellable(asset, settings, assetConfig.Network)
 	}
 	if err != nil {
-		cryptoPayVaultReports.report(asset, func() {
-			glog.Warningf("[cryptopay]%s is switched on but its vault file is not complete, so it is not sold: %s\n", asset, err)
-		})
-		return false
+		if assetConfig.Enabled {
+			cryptoPayVaultReports.report(asset, func() {
+				glog.Warningf("[cryptopay]%s is switched on but its vault file is not complete, so it is not sold: %s\n", asset, err)
+			})
+		}
+		return err
 	}
-	return true
+	return nil
 }
 
 // cryptoAssetScannable reports whether a scanned coin's wallet daemon is
@@ -564,8 +1001,14 @@ func cryptoAssetMarket(asset string) string {
 		return model.SubscriptionMarketMonero
 	case model.CryptoAssetZec:
 		return model.SubscriptionMarketZcash
-	case model.CryptoAssetUsdcSolana:
+	case model.CryptoAssetUsdcSolana, model.CryptoAssetSol:
 		return model.SubscriptionMarketSolana
+	case model.CryptoAssetTao:
+		return model.SubscriptionMarketBittensor
+	case model.CryptoAssetBtc:
+		return model.SubscriptionMarketBitcoin
+	case model.CryptoAssetEth:
+		return model.SubscriptionMarketEthereum
 	}
 	return ""
 }
@@ -578,13 +1021,20 @@ func cryptoAssetOnboardingStore(asset string) string {
 		return model.OnboardingStoreMonero
 	case model.CryptoAssetZec:
 		return model.OnboardingStoreZcash
-	case model.CryptoAssetUsdcSolana:
+	case model.CryptoAssetUsdcSolana, model.CryptoAssetSol:
 		return model.OnboardingStoreSolana
+	case model.CryptoAssetTao:
+		return model.OnboardingStoreBittensor
+	case model.CryptoAssetBtc:
+		return model.OnboardingStoreBitcoin
+	case model.CryptoAssetEth:
+		return model.OnboardingStoreEthereum
 	}
 	return ""
 }
 
-// The decimals of a coin's atomic unit: piconero, zatoshi, micro-USDC.
+// The decimals of a coin's atomic unit: piconero, zatoshi, micro-USDC, rao,
+// satoshi, wei, lamport (mmm/BTCPAY.md §17.7).
 func cryptoAssetDecimals(asset string) int {
 	switch asset {
 	case model.CryptoAssetXmr:
@@ -593,8 +1043,86 @@ func cryptoAssetDecimals(asset string) int {
 		return 8
 	case model.CryptoAssetUsdcSolana:
 		return 6
+	case model.CryptoAssetTao:
+		return 9
+	case model.CryptoAssetBtc:
+		return 8
+	case model.CryptoAssetEth:
+		return 18
+	case model.CryptoAssetSol:
+		return 9
 	}
 	return 0
+}
+
+// cryptoAssetNetwork is the chain a coin is paid on.
+func cryptoAssetNetwork(asset string) string {
+	switch asset {
+	case model.CryptoAssetUsdcSolana, model.CryptoAssetSol:
+		return "solana"
+	case model.CryptoAssetZec:
+		return "zcash"
+	case model.CryptoAssetXmr:
+		return "monero"
+	case model.CryptoAssetTao:
+		return "bittensor"
+	case model.CryptoAssetBtc:
+		return "bitcoin"
+	case model.CryptoAssetEth:
+		return "ethereum"
+	}
+	return ""
+}
+
+// cryptoAssetPaymentLink reports a coin whose invoices carry a payment uri:
+// every coin but TAO, which has no payment link standard.
+func cryptoAssetPaymentLink(asset string) bool {
+	return asset != model.CryptoAssetTao && cryptoAssetNetwork(asset) != ""
+}
+
+// cryptoAssetNetworkWarning is what to send and on which network, in English,
+// for a person or an agent paying an invoice by hand.
+func cryptoAssetNetworkWarning(asset string) string {
+	switch asset {
+	case model.CryptoAssetUsdcSolana:
+		return "Send USDC on Solana (the USDC token, mint " + solanaUsdcMint + ") to this address, exactly the amount. USDC on another network, or SOL, is not credited. A transfer sent by hand carries the memo."
+	case model.CryptoAssetZec:
+		return "Send ZEC to this shielded address. ZEC sent from a transparent address is credited; ZEC sent to a transparent address is not. A payment needs 10 confirmations."
+	case model.CryptoAssetXmr:
+		return "Send XMR to this subaddress, exactly the amount."
+	case model.CryptoAssetTao:
+		return "Send TAO on the Bittensor network (Finney) to this address, exactly the amount. TAO has no memo: the address alone identifies this invoice. TAO sent on another network or as a wrapped token is not credited."
+	case model.CryptoAssetBtc:
+		return "Send BTC on the Bitcoin network to this address, exactly the amount. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation."
+	case model.CryptoAssetEth:
+		return "Send ETH on Ethereum mainnet to this address, exactly the amount. ETH on another network (Base, Arbitrum, Optimism) or a token is not credited. A payment is credited once its block is finalized, about 15 minutes."
+	case model.CryptoAssetSol:
+		return "Send native SOL on Solana to this address, exactly the amount. A token (SPL) transfer is not credited. The address alone identifies this invoice; the memo is optional."
+	}
+	return ""
+}
+
+// cryptoAssetUriNote is why an invoice of the coin has no payment uri, or "".
+func cryptoAssetUriNote(asset string) string {
+	if asset == model.CryptoAssetTao {
+		return "TAO has no payment link standard: copy the address and send exactly the amount."
+	}
+	return ""
+}
+
+// CryptoAssetDecimals is cryptoAssetDecimals for the operator tools.
+func CryptoAssetDecimals(asset string) int {
+	return cryptoAssetDecimals(asset)
+}
+
+// The decimals a coin's quoted amount is rounded up to: 6 for every coin but
+// Bitcoin, which is quoted to the satoshi (mmm/BTCPAY.md §17.7). Exchanges
+// send TAO at 8 decimals at most, so 6 is short enough to send as quoted.
+func cryptoAssetQuoteDecimals(asset string) int {
+	if asset == model.CryptoAssetBtc {
+		return 8
+	}
+	return cryptoQuoteDecimals
 }
 
 // cryptoAssetQuoteTtl is how long a coin's quote holds: the config's expiry

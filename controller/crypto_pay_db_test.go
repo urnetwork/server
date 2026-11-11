@@ -1028,7 +1028,7 @@ func TestCryptoReconcileLegs(t *testing.T) {
 		// grants it again through the one credit (mmm/ZCASH-CONTRACT.md §3.13.2)
 		connect.AssertEqual(t, planIntent.CreditedAt, (*time.Time)(nil))
 		connect.AssertEqual(t, planIntent.BalanceId, (*server.Id)(nil))
-		credited, err = CryptoOperatorCredit(clientSession, plan.IntentId)
+		credited, err = CryptoOperatorCredit(clientSession, plan.IntentId, false)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, credited, true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
@@ -1040,7 +1040,7 @@ func TestCryptoReconcileLegs(t *testing.T) {
 			connect.AssertEqual(t, receipt.State, model.CryptoReceiptStateCredited)
 		}
 		// once
-		_, err = CryptoOperatorCredit(clientSession, plan.IntentId)
+		_, err = CryptoOperatorCredit(clientSession, plan.IntentId, false)
 		connect.AssertEqual(t, err != nil, true)
 	})
 }
@@ -1066,7 +1066,7 @@ func TestCryptoOperatorTools(t *testing.T) {
 		shortReceipt := cryptoDbReceipt(t, ctx, reviewed, "tx-operator", reviewed.AmountAtomic*98/100, 4)
 		reviewedId := reviewed.IntentId
 		model.SetCryptoPaymentReceiptsStateInConn(nil, ctx, &reviewedId, []model.CryptoPaymentReceiptKey{shortReceipt.Key()}, model.CryptoReceiptStateReview, model.CryptoReviewReasonUnderpaid)
-		credited, err := CryptoOperatorCredit(clientSession, reviewed.IntentId)
+		credited, err := CryptoOperatorCredit(clientSession, reviewed.IntentId, false)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, credited, true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
@@ -1108,7 +1108,7 @@ func TestCryptoOperatorTools(t *testing.T) {
 		connect.AssertEqual(t, err != nil, true)
 
 		// a voided invoice is never credited
-		_, err = CryptoOperatorCredit(clientSession, open.IntentId)
+		_, err = CryptoOperatorCredit(clientSession, open.IntentId, false)
 		connect.AssertEqual(t, err != nil, true)
 
 		listed := CryptoOperatorListInvoices(ctx, model.CryptoAssetXmr, "", 10)

@@ -98,6 +98,57 @@ var cryptoPayRateSpread = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	Help:      "Spread (max over min) of the fresh rate answers of the last quote, by asset",
 }, []string{"asset"})
 
+// Sanctions screens of a payment's senders before its credit (mmm/BTCPAY.md
+// §17.3), by asset and result: clean, matched (held as sanctions_hold),
+// unscreenable (held as screening_unavailable: no list, or a sender the list
+// cannot read), retry (the senders could not be read now), released (a held
+// payment that screened clean later).
+var cryptoPayScreenings = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "crypto_pay",
+	Name:      "screenings_total",
+	Help:      "Sanctions screens of crypto payments' senders before credit, by asset and result (clean, matched, unscreenable, retry, released)",
+}, []string{"asset", "result"})
+
+// Coinbase deposit addresses the refill made, by asset and result: created,
+// reused (Coinbase answered an address the pool holds), error.
+var cryptoPayCoinbaseAddresses = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "crypto_pay",
+	Name:      "coinbase_addresses_total",
+	Help:      "Coinbase deposit address requests of the address refill, by asset and result (created, reused, error)",
+}, []string{"asset", "result"})
+
+// New addresses registered with a provider's webhook (a fast path), by asset
+// and result: registered, error.
+var cryptoPayWebhookRegistrations = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "crypto_pay",
+	Name:      "webhook_registrations_total",
+	Help:      "Invoice addresses registered with a provider webhook, by asset and result (registered, error)",
+}, []string{"asset", "result"})
+
+// Webhook deliveries that name a per-address coin's invoice addresses, by
+// source (alchemy, helius), asset and result: hinted (an invoice address was
+// named, its scan reads it next), ignored (none was), refused (not verified).
+var cryptoPayWebhookDeliveries = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "crypto_pay",
+	Name:      "webhook_deliveries_total",
+	Help:      "Crypto webhook deliveries by source, asset and result (hinted, ignored, refused)",
+}, []string{"source", "asset", "result"})
+
+// Blocks a scanner passed over without reading them, by asset: TAO's
+// scanner never reads further back than its lookback (snow's node is shared
+// with the SN25 validator), so a scanner that was down longer skips the
+// oldest blocks and says so.
+var cryptoPayScanBlocksSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Namespace: "urnetwork",
+	Subsystem: "crypto_pay",
+	Name:      "scan_blocks_skipped_total",
+	Help:      "Blocks a crypto scanner passed over without reading them (past its lookback, or across a runtime it cannot decode), by asset",
+}, []string{"asset"})
+
 // Registers the metrics with the default registry.
 func init() {
 	prometheus.MustRegister(
@@ -112,5 +163,10 @@ func init() {
 		cryptoPayHeights,
 		cryptoPayRateSourceResults,
 		cryptoPayRateSpread,
+		cryptoPayScreenings,
+		cryptoPayCoinbaseAddresses,
+		cryptoPayWebhookRegistrations,
+		cryptoPayWebhookDeliveries,
+		cryptoPayScanBlocksSkipped,
 	)
 }

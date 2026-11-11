@@ -87,11 +87,23 @@ func CryptoOperatorUnmatchedReceipts(ctx context.Context, asset string, limit in
 // that stayed credited), once the operator has seen the payment on the chain
 // (mmm/ZCASH-CONTRACT.md §3.13.2). A voided invoice is never credited. USDC is credited
 // only by its webhook and reconciler, which know the paying transaction.
-func CryptoOperatorCredit(clientSession *session.ClientSession, intentId server.Id) (bool, error) {
+//
+// A payment the sanctions screen held as a match (sanctions_hold) is credited
+// only with sanctionsCleared: the owner and counsel cleared it (mmm/BTCPAY.md
+// §17.3). A payment held because it could not be screened is not refused:
+// the operator's review stands in for the screen.
+func CryptoOperatorCredit(clientSession *session.ClientSession, intentId server.Id, sanctionsCleared bool) (bool, error) {
 	ctx := clientSession.Ctx
 	intent := model.GetCryptoPaymentIntent(ctx, intentId)
 	if intent == nil {
 		return false, errors.New("no such invoice")
+	}
+	if !sanctionsCleared {
+		for _, receipt := range model.GetCryptoPaymentReceiptsForIntent(ctx, intentId) {
+			if receipt.State == model.CryptoReceiptStateReview && receipt.ReviewReason == model.CryptoReviewReasonSanctionsHold {
+				return false, errors.New("a payment to this invoice is held because a sender is on the sanctions list: credit it only once the owner and counsel cleared it (--sanctions-cleared)")
+			}
+		}
 	}
 	if intent.CreditedAt != nil {
 		return false, errors.New("the invoice is already credited")
@@ -162,8 +174,15 @@ func cryptoValidRefundAddress(asset string, address string) bool {
 		return len(address) == 95 || len(address) == 106
 	case model.CryptoAssetZec:
 		return 26 <= len(address)
-	case model.CryptoAssetUsdcSolana:
+	case model.CryptoAssetUsdcSolana, model.CryptoAssetSol:
 		return 32 <= len(address) && len(address) <= 44
+	case model.CryptoAssetBtc:
+		return 26 <= len(address) && len(address) <= 62
+	case model.CryptoAssetEth:
+		return cryptoEthereumAddressOk(address)
+	case model.CryptoAssetTao:
+		_, err := cryptoTaoAccountOf(address)
+		return err == nil
 	}
 	return false
 }
@@ -199,6 +218,12 @@ func CryptoOperatorRefund(clientSession *session.ClientSession, intentId server.
 	payoutAddress = strings.TrimSpace(payoutAddress)
 	if !cryptoValidRefundAddress(intent.Asset, payoutAddress) {
 		return nil, fmt.Errorf("that does not look like a %s address", intent.Asset)
+	}
+	// every refund destination is screened against OFAC's addresses first, in
+	// every coin (mmm/BTCPAY.md §17.3): a match, or an address the list cannot
+	// screen, records nothing
+	if err := cryptoScreenRefundDestination(intent.Asset, payoutAddress); err != nil {
+		return nil, err
 	}
 	result := &CryptoOperatorRefundResult{Intent: intent}
 	for _, receipt := range model.GetCryptoPaymentReceiptsForIntent(ctx, intentId) {

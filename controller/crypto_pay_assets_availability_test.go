@@ -45,8 +45,10 @@ func cryptoTestScanCursors(t testing.TB, cursors map[string]*model.CryptoScanCur
 		return cursors[asset]
 	}
 	resetCryptoAvailability()
+	restoreSeams := cryptoTestHermeticSeams()
 	t.Cleanup(func() {
 		cryptoGetScanCursor = previous
+		restoreSeams()
 		resetCryptoAvailability()
 	})
 	return reads
@@ -202,14 +204,16 @@ func TestCryptoAssetsNameTheCoinsThatAreTemporarilyUnavailable(t *testing.T) {
 	connect.AssertEqual(t, strings.Contains(string(resultJson), `"available":false,"unavailable_reason":"network_height_unknown"}`), true)
 	connect.AssertEqual(t, strings.Count(string(resultJson), `"unavailable_reason"`), 2)
 
-	// the balance offers only what can be paid with now
+	// the balance offers only what can be paid with now; the unavailable
+	// coins ride in a list of their own, for an app that shows them greyed
 	balance := &SubscriptionBalanceResult{}
 	decorateCryptoPay(balance, &session.ClientSession{Ctx: ctx})
 	connect.AssertEqual(t, cryptoTestAssetNames(balance.CryptoAssets), []string{model.CryptoAssetUsdcSolana})
-	balanceJson, err := json.Marshal(balance)
+	connect.AssertEqual(t, cryptoTestAssetNames(balance.CryptoUnavailableAssets), []string{model.CryptoAssetZec, model.CryptoAssetXmr})
+	offeredJson, err := json.Marshal(balance.CryptoAssets)
 	connect.AssertEqual(t, err, nil)
-	connect.AssertEqual(t, strings.Contains(string(balanceJson), `"available":false`), false)
-	connect.AssertEqual(t, strings.Contains(string(balanceJson), "unavailable"), false)
+	connect.AssertEqual(t, strings.Contains(string(offeredJson), `"available":false`), false)
+	connect.AssertEqual(t, strings.Contains(string(offeredJson), "unavailable"), false)
 
 	// a coin switched off is in neither list
 	cryptoPayConfigFunc().Assets[model.CryptoAssetZec].Enabled = false

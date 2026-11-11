@@ -79,6 +79,44 @@ type cryptoWalletReceipt struct {
 	Pool string
 	// the block's time, or when the daemon first saw a mempool transfer
 	Timestamp time.Time
+	// the payment's senders, for sanctions screening (mmm/BTCPAY.md §17.3):
+	// a Bitcoin payment's input addresses, an ETH transfer's sender and its
+	// transaction's origin, a SOL transfer's source, a TAO transfer's origin.
+	// "" is a sender the chain does not name (an input without an address),
+	// which cannot be screened. nil for Monero and Zcash, which are shielded.
+	Senders []string
+}
+
+// cryptoWalletWatched is a per-address coin's chain reader (Bitcoin and ETH
+// through Alchemy, SOL through Helius, TAO through snow's node): no daemon of
+// ours knows every invoice address, so the scanner names the addresses to
+// read before each scan, and IncomingSince and Transaction report only
+// transfers to addresses the pool holds.
+type cryptoWalletWatched interface {
+	SetWatched(addresses []*model.CryptoPaymentWatchedAddress)
+}
+
+// cryptoWalletNamedAddress is a coin whose addresses are made for one invoice
+// each: a Coinbase deposit address, created with the id of the invoice it
+// will serve as its name (mmm/BTCPAY.md §17.2). The refill reserves the id.
+type cryptoWalletNamedAddress interface {
+	NewNamedAddress(ctx context.Context, name string) (address string, index uint64, err error)
+}
+
+// cryptoWalletIrreversible is a reader that reports only final transactions
+// (TAO's finalized blocks, SOL's finalized commitment): what it reported once
+// never leaves the chain, so the scanner and the reconciler never take a
+// receipt it stopped reporting as gone.
+type cryptoWalletIrreversible interface {
+	Irreversible() bool
+}
+
+// cryptoWalletRegistrar is a coin whose new addresses are registered with
+// its provider's webhook, a fast path only (ETH's Alchemy Address Activity).
+// A failed registration never keeps an address from the pool: polling is the
+// source of truth.
+type cryptoWalletRegistrar interface {
+	RegisterAddresses(ctx context.Context, addresses []string) error
 }
 
 // Zcash pools as the receipts name them.
@@ -96,6 +134,14 @@ var cryptoWalletFor = func(asset string, settings *cryptoWalletSettings, assetCo
 		return newMoneroWallet(settings, assetConfig), nil
 	case model.CryptoAssetZec:
 		return newZcashWallet(settings, assetConfig), nil
+	case model.CryptoAssetBtc:
+		return newBitcoinWallet(settings, assetConfig), nil
+	case model.CryptoAssetEth:
+		return newEthereumWallet(settings, assetConfig), nil
+	case model.CryptoAssetSol:
+		return newSolanaNativeWallet(settings, assetConfig), nil
+	case model.CryptoAssetTao:
+		return newBittensorWallet(settings, assetConfig), nil
 	}
 	return nil, fmt.Errorf("%s has no wallet daemon", asset)
 }
@@ -131,6 +177,9 @@ type cryptoRpcAuth int
 const (
 	cryptoRpcAuthBasic cryptoRpcAuth = iota
 	cryptoRpcAuthDigest
+	// a provider whose url carries its key (Alchemy, Helius): no
+	// Authorization header
+	cryptoRpcAuthNone
 )
 
 // cryptoRpcError is an error the daemon answered (not a transport failure).
@@ -281,6 +330,15 @@ func (self *cryptoRpcClient) post(ctx context.Context, body []byte) (*cryptoRpcH
 		}
 		if challenge != "" {
 			return nil, errors.New("digest authentication refused")
+		}
+		return response, nil
+	case cryptoRpcAuthNone:
+		response, challenge, err := self.postOnce(ctx, body, "")
+		if err != nil {
+			return nil, err
+		}
+		if challenge != "" {
+			return nil, errors.New("the provider refused the key")
 		}
 		return response, nil
 	default:
