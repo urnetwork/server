@@ -94,8 +94,26 @@ func readProviderEgressH3Provider(ctx context.Context, clientId server.Id, estab
 }
 
 // Records that networkId's exit in countryCode reached the URL over QUIC on
-// day. A network already recorded, or a full day, writes nothing.
+// day. A network already recorded, or a full day, writes nothing and takes no
+// row lock: on a busy URL nearly every leg is one of those, and an ON
+// CONFLICT that updates nothing still locks the row, which writes its xmax
+// and a WAL record. So those cost one read, and only a network new to the
+// day reaches the upsert, at most providerEgressH3PlaceNetworkCap times a day.
 func addProviderEgressH3Place(ctx context.Context, name string, countryCode string, day time.Time, networkId server.Id, now time.Time) {
+	day = day.UTC().Truncate(24 * time.Hour)
+	known := false
+	server.Db(ctx, func(conn server.PgConn) {
+		server.Raise(conn.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM provider_egress_h3_place
+				WHERE name = $1 AND country_code = $2 AND tally_day = $3
+					AND (network_ids @> ARRAY[$4::uuid] OR $5 <= cardinality(network_ids))
+			)`,
+			name, countryCode, day, networkId, providerEgressH3PlaceNetworkCap).Scan(&known))
+	})
+	if known {
+		return
+	}
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `
 			INSERT INTO provider_egress_h3_place AS place (name, country_code, tally_day, network_ids, update_time)
@@ -105,7 +123,7 @@ func addProviderEgressH3Place(ctx context.Context, name string, countryCode stri
 				update_time = EXCLUDED.update_time
 			WHERE NOT (place.network_ids @> EXCLUDED.network_ids)
 				AND cardinality(place.network_ids) < $6`,
-			name, countryCode, day.UTC().Truncate(24*time.Hour), networkId, now.UTC(), providerEgressH3PlaceNetworkCap))
+			name, countryCode, day, networkId, now.UTC(), providerEgressH3PlaceNetworkCap))
 	}, server.TxReadCommitted)
 }
 

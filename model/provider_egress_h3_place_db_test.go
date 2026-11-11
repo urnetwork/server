@@ -269,3 +269,44 @@ func TestGetProviderEgressHealthContactedTotalJudgesHttp3LoadsByTheirHttpsLeg(t 
 		}
 	})
 }
+
+// Every HTTP/3 leg that reached its site offers its network to the place; on
+// a busy URL nearly every offer is a network already counted or a day already
+// full. Those are a read, and take no row lock: a lock-only ON CONFLICT would
+// write the tuple's xmax and a WAL record on each leg. The row's xmax (which
+// an ON CONFLICT update leaves set to its own lock) moves only with a write.
+func TestH3PlaceEvidenceOfAKnownNetworkOrAFullDayTakesNoRowLock(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		day := now.UTC().Truncate(24 * time.Hour)
+		read := func() (xmax string, networks int) {
+			server.Db(ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(ctx, `SELECT xmax::text, cardinality(network_ids)::integer
+					FROM provider_egress_h3_place WHERE name = 'h3-site' AND country_code = 'zs' AND tally_day = $1`, day).Scan(&xmax, &networks))
+			})
+			return
+		}
+		first := server.NewId()
+		addProviderEgressH3Place(ctx, "h3-site", "zs", day, first, now)
+		before, networks := read()
+		if networks != 1 {
+			t.Fatalf("networks=%d after the first network", networks)
+		}
+		addProviderEgressH3Place(ctx, "h3-site", "zs", day, first, now)
+		if xmax, networks := read(); xmax != before || networks != 1 {
+			t.Fatalf("xmax %s -> %s networks=%d; a network already counted locked the row", before, xmax, networks)
+		}
+		for range providerEgressH3PlaceNetworkCap - 1 {
+			addProviderEgressH3Place(ctx, "h3-site", "zs", day, server.NewId(), now)
+		}
+		full, networks := read()
+		if networks != providerEgressH3PlaceNetworkCap {
+			t.Fatalf("networks=%d after filling the day", networks)
+		}
+		addProviderEgressH3Place(ctx, "h3-site", "zs", day, server.NewId(), now)
+		if xmax, networks := read(); xmax != full || networks != providerEgressH3PlaceNetworkCap {
+			t.Fatalf("xmax %s -> %s networks=%d; a full day locked the row", full, xmax, networks)
+		}
+	})
+}
