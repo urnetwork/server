@@ -1190,8 +1190,8 @@ func AddBasicTransferBalanceInTx(
 // tx commits, so the upgrade is visible immediately.
 //
 // It records no grant kind: it is for a Pro balance bought for its own window
-// (x402), which the next monthly grant must not supersede in the summary. The
-// monthly Pro grant uses AddGrantTransferBalanceInTx.
+// (x402's month, which carries its own data and is not a Pro grant cycle). The
+// cycle grants (GrantProCycleInTx) record kind pro.
 func AddProTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -5821,6 +5821,11 @@ type SubscriptionRenewal struct {
 	PurchaseToken      string
 	SubscriptionMarket SubscriptionMarket // google or apple
 	TransactionId      string             // for tracking on Google Play or Apple App Store
+	// The end of the period the row's payment or trial covers, without the
+	// market's grace that EndTime carries. Set by every credit path; nil for a
+	// billing grace hold, which keeps Pro but pays for no period. The Pro
+	// grant cycles are cut from these periods (pro_grant_cycle_model.go).
+	PaidEndTime *time.Time
 }
 
 var ErrPaymentNetworkNotFound = errors.New("payment network does not exist")
@@ -5897,13 +5902,16 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		        net_revenue_nano_cents,
 		        purchase_token,
 						market,
-						transaction_id
+						transaction_id,
+						paid_end_time
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (network_id, subscription_type, end_time, start_time, market) DO UPDATE
 			SET
 				net_revenue_nano_cents = $5,
-				purchase_token = $6
+				purchase_token = $6,
+				-- a hold written over a credit's row keeps the credit's period
+				paid_end_time = COALESCE(EXCLUDED.paid_end_time, subscription_renewal.paid_end_time)
 		`,
 		renewal.NetworkId,
 		renewal.SubscriptionType,
@@ -5913,6 +5921,7 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		renewal.PurchaseToken,
 		renewal.SubscriptionMarket,
 		renewal.TransactionId,
+		renewal.PaidEndTime,
 	)
 	// a failed insert aborts the caller's transaction, so it raises rather
 	// than leave the credit path to commit a rollback
@@ -6074,123 +6083,9 @@ func IsProFresh(
 	return IsProNetworkFresh(ctx, *networkId)
 }
 
-// AddProTransferBalanceToAllNetworks grants the Pro data allowance to every network
-// with an active supporter subscription, for the window [startTime, endTime).
-//
-// The balance carries pro = true, so THIS GRANT is what makes a network Pro for the
-// period (see pro_model.go). It also carries the subscription's revenue pro-rated to
-// the grant window, which drives provider subsidy accounting: a yearly subscription
-// contributes roughly 1/12 of its revenue to each monthly grant.
-//
-// Eligibility comes from subscription_renewal, NOT from the pro column -- otherwise
-// the grant would renew its own entitlement forever and a lapsed subscription would
-// never drop to free.
-//
-// The Pro cache is refreshed for every granted network so the upgrade is visible
-// immediately instead of after ProCacheTtl.
-// A supplied task run id commits a replay receipt with all grants; omit it for
-// an intentional independent refresh. Cached entitlement remains a projection.
-func AddProTransferBalanceToAllNetworks(
-	ctx context.Context,
-	startTime time.Time,
-	endTime time.Time,
-	balanceByteCount ByteCount,
-	runIds ...server.Id,
-) (addedTransferBalances map[server.Id]ByteCount) {
-	addedTransferBalances = map[server.Id]ByteCount{}
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		addedTransferBalances = map[server.Id]ByteCount{}
-		if !claimTransferGrantRunInTx(ctx, tx, GrantKindPro, startTime, endTime, runIds) {
-			return
-		}
-		// network_id -> subscription revenue pro-rated to this grant window
-		supporters := map[server.Id]NanoCents{}
-
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					network.network_id,
-					subscription_renewal.net_revenue_nano_cents,
-					subscription_renewal.start_time,
-					subscription_renewal.end_time
-				FROM network
-
-				INNER JOIN subscription_renewal ON
-					subscription_renewal.network_id = network.network_id AND
-					subscription_renewal.subscription_type = $1 AND
-					subscription_renewal.start_time <= $2 AND
-					$2 < subscription_renewal.end_time
-			`,
-			SubscriptionTypeSupporter,
-			server.NowUtc(),
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var networkId server.Id
-				var netRevenueNanoCents NanoCents
-				var supporterStartTime time.Time
-				var supporterEndTime time.Time
-				server.Raise(result.Scan(
-					&networkId,
-					&netRevenueNanoCents,
-					&supporterStartTime,
-					&supporterEndTime,
-				))
-
-				subsidyNetRevenue := NanoCents(0)
-				if supporterDuration := supporterEndTime.Sub(supporterStartTime); 0 < supporterDuration {
-					fraction := float64(endTime.Sub(startTime)) / float64(supporterDuration)
-					subsidyNetRevenue = NanoCents(fraction * float64(netRevenueNanoCents))
-				}
-				// SUM, do not overwrite: a network can hold several active renewals
-				// at once (one row per market), and each contributes its own
-				// pro-rated revenue to the subsidy accounting
-				supporters[networkId] += subsidyNetRevenue
-			}
-		})
-
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for networkId, subsidyNetRevenue := range supporters {
-				batch.Queue(
-					`
-		                INSERT INTO transfer_balance (
-		                    balance_id,
-		                    network_id,
-		                    start_time,
-		                    end_time,
-		                    start_balance_byte_count,
-		                    net_revenue_nano_cents,
-		                    subsidy_net_revenue_nano_cents,
-		                    balance_byte_count,
-		                    pro,
-		                    grant_kind
-		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true, $8)
-		            `,
-					server.NewId(),
-					networkId,
-					startTime,
-					endTime,
-					balanceByteCount,
-					NanoCents(0),
-					subsidyNetRevenue,
-					GrantKindPro,
-				)
-				addedTransferBalances[networkId] = balanceByteCount
-			}
-		})
-	})
-
-	networkIds := make([]server.Id, 0, len(addedTransferBalances))
-	for networkId := range addedTransferBalances {
-		networkIds = append(networkIds, networkId)
-	}
-	UpdateProNetworks(ctx, networkIds...)
-
-	return
-}
+// The monthly Pro grant to every subscriber (AddProTransferBalanceToAllNetworks, on
+// the 1st of each month) is retired: each network's Pro grant now comes at the start
+// of each of its own subscription cycles (GrantProCycleInTx, PRO-GRANT-CYCLE.md).
 
 // AddFreeTransferBalanceToAllNetworks grants the free-tier data allowance to every
 // network WITHOUT an active supporter subscription, for the window

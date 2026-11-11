@@ -192,7 +192,8 @@ func cryptoCreditIntentInTx(
 	case plan:
 		networkId := *intent.NetworkId
 		_, transactionId := model.CryptoPaymentRenewalHandle(intent)
-		endTime := now.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
+		paidEndTime := now.Add(solanaPlanDuration(intent.Item))
+		endTime := paidEndTime.Add(manualPaymentGracePeriod)
 		// a failure past the one-shot raises: committing a credited
 		// invoice without its grant would lose the payment
 		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
@@ -203,19 +204,24 @@ func cryptoCreditIntentInTx(
 			NetRevenue:         credit.usdNanoCents,
 			SubscriptionMarket: market,
 			TransactionId:      transactionId,
+			PaidEndTime:        &paidEndTime,
 		}))
-		// a supporter subscription carries the Pro entitlement
+		// a supporter subscription carries the Pro entitlement; the term's
+		// marker holds no data (SupporterPeriodTransferBalance)
 		transferBalance := &model.TransferBalance{
 			NetworkId:             networkId,
 			StartTime:             now,
 			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: SupporterPeriodTransferBalance,
 			SubsidyNetRevenue:     credit.usdNanoCents,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      SupporterPeriodTransferBalance,
 			Pro:                   true,
 		}
 		model.AddTransferBalanceInTx(ctx, tx, transferBalance)
 		balanceId = &transferBalance.BalanceId
+		// the term's data: the full Pro grant for the cycle it starts, and
+		// monthly from there to the term's end (the sweep)
+		model.GrantProCycleInTx(tx, ctx, networkId)
 		// the regional tier and the welcome offer, in the credit's
 		// transaction on every path
 		model.SetSubscriptionRenewalPriceTierByTransactionInTx(tx, ctx, networkId, market, transactionId, intent.Tier)

@@ -256,9 +256,9 @@ func TestPaymentReconcileAppleNeverRecreditsPreLedgerWindow(t *testing.T) {
 			NetworkId:             networkId,
 			StartTime:             preLedgerStart,
 			EndTime:               preLedgerEnd,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: legacyActivationTestByteCount,
 			SubsidyNetRevenue:     model.UsdToNanoCents(32.0),
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      legacyActivationTestByteCount,
 			Pro:                   true,
 		})
 		model.UpdateProNetwork(ctx, networkId)

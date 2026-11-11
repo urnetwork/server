@@ -367,6 +367,17 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `ALTER TABLE provider_zero_carry DROP CONSTRAINT provider_zero_carry_pkey`},
 		{name: "zero-carry upgrade evidence missing", version: server.ProviderZeroCarryVersion(),
 			sql: `ALTER TABLE provider_zero_carry DROP COLUMN client_version`},
+		// Every credit path writes the paid end, and only a hold may leave it
+		// out: without the column every credit fails, and a default would read
+		// every hold as paid. One grant per network and cycle rests on the key.
+		{name: "renewal paid end missing", version: server.ProGrantCycleVersion(),
+			sql: `ALTER TABLE subscription_renewal DROP COLUMN paid_end_time`},
+		{name: "renewal paid end defaults to paid", version: server.ProGrantCycleVersion(),
+			sql: `ALTER TABLE subscription_renewal ALTER COLUMN paid_end_time SET DEFAULT now()`},
+		{name: "Pro grant cycles unkeyed", version: server.ProGrantCycleVersion(),
+			sql: `ALTER TABLE pro_grant_cycle DROP CONSTRAINT pro_grant_cycle_pkey`},
+		{name: "Pro grant cycle clawback missing", version: server.ProGrantCycleVersion(),
+			sql: `ALTER TABLE pro_grant_cycle DROP COLUMN ended_time`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

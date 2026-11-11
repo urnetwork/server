@@ -1273,11 +1273,14 @@ func cryptoRegtestEndToEndAsset(
 	connect.AssertEqual(t, renewal.transactionId, intent.IntentId.String())
 	connect.AssertEqual(t, renewal.netRevenue, model.UsdToNanoCents(40))
 	connect.AssertEqual(t, renewal.endTime.Sub(renewal.startTime), solanaPlanDuration(model.SolanaPlanYearly)+manualPaymentGracePeriod)
+	// the data is the term's first cycle grant (the term's own balance holds
+	// none and is not active)
 	proBalances := 0
 	for _, balance := range model.GetActiveTransferBalances(ctx, networkId) {
 		if balance.Pro {
 			proBalances += 1
-			connect.AssertEqual(t, balance.StartBalanceByteCount, RefreshSupporterTransferBalance)
+			connect.AssertEqual(t, balance.StartBalanceByteCount, model.Pro().DataAmount(true))
+			connect.AssertEqual(t, balance.GrantKind, model.GrantKindPro)
 		}
 	}
 	connect.AssertEqual(t, proBalances, 1)

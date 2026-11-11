@@ -482,6 +482,7 @@ func appleCreditSubscriptionTransactionInTx(
 	}
 
 	endTime := transaction.expiresTime.Add(SubscriptionGracePeriod)
+	paidEndTime := transaction.expiresTime
 	renewal := &model.SubscriptionRenewal{
 		NetworkId:          transaction.networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -490,6 +491,7 @@ func appleCreditSubscriptionTransactionInTx(
 		NetRevenue:         transaction.creditNetRevenue(),
 		SubscriptionMarket: model.SubscriptionMarketApple,
 		TransactionId:      transaction.transactionId,
+		PaidEndTime:        &paidEndTime,
 	}
 	server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, renewal))
 	// the regional price tier (from the storefront) and the welcome offer (an
@@ -499,15 +501,18 @@ func appleCreditSubscriptionTransactionInTx(
 	// under its own savepoint
 	appleRecordWinbackInTx(tx, ctx, transaction)
 
+	// the period's Pro marker holds no data (SupporterPeriodTransferBalance)
 	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
 		NetworkId:             transaction.networkId,
 		StartTime:             transaction.purchaseTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     transaction.creditNetRevenue(),
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	})
+	// the period's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, ctx, transaction.networkId)
 	if transaction.sandbox() {
 		// no payment was made, so there is no sale to post
 		return true

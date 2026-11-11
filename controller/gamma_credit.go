@@ -101,7 +101,8 @@ func gammaCreditIntentInTx(
 			// a renewal continues the paid term
 			start = *intent.TermStartTime
 		}
-		endTime := start.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
+		paidEndTime := start.Add(solanaPlanDuration(intent.Item))
+		endTime := paidEndTime.Add(manualPaymentGracePeriod)
 		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
 			NetworkId:          networkId,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -110,18 +111,24 @@ func gammaCreditIntentInTx(
 			NetRevenue:         amount,
 			SubscriptionMarket: model.SubscriptionMarketGamma,
 			TransactionId:      intent.IntentId.String(),
+			PaidEndTime:        &paidEndTime,
 		}))
+		// the term's Pro marker holds no data (SupporterPeriodTransferBalance)
 		transferBalance := &model.TransferBalance{
 			NetworkId:             networkId,
 			StartTime:             start,
 			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: SupporterPeriodTransferBalance,
 			SubsidyNetRevenue:     amount,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      SupporterPeriodTransferBalance,
 			Pro:                   true,
 		}
 		model.AddTransferBalanceInTx(ctx, tx, transferBalance)
 		balanceId = &transferBalance.BalanceId
+		// the term's data: the full Pro grant for the cycle it starts. A
+		// renewal continuing the term starts its cycle at the term's start,
+		// granted then (the sweep) when it is still ahead.
+		model.GrantProCycleInTx(tx, ctx, networkId)
 		model.SetSubscriptionRenewalPriceTierByTransactionInTx(tx, ctx, networkId, model.SubscriptionMarketGamma, intent.IntentId.String(), intent.Tier)
 		if intent.Item == model.SolanaPlanYearlyOnboarding {
 			if model.RedeemOnboardingOfferInTx(tx, ctx, networkId, model.OnboardingStoreGamma, now) {

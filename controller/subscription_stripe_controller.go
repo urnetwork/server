@@ -1125,6 +1125,9 @@ func stripeCreditInvoicePaidInTx(
 		return false, nil
 	}
 
+	// the invoice's billing period: endTime is its end plus the manual-payment
+	// grace (stripeResolveInvoiceCredit)
+	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -1133,6 +1136,7 @@ func stripeCreditInvoicePaidInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketStripe,
 		TransactionId:      invoiceId,
+		PaidEndTime:        &paidEndTime,
 	}
 
 	err := model.AddSubscriptionRenewalInTx(tx, ctx, &subscriptionRenewal)
@@ -1141,14 +1145,15 @@ func stripeCreditInvoicePaidInTx(
 		return false, err
 	}
 
-	// a supporter subscription -> carries the Pro entitlement
+	// a supporter subscription -> carries the Pro entitlement; the period's
+	// marker holds no data (SupporterPeriodTransferBalance)
 	transferBalance := &model.TransferBalance{
 		NetworkId:             networkId,
 		StartTime:             startTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     netRevenue,
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	}
 
@@ -1157,6 +1162,8 @@ func stripeCreditInvoicePaidInTx(
 		tx,
 		transferBalance,
 	)
+	// the period's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, ctx, networkId)
 
 	// the ledger row is new: this invoice is a new payment, posted once the
 	// transaction commits

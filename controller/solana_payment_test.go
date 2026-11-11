@@ -337,12 +337,17 @@ func TestSolanaWebhookGrantsExactlyThePlanQuoted(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, result.Message, "Processed 1 matching payments")
 
+		// the month's data: one cycle's full Pro grant, for the month and a day
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].Pro, true)
-		connect.AssertEqual(t, balances[0].BalanceByteCount, RefreshSupporterTransferBalance)
-		// a MONTH plus the grace period. The year-for-everything webhook fails here.
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+manualPaymentGracePeriod)
+		connect.AssertEqual(t, balances[0].BalanceByteCount, model.Pro().DataAmount(true))
+		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+model.ProGrantGrace)
+		// the month's own balance: a MONTH plus the grace period. The
+		// year-for-everything webhook fails here.
+		periods, _ := proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, periods[0].endTime.Sub(periods[0].startTime), 30*24*time.Hour+manualPaymentGracePeriod)
 		// the entitlement is refreshed immediately, not after the pro cache ttl
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 

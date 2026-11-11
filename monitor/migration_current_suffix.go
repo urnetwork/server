@@ -946,6 +946,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
 	// the provider zero-carry verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
+	// the per-cycle Pro grants, versioned by their position
+	[]snMainnetMigrationContract{proGrantCycleMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
