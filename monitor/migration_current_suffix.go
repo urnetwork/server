@@ -970,6 +970,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the retained host admission exception, with the qualification recovery
 	// custody it carries on; versioned by its position
 	[]snMainnetMigrationContract{competitionExecutorAdmissionExceptionMigrationContract},
+	// the onboarding platform's distribution, versioned by its position
+	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
