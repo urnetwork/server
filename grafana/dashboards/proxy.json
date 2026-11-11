@@ -3669,6 +3669,62 @@
           "legendFormat": "{{direction}}"
         }
       ]
+    },
+    {
+      "id": 78,
+      "type": "row",
+      "title": "Pro features in use: SOCKS and WireGuard use for the apps' upgrade notice",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 259
+      },
+      "panels": []
+    },
+    {
+      "id": 79,
+      "type": "timeseries",
+      "title": "proxies using SOCKS or WireGuard per hour, by plan",
+      "description": "Each proxy process records a SOCKS sign-in or a WireGuard handshake for the Pro features notice at most once per proxy, feature and hour (model ProxyFeatureUses), so a series is about the proxies that used the feature in the last hour, summed over processes (a proxy served by two processes during a deploy overlap counts twice). free is the use enforce_features takes away; pro keeps it; unknown is a plan the process could not read. The notice itself counts a use for 14 days.",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 260
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": false,
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (feature, plan) (increase(urnetwork_proxy_feature_use_marks_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{feature}} {{plan}}"
+        }
+      ]
     }
   ]
 }

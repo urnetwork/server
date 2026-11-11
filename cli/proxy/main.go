@@ -137,13 +137,22 @@ Options:
 	providerAppearances := model.NewProviderAppearances(ctx, model.DefaultProviderAppearanceSettings())
 	defer providerAppearances.Close()
 
+	// each SOCKS sign-in and WireGuard handshake of a proxy is noted for the
+	// apps' Pro features notice, and written in the background at most once
+	// per proxy, feature and hour (model ProxyFeatureUses). Closed after the
+	// device manager, so the final write sees every listener's notes.
+	proxyFeatureUses := model.NewProxyFeatureUses(ctx, model.DefaultProxyFeatureUseSettings())
+	defer proxyFeatureUses.Close()
+
 	// hosted windows dial the edge the platform's load model chooses, not the
 	// one DNS caches hand this host (connect/MOVE.md §13). Closed after the
 	// device manager, so no window is left to ask it.
 	edgePlacement := edgeplacement.NewEdgePlacement(ctx, edgeplacement.DefaultEdgePlacementSettings())
 	defer edgePlacement.Close()
 
-	proxyDeviceManager := proxy.NewProxyDeviceManager(model.WithProviderAppearances(ctx, providerAppearances), newProxyDeviceManagerSettings(settings, edgePlacement))
+	proxyDeviceManagerSettings := newProxyDeviceManagerSettings(settings, edgePlacement)
+	proxyDeviceManagerSettings.FeatureUses = proxyFeatureUses
+	proxyDeviceManager := proxy.NewProxyDeviceManager(model.WithProviderAppearances(ctx, providerAppearances), proxyDeviceManagerSettings)
 	defer func() {
 		_ = proxyDeviceManager.CloseAndWait(context.Background())
 	}()
@@ -202,6 +211,8 @@ Options:
 	// then end the contract compensations still deferred; their tokens stay
 	// pending for recovery, as at any exit, and none runs into the teardown
 	drainCoordinator.AddBeforeExit(model.QuiesceRedisContractCompensations)
+	// and write the SOCKS and WireGuard uses noted during the drain
+	drainCoordinator.AddBeforeExit(proxyFeatureUses.Flush)
 
 	warmup := func(proxyClient *model.ProxyClient) error {
 		return wg.AddProxyClients(proxyClient)
