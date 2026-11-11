@@ -53,7 +53,7 @@ Use the exported purpose labels literally:
   and immutable same-round scoring baseline are authenticated together.
 
 `ActivatedAt` alone never establishes these purposes. The exporter lists Go
-`1.27.3` as the compiler requirement; `compiler_verified` remains false unless
+`1.27.4` as the compiler requirement; `compiler_verified` remains false unless
 independently authenticated compiler evidence exists. An absent baseline is
 printed as not established, never copied from an old or planned control. These
 new capability/command paths remain prepared release work until qualified and
@@ -156,10 +156,10 @@ regardless of numerical floor headroom.
 
 ## Agent model roles
 
-Go 1.27.3 is mandatory for competition builds and tests. Select the actual
-installed 1.27.3 toolchain before invoking launchers and set `GOTOOLCHAIN=local`;
+Go 1.27.4 is mandatory for competition builds and tests. Select the actual
+installed 1.27.4 toolchain before invoking launchers and set `GOTOOLCHAIN=local`;
 do not rely on a newer toolchain being downloaded or automatically selected.
-Evaluator images and promoted binary metadata must bind exactly Go 1.27.3.
+Evaluator images and promoted binary metadata must bind exactly Go 1.27.4.
 
 Use Sol 6.1 (`gpt-6.1-sol`) with low reasoning for all test execution,
 including preflight, submission validation, post-promotion smoke tests, and
@@ -484,7 +484,7 @@ checkpoint/image remains historical evidence, not qualification for new staging.
 
 After those distinct review/publication steps, these commands verify the frozen
 record and build its new evaluator. `source-record` verifies existing refs; it
-does not freeze, publish, or approve them. The new builder pins Go 1.27.3 and
+does not freeze, publish, or approve them. The new builder pins Go 1.27.4 and
 marks the image explicitly as staging. Sol 6.1 low executes all build/test and
 qualification steps; a successful image build alone is not runtime readiness.
 
