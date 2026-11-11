@@ -24,7 +24,10 @@ import (
 //	        done nothing. That insert with the batch's rows is the linearization point.
 //	debits  service_debit_journal rows, with no payout anywhere (D-QUOTA-4): no transfer_escrow and no
 //	        participant rows. A lease's bytes arrive carved per balance by its host
-//	        (plan-QUOTA-lease-debits), each row under the usage id its host named its Redis token for.
+//	        (plan-QUOTA-lease-debits), each row under the usage id its host named its Redis token for,
+//	        and a lease meter's (tls, mx, smtp) bytes must equal their carves: no lease byte is debited
+//	        without its carve, so bytes whose reservation lapsed are its host's to count unbilled, never
+//	        debited here on bytes another host reserved (QD-653, DESIGN-DETAILS 13.2.2).
 //	        evs's bytes have no reservation, so they draw at apply time in draw order
 //	        (LoadDrawOrderBalances), each row's usage_id the first 16 B of SHA-256(batch_id ||
 //	        network_id || meter || balance_id) (plan-QUOTA-small-readings reading 3). Debit after use is
@@ -36,7 +39,8 @@ import (
 //
 // A batch is refused whole, with nothing applied and its id left unused, when it names no batch, an
 // unknown producer or meter, a zero network, a negative transfer or more events than
-// sidecar.QuotaUsageBatchMaxEventCount, or carves that do not fit its events. Relayed bytes settle by
+// sidecar.QuotaUsageBatchMaxEventCount, carves that do not fit its events, a carve on a meter no lease
+// spends, or a lease meter's bytes its carves do not cover exactly. Relayed bytes settle by
 // contract (QUOTA-M2-09), never by batch, so a batch naming meter relay is refused too.
 //
 // One service_usage_batch row a producer a minute: batch rows live 24 h (§20.14) and a producer retries
@@ -100,6 +104,16 @@ func ServiceUsageId(batchId server.Id, networkId server.Id, meter string, balanc
 	input = append(input, balanceId[:]...)
 	sum := sha256.Sum256(input)
 	return server.Id(sum[0:16])
+}
+
+// Whether meter is one an edge lease spends (§20.6): its bytes are debited only as their host carved
+// them, never drawn at apply.
+func isQuotaLeaseMeter(meter string) bool {
+	switch meter {
+	case sidecar.QuotaMeterTls, sidecar.QuotaMeterMx, sidecar.QuotaMeterSmtp:
+		return true
+	}
+	return false
 }
 
 // What a batch moves for one (network, meter).
@@ -190,6 +204,9 @@ func usageBatchTotals(batch *sidecar.UsageBatch, carves []*UsageCarve) (map[serv
 		if carve.ByteCount <= 0 {
 			return nil, usageBatchRefused("a carve of %d bytes", carve.ByteCount)
 		}
+		if !isQuotaLeaseMeter(carve.Meter) {
+			return nil, usageBatchRefused("a carve on %q, which no lease spends", carve.Meter)
+		}
 		networkTotal, ok := networkTotals[carve.NetworkId]
 		if !ok {
 			return nil, usageBatchRefused("a carve for a network the batch does not name")
@@ -208,6 +225,9 @@ func usageBatchTotals(batch *sidecar.UsageBatch, carves []*UsageCarve) (map[serv
 			}
 			if total.transferByteCount < carvedByteCount {
 				return nil, usageBatchRefused("%d bytes carved of %d on %s", carvedByteCount, total.transferByteCount, meter)
+			}
+			if isQuotaLeaseMeter(meter) && carvedByteCount != total.transferByteCount {
+				return nil, usageBatchRefused("%d bytes carved of %d on lease meter %s", carvedByteCount, total.transferByteCount, meter)
 			}
 		}
 	}

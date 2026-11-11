@@ -10,8 +10,11 @@ package model
 import (
 	"context"
 	"errors"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/sidecar"
@@ -338,5 +341,132 @@ func TestServiceDebitFlushRefusesAMissingBalance(t *testing.T) {
 		rowCount, appliedCount := testingServiceDebitRowCounts(ctx, balanceId)
 		connect.AssertEqual(t, rowCount, 1)
 		connect.AssertEqual(t, appliedCount, 0)
+	})
+}
+
+// Twin LeaseTwin-ReleaseFirst: the flush releases a carved row's token only after the commit that debits it,
+// by release-debited, which lowers the balance's floor to what the debit left in the same script. Held
+// before its commit, the token still reserves its bytes and the floor is untouched; held between the commit
+// and the release, the token still reserves them, so a reading from before the debit grants only what is
+// free; once released, the floor stands at the debited balance, and that old reading is clamped by it.
+func TestFlushReleasesAfterItsCommit(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC)
+		clock := sidecartest.NewFakeClock(now)
+		redis := NewQuotaRateServerRedis(10 * time.Second)
+		networkId := server.NewId()
+		balanceId := testingShardBalance(ctx, networkId, 4, 1000, now)
+		leaseToken := QuotaLeaseToken(server.NewId(), 1)
+		connect.AssertEqual(t, testingReserveLease(t, ctx, redis, balanceId, leaseToken, 1000, 300), ByteCount(300))
+		usageId := testingJournalServiceDebit(ctx, balanceId, sidecar.QuotaMeterTls, 300)
+		moved, _ := testingCarveLease(t, ctx, redis, balanceId, usageId, &LeaseCarvePart{Token: leaseToken, ByteCount: 300, ExpectByteCount: 300})
+		connect.AssertEqual(t, moved, true)
+		carvedToken := QuotaCarveToken(usageId)
+		// the edge's first reading lowered the floor to 1000
+		connect.AssertEqual(t, testingReadLeaseReservation(ctx, balanceId).floor, "1000")
+
+		killed := errors.New("killed")
+		_, _, err := testingFlushBalance(t, ctx, balanceId, clock, &serviceDebitFlushHooks{
+			beforeCommit: func(server.Id) error {
+				// inside the debit's transaction: nothing released, the floor as it was
+				state := testingReadLeaseReservation(ctx, balanceId)
+				if state.tokenAmounts[carvedToken] != "300" || state.floor != "1000" {
+					t.Errorf("before the commit: %+v", state)
+				}
+				return killed
+			},
+		})
+		connect.AssertEqual(t, errors.Is(err, killed), true)
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, balanceId), int64(1000))
+
+		_, _, err = testingFlushBalance(t, ctx, balanceId, clock, &serviceDebitFlushHooks{
+			afterCommit: func(server.Id) error {
+				// debited and not yet released: the token still holds the bytes the debit took
+				state := testingReadLeaseReservation(ctx, balanceId)
+				if state.tokenAmounts[carvedToken] != "300" || state.floor != "1000" {
+					t.Errorf("after the commit: %+v", state)
+				}
+				return killed
+			},
+		})
+		connect.AssertEqual(t, errors.Is(err, killed), true)
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, balanceId), int64(700))
+		// a reading from before the debit grants only what is free: 1000 less the 300 still reserved
+		staleToken := QuotaLeaseToken(server.NewId(), 1)
+		connect.AssertEqual(t, testingReserveLease(t, ctx, redis, balanceId, staleToken, 1000, 1000), ByteCount(700))
+		connect.AssertEqual(t, ReleaseLease(ctx, redis, balanceId, staleToken, testingLeaseTokenTtl), nil)
+
+		// the rerun finds the row applied and releases it with the balance its transaction read
+		_, released, err := testingFlushBalance(t, ctx, balanceId, clock, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, released, 1)
+		state := testingReadLeaseReservation(ctx, balanceId)
+		if _, ok := state.tokenAmounts[carvedToken]; ok {
+			t.Fatal("the carved token stayed after its release")
+		}
+		connect.AssertEqual(t, state.floor, "700")
+		connect.AssertEqual(t, state.total, "0")
+		// the same old reading, with nothing reserved, is clamped to the debited balance
+		connect.AssertEqual(t, testingReserveLease(t, ctx, redis, balanceId, QuotaLeaseToken(server.NewId(), 1), 1000, 1000), ByteCount(700))
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, balanceId), int64(700))
+	})
+}
+
+// release-debited carries the balance the debit left, read with RETURNING in the debit's statement: an
+// overdrawn balance shows its floor as 0, and every token the page releases, a relayed contract's
+// included, lowers it.
+func TestServiceDebitFlushFloorIsTheDebitedBalance(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := time.Date(2026, time.April, 1, 12, 0, 0, 0, time.UTC)
+		clock := sidecartest.NewFakeClock(now)
+		networkId := server.NewId()
+		balanceId := testingShardBalance(ctx, networkId, 6, 500, now)
+		relay := testingJournalServiceDebit(ctx, balanceId, sidecar.QuotaMeterRelay, 200)
+		testingReserveToken(ctx, balanceId, relay.String(), 200)
+		testingJournalServiceDebit(ctx, balanceId, sidecar.QuotaMeterEvs, 100)
+		_, _, err := testingFlushBalance(t, ctx, balanceId, clock, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, balanceId), int64(200))
+		connect.AssertEqual(t, testingReadLeaseReservation(ctx, balanceId).floor, "200")
+
+		// past the balance: overdrawn, and the floor reads 0
+		over := testingJournalServiceDebit(ctx, balanceId, sidecar.QuotaMeterRelay, 450)
+		testingReserveToken(ctx, balanceId, over.String(), 200)
+		_, _, err = testingFlushBalance(t, ctx, balanceId, clock, nil)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, testingBalanceByteCount(ctx, balanceId), int64(-250))
+		state := testingReadLeaseReservation(ctx, balanceId)
+		connect.AssertEqual(t, state.floor, "0")
+		connect.AssertEqual(t, state.total, "0")
+	})
+}
+
+// The oldest-age gauge reads a shard's oldest row by state: a batch row dates from its batch's applied time,
+// and a relayed row from its contract id.
+func TestServiceDebitOldestAge(t *testing.T) {
+	env := server.DefaultTestEnv()
+	env.RerunCount = 0
+	env.Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc()
+		networkId := server.NewId()
+		balance := testingBalance(10000, now.Add(-time.Hour), now.Add(time.Hour))
+		testingSetQuotaBalances(ctx, now, networkId, []*sidecartest.QuotaBalance{balance})
+		batch := testingEvsBatch(networkId, 100, 0)
+		_, err := ApplyUsageBatch(ctx, batch, nil, now.Add(-90*time.Second))
+		connect.AssertEqual(t, err, nil)
+		shard := ServiceDebitShard(server.Id(balance.BalanceId))
+		sampleServiceDebitOldestAge(ctx, shard, now)
+		age := testutil.ToFloat64(serviceDebitOldestAge.WithLabelValues(strconv.Itoa(shard), "pending"))
+		if age < 85 || 600 < age {
+			t.Fatalf("the pending age reads %f", age)
+		}
+		connect.AssertEqual(t, testutil.ToFloat64(serviceDebitOldestAge.WithLabelValues(strconv.Itoa(shard), "redis_release")) < 85, true)
 	})
 }

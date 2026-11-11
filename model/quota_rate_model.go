@@ -21,7 +21,7 @@ import (
 // through ServiceHost.Quota, by the key grammar sidecar/host_quota_keys.go fixes, in one all-or-none
 // script a call (quota_rate_script.go):
 //
-//   - each eraser's ?closure=1 uploads, its own 60 a minute and its turn of the network's closure
+//   - each eraser's ?closure=1 uploads, its own 60 a minute and its seat in the network's closure
 //     pacing (R = evs_closure_uploads_per_s, in equal turns), and its closure bytes against its own
 //     evs_closure_bytes_per_day a UTC day, never below evs_closure_bytes_floor (owner decision 146),
 //     so one eraser past any of these leaves another passing;
@@ -31,8 +31,10 @@ import (
 //
 // Windows are a minute and a UTC day turning at 00:00:00, on the caller's clock. A refusal counts
 // nothing and names the key that stopped the call, with retry_after_ms to its window's end, an
-// allowance's to the next 00:00 UTC, a turn's to the turn. A debit id answers its first result for the
-// keys' 48 h, a refusal included, so a caller asking again after a refusal takes a new id.
+// allowance's to the next 00:00 UTC, a turn's to the eraser's seat. A debit id that passed answers pass
+// for the keys' 48 h and counts nothing; a refused one recorded nothing and is judged afresh, so the
+// upload route keeps one debit id an upload, and an upload refused for its turn can come back under it
+// (DESIGN-DETAILS 13.2.1, QD-652).
 //
 // Redis is soft state (owner decision 136): a lost Redis forgets counters and opens every window
 // afresh, and a call Redis does not answer passes, counted in urnetwork_quota_rate_fail_open_total,
@@ -48,18 +50,14 @@ type QuotaRateSettings struct {
 	// How long every {sq_} key lives past its last write, a debit id's first answer included: §20.7's
 	// 48 h, api-13's counters ttl.
 	KeyTtl time.Duration
-	// How long past its turn an asking eraser's pacing slot lapses (reading 19's ClosureSlotHorizon):
-	// 5 min, so an eraser that went away does not hold its place.
-	ClosureSlotHorizon time.Duration
 	// Bounds one call whose context has no deadline: past it the call passes, as when Redis is lost.
 	CallTimeout time.Duration
 }
 
 func DefaultQuotaRateSettings() *QuotaRateSettings {
 	return &QuotaRateSettings{
-		KeyTtl:             48 * time.Hour,
-		ClosureSlotHorizon: 5 * time.Minute,
-		CallTimeout:        2 * time.Second,
+		KeyTtl:      48 * time.Hour,
+		CallTimeout: 2 * time.Second,
 	}
 }
 
