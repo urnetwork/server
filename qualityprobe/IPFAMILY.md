@@ -122,8 +122,8 @@ serves both families is loaded as itself and never stands in: a catalog
 without `ipv4: false` URLs (config main today) measures IPv6 exactly on the
 turns whose URL has AAAA, and the `ipv6` marks stage the rollout as `h3`'s
 did. Each `ipv4: false` URL added makes the IPv6 legs of every turn whose URL
-has no AAAA (39% of general destinations at f2a627a's marks) load one, so it
-is a rollout step of its own. The evidence names the stand-in
+has no AAAA (41 of the 121 general destinations on the config branch, 34%)
+load one, so it is a rollout step of its own. The evidence names the stand-in
 (`ipv6.destination`); the IPv6 place evidence and verdicts are the stand-in's
 (`UrlProbeEvidence.Ipv6Destination`), the IPv4 HTTP/3 leg's stay the load's
 URL's. A security recheck makes no IPv6 leg.
@@ -323,8 +323,14 @@ publication, inside the six-minute renewal headroom with a 20 s margin (was
 4. api and alt, for a standalone prober's HTTP ingest (old ones refuse an
    outcome carrying the new evidence fields) and the pool route (the country
    settings).
-5. The config release with the marks. Old binaries ignore `ipv6`, `ipv4` and
-   `country_settings`, so code and config can ship in either order.
+5. The config release: config branch `qualityprobe/ip-family-1111` (on config
+   main 6d5844c, with `qualityprobe/udp-country-switch`'s cn, ir, ru and tm
+   entries merged in), carrying the country settings, `ipv6: true` back on
+   cloudflare, cloudflare-doh, telegram, crunchyroll, cdnjs-site and mixcloud,
+   and the `ipv4: false` twin of cloudflare-trace. Old binaries ignore `ipv6`
+   and `country_settings`, but would load the twin through IPv4-only exits,
+   so this release follows steps 3 and 4; merge config main into the branch
+   again just before.
 6. The Grafana panels (`bringyourctl grafana load-defaults --dashboards_only`).
 
 ## Impact estimate (Main, read-only, 2026-11-11)
@@ -352,10 +358,11 @@ publication, inside the six-minute renewal headroom with a 20 s margin (was
   Quality-ratio providers (us 78, de 27, fr 9, gb 3) can leave Quality and
   Speed over IPv6, 0.3% of the Quality-ratio population, and only those whose
   IPv6 fails. Such a provider fails the share of its turns that draw an
-  `ipv6: true` URL: config main f2a627a marks 74 of the 121 general
-  destinations (61%) and 147 of the 211 candidates, so it falls below the 4/5
-  ratio into the Online fallback; it is not removed, since its turns on URLs
-  without ipv6 still pass. Once an `ipv4: false` URL is released (the
+  `ipv6: true` URL: config main (6d5844c, after the nine retirements) marks
+  77 of the 121 general destinations (64%) and 143 of the 202 candidates, and
+  the config branch 80 and 146, so it falls below the 4/5 ratio into the
+  Online fallback; it is not removed, since its turns on URLs without ipv6
+  still pass. Once an `ipv4: false` URL is released (the
   cloudflare-trace twin, on the config branch), those turns load it over IPv6
   as a stand-in, so every turn tests IPv6: a provider whose IPv6 is broken
   where the place rule counts then fails every turn, and `no_success` takes it
@@ -366,14 +373,17 @@ publication, inside the six-minute renewal headroom with a 20 s margin (was
 ## Measure before it counts
 
 As for h3, with no code switch. Config main already carries the full set of
-marks (f2a627a: 74 general destinations and 147 candidates `ipv6: true`, on
-top of b2e0b76's h3 marks), so the first config release this code runs with
-decides the stage:
+marks (6d5844c: 77 general destinations and 143 candidates `ipv6: true`, on
+top of the h3 marks), so the first config release this code runs with
+decides the stage. The `ipv6` marks there are harmless to older binaries;
+the config branch's `ipv4: false` twin is not, and it widens IPv6 to every
+dual-stack turn:
 
 1. Release a config that marks a handful of URLs `ipv6: true` (say 5 of the
-   121, about 4% of a dual-stack provider's turns) for 48 hours; with
-   f2a627a's marks released as they are, the requirement starts in full with
-   the taskworker deploy.
+   121, about 4% of a dual-stack provider's turns), with no `ipv4: false`
+   URL, for 48 hours; with config main's marks released as they are, the
+   requirement starts on two thirds of dual-stack turns with the taskworker
+   deploy.
 2. Read the family row and, from the history, the IPv6 outcomes by country:
 
    ```sql
@@ -406,7 +416,8 @@ decides the stage:
   out. (`ipv4: false` URLs are now loaded, as stand-ins.)
 - Whether a URL that serves both families should also stand in for a turn
   whose URL has no AAAA. That would make every dual-stack turn measure IPv6
-  (today 61% do, at f2a627a's marks) and spread the stand-ins over 74 URLs,
+  (66% do on the config branch's marks, before the twin) and spread the
+  stand-ins over 80 URLs,
   but it removes the marks as a rollout lever: any one mark would put IPv6
   legs on every dual-stack turn. This branch keeps stand-ins to `ipv4: false`
   URLs; widening them is one line (`urlProbeIpv6StandIns`).
