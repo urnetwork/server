@@ -402,8 +402,11 @@ func TestSolanaWebhookOverpaymentBuysThePlanQuotedNotAYear(t *testing.T) {
 
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
-		// the plan QUOTED: a month, not the year the old webhook assumed
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), 30*24*time.Hour+manualPaymentGracePeriod)
+		// the plan QUOTED: a month, not the year the old webhook assumed. The
+		// term's own Pro balance spans it with the grace; the data is its cycle
+		periods, _ := proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, periods[0].endTime.Sub(periods[0].startTime), 30*24*time.Hour+manualPaymentGracePeriod)
 	})
 }
 
@@ -465,7 +468,11 @@ func TestSolanaWebhookUnderpaymentTakesNothingAndKeepsTheQuote(t *testing.T) {
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].Pro, true)
-		connect.AssertEqual(t, balances[0].EndTime.Sub(balances[0].StartTime), SubscriptionYearDuration+manualPaymentGracePeriod)
+		// the YEAR quoted: the term's own Pro balance spans it with the grace;
+		// the data is its first monthly cycle
+		periods, _ := proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, periods[0].endTime.Sub(periods[0].startTime), SubscriptionYearDuration+manualPaymentGracePeriod)
 	})
 }
 
