@@ -3573,6 +3573,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	checks, err := self.readinessChecks(ctx, settings)
 	result.Checks = checks
 	if err != nil {
+		glog.Infof("[competition]readiness checks failed: %s\n", competitionLogError(err))
 		result.Checks["database"] = false
 		evalError := infrastructureError("readiness_failed", "competition dependencies did not pass readiness")
 		evalError.Readiness = &result
@@ -3581,6 +3582,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	result.Ready = allChecks(checks)
 	result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, settings, round, checks)
 	if err != nil {
+		glog.Infof("[competition]readiness hold status unavailable: %s\n", competitionLogError(err))
 		result.Ready = false
 		result.Checks["automation_hold_status"] = false
 		evalError := infrastructureError("readiness_failed", "competition hold status is unavailable")
@@ -3712,10 +3714,12 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		}
 		checks, checkErr := self.readinessChecks(ctx, effective)
 		if checkErr != nil {
+			glog.Infof("[competition]intake readiness checks failed: %s\n", competitionLogError(checkErr))
 			return infrastructureError("readiness_failed", "competition intake status is unavailable")
 		}
 		result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, effective, round, checks)
 		if err != nil {
+			glog.Infof("[competition]intake hold status unavailable: %s\n", competitionLogError(err))
 			return infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		return nil
@@ -4103,6 +4107,7 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 	if v2 {
 		held, holdErr := self.competitionPublicationHeld(ctx, settings, &job.Round)
 		if holdErr != nil {
+			glog.Infof("[competition]score job publication hold status unavailable: %s\n", competitionLogError(holdErr))
 			return nil, http.StatusServiceUnavailable, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		if held {
@@ -4152,6 +4157,7 @@ func (self *Service) roundViewContext(ctx context.Context, round *roundRecord) (
 	if competitionRoundUsesV2(round) {
 		held, holdErr := self.competitionPublicationHeld(ctx, self.settings, round)
 		if holdErr != nil {
+			glog.Infof("[competition]round publication hold status unavailable: %s\n", competitionLogError(holdErr))
 			return nil, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		published = published && !held
