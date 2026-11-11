@@ -4,13 +4,19 @@ package controller
 //
 //	POST /pay/alchemy   every Alchemy webhook (https://api.bringyour.com/pay/alchemy)
 //
-// The ETH Address Activity webhook, and Bitcoin's if Alchemy offers one, are a
-// fast path only. A delivery is verified with its own webhook's signing key
-// (Alchemy's X-Alchemy-Signature: the hex HMAC-SHA256 of the raw body),
-// routed by its webhook id and network, and answered 2xx at once: the invoice
-// addresses it names are read on the coin's next scan, whatever their age,
-// and that read of the chain credits (crypto_pay_watch.go). Polling is the
-// source of truth, so neither coin's availability depends on a webhook.
+// The ETH Address Activity webhook is a fast path only. A delivery is verified
+// with its own webhook's signing key (Alchemy's X-Alchemy-Signature: the hex
+// HMAC-SHA256 of the raw body), routed by its webhook id and network, and
+// answered 2xx at once: the invoice addresses it names are read on the next
+// ETH scan, whatever their age, and that read of the chain credits
+// (crypto_pay_watch.go). Polling is the source of truth, so ETH's availability
+// does not depend on the webhook.
+//
+// Bitcoin has no webhook (mmm/BTCPAY.md §16.7): Alchemy documents no Bitcoin
+// Address Activity webhook, its Bitcoin address notifications are the UTXO
+// API's WebSocket, an add-on the owner did not buy (2026-11-11), and the
+// Bitcoin scanner reads every block anyway, so a hint would bring nothing
+// forward.
 //
 // The ETH webhook watches every address the pool takes from Coinbase: the
 // refill adds each one through Alchemy's Notify API when alchemy.yml names
@@ -52,9 +58,7 @@ import (
 // The url every Alchemy webhook delivers to.
 const cryptoAlchemyWebhookUrl = "https://api.bringyour.com/pay/alchemy"
 
-// Alchemy's network name of the ETH mainnet webhook. Alchemy documents no
-// Bitcoin Address Activity network: a Bitcoin delivery is read for its
-// addresses whatever network it names.
+// Alchemy's network name of the ETH mainnet webhook.
 const cryptoAlchemyEthNetwork = "ETH_MAINNET"
 
 // A delivery is read up to this many bytes.
@@ -74,17 +78,14 @@ type cryptoAlchemyWebhook struct {
 	signingKey string
 }
 
-// The configured webhooks, from vault alchemy.yml (read on each delivery).
-// Replaceable only by tests.
+// The configured webhooks, from vault alchemy.yml (read on each delivery): the
+// ETH one. Replaceable only by tests.
 var cryptoAlchemyWebhooks = func() []*cryptoAlchemyWebhook {
 	webhooks := []*cryptoAlchemyWebhook{}
-	for _, asset := range []string{model.CryptoAssetEth, model.CryptoAssetBtc} {
-		settings, err := cryptoWalletSettingsFunc(asset)
-		if err != nil || settings.AlchemyWebhookId == "" || settings.AlchemyWebhookSigningKey == "" {
-			continue
-		}
+	settings, err := cryptoWalletSettingsFunc(model.CryptoAssetEth)
+	if err == nil && settings.AlchemyWebhookId != "" && settings.AlchemyWebhookSigningKey != "" {
 		webhooks = append(webhooks, &cryptoAlchemyWebhook{
-			asset:      asset,
+			asset:      model.CryptoAssetEth,
 			id:         settings.AlchemyWebhookId,
 			signingKey: settings.AlchemyWebhookSigningKey,
 		})
@@ -178,23 +179,17 @@ func AlchemyWebhook(args *AlchemyWebhookArgs, clientSession *session.ClientSessi
 	if webhook == nil {
 		return nil, errors.New("Invalid delivery.")
 	}
-	if webhook.asset == model.CryptoAssetEth && args.Event.Network != cryptoAlchemyEthNetwork {
+	if webhook.asset != model.CryptoAssetEth || args.Event.Network != cryptoAlchemyEthNetwork {
 		cryptoPayWebhookDeliveries.WithLabelValues("alchemy", webhook.asset, "ignored").Inc()
 		return &AlchemyWebhookResult{Message: "Not an Ethereum mainnet delivery"}, nil
 	}
 	addresses := []string{}
 	for _, activity := range args.Event.Activity {
-		if webhook.asset == model.CryptoAssetEth && activity.Category != "external" && activity.Category != "internal" {
+		if activity.Category != "external" && activity.Category != "internal" {
 			// a token transfer pays no ETH invoice
 			continue
 		}
-		var address string
-		var err error
-		if webhook.asset == model.CryptoAssetEth {
-			address, err = cryptoEthereumAddressCanonical(activity.ToAddress)
-		} else {
-			address, err = cryptoBitcoinAddressCanonical(activity.ToAddress)
-		}
+		address, err := cryptoEthereumAddressCanonical(activity.ToAddress)
 		if err == nil && !slices.Contains(addresses, address) {
 			addresses = append(addresses, address)
 		}

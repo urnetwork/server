@@ -1644,6 +1644,68 @@ func ListCryptoPaymentWatchedAddressesInConn(
 	return
 }
 
+// GetCryptoPaymentInvoiceAddressesInPlayInConn maps each given address of a
+// coin that is an invoice address in play to the pool index the invoice drew
+// it at, in one lookup by the invoice address index: open, closed (expired,
+// credited or voided) after watchSince, or with a receipt still in the mempool
+// or unconfirmed, as ListCryptoPaymentWatchedAddressesInConn lists them, and
+// made before createdBefore. The Bitcoin block scanner asks it once a block,
+// with every address the block's outputs pay, and watchSince and
+// createdBefore from the block's time, so a block read late (a scanner that
+// was down) is matched as it would have been on time. Reuse the caller's
+// PostgreSQL session; nil selects the outer acquisition boundary.
+func GetCryptoPaymentInvoiceAddressesInPlayInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	asset string,
+	addresses []string,
+	watchSince time.Time,
+	createdBefore time.Time,
+) (indexes map[string]int64) {
+	indexes = map[string]int64{}
+	if len(addresses) == 0 {
+		return
+	}
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT intent.address, intent.address_index
+				FROM crypto_payment_intent intent
+				WHERE intent.asset = $1
+				  AND intent.address = ANY($2)
+				  AND intent.solana_reference IS NULL
+				  AND intent.address_index IS NOT NULL
+				  AND intent.unlinked_at IS NULL
+				  AND intent.create_time < $4
+				  AND (
+					(intent.credited_at IS NULL AND intent.voided_at IS NULL AND $3 < intent.expires_at)
+					OR $3 < intent.credited_at
+					OR $3 < intent.voided_at
+					OR EXISTS (
+						SELECT 1 FROM crypto_payment_receipt receipt
+						WHERE receipt.intent_id = intent.intent_id
+						  AND receipt.state IN ('seen', 'confirmed')
+					)
+				  )
+			`,
+			asset,
+			addresses,
+			watchSince,
+			createdBefore,
+		)
+		server.WithPgResult(result, err, func() {
+			for result.Next() {
+				var address string
+				var index int64
+				server.Raise(result.Scan(&address, &index))
+				indexes[address] = index
+			}
+		})
+	})
+	return
+}
+
 // GetCryptoPaymentReceiptAddressesForTxInConn lists the addresses a coin's
 // stored receipts of one transaction were paid to, for a re-read of the
 // transaction by a per-address coin (a transfer by a contract does not name
@@ -1871,6 +1933,93 @@ func SetCryptoScanCursorSuccessInConn(
 			`,
 			asset,
 			height,
+			walletHeight,
+			nodeHeight,
+			networkHeight,
+			now,
+		))
+	}, server.TxReadCommitted)
+}
+
+// CryptoScanChain is a block reader's view of the recent chain, kept with its
+// coin's cursor (the Bitcoin block scanner, controller/crypto_pay_bitcoin.go):
+// the cursor's height and block hash, and the recent blocks it read, in the
+// reader's own json (crypto_scan_cursor.recent_blocks).
+type CryptoScanChain struct {
+	Height       int64
+	BlockHash    string
+	RecentBlocks string
+}
+
+// GetCryptoScanChainInConn reads the coin's kept chain, or nil before its
+// first scan. Only a block reader reads it: the other coins' cursors are read
+// without recent_blocks. Reuse the caller's PostgreSQL session; nil selects
+// the outer acquisition boundary.
+func GetCryptoScanChainInConn(connOwner server.PgConn, ctx context.Context, asset string) (chain *CryptoScanChain) {
+	server.DbInConn(ctx, connOwner, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+				SELECT height, block_hash, recent_blocks::text
+				FROM crypto_scan_cursor
+				WHERE asset = $1
+			`,
+			asset,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				chain = &CryptoScanChain{}
+				var blockHash *string
+				var recentBlocks *string
+				server.Raise(result.Scan(&chain.Height, &blockHash, &recentBlocks))
+				if blockHash != nil {
+					chain.BlockHash = *blockHash
+				}
+				if recentBlocks != nil {
+					chain.RecentBlocks = *recentBlocks
+				}
+			}
+		})
+	})
+	return
+}
+
+// SetCryptoScanCursorChainSuccessInConn is SetCryptoScanCursorSuccessInConn
+// for a block reader: the cursor, the heights and the reader's kept chain in
+// one write, so the chain a reader starts from is always the one its last
+// complete scan left.
+func SetCryptoScanCursorChainSuccessInConn(
+	connOwner server.PgConn,
+	ctx context.Context,
+	asset string,
+	walletHeight int64,
+	nodeHeight int64,
+	networkHeight int64,
+	now time.Time,
+	chain *CryptoScanChain,
+) {
+	server.TxInConn(ctx, connOwner, func(tx server.PgTx) {
+		server.RaisePgResult(tx.Exec(
+			ctx,
+			`
+				INSERT INTO crypto_scan_cursor
+				(asset, height, block_hash, recent_blocks, wallet_height, node_height, network_height, last_success_at, last_error, update_time)
+				VALUES ($1, $2, $3, $4::jsonb, $5, NULLIF($6, 0), NULLIF($7, 0), $8, NULL, $8)
+				ON CONFLICT (asset) DO UPDATE
+				SET height = EXCLUDED.height,
+					block_hash = EXCLUDED.block_hash,
+					recent_blocks = EXCLUDED.recent_blocks,
+					wallet_height = EXCLUDED.wallet_height,
+					node_height = EXCLUDED.node_height,
+					network_height = EXCLUDED.network_height,
+					last_success_at = EXCLUDED.last_success_at,
+					last_error = NULL,
+					update_time = EXCLUDED.update_time
+			`,
+			asset,
+			chain.Height,
+			nullIfEmptyString(chain.BlockHash),
+			nullIfEmptyString(chain.RecentBlocks),
 			walletHeight,
 			nodeHeight,
 			networkHeight,

@@ -304,8 +304,8 @@ func paymentFailureFinding(kind, target string, count, oldestAge, newestAge int6
 		}
 		common.class = "crypto-scanner-stalled"
 		common.symptom = fmt.Sprintf("the %s payment scanner has not completed a scan for %d minutes", target, oldestAge/60)
-		common.mechanism = "The coin's scan chain fails every run (its chain source is down, refuses the key, lags or pauses on a runtime it cannot read, or its vault file is gone): the coin is listed as unavailable, and payments to its open invoices are not read until it recovers. crypto_scan_cursor.last_error holds the reason."
-		common.action = "Read crypto_scan_cursor.last_error for the coin and the taskworker log ([cryptopay]). Restore the chain source (Alchemy, Helius, snow's Finney node, the wallet daemon) or its vault file. For TAO on a new runtime, check that the reader decodes it before forcing anything; never point the scanner at an older block range."
+		common.mechanism = "The coin's scan chain fails every run (its chain source is down, refuses the key, lags or pauses on a runtime it cannot read, or its vault file is gone; for Bitcoin also a chain that changed below every block its scanner keeps, a reorg deeper than 24 blocks or a source on another chain): the coin is listed as unavailable, and payments to its open invoices are not read until it recovers. crypto_scan_cursor.last_error holds the reason."
+		common.action = "Read crypto_scan_cursor.last_error for the coin and the taskworker log ([cryptopay]). Restore the chain source (Alchemy, Helius, snow's Finney node, the wallet daemon) or its vault file. For TAO on a new runtime, check that the reader decodes it before forcing anything. For a Bitcoin reorg deeper than the kept chain, check the chain on a second source first, then clear crypto_scan_cursor.recent_blocks for btc: the scan reads its reorg window again from the cursor. Never point the scanner at an older block range."
 		common.verify = "The scanner succeeds again, the coin is listed as available, and payments made while it was down are credited from the chain."
 	default:
 		return finding{}, fmt.Errorf("payment failures returned an unknown kind")

@@ -11408,4 +11408,10 @@ var migrations = []any{
 
 	// One approved host-admission replacement; original clocks stay append-only.
 	newSqlMigration(CompetitionExecutorQualificationRecoveryMigrationSql()),
+
+	// The Bitcoin block scanner's kept chain (db_crypto_scan_chain.go,
+	// mmm/BTCPAY.md §16.7): one nullable jsonb column on crypto_scan_cursor, a
+	// catalog change only, under a five-second lock bound. Only the Bitcoin
+	// reader uses it. Apply before deploying the taskworker that scans Bitcoin.
+	cryptoScanChainMigration,
 }

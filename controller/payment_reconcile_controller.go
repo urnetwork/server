@@ -2607,7 +2607,9 @@ func reconcileX402(run *paymentReconcileRun, since time.Time) (bool, error) {
 //	       hold the receipt for review (orphaned), so `bringyourctl crypto
 //	       credit` can grant it again. More than
 //	       cryptoReconcileMaxOrphansPerRun at once ends none: an error for
-//	       an operator (a rebuilt or resyncing wallet looks like that)
+//	       an operator (a rebuilt or resyncing wallet looks like that).
+//	       A coin whose credits stand over a reorg (Bitcoin,
+//	       cryptoWalletKeepsCredits) ends none: an error for an operator
 //	    otherwise -> skipped and retried next run (an error when the wallet
 //	       cannot be trusted at all)
 //	the daemon's incoming total over a day of final blocks differs from our
@@ -2860,6 +2862,24 @@ func cryptoReconcileVerify(
 		if !run.dryRun {
 			model.MarkCryptoPaymentReceiptsFinalInConn(run.connOwner, ctx, asset, finalKeys, run.now)
 		}
+	}
+	if keeper, ok := wallet.(cryptoWalletKeepsCredits); ok && keeper.KeepsCredits() {
+		// the coin's credits stand over a reorg (Bitcoin, mmm/BTCPAY.md
+		// §16.7): each one the chain no longer shows is for an operator, who
+		// checks the Coinbase account; nothing is ended
+		for _, candidate := range gone {
+			details := map[string]any{
+				"error":  "a credited payment is no longer on the chain; its credit stands (credits are never taken back for this coin): check the Coinbase account",
+				"leg":    "verify",
+				"reason": candidate.reason,
+			}
+			if candidate.receipt.IntentId != nil {
+				details["intent_id"] = candidate.receipt.IntentId.String()
+			}
+			run.record(store, model.PaymentReconcileActionError, nil, candidate.receipt.TxId, details)
+			glog.Errorf("[reconcile]%s: a credited payment for invoice %v is no longer on the chain; its credit stands\n", store, candidate.receipt.IntentId)
+		}
+		return true
 	}
 	if cryptoReconcileMaxOrphansPerRun < len(gone) {
 		run.record(store, model.PaymentReconcileActionError, nil, "", map[string]any{
