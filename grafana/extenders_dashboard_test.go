@@ -55,6 +55,8 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"solve heap and budget": "urnetwork_stats_derive_solve_bytes",
 		"reading the day":       "urnetwork_stats_derive_ingest_seconds",
 		"how activations end":   "urnetwork_extender_activations_total",
+		// the residents' relay of the webrtc carrier's offers (connect/EXTENDER.md S8)
+		"webrtc relay outcomes": "urnetwork_extender_webrtc_relay_offers_total",
 		"activation step times": "urnetwork_extender_activation_step_seconds",
 		// the refusals for room, which the activator waits out rather than
 		// backing off (connect#230)

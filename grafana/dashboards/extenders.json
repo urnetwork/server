@@ -3338,7 +3338,7 @@
      "legendFormat": "{{stage}} {{outcome}}"
     }
    ],
-   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account (connect#230); config error is the operator's extender configuration; tcp and forward are the required test (C2a), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
+   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account (connect#230); config error is the operator's extender configuration; tcp and forward are the required test over public tcp, and webrtc the required test over the peer-to-peer webrtc carrier (C2a, S8), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family; an activation that failed both required paths ends at webrtc. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
   },
   {
    "id": 64,
@@ -3878,6 +3878,76 @@
     }
    ],
    "description": "Extenders with 5 or more distinct process runs started in the last 24 hours, beside the extenders that report a run id at all. Each activation names the run of the process that sent it, so a run that started in the window is a restart; a process that restarts every half hour starts about 48 a day, and long-lived copies of one key start none. Run ids arrive with a connect release, so a zero means no restarts only beside a population that reports them. A gap is a read that failed. Which extenders, and how their runs ended, is the query in connect/EXTENDER-ACTIVATION.md section 7."
+  },
+  {
+   "id": 75,
+   "type": "row",
+   "title": "webrtc relay",
+   "collapsed": false,
+   "gridPos": {
+    "h": 1,
+    "w": 24,
+    "x": 0,
+    "y": 163
+   },
+   "panels": []
+  },
+  {
+   "id": 76,
+   "type": "timeseries",
+   "title": "webrtc offers the residents relayed (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 164
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (outcome) (increase(urnetwork_extender_webrtc_relay_offers_total{env=\"$env\"}[1h]))",
+     "refId": "A",
+     "legendFormat": "{{outcome}}"
+    }
+   ],
+   "description": "The peer-to-peer webrtc extender carrier's offers the exchange residents took from the prober and relayed to their clients, per hour, by outcome (connect/EXTENDER.md S8): answered is an offer the extender's client answered, whose answer was posted back for the api's activation probe or the taskworker's uptime probe; no_answer is a client that sent nothing back before the offer's deadline or whose answer failed -- an extender with no answerer, or one that predates the carrier, never answers; expired is an offer whose prober had stopped waiting when it was taken; rate_limited and busy are the relay's own bounds, a client's offers past its rate and the exchange relaying as many as it takes at once; oversized and malformed are an offer or answer past the size bound, or an offer that did not decode. The probe steps of the webrtc test itself are the webrtc step of the activation panels above."
   }
  ]
 }
