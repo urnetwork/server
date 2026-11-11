@@ -19,6 +19,27 @@ func CryptoPaymentAssets(w http.ResponseWriter, r *http.Request) {
 	router.WrapNoAuth(controller.CryptoPaymentAssets, w, r)
 }
 
+// CryptoPaymentQuote prices a plan or a data pack in a coin now, without an
+// invoice. The bearer token is optional (the network's tier and offer).
+func CryptoPaymentQuote(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputOptionalAuth(controller.CryptoPaymentQuote, w, r)
+}
+
+// AlchemyWebhook is every Alchemy webhook's delivery (ETH Address Activity,
+// and Bitcoin's if Alchemy offers one): verified by the webhook's own signing
+// key, it only brings the coin's next chain read forward.
+func AlchemyWebhook(w http.ResponseWriter, r *http.Request) {
+	if !webhookVerifiable(w, "alchemy", controller.AlchemyWebhookVerifiable) {
+		return
+	}
+	router.WrapWithInputBodyFormatterNoAuth(
+		controller.VerifyAlchemyBody,
+		controller.AlchemyWebhook,
+		w,
+		r,
+	)
+}
+
 // CryptoPaymentIntent starts an invoice for the caller's network.
 func CryptoPaymentIntent(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.CreateCryptoPaymentIntent, w, r)

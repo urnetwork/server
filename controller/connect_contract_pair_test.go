@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/urnetwork/connect"
@@ -117,31 +118,57 @@ func TestNewContractPairReadPreservesRejectionPrecedence(t *testing.T) {
 }
 
 // Keep successful same-client and two-client paths to one preflight acquire
-// plus the unchanged write transaction. Warm only the unrelated usage stamp.
+// before escrow admission, which network contracts take like public ones
+// (model/subscription_network_escrow.go). Warm only the unrelated usage stamp.
 func TestNewContractPairReadCreatesActivePairs(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
 		networkId, sourceId, destinationId := contractPairTestClients(ctx)
+		now := server.NowUtc()
+		model.AddTransferBalance(ctx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now.Add(-time.Minute),
+			EndTime:               now.Add(24 * time.Hour),
+			StartBalanceByteCount: 64 * MinContractTransferByteCount,
+			BalanceByteCount:      64 * MinContractTransferByteCount,
+			NetRevenue:            model.UsdToNanoCents(1),
+		})
 		model.StampTopLevelClientContractTime(ctx, sourceId)
+		previous := createTransferEscrow
+		defer func() { createTransferEscrow = previous }()
+		var admissionAcquires float64
+		var escrow *model.TransferEscrow
+		createTransferEscrow = func(ctx context.Context, sourceNetworkId, sourceId, destinationNetworkId, destinationId server.Id, count model.ByteCount) (*model.TransferEscrow, error) {
+			admissionAcquires = contractPairAcquireCount(t)
+			result, err := previous(ctx, sourceNetworkId, sourceId, destinationNetworkId, destinationId, count)
+			escrow = result
+			return result, err
+		}
 		for _, targetId := range []server.Id{destinationId, sourceId} {
 			before := contractPairAcquireCount(t)
+			escrow = nil
 			contractId, bytes, priority, streamId, _, err := newContract(ctx, sourceId, targetId, nil, false, true, 1024, model.ProvideModeNetwork, false, 0, connect.DefaultContractManagerSettings())
-			if err != nil || contractId == (server.Id{}) || bytes != max(MinContractTransferByteCount, 1024) || priority != model.TrustedPriority || streamId != nil {
+			if err != nil || escrow == nil || contractId != escrow.ContractId || bytes != max(MinContractTransferByteCount, 1024) || bytes != escrow.TransferByteCount ||
+				priority != escrow.Priority || priority == model.TrustedPriority || streamId != nil {
 				t.Fatalf("active pair changed contract result: %v", err)
 			}
-			if got := contractPairAcquireCount(t) - before; got != 2 {
-				t.Fatalf("active pair acquired %.0f connections, want one preflight and one transaction", got)
+			if got := admissionAcquires - before; got != 1 {
+				t.Fatalf("active pair acquired %.0f connections before escrow admission, want one preflight", got)
 			}
 			server.Db(ctx, func(conn server.PgConn) {
-				result, err := conn.Query(ctx, `SELECT source_network_id, destination_network_id, source_id, destination_id FROM transfer_contract WHERE contract_id = $1`, contractId)
+				result, err := conn.Query(ctx, `SELECT source_network_id, destination_network_id, source_id, destination_id, payer_network_id FROM transfer_contract WHERE contract_id = $1`, contractId)
 				server.WithPgResult(result, err, func() {
 					if !result.Next() {
 						t.Fatal("created contract missing")
 					}
 					var sourceNetworkId, destinationNetworkId, storedSourceId, storedDestinationId server.Id
-					server.Raise(result.Scan(&sourceNetworkId, &destinationNetworkId, &storedSourceId, &storedDestinationId))
+					var payerNetworkId *server.Id
+					server.Raise(result.Scan(&sourceNetworkId, &destinationNetworkId, &storedSourceId, &storedDestinationId, &payerNetworkId))
 					if sourceNetworkId != networkId || destinationNetworkId != networkId || storedSourceId != sourceId || storedDestinationId != targetId {
 						t.Fatal("pair lookup changed persisted endpoint mappings")
+					}
+					if payerNetworkId == nil || *payerNetworkId != networkId {
+						t.Fatalf("network contract payer is %v, want the network", payerNetworkId)
 					}
 				})
 			})

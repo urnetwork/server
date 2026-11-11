@@ -191,6 +191,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/circle":                              routeAccessPublic,
 	"POST /pay/play":                                routeAccessPublic,
 	"POST /pay/solana":                              routeAccessPublic,
+	"POST /pay/alchemy":                             routeAccessPublic, // each delivery verified by its webhook's signing key
 	"POST /solana/payment-intent":                   routeAccessClient,
 	"POST /solana/payment-transaction":              routeAccessClient,
 	"POST /stripe/payment-intent":                   routeAccessClient,
@@ -201,6 +202,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/data/solana-intent":                  routeAccessPublic,
 	"POST /pay/data/solana-status":                  routeAccessPublic,
 	"GET /pay/crypto/assets":                        routeAccessPublic,
+	"POST /pay/crypto/quote":                        routeAccessPublic, // optional bearer: the network's tier and welcome offer
 	"POST /pay/crypto/intent":                       routeAccessClient,
 	"POST /pay/data/crypto-intent":                  routeAccessPublic,
 	"POST /pay/crypto/status":                       routeAccessPublic, // the invoice's status token is the credential

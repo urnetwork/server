@@ -52,6 +52,9 @@ var subscriptionMetricsStores = []string{
 	SubscriptionMarketSolana,
 	SubscriptionMarketMonero,
 	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
 }
 
 var subscriptionMetricsWindows = []string{

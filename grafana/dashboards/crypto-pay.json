@@ -215,7 +215,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "rate source requests / s",
-      "description": "Rate source answers and failures by coin and source (kraken, coingecko, coinbase). A quote needs two fresh answers within the spread limit; failures are logged at verbosity 1 only.",
+      "description": "Rate source answers and failures by coin and source: Kraken and Coinbase for every coin they list, and CoinGecko for Monero only (its second source until the owner names another). A quote needs two fresh answers within the spread limit; failures are logged at verbosity 1 only.",
       "gridPos": {
         "h": 8,
         "w": 12,
@@ -288,6 +288,113 @@
           "refId": "B",
           "expr": "sum by (asset, state, reason) (rate(urnetwork_crypto_pay_receipts_recorded_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
           "legendFormat": "recorded {{asset}} {{state}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "sanctions screens / s",
+      "description": "Screens of a TAO, Bitcoin, ETH or SOL payment's senders against OFAC's addresses before credit (mmm/BTCPAY.md \u00a717.3): clean, matched (held as sanctions_hold for the owner and counsel), unscreenable (held as screening_unavailable: no table, or a sender the table cannot read; screened again each scan), retry (the senders could not be read now) and released (a held payment that screened clean later). Any matched or lasting unscreenable is the \u00a72.22 page.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 37
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (asset, result) (rate(urnetwork_crypto_pay_screenings_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{asset}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "type": "timeseries",
+      "title": "Coinbase deposit addresses / s",
+      "description": "Deposit addresses the refill asked Coinbase for (one per future invoice, named with its invoice id): created, reused (Coinbase answered an address the pool holds: it does not issue an address per request on that network, and the refill stops) and error (no wallet for the coin in the account, a refused network, a refused key).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 37
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (asset, result) (rate(urnetwork_crypto_pay_coinbase_addresses_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{asset}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "webhook deliveries and registrations / s",
+      "description": "Alchemy and Helius deliveries that name a per-address coin's invoice addresses (hinted: read on the coin's next scan; ignored; refused: not verified), and new pool addresses registered with the ETH Address Activity webhook through the Notify API. A fast path only: polling the chain is the source of truth.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, asset, result) (rate(urnetwork_crypto_pay_webhook_deliveries_total{env=\"$env\",service=~\"api|alt\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{source}} {{asset}} {{result}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (asset, result) (rate(urnetwork_crypto_pay_webhook_registrations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "registered {{asset}} {{result}}"
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "TAO reader: paused, skipped blocks, undecodable extrinsics",
+      "description": "The TAO reader over snow's Finney node: paused (1) while it meets a runtime it cannot decode (it never crash-loops; nothing is credited until a scan succeeds), blocks passed over past its lookback of recent finalized blocks (it never replays history across runtime upgrades), and extrinsics it could not decode (skipped and counted; a payment in one is held as transfer_shape).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 45
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (asset) (urnetwork_crypto_pay_tao_reader_paused{env=\"$env\",service=\"taskworker\",instance!=\"\"})",
+          "legendFormat": "paused"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (asset) (rate(urnetwork_crypto_pay_scan_blocks_skipped_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "skipped blocks {{asset}}"
+        },
+        {
+          "refId": "C",
+          "expr": "sum (rate(urnetwork_crypto_pay_tao_extrinsics_undecodable_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "undecodable extrinsics"
         }
       ]
     }

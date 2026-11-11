@@ -85,7 +85,7 @@ func TestX402BlankConfigNoops(t *testing.T) {
 	// 3. the inline-upgrade settle path declines to handle the request at all
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/network/auth-client", strings.NewReader(`{}`))
-	req.Header.Set(X402PaymentHeader, "a-signed-payment")
+	req.Header.Set(X402V1PaymentHeader, "a-signed-payment")
 	connect.AssertEqual(t, false, X402SettleInlineUpgrade(rec, req))
 
 	// 4. no terms are quoted for anything

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 func TestNormalizeLocale(t *testing.T) {
@@ -71,15 +72,141 @@ func TestPlatformFromDeviceSpecNamesTheAppsSpecs(t *testing.T) {
 		"socks5":                  "",
 		"resident":                "",
 		"urnetwork/egress-prober": "",
-		// a Mac model with only a version still names no platform: the App
-		// Store and the direct-download build send the same spec, and the
-		// platform decides the App Store offer rule (NoOfferEmail)
-		"15.7.9 MacBook Air (M1, 2020)": "",
+		// the macOS app, "<os version> <model>" (mmm/ONBOARDING-RETENTION.md
+		// P6): see TestPlatformFromDeviceSpecNamesTheMacApp
+		"15.7.9 MacBook Air (M1, 2020)": "macos",
 	}
 	for in, want := range cases {
 		if got := platformFromDeviceSpec(in); got != want {
 			t.Errorf("platformFromDeviceSpec(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// mmm/ONBOARDING-RETENTION.md P6: the macOS app's spec names only the Mac
+// ("<os version> <retail name>", or the hardware model id the app's table
+// has no name for), so every Mac app network was left without a platform. It
+// then got the offer emails with card prices and no App Store rule, while a
+// Mac browser's sign-up got the App Store's rule. A Mac app is macos now: the
+// App Store build and the direct-download build send the same spec, and only
+// the App Store build has a stable release.
+func TestPlatformFromDeviceSpecNamesTheMacApp(t *testing.T) {
+	cases := map[string]string{
+		// the retail names of apple DeviceModelNames
+		"15.7.9 MacBook Air (M1, 2020)":           "macos",
+		"15.5 MacBook Pro (16-inch, Nov 2023)":    "macos",
+		"26.1 Mac mini (2024)":                    "macos",
+		"15.0 iMac (24-inch, 2021)":               "macos",
+		"14.6 Mac Studio (2023)":                  "macos",
+		"15.1 Mac Pro (2023)":                     "macos",
+		"13.6 iMac Pro (2017)":                    "macos",
+		"12.7 MacBook (Retina, 12-inch, 2017)":    "macos",
+		"26.0 MacBook Pro (14-inch, M5, 2025)":    "macos",
+		"15.7 MacBook Air (15-inch, M3, 2024)":    "macos",
+		"14.7.1 MacBook Pro (13-inch, M2, 2022)":  "macos",
+		"26.1 MacBook Air (13-inch, M4, 2025)":    "macos",
+		"15.6.1 Mac Studio (2025)":                "macos",
+		"11.7.10 MacBook Pro (15-inch, 2017)":     "macos",
+		"10.15.7 iMac (Retina 5K, 27-inch, 2019)": "macos",
+		// the hardware model id, when the table has no name for it
+		"26.1 Mac16,10":         "macos",
+		"14.6 MacBookPro18,3":   "macos",
+		"13.6 MacBookAir10,1":   "macos",
+		"15.0 iMac21,1":         "macos",
+		"13.6 iMacPro1,1":       "macos",
+		"12.7 Macmini9,1":       "macos",
+		"12.7 MacPro7,1":        "macos",
+		"12.7 MacBook10,1":      "macos",
+		"15.7 Mac":              "macos",
+		"18.1 iPhone 16 Pro":    "ios",
+		"17.0 iPad Pro (M4)":    "ios",
+		"16 Samsung Galaxy S24": "android",
+		// not a Mac: an Android model that only mentions one, a bare word
+		"14 Xiaomi Macro Edition": "",
+		"Mac":                     "",
+		"MacBook Air":             "",
+	}
+	for in, want := range cases {
+		if got := platformFromDeviceSpec(in); got != want {
+			t.Errorf("platformFromDeviceSpec(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// mmm/ONBOARDING-RETENTION.md P14 and P6: a sign-up's platform. A browser
+// sign-up was recorded as the visitor's OS: a Mac browser as macos (the App
+// Store's offer rule and store-billed copy for a card buyer on the web), a
+// Windows or Linux browser as the desktop app's platform. A desktop browser is
+// web now; a phone's browser keeps the phone (the site sends it to the app's
+// store); an app's declared device type decides first.
+func TestPlatformFromRequest(t *testing.T) {
+	request := func(deviceType string, userAgent string) *session.ClientSession {
+		s := &session.ClientSession{Header: map[string][]string{}}
+		if userAgent != "" {
+			s.Header["User-Agent"] = []string{userAgent}
+		}
+		s.ClientInfo = session.UnknownClientInfo()
+		if deviceType != "" {
+			s.ClientInfo.DeviceType = deviceType
+		}
+		return s
+	}
+	const (
+		macSafari     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15"
+		macChrome     = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+		windowsEdge   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0"
+		linuxFirefox  = "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0"
+		chromebook    = "Mozilla/5.0 (X11; CrOS x86_64 14541.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
+		iphoneSafari  = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1"
+		ipadSafari    = "Mozilla/5.0 (iPad; CPU OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1"
+		androidChrome = "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36"
+		goSdk         = "Go-http-client/2.0"
+	)
+	cases := []struct {
+		name       string
+		deviceType string
+		userAgent  string
+		want       string
+	}{
+		{"a Mac's Safari", "", macSafari, "web"},
+		{"a Mac's Chrome", "", macChrome, "web"},
+		{"a Windows browser", "", windowsEdge, "web"},
+		{"a Linux browser", "", linuxFirefox, "web"},
+		{"a Chromebook", "", chromebook, "web"},
+		{"an iPhone's browser", "", iphoneSafari, "ios"},
+		{"an iPad's browser", "", ipadSafari, "ios"},
+		{"an Android phone's browser", "", androidChrome, "android"},
+		// the apps declare their device type through their sdk
+		{"the macOS app", "macos", goSdk, "macos"},
+		{"the Android app", "android", goSdk, "android"},
+		{"the iOS app", "ios", goSdk, "ios"},
+		{"the Windows app", "windows", goSdk, "windows"},
+		{"the Linux app", "linux", goSdk, "linux"},
+		{"ur.io's sdk host", "web", macSafari, "web"},
+		// a declared type outside the campaign's platforms falls through
+		{"the cli", "cli", goSdk, ""},
+		{"an unknown client", "unknown", goSdk, ""},
+		{"no user agent", "", "", ""},
+		{"a non-browser client names its platform as a spec does", "", "urnetwork windows amd64", "windows"},
+	}
+	for _, c := range cases {
+		if got := platformFromRequest(request(c.deviceType, c.userAgent)); got != c.want {
+			t.Errorf("%s: platformFromRequest = %q, want %q", c.name, got, c.want)
+		}
+	}
+	if got := platformFromRequest(nil); got != "" {
+		t.Errorf("no session: %q", got)
+	}
+
+	// a device authenticating: its app's declared type, else its spec
+	if got := devicePlatform(request("macos", goSdk), "15.7.9 MacBook Air (M1, 2020)"); got != "macos" {
+		t.Errorf("the macOS app's device: %q", got)
+	}
+	if got := devicePlatform(request("", goSdk), "16 Samsung Galaxy S24 Ultra"); got != "android" {
+		t.Errorf("an older Android app's device: %q", got)
+	}
+	if got := devicePlatform(request("unknown", ""), "socks5"); got != "" {
+		t.Errorf("an automation's device: %q", got)
 	}
 }
 

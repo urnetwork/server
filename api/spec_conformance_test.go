@@ -224,6 +224,8 @@ func registry() []specEndpoint {
 		{method: "POST", path: "/pay/data/crypto-intent", argType: rt(controller.CreateDataCryptoPaymentIntentArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
 		{method: "POST", path: "/pay/crypto/status", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentStatusResult{})},
 		{method: "POST", path: "/pay/crypto/requote", argType: rt(controller.CryptoPaymentStatusArgs{}), resultType: rt(controller.CryptoPaymentIntentResult{})},
+		{method: "POST", path: "/pay/crypto/quote", argType: rt(controller.CryptoPaymentQuoteArgs{}), resultType: rt(controller.CryptoPaymentQuoteResult{})},
+		{method: "POST", path: "/pay/alchemy", argType: rt(controller.AlchemyWebhookArgs{}), resultType: rt(controller.AlchemyWebhookResult{})},
 		// Pay with Gamma (controller/gamma_controller.go)
 		{method: "GET", path: "/pay/gamma/services.json", argType: nil, resultType: rt(controller.GammaServicesDocument{})},
 		{method: "GET", path: "/pay/gamma/terms", argType: nil, resultType: rt(controller.GammaTermsResult{})},

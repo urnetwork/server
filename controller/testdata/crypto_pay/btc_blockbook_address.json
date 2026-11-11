@@ -1,0 +1,112 @@
+{
+ "page": 1,
+ "totalPages": 1,
+ "itemsOnPage": 2,
+ "address": "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u",
+ "balance": "0",
+ "totalReceived": "21882943",
+ "totalSent": "21882943",
+ "unconfirmedBalance": "0",
+ "unconfirmedTxs": 0,
+ "txs": 5,
+ "transactions": [
+  {
+   "txid": "5ba03f5dfdefeac5306857a55d81575b4bd6863e74a2911a298577b8cab921f9",
+   "version": 2,
+   "lockTime": 860861,
+   "vin": [
+    {
+     "txid": "877266da537525669e890666f60e282f074f3414566487734abd2ab37ee33b68",
+     "sequence": 4294967293,
+     "n": 0,
+     "addresses": [
+      "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u"
+     ],
+     "isAddress": true,
+     "isOwn": true,
+     "value": "17657843"
+    },
+    {
+     "txid": "124eb649e366fbfbddb8f15b5681e55af6bcf8f2a09a10f64e4c03c2c2a5a88e",
+     "sequence": 4294967293,
+     "n": 1,
+     "addresses": [
+      "3JW2ELKCgZRNK9k2RanmC28docjtjzqLjc"
+     ],
+     "isAddress": true,
+     "value": "4439",
+     "hex": "1600141d01dc6770a4b02ce1b05b4cecb29b14e794c631"
+    }
+   ],
+   "vout": [
+    {
+     "value": "1399",
+     "n": 0,
+     "addresses": [
+      "bc1q95mewpcj5t7f34zfvxv5rxsy9fzsfr2glk3j42"
+     ],
+     "isAddress": true
+    },
+    {
+     "value": "17660000",
+     "n": 1,
+     "spent": true,
+     "spentTxId": "4a8fdd3714279c166e5dfbf9c2038316acf050647bd99ac72442c381e97ce735",
+     "spentHeight": 860863,
+     "addresses": [
+      "bc1q8ejj270nzwkc28eqx6797mk77404euy8ujgh7j"
+     ],
+     "isAddress": true
+    }
+   ],
+   "blockHash": "000000000000000000011bdb112fa48b8bc4061dc5e91f5f1f38fdb6c47f0524",
+   "blockHeight": 860862,
+   "confirmations": 114498,
+   "blockTime": 1726049620,
+   "size": 393,
+   "vsize": 231,
+   "value": "17661399",
+   "valueIn": "17662282",
+   "fees": "883"
+  },
+  {
+   "txid": "877266da537525669e890666f60e282f074f3414566487734abd2ab37ee33b68",
+   "version": 2,
+   "vin": [
+    {
+     "txid": "669922e8eba991a66f452015799dede489f75d7b6410466c9458d9d89490109a",
+     "sequence": 4294967293,
+     "n": 0,
+     "addresses": [
+      "bc1qpnesz97uwn48lnet509pjkkkjjtwsqtt4gfd4l"
+     ],
+     "isAddress": true,
+     "value": "17658484"
+    }
+   ],
+   "vout": [
+    {
+     "value": "17657843",
+     "n": 0,
+     "spent": true,
+     "spentTxId": "5ba03f5dfdefeac5306857a55d81575b4bd6863e74a2911a298577b8cab921f9",
+     "spentHeight": 860862,
+     "addresses": [
+      "bc1q0wd209cv5k9pd9mhk7nspacywcj038xxdhnt5u"
+     ],
+     "isAddress": true,
+     "isOwn": true
+    }
+   ],
+   "blockHash": "00000000000000000002817aaf45bee0f9f07713549a7b2cdfa8e6f95dc0b6e6",
+   "blockHeight": 860860,
+   "confirmations": 114500,
+   "blockTime": 1726049034,
+   "size": 191,
+   "vsize": 110,
+   "value": "17657843",
+   "valueIn": "17658484",
+   "fees": "641"
+  }
+ ]
+}

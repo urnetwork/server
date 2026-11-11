@@ -365,12 +365,56 @@ func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]
 		return wallet, nil
 	}
 	resetCryptoAvailability()
+	restoreSeams := cryptoTestHermeticSeams()
 	t.Cleanup(func() {
 		restoreConfig()
 		cryptoWalletSettingsFunc = previousSettings
 		cryptoWalletFor = previousWalletFor
+		restoreSeams()
 		resetCryptoAvailability()
 	})
+}
+
+// cryptoTestHermeticSeams answers the rail's database and Redis reads that a
+// hermetic test does not set up: a pool with free addresses, no watched
+// addresses, no scan hints, no pool addresses for a transaction. Returns the
+// restore.
+func cryptoTestHermeticSeams() func() {
+	previousCount := cryptoCountFreeAddresses
+	previousWatched := cryptoListWatchedAddresses
+	previousResolve := cryptoResolveAddresses
+	previousReceiptAddresses := cryptoReceiptAddressesForTx
+	previousInvoiceAddresses := cryptoInvoiceAddresses
+	previousAddHints := cryptoAddScanHints
+	previousTakeHints := cryptoTakeScanHints
+	cryptoCountFreeAddresses = func(ctx context.Context, asset string) int {
+		return 1
+	}
+	cryptoListWatchedAddresses = func(ctx context.Context, asset string, now time.Time, watchSince time.Time, limit int) []*model.CryptoPaymentWatchedAddress {
+		return []*model.CryptoPaymentWatchedAddress{}
+	}
+	cryptoResolveAddresses = func(ctx context.Context, asset string, addresses []string) map[string]int64 {
+		return map[string]int64{}
+	}
+	cryptoReceiptAddressesForTx = func(ctx context.Context, asset string, txId string) []string {
+		return []string{}
+	}
+	cryptoInvoiceAddresses = func(ctx context.Context, asset string, addresses []string) []string {
+		return []string{}
+	}
+	cryptoAddScanHints = func(ctx context.Context, asset string, addresses []string) {}
+	cryptoTakeScanHints = func(ctx context.Context, asset string, limit int) []string {
+		return []string{}
+	}
+	return func() {
+		cryptoCountFreeAddresses = previousCount
+		cryptoListWatchedAddresses = previousWatched
+		cryptoResolveAddresses = previousResolve
+		cryptoReceiptAddressesForTx = previousReceiptAddresses
+		cryptoInvoiceAddresses = previousInvoiceAddresses
+		cryptoAddScanHints = previousAddHints
+		cryptoTakeScanHints = previousTakeHints
+	}
 }
 
 // cryptoTestIntent is an open xmr invoice for $40 at $555.36 with the address

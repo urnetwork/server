@@ -916,8 +916,9 @@ func CreateContract(
 
 		// network peers never fall back to stream: when the companion reply
 		// is same-network and the destination advertises the network mode,
-		// settle it as a non-companion network contract (the no-escrow path,
-		// same as the forward direction between network peers)
+		// settle it as a non-companion network contract, escrowed from the
+		// network's balance like the forward direction between network peers,
+		// with the destination kept as its usage origin
 		if relationshipDetails.Mode == model.ProvideModeNetwork &&
 			GetProvideModes(ctx, destinationId)[model.ProvideModeNetwork] {
 			glog.V(2).Infof("[contract][network-normalize]%s->%s companion settled as network\n", clientId, destinationId)
@@ -1240,14 +1241,17 @@ var createZeroEscrowCompanionContract = model.CreateZeroEscrowCompanionContract
 
 // Model creation owns commit and returns its immutable database deadline.
 // Later stream work may reject the response but never changes that deadline.
-// Public and companion contracts always try escrow first, so a payer is
-// charged, shrink-to-fit included, while anything is left. Only when escrow
-// admission finds the balance exhausted (model.ErrContractBalanceExhausted)
-// and the contract degradation valve is open (model/network_degradation_model.go)
-// is the contract created without escrow instead (model/subscription_zero_escrow.go),
-// at the request size and the payer's escrow priority. Every other refusal,
-// including a data cap or test drain, stands. Network and friends-and-family
-// contracts are unchanged.
+// Every contract tries escrow first, so a payer is charged, shrink-to-fit
+// included, while anything is left: public, network and friends-and-family
+// contracts by their source's network, companions by their destination's.
+// Only when escrow admission finds the balance exhausted
+// (model.ErrContractBalanceExhausted) and the contract degradation valve is
+// open (model/network_degradation_model.go) is the contract created without
+// escrow instead (model/subscription_zero_escrow.go), at the request size and
+// the payer's escrow priority. Every other refusal, including a data cap or
+// test drain, stands. Network and friends-and-family contracts escrow like
+// public contracts and differ from them only in how they join streams
+// (model/subscription_network_escrow.go).
 func newContract(
 	ctx context.Context,
 	sourceId server.Id,
@@ -1276,7 +1280,6 @@ func newContract(
 		return
 	}
 	sourceNetworkId, destinationNetworkId := *sourceNetworkIdPointer, *destinationNetworkIdPointer
-	var err error
 	// Participant persistence happens after Redis assigns/reuses the stream id.
 	// Resolve every intermediary before reserving the payer's balance so a
 	// malformed or stale path cannot leave an unreturnable contract behind if
@@ -1303,20 +1306,30 @@ func newContract(
 				ctx = model.WithPairStreamBinding(ctx, sourceId, destinationId, forceStream)
 			}
 		}
-		contractId, expirationTime, err = model.CreateContractNoEscrowWithExpiration(
-			ctx,
+		// Escrowed from the source's network like a public contract: for a
+		// network contract the network both clients belong to, for a
+		// friends-and-family contract the dialing network. A same-network
+		// companion normalized to a network contract keeps its destination as
+		// its usage origin, while its source funds it.
+		escrow, err := createSourcePaidContract(
+			model.WithContractUsageOrigin(ctx, usageOriginIsSource),
 			sourceNetworkId,
 			sourceId,
 			destinationNetworkId,
 			destinationId,
 			contractTransferByteCount,
-			usageOriginIsSource,
 		)
 		if err != nil {
 			returnErr = err
 			return
 		}
-		priority = model.TrustedPriority
+		contractId = escrow.ContractId
+		expirationTime = escrow.ExpirationTime
+		// Sign only the capacity actually held in escrow, which shrinks to fit
+		// the payer's balance. A zero escrow contract holds none and returns
+		// the request.
+		contractTransferByteCount = escrow.TransferByteCount
+		priority = escrow.Priority
 
 		defer server.EnterContractCreationStage(ctx, server.ContractStageStream)()
 		switch streamVersion {
@@ -1474,7 +1487,7 @@ func newContract(
 		if streamVersion != 0 && (forceStream || 0 < len(intermediaryIds)) {
 			ctx = model.WithAddStreamBinding(ctx, sourceId, destinationId, intermediaryIds)
 		}
-		escrow, err := createTransferEscrow(
+		escrow, err := createSourcePaidContract(
 			ctx,
 			sourceNetworkId,
 			sourceId,
@@ -1482,18 +1495,6 @@ func newContract(
 			destinationId,
 			contractTransferByteCount,
 		)
-		// deduct first: free data only once the payer has nothing left and
-		// the valve is open
-		if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
-			escrow, err = createZeroEscrowContract(
-				ctx,
-				sourceNetworkId,
-				sourceId,
-				destinationNetworkId,
-				destinationId,
-				contractTransferByteCount,
-			)
-		}
 		if err != nil {
 			returnErr = err
 			return
@@ -1523,6 +1524,38 @@ func newContract(
 	}
 
 	return
+}
+
+// Escrow admission for a contract its source pays: public, network and
+// friends-and-family. Deduct first: free data only once the payer has nothing
+// left and the valve is open.
+func createSourcePaidContract(
+	ctx context.Context,
+	sourceNetworkId server.Id,
+	sourceId server.Id,
+	destinationNetworkId server.Id,
+	destinationId server.Id,
+	contractTransferByteCount model.ByteCount,
+) (*model.TransferEscrow, error) {
+	escrow, err := createTransferEscrow(
+		ctx,
+		sourceNetworkId,
+		sourceId,
+		destinationNetworkId,
+		destinationId,
+		contractTransferByteCount,
+	)
+	if errors.Is(err, model.ErrContractBalanceExhausted) && zeroContractCost(ctx) {
+		return createZeroEscrowContract(
+			ctx,
+			sourceNetworkId,
+			sourceId,
+			destinationNetworkId,
+			destinationId,
+			contractTransferByteCount,
+		)
+	}
+	return escrow, err
 }
 
 // Provide registers the client's provide keys, and the capabilities the provide

@@ -11300,9 +11300,11 @@ an exhausted payer's new contract is funded.
   `resuming` (healthy, zero cost held for one more check) and `charging`; the
   failures `measurement_failed`, `state_read_failed`, `publish_failed` and
   `superseded` publish nothing, and the published state ages out within its TTL.
-- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
-  contract-creating service (api, connect, taskworker, proxy): the free
-  contracts actually created for exhausted payers.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"network"|"companion"}`
+  on every contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers. `network` counts plain
+  contracts between two clients of one network, which escrow from that
+  network's balance like public contracts since 2026-11-10.
 - `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
   second cache refreshes, read only after an exhausted refusal. Only
   `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,
@@ -22610,6 +22612,35 @@ establish:
   and no email recovery channel exists. Preserve the code and provider ledger;
   retry idempotently to a verified destination or record an authorized support
   or refund disposition. Do not infer this failure from balance-code rows.
+
+The crypto invoice rail (mmm/BTCPAY.md §17, server docs/CRYPTO-PAY-API.md) adds
+four classes, aggregated per coin (`usdc_solana`, `zec`, `xmr`, `tao`, `btc`,
+`eth`, `sol`) from `crypto_payment_receipt` in review and `crypto_scan_cursor`.
+The count is distinct invoices; the ages are first-seen ages:
+
+- `crypto-sanctions-hold` (PAGE): before a TAO, Bitcoin, ETH or SOL credit the
+  scanner screened a sender against the newest `config/all/crypto/<release>/`
+  OFAC table and it matched (`sanctions_hold`). Nothing was credited and the
+  buyer sees only `screening`. Do not credit, refund or move the funds: the
+  owner and counsel decide each one, and only a hold they cleared is credited,
+  with `bringyourctl crypto credit --sanctions-cleared`.
+- `crypto-screening-unavailable` (PAGE): a payment's senders could not be
+  screened (no readable table, or a sender the table cannot read, such as a
+  Bitcoin input without an address); the scanner screens it again each scan
+  and never credits it unscreened. Restore the release's table (the cryptoctl
+  step of `build/all/run.sh`) rather than crediting by hand.
+- `crypto-payment-held` (WARN): a TAO transfer of a shape the rail does not
+  credit by itself (a batch, a proxy or multisig call, the EVM precompile, a
+  stake transfer: `transfer_shape`), or a payment to a shared deposit address
+  whose amount no open invoice was quoted (`amount_unmatched`). Confirm in the
+  Coinbase account that the coin arrived, then credit it with `bringyourctl
+  crypto credit`, or return it on the owner's go.
+- `crypto-scanner-stalled` (PAGE): a coin's scanner succeeded in the last week
+  and has not for 15 minutes (its chain source down or refusing the key, a vault file
+  gone, or the TAO reader paused on a runtime it cannot decode, gauge
+  `urnetwork_crypto_pay_tao_reader_paused`). The coin is listed as unavailable
+  and payments to its open invoices wait. `crypto_scan_cursor.last_error`
+  names the reason; never point a scanner at an older block range to recover.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
