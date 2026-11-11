@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T06:21:19Z",
+  "observed_at": "2026-11-11T07:35:13Z",
   "latest_single_admission_recovery": {
     "evidence": "EPOCH2-SINGLE-ADMISSION-RECOVERY-2026-11-11.json",
     "user_approved": true,
@@ -8,6 +8,9 @@
     "replacement_clock_started": true,
     "replacement_agent_state": "running",
     "replacement_execution_started": true,
+    "replacement_replicates_completed": 7,
+    "replacement_current_replicate": 8,
+    "replacement_full_r9_verdict_available": false,
     "replacement_run_id": "0f7d6ce27edb1066bd998896be31fba5553d9a68f06ba673aa2212c808da5b86",
     "replacement_deadline_at": "2026-11-11T09:17:08.071036Z",
     "goofe_passing_admission_preserved": true,
