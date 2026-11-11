@@ -1044,3 +1044,22 @@ func (self *quotaLeaseSet) Drain(ctx context.Context) {
 	self.cancel()
 	self.entryGroup.Wait()
 }
+
+// Runs one round of every entry's goroutine work, open and closing, as their wakes or ticks would: the
+// lever of a set whose rounds a test drives (manualTicks).
+func (self *quotaLeaseSet) tickAll(ctx context.Context) {
+	var entries []*quotaLeaseEntry
+	func() {
+		self.stateLock.Lock()
+		defer self.stateLock.Unlock()
+		for _, lane := range self.lanes {
+			if lane.open != nil {
+				entries = append(entries, lane.open)
+			}
+			entries = append(entries, lane.closing...)
+		}
+	}()
+	for _, entry := range entries {
+		entry.tick(ctx)
+	}
+}
