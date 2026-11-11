@@ -776,16 +776,46 @@ func (self *snClaimRelayCoreChain) Send(ctx context.Context, send *snClaimRelayS
 	return receipt.outcome, nil
 }
 
-// snClaimRelayCoreLedger reads the pool's account index and its latest finalized
-// root's tree. A coldkey in the index that the root does not hold at its index,
-// which vault2 would refuse anyway, is left out and logged.
+// snClaimRelayCoreLedger reads each of the operator's pools, its pool and its
+// capture the flag pool: the pool's account index and its latest finalized
+// root's tree. A coldkey in the index that the root does not hold at its
+// index, which vault2 would refuse anyway, is left out and logged. A pool whose
+// ledger cannot be read is left out of the pass and named, so that the other
+// pools' accounts are still claimed.
 type snClaimRelayCoreLedger struct {
 	cfg *StConfig
 }
 
-func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) ([]*snClaimRelayAccount, error) {
+func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) ([]*snClaimRelayAccount, []uint64, error) {
+	accounts := []*snClaimRelayAccount{}
+	unavailable := []uint64{}
+	var errs []error
+	for _, noId := range stLedgerV2OwnPools(self.cfg) {
+		var poolAccounts []*snClaimRelayAccount
+		err := stLedgerV2Guard(func() (err error) {
+			poolAccounts, err = self.poolAccounts(ctx, noId)
+			return
+		})
+		if err != nil {
+			unavailable = append(unavailable, noId)
+			errs = append(errs, fmt.Errorf("pool %d: %w", noId, err))
+			continue
+		}
+		accounts = append(accounts, poolAccounts...)
+	}
+	if len(unavailable) == len(stLedgerV2OwnPools(self.cfg)) {
+		return nil, nil, errors.Join(errs...)
+	}
+	for _, err := range errs {
+		glog.Infof("[sn]claim relay ledger: %s\n", err)
+	}
+	return accounts, unavailable, nil
+}
+
+// One pool's accounts, empty until it has a finalized root.
+func (self *snClaimRelayCoreLedger) poolAccounts(ctx context.Context, noId uint64) ([]*snClaimRelayAccount, error) {
 	deploymentKey := self.cfg.DeploymentKey()
-	root := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, self.cfg.NoId)
+	root := model.GetLatestStLedgerV2FinalizedRoot(ctx, deploymentKey, noId)
 	if root == nil || root.RootIndex == nil {
 		return nil, nil
 	}
@@ -793,8 +823,8 @@ func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) ([]*snClaimRel
 	if err != nil {
 		return nil, err
 	}
-	claimed := model.GetStLedgerV2ClaimedCumulatives(ctx, deploymentKey, self.cfg.NoId)
-	indexAccounts := model.GetStLedgerV2Accounts(ctx, deploymentKey, self.cfg.NoId)
+	claimed := model.GetStLedgerV2ClaimedCumulatives(ctx, deploymentKey, noId)
+	indexAccounts := model.GetStLedgerV2Accounts(ctx, deploymentKey, noId)
 	accounts := make([]*snClaimRelayAccount, 0, len(indexAccounts))
 	for _, indexAccount := range indexAccounts {
 		if uint64(len(leaves)) <= indexAccount.Index {
@@ -802,10 +832,10 @@ func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) ([]*snClaimRel
 		}
 		leaf := &leaves[indexAccount.Index]
 		if leaf.Coldkey != indexAccount.Coldkey {
-			glog.Errorf("[sn]claim relay account %d of pool %d is another coldkey in root %d\n", indexAccount.Index, self.cfg.NoId, *root.RootIndex)
+			glog.Errorf("[sn]claim relay account %d of pool %d is another coldkey in root %d\n", indexAccount.Index, noId, *root.RootIndex)
 			continue
 		}
-		account := &snClaimRelayAccount{NoId: self.cfg.NoId, Index: indexAccount.Index, RootIndex: *root.RootIndex, Coldkey: leaf.Coldkey, Cumulative: leaf.Cumulative}
+		account := &snClaimRelayAccount{NoId: noId, Index: indexAccount.Index, RootIndex: *root.RootIndex, Coldkey: leaf.Coldkey, Cumulative: leaf.Cumulative}
 		if mirrored, ok := claimed[indexAccount.Index]; ok && mirrored.Lt(&leaf.Cumulative) {
 			account.Claimed = mirrored
 		} else if ok {
