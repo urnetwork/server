@@ -20,6 +20,7 @@ import (
 // Runtime images are pinned beside the clock so a main rollout cannot silently
 // change an already-dispatched qualification bundle on reconnection.
 type competitionExecutorQualificationRun struct {
+	Recovery          *competitionExecutorQualificationRecoveryRecord
 	JobId             server.Id
 	StartedAt         time.Time
 	DeadlineAt        time.Time
@@ -49,6 +50,14 @@ func (self PostgresStore) reserveDistributedExecutorQualification(ctx context.Co
 	if err != nil {
 		return nil, err
 	}
+	round, err := self.GetRound(ctx, settings, roundId)
+	if err != nil {
+		return nil, err
+	}
+	recovery, err := self.loadExecutorQualificationRecovery(ctx, settings, round, hostId)
+	if err != nil {
+		return nil, err
+	}
 	resultErr = captureDatabaseError(func() {
 		server.Tx(ctx, func(tx server.PgTx) {
 			run = nil
@@ -58,14 +67,20 @@ func (self PostgresStore) reserveDistributedExecutorQualification(ctx context.Co
 			server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_executor_control_amendment',$1,true)`, competitionExecutorControlAmendmentSha256(settings)))
 			now := self.nowUtc().Truncate(time.Microsecond)
 			deadline := now.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds) * time.Second)
-			server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run
+			if recovery == nil {
+				server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run
  (round_id,host_id,job_id,started_at,deadline_at,api_image_digest,worker_image_digest) VALUES($1,$2,$3,$4,$5,$6,$7)
  ON CONFLICT(round_id,host_id) DO NOTHING`, roundId, hostId, jobId, now, deadline, apiImage, workerImage))
-			stored := &competitionExecutorQualificationRun{}
+			}
+			stored := &competitionExecutorQualificationRun{Recovery: recovery}
 			server.Raise(tx.QueryRow(ctx, `SELECT job_id,started_at,deadline_at,api_image_digest,worker_image_digest
- FROM competition_executor_qualification_run WHERE round_id=$1 AND host_id=$2 FOR SHARE`, roundId, hostId).
+ FROM competition_executor_qualification_clock($1,$2)`, roundId, hostId).
 				Scan(&stored.JobId, &stored.StartedAt, &stored.DeadlineAt, &stored.ApiImageDigest, &stored.WorkerImageDigest))
-			if stored.JobId != jobId || !stored.DeadlineAt.Equal(stored.StartedAt.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds)*time.Second)) ||
+			expectedJobId := jobId
+			if recovery != nil {
+				expectedJobId = recovery.Authorization.ReplacementJobId
+			}
+			if stored.JobId != expectedJobId || !stored.DeadlineAt.Equal(stored.StartedAt.Add(time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds)*time.Second)) ||
 				!imageDigestPattern.MatchString(stored.ApiImageDigest) || !imageDigestPattern.MatchString(stored.WorkerImageDigest) {
 				panic(ErrConflict)
 			}
@@ -99,12 +114,20 @@ func (self PostgresStore) distributedExecutorQualified(ctx context.Context, sett
 	if err := decodeFailureEvidenceJson(content, receipt); err != nil {
 		return false, err
 	}
+	selected := *settings
+	selected.executorQualificationRecovery = nil
+	if receipt.RecoverySha256 != "" {
+		selected.executorQualificationRecovery, err = self.loadExecutorQualificationRecovery(ctx, settings, round, host.HostId)
+		if err != nil || selected.executorQualificationRecovery == nil {
+			return false, errors.New("stored host receipt has no authenticated recovery authority")
+		}
+	}
 	canonical, err := json.Marshal(receipt)
 	if err != nil {
 		return false, err
 	}
 	digest := sha256.Sum256(canonical)
-	if hex.EncodeToString(digest[:]) != expected || validateCompetitionExecutorReceipt(settings, round, baseline, host, receipt) != nil {
+	if hex.EncodeToString(digest[:]) != expected || validateCompetitionExecutorReceipt(&selected, round, baseline, host, receipt) != nil {
 		return false, errors.New("stored executor admission evidence failed authentication")
 	}
 	reader, ok := settings.artifactArchive.(interface {
@@ -137,7 +160,7 @@ func (self PostgresStore) recordDistributedExecutorQualification(ctx context.Con
 			server.Raise(ensureAutomationNotHeldInTx(ctx, tx, settings, "evaluation"))
 			var startedAt, deadlineAt time.Time
 			var jobId server.Id
-			server.Raise(tx.QueryRow(ctx, `SELECT job_id,started_at,deadline_at FROM competition_executor_qualification_run WHERE round_id=$1 AND host_id=$2 FOR SHARE`, round.RoundId, host.HostId).
+			server.Raise(tx.QueryRow(ctx, `SELECT job_id,started_at,deadline_at FROM competition_executor_qualification_clock($1,$2)`, round.RoundId, host.HostId).
 				Scan(&jobId, &startedAt, &deadlineAt))
 			if jobId.String() != receipt.QualificationJobId || !startedAt.Equal(receipt.QualificationStartedAt) || !deadlineAt.Equal(receipt.QualificationDeadlineAt) || !self.nowUtc().Before(deadlineAt) {
 				panic(ErrConflict)
