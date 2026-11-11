@@ -187,9 +187,10 @@ How the numbers change. Each of these is an owner decision:
   funding runs short, the split pays only the bytes actually charged, while the
   ledger counts the verified usage. Recommended: count them, as the pool does.
 - **D5, byte basis and time.** The ledger counts the smaller of the two
-  reports, the split the mean (within the dispute tolerance), and the ledger
-  dates a contract by its close time instead of its sweep time. Small;
-  recommended: accept.
+  reports, the split their mean, so a settled contract counts at most half the
+  16 MiB dispute tolerance (`AcceptableTransfersByteDifference`) less; and the
+  ledger dates a contract by its close time instead of its sweep time, the
+  same transaction for an ordinary settlement. Small; recommended: accept.
 - **D6, cutover.** Which block first uses the ledger. Recommended: the first
   block after a dry run shows the owner both awards for one completed block
   (block 20 is due after 11-15 02:00Z and should keep today's rules unless the
