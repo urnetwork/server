@@ -34,7 +34,9 @@ package model
 //	            mirrored from the log (TEAM-M6-03)
 //	            a new Delegation, or a change of the AdminSet's roles or
 //	            threshold: the network authority notice to Owners and Admins
-//	            (security_notice_authority.go, §7.8)
+//	            (security_notice_authority.go, §7.8); a forwarding
+//	            Delegation is no new way to admit devices or sign people in,
+//	            so it owes none (QD-647)
 //	          and one admin event naming the entry (§7.11)
 //	sponsors  each run that met a SponsorSet or a member's removal, and a
 //	          process's first run for a network, sets every tagged client's
@@ -128,7 +130,8 @@ type configLogEntryEffect struct {
 	sponsorsMoved bool
 	// the AdminSet's roles or threshold changed
 	adminSetChanged bool
-	// how many Delegations the entry declared
+	// how many Delegations the entry declared that owe the notice: every
+	// one but a forwarding Delegation (QD-647)
 	delegationCount int
 }
 
@@ -384,7 +387,10 @@ func (self *configLogNetwork) entryEffectWithLock(ctx context.Context, sequencer
 		effect.adminSetChanged = true
 	}
 	for _, delegation := range after.Delegations() {
-		if before.Delegation(delegation.GetDelegationId()) == nil {
+		// a forwarding Delegation admits nothing and signs no one in, and
+		// its device's own admission owed the notice already: it owes
+		// none (QD-647)
+		if before.Delegation(delegation.GetDelegationId()) == nil && !sidecar.ConfigDelegationRowForwards(delegation) {
 			effect.delegationCount += 1
 		}
 	}

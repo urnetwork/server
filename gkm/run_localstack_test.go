@@ -177,7 +177,7 @@ func TestGkmRoutesOnTheLocalStack(t *testing.T) {
 		state.admit(reader.sidecarId, reader.publicKey, sidecar.AclEvsRead)
 
 		// KF1: the form, epoch/0 and gen/1
-		formBody, _ := proto.Marshal(&protocol.GroupForm{RepoId: repoId.Bytes(), GroupId: groupId.Bytes(), Generation: 1})
+		formBody, _ := proto.Marshal(&protocol.GroupForm{RepoId: repoId.Bytes(), GroupId: groupId.Bytes(), Generation: 1, Auth: gkmStackPin(10)})
 		form, _ := admin.sign("group-form", bridge.SignedType_SIGNED_GROUP_FORM, formBody, nil)
 		key1, rotate1, err := sidecar.NewGkmFirstGeneration(repoId, groupId, &sidecar.GkmGenerationArgs{
 			Cause:         sidecar.GkmCauseRequest,
