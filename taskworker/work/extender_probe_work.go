@@ -86,6 +86,83 @@ var probeExtenderAddress = func(
 	return controller.ProbeExtenderUptime(ctx, target, serverName, destinationHost)
 }
 
+// The reads and writes of one pass, and its diagnostic line. The accounting
+// itself -- the failure budget, the deactivation, the revocation -- is the
+// model's, and the model's own tests prove it against the database; this is the
+// seam a test runs the pass's decisions through with no database at all.
+// Production never replaces it.
+type extenderProbeStore interface {
+	// every active address, oldest probe first
+	activeTargets(ctx context.Context) []*model.NetworkExtenderProbeTarget
+	// applies one address's result (model.RecordNetworkExtenderProbeResult)
+	recordResult(
+		ctx context.Context,
+		target *model.NetworkExtenderProbeTarget,
+		success bool,
+		probeTime time.Time,
+		maxConsecutiveProbeFailures int,
+		signRevocation model.NetworkExtenderRevocationSigner,
+	) *model.NetworkExtenderProbeOutcome
+	// sets aside the block reports an outage made (model.DiscountNetworkExtenderBlockReports)
+	discountBlockReports(ctx context.Context, extenderId server.Id, now time.Time) int64
+	// the temporary diagnostic line of one failed probe (extender_probe_diagnostics.go)
+	logFailure(
+		ctx context.Context,
+		target *model.NetworkExtenderProbeTarget,
+		serverName string,
+		probeErr error,
+		now time.Time,
+	)
+}
+
+// The store of a pass. A variable for the reason probeExtenderAddress is one.
+var newExtenderProbeStore = func() extenderProbeStore {
+	return modelExtenderProbeStore{}
+}
+
+// The clock of a pass, for the same reason.
+var extenderProbeNow = server.NowUtc
+
+// The production store: the model's reads and writes.
+type modelExtenderProbeStore struct{}
+
+func (modelExtenderProbeStore) activeTargets(ctx context.Context) []*model.NetworkExtenderProbeTarget {
+	return model.GetActiveNetworkExtenderProbeTargets(ctx)
+}
+
+func (modelExtenderProbeStore) recordResult(
+	ctx context.Context,
+	target *model.NetworkExtenderProbeTarget,
+	success bool,
+	probeTime time.Time,
+	maxConsecutiveProbeFailures int,
+	signRevocation model.NetworkExtenderRevocationSigner,
+) *model.NetworkExtenderProbeOutcome {
+	return model.RecordNetworkExtenderProbeResult(
+		ctx,
+		target.ExtenderId,
+		target.IpVersion,
+		success,
+		probeTime,
+		maxConsecutiveProbeFailures,
+		signRevocation,
+	)
+}
+
+func (modelExtenderProbeStore) discountBlockReports(ctx context.Context, extenderId server.Id, now time.Time) int64 {
+	return model.DiscountNetworkExtenderBlockReports(ctx, extenderId, now)
+}
+
+func (modelExtenderProbeStore) logFailure(
+	ctx context.Context,
+	target *model.NetworkExtenderProbeTarget,
+	serverName string,
+	probeErr error,
+	now time.Time,
+) {
+	logExtenderProbeFailure(ctx, target, serverName, probeErr, now)
+}
+
 type ExtenderProbeArgs struct {
 }
 
@@ -156,7 +233,8 @@ func ExtenderProbe(
 		return result, nil
 	}
 
-	targets := model.GetActiveNetworkExtenderProbeTargets(clientSession.Ctx)
+	store := newExtenderProbeStore()
+	targets := store.activeTargets(clientSession.Ctx)
 	result.Probed = len(targets)
 	if len(targets) == 0 {
 		return result, nil
@@ -195,14 +273,13 @@ func ExtenderProbe(
 				probeCtx, probeSocket := withExtenderProbeSocket(probeCtx)
 				probeErr := probeExtenderAddress(probeCtx, target, serverName, destinationHost)
 				if probeErr != nil && ExtenderProbeFailureDiagnostics {
-					logExtenderProbeFailure(clientSession.Ctx, target, serverName, probeSocket.observed(probeErr), server.NowUtc())
+					store.logFailure(clientSession.Ctx, target, serverName, probeSocket.observed(probeErr), extenderProbeNow())
 				}
-				outcome := model.RecordNetworkExtenderProbeResult(
+				outcome := store.recordResult(
 					clientSession.Ctx,
-					target.ExtenderId,
-					target.IpVersion,
+					target,
 					probeErr == nil,
-					server.NowUtc(),
+					extenderProbeNow(),
 					ExtenderMaxConsecutiveProbeFailures,
 					func(extender *model.NetworkExtender, issueTime time.Time) ([]byte, error) {
 						_, message, err := controller.SignExtenderRevocation(
@@ -221,10 +298,10 @@ func ExtenderProbe(
 				// failure did not refuse is already visible.
 				discountedCount := int64(0)
 				if probeErr != nil {
-					discountedCount = model.DiscountNetworkExtenderBlockReports(
+					discountedCount = store.discountBlockReports(
 						clientSession.Ctx,
 						target.ExtenderId,
-						server.NowUtc(),
+						extenderProbeNow(),
 					)
 				}
 

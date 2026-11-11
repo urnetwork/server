@@ -165,12 +165,16 @@ type NetworkExtenderWithAddresses struct {
 // task can spread addresses over its workers without regrouping (C3).
 type NetworkExtenderProbeTarget struct {
 	ExtenderId server.Id
-	PublicKey  []byte
-	TcpPort    int
-	DnsTld     string
-	IpVersion  int
-	Ip         netip.Addr
-	Carriers   []string
+	// the network that activated the extender, which a pass judges its
+	// failures by: one network's extenders share an operator, and often one
+	// outage
+	NetworkId server.Id
+	PublicKey []byte
+	TcpPort   int
+	DnsTld    string
+	IpVersion int
+	Ip        netip.Addr
+	Carriers  []string
 	// the camouflage key the extender's records carry (phase 14b), which the
 	// probe fronts its camouflaged attempt with, so a splicing extender
 	// passes; nil when its records carry none
@@ -1037,6 +1041,7 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 			`
 			SELECT
 				network_extender.extender_id,
+				network_extender.network_id,
 				network_extender.public_key,
 				network_extender.tcp_port,
 				network_extender.dns_tld,
@@ -1058,6 +1063,7 @@ func GetActiveNetworkExtenderProbeTargets(ctx context.Context) []*NetworkExtende
 				var carriers string
 				server.Raise(result.Scan(
 					&target.ExtenderId,
+					&target.NetworkId,
 					&target.PublicKey,
 					&target.TcpPort,
 					&target.DnsTld,
