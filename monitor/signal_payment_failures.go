@@ -106,8 +106,9 @@ WITH active_supporter AS (
       AND receipt.first_seen_at <= now()
     GROUP BY 1, 2
 ), crypto_scanner AS (
-    -- a coin's scanner that succeeded before and has not for 15 minutes:
-    -- payments to its open invoices are not being read
+    -- a coin's scanner that succeeded in the last week and has not for 15
+    -- minutes: payments to its open invoices are not being read (a cursor
+    -- left by a coin taken out of service stops paging after the week)
     SELECT scan.asset AS target,
            1::bigint AS issue_count,
            extract(epoch FROM now() - scan.last_success_at)::bigint AS oldest_age,
@@ -115,6 +116,7 @@ WITH active_supporter AS (
     FROM crypto_scan_cursor scan
     WHERE scan.last_success_at IS NOT NULL
       AND scan.last_success_at < now() - interval '15 minutes'
+      AND scan.last_success_at > now() - interval '7 days'
 )
 SELECT 'entitlement_missing' AS kind, target, issue_count, oldest_age, newest_age
 FROM missing_entitlement
