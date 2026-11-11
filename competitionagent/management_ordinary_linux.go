@@ -130,7 +130,7 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 	if commonPath != "/urnetwork.slice" {
 		return facts, errors.New("ordinary management has an unexpected common ancestor")
 	}
-	common, err := openRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	common, err := openKernelRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return facts, err
 	}
@@ -170,7 +170,7 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 			if len(snapshot.Groups) >= settings.CleanupObjectCount || strings.Count(strings.TrimPrefix(path, policy.Parent.CgroupPath), "/") > settings.ManagementGroupDepth {
 				return snapshot, errors.New("ordinary hierarchy exceeds its finite inventory or depth")
 			}
-			current, err := openRelativeNoFollow(root, strings.TrimPrefix(path, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+			current, err := openKernelRelativeNoFollow(root, strings.TrimPrefix(path, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 			if err != nil {
 				return snapshot, err
 			}
@@ -196,6 +196,32 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 			}
 			for _, name := range names {
 				value, readErr := readManagementKernelProperty(ctx, current, name, settings.DiagnosticBytes, requireKernel)
+				if errors.Is(readErr, os.ErrNotExist) && name == "cpuset.cpus.effective" && !fixed[path] {
+					// A delegated service can have children without their own
+					// cpuset controller. Prove inheritance through held parents,
+					// rather than treating an absent property as an empty CPU set.
+					parentPath := filepath.Dir(path)
+					parentValues := snapshot.Groups[parentPath]
+					parent := held[parentPath]
+					if parent == nil || parentValues == nil {
+						readErr = errors.New("ordinary cpuset inheritance has no observed parent")
+					} else {
+						var parentControllers, childControllers string
+						parentControllers, readErr = readManagementKernelProperty(ctx, parent, "cgroup.subtree_control", settings.DiagnosticBytes, requireKernel)
+						if readErr == nil {
+							childControllers, readErr = readManagementKernelProperty(ctx, current, "cgroup.controllers", settings.DiagnosticBytes, requireKernel)
+						}
+						if readErr == nil && (!managementCpusetDisabled(parentControllers) || !managementCpusetDisabled(childControllers)) {
+							readErr = errors.New("ordinary missing cpuset has no disabled-controller proof")
+						}
+						if readErr == nil {
+							value = parentValues[name]
+							values["cpuset.inherited_from"] = parentPath
+							values["cpuset.parent_subtree_control"] = parentControllers
+							values["cpuset.controllers"] = childControllers
+						}
+					}
+				}
 				if readErr != nil {
 					if !discover {
 						_ = current.Close()
@@ -232,7 +258,7 @@ func readManagementOrdinaryFacts(ctx context.Context, policy ManagementResourceP
 	if err != nil {
 		return facts, err
 	}
-	currentCommon, err := openRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
+	currentCommon, err := openKernelRelativeNoFollow(root, strings.TrimPrefix(commonPath, "/"), os.O_RDONLY|syscall.O_DIRECTORY, 0)
 	if err != nil {
 		return facts, err
 	}
@@ -268,6 +294,22 @@ func validateManagementOrdinaryFacts(facts managementOrdinaryFacts, policy Manag
 			if !pathWithin(policy.Parent.CgroupPath, path) || values["cgroup.type"] != "domain" || validateRuntimeBoundaryManagementCpuSet(values["cpuset.cpus.effective"], policy.ManagementCpuSet) != nil {
 				return errors.New("ordinary descendant escaped the management CPU/domain boundary")
 			}
+			if parentPath, inherited := values["cpuset.inherited_from"]; inherited {
+				parent := snapshot.Groups[parentPath]
+				_, parentObserved := values["cpuset.parent_subtree_control"]
+				_, childObserved := values["cpuset.controllers"]
+				if !parentObserved || !childObserved || parentPath != filepath.Dir(path) || parent == nil || values["cpuset.cpus.effective"] != parent["cpuset.cpus.effective"] ||
+					!managementCpusetDisabled(values["cpuset.parent_subtree_control"]) || !managementCpusetDisabled(values["cpuset.controllers"]) ||
+					!reflect.DeepEqual(facts.Before.Groups[path], facts.After.Groups[path]) {
+					return errors.New("ordinary cpuset inheritance is incomplete or changed")
+				}
+			} else {
+				_, beforeInherited := facts.Before.Groups[path]["cpuset.inherited_from"]
+				_, afterInherited := facts.After.Groups[path]["cpuset.inherited_from"]
+				if beforeInherited || afterInherited {
+					return errors.New("ordinary cpuset inheritance changed its observation source")
+				}
+			}
 		}
 		for _, group := range groups {
 			values, found := snapshot.Groups[group.CgroupPath]
@@ -296,6 +338,32 @@ func validateManagementOrdinaryFacts(facts managementOrdinaryFacts, policy Manag
 		}
 	}
 	return nil
+}
+
+// Kernel controller lists are canonical identifiers. Absence proves inherited
+// cpuset membership only when neither the parent nor child exposes cpuset.
+func managementCpusetDisabled(value string) bool {
+	fields := strings.Fields(value)
+	if value != strings.Join(fields, " ") {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, field := range fields {
+		if field == "cpuset" || seen[field] || field[0] < 'a' || field[0] > 'z' {
+			return false
+		}
+		for _, character := range field {
+			if character < 'a' || character > 'z' {
+				if character < '0' || character > '9' {
+					if character != '_' {
+						return false
+					}
+				}
+			}
+		}
+		seen[field] = true
+	}
+	return true
 }
 
 // A canonical kernel period is an ABI range, not a new policy timer.

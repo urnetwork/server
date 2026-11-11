@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "kind": "epoch2-baseline-producer-inventory-preparation/v1",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "release_kind": "coverage-local-fixtures/1",
+  "root_profile": "/etc/urnetwork/competition-epoch2-control-baseline-20261110-v1/round-baseline-preparation.json",
+  "profile_sha256": "9ced8d2dda05613558cce71a02800706b481c970ee2f634aa6e0d652aee455af",
+  "program_sha256": "82b77832b964b15ea696bc1d062b31f00d81b32c15939d00680ab781a3a8de14",
+  "root_cause": "The historical scorer-three preparation loader still required older helper digests, although the approved local-fixture source release changed those helpers. An explicit private release selector preserves historical digests and authenticates the qualified release separately.",
+  "loader_validation": "ConfigureCompetitionFutureRoundBaselinePreparation passed against all16 protected actual dependencies and the exact program pin.",
+  "regression_tests": "Explicit release, all14 tracked text dependencies, historical default unchanged, caller mutation isolation, unknown release and legacy-policy refusal; targeted ordinary three runs passed.",
+  "targeted_race_three_runs": "passed, including the corrupt-version retention negative control",
+  "adjacent_test_fix": "Corrupt retained-version test now checks typed authentication failure, preserved cause and absence of a returned manifest instead of expecting deliberately redacted backend text in public error formatting.",
+  "no_database_or_api_write": true,
+  "measurements_started": false,
+  "baseline_ready": false,
+  "host_admission_ready": false,
+  "grading_ready": false,
+  "submission_clocks_started": false,
+  "frozen_source_or_image_changed": false,
+  "approved_next_measurements": "Official single R9 baseline, followed by Sille/Goofe R9 no-op admission concurrently. Keep intake open and scoring paused until native containment, cleanup and grading receipts pass.",
+  "pending_headroom_action": "User approval requested to clear36GiB rebuildable RAM-backed Go cache. A root process/descriptor/environment scan found no active owner and zero unreadable process checks; no deletion performed."
+}

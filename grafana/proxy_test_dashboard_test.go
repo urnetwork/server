@@ -32,28 +32,31 @@ type proxyTestMetric struct {
 
 // The contract's metrics file table.
 var proxyTestMetrics = map[string]proxyTestMetric{
-	"urnetwork_proxy_test_up":                             {},
-	"urnetwork_proxy_test_heartbeat_timestamp_seconds":    {},
-	"urnetwork_proxy_test_build_info":                     {labels: []string{"version"}},
-	"urnetwork_proxy_test_countries":                      {},
-	"urnetwork_proxy_test_runs_total":                     {counter: true, labels: []string{"country", "outcome"}},
-	"urnetwork_proxy_test_phase_seconds_total":            {counter: true, labels: []string{"country", "phase"}},
-	"urnetwork_proxy_test_phase_samples_total":            {counter: true, labels: []string{"country", "phase"}},
-	"urnetwork_proxy_test_phase_seconds_last":             {labels: []string{"country", "phase"}},
-	"urnetwork_proxy_test_phase_seconds_window":           {labels: []string{"country", "phase", "stat"}},
-	"urnetwork_proxy_test_all_phase_seconds_window":       {labels: []string{"phase", "stat"}},
-	"urnetwork_proxy_test_last_run_timestamp_seconds":     {labels: []string{"country"}},
-	"urnetwork_proxy_test_last_success_timestamp_seconds": {labels: []string{"country"}},
-	"urnetwork_proxy_test_exit_country_mismatch_total":    {counter: true, labels: []string{"country"}},
-	"urnetwork_proxy_test_remove_failures_total":          {counter: true},
-	"urnetwork_proxy_test_api_errors_total":               {counter: true, labels: []string{"call"}},
+	"urnetwork_proxy_test_up":                                       {},
+	"urnetwork_proxy_test_heartbeat_timestamp_seconds":              {},
+	"urnetwork_proxy_test_build_info":                               {labels: []string{"version"}},
+	"urnetwork_proxy_test_countries":                                {},
+	"urnetwork_proxy_test_country_providers":                        {labels: []string{"country", "country_name"}},
+	"urnetwork_proxy_test_providers":                                {},
+	"urnetwork_proxy_test_providers_last_success_timestamp_seconds": {},
+	"urnetwork_proxy_test_runs_total":                               {counter: true, labels: []string{"country", "outcome"}},
+	"urnetwork_proxy_test_phase_seconds_total":                      {counter: true, labels: []string{"country", "phase"}},
+	"urnetwork_proxy_test_phase_samples_total":                      {counter: true, labels: []string{"country", "phase"}},
+	"urnetwork_proxy_test_phase_seconds_last":                       {labels: []string{"country", "phase"}},
+	"urnetwork_proxy_test_phase_seconds_window":                     {labels: []string{"country", "phase", "stat"}},
+	"urnetwork_proxy_test_all_phase_seconds_window":                 {labels: []string{"phase", "stat"}},
+	"urnetwork_proxy_test_last_run_timestamp_seconds":               {labels: []string{"country"}},
+	"urnetwork_proxy_test_last_success_timestamp_seconds":           {labels: []string{"country"}},
+	"urnetwork_proxy_test_exit_country_mismatch_total":              {counter: true, labels: []string{"country"}},
+	"urnetwork_proxy_test_remove_failures_total":                    {counter: true},
+	"urnetwork_proxy_test_api_errors_total":                         {counter: true, labels: []string{"call"}},
 }
 
 // The values of the contract's closed labels. country is open, so the
-// dashboard selects it only through the country variable, and version is
-// never matched.
+// dashboard selects it only through the country variable; country_name and
+// version are never matched.
 var proxyTestLabelValues = map[string][]string{
-	"outcome": {"ok", "create_error", "ready_timeout", "browser_error", "navigate_timeout", "http_error"},
+	"outcome": {"ok", "create_error", "ready_timeout", "browser_error", "navigate_timeout", "http_error", "site_refused", "load_timeout"},
 	"phase":   {"create", "setup", "connect", "load"},
 	"call":    {"login", "locations", "create", "remove", "list"},
 }
@@ -89,11 +92,51 @@ const (
 	proxyTestLatestRunPanel      = 26
 	proxyTestFastestPanel        = 27
 	proxyTestSuccessRatePanel    = 28
+	proxyTestDeliveredPanel      = 29
+	proxyTestProvidersPanel      = 31
+	proxyTestProvidersAgePanel   = 32
+	proxyTestProvidersTrendPanel = 33
+	proxyTestProvidersTablePanel = 34
 )
 
+// The labels the runner writes, besides the env, host and job that its
+// metrics shipping adds: the only ones a query may group by, and so the only
+// ones a panel of the shared copy may show.
+var proxyTestLabels = []string{"country", "country_name", "outcome", "phase", "stat", "call", "version"}
+
+// The functions a read may sit in, between it and its max: counters through
+// increase() or rate(), gauges over time.
+var proxyTestCounterFunctions = []string{"increase(", "rate("}
+var proxyTestGaugeFunctions = []string{"max_over_time(", "last_over_time(", "avg_over_time(", "min_over_time("}
+
+// The providers table's columns: display name, query refId and the query.
+// The 24 h and 7 d columns are the per-country gauge over time, each read
+// deduplicated with max per country and name.
+var proxyTestProvidersColumns = []struct {
+	name  string
+	refId string
+	expr  string
+}{
+	{"providers now", "A", `max by (country, country_name) (urnetwork_proxy_test_country_providers{env="main",country=~"$country"})`},
+	{"24 h average", "B", `max by (country, country_name) (avg_over_time(urnetwork_proxy_test_country_providers{env="main",country=~"$country"}[24h]))`},
+	{"7 d average", "C", `max by (country, country_name) (avg_over_time(urnetwork_proxy_test_country_providers{env="main",country=~"$country"}[7d]))`},
+	{"7 d min", "D", `max by (country, country_name) (min_over_time(urnetwork_proxy_test_country_providers{env="main",country=~"$country"}[7d]))`},
+	{"7 d max", "E", `max by (country, country_name) (max_over_time(urnetwork_proxy_test_country_providers{env="main",country=~"$country"}[7d]))`},
+}
+
+// What the providers table's description must tell a reader: the history
+// behind the 24 h and 7 d columns starts with the runner's deploy.
+const proxyTestProvidersFillIn = "fill in as history accumulates from the deploy time"
+
+// The outcomes in which the page's main document came through the proxy:
+// the page loaded (ok), its load event stalled (load_timeout), or the site
+// answered a refusal (site_refused) or another http error. The others are
+// proxy failures: no byte of the document came.
+const proxyTestDeliveredOutcomes = "ok|load_timeout|site_refused|http_error"
+
 // The panels that follow the country variable, and those over every country.
-var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel, proxyTestFastestPanel, proxyTestSuccessRatePanel}
-var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel}
+var proxyTestCountryPanels = []int{proxyTestOutcomesPanel, proxyTestMeanPanel, proxyTestCountryTablePanel, proxyTestSlowestPanel, proxyTestFailureRatePanel, proxyTestLatestRunPanel, proxyTestFastestPanel, proxyTestSuccessRatePanel, proxyTestProvidersTablePanel}
+var proxyTestAllCountryPanels = []int{proxyTestSetupP50Panel, proxyTestSetupP90Panel, proxyTestConnectP50Panel, proxyTestConnectP90Panel, proxyTestSuccessPanel, proxyTestDeliveredPanel, proxyTestCountriesPanel, proxyTestTestedPanel, proxyTestCoveragePanel, proxyTestPercentilesPanel, proxyTestProvidersPanel, proxyTestProvidersAgePanel, proxyTestProvidersTrendPanel}
 
 // The fields of the document that testDashboard does not read.
 type proxyTestDatasource struct {
@@ -360,7 +403,7 @@ func TestProxyTestDashboardReadsFollowTheContract(t *testing.T) {
 		}
 		for _, by := range proxyTestByPattern.FindAllStringSubmatch(query, -1) {
 			for _, label := range strings.Split(by[1], ",") {
-				if label = strings.TrimSpace(label); !slices.Contains([]string{"country", "outcome", "phase", "stat", "call", "version"}, label) {
+				if label = strings.TrimSpace(label); !slices.Contains(proxyTestLabels, label) {
 					t.Errorf("query groups by %q, which is not a runner label: %s", label, query)
 				}
 			}
@@ -413,13 +456,13 @@ func TestProxyTestDashboardReadsFollowTheContract(t *testing.T) {
 
 			before := read.before
 			function := ""
-			for _, candidate := range []string{"increase(", "rate(", "max_over_time(", "last_over_time("} {
+			for _, candidate := range append(slices.Clone(proxyTestCounterFunctions), proxyTestGaugeFunctions...) {
 				if strings.HasSuffix(before, candidate) {
 					function, before = candidate, strings.TrimSuffix(before, candidate)
 					break
 				}
 			}
-			counterFunction := function == "increase(" || function == "rate("
+			counterFunction := slices.Contains(proxyTestCounterFunctions, function)
 			if metric.counter && !counterFunction {
 				t.Errorf("the counter %s is read without increase() or rate(), so a runner restart reads as a drop: %s", read.metric, query)
 			}
@@ -548,6 +591,9 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 	}
 	panel(proxyTestSuccessPanel, "stat", "percentunit")
 	expect(proxyTestSuccessPanel, "A", `(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main",outcome="ok"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main"}[1h]))) > 0)`)
+	// beside it, the runs whose page's main document came through the proxy
+	panel(proxyTestDeliveredPanel, "stat", "percentunit")
+	expect(proxyTestDeliveredPanel, "A", `(sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main",outcome=~"`+proxyTestDeliveredOutcomes+`"}[1h]))) or vector(0)) / (sum(max by (country, outcome) (increase(urnetwork_proxy_test_runs_total{env="main"}[1h]))) > 0)`)
 
 	// coverage
 	panel(proxyTestCountriesPanel, "stat", "short")
@@ -589,7 +635,7 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 		"E": {"load p50", `phase="load",stat="p50"`},
 		"F": {"load p90", `phase="load",stat="p90"`},
 		"G": {"runs", `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`},
-		"H": {"failures", `outcome!="ok"}[24h]`},
+		"H": {"proxy failures", `outcome!~"` + proxyTestDeliveredOutcomes + `"}[24h]`},
 		"I": {"success", `outcome="ok"}[24h]`},
 		"J": {"last tested", `urnetwork_proxy_test_last_run_timestamp_seconds{env="main",country=~"$country"}`},
 		"K": {"exit mismatches", `increase(urnetwork_proxy_test_exit_country_mismatch_total{env="main",country=~"$country"}[24h])`},
@@ -619,7 +665,7 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 	panel(proxyTestSlowestPanel, "bargauge", "s")
 	expect(proxyTestSlowestPanel, "A", `sort_desc(topk(20, max by (country) (urnetwork_proxy_test_phase_seconds_window{env="main",country=~"$country",phase="setup",stat="p90"})))`)
 	panel(proxyTestFailureRatePanel, "bargauge", "percentunit")
-	contains(proxyTestFailureRatePanel, "A", "topk(20, ", `outcome!="ok"}[24h]`, `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`)
+	contains(proxyTestFailureRatePanel, "A", "topk(20, ", `outcome!~"`+proxyTestDeliveredOutcomes+`"}[24h]`, `urnetwork_proxy_test_runs_total{env="main",country=~"$country"}[24h]`)
 	// and their counterparts: the fastest 20 by setup p90, and the highest
 	// success rates among countries with at least 3 runs in 24 h
 	panel(proxyTestFastestPanel, "bargauge", "s")
@@ -633,6 +679,10 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 	for refId, phase := range map[string]string{"C": "create", "D": "setup", "E": "connect", "F": "load"} {
 		contains(proxyTestLatestRunPanel, refId, `urnetwork_proxy_test_phase_seconds_last{env="main",country=~"$country",phase="`+phase+`"}`)
 	}
+
+	// the providers: the total, the age of the counts, the total over time,
+	// and every listed country's providers now and over 24 h and 7 d
+	proxyTestAssertProvidersPanels(t, proxyTestDashboardName, func(query string) string { return query })
 
 	// the country variable drives the per-country panels only
 	for _, id := range proxyTestCountryPanels {
@@ -648,6 +698,127 @@ func TestProxyTestDashboardPanels(t *testing.T) {
 				t.Errorf("all-country panel %d query %s follows the country variable: %s", id, target.RefId, target.Expr)
 			}
 		}
+	}
+}
+
+// The providers section of the named dashboard, under its own row: the total
+// providers over every country, the age of the counts, the total over time,
+// and a table with a row for every listed country, merged from instant
+// queries by country and name and sorted by providers now, most first.
+// queryOf turns a query of the internal dashboard into the named one's.
+func proxyTestAssertProvidersPanels(t *testing.T, dashboardName string, queryOf func(string) string) {
+	t.Helper()
+	dashboard := readTestDashboard(t, dashboardName)
+	document := readProxyTestDocumentJson(t, dashboardName)
+	documentPanels := map[int]map[string]any{}
+	order := []int{}
+	for _, item := range document["panels"].([]any) {
+		documentPanel := item.(map[string]any)
+		id := int(documentPanel["id"].(float64))
+		documentPanels[id] = documentPanel
+		order = append(order, id)
+	}
+	rowIndex := slices.Index(order, 30)
+	if rowIndex < 0 || documentPanels[30]["type"] != "row" || documentPanels[30]["title"] != "providers" {
+		t.Fatalf("%s has no providers row", dashboardName)
+	}
+	if !slices.Equal(order[rowIndex+1:min(rowIndex+5, len(order))], []int{proxyTestProvidersPanel, proxyTestProvidersAgePanel, proxyTestProvidersTrendPanel, proxyTestProvidersTablePanel}) {
+		t.Errorf("%s: the providers row holds %v", dashboardName, order[rowIndex+1:min(rowIndex+5, len(order))])
+	}
+
+	panel := func(id int, kind string, unit string, title string) *testPanel {
+		t.Helper()
+		found := dashboardPanelById(dashboard, id)
+		if found == nil {
+			t.Fatalf("%s panel %d is missing", dashboardName, id)
+		}
+		if found.Type != kind || found.FieldConfig.Defaults.Unit != unit || found.Title != title {
+			t.Errorf("%s panel %d is a %s %q in %q, want a %s %q in %q", dashboardName, id, found.Type, found.Title, found.FieldConfig.Defaults.Unit, kind, title, unit)
+		}
+		for _, target := range found.Targets {
+			instant := target.Instant && target.Range != nil && !*target.Range
+			if (kind == "timeseries") == instant {
+				t.Errorf("%s panel %d query %s: instant=%v", dashboardName, id, target.RefId, instant)
+			}
+		}
+		return found
+	}
+	expect := func(id int, refId string, want string) {
+		t.Helper()
+		if got := proxyTestTarget(t, dashboard, id, refId).Expr; got != queryOf(want) {
+			t.Errorf("%s panel %d query %s = %s, want %s", dashboardName, id, refId, got, queryOf(want))
+		}
+	}
+
+	panel(proxyTestProvidersPanel, "stat", "locale", "total providers")
+	expect(proxyTestProvidersPanel, "A", `max(urnetwork_proxy_test_providers{env="main"})`)
+	age := panel(proxyTestProvidersAgePanel, "stat", "s", "provider counts age")
+	expect(proxyTestProvidersAgePanel, "A", `time() - max(max_over_time(urnetwork_proxy_test_providers_last_success_timestamp_seconds{env="main"}[7d]))`)
+	steps := map[string]float64{}
+	for _, step := range age.FieldConfig.Defaults.Thresholds.Steps {
+		if step.Value != nil {
+			steps[step.Color] = *step.Value
+		}
+	}
+	// the runner reads every minute; orange past 5 minutes, red past 15
+	if !maps.Equal(steps, map[string]float64{"orange": 300, "red": 900}) {
+		t.Errorf("%s: provider counts age thresholds %v", dashboardName, steps)
+	}
+	panel(proxyTestProvidersTrendPanel, "timeseries", "locale", "total providers over time")
+	expect(proxyTestProvidersTrendPanel, "A", `max(urnetwork_proxy_test_providers{env="main"})`)
+	legend, _ := documentPanels[proxyTestProvidersTrendPanel]["options"].(map[string]any)["legend"].(map[string]any)
+	if calcs, _ := json.Marshal(legend["calcs"]); string(calcs) != `["lastNotNull","min","mean","max"]` {
+		t.Errorf("%s: the trend's legend gives %s, want the latest, min, mean and max", dashboardName, calcs)
+	}
+
+	table := panel(proxyTestProvidersTablePanel, "table", "", "providers by country")
+	if len(table.Targets) != len(proxyTestProvidersColumns) {
+		t.Errorf("%s: the providers table has %d queries, want %d", dashboardName, len(table.Targets), len(proxyTestProvidersColumns))
+	}
+	columns := map[string]string{}
+	for _, override := range table.FieldConfig.Overrides {
+		for _, property := range override.Properties {
+			if property.Id == "displayName" {
+				columns[strings.Trim(string(property.Value), `"`)] = strings.TrimPrefix(override.Matcher.Options, "Value #")
+			}
+		}
+	}
+	wantColumns := map[string]string{}
+	for _, column := range proxyTestProvidersColumns {
+		wantColumns[column.name] = column.refId
+		expect(proxyTestProvidersTablePanel, column.refId, column.expr)
+		if target := proxyTestTarget(t, dashboard, proxyTestProvidersTablePanel, column.refId); target.Format != "table" {
+			t.Errorf("%s: providers query %s is not in table format", dashboardName, column.refId)
+		}
+	}
+	if !maps.Equal(columns, wantColumns) {
+		t.Errorf("%s: providers table columns = %v, want %v", dashboardName, columns, wantColumns)
+	}
+	// every listed country: no top-k, no row limit
+	for _, target := range table.Targets {
+		for _, function := range []string{"topk", "bottomk", "limitk", "limit_ratio"} {
+			if strings.Contains(target.Expr, function) {
+				t.Errorf("%s: providers query %s keeps only some countries: %s", dashboardName, target.RefId, target.Expr)
+			}
+		}
+	}
+	tablePanel := documentPanels[proxyTestProvidersTablePanel]
+	sortBy, _ := json.Marshal(tablePanel["options"].(map[string]any)["sortBy"])
+	if string(sortBy) != `[{"desc":true,"displayName":"providers now"}]` {
+		t.Errorf("%s: the providers table sorts by %s, want providers now, most first", dashboardName, sortBy)
+	}
+	transformations, _ := json.Marshal(tablePanel["transformations"])
+	wantTransformations := `[{"id":"merge","options":{}},{"id":"organize","options":{"excludeByName":{"Time":true},"indexByName":{"Value #A":2,"Value #B":3,"Value #C":4,"Value #D":5,"Value #E":6,"country":1,"country_name":0},"renameByName":{"country":"code","country_name":"country"}}}]`
+	if string(transformations) != wantTransformations {
+		t.Errorf("%s: the providers table's transformations are %s, want the queries merged by country, the name first as country and the code as code: %s", dashboardName, transformations, wantTransformations)
+	}
+	// a country listed in the last 7 days but not now has no providers now
+	mappings, _ := json.Marshal(tablePanel["fieldConfig"])
+	if !strings.Contains(string(mappings), `"options":{"match":"null","result":{"index":0,"text":"not listed"}}`) {
+		t.Errorf("%s: providers now has no 'not listed' for a country that left the list", dashboardName)
+	}
+	if !strings.Contains(table.Description, proxyTestProvidersFillIn) {
+		t.Errorf("%s: the providers table's description does not say the averages %s: %s", dashboardName, proxyTestProvidersFillIn, table.Description)
 	}
 }
 
@@ -706,8 +877,19 @@ func TestProxyTestDashboardPromqlParses(t *testing.T) {
 // restart and another environment's series, then over a crashed runner, a
 // stopped runner and no telemetry from main.
 func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
+	proxyTestEvaluateRunnerFile(t, proxyTestDashboardName, "")
+}
+
+// Evaluates the named dashboard's panels as TestProxyTestDashboardPromqlEvaluatesTheRunnerFile
+// describes, with every country selected. The panels are matched by id and
+// query refId, so a dashboard with the same panels gives the same series.
+// extraLabels (",name=\"value\"...", or empty) is added to every input series,
+// and since each expected sample carries exactly its labels, no panel may pass
+// one of them on.
+func proxyTestEvaluateRunnerFile(t *testing.T, dashboardName string, extraLabels string) {
+	t.Helper()
 	promtool, ctx := proxyTestPromtool(t)
-	dashboard := readTestDashboard(t, proxyTestDashboardName)
+	dashboard := readTestDashboard(t, dashboardName)
 	query := func(id int, refId string) string {
 		return proxyTestConcrete(proxyTestTarget(t, dashboard, id, refId).Expr)
 	}
@@ -728,11 +910,14 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		mismatch       = "urnetwork_proxy_test_exit_country_mismatch_total"
 		removeFailures = "urnetwork_proxy_test_remove_failures_total"
 		apiErrors      = "urnetwork_proxy_test_api_errors_total"
+		countryCounts  = "urnetwork_proxy_test_country_providers"
+		providers      = "urnetwork_proxy_test_providers"
+		providersRead  = "urnetwork_proxy_test_providers_last_success_timestamp_seconds"
 	)
 	// One sample a minute from 0 to 25 h, evaluated at 25 h (time() = 90000).
 	file := func(env string, host string) func(metric, labels, values string) map[string]string {
 		return func(metric, labels, values string) map[string]string {
-			return map[string]string{"series": fmt.Sprintf(`%s{env=%q,host=%q,job="node"%s}`, metric, env, host, labels), "values": values}
+			return map[string]string{"series": fmt.Sprintf(`%s{env=%q,host=%q,job="node"%s%s}`, metric, env, host, extraLabels, labels), "values": values}
 		}
 	}
 	planetoid := file("main", "planetoid")
@@ -750,6 +935,18 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		return samples
 	}
 	none := []map[string]any{}
+	// the provider counts carry the country's name beside its code
+	countryNames := map[string]string{"us": "United States", "de": "Germany", "jp": "Japan", "tr": "Türkiye"}
+	countryLabels := func(countryCode string) string {
+		return fmt.Sprintf(`,country=%q,country_name=%q`, countryCode, countryNames[countryCode])
+	}
+	byCountry := func(values map[string]float64) []map[string]any {
+		samples := []map[string]any{}
+		for countryCode, v := range values {
+			samples = append(samples, map[string]any{"labels": "{" + strings.TrimPrefix(countryLabels(countryCode), ",") + "}", "value": v})
+		}
+		return samples
+	}
 	type evaluation struct {
 		id      int
 		refId   string
@@ -787,6 +984,10 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		planetoid(runs, `,country="fr",outcome="create_error"`, "0+1x1500"),
 		planetoid(runs, `,country="jp",outcome="ok"`, "0+2x1500"),
 		planetoid(runs, `,country="us",outcome="ok"`, "0+1x1470 1+1x29"),
+		// nl: one site_refused and one load_timeout a minute, delivered pages
+		// that did not load ok
+		planetoid(runs, `,country="nl",outcome="site_refused"`, "0+1x1500"),
+		planetoid(runs, `,country="nl",outcome="load_timeout"`, "0+1x1500"),
 		other(runs, `,country="de",outcome="ok"`, "0+100x1500"),
 		planetoid(mismatch, `,country="de"`, "0+1x1500"),
 
@@ -830,6 +1031,21 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		planetoid(phaseLast, `,country="de",phase="connect"`, constant("0.8")),
 		planetoid(phaseLast, `,country="de",phase="load"`, constant("2.5")),
 		planetoid(phaseLast, `,country="jp",phase="setup"`, "1.5+0x1200 _x300"),
+
+		// the provider counts. us: 1542 once, 24 h and a minute ago, and 100
+		// since, from the second host too; de: listed for the last 24 h, 10
+		// for 12 h and then 14; jp: left the list 5 h ago; tr: a name past
+		// ascii; another environment's us is never read
+		planetoid(countryCounts, countryLabels("us"), "_x59 1542 100x1440"),
+		copied(countryCounts, countryLabels("us"), "_x59 1542 100x1440"),
+		planetoid(countryCounts, countryLabels("de"), "_x61 10x719 14x719"),
+		planetoid(countryCounts, countryLabels("jp"), "3x1200 _x300"),
+		planetoid(countryCounts, countryLabels("tr"), constant("5")),
+		other(countryCounts, countryLabels("us"), constant("999")),
+		planetoid(providers, "", constant("119")),
+		copied(providers, "", constant("119")),
+		other(providers, "", constant("999")),
+		planetoid(providersRead, "", "0+60x1500"),
 	}
 	lastTested := by("country", map[string]float64{"de": 0, "fr": 3600, "jp": 18000, "us": 0, "it": 90000})
 	dayEvaluations := []evaluation{
@@ -842,8 +1058,10 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		{proxyTestSetupP90Panel, "A", value(6)},
 		{proxyTestConnectP50Panel, "A", value(0.75)},
 		{proxyTestConnectP90Panel, "A", value(1.5)},
-		// (180 de + 120 jp + 60 us ok) / (360 ok + 60 http_error + 60 create_error)
-		{proxyTestSuccessPanel, "A", value(0.75)},
+		// (180 de + 120 jp + 60 us ok) / (360 ok + 60 http_error + 60 create_error + 60 site_refused + 60 load_timeout)
+		{proxyTestSuccessPanel, "A", value(0.6)},
+		// (360 ok + 60 http_error + 60 site_refused + 60 load_timeout) / 600
+		{proxyTestDeliveredPanel, "A", value(0.9)},
 		{proxyTestCountriesPanel, "A", value(5)},
 		{proxyTestTestedPanel, "A", value(4)},
 		{proxyTestCoveragePanel, "A", value(0.8)},
@@ -855,7 +1073,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{"labels": `{phase="load",stat="p50"}`, "value": 2},
 			{"labels": `{phase="load",stat="p90"}`, "value": 4},
 		}},
-		{proxyTestOutcomesPanel, "A", by("outcome", map[string]float64{"ok": 360, "http_error": 60, "create_error": 60})},
+		{proxyTestOutcomesPanel, "A", by("outcome", map[string]float64{"ok": 360, "http_error": 60, "create_error": 60, "site_refused": 60, "load_timeout": 60})},
 		{proxyTestMeanPanel, "A", []map[string]any{
 			{"labels": `{country="de",phase="setup"}`, "value": 3},
 			{"labels": `{country="de",phase="connect"}`, "value": 0.5},
@@ -868,21 +1086,34 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 		{proxyTestCountryTablePanel, "D", by("country", map[string]float64{"de": 2})},
 		{proxyTestCountryTablePanel, "E", by("country", map[string]float64{"de": 3})},
 		{proxyTestCountryTablePanel, "F", by("country", map[string]float64{"de": 5})},
-		{proxyTestCountryTablePanel, "G", by("country", map[string]float64{"de": 5760, "fr": 1440, "jp": 2880, "us": 1440})},
-		{proxyTestCountryTablePanel, "H", by("country", map[string]float64{"de": 1440, "fr": 1440, "jp": 0, "us": 0})},
-		{proxyTestCountryTablePanel, "I", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1})},
+		{proxyTestCountryTablePanel, "G", by("country", map[string]float64{"de": 5760, "fr": 1440, "jp": 2880, "us": 1440, "nl": 2880})},
+		// de's http errors, and all of nl's runs, came through the proxy
+		{proxyTestCountryTablePanel, "H", by("country", map[string]float64{"de": 0, "fr": 1440, "jp": 0, "us": 0, "nl": 0})},
+		{proxyTestCountryTablePanel, "I", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1, "nl": 0})},
 		{proxyTestCountryTablePanel, "J", lastTested},
-		{proxyTestCountryTablePanel, "K", by("country", map[string]float64{"de": 1440, "fr": 0, "jp": 0, "us": 0})},
+		{proxyTestCountryTablePanel, "K", by("country", map[string]float64{"de": 1440, "fr": 0, "jp": 0, "us": 0, "nl": 0})},
 		{proxyTestSlowestPanel, "A", by("country", map[string]float64{"de": 4.5, "jp": 2})},
-		{proxyTestFailureRatePanel, "A", by("country", map[string]float64{"de": 0.25, "fr": 1})},
+		{proxyTestFailureRatePanel, "A", by("country", map[string]float64{"fr": 1})},
 		{proxyTestFastestPanel, "A", by("country", map[string]float64{"de": 4.5, "jp": 2})},
-		{proxyTestSuccessRatePanel, "A", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1})},
+		{proxyTestSuccessRatePanel, "A", by("country", map[string]float64{"de": 0.75, "fr": 0, "jp": 1, "us": 1, "nl": 0})},
 		{proxyTestLatestRunPanel, "A", lastTested},
 		{proxyTestLatestRunPanel, "B", by("country", map[string]float64{"de": 0, "jp": 18000, "us": 0})},
 		{proxyTestLatestRunPanel, "C", by("country", map[string]float64{"de": 0.5})},
 		{proxyTestLatestRunPanel, "D", by("country", map[string]float64{"de": 3.5, "jp": 1.5})},
 		{proxyTestLatestRunPanel, "E", by("country", map[string]float64{"de": 0.8})},
 		{proxyTestLatestRunPanel, "F", by("country", map[string]float64{"de": 2.5})},
+
+		{proxyTestProvidersPanel, "A", value(119)},
+		{proxyTestProvidersAgePanel, "A", value(0)},
+		{proxyTestProvidersTrendPanel, "A", value(119)},
+		// jp is not listed now, so it has no providers now but has its 24 h
+		// and 7 d columns
+		{proxyTestProvidersTablePanel, "A", byCountry(map[string]float64{"us": 100, "de": 14, "tr": 5})},
+		{proxyTestProvidersTablePanel, "B", byCountry(map[string]float64{"us": 100, "de": 12, "jp": 3, "tr": 5})},
+		// us: (1542 + 1441 * 100) / 1442
+		{proxyTestProvidersTablePanel, "C", byCountry(map[string]float64{"us": 101, "de": 12, "jp": 3, "tr": 5})},
+		{proxyTestProvidersTablePanel, "D", byCountry(map[string]float64{"us": 100, "de": 10, "jp": 3, "tr": 5})},
+		{proxyTestProvidersTablePanel, "E", byCountry(map[string]float64{"us": 1542, "de": 14, "jp": 3, "tr": 5})},
 	}
 
 	cases := []struct {
@@ -897,13 +1128,23 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			planetoid(countries, "", constant("3")),
 			planetoid(runs, `,country="fr",outcome="create_error"`, "0+1x1500"),
 			planetoid(lastRun, `,country="fr"`, constant("0")),
+			// the counts of the last successful read, 15 minutes old, which
+			// the file keeps
+			planetoid(countryCounts, countryLabels("de"), constant("57")),
+			planetoid(providers, "", constant("57")),
+			planetoid(providersRead, "", constant("89100")),
 		}, []evaluation{
 			{proxyTestUpPanel, "A", value(2)},
 			{proxyTestHeartbeatPanel, "A", value(300)},
+			{proxyTestProvidersPanel, "A", value(57)},
+			{proxyTestProvidersAgePanel, "A", value(900)},
+			{proxyTestProvidersTablePanel, "A", byCountry(map[string]float64{"de": 57})},
+			{proxyTestProvidersTablePanel, "C", byCountry(map[string]float64{"de": 57})},
 			{proxyTestRemoveFailuresPanel, "A", value(0)},
 			{proxyTestApiErrorsPanel, "A", value(0)},
 			{proxyTestSetupP50Panel, "A", none},
 			{proxyTestSuccessPanel, "A", value(0)},
+			{proxyTestDeliveredPanel, "A", value(0)},
 			{proxyTestTestedPanel, "A", value(0)},
 			{proxyTestCoveragePanel, "A", value(0)},
 			{proxyTestCountryTablePanel, "I", by("country", map[string]float64{"fr": 0})},
@@ -917,6 +1158,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{proxyTestUpPanel, "A", value(0)},
 			{proxyTestHeartbeatPanel, "A", value(3600)},
 			{proxyTestSuccessPanel, "A", none},
+			{proxyTestDeliveredPanel, "A", none},
 			{proxyTestCountryTablePanel, "G", by("country", map[string]float64{"de": 0})},
 			{proxyTestCountryTablePanel, "H", by("country", map[string]float64{"de": 0})},
 			{proxyTestCountryTablePanel, "I", none},
@@ -928,7 +1170,15 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			other(countries, "", constant("5")),
 			other(runs, `,country="de",outcome="ok"`, "0+1x1500"),
 			other(lastRun, `,country="de"`, "0+60x1500"),
+			other(countryCounts, countryLabels("de"), constant("450")),
+			other(providers, "", constant("450")),
+			other(providersRead, "", "0+60x1500"),
 		}, []evaluation{
+			{proxyTestProvidersPanel, "A", none},
+			{proxyTestProvidersAgePanel, "A", none},
+			{proxyTestProvidersTrendPanel, "A", none},
+			{proxyTestProvidersTablePanel, "A", none},
+			{proxyTestProvidersTablePanel, "C", none},
 			{proxyTestUpPanel, "A", none},
 			{proxyTestHeartbeatPanel, "A", none},
 			{proxyTestVersionPanel, "A", none},
@@ -936,6 +1186,7 @@ func TestProxyTestDashboardPromqlEvaluatesTheRunnerFile(t *testing.T) {
 			{proxyTestApiErrorsPanel, "A", none},
 			{proxyTestSetupP50Panel, "A", none},
 			{proxyTestSuccessPanel, "A", none},
+			{proxyTestDeliveredPanel, "A", none},
 			{proxyTestCountriesPanel, "A", none},
 			{proxyTestTestedPanel, "A", value(0)},
 			{proxyTestCoveragePanel, "A", none},

@@ -27,6 +27,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 // These values come only from the protected agent role, never the wire.
@@ -114,6 +116,7 @@ type RuntimeResourceBoundary struct {
 	ContainerdUnit          Pin                          `json:"containerd_unit"`
 	NetworkUnit             Pin                          `json:"network_unit"`
 	NativeClass             *RuntimeNativeClassSelection `json:"native_class,omitempty"`
+	WorkspaceMount          *RuntimeWorkspaceMount       `json:"workspace_mount,omitempty"`
 	WorkDeviceId            uint64                       `json:"-"`
 	namespace               runtimeBoundaryNamespace
 	nativeClass             *runtimeNativeClassProof
@@ -188,7 +191,7 @@ const runtimeBoundaryEngineUnitName = "urnetwork-private-engine.service"
 const runtimeBoundaryContainerdUnitName = "urnetwork-private-containerd.service"
 const runtimeBoundaryNetworkUnitName = "urnetwork-private-engine-network.service"
 const runtimeBoundaryNsfs = 0x6e736673
-const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs,Slice,OnFailure,OnFailureJobMode"
+const runtimeBoundaryUnitProperties = "Id,FragmentPath,DropInPaths,LoadState,ActiveState,SubState,MainPID,InvocationID,ExecMainStartTimestampMonotonic,ControlGroup,PrivateNetwork,NetworkNamespacePath,JoinsNamespaceOf,Requires,BindsTo,After,User,Group,Restart,KillMode,RemainAfterExit,AllowedCPUs,Slice,OnFailure,OnFailureJobMode,UMask"
 
 var runtimeBoundaryBridgeNamePattern = regexp.MustCompile(`^unev-[0-9a-f]{10}$`)
 var runtimeBoundaryVethNamePattern = regexp.MustCompile(`^veth[0-9a-f]+$`)
@@ -200,11 +203,20 @@ func VerifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 }
 
 // The concrete public path always installs native protected-file/kernel checks.
-func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost) (*RuntimeResourceBoundary, error) {
+// Rendering and native admission share one finite settings check.
+func validateRuntimeResourceBoundarySettings(settings RuntimeResourceBoundarySettings) error {
 	if settings.DocumentBytes <= 0 || settings.NativeBytes <= 0 || settings.ExecutableBytes <= 0 || settings.MountCount <= 0 || settings.DocumentDepth <= 0 || settings.CommandTimeout <= 0 ||
 		!dockerProxyMemoryPattern.MatchString(settings.ContainerLogMaximumSize) || settings.ContainerLogMaximumFiles <= 0 ||
 		settings.MaximumNetworkInterfaces <= 0 || settings.MaximumNetworkRoutes <= 0 || settings.MaximumRuntimeProcesses <= 0 {
-		return nil, errors.New("resource boundary requires positive finite settings")
+		return errors.New("resource boundary requires positive finite settings")
+	}
+	return nil
+}
+
+// Native evidence remains mandatory after structural configuration admission.
+func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeResourceScope, settings RuntimeResourceBoundarySettings, host runtimeBoundaryHost) (*RuntimeResourceBoundary, error) {
+	if err := validateRuntimeResourceBoundarySettings(settings); err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -263,6 +275,19 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 			return nil, err
 		}
 	}
+	if boundary.WorkspaceMount != nil {
+		if err := host.Executable(boundary.WorkspaceMount.MountHelper); err != nil {
+			return nil, err
+		}
+		content, err := host.Document(boundary.WorkspaceMount.Unit, settings.DocumentBytes)
+		if err != nil {
+			return nil, err
+		}
+		expected, err := RenderRuntimeWorkspaceMount(*boundary, settings)
+		if err != nil || !bytes.Equal(content, expected) {
+			return nil, errors.New("workspace bootstrap unit differs from its closed mount policy")
+		}
+	}
 	if err := prepareRuntimeNativeClass(ctx, boundary, scope, settings, host); err != nil {
 		return nil, err
 	}
@@ -315,6 +340,15 @@ func verifyRuntimeResourceBoundary(ctx context.Context, pin Pin, scope RuntimeRe
 // All mutable engine paths are distinct children of the one quota filesystem.
 // Socket/control state and durable agent journals cannot consume that budget.
 func (self *RuntimeResourceBoundary) validate(scope RuntimeResourceScope) error {
+	if self.WorkspaceMount != nil {
+		if self.WorkspaceMount.Kind != runtimeWorkspacePropagation || self.WorkRoot != scope.WorkDirectory ||
+			filepath.Dir(self.WorkspaceMount.Unit.Path) != "/etc/systemd/system" || !strings.HasSuffix(self.WorkspaceMount.Unit.Path, ".mount") ||
+			self.WorkspaceMount.Unit.Path != "/etc/systemd/system/"+runtimeWorkspaceUnitName(self.WorkRoot) || !digestPattern.MatchString(self.WorkspaceMount.Unit.Sha256) ||
+			self.WorkspaceMount.MountHelper.Path != "/usr/bin/mount" || !digestPattern.MatchString(self.WorkspaceMount.MountHelper.Sha256) ||
+			strings.ContainsAny(self.WorkRoot+self.CandidateRoot, "$%\\ \t\r\n\x00") {
+			return errors.New("workspace propagation is not an explicitly pinned job-only mount class")
+		}
+	}
 	if self.NativeClass != nil {
 		if err := self.NativeClass.validate(*self); err != nil {
 			return err
@@ -403,12 +437,17 @@ func runtimeBoundaryEngineDocument(boundary RuntimeResourceBoundary, settings Ru
 		"pidfile": filepath.Join(filepath.Dir(boundary.PrivateSocketPath), "dockerd.pid"),
 		"hosts":   []any{"unix://" + boundary.PrivateSocketPath}, "group": "root",
 		"containerd": boundary.ContainerdSocketPath, "containerd-namespace": "urnetwork-evaluation",
-		"containerd-plugins-namespace": "urnetwork-evaluation-plugins",
+		"containerd-plugins-namespace": runtimeBoundaryPluginNamespace(boundary),
 		"bridge":                       "none", "iptables": false, "ip6tables": false, "ip-forward": false, "ip-masq": false, "userland-proxy": false, "ipv6": false,
 		"userns-remap": boundary.UserNamespace + ":" + boundary.UserNamespace,
 		"exec-opts":    []any{"native.cgroupdriver=systemd"}, "default-runtime": boundary.RuntimeName, "live-restore": false,
 		"log-driver": "json-file", "log-opts": map[string]any{"max-size": settings.ContainerLogMaximumSize, "max-file": strconv.Itoa(settings.ContainerLogMaximumFiles)},
 	}
+}
+
+// Stock Docker remapping derives this effective namespace from the root map.
+func runtimeBoundaryPluginNamespace(boundary RuntimeResourceBoundary) string {
+	return fmt.Sprintf("plugins.moby-%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)
 }
 
 // Containerd's root, state and socket are explicit; only its fixed daemon is
@@ -423,11 +462,22 @@ func runtimeBoundaryTemporaryDirectories(boundary RuntimeResourceBoundary) []str
 	return []string{filepath.Join(boundary.ScratchRoot, "engine-tmp"), filepath.Join(boundary.ScratchRoot, "docker-tmp"), filepath.Join(boundary.ScratchRoot, "engine-home")}
 }
 
-// Both daemons resolve only protected pinned helpers and use bounded temporary
-// roots; systemd supplies incidental invocation/notification metadata separately.
+// Docker also resolves namespace DNS and AppArmor helpers from the protected
+// system-tool directory. Never inherit the launching operator's search path.
+func runtimeBoundaryHelperPath(boundary RuntimeResourceBoundary) string {
+	runtimeDirectory := filepath.Dir(boundary.Runc.Path)
+	systemDirectory := filepath.Dir(boundary.Nftables.Path)
+	if runtimeDirectory == systemDirectory {
+		return runtimeDirectory
+	}
+	return runtimeDirectory + string(os.PathListSeparator) + systemDirectory
+}
+
+// Both daemons resolve helpers only in protected executable directories and use
+// bounded temporary roots; incidental systemd metadata is checked separately.
 func runtimeBoundaryEnvironment(boundary RuntimeResourceBoundary) map[string]string {
 	directories := runtimeBoundaryTemporaryDirectories(boundary)
-	return map[string]string{"PATH": filepath.Dir(boundary.Runc.Path), "TMPDIR": directories[0], "DOCKER_TMPDIR": directories[1], "HOME": directories[2]}
+	return map[string]string{"PATH": runtimeBoundaryHelperPath(boundary), "TMPDIR": directories[0], "DOCKER_TMPDIR": directories[1], "HOME": directories[2]}
 }
 
 // Protected unit configuration is checked against the actual daemon process,
@@ -514,7 +564,7 @@ func validateRuntimeBoundaryDaemon(content []byte, boundary RuntimeResourceBound
 		info.DockerRootDir != filepath.Join(boundary.DockerDataRoot, fmt.Sprintf("%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)) ||
 		info.CgroupDriver != "systemd" || info.CgroupVersion != "2" || info.DefaultRuntime != boundary.RuntimeName || info.LiveRestoreEnabled ||
 		info.Containerd == nil || info.Containerd.Address != boundary.ContainerdSocketPath ||
-		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != "urnetwork-evaluation-plugins" {
+		info.Containerd.Namespaces.Containers != "urnetwork-evaluation" || info.Containerd.Namespaces.Plugins != runtimeBoundaryPluginNamespace(boundary) {
 		return errors.New("private daemon storage, remap, cgroup or runtime class differs")
 	}
 	userns := false
@@ -545,6 +595,7 @@ type runtimeBoundaryMount struct {
 	Root, Target, Source, Type string
 	Options                    map[string]bool
 	Shared                     bool
+	SharedGroup, MasterGroup   uint64
 }
 
 // This parser bounds both examined bytes and entries, including foreign mounts.
@@ -580,8 +631,21 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 		root, rootErr := decodeMountField(fields[3])
 		target, targetErr := decodeMountField(fields[4])
 		source, sourceErr := decodeMountField(fields[separator+2])
+		rootValid := filepath.IsAbs(root) && filepath.Clean(root) == root
+		if !rootValid && fields[separator+1] == "nsfs" {
+			// Namespace handles have kernel type/inode roots, not filesystem paths.
+			kind, inodeField, found := strings.Cut(root, ":[")
+			switch kind {
+			case "net", "mnt", "pid", "user", "uts", "ipc", "cgroup", "time":
+				if found && strings.HasSuffix(inodeField, "]") {
+					inodeText := strings.TrimSuffix(inodeField, "]")
+					inode, err := strconv.ParseUint(inodeText, 10, 64)
+					rootValid = err == nil && inode != 0 && strconv.FormatUint(inode, 10) == inodeText
+				}
+			}
+		}
 		if idErr != nil || id == 0 || !found || majorErr != nil || minorErr != nil || rootErr != nil || targetErr != nil || sourceErr != nil ||
-			!filepath.IsAbs(target) || filepath.Clean(target) != target || !filepath.IsAbs(root) || filepath.Clean(root) != root {
+			!filepath.IsAbs(target) || filepath.Clean(target) != target || !rootValid {
 			return nil, errors.New("invalid resource mount identity")
 		}
 		options := map[string]bool{}
@@ -589,11 +653,24 @@ func parseRuntimeBoundaryMounts(content []byte, settings RuntimeResourceBoundary
 			options[option] = true
 		}
 		shared := false
+		var sharedGroup, masterGroup uint64
 		for _, optional := range fields[6:separator] {
 			shared = shared || strings.HasPrefix(optional, "shared:") || strings.HasPrefix(optional, "master:")
+			kind, value, found := strings.Cut(optional, ":")
+			if found && (kind == "shared" || kind == "master") {
+				group, err := strconv.ParseUint(value, 10, 64)
+				if err != nil || group == 0 || strconv.FormatUint(group, 10) != value || kind == "shared" && sharedGroup != 0 || kind == "master" && masterGroup != 0 {
+					return nil, errors.New("invalid or duplicated mount propagation identity")
+				}
+				if kind == "shared" {
+					sharedGroup = group
+				} else {
+					masterGroup = group
+				}
+			}
 		}
 		device := (major&0xfff)<<8 | minor&0xff | (minor&0xffffff00)<<12 | (major&0xfffff000)<<32
-		mounts = append(mounts, runtimeBoundaryMount{Id: id, DeviceId: device, Root: root, Target: target, Source: source, Type: fields[separator+1], Options: options, Shared: shared})
+		mounts = append(mounts, runtimeBoundaryMount{Id: id, DeviceId: device, Root: root, Target: target, Source: source, Type: fields[separator+1], Options: options, Shared: shared, SharedGroup: sharedGroup, MasterGroup: masterGroup})
 	}
 	if reader.Err() != nil {
 		return nil, errors.New("resource mount inventory is malformed")
@@ -622,6 +699,7 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 	}
 	var owned *runtimeBoundaryMount
 	var root *runtimeBoundaryMount
+	var workspace *runtimeBoundaryMount
 	for index := range mounts {
 		mount := &mounts[index]
 		if mount.Target == "/" {
@@ -635,6 +713,11 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 				return errors.New("candidate filesystem has stacked mount authority")
 			}
 			owned = mount
+		} else if boundary.WorkspaceMount != nil && mount.Target == boundary.WorkRoot {
+			if workspace != nil {
+				return errors.New("workspace has stacked mount authority")
+			}
+			workspace = mount
 		} else if pathWithin(boundary.CandidateRoot, mount.Target) || mount.DeviceId == facts.BlockDeviceId {
 			return errors.New("candidate filesystem has nested or aliased mount authority")
 		}
@@ -642,6 +725,11 @@ func validateRuntimeBoundaryFacts(boundary RuntimeResourceBoundary, scope Runtim
 	if owned == nil || root == nil || owned.DeviceId == root.DeviceId || owned.DeviceId != facts.BlockDeviceId || owned.Type != "ext4" ||
 		owned.Source != boundary.BlockDevice || owned.Root != "/" || owned.Shared || !owned.Options["rw"] || !owned.Options["nosuid"] || !owned.Options["nodev"] || owned.Options["ro"] {
 		return errors.New("candidate mount is not the exact private non-root loop ext4 filesystem")
+	}
+	if boundary.WorkspaceMount != nil {
+		if err := validateRuntimeWorkspaceHost(boundary, *owned, workspace); err != nil {
+			return err
+		}
 	}
 	number, _ := strconv.ParseUint(strings.TrimPrefix(boundary.BlockDevice, "/dev/loop"), 10, 32)
 	if facts.BlockDeviceId == 0 || facts.LoopNumber != uint32(number) || facts.LoopFlags&1 != 0 || facts.LoopOffset != 0 ||
@@ -897,11 +985,11 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 			var filesystem syscall.Statfs_t
 			err = syscall.Fstatfs(int(file.Fd()), &filesystem)
 			if err == nil {
-				facts.FilesystemType = filesystem.Type
-				facts.FilesystemBytes, err = runtimeBoundaryBytes(filesystem.Blocks, filesystem.Bsize)
+				facts.FilesystemType = int64(filesystem.Type)
+				facts.FilesystemBytes, err = runtimeBoundaryBytes(filesystem.Blocks, int64(filesystem.Bsize))
 			}
 			if err == nil {
-				facts.FreeBytes, err = runtimeBoundaryBytes(filesystem.Bavail, filesystem.Bsize)
+				facts.FreeBytes, err = runtimeBoundaryBytes(filesystem.Bavail, int64(filesystem.Bsize))
 			}
 		}
 		_ = file.Close()
@@ -940,8 +1028,8 @@ func (runtimeBoundaryNativeHost) Kernel(ctx context.Context, boundary RuntimeRes
 	if err := syscall.Fstatfs(int(backing.Fd()), &backingFilesystem); err != nil {
 		return facts, err
 	}
-	facts.BackingFilesystemType = backingFilesystem.Type
-	facts.BackingFreeBytes, err = runtimeBoundaryBytes(backingFilesystem.Bavail, backingFilesystem.Bsize)
+	facts.BackingFilesystemType = int64(backingFilesystem.Type)
+	facts.BackingFreeBytes, err = runtimeBoundaryBytes(backingFilesystem.Bavail, int64(backingFilesystem.Bsize))
 	if err != nil {
 		return facts, err
 	}
@@ -1216,6 +1304,7 @@ type runtimeBoundaryUnit struct {
 	Pid                                                 int
 	ProcessStart                                        uint64
 	Namespace                                           runtimeBoundaryNamespaceId
+	MountNamespace                                      runtimeBoundaryNamespaceId
 }
 
 // Native receipts retain one keeper descriptor. Mutable closure is protected;
@@ -1228,6 +1317,7 @@ type runtimeBoundaryNativeNamespace struct {
 	settings               RuntimeResourceBoundarySettings
 	identity, hostIdentity runtimeBoundaryNamespaceId
 	units                  map[string]runtimeBoundaryUnit
+	workspace              *runtimeWorkspaceProof
 }
 
 // A duplicate descriptor is a bounded per-command lease; close cannot redirect
@@ -1301,9 +1391,13 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 	}
 	keeper := result.Name == runtimeBoundaryKeeperUnitName
 	network := result.Name == runtimeBoundaryNetworkUnitName
+	expectedUmask := "0077"
+	if result.Name == runtimeBoundaryEngineUnitName || result.Name == runtimeBoundaryContainerdUnitName {
+		expectedUmask = "0022"
+	}
 	if properties["Id"] != result.Name || properties["FragmentPath"] != pin.Path || properties["DropInPaths"] != "" ||
 		properties["LoadState"] != "loaded" || properties["ActiveState"] != "active" || properties["PrivateNetwork"] != "yes" ||
-		properties["NetworkNamespacePath"] != "" || properties["User"] != "root" || properties["Group"] != "root" ||
+		properties["NetworkNamespacePath"] != "" || properties["User"] != "root" || properties["Group"] != "root" || properties["UMask"] != expectedUmask ||
 		properties["Restart"] != "no" || properties["KillMode"] != "control-group" ||
 		properties["Slice"] != managementPrivateSliceName || properties["OnFailure"] != managementRecoveryServiceName || properties["OnFailureJobMode"] != "replace" ||
 		network && (properties["SubState"] != "exited" || properties["RemainAfterExit"] != "yes") ||
@@ -1315,11 +1409,20 @@ func parseRuntimeBoundaryUnit(content []byte, pin Pin, boundary RuntimeResourceB
 	}
 	contains := func(key, required string) bool {
 		for _, value := range strings.Fields(properties[key]) {
-			if value == required {
+			// systemctl quotes and escapes unit names containing literal
+			// backslashes, including canonical path-unit names with hyphens.
+			if value == required || value == strconv.Quote(required) {
 				return true
 			}
 		}
 		return false
+	}
+	if boundary.WorkspaceMount != nil && (result.Name == runtimeBoundaryEngineUnitName || result.Name == runtimeBoundaryContainerdUnitName) {
+		for _, property := range []string{"Requires", "BindsTo", "After"} {
+			if !contains(property, filepath.Base(boundary.WorkspaceMount.Unit.Path)) {
+				return result, errors.New("private runtime has no workspace mount lifetime dependency")
+			}
+		}
 	}
 	allowedJoin := map[string]bool{runtimeBoundaryKeeperUnitName: true}
 	if keeper {
@@ -1425,6 +1528,12 @@ func runtimeBoundaryParticipant(unit runtimeBoundaryUnit, boundary RuntimeResour
 	}
 	_ = file.Close()
 	unit.Namespace = identity
+	mountFile, mountIdentity, err := runtimeBoundaryOpenNamespace(filepath.Join(proc, "ns", "mnt"))
+	if err != nil {
+		return unit, err
+	}
+	_ = mountFile.Close()
+	unit.MountNamespace = mountIdentity
 	if err := verifyRuntimeBoundaryManagement(unit, boundary, settings); err != nil {
 		return unit, err
 	}
@@ -1546,6 +1655,11 @@ func validateRuntimeBoundaryNamespacePeers(units map[string]runtimeBoundaryUnit,
 		}
 		pids[unit.Pid] = true
 	}
+	engine := units[runtimeBoundaryEngineUnitName]
+	containerd := units[runtimeBoundaryContainerdUnitName]
+	if engine.MountNamespace.Inode == 0 || engine.MountNamespace != containerd.MountNamespace {
+		return errors.New("private Docker and containerd do not share the image mount namespace")
+	}
 	return nil
 }
 
@@ -1568,7 +1682,7 @@ func (self *runtimeBoundaryNativeNamespace) Peer(pid int, executable Pin) error 
 		return errors.New("private socket peer is not the captured service process")
 	}
 	current, err := runtimeBoundaryParticipant(expected, self.boundary, self.settings)
-	if err != nil || current.ProcessStart != expected.ProcessStart || current.Namespace != self.identity {
+	if err != nil || current.ProcessStart != expected.ProcessStart || current.Namespace != self.identity || current.MountNamespace != expected.MountNamespace {
 		return errors.New("private socket peer changed its process or namespace generation")
 	}
 	return nil
@@ -1602,7 +1716,7 @@ func (self *runtimeBoundaryNativeNamespace) Recheck(ctx context.Context) error {
 		}
 		if unit.Pid != 0 {
 			unit, err = runtimeBoundaryParticipant(unit, self.boundary, self.settings)
-			if err != nil || unit.ProcessStart != expected.ProcessStart {
+			if err != nil || unit.ProcessStart != expected.ProcessStart || unit.MountNamespace != expected.MountNamespace {
 				return errors.New("private namespace process generation changed")
 			}
 		}
@@ -1633,6 +1747,9 @@ func (self *runtimeBoundaryNativeNamespace) Recheck(ctx context.Context) error {
 		}
 	}
 	if err := self.verifyManagedShims(ctx); err != nil {
+		return err
+	}
+	if err := self.verifyWorkspace(ctx, current); err != nil {
 		return err
 	}
 	finalLease, err := self.lease()
@@ -1666,43 +1783,98 @@ func (self *runtimeBoundaryNativeNamespace) verifyManagedShims(ctx context.Conte
 		if pid == unit.Pid {
 			continue
 		}
-		proc := "/proc/" + value
-		target, err := os.Readlink(filepath.Join(proc, "exe"))
-		if err != nil {
+		err = func() error {
+			proc := "/proc/" + value
+			target, err := os.Readlink(filepath.Join(proc, "exe"))
+			if err != nil {
+				return err
+			}
+			participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Name: unit.Name, ControlGroup: unit.ControlGroup, Pid: pid}, self.boundary, self.settings)
+			if err != nil {
+				return fmt.Errorf("private containerd helper management observation: %w", err)
+			}
+			if target == self.boundary.Runc.Path {
+				return nil
+			}
+			if target != self.boundary.ContainerdShim.Path {
+				return errors.New("private containerd owns an unpinned helper")
+			}
+			arguments, err := readBounded(filepath.Join(proc, "cmdline"), self.settings.DocumentBytes)
+			if err != nil {
+				return err
+			}
+			if validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
+				return errors.New("managed containerd shim arguments escaped its private runtime")
+			}
+			if participant.Namespace != self.identity || participant.MountNamespace != unit.MountNamespace {
+				return errors.New("managed containerd shim escaped its private namespace")
+			}
+			if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {
+				return err
+			}
+			file, err := os.Open(filepath.Join(proc, "exe"))
+			if err != nil {
+				return err
+			}
+			digest := sha256.New()
+			count, copyErr := io.Copy(digest, io.LimitReader(file, self.settings.ExecutableBytes+1))
+			_ = file.Close()
+			if copyErr != nil || count > self.settings.ExecutableBytes || hex.EncodeToString(digest.Sum(nil)) != self.boundary.ContainerdShim.Sha256 {
+				return errors.New("managed containerd shim content differs")
+			}
+			return nil
+		}()
+		if err := reconcileRuntimeBoundaryProcessExit(err, pid, runtimeBoundaryProcessExited); err != nil {
 			return err
-		}
-		participant, err := runtimeBoundaryParticipant(runtimeBoundaryUnit{Name: unit.Name, ControlGroup: unit.ControlGroup, Pid: pid}, self.boundary, self.settings)
-		if err != nil {
-			return errors.New("private containerd helper escaped its management CPU role")
-		}
-		if target == self.boundary.Runc.Path {
-			continue
-		}
-		if target != self.boundary.ContainerdShim.Path {
-			return errors.New("private containerd owns an unpinned helper")
-		}
-		arguments, err := readBounded(filepath.Join(proc, "cmdline"), self.settings.DocumentBytes)
-		if err != nil || validateRuntimeBoundaryShimArguments(arguments, self.boundary, self.settings) != nil {
-			return errors.New("managed containerd shim arguments escaped its private runtime")
-		}
-		if participant.Namespace != self.identity {
-			return errors.New("managed containerd shim escaped its private namespace")
-		}
-		if err := verifyRuntimeBoundaryShimSocketMount(proc, self.boundary); err != nil {
-			return err
-		}
-		file, err := os.Open(filepath.Join(proc, "exe"))
-		if err != nil {
-			return err
-		}
-		digest := sha256.New()
-		count, copyErr := io.Copy(digest, io.LimitReader(file, self.settings.ExecutableBytes+1))
-		_ = file.Close()
-		if copyErr != nil || count > self.settings.ExecutableBytes || hex.EncodeToString(digest.Sum(nil)) != self.boundary.ContainerdShim.Sha256 {
-			return errors.New("managed containerd shim content differs")
 		}
 	}
 	return nil
+}
+
+// A census is not a process lifetime: normal health-check helpers may exit
+// before proc reads finish. Only positive kernel exit evidence retires an error.
+func reconcileRuntimeBoundaryProcessExit(observationErr error, pid int, exited func(int) (bool, error)) error {
+	if !errors.Is(observationErr, os.ErrNotExist) && !errors.Is(observationErr, unix.ESRCH) {
+		return observationErr
+	}
+	var pathErr *os.PathError
+	procPath := "/proc/" + strconv.Itoa(pid)
+	if pid <= 1 || !errors.As(observationErr, &pathErr) || pathErr.Path != procPath && !strings.HasPrefix(pathErr.Path, procPath+"/") {
+		return observationErr
+	}
+	terminated, err := exited(pid)
+	if err != nil {
+		return errors.Join(observationErr, err)
+	}
+	if terminated {
+		return nil
+	}
+	return observationErr
+}
+
+// pidfd readiness includes an exited unreaped helper. ESRCH proves absence;
+// permissions, unsupported kernels and poll failures never grant admission.
+func runtimeBoundaryProcessExited(pid int) (bool, error) {
+	if pid <= 1 {
+		return false, errors.New("private helper exit identity is invalid")
+	}
+	fd, err := unix.PidfdOpen(pid, 0)
+	if errors.Is(err, unix.ESRCH) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(fd)
+	items := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	_, err = unix.Poll(items, 0)
+	if err != nil {
+		return false, err
+	}
+	if items[0].Revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
+		return false, errors.New("private helper pidfd observation failed")
+	}
+	return items[0].Revents&(unix.POLLIN|unix.POLLHUP) != 0, nil
 }
 
 // The shim source uses /run/containerd for its socket directory independently
@@ -1736,7 +1908,7 @@ func validateRuntimeBoundaryContainerdVersion(content []byte, boundary RuntimeRe
 		return errors.New("private containerd version projection is unqualified")
 	}
 	fields := strings.Fields(string(content))
-	if len(fields) != 4 || fields[0] != "containerd" || fields[1] != "github.com/containerd/containerd/v2" && fields[1] != "containerd.io" ||
+	if len(fields) != 4 || fields[0] != "containerd" || fields[1] != "github.com/containerd/containerd/v2" && fields[1] != "containerd.io" && fields[1] != "containerd" ||
 		strings.TrimPrefix(fields[2], "v") != boundary.ContainerdVersion || fields[3] != boundary.ContainerdSourceCommit {
 		return errors.New("private containerd actual source version differs")
 	}
@@ -1816,8 +1988,8 @@ func validateRuntimeBoundaryInterfaces(content []byte, settings RuntimeResourceB
 			Kind string `json:"info_kind"`
 		} `json:"linkinfo"`
 		Addresses []struct {
-			Family, Local string
-			Prefixlen     int
+			Family, Local, Scope string
+			Prefixlen            int
 		} `json:"addr_info"`
 	}
 	if json.Unmarshal(content, &links) != nil || len(links) == 0 || len(links) > settings.MaximumNetworkInterfaces {
@@ -1845,16 +2017,23 @@ func validateRuntimeBoundaryInterfaces(content []byte, settings RuntimeResourceB
 				}
 			}
 		case runtimeBoundaryBridgeNamePattern.MatchString(link.Ifname):
-			if link.LinkInfo.Kind != "bridge" || link.Master != "" || len(link.Addresses) != 0 {
+			if link.LinkInfo.Kind != "bridge" || link.Master != "" {
 				return errors.New("private bridge is not isolated and address-free")
 			}
 			bridges[link.Ifname] = true
 		case runtimeBoundaryVethNamePattern.MatchString(link.Ifname):
-			if link.LinkInfo.Kind != "veth" || link.LinkNetnsid == nil || *link.LinkNetnsid < 0 || len(link.Addresses) != 0 {
+			if link.LinkInfo.Kind != "veth" || link.LinkNetnsid == nil || *link.LinkNetnsid < 0 {
 				return errors.New("private workload veth is not an isolated peer")
 			}
 		default:
 			return errors.New("private namespace contains an external or unreviewed link")
+		}
+		if link.Ifname != "lo" {
+			for _, address := range link.Addresses {
+				if !isolatedNetworkLinkLocalAddress(address.Family, address.Local, address.Scope, address.Prefixlen) {
+					return errors.New("private interface exposes a non-link-local address")
+				}
+			}
 		}
 	}
 	if !loopback || len(bridges) > 1 {
@@ -1876,6 +2055,7 @@ func validateRuntimeBoundaryRoutes(content []byte, settings RuntimeResourceBound
 	}
 	var routes []struct {
 		Dst, Dev, Gateway, Via string
+		Type, Protocol         string
 		Nexthops               []json.RawMessage
 	}
 	if json.Unmarshal(content, &routes) != nil || len(routes) > settings.MaximumNetworkRoutes {
@@ -1883,8 +2063,19 @@ func validateRuntimeBoundaryRoutes(content []byte, settings RuntimeResourceBound
 	}
 	for _, route := range routes {
 		if route.Dst == "" || route.Dst == "default" || route.Gateway != "" || route.Via != "" || len(route.Nexthops) != 0 ||
-			route.Dev != "lo" && !runtimeBoundaryBridgeNamePattern.MatchString(route.Dev) {
+			route.Dev != "lo" && !runtimeBoundaryBridgeNamePattern.MatchString(route.Dev) && !runtimeBoundaryVethNamePattern.MatchString(route.Dev) {
 			return errors.New("private namespace has an external or default route")
+		}
+		if runtimeBoundaryVethNamePattern.MatchString(route.Dev) {
+			// Only kernel-created IPv6 link-local and multicast entries belong
+			// on these peers. The preceding full link inventory proves custody.
+			local := net.ParseIP(route.Dst)
+			linkLocal := route.Type == "local" && local != nil && local.To4() == nil && local.IsLinkLocalUnicast()
+			linkPrefix := route.Dst == "fe80::/64" && (route.Type == "" || route.Type == "unicast")
+			multicast := route.Dst == "ff00::/8" && route.Type == "multicast"
+			if route.Protocol != "kernel" || !linkLocal && !linkPrefix && !multicast {
+				return errors.New("private veth has a non-kernel or routable entry")
+			}
 		}
 	}
 	return nil

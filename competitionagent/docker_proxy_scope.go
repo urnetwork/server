@@ -47,6 +47,7 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 		return err
 	}
 	if settings.MaximumOperations <= 0 || settings.MaximumConnections <= 0 || settings.MaximumHeaderBytes <= 0 || settings.MaximumDocumentBytes <= 0 || settings.MaximumRequestBytes <= 0 ||
+		settings.MaximumRefusalReasonBytes <= 0 || int64(settings.MaximumRefusalReasonBytes) > settings.MaximumDocumentBytes ||
 		settings.MaximumImageLoadBytes <= 0 || settings.MaximumBuildOutputBytes <= 0 || settings.MaximumResponseBytes <= 0 || settings.MaximumSpoolBytes <= 0 || settings.MaximumContextBytes <= 0 || settings.MaximumContextFileBytes <= 0 || settings.MaximumContextEntries <= 0 ||
 		settings.MaximumDocumentDepth <= 0 || settings.MaximumContextDepth <= 0 || settings.DirectoryBatch <= 0 || settings.CopyBufferBytes <= 0 || settings.HeaderTimeout <= 0 || settings.UploadTimeout <= 0 || settings.ClientWriteTimeout <= 0 ||
 		settings.OperationTimeout <= 0 || settings.BuildTimeout <= 0 || settings.BuildStopGrace <= 0 || settings.QuiesceTimeout <= 0 || settings.DrainAllowance <= 0 || settings.Now == nil ||
@@ -73,9 +74,13 @@ func validateDockerProxyPlan(plan DockerProxyPlan, settings DockerProxySettings,
 			return errors.New("Docker role paths must be canonical and private")
 		}
 	}
+	workerSocket, buildSocket, socketErr := dockerRunSocketPaths(filepath.Join(plan.BaseDirectory, "clients"), plan.RunId)
+	if socketErr != nil {
+		return socketErr
+	}
 	if !pathWithin(plan.BaseDirectory, plan.StateDirectory) || !pathWithin(plan.BaseDirectory, plan.ScratchDirectory) || !pathWithin(plan.BaseDirectory, plan.ContextRoot) ||
 		!pathWithin(plan.BaseDirectory, plan.UpstreamSocketPath) || pathWithin(plan.StateDirectory, plan.UpstreamSocketPath) || pathWithin(plan.ScratchDirectory, plan.UpstreamSocketPath) || pathWithin(plan.ContextRoot, plan.UpstreamSocketPath) ||
-		plan.SocketPath != filepath.Join(plan.BaseDirectory, "clients", plan.RunId, "docker.sock") || plan.BuildSocketPath != filepath.Join(plan.BaseDirectory, "clients", plan.RunId, "build.sock") {
+		plan.SocketPath != workerSocket || plan.BuildSocketPath != buildSocket {
 		return errors.New("Docker owner endpoints differ from the installed private per-run role")
 	}
 	if len(plan.SocketPath) >= len(syscall.RawSockaddrUnix{}.Path) || len(plan.BuildSocketPath) >= len(syscall.RawSockaddrUnix{}.Path) {
@@ -222,7 +227,11 @@ func (self *DockerProxy) verifyMutationScope(ctx context.Context, r *http.Reques
 		}
 	}
 	if parts[0] == "images" {
-		if parts[1] != self.plan.BaseImageDigest || r.URL.Query().Get("repo") != "urnetwork/sim-latency-evaluator-base-id" ||
+		// The Docker CLI normalizes the shorthand alias to Docker Hub's
+		// explicit domain. Both name the same single offline daemon alias.
+		repository := r.URL.Query().Get("repo")
+		if parts[1] != self.plan.BaseImageDigest ||
+			(repository != "urnetwork/sim-latency-evaluator-base-id" && repository != "docker.io/urnetwork/sim-latency-evaluator-base-id") ||
 			r.URL.Query().Get("tag") != strings.TrimPrefix(self.plan.BaseImageDigest, "sha256:") {
 			return "", errors.New("Docker image tag is outside the frozen source")
 		}
@@ -350,6 +359,7 @@ type dockerPolicyHostConfig struct {
 	ReadonlyRootfs, Privileged                       bool
 	CapAdd, CapDrop, SecurityOpt, Binds              []string
 	Memory, MemorySwap, ShmSize                      int64
+	MemorySwappiness                                 *int64
 	PidsLimit                                        *int64
 	CpusetCpus                                       string
 	Ulimits                                          []struct {
@@ -382,7 +392,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 	var hostObject map[string]json.RawMessage
 	var host dockerPolicyHostConfig
 	if json.Unmarshal(object["HostConfig"], &hostObject) != nil || hostObject == nil ||
-		dockerPolicyFields(hostObject, "CgroupParent CgroupnsMode NetworkMode Runtime PidMode IpcMode UTSMode UsernsMode ReadonlyRootfs Privileged CapAdd CapDrop SecurityOpt Binds Memory MemorySwap ShmSize PidsLimit CpusetCpus Ulimits Sysctls Tmpfs MaskedPaths ReadonlyPaths Mounts RestartPolicy AutoRemove") != nil ||
+		dockerPolicyFields(hostObject, "CgroupParent CgroupnsMode NetworkMode Runtime PidMode IpcMode UTSMode UsernsMode ReadonlyRootfs Privileged CapAdd CapDrop SecurityOpt Binds Memory MemorySwap MemorySwappiness ShmSize PidsLimit CpusetCpus Ulimits Sysctls Tmpfs MaskedPaths ReadonlyPaths Mounts RestartPolicy AutoRemove") != nil ||
 		json.Unmarshal(object["HostConfig"], &host) != nil || !self.allowedCgroup(host.CgroupParent) || host.Privileged || !host.ReadonlyRootfs ||
 		host.PidMode != "" || host.UtsMode != "" || host.UsernsMode != "" || host.CgroupnsMode != "" && host.CgroupnsMode != "private" ||
 		host.IpcMode != "" && host.IpcMode != "private" && host.IpcMode != "none" || host.Runtime != "" && host.Runtime != "runc" ||
@@ -405,6 +415,11 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 	if host.Memory <= 0 || host.Memory > self.settings.MaximumContainerMemoryBytes || host.MemorySwap != host.Memory ||
 		host.PidsLimit == nil || *host.PidsLimit <= 0 || *host.PidsLimit > self.settings.MaximumContainerPids {
 		return errors.New("Docker container omitted a finite memory, swap or PID ceiling")
+	}
+	// Docker CLI serializes its unset swappiness as -1, not null. This sentinel
+	// never grants swap: the equal memory/swap ceiling above remains mandatory.
+	if host.MemorySwappiness != nil && *host.MemorySwappiness != -1 && *host.MemorySwappiness != 0 {
+		return errors.New("Docker container changed its inherited swappiness default")
 	}
 	requested, err := dockerPolicyCpuSet(host.CpusetCpus, self.settings.MaximumCpuIndex)
 	if err != nil {
@@ -500,7 +515,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 		if err := addTarget(target); err != nil {
 			return err
 		}
-		size, err := self.verifyDockerTmpfs(target, options)
+		size, err := self.verifyDockerTmpfs(target, options, host.CgroupParent == self.plan.BuildCgroupName)
 		if err != nil || size > self.settings.MaximumContainerTmpfsBytes-tmpfsBytes {
 			return errors.New("Docker tmpfs policy exceeds its finite ceiling")
 		}
@@ -557,7 +572,7 @@ func (self *DockerProxy) verifyContainerCreate(ctx context.Context, object map[s
 				}
 				pieces = append(pieces, strings.Join(option, "="))
 			}
-			size, err := self.verifyDockerTmpfs(mount.Target, strings.Join(pieces, ","))
+			size, err := self.verifyDockerTmpfs(mount.Target, strings.Join(pieces, ","), host.CgroupParent == self.plan.BuildCgroupName)
 			if err != nil || size > self.settings.MaximumContainerTmpfsBytes-tmpfsBytes {
 				return errors.New("Docker structured tmpfs exceeds its finite ceiling")
 			}
@@ -671,7 +686,7 @@ func (self *DockerProxy) verifyDockerBind(source, target string, readOnly bool) 
 
 // The frozen roles use only these private memory filesystems. A size, mapped
 // uid/gid, non-suid/non-device mode and finite total are required on every one.
-func (self *DockerProxy) verifyDockerTmpfs(target, value string) (int64, error) {
+func (self *DockerProxy) verifyDockerTmpfs(target, value string, trackedBuild bool) (int64, error) {
 	switch target {
 	case "/tmp", "/work", "/data", "/var/lib/postgresql", "/var/run/postgresql":
 	default:
@@ -684,7 +699,7 @@ func (self *DockerProxy) verifyDockerTmpfs(target, value string) (int64, error) 
 			return 0, errors.New("Docker tmpfs option is duplicated")
 		}
 		switch name {
-		case "rw", "nosuid", "nodev", "noexec":
+		case "rw", "nosuid", "nodev", "noexec", "exec":
 			if hasValue {
 				return 0, errors.New("Docker tmpfs flag has an unexpected value")
 			}
@@ -697,6 +712,14 @@ func (self *DockerProxy) verifyDockerTmpfs(target, value string) (int64, error) 
 		default:
 			return 0, errors.New("Docker tmpfs requested an unreviewed host option")
 		}
+	}
+	// Docker defaults tmpfs to noexec. Go's check stage must execute its
+	// generated test binaries; only the independently owned compiler work
+	// mount receives this capability. Other roles and evidence stay noexec.
+	if options["exec"] == "true" && (!trackedBuild || target != "/work") ||
+		trackedBuild && target == "/work" && options["exec"] != "true" ||
+		options["exec"] == "true" && options["noexec"] == "true" {
+		return 0, errors.New("Docker executable tmpfs is not the explicit tracked compiler work mount")
 	}
 	mode, err := strconv.ParseUint(options["mode"], 8, 12)
 	if err != nil || mode != 0700 && mode != 0750 && mode != 01770 || options["rw"] != "true" || options["nosuid"] != "true" || options["nodev"] != "true" ||

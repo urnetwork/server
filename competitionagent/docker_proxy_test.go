@@ -62,9 +62,13 @@ func newDockerProxyTest(t *testing.T) *dockerProxyTest {
 	}
 	digest := sha256.Sum256(contents)
 	stockProfile, coreProfile := testCandidateCoreProfilePins(t, root)
+	workerSocket, buildSocket, err := dockerRunSocketPaths(filepath.Join(root, "clients"), scope.plan.RunId)
+	if err != nil {
+		t.Fatal(err)
+	}
 	plan := DockerProxyPlan{Schema: Schema, RunId: scope.plan.RunId, JobId: scope.plan.JobId, RoundId: scope.plan.RoundId, Attempt: scope.plan.Attempt,
-		DeadlineAt: time.Now().Add(time.Hour), BaseDirectory: root, StateDirectory: filepath.Join(root, "state", scope.plan.RunId, "docker-owner"), ScratchDirectory: filepath.Join(root, "scratch", scope.plan.RunId), SocketPath: filepath.Join(root, "clients", scope.plan.RunId, "docker.sock"),
-		BuildSocketPath: filepath.Join(root, "clients", scope.plan.RunId, "build.sock"), ContextRoot: contextRoot, UpstreamSocketPath: filepath.Join(root, "engine", "docker.sock"),
+		DeadlineAt: time.Now().Add(time.Hour), BaseDirectory: root, StateDirectory: filepath.Join(root, "state", scope.plan.RunId, "docker-owner"), ScratchDirectory: filepath.Join(root, "scratch", scope.plan.RunId), SocketPath: workerSocket,
+		BuildSocketPath: buildSocket, ContextRoot: contextRoot, UpstreamSocketPath: filepath.Join(root, "engine", "docker.sock"),
 		Docker: Pin{Path: filepath.Join(root, "docker"), Sha256: strings.Repeat("d", 64)}, Buildx: Pin{Path: filepath.Join(root, "docker-buildx"), Sha256: strings.Repeat("e", 64)},
 		Dockerfile: Pin{Path: dockerfile, Sha256: hex.EncodeToString(digest[:])}, BaseImageDigest: "sha256:" + strings.Repeat("3", 64),
 		StockSeccompProfile: stockProfile, CandidateCoreProfile: coreProfile,
@@ -608,6 +612,18 @@ func TestDockerProxyFrozenBaseAliasMatchesMinimumWorkBuilder(t *testing.T) {
 	fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost, strings.Replace(path, "evaluator-base-id", "evaluator-base", 1), http.NoBody))
 	if response.Code != http.StatusForbidden || calls.Load() != 1 {
 		t.Fatal("foreign base alias reached the daemon")
+	}
+	for _, repository := range []string{
+		"registry.example/urnetwork/sim-latency-evaluator-base-id",
+		"docker.io/foreign/sim-latency-evaluator-base-id",
+		"docker.io/urnetwork/sim-latency-evaluator-base",
+	} {
+		response = httptest.NewRecorder()
+		fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost,
+			strings.Replace(path, "repo=urnetwork/sim-latency-evaluator-base-id", "repo="+repository, 1), http.NoBody))
+		if response.Code != http.StatusForbidden || calls.Load() != 1 {
+			t.Fatalf("foreign normalized alias reached daemon: %s", repository)
+		}
 	}
 }
 

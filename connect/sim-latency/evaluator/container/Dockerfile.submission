@@ -18,6 +18,31 @@ COPY --chmod=0555 competitionpatch /opt/urnetwork/submission/competitionpatch
 COPY --chmod=0444 original-source.json /opt/urnetwork/submission/original-source.json
 COPY --chmod=0444 candidate-commits.json /opt/urnetwork/submission/candidate-commits.json
 
+# BEGIN authenticated image branch materialization
+# Image construction may detach exact source commits while leaving historical
+# branch refs behind. Attach only those authenticated commits in this throwaway
+# layer; never reset a worktree or relax the patch applier's pristine checks.
+RUN --network=none set -eu; \
+    identity=/opt/urnetwork/submission/original-source.json; \
+    test "$(sha256sum "$identity" | awk '{print $1}')" = "${ORIGINAL_SOURCE_IDENTITY_SHA256}"; \
+    root=/workspace; \
+    branch="$(jq -er '.branch | select(. == "sim-latency" or . == "sim-latency-staging")' "$identity")"; \
+    for repository in server connect sdk proxy glog goidenticons userwireguard sn warp gvisor; do \
+        expected="$(jq -er --arg repository "$repository" '.repositories[$repository] | select(type == "string" and test("^[0-9a-f]{40}$"))' "$identity")"; \
+        test "$(git -c safe.directory="$root/$repository" -C "$root/$repository" rev-parse HEAD)" = "$expected"; \
+        if actual="$(git -c safe.directory="$root/$repository" -C "$root/$repository" symbolic-ref --quiet --short HEAD)"; then \
+            test "$actual" = "$branch"; \
+        else \
+            test "$?" -eq 1; \
+        fi; \
+    done; \
+    for repository in server connect sdk proxy glog goidenticons userwireguard sn warp gvisor; do \
+        expected="$(jq -er --arg repository "$repository" '.repositories[$repository]' "$identity")"; \
+        git -c safe.directory="$root/$repository" -c core.hooksPath=/dev/null -C "$root/$repository" update-ref --no-deref "refs/heads/$branch" "$expected"; \
+        git -c safe.directory="$root/$repository" -c core.hooksPath=/dev/null -C "$root/$repository" symbolic-ref HEAD "refs/heads/$branch"; \
+    done
+# END authenticated image branch materialization
+
 # The base may predate broad patch support. Only the immutable host release's
 # independently hashed validator is copied; no candidate executable is trusted.
 # The host and Docker apply the same original bytes, then compare every commit.

@@ -121,10 +121,12 @@ type ReengagementHighlightConfig struct {
 type ReengagementServiceRemindersConfig struct {
 	// crypto Pro stops in 14 and 2 days
 	ProEnding bool `yaml:"pro_ending"`
-	// an App Store or Play trial ends in 2 days
+	// a free trial ends soon: an App Store or Play trial in 2 days (the daily
+	// task), a Stripe trial in 3 (Stripe's customer.subscription.trial_will_end)
 	TrialEnding bool `yaml:"trial_ending"`
-	// the stores whose trials get the notice; default apple and play (Stripe
-	// sends its own when its dashboard setting is on: add stripe otherwise)
+	// the stores whose trials get the notice; default apple and play. With
+	// stripe the Stripe trials get it too, from trial_will_end (Stripe's own
+	// dashboard reminder, if it is on, comes besides)
 	TrialEndingStores []string `yaml:"trial_ending_stores"`
 }
 

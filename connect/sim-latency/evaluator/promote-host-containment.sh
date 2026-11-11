@@ -15,9 +15,13 @@ readonly HASH_LOCAL_MOUNT="$SCRIPT_DIR/container/hash-local-mount.sh"
 host_config=""
 evaluation_dir=""
 resource_bomb_report=""
+private_binding=""
+private_binding_sha256=""
+private_agent_config=""
+private_agent_config_sha256=""
 
 usage() {
-    printf 'usage: promote-host-containment --host-config PATH --evaluation-dir PATH --resource-bomb-report PATH\n' >&2
+    printf 'usage: promote-host-containment --host-config PATH --evaluation-dir PATH --resource-bomb-report PATH [--private-binding PATH --private-binding-sha256 SHA256 --private-agent-config PATH --private-agent-config-sha256 SHA256]\n' >&2
     exit 2
 }
 
@@ -41,6 +45,16 @@ while [ "$#" -gt 0 ]; do
         --resource-bomb-report)
             [ "$#" -ge 2 ] || usage
             resource_bomb_report="$2"
+            shift 2
+            ;;
+        --private-binding|--private-binding-sha256|--private-agent-config|--private-agent-config-sha256)
+            [ "$#" -ge 2 ] || usage
+            case "$1" in
+                --private-binding) private_binding="$2" ;;
+                --private-binding-sha256) private_binding_sha256="$2" ;;
+                --private-agent-config) private_agent_config="$2" ;;
+                --private-agent-config-sha256) private_agent_config_sha256="$2" ;;
+            esac
             shift 2
             ;;
         *) usage ;;
@@ -183,6 +197,52 @@ round_id="$(jq -er '.round_id' "$completion")"
 [[ "$job_id" =~ ^[0-9a-f-]{36}$ ]] || die "worker job id is invalid"
 [[ "$round_id" =~ ^[0-9a-f-]{36}$ ]] || die "completion round id is invalid"
 
+# The optional private class authenticates a shared control and exact local
+# candidate inventory. It does not bypass score, containment or resource checks.
+private_binding_json='{}'
+private_container_count=0
+if [ -n "$private_binding$private_binding_sha256$private_agent_config$private_agent_config_sha256" ]; then
+    [ -n "$private_binding" ] && [ -n "$private_agent_config" ] || usage
+    [[ "$private_binding_sha256" =~ ^[0-9a-f]{64}$ ]] &&
+        [[ "$private_agent_config_sha256" =~ ^[0-9a-f]{64}$ ]] || die "private evidence pins are invalid"
+    secure_root_owned "$private_binding" && secure_root_owned "$private_agent_config" ||
+        die "private evidence authority is not protected"
+    [ "$(sha256_file "$private_binding")" = "$private_binding_sha256" ] &&
+        [ "$(sha256_file "$private_agent_config")" = "$private_agent_config_sha256" ] ||
+        die "private evidence authority changed"
+    jq -e --slurpfile config "$private_agent_config" --slurpfile host "$host_config" \
+        --slurpfile worker "$worker_result" --slurpfile complete "$completion" --arg job_id "$job_id" --arg round_id "$round_id" \
+        --arg worker_sha256 "$(sha256_file "$worker_result")" --arg config_sha256 "$private_agent_config_sha256" '
+        .schema == 1 and .kind == "sim-latency-private-shared-baseline-containment/v1" and
+        .grading_ready == false and .agent_config_sha256 == $config_sha256 and
+        .host_id == $config[0].host_id and .qualified_job_id == $job_id and .qualified_round_id == $round_id and
+        .worker_result_sha256 == $worker_sha256 and .image_digest == $host[0].image_digest and
+        .image_digest == $config[0].evaluator_image_digest and
+        .source_lock_sha256 == $config[0].source_lock_sha256 and
+        .qualification_sha256 == $config[0].qualification_sha256 and
+        .private_runtime_boundary_sha256 == $config[0].docker_role.resource_boundary.sha256 and
+        .private_runtime_boundary_sha256 == $host[0].private_runtime_boundary_sha256 and
+        .subevaluation_agent_sha256 == $config[0].agent.sha256 and
+        .evaluator_command_sha256 == $config[0].evaluator.sha256 and
+        .submission_builder_sha256 == $config[0].submission_builder_sha256 and
+        .resource_policy_sha256 == $config[0].docker_role.resource_policy.sha256 and
+        .config_local_sha256 == $config[0].config_local_sha256 and .vault_local_sha256 == $config[0].vault_local_sha256 and
+        .config_local_sha256 == $host[0].config_local_sha256 and .vault_local_sha256 == $host[0].vault_local_sha256 and
+        .baseline_sha256 == $complete[0].artifacts.baseline and
+        .local_container_evidence_count == $worker[0].score.significance.replicate_count and
+        (.local_container_evidence_count | type == "number" and . >= 1 and . <= 9 and . % 2 == 1) and
+        ([.source_lock_sha256,.qualification_sha256,.private_runtime_boundary_sha256,
+          .subevaluation_agent_sha256,.evaluator_command_sha256,.submission_builder_sha256,
+          .resource_policy_sha256,.manifest_sha256,.terminal_response_sha256,.trusted_patch_sha256,
+          .baseline_sha256] | all(.[]; type == "string" and test("^[0-9a-f]{64}$"))) and
+        (.container_root_uid | type == "number" and . > 0) and
+        (.container_root_gid | type == "number" and . > 0) and
+        (.container_id_map_length | type == "number" and . > 65532)' \
+        "$private_binding" >/dev/null || die "private shared-baseline evidence identity is invalid"
+    private_container_count="$(jq -er '.local_container_evidence_count' "$private_binding")"
+    private_binding_json="$(jq -c . "$private_binding")"
+fi
+
 authenticate_declared_artifact() {
     local relative="$1" path expected_sha expected_bytes
     path="$evaluation_dir/$relative"
@@ -241,6 +301,13 @@ while IFS=$'\t' read -r relative expected_sha expected_bytes; do
             docker_uid_map_sha256="$(jq -er '.uid_map_sha256' "$path")"
             docker_gid_map_sha256="$(jq -er '.gid_map_sha256' "$path")"
             docker_id_map_evidence_count=$((docker_id_map_evidence_count + 1))
+            if [ "$private_container_count" -gt 0 ]; then
+                jq -e --argjson binding "$private_binding_json" '
+                    .root_host_uid == $binding.container_root_uid and .root_host_gid == $binding.container_root_gid and
+                    .host_uid == ($binding.container_root_uid + .container_uid) and
+                    .host_gid == ($binding.container_root_gid + .container_gid)' "$path" >/dev/null ||
+                    die "private container map differs from authenticated boundary"
+            fi
             ;;
         evidence/local-mounts.json)
             jq -e --arg config_sha "$config_local_sha256" --arg vault_sha "$vault_local_sha256" \
@@ -253,6 +320,9 @@ while IFS=$'\t' read -r relative expected_sha expected_bytes; do
             local_mount_evidence_count=$((local_mount_evidence_count + 1))
             ;;
         evidence/runs/baseline-*/containers.json|evidence/runs/candidate-*/containers.json)
+            if [ "$private_container_count" -gt 0 ] && [[ "$relative" == evidence/runs/baseline-* ]]; then
+                die "shared-baseline qualification contains a local baseline"
+            fi
             jq -e \
                 'type == "array" and length == 3 and
                  (map(select(.name | endswith("-runner-1"))) | length == 1) and
@@ -270,7 +340,11 @@ while IFS=$'\t' read -r relative expected_sha expected_bytes; do
             ;;
     esac
 done < <(jq -er '.artifacts[] | [.path,.sha256,(.bytes|tostring)] | @tsv' "$evidence_manifest")
-[ "$container_evidence_count" -ge 2 ] || die "baseline/candidate container evidence is incomplete"
+if [ "$private_container_count" -gt 0 ]; then
+    [ "$container_evidence_count" -eq "$private_container_count" ] || die "private candidate container evidence is incomplete"
+else
+    [ "$container_evidence_count" -ge 2 ] || die "baseline/candidate container evidence is incomplete"
+fi
 [ "$local_mount_evidence_count" -eq 1 ] || die "direct local mount evidence is missing or duplicated"
 [ "$docker_id_map_evidence_count" -eq 1 ] || die "Docker user-namespace evidence is missing or duplicated"
 
@@ -371,6 +445,7 @@ jq -n --arg promoted_at "$promoted_at" --arg job_id "$job_id" \
       evidence_artifact_count:$evidence_artifact_count,verified:true}' > "$immutable_tmp"
 
 jq -n \
+    --argjson private_binding "$private_binding_json" \
     --arg promoted_at "$promoted_at" \
     --arg image_digest "$image_digest" \
     --arg job_cgroup "$job_cgroup" \
@@ -425,7 +500,12 @@ jq -n \
       evidence_manifest_sha256:$evidence_manifest_sha256,
       evaluation_complete_sha256:$evaluation_complete_sha256,
       cleanup_elapsed_ms:$cleanup_elapsed_ms,cleanup_limit_ms:10000,
-      residual_containers:0,residual_networks:0,cleanup_complete:true}' > "$marker_tmp"
+      residual_containers:0,residual_networks:0,cleanup_complete:true} +
+      (if $private_binding == {} then {} else
+        ($private_binding | {private_runtime_boundary_sha256,subevaluation_agent_sha256,
+          evaluator_command_sha256,submission_builder_sha256,resource_policy_sha256,source_lock_sha256,
+          container_root_uid,container_root_gid,container_id_map_length,
+          baseline_sha256,manifest_sha256,terminal_response_sha256}) end)' > "$marker_tmp"
 for pending_marker in "$template_tmp" "$redis_tmp" "$marker_tmp" "$immutable_tmp"; do
     chmod 0600 "$pending_marker"
     sync -d "$pending_marker"

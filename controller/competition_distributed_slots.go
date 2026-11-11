@@ -171,10 +171,7 @@ func (self PostgresStore) claimDistributedCompetitionJob(ctx context.Context, se
 				}
 			}
 			var qualified bool
-			server.Raise(tx.QueryRow(ctx, `SELECT NOT EXISTS(SELECT 1 FROM jsonb_array_elements(r.policy_json->'distributed_evaluation_policy'->'hosts') host
-			 WHERE NOT EXISTS(SELECT 1 FROM competition_executor_equivalence e WHERE e.round_id=r.round_id AND e.host_id=host->>'host_id'
-			 AND e.baseline_sha256=$2 AND e.receipt_json->>'policy_approval_sha256'=r.policy_json->'distributed_evaluation_policy'->>'approval_sha256'
-			 AND COALESCE((e.receipt_json->>'passed')::boolean,false))) FROM competition_round r WHERE r.round_id=$1`, job.RoundId, baseline.Sha256).Scan(&qualified))
+			server.Raise(tx.QueryRow(ctx, `SELECT competition_executor_control_hosts_ready($1)`, job.RoundId).Scan(&qualified))
 			if !qualified {
 				job = nil
 				return

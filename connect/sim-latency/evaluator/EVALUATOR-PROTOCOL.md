@@ -303,3 +303,54 @@ corresponding malicious
 initialization gate: it attempts to corrupt six trusted base files during the
 compile-only test process and requires every final-image digest to remain
 unchanged.
+
+## Distributed private evaluator identities
+
+The shared-baseline producer and a private sub-evaluator can intentionally use
+different qualified host scripts while measuring the same frozen product image.
+Do not use the producer's `Settings.EvaluatorCommandSha256` as the private
+executor's script identity, and do not replace that producer pin to make a
+private dispatch pass. The baseline retains its original producer provenance.
+
+For a private script, each host entry in the root-pinned coordinator role must
+include both `evaluator_command_sha256` and `agent_config_snapshot_path`, in
+addition to its existing `agent_config_sha256`. For example, with placeholders
+replaced by independently verified digests:
+
+```json
+{
+  "host_id": "executor-a.example",
+  "agent_command": "/usr/local/libexec/competitionsubeval",
+  "agent_command_sha256": "<agent-executable-sha256>",
+  "agent_config_path": "/etc/competition/agent.json",
+  "agent_config_sha256": "<complete-agent-config-sha256>",
+  "evaluator_command_sha256": "<private-evaluator-script-sha256>",
+  "agent_config_snapshot_path": "/etc/competition/coordinator/agent-snapshot.json"
+}
+```
+
+The snapshot is a root-owned, non-symlink, read-only file on the coordinator.
+It must contain the complete byte-identical agent configuration, not a redacted
+or reserialized copy. Its SHA-256 must equal `agent_config_sha256`; its host id
+must match the connection, and its `evaluator.sha256` must equal the declared
+private-script pin. For local execution the snapshot may be the already pinned
+agent configuration itself. For remote execution, provision the exact protected
+snapshot independently; the remote `agent_config_path` is not a local snapshot.
+Do not copy the agent's signing-key contents, production vault, or database
+credentials into this role.
+
+Dispatch manifests and success/failure archive provenance bind the private
+script actually selected. The agent still independently checks that digest
+against its installed role before accepting execution. Historical same-script
+roles may omit both new fields; omission is not suitable for a new private
+deployment whose script differs from the baseline producer. A partially
+configured private pin is rejected before workload/seed materialization.
+
+Correcting an uncommitted dispatch does not authorize replacing an accepted
+manifest, renewing an admission deadline, changing the frozen source/scoring
+policy, or resampling the shared baseline. Actual script changes still require
+their own qualified deployment boundary. Before customer FIFO claims, require
+the retained shared R9 baseline and passing retained R9 admission receipts for
+every configured host; a reachable agent or running service is not admission.
+The epoch-two correction and deployment evidence is recorded in
+[the dispatch checkpoint](../launch/EPOCH2-PRIVATE-DISPATCH-FIX-2026-11-11.json).

@@ -186,7 +186,7 @@ func readManagementRecoveryChildren(directory *os.File, maximum int) ([]string, 
 		// Linux O_PATH is an ABI flag, not a policy setting. DirEntry.Info on
 		// os.NewFile may reopen its display name; stat the held child instead.
 		const openPath = 0x200000
-		child, err := openRelativeNoFollow(directory, entry.Name(), openPath, 0)
+		child, err := openKernelRelativeNoFollow(directory, entry.Name(), openPath, 0)
 		if err != nil {
 			return nil, err
 		}

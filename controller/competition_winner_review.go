@@ -97,6 +97,22 @@ func (self *CompetitionSupervisor) reconcileWinnerReview(ctx context.Context, le
 	}
 	checkpoint := transition.WinnerReview
 	if state.ApprovedReviewId != nil && state.ApprovedReview != nil {
+		// A separately authorized official import may predate supervisor startup.
+		// Record adoption now, never invent native review start/completion times
+		// or replace an existing checkpoint (including an expired one).
+		if checkpoint == nil && state.ApprovedReview.Request.OfficialReviewOverride != nil {
+			review := state.ApprovedReview
+			adopted := &model.CompetitionWinnerReviewCheckpoint{
+				RoundId: snapshot.Round.RoundId, JobId: *decision.SelectedJobId, RewardRevision: decision.Revision, RewardDecisionSha256: decision.DecisionSha256,
+				StartedAt: now, Deadline: now.Add(time.Duration(state.Policy.WinnerReviewTimeoutSeconds) * time.Second),
+			}
+			if snapshot.Round.Epoch != 1 || state.Policy.Staging || review.ReviewId != *state.ApprovedReviewId || review.CreatedAt.After(now) ||
+				model.ValidateCompetitionOfficialReviewImport(model.CompetitionOfficialReviewImport{RoundId: snapshot.Round.RoundId, Review: review.Request}, state.Policy) != nil ||
+				!model.CompetitionReviewWithinCheckpoint(review, adopted) {
+				return block("winner_review_identity_conflict", ErrConflict)
+			}
+			return save("winner_review_pending", "official_review_checkpoint_adopted", adopted)
+		}
 		if checkpoint == nil || checkpoint.JobId != *decision.SelectedJobId || checkpoint.RoundId != snapshot.Round.RoundId ||
 			state.ApprovedReview.Request.ExpectedDecisionSha256 != checkpoint.RewardDecisionSha256 || state.ApprovedReview.Request.ExpectedRevision != checkpoint.RewardRevision ||
 			!model.CompetitionReviewWithinCheckpoint(state.ApprovedReview, checkpoint) {
@@ -184,9 +200,13 @@ func winnerReviewState(result *model.CompetitionV2RoundResult, policy model.Comp
 			source = review
 		}
 	}
+	providerMatches := source != nil && source.Request.ReviewerModel == modelName && source.Request.ReviewerReasoning == reasoning
+	if source != nil && source.Request.OfficialReviewOverride != nil {
+		providerMatches = model.ValidateCompetitionOfficialReviewImport(model.CompetitionOfficialReviewImport{RoundId: result.Seal.RoundId, Review: source.Request}, policy) == nil
+	}
 	if reward != nil && source != nil && reward.ReviewId == source.ReviewId &&
 		(reward.Request.RewardDisposition == "approved" || reward.Request.RewardDisposition == "restored") && source.Request.SourceDisposition == "approved" &&
-		source.Request.ReviewerModel == modelName && source.Request.ReviewerReasoning == reasoning && source.Request.ExpectedDecisionSha256 == state.CurrentDecision.DecisionSha256 {
+		providerMatches && source.Request.ExpectedDecisionSha256 == state.CurrentDecision.DecisionSha256 {
 		state.ApprovedReview, state.ApprovedReviewId = source, &source.ReviewId
 	}
 	return state, nil
@@ -254,6 +274,23 @@ func validateWinnerReviewSubmissionInTx(ctx context.Context, tx server.PgTx, res
 	}
 	if decision.SelectedJobId == nil || request.JobId != *decision.SelectedJobId {
 		return ErrConflict
+	}
+	if request.OfficialReviewOverride != nil {
+		if request.OfficialReviewOverride.CompletedAt.Before(result.Seal.PublicationAt) || request.OfficialReviewOverride.CompletedAt.After(now) {
+			return ErrConflict
+		}
+		content, err := json.Marshal(request)
+		if err != nil {
+			return err
+		}
+		var authorized bool
+		if err := tx.QueryRow(ctx, `SELECT competition_official_review_request_authorized($1,$2::jsonb)`, result.Seal.RoundId, string(content)).Scan(&authorized); err != nil {
+			return err
+		}
+		if !authorized {
+			return ErrConflict
+		}
+		return nil
 	}
 	var content []byte
 	if err := tx.QueryRow(ctx, `SELECT transition_json FROM competition_supervisor_transition WHERE environment=$1 AND competition_id=$2 AND season_id=$3 AND target_epoch=$4 ORDER BY revision DESC LIMIT 1`, result.Seal.Environment, result.Seal.CompetitionId, result.Seal.SeasonId, result.Seal.Epoch+1).Scan(&content); err != nil {

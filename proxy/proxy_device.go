@@ -1332,7 +1332,7 @@ func NewProxyDevice(
 	if initialDeviceState := proxyDeviceConfig.InitialDeviceState; initialDeviceState != nil {
 		deviceLocal.SetPerformanceProfile(initialDeviceState.PerformanceProfile)
 		deviceLocal.SetConnectLocation(initialDeviceState.Location)
-		dnsResolverSettings = hostedDnsResolverSettings(initialDeviceState.DnsResolverSettings)
+		dnsResolverSettings = proxyDeviceDnsResolverSettings(initialDeviceState)
 	}
 
 	// The manager creates one ProxyDevice per client and closes it on disconnect.

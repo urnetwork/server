@@ -60,6 +60,12 @@ func recoveryAuthorityPath(value string) bool {
 // Recovery needs only fixed root control/data authority; an exhausted/dead
 // ordinary engine or absent worker account cannot disable this validation.
 func (self *Config) validateRecoveryConfiguration(settings AgentSettings, protected bool) error {
+	return self.validateRecoveryRole(settings, protected, false)
+}
+
+// Metadata observation shares protected static role checks, but is not a
+// recovery owner and cannot need the first qualification it is computing.
+func (self *Config) validateRecoveryRole(settings AgentSettings, protected, dockerProbe bool) error {
 	if self == nil || self.Schema != Schema || !namePattern.MatchString(self.HostId) || self.TrustedOperatorUser == "" || self.ExpectedDataDeviceId == 0 ||
 		!recoveryAuthorityPath(self.configPath) || !recoveryAuthorityPath(self.Agent.Path) || !recoveryAuthorityPath(self.BaseDirectory) ||
 		self.StateDirectory == self.BaseDirectory || !pathWithin(self.BaseDirectory, self.StateDirectory) || !pathWithin(self.BaseDirectory, self.WorkDirectory) ||
@@ -71,7 +77,10 @@ func (self *Config) validateRecoveryConfiguration(settings AgentSettings, protec
 	if self.Limits.Validate() != nil || self.Limits.MaximumJobDuration > DefaultLimits().MaximumJobDuration {
 		return errors.New("recovery cannot widen original job limits")
 	}
-	for _, value := range []string{self.SourceLockSha256, self.QualificationSha256, self.ConfigLocalSha256, self.VaultLocalSha256, self.Evaluator.Sha256} {
+	if !digestPattern.MatchString(self.QualificationSha256) && !(dockerProbe && self.QualificationSha256 == "") {
+		return errors.New("recovery omitted frozen qualification identity")
+	}
+	for _, value := range []string{self.SourceLockSha256, self.ConfigLocalSha256, self.VaultLocalSha256, self.Evaluator.Sha256} {
 		if !digestPattern.MatchString(value) {
 			return errors.New("recovery omitted frozen evaluator/fixture identity")
 		}

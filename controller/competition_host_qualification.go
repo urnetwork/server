@@ -25,7 +25,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-const competitionHostQualificationProfile = "sim-latency-host-readiness/v1"
+const competitionHostQualificationProfile = "sim-latency-host-readiness/v2"
 const competitionHostQualificationTimeout = 15 * time.Minute
 const competitionHostQualificationComment = "// competitionHostReadinessProbe exercises the authenticated evaluator without changing behavior."
 
@@ -154,7 +154,10 @@ func competitionHostQualificationSettings(settings *Settings) *Settings {
 	policy.ProviderCount, policy.ClientPoolSize, policy.ArrivalsPerMinute, policy.QualityWindowSize = 32, 8, 16, 8
 	policy.ExchangeHosts, policy.FleetShards = 1, 0
 	policy.RampMs, policy.PrewarmMs, policy.SettleMs = 0, 5000, 0
-	policy.ClientWarmupTimeoutMs, policy.DurationMs, policy.RequestTimeoutMs = 60000, 30000, 30000
+	// The frozen scheduler's short-window probes span exactly90%, leaving no
+	// allowance for the first observation's latency. Above100s its10s cadence
+	// gives this readiness-only fixture positive headroom without relaxing G4.
+	policy.ClientWarmupTimeoutMs, policy.DurationMs, policy.RequestTimeoutMs = 60000, 120000, 30000
 	policy.PipelineIntervalMs, policy.TestTimeoutMs, policy.AnnounceTimeoutMs = 100, 3000, 2000
 	policy.ImpairmentEnabled, policy.Replicates = false, 1
 	return &copy
@@ -847,7 +850,9 @@ func RunCompetitionHostQualification(ctx context.Context, settings *Settings, co
 			case <-time.After(5 * time.Second):
 			}
 			probeCtx, cancel := context.WithTimeout(operationCtx, 5*time.Second)
-			_, err := CheckCompetitionPreparationFence(probeCtx, settings, request)
+			// Observe authority without contending with the synchronous source
+			// fence or repeatedly transporting its immutable manifest.
+			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
 			if err == nil {
 				err = checkCompetitionQualificationSlot(probeCtx, owner)
 			}

@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "kind": "official-epoch1-astra-import-control-plane-qualification/v1",
+  "status": "PASSED_PENDING_MAIN_DEPLOYMENT_AND_IMPORT",
+  "recorded_at": "2026-11-08T22:19:48Z",
+  "server_source_commit": "15b91c1f413671ccdd8e837cfe3a3ddc6ad50ff8",
+  "sn_contract_commit": "6b5614576af1b4fffc4dcaf47f2f6026404b9c18",
+  "config_commit": "4963f0d5c6ebbebcbba48ff03af29decef893c4b",
+  "migration_version": 949,
+  "go_version": "go1.27.3",
+  "ordinary": {
+    "test_executions_passed": 39,
+    "failed": 0,
+    "skipped": 0,
+    "repetition_count": 3,
+    "isolated_postgresql_import_and_source_boundary_runs": 3,
+    "log_sha256": "13b6bb397a7022a92f9c0d960b81eeeadd012837f972f5dbb79907dd7db2e733"
+  },
+  "race": {
+    "test_executions_passed": 13,
+    "failed": 0,
+    "skipped": 0,
+    "packages": ["server", "model", "controller", "api", "connect/sim-latency"],
+    "log_sha256": "6eaf2022be655a1838612f05d1e70142c74ead236e905ea1a02760b58723fa10"
+  },
+  "legacy_regressions": {
+    "test_executions_passed": 32,
+    "failed": 0,
+    "isolated_sql_tests_initially_skipped_for_missing_explicit_opt_in": 2,
+    "log_sha256": "afcf975ecf42f1956a45cf43f9b8979953f64d9676ba9d4dca1d5afe33e18687",
+    "subsequent_explicit_isolated_sql_run": {
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "log_sha256": "7a32a6e7742eb5d58a5c822dd30350cb88be0e3576ca503ea3368643ce1670be"
+    }
+  },
+  "proof_scope": [
+    "Exact operator-deployed import digest and separately scoped review_operator authentication.",
+    "Six genuine Astra findings, required production-benefit addendum and explicit operator waivers; ordinary/native review paths cannot use the override.",
+    "Immutable exact-current sealed candidate/election/evidence binding, publication/completion time checks, idempotent same-actor replay and changed-request/actor rejection.",
+    "Go and PostgreSQL winner-source authorization accepts the explicit amendment without renewing the historical expired checkpoint.",
+    "Original Snow provider/finding constraints and native handoff behavior remain independently guarded."
+  ],
+  "official_import": {
+    "sha256": "a33d62757c9cf3d31c0ff72dd04f7885b20067b00581ba77d0a1414d85b5b4be",
+    "protected_key": "blob/competition/v2/review-evidence/sim-latency-season-1/main/sim-latency-production-20261028-r2/01a1855d-49bd-0250-90db-d0c0885f0e46/01a1a440-fd2e-538a-365c-f4b23eed4739/a33d62757c9cf3d31c0ff72dd04f7885b20067b00581ba77d0a1414d85b5b4be.txt",
+    "version_id": "85338bc6-80b9-41d2-af1a-d4d9902e0ac3",
+    "compliance_retain_until": "2028-01-01T00:00:00Z",
+    "exact_version_readback_verified": true,
+    "root_owned_request": "/var/lib/urnetwork/competition-epoch1-official-astra-20261108-v1/official-import.json"
+  },
+  "ten_competition_branch_heads_still_match_epoch1_checkpoint": true,
+  "candidate_code_reexecuted": false,
+  "native_snow_qualification_claim": false,
+  "calibration_accepted": false,
+  "main_migration_applied_by_this_agent": false,
+  "api_import_performed": false,
+  "rewards_released": false,
+  "source_promoted": false
+}

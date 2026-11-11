@@ -63,8 +63,54 @@ func TestPaymentFailuresClassifiesEveryDurableProblemWithoutIdentifiers(t *testi
 	}
 }
 
+// The crypto rail's held payments and stalled scanners page (a sanctions
+// match, an unreadable screen, a scanner that stopped) or warn (a payment an
+// operator must check in Coinbase), without identifiers.
+func TestPaymentFailuresClassifiesTheCryptoRail(t *testing.T) {
+	source := &syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{
+			{"crypto_payment_held", "tao", "1", "3600", "3600"},
+			{"crypto_sanctions_hold", "btc", "1", "600", "600"},
+			{"crypto_scanner_stalled", "tao", "1", "1200", "1200"},
+			{"crypto_screening_unavailable", "eth", "2", "900", "300"},
+		}, nil
+	}}
+	alerts, err := NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(source))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for class, severity := range map[string]Severity{
+		"crypto-sanctions-hold":        SeverityPage,
+		"crypto-screening-unavailable": SeverityPage,
+		"crypto-scanner-stalled":       SeverityPage,
+		"crypto-payment-held":          SeverityWarn,
+	} {
+		alert := requireAlertClass(t, alerts, class)
+		if alert.Severity != severity {
+			t.Fatalf("%s severity = %s, want %s", class, alert.Severity, severity)
+		}
+	}
+	// an asset the rail does not have is refused, not reported
+	_, err = NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(&syntheticSource{postgresFn: func(string) ([]Row, error) {
+		return []Row{{"crypto_sanctions_hold", "ltc", "1", "600", "600"}}, nil
+	}}))
+	if err == nil {
+		alerts, _ := NewPaymentFailuresSignal().Run(context.Background(), syntheticSettings(&syntheticSource{postgresFn: func(string) ([]Row, error) {
+			return []Row{{"crypto_sanctions_hold", "ltc", "1", "600", "600"}}, nil
+		}}))
+		for _, alert := range alerts {
+			if alert.Class == "crypto-sanctions-hold" {
+				t.Fatalf("an unknown crypto asset was reported")
+			}
+		}
+	}
+	if !strings.Contains(paymentFailuresQuery, "FROM crypto_payment_receipt receipt") || !strings.Contains(paymentFailuresQuery, "FROM crypto_scan_cursor scan") {
+		t.Fatalf("payment failures query reads no crypto rail state")
+	}
+}
+
 func TestPaymentFailuresSeparatesExistingAndDeletedNetworks(t *testing.T) {
-	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
+	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'bitcoin', 'bittensor', 'ethereum', 'google', 'monero', 'solana', 'stripe', 'zcash')") != 1 {
 		t.Fatal("payment failures query does not limit entitlement checks to authoritative provider markets")
 	}
 	if strings.Count(paymentFailuresQuery, "renewal.market IN ('apple', 'google', 'stripe')") != 1 {

@@ -123,7 +123,7 @@ source_lock_path="$(mktemp "$destination_parent/.evaluation-source-lock.XXXXXXXX
 source_container="$(evaluation_docker create "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id")"
 evaluation_docker cp "$source_container:/opt/urnetwork/source-lock.json" "$source_lock_path"
 for repository in "${REPOSITORIES[@]}"; do
-    evaluation_docker cp "$source_container:/workspace/$repository" "$destination/"
+    evaluation_docker_copy_tree "$source_container:/workspace/$repository" "$destination/"
 done
 evaluation_docker rm "$source_container" >/dev/null
 source_container=""

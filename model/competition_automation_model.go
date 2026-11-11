@@ -399,30 +399,31 @@ type CompetitionReviewFinding struct {
 
 // Actor identity comes from authentication, never from this request.
 type CompetitionIntegrityReviewRequest struct {
-	IdempotencyKey              string                     `json:"idempotency_key"`
-	ExpectedRevision            int                        `json:"expected_revision"`
-	JobId                       server.Id                  `json:"job_id"`
-	PatchSha256                 string                     `json:"patch_sha256"`
-	BaseSourceLockSha256        string                     `json:"base_source_lock_sha256"`
-	ScoreSha256                 string                     `json:"score_sha256"`
-	BaselineSha256              string                     `json:"baseline_sha256"`
-	ArtifactManifestSha256      string                     `json:"artifact_manifest_sha256"`
-	CriteriaVersion             string                     `json:"criteria_version"`
-	RewardDisposition           string                     `json:"reward_disposition"`
-	SourceDisposition           string                     `json:"source_disposition"`
-	ReasonCodes                 []string                   `json:"reason_codes"`
-	PublicExplanation           string                     `json:"public_explanation"`
-	WithheldEvidenceExplanation string                     `json:"withheld_evidence_explanation"`
-	PrivateEvidenceSha256       string                     `json:"private_evidence_sha256"`
-	Findings                    []CompetitionReviewFinding `json:"findings"`
-	SupersedesReviewId          *server.Id                 `json:"supersedes_review_id,omitempty"`
-	AppealId                    string                     `json:"appeal_id,omitempty"`
-	ExpectedReplacementJobId    *server.Id                 `json:"expected_replacement_job_id,omitempty"`
-	ExpectedDecisionSha256      string                     `json:"expected_decision_sha256,omitempty"`
-	ReviewerModel               string                     `json:"reviewer_model,omitempty"`
-	ReviewerReasoning           string                     `json:"reviewer_reasoning,omitempty"`
-	ProductionBenefitAddendum   *CompetitionReviewAddendum `json:"production_benefit_addendum,omitempty"`
-	HandoffId                   string                     `json:"handoff_id,omitempty"`
+	OfficialReviewOverride      *CompetitionOfficialReviewOverride `json:"official_review_override,omitempty"`
+	IdempotencyKey              string                             `json:"idempotency_key"`
+	ExpectedRevision            int                                `json:"expected_revision"`
+	JobId                       server.Id                          `json:"job_id"`
+	PatchSha256                 string                             `json:"patch_sha256"`
+	BaseSourceLockSha256        string                             `json:"base_source_lock_sha256"`
+	ScoreSha256                 string                             `json:"score_sha256"`
+	BaselineSha256              string                             `json:"baseline_sha256"`
+	ArtifactManifestSha256      string                             `json:"artifact_manifest_sha256"`
+	CriteriaVersion             string                             `json:"criteria_version"`
+	RewardDisposition           string                             `json:"reward_disposition"`
+	SourceDisposition           string                             `json:"source_disposition"`
+	ReasonCodes                 []string                           `json:"reason_codes"`
+	PublicExplanation           string                             `json:"public_explanation"`
+	WithheldEvidenceExplanation string                             `json:"withheld_evidence_explanation"`
+	PrivateEvidenceSha256       string                             `json:"private_evidence_sha256"`
+	Findings                    []CompetitionReviewFinding         `json:"findings"`
+	SupersedesReviewId          *server.Id                         `json:"supersedes_review_id,omitempty"`
+	AppealId                    string                             `json:"appeal_id,omitempty"`
+	ExpectedReplacementJobId    *server.Id                         `json:"expected_replacement_job_id,omitempty"`
+	ExpectedDecisionSha256      string                             `json:"expected_decision_sha256,omitempty"`
+	ReviewerModel               string                             `json:"reviewer_model,omitempty"`
+	ReviewerReasoning           string                             `json:"reviewer_reasoning,omitempty"`
+	ProductionBenefitAddendum   *CompetitionReviewAddendum         `json:"production_benefit_addendum,omitempty"`
+	HandoffId                   string                             `json:"handoff_id,omitempty"`
 }
 
 // Review records remain separate even when approval does not change the reward recipient.
@@ -439,6 +440,9 @@ type CompetitionIntegrityReviewResult struct {
 
 // Requires complete structured criteria and distinguishes source-only concerns from fraud.
 func ValidateCompetitionIntegrityReview(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy) error {
+	if request.OfficialReviewOverride != nil {
+		return errors.New("official review overrides require the independently pinned operator import")
+	}
 	return validateCompetitionIntegrityReviewContent(request, policy, false)
 }
 
@@ -455,6 +459,9 @@ func ValidateCompetitionSnowMemberContent(request CompetitionIntegrityReviewRequ
 // The private member context changes only the criterion census, never review
 // authority or the treatment of uncertainty, approval and substantiated failure.
 func validateCompetitionIntegrityReviewContent(request CompetitionIntegrityReviewRequest, policy CompetitionAutomationPolicy, snowMember bool) error {
+	if request.OfficialReviewOverride != nil {
+		return errors.New("official review overrides require the independently pinned operator import")
+	}
 	if request.HandoffId != "" {
 		if _, err := server.ParseId(request.HandoffId); err != nil || policy.WinnerReviewPolicy != CompetitionSnowWinnerReviewPolicy || request.RewardDisposition == "restored" {
 			return errors.New("review handoff requires the exact two-member policy and native pending proposal")

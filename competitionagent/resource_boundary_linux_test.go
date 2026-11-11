@@ -214,7 +214,7 @@ func newRuntimeBoundaryTest(t *testing.T) *runtimeBoundaryTest {
 	info := map[string]any{"Driver": "overlay2", "DriverStatus": [][]string{{"Backing Filesystem", "extfs"}},
 		"DockerRootDir": filepath.Join(boundary.DockerDataRoot, "200000.300000"), "CgroupDriver": "systemd", "CgroupVersion": "2", "DefaultRuntime": "runc",
 		"LiveRestoreEnabled": false, "SecurityOptions": []string{"name=userns"},
-		"Containerd": map[string]any{"Address": boundary.ContainerdSocketPath, "Namespaces": map[string]any{"Containers": "urnetwork-evaluation", "Plugins": "urnetwork-evaluation-plugins"}},
+		"Containerd": map[string]any{"Address": boundary.ContainerdSocketPath, "Namespaces": map[string]any{"Containers": "urnetwork-evaluation", "Plugins": fmt.Sprintf("plugins.moby-%d.%d", boundary.ContainerRootUid, boundary.ContainerRootGid)}},
 		"Runtimes":   map[string]any{"runc": map[string]any{"path": "runc"}, "io.containerd.runc.v2": map[string]any{"path": "runc"}}}
 	host.daemon, err = json.Marshal(info)
 	if err != nil {
@@ -691,6 +691,7 @@ func TestRuntimeResourceBoundaryRejectsUnboundedLiveDaemonLogs(t *testing.T) {
 func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T) {
 	fixture := newRuntimeBoundaryTest(t)
 	boundary := fixture.boundary
+	boundary.Nftables.Path = "/opt/synthetic-system/sbin/nft"
 	tokens := map[string]string{
 		"BASE_DIRECTORY": boundary.BaseDirectory, "BACKING_FILE": boundary.BackingFile, "LOOP_NUMBER": "31",
 		"MAXIMUM_BYTES": strconv.FormatUint(boundary.MaximumBytes, 10), "MINIMUM_FREE_BYTES": strconv.FormatUint(boundary.MinimumFreeBytes, 10),
@@ -708,7 +709,9 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		"CONFIG_DIRECTORY": filepath.Dir(boundary.EngineConfig.Path), "CONTAINER_LOG_MAXIMUM_SIZE": fixture.settings.ContainerLogMaximumSize,
 		"CONTAINER_LOG_MAXIMUM_FILES": strconv.Itoa(fixture.settings.ContainerLogMaximumFiles), "ENGINE_START_SECONDS": "30", "ENGINE_STOP_SECONDS": "30",
 		"ENGINE_MEMORY_MAXIMUM": "1G", "ENGINE_CPU_QUOTA": "100%", "ENGINE_TASKS_MAXIMUM": "4096", "ENGINE_DESCRIPTOR_MAXIMUM": "65536", "MOUNT_START_SECONDS": "30",
-		"MANAGEMENT_CPUSET": boundary.ManagementCpuSet,
+		"MANAGEMENT_CPUSET":  boundary.ManagementCpuSet,
+		"ENGINE_HELPER_PATH": runtimeBoundaryHelperPath(boundary),
+		"PRIVATE_AGENT_PATH": "/usr/local/libexec/synthetic-agent", "PRIVATE_AGENT_CONFIG": "/etc/synthetic-agent.json",
 	}
 	unresolved := regexp.MustCompile(`@[A-Z0-9_]+@`)
 	render := func(name string) []byte {
@@ -742,10 +745,9 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 	}
 	for _, name := range []string{"urnetwork-private-engine.service.in", "urnetwork-private-containerd.service.in"} {
 		unit := string(render(name))
-		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + filepath.Dir(boundary.Runc.Path),
+		for _, required := range []string{"Restart=no", "Delegate=yes", "KillMode=control-group", "LimitCORE=0", "PATH=" + runtimeBoundaryHelperPath(boundary),
 			"AllowedCPUs=" + boundary.ManagementCpuSet,
 			"PrivateNetwork=yes", "BindsTo=" + runtimeBoundaryKeeperUnitName, "JoinsNamespaceOf=" + runtimeBoundaryKeeperUnitName,
-			"BindPaths=" + boundary.EngineExecRoot + "/containerd-sockets:/run/containerd",
 			boundary.CandidateRoot + "/daemon-logs/", "/usr/bin/chmod 0600 " + filepath.Dir(boundary.PrivateSocketPath)} {
 			if !strings.Contains(unit, required) {
 				t.Fatalf("private service lost an enforced boundary: %s", name)
@@ -753,6 +755,13 @@ func TestRuntimeResourceBoundaryProvisioningTemplatesMatchVerifier(t *testing.T)
 		}
 		if strings.Contains(unit, "/run/docker.sock") || strings.Contains(unit, "docker.service") {
 			t.Fatal("private unit targets the user's engine")
+		}
+		if name == "urnetwork-private-engine.service.in" {
+			if strings.Contains(unit, "BindPaths=") || !strings.Contains(unit, "ExecStart="+tokens["PRIVATE_AGENT_PATH"]+" --config "+tokens["PRIVATE_AGENT_CONFIG"]+" --start-private-engine") {
+				t.Fatal("Docker must join containerd's image mount namespace through its pinned startup role")
+			}
+		} else if !strings.Contains(unit, "BindPaths="+boundary.EngineExecRoot+"/containerd-sockets:/run/containerd") {
+			t.Fatal("containerd lost its private shim socket mount")
 		}
 	}
 	_ = render("candidate.mount.in")
@@ -775,8 +784,8 @@ func TestRuntimeResourceBoundaryNamespacePeersRequireNonHostIdentity(t *testing.
 	makeUnits := func() map[string]runtimeBoundaryUnit {
 		return map[string]runtimeBoundaryUnit{
 			runtimeBoundaryKeeperUnitName:     {Pid: 101, ProcessStart: 1, Namespace: private},
-			runtimeBoundaryEngineUnitName:     {Pid: 102, ProcessStart: 2, Namespace: private},
-			runtimeBoundaryContainerdUnitName: {Pid: 103, ProcessStart: 3, Namespace: private},
+			runtimeBoundaryEngineUnitName:     {Pid: 102, ProcessStart: 2, Namespace: private, MountNamespace: private},
+			runtimeBoundaryContainerdUnitName: {Pid: 103, ProcessStart: 3, Namespace: private, MountNamespace: private},
 		}
 	}
 	if err := validateRuntimeBoundaryNamespacePeers(makeUnits(), private, host); err != nil {
@@ -815,12 +824,16 @@ func TestRuntimeResourceBoundaryNamespacePeersRequireNonHostIdentity(t *testing.
 func runtimeBoundaryTestUnitProperties(boundary RuntimeResourceBoundary, pin Pin) map[string]string {
 	name := filepath.Base(pin.Path)
 	properties := map[string]string{"Id": name, "FragmentPath": pin.Path, "DropInPaths": "", "LoadState": "loaded", "ActiveState": "active", "SubState": "running",
+		"UMask":   "0077",
 		"MainPID": "101", "InvocationID": strings.Repeat("a", 32), "ExecMainStartTimestampMonotonic": "123",
 		"ControlGroup": managementPrivateCgroupPath + "/" + name, "PrivateNetwork": "yes", "NetworkNamespacePath": "", "User": "root", "Group": "root",
 		"Slice": managementPrivateSliceName, "OnFailure": managementRecoveryServiceName, "OnFailureJobMode": "replace",
 		"Restart": "no", "KillMode": "control-group", "RemainAfterExit": "no", "JoinsNamespaceOf": runtimeBoundaryKeeperUnitName,
 		"AllowedCPUs": strings.ReplaceAll(boundary.ManagementCpuSet, ",", " "),
 		"Requires":    runtimeBoundaryKeeperUnitName, "BindsTo": runtimeBoundaryKeeperUnitName, "After": runtimeBoundaryKeeperUnitName}
+	if name == runtimeBoundaryEngineUnitName || name == runtimeBoundaryContainerdUnitName {
+		properties["UMask"] = "0022"
+	}
 	if name == runtimeBoundaryKeeperUnitName {
 		properties["JoinsNamespaceOf"] = runtimeBoundaryEngineUnitName + " " + runtimeBoundaryContainerdUnitName + " " + runtimeBoundaryNetworkUnitName
 	}
@@ -962,7 +975,7 @@ func TestRuntimeResourceBoundaryPrivateTemplatesArmFixedRecovery(t *testing.T) {
 	}
 }
 
-// The only allowed links are loopback and one address-free private cohort
+// The only allowed links are loopback and one isolated private cohort
 // bridge with container veths enslaved to it; physical/tunnel/extra bridges fail.
 func TestRuntimeResourceBoundaryOfflineInterfaceInventory(t *testing.T) {
 	settings := DefaultRuntimeResourceBoundarySettings()
@@ -987,6 +1000,35 @@ func TestRuntimeResourceBoundaryOfflineInterfaceInventory(t *testing.T) {
 	}
 }
 
+// Bridge and veth IPv6 link-local assignments have identical safety rules;
+// IPv4, globally scoped, malformed and non-/64 addresses remain forbidden.
+func TestRuntimeResourceBoundaryLinkLocalInterfaceInventory(t *testing.T) {
+	settings := DefaultRuntimeResourceBoundarySettings()
+	for _, target := range []string{"bridge", "veth"} {
+		for _, address := range []string{
+			`{"family":"inet6","local":"fe80::1","scope":"link","prefixlen":64}`,
+			`{"family":"inet","local":"192.0.2.1","scope":"global","prefixlen":24}`,
+			`{"family":"inet6","local":"2001:db8::1","scope":"global","prefixlen":64}`,
+			`{"family":"inet6","local":"fe80::1","scope":"global","prefixlen":64}`,
+			`{"family":"inet6","local":"fe80::1","scope":"link","prefixlen":32}`,
+			`{"family":"inet6","local":"invalid","scope":"link","prefixlen":64}`,
+		} {
+			bridgeAddresses, vethAddresses := `[]`, `[]`
+			if target == "bridge" {
+				bridgeAddresses = `[` + address + `]`
+			} else {
+				vethAddresses = `[` + address + `]`
+			}
+			content := `[{"ifindex":1,"ifname":"lo","link_type":"loopback","addr_info":[]},{"ifindex":2,"ifname":"unev-0123456789","linkinfo":{"info_kind":"bridge"},"addr_info":` + bridgeAddresses + `},{"ifindex":3,"ifname":"veth0123abc","master":"unev-0123456789","link_netnsid":0,"linkinfo":{"info_kind":"veth"},"addr_info":` + vethAddresses + `}]`
+			err := validateRuntimeBoundaryInterfaces([]byte(content), settings)
+			wantAllowed := address == `{"family":"inet6","local":"fe80::1","scope":"link","prefixlen":64}`
+			if (err == nil) != wantAllowed {
+				t.Fatalf("%s address %s: allowed=%v, error=%v", target, address, wantAllowed, err)
+			}
+		}
+	}
+}
+
 // Offline routes cannot install a gateway, default, multipath or foreign link.
 func TestRuntimeResourceBoundaryOfflineRouteContract(t *testing.T) {
 	settings := DefaultRuntimeResourceBoundarySettings()
@@ -1001,6 +1043,35 @@ func TestRuntimeResourceBoundaryOfflineRouteContract(t *testing.T) {
 	} {
 		if err := validateRuntimeBoundaryRoutes([]byte(content), settings); err == nil {
 			t.Fatal("external private-namespace route was admitted")
+		}
+	}
+}
+
+// Bringing up an isolated peer creates local and multicast kernel routes, not
+// an external gateway. Only these exact route classes may refer to a veth.
+func TestRuntimeResourceBoundaryKernelVethRoutes(t *testing.T) {
+	settings := DefaultRuntimeResourceBoundarySettings()
+	for _, route := range []string{
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"fe80::1","dev":"veth0123abc","protocol":"kernel","type":"local"}`,
+		`{"dst":"ff00::/8","dev":"veth0123abc","protocol":"kernel","type":"multicast"}`,
+	} {
+		if err := validateRuntimeBoundaryRoutes([]byte(`[`+route+`]`), settings); err != nil {
+			t.Fatal("isolated peer kernel route rejected", route, err)
+		}
+	}
+	for _, route := range []string{
+		`{"dst":"default","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"192.0.2.0/24","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"2001:db8::/64","dev":"veth0123abc","protocol":"kernel"}`,
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"static"}`,
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"kernel","gateway":"fe80::1"}`,
+		`{"dst":"ff00::/8","dev":"veth0123abc","protocol":"kernel","type":"unicast"}`,
+		`{"dst":"fe80::1","dev":"veth0123abc","protocol":"kernel","type":"unicast"}`,
+		`{"dst":"fe80::/64","dev":"veth0123abc","protocol":"kernel","nexthops":[{"dev":"lo"}]}`,
+	} {
+		if err := validateRuntimeBoundaryRoutes([]byte(`[`+route+`]`), settings); err == nil {
+			t.Fatal("routable or untrusted peer route admitted", route)
 		}
 	}
 }

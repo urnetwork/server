@@ -101,7 +101,7 @@ func competitionExecutorQualificationSha256(settings *Settings) string {
 	if settings.DistributedEvaluationPolicy != nil && settings.executorHostId != "" {
 		for _, host := range settings.DistributedEvaluationPolicy.Hosts {
 			if host.HostId == settings.executorHostId && host.SlotId == settings.executorSlotId {
-				return host.QualificationSha256
+				return competitionExecutorControlHost(settings, host).QualificationSha256
 			}
 		}
 		return ""
@@ -126,14 +126,16 @@ func competitionDistributedEnabled(settings *Settings) bool {
 // Contains no production vault, database, blob-store or seed-key settings.
 // SSH identity is a dedicated forced-command role, never an operator agent.
 type competitionExecutorConnection struct {
-	HostId             string `json:"host_id"`
-	AgentCommand       string `json:"agent_command"`
-	AgentCommandSha256 string `json:"agent_command_sha256,omitempty"`
-	AgentConfigPath    string `json:"agent_config_path"`
-	AgentConfigSha256  string `json:"agent_config_sha256,omitempty"`
-	SshEndpoint        string `json:"ssh_endpoint,omitempty"`
-	SshIdentityFile    string `json:"ssh_identity_file,omitempty"`
-	SshKnownHostsFile  string `json:"ssh_known_hosts_file,omitempty"`
+	HostId                  string `json:"host_id"`
+	EvaluatorCommandSha256  string `json:"evaluator_command_sha256,omitempty"`
+	AgentConfigSnapshotPath string `json:"agent_config_snapshot_path,omitempty"`
+	AgentCommand            string `json:"agent_command"`
+	AgentCommandSha256      string `json:"agent_command_sha256,omitempty"`
+	AgentConfigPath         string `json:"agent_config_path"`
+	AgentConfigSha256       string `json:"agent_config_sha256,omitempty"`
+	SshEndpoint             string `json:"ssh_endpoint,omitempty"`
+	SshIdentityFile         string `json:"ssh_identity_file,omitempty"`
+	SshKnownHostsFile       string `json:"ssh_known_hosts_file,omitempty"`
 }
 
 // Operational bounds belong to the coordinator owner. No nonpositive bound
@@ -220,6 +222,9 @@ func ConfigureCompetitionDistributedCoordinator(settings *Settings, path, expect
 			return errors.New("coordinator connection is not an approved fixed agent command")
 		}
 		seen[connection.HostId] = true
+		if err := validateCompetitionExecutorEvaluatorConnection(connection); err != nil {
+			return err
+		}
 		if host.Transport == "ssh" {
 			if !competitionAgentEndpointPattern.MatchString(connection.SshEndpoint) {
 				return errors.New("invalid dedicated executor SSH endpoint")

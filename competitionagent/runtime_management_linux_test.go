@@ -3,12 +3,52 @@
 package competitionagent
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// A vanished proc property must retain process provenance through descriptor
+// reads; a missing cgroup property must never become an exited-helper waiver.
+func TestRuntimeResourceBoundaryManagementMissingPropertyProvenance(t *testing.T) {
+	for _, property := range []string{"stat", "cpuset.cpus"} {
+		fixture := newRuntimeBoundaryTest(t)
+		_, _, _, procPath, groupPath := newRuntimeManagementFileTest(t)
+		proc, err := os.Open(procPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer proc.Close()
+		group, err := os.Open(groupPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer group.Close()
+		parent := procPath
+		if property == "cpuset.cpus" {
+			parent = groupPath
+		}
+		if err := os.Remove(filepath.Join(parent, property)); err != nil {
+			t.Fatal(err)
+		}
+		_, observationErr := readRuntimeBoundaryManagementDescriptors(proc, group, "/proc/12345", fixture.settings, false)
+		if !errors.Is(observationErr, os.ErrNotExist) {
+			t.Fatal("missing kernel property lost its cause", observationErr)
+		}
+		calls := 0
+		reconciled := reconcileRuntimeBoundaryProcessExit(observationErr, 12345, func(int) (bool, error) { calls++; return true, nil })
+		if property == "stat" {
+			if reconciled != nil || calls != 1 {
+				t.Fatal("owned proc disappearance was not reconciled", reconciled, calls)
+			}
+		} else if reconciled == nil || calls != 0 {
+			t.Fatal("missing cgroup evidence was waived", reconciled, calls)
+		}
+	}
+}
 
 // A correct private namespace is independent of its processor/cgroup role.
 func runtimeManagementTestFacts() (runtimeBoundaryUnit, runtimeBoundaryManagementFacts) {
@@ -74,6 +114,7 @@ func TestRuntimeResourceBoundaryManagementCorrectNamespaceCannotHideWrongProcess
 	units := map[string]runtimeBoundaryUnit{}
 	for index, name := range []string{runtimeBoundaryKeeperUnitName, runtimeBoundaryEngineUnitName, runtimeBoundaryContainerdUnitName} {
 		participant := unit
+		participant.MountNamespace = runtimeBoundaryNamespaceId{Device: 4, Inode: 301}
 		participant.Pid, participant.Name = 120+index, name
 		units[name] = participant
 	}
@@ -214,7 +255,7 @@ func TestRuntimeResourceBoundaryManagementHeldDescriptorsIgnorePathReplacement(t
 	if err := os.WriteFile(filepath.Join(groupPath, "cpuset.cpus.effective"), []byte("0-4\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	facts, err := readRuntimeBoundaryManagementDescriptors(proc, group, fixture.settings, false)
+	facts, err := readRuntimeBoundaryManagementDescriptors(proc, group, procPath, fixture.settings, false)
 	if err != nil {
 		t.Fatal("captured directories followed replacement paths", err)
 	}

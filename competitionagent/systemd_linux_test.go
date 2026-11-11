@@ -77,11 +77,34 @@ func TestSystemdDockerOwnerAndEvaluatorHaveIndependentBoundedRoles(t *testing.T)
 	launch.DeadlineAt = now.Add(6 * time.Minute)
 	args, err = systemdLaunchArguments(launch, settings)
 	if err != nil || !slices.Contains(args, "--execute="+runId) || !slices.Contains(args, "--property=BindsTo="+dockerOwnerUnitName(runId)) ||
-		!slices.Contains(args, "--property=After="+dockerOwnerUnitName(runId)) || !slices.Contains(args, "--property=RuntimeMaxSec=360.000000s") {
+		!slices.Contains(args, "--property=RuntimeMaxSec=360.000000s") {
 		t.Fatal("evaluator escaped its exact owner or original job clock", args, err)
 	}
 	launch.Role, launch.UnitName = "docker-owner", dockerOwnerUnitName(runId)
 	if _, err := systemdLaunchArguments(launch, settings); err == nil {
 		t.Fatal("Docker owner accepted a reverse dependency")
+	}
+}
+
+// Cleanup synchronously joins the owner from evaluator ExecStopPost. Systemd
+// reverses After at stop: After=owner would make that owner stop wait for the
+// callback itself. Use the actual launch argv to forbid that dependency cycle;
+// the separate ready barrier and runtime BindsTo ownership remain required.
+func TestSystemdPostStopOwnerJoinHasNoReverseOrderingDependency(t *testing.T) {
+	settings := DefaultAgentSettings()
+	runId := strings.Repeat("a", 64)
+	owner := dockerOwnerUnitName(runId)
+	launch := Launch{UnitName: unitName(runId), RunId: runId, OwnerUnitName: owner, ConfigPath: "/synthetic/agent.json", BaseDirectory: "/synthetic/runtime", Agent: Pin{Path: "/synthetic/agent"}, DeadlineAt: settings.Now().Add(time.Minute)}
+	args, err := systemdLaunchArguments(launch, settings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(args, "--property=BindsTo="+owner) {
+		t.Fatal("runtime owner loss no longer cancels evaluator")
+	}
+	for _, argument := range args {
+		if after, ok := strings.CutPrefix(argument, "--property=After="); ok && slices.Contains(strings.Fields(after), owner) {
+			t.Fatal("owner stop waits for the evaluator callback that joins that owner")
+		}
 	}
 }

@@ -301,6 +301,12 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 	}
 	for _, key := range strings.Split(managementSshProperties, ",") {
 		if _, found := values[key]; !found {
+			// PID1 omits the unset command property for a nonexistent unit.
+			// It is never optional for an actual invocation.
+			if key == "ExecStart" && values["LoadState"] == "not-found" {
+				values[key] = ""
+				continue
+			}
 			return unit, errors.New("managed SSH unit properties are incomplete")
 		}
 	}
@@ -464,7 +470,7 @@ func readManagementSshFile(parent *os.File, name string, maximum, magic int64) (
 	defer file.Close()
 	info, err := file.Stat()
 	var filesystem syscall.Statfs_t
-	if err != nil || !info.Mode().IsRegular() || maximum <= 0 || syscall.Fstatfs(int(file.Fd()), &filesystem) != nil || magic != 0 && filesystem.Type != magic {
+	if err != nil || !info.Mode().IsRegular() || maximum <= 0 || syscall.Fstatfs(int(file.Fd()), &filesystem) != nil || magic != 0 && int64(filesystem.Type) != magic {
 		return nil, errors.New("managed SSH native evidence changed its filesystem or type")
 	}
 	content, err := io.ReadAll(io.LimitReader(file, maximum+1))

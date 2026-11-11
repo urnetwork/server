@@ -10,7 +10,11 @@ subevaluation_ownership_init() {
     subevaluation_preflight_cgroup=""
     subevaluation_docker_args=()
     subevaluation_run_label_args=()
+    subevaluation_core_args=()
     subevaluation_probe_args=()
+    # Legacy identity calls supply their own security flags; scoped probes
+    # already include them and must not duplicate Docker's list-valued options.
+    subevaluation_legacy_probe_args=(--network none --read-only --cap-drop ALL --security-opt no-new-privileges:true)
     subevaluation_management_args=()
     subevaluation_compose_args=()
     subevaluation_cleanup_filter_args=()
@@ -48,13 +52,13 @@ subevaluation_ownership_init() {
     subevaluation_preflight_cgroup="urnetwork-evaluation-${token:0:32}-preflight.slice"
     export URNETWORK_SUBEVALUATION_BRIDGE_NAME="unev-${subevaluation_run_id:0:10}"
     subevaluation_management_args=(--cpuset-cpus "${URNETWORK_SUBEVALUATION_MANAGEMENT_CPUSET:-}")
+    subevaluation_core_args=(--ulimit core=1:1 --security-opt "seccomp=$URNETWORK_SUBEVALUATION_CORE_PROFILE")
     subevaluation_docker_args=(
         --label "com.urnetwork.competition.job-id=$URNETWORK_SUBEVALUATION_JOB_ID"
         --label "com.urnetwork.competition.round-id=$URNETWORK_SUBEVALUATION_ROUND_ID"
         --label "com.urnetwork.competition.run-id=$subevaluation_run_id"
         --cgroup-parent "$subevaluation_preflight_cgroup"
-        --ulimit core=1:1
-        --security-opt "seccomp=$URNETWORK_SUBEVALUATION_CORE_PROFILE"
+        "${subevaluation_core_args[@]}"
     )
     subevaluation_probe_args=(
         --network none --read-only --cap-drop ALL
@@ -62,6 +66,7 @@ subevaluation_ownership_init() {
         --memory 4g --memory-swap 4g --pids-limit 1024
         "${subevaluation_management_args[@]}"
     )
+    subevaluation_legacy_probe_args=()
     subevaluation_run_label_args=(--label "com.urnetwork.competition.run-id=$subevaluation_run_id")
     subevaluation_compose_args=(--file "$directory/compose.subevaluation.yml")
     subevaluation_cleanup_filter_args=(
@@ -69,6 +74,42 @@ subevaluation_ownership_init() {
         --filter "label=com.urnetwork.competition.run-id=$subevaluation_run_id"
     )
     subevaluation_scoped=true
+}
+
+# Copy only a trusted pristine-image tree into a fresh private worker directory.
+# Docker's non-root unpacker applies readonly directory modes before children;
+# GNU tar defers restoration until extraction completes. No candidate archive
+# enters this path. Owner-write enables the subsequent Git checkout/patch step.
+evaluation_docker_copy_tree() {
+    if [[ "$subevaluation_scoped" = true ]]; then
+        evaluation_docker cp "$1" - | tar --extract --file=- --directory="$2" \
+            --no-same-owner --no-same-permissions --delay-directory-restore || return
+        chmod -R u+rwX -- "$2"
+    else
+        evaluation_docker cp "$1" "$2"
+    fi
+}
+
+# The compiler's remapped uid differs from the host worker that copied/committed
+# this tree. Seal it before the first candidate container, including cache-hit
+# identity probes. The private run ancestor remains 0700; binds remain readonly.
+evaluation_seal_build_source() {
+    [[ "$#" = 1 && -d "$1" && ! -L "$1" ]] || return 2
+    find "$1" -type d -exec chmod 0555 {} + || return
+    find "$1" -type f -perm /111 -exec chmod 0555 {} + || return
+    find "$1" -type f ! -perm /111 -exec chmod 0444 {} +
+}
+
+# Only the fixed top-level compiler workspace is excluded from diagnostic
+# snapshots. Same-named paths below candidate output remain fully validated.
+evaluation_diagnostic_find() {
+    local root="$1"
+    shift
+    if [[ "$subevaluation_scoped" = true ]]; then
+        evaluation_file find "$root" -path "$root/tracked-build" -prune -o \( "$@" \)
+    else
+        evaluation_file find "$root" "$@"
+    fi
 }
 
 # Only the root-pinned public role can route prospective Docker calls. Neither

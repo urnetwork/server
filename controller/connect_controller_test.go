@@ -622,7 +622,8 @@ func TestCreateContractCompanionFallback(t *testing.T) {
 
 		// Scenario 2: the ideal relationship mode is used when advertised
 		// (regression guard). The consumer advertises ProvideModeNetwork, so the
-		// same-network return uses Network directly (NoEscrow) with no companion
+		// same-network return uses Network directly, escrowed from the network's
+		// balance, with no companion
 		// fallback and no origin required.
 		{
 			networkId := newFundedNetwork()
@@ -710,6 +711,16 @@ func TestCreateContractRejectsInactiveClient(t *testing.T) {
 		ctx := context.Background()
 		networkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("inactive-contract-%s", networkId), server.NewId())
+		// network contracts escrow from the network's balance
+		now := server.NowUtc()
+		model.AddTransferBalance(ctx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now.Add(-time.Minute),
+			EndTime:               now.Add(24 * time.Hour),
+			StartBalanceByteCount: 64 * model.Mib,
+			BalanceByteCount:      64 * model.Mib,
+			NetRevenue:            model.UsdToNanoCents(1),
+		})
 
 		sourceId := server.NewId()
 		inactiveSourceId := server.NewId()
@@ -956,6 +967,16 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 		networkId := server.NewId()
 		userId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, fmt.Sprintf("test-%s", networkId), userId)
+		// network contracts escrow from the network's balance
+		now := server.NowUtc()
+		model.AddTransferBalance(ctx, &model.TransferBalance{
+			NetworkId:             networkId,
+			StartTime:             now.Add(-time.Minute),
+			EndTime:               now.Add(24 * time.Hour),
+			StartBalanceByteCount: 64 * model.Mib,
+			BalanceByteCount:      64 * model.Mib,
+			NetRevenue:            model.UsdToNanoCents(1),
+		})
 
 		newClient := func() server.Id {
 			clientId := server.NewId()
@@ -968,7 +989,8 @@ func TestCreateContractNetworkNormalizedCompanionStreamId(t *testing.T) {
 		provider := newClient()
 
 		// both peers advertise the network mode (and Stream, like real
-		// clients), so both directions settle as network no-escrow contracts
+		// clients), so both directions settle as network contracts, escrowed
+		// from the network's balance
 		for _, clientId := range []server.Id{client, provider} {
 			model.SetProvide(ctx, clientId, map[model.ProvideMode][]byte{
 				model.ProvideModeNetwork: networkKey,
@@ -1180,10 +1202,11 @@ func TestCreateContractEscrowForwardNoAutoJoin(t *testing.T) {
 // TestCreateContractCompanionNetworkNormalization guards the boundaries of the
 // companion -> network normalization: a companion request between same-network
 // peers where the destination advertises the network mode settles as a
-// non-companion network contract (no escrow), and nothing else does. A cross
-// network companion must never normalize — that would hand strangers the
-// no-escrow path — and a same-network destination that advertises only Stream
-// keeps the companion fallback.
+// non-companion network contract, escrowed from the network's balance, and
+// nothing else does. A cross network companion must never normalize — that
+// would hand strangers the network mode, which needs no origin — and a
+// same-network destination that advertises only Stream keeps the companion
+// fallback.
 func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
@@ -1232,7 +1255,8 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 		// Scenario 1: normalize. Same-network peers, destination advertises the
 		// network mode. The companion request settles as a non-companion network
 		// contract: no origin contract is needed (a real companion would reject
-		// without one), the priority is trusted, and no escrow is opened.
+		// without one), and it is escrowed from the network's balance at the
+		// escrow priority, like the forward direction.
 		{
 			networkId := newFundedNetwork()
 			source := newClient(networkId)
@@ -1256,9 +1280,20 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 				err := proto.Unmarshal(result.Contract.StoredContractBytes, storedContract)
 				connect.AssertEqual(t, err, nil)
 				// Transport normalization must preserve the original provider for
-				// subnet usage, even though no companion or escrow is stored.
+				// subnet usage, even though no companion is stored and the
+				// source funds it.
 				contractId, err := server.IdFromBytes(storedContract.ContractId)
 				connect.AssertEqual(t, err, nil)
+				var payerNetworkId *server.Id
+				var escrowByteCount model.ByteCount
+				var contractPriority int64
+				server.Db(ctx, func(conn server.PgConn) {
+					server.Raise(conn.QueryRow(ctx, `SELECT payer_network_id, priority, (SELECT COALESCE(sum(balance_byte_count),0)::bigint FROM transfer_escrow WHERE contract_id=$1) FROM transfer_contract WHERE contract_id=$1`, contractId).Scan(&payerNetworkId, &contractPriority, &escrowByteCount))
+				})
+				if payerNetworkId == nil || *payerNetworkId != networkId || escrowByteCount != model.ByteCount(storedContract.TransferByteCount) {
+					t.Fatalf("normalized return is not escrowed from the network: payer=%v escrowed=%d signed=%d", payerNetworkId, escrowByteCount, storedContract.TransferByteCount)
+				}
+				connect.AssertEqual(t, model.GetOpenTransferByteCount(ctx, networkId), openByteCount+escrowByteCount)
 				start := server.NowUtc()
 				connect.AssertEqual(t, model.CloseContract(ctx, contractId, source, 121, false), nil)
 				connect.AssertEqual(t, model.CloseContract(ctx, contractId, destination, 120, false), nil)
@@ -1268,12 +1303,12 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 				}
 				connect.AssertEqual(t, storedContract.Priority != nil, true)
 				if storedContract.Priority != nil {
-					connect.AssertEqual(t, int(*storedContract.Priority), int(model.TrustedPriority))
+					connect.AssertEqual(t, int64(*storedContract.Priority), contractPriority)
+					connect.AssertEqual(t, *storedContract.Priority != model.TrustedPriority, true)
 				}
 			}
 
-			// the normalized contract is no-escrow: the payer network's open
-			// escrow bytes are unchanged
+			// settled: the normalized contract's escrow is no longer open
 			connect.AssertEqual(t, model.GetOpenTransferByteCount(ctx, networkId), openByteCount)
 		}
 
@@ -1305,7 +1340,7 @@ func TestCreateContractCompanionNetworkNormalization(t *testing.T) {
 		// Scenario 3: no normalization across networks, even when the destination
 		// advertises the network mode. The relationship is Public, so the
 		// companion request must keep the companion Stream path. Normalizing here
-		// would grant strangers no-escrow contracts.
+		// would grant strangers the network mode, which needs no origin.
 		{
 			sourceNetworkId := newFundedNetwork()
 			destinationNetworkId := newFundedNetwork()

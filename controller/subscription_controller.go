@@ -202,13 +202,22 @@ type SubscriptionBalanceResult struct {
 	Experiments map[string]*model.ExperimentAssignment `json:"experiments,omitempty"`
 
 	// ----- crypto payments (crypto_pay_controller.go) -----
-	// CryptoAssets are the coins that are on and what each sells (the list of
-	// GET /pay/crypto/assets). Omitted when none is on, so a client older than
-	// crypto, or a deployment with crypto off, never shows a coin.
+	// CryptoAssets are the coins that can be paid with now and what each sells
+	// (the assets list of GET /pay/crypto/assets: never a coin whose quotes are
+	// refused for now, since every app offers each coin listed here). Omitted
+	// when there is none, so a client older than crypto, or a deployment with
+	// crypto off, never shows a coin.
 	CryptoAssets []*CryptoPaymentAsset `json:"crypto_assets,omitempty"`
+	// CryptoUnavailableAssets are the coins that are on but cannot be paid with
+	// now (the unavailable_assets list of GET /pay/crypto/assets), each with
+	// available false and its unavailable_reason, for an app that shows a coin
+	// greyed out (the "More coins" tab while all four of its coins are
+	// unavailable). Never offered. Omitted when there is none.
+	CryptoUnavailableAssets []*CryptoPaymentAsset `json:"crypto_unavailable_assets,omitempty"`
 	// CryptoTerm is the network's latest one-time crypto credit (Solana,
-	// Monero or Zcash) whose grace has not ended. Apps show the renewal notice
-	// while term_end_time <= now < grace_end_time, and never before.
+	// Monero, Zcash, Bittensor, Bitcoin or Ethereum) whose grace has not
+	// ended. Apps show the renewal notice while term_end_time <= now <
+	// grace_end_time, and never before.
 	CryptoTerm *CryptoTerm `json:"crypto_term,omitempty"`
 
 	// ----- failed renewals (subscription_stripe_dunning.go) -----
@@ -2575,8 +2584,12 @@ func HeliusWebhook(
 	// the reason the transaction was skipped -- reported as the result message for a
 	// single-transaction delivery, so a caller (and the existing tests) can see WHY
 	skipMessage := ""
+	// native SOL payments to SOL invoice addresses: the chain read credits
+	// them, so a delivery only brings that read forward (heliusHintNativeInvoices)
+	nativeHinted := 0
 	lookups := &solanaDbPaymentLookups{clientSession: clientSession}
 	for _, transaction := range transactions {
+		nativeHinted += heliusHintNativeInvoices(clientSession, transaction)
 		decision := solanaDecidePayment(transaction, lookups)
 
 		switch decision.action {
@@ -2639,6 +2652,9 @@ func HeliusWebhook(
 		return nil, firstErr
 	}
 
+	if matched == 0 && 0 < nativeHinted {
+		return &HeliusWebhookResult{Message: fmt.Sprintf("%d SOL invoice payments to read", nativeHinted)}, nil
+	}
 	if matched == 0 {
 		glog.Infof("HeliusWebhook: no matching payments found for %v", transactions)
 		// a single-transaction delivery keeps its specific reason; a batch with
@@ -2649,6 +2665,51 @@ func HeliusWebhook(
 		return &HeliusWebhookResult{Message: "No matching payments"}, nil
 	}
 	return &HeliusWebhookResult{Message: fmt.Sprintf("Processed %d matching payments", matched)}, nil
+}
+
+// heliusHintNativeInvoices is the webhook's native branch: the native SOL
+// transfers of a delivered transaction to SOL invoice addresses (each SOL
+// invoice has a Coinbase deposit address of its own) are read on the SOL
+// scanner's next scan, whatever the invoice's age, and that read of the chain
+// at the finalized commitment credits them (crypto_pay_solana_native.go).
+// The delivery itself credits nothing and changes nothing of the USDC
+// decision. Helius delivers a per-invoice address's transactions only when the
+// address is on its webhook; the scanner's polling is the source of truth
+// either way. Returns how many invoice addresses the transaction paid. A
+// failed lookup is logged, never the delivery's failure: the scan still reads
+// every open invoice.
+func heliusHintNativeInvoices(clientSession *session.ClientSession, transaction *SolanaTransaction) (hinted int) {
+	if cryptoPayConfigFunc().Asset(model.CryptoAssetSol) == nil {
+		// native SOL is not switched on: there is no SOL invoice to hint
+		return 0
+	}
+	destinations := []string{}
+	for _, nativeTransfer := range transaction.NativeTransfers {
+		if nativeTransfer.Amount <= 0 || nativeTransfer.ToUserAccount == "" {
+			continue
+		}
+		address, err := cryptoSolanaAddressCanonical(nativeTransfer.ToUserAccount)
+		if err != nil || slices.Contains(destinations, address) {
+			continue
+		}
+		destinations = append(destinations, address)
+	}
+	if len(destinations) == 0 {
+		return 0
+	}
+	server.HandleError(func() {
+		invoiceAddresses := cryptoInvoiceAddresses(clientSession.Ctx, model.CryptoAssetSol, destinations)
+		if len(invoiceAddresses) == 0 {
+			return
+		}
+		cryptoAddScanHints(clientSession.Ctx, model.CryptoAssetSol, invoiceAddresses)
+		cryptoPayWebhookDeliveries.WithLabelValues("helius", model.CryptoAssetSol, "hinted").Inc()
+		hinted = len(invoiceAddresses)
+		glog.Infof("HeliusWebhook: transaction %s pays %d SOL invoice addresses; their scan reads them next\n", transaction.Signature, hinted)
+	}, func(err error) {
+		glog.Warningf("HeliusWebhook: could not look up the SOL invoice addresses of transaction %s: %s\n", transaction.Signature, err)
+	})
+	return
 }
 
 // What the webhook does with one transaction (solanaDecidePayment).

@@ -290,10 +290,10 @@ func testExchangeDataCapPausesStopsAndResumesTraffic(t *testing.T, delivery loca
 	})
 }
 
-// With enforcement on and a one-client tier, an ordinary client past the tier
-// is kicked at connection and creation answers upgrade_required. An Embed plan
-// allowance of three lifts both gates, and the allowance is itself enforced
-// once three clients are connected.
+// With enforcement on and a one-client free tier, an ordinary client past the
+// tier is kicked at connection and creation answers upgrade_required, since the
+// Pro tier (two) lifts it. An Embed plan allowance of three lifts both gates,
+// and the allowance is itself enforced once three clients are connected.
 func TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit(t *testing.T) {
 	if testing.Short() {
 		return
@@ -302,7 +302,7 @@ func TestConnectEmbedPlanAllowanceLiftsTheConcurrentLimit(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		defer model.Testing_SetEnforceConcurrentClients(true)()
-		defer model.Testing_SetConcurrentClientsLimit(1, 1)()
+		defer model.Testing_SetConcurrentClientsLimit(1, 2)()
 		defer model.Testing_ClearNetworkClientLimitCache()
 		testServer := newProviderIntentTestServer(t, ctx)
 		userSession := session.Testing_CreateClientSession(ctx, session.NewByJwt(testServer.networkId, testServer.userId, testServer.networkName, false, false))

@@ -27,6 +27,17 @@
 // providers without a success out of Online, since they are below every
 // ratio. The kill switch turns the ratio off with the rule.
 //
+// The rule, its ratio and the country guard read the general catalog's URL
+// outcomes alone (D4, ProviderEgressHealthCounts.General). Outcomes from a
+// provider's country list never decide them, even once a country site scores
+// in Quality and Speed: where the general catalog fails structurally (bw, kz
+// and ge on Main, 2026-11-07), a working country list would give every
+// provider a success and end the exemption while the general half kept every
+// provider under the ratio, so the whole country would leave Online; and a
+// failing country site would take providers whose general outcomes pass out
+// of Online. A country site on probation is in no score at all
+// (provider_egress_url_source.go).
+//
 // Each fleet pass (the score export, the location counts, the dashboard
 // counts) computes the country guard over its own population from the
 // evidence it already loaded, under its own settings, and holds the floor's
@@ -250,11 +261,11 @@ func providerOnlineSuccessShareBelow(succeeded int, measured int, share float64)
 // Counts a pass's population by published country, and decides each country
 // under the settings' floor and margin, holding the margin against the
 // previous guard: every provider the common gates admit, with current URL
-// evidence. Unmeasured providers say nothing about the probe and are left
-// out, and so are providers the common gates exclude, which are in no bucket
-// whatever their URLs. A nil previous guard decides by the plain floor. The
-// guard carries the settings' Online URL ratio, and counts the providers
-// below it, without deciding any country by it.
+// evidence from the general catalog. Unmeasured providers say nothing about
+// the probe and are left out, and so are providers the common gates exclude,
+// which are in no bucket whatever their URLs. A nil previous guard decides by
+// the plain floor. The guard carries the settings' Online URL ratio, and
+// counts the providers below it, without deciding any country by it.
 func newProviderOnlineSuccessBaseline(
 	filter providerCountFilter,
 	clientIdCountryCodes map[server.Id]string,
@@ -271,10 +282,13 @@ func newProviderOnlineSuccessBaseline(
 		countryCodeCounts:        map[string]providerOnlineSuccessCount{},
 	}
 	for clientId, countryCode := range clientIdCountryCodes {
-		if filter.hasHardEgressFailure(clientId) {
+		// A zero-carry verdict (provider_zero_carry.go) is no common gate
+		// here: its provider stays in the guard as measured without a
+		// success, so a verdict moves no country into or out of exemption.
+		if filter.hasCommonGateFailure(clientId) {
 			continue
 		}
-		counts, urlIndex := filter.urlIndex(clientId, settings)
+		counts, urlIndex := filter.onlineUrlIndex(clientId, settings)
 		if !urlIndex.Evidence {
 			continue
 		}

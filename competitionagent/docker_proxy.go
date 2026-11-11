@@ -56,6 +56,7 @@ type DockerProxy struct {
 	beforeContextOpen             func(string, string)
 	fileHandoff                   bool
 	hostFiles                     *hostFileBroker
+	runtimeBoundary               *RuntimeResourceBoundary
 	syncSpoolDirectory            func(string) error
 }
 
@@ -163,8 +164,8 @@ func newDockerProxy(plan DockerProxyPlan, settings DockerProxySettings, protecte
 			self.Close()
 			return nil, err
 		}
-		self.hostFiles.proveMap = self.proveHostNamespace
-		self.hostFiles.proveNetwork = self.proveHostNetwork
+		self.hostFiles.proveMap = self.proveHostNamespaceWithDiagnostics
+		self.hostFiles.proveNetwork = self.proveHostNetworkWithDiagnostics
 		self.hostFiles.beforePath = self.requireNoRunContainers
 		self.hostFiles.buildJoined = self.requireBuildOutputJoined
 	}
@@ -289,10 +290,11 @@ func (self *DockerProxy) Close() error {
 		}
 		self.stateLock.Unlock()
 		if inflight == 0 {
+			var journalErr error
 			if journal != nil {
-				return journal.Close()
+				journalErr = journal.Close()
 			}
-			return nil
+			return errors.Join(journalErr, self.runtimeBoundary.Close())
 		}
 		select {
 		case <-ctx.Done():
@@ -477,6 +479,10 @@ func (self *DockerProxy) forwardMutation(w http.ResponseWriter, r *http.Request,
 	if kind == "http" {
 		path, scopeErr := self.verifyMutationScope(r.Context(), r, bodyPath)
 		if scopeErr != nil {
+			if err := self.persistScopeRefusal(id, r, bodyDigest, bodyBytes, scopeErr); err != nil {
+				http.Error(w, "Docker refusal custody unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "Docker scope rejected", http.StatusForbidden)
 			return
 		}
@@ -634,6 +640,14 @@ func (self *DockerProxy) upstreamRequest(ctx context.Context, r *http.Request, p
 	request.Header = r.Header.Clone()
 	removeDockerHopHeaders(request.Header)
 	request.Body = file
+	if size == 0 {
+		// A non-nil reader with zero length becomes chunked on HTTP/1. Docker
+		// rejects that framing for bodyless actions even when it carries no bytes.
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		request.Body = http.NoBody
+	}
 	request.GetBody = nil
 	request.ContentLength = size
 	request.TransferEncoding = nil

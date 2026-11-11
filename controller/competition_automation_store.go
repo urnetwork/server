@@ -391,14 +391,14 @@ func (self PostgresStore) AutomationSeal(ctx context.Context, settings *Settings
 
 // A review replay returns the original response. A stale expected revision never creates a second replacement.
 func (self PostgresStore) RecordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest) (result *model.CompetitionIntegrityReviewResult, err error) {
-	if request.HandoffId != "" {
+	if request.HandoffId != "" || request.OfficialReviewOverride != nil {
 		return nil, ErrConflict
 	}
-	return self.recordIntegrityReview(ctx, settings, roundId, actorId, request, nil)
+	return self.recordIntegrityReview(ctx, settings, roundId, actorId, request, nil, nil)
 }
 
 // Only the independent operator import may select the timely completion clock.
-func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest, handoff *model.CompetitionReviewHandoffImport) (result *model.CompetitionIntegrityReviewResult, err error) {
+func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *Settings, roundId server.Id, actorId string, request model.CompetitionIntegrityReviewRequest, handoff *model.CompetitionReviewHandoffImport, official *model.CompetitionOfficialReviewImport) (result *model.CompetitionIntegrityReviewResult, err error) {
 	if !tokenNamePattern.MatchString(actorId) {
 		return nil, errors.New("authenticated reviewer identity is required")
 	}
@@ -420,7 +420,14 @@ func (self PostgresStore) recordIntegrityReview(ctx context.Context, settings *S
 			} else if request.HandoffId != "" {
 				panic(ErrConflict)
 			}
-			server.Raise(model.ValidateCompetitionIntegrityReview(request, *policy.AutomationPolicy))
+			if official != nil {
+				if handoff != nil {
+					panic(ErrConflict)
+				}
+				server.Raise(self.authorizeOfficialReviewInTx(ctx, tx, settings, actorId, *official, *policy.AutomationPolicy))
+			} else {
+				server.Raise(model.ValidateCompetitionIntegrityReview(request, *policy.AutomationPolicy))
+			}
 			var storedDigest string
 			var content []byte
 			loadErr = tx.QueryRow(ctx, `SELECT request_sha256,review_json FROM competition_integrity_review WHERE round_id=$1 AND actor_id=$2 AND idempotency_key=$3`, roundId, actorId, request.IdempotencyKey).Scan(&storedDigest, &content)

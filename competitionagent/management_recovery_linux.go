@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -104,15 +105,16 @@ func recoveryServiceTimeout(settings AgentSettings) (time.Duration, error) {
 	return total, nil
 }
 
-// Pinned unit text is closed as well as hashed. Extra programs, command prefixes,
-// environment files, namespaces and reverse dependency hooks cannot hide in it.
-func validateRecoveryServiceText(content []byte, config Config, policy *ManagementResourcePolicy, settings AgentSettings) error {
-	if policy == nil || int64(len(content)) > settings.ConfigBytes {
-		return errors.New("recovery service text exceeds its fixed role")
+// One owner supplies exact argv quoting, duration precision and resource values
+// to both provisioning and admission. Rendering proves no native readiness.
+func recoveryServiceTextProperties(config Config, policy *ManagementResourcePolicy, settings AgentSettings) (map[string]string, error) {
+	if policy == nil || !recoveryAuthorityPath(config.Agent.Path) || !recoveryAuthorityPath(config.configPath) ||
+		settings.ConfigBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 || settings.ContainmentCpuPeriodMicros <= 0 {
+		return nil, errors.New("recovery service omitted exact role or bounded settings")
 	}
 	timeout, err := recoveryServiceTimeout(settings)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	expected := map[string]string{
 		"Unit.Description": "Independent subevaluation recovery outside ordinary management ancestry",
@@ -128,6 +130,50 @@ func validateRecoveryServiceText(content []byte, config Config, policy *Manageme
 		"Service.StandardInput": "null", "Service.StandardOutput": "null", "Service.StandardError": "null",
 		"Service.PrivateNetwork": "no", "Service.PrivateUsers": "no", "Service.PrivateMounts": "no",
 		"Service.Environment": "\"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\" \"LANG=C\" \"LC_ALL=C\"",
+	}
+	return expected, nil
+}
+
+// Generates inert unit bytes from the same closed contract admission checks.
+// No file is written, service started, host inspected or qualification granted.
+func RenderRecoveryService(agentPath, configPath string, policy ManagementResourcePolicy, settings AgentSettings) ([]byte, error) {
+	if err := ValidateManagementResourcePolicy(policy, DefaultManagementBoundarySettings()); err != nil {
+		return nil, err
+	}
+	expected, err := recoveryServiceTextProperties(Config{Agent: Pin{Path: agentPath}, configPath: configPath}, &policy, settings)
+	if err != nil {
+		return nil, err
+	}
+	var content strings.Builder
+	for _, section := range []string{"Unit", "Service"} {
+		content.WriteString("[" + section + "]\n")
+		keys := []string{}
+		for key := range expected {
+			if strings.HasPrefix(key, section+".") {
+				keys = append(keys, key)
+			}
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			content.WriteString(strings.TrimPrefix(key, section+".") + "=" + expected[key] + "\n")
+		}
+		content.WriteByte('\n')
+	}
+	if int64(content.Len()) > settings.ConfigBytes {
+		return nil, errors.New("rendered recovery service exceeds its owner document bound")
+	}
+	return []byte(content.String()), nil
+}
+
+// Pinned unit text is closed as well as hashed. Extra programs, command prefixes,
+// environment files, namespaces and reverse dependency hooks cannot hide in it.
+func validateRecoveryServiceText(content []byte, config Config, policy *ManagementResourcePolicy, settings AgentSettings) error {
+	if int64(len(content)) > settings.ConfigBytes {
+		return errors.New("recovery service text exceeds its fixed role")
+	}
+	expected, err := recoveryServiceTextProperties(config, policy, settings)
+	if err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	section := ""

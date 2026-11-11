@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-09T23:59:47Z",
+  "status": "BOTH_NATIVE_MAPS_AND_GOOFE_RESOURCE_RECHECK_PASSED",
+  "epoch2_open": false,
+  "grading_activated": false,
+  "source_image_changed": false,
+  "observations": {
+    "both_hosts": "Trusted frozen-image cat probes failed before executing any code; non-root saw permission denied and the root control saw missing file. Offline Docker copy verified the executable exists with mode0755 in the image. All named probe containers auto-removed; explicit image-inspection container removed afterward.",
+    "sille_mount_namespace_inodes": {"dockerd": 4026532992, "containerd": 4026534850},
+    "goofe_mount_namespace_inodes": {"dockerd": 4026533138, "containerd": 4026533137},
+    "explanation": "Independent systemd BindPaths directives create separate slave mount views. Docker's overlay image mount is not visible to containerd's runtime, although both see the same underlying quota-backed shim-socket directory and the same network namespace. Prior admission proved the latter two but omitted image mount identity."
+  },
+  "correction": {
+    "startup": "Only containerd creates the private /run/containerd bind. A separate fixed root-only agent startup role obtains the pinned live containerd mount namespace by descriptor, verifies process birth and network identity, then execs only the pinned Docker/config pair through pinned nsenter. No caller-selected program, numeric-PID namespace join, candidate or SSH authority is accepted.",
+    "admission": "Capture and every recheck require Docker/containerd to share one nonempty mount identity. Socket peers cannot change that captured identity, and managed shims must share their owning containerd's mount view.",
+    "tests": "Deterministic split/missing/device-different mount identities are refused while same-network/same-mount controls pass. Deployment template enforces the fixed startup role rather than a second engine BindPaths. CLI refuses extra arguments and mixed roles; unsupported platforms remain fail closed.",
+    "focused_race_repetitions": 3,
+    "focused_race": "passed",
+    "full_agent_and_cli_packages": "passed once; agent37.156s, CLI0.006s",
+    "go_vet_agent_and_cli": "passed",
+    "native_corrected_launch": "Installed on both idle private engines. Frozen image now executes as65532:65532 with network none, read-only rootfs, all capabilities dropped, pinned seccomp, core1, management CPU/memory/PID bounds. Actual UID/GID maps both0:200000:65536. All trusted probes removed; no submission was executed.",
+    "installed_agent_source_commit": "12727808e",
+    "installed_agent_sha256": "0f09a084db36cf2a30721c184502c412f5d30a8d96a52fa4b745f014b8ae9596",
+    "sille_shared_mount_namespace_inode": 4026534850,
+    "goofe_shared_mount_namespace_inode": 4026533137,
+    "sille_namespace_only_receipt": "/etc/urnetwork/competition-sille-namespace-proof-20261109-v3/containment.partial.json",
+    "sille_namespace_only_receipt_sha256": "23cc1a896bacd23d9327f79946a7943264c72a2d41a253d9070697a70b0e46ff",
+    "goofe_namespace_only_receipt": "/etc/urnetwork/competition-goofe-namespace-proof-20261109-v3/containment.partial.json",
+    "goofe_namespace_only_receipt_sha256": "e3a83fe3fe524686d979ed9f53b51c2f99206f71e9b996b80ee031938b37e7b7",
+    "sille_boundary_sha256": "daf0aedd6e288ff614651ed56fa01017f783e740a120167c704149af4d6c80a5",
+    "goofe_boundary_sha256": "bf5d732935ee9803484c1767442113cb1e1559649d817c99f495adbd7b55306f",
+    "goofe_native_resource_boundary_and_immediate_recheck": "passed with current mount-identity verifier; explicitly grading_qualified=false and baseline_ready=false"
+  },
+  "adjacent_native_failure": {
+    "check": "Fresh Goofe resource verification with the corrected native verifier refuses daemon cwd outside quota.",
+    "actual_cwd": "Before correction, Docker cwd readlink was /, but its actual device/inode matched the candidate root, not host /. Thus the string alone was not proof of writes escaping quota.",
+    "cause": "nsenter --wd opens cwd before entry and retained a mount reference from the original systemd namespace. That mount was unreachable by its canonical path in the joined view. --wdns resolves cwd after entry instead. Both installed util-linux versions explicitly support --wdns.",
+    "followup": "Pinned startup now uses --wdns=<candidate_root>. Deployed immutable v3 on both hosts. Their daemon cwd resolves to the canonical candidate root and the frozen image still executes. Focused race3 and full agent/CLI suites passed,35.840s and0.006s. Goofe's native resource verification plus recheck passed without relaxing any guard.",
+    "diagnostic_evidence": "/mnt/data/urnetwork-subeval-sille/state/startup-cwd-20261109-v1.trace and v2.trace; bounded root-only startup diagnostics were stopped and the canonical private service restored. No candidate or primary daemon was involved.",
+    "grading_qualified": false
+  },
+  "remaining": "Complete final protected startup/recovery/control inventories and genuine host fingerprints before freezing the two-host policy. Keep startup metadata independent of final execution/recovery authority so final recovery-unit pins cannot invalidate the bootstrap loader. Namespace-only receipts cannot prove pressure, baseline or grading admission. Sille core-pattern approval remains pending separately."
+}

@@ -144,7 +144,9 @@ func systemdLaunchArguments(launch Launch, settings AgentSettings) ([]string, er
 		if launch.Role != "" || launch.OwnerUnitName != dockerOwnerUnitName(launch.RunId) {
 			return nil, errors.New("evaluator must bind only its own independent Docker service")
 		}
-		args = append(args, "--property=BindsTo="+launch.OwnerUnitName, "--property=After="+launch.OwnerUnitName)
+		// The explicit ready RPC already orders startup. After would reverse
+		// stop ordering and block owner.Stop inside this unit's ExecStopPost.
+		args = append(args, "--property=BindsTo="+launch.OwnerUnitName)
 	}
 	if launch.ManagementCpuSet != "" {
 		if !dockerProxyCpuSetPattern.MatchString(launch.ManagementCpuSet) || settings.ManagementMemoryBytes <= 0 || settings.ManagementCpuQuotaPercent <= 0 {

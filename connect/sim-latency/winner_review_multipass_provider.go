@@ -392,7 +392,9 @@ func winnerMultipassVisibleTransport(content []byte, contentType string, maximum
 							return false
 						}
 						for field, value := range configuration {
-							if field == "effort" && (value == "high" || value == "xhigh") || (field == "summary" || field == "generate_summary") && value == nil {
+							// Newer provider schemas echo these optional configuration
+							// fields as null; they contain no private model output.
+							if field == "effort" && (value == "high" || value == "xhigh") || (field == "summary" || field == "generate_summary" || field == "context" || field == "mode") && value == nil {
 								continue
 							}
 							return false

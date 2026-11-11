@@ -306,10 +306,14 @@ func (self *Agent) makeDockerOwnerPlan(manifest StartManifest, plan cleanupPlan,
 			return nil, err
 		}
 	}
+	workerSocket, buildSocket, err := dockerRunSocketPaths(filepath.Join(self.config.BaseDirectory, "clients"), manifest.Identity.RunId)
+	if err != nil {
+		return nil, err
+	}
 	owner := &DockerProxyPlan{Schema: Schema, RunId: manifest.Identity.RunId, JobId: manifest.Identity.JobId, RoundId: manifest.Identity.RoundId,
 		Attempt: manifest.Identity.Attempt, DeadlineAt: manifest.Identity.DeadlineAt, BaseDirectory: self.config.BaseDirectory, TrustedOperatorUid: operatorUid,
 		StateDirectory: filepath.Join(self.stateDirectory(manifest.Identity.RunId), "docker-owner"), ScratchDirectory: filepath.Join(self.config.DockerRole.ScratchDirectory, manifest.Identity.RunId),
-		SocketPath: filepath.Join(self.config.BaseDirectory, "clients", manifest.Identity.RunId, "docker.sock"), BuildSocketPath: filepath.Join(self.config.BaseDirectory, "clients", manifest.Identity.RunId, "build.sock"),
+		SocketPath: workerSocket, BuildSocketPath: buildSocket,
 		ContextRoot: self.workDirectory(manifest.Identity.RunId), UpstreamSocketPath: self.config.DockerSocketPath, Docker: self.config.Docker, Buildx: self.config.DockerRole.Buildx,
 		Dockerfile: self.config.DockerRole.Dockerfile, BaseImageDigest: manifest.EvaluatorImageDigest, CgroupNames: append([]string(nil), plan.CgroupNames...),
 		StockSeccompProfile: self.config.DockerRole.StockSeccompProfile, CandidateCoreProfile: self.config.DockerRole.CandidateCoreProfile,
@@ -457,6 +461,16 @@ func (self *Agent) RunDockerOwner(ctx context.Context, runId string) error {
 		return err
 	}
 	defer proxy.Close()
+	if self.protected {
+		boundary, err := self.runtimeAdmission(ctx)
+		if err != nil {
+			return err
+		}
+		if err := proxy.bindRuntimeBoundary(boundary); err != nil {
+			_ = boundary.Close()
+			return err
+		}
+	}
 	if proxy.Snapshot().AdmissionsClosed {
 		return errors.New("persisted Docker custody is already closed or uncertain")
 	}

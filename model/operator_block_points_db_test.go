@@ -170,11 +170,12 @@ func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
 		// a completed block whose reliability evidence is retained, after a
-		// boundary inside the block before it (operatorBlockPointsTestBlock)
-		block, now := operatorBlockPointsTestBlock(server.NowUtc())
+		// boundary inside the block before it, or late in the open block inside
+		// the block itself (operatorBlockPointsTestBlock)
+		block, now, cutoff := operatorBlockPointsTestBlock(server.NowUtc())
 		blockStart := operatorBlockStart(block)
 		blockEnd := blockStart.Add(SubnetBlockDuration)
-		cutoff := blockStart.Add(-2 * 24 * time.Hour)
+		windowStart, windowEnd, _ := OperatorBlockPointsWindow(block, cutoff)
 		useOperatorBlockPointsTransition(t, cutoff)
 
 		config := operatorBlockPointsTestConfig()
@@ -204,7 +205,7 @@ func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 		payer.contract(t, ctx, providerB, clientB, legacyClose, legacyClose, 5*1024*1024, UsdToNanoCents(1))
 		// the block's traffic: three times as much through A as through B,
 		// swept on both sides of a settlement that closed in the block
-		inBlock := blockStart.Add(24 * time.Hour)
+		inBlock := operatorBlockPointsTestTrafficTime(block, cutoff)
 		postCutoff := []server.Id{
 			payer.contract(t, ctx, providerA, clientA, inBlock, inBlock, 2*gib, 0),
 			payer.contract(t, ctx, providerA, clientA, inBlock.Add(time.Hour), inBlock.Add(time.Hour), gib, 0),
@@ -236,7 +237,9 @@ func TestOperatorBlockPointsAwardPostCutoffBlock(t *testing.T) {
 
 		// the plan's rule over the block: one paying network, so its subsidy
 		// splits over A and B by bytes
-		scale := float64(SubnetBlockDuration) / float64(config.Duration())
+		// over the block's window past the boundary (ComputeOperatorBlockPoints'
+		// SubsidyScale), the whole block unless the boundary is inside it
+		scale := min(float64(windowEnd.Sub(windowStart))/float64(config.Duration()), 1.0)
 		subsidyUsd := scale * config.MinPayoutUsd
 		payoutA := UsdToNanoCents(float64(3*gib) / float64(4*gib) * subsidyUsd / 1)
 		payoutB := UsdToNanoCents(float64(gib) / float64(4*gib) * subsidyUsd / 1)

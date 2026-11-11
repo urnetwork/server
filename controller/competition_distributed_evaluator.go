@@ -176,6 +176,10 @@ func (self *competitionAgentEvaluator) cancelExpiredRun(settings *Settings, job 
 // workload/patch/shared baseline. The seed exists solely in the signed request,
 // which crosses encrypted transport and is never included in MinIO artifacts.
 func prepareCompetitionAgentBundle(ctx context.Context, settings *Settings, job *queuedJob, host CompetitionExecutorHostPolicy) (manifest competitionagent.StartManifest, directory string, resultErr error) {
+	manifest, err := competitionAgentManifestForJob(settings, job, host)
+	if err != nil {
+		return manifest, "", err
+	}
 	providers, err := readRoundWorkload(ctx, settings, &job.Round)
 	if err != nil {
 		return manifest, "", err
@@ -194,22 +198,6 @@ func prepareCompetitionAgentBundle(ctx context.Context, settings *Settings, job 
 			_ = os.RemoveAll(directory)
 		}
 	}()
-	startedAt := job.StartedAt
-	if job.EvaluationCycle > 0 {
-		startedAt = job.CycleStartedAt
-	}
-	if startedAt == nil || job.ExecutionDeadline == nil {
-		return manifest, directory, ErrConflict
-	}
-	manifest = competitionagent.StartManifest{Identity: competitionagent.Identity{HostId: host.HostId, RunId: competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount),
-		JobId: job.JobId.String(), RoundId: job.RoundId.String(), RoundEpoch: job.Round.Epoch, SourceEpoch: evaluationSourceEpoch(&job.Round), Cycle: job.EvaluationCycle, Attempt: job.AttemptCount,
-		StartedAt: startedAt.UTC(), DeadlineAt: job.ExecutionDeadline.UTC()}, EvaluatorImageDigest: job.EvaluatorImageDigest,
-		EvaluatorCommandSha256: settings.EvaluatorCommandSha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256,
-		QualificationSha256: host.QualificationSha256, ConfigLocalSha256: settings.EvaluationPolicy.ConfigLocalSha256,
-		VaultLocalSha256: settings.EvaluationPolicy.VaultLocalSha256, RoundBaselineSha256: job.RoundBaseline.Sha256}
-	if err := manifest.Identity.Validate(settings.distributedCoordinator.Config.Settings.Limits); err != nil {
-		return manifest, directory, err
-	}
 	for _, input := range []struct {
 		name    string
 		content []byte
@@ -336,7 +324,7 @@ func authenticateDistributedCompetitionAttempt(ctx context.Context, settings *Se
 		return failure("artifact_authentication_failed", "executor changed the canonical patch or omitted stderr")
 	}
 	manifest := artifactManifest{Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(), SourceEpoch: evaluationSourceEpoch(&job.Round), Attempt: job.AttemptCount,
-		EvaluatorImageDigest: job.EvaluatorImageDigest, ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest, EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
+		EvaluatorImageDigest: job.EvaluatorImageDigest, ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest, EvaluatorCommandSha256: start.EvaluatorCommandSha256,
 		RequestSha256: response.RequestSha256, PatchSha256: patchHash, StderrSha256: stderrHash, ResultSha256: hex.EncodeToString(resultDigest[:]), Security: result.Security, Artifacts: artifacts, Executor: executor}
 	if err := sealArtifactDirectory(directory); err != nil || settings.artifactArchive == nil {
 		return EvaluationOutcome{Error: terminalInfrastructureError("artifact_archive_unavailable", "authenticated executor evidence could not be sealed and retained")}
@@ -440,7 +428,7 @@ func archiveDistributedCompetitionFailure(ctx context.Context, settings *Setting
 		return EvaluationOutcome{Error: failure}
 	}
 	manifest := artifactManifest{Schema: 1, JobId: job.JobId.String(), RoundId: job.RoundId.String(), SourceEpoch: evaluationSourceEpoch(&job.Round), Attempt: job.AttemptCount,
-		EvaluatorImageDigest: job.EvaluatorImageDigest, ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest, EvaluatorCommandSha256: settings.EvaluatorCommandSha256,
+		EvaluatorImageDigest: job.EvaluatorImageDigest, ApiImageDigest: job.ApiImageDigest, WorkerImageDigest: job.WorkerImageDigest, EvaluatorCommandSha256: start.EvaluatorCommandSha256,
 		RequestSha256: response.RequestSha256, PatchSha256: patchHash, StderrSha256: stderrHash, Executor: executor, Failure: failure, Artifacts: []evaluationArtifact{receipt}}
 	archived, err := settings.artifactArchive.ArchiveAttempt(ctx, settings, job, directory, manifest)
 	if err != nil {

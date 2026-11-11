@@ -8625,7 +8625,7 @@ reap share edges and sample sufficiency, malformed frames and failed reads,
 the list's window and name rules, inventory authority and cancellation.
 
 ACTION: retention horizons are owner decisions. Never drop
-`client_reliability` days inside the 14-day retention by hand: operator block
+`client_reliability` days inside the 10-day retention by hand: operator block
 points read a completed block's window, and a missing reliability block cuts
 provider credit. VERIFY: a complete observation inside each line on the next
 runs (two for the sampled check).
@@ -8942,7 +8942,7 @@ minutes) drops a family's range once its upper bound is the family's declared
 transaction that detaches it; a family with its own task (`client_reliability`)
 drops through that task. Size is bounded only by those drops. This probe
 watches every registered family that drops ranges and names no dedicated probe
-(`RetentionSignal`): today `client_reliability` (14 days,
+(`RetentionSignal`): today `client_reliability` (10 days,
 `ClientReliabilityRetention`, the same cutoff §2.4g's
 `partition-retention-stuck` judges) and `provider_egress_health_history` (7
 days). The contract tables name §2.4i and
@@ -11300,9 +11300,11 @@ an exhausted payer's new contract is funded.
   `resuming` (healthy, zero cost held for one more check) and `charging`; the
   failures `measurement_failed`, `state_read_failed`, `publish_failed` and
   `superseded` publish nothing, and the published state ages out within its TTL.
-- `urnetwork_zero_escrow_contracts_total{kind="public"|"companion"}` on every
-  contract-creating service (api, connect, taskworker, proxy): the free
-  contracts actually created for exhausted payers.
+- `urnetwork_zero_escrow_contracts_total{kind="public"|"network"|"companion"}`
+  on every contract-creating service (api, connect, taskworker, proxy): the free
+  contracts actually created for exhausted payers. `network` counts plain
+  contracts between two clients of one network, which escrow from that
+  network's balance like public contracts since 2026-11-10.
 - `urnetwork_zero_contract_cost_reads_total{result}` on the same services: 15
   second cache refreshes, read only after an exhausted refusal. Only
   `zero_cost` lets that contract be free; `charging`, `missing`, `expired`,
@@ -19489,6 +19491,27 @@ Alert, WARN tier, five-minute cadence, when any of these holds:
   is missing, retains a stored retry error, or its current `run_at` is more
   than a whole `SiteRefreshInterval` overdue; the schedule is not a measured
   last-completion time or evidence that no worker holds the task;
+- **country site tally stale** (`egress-country-site-tally-stale`, frame
+  `oldest-day`): the oldest day of `provider_egress_country_site_tally`, the
+  country sites' pair tally, began longer ago than the retention every
+  refresh deletes to (`ProviderEgressCountrySiteTallyRetention`, eight days),
+  plus a day for the tally's day boundary, one `SiteRefreshInterval` and one
+  `SiteRefreshMaxTime` (the next run starts an interval after the last one
+  ends, and deletes after its candidate checks), and 30 minutes of slack: ten
+  days two hours at the defaults, following the budget if it grows. The oldest
+  day normally reaches nine to ten and a half days just before a delete, so an
+  older one means the deletes stopped. Every `RefreshEgressDestinations` run
+  deletes the expired days in its country-site step, whether it judges the
+  sites or skips them for a prober fault, so this is a refresh that is not
+  running (which `egress-site-refresh-not-running` names first) or one that
+  returns before that step: an unusable `qualityprobe.yml`, a budget refusal,
+  a seed failure or a drain mid-check, none of which another condition
+  reports. The tally then grows by about 500,000 rows a day until a run
+  deletes the backlog in one statement. Migration 947 creates the table, so
+  the schema preflight does not require it: until it exists the condition
+  reads nothing and emits nothing, not even a healthy finding, and an open
+  finding stays open. It reads only the minimum `tally_day`, through the
+  primary key;
 - **pool thin** (`egress-site-pool-thin`, frames `<class>/below-pool-size`
   and `<class>/candidates-exhausted`): a class's active pool is below
   `SitePoolSize` for that class, or no candidate is left to promote, so the
@@ -19657,7 +19680,8 @@ thresholds are the refresh task's own (`model.ProviderEgressSiteSettings`,
 the `settings` block of `egress-sites.yml`) beside the signal's
 `EgressSitePoolSettings` (the 24-hour refresh age, the backfill share and
 window, the guard window, the fewest loads a class's share is judged on,
-the unreachable share), so the monitor judges by the numbers the task acts on.
+the unreachable share, the country site tally's slack), so the monitor judges
+by the numbers the task acts on.
 
 ### 2.19c Derived-location health — the ping geometry and its calibration
 Probe: `derived-locations`
@@ -22589,6 +22613,35 @@ establish:
   retry idempotently to a verified destination or record an authorized support
   or refund disposition. Do not infer this failure from balance-code rows.
 
+The crypto invoice rail (mmm/BTCPAY.md §17, server docs/CRYPTO-PAY-API.md) adds
+four classes, aggregated per coin (`usdc_solana`, `zec`, `xmr`, `tao`, `btc`,
+`eth`, `sol`) from `crypto_payment_receipt` in review and `crypto_scan_cursor`.
+The count is distinct invoices; the ages are first-seen ages:
+
+- `crypto-sanctions-hold` (PAGE): before a TAO, Bitcoin, ETH or SOL credit the
+  scanner screened a sender against the newest `config/all/crypto/<release>/`
+  OFAC table and it matched (`sanctions_hold`). Nothing was credited and the
+  buyer sees only `screening`. Do not credit, refund or move the funds: the
+  owner and counsel decide each one, and only a hold they cleared is credited,
+  with `bringyourctl crypto credit --sanctions-cleared`.
+- `crypto-screening-unavailable` (PAGE): a payment's senders could not be
+  screened (no readable table, or a sender the table cannot read, such as a
+  Bitcoin input without an address); the scanner screens it again each scan
+  and never credits it unscreened. Restore the release's table (the cryptoctl
+  step of `build/all/run.sh`) rather than crediting by hand.
+- `crypto-payment-held` (WARN): a TAO transfer of a shape the rail does not
+  credit by itself (a batch, a proxy or multisig call, the EVM precompile, a
+  stake transfer: `transfer_shape`), or a payment to a shared deposit address
+  whose amount no open invoice was quoted (`amount_unmatched`). Confirm in the
+  Coinbase account that the coin arrived, then credit it with `bringyourctl
+  crypto credit`, or return it on the owner's go.
+- `crypto-scanner-stalled` (PAGE): a coin's scanner succeeded in the last week
+  and has not for 15 minutes (its chain source down or refusing the key, a vault file
+  gone, or the TAO reader paused on a runtime it cannot decode, gauge
+  `urnetwork_crypto_pay_tao_reader_paused`). The coin is listed as unavailable
+  and payments to its open invoices wait. `crypto_scan_cursor.last_error`
+  names the reason; never point a scanner at an older block range to recover.
+
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal
 start ages, not inferred deletion times. No account, email, network, payment
@@ -24071,6 +24124,63 @@ findings from a Taskworker host: an unreachable address family, a firewall or
 a host that refuses the server is the usual cause. Do not exclude a provider
 by hand on an undecided finding. Verify with a judged run under 20 minutes
 old, and no undecided finding, on two cadences.
+
+### 2.32 Zero-carry verdict spikes
+Probe: `zero-carry-verdicts`
+
+The Taskworker's zero-carry judge (`JudgeProviderZeroCarry`, a RunOnce task
+every two minutes on one Taskworker at a time, `model/provider_zero_carry.go`)
+takes a provider out of every bucket, FindProviders2 answer and
+provider-locations count when its contracts from at least three client
+networks carried nothing in a day, the sessions its clients reported idle left
+out, and every URL probe in eight hours failed. A verdict clears on a URL
+success the verdict did not see, a new app version on the device, or its
+expiry after 72 hours. In a country the URL-success rule exempts, honest
+providers fail the probe too, so nothing but the device's version or the
+expiry clears a verdict there. A burst of verdicts is therefore worth a look:
+either a release whose providers stopped carrying for current clients, or a
+platform fault that stopped acknowledgements and URL probes together.
+
+Every run counts what it made and cleared in
+`urnetwork_provider_zero_carry_changes_total{change}` (`created`, `expired`,
+`url_success`, `upgrade`, `gone`) and sets
+`urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds`.
+
+Implementation (5-minute cadence; `signal_zero_carry_verdicts.go` and
+`signal_zero_carry_verdicts_test.go`). One loopback Mimir read evaluated two
+minutes behind now:
+`sum(increase(urnetwork_provider_zero_carry_changes_total{job="taskworker",change="created"}[1h]))`
+and `max(urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{job="taskworker"})`.
+
+Classes (all WARN, target `<env>/zero-carry-verdicts`; only counts and ages
+are rendered, never a provider, a network or a country):
+
+- `zero-carry-verdict-spike` (sustain 2, never pages): at least 100 verdicts
+  made in the trailing hour, twice the whole standing population the judge's
+  first pass over Main made (52 on 2026-11-08). Resolved healthy below it;
+- `zero-carry-verdicts-unobservable` (visibility, sustain 2, never pages): a
+  failed or annotated Mimir read, no last-run series (a fleet built before
+  §2.32, as before the roll, mid-roll and after a rollback), no changes series
+  beside it, or an invalid sample (a run time ahead of the clock).
+
+The egress probes dashboard's zero-carry judge row (panels 159 to 161) charts
+the verdicts in force by country, the changes by why, the reads, and how the
+confirming reads ended. False-negative qualifiers: a process that ran the
+judge and is not scraped is not counted, so a missing Taskworker slot can hide
+part of a burst; a slow burst under 100 an hour never raises it, and the
+providers by country chart shows it.
+
+ACTION: read the Taskworker's `[zero-carry]` lines for the countries and the
+client versions of the new verdicts. A release of the provider app or of
+connect in the last day points to a build that stopped carrying: roll it back,
+and the verdicts clear as its devices report the old version. A platform fault
+clears outside exempt countries once URL probes succeed again. There is no
+runtime switch: inside exempt countries a wrong verdict holds until its expiry,
+and deleting `provider_zero_carry` rows alone does not help, because the judge
+re-creates them from the same day's contracts. To lift a wrong burst sooner,
+stop the judge first (roll the Taskworker back to a build without it), then
+delete the rows; ask the owner before either. Verify with fewer than 100
+verdicts made in the trailing hour on two cadences.
 
 ---
 

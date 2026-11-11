@@ -71,7 +71,10 @@ type Config struct {
 // All scheduling and diagnostic bounds belong to an agent instance. Nonpositive
 // values are invalid; Now is a test seam and is never accepted from a peer.
 type AgentSettings struct {
-	ControlTimeout   time.Duration
+	ControlTimeout time.Duration
+	// Native runtime admission and owned-service readiness need their own
+	// budget. Nonpositive refuses construction; never extends the job deadline.
+	LaunchTimeout    time.Duration
 	SelfCheckTimeout time.Duration
 	CancelGrace      time.Duration
 	LockPollInterval time.Duration
@@ -112,7 +115,7 @@ type AgentSettings struct {
 
 // Control calls are short; only the detached systemd service owns evaluation.
 func DefaultAgentSettings() AgentSettings {
-	return AgentSettings{ControlTimeout: 30 * time.Second, SelfCheckTimeout: 2 * time.Minute,
+	return AgentSettings{ControlTimeout: 30 * time.Second, LaunchTimeout: 2 * time.Minute, SelfCheckTimeout: 2 * time.Minute,
 		CancelGrace: 10 * time.Second, LockPollInterval: 25 * time.Millisecond,
 		MaximumClockSkew: time.Minute, DiagnosticBytes: 4 * 1024 * 1024,
 		ConfigBytes: 64 * 1024, DirectoryBatch: 128, InputTransferTimeout: 2 * time.Minute, OutputTransferTimeout: 2 * time.Minute, CleanupTimeout: 2 * time.Minute,
@@ -125,6 +128,21 @@ func DefaultAgentSettings() AgentSettings {
 
 // Only an explicitly pinned path may select the role; unknown fields fail closed.
 func LoadConfig(path string) (*Config, error) {
+	return loadConfigForPurpose(path, false)
+}
+
+// A root-only metadata observer may compute the first genuine fingerprint.
+// Empty qualification is not execution authority and remains invalid for every
+// agent constructor, SSH owner, cleanup owner and candidate-running entrypoint.
+func LoadDockerProbeConfig(path string) (*Config, error) {
+	if os.Geteuid() != 0 {
+		return nil, errors.New("prospective Docker audit requires the root metadata role")
+	}
+	return loadConfigForPurpose(path, true)
+}
+
+// Parsing and all protected path/pin checks are identical for both purposes.
+func loadConfigForPurpose(path string, dockerProbe bool) (*Config, error) {
 	settings := DefaultAgentSettings()
 	if err := protectedRootPath(path, false, true); err != nil {
 		return nil, err
@@ -140,7 +158,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err := decodeStrict(content, config); err != nil {
 		return nil, err
 	}
-	if err := config.validate(true); err != nil {
+	if err := config.validateForPurpose(true, dockerProbe); err != nil {
 		return nil, err
 	}
 	return config, nil
@@ -148,8 +166,14 @@ func LoadConfig(path string) (*Config, error) {
 
 // Public construction never bypasses protected path or non-root worker checks.
 func (self *Config) validate(protected bool) error {
+	return self.validateForPurpose(protected, false)
+}
+
+// Only an absent first fingerprint is permitted for read-only observation;
+// malformed supplied fingerprints and every other role invariant still fail.
+func (self *Config) validateForPurpose(protected, dockerProbe bool) error {
 	if self == nil || self.Schema != Schema || !namePattern.MatchString(self.HostId) || self.WorkerUser == "" || self.TrustedOperatorUser == "" || self.ExpectedDataDeviceId == 0 ||
-		!digestPattern.MatchString(self.SourceLockSha256) || !digestPattern.MatchString(self.QualificationSha256) ||
+		!digestPattern.MatchString(self.SourceLockSha256) || (!digestPattern.MatchString(self.QualificationSha256) && !(dockerProbe && self.QualificationSha256 == "")) ||
 		!digestPattern.MatchString(self.SubmissionBuilderSha256) ||
 		!digestPattern.MatchString(self.ConfigLocalSha256) || !digestPattern.MatchString(self.VaultLocalSha256) ||
 		!strings.HasPrefix(self.EvaluatorImageDigest, "sha256:") || !digestPattern.MatchString(strings.TrimPrefix(self.EvaluatorImageDigest, "sha256:")) {
@@ -231,7 +255,7 @@ func (self *Config) validate(protected bool) error {
 	if err := self.DockerRole.validate(self, protected); err != nil {
 		return err
 	}
-	if err := self.validateRecoveryConfiguration(DefaultAgentSettings(), protected); err != nil {
+	if err := self.validateRecoveryRole(DefaultAgentSettings(), protected, dockerProbe); err != nil {
 		return err
 	}
 	key, err := base64.StdEncoding.DecodeString(self.CoordinatorPublicKeyBase64)
@@ -284,12 +308,18 @@ func (self *Config) requireDataMount() error {
 // Runtime leaves stay root-owned. Only ancestors above the configured base may
 // belong to the explicitly trusted operator; no home directory is chowned.
 func protectedRuntimePath(path, base string, operatorUid uint32) error {
+	return protectedRuntimePathWithStat(path, base, operatorUid, os.Lstat)
+}
+
+// The observation seam lets tests reproduce ownership topology without chown
+// privileges; production always supplies the real non-following filesystem read.
+func protectedRuntimePathWithStat(path, base string, operatorUid uint32, statPath func(string) (os.FileInfo, error)) error {
 	if !pathWithin(base, path) {
 		return errors.New("runtime path escaped its configured base")
 	}
 	inside := true
 	for current := path; ; current = filepath.Dir(current) {
-		info, err := os.Lstat(current)
+		info, err := statPath(current)
 		if err != nil {
 			return err
 		}

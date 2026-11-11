@@ -4044,6 +4044,9 @@ type providerCountFilter struct {
 	blackholed map[server.Id]bool
 	// Security exceptions persist until later authenticated TLS from the same URL.
 	tlsAuthenticationFailed map[server.Id]bool
+	// The zero-carry verdicts in force (provider_zero_carry.go): providers
+	// whose contracts from several networks carried nothing.
+	zeroCarry map[server.Id]bool
 	// The URL-success rule's country guard with the kill switch and floor it
 	// was decided under, set by each consumer after the filter loads: a fleet
 	// pass counts its own population under its own settings, a scoped reader
@@ -4099,12 +4102,14 @@ func providerCountFilterSql(clientScoped bool) string {
 
 // Load complete exception maps once for publication and provider diagnostics.
 func newProviderCountFilter(ctx context.Context, loadEgressEvidence bool) providerCountFilter {
+	now := server.NowUtc()
 	f := providerCountFilter{
-		now:                     server.NowUtc(),
+		now:                     now,
 		arinRisk:                map[server.Id]bool{},
 		arinNonQuality:          map[server.Id]bool{},
 		reliabilityFailed:       map[server.Id]bool{},
 		tlsAuthenticationFailed: GetAllProviderEgressTLSAuthenticationFailedClientIds(ctx),
+		zeroCarry:               getProviderZeroCarryClientIds(ctx, nil, now),
 		countryCodes:            GetAllProviderEgressCountryCodes(ctx),
 		modernEvidence:          getProviderModernEvidenceRecords(ctx, nil),
 	}
@@ -4135,7 +4140,18 @@ func (self providerCountFilter) isBlackholed(clientId server.Id) bool {
 	return self.blackholed[clientId]
 }
 
+// A hard exclusion: absent from every result and count, force_minimum and
+// an explicit client id included. The common gates, and a zero-carry verdict.
 func (self providerCountFilter) hasHardEgressFailure(clientId server.Id) bool {
+	return self.hasCommonGateFailure(clientId) || self.zeroCarry[clientId]
+}
+
+// The common gates alone: ARIN risk, reliability and the URL security
+// quarantine. The URL-success rule's country guard leaves out only these
+// (newProviderOnlineSuccessBaseline): a zero-carry provider still counts
+// there as measured without a success, as it did before its verdict, so a
+// verdict changes no country's exemption and no other provider's place.
+func (self providerCountFilter) hasCommonGateFailure(clientId server.Id) bool {
 	return self.arinRisk[clientId] || self.reliabilityFailed[clientId] || self.tlsAuthenticationFailed[clientId]
 }
 
@@ -5571,7 +5587,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        	--
 	        	-- Restricting this to Public would remove Network-only
 	        	-- providers from their own network's discovery, which works
-	        	-- today via CreateContractNoEscrow. Stream is still excluded:
+	        	-- today: such a contract escrows from that network's balance.
+	        	-- Stream is still excluded:
 	        	-- resolveNonCompanionProvideMode can resolve a Stream-only
 	        	-- destination as a companion, but that dead-ends at
 	        	-- CreateCompanionTransferEscrow, which needs a pre-existing
@@ -6737,7 +6754,7 @@ func FindProviders2(
 			// UpdateClientScores puts both Public and Network-only providers in the
 			// pool. A Network-only provider can only settle a contract with a
 			// source in its own network (GetProvideRelationship ->
-			// ProvideModeNetwork -> CreateContractNoEscrow); it is real, usable
+			// ProvideModeNetwork -> escrow from that network's balance); it is real, usable
 			// supply for those users and has always been discoverable to them, so
 			// it stays. For anyone else CreateContract would reject with
 			// NoPermission, so it goes.

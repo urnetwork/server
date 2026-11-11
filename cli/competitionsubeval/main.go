@@ -43,8 +43,25 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	if parsed.serveManaged {
 		return competitionagent.ServeManagedSsh(ctx, parsed.configPath, input, output, diagnostic)
 	}
+	if parsed.startPrivateEngine {
+		if os.Geteuid() != 0 {
+			return errors.New("private engine startup requires the fixed root role")
+		}
+		config, err := competitionagent.LoadPrivateEngineStartupConfig(parsed.configPath)
+		if err != nil {
+			return err
+		}
+		return competitionagent.StartPrivateEngine(ctx, config)
+	}
 	if parsed.dockerProbe && os.Geteuid() != 0 {
 		return errors.New("Docker host audit requires the fixed root role")
+	}
+	if parsed.dockerProbe {
+		config, err := competitionagent.LoadDockerProbeConfig(parsed.configPath)
+		if err != nil {
+			return err
+		}
+		return competitionagent.RunDockerProbe(ctx, config, parsed.dockerArguments, output)
 	}
 	if parsed.recoverActive {
 		if os.Geteuid() != 0 {
@@ -69,9 +86,6 @@ func run(ctx context.Context, args []string, input io.Reader, output, diagnostic
 	config, err := competitionagent.LoadConfig(parsed.configPath)
 	if err != nil {
 		return err
-	}
-	if parsed.dockerProbe {
-		return competitionagent.RunDockerProbe(ctx, config, parsed.dockerArguments, output)
 	}
 	settings := competitionagent.DefaultAgentSettings()
 	agent, err := competitionagent.NewAgent(config, competitionagent.NewSystemdRunner(settings), settings)

@@ -33,3 +33,37 @@ qualify the correction before a new release. Neither path permits relabeling thi
 failed attempt as passed or silently retrying its first draw.
 
 Winner approval, rewards, and source promotion remain held.
+
+## SSH-enabled diagnosis, 15:17 UTC
+
+SSH to Snow as `by` now works with host-key verification. Passwordless sudo and
+Docker access are not available. Read-only journal inspection confirms Qwen
+served the existing request with HTTP 200 at 09:04:22 UTC after 2m32.593s; this
+was not an inference timeout. No new inference request was sent.
+
+The live Qwen OpenAPI advertises nullable `context` and `mode` fields in the
+reasoning-configuration object. The frozen Go privacy guard recognizes only
+`effort` and null `summary`/`generate_summary`, so it rejects these additional
+configuration keys even when null. The upstream Responses implementation echoes
+request configuration in response envelopes using model serialization:
+[pinned upstream implementation](https://github.com/vllm-project/vllm/blob/ced6857afa0ea7b2e3f0846a62e1394e90f15607/vllm/entrypoints/openai/responses/serving.py#L1218).
+
+Two deterministic regression tests fail against the original frozen guard:
+
+- `TestWinnerMultipassPrivacyAllowsNullReasoningConfiguration`: both optional
+  null fields are incorrectly rejected in JSON and SSE envelopes.
+- `TestWinnerMultipassPrivacyRetainsNullReasoningConfigurationTransport`: the
+  composed broker rejects an otherwise valid response with the same error.
+
+The narrow source correction permits only null `context` and null `mode` beside
+the existing allowed configuration. Nonempty values, unknown fields, reasoning
+items, private content and nonempty summaries still fail closed. The affected
+privacy/provider tests and diagnostic controls pass with that correction in an
+isolated overlay over the frozen dependency checkout. The installed immutable
+review binary remains unchanged; no replacement release or live qualification
+has been authorized by these CPU-only results.
+
+This establishes a real client bug and a sufficient explanation for the observed
+error, not an exact reconstruction of the discarded response. Without a retained
+sanitized event-shape record, the original response's precise triggering field
+remains unproved. Do not claim that private text definitely was or was not sent.

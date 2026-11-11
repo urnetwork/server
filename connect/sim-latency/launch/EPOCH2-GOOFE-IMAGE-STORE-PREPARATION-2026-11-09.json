@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "status": "PRIVATE_COMPATIBLE_ENGINE_RUNNING_EXACT_CANDIDATE_IMAGE_ID_VERIFIED",
+  "observed_difference": "Sille uses overlay2 image IDs; Goofe's existing Docker engine uses the containerd snapshotter and exposes an OCI manifest digest as its image ID.",
+  "native_proof": {
+    "source_product_image_id": "sha256:8fb0060994004eb42345b3f97582c044599f22f17ee39e0119c01afbccb01017",
+    "goofe_containerd_loaded_manifest_id": "sha256:a7493f2dd189213cda69621d5314d04a9ae409b26d1e33204b37bad2733dbbae",
+    "goofe_containerd_manifest_config_digest": "sha256:8fb0060994004eb42345b3f97582c044599f22f17ee39e0119c01afbccb01017",
+    "manifest_readback": "ctr content get on the existing engine's moby namespace; schema2 OCI manifest with 42 layers",
+    "source_id_lookup_on_existing_engine": "refused: No such image; not accepted as exact-ID qualification"
+  },
+  "private_engine": {
+    "service": "urnetwork-competition-docker.service",
+    "config": "/home/by/sim-latency/docker-engine-v1/daemon-agent-socket-v2.json",
+    "config_sha256": "e1b6d04a90d8ef59cdfe31184b1e9e73ffdbb5a488853f35588e3012e0bf317d",
+    "service_sha256": "a2bccae33871ad2c1a030b6bf6113872bf905367b83ccd9bb93d1530f0a9c2cd",
+    "socket": "unix:///home/by/sim-latency/engine-control/docker.sock",
+    "initial_configuration_preserved": "daemon.json and service-v1.unit retain the initial outside-base socket configuration; the agent policy correctly requires its protected socket within BaseDirectory",
+    "data_root": "/home/by/sim-latency/docker-engine-v1/data",
+    "driver_observed": "overlay2",
+    "containerd_snapshotter": false,
+    "network_listener": "root-only local Unix socket; no TCP listener",
+    "host_bridge_firewall_forwarding_changes": "Default bridge, iptables/ip6tables, IP forwarding, masquerade and userland proxy disabled for this private daemon",
+    "validation": ["dockerd --validate: configuration OK", "systemd-analyze verify passed", "native private-engine docker info confirmed overlay2 and the exact private data root"],
+    "existing_primary_docker_restarted": false,
+    "existing_primary_postgres_redis_observation": "Both remained healthy/up for six days after private-engine start",
+    "enabled_at_boot": false
+  },
+  "instrument_image_transfer": {"expected_exact_id": "sha256:2693969b85b0434705fce665f2fc0dbf98c4b1dc803f443b1330f58e398591aa", "load_completed": true, "exact_id_verified": true, "verified_at": "2026-11-09T16:07:13Z", "final_epoch2_release": false, "qualification_note": "This candidate passed native70 and both mechanical test attestations, but its host qualification refused the wrong fixture paths. A distinct corrected source-build attempt is in progress; no final release or grading admission is claimed."},
+  "runtime_qualified": false,
+  "qualified_source_image_load": {"image_digest": "sha256:5e5dfa2715c980d7ec037b6f15208e1d240a6bc80668aabc3335c1f71b2b92d9", "native_load_terminal_status": 0, "native_load_reported_exact_id": true, "transfer": "Docker save, zstd stream over strict known-host SSH, native Docker load into private engine"},
+  "versions_observed": {"sille_docker": "29.9.0", "goofe_docker": "29.9.2", "difference": "patch release; explicitly permitted by the operator"},
+  "before_host_policy_freeze": ["Align private-daemon user-namespace remapping and no-new-privileges controls with Sille", "Install complete pinned agent/resource/recovery inventory", "Collect genuine final prospective host fingerprint; no grading readiness is inferred from image load"],
+  "grading_activated": false,
+  "production_database_or_vault_main_copied": false
+}

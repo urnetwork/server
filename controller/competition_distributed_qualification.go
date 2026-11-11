@@ -46,6 +46,8 @@ type competitionHostMetricScreen struct {
 // The immutable retained receipt binds every host to this exact seed/workload,
 // source, image, local fixtures, full shared baseline and original no-op clock.
 type competitionExecutorEquivalenceReceipt struct {
+	RecoverySha256                    string                               `json:"recovery_sha256,omitempty"`
+	ControlAmendmentSha256            string                               `json:"control_amendment_sha256,omitempty"`
 	WorkCoveragePolicy                *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
 	Schema                            int                                  `json:"schema"`
 	Kind                              string                               `json:"kind"`
@@ -99,6 +101,7 @@ func qualifyCompetitionDistributedHosts(ctx context.Context, settings *Settings,
 	}
 	results := make(chan error, len(settings.DistributedEvaluationPolicy.Hosts))
 	for _, host := range settings.DistributedEvaluationPolicy.Hosts {
+		host = competitionExecutorControlHost(settings, host)
 		go func() {
 			results <- qualifyCompetitionDistributedHost(ctx, settings, store.PostgresStore, round, baseline, host)
 		}()
@@ -112,21 +115,31 @@ func qualifyCompetitionDistributedHosts(ctx context.Context, settings *Settings,
 	return errors.Join(failures...)
 }
 
-// A durable clock reservation precedes input preparation. Reconnects reconstruct
-// exactly the same signed manifest, never another no-op sample or later clock.
+// Readiness precedes the first durable clock; failed setup cannot spend a
+// measurement budget. Reconnects still return the original immutable clock.
+func reserveCompetitionReadyExecutorAdmission(ctx context.Context, roundId server.Id,
+	check func(context.Context) (HostSelfCheck, error),
+	reserve func(context.Context) (*competitionExecutorQualificationRun, error),
+) (HostSelfCheck, *competitionExecutorQualificationRun, error) {
+	hostCheck, err := check(ctx)
+	if err != nil || !hostCheck.RebaselinePassed || hostCheck.RebaselineRoundId == nil || *hostCheck.RebaselineRoundId != roundId {
+		return hostCheck, nil, errors.New("executor no-op admission requires genuine same-round containment readiness")
+	}
+	if err := ctx.Err(); err != nil {
+		return hostCheck, nil, err
+	}
+	run, err := reserve(ctx)
+	return hostCheck, run, err
+}
+
+// A durable clock reservation follows readiness and precedes input preparation.
+// Reconnects reconstruct the same signed manifest, never a later clock.
 func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, store PostgresStore, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy) error {
 	qualified, err := store.distributedExecutorQualified(ctx, settings, round, baseline, host)
 	if err != nil || qualified {
 		return err
 	}
 	jobId := competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256)
-	run, err := store.reserveDistributedExecutorQualification(ctx, settings, round.RoundId, host.HostId, jobId)
-	if err != nil {
-		return err
-	}
-	startedAt, deadlineAt := run.StartedAt, run.DeadlineAt
-	operationCtx, cancel := context.WithDeadline(ctx, deadlineAt)
-	defer cancel()
 	selected := *settings
 	selected.executorHostId, selected.executorSlotId = host.HostId, host.SlotId
 	transport, err := competitionTransportForHost(&selected, host)
@@ -134,10 +147,19 @@ func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, 
 		return err
 	}
 	evaluator := &competitionAgentEvaluator{host: host, transport: transport}
-	check, err := evaluator.SelfCheck(operationCtx, &selected)
-	if err != nil || !check.RebaselinePassed || check.RebaselineRoundId == nil || *check.RebaselineRoundId != round.RoundId {
-		return errors.New("executor no-op admission requires genuine same-round containment readiness")
+	check, run, err := reserveCompetitionReadyExecutorAdmission(ctx, round.RoundId,
+		func(probeCtx context.Context) (HostSelfCheck, error) { return evaluator.SelfCheck(probeCtx, &selected) },
+		func(reserveCtx context.Context) (*competitionExecutorQualificationRun, error) {
+			return store.reserveDistributedExecutorQualification(reserveCtx, settings, round.RoundId, host.HostId, jobId)
+		})
+	if err != nil {
+		return err
 	}
+	selected.executorQualificationRecovery = run.Recovery
+	jobId = run.JobId
+	startedAt, deadlineAt := run.StartedAt, run.DeadlineAt
+	operationCtx, cancel := context.WithDeadline(ctx, deadlineAt)
+	defer cancel()
 	if err := store.RegisterHost(operationCtx, &selected, check); err != nil {
 		return err
 	}
@@ -313,13 +335,17 @@ func screenCompetitionExecutorNoop(settings *Settings, job *queuedJob, host Comp
 	policy := settings.DistributedEvaluationPolicy
 	manifestDigest := sha256.Sum256(outcome.ArtifactManifest)
 	receipt := &competitionExecutorEquivalenceReceipt{Schema: 1, Kind: "competition-executor-noop-admission/v1", RoundId: job.RoundId.String(), HostId: host.HostId,
-		WorkCoveragePolicy: settings.EvaluationPolicy.Clone().WorkCoveragePolicy,
-		BaselineSha256:     job.RoundBaseline.Sha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256, ProvidersSha256: job.Round.ProvidersSha256,
+		ControlAmendmentSha256: competitionExecutorControlAmendmentSha256(settings),
+		WorkCoveragePolicy:     settings.EvaluationPolicy.Clone().WorkCoveragePolicy,
+		BaselineSha256:         job.RoundBaseline.Sha256, SourceLockSha256: settings.AutomationPolicy.SourceLockSha256, ProvidersSha256: job.Round.ProvidersSha256,
 		EvaluatorImageDigest: job.EvaluatorImageDigest, QualificationSha256: host.QualificationSha256, ConfigLocalSha256: settings.EvaluationPolicy.ConfigLocalSha256, VaultLocalSha256: settings.EvaluationPolicy.VaultLocalSha256,
 		PolicyApprovalSha256: policy.ApprovalSha256, QualificationJobId: job.JobId.String(), QualificationStartedAt: job.StartedAt.UTC(), QualificationDeadlineAt: job.ExecutionDeadline.UTC(),
 		Noop: true, Passed: true, Replicates: 9, ScreenKind: policy.EquivalencePolicy.ScreenKind, MaximumRawScoreRelativeDifference: policy.EquivalencePolicy.MaximumRawScoreRelativeDifference,
 		ConfidenceLevel: 0.95, StatisticalMethod: "two-sided-welch-t-run-level", StatisticalEquivalenceProven: false,
 		ArchiveManifestSha256: hex.EncodeToString(manifestDigest[:]), CreatedAt: server.NowUtc().Truncate(time.Microsecond)}
+	if recovery := settings.executorQualificationRecovery; recovery != nil {
+		receipt.RecoverySha256 = recovery.Sha256
+	}
 	for _, name := range competitionNoopMetricNames(settings) {
 		screen, err := compareCompetitionHostMetric(name, baselineValues[name], candidateValues[name])
 		if err != nil {
@@ -349,13 +375,24 @@ func competitionExecutorReceiptBytes(receipt *competitionExecutorEquivalenceRece
 
 // Existing receipts cannot be relabeled as evidence for a later seed or policy.
 func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy, receipt *competitionExecutorEquivalenceReceipt) error {
+	expectedJobId := competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256)
+	expectedRecovery := ""
+	if recovery := settings.executorQualificationRecovery; recovery != nil {
+		_, digest, err := competitionExecutorQualificationRecoveryBytes(recovery.Authorization)
+		if err != nil || digest != recovery.Sha256 || validateCompetitionExecutorQualificationRecovery(settings, round, recovery.Authorization) != nil || recovery.Authorization.HostId != host.HostId || recovery.Authorization.BaselineSha256 != baseline.Sha256 {
+			return errors.New("host receipt has invalid replacement authority")
+		}
+		expectedJobId, expectedRecovery = recovery.Authorization.ReplacementJobId, recovery.Sha256
+	}
 	if receipt == nil || receipt.Schema != 1 || receipt.Kind != "competition-executor-noop-admission/v1" || receipt.RoundId != round.RoundId.String() || receipt.HostId != host.HostId ||
+		receipt.RecoverySha256 != expectedRecovery ||
+		receipt.ControlAmendmentSha256 != competitionExecutorControlAmendmentSha256(settings) ||
 		receipt.BaselineSha256 != baseline.Sha256 || receipt.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || receipt.ProvidersSha256 != round.ProvidersSha256 ||
 		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.QualificationSha256 != host.QualificationSha256 || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
 		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || !receipt.Passed || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
 		receipt.ScreenKind != "operational-admission/v1" || receipt.MaximumRawScoreRelativeDifference != 0.05 || receipt.RawScoreRelativeDifference < 0 || receipt.RawScoreRelativeDifference > 0.05 || math.IsNaN(receipt.RawScoreRelativeDifference) || math.IsInf(receipt.RawScoreRelativeDifference, 0) || receipt.ConfidenceLevel != 0.95 ||
 		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) || len(receipt.Metrics) != len(competitionNoopMetricNames(settings)) || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) ||
-		receipt.QualificationJobId != competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256).String() || receipt.QualificationStartedAt.IsZero() ||
+		receipt.QualificationJobId != expectedJobId.String() || receipt.QualificationStartedAt.IsZero() ||
 		!receipt.QualificationDeadlineAt.Equal(receipt.QualificationStartedAt.Add(3*time.Hour)) || receipt.CreatedAt.Before(receipt.QualificationStartedAt) ||
 		receipt.Retention == nil || receipt.Retention.Mode != "COMPLIANCE" || receipt.Retention.RetainUntil.Before(settings.RetainUntil) {
 		return errors.New("retained host admission receipt does not match the frozen round")

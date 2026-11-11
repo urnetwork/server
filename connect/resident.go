@@ -12,6 +12,7 @@ import (
 	// "io"
 	"math/rand"
 	"net"
+	"net/netip"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -552,6 +553,11 @@ type ExchangeSettings struct {
 	// fit the exchange and minimum supported client carrier limits.
 	// Framers below the control sender's 4 KiB envelope leave requests pending.
 	ClientCloseBatchSize int
+	// The most transport addresses one ObservedAddresses frame carries
+	// (resident_observed_addresses.go). 16, the most a client keeps: a client
+	// has a few transports, each seen from one address per family.
+	// Non-positive uses the default.
+	ObservedAddressesMaxCount int
 
 	ExchangeResidentWaitTimeout time.Duration
 	ExchangeResidentPollTimeout time.Duration
@@ -701,7 +707,8 @@ func DefaultExchangeSettingsWithBufferSize(bufferSize int) *ExchangeSettings {
 			TopologyRefreshInterval: 60 * time.Second,
 			ResyncSpreadTimeout:     30 * time.Second,
 		},
-		ClientCloseBatchSize: 512,
+		ClientCloseBatchSize:      512,
+		ObservedAddressesMaxCount: 16,
 
 		ExchangeResidentWaitTimeout: exchangeResidentWaitTimeout,
 		ExchangeResidentPollTimeout: 15 * time.Second,
@@ -815,6 +822,13 @@ type Exchange struct {
 	// Nil in production; nomination tests wait for retirement after lifecycle
 	// workers start to verify that cleanup cannot precede map publication.
 	afterResidentWorkersStartedForTest func(*Resident)
+	// Nil in production; registration tests refuse a client's nominations, as
+	// a draining exchange or a failed nomination would, while its connection
+	// stays open, until it returns false.
+	refuseNominationForTest func(clientId server.Id) bool
+	// Nil in production; registration tests wait for a resident's teardown,
+	// its peer registration cleanup included, to finish.
+	afterResidentTeardownForTest func(*Resident)
 	// Nil in production; local transport tests hold an attach after its
 	// generation check, a pump after it takes a batch's first message and
 	// after it gathers the batch, and a pump before it waits on a delivery
@@ -1178,6 +1192,10 @@ func (self *Exchange) nominateLocalResident(
 		return false, false
 	}
 
+	if refuse := self.refuseNominationForTest; refuse != nil && refuse(clientId) {
+		return false, false
+	}
+
 	// Refuse to nominate a resident for a client that would push the network past
 	// its limit, which keeps the client from becoming active. An intent provider
 	// is judged by its provider intent check and a re-nomination of an
@@ -1275,6 +1293,9 @@ func (self *Exchange) nominateLocalResident(
 				clientId,
 				resident.residentId,
 			)
+			if afterTeardown := self.afterResidentTeardownForTest; afterTeardown != nil {
+				defer afterTeardown(resident)
+			}
 			// RemoveNetworkPeer no-ops (no publish) when this resident never
 			// registered, so churny residents that died before announcing
 			// emit nothing here.
@@ -1282,8 +1303,8 @@ func (self *Exchange) nominateLocalResident(
 			// entirely: the member registration ttl converts a non-returning
 			// client to a disconnect anyway, and a returning client refreshes
 			// the entry with no visible blip (CONNECTDRAIN2.md §3.2, MOVE.md
-			// §5.7)
-			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() {
+			// §5.7). So does a replaced resident's (residentReplaced).
+			if self.settings.EnableNetworkPeers && resident.peerNetworkId != nil && !resident.drained.Load() && !resident.moved.Load() && !residentReplaced(cleanupCtx, clientId, resident.residentId) {
 				if resident.peerCategory == model.NetworkPeerCategoryProxy {
 					model.RemoveNetworkProxyPeer(
 						cleanupCtx,
@@ -1342,6 +1363,24 @@ func (self *Exchange) nominateLocalResident(
 	self.notifyResidentArrival(resident)
 
 	return true, false
+}
+
+// residentReplaced reports whether another resident now serves the client: a
+// nomination replaced this one, in this process or on another host. The
+// client's peer registration is the replacement's then, though it may still
+// name this resident: registration happens once per connection, at announce,
+// and the replacement re-registers it under its own id only at its first
+// heartbeat (refreshResidentRegistration). Removing it here would leave the
+// connected client uncounted until that heartbeat, up to ExchangeResidentTtl/4,
+// and let one more client past the network's concurrent client limit. Kept,
+// the registration counts the client; if the client leaves before the
+// replacement's heartbeat, the member ttl converts it to a disconnect, as for
+// a drained or moved resident.
+func residentReplaced(ctx context.Context, clientId server.Id, residentId server.Id) bool {
+	return server.HandleErrorWithReturn(func() bool {
+		current := model.GetResidentForClient(ctx, clientId, 0)
+		return current != nil && current.ResidentId != residentId
+	})
 }
 
 // Refreshes metadata for one resident. Transport cancellation must not change
@@ -2886,6 +2925,9 @@ type ExchangeHeader struct {
 	Carrier             ResidentCarrier
 	IpFamily            uint8
 	ProvideIntent       bool
+	// the edge's ClientIp, invalid when it has none. Gob encodes it with its
+	// MarshalBinary, and the header stays comparable.
+	ClientIp netip.Addr
 }
 
 func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierProperties {
@@ -2898,12 +2940,16 @@ func (self ExchangeHeader) transferCarrierProperties() connect.TransferCarrierPr
 }
 
 func (self ExchangeHeader) transportEdge() ResidentTransportEdge {
-	return ResidentTransportEdge{
+	edge := ResidentTransportEdge{
 		ResidentMoveVersion: self.ResidentMoveVersion,
 		Carrier:             self.Carrier,
 		IpFamily:            self.IpFamily,
 		ProvideIntent:       self.ProvideIntent,
 	}
+	if self.ClientIp.IsValid() {
+		edge.ClientIp = self.ClientIp.Unmap()
+	}
+	return edge
 }
 
 type ExchangeConnection struct {
@@ -3652,6 +3698,7 @@ func NewResidentTransportWithEdge(
 		Carrier:                               edge.Carrier,
 		IpFamily:                              edge.IpFamily,
 		ProvideIntent:                         edge.ProvideIntent,
+		ClientIp:                              edge.ClientIp,
 	}
 	transport := newResidentTransport(ctx, exchange, header, clientId, instanceId)
 	transport.admission = admission
@@ -4271,6 +4318,9 @@ type Resident struct {
 	stateLock sync.RWMutex
 
 	transports map[*clientTransport]bool
+	// a coalesced signal that the transports changed, for the observed
+	// addresses listener (resident_observed_addresses.go)
+	observedAddressesKick chan struct{}
 
 	// destination id -> forward
 	forwards map[server.Id]*ResidentForward
@@ -4422,6 +4472,7 @@ func newResidentDuringAdmission(
 		residentContractManager: residentContractManager,
 		residentController:      residentController,
 		transports:              map[*clientTransport]bool{},
+		observedAddressesKick:   make(chan struct{}, 1),
 		forwards:                map[server.Id]*ResidentForward{},
 		controlLimiter:          newLimiter(cancelCtx, exchange.settings.ControlMinTimeout),
 		createTime:              time.Now(),
@@ -4741,6 +4792,16 @@ func streamHopsToReset(hops []model.StreamHop) *protocol.StreamReset {
 
 func (self *Resident) Run() {
 	defer self.cancel()
+	// the addresses the client's transports connect from
+	// (resident_observed_addresses.go); a transport attached before Run left
+	// its kick in the signal's buffer
+	observedAddressesListener := newResidentObservedAddressesListener(
+		self.ctx,
+		self.observedAddresses,
+		self.sendListenerFrame,
+		self.observedAddressesKick,
+	)
+	defer observedAddressesListener.CloseAndWait()
 	if self.exchange.keyEventSubscriber != nil && self.sessionNetworkId != nil {
 		networkId := *self.sessionNetworkId
 		hints := make(chan *protocol.NetworkSessionsChanged, 1)
@@ -5333,6 +5394,7 @@ func (self *Resident) addTransportWithEdge(
 		defer self.stateLock.Unlock()
 		self.transports[transport] = true
 	}()
+	self.kickObservedAddresses()
 
 	closeTransport = func() {
 		routeManager := self.client.RouteManager()
@@ -5344,6 +5406,7 @@ func (self *Resident) addTransportWithEdge(
 			defer self.stateLock.Unlock()
 			delete(self.transports, transport)
 		}()
+		self.kickObservedAddresses()
 		if move := self.move.Load(); move != nil {
 			move.notifyTransportClosed()
 		}

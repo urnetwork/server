@@ -257,17 +257,11 @@ func (self *sourceSupervisorRuntime) instrumentSelectedSource(ctx context.Contex
 // Builds the protected child through the existing offline pipeline and actual
 // independent qualifier. No passed receipt or runtime pin is synthesized here.
 func (self *sourceSupervisorRuntime) buildTrustedInstrument(ctx context.Context, current, intent *model.CompetitionSourceActivation, manifest *sourceManifest, stagedRoots map[string]string) error {
-	proof := intent.TrustedInstrument
-	manifestBytes, err := yaml.Marshal(manifest)
+	request, err := self.trustedInstrumentBuildRequest(current, intent, manifest, stagedRoots)
 	if err != nil {
 		return err
 	}
-	proposal := &reviewedSourceProposal{Schema: 2, Staging: false, BaseSourceLockSha256: proof.SelectedProductSourceLockSha256,
-		SourceLockSha256: intent.SourceLockSha256, Commits: intent.Commits, StagedRoots: stagedRoots, PatchSha256: proof.Approval.PatchSha256,
-		EvaluatedImageDigest: current.EvaluatorImageDigest, WinnerReviewPolicy: intent.WinnerReviewPolicy, CandidatePathBase: self.settings.PatchPolicy.PathBase}
-	request := reviewedSourceBuildRequest{Operation: "isolated_trusted_instrument_build", Proposal: proposal, SourceManifest: manifestBytes, SourceGeneration: intent.SourceGeneration,
-		ConfigLocalDirectory: filepath.Join(self.repositoriesRoot, "config", "local"), VaultLocalDirectory: filepath.Join(self.repositoriesRoot, "vault", "local"),
-		SandboxContract: "offline_evaluator_containment_v1", TrustedInstrument: proof}
+	proof := intent.TrustedInstrument
 	content, err := runSourceSupervisorProgram(ctx, self.buildCommand, self.buildSha256, request, []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C", "LC_ALL=C"})
 	if err != nil {
 		return err
@@ -283,4 +277,20 @@ func (self *sourceSupervisorRuntime) buildTrustedInstrument(ctx context.Context,
 	intent.EvaluatorImageDigest, intent.HostQualificationSha256 = receipt.EvaluatorImageDigest, receipt.HostQualificationSha256
 	intent.SimulatorSha256, intent.ScorerSha256 = receipt.SimulatorSha256, receipt.SimulatorSha256
 	return nil
+}
+
+// Local fixtures are configured independently of the operator's checkout root.
+func (self *sourceSupervisorRuntime) trustedInstrumentBuildRequest(current, intent *model.CompetitionSourceActivation, manifest *sourceManifest, stagedRoots map[string]string) (reviewedSourceBuildRequest, error) {
+	proof := intent.TrustedInstrument
+	manifestBytes, err := yaml.Marshal(manifest)
+	if err != nil {
+		return reviewedSourceBuildRequest{}, err
+	}
+	proposal := &reviewedSourceProposal{Schema: 2, Staging: false, BaseSourceLockSha256: proof.SelectedProductSourceLockSha256,
+		SourceLockSha256: intent.SourceLockSha256, Commits: intent.Commits, StagedRoots: stagedRoots, PatchSha256: proof.Approval.PatchSha256,
+		EvaluatedImageDigest: current.EvaluatorImageDigest, WinnerReviewPolicy: intent.WinnerReviewPolicy, CandidatePathBase: self.settings.PatchPolicy.PathBase}
+	request := reviewedSourceBuildRequest{Operation: "isolated_trusted_instrument_build", Proposal: proposal, SourceManifest: manifestBytes, SourceGeneration: intent.SourceGeneration,
+		ConfigLocalDirectory: self.settings.ConfigLocalDirectory, VaultLocalDirectory: self.settings.VaultLocalDirectory,
+		SandboxContract: "offline_evaluator_containment_v1", TrustedInstrument: proof}
+	return request, validateSourceBuildRequest(request)
 }

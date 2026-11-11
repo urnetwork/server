@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "kind": "epoch2-native-pressure-preparation/v1",
+  "observed_at": "2026-11-10T06:46:06Z",
+  "host_id": "sille",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "unit": "urnetwork-resource-bomb-sille-20261110-v1.service",
+  "unit_sha256": "a6ab2d3fb99ab21f13fb3b4f1fc67a3fbe0d57fa2d6097525be30999eb028295",
+  "unit_verified": true,
+  "unit_installed_and_loaded": true,
+  "unit_started": false,
+  "observed_active_state": "inactive",
+  "observed_main_pid": 0,
+  "source_archive_sha256": "ed075c51e7f3522200d67981eaad1989ccaf5a9be23be45dcdd7d46222611b6a",
+  "offline_dependencies_verified": true,
+  "go_version": "go1.27.3",
+  "execution_boundary": {
+    "private_mount_namespace": true,
+    "private_socket": "/mnt/data/urnetwork-subeval-sille/control/docker.sock",
+    "management_cpuset": "20,22",
+    "management_memory_limit_bytes": 2147483648,
+    "management_swap_limit_bytes": 0,
+    "runtime_max_seconds": 600,
+    "cleanup": "Bounded exact-name cleanup in ExecStopPost, targeting only the private engine."
+  },
+  "memory_prerequisite": {
+    "command": "/usr/local/libexec/urnetwork/competition-memory-headroom-20261110-v1/check-memory-headroom",
+    "command_sha256": "3b0fc04268dac09235898c8ec762128ec26625380023337274f260dd6a529d0c",
+    "minimum_available_bytes": 103079215104,
+    "observed_available_bytes": 68861394944,
+    "passed": false,
+    "enforced_by_exec_start_pre": true,
+    "unit_tests": "Three consecutive ordinary runs passed; earlier three race runs passed at the utility checkpoint.",
+    "cleanup_permission": "Approval to remove the identified inactive rebuildable 36-GiB RAM build cache remains pending. Nothing deleted."
+  },
+  "qualification_protocol": "Approved existing two-wave protocol: official R9 baseline on the original baseline producer, then concurrent full-R9 no-op admission on the two private executors against that one shared baseline.",
+  "authority_limits": {
+    "proves_pressure_cleanup": false,
+    "baseline_started": false,
+    "executor_admission_started": false,
+    "grading_activated": false,
+    "submission_clock_started": false
+  }
+}

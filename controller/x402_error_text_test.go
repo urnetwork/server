@@ -63,7 +63,7 @@ func newX402ErrorTextRequest(tb testing.TB, target string, body string) *http.Re
 	request.RemoteAddr = "192.0.2.53:4500"
 	request.Header.Set("Authorization", "Bearer "+session.NewByJwt(networkId, userId, "x402errortext", false, false).Testing_Sign())
 	payment, _ := x402CdpTestEvmPayment(tb, "base", x402CdpTestPayToBase, "10000000")
-	request.Header.Set(X402PaymentHeader, payment)
+	request.Header.Set(X402V1PaymentHeader, payment)
 	return request
 }
 
@@ -131,7 +131,7 @@ func TestX402HandlersHideSessionFailure(t *testing.T) {
 	} {
 		request := httptest.NewRequest(http.MethodPost, "/x402/purchase", bytes.NewReader([]byte(`{"sku_id":"pro_1month"}`)))
 		request.RemoteAddr = "synthetic-peer"
-		request.Header.Set(X402PaymentHeader, "synthetic-payment")
+		request.Header.Set(X402V1PaymentHeader, "synthetic-payment")
 		w := httptest.NewRecorder()
 		serve(w, request)
 		requireX402Answer(t, w, http.StatusInternalServerError, router.UnexpectedErrorMessage)

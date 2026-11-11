@@ -97,6 +97,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /competition/v2/holds":                    routeAccessPublic,
 	"POST /competition/v2/source-handoffs":          routeAccessPublic,
 	"POST /competition/v2/review-handoff-imports":   routeAccessPublic,
+	"POST /competition/v2/official-review-imports":  routeAccessPublic,
 	"POST /competition/v2/rounds/([^/]+)/incidents": routeAccessPublic,
 	"GET /stats/last-90":                            routeAccessPublic,
 	"GET /stats/providers-map":                      routeAccessPublic,
@@ -190,6 +191,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/circle":                              routeAccessPublic,
 	"POST /pay/play":                                routeAccessPublic,
 	"POST /pay/solana":                              routeAccessPublic,
+	"POST /pay/alchemy":                             routeAccessPublic, // each delivery verified by its webhook's signing key
 	"POST /solana/payment-intent":                   routeAccessClient,
 	"POST /solana/payment-transaction":              routeAccessClient,
 	"POST /stripe/payment-intent":                   routeAccessClient,
@@ -200,10 +202,17 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /pay/data/solana-intent":                  routeAccessPublic,
 	"POST /pay/data/solana-status":                  routeAccessPublic,
 	"GET /pay/crypto/assets":                        routeAccessPublic,
+	"POST /pay/crypto/quote":                        routeAccessPublic, // optional bearer: the network's tier and welcome offer
 	"POST /pay/crypto/intent":                       routeAccessClient,
 	"POST /pay/data/crypto-intent":                  routeAccessPublic,
-	"POST /pay/crypto/status":                       routeAccessPublic,  // the invoice's status token is the credential
-	"POST /pay/crypto/requote":                      routeAccessPublic,  // the invoice's status token is the credential
+	"POST /pay/crypto/status":                       routeAccessPublic, // the invoice's status token is the credential
+	"POST /pay/crypto/requote":                      routeAccessPublic, // the invoice's status token is the credential
+	"GET /pay/gamma/services.json":                  routeAccessPublic,
+	"GET /pay/gamma/terms":                          routeAccessPublic,
+	"POST /pay/gamma/intent":                        routeAccessClient,
+	"POST /pay/gamma/status":                        routeAccessPublic,  // the intent's status token is the credential
+	"GET /pay/gamma/settings":                       routeAccessNetwork, // the automatic charges' switches
+	"POST /pay/gamma/settings":                      routeAccessNetwork,
 	"GET /wallet/balance":                           routeAccessNetwork, // Circle wallet balance
 	"POST /wallet/validate-address":                 routeAccessClient,
 	"POST /wallet/circle-init":                      routeAccessNetwork, // creates the Circle wallet

@@ -1,0 +1,49 @@
+{
+  "schema": 1,
+  "observed_at": "2026-11-10T10:15:32Z",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "operational_amendment_approved": true,
+  "live_amendment_registered": false,
+  "scope": "Executor control corrections only; preserve round, source, image, rules, submissions, order and clocks",
+  "agent_sha256": "79bc85112de5bfa2ffde8b97f2f20bab41cab9180d0fbc68c694f03c20aa17f7",
+  "agent_source_commit": "5c664029ff1f1d64819ac259ca29c3734ca176bf",
+  "builder_sha256": "4a87daf6121cc935b45c4a77f321986863c42fbb89ee575fe5339d4ae1e07c7b",
+  "protected_role_version": "20261110-v4",
+  "hosts": [
+    {
+      "host_id": "sille",
+      "previous_qualification_sha256": "6402608c5b8f07172b6b0b6384eb3e6b395636033a58c45ea2add2e5eec8ea4f",
+      "qualification_sha256": "b7ec134a113fd0f7584cc9c0314e27a3bc58112a01b074c1e9c8ec2db6857f10",
+      "confirmed_observation_sha256": "97110af298a6cf037abfd65d744c27290b3cbf814701d7c30c1711cdadcd4068",
+      "native_resource_boundary_verified": true,
+      "namespace_probe_verified": true,
+      "signed_available_at": "2026-11-10T10:10:58.21368328Z"
+    },
+    {
+      "host_id": "goofe",
+      "previous_qualification_sha256": "124f8dfbf4104705d0683da055236dc88300ff34af71173deddb6a60824e112f",
+      "qualification_sha256": "e9fc842d5e1839896167a84251c05719097a595e34291f6088cbe917e69d1798",
+      "confirmed_observation_sha256": "d4a88488264638ffe388fd05bbbe69fd73ce621728a9388cf0af121db002b6b1",
+      "native_resource_boundary_verified": true,
+      "namespace_probe_verified": true,
+      "signed_available_at": "2026-11-10T10:10:57.934498682Z"
+    }
+  ],
+  "availability_receipt_directory": "/etc/urnetwork/competition-coordinator-role-20261110-v4",
+  "availability_signatures_verified": true,
+  "availability_creates_attempt_or_clock": false,
+  "transport": "Goofe restricted SSH dispatcher v2 pins corrected agent and role-v4 configuration; sudoers and sshd validation passed",
+  "storage": "Cleared only this operator's inactive, rebuildable epoch2-control-build-cache-20261110-v1 using go clean -cache after root owner checks; no source, module cache, logs or evidence removed. Sille backing headroom rose to 39308746752 bytes and native resource recheck passed.",
+  "limits": {
+    "full_private_executor_containment_qualified": false,
+    "official_shared_R9_baseline_present": false,
+    "R9_host_admission_complete": false,
+    "grading_ready": false
+  },
+  "remaining": [
+    "Deploy migration 950 and the pushed main API checkpoint before registering the append-only amendment",
+    "Register exact corrected identities with authenticated evidence; do not rewrite frozen policy",
+    "Complete private executor containment, including Sille pressure qualification after sufficient memory headroom",
+    "Produce the official shared R9 baseline, then perform parallel R9 admission on both hosts"
+  ]
+}

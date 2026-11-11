@@ -72,7 +72,11 @@ func TestSourceBuildSandboxGitPolicyScopesEveryPhaseAndVcsChild(t *testing.T) {
 			}
 			config[key] = value
 		}
-		if !slices.Equal(safe, []string{"", "/workspace/server"}) {
+		expectedSafe := []string{""}
+		for _, repository := range sourceRepositoryNames() {
+			expectedSafe = append(expectedSafe, "/workspace/"+repository)
+		}
+		if !slices.Equal(safe, expectedSafe) {
 			t.Fatal("guest trust was inherited, widened or not reset", phase, safe)
 		}
 		for key, expected := range map[string]string{"core.hooksPath": "/dev/null", "core.fsmonitor": "false",
@@ -87,6 +91,67 @@ func TestSourceBuildSandboxGitPolicyScopesEveryPhaseAndVcsChild(t *testing.T) {
 		if phase == "compile" && (!strings.Contains(script, "go build -trimpath") || !strings.Contains(script, "vcs.modified=")) {
 			t.Fatal("production binary lost clean revision verification")
 		}
+	}
+}
+
+// Frozen root tests build a helper in sn. Force real Git ownership refusal in
+// Go's nested build, then prove exact mounted-root trust preserves VCS stamps.
+func TestSourceBuildSandboxNestedHelperRetainsSiblingVcsStamp(t *testing.T) {
+	root := t.TempDir()
+	sourceTestRepository(t, root, "sn")
+	repository := filepath.Join(root, "sn")
+	for name, content := range map[string]string{
+		"go.mod":  "module helper.example/fixture\n\ngo 1.23.0\n",
+		"main.go": "package main\nfunc main() {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repository, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sourceTestGit(t, repository, "add", "--all")
+	sourceTestGit(t, repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--quiet", "-m", "add helper")
+	commit := sourceTestGit(t, repository, "rev-parse", "HEAD")
+	guest, _ := sourceSandboxGitArgumentEnvironment(t, "correctness")
+	environment := map[string]string{"PATH": os.Getenv("PATH"), "GOCACHE": filepath.Join(t.TempDir(), "cache"),
+		"GOTOOLCHAIN": "local", "GOWORK": "off", "GOENV": "off", "GOPROXY": "off", "GOSUMDB": "off", "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+	for name, value := range guest {
+		if strings.HasPrefix(name, "GIT_") {
+			environment[name] = value
+		}
+	}
+	count, err := strconv.Atoi(environment["GIT_CONFIG_COUNT"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Map only production's exact sn mount to the synthetic helper checkout.
+	for index := 0; index < count; index++ {
+		key := "GIT_CONFIG_VALUE_" + strconv.Itoa(index)
+		if environment["GIT_CONFIG_KEY_"+strconv.Itoa(index)] == "safe.directory" && environment[key] == "/workspace/sn" {
+			environment[key] = repository
+		}
+	}
+	outputPath := filepath.Join(t.TempDir(), "helper")
+	build := func() ([]byte, error) {
+		command := exec.CommandContext(t.Context(), "go", "build", "-buildvcs=true", "-o", outputPath, ".")
+		command.Dir = repository
+		command.Env = sourceSandboxGitTestEnvironment(environment)
+		return command.CombinedOutput()
+	}
+	if output, err := build(); err != nil {
+		t.Fatalf("nested helper lost authenticated sibling trust: %v %s", err, output)
+	}
+	command := exec.CommandContext(t.Context(), "go", "version", "-m", outputPath)
+	if output, err := command.CombinedOutput(); err != nil || !bytes.Contains(output, []byte("vcs.revision="+commit)) || !bytes.Contains(output, []byte("vcs.modified=false")) {
+		t.Fatalf("helper lost clean exact VCS stamp: %v %s", err, output)
+	}
+	// The old server-only policy deterministically fails before helper execution.
+	for name, value := range environment {
+		if strings.HasPrefix(name, "GIT_CONFIG_VALUE_") && value == repository {
+			environment[name] = "/workspace/server"
+		}
+	}
+	if output, err := build(); err == nil || !bytes.Contains(output, []byte("error obtaining VCS status")) {
+		t.Fatalf("server-only trust did not reproduce nested helper refusal: %v %s", err, output)
 	}
 }
 

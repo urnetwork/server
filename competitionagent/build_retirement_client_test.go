@@ -9,14 +9,13 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
 func TestBuildRetirementClientUsesNoArgumentRoleAndRejectsExpandedProof(t *testing.T) {
 	fixture := newDockerClientTestFixture(t)
-	listener, err := net.Listen("unix", filepath.Join(fixture.config.SocketDirectory, fixture.runId, "docker.sock"))
+	listener, err := net.Listen("unix", dockerClientTestSocket(t, fixture))
 	if err != nil {
 		t.Fatal(err)
 	}

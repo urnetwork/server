@@ -88,7 +88,7 @@ func newAgent(config *Config, runner Runner, settings AgentSettings, protected b
 	if err := config.validate(protected); err != nil {
 		return nil, err
 	}
-	if runner == nil || settings.ControlTimeout <= 0 || settings.SelfCheckTimeout <= 0 || settings.CancelGrace <= 0 || settings.LockPollInterval <= 0 ||
+	if runner == nil || settings.ControlTimeout <= 0 || settings.LaunchTimeout <= 0 || settings.SelfCheckTimeout <= 0 || settings.CancelGrace <= 0 || settings.LockPollInterval <= 0 ||
 		settings.MaximumClockSkew <= 0 || settings.DiagnosticBytes <= 0 || settings.ConfigBytes <= 0 || settings.DirectoryBatch <= 0 || settings.Now == nil {
 		return nil, errors.New("invalid bounded subevaluation agent owner")
 	}
@@ -405,7 +405,9 @@ func (self *Agent) commitStart(ctx context.Context, request Request, digest, inc
 // The committed launch-attempt marker is intentionally not cleared on error.
 // A transport cancellation after this call can only reconcile the original unit.
 func (self *Agent) launch(ctx context.Context, manifest StartManifest) {
-	controlCtx, cancel := context.WithTimeout(ctx, self.settings.ControlTimeout)
+	startupCtx, startupCancel := context.WithTimeout(ctx, self.settings.LaunchTimeout)
+	defer startupCancel()
+	controlCtx, cancel := context.WithDeadline(startupCtx, manifest.Identity.DeadlineAt)
 	defer cancel()
 	state, err := self.loadState(manifest.Identity.RunId)
 	if err != nil {

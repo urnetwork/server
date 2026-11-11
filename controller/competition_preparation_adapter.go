@@ -173,6 +173,50 @@ func CheckCompetitionPreparationFence(ctx context.Context, settings *Settings, r
 	return intent, err
 }
 
+// The watchdog observes revocation without taking the season lock owned by
+// synchronous authorization. Full review/source authorization still runs at
+// every external-operation boundary; this observation never grants authority.
+func checkCompetitionPreparationLiveness(ctx context.Context, settings *Settings, request CompetitionPreparationRequest) error {
+	return captureDatabaseError(func() {
+		server.Tx(ctx, func(tx server.PgTx) {
+			server.Raise(checkCompetitionPreparationLivenessInTx(ctx, tx, settings, request))
+		})
+	})
+}
+
+// Read only lifecycle facts on the caller's transaction, without advisory or
+// row locks, so the monitor cannot cancel healthy authorization by contention.
+func checkCompetitionPreparationLivenessInTx(ctx context.Context, tx server.PgTx, settings *Settings, request CompetitionPreparationRequest) error {
+	store := PostgresStore{}
+	if err := store.requireAutomationLeaseInTx(ctx, tx, settings, request.Lease); err != nil {
+		return err
+	}
+	if err := ensureAutomationNotHeldInTx(ctx, tx, settings, "source_activation"); err != nil {
+		return err
+	}
+	// The intent and its digest are immutable under database guards. Fetching
+	// multi-megabyte manifests here consumes the liveness budget on transport;
+	// full digest recomputation remains in synchronous authorization, not here.
+	var valid bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS (
+	 SELECT 1 FROM competition_source_activation a
+	 WHERE a.environment=$1 AND a.competition_id=$2 AND a.season_id=$3 AND a.generation=$4
+	 AND a.intent_sha256::text=$5 AND a.intent_json->>'intent_sha256'=$5
+	 AND (a.intent_json->>'expected_generation')::bigint=$6
+	 AND a.activated_at IS NULL AND a.abandoned_at IS NULL
+	 AND COALESCE((SELECT p.generation FROM competition_source_pointer p
+	  WHERE p.environment=$1 AND p.competition_id=$2 AND p.season_id=$3),0)=$6
+	)`, settings.AutomationPolicy.Environment, settings.CompetitionId, settings.AutomationPolicy.SeasonId,
+		request.Intent.Generation, request.Intent.IntentSha256, request.Intent.ExpectedGeneration).Scan(&valid)
+	if err != nil {
+		return err
+	}
+	if !valid {
+		return ErrConflict
+	}
+	return nil
+}
+
 // Small private seams make cancellation and failure ordering deterministic in
 // tests; the exported entrypoint always binds concrete storage and execution.
 type competitionPreparationAdapter struct {
@@ -252,7 +296,7 @@ func RunCompetitionPreparation(ctx context.Context, settings *Settings, config C
 			case <-time.After(5 * time.Second):
 			}
 			probeCtx, probeCancel := context.WithTimeout(operationCtx, 5*time.Second)
-			_, err := adapter.checkFence(probeCtx, settings, request)
+			err := checkCompetitionPreparationLiveness(probeCtx, settings, request)
 			probeCancel()
 			if err != nil {
 				stop(err)

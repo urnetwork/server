@@ -64,6 +64,15 @@ type candidateSourceIdentity struct {
 	Repositories         map[string]string `json:"repositories"`
 	CandidatePatchSha256 string            `json:"candidate_patch_sha256"`
 	CandidatePathBase    string            `json:"candidate_path_base,omitempty"`
+	WorkCoveragePolicy   json.RawMessage   `json:"work_coverage_policy,omitempty"`
+}
+
+// Optional only for legacy source locks. Presence means the exact producer's
+// v1 page/byte floor contract, not null or arbitrary extension metadata.
+type candidateSourceCoveragePolicy struct {
+	Kind                     string  `json:"kind"`
+	MinimumPageCoverageRatio float64 `json:"minimum_page_coverage_ratio"`
+	MinimumByteCoverageRatio float64 `json:"minimum_byte_coverage_ratio"`
 }
 
 // Only already-admitted bind mounts participate in the source contract.
@@ -374,6 +383,13 @@ func (self *DockerProxy) readCandidateSourceIdentity(source string) (*candidateS
 		identity.SourceEpoch < 0 || identity.SourceEpoch > 6 || !identity.Staging && identity.Branch != "sim-latency" || identity.Staging && identity.Branch != "sim-latency-staging" ||
 		identity.CandidatePathBase != "" && identity.CandidatePathBase != "mono_root_v1" {
 		return nil, "", errors.New("candidate source identity is not the exact temporary post-patch class")
+	}
+	if len(identity.WorkCoveragePolicy) != 0 {
+		var coverage candidateSourceCoveragePolicy
+		if decodeStrict(identity.WorkCoveragePolicy, &coverage) != nil || coverage.Kind != "seeded-crawl-coverage/v1" ||
+			coverage.MinimumPageCoverageRatio != 0.95 || coverage.MinimumByteCoverageRatio != 0.95 {
+			return nil, "", errors.New("candidate source coverage policy differs from the frozen v1 contract")
+		}
 	}
 	repositories := strings.Fields("server connect sdk proxy glog goidenticons userwireguard sn warp gvisor")
 	if len(identity.Repositories) != len(repositories) {

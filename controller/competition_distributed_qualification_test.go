@@ -3,9 +3,11 @@
 package controller
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +18,65 @@ import (
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/competitionagent"
 )
+
+// Failed or stale readiness cannot publish a first admission clock, including
+// cancellation observed after the probe but before the reservation boundary.
+func TestCompetitionDistributedAdmissionReadinessPrecedesClock(t *testing.T) {
+	roundId, otherRoundId := server.NewId(), server.NewId()
+	for _, test := range []struct {
+		check            HostSelfCheck
+		err              error
+		cancelAfterCheck bool
+	}{
+		{err: errors.New("synthetic unavailable host")},
+		{check: HostSelfCheck{RebaselinePassed: true}},
+		{check: HostSelfCheck{RebaselineRoundId: &roundId}},
+		{check: HostSelfCheck{RebaselinePassed: true, RebaselineRoundId: &otherRoundId}},
+		{check: HostSelfCheck{RebaselinePassed: true, RebaselineRoundId: &roundId}, cancelAfterCheck: true},
+	} {
+		ctx, cancel := context.WithCancel(t.Context())
+		reservations := 0
+		_, run, err := reserveCompetitionReadyExecutorAdmission(ctx, roundId,
+			func(context.Context) (HostSelfCheck, error) {
+				if test.cancelAfterCheck {
+					cancel()
+				}
+				return test.check, test.err
+			}, func(context.Context) (*competitionExecutorQualificationRun, error) {
+				reservations++
+				return &competitionExecutorQualificationRun{}, nil
+			})
+		cancel()
+		if err == nil || run != nil || reservations != 0 {
+			t.Fatal("unready or canceled setup consumed the immutable no-op clock", err, reservations)
+		}
+	}
+}
+
+// Readiness cannot renew an existing durable sample. The store's original
+// instants and identities pass through unchanged on every reconnection.
+func TestCompetitionDistributedAdmissionPreservesOriginalClockAfterReadiness(t *testing.T) {
+	roundId := server.NewId()
+	startedAt := time.Unix(1700000000, 0).UTC()
+	original := &competitionExecutorQualificationRun{JobId: server.NewId(), StartedAt: startedAt, DeadlineAt: startedAt.Add(3 * time.Hour)}
+	checks, reservations := 0, 0
+	for range 2 {
+		_, run, err := reserveCompetitionReadyExecutorAdmission(t.Context(), roundId,
+			func(context.Context) (HostSelfCheck, error) {
+				checks++
+				return HostSelfCheck{RebaselinePassed: true, RebaselineRoundId: &roundId}, nil
+			}, func(context.Context) (*competitionExecutorQualificationRun, error) {
+				reservations++
+				if checks != reservations {
+					t.Fatal("clock reservation preceded readiness")
+				}
+				return original, nil
+			})
+		if err != nil || run != original || !run.StartedAt.Equal(startedAt) || !run.DeadlineAt.Equal(startedAt.Add(3*time.Hour)) {
+			t.Fatal("readiness replaced the original qualification clock", err)
+		}
+	}
+}
 
 // Synthetic full-R9 evidence uses broad raw noise deliberately: the confidence
 // interval exceeds five percent, yet the approved operational screen can pass.

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -140,21 +141,39 @@ func (c *OnboardingBrevoConfig) TemplateIdLocale(step string, variant string, lo
 	return 0, "", false
 }
 
+// HasTemplateVariant reports whether the step's variant itself has an uploaded
+// template in some locale, without the `default` fallback: a new variant
+// (e2_widget/desktop) goes only once the release has uploaded it and written
+// its ids.
+func (c *OnboardingBrevoConfig) HasTemplateVariant(step string, variant string) bool {
+	for _, id := range c.Templates[step][variant] {
+		if 0 < id {
+			return true
+		}
+	}
+	return false
+}
+
 // TemplateLocaleCandidates orders the locales to try for a recipient: the exact
-// tag, its language alone, then `en`. Tags are matched as the store writes them
-// (es-419, pt-BR, zh-HK), case-insensitively on the language.
+// tag, the store locale its region reads (onboarding.RegionalStoreLocale:
+// zh-TW and zh-Hant read zh-HK, es-AR reads es-419, pt-AO reads pt-PT), its
+// language alone, then `en`, each once. Tags are matched as the store writes
+// them (es-419, pt-BR, zh-HK), case-insensitively on the language.
 func TemplateLocaleCandidates(locale string) []string {
 	locale = strings.TrimSpace(strings.ReplaceAll(locale, "_", "-"))
 	candidates := []string{}
-	if locale != "" {
-		candidates = append(candidates, locale)
-		if language, _, ok := strings.Cut(locale, "-"); ok && language != "" {
-			candidates = append(candidates, strings.ToLower(language))
-		} else {
-			candidates = append(candidates, strings.ToLower(locale))
+	add := func(candidate string) {
+		if candidate != "" && !slices.Contains(candidates, candidate) {
+			candidates = append(candidates, candidate)
 		}
 	}
-	candidates = append(candidates, TemplateLocaleDefault)
+	if locale != "" {
+		add(locale)
+		add(onboarding.RegionalStoreLocale(locale))
+		language, _, _ := strings.Cut(locale, "-")
+		add(strings.ToLower(language))
+	}
+	add(TemplateLocaleDefault)
 	return candidates
 }
 

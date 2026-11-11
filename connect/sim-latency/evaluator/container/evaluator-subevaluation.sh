@@ -606,8 +606,8 @@ else
 fi
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
-base_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id" identity)"
+base_identity="$(evaluation_docker run --rm "${subevaluation_legacy_probe_args[@]}" \
+    "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$base_image_id" identity)"
 jq -e --arg base_sha "$base_sha" --arg empty_patch "$EMPTY_PATCH_SHA256" --argjson source_epoch "$source_epoch" \
     '.schema == 1 and .image_kind == "evaluator-base" and
      .base_sha == $base_sha and .build_sha == $base_sha and
@@ -710,6 +710,14 @@ wall_timeout_seconds="$(
         "$ramp_ms" "$settle_ms" "$client_warmup_timeout_ms" "$duration_ms" "$request_timeout_ms"
 )" || die "could not calculate the stage timeout budget"
 [ "$score_timeout_seconds" -eq 10800 ] || die "score timeout is not the frozen three-hour submission limit"
+
+compose_run_with() {
+    local project="$1" compose_env="$2"
+    shift 2
+    # Compose run defaults to interactive even with --no-tty. The private
+    # owner permits stdout/stderr attach only; these batch jobs need no stdin.
+    compose_with "$project" "$compose_env" --profile run run --interactive=false "$@"
+}
 
 compose_with() {
     local project="$1" env_file="$2"
@@ -839,7 +847,15 @@ write_compose_env() {
 
 validate_output_tree() {
     local root="$1"
-    [ -z "$(evaluation_file find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ] ||
+    local invalid
+    if [[ "$subevaluation_scoped" = true && "$root" = "$work_dir" ]]; then
+        invalid="$(evaluation_diagnostic_find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ||
+            die "could not validate the diagnostic evidence tree"
+    else
+        invalid="$(evaluation_file find "$root" -mindepth 1 ! -type f ! -type d -print -quit)" ||
+            die "could not validate the candidate output tree"
+    fi
+    [ -z "$invalid" ] ||
         die "candidate output contains a non-regular entry"
 }
 
@@ -936,14 +952,18 @@ persist_evidence_tree() {
     if [[ "$subevaluation_scoped" != true ]]; then
         sudo -n chown -R "$worker_uid:$worker_gid" "$work_dir"
     fi
-    find "$work_dir" -type d -exec chmod u+rwx,go-rwx {} +
-    find "$work_dir" -type f -exec chmod 0400 {} +
+    evaluation_diagnostic_find "$work_dir" -type d -exec chmod u+rwx,go-rwx {} +
+    evaluation_diagnostic_find "$work_dir" -type f -exec chmod 0400 {} +
     validate_output_tree "$work_dir"
     local runtime_work_dir="$work_dir"
     work_dir="$artifact_dir/evidence"
     [ ! -e "$work_dir" ] || die "retained evidence directory already exists"
     install -d -m 0700 "$work_dir"
-    cp -a "$runtime_work_dir/." "$work_dir/"
+    if [[ "$subevaluation_scoped" = true ]]; then
+        evaluation_diagnostic_find "$runtime_work_dir" -mindepth 1 -maxdepth 1 -exec cp -a -t "$work_dir" -- {} +
+    else
+        cp -a "$runtime_work_dir/." "$work_dir/"
+    fi
     sync "$work_dir"
     if [[ "$subevaluation_scoped" = true ]]; then
         evaluation_host unmount-evidence
@@ -1212,7 +1232,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
+            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_core_args[@]}" "${subevaluation_run_label_args[@]}" \
             "$base_image_id" score-progress \
             --run "$(join_csv "${candidate_csv[@]}")" \
             --baseline /artifacts/baseline.json)" || die "candidate-$ordinal live comparison failed"
@@ -1227,7 +1247,7 @@ run_live_comparison() {
             --label 'com.urnetwork.competition.stage=live-progress' \
             --label "com.urnetwork.competition.round-id=$round_id" \
             --mount "type=bind,src=$work_dir/scorer-input,dst=/artifacts,readonly" \
-            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_run_label_args[@]}" \
+            --entrypoint /opt/urnetwork/bin/sim-latency "${subevaluation_core_args[@]}" "${subevaluation_run_label_args[@]}" \
             "$base_image_id" compare \
             --a "$(join_csv "${candidate_manifests[@]}")" \
             --b "$(join_csv "${baseline_manifests[@]}")" \
@@ -1343,7 +1363,7 @@ run_stage() {
     "$NETWORK_BOUNDARY" "${project}_evaluation" > "$stage_root/network-boundary.json" ||
         die "$stage_token network boundary failed before runner admission"
     local migration_json migration_path migration_sha
-    migration_json="$(compose_with "$project" "$compose_env" --profile run run --rm --no-deps --no-tty migrate)"
+    migration_json="$(compose_run_with "$project" "$compose_env" --rm --no-deps --no-tty migrate)"
     jq -e '.schema == 1 and .database_version > 0 and .database_version == .migration_count' \
         <<<"$migration_json" >/dev/null || die "$stage_token migration gate failed"
     migration_path="$stage_root/migration.json"
@@ -1352,7 +1372,7 @@ run_stage() {
     migration_hashes+=("$migration_sha")
     redis_generations+=("$(new_secret)")
 
-    compose_with "$project" "$compose_env" --profile run run --rm --no-deps --no-tty runner preflight >&2
+    compose_run_with "$project" "$compose_env" --rm --no-deps --no-tty runner preflight >&2
     local runner_id="" postgres_id redis_id runner_cgroup postgres_cgroup redis_cgroup
     local inspect_path="$stage_root/containers.json" inspect_json
     postgres_id="$(compose_with "$project" "$compose_env" --profile run ps --all --quiet postgres)"
@@ -1741,8 +1761,8 @@ jq -e --argjson commits "$candidate_commits_json" '.repositories == $commits' \
     die "temporary candidate checkout does not match the canonical patch"
 [ "$(evaluation_docker image inspect --format '{{.Id}}' "$candidate_image_id")" = "$candidate_image_id" ] ||
     die "candidate image id is unavailable or changed"
-candidate_identity="$(evaluation_docker run --rm --network none --read-only --cap-drop ALL \
-    --security-opt no-new-privileges:true --mount "type=bind,src=$candidate_source_root,dst=/workspace,readonly" \
+candidate_identity="$(evaluation_docker run --rm "${subevaluation_legacy_probe_args[@]}" \
+    --mount "type=bind,src=$candidate_source_root,dst=/workspace,readonly" \
     "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$candidate_image_id" identity)"
 candidate_simulator_sha256="$(jq -er '.simulator_sha256' <<<"$candidate_identity")"
 jq -e --arg base_sha "$base_sha" --arg build_sha "$candidate_sha" \

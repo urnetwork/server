@@ -2765,7 +2765,7 @@
           "legendFormat": "total"
         }
       ],
-      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, no_success, low_success, then unprobed with no evidence or health, then not_modern, then unprobed while warming up (passing URL checks on too few runs), then arin_non_quality. Blackhole and country are legacy labels that stay zero."
+      "description": "Every provider left out of at least one bucket, each counted once under the first rule that holds, in the order reliability, arin_risk, tls, zero_carry, no_success, low_success, then unprobed with no evidence or health, then not_modern, then unprobed while warming up (passing URL checks on too few runs), then arin_non_quality. Blackhole and country are legacy labels that stay zero."
     },
     {
       "id": 45,
@@ -2824,7 +2824,7 @@
           "legendFormat": "{{reason}}"
         }
       ],
-      "description": "The providers each rule leaves out over time. Reliability, arin_risk and tls remove a provider from everything; no_success and low_success (only while online_url_success_ratio is on) from every bucket and the counts while their probes continue; health, unprobed with no evidence and not_modern (only while the modern provider gate is on) from quality and speed; unprobed while warming up (passing URL checks on too few runs) from quality, and from speed below 2 runs; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
+      "description": "The providers each rule leaves out over time. Reliability, arin_risk, tls and zero_carry remove a provider from everything; no_success and low_success (only while online_url_success_ratio is on) from every bucket and the counts while their probes continue; health, unprobed with no evidence and not_modern (only while the modern provider gate is on) from quality and speed; unprobed while warming up (passing URL checks on too few runs) from quality, and from speed below 2 runs; arin_non_quality from quality alone. Every reason is published every refresh, zero included."
     },
     {
       "id": 46,
@@ -5742,6 +5742,73 @@
         }
       ],
       "description": "The Online members by the outcome their capability evidence gives: the supply modern-only requests and modern-first priority draw from in the Online fallback. Online is no gate bucket, so this is no gate's shadow (FP2-MODERN.md)."
+    },
+    {
+      "id": 933,
+      "type": "row",
+      "title": "zero-carry verdicts",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 241
+      },
+      "panels": []
+    },
+    {
+      "id": 934,
+      "type": "stat",
+      "title": "left out: zero carry",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 242
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "min": 0,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "#ff9f1c"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_stats_provider_excluded{env=\"$env\",reason=\"zero_carry\"})",
+          "refId": "A",
+          "legendFormat": "zero_carry"
+        }
+      ],
+      "description": "Connected providers with a zero-carry verdict in force, as the dashboard counts the pool: in the last day their contracts from at least three client networks (the prober's, their own network's and the sessions their clients reported idle left out) carried at most 1 KiB in all, and none earlier that day carried any, and every URL probe in the last eight hours failed. A hard exclusion: out of every bucket, answer and provider-locations count, force_minimum and an explicit client id included, in every country, whatever the URL-success rule's exemption. The URL probe keeps measuring them; a success, a new app version on the device or the verdict's expiry after 72 hours brings them back (model/provider_zero_carry.go). The judge's runs, its verdicts by country and its reads are on the egress probes dashboard (zero-carry judge row)."
     }
   ]
 }

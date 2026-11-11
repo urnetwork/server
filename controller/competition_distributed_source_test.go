@@ -39,9 +39,23 @@ func TestCompetitionDistributedMeasuredGraphUsesCanonicalTenRepositoryContract(t
 // Rehashing malicious inventories proves semantic source checks, not merely
 // rejection caused by a changed outer file digest or an invented protocol.
 func TestCompetitionDistributedSourcesVerifyAllTenFrozenHeadsAndLifecycle(t *testing.T) {
+	testCompetitionDistributedSources(t, nil)
+}
+
+// The wire fixture includes the preparer's optional leaf independently of the
+// consumer struct, so a missing consumer field fails at the real decode boundary.
+func TestCompetitionDistributedSourcesVerifyFrozenCoveragePolicy(t *testing.T) {
+	policy := model.DefaultCompetitionWorkCoveragePolicy()
+	testCompetitionDistributedSources(t, &policy)
+}
+
+// Every mutation is rehashed, including the pristine-source build digest.
+func testCompetitionDistributedSources(t *testing.T, coverage *model.CompetitionWorkCoveragePolicy) {
+	t.Helper()
 	for _, change := range []struct {
-		name   string
-		mutate func(*competitionDistributedSourceEvidence)
+		name       string
+		mutate     func(*competitionDistributedSourceEvidence)
+		wireChange string
 	}{
 		{name: "valid", mutate: func(*competitionDistributedSourceEvidence) {}},
 		{name: "wrong baseline head", mutate: func(e *competitionDistributedSourceEvidence) {
@@ -61,8 +75,19 @@ func TestCompetitionDistributedSourcesVerifyAllTenFrozenHeadsAndLifecycle(t *tes
 		{name: "candidate build-map mismatch", mutate: func(e *competitionDistributedSourceEvidence) {
 			e.Candidate.Repositories["sdk"] = strings.Repeat("e", 40)
 		}},
+		{name: "baseline missing coverage", wireChange: "baseline/missing"},
+		{name: "baseline changed coverage", wireChange: "baseline/changed"},
+		{name: "candidate missing coverage", wireChange: "candidate/missing"},
+		{name: "candidate changed coverage", wireChange: "candidate/changed"},
+		{name: "original missing coverage", wireChange: "original/missing"},
+		{name: "original changed coverage", wireChange: "original/changed"},
+		{name: "unknown source leaf", wireChange: "baseline/unknown"},
 	} {
+		if coverage == nil && change.wireChange != "" {
+			continue
+		}
 		settings := validSettings()
+		settings.EvaluationPolicy.WorkCoveragePolicy = coverage.Clone()
 		settings.distributedCoordinator = &competitionDistributedCoordinatorProfile{Config: competitionDistributedCoordinatorConfig{Settings: defaultCompetitionDistributedCoordinatorSettings()}}
 		settings.distributedSourceCommits = map[string]string{}
 		for _, repository := range model.CompetitionSourceRepositoryNames() {
@@ -85,7 +110,32 @@ func TestCompetitionDistributedSourcesVerifyAllTenFrozenHeadsAndLifecycle(t *tes
 		candidate.Repositories["server"] = strings.Repeat("d", 40)
 		candidate.CandidatePatchSha256 = &patch
 		buildCommits := copyCommits(candidate.Repositories)
-		originalBytes, err := json.MarshalIndent(baseline, "", "  ")
+		wireSource := func(identity any, scope string) map[string]any {
+			t.Helper()
+			content, err := json.Marshal(identity)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var value map[string]any
+			if err := json.Unmarshal(content, &value); err != nil {
+				t.Fatal(err)
+			}
+			if coverage != nil {
+				value["work_coverage_policy"] = coverage.Clone()
+			}
+			switch change.wireChange {
+			case scope + "/missing":
+				delete(value, "work_coverage_policy")
+			case scope + "/changed":
+				changed := coverage.Clone()
+				changed.MinimumPageCoverageRatio = 0.5
+				value["work_coverage_policy"] = changed
+			case scope + "/unknown":
+				value["unrecognized_instrument_policy"] = true
+			}
+			return value
+		}
+		originalBytes, err := json.MarshalIndent(wireSource(baseline, "original"), "", "  ")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -98,8 +148,20 @@ func TestCompetitionDistributedSourcesVerifyAllTenFrozenHeadsAndLifecycle(t *tes
 		commitsDigest := sha256.Sum256(append(commits, '\n'))
 		evidence := competitionDistributedSourceEvidence{Schema: 1, Kind: "sim-latency-temporary-evaluation-sources", Origin: "authenticated_evaluator_image",
 			RuntimeTarget: "/workspace", ReadOnlyMount: true, Baseline: baseline, Candidate: candidate, CleanupComplete: true}
-		change.mutate(&evidence)
-		evidenceBytes, err := json.MarshalIndent(evidence, "", "  ")
+		if change.mutate != nil {
+			change.mutate(&evidence)
+		}
+		evidenceBytes, err := json.Marshal(evidence)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wireEvidence map[string]any
+		if err := json.Unmarshal(evidenceBytes, &wireEvidence); err != nil {
+			t.Fatal(err)
+		}
+		wireEvidence["baseline"] = wireSource(evidence.Baseline, "baseline")
+		wireEvidence["candidate"] = wireSource(evidence.Candidate, "candidate")
+		evidenceBytes, err = json.MarshalIndent(wireEvidence, "", "  ")
 		if err != nil {
 			t.Fatal(err)
 		}

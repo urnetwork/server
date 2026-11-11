@@ -23,6 +23,9 @@ func (self *DockerProxy) proveHostNamespace(ctx context.Context, containerId str
 	if !digestPattern.MatchString(containerId) || self.plan.HostFiles == nil {
 		return HostNamespaceMap{}, errors.New("namespace probe has no full owned container identity")
 	}
+	if _, err := self.requireRuntimeBoundary(ctx); err != nil {
+		return HostNamespaceMap{}, err
+	}
 	owned, err := self.inspectOwnedDocker(ctx, containerId, false)
 	if err != nil || owned != containerId {
 		return HostNamespaceMap{}, errors.New("namespace probe belongs to another container")

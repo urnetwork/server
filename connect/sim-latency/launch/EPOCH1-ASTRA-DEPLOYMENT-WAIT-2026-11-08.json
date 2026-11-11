@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "kind": "official-epoch1-approval-external-deployment-blocker/v1",
+  "status": "WAIT_EXHAUSTED_PENDING_EXTERNAL_DEPLOYMENT",
+  "observed_at": "2026-11-08T23:00:10Z",
+  "read_only_database_schema_head": 948,
+  "required_migration": 949,
+  "official_import_route_http_status": 404,
+  "readiness_watch": {
+    "unit": "urnetwork-epoch1-official-import-readiness-20261108-v1.service",
+    "started_at": "2026-11-08T22:29:54Z",
+    "ended_at": "2026-11-08T22:59:54Z",
+    "state": "failed",
+    "main_pid": 0,
+    "exit_code": 1,
+    "reason": "Bounded deployment availability wait expired, not a reviewer or evaluation failure.",
+    "review_import_performed": false,
+    "restarted_or_deadline_renewed": false
+  },
+  "election_unchanged": {
+    "job_id": "01a1a440-fd2e-538a-365c-f4b23eed4739",
+    "revision": 1,
+    "decision_sha256": "a800ecdba04be602f61a904e9626819fa68fcf71191bdf8dda0b7c7989a94e81"
+  },
+  "official_astra_review_approved": true,
+  "conditional_user_winner_approval_satisfied": true,
+  "api_integrity_review": "not_reviewed",
+  "api_source_approval": "pending",
+  "api_settlement_status": "pending",
+  "main_migration_performed_by_this_agent": false,
+  "rewards_released": false,
+  "source_promoted": false,
+  "resume": "Verify normal-pipeline migration949 and API/config convergence, then follow EPOCH1-ASTRA-DEPLOYMENT-HANDOFF-2026-11-08.md. No new winner-review approval is required; do not fabricate native Snow evidence, edit old records, or migrate through PgBouncer."
+}

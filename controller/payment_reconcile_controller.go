@@ -18,7 +18,8 @@ package controller
 //     marker for that renewal window after rechecking its live local owner.
 //   - store says the entitlement is ALREADY over (refunded, revoked, expired
 //     and the end-of-period task missed it) -> end it at now. The cancelled ≠
-//     expired rule: a cancel-at-period-end with time remaining is paid-through
+//     expired rule: a cancel-at-period-end with time remaining, or a Stripe
+//     cancel inside a paid period that gave no money back, is paid-through
 //     and is NEVER ended -- we never claw back paid-through time.
 //
 // Every repair is a payment_reconciliation_event row; a run that repairs
@@ -187,6 +188,13 @@ var moneroReconcileHasCredentials = func() bool {
 }
 
 var zcashReconcileHasCredentials = func() bool {
+	return true
+}
+
+// The TAO, Bitcoin and ETH legs always run, like Monero's and Zcash's: the
+// first reads only our receipts, and the chain legs run when the coin's
+// chain source is in the vault.
+var cryptoRailReconcileHasCredentials = func() bool {
 	return true
 }
 
@@ -434,10 +442,16 @@ type stripeReconcileSubscription struct {
 	} `json:"cancellation_details"`
 }
 
+// Stripe's cancellation_details.reason for a cancel someone asked for: the
+// customer in the billing portal, or an operator in the Dashboard or the API.
+// Stripe's own cancels say payment_failed or payment_disputed.
+const stripeCancellationReasonRequested = "cancellation_requested"
+
 // stripeSubscriptionOver applies the cancelled ≠ expired rule to a Stripe
-// subscription status: only statuses where Stripe says the entitlement is
-// ALREADY over. cancel_at_period_end with status "active" is paid-through
-// time and is never acted on.
+// subscription status: only statuses after which Stripe bills nothing more.
+// cancel_at_period_end with status "active" is paid-through time and is never
+// acted on, and neither is a cancel inside the paid period that gave no money
+// back (stripeCancelLeavesPaidPeriod).
 func stripeSubscriptionOver(status string) bool {
 	switch status {
 	case "canceled", "incomplete_expired", "unpaid":
@@ -459,10 +473,73 @@ func stripeSubscriptionEntitled(status string) bool {
 }
 
 type stripeReconcileInvoiceExpanded struct {
-	Id           string                       `json:"id"`
-	Status       string                       `json:"status"`
+	Id     string `json:"id"`
+	Status string `json:"status"`
+	// in the currency's minor unit; 0 for a trial or a fully discounted invoice
+	AmountPaid int64 `json:"amount_paid"`
+	// the id of the charge that paid it. API versions from 2025-03-31 no longer
+	// name it here.
+	Charge       json.RawMessage              `json:"charge"`
 	Lines        *StripeLineItems             `json:"lines"`
 	Subscription *stripeReconcileSubscription `json:"subscription"`
+}
+
+// The charge that paid a renewal's invoice.
+type stripeReconcileCharge struct {
+	Id             string `json:"id"`
+	Status         string `json:"status"`
+	Amount         int64  `json:"amount"`
+	AmountRefunded int64  `json:"amount_refunded"`
+	Refunded       bool   `json:"refunded"`
+	Disputed       bool   `json:"disputed"`
+}
+
+// Whether the charge still holds all the money it took: it succeeded, none of
+// it was refunded, and it was never disputed. Stripe keeps the invoice "paid"
+// through a refund or a dispute, so only the charge can tell. An inquiry or a
+// dispute the merchant won still marks it disputed.
+func (self *stripeReconcileCharge) keptWholePayment() bool {
+	return self.Status == "succeeded" &&
+		0 < self.Amount &&
+		self.AmountRefunded == 0 &&
+		!self.Refunded &&
+		!self.Disputed
+}
+
+// Whether the window a canceled subscription's invoice paid for may still be
+// running on paid time: someone asked for the cancel (not Stripe, for a failed
+// or disputed payment), the invoice is paid and took money, and its paid
+// period, which ends at paidPeriodEnd, has not ended. A cancel stops the renewals; it gives
+// no money back. The invoice's charge decides the rest (keptWholePayment).
+func stripeCancelLeavesPaidPeriod(
+	invoice *stripeReconcileInvoiceExpanded,
+	paidPeriodEnd time.Time,
+	now time.Time,
+) bool {
+	return invoice != nil &&
+		invoice.Status == "paid" &&
+		invoice.Subscription != nil &&
+		invoice.Subscription.Status == "canceled" &&
+		invoice.Subscription.CancellationDetails.Reason == stripeCancellationReasonRequested &&
+		0 < invoice.AmountPaid &&
+		now.Before(paidPeriodEnd)
+}
+
+// Reads the charge that paid a renewal's invoice.
+func stripeReconcileFetchCharge(ctx context.Context, chargeId string) (*stripeReconcileCharge, error) {
+	charge, err := server.HttpGetRequireStatusOk[*stripeReconcileCharge](
+		ctx,
+		fmt.Sprintf("%s/v1/charges/%s", stripeApiBaseUrl, url.PathEscape(chargeId)),
+		stripeAuthHeader,
+		server.ResponseJsonObject[*stripeReconcileCharge],
+	)
+	if err != nil {
+		return nil, err
+	}
+	if charge == nil || charge.Id != chargeId {
+		return nil, fmt.Errorf("charge %s: Stripe returned another or a malformed charge", chargeId)
+	}
+	return charge, nil
 }
 
 type stripeReconcileInvoiceList struct {
@@ -524,9 +601,12 @@ type PaymentReconcileStoreResult struct {
 	Sandbox int `json:"sandbox,omitempty"`
 	// UnknownToStore counts examined App Store renewals whose transaction no
 	// accepted environment knows, past the bounded retry (unknown_to_store).
-	UnknownToStore  int  `json:"unknown_to_store,omitempty"`
-	Skipped         bool `json:"skipped,omitempty"`
-	BudgetExhausted bool `json:"budget_exhausted,omitempty"`
+	UnknownToStore int `json:"unknown_to_store,omitempty"`
+	// examined Stripe renewals whose subscription was canceled inside a paid
+	// period nothing was refunded or disputed from, kept to the period's end
+	CanceledPaidThrough int  `json:"canceled_paid_through,omitempty"`
+	Skipped             bool `json:"skipped,omitempty"`
+	BudgetExhausted     bool `json:"budget_exhausted,omitempty"`
 }
 
 type PaymentReconcileRunResult struct {
@@ -751,6 +831,15 @@ func (self *paymentReconcileRun) countUnknownToStore(store string) {
 	summary := self.storeResult(store)
 	summary.UnknownToStore += 1
 	self.storeDetail(store)[model.PaymentReconcileActionUnknownToStore] = summary.UnknownToStore
+}
+
+// Counts one examined renewal kept on the paid time of a canceled
+// subscription. A kept window writes no event of its own, so the count is
+// folded into the heartbeat row.
+func (self *paymentReconcileRun) countCanceledPaidThrough(store string) {
+	summary := self.storeResult(store)
+	summary.CanceledPaidThrough += 1
+	self.storeDetail(store)["canceled_paid_through"] = summary.CanceledPaidThrough
 }
 
 // creditAction names the audit action for a credit repair: the real action,
@@ -1001,6 +1090,9 @@ func runPaymentReconciliation(
 		{model.SubscriptionMarketX402, x402ReconcileHasCredentials, reconcileX402},
 		{model.SubscriptionMarketMonero, moneroReconcileHasCredentials, reconcileMonero},
 		{model.SubscriptionMarketZcash, zcashReconcileHasCredentials, reconcileZcash},
+		{model.SubscriptionMarketBittensor, cryptoRailReconcileHasCredentials, reconcileBittensor},
+		{model.SubscriptionMarketBitcoin, cryptoRailReconcileHasCredentials, reconcileBitcoin},
+		{model.SubscriptionMarketEthereum, cryptoRailReconcileHasCredentials, reconcileEthereum},
 	}
 	if 0 < len(options.Stores) {
 		selected := map[string]bool{}
@@ -1116,6 +1208,12 @@ func runPaymentReconciliation(
 //	subscription status canceled / incomplete_expired / unpaid, renewal active -> end
 //	    that invoice's renewal only (every open renewal is checked against its
 //	    own invoice's subscription; a network's other subscriptions keep theirs)
+//	canceled on request inside the invoice's paid period, its charge neither
+//	    refunded nor disputed                                                  -> nothing
+//	    until the paid period ends, then end (a cancel gives no money back,
+//	    and the manual-payment grace is for renewals that may yet be paid)
+//	unpaid, or canceled for payment_failed, exact paid window                 -> nothing
+//	    through the manual-payment grace
 //	status active + cancel_at_period_end (time remaining)                      -> nothing
 //	anything else                                                              -> nothing
 func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
@@ -1293,6 +1391,45 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 			continue
 		}
 		if stripeSubscriptionOver(fullInvoice.Subscription.Status) {
+			details := map[string]any{"subscription_status": fullInvoice.Subscription.Status}
+			if reason := fullInvoice.Subscription.CancellationDetails.Reason; reason != "" {
+				details["cancellation_reason"] = reason
+			}
+			// A cancel inside the paid period keeps the window this invoice
+			// paid for until the period ends, unless its charge gave money back.
+			// A refund or dispute also ends it through its own webhook.
+			paidPeriodEnd, paidWindow := stripeRenewalPaidPeriodEndInConn(run.connOwner, ctx, renewal, fullInvoice)
+			if paidWindow && stripeCancelLeavesPaidPeriod(fullInvoice, paidPeriodEnd, run.now) {
+				details["paid_period_end"] = paidPeriodEnd.UTC().Format(time.RFC3339)
+				// with no charge named, what came back can't be read: end, as before
+				if chargeId := stripeIdFromRaw(fullInvoice.Charge); chargeId != "" {
+					if !run.spend(store) {
+						return false, nil
+					}
+					charge, err := stripeReconcileFetchCharge(ctx, chargeId)
+					if err != nil {
+						// as for an invoice that can't be read: nothing ends this run
+						run.record(
+							store,
+							model.PaymentReconcileActionError,
+							&renewal.NetworkId,
+							renewal.TransactionId,
+							map[string]any{"error": err.Error(), "leg": "charge", "charge": chargeId},
+						)
+						continue
+					}
+					if charge.keptWholePayment() {
+						run.countCanceledPaidThrough(store)
+						// the paid window is confirmed, so its Pro metadata is
+						// repaired as an active subscription's is
+						run.repairEntitlement(store, renewal, fullInvoice.Subscription.Id, details)
+						continue
+					}
+					details["charge"] = charge.Id
+					details["charge_amount_refunded"] = charge.AmountRefunded
+					details["charge_disputed"] = charge.Disputed
+				}
+			}
 			// only the window this invoice paid for; the subscription's other
 			// open invoices are checked on their own
 			run.end(
@@ -1300,7 +1437,7 @@ func reconcileStripe(run *paymentReconcileRun, since time.Time) (bool, error) {
 				renewal.NetworkId,
 				paymentReconcileEndScope{transactionIds: []string{renewal.TransactionId}},
 				fullInvoice.Subscription.Id,
-				map[string]any{"subscription_status": fullInvoice.Subscription.Status},
+				details,
 			)
 		} else if stripeSubscriptionEntitled(fullInvoice.Subscription.Status) &&
 			stripeRenewalMatchesInvoiceInConn(run.connOwner, ctx, renewal, fullInvoice) {
@@ -1330,25 +1467,40 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 	renewal *model.ReconcileSubscriptionRenewal,
 	invoice *stripeReconcileInvoiceExpanded,
 ) bool {
+	_, paidWindow := stripeRenewalPaidPeriodEndInConn(connOwner, ctx, renewal, invoice)
+	return paidWindow
+}
+
+// The end of the paid period the invoice bills, when the renewal is exactly the
+// window the invoice's credit wrote on this network: the invoice's own ledger
+// network, the subscription's network metadata, and a subscription line whose
+// period starts the window and, with a grace period, ends it. paidWindow false
+// otherwise. Reuse the caller's PostgreSQL session; nil selects the outer
+// acquisition boundary.
+func stripeRenewalPaidPeriodEndInConn(connOwner server.PgConn,
+	ctx context.Context,
+	renewal *model.ReconcileSubscriptionRenewal,
+	invoice *stripeReconcileInvoiceExpanded,
+) (paidPeriodEnd time.Time, paidWindow bool) {
 	if invoice == nil || invoice.Subscription == nil || invoice.Id != renewal.TransactionId {
-		return false
+		return time.Time{}, false
 	}
 	ledgerNetworkId, credited := model.GetStripeInvoiceNetworkIdInConn(connOwner, ctx, renewal.TransactionId)
 	if !credited || ledgerNetworkId != renewal.NetworkId {
-		return false
+		return time.Time{}, false
 	}
 	metadataNetwork := invoice.Subscription.Metadata["network_id"]
 	if metadataNetwork != "" {
 		metadataNetworkId, err := server.ParseId(metadataNetwork)
 		if err != nil || metadataNetworkId != renewal.NetworkId {
-			return false
+			return time.Time{}, false
 		}
 	} else {
 		// Legacy subscriptions predate immutable provider metadata. The exact
 		// stripe_invoice ledger remains the committed credit owner.
 	}
 	if invoice.Lines == nil {
-		return false
+		return time.Time{}, false
 	}
 	for _, line := range invoice.Lines.Data {
 		if line == nil || line.Type != "subscription" || line.Period == nil {
@@ -1363,10 +1515,10 @@ func stripeRenewalMatchesInvoiceInConn(connOwner server.PgConn,
 				// Existing paid invoices retain the old 24-hour window until a
 				// separately verified migration extends them.
 				renewal.EndTime.Equal(periodEnd.Add(SubscriptionGracePeriod))) {
-			return true
+			return periodEnd, true
 		}
 	}
-	return false
+	return time.Time{}, false
 }
 
 // ----- apple -----
@@ -2330,7 +2482,17 @@ func reconcileSolana(run *paymentReconcileRun, since time.Time) (bool, error) {
 		}
 	}
 
-	return true, nil
+	// leg 3: the chain itself, for every open USDC intent's reference: a
+	// payment whose Helius delivery was lost is found and credited through the
+	// webhook's own decision (mmm/BTCPAY.md §17.3, closing the gap of §2.5)
+	if complete, err := reconcileSolanaChainReferences(run); err != nil || !complete {
+		return complete, err
+	}
+
+	// leg 4: native SOL invoices, on the rail's own legs (credited from the
+	// chain by the scanner; this re-judges held receipts and re-verifies
+	// credits) under the solana store
+	return reconcileCryptoAsset(run, model.CryptoAssetSol)
 }
 
 func solanaStatusConfirmsPayment(statusErr any, confirmationStatus *string) bool {
@@ -2492,6 +2654,18 @@ func reconcileZcash(run *paymentReconcileRun, since time.Time) (bool, error) {
 	return reconcileCryptoAsset(run, model.CryptoAssetZec)
 }
 
+func reconcileBittensor(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetTao)
+}
+
+func reconcileBitcoin(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetBtc)
+}
+
+func reconcileEthereum(run *paymentReconcileRun, since time.Time) (bool, error) {
+	return reconcileCryptoAsset(run, model.CryptoAssetEth)
+}
+
 func reconcileCryptoAsset(run *paymentReconcileRun, asset string) (bool, error) {
 	ctx := run.clientSession.Ctx
 	store := cryptoAssetMarket(asset)
@@ -2566,8 +2740,14 @@ func reconcileCryptoAsset(run *paymentReconcileRun, asset string) (bool, error) 
 	}
 
 	// leg 2: credited receipts must still be on the chain, by the word of a
-	// wallet that can be trusted to know
-	if 0 < len(toVerify) {
+	// wallet that can be trusted to know. A reader of final transactions only
+	// (TAO's finalized blocks, SOL's finalized commitment) credited nothing
+	// that can leave the chain, so it is not asked again
+	irreversible := false
+	if final, ok := wallet.(cryptoWalletIrreversible); ok {
+		irreversible = final.Irreversible()
+	}
+	if 0 < len(toVerify) && !irreversible {
 		cursor := model.GetCryptoScanCursorInConn(run.connOwner, ctx, asset)
 		refused := ""
 		if err := cryptoCheckWallet(ctx, run.connOwner, asset, wallet); err != nil {
@@ -2801,7 +2981,7 @@ func cryptoReconcileLedger(
 	assetConfig := config.Asset(asset)
 	cursor := model.GetCryptoScanCursorInConn(run.connOwner, ctx, asset)
 	if cursor == nil || cursor.LastSuccessAt == nil || cursor.WalletHeight == nil ||
-		3*config.ScanInterval < run.now.Sub(*cursor.LastSuccessAt) {
+		3*config.ScanIntervalFor(asset) < run.now.Sub(*cursor.LastSuccessAt) {
 		// the scanner is behind; the quote path already stops selling
 		return nil
 	}

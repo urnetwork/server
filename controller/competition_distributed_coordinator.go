@@ -83,6 +83,7 @@ func runCompetitionDistributedCoordinator(ctx context.Context, settings *Setting
 	}
 	children := []executorChild{}
 	for _, host := range settings.DistributedEvaluationPolicy.Hosts {
+		host = competitionExecutorControlHost(settings, host)
 		childSettings := *settings
 		childSettings.executorHostId, childSettings.executorSlotId = host.HostId, host.SlotId
 		childSettings.roundBaselinePreparation, childSettings.distributedPreparationOnly = nil, false

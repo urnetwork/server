@@ -433,7 +433,9 @@ func LoadProviderEgressSites() (*ProviderEgressSites, error) {
 
 // The pool the prober is served: every active row, probation included (a site
 // on probation is loaded and recorded; what it may not do is count, which
-// ingest decides), in name order, with the profile. A row with places it is
+// ingest decides: model.ScoreProviderEgressHealth for a legacy run, the store
+// for a URL outcome, provider_egress_url_source.go), in name order, with the
+// profile. A row with places it is
 // incompatible with is served as a canary in canaryShare of pool fetches --
 // each pass fetches once, so about that share of the runs from a marked place
 // load it, unscored, which is how the refresh learns it works there again

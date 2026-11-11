@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "status": "DEPLOYED_API_PREPARATION_SUCCEEDED",
+  "runner_source_commit": "6e1c371ac617897866bc7a23aedaa0dac018fbf4",
+  "runner_sha256": "5c40ba5b38897d66a778979562f0cd70b0ed9958e6c2258b54cae85e27755634",
+  "unit": "urnetwork-epoch2-api-prepare-projection-20261109-v1.service",
+  "unit_terminal_exit": 0,
+  "transition_revision": 13,
+  "transition_state": "preparation_ready",
+  "api_readiness_recorded_at": "2026-11-09T22:07:43.172783Z",
+  "api_runtime_image_digest": "sha256:cd9ef00c61fb7724ae582636b55029d3f7e408f3027bce5c48d5f93ed86f9e7e",
+  "failure": "Preparation's read-only watchdog still transferred the complete immutable intent and incumbent within its five-second budget.",
+  "native_read_only_comparison": [
+    {"returned_bytes":64,"callback_ms":172,"total_ms":731},
+    {"returned_bytes":1971080,"callback_ms":2252,"total_ms":2487},
+    {"returned_bytes":64,"callback_ms":145,"total_ms":434}
+  ],
+  "fix": "Project one lifecycle boolean from scoped generation, immutable column/JSON digest, expected predecessor, activation/abandonment and current pointer. Keep exact lease/hold checks, all synchronous full authorization, the five-second watchdog budget and all grading gates.",
+  "adjacent_fix": "The host-qualification watchdog now uses the same bounded liveness observer; full authorization remains at its synchronous boundaries.",
+  "deterministic_regression": "Synthetic full-payload transfer tripwire refuses the old source reader while the real projection succeeds with a large manifest. No timing/scheduler dependence.",
+  "focused_ordinary_repetitions": 3,
+  "focused_race_repetitions": 3,
+  "latest_race_includes_host_qualification_controls": true,
+  "isolated_postgres_cases": 2,
+  "isolated_postgres_repetitions_each": 3,
+  "postgres_controls": "Real held advisory scope; large JSONB payload with char(64) and JSON digest comparison; zero/nonzero current pointer; changed pointer; abandoned source.",
+  "main_database_migration_performed": false,
+  "grading_started": false,
+  "epoch2_opened": false
+}

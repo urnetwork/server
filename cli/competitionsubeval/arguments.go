@@ -21,6 +21,7 @@ type arguments struct {
 	hostOperationRunId string
 	dockerProbe        bool
 	recoverActive      bool
+	startPrivateEngine bool
 }
 
 // Argument parsing is kept separate so invalid modes cannot load any authority.
@@ -39,11 +40,12 @@ func parseArguments(args []string, diagnostic io.Writer) (arguments, error) {
 	flags.StringVar(&parsed.hostOperationRunId, "host-operation", "", "Non-root finite fixed-run file handoff; public sibling metadata only")
 	flags.BoolVar(&parsed.dockerProbe, "docker-probe", false, "Root-only closed read-only private-engine host-audit query")
 	flags.BoolVar(&parsed.recoverActive, "recover-active", false, "PID1-only independent recovery of the existing physical slot")
+	flags.BoolVar(&parsed.startPrivateEngine, "start-private-engine", false, "Root-only pinned Docker launch in the private containerd mount namespace")
 	if err := flags.Parse(args); err != nil {
 		return arguments{}, err
 	}
 	roles := 0
-	for _, enabled := range []bool{parsed.serve, parsed.serveManaged, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive} {
+	for _, enabled := range []bool{parsed.serve, parsed.serveManaged, parsed.executeRunId != "", parsed.cleanupRunId != "", parsed.dockerClientRunId != "", parsed.dockerOwnerRunId != "", parsed.freezeRunId != "", parsed.hostOperationRunId != "", parsed.dockerProbe, parsed.recoverActive, parsed.startPrivateEngine} {
 		if enabled {
 			roles++
 		}

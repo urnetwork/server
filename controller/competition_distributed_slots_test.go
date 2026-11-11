@@ -98,12 +98,17 @@ func newCompetitionDistributedPgFixture(outer *testing.T, t testing.TB, publish,
 	server.Tx(ctx, func(tx server.PgTx) {
 		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE competition_round DISABLE TRIGGER competition_v2_round_source`))
 		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE competition_round DISABLE TRIGGER competition_v2_round_reserved_identity`))
+		// This is also a source-installation guard: the synthetic fixture has
+		// no activated source pointer. Restore it in the same transaction before
+		// any job, baseline, qualification, amendment or execution is exercised.
+		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE competition_round DISABLE TRIGGER competition_work_coverage_round`))
 		round := fixture.round
 		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_round(round_id,competition_id,epoch_number,staging,workload_commitment,seed_nonce,seed_ciphertext,providers_sha256,providers_path,policy_json,opens_at,closes_at,reveal_at,created_at,canceled)
 		 VALUES($1,$2,2,false,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,$11,$12,false)`, round.RoundId, round.CompetitionId, round.WorkloadCommitment, round.SeedNonce,
 			round.SeedCiphertext, round.ProvidersSha256, round.ProvidersPath, string(round.PolicyJson), round.OpensAt, round.ClosesAt, round.RevealAt, round.CreatedAt))
 		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE competition_round ENABLE TRIGGER competition_v2_round_source`))
 		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE competition_round ENABLE TRIGGER competition_v2_round_reserved_identity`))
+		server.RaisePgResult(tx.Exec(ctx, `ALTER TABLE competition_round ENABLE TRIGGER competition_work_coverage_round`))
 	})
 	fixture.sourceJob = fixture.addJob(t, server.Id{15: 3}, clock.Now(), "source")
 	fixture.preparation, err = fixture.store.ReserveRoundBaseline(ctx, settings, "synthetic-coordinator", testWorkerImageDigest())
@@ -146,6 +151,7 @@ func (self *competitionDistributedPgFixture) addJob(t testing.TB, jobId server.I
 // The native identity/append-only guards still verify every frozen linkage.
 func (self *competitionDistributedPgFixture) qualifyHost(t testing.TB, host CompetitionExecutorHostPolicy) {
 	t.Helper()
+	host = competitionExecutorControlHost(self.settings, host)
 	ctx := context.Background()
 	now := self.clock.Now()
 	jobId, deadline := server.NewId(), now.Add(3*time.Hour)
@@ -153,8 +159,29 @@ func (self *competitionDistributedPgFixture) qualifyHost(t testing.TB, host Comp
 		"baseline_sha256": self.prepared.BaselineSha256, "source_lock_sha256": self.settings.AutomationPolicy.SourceLockSha256,
 		"providers_sha256": self.round.ProvidersSha256, "evaluator_image_digest": self.settings.EvaluatorImageDigest,
 		"qualification_sha256": host.QualificationSha256, "policy_approval_sha256": self.settings.DistributedEvaluationPolicy.ApprovalSha256,
-		"passed": true, "noop": true, "archive_manifest_sha256": strings.Repeat("6", 64),
+		"passed": true, "noop": true, "replicates": 9, "archive_manifest_sha256": strings.Repeat("6", 64),
 		"qualification_job_id": jobId.String(), "qualification_started_at": now, "qualification_deadline_at": deadline, "created_at": now}
+	if amendment := competitionExecutorControlAmendmentSha256(self.settings); amendment != "" {
+		receipt["control_amendment_sha256"] = amendment
+	}
+	self.addCoverageToReceipt(t, receipt)
+	content, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.Raise(self.store.requireAutomationLeaseInTx(ctx, tx, self.settings, *self.settings.automationLease))
+		server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_executor_control_amendment',$1,true)`, competitionExecutorControlAmendmentSha256(self.settings)))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run(round_id,host_id,job_id,started_at,deadline_at,api_image_digest,worker_image_digest) VALUES($1,$2,$3,$4,$5,$6,$7)`, self.round.RoundId, host.HostId, jobId, now, deadline, testApiImageDigest(), testWorkerImageDigest()))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_equivalence(round_id,host_id,receipt_json,receipt_sha256,baseline_sha256,created_at) VALUES($1,$2,$3::jsonb,$4,$5,$6)`,
+			self.round.RoundId, host.HostId, string(content), hex.EncodeToString(digest[:]), self.prepared.BaselineSha256, now))
+	})
+}
+
+// Original and recovery SQL fixtures carry the same complete coverage proof.
+func (self *competitionDistributedPgFixture) addCoverageToReceipt(t testing.TB, receipt map[string]any) {
+	t.Helper()
 	if self.settings.EvaluationPolicy.WorkCoveragePolicy != nil {
 		receipt["work_coverage_policy"] = self.settings.EvaluationPolicy.WorkCoveragePolicy.Clone()
 		var baseline roundBaselineManifest
@@ -190,17 +217,6 @@ func (self *competitionDistributedPgFixture) qualifyHost(t testing.TB, host Comp
 		}
 		receipt["metrics"] = metrics
 	}
-	content, err := json.Marshal(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(content)
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.Raise(self.store.requireAutomationLeaseInTx(ctx, tx, self.settings, *self.settings.automationLease))
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run(round_id,host_id,job_id,started_at,deadline_at,api_image_digest,worker_image_digest) VALUES($1,$2,$3,$4,$5,$6,$7)`, self.round.RoundId, host.HostId, jobId, now, deadline, testApiImageDigest(), testWorkerImageDigest()))
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_equivalence(round_id,host_id,receipt_json,receipt_sha256,baseline_sha256,created_at) VALUES($1,$2,$3::jsonb,$4,$5,$6)`,
-			self.round.RoundId, host.HostId, string(content), hex.EncodeToString(digest[:]), self.prepared.BaselineSha256, now))
-	})
 }
 
 // Each independent worker receives only its approved physical slot selector.

@@ -1,5 +1,11 @@
 # sim-latency
 
+Epoch 1's operator-authorized official review is Astra max; it approved the
+elected submission on 2026-11-08. See the
+[review and remaining control-plane status](launch/EPOCH1-ASTRA-OFFICIAL-REVIEW-2026-11-08.md).
+This one-epoch reviewer amendment does not change scoring, declare Snow
+qualified, or change the next epoch's configured reviewer policy.
+
 `sim-latency` is the fixed measuring instrument for the URnetwork latency
 competition. It runs the real API, exchange, matchmaking, client, provider,
 reliability, and accounting paths against a deterministic provider fleet and

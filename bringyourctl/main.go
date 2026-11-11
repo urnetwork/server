@@ -52,6 +52,8 @@ Usage:
     bringyourctl db scrub-client-addresses
     bringyourctl db key-history-floor [--rollback | --restore]
     bringyourctl db close-evidence-retention [--mode=<mode>] [--max-rows-per-second=<n>] [--remove]
+    bringyourctl db usage-archive-export [--mode=<mode>] [--close-time-floor=<date>] [--max-weeks-per-pass=<n>] [--remove]
+    bringyourctl db reindex-index <index> [--dry-run] [--lock-timeout=<duration>] [--timeout=<duration>] [--parallel=<n>]
     bringyourctl search --realm=<realm> --type=<type> add <value>
     bringyourctl search --realm=<realm> --type=<type> around --distance=<distance> <value>
     bringyourctl search --realm=<realm> --type=<type> remove <value>
@@ -104,9 +106,11 @@ Usage:
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
     bringyourctl crypto show --intent=<intent_id>
-    bringyourctl crypto credit --intent=<intent_id>
+    bringyourctl crypto credit --intent=<intent_id> [--sanctions-cleared]
+    bringyourctl crypto credit-usdc --intent=<intent_id> --tx=<signature> [(--commit --expect=<digest>)]
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
+    bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
@@ -219,12 +223,32 @@ Options:
     --mode=<mode>  With db close-evidence-retention, set the close evidence
                    row retention's brake: on, or off to stop the row deletes
                    from their next batch. The weekly drops of partitioned
-                   evidence never read it.
+                   evidence never read it. With db usage-archive-export, set
+                   the export control's mode: on drops exported, verified
+                   weeks early, dry_run verifies them and keeps them, off
+                   drops nothing early from the next retention pass.
     --max-rows-per-second=<n>  With db close-evidence-retention, set the
                    brake's rate: rows deleted a second, at most 5000; 0 stops
                    the deletes.
     --remove       With db close-evidence-retention, delete the brake, so the
-                   code's default rate (1000 a second) applies.
+                   code's default rate (1000 a second) applies. With db
+                   usage-archive-export, delete the export control, so no
+                   week of the usage archive drops before its 52 weeks.
+    --close-time-floor=<date>  With db usage-archive-export, the close time
+                   floor (YYYY-MM-DD, UTC): a week leaves early only when it
+                   ends by the floor and every row closed before it. It is
+                   never later than 70 days ago, whatever is set. Move it only
+                   past SN epochs that are recorded with no recovery pending.
+    --max-weeks-per-pass=<n>  With db usage-archive-export, the early drops
+                   (or dry-run verifications) of one retention pass, 1 to 4.
+    --lock-timeout=<duration>  With db reindex-index, how long the rebuild
+                   waits for its table's lock to clear before it starts, and
+                   then for each lock and snapshot wait (Go duration, default
+                   1h).
+    --timeout=<duration>  With db reindex-index, the longest the rebuild may
+                   run (Go duration, default 8h).
+    --parallel=<n> With db reindex-index, the build's parallel maintenance
+                   workers, 0 to 8 (default 0: one cpu).
     --enable       Enable Embed for the network, once its sales contract is
                    signed: its data-cap and ACL-group APIs open.
     --client-limit=<limit>  With --enable, also set the network's client
@@ -245,10 +269,13 @@ Options:
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
-    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero or zcash.
+    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin or ethereum.
     --asset=<asset>  A crypto payment asset: usdc_solana, zec or xmr.
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
     --intent=<intent_id>  A crypto invoice id.
+    --sanctions-cleared  With crypto credit, credit an invoice whose payment the sanctions screen held as a match (sanctions_hold): only once the owner and counsel cleared it.
+    --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
+    --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
     --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
@@ -256,11 +283,11 @@ Options:
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
     --sweep_batch_limit=<sweep_batch_limit>  With --move_all_sweeps, run at most this many sweep transactions in one call; omitted or 0 moves every sweep.
     --count_sweeps  Also count the sweeps a correction would move (dry run).
-    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed or contracts close-due dry run printed; --send and --commit refuse any other census.
+    --expect=<digest>  The digest the sn-reconcile, reimburse, account-points backfill-blocks, network sign-out-all, network trim-proxies, balance move-redeemed, crypto credit-usdc or contracts close-due dry run printed; --send and --commit refuse any other census.
     --before=<before>  With contracts close-due, the deadline bound (RFC 3339) of the contracts to retire; the dry run defaults to a minute ago and prints it, and --commit needs the one the dry run printed.
     --file=<file>  A payouts reimburse CSV with the header network_id,wallet_id,amount_usdc; for payouts usdc-sent-notice, one payment id per line; for account-points backfill-blocks, the awards the dry run saves and --commit commits (omitted, operator-block-points-<digest>.json).
     --blocks=<blocks>  With account-points backfill-blocks, the operator blocks to award, comma separated; omitted, every completed block past the earning boundary. A block that has its points is skipped.
-    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect. Without it the run is a read-only dry run.
+    --commit  With account-points backfill-blocks, commit the awards of the dry run whose digest is --expect; with network sign-out-all, sign the network out as its dry run with that digest printed; with balance move-redeemed, move the balance its dry run with that digest printed; with contracts close-due, retire the contracts of the dry run whose digest is --expect; with network trim-proxies, remove the hosted proxies of the dry run whose digest is --expect; with crypto credit-usdc, credit the invoice from the payment as its dry run with that digest printed. Without it the run is a read-only dry run.
     --remove-clients  With network sign-out-all, also deactivate every active client of the network as /network/remove-clients does.
     --network_ids=<network_ids>  With network trim-proxies, the networks to trim, comma separated; omitted, every network that holds a hosted proxy (a paged scan of proxy_client).
     --keep=<keep>  With network trim-proxies, the active hosted proxies each trimmed free network keeps, its newest by client id; omitted, the free cap (5).
@@ -313,6 +340,10 @@ func main() {
 			dbKeyHistoryFloor(opts)
 		} else if closeEvidenceRetention, _ := opts.Bool("close-evidence-retention"); closeEvidenceRetention {
 			dbCloseEvidenceRetention(opts)
+		} else if usageArchiveExport, _ := opts.Bool("usage-archive-export"); usageArchiveExport {
+			dbUsageArchiveExport(opts)
+		} else if reindexIndex, _ := opts.Bool("reindex-index"); reindexIndex {
+			dbReindexIndex(opts)
 		}
 	} else if search, _ := opts.Bool("search"); search {
 		if add, _ := opts.Bool("add"); add {
@@ -403,6 +434,9 @@ func main() {
 			os.Exit(paymentsStripeDunning(opts, os.Stdout))
 		}
 	} else if crypto, _ := opts.Bool("crypto"); crypto {
+		if creditUsdc, _ := opts.Bool("credit-usdc"); creditUsdc {
+			os.Exit(cryptoCreditUsdcCommand(opts, os.Stdout, os.Stderr))
+		}
 		os.Exit(cryptoCommand(opts, os.Stdout))
 	} else if payout, _ := opts.Bool("payout"); payout {
 		if single, _ := opts.Bool("single"); single {
@@ -737,6 +771,125 @@ func closeEvidenceRetentionBrakeChange(opts docopt.Opts) (fields map[string]stri
 		return nil, false, errors.New("--remove deletes the brake; set fields without it")
 	}
 	return
+}
+
+// dbUsageArchiveExport prints the usage archive export control
+// ({usage_archive_export}control, server/db_provider_usage_archive_export.go)
+// as stored and as the next retention pass narrows it, after setting its
+// fields with --mode, --close-time-floor and --max-weeks-per-pass, or deleting
+// it with --remove. The control only lets the retention pass drop a week
+// early that a verified export in the ledger holds exactly; its kill switch is
+// --mode=off (or --remove): the next pass drops nothing early. The 52-week
+// drops never read it.
+func dbUsageArchiveExport(opts docopt.Opts) {
+	ctx := context.Background()
+	settings := server.DefaultProviderUsageArchiveExportSettings()
+	fields, remove, err := usageArchiveExportControlChange(opts, settings)
+	if err != nil {
+		panic(err)
+	}
+	if remove || 0 < len(fields) {
+		writeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if remove {
+			server.Raise(server.RemoveProviderUsageArchiveExportControl(writeCtx))
+		}
+		server.Raise(server.SetProviderUsageArchiveExportControl(writeCtx, fields))
+	}
+	stored, err := server.GetProviderUsageArchiveExportControlFields(ctx, settings)
+	server.Raise(err)
+	control := server.NarrowProviderUsageArchiveExportControl(stored, settings)
+	fmt.Printf("Usage archive export control: %v\n", stored)
+	fmt.Printf("Next retention pass: mode %s, close time floor %s (in force now: %s), up to %d weeks a pass",
+		control.Mode, control.CloseTimeFloor.Format(time.DateOnly), control.EffectiveFloor(server.NowUtc()).Format(time.RFC3339), control.MaxWeeksPerPass)
+	if control.Invalid != "" {
+		fmt.Printf("; off because %s", control.Invalid)
+	}
+	fmt.Println()
+}
+
+// The export control fields and removal the options ask for. Every value is
+// checked as the retention pass narrows it (server.NarrowProviderUsageArchiveExportControl),
+// so the command refuses what the pass would read as off: a mode other than on,
+// dry_run or off, a floor that is not YYYY-MM-DD, and a weekly brake outside 1
+// to the settings' most. --remove with fields is refused.
+func usageArchiveExportControlChange(opts docopt.Opts, settings *server.ProviderUsageArchiveExportSettings) (fields map[string]string, remove bool, err error) {
+	fields = map[string]string{}
+	remove, _ = opts.Bool("--remove")
+	if mode, _ := opts.String("--mode"); mode != "" {
+		if mode != "on" && mode != "dry_run" && mode != "off" {
+			return nil, false, fmt.Errorf("--mode must be on, dry_run or off, not %q", mode)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldMode] = mode
+	}
+	if floor, _ := opts.String("--close-time-floor"); floor != "" {
+		if _, parseErr := time.Parse(time.DateOnly, floor); parseErr != nil {
+			return nil, false, fmt.Errorf("--close-time-floor must be YYYY-MM-DD, not %q", floor)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldCloseTimeFloor] = floor
+	}
+	if weeks, _ := opts.String("--max-weeks-per-pass"); weeks != "" {
+		value, parseErr := strconv.Atoi(weeks)
+		if parseErr != nil || value < 1 || settings.MaxWeeksPerPass < value {
+			return nil, false, fmt.Errorf("--max-weeks-per-pass must be 1 to %d, not %q", settings.MaxWeeksPerPass, weeks)
+		}
+		fields[server.ProviderUsageArchiveExportControlFieldMaxWeeksPerPass] = weeks
+	}
+	if remove && 0 < len(fields) {
+		return nil, false, errors.New("--remove deletes the export control; set fields without it")
+	}
+	return
+}
+
+// dbReindexIndex rebuilds one index with REINDEX INDEX CONCURRENTLY
+// (server.RebuildIndexConcurrently): reads and writes continue, the rebuild
+// waits for its table's lock to clear rather than queuing behind it, and a
+// failed rebuild's incomplete copy is dropped. --dry-run reads the index and
+// prints the plan. It exits non-zero on any failure, so a caller stops before
+// the next index.
+func dbReindexIndex(opts docopt.Opts) {
+	indexName, options, err := reindexIndexOptions(opts)
+	if err != nil {
+		panic(err)
+	}
+	options.Logf = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+	result, err := server.RebuildIndexConcurrently(context.Background(), indexName, options)
+	if result != nil {
+		fmt.Printf("index %s table %s bytes_before %d bytes_after %d compact_estimate %d heap %d rebuilt %t elapsed %s\n",
+			result.IndexName, result.TableName, result.BytesBefore, result.BytesAfter, result.CompactBytes, result.HeapBytes, result.Rebuilt, result.Elapsed.Round(time.Second))
+	}
+	if err != nil {
+		panic(err)
+	}
+}
+
+// The index and the rebuild's bounds the options ask for. Durations are Go
+// durations; the rebuild refuses bounds it cannot honour.
+func reindexIndexOptions(opts docopt.Opts) (indexName string, options *server.IndexRebuildOptions, err error) {
+	indexName, _ = opts.String("<index>")
+	options = server.DefaultIndexRebuildOptions()
+	options.DryRun, _ = opts.Bool("--dry-run")
+	if value, _ := opts.String("--lock-timeout"); value != "" {
+		if options.LockTimeout, err = time.ParseDuration(value); err != nil {
+			return "", nil, fmt.Errorf("--lock-timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--timeout"); value != "" {
+		if options.Timeout, err = time.ParseDuration(value); err != nil {
+			return "", nil, fmt.Errorf("--timeout: %w", err)
+		}
+	}
+	if value, _ := opts.String("--parallel"); value != "" {
+		if options.ParallelWorkers, err = strconv.Atoi(value); err != nil {
+			return "", nil, fmt.Errorf("--parallel: %w", err)
+		}
+	}
+	if err = options.Validate(); err != nil {
+		return "", nil, err
+	}
+	return indexName, options, nil
 }
 
 // dbAudit compares the live DB schema against the schema its recorded migration
@@ -2192,11 +2345,14 @@ func paymentsReconcile(opts docopt.Opts) {
 		model.SubscriptionMarketX402,
 		model.SubscriptionMarketMonero,
 		model.SubscriptionMarketZcash,
+		model.SubscriptionMarketBittensor,
+		model.SubscriptionMarketBitcoin,
+		model.SubscriptionMarketEthereum,
 	}
 	stores := allStores
 	if store, _ := opts.String("--store"); store != "" {
 		if !slices.Contains(allStores, store) {
-			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, or zcash)\n", store)
+			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin, or ethereum)\n", store)
 			os.Exit(1)
 		}
 		options.Stores = []string{store}
@@ -2874,7 +3030,7 @@ func providerInspect(opts docopt.Opts) {
 		fmt.Printf("  latest health run none\n")
 	}
 	fmt.Print(providerInspectIndexLines(inspection))
-	fmt.Printf("  url successes %d, errors %d in the evidence window; no success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
+	fmt.Printf("  url successes %d, errors %d in the evidence window (general catalog, which the online rule reads: %d, %d); no general success in %d or more runs %t\n", inspection.UrlSuccessCount, inspection.UrlErrorCount, inspection.OnlineUrlSuccessCount, inspection.OnlineUrlErrorCount, model.ProviderOnlineMinMeasuredUrlRuns, inspection.NoUrlSuccess)
 	// the decision follows the rule as the score export published it; this
 	// host's provider.yml is shown beside it
 	countryGuard := "no trusted published guard, so the rule applies nowhere"

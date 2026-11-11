@@ -30,6 +30,10 @@ func trackedBuilderAsset(t *testing.T, name string) string {
 func runTrackedBuilderProtocol(t *testing.T, fault string) (string, int) {
 	t.Helper()
 	root := t.TempDir()
+	cacheRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cacheRoot, "seed.mod"), []byte("trusted-cache"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	client := filepath.Join(root, "client")
 	program := `#!/bin/bash
 set -euo pipefail
@@ -63,7 +67,10 @@ case "$1" in
     count=$((count + 1)); printf '%s\n' "$count" > "$SYNTHETIC_BUILD_COUNTER"
     printf '%064d\n' "$count"
     ;;
-  cp) printf 'trusted-cache' > "${@: -1}/seed.mod" ;;
+  cp)
+    [[ "${@: -1}" == - ]] || exit 96
+    tar -C "$SYNTHETIC_CACHE_ROOT" -cf - seed.mod
+    ;;
   container)
     [[ "$2" == start ]] || exit 93
     case "${3: -1}" in
@@ -116,6 +123,7 @@ tracked_submission_build
 `
 	command := exec.CommandContext(t.Context(), "bash", "-eu", "-c", body, "tracked-protocol", evaluatorRoutingHelper(t), trackedBuilderAsset(t, "tracked-submission-build.sh"))
 	command.Env = append(controlEnvironment(), "SYNTHETIC_ROOT="+root, "SYNTHETIC_BUILD_ROOT="+filepath.Join(root, ".evidence-runtime", "tracked-build"),
+		"SYNTHETIC_CACHE_ROOT="+cacheRoot,
 		"SYNTHETIC_BUILD_LOG="+filepath.Join(root, "calls"), "SYNTHETIC_BUILD_COUNTER="+filepath.Join(root, "counter"), "SYNTHETIC_BUILD_FAULT="+fault,
 		"SYNTHETIC_REVISION="+strings.Repeat("c", 40), "SYNTHETIC_DIGEST="+strings.Repeat("d", 64),
 		"URNETWORK_SUBEVALUATION_RUN_ID="+strings.Repeat("a", 64), "URNETWORK_SUBEVALUATION_JOB_ID=00000000-0000-0000-0000-000000000001",
@@ -249,7 +257,7 @@ func TestTrackedBuilderCompleteCreateGateAcceptsBothIsolatedStages(t *testing.T)
 		if err := fixture.trackedBuild(t, stage, func(object map[string]json.RawMessage, host *dockerPolicyHostConfig) {
 			host.Memory, host.MemorySwap, host.CpusetCpus = resource.BuildMemoryLimitBytes, resource.BuildMemoryLimitBytes, fixture.fixture.plan.CpuSet
 			host.PidsLimit = &resource.BuildPidsLimit
-			host.Tmpfs = map[string]string{"/work": "rw,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=" + resource.BuildWorkLimit}
+			host.Tmpfs = map[string]string{"/work": "rw,nosuid,nodev,exec,uid=65532,gid=65532,mode=0700,size=" + resource.BuildWorkLimit}
 			object["HostConfig"], _ = json.Marshal(host)
 			body, _ = json.Marshal(object)
 		}); err != nil {
@@ -259,6 +267,36 @@ func TestTrackedBuilderCompleteCreateGateAcceptsBothIsolatedStages(t *testing.T)
 		fixture.fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost, "http://worker/v1.56/containers/create", bytes.NewReader(body)))
 		if response.Code != http.StatusCreated || creates.Load() != 1 || reads.Load() != 0 {
 			t.Fatal("complete tracked CREATE gate rejected a frozen isolated stage", stage, response.Code, response.Body.String())
+		}
+	}
+}
+
+// Missing/conflicting execution flags must fail before any daemon mutation.
+func TestTrackedBuilderCompleteCreateGateRejectsNonExecutableWork(t *testing.T) {
+	for _, execution := range []string{"", ",exec,noexec"} {
+		fixture := newCandidateSourceTest(t)
+		resource := testRunResourceIdentity()
+		policy, err := newBuildRetirementPolicy(runSliceResources{ResourcePolicySha256: fixture.fixture.plan.ResourcePolicySha256, Identity: resource,
+			BuildTasksMaximum: resource.BuildPidsLimit, CpuPeriodMicros: 100000}, fixture.fixture.plan.BuildCgroupName, int64(os.Getpagesize()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.fixture.proxy.plan.BuildRetirement = policy
+		reads, creates := fixture.daemon(t, nil)
+		var body []byte
+		if err := fixture.trackedBuild(t, "check", func(object map[string]json.RawMessage, host *dockerPolicyHostConfig) {
+			host.Memory, host.MemorySwap, host.CpusetCpus = resource.BuildMemoryLimitBytes, resource.BuildMemoryLimitBytes, fixture.fixture.plan.CpuSet
+			host.PidsLimit = &resource.BuildPidsLimit
+			host.Tmpfs = map[string]string{"/work": "rw,nosuid,nodev,uid=65532,gid=65532,mode=0700,size=" + resource.BuildWorkLimit + execution}
+			object["HostConfig"], _ = json.Marshal(host)
+			body, _ = json.Marshal(object)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		response := httptest.NewRecorder()
+		fixture.fixture.proxy.workerHandler(response, httptest.NewRequest(http.MethodPost, "http://worker/v1.56/containers/create", bytes.NewReader(body)))
+		if response.Code != http.StatusForbidden || creates.Load() != 0 || reads.Load() != 0 {
+			t.Fatal("non-executable work reached the upstream daemon", execution, response.Code)
 		}
 	}
 }

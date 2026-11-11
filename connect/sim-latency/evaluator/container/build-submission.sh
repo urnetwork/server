@@ -392,6 +392,9 @@ jq -S --argjson candidate_commits "$candidate_commits_json" --arg patch_sha256 "
 mv -f -- "$source_identity.new" "$source_identity"
 chmod 0400 "$source_identity"
 candidate_source_identity_sha256="$(sha256sum "$source_identity" | awk '{print $1}')"
+if [[ "$subevaluation_scoped" = true ]]; then
+    evaluation_seal_build_source "$source_root" || infrastructure_failure "candidate source could not be sealed for the remapped compiler"
+fi
 
 image_key="$(printf '%s\000%s\000%s\000%s' \
     "$base_image_id" "$patch_sha256" "$policy_sha256" "$builder_sha256" | sha256sum | awk '{print $1}')"
@@ -459,10 +462,7 @@ if [[ "$subevaluation_scoped" = true ]]; then
     candidate_source_mount_args=(--mount "type=bind,src=$source_root,dst=/workspace,readonly")
 fi
 runtime_identity="$(evaluation_docker run --rm \
-    --network none \
-    --read-only \
-    --cap-drop ALL \
-    --security-opt no-new-privileges:true \
+    "${subevaluation_legacy_probe_args[@]}" \
     "${candidate_source_mount_args[@]}" "${subevaluation_probe_args[@]}" "${subevaluation_docker_args[@]}" "$image_id" identity)"
 validate_submission_runtime_identity "$runtime_identity" || {
         printf 'candidate runtime identity does not authenticate build inputs\n' >&2

@@ -1507,6 +1507,11 @@ func (self *providerEgressProbePass) runFullBatchObserved(
 	}
 	var scoring *model.ProviderEgressHealthScoring
 	siteSettings := model.DefaultProviderEgressSiteSettings()
+	// A URL turn submits its one load as measured: cut here it would be no
+	// outcome at all, and the rolling quota would turn the provider again for
+	// it. The operator ingest records the load's catalog source and keeps one
+	// on probation, a country site or a general site the refresh has not
+	// graduated, out of every score (model/provider_egress_url_source.go).
 	if self.loadScoring != nil && !self.urlProbes {
 		scoring, siteSettings = self.loadScoring(ctx)
 	}

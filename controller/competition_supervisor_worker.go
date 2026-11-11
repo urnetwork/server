@@ -161,6 +161,9 @@ func RunCompetitionSupervisorWorker(ctx context.Context, settings *Settings, req
 	}
 	frozen.automationLease, frozen.automationRoundId = &request.Lease, round.RoundId
 	if frozen.DistributedEvaluationPolicy != nil {
+		if err := store.loadExecutorControlAmendment(ctx, frozen, round); err != nil {
+			return err
+		}
 		frozen.distributedSourceCommits = map[string]string{}
 		for repository, commit := range intent.Commits {
 			if repository != "operator-proxy" {

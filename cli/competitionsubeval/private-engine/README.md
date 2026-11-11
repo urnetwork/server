@@ -26,6 +26,12 @@ plan:
   binaries in the one protected `ENGINE_BIN` directory. The qualified runtime is
   stock `runc`, with explicitly empty arguments; do not install or enable `runsc`
   and do not define the reserved `runtimes.runc` name.
+- Render `ENGINE_HELPER_PATH` as the runtime binary directory followed by the
+  pinned `nft` binary's directory (omit the duplicate if identical). Both are
+  protected executable ancestors. Docker's embedded DNS needs `iptables` even
+  with daemon `iptables=false`; AppArmor also needs `apparmor_parser`. Qualify
+  actual helper lookup and service-name resolution, not only daemon startup.
+  Never inherit an operator PATH or enable Docker's host firewall management.
 - Freeze the actual private containerd executable SHA, semantic version and
   source commit explicitly on both hosts. The version/source fields have no
   deployment default and are not covered by the kernel/Docker minor waiver.
@@ -64,6 +70,12 @@ containerd identity. Root-owned on-disk metadata alone is not proof: the actual
 socket peer executable, configuration argv and helper/temp environment must
 match. The exact protected `chmod` helper makes both control sockets root-only;
 `UMask` alone does not override Docker's explicit socket mode.
+
+Only the engine and containerd services use `UMask=0022`: runtime-created mount
+destination parents inside a container must be traversable by its remapped
+non-root user. Their host data/state roots remain explicitly root-only, control
+sockets remain explicitly restricted, and keeper/network/recovery services keep
+`0077`. This does not expose any additional configuration or vault mount.
 
 Both daemon units set `LimitCORE=0` as defense in depth, not as proof for a piped
 host core collector. Linux ignores that limit for piped `core_pattern` handlers.

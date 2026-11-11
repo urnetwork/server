@@ -21,6 +21,7 @@ type DockerProxySettings struct {
 	MaximumConnections          int
 	MaximumHeaderBytes          int
 	MaximumDocumentBytes        int64
+	MaximumRefusalReasonBytes   int
 	MaximumBuildOutputBytes     int64
 	MaximumRequestBytes         int64
 	MaximumImageLoadBytes       int64
@@ -57,7 +58,7 @@ type DockerProxySettings struct {
 // source trees or caches. Response streaming remains bounded for image exports.
 func DefaultDockerProxySettings() DockerProxySettings {
 	return DockerProxySettings{MaximumOperations: 4096, MaximumConnections: 64, MaximumHeaderBytes: 64 * 1024,
-		MaximumDocumentBytes: 2 * 1024 * 1024, MaximumBuildOutputBytes: 4 * 1024 * 1024, MaximumRequestBytes: 64 * 1024 * 1024, MaximumImageLoadBytes: 16 * 1024 * 1024 * 1024,
+		MaximumDocumentBytes: 2 * 1024 * 1024, MaximumRefusalReasonBytes: 4 * 1024, MaximumBuildOutputBytes: 4 * 1024 * 1024, MaximumRequestBytes: 64 * 1024 * 1024, MaximumImageLoadBytes: 16 * 1024 * 1024 * 1024,
 		MaximumResponseBytes: 16 * 1024 * 1024 * 1024, MaximumSpoolBytes: 32 * 1024 * 1024 * 1024,
 		MaximumContextBytes: 1024 * 1024 * 1024, MaximumContextFileBytes: 512 * 1024 * 1024,
 		MaximumContextEntries: 16384, MaximumContextDepth: 64, MaximumDocumentDepth: 64, DirectoryBatch: 128, CopyBufferBytes: 64 * 1024,

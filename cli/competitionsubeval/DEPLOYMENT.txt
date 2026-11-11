@@ -36,6 +36,26 @@ agent journals, public client sockets and private control sockets do not. See
 private-engine/README.md for the inert quota/namespace provisioning inputs.
 No unmounted-root fallback or user-daemon resource sharing is permitted.
 
+For the first prospective host fingerprint, the root-only --docker-probe role
+may load the same protected inventory with qualification_sha256 empty. All
+other protected path, executable, fixture, management and private-engine pins
+still validate. The role accepts only the fixed local metadata queries; it
+cannot create a container, execute a candidate, serve SSH or run recovery.
+Do not insert a placeholder-valid hash to bootstrap this observation. Retain
+the actual host audit, install its genuine fingerprint in both host and agent
+inventories, recompute their file pins, and qualify execution separately.
+Normal execution and recovery continue to reject an empty qualification.
+
+The engine service uses the separate root-only --start-private-engine role.
+It joins the already-running pinned containerd's mount namespace by a held
+namespace descriptor, then execs only the pinned dockerd/config pair. Do not
+add BindPaths to the engine service: a second systemd mount namespace hides
+Docker's overlay image mounts from containerd. Only containerd creates the
+private /run/containerd bind. Native admission and every later recheck compare
+the daemon mount identities and reject split or changed views. Startup does
+not admit a candidate or assert grading readiness. Its root-only prospective
+inventory may have no qualification yet; SSH, execution and recovery may not.
+
 Set the private boundary's explicit management_cpuset and every private unit's
 AllowedCPUs from the unchanged pinned resource helper. Manager metadata alone
 is insufficient: live daemon/keeper/shim membership, configured/effective cgroup

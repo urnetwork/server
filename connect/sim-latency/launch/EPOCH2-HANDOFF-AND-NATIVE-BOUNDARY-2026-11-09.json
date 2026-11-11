@@ -1,0 +1,71 @@
+{
+  "schema": 1,
+  "status": "HANDOFF_AND_RESOURCE_BOUNDARY_VERIFIED_GRADING_NOT_READY",
+  "operator_handoff": {
+    "http_status": 200,
+    "revision": 1,
+    "request_sha256": "a63f76b782966b2108ae0c4a57a453aaaf093ede84f8aaa7f1bd5a10bedc8025",
+    "response_sha256": "de522d88200ed66b03f1f20732842f33710a6706b2483ae75a040ae74150ab34",
+    "retained_minio_version": "126df67b-facf-4e4f-9f88-2dc721f6f827",
+    "retain_until": "2028-01-01T00:00:00Z",
+    "retained_readback_verified": true
+  },
+  "publication_incident": {
+    "source_intent": "e3d5f949027436a5eb67e3d887b14d234be6eb2133696cfbd98fcca0fc23933f",
+    "observation": "Source validation holds the season advisory lock while validating the approved winner; supervisor renewal also requested that lock and exhausted its separate renewal budget.",
+    "evidence": "Bounded PostgreSQL advisory-lock observations plus the diagnostic supervisor's goroutine dump identify CheckSourceOperatorHandoff -> validateSourceAuthorizationInTx. A standalone complete authorization check succeeded in 10826ms.",
+    "fix": "Renew only under the existing exact lease-row lock, preserving owner/fence/expiry checks and guarded update. Acquirers and source writers retain their season serialization; renewal never takes season after row.",
+    "deterministic_pre_fix_failure_reproduced": true,
+    "unit_and_read_prefix_tests": "passed",
+    "focused_race_repetitions": 3,
+    "isolated_postgres_first_passes": 4,
+    "isolated_postgres_three_repeat_passes": 12,
+    "postgres_failures": 0,
+    "postgres_first_log_sha256": "3da23d0fc817be4bf4c706af27126a258a8a4846e3d47e312b9aa1f0cc4f3a0b",
+    "postgres_three_repeat_log_sha256": "784a780e202e226fe3ed1f3b6f114e3e5dc6dc2e8553174e9a79e195f8d97ed5",
+    "main_database_migration_performed": false,
+    "test_services": "Fresh owner-labelled disposable PostgreSQL/Redis, removed after tests using exact verified IDs; existing local and gate services preserved",
+    "corrected_runner_deployed": true,
+    "corrected_runner_commit": "0b334f621bf6aa7269fa9c9b096f55fc9176fbd4",
+    "source_publication_completed": true,
+    "publication_transition_revision": 10,
+    "publication_completed_at": "2026-11-09T20:54:44.493338Z",
+    "config_manifest_commit": "ff23e28f3a6d0e9067b5024e5127a7bb697d1a0b",
+    "following_preparation": "Blocked at revision11 by the preparation watchdog competing with full source authorization. Publication receipts remain valid; no round opened."
+  },
+  "preparation_watchdog_incident": {
+    "observation": "The five-second background full fence takes the same season scope as synchronous source authorization, which independently takes about eleven seconds. The watchdog's own lock/context deadline can cancel healthy preparation.",
+    "fix": "Background observation reads exact lease, source hold, immutable intent digest, activation/abandonment and predecessor pointer without advisory or row locks. Full authorization remains unchanged before and after external operations.",
+    "focused_ordinary_repetitions": 3,
+    "focused_race_repetitions": 3,
+    "isolated_postgres_repetitions": 3,
+    "postgres_log_sha256": "f2dfd1b4a6e92c9d609c4b9bb2903a3ccf295f2a597ee97db2143bdc05355f17",
+    "pre_fix_scope_tripwire": "The previous full-authorization season-lock primitive deterministically refuses while the same fixture's read-only liveness probe succeeds. PostgreSQL holds the real scope until independent lifecycle rejection returns.",
+    "negative_controls": "lost/expired lease authority, source hold, missing/changed/abandoned/activated intent and changed incumbent are refused",
+    "main_database_migration_performed": false,
+    "deployment": "Installed /usr/local/libexec/urnetwork/competition-preparation-liveness-20261109-v1 from clean main 1ecf275a8fe9cc1e304459b45758c7e9a1902dc7. Binary SHA-256 f160e2088541bf22b9825a22a482de7b64fd6e056e75baa782400b5093bdd4a8. Merged-main focused follow-up passed.",
+    "live_attempt": "urnetwork-epoch2-api-prepare-liveness-20261109-v2.service failed, transition revision12 at 21:17:31Z. Private native diagnostic proves the read-only watchdog still exceeded its five-second PostgreSQL connection/transaction deadline; database timing diagnosis remains. Source publication preserved, no opening or grading activation.",
+    "private_diagnostic": "/var/lib/urnetwork/competition-epoch1-approved-source-20261109-v4/preparation-cli-liveness-diagnostic-20261109.stderr"
+  },
+  "goofe_resource_boundary": {
+    "base_directory": "/home/by/sim-latency",
+    "actual_boundary_path": "/etc/urnetwork/competition-goofe-runtime-20261109-v4/boundary.json",
+    "boundary_sha256": "a4214d1676e0bcbac8845422dc699a292a1b29ec13a63971b114a8a6ef74b5e2",
+    "engine_document_sha256": "c5a94038f60849c9642c2331b1afa4d7ad4d040739f2f6cee910c8d6f16ee2eb",
+    "native_resource_verifier_and_immediate_recheck": "passed",
+    "trusted_engine_executables": "/usr/local/libexec/urnetwork/competition-private-engine-sille-20261109-v1",
+    "ip_executable": "/usr/bin/ip, canonical regular file rather than the /usr/sbin/ip symlink",
+    "device": "/dev/loop0 root:root0600, exact owned backing file verified before changes",
+    "allocation": "128GiB backing reservation restored after mkfs discard created holes; no reformat or payload overwrite",
+    "discard_prevention": "Exact-backing-file udev rule validated and applied only to loop0; kernel discard_max_bytes readback0",
+    "mount_propagation": "Evaluator bind and candidate mounts private; propagated alias removed after stopping only the empty private daemons",
+    "scope_of_success": "Resource boundary only. Complete agent admission, recovery arming, pressure/cleanup, baseline and cross-host qualification are not claimed."
+  },
+  "native_verifier_fixes": [
+    {"commit": "cd837fe08", "change": "Accept valid foreign nsfs type/inode roots; still reject nested/aliased candidate mounts and malformed identities", "pre_fix_regression_failed": true},
+    {"commit": "9c3d21bb7", "change": "Accept distribution containerd branding only with the exact pinned executable, version and source commit", "pre_fix_regression_failed": true},
+    {"commit": "7e3456efb", "change": "Bind effective Docker plugin namespace to exact mapped root UID/GID; renderer/template/native verifier agree", "pre_fix_regression_failed": true}
+  ],
+  "grading_activated": false,
+  "epoch2_open": false
+}

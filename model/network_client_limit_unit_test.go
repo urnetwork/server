@@ -7,9 +7,41 @@ import (
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/session"
 )
 
 // Pure tests: no database or redis.
+
+// An app's sign-in skips the concurrent limit's creation gate: a device
+// create, with a network token, from a caller whose client info names an app.
+// A hosted proxy, an API key, and any other caller keep the gate.
+func TestConcurrentLimitCreationExemptOnlyForAppSignIns(t *testing.T) {
+	sessionFor := func(deviceType string, apiKey bool) *session.ClientSession {
+		return &session.ClientSession{
+			ClientInfo:          connect.ClientInfo{Version: 1, DeviceType: deviceType},
+			ByJwt:               &session.ByJwt{NetworkId: server.NewId(), UserId: server.NewId()},
+			ApiKeyAuthenticated: apiKey,
+		}
+	}
+	device := &AuthNetworkClientArgs{Description: "device"}
+	proxy := &AuthNetworkClientArgs{Description: "proxy", ProxyConfig: &ProxyConfig{}}
+	for _, deviceType := range []string{"android", "ios", "macos", "windows", "linux"} {
+		if !concurrentLimitCreationExempt(device, sessionFor(deviceType, false)) {
+			t.Errorf("the %s app's sign-in is not exempt", deviceType)
+		}
+		if concurrentLimitCreationExempt(proxy, sessionFor(deviceType, false)) {
+			t.Errorf("the %s app's hosted proxy is exempt", deviceType)
+		}
+		if concurrentLimitCreationExempt(device, sessionFor(deviceType, true)) {
+			t.Errorf("an api key claiming the %s app is exempt", deviceType)
+		}
+	}
+	for _, deviceType := range []string{"", "web", "cli", "server", "unknown"} {
+		if concurrentLimitCreationExempt(device, sessionFor(deviceType, false)) {
+			t.Errorf("a caller with client info device type %q is exempt", deviceType)
+		}
+	}
+}
 
 func TestNetworkClientLimitLocalCache(t *testing.T) {
 	cache := newNetworkClientLimitLocalCache()
@@ -90,6 +122,52 @@ func TestConcurrentClientLimitExceeded(t *testing.T) {
 	connect.AssertEqual(t, concurrentClientLimitExceeded(5000, 5000), true)
 }
 
+// The concurrent limit's refusal asks for an upgrade only when an upgrade lifts
+// the limit: a free network with no Embed plan row whose Pro tier allows more
+// than are connected. Every refusal says the client limit is exceeded, so the
+// apps can tell it from any other refusal and say how to free a slot.
+func TestConcurrentClientLimitRefusalOffersUpgradeOnlyWhenItLiftsTheLimit(t *testing.T) {
+	cases := []struct {
+		override        bool
+		isPro           bool
+		proLimit        int
+		connectedCount  int
+		upgradeRequired bool
+	}{
+		// free at the free limit, the Pro tier has room
+		{override: false, isPro: false, proLimit: 1000, connectedCount: 2, upgradeRequired: true},
+		// free, the Pro tier is unlimited
+		{override: false, isPro: false, proLimit: 0, connectedCount: 2, upgradeRequired: true},
+		// free, but as many are connected as the Pro tier allows
+		{override: false, isPro: false, proLimit: 2, connectedCount: 2, upgradeRequired: false},
+		// Pro at the Pro limit
+		{override: false, isPro: true, proLimit: 1000, connectedCount: 1000, upgradeRequired: false},
+		// an Embed plan row, whatever the tier would allow
+		{override: true, isPro: false, proLimit: 1000, connectedCount: 5, upgradeRequired: false},
+	}
+	for _, c := range cases {
+		refusal := concurrentClientLimitRefusal(c.override, c.isPro, c.proLimit, c.connectedCount)
+		if !refusal.ClientLimitExceeded {
+			t.Errorf("%+v: the refusal does not say the client limit is exceeded", c)
+		}
+		if refusal.UpgradeRequired != c.upgradeRequired {
+			t.Errorf("%+v: upgrade_required = %t, want %t", c, refusal.UpgradeRequired, c.upgradeRequired)
+		}
+		if refusal.Message == "" {
+			t.Errorf("%+v: the refusal has no message", c)
+		}
+	}
+}
+
+// While enforcement is dark the refusal is nil at once, with no lookup: this
+// test has no database or redis for one to reach.
+func TestNetworkConcurrentClientLimitRefusalIsDarkWithoutLookup(t *testing.T) {
+	defer Testing_SetEnforceConcurrentClients(false)()
+	if refusal := networkConcurrentClientLimitRefusal(context.Background(), server.NewId()); refusal != nil {
+		t.Fatalf("refusal while dark = %+v, want none", refusal)
+	}
+}
+
 // With an Embed plan row cached, the network's concurrent limit is the row's
 // limit and the tier is never read (this test has no database to read it from).
 func TestNetworkConcurrentClientLimitUsesTheEmbedPlanOverride(t *testing.T) {
@@ -110,4 +188,35 @@ func TestNetworkConcurrentClientLimitUsesTheEmbedPlanOverride(t *testing.T) {
 	limit, override := networkClientLimitOverride(ctx, networkId)
 	connect.AssertEqual(t, limit, 5000)
 	connect.AssertEqual(t, override, true)
+}
+
+// The client_limit_upgrade claim is true only when UR Pro raises the
+// network's limit: a free network without an Embed allowance, while Pro's
+// limit is higher than free's (unlimited counts as higher).
+func TestClientLimitUpgradeClaimSaysWhenProRaisesTheLimit(t *testing.T) {
+	claim := func(override bool, isPro bool) bool {
+		return *clientLimitUpgradeClaim(override, isPro)
+	}
+	func() {
+		defer Testing_SetConcurrentClientsLimit(2, 1000)()
+		connect.AssertEqual(t, claim(false, false), true)
+		connect.AssertEqual(t, claim(false, true), false)
+		connect.AssertEqual(t, claim(true, false), false)
+		connect.AssertEqual(t, claim(true, true), false)
+	}()
+	func() {
+		// Pro no higher than free: nothing to gain
+		defer Testing_SetConcurrentClientsLimit(3, 3)()
+		connect.AssertEqual(t, claim(false, false), false)
+	}()
+	func() {
+		// unlimited Pro
+		defer Testing_SetConcurrentClientsLimit(2, 0)()
+		connect.AssertEqual(t, claim(false, false), true)
+	}()
+	func() {
+		// unlimited free: nothing to gain
+		defer Testing_SetConcurrentClientsLimit(0, 1000)()
+		connect.AssertEqual(t, claim(false, false), false)
+	}()
 }

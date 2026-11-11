@@ -250,10 +250,14 @@ type AuthNetworkClientResult struct {
 type AuthNetworkClientError struct {
 	// can be a hard limit or a rate limit
 	ClientLimitExceeded bool `json:"client_limit_exceeded"`
-	// the network is at its plan's limit for concurrent connected top-level
-	// clients (pro.yml concurrent_clients). Unlike ClientLimitExceeded, this is
-	// a plan limit rather than a hard cap: the client should surface an upgrade
-	// prompt. Corresponds to HTTP 402 semantics for the caller.
+	// a plan limit refused the request and UR Pro lifts it: the network is on
+	// the free tier at its concurrent connected top-level client limit
+	// (pro.yml concurrent_clients), its hosted proxy cap or create rate, or a
+	// Pro-only feature. The client should surface an upgrade prompt.
+	// Corresponds to HTTP 402 semantics for an agent. A refusal with
+	// ClientLimitExceeded and without this is one no upgrade lifts: a Pro
+	// network at the Pro limit, an Embed plan's allowance, or the top-level
+	// client cap; the client should say how to free a slot instead.
 	UpgradeRequired bool `json:"upgrade_required,omitempty"`
 	// a unique-exit create found no exit the network could take in the
 	// location. Nothing was created, and neither the proxy cap nor the create
@@ -531,8 +535,15 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// live rather than from the jwt's stale claim; and while the rollout is dark
 		// this does no redis/db work at all. See NetworkConcurrentClientsExceeded.
 		// Checked before the tx so the lookup does not hold it open. Connection
-		// activation applies the same limit; see CanConnectNetworkPeer.
-		concurrentLimitExceeded := authClient.SourceClientId == nil && !authClient.ProvideIntent && NetworkConcurrentClientsExceeded(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		// activation applies the same limit; see CanConnectNetworkPeer. The
+		// refusal asks for an upgrade only when one lifts the limit
+		// (concurrentClientLimitRefusal). A URnetwork app's sign-in skips this
+		// gate and is held off at connection instead, where the app shows what
+		// to do (concurrentLimitCreationExempt).
+		var concurrentLimitRefusal *AuthNetworkClientError
+		if authClient.SourceClientId == nil && !authClient.ProvideIntent && !concurrentLimitCreationExempt(authClient, clientSession) {
+			concurrentLimitRefusal = networkConcurrentClientLimitRefusal(clientSession.Ctx, clientSession.ByJwt.NetworkId)
+		}
 		// A hosted proxy is limited on its own, and always
 		// (network_client_proxy_limit.go): the network's active proxies are
 		// capped and its proxy creates are rated per minute. The Embed row and
@@ -549,13 +560,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		proxyCreateRateExceeded := func(isPro bool) bool {
 			return proxyCreateCounted && proxyClientCreateRateExceeded(proxyClientCreatesPerMinute(isPro), proxyCreateCount)
 		}
-		if concurrentLimitExceeded && registration == nil {
+		if concurrentLimitRefusal != nil && registration == nil {
 			authClientResult = &AuthNetworkClientResult{
-				Error: &AuthNetworkClientError{
-					ClientLimitExceeded: true,
-					UpgradeRequired:     true,
-					Message:             "Your plan's concurrent client limit is reached. Upgrade to UR Pro to connect more clients.",
-				},
+				Error: concurrentLimitRefusal,
 			}
 			return
 		}
@@ -627,6 +634,9 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// snapshot, but neither a separate pool borrower nor a TTL authority.
 		// Read on the transaction's owned connection before BEGIN, and keep
 		// cache publication outside the database connection's lifetime.
+		// the Embed allowance the token's client_limit_upgrade claim reads,
+		// through the process cache, before any connection is checked out
+		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 		var isPro bool
 		var mintEntitlement proEntitlement
 		if validateParent {
@@ -693,8 +703,8 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 					}
 					return
 				}
-				if concurrentLimitExceeded {
-					authClientResult = &AuthNetworkClientResult{Error: &AuthNetworkClientError{ClientLimitExceeded: true, UpgradeRequired: true, Message: "Your plan's concurrent client limit is reached."}}
+				if concurrentLimitRefusal != nil {
+					authClientResult = &AuthNetworkClientResult{Error: concurrentLimitRefusal}
 					return
 				}
 			}
@@ -761,13 +771,21 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 				// is dark, this cap is not enforced and no count runs at all (see
 				// pro.yml). Provisioning must never be refused while dark. A
 				// provider install (provide intent) is exempt and is not counted:
-				// it never becomes a peer (NetworkPeerCategoryProvider). The limit
-				// is per network: an Embed plan raises it (see
+				// it never becomes a peer (NetworkPeerCategoryProvider). A hosted
+				// proxy is neither counted nor capped here: its own cap and create
+				// rate govern it (owner decision 2026-11-08). The limit is per
+				// network: an Embed plan raises it (see
 				// network_client_limit_model.go); the peer valve keeps the constant.
-				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent {
+				if Pro().EnforceConcurrentClients && !authClient.ProvideIntent && authClient.ProxyConfig == nil {
 					topLevelClientLimit := networkTopLevelClientLimitInTx(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId)
-					// the scan is bounded at the limit since only the threshold matters
-					topLevelClientCount := countNetworkActiveTopLevelClients(clientSession.Ctx, tx, clientSession.ByJwt.NetworkId, topLevelClientLimit+1)
+					// the count stops at the limit since only the threshold matters
+					topLevelClientCount := countNetworkActiveTopLevelClients(
+						clientSession.Ctx,
+						tx,
+						clientSession.ByJwt.NetworkId,
+						topLevelClientLimit+1,
+						topLevelClientCountExamineBudget,
+					)
 					if topLevelClientLimit <= topLevelClientCount {
 						authClientResult = &AuthNetworkClientResult{
 							Error: &AuthNetworkClientError{
@@ -1007,6 +1025,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientId = &clientId
 			byJwtWithClientId.DeviceId = &deviceId
 			byJwtWithClientId.Pro = isPro
+			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
@@ -1076,6 +1095,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 		// IsProFresh checks PostgreSQL and refreshes Redis, neither of which
 		// may be nested under this transaction's checked-out connection.
 		isPro := IsProFresh(clientSession.Ctx, &clientSession.ByJwt.NetworkId)
+		_, clientLimitOverride := networkClientLimitOverride(clientSession.Ctx, clientSession.ByJwt.NetworkId)
 
 		// important: must check `network_id = session network_id`
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
@@ -1239,6 +1259,7 @@ func authNetworkClientWithParentState(authClient *AuthNetworkClientArgs, clientS
 			byJwtWithClientId.ClientId = authClient.ClientId
 			byJwtWithClientId.DeviceId = deviceId
 			byJwtWithClientId.Pro = isPro
+			byJwtWithClientId.ClientLimitUpgrade = clientLimitUpgradeClaim(clientLimitOverride, isPro)
 			byJwtWithClientId.Roles = roles
 			byJwtWithClientId.Principal = principal
 			server.Raise(session.AssociateSessionClientInTx(clientSession.Ctx, tx, byJwtWithClientId, clientSession.ByJwt.ClientId == nil))
@@ -1326,6 +1347,25 @@ func RemoveNetworkClient(
 
 		removeClientResult = &RemoveNetworkClientResult{}
 	}, server.TxReadCommitted)
+
+	if removeClientResult != nil && removeClientResult.Error == nil {
+		if clientSession.ByJwt.ClientId == nil {
+			// another device removed with the network credential: a user
+			// freeing a slot (the apps' device list), the web manager or the
+			// api. Logged so support can tell who removed a device.
+			glog.Infof(
+				"[nc]network %s removed client %s with its network credential (%s)\n",
+				clientSession.ByJwt.NetworkId,
+				removeClient.ClientId,
+				clientSession.ClientInfo.DeviceType,
+			)
+		}
+		// the removal committed whatever this does: a failure leaves the slot
+		// to free when the registration expires, as before
+		server.HandleError(func() {
+			releaseRemovedClientSlot(clientSession.Ctx, clientSession.ByJwt.NetworkId, removeClient.ClientId)
+		})
+	}
 
 	return removeClientResult, removeClientErr
 }

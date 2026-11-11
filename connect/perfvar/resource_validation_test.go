@@ -127,6 +127,29 @@ func TestResolvedFullTunApplicationMtu(t *testing.T) {
 		t.Fatalf("QUIC Initial payload=%d plus headers=%d does not fit product MTU=%d",
 			fullTunQUICInitialPacketSize, initialHeaderByteCount, clientconnect.DefaultMtu)
 	}
+	// The product MTU carries the QUIC-minimum Initial in one IPv4 packet, as
+	// Connect's product-MTU UDP test pins. An explicit smaller application MTU
+	// still exercises the IPv4 fragment path independently of the outer MTU.
+	quicInitialPacketByteCount := clientconnect.Ipv4HeaderSizeWithoutExtensions +
+		clientconnect.UdpHeaderSize +
+		fullTunQUICInitialPacketSize
+	if clientconnect.DefaultMtu < quicInitialPacketByteCount {
+		t.Fatalf(
+			"QUIC Initial packet=%dB must fit the product MTU=%d unfragmented",
+			quicInitialPacketByteCount,
+			clientconnect.DefaultMtu,
+		)
+	}
+	cellEdge := cellEdgeNetworkProfiles(20260817)[cellEdge1mDown250kUpName]
+	cellEdge.InnerMtu = 1200
+	if got := resolvedFullTunApplicationMtu(cellEdge, defaultTunResourceProfile()); quicInitialPacketByteCount <= got {
+		t.Fatalf(
+			"%s application MTU=%d must still fragment the %dB QUIC Initial packet",
+			cellEdge.Name,
+			got,
+			quicInitialPacketByteCount,
+		)
+	}
 }
 
 // The constrained profile starts small but permits the same bounded TCP

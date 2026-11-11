@@ -10,15 +10,19 @@ import (
 )
 
 // AuthNetworkClient provisions a client, and is where an agent meets the plan's
-// concurrent-client limit. It carries the full x402 round trip:
+// limits. For an agent that asks for terms it carries the full x402 round trip:
 //
-//	POST /network/auth-client                     -> 402 + payment terms
-//	POST /network/auth-client  X-PAYMENT: <signed> -> 200, Pro active, client returned
+//	POST /network/auth-client  X-UR-X402: 1                              -> 402 + payment terms
+//	POST /network/auth-client  X-UR-X402: 1, PAYMENT-SIGNATURE: <signed> -> 200, Pro active, client returned
 //
-// The retry carries the signed payment on the SAME request, which is settled before
+// The 402 carries the x402 v2 terms in its PAYMENT-REQUIRED header and the v1
+// terms as its body; a v1 client retries with X-PAYMENT instead. The retry
+// carries the signed payment on the SAME request, which is settled before
 // the auth runs -- so by the time AuthNetworkClient checks the limit, the network is
-// already Pro and simply succeeds. When x402 is off, the limit still returns the
-// normal JSON body with `upgrade_required` for human clients to prompt on.
+// already Pro and simply succeeds. Every caller that does not ask (the apps, the
+// browser extensions, ur.io), and every caller while x402 is off, gets the normal
+// JSON body with `upgrade_required` to prompt on instead
+// (controller.X402QuotesClient).
 func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 	if !controller.X402SettleInlineUpgrade(w, r) {
 		// settlement failed and the response is already written
@@ -30,7 +34,7 @@ func AuthNetworkClient(w http.ResponseWriter, r *http.Request) {
 		w,
 		r,
 		func(_ *session.ClientSession, result *model.AuthNetworkClientResult) bool {
-			return controller.WriteX402UpgradeRequired(w, result)
+			return controller.WriteX402UpgradeRequired(w, r, result)
 		},
 	)
 }

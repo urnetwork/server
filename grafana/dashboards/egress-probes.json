@@ -7675,6 +7675,391 @@
           "legendFormat": "run {{result}}"
         }
       ]
+    },
+    {
+      "id": 153,
+      "type": "row",
+      "title": "URL outcomes by catalog source, and country sites graduating on paired evidence",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 501
+      }
+    },
+    {
+      "id": 154,
+      "type": "timeseries",
+      "title": "URL outcomes by catalog source / min",
+      "description": "Measured URL outcomes the operator ingest stored (api and alt, or a taskworker with operator_transport: local), by the catalog their destination came from (source: general, the served general pool; country, the provider's country list; unrecognized, a destination the storing host could place in neither, as during a catalog rollout or while it cannot parse the catalog, stored on probation so it fails closed), how they counted (scoring: scored, in the eight-hour window every bucket, the index and the Online rule read; probation, recorded and in the rolling quota but never scored: a country site until it graduates on paired evidence, and again after a demotion, and a general site the pool refresh promoted and has not graduated; security_recheck, a recheck of a URL with an open TLS finding, out of both) and outcome. The ingest reads the source from the served catalog and the probation from the pool as it stands (model/provider_egress_url_source.go); each outcome's history row keeps both (provider_egress_health_history url_source, url_probation).",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 502
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, scoring, outcome) (rate(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[$__rate_interval])) * 60",
+          "legendFormat": "{{source}} {{scoring}} {{outcome}}"
+        }
+      ]
+    },
+    {
+      "id": 155,
+      "type": "timeseries",
+      "title": "URL success share by catalog source (1h)",
+      "description": "The share of the last hour's stored URL outcomes that succeeded, per catalog source and scoring: how a country list, or a site on probation, does beside the scored general pool before anything decides to score it. A country list whose share stays well under the general pool's in the same country would cost its providers buckets if it were scored. Read beside the per-destination series above (urnetwork_egress_probe_health_checks_total) for a single site.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 502
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\",outcome=\"success\"}[1h])) / sum by (source, scoring) (increase(urnetwork_egress_url_outcomes_total{env=\"$env\",instance!=\"\"}[1h]))",
+          "legendFormat": "{{source}} {{scoring}}"
+        }
+      ]
+    },
+    {
+      "id": 156,
+      "type": "timeseries",
+      "title": "country sites by state (latest refresh)",
+      "description": "The listed country sites by state, as the latest daily pool refresh left them (read from the taskworker that ran it): probation, never graduated, recorded and in the rolling quota but never scored; scored, graduated because, over a week, it did no worse than the general catalog for the same providers (per network, at most 3 points worse at one-sided 95%, and load-weighted), with at least 10 networks of 50 paired loads, 20 providers and no TLS failure the judge has not called the provider's own. Only networks at least two weeks old (by network creation) count, for a site or against it: their paired outcomes and their TLS findings, so a farm of new networks can neither graduate a site nor demote one; demoted, on probation again after being clearly worse (6 points at 95%), collapsing (under half the successes its providers' general outcomes predict, for most loads or most networks) or a TLS failure judged a site or place fault. A scored country site counts in Quality, Speed, the index and ranking, never in the Online rule or its country guard. Each site's last judgement is in provider_egress_country_site.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 510
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (state) (urnetwork_egress_country_sites{env=\"$env\"} and on(env,service,block,host,instance) topk(1, max by (env,service,block,host,instance) (urnetwork_egress_site_refresh_last_run_timestamp_seconds{env=\"$env\"})))",
+          "legendFormat": "{{state}}"
+        }
+      ]
+    },
+    {
+      "id": 157,
+      "type": "timeseries",
+      "title": "country site graduations and demotions / day",
+      "description": "Country sites the daily pool refresh graduated (paired: no worse than the general catalog for the same providers) or demoted (worse: clearly worse per network; collapsed: failing for most loads or networks in the last two days; tls: a TLS failure judged a site or place fault), summed across the taskworkers over a day. A refresh skipped for a prober fault judges no country site. The [egresssites] log line names each site with its evidence.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 510
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (change, reason) (increase(urnetwork_egress_country_site_changes_total{env=\"$env\"}[1d]))",
+          "legendFormat": "{{change}} {{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 158,
+      "type": "row",
+      "title": "zero-carry judge: verdicts by country, changes, reads",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 518
+      },
+      "panels": []
+    },
+    {
+      "id": 159,
+      "type": "timeseries",
+      "title": "zero-carry providers by country",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 519
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (country_code) (urnetwork_provider_zero_carry_providers{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{country_code}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max(urnetwork_provider_zero_carry_verdicts{env=\"$env\",service=\"taskworker\"} and on(env,service,block,host,instance) topk(1, (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 900) and (urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "B",
+          "legendFormat": "verdicts in force"
+        }
+      ],
+      "description": "Connected providers with a zero-carry verdict in force by published country, and every verdict in force connected or not, after the zero-carry judge's newest run: the judge runs every two minutes on one taskworker at a time, so each point is the taskworker process whose last-run timestamp is newest, and the chart goes blank once no run has finished for 15 minutes. A country whose count here equals its provider-locations count before the verdicts has lost all its listed supply: every provider it listed carried nothing for its clients."
+    },
+    {
+      "id": 160,
+      "type": "timeseries",
+      "title": "zero-carry judge: changes and reads / hour",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 519
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (change) (rate(urnetwork_provider_zero_carry_changes_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "A",
+          "legendFormat": "{{change}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (kind) (rate(urnetwork_provider_zero_carry_reads_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "B",
+          "legendFormat": "read {{kind}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "sum by (outcome) (rate(urnetwork_provider_zero_carry_confirmations_total{env=\"$env\",service=\"taskworker\",instance!=\"\"}[$__rate_interval])) * 3600",
+          "refId": "C",
+          "legendFormat": "confirm {{outcome}}"
+        }
+      ],
+      "description": "Verdicts the zero-carry judge made (created) and cleared, by why (expired: past 72 hours; url_success: a URL probe succeeded that the verdict did not see; upgrade: the device reported another app version; gone: the client is gone or inactive), what it read (connected providers paged, the candidates the URL condition left: at least two URL runs in eight hours, none a success; those whose contracts it read; those it read again to confirm a verdict; and the contracts both reads read, its load on transfer_contract through the (destination_id, close_time) index), and how the confirming reads ended (verdict; older_carried: the read stopped at its limit and a contract earlier in the day carried bytes; capped: the search of the rest of the day examined its bound of 2,000 contracts without finding one that carried, so the provider is too busy to confirm and gets no verdict; idle: with the sessions their clients reported idle left out, they fell below the rule). A wave of upgrade clears follows an operator notice; a wave of created after a release is a build that stopped carrying, and monitor signal §2.32 raises zero-carry-verdict-spike when one hour's verdicts pass its bound."
+    },
+    {
+      "id": 161,
+      "type": "timeseries",
+      "title": "zero-carry judge: since the last run and pass",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 527
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_provider_zero_carry_judge_last_run_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > 0)",
+          "refId": "A",
+          "legendFormat": "since the last run"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "time() - max(urnetwork_provider_zero_carry_judge_last_pass_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > 0)",
+          "refId": "B",
+          "legendFormat": "since the last pass over every connected provider"
+        }
+      ],
+      "description": "Seconds since the newest zero-carry judge run on any taskworker, and since one finished a pass over every connected provider (about an hour on Main). A judge that stops makes no new verdicts, and those in force lapse at their expiry, 72 hours after each was made, so zero-carry providers return to the pool; the pending_task row under run_once_key judge_provider_zero_carry carries its reschedule error."
     }
   ]
 }

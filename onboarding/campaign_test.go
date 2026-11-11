@@ -84,9 +84,11 @@ func TestE2(t *testing.T) {
 }
 
 func TestPathA(t *testing.T) {
-	// E3a: the in-app offer's last day
+	// E3a: the in-app offer's last day (it ends within LastChanceWindow;
+	// TestE3aOnlyWhenTheOfferEndsWithin36Hours has the offer with days left)
 	f := healthy(PathA)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	d := Decide(StepE3, f)
 	if d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningJoined || d.NextStep != StepE4 {
 		t.Errorf("e3a active: %+v", d)
@@ -143,9 +145,11 @@ func TestPathB(t *testing.T) {
 			t.Errorf("e4b with offer %q: %+v", state, d)
 		}
 	}
-	// E5b: the emailed offer's last day
+	// E5b: the emailed offer's last day (it ends within LastChanceWindow;
+	// TestE5bOnlyWhenTheOfferEndsWithin36Hours has the offer with days left)
 	f = healthy(PathB)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	d = Decide(StepE5, f)
 	if d.Action != ActionSend || d.Template != TemplateE3LastChance || d.Opening != OpeningLastNote || d.NextStep != "" {
 		t.Errorf("e5b: %+v", d)
@@ -175,6 +179,7 @@ func TestPathB(t *testing.T) {
 func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
 	f := healthy(PathA)
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	f.NoOfferEmail = true
 	if d := Decide(StepE3, f); d.Action != ActionSkip || d.NextStep != StepE4 {
 		t.Errorf("e3a without an email offer: %+v", d)
@@ -185,6 +190,7 @@ func TestOfferStepsStandDownWithoutAnEmailOffer(t *testing.T) {
 		t.Errorf("e4b without an email offer: %+v", d)
 	}
 	f.OfferState = OfferStateActive
+	f.OfferEndsSoon = true
 	if d := Decide(StepE5, f); d.Action != ActionSkip {
 		t.Errorf("e5b without an email offer: %+v", d)
 	}
@@ -358,11 +364,17 @@ func TestFormatting(t *testing.T) {
 	if FormatUsd(29.99) != "$29.99" || FormatUsd(4) != "$4" || FormatUsd(39.999) != "$40" || FormatUsd(0.5) != "$0.50" {
 		t.Errorf("usd: %s %s %s %s", FormatUsd(29.99), FormatUsd(4), FormatUsd(39.999), FormatUsd(0.5))
 	}
-	if FormatCount(4812) != "4,812" || FormatCount(999) != "999" || FormatCount(1234567) != "1,234,567" || FormatCount(0) != "0" {
+	// counts group as the template's locale does (TestCountGroupingFollowsTheLocale);
+	// these are English, and "" is English
+	if FormatCount(4812, "en") != "4,812" || FormatCount(999, "en") != "999" || FormatCount(1234567, "en") != "1,234,567" || FormatCount(0, "en") != "0" || FormatCount(4812, "") != "4,812" {
 		t.Error("count grouping")
 	}
-	if FormatGb(30) != "30 GB" || FormatGb(2.5) != "2.5 GB" {
-		t.Error("gb")
+	if FormatCount(4812, "de") != "4.812" || FormatCount(4812, "fr") != "4\u00a0812" || FormatCount(4812, "ar") != "4,812" || FormatCount(4812, "!!") != "4,812" {
+		t.Errorf("count grouping by locale: %q %q %q %q", FormatCount(4812, "de"), FormatCount(4812, "fr"), FormatCount(4812, "ar"), FormatCount(4812, "!!"))
+	}
+	// the free grant is 30 GiB (pro.yml free.data: 30gib), not 30 GB
+	if FormatGb(30) != "30 GiB" || FormatGb(2.5) != "2.5 GiB" {
+		t.Error("gib")
 	}
 	la, _ := time.LoadLocation("America/Los_Angeles")
 	at := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
@@ -388,9 +400,12 @@ func TestParamsMatchManifests(t *testing.T) {
 		Platform: "iPhone", StoreBilled: true, DailyDataGb: 30, DaysActive: 3, ConnectDays: 2, ProvidersOnline: 4812, CountriesOnline: 91,
 		OfferExpiresAt: &expires, OfferPriceUsd: 29.99, RegularYearUsd: 39.99, TrialDays: 14,
 		Location: time.UTC, Now: expires.Add(-4 * 24 * time.Hour), Token: "tok", SiteUrl: "https://ur.io", CompanyLine: "co",
+		// the desktop email's browser branch (TestE2DesktopParams has the app's)
+		Browser: true,
 	}
 	for _, tv := range [][2]string{
 		{TemplateE1Connect, VariantDefault}, {TemplateE2Widget, VariantActivated}, {TemplateE2Widget, VariantNotActivated},
+		{TemplateE2Widget, VariantDesktop},
 		{TemplateE3LastChance, VariantDefault}, {TemplateE4Feedback, VariantEngaged}, {TemplateE4Feedback, VariantNotActivated},
 		{TemplateE4bOffer, VariantDefault},
 	} {
@@ -435,7 +450,7 @@ func TestParamsMatchManifests(t *testing.T) {
 		t.Errorf("reason url / floor: %v", p)
 	}
 	p = BuildParams(ParamsInput{Template: TemplateE1Connect, Token: "T", SiteUrl: "https://ur.io", DailyDataGb: 30})
-	if p["cta_url"] != "https://ur.io/o/connect?t=T" || p["daily_data_gb"] != "30 GB" || p["offer_expires_at"] != "" {
+	if p["cta_url"] != "https://ur.io/o/connect?t=T" || p["daily_data_gb"] != "30 GiB" || p["offer_expires_at"] != "" {
 		t.Errorf("e1 params: %v", p)
 	}
 	if StepLandingSlug(TemplateE3LastChance) != "offer" || StepLandingSlug(TemplateE2Widget) != "widgets" {

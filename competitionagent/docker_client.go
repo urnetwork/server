@@ -7,6 +7,8 @@ package competitionagent
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -54,6 +56,26 @@ func defaultDockerClientSettings() dockerClientSettings {
 // Transport/unknown failures remain evaluator infrastructure errors; complete
 // ordinary build refusals retain the actual acknowledged CLI exit status.
 type dockerClientExitError struct{ code int }
+
+// Lossless encoding keeps every run-id bit while fitting native Unix address
+// limits under normal host base directories. Every producer/client uses this
+// one derivation; journal and signed run identities retain their canonical hex.
+func dockerRunSocketPaths(directory, runId string) (string, string, error) {
+	if !filepath.IsAbs(directory) || filepath.Clean(directory) != directory || !digestPattern.MatchString(runId) {
+		return "", "", errors.New("invalid fixed run socket identity")
+	}
+	decoded, err := hex.DecodeString(runId)
+	if err != nil {
+		return "", "", err
+	}
+	component := base64.RawURLEncoding.EncodeToString(decoded)
+	worker := filepath.Join(directory, component, "docker.sock")
+	build := filepath.Join(directory, component, "build.sock")
+	if len(worker) >= len(syscall.RawSockaddrUnix{}.Path) || len(build) >= len(syscall.RawSockaddrUnix{}.Path) {
+		return "", "", errors.New("fixed run sockets exceed the native Unix address boundary")
+	}
+	return worker, build, nil
+}
 
 func (self dockerClientExitError) Error() string { return "restricted Docker client failed" }
 
@@ -127,7 +149,11 @@ func runHostFilesClient(ctx context.Context, config *DockerClientConfig, runId s
 	default:
 		return dockerClientExitError{code: 2}
 	}
-	result, err := requestHostFiles(ctx, filepath.Join(config.SocketDirectory, runId, "docker.sock"), request, settings.Proxy)
+	socket, _, err := dockerRunSocketPaths(config.SocketDirectory, runId)
+	if err != nil {
+		return dockerClientExitError{code: 2}
+	}
+	result, err := requestHostFiles(ctx, socket, request, settings.Proxy)
 	if err != nil || !result.Acknowledged || result.RunId != runId || result.Operation != request.Operation {
 		return dockerClientExitError{code: 2}
 	}
@@ -230,6 +256,9 @@ func loadDockerClientConfig(executable string, settings dockerClientSettings, pr
 		config.DockerConfigurationDirectory != filepath.Join(filepath.Dir(executable), "docker-client-config") {
 		return nil, errors.New("Docker client runtime roots differ from the installed role")
 	}
+	if _, _, err := dockerRunSocketPaths(config.SocketDirectory, strings.Repeat("0", 64)); err != nil {
+		return nil, err
+	}
 	if protected {
 		for _, path := range []string{config.BaseDirectory, config.WorkDirectory, config.SocketDirectory} {
 			if err := protectedRuntimePath(path, config.BaseDirectory, config.TrustedOperatorUid); err != nil {
@@ -314,7 +343,10 @@ func runDockerClient(ctx context.Context, config *DockerClientConfig, runId stri
 	if err := validateDockerClientArguments(arguments, settings); err != nil {
 		return dockerClientExitError{code: 2}
 	}
-	socket := filepath.Join(config.SocketDirectory, runId, "docker.sock")
+	socket, _, err := dockerRunSocketPaths(config.SocketDirectory, runId)
+	if err != nil {
+		return dockerClientExitError{code: 2}
+	}
 	work := filepath.Join(config.WorkDirectory, runId)
 	if arguments[0] == "build" {
 		if len(arguments) < 2 {

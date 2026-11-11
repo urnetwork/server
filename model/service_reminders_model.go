@@ -15,6 +15,11 @@ type SupporterWindowEnding struct {
 	NetworkId server.Id
 	EndTime   time.Time
 	Market    string
+	// the coin of a crypto invoice the window was paid with, when its market
+	// does not name it: "sol" for a solana window a native SOL invoice paid
+	// (its transaction id is the invoice id, or after the 30-day unlink a
+	// random id with the SOL prefix), else ""
+	CryptoAsset string
 }
 
 // ListLastSupporterWindowsEnding are the supporter windows on `markets` that
@@ -25,7 +30,8 @@ func ListLastSupporterWindowsEnding(ctx context.Context, endFrom time.Time, endT
 		result, err := conn.Query(
 			ctx,
 			`
-				SELECT DISTINCT ON (s.network_id) s.network_id, s.end_time, s.market
+				SELECT DISTINCT ON (s.network_id) s.network_id, s.end_time, s.market,
+					CASE WHEN `+cryptoRenewalSolSql("s")+` THEN '`+CryptoAssetSol+`' ELSE '' END
 				FROM subscription_renewal s
 				WHERE
 					s.subscription_type = 'supporter' AND
@@ -49,7 +55,7 @@ func ListLastSupporterWindowsEnding(ctx context.Context, endFrom time.Time, endT
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
 				w := &SupporterWindowEnding{}
-				server.Raise(result.Scan(&w.NetworkId, &w.EndTime, &w.Market))
+				server.Raise(result.Scan(&w.NetworkId, &w.EndTime, &w.Market, &w.CryptoAsset))
 				windows = append(windows, w)
 			}
 		})
