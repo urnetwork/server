@@ -1329,12 +1329,11 @@ func TestAddTierTransferBalancesToAllNetworks(t *testing.T) {
 		startTime := server.NowUtc()
 		endTime := startTime.Add(24 * time.Hour)
 
-		// the free grant goes to networks WITHOUT an active subscription, and
-		// carries pro = false -- it must never confer Pro
+		// the free grant goes to every network, a subscriber's on top of its Pro
+		// grant, and carries pro = false -- it must never confer Pro
 		addedFree := AddFreeTransferBalanceToAllNetworks(ctx, startTime, endTime, 1*Mib)
 		connect.AssertEqual(t, addedFree[networkIdA], 1*Mib)
-		_, freeHasSupporter := addedFree[networkIdB]
-		connect.AssertEqual(t, freeHasSupporter, false)
+		connect.AssertEqual(t, addedFree[networkIdB], 1*Mib)
 
 		// the pro grant goes to networks WITH an active subscription, for the
 		// subscription's own cycle, and carries pro = true -- this grant is what
@@ -1357,8 +1356,20 @@ func TestAddTierTransferBalancesToAllNetworks(t *testing.T) {
 		connect.AssertEqual(t, transferBalanceA.Pro, false)
 
 		transferBalancesB := GetActiveTransferBalances(ctx, networkIdB)
-		connect.AssertEqual(t, 1, len(transferBalancesB))
-		transferBalanceB := transferBalancesB[0]
+		connect.AssertEqual(t, 2, len(transferBalancesB))
+		transferBalancesBByKind := map[GrantKind]*TransferBalance{}
+		for _, transferBalance := range transferBalancesB {
+			transferBalancesBByKind[transferBalance.GrantKind] = transferBalance
+		}
+		freeTransferBalanceB := transferBalancesBByKind[GrantKindFree]
+		transferBalanceB := transferBalancesBByKind[GrantKindPro]
+		if freeTransferBalanceB == nil || transferBalanceB == nil {
+			t.Fatalf("the subscriber's balances are %v, want its free grant and its Pro grant", transferBalancesBByKind)
+		}
+		connect.AssertEqual(t, addedFree[networkIdB], freeTransferBalanceB.BalanceByteCount)
+		connect.AssertEqual(t, startTime, freeTransferBalanceB.StartTime)
+		connect.AssertEqual(t, endTime, freeTransferBalanceB.EndTime)
+		connect.AssertEqual(t, freeTransferBalanceB.Pro, false)
 		connect.AssertEqual(t, 4*Mib, transferBalanceB.BalanceByteCount)
 		connect.AssertEqual(t, subscriptionStartTime, transferBalanceB.StartTime)
 		connect.AssertEqual(t, subscriptionEndTime, transferBalanceB.EndTime)

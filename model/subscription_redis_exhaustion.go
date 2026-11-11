@@ -164,7 +164,11 @@ func (self *redisExhaustedPayers) clear() {
 // room the census would reserve, and whether the probes prove that the census
 // refuses the request as exhausted. A proof notes the grants holding a marker
 // for the request's recovery page, as a census notes a skipped grant, and
-// nothing else: no grant is reserved.
+// nothing else: no grant is reserved. A Pro payer's census reads the same
+// grants in two funding phases (transfer_balance_funding_order.go); one
+// earliest-expiry pass reads each of them once too, and the verdict does not
+// depend on the order: the room is a sum, and any grant whose room covers the
+// rest of the request defers to the census.
 func proveRedisGrantExhaustion(ctx context.Context, admission *redisContractAdmission, payerNetworkId server.Id,
 	now time.Time, requested ByteCount, limits redisGrantSelectionLimits) (rows int, room ByteCount, proven bool) {
 	// The census stops at its row limit once its windows and keyset pages
@@ -191,7 +195,7 @@ func proveRedisGrantExhaustion(ctx context.Context, admission *redisContractAdmi
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					balance := &escrowTransferBalance{}
-					server.Raise(result.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime))
+					server.Raise(result.Scan(&balance.balanceId, &balance.paid, &balance.balanceByteCount, &balance.startTime, &balance.endTime, &balance.fundsFirst))
 					page = append(page, balance)
 				}
 			})

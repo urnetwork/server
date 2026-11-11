@@ -12,8 +12,10 @@ import (
 //
 // The three recurring grants run on three different schedules, and each balance's
 // window extends a little past the end of its period so consecutive grants overlap
-// and a client never sees a gap at the boundary. Spending draws the balance that
-// ends first, so the old grant's leftover is used up before the new grant.
+// and a client never sees a gap at the boundary. Spending draws a network's paid
+// Pro grants first and otherwise the balance that ends first
+// (transfer_balance_funding_order.go), so the old grant's leftover is used up
+// before the new grant of its kind.
 
 // How long past the end of the day a daily free balance stays valid.
 const FreeGrantGrace = 1 * time.Hour

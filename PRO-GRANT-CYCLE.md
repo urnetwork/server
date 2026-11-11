@@ -130,10 +130,78 @@ cycle.
   crypto rails and gamma, keeps Pro through the period's marker but starts no
   cycle. The last cycle's grant expires a day after the cycle. The
   renewal that recovers the charge starts the next cycle. (Before, a network
-  in grace on the 1st got a new 10 TiB.) For the owner to decide: from that
-  expiry until the charge recovers, the network has no new data. It also gets
-  no daily free grant, which still excludes every supporter renewal holder.
-  Before, the 600 GiB credit spanned the grace.
+  in grace on the 1st got a new 10 TiB.) From that expiry until the charge
+  recovers, the network has the daily free grant, as every network does
+  (owner, 2026-11-11: "extend daily data in grace"; see The daily free
+  grant). Before, the 600 GiB credit spanned the grace.
+
+## The daily free grant
+
+Owner, 2026-11-11: "3. yes extend daily data in grace" and "5. i think pro
+should get the 1tib per month plus the 30gb per day". The monthly amount is
+pro.yml's 10 TiB, confirmed the same day. So the daily free grant (pro.yml
+`free.data`, 30 GiB, `RefreshFreeTransferBalances` at 00:00 UTC) goes to every
+network on top of any cycle grant: Pro networks, both kinds of payment grace,
+and x402 networks beside their month's data. Only a lag.dev guest and a prober
+shard's private network are left out, as before. A Pro Seeker holder gets the
+Seeker multiplier on it, as a free one does.
+
+It is the grant a free network gets: no revenue, `pro = false`, kind `free`,
+valid `[day start, next day + 1 h)`. It never confers Pro, so a network in grace
+keeps Pro only through its period's marker, as before.
+
+**Funding order** (`model/transfer_balance_funding_order.go`). Contracts were
+funded from a payer's grants in earliest-expiry order. A daily grant ends
+within a day, before any cycle grant, so a Pro network would have spent its free
+data first every day. Now a payer's paid Pro grants fund first: recurring Pro
+grants (grant kind `pro`) that carry subscription revenue (`paid`), meaning a
+paid period's cycle grant and, until it runs out, the 11-01 calendar grant.
+Everything else follows. Each group goes earliest expiry first. Settlement and
+the deadline close charge a contract's escrows in the same order.
+
+- A network without a paid Pro grant keeps exactly the old order. That covers
+  every free network: a free network with a data pack still spends its daily
+  grant first. It also covers every network that already got the daily grant
+  while it was Pro: a Pro balance with no grant kind is not a paid Pro grant.
+  So a network whose Pro comes from an AppSumo or other data code redeemed
+  while codes still conferred Pro keeps spending its daily grant before the
+  code, as before.
+- A subscriber's 600 GiB activation credit from before per-cycle grants has no
+  grant kind either. It funds after the daily grant, which matters only once
+  the 10 TiB cycle grant is used up.
+- A Pro network's traffic draws its paid cycle grant while that has bytes, at
+  paid priority. The daily grant funds it only once the cycle grant is used up,
+  or after it has expired in a grace. Daily grants still expire each day, unused
+  while the cycle grant lasts. So in practice "plus 30 GiB a day" is a floor of
+  30 GiB a day once the month's grant is used or has lapsed, not 900 GiB more a
+  month.
+- A Pro network's unpaid grants that used to fund before a later-ending paid
+  Pro grant now fund after it: referral grants, and a short-lived data pack or
+  code. An x402 Pro month records no revenue, so it is not a paid Pro grant.
+- The Redis admission census reads paid Pro grants in their own keyset phase,
+  but only for a payer that its Pro cache reads as Pro. Every other payer runs
+  the same statements as before. Reads inside a contract transaction (the
+  zero-byte anchor, the zero-escrow priority) use one bounded statement, gated
+  by one probe of `transfer_balance_pro`.
+
+**Payouts.**
+
+- A per-contract payout is the provider share of the funding balance's net
+  revenue. Neither the cycle grant nor the daily grant carries any (the cycle
+  grant's revenue is subsidy revenue), so per-contract payouts are unchanged.
+- The subsidy pool's revenue input counts a balance's subsidy revenue,
+  pro-rated to the plan's window, only when that balance funded swept traffic
+  in the plan. Under the funding order, a Pro network with traffic keeps funding
+  it from its cycle grant, so the input is what it would be without the daily
+  grant. Without the order, a Pro network that used less than 30 GiB a day
+  would never touch its cycle grant, and its subscription revenue would drop
+  out of the input.
+- Traffic the daily grant funds for a Pro network (after the cycle grant is
+  used up, or in a grace) is unpaid. It pays providers nothing and adds nothing
+  to the revenue input. Before, that traffic was refused for lack of balance.
+  Like a free user's traffic, it counts in the pool's split, which is per
+  traffic user, and toward the active-user term. Points weigh it like any
+  traffic.
 
 ## The 600 GiB activation credit
 
@@ -192,6 +260,17 @@ second grant in one cycle.
   network, on top of the cycle grants the new sweep and api have written. If
   no new binary is deployed by then, nothing doubles: the 12-01 grant is a
   legacy grant and the per-cycle grants start on 01-01 instead.
+- The daily free grant for Pro networks (The daily free grant) needs no
+  migration and no config release.
+  - The funding order lives in connect, api and alt (contract admission and
+    client closes) and in the taskworker (deadline closes, and the contracts
+    of the probes it runs).
+  - The grant itself is written by the taskworker's 00:00 UTC run.
+  - Roll connect, api and alt before the taskworker, or finish all four before
+    the next 00:00 UTC. From a new taskworker's first run on, every Pro network
+    holds a daily grant, and an old connect, api or alt binary funds Pro
+    traffic from it first, unpaid, until that binary is replaced.
+  - A Pro network gets its first daily grant at that first run.
 
 ## Accounting notes
 
@@ -211,3 +290,6 @@ second grant in one cycle.
   contract priority), like the monthly grant. A period recorded without
   revenue (an App Store sandbox purchase, a Stripe trial's $0 invoice, a
   manual upgrade) gives an unpaid grant, as before.
+- Because it is paid, a cycle grant funds before the daily free grant (The
+  daily free grant), so it keeps funding the network's traffic, and so
+  carrying its revenue into the subsidy pool's input, while it has bytes.
