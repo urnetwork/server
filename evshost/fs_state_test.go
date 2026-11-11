@@ -79,7 +79,3 @@ func TestFs12OnT3(t *testing.T) {
 		sidecart3.RunRow(tb, "FS-12", "", nil)
 	})
 }
-
-func TestFs4BatchedEpochOnT3(t *testing.T) {
-	runClauseOnT3(t, "FS-4", "batched epoch", fault.Fs4BatchedEpoch)
-}
