@@ -858,7 +858,10 @@ type ProviderEgressContactedTotal struct {
 // legacy batch) keeps every load, since nothing says which of its failures
 // reached the provider. An outcome on probation is not a scored load
 // (provider_egress_url_source.go): a failing country site or a new candidate
-// must not read as a prober fault.
+// must not read as a prober fault. A load is judged by its HTTPS leg, as the
+// site tallies judge it: an outcome that carries an HTTP/3 leg had its HTTPS
+// leg pass (egresshealth.UrlProbeEvidence.HttpsOk), so providers that do not
+// carry UDP cannot hold the refresh.
 func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt time.Time) ProviderEgressContactedTotal {
 	contacted := ProviderEgressContactedTotal{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -869,7 +872,7 @@ func GetProviderEgressHealthContactedTotal(ctx context.Context, minMeasuredAt ti
 			ctx,
 			`
 			SELECT
-				COALESCE(sum(ok_count), 0)::bigint,
+				COALESCE(sum(CASE WHEN (url_probe_evidence -> 'h3') IS NOT NULL THEN total_count ELSE ok_count END), 0)::bigint,
 				COALESCE(sum(total_count), 0)::bigint,
 				COALESCE(sum(total_count) FILTER (WHERE
 					total_count = 1 AND ok_count = 0 AND NOT tls_authentication_failure

@@ -227,3 +227,45 @@ func TestH3PlaceEvidenceIsBoundedAndExpires(t *testing.T) {
 		}
 	})
 }
+
+// The pool refresh's prober-fault line judges loads by their HTTPS leg, as the
+// site tallies do: a URL outcome whose only failure is a silent HTTP/3 leg
+// judged the provider's is a load that reached its site over TCP, so a fleet
+// whose providers do not carry UDP cannot stop the refresh. Failures of the
+// HTTPS leg still count.
+func TestGetProviderEgressHealthContactedTotalJudgesHttp3LoadsByTheirHttpsLeg(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := t.Context()
+		now := server.NowUtc().Truncate(time.Microsecond)
+		at := now.Add(-time.Minute)
+		site := testingTlsSite("h3-site", "https://h3.example/")
+		silent := testingH3UrlResult(server.NewId(), site, at, egresshealth.UrlProbeH3UdpSilent)
+		silent = judgedProviderEgressH3(silent, ProviderEgressH3PlaceMinNetworks)
+		if silent.OKCount != 0 || silent.UrlProbeEvidence.H3.Verdict != egresshealth.UrlProbeH3VerdictProvider {
+			t.Fatalf("fixture: %+v", silent)
+		}
+		for _, health := range []*ProviderEgressHealth{
+			silent,
+			testingH3UrlResult(server.NewId(), site, at, egresshealth.UrlProbeH3UdpPassed),
+			testingH3UrlResult(server.NewId(), site, at, egresshealth.UrlProbeH3UdpAnswered),
+		} {
+			if err := health.UrlProbeEvidence.ValidateOutcome(health.OKCount, health.Total, health.TLSAuthenticationFailure); err != nil {
+				t.Fatalf("fixture fails validation: %v", err)
+			}
+			if !StoreProviderEgressHealth(ctx, health).Stored {
+				t.Fatal("the outcome was not stored")
+			}
+		}
+		// an HTTPS failure that reached its site
+		failed := fp2TestUrlProbeEvidence(at, false)
+		if !StoreProviderEgressHealth(ctx, &ProviderEgressHealth{
+			RunId: server.NewId(), ClientId: server.NewId(), MeasuredAt: at, Total: 1, UrlProbeEvidence: failed,
+			ClassResults: map[string]ProviderEgressHealthClassResult{string(failed.Destination.Class): {OK: 0, Total: 1}}, FailedNames: failed.Destination.Name,
+		}).Stored {
+			t.Fatal("the HTTPS failure was not stored")
+		}
+		if got, want := GetProviderEgressHealthContactedTotal(ctx, now.Add(-time.Hour)), (ProviderEgressContactedTotal{Ok: 3, Total: 4}); got != want {
+			t.Fatalf("contacted total = %+v, want %+v", got, want)
+		}
+	})
+}
