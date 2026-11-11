@@ -86,19 +86,34 @@ func TestSubscriptionMetricsCollectorPublishesCompleteBoundedSnapshot(t *testing
 		t.Fatalf("snapshot timestamp = %v, want %d", got, refreshedAt.Unix())
 	}
 
-	// nine tracked stores (apple, google, stripe, solana, monero, zcash,
-	// bittensor, bitcoin, ethereum) plus the deduplicated series
-	if got := len(metricFamilies["urnetwork_subscription_active_accounts"].Metric); got != 10 {
-		t.Errorf("active series = %d, want 10 bounded stores", got)
+	// ten tracked stores (apple, google, stripe, solana, monero, zcash,
+	// bittensor, bitcoin, ethereum, gamma) plus the deduplicated series
+	if got := len(metricFamilies["urnetwork_subscription_active_accounts"].Metric); got != 11 {
+		t.Errorf("active series = %d, want 11 bounded stores", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_engaged_accounts"].Metric); got != 30 {
-		t.Errorf("engagement series = %d, want 10 stores x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_engaged_accounts"].Metric); got != 33 {
+		t.Errorf("engagement series = %d, want 11 stores x 3 windows", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_new_paid_accounts"].Metric); got != 30 {
-		t.Errorf("new-paid series = %d, want 10 stores x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_new_paid_accounts"].Metric); got != 33 {
+		t.Errorf("new-paid series = %d, want 11 stores x 3 windows", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_reconciliation_events"].Metric); got != 162 {
-		t.Errorf("reconciliation series = %d, want 9 stores x 6 actions x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_reconciliation_events"].Metric); got != 180 {
+		t.Errorf("reconciliation series = %d, want 10 stores x 6 actions x 3 windows", got)
+	}
+	// the markets added after the first six publish a known zero, never no
+	// data, until a subscription in them is counted
+	for _, store := range []string{
+		model.SubscriptionMarketBittensor,
+		model.SubscriptionMarketBitcoin,
+		model.SubscriptionMarketEthereum,
+		model.SubscriptionMarketGamma,
+	} {
+		if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_active_accounts", map[string]string{"store": store}); got != 0 {
+			t.Errorf("active %s = %v, want a known zero", store, got)
+		}
+		if got := subscriptionMetricValue(t, metricFamilies, "urnetwork_subscription_new_paid_accounts", map[string]string{"store": store, "window": model.SubscriptionMetricsWindow30Days}); got != 0 {
+			t.Errorf("new paid %s 30d = %v, want a known zero", store, got)
+		}
 	}
 	if got := len(metricFamilies["urnetwork_subscription_data_pack_fulfillments"].Metric); got != 12 {
 		t.Errorf("data-pack series = %d, want 3 sources x 4 windows", got)
@@ -227,13 +242,13 @@ func requireSubscriptionMetricsGeneration(
 	refreshedAt time.Time,
 ) {
 	t.Helper()
-	// nine tracked stores (apple, google, stripe, solana, monero, zcash,
-	// bittensor, bitcoin, ethereum): monero and zcash added 58 samples to the
-	// 152 of four stores, and the active trials 21 (seven stores by three
-	// plans); bittensor, bitcoin and ethereum add 29 samples and 3 trial
-	// series each (96)
-	if len(metrics) != 327 {
-		t.Fatalf("collected metrics = %d, want 327 bounded samples", len(metrics))
+	// ten tracked stores (apple, google, stripe, solana, monero, zcash,
+	// bittensor, bitcoin, ethereum, gamma): monero and zcash added 58 samples
+	// to the 152 of four stores, and the active trials 21 (seven stores by
+	// three plans); bittensor, bitcoin and ethereum add 29 samples and 3 trial
+	// series each (96), and gamma 32 more
+	if len(metrics) != 359 {
+		t.Fatalf("collected metrics = %d, want 359 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric

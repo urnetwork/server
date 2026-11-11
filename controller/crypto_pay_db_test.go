@@ -265,7 +265,7 @@ func TestCryptoCreditRenewalBalanceRevenueAndOffer(t *testing.T) {
 		connect.AssertEqual(t, term.GraceEndTime.Sub(term.TermEndTime), manualPaymentGracePeriod)
 
 		// a crypto year blocks no new card purchase
-		connect.AssertEqual(t, subscriptionMarketsBlockNewPurchase(model.GetActiveSubscriptionRenewalMarkets(ctx, networkId, model.SubscriptionTypeSupporter)), false)
+		connect.AssertEqual(t, subscriptionMarketsBlockNewPurchase(model.GetActiveSubscriptionRenewalMarkets(ctx, networkId, model.SubscriptionTypeSupporter), false), false)
 	})
 }
 

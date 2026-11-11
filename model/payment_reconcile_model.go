@@ -84,6 +84,25 @@ const (
 // PaymentReconcileStoreAll is the store label for run-level rows (heartbeat).
 const PaymentReconcileStoreAll = "all"
 
+// PaymentReconcileStores are the stores the hourly payment reconciliation
+// passes over, in the order it does, each with its own leg and watermark
+// (controller/payment_reconcile_controller.go, which a test holds to this
+// list). The payment monitor expects a fresh watermark from each and accepts
+// a repair from each (monitor/signal_payment_reconciliation.go). gamma has no
+// leg.
+var PaymentReconcileStores = []string{
+	SubscriptionMarketStripe,
+	SubscriptionMarketApple,
+	SubscriptionMarketGoogle,
+	SubscriptionMarketSolana,
+	SubscriptionMarketX402,
+	SubscriptionMarketMonero,
+	SubscriptionMarketZcash,
+	SubscriptionMarketBittensor,
+	SubscriptionMarketBitcoin,
+	SubscriptionMarketEthereum,
+}
+
 type PaymentReconciliationEvent struct {
 	EventId   server.Id
 	RunId     server.Id
