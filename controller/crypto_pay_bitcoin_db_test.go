@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,6 +238,129 @@ func TestCryptoBitcoinReorgKeepsCreditsAndJudgesTheRestAgain(t *testing.T) {
 		connect.AssertEqual(t, countReconcileEvents(events, model.SubscriptionMarketBitcoin, model.PaymentReconcileActionEnded), 0)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, creditedNetworkId), true)
 		connect.AssertEqual(t, model.GetCryptoPaymentIntent(ctx, credited.IntentId).CreditedAt != nil, true)
+	})
+}
+
+// Bitcoin's confirmation grace end to end, through the scanner and the
+// database (mmm/BTCPAY.md §16.8), on the recorded blocks while the price is
+// down to $27,000 since the quotes: a payment of the quoted amount mined 2
+// hours 50 minutes past its invoice's expiry is credited at the quoted price,
+// on time ($37.98 at the fallen rate, which the rail held for review as
+// late_underpaid before the grace); one mined a minute past the grace takes the
+// late path, valued at the fallen rate and held for review. An invoice with
+// nothing received reads pending through its grace and is not re-quoted then,
+// since a payment sent within its quote may be unmined; past the grace it
+// reads expired and is re-quoted, for the same address.
+func TestCryptoBitcoinScannerCreditsAPaymentMinedInTheGrace(t *testing.T) {
+	skipWithoutProYml(t)
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		cryptoTestResetLimiters()
+		node := newCryptoTestBitcoinNode(t, 975402)
+		node.shift = time.Now().Unix() - 1794381078 - 60
+		cryptoDbBitcoinScanner(t, node)
+		// sold, too: the Coinbase key is there, for the re-quotes
+		settings, err := cryptoWalletSettingsFunc(model.CryptoAssetBtc)
+		connect.AssertEqual(t, err, nil)
+		settings.Coinbase = &cryptoCoinbaseSettings{Host: "api.coinbase.test", KeyName: "synthetic", PrivateKey: "synthetic"}
+		cryptoWalletSettingsFunc = func(asset string) (*cryptoWalletSettings, error) {
+			if asset != model.CryptoAssetBtc {
+				return nil, fmt.Errorf("%s has no chain source in this test", asset)
+			}
+			sold := *settings
+			return &sold, nil
+		}
+		cryptoTestRates(t, map[string]map[string]float64{
+			cryptoRateSourceKraken:   {model.CryptoAssetBtc: 27_000},
+			cryptoRateSourceCoinbase: {model.CryptoAssetBtc: 27_000},
+		})
+		taskSession := session.Testing_CreateClientSession(ctx, nil)
+		blockTime := func(recorded int64) time.Time {
+			return time.Unix(recorded+node.shift, 0).UTC()
+		}
+		requote := func(intentId server.Id, expiresAt time.Time, rateUsd float64, priceUsd float64) {
+			cryptoDbExec(
+				ctx,
+				`UPDATE crypto_payment_intent SET quoted_at = $2, create_time = $2, expires_at = $3, rate_usd = $4, price_usd_nano_cents = $5, regular_price_usd_nano_cents = $5 WHERE intent_id = $1`,
+				intentId, expiresAt.Add(-30*time.Minute), expiresAt, rateUsd, model.UsdToNanoCents(priceUsd),
+			)
+		}
+
+		// 975401 pays 140,682 sats to this P2WPKH address ($40 at $28,575.27
+		// with the buffer); the invoice expired 2 h 50 min before that block
+		grace, graceNetworkId := cryptoDbBitcoinIntent(t, ctx, "btcgrace", model.SolanaPlanYearly, 721, cryptoTestBtcP2wpkhSingle, 140_682)
+		requote(grace.IntentId, blockTime(1794380897).Add(-(2*time.Hour + 50*time.Minute)), 28_575.27, 40)
+		// 975400 pays 28,637 sats to this P2PKH address ($8 at $28,076); the
+		// invoice expired 3 h 1 min before that block
+		late, lateNetworkId := cryptoDbBitcoinIntent(t, ctx, "btcgracelate", model.SolanaPlanYearly, 722, cryptoTestBtcP2pkh, 28_637)
+		requote(late.IntentId, blockTime(1794380740).Add(-(3*time.Hour + time.Minute)), 28_076, 8)
+
+		scan := cryptoDbBitcoinScan(t, taskSession)
+		connect.AssertEqual(t, scan.NewReceipts, 2)
+		connect.AssertEqual(t, scan.Credited, 1)
+		connect.AssertEqual(t, scan.Reviewed, 1)
+
+		credited := model.GetCryptoPaymentIntent(ctx, grace.IntentId)
+		connect.AssertEqual(t, credited.CreditedAt != nil, true)
+		connect.AssertEqual(t, *credited.CreditedUsdNanoCents, model.UsdToNanoCents(40))
+		connect.AssertEqual(t, model.IsProNetwork(ctx, graceNetworkId), true)
+		connect.AssertEqual(t, cryptoDbBitcoinStatus(t, ctx, grace.IntentId).Status, CryptoPaymentStatusPaid)
+		for _, receipt := range model.GetCryptoPaymentReceiptsForIntent(ctx, grace.IntentId) {
+			connect.AssertEqual(t, receipt.State, model.CryptoReceiptStateCredited)
+			connect.AssertEqual(t, receipt.FirstSeenAt, blockTime(1794380897))
+			connect.AssertEqual(t, *receipt.FirstSeenRateUsd, 27_000.0)
+		}
+
+		connect.AssertEqual(t, model.GetCryptoPaymentIntent(ctx, late.IntentId).CreditedAt, (*time.Time)(nil))
+		connect.AssertEqual(t, model.IsProNetwork(ctx, lateNetworkId), false)
+		view := cryptoDbBitcoinStatus(t, ctx, late.IntentId)
+		connect.AssertEqual(t, view.Status, CryptoPaymentStatusReview)
+		connect.AssertEqual(t, view.ReviewReason, model.CryptoReviewReasonLateUnderpaid)
+		for _, receipt := range model.GetCryptoPaymentReceiptsForIntent(ctx, late.IntentId) {
+			connect.AssertEqual(t, receipt.State, model.CryptoReceiptStateReview)
+			connect.AssertEqual(t, receipt.ReviewReason, model.CryptoReviewReasonLateUnderpaid)
+		}
+
+		// an invoice ten minutes past its expiry with nothing received
+		waiting, _ := cryptoDbBitcoinIntent(t, ctx, "btcgracewaiting", model.SolanaPlanYearly, 723, "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh", 54_622)
+		token, tokenHash := cryptoNewStatusToken()
+		cryptoDbExec(ctx, `UPDATE crypto_payment_intent SET status_token_hash = $2 WHERE intent_id = $1`, waiting.IntentId, tokenHash)
+		requote(waiting.IntentId, server.NowUtc().Add(-10*time.Minute), 73_596.90, 40)
+		// a free address, so the coin is sold
+		reserved := server.NewId()
+		model.AddCryptoPaymentAddresses(ctx, []*model.CryptoPaymentAddress{{Asset: model.CryptoAssetBtc, AddressIndex: 724, Address: "bc1qar0srrr7xfkvy5l643lydnw9re59gtzzwf5mdq", ReservedIntentId: &reserved}})
+		resetCryptoAvailability()
+		clientSession := session.Testing_CreateClientSession(ctx, nil)
+		args := &CryptoPaymentStatusArgs{IntentId: waiting.IntentId.String(), StatusToken: token}
+
+		status, err := CryptoPaymentStatus(args, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, status.Status, CryptoPaymentStatusPending)
+		connect.AssertEqual(t, status.Error, (*CryptoPaymentError)(nil))
+		refused, err := CryptoPaymentRequote(args, clientSession)
+		connect.AssertEqual(t, err, nil)
+		if refused.Error == nil {
+			t.Fatalf("an invoice in its grace was re-quoted")
+		}
+		connect.AssertEqual(t, refused.Error.Code, PurchaseErrorCodeInvalidRequest)
+		connect.AssertEqual(t, strings.Contains(refused.Error.Message, "can take up to 3 hours"), true)
+		connect.AssertEqual(t, model.GetCryptoPaymentIntent(ctx, waiting.IntentId).AmountAtomic, int64(54_622))
+
+		// past the grace: expired, and re-quoted for the same address at the
+		// rate now
+		requote(waiting.IntentId, server.NowUtc().Add(-(3*time.Hour + time.Minute)), 73_596.90, 40)
+		status, err = CryptoPaymentStatus(args, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, status.Status, CryptoPaymentStatusExpired)
+		connect.AssertEqual(t, status.Error.Code, PurchaseErrorCodeQuoteExpired)
+		requoted, err := CryptoPaymentRequote(args, clientSession)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, requoted.Error, (*CryptoPaymentError)(nil))
+		connect.AssertEqual(t, requoted.Address, waiting.Address)
+		connect.AssertEqual(t, requoted.RateUsd, 27_000.0)
+		amountAtomic, _ := cryptoAssetQuoteAmountAtomic(model.CryptoAssetBtc, 40, 27_000, 0.5)
+		connect.AssertEqual(t, requoted.AmountAtomic, fmt.Sprintf("%d", amountAtomic))
+		connect.AssertEqual(t, requoted.Status.Status, CryptoPaymentStatusPending)
 	})
 }
 
