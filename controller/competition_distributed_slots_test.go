@@ -164,6 +164,24 @@ func (self *competitionDistributedPgFixture) qualifyHost(t testing.TB, host Comp
 	if amendment := competitionExecutorControlAmendmentSha256(self.settings); amendment != "" {
 		receipt["control_amendment_sha256"] = amendment
 	}
+	self.addCoverageToReceipt(t, receipt)
+	content, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(content)
+	server.Tx(ctx, func(tx server.PgTx) {
+		server.Raise(self.store.requireAutomationLeaseInTx(ctx, tx, self.settings, *self.settings.automationLease))
+		server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_executor_control_amendment',$1,true)`, competitionExecutorControlAmendmentSha256(self.settings)))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run(round_id,host_id,job_id,started_at,deadline_at,api_image_digest,worker_image_digest) VALUES($1,$2,$3,$4,$5,$6,$7)`, self.round.RoundId, host.HostId, jobId, now, deadline, testApiImageDigest(), testWorkerImageDigest()))
+		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_equivalence(round_id,host_id,receipt_json,receipt_sha256,baseline_sha256,created_at) VALUES($1,$2,$3::jsonb,$4,$5,$6)`,
+			self.round.RoundId, host.HostId, string(content), hex.EncodeToString(digest[:]), self.prepared.BaselineSha256, now))
+	})
+}
+
+// Original and recovery SQL fixtures carry the same complete coverage proof.
+func (self *competitionDistributedPgFixture) addCoverageToReceipt(t testing.TB, receipt map[string]any) {
+	t.Helper()
 	if self.settings.EvaluationPolicy.WorkCoveragePolicy != nil {
 		receipt["work_coverage_policy"] = self.settings.EvaluationPolicy.WorkCoveragePolicy.Clone()
 		var baseline roundBaselineManifest
@@ -199,18 +217,6 @@ func (self *competitionDistributedPgFixture) qualifyHost(t testing.TB, host Comp
 		}
 		receipt["metrics"] = metrics
 	}
-	content, err := json.Marshal(receipt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	digest := sha256.Sum256(content)
-	server.Tx(ctx, func(tx server.PgTx) {
-		server.Raise(self.store.requireAutomationLeaseInTx(ctx, tx, self.settings, *self.settings.automationLease))
-		server.RaisePgResult(tx.Exec(ctx, `SELECT set_config('urnetwork.competition_executor_control_amendment',$1,true)`, competitionExecutorControlAmendmentSha256(self.settings)))
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_qualification_run(round_id,host_id,job_id,started_at,deadline_at,api_image_digest,worker_image_digest) VALUES($1,$2,$3,$4,$5,$6,$7)`, self.round.RoundId, host.HostId, jobId, now, deadline, testApiImageDigest(), testWorkerImageDigest()))
-		server.RaisePgResult(tx.Exec(ctx, `INSERT INTO competition_executor_equivalence(round_id,host_id,receipt_json,receipt_sha256,baseline_sha256,created_at) VALUES($1,$2,$3::jsonb,$4,$5,$6)`,
-			self.round.RoundId, host.HostId, string(content), hex.EncodeToString(digest[:]), self.prepared.BaselineSha256, now))
-	})
 }
 
 // Each independent worker receives only its approved physical slot selector.
