@@ -6,6 +6,20 @@
   "baseline_sha256_unchanged": "784aef3401631be5a39a73185c0276bb7ded38410f53de48af7ed942dfdd1340",
   "both_execution_states": "succeeded",
   "execution_success_is_not_admission_success": true,
+  "central_authentication": {
+    "failure_on_both_hosts": "executor_source_mismatch",
+    "retained_failure_manifest_readback": true,
+    "goofe_failure_manifest_content_address": "90772215b9dd593281a4a07cde38073fc185bfd94d5f53727127f8f04253fc5c",
+    "sille_failure_manifest_content_address": "f65c2688c21e6a396f2859fdc371b8df6203e61152a3e83a991e64429ffc8481",
+    "root_cause": "Trusted source identities include work_coverage_policy, but competitionDistributedSourceIdentity omitted that leaf and strict decoding rejected the valid evidence on both hosts.",
+    "fix": "Decode the typed optional coverage policy and require the exact frozen policy on baseline, candidate and pristine source identities. Preserve unknown-field rejection, digest checks and all source/lifecycle invariants.",
+    "regression_reproduced_before_fix": true,
+    "normal_source_regression_repetitions_passed": 3,
+    "normal_source_regression_seconds": 2.744,
+    "race_checks_pending": true,
+    "fix_deployed": false,
+    "sille_g5_failure_not_waived": true
+  },
   "sille": {
     "run_id": "a6e33c2be87ab1879f17a2526fd23f0b92539346e504d34f56f6e9c0d775b30e",
     "replicates_completed": 9,
