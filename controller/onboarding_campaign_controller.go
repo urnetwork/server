@@ -181,7 +181,7 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 		NetworkId: networkId,
 		CreatedAt: now,
 		Email:     hasEmail,
-		Platform:  platformFromUserAgent(clientSession),
+		Platform:  platformFromRequest(clientSession),
 		Locale:    localeFromSession(clientSession),
 	}
 	if ip, ok := clientIp(clientSession); ok {
@@ -245,9 +245,18 @@ func RecordOnboardingClientContext(clientSession *session.ClientSession, network
 	if l := normalizeLocale(locale); l != "" {
 		model.SetNetworkOnboardingLocale(clientSession.Ctx, networkId, l)
 	}
-	if p := platformFromDeviceSpec(deviceSpec); p != "" {
+	if p := devicePlatform(clientSession, deviceSpec); p != "" {
 		model.SetNetworkOnboardingPlatform(clientSession.Ctx, networkId, p)
 	}
+}
+
+// devicePlatform is the platform of a device authenticating: the one its app
+// declares (clientInfoPlatform), else what its device spec names.
+func devicePlatform(clientSession *session.ClientSession, deviceSpec string) string {
+	if p := clientInfoPlatform(clientSession); p != "" {
+		return p
+	}
+	return platformFromDeviceSpec(deviceSpec)
 }
 
 func clientIp(clientSession *session.ClientSession) (string, bool) {
@@ -262,12 +271,60 @@ func clientIp(clientSession *session.ClientSession) (string, bool) {
 }
 
 // Platform values (model.EventPlatform*): ios, macos, android, web, windows, linux.
+
+// platformFromRequest is the platform of a sign-up (or of the first device,
+// on the device path): the one the app declares (clientInfoPlatform), else the
+// browser's (platformFromUserAgent).
+//
+// mmm/ONBOARDING-RETENTION.md P14 and P6: a browser sign-up was recorded as the
+// visitor's OS, so a sign-up on ur.io from a Mac got platform macos and with
+// it the App Store's offer rule (no offer email while the App Store codes do
+// not flow) and the store-billed copy (no price), though such a buyer pays by
+// card on the web. A Windows or Linux browser got the desktop app's platform.
+// A desktop browser is `web` now; a phone's or tablet's browser keeps the
+// phone's platform, since the site sends phones to the app's store.
+func platformFromRequest(clientSession *session.ClientSession) string {
+	if p := clientInfoPlatform(clientSession); p != "" {
+		return p
+	}
+	return platformFromUserAgent(clientSession)
+}
+
+// clientInfoPlatform is the platform an app declares in X-UR-ClientInfo: every
+// app's sdk sets its device type on its api calls (android, ios, macos,
+// windows, linux), and ur.io's sdk host sets web. The macOS App Store build
+// and the direct-download build both declare macos, so it does not tell them
+// apart. "" for cli, server, unknown and no header.
+func clientInfoPlatform(clientSession *session.ClientSession) string {
+	if clientSession == nil {
+		return ""
+	}
+	switch deviceType := clientSession.ClientInfo.DeviceType; deviceType {
+	case "android", "ios", "macos", "windows", "linux", onboarding.PlatformWeb:
+		return deviceType
+	}
+	return ""
+}
+
+// platformFromUserAgent reads the request's User-Agent: a browser's (every
+// browser's starts "Mozilla/") is web, or the phone's or tablet's platform
+// (iOS and iPadOS, Android); any other client's names its platform as a device
+// spec does.
 func platformFromUserAgent(clientSession *session.ClientSession) string {
 	if clientSession == nil {
 		return ""
 	}
-	ua := strings.ToLower(strings.Join(clientSession.Header["User-Agent"], " "))
-	return platformFromDeviceSpec(ua)
+	ua := strings.ToLower(strings.TrimSpace(strings.Join(clientSession.Header["User-Agent"], " ")))
+	if !strings.HasPrefix(ua, "mozilla/") {
+		return platformFromDeviceSpec(ua)
+	}
+	switch {
+	case strings.Contains(ua, "iphone"), strings.Contains(ua, "ipad"), strings.Contains(ua, "ipod"):
+		return "ios"
+	case strings.Contains(ua, "android"):
+		return "android"
+	}
+	return onboarding.PlatformWeb
 }
 
 func platformFromDeviceSpec(spec string) string {
@@ -290,10 +347,35 @@ func platformFromDeviceSpec(spec string) string {
 		return "linux"
 	case strings.Contains(s, "mozilla"), strings.Contains(s, "chrome"), strings.Contains(s, "safari"), strings.Contains(s, "firefox"):
 		return "web"
+	case macAppModelSpec(s):
+		return "macos"
 	case androidAppModelSpec(s):
 		return "android"
 	}
 	return ""
+}
+
+// macAppModelPattern matches the model in the macOS app's spec: a Mac's retail
+// name from the app's DeviceModelNames table ("macbook pro (16-inch, nov
+// 2023)", "mac mini (2024)", "imac (24-inch, 2021)"), its hardware model id
+// when the table has no name ("mac16,10", "macbookpro18,3", "imacpro1,1"), or
+// "mac" when the id cannot be read.
+var macAppModelPattern = regexp.MustCompile(`^(?:(?:mac|imac|imac pro|mac mini|mac pro|mac studio|macbook|macbook air|macbook pro)(?: \(.*\))?|(?:mac|imac|imacpro|macbook|macbookair|macbookpro|macmini|macpro)\d+,\d+)$`)
+
+// macAppModelSpec is the spec the macOS app sends: "<os version> <model>"
+// (apple DeviceManager.getDeviceSpecs), e.g. "15.7.9 macbook air (m1, 2020)".
+// It names the Mac, not the store: the App Store build and the
+// direct-download build send the same spec (and declare the same device type
+// and version), so nothing tells them apart. The App Store build is the one
+// with a stable release (the direct DMG has only nightlies), so a Mac app is
+// macos, the App Store's platform (mmm/ONBOARDING-RETENTION.md P6). s is
+// lower case.
+func macAppModelSpec(s string) bool {
+	_, model, ok := strings.Cut(s, " ")
+	if !ok || !leadingOsVersion(s) {
+		return false
+	}
+	return macAppModelPattern.MatchString(strings.TrimSpace(model))
 }
 
 // androidBuildFingerprintSpec is the spec older Android apps sent:
@@ -316,8 +398,8 @@ func androidBuildFingerprintSpec(s string) bool {
 // "<os version> <make model>" (android MainApplication.deviceSpec), e.g.
 // "16 samsung galaxy s24 ultra" or "17.1 pixel 8 pro". The Apple apps send the
 // same shape ("18.1 iphone 16 pro", "15.7.9 macbook air (m1, 2020)"): an
-// iPhone or iPad is decided before this, and an Apple model is left without a
-// platform, as it was. s is lower case.
+// iPhone or iPad is decided before this, a Mac by macAppModelSpec, and any
+// other Apple model is left without a platform. s is lower case.
 func androidAppModelSpec(s string) bool {
 	_, model, ok := strings.Cut(s, " ")
 	if !ok || model == "" || !leadingOsVersion(s) {

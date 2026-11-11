@@ -235,6 +235,9 @@ type Decision struct {
 	NextStep string
 }
 
+// The web platform: a browser sign-up, whose app is the extension.
+const PlatformWeb = "web"
+
 // WidgetPlatform reports whether the platform's app has a widget for E2's
 // activated email to point at: the iOS and Android apps, and the macOS app
 // (the apple widgets target builds for macOS too). The Windows and Linux apps
@@ -242,7 +245,7 @@ type Decision struct {
 // before: Android app rows were often recorded without a platform.
 func WidgetPlatform(platform string) bool {
 	switch platform {
-	case "windows", "linux", "web":
+	case "windows", "linux", PlatformWeb:
 		return false
 	}
 	return true
