@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"reflect"
 
 	"github.com/urnetwork/server/model"
 )
@@ -16,18 +17,19 @@ import (
 // A source identity is image-authenticated and temporary; only the candidate's
 // repository heads/patch identity change after canonical patch application.
 type competitionDistributedSourceIdentity struct {
-	Schema               int               `json:"schema"`
-	Kind                 string            `json:"kind"`
-	Temporary            bool              `json:"temporary"`
-	BaseImageId          string            `json:"base_image_id"`
-	BaseSha              string            `json:"base_sha"`
-	SourceEpoch          int               `json:"source_epoch"`
-	Staging              bool              `json:"staging"`
-	Branch               string            `json:"branch"`
-	SourceLockSha256     string            `json:"source_lock_sha256"`
-	Repositories         map[string]string `json:"repositories"`
-	CandidatePatchSha256 *string           `json:"candidate_patch_sha256"`
-	CandidatePathBase    string            `json:"candidate_path_base,omitempty"`
+	WorkCoveragePolicy   *model.CompetitionWorkCoveragePolicy `json:"work_coverage_policy,omitempty"`
+	Schema               int                                  `json:"schema"`
+	Kind                 string                               `json:"kind"`
+	Temporary            bool                                 `json:"temporary"`
+	BaseImageId          string                               `json:"base_image_id"`
+	BaseSha              string                               `json:"base_sha"`
+	SourceEpoch          int                                  `json:"source_epoch"`
+	Staging              bool                                 `json:"staging"`
+	Branch               string                               `json:"branch"`
+	SourceLockSha256     string                               `json:"source_lock_sha256"`
+	Repositories         map[string]string                    `json:"repositories"`
+	CandidatePatchSha256 *string                              `json:"candidate_patch_sha256"`
+	CandidatePathBase    string                               `json:"candidate_path_base,omitempty"`
 }
 
 // Matches the trusted retained image-to-temporary-source inventory exactly.
@@ -86,6 +88,7 @@ func authenticateDistributedCompetitionSources(settings *Settings, job *queuedJo
 	}
 	identityMatches := func(identity competitionDistributedSourceIdentity) bool {
 		return identity.Schema == 1 && identity.Kind == "sim-latency-evaluation-source" && identity.Temporary && !identity.Staging && identity.Branch == "sim-latency" &&
+			model.ValidateCompetitionWorkCoveragePolicy(identity.WorkCoveragePolicy) == nil && reflect.DeepEqual(identity.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) &&
 			identity.BaseImageId == job.EvaluatorImageDigest && identity.BaseSha == settings.BaseSha && identity.SourceEpoch == evaluationSourceEpoch(&job.Round) &&
 			sha256Pattern.MatchString(identity.SourceLockSha256) && validateDistributedMeasuredCommits(identity.Repositories) == nil &&
 			(identity.CandidatePathBase == "" || identity.CandidatePathBase == competitionMonoRootPathBase) &&

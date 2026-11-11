@@ -127,11 +127,24 @@ TAO the first scan only while the SN25 validator's deploy gate allows it.
   `zcash`, `bittensor`, `bitcoin`, `ethereum`) whose grace has not ended:
 
   ```json
-  {"market": "bitcoin", "term_end_time": "2027-10-20T18:00:00Z", "grace_end_time": "2027-11-19T18:00:00Z"}
+  {"market": "solana", "asset": "sol", "term_end_time": "2027-10-20T18:00:00Z", "grace_end_time": "2027-11-19T18:00:00Z"}
   ```
 
   `term_end_time` = `grace_end_time` − 30 days. Show the renewal notice while `term_end_time <= now <
-  grace_end_time`, never before. Native SOL credits under `solana`, as USDC does.
+  grace_end_time`, never before. `asset` is the coin the term was paid with (`usdc_solana`, `sol`, `xmr`, `zec`,
+  `tao`, `btc`, `eth`): native SOL credits under `solana`, as USDC does, and `asset` tells them apart for the whole
+  term, after the payment's 30-day unlink too.
+
+  `crypto_unavailable_assets` (above) is its final name and shape: an array of `CryptoPaymentAsset`, each with
+  `available: false` and its `unavailable_reason`, left out when empty.
+
+## Additions to GET /subscription/details (`SubscriptionDetail`)
+
+- `store` takes the new markets `bittensor`, `bitcoin` and `ethereum`; a SOL year's store is `solana`, as USDC's.
+- `crypto_asset`: a one-time crypto year's coin (`usdc_solana`, `sol`, `xmr`, `zec`, `tao`, `btc`, `eth`), left out
+  for the other stores. Manage subscription names the coin from it ("Paid with SOL", not "USDC on Solana"). It is
+  read from the renewal: a SOL year's transaction id is its invoice's id, and after the 30-day unlink a random id
+  with the `sol/` prefix, so the coin outlives the link.
 
 ## POST /pay/crypto/quote
 
@@ -235,7 +248,7 @@ Response `CryptoPaymentIntentResult`:
 | `rate_usd` | number | the coin's USD rate the amount was quoted at; `1` for USDC |
 | `address` | string | where to pay: a Monero subaddress, a Zcash unified address, the Solana merchant address (USDC), or the invoice's own Coinbase deposit address (TAO as SS58 with prefix 42, Bitcoin, ETH in EIP-55 case, SOL) |
 | `amount`, `amount_atomic` | string | exactly what to send: price × (1 + the coin's buffer) ÷ rate, rounded up to the coin's quote decimals ($40 at $555.36 is `0.072386` XMR; mmm/ZCASH-CONTRACT.md §2.3's example `0.072387` is off by one). USDC: the price plus a unique sub-cent suffix |
-| `memo` | string | USDC: the Solana Pay reference, the memo of a transfer sent by hand; SOL: its Solana Pay reference (optional: the address alone finds the payment); else `""` |
+| `memo` | string | USDC only: the Solana Pay reference, the memo of a transfer sent by hand. `""` for every other coin, SOL included: a SOL invoice's own deposit address identifies it, and its Solana Pay reference is in `uri` only. Show a memo only when it is not empty |
 | `uri` | string | the payment URI to show as a QR and to open. Never built by a client. `""` for TAO |
 | `uri_note` | string | when `uri` is `""`, why: TAO has no payment link standard (the invoice shows the address and the amount with Copy, and a QR of the address only); else `""` |
 | `network` | string | the chain the payment must be sent on (as in the coin list) |
@@ -482,7 +495,18 @@ The monitor's payment failures signal (SIGNALS.md §2.22) pages on `crypto-sanct
 minutes, including a paused TAO reader) and warns on `crypto-payment-held` (`transfer_shape`, `amount_unmatched`).
 The dashboard "urnetwork / crypto payments" charts every `urnetwork_crypto_pay_*` metric.
 
+### The 30-day unlink
+
+Every coin's invoices are unlinked from their network 30 days after their credit (or their creation, when never
+credited), as Monero's are: the invoice forgets its network, email and balance code, every exact time of the
+invoice, its receipts and its pool address (a Coinbase deposit address included) becomes the day, its quotes are
+deleted, and its renewal's transaction id becomes a random id. A SOL year's becomes `sol/` and a random id, so
+the term and Manage subscription still name SOL. A Coinbase address keeps the invoice id it was named with,
+which names no network after the unlink. The sanctions screen keeps no record of its own: a hold is its receipts'
+state and reason (which stay, for the owner and counsel), and the senders it read are never stored.
+
 ### Database
 
 No migration: the reserved invoice id of a Coinbase address lives in `crypto_payment_address.intent_id` (migration
-853), which a free row did not use. The migration head is unchanged by this rail work.
+853), which a free row did not use, and a SOL renewal's coin in its transaction id. The migration head is unchanged
+by this rail work.

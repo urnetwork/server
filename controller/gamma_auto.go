@@ -130,7 +130,7 @@ func (self *gammaBiller) autoRenew(account *model.GammaAccount) {
 	if !account.AutoRenew || account.RenewPlan == "" {
 		return
 	}
-	_, graceEnd, ok := model.GetLatestOneTimeSubscriptionRenewal(self.ctx, account.NetworkId, []string{model.SubscriptionMarketGamma}, self.now)
+	_, _, graceEnd, ok := model.GetLatestOneTimeSubscriptionRenewal(self.ctx, account.NetworkId, []string{model.SubscriptionMarketGamma}, self.now)
 	if !ok {
 		return
 	}

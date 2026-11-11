@@ -49,7 +49,7 @@ const SubscriptionCadenceYearly = "yearly"
 const SubscriptionCadenceMonthly = "monthly"
 
 type SubscriptionDetail struct {
-	// the market: stripe | apple | google | solana | monero | zcash | manual | x402 | "" (unknown)
+	// the market: stripe | apple | google | solana | monero | zcash | bittensor | bitcoin | ethereum | manual | x402 | "" (unknown)
 	Store string `json:"store"`
 	// the wire plan value ("supporter"); the ui names it Pro
 	Plan string `json:"plan"`
@@ -69,8 +69,12 @@ type SubscriptionDetail struct {
 	ManageUrl string `json:"manage_url"`
 	// the store handle, for support: invoice id (stripe), original transaction
 	// id (apple), purchase token (google), payment reference (solana), invoice
-	// id (monero, zcash)
+	// id (monero, zcash, bittensor, bitcoin, ethereum, and solana paid in SOL)
 	TransactionId string `json:"transaction_id,omitempty"`
+	// a one-time crypto year's coin: usdc_solana | sol | xmr | zec | tao |
+	// btc | eth. USDC and native SOL share the solana store; this tells them
+	// apart for the whole term. Left out for the other stores
+	CryptoAsset string `json:"crypto_asset,omitempty"`
 	// the store is retrying a renewal whose payment did not go through (Stripe
 	// past_due or unpaid): the customer should update the payment method
 	// (POST /stripe/customer-portal with flow payment_method_update) or pay
@@ -322,6 +326,7 @@ func buildSubscriptionDetails(
 		case model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
 			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 			detail.TransactionId = renewal.TransactionId
+			detail.CryptoAsset = model.CryptoRenewalAsset(ctx, store, renewal.TransactionId)
 		case model.SubscriptionMarketGamma:
 			// renewal is switched with POST /pay/gamma/settings
 			detail.ManageUrl = gammaManageUrl
@@ -1007,7 +1012,7 @@ func subscriptionCancelRefusal(store string) *SubscriptionCancelResult {
 	case model.SubscriptionMarketSolana:
 		return subscriptionCancelError(
 			SubscriptionErrorCodeDoesNotRenew,
-			"A USDC payment covers one period and does not renew. There is nothing to cancel.",
+			"A USDC or SOL payment covers one period and does not renew. There is nothing to cancel.",
 			"",
 		)
 	case model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
