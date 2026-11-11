@@ -49,7 +49,7 @@ const (
 )
 
 type PayDataCheckoutArgs struct {
-	// "data_1tib" or "data_10tib"
+	// a pack pro.yml sells by card: "data_1tib" or "data_10tib"
 	ItemId string `json:"item_id"`
 	// "stripe"; empty means stripe
 	Provider string `json:"provider"`
@@ -236,9 +236,11 @@ func PayDataCheckout(
 // refusal is its `PurchaseErrorCode*` and its message.
 func payDataValidate(args *PayDataCheckoutArgs) (target payDataTarget, provider string, errCode string, errMessage string) {
 	itemId := strings.TrimSpace(args.ItemId)
-	byteCount, ok := stripeDataPackByteCount(itemId)
-	if !ok {
-		return target, "", PurchaseErrorCodeInvalidRequest, "Unknown item."
+	// a card checkout: a pack pro.yml does not sell by card is refused here,
+	// with where it is sold
+	byteCount, errCode, errMessage := stripeDataPackByteCount(itemId)
+	if errMessage != "" {
+		return target, "", errCode, errMessage
 	}
 
 	provider = strings.ToLower(strings.TrimSpace(args.Provider))

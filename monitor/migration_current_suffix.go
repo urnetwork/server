@@ -946,6 +946,10 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerEgressUrlSourceMigrationContract},
 	// the provider zero-carry verdicts, versioned by their position
 	[]snMainnetMigrationContract{providerZeroCarryMigrationContract},
+	// the onboarding platform's distribution, versioned by its position
+	[]snMainnetMigrationContract{networkOnboardingDistributionMigrationContract},
+	// the Bitcoin block scanner's kept chain, versioned by its position
+	[]snMainnetMigrationContract{cryptoScanChainMigrationContract},
 	// the HTTP/3 place evidence, versioned by its position
 	[]snMainnetMigrationContract{providerEgressH3PlaceMigrationContract},
 )

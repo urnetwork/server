@@ -9342,6 +9342,13 @@ Reproducing the same stale expectation on unchanged baseline and candidate
 separates an inherited test issue from a new regression; it does not make the
 broad suite green or excuse a distinct conservation/custody failure.
 
+Update 2026-11-11: settlement no longer queues the provider-total projection
+(server BILLING-SPLIT.md). Nothing in production read `account_balance.provided_*`
+or its Redis deltas. The drain and the per-task reader stay only to consume the
+rows already queued and those older binaries queue during a rollout, so the
+provider totals drain panels fall to zero once those are gone. Tests now assert
+that settlement produces no provider totals.
+
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
 claiming the outcome. Rollback restores all state. An old writer that wins before
@@ -22596,13 +22603,21 @@ establish:
   network. Successful cancellation preserves paid local history, so this WARN
   alone cannot establish a Google billing failure. The Apple and Google store
   workflows remain separate from Stripe cancellation. A gamma plan renews
-  through our own biller, not a store: account deletion neither refuses nor
-  cancels it, the account's `gamma_account` row (automatic renewal, plan,
-  deposit hotkey) survives, and the biller renews from that row near the end
-  of the term without reading the network, so it can charge the deposit for an
-  account the credit can no longer reach. Before the term ends, stop that
-  owner's automatic renewal with the owner's go and give any renewal already
-  charged and never credited an authorized refund or support disposition. The
+  through our own biller, not a store. Before server commit `57f98311f`,
+  account deletion neither refused nor cancelled it, the account's
+  `gamma_account` row (automatic renewal, plan, deposit hotkey) survived
+  switched on, and the biller renewed from that row near the end of the term
+  without reading the network, so it could charge the deposit for an account
+  the credit can no longer reach. From `57f98311f`, deletion turns the row's
+  renewal, top-up and seat upgrade off, voids the account's open intents and
+  waits for a gamma charge in flight to be credited, and the biller charges no
+  intent whose network is gone; a spend that still lands for one raises the
+  gamma alarm `credit_unfulfillable`. On a build older than that, stop the
+  deleted owner's automatic renewal with the owner's go before the term ends.
+  On any build, give a gamma payment charged and never credited an authorized
+  refund or support disposition (gamma itself cannot be refunded on chain). A
+  deleted owner's paid gamma term may then stay in this WARN until it expires,
+  as cancelled store history does. The
   other one-time crypto markets (Monero, Zcash, TAO, Bitcoin, ETH) are
   excluded like Solana: a prepaid year that never renews. The recurring set is
   `model.SubscriptionMarkets` less `model.SubscriptionOneTimeCryptoMarkets`; a
@@ -22664,9 +22679,13 @@ The count is distinct invoices; the ages are first-seen ages:
 - `crypto-scanner-stalled` (PAGE): a coin's scanner succeeded in the last week
   and has not for 15 minutes (its chain source down or refusing the key, a vault file
   gone, or the TAO reader paused on a runtime it cannot decode, gauge
-  `urnetwork_crypto_pay_tao_reader_paused`). The coin is listed as unavailable
-  and payments to its open invoices wait. `crypto_scan_cursor.last_error`
-  names the reason; never point a scanner at an older block range to recover.
+  `urnetwork_crypto_pay_tao_reader_paused`; for Bitcoin also a source behind the
+  scanner's kept chain, or a chain changed below all 24 blocks it keeps). The coin
+  is listed as unavailable and payments to its open invoices wait.
+  `crypto_scan_cursor.last_error` names the reason; never point a scanner at an
+  older block range to recover. After a Bitcoin reorg deeper than the kept chain,
+  check the chain on a second source, then clear `crypto_scan_cursor.recent_blocks`
+  for `btc`: the scan reads its reorg window again from the cursor.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal

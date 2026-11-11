@@ -15,10 +15,10 @@ import (
 )
 
 // A held provider row must not hold up the upstream grant. The foreground
-// financial owner queues provider totals instead of writing them, so it settles
-// while the row is held and a second contract on the shared grant settles right
-// after it. The projection writes the totals exactly once after the row is
-// released.
+// financial owner neither writes nor queues provider totals (BILLING-SPLIT.md;
+// until 2026-11-11 it queued them), so it settles while the row is held and a
+// second contract on the shared grant settles right after it. The provider's
+// earnings stay in the sweeps; its account row is never written.
 func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
@@ -81,7 +81,7 @@ func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
 		if err := SettleEscrow(ctx, secondId, ContractOutcomeSettled); err != nil {
 			t.Fatal("held provider row retained the shared grant", err)
 		}
-		// Both totals wait in their projections, not in the financial owners.
+		// Neither owner queued provider totals.
 		server.Db(ctx, func(conn server.PgConn) {
 			var provided, pendingBytes, pendingRevenue int64
 			server.Raise(conn.QueryRow(ctx, `WITH unapplied AS (
@@ -93,12 +93,11 @@ func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
                 COALESCE((SELECT sum((allocation->>'bytes')::bigint) FROM unapplied),0),
                 COALESCE((SELECT sum((allocation->>'revenue')::bigint) FROM unapplied),0)`,
 				f.destinationNetworkId, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&provided, &pendingBytes, &pendingRevenue))
-			if provided != 0 || pendingBytes != 22 || pendingRevenue != 22 {
-				t.Fatal("provider totals did not wait in their projections", provided, pendingBytes, pendingRevenue)
+			if provided != 0 || pendingBytes != 0 || pendingRevenue != 0 {
+				t.Fatal("settlement queued provider totals", provided, pendingBytes, pendingRevenue)
 			}
 		})
 		releaseProvider()
-		projectLegacyProviderTotalsForTest(t, ctx)
 		server.Db(ctx, func(conn server.PgConn) {
 			var terminal, metadata int
 			var credit, swept, provided, sweptRevenue, providedRevenue int64
@@ -111,8 +110,8 @@ func TestLegacySettlementProviderTotalWaitReleasesGrant(t *testing.T) {
                 (SELECT sum(payout_net_revenue_nano_cents) FROM transfer_escrow_sweep WHERE contract_id=ANY($1)),
                 (SELECT provided_net_revenue_nano_cents FROM account_balance WHERE network_id=$3)`,
 				[]server.Id{firstId, secondId}, f.balanceId, f.destinationNetworkId).Scan(&terminal, &metadata, &credit, &swept, &provided, &sweptRevenue, &providedRevenue))
-			if terminal != 2 || metadata != 2 || credit != 978 || swept != 22 || provided != 22 || sweptRevenue != 22 || providedRevenue != 22 {
-				t.Fatal("provider projection changed accounting", terminal, metadata, credit, swept, provided, sweptRevenue, providedRevenue)
+			if terminal != 2 || metadata != 2 || credit != 978 || swept != 22 || provided != 0 || sweptRevenue != 22 || providedRevenue != 0 {
+				t.Fatal("settlement changed accounting or wrote provider totals", terminal, metadata, credit, swept, provided, sweptRevenue, providedRevenue)
 			}
 		})
 		requireLegacyOwnedMetadataRedis(t, ctx, f.balanceId, 0)

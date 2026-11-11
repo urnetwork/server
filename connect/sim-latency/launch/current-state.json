@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-11T09:11:35Z",
+  "observed_at": "2026-11-11T09:18:03Z",
   "latest_system_go1_27_4": {
     "evidence": "SYSTEM-GO1.27.4-2026-11-11.json",
     "system_upgrade_complete_on_sille_and_goofe": true,
@@ -18,14 +18,14 @@
     "ordinary_and_race_qualification_passed_three_repetitions": true,
     "additional_retained_read_path_ordinary_passed": true,
     "additional_retained_read_path_race_passed": true,
-    "migration953_rollout_in_progress": true,
+    "migration953_rollout_verified": true,
     "requested_migration_recheck_at": "2026-11-11T09:00:09Z",
     "requested_recheck_completed_at": "2026-11-11T09:00:33Z",
-    "latest_main_migration_observed": 952,
+    "latest_main_migration_observed": 953,
     "pinned_worker_installed_not_started": true,
     "grading_ready": false,
     "customer_evaluation_clocks_started": 0,
-    "next_action": "All checks passed. Await migration953 and the epoch scope of the newly requested Go1.27.4 competition change before activation. Preserve the current frozen instrument and retained failed judgement. Earlier entries below are historical."
+    "next_action": "All checks and migration953 passed. Await the epoch scope of the newly requested Go1.27.4 competition change before activation. Preserve the current frozen instrument and retained failed judgement. Earlier entries below are historical."
   },
   "latest_single_admission_recovery": {
     "evidence": "EPOCH2-SINGLE-ADMISSION-RECOVERY-2026-11-11.json",

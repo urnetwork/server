@@ -503,13 +503,14 @@ func TestConnectDaysNeverExceedDaysActive(t *testing.T) {
 // direct (Stripe) platforms keep the amount.
 func TestOfferParamsStoreBilled(t *testing.T) {
 	expires := time.Date(2026, 9, 14, 22, 5, 0, 0, time.UTC)
+	// an app of unknown distribution, as every app was before it reported one
 	for _, platform := range []string{"ios", "macos", "android"} {
-		if !StoreBilledPlatform(platform) {
+		if !StoreBilledPlatform(platform, "") {
 			t.Fatalf("%s is store billed", platform)
 		}
 	}
 	for _, platform := range []string{"web", "windows", "linux", ""} {
-		if StoreBilledPlatform(platform) {
+		if StoreBilledPlatform(platform, "") {
 			t.Fatalf("%s is billed directly", platform)
 		}
 	}

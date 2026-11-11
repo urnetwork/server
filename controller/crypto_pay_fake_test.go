@@ -337,8 +337,12 @@ func cryptoTestStandardRates(t testing.TB) {
 }
 
 // cryptoTestEnable turns the rail on for one test: the config, a vault that
-// names every daemon, the given fake wallets, and nothing cached.
+// names every daemon, the given fake wallets, and nothing cached. The data
+// packs are the ones pro.yml sells (dataPackTestSkus), whatever this
+// environment's pro.yml is, since the coins sell the packs pro.yml sells with
+// crypto.
 func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]*fakeCryptoWallet) {
+	restoreSkus := model.Testing_SetDataCodeSkus(dataPackTestSkus()...)
 	restoreConfig := setCryptoPayConfigForTest(config)
 	previousSettings := cryptoWalletSettingsFunc
 	previousWalletFor := cryptoWalletFor
@@ -372,6 +376,7 @@ func cryptoTestEnable(t testing.TB, config *CryptoPayConfig, wallets map[string]
 		cryptoWalletFor = previousWalletFor
 		restoreSeams()
 		resetCryptoAvailability()
+		restoreSkus()
 	})
 }
 

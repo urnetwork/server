@@ -44,10 +44,13 @@ func TestForceCloseOwnershipBusyClassification(t *testing.T) {
 	}
 }
 
-// Native close owns a private provider publication key. Losing that admission
-// must retain debit/payout custody even when its holder releases before the
-// expiry code decides whether to quarantine the contract.
-func TestExpiryPublicationBusyRetainsFinancialCustody(t *testing.T) {
+// Native close publishes no provider totals since 2026-11-11
+// (BILLING-SPLIT.md), so it takes no provider publication key: a holder of
+// the key it took until then cannot refuse native expiry, which settles at
+// once with exact custody and queues no provider total. (That key's refusal
+// had to retain debit/payout custody; the grant's own refusal still does,
+// TestTransferBalanceOwnerCoversExpiryQuarantine.)
+func TestExpiryNativeCloseTakesNoProviderPublicationOwner(t *testing.T) {
 	env := server.DefaultTestEnv()
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
@@ -73,39 +76,21 @@ func TestExpiryPublicationBusyRetainsFinancialCustody(t *testing.T) {
 		defer release()
 		var refused atomic.Int32
 		observed := server.Testing_WithPgOwnershipObservation(ctx, func(event server.PgOwnershipEvent) {
-			if event.Kind == server.PgOwnershipRefused && slices.Contains(event.Keys, key) {
+			if event.Kind == server.PgOwnershipRefused {
 				refused.Add(1)
-				// Join the real holder before returning the observed refusal.
-				// A later successful admission cannot change its meaning.
-				release()
 			}
 		})
 		selected, err := ForceCloseOpenContractIds(observed, cutoff, 10, 1, 1, 0)
-		if selected != 1 || !errors.Is(err, errTransferBalanceOwnershipBusy) || refused.Load() != 1 {
-			t.Fatal("native expiry did not exercise its exact publication refusal", selected, refused.Load(), err)
+		if selected != 1 || err != nil || refused.Load() != 0 {
+			t.Fatal("a held provider publication key refused native expiry", selected, refused.Load(), err)
 		}
-		server.Db(ctx, func(conn server.PgConn) {
-			var exact bool
-			server.Raise(conn.QueryRow(ctx, `SELECT outcome IS NULL AND provider_usage IS NOT NULL
- AND NOT EXISTS(SELECT 1 FROM transfer_debit_journal WHERE contract_id=$1)
- AND NOT EXISTS(SELECT 1 FROM transfer_escrow_sweep WHERE contract_id=$1)
- AND NOT EXISTS(SELECT 1 FROM pending_task WHERE run_once_key=$2)
- AND NOT EXISTS(SELECT 1 FROM transfer_escrow WHERE contract_id=$1 AND settled)
- AND (SELECT balance_byte_count FROM transfer_balance WHERE balance_id=$3)=1000
- FROM transfer_contract WHERE contract_id=$1`, contract.ContractId, task.RunOnce("legacy_provider_totals", contract.ContractId).String(), f.balanceId).Scan(&exact))
-			if !exact || Testing_NetEscrowByteCount(ctx, f.balanceId) != 300 {
-				t.Fatal("ownership refusal became a terminal no-payout quarantine")
-			}
-		})
-		selected, err = ForceCloseOpenContractIds(ctx, cutoff, 10, 1, 1, 0)
-		if selected != 1 || err != nil {
-			t.Fatal("retained native expiry did not resume ordinary settlement", selected, err)
-		}
+		release()
 		applied, released, busy, err := flushTransferDebitBalance(ctx, f.balanceId)
 		if err != nil || applied != 1 || released != 1 || busy {
-			t.Fatal("resumed native expiry did not debit exactly once", applied, released, busy, err)
+			t.Fatal("native expiry did not debit exactly once", applied, released, busy, err)
 		}
-		// The durable provider owners: a provider total and no net escrow mirror.
+		// No durable provider owners: the sweep is the provider record, and
+		// native close queues neither a provider total nor a net escrow mirror.
 		pendingOwners := func() (pending int) {
 			server.Db(ctx, func(conn server.PgConn) {
 				server.Raise(conn.QueryRow(ctx, `SELECT count(*) FROM pending_task WHERE function_name=ANY($1)`,
@@ -114,15 +99,8 @@ func TestExpiryPublicationBusyRetainsFinancialCustody(t *testing.T) {
 			})
 			return
 		}
-		if pending := pendingOwners(); pending != 1 {
-			t.Fatal("resumed native expiry did not queue exactly one provider completion", pending)
-		}
-		// Since f1b0b6417 a provider total is queued legacyProviderTotalsDeferral
-		// ahead of the per-task reader, for the drain to take once it is older
-		// than the drain's lag. One drain pass at that time completes it.
-		_, drained := providerTotalsDrainTestPass(t, ctx, server.NowUtc().Add(2*legacyProviderTotalsDrainLag))
-		if pending := pendingOwners(); drained != (legacyProviderTotalsDrainOutcome{credited: 1}) || pending != 0 {
-			t.Fatal("resumed native expiry lost its actual provider completion", drained, pending)
+		if pending := pendingOwners(); pending != 0 {
+			t.Fatal("resumed native expiry queued a provider completion", pending)
 		}
 		requireLegacyProviderDurability(t, ctx, f, contract.ContractId, 11)
 		credit, pending, appliedRows := asyncDebitTestState(t, ctx, f.balanceId)

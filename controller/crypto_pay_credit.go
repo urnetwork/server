@@ -112,7 +112,8 @@ func cryptoCreditIntentInConn(
 	duration := model.Pro().DataCodeDuration
 	if !plan {
 		var ok bool
-		byteCount, ok = stripeDataPackByteCount(intent.Item)
+		// what the invoiced pack grants, whatever its rails say now
+		byteCount, ok = dataPackByteCount(intent.Item)
 		if !ok || byteCount <= 0 {
 			return false, fmt.Errorf("invoice %s names an unknown data pack", intent.IntentId)
 		}

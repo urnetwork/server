@@ -17,6 +17,8 @@ import (
 	"golang.org/x/text/language"
 	"golang.org/x/text/message"
 	"golang.org/x/text/number"
+
+	"github.com/urnetwork/server/session"
 )
 
 // ParamsInput is the data a send renders from.
@@ -358,12 +360,48 @@ func flagParam(on bool) string {
 	return ""
 }
 
-// StoreBilledPlatform reports whether a store bills the platform's purchases:
-// the App Store on ios and macos, Google Play on android.
-func StoreBilledPlatform(platform string) bool {
+// StoreBilledPlatform reports whether a store bills the purchases of the
+// platform's app, as its distribution (session.ClientDistribution*) says: the
+// App Store (AppStorePlatform), and Google Play on android but for the
+// flavors outside Play (android_direct, the GitHub APK and the F-Droid build;
+// solana_dapp; ethos_dapp), which bill through Stripe as the web, Windows,
+// Linux and the direct-download Mac do (mmm/onboarding/PLAN.md, the 2026-09-09
+// billing decision). An Android app of unknown distribution ("", every app
+// from before the apps reported it) is taken for the Play build, the one most
+// installs come from.
+func StoreBilledPlatform(platform string, distribution string) bool {
 	switch platform {
-	case "ios", "macos", "android":
-		return true
+	case "ios", "macos":
+		return AppStorePlatform(platform, distribution)
+	case "android":
+		return distribution == "" || distribution == session.ClientDistributionPlay
 	}
 	return false
+}
+
+// AppStorePlatform reports whether the App Store bills the purchases of the
+// platform's app: ios, and macos but for the direct-download build
+// (mac_direct, a Developer ID DMG that bills through Stripe). The two Mac
+// builds send the same device type, spec and version, so only the
+// distribution tells them apart; a Mac app of unknown distribution is taken
+// for the App Store build, the one with a stable release.
+func AppStorePlatform(platform string, distribution string) bool {
+	switch platform {
+	case "ios":
+		return true
+	case "macos":
+		return distribution != session.ClientDistributionMacDirect
+	}
+	return false
+}
+
+// OfferEmailWithheld is Facts.NoOfferEmail: the offer steps may not go when
+// the network's country gets no offers by email (offerByCountry false), or when
+// the App Store bills the network's app (AppStorePlatform) and the network is
+// not on path A: it could not redeem the emailed offer while no App Store code
+// reaches it (REVIEW.md finding 2), until offer.apple_email_enabled
+// (appleEmailEnabled) says the codes flow. The direct-download Mac bills
+// through Stripe and gets the path B offers as the web does (P6).
+func OfferEmailWithheld(offerByCountry bool, platform string, distribution string, path string, appleEmailEnabled bool) bool {
+	return !offerByCountry || (AppStorePlatform(platform, distribution) && path != PathA && !appleEmailEnabled)
 }

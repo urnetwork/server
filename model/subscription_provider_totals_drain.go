@@ -1,6 +1,11 @@
 // Queued provider totals drain in bulk, beside the per-task reader.
 //
-// Every closed contract with provider payouts queues one ApplyLegacyProviderTotals
+// Settlement stopped queueing provider totals on 2026-11-11 (BILLING-SPLIT.md);
+// the drain and the per-task reader stay to consume the rows already queued and
+// those older binaries queue during a rollout. The rest of this comment
+// describes the queue as it was produced.
+//
+// Every closed contract with provider payouts queued one ApplyLegacyProviderTotals
 // row (queueLegacyProviderTotalsInTx). The per-task reader applies them one claim
 // at a time, and each provider's rows apply one cohort at a time: its claim group
 // key admits one Run slot per provider, and a cohort holds at most 64 rows. A

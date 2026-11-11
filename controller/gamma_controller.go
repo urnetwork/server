@@ -77,7 +77,12 @@ const (
 
 // The plans and data items gamma sells. Monthly too: gamma can renew.
 var gammaKnownPlans = []string{model.SolanaPlanMonthly, model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
-var gammaKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
+
+// gammaKnownItems are the data packs pro.yml sells with Gamma, in its order:
+// data_1tib, data_10tib and the 256 GiB pack.
+func gammaKnownItems() []string {
+	return dataPackIdsOn(model.DataRailGamma)
+}
 
 // The biller writes its state every run; older than this, it is not running
 // and nothing is sold.
@@ -157,8 +162,8 @@ func gammaMaxSpend() int64 {
 			largest = max(largest, model.UsdToNanoCents(priceUsd))
 		}
 	}
-	for _, item := range gammaKnownItems {
-		if priceUsd, ok := dataPackPriceUsd(item); ok {
+	for _, item := range gammaKnownItems() {
+		if priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma); ok {
 			largest = max(largest, model.UsdToNanoCents(priceUsd))
 		}
 	}
@@ -303,8 +308,8 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 			IndicativeTao:    gammaIndicativeTao(units, gammaPerTao),
 		})
 	}
-	for _, item := range gammaKnownItems {
-		priceUsd, ok := dataPackPriceUsd(item)
+	for _, item := range gammaKnownItems() {
+		priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma)
 		if !ok {
 			continue
 		}
@@ -339,7 +344,7 @@ func gammaIndicativeTao(units int64, gammaPerTao uint64) string {
 type CreateGammaPaymentIntentArgs struct {
 	// monthly | yearly | yearly_onboarding
 	Plan string `json:"plan,omitempty"`
-	// data_1tib | data_10tib
+	// a pack pro.yml sells with Gamma: data_1tib | data_10tib | data_256gib
 	ItemId string `json:"item_id,omitempty"`
 	// account (default): the plan or data lands on the caller's network;
 	// code: a data pack as a balance code
@@ -392,6 +397,32 @@ func gammaIntentError(code string, message string) *GammaPaymentIntentResult {
 
 const gammaUnavailableMessage = "Paying with Gamma is temporarily unavailable."
 
+// A plan paid with Gamma never charges for days another Pro subscription
+// pays for (the owner, 2026-11-11): beside one that renews, a Gamma Pro
+// purchase and Gamma renewal are refused, as card checkout is refused beside a
+// renewing Gamma plan (stripeNewSubscriptionRefusal).
+const gammaOtherProRenewsPurchaseMessage = "You already have a Pro subscription that renews, so no Gamma payment was started: paying with Gamma as well would charge you twice for the same days. Cancel that subscription, then pay with Gamma once it has ended."
+const gammaOtherProRenewsSettingsMessage = "You have another Pro subscription that renews, so Gamma renewal was not turned on: both would charge you for the same days. Cancel that subscription, then turn Gamma renewal on once it has ended."
+
+// a plan intent the biller holds while another Pro subscription pays for the
+// days it would buy (gammaPlanCovered)
+const gammaPlanCoveredMessage = "Another Pro subscription pays for these days, so this Gamma payment is not charged while it runs. It is charged only if that subscription ends before this payment expires."
+
+// gammaOtherProRenews reports whether a Pro subscription of the network other
+// than a plan paid with gamma renews or still bills, by card checkout's own
+// rule (stripeNewSubscriptionRefusal) with gamma left out: a recorded window
+// of Stripe, the App Store or Google Play that covers now (a manual grant, an
+// x402 month or a one-time crypto year never renews), the subscription behind
+// its last Stripe window still billing, or a live subscription of its Stripe
+// customer.
+func gammaOtherProRenews(clientSession *session.ClientSession) bool {
+	markets := model.GetActiveSubscriptionRenewalMarkets(clientSession.Ctx, clientSession.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+	if subscriptionMarketsBlockNewPurchase(markets, false) {
+		return true
+	}
+	return stripeNetworkHasBillingSubscription(clientSession)
+}
+
 // CreateGammaPaymentIntent answers POST /pay/gamma/intent.
 func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession *session.ClientSession) (*GammaPaymentIntentResult, error) {
 	ctx := clientSession.Ctx
@@ -410,7 +441,10 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	if plan != "" && !slices.Contains(gammaKnownPlans, plan) {
 		return gammaIntentError(PurchaseErrorCodePlanUnavailable, "That plan is not available with Gamma."), nil
 	}
-	if itemId != "" && !slices.Contains(gammaKnownItems, itemId) {
+	if itemId != "" && !slices.Contains(gammaKnownItems(), itemId) {
+		if refusal := dataPackRefusal(itemId, model.DataRailGamma); refusal != "" {
+			return gammaIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+		}
 		return gammaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available with Gamma."), nil
 	}
 	delivery := strings.TrimSpace(args.Delivery)
@@ -448,6 +482,12 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	if !allowNetworkIntent(networkId) {
 		return gammaIntentError(PurchaseErrorCodeRateLimited, "Too many payment attempts. Try again in a minute."), nil
 	}
+	if plan != "" && gammaOtherProRenews(clientSession) {
+		// Pro paid elsewhere renews: a Gamma plan beside it would charge the
+		// customer twice for the same days (an open one is not handed out
+		// again either)
+		return gammaIntentError(PurchaseErrorCodeAlreadySubscribed, gammaOtherProRenewsPurchaseMessage), nil
+	}
 
 	var priceUsd, regularUsd float64
 	tierName := ""
@@ -465,7 +505,7 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		tierName = tier.Tier.Name
 	} else {
 		var ok bool
-		priceUsd, ok = dataPackPriceUsd(itemId)
+		priceUsd, ok = dataPackPriceUsd(itemId, model.DataRailGamma)
 		if !ok {
 			return gammaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
 		}
@@ -779,6 +819,16 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeQuoteExpired, Message: "The payment expired before the deposit could pay it."}
 		return result
 	}
+	if gammaPlanCovered(ctx, intent, now) {
+		// the biller does not charge it while another Pro subscription pays
+		// for the same days (gamma_auto.go)
+		result.Status = gammaStatusSeen
+		if balance < 0 {
+			result.Status = gammaStatusPending
+		}
+		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: gammaPlanCoveredMessage}
+		return result
+	}
 	if charge != nil && (charge.State == model.GammaChargeSkipped || charge.State == model.GammaChargeFailed) {
 		result.Status = gammaStatusSeen
 		if balance < 0 {
@@ -857,8 +907,8 @@ func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSess
 	settings := &model.GammaAccountSettings{AutoRenew: args.AutoRenew, AutoTopup: args.AutoTopup}
 	if args.TopupItemId != nil {
 		item := strings.TrimSpace(*args.TopupItemId)
-		if !slices.Contains(gammaTopupItems, item) {
-			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeItemUnavailable, Message: "The top-up item is data_1tib or data_10tib."}}, nil
+		if !slices.Contains(gammaTopupItems(), item) {
+			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeItemUnavailable, Message: gammaTopupItemMessage()}}, nil
 		}
 		settings.TopupItem = &item
 	}
@@ -868,6 +918,13 @@ func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSess
 			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeInvalidRequest, Message: "The monthly limit is a decimal amount of gamma, or \"0\" for none."}}, nil
 		}
 		settings.MonthlyLimit = &units
+	}
+	if args.AutoRenew != nil && *args.AutoRenew && gammaOtherProRenews(clientSession) {
+		// a Gamma plan renewing beside Pro paid elsewhere would charge the
+		// customer twice for the same days; nothing in the request is applied
+		result := gammaSettingsResult(clientSession)
+		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: gammaOtherProRenewsSettingsMessage}
+		return result, nil
 	}
 	model.SetGammaAccountSettings(clientSession.Ctx, clientSession.ByJwt.NetworkId, settings, gammaNow())
 	return gammaSettingsResult(clientSession), nil

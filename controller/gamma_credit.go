@@ -47,7 +47,8 @@ func gammaCreditIntent(clientSession *session.ClientSession, intent *model.Gamma
 	duration := model.Pro().DataCodeDuration
 	if !plan {
 		var ok bool
-		byteCount, ok = stripeDataPackByteCount(intent.Item)
+		// what the charged pack grants, whatever its rails say now
+		byteCount, ok = dataPackByteCount(intent.Item)
 		if !ok || byteCount <= 0 {
 			return false, fmt.Errorf("intent %s names an unknown data pack", intent.IntentId)
 		}
@@ -100,6 +101,12 @@ func gammaCreditIntentInTx(
 		if intent.TermStartTime != nil && intent.TermStartTime.Before(now.Add(gammaRenewLead)) {
 			// a renewal continues the paid term
 			start = *intent.TermStartTime
+			// where Pro paid elsewhere ran past it (and has ended: the biller
+			// charges nothing while it runs), the new term starts after it,
+			// so no day is paid for twice
+			if coverEnd := model.GetGammaProCoverEndInTx(tx, ctx, networkId, start, &start); coverEnd.After(start) && !coverEnd.After(now) {
+				start = coverEnd
+			}
 		}
 		endTime := start.Add(solanaPlanDuration(intent.Item) + manualPaymentGracePeriod)
 		server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, &model.SubscriptionRenewal{
