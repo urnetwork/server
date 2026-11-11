@@ -1,0 +1,36 @@
+{
+  "kinds": [
+    {"x402Version": 2, "scheme": "exact", "network": "eip155:8453"},
+    {"x402Version": 2, "scheme": "exact", "network": "eip155:84532"},
+    {"x402Version": 2, "scheme": "exact", "network": "eip155:137"},
+    {"x402Version": 2, "scheme": "exact", "network": "eip155:42161"},
+    {"x402Version": 2, "scheme": "exact", "network": "eip155:480"},
+    {"x402Version": 2, "scheme": "exact", "network": "eip155:143"},
+    {"x402Version": 2, "scheme": "exact", "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "extra": {"feePayer": "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP", "transactionVersions": [0]}},
+    {"x402Version": 2, "scheme": "exact", "network": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1", "extra": {"feePayer": "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP", "transactionVersions": [0]}},
+    {"x402Version": 2, "scheme": "upto", "network": "eip155:8453", "extra": {"facilitatorAddress": "0x8F5cB67B49555E614892b7233CFdDEBFB746E531"}},
+    {"x402Version": 2, "scheme": "upto", "network": "eip155:84532", "extra": {"facilitatorAddress": "0x8F5cB67B49555E614892b7233CFdDEBFB746E531"}},
+    {"x402Version": 2, "scheme": "batch-settlement", "network": "eip155:8453", "extra": {"receiverAuthorizer": "0x4A8F3c2e1D9b7F6a0E5c8b3d2a1f9e7C6D4B2A0f", "delegatedRefund": true}},
+    {"x402Version": 1, "scheme": "exact", "network": "base"},
+    {"x402Version": 1, "scheme": "exact", "network": "base-sepolia"},
+    {"x402Version": 1, "scheme": "exact", "network": "solana", "extra": {"feePayer": "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP", "transactionVersions": [0]}},
+    {"x402Version": 1, "scheme": "exact", "network": "solana-devnet", "extra": {"feePayer": "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP", "transactionVersions": [0]}}
+  ],
+  "extensions": ["bazaar", "builder-code", "eip2612GasSponsoring"],
+  "signers": {
+    "eip155:*": [
+      "0x8F5cB67B49555E614892b7233CFdDEBFB746E531",
+      "0x67B9CE703d9ce658d7C4ac3c289cEa112fE662Af",
+      "0x68A96F41ff1e9F2E7b591A931A4AD224e7C07863",
+      "0x97AcCe27D5069544480BDe0F04D9F47d7422a016",
+      "0xa32cCda98ba7529705a059Bd2d213Da8de10d101"
+    ],
+    "solana:*": [
+      "BENrLoUbndxoNMUS5JXApGMtNykLjFXXixMtpDwDR9SP",
+      "BFK9TLC3edb13K6v4YyH3DwPb5DSUpkWvb7XnqCL9b4F",
+      "D6ZhtNQ5nT9ZnTHUbqXZsTx5MH2rPFiBBggX4hY1WePM",
+      "GVJJ7rdGiXr5xaYbRwRbjfaJL7fmwRygFi1H6aGqDveb",
+      "Hc3sdEAsCGQcpgfivywog9uwtk8gUBUZgsxdME1EJy88"
+    ]
+  }
+}

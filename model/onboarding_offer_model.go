@@ -48,6 +48,11 @@ const (
 	OnboardingStoreSolana = "solana"
 	OnboardingStoreZcash  = "zcash"
 	OnboardingStoreMonero = "monero"
+	// the coins received into our Coinbase account (mmm/BTCPAY.md §17), named
+	// like their subscription markets; native SOL redeems on solana
+	OnboardingStoreBittensor = "bittensor"
+	OnboardingStoreBitcoin   = "bitcoin"
+	OnboardingStoreEthereum  = "ethereum"
 )
 
 type OnboardingOffer struct {

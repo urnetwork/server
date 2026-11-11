@@ -478,6 +478,17 @@ func StripeWebhook(
 
 		return stripeHandleSubscriptionDeleted(stripeWebhook.Data.Object, clientSession)
 
+	} else if stripeWebhook.Type == "customer.subscription.trial_will_end" && stripeWebhook.Data != nil {
+
+		/**
+		 * Stripe posts this three days before a trial's first charge: the
+		 * trial-ending reminder for Stripe trials (service_reminders_controller.go)
+		 */
+
+		glog.Infof("type: customer.subscription.trial_will_end")
+
+		return stripeHandleSubscriptionTrialWillEnd(stripeWebhook.Data.Object, clientSession)
+
 	}
 	// else IGNORE the event and answer 200. This is load-bearing: the endpoint
 	// subscribes to the full event catalog, and a non-2xx on an unhandled type

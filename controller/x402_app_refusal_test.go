@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/urnetwork/connect"
@@ -186,8 +187,9 @@ func TestWriteX402UpgradeRequiredAnswersCallersThatDidNotAskWithTheJsonRefusal(t
 }
 
 // An agent that asks is quoted the terms for a Pro month, with the refusal's
-// message as the terms' error. A refusal no upgrade lifts is quoted to no one,
-// and neither is a refusal while x402 is off.
+// message as the start of the terms' error (followed by the price, see
+// TestX402TermsSayHowToAllowThePrice). A refusal no upgrade lifts is quoted to
+// no one, and neither is a refusal while x402 is off.
 func TestWriteX402UpgradeRequiredQuotesAnAgentThatAsks(t *testing.T) {
 	t.Setenv("WARP_DOMAIN", "x402.example")
 	x402ErrorTextConfig(t, "https://facilitator.x402.example")
@@ -203,8 +205,8 @@ func TestWriteX402UpgradeRequiredQuotesAnAgentThatAsks(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &paymentRequired); err != nil {
 		t.Fatalf("the agent's 402 body is not payment terms: %v", err)
 	}
-	connect.AssertEqual(t, paymentRequired.X402Version, X402Version)
-	connect.AssertEqual(t, paymentRequired.Error, refusal.Error.Message)
+	connect.AssertEqual(t, paymentRequired.X402Version, X402VersionV1)
+	connect.AssertEqual(t, strings.HasPrefix(paymentRequired.Error, refusal.Error.Message), true)
 	connect.AssertEqual(t, len(paymentRequired.Accepts), 1)
 
 	noUpgrade := &model.AuthNetworkClientResult{

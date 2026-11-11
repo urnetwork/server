@@ -86,19 +86,19 @@ func TestSubscriptionMetricsCollectorPublishesCompleteBoundedSnapshot(t *testing
 		t.Fatalf("snapshot timestamp = %v, want %d", got, refreshedAt.Unix())
 	}
 
-	// six tracked stores (apple, google, stripe, solana, monero, zcash) plus
-	// the deduplicated series
-	if got := len(metricFamilies["urnetwork_subscription_active_accounts"].Metric); got != 7 {
-		t.Errorf("active series = %d, want 7 bounded stores", got)
+	// nine tracked stores (apple, google, stripe, solana, monero, zcash,
+	// bittensor, bitcoin, ethereum) plus the deduplicated series
+	if got := len(metricFamilies["urnetwork_subscription_active_accounts"].Metric); got != 10 {
+		t.Errorf("active series = %d, want 10 bounded stores", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_engaged_accounts"].Metric); got != 21 {
-		t.Errorf("engagement series = %d, want 7 stores x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_engaged_accounts"].Metric); got != 30 {
+		t.Errorf("engagement series = %d, want 10 stores x 3 windows", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_new_paid_accounts"].Metric); got != 21 {
-		t.Errorf("new-paid series = %d, want 7 stores x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_new_paid_accounts"].Metric); got != 30 {
+		t.Errorf("new-paid series = %d, want 10 stores x 3 windows", got)
 	}
-	if got := len(metricFamilies["urnetwork_subscription_reconciliation_events"].Metric); got != 108 {
-		t.Errorf("reconciliation series = %d, want 6 stores x 6 actions x 3 windows", got)
+	if got := len(metricFamilies["urnetwork_subscription_reconciliation_events"].Metric); got != 162 {
+		t.Errorf("reconciliation series = %d, want 9 stores x 6 actions x 3 windows", got)
 	}
 	if got := len(metricFamilies["urnetwork_subscription_data_pack_fulfillments"].Metric); got != 12 {
 		t.Errorf("data-pack series = %d, want 3 sources x 4 windows", got)
@@ -227,11 +227,13 @@ func requireSubscriptionMetricsGeneration(
 	refreshedAt time.Time,
 ) {
 	t.Helper()
-	// six tracked stores (apple, google, stripe, solana, monero, zcash): monero
-	// and zcash added 58 samples to the 152 of four stores, and the active
-	// trials 21 (seven stores by three plans)
-	if len(metrics) != 231 {
-		t.Fatalf("collected metrics = %d, want 231 bounded samples", len(metrics))
+	// nine tracked stores (apple, google, stripe, solana, monero, zcash,
+	// bittensor, bitcoin, ethereum): monero and zcash added 58 samples to the
+	// 152 of four stores, and the active trials 21 (seven stores by three
+	// plans); bittensor, bitcoin and ethereum add 29 samples and 3 trial
+	// series each (96)
+	if len(metrics) != 327 {
+		t.Fatalf("collected metrics = %d, want 327 bounded samples", len(metrics))
 	}
 	for _, metric := range metrics {
 		var dtoMetric dto.Metric

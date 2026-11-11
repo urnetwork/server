@@ -106,10 +106,11 @@ Usage:
     bringyourctl payments stripe-dunning [--send]
     bringyourctl crypto list [--asset=<asset>] [--state=<state>] [--limit=<n>]
     bringyourctl crypto show --intent=<intent_id>
-    bringyourctl crypto credit --intent=<intent_id>
+    bringyourctl crypto credit --intent=<intent_id> [--sanctions-cleared]
     bringyourctl crypto credit-usdc --intent=<intent_id> --tx=<signature> [(--commit --expect=<digest>)]
     bringyourctl crypto void --intent=<intent_id>
     bringyourctl crypto refund --intent=<intent_id> --address=<payout_address>
+    bringyourctl crypto alchemy-webhook [--signing-key-file=<path>]
     bringyourctl payout single --account_payment_id=<account_payment_id>
     bringyourctl payout pending
     bringyourctl payouts list-pending [--plan_id=<plan_id>]
@@ -268,10 +269,12 @@ Options:
     --destination_address=<destination_address>  Destination address.
     --blockchain=<blockchain>  Blockchain.
     --max_duration=<max_duration>  Bound a payout plan to the first <max_duration> of contract close time after the most recent subsidy epoch, draining a backlog forward one slice per run, e.g. 14d, 1.5d, 336h.
-    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero or zcash.
+    --store=<store>  Limit payment reconciliation to one store: stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin or ethereum.
     --asset=<asset>  A crypto payment asset: usdc_solana, zec or xmr.
     --state=<state>  A crypto invoice status: pending, seen, confirming, paid, expired or review.
     --intent=<intent_id>  A crypto invoice id.
+    --sanctions-cleared  With crypto credit, credit an invoice whose payment the sanctions screen held as a match (sanctions_hold): only once the owner and counsel cleared it.
+    --signing-key-file=<path>  With crypto alchemy-webhook, the file the webhook's signing key is written to (mode 0600) when Alchemy returns it; it is never printed.
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
     --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
@@ -2342,11 +2345,14 @@ func paymentsReconcile(opts docopt.Opts) {
 		model.SubscriptionMarketX402,
 		model.SubscriptionMarketMonero,
 		model.SubscriptionMarketZcash,
+		model.SubscriptionMarketBittensor,
+		model.SubscriptionMarketBitcoin,
+		model.SubscriptionMarketEthereum,
 	}
 	stores := allStores
 	if store, _ := opts.String("--store"); store != "" {
 		if !slices.Contains(allStores, store) {
-			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, or zcash)\n", store)
+			fmt.Printf("unknown store %q (expected stripe, apple, google, solana, x402, monero, zcash, bittensor, bitcoin, or ethereum)\n", store)
 			os.Exit(1)
 		}
 		options.Stores = []string{store}

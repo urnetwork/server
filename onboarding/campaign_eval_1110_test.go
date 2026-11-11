@@ -235,8 +235,10 @@ func TestE2ProvidersLineEmptyWhileTheCountIsUnknown(t *testing.T) {
 // whenever the in-app offer was active. An offer issued days after sign-up
 // (the offer screen seen late) still had days left at E3a: on Main 10 of 403
 // E3a sends in 60 days had more than 36 hours left. E3a goes only when the
-// offer ends within 36 hours of the send; otherwise the step is skipped (not
-// moved: the schedule is the owner's call).
+// offer ends within 36 hours of the send. Otherwise it waits for the offer's
+// last day when one lies ahead (mmm/ONBOARDING-RETENTION.md P7, approved
+// 2026-11-10: TestE3aWaitsForALateOffersLastDay), and is skipped when none
+// does, as here.
 func TestE3aOnlyWhenTheOfferEndsWithin36Hours(t *testing.T) {
 	now := time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC)
 	for _, c := range []struct {

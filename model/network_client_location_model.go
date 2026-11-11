@@ -5587,7 +5587,8 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 	        	--
 	        	-- Restricting this to Public would remove Network-only
 	        	-- providers from their own network's discovery, which works
-	        	-- today via CreateContractNoEscrow. Stream is still excluded:
+	        	-- today: such a contract escrows from that network's balance.
+	        	-- Stream is still excluded:
 	        	-- resolveNonCompanionProvideMode can resolve a Stream-only
 	        	-- destination as a companion, but that dead-ends at
 	        	-- CreateCompanionTransferEscrow, which needs a pre-existing
@@ -6753,7 +6754,7 @@ func FindProviders2(
 			// UpdateClientScores puts both Public and Network-only providers in the
 			// pool. A Network-only provider can only settle a contract with a
 			// source in its own network (GetProvideRelationship ->
-			// ProvideModeNetwork -> CreateContractNoEscrow); it is real, usable
+			// ProvideModeNetwork -> escrow from that network's balance); it is real, usable
 			// supply for those users and has always been discoverable to them, so
 			// it stays. For anyone else CreateContract would reject with
 			// NoPermission, so it goes.

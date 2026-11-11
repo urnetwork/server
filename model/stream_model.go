@@ -402,8 +402,8 @@ func AddCompanionContractToStream(
 // AddContractToPairStream marks a contract with the pair's active stream and
 // joins it to the stream's membership, resolving candidates through the pair
 // marker. This is the resolution for reply contracts that carry no origin
-// linkage — a same-network companion reply normalized to a network no-escrow
-// contract still has to carry the origin flow's stream id, or the receive
+// linkage — a same-network companion reply normalized to a network contract
+// still has to carry the origin flow's stream id, or the receive
 // sequence on the other side cannot see that the stream is active when it
 // inspects the contract.
 func AddContractToPairStream(

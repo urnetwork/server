@@ -51,6 +51,10 @@ type ParamsInput struct {
 	// the App Store or Google Play bills the network: the offer emails carry
 	// no price (the store charges its own local price; REVIEW.md finding 7)
 	StoreBilled bool
+	// the network signed up in a browser (platform web): E2's desktop email
+	// (VariantDesktop) asks to pin the extension, not to start the app with
+	// the computer
+	Browser bool
 
 	// the network's zone for the local date/time strings
 	Location *time.Location
@@ -267,20 +271,28 @@ func BuildParams(in ParamsInput) map[string]string {
 		// the live counts, or "" while they are unknown (the count query has
 		// not succeeded yet): the template drops the line on an empty
 		// providers_online rather than say "0 providers are online". The
-		// activated line quotes both counts, so it needs both.
+		// activated and desktop line quotes both counts, so it needs both.
+		connected := in.Variant == VariantActivated || in.Variant == VariantDesktop
 		providers, countries := in.ProvidersOnline, in.CountriesOnline
-		if providers <= 0 || (in.Variant == VariantActivated && countries <= 0) {
+		if providers <= 0 || (connected && countries <= 0) {
 			providers, countries = 0, 0
 		}
 		p["providers_online"] = formatKnownCount(providers, in.Locale)
-		if in.Variant == VariantActivated {
+		if connected {
 			if daysActive < 2 {
 				daysActive = 2
 			}
 			p["connect_days"] = FormatCount(connectDaysOfFirst(in.ConnectDays, daysActive), in.Locale)
 			p["days_active"] = FormatCount(daysActive, in.Locale)
-			p["platform"] = in.Platform
 			p["countries_online"] = formatKnownCount(countries, in.Locale)
+		}
+		switch in.Variant {
+		case VariantActivated:
+			p["platform"] = in.Platform
+		case VariantDesktop:
+			// the browser's branch (pin the extension) or the app's (start it
+			// with the computer)
+			p["browser"] = flagParam(in.Browser)
 		}
 	case TemplateE3LastChance:
 		p["opening"] = in.Opening
@@ -334,6 +346,12 @@ func connectDaysOfFirst(connectDays int, daysActive int) int {
 
 // storeBilledFlag is the templates' `{% if params.store_billed %}` value.
 func storeBilledFlag(on bool) string {
+	return flagParam(on)
+}
+
+// flagParam is a flag the templates test with `{% if params.<name> %}`: "1"
+// or "".
+func flagParam(on bool) string {
 	if on {
 		return "1"
 	}
