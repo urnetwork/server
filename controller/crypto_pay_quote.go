@@ -51,15 +51,19 @@ type CryptoPaymentQuoteResult struct {
 	// the amount an invoice made now asks: price × (1 + the coin's buffer) ÷
 	// rate, rounded up to quote_decimals. USDC's invoice adds a unique
 	// sub-cent suffix to the price
-	Amount                string     `json:"amount"`
-	AmountAtomic          string     `json:"amount_atomic"`
-	Network               string     `json:"network"`
-	Decimals              int        `json:"decimals"`
-	QuoteDecimals         int        `json:"quote_decimals"`
-	PaymentLink           bool       `json:"payment_link"`
-	QuoteTtlSeconds       int        `json:"quote_ttl_seconds"`
-	ConfirmationsRequired int        `json:"confirmations_required"`
-	QuotedAt              *time.Time `json:"quoted_at"`
+	Amount        string `json:"amount"`
+	AmountAtomic  string `json:"amount_atomic"`
+	Network       string `json:"network"`
+	Decimals      int    `json:"decimals"`
+	QuoteDecimals int    `json:"quote_decimals"`
+	PaymentLink   bool   `json:"payment_link"`
+	// the window to send the payment in
+	QuoteTtlSeconds int `json:"quote_ttl_seconds"`
+	// as CryptoPaymentAsset.confirmation_grace_seconds (btc 10800, left out
+	// for every other coin)
+	ConfirmationGraceSeconds int        `json:"confirmation_grace_seconds,omitempty"`
+	ConfirmationsRequired    int        `json:"confirmations_required"`
+	QuotedAt                 *time.Time `json:"quoted_at"`
 	// a refusal (the same codes as POST /pay/crypto/intent); left out on success
 	Error *CryptoPaymentError `json:"error,omitempty"`
 }
@@ -100,15 +104,16 @@ func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.Cli
 	}
 
 	result := &CryptoPaymentQuoteResult{
-		Asset:                 asset,
-		Plan:                  plan,
-		ItemId:                itemId,
-		Network:               cryptoAssetNetwork(asset),
-		Decimals:              cryptoAssetDecimals(asset),
-		QuoteDecimals:         cryptoAssetQuoteDecimals(asset),
-		PaymentLink:           cryptoAssetPaymentLink(asset),
-		QuoteTtlSeconds:       int(cryptoAssetQuoteTtl(config, asset) / time.Second),
-		ConfirmationsRequired: cryptoConfirmationsRequired(config, asset),
+		Asset:                    asset,
+		Plan:                     plan,
+		ItemId:                   itemId,
+		Network:                  cryptoAssetNetwork(asset),
+		Decimals:                 cryptoAssetDecimals(asset),
+		QuoteDecimals:            cryptoAssetQuoteDecimals(asset),
+		PaymentLink:              cryptoAssetPaymentLink(asset),
+		QuoteTtlSeconds:          int(cryptoAssetQuoteTtl(config, asset) / time.Second),
+		ConfirmationGraceSeconds: int(cryptoAssetConfirmationGrace(asset) / time.Second),
+		ConfirmationsRequired:    cryptoConfirmationsRequired(config, asset),
 	}
 	if plan != "" {
 		offerApplied := false

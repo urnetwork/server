@@ -42,9 +42,12 @@ package controller
 // reading every new mempool transaction (getrawmempool, then each new txid)
 // would cost about 240 million compute units a month, eight times the free
 // tier's 30 million. An invoice goes from pending to confirming, or paid, when
-// its payment is mined: credited at 1 confirmation, final at 6. A payment
-// sent before its quote expired but mined after it is valued as late, at its
-// block's time.
+// its payment is mined: credited at 1 confirmation, final at 6. A payment is
+// first seen at its block's time, so one sent before its quote expired is
+// often mined after it: it counts as sent within the quote, at the quoted
+// price, while its block is within cryptoBitcoinConfirmationGrace (3 hours)
+// of the expiry, and only one mined later is valued as late, at its block's
+// time (mmm/BTCPAY.md §16.8).
 
 import (
 	"context"
@@ -87,6 +90,50 @@ const cryptoBitcoinClockTolerance = 3 * time.Hour
 // Bitcoin Core's RPC_INVALID_ADDRESS_OR_KEY: getrawtransaction's "No such
 // mempool or blockchain transaction".
 const cryptoBitcoinRpcNotFound = -5
+
+// cryptoBitcoinConfirmationGrace is how long past its quote's expiry a Bitcoin
+// payment may be mined and still count as sent within the quote: credited at
+// the quoted price, with the invoice open (pending, or seen while short) until
+// then (cryptoAssetConfirmationGrace, mmm/BTCPAY.md §16.8). The scan sees a
+// payment only once it is mined, never in the mempool, so it cannot tell when
+// it was sent; a payment of the quoted amount whose block is at most this long
+// past expires_at is taken as sent in time. The quote's window to send is the
+// rail's quote expiry (30 minutes), unchanged: expires_at stays the time to
+// send by.
+//
+// The grace is the time a payment sent at the very last second of the window
+// needs to be mined. With blocks a Poisson process of mean μ, a payment whose
+// fee gets it into the k-th block after it is broadcast misses a grace g with
+// probability P(Poisson(g/μ) ≤ k-1). At 3 hours:
+//
+//	mined within     μ = 10 min   12.5 min   15 min   20 min
+//	the next block   1.5e-8       5.6e-7     6.1e-6   1.2e-4
+//	2 blocks         2.9e-7       8.6e-6     8.0e-5   1.2e-3
+//	3 blocks         2.8e-6       6.6e-5     5.2e-4   6.2e-3
+//	6 blocks         3.2e-4       4.2e-3     2.0e-2   1.2e-1
+//
+// so under 1e-4 of the payments sent at the end of the window miss it when
+// their fee confirms them within 3 blocks while blocks run a fifth slow
+// (hashrate 20% short of its difficulty, as in a curtailment: 6.6e-5), within
+// 2 blocks while blocks run a third slow (8.0e-5), or in the next block while
+// they run at half speed (1.2e-4). Two hours would miss 3-block inclusion at
+// 10-minute blocks 5.2e-4 of the time (1-block 6.1e-6); 3.5 hours would also
+// cover 3 blocks a third slow (9.4e-5). A payment sent earlier in the window
+// has the rest of the window on top: sent at a uniform time in it, 3-block
+// inclusion at 12.5-minute blocks misses 2.8e-5. The margin also absorbs a
+// few minutes of block-time skew and of the scan (the first-seen time is the
+// block's, never after the scan that read it): with 5 minutes of it gone, the
+// design point still misses 9.4e-5.
+//
+// The price the quote holds is exposed for 3.5 hours instead of 30 minutes.
+// At 50% a year Bitcoin's price moves about 1.0% (one standard deviation) in
+// 3.5 hours: an honest payer pays at a random point of that, which costs
+// nothing on average, and a payer who waits for a fall before sending gains an
+// option worth about 0.4% of the price, under the 0.5% buffer every quote
+// carries; the $100 invoice cap bounds even a 10% crash at $10 an invoice.
+// The buffer and the 99.5% underpaid tolerance (judged in BTC, so the grace
+// does not move it) stay as they are.
+const cryptoBitcoinConfirmationGrace = 3 * time.Hour
 
 type bitcoinWallet struct {
 	*cryptoCoinbaseAddresses
