@@ -140,19 +140,8 @@ end
 -- Drops what an expired lease left, and the lease.
 local function trim(group, ix, now)
   local expired = redis.call("ZRANGEBYSCORE", ix, "-inf", now)
-  local fields = {}
   for _, member in ipairs(expired) do
-    fields[#fields + 1] = "m:" .. member
-    fields[#fields + 1] = "r:" .. member
-    fields[#fields + 1] = "i:" .. member
-    fields[#fields + 1] = "e:" .. member
-    if 400 <= #fields then
-      redis.call("HDEL", group, unpack(fields))
-      fields = {}
-    end
-  end
-  if 0 < #fields then
-    redis.call("HDEL", group, unpack(fields))
+    redis.call("HDEL", group, "m:" .. member, "r:" .. member, "i:" .. member, "e:" .. member)
   end
   if 0 < #expired then
     redis.call("ZREMRANGEBYSCORE", ix, "-inf", now)
@@ -744,17 +733,8 @@ if ARGV[4] ~= "" then
 end
 redis.call("ZREMRANGEBYLEX", key, "[\1" .. ARGV[3], max)
 redis.call("ZREMRANGEBYLEX", key, "-", "(\1")
-local members = {}
 for index = 6, #ARGV do
-  members[#members + 1] = 0
-  members[#members + 1] = "\1" .. ARGV[index]
-  if 400 <= #members then
-    redis.call("ZADD", key, unpack(members))
-    members = {}
-  end
-end
-if 0 < #members then
-  redis.call("ZADD", key, unpack(members))
+  redis.call("ZADD", key, 0, "\1" .. ARGV[index])
 end
 redis.call("ZADD", key, 0, "\0" .. ARGV[1] .. ARGV[2])
 redis.call("PEXPIRE", key, ARGV[5])
@@ -782,16 +762,8 @@ end
 // KEYS: {sc_<client_id>}set. ARGV: the name keys to forget, none at all for a client whose every lease was
 // kept. Returns {edge}, as socketStoreSetEdgeLua answers it once they are gone.
 const socketStoreSetForgetLua = socketStoreLuaPrelude + socketStoreSetEdgeLua + `
-local members = {}
 for index = 1, #ARGV do
-  members[#members + 1] = "\1" .. ARGV[index]
-  if 400 <= #members then
-    redis.call("ZREM", key, unpack(members))
-    members = {}
-  end
-end
-if 0 < #members then
-  redis.call("ZREM", key, unpack(members))
+  redis.call("ZREM", key, "\1" .. ARGV[index])
 end
 return {edge()}
 `
@@ -875,7 +847,6 @@ local key = KEYS[1]
 local ttl_max = tonumber(ARGV[1])
 local now = tonumber(ARGV[2])
 local values = redis.call("HGETALL", key)
-local ended = {}
 for index = 1, #values, 2 do
   local field = values[index]
   if field ~= "~f" then
@@ -885,18 +856,11 @@ for index = 1, #values, 2 do
       ttl = math.min(ttl_max, grant - now)
     end
     if ttl <= 0 then
-      ended[#ended + 1] = field
-      if 400 <= #ended then
-        redis.call("HDEL", key, unpack(ended))
-        ended = {}
-      end
+      redis.call("HDEL", key, field)
     else
       redis.call("HPEXPIRE", key, ttl, "FIELDS", 1, field)
     end
   end
-end
-if 0 < #ended then
-  redis.call("HDEL", key, unpack(ended))
 end
 return 1
 `
