@@ -64,10 +64,10 @@ Tests:
 - `TestBillingSplitReadersAfterSettlement` (`model/billing_split_readers_test.go`)
   settles one real multi-hop contract and pins every remaining reader: the
   sweeps and their `provider_payouts`, `GetTransferStats` (Unpaid Data),
-  `queryProviderPayoutStats`, `readOperatorBlockTraffic` (operator block points
-  are a pure function of it, `planOperatorBlockPoints`), the payout planner's
-  selection, and `GetStEpochProviderUsage`. It passes unchanged on the code
-  before this change.
+  `queryProviderPayoutStats`, `readOperatorBlockTraffic` and the points
+  `planOperatorBlockPoints` awards from it, the payout planner's selection, and
+  `GetStEpochProviderUsage`. It passes unchanged on the code before this
+  change.
 - `TestBillingSplitSettlementWritesNoProviderTotals` pins the removal: no
   provider totals row, no provided totals in PostgreSQL or Redis, and sweeps
   with `provider_payouts` and no `destination_id`. It fails on the code before

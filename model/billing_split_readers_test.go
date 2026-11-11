@@ -82,8 +82,8 @@ func newBillingSplitReadersFixture(t testing.TB, ctx context.Context) *billingSp
 
 // What every remaining reader of the split returns for the fixture: the Unpaid
 // Data the apps show, the provider payout stats, the operator block points
-// traffic (planOperatorBlockPoints is a pure function of it), the payout
-// planner's selection and the SN pool's provider usage.
+// traffic and the points an award gives it, the payout planner's selection and
+// the SN pool's provider usage.
 func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 	testEnv := server.DefaultTestEnv()
 	testEnv.RerunCount = 0
@@ -166,6 +166,50 @@ func TestBillingSplitReadersAfterSettlement(t *testing.T) {
 			if pair == nil || pair.paidByteCount != want.bytes || pair.unpaidByteCount != 0 {
 				t.Fatalf("operator block pair %s -> %s = %+v, want %d paid", f.payerNetworkId, networkId, pair, want.bytes)
 			}
+		}
+
+		// the points an award over one fixed block gives that traffic, by the
+		// plan's rule (planOperatorBlockPoints): the minimum subsidy of the one
+		// paying network split over A and B by bytes, plus their net revenue,
+		// weighs the block's points. Reliability, seekers and referrals are off.
+		config := operatorBlockPointsTestConfig()
+		config.ReliabilityPointsPerPayout = 0
+		config.ReliabilitySubsidyPerPayoutUsd = 0
+		config.UsdPerActiveUser = 0
+		config.SubscriptionNetRevenueFraction = 0
+		awardStart := time.Date(2026, 11, 8, 0, 0, 0, 0, time.UTC)
+		awardEnd := awardStart.Add(SubnetBlockDuration)
+		award, err := planOperatorBlockPoints(&operatorBlockPointsInputs{
+			subsidyConfig:    config,
+			block:            1,
+			cutoff:           awardStart,
+			windowStart:      awardStart,
+			windowEnd:        awardEnd,
+			seekerHolders:    map[server.Id]bool{},
+			networkReferrals: map[server.Id][]server.Id{},
+		}, traffic, &operatorBlockReliability{networkWeights: map[server.Id]float64{}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		scale := min(float64(awardEnd.Sub(awardStart))/float64(config.Duration()), 1.0)
+		subsidyUsd := scale * config.MinPayoutUsd
+		trafficBytes := float64(f.egressBytes + f.hopBBytes)
+		payoutA := f.egressRevenue + UsdToNanoCents(float64(f.egressBytes)/trafficBytes*subsidyUsd)
+		payoutB := f.hopBRevenue + UsdToNanoCents(float64(f.hopBBytes)/trafficBytes*subsidyUsd)
+		totalPoints := float64(config.AccountPointsPerPayout) * scale
+		wantPoints := map[server.Id]NanoPoints{
+			f.networkA: PointsToNanoPoints(totalPoints * (float64(payoutA) / float64(payoutA+payoutB))),
+			f.networkB: PointsToNanoPoints(totalPoints * (float64(payoutB) / float64(payoutA+payoutB))),
+		}
+		gotPoints := map[server.Id]NanoPoints{}
+		for _, point := range award.Points {
+			if point.Event != string(AccountPointEventPayout) {
+				t.Fatalf("award has an unexpected %s point for %s", point.Event, point.NetworkId)
+			}
+			gotPoints[point.NetworkId] += point.PointValue
+		}
+		if award.TotalComputedPayout != payoutA+payoutB || !maps.Equal(gotPoints, wantPoints) {
+			t.Fatalf("operator block award computed %d nanocents and points %v, want %d and %v", award.TotalComputedPayout, gotPoints, payoutA+payoutB, wantPoints)
 		}
 
 		// the payout planner's selection (USDC payouts are off; the planner
