@@ -233,6 +233,10 @@ wedge/crash class that caused every CLUSTERDOWN today.
 - **`{account_balance_*}` payout accounting lives in redis with no TTL** on a
   cache-posture cluster (hourly RDB, no replicas yet): checkpoint-into-pg
   remains the standing FIXME — the only redis data whose loss is real money.
+  Update 2026-11-11: moot. Nothing in production reads these counters or
+  `account_balance.provided_*`, and settlement no longer writes either
+  (BILLING-SPLIT.md). The keys are frozen history; deleting them is an owner
+  decision after a backup.
 - **Matchmaking gate redesign (0.95-on-5min reliability gate)** — committed
   follow-up once production is stable (user 2026-07-15: "I want to fix this
   after we unbreak production").

@@ -26,7 +26,6 @@ import (
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/session"
-	"github.com/urnetwork/server/task"
 )
 
 type ByteCount = int64
@@ -1190,8 +1189,8 @@ func AddBasicTransferBalanceInTx(
 // tx commits, so the upgrade is visible immediately.
 //
 // It records no grant kind: it is for a Pro balance bought for its own window
-// (x402), which the next monthly grant must not supersede in the summary. The
-// monthly Pro grant uses AddGrantTransferBalanceInTx.
+// (x402's month, which carries its own data and is not a Pro grant cycle). The
+// cycle grants (GrantProCycleInTx) record kind pro.
 func AddProTransferBalanceInTx(
 	tx server.PgTx,
 	ctx context.Context,
@@ -3925,16 +3924,17 @@ func evenContractPayoutShare(total int64, participantIndex int, participantCount
 	return share
 }
 
+// The billing split: each funding balance's payout bytes and revenue, divided
+// evenly over the contract's participants into one sweep per balance and
+// provider network. The sweeps are its only output. Settlement stopped
+// projecting them into lifetime provider totals on 2026-11-11, since nothing
+// read those totals (BILLING-SPLIT.md).
 func allocateContractParticipantPayouts(
 	contractParticipants []ContractParticipant,
 	originNetworkId server.Id,
 	sweepPayouts map[server.Id]sweepPayout,
-) (
-	participantSweepPayouts map[participantSweepKey]*participantSweepPayout,
-	accountPayouts map[server.Id]*contractPayout,
-) {
-	participantSweepPayouts = map[participantSweepKey]*participantSweepPayout{}
-	accountPayouts = map[server.Id]*contractPayout{}
+) map[participantSweepKey]*participantSweepPayout {
+	participantSweepPayouts := map[participantSweepKey]*participantSweepPayout{}
 	balanceIds := make([]server.Id, 0, len(sweepPayouts))
 	for balanceId := range sweepPayouts {
 		balanceIds = append(balanceIds, balanceId)
@@ -3995,35 +3995,25 @@ func allocateContractParticipantPayouts(
 				balanceId: balanceId,
 				networkId: participant.NetworkId,
 			}
+			// Payout wallets are network-scoped and the sweep primary key is
+			// per network. If two hops belong to one eligible network, their
+			// shares combine in the network's sweep, and providerPayouts keeps
+			// each client's own share. Every sweep written here carries
+			// providerPayouts, so no reader needs the sweep's destination_id,
+			// which only rows from before provider_payouts use.
 			participantSweep := participantSweepPayouts[key]
 			if participantSweep == nil {
-				participantSweep = &participantSweepPayout{
-					destinationId: participant.ClientId,
-				}
+				participantSweep = &participantSweepPayout{}
 				participantSweepPayouts[key] = participantSweep
-			} else if participant.ClientId.Cmp(participantSweep.destinationId) < 0 {
-				// Payout wallets are network-scoped and the sweep primary key is
-				// per network. If two hops belong to one eligible network, combine
-				// their payment shares and keep only a legacy representative here.
-				// providerPayouts retains every client's actual subnet attribution.
-				participantSweep.destinationId = participant.ClientId
 			}
 			participantSweep.payoutByteCount += participantByteCount
 			participantSweep.payout += participantPayout
 			participantSweep.providerPayouts = append(participantSweep.providerPayouts, contractProviderPayout{
 				ClientId: participant.ClientId, PayoutByteCount: participantByteCount, PayoutNanoCents: participantPayout,
 			})
-
-			accountPayout := accountPayouts[participant.NetworkId]
-			if accountPayout == nil {
-				accountPayout = &contractPayout{}
-				accountPayouts[participant.NetworkId] = accountPayout
-			}
-			accountPayout.payoutByteCount += participantByteCount
-			accountPayout.payout += participantPayout
 		}
 	}
-	return
+	return participantSweepPayouts
 }
 
 // Keep both lookups parameterized: historical contract cardinality estimates
@@ -4092,9 +4082,9 @@ func settleEscrowForegroundWithExpiryScopeInTx(ctx context.Context, tx server.Pg
 // (unmarked) reservation, admitted before Redis admission became the only
 // path, settles in the caller's transaction through its original atomic
 // debit/outcome path. With inlineFinancial that transaction also commits its
-// exact earnings, escrow metadata and durable mirror and provider-total
-// owners, as the retired legacy settlement queue's worker did
-// (PARTITION-MAINTENANCE-PLAN.md, Part B).
+// exact earnings, escrow metadata and durable mirror owners, as the retired
+// legacy settlement queue's worker did (PARTITION-MAINTENANCE-PLAN.md, Part B).
+// Settlement writes no lifetime provider totals (BILLING-SPLIT.md).
 //
 // With wakeDebitFlush, a journaled debit's posts kick its partition's
 // backed-off flush chain.
@@ -4110,16 +4100,8 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 	var result pgx.Rows
 	var err error
 	if asyncDebit {
-		// Native close writes no shared grant. Its immutable provider owner
-		// still needs queue admission before publishing the outcome and debt.
-		admitted, ownershipErr := server.TryTxOwnership(ctx, tx,
-			[]server.PgOwnershipKey{task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId))})
-		if ownershipErr != nil {
-			return nil, false, ownershipErr
-		}
-		if !admitted {
-			return nil, false, errTransferBalanceOwnershipBusy
-		}
+		// Native close writes no shared grant and publishes no queued task, so
+		// it needs no ownership beyond the contract lock it holds.
 		result, err = tx.Query(ctx, `SELECT balance_id FROM transfer_escrow WHERE contract_id=$1 ORDER BY balance_id`, contractId)
 	} else {
 		admitted, ownershipErr := tryLegacyFinancialOwnershipInTx(ctx, tx, []server.Id{contractId})
@@ -4187,7 +4169,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		return
 	}
 
-	participantSweepPayouts, accountPayouts := allocateContractParticipantPayouts(
+	participantSweepPayouts := allocateContractParticipantPayouts(
 		contractParticipants,
 		originNetworkId,
 		sweepPayouts,
@@ -4265,7 +4247,7 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 				server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
 					for key, payout := range participantSweepPayouts {
 						batch.Queue(participantSweepInsertSQL, contractId, key.balanceId, key.networkId,
-							payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
+							payout.payoutByteCount, payout.payout, payout.providerPayouts)
 					}
 				})
 			}
@@ -4330,30 +4312,10 @@ func settleEscrowWithOptionsInTx(ctx context.Context, tx server.PgTx, contractId
 		})
 	}
 
-	if (inlineFinancial || asyncDebit) && len(accountPayouts) > 0 {
-		// Exact earnings remain in the sweep ledger. Their lifetime display
-		// totals have an independent per-contract durable owner, so a held
-		// provider row cannot retain this transaction. No Redis increment is
-		// added; account totals and the task's replay marker commit together.
-		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
-	} else if 0 < len(accountPayouts) {
-		posts = append(posts, func() any {
-			server.Redis(ctx, func(r server.RedisClient) {
-				// Participant networks occupy independent Redis hash slots. Keep
-				// each network's byte/revenue pair atomic in its own transaction.
-				for networkId, payout := range accountPayouts {
-					_, pipelineErr := r.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
-						pipe.IncrBy(ctx, accountBalanceNetPayoutByteCountKey(networkId), payout.payoutByteCount)
-						pipe.IncrBy(ctx, accountBalanceNetPayout(networkId), payout.payout)
-						return nil
-					})
-					server.Raise(pipelineErr)
-				}
-			})
-			return nil
-		})
-	}
-
+	// Exact earnings remain in the sweep ledger. Settlement no longer adds
+	// them to lifetime provider totals (account_balance.provided_* and the
+	// {account_balance_<id>} Redis counters): nothing read those totals, and
+	// each settled contract queued one task row to write them.
 	return
 }
 
@@ -4370,7 +4332,6 @@ type participantSweepKey struct {
 }
 
 type participantSweepPayout struct {
-	destinationId   server.Id
 	payoutByteCount ByteCount
 	payout          NanoCents
 	providerPayouts []contractProviderPayout
@@ -4382,11 +4343,6 @@ type contractProviderPayout struct {
 	ClientId        server.Id `json:"client_id"`
 	PayoutByteCount ByteCount `json:"payout_byte_count"`
 	PayoutNanoCents NanoCents `json:"payout_nano_cents"`
-}
-
-type contractPayout struct {
-	payoutByteCount ByteCount
-	payout          NanoCents
 }
 
 // `server.ComplexValue`
@@ -5578,7 +5534,11 @@ func GetContractClose(ctx context.Context, contractId server.Id) (contractClose 
 }
 
 // update 2026-01-30: the net payout byte count and net payout are now tracked in redis
-// FIXME this should be merged back into the database at regular checkpoint intervals
+// update 2026-11-11: settlement no longer writes these counters or
+// account_balance.provided_*. The provided totals are frozen history: only
+// the drain of task rows that older binaries queued still adds to the
+// PostgreSQL columns (subscription_provider_totals_drain.go). GetAccountBalance
+// has no production caller (BILLING-SPLIT.md).
 
 func accountBalanceNetPayoutByteCountKey(networkId server.Id) string {
 	return fmt.Sprintf("{account_balance_%s}npbc", networkId)
@@ -5821,6 +5781,11 @@ type SubscriptionRenewal struct {
 	PurchaseToken      string
 	SubscriptionMarket SubscriptionMarket // google or apple
 	TransactionId      string             // for tracking on Google Play or Apple App Store
+	// The end of the period the row's payment or trial covers, without the
+	// market's grace that EndTime carries. Set by every credit path; nil for a
+	// billing grace hold, which keeps Pro but pays for no period. The Pro
+	// grant cycles are cut from these periods (pro_grant_cycle_model.go).
+	PaidEndTime *time.Time
 }
 
 var ErrPaymentNetworkNotFound = errors.New("payment network does not exist")
@@ -5897,13 +5862,16 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		        net_revenue_nano_cents,
 		        purchase_token,
 						market,
-						transaction_id
+						transaction_id,
+						paid_end_time
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 			ON CONFLICT (network_id, subscription_type, end_time, start_time, market) DO UPDATE
 			SET
 				net_revenue_nano_cents = $5,
-				purchase_token = $6
+				purchase_token = $6,
+				-- a hold written over a credit's row keeps the credit's period
+				paid_end_time = COALESCE(EXCLUDED.paid_end_time, subscription_renewal.paid_end_time)
 		`,
 		renewal.NetworkId,
 		renewal.SubscriptionType,
@@ -5913,6 +5881,7 @@ func AddSubscriptionRenewalInTx(tx server.PgTx, ctx context.Context, renewal *Su
 		renewal.PurchaseToken,
 		renewal.SubscriptionMarket,
 		renewal.TransactionId,
+		renewal.PaidEndTime,
 	)
 	// a failed insert aborts the caller's transaction, so it raises rather
 	// than leave the credit path to commit a rollback
@@ -6074,123 +6043,9 @@ func IsProFresh(
 	return IsProNetworkFresh(ctx, *networkId)
 }
 
-// AddProTransferBalanceToAllNetworks grants the Pro data allowance to every network
-// with an active supporter subscription, for the window [startTime, endTime).
-//
-// The balance carries pro = true, so THIS GRANT is what makes a network Pro for the
-// period (see pro_model.go). It also carries the subscription's revenue pro-rated to
-// the grant window, which drives provider subsidy accounting: a yearly subscription
-// contributes roughly 1/12 of its revenue to each monthly grant.
-//
-// Eligibility comes from subscription_renewal, NOT from the pro column -- otherwise
-// the grant would renew its own entitlement forever and a lapsed subscription would
-// never drop to free.
-//
-// The Pro cache is refreshed for every granted network so the upgrade is visible
-// immediately instead of after ProCacheTtl.
-// A supplied task run id commits a replay receipt with all grants; omit it for
-// an intentional independent refresh. Cached entitlement remains a projection.
-func AddProTransferBalanceToAllNetworks(
-	ctx context.Context,
-	startTime time.Time,
-	endTime time.Time,
-	balanceByteCount ByteCount,
-	runIds ...server.Id,
-) (addedTransferBalances map[server.Id]ByteCount) {
-	addedTransferBalances = map[server.Id]ByteCount{}
-
-	server.Tx(ctx, func(tx server.PgTx) {
-		addedTransferBalances = map[server.Id]ByteCount{}
-		if !claimTransferGrantRunInTx(ctx, tx, GrantKindPro, startTime, endTime, runIds) {
-			return
-		}
-		// network_id -> subscription revenue pro-rated to this grant window
-		supporters := map[server.Id]NanoCents{}
-
-		result, err := tx.Query(
-			ctx,
-			`
-				SELECT
-					network.network_id,
-					subscription_renewal.net_revenue_nano_cents,
-					subscription_renewal.start_time,
-					subscription_renewal.end_time
-				FROM network
-
-				INNER JOIN subscription_renewal ON
-					subscription_renewal.network_id = network.network_id AND
-					subscription_renewal.subscription_type = $1 AND
-					subscription_renewal.start_time <= $2 AND
-					$2 < subscription_renewal.end_time
-			`,
-			SubscriptionTypeSupporter,
-			server.NowUtc(),
-		)
-		server.WithPgResult(result, err, func() {
-			for result.Next() {
-				var networkId server.Id
-				var netRevenueNanoCents NanoCents
-				var supporterStartTime time.Time
-				var supporterEndTime time.Time
-				server.Raise(result.Scan(
-					&networkId,
-					&netRevenueNanoCents,
-					&supporterStartTime,
-					&supporterEndTime,
-				))
-
-				subsidyNetRevenue := NanoCents(0)
-				if supporterDuration := supporterEndTime.Sub(supporterStartTime); 0 < supporterDuration {
-					fraction := float64(endTime.Sub(startTime)) / float64(supporterDuration)
-					subsidyNetRevenue = NanoCents(fraction * float64(netRevenueNanoCents))
-				}
-				// SUM, do not overwrite: a network can hold several active renewals
-				// at once (one row per market), and each contributes its own
-				// pro-rated revenue to the subsidy accounting
-				supporters[networkId] += subsidyNetRevenue
-			}
-		})
-
-		server.BatchInTx(ctx, tx, func(batch server.PgBatch) {
-			for networkId, subsidyNetRevenue := range supporters {
-				batch.Queue(
-					`
-		                INSERT INTO transfer_balance (
-		                    balance_id,
-		                    network_id,
-		                    start_time,
-		                    end_time,
-		                    start_balance_byte_count,
-		                    net_revenue_nano_cents,
-		                    subsidy_net_revenue_nano_cents,
-		                    balance_byte_count,
-		                    pro,
-		                    grant_kind
-		                )
-		                VALUES ($1, $2, $3, $4, $5, $6, $7, $5, true, $8)
-		            `,
-					server.NewId(),
-					networkId,
-					startTime,
-					endTime,
-					balanceByteCount,
-					NanoCents(0),
-					subsidyNetRevenue,
-					GrantKindPro,
-				)
-				addedTransferBalances[networkId] = balanceByteCount
-			}
-		})
-	})
-
-	networkIds := make([]server.Id, 0, len(addedTransferBalances))
-	for networkId := range addedTransferBalances {
-		networkIds = append(networkIds, networkId)
-	}
-	UpdateProNetworks(ctx, networkIds...)
-
-	return
-}
+// The monthly Pro grant to every subscriber (AddProTransferBalanceToAllNetworks, on
+// the 1st of each month) is retired: each network's Pro grant now comes at the start
+// of each of its own subscription cycles (GrantProCycleInTx, PRO-GRANT-CYCLE.md).
 
 // AddFreeTransferBalanceToAllNetworks grants the free-tier data allowance to every
 // network WITHOUT an active supporter subscription, for the window
@@ -6900,10 +6755,15 @@ func derefCursor(ptrs []any) []any {
 
 // BackfillSweepDestinationIds denormalizes transfer_contract.destination_id onto
 // transfer_escrow_sweep for rows created before the column existed, in bounded
-// batches (one maintenance tx each) until a batch comes up short. New sweeps are
-// stamped by settleEscrowInTx, so this only touches the pre-existing set. Orphan
-// sweeps whose contract no longer exists are left NULL (no destination to copy)
-// and are reaped by SweepOrphanContractData; the stats filters exclude NULL.
+// batches (one maintenance tx each) until a batch comes up short. Orphan sweeps
+// whose contract no longer exists are left NULL (no destination to copy) and
+// are reaped by SweepOrphanContractData.
+//
+// Only a sweep without provider_payouts is backfilled: the provider
+// attribution reads destination_id for those rows alone
+// (contract_provider_attribution.go). Every sweep settlement writes carries
+// provider_payouts and, since 2026-11-11, no destination_id
+// (BILLING-SPLIT.md), so the backfill leaves new sweeps alone.
 //
 // Migration 816 dropped transfer_escrow_sweep_destination_id_sweep_time once the
 // provider stats stopped reading sweep destinations (b12af6b3), so each batch
@@ -6923,7 +6783,7 @@ func BackfillSweepDestinationIds(ctx context.Context, limit int) (backfilledCoun
 					SELECT s.contract_id, s.balance_id, s.network_id, tc.destination_id
 					FROM transfer_escrow_sweep s
 					INNER JOIN transfer_contract tc ON tc.contract_id = s.contract_id
-					WHERE s.destination_id IS NULL
+					WHERE s.destination_id IS NULL AND s.provider_payouts IS NULL
 					LIMIT $1
 				)
 				UPDATE transfer_escrow_sweep s

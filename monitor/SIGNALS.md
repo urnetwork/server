@@ -9342,6 +9342,13 @@ Reproducing the same stale expectation on unchanged baseline and candidate
 separates an inherited test issue from a new regression; it does not make the
 broad suite green or excuse a distinct conservation/custody failure.
 
+Update 2026-11-11: settlement no longer queues the provider-total projection
+(server BILLING-SPLIT.md). Nothing in production read `account_balance.provided_*`
+or its Redis deltas. The drain and the per-task reader stay only to consume the
+rows already queued and those older binaries queue during a rollout, so the
+provider totals drain panels fall to zero once those are gone. Tests now assert
+that settlement produces no provider totals.
+
 The outcome trigger refuses an old writer after an intent has been accepted;
 the worker deletes its locked intent inside the financial transaction before
 claiming the outcome. Rollback restores all state. An old writer that wins before
@@ -22672,9 +22679,13 @@ The count is distinct invoices; the ages are first-seen ages:
 - `crypto-scanner-stalled` (PAGE): a coin's scanner succeeded in the last week
   and has not for 15 minutes (its chain source down or refusing the key, a vault file
   gone, or the TAO reader paused on a runtime it cannot decode, gauge
-  `urnetwork_crypto_pay_tao_reader_paused`). The coin is listed as unavailable
-  and payments to its open invoices wait. `crypto_scan_cursor.last_error`
-  names the reason; never point a scanner at an older block range to recover.
+  `urnetwork_crypto_pay_tao_reader_paused`; for Bitcoin also a source behind the
+  scanner's kept chain, or a chain changed below all 24 blocks it keeps). The coin
+  is listed as unavailable and payments to its open invoices wait.
+  `crypto_scan_cursor.last_error` names the reason; never point a scanner at an
+  older block range to recover. After a Bitcoin reorg deeper than the kept chain,
+  check the chain on a second source, then clear `crypto_scan_cursor.recent_blocks`
+  for `btc`: the scan reads its reorg window again from the cursor.
 
 Findings are aggregated to kind, store/reason, count, and oldest/newest age;
 the orphan-renewal count is distinct deleted owners and its ages are renewal

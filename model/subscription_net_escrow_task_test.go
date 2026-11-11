@@ -68,7 +68,7 @@ func legacyMirrorTestDelete(ctx context.Context, tx server.PgTx, id server.Id, p
 func legacyMirrorTestPublish(t testing.TB, ctx context.Context, balanceIds []server.Id, changes func(server.PgTx)) {
 	t.Helper()
 	server.Tx(ctx, func(tx server.PgTx) {
-		admitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(nil, balanceIds))
+		admitted, err := server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(balanceIds))
 		server.Raise(err)
 		if !admitted {
 			panic("mirror producer could not admit its queue keys")
@@ -141,7 +141,7 @@ func TestLegacyNetEscrowMirrorProducerBeforeDeleteRequeues(t *testing.T) {
 		old, post := legacyMirrorTestRun(t, ctx, f.balanceId)
 		producer, finish := beginRareGrantTestTx(t, ctx)
 		defer finish(false)
-		admitted, err := server.TryTxOwnership(ctx, producer, legacyFinancialOwnershipKeys(nil, ids))
+		admitted, err := server.TryTxOwnership(ctx, producer, legacyFinancialOwnershipKeys(ids))
 		server.Raise(err)
 		if !admitted {
 			t.Fatal("producer did not admit its financial queue keys")
@@ -246,7 +246,7 @@ func TestLegacyNetEscrowMirrorDeleteBeforeProducerLeavesFreshOwner(t *testing.T)
 				// The finishing transaction must own no financial lock.
 				server.RaisePgResult(tx.Exec(ctx, `SELECT 1 FROM transfer_balance WHERE balance_id=$1 FOR UPDATE NOWAIT`, f.balanceId))
 				var err error
-				admitted, err = server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(nil, ids))
+				admitted, err = server.TryTxOwnership(ctx, tx, legacyFinancialOwnershipKeys(ids))
 				server.Raise(err)
 			}, server.TxReadCommitted, server.OptNoRetry())
 		}, func(err error) { probeErr = err })

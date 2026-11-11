@@ -99,7 +99,8 @@ func appleCurrencyTestRevenue(
 					paid,
 					pro
 				FROM transfer_balance
-				WHERE network_id = $1 AND pro
+				-- the period's own balance, not its cycle's grant (kind pro)
+				WHERE network_id = $1 AND pro AND grant_kind IS NULL
 			`,
 			networkId,
 		)
@@ -265,11 +266,12 @@ func TestProcessAppleNotificationNonUsdPriceRecordsNoUsdRevenue(t *testing.T) {
 		connect.AssertEqual(t, balance.SubsidyNetRevenue, appleCurrencyTestMarker)
 		connect.AssertEqual(t, balance.NetRevenue, model.NanoCents(0))
 
-		// the grant is unchanged: paid, pro, the supporter bytes
+		// the period's balance is unchanged: paid and pro; it holds no data,
+		// which is its cycle's grant
 		connect.AssertEqual(t, balance.Paid, true)
 		connect.AssertEqual(t, balance.Pro, true)
-		connect.AssertEqual(t, balance.StartBalanceByteCount, RefreshSupporterTransferBalance)
-		connect.AssertEqual(t, balance.BalanceByteCount, RefreshSupporterTransferBalance)
+		connect.AssertEqual(t, balance.StartBalanceByteCount, SupporterPeriodTransferBalance)
+		connect.AssertEqual(t, balance.BalanceByteCount, SupporterPeriodTransferBalance)
 
 		priceMilliunits, currency := appleCurrencyTestLedger(t, ctx, transactionId)
 		connect.AssertEqual(t, priceMilliunits, int64(3_300_000))
@@ -362,12 +364,12 @@ func TestAppleReconcileCreditNonUsdPriceRecordsNoUsdRevenue(t *testing.T) {
 	})
 }
 
-// The recurring Pro grant pro-rates the renewal's net revenue into its own
-// balance, which is how a misread price reached the payout planner a second
-// time. For a KRW subscriber it now carries a share of the marker, not of
-// $2,640.
+// The Pro cycle grant pro-rates the renewal's net revenue into its own balance,
+// which is how a misread price reached the payout planner a second time. For a
+// KRW subscriber it carries a share of the marker, not of $2,640.
 func TestProGrantFromNonUsdAppleSubscriptionCarriesNoUsdRevenue(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		setProCycleTestData(t, model.Gib)
 		ctx := context.Background()
 		networkId := server.NewId()
 		model.Testing_CreateNetwork(ctx, networkId, "apple-currency-grant", server.NewId())
@@ -379,14 +381,6 @@ func TestProGrantFromNonUsdAppleSubscriptionCarriesNoUsdRevenue(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, processed, true)
 
-		// a grant window inside the 31-day renewal, so the grant's share of
-		// the renewal revenue is below one
-		grantStartTime := now
-		grantEndTime := now.Add(7 * 24 * time.Hour)
-		addedTransferBalances := model.AddProTransferBalanceToAllNetworks(ctx, grantStartTime, grantEndTime, model.Gib)
-		_, granted := addedTransferBalances[networkId]
-		connect.AssertEqual(t, granted, true)
-
 		grantCount := 0
 		var grantSubsidyNetRevenue model.NanoCents
 		server.Db(ctx, func(conn server.PgConn) {
@@ -395,11 +389,10 @@ func TestProGrantFromNonUsdAppleSubscriptionCarriesNoUsdRevenue(t *testing.T) {
 				`
 					SELECT subsidy_net_revenue_nano_cents
 					FROM transfer_balance
-					WHERE network_id = $1 AND start_time = $2 AND end_time = $3
+					WHERE network_id = $1 AND grant_kind = $2
 				`,
 				networkId,
-				grantStartTime,
-				grantEndTime,
+				model.GrantKindPro,
 			)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
@@ -409,7 +402,8 @@ func TestProGrantFromNonUsdAppleSubscriptionCarriesNoUsdRevenue(t *testing.T) {
 			})
 		})
 		connect.AssertEqual(t, grantCount, 1)
-		connect.AssertEqual(t, grantSubsidyNetRevenue < appleCurrencyTestMarker, true)
+		connect.AssertEqual(t, 0 < grantSubsidyNetRevenue, true)
+		connect.AssertEqual(t, grantSubsidyNetRevenue <= appleCurrencyTestMarker, true)
 	})
 }
 
@@ -485,7 +479,7 @@ func TestProcessAppleNotificationLargeUnitPriceIsEntitled(t *testing.T) {
 		connect.AssertEqual(t, balance.SubsidyNetRevenue, appleCurrencyTestMarker)
 		connect.AssertEqual(t, balance.Paid, true)
 		connect.AssertEqual(t, balance.Pro, true)
-		connect.AssertEqual(t, balance.StartBalanceByteCount, RefreshSupporterTransferBalance)
+		connect.AssertEqual(t, balance.StartBalanceByteCount, SupporterPeriodTransferBalance)
 
 		priceMilliunits, currency := appleCurrencyTestLedger(t, ctx, transactionId)
 		connect.AssertEqual(t, priceMilliunits, int64(66_000_000))

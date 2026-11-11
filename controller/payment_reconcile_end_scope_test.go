@@ -220,9 +220,9 @@ func TestPaymentReconcileStripeEndsAMovedInvoiceOnEachNetwork(t *testing.T) {
 			NetworkId:             movedNetworkId,
 			StartTime:             movedStart,
 			EndTime:               movedEnd,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: legacyActivationTestByteCount,
 			SubsidyNetRevenue:     model.UsdToNanoCents(3.5),
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      legacyActivationTestByteCount,
 			Pro:                   true,
 		})
 		// a different, paid subscription the moved-to network also holds
@@ -382,9 +382,9 @@ func TestPaymentReconcileAppleEndsOnlyTheRevokedSubscription(t *testing.T) {
 			NetworkId:             networkId,
 			StartTime:             twinStart,
 			EndTime:               twinEnd,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: legacyActivationTestByteCount,
 			SubsidyNetRevenue:     model.UsdToNanoCents(4.0),
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      legacyActivationTestByteCount,
 			Pro:                   true,
 		})
 		model.UpdateProNetwork(ctx, networkId)

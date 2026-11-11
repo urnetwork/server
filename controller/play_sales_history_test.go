@@ -43,7 +43,7 @@ func (self *playSalesTrialFixture) seedPlayCredit(expiry time.Time, netRevenue m
 		// RemoveCompletedContracts deleted the balance
 		return
 	}
-	byteCount := RefreshSupporterTransferBalance
+	byteCount := legacyActivationTestByteCount
 	if netRevenue == 0 {
 		// a grace period's hold
 		byteCount = 0

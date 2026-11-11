@@ -90,7 +90,7 @@ func TestAddRefreshTransferBalanceInTxRollbackCachesNothing(t *testing.T) {
 				connect.AssertEqual(t, err, nil)
 				// a panic is the tx helper's rollback path
 				panic(rollback{})
-			})
+			}, server.TxReadCommitted)
 		}()
 
 		// it was the Pro grant, and it did not commit

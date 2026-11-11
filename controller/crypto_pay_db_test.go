@@ -234,24 +234,20 @@ func TestCryptoCreditRenewalBalanceRevenueAndOffer(t *testing.T) {
 		connect.AssertEqual(t, renewal.endTime.Sub(renewal.startTime), solanaPlanDuration(model.SolanaPlanYearlyOnboarding)+manualPaymentGracePeriod)
 		connect.AssertEqual(t, !renewal.startTime.Before(before.Add(-time.Second)), true)
 
-		var pro *model.TransferBalance
-		for _, balance := range model.GetActiveTransferBalances(ctx, networkId) {
-			if balance.Pro {
-				pro = balance
-			}
-		}
-		connect.AssertEqual(t, pro != nil, true)
-		connect.AssertEqual(t, pro.StartBalanceByteCount, RefreshSupporterTransferBalance)
-		connect.AssertEqual(t, pro.EndTime.Equal(renewal.endTime), true)
-		var subsidyRevenue model.NanoCents
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT subsidy_net_revenue_nano_cents FROM transfer_balance WHERE balance_id = $1`, pro.BalanceId).Scan(&subsidyRevenue))
-		})
-		connect.AssertEqual(t, subsidyRevenue, model.UsdToNanoCents(3))
+		// the term's own balance carries its window and revenue and no data;
+		// the term's first monthly cycle carries the full Pro grant
+		periods, grants := proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, periods[0].startByteCount, SupporterPeriodTransferBalance)
+		connect.AssertEqual(t, periods[0].endTime.Equal(renewal.endTime), true)
+		connect.AssertEqual(t, periods[0].subsidy, model.UsdToNanoCents(3))
+		connect.AssertEqual(t, len(grants), 1)
+		connect.AssertEqual(t, grants[0].startByteCount, model.Pro().DataAmount(true))
+		connect.AssertEqual(t, grants[0].startTime.Equal(renewal.startTime), true)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
 
 		after := model.GetCryptoPaymentIntent(ctx, intent.IntentId)
-		connect.AssertEqual(t, *after.BalanceId, pro.BalanceId)
+		connect.AssertEqual(t, *after.BalanceId, periods[0].balanceId)
 		connect.AssertEqual(t, *after.CreditedUsdNanoCents, model.UsdToNanoCents(3))
 
 		offer := model.GetOnboardingOffer(ctx, networkId)
