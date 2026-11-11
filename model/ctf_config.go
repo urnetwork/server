@@ -16,7 +16,8 @@ package model
 //	  own_network_ids: []       # networks the operator declares it controls (P6,
 //	                            # X6), beside extender.yml's durable_network_ids
 //	                            # and every extender canary's network
-//	  object_retention_epochs: 8
+//	  object_retention_epochs: 8   # stored census objects kept, at least until a
+//	                               # finalized ledger covers their epoch
 //	  member_retention_epochs: 60
 
 import (
@@ -30,9 +31,10 @@ import (
 )
 
 // Retention when ctf.yml leaves it out: presence for four epochs after a
-// census, census objects for eight epochs after their census (they stay in the
-// ledger object store), and census members for sixty, more than the year a
-// client's status covers.
+// census; a census's stored objects for eight epochs, and never before a
+// finalized ledger covers its epoch (they also stay in the ledger object
+// store); and census members for sixty, more than the year a client's status
+// covers. A census itself, its counts and its exclusions are kept.
 const (
 	ctfDefaultPresenceRetentionEpochs = 4
 	ctfDefaultObjectRetentionEpochs   = 8

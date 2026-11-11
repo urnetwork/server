@@ -626,9 +626,12 @@ func GetCtfCensusExclusions(ctx context.Context, deploymentKey StDeploymentKey, 
 	return exclusions
 }
 
-// RemoveCtfCensusObjectsBefore deletes the census objects of every epoch
-// before epoch whose census was published; the ledger object store keeps
-// them.
+// RemoveCtfCensusObjectsBefore deletes the stored objects of every census
+// before epoch that was published and whose epoch a finalized CTF ledger
+// covers. A committed census is a fixed input of every root that covers its
+// epoch until one is final (§5), so its objects are kept here, as well as in
+// the ledger object store, until then; a census no finalized ledger covers,
+// such as a shadow run's, is kept.
 func RemoveCtfCensusObjectsBefore(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64) (removed int64) {
 	key := requireStDeploymentKey(deploymentKey)
 	server.MaintenanceTx(ctx, func(tx server.PgTx) {
@@ -642,7 +645,16 @@ func RemoveCtfCensusObjectsBefore(ctx context.Context, deploymentKey StDeploymen
 				ctf_census.deployment_key = ctf_census_object.deployment_key AND
 				ctf_census.no_id = ctf_census_object.no_id AND
 				ctf_census.epoch = ctf_census_object.epoch AND
-				ctf_census.published_time IS NOT NULL
+				ctf_census.published_time IS NOT NULL AND
+				EXISTS (
+					SELECT 1 FROM ctf_ledger
+					WHERE
+						ctf_ledger.deployment_key = ctf_census.deployment_key AND
+						ctf_ledger.no_id = ctf_census.no_id AND
+						ctf_ledger.status = 'finalized' AND
+						ctf_ledger.first_epoch <= ctf_census.epoch AND
+						ctf_census.epoch <= ctf_ledger.epoch
+				)
 			`,
 			key, int64(noId), int64(epoch),
 		)
