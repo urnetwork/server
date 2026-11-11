@@ -15,19 +15,21 @@ import (
 // TestStripeDataPackByteCount pins the item -> amount mapping. Getting this wrong
 // charges for one thing and delivers another.
 func TestStripeDataPackByteCount(t *testing.T) {
-	byteCount, ok := stripeDataPackByteCount(StripeItemData1Tib)
-	connect.AssertEqual(t, ok, true)
+	skipWithoutProYml(t)
+
+	byteCount, _, errMessage := stripeDataPackByteCount(StripeItemData1Tib)
+	connect.AssertEqual(t, errMessage, "")
 	connect.AssertEqual(t, byteCount, 1*model.Tib)
 
-	byteCount, ok = stripeDataPackByteCount(StripeItemData10Tib)
-	connect.AssertEqual(t, ok, true)
+	byteCount, _, errMessage = stripeDataPackByteCount(StripeItemData10Tib)
+	connect.AssertEqual(t, errMessage, "")
 	connect.AssertEqual(t, byteCount, 10*model.Tib)
 
 	// the Pro items are subscriptions, not data packs
-	_, ok = stripeDataPackByteCount(StripeItemProMonthly)
-	connect.AssertEqual(t, ok, false)
-	_, ok = stripeDataPackByteCount("nonsense")
-	connect.AssertEqual(t, ok, false)
+	_, errCode, _ := stripeDataPackByteCount(StripeItemProMonthly)
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidRequest)
+	_, errCode, _ = stripeDataPackByteCount("nonsense")
+	connect.AssertEqual(t, errCode, PurchaseErrorCodeInvalidRequest)
 }
 
 // TestStripeDataPackPriceUsd pins that the web checkout quotes the SAME price as
@@ -36,16 +38,19 @@ func TestStripeDataPackByteCount(t *testing.T) {
 func TestStripeDataPackPriceUsd(t *testing.T) {
 	skipWithoutProYml(t)
 
-	priceUsd, ok := stripeDataPackPriceUsd(1 * model.Tib)
+	priceUsd, ok := dataPackPriceUsd(StripeItemData1Tib, model.DataRailCard)
 	connect.AssertEqual(t, ok, true)
 	connect.AssertEqual(t, priceUsd, float64(3))
 
-	priceUsd, ok = stripeDataPackPriceUsd(10 * model.Tib)
+	priceUsd, ok = dataPackPriceUsd(StripeItemData10Tib, model.DataRailCard)
 	connect.AssertEqual(t, ok, true)
 	connect.AssertEqual(t, priceUsd, float64(20))
 
-	// an amount we do not sell has no price -- checkout must refuse, not guess
-	_, ok = stripeDataPackPriceUsd(7 * model.Tib)
+	// a pack we do not sell has no price -- checkout must refuse, not guess
+	_, ok = dataPackPriceUsd("data_7tib", model.DataRailCard)
+	connect.AssertEqual(t, ok, false)
+	// nor does one pro.yml does not sell by card
+	_, ok = dataPackPriceUsd(X402SkuData256Gib, model.DataRailCard)
 	connect.AssertEqual(t, ok, false)
 }
 

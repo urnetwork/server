@@ -57,7 +57,7 @@ const (
 )
 
 type PayDataSolanaIntentArgs struct {
-	// "data_1tib" or "data_10tib"
+	// a pack pro.yml sells with crypto: "data_1tib" or "data_10tib"
 	ItemId string `json:"item_id"`
 	// the network that receives the data. Required: with no sign-in and no
 	// email, the network is the only place the data can go.
@@ -109,26 +109,12 @@ type PayDataSolanaStatusResult struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
-// dataPackPriceUsd is the price of a data item, from pro.yml (data_code.skus):
-// the same number the site shows, Stripe charges and x402 quotes, so a buyer is
-// never shown two prices. ok = false for an unknown item or an unusable price.
-func dataPackPriceUsd(itemId string) (float64, bool) {
-	byteCount, ok := stripeDataPackByteCount(itemId)
-	if !ok {
-		return 0, false
-	}
-	priceUsd, ok := stripeDataPackPriceUsd(byteCount)
-	if !ok || priceUsd <= 0 {
-		return 0, false
-	}
-	return priceUsd, true
-}
-
 // solanaIsDataPackPlan reports whether an intent's subscription_plan names a
-// data item rather than a subscription plan.
+// data item rather than a subscription plan. By the id's form alone, so an
+// intent for a pack pro.yml has since dropped is refused at credit, never
+// credited as a plan (an unknown plan is a year of Pro).
 func solanaIsDataPackPlan(subscriptionPlan string) bool {
-	_, ok := stripeDataPackByteCount(subscriptionPlan)
-	return ok
+	return isDataPackItem(subscriptionPlan)
 }
 
 // payDataSolanaValidReference is a shape check on the client-generated
@@ -157,7 +143,12 @@ func PayDataSolanaIntent(
 	clientSession *session.ClientSession,
 ) (*PayDataSolanaIntentResult, error) {
 	itemId := strings.TrimSpace(args.ItemId)
-	if _, ok := stripeDataPackByteCount(itemId); !ok {
+	// USDC by Solana Pay is the crypto rail: a pack pro.yml does not sell with
+	// crypto is refused with where it is sold
+	if refusal := dataPackRefusal(itemId, model.DataRailCrypto); refusal != "" {
+		return payDataSolanaIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+	}
+	if model.Pro().DataCodeSku(itemId) == nil {
 		return payDataSolanaIntentError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
 	}
 	reference := strings.TrimSpace(args.Reference)
@@ -178,7 +169,7 @@ func PayDataSolanaIntent(
 
 	// The price comes from pro.yml, keyed by the item. It is NEVER taken from the
 	// client: the webhook checks the received amount against this quote.
-	priceUsd, ok := dataPackPriceUsd(itemId)
+	priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 	if !ok {
 		glog.Errorf("[paydata]no usable price in pro.yml for data pack %s\n", itemId)
 		return payDataSolanaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
@@ -383,7 +374,8 @@ func solanaCreditDataPackInConn(connOwner server.PgConn,
 	tokenAmountReceivedUsd float64,
 ) (credited bool, returnErr error) {
 	itemId := paymentSearchResult.SubscriptionPlan
-	byteCount, ok := stripeDataPackByteCount(itemId)
+	// what the quoted pack grants, whatever its rails say now
+	byteCount, ok := dataPackByteCount(itemId)
 	if !ok || byteCount <= 0 {
 		return false, fmt.Errorf("unknown data pack %s", itemId)
 	}

@@ -77,7 +77,12 @@ const (
 
 // The plans and data items gamma sells. Monthly too: gamma can renew.
 var gammaKnownPlans = []string{model.SolanaPlanMonthly, model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
-var gammaKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
+
+// gammaKnownItems are the data packs pro.yml sells with Gamma, in its order:
+// data_1tib, data_10tib and the 256 GiB pack.
+func gammaKnownItems() []string {
+	return dataPackIdsOn(model.DataRailGamma)
+}
 
 // The biller writes its state every run; older than this, it is not running
 // and nothing is sold.
@@ -157,8 +162,8 @@ func gammaMaxSpend() int64 {
 			largest = max(largest, model.UsdToNanoCents(priceUsd))
 		}
 	}
-	for _, item := range gammaKnownItems {
-		if priceUsd, ok := dataPackPriceUsd(item); ok {
+	for _, item := range gammaKnownItems() {
+		if priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma); ok {
 			largest = max(largest, model.UsdToNanoCents(priceUsd))
 		}
 	}
@@ -303,8 +308,8 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 			IndicativeTao:    gammaIndicativeTao(units, gammaPerTao),
 		})
 	}
-	for _, item := range gammaKnownItems {
-		priceUsd, ok := dataPackPriceUsd(item)
+	for _, item := range gammaKnownItems() {
+		priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma)
 		if !ok {
 			continue
 		}
@@ -339,7 +344,7 @@ func gammaIndicativeTao(units int64, gammaPerTao uint64) string {
 type CreateGammaPaymentIntentArgs struct {
 	// monthly | yearly | yearly_onboarding
 	Plan string `json:"plan,omitempty"`
-	// data_1tib | data_10tib
+	// a pack pro.yml sells with Gamma: data_1tib | data_10tib | data_256gib
 	ItemId string `json:"item_id,omitempty"`
 	// account (default): the plan or data lands on the caller's network;
 	// code: a data pack as a balance code
@@ -410,7 +415,10 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	if plan != "" && !slices.Contains(gammaKnownPlans, plan) {
 		return gammaIntentError(PurchaseErrorCodePlanUnavailable, "That plan is not available with Gamma."), nil
 	}
-	if itemId != "" && !slices.Contains(gammaKnownItems, itemId) {
+	if itemId != "" && !slices.Contains(gammaKnownItems(), itemId) {
+		if refusal := dataPackRefusal(itemId, model.DataRailGamma); refusal != "" {
+			return gammaIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+		}
 		return gammaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available with Gamma."), nil
 	}
 	delivery := strings.TrimSpace(args.Delivery)
@@ -465,7 +473,7 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		tierName = tier.Tier.Name
 	} else {
 		var ok bool
-		priceUsd, ok = dataPackPriceUsd(itemId)
+		priceUsd, ok = dataPackPriceUsd(itemId, model.DataRailGamma)
 		if !ok {
 			return gammaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
 		}
@@ -857,8 +865,8 @@ func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSess
 	settings := &model.GammaAccountSettings{AutoRenew: args.AutoRenew, AutoTopup: args.AutoTopup}
 	if args.TopupItemId != nil {
 		item := strings.TrimSpace(*args.TopupItemId)
-		if !slices.Contains(gammaTopupItems, item) {
-			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeItemUnavailable, Message: "The top-up item is data_1tib or data_10tib."}}, nil
+		if !slices.Contains(gammaTopupItems(), item) {
+			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeItemUnavailable, Message: gammaTopupItemMessage()}}, nil
 		}
 		settings.TopupItem = &item
 	}
