@@ -14,6 +14,11 @@ package proxy
 // 2026-11-11 (connect net_http_doh_regional.go: Turkmentelecom refuses clients
 // outside its network and answers the platform's names with 127.0.0.1), so a
 // tm proxy stored with any of them builds its tun with connect's defaults.
+// The same rule covers ir and tr, whose recommendations named servers that
+// cannot answer an exit until 2026-11-11: ir 403.online's private
+// 10.202.10.10, and tr the resolvers of TTNET and Turkcell Superonline, which
+// answer only their own customers, so a tr proxy stored with them resolved
+// nothing on an exit of any other network.
 //
 // The replacement happens when a device reads its settings, not in storage.
 // The device is the only user of the stored resolver settings, so the stored
@@ -29,7 +34,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// Every regional recommendation connect has given kz and tm, as auth-client
+// Every regional recommendation connect has given kz, tm, ir and tr, as auth-client
 // stored it, by lower case country code: oldest first, the current one last,
 // nil once the country has none. Each keeps the dns upgrade mask address it
 // was stored with, so a later change of connect's default does not unmatch
@@ -118,6 +123,59 @@ var countryCodeRegionalDnsRecommendations = map[string][]*connect.DnsResolverSet
 		},
 		// connect 8e0fe91e, 2026-11-11: none
 		nil,
+	},
+	"ir": {
+		// connect e61efd34, 2026-02-09: Shecan and 403.online, and Cloudflare as a local resolver
+		{
+			EnableRemoteDns: true,
+			EnableLocalDns:  true,
+			RemoteDnsIpv4:   []string{"178.22.122.100", "10.202.10.10"},
+			LocalDnsIpv4:    []string{"1.1.1.1"},
+		},
+		// connect ee7a476c, 2026-07-10: remote only
+		{
+			EnableRemoteDns: true,
+			RemoteDnsIpv4:   []string{"178.22.122.100", "10.202.10.10"},
+		},
+		// connect 45357960, 2026-08-02: the dns upgrade mask address
+		{
+			EnableRemoteDns:       true,
+			DnsUpgradeMaskAddress: "65.49.70.65",
+			RemoteDnsIpv4:         []string{"178.22.122.100", "10.202.10.10"},
+		},
+		// connect 8e0fe91e, 2026-11-11: Shecan and Electro
+		{
+			EnableRemoteDns:       true,
+			DnsUpgradeMaskAddress: "65.49.70.65",
+			RemoteDnsIpv4:         []string{"178.22.122.100", "78.157.42.100"},
+		},
+	},
+	"tr": {
+		// connect c33aafe1, 2026-02-09: TTNET and Turkcell Superonline, and Cloudflare as a local resolver
+		{
+			EnableRemoteDns: true,
+			EnableLocalDns:  true,
+			RemoteDnsIpv4:   []string{"195.175.39.39", "212.252.114.8"},
+			LocalDnsIpv4:    []string{"1.1.1.1"},
+		},
+		// connect ee7a476c, 2026-07-10: remote only
+		{
+			EnableRemoteDns: true,
+			RemoteDnsIpv4:   []string{"195.175.39.39", "212.252.114.8"},
+		},
+		// connect 45357960, 2026-08-02: the dns upgrade mask address
+		{
+			EnableRemoteDns:       true,
+			DnsUpgradeMaskAddress: "65.49.70.65",
+			RemoteDnsIpv4:         []string{"195.175.39.39", "212.252.114.8"},
+		},
+		// connect 8e0fe91e, 2026-11-11: Cloudflare and Quad9's unfiltered 9.9.9.10
+		{
+			EnableRemoteDns:       true,
+			DnsUpgradeMaskAddress: "65.49.70.65",
+			RemoteDnsIpv4:         []string{"1.1.1.1", "9.9.9.10"},
+			RemoteDnsIpv6:         []string{"2606:4700:4700::1111", "2620:fe::10"},
+		},
 	},
 }
 

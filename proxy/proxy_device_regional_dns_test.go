@@ -6,8 +6,9 @@ package proxy
 // Public DNS. The owner decided on 2026-11-09 that such proxies move to the
 // current recommendation, and that only an exact former recommendation
 // changes. tm has had none since 2026-11-11, so its proxies move to connect's
-// defaults. These tests read configs as older servers stored them and check
-// the settings a hosted device's tun is built with
+// defaults, and ir and tr proxies move the same way from the recommendations
+// connect replaced on 2026-11-11. These tests read configs as older servers
+// stored them and check the settings a hosted device's tun is built with
 // (proxyDeviceDnsResolverSettings).
 
 import (
@@ -53,7 +54,34 @@ var (
 		// connect b49cbc21, 2026-11-08: Turkmentelecom alone
 		`{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["217.174.238.141"]}`,
 	}
+	formerIrDnsResolverSettingsJsons = []string{
+		// connect e61efd34, 2026-02-09: Shecan and 403.online, and a local resolver
+		`{"enable_remote_dns":true,"enable_local_dns":true,"remote_dns_ipv4":["178.22.122.100","10.202.10.10"],"local_dns_ipv4":["1.1.1.1"]}`,
+		// connect ee7a476c, 2026-07-10: remote only
+		`{"enable_remote_dns":true,"remote_dns_ipv4":["178.22.122.100","10.202.10.10"]}`,
+		// connect 45357960, 2026-08-02: the dns upgrade mask address
+		`{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["178.22.122.100","10.202.10.10"]}`,
+	}
+	formerTrDnsResolverSettingsJsons = []string{
+		// connect c33aafe1, 2026-02-09: TTNET and Turkcell Superonline, and a local resolver
+		`{"enable_remote_dns":true,"enable_local_dns":true,"remote_dns_ipv4":["195.175.39.39","212.252.114.8"],"local_dns_ipv4":["1.1.1.1"]}`,
+		// connect ee7a476c, 2026-07-10: remote only
+		`{"enable_remote_dns":true,"remote_dns_ipv4":["195.175.39.39","212.252.114.8"]}`,
+		// connect 45357960, 2026-08-02: the dns upgrade mask address
+		`{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["195.175.39.39","212.252.114.8"]}`,
+	}
 )
+
+// Every country's former recommendations (formerKzDnsResolverSettingsJsons and
+// the rest), by lower case country code.
+func formerDnsResolverSettingsJsonsByCountry() map[string][]string {
+	return map[string][]string{
+		"kz": formerKzDnsResolverSettingsJsons,
+		"tm": formerTmDnsResolverSettingsJsons,
+		"ir": formerIrDnsResolverSettingsJsons,
+		"tr": formerTrDnsResolverSettingsJsons,
+	}
+}
 
 // A hosted proxy's config as proxy_device_config.config_json stores it: a
 // country location and the resolver settings json as written.
@@ -98,30 +126,32 @@ func storedDnsResolverSettingsJson(t testing.TB, dnsResolverSettings *connect.Dn
 	return string(dnsResolverSettingsJson)
 }
 
-// A kz or tm proxy stored with a former recommendation of its country builds
-// its tun with the current one, in whatever case the country code is stored
-// (connect matched it in lower case): for tm, which has none, with connect's
-// defaults. The stored settings do not change.
+// A kz, tm, ir or tr proxy stored with a former recommendation of its country
+// builds its tun with the current one, in whatever case the country code is
+// stored (connect matched it in lower case): for tm, which has none, with
+// connect's defaults. The stored settings do not change.
 func TestProxyDeviceDnsResolverSettingsReplaceFormerRegionalRecommendations(t *testing.T) {
 	type formerRecommendation struct {
 		countryCode             string
 		dnsResolverSettingsJson string
 	}
 	formerRecommendations := []formerRecommendation{}
-	for _, dnsResolverSettingsJson := range formerKzDnsResolverSettingsJsons {
-		for _, countryCode := range []string{"kz", "KZ"} {
-			formerRecommendations = append(formerRecommendations, formerRecommendation{
-				countryCode:             countryCode,
-				dnsResolverSettingsJson: dnsResolverSettingsJson,
-			})
-		}
-	}
-	for _, dnsResolverSettingsJson := range formerTmDnsResolverSettingsJsons {
-		for _, countryCode := range []string{"tm", "Tm"} {
-			formerRecommendations = append(formerRecommendations, formerRecommendation{
-				countryCode:             countryCode,
-				dnsResolverSettingsJson: dnsResolverSettingsJson,
-			})
+	for _, c := range []struct {
+		dnsResolverSettingsJsons []string
+		countryCodes             []string
+	}{
+		{dnsResolverSettingsJsons: formerKzDnsResolverSettingsJsons, countryCodes: []string{"kz", "KZ"}},
+		{dnsResolverSettingsJsons: formerTmDnsResolverSettingsJsons, countryCodes: []string{"tm", "Tm"}},
+		{dnsResolverSettingsJsons: formerIrDnsResolverSettingsJsons, countryCodes: []string{"ir", "IR"}},
+		{dnsResolverSettingsJsons: formerTrDnsResolverSettingsJsons, countryCodes: []string{"tr", "Tr"}},
+	} {
+		for _, dnsResolverSettingsJson := range c.dnsResolverSettingsJsons {
+			for _, countryCode := range c.countryCodes {
+				formerRecommendations = append(formerRecommendations, formerRecommendation{
+					countryCode:             countryCode,
+					dnsResolverSettingsJson: dnsResolverSettingsJson,
+				})
+			}
 		}
 	}
 
@@ -150,10 +180,10 @@ func TestProxyDeviceDnsResolverSettingsReplaceFormerRegionalRecommendations(t *t
 	}
 }
 
-// A kz or tm proxy keeps stored settings that are not exactly a former
+// A kz, tm or tr proxy keeps stored settings that are not exactly a former
 // recommendation of its country: a list in another order or with another
 // server, another toggle, a field no recommendation set, a combination connect
-// never shipped, the other country's recommendation, and the user's own.
+// never shipped, another country's recommendation, and the user's own.
 func TestProxyDeviceDnsResolverSettingsKeepUserSettingsInKzAndTm(t *testing.T) {
 	type storedSettings struct {
 		countryCode             string
@@ -240,9 +270,24 @@ func TestProxyDeviceDnsResolverSettingsKeepUserSettingsInKzAndTm(t *testing.T) {
 			countryCode:             "tm",
 			dnsResolverSettingsJson: `{"enable_remote_doh":true,"remote_doh_urls_ipv4":["https://192.0.2.53/dns-query"]}`,
 		},
+		// the tr list in another order
+		{
+			countryCode:             "tr",
+			dnsResolverSettingsJson: `{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["212.252.114.8","195.175.39.39"]}`,
+		},
+		// TTNET alone
+		{
+			countryCode:             "tr",
+			dnsResolverSettingsJson: `{"enable_remote_dns":true,"dns_upgrade_mask_address":"65.49.70.65","remote_dns_ipv4":["195.175.39.39"]}`,
+		},
+		// ir's recommendation
+		{
+			countryCode:             "tr",
+			dnsResolverSettingsJson: formerIrDnsResolverSettingsJsons[2],
+		},
 	}
 	defaultJson := storedDnsResolverSettingsJson(t, connect.DefaultDnsResolverSettings())
-	for _, countryCode := range []string{"kz", "tm"} {
+	for _, countryCode := range []string{"kz", "tm", "ir", "tr"} {
 		// the default settings, sent as the user's own
 		cases = append(cases, storedSettings{
 			countryCode:             countryCode,
@@ -268,13 +313,18 @@ func TestProxyDeviceDnsResolverSettingsKeepUserSettingsInKzAndTm(t *testing.T) {
 	}
 }
 
-// A proxy outside kz and tm keeps its stored settings, a former kz or tm
-// recommendation included, as does a proxy whose location has no country and
-// a proxy with no location.
+// A proxy keeps its stored settings when they are another country's former
+// recommendation, in a country with former recommendations of its own or
+// without, as does a proxy whose location has no country and a proxy with no
+// location.
 func TestProxyDeviceDnsResolverSettingsKeepOtherCountries(t *testing.T) {
-	formerJsons := slices.Concat(formerKzDnsResolverSettingsJsons, formerTmDnsResolverSettingsJsons)
-	for _, countryCode := range []string{"ru", "tr", "cn", "ir", "us", ""} {
+	formerJsonsByCountry := formerDnsResolverSettingsJsonsByCountry()
+	formerJsons := slices.Concat(formerKzDnsResolverSettingsJsons, formerTmDnsResolverSettingsJsons, formerIrDnsResolverSettingsJsons, formerTrDnsResolverSettingsJsons)
+	for _, countryCode := range []string{"ru", "tr", "cn", "ir", "kz", "tm", "us", ""} {
 		for _, formerJson := range formerJsons {
+			if slices.Contains(formerJsonsByCountry[countryCode], formerJson) {
+				continue
+			}
 			initialDeviceState := storedProxyDeviceState(t, countryCode, formerJson)
 			expectedJson := storedDnsResolverSettingsJson(t, hostedDnsResolverSettings(initialDeviceState.DnsResolverSettings))
 
@@ -307,7 +357,7 @@ func TestProxyDeviceDnsResolverSettingsKeepOtherCountries(t *testing.T) {
 // changes a recommendation again this fails until the new one is appended, and
 // then the proxies stored with the one it replaced move to it too.
 func TestCountryCodeRegionalDnsRecommendationsEndWithTheCurrentOne(t *testing.T) {
-	for _, countryCode := range []string{"kz", "tm"} {
+	for _, countryCode := range []string{"kz", "tm", "ir", "tr"} {
 		if _, ok := countryCodeRegionalDnsRecommendations[countryCode]; !ok {
 			t.Errorf("no recommendations for %s", countryCode)
 		}
@@ -330,11 +380,11 @@ func TestCountryCodeRegionalDnsRecommendationsEndWithTheCurrentOne(t *testing.T)
 	}
 }
 
-// A kz or tm proxy stored with the current recommendation keeps it, and one
-// stored with no settings keeps none, which builds its tun with connect's
-// defaults.
+// A kz, tm, ir or tr proxy stored with the current recommendation keeps it,
+// and one stored with no settings keeps none, which builds its tun with
+// connect's defaults.
 func TestProxyDeviceDnsResolverSettingsKeepCurrentRecommendationAndNone(t *testing.T) {
-	for _, countryCode := range []string{"kz", "tm"} {
+	for _, countryCode := range []string{"kz", "tm", "ir", "tr"} {
 		currentJson := storedDnsResolverSettingsJson(t, connect.RegionalDnsResolverSettings(countryCode))
 		initialDeviceState := storedProxyDeviceState(t, countryCode, currentJson)
 		expectedJson := storedDnsResolverSettingsJson(t, hostedDnsResolverSettings(initialDeviceState.DnsResolverSettings))
