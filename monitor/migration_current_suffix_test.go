@@ -419,6 +419,25 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 			sql: `DROP INDEX competition_executor_control_started_job`},
 		{name: "equivalence guard back on the unamended host lookup", version: control,
 			sql: `CREATE OR REPLACE FUNCTION competition_executor_equivalence_guard() RETURNS trigger LANGUAGE plpgsql AS ` + snMainnetMigrationLiteral(unamendedEquivalenceGuard)},
+		// Pay with Gamma: the unique indexes carry the biller's invariants. A
+		// derivation index assigns one deposit hotkey, an automatic intent is
+		// made once per account, purpose and period, an intent's reference and
+		// its charge are unique, and at most one spend batch is live; an
+		// account renews unless it turns renewal off.
+		{name: "gamma deposit hotkey derivation reusable", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_deposit_hotkey_index_unique`},
+		{name: "gamma automatic intent repeatable per period", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_payment_intent_period`},
+		{name: "gamma intent reference shared", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_payment_intent_reference`},
+		{name: "gamma intent charged twice", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_charge_intent`},
+		{name: "two live gamma spend batches", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `DROP INDEX gamma_spend_batch_live; CREATE INDEX gamma_spend_batch_live ON gamma_spend_batch ((true)) WHERE state IN ('signed', 'submitted')`},
+		{name: "gamma renewal off by default", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `ALTER TABLE gamma_account ALTER COLUMN auto_renew SET DEFAULT false`},
+		{name: "gamma chain state not a singleton", version: server.GammaPaySchemaMigrationVersion(),
+			sql: `ALTER TABLE gamma_chain_state DROP CONSTRAINT gamma_chain_state_singleton_check`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

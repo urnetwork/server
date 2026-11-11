@@ -957,6 +957,8 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the operator's executor control amendment, with the official review
 	// custody it carries on; versioned by its position
 	[]snMainnetMigrationContract{competitionExecutorControlAmendmentMigrationContract},
+	// the Pay with Gamma tables, versioned by their position
+	[]snMainnetMigrationContract{gammaPayMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
