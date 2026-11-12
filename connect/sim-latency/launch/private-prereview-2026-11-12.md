@@ -48,3 +48,38 @@ queued or running evaluations. This is **not** an eligible-submission count.
 No Qwen/Gemma inference had started for this pre-review request at that check.
 Existing scoring and the independent recovery-tool qualification are not being
 interrupted.
+
+## Required checks before the first private model request
+
+Use synthetic fixtures to prove that a successful but gate-failed, below-margin,
+insignificant or reward-excluded job is not selected. Reject changed patch,
+score projection, object version, baseline, source, instrument or policy
+identities. Verify that no seal, election or authoritative review write is
+needed or produced. Exercise both successful model members, conflicting
+findings, incomplete responses, wrong model identities and provider failures;
+all terminal evidence must survive rejection. Verify private output permissions,
+bounded inputs and source coverage, cache invalidation and duplicate execution
+control. Run no candidate code in the review process.
+
+## Initial provider transport evidence
+
+Both members completed a small synthetic strict-schema request on November 12,
+returning HTTP 200, their expected model name, valid JSON and real token usage:
+
+| Member | Elapsed seconds | Input tokens | Output tokens |
+| --- | ---: | ---: | ---: |
+| Qwen | 129.227 | 283 | 394 |
+| Gemma | 103.141 | 67 | 400 |
+
+No candidate data or credentials were sent. Calls were serial and tool-free,
+with bounded memory, CPU, response size and duration, an explicit singleton
+lock and egress restricted to Snow. Raw responses, headers and transport
+metadata were preserved privately, including the corrected launcher script.
+An initial launcher exited without response files; it is not counted as proof
+of model execution.
+
+This checks transport, not review quality, complete source handling, model
+weight provenance or the current full review schema. It does not qualify an
+official review or authorize approval. Durable receipt:
+`/var/lib/urnetwork/competition-private-prereview-transport-smoke-20261112.xrN2WOPt/receipt.json`,
+SHA-256 `564036c230302c24c89e95907f85046fa6ec76bc34f2522d870e9cc5113cd9c5`.
