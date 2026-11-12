@@ -13,7 +13,7 @@ clusters:
     region: us-east-1
   meta-2:
     kind: metadata
-    endpoints: [127.0.0.1:52301]
+    endpoints: [127.0.0.1:52301, 127.0.0.1:52302, 127.0.0.1:52303, 127.0.0.1:52304]
     access_key: sidecar-t3-filecluster
     secret_key: sidecar-t3-filecluster-only
     bucket: sidecar-t3-meta-2

@@ -25,6 +25,10 @@ package server
 // cluster, which carries no hooks, is passed only on the strength of the same commit's hooked build passing on T3:
 // the operator runs both and records the build only when both pass.
 //
+// The suite runs on a cluster of hosts and refuses a target of one (QD-756): §19.6 builds every cluster from 4 hosts,
+// and the fork refuses to start one process on a cluster's drives under the settle rules, so a cluster one process
+// serves is no cluster a block reaches.
+//
 // It reports, beside the cases, the longest lag any host saw from a cancel to a write's last drive answer, which no
 // margin relies on (§22.9), and how long a failed DELETE's key stayed held past its request's end (DESIGN-DETAILS 2.7).
 //
@@ -162,8 +166,7 @@ type FileClusterSuiteTarget struct {
 	Config *FileClusterConfig
 	// Each host, in Config.Endpoints' order.
 	Hosts []*FileClusterSuiteHost
-	// Each host's drives, which every case's quorum arithmetic reads: 2 at T3's 4 x 2 EC:4, 4 at its 4 x 4 EC:8, 8 for a
-	// one-process cluster.
+	// Each host's drives, which every case's quorum arithmetic reads: 2 at T3's 4 x 2 EC:4, 4 at its 4 x 4 EC:8.
 	DrivesPerHost int
 	// The caller's store cases, nil for none.
 	StoreCases FileClusterSuiteStoreCases
@@ -293,6 +296,9 @@ func RunFileClusterSuite(ctx context.Context, target *FileClusterSuiteTarget) (*
 	if target.Config == nil || len(target.Hosts) != len(target.Config.Endpoints) || target.DrivesPerHost <= 0 {
 		return nil, fmt.Errorf("%w: a suite target names each host of its config and its drives", ErrFileClusterConfig)
 	}
+	if len(target.Hosts) < 2 {
+		return nil, fmt.Errorf("%w: %s", ErrFileClusterConfig, fileClusterSuiteOneHostDetail(target.Config.ClusterId))
+	}
 	for index, host := range target.Hosts {
 		if host.Endpoint != target.Config.Endpoints[index] {
 			return nil, fmt.Errorf("%w: host %d is %q, the config's %q", ErrFileClusterConfig, index, host.Endpoint, target.Config.Endpoints[index])
@@ -336,6 +342,11 @@ func RunFileClusterSuite(ctx context.Context, target *FileClusterSuiteTarget) (*
 	run.runAll(ctx)
 	run.report.Elapsed = time.Since(run.report.Started)
 	return run.report, nil
+}
+
+// Why the suite does not run on a cluster of one host (QD-756).
+func fileClusterSuiteOneHostDetail(clusterId string) string {
+	return fmt.Sprintf("%s names one host: every cluster is built from 4 hosts (§19.6), and the fork refuses to start one process on a cluster's drives under the settle rules, so the suite runs on no cluster one process serves", clusterId)
 }
 
 // A store of config's cluster alone, reached through endpoints. It stands as its own first metadata cluster, since the
@@ -428,18 +439,12 @@ func (self *fileClusterSuiteRun) notRunRest(detail string) {
 func (self *fileClusterSuiteRun) lacks(needs fileClusterSuiteNeed) string {
 	switch needs {
 	case fileClusterSuiteNeedsHooks:
-		if len(self.hooks) < 2 {
-			return "a held commit needs a second host"
-		}
 		for index, hook := range self.hooks {
 			if hook == nil {
 				return fmt.Sprintf("host %d has no barrier control port: run this commit's settle_testhooks build on T3", index)
 			}
 		}
 	case fileClusterSuiteNeedsControl:
-		if len(self.target.Hosts) < 2 {
-			return "a host lost needs a second host"
-		}
 		for index, host := range self.target.Hosts {
 			if host.Control == nil {
 				return fmt.Sprintf("host %d cannot be stopped from here", index)
@@ -1319,9 +1324,13 @@ func ParseFileClusterSuiteHostsFile(data []byte) (*FileClusterSuiteHostsFile, er
 }
 
 // The suite's target for config, from its hosts file entry: an entry's hooks and containers name every host or none.
+// A config of one host is refused, as RunFileClusterSuite refuses its target.
 func NewFileClusterSuiteTarget(config *FileClusterConfig, entry *FileClusterSuiteHostsEntry, settings *FileClusterSuiteSettings) (*FileClusterSuiteTarget, error) {
 	if entry == nil || entry.DrivesPerHost <= 0 {
 		return nil, fmt.Errorf("%w: %s: the hosts file gives no drives per host", ErrFileClusterConfig, config.ClusterId)
+	}
+	if len(config.Endpoints) < 2 {
+		return nil, fmt.Errorf("%w: %s", ErrFileClusterConfig, fileClusterSuiteOneHostDetail(config.ClusterId))
 	}
 	if (0 < len(entry.Hooks) && len(entry.Hooks) != len(config.Endpoints)) || (0 < len(entry.Containers) && len(entry.Containers) != len(config.Endpoints)) {
 		return nil, fmt.Errorf("%w: %s: hooks and containers name each of its %d hosts or none", ErrFileClusterConfig, config.ClusterId, len(config.Endpoints))

@@ -17,6 +17,9 @@
 // run there and its run does not pass alone: the same commit's settle_testhooks build passing on T3 is that evidence,
 // and the operator records the build once both runs agree. Exit 1: a case failed or did not run; 2: usage.
 //
+// A cluster of one host is refused, exit 2 (QD-756): §19.6 builds every cluster from 4 hosts, and the fork refuses to
+// start one process on a cluster's drives under the settle rules.
+//
 // It writes only under fresh prefixes and deletes what it wrote, so it may run on a cluster that serves, but it
 // stops and starts hosts only where -hosts names containers, which only T3 does. Never in the whole-suite scripts:
 // nightly and at Gn-out (§22.15).
