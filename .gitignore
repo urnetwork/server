@@ -12,6 +12,7 @@
 # binaries
 client/build
 bringyourctl/bringyourctl
+sidecarctl/sidecarctl
 cli/api/api
 cli/mcp/mcp
 cli/taskworker/taskworker
