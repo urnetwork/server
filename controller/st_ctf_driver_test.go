@@ -9,6 +9,7 @@ package controller
 import (
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"reflect"
 	"slices"
 	"strings"
@@ -403,6 +404,44 @@ func TestStCtfDriverRecycleRevertsResidualMissing(t *testing.T) {
 
 	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
 	requireCtfLog(t, f.takeLog(), "recycle root 0")
+}
+
+// §4.6: with the carry account claimed, a surplus above the residual worth
+// less than the runtime's transfer floor cannot move, so the recycle ends
+// without sending and the next root's claim moves it along; a claim of the
+// carry account that someone else made before the driver is moved at once.
+func TestStCtfDriverLeavesDustForTheNextRoot(t *testing.T) {
+	f := ctfTestFinalRoot(t)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	f.takeLog()
+	var key [2]uint64
+	var cumulative uint256.Int
+	for k, amount := range f.chain.claimed {
+		if k[0] == ctfTestPoolId {
+			key, cumulative = k, amount
+		}
+	}
+	// 99,999 rao at 1 TAO per α: below the 100,000 rao floor
+	f.chain.held.AddUint64(&f.chain.held, 99_999)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusSkipped, false, "transfer floor")
+	requireCtfLog(t, f.takeLog())
+	if status, _ := f.records.Outcome(f.ctx, 8, model.StPublishKindCtfRecycle); status != model.StPublishStatusSkipped {
+		t.Fatalf("dust left the recycle %q", status)
+	}
+	// the same α is worth the floor at a higher price, and moves
+	f.chain.alphaPrice = big.NewInt(2e18)
+	requireLedgerV2Outcome(t, f.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "recycle root 0")
+	requireCtfAlerts(t, f.alerts)
+
+	g := ctfTestFinalRoot(t)
+	g.chain.claimed[key] = cumulative
+	g.chain.held.Add(&g.chain.held, &cumulative)
+	requireLedgerV2Outcome(t, g.runStep(&StCtfDriverStep{Kind: StCtfDriverStepRecycle, RootIndex: 0}), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, g.takeLog(), "recycle root 0")
+	if returned := g.chain.recycled[9]; cumulative.IsZero() || !returned.Eq(&cumulative) || g.chain.held.Uint64() != ctfTestSeedRao {
+		t.Fatalf("returned %s of the %s someone else claimed, keeping %s", returned.Dec(), cumulative.Dec(), g.chain.held.Dec())
+	}
 }
 
 // §4.6: a position the runtime lowered below the residual is followed down

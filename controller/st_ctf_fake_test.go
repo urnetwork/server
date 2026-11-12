@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math/big"
 	"slices"
 	"testing"
 	"time"
@@ -87,6 +88,8 @@ type fakeCtfChain struct {
 	residual    uint256.Int
 	seedMinimum uint256.Int
 	spendable   uint256.Int
+	// alphaPrice is the subnet's alpha price, in wei of TAO per α.
+	alphaPrice *big.Int
 	// afterClose runs after a close of the CTF pool succeeds.
 	afterClose func()
 	// staking holds the runtime's StakingHotkeys lists by coldkey, and
@@ -108,6 +111,7 @@ func newFakeCtfChain(log *[]string) *fakeCtfChain {
 		staking: map[[32]byte][][32]byte{}, poolHotkeys: map[[32]byte]bool{ctfTestPoolHotkey: true},
 		// created with its 1 TAO seed as its residual
 		held: *uint256.NewInt(ctfTestSeedRao), residual: *uint256.NewInt(ctfTestSeedRao), seedMinimum: *uint256.NewInt(ctfTestSeedRao / 10),
+		alphaPrice: big.NewInt(1e18),
 	}
 }
 
@@ -240,7 +244,7 @@ func (self *fakeCtfChain) CtfCarryHeld(ctx context.Context, carry common.Address
 	if carry != ctfTestCarry || identity == nil || identity.Coldkey != self.carry.Coldkey || identity.EscrowHotkey != self.carry.EscrowHotkey {
 		return nil, fmt.Errorf("no carry %s with that identity", carry.Hex())
 	}
-	return &StCtfCarryHeld{Residual: self.residual, Position: self.held, SeedMinimum: self.seedMinimum, SpendableRao: self.spendable}, nil
+	return &StCtfCarryHeld{Residual: self.residual, Position: self.held, SeedMinimum: self.seedMinimum, SpendableRao: self.spendable, AlphaPriceWei: self.alphaPrice}, nil
 }
 
 func (self *fakeCtfChain) CtfCommitCensus(ctx context.Context, epoch uint64, noId uint64, hash [32]byte) (string, error) {

@@ -1021,6 +1021,17 @@ func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 	} else if kept.Lt(&held.Residual) {
 		stCtfAlert(cfg, StCtfAlertCarryResidual, fmt.Sprintf("lowered %s", kept.Dec()), "the carry %s holds %s rao on vault2's escrow hotkey, below its residual of %s: the runtime lowered it, and the next recycle or seed() follows it down; a residual root's sweep can clear is restored only by seed()", carry.Hex(), held.Position.Dec(), held.Residual.Dec())
 	}
+	// With the carry account claimed, what sits above the residual moves only
+	// if the runtime's transfer floor lets it, at the alpha price: dust, as a
+	// rounding tick or a donation leaves, waits for the next root's claim,
+	// which moves it along, rather than a recycle the runtime refuses.
+	if !claimDue && kept.Lt(&held.Position) {
+		var surplus uint256.Int
+		surplus.Sub(&held.Position, &kept)
+		if !snClaimRelayClearsFloor(snClaimRelayValueTaoRao(&surplus, held.AlphaPriceWei)) {
+			return stCtfConclude(ctx, records, root.Epoch, kind, model.StPublishStatusSkipped, "already done: the carry account is claimed, and the %s rao above the residual are worth less than the runtime's transfer floor; the next root's recycle moves them", surplus.Dec()), nil
+		}
+	}
 	// Only a recycle that claims or moves stake reaches vault2's list: a
 	// carry with nothing above its residual ends at NothingToRecycle.
 	if claimDue || kept.Lt(&held.Position) {

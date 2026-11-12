@@ -66,13 +66,16 @@ type StCtfCarry struct {
 
 // StCtfCarryHeld is what the carry contract holds of its own (§4.6), read at
 // one finalized block: its residual, its coldkey's position on vault2's
-// escrow hotkey, which bounds what a recycle keeps, its least seed, and the
-// TAO its address can spend, which seed() stakes with any value sent.
+// escrow hotkey, which bounds what a recycle keeps, its least seed, the TAO
+// its address can spend, which seed() stakes with any value sent, and the
+// subnet's alpha price in wei of TAO per α, at which the runtime applies its
+// transfer floor to the carry's moves.
 type StCtfCarryHeld struct {
-	Residual     uint256.Int
-	Position     uint256.Int
-	SeedMinimum  uint256.Int
-	SpendableRao uint256.Int
+	Residual      uint256.Int
+	Position      uint256.Int
+	SeedMinimum   uint256.Int
+	SpendableRao  uint256.Int
+	AlphaPriceWei *big.Int
 }
 
 // Kept is what a recycle keeps on the escrow hotkey: the residual, or the
@@ -109,7 +112,7 @@ type StCtfClient interface {
 	CtfRecycledFor(ctx context.Context, carry common.Address, epoch uint64) (uint256.Int, error)
 	// CtfCarryHeld reads what the carry holds of its own at one finalized
 	// block: residual(), its position on the escrow hotkey that identity
-	// names, seedMinimum() and its address's spendable TAO.
+	// names, seedMinimum(), its address's spendable TAO and the alpha price.
 	CtfCarryHeld(ctx context.Context, carry common.Address, identity *StCtfCarry) (*StCtfCarryHeld, error)
 	// CtfCommitCensus sends commitCtfCensus(epoch, noId, hash) under
 	// ctfcensus:e:no.
@@ -264,6 +267,21 @@ func (self *CoreStClient) CtfCarryHeld(ctx context.Context, carry common.Address
 	}
 	if err != nil {
 		return nil, fmt.Errorf("carry %s balance: %w", carry.Hex(), err)
+	}
+	priceCall := make([]byte, 36)
+	copy(priceCall[:4], snClaimRelayGetAlphaPriceSelector)
+	new(big.Int).SetUint64(self.cfg.Netuid).FillBytes(priceCall[4:])
+	out.AlphaPriceWei, err = stViewAtBlock(self, ctx, snClaimRelayAlphaPrecompile, block, priceCall, func(word []byte) (*big.Int, error) {
+		if len(word) != 32 {
+			return nil, fmt.Errorf("%d bytes", len(word))
+		}
+		return new(big.Int).SetBytes(word), nil
+	})
+	if err == nil && out.AlphaPriceWei.Sign() <= 0 {
+		err = errors.New("zero")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("alpha price of netuid %d: %w", self.cfg.Netuid, err)
 	}
 	return out, nil
 }
