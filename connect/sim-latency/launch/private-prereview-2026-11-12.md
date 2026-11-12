@@ -232,3 +232,20 @@ or source digest, partial-versus-complete provenance, unresolved dependencies,
 failed/incomplete provider output and changes to the eligible-job inventory.
 Persist immutable progress so reconnecting does not repeat completed calls.
 Protected archival failure retries archival only, never model execution.
+
+## Bounded preparation qualification, 22:31 UTC
+
+The lossless coverage planner passed eleven synthetic cases three times each in
+ordinary and race execution. The bounded source/hunk renderer passed six cases
+three times each in both modes. The linked offline-validation retention helper
+and its unchanged original publisher passed sixteen synthetic cases three times
+each in both modes. Actor, guard and capture checks completed successfully.
+Durable private evidence:
+`/var/lib/urnetwork/competition-render-linked-synthetic-qualification-20261112.WtE2fpwl`
+(manifest SHA-256
+`553e2db57205e84950211b4c35da77b57810d8ed9da4d463e81d9e2e844cb78d`).
+
+These tests qualify their stated preparation/retention behavior, not complete
+reviews. No actual inventory plan or new model inference ran in those tests.
+The prospectively bound full-scope provider adapter, result validation,
+cross-scope context closure and actual paired reviews remain in progress.
