@@ -168,5 +168,5 @@ func TestCompetitionHeartbeatDistributedReturnedRollbackKeepsLegacyThreeCallPoli
 // A real final-slot UPDATE follows an actually successful job UPDATE. Each
 // canceled statement/rollback must restore both leases and the original run.
 func TestCompetitionHeartbeatDistributedReturnedRollbackPgThreeFinalSlotFailuresThenFourthSuccess(t *testing.T) {
-	testCompetitionHeartbeatReturnedRollbackPg(t, true)
+	testCompetitionHeartbeatReturnedRollbackPg(t, competitionHeartbeatDatabaseSlotUpdate)
 }
