@@ -244,6 +244,8 @@ func PayDataSolanaStatus(
 	if model.GetCryptoPaymentIntentBySolanaReference(clientSession.Ctx, reference) != nil {
 		return &PayDataSolanaStatusResult{Status: PayDataSolanaStatusUnknown}, nil
 	}
+	// a payment its webhook has not delivered is found on the chain
+	intent = payDataSolanaStatusCheck(clientSession, intent)
 
 	result := &PayDataSolanaStatusResult{
 		Status:    payDataSolanaStatusOf(intent, server.NowUtc()),
