@@ -10,7 +10,8 @@
 #                           100 nightly explorer seeds, then §22.7's scenarios and CC3's leak self-test, then
 #                           T3's cluster faults on the 4-host file-cluster
 #                           layouts (server/local/file-cluster-t3/t3.sh up; TEST-M2-07), which kill and start
-#                           hosts and so run only here, and say "not run" when the layouts do not answer
+#                           hosts and so run only here, and say "not run" when the layouts do not answer, then
+#                           §22.8's disruption rows (TEST-M2-15), which use real time and real processes
 #
 # Everything builds with -tags sidecar_testhooks,sidecar_pending, so the hooks and the pending migration
 # groups are in, and runs with -count=1 and WARP_TEST_ENV_FAIL_FAST=1: server's TestEnv reruns a failed
@@ -119,6 +120,19 @@ cluster_faults() {
   fi
 }
 
+# §22.8's disruption rows beyond the schedules (TEST-M2-15; sidecart3/disruption.go): a resident killed mid-stream, a
+# Redis master's restart under an evs world and a Postgres restart mid-request, carried out for real on the private
+# stores, and an lb drain through nginx from warp's directives (local/sidecar-lb-fixture). They use real time, so they
+# run here and never at merge.
+disruptions() {
+  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_disruption" -run '^(TestT3ResidentKilledMidStreamResetsTransferFailed|TestT3ResidentMigrationKeepsAStreamWholeOrResetsIt|TestT3RedisMasterRestartLosesOnlyRebuildableState|TestT3PostgresRestartMidRequest)$'
+  if command -v "${SIDECAR_LB_NGINX:-nginx}" >/dev/null 2>&1; then
+    go_t3 ./sidecart3 -tags "$tags,sidecar_disruption" -run '^(TestT3LbDrainCutsAStreamedPutWith502|TestT3LbDrainRetriesABufferedPutOnTheSibling)$'
+  else
+    skip "the lb drain rows: no nginx (SIDECAR_LB_NGINX or nginx on PATH)"
+  fi
+}
+
 connect_pin() {
   awk '/path: connect$/ { found = 1; next } found && /ref:/ { print $2; exit }' "$here/local/source-graph/lock.yml"
 }
@@ -128,6 +142,7 @@ if [ "$cadence" = nightly ]; then
   rows
   scenarios
   cluster_faults
+  disruptions
 else
   pin=$(connect_pin)
   last_pin=$(cat "$state_dir/connect-pin" 2>/dev/null || true)

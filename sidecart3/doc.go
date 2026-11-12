@@ -43,6 +43,13 @@
 //     answers or is sent handed to the capture, and T3Sidecar, a sidecar.Sidecar enrolled through
 //     server's own routes whose clients run on server's exchange, which S1's token and genesis clauses
 //     run on.
+//   - disruption.go, §22.8's disruptions beyond the schedules (TEST-M2-15): RedisRestart and
+//     PostgresRestart on the test's own database, ResidentKill on server's exchange, and LbFixture, nginx
+//     from warp's directives (local/sidecar-lb-fixture) whose Drain cuts an upstream block; their rows
+//     run in sidecar-t3.sh's nightly form under sidecar_disruption.
+//   - version_pair.go, §22.8's sidecar N against N±1 (TEST-M2-16): VersionPair, two dispatchers on
+//     server's exchange planting each other's newer and older types and wire majors, each answered
+//     UNIMPLEMENTED or VERSION; a binary of another commit set is not built, and every result says so.
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
