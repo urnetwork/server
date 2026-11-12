@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T07:11:18.792549Z",
+  "observed_at": "2026-11-12T08:20:06.473979Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,12 +17,12 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": true,
-    "publication_held": false,
-    "diagnosis": "Goofe completed its previous native run, reconciled the same attempt with its original deadline, retained artifacts and recorded success. Its fresh host heartbeat restored grading readiness; no explicit hold was changed. Sille's current custody remains released while native execution continues."
+    "grading_ready": false,
+    "publication_held": true,
+    "diagnosis": "Both native evaluations continue. Host-registration freshness after custody handback remains the observed readiness problem; explicit holds were false at the last direct check. The prior Sille attempt reconciled and succeeded without a measurement restart or deadline extension."
   },
   "queue": {
-    "succeeded": 10,
+    "succeeded": 11,
     "failed": 2,
     "queued": 4,
     "running": 2
@@ -33,17 +33,18 @@
       "host_id": "goofe",
       "started_at": "2026-11-12T07:10:20.253976",
       "deadline": "2026-11-12T10:10:20.253976",
-      "observed_phase": "new_fifo_claim"
-    },
-    {
-      "job_id": "01a1ca5d-8d1f-3a64-6356-0dfeacf43557",
-      "host_id": "sille",
-      "started_at": "2026-11-12T05:52:24.10429",
-      "deadline": "2026-11-12T08:52:24.10429",
       "observed_phase": "candidate_measurements",
       "candidate_completed": 7,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T06:15:17.173607Z",
-      "native_process_verified_live": true,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:40:14.196945Z"
+    },
+    {
+      "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
+      "host_id": "sille",
+      "started_at": "2026-11-12T07:37:00.304027",
+      "deadline": "2026-11-12T10:37:00.304027",
+      "observed_phase": "candidate_measurements",
+      "candidate_completed": 3,
+      "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:43:32.322963Z",
       "reattachment_verified": false
     }
   ],
@@ -88,13 +89,21 @@
     "implementation_and_deployment_pending": true,
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
-    "frozen_server_commit": "4394a2ddb33246459747a01a1f5a7c1713921c86",
+    "frozen_server_commit": "3e72d8572839264459898950f0fc040feda50f11",
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "corrected_startup_role_smoke_verified_active_compilation_no_result_yet",
+      "status": "ordinary_controller_cli_root_passed_monitor_failed_conn_closed_diagnosis_pending",
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
-      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.NBkRc8Ov",
+      "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
+      "controller_ordinary_passed": 393,
+      "cli_ordinary_passed": 33,
+      "root_ordinary_passed": 33,
+      "monitor_ordinary_passed": 0,
+      "monitor_failure": "TestMigrationsCompetitionDistributedPublishedPrefixesAndGuardFaults: schema-readiness query returned conn closed; fail-fast stopped the package. Root cause not yet established.",
+      "monitor_log_sha256": "1af94365a7a169d7a2a6c5ddd4d4c554f10c943d13ce106b5eca739e98be210b",
+      "race_started": false,
+      "owned_qa_fixtures_cleaned_up": true,
       "workspace_sha256": "fa98030fed949631072273ad80a100475256da96089e3100137f9c31e3ab6c28",
       "previous_zero_test_dependency_failures": [
         {"evidence": "2IZI2TQU", "log_sha256": "d8f9d157a2fc0598e919ec3741b4a68f45dcb91d8aa07c8e1470fb7f9db7a071"},
