@@ -564,6 +564,8 @@ var alertClassKinds = map[string]alertClassKind{
 	"payment-reconciliation-store-skipped":                incidentAlertClass,
 	"payment-reconciliation-task":                         incidentAlertClass,
 	"payment-reconciliation-watermark-stale":              incidentAlertClass,
+	"payment-received-held":                               incidentAlertClass,
+	"payment-received-uncredited":                         incidentAlertClass,
 	"payment-refund-unmatched":                            incidentAlertClass,
 	"payment-renewal-orphan":                              incidentAlertClass,
 	"payment-solana-unfulfilled":                          incidentAlertClass,

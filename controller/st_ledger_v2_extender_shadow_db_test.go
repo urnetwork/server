@@ -26,8 +26,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// stExtenderShadowTestChain is the shadow run's chain: the pool's state and
-// vault2's fundedThrough.
+// The shadow run's chain: the pool's state and vault2's fundedThrough.
 type stExtenderShadowTestChain struct {
 	state  StLedgerV2State
 	funded map[uint64]uint256.Int

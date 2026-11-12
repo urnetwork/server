@@ -22,6 +22,7 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"per-cycle Pro grants", ProGrantCycleSql, ProGrantCycleVersion},
 		{"ping target evidence refusals", networkPingTargetEvidenceSchemaSql, NetworkPingTargetEvidenceSchemaMigrationVersion},
 		{"extender address ports", networkExtenderAddressPortsSchemaSql, NetworkExtenderAddressPortsSchemaMigrationVersion},
+		{"URL failed later legs and post-quantum outcome", ProviderEgressFp2EvidenceSql, ProviderEgressFp2EvidenceMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {

@@ -90,7 +90,7 @@ func stContractSharesForEpoch(
 		}
 		total += int64(provider.ByteCount)
 		switch {
-		case inForce && amendment.PlatformEndpoints.Holds(provider.ClientId, createTime):
+		case inForce && amendment.PlatformEndpoints.holds(provider.ClientId, createTime):
 			shares.IntraPlatform += provider.ByteCount
 			shares.Pooled = append(shares.Pooled, provider)
 		case inForce && contractShareIsIntraNetwork(provider.NetworkId, originNetworkId):

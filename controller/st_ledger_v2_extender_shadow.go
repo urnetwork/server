@@ -43,13 +43,12 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// StLedgerV2UsageStepExtenderShadow is the usage step that builds an epoch's
-// shadow report.
+// The usage step that builds an epoch's shadow report.
 const StLedgerV2UsageStepExtenderShadow = "extender_shadow"
 
 const stExtenderShadowSchema = "urnetwork-extender-shadow-v1"
 
-// stExtenderShadowChain is the chain as a shadow run reads it: views only.
+// The chain as a shadow run reads it: views only.
 type stExtenderShadowChain interface {
 	LedgerV2State(ctx context.Context, noId uint64) (*StLedgerV2State, error)
 	LedgerV2FundedThrough(ctx context.Context, noId uint64, epoch uint64) (uint256.Int, error)
@@ -60,16 +59,17 @@ type stExtenderShadowChain interface {
 // more; a restart reads each once more.
 var stExtenderShadowConcluded sync.Map
 
+// The key a shadow step concludes under, by deployment, operator and epoch.
 func stExtenderShadowKey(cfg *StConfig, epoch uint64) string {
 	return fmt.Sprintf("%s|%d|%d", cfg.DeploymentKey(), cfg.NoId, epoch)
 }
 
-// stLedgerV2ExtenderShadowDue reports whether an epoch's shadow report is still
-// to be built: its census is captured, its live root has recorded its rows
-// without an extender component, and no report is recorded. An epoch whose rows
-// carry a component is one the amendment covers, built live; one declared
-// unrecoverable has nothing to shadow. A failed read, such as a table not
-// migrated yet, is logged and plans nothing.
+// Reports whether an epoch's shadow report is still to be built: its census is
+// captured, its live root has recorded its rows without an extender component,
+// and no report is recorded. An epoch whose rows carry a component is one the
+// amendment covers, built live; one declared unrecoverable has nothing to
+// shadow. A failed read, such as a table not migrated yet, is logged and plans
+// nothing.
 func stLedgerV2ExtenderShadowDue(ctx context.Context, cfg *StConfig, epoch uint64) (due bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -88,15 +88,16 @@ func stLedgerV2ExtenderShadowDue(ctx context.Context, cfg *StConfig, epoch uint6
 	return model.GetStLedgerV2ExtenderCensus(ctx, key, cfg.NoId, epoch) != nil && model.GetStLedgerV2ExtenderShadow(ctx, key, cfg.NoId, epoch) == nil
 }
 
+// Concludes an epoch's shadow step without a report, saying why.
 func stExtenderShadowConclude(cfg *StConfig, epoch uint64, format string, args ...any) *StPublishOutcome {
 	stExtenderShadowConcluded.Store(stExtenderShadowKey(cfg, epoch), true)
 	return &StPublishOutcome{Status: model.StPublishStatusSkipped, Reason: fmt.Sprintf(format, args...)}
 }
 
-// stLedgerV2RunExtenderShadow builds, publishes and records epoch's shadow
-// report. It waits for the epoch's rows to be recorded by its live root and for
-// its close, and concludes without a report for an epoch the amendment covers,
-// one declared unrecoverable, or one with no eligible usage.
+// Builds, publishes and records epoch's shadow report. It waits for the epoch's
+// rows to be recorded by its live root and for its close, and concludes without
+// a report for an epoch the amendment covers, one declared unrecoverable, or
+// one with no eligible usage.
 func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExtenderShadowChain, epoch uint64) *StPublishOutcome {
 	key := cfg.DeploymentKey()
 	if recorded := model.GetStLedgerV2ExtenderShadow(ctx, key, cfg.NoId, epoch); recorded != nil {
@@ -126,7 +127,37 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 	case recorded.Extenders != nil:
 		return stExtenderShadowConclude(cfg, epoch, "epoch %d's rows were recorded with an extender component, so it has no shadow", epoch)
 	}
-	funding, wait, err := stExtenderShadowFunding(ctx, cfg, chain, epoch)
+	// the provider pool's f_k for the epoch, read once its close is final:
+	// fundedThrough[k] − fundedThrough[k−1], the latter 0 at the pool's first
+	// epoch; wait says why it cannot be read yet
+	readFunding := func() (funding uint256.Int, wait string, err error) {
+		state, err := chain.LedgerV2State(ctx, cfg.NoId)
+		if err != nil {
+			return funding, "", err
+		}
+		switch {
+		case !state.Registered || epoch < state.FirstEpoch:
+			return funding, "", fmt.Errorf("epoch %d is not a settlement v2 epoch of pool %d", epoch, cfg.NoId)
+		case state.LastFundedEpoch < epoch:
+			return funding, fmt.Sprintf("the pool's epoch %d is not closed yet", epoch), nil
+		}
+		through, err := chain.LedgerV2FundedThrough(ctx, cfg.NoId, epoch)
+		if err != nil {
+			return funding, "", err
+		}
+		var before uint256.Int
+		if state.FirstEpoch < epoch {
+			if before, err = chain.LedgerV2FundedThrough(ctx, cfg.NoId, epoch-1); err != nil {
+				return funding, "", err
+			}
+		}
+		if through.Lt(&before) {
+			return funding, "", fmt.Errorf("pool %d's fundedThrough decreases at epoch %d", cfg.NoId, epoch)
+		}
+		funding.Sub(&through, &before)
+		return funding, "", nil
+	}
+	funding, wait, err := readFunding()
 	if err != nil {
 		return stLedgerV2UsageRetry(fmt.Sprintf("epoch %d shadow funding: %s", epoch, err))
 	}
@@ -184,8 +215,7 @@ func stLedgerV2RunExtenderShadow(ctx context.Context, cfg *StConfig, chain stExt
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d shadow report %s", epoch, kept.ReportRef)}
 }
 
-// stLedgerV2RecordedRows reads an epoch's recorded provider rows from their
-// published chunks.
+// Reads an epoch's recorded provider rows from their published chunks.
 func stLedgerV2RecordedRows(ctx context.Context, epoch uint64, refs []string) ([]protocol.LedgerUsageRow, error) {
 	chunks := make([][]byte, len(refs))
 	for i, ref := range refs {
@@ -202,55 +232,24 @@ func stLedgerV2RecordedRows(ctx context.Context, epoch uint64, refs []string) ([
 	return rows, nil
 }
 
-// stExtenderShadowFunding is the provider pool's f_k for a shadow epoch, read once
-// its close is final: fundedThrough[k] − fundedThrough[k−1], the latter 0 at the
-// pool's first epoch. wait says why it cannot be read yet.
-func stExtenderShadowFunding(ctx context.Context, cfg *StConfig, chain stExtenderShadowChain, epoch uint64) (funding uint256.Int, wait string, err error) {
-	state, err := chain.LedgerV2State(ctx, cfg.NoId)
-	if err != nil {
-		return funding, "", err
-	}
-	switch {
-	case !state.Registered || epoch < state.FirstEpoch:
-		return funding, "", fmt.Errorf("epoch %d is not a settlement v2 epoch of pool %d", epoch, cfg.NoId)
-	case state.LastFundedEpoch < epoch:
-		return funding, fmt.Sprintf("the pool's epoch %d is not closed yet", epoch), nil
-	}
-	through, err := chain.LedgerV2FundedThrough(ctx, cfg.NoId, epoch)
-	if err != nil {
-		return funding, "", err
-	}
-	var before uint256.Int
-	if state.FirstEpoch < epoch {
-		if before, err = chain.LedgerV2FundedThrough(ctx, cfg.NoId, epoch-1); err != nil {
-			return funding, "", err
-		}
-	}
-	if through.Lt(&before) {
-		return funding, "", fmt.Errorf("pool %d's fundedThrough decreases at epoch %d", cfg.NoId, epoch)
-	}
-	funding.Sub(&through, &before)
-	return funding, "", nil
-}
-
-// stExtenderShadowInput is everything a shadow report is built from.
+// Everything a shadow report is built from.
 type stExtenderShadowInput struct {
 	ChainId uint64
 	Netuid  uint16
 	NoId    uint64
 	Epoch   uint64
-	// Funding is the epoch's real f_k.
+	// the epoch's real f_k.
 	Funding uint256.Int
-	// Rows are the epoch's provider rows under the amendment, without the pooled
+	// the epoch's provider rows under the amendment, without the pooled
 	// shares, and Pool the epoch reader's pool.
 	Rows []protocol.LedgerUsageRow
 	Pool *model.StEpochExtenderPool
-	// Recorded are the epoch's rows as its live root recorded them, and
-	// RecordedChunks their chunks.
+	// the epoch's rows as its live root recorded them, and RecordedChunks their
+	// chunks.
 	Recorded       []protocol.LedgerUsageRow
 	RecordedChunks []string
 	Census         []ledger.CensusRow
-	// PlatformEndpoints counts the registrations read.
+	// the number of registrations read
 	PlatformEndpoints int
 }
 
@@ -263,6 +262,7 @@ type stExtenderShadowRoot struct {
 	LedgerHash string `json:"ledger_hash"`
 }
 
+// The pooled bytes Z leaves out, as the report states them.
 type stExtenderShadowLeftOut struct {
 	UnfundedBytes        uint64 `json:"unfunded_bytes"`
 	UnfundedContracts    uint64 `json:"unfunded_contracts"`
@@ -270,14 +270,16 @@ type stExtenderShadowLeftOut struct {
 	MeasurementContracts uint64 `json:"measurement_contracts"`
 }
 
+// One coldkey's amounts in the report: under the shadow and as recorded.
 type stExtenderShadowColdkey struct {
 	Coldkey string `json:"coldkey"`
-	// Recorded is the coldkey's amount from the epoch's rows as recorded, the
+	// the coldkey's amount from the epoch's rows as recorded, the
 	// rule in force; Shadow its amount under §8.6. Both are from the same f_k.
 	Recorded string `json:"recorded"`
 	Shadow   string `json:"shadow"`
 }
 
+// The shadow report as published: compact JSON, keys in declaration order.
 type stExtenderShadowReport struct {
 	Schema        string               `json:"schema"`
 	ChainId       uint64               `json:"chain_id"`
@@ -288,8 +290,8 @@ type stExtenderShadowReport struct {
 	ExtendersFrom uint64               `json:"extenders_from"`
 	Pending       stExtenderShadowRoot `json:"pending"`
 	FundedThrough map[string]string    `json:"funded_through"`
-	// ProviderChunks are the shadow's provider rows, and RecordedChunks the
-	// epoch's rows as its live root recorded them.
+	// the shadow's provider rows, and RecordedChunks the epoch's rows as its live
+	// root recorded them.
 	ProviderChunks        []string                  `json:"provider_chunks"`
 	RecordedChunks        []string                  `json:"recorded_chunks"`
 	EligibleProviderBytes uint64                    `json:"eligible_provider_bytes"`
@@ -299,31 +301,32 @@ type stExtenderShadowReport struct {
 	Coldkeys              []stExtenderShadowColdkey `json:"coldkeys"`
 }
 
+// Bytes as 0x-prefixed lowercase hex.
 func stExtenderShadowHex(b []byte) string {
 	return "0x" + hex.EncodeToString(b)
 }
 
-// stExtenderShadowBuild builds a shadow epoch's ledger, a pool's first root over
-// the one epoch, and its report: compact JSON, keys in declaration order,
-// amounts as decimal strings of rao. The rows as recorded are built from the same
-// funding without a component, for each coldkey's amount under the rule in force.
+// Builds a shadow epoch's ledger, a pool's first root over the one epoch, and
+// its report: compact JSON, keys in declaration order, amounts as decimal
+// strings of rao. The rows as recorded are built from the same funding without
+// a component, for each coldkey's amount under the rule in force.
 func stExtenderShadowBuild(ctx context.Context, in *stExtenderShadowInput) ([]byte, *ledger.Ledger, error) {
 	if in.Pool == nil {
 		return nil, nil, errors.New("st ledger v2: a shadow needs the epoch's extender pool")
 	}
-	funded := map[uint64]uint256.Int{in.Epoch: in.Funding}
-	shadow, err := ledger.Build(ctx, ledger.BuildInput{NoID: in.NoId, Epoch: in.Epoch, FirstEpoch: in.Epoch, FundedThrough: funded,
+	epochFundedThroughs := map[uint64]uint256.Int{in.Epoch: in.Funding}
+	shadow, err := ledger.Build(ctx, ledger.BuildInput{NoID: in.NoId, Epoch: in.Epoch, FirstEpoch: in.Epoch, FundedThrough: epochFundedThroughs,
 		Epochs: []ledger.EpochInput{{Epoch: in.Epoch, Rows: in.Rows, Extenders: &ledger.ExtenderInput{Bytes: in.Pool.Bytes(), Census: in.Census}}}})
 	if err != nil {
 		return nil, nil, err
 	}
-	amounts := map[[32]byte]*stExtenderShadowColdkey{}
+	coldkeyAmounts := map[[32]byte]*stExtenderShadowColdkey{}
 	add := func(deltas []protocol.LedgerDelta, shadow bool) {
 		for _, delta := range deltas {
-			entry := amounts[delta.Coldkey]
+			entry := coldkeyAmounts[delta.Coldkey]
 			if entry == nil {
 				entry = &stExtenderShadowColdkey{Coldkey: stExtenderShadowHex(delta.Coldkey[:]), Recorded: "0", Shadow: "0"}
-				amounts[delta.Coldkey] = entry
+				coldkeyAmounts[delta.Coldkey] = entry
 			}
 			if shadow {
 				entry.Shadow = delta.Delta.Dec()
@@ -333,7 +336,7 @@ func stExtenderShadowBuild(ctx context.Context, in *stExtenderShadowInput) ([]by
 		}
 	}
 	add(shadow.Epochs[0].Deltas, true)
-	recorded, err := ledger.Build(ctx, ledger.BuildInput{NoID: in.NoId, Epoch: in.Epoch, FirstEpoch: in.Epoch, FundedThrough: funded,
+	recorded, err := ledger.Build(ctx, ledger.BuildInput{NoID: in.NoId, Epoch: in.Epoch, FirstEpoch: in.Epoch, FundedThrough: epochFundedThroughs,
 		Epochs: []ledger.EpochInput{{Epoch: in.Epoch, Rows: in.Recorded}}})
 	switch {
 	case err == nil:
@@ -352,27 +355,31 @@ func stExtenderShadowBuild(ctx context.Context, in *stExtenderShadowInput) ([]by
 	if err != nil {
 		return nil, nil, err
 	}
+	providerChunks := make([]string, len(allocation.Providers))
+	for i, ref := range allocation.Providers {
+		providerChunks[i] = ref.String()
+	}
 	report := &stExtenderShadowReport{
 		Schema: stExtenderShadowSchema, ChainId: in.ChainId, Netuid: in.Netuid, NoId: in.NoId, Epoch: in.Epoch, FirstEpoch: in.Epoch, ExtendersFrom: in.Epoch,
 		Pending: stExtenderShadowRoot{Epoch: shadow.Commit.Epoch, Root: stExtenderShadowHex(shadow.Commit.Root[:]), Total: shadow.Commit.Total.Dec(),
 			LeafCount: shadow.Commit.LeafCount, LedgerHash: stExtenderShadowHex(shadow.Commit.LedgerHash[:])},
 		FundedThrough:         map[string]string{strconv.FormatUint(in.Epoch, 10): in.Funding.Dec()},
-		ProviderChunks:        refStringsOf(allocation.Providers),
+		ProviderChunks:        providerChunks,
 		RecordedChunks:        append([]string{}, in.RecordedChunks...),
 		EligibleProviderBytes: ledger.EligibleUsage(in.Rows),
 		ExtenderPool:          pool,
 		LeftOut: stExtenderShadowLeftOut{UnfundedBytes: uint64(in.Pool.UnfundedBytes), UnfundedContracts: in.Pool.UnfundedContracts,
 			MeasurementBytes: uint64(in.Pool.MeasurementBytes), MeasurementContracts: in.Pool.MeasurementContracts},
 		PlatformEndpoints: in.PlatformEndpoints,
-		Coldkeys:          make([]stExtenderShadowColdkey, 0, len(amounts)),
+		Coldkeys:          make([]stExtenderShadowColdkey, 0, len(coldkeyAmounts)),
 	}
-	coldkeys := make([][32]byte, 0, len(amounts))
-	for coldkey := range amounts {
+	coldkeys := make([][32]byte, 0, len(coldkeyAmounts))
+	for coldkey := range coldkeyAmounts {
 		coldkeys = append(coldkeys, coldkey)
 	}
 	slices.SortFunc(coldkeys, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
 	for _, coldkey := range coldkeys {
-		report.Coldkeys = append(report.Coldkeys, *amounts[coldkey])
+		report.Coldkeys = append(report.Coldkeys, *coldkeyAmounts[coldkey])
 	}
 	encoded, err := json.Marshal(report)
 	if err != nil {
@@ -381,18 +388,10 @@ func stExtenderShadowBuild(ctx context.Context, in *stExtenderShadowInput) ([]by
 	return encoded, shadow, nil
 }
 
-func refStringsOf(refs []ledger.Ref) []string {
-	out := make([]string, len(refs))
-	for i, ref := range refs {
-		out[i] = ref.String()
-	}
-	return out
-}
-
-// stExtenderShadowVerifyInput reads a shadow report back into the chain facts of
-// ledger.VerifyInput, as the validator's recompute takes them: the pool's first
-// root over the one epoch, funded with its f_k, with the epoch as E_x. fetcher
-// serves the objects it names. Heads is left to the caller: nil skips check 6.
+// Reads a shadow report back into the chain facts of ledger.VerifyInput, as the
+// validator's recompute takes them: the pool's first root over the one epoch,
+// funded with its f_k, with the epoch as E_x. fetcher serves the objects it
+// names. Heads is left to the caller: nil skips check 6.
 func stExtenderShadowVerifyInput(data []byte, fetcher ledger.Fetcher) (*ledger.VerifyInput, error) {
 	var report stExtenderShadowReport
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -445,22 +444,23 @@ func stExtenderShadowVerifyInput(data []byte, fetcher ledger.Fetcher) (*ledger.V
 	return in, nil
 }
 
-// stLedgerV2ExtenderShadowViews narrows the chain clients to the shadow run's
-// views.
+// Narrows the chain clients to the shadow run's views.
 type stLedgerV2ExtenderShadowViews struct {
 	client StLedgerV2Client
 }
 
+// The pool's settlement v2 state, a view.
 func (self stLedgerV2ExtenderShadowViews) LedgerV2State(ctx context.Context, noId uint64) (*StLedgerV2State, error) {
 	return self.client.LedgerV2State(ctx, noId)
 }
 
+// The pool's fundedThrough at an epoch, a view.
 func (self stLedgerV2ExtenderShadowViews) LedgerV2FundedThrough(ctx context.Context, noId uint64, epoch uint64) (uint256.Int, error) {
 	return self.client.LedgerV2FundedThrough(ctx, noId, epoch)
 }
 
-// GetStLedgerV2ExtenderShadow is an epoch's recorded shadow report for the
-// configured deployment and operator, nil before one is recorded.
+// An epoch's recorded shadow report for the configured deployment and operator,
+// nil before one is recorded.
 func GetStLedgerV2ExtenderShadow(ctx context.Context, epoch uint64) (*model.StLedgerV2ExtenderShadow, error) {
 	cfg, _, err := stRequire()
 	if err != nil {

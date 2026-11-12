@@ -66,23 +66,22 @@ type StLedgerV2EpochRows struct {
 	Extenders *StLedgerV2EpochExtenders
 }
 
-// StLedgerV2EpochExtenders is an epoch's extender component as recorded: Z,
-// its extender pool bytes, and its census chunk references, with Z's parts and
-// the contracts and payer networks behind it, which the epoch's usage statement
-// attests (sn demand/usage, statement v2). Its share rows follow from Z, the
-// census and the provider rows.
+// An epoch's extender component as recorded: Z, its extender pool bytes, and
+// its census chunk references, with Z's parts and the contracts and payer
+// networks behind it, which the epoch's usage statement attests (sn
+// demand/usage, statement v2). Its share rows follow from Z, the census and
+// the provider rows.
 type StLedgerV2EpochExtenders struct {
 	Bytes        uint64
 	CensusChunks []string
-	// IntraPlatform and IntraNetwork are Z's parts, and Contracts and Payers
-	// count the contracts behind Z and their distinct payer networks.
+	// Z's parts, then the contracts behind Z and their distinct payer networks
 	IntraPlatform uint64
 	IntraNetwork  uint64
 	Contracts     uint64
 	Payers        uint64
 }
 
-// Equal reports the same component, both nil included.
+// Reports the same component, both nil included.
 func (self *StLedgerV2EpochExtenders) Equal(other *StLedgerV2EpochExtenders) bool {
 	if self == nil || other == nil {
 		return self == other
@@ -92,9 +91,9 @@ func (self *StLedgerV2EpochExtenders) Equal(other *StLedgerV2EpochExtenders) boo
 		self.Contracts == other.Contracts && self.Payers == other.Payers
 }
 
-// Check requires what the epoch reader's pool holds by construction: Z is the
-// sum of its parts, and the contracts and payers behind it exist exactly when Z
-// is positive, with no more payers than contracts.
+// Requires what the epoch reader's pool holds by construction: Z is the sum of
+// its parts, and the contracts and payers behind it exist exactly when Z is
+// positive, with no more payers than contracts.
 func (self *StLedgerV2EpochExtenders) Check() error {
 	switch {
 	case self.IntraPlatform > math.MaxUint64-self.IntraNetwork || self.IntraPlatform+self.IntraNetwork != self.Bytes:
@@ -118,7 +117,7 @@ func RecordStLedgerV2EpochRows(ctx context.Context, deploymentKey StDeploymentKe
 	return RecordStLedgerV2EpochComponents(ctx, deploymentKey, noId, epoch, providerChunks, nil)
 }
 
-// RecordStLedgerV2EpochComponents records an epoch's provider chunk
+// Records an epoch's provider chunk
 // references and its extender component, nil for none, once and together
 // (§6.4 fixed inputs). Recording the same again is a no-op; a record whose
 // rebuild the operator requested is replaced, which ends the request; any

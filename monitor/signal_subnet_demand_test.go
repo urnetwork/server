@@ -597,9 +597,9 @@ func TestSubnetDepositsAuditAV2Source(t *testing.T) {
 	world.requirePrivate(t, alerts)
 }
 
-// subnetDemandExtenderPool is a version 2 statement's extender pool of z bytes,
-// all intra-network, from one contract of one payer, with one eligible extender
-// in one unit taking all of it.
+// A version 2 statement's extender pool of z bytes, all intra-network, from one
+// contract of one payer, with one eligible extender in one unit taking all of
+// it.
 func subnetDemandExtenderPool(z uint64) *usage.ExtenderPool {
 	return &usage.ExtenderPool{IntraNetworkBytes: z, ExtenderPoolBytes: z, ExtenderPoolWeightBytes: z, ExtenderPoolContracts: 1, ExtenderPoolPayers: 1,
 		ExtenderCensus: subnetDemandChunks("census"), ExtenderUnits: 1, EligibleExtenders: 1, ExtenderChunks: subnetDemandChunks("shares")}

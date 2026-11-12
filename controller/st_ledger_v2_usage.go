@@ -520,12 +520,12 @@ func stLedgerV2PublishStatement(ctx context.Context, cfg *StConfig, client StCli
 	return &StPublishOutcome{Status: model.StPublishStatusConfirmed, Reason: fmt.Sprintf("epoch %d statement %s (%s): %d bytes in %d rows, %d users", epoch, published.ContentHash, statement.Kind(), totalBytes, count, record.TotalUsers)}
 }
 
-// stLedgerV2StatementExtenderPool is a version 2 statement's extender pool for an
-// epoch whose committed header carries component: what the header and its census
-// and share-row chunks hold, with Z's parts and the contracts and payers behind
-// it as the epoch's rows record kept them when the component was first built. A
-// record that does not hold the committed component, the same Z and census
-// chunks, cannot attest it (errStLedgerV2UsageHeader).
+// A version 2 statement's extender pool for an epoch whose committed header
+// carries component: what the header and its census and share-row chunks hold,
+// with Z's parts and the contracts and payers behind it as the epoch's rows
+// record kept them when the component was first built. A record that does not
+// hold the committed component, the same Z and census chunks, cannot attest it
+// (errStLedgerV2UsageHeader).
 func stLedgerV2StatementExtenderPool(ctx context.Context, cfg *StConfig, epoch uint64, component *ledger.HeaderExtenders) (*usage.ExtenderPool, *usage.Extenders, error) {
 	recorded := model.GetStLedgerV2EpochRows(ctx, cfg.DeploymentKey(), cfg.NoId, epoch, epoch)[epoch]
 	if recorded == nil || recorded.Extenders == nil {
