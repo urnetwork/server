@@ -106,15 +106,18 @@ func retryCompetitionJobHeartbeatOperationObserved(ctx context.Context, jobExpir
 		}
 		proof = func(err error) bool {
 			return competitionHeartbeatUnadmittedDeadline(err) || competitionHeartbeatSlotUpdateDeadline(err) || competitionHeartbeatJobLockDeadline(err) || competitionHeartbeatDistributedSlotUpdateDeadline(err) ||
-				settings.PrefixMaximumAttempts > 0 && competitionHeartbeatDistributedPreBusinessDeadline(err)
+				settings.DistributedReturnedRollbackMaximumAttempts > 0 && competitionHeartbeatDistributedPreBusinessDeadline(err)
 		}
-		if settings.ScopeLockMaximumAttempts > settings.LeaseRetry.MaximumAttempts || settings.PrefixMaximumAttempts > settings.LeaseRetry.MaximumAttempts {
+		if settings.ScopeLockMaximumAttempts > settings.LeaseRetry.MaximumAttempts || settings.DistributedReturnedRollbackMaximumAttempts > settings.LeaseRetry.MaximumAttempts {
 			continuation = &competitionAuthorityLockContinuation{}
 			if settings.ScopeLockMaximumAttempts > settings.LeaseRetry.MaximumAttempts {
 				continuation.MaximumAttempts, continuation.Completed = settings.ScopeLockMaximumAttempts, competitionHeartbeatScopeLockTimeout
 			}
-			if settings.PrefixMaximumAttempts > settings.LeaseRetry.MaximumAttempts {
-				continuation.DeadlineMaximumAttempts, continuation.CompletedDeadline = settings.PrefixMaximumAttempts, competitionHeartbeatDistributedPreBusinessDeadline
+			if settings.DistributedReturnedRollbackMaximumAttempts > settings.LeaseRetry.MaximumAttempts {
+				continuation.DeadlineMaximumAttempts = settings.DistributedReturnedRollbackMaximumAttempts
+				continuation.CompletedDeadline = func(err error) bool {
+					return competitionHeartbeatDistributedPreBusinessDeadline(err) || competitionHeartbeatDistributedSlotUpdateDeadline(err)
+				}
 			}
 		}
 	}

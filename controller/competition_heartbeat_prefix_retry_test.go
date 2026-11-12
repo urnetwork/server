@@ -64,10 +64,10 @@ func TestCompetitionHeartbeatPrefixRetryFourthAttemptUsesOriginalReserve(t *test
 			settings.LeaseRetry.Now = time.Now
 			settings.AcquireRetry.AttemptTimeout = 2 * time.Second
 			if mode == "old-proof" {
-				settings.PrefixMaximumAttempts = 0
+				settings.DistributedReturnedRollbackMaximumAttempts = 0
 			}
 			if mode == "old-cap" {
-				settings.PrefixMaximumAttempts = settings.LeaseRetry.MaximumAttempts
+				settings.DistributedReturnedRollbackMaximumAttempts = settings.LeaseRetry.MaximumAttempts
 			}
 			started, calls := time.Now(), 0
 			ack, err := retryCompetitionJobHeartbeatOperation(t.Context(), started.Add(time.Minute), started.Add(time.Minute), settings, func(attempt context.Context) error {
@@ -101,7 +101,7 @@ func TestCompetitionHeartbeatPrefixRetryDoesNotEnableDisabledScopeContinuation(t
 		settings.LeaseRetry.Now = time.Now
 		settings.ScopeLockMaximumAttempts = 0
 		settings.LeaseRetry.MaximumAttempts = 8
-		settings.PrefixMaximumAttempts = 12
+		settings.DistributedReturnedRollbackMaximumAttempts = 12
 		started, calls := time.Now(), 0
 		ack, err := retryCompetitionJobHeartbeatOperation(t.Context(), started.Add(time.Minute), started.Add(time.Minute), settings, func(context.Context) error {
 			calls++
@@ -127,7 +127,7 @@ func TestCompetitionHeartbeatPrefixRetryKeepsFiniteCumulativeCap(t *testing.T) {
 			<-attempt.Done()
 			return competitionHeartbeatPrefixFailure(1 + calls%len(competitionHeartbeatDistributedPreBusinessStatements()))
 		})
-		if err == nil || !ack.IsZero() || calls != settings.PrefixMaximumAttempts || time.Since(started) > settings.AcquireRetry.Timeout {
+		if err == nil || !ack.IsZero() || calls != settings.DistributedReturnedRollbackMaximumAttempts || time.Since(started) > settings.AcquireRetry.Timeout {
 			t.Fatal("reviewed prefixes created a new call or time allowance", calls, err)
 		}
 	})
