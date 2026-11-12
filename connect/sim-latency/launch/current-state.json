@@ -487,6 +487,27 @@
         "source_and_dependencies_unchanged": true,
         "failure": "Isolated PostgreSQL reached its unchanged 1 GiB cap; memory.events recorded oom_kill=1, and backend 186 was killed during commit. Exact preceding operation and memory ownership remain under diagnosis. No live evaluator failure or production database outage is inferred."
       },
+      "session_memory_diagnostic": {
+        "status": "live_full_target_native_prefixes_no_test_outcome_yet",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "34a2a189fe1e4dcd894510a394877fb2",
+        "main_pid": 3792412,
+        "control_session": 18770,
+        "evidence_directory": "/dev/shm/competition-census-session-memory-qa-20261112.dWGyTW1M",
+        "source_directory": "/home/by/urnetwork/temp/competition-census-session-memory-diagnostic-20261112",
+        "source_manifest_sha256": "1a9d60bc517b92d1d7e0f66b02485b79f31ceb1b1159e6620d4225fd91e33ef8",
+        "test": "TestMigrationsSignalMergedCatalogUsesExactColumns",
+        "original_prefixes": 221,
+        "postgres_memory_bytes": 1073741824,
+        "go_timeout_minutes": 40,
+        "actor_timeout_minutes": 45,
+        "attribution_preflights_passed": true,
+        "test_run_confirmed_at": "2026-11-12T16:29:30Z",
+        "diagnostic_postprocessing_warning": "Go test-json splits long Output lines into chunks. The frozen per-record jq extraction is known to reject partial JSON payloads; raw continuation bytes remain retained. Preserve actual Go/sampler/guard results separately from parser status and use a separately qualified reassembler after the run. Do not edit or restart the live source for this postprocessing defect.",
+        "automatic_retry_authorized": false,
+        "production_change": false,
+        "qualification_credit": false
+      },
       "completed_remainder4": {
         "passed": 20,
         "failed": 0,
