@@ -1279,15 +1279,8 @@ func PlayWebhook(
 					plan,
 					server.NowUtc(),
 				)
-				// cancelled is not expired: a purchase whose auto-renew was
-				// turned off before its notification was processed is still
-				// paid through its expiry. It is acknowledged (Google refunds a
-				// purchase left unacknowledged for three days) and its paid
-				// time credited through the same gate as an active one's; one
-				// whose paid time is over is left alone. Skipping every
-				// cancelled purchase left a month bought and cancelled while
-				// notifications were refused unacknowledged and never credited
-				// (support inbox 8010, 8046, 8086, 8098).
+				// cancelled is not expired: paid time left is acknowledged (or Google
+				// refunds it after three days) and credited like an active purchase
 				acknowledgeAndCheckRenewal = playPurchasePaid(sub, server.NowUtc())
 			}
 

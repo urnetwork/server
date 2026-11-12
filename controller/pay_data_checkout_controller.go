@@ -210,6 +210,9 @@ func PayDataCheckout(
 		if networkId == nil {
 			return payDataCheckoutError(PurchaseErrorCodeNetworkNotFound, fmt.Sprintf("No network named %s", networkNameArg)), nil
 		}
+		if refuseGuestDestination(clientSession.Ctx, *networkId) {
+			return payDataCheckoutError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestNetworkMessage), nil
+		}
 		target.NetworkId = networkId
 		target.NetworkName = storedName
 	}

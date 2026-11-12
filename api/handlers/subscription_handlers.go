@@ -120,6 +120,15 @@ func SubscriptionVerifyPlayPurchase(w http.ResponseWriter, r *http.Request) {
 	router.WrapWithInputRequireAuth(controller.VerifyPlayPurchase, w, r)
 }
 
+// SubscriptionVerifyStripeCheckout is the client purchase-reporting endpoint
+// for card payments: the app reports the checkout session (or the payment
+// sheet's subscription) as soon as it finishes, and the server reads it back
+// from Stripe and credits it through the webhooks' own code
+// (controller/subscription_verify_stripe_controller.go).
+func SubscriptionVerifyStripeCheckout(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireAuth(controller.VerifyStripeCheckout, w, r)
+}
+
 // subscriptionAppleVerifierFunc is the verifier seam, replaceable only by
 // hermetic tests (this test env has no apple.yml to build the default,
 // panicking verifier from). Production never mutates it.

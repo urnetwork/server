@@ -1,14 +1,11 @@
 package controller
 
 // A Play purchase whose first notification is processed after the customer
-// turned auto-renew off. Play then reports SUBSCRIPTION_STATE_CANCELED with the
-// paid period still running (cancelled is not expired), and the purchase is
-// still unacknowledged. The webhook used to skip that state outright: no
-// acknowledge, so Google refunded the purchase after three days, and no credit,
-// so the customer paid and stayed on Free (support inbox 8010, 8046, 8086 and
-// 8098: a GBP 4.49 month bought on 2026-10-24, cancelled the same day while
-// RTDNs were refused, never credited). The verify endpoint answered invalid for
-// the same purchase, and the reconciler only re-checks tokens Main already has.
+// turned auto-renew off: Play reports it cancelled with the paid period still
+// running (cancelled is not expired) and still unacknowledged. The webhook used
+// to skip that state outright, so the purchase was never acknowledged (Google
+// refunded it after three days) or credited, and the verify endpoint answered
+// invalid for it (support inbox 8010, 8046, 8086 and 8098).
 
 import (
 	"context"
@@ -23,6 +20,8 @@ import (
 	"github.com/urnetwork/server/session"
 )
 
+// The fake Play subscription of a purchase whose auto-renew was turned off,
+// paid through expiryTime.
 func playCanceledTestSubscription(networkId server.Id, productId string, startTime time.Time, expiryTime time.Time) *PlaySubscription {
 	sub := playTestSubscription(networkId, productId, startTime, expiryTime)
 	sub.SubscriptionState = "SUBSCRIPTION_STATE_CANCELED"

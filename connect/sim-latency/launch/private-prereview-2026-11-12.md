@@ -107,3 +107,64 @@ weight provenance or the current full review schema. It does not qualify an
 official review or authorize approval. Durable receipt:
 `/var/lib/urnetwork/competition-private-prereview-transport-smoke-20261112.xrN2WOPt/receipt.json`,
 SHA-256 `564036c230302c24c89e95907f85046fa6ec76bc34f2522d870e9cc5113cd9c5`.
+
+## Authenticated export milestone
+
+The corrected read-only exporter authenticated the currently eligible jobs'
+retained original scores, canonical patches, shared baseline and frozen Git
+context. Actor, guard, source/dependency capture and resource checks all passed.
+The private inventory digest is
+`38022aaaccdb05585eadabd352489ebdf08fdc36a2944179b96f386ed3a0fac1`.
+All copied context bytes were compared and flushed to persistent storage at
+`/mnt/data/competition-private-prereview-contexts-20261112.WABbFBO6/contexts`;
+directories are root-private and files root-owned/read-only. Protected MinIO
+publication of the eventual review results remains a separate step.
+
+Corrections were confined to the new private exporter and its management
+sandbox: hydrate activation timestamps from SQL rather than immutable prepared
+intent JSON; bind egress to the endpoint selected after host settings load;
+override the general blob bucket with the trusted competition artifact bucket;
+and trust exact owning Git repositories for nested replacement modules, without
+global Git trust. These did not alter live scoring or its frozen instrument.
+
+The corrected exporter cut passed 23 synthetic tests three times ordinarily and
+three times under the race detector (138 passes, zero failures/skips). Its
+actor, guard and capture succeeded within the unchanged 128 MiB cache-growth
+budget. A previous cut's 114 native test passes exceeded that budget and remain
+an overall failed qualification, not transferred credit.
+
+The exported packets are explicitly **not token-admitted or authoritative**.
+They retain complete supplied file bytes, not a claim that every transitive
+caller is already covered. Bounded partial code-observation passes may run
+after their own authentication and input checks, but must remain nonfinal and
+cannot approve or disqualify a submission. Complete paired review, union of
+findings and independently verified official reuse are still required.
+
+## Bounded observation milestone
+
+The first full-instrument inputs exceeded both members' tokenizer-verified
+context budgets and were refused before generation. A subsequent Qwen pass
+with an 8,192-token output allowance exhausted that allowance in reasoning;
+its incomplete response remains preserved and is not a review result.
+
+The next observer cut reserves 32,768 output tokens and divides the instrument
+into four explicit, complete-file groups. Sixteen deterministic controls passed
+three ordinary and three race repetitions (96 passes, no failures or skips).
+The model pair, reasoning efforts, context limits and generation deadline did
+not change. All groups and remaining changed-source context are still required.
+
+Both first-group provider calls returned completed responses. Their original
+local validators rejected the observations, so neither currently counts as a
+validated partial review. Qwen's rejection identified a citation-boundary issue:
+an authenticated changed-file patch path was rejected because its complete
+pristine file was deferred. A separate offline validator is being prepared to
+distinguish patch-hunk-only evidence from full-pristine evidence, retaining
+unknown-path rejection and every response-integrity check. It must validate the
+original preserved response without another inference call or modification of
+the original failure receipt. Gemma's local rejection also remains under
+diagnosis. Other scopes remain held pending these checks.
+
+These are private, nonfinal observations, not submission approvals, complete
+honesty reviews, or authority to elect, reward or promote a candidate. No
+candidate patch was executed by this review tooling. Protected result
+publication and full-source paired review remain unfinished.

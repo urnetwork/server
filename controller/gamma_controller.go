@@ -491,10 +491,13 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	}
 
 	offerApplied := false
+	// a plan, and a data pack delivered to the account, land on the caller's
+	// network (purchase_guest_guard.go); a code is redeemed wherever its
+	// buyer chooses
+	if (plan != "" || delivery == model.CryptoDeliveryAccount) && refuseGuestPurchase(clientSession) {
+		return gammaIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestSignInRequiredMessage), nil
+	}
 	if plan != "" {
-		if refuseGuestPurchase(clientSession) {
-			return gammaIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestSignInRequiredMessage), nil
-		}
 		if plan == model.SolanaPlanYearlyOnboarding {
 			if EligibleOnboardingOffer(clientSession, networkId) == nil {
 				return gammaIntentError(PurchaseErrorCodeOfferUnavailable, "The welcome offer is not available."), nil

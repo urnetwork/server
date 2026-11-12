@@ -50406,7 +50406,13 @@ Each (country, resolver) is judged on its own:
 - a partial set: the client's 16 KiB read cut records off (`client_cap`), or
   the answer is a strict subset of its location's set
   (`fewer_than_authoritative`). The second is judged only when the set for
-  the resolver's own /24 was read, since that set can be the smaller one;
+  the resolver's own /24 was read, since that set can be the smaller one. A
+  resolver known to cut an answer it cannot carry to a run of its whole
+  records (`TrimmingResolvers`: DNSPod, by the endpoints the sdk gives cn,
+  which delivers 481 bytes whole) is not judged partial for a run of whole
+  records that each decode, of a set larger than it delivers whole: that is
+  its trim, which China's own set is sized for (below). An empty answer from
+  it, or one with a value that does not decode, is judged as any other;
 - unreachable from here: no answer (to the TXT question nor, from a plain
   resolver, to the A question asked after it), a refusal, a server failure,
   an HTTP or TLS failure. Some regional resolvers refuse foreign questions
@@ -50508,10 +50514,10 @@ alert names the country, the resolver and its endpoint:
 - `fewer_than_authoritative`: the resolver trims the set; compare its answer
   with `dig +tcp +norec +subnet=<resolver ip>/24 TXT extender.bringyour.com
   @<a nameserver from dig NS extender.bringyour.com>`. For cn, China's own
-  set is held to what Alidns and DNSPod delivered whole on 11-12 (below); a
-  partial cn answer of it means a resolver's ceiling moved, or
-  `cn_record_count` was raised past DNSPod's one record. Measure again as
-  below before moving `extenderDnsCnDnspodMaxMessageBytes` or
+  set is held to what Alidns delivered whole on 11-12, and DNSPod's run of
+  one whole record of it is not reported (below); a partial cn answer from
+  Alidns means its ceiling moved. Measure again as below before moving
+  `extenderDnsCnDnspodMaxMessageBytes` or
   `extenderDnsCnAlidnsMaxMessageBytes`.
 
 A resolver that keeps failing its region belongs out of the sdk's
@@ -50528,13 +50534,14 @@ with the name's whole set over TCP. Sizes are the whole DNS message.
 
 | Resolver | Delivered whole | Larger answers |
 |---|---|---|
-| DNSPod: DoH 1.12.12.12 and 120.53.53.53, plain 119.29.29.29 over UDP | up to 481 bytes (one 410-character record) | 948 to 2,297 bytes trimmed to under 512, not marked truncated; 4,511 bytes marked truncated with none. The EDNS size asked (none, 1,232 or 4,096) changes nothing |
+| DNSPod: DoH 1.12.12.12 and 120.53.53.53, plain 119.29.29.29 over UDP | up to 481 bytes (one 410-character record) | 948 to 2,297 bytes cut at record boundaries, not marked truncated: all ten such answers parsed, every value a whole record of the set, 4 to 6 of them in 433 to 462 bytes, never a partial record and never none; 4,511 bytes marked truncated with none. The EDNS size asked (none, 1,232 or 4,096) changes nothing |
 | DNSPod: plain 119.29.29.29 over TCP | 948 bytes once | a 481-byte answer came back empty; a client never retries over TCP an answer that arrived unmarked |
 | Alidns: DoH 223.5.5.5 and 223.6.6.6, plain 223.5.5.5 over UDP and TCP | up to 1,144 bytes (16 records) | trimmed to 1,151 to 1,204 bytes, not marked truncated |
 
-A Main record is 264 to 368 characters, so DNSPod delivers one whole and
-Alidns three (two, when all three are near the longest). Both forward the
-asker's subnet, and a Chinese /24 is answered
+A Main record is 264 to 368 characters, so Alidns delivers three of them
+whole (two near the longest, four of the shortest), and DNSPod cuts such an
+answer to one whole record. Both forward the asker's subnet, and a Chinese /24
+is answered
 Asia's set: 13 records, 4.6 KB, of which Alidns served 3 (1,200 bytes) and
 DNSPod none. A client takes the answer of whichever DoH server answers first,
 so a client in China learned three extenders from DNS, or none.
@@ -50544,29 +50551,35 @@ From 11-12 the publisher answers China with sets of its own
 identifiers `extender-country-CN-<type>`, Route 53's CN country, which answers
 China in place of Asia's sets):
 
-- a TXT set of `cn_record_count` records (the dns block; 1 by default, what
-  both resolvers deliver whole), each record alone within DNSPod's 481 bytes
-  and all of them within Alidns's 1,204, counting the question, the OPT record
-  and a /24 client subnet;
+- a TXT set of as many records as Alidns delivers whole, all of them within
+  its 1,204 bytes, and each alone within the 462 bytes DNSPod's trimmed
+  answers ran to, so DNSPod's cut keeps one whole record of it, counting the
+  question, the OPT record and a /24 client subnet. `cn_record_count` (the
+  dns block) caps it, at 4 unset, which Alidns's ceiling reaches first for
+  every record Main signs: the best for users (owner, 2026-11-12);
 - A and AAAA sets of exactly the addresses those records name; a family none
   of them has is not answered by China's sets, and Route 53 answers China's
   question for it from Asia's set, whose addresses no record of China's
   vouches for, so a client never dials them;
-- a window that rotates every tick through the extenders China's own vantage
-  of the dns channel is dealt each epoch (R2: its partition of Asia's open
-  addresses, then the fill), canaries first while a slot is left to rotate, so
-  a day's lookups in China cover that vantage's partition and never more.
+- a window that moves one place along the extenders China's own vantage of
+  the dns channel is dealt each epoch every tick (R2: its partition of Asia's
+  open addresses, then the fill), canaries first while a slot is left to
+  rotate, so every extender heads a window once a cycle and a day's lookups in
+  China cover that vantage's partition and never more.
 
-Raising `cn_record_count` to 3 gives a client whose lookup lands on Alidns
-three records and one on DNSPod still one, trimmed out of the three and
-unmarked, which this half reports as `extender-dns-country-partial` for
-DNSPod. The extenders dashboard's "China's own set" panel shows what Route 53
-accepted each tick (`urnetwork_taskworker_extender_dns_country_records`).
+A client whose lookup lands on Alidns gets about three records, and one on
+DNSPod one whole record, unmarked; this half takes DNSPod's run of whole
+records as its trim and reports it neither stale nor partial (above), while an
+empty or broken answer from DNSPod still alerts. Setting `cn_record_count` to
+1 gives every client in China the one record both deliver whole. The
+extenders dashboard's "China's own set" panel shows what Route 53 accepted
+each tick (`urnetwork_taskworker_extender_dns_country_records`).
 
 Expected once the taskworker carrying it and this monitor are deployed: every
-cn resolver fresh and whole, a 1-record answer of about 0.4 KB, the set Route
-53 gives the resolver's /24. Until the monitor carries the client subnet, its
-cn identities keep judging the set Route 53 gives the monitor's own location.
+cn resolver fresh, Alidns whole (about three records, about 1.1 KB) and
+DNSPod one whole record of the set Route 53 gives the resolver's /24. Until
+the monitor carries the client subnet, its cn identities keep judging the set
+Route 53 gives the monitor's own location.
 
 ### 28.3 Provider fleet departure
 

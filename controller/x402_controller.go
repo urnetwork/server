@@ -1505,6 +1505,13 @@ func X402SettleInlineUpgrade(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 
+	// nothing is verified or settled for a guest network
+	// (purchase_guest_guard.go)
+	if err := X402RefuseGuest(clientSession); err != nil {
+		writeX402PurchaseError(w, err)
+		return false
+	}
+
 	result, err := X402Purchase(
 		clientSession.Ctx,
 		clientSession.ByJwt.NetworkId,
@@ -1934,6 +1941,13 @@ func X402PurchaseHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		WriteX402PaymentRequired(w, terms)
+		return
+	}
+
+	// nothing is verified or settled for a guest network
+	// (purchase_guest_guard.go)
+	if err := X402RefuseGuest(clientSession); err != nil {
+		writeX402PurchaseError(w, err)
 		return
 	}
 
