@@ -100,7 +100,7 @@ func TestStExtenderDbAmendedUsageReadsTheLiveContractRow(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		start := time.Date(2026, 11, 27, 18, 29, 0, 0, time.UTC)
+		start := time.Date(2026, 11, 27, 18, 25, 0, 0, time.UTC)
 		end := start.Add(time.Hour)
 		at := start.Add(time.Minute)
 		id := contractPayoutTestId
@@ -333,7 +333,7 @@ func TestStExtenderDbCensusRecords(t *testing.T) {
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		start := time.Date(2026, 11, 20, 18, 28, 0, 0, time.UTC)
+		start := time.Date(2026, 11, 20, 18, 25, 0, 0, time.UTC)
 		end := start.Add(7 * 24 * time.Hour)
 		id := contractPayoutTestId
 		create := func(extender byte, created time.Time, revoked *time.Time, active bool, addresses ...*NetworkExtenderAddress) server.Id {
@@ -422,7 +422,7 @@ func TestStExtenderDbCensusStoredOnce(t *testing.T) {
 		if GetStLedgerV2ExtenderCensus(ctx, testStDeploymentKey, 1, 8) != nil {
 			t.Fatal("a census before its capture")
 		}
-		first := time.Date(2026, 12, 4, 18, 31, 0, 0, time.UTC)
+		first := time.Date(2026, 12, 4, 18, 26, 0, 0, time.UTC)
 		captured := CaptureStLedgerV2ExtenderCensus(ctx, testStDeploymentKey, 1, 8, EncodeStExtenderCensus(rows), uint64(len(rows)), first)
 		if captured == nil || captured.Rows != 2 || !captured.CaptureTime.Equal(first) {
 			t.Fatalf("captured %+v", captured)

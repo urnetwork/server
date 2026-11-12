@@ -109,7 +109,7 @@ func TestStExtenderDbAmendedUsageClassifiesPlatformEndpointsByCreateTime(t *test
 	env.RerunCount = 0
 	env.Run(t, func(t testing.TB) {
 		ctx := t.Context()
-		start := time.Date(2026, 11, 27, 18, 29, 0, 0, time.UTC)
+		start := time.Date(2026, 11, 27, 18, 25, 0, 0, time.UTC)
 		end := start.Add(time.Hour)
 		id := contractPayoutTestId
 		origin, edge := ContractParticipant{ClientId: id(1), NetworkId: id(101)}, ContractParticipant{ClientId: id(2), NetworkId: id(102)}

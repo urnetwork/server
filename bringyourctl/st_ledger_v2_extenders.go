@@ -107,8 +107,9 @@ func stV2PlatformEndpoints(opts docopt.Opts) {
 }
 
 // stV2PlatformEndpointRegister registers a client as a platform endpoint from
-// now on (§8.6.2): tlsedge, smtpedge or mxedge, on one of the operator's own
-// networks.
+// now on (§8.6.2): tlsedge, smtpedge or mxedge, the kinds the signed amendment
+// entry covers, on one of the operator's own networks. A new kind needs a new
+// signed entry.
 func stV2PlatformEndpointRegister(opts docopt.Opts) {
 	clientIdStr, _ := opts.String("--client_id")
 	clientId, err := server.ParseId(clientIdStr)

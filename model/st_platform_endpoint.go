@@ -7,15 +7,22 @@
 // exactly when the contract was created while the endpoint's registration was in
 // force.
 //
-// The registry reads §8.6 narrowly. At E_x the platform endpoints are sidecar's
-// edge platform clients, tlsedge, smtpedge and mxedge (decision 6), so those are
-// the only kinds; a registration names a client that exists on one of the
-// operator's own networks (its gated durable networks or the networks it
-// declares it controls, the networks E5 names), never on a declared measurement
-// network, and holds from the moment it is made, never backdated. Sidecar has not
-// shipped, so the registry starts empty and intra-platform bytes are 0 until the
-// operator registers an endpoint. Registrations are kept forever: a revocation
-// only ends one, so an epoch read again classifies its contracts as it did.
+// The registry reads §8.6 narrowly (the owner's decisions of 2026-11-12):
+//   - The kinds are the signed set. At E_x the platform endpoints are sidecar's
+//     edge platform clients, its TLS, SMTP and MX edges: tlsedge, smtpedge and
+//     mxedge (decision 6). Every other kind is refused before anything is read.
+//     A new kind is a new rule: it needs a new signed amendment entry before it
+//     is added here.
+//   - "On an operator network" is the test. A registration names an active
+//     client on one of the operator's own networks (its gated durable networks
+//     or the networks it declares it controls, the networks E5 names), never on
+//     a declared measurement network.
+//   - A registration holds from the moment it is made, never backdated.
+//
+// Sidecar has not shipped, so the registry starts empty and intra-platform bytes
+// are 0 until the operator registers an endpoint. Registrations are kept
+// forever: a revocation only ends one, so an epoch read again classifies its
+// contracts as it did.
 package model
 
 import (
@@ -28,7 +35,8 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// The kinds of platform endpoint: sidecar's edge platform clients.
+// The kinds of platform endpoint: sidecar's edge platform clients, the set the
+// signed amendment entry covers. Adding one needs a new signed entry.
 const (
 	StPlatformEndpointTlsEdge  = "tlsedge"
 	StPlatformEndpointSmtpEdge = "smtpedge"
@@ -102,13 +110,13 @@ type StPlatformEndpointNetworks struct {
 }
 
 // RegisterStPlatformEndpoint registers clientId as a platform endpoint of kind
-// from now on. It is refused for a kind other than sidecar's three edges, a
-// client that does not exist or is not active, a client whose network is not
-// one of the operator's own or is a measurement network, a client already
-// registered, or an empty by.
+// from now on. It is refused, before anything is read, for a kind other than
+// sidecar's three edges, the signed set; and for a client that does not exist or
+// is not active, a client whose network is not one of the operator's own or is a
+// measurement network, a client already registered, or an empty by.
 func RegisterStPlatformEndpoint(ctx context.Context, clientId server.Id, kind string, by string, networks StPlatformEndpointNetworks) (*StPlatformEndpoint, error) {
 	if !slices.Contains(StPlatformEndpointKinds, kind) {
-		return nil, fmt.Errorf("%w: kind %q is not one of %v", ErrStPlatformEndpoint, kind, StPlatformEndpointKinds)
+		return nil, fmt.Errorf("%w: kind %q is not one of %v, the kinds the signed amendment entry covers; a new kind needs a new signed entry", ErrStPlatformEndpoint, kind, StPlatformEndpointKinds)
 	}
 	if by == "" {
 		return nil, fmt.Errorf("%w: a registration names who makes it", ErrStPlatformEndpoint)
