@@ -727,6 +727,12 @@ type ExtenderActivateResult struct {
 	// extender makes a key of its network's own. Left out on every other
 	// answer; an extender that predates it reads `error` alone.
 	Refusal string `json:"refusal,omitempty"`
+	// true on every answer: this operator keeps each address's ports
+	// (connect/EXTENDER.md S10), storing the ports a post offers with that
+	// family's address alone and signing them per address, so an extender may
+	// offer each family its own ports. An extender that reads it does so only
+	// while the operator's last answer said it; one that predates it skips it.
+	AddressPorts bool `json:"address_ports,omitempty"`
 }
 
 // The wire form of a wait (`retry_after_seconds`): whole seconds, rounded up
@@ -1223,9 +1229,10 @@ func (self *extenderActivateService) activate(
 			probeSteps,
 		)
 		return &ExtenderActivateResult{
-			Activated:  false,
-			Error:      message,
-			ProbeSteps: probeSteps,
+			Activated:    false,
+			Error:        message,
+			ProbeSteps:   probeSteps,
+			AddressPorts: true,
 		}, nil
 	}
 	// a refusal that judged nothing about the caller -- a busy api, a spent
@@ -1783,6 +1790,7 @@ func (self *extenderActivateService) activate(
 		AllowedHosts:    config.AllowedHosts(),
 		Record:          recordBase64,
 		Bootstrap:       bootstrap,
+		AddressPorts:    true,
 	}, nil
 }
 

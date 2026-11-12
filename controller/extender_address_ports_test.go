@@ -5,8 +5,10 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"net/netip"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/urnetwork/server"
 
 	"github.com/urnetwork/server/model"
+	"github.com/urnetwork/server/session"
 )
 
 // The ports of each extender address (connect/EXTENDER.md S10). A router's
@@ -117,6 +120,29 @@ func TestSignExtenderRecordNamesTheAddressPorts(t *testing.T) {
 	}
 }
 
+// Every answer says the operator keeps each address's ports, a refusal too, so
+// an extender offers each family its own ports only to an operator that keeps
+// them: one that predates them would sign each family on the other's.
+func TestExtenderActivateAnswersThatItKeepsAddressPorts(t *testing.T) {
+	clientSession := session.Testing_CreateClientSession(context.Background(), &session.ByJwt{})
+	clientSession.ClientAddress = "127.0.0.1:54321"
+	result, err := ExtenderActivate(&ExtenderActivateArgs{Carriers: []string{connect.ExtenderCarrierTcp}}, clientSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Activated || !result.AddressPorts {
+		t.Fatalf("activated %t, address ports %t, expected a refusal that says the operator keeps them",
+			result.Activated, result.AddressPorts)
+	}
+	answer, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(answer), `"address_ports":true`) {
+		t.Fatalf("the answer %s does not carry address_ports", answer)
+	}
+}
+
 // An address is measured only where it serves tcp on 443 (decision 4), judged
 // by its own port: a v4 address the router forwards on 40443 is left out
 // whichever family activated last, and the v6 address on 443 is measured.
@@ -185,6 +211,9 @@ func TestExtenderActivateKeepsEachFamilysPorts(t *testing.T) {
 			}
 			if !result.Activated {
 				t.Fatalf("the activation from %s was refused: %s", clientIp, result.Error)
+			}
+			if !result.AddressPorts {
+				t.Fatalf("the activation from %s does not say the operator keeps each address's ports", clientIp)
 			}
 			return verifyTestExtenderRecord(t, rootPublicKey, result.Record)
 		}

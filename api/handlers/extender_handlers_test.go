@@ -85,6 +85,9 @@ func TestExtenderActivateArgsFieldNames(t *testing.T) {
 func TestExtenderActivateResultFieldNames(t *testing.T) {
 	want := []string{
 		"activated",
+		// the operator keeps each address's ports, on every answer
+		// (EXTENDER.md S10)
+		"address_ports",
 		"allowed_hosts",
 		"bootstrap",
 		"carriers",
