@@ -19,8 +19,9 @@ package api
 //
 //   - TestSpecRoutesImplemented: every spec path+method has a matching route in
 //     Routes(), and every route Routes() serves, streaming routes included, is
-//     documented: a /competition/ route in sn/api/competition.yml, every other
-//     route here. An undocumented route fails.
+//     documented: a /competition/ route in sn/api/competition.yml, a /sn/ctf
+//     route and GET /sn/openapi.yml in sn/api/operator.yml, every other route
+//     here. An undocumented route fails.
 //
 // Security/auth parity is intentionally out of scope (not reflectable).
 
@@ -249,6 +250,7 @@ func registry() []specEndpoint {
 		{"POST", "/sn/wallet/hotkey-delegation/history", rt(controller.SnHotkeyNetworkDelegationHistoryArgs{}), rt(controller.SnWalletMappingHistoryResult{})},
 		{"POST", "/sn/wallet/validate", rt(controller.SnValidateWalletArgs{}), rt(controller.SnValidateWalletResult{})},
 		{"GET", "/sn/head", nil, rt(controller.SnHeadResult{})},
+		{"GET", "/sn/ledger/account", nil, rt(controller.StLedgerV2AccountsResult{})},
 		{"GET", "/sn/claim-relay", nil, rt(controller.SnClaimRelayResult{})},
 		{"POST", "/sn/claim-relay/claim-now", rt(controller.SnClaimRelayClaimNowArgs{}), rt(controller.SnClaimRelayClaimNowResult{})},
 		{"GET", "/sn/top", nil, rt(controller.SnTopResult{})},
@@ -303,6 +305,17 @@ func loadSpec(t *testing.T) *specDoc {
 
 func loadCompetitionSpec(t *testing.T) *specDoc {
 	return loadSpecAt(t, "..", "..", "sn", "api", "competition.yml")
+}
+
+func loadOperatorSpec(t *testing.T) *specDoc {
+	return loadSpecAt(t, "..", "..", "sn", "api", "operator.yml")
+}
+
+// operatorOwned reports the routes sn/api/operator.yml alone documents: the
+// capture the flag routes and the document itself. GET /sn/ledger/account is
+// in both documents.
+func operatorOwned(path string) bool {
+	return path == "/sn/ctf" || strings.HasPrefix(path, "/sn/ctf/") || path == "/sn/openapi.yml"
 }
 
 func loadSpecAt(t *testing.T, pathParts ...string) *specDoc {
@@ -782,9 +795,15 @@ func TestSpecRoutesImplemented(t *testing.T) {
 		t.Errorf("spec endpoint %q has no matching route in Routes()", k)
 	}
 
-	undocumented := undocumentedRoutes(implKeys, specKeys, specOperationKeys(loadCompetitionSpec(t)))
+	undocumented := undocumentedRoutes(implKeys, specKeys, specOperationKeys(loadCompetitionSpec(t)), specOperationKeys(loadOperatorSpec(t)))
 	for _, k := range undocumented {
 		t.Errorf("route %q is served but not documented", k)
+	}
+	// bringyour.yml must not list the routes sn/api/operator.yml owns
+	for key := range specKeys {
+		if _, path, _ := strings.Cut(key, " "); operatorOwned(path) {
+			t.Errorf("spec endpoint %q belongs in sn/api/operator.yml, not bringyour.yml", key)
+		}
 	}
 
 	t.Logf("spec routes: %d spec endpoints, %d impl routes, %d spec endpoints unmatched, %d impl routes undocumented",
@@ -808,14 +827,19 @@ func specOperationKeys(spec *specDoc) map[string]bool {
 
 // undocumentedRoutes returns, sorted, the served route keys no spec documents.
 // A /competition/ route is documented by sn/api/competition.yml
-// (competitionKeys), every other route by bringyour.yml (specKeys); a route
-// listed only in the other document is undocumented.
-func undocumentedRoutes(implKeys, specKeys, competitionKeys map[string]bool) []string {
+// (competitionKeys), a route operatorOwned names by sn/api/operator.yml
+// (operatorKeys), and every other route by bringyour.yml (specKeys); a route
+// listed only in another document is undocumented.
+func undocumentedRoutes(implKeys, specKeys, competitionKeys, operatorKeys map[string]bool) []string {
 	var undocumented []string
 	for key := range implKeys {
 		documented := specKeys[key]
-		if _, path, _ := strings.Cut(key, " "); strings.HasPrefix(path, "/competition/") {
+		_, path, _ := strings.Cut(key, " ")
+		switch {
+		case strings.HasPrefix(path, "/competition/"):
 			documented = competitionKeys[key]
+		case operatorOwned(path):
+			documented = operatorKeys[key]
 		}
 		if !documented {
 			undocumented = append(undocumented, key)
@@ -826,21 +850,124 @@ func undocumentedRoutes(implKeys, specKeys, competitionKeys map[string]bool) []s
 }
 
 // A served route that no spec documents is reported, a streaming route like
-// any other, and a competition route counts as documented only by
-// sn/api/competition.yml.
+// any other, a competition route counts as documented only by
+// sn/api/competition.yml, and a capture the flag route or the document only
+// by sn/api/operator.yml.
 func TestSpecUndocumentedRoutesAreReported(t *testing.T) {
 	implKeys := map[string]bool{
 		"GET /hello":                  true,
 		"POST /provider-work/v1/cuts": true,
 		"GET /competition/info":       true,
 		"POST /competition/score":     true,
+		"GET /sn/ctf":                 true,
+		"GET /sn/ctf/top":             true,
+		"GET /sn/openapi.yml":         true,
+		"GET /sn/ledger/account":      true,
 	}
-	specKeys := map[string]bool{"GET /hello": true, "POST /competition/score": true}
+	specKeys := map[string]bool{"GET /hello": true, "POST /competition/score": true, "GET /sn/ctf/top": true, "GET /sn/ledger/account": true}
 	competitionKeys := map[string]bool{"GET /competition/info": true}
-	got := undocumentedRoutes(implKeys, specKeys, competitionKeys)
-	want := []string{"POST /competition/score", "POST /provider-work/v1/cuts"}
+	operatorKeys := map[string]bool{"GET /sn/ctf": true, "GET /sn/openapi.yml": true, "GET /sn/ledger/account": true}
+	got := undocumentedRoutes(implKeys, specKeys, competitionKeys, operatorKeys)
+	want := []string{"GET /sn/ctf/top", "POST /competition/score", "POST /provider-work/v1/cuts"}
 	if !slices.Equal(got, want) {
 		t.Errorf("undocumented routes = %v, want %v", got, want)
+	}
+}
+
+// operatorRegistry maps the routes sn/api/operator.yml documents to their Go
+// answers. The document is held to its own examples in sn (api/operator_test.go);
+// here every property it gives an answer must be a Go JSON field of a
+// compatible type, nullable ones pointers.
+func operatorRegistry() []specEndpoint {
+	return []specEndpoint{
+		{"GET", "/sn/ctf", nil, rt(controller.SnCtfResult{})},
+		{"GET", "/sn/ctf/here", nil, rt(controller.SnCtfHereResult{})},
+		{"GET", "/sn/ctf/country/{cc}", nil, rt(controller.SnCtfCountryResult{})},
+		{"GET", "/sn/ctf/top", nil, rt(controller.SnCtfTopResult{})},
+		{"GET", "/sn/ctf/epoch/{epoch}", nil, rt(controller.SnCtfEpochResult{})},
+		{"GET", "/sn/ctf/client", nil, rt(controller.SnCtfClientResult{})},
+		// kind, label and unavailable_pools
+		{"GET", "/sn/ledger/account", nil, rt(controller.StLedgerV2AccountsResult{})},
+		// the document itself, as YAML
+		{"GET", "/sn/openapi.yml", nil, nil},
+	}
+}
+
+func TestOperatorSpecConformance(t *testing.T) {
+	spec := loadOperatorSpec(t)
+	checker := &conformanceChecker{t: t, spec: spec}
+	covered := map[string]bool{}
+	for _, ep := range operatorRegistry() {
+		endpoint := ep.method + " " + ep.path
+		covered[endpoint] = true
+		if !spec.hasOperation(ep.method, ep.path) {
+			t.Errorf("[%s] endpoint is in the registry but not found in the spec", endpoint)
+			continue
+		}
+		req, resp := spec.operation(ep.method, ep.path)
+		if ep.argType != nil && req != nil {
+			checker.check(endpoint+" (request)", "", req, ep.argType, 0)
+		}
+		if ep.resultType != nil && resp != nil {
+			checker.check(endpoint+" (response)", "", resp, ep.resultType, 0)
+		}
+	}
+	// every operation of the document has its Go answer here
+	for key := range specOperationKeys(spec) {
+		found := false
+		for endpoint := range covered {
+			method, path, _ := strings.Cut(endpoint, " ")
+			if key == method+" "+normalizePath(path) {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("operator spec endpoint %q is not in operatorRegistry", key)
+		}
+	}
+}
+
+func TestOperatorSpecRoutesImplemented(t *testing.T) {
+	implKeys := implRouteKeys()
+	for key := range specOperationKeys(loadOperatorSpec(t)) {
+		if !implKeys[key] {
+			t.Errorf("operator spec endpoint %q has no matching route in Routes()", key)
+		}
+	}
+	for _, endpoint := range operatorRegistry() {
+		if key := endpoint.method + " " + normalizePath(endpoint.path); !implKeys[key] {
+			t.Errorf("operator registry endpoint %q has no matching implemented route", key)
+		}
+	}
+}
+
+// Only GET /sn/ctf/client takes a credential, a client's bearer token; every
+// other operation of the document is public and says so with security: [].
+func TestOperatorSpecSecurity(t *testing.T) {
+	spec := loadOperatorSpec(t)
+	if security, ok := spec.root["security"]; ok && len(asSlice(security)) != 0 {
+		t.Errorf("operator spec root security = %v, want none", security)
+	}
+	for path, methodsAny := range spec.paths {
+		for method, operationAny := range asMap(methodsAny) {
+			switch method {
+			case "get", "post", "put", "delete", "patch":
+			default:
+				continue
+			}
+			key := strings.ToUpper(method) + " " + path
+			security, overrides := asMap(operationAny)["security"]
+			requirements := asSlice(security)
+			if key == "GET /sn/ctf/client" {
+				if !overrides || len(requirements) != 1 || len(asMap(requirements[0])) != 1 || asMap(requirements[0])["BearerAuth"] == nil {
+					t.Errorf("%s must declare security [BearerAuth: []], has %v", key, security)
+				}
+				continue
+			}
+			if !overrides || len(requirements) != 0 {
+				t.Errorf("public operation %s must declare security: [], has %v", key, security)
+			}
+		}
 	}
 }
 
