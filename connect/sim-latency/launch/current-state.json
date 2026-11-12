@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T09:41:55.075558Z",
+  "observed_at": "2026-11-12T10:56:22.767271Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -19,12 +19,13 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "diagnosis": "Both previously measured attempts are now recorded succeeded after same-clock reconciliation and retention. Goofe's intervening build failure has offline frozen-base nonapplication evidence. Both hosts have claimed their following FIFO jobs; no original deadline or measurement history was reset."
+    "api_observed_at": "2026-11-12T10:50:16Z",
+    "diagnosis": "Goofe recorded success after same-attempt fence-33 reconciliation, then claimed the next FIFO job at fence 34; its new native service is active. Sille completed 9/9 with native exit zero and both cleanup checks verified, but central retention is pending and its last observed fence-18 lease remains expired after the 10:02:59 heartbeat error. No new terminal failure, clock reset, grant or maintenance hold has been recorded."
   },
   "queue": {
-    "succeeded": 13,
+    "succeeded": 14,
     "failed": 3,
-    "queued": 2,
+    "queued": 1,
     "running": 2
   },
   "recent_completed": [
@@ -62,19 +63,37 @@
       "native_cleanup_verified": true,
       "native_stop_cleanup_verified": true,
       "database_custody": "same_attempt_reconciliation_fence_17_original_clock_preserved"
-    }
-  ],
-  "active_attempts": [
+    },
     {
       "job_id": "01a1cd84-9163-5ec0-4f8a-d56902ef4a38",
       "host_id": "goofe",
       "run_id": "172485374a7f77775e327f1b38818f243412a523375f3c411952ef004563da6f",
       "started_at": "2026-11-12T09:08:11.310398",
       "deadline": "2026-11-12T12:08:11.310398",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 3,
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T10:44:19.361657Z",
+      "candidate_completed": 9,
+      "native_service_verified_active": false,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "native_terminal_observed_at": "2026-11-12T10:35:59.217867Z",
+      "database_fence": 33,
+      "database_custody": "same_attempt_reconciled_original_deadline_preserved_heartbeat_2026-11-12T10:40:20.153462Z_lease_2026-11-12T10:41:50.153462Z"
+    }
+  ],
+  "active_attempts": [
+    {
+      "job_id": "01a1ced7-151a-9f37-2271-b4486a0f1ac1",
+      "host_id": "goofe",
+      "run_id": "8033ed26204ff3a2c732e6d396a96e46737b88ea3cc971273b2b0631731a25db",
+      "started_at": "2026-11-12T10:44:50.752744",
+      "deadline": "2026-11-12T13:44:50.752744",
+      "observed_phase": "native_service_active",
       "native_service_verified_active": true,
-      "database_fence": 32
+      "native_service_pid": 3259690,
+      "database_fence": 34,
+      "database_custody": "heartbeat_2026-11-12T10:45:13.544250Z_lease_2026-11-12T10:46:43.544250Z"
     },
     {
       "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
@@ -82,8 +101,14 @@
       "run_id": "b4f33b481989ea9e43637e5a2aa6e99abc710d5ec690f51f8852200a4c87c4dd",
       "started_at": "2026-11-12T09:20:10.16599",
       "deadline": "2026-11-12T12:20:10.16599",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 1
+      "observed_phase": "native_exit_zero_and_cleanup_verified_not_yet_centrally_retained",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "native_terminal_observed_at": "2026-11-12T10:56:22.767271Z",
+      "database_fence": 18,
+      "database_custody": "last_observed_lease_expired_2026-11-12T10:04:07.140698Z_not_a_verified_new_owner"
     }
   ],
   "latest_failure": {
@@ -92,6 +117,24 @@
     "offline_result": "19 files have hunks that do not apply to the exact frozen Connect tree",
     "generic_builder_classification_not_rewritten": true,
     "blind_infrastructure_retry_granted": false
+  },
+  "current_heartbeat_incidents": {
+    "private_log": "/var/lib/urnetwork/competition-epoch2-running-heartbeat-20261112.cOJomeKJ/worker.private.log",
+    "log_sha256": "b4af8fa2ee203a159b305699f7a8d30192fa3cfa51fe7b2de61ef3d03a00ec77",
+    "goofe_error_at": "2026-11-12T09:56:40Z",
+    "sille_error_at": "2026-11-12T10:02:59Z",
+    "error": "PostgresStore.Heartbeat context deadline exceeded",
+    "native_processes_verified_active_at": "2026-11-12T10:09:30Z",
+    "original_deadlines_unchanged": true
+  },
+  "transport_cancellation_audit": {
+    "source_gap_confirmed": true,
+    "scope": "Manually owned request pipes can block protocol reads or writer join before process.Wait after direct-child cancellation; inherited stderr also needs a bounded join.",
+    "live_snapshot": "Coordinator 143823 retained direct child 2571215 in zombie state at 2026-11-12T11:02:41Z; this does not prove its exact blocked phase or zombie duration.",
+    "covered_by_staged_698_worker": false,
+    "separate_fix_and_deterministic_tests_requested": true,
+    "frozen_recovery_qualification_unchanged": true,
+    "live_process_signaled_or_restarted": false
   },
   "live_worker": {
     "source_commit": "68817f6d3ea96b7a8179c7af63808d504560af32",
@@ -132,14 +175,67 @@
     "user_authorized": true,
     "request_is_not_a_database_grant": true,
     "implementation_and_deployment_pending": true,
+  "deployment_requirements_after_final_merged_qualification": {
+    "migration": "Append the additive recovery migration after all published origin migrations; normal direct-administration deployment pipeline only.",
+    "main_services": ["api", "monitor"],
+    "api_reason": "Old strict shared readers reject schema-2 recovery markers; deploy compatible readers before granting recovery.",
+    "local_programs": ["competitionworker", "competitionreevaluate"],
+    "handoff": "Verified global idle and fresh runtime proof before central worker replacement and sequential grants.",
+    "config_or_vault_change_required": false,
+    "native_agent_or_candidate_image_change_required": false
+  },
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
-    "frozen_server_commit": "27844c56653c67158067f71ac7ab95e319f93c2d",
+  "frozen_server_commit": "7880fd886bb976adabb5e0b97a2cc6d5d61ea439",
     "unqualified_remote_backup_branch": "competition-distributed-infrastructure-reevaluation-20261112",
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "smoke_14_of_14_and_critical_repeat_54_of_54_passed_test_only_parity_correction_refrozen_phase_b_verified_running",
+    "status": "intake_catalog_fixture_corrected_new_independent_qualification_running_no_live_deployment",
+    "intake_catalog_rerun": {
+      "source_commit": "7880fd886bb976adabb5e0b97a2cc6d5d61ea439",
+      "production_code_unchanged_from_a4eaa": true,
+      "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+      "invocation_id": "0c936151f0014248a391a4c43af992b2",
+      "main_pid": 2849118,
+      "started_at": "2026-11-12T10:32:07Z",
+      "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.bP8Zrgis",
+      "verified_active": true,
+      "stages": "Two exact intake owner/fault tests repeated three times; only if green, full source-derived migration/PostgreSQL tests with Go discovery equality",
+      "targeted_passed": 6,
+      "targeted_failed": 0,
+      "targeted_log_sha256": "43f71bf69944ddbaa28555c3cc86867611d174e1684b9dd9c5e854c1af2fd8e1",
+      "broader_suite_running": true,
+      "repaired_native_fault_test_passed_in_broad_run_at": "2026-11-12T10:48:04.981393801Z",
+      "broader_allowlist_matches_go_discovery": true,
+      "broader_allowlist_sha256": "b4f2acc7896240749b5bf6d11c75b1a8ae7520afc16efff4ba0adeabd499334f",
+      "preserved_physical_fault_controls": 12,
+      "race_authorized": false
+    },
+      "successor_oracle_rerun": {
+        "source_commit": "bf055da1ac6d9e90c904c7f15d023b16dc96705b",
+        "production_code_unchanged_from_a4eaa": true,
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "8bce69974b9c49119c70f65fe1666152",
+        "main_pid": 2603949,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.scTPflNp",
+      "verified_active": false,
+        "boundary_checks_passed": 12,
+      "original_schema_fault_test_result_pending": false,
+      "original_schema_fault_test_passed": true,
+      "broad_passed": 44,
+      "broad_failed_tests": 1,
+      "failure": "TestMigrationsCompetitionIntakeFirstActualCatalogFaults: complete intake candidate catalog is not coherent: <nil>; schema head 961",
+      "broad_log_sha256": "edf97930d1a08684520e3e705212b6b8677c220fb238b91b510e7cef7b97fb14",
+      "durable_evidence_directory": "/var/lib/urnetwork/bounded-census-bf055-failure-20261112.J5rO3906",
+      "durable_evidence_manifest_sha256": "313aa619adc7ecdb1d607408759e3df6272a5c5ded2c0d568297cff5dd0955aa",
+      "source_and_dependency_after_manifests_match_before": true,
+      "owned_fixtures_cleaned_up_and_source_released": true,
+        "harness_template_sha256": "2af012850033ab9dc5a084fb8c85b8818b170f3a985af77f743ff911cde41995",
+        "harness_exit_helper_sha256": "3d62e8e5110e022db0c1b6d842dd04068806dd7bc8a98fcd00372b50a6af7215",
+        "harness_forced_failure_and_dirty_first_repository_controls_passed": true,
+        "race_authorized": false
+      },
       "phase_b": {
         "source_commit": "27844c56653c67158067f71ac7ab95e319f93c2d",
         "production_code_unchanged_from_a4eaa": true,
@@ -148,7 +244,12 @@
         "invocation_id": "642622d53b1e40d8bead38b90487691c",
         "main_pid": 2368044,
         "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.OzHgCUcg",
-        "verified_active": true,
+        "verified_active": false,
+        "prerequisite_results": "ownership controls 6/6 and native parity comparison 1/1 passed",
+        "broad_result": "29 passed then fail-fast: TestMigrationsAutomationSchemaFaultsReachSignal reports admitted claim custody has an unreviewed successor",
+        "log_sha256": "339da81bc87b83feb4d792126064ccfaf2f6e0ac221ae1aee1fade48503b16cf",
+        "fixtures_cleaned_up_and_compiler_released": true,
+        "after_manifest_missing_on_failure": true,
         "stages": "two acquisition-tripwire tests repeated three times, then exact native parity comparison, then broader source-derived migration/PostgreSQL tests only if both gates pass",
         "excluded_test": "TestMigrationCatalogResourceDiagnostic: retained explicit old-monolithic OOM reproduction, not ordinary qualification",
         "race_authorized": false

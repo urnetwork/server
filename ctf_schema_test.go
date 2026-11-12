@@ -25,8 +25,8 @@ func TestCtfSchemaMigrationIsAppended(t *testing.T) {
 }
 
 // ctf_award.network_id is its own plain SQL migration, after the one that
-// creates ctf_award and after the ping evidence migration that was the last on
-// main before it, at its position in the list.
+// creates ctf_award and after the extender address ports migration that was
+// the last on main before it, at its position in the list.
 func TestCtfAwardNetworkMigrationIsAppended(t *testing.T) {
 	version := CtfAwardNetworkMigrationVersion()
 	if version < 1 || len(migrations) < version || migrations[version-1] != ctfAwardNetworkMigration {
@@ -35,8 +35,8 @@ func TestCtfAwardNetworkMigrationIsAppended(t *testing.T) {
 	if schema := CtfSchemaMigrationVersion(); version <= schema {
 		t.Fatalf("ctf award network migration %d is not after the ctf schema migration %d", version, schema)
 	}
-	if evidence := NetworkPingTargetEvidenceSchemaMigrationVersion(); version <= evidence {
-		t.Fatalf("ctf award network migration %d is not after the ping evidence migration %d", version, evidence)
+	if ports := NetworkExtenderAddressPortsSchemaMigrationVersion(); version <= ports {
+		t.Fatalf("ctf award network migration %d is not after the extender address ports migration %d", version, ports)
 	}
 	if sqlMigrationVersion(ctfAwardNetworkSql) != version {
 		t.Fatal("the ctf award network SQL is in the list more than once, or not as its migration")

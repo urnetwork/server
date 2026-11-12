@@ -3,13 +3,17 @@ package work
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/urnetwork/glog"
+
+	"github.com/urnetwork/connect"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/controller"
@@ -20,10 +24,13 @@ import (
 
 // Extender uptime probes (connect/EXTENDER.md C3).
 //
-// Every five minutes each active address is dialed over its tcp carrier with a
-// fresh challenge. That is the whole liveness test: an address that cannot sign
-// bytes chosen now is not serving, whatever its record says. The dial is the
-// same one a client makes, so what passes here is what a client can use.
+// Every five minutes each active address is dialed over the required paths it
+// was accepted on -- its tcp carrier, or its webrtc carrier through the
+// signaling relay, or, for an address that lists both, tcp and then webrtc
+// only once tcp has failed -- with a fresh challenge (C2a; connect/EXTENDER.md
+// S8). That is the whole liveness test: an address that cannot sign bytes
+// chosen now is not serving, whatever its record says. The dial is the same
+// one a client makes, so what passes here is what a client can use.
 //
 // Removal is on consecutive failures, not on any failure and not on a sum. Six
 // in a row -- half an hour of being unreachable -- deactivates the address, and
@@ -84,17 +91,96 @@ const (
 	// pass's verdict: no probe starts later than this before the pass's max
 	// time. An address left unprobed is the oldest probed of the next pass.
 	ExtenderProbeRecordReserve = 2 * time.Minute
+
+	// How long the tcp challenge of an address that lists both required paths
+	// has before tcp is judged failed and webrtc is probed in its place
+	// (connect/EXTENDER.md S8). Webrtc is probed only once tcp has failed,
+	// never beside it (owner, 2026-11-12), as the activation runs it
+	// (controller.ExtenderActivateSettings.TcpChallengeTimeout): a tcp probe that
+	// answers passes well within this, so a healthy address sends its
+	// extender's device no offer, and one whose tcp port stopped answering
+	// still leaves webrtc the activation's whole budget of the address's.
+	ExtenderProbeTcpBeforeWebRtcTimeout = ExtenderProbeAddressTimeout - controller.ExtenderActivateProbeTimeout
 )
 
-// probeExtenderAddress dials one address's tcp carrier and requires a
-// challenge signature under the extender's published key.
+// probeExtenderAddress probes one address over the required paths it was
+// accepted on (C2a, C3) and requires a challenge signature under the
+// extender's published key: the tcp carrier when the address lists it, the
+// webrtc carrier when it lists that (connect/EXTENDER.md S8), and, when it
+// lists both, tcp first, its challenge cut at ExtenderProbeTcpBeforeWebRtcTimeout,
+// and webrtc only once tcp has failed, the address live while either answers.
+// So an address accepted on webrtc is never judged by a public tcp port it may
+// not have, a tcp port that stopped answering does not starve the webrtc
+// probe of the address budget, and a tcp port that answers costs no offer:
+// the two are never probed at once. An address that lists neither is judged
+// by tcp, as every address was before webrtc.
 //
 // It is a variable so a test can drive the task's accounting -- the failure
 // budget, the deactivation, the revocation -- deterministically, without
-// standing up an extender for every case and without waiting on real dials.
-// Production never replaces it; the real dial is proved against an in-process
-// extender by the activation tests, which run the same connect probe.
+// standing up an extender for every case and without waiting on real dials;
+// the two paths beneath it are variables so a test can prove which path an
+// address is judged by, and when. Production never replaces them; the real
+// dials are proved against an in-process extender by the activation tests,
+// which run the same connect probes.
 var probeExtenderAddress = func(
+	ctx context.Context,
+	target *model.NetworkExtenderProbeTarget,
+	serverName string,
+	destinationHost string,
+) error {
+	listsTcp := slices.Contains(target.Carriers, connect.ExtenderCarrierTcp)
+	listsWebRtc := slices.Contains(target.Carriers, connect.ExtenderCarrierWebRtc)
+	probeTcp := probeExtenderTcpAddress
+	probeWebRtc := probeExtenderWebRtcAddress
+	switch {
+	case listsWebRtc && !listsTcp:
+		return probeExtenderPath(func() error {
+			return probeWebRtc(ctx, target, destinationHost)
+		})
+	case !listsWebRtc:
+		return probeExtenderPath(func() error {
+			return probeTcp(ctx, target, serverName, destinationHost)
+		})
+	}
+
+	// both: tcp first, under its share, and webrtc in its place only once it
+	// has failed, under the rest of the address's budget
+	tcpCtx, tcpCancel := context.WithTimeout(ctx, ExtenderProbeTcpBeforeWebRtcTimeout)
+	tcpErr := probeExtenderPath(func() error {
+		return probeTcp(tcpCtx, target, serverName, destinationHost)
+	})
+	tcpCancel()
+	if tcpErr == nil {
+		return nil
+	}
+	if ctx.Err() != nil {
+		// the address's budget, or the pass, has ended: nothing is left to
+		// probe webrtc with
+		return tcpErr
+	}
+	webRtcErr := probeExtenderPath(func() error {
+		return probeWebRtc(ctx, target, destinationHost)
+	})
+	if webRtcErr == nil {
+		return nil
+	}
+	return errors.Join(tcpErr, webRtcErr)
+}
+
+// One path's probe, a panic in which fails that path alone rather than the
+// pass, which runs it from a goroutine of its own.
+func probeExtenderPath(probe func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			glog.Errorf("[extender]uptime probe panicked: %s\n", server.ErrorJson(r, debug.Stack()))
+			err = fmt.Errorf("the probe failed: %v", r)
+		}
+	}()
+	return probe()
+}
+
+// The tcp challenge of one address (C3).
+var probeExtenderTcpAddress = func(
 	ctx context.Context,
 	target *model.NetworkExtenderProbeTarget,
 	serverName string,
@@ -104,6 +190,16 @@ var probeExtenderAddress = func(
 	// controller's, so it is proved against an in-process extender in both
 	// phases (phase 14b)
 	return controller.ProbeExtenderUptime(ctx, target, serverName, destinationHost)
+}
+
+// The webrtc challenge of one address (C2a, C3), through the operator's
+// signaling relay to the extender's client.
+var probeExtenderWebRtcAddress = func(
+	ctx context.Context,
+	target *model.NetworkExtenderProbeTarget,
+	destinationHost string,
+) error {
+	return controller.ProbeExtenderWebRtcUptime(ctx, target, destinationHost)
 }
 
 // The reads and writes of one pass, and its diagnostic line. The accounting
