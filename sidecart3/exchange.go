@@ -233,23 +233,34 @@ type controllerOutOfBandControl struct {
 }
 
 func (self *controllerOutOfBandControl) SendControl(frames []*protocol.Frame, callback connect.OobResultFunction) {
-	// a canceled platform raises out of the db layer at teardown, which HandleError takes
-	go server.HandleError(func() {
+	go func() {
 		defer func() {
 			for _, frame := range frames {
 				connect.MessagePoolReturn(frame.MessageBytes)
 			}
 		}()
-		resultFrames, err := controller.ConnectControlFrames(self.ctx, self.clientId, frames, self.contractManagerSettings)
+		var resultFrames []*protocol.Frame
+		var err error
+		// a canceled platform raises out of the db layer at teardown, which HandleError takes: the callback then hears the
+		// raise as its error, as api's control route would answer one, since a client counts a control in flight until its
+		// callback runs and its close waits for every one (a raise that skipped it left a client that never closed)
+		server.HandleError(func() {
+			resultFrames, err = controller.ConnectControlFrames(self.ctx, self.clientId, frames, self.contractManagerSettings)
+		}, func(raised error) {
+			resultFrames = nil
+			err = raised
+		})
 		defer func() {
 			for _, frame := range resultFrames {
 				connect.MessagePoolReturn(frame.MessageBytes)
 			}
 		}()
 		if callback != nil {
-			callback(resultFrames, err)
+			server.HandleError(func() {
+				callback(resultFrames, err)
+			})
 		}
-	})
+	}()
 }
 
 // Opens a Required client in the platform's network: a client id and by-client jwt from model.AuthNetworkClient, the
