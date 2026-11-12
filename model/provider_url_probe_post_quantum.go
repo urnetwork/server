@@ -1,5 +1,6 @@
-// Which URL turns measure post-quantum (FP2-PROTOCOL.md §12.2, with the
-// schedule below in place of "every URL probe tunnel").
+// Which URL turns measure post-quantum (FP2-PROTOCOL.md §12.2): those whose
+// provider has no measured outcome in the last four hours, in place of every
+// URL probe tunnel (owner decision 2026-11-12, "accepted").
 //
 // A turn that measures post-quantum opens an opportunistic end-to-end session
 // with its provider, which the provider can open only with the probe client's

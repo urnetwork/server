@@ -44,8 +44,9 @@ type CapabilityObservation struct {
 	// while the session first establishes (connect's
 	// OpportunisticEstablishHold), so a provider that seals in time carries
 	// them sealed and one that does not gets them in plaintext once it ends.
-	// Zero, the capability probe's, sends at once, in plaintext until the
-	// session seals.
+	// Zero, the capability probe's, keeps the client's own hold, none by
+	// default: its first sends go at once, in plaintext until the session
+	// seals.
 	EstablishHold time.Duration
 	// A replaced window client is recorded (Tunnel.ClientReplaced) and the
 	// tunnel keeps running, for a measurement that rides traffic the session
@@ -98,7 +99,9 @@ func (self *CapabilityObservation) apply(settings *connect.ClientSettings) {
 		encryption = &copied
 	}
 	encryption.Mode = connect.EncryptionModeOpportunistic
-	encryption.OpportunisticEstablishHold = self.EstablishHold
+	if 0 < self.EstablishHold {
+		encryption.OpportunisticEstablishHold = self.EstablishHold
+	}
 	if self.NewPeerClientPublicKeyFetcher != nil {
 		encryption.NewPeerClientPublicKeyFetcher = self.NewPeerClientPublicKeyFetcher
 	}
