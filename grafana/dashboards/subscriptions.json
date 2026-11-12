@@ -980,6 +980,113 @@
           "range": false
         }
       ]
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "received payments not credited",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 62
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 25,
+      "type": "bargauge",
+      "title": "received payments not credited",
+      "description": "Payments that reached us at least 30 minutes ago and that no credit consumed, per rail: `usdc_solana` is a USDC payment into a Solana receiver that bought nothing (a `solana_unfulfilled_payment` row: the Helius webhook's, the reconcile's or its receiver leg's, which reads the receivers' own history); each crypto coin is a receipt not credited (seen, confirmed, or held for review); `gamma` is a Pay with Gamma charge spent but not credited. Each one is a customer who paid and may have no Pro. Every rail should read zero; SIGNALS.md §2.22 names the alert for each.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (rail) (urnetwork_subscription_payments_uncredited{env=\"$env\",service=\"taskworker\",rail=~\"usdc_solana|zec|xmr|tao|btc|eth|sol|gamma\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{rail}}",
+          "instant": true,
+          "range": false
+        }
+      ]
+    },
+    {
+      "id": 26,
+      "type": "bargauge",
+      "title": "oldest received payment not credited",
+      "description": "How long the oldest payment counted in \"received payments not credited\" has waited, per rail that has one. A rail with nothing waiting shows no bar.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 63
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "warp-mimir"
+          },
+          "expr": "max by (rail) (urnetwork_subscription_payments_uncredited_oldest_age_seconds{env=\"$env\",service=\"taskworker\",rail=~\"usdc_solana|zec|xmr|tao|btc|eth|sol|gamma\"} and on(env,service,block,host,instance) topk(1, (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} > time() - 1200) and (urnetwork_subscription_snapshot_timestamp_seconds{env=\"$env\",service=\"taskworker\"} <= time() + 30)))",
+          "refId": "A",
+          "legendFormat": "{{rail}}",
+          "instant": true,
+          "range": false
+        }
+      ]
     }
   ]
 }
