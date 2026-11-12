@@ -19,6 +19,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
+// The --epoch option as a whole number; anything else panics with the value.
 func stV2ExtenderEpoch(opts docopt.Opts) uint64 {
 	epochStr, _ := opts.String("--epoch")
 	epoch, err := strconv.ParseUint(epochStr, 10, 64)
@@ -28,7 +29,7 @@ func stV2ExtenderEpoch(opts docopt.Opts) uint64 {
 	return epoch
 }
 
-// stV2ExtenderOut writes data to --out, which must not exist, or to stdout.
+// Writes data to --out, which must not exist, or to stdout.
 func stV2ExtenderOut(opts docopt.Opts, data []byte) {
 	out, _ := opts.String("--out")
 	if out == "" {
@@ -46,9 +47,9 @@ func stV2ExtenderOut(opts docopt.Opts, data []byte) {
 	fmt.Fprintf(os.Stderr, "written to %s\n", out)
 }
 
-// stV2ExtenderReplay is the offline replay of a recorded epoch under the
-// extender pool amendment (§8.6.7, epoch 4): read only, it prints the report as
-// JSON and exits 1 unless the rows differ by exactly the pooled shares.
+// The offline replay of a recorded epoch under the extender pool amendment
+// (§8.6.7, epoch 4): read only, it prints the report as JSON and exits 1 unless
+// the rows differ by exactly the pooled shares.
 func stV2ExtenderReplay(opts docopt.Opts) {
 	// PostgreSQL refuses every write this process attempts
 	server.RequirePgReadOnly()
@@ -76,7 +77,7 @@ func stV2ExtenderReplay(opts docopt.Opts) {
 	}
 }
 
-// stV2ExtenderShadow prints an epoch's recorded shadow report (§8.6.7).
+// Prints an epoch's recorded shadow report (§8.6.7).
 func stV2ExtenderShadow(opts docopt.Opts) {
 	server.RequirePgReadOnly()
 	epoch := stV2ExtenderEpoch(opts)
@@ -91,7 +92,7 @@ func stV2ExtenderShadow(opts docopt.Opts) {
 	stV2ExtenderOut(opts, shadow.Report)
 }
 
-// stV2PlatformEndpoints lists the platform endpoint registry, as JSON.
+// Lists the platform endpoint registry, as JSON.
 func stV2PlatformEndpoints(opts docopt.Opts) {
 	server.RequirePgReadOnly()
 	set := model.GetStPlatformEndpoints(context.Background())
@@ -106,10 +107,9 @@ func stV2PlatformEndpoints(opts docopt.Opts) {
 	os.Stdout.Write(append(encoded, '\n'))
 }
 
-// stV2PlatformEndpointRegister registers a client as a platform endpoint from
-// now on (§8.6.2): tlsedge, smtpedge or mxedge, the kinds the signed amendment
-// entry covers, on one of the operator's own networks. A new kind needs a new
-// signed entry.
+// Registers a client as a platform endpoint from now on (§8.6.2): tlsedge,
+// smtpedge or mxedge, the kinds the signed amendment entry covers, on one of
+// the operator's own networks. A new kind needs a new signed entry.
 func stV2PlatformEndpointRegister(opts docopt.Opts) {
 	clientIdStr, _ := opts.String("--client_id")
 	clientId, err := server.ParseId(clientIdStr)
@@ -125,7 +125,7 @@ func stV2PlatformEndpointRegister(opts docopt.Opts) {
 	fmt.Printf("client %s (network %s) is a %s platform endpoint from %s, registered by %s\n", registered.ClientId, registered.NetworkId, registered.Kind, registered.RegisterTime.UTC().Format("2006-01-02T15:04:05Z"), registered.RegisteredBy)
 }
 
-// stV2PlatformEndpointRevoke ends a client's platform endpoint registration now.
+// Ends a client's platform endpoint registration now.
 func stV2PlatformEndpointRevoke(opts docopt.Opts) {
 	clientIdStr, _ := opts.String("--client_id")
 	clientId, err := server.ParseId(clientIdStr)

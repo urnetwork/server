@@ -43,22 +43,24 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// StLedgerV2AlertAmendments is raised when the published amendments file was
-// not taken, or no verified one is held.
-const StLedgerV2AlertAmendments = "v2_amendments"
+// Raised when the published amendments file was not taken, or no verified one
+// is held.
+const stLedgerV2AlertAmendments = "v2_amendments"
 
-// stAmendmentStore keeps a deployment's last verified amendments file in the
+// Keeps a deployment's last verified amendments file in the
 // database. A database failure is an error, which the source treats as no
 // stored copy it may overwrite.
 type stAmendmentStore struct {
 	deploymentKey model.StDeploymentKey
 }
 
+// The stored copy, nil without one.
 func (self *stAmendmentStore) Load(ctx context.Context) (raw []byte, err error) {
 	defer stDemandStoreRecover("amendments load", &err)
 	return model.GetStAmendments(ctx, self.deploymentKey), nil
 }
 
+// Replaces the stored copy.
 func (self *stAmendmentStore) Save(ctx context.Context, raw []byte) (err error) {
 	defer stDemandStoreRecover("amendments save", &err)
 	model.SaveStAmendments(ctx, self.deploymentKey, raw)
@@ -79,14 +81,14 @@ var (
 // One source per deployment for the process's life: a source holds the newest
 // verified file it has taken, so a lost or older store cannot walk it back.
 var (
-	stAmendmentSourcesLock sync.Mutex
-	stAmendmentSources     = map[model.StDeploymentKey]*amendment.Source{}
+	stDeploymentKeyAmendmentSourcesLock sync.Mutex
+	stDeploymentKeyAmendmentSources     = map[model.StDeploymentKey]*amendment.Source{}
 )
 
-// Testing_SetStAmendments points the amendments file's published address and
-// pinned signer at a test's own, for the tests of other packages, and returns
-// what restores them. Only the deployment of chainId and netuid is pinned, so
-// a zero chainId pins none: every deployment then publishes no amendments.
+// Points the amendments file's published address and pinned signer at a test's
+// own, for the tests of other packages, and returns what restores them. Only
+// the deployment of chainId and netuid is pinned, so a zero chainId pins none:
+// every deployment then publishes no amendments.
 func Testing_SetStAmendments(url string, signer common.Address, chainId uint64, netuid uint16) (restore func()) {
 	previousUrl, previousSigner, previousUnpublished := stAmendmentUrl, stAmendmentSigner, stAmendmentUnpublished
 	stAmendmentUrl = url
@@ -99,31 +101,19 @@ func Testing_SetStAmendments(url string, signer common.Address, chainId uint64, 
 	stAmendmentUnpublished = func(chain uint64, sn uint16) (*amendment.File, error) {
 		return amendment.ParseVerified(fmt.Appendf(nil, "sn: %d\n", sn), chain, sn, common.Address{})
 	}
-	stAmendmentSourcesLock.Lock()
-	stAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
-	stAmendmentSourcesLock.Unlock()
+	stDeploymentKeyAmendmentSourcesLock.Lock()
+	stDeploymentKeyAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
+	stDeploymentKeyAmendmentSourcesLock.Unlock()
 	return func() {
 		stAmendmentUrl, stAmendmentSigner, stAmendmentUnpublished = previousUrl, previousSigner, previousUnpublished
-		stAmendmentSourcesLock.Lock()
-		stAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
-		stAmendmentSourcesLock.Unlock()
+		stDeploymentKeyAmendmentSourcesLock.Lock()
+		stDeploymentKeyAmendmentSources = map[model.StDeploymentKey]*amendment.Source{}
+		stDeploymentKeyAmendmentSourcesLock.Unlock()
 	}
 }
 
-func stAmendmentSource(cfg *StConfig, signer common.Address) *amendment.Source {
-	stAmendmentSourcesLock.Lock()
-	defer stAmendmentSourcesLock.Unlock()
-	key := cfg.DeploymentKey()
-	source := stAmendmentSources[key]
-	if source == nil {
-		source = amendment.NewSource(stAmendmentUrl, cfg.ChainId, uint16(cfg.Netuid), signer, stAmendmentStorer(cfg))
-		stAmendmentSources[key] = source
-	}
-	return source
-}
-
-// stLedgerV2Amendments is the amendments in force as one build reads them:
-// the verified file and the configured fallback.
+// The amendments in force as one build reads them: the verified file and the
+// configured fallback.
 type stLedgerV2Amendments struct {
 	noId     uint64
 	file     *amendment.File
@@ -135,18 +125,25 @@ type stLedgerV2Amendments struct {
 	platformEndpoints model.StPlatformEndpointSet
 }
 
-// stLedgerV2ReadAmendments reads the amendments for one build: it fetches the
-// published file once, for a deployment with a pinned signer, and parses the
-// configured lines. A file that cannot be taken leaves the last verified one
-// in force, with an alert; with none held the amendments are unknown, and the
-// build stops (amendment.ErrUnknown).
+// Reads the amendments for one build: it fetches the published file once, for a
+// deployment with a pinned signer, and parses the configured lines. A file that
+// cannot be taken leaves the last verified one in force, with an alert; with
+// none held the amendments are unknown, and the build stops
+// (amendment.ErrUnknown).
 func stLedgerV2ReadAmendments(ctx context.Context, cfg *StConfig) (*stLedgerV2Amendments, error) {
 	if cfg == nil || cfg.Netuid == 0 || cfg.Netuid > 65535 || cfg.NoId == 0 {
 		return nil, errors.New("st ledger v2: the amendments need the deployment's netuid and operator")
 	}
-	fallback, err := stAmendmentFallback(cfg)
+	// st.yml's configured amendment lines
+	var lines []string
+	if node := &cfg.Amendments; !node.IsZero() {
+		if err := node.Decode(&lines); err != nil {
+			return nil, fmt.Errorf("st.yml %s amendments: %w", cfg.Profile, err)
+		}
+	}
+	fallback, err := amendment.ParseFallback(cfg.ChainId, uint16(cfg.Netuid), lines)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("st.yml %s %w", cfg.Profile, err)
 	}
 	pool, err := stExtenderPoolSettings(cfg)
 	if err != nil {
@@ -160,14 +157,26 @@ func stLedgerV2ReadAmendments(ctx context.Context, cfg *StConfig) (*stLedgerV2Am
 		}
 		return read, nil
 	}
-	file, problem := stAmendmentSource(cfg, signer).Refresh(ctx)
+	// one source per deployment for the process's life
+	source := func() *amendment.Source {
+		stDeploymentKeyAmendmentSourcesLock.Lock()
+		defer stDeploymentKeyAmendmentSourcesLock.Unlock()
+		key := cfg.DeploymentKey()
+		source := stDeploymentKeyAmendmentSources[key]
+		if source == nil {
+			source = amendment.NewSource(stAmendmentUrl, cfg.ChainId, uint16(cfg.Netuid), signer, stAmendmentStorer(cfg))
+			stDeploymentKeyAmendmentSources[key] = source
+		}
+		return source
+	}()
+	file, problem := source.Refresh(ctx)
 	if problem != nil {
 		held := "no verified amendments file is held, so the amendments in force are unknown and no epoch's rows are built"
 		if file != nil {
 			held = "the last verified amendments file stays in force"
 		}
 		glog.Errorf("[st]v2 AMENDMENTS PROBLEM: %s; %s\n", stScrubEndpoints(problem.Error()), held)
-		stLedgerV2Alert(cfg, StLedgerV2AlertAmendments, "amendments", "%s; %s", stScrubEndpoints(problem.Error()), held)
+		stLedgerV2Alert(cfg, stLedgerV2AlertAmendments, "amendments", "%s; %s", stScrubEndpoints(problem.Error()), held)
 	}
 	if file == nil {
 		return nil, amendment.ErrUnknown
@@ -176,45 +185,32 @@ func stLedgerV2ReadAmendments(ctx context.Context, cfg *StConfig) (*stLedgerV2Am
 	return read, nil
 }
 
-// stAmendmentFallback parses st.yml's configured amendment lines.
-func stAmendmentFallback(cfg *StConfig) (*amendment.Fallback, error) {
-	var lines []string
-	if node := &cfg.Amendments; !node.IsZero() {
-		if err := node.Decode(&lines); err != nil {
-			return nil, fmt.Errorf("st.yml %s amendments: %w", cfg.Profile, err)
-		}
-	}
-	fallback, err := amendment.ParseFallback(cfg.ChainId, uint16(cfg.Netuid), lines)
-	if err != nil {
-		return nil, fmt.Errorf("st.yml %s %w", cfg.Profile, err)
-	}
-	return fallback, nil
-}
-
-// stExtenderPoolConfig is st.yml's extender_pool block, parsed.
+// The extender_pool block of st.yml, parsed.
 type stExtenderPoolConfig struct {
-	MeasurementNetworkIds []string `yaml:"measurement_network_ids"`
-	DeclaredNetworkIds    []string `yaml:"declared_network_ids"`
+	MeasurementNetworkIdStrs []string `yaml:"measurement_network_ids"`
+	DeclaredNetworkIdStrs    []string `yaml:"declared_network_ids"`
 
-	measurement map[server.Id]bool
-	declared    map[server.Id]bool
+	measurementNetworkIds map[server.Id]bool
+	declaredNetworkIds    map[server.Id]bool
 }
 
+// Parses one extender_pool list of network ids; an entry that is not a
+// network id refuses the list, label naming it.
 func stParseNetworkIdSet(label string, values []string) (map[server.Id]bool, error) {
-	set := map[server.Id]bool{}
+	networkIds := map[server.Id]bool{}
 	for _, value := range values {
 		networkId, err := server.ParseId(strings.TrimSpace(value))
 		if err != nil || networkId == (server.Id{}) {
 			return nil, fmt.Errorf("st.yml extender_pool %s: %q is not a network id", label, value)
 		}
-		set[networkId] = true
+		networkIds[networkId] = true
 	}
-	return set, nil
+	return networkIds, nil
 }
 
-// stExtenderPoolSettings parses st.yml's extender_pool block. An entry that
-// is not a network id refuses the block, rather than counting the traffic or
-// extender it was meant to leave out.
+// Parses st.yml's extender_pool block. An entry that is not a network id
+// refuses the block, rather than counting the traffic or extender it was meant
+// to leave out.
 func stExtenderPoolSettings(cfg *StConfig) (*stExtenderPoolConfig, error) {
 	pool := &stExtenderPoolConfig{}
 	if node := &cfg.ExtenderPool; !node.IsZero() {
@@ -223,16 +219,16 @@ func stExtenderPoolSettings(cfg *StConfig) (*stExtenderPoolConfig, error) {
 		}
 	}
 	var err error
-	if pool.measurement, err = stParseNetworkIdSet("measurement_network_ids", pool.MeasurementNetworkIds); err != nil {
+	if pool.measurementNetworkIds, err = stParseNetworkIdSet("measurement_network_ids", pool.MeasurementNetworkIdStrs); err != nil {
 		return nil, err
 	}
-	if pool.declared, err = stParseNetworkIdSet("declared_network_ids", pool.DeclaredNetworkIds); err != nil {
+	if pool.declaredNetworkIds, err = stParseNetworkIdSet("declared_network_ids", pool.DeclaredNetworkIdStrs); err != nil {
 		return nil, err
 	}
 	return pool, nil
 }
 
-// extenders is the extender pool amendment as the epoch reader applies it to
+// The extender pool amendment as the epoch reader applies it to
 // epoch: in force from the first epoch of the entry that covers it, with the
 // operator's registered platform endpoints (model/st_platform_endpoint.go), and
 // the zero amendment when none covers it.
@@ -252,47 +248,38 @@ func (self *stLedgerV2Amendments) extenders(ctx context.Context, epoch uint64) (
 	return model.StExtenderAmendment{FirstEpoch: in.Extenders.FromEpoch, PlatformEndpoints: self.platformEndpoints}, nil
 }
 
-// stPlatformEndpointsRead reads the platform endpoint registry: a seam the pure
-// tests replace.
+// Reads the platform endpoint registry: a seam the pure tests replace.
 var stPlatformEndpointsRead = model.GetStPlatformEndpoints
 
-// stPlatformEndpoints reads the platform endpoint registry. A failed read, such
+// Reads the platform endpoint registry. A failed read, such
 // as a table not migrated yet, is an error, never an empty registry.
 func stPlatformEndpoints(ctx context.Context) (set model.StPlatformEndpointSet, err error) {
 	defer stDemandStoreRecover("platform endpoint registry read", &err)
 	return stPlatformEndpointsRead(ctx), nil
 }
 
-// stPlatformEndpointNetworks are the networks a platform endpoint registration
-// is checked against: the operator's own, the one list E5 reads
+// The operator's command registering a client as a platform endpoint of kind
+// from now on (model.RegisterStPlatformEndpoint). A registration is checked
+// against the operator's own networks, the one list E5 reads
 // (readStExtenderOwnNetworks: its gated durable networks, the networks it
 // declares it controls and the networks of its canaries), and its measurement
 // networks.
-func stPlatformEndpointNetworks(ctx context.Context, cfg *StConfig) (model.StPlatformEndpointNetworks, error) {
-	networks := model.StPlatformEndpointNetworks{Operator: map[server.Id]bool{}}
-	pool, err := stExtenderPoolSettings(cfg)
-	if err != nil {
-		return networks, err
-	}
-	ownNetworks, err := readStExtenderOwnNetworks(ctx, cfg)
-	if err != nil {
-		return networks, err
-	}
-	networks.Operator = ownNetworks.AllNetworkIds()
-	networks.Measurement = stExtenderPoolMeasurementNetworks(ctx, pool)
-	return networks, nil
-}
-
-// StRegisterPlatformEndpoint is the operator's command registering a client as a
-// platform endpoint of kind from now on (model.RegisterStPlatformEndpoint).
 func StRegisterPlatformEndpoint(ctx context.Context, clientId server.Id, kind string, by string) (*model.StPlatformEndpoint, error) {
 	cfg, _, err := stRequire()
 	if err != nil {
 		return nil, err
 	}
-	networks, err := stPlatformEndpointNetworks(ctx, cfg)
+	pool, err := stExtenderPoolSettings(cfg)
 	if err != nil {
 		return nil, err
+	}
+	ownNetworks, err := readStExtenderOwnNetworks(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	networks := model.StPlatformEndpointNetworks{
+		OperatorNetworkIds:    ownNetworks.allNetworkIds(),
+		MeasurementNetworkIds: stExtenderPoolMeasurementNetworks(ctx, pool),
 	}
 	registered, err := model.RegisterStPlatformEndpoint(ctx, clientId, kind, by, networks)
 	if err == nil {
@@ -301,8 +288,7 @@ func StRegisterPlatformEndpoint(ctx context.Context, clientId server.Id, kind st
 	return registered, err
 }
 
-// StRevokePlatformEndpoint is the operator's command ending a client's platform
-// endpoint registration now.
+// The operator's command ending a client's platform endpoint registration now.
 func StRevokePlatformEndpoint(ctx context.Context, clientId server.Id, by string) error {
 	err := model.RevokeStPlatformEndpoint(ctx, clientId, by)
 	if err == nil {
@@ -311,16 +297,15 @@ func StRevokePlatformEndpoint(ctx context.Context, clientId server.Id, by string
 	return err
 }
 
-// stExtenderPoolMeasurementNetworks are the payer networks whose contracts
-// never count toward Z: the configured measurement and test networks and the
-// internal prober's.
+// The payer networks whose contracts never count toward Z: the configured
+// measurement and test networks and the internal prober's.
 func stExtenderPoolMeasurementNetworks(ctx context.Context, pool *stExtenderPoolConfig) map[server.Id]bool {
-	measurement := map[server.Id]bool{}
-	for networkId := range pool.measurement {
-		measurement[networkId] = true
+	measurementNetworkIds := map[server.Id]bool{}
+	for networkId := range pool.measurementNetworkIds {
+		measurementNetworkIds[networkId] = true
 	}
 	if prober := model.GetProberIdentity(ctx); prober.HasNetwork() {
-		measurement[*prober.NetworkId] = true
+		measurementNetworkIds[*prober.NetworkId] = true
 	}
-	return measurement
+	return measurementNetworkIds
 }

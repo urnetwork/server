@@ -39,12 +39,12 @@ func TestStExtenderOwnNetworksAreOneList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ownNetworks.DurableNetworkIds) != 1 || !ownNetworks.DurableNetworkIds[durableNetworkId] ||
-		len(ownNetworks.DeclaredNetworkIds) != 2 || !ownNetworks.DeclaredNetworkIds[declaredNetworkId] || !ownNetworks.DeclaredNetworkIds[ctfOwnNetworkId] ||
-		len(ownNetworks.CanaryNetworkIds) != 1 || !ownNetworks.CanaryNetworkIds[canaryNetworkId] {
+	if len(ownNetworks.durableNetworkIds) != 1 || !ownNetworks.durableNetworkIds[durableNetworkId] ||
+		len(ownNetworks.declaredNetworkIds) != 2 || !ownNetworks.declaredNetworkIds[declaredNetworkId] || !ownNetworks.declaredNetworkIds[ctfOwnNetworkId] ||
+		len(ownNetworks.canaryNetworkIds) != 1 || !ownNetworks.canaryNetworkIds[canaryNetworkId] {
 		t.Fatalf("own networks %+v", ownNetworks)
 	}
-	allNetworkIds := ownNetworks.AllNetworkIds()
+	allNetworkIds := ownNetworks.allNetworkIds()
 	if len(allNetworkIds) != 4 || !allNetworkIds[durableNetworkId] || !allNetworkIds[declaredNetworkId] || !allNetworkIds[ctfOwnNetworkId] || !allNetworkIds[canaryNetworkId] {
 		t.Fatalf("all own networks %v", allNetworkIds)
 	}
@@ -74,7 +74,7 @@ func TestStExtenderOwnNetworksFailClosed(t *testing.T) {
 	}
 	installTestExtenderConfigYaml(t, "directory: {}\n")
 	setTestCtfOwnNetworkIds(t)
-	if ownNetworks, err := readStExtenderOwnNetworks(t.Context(), cfg); err != nil || len(ownNetworks.AllNetworkIds()) != 0 {
+	if ownNetworks, err := readStExtenderOwnNetworks(t.Context(), cfg); err != nil || len(ownNetworks.allNetworkIds()) != 0 {
 		t.Fatalf("no own networks: %+v, %v", ownNetworks, err)
 	}
 }

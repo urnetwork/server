@@ -1218,8 +1218,37 @@ var subnetUsageEvidenceKinds = []string{usage.EvidenceKind, usage.EvidenceKindV2
 func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch uint64, signer common.Address, start, end subnetEvmBlock) (subnetUsageStatementRead, error) {
 	deployment := run.settings.Deployment
 	runId := usage.RunID(noId, epoch)
-	found := map[string]*usage.Statement{}
+	contentHashStatements := map[string]*usage.Statement{}
 	invalid := false
+	// reads one history answer's statements, and reports whether every object
+	// was read; a statement that does not verify or decode marks invalid
+	readHistory := func(origin string, history subnetUsageHistory) bool {
+		complete := true
+		for _, object := range history.Objects {
+			contentHash := "sha256:" + strings.TrimSuffix(filepath.Base(object.Key), ".json")
+			if _, seen := contentHashStatements[contentHash]; seen {
+				continue
+			}
+			raw, etag, err := readSubnetApi(ctx, run, origin, "/sn/evidence", url.Values{"hash": []string{contentHash}}, maximumSubnetUsageEnvelopeBytes)
+			if subnetCanceled(ctx) != nil {
+				return false
+			}
+			if err != nil {
+				complete = false
+				continue
+			}
+			statement, err := decodeSubnetUsageEnvelope(raw, etag, contentHash, runId, deployment)
+			if err == nil {
+				err = checkSubnetUsageStatement(statement, deployment, noId, epoch, signer, start, end)
+			}
+			if err != nil {
+				invalid = true
+				continue
+			}
+			contentHashStatements[contentHash] = statement
+		}
+		return complete
+	}
 	answered := 0
 	for _, origin := range run.settings.ApiOrigins {
 		complete := true
@@ -1238,7 +1267,7 @@ func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch u
 				complete = false
 				continue
 			}
-			if !readSubnetUsageHistory(ctx, run, origin, history, runId, deployment, noId, epoch, signer, start, end, found, &invalid) {
+			if !readHistory(origin, history) {
 				complete = false
 			}
 			if canceled := subnetCanceled(ctx); canceled != nil {
@@ -1249,14 +1278,29 @@ func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch u
 			answered++
 		}
 	}
+	// whether two verified statements for the same chunks attest the same
+	// usage: the same version, totals and, for version 2, extender pool
+	sameUsage := func(a, b *usage.Statement) bool {
+		if a.Schema != b.Schema || a.TotalUsageBytes != b.TotalUsageBytes || a.TotalUsers != b.TotalUsers || a.ProviderRows != b.ProviderRows {
+			return false
+		}
+		if a.ExtenderPool == nil || b.ExtenderPool == nil {
+			return a.ExtenderPool == nil && b.ExtenderPool == nil
+		}
+		pa, pb := a.ExtenderPool, b.ExtenderPool
+		return pa.IntraPlatformBytes == pb.IntraPlatformBytes && pa.IntraNetworkBytes == pb.IntraNetworkBytes && pa.ExtenderPoolBytes == pb.ExtenderPoolBytes &&
+			pa.ExtenderPoolWeightBytes == pb.ExtenderPoolWeightBytes && pa.ExtenderPoolContracts == pb.ExtenderPoolContracts && pa.ExtenderPoolPayers == pb.ExtenderPoolPayers &&
+			strings.Join(pa.ExtenderCensus, ",") == strings.Join(pb.ExtenderCensus, ",") && pa.ExtenderUnits == pb.ExtenderUnits &&
+			pa.EligibleExtenders == pb.EligibleExtenders && strings.Join(pa.ExtenderChunks, ",") == strings.Join(pb.ExtenderChunks, ",")
+	}
 	var chosen *usage.Statement
-	for _, statement := range found {
+	for _, statement := range contentHashStatements {
 		switch {
 		case chosen == nil:
 			chosen = statement
 		case strings.Join(chosen.ProviderChunks, ",") != strings.Join(statement.ProviderChunks, ","):
 			return subnetUsageStatementRead{reason: "usage-statement-rebuilt"}, nil
-		case !subnetSameUsageStatement(chosen, statement):
+		case !sameUsage(chosen, statement):
 			return subnetUsageStatementRead{status: validator.DepositAuditEquivocation}, nil
 		}
 	}
@@ -1269,52 +1313,6 @@ func readSubnetUsageStatement(ctx context.Context, run *subnetRun, noId, epoch u
 		return subnetUsageStatementRead{absent: true}, nil
 	}
 	return subnetUsageStatementRead{reason: "usage-statement-unavailable"}, nil
-}
-
-// Whether two verified statements for the same chunks attest the same usage: the
-// same version, totals and, for version 2, extender pool.
-func subnetSameUsageStatement(a, b *usage.Statement) bool {
-	if a.Schema != b.Schema || a.TotalUsageBytes != b.TotalUsageBytes || a.TotalUsers != b.TotalUsers || a.ProviderRows != b.ProviderRows {
-		return false
-	}
-	if a.ExtenderPool == nil || b.ExtenderPool == nil {
-		return a.ExtenderPool == nil && b.ExtenderPool == nil
-	}
-	pa, pb := a.ExtenderPool, b.ExtenderPool
-	return pa.IntraPlatformBytes == pb.IntraPlatformBytes && pa.IntraNetworkBytes == pb.IntraNetworkBytes && pa.ExtenderPoolBytes == pb.ExtenderPoolBytes &&
-		pa.ExtenderPoolWeightBytes == pb.ExtenderPoolWeightBytes && pa.ExtenderPoolContracts == pb.ExtenderPoolContracts && pa.ExtenderPoolPayers == pb.ExtenderPoolPayers &&
-		strings.Join(pa.ExtenderCensus, ",") == strings.Join(pb.ExtenderCensus, ",") && pa.ExtenderUnits == pb.ExtenderUnits &&
-		pa.EligibleExtenders == pb.EligibleExtenders && strings.Join(pa.ExtenderChunks, ",") == strings.Join(pb.ExtenderChunks, ",")
-}
-
-// Reads one history answer's statements into found, and reports whether every
-// object was read. A statement that does not verify or decode marks invalid.
-func readSubnetUsageHistory(ctx context.Context, run *subnetRun, origin string, history subnetUsageHistory, runId string, deployment SubnetDeploymentIdentity, noId, epoch uint64, signer common.Address, start, end subnetEvmBlock, found map[string]*usage.Statement, invalid *bool) bool {
-	complete := true
-	for _, object := range history.Objects {
-		contentHash := "sha256:" + strings.TrimSuffix(filepath.Base(object.Key), ".json")
-		if _, seen := found[contentHash]; seen {
-			continue
-		}
-		raw, etag, err := readSubnetApi(ctx, run, origin, "/sn/evidence", url.Values{"hash": []string{contentHash}}, maximumSubnetUsageEnvelopeBytes)
-		if subnetCanceled(ctx) != nil {
-			return false
-		}
-		if err != nil {
-			complete = false
-			continue
-		}
-		statement, err := decodeSubnetUsageEnvelope(raw, etag, contentHash, runId, deployment)
-		if err == nil {
-			err = checkSubnetUsageStatement(statement, deployment, noId, epoch, signer, start, end)
-		}
-		if err != nil {
-			*invalid = true
-			continue
-		}
-		found[contentHash] = statement
-	}
-	return complete
 }
 
 // The evidence envelope only routes a statement; the statement's own signature

@@ -24,7 +24,7 @@ func TestStPlatformEndpointRegistry(t *testing.T) {
 		Testing_CreateDevice(ctx, operator, server.NewId(), edge, "tlsedge", "tlsedge")
 		Testing_CreateDevice(ctx, measurement, server.NewId(), probe, "probe", "probe")
 		Testing_CreateDevice(ctx, customer, server.NewId(), provider, "provider", "provider")
-		networks := StPlatformEndpointNetworks{Operator: map[server.Id]bool{operator: true, measurement: true}, Measurement: map[server.Id]bool{measurement: true}}
+		networks := StPlatformEndpointNetworks{OperatorNetworkIds: map[server.Id]bool{operator: true, measurement: true}, MeasurementNetworkIds: map[server.Id]bool{measurement: true}}
 
 		if set := GetStPlatformEndpoints(ctx); set.Count() != 0 {
 			t.Fatalf("a new registry holds %d registrations", set.Count())
@@ -40,7 +40,7 @@ func TestStPlatformEndpointRegistry(t *testing.T) {
 			"a customer's client":   {provider, StPlatformEndpointSmtpEdge, "operator@example"},
 			"a measurement network": {probe, StPlatformEndpointMxEdge, "operator@example"},
 		} {
-			if registered, err := RegisterStPlatformEndpoint(ctx, c.clientId, c.kind, c.by, networks); !errors.Is(err, ErrStPlatformEndpoint) || registered != nil {
+			if registered, err := RegisterStPlatformEndpoint(ctx, c.clientId, c.kind, c.by, networks); !errors.Is(err, errStPlatformEndpoint) || registered != nil {
 				t.Fatalf("%s: %+v, %v", name, registered, err)
 			}
 		}
@@ -56,27 +56,27 @@ func TestStPlatformEndpointRegistry(t *testing.T) {
 		if registered.NetworkId != operator || registered.Kind != StPlatformEndpointTlsEdge || registered.RegisterTime.Before(before) || registered.RevokeTime != nil {
 			t.Fatalf("registered %+v", registered)
 		}
-		if _, err := RegisterStPlatformEndpoint(ctx, edge, StPlatformEndpointSmtpEdge, "operator@example", networks); !errors.Is(err, ErrStPlatformEndpoint) {
+		if _, err := RegisterStPlatformEndpoint(ctx, edge, StPlatformEndpointSmtpEdge, "operator@example", networks); !errors.Is(err, errStPlatformEndpoint) {
 			t.Fatalf("a second registration in force: %v", err)
 		}
 		set := GetStPlatformEndpoints(ctx)
-		if set.Count() != 1 || set.InForce(server.NowUtc()) != 1 || !set.Holds(edge, server.NowUtc()) {
+		if set.Count() != 1 || set.InForce(server.NowUtc()) != 1 || !set.holds(edge, server.NowUtc()) {
 			t.Fatalf("registry %+v", set)
 		}
 		// never backdated: a contract created before the registration is not
 		// intra-platform
-		if set.Holds(edge, registered.RegisterTime.Add(-time.Microsecond)) || !set.Holds(edge, registered.RegisterTime) {
+		if set.holds(edge, registered.RegisterTime.Add(-time.Microsecond)) || !set.holds(edge, registered.RegisterTime) {
 			t.Fatal("the registration does not start when it was made")
 		}
 
 		time.Sleep(2 * time.Millisecond)
-		if err := RevokeStPlatformEndpoint(ctx, edge, ""); !errors.Is(err, ErrStPlatformEndpoint) {
+		if err := RevokeStPlatformEndpoint(ctx, edge, ""); !errors.Is(err, errStPlatformEndpoint) {
 			t.Fatalf("a revocation by no one: %v", err)
 		}
 		if err := RevokeStPlatformEndpoint(ctx, edge, "operator@example"); err != nil {
 			t.Fatal(err)
 		}
-		if err := RevokeStPlatformEndpoint(ctx, edge, "operator@example"); !errors.Is(err, ErrStPlatformEndpoint) {
+		if err := RevokeStPlatformEndpoint(ctx, edge, "operator@example"); !errors.Is(err, errStPlatformEndpoint) {
 			t.Fatalf("a second revocation: %v", err)
 		}
 		set = GetStPlatformEndpoints(ctx)
@@ -85,7 +85,7 @@ func TestStPlatformEndpointRegistry(t *testing.T) {
 			t.Fatalf("registry after the revocation %+v", set)
 		}
 		// contracts created while it was in force keep their class
-		if !set.Holds(edge, registered.RegisterTime) || set.Holds(edge, *revoked.RevokeTime) {
+		if !set.holds(edge, registered.RegisterTime) || set.holds(edge, *revoked.RevokeTime) {
 			t.Fatal("the revocation moved the registration's window")
 		}
 
@@ -132,7 +132,7 @@ func TestStExtenderDbAmendedUsageClassifiesPlatformEndpointsByCreateTime(t *test
 		if got := stAmendedDbUsages(usages); len(got) != 1 || got[edge.ClientId] != 100+10_000 {
 			t.Fatalf("usages %v, want the edge's shares of the contracts created outside its registration", got)
 		}
-		if pool.IntraPlatform != 1_000 || pool.IntraNetwork != 0 || pool.Contracts != 1 || pool.Payers != 1 || pool.PooledByClient[edge.ClientId] != 1_000 {
+		if pool.IntraPlatform != 1_000 || pool.IntraNetwork != 0 || pool.Contracts != 1 || pool.Payers != 1 || pool.ClientIdPooledBytes[edge.ClientId] != 1_000 {
 			t.Fatalf("pool %+v", pool)
 		}
 		// with no registration, nothing is intra-platform

@@ -19,24 +19,39 @@ import (
 	"github.com/urnetwork/server/task"
 )
 
-const (
-	stLedgerV2UsageStepMaxAttempts = 100
-	// The least delay between turns: users are captured as close to the boundary
+// Tunables of the usage statement's tasks.
+type StLedgerV2UsageStepSettings struct {
+	// Turns a step's chain may take before it stops; the next sync turn
+	// restarts a stopped chain.
+	MaxAttempts int
+	// Least delay between turns: users are captured as close to the boundary
 	// as a failed read allows.
-	stLedgerV2UsageStepRetryDelay = 15 * time.Second
-	// A step reads the epoch's provider chunks and publishes one small object.
-	stLedgerV2UsageStepMaxTime = 30 * time.Minute
-	// An extender shadow step reads the epoch's contracts as a root's build
-	// does, so it has the v2 driver's time.
-	stLedgerV2UsageShadowStepMaxTime = 2 * time.Hour
-)
+	RetryDelay time.Duration
+	// Bound of one step that reads the epoch's provider chunks and publishes
+	// one small object.
+	MaxTime time.Duration
+	// Bound of one extender shadow step, which reads the epoch's contracts as
+	// a root's build does, so it has the v2 driver's time.
+	ShadowMaxTime time.Duration
+}
 
-// stLedgerV2UsageStepMaxTimeOf is a usage step's time limit by kind.
-func stLedgerV2UsageStepMaxTimeOf(kind string) time.Duration {
-	if kind == controller.StLedgerV2UsageStepExtenderShadow {
-		return stLedgerV2UsageShadowStepMaxTime
+// The defaults the usage steps have always had, and the v2 driver's two hours
+// for a shadow step.
+func DefaultStLedgerV2UsageStepSettings() *StLedgerV2UsageStepSettings {
+	return &StLedgerV2UsageStepSettings{
+		MaxAttempts:   100,
+		RetryDelay:    15 * time.Second,
+		MaxTime:       30 * time.Minute,
+		ShadowMaxTime: 2 * time.Hour,
 	}
-	return stLedgerV2UsageStepMaxTime
+}
+
+// A usage step's time limit by kind.
+func (self *StLedgerV2UsageStepSettings) maxTimeOf(kind string) time.Duration {
+	if kind == controller.StLedgerV2UsageStepExtenderShadow {
+		return self.ShadowMaxTime
+	}
+	return self.MaxTime
 }
 
 // scheduleStLedgerV2UsageSteps starts a task chain for each due usage step that has
@@ -53,10 +68,11 @@ func scheduleStLedgerV2UsageSteps(clientSession *session.ClientSession, deployme
 		glog.Infof("[st]v2 usage sync failed: %s\n", err)
 		return
 	}
+	settings := DefaultStLedgerV2UsageStepSettings()
 	for _, step := range steps {
 		args := &StLedgerV2UsageStepArgs{DeploymentKey: string(deploymentKey), Kind: step.Kind, Epoch: step.Epoch}
 		server.Tx(clientSession.Ctx, func(tx server.PgTx) {
-			task.ScheduleTaskInTxIfAbsent(tx, StLedgerV2UsageStep, args, clientSession, stLedgerV2UsageStepRunOnce(args), task.RunAt(step.RunAt), task.MaxTime(stLedgerV2UsageStepMaxTimeOf(step.Kind)))
+			task.ScheduleTaskInTxIfAbsent(tx, StLedgerV2UsageStep, args, clientSession, stLedgerV2UsageStepRunOnce(args), task.RunAt(step.RunAt), task.MaxTime(settings.maxTimeOf(step.Kind)))
 		})
 	}
 }
@@ -111,14 +127,15 @@ func StLedgerV2UsageStepPost(
 	if _, current := stTaskDeploymentCurrent(stLedgerV2UsageStep.DeploymentKey); !current {
 		return nil
 	}
-	if stLedgerV2UsageStepResult.Retry && stLedgerV2UsageStep.Attempt+1 < stLedgerV2UsageStepMaxAttempts {
-		runAt := server.NowUtc().Add(stLedgerV2UsageStepRetryDelay)
+	settings := DefaultStLedgerV2UsageStepSettings()
+	if stLedgerV2UsageStepResult.Retry && stLedgerV2UsageStep.Attempt+1 < settings.MaxAttempts {
+		runAt := server.NowUtc().Add(settings.RetryDelay)
 		if stLedgerV2UsageStepResult.RetryAt != nil && runAt.Before(*stLedgerV2UsageStepResult.RetryAt) {
 			runAt = *stLedgerV2UsageStepResult.RetryAt
 		}
 		next := *stLedgerV2UsageStep
 		next.Attempt += 1
-		task.ScheduleTaskInTx(tx, StLedgerV2UsageStep, &next, clientSession, stLedgerV2UsageStepRunOnce(&next), task.RunAt(runAt), task.MaxTime(stLedgerV2UsageStepMaxTimeOf(next.Kind)))
+		task.ScheduleTaskInTx(tx, StLedgerV2UsageStep, &next, clientSession, stLedgerV2UsageStepRunOnce(&next), task.RunAt(runAt), task.MaxTime(settings.maxTimeOf(next.Kind)))
 	}
 	return nil
 }

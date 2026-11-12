@@ -187,6 +187,26 @@ func TestStatsRefreshProviderEgressPublishesEveryBucketAndReason(t *testing.T) {
 		}
 		connect.AssertEqual(t, onlineMembers, float64(4))
 		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderModernGateShadowGauge.gauge, "urnetwork_stats_provider_modern_gate_shadow"), 3*len(model.ProviderModernOutcomes))
+
+		// the classified decision's supply (FP2-PROTOCOL.md §8.1): every
+		// provider here is v4-only and none lost a capability, so each counts
+		// under ipv4+dualproto in the buckets its strict decision admits, with
+		// no post-quantum outcome; every series is published, zero included
+		capability := func(bucket string, ip string, protocol string) float64 {
+			return testutil.ToFloat64(statsProviderEgressCapabilityGauge.gauge.WithLabelValues(bucket, ip, protocol))
+		}
+		postQuantum := func(bucket string, signal string) float64 {
+			return testutil.ToFloat64(statsProviderPostQuantumGauge.gauge.WithLabelValues(bucket, signal))
+		}
+		for bucket, members := range map[string]float64{model.RankModeQuality: 2, model.RankModeSpeed: 2, model.ProviderEgressBucketOnline: 4} {
+			connect.AssertEqual(t, capability(bucket, model.ProviderCapabilityIpIpv4, model.ProviderCapabilityProtocolDualproto), members)
+			connect.AssertEqual(t, capability(bucket, model.ProviderCapabilityIpIpv4, model.ProviderCapabilityProtocolTcp), float64(0))
+			connect.AssertEqual(t, capability(bucket, model.ProviderCapabilityIpDualstack, model.ProviderCapabilityProtocolDualproto), float64(0))
+			connect.AssertEqual(t, postQuantum(bucket, model.ProviderPostQuantumSignalNone), members)
+			connect.AssertEqual(t, postQuantum(bucket, model.ProviderPostQuantumSignalPositive), float64(0))
+		}
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderEgressCapabilityGauge.gauge, "urnetwork_stats_provider_egress_capability"), 3*2*2)
+		connect.AssertEqual(t, testutil.CollectAndCount(statsProviderPostQuantumGauge.gauge, "urnetwork_stats_provider_post_quantum"), 3*3)
 		// the gate beside the counts: off, and no start
 		connect.AssertEqual(t, testutil.ToFloat64(statsProviderModernGateOnGauge.gauge), float64(0))
 		connect.AssertEqual(t, statsEgressTestModernGateStartSeries(t), 0)

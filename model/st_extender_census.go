@@ -17,19 +17,18 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// StExtenderCensusAddress is one address of an extender record.
+// One address of an extender record.
 type StExtenderCensusAddress struct {
 	Ip netip.Addr
-	// Active is the address not deactivated by the five-minute challenge (C3).
+	// the address not deactivated by the five-minute challenge (C3).
 	Active bool
 }
 
-// StExtenderCensusRecord is one extender record of the directory, as the
-// census reads it.
+// One extender record of the directory, as the census reads it.
 type StExtenderCensusRecord struct {
 	ExtenderId server.Id
-	// NetworkId is the network that first stored the record's key, and
-	// ClientId the provider client of it that activated it last.
+	// the network that first stored the record's key, and ClientId the provider
+	// client of it that activated it last.
 	NetworkId     server.Id
 	ClientId      server.Id
 	Active        bool
@@ -50,9 +49,8 @@ const stExtenderCensusRecordsSql = `
 	ORDER BY e.extender_id, a.ip_version
 `
 
-// GetStExtenderCensusRecords reads the operator's extender records known in
-// the epoch [start, end) as they stand now, which the census capture reads as
-// soon as end is finalized.
+// Reads the operator's extender records known in the epoch [start, end) as they
+// stand now, which the census capture reads as soon as end is finalized.
 func GetStExtenderCensusRecords(ctx context.Context, start time.Time, end time.Time) []*StExtenderCensusRecord {
 	records := []*StExtenderCensusRecord{}
 	server.Db(ctx, func(conn server.PgConn) {
@@ -94,12 +92,12 @@ func BuildStExtenderCensus(records []*StExtenderCensusRecord, rules *ExtenderEli
 	return rows, nil
 }
 
-// EncodeStExtenderCensus is a census as stored: its rows, concatenated.
+// A census as stored: its rows, concatenated.
 func EncodeStExtenderCensus(rows []ledger.CensusRow) []byte {
 	return bytes.Join(ledger.EncodeCensusChunks(rows), nil)
 }
 
-// DecodeStExtenderCensus reads a stored census.
+// Reads a stored census.
 func DecodeStExtenderCensus(data []byte) ([]ledger.CensusRow, error) {
 	chunks := [][]byte{}
 	for start := 0; start < len(data); start += ledger.ChunkRows * ledger.CensusRowBytes {
@@ -115,7 +113,7 @@ func DecodeStExtenderCensus(data []byte) ([]ledger.CensusRow, error) {
 	return rows, nil
 }
 
-// StLedgerV2ExtenderCensus is an epoch's captured census.
+// An epoch's captured census.
 type StLedgerV2ExtenderCensus struct {
 	Epoch       uint64
 	Census      []byte
@@ -123,9 +121,9 @@ type StLedgerV2ExtenderCensus struct {
 	CaptureTime time.Time
 }
 
-// CaptureStLedgerV2ExtenderCensus records an epoch's census once: a census
-// already captured is kept, and returned, whatever this one holds, because
-// the boundary's census is the first one taken after it.
+// Records an epoch's census once: a census already captured is kept, and
+// returned, whatever this one holds, because the boundary's census is the first
+// one taken after it.
 func CaptureStLedgerV2ExtenderCensus(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64, census []byte, rows uint64, captureTime time.Time) *StLedgerV2ExtenderCensus {
 	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
@@ -138,8 +136,7 @@ func CaptureStLedgerV2ExtenderCensus(ctx context.Context, deploymentKey StDeploy
 	return GetStLedgerV2ExtenderCensus(ctx, deploymentKey, noId, epoch)
 }
 
-// GetStLedgerV2ExtenderCensus is an epoch's captured census, nil before it is
-// captured.
+// An epoch's captured census, nil before it is captured.
 func GetStLedgerV2ExtenderCensus(ctx context.Context, deploymentKey StDeploymentKey, noId uint64, epoch uint64) *StLedgerV2ExtenderCensus {
 	key := requireStDeploymentKey(deploymentKey)
 	var census *StLedgerV2ExtenderCensus
@@ -160,8 +157,8 @@ func GetStLedgerV2ExtenderCensus(ctx context.Context, deploymentKey StDeployment
 	return census
 }
 
-// GetStAmendments is the last amendments file that verified for a deployment,
-// exactly as it was published; nil before the first.
+// The last amendments file that verified for a deployment, exactly as it was
+// published; nil before the first.
 func GetStAmendments(ctx context.Context, deploymentKey StDeploymentKey) []byte {
 	key := requireStDeploymentKey(deploymentKey)
 	var raw []byte
@@ -176,7 +173,7 @@ func GetStAmendments(ctx context.Context, deploymentKey StDeploymentKey) []byte 
 	return raw
 }
 
-// SaveStAmendments replaces a deployment's verified amendments file.
+// Replaces a deployment's verified amendments file.
 func SaveStAmendments(ctx context.Context, deploymentKey StDeploymentKey, raw []byte) {
 	key := requireStDeploymentKey(deploymentKey)
 	server.Tx(ctx, func(tx server.PgTx) {
