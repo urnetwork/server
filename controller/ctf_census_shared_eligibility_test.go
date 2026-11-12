@@ -28,14 +28,18 @@ func ctfSharedTestUnit(ip netip.Addr) [32]byte {
 	return sha256.Sum256([]byte(netip.PrefixFrom(ip, bits).Masked().String()))
 }
 
-func ctfSharedTestRecord(extender byte, client server.Id, addresses ...string) *model.StExtenderCensusRecord {
-	record := &model.StExtenderCensusRecord{ExtenderId: server.Id{0x40, extender}, NetworkId: server.Id{0x30, client[1]}, ClientId: client, Active: true}
+// An active record of extender id byte extender for clientId, on the client's
+// test network, with its active addresses.
+func ctfSharedTestRecord(extender byte, clientId server.Id, addresses ...string) *model.StExtenderCensusRecord {
+	record := &model.StExtenderCensusRecord{ExtenderId: server.Id{0x40, extender}, NetworkId: server.Id{0x30, clientId[1]}, ClientId: clientId, Active: true}
 	for _, address := range addresses {
 		record.Addresses = append(record.Addresses, model.StExtenderCensusAddress{Ip: netip.MustParseAddr(address), Active: true})
 	}
 	return record
 }
 
+// Every reconciled rule and every unchanged one, from records through the
+// shared judgement to the census decision, with what main decided beside it.
 func TestCtfCensusExtendersUnderTheSharedEligibility(t *testing.T) {
 	ids := ctfTestClientIds(20)
 	gated := ctfSharedTestRecord(11, ids[11], "192.0.2.111")
@@ -69,33 +73,33 @@ func TestCtfCensusExtendersUnderTheSharedEligibility(t *testing.T) {
 		ctfSharedTestRecord(16, ids[16], "203.0.113.16"),
 	}
 	rules := &model.ExtenderEligibilityRules{
-		Unit:           ctfSharedTestUnit,
-		Durable:        map[server.Id]bool{},
-		Declared:       map[server.Id]bool{},
-		CanaryNetworks: map[server.Id]bool{records[9].NetworkId: true},
-		Coldkeys:       map[server.Id][32]byte{},
-		HeadBound:      map[server.Id]bool{ids[15]: true},
+		Unit:               ctfSharedTestUnit,
+		DurableNetworkIds:  map[server.Id]bool{},
+		DeclaredNetworkIds: map[server.Id]bool{},
+		CanaryNetworkIds:   map[server.Id]bool{records[9].NetworkId: true},
+		ClientIdColdkeys:   map[server.Id][32]byte{},
+		HeadBoundClientIds: map[server.Id]bool{ids[15]: true},
 	}
 	for _, record := range records {
-		rules.Coldkeys[record.ClientId] = ctfTestHash("coldkey " + record.ClientId.String())
+		rules.ClientIdColdkeys[record.ClientId] = ctfTestHash("coldkey " + record.ClientId.String())
 	}
-	delete(rules.Coldkeys, ids[4])
-	delete(rules.Coldkeys, ids[16])
-	judged, err := model.DecideExtenderEligibility(records, rules)
+	delete(rules.ClientIdColdkeys, ids[4])
+	delete(rules.ClientIdColdkeys, ids[16])
+	eligibilities, err := model.DecideExtenderEligibility(records, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	f := newCtfCensusFixture()
-	members := []server.Id{}
-	boundaries := map[server.Id][]*model.CtfExtenderBoundary{}
+	memberClientIds := []server.Id{}
+	clientIdBoundaries := map[server.Id][]*model.CtfExtenderBoundary{}
 	for _, record := range records {
 		if record.ClientId == ids[8] {
 			continue
 		}
-		boundaries[record.ClientId] = append(boundaries[record.ClientId], &model.CtfExtenderBoundary{ExtenderId: record.ExtenderId, ClientId: record.ClientId, CountryCode: "ir"})
-		if len(boundaries[record.ClientId]) == 1 {
-			members = append(members, record.ClientId)
+		clientIdBoundaries[record.ClientId] = append(clientIdBoundaries[record.ClientId], &model.CtfExtenderBoundary{ExtenderId: record.ExtenderId, ClientId: record.ClientId, CountryCode: "ir"})
+		if len(clientIdBoundaries[record.ClientId]) == 1 {
+			memberClientIds = append(memberClientIds, record.ClientId)
 			samples := 672
 			if record.ClientId == ids[6] {
 				samples = 10
@@ -103,7 +107,7 @@ func TestCtfCensusExtendersUnderTheSharedEligibility(t *testing.T) {
 			f.present(model.CtfRoleExtender, record.ClientId, "ir", 0, samples)
 		}
 	}
-	f.facts.Extenders = ctfExtenderEnds(judged, boundaries, members)
+	f.facts.Extenders = ctfExtenderEnds(eligibilities, clientIdBoundaries, memberClientIds)
 	decision := decideCtfCensus(f.facts)
 
 	for _, c := range []struct {
@@ -148,18 +152,18 @@ func TestCtfCensusExtendersUnderTheSharedEligibility(t *testing.T) {
 	// records are exactly this census's extender candidates' records, less
 	// those this census's presence leaves out (6, present too little, and 8,
 	// never sampled)
-	candidates := map[server.Id]bool{}
+	candidateExtenderIds := map[server.Id]bool{}
 	for _, member := range decision.candidates() {
 		if member.Role == model.CtfRoleExtender {
-			candidates[*member.ExtenderId] = true
+			candidateExtenderIds[*member.ExtenderId] = true
 		}
 	}
-	for _, eligibility := range judged {
+	for _, eligibility := range eligibilities {
 		if eligibility.Record.ClientId == ids[6] || eligibility.Record.ClientId == ids[8] {
 			continue
 		}
-		if eligibility.Eligible() != candidates[eligibility.Record.ExtenderId] {
-			t.Errorf("extender %s: eligible %v in the extender pool, candidate %v here", eligibility.Record.ExtenderId, eligibility.Eligible(), candidates[eligibility.Record.ExtenderId])
+		if eligibility.Eligible() != candidateExtenderIds[eligibility.Record.ExtenderId] {
+			t.Errorf("extender %s: eligible %v in the extender pool, candidate %v here", eligibility.Record.ExtenderId, eligibility.Eligible(), candidateExtenderIds[eligibility.Record.ExtenderId])
 		}
 	}
 }
@@ -170,16 +174,16 @@ func TestCtfExtenderEndsWithoutAnActiveRecord(t *testing.T) {
 	ids := ctfTestClientIds(3)
 	inactive := ctfSharedTestRecord(1, ids[1], "198.51.100.1")
 	inactive.Active = false
-	rules := &model.ExtenderEligibilityRules{Unit: ctfSharedTestUnit, Durable: map[server.Id]bool{}, Declared: map[server.Id]bool{}, Coldkeys: map[server.Id][32]byte{}, HeadBound: map[server.Id]bool{}}
-	judged, err := model.DecideExtenderEligibility([]*model.StExtenderCensusRecord{inactive}, rules)
+	rules := &model.ExtenderEligibilityRules{Unit: ctfSharedTestUnit, DurableNetworkIds: map[server.Id]bool{}, DeclaredNetworkIds: map[server.Id]bool{}, ClientIdColdkeys: map[server.Id][32]byte{}, HeadBoundClientIds: map[server.Id]bool{}}
+	eligibilities, err := model.DecideExtenderEligibility([]*model.StExtenderCensusRecord{inactive}, rules)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ends := ctfExtenderEnds(judged, nil, []server.Id{ids[1], ids[2]})
-	if end := ends[ids[1]]; end == nil || end.Active || end.Egress != nil || end.ExtenderId != inactive.ExtenderId {
-		t.Errorf("a client with only an inactive record: %+v", end)
+	clientIdExtenderEnds := ctfExtenderEnds(eligibilities, nil, []server.Id{ids[1], ids[2]})
+	if extenderEnd := clientIdExtenderEnds[ids[1]]; extenderEnd == nil || extenderEnd.Active || extenderEnd.Egress != nil || extenderEnd.ExtenderId != inactive.ExtenderId {
+		t.Errorf("a client with only an inactive record: %+v", extenderEnd)
 	}
-	if ends[ids[2]] != nil {
+	if clientIdExtenderEnds[ids[2]] != nil {
 		t.Error("a client without a record has facts")
 	}
 }

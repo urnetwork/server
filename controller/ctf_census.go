@@ -302,19 +302,19 @@ func stCtfBuildCensus(ctx context.Context, cfg *StConfig, client StClient, setti
 		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d extender eligibility", epoch), "epoch %d's census waits: %s", epoch, err)
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
 	}
-	judged, err := model.DecideExtenderEligibility(records, rules)
+	eligibilities, err := model.DecideExtenderEligibility(records, rules)
 	if err != nil {
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
 	}
-	facts.Extenders = ctfExtenderEnds(judged, model.GetCtfExtenderBoundaries(ctx, extenderIds, authority.StartTime, authority.EndTime), extenderIds)
+	facts.Extenders = ctfExtenderEnds(eligibilities, model.GetCtfExtenderBoundaries(ctx, extenderIds, authority.StartTime, authority.EndTime), extenderIds)
 
 	// P6: the operator's own networks, the one list E5 reads
-	own, err := readStExtenderOwnNetworks(ctx, cfg)
+	ownNetworks, err := readStExtenderOwnNetworks(ctx, cfg)
 	if err != nil {
 		stLedgerV2Alert(cfg, StCtfDataAlertCensus, fmt.Sprintf("epoch %d own networks", epoch), "epoch %d's census waits: %s", epoch, err)
 		return stCtfCensusRetry(fmt.Sprintf("epoch %d: %s", epoch, err))
 	}
-	facts.OwnNetworks = own.All()
+	facts.OwnNetworks = ownNetworks.AllNetworkIds()
 
 	// P5, X5: a fleet binding at either boundary, and the provider pool's
 	// wallet selection
@@ -620,20 +620,20 @@ func ctfResolveProviderUnit(egress *model.CtfEgress, sampled []*ctfSampledUnit, 
 	return resolved
 }
 
-// ctfExtenderEnds are the extender members' facts: each member's provider
-// client judged by its judged record under the shared eligibility rules (X1,
-// X4–X6), with the country of that record and its activations from the
-// boundary read (X3). A member whose client has no record of the epoch has no
-// facts, so it is inactive.
-func ctfExtenderEnds(judged model.ExtenderEligibilities, boundaries map[server.Id][]*model.CtfExtenderBoundary, extenderIds []server.Id) map[server.Id]*ctfExtenderEnd {
-	ends := map[server.Id]*ctfExtenderEnd{}
-	for _, clientId := range extenderIds {
-		eligibility := judged.Judged(clientId)
+// The extender members' facts: each member's provider client judged by its
+// judged record under the shared eligibility rules (X1, X4–X6), with the
+// country of that record and its activations from the boundary read (X3). A
+// member whose client has no record of the epoch has no facts, so it is
+// inactive.
+func ctfExtenderEnds(eligibilities model.ExtenderEligibilities, clientIdBoundaries map[server.Id][]*model.CtfExtenderBoundary, extenderClientIds []server.Id) map[server.Id]*ctfExtenderEnd {
+	clientIdExtenderEnds := map[server.Id]*ctfExtenderEnd{}
+	for _, clientId := range extenderClientIds {
+		eligibility := eligibilities.Judged(clientId)
 		if eligibility == nil {
 			continue
 		}
 		networkId := eligibility.Record.NetworkId
-		end := &ctfExtenderEnd{
+		extenderEnd := &ctfExtenderEnd{
 			ExtenderId: eligibility.Record.ExtenderId,
 			NetworkId:  &networkId,
 			Active:     eligibility.Active(),
@@ -644,17 +644,17 @@ func ctfExtenderEnds(judged model.ExtenderEligibilities, boundaries map[server.I
 		}
 		if eligibility.Active() {
 			unit := eligibility.Unit
-			end.Egress = &model.CtfEgress{Unit: &unit, UnitFamily: int(eligibility.Family)}
+			extenderEnd.Egress = &model.CtfEgress{Unit: &unit, UnitFamily: int(eligibility.Family)}
 		}
-		for _, record := range boundaries[clientId] {
-			if record.ExtenderId == eligibility.Record.ExtenderId {
-				end.CountryCode = record.CountryCode
-				end.ActivatedElsewhere = ctfExtenderMoved(record)
+		for _, boundary := range clientIdBoundaries[clientId] {
+			if boundary.ExtenderId == eligibility.Record.ExtenderId {
+				extenderEnd.CountryCode = boundary.CountryCode
+				extenderEnd.ActivatedElsewhere = ctfExtenderMoved(boundary)
 			}
 		}
-		ends[clientId] = end
+		clientIdExtenderEnds[clientId] = extenderEnd
 	}
-	return ends
+	return clientIdExtenderEnds
 }
 
 // stCtfColdkeys selects the payout coldkey of each member client as the
