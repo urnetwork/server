@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/urnetwork/server"
@@ -19,9 +20,15 @@ import (
 // Real source handoff, protected admissions, runtime quorum and separate
 // reserved publication precede synthetic no-op receipts. No trigger is disabled.
 func newCompetitionPreparedIntakeCompletionFixture(t *testing.T, tb testing.TB, distributed bool) *competitionDistributedPgFixture {
+	return newCompetitionPreparedIntakeCompletionFixtureAt(t, tb, distributed, time.Time{})
+}
+
+// The full guarded lifecycle also supports genuinely historical synthetic
+// runs. Only current SQL authority/qualification clocks remain on real time.
+func newCompetitionPreparedIntakeCompletionFixtureAt(t *testing.T, tb testing.TB, distributed bool, historicalNow time.Time) *competitionDistributedPgFixture {
 	tb.Helper()
 	ctx := tb.Context()
-	intake := newCompetitionIntakeFirstDatabaseFixture(t, ctx, func(settings *Settings) {
+	intake := newCompetitionIntakeFirstDatabaseFixtureAt(t, ctx, historicalNow, func(settings *Settings) {
 		if distributed {
 			settings.FutureEpochPolicy.DistributedEvaluationPolicy = competitionDistributedSlotTestPolicy(tb)
 		}
@@ -35,10 +42,12 @@ func newCompetitionPreparedIntakeCompletionFixture(t *testing.T, tb testing.TB, 
 	if err != nil {
 		tb.Fatal(err)
 	}
-	server.Db(ctx, func(conn server.PgConn) {
-		intake.now, err = competitionIntakeFirstDatabaseTime(ctx, conn)
-		server.Raise(err)
-	})
+	if historicalNow.IsZero() {
+		server.Db(ctx, func(conn server.PgConn) {
+			intake.now, err = competitionIntakeFirstDatabaseTime(ctx, conn)
+			server.Raise(err)
+		})
+	}
 	service := newServiceWithImageDigest(intake.settings, intake.store, testApiImageDigest(), nil)
 	for _, name := range []string{"synthetic-prepared-source", "synthetic-prepared-next"} {
 		accepted, code, evalError := service.SubmitV2(ctx, ScoreArgs{RoundId: opened.RoundId, Patch: testPatch(name)}, &Principal{Id: "synthetic-submitter", Role: "submitter"})
@@ -76,9 +85,21 @@ func newCompetitionPreparedIntakeCompletionFixture(t *testing.T, tb testing.TB, 
 		sourceJob: preparation.SourceJob, preparation: preparation, prepared: prepared}
 	fixture.store.now = clock.Now
 	if distributed {
+		// SQL independently bounds actual qualification publication. Synthetic
+		// original candidate history must not backdate that live SQL authority.
+		originalNow := clock.Now()
+		if !historicalNow.IsZero() {
+			var currentNow time.Time
+			server.Db(ctx, func(conn server.PgConn) {
+				currentNow, err = competitionIntakeFirstDatabaseTime(ctx, conn)
+				server.Raise(err)
+			})
+			clock.Advance(currentNow.Sub(clock.Now()))
+		}
 		for _, host := range frozen.DistributedEvaluationPolicy.Hosts {
 			fixture.qualifyHost(tb, host)
 		}
+		clock.Advance(originalNow.Sub(clock.Now()))
 	} else {
 		check := passingHostCheck(frozen)
 		check.RebaselinePassed, check.RebaselineRoundId = true, &round.RoundId

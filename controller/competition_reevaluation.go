@@ -199,6 +199,9 @@ func CompetitionJobReevaluationSnapshotDigest(content json.RawMessage) (string, 
 // Only the privileged local CLI binds a separately pinned qualification. This
 // is not inferred from version strings, old image receipts or a successful Go run.
 func BindCompetitionJobReevaluationRuntime(settings *Settings, proof model.CompetitionJobReevaluationRuntime, digest string) error {
+	if proof.Schema == 2 || proof.Kind == model.CompetitionDistributedJobReevaluationRuntimeKind {
+		return bindCompetitionDistributedReevaluationRuntime(settings, proof, digest)
+	}
 	if settings == nil || proof.Schema != 1 || proof.Kind != model.CompetitionJobReevaluationRuntimeKind || !proof.Accepted ||
 		proof.Capability != model.CompetitionJobReevaluationCapability || !proof.ApiCompatible || !proof.WorkerCompatible ||
 		!gitShaPattern.MatchString(proof.SourceCommit) || !imageDigestPattern.MatchString(proof.ApiImageDigest) ||
@@ -270,7 +273,7 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 		return ErrAutomationDisabled
 	}
 	if !tokenNamePattern.MatchString(request.IdempotencyKey) || !sha256Pattern.MatchString(request.AuthorizationSha256) ||
-		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind ||
+		a.Schema != 1 || a.Kind != model.CompetitionJobReevaluationAuthorizationKind || a.Distributed != nil ||
 		a.Environment != settings.AutomationPolicy.Environment || a.CompetitionId != settings.CompetitionId || a.SeasonId != settings.AutomationPolicy.SeasonId ||
 		a.JobId == (server.Id{}) || a.RoundId == (server.Id{}) || a.ExpectedCycle != 0 || a.ExpectedAttemptCount < 1 || !a.SingleUse ||
 		a.AuthorizedAt.IsZero() || !a.AuthorizedAt.Before(a.ExpiresAt) || !sha256Pattern.MatchString(a.EvidenceSha256) ||
@@ -324,7 +327,8 @@ func validateCompetitionReevaluationRequest(settings *Settings, principal *Princ
 // Current deployment proof gates a new grant, never exact committed replay.
 func validateCompetitionReevaluationRuntime(settings *Settings, a model.CompetitionJobReevaluationAuthorization) error {
 	proof := settings.reevaluationRuntime
-	if proof == nil || settings.reevaluationRuntimeSha256 != a.RuntimeQualificationSha256 || proof.SourceCommit != a.FixedSourceCommit ||
+	if proof == nil || proof.Schema != 1 || proof.Kind != model.CompetitionJobReevaluationRuntimeKind || proof.Capability != model.CompetitionJobReevaluationCapability ||
+		settings.reevaluationRuntimeSha256 != a.RuntimeQualificationSha256 || proof.SourceCommit != a.FixedSourceCommit ||
 		proof.WorkerSha256 != a.FixedWorkerSha256 || proof.WorkerImageDigest != a.FixedWorkerImageDigest || proof.ApiImageDigest != a.ApiImageDigest {
 		return ErrConflict
 	}
@@ -357,6 +361,7 @@ func readCompetitionReevaluationReceipt(ctx context.Context, settings *Settings,
 			var result model.CompetitionJobReevaluationReceipt
 			server.Raise(decodeFailureEvidenceJson(content, &result))
 			server.Raise(model.ValidateCompetitionJobReevaluationCycle(&result.CompetitionJobReevaluationCycle))
+			server.Raise(validateCompetitionDistributedRecoveryReceipt(&result))
 			receipt = &result
 		})
 	})
@@ -450,6 +455,9 @@ func validateCompetitionReevaluationIncidentInTx(ctx context.Context, tx server.
 // One transaction records the complete old terminal projection before a
 // narrowly guarded queue transition. Exact replay is receipt-only, not a reset.
 func (self PostgresStore) AuthorizeJobReevaluation(ctx context.Context, settings *Settings, principal *Principal, request model.CompetitionJobReevaluationRequest) (receipt *model.CompetitionJobReevaluationReceipt, err error) {
+	if request.Authorization.Schema == 2 || request.Authorization.Kind == model.CompetitionDistributedJobReevaluationAuthorizationKind {
+		return self.authorizeDistributedJobReevaluation(ctx, settings, principal, request, competitionTransportForHost)
+	}
 	if err := validateCompetitionReevaluationRequest(settings, principal, request); err != nil {
 		return nil, err
 	}

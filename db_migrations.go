@@ -11460,4 +11460,8 @@ var migrations = []any{
 	// before deploying the taskworker and api that use them; they stay empty
 	// while ctf.yml leaves capture the flag off.
 	ctfSchemaMigration,
+
+	// Explicit distributed terminal-infrastructure recovery preserves original
+	// admission/failure and requires all-host closure before a new cycle queues.
+	newSqlMigration(CompetitionDistributedReevaluationMigrationSql()),
 }

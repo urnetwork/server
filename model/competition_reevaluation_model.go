@@ -55,6 +55,7 @@ type CompetitionJobReevaluationAuthorization struct {
 	PostCloseApproval            *CompetitionJobReevaluationPostCloseApproval            `json:"post_close_approval,omitempty"`
 	BackingServiceEvidence       *CompetitionJobReevaluationBackingServiceEvidence       `json:"backing_service_evidence,omitempty"`
 	OperatorInterruptionEvidence *CompetitionJobReevaluationOperatorInterruptionEvidence `json:"operator_interruption_evidence,omitempty"`
+	Distributed                  *CompetitionDistributedJobReevaluationAuthorization     `json:"distributed,omitempty"`
 }
 
 // The scoped operator binds retained stop evidence to an actual interrupted
@@ -117,38 +118,41 @@ type CompetitionJobReevaluationRequest struct {
 // ReceiptSha256 authenticates immutable field consistency, not a signature:
 // authorization provenance remains the trusted API and its immutable audit.
 type CompetitionJobReevaluationCycle struct {
-	Schema                     int                          `json:"schema"`
-	Environment                string                       `json:"environment"`
-	CompetitionId              string                       `json:"competition_id"`
-	SeasonId                   string                       `json:"season_id"`
-	JobId                      server.Id                    `json:"job_id"`
-	RoundId                    server.Id                    `json:"round_id"`
-	PatchSha256                string                       `json:"patch_sha256"`
-	RoundPolicySha256          string                       `json:"round_policy_sha256"`
-	BaselineSha256             string                       `json:"baseline_sha256"`
-	Cycle                      int                          `json:"cycle"`
-	ReceiptSha256              string                       `json:"receipt_sha256"`
-	AuthorizationSha256        string                       `json:"authorization_sha256"`
-	EvidenceSha256             string                       `json:"evidence_sha256"`
-	PreviousTerminalSha256     string                       `json:"previous_terminal_sha256"`
-	PreviousFailure            CompetitionEvaluationFailure `json:"previous_failure"`
-	IncidentClass              string                       `json:"incident_class,omitempty"`
-	RuntimeQualificationSha256 string                       `json:"runtime_qualification_sha256"`
-	FixedSourceCommit          string                       `json:"fixed_source_commit"`
-	FixedWorkerSha256          string                       `json:"fixed_worker_sha256"`
-	FixedWorkerImageDigest     string                       `json:"fixed_worker_image_digest"`
-	ApiImageDigest             string                       `json:"api_image_digest"`
-	AuthorizedAt               time.Time                    `json:"authorized_at"`
-	StartedAt                  *time.Time                   `json:"started_at,omitempty"`
-	ExecutionTimeoutSeconds    int                          `json:"execution_timeout_seconds"`
+	Schema                     int                                         `json:"schema"`
+	Environment                string                                      `json:"environment"`
+	CompetitionId              string                                      `json:"competition_id"`
+	SeasonId                   string                                      `json:"season_id"`
+	JobId                      server.Id                                   `json:"job_id"`
+	RoundId                    server.Id                                   `json:"round_id"`
+	PatchSha256                string                                      `json:"patch_sha256"`
+	RoundPolicySha256          string                                      `json:"round_policy_sha256"`
+	BaselineSha256             string                                      `json:"baseline_sha256"`
+	Cycle                      int                                         `json:"cycle"`
+	ReceiptSha256              string                                      `json:"receipt_sha256"`
+	AuthorizationSha256        string                                      `json:"authorization_sha256"`
+	EvidenceSha256             string                                      `json:"evidence_sha256"`
+	PreviousTerminalSha256     string                                      `json:"previous_terminal_sha256"`
+	PreviousFailure            CompetitionEvaluationFailure                `json:"previous_failure"`
+	IncidentClass              string                                      `json:"incident_class,omitempty"`
+	RuntimeQualificationSha256 string                                      `json:"runtime_qualification_sha256"`
+	FixedSourceCommit          string                                      `json:"fixed_source_commit"`
+	FixedWorkerSha256          string                                      `json:"fixed_worker_sha256"`
+	FixedWorkerImageDigest     string                                      `json:"fixed_worker_image_digest"`
+	ApiImageDigest             string                                      `json:"api_image_digest"`
+	AuthorizedAt               time.Time                                   `json:"authorized_at"`
+	StartedAt                  *time.Time                                  `json:"started_at,omitempty"`
+	ExecutionTimeoutSeconds    int                                         `json:"execution_timeout_seconds"`
+	Distributed                *CompetitionDistributedJobReevaluationCycle `json:"distributed,omitempty"`
 }
 
 // The receipt is permanent and retry-stable. StartedAt belongs to the eventual
-// first claim and is never invented by authorization or receipt replay.
+// first claim. DistributedProof is private audit data, not public feedback or
+// CLI output; public consumers receive only CompetitionJobReevaluationCycle.
 type CompetitionJobReevaluationReceipt struct {
 	CompetitionJobReevaluationCycle
-	RequestSha256 string `json:"request_sha256"`
-	AttemptOffset int    `json:"attempt_offset"`
+	RequestSha256    string          `json:"request_sha256"`
+	AttemptOffset    int             `json:"attempt_offset"`
+	DistributedProof json.RawMessage `json:"distributed_proof,omitempty"`
 }
 
 // Excluding only first-claim time makes the public receipt independently
@@ -161,7 +165,7 @@ func CompetitionJobReevaluationCycleDigest(cycle CompetitionJobReevaluationCycle
 // A recovery marker cannot authorize another job, scored result, canceled
 // result or unknown infrastructure cause. The API authenticates its origin.
 func ValidateCompetitionJobReevaluationCycle(cycle *CompetitionJobReevaluationCycle) error {
-	if cycle == nil || cycle.Schema != 1 || cycle.Cycle != 1 || cycle.JobId == (server.Id{}) || cycle.RoundId == (server.Id{}) ||
+	if cycle == nil || (cycle.Schema != 1 && cycle.Schema != 2) || cycle.Cycle != 1 || cycle.JobId == (server.Id{}) || cycle.RoundId == (server.Id{}) ||
 		!competitionAutomationScope.MatchString(cycle.Environment) || !competitionAutomationScope.MatchString(cycle.CompetitionId) || !competitionAutomationScope.MatchString(cycle.SeasonId) ||
 		!competitionAutomationSha256.MatchString(cycle.PatchSha256) || !competitionAutomationSha256.MatchString(cycle.RoundPolicySha256) ||
 		!competitionAutomationSha256.MatchString(cycle.BaselineSha256) || !competitionAutomationSha256.MatchString(cycle.AuthorizationSha256) ||
@@ -169,7 +173,7 @@ func ValidateCompetitionJobReevaluationCycle(cycle *CompetitionJobReevaluationCy
 		!competitionAutomationSha256.MatchString(cycle.RuntimeQualificationSha256) || !competitionSourceCommitPattern.MatchString(cycle.FixedSourceCommit) ||
 		!competitionAutomationSha256.MatchString(cycle.FixedWorkerSha256) || !validCompetitionReevaluationImage(cycle.FixedWorkerImageDigest) || !validCompetitionReevaluationImage(cycle.ApiImageDigest) ||
 		cycle.AuthorizedAt.IsZero() || cycle.ExecutionTimeoutSeconds != 3*60*60 ||
-		(cycle.IncidentClass != "" && cycle.IncidentClass != CompetitionJobReevaluationHeartbeatBudget && cycle.IncidentClass != CompetitionJobReevaluationBackingService && cycle.IncidentClass != CompetitionJobReevaluationOperatorInterruption) ||
+		!validCompetitionReevaluationCycleClass(cycle) ||
 		!CompetitionJobReevaluationFailureAllowed(cycle.IncidentClass, cycle.PreviousFailure) ||
 		cycle.StartedAt != nil && (cycle.StartedAt.IsZero() || cycle.StartedAt.Before(cycle.AuthorizedAt)) {
 		return errors.New("reevaluation cycle identity or bounded authority is invalid")
@@ -194,6 +198,8 @@ func CompetitionJobReevaluationFailureAllowed(incidentClass string, failure Comp
 		return failure.Kind == "infrastructure" && failure.Code == "evaluation_time_budget_exhausted"
 	case CompetitionJobReevaluationBackingService:
 		return failure.Kind == "submission" && failure.Code == "run_unstable"
+	case CompetitionJobReevaluationDistributedInfrastructure:
+		return failure.Kind == "infrastructure" && failure.Code == "evaluation_time_budget_exhausted"
 	default:
 		return false
 	}
