@@ -63,7 +63,9 @@ func getActiveNetworkExtendersWithAddresses(ctx context.Context, directoryTier i
 				network_extender_address.carriers,
 				network_extender_address.dns_ports,
 				network_extender_address.activate_time,
-				network_extender_address.last_publish_time
+				network_extender_address.last_publish_time,
+				COALESCE(network_extender_address.tcp_port, 0),
+				COALESCE(network_extender_address.udp_port, 0)
 			FROM network_extender
 			INNER JOIN network_extender_address ON
 				network_extender_address.extender_id = network_extender.extender_id AND
@@ -108,6 +110,8 @@ func getActiveNetworkExtendersWithAddresses(ctx context.Context, directoryTier i
 					&dnsPorts,
 					&address.ActivateTime,
 					&address.LastPublishTime,
+					&address.TcpPort,
+					&address.UdpPort,
 				))
 				address.ExtenderId = extender.ExtenderId
 				address.Carriers = splitExtenderCarriers(carriers)

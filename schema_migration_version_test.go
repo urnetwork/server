@@ -21,6 +21,7 @@ func TestSchemaMigrationVersionsNameTheirMigrations(t *testing.T) {
 		{"onboarding platform distribution", networkOnboardingDistributionSql, NetworkOnboardingDistributionMigrationVersion},
 		{"per-cycle Pro grants", ProGrantCycleSql, ProGrantCycleVersion},
 		{"ping target evidence refusals", networkPingTargetEvidenceSchemaSql, NetworkPingTargetEvidenceSchemaMigrationVersion},
+		{"extender address ports", networkExtenderAddressPortsSchemaSql, NetworkExtenderAddressPortsSchemaMigrationVersion},
 	} {
 		registered := 0
 		for _, migration := range migrations {
