@@ -249,9 +249,10 @@ func snClaimRelayAccountView(status *SnClaimRelayStatus, coldkeySs58 string, ent
 			if class == snClaimRelayClassMoving || status.State == SnClaimRelayStateLedgerUnavailable {
 				class = snClaimRelayClassPaused
 			}
-		case status.State == SnClaimRelayStateLedgerUnavailable:
+		case status.State == SnClaimRelayStateLedgerUnavailable && status.OthersClaimed:
 			// the pass said the ledger is unavailable for another pool's
-			// sake: this pool's accounts are claimed
+			// sake and claimed this pool's accounts; one that stopped on
+			// this pool after naming another pauses it, as before that pool
 			class = snClaimRelayClassMoving
 		}
 	}

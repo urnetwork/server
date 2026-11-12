@@ -420,8 +420,14 @@ func TestClaimRelayCtfPoolProofUnavailable(t *testing.T) {
 // ledger_unavailable to one that asks with it. A pass that could not read the
 // operator's pool, or stopped on its tree after naming the capture the flag
 // pool, is ledger_unavailable to both, and every other state reads the same.
+// The status a pass publishes before a send, which stands while the send waits
+// for finality, already reads as the pass's end does. The operator's pool's
+// rows are claimed, moving, only when the pass claimed the pools it could
+// read, and wait as a paused relay's when it could not read that pool or
+// stopped on it.
 func TestClaimRelayStateForOldClients(t *testing.T) {
 	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
 	states := func(status *SnClaimRelayStatus) [2]string {
 		return [2]string{snClaimRelayStateFor(status, false), snClaimRelayStateFor(status, true)}
 	}
@@ -434,15 +440,17 @@ func TestClaimRelayStateForOldClients(t *testing.T) {
 		unavailable   []uint64
 		states        [2]string
 		sent          []string
+		// how a row of the operator's pool under the threshold reads
+		poolRow string
 	}{
 		{"the CTF pool's ledger", errors.New("the capture the flag ledger cannot be read"), nil, nil,
-			true, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateRunning, SnClaimRelayStateLedgerUnavailable}, []string{"1/0"}},
+			true, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateRunning, SnClaimRelayStateLedgerUnavailable}, []string{"1/0"}, SnClaimRelayReasonUnderThreshold},
 		{"the CTF pool's tree at a proof", nil, nil, map[uint64]error{claimRelayTestCtfPool: errors.New("the capture the flag tree cannot be built")},
-			true, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateRunning, SnClaimRelayStateLedgerUnavailable}, []string{"1/0"}},
+			true, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateRunning, SnClaimRelayStateLedgerUnavailable}, []string{"1/0"}, SnClaimRelayReasonUnderThreshold},
 		{"the operator's pool's ledger", nil, errors.New("the pool's ledger cannot be read"), nil,
-			true, []uint64{1}, [2]string{SnClaimRelayStateLedgerUnavailable, SnClaimRelayStateLedgerUnavailable}, []string{claimRelayCtfKey(0)}},
+			true, []uint64{1}, [2]string{SnClaimRelayStateLedgerUnavailable, SnClaimRelayStateLedgerUnavailable}, []string{claimRelayCtfKey(0)}, SnClaimRelayReasonRelayPaused},
 		{"the operator's pool's tree after the CTF pool's ledger", errors.New("the capture the flag ledger cannot be read"), nil, map[uint64]error{1: errors.New("the pool's tree cannot be built")},
-			false, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateLedgerUnavailable, SnClaimRelayStateLedgerUnavailable}, []string{}},
+			false, []uint64{claimRelayTestCtfPool}, [2]string{SnClaimRelayStateLedgerUnavailable, SnClaimRelayStateLedgerUnavailable}, []string{}, SnClaimRelayReasonRelayPaused},
 	} {
 		world := newClaimRelayWorld(t, over)
 		// a batch, so that one pass reaches both pools' proofs
@@ -455,6 +463,21 @@ func TestClaimRelayStateForOldClients(t *testing.T) {
 		slices.Sort(sent)
 		if status.OthersClaimed != c.othersClaimed || !slices.Equal(status.UnavailablePools, c.unavailable) || states(status) != c.states || !slices.Equal(sent, c.sent) {
 			t.Fatalf("%s: others claimed %t, unavailable %v, states %v, sent %v", c.name, status.OthersClaimed, status.UnavailablePools, states(status), sent)
+		}
+		// one publish before a send and one at the end, each read alike
+		if published := len(world.publishedStatuses); published != 1+min(len(sent), 1) {
+			t.Fatalf("%s: %d statuses published", c.name, published)
+		}
+		for i := range world.publishedStatuses {
+			published := &world.publishedStatuses[i]
+			if published.OthersClaimed != c.othersClaimed || !slices.Equal(published.UnavailablePools, c.unavailable) || states(published) != c.states {
+				t.Fatalf("%s: publish %d read %v, others claimed %t", c.name, i, states(published), published.OthersClaimed)
+			}
+		}
+		entry := claimRelayLedgerEntry(small, new(uint256.Int), nil)
+		entry.NoId = 1
+		if account, err := snClaimRelayAccountView(status, "ss58", entry, false, false, time.Time{}, nil, world.nowTime); err != nil || account.Reason != c.poolRow {
+			t.Fatalf("%s: the operator's pool's row %+v (%v), want %s", c.name, account, err, c.poolRow)
 		}
 	}
 	// every other state, and a status written before the pass said whether it
@@ -557,13 +580,19 @@ func TestClaimRelayAccountViewOfThePools(t *testing.T) {
 	}
 	// a pass that could not read the capture the flag pool says the ledger is
 	// unavailable: that pool waits, the other is claimed
-	status.State, status.UnavailablePools = SnClaimRelayStateLedgerUnavailable, []uint64{claimRelayTestCtfPool}
+	status.State, status.UnavailablePools, status.OthersClaimed = SnClaimRelayStateLedgerUnavailable, []uint64{claimRelayTestCtfPool}, true
 	if account := view(true); account.Reason != SnClaimRelayReasonRelayPaused || account.ClaimNowReason != SnClaimRelayReasonRelayPaused {
 		t.Fatalf("an unavailable pool: %+v", account)
 	}
 	entry.NoId = 1
 	if account := view(false); account.Reason != SnClaimRelayReasonUnderThreshold || !account.ClaimNowAvailable || account.Kind != StLedgerV2PoolKindPool || account.Label != "Pool 1" {
 		t.Fatalf("the operator's pool: %+v", account)
+	}
+	// a pass that named the capture the flag pool and then stopped on the
+	// operator's pool claimed neither: both wait, as with no pool named
+	status.OthersClaimed = false
+	if account := view(false); account.Reason != SnClaimRelayReasonRelayPaused || account.ClaimNowReason != SnClaimRelayReasonRelayPaused {
+		t.Fatalf("the operator's pool after a pass that stopped on it: %+v", account)
 	}
 	// a ledger unavailable with no pool named pauses every pool
 	status.UnavailablePools = nil
