@@ -140,9 +140,15 @@ func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 		}
 		chain.state.LastFundedEpoch = 2
 		rowsBefore := model.GetStLedgerV2EpochRows(f.ctx, f.cfg.DeploymentKey(), 1, 1, 2)
-		server.Tx(f.ctx, func(tx server.PgTx) {
-			server.RaisePgResult(tx.Exec(f.ctx, `DELETE FROM st_payout_wallet_resolution WHERE epoch = 2`))
-		})
+		// wallet resolutions are append-only; the shadow adds none
+		resolutions := func() int {
+			var count int
+			server.Db(f.ctx, func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(f.ctx, `SELECT count(*) FROM st_payout_wallet_resolution`).Scan(&count))
+			})
+			return count
+		}
+		resolutionsBefore := resolutions()
 		outcome := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2)
 		if outcome.Status != model.StPublishStatusConfirmed {
 			t.Fatalf("shadow %+v", outcome)
@@ -187,12 +193,8 @@ func TestStLedgerV2ExtenderShadowAndReplayBeforeTheAmendment(t *testing.T) {
 				t.Fatalf("the shadow changed epoch %d's record", epoch)
 			}
 		}
-		var resolutions int
-		server.Db(f.ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(f.ctx, `SELECT count(*) FROM st_payout_wallet_resolution WHERE epoch = 2`).Scan(&resolutions))
-		})
-		if resolutions != 0 {
-			t.Fatalf("the shadow retained %d wallet resolutions", resolutions)
+		if after := resolutions(); after != resolutionsBefore {
+			t.Fatalf("the shadow retained wallet resolutions: %d before, %d after", resolutionsBefore, after)
 		}
 		// built once
 		if again := stLedgerV2RunExtenderShadow(f.ctx, f.cfg, chain, 2); again.Status != model.StPublishStatusSkipped || !strings.Contains(again.Reason, recorded.ReportRef) {
