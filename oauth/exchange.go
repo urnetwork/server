@@ -100,6 +100,16 @@ type ExchangeScopeSource interface {
 	Grant(ctx context.Context, request *ExchangeScopeRequest) (*ExchangeScopeGrant, error)
 }
 
+// A source that also mints §7.8's re-seed mode tokens while sidecar.yml's
+// reseed is true (§19.10): GrantReseed answers in place of Grant then, an
+// error wrapping ErrRestoreRequired for every request it does not mint. With
+// an installed source that is no ExchangeReseedScopeSource the exchange
+// answers every request restore_required.
+type ExchangeReseedScopeSource interface {
+	ExchangeScopeSource
+	GrantReseed(ctx context.Context, request *ExchangeScopeRequest) (*ExchangeScopeGrant, error)
+}
+
 // The source until a projection's is installed: it grants no scope at all, so a
 // request for any is refused, and a request for none gets a token that grants
 // nothing but names its client.
@@ -277,11 +287,7 @@ func Exchange(ctx context.Context, args *ExchangeArgs) (*ExchangeResult, error) 
 	if err != nil {
 		return nil, err
 	}
-	if server.CurrentSidecarConfig().Reseed() {
-		// re-seed mode's admin tokens are not built yet (§19.10), so the
-		// exchange holds everything while a restore runs
-		return nil, fmt.Errorf("%w: a restore holds the exchange", ErrRestoreRequired)
-	}
+	reseed := server.CurrentSidecarConfig().Reseed()
 
 	byJwt, err := exchangeSubject(ctx, args.SubjectToken)
 	if err != nil {
@@ -330,7 +336,7 @@ func Exchange(ctx context.Context, args *ExchangeArgs) (*ExchangeResult, error) 
 		credentialMemberId = *byJwt.MemberId
 	}
 
-	grant, err := currentExchangeScopeSource().Grant(ctx, &ExchangeScopeRequest{
+	scopeRequest := &ExchangeScopeRequest{
 		NetworkId:       networkId,
 		ClientId:        clientId,
 		SubjectClientId: subjectClientId,
@@ -338,7 +344,19 @@ func Exchange(ctx context.Context, args *ExchangeArgs) (*ExchangeResult, error) 
 		MemberId:        &credentialMemberId,
 		Audience:        audience,
 		Scopes:          slices.Clone(scopes),
-	})
+	}
+	var grant *ExchangeScopeGrant
+	if reseed {
+		// §7.8's re-seed mode (§19.10): only a source that mints its admin
+		// scopes answers, and every other request is restore_required
+		reseedSource, ok := currentExchangeScopeSource().(ExchangeReseedScopeSource)
+		if !ok {
+			return nil, fmt.Errorf("%w: a restore holds the exchange", ErrRestoreRequired)
+		}
+		grant, err = reseedSource.GrantReseed(ctx, scopeRequest)
+	} else {
+		grant, err = currentExchangeScopeSource().Grant(ctx, scopeRequest)
+	}
 	if err != nil {
 		return nil, err
 	}

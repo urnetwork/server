@@ -29,6 +29,16 @@ package oauth
 //	                   so a setup that supersedes S's Delegation with other keys
 //	                   ends the old F's exchange; the token names S as its sidecar
 //
+// Re-seed mode (§7.8, §19.10; TEAM-M3-02): while sidecar.yml's reseed is true
+// the exchange asks GrantReseed in place of Grant, which reads no projection,
+// since a site loss took the log: it mints repo:<id>:admin, at evs and gkm and
+// for any repo, to the sidecars the restored rows list under the network's
+// Owners and Admins (model.ConfigReseedAdminSidecar), for evs's POST
+// /evs/v1/repos/<id>/reseed and gkm's GroupForm alone, and answers every other
+// request restore_required: another scope, another audience, a forwarding
+// client, any other sidecar. It holds for every network while reseed is on,
+// those whose logs resumed included, until the operator turns it off.
+//
 // Refused whole: a client whose sidecar the state revoked, reaped, parked or
 // suspended, whose not_after passed or whose member left (invalid_grant); an
 // unadmitted client asking anything but its own recovery scope at gkm
@@ -45,6 +55,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -90,6 +101,9 @@ var (
 	// the sidecar a forwarding client speaks for, nil for one that speaks for
 	// none
 	exchangeScopeForwardingSidecar = model.ForwardingClientSidecar
+	// whether the restored rows list the sidecar under its network's Owners
+	// and Admins, and its member
+	exchangeScopeReseedAdminSidecar = model.ConfigReseedAdminSidecar
 )
 
 // The real ExchangeScopeSource over a gate.
@@ -106,7 +120,7 @@ func NewProjectionExchangeScopeSource(gate ExchangeGate, settings *ExchangeScope
 	return &ProjectionExchangeScopeSource{gate: gate, settings: settings}
 }
 
-var _ ExchangeScopeSource = (*ProjectionExchangeScopeSource)(nil)
+var _ ExchangeReseedScopeSource = (*ProjectionExchangeScopeSource)(nil)
 
 func (self *ProjectionExchangeScopeSource) now() time.Time {
 	if self.settings.Clock != nil {
@@ -372,5 +386,41 @@ func (self *ProjectionExchangeScopeSource) grantForwardOnly(ctx context.Context,
 		ProjVersion: snapshot.Pin.GetVersion(),
 		MemberId:    exchangeSidecarMember(state, sidecarId),
 		SidecarId:   forwardSidecarId,
+	}, nil
+}
+
+// Re-seed mode's grant (see the file header): repo:<id>:admin alone, at evs and
+// gkm, to an Owner's or Admin's sidecar as the restored rows list them, or
+// restore_required.
+func (self *ProjectionExchangeScopeSource) GrantReseed(ctx context.Context, request *ExchangeScopeRequest) (*ExchangeScopeGrant, error) {
+	restoreRequired := fmt.Errorf("%w: a restore holds the exchange but for its admins' re-seeds", ErrRestoreRequired)
+	if request == nil || request.SidecarId == nil || 0 == len(request.Scopes) {
+		return nil, restoreRequired
+	}
+	if aclAudience, ok := exchangeAclAudience(request.Audience); !ok || aclAudience == 0 {
+		return nil, restoreRequired
+	}
+	for _, scope := range request.Scopes {
+		if _, role, ok := parseExchangeRepoScope(scope); !ok || role != "admin" {
+			return nil, restoreRequired
+		}
+	}
+	forwardOnly, err := exchangeScopeClientForwardOnly(ctx, request.NetworkId, request.ClientId)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the client's marks: %w", ErrExchangeUnavailable, err)
+	}
+	if forwardOnly {
+		return nil, restoreRequired
+	}
+	memberId, admin, err := exchangeScopeReseedAdminSidecar(ctx, request.NetworkId, *request.SidecarId)
+	if err != nil {
+		return nil, fmt.Errorf("%w: the restored rows: %w", ErrExchangeUnavailable, err)
+	}
+	if !admin {
+		return nil, restoreRequired
+	}
+	return &ExchangeScopeGrant{
+		Scopes:   slices.Clone(request.Scopes),
+		MemberId: memberId,
 	}, nil
 }

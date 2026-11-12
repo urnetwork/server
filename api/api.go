@@ -461,6 +461,8 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// §7.9's authorization log (TEAM-M2-13)
 		router.NewRoute("POST", "/network/config/delta", handlers.NetworkConfigDelta),
 		router.NewRoute("POST", "/network/config/projection", handlers.NetworkConfigProjectionPublish),
+		// §7.9's site loss: devices upload the log they keep (TEAM-M3-02)
+		router.NewRoute("POST", "/network/config/reseed", handlers.NetworkConfigReseed),
 		router.NewRoute("GET", "/network/config/projection", handlers.NetworkConfigProjection),
 		router.NewRoute("POST", "/account/payout-wallet", handlers.SetPayoutWallet),
 		router.NewRoute("GET", "/account/payout-wallet", handlers.GetPayoutWallet),

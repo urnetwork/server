@@ -5,6 +5,7 @@ import (
 	"strconv"
 
 	"github.com/urnetwork/server/controller"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/router"
 	"github.com/urnetwork/server/session"
 )
@@ -41,4 +42,10 @@ func NetworkConfigProjection(w http.ResponseWriter, r *http.Request) {
 		return controller.NetworkConfigProjection(args, clientSession)
 	}
 	router.WrapRequireClient(impl, w, r)
+}
+
+// POST /network/config/reseed: a member device's upload of the log it keeps,
+// while sidecar.yml's reseed is true (§7.9's site loss, TEAM-M3-02).
+func NetworkConfigReseed(w http.ResponseWriter, r *http.Request) {
+	router.WrapWithInputRequireClient(model.PostConfigReseed, w, r)
 }

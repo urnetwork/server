@@ -354,6 +354,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/config/delta":                    routeAccessClient,   // a signed statement, verified at the tip (§7.9)
 	"POST /network/config/projection":               routeAccessClient,   // a config writer's signed base (§7.9)
 	"GET /network/config/projection":                routeAccessClient,   // the network's log, which the caller verifies (§7.9)
+	"POST /network/config/reseed":                   routeAccessClient,   // a member device's upload of the log it keeps after a site loss (§7.9)
 	"POST /account/payout-wallet":                   routeAccessAppAdmin, // redirects payouts
 	"GET /account/payout-wallet":                    routeAccessAppAdmin, // payout wallet read
 	"POST /account/circle-wallet":                   routeAccessPublic,
@@ -457,6 +458,8 @@ var strictExpRoutes = map[string]bool{
 	"POST /network/config/delta":      true,
 	"POST /network/config/projection": true,
 	"GET /network/config/projection":  true,
+	// §7.9's site loss, only while sidecar.yml's reseed is true (TEAM-M3-02)
+	"POST /network/config/reseed": true,
 }
 
 // The only routes a forward_only bearer reaches (§7.4's mark row, owner

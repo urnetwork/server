@@ -682,3 +682,80 @@ func TestExchangeWithAForwardingClientsToken(t *testing.T) {
 		connect.AssertEqual(t, claims.ProjVersion, snapshot.Pin.GetVersion())
 	})
 }
+
+// Replaces the restored rows' Owners and Admins for one test: admins maps each admin's sidecar to its member.
+func setExchangeScopeReseedAdmins(t testing.TB, admins map[server.Id]server.Id) {
+	previous := exchangeScopeReseedAdminSidecar
+	exchangeScopeReseedAdminSidecar = func(ctx context.Context, networkId server.Id, sidecarId server.Id) (*server.Id, bool, error) {
+		memberId, admin := admins[sidecarId]
+		if !admin {
+			return nil, false, nil
+		}
+		return &memberId, true, nil
+	}
+	t.Cleanup(func() {
+		exchangeScopeReseedAdminSidecar = previous
+	})
+}
+
+// §7.8's re-seed mode (TEAM-M3-02, §19.10): repo:<id>:admin alone, at evs and gkm, for any repo, to the sidecars the
+// restored rows list under Owners and Admins, with no projection read; everything else restore_required: another
+// scope, another audience, no scope, another sidecar, a client bound to none, a forwarding client.
+func TestExchangeScopesReseedModeMintsOnlyAdminsAdminScopes(t *testing.T) {
+	networkId := server.NewId()
+	adminSidecarId, otherSidecarId, memberId := server.NewId(), server.NewId(), server.NewId()
+	setExchangeScopeReseedAdmins(t, map[server.Id]server.Id{adminSidecarId: memberId})
+	forwardingClientId := server.NewId()
+	setExchangeScopeForwarding(t, map[server.Id]*server.Id{forwardingClientId: &adminSidecarId})
+	// no gate at all: re-seed mode reads none
+	source := NewProjectionExchangeScopeSource(nil, nil)
+	request := func(sidecarId *server.Id, audience string, scopes ...string) *ExchangeScopeRequest {
+		clientId := server.NewId()
+		return &ExchangeScopeRequest{NetworkId: networkId, ClientId: clientId, SubjectClientId: clientId, SidecarId: sidecarId, Audience: audience, Scopes: scopes}
+	}
+	repoAdmin, otherAdmin := repoScope(server.NewId(), "admin"), repoScope(server.NewId(), "admin")
+	for _, audience := range []string{"evs", "gkm"} {
+		grant, err := source.GrantReseed(context.Background(), request(&adminSidecarId, audience, repoAdmin, otherAdmin))
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, grant.Scopes, []string{repoAdmin, otherAdmin})
+		connect.AssertEqual(t, *grant.MemberId, memberId)
+		connect.AssertEqual(t, grant.ProjVersion, uint64(0))
+	}
+	forwarding := request(&adminSidecarId, "evs", repoAdmin)
+	forwarding.ClientId = forwardingClientId
+	for name, refused := range map[string]*ExchangeScopeRequest{
+		"a read scope":        request(&adminSidecarId, "evs", repoScope(server.NewId(), "r")),
+		"beside a read":       request(&adminSidecarId, "evs", repoAdmin, repoScope(server.NewId(), "r")),
+		"at dns":              request(&adminSidecarId, "dns", repoAdmin),
+		"no scope":            request(&adminSidecarId, "evs"),
+		"another sidecar":     request(&otherSidecarId, "evs", repoAdmin),
+		"no sidecar":          request(nil, "evs", repoAdmin),
+		"a forwarding client": forwarding,
+		"a recovery scope":    request(&adminSidecarId, "gkm", recoveryScope(memberId)),
+	} {
+		_, err := source.GrantReseed(context.Background(), refused)
+		requireExchangeRefused(t, name, err, ErrRestoreRequired)
+	}
+}
+
+// Through the exchange while sidecar.yml's reseed is on: the installed source's re-seed grant answers, an admin's
+// sidecar getting its admin scope and a token naming it, and every other request restore_required.
+func TestExchangeInReseedMode(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(tb testing.TB) {
+		fixture := newExchangeFixture(t)
+		defer server.Testing_PushSidecarConfig("sidecar:\n  reseed: true\n")()
+		setExchangeScopeReseedAdmins(t, map[server.Id]server.Id{fixture.sidecarId: fixture.userId})
+		defer SetExchangeScopeSource(NewProjectionExchangeScopeSource(nil, nil))()
+
+		repoAdmin := repoScope(server.NewId(), "admin")
+		result, err := Exchange(t.Context(), fixture.args("evs", repoAdmin))
+		connect.AssertEqual(t, err, nil)
+		claims, err := newTestServiceTokenVerifier(t).Verify(result.AccessToken, "evs")
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, claims.Scopes(), []string{repoAdmin})
+		connect.AssertEqual(t, *claims.SidecarId, fixture.sidecarId)
+
+		_, err = Exchange(t.Context(), fixture.args("evs", repoScope(server.NewId(), "r")))
+		requireExchangeRefused(t, "a read scope", err, ErrRestoreRequired)
+	})
+}
