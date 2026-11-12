@@ -993,6 +993,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	// the network each capture the flag award was won for, versioned by its
 	// position
 	[]snMainnetMigrationContract{ctfAwardNetworkMigrationContract},
+	// the SN25 extender pool's tables and epoch row columns, versioned by
+	// their position
+	[]snMainnetMigrationContract{stLedgerV2ExtenderMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an
