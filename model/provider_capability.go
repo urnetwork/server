@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/urnetwork/connect"
+
+	"github.com/urnetwork/server/qualityprobe/egresshealth"
 )
 
 // The IP and protocol labels, as FindProviders2 serves them
@@ -46,16 +48,15 @@ const (
 )
 
 // The failed_later_legs bits of a URL run (§4.1), the later legs judged the
-// provider's: legs made after the run's IPv4 HTTPS leg passed.
-// todo(fp2): egresshealth.UrlProbeFailedLaterLeg* once the evidence
-// migration lands, so the two cannot drift
+// provider's: legs made after the run's IPv4 HTTPS leg passed. The ingest's
+// own constants, so the two cannot drift.
 const (
 	// IPv4 HTTP/3 silent, judged the provider's
-	ProviderEgressFailedLaterLegIpv4Udp = 1
+	ProviderEgressFailedLaterLegIpv4Udp = egresshealth.UrlProbeFailedLaterLegIpv4Udp
 	// IPv6 HTTPS failed, judged the provider's
-	ProviderEgressFailedLaterLegIpv6Tcp = 2
+	ProviderEgressFailedLaterLegIpv6Tcp = egresshealth.UrlProbeFailedLaterLegIpv6Tcp
 	// IPv6 HTTP/3 silent after a passed IPv6 HTTPS leg, judged the provider's
-	ProviderEgressFailedLaterLegIpv6Udp = 4
+	ProviderEgressFailedLaterLegIpv6Udp = egresshealth.UrlProbeFailedLaterLegIpv6Udp
 )
 
 // One of the four label pairs, in the decided order (D7.2).

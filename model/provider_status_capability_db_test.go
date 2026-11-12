@@ -21,8 +21,8 @@ import (
 // (pq_outcome).
 type capabilityStatusTestRun struct {
 	ok              bool
-	failedLaterLegs int
-	pqOutcome       int
+	failedLaterLegs int16
+	pqOutcome       int16
 }
 
 // count runs of one kind.
