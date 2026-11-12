@@ -426,11 +426,18 @@ func TestDbClaimRelayRequests(t *testing.T) {
 		if requested || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) || until.After(now.Add(snClaimRelayClaimNowPeriod+time.Hour)) {
 			t.Fatalf("after it was paid: %t %s", requested, until)
 		}
-		// a running limit is not pushed back by another
+		// a running limit is not pushed back by another: it keeps its start
 		model.FinishSnClaimRelayRequest(ctx, key, first, true, now.Add(10*24*time.Hour), snClaimRelayClaimNowPeriod)
 		if _, again := model.GetSnClaimRelayRequest(ctx, key, first, now); !again.Equal(until) && again.Sub(until) > time.Minute {
 			t.Fatalf("the limit moved from %s to %s", until, again)
 		}
+		server.Redis(ctx, func(r server.RedisClient) {
+			start, err := r.Get(ctx, fmt.Sprintf("sn_claim_relay_limit:%s:%s", key, hex.EncodeToString(first[:]))).Result()
+			server.Raise(err)
+			if start != fmt.Sprint(now.UnixMilli()) {
+				t.Fatalf("the limit's start %s, want %d", start, now.UnixMilli())
+			}
+		})
 		// nothing sent, nothing used up
 		model.FinishSnClaimRelayRequest(ctx, key, second, false, now, snClaimRelayClaimNowPeriod)
 		if requested, until := model.GetSnClaimRelayRequest(ctx, key, second, now); requested || !until.IsZero() {
@@ -1079,20 +1086,22 @@ func TestDbClaimRelayClaimNowLimitIsPerColdkey(t *testing.T) {
 		if !requested || until.Before(now.Add(snClaimRelayClaimNowPeriod-time.Hour)) || now.Add(snClaimRelayClaimNowPeriod).Before(until) {
 			t.Fatalf("after the first claim: requested %t until %s", requested, until)
 		}
-		// the limit is the coldkey's own key in Redis, kept for the period
+		// the limit is the coldkey's own key in Redis, holding its start and kept
+		// for the period
 		limitKey := fmt.Sprintf("sn_claim_relay_limit:%s:%s", key, hex.EncodeToString(tapped[:]))
-		server.Redis(ctx, func(r server.RedisClient) {
-			ttl, err := r.PTTL(ctx, limitKey).Result()
-			server.Raise(err)
-			if ttl < snClaimRelayClaimNowPeriod-time.Hour || snClaimRelayClaimNowPeriod < ttl {
-				t.Fatalf("limit %s ttl %s", limitKey, ttl)
-			}
-		})
-		if requested, otherUntil := model.GetSnClaimRelayRequest(ctx, key, other, now); requested || !otherUntil.IsZero() {
-			t.Fatalf("another coldkey: requested %t until %s", requested, otherUntil)
+		limit := func() (start string, ttl time.Duration) {
+			server.Redis(ctx, func(r server.RedisClient) {
+				var err error
+				start, err = r.Get(ctx, limitKey).Result()
+				server.Raise(err)
+				ttl, err = r.PTTL(ctx, limitKey).Result()
+				server.Raise(err)
+			})
+			return
 		}
-		if _, elsewhere := model.GetSnClaimRelayRequest(ctx, model.StDeploymentKey("945:"+server.NewId().String()), tapped, now); !elsewhere.IsZero() {
-			t.Fatalf("another deployment's limit until %s", elsewhere)
+		limitStart, limitTtl := limit()
+		if limitTtl < snClaimRelayClaimNowPeriod-time.Hour || snClaimRelayClaimNowPeriod < limitTtl {
+			t.Fatalf("limit %s ttl %s", limitKey, limitTtl)
 		}
 		answer, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession)
 		if err != nil || answer.Error != nil || len(answer.Accounts) != 2 {
@@ -1114,6 +1123,11 @@ func TestDbClaimRelayClaimNowLimitIsPerColdkey(t *testing.T) {
 		}
 		if requested, again := model.GetSnClaimRelayRequest(ctx, key, tapped, server.NowUtc()); requested || again.Sub(until).Abs() > time.Second {
 			t.Fatalf("the limit moved from %s to %s (requested %t)", until, again, requested)
+		}
+		// the paid claim that ended the request kept the running limit: its
+		// start, and the time left of it
+		if start, ttl := limit(); start != limitStart || limitTtl < ttl {
+			t.Fatalf("the limit started again: start %s ttl %s, was %s ttl %s", start, ttl, limitStart, limitTtl)
 		}
 
 		// the coldkey earns again in the capture the flag pool: the balance waits
@@ -1238,6 +1252,46 @@ func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 		}
 		if response := serveLedgerV2(SnLedgerAccount, "/sn/ledger/account?coldkey="+ledgerV2Hex(claimRelayTestColdkey(1))); response.Code != http.StatusBadGateway {
 			t.Fatalf("the ledger route %d %s", response.Code, response.Body.String())
+		}
+	})
+}
+
+// Once the capture the flag pool has a root, a pass that cannot read the
+// operator's pool still claims the CTF pool's accounts on the real tables and
+// names the operator's pool unavailable; the request of a coldkey that pool's
+// account index records waits for it, and one of a coldkey it does not record,
+// with nothing readable to claim, is given back.
+func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+		world := newClaimRelayDbWorld(t, small, small)
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		carry := claimRelayTestColdkey(9)
+		world.publishCtfRoot(carry, 0, 9, []merkle.LedgerAccount{
+			{Coldkey: carry, Cumulative: *claimRelayTestAlpha(4 * snClaimRelayAutomaticTaoRao)},
+			{Coldkey: claimRelayTestColdkey(0), Cumulative: *claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)},
+		})
+		paid := world.payBothPools()
+		// the operator's pool's next root names objects nobody published
+		one := uint64(1)
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: 1, Seq: 2, Epoch: 5, Root: [32]byte{0xaf}, Total: *uint256.NewInt(1), LeafCount: 2, LedgerHash: [32]byte{0xaf, 0x01}, RootIndex: &one}, 95)
+		resetLedgerV2Caches()
+		now := server.NowUtc()
+		model.AddSnClaimRelayRequest(ctx, key, claimRelayTestColdkey(1), now)
+		model.AddSnClaimRelayRequest(ctx, key, claimRelayTestColdkey(5), now)
+
+		SnClaimRelayPass(ctx)
+		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{1}) {
+			t.Fatalf("status %+v", status)
+		}
+		if got := paid(); !slices.Equal(got, []string{claimRelayCtfKey(1)}) {
+			t.Fatalf("paid %v", got)
+		}
+		requests := model.GetSnClaimRelayRequests(ctx, key, 10)
+		if len(requests) != 1 || requests[0].Coldkey != claimRelayTestColdkey(1) {
+			t.Fatalf("requests %+v", requests)
 		}
 	})
 }

@@ -297,6 +297,50 @@ func TestClaimRelayOnePoolUnavailable(t *testing.T) {
 	requireClaimRelayState(t, world.pass(), SnClaimRelayStateLedgerUnavailable)
 }
 
+// The operator's pool cannot be read while the capture the flag pool has a
+// root: the CTF pool's accounts are still claimed, the pass names the
+// operator's pool, and a request of a coldkey that pool may hold waits.
+func TestClaimRelayOperatorPoolUnavailable(t *testing.T) {
+	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+	world := newClaimRelayWorld(t, small, small)
+	world.addCtf(0, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao))
+	world.poolLedgerErr = errors.New("the pool's ledger cannot be read")
+	world.tap(1)
+	status := world.passes()
+	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
+	requireClaimRelaySent(t, world, claimRelayCtfKey(0))
+	if !slices.Equal(status.UnavailablePools, []uint64{1}) {
+		t.Fatalf("unavailable %v", status.UnavailablePools)
+	}
+	if _, queued := world.requests[claimRelayTestColdkey(1)]; !queued {
+		t.Fatal("a request ended while its coldkey's account in the pool could not be read")
+	}
+}
+
+// With no capture the flag root, as with capture the flag off, a pass that
+// cannot read the operator's pool ends there as it did before the CTF pool:
+// the ledger is unavailable whatever else would stop it, here a low balance,
+// nothing is sent, and every request waits, a coldkey's the pool does not
+// record too.
+func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.T) {
+	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
+	world := newClaimRelayWorld(t, small, small)
+	world.poolLedgerErr = errors.New("the pool's ledger cannot be read")
+	world.balanceWei = big.NewInt(1)
+	world.tap(1)
+	world.tap(5)
+	status := world.pass()
+	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
+	if len(world.txs) != 0 || len(status.UnavailablePools) != 0 {
+		t.Fatalf("sent %d, unavailable %v", len(world.txs), status.UnavailablePools)
+	}
+	for _, index := range []int{1, 5} {
+		if _, queued := world.requests[claimRelayTestColdkey(index)]; !queued {
+			t.Fatalf("coldkey %d's request ended while the ledger could not be read", index)
+		}
+	}
+}
+
 // A batch ends where a group ends: when the batcher fits part of a coldkey's
 // group, the group waits for the next transaction, whole.
 func TestClaimRelayABatchEndsAtAGroupsEnd(t *testing.T) {
