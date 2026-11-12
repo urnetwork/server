@@ -241,6 +241,7 @@ func NewSignals() []Signal {
 		NewProviderFleetDepartureSignal(),
 		NewGossipMeshSignal(),
 		NewExtenderSupplySignal(),
+		NewExtenderWebRtcRelaySignal(),
 	}
 }
 
