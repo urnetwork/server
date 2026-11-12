@@ -91,3 +91,9 @@ const StLedgerV2ExtenderSchemaSql = `
 `
 
 var stLedgerV2ExtenderMigration = newSqlMigration(StLedgerV2ExtenderSchemaSql)
+
+// The version that creates the extender pool's state, wherever merges place
+// it.
+func StLedgerV2ExtenderMigrationVersion() int {
+	return migrationVersion(stLedgerV2ExtenderMigration)
+}
