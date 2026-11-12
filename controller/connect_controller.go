@@ -498,6 +498,22 @@ func ConnectControlFrames(
 	refusals := connectControlRefusalsFromContext(ctx)
 
 	for _, frame := range frames {
+		if frame.MessageType == contractsNoRecordMessageType {
+			// read by its number, before the generic decode, so this holds with
+			// a connect that does or does not know the message
+			// (connect_control_no_record.go)
+			err := observeControlFrame(ctx, contractsNoRecordControlMessage{}, defaultControlFrameMetrics, func() error {
+				if refusals != nil {
+					return errConnectControlRefusalNotPrepared
+				}
+				return ContractsNoRecord(ctx, clientId, frame.MessageBytes)
+			})
+			if err != nil {
+				recordControlFrameFailure(contractsNoRecordControlMessage{}, err)
+				errs = append(errs, err)
+			}
+			continue
+		}
 		message, err := connect.FromFrame(frame)
 		if err != nil {
 			// a frame that will not decode is client-supplied bytes; `nil`

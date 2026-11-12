@@ -42,6 +42,8 @@ type LegacyPrelaunchAuthorization struct {
 	ControlUser                    string                       `json:"control_user"`
 	OwnerStartDenial               Pin                          `json:"owner_start_denial"`
 	PriorControlRoles              []LegacyPrelaunchControlRole `json:"prior_control_roles,omitempty"`
+	PriorAuthorization             *Pin                         `json:"prior_authorization,omitempty"`
+	RetainedStartedSha256          string                       `json:"retained_started_sha256,omitempty"`
 }
 
 // Retiring an old PID1 record must not erase its launcher coverage. The exact
@@ -78,6 +80,8 @@ type legacyPrelaunchClosed struct {
 	Provenance                    string `json:"provenance"`
 	EvaluatorStarted              bool   `json:"evaluator_started"`
 	OriginalEvaluatorStderrExists bool   `json:"original_evaluator_stderr_exists"`
+	PriorAuthorizationSha256      string `json:"prior_authorization_sha256,omitempty"`
+	RetainedStartedSha256         string `json:"retained_started_sha256,omitempty"`
 }
 
 // The compatibility filename does not imply evaluator output. Its complete
@@ -103,6 +107,9 @@ func RecoverLegacyPrelaunch(ctx context.Context, authorizationPath string) error
 	settings := DefaultAgentSettings()
 	authorization, _, err := readLegacyPrelaunchAuthorization(authorizationPath, settings, true)
 	if err != nil {
+		return err
+	}
+	if _, err := validateLegacyPrelaunchPrior(authorizationPath, *authorization, settings, true); err != nil {
 		return err
 	}
 	if validateFilePin(authorization.OriginalConfig, settings.ConfigBytes, true) != nil {
@@ -177,7 +184,43 @@ func readLegacyPrelaunchAuthorization(path string, settings AgentSettings, prote
 			}
 		}
 	}
+	if authorization.PriorAuthorization == nil {
+		if authorization.RetainedStartedSha256 != "" {
+			return nil, "", errors.New("legacy closure starting amendment lacks prior authority")
+		}
+	} else if !recoveryAuthorityPath(authorization.PriorAuthorization.Path) || !digestPattern.MatchString(authorization.PriorAuthorization.Sha256) || !digestPattern.MatchString(authorization.RetainedStartedSha256) {
+		return nil, "", errors.New("legacy closure amendment omitted exact one-hop pins")
+	}
 	return authorization, digestDockerBytes(content), nil
+}
+
+// A replacement recovery executable/service may resume only the exact prior
+// root authorization. Every other fact stays identical; chains are forbidden.
+func validateLegacyPrelaunchPrior(path string, authorization LegacyPrelaunchAuthorization, settings AgentSettings, protected bool) (string, error) {
+	if authorization.PriorAuthorization == nil {
+		if authorization.RetainedStartedSha256 != "" {
+			return "", errors.New("legacy amendment omitted its prior authorization")
+		}
+		return "", nil
+	}
+	pin := *authorization.PriorAuthorization
+	if path == pin.Path || !digestPattern.MatchString(authorization.RetainedStartedSha256) {
+		return "", errors.New("legacy amendment is not a distinct one-hop resume")
+	}
+	prior, digest, err := readLegacyPrelaunchAuthorization(pin.Path, settings, protected)
+	if err != nil || digest != pin.Sha256 || prior.PriorAuthorization != nil || prior.RetainedStartedSha256 != "" {
+		return "", errors.New("legacy amendment prior authority is missing, altered or chained")
+	}
+	expected := authorization
+	expected.RecoveryAgent, expected.RecoveryService = prior.RecoveryAgent, prior.RecoveryService
+	expected.PriorAuthorization, expected.RetainedStartedSha256 = nil, ""
+	if !reflect.DeepEqual(expected, *prior) {
+		return "", errors.New("legacy amendment changed frozen authority outside recovery executable/service")
+	}
+	if authorization.RecoveryAgent == prior.RecoveryAgent && authorization.RecoveryService == prior.RecoveryService {
+		return "", errors.New("legacy amendment has no explicit replacement recovery authority")
+	}
+	return digest, nil
 }
 
 // The canonical recovery service is temporarily a new operator role. Its old
@@ -238,6 +281,10 @@ func (self *Agent) closeLegacyPrelaunch(parent context.Context, authorizationPat
 	if !self.recoveryOnly || host == nil || authorization.HostId != self.config.HostId || authorization.OriginalConfig != (Pin{Path: self.config.configPath, Sha256: self.config.configSha256}) {
 		return errors.New("legacy closure differs from its original recovery-only host")
 	}
+	priorDigest, err := validateLegacyPrelaunchPrior(authorizationPath, authorization, self.settings, self.protected)
+	if err != nil {
+		return err
+	}
 	timeout, err := recoveryServiceTimeout(self.settings)
 	if err != nil {
 		return err
@@ -273,6 +320,13 @@ func (self *Agent) closeLegacyPrelaunch(parent context.Context, authorizationPat
 	startedPath := filepath.Join(self.stateDirectory(authorization.RunId), "legacy-prelaunch-started.json")
 	started := legacyPrelaunchStarted{}
 	content, readErr := readBounded(startedPath, self.config.Limits.DocumentBytes)
+	startedAuthority := digest
+	if priorDigest != "" {
+		if readErr != nil || legacyPrelaunchSealedFile(startedPath, self.protected) != nil || digestDockerBytes(content) != authorization.RetainedStartedSha256 {
+			return errors.New("legacy amendment cannot recreate or replace its exact original starting receipt")
+		}
+		startedAuthority = priorDigest
+	}
 	if errors.Is(readErr, os.ErrNotExist) {
 		content, err = readBounded(filepath.Join(self.stateDirectory(authorization.RunId), "state.json"), self.config.Limits.DocumentBytes)
 		if err != nil || digestDockerBytes(content) != authorization.StateSha256 {
@@ -282,7 +336,7 @@ func (self *Agent) closeLegacyPrelaunch(parent context.Context, authorizationPat
 			return errors.New("legacy prelaunch closure cannot replace existing evaluator stderr")
 		}
 		started = legacyPrelaunchStarted{Schema: Schema, AuthorizationSha256: digest, OriginalStateSha256: authorization.StateSha256, OriginalState: *state, OriginalEvaluatorStderrAbsent: true}
-	} else if readErr != nil || validateDocumentKeys(content) != nil || decodeStrict(content, &started) != nil || started.Schema != Schema || started.AuthorizationSha256 != digest || started.OriginalStateSha256 != authorization.StateSha256 {
+	} else if readErr != nil || validateDocumentKeys(content) != nil || decodeStrict(content, &started) != nil || started.Schema != Schema || started.AuthorizationSha256 != startedAuthority || started.OriginalStateSha256 != authorization.StateSha256 {
 		return errors.New("legacy closure starting receipt differs")
 	}
 	original := &started.OriginalState
@@ -343,6 +397,16 @@ func (self *Agent) closeLegacyPrelaunch(parent context.Context, authorizationPat
 	if err != nil || againDigest != digest || !reflect.DeepEqual(*again, authorization) {
 		return errors.New("legacy closure authority changed during cleanup")
 	}
+	priorAgain, priorErr := validateLegacyPrelaunchPrior(authorizationPath, authorization, self.settings, self.protected)
+	if priorErr != nil || priorAgain != priorDigest {
+		return errors.New("legacy amendment prior authority changed during cleanup")
+	}
+	if priorDigest != "" {
+		retained, err := readBounded(startedPath, self.config.Limits.DocumentBytes)
+		if err != nil || legacyPrelaunchSealedFile(startedPath, self.protected) != nil || digestDockerBytes(retained) != authorization.RetainedStartedSha256 {
+			return errors.New("legacy amendment original starting receipt changed during cleanup")
+		}
+	}
 	clockAfter, err := self.legacyPrelaunchClock(manifest)
 	if err != nil || !bytes.Equal(clock, clockAfter) {
 		return errors.New("legacy closure changed its original job clock")
@@ -358,7 +422,7 @@ func (self *Agent) closeLegacyPrelaunch(parent context.Context, authorizationPat
 	closed := legacyPrelaunchClosed{Schema: Schema, Kind: "competition-legacy-prelaunch-closed/v1", AuthorizationSha256: digest, ApprovalSha256: authorization.ApprovalSha256,
 		RunId: authorization.RunId, ManifestSha256: authorization.ManifestSha256, CleanupPlanSha256: authorization.CleanupPlanSha256, ClockSha256: authorization.ClockSha256,
 		BootId: authorization.BootId, BeforeSha256: digestDockerBytes(before), AfterSha256: digestDockerBytes(after), ResourcesSha256: digestDockerBytes(resources),
-		Provenance: "operator_legacy_prelaunch_recovery", EvaluatorStarted: false, OriginalEvaluatorStderrExists: false}
+		Provenance: "operator_legacy_prelaunch_recovery", EvaluatorStarted: false, OriginalEvaluatorStderrExists: false, PriorAuthorizationSha256: priorDigest, RetainedStartedSha256: authorization.RetainedStartedSha256}
 	closedBytes, err := json.Marshal(closed)
 	if err != nil {
 		return err
