@@ -33,8 +33,7 @@ func TestMigrationsCompetitionPostCloseRecoveryRetainsInheritedCustody(t *testin
 // unrelated inherited guard failures, rather than merely a new schema head.
 func TestMigrationsCompetitionPostCloseRecoveryNativeFaultCustody(t *testing.T) {
 	version := server.CompetitionReevaluationPostCloseMigrationVersion()
-	contract := migrationCurrentSuffixTestContract(t, version)
-	owner := fmt.Sprintf("%s@v%d", contract.artifact.name, version)
+	distributed := server.CompetitionDistributedReevaluationMigrationVersion()
 	oldInsert, _, _, _ := server.CompetitionJobReevaluationBodiesSql()
 	faults := []struct{ name, sql string }{
 		{name: "window-bypass", sql: `CREATE OR REPLACE FUNCTION competition_job_reevaluation_post_close_allows(request jsonb,closes timestamp,granted timestamp) RETURNS boolean LANGUAGE plpgsql STABLE AS 'BEGIN RETURN true; END'`},
@@ -44,36 +43,45 @@ func TestMigrationsCompetitionPostCloseRecoveryNativeFaultCustody(t *testing.T) 
 		{name: "lost-atomic-commit", sql: `ALTER TABLE competition_job_reevaluation DISABLE TRIGGER competition_job_reevaluation_atomic`},
 		{name: "lost-slot-authority", sql: `ALTER TABLE competition_worker_slot DISABLE TRIGGER competition_recovery_slot_authority`},
 	}
-	snMainnetMigrationTestEnv().Run(t, func(t testing.TB) {
-		var actual int
-		server.Db(t.Context(), func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(t.Context(), `SELECT COALESCE(MAX(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actual))
-		})
-		if actual != server.MigrationCount() {
-			t.Fatalf("post-close monitor fixture schema=%d want=%d", actual, server.MigrationCount())
+	(&server.TestEnv{ApplyDbMigrations: false, RerunCount: 0}).Run(t, func(t testing.TB) {
+		heads := []int{distributed - 1, distributed}
+		if head := server.MigrationCount(); head > distributed {
+			heads = append(heads, head)
 		}
-		t.Logf("post_close_fixture_schema_head=%d", actual)
-		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
-			t.Fatal("post-close migration schema drift", drift)
-		}
-		for _, fault := range faults {
-			snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
-				if _, err := tx.Exec(ctx, fault.sql); err != nil {
-					t.Fatalf("apply %s: %v", fault.name, err)
-				}
-				source := &snMainnetMigrationTxSource{tx: tx}
-				alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
-				if err != nil {
-					t.Fatalf("inspect %s: %v", fault.name, err)
-				}
-				alert := requireAlertClass(t, alerts, "migration-schema-drift")
-				if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, owner) {
-					t.Fatalf("%s lost successor ownership: %s", fault.name, alert.Observed)
-				}
+		for _, head := range heads {
+			server.ApplyDbMigrationsUpTo(t.Context(), head)
+			contract := migrationDistributedRecoveryTestOwner(t, version, head)
+			owner := fmt.Sprintf("%s@v%d", contract.name, contract.requiredVersion)
+			var actual int
+			server.Db(t.Context(), func(conn server.PgConn) {
+				server.Raise(conn.QueryRow(t.Context(), `SELECT COALESCE(MAX(end_version_number),0) FROM migration_audit WHERE status='success'`).Scan(&actual))
 			})
-		}
-		if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
-			t.Fatal("rolled-back recovery fault left schema drift", drift)
+			if actual != head {
+				t.Fatalf("post-close monitor fixture schema=%d want=%d", actual, head)
+			}
+			t.Logf("post_close_fixture_schema_head=%d", actual)
+			if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+				t.Fatal("post-close migration schema drift", drift)
+			}
+			for _, fault := range faults {
+				snMainnetMigrationFaultTx(t, func(ctx context.Context, tx server.PgTx) {
+					if _, err := tx.Exec(ctx, fault.sql); err != nil {
+						t.Fatalf("apply %s: %v", fault.name, err)
+					}
+					source := &snMainnetMigrationTxSource{tx: tx}
+					alerts, err := NewMigrationsSignal().Run(ctx, syntheticSettings(source))
+					if err != nil {
+						t.Fatalf("inspect %s: %v", fault.name, err)
+					}
+					alert := requireAlertClass(t, alerts, "migration-schema-drift")
+					if alert.Severity != SeverityPage || !strings.Contains(alert.Observed, owner) {
+						t.Fatalf("%s lost successor ownership: %s", fault.name, alert.Observed)
+					}
+				})
+			}
+			if _, drift := migrationPingDatabaseCheck(t, t.Context()); drift != "" {
+				t.Fatal("rolled-back recovery fault left schema drift", drift)
+			}
 		}
 	})
 }

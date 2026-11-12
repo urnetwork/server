@@ -10,6 +10,47 @@ import (
 	"github.com/urnetwork/server"
 )
 
+// Only these two reviewed predecessors transfer to this exact distributed
+// successor. An unexpected later retirement remains an oracle failure.
+func migrationDistributedRecoveryTestOwner(t testing.TB, priorVersion, head int) migrationArtifact {
+	t.Helper()
+	version := server.CompetitionDistributedReevaluationMigrationVersion()
+	legacy, claim := server.CompetitionReevaluationPostCloseMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion()
+	if priorVersion != legacy && priorVersion != claim {
+		t.Fatal("distributed owner oracle received an unreviewed predecessor", priorVersion)
+	}
+	for _, previous := range []int{legacy, claim} {
+		if version <= previous || migrationCurrentSuffixTestContract(t, previous).artifact.removedVersion != version {
+			t.Fatal("distributed owner oracle lost its exact predecessor transfer", previous)
+		}
+	}
+	current := migrationCurrentSuffixTestContract(t, version).artifact
+	if current.name != "separately authorized distributed infrastructure recovery" || current.removedVersion != 0 {
+		t.Fatal("distributed owner oracle has an unreviewed successor")
+	}
+	if head >= version {
+		return current
+	}
+	return migrationCurrentSuffixTestContract(t, priorVersion).artifact
+}
+
+// Both historical owners stay required up to the actual append, including at
+// the immediately preceding head; only that append transfers their custody.
+func TestMigrationsDistributedRecoveryOwnerOracleClosedBoundaries(t *testing.T) {
+	version := server.CompetitionDistributedReevaluationMigrationVersion()
+	for _, previous := range []int{server.CompetitionReevaluationPostCloseMigrationVersion(), server.CompetitionExecutorAdmissionClaimMigrationVersion()} {
+		for _, head := range []int{previous, version - 1, version, version + 1, server.MigrationCount()} {
+			want := previous
+			if head >= version {
+				want = version
+			}
+			if owner := migrationDistributedRecoveryTestOwner(t, previous, head); owner.requiredVersion != want {
+				t.Fatal("explicit distributed owner boundary moved", previous, head, owner.requiredVersion, want)
+			}
+		}
+	}
+}
+
 // Both independently owned predecessor artifacts end exactly at this successor;
 // unrelated source/baseline/qualification checks remain carried by its query.
 func TestMigrationsDistributedRecoveryRetainsExactCustody(t *testing.T) {
