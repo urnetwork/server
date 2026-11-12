@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T08:48:01.917626Z",
+  "observed_at": "2026-11-12T09:01:17.659846Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -18,27 +18,28 @@
   "runtime_status": {
     "intake_ready": true,
     "grading_ready": false,
-    "publication_held": false,
-    "diagnosis": "Goofe completed 9/9, exited zero and verified both cleanup boundaries. Reconciliation advanced fence 27 to 28 with the original clock and received 256 files (202552782 bytes), but another PostgreSQL heartbeat deadline released fence 28 during retention at 08:46:50.684736Z. No new failure is recorded; central archival/score recording remains pending. Sille continues native measurements on its original clock."
+    "publication_held": true,
+    "diagnosis": "Goofe's original attempt is now recorded succeeded after 9/9 measurements, verified native cleanup, repeated same-clock reconciliations through fence 30, and central retention. No measurement rerun or deadline extension occurred. API readiness continues fluctuating with host liveness; Sille remains in native measurement on its original clock."
   },
   "queue": {
-    "succeeded": 11,
+    "succeeded": 12,
     "failed": 2,
     "queued": 5,
-    "running": 2
+    "running": 1
   },
-  "active_attempts": [
+  "recent_completed": [
     {
       "job_id": "01a1cac1-bfb6-874c-78fb-05740ec204e4",
       "host_id": "goofe",
       "started_at": "2026-11-12T07:10:20.253976",
       "deadline": "2026-11-12T10:10:20.253976",
-      "observed_phase": "native_succeeded_central_retention_pending",
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T09:01:17.659846Z",
       "candidate_completed": 9,
       "native_exit_code": 0,
       "native_cleanup_verified": true,
       "native_stop_cleanup_verified": true,
-      "database_custody": "reconciled_fence_28_then_released_after_heartbeat_timeout_2026-11-12T08:46:50.684736Z",
+      "database_custody": "same_attempt_reconciliations_fences_27_through_30_original_clock_preserved",
       "retention_heartbeat_incident": {
         "error_at": "2026-11-12T08:46:46.970880Z",
         "error": "PostgresStore.Heartbeat: context deadline exceeded",
@@ -48,14 +49,16 @@
         "deadline_extended": false,
         "new_terminal_failure_recorded": false
       }
-    },
+    }
+  ],
+  "active_attempts": [
     {
       "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
       "host_id": "sille",
       "started_at": "2026-11-12T07:37:00.304027",
       "deadline": "2026-11-12T10:37:00.304027",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 6,
+      "candidate_completed": 8,
       "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:43:32.322963Z",
       "reattachment_verified": false
     }
