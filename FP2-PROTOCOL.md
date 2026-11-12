@@ -4,7 +4,8 @@ Design for peer review. Nothing here is built yet.
 
 | | |
 |---|---|
-| Status | ready for peer review, 2026-11-12 |
+| Status | Ready for peer review: all owner decisions recorded. |
+| Date | 2026-11-12 |
 | Server | origin/main b8e99de07; every server file cited is identical at cbb7d7306 |
 | Connect | origin/main fc949b78 |
 | SDK | origin/main 447ed899 |
@@ -65,6 +66,8 @@ other repos.
     it is 1 if the memory gate fails (D11.5).
   - Rank mode: the performance profile's, `quality` in auto (D10).
 - The provider status tells a downgraded provider why (D11.6).
+- Connect's shipped local IPv6 downgrade (B5) is retired. Placement uses
+  only the server's labels on both axes (D11.8).
 
 **Goals.**
 1. Bring the providers that pass everything but UDP (about 20,700 on Main on
@@ -74,10 +77,9 @@ other repos.
 3. Keep every answer to an existing client byte-identical.
 
 **Non-goals.**
-- **No local downgrade on either axis** (owner, decision D7.5). This design
-  adds no capability state derived from a client's own flows. Whether the
-  shipped local IPv6 downgrade (IPV6.md B5) goes too is the one open question
-  (Q8; both options in §7.9).
+- **No local downgrade on either axis** (D7.5, D11.8). No capability state is
+  derived from a client's own flows, and the shipped local IPv6 downgrade
+  (IPV6.md B5) is retired (§7.9).
 - **The hard gate stays the default.** Old clients, and new clients talking
   to old servers, get the hard gate.
 - **No change to SN25.** Scoring, weights and payouts read no URL outcome and
@@ -111,7 +113,7 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D7.2 | overflow order: full → `ipv4+dualproto` → `dualstack+tcp` → `ipv4+tcp` | accepted | §6 |
 | D7.3 | "not enough" means fewer matching providers in the location than the window's target count | "correct" | §6.3, refined by D11.1 and D11.2 |
 | D7.4 | labels come only from negative probe evidence | "if no negative measurement assume dual" (for both axes; unmeasured `udp_probes: false` countries count as `dualproto`) | §3.2-3.3 |
-| D7.5 | no local downgrade state on either axis | "it's impossible to tell per-flow failures from provider failures. also it's very hard to tell a failed udp flow" | §1 non-goals. Whether it also covers the shipped B5 is open question Q8 (§7.9). |
+| D7.5 | no local downgrade state on either axis | "it's impossible to tell per-flow failures from provider failures. also it's very hard to tell a failed udp flow" | §1 non-goals; applied to the shipped B5 by D11.8 (§7.9) |
 | D8 | limited window size | "I want to change the limited window to half the normal window size, min 1." Supersedes "min count 1, default 1" (D6.3). | §7.4 |
 | D9 | process | "Ok fully finish FP2-PROTOCOL.md and then i will have a peer review before we start implementation." | this document |
 | D10 | the limited window's rank mode follows the performance profile | "the limited window should match the same rank mode as the performance profile. if auto, the limited window should be quality" (answers open question Q3) | §6.2, §7.4, §7.6 |
@@ -122,10 +124,10 @@ All dates are 2026-11-12 unless marked. Quotes are verbatim, typos included.
 | D11.5 (Q5) | if the mobile memory gate fails, mobile sizes the limited window at 1 | accepted | §7.4, §7.8, §7.10, §9, §10 |
 | D11.6 (Q6) | the provider status tells a downgraded provider why | accepted | §5.5, §7.8 |
 | D11.7 (Q7) | a /mainnet note when the apps ship | accepted | §10 |
+| D11.8 (Q8) | D7.5 also retires connect's shipped IPv6 local downgrade (B5): placement uses only the server's labels on both axes | "a retire it accepted" | §1, §7.1-7.3, §7.9, §9, §10, §11 |
 
-Whether D7.5 also retires the shipped IPv6 local downgrade (B5) is not
-confirmed. It is the one open question (Q8, §11), and §7.9 sets out both
-options.
+D11.8 applies D7.5 to the shipped IPv6 local downgrade (B5) too: it is
+retired (§7.9). No owner question is open.
 
 ## 3. Capability model
 
@@ -816,7 +818,7 @@ today's default (model/egress_index.go:208).
   - from `capabilities` when the answer echoes `select`;
   - otherwise from `ip_family` with `dualproto` (§5.4).
 - **`multiClientChannel`** gains `supportsFlow(ipVersion, ipProtocol)`. It
-  reads only these labels (D6.2, D7.5). A fixed destination supports every
+  reads only these labels (D6.2, D7.5, D11.8). A fixed destination supports every
   flow: it is the user's choice, as `supportsIpVersion` already says
   (connect/ip_remote_multi_client_family.go:53-66).
 
@@ -838,6 +840,10 @@ ICMP follows TCP: no probe measures ICMP, so no evidence exists against it.
 Every site that places, adopts, rebinds or donates a flow today checks
 `supportsIpVersion`. Each moves to `supportsFlow` on the flow's path. Sites
 that gather by IP version alone take the protocol as well.
+
+Every site reads only the server's labels, on both axes. The B5 latch that
+could lower an exit's family is retired (D11.8, §7.9), so no client-side
+state changes a label between FP2 answers.
 
 | Site (connect/) | Function | What it chooses |
 |---|---|---|
@@ -986,35 +992,34 @@ that gather by IP version alone take the protocol as well.
   (sdk/device_local.go:9077-9078). Connected stays count-based on the normal
   windows (sdk/connect_view_controller.go:1215).
 
-### 7.9 The shipped local IPv6 downgrade (B5): open question Q8
+### 7.9 Retiring the local IPv6 downgrade (B5) (D11.8)
 
-This design adds no local capability state (D7.5). Connect already ships one
-piece, the IPv6 local downgrade of IPV6.md B5: an exit whose IPv6 dials starve
-while IPv4 stays healthy is latched to v4-only for the life of the window. The
-owner has not said whether D7.5 retires it. Both options:
+Connect ships one piece of local capability state: the IPv6 local downgrade
+of IPV6.md B5. An exit whose IPv6 dials starve while its IPv4 stays healthy is
+latched to v4-only for the life of its window. D11.8 retires it, so placement
+uses only the server's labels on both axes.
 
-**Option A: retire B5.** Placement reads only the server's labels.
-- Removed:
-  - `maybeDowngradeIpv6` (connect/ip_remote_multi_client_family.go:68-85);
-  - its trigger on the dial-failure path (connect/ip_remote_multi_client.go:10406-10407);
-  - `noteIpFamilyDowngrade` (family.go:661-676);
-  - the `ipFamilyDowngraded` latch (connect/ip_remote_multi_client.go:17253-17259);
-  - `ipv6DialStarvedWithLock` (family.go:97-138).
-- `IpFamily()` (family.go:40-51) returns the server's IP label. The
-  version-split dial-strike record stays, because ordinary starvation
-  warnings read it.
-- IPV6.md B5 is marked superseded.
-- **Effect:** a dual-stack exit whose IPv6 breaks keeps getting IPv6 flows
-  until its label turns (§3.5). Applications fall back to IPv4 meanwhile.
+**Removed:**
+- `maybeDowngradeIpv6` (connect/ip_remote_multi_client_family.go:68-85);
+- its trigger on the dial-failure path
+  (connect/ip_remote_multi_client.go:10406-10407);
+- `noteIpFamilyDowngrade` (family.go:661-676);
+- the `ipFamilyDowngraded` latch
+  (connect/ip_remote_multi_client.go:17253-17259);
+- `ipv6DialStarvedWithLock` (family.go:97-138).
 
-**Option B: keep B5 as shipped.** Nothing in B5 changes.
-- The IP label a placement reads is the server's label, lowered by B5's latch
-  where it fired. The latch only ever lowers `dualstack` to `ipv4`.
-- D7.5 then applies to new local state only. This design adds none, and in
-  particular no UDP downgrade.
-- **Effect:** IPv6 flows leave a starved exit within a session, as today.
+**Kept:** the version-split dial-strike record, which ordinary starvation
+warnings read.
 
-Every other part of this design works unchanged under either option.
+**Changed:**
+- `IpFamily()` (family.go:40-51) returns the server's IP label.
+- IPV6.md B5 is marked superseded by this document.
+
+**Effect:**
+- A dual-stack exit whose IPv6 breaks keeps receiving IPv6 flows until its
+  label turns (§3.5), typically within a few hours. Applications fall back to
+  IPv4 meanwhile.
+- Only dual-stack providers are concerned: about 1% of supply.
 
 ### 7.10 Costs per device
 
@@ -1248,10 +1253,24 @@ all):
 - no compatible client: UDP gets port unreachable after formation and waits
   during formation; B6 reads labels;
 - old-server detection;
-- B5, per the answer to Q8:
-  - under option A, no capability change after dial strikes;
-  - under option B, B5's latch lowers a `dualstack` label, and the exit then
-    gets no IPv6 flow.
+- **B5 retirement (D11.8):**
+  - remove B5's tests: `TestMaybeDowngradeIpv6` and
+    `TestClientDialFailureDowngradesAndRepublishes`
+    (connect/ip_remote_multi_client_family_test.go:648, 770);
+    `TestDialFailureDowngradesStarvedIpv6AndFillsShortfall` and
+    `TestDialFailureNeverDowngradesIpv6OnlyExit`
+    (connect/ip_remote_multi_client_rerace_test.go:2179, 2261);
+  - rewrite the two tests that set the latch directly to set the server's IP
+    label instead: `TestUnboundIpv6FlowIsNotAdoptedByAnExitDowngradedToIpv4`
+    (connect/ip_remote_multi_client_unbound_flow_test.go:1028-1034) and the
+    late-owner case (connect/ip_remote_multi_client_syn_retry_publication_test.go:586);
+  - add tests proving placement no longer downgrades:
+    - IPv6 dial strikes across distinct destinations while IPv4 stays healthy
+      (B5's old trigger) leave the exit's labels, `IpFamily()` and its IPv6
+      placement unchanged, publish no `family_downgrade` event and open no
+      IPv6 shortfall;
+    - UDP flows that get no reply leave the protocol label unchanged;
+    - a label changes only when a fresh FP2 answer re-labels the entry.
 
 **sdk:**
 - the window status fields;
@@ -1285,16 +1304,16 @@ inert for them.
 | 1 | `db migrate` (§4.1) | any server build with this change (readiness) | none needed: the column is unused by older builds and stays |
 | 2 | taskworker: ingest writes the mask; the export classifies and writes the capability facets, the native capability snapshot and the sets; stats gauges | step 3 for full value (not required for safety) | previous build. Capability keys expire with the export TTL (300 min); legacy keys are unchanged throughout. |
 | 3 | api, alt and the proxy service's server side: selector mode and the provider status reason (D11.6) | the client release | previous build: new clients see an old server (§5.4) |
-| 4 | proxy service with the new connect and sdk (hosted devices) | the app release, as the first fleet measurement of §8.2 | previous proxy build |
-| 5 | apps through the nightly: the memory gate decides the mobile limited size (D11.5); the Apple status row shows the reason (D11.6); a /mainnet note goes out with it (D11.7) | none | the previous release |
+| 4 | proxy service with the new connect and sdk (hosted devices), B5's retirement included (D11.8) | the app release, as the first fleet measurement of §8.2 | previous proxy build |
+| 5 | apps through the nightly, B5's retirement included (D11.8): the memory gate decides the mobile limited size (D11.5); the Apple status row shows the reason (D11.6); a /mainnet note goes out with it (D11.7) | none | the previous release |
 
 - **Measure between steps 2 and 3.** Watch Redis memory for `cs_` keys,
   export duration, and the new gauges filling over 8 hours.
 - **The client settings** `LimitedWindowSizeFraction` (0.5; 0 turns the
   window off) and the selectors are compiled defaults. They are exposed in the
   developer menu for testing; a production change is a release.
-- **IPV6.md B5:** marked superseded under option A of Q8; unchanged under
-  option B.
+- **IPV6.md B5** is marked superseded in the connect change that retires it
+  (D11.8).
 - **The /mainnet note (D11.7)** goes on the /mainnet timeline when step 5
   ships. It says that providers whose builds do not route UDP, or whose IPv6
   fails, are offered for the traffic they can carry, and that SN25 scoring is
@@ -1310,24 +1329,9 @@ inert for them.
 | **Mobile memory.** Two more window clients against a 24 MiB target calibrated for 5. | The §9 memory gate. If it fails, mobile uses 1 (D11.5). |
 | **Platform load.** 3-4 more clients per device: setups, pings, contracts and race duplicates. | measure on the proxy fleet first (step 4) |
 | **Label lag without local downgrade (D7.5).** A provider that loses UDP keeps `dualproto` for a few hours, and its UDP flows stall until then. | The wide race hedges cold starts, and apps fall back from QUIC to TCP. |
-| **IPv6 without B5** (option A of Q8 only). A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns. | Dual-stack is about 1% of supply; applications fall back to IPv4. |
+| **IPv6 without B5 (D11.8).** A dual-stack exit whose IPv6 breaks keeps `dualstack` until the evidence turns, typically a few hours (§3.5). | Only dual-stack providers are concerned, about 1% of supply. Applications fall back to IPv4, and B6's no-route still answers when no `dualstack` client exists. |
 | **Export cost.** About 75% more union pages. | measured at step 2; capability keys can be dropped by rollback |
 
 ### Open questions
 
-Q1-Q7 are decided (D10 and D11). One question remains.
-
-- **Q8. Does D7.5 retire the shipped IPv6 local downgrade (B5)?**
-  - *Options:* §7.9 sets out both.
-    - **A, retire it:** placement reads only the server's labels. IPv6 flows
-      to a dual-stack exit whose IPv6 broke continue until its label turns,
-      typically within a few hours (§3.5).
-    - **B, keep it as shipped:** B5's latch may lower a `dualstack` label for
-      the life of a window. D7.5 covers new local state only.
-  - *What changes:* option A removes the five B5 pieces listed in §7.9, its
-    tests and the IPV6.md B5 text. Option B changes nothing in B5, and adds
-    one test that the latch composes with the labels.
-  - *Recommendation:* A. The owner's reason for D7.5 ("impossible to tell
-    per-flow failures from provider failures") applies to B5's dial-strike
-    inference too. A gives placement one source of truth, and the supply it
-    touches is about 1%.
+None. Q1-Q8 are decided (D10, D11.1-D11.8).
