@@ -1,6 +1,21 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T01:17:57Z",
+  "observed_at": "2026-11-12T01:32:02Z",
+  "latest_epoch2_worker_staged": {
+    "evidence": "EPOCH2-HEARTBEAT-QUALIFICATION-2026-11-12.json",
+    "source_commit": "89be8b3b8b768cf0434cf1a337e67b6cb3751ae0",
+    "exact_main_ordinary_passed": 87,
+    "exact_main_race_passed": 87,
+    "binary_sha256": "06e179cdb25d12a78c47208d12a093de94648a33f1c8ec74afb2c51754628eec",
+    "image_digest": "sha256:f3bbf6a1246eb2b92f298efbd4c17a8e4e6f571cc071e8a6cc059f25a2ee5e51",
+    "image_worker_bytes_match_native": true,
+    "immutable_release_staged": true,
+    "runtime_override_installed": false,
+    "service_reloaded": false,
+    "service_restarted": false,
+    "original_worker_still_running_verified": true,
+    "next_action": "Obtain requested claim-only maintenance approval or wait for the previously authorized empty-queue boundary; do not interrupt current attempts. At positively verified idle, activate the staged pinned wrapper/override and resume claims. Source/baseline/scoring policy and all original attempt deadlines remain unchanged. Run independent tests for the separate managed-control retirement fix; do not silently deploy a changed native agent. Older entries below are historical snapshots."
+  },
   "latest_epoch2_heartbeat_qualified": {
     "evidence": "EPOCH2-HEARTBEAT-QUALIFICATION-2026-11-12.json",
     "qualified_branch_commit": "d4bb6c900595d5d8e76921baff4dbeb49fbfcc97",

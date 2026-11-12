@@ -167,6 +167,8 @@ func StSyncChain(
 	// stop the steps below.
 	scheduleStCtfDataSteps(clientSession, deploymentKey, state)
 	scheduleStLedgerV2Steps(clientSession, deploymentKey, state)
+	// Capture the flag's own chains, off unless st.yml turns them on.
+	scheduleStCtfDriverSteps(clientSession, deploymentKey, state)
 	scheduleStV1Sweep(clientSession, deploymentKey)
 
 	return &StSyncChainResult{}, nil

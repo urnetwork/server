@@ -87,6 +87,7 @@ type managementSshHost struct {
 	start              func(context.Context, *Config, managementSshPlan, string, []*os.File) (managementSshProcess, error)
 	observe            func(context.Context, *Config, *ManagementResourcePolicy, Pin, managementSshPlan) (managementSshUnit, error)
 	stop               func(context.Context, Pin, string) error
+	resetFailed        func(context.Context, Pin, string) error
 	empty              func(context.Context, string) (bool, error)
 	newId              func() (string, error)
 	joinContext        func(context.Context, time.Duration) (context.Context, context.CancelFunc)
@@ -123,7 +124,7 @@ func VerifyManagedControlPlacement(ctx context.Context, configPath string) error
 // The lifecycle is externally driven so the SSH parent joins all of its own
 // process/descriptor work before returning, including cancellation orderings.
 func (self *managementSshHost) serve(parent context.Context, configPath string, input io.Reader, output, diagnostic io.Writer) error {
-	if self == nil || self.settings.validate() != nil || self.load == nil || self.admit == nil || self.start == nil || self.observe == nil || self.stop == nil || self.empty == nil || self.newId == nil || self.joinContext == nil {
+	if self == nil || self.settings.validate() != nil || self.load == nil || self.admit == nil || self.start == nil || self.observe == nil || self.stop == nil || self.resetFailed == nil || self.empty == nil || self.newId == nil || self.joinContext == nil {
 		return errors.New("managed SSH has no finite concrete owner")
 	}
 	files, err := captureManagementSshFiles(input, output, diagnostic)
@@ -168,8 +169,8 @@ func (self *managementSshHost) serve(parent context.Context, configPath string, 
 	prior, priorErr := self.observe(parent, config, policy, manager, plan)
 	if priorErr != nil || prior.exists {
 		withdrawErr := registry.withdraw(plan.Id)
-		retireErr := registry.retire(plan.Id)
-		return errors.Join(errors.New("managed SSH nonce already has manager custody or cannot be checked"), withdrawErr, retireErr)
+		closeErr := registry.close(plan, "unknown", "")
+		return errors.Join(ErrManagedSshUnknown, errors.New("managed SSH nonce already has manager custody or cannot be checked"), priorErr, withdrawErr, closeErr)
 	}
 	marker := filepath.Join(registry.path, id+".admit")
 	monitorCtx, monitorCancel := context.WithDeadline(context.WithoutCancel(parent), plan.ExpiresAt)
@@ -260,6 +261,21 @@ func (self *managementSshHost) serve(parent context.Context, configPath string, 
 							closeErr := registry.close(plan, "unknown", invocation)
 							return errors.Join(ErrManagedSshUnknown, outcomeErr, waitErr, closeErr)
 						}
+						// Process join alone does not retire a loaded failed unit.
+						// Keep the original root plan until PID1 and the kernel
+						// positively agree that this exact nonce is gone.
+						if err := registry.withdraw(plan.Id); err != nil {
+							closeErr := registry.close(plan, "unknown", invocation)
+							return errors.Join(ErrManagedSshUnknown, outcomeErr, waitErr, err, closeErr)
+						}
+						if err := self.retireControl(ctx, config, policy, manager, plan, invocation); err != nil {
+							closeErr := registry.close(plan, "unknown", invocation)
+							return errors.Join(ErrManagedSshUnknown, outcomeErr, waitErr, err, closeErr)
+						}
+						if err := ctx.Err(); err != nil {
+							closeErr := registry.close(plan, "unknown", invocation)
+							return errors.Join(ErrManagedSshUnknown, outcomeErr, waitErr, err, closeErr)
+						}
 						if err := registry.close(plan, "joined", invocation); err != nil {
 							return err
 						}
@@ -305,6 +321,69 @@ func (self *managementSshHost) serve(parent context.Context, configPath string, 
 			case <-ctx.Done():
 			case <-time.After(self.settings.PollInterval):
 			}
+		}
+	}
+}
+
+// Admission is withdrawn and the exact stop/physical monitor join already
+// completed. Only this nonce may be reset, and only a stable inactive original
+// invocation without a queued job can precede that non-launching operation.
+// Lost acknowledgement never authorizes metadata deletion or a second reset.
+func (self *managementSshHost) retireControl(ctx context.Context, config *Config, policy *ManagementResourcePolicy, manager Pin, plan managementSshPlan, invocation string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	before, err := self.observe(ctx, config, policy, manager, plan)
+	if err != nil {
+		return err
+	}
+	if before.pendingJob || before.controlPid != 0 || before.exists && (!before.inactive || before.invocationId != invocation) {
+		return errors.New("managed SSH retirement lost its stopped invocation or acquired pending work")
+	}
+	empty, err := self.empty(ctx, plan.UnitName)
+	if err != nil || !empty {
+		return errors.Join(errors.New("managed SSH retirement has no positive native empty proof"), err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	confirmed, err := self.observe(ctx, config, policy, manager, plan)
+	if err != nil || confirmed.pendingJob || confirmed.controlPid != 0 || confirmed.exists && (!before.exists || !confirmed.inactive || confirmed.invocationId != invocation) {
+		return errors.Join(errors.New("managed SSH invocation changed around native empty proof"), err)
+	}
+	if confirmed.exists {
+		if err := self.resetFailed(ctx, manager, plan.UnitName); err != nil {
+			return err
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		after, err := self.observe(ctx, config, policy, manager, plan)
+		if err != nil {
+			return err
+		}
+		if after.pendingJob || after.controlPid != 0 || after.exists && (!after.inactive || after.invocationId != invocation) {
+			return errors.New("managed SSH retirement observed replacement or pending manager work")
+		}
+		if !after.exists {
+			empty, err := self.empty(ctx, plan.UnitName)
+			if err != nil || !empty {
+				return errors.Join(errors.New("retired managed SSH unit retains uncertain native work"), err)
+			}
+			// Bracket the native proof with fresh absence observations;
+			// reset success alone never proves collection or future denial.
+			final, err := self.observe(ctx, config, policy, manager, plan)
+			if err != nil || final.exists || final.pendingJob || final.controlPid != 0 {
+				return errors.Join(errors.New("managed SSH unit did not remain positively retired"), err)
+			}
+			return ctx.Err()
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(self.settings.PollInterval):
 		}
 	}
 }
@@ -568,7 +647,7 @@ func (self *managementSshRegistry) close(plan managementSshPlan, outcome, invoca
 	return self.write(plan.Id+".closed", closed)
 }
 
-// Only the caller's positively joined or never-issued exact nonce is removed.
+// Only the caller's positively retired or never-issued exact nonce is removed.
 // No prefix scan, recursive cleanup, expiry or remote input authorizes this.
 func (self *managementSshRegistry) retire(id string) error {
 	if !digestPattern.MatchString(id) {
