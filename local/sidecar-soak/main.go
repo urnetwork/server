@@ -23,11 +23,14 @@
 //
 // Targets. t2 runs evsservice's engine on sidecartest's fakes in this process, with load's EvsSubscriberWorld:
 // commits to one ref at Fraction of §11.15's 20 pushes a second, each hinting every subscriber. Its fakes hold every
-// object in this process's heap, so its heap signal reads open, and no evsservice count of orphans deletes nothing,
-// so neither target reads orphans (question test-m2-03-soak-orphan-count). stack, the private stack's stores through
-// sidecarhost on the attested Redis and the local MinIO, is not built: server's sidecart3 builds its hosts only
-// inside go test, and the target refuses, so a run there cannot pass by running on fakes. The mix holds evs alone:
-// each other service's driver is its area's (SOCK-M5-17, TLS-M5-26, SMTP-M9-32) and joins here when it lands.
+// object in this process's heap, so its heap signal reads open. Its orphans are counted by orphan GC's dry count over
+// the fakes' stores (evsOrphanCounter, QD-677), but a short run ends long before the load's segments could pass a
+// horizon, and on a run of any length nothing evacuates t2's batches, so its horizon stays at the warm-up's first
+// minute: its end's count reaches nothing the load wrote, orphanCoverage says so, and no t2 run is evidence. stack,
+// the private stack's stores through sidecarhost on the attested Redis and the local MinIO, is not built: server's
+// sidecart3 builds its hosts only inside go test, and the target refuses, so a run there cannot pass by running on
+// fakes. The mix holds evs alone: each other service's driver is its area's (SOCK-M5-17, TLS-M5-26, SMTP-M9-32) and
+// joins here when it lands.
 //
 // Nothing here dials a production port or reads vault.
 package main
@@ -69,6 +72,11 @@ type soakSettings struct {
 	Tolerances     *soakTolerances
 	// Subscribers on the evs target's ref: §22.8's 1,000.
 	Subscribers int
+	// Pushes a second the evs target's one ref is taken to sustain: §11.15's concurrency row gives roughly 20 to
+	// 50, and the soak takes the low end.
+	EvsCapacityPerSecond float64
+	// Failure kinds each service's report keeps by name, past which the rest count together: load's 16.
+	MaxFailureKinds int
 	// Minutes of the same phases, which prove nothing: the report is a smoke.
 	Short bool
 	// What phases read time from and wait on: nil is real time.
@@ -83,14 +91,16 @@ type soakSettings struct {
 // §22.8's soak: 72 h at 30%, after 10 min of warm-up, read through 30 min of quiet, 5 readings 10 s apart.
 func defaultSoakSettings() *soakSettings {
 	return &soakSettings{
-		Duration:       72 * time.Hour,
-		Fraction:       0.3,
-		Warmup:         10 * time.Minute,
-		Quiet:          30 * time.Minute,
-		SampleCount:    5,
-		SampleInterval: 10 * time.Second,
-		Tolerances:     defaultSoakTolerances(),
-		Subscribers:    load.SubscribersPerRepo,
+		Duration:             72 * time.Hour,
+		Fraction:             0.3,
+		Warmup:               10 * time.Minute,
+		Quiet:                30 * time.Minute,
+		SampleCount:          5,
+		SampleInterval:       10 * time.Second,
+		Tolerances:           defaultSoakTolerances(),
+		Subscribers:          load.SubscribersPerRepo,
+		EvsCapacityPerSecond: 20,
+		MaxFailureKinds:      16,
 	}
 }
 
@@ -138,7 +148,9 @@ type soakReport struct {
 	Smoke    bool              `json:"smoke"`
 	Settings map[string]string `json:"settings"`
 	Warmup   []*load.Report    `json:"warmup"`
-	Load     []*load.Report    `json:"load"`
+	// When the load phase began, which the end's orphan count must reach past to say anything of it.
+	LoadStarted time.Time      `json:"load_started"`
+	Load        []*load.Report `json:"load"`
 	// readings every SampleInterval through the load phase
 	Series   []load.Sample  `json:"series"`
 	Baseline *soakReading   `json:"baseline"`
@@ -149,8 +161,20 @@ type soakReport struct {
 	Notes  []string `json:"notes"`
 }
 
-// Why the report cannot stand as D-TEST-7's soak evidence, or nil: a short run, a signal read open, a leak, a load
-// phase that failed attempts, or a target on fakes.
+// Why the end's orphan count says nothing of the load, or empty: under the horizon a segment is GC's to judge only
+// once the horizon has passed its LastModified plus the adoption bound, so an end whose count judged only what was
+// written before the load began, as when the run is shorter than about 49 h or nothing evacuates its batches,
+// compares the baseline with itself. The verdict stands as the counts give it; the run is no evidence.
+func (self *soakReport) orphanCoverage() string {
+	if self.End == nil || self.End.Orphans < 0 || !self.End.OrphansJudgedThrough.Before(self.LoadStarted) {
+		return ""
+	}
+	return fmt.Sprintf("the end's count judged only segments written by %s, and the load began at %s",
+		self.End.OrphansJudgedThrough.UTC().Format(time.RFC3339), self.LoadStarted.UTC().Format(time.RFC3339))
+}
+
+// Why the report cannot stand as D-TEST-7's soak evidence, or nil: a short run, a signal read open, a leak, an
+// orphan count that reached nothing the load wrote, a load phase that failed attempts, or a target on fakes.
 func (self *soakReport) gateEvidence() error {
 	reasons := []string{}
 	if self.Smoke {
@@ -166,6 +190,9 @@ func (self *soakReport) gateEvidence() error {
 		case soakLeaked:
 			reasons = append(reasons, fmt.Sprintf("%s leaked: %s", verdict.Signal, verdict.Why))
 		}
+	}
+	if coverage := self.orphanCoverage(); coverage != "" {
+		reasons = append(reasons, fmt.Sprintf("%s judged nothing the load wrote: %s", soakSignalOrphans, coverage))
 	}
 	for _, report := range self.Load {
 		if 0 < report.Failed {
@@ -229,15 +256,16 @@ func runSoak(ctx context.Context, settings *soakSettings, target soakTarget) *so
 		}
 		counter := target.Orphans()
 		if counter == nil {
-			reading.OrphansWhy = "no orphan count: evsservice counts none that deletes nothing (question test-m2-03-soak-orphan-count)"
+			reading.OrphansWhy = fmt.Sprintf("no orphan count on the %s target", target.Name())
 			return reading, nil
 		}
-		orphans, err := counter.CountOrphans(ctx)
+		count, err := counter.CountOrphans(ctx)
 		if err != nil {
 			reading.OrphansWhy = "the orphan count failed: " + err.Error()
 			return reading, nil
 		}
-		reading.Orphans = orphans
+		reading.Orphans = count.Orphans
+		reading.OrphansJudgedThrough = count.JudgedThrough
 		return reading, nil
 	}
 
@@ -263,6 +291,7 @@ func runSoak(ctx context.Context, settings *soakSettings, target soakTarget) *so
 		// a stepped run moves its own clock; a series would only race it
 		close(seriesDone)
 	}
+	report.LoadStarted = clock.Now()
 	report.Load = runSoakMix(ctx, settings, clock, target.Mix(), settings.Duration)
 	stopSeries()
 	<-seriesDone
@@ -277,6 +306,9 @@ func runSoak(ctx context.Context, settings *soakSettings, target soakTarget) *so
 	}
 	report.End = end
 	report.Verdicts = compareSoak(report.Baseline, report.End, settings.Tolerances, target.Open())
+	if coverage := report.orphanCoverage(); coverage != "" {
+		report.Notes = append(report.Notes, fmt.Sprintf("%s compares only what the load did not write, so it is no evidence: %s", soakSignalOrphans, coverage))
+	}
 	report.Passed = !slices.ContainsFunc(report.Verdicts, func(verdict *soakVerdict) bool { return verdict.Outcome == soakLeaked })
 	report.Ended = clock.Now()
 	return report
@@ -298,7 +330,7 @@ func runSoakMix(ctx context.Context, settings *soakSettings, clock sidecartest.C
 		}
 		first := service.arrivals
 		driver := load.NewDriver(&load.DriverSettings{
-			Name: service.Name, Rate: rate, Steady: duration, MaxFailureKinds: 16, Clock: clock,
+			Name: service.Name, Rate: rate, Steady: duration, MaxFailureKinds: settings.MaxFailureKinds, Clock: clock,
 		}, func(ctx context.Context, arrival int64) error {
 			return service.Workload(ctx, first+arrival)
 		})
@@ -315,38 +347,46 @@ func runSoakMix(ctx context.Context, settings *soakSettings, clock sidecartest.C
 
 // The t2 target: see the file header.
 type t2SoakTarget struct {
-	fakes *sidecartest.FakeHost
-	world *load.EvsSubscriberWorld
-	mix   []*soakService
+	fakes   *sidecartest.FakeHost
+	world   *load.EvsSubscriberWorld
+	mix     []*soakService
+	orphans *evsOrphanCounter
 }
 
-// §11.15's concurrency row: one ref sustains roughly 20 to 50 pushes a second; the soak takes the low end.
-const t2EvsCapacityPerSecond = 20
-
-func newT2SoakTarget(ctx context.Context, clock sidecartest.Clock, subscribers int) (*t2SoakTarget, error) {
+// The t2 target on settings' Clock, its ref's Subscribers and its EvsCapacityPerSecond.
+func newT2SoakTarget(ctx context.Context, settings *soakSettings) (*t2SoakTarget, error) {
+	clock := settings.Clock
 	if clock == nil {
 		clock = sidecar.RealClock{}
 	}
 	fakes := sidecartest.NewFakeHost(ctx, clock, nil, nil, sidecartest.DefaultFakeHostSettings())
+	orphans, err := newEvsOrphanCounter(fakes.ServiceHost())
+	if err != nil {
+		fakes.Redis.Close()
+		return nil, err
+	}
 	worldSettings := load.DefaultEvsSubscriberWorldSettings()
-	worldSettings.Subscribers = subscribers
+	worldSettings.Subscribers = settings.Subscribers
 	world, err := load.NewEvsSubscriberWorld(ctx, fakes, fakes.ServiceHost(), clock, worldSettings)
 	if err != nil {
 		fakes.Redis.Close()
 		return nil, err
 	}
+	// the soak paces each arrival itself (Attempt): the workload's driver keeps only its clock and name
 	workloadSettings := load.DefaultSubscriberSettings()
-	workloadSettings.Driver = &load.DriverSettings{Name: "evs-commit-hint", Rate: 1, Steady: time.Second, Clock: clock}
+	workloadSettings.Driver.Name = "evs-commit-hint"
+	workloadSettings.Driver.Clock = clock
 	workload := load.NewSubscriberWorkload(workloadSettings, world)
 	return &t2SoakTarget{
 		fakes: fakes,
 		world: world,
 		mix: []*soakService{{
 			Name:              "evs-commit-hint",
-			CapacityPerSecond: t2EvsCapacityPerSecond,
+			CapacityPerSecond: settings.EvsCapacityPerSecond,
 			CapacitySource:    "§11.15's concurrency row, one ref's 20 to 50 pushes a second at its low end",
 			Workload:          workload.Attempt,
 		}},
+		orphans: orphans,
 	}, nil
 }
 
@@ -363,7 +403,7 @@ func (self *t2SoakTarget) RedisKeys() load.RedisKeyCounter {
 }
 
 func (self *t2SoakTarget) Orphans() orphanCounter {
-	return nil
+	return self.orphans
 }
 
 func (self *t2SoakTarget) Open() map[soakSignal]string {
@@ -380,10 +420,10 @@ func (self *t2SoakTarget) Close() {
 // Why the stack target refuses.
 var errSoakStackUnbuilt = errors.New("the stack target is not built: the private stack's engines need sidecarhost.NewServiceHost over the attested Redis and the local MinIO, which server's sidecart3 builds only inside go test (TEST-M2-14's gap)")
 
-func openSoakTarget(ctx context.Context, name string, clock sidecartest.Clock, subscribers int) (soakTarget, error) {
+func openSoakTarget(ctx context.Context, name string, settings *soakSettings) (soakTarget, error) {
 	switch name {
 	case "t2":
-		return newT2SoakTarget(ctx, clock, subscribers)
+		return newT2SoakTarget(ctx, settings)
 	case "stack":
 		return nil, errSoakStackUnbuilt
 	}
@@ -430,7 +470,7 @@ func run(ctx context.Context, args []string, stdout io.Writer, stderr io.Writer)
 	if 0 < *subscribers {
 		settings.Subscribers = *subscribers
 	}
-	target, err := openSoakTarget(ctx, *targetName, settings.Clock, settings.Subscribers)
+	target, err := openSoakTarget(ctx, *targetName, settings)
 	if err != nil {
 		fmt.Fprintf(stderr, "sidecar-soak: %v\n", err)
 		return 2
