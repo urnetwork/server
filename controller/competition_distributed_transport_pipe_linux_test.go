@@ -66,6 +66,7 @@ type competitionAgentPipeFixture struct {
 	transportContext context.Context
 	cancel           context.CancelFunc
 	done             chan struct{}
+	commandWaited    chan struct{}
 	response         competitionagent.Response
 	err              error
 	output           string
@@ -148,7 +149,7 @@ func newCompetitionAgentPipeFixture(t *testing.T, binary, mode, hold string) *co
 			connection: competitionExecutorConnection{AgentCommand: binary, AgentCommandSha256: binaryDigest, AgentConfigPath: configPath, AgentConfigSha256: hex.EncodeToString(configDigest[:])},
 		},
 		request: competitionagent.Request{Operation: "status", RunId: strings.Repeat("1", 64), FencingToken: 7}, artifact: artifact,
-		listener: listener, watchdog: watchdog, cancel: cancel, done: make(chan struct{}), output: filepath.Join(directory, "output"),
+		listener: listener, watchdog: watchdog, cancel: cancel, done: make(chan struct{}), commandWaited: make(chan struct{}), output: filepath.Join(directory, "output"),
 	}
 	if err := os.Mkdir(fixture.output, 0700); err != nil {
 		listener.Close()
@@ -202,14 +203,9 @@ func newCompetitionAgentPipeFixture(t *testing.T, binary, mode, hold string) *co
 	return fixture
 }
 
-// A pidfd is a generation-pinned native exit witness, not a guessed PID poll.
+// POLLIN proves exit on the qualified kernel too. Linux 6.8 does not emit HUP
+// for a reaped pidfd, so reaping is proved separately through actual Wait/ECHILD.
 func waitCompetitionAgentPipeProcess(ctx context.Context, pidFd int) error {
-	return waitCompetitionAgentPipeEvent(ctx, pidFd, unix.POLLIN)
-}
-
-// POLLIN proves exit; POLLHUP additionally proves the pinned child was reaped.
-// The latter is used before releasing a deliberately unread response buffer.
-func waitCompetitionAgentPipeEvent(ctx context.Context, pidFd int, expected int16) error {
 	deadline, ok := ctx.Deadline()
 	if !ok || pidFd < 0 {
 		return errors.New("fixture process has no bounded native exit witness")
@@ -219,12 +215,12 @@ func waitCompetitionAgentPipeEvent(ctx context.Context, pidFd int, expected int1
 		if remaining <= 0 || ctx.Err() != nil {
 			return context.DeadlineExceeded
 		}
-		pollFds := []unix.PollFd{{Fd: int32(pidFd), Events: expected}}
+		pollFds := []unix.PollFd{{Fd: int32(pidFd), Events: unix.POLLIN}}
 		count, err := unix.Poll(pollFds, int((remaining+time.Millisecond-1)/time.Millisecond))
 		if errors.Is(err, unix.EINTR) {
 			continue
 		}
-		if err != nil || count != 1 || pollFds[0].Revents&(unix.POLLNVAL|unix.POLLERR) != 0 || pollFds[0].Revents&expected != expected {
+		if err != nil || count != 1 || pollFds[0].Revents&(unix.POLLNVAL|unix.POLLERR) != 0 || pollFds[0].Revents&unix.POLLIN == 0 {
 			return errors.Join(err, errors.New("fixture process did not acknowledge its exact lifecycle event"))
 		}
 		return nil
@@ -289,8 +285,8 @@ func (self *competitionAgentPipeFixture) startCommand(t *testing.T, writeRequest
 		t.Fatal(err)
 	}
 	self.startOperation(t, func() (competitionagent.Response, error) {
-		return competitionagent.Response{}, exchangeCompetitionAgentCommand(self.transportContext, self.cancel, command, arguments,
-			int(self.transport.profile.Config.Settings.MaximumDiagnosticBytes), writeRequest, readResponse)
+		return competitionagent.Response{}, exchangeCompetitionAgentCommandWithWaitObserver(self.transportContext, self.cancel, command, arguments,
+			int(self.transport.profile.Config.Settings.MaximumDiagnosticBytes), writeRequest, readResponse, func() { close(self.commandWaited) })
 	})
 }
 
@@ -338,11 +334,24 @@ func (self *competitionAgentPipeFixture) await(t *testing.T) {
 		if err := waitCompetitionAgentPipeProcess(self.watchdog, self.agent.pidFd); err != nil {
 			t.Fatal(err)
 		}
-		var info unix.Siginfo
-		if err := unix.Waitid(unix.P_PIDFD, self.agent.pidFd, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil); !errors.Is(err, unix.ECHILD) {
-			t.Fatal("generation-pinned exact child was not physically reaped", err)
+		if err := requireCompetitionAgentPipeReaped(self.agent.pidFd); err != nil {
+			t.Fatal(err)
 		}
 	}
+}
+
+// A native WNOWAIT query never steals another waiter's exit status. Only ECHILD
+// accepts reaping, after the same generation's independent exit/Wait witnesses.
+func requireCompetitionAgentPipeReaped(pidFd int) error {
+	if pidFd < 0 {
+		return errors.New("invalid generation-pinned child witness")
+	}
+	var info unix.Siginfo
+	err := unix.Waitid(unix.P_PIDFD, pidFd, &info, unix.WEXITED|unix.WNOHANG|unix.WNOWAIT, nil)
+	if errors.Is(err, unix.ECHILD) {
+		return nil
+	}
+	return errors.Join(err, errors.New("generation-pinned exact child was not physically reaped"))
 }
 
 // Closing request-local descriptors must not kill an inherited stream holder.
@@ -594,9 +603,29 @@ func TestCompetitionAgentPipeWaitPreservesBufferedFrames(t *testing.T) {
 		}
 		return readCompetitionAgentTrailer(reader)
 	})
+	// The child is positively waiting for its control release here. Neither a
+	// live generation nor an invalid descriptor can stand in for a reaped child.
+	if err := requireCompetitionAgentPipeReaped(fixture.agent.pidFd); err == nil {
+		t.Fatal("live fixture generation was accepted as physically reaped")
+	}
+	if err := requireCompetitionAgentPipeReaped(-1); err == nil {
+		t.Fatal("invalid native witness was accepted as physically reaped")
+	}
+	unrelatedFile, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelatedErr := requireCompetitionAgentPipeReaped(int(unrelatedFile.Fd()))
+	if err := unrelatedFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if unrelatedErr == nil {
+		t.Fatal("non-pidfd descriptor was accepted as physically reaped")
+	}
 	fixture.emitAndExit(t, false)
-	if err := waitCompetitionAgentPipeEvent(fixture.watchdog, fixture.agent.pidFd, unix.POLLHUP); err != nil {
-		t.Fatal("child was not reaped before the deliberately unread frame", err)
+	awaitCompetitionAgentPipeSignal(t, fixture.watchdog, fixture.commandWaited)
+	if err := requireCompetitionAgentPipeReaped(fixture.agent.pidFd); err != nil {
+		t.Fatal("actual waiter did not reap before the deliberately unread frame", err)
 	}
 	close(allowRead)
 	fixture.await(t)

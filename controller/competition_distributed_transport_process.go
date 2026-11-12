@@ -16,6 +16,13 @@ import (
 // Inherited streams cannot keep local I/O blocked after request cancellation;
 // the descendant and detached native evaluation may continue independently.
 func exchangeCompetitionAgentCommand(ctx context.Context, cancel context.CancelFunc, command string, arguments []string, maximumDiagnosticBytes int, writeRequest func(io.Writer) error, readResponse func(io.Reader) error) error {
+	return exchangeCompetitionAgentCommandWithWaitObserver(ctx, cancel, command, arguments, maximumDiagnosticBytes, writeRequest, readResponse, nil)
+}
+
+// The nil production observer has no I/O, timing or authority effect. Native
+// tests may acknowledge actual Wait completion before consuming buffered bytes;
+// the observer must return synchronously and is never exposed by a public role.
+func exchangeCompetitionAgentCommandWithWaitObserver(ctx context.Context, cancel context.CancelFunc, command string, arguments []string, maximumDiagnosticBytes int, writeRequest func(io.Writer) error, readResponse func(io.Reader) error, observeWait func()) error {
 	stdin, requestInput, err := os.Pipe()
 	if err != nil {
 		return err
@@ -70,6 +77,9 @@ func exchangeCompetitionAgentCommand(ctx context.Context, cancel context.CancelF
 	go func() {
 		defer close(waited)
 		waitErr = process.Wait()
+		if observeWait != nil {
+			observeWait()
+		}
 	}()
 	written := make(chan struct{})
 	var writeErr error
