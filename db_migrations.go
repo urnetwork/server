@@ -11494,4 +11494,11 @@ var migrations = []any{
 	// when absent, under a five-second lock bound. Nothing existing is
 	// rewritten. Apply before deploying the taskworker and api that read them.
 	stLedgerV2ExtenderMigration,
+
+	// The Solana receiver sweep's cursor (solana_receiver_sweep_schema.go,
+	// controller/solana_receiver_sweep.go): one new empty table, under a
+	// five-second lock bound, created only when absent. Nothing existing is
+	// locked or rewritten. Apply before deploying the taskworker that runs
+	// the payment reconcile.
+	solanaReceiverSweepCursorMigration,
 }
