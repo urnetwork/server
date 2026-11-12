@@ -1,6 +1,20 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T03:55:44Z",
+  "observed_at": "2026-11-12T04:20:41Z",
+  "latest_epoch2_receive_cleanup_qualified": {
+    "evidence": "EPOCH2-RECEIVE-CLEANUP-QUALIFICATION-2026-11-12.json",
+    "source_commit": "698d94c44a0c148af0dfff119020c76dcd0a7444",
+    "ordinary_passed": 147,
+    "race_passed": 147,
+    "failures": 0,
+    "behavioral_negative_control_caught_original_leak": true,
+    "source_workspace_and_external_dependencies_unchanged": true,
+    "all_resource_guards_passed": true,
+    "deployed": false,
+    "merged_and_pushed_main_commit": "7167d994adf020bbd58b3e99c150048f54f90539",
+    "running_worker_source_unchanged": "68817f6d3ea96b7a8179c7af63808d504560af32",
+    "next_action": "Prepare a guarded build-only release from exact qualified source 698d94, retaining the existing staged 95fe fallback. Do not activate either during active attempts. Requested claim-only maintenance approval remains pending; otherwise use the existing empty-queue maintenance boundary. Two old infrastructure failures still need separately authorized controlled recovery. Earlier entries are historical snapshots."
+  },
   "receive_cleanup_qualification": {
     "source_commit": "02e4ed3a8c24ee23c78601663d351b908eecd683",
     "source_worktree": "/home/by/urnetwork/temp/competition-receive-owned-cleanup-20261112",
@@ -19,25 +33,29 @@
     "next_action": "Correct only the invalid fixture, commit and freeze the corrected source, rerun three ordinary and race repetitions plus existing completion/deadline regressions, then run a behavioral negative control. Do not weaken frozen policy or activate unqualified cleanup."
   },
   "current_runtime_observation": {
+    "observed_at": "2026-11-12T04:20:41Z",
     "epoch": 2,
     "round_status": "open",
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "succeeded": 6,
+    "succeeded": 7,
     "failed": 2,
     "running": 2,
     "queued": 7,
     "goofe_job_id": "01a1c7bf-ae3b-76f3-dee7-e60d2f77c90c",
     "goofe_native_state": "running",
     "goofe_execution_started": true,
+    "goofe_replicates_completed": 3,
     "goofe_previous_job_database_completion_verified": true,
     "goofe_original_deadline": "2026-11-12T06:40:44.712434Z",
-    "sille_job_id": "01a1c7b8-846f-8746-1739-a9658e3eb146",
-    "sille_replicates_completed": 8,
-    "sille_original_deadline": "2026-11-12T05:21:52.594711Z",
-    "readiness_note": "Public readiness recovered after a transient hold coincident with an expired Sille slot. A native succeeded state is not a committed score. Neither attempt was interrupted or given a new deadline.",
-    "cleanup_review_note": "Future receive cleanup is source-only and unqualified. Received inventories include private inputs intentionally excluded from retention; cleanup must independently authenticate retained artifacts and temporary-input ownership without uploading hidden inputs or adopting historical directories."
+    "sille_job_id": "01a1c88c-5f36-c222-3ec0-668fe393050f",
+    "sille_phase": "building",
+    "sille_replicates_completed": 0,
+    "sille_previous_job_database_completion_verified": true,
+    "sille_original_deadline": "2026-11-12T07:08:45.761115Z",
+    "readiness_note": "Both hosts are evaluating subsequent FIFO claims after their previous native results were retained and committed. Original attempt clocks and measurements were preserved.",
+    "cleanup_review_note": "Future receive cleanup is qualified and merged, but not deployed. Its independent retention/input ownership checks preserve unbound private control files without uploading hidden inputs or adopting historical directories."
   },
   "latest_epoch2_final_worker_ready_for_idle_handoff": {
     "evidence": "EPOCH2-HEARTBEAT-ALL-STATEMENTS-QUALIFICATION-2026-11-12.json",

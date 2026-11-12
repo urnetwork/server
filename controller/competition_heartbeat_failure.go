@@ -34,12 +34,14 @@ type competitionHeartbeatSettings struct {
 	DistributedReturnedRollbackMaximumAttempts int
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings
+	// Optional post-commit local housekeeping; never completion authority.
+	ReceiveCleanup competitionReceiveCleanupSettings
 }
 
 // Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
 	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
-		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), ScopeLockMaximumAttempts: 8, DistributedReturnedRollbackMaximumAttempts: 8, CompletionRetry: defaultCompetitionLeaseRetrySettings()}
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), ScopeLockMaximumAttempts: 8, DistributedReturnedRollbackMaximumAttempts: 8, CompletionRetry: defaultCompetitionLeaseRetrySettings(), ReceiveCleanup: defaultCompetitionReceiveCleanupSettings()}
 }
 
 // Only fixed categories, a validated PostgreSQL code, an opaque digest and

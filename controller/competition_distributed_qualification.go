@@ -211,6 +211,7 @@ func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, 
 		return nil
 	}
 	outcome := evaluator.Evaluate(operationCtx, &selected, job)
+	defer outcome.closeReceiveCustody()
 	if !screened || !outcome.distributedArchiveVerified || outcome.Error != nil {
 		return fmt.Errorf("executor %s did not pass retained full-R9 no-op admission", host.HostId)
 	}
