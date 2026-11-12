@@ -302,9 +302,20 @@ func TestClientScorePostQuantumReadyMarker(t *testing.T) {
 		if mark(restart.Add(time.Minute)) {
 			t.Fatal("a restarted stream was ready at once")
 		}
-		noteClientScorePostQuantumStream(ctx, restart.Add(settings.ReadyAfter), settings)
-		if !mark(restart.Add(settings.ReadyAfter)) {
+		at = restart
+		for ; at.Before(restart.Add(settings.ReadyAfter)); at = at.Add(10 * time.Minute) {
+			noteClientScorePostQuantumStream(ctx, at, settings)
+		}
+		noteClientScorePostQuantumStream(ctx, at, settings)
+		if !mark(at) {
 			t.Fatal("a restarted stream was not ready after its own window")
+		}
+		// a stream noted with a gap longer than the bound restarted at the
+		// note after the gap, so a window counts only from there
+		gapAt := at.Add(settings.SeenMaxAge)
+		noteClientScorePostQuantumStream(ctx, gapAt, settings)
+		if mark(gapAt) {
+			t.Fatal("a stream that went silent past the bound kept its old window")
 		}
 		if _, err := markClientScorePostQuantumReady(ctx, 0, restart, settings); err == nil {
 			t.Fatal("a marker without a ttl was accepted")
