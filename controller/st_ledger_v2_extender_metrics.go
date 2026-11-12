@@ -34,11 +34,12 @@ var (
 	}, []string{"phase"})
 )
 
+// Registers the extender pool's metrics.
 func init() {
 	prometheus.MustRegister(stExtenderPoolEpoch, stExtenderPoolBytes, stExtenderPoolCounts, stExtenderPoolWeightShare)
 }
 
-// stExtenderCensusMetrics records an epoch's captured census.
+// Records an epoch's captured census.
 func stExtenderCensusMetrics(epoch uint64, rows []ledger.CensusRow) {
 	eligible, units := stExtenderCensusCounts(rows)
 	stExtenderPoolEpoch.WithLabelValues("census").Set(float64(epoch))
@@ -47,30 +48,30 @@ func stExtenderCensusMetrics(epoch uint64, rows []ledger.CensusRow) {
 	stExtenderPoolCounts.WithLabelValues("census", "units").Set(float64(units))
 }
 
-// stExtenderPoolMetrics records an epoch's extender pool as a phase built it:
-// the epoch reader's pool, the split and the eligible provider usage.
+// Records an epoch's extender pool as a phase built it: the epoch reader's
+// pool, the split and the eligible provider usage.
 func stExtenderPoolMetrics(phase string, epoch uint64, pool *model.StEpochExtenderPool, split *ledger.ExtenderSplit, eligibleProvider uint64, platformEndpoints int) {
 	stExtenderPoolEpoch.WithLabelValues(phase).Set(float64(epoch))
-	parts := map[string]uint64{
+	partBytes := map[string]uint64{
 		"intra_platform": uint64(pool.IntraPlatform), "intra_network": uint64(pool.IntraNetwork), "pool": pool.Bytes(),
 		"weight": split.Weight, "eligible_provider": eligibleProvider,
 		"unfunded": uint64(pool.UnfundedBytes), "measurement": uint64(pool.MeasurementBytes),
 	}
-	for part, bytes := range parts {
+	for part, bytes := range partBytes {
 		stExtenderPoolBytes.WithLabelValues(phase, part).Set(float64(bytes))
 	}
-	counts := map[string]uint64{
+	kindCounts := map[string]uint64{
 		"eligible": split.Eligible, "units": split.Units, "contracts": pool.Contracts, "payers": pool.Payers,
 		"unfunded_contracts": pool.UnfundedContracts, "measurement_contracts": pool.MeasurementContracts,
 		"platform_endpoints": uint64(platformEndpoints),
 	}
-	for count, value := range counts {
-		stExtenderPoolCounts.WithLabelValues(phase, count).Set(float64(value))
+	for kind, value := range kindCounts {
+		stExtenderPoolCounts.WithLabelValues(phase, kind).Set(float64(value))
 	}
 	stExtenderPoolWeightShare.WithLabelValues(phase).Set(stExtenderWeightShare(split.Weight, eligibleProvider))
 }
 
-// stExtenderWeightShare is Z' / (W_k + Z'), 0 for an epoch with no weight.
+// Z' / (W_k + Z'), 0 for an epoch with no weight.
 func stExtenderWeightShare(weight uint64, eligibleProvider uint64) float64 {
 	total := float64(weight) + float64(eligibleProvider)
 	if total == 0 {

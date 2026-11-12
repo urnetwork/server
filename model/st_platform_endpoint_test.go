@@ -19,8 +19,8 @@ import (
 func TestStPlatformEndpointKindsAreTheSignedSet(t *testing.T) {
 	// Changing this set changes which traffic counts toward Z: it needs a new
 	// signed amendment entry first.
-	if want := []string{"tlsedge", "smtpedge", "mxedge"}; !slices.Equal(StPlatformEndpointKinds, want) {
-		t.Fatalf("platform endpoint kinds %v, the signed set is %v", StPlatformEndpointKinds, want)
+	if want := []string{"tlsedge", "smtpedge", "mxedge"}; !slices.Equal(stPlatformEndpointKinds, want) {
+		t.Fatalf("platform endpoint kinds %v, the signed set is %v", stPlatformEndpointKinds, want)
 	}
 }
 
@@ -33,7 +33,7 @@ func TestStPlatformEndpointRefusesAKindOutsideTheSignedSetBeforeReadingAnything(
 	clientId, networkId := server.NewId(), server.NewId()
 	// Every network the client could be on is the operator's own, so only the
 	// kind can refuse.
-	networks := StPlatformEndpointNetworks{Operator: map[server.Id]bool{networkId: true}, Measurement: map[server.Id]bool{}}
+	networks := StPlatformEndpointNetworks{OperatorNetworkIds: map[server.Id]bool{networkId: true}, MeasurementNetworkIds: map[server.Id]bool{}}
 	for _, kind := range []string{
 		"",
 		"egress",
@@ -51,7 +51,7 @@ func TestStPlatformEndpointRefusesAKindOutsideTheSignedSetBeforeReadingAnything(
 		"tlsedge,smtpedge",
 	} {
 		registered, err := RegisterStPlatformEndpoint(ctx, clientId, kind, "operator@example", networks)
-		if registered != nil || !errors.Is(err, ErrStPlatformEndpoint) {
+		if registered != nil || !errors.Is(err, errStPlatformEndpoint) {
 			t.Fatalf("kind %q: registered %+v, %v", kind, registered, err)
 		}
 		if want := fmt.Sprintf("kind %q is not one of", kind); !strings.Contains(err.Error(), want) {

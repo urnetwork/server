@@ -31,16 +31,16 @@ func stAmendedTestAdd(t *testing.T, reader *stEpochAmendedUsage, c stAmendedTest
 	return reader.add(row, snapshot)
 }
 
-// stExtenderPoolTotals are a pool's totals without its per-client map, which
-// leaves the struct comparable.
+// A pool's totals without its per-client map, which leaves the struct
+// comparable.
 func stExtenderPoolTotals(pool *StEpochExtenderPool) [8]uint64 {
 	return [8]uint64{uint64(pool.IntraPlatform), uint64(pool.IntraNetwork), pool.Contracts, pool.Payers,
 		uint64(pool.UnfundedBytes), pool.UnfundedContracts, uint64(pool.MeasurementBytes), pool.MeasurementContracts}
 }
 
-// stExtenderPoolEmpty reports a pool with nothing in it.
+// Reports a pool with nothing in it.
 func stExtenderPoolEmpty(pool *StEpochExtenderPool) bool {
-	return stExtenderPoolTotals(pool) == [8]uint64{} && len(pool.PooledByClient) == 0
+	return stExtenderPoolTotals(pool) == [8]uint64{} && len(pool.ClientIdPooledBytes) == 0
 }
 
 func stTestNetwork(n byte) *server.Id {
@@ -93,8 +93,8 @@ func TestStEpochAmendedUsageWorkedExample(t *testing.T) {
 	}
 	// each pooled share is its client's: tlsedge's half of c2 and the receiving
 	// client's half of c3
-	if len(pool.PooledByClient) != 2 || pool.PooledByClient[tlsedge.ClientId] != 1_500_000_001 || pool.PooledByClient[contractPayoutTestId(7)] != 500_000_001 || pool.PooledBytes() != 2_000_000_002 {
-		t.Fatalf("pooled by client %v", pool.PooledByClient)
+	if len(pool.ClientIdPooledBytes) != 2 || pool.ClientIdPooledBytes[tlsedge.ClientId] != 1_500_000_001 || pool.ClientIdPooledBytes[contractPayoutTestId(7)] != 500_000_001 || pool.PooledBytes() != 2_000_000_002 {
+		t.Fatalf("pooled by client %v", pool.ClientIdPooledBytes)
 	}
 }
 
@@ -161,8 +161,8 @@ func TestStEpochAmendedUsageExcludesUnfundedAndMeasurement(t *testing.T) {
 	}
 	// every pooled share leaves the rows, funded or not: the receiving client's
 	// three halves
-	if pool.PooledByClient[contractPayoutTestId(7)] != 3*501 || pool.PooledBytes() != 3*501 {
-		t.Fatalf("pooled by client %v", pool.PooledByClient)
+	if pool.ClientIdPooledBytes[contractPayoutTestId(7)] != 3*501 || pool.PooledBytes() != 3*501 {
+		t.Fatalf("pooled by client %v", pool.ClientIdPooledBytes)
 	}
 }
 
