@@ -3725,6 +3725,129 @@
           "legendFormat": "{{feature}} {{plan}}"
         }
       ]
+    },
+    {
+      "id": 80,
+      "type": "timeseries",
+      "title": "live window clients by window and capability labels",
+      "description": "Live hosted window clients by window (quality, speed, limited, auto) and the ip (dualstack, ipv4) and protocol (dualproto, tcp) labels FindProviders2 gave them (server FP2-PROTOCOL.md §8.2). The limited window holds tcp clients only; after the clients ship, its series fill.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 268
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, ip, protocol) (urnetwork_proxy_window_clients{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"})",
+          "legendFormat": "{{window}} {{ip}}+{{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 81,
+      "type": "timeseries",
+      "title": "flows / s by window of the first exit, ip version and protocol",
+      "description": "Hosted device flows by the window of the exit that first carried them, their ip version (4, 6) and protocol (tcp, udp, icmp), each counted once (FP2-PROTOCOL.md §8.2). The fleet's IPv6 and UDP flow shares, and the share the limited window carries, read from here.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 268
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (window, ip_version, protocol) (rate(urnetwork_proxy_window_flows_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "{{window}} v{{ip_version}} {{protocol}}"
+        }
+      ]
+    },
+    {
+      "id": 82,
+      "type": "timeseries",
+      "title": "flows with no compatible exit / s",
+      "description": "Hosted device flows answered unreachable because no window held an exit labelled to carry them, by ip version and protocol (FP2-PROTOCOL.md §7.7, §8.2): UDP port unreachable once the windows formed, and IPv6 no-route. Expected near zero where dualproto supply exists.",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 276
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "warp-mimir"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (ip_version, protocol) (rate(urnetwork_proxy_window_no_compatible_total{env=\"$env\",service=\"proxy\",block=~\"$block\",host=~\"$host\",instance!=\"\"}[$__rate_interval]))",
+          "legendFormat": "v{{ip_version}} {{protocol}}"
+        }
+      ]
     }
   ]
 }
