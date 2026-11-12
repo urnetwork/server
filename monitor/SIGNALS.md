@@ -50050,3 +50050,454 @@ The query uses the existing byte-bounded Mimir gateway adapter: one vector, maxi
 False positives: legitimate high turnover, uninstrumented synchronous work or a transient occupancy burst can exceed the band; two sampled observations do not establish an individual hung call. False negatives: per-process counts below the band can sum to a large fleet population; work in other instrumented stages, deferred async compensation or missing publishers is not measured as OTHER. Low OTHER does not prove compensation queues drained, healthy Redis/PG, low CPU or customer recovery. Correlate the same process generation and bounded owner/stage evidence before any repair. Do not raise pools or restart based on this gauge.
 
 Synthetic controls cover public constructor → bounded vector → source-clock reducer → actual cadence gate/in-memory notifier; strict count threshold and ingress sum; no completed calls; repeated/stale/missing/invalid source cells; equal/newer generation ambiguity; cancellation with no baseline commit; independent positive siblings; default/custom/invalid policy; fixed private-label omission; and unknown/replacement versus complete below-band recovery. No Main or network execution is required for those controls.
+
+## 28. Extender health — release to clients, supply and the gossip mesh
+
+On 2026-11-11 the owner asked for extender health signals: "We especially
+want to know if extenders aren't being released to clients or some other
+issue like those discovered here." The review that prompted it
+(factury/research/extender-health-2026-11-11.md, with its 22:20Z correction;
+gossip-drop-2026-11-11.md; extender-ping-rejections-2026-11-11.md) found
+every one of its issues days or weeks after it began. Nothing alerted on
+any of them.
+
+This section indexes every finding against the signal that catches it. It
+covers four sources:
+
+- §27.2 `extender-publishing`, from fix/extender-publish-1111;
+- §2.19c's stale-directories condition and refusal reasons, from
+  fix/extender-ping-metrics-1111;
+- the prober guard and the activation and attribution fixes of
+  fix/extender-churn-1111 and fix/extender-attribution-1111;
+- the five probes below (§28.1–§28.5).
+
+Replayed times come from Main's Mimir history from 2026-10-28 to 11-11,
+unless a row says otherwise.
+
+| Finding | Ran for | Signal (class, section) | Would have warned |
+|---|---|---|---|
+| The gossip publish drain died in the 11-06 07:44Z Main brownout; nothing was published until the restart at 11-11 22:09–22:15Z | 5.6 days | `extender-gossip-stalled` (§27.2); the end state `extender-release-coverage-low` (§28.1) | §27.2 within about half an hour (from the queue's age); §28.1 at about 11-07 07:40Z |
+| Route 53 refused every DNS tick from 10-28 18:12Z (one batch over the 32,000-character RDATA limit), while the DNS gauges reported the sets the tick wanted, not what landed | 14 days | `extender-dns-publish-failing` (§27.2); the gauges now count only what Route 53 accepted | within about 45 minutes (the counter is new; not replayable) |
+| The public TXT records of `extender.bringyour.com` expired 10-29 18:12Z and were still served on 11-11 | 13 days | `extender-dns-records-stale` (§28.2) | about 10-28 19:30Z, an hour after the last accepted tick |
+| The seed bundle is off by design | — | `extender-seed-off` (§27.1), a configured state | — |
+| Gated release has never been used: no requests, no gated fleet | — | `extender-gated-release-failing` (§28.1), dormant until clients ask | — |
+| The activation bootstrap was the only fresh source of extender records after 11-07 | — | `extender-activations-stopped` (§28.1) | never: at least 7 stored activations every hour from 11-03 |
+| 87% of extender-to-extender pings were refused as an unknown pinger (reason 4) because directories were stale. The ping gauge had no reason label, and `derive-refusals` blamed gate tolerance and clock skew | 4.5 days | `extender-directories-stale` (§2.19c); `derive-refusals` leaves out reasons 4 and 6; the `reason` label on `urnetwork_stats_extender_pings_24h`; route-refused claims in `urnetwork_extender_ping_report_refused_total` | §2.19c at about 11-07 07Z (the ping review's estimate) |
+| Revocations outnumbered creations about 2 to 1. Many were false: 157 of 199 checks failed from the prober's side on 11-01, with no prober-side guard | weeks | `extender-supply-falling`, `extender-churn-high` (§28.5); the prober's common-mode guard and false-revocation counters (fix/extender-churn-1111) | `extender-supply-falling` at about 11-02 01:48Z |
+| Only 12.9% of activation probes pass TCP 443. Two accounts that never pass pin the activation limit (about 96k refusals a day). A budget check that failed was counted as `account` | weeks | the `unproven_account` and `error` outcomes of `urnetwork_extender_activations_total`, and the longer wait for accounts that never pass (fix/extender-attribution-1111). No alert: reachability is the operators' | — |
+| 72% of `contract_extender` rows were an extender's own host, inflating the relay statistics about 10–15 times | weeks | self-tags no longer written (fix/extender-attribution-1111). No alert | — |
+| A 12.5k-device provider fleet (Vietnam, one custom build) went offline at 10:35Z, taking most of the gossip mesh with it. It was first read as a gossip outage | ongoing | `provider-fleet-departure` (§28.3); `gossip-mesh-links-dropped` (§28.4) | §28.4 at about 10:52Z, §28.3 at about 11:54Z (the stats lag 30–40 minutes); the same fleet's 11-02 departure at about 14:12Z and 14:54Z |
+| While that fleet was present, the gossip replicas' 512/1024 watermarks ran a 67-second trim-and-redial loop, about 10k link closures a minute | all 14 days of history | `gossip-mesh-saturated` (§28.4) | all four replicas held more than 1,024 open fds 95% of the time from 10-30 to 11-11 10:35Z; edge-3 again from about 22:20Z to 23:30Z after the restart, at 98–101% of 1,024 |
+| About 14 GB of gossip heap built up across the four replicas | 10 days | `gossip-heap-high` (§28.4) | edge-4 by about 11-01 22Z, edge-3 by about 11-02 02Z |
+
+How each channel reaches clients, and which signal judges its publisher
+and which its outcome:
+
+| Channel | What reaches clients | Publisher | Outcome |
+|---|---|---|---|
+| Gossip: each replica drains `network_extender_publish` every 5 s (gossip/publish.go) and floods it to its links | every member's and extender's directory, through its link to a replica | `extender-gossip-stalled` (§27.2) | `extender-release-coverage-low` (§28.1); `extender-directories-stale` (§2.19c); the links themselves, `gossip-mesh-links-dropped` and `gossip-mesh-saturated` (§28.4) |
+| DNS `extender.<network host>`: the taskworker's publish tick writes the geo A, AAAA and TXT sets to Route 53 every 10 minutes | a resolver's continent's addresses and signed records | `extender-dns-publish-failing` (§27.2) | `extender-dns-records-stale` (§28.2) |
+| Seed bundle: `/v1/seed.bin` and its mirrors | a signed cold-start bundle (no released client fetches it yet) | `extender-seed-mirror-stale`, `-expired`, `-rollback` (§27.1) | `extender-seed-off` while off (§27.1) |
+| Activation bootstrap: each stored `POST /network/extender-activate` | the activating extender's own fresh record and 8 random peers | — | `extender-activations-stopped` (§28.1) |
+| Gated release: `POST /network/extender-release` | gated records for a client that asks | — | `extender-gated-release-failing` (§28.1) |
+| Extender feeds: a client's feed request to an extender | samples of the extender's own directory | — | only as fresh as the channels above; §2.19c |
+
+Read together:
+
+- **A provider fleet left.** `provider-fleet-departure` beside
+  `gossip-mesh-links-dropped` (and connect and ping drops in the same window)
+  means the fleet's devices went offline. No server action applies.
+- **Gossip publishing stopped.** `extender-gossip-stalled` fires within
+  minutes. If it is not fixed, `extender-release-coverage-low` follows a day
+  later, and `extender-directories-stale` follows once the records lapse.
+  The stall alone can be missed (the stats collector stopped, or a drip
+  that queues nothing). The outcome signals still fire.
+- **DNS publishing stopped.** `extender-dns-publish-failing` comes first.
+  `extender-dns-records-stale` follows within the hour, and it also fires
+  when the publisher believes it succeeded.
+- **Supply fell.** `extender-supply-falling` with activations still stored
+  is revocation, by the prober or on the extenders' side. With
+  `extender-activations-stopped` too, it is the activation path.
+
+Deployment: the probes run in the monitor build that carries this section.
+Most read series Main already exports. Two parts need new exporters:
+`gossip-mesh` reads `urnetwork_gossip_peers` and
+`urnetwork_gossip_conn_manager_watermark` from a gossip build with
+gossip/mesh_metrics.go (until then, open file descriptors and the default
+watermark); `extender-churn-high` reads `urnetwork_stats_extenders_created_24h`
+and `urnetwork_stats_extenders_revoked_24h` from a taskworker build with
+controller/stats_extender_supply.go (until then,
+`extender-supply-unobservable` reports `churn_state_missing`). The extender
+health dashboard (`urnetwork-extender-health`) shows every series these
+probes read.
+
+### 28.1 Extender release to clients
+
+Probe: `extender-release`
+
+Status: added 2026-11-11. It judges the outcome of three channels from
+series Main already exports, at one-minute evaluations of one bounded Mimir
+range read (the §26 history read), every 5 minutes.
+
+Source:
+
+- the gossip channel: `urnetwork_stats_extender_gossip_extenders_24h{kind="record"}`
+  (distinct extenders behind the records released in the last 24 hours)
+  against `urnetwork_stats_online_extenders` (active extenders with an active
+  address), both from every taskworker's stats collector, merged by `max`;
+- the activation bootstrap: `urnetwork_extender_activations_total{stage="store",outcome="activated"}`,
+  beside all its stages as the posts that arrived;
+- gated release: `urnetwork_extender_releases_total` by outcome.
+
+```promql
+max(urnetwork_stats_extender_gossip_extenders_24h{env="main",kind="record"}) / max(urnetwork_stats_online_extenders{env="main"})
+sum(increase(urnetwork_extender_activations_total{env="main",stage="store",outcome="activated"}[1h]))
+sum(increase(urnetwork_extender_releases_total{env="main",outcome="ok"}[1h]))
+  / sum(increase(urnetwork_extender_releases_total{env="main",outcome!~"rate_limited|epoch_spent|probation"}[1h]))
+```
+
+Healthy:
+
+- **Gossip coverage about 1.** A record lives a day, and the drip re-releases
+  each online extender's record before it expires. Coverage was 1.0–1.15
+  from 10-30 to 11-06; extenders revoked during the day still count.
+- **Activations.** At least 7 stored in every trailing hour from 11-03 to
+  11-11, about 39 an hour.
+- **Gated releases.** No requests through 11-11.
+
+Thresholds (each judged at every one-minute evaluation of its hold, with at
+least 10 online extenders; a smaller pool is not judged):
+
+- WARN `extender-release-coverage-low`: gossip coverage under 0.5 for 60
+  minutes. It fell from 0.97 at 11-07 04Z to 0.33 at 07Z and 0 at 08Z, so it
+  would have fired at about 07:40Z, 24 hours after the drain died. This is
+  deliberately a day late: `extender-gossip-stalled` (§27.2) catches a dead
+  drain in minutes. This catches any cause of records not being released,
+  including a drip that queues nothing.
+- WARN `extender-activations-stopped`: no stored activation in the trailing
+  hour for 30 minutes, so 90 minutes without one.
+- WARN `extender-gated-release-failing`: at least 10 answers in the trailing
+  hour that could have released a record, under half of which did, for 30
+  minutes. Rate limits, spent epochs and probation refuse a requester by
+  design, so they are left out. An idle channel (fewer than 10 answers) is
+  healthy.
+- `extender-release-unobservable`: the read failed, a series was missing at
+  an evaluation, or no stats collector exported the online pool
+  (`extender_state_missing`).
+
+False-positive qualifiers: coverage counts each extender once per day
+whatever it released, so a pool that grew fast in one day (10-30: 30 to 158
+online) briefly reads lower. Activations stop in an environment whose
+extenders all left, so the pool floor applies.
+
+False-negative qualifiers: released is not delivered. A record published to
+a mesh nobody is linked to counts as released; §28.4 judges the links and
+§2.19c whether extenders recognise each other. DNS-delivered records are
+§28.2's. `urnetwork_taskworker_extender_dns_extenders` appears in the alert
+as context. It counts what Route 53 accepted only on a taskworker carrying
+§27.2's fix.
+
+ACTION: for coverage, read §27.2 first: `extender-gossip-stalled` means the
+replicas are not draining (their log for `[gossip]drain pass failed` and
+`[gossip]not ready`). An empty queue with nothing released is a drip that
+does not queue: read the taskworker's extender publish chain. For
+activations, read the extenders dashboard's activation outcomes by stage:
+
+- `config` error: the operator's extender configuration;
+- `tcp` or `forward` failures from every account at once: the api's
+  outbound probe path;
+- `store` errors: Main;
+- no posts at all: the api route and the lb.
+
+For gated release, read the outcomes:
+
+- `empty`: the gated tier has no eligible member;
+- `country_capacity`: the per-country limit;
+- `incompatible`: declared capabilities;
+- `unavailable`: the api's extender configuration and the release ledger.
+
+### 28.2 Extender records in public DNS
+
+Probe: `extender-dns-records`
+
+Status: added 2026-11-11. On 11-11 it reads every record served as issued
+10-28 18:12Z and expired 10-29 18:12Z, and fires on the monitor's second run
+until §27.2's DNS fix is deployed and its first tick lands.
+
+Source: the TXT records of the extender record name, `extender.bringyour.com`
+on Main (a client derives `extender.<network host>`). Every 10 minutes (15
+under the watcher's cadence floor) the probe asks three public resolvers
+(1.1.1.1, 8.8.8.8 and 9.9.9.9) over the DNS wire protocol, with recursion
+desired, UDP and then TCP when truncated, as a client asks public resolvers
+over DoH. At 11-12 00:40Z all three served the same 13 records, issued
+10-28 18:12:41Z. Each value is the base64 of one operator-signed extender
+record. The probe decodes it as a client does
+(`connect.DecodeExtenderDnsRecord`) and reads the record body's signed issue
+and expiry times. It judges the freshest answer, so one resolver's stale
+cache or failure does not decide. Counts and times only reach the alert,
+never an address or key.
+
+The platform resolver is not used. On 11-11 the monitor host's home router
+answered the name's A query but dropped its 4 KB TXT answer over both UDP
+and TCP.
+
+```sh
+dig +tcp +short TXT extender.bringyour.com @1.1.1.1
+```
+
+Healthy: the publish tick re-signs every record of the TXT sets every 10
+minutes, and the sets carry a 60-second TTL, so the newest record served is
+about 11 minutes old at most, and every record is valid (24 hours).
+
+Thresholds:
+
+- WARN `extender-dns-records-stale`, on 2 consecutive runs, when the
+  freshest answer shows any of:
+  - the newest record served was issued more than an hour ago
+    (`newest_too_old`);
+  - every record served has expired (`all_expired`);
+  - the name serves no TXT record, or does not exist (`none_served`);
+  - no served value decodes as a record (`none_decoded`).
+- `extender-dns-records-unobservable`: no resolver answered (a timeout, a
+  server failure, or the monitor host's outbound DNS), or the policy is
+  invalid. An open stale finding stays open.
+
+False-positive qualifiers: a resolver that caches past the TTL serves
+records up to its cache life older; an hour covers that.
+
+False-negative qualifiers: the name is geo-routed, so the probe sees only
+the TXT sets of the resolvers' locations (or the default set). A set that
+fails only for another continent is §27.2's `extender-dns-publish-failing`.
+A client behind a resolver that drops large answers, like the router above,
+gets no records at all, and this probe does not see it. The signature is
+not verified: the monitor holds no root key, and the hosted zone has no
+other writer. The A and AAAA sets are not judged here; their changes are
+§27.2's.
+
+ACTION: read §27.2's `extender-dns-publish-failing` and the taskworker log
+for `[extenderpublish]dns publish failed`, which names each refused set and
+Route 53's answer:
+
+- `InvalidChangeBatch`: a set's size or shape;
+- `AccessDenied` or a signature error: the dns block's credentials;
+- `Throttling` or `PriorRequestNotComplete`: another writer of the zone.
+
+If the publisher reports every change accepted, compare its TXT sets with
+the hosted zone's record sets for the name.
+
+### 28.3 Provider fleet departure
+
+Probe: `provider-fleet-departure`
+
+Status: added 2026-11-11 from the gossip drop of that day. It reports a
+departing provider fleet as what it is, beside the drops that fleet causes
+elsewhere. One finding covers the whole environment (target
+`<env>/provider-fleet`).
+
+Source: `urnetwork_stats_online_providers_by_country` against its peak over
+the trailing 3 hours. A country the gauge no longer exports reads as zero
+while the gauge exports any country. Beside it, each now against its
+3-hour peak:
+
+- `urnetwork_stats_online_providers`;
+- connect's `urnetwork_connect_connected_clients` summed over processes;
+- the gossip replicas' open fds;
+- the three provider builds (`urnetwork_stats_device_versions{population="provider"}`)
+  that lost the most.
+
+```promql
+max by (country_code) (max_over_time(urnetwork_stats_online_providers_by_country{env="main"}[3h]))
+  - (max by (country_code) (urnetwork_stats_online_providers_by_country{env="main"})
+     or 0 * max by (country_code) (max_over_time(urnetwork_stats_online_providers_by_country{env="main"}[3h])))
+```
+
+Healthy: no country loses more than half of its providers within 3 hours.
+From 10-28 to 11-11 only whole fleets did:
+
+- Vietnam on 11-02 at 13:52Z, from 11.6k to 3.8k;
+- Vietnam on 11-11 at 10:35Z, from 11,221 to 216.
+
+Thresholds:
+
+- WARN `provider-fleet-departure`: a country's online providers more than
+  half under their 3-hour peak, by at least 1,000, at every one-minute
+  evaluation for 45 minutes. 45 minutes spans two refreshes of the stats
+  collector, which refreshes the counts every 30–40 minutes. That skips
+  single-refresh blips: Spain and Thailand lost about 1.9k and 1.6k for one
+  refresh on 11-05 at 13:20Z and 11-06 at 12:00Z, and came straight back.
+  Replayed, it fires on the two Vietnam departures only, at about 11-02
+  14:54Z and 11-11 11:54Z.
+- `provider-fleet-departure-unobservable`: the read failed, a refresh
+  exported no country, or no stats collector exported the country gauge
+  (`provider_state_missing`).
+
+False-positive qualifiers: a stats collector that misplaces a country's
+providers for two refreshes reads as a departure. Connect and gossip in the
+alert tell the two apart: a real fleet takes its connections with it.
+
+False-negative qualifiers:
+
+- **A large country's fleet.** One under half of its country is not caught:
+  the US lost 5–20k providers within 3 hours several times a week (11-04
+  17:30Z: 19.8k of 65.9k, mostly on build `2026.7.2+982300760`, which carries
+  no gossip node).
+- **A fleet spread thinly.** One spread over many countries is not caught
+  either.
+- **Upgrades.** A build that lost providers while the total held is an
+  upgrade, not a departure.
+
+ACTION: treat connect, gossip and ping drops in the same window as the
+fleet's, not as a server fault, unless a server change lines up with them
+(process starts, a config release, a lb reload). The listed builds name the
+fleet. Then read §28.4: a fleet that returns brings its gossip links back,
+and more members than the replicas' watermarks restart the trim loop.
+
+### 28.4 Gossip mesh capacity, links and heap
+
+Probe: `gossip-mesh`
+
+Status: added 2026-11-11. On a gossip build that predates
+gossip/mesh_metrics.go, it reads the replicas' open file descriptors in
+place of their links. Those count every link plus a few tens of the
+process's own descriptors, and the probe uses gossip/run.go's 1,024 as the
+watermark.
+
+Source, per gossip host:
+
+- `urnetwork_gossip_peers`: the links the replica's node holds;
+- `urnetwork_gossip_mesh_peers`: its topic mesh;
+- `urnetwork_gossip_conn_manager_watermark{level}`: the watermarks its
+  connection manager trims at. These three are exported by every gossip
+  replica's stats push from gossip/mesh_metrics.go, and nothing at all
+  before the node exists or after its run ends;
+- `process_open_fds{service="gossip"}`;
+- `go_memstats_heap_inuse_bytes{service="gossip"}`.
+
+The replicas' links summed over hosts are also read against their 3-hour
+peak.
+
+```promql
+max by (host) (urnetwork_gossip_peers{env="main",service="gossip"})
+  / max by (host) (urnetwork_gossip_conn_manager_watermark{env="main",service="gossip",level="high"})
+sum(max by (host) (urnetwork_gossip_peers{env="main",service="gossip"}))
+  / max_over_time(sum(max by (host) (urnetwork_gossip_peers{env="main",service="gossip"}))[3h:1m])
+max by (host) (go_memstats_heap_inuse_bytes{env="main",service="gossip"})
+```
+
+Healthy:
+
+- **Links.** Each replica's connection manager keeps at most its high
+  watermark of links (1,024). Above it, every 10 seconds, it closes the
+  links older than their 60-second grace period down to the low watermark
+  (512), and the members it closed redial at once. A healthy replica stays
+  under the high watermark: after the fleet left on 11-11 they held 660–1,010
+  open fds each.
+- **Heap.** It was under 0.1 GB after the 22:15Z restart.
+
+Thresholds (each judged at every one-minute evaluation of its hold):
+
+- WARN `gossip-mesh-saturated`, per replica (target
+  `<env>/gossip-mesh/<host>`): links above 90% of the high watermark for 30
+  minutes, or above the watermark for 10 minutes (`trimming=yes`, the
+  loop). All four replicas held more than 1,024 open fds 95% of the time
+  from 10-30 until 11-11 10:35Z (1,000–8,000). After the restart, edge-3 held
+  1,000–1,030 (98–101%) from about 22:20Z to 23:30Z on 11-11, then about 780.
+- WARN `gossip-mesh-links-dropped` (target `<env>/gossip-mesh`): the
+  replicas' links together under half of their 3-hour peak for 15 minutes.
+  Replayed, it fires only on the two fleet departures: on 11-02 at 13:57Z the
+  links fell to 36%, and on 11-11 at 10:37Z to 20%. A replica restart
+  recovers in a minute or two, and the 11-11 22:09–22:15Z restarts of all
+  four did not trip it.
+- WARN `gossip-heap-high`, per replica (target `<env>/gossip-heap/<host>`):
+  heap in use above 4 GiB for 30 minutes. Edge-4 crossed it by about 11-01
+  22Z and edge-3 by about 11-02 02Z. Both held 4.3–6.4 GB until the restart.
+- `gossip-mesh-unobservable`: the read failed, a placed gossip host
+  exported nothing at an evaluation, or a series was ambiguous.
+
+False-positive qualifiers: open fds overcount links by the process's own
+descriptors, so a replica judged from them warns a few tens of links early.
+Restarts dip the links for a minute or two. The 15-minute hold covers that.
+
+False-negative qualifiers:
+
+- **Demand is not measured.** A member that cannot link at all (the lb's
+  per-address connection cap, a failed hello) is not counted as wanting a
+  link.
+- **The heap threshold is absolute.** A slow leak under 4 GiB is visible
+  only on the dashboard.
+
+ACTION:
+
+- **Saturated.** Raise the replicas' watermarks in gossip/run.go
+  (`connManagerLowWater`, `connManagerHighWater`), sized to the member
+  population, or add gossip replicas. Deploy gossip one host at a time. The
+  fleet's demand is the replicas' links summed; the capacity is the replicas
+  times the high watermark.
+- **Links dropped.** Read §28.3 first: `provider-fleet-departure` in the same
+  window means a fleet left. Otherwise check, in order:
+  `process_start_time_seconds{service="gossip"}`; the lb's gossip vhost
+  (429s from the per-address cap, 5xx); and that `GET /hello` still carries
+  `gossip_peer_id`.
+- **Heap.** Take a heap profile of the replica first (gossip-drop review,
+  follow-up 4). Then restart the gossip unit of one host at a time, and
+  confirm the container restarted (`docker ps`).
+
+### 28.5 Extender supply and churn
+
+Probe: `extender-supply`
+
+Status: added 2026-11-11. `extender-churn-high` needs a taskworker build
+with controller/stats_extender_supply.go. Until then the probe judges only
+the fall and reports `churn_state_missing`.
+
+Source:
+
+- `urnetwork_stats_online_extenders` against its maximum over the trailing
+  24 hours;
+- `urnetwork_stats_extenders_created_24h`: keys first activated in the
+  trailing day;
+- `urnetwork_stats_extenders_revoked_24h`: extenders that lost their last
+  active address in the trailing day and have not activated again since (a
+  re-activation reuses the key's row and clears its revocation).
+
+All three come from every taskworker's stats collector, merged by `max`.
+Stored activations of the day appear as context.
+
+```promql
+(max(max_over_time(urnetwork_stats_online_extenders{env="main"}[24h])) - max(urnetwork_stats_online_extenders{env="main"}))
+  / max(max_over_time(urnetwork_stats_online_extenders{env="main"}[24h]))
+max(urnetwork_stats_extenders_revoked_24h{env="main"}) - max(urnetwork_stats_extenders_created_24h{env="main"})
+```
+
+Healthy: 157–214 online from 11-02 to 11-11, moving a few a day. About 11
+created and 20 revoked a day in that period, an excess of about 9.
+
+Thresholds:
+
+- WARN `extender-supply-falling`: online extenders more than 25% under their
+  24-hour peak, and at least 20 under it, for 60 minutes. On 11-01 the
+  uptime prober's own failures took the fleet from 307 to 171 in half a day.
+  The fall crossed 25% at 11-02 00:48Z and would have fired at about 01:48Z.
+- WARN `extender-churn-high`: more than 30 more extenders revoked than
+  created in the trailing day, for 2 hours.
+- `extender-supply-unobservable`: the read failed, a series was missing at
+  an evaluation, no stats collector exported the online pool
+  (`extender_state_missing`), or none exported the supply counts
+  (`churn_state_missing`).
+
+False-positive qualifiers: an operator retiring a large fleet on purpose
+reads as a fall.
+
+False-negative qualifiers: a fleet that churns while it re-activates new
+keys holds its online count. The created and revoked counts show that,
+though a revocation that the same key's re-activation cleared is no longer
+counted. A slow decline under 25% a day is visible only on the dashboard.
+
+ACTION: read the taskworker's extender probe sweeps (the "N ok" lines of
+extender_probe_work.go). On a build with fix/extender-churn-1111, also read
+`urnetwork_taskworker_extender_probe_passes_total{verdict="common_mode"}`
+and the prober's control target. Failures spread over every network at
+once are the prober's; failures in a few networks are theirs.
+`urnetwork_taskworker_extender_probe_restores_total` counts revoked
+extenders that answered again, which were false revocations. Then read
+§28.1's activations for extenders coming back.

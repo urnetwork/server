@@ -149,7 +149,14 @@ func newNode(
 	settings.PeerTarget = 0
 	settings.ConnManagerLowWater = connManagerLowWater
 	settings.ConnManagerHighWater = connManagerHighWater
-	return connectgossip.NewNode(ctx, settings)
+	node, err := connectgossip.NewNode(ctx, settings)
+	if err != nil {
+		return nil, err
+	}
+	// the links it holds against the watermarks it trims at, until its run
+	// ends (mesh_metrics.go)
+	gossipMeshMetrics.observe(ctx, node.Status, settings.ConnManagerLowWater, settings.ConnManagerHighWater)
+	return node, nil
 }
 
 // Run serves the production gossip module until ctx is canceled.
