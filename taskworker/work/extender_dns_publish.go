@@ -43,12 +43,26 @@ import (
 // is already there. Only the open tier is sampled: a gated extender is in no
 // dns set, and a canary is pinned in its own region's sets alone (R1, R4).
 //
-// One apply is one change batch. Route 53 applies a batch atomically, so the
-// record never exists in a half-updated state where a continent has been
-// deleted and not yet re-upserted, and the whole tick costs one write.
+// One set is one change request. Route 53 refuses a whole request when its
+// values add up to more than 32,000 characters, counting each character of an
+// UPSERT twice, and from 2026-10-28 18:12Z the single batch of every set did
+// exactly that on every tick, so nothing landed for two weeks
+// (factury/research/extender-health-2026-11-11.md §1.4). Set by set, a TXT set
+// Route 53 will not take costs that set alone, and the A and AAAA sets, which
+// are what a client is answered with, still land. The upserts go first and the
+// deletes after, and a set of a type is deleted only once every upsert of that
+// type landed, so a location never loses its set while the set that would
+// answer it instead -- the default -- failed to land.
 //
-// Deletion is narrowed to sets this publisher owns -- the record name, an A or
-// AAAA type and a set identifier under the extender prefix. A record an
+// Each location's TXT set is held to what Route 53 takes in one request and
+// to what a released client reads in one DoH answer (extenderDnsTxtBudget). A
+// location whose records do not all fit keeps the head of its sample and
+// answers only the addresses of the records it kept: a released client dials
+// only an address a record vouched for, so an address without its record would
+// be a slot no client can use.
+//
+// Deletion is narrowed to sets this publisher owns -- the record name, an A,
+// AAAA or TXT type and a set identifier under the extender prefix. A record an
 // operator put at the same name by hand is not a set this tick "no longer
 // wants"; deleting it would be a destructive surprise that no later tick could
 // undo.
@@ -81,10 +95,31 @@ const (
 	// when the zone is read back.
 	extenderDnsSetIdentifierPrefix = "extender-"
 	extenderDnsDefaultSetLabel     = "default"
+
+	// Route 53's quota on one ChangeResourceRecordSets request (developer
+	// guide, "Quotas", "Maximums on API requests"): the characters of every
+	// Value element, spaces included, each counted twice in an UPSERT.
+	extenderDnsRoute53MaxRequestCharacters = 32_000
+
+	// The most characters one TXT set's values may add up to: an upsert of
+	// the set alone, counted twice, is then within the request quota.
+	extenderDnsTxtMaxValueCharacters = extenderDnsRoute53MaxRequestCharacters / 2
+
+	// The most bytes one TXT set's records may take in a DNS answer.
+	//
+	// The released reader (connect v2026.10.27, net_http_doh.go) reads at most
+	// 16 KiB of a DoH answer (maxDohResponseBytes), keeps the TXT records it
+	// parsed before the cut (parseDohWire), and asks the system resolver only
+	// when DoH yielded nothing (net_extender_network.go resolveDnsTxt). An
+	// answer past 16 KiB is therefore read in part, by whichever records the
+	// resolver happened to put first. 15,000 bytes of records leave 1,384 of
+	// the 16,384 for the header, the question, the resolver's OPT record with
+	// the RFC 8467 padding a DoH answer is given (up to 467 bytes), and an
+	// authority section.
+	extenderDnsTxtMaxAnswerBytes = 15_000
 )
 
-// The families a set can be published for, in the order the batch carries
-// them.
+// The families a set can be published for, in the order a tick sends them.
 var extenderDnsIpVersions = []int{4, 6}
 
 // One geolocation set: the addresses one continent, or the default, is
@@ -133,23 +168,36 @@ type extenderDnsRecordSigner func(extenderId server.Id) (string, bool)
 // The record types this publisher owns under the record name.
 var extenderDnsRecordTypes = []string{route53.RRTypeA, route53.RRTypeAaaa, route53.RRTypeTxt}
 
+// One set change of an apply: the upsert of a desired set, or the delete of a
+// set of ours the tick no longer wants.
+type extenderDnsChange struct {
+	recordType    string
+	setIdentifier string
+	// the set an upsert writes; nil for a delete
+	desiredSet *extenderDnsRecordSet
+	// why the change did not land -- Route 53's refusal, a request that
+	// failed, or the failure that kept it from being sent; nil when it landed
+	err error
+}
+
 // Applies one tick's desired state to the record.
 //
 // An implementation reads what the zone already holds under the name, upserts
-// every desired set and deletes every set of its own that is no longer
-// desired, in one batch.
+// every desired set and deletes every set of its own that is no longer desired
+// (applyExtenderDnsChanges), and reports every change the tick wanted, sent or
+// not. The error joins the errors of the changes that did not land.
 type extenderDnsPublisher interface {
 	publish(
 		ctx context.Context,
 		recordName string,
 		ttl int,
 		desiredSets []*extenderDnsRecordSet,
-	) error
+	) ([]*extenderDnsChange, error)
 }
 
 // newExtenderDnsPublisher builds the publisher one tick writes through.
 //
-// It is a variable so a test can substitute a fake that records the batches
+// It is a variable so a test can substitute a fake that records the applies
 // rather than reaching aws. Production never replaces it.
 var newExtenderDnsPublisher = func(
 	config *controller.ExtenderConfig,
@@ -161,12 +209,106 @@ var newExtenderDnsPublisher = func(
 	return publisher, nil
 }
 
+// applyExtenderDnsChanges makes one tick's changes, each through its own call,
+// and reports every one of them.
+//
+// Every desired set is upserted, in the order the sample drew them. Then every
+// set of ours the zone holds that the tick no longer wants is deleted -- unless
+// an upsert of the same type failed this tick. A continent's set is deleted so
+// that the default set answers the continent instead, and it goes only once
+// every set of its type, the default among them, has landed.
+//
+// Shared by every publisher, so the fake and Route 53 cannot disagree about
+// what a tick sends.
+func applyExtenderDnsChanges(
+	existingSetIdentifiers []string,
+	existingRecordTypes map[string]string,
+	desiredSets []*extenderDnsRecordSet,
+	upsert func(desiredSet *extenderDnsRecordSet) error,
+	remove func(setIdentifier string) error,
+) ([]*extenderDnsChange, error) {
+	changes := []*extenderDnsChange{}
+	errs := []error{}
+	failedRecordTypes := map[string]bool{}
+	for _, desiredSet := range desiredSets {
+		change := &extenderDnsChange{
+			recordType:    desiredSet.recordType(),
+			setIdentifier: desiredSet.setIdentifier(),
+			desiredSet:    desiredSet,
+		}
+		if err := upsert(desiredSet); err != nil {
+			change.err = err
+			failedRecordTypes[change.recordType] = true
+			errs = append(errs, fmt.Errorf("upsert %s: %w", change.setIdentifier, err))
+		}
+		changes = append(changes, change)
+	}
+	for _, setIdentifier := range extenderDnsDeletedSetIdentifiers(existingSetIdentifiers, desiredSets) {
+		change := &extenderDnsChange{
+			recordType:    existingRecordTypes[setIdentifier],
+			setIdentifier: setIdentifier,
+		}
+		if failedRecordTypes[change.recordType] {
+			change.err = fmt.Errorf("held while a %s upsert of this tick failed", change.recordType)
+		} else if err := remove(setIdentifier); err != nil {
+			change.err = err
+			errs = append(errs, fmt.Errorf("delete %s: %w", change.setIdentifier, err))
+		}
+		changes = append(changes, change)
+	}
+	if len(errs) == 0 {
+		return changes, nil
+	}
+	return changes, extenderDnsChangeErrors(errs)
+}
+
+// The failed changes of one apply. One line, since the tick logs it as one
+// (Route 53's errors carry their status on a second line), and each error
+// still unwraps.
+type extenderDnsChangeErrors []error
+
+func (self extenderDnsChangeErrors) Error() string {
+	messages := []string{}
+	for _, err := range self {
+		messages = append(messages, strings.Join(strings.Fields(err.Error()), " "))
+	}
+	return strings.Join(messages, "; ")
+}
+
+func (self extenderDnsChangeErrors) Unwrap() []error {
+	return self
+}
+
+// The changes of an apply that failed before it could send any: the upsert of
+// every desired set, each failed by err. The deletes are unknown, since the
+// zone was never read.
+func unsentExtenderDnsChanges(
+	desiredSets []*extenderDnsRecordSet,
+	err error,
+) ([]*extenderDnsChange, error) {
+	changes := []*extenderDnsChange{}
+	for _, desiredSet := range desiredSets {
+		changes = append(changes, &extenderDnsChange{
+			recordType:    desiredSet.recordType(),
+			setIdentifier: desiredSet.setIdentifier(),
+			desiredSet:    desiredSet,
+			err:           err,
+		})
+	}
+	return changes, err
+}
+
 // publishExtenderDns refreshes the geolocation sets for this tick (C5).
 //
 // A deployment with no dns block, or with it disabled, leaves dns untouched
 // and says so by doing nothing: the drip is the half of the tick that always
 // runs, and an operator that publishes records without publishing dns is a
 // supported configuration rather than a misconfiguration.
+//
+// What the tick reports (extender_dns_metrics.go) is what Route 53 accepted:
+// every change counted by its outcome, and the gauges drawn from the sets that
+// landed. From 10-28 the gauges were drawn from the desired sets before the
+// batch was sent, and read 62 extenders in dns while none of it landed.
 func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) error {
 	if config == nil || !config.Dns.Enabled {
 		return nil
@@ -175,13 +317,10 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 	if recordName == "" {
 		// the name is configured, never derived: the sdk's default is
 		// `extender.<host>` under the env prefix rule, and which name this
-		// operator serves is an operations decision
+		// operator serves is an operations decision. Nothing was drawn, so
+		// nothing landed
+		observeExtenderDnsSets(nil, nil)
 		return fmt.Errorf("the extender dns has no record name")
-	}
-
-	publisher, err := newExtenderDnsPublisher(config)
-	if err != nil {
-		return err
 	}
 
 	// the secret every location's partition is keyed by (R2). An operator
@@ -201,10 +340,26 @@ func publishExtenderDns(ctx context.Context, config *controller.ExtenderConfig) 
 		connect.ExtenderEpoch(server.NowUtc(), connect.ExtenderOpenEpochTimeout),
 		newExtenderDnsRecordSigner(ctx, config),
 	)
-	// what this tick converges the zone to, which is the only record of what
-	// is in dns: the sets are recomputed every tick and never stored
-	observeExtenderDnsSets(desiredSets, addresses)
-	return publisher.publish(ctx, recordName, extenderDnsTtl(config), desiredSets)
+
+	var changes []*extenderDnsChange
+	publisher, err := newExtenderDnsPublisher(config)
+	if err != nil {
+		changes, err = unsentExtenderDnsChanges(desiredSets, err)
+	} else {
+		changes, err = publisher.publish(ctx, recordName, extenderDnsTtl(config), desiredSets)
+	}
+
+	// what landed is the only record of what is in dns: the sets are
+	// recomputed every tick and never stored
+	acceptedSets := []*extenderDnsRecordSet{}
+	for _, change := range changes {
+		if change.err == nil && change.desiredSet != nil {
+			acceptedSets = append(acceptedSets, change.desiredSet)
+		}
+	}
+	observeExtenderDnsChanges(changes)
+	observeExtenderDnsSets(acceptedSets, addresses)
+	return err
 }
 
 // newExtenderDnsRecordSigner signs a fresh record per extender for the TXT
@@ -436,20 +591,14 @@ func sampleExtenderDnsRecordSets(
 	// the addresses it was answered with, and each extender once however many
 	// of its addresses were drawn.
 	if signRecord != nil {
-		locationExtenderIds := map[string][]server.Id{}
+		locationAddressSets := map[string][]*extenderDnsRecordSet{}
 		locationOrder := []string{}
 		for _, desiredSet := range desiredSets {
 			location := desiredSet.continentCode
-			if _, ok := locationExtenderIds[location]; !ok {
+			if _, ok := locationAddressSets[location]; !ok {
 				locationOrder = append(locationOrder, location)
 			}
-			for _, ip := range desiredSet.ips {
-				extenderId, ok := ipExtenderIds[ip]
-				if !ok || slices.Contains(locationExtenderIds[location], extenderId) {
-					continue
-				}
-				locationExtenderIds[location] = append(locationExtenderIds[location], extenderId)
-			}
+			locationAddressSets[location] = append(locationAddressSets[location], desiredSet)
 		}
 		// sign each extender once, however many locations answer with it;
 		// a refusal is remembered too, so an extender the signer has nothing
@@ -459,9 +608,12 @@ func sampleExtenderDnsRecordSets(
 			ok     bool
 		}
 		signed := map[server.Id]signedRecord{}
+		txtSets := []*extenderDnsRecordSet{}
 		for _, location := range locationOrder {
+			budget := &extenderDnsTxtBudget{}
 			records := []string{}
-			for _, extenderId := range locationExtenderIds[location] {
+			heldBack := map[server.Id]bool{}
+			for _, extenderId := range extenderDnsLocationExtenderIds(locationAddressSets[location], ipExtenderIds) {
 				entry, seen := signed[extenderId]
 				if !seen {
 					entry.record, entry.ok = signRecord(extenderId)
@@ -470,18 +622,105 @@ func sampleExtenderDnsRecordSets(
 				if !entry.ok {
 					continue
 				}
+				if !budget.take(entry.record) {
+					heldBack[extenderId] = true
+					continue
+				}
 				records = append(records, entry.record)
+			}
+			if 0 < len(heldBack) {
+				// a released client dials only an address a record vouched
+				// for, so an address whose record did not fit goes with it
+				for _, addressSet := range locationAddressSets[location] {
+					addressSet.ips = slices.DeleteFunc(addressSet.ips, func(ip string) bool {
+						extenderId, ok := ipExtenderIds[ip]
+						return ok && heldBack[extenderId]
+					})
+				}
+				glog.Errorf(
+					"[extenderpublish]dns location %q holds %d records; %d more extenders did not fit its txt budget and are left out of its sets\n",
+					location,
+					len(records),
+					len(heldBack),
+				)
 			}
 			if len(records) == 0 {
 				continue
 			}
-			desiredSets = append(desiredSets, &extenderDnsRecordSet{
+			txtSets = append(txtSets, &extenderDnsRecordSet{
 				continentCode: location,
 				records:       records,
 			})
 		}
+		// an address set the budget emptied resolves to nothing, which is
+		// worse than no set: it is not desired, and the default answers in its
+		// place
+		desiredSets = slices.DeleteFunc(desiredSets, func(desiredSet *extenderDnsRecordSet) bool {
+			return len(desiredSet.ips) == 0
+		})
+		desiredSets = append(desiredSets, txtSets...)
 	}
 	return desiredSets
+}
+
+// The extenders a location's address sets answer with, best first: rank by
+// rank across the sets, the A set's before the AAAA set's of the same rank,
+// each extender once, at its best rank. Every set is drawn as the location's
+// canaries (R4), then its own partition in the epoch's keyed order, then the
+// fill (R2), so the head is the operator's own ranking of what the location
+// should be answered with. Every record of a tick is signed in that tick, so
+// freshness does not tell them apart.
+func extenderDnsLocationExtenderIds(
+	addressSets []*extenderDnsRecordSet,
+	ipExtenderIds map[string]server.Id,
+) []server.Id {
+	extenderIds := []server.Id{}
+	for rank := 0; ; rank += 1 {
+		ranked := false
+		for _, addressSet := range addressSets {
+			if len(addressSet.ips) <= rank {
+				continue
+			}
+			ranked = true
+			extenderId, ok := ipExtenderIds[addressSet.ips[rank]]
+			if !ok || slices.Contains(extenderIds, extenderId) {
+				continue
+			}
+			extenderIds = append(extenderIds, extenderId)
+		}
+		if !ranked {
+			return extenderIds
+		}
+	}
+}
+
+// What one location's TXT set has taken of the two limits it must fit
+// (extenderDnsTxtMaxValueCharacters, extenderDnsTxtMaxAnswerBytes).
+type extenderDnsTxtBudget struct {
+	valueCharacters int
+	answerBytes     int
+}
+
+// Takes one more record when it fits both limits; false, and nothing taken,
+// when it does not.
+func (self *extenderDnsTxtBudget) take(record string) bool {
+	valueCharacters := self.valueCharacters + len(extenderDnsTxtValue(record))
+	answerBytes := self.answerBytes + extenderDnsTxtAnswerBytes(record)
+	if extenderDnsTxtMaxValueCharacters < valueCharacters || extenderDnsTxtMaxAnswerBytes < answerBytes {
+		return false
+	}
+	self.valueCharacters = valueCharacters
+	self.answerBytes = answerBytes
+	return true
+}
+
+// The bytes one TXT record takes in a DNS answer: its owner name, compressed
+// to a pointer (2), the type, class, ttl and data length (10), and its data,
+// a length byte before each string of at most 255 characters (RFC 1035
+// §3.3.14, §4.1.3, §4.1.4).
+func extenderDnsTxtAnswerBytes(record string) int {
+	strs := max(1, (len(record)+extenderDnsTxtMaxStringLength-1)/extenderDnsTxtMaxStringLength)
+	return 2 + 10 + strs + len(record)
 }
 
 // extenderDnsDeletedSetIdentifiers is the set identifiers an apply must
@@ -709,13 +948,15 @@ func newRoute53ExtenderDnsPublisher(
 	}, nil
 }
 
-// publish writes the desired state as one change batch.
+// publish writes the desired state one set per change request
+// (applyExtenderDnsChanges). A tick with no active address anywhere and
+// nothing of ours in the zone sends nothing.
 func (self *route53ExtenderDnsPublisher) publish(
 	ctx context.Context,
 	recordName string,
 	ttl int,
 	desiredSets []*extenderDnsRecordSet,
-) error {
+) ([]*extenderDnsChange, error) {
 	name := extenderDnsFqdn(recordName)
 
 	hostedZoneId, err := resolveExtenderDnsHostedZoneId(
@@ -725,44 +966,62 @@ func (self *route53ExtenderDnsPublisher) publish(
 		self.hostedZoneName,
 	)
 	if err != nil {
-		return err
+		return unsentExtenderDnsChanges(desiredSets, err)
 	}
 
 	existingSetIdentifiers, existingRecordSets, err := self.listRecordSets(ctx, hostedZoneId, name)
 	if err != nil {
-		return err
+		return unsentExtenderDnsChanges(desiredSets, err)
+	}
+	existingRecordTypes := map[string]string{}
+	for setIdentifier, recordSet := range existingRecordSets {
+		existingRecordTypes[setIdentifier] = aws.StringValue(recordSet.Type)
 	}
 
-	changes := []*route53.Change{}
-	for _, desiredSet := range desiredSets {
-		changes = append(changes, &route53.Change{
-			Action:            aws.String(route53.ChangeActionUpsert),
-			ResourceRecordSet: extenderDnsResourceRecordSet(name, ttl, desiredSet),
-		})
-	}
-	for _, setIdentifier := range extenderDnsDeletedSetIdentifiers(
+	return applyExtenderDnsChanges(
 		existingSetIdentifiers,
+		existingRecordTypes,
 		desiredSets,
-	) {
-		// a delete must carry the set exactly as it exists, which is why the
-		// listing is kept rather than rebuilt from the identifier
-		changes = append(changes, &route53.Change{
-			Action:            aws.String(route53.ChangeActionDelete),
-			ResourceRecordSet: existingRecordSets[setIdentifier],
-		})
-	}
-	if len(changes) == 0 {
-		// no active address anywhere and nothing of ours in the zone; an empty
-		// batch is rejected by the api
-		return nil
-	}
+		func(desiredSet *extenderDnsRecordSet) error {
+			return self.change(
+				ctx,
+				hostedZoneId,
+				route53.ChangeActionUpsert,
+				extenderDnsResourceRecordSet(name, ttl, desiredSet),
+			)
+		},
+		func(setIdentifier string) error {
+			// a delete must carry the set exactly as it exists, which is why
+			// the listing is kept rather than rebuilt from the identifier
+			return self.change(
+				ctx,
+				hostedZoneId,
+				route53.ChangeActionDelete,
+				existingRecordSets[setIdentifier],
+			)
+		},
+	)
+}
 
-	_, err = self.api.ChangeResourceRecordSetsWithContext(
+// change sends one change as a request of its own, so Route 53's per-request
+// quotas apply to one set and its refusal costs that set alone.
+func (self *route53ExtenderDnsPublisher) change(
+	ctx context.Context,
+	hostedZoneId string,
+	action string,
+	recordSet *route53.ResourceRecordSet,
+) error {
+	_, err := self.api.ChangeResourceRecordSetsWithContext(
 		ctx,
 		&route53.ChangeResourceRecordSetsInput{
 			HostedZoneId: aws.String(hostedZoneId),
 			ChangeBatch: &route53.ChangeBatch{
-				Changes: changes,
+				Changes: []*route53.Change{
+					{
+						Action:            aws.String(action),
+						ResourceRecordSet: recordSet,
+					},
+				},
 			},
 		},
 	)
