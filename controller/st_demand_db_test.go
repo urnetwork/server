@@ -907,7 +907,7 @@ func TestStLedgerV2UsageSyncBacksOffAndReadsUnplacedCommits(t *testing.T) {
 		}
 
 		// No root in epoch 5's window, past it: one alert, then no reads for a while.
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 5, 3)
+		stDemandCaptureEpochUsage(ctx, key, 5)
 		if got, err := turn(6, 5*50_400+1_201); got != "" || err != nil || alerts != 1 || chain.windows != 1 {
 			tb.Fatalf("%q, %v, %d alerts, %d window reads", got, err, alerts, chain.windows)
 		}
@@ -920,7 +920,7 @@ func TestStLedgerV2UsageSyncBacksOffAndReadsUnplacedCommits(t *testing.T) {
 		}
 
 		// A committed header that cannot be read: read again twice, then given up on.
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 6, 3)
+		stDemandCaptureEpochUsage(ctx, key, 6)
 		stDemandCommitRoot(tb, cfg, 6, 1, 6*50_400+10, [32]byte{0xee})
 		for attempt := 1; attempt <= 2; attempt++ {
 			if got, err := turn(7, 6*50_400+20); got != "" || err == nil || alerts != 1 {
@@ -937,7 +937,7 @@ func TestStLedgerV2UsageSyncBacksOffAndReadsUnplacedCommits(t *testing.T) {
 
 		// A header that lists the epoch twice: no statement, at once, and the step
 		// refuses it for good.
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 7, 3)
+		stDemandCaptureEpochUsage(ctx, key, 7)
 		twice, err := ledger.EncodeHeader(&ledger.Header{NoID: 1, Epoch: 7, Epochs: []ledger.HeaderEpoch{{Epoch: 7, Providers: []ledger.Ref{}}, {Epoch: 7, Providers: []ledger.Ref{}}}, Accounts: []ledger.Ref{ledger.RefOf([]byte("accounts"))}})
 		if err != nil {
 			tb.Fatal(err)
@@ -955,7 +955,7 @@ func TestStLedgerV2UsageSyncBacksOffAndReadsUnplacedCommits(t *testing.T) {
 
 		// A root the mirror saw only finalized: its commit is read from chain, and the
 		// statement is due from that commit's header.
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 8, 3)
+		stDemandCaptureEpochUsage(ctx, key, 8)
 		hash := stDemandHeaderEpoch(tb, 8, []string{}, false)
 		rootIndex := uint64(3)
 		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: 1, Seq: 3, Epoch: 8, Root: [32]byte{3}, LeafCount: 1, LedgerHash: hash, RootIndex: &rootIndex}, 8*50_400+900)
@@ -1660,6 +1660,14 @@ func stDemandHeaderEpoch(tb testing.TB, epoch uint64, refs []string, null bool) 
 	return [32]byte(ledger.RefOf(data))
 }
 
+// stDemandCaptureEpochUsage captures an ended epoch's users and its extender census, as
+// the two usage steps the sync plans for it do (st_ledger_v2_extenders.go); an operator
+// without extender records captures an empty census.
+func stDemandCaptureEpochUsage(ctx context.Context, key model.StDeploymentKey, epoch uint64) {
+	model.CaptureStLedgerV2EpochUsers(ctx, key, 1, epoch, 3)
+	model.CaptureStLedgerV2ExtenderCensus(ctx, key, 1, epoch, model.EncodeStExtenderCensus(nil), 0, server.NowUtc())
+}
+
 // stDemandCommitRoot mirrors a DistributionCommitted event of pool 1 at block.
 func stDemandCommitRoot(tb testing.TB, cfg *StConfig, epoch uint64, seq uint64, block uint64, ledgerHash [32]byte) {
 	tb.Helper()
@@ -1667,8 +1675,9 @@ func stDemandCommitRoot(tb testing.TB, cfg *StConfig, epoch uint64, seq uint64, 
 }
 
 // A sync turn plans the ended epoch's next usage step, on a registered pool, and only
-// from the pool's first epoch on: users at once, the statement once the root committed
-// for the epoch in its root window is mirrored. An epoch that can have no statement,
+// from the pool's first epoch on: users and the extender census at once, each until it
+// is captured, the statement once the root committed for the epoch in its root window
+// is mirrored. An epoch that can have no statement,
 // declared unrecoverable, with no root in its window or with more than one, alerts once
 // and plans nothing.
 func TestStLedgerV2UsageSync(t *testing.T) {
@@ -1694,21 +1703,27 @@ func TestStLedgerV2UsageSync(t *testing.T) {
 			if err != nil {
 				tb.Fatal(err)
 			}
-			if len(steps) == 0 {
-				return ""
+			planned := []string{}
+			for _, step := range steps {
+				planned = append(planned, fmt.Sprintf("%s %d", step.Kind, step.Epoch))
 			}
-			return fmt.Sprintf("%s %d", steps[0].Kind, steps[0].Epoch)
+			return strings.Join(planned, ", ")
 		}
 		if got := plan(5); got != "" {
 			tb.Fatalf("the epoch before the pool's first: %q", got)
 		}
-		if got := plan(6); got != StLedgerV2UsageStepUsers+" 5" {
+		// the extender census is captured beside the users, each once
+		if got := plan(6); got != StLedgerV2UsageStepUsers+" 5, "+StLedgerV2UsageStepExtenderCensus+" 5" {
 			tb.Fatalf("%q", got)
 		}
 		store := server.NewLocalBlobStore(tb.TempDir(), "test")
 		SetStLedgerV2ObjectStore(store)
 		tb.Cleanup(func() { SetStLedgerV2ObjectStore(nil) })
 		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 5, 3)
+		if got := plan(6); got != StLedgerV2UsageStepExtenderCensus+" 5" {
+			tb.Fatalf("the census after the users: %q", got)
+		}
+		model.CaptureStLedgerV2ExtenderCensus(ctx, key, 1, 5, model.EncodeStExtenderCensus(nil), 0, server.NowUtc())
 		if got := plan(6); got != "" {
 			tb.Fatalf("waiting on the commit: %q", got)
 		}
@@ -1736,7 +1751,7 @@ func TestStLedgerV2UsageSync(t *testing.T) {
 			}
 		}
 		tb.Cleanup(func() { stLedgerV2AlertSink = previousSink })
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 6, 3)
+		stDemandCaptureEpochUsage(ctx, key, 6)
 		stDemandCommitRoot(tb, cfg, 6, 2, 6*50_400+10, stDemandHeaderEpoch(tb, 6, nil, true))
 		if got := plan(7); got != "" || alerts != 1 {
 			tb.Fatalf("%q, %d alerts", got, alerts)
@@ -1745,7 +1760,7 @@ func TestStLedgerV2UsageSync(t *testing.T) {
 			tb.Fatalf("%q, %d alerts", got, alerts)
 		}
 		// No root in the window: nothing until the window has closed, then an alert.
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 7, 3)
+		stDemandCaptureEpochUsage(ctx, key, 7)
 		turn := func(epoch, head uint64) string {
 			tb.Helper()
 			steps, err := StLedgerV2UsageSync(ctx, &StEpochState{Epoch: epoch, HeadBlock: head})
@@ -1764,7 +1779,7 @@ func TestStLedgerV2UsageSync(t *testing.T) {
 			tb.Fatalf("%q, %d alerts", got, alerts)
 		}
 		// Two roots in the window: validators cannot match one statement, so none.
-		model.CaptureStLedgerV2EpochUsers(ctx, key, 1, 8, 3)
+		stDemandCaptureEpochUsage(ctx, key, 8)
 		stDemandCommitRoot(tb, cfg, 8, 3, 8*50_400+1, stDemandHeaderEpoch(tb, 8, []string{}, false))
 		stDemandCommitRoot(tb, cfg, 8, 4, 8*50_400+2, stDemandHeaderEpoch(tb, 8, []string{}, false))
 		if got := turn(9, 8*50_400+3); got != "" || alerts != 3 {
