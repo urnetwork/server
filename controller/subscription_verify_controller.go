@@ -117,7 +117,9 @@ type VerifyPlayPurchaseArgs struct {
 //	SUBSCRIPTION_STATE_PENDING / PAUSED / ON_HOLD / GRACE        -> pending (retry)
 //	SUBSCRIPTION_STATE_ACTIVE, credit landed                     -> credited
 //	SUBSCRIPTION_STATE_ACTIVE, balance already overlaps expiry   -> already_credited
-//	CANCELED / EXPIRED / PENDING_PURCHASE_CANCELED / other       -> invalid
+//	CANCELED with paid time left (auto-renew off)                -> as ACTIVE
+//	CANCELED past its expiry / EXPIRED /
+//	PENDING_PURCHASE_CANCELED / other                            -> invalid
 //	Google API failure                                           -> error (non-2xx, retry)
 func VerifyPlayPurchase(
 	verifyPlayPurchase *VerifyPlayPurchaseArgs,
@@ -193,9 +195,16 @@ func VerifyPlayPurchase(
 		return verifyStatusResult(VerifyPurchaseStatusPending), nil
 	case "SUBSCRIPTION_STATE_ACTIVE":
 		// fall through to credit
+	case "SUBSCRIPTION_STATE_CANCELED":
+		// cancelled is not expired: auto-renew is off and the period it paid
+		// for is credited like an active one's (support inbox 8086). With no
+		// paid time left it never credits -- terminal
+		if !playPurchasePaid(sub, server.NowUtc()) {
+			return NewVerifyStorePurchaseInvalid(), nil
+		}
 	default:
-		// CANCELED / EXPIRED / PENDING_PURCHASE_CANCELED / unknown: this report
-		// will never credit through this endpoint -- terminal
+		// EXPIRED / PENDING_PURCHASE_CANCELED / unknown: this report will
+		// never credit through this endpoint -- terminal
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
 
@@ -241,9 +250,10 @@ func VerifyPlayPurchase(
 	if err != nil {
 		return nil, err
 	}
-	if renewalResult.Canceled && !renewalResult.Renewed {
-		// the state flipped between the two fetches; a flip to a paid-through
-		// cancellation still credits its period (Renewed) and reports it
+	if renewalResult.Terminal || renewalResult.Canceled && !renewalResult.Renewed && !renewalResult.ExpiryTime.After(server.NowUtc()) {
+		// the paid time is over (or the state flipped to expired between the
+		// two fetches). A paid-through cancellation the credit gate found
+		// already covered falls through to already_credited.
 		return NewVerifyStorePurchaseInvalid(), nil
 	}
 	expiryTime := renewalResult.ExpiryTime
