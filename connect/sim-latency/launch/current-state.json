@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T04:44:51.797909+00:00",
+  "observed_at": "2026-11-12T05:45:11.619769Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -21,23 +21,26 @@
     "publication_held": false
   },
   "queue": {
-    "succeeded": 7,
+    "succeeded": 8,
     "failed": 2,
-    "queued": 7,
+    "queued": 6,
     "running": 2
   },
   "active_attempts": [
     {
-      "job_id": "01a1c7bf-ae3b-76f3-dee7-e60d2f77c90c",
+      "job_id": "01a1ca08-d3c6-0e22-3ccf-fd6da35bc356",
       "host_id": "goofe",
-      "started_at": "2026-11-12T03:40:44.712434",
-      "deadline": "2026-11-12T06:40:44.712434"
+      "started_at": "2026-11-12T05:31:38.724108",
+      "deadline": "2026-11-12T08:31:38.724108",
+      "observed_phase": "building"
     },
     {
       "job_id": "01a1c88c-5f36-c222-3ec0-668fe393050f",
       "host_id": "sille",
       "started_at": "2026-11-12T04:08:45.761115",
-      "deadline": "2026-11-12T07:08:45.761115"
+      "deadline": "2026-11-12T07:08:45.761115",
+      "observed_phase": "native_complete_retention_pending",
+      "candidate_completed": 9
     }
   ],
   "live_worker": {
