@@ -31,8 +31,12 @@ import (
 )
 
 // stCtfAmendmentRefreshInterval spaces the fetches of the published file; in
-// between, the last verified file is read.
-const stCtfAmendmentRefreshInterval = 10 * time.Minute
+// between, the last verified file is read. After a fetch that failed, the
+// next is tried sooner.
+const (
+	stCtfAmendmentRefreshInterval      = 10 * time.Minute
+	stCtfAmendmentProblemRetryInterval = 1 * time.Minute
+)
 
 // errStCtfTerms is an entry in force whose terms package ctf cannot build, or
 // whose carry is not the configured one.
@@ -98,12 +102,13 @@ func (self *stCtfAmendmentStore) Save(ctx context.Context, raw []byte) error {
 	return store.Put(ctx, self.path(store), tmp.Name(), "application/yaml")
 }
 
-// stCtfAmendmentHolder is one deployment's source and the file last read
-// from it.
+// stCtfAmendmentHolder is one deployment's source, the file last read from
+// it, and whether that read could not take the published file.
 type stCtfAmendmentHolder struct {
 	source    *amendment.Source
 	lock      sync.Mutex
 	file      *amendment.File
+	problem   error
 	refreshed time.Time
 }
 
@@ -111,13 +116,15 @@ var stCtfAmendmentHolders sync.Map // deployment key → *stCtfAmendmentHolder
 
 // stCtfAmendmentFile returns the verified amendment file of the deployment:
 // the published one, refreshed at most every stCtfAmendmentRefreshInterval,
-// else the last verified copy, else nil (unknown). A deployment without a
-// pinned signer has the empty unpublished file.
-func stCtfAmendmentFile(ctx context.Context, cfg *StConfig) (*amendment.File, error) {
+// else the last verified copy, else nil (unknown). stale reports a last copy
+// served because the published file could not be taken: it may predate an
+// entry. A deployment without a pinned signer has the empty unpublished file.
+func stCtfAmendmentFile(ctx context.Context, cfg *StConfig) (file *amendment.File, stale bool, err error) {
 	netuid := uint16(cfg.Netuid)
 	signer, pinned := stCtfAmendmentSigner(cfg.ChainId, netuid)
 	if !pinned {
-		return amendment.Unpublished(cfg.ChainId, netuid)
+		file, err = amendment.Unpublished(cfg.ChainId, netuid)
+		return file, false, err
 	}
 	value, _ := stCtfAmendmentHolders.LoadOrStore(string(cfg.DeploymentKey()), &stCtfAmendmentHolder{
 		source: amendment.NewSource(stCtfAmendmentUrl, cfg.ChainId, netuid, signer, stCtfAmendmentStorer(cfg)),
@@ -125,8 +132,12 @@ func stCtfAmendmentFile(ctx context.Context, cfg *StConfig) (*amendment.File, er
 	holder := value.(*stCtfAmendmentHolder)
 	holder.lock.Lock()
 	defer holder.lock.Unlock()
-	if holder.file != nil && server.NowUtc().Sub(holder.refreshed) < stCtfAmendmentRefreshInterval {
-		return holder.file, nil
+	interval := stCtfAmendmentRefreshInterval
+	if holder.problem != nil {
+		interval = stCtfAmendmentProblemRetryInterval
+	}
+	if holder.file != nil && stCtfServerNow().Sub(holder.refreshed) < interval {
+		return holder.file, holder.problem != nil, nil
 	}
 	file, problem := holder.source.Refresh(ctx)
 	if problem != nil {
@@ -134,17 +145,18 @@ func stCtfAmendmentFile(ctx context.Context, cfg *StConfig) (*amendment.File, er
 		glog.Infof("[st]ctf amendment file problem: %s\n", problem)
 	}
 	if file == nil {
-		return nil, fmt.Errorf("%w: %v", amendment.ErrUnknown, problem)
+		return nil, false, fmt.Errorf("%w: %v", amendment.ErrUnknown, problem)
 	}
-	holder.file, holder.refreshed = file, server.NowUtc()
-	return file, nil
+	holder.file, holder.problem, holder.refreshed = file, problem, stCtfServerNow()
+	return file, problem != nil, nil
 }
 
 // stCtfInForce returns the capture the flag entry in force for an epoch, nil
 // when none is (the epoch is before E_c), after checking its terms. An
-// unknown file is an error wrapping amendment.ErrUnknown.
+// unknown file, or a last copy without the entry while the published file
+// cannot be read, is an error wrapping amendment.ErrUnknown.
 func stCtfInForce(ctx context.Context, cfg *StConfig, epoch uint64) (*amendment.Entry, error) {
-	file, err := stCtfAmendmentFile(ctx, cfg)
+	file, stale, err := stCtfAmendmentFile(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -157,6 +169,10 @@ func stCtfInForce(ctx context.Context, cfg *StConfig, epoch uint64) (*amendment.
 		return nil, err
 	}
 	entry := in.CaptureTheFlag
+	if entry == nil && stale {
+		// An older copy may predate the entry: unknown, never "not in force".
+		return nil, fmt.Errorf("%w: the published file could not be read, and the last verified copy has no capture the flag entry for epoch %d", amendment.ErrUnknown, epoch)
+	}
 	if entry == nil {
 		return nil, nil
 	}

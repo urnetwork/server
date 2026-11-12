@@ -79,6 +79,7 @@ const (
 	StCtfAlertDrand              = "ctf_drand"
 	StCtfAlertBuild              = "ctf_build"
 	StCtfAlertCarry              = "ctf_carry"
+	StCtfAlertMirror             = "ctf_mirror"
 )
 
 const (
@@ -455,7 +456,6 @@ func stCtfRunCensus(ctx context.Context, cfg *StConfig, client StLedgerV2Client,
 	if hash != ([32]byte{}) {
 		if census != nil && census.Hash != hash {
 			stCtfAlert(cfg, StCtfAlertCensusMismatch, fmt.Sprintf("epoch %d", epoch), "the chain holds census %v committed at block %d, not the census built, %v", ledger.Ref(hash), block, census.Hash)
-			records.SetCommitment(ctx, &model.CtfCensusCommitment{Epoch: epoch, CensusHash: census.Hash, Status: model.CtfCommitmentStatusRefused})
 		}
 		// Every committed census object stays published: a lost one stalls
 		// the epoch's roots.
@@ -717,12 +717,20 @@ func stCtfCommitEpoch(ctx context.Context, cfg *StConfig, client StLedgerV2Clien
 
 // stCtfInputWait turns a build input that cannot be read yet into a wait: a
 // pulse whose round is not published, or a relay outage, which is alerted
-// once its round is stCtfDrandAlertAfter old.
+// once its round is stCtfDrandAlertAfter old. Inputs that retrying will not
+// bring are alerted at once: a committed census without its recorded
+// coldkeys, or a previous root whose published objects do not rebuild it.
 func stCtfInputWait(cfg *StConfig, state *StLedgerV2State, epoch uint64, err error) *StPublishOutcome {
 	if errors.Is(err, errStCtfPulseNotYet) {
 		return stLedgerV2Wait(cfg, state, err.Error(), 0)
 	}
 	stCtfDrandAlert(cfg, err)
+	switch {
+	case errors.Is(err, errStCtfColdkeysUnknown), errors.Is(err, ctf.ErrCensusUnavailable):
+		stCtfAlert(cfg, StCtfAlertCensusUnavailable, fmt.Sprintf("epoch %d", epoch), "the capture the flag root of epoch %d cannot be built: %s", epoch, err)
+	case errors.Is(err, ledger.ErrPrevious):
+		stCtfAlert(cfg, StCtfAlertBuild, fmt.Sprintf("epoch %d", epoch), "the capture the flag root of epoch %d cannot be built on the latest final root: %s", epoch, err)
+	}
 	glog.Infof("[st]ctf epoch %d build input: %s\n", epoch, err)
 	return &StPublishOutcome{Status: model.StPublishStatusFailed, Reason: err.Error(), Retry: true, RetryAt: stCtfServerNow().Add(stCtfPollDelay)}
 }
@@ -958,21 +966,17 @@ func stCtfRunRecycle(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 	if index < 0 {
 		return stCtfConclude(ctx, records, root.Epoch, kind, model.StPublishStatusSkipped, "root %d has no carry account", rootIndex), nil
 	}
+	// The carry account is always named, with its proof, so the call under
+	// the root's transaction key never changes: the carry claims it only while
+	// vault2's claimed is below its cumulative, and otherwise moves only what
+	// it holds.
 	account := tree.accounts[index]
-	claimed, err := client.LedgerV2Claimed(ctx, poolId, uint64(index))
+	proof, err := tree.tree.Proof(uint64(index))
 	if err != nil {
 		return stLedgerV2Retry(err), nil
 	}
-	var named *merkle.LedgerAccount
-	var proof []merkle.LedgerNode
-	if claimed.Lt(&account.Cumulative) {
-		named = &account
-		if proof, err = tree.tree.Proof(uint64(index)); err != nil {
-			return stLedgerV2Retry(err), nil
-		}
-	}
 	outcome := stCtfSend(ctx, records, root.Epoch, kind, func() (string, error) {
-		return ctfClient.CtfRecycle(ctx, carry, poolId, rootIndex, uint64(index), named, proof)
+		return ctfClient.CtfRecycle(ctx, carry, poolId, rootIndex, uint64(index), &account, proof)
 	})
 	if outcome.Status == model.StPublishStatusConfirmed {
 		stCtfLastEpoch.WithLabelValues("recycle").Set(float64(root.Epoch))

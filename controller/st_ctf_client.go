@@ -12,7 +12,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"math/big"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -58,9 +57,8 @@ type StCtfClient interface {
 	// ctfcensus:e:no.
 	CtfCommitCensus(ctx context.Context, epoch uint64, noId uint64, hash [32]byte) (string, error)
 	// CtfRecycle sends the carry contract's recycle(rootIndex, account,
-	// proof) under ctfrecycle:rootIndex:P. A nil account names none (zero
-	// coldkey): the carry account was claimed already, and only what the
-	// carry holds moves.
+	// proof) under ctfrecycle:rootIndex:P, the carry account at index of the
+	// final root rootIndex with its claim proof.
 	CtfRecycle(ctx context.Context, carry common.Address, poolId uint64, rootIndex uint64, index uint64, account *merkle.LedgerAccount, proof []merkle.LedgerNode) (string, error)
 }
 
@@ -144,15 +142,10 @@ func (self *CoreStClient) CtfCommitCensus(ctx context.Context, epoch uint64, noI
 }
 
 func (self *CoreStClient) CtfRecycle(ctx context.Context, carry common.Address, poolId uint64, rootIndex uint64, index uint64, account *merkle.LedgerAccount, proof []merkle.LedgerNode) (string, error) {
-	argument := stabi.LedgerTreeAccount{Index: stBig(index), Cumulative: new(big.Int)}
-	nodes := []stabi.LedgerTreeProofNode{}
-	if account != nil {
-		argument.Coldkey, argument.Cumulative = account.Coldkey, account.Cumulative.ToBig()
-		for _, node := range proof {
-			nodes = append(nodes, stabi.LedgerTreeProofNode{Hash: node.Hash, Sum: node.Sum.ToBig()})
-		}
-	} else {
-		argument.Index = new(big.Int)
+	argument := stabi.LedgerTreeAccount{Index: stBig(index), Coldkey: account.Coldkey, Cumulative: account.Cumulative.ToBig()}
+	nodes := make([]stabi.LedgerTreeProofNode, len(proof))
+	for i, node := range proof {
+		nodes[i] = stabi.LedgerTreeProofNode{Hash: node.Hash, Sum: node.Sum.ToBig()}
 	}
 	return self.sendLedgerV2(ctx, stCtfRecycleOperation(rootIndex, poolId), carry, stCtfCarryAbi.PackRecycle(stBig(rootIndex), argument, nodes))
 }

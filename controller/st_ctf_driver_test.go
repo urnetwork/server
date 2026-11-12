@@ -526,3 +526,69 @@ func TestStCtfDriverDeferredAndMissedEpochs(t *testing.T) {
 		t.Fatalf("epochs %+v", result.Epochs)
 	}
 }
+
+// §5 fixed inputs: an epoch's result binds once a committed root carries it.
+// A build on the latest final root that is never committed binds nothing:
+// when the pending root then finalizes, the epoch is built on it, with other
+// awards (its carry is not back), and committed.
+func TestStCtfDriverRebuildsAResultNoCommittedRootCarries(t *testing.T) {
+	f := newCtfFixture(t, StCtfModeLive)
+	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
+	f.commitRound(8, 1000)
+	f.emission(8, 1_000_000_000_000)
+	f.chain.head = f.chain.end(8)
+	f.run(StCtfDriverStepCensus, 8)
+	f.run(StCtfDriverStepEpoch, 8)
+	f.chain.approvals = 1
+	first := f.chain.pending.LedgerHash
+
+	// epoch 9 closes, then settlement pauses: the root of 8 cannot finalize,
+	// epoch 9 is built on no root, covering 8 and 9, and its commit waits
+	f.census[9] = ctfTestCensusOf(t, 9, ctfTestCandidates()...)
+	f.commitRound(9, 1001)
+	f.emission(9, 1_000_000_000_000)
+	f.chain.head = f.chain.end(9)
+	f.run(StCtfDriverStepCensus, 9)
+	f.chain.afterClose = func() { f.chain.paused = true }
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 9), model.StPublishStatusSkipped, true, "settlement is paused")
+	provisional := f.records.results[9]
+	if provisional == nil || f.records.results[8].LedgerHash != first {
+		t.Fatalf("results 8 %+v 9 %+v", f.records.results[8], provisional)
+	}
+
+	// unpaused: the root of 8 finalizes, and 9 is built on it
+	f.chain.paused, f.chain.afterClose = false, nil
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepEpoch, 9), model.StPublishStatusConfirmed, false, "")
+	requireCtfLog(t, f.takeLog(), "census 8", "close 8", "commit 8 prev 0", "census 9", "close 9", "finalize 8", "commit 9 prev 1")
+	previous := f.chain.roots[0]
+	result := f.verify(&ledger.Root{Epoch: previous.Epoch, Root: previous.Root, Total: previous.Total, LeafCount: previous.LeafCount, LedgerHash: previous.LedgerHash})
+	requireCtfAudit(t, result)
+	fixed := f.records.results[9]
+	if fixed == nil || fixed.LedgerHash != f.chain.pending.LedgerHash || ledger.Ref(fixed.AwardsRef) != result.Epochs[0].AwardsRef || fixed.AwardsRef == provisional.AwardsRef {
+		t.Fatalf("epoch 9: provisional %+v, fixed %+v", provisional, fixed)
+	}
+	if result.Epochs[0].Matured {
+		t.Fatal("epoch 9 matured on the root of 8, whose carry is not back")
+	}
+	if f.records.results[8].LedgerHash != first {
+		t.Fatal("the committed result of epoch 8 changed")
+	}
+}
+
+// §4.3: a commitment on chain other than the census built is alerted, and
+// the chain's commitment is what is recorded.
+func TestStCtfDriverRecordsTheChainsCommitment(t *testing.T) {
+	f := newCtfFixture(t, StCtfModeLive)
+	f.census[8] = ctfTestCensusOf(t, 8, ctfTestCandidates()...)
+	other := ctfTestCensusOf(t, 8, ctfTestCandidates()[:2]...)
+	f.chain.head = f.chain.end(8)
+	f.chain.census[8] = fakeCtfCensus{hash: other.Hash, block: f.chain.end(8) + 7}
+	f.chain.times[f.chain.end(8)+7] = ctfTestCommitTime(1002)
+	requireLedgerV2Outcome(t, f.run(StCtfDriverStepCensus, 8), model.StPublishStatusSkipped, false, "is committed at block")
+	requireCtfLog(t, f.takeLog())
+	requireCtfAlerts(t, f.alerts, StCtfAlertCensusMismatch+" epoch 8")
+	commitment := f.records.commitments[8]
+	if commitment == nil || commitment.CensusHash != other.Hash || commitment.Status != model.CtfCommitmentStatusCommitted || *commitment.Round != 1002 {
+		t.Fatalf("commitment %+v", commitment)
+	}
+}

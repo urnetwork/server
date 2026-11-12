@@ -153,3 +153,36 @@ func TestStCtfInForceFromThePublishedFile(t *testing.T) {
 		t.Fatalf("another signer: %v %v", got, err)
 	}
 }
+
+// §2.4: a last verified copy without the entry, served while the published
+// file cannot be read, may predate the entry: unknown, never "not in force".
+func TestStCtfInForceIsUnknownFromAStaleCopy(t *testing.T) {
+	resetCtfAmendments(t)
+	captureLedgerV2Alerts(t)
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := true
+	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !up {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("sn: 25\n"))
+	}))
+	t.Cleanup(site.Close)
+	store := &ctfTestAmendmentStore{}
+	stCtfAmendmentSigner = func(uint64, uint16) (common.Address, bool) { return crypto.PubkeyToAddress(key.PublicKey), true }
+	stCtfAmendmentUrl = site.URL
+	stCtfAmendmentStorer = func(*StConfig) amendment.Store { return store }
+	cfg := ctfTestAmendmentConfig()
+	if entry, err := stCtfInForce(t.Context(), cfg, 8); err != nil || entry != nil {
+		t.Fatalf("published, no entry: %v %v", entry, err)
+	}
+	up = false
+	stCtfAmendmentHolders.Clear()
+	if entry, err := stCtfInForce(t.Context(), cfg, 8); !errors.Is(err, amendment.ErrUnknown) || entry != nil {
+		t.Fatalf("stale copy: %v %v", entry, err)
+	}
+}

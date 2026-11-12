@@ -29,6 +29,7 @@ import (
 	"github.com/urfoundation/sn/merkle"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/model"
 	"github.com/urnetwork/server/startifact"
 )
 
@@ -55,6 +56,10 @@ func stCtfCensusOf(ctx context.Context, epoch uint64) (*StCtfCensus, error) {
 	}
 	return census, nil
 }
+
+// errStCtfColdkeysUnknown is a committed census whose candidates' payout
+// coldkeys, attested with the census and never published, are not held.
+var errStCtfColdkeysUnknown = errors.New("st ctf: the committed census's coldkeys are unknown")
 
 // stCtfBoundFor maps the clients with an active fleet binding at either
 // boundary of an epoch (P5, X5) to true, as the provider rows read them
@@ -204,7 +209,7 @@ func stCtfDrawInputs(ctx context.Context, cfg *StConfig, input *ctf.EpochInput, 
 		return err
 	}
 	if recorded == nil || recorded.Hash != census.input.Hash {
-		return fmt.Errorf("st ctf: epoch %d has no recorded census matching its commitment %v, so its winners' coldkeys are unknown", input.Epoch, census.input.Hash)
+		return fmt.Errorf("%w: epoch %d has no recorded census matching its commitment %v", errStCtfColdkeysUnknown, input.Epoch, census.input.Hash)
 	}
 	input.Bound, input.Coldkeys = bound, recorded.Coldkeys
 	return nil
@@ -228,8 +233,10 @@ func stCtfBuildInput(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 	if epoch <= covered || ledger.MaxCoveredEpochs < epoch-covered {
 		return nil, fmt.Errorf("st ctf: a root for epoch %d cannot cover epochs %d to %d", epoch, covered+1, epoch)
 	}
-	// The result of an epoch an earlier live root covered is fixed: its
-	// awards must encode to exactly the awards object it fixed.
+	// The result of an epoch a committed root carried is fixed: its awards
+	// must encode to exactly that root's awards object (§5). A result only an
+	// uncommitted build recorded binds nothing: no audit has seen it, and its
+	// awards depend on the root it was built on, which may since have changed.
 	fixed := records.EpochResults(ctx, covered+1, epoch)
 	for k := covered + 1; k <= epoch; k++ {
 		funded, err := client.LedgerV2FundedThrough(ctx, poolId, k)
@@ -255,13 +262,28 @@ func stCtfBuildInput(ctx context.Context, cfg *StConfig, client StLedgerV2Client
 				return nil, err
 			}
 		}
-		if result := fixed[k]; result != nil {
+		if result := fixed[k]; result != nil && stCtfResultCommitted(ctx, records, poolId, result) {
 			awards := ledger.Ref(result.AwardsRef)
 			input.Awards = &awards
 		}
 		in.Epochs = append(in.Epochs, input)
 	}
 	return in, nil
+}
+
+// stCtfResultCommitted reports whether a recorded epoch result was fixed by
+// a root committed on chain: the root that carries it is mirrored, or the
+// driver saw its commit go through.
+func stCtfResultCommitted(ctx context.Context, records stCtfRecords, poolId uint64, result *model.CtfEpochResult) bool {
+	if row := records.Ledger(ctx, result.LedgerEpoch, result.LedgerHash); row != nil && row.Status != model.CtfLedgerStatusBuilt && row.Status != model.CtfLedgerStatusShadow {
+		return true
+	}
+	for _, root := range records.RootsFromEpoch(ctx, poolId, result.LedgerEpoch) {
+		if root.Epoch == result.LedgerEpoch && root.LedgerHash == result.LedgerHash {
+			return true
+		}
+	}
+	return false
 }
 
 // stCtfPublish writes a built root's objects: every object but the header,

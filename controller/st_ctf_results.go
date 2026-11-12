@@ -136,10 +136,12 @@ func stCtfLedgerRow(in *ctf.BuildInput, built *ctf.Ledger, shadow bool, report [
 }
 
 // stCtfRecordBuild records a live root before its header is published: the
-// draw of each drawn epoch, the result of each epoch it is the first to
-// cover, which fixes it, and the ledger. Each record is written once, so a
-// repeated build records nothing new.
+// draw of each drawn epoch, the result of each epoch no committed root has
+// carried, and the ledger. A result is fixed once its root is committed
+// (stCtfResultCommitted); until then a later build replaces it, since only an
+// uncommitted build recorded it. Draws and ledgers are written once.
 func stCtfRecordBuild(ctx context.Context, cfg *StConfig, records stCtfRecords, in *ctf.BuildInput, built *ctf.Ledger) error {
+	recorded := records.EpochResults(ctx, in.Epochs[0].Epoch, built.Commit.Epoch)
 	for i, e := range built.Epochs {
 		input := &in.Epochs[i]
 		if e.Drawn && input.Pulse != nil && e.Census != nil {
@@ -147,6 +149,12 @@ func stCtfRecordBuild(ctx context.Context, cfg *StConfig, records stCtfRecords, 
 		}
 		if input.Awards != nil {
 			continue
+		}
+		if previous := recorded[e.Epoch]; previous != nil {
+			if previous.LedgerHash == built.Commit.LedgerHash {
+				continue
+			}
+			records.RemoveEpochResult(ctx, e.Epoch)
 		}
 		result, awards, pots, pending, err := stCtfEpochResultRows(built, e)
 		if err != nil {

@@ -43,11 +43,19 @@ func (self *CoreStClient) stCtfEventDecoders(address common.Address) ([]stEventD
 	}, true
 }
 
-// stApplyCtfEvents mirrors the carry contract's Recycled logs.
+// stApplyCtfEvents mirrors the carry contract's Recycled logs. It runs in the
+// shared chain sync, so a failure here, such as tables not migrated yet, is
+// alerted and ends here: the logs stay in st_chain_event, and the driver reads
+// recycledFor from the chain.
 func stApplyCtfEvents(ctx context.Context, cfg *StConfig, events []*model.StChainEvent) {
 	if stCtfCarryMirrored(cfg) == (common.Address{}) {
 		return
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			stCtfAlert(cfg, StCtfAlertMirror, "recycled", "the carry contract's Recycled logs were not mirrored: %v", r)
+		}
+	}()
 	recycles := []*model.CtfRecycle{}
 	for _, event := range events {
 		if event.Kind != stCtfEventRecycled {

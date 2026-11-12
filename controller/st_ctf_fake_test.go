@@ -79,6 +79,8 @@ type fakeCtfChain struct {
 	recycled map[uint64]uint256.Int
 	// held is the carry contract's stake on vault2's escrow hotkey.
 	held uint256.Int
+	// afterClose runs after a close of the CTF pool succeeds.
+	afterClose func()
 }
 
 func newFakeCtfChain(log *[]string) *fakeCtfChain {
@@ -128,7 +130,11 @@ func (self *fakeCtfChain) LedgerV2Close(ctx context.Context, epoch uint64, noId 
 	if err := self.requirePool(noId); err != nil {
 		return "", err
 	}
-	return self.fakeLedgerV2Chain.LedgerV2Close(ctx, epoch, noId)
+	txHash, err := self.fakeLedgerV2Chain.LedgerV2Close(ctx, epoch, noId)
+	if err == nil && self.afterClose != nil {
+		self.afterClose()
+	}
+	return txHash, err
 }
 
 func (self *fakeCtfChain) LedgerV2Commit(ctx context.Context, epoch uint64, noId uint64, prevRootCount uint64, c *StLedgerV2Commitment) (string, error) {
@@ -219,7 +225,10 @@ func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, 
 	if uint64(len(self.roots)) <= rootIndex {
 		return "", fakeLedgerV2Revert("UnknownRoot")
 	}
-	if account != nil {
+	if account == nil {
+		return "", errors.New("the driver names no carry account, so its call could change under one transaction key")
+	}
+	{
 		root := self.roots[rootIndex]
 		if account.Coldkey != self.carry.Coldkey {
 			return "", fakeLedgerV2Revert("InvalidColdkey")
@@ -371,6 +380,18 @@ func (self *fakeCtfRecords) CreateEpochResult(ctx context.Context, result *model
 	}
 	self.results[result.Epoch], self.awards[result.Epoch] = result, awards
 	return true
+}
+
+func (self *fakeCtfRecords) RemoveEpochResult(ctx context.Context, epoch uint64) {
+	delete(self.results, epoch)
+	delete(self.awards, epoch)
+}
+
+func (self *fakeCtfRecords) Ledger(ctx context.Context, epoch uint64, ledgerHash [32]byte) *model.CtfLedger {
+	if ledger := self.ledgers[ledgerHash]; ledger != nil && ledger.Epoch == epoch {
+		return ledger
+	}
+	return nil
 }
 
 func (self *fakeCtfRecords) CreateLedger(ctx context.Context, ledger *model.CtfLedger) bool {

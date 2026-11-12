@@ -45,14 +45,17 @@ type stCtfRecords interface {
 	SetCommitment(ctx context.Context, commitment *model.CtfCensusCommitment) bool
 	// CreateDraw writes an epoch's draw once.
 	CreateDraw(ctx context.Context, draw *model.CtfDraw) bool
-	// EpochResults returns the fixed results of epochs first … last, and
-	// CreateEpochResult fixes one, once.
+	// EpochResults returns the recorded results of epochs first … last;
+	// CreateEpochResult records one, once; RemoveEpochResult removes one,
+	// only ever a result no committed root carries.
 	EpochResults(ctx context.Context, first uint64, last uint64) map[uint64]*model.CtfEpochResult
 	CreateEpochResult(ctx context.Context, result *model.CtfEpochResult, awards []*model.CtfAward, pots []*model.CtfPot, pending []*model.CtfPendingAward) bool
-	// CreateLedger writes a built ledger once, and SetLedgerStatus records
-	// its change of state.
+	RemoveEpochResult(ctx context.Context, epoch uint64)
+	// CreateLedger writes a built ledger once, SetLedgerStatus records its
+	// change of state, and Ledger reads it.
 	CreateLedger(ctx context.Context, ledger *model.CtfLedger) bool
 	SetLedgerStatus(ctx context.Context, epoch uint64, ledgerHash [32]byte, update *model.CtfLedgerStatusUpdate) bool
+	Ledger(ctx context.Context, epoch uint64, ledgerHash [32]byte) *model.CtfLedger
 }
 
 // stCtfDbRecords keeps the records in the database.
@@ -145,6 +148,10 @@ func (self *stCtfDbRecords) CreateEpochResult(ctx context.Context, result *model
 	return model.CreateCtfEpochResult(ctx, result, awards, pots, pending)
 }
 
+func (self *stCtfDbRecords) RemoveEpochResult(ctx context.Context, epoch uint64) {
+	model.RemoveCtfEpochResult(ctx, self.deploymentKey, self.noId, epoch)
+}
+
 func (self *stCtfDbRecords) CreateLedger(ctx context.Context, ledger *model.CtfLedger) bool {
 	ledger.DeploymentKey, ledger.NoId = self.deploymentKey, self.noId
 	return model.CreateCtfLedger(ctx, ledger)
@@ -152,6 +159,10 @@ func (self *stCtfDbRecords) CreateLedger(ctx context.Context, ledger *model.CtfL
 
 func (self *stCtfDbRecords) SetLedgerStatus(ctx context.Context, epoch uint64, ledgerHash [32]byte, update *model.CtfLedgerStatusUpdate) bool {
 	return model.SetCtfLedgerStatus(ctx, self.deploymentKey, self.noId, epoch, ledgerHash, update)
+}
+
+func (self *stCtfDbRecords) Ledger(ctx context.Context, epoch uint64, ledgerHash [32]byte) *model.CtfLedger {
+	return model.GetCtfLedger(ctx, self.deploymentKey, self.noId, epoch, ledgerHash)
 }
 
 var stCtfRecordsLock sync.Mutex
