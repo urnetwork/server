@@ -14,8 +14,10 @@ package oauth
 // ClientKey's DPoP proof of this request (§7.4's rule, the jti single-use, htu
 // the issuer's token endpoint), refuses an inactive or reaped client, and never
 // issues the api's audience. Scopes come from the installed ExchangeScopeSource,
-// §8's rows in the newest projection, which TEAM-M2-15 installs; until then the
-// source grants no scope at all, so none is ever granted without a projection.
+// §8's rows in the newest projection (exchange_scopes.go's
+// ProjectionExchangeScopeSource, which api installs over its gate cache); until
+// one is installed the source grants no scope at all, so none is ever granted
+// without a projection.
 //
 // Tokens are never stored. Each exchange is one line of api's 7-day service log
 // with §2.8 api-11's fields, and never a token or a proof.
@@ -66,7 +68,11 @@ type ExchangeScopeRequest struct {
 	SubjectClientId server.Id
 	// nil for a client bound to no sidecar
 	SidecarId *server.Id
-	Audience  string
+	// the member the client's credential names: its member_id in a team, its
+	// user in a personal network, whose one member that user is (§7.5); what an
+	// unadmitted client's recovery scope may name (§7.9)
+	MemberId *server.Id
+	Audience string
 	// as asked, each once
 	Scopes []string
 }
@@ -315,12 +321,17 @@ func Exchange(ctx context.Context, args *ExchangeArgs) (*ExchangeResult, error) 
 		return nil, fmt.Errorf("%w: the client's subject is not known", ErrInvalidGrant)
 	}
 	sidecarId := exchangeClientSidecarId(ctx, networkId, clientId)
+	credentialMemberId := byJwt.UserId
+	if byJwt.MemberId != nil {
+		credentialMemberId = *byJwt.MemberId
+	}
 
 	grant, err := currentExchangeScopeSource().Grant(ctx, &ExchangeScopeRequest{
 		NetworkId:       networkId,
 		ClientId:        clientId,
 		SubjectClientId: subjectClientId,
 		SidecarId:       sidecarId,
+		MemberId:        &credentialMemberId,
 		Audience:        audience,
 		Scopes:          slices.Clone(scopes),
 	})

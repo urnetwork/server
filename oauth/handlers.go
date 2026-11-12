@@ -224,6 +224,8 @@ func writeExchangeError(w http.ResponseWriter, err error) {
 		writeOauthError(w, http.StatusBadRequest, "invalid_grant", "The grant is invalid or expired.")
 	case errors.Is(err, ErrRestoreRequired):
 		writeOauthError(w, http.StatusBadRequest, "restore_required", "The network is being restored. Try again later.")
+	case errors.Is(err, ErrExchangeUnavailable):
+		writeOauthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "Please try again.")
 	default:
 		writeOauthError(w, http.StatusInternalServerError, "server_error", "Please try again.")
 	}
