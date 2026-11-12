@@ -115,7 +115,7 @@ Usage:
     bringyourctl payouts populate-tx-hashes
     bringyourctl payouts reconcile-legacy-attempts [--apply] [--group_limit=<group_limit>]
     bringyourctl payouts correct-legacy-attempts [--apply] [--group_limit=<group_limit>] [--move_all_sweeps] [--sweep_batch_size=<sweep_batch_size>] [--sweep_batch_limit=<sweep_batch_limit>] [--count_sweeps]
-    bringyourctl payouts close-parked [(--apply --expect=<digest>)] [--ids]
+    bringyourctl payouts close-parked [--paid=<paid>] [(--apply --expect=<digest>)] [--ids]
     bringyourctl payouts sn-reconcile [(--send --expect=<digest>)] [--json]
     bringyourctl payouts reimburse --file=<file> --reason=<reason> [--allow_prior_reimbursement] [(--send --expect=<digest>)]
     bringyourctl payouts usdc-sent-notice --file=<file> [--send]
@@ -279,6 +279,7 @@ Options:
     --tx=<signature>  With crypto credit-usdc, the Solana transaction signature of the payment recorded unfulfilled (no_intent) that pays the invoice: owner's go only, for a memo-less payment whose amount is not the quote's.
     --address=<payout_address>  The address the account holder gave for a refund, in the invoice's coin.
     --ids  With payouts close-parked, also list each payment: its id, plan week, reason and payout.
+    --paid=<paid>  With payouts close-parked, also close these keyed payments, each paid by another Circle transfer: <payment_id>:<circle_transaction_id>, comma separated. Each is checked with the database and Circle.
     --group_limit=<group_limit>  Look up at most this many Circle destination groups; omitted or 0 looks up every group.
     --move_all_sweeps  Move every sweep of a corrected legacy attempt to its replacement instead of one anchor sweep.
     --sweep_batch_size=<sweep_batch_size>  With --move_all_sweeps, move at most this many sweeps per transaction; omitted uses 10000.
