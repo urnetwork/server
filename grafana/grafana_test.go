@@ -2008,10 +2008,12 @@ func TestProvidersDashboardPinsInternalMeasurements(t *testing.T) {
 	// observes its own answers, so they are summed as rates across them, and
 	// TestProvidersDashboardShowsTheEgressBuckets pins those reads instead. So
 	// are the ARIN canary's decision reads, each process's own counter, which
-	// TestProvidersDashboardShowsTheArindbCanaryRow pins
+	// TestProvidersDashboardShowsTheArindbCanaryRow pins, and the selector-mode
+	// and strict post-quantum request counters, which
+	// TestProvidersDashboardShowsTheCapabilityAwareSelection pins
 	for _, expression := range expressions {
 		for _, metric := range metricNamePattern.FindAllString(expression, -1) {
-			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric {
+			if providersPerProcessMetric(metric) || metric == providersArindbDecisionReadsMetric || slices.Contains(providersCapabilityRequestMetrics, metric) {
 				continue
 			}
 			assertReplicaSafeReads(t, "providers dashboard", expression, metric, `{env="$env"`)
