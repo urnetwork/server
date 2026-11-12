@@ -264,25 +264,21 @@ func stPlatformEndpoints(ctx context.Context) (set model.StPlatformEndpointSet, 
 }
 
 // stPlatformEndpointNetworks are the networks a platform endpoint registration
-// is checked against: the operator's own, its gated durable networks
-// (extender.yml directory.durable_network_ids) and the networks st.yml's
-// extender_pool declares it controls, and its measurement networks.
+// is checked against: the operator's own, the one list E5 reads
+// (readStExtenderOwnNetworks: its gated durable networks, the networks it
+// declares it controls and the networks of its canaries), and its measurement
+// networks.
 func stPlatformEndpointNetworks(ctx context.Context, cfg *StConfig) (model.StPlatformEndpointNetworks, error) {
 	networks := model.StPlatformEndpointNetworks{Operator: map[server.Id]bool{}}
 	pool, err := stExtenderPoolSettings(cfg)
 	if err != nil {
 		return networks, err
 	}
-	extenders, err := EnvExtenderConfig()
+	own, err := readStExtenderOwnNetworks(ctx, cfg)
 	if err != nil {
-		return networks, fmt.Errorf("extender.yml cannot be read for its durable_network_ids: %w", err)
+		return networks, err
 	}
-	for _, networkId := range extenders.DurableNetworkIds() {
-		networks.Operator[networkId] = true
-	}
-	for networkId := range pool.declared {
-		networks.Operator[networkId] = true
-	}
+	networks.Operator = own.All()
 	networks.Measurement = stExtenderPoolMeasurementNetworks(ctx, pool)
 	return networks, nil
 }
