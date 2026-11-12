@@ -529,6 +529,42 @@ func TestFileClusterDeadlineHeaderTakesTheOwnDeadline(t *testing.T) {
 	}
 }
 
+// A request whose ctx says the store keeps another clock carries its deadline in the store's time, the
+// request's own deadline included, while the client's cancel at it still keeps the cluster's clock; one
+// whose ctx says nothing carries the cluster's time.
+func TestFileClusterDeadlineHeaderTakesTheStoresTime(t *testing.T) {
+	fixture := newFileClusterFixture(t, newFakeS3(1, "build-1"), "")
+	storeNow := fixture.clock.Now().Add(311 * 24 * time.Hour)
+	storeTime := func(deadline time.Time) time.Time {
+		return storeNow.Add(deadline.Sub(fixture.clock.Now()))
+	}
+	ctx := WithFileClusterStoreTime(t.Context(), storeTime)
+	if _, err := fixture.cluster.Head(ctx, "head/a/_"); !errors.Is(err, sidecar.ErrBlobNotFound) {
+		t.Fatal(err)
+	}
+	own := fixture.clock.Now().Add(2 * time.Second)
+	if err := fixture.cluster.Delete(sidecar.WithBlobDeadline(ctx, own), "idx/r/f/1/t.e"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.cluster.Head(t.Context(), "head/a/_"); !errors.Is(err, sidecar.ErrBlobNotFound) {
+		t.Fatal(err)
+	}
+	requests := fixture.store.takeRequests()
+	want := []string{
+		strconv.FormatInt(storeNow.Add(fixture.cluster.RequestTimeout()).UnixMilli(), 10),
+		strconv.FormatInt(storeNow.Add(2*time.Second).UnixMilli(), 10),
+		strconv.FormatInt(fixture.clock.Now().Add(fixture.cluster.RequestTimeout()).UnixMilli(), 10),
+	}
+	if len(requests) != len(want) {
+		t.Fatalf("requests %+v", requests)
+	}
+	for index, request := range requests {
+		if request.deadline != want[index] {
+			t.Errorf("%s %s: deadline %q, want %q", request.method, request.path, request.deadline, want[index])
+		}
+	}
+}
+
 // A DELETE that names its object carries that object's LastModified as x-ur-if-unmodified-ms, in Unix
 // ms, beside its deadline. No other request carries it, and a DELETE that names nothing carries none.
 func TestFileClusterUnmodifiedHeaderRidesANamedDelete(t *testing.T) {

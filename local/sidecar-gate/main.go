@@ -103,7 +103,12 @@ type gateRow struct {
 	Tests    []gateTest    `yaml:"tests"`
 	Commands []gateCommand `yaml:"commands"`
 	External string        `yaml:"external"`
+	// The case's T3 run reads stored ages through T3's store clock, which the report says (QD-264).
+	StoreClock bool `yaml:"store_clock"`
 }
+
+// What a report says of a store_clock row beside its outcome.
+const gateStoreClockDetail = "store clock translated: its T3 run read LastModified and ttls on the schedule's clock through server/sidecart3/clock.go, not the stores' own (QD-264)"
 
 func (self *gateRow) label() string {
 	label := self.Row
@@ -430,6 +435,9 @@ func readCommitSet(root string, repos []string) []gateCommit {
 // none is missing; a row waiting on the world is open.
 func runGateRow(ctx context.Context, options *gateOptions, report *gateReport, row *gateRow) *gateResult {
 	result := &gateResult{label: row.label()}
+	if row.StoreClock {
+		result.details = append(result.details, gateStoreClockDetail)
+	}
 	if row.External != "" && len(row.Tests) == 0 && len(row.Commands) == 0 {
 		result.outcome = gateOpen
 		result.details = append(result.details, "waits on "+row.External)
