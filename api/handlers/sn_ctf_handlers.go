@@ -40,8 +40,8 @@ func SnCtfEpoch(w http.ResponseWriter, r *http.Request) {
 	controller.SnCtfEpoch(w, r, pathValue(r, 0))
 }
 
-// SnCtfClient backs `GET /sn/ctf/client`: the calling client's own status and
-// wins. A client's bearer token only.
+// SnCtfClient backs `GET /sn/ctf/client`: a client token's own client's status
+// and wins, or the wins of every client of a network credential's network.
 func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 	controller.SnCtfClient(w, r)
 }

@@ -444,11 +444,12 @@ func (self *CoreStClient) LedgerV2Answer(ctx context.Context, noId uint64, seq u
 	return self.sendLedgerV2(ctx, stLedgerV2AnswerOperation(noId, seq, answer.RootIndex, answer.Index), self.cfg.VaultV2, stLedgerV2PackCheckPath(noId, answer))
 }
 
-// stLedgerV2ErrorNames names every custom error of the v2 contracts and of
-// LedgerTree by selector.
+// stLedgerV2ErrorNames names every custom error of the v2 contracts, the
+// capture the flag carry and LedgerTree by selector. Errors the contracts
+// share have the same signature, so the same selector names them.
 var stLedgerV2ErrorNames = func() map[[4]byte]string {
 	names := map[[4]byte]string{}
-	for _, meta := range []*bind.MetaData{&stabi.STSettlement2MetaData, &stabi.STSettlementVault2MetaData} {
+	for _, meta := range []*bind.MetaData{&stabi.STSettlement2MetaData, &stabi.STSettlementVault2MetaData, &stabi.STCtfCarryMetaData} {
 		parsed, err := meta.ParseABI()
 		if err != nil {
 			panic(err)
