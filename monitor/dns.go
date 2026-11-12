@@ -297,9 +297,10 @@ func buildDohTxtQuery(hostname string) ([]byte, error) {
 	if err := optHeader.SetEDNS0(dnsDohEdnsPayloadSize, dnsmessage.RCodeSuccess, false); err != nil {
 		return nil, err
 	}
+	question := dnsmessage.Question{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}
 	message := dnsmessage.Message{
 		Header:      dnsmessage.Header{RecursionDesired: true},
-		Questions:   []dnsmessage.Question{{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}},
+		Questions:   []dnsmessage.Question{question},
 		Additionals: []dnsmessage.Resource{{Header: optHeader, Body: &dnsmessage.OPTResource{}}},
 	}
 	return message.Pack()
