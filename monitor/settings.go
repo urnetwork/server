@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"os/exec"
 	"path/filepath"
 	"slices"
@@ -352,6 +353,32 @@ type DNSAliasSignalSource interface {
 // wire protocol (UDP, then TCP when truncated).
 type DNSTxtSignalSource interface {
 	DNSTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
+}
+
+// DNSAddressSignalSource optionally supplies one resolver's answer to a name's
+// A question, for SIGNALS.md §28.2, which asks it of a plain resolver that
+// left the TXT question unanswered. Production asks over the DNS wire
+// protocol (UDP, then TCP when truncated).
+type DNSAddressSignalSource interface {
+	DNSAddress(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
+}
+
+// DNSDohSignalSource optionally supplies one DoH server's answer to a name's
+// TXT question, for SIGNALS.md §28.2: the HTTP status and the body, read to at
+// most maxBytes+1 bytes. Production asks the server over https as a client
+// asks it (an RFC 8484 GET).
+type DNSDohSignalSource interface {
+	DNSDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int) (int, []byte, error)
+}
+
+// DNSAuthoritativeTxtSignalSource optionally supplies the authoritative
+// nameservers of the zone that holds a name, and their answer to its TXT
+// question, with an EDNS client subnet when clientSubnet is valid, for
+// SIGNALS.md §28.2. Production discovers the nameservers through the platform
+// resolver and asks them over TCP.
+type DNSAuthoritativeTxtSignalSource interface {
+	DNSNameservers(ctx context.Context, name string) ([]string, error)
+	DNSTxtAuthoritative(ctx context.Context, hostname string, servers []string, clientSubnet netip.Prefix) (DNSResponseObservation, error)
 }
 
 // SettingsGenerationCheck compares the immutable settings already owned by a
@@ -1023,6 +1050,38 @@ func (r *sourceRunner) dnsTxt(ctx context.Context, resolver, hostname string) (D
 		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSTxtSignalSource")
 	}
 	return source.DNSTxt(ctx, resolver, hostname)
+}
+
+func (r *sourceRunner) dnsAddress(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSAddressSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAddressSignalSource")
+	}
+	return source.DNSAddress(ctx, resolver, hostname)
+}
+
+func (r *sourceRunner) dnsDohTxt(ctx context.Context, dohUrl, hostname string, maxBytes int) (int, []byte, error) {
+	source, ok := r.source.(DNSDohSignalSource)
+	if !ok {
+		return 0, nil, fmt.Errorf("monitor: SignalSource does not implement DNSDohSignalSource")
+	}
+	return source.DNSDohTxt(ctx, dohUrl, hostname, maxBytes)
+}
+
+func (r *sourceRunner) dnsNameservers(ctx context.Context, name string) ([]string, error) {
+	source, ok := r.source.(DNSAuthoritativeTxtSignalSource)
+	if !ok {
+		return nil, fmt.Errorf("monitor: SignalSource does not implement DNSAuthoritativeTxtSignalSource")
+	}
+	return source.DNSNameservers(ctx, name)
+}
+
+func (r *sourceRunner) dnsTxtAuthoritative(ctx context.Context, hostname string, servers []string, clientSubnet netip.Prefix) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSAuthoritativeTxtSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAuthoritativeTxtSignalSource")
+	}
+	return source.DNSTxtAuthoritative(ctx, hostname, servers, clientSubnet)
 }
 
 func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, error) {

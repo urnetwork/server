@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "kind": "approved-reversible-temporary-baseline-sparse-cleanup",
+  "date": "2026-11-12",
+  "authorization": "Existing user approval for reversible clean versioned baseline exclusion in completed temporary test checkouts",
+  "checkouts": [
+    {
+      "path": "/mnt/data/heartbeat-diagnostics-qa-20261031.vsSbRMn7/positive/server",
+      "head": "6560417210f55e1699e41063e95cf82e9ef0fe61",
+      "baseline_allocated_bytes_before": 1517789184,
+      "dirty_source_manifest_sha256_before_and_after": "3b2c66a11f41ff2037d190948da10504fed6bc3070b6072b4df635c7f94a03a2"
+    },
+    {
+      "path": "/mnt/data/heartbeat-diagnostics-qa-20261031.vsSbRMn7/negative/server",
+      "head": "6560417210f55e1699e41063e95cf82e9ef0fe61",
+      "baseline_allocated_bytes_before": 1517789184,
+      "dirty_source_manifest_sha256_before_and_after": "cb31836316585f5f7604bc7ce73d7e932d946b692eaab9a4f1425db5d8966303"
+    }
+  ],
+  "checks": {
+    "baseline_clean_including_ignored_and_untracked_checks": true,
+    "previous_sparse_pattern_file_absent": true,
+    "no_process_cwd_or_open_file_reference_found": true,
+    "tracked_diff_staged_diff_and_untracked_test_source_hashes_preserved": true,
+    "canonical_baseline_git_objects_logs_patches_and_evaluation_evidence_untouched": true,
+    "opaque_caches_non_git_source_archives_and_active_jobs_untouched": true,
+    "no_engine_command_hold_restart_or_deadline_change": true
+  },
+  "sparse_patterns": ["/*", "!/connect/sim-latency/baseline/"],
+  "evaluation_volume_available_bytes_before": 2785099776,
+  "evaluation_volume_available_bytes_after": 5820489728,
+  "restore": "Run sudo git -C <exact checkout path above> sparse-checkout disable when sufficient storage is available. Both recorded commits and Git objects remain present."
+}
