@@ -11,6 +11,7 @@ import (
 	"crypto/ed25519"
 	"errors"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -113,5 +114,24 @@ func TestConfigReseedAdminSidecar(t *testing.T) {
 		_, admin, err = ConfigReseedAdminSidecar(owner.ctx, server.NewId(), sidecarId)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, admin, false)
+	})
+}
+
+// The rev step owes a rev/ object for a client deactivated within rev/'s DeleteAfter and none for one deactivated
+// before it.
+func TestRecreateRecentRevocations(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		owner := newClientOwnerFixture(t)
+		recent := owner.mint(t, owner.root, &AuthNetworkClientArgs{Description: "recent", DeviceSpec: "test"})
+		old := owner.mint(t, owner.root, &AuthNetworkClientArgs{Description: "old", DeviceSpec: "test"})
+		now := server.NowUtc()
+		settings := DefaultSidecarRevSettings()
+		server.Tx(owner.ctx, func(tx server.PgTx) {
+			server.RaisePgResult(tx.Exec(owner.ctx, `UPDATE network_client SET active = false, deactivate_time = $2 WHERE client_id = $1`, *recent.ClientId, now.Add(-5*time.Minute)))
+			server.RaisePgResult(tx.Exec(owner.ctx, `UPDATE network_client SET active = false, deactivate_time = $2 WHERE client_id = $1`, *old.ClientId, now.Add(-settings.DeleteAfter-time.Minute)))
+		})
+		count, err := RecreateRecentRevocations(owner.ctx, now, settings)
+		connect.AssertEqual(t, err, nil)
+		connect.AssertEqual(t, count, 1)
 	})
 }
