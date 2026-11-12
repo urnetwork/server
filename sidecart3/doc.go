@@ -32,6 +32,9 @@
 //   - cluster_faults.go, T3's 4-host file-cluster layouts (Settings.Layout, EVSB-M2-17's
 //     local/file-cluster-t3) and their faults: HostDown, HostUp, QuorumLoss and DriveMiss carried out on
 //     the minio fork's containers, and HostCluster for a read through one host.
+//   - capture_stores.go, §22.7's CC3 (TEST-M2-09): every object, every Redis key on every master and
+//     every sidecar Postgres table's rows added to a Net's capture, with PrivacyClassPostgres and, under
+//     sidecar_leaktest, its leak (capture_stores_leak.go).
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
@@ -43,7 +46,7 @@
 //     clients would run on T2's platform fakes, rather than passing it there.
 //   - a link's conditions (SetLink) and a contract's class (SetContractClass) on server's exchange, which
 //     takes neither: a row that asks for one fails as unapplied (sidecartest.Net.Unapplied).
-//   - the capture of the exchange's frames (CC2) and of the stores (CC3, TEST-M2-09).
+//   - the capture of the exchange's frames (CC2).
 //   - the 3-master Redis Cluster: test-env.sh attests one Redis node until QD-028's change lands, so
 //     RunCrossslot fails rather than linting on a node that accepts what 3 masters refuse.
 //   - api on the store clock: T3 hosts no api but the config log's sequencer, which takes the Net's clock
