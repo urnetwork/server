@@ -53,6 +53,27 @@ func withFileClusterDeadline(ctx context.Context, requestTimeout time.Duration) 
 	return context.WithValue(ctx, fileClusterDeadlineKey{}, requestTimeout)
 }
 
+// The context key WithFileClusterStoreTime stores under.
+type fileClusterStoreTimeKey struct{}
+
+// ctx for requests to a store that keeps another clock than the clusters' Clock: storeTime gives the
+// store's own time for a deadline on Clock, and x-ur-deadline-ms carries that. T3's store clock
+// (sidecart3/clock.go) sets it, since a schedule's fake clock and the store's real one part as a test
+// runs, and the fork refuses a deadline already past by its own clock. The cancel at a request's deadline
+// still keeps Clock. Production never sets it, and sends Clock's time as it is.
+func WithFileClusterStoreTime(ctx context.Context, storeTime func(deadline time.Time) time.Time) context.Context {
+	return context.WithValue(ctx, fileClusterStoreTimeKey{}, storeTime)
+}
+
+// What x-ur-deadline-ms carries for deadline: the store's time for it when ctx says the store keeps
+// another clock, else deadline itself.
+func fileClusterHeaderDeadline(ctx context.Context, deadline time.Time) time.Time {
+	if storeTime, ok := ctx.Value(fileClusterStoreTimeKey{}).(func(deadline time.Time) time.Time); ok && storeTime != nil {
+		return storeTime(deadline)
+	}
+	return deadline
+}
+
 // An http.RoundTripper over one host's base transport that adds the deadline header and cancels at a
 // request's own deadline, as the file header says. Safe for concurrent use.
 type fileClusterTransport struct {
@@ -70,7 +91,7 @@ func (self *fileClusterTransport) RoundTrip(request *http.Request) (*http.Respon
 	deadline := sidecar.BlobRequestDeadline(request.Context(), issued, requestTimeout)
 	// RoundTrip must not change the request it was given
 	request = request.Clone(request.Context())
-	request.Header.Set(fileClusterDeadlineHeader, strconv.FormatInt(deadline.UnixMilli(), 10))
+	request.Header.Set(fileClusterDeadlineHeader, strconv.FormatInt(fileClusterHeaderDeadline(request.Context(), deadline).UnixMilli(), 10))
 	if request.Method == http.MethodDelete {
 		if lastModified, ok := sidecar.BlobUnmodified(request.Context()); ok {
 			request.Header.Set(fileClusterUnmodifiedHeader, strconv.FormatInt(lastModified.UnixMilli(), 10))
