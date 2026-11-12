@@ -461,7 +461,7 @@ func TestT3PostgresRestartMidRequest(t *testing.T) {
 		model.Testing_CreateNetwork(ctx, networkId, networkName, userId)
 		root := "Bearer " + session.NewByJwt(networkId, userId, networkName, false, false).Testing_Sign()
 
-		restart := NewPostgresRestart()
+		restart := NewPostgresRestart(nil)
 		restarted := make(chan error, 1)
 		server.SetPgCommitFaultForTest(t, func(ctx context.Context, commit func() error, rollback func()) error {
 			if ctx.Value(disruptionRequestKey{}) == nil {

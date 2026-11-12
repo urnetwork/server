@@ -23,7 +23,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -146,11 +145,30 @@ func redisClientIdsOnDatabase(list string, database int) ([]int64, error) {
 	return clientIds, scanner.Err()
 }
 
-// A Postgres or PgBouncer restart, on the test's own database: every backend on it but the asking one is terminated.
-type PostgresRestart struct{}
+// What a Postgres restart runs with.
+type PostgresRestartSettings struct {
+	// How long each backend's termination may take to show, as pg_terminate_backend waits for it: past this the
+	// restart fails, since a backend that outlived it did not go down.
+	TerminateTimeout time.Duration
+}
 
-func NewPostgresRestart() *PostgresRestart {
-	return &PostgresRestart{}
+func DefaultPostgresRestartSettings() *PostgresRestartSettings {
+	return &PostgresRestartSettings{
+		TerminateTimeout: 5 * time.Second,
+	}
+}
+
+// A Postgres or PgBouncer restart, on the test's own database: every backend on it but the asking one is terminated.
+type PostgresRestart struct {
+	settings *PostgresRestartSettings
+}
+
+// settings nil takes the defaults.
+func NewPostgresRestart(settings *PostgresRestartSettings) *PostgresRestart {
+	if settings == nil {
+		settings = DefaultPostgresRestartSettings()
+	}
+	return &PostgresRestart{settings: settings}
 }
 
 func (self *PostgresRestart) String() string {
@@ -168,7 +186,8 @@ func (self *PostgresRestart) Disrupt(ctx context.Context) (returnErr error) {
 	server.MaintenanceDb(ctx, func(conn server.PgConn) {
 		rows, err := conn.Query(
 			ctx,
-			`SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`,
+			`SELECT pg_terminate_backend(pid, $1) FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`,
+			self.settings.TerminateTimeout.Milliseconds(),
 		)
 		if err != nil {
 			returnErr = err
@@ -182,7 +201,7 @@ func (self *PostgresRestart) Disrupt(ctx context.Context) (returnErr error) {
 				return
 			}
 			if !terminated {
-				returnErr = errors.New("postgres restart: a backend outlived its termination's 5 s")
+				returnErr = fmt.Errorf("postgres restart: a backend outlived its termination's %s", self.settings.TerminateTimeout)
 				return
 			}
 		}
