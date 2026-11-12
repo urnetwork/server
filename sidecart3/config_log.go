@@ -24,10 +24,23 @@ import (
 // Makes server's sequencer over a cluster on a clock, with the default settings: no append limits, admission cap,
 // effects or hints, which need Postgres and Redis and no admission row reads.
 func ConfigLogApi() sidecartest.AdmissionApiFactory {
+	return ConfigLogApiWith(nil, nil)
+}
+
+// ConfigLogApi with what a test adds to the sequencer: edit changes its settings once the clock is set, as api's
+// process sets the read cache's script (model.NewConfigLogRedisEntryCache), and advanceHead raises network_acl_head
+// after each entry (model.AdvanceNetworkAclHead); both need the private stores. nil for neither.
+func ConfigLogApiWith(
+	edit func(settings *model.ConfigLogSettings),
+	advanceHead func(ctx context.Context, networkId server.Id, version uint64, chain []byte, hasDocument bool) (bool, error),
+) sidecartest.AdmissionApiFactory {
 	return func(clock sidecar.Clock, cluster sidecar.BlobCluster) sidecartest.AdmissionApi {
 		settings := model.DefaultConfigLogSettings()
 		settings.Clock = clock
-		return &configLogApi{sequencer: model.NewConfigLogSequencer(cluster, settings, nil)}
+		if edit != nil {
+			edit(settings)
+		}
+		return &configLogApi{sequencer: model.NewConfigLogSequencer(cluster, settings, advanceHead)}
 	}
 }
 

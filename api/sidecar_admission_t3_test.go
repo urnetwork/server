@@ -1,6 +1,6 @@
 //go:build sidecar_localstack
 
-package api
+package api_test
 
 // §22.7's admission suite on T3 (TEAM-M2-19): each row of sidecartest's suite, its own top-level test, through server's
 // real sequencer (sidecart3.ConfigLogApi, model.ConfigLogSequencer) over the local stack's MinIO as api's first
