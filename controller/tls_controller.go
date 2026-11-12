@@ -215,9 +215,9 @@ var tlsCertRevokeMemberPermitted = func(ctx context.Context, networkId server.Id
 // revocation chain takes to its CA. A client token revokes its own client's
 // certificate. A network credential, which names no client, revokes any of
 // its network's: a personal network's owner's, or a team member's whose role
-// holds devices; an API key, whose scopes this route does not read, none. A
-// certificate of another network is not found. One already on its way out
-// answers its state.
+// holds devices; an API key, an OAuth identity or an admin token, whose scopes
+// this route does not read, none. A certificate of another network is not
+// found. One already on its way out answers its state.
 func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, clientSession *session.ClientSession) (*TlsCertRevokeResult, error) {
 	deps := tlsCertsDeps.Load()
 	if deps == nil {
@@ -240,8 +240,8 @@ func TlsCertRevoke(args *sidecar.TlsCertRevokeArgs, clientSession *session.Clien
 		if row.ClientId != sidecar.Id(*byJwt.ClientId) {
 			return nil, errTlsCertsNotOwn
 		}
-	case clientSession.ApiKeyAuthenticated:
-		// an API key's scopes are not read here, so none reaches another client's certificate
+	case clientSession.ApiKeyAuthenticated || clientSession.UnsignedIdentity || clientSession.AdminCommand != nil:
+		// a scoped credential's scopes are not read here, so none reaches another client's certificate
 		return nil, errTlsCertsRoleRefused
 	case byJwt.MemberId != nil:
 		if !tlsCertRevokeMemberPermitted(ctx, byJwt.NetworkId, *byJwt.MemberId) {

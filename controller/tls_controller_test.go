@@ -395,6 +395,9 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 	apiKeySession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId)})
 	defer apiKeySession.Cancel()
 	apiKeySession.ApiKeyAuthenticated = true
+	oauthSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId)})
+	defer oauthSession.Cancel()
+	oauthSession.UnsignedIdentity = true
 	memberId := server.NewId()
 	memberSession := session.NewLocalClientSession(world.ctx, "", &session.ByJwt{NetworkId: server.Id(networkId), MemberId: &memberId})
 	defer memberSession.Cancel()
@@ -406,7 +409,7 @@ func TestTlsCertRevokeByOwnClientAndByItsNetwork(t *testing.T) {
 	tlsCertRevokeMemberPermitted = func(ctx context.Context, askedNetworkId server.Id, askedMemberId server.Id) bool {
 		return memberPermitted && askedNetworkId == server.Id(networkId) && askedMemberId == memberId
 	}
-	for _, clientSession := range []*session.ClientSession{apiKeySession, memberSession} {
+	for _, clientSession := range []*session.ClientSession{apiKeySession, oauthSession, memberSession} {
 		if _, err := TlsCertRevoke(&sidecar.TlsCertRevokeArgs{CertId: siblings}, clientSession); !tlsTestStatus(err, "403") {
 			t.Fatalf("a credential that is no admin's answered %v", err)
 		}
