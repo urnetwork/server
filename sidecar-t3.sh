@@ -7,7 +7,8 @@
 #                           the T3 rows at once (Q-TEST-1: a connect pin change reruns both tiers; T2's
 #                           run every merge in sidecar/test.sh)
 #   sidecar-t3.sh nightly   the suites, then every FS row registered on T3, under §22.8's rules with the
-#                           100 nightly explorer seeds, then T3's cluster faults on the 4-host file-cluster
+#                           100 nightly explorer seeds, then §22.7's scenarios and CC3's leak self-test, then
+#                           T3's cluster faults on the 4-host file-cluster
 #                           layouts (server/local/file-cluster-t3/t3.sh up; TEST-M2-07), which kill and start
 #                           hosts and so run only here, and say "not run" when the layouts do not answer
 #
@@ -103,6 +104,12 @@ layout_up() {
   curl -sf -o /dev/null --max-time 5 "$layout_health"
 }
 
+# §22.7's scenarios on T3 (TEST-M2-11), and CC3's self-test under the leak leg's tag (TEST-M2-09).
+scenarios() {
+  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack" -run '^TestScenario'
+  go_t3 ./sidecart3 -tags "$tags,sidecar_localstack,sidecar_leaktest" -run '^TestT3EveryStoreClassCatchesItsLeak$'
+}
+
 # QuorumLoss, DriveMiss, HostDown and HostUp on T3's 4-host layouts, which take hosts down for real.
 cluster_faults() {
   if layout_up; then
@@ -119,6 +126,7 @@ connect_pin() {
 suites
 if [ "$cadence" = nightly ]; then
   rows
+  scenarios
   cluster_faults
 else
   pin=$(connect_pin)
