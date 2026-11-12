@@ -21,8 +21,12 @@ type competitionHeartbeatSettings struct {
 	LeaseRetry      competitionLeaseRetrySettings
 	// The existing outer allowance admits acquisition-only host failures and
 	// the job's separately proved no-COMMIT slot-update failure. It never
-	// enlarges lock retries, lease duration or the evaluation clock.
+	// enlarges ordinary lock retries, lease duration or the evaluation clock.
 	AcquireRetry competitionHeartbeatAcquireRetrySettings
+	// Only a fully rolled-back first advisory-lock timeout may use the
+	// existing twenty-second owner reserve. This is a total call cap, not
+	// extra attempts or a fresh timeout after historical retries are spent.
+	ScopeLockMaximumAttempts int
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings
 }
@@ -30,7 +34,7 @@ type competitionHeartbeatSettings struct {
 // Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
 	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
-		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), CompletionRetry: defaultCompetitionLeaseRetrySettings()}
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), ScopeLockMaximumAttempts: 8, CompletionRetry: defaultCompetitionLeaseRetrySettings()}
 }
 
 // Only fixed categories, a validated PostgreSQL code, an opaque digest and

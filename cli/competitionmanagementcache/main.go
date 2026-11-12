@@ -29,14 +29,15 @@ func main() {
 	settings := defaultCacheSettings()
 	flags := flag.NewFlagSet("competitionmanagementcache", flag.ContinueOnError)
 	once := flags.Bool("once", false, "Perform one bounded native pass")
+	serve := flags.Bool("serve", false, "Keep one stable cgroup owner for bounded same-cgroup passes")
 	renderService := flags.Bool("render-service", false, "Render the independently started bounded service")
-	renderTimer := flags.Bool("render-timer", false, "Render the coalescing oneshot timer")
+	renderTimer := flags.Bool("render-timer", false, "Reject the obsolete transient-cgroup timer")
 	settingsPath := flags.String("settings", "", "Optional protected root-owned numeric policy")
 	if err := flags.Parse(os.Args[1:]); err != nil || flags.NArg() != 0 {
 		os.Exit(2)
 	}
 	operations := 0
-	for _, enabled := range []bool{*once, *renderService, *renderTimer} {
+	for _, enabled := range []bool{*once, *serve, *renderService, *renderTimer} {
 		if enabled {
 			operations++
 		}
@@ -70,6 +71,17 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if *serve {
+		runner, err := newNativeCacheServicePass(settings, *settingsPath)
+		if err == nil {
+			err = superviseCacheService(ctx, settings, runner, os.Stdout, waitCacheService)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "stable cache owner stopped without authorizing another pass")
+			os.Exit(1)
+		}
+		return
+	}
 	result, err := runCachePass(ctx, settings)
 	_ = json.NewEncoder(os.Stdout).Encode(result)
 	if err != nil {
@@ -133,8 +145,8 @@ func runCachePass(ctx context.Context, settings cacheSettings) (cacheResult, err
 	return maintainCache(ctx, settings, kernel, journal)
 }
 
-// Unit rendering shares the owner defaults. The timer never overlaps an active
-// service; its runtime/stop bounds contain a slow kernel reclaim syscall.
+// One persistent service keeps its cgroup identity stable across maintenance.
+// The parent bounds and joins pass processes; no timer can recreate this owner.
 func renderCacheUnit(settings cacheSettings, settingsPath string, service bool) (string, error) {
 	if err := settings.validate(); err != nil {
 		return "", err
@@ -148,14 +160,13 @@ func renderCacheUnit(settings cacheSettings, settingsPath string, service bool) 
 	}
 	seconds := func(value time.Duration) string { return strconv.FormatFloat(value.Seconds(), 'f', 6, 64) + "s" }
 	if !service {
-		return "[Unit]\nDescription=Bounded private engine cache maintenance timer\n\n[Timer]\nOnBootSec=" + seconds(settings.Interval) +
-			"\nOnUnitInactiveSec=" + seconds(settings.Interval) + "\nUnit=urnetwork-management-cache.service\n\n[Install]\nWantedBy=timers.target\n", nil
+		return "", errors.New("persistent cache maintenance has no timer; disable the legacy timer and enable its stable service")
 	}
-	return "[Unit]\nDescription=Bounded private engine cache maintenance\nAfter=urnetwork-private-engine.service\n\n[Service]\nType=oneshot\nUser=root\nGroup=root\n" +
-		"Slice=urnetwork-management-private.slice\nExecStart=" + cacheInstalledExecutable + " --once" + argument +
-		"\nRestart=no\nRuntimeMaxSec=" + seconds(settings.PassTimeout) + "\nTimeoutStartSec=" + seconds(settings.PassTimeout) + "\nTimeoutStopSec=" + seconds(settings.StopTimeout) +
+	return "[Unit]\nDescription=Bounded private engine cache maintenance\nAfter=urnetwork-private-engine.service\n\n[Service]\nType=exec\nUser=root\nGroup=root\n" +
+		"Slice=urnetwork-management-private.slice\nExecStart=" + cacheInstalledExecutable + " --serve" + argument +
+		"\nRestart=no\nTimeoutStartSec=" + seconds(settings.PassTimeout) + "\nTimeoutStopSec=" + seconds(settings.PassTimeout+settings.StopTimeout) +
 		"\nKillMode=control-group\nMemoryMax=" + strconv.FormatInt(settings.ServiceMemoryBytes, 10) + "\nMemoryHigh=infinity\nMemorySwapMax=0\nTasksMax=" + strconv.Itoa(settings.ServiceTasksMaximum) +
 		"\nLimitCORE=0\nUMask=0077\nNoNewPrivileges=yes\nCapabilityBoundingSet=\nAmbientCapabilities=\nPrivateNetwork=yes\nPrivateTmp=yes\n" +
 		"ProtectHome=yes\nProtectSystem=strict\nProtectControlGroups=no\nReadOnlyPaths=/sys/fs/cgroup\nReadWritePaths=" + cachePrivatePath + "/" + cacheEngineName +
-		"/memory.reclaim\nReadWritePaths=" + cacheJournalPath + "\nRestrictSUIDSGID=yes\nLockPersonality=yes\n", nil
+		"/memory.reclaim\nReadWritePaths=" + cacheJournalPath + "\nRestrictSUIDSGID=yes\nLockPersonality=yes\n\n[Install]\nWantedBy=multi-user.target\n", nil
 }

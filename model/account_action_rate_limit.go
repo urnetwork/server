@@ -192,6 +192,45 @@ func countRecentAccountActionAttempts(
 	return count
 }
 
+// CountAccountActionAttempts counts the attempts of `action` recorded for `id`
+// at or after `minTime`, reading at most `maxCount` of them: a caller that only
+// needs to know whether there are that many reads no further (an account's
+// extender activations over the last day, controller
+// unprovenAccountRetryAfter). Non-positive `maxCount` reads nothing.
+func CountAccountActionAttempts(
+	ctx context.Context,
+	id server.Id,
+	action string,
+	minTime time.Time,
+	maxCount int,
+) int {
+	if maxCount <= 0 {
+		return 0
+	}
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		// a utc cutoff from the caller, as in countRecentAccountActionAttempts,
+		// and the range of the (user_id, action, create_time) index, cut at
+		// maxCount
+		server.Raise(conn.QueryRow(
+			ctx,
+			`
+			SELECT COUNT(*) FROM (
+				SELECT 1 FROM network_user_action_attempt
+				WHERE user_id = $1 AND action = $2
+				  AND $3 <= create_time
+				LIMIT $4
+			) AS attempt
+			`,
+			id,
+			action,
+			minTime.UTC(),
+			maxCount,
+		).Scan(&count))
+	})
+	return count
+}
+
 // CheckAccountActionRateLimit reports whether userId is still under `limit`
 // attempts of `action` in the trailing `window`. It does not record
 // anything — pair with RecordAccountActionAttempt after the action actually

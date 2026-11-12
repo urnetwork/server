@@ -175,6 +175,7 @@ func TestNetworkPingTalliesMatchTheRows(t *testing.T) {
 			pingerKind int
 			cosign     int
 			relayed    bool
+			reason     int
 		}
 		wantOutcomeKeyPings := map[outcomeKey]int64{}
 		var wantPings int64
@@ -182,16 +183,16 @@ func TestNetworkPingTalliesMatchTheRows(t *testing.T) {
 		var wantTargets int64
 		server.Db(ctx, func(conn server.PgConn) {
 			result, err := conn.Query(ctx, `
-				SELECT pinger_kind, cosign, 0 < hop_count, count(*)
+				SELECT pinger_kind, cosign, 0 < hop_count, cosign_reason, count(*)
 				FROM network_ping
 				WHERE $1 <= create_time
-				GROUP BY 1, 2, 3
+				GROUP BY 1, 2, 3, 4
 			`, windowStart)
 			server.WithPgResult(result, err, func() {
 				for result.Next() {
 					var key outcomeKey
 					var pings int64
-					server.Raise(result.Scan(&key.pingerKind, &key.cosign, &key.relayed, &pings))
+					server.Raise(result.Scan(&key.pingerKind, &key.cosign, &key.relayed, &key.reason, &pings))
 					wantOutcomeKeyPings[key] = pings
 					wantPings += pings
 				}
@@ -220,13 +221,18 @@ func TestNetworkPingTalliesMatchTheRows(t *testing.T) {
 		if count.Pings24h == 0 {
 			t.Fatal("the window holds no ping, so this proves nothing")
 		}
+		var outcomePings int64
 		for _, outcome := range count.Outcomes24h {
 			connect.AssertEqual(t, outcome.Pings, wantOutcomeKeyPings[outcomeKey{
 				pingerKind: outcome.PingerKind,
 				cosign:     outcome.Cosign,
 				relayed:    outcome.Relayed,
+				reason:     outcome.Reason,
 			}])
+			outcomePings += outcome.Pings
 		}
+		// every ping of the window is in exactly one outcome
+		connect.AssertEqual(t, outcomePings, wantPings)
 		for _, source := range count.Sources24h {
 			connect.AssertEqual(t, source.Sources, wantKindSources[source.PingerKind])
 		}
