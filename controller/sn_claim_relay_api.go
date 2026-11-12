@@ -329,9 +329,10 @@ func snClaimRelayNetworkColdkeys(clientSession *session.ClientSession) ([][32]by
 }
 
 // snClaimRelayColdkeyAccounts reads the relay's view of one coldkey's accounts in
-// the operator's pools, its pool and its capture the flag pool, by no_id: none,
-// one or two. partial reads each pool on its own and names those that cannot be
-// read; otherwise any pool that cannot be read is an error.
+// the operator's pools, its pool and, while capture the flag is on
+// (stCtfPoolOn), its capture the flag pool, by no_id: none, one or two. partial
+// reads each pool on its own and names those that cannot be read; otherwise any
+// pool that cannot be read is an error.
 func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnClaimRelayStatus, coldkey [32]byte, partial bool, now time.Time) ([]*SnClaimRelayAccount, []*StLedgerV2UnavailablePool, error) {
 	var ledger *StLedgerV2AccountsResult
 	var err error
@@ -347,7 +348,7 @@ func snClaimRelayColdkeyAccounts(ctx context.Context, cfg *StConfig, status *SnC
 	if err != nil {
 		return nil, nil, err
 	}
-	ownPools := stLedgerV2OwnPools(cfg)
+	ownPools := stLedgerV2OwnPools(cfg, stCtfPoolOn(cfg))
 	unavailable := []*StLedgerV2UnavailablePool{}
 	for _, pool := range ledger.UnavailablePools {
 		if slices.Contains(ownPools, pool.NoId) {
@@ -511,7 +512,7 @@ func SnClaimRelayClaimNow(args *SnClaimRelayClaimNowArgs, clientSession *session
 	}
 	if len(accounts) == 0 {
 		if 0 < len(unavailable) {
-			return unreadable(fmt.Errorf("pools %d of %d unavailable", len(unavailable), len(stLedgerV2OwnPools(cfg))))
+			return unreadable(fmt.Errorf("pools %d of %d unavailable", len(unavailable), len(stLedgerV2OwnPools(cfg, stCtfPoolOn(cfg)))))
 		}
 		return refuse(SnClaimRelayReasonNothingPending, 0)
 	}

@@ -12,6 +12,10 @@ package controller
 //	api:
 //	  enabled: false                  # the /sn/ctf routes answer
 //	  page_url: https://ur.xyz/ctf    # links.page; a country's page is page_url/<cc>
+//
+// The same switch, with st.yml's ctf block on, has the ledger route and the
+// claim relay read the operator's capture the flag pool (stCtfPoolOn); while
+// either is off, they read no capture the flag pool at all.
 
 import (
 	"context"

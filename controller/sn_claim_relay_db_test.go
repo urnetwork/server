@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/holiman/uint256"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/urfoundation/sn/ctf"
 	"github.com/urfoundation/sn/ledger"
@@ -943,18 +944,19 @@ func claimRelayDbNear(millis int64, until time.Time) bool {
 	return time.Duration(millis-until.UnixMilli()).Abs()*time.Millisecond <= time.Second
 }
 
-// GET /sn/claim-relay reads both of the operator's pools from the database: a
-// coldkey's account in its pool and in its capture the flag pool, each a row of
-// its own kind and label, whether or not partial=true is asked. Once the CTF
-// pool's latest root cannot be read, partial=true names that pool in
-// unavailable_pools beside the pool's row, while an old client, which never
-// sends partial, gets the error answer with no balances. The pass claims the
-// pool it can read and says the ledger is unavailable, naming the other, and a
-// Claim now takes the readable pool's account and keeps its request for the
-// other.
+// With capture the flag on, GET /sn/claim-relay reads both of the operator's
+// pools from the database: a coldkey's account in its pool and in its capture
+// the flag pool, each a row of its own kind and label, whether or not
+// partial=true is asked. Once the CTF pool's latest root cannot be read,
+// partial=true names that pool in unavailable_pools beside the pool's row,
+// while an old client, which never sends partial, gets the error answer with
+// no balances. The pass claims the pool it can read and says the ledger is
+// unavailable, naming the other, and a Claim now takes the readable pool's
+// account and keeps its request for the other.
 func TestDbClaimRelayRouteReadsBothPools(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+		setCtfPoolTestSwitches(t, world.cfg, true, true)
 		ctx := world.ctx
 		key := world.cfg.DeploymentKey()
 		carry, holder := claimRelayTestColdkey(9), claimRelayTestColdkey(1)
@@ -1040,18 +1042,19 @@ func TestDbClaimRelayRouteReadsBothPools(t *testing.T) {
 	})
 }
 
-// Claim now on the real tables and Redis, for a coldkey with an account in each
-// of the operator's pools and no batcher: the first pass pays the pool's
-// account, which starts the coldkey's 30-day limit, a Redis key of its own
-// (model.StartSnClaimRelayLimit), while the request stays for the capture the
-// flag account; the next pass pays that one and ends the request, and the limit
-// keeps its first end. While it runs, the coldkey's new balance waits with the
-// limit's reason and end, and a tap is refused with them; another coldkey taps
-// freely.
+// Claim now on the real tables and Redis, with capture the flag on, for a
+// coldkey with an account in each of the operator's pools and no batcher: the
+// first pass pays the pool's account, which starts the coldkey's 30-day limit,
+// a Redis key of its own (model.StartSnClaimRelayLimit), while the request
+// stays for the capture the flag account; the next pass pays that one and ends
+// the request, and the limit keeps its first end. While it runs, the coldkey's
+// new balance waits with the limit's reason and end, and a tap is refused with
+// them; another coldkey taps freely.
 func TestDbClaimRelayClaimNowLimitIsPerColdkey(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
 		world := newClaimRelayDbWorld(t, small, small)
+		setCtfPoolTestSwitches(t, world.cfg, true, true)
 		ctx := world.ctx
 		key := world.cfg.DeploymentKey()
 		carry, tapped, other := claimRelayTestColdkey(9), claimRelayTestColdkey(1), claimRelayTestColdkey(0)
@@ -1178,7 +1181,8 @@ func claimRelayDbKeys(t testing.TB, raw []byte) []string {
 // and label and an empty unavailable_pools. A pass that cannot read the
 // operator's pool ends there as it did, ledger_unavailable whatever else would
 // stop it (here a low balance), and leaves every Claim now request queued; the
-// old client reads the error and no balances, and the ledger route a 502.
+// old client reads the error and no balances, and the ledger route a 502. The
+// pools_unavailable metric counts the pool.
 func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
@@ -1243,6 +1247,9 @@ func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 		if result.State != SnClaimRelayStateLedgerUnavailable || status.State != SnClaimRelayStateLedgerUnavailable || len(status.UnavailablePools) != 0 || !strings.Contains(status.Detail, "pool 1:") {
 			t.Fatalf("pass %s, status %+v", result, status)
 		}
+		if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); status.PoolsUnavailable != 1 || gauge != 1 {
+			t.Fatalf("pools unavailable %d, metric %v", status.PoolsUnavailable, gauge)
+		}
 		if requests := model.GetSnClaimRelayRequests(ctx, key, 10); len(requests) != 2 {
 			t.Fatalf("requests %+v", requests)
 		}
@@ -1256,15 +1263,16 @@ func TestDbClaimRelayWithCtfOffAnswersAsBefore(t *testing.T) {
 	})
 }
 
-// Once the capture the flag pool has a root, a pass that cannot read the
-// operator's pool still claims the CTF pool's accounts on the real tables and
-// names the operator's pool unavailable; the request of a coldkey that pool's
-// account index records waits for it, and one of a coldkey it does not record,
-// with nothing readable to claim, is given back.
+// With capture the flag on, once its pool has a root, a pass that cannot read
+// the operator's pool still claims the CTF pool's accounts on the real tables
+// and names the operator's pool unavailable; the request of a coldkey that
+// pool's account index records waits for it, and one of a coldkey it does not
+// record, with nothing readable to claim, is given back.
 func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
 		world := newClaimRelayDbWorld(t, small, small)
+		setCtfPoolTestSwitches(t, world.cfg, true, true)
 		ctx := world.ctx
 		key := world.cfg.DeploymentKey()
 		carry := claimRelayTestColdkey(9)
@@ -1283,7 +1291,7 @@ func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 
 		SnClaimRelayPass(ctx)
 		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
-		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{1}) {
+		if status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{1}) || status.PoolsUnavailable != 1 {
 			t.Fatalf("status %+v", status)
 		}
 		if got := paid(); !slices.Equal(got, []string{claimRelayCtfKey(1)}) {
@@ -1292,6 +1300,85 @@ func TestDbClaimRelayClaimsTheCtfPoolWhileThePoolCannotBeRead(t *testing.T) {
 		requests := model.GetSnClaimRelayRequests(ctx, key, 10)
 		if len(requests) != 1 || requests[0].Coldkey != claimRelayTestColdkey(1) {
 			t.Fatalf("requests %+v", requests)
+		}
+	})
+}
+
+// With capture the flag off the claim relay reads no capture the flag pool, so
+// no fault of one can reach a client. Here every read of the operator's CTF
+// pool fails: its finalized root names objects nobody published, and the
+// account index records coldkey 1 there. Whichever switch is off (no ctf.yml or
+// its api block off, or no st.yml ctf block), the pass still claims pool 1 and
+// runs with no pool unavailable, an old client and a partial=true one both read
+// coldkey 1's account in pool 1 whole, and a Claim now is taken and paid.
+// Turned on, the same pool is named unavailable by the pass and fails the old
+// client's answer, so a read of it would show.
+func TestDbClaimRelayReadsNoCtfPoolWithCtfOff(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		world := newClaimRelayDbWorld(t, claimRelayTestAlpha(2*snClaimRelayAutomaticTaoRao), claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+		ctx := world.ctx
+		key := world.cfg.DeploymentKey()
+		// an object store with nothing in it: no read leaves the test
+		SetStLedgerV2ObjectStore(server.NewLocalBlobStore(t.TempDir(), "test"))
+		t.Cleanup(func() { SetStLedgerV2ObjectStore(nil) })
+		zero := uint64(0)
+		model.SetStLedgerV2RootFinalized(ctx, key, &model.StLedgerV2Root{NoId: claimRelayTestCtfPool, Seq: 1, Epoch: 9, Root: [32]byte{0xcf}, Total: *uint256.NewInt(1), LeafCount: 2, LedgerHash: [32]byte{0xcf, 0x01}, RootIndex: &zero}, 95)
+		if err := model.RecordStLedgerV2Root(ctx, key, claimRelayTestCtfPool, 1, 0, [][32]byte{claimRelayTestColdkey(9), claimRelayTestColdkey(1)}, nil); err != nil {
+			t.Fatal(err)
+		}
+		paid := world.payBothPools()
+		clientSession := world.session(1)
+		readsPool1 := func(name string, partial bool) *SnClaimRelayResult {
+			t.Helper()
+			answer, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: partial}, clientSession)
+			if err != nil || answer.Error != nil || len(answer.Accounts) != 1 || answer.Accounts[0].NoId != 1 || answer.Accounts[0].Index != 1 || len(answer.UnavailablePools) != 0 {
+				t.Fatalf("%s, partial %t: %+v (%v)", name, partial, answer, err)
+			}
+			return answer
+		}
+
+		var answer *SnClaimRelayResult
+		for _, off := range []struct {
+			name   string
+			stYml  bool
+			ctfYml bool
+		}{
+			{"neither switch", false, false},
+			{"no ctf.yml, or its api block off", true, false},
+			{"no st.yml ctf block", false, true},
+		} {
+			setCtfPoolTestSwitches(t, world.cfg, off.stYml, off.ctfYml)
+			result := SnClaimRelayPass(ctx)
+			status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+			if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); result.State != SnClaimRelayStateRunning || len(status.UnavailablePools) != 0 || status.PoolsUnavailable != 0 || gauge != 0 {
+				t.Fatalf("%s: pass %s, status %+v, metric %v", off.name, result, status, gauge)
+			}
+			readsPool1(off.name, false)
+			answer = readsPool1(off.name, true)
+		}
+		if got := paid(); !slices.Equal(got, []string{"1/0"}) {
+			t.Fatalf("paid %v", got)
+		}
+		tap, err := SnClaimRelayClaimNow(&SnClaimRelayClaimNowArgs{ColdkeySs58: answer.Accounts[0].ColdkeySs58}, clientSession)
+		if err != nil || !tap.Requested {
+			t.Fatalf("tap %+v (%v)", tap, err)
+		}
+		if result := SnClaimRelayPass(ctx); result.State != SnClaimRelayStateRunning || !slices.Equal(paid(), []string{"1/0", "1/1"}) {
+			t.Fatalf("the tapped pass %s, paid %v", result, paid())
+		}
+
+		// on, the same pool cannot be read
+		setCtfPoolTestSwitches(t, world.cfg, true, true)
+		SnClaimRelayPass(ctx)
+		status := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc())
+		if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); status.State != SnClaimRelayStateLedgerUnavailable || !slices.Equal(status.UnavailablePools, []uint64{claimRelayTestCtfPool}) || status.PoolsUnavailable != 1 || gauge != 1 {
+			t.Fatalf("on: status %+v, metric %v", status, gauge)
+		}
+		if old, err := SnClaimRelay(clientSession); err != nil || old.Error == nil || len(old.Accounts) != 0 {
+			t.Fatalf("on: an old client's answer %+v (%v)", old, err)
+		}
+		if partial, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, clientSession); err != nil || partial.Error != nil || len(partial.Accounts) != 1 || len(partial.UnavailablePools) != 1 || partial.UnavailablePools[0].NoId != claimRelayTestCtfPool {
+			t.Fatalf("on: a partial answer %+v (%v)", partial, err)
 		}
 	})
 }

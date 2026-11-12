@@ -3,9 +3,10 @@ package controller
 // sn_claim_relay_pools_test.go — the claim relay over the operator's two pools,
 // its pool and its capture the flag pool (sn CAPTURETHEFLAG.md §10): the unit is
 // (coldkey, pool), a due account takes its coldkey's other accounts above the
-// floor into the same batch, Claim now claims every pool, and the 30-day limit
-// stays per coldkey. Like sn_claim_relay_test.go, nothing here reads a database,
-// Redis or a network.
+// floor into the same batch, Claim now claims every pool, the 30-day limit stays
+// per coldkey, and the capture the flag pool is read only while capture the flag
+// is on. Like sn_claim_relay_test.go, nothing here reads a database, Redis or a
+// network.
 
 import (
 	"errors"
@@ -16,6 +17,9 @@ import (
 	"time"
 
 	"github.com/holiman/uint256"
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/urnetwork/server"
 )
 
 // The accounts the world's transactions sent, by pool and index, once each.
@@ -321,7 +325,8 @@ func TestClaimRelayOperatorPoolUnavailable(t *testing.T) {
 // cannot read the operator's pool ends there as it did before the CTF pool:
 // the ledger is unavailable whatever else would stop it, here a low balance,
 // nothing is sent, and every request waits, a coldkey's the pool does not
-// record too.
+// record too. The api reads no pool named, as before; the status counts the
+// pool for the metrics.
 func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.T) {
 	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
 	world := newClaimRelayWorld(t, small, small)
@@ -331,8 +336,8 @@ func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.
 	world.tap(5)
 	status := world.pass()
 	requireClaimRelayState(t, status, SnClaimRelayStateLedgerUnavailable)
-	if len(world.txs) != 0 || len(status.UnavailablePools) != 0 {
-		t.Fatalf("sent %d, unavailable %v", len(world.txs), status.UnavailablePools)
+	if len(world.txs) != 0 || len(status.UnavailablePools) != 0 || status.PoolsUnavailable != 1 {
+		t.Fatalf("sent %d, unavailable %v, counted %d", len(world.txs), status.UnavailablePools, status.PoolsUnavailable)
 	}
 	for _, index := range []int{1, 5} {
 		if _, queued := world.requests[claimRelayTestColdkey(index)]; !queued {
@@ -462,7 +467,140 @@ func TestStLedgerV2PoolKind(t *testing.T) {
 			t.Fatalf("%d: %s %q", c.noId, kind, label)
 		}
 	}
-	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}); !slices.Equal(pools, []uint64{1, 1<<32 + 1}) {
+	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}, true); !slices.Equal(pools, []uint64{1, 1<<32 + 1}) {
 		t.Fatalf("own pools %v", pools)
 	}
+	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}, false); !slices.Equal(pools, []uint64{1}) {
+		t.Fatalf("own pools with capture the flag off %v", pools)
+	}
+}
+
+// resetSnCtfApiConfigCache drops the kept read of ctf.yml, so that the next
+// read is the vault's.
+func resetSnCtfApiConfigCache() {
+	cache := &snCtfApiConfigCache
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+	cache.config = nil
+}
+
+// setCtfYmlTestApi sets ctf.yml's api block, one of the two switches of
+// stCtfPoolOn, until the test ends: enabled, or off as an absent ctf.yml reads.
+func setCtfYmlTestApi(t testing.TB, enabled bool) {
+	t.Helper()
+	apiConfigOf := snCtfApiConfigOf
+	snCtfApiConfigOf = func() *snCtfApiConfig {
+		return &snCtfApiConfig{Enabled: enabled, PageUrl: snCtfDefaultPageUrl}
+	}
+	t.Cleanup(func() { snCtfApiConfigOf = apiConfigOf })
+}
+
+// setCtfPoolTestSwitches sets the two switches of stCtfPoolOn until the test
+// ends: st.yml's ctf block, live or none, and ctf.yml's api block, enabled or
+// off, as an absent ctf.yml reads.
+func setCtfPoolTestSwitches(t testing.TB, cfg *StConfig, stYml bool, ctfYml bool) {
+	t.Helper()
+	cfg.Ctf = StCtfConfig{Mode: StCtfModeOff}
+	if stYml {
+		cfg.Ctf = StCtfConfig{Mode: StCtfModeLive, CarryAddress: ctfTestCarry}
+	}
+	setCtfYmlTestApi(t, ctfYml)
+}
+
+// The ledger route and the claim relay read capture the flag pools only while
+// both switches are on: st.yml's ctf block runs capture the flag, in shadow or
+// live, and the vault's ctf.yml enables its api block. With either off (no
+// ctf.yml, one without an api block, its api block off, one that does not
+// parse; no st.yml ctf block, or its mode off) the operator's own pools are
+// its pool alone.
+func TestStCtfPoolOnNeedsBothSwitches(t *testing.T) {
+	t.Cleanup(resetSnCtfApiConfigCache)
+	const enabled = "api:\n  enabled: true\n  page_url: https://ur.xyz/ctf\n"
+	for _, c := range []struct {
+		name string
+		mode StCtfMode
+		// the vault's ctf.yml, "" for none
+		ctfYml string
+		on     bool
+	}{
+		{"no ctf.yml", StCtfModeLive, "", false},
+		{"ctf.yml without an api block", StCtfModeLive, "presence:\n  enabled: true\ncensus:\n  enabled: true\n  first_epoch: 7\n", false},
+		{"ctf.yml with its api block off", StCtfModeLive, "api:\n  enabled: false\n", false},
+		{"ctf.yml that does not parse", StCtfModeLive, "api: [enabled\n", false},
+		{"no st.yml ctf block", "", enabled, false},
+		{"st.yml ctf mode off", StCtfModeOff, enabled, false},
+		{"shadow", StCtfModeShadow, enabled, true},
+		{"live", StCtfModeLive, enabled, true},
+	} {
+		pop := func() {}
+		if c.ctfYml != "" {
+			pop = server.Vault.PushSimpleResource("ctf.yml", []byte(c.ctfYml))
+		}
+		resetSnCtfApiConfigCache()
+		cfg := &StConfig{NoId: 1, Ctf: StCtfConfig{Mode: c.mode}}
+		on := stCtfPoolOn(cfg)
+		pop()
+		if on != c.on {
+			t.Fatalf("%s: on %t", c.name, on)
+		}
+		want := []uint64{1}
+		if c.on {
+			want = append(want, 1<<32+1)
+		}
+		if pools := stLedgerV2OwnPools(cfg, on); !slices.Equal(pools, want) {
+			t.Fatalf("%s: own pools %v", c.name, pools)
+		}
+	}
+	if stCtfPoolOn(nil) {
+		t.Fatal("a server without st.yml reads the capture the flag pool")
+	}
+}
+
+// The pools_unavailable metric counts the pools the relay's latest read could
+// not read, in every pass: the operator's pool when it ends a pass before the
+// capture the flag pool's first root (the api, as before, reads no pool named
+// then), both pools when neither can be read, and the capture the flag pool
+// while the pass claims the other. A pass that ends before reading the ledger
+// carries the count, and a read of every pool clears it.
+func TestClaimRelayPoolsUnavailableMetric(t *testing.T) {
+	over := claimRelayTestAlpha(2 * snClaimRelayAutomaticTaoRao)
+	world := newClaimRelayWorld(t, over)
+	pass := func(name string, state string, unavailable []uint64, count int) {
+		t.Helper()
+		status := world.pass()
+		observeSnClaimRelayPass(status)
+		requireClaimRelayState(t, status, state)
+		if !slices.Equal(status.UnavailablePools, unavailable) || status.PoolsUnavailable != count {
+			t.Fatalf("%s: unavailable %v, counted %d", name, status.UnavailablePools, status.PoolsUnavailable)
+		}
+		if gauge := testutil.ToFloat64(snClaimRelayPoolsUnavailable); gauge != float64(count) {
+			t.Fatalf("%s: pools_unavailable %v, want %d", name, gauge, count)
+		}
+	}
+
+	world.poolLedgerErr = errors.New("the pool's ledger cannot be read")
+	pass("the operator's pool before the first CTF root", SnClaimRelayStateLedgerUnavailable, nil, 1)
+	world.factsErr = errors.New("the chain cannot be read")
+	pass("a pass that ends before the ledger", SnClaimRelayStateChainUnavailable, nil, 1)
+	world.factsErr, world.reconcileErr = nil, errSnClaimRelayInFlight
+	pass("a claim in flight", SnClaimRelayStateInFlight, nil, 1)
+	world.reconcileErr = nil
+
+	world.addCtf(0, claimRelayTestAlpha(10*snClaimRelayFloorTaoRao))
+	world.ctfLedgerErr = errors.New("the capture the flag ledger cannot be read")
+	pass("both pools", SnClaimRelayStateLedgerUnavailable, nil, 2)
+	world.signerErr = errSnClaimRelayNoKey
+	pass("no key", SnClaimRelayStateNoKey, nil, 2)
+	world.signerErr = nil
+
+	world.poolLedgerErr = nil
+	pass("the capture the flag pool", SnClaimRelayStateLedgerUnavailable, []uint64{claimRelayTestCtfPool}, 1)
+	world.ctfLedgerErr = nil
+	pass("every pool read", SnClaimRelayStateRunning, nil, 0)
+	world.factsErr = errors.New("the chain cannot be read")
+	pass("a pass that ends before the ledger after a whole read", SnClaimRelayStateChainUnavailable, nil, 0)
+
+	// a status written before the count was kept names only its pools
+	world.status = &SnClaimRelayStatus{State: SnClaimRelayStateLedgerUnavailable, PassTime: world.nowTime, UnavailablePools: []uint64{claimRelayTestCtfPool}}
+	pass("a pass that ends before the ledger after an older status", SnClaimRelayStateChainUnavailable, nil, 1)
 }
