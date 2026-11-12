@@ -1249,8 +1249,10 @@ func cryptoLoadIntentForToken(ctx context.Context, intentIdText string, token st
 	return intent
 }
 
-// CryptoPaymentStatus answers POST /pay/crypto/status. It reads Postgres
-// only: the scanner keeps the receipts current.
+// CryptoPaymentStatus answers POST /pay/crypto/status. The scanner keeps the
+// receipts of the scanned coins current; an open USDC invoice, which only its
+// webhook or the hourly reconcile credits, is read from the chain here
+// (solana_status_check.go).
 func CryptoPaymentStatus(
 	args *CryptoPaymentStatusArgs,
 	clientSession *session.ClientSession,
@@ -1263,6 +1265,8 @@ func CryptoPaymentStatus(
 	if intent == nil {
 		return &CryptoPaymentStatusResult{Status: CryptoPaymentStatusUnknown}, nil
 	}
+	// a USDC payment its webhook has not delivered is found on the chain
+	intent = cryptoUsdcStatusCheck(clientSession, intent)
 	config := cryptoPayConfigFunc()
 	receipts := []*model.CryptoPaymentReceipt{}
 	if intent.Asset != model.CryptoAssetUsdcSolana {
