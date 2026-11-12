@@ -34,7 +34,30 @@
     "cli": 33,
     "root": 33
   },
-  "next_action": "Audit schema-census planning and execution memory before choosing a query fix or prospectively bounded QA memory adjustment. Preserve the failed run; rerun affected checks and race qualification before deploying recovery authority.",
+  "controlled_reproduction": {
+    "source_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+    "private_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.CeOHaNnO",
+    "test_log_sha256": "3e79b3c2ce9e13501fc75d7a14af5ada1ec871259254381ab789b03e3ce5b649",
+    "query_bytes": 4362508,
+    "query_sha256": "a2bf64150161521e568b31b7d3966395ae6ca24522038e94b7baf7b562e83eec",
+    "artifact_columns": 373,
+    "compiled_migration_head": 961,
+    "database_prefix": 927,
+    "operation": "EXPLAIN (FORMAT JSON, SETTINGS, SUMMARY), jit=off",
+    "postgres_memory_limit_and_peak_bytes": 2147483648,
+    "docker_reported_oom_killed": true,
+    "native_postgres_log": "2026-11-12T08:35:59.856Z: backend 126 terminated by signal 9 during EXPLAIN",
+    "full_query_execution_reached": false,
+    "jit_on_comparison_reached": false,
+    "plan_or_artifact_rows_returned": false,
+    "memory_log_sha256": "88f331ffa08fdb05611d071d391e1b16127f7d329c9c46a5a5282bc698f21044",
+    "initial_inspect_sha256": "7b26df72f1bbc0df35d9cd44f3871b59181d75e548170f9d44d7189b51f0a31a",
+    "final_inspect_sha256": "30cb4861929520cd1a82636c4dd232b86bf03066f90326435812fe0d52af0c1c",
+    "postgres_log_sha256": "f05daa2b437422516ea0026b6017199c55015672dba6370f3b67e9d6d0e53e90",
+    "source_manifest_unchanged_sha256": "9670671eadde912b147725b59ba18c7a48a838cf0c70a95f30811682d60a4219",
+    "owned_fixtures_cleaned_up": true
+  },
+  "next_action": "Fix the unbounded single-query planning footprint while preserving the full artifact census and fault checks. Do not increase the fixture cap again merely to obtain a passing result. Rerun affected ordinary checks and race qualification before deploying recovery authority.",
   "live_attempts_restarted": false,
   "main_database_modified": false
 }

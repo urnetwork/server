@@ -94,7 +94,7 @@
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "isolated_monitor_query_memory_diagnostic_verified_running_no_result_yet",
+      "status": "isolated_monitor_query_planning_oom_reproduced_at_2gib_bounded_query_fix_pending",
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
       "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
       "controller_ordinary_passed": 393,
@@ -110,6 +110,10 @@
       "diagnostic": {
         "source_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
         "verified_running_at": "2026-11-12T08:34:18Z",
+        "terminal_at": "2026-11-12T08:36:00.600993907Z",
+        "result": "failed: PostgreSQL OOM-killed during EXPLAIN with jit=off; query execution never reached",
+        "test_log_sha256": "3e79b3c2ce9e13501fc75d7a14af5ada1ec871259254381ab789b03e3ce5b649",
+        "owned_fixtures_cleaned_up": true,
         "unit": "competition-distributed-recovery-independent-qa-20261112.service",
         "invocation_id": "686b5c07bb194cfeb6e381c150123436",
         "main_pid": 1840830,
