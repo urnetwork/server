@@ -1,9 +1,12 @@
-// A capability measurement tunnel (server/capprobe) observes what its
-// provider negotiates on the wire: connect's per-peer evidence of the
-// end-to-end session and of receive window advertisement (connect
-// DESIGNNOTES §3.13). It is an ordinary provider tunnel whose generated
-// clients attempt end-to-end sessions and record what they see in the
-// measurement's recorder; the URL probe's tunnels keep their sessions off.
+// A capability observation tunnel observes what its provider negotiates on
+// the wire: connect's per-peer evidence of the end-to-end session and of
+// receive window advertisement (connect DESIGNNOTES §3.13). It is an ordinary
+// provider tunnel whose generated clients attempt end-to-end sessions and
+// record what they see in the observation's recorder. Two kinds use it: a
+// capability probe measurement (server/capprobe), in a tunnel of its own, and
+// a URL turn the claim marks for post-quantum (fleetprobe url_e2e.go), whose
+// URL legs ride the session and must not depend on it. Every other URL
+// turn's tunnel keeps its sessions off.
 package providertunnel
 
 import (
@@ -37,9 +40,22 @@ type CapabilityObservation struct {
 	// lost is dialed again at once whatever this is, and that measurement has
 	// lost its tunnel anyway. Zero keeps a probe tunnel's unpaced re-dial.
 	RedialMin time.Duration
+	// How long a generated client holds its first sends to the provider
+	// while the session first establishes (connect's
+	// OpportunisticEstablishHold), so a provider that seals in time carries
+	// them sealed and one that does not gets them in plaintext once it ends.
+	// Zero, the capability probe's, sends at once, in plaintext until the
+	// session seals.
+	EstablishHold time.Duration
+	// A replaced window client is recorded (Tunnel.ClientReplaced) and the
+	// tunnel keeps running, for a measurement that rides traffic the session
+	// must not change: a URL turn that measures post-quantum. False, the
+	// capability probe's, ends the tunnel at a replacement
+	// (ErrTunnelClientReplaced).
+	KeepTunnelOnReplacement bool
 }
 
-// Nil, the URL tunnel's, is valid.
+// Nil, every tunnel's but an observation's, is valid.
 func (self *CapabilityObservation) validate() error {
 	if self != nil && self.Recorder == nil {
 		return ErrCapabilityObservation
@@ -82,6 +98,7 @@ func (self *CapabilityObservation) apply(settings *connect.ClientSettings) {
 		encryption = &copied
 	}
 	encryption.Mode = connect.EncryptionModeOpportunistic
+	encryption.OpportunisticEstablishHold = self.EstablishHold
 	if self.NewPeerClientPublicKeyFetcher != nil {
 		encryption.NewPeerClientPublicKeyFetcher = self.NewPeerClientPublicKeyFetcher
 	}

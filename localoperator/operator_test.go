@@ -166,7 +166,7 @@ func TestDueProvidersMatchTheClientDecode(t *testing.T) {
 	providers := []model.ProviderUrlProbeDue{
 		{ClientId: server.NewId(), CountryCode: "us", Region: "California", CycleStartedAt: claimedAt.Add(-time.Hour),
 			RunsNeeded: 10, SuccessesNeeded: 10, OutcomeCount: 3, ClaimOrdinal: 41, ClaimedAt: claimedAt,
-			CompletedRunCount: &completed, NetworkId: &networkId, IpFamily: connect.IpFamilyDualstack,
+			CompletedRunCount: &completed, NetworkId: &networkId, IpFamily: connect.IpFamilyDualstack, PostQuantum: true,
 			SecurityDestinations: []egresshealth.Destination{{Name: "recheck", Class: egresshealth.ClassSite, Url: "https://recheck.example/"}}},
 		{ClientId: server.NewId(), ClaimOrdinal: 42, ClaimedAt: claimedAt, SecurityDestinations: []egresshealth.Destination{}},
 		{ClientId: server.NewId(), ClaimOrdinal: 43},
@@ -187,6 +187,10 @@ func TestDueProvidersMatchTheClientDecode(t *testing.T) {
 	// the advertised families reach the prober both ways, legacy as empty
 	if decoded[0].IpFamily != egresshealth.IpFamilyDualstack || decoded[1].IpFamily != "" {
 		t.Fatalf("families decoded as %q and %q", decoded[0].IpFamily, decoded[1].IpFamily)
+	}
+	// a post-quantum turn reaches the prober both ways, every other turn as none
+	if !decoded[0].PostQuantum || decoded[1].PostQuantum || decoded[2].PostQuantum {
+		t.Fatalf("post-quantum turns decoded as %t, %t, %t", decoded[0].PostQuantum, decoded[1].PostQuantum, decoded[2].PostQuantum)
 	}
 	// independent of the model's slices: a pass may keep the list
 	got := DueProvidersOf(providers)
