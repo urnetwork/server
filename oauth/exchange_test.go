@@ -33,6 +33,7 @@ import (
 // answering for it.
 type exchangeFixture struct {
 	networkId    server.Id
+	userId       server.Id
 	clientId     server.Id
 	sidecarId    server.Id
 	token        string
@@ -56,6 +57,7 @@ func newExchangeFixture(t testing.TB) *exchangeFixture {
 	client.SetStrictExp(true)
 	self := &exchangeFixture{
 		networkId:  network.NetworkId,
+		userId:     network.UserId,
 		clientId:   clientId,
 		sidecarId:  server.NewId(),
 		token:      client.Testing_Sign(),
