@@ -325,8 +325,8 @@ func TestClaimRelayOperatorPoolUnavailable(t *testing.T) {
 // cannot read the operator's pool ends there as it did before the CTF pool:
 // the ledger is unavailable whatever else would stop it, here a low balance,
 // nothing is sent, and every request waits, a coldkey's the pool does not
-// record too. The api reads no pool named, as before; the metrics count the
-// pool.
+// record too. The api reads no pool named, as before; the status counts the
+// pool for the metrics.
 func TestClaimRelayOperatorPoolUnavailableBeforeTheCtfPoolsFirstRoot(t *testing.T) {
 	small := claimRelayTestAlpha(10 * snClaimRelayFloorTaoRao)
 	world := newClaimRelayWorld(t, small, small)
@@ -599,4 +599,8 @@ func TestClaimRelayPoolsUnavailableMetric(t *testing.T) {
 	pass("every pool read", SnClaimRelayStateRunning, nil, 0)
 	world.factsErr = errors.New("the chain cannot be read")
 	pass("a pass that ends before the ledger after a whole read", SnClaimRelayStateChainUnavailable, nil, 0)
+
+	// a status written before the count was kept names only its pools
+	world.status = &SnClaimRelayStatus{State: SnClaimRelayStateLedgerUnavailable, PassTime: world.nowTime, UnavailablePools: []uint64{claimRelayTestCtfPool}}
+	pass("a pass that ends before the ledger after an older status", SnClaimRelayStateChainUnavailable, nil, 1)
 }

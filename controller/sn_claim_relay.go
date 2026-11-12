@@ -9,7 +9,8 @@ package controller
 // Policy (owner, question 1). Everything is in TAO value, since gas is paid in
 // TAO:
 //   - the relay's unit is a coldkey's account in one of the operator's pools:
-//     its pool and its capture the flag pool (sn CAPTURETHEFLAG.md §10);
+//     its pool and, while capture the flag is on (stCtfPoolOn), its capture
+//     the flag pool (sn CAPTURETHEFLAG.md §10);
 //   - an account is claimed automatically once it is worth 0.0125 TAO. When one
 //     of a coldkey's accounts is due, its other accounts above the transfer
 //     floor of 0.0001 TAO go in the same claim batch: a capture the flag
@@ -28,7 +29,8 @@ package controller
 //
 // Stops, all of them fail closed:
 //   - no relayer key: nothing is read or sent, and the status says so. This is
-//     the only gate; there is no other setting;
+//     the only gate of the relay; the capture the flag pool has its own,
+//     stCtfPoolOn, and while it is off the relay neither reads nor claims it;
 //   - a gas price over the ceiling;
 //   - a claim's gas jumping, which is what griefing looks like: third parties
 //     filling vault2's staking-hotkey list take a claim from about 150,000 gas
@@ -505,8 +507,9 @@ func (self *snClaimRelay) pass(ctx context.Context) *SnClaimRelayStatus {
 	status := &SnClaimRelayStatus{State: SnClaimRelayStateRunning, PassTime: now}
 	if previous := self.lastStatus(ctx); previous != nil {
 		status.Refusals = snClaimRelayLiveRefusals(previous.Refusals, now)
-		// what the latest read found, until this pass reads the ledger
-		status.PoolsUnavailable = previous.PoolsUnavailable
+		// what the latest read found, until this pass reads the ledger; a
+		// status written before the count was kept names only its pools
+		status.PoolsUnavailable = max(previous.PoolsUnavailable, len(previous.UnavailablePools))
 	}
 	self.run(ctx, now, status)
 	// A pool that cannot be read is a fault even while the others are claimed,

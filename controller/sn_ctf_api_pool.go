@@ -25,7 +25,9 @@ func stCtfPoolId(cfg *StConfig) (uint64, bool) {
 // live) and ctf.yml's api block enables it. While either is off they read
 // none, not even one the account index records a coldkey in, so no fault of a
 // capture the flag pool can reach a client; the pool's accounts are answered
-// and claimed again once both are on.
+// and claimed again once both are on. A change of ctf.yml takes effect as each
+// process reads it again, within a minute (snCtfApiConfigTtl), and the relay's
+// answers keep its last pass's state until the next pass.
 func stCtfPoolOn(cfg *StConfig) bool {
 	return cfg != nil && cfg.Ctf.On() && snCtfApiConfigOf().Enabled
 }
