@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T08:20:06.473979Z",
+  "observed_at": "2026-11-12T08:43:16.216675Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -17,14 +17,14 @@
   },
   "runtime_status": {
     "intake_ready": true,
-    "grading_ready": false,
-    "publication_held": true,
-    "diagnosis": "Both native evaluations continue. Host-registration freshness after custody handback remains the observed readiness problem; explicit holds were false at the last direct check. The prior Sille attempt reconciled and succeeded without a measurement restart or deadline extension."
+    "grading_ready": true,
+    "publication_held": false,
+    "diagnosis": "Goofe completed 9/9, exited zero and verified both cleanup boundaries. Automatic reconciliation advanced fence 27 to 28 with the same attempt/start/deadline, received 256 files (202552782 bytes), and refreshed host liveness. Central archival/score recording remains pending. Sille continues native measurements on its original clock."
   },
   "queue": {
     "succeeded": 11,
     "failed": 2,
-    "queued": 4,
+    "queued": 5,
     "running": 2
   },
   "active_attempts": [
@@ -33,9 +33,12 @@
       "host_id": "goofe",
       "started_at": "2026-11-12T07:10:20.253976",
       "deadline": "2026-11-12T10:10:20.253976",
-      "observed_phase": "candidate_measurements",
-      "candidate_completed": 7,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:40:14.196945Z"
+      "observed_phase": "native_succeeded_central_retention_pending",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "database_custody": "automatically_reconciled_fence_28_original_clock_preserved"
     },
     {
       "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
@@ -43,7 +46,7 @@
       "started_at": "2026-11-12T07:37:00.304027",
       "deadline": "2026-11-12T10:37:00.304027",
       "observed_phase": "candidate_measurements",
-      "candidate_completed": 3,
+      "candidate_completed": 6,
       "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:43:32.322963Z",
       "reattachment_verified": false
     }
