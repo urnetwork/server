@@ -27,10 +27,11 @@ type competitionHeartbeatSettings struct {
 	// existing twenty-second owner reserve. This is a total call cap, not
 	// extra attempts or a fresh timeout after historical retries are spent.
 	ScopeLockMaximumAttempts int
-	// Exact rolled-back distributed pre-business deadlines share this total
-	// call ceiling inside the same twenty-second owner and both leases.
-	// Nonpositive disables this new prefix continuation.
-	PrefixMaximumAttempts int
+	// Exact returned-idle, acknowledged-rollback distributed prefix/final-slot
+	// deadlines share one total call ceiling inside the same twenty-second
+	// owner and both leases. Nonpositive preserves historical final-slot
+	// retries and disables the new pre-business prefix continuation.
+	DistributedReturnedRollbackMaximumAttempts int
 	// Independent metadata budget; never extends the evaluation or its lease.
 	CompletionRetry competitionLeaseRetrySettings
 }
@@ -38,7 +39,7 @@ type competitionHeartbeatSettings struct {
 // Retains fifteen-second cleanup and independently owned default retry policies.
 func defaultCompetitionHeartbeatSettings() competitionHeartbeatSettings {
 	return competitionHeartbeatSettings{HandBackTimeout: 15 * time.Second,
-		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), ScopeLockMaximumAttempts: 8, PrefixMaximumAttempts: 8, CompletionRetry: defaultCompetitionLeaseRetrySettings()}
+		LeaseRetry: defaultCompetitionLeaseRetrySettings(), AcquireRetry: defaultCompetitionHeartbeatAcquireRetrySettings(), ScopeLockMaximumAttempts: 8, DistributedReturnedRollbackMaximumAttempts: 8, CompletionRetry: defaultCompetitionLeaseRetrySettings()}
 }
 
 // Only fixed categories, a validated PostgreSQL code, an opaque digest and

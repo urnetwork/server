@@ -1,6 +1,6 @@
-// Disposable PostgreSQL instruments only the observed transaction-local
-// configuration statement. Production SQL stays unchanged; explicit server
-// wait/cancellation/rollback acknowledgements prove three returned failures.
+// Disposable PostgreSQL instruments only reviewed transaction-local config or
+// the final slot UPDATE. Production SQL stays unchanged; actual server wait,
+// cancellation and rollback acknowledgements prove three returned failures.
 package controller
 
 import (
@@ -32,6 +32,13 @@ func (self *competitionHeartbeatPrefixPgBarrier) unlock() {
 
 // A live original claim is renewed, never rerun or given a replacement clock.
 func TestCompetitionHeartbeatPrefixRetryPgThreeRollbacksThenFourthSuccess(t *testing.T) {
+	testCompetitionHeartbeatReturnedRollbackPg(t, false)
+}
+
+// Both exact source graphs share actual server-wait/cancellation/rollback and
+// cleanup ownership. Only isolated instrumentation and proof position differ.
+func testCompetitionHeartbeatReturnedRollbackPg(t *testing.T, finalSlot bool) {
+	t.Helper()
 	for _, historicalCap := range []bool{true, false} {
 		env := server.DefaultTestEnv()
 		env.RerunCount = 0
@@ -59,6 +66,26 @@ func TestCompetitionHeartbeatPrefixRetryPgThreeRollbacksThenFourthSuccess(t *tes
 				server.Raise(tx.QueryRow(watchdog, "SELECT current_database()").Scan(&database))
 				if !strings.HasPrefix(database, "test_") {
 					panic("prefix instrumentation requires its isolated generated test database")
+				}
+				if finalSlot {
+					server.RaisePgResult(tx.Exec(watchdog, `CREATE SEQUENCE synthetic_returned_slot_calls;
+					 CREATE FUNCTION synthetic_returned_slot_latency() RETURNS trigger AS $body$
+					 DECLARE call_number bigint;
+					 BEGIN
+					  IF NEW.job_id::text=TG_ARGV[0] AND NEW.lease_expires_at>OLD.lease_expires_at THEN
+					   call_number:=nextval('synthetic_returned_slot_calls'::regclass);
+					   IF call_number<=3 THEN
+					    PERFORM set_config('lock_timeout','0',true);
+					    PERFORM set_config('application_name',TG_ARGV[3],true);
+					    PERFORM pg_advisory_xact_lock(TG_ARGV[1]::integer,(TG_ARGV[2]::integer+call_number)::integer);
+					   END IF;
+					  END IF;
+					  RETURN NEW;
+					 END $body$ LANGUAGE plpgsql;`))
+					server.RaisePgResult(tx.Exec(watchdog, fmt.Sprintf(`CREATE TRIGGER synthetic_returned_slot_latency
+					 BEFORE UPDATE OF lease_expires_at ON competition_execution_slot FOR EACH ROW
+					 EXECUTE FUNCTION synthetic_returned_slot_latency('%s','%d','%d','%s')`, job.JobId.String(), class, firstObject, applicationName)))
+					return
 				}
 				server.RaisePgResult(tx.Exec(watchdog, fmt.Sprintf(`CREATE SCHEMA synthetic_prefix;
 				 CREATE SEQUENCE synthetic_prefix.calls;
@@ -156,7 +183,7 @@ func TestCompetitionHeartbeatPrefixRetryPgThreeRollbacksThenFourthSuccess(t *tes
 			settings.LeaseRetry.Now = time.Now
 			settings.AcquireRetry.AttemptTimeout = 2 * time.Second
 			if historicalCap {
-				settings.PrefixMaximumAttempts = settings.LeaseRetry.MaximumAttempts
+				settings.DistributedReturnedRollbackMaximumAttempts = settings.LeaseRetry.MaximumAttempts
 			}
 			originalWait := settings.LeaseRetry.Wait
 			settings.LeaseRetry.Wait = func(ctx context.Context, delay time.Duration) error {
@@ -240,10 +267,20 @@ func TestCompetitionHeartbeatPrefixRetryPgThreeRollbacksThenFourthSuccess(t *tes
 					tb.Fatal("actual prefix statement/rollback/release did not return")
 				}
 				proof, ok := returned.err.(competitionHeartbeatDatabaseError)
-				if returned.ordinal != ordinal || !ok || !competitionHeartbeatDistributedPreBusinessDeadline(returned.err) || proof.snapshot.Step != competitionHeartbeatDatabaseSupervisorAuthority || proof.snapshot.SqlStatements != 8 ||
-					len(proof.snapshot.Statements) != 8 || proof.snapshot.Statements[7].Ordinal != 2 || proof.snapshot.Statements[7].Kind != "exec" || proof.snapshot.Transaction.CommitAttempts != 0 ||
+				if returned.ordinal != ordinal || !ok || proof.snapshot.Transaction.CommitAttempts != 0 ||
 					proof.snapshot.Transaction.RollbackAcknowledged != 1 || proof.snapshot.Transaction.ReleaseReturned != 1 || proof.snapshot.Transaction.LastRelease.Disposition != server.DbTxReleaseIdle {
-					tb.Fatal("actual prefix failed to produce its exact returned no-business proof", ordinal, competitionHeartbeatFailureDetails(returned.err))
+					tb.Fatal("actual heartbeat failed to produce its exact returned rollback proof", ordinal, competitionHeartbeatFailureDetails(returned.err))
+				}
+				if finalSlot {
+					if !competitionHeartbeatDistributedSlotUpdateDeadline(returned.err) || competitionHeartbeatDistributedPreBusinessDeadline(returned.err) ||
+						proof.snapshot.Step != competitionHeartbeatDatabaseSlotUpdate || proof.snapshot.SqlStatements != 12 || len(proof.snapshot.Statements) != 12 ||
+						proof.snapshot.Statements[10].Step != competitionHeartbeatDatabaseSlotUpdate || proof.snapshot.Statements[10].Succeeded ||
+						proof.snapshot.Statements[11].Step != competitionHeartbeatDatabaseJobUpdate || !proof.snapshot.Statements[11].Succeeded {
+						tb.Fatal("actual final-slot rollback lost its exact failed slot and completed job UPDATE proof", competitionHeartbeatFailureDetails(returned.err))
+					}
+				} else if !competitionHeartbeatDistributedPreBusinessDeadline(returned.err) || proof.snapshot.Step != competitionHeartbeatDatabaseSupervisorAuthority || proof.snapshot.SqlStatements != 8 ||
+					len(proof.snapshot.Statements) != 8 || proof.snapshot.Statements[7].Ordinal != 2 || proof.snapshot.Statements[7].Kind != "exec" {
+					tb.Fatal("actual prefix lost its exact failed configuration proof", competitionHeartbeatFailureDetails(returned.err))
 				}
 				if after := readCompetitionDistributedMergedHeartbeat(watchdog, job.JobId); !reflect.DeepEqual(before, after) {
 					tb.Fatal("rolled-back prefix changed the original committed custody", before, after)
