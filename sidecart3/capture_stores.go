@@ -2,7 +2,8 @@ package sidecart3
 
 // §22.7's CC3 on T3 (TEST-M2-09; R-TEST-3, I-1, I-2, I-18): what T3's real stores hold, added to a Net's capture as
 // sources its scan reads at each Scan, so a canary or a key in any stored byte is found in every form the scan
-// knows, streaming, never sampled:
+// knows, never sampled (an object streams to the scan; a Redis key's reads and a Postgres table's pages are held
+// whole until the scan reads them, which this draft leaves to the review phase):
 //
 //   - every object in every metadata cluster and the segment cluster: its key, which is data too, its metadata and
 //     its body, read through the Net's host under InspectContext, so the capture takes no plan and leaves no
@@ -407,8 +408,8 @@ func captureRedisKey(ctx context.Context, client server.RedisClient, key string,
 	return body.Bytes(), nil
 }
 
-// Every row of each table, each table an item that streams its rows as Postgres's JSON text of each, a page at a
-// time, in a read-only transaction.
+// Every row of each table, each table an item of Postgres's JSON text of its rows, read a page at a time, each page
+// in a read-only transaction, and held whole until the scan reads it.
 func capturePostgres(ctx context.Context, tables []string, settings *CaptureStoresSettings, report *CaptureStoresReport) []*sidecartest.PrivacyItem {
 	reader := &postgresReader{}
 	present := []string{}
