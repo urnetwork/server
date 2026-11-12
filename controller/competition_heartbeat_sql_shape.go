@@ -11,20 +11,21 @@ import (
 )
 
 const competitionHeartbeatLegacySlotShape = "legacy-automated-slot-update/v1"
+const competitionHeartbeatScopeLockShape = "automated-first-scope-lock/v1"
+const competitionHeartbeatDistributedSlotShape = "distributed-automated-slot-update/v1"
+
+// Source-owned statement descriptors never carry SQL arguments or private data.
+type competitionHeartbeatSqlStatement struct {
+	step competitionHeartbeatDatabaseStep
+	kind string
+	sql  string
+}
 
 // These literal statements match the exact current-main helper graph. A
 // changed helper, extra method, reordered statement or transaction-control SQL
 // invalidates continuation without changing the underlying database call.
-func competitionHeartbeatLegacySlotStatements() []struct {
-	step competitionHeartbeatDatabaseStep
-	kind string
-	sql  string
-} {
-	return []struct {
-		step competitionHeartbeatDatabaseStep
-		kind string
-		sql  string
-	}{
+func competitionHeartbeatLegacySlotStatements() []competitionHeartbeatSqlStatement {
+	return []competitionHeartbeatSqlStatement{
 		{step: competitionHeartbeatDatabaseScopeLock, kind: "exec", sql: "SELECT pg_advisory_xact_lock(hashtextextended($1,0))"},
 		{step: competitionHeartbeatDatabaseSlotLock, kind: "row_scan", sql: "SELECT lease_expires_at FROM competition_worker_slot WHERE slot_id=1 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE"},
 		{step: competitionHeartbeatDatabaseJobLock, kind: "row_scan", sql: "SELECT lease_expires_at,round_id,evaluation_cycle,attempt_count FROM competition_job WHERE job_id=$1 AND state='running' AND lease_owner=$2 AND lease_expires_at IS NOT NULL FOR UPDATE"},
@@ -37,6 +38,22 @@ func competitionHeartbeatLegacySlotStatements() []struct {
 	}
 }
 
+// A distributed heartbeat authenticates its host/fence, then updates the job
+// before its physical slot. This exact prefix is distinct from the singleton.
+func competitionHeartbeatDistributedSlotStatements() []competitionHeartbeatSqlStatement {
+	legacy := competitionHeartbeatLegacySlotStatements()
+	return []competitionHeartbeatSqlStatement{
+		legacy[0],
+		{step: competitionHeartbeatDatabaseSlotLock, kind: "row_scan", sql: "SELECT lease_expires_at FROM competition_execution_slot WHERE slot_id=$3 AND worker_id=$1 AND job_id=$2 AND lease_expires_at IS NOT NULL FOR UPDATE"},
+		legacy[2], legacy[3],
+		{step: competitionHeartbeatDatabaseJobAuthority, kind: "row_scan", sql: "SELECT EXISTS(SELECT 1 FROM competition_job j JOIN competition_execution_slot s ON s.slot_id=j.executor_slot_id WHERE j.job_id=$1 AND j.executor_host_id=$2 AND j.executor_slot_id=$3 AND j.executor_fencing_token=$4 AND s.host_id=j.executor_host_id AND s.job_id=j.job_id AND s.fencing_token=j.executor_fencing_token)"},
+		{step: competitionHeartbeatDatabaseJobAuthority, kind: "exec", sql: "SELECT set_config('urnetwork.competition_executor_host',$1,true), set_config('urnetwork.competition_executor_slot',$2,true),set_config('urnetwork.competition_executor_fence',$3,true)"},
+		legacy[4], legacy[5], legacy[6], legacy[7],
+		{step: competitionHeartbeatDatabaseJobUpdate, kind: "exec", sql: "UPDATE competition_job SET lease_expires_at = $3 WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at"},
+		{step: competitionHeartbeatDatabaseSlotUpdate, kind: "exec", sql: "UPDATE competition_execution_slot SET lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = $5 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at"},
+	}
+}
+
 // One source-selected class spans the complete invocation, never a caller's
 // error text. The cumulative SQL index intentionally does not reset on retry.
 func (self *competitionHeartbeatDatabaseObservation) observeSql(statement *competitionHeartbeatStatementObservation, sql string) {
@@ -45,7 +62,19 @@ func (self *competitionHeartbeatDatabaseObservation) observeSql(statement *compe
 	}
 	self.sqlCount++
 	statements := competitionHeartbeatLegacySlotStatements()
-	if self.sqlShape != competitionHeartbeatLegacySlotShape || self.sqlCount == 0 || self.sqlCount > uint64(len(statements)) || statement == nil {
+	if self.sqlShape == competitionHeartbeatScopeLockShape {
+		if self.sqlCount != 1 || statement == nil || statement.Step != competitionHeartbeatDatabaseScopeLock || statement.Kind != "exec" || strings.Join(strings.Fields(sql), " ") != statements[0].sql {
+			self.sqlValid = false
+		}
+		return
+	}
+	if self.sqlShape == competitionHeartbeatDistributedSlotShape {
+		statements = competitionHeartbeatDistributedSlotStatements()
+	} else if self.sqlShape != competitionHeartbeatLegacySlotShape {
+		self.sqlValid = false
+		return
+	}
+	if self.sqlCount == 0 || self.sqlCount > uint64(len(statements)) || statement == nil {
 		self.sqlValid = false
 		return
 	}
