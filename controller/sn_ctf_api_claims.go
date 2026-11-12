@@ -4,8 +4,9 @@ package controller
 // (sn_ctf_api_wins.go): each winning coldkey's account in the CTF pool, its
 // cumulative in each finalized root that pays one of its wins, and vault2's
 // claimed. The answer gives them snCtfClaimsTimeout, about five seconds;
-// whatever is not read by then answers claimed null, so a claim state the
-// chain cannot give in time never fails the answer, nor holds it past that.
+// vault2's claimed not read by then is the account's last value read, and a
+// state with none answers claimed null, so a claim state the chain cannot give
+// in time never fails the answer, nor holds it past that.
 //
 //   - The accounts come from the server's records and the ledger objects, each
 //     read once for all of the answer's coldkeys: the count of recorded
@@ -13,13 +14,16 @@ package controller
 //     and the record of each root's deltas.
 //   - vault2's claimed is read at one finalized block per answer, read once,
 //     in eth_call batches of stMaximumEVMRPCBatchCalls, the coldkeys of the
-//     newest wins first. Each value is kept for snCtfClaimedTtl, so an answer
-//     reads only the accounts no answer has read lately, and every coldkey is
-//     read however many a network has.
+//     newest wins first. Each value is answered as read for snCtfClaimedTtl,
+//     so an answer reads only the accounts no answer has read lately, and
+//     every coldkey is read however many a network has. Past that it is the
+//     account's last value read, answered when a fresh read fails or does not
+//     finish in time.
 //   - Every read runs on the request's own goroutine: nothing it starts
 //     outlives the request.
 
 import (
+	"container/list"
 	"context"
 	"fmt"
 	"sync"
@@ -43,9 +47,12 @@ import (
 // unless another reader read the account in the meantime.
 const snCtfClaimedTtl = 25 * time.Second
 
-// The most claimed values kept. Past it the expired ones are dropped, and all
-// of them when that is not enough.
-const snCtfClaimedCacheLimit = 1 << 16
+// The most accounts whose claimed is kept, the least recently used dropped
+// first. A value is kept past snCtfClaimedTtl as the account's last read, which
+// an answer gives when a fresh read of the account fails or does not finish in
+// time, so a slow chain does not take a network's won lines away. Tests lower
+// it.
+var snCtfClaimedCacheLimit = 1 << 18
 
 type snCtfClaimedKey struct {
 	deploymentKey model.StDeploymentKey
@@ -55,13 +62,17 @@ type snCtfClaimedKey struct {
 }
 
 type snCtfClaimedRead struct {
+	key      snCtfClaimedKey
 	claimed  uint256.Int
 	readTime time.Time
 }
 
 var snCtfClaimedCache struct {
-	lock  sync.Mutex
-	reads map[snCtfClaimedKey]snCtfClaimedRead
+	lock sync.Mutex
+	// each key's element of recency, whose value is its *snCtfClaimedRead
+	reads map[snCtfClaimedKey]*list.Element
+	// the most recently used first
+	recency *list.List
 }
 
 // snCtfClaimedNow is the claimed cache's clock. Tests replace it.
@@ -71,7 +82,41 @@ func snCtfResetClaimedCache() {
 	cache := &snCtfClaimedCache
 	cache.lock.Lock()
 	defer cache.lock.Unlock()
-	cache.reads = nil
+	cache.reads, cache.recency = nil, nil
+}
+
+// snCtfClaimedLast is the last value read of key, nil when none is kept, which
+// becomes the most recently used. The caller holds the cache's lock.
+func snCtfClaimedLast(key snCtfClaimedKey) *snCtfClaimedRead {
+	cache := &snCtfClaimedCache
+	element, ok := cache.reads[key]
+	if !ok {
+		return nil
+	}
+	cache.recency.MoveToFront(element)
+	return element.Value.(*snCtfClaimedRead)
+}
+
+// snCtfClaimedKeep keeps a value read of key as the most recently used,
+// dropping the least recently used past snCtfClaimedCacheLimit. The caller
+// holds the cache's lock.
+func snCtfClaimedKeep(key snCtfClaimedKey, claimed uint256.Int, readTime time.Time) {
+	cache := &snCtfClaimedCache
+	if cache.reads == nil {
+		cache.reads, cache.recency = map[snCtfClaimedKey]*list.Element{}, list.New()
+	}
+	if element, ok := cache.reads[key]; ok {
+		read := element.Value.(*snCtfClaimedRead)
+		read.claimed, read.readTime = claimed, readTime
+		cache.recency.MoveToFront(element)
+		return
+	}
+	cache.reads[key] = cache.recency.PushFront(&snCtfClaimedRead{key: key, claimed: claimed, readTime: readTime})
+	for snCtfClaimedCacheLimit < cache.recency.Len() {
+		oldest := cache.recency.Back()
+		cache.recency.Remove(oldest)
+		delete(cache.reads, oldest.Value.(*snCtfClaimedRead).key)
+	}
 }
 
 // snCtfClaimedOf is vault2's claimed of each index of the CTF pool, by index.
@@ -79,8 +124,11 @@ func snCtfResetClaimedCache() {
 // read. The others are read at one finalized block, which is read once, a
 // batch of stMaximumEVMRPCBatchCalls at a time in the indexes' order, and each
 // batch is kept as soon as it is read, as of the time this read began. An
-// index whose value is not read before ctx ends, or whose batch the chain
-// refuses, is left out.
+// index whose value is not read before ctx ends, or whose read fails, is
+// answered with the last value read for it, however old: claimed only grows,
+// so that value errs only by reading a claimed win as not claimed a little
+// longer. An index this instance has not read, or no longer keeps, is left
+// out.
 func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes []uint64) map[uint64]uint256.Int {
 	claimed := map[uint64]uint256.Int{}
 	keyOf := func(index uint64) snCtfClaimedKey {
@@ -96,7 +144,7 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 			continue
 		}
 		listed[index] = true
-		if read, ok := cache.reads[keyOf(index)]; ok && now.Sub(read.readTime) < snCtfClaimedTtl {
+		if read := snCtfClaimedLast(keyOf(index)); read != nil && now.Sub(read.readTime) < snCtfClaimedTtl {
 			claimed[index] = read.claimed
 		} else {
 			unread = append(unread, index)
@@ -106,22 +154,47 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 	if len(unread) == 0 {
 		return claimed
 	}
+	snCtfReadClaimed(ctx, poolId, unread, now, keyOf, claimed)
+	// what was not read now: the last value read, whatever its age
+	stale := 0
+	cache.lock.Lock()
+	for _, index := range unread {
+		if _, ok := claimed[index]; ok {
+			continue
+		}
+		if read := snCtfClaimedLast(keyOf(index)); read != nil {
+			claimed[index] = read.claimed
+			stale += 1
+		}
+	}
+	cache.lock.Unlock()
+	if 0 < stale {
+		glog.Infof("[sn]ctf claimed of %d accounts of pool %d answered as last read\n", stale, poolId)
+	}
+	return claimed
+}
 
+// snCtfReadClaimed reads vault2's claimed of the indexes into claimed at one
+// finalized block, which it reads once, a batch at a time while ctx lasts,
+// keeping each batch as soon as it is read as of readTime. It stops at the
+// first read that fails.
+func snCtfReadClaimed(ctx context.Context, poolId uint64, indexes []uint64, readTime time.Time, keyOf func(uint64) snCtfClaimedKey, claimed map[uint64]uint256.Int) {
+	cache := &snCtfClaimedCache
 	client := stLedgerV2Client()
 	if client == nil {
-		glog.Infof("[sn]ctf claimed of %d accounts of pool %d: %s\n", len(unread), poolId, errStLedgerV2NotConfigured)
-		return claimed
+		glog.Infof("[sn]ctf claimed of %d accounts of pool %d: %s\n", len(indexes), poolId, errStLedgerV2NotConfigured)
+		return
 	}
 	var block uint64
 	if err := stLedgerV2Guard(func() (err error) {
 		block, err = client.LedgerV2FinalizedBlock(ctx)
 		return
 	}); err != nil {
-		glog.Infof("[sn]ctf claimed of %d accounts of pool %d: %s\n", len(unread), poolId, err)
-		return claimed
+		glog.Infof("[sn]ctf claimed of %d accounts of pool %d: %s\n", len(indexes), poolId, err)
+		return
 	}
-	for start := 0; start < len(unread); start += stMaximumEVMRPCBatchCalls {
-		batch := unread[start:min(start+stMaximumEVMRPCBatchCalls, len(unread))]
+	for start := 0; start < len(indexes); start += stMaximumEVMRPCBatchCalls {
+		batch := indexes[start:min(start+stMaximumEVMRPCBatchCalls, len(indexes))]
 		var values []uint256.Int
 		err := stLedgerV2Guard(func() (err error) {
 			values, err = client.LedgerV2ClaimedAt(ctx, poolId, block, batch)
@@ -131,32 +204,18 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 			err = fmt.Errorf("%d values read for %d accounts", len(values), len(batch))
 		}
 		if err != nil {
-			glog.Infof("[sn]ctf claimed of %d accounts of pool %d at block %d, %d of them read: %s\n", len(unread), poolId, block, start, err)
-			break
+			glog.Infof("[sn]ctf claimed of %d accounts of pool %d at block %d, %d of them read: %s\n", len(indexes), poolId, block, start, err)
+			return
 		}
 		cache.lock.Lock()
-		if cache.reads == nil {
-			cache.reads = map[snCtfClaimedKey]snCtfClaimedRead{}
-		}
-		if snCtfClaimedCacheLimit < len(cache.reads)+len(batch) {
-			for key, read := range cache.reads {
-				if snCtfClaimedTtl <= now.Sub(read.readTime) {
-					delete(cache.reads, key)
-				}
-			}
-			if snCtfClaimedCacheLimit < len(cache.reads)+len(batch) {
-				cache.reads = map[snCtfClaimedKey]snCtfClaimedRead{}
-			}
-		}
 		for i, index := range batch {
 			claimed[index] = values[i]
 			// as of when the read began, never later: a value read slowly
 			// expires no later than one read quickly
-			cache.reads[keyOf(index)] = snCtfClaimedRead{claimed: values[i], readTime: now}
+			snCtfClaimedKeep(keyOf(index), values[i], readTime)
 		}
 		cache.lock.Unlock()
 	}
-	return claimed
 }
 
 // snCtfAccount is one coldkey's account in the CTF pool as a claim sees it,
