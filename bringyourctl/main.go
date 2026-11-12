@@ -176,6 +176,7 @@ Usage:
     bringyourctl st v2-activation
     bringyourctl st v1-sweep-status
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
+    bringyourctl st ctf-outage --start=<start_time> --end=<end_time> --reason=<reason> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
     bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
@@ -657,6 +658,8 @@ func main() {
 			stV2Activation(opts)
 		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {
 			stV2ActivationClear(opts)
+		} else if ctfOutage, _ := opts.Bool("ctf-outage"); ctfOutage {
+			stCtfOutage(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
