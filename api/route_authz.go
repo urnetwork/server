@@ -238,6 +238,7 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /subscription/create-payment-id":          routeAccessClient,
 	"POST /subscription/verify-play-purchase":       routeAccessClient,
 	"POST /subscription/verify-apple-transaction":   routeAccessClient,
+	"POST /subscription/verify-stripe-checkout":     routeAccessClient,
 	"GET /x402/skus":                                routeAccessPublic,
 	"POST /x402/purchase":                           routeAccessClient,
 	"POST /device/add":                              routeAccessNetwork, // device sharing/adoption into the network
