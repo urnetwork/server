@@ -31,12 +31,12 @@ import (
 )
 
 // The probe's slot is the shard registry's second to last, apart from every
-// URL shard the URL probe's settings accept and from the capability probe's
+// URL shard the URL probe's settings accept and from the retired capability probe's
 // last slot, so no two probes retire each other's shard owner.
 func TestProviderBandwidthProbeShardSlotIsItsOwn(t *testing.T) {
 	connect.AssertEqual(t, providerBandwidthProbeShardIndex, 254)
 	connect.AssertEqual(t, providerBandwidthProbeShardCount, 256)
-	connect.AssertEqual(t, providerBandwidthProbeShardIndex != capabilityProbeShardIndex, true)
+	connect.AssertEqual(t, providerBandwidthProbeShardIndex != retiredCapabilityProbeShardIndex, true)
 	connect.AssertEqual(t, maxProviderUrlProbeShardCount, providerBandwidthProbeShardIndex)
 	for _, c := range []struct {
 		urlShardCount int

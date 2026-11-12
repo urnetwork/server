@@ -46,9 +46,6 @@ func TestCapabilityProbesDashboardReadsOneFreshCensus(t *testing.T) {
 		"urnetwork_stats_provider_capability_key_exchanges{",
 		"urnetwork_stats_provider_capabilities_observed_at_seconds{",
 		"urnetwork_stats_provider_modern_gate_shadow{",
-		"urnetwork_capability_probe_last_pass_timestamp_seconds{",
-		"urnetwork_capability_probe_providers_total{",
-		"urnetwork_capability_probe_readings_total{",
 	} {
 		if !strings.Contains(joined, metric) {
 			t.Errorf("capability probes dashboard does not read %s", metric)

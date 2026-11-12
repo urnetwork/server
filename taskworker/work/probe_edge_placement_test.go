@@ -8,7 +8,7 @@ import (
 )
 
 // Every taskworker probe pass that opens provider tunnels places them
-// (connect/MOVE.md §13): the tunnel config each capability, URL and bandwidth probe pass
+// (connect/MOVE.md §13): the tunnel config each URL and bandwidth probe pass
 // builds names the pass's own placement, which the pass creates and closes. A
 // config built without one would leave the pass's tunnels to DNS, which is
 // caught here rather than by an imbalance in production.
@@ -17,7 +17,6 @@ func TestProbePassesPlaceTheirTunnels(t *testing.T) {
 		path     string
 		function string
 	}{
-		{path: "capability_probe_work.go", function: "runCapabilityProbeShard"},
 		{path: "provider_egress_probe_work.go", function: "runProviderEgressProbe"},
 		{path: "provider_bandwidth_probe_work.go", function: "runProviderBandwidthProbeShard"},
 	} {
