@@ -6,28 +6,35 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"golang.org/x/net/dns/dnsmessage"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/urnetwork/connect"
 	"github.com/urnetwork/connect/protocol"
 )
 
-// §28.2 over synthetic TXT answers. Every record is signed with a key made
-// here, and every address is an RFC 5737 or RFC 3849 documentation address.
+// §28.2 over synthetic resolver answers. Every record is signed with a key
+// made here, and every address is an RFC 5737 or RFC 3849 documentation
+// address.
 
 type extenderDnsSyntheticSource struct {
 	*syntheticSource
-	names []string
-	txtFn func(hostname string) ([]string, error)
+	stateLock sync.Mutex
+	asked     []string
+	txtFn     func(resolver string, hostname string) (DNSResponseObservation, error)
 }
 
-func (self *extenderDnsSyntheticSource) DNSTxt(_ context.Context, hostname string) ([]string, error) {
-	self.names = append(self.names, hostname)
-	return self.txtFn(hostname)
+func (self *extenderDnsSyntheticSource) DNSTxt(_ context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+	self.stateLock.Lock()
+	self.asked = append(self.asked, resolver+" "+hostname)
+	self.stateLock.Unlock()
+	return self.txtFn(resolver, hostname)
 }
 
 var extenderDnsTestNow = time.Date(2026, 11, 11, 21, 30, 0, 0, time.UTC)
@@ -72,9 +79,13 @@ func extenderDnsTestValue(t *testing.T, issue time.Time) string {
 	return value
 }
 
-// Runs the probe once against a fixed answer, and returns its findings'
-// states and the names it resolved.
-func extenderDnsTestStates(t *testing.T, settings *ExtenderDnsRecordsSettings, environment string, txtFn func(string) ([]string, error)) (map[string]string, []string) {
+// A resolver's successful answer of these values.
+func extenderDnsTestAnswer(values []string) DNSResponseObservation {
+	return DNSResponseObservation{ResponseCode: DNSResponseSuccess, Texts: values}
+}
+
+// Runs the probe once, and returns its findings' states and what it asked.
+func extenderDnsTestStates(t *testing.T, settings *ExtenderDnsRecordsSettings, environment string, txtFn func(string, string) (DNSResponseObservation, error)) (map[string]string, []string) {
 	t.Helper()
 	source := &extenderDnsSyntheticSource{syntheticSource: &syntheticSource{}, txtFn: txtFn}
 	signalSettings := stormMainSettings(extenderDnsTestNow, source)
@@ -100,7 +111,8 @@ func extenderDnsTestStates(t *testing.T, settings *ExtenderDnsRecordsSettings, e
 		}
 		states[one.class+" "+one.target] = state
 	}
-	return states, source.names
+	sort.Strings(source.asked)
+	return states, source.asked
 }
 
 func TestExtenderDnsRecordsJudgesWhatClientsAreServed(t *testing.T) {
@@ -132,27 +144,42 @@ func TestExtenderDnsRecordsJudgesWhatClientsAreServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	timeout := &net.DNSError{Err: "i/o timeout", IsTimeout: true}
 
-	answer := func(values []string, err error) func(string) ([]string, error) {
-		return func(string) ([]string, error) { return values, err }
+	every := func(observation DNSResponseObservation, err error) func(string, string) (DNSResponseObservation, error) {
+		return func(string, string) (DNSResponseObservation, error) { return observation, err }
 	}
 	for _, test := range []struct {
 		name  string
-		txtFn func(string) ([]string, error)
+		txtFn func(string, string) (DNSResponseObservation, error)
 		want  map[string]string
 	}{
-		{name: "fresh records", txtFn: answer(fresh, nil), want: map[string]string{stale: "healthy", visibility: "healthy"}},
-		{name: "the records of 10-28", txtFn: answer(frozen, nil), want: map[string]string{stale: "warn", visibility: "healthy"}},
-		{name: "valid but no longer refreshed", txtFn: answer(lagging, nil), want: map[string]string{stale: "warn"}},
-		{name: "one fresh record", txtFn: answer(mixed, nil), want: map[string]string{stale: "healthy"}},
-		{name: "no txt records", txtFn: answer(nil, &net.DNSError{Err: "no such host", Name: "extender.bringyour.com", IsNotFound: true}), want: map[string]string{stale: "warn", visibility: "healthy"}},
-		{name: "values that are not records", txtFn: answer([]string{"v=spf1 -all", revocation}, nil), want: map[string]string{stale: "warn"}},
-		{name: "the lookup timed out", txtFn: answer(nil, &net.DNSError{Err: "i/o timeout", IsTimeout: true}), want: map[string]string{stale: "hold", visibility: "unobservable"}},
+		{name: "fresh records", txtFn: every(extenderDnsTestAnswer(fresh), nil), want: map[string]string{stale: "healthy", visibility: "healthy"}},
+		{name: "the records of 10-28", txtFn: every(extenderDnsTestAnswer(frozen), nil), want: map[string]string{stale: "warn", visibility: "healthy"}},
+		{name: "valid but no longer refreshed", txtFn: every(extenderDnsTestAnswer(lagging), nil), want: map[string]string{stale: "warn"}},
+		{name: "one fresh record", txtFn: every(extenderDnsTestAnswer(mixed), nil), want: map[string]string{stale: "healthy"}},
+		{name: "no txt records", txtFn: every(extenderDnsTestAnswer(nil), nil), want: map[string]string{stale: "warn", visibility: "healthy"}},
+		{name: "no such name", txtFn: every(DNSResponseObservation{ResponseCode: DNSResponseNameError}, nil), want: map[string]string{stale: "warn"}},
+		{name: "values that are not records", txtFn: every(extenderDnsTestAnswer([]string{"v=spf1 -all", revocation}), nil), want: map[string]string{stale: "warn"}},
+		{name: "every resolver timed out", txtFn: every(DNSResponseObservation{}, timeout), want: map[string]string{stale: "hold", visibility: "unobservable"}},
+		{name: "every resolver failed the name", txtFn: every(DNSResponseObservation{ResponseCode: DNSResponseServerFailure}, nil), want: map[string]string{stale: "hold", visibility: "unobservable"}},
+		{name: "one resolver answers", txtFn: func(resolver string, _ string) (DNSResponseObservation, error) {
+			if resolver == "8.8.8.8:53" {
+				return extenderDnsTestAnswer(fresh), nil
+			}
+			return DNSResponseObservation{}, timeout
+		}, want: map[string]string{stale: "healthy", visibility: "healthy"}},
+		{name: "one resolver's stale cache", txtFn: func(resolver string, _ string) (DNSResponseObservation, error) {
+			if resolver == "9.9.9.9:53" {
+				return extenderDnsTestAnswer(frozen), nil
+			}
+			return extenderDnsTestAnswer(fresh), nil
+		}, want: map[string]string{stale: "healthy"}},
 	} {
-		states, names := extenderDnsTestStates(t, DefaultExtenderDnsRecordsSettings(), "main", test.txtFn)
+		states, asked := extenderDnsTestStates(t, DefaultExtenderDnsRecordsSettings(), "main", test.txtFn)
 		requireStormStates(t, test.name, states, test.want)
-		if len(names) != 1 || names[0] != "extender.bringyour.com" {
-			t.Fatalf("%s: resolved %v, want the extender record name", test.name, names)
+		if strings.Join(asked, ",") != "1.1.1.1:53 extender.bringyour.com,8.8.8.8:53 extender.bringyour.com,9.9.9.9:53 extender.bringyour.com" {
+			t.Fatalf("%s: asked %v, want every resolver for the extender record name", test.name, asked)
 		}
 	}
 }
@@ -162,7 +189,15 @@ func TestExtenderDnsRecordsJudgesWhatClientsAreServed(t *testing.T) {
 func TestExtenderDnsRecordsAlertNamesTheServedTimes(t *testing.T) {
 	frozenIssue := time.Date(2026, 10, 28, 18, 12, 0, 0, time.UTC)
 	values := []string{extenderDnsTestValue(t, frozenIssue), extenderDnsTestValue(t, frozenIssue)}
-	source := &extenderDnsSyntheticSource{syntheticSource: &syntheticSource{}, txtFn: func(string) ([]string, error) { return values, nil }}
+	source := &extenderDnsSyntheticSource{syntheticSource: &syntheticSource{}, txtFn: func(resolver string, _ string) (DNSResponseObservation, error) {
+		if resolver == "1.1.1.1:53" {
+			return DNSResponseObservation{}, errors.New("synthetic unreachable")
+		}
+		return extenderDnsTestAnswer(values), nil
+	}}
+	if got := (extenderDnsRecordsProbe{}).cadence(); got != 10*time.Minute {
+		t.Fatalf("cadence = %s", got)
+	}
 	alerts, err := NewExtenderDnsRecordsSignal().Run(context.Background(), stormMainSettings(extenderDnsTestNow, source))
 	if err != nil {
 		t.Fatal(err)
@@ -178,7 +213,7 @@ func TestExtenderDnsRecordsAlertNamesTheServedTimes(t *testing.T) {
 		t.Fatalf("no stale alert in %+v", alerts)
 	}
 	for _, want := range []string{
-		"name=extender.bringyour.com", "served=2", "records=2", "valid=0", "expired=2",
+		"name=extender.bringyour.com", "resolvers_answered=2/3", "served=2", "records=2", "valid=0", "expired=2",
 		fmt.Sprintf("newest_issued_unix=%d", frozenIssue.Unix()),
 		fmt.Sprintf("newest_issued_age_seconds=%.0f", extenderDnsTestNow.Sub(frozenIssue).Seconds()),
 		fmt.Sprintf("latest_expires_unix=%d", frozenIssue.Add(24*time.Hour).Unix()),
@@ -193,14 +228,14 @@ func TestExtenderDnsRecordsAlertNamesTheServedTimes(t *testing.T) {
 	}
 }
 
-// An environment with no record name resolves nothing, and a record body that
-// does not decode is counted, never trusted.
+// An environment with no record name asks nothing, a record body that does
+// not decode is counted and never trusted, and an invalid policy asks nothing.
 func TestExtenderDnsRecordsSkipsAndCounts(t *testing.T) {
-	states, names := extenderDnsTestStates(t, DefaultExtenderDnsRecordsSettings(), "beta", func(string) ([]string, error) {
-		return nil, errors.New("must not resolve")
+	states, asked := extenderDnsTestStates(t, DefaultExtenderDnsRecordsSettings(), "beta", func(string, string) (DNSResponseObservation, error) {
+		return DNSResponseObservation{}, errors.New("must not resolve")
 	})
-	if len(states) != 0 || len(names) != 0 {
-		t.Fatalf("an environment with no record name: states %v, names %v", states, names)
+	if len(states) != 0 || len(asked) != 0 {
+		t.Fatalf("an environment with no record name: states %v, asked %v", states, asked)
 	}
 
 	broken, err := proto.Marshal(&protocol.ExtenderGossipMessage{
@@ -219,11 +254,71 @@ func TestExtenderDnsRecordsSkipsAndCounts(t *testing.T) {
 		t.Fatalf("observation = %+v", observation)
 	}
 
-	invalid, _ := extenderDnsTestStates(t, &ExtenderDnsRecordsSettings{}, "main", func(string) ([]string, error) {
-		t.Fatal("resolved under an invalid policy")
-		return nil, nil
+	invalid, asked := extenderDnsTestStates(t, &ExtenderDnsRecordsSettings{}, "main", func(string, string) (DNSResponseObservation, error) {
+		return DNSResponseObservation{}, errors.New("must not resolve")
 	})
-	if invalid["extender-dns-records-unobservable main/extender-dns-records"] != "unobservable" {
-		t.Fatalf("invalid policy: %v", invalid)
+	if invalid["extender-dns-records-unobservable main/extender-dns-records"] != "unobservable" || len(asked) != 0 {
+		t.Fatalf("invalid policy: %v, asked %v", invalid, asked)
+	}
+}
+
+// The wire parser takes a TXT answer's records as one value each, its
+// character strings joined as a client joins them, and nothing of another
+// type or class.
+func TestParseDNSResponseJoinsTxtCharacterStrings(t *testing.T) {
+	name := dnsmessage.MustNewName("extender.example.test.")
+	long := strings.Repeat("A", 255)
+	message := dnsmessage.Message{
+		Header:    dnsmessage.Header{ID: 29, Response: true, RCode: dnsmessage.RCodeSuccess},
+		Questions: []dnsmessage.Question{{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET}},
+		Answers: []dnsmessage.Resource{
+			{
+				Header: dnsmessage.ResourceHeader{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET},
+				Body:   &dnsmessage.TXTResource{TXT: []string{long, "BBB"}},
+			},
+			{
+				Header: dnsmessage.ResourceHeader{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassINET},
+				Body:   &dnsmessage.TXTResource{TXT: []string{"second"}},
+			},
+			{
+				Header: dnsmessage.ResourceHeader{Name: name, Type: dnsmessage.TypeTXT, Class: dnsmessage.ClassCHAOS},
+				Body:   &dnsmessage.TXTResource{TXT: []string{"not internet"}},
+			},
+		},
+	}
+	packet, err := message.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation, truncated, err := parseDNSResponse(packet, 29, name, dnsmessage.TypeTXT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated || observation.ResponseCode != DNSResponseSuccess || len(observation.Addresses) != 0 ||
+		len(observation.Texts) != 2 || observation.Texts[0] != long+"BBB" || observation.Texts[1] != "second" {
+		t.Fatalf("parsed txt response = %+v truncated=%t", observation, truncated)
+	}
+	if recordType, err := dnsMessageType(DNSRecordTXT); err != nil || recordType != dnsmessage.TypeTXT {
+		t.Fatalf("txt record type = %v %v", recordType, err)
+	}
+}
+
+// A public resolver asked without recursion desired answers SERVFAIL or
+// REFUSED (1.1.1.1, 8.8.8.8 and 9.9.9.9 on 2026-11-11), so the TXT question
+// sets it; an authoritative nameserver is still asked without it.
+func TestDNSQuestionSetsRecursionDesiredOnlyForResolvers(t *testing.T) {
+	for _, recursionDesired := range []bool{false, true} {
+		packet, queryID, _, questionType, err := buildDNSQuestion("extender.example.test", DNSRecordTXT, recursionDesired)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var query dnsmessage.Message
+		if err := query.Unpack(packet); err != nil {
+			t.Fatal(err)
+		}
+		if query.Header.ID != queryID || query.Header.RecursionDesired != recursionDesired || questionType != dnsmessage.TypeTXT ||
+			len(query.Questions) != 1 || query.Questions[0].Name.String() != "extender.example.test." {
+			t.Fatalf("question with recursion desired %t = %+v", recursionDesired, query)
+		}
 	}
 }

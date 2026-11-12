@@ -44,7 +44,7 @@ type probeRunner interface {
 	tlsCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
 	dnsAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error)
 	dnsRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
-	dnsTxt(ctx context.Context, hostname string) ([]string, error)
+	dnsTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
 	warpctl(ctx context.Context, args ...string) (string, error)
 	warpctlStream(ctx context.Context, diagnostics io.Writer, args ...string) (*exec.Cmd, io.ReadCloser, error)
 }

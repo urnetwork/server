@@ -2,9 +2,11 @@ package monitor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -16,10 +18,10 @@ import (
 // SIGNALS.md §28.2 maps to signal_extender_dns_records.go and
 // signal_extender_dns_records_test.go. What a client resolving the extender
 // record name gets: the TXT values of the name, each the base64 of one
-// operator-signed extender record (connect/EXTENDER.md C5), read through the
-// platform resolver as a client's system resolver would, decoded as a client
-// decodes them (connect.DecodeExtenderDnsRecord), and judged by the issue and
-// expiry times signed into each.
+// operator-signed extender record (connect/EXTENDER.md C5), asked of public
+// resolvers as a client asks them over DoH, decoded as a client decodes them
+// (connect.DecodeExtenderDnsRecord), and judged by the issue and expiry times
+// signed into each.
 //
 // The publish tick re-signs every record of the TXT sets every 10 minutes, and
 // the sets carry a 60-second TTL, so the newest record a resolver serves is
@@ -30,9 +32,11 @@ import (
 // the dns channel: §27.2 reports the publisher's failures, this what clients
 // are served, whatever the publisher believes.
 //
-// The signature is not verified: the monitor holds no root key, and the
-// operator's hosted zone has no other writer. The name is public; no address
-// or key a record carries reaches an alert.
+// Every configured resolver is asked, and the freshest answer is judged, so
+// one resolver's stale cache or failure does not decide. The signature is not
+// verified: the monitor holds no root key, and the operator's hosted zone has
+// no other writer. The name is public; no address or key a record carries
+// reaches an alert.
 func NewExtenderDnsRecordsSignal() Signal {
 	return NewExtenderDnsRecordsSignalWithSettings(DefaultExtenderDnsRecordsSettings())
 }
@@ -53,6 +57,9 @@ type ExtenderDnsRecordsSettings struct {
 	// environment with none is not judged. A client derives it as
 	// extender.<network host> (sdk ExtenderDnsName).
 	RecordNames map[string]string
+	// the public resolvers asked, each an ip:port; the freshest answer is
+	// judged
+	Resolvers []string
 	// the newest record served issued longer ago than this is stale
 	MaxNewestAge time.Duration
 	// consecutive stale runs before the finding opens
@@ -67,6 +74,7 @@ type ExtenderDnsRecordsSettings struct {
 func DefaultExtenderDnsRecordsSettings() *ExtenderDnsRecordsSettings {
 	return &ExtenderDnsRecordsSettings{
 		RecordNames:  map[string]string{"main": "extender.bringyour.com"},
+		Resolvers:    []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"},
 		MaxNewestAge: time.Hour,
 		Sustain:      2,
 		Cadence:      10 * time.Minute,
@@ -75,7 +83,7 @@ func DefaultExtenderDnsRecordsSettings() *ExtenderDnsRecordsSettings {
 }
 
 func (self *ExtenderDnsRecordsSettings) valid() bool {
-	return self != nil && 0 < self.MaxNewestAge && 0 < self.Sustain && 0 < self.Cadence && 0 < self.MaxRecords
+	return self != nil && 0 < len(self.Resolvers) && 0 < self.MaxNewestAge && 0 < self.Sustain && 0 < self.Cadence && 0 < self.MaxRecords
 }
 
 type extenderDnsRecordsProbe struct {
@@ -160,6 +168,18 @@ func observeExtenderDnsRecords(txts []string, now time.Time, maxRecords int) ext
 	return observation
 }
 
+// Whether this answer is fresher than another: a newer newest record, then
+// more valid records, then more served.
+func (self extenderDnsRecordsObservation) fresherThan(other extenderDnsRecordsObservation) bool {
+	if !self.newestIssue.Equal(other.newestIssue) {
+		return other.newestIssue.Before(self.newestIssue)
+	}
+	if self.valid != other.valid {
+		return other.valid < self.valid
+	}
+	return other.served < self.served
+}
+
 // Why an answer is stale, in a fixed order; none when it is fresh.
 func (self extenderDnsRecordsObservation) staleReasons(now time.Time, maxNewestAge time.Duration) []string {
 	reasons := []string{}
@@ -188,6 +208,12 @@ func extenderDnsRecordsUnix(value time.Time) string {
 	return fmt.Sprintf("%d", value.Unix())
 }
 
+// One resolver's answer.
+type extenderDnsRecordsAnswer struct {
+	observation DNSResponseObservation
+	err         error
+}
+
 func (self extenderDnsRecordsProbe) check(ctx context.Context, env *probeEnv) ([]finding, error) {
 	settings := self.effectiveSettings()
 	target := env.cfg.env + "/extender-dns-records"
@@ -199,53 +225,83 @@ func (self extenderDnsRecordsProbe) check(ctx context.Context, env *probeEnv) ([
 		// the environment publishes no extender record name
 		return nil, nil
 	}
-	txts, err := env.runner.dnsTxt(ctx, name)
-	if err != nil {
-		if lifecycleErr := probeLifecycleError(ctx, err); lifecycleErr != nil {
-			return nil, lifecycleErr
-		}
-		if !dnsNameNotFound(err) {
-			return []finding{
-				stormClearHold(extenderDnsRecordsProbeId, "extender-dns-records-stale", target),
-				extenderDnsRecordsUnobservable(target, "lookup_failed", err),
-			}, nil
-		}
-		// no such name, or no TXT records under it: nothing is served
-		txts = nil
+
+	answers := make([]extenderDnsRecordsAnswer, len(settings.Resolvers))
+	var wait sync.WaitGroup
+	for index, resolver := range settings.Resolvers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			observation, err := env.runner.dnsTxt(ctx, resolver, name)
+			answers[index] = extenderDnsRecordsAnswer{observation: observation, err: err}
+		}()
 	}
+	wait.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, probeLifecycleError(ctx, err)
+	}
+
 	now := env.now()
-	observation := observeExtenderDnsRecords(txts, now, settings.MaxRecords)
-	reasons := observation.staleReasons(now, settings.MaxNewestAge)
+	answered := 0
+	var freshest *extenderDnsRecordsObservation
+	var failure error
+	for _, answer := range answers {
+		if answer.err != nil {
+			failure = answer.err
+			continue
+		}
+		switch answer.observation.ResponseCode {
+		case DNSResponseSuccess, DNSResponseNameError:
+		default:
+			// a resolver that could not answer says nothing of the name
+			failure = errors.New("resolver answered " + string(answer.observation.ResponseCode))
+			continue
+		}
+		answered++
+		observation := observeExtenderDnsRecords(answer.observation.Texts, now, settings.MaxRecords)
+		if freshest == nil || observation.fresherThan(*freshest) {
+			freshest = &observation
+		}
+	}
+	if freshest == nil {
+		return []finding{
+			stormClearHold(extenderDnsRecordsProbeId, "extender-dns-records-stale", target),
+			extenderDnsRecordsUnobservable(target, "lookup_failed", failure),
+		}, nil
+	}
+
+	reasons := freshest.staleReasons(now, settings.MaxNewestAge)
 	findings := []finding{healthyFinding(extenderDnsRecordsProbeId, tierWarn, "extender-dns-records-unobservable", target)}
 	if len(reasons) == 0 {
 		return append(findings, healthyFinding(extenderDnsRecordsProbeId, tierWarn, "extender-dns-records-stale", target)), nil
 	}
 	newestAge := "none"
-	if !observation.newestIssue.IsZero() {
-		newestAge = fmt.Sprintf("%.0f", now.Sub(observation.newestIssue).Seconds())
+	if !freshest.newestIssue.IsZero() {
+		newestAge = fmt.Sprintf("%.0f", now.Sub(freshest.newestIssue).Seconds())
 	}
 	return append(findings, finding{
 		probeId: extenderDnsRecordsProbeId, tier: tierWarn, class: "extender-dns-records-stale", target: target, sustain: settings.Sustain,
 		symptom:   fmt.Sprintf("The extender records public DNS serves for %s are stale: %s", name, strings.Join(reasons, ", ")),
 		mechanism: "A client that resolves the extender record name verifies the signed records of its TXT set and adds them to its directory, beside the addresses of the A and AAAA sets. The publish tick re-signs the records every 10 minutes, so a resolver serves records minutes old. Records older than that mean Route 53 has not accepted the tick's TXT changes; expired ones are refused by every client, which then learns no extender from dns at all.",
-		baseline:  fmt.Sprintf("The newest record served was issued within about 11 minutes (the 10-minute tick and the sets' 60-second TTL), and every record is valid. WARN when the newest is older than %s, when every record has expired, or when none is served, for %d consecutive runs %s apart.", settings.MaxNewestAge, settings.Sustain, self.cadence()),
-		observed: fmt.Sprintf("name=%s served=%d records=%d undecodable=%d other=%d valid=%d expired=%d newest_issued_unix=%s newest_issued_age_seconds=%s latest_expires_unix=%s reasons=%s",
-			name, observation.served, observation.records, observation.undecodable, observation.other,
-			observation.valid, observation.expired,
-			extenderDnsRecordsUnix(observation.newestIssue), newestAge, extenderDnsRecordsUnix(observation.latestExpire),
+		baseline:  fmt.Sprintf("The newest record served was issued within about 11 minutes (the 10-minute tick and the sets' 60-second TTL), and every record is valid. WARN when the freshest answer's newest record is older than %s, when every record has expired, or when none is served, for %d consecutive runs %s apart.", settings.MaxNewestAge, settings.Sustain, self.cadence()),
+		observed: fmt.Sprintf("name=%s resolvers_answered=%d/%d served=%d records=%d undecodable=%d other=%d valid=%d expired=%d newest_issued_unix=%s newest_issued_age_seconds=%s latest_expires_unix=%s reasons=%s",
+			name, answered, len(settings.Resolvers),
+			freshest.served, freshest.records, freshest.undecodable, freshest.other,
+			freshest.valid, freshest.expired,
+			extenderDnsRecordsUnix(freshest.newestIssue), newestAge, extenderDnsRecordsUnix(freshest.latestExpire),
 			strings.Join(reasons, ","),
 		),
-		evidence: "The monitor host's platform resolver's TXT answer for the name, each value decoded with connect.DecodeExtenderDnsRecord and judged by the issue and expiry times signed into its record body. Counts and times only; no record content reaches the alert.",
-		context:  "The name is geo-routed: a resolver gets the TXT set of its own continent, or the default set, so this judges the set the monitor's location is answered with. A set that fails only for another continent is §27.2's extender-dns-publish-failing. From 2026-10-28 18:12Z to at least 11-11 every TXT record served was the 10-28 18:12Z set, expired since 10-29.",
-		action:   "Read §27.2's extender-dns-publish-failing and the taskworker log for `[extenderpublish]dns publish failed`, which names each refused set and Route 53's answer (InvalidChangeBatch: a set's size; AccessDenied: the dns block's credentials). If the publisher reports every change accepted, compare its TXT sets with what Route 53 serves (the hosted zone's record sets for the name) and the resolver's TTL.",
-		verify:   fmt.Sprintf("A run resolves the name to valid records, the newest issued within %s.", settings.MaxNewestAge),
+		evidence: "The TXT answer of each configured public resolver over the DNS wire protocol (UDP, then TCP when truncated), each value decoded with connect.DecodeExtenderDnsRecord and judged by the issue and expiry times signed into its record body; the freshest answer is reported. Counts and times only; no record content reaches the alert.",
+		context:  "The name is geo-routed: a resolver gets the TXT set of its own location, or the default set, so this judges the sets the resolvers' locations are answered with. A set that fails only for another continent is §27.2's extender-dns-publish-failing. From 2026-10-28 18:12Z to at least 11-11 every TXT record served was the 10-28 18:12Z set, expired since 10-29.",
+		action:   "Read §27.2's extender-dns-publish-failing and the taskworker log for `[extenderpublish]dns publish failed`, which names each refused set and Route 53's answer (InvalidChangeBatch: a set's size; AccessDenied: the dns block's credentials). If the publisher reports every change accepted, compare its TXT sets with the hosted zone's record sets for the name.",
+		verify:   fmt.Sprintf("A run reads valid records from the resolvers, the newest issued within %s.", settings.MaxNewestAge),
 		playbook: "SIGNALS.md §28.2",
 	}), nil
 }
 
-// The visibility finding of §28.2: the policy is invalid, or the lookup failed
-// for a reason other than the name serving nothing. Fixed reasons and the
-// shared error classification only; the resolver's text never leaves it.
+// The visibility finding of §28.2: the policy is invalid, or no resolver
+// answered. Fixed reasons and the shared error classification only; the
+// resolvers' text never leaves it.
 func extenderDnsRecordsUnobservable(target string, reason string, err error) finding {
 	observed := "visibility_reason=" + reason
 	if err != nil {
@@ -254,13 +310,13 @@ func extenderDnsRecordsUnobservable(target string, reason string, err error) fin
 	return finding{
 		probeId: extenderDnsRecordsProbeId, tier: tierWarn, class: "extender-dns-records-unobservable", target: target, sustain: 2,
 		symptom:   "The §28.2 signal could not read the extender records public DNS serves",
-		mechanism: "The TXT lookup of the extender record name failed (a timeout, a server failure, the monitor host's resolver or network), or the signal's policy is invalid. Whether clients are served fresh records is unknown, not fresh.",
-		baseline:  "Every run resolves the name and decodes its answer.",
+		mechanism: "No configured public resolver answered the TXT question of the extender record name (a timeout, a server failure, the monitor host's network or its outbound DNS), or the signal's policy is invalid. Whether clients are served fresh records is unknown, not fresh.",
+		baseline:  "Every run reads at least one resolver's answer.",
 		observed:  observed,
 		evidence:  "The fixed reason and the shared error classification only.",
 		context:   "A stale finding already open stays open while this lasts.",
-		action:    "Check the monitor host's resolver and network (dig TXT for the name against a public resolver), then rerun the signal.",
-		verify:    "Two consecutive runs resolve the name.",
+		action:    "Check that the monitor host reaches the public resolvers on port 53 (dig +tcp TXT for the name against each), then rerun the signal.",
+		verify:    "Two consecutive runs read a resolver's answer.",
 		playbook:  "SIGNALS.md §28.2",
 	}
 }

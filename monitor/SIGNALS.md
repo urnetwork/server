@@ -50113,15 +50113,24 @@ Status: added 2026-11-11. On 11-11 it reads every record served as issued
 until §27.2's DNS fix is deployed and its first tick lands.
 
 Source: the TXT records of the extender record name, `extender.bringyour.com`
-on Main (a client derives `extender.<network host>`). The monitor host's
-platform resolver reads them, as a client's system resolver would, every 10
-minutes. Each value is the base64 of one operator-signed extender record.
-The probe decodes it as a client does (`connect.DecodeExtenderDnsRecord`) and
-reads the record body's signed issue and expiry times. Counts and times
-only reach the alert, never an address or key.
+on Main (a client derives `extender.<network host>`). Every 10 minutes (15
+under the watcher's cadence floor) the probe asks three public resolvers
+(1.1.1.1, 8.8.8.8 and 9.9.9.9) over the DNS wire protocol, with recursion
+desired, UDP and then TCP when truncated, as a client asks public resolvers
+over DoH. At 11-12 00:40Z all three served the same 13 records, issued
+10-28 18:12:41Z. Each value is the base64 of one operator-signed extender
+record. The probe decodes it as a client does
+(`connect.DecodeExtenderDnsRecord`) and reads the record body's signed issue
+and expiry times. It judges the freshest answer, so one resolver's stale
+cache or failure does not decide. Counts and times only reach the alert,
+never an address or key.
+
+The platform resolver is not used. On 11-11 the monitor host's home router
+answered the name's A query but dropped its 4 KB TXT answer over both UDP
+and TCP.
 
 ```sh
-dig +short TXT extender.bringyour.com
+dig +tcp +short TXT extender.bringyour.com @1.1.1.1
 ```
 
 Healthy: the publish tick re-signs every record of the TXT sets every 10
@@ -50130,23 +50139,25 @@ about 11 minutes old at most, and every record is valid (24 hours).
 
 Thresholds:
 
-- WARN `extender-dns-records-stale`, on 2 consecutive runs, when any of:
+- WARN `extender-dns-records-stale`, on 2 consecutive runs, when the
+  freshest answer shows any of:
   - the newest record served was issued more than an hour ago
     (`newest_too_old`);
   - every record served has expired (`all_expired`);
-  - the name serves no TXT record (`none_served`);
+  - the name serves no TXT record, or does not exist (`none_served`);
   - no served value decodes as a record (`none_decoded`).
-- `extender-dns-records-unobservable`: the lookup failed for a reason other
-  than the name serving nothing (a timeout, a server failure, the monitor
-  host's network), or the policy is invalid. An open stale finding stays
-  open.
+- `extender-dns-records-unobservable`: no resolver answered (a timeout, a
+  server failure, or the monitor host's outbound DNS), or the policy is
+  invalid. An open stale finding stays open.
 
 False-positive qualifiers: a resolver that caches past the TTL serves
 records up to its cache life older; an hour covers that.
 
-False-negative qualifiers: the name is geo-routed, so the monitor sees only
-its own continent's TXT set (or the default set). A set that fails only for
-another continent is §27.2's `extender-dns-publish-failing`. The signature is
+False-negative qualifiers: the name is geo-routed, so the probe sees only
+the TXT sets of the resolvers' locations (or the default set). A set that
+fails only for another continent is §27.2's `extender-dns-publish-failing`.
+A client behind a resolver that drops large answers, like the router above,
+gets no records at all, and this probe does not see it. The signature is
 not verified: the monitor holds no root key, and the hosted zone has no
 other writer. The A and AAAA sets are not judged here; their changes are
 §27.2's.

@@ -140,26 +140,26 @@ func (r *runner) dnsRecursive(ctx context.Context, hostname string, recordType D
 	return DNSResponseObservation{ResponseCode: DNSResponseNameError}, nil
 }
 
-// dnsTxt resolves a name's TXT records through the platform resolver, the
-// view a client's system resolver has. Each record's character strings are
-// joined into one value, as a client joins them. A name with no TXT records,
-// or no such name, is returned as the resolver's not-found error, which
-// dnsNameNotFound recognises.
-func (r *runner) dnsTxt(ctx context.Context, hostname string) ([]string, error) {
+// dnsTxt asks one resolver (host:port) for a name's TXT records over the DNS
+// wire protocol: UDP first, then TCP when the answer is truncated, as a large
+// signed TXT set always is. The platform resolver is not used: a home router
+// that answered the name's A query dropped its 4 KB TXT answer over both UDP
+// and TCP (2026-11-11). The response code says whether the name serves no
+// TXT records (success, no values) or does not exist (name-error).
+func (r *runner) dnsTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
 	commandCtx, cancel := boundedDNSContext(ctx, r.cfg.commandTimeout)
 	defer cancel()
 
-	txts, err := net.DefaultResolver.LookupTXT(commandCtx, absoluteDNSName(hostname))
-	if err == nil {
-		return txts, nil
+	// a recursive resolver asked without recursion desired answers from its
+	// cache only, or refuses
+	observation, err := dnsWireQueryRecursion(commandCtx, "udp", resolver, hostname, DNSRecordTXT, true)
+	if err != nil {
+		if ctx.Err() != nil {
+			return DNSResponseObservation{}, ctx.Err()
+		}
+		return DNSResponseObservation{}, fmt.Errorf("txt query: %w", err)
 	}
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
-	if dnsNameNotFound(err) {
-		return nil, err
-	}
-	return nil, fmt.Errorf("recursive txt lookup: %w", err)
+	return observation, nil
 }
 
 func boundedDNSContext(ctx context.Context, configured time.Duration) (context.Context, context.CancelFunc) {
@@ -207,8 +207,17 @@ func canonicalNetIPStrings(addresses []netip.Addr) []string {
 	return values
 }
 
+// dnsWireQuery asks a server directly with recursion not desired, as an
+// authoritative nameserver is asked.
 func dnsWireQuery(ctx context.Context, network, endpoint, hostname string, recordType DNSRecordType) (DNSResponseObservation, error) {
-	packet, queryID, questionName, questionType, err := buildDNSQuestion(hostname, recordType)
+	return dnsWireQueryRecursion(ctx, network, endpoint, hostname, recordType, false)
+}
+
+// dnsWireQueryRecursion asks a server over UDP, or TCP, retrying a truncated
+// UDP answer over TCP; recursionDesired is set when the server is a recursive
+// resolver.
+func dnsWireQueryRecursion(ctx context.Context, network, endpoint, hostname string, recordType DNSRecordType, recursionDesired bool) (DNSResponseObservation, error) {
+	packet, queryID, questionName, questionType, err := buildDNSQuestion(hostname, recordType, recursionDesired)
 	if err != nil {
 		return DNSResponseObservation{}, err
 	}
@@ -237,7 +246,7 @@ func dnsWireQuery(ctx context.Context, network, endpoint, hostname string, recor
 	return observation, nil
 }
 
-func buildDNSQuestion(hostname string, recordType DNSRecordType) ([]byte, uint16, dnsmessage.Name, dnsmessage.Type, error) {
+func buildDNSQuestion(hostname string, recordType DNSRecordType, recursionDesired bool) ([]byte, uint16, dnsmessage.Name, dnsmessage.Type, error) {
 	name, err := dnsmessage.NewName(strings.TrimSuffix(hostname, ".") + ".")
 	if err != nil {
 		return nil, 0, dnsmessage.Name{}, 0, err
@@ -251,7 +260,7 @@ func buildDNSQuestion(hostname string, recordType DNSRecordType) ([]byte, uint16
 		return nil, 0, dnsmessage.Name{}, 0, err
 	}
 	queryID := binary.BigEndian.Uint16(random[:])
-	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: queryID})
+	builder := dnsmessage.NewBuilder(nil, dnsmessage.Header{ID: queryID, RecursionDesired: recursionDesired})
 	if err := builder.StartQuestions(); err != nil {
 		return nil, 0, dnsmessage.Name{}, 0, err
 	}
@@ -268,6 +277,8 @@ func dnsMessageType(recordType DNSRecordType) (dnsmessage.Type, error) {
 		return dnsmessage.TypeA, nil
 	case DNSRecordAAAA:
 		return dnsmessage.TypeAAAA, nil
+	case DNSRecordTXT:
+		return dnsmessage.TypeTXT, nil
 	default:
 		return 0, fmt.Errorf("unsupported DNS record type %q", recordType)
 	}
@@ -384,6 +395,12 @@ func parseDNSResponse(packet []byte, queryID uint16, questionName dnsmessage.Nam
 			}
 		case *dnsmessage.CNAMEResource:
 			observation.CNAMECount++
+		case *dnsmessage.TXTResource:
+			if questionType == dnsmessage.TypeTXT {
+				// one record's character strings are one value, as a
+				// client joins them
+				observation.Texts = append(observation.Texts, strings.Join(body.TXT, ""))
+			}
 		}
 	}
 	observation.Addresses = canonicalAddressStrings(observation.Addresses)
