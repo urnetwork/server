@@ -767,10 +767,12 @@ func CreateCryptoPaymentIntent(
 		networkId: &networkId,
 		reuse:     true,
 	}
+	// a plan and a data pack alike land on the caller's network
+	// (purchase_guest_guard.go)
+	if refuseGuestPurchase(clientSession) {
+		return cryptoIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestSignInRequiredMessage), nil
+	}
 	if plan != "" {
-		if refuseGuestPurchase(clientSession) {
-			return cryptoIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestSignInRequiredMessage), nil
-		}
 		if plan == model.SolanaPlanYearlyOnboarding {
 			if EligibleOnboardingOffer(clientSession, networkId) == nil {
 				return cryptoIntentError(PurchaseErrorCodeOfferUnavailable, "The welcome offer is not available."), nil
@@ -883,6 +885,9 @@ func CreateDataCryptoPaymentIntent(
 		networkId, storedName := model.FindNetworkByName(clientSession.Ctx, networkName)
 		if networkId == nil {
 			return cryptoIntentError(PurchaseErrorCodeNetworkNotFound, fmt.Sprintf("No network named %s", networkName)), nil
+		}
+		if refuseGuestDestination(clientSession.Ctx, *networkId) {
+			return cryptoIntentError(PurchaseErrorCodeGuestSignInRequired, purchaseGuestNetworkMessage), nil
 		}
 		request.delivery = model.CryptoDeliveryNetwork
 		request.networkId = networkId
