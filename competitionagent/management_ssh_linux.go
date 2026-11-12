@@ -21,7 +21,7 @@ import (
 	"syscall"
 )
 
-const managementSshProperties = "Id,LoadState,ActiveState,SubState,Transient,FragmentPath,DropInPaths,Slice,ControlGroup,User,Group,Type,Restart,RemainAfterExit,KillMode,ExecStart,MainPID,InvocationID,ExecMainStartTimestampMonotonic,OnFailure,BindsTo,PartOf,MemoryMax,MemoryHigh,MemorySwapMax,TasksMax,CPUQuotaPerSecUSec,CPUQuotaPeriodUSec,AllowedCPUs,CPUAffinity,RuntimeMaxUSec,TimeoutStopUSec,NoNewPrivileges,CapabilityBoundingSet,AmbientCapabilities"
+const managementSshProperties = "Id,LoadState,ActiveState,SubState,Transient,FragmentPath,DropInPaths,Slice,ControlGroup,User,Group,Type,Restart,RemainAfterExit,KillMode,ExecStart,MainPID,ControlPID,Job,NeedDaemonReload,InvocationID,ExecMainStartTimestampMonotonic,OnFailure,BindsTo,PartOf,MemoryMax,MemoryHigh,MemorySwapMax,TasksMax,CPUQuotaPerSecUSec,CPUQuotaPeriodUSec,AllowedCPUs,CPUAffinity,RuntimeMaxUSec,TimeoutStopUSec,NoNewPrivileges,CapabilityBoundingSet,AmbientCapabilities"
 
 // This preserves the existing trusted-root Linux 6.8 control class, not a
 // claimed minimum. A narrower actual host refuses; native qualification must
@@ -38,6 +38,8 @@ type managementSshUnit struct {
 	inactive     bool
 	invocationId string
 	pid          int
+	controlPid   int
+	pendingJob   bool
 	projection   []byte
 }
 
@@ -56,6 +58,10 @@ func newManagementSshHost(settings ManagementSshSettings) *managementSshHost {
 	}
 	self.stop = func(ctx context.Context, manager Pin, unit string) error {
 		_, err := managementSshManager(ctx, manager, "stop", unit, settings)
+		return err
+	}
+	self.resetFailed = func(ctx context.Context, manager Pin, unit string) error {
+		_, err := managementSshManager(ctx, manager, "reset-failed", unit, settings)
 		return err
 	}
 	self.empty = func(ctx context.Context, unit string) (bool, error) {
@@ -226,20 +232,33 @@ func (self *managementSshNativeProcess) Kill() error {
 	return self.command.Process.Kill()
 }
 
-// There are exactly two verbs and one fixed property list. No request can
+// There are exactly three verbs and one fixed property list. No request can
 // choose a program, manager endpoint, property, evaluator or durable unit.
-func managementSshManager(parent context.Context, pin Pin, operation, unit string, settings ManagementSshSettings) ([]byte, error) {
-	if pin.Path != "/usr/bin/systemctl" || !validManagementSshUnit(unit) || settings.validate() != nil {
+func managementSshManagerArguments(operation, unit string) ([]string, error) {
+	if !validManagementSshUnit(unit) {
 		return nil, errors.New("managed SSH manager has no closed unit/tool authority")
 	}
-	var arguments []string
 	switch operation {
 	case "show":
-		arguments = []string{"show", "--no-pager", "--all", "--property=" + managementSshProperties, "--", unit}
+		return []string{"show", "--no-pager", "--all", "--property=" + managementSshProperties, "--", unit}, nil
 	case "stop":
-		arguments = []string{"stop", "--", unit}
+		return []string{"stop", "--", unit}, nil
+	case "reset-failed":
+		return []string{"reset-failed", "--", unit}, nil
 	default:
 		return nil, errors.New("managed SSH manager refused another operation")
+	}
+}
+
+// The descriptor-held executable and the existing control/join budgets remain
+// mandatory for reset too. No unknown unit or global failure reset is exposed.
+func managementSshManager(parent context.Context, pin Pin, operation, unit string, settings ManagementSshSettings) ([]byte, error) {
+	if pin.Path != "/usr/bin/systemctl" || settings.validate() != nil {
+		return nil, errors.New("managed SSH manager has no closed unit/tool authority")
+	}
+	arguments, err := managementSshManagerArguments(operation, unit)
+	if err != nil {
+		return nil, err
 	}
 	file, err := openContainmentManagerExecutable(pin, DefaultRuntimeResourceBoundarySettings().ExecutableBytes, true)
 	if err != nil {
@@ -260,8 +279,8 @@ func managementSshManager(parent context.Context, pin Pin, operation, unit strin
 	if ctx.Err() != nil || output.exceeded {
 		return nil, errors.New("managed SSH manager did not return a bounded acknowledgement")
 	}
-	if operation == "stop" && err != nil {
-		return nil, errors.New("managed SSH control stop was not acknowledged")
+	if operation != "show" && err != nil {
+		return nil, errors.New("managed SSH control manager operation was not acknowledged")
 	}
 	if operation == "show" && err != nil && !strings.Contains(output.String(), "LoadState=not-found\n") {
 		return nil, errors.New("managed SSH control properties are unavailable")
@@ -313,8 +332,20 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 	if len(values) != len(strings.Split(managementSshProperties, ",")) || values["Id"] != plan.UnitName {
 		return unit, errors.New("managed SSH unit properties selected another owner")
 	}
+	controlPid, controlErr := strconv.Atoi(values["ControlPID"])
+	if controlErr != nil || controlPid < 0 || strconv.Itoa(controlPid) != values["ControlPID"] || values["NeedDaemonReload"] != "no" {
+		return unit, errors.New("managed SSH unit has uncertain control process or stale manager authority")
+	}
+	unit.controlPid = controlPid
+	if values["Job"] != "" && values["Job"] != "0" {
+		job, jobErr := strconv.ParseUint(values["Job"], 10, 32)
+		if jobErr != nil || strconv.FormatUint(job, 10) != values["Job"] {
+			return managementSshUnit{}, errors.New("managed SSH unit has malformed pending manager work")
+		}
+		unit.pendingJob = true
+	}
 	if values["LoadState"] == "not-found" {
-		if values["ActiveState"] != "inactive" || values["MainPID"] != "0" || values["ControlGroup"] != "" || values["FragmentPath"] != "" || values["DropInPaths"] != "" {
+		if values["ActiveState"] != "inactive" || values["MainPID"] != "0" || controlPid != 0 || unit.pendingJob || values["ControlGroup"] != "" || values["FragmentPath"] != "" || values["DropInPaths"] != "" {
 			return unit, errors.New("missing managed SSH unit still has uncertain process custody")
 		}
 		return unit, nil
@@ -361,7 +392,7 @@ func validateManagementSshUnit(content []byte, config Config, policy *Management
 	unit.exists, unit.invocationId, unit.pid, unit.projection = true, invocation, pid, append([]byte(nil), content...)
 	switch values["ActiveState"] {
 	case "inactive", "failed":
-		if pid != 0 || values["ControlGroup"] != "" && values["ControlGroup"] != group {
+		if pid != 0 || controlPid != 0 || values["ControlGroup"] != "" && values["ControlGroup"] != group {
 			return managementSshUnit{}, errors.New("inactive managed SSH unit retains another process or group")
 		}
 		unit.inactive, unit.completed = true, true
