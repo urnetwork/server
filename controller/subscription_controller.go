@@ -1270,7 +1270,6 @@ func PlayWebhook(
 			case "SUBSCRIPTION_STATE_CANCELED",
 				"SUBSCRIPTION_STATE_EXPIRED",
 				"SUBSCRIPTION_STATE_PENDING_PURCHASE_CANCELED":
-				acknowledgeAndCheckRenewal = false
 				// the onboarding trial outcome: a trial that stops renewing or
 				// expires before its first paid period is trial.cancelled
 				playStoreTrialCancelled(
@@ -1280,6 +1279,16 @@ func PlayWebhook(
 					plan,
 					server.NowUtc(),
 				)
+				// cancelled is not expired: a purchase whose auto-renew was
+				// turned off before its notification was processed is still
+				// paid through its expiry. It is acknowledged (Google refunds a
+				// purchase left unacknowledged for three days) and its paid
+				// time credited through the same gate as an active one's; one
+				// whose paid time is over is left alone. Skipping every
+				// cancelled purchase left a month bought and cancelled while
+				// notifications were refused unacknowledged and never credited
+				// (support inbox 8010, 8046, 8086, 8098).
+				acknowledgeAndCheckRenewal = playPurchasePaid(sub, server.NowUtc())
 			}
 
 			if acknowledgeAndCheckRenewal {
