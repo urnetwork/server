@@ -70,6 +70,20 @@ type claimRelayWorldTx struct {
 	final     bool
 }
 
+// The capture the flag pool of operator 1, beside its pool 1.
+const claimRelayTestCtfPool = uint64(1<<32 + 1)
+
+// The world's maps key an account of pool 1 by its index and an account of the
+// capture the flag pool by its index past claimRelayTestCtfSlot.
+const claimRelayTestCtfSlot = uint64(1 << 20)
+
+func claimRelaySlot(account *snClaimRelayAccount) uint64 {
+	if account.NoId == claimRelayTestCtfPool {
+		return claimRelayTestCtfSlot + account.Index
+	}
+	return account.Index
+}
+
 // claimRelayWorld is the chain, the transaction intents, the mirror and Redis.
 type claimRelayWorld struct {
 	t       testing.TB
@@ -77,6 +91,14 @@ type claimRelayWorld struct {
 
 	leaves []merkle.LedgerAccount
 	tree   *merkle.LedgerSumTree
+	// the capture the flag pool's accounts, none unless a test adds them
+	ctfLeaves []merkle.LedgerAccount
+	ctfTree   *merkle.LedgerSumTree
+	// one pool's ledger cannot be read; ledgerErr fails both
+	poolLedgerErr error
+	ctfLedgerErr  error
+	// the account index of a pool that cannot be read cannot be read either
+	indexUnreadable bool
 
 	chainClaimed  map[uint64]*uint256.Int
 	mirrorClaimed map[uint64]*uint256.Int
@@ -104,6 +126,8 @@ type claimRelayWorld struct {
 	// a batch's refused items, by account index
 	batchRefusals map[uint64][4]byte
 	batching      bool
+	// the most claims the batcher fits in a batch, 0 for all
+	batchMost int
 
 	txs        []*claimRelayWorldTx
 	requests   map[[32]byte]time.Time
@@ -152,6 +176,26 @@ func (self *claimRelayWorld) setLeaves(amounts ...*uint256.Int) {
 		self.t.Fatal(err)
 	}
 	self.tree = tree
+}
+
+// addCtf gives the coldkey of pool 1's account coldkeyIndex an account in the
+// capture the flag pool, at the pool's next index, and returns that index.
+func (self *claimRelayWorld) addCtf(coldkeyIndex int, amount *uint256.Int) uint64 {
+	self.t.Helper()
+	self.ctfLeaves = append(self.ctfLeaves, merkle.LedgerAccount{Coldkey: claimRelayTestColdkey(coldkeyIndex), Cumulative: *amount})
+	tree, err := merkle.BuildLedgerSumTree(context.Background(), self.ctfLeaves)
+	if err != nil {
+		self.t.Fatal(err)
+	}
+	self.ctfTree = tree
+	return uint64(len(self.ctfLeaves) - 1)
+}
+
+func (self *claimRelayWorld) treeOf(account *snClaimRelayAccount) *merkle.LedgerSumTree {
+	if account.NoId == claimRelayTestCtfPool {
+		return self.ctfTree
+	}
+	return self.tree
 }
 
 // A new relay over this world: nothing but the world lasts.
@@ -255,15 +299,16 @@ func (self *claimRelayWorld) Claimed(_ context.Context, account *snClaimRelayAcc
 	if self.claimedErr != nil {
 		return nil, self.claimedErr
 	}
-	return self.claimedOf(account.Index), nil
+	return self.claimedOf(claimRelaySlot(account)), nil
 }
 
 func (self *claimRelayWorld) VerifyProof(_ context.Context, account *snClaimRelayAccount, proof []merkle.LedgerNode) (bool, error) {
-	if self.badProofs[account.Index] {
+	if self.badProofs[claimRelaySlot(account)] {
 		return false, nil
 	}
-	root, total := self.tree.Root()
-	return merkle.VerifyLedgerProof(root, &total, self.tree.LeafCount(), account.Index, account.Coldkey, &account.Cumulative, proof), nil
+	tree := self.treeOf(account)
+	root, total := tree.Root()
+	return merkle.VerifyLedgerProof(root, &total, tree.LeafCount(), account.Index, account.Coldkey, &account.Cumulative, proof), nil
 }
 
 func (self *claimRelayWorld) estimateOf(index uint64) uint64 {
@@ -274,11 +319,12 @@ func (self *claimRelayWorld) estimateOf(index uint64) uint64 {
 }
 
 func (self *claimRelayWorld) Estimate(_ context.Context, claim *snClaimRelayClaim) (uint64, error) {
-	self.estimated = append(self.estimated, claim.Account.Index)
-	if err := self.refusals[claim.Account.Index]; err != nil {
+	slot := claimRelaySlot(claim.Account)
+	self.estimated = append(self.estimated, slot)
+	if err := self.refusals[slot]; err != nil {
 		return 0, err
 	}
-	return self.estimateOf(claim.Account.Index), nil
+	return self.estimateOf(slot), nil
 }
 
 func (self *claimRelayWorld) Claim(claim *snClaimRelayClaim) (common.Address, []byte) {
@@ -294,6 +340,9 @@ func (self *claimRelayWorld) SizeBatch(_ context.Context, claims []*snClaimRelay
 	}
 	if !self.batching {
 		return nil, nil
+	}
+	if 0 < self.batchMost && self.batchMost < len(claims) {
+		claims = claims[:self.batchMost]
 	}
 	// the last item needs its whole cap; the 20% is the tools' headroom
 	need := uint64(len(claims)-1)*claimRelayTestBatchGas + gasPerClaim + gasPerClaim/63 + 20_000
@@ -325,7 +374,7 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 	}
 	griefed := false
 	for _, claim := range send.Claims {
-		index := claim.Account.Index
+		index := claimRelaySlot(claim.Account)
 		used, ok := self.gasUsed[index]
 		if !ok {
 			used = claimRelayTestUsedGas
@@ -360,9 +409,9 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 		}
 	}
 	for _, claim := range paid {
-		self.chainClaimed[claim.Account.Index] = &claim.Account.Cumulative
+		self.chainClaimed[claimRelaySlot(claim.Account)] = &claim.Account.Cumulative
 		// the mirror follows within seconds
-		self.mirrorClaimed[claim.Account.Index] = &claim.Account.Cumulative
+		self.mirrorClaimed[claimRelaySlot(claim.Account)] = &claim.Account.Cumulative
 	}
 	outcome.GasUsed, outcome.Griefed = need, griefed
 	self.txs = append(self.txs, &claimRelayWorldTx{createTime: self.nowTime, send: send, gasUsed: need, costWei: snClaimRelayLiability(need, self.gasPriceWei), griefed: griefed, outcome: outcome, final: true})
@@ -371,23 +420,56 @@ func (self *claimRelayWorld) Send(_ context.Context, send *snClaimRelaySend) (*s
 
 // snClaimRelayLedger
 
-func (self *claimRelayWorld) Accounts(context.Context) ([]*snClaimRelayAccount, error) {
-	if self.ledgerErr != nil {
-		return nil, self.ledgerErr
-	}
-	accounts := []*snClaimRelayAccount{}
-	for index := range self.leaves {
-		account := &snClaimRelayAccount{NoId: 1, Index: uint64(index), RootIndex: 3, Coldkey: self.leaves[index].Coldkey, Cumulative: self.leaves[index].Cumulative}
-		if claimed := self.mirrorClaimed[uint64(index)]; claimed != nil {
-			account.Claimed = *claimed
+// Pool 1's accounts, then the capture the flag pool's, as the core ledger reads
+// them. A pool that cannot be read is named with the coldkeys its account index
+// records, unless the index cannot be read either; no pool with a finalized
+// root read is an error, with the read naming the pools that failed. A pool
+// has a root once a test gives it an account.
+func (self *claimRelayWorld) Accounts(context.Context) (*snClaimRelayLedgerRead, error) {
+	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
+	pools := []struct {
+		noId      uint64
+		rootIndex uint64
+		leaves    []merkle.LedgerAccount
+		rooted    bool
+		err       error
+	}{{1, 3, self.leaves, 0 < len(self.leaves), errors.Join(self.ledgerErr, self.poolLedgerErr)}, {claimRelayTestCtfPool, 0, self.ctfLeaves, 0 < len(self.ctfLeaves), errors.Join(self.ledgerErr, self.ctfLedgerErr)}}
+	rooted := 0
+	for _, pool := range pools {
+		if pool.err != nil {
+			read.Unavailable = append(read.Unavailable, pool.noId)
+			if !self.indexUnreadable {
+				if read.UnavailableColdkeys == nil {
+					read.UnavailableColdkeys = map[[32]byte]bool{}
+				}
+				for _, leaf := range pool.leaves {
+					read.UnavailableColdkeys[leaf.Coldkey] = true
+				}
+			}
+			continue
 		}
-		accounts = append(accounts, account)
+		if pool.rooted {
+			rooted += 1
+		}
+		for index := range pool.leaves {
+			account := &snClaimRelayAccount{NoId: pool.noId, Index: uint64(index), RootIndex: pool.rootIndex, Coldkey: pool.leaves[index].Coldkey, Cumulative: pool.leaves[index].Cumulative}
+			if claimed := self.mirrorClaimed[claimRelaySlot(account)]; claimed != nil {
+				account.Claimed = *claimed
+			}
+			read.Accounts = append(read.Accounts, account)
+		}
 	}
-	return accounts, nil
+	if 0 < len(read.Unavailable) && rooted == 0 {
+		return read, errors.Join(self.ledgerErr, self.poolLedgerErr, self.ctfLedgerErr)
+	}
+	if self.indexUnreadable {
+		read.UnavailableColdkeys = nil
+	}
+	return read, nil
 }
 
 func (self *claimRelayWorld) Proof(_ context.Context, account *snClaimRelayAccount) ([]merkle.LedgerNode, error) {
-	return self.tree.Proof(account.Index)
+	return self.treeOf(account).Proof(account.Index)
 }
 
 // snClaimRelayRequests
@@ -404,6 +486,12 @@ func (self *claimRelayWorld) List(_ context.Context, limit int) []*snClaimRelayR
 func (self *claimRelayWorld) Finish(_ context.Context, coldkey [32]byte, startLimit bool) {
 	delete(self.requests, coldkey)
 	if _, limited := self.limits[coldkey]; startLimit && !limited {
+		self.limits[coldkey] = self.nowTime.Add(snClaimRelayClaimNowPeriod)
+	}
+}
+
+func (self *claimRelayWorld) Limit(_ context.Context, coldkey [32]byte) {
+	if _, limited := self.limits[coldkey]; !limited {
 		self.limits[coldkey] = self.nowTime.Add(snClaimRelayClaimNowPeriod)
 	}
 }
@@ -1532,7 +1620,7 @@ func TestClaimRelayAccountViewSaysWhy(t *testing.T) {
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			status := &SnClaimRelayStatus{State: c.state, PassTime: now, AlphaPriceWei: claimRelayTestAlphaPrice.String(), Refusals: c.refusals}
-			account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(c.balance, zero, nil), c.requested, c.limit, nil, now)
+			account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(c.balance, zero, nil), c.requested, false, c.limit, nil, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1555,7 +1643,7 @@ func TestClaimRelayAccountViewAmounts(t *testing.T) {
 	now := claimRelayTestMonday
 	status := &SnClaimRelayStatus{State: SnClaimRelayStateRunning, PassTime: now, AlphaPriceWei: claimRelayTestAlphaPrice.String()}
 	cumulative, claimed, pending := uint256.NewInt(10_000_000_000), uint256.NewInt(4_000_000_000), uint256.NewInt(12_000_000_000)
-	account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(cumulative, claimed, pending), false, time.Time{}, nil, now)
+	account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(cumulative, claimed, pending), false, false, time.Time{}, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1569,7 +1657,7 @@ func TestClaimRelayAccountViewAmounts(t *testing.T) {
 	rootless := &StLedgerV2AccountEntry{NoId: 1, Index: 7, Cumulative: "0", Claimed: "0"}
 	text := "5"
 	rootless.PendingCumulative = &text
-	account, err = snClaimRelayAccountView(status, "ss58", rootless, false, time.Time{}, nil, now)
+	account, err = snClaimRelayAccountView(status, "ss58", rootless, false, false, time.Time{}, nil, now)
 	if err != nil || account.Reason != SnClaimRelayReasonNothingPending || account.PendingRao != 5 {
 		t.Fatalf("account %+v (%v)", account, err)
 	}
@@ -1585,7 +1673,7 @@ func TestClaimRelayAccountViewNamesTheRelaysClaim(t *testing.T) {
 	record := &model.SnClaimRelayClaim{TxHash: hash, Cumulative: "4000000000", AmountRao: "3000000000"}
 	view := func(cumulative uint64, claimed uint64, record *model.SnClaimRelayClaim) *SnClaimRelayAccount {
 		t.Helper()
-		account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(uint256.NewInt(cumulative), uint256.NewInt(claimed), nil), false, time.Time{}, record, now)
+		account, err := snClaimRelayAccountView(status, "ss58", claimRelayLedgerEntry(uint256.NewInt(cumulative), uint256.NewInt(claimed), nil), false, false, time.Time{}, record, now)
 		if err != nil {
 			t.Fatal(err)
 		}

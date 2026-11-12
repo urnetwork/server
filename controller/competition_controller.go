@@ -6503,6 +6503,8 @@ type EvaluationOutcome struct {
 	// Set only by the coordinator after authenticated artifacts are retained.
 	distributedArchiveVerified   bool
 	distributedIntegrityRejected bool
+	// Creation custody is local-only and never serialized as score authority.
+	receiveCustody *competitionReceiveCustody
 }
 
 // Schedules an infrastructure retry only when it can begin before the one
@@ -7436,6 +7438,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	go func() {
 		done <- evalReturn{outcome: self.evaluator.Evaluate(evalCtx, self.settings, job)}
 	}()
+	joinPreservingReceive := func() { result := <-done; result.outcome.closeReceiveCustody() }
 	heartbeatTicker := time.NewTicker(time.Duration(self.settings.WorkerHeartbeatSeconds) * time.Second)
 	defer heartbeatTicker.Stop()
 	heartbeatTick := heartbeatTicker.C
@@ -7481,6 +7484,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 	// All result selections, including pre-dispatch probes, share the same
 	// parent/integrity/budget ordering and retain the one joined outcome.
 	finishEvaluation := func(outcome EvaluationOutcome) error {
+		defer outcome.closeReceiveCustody()
 		if self.evaluationResultForTest != nil {
 			self.evaluationResultForTest()
 		}
@@ -7562,7 +7566,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 		case <-heartbeatTick:
 			if parent.Err() != nil {
 				cancel()
-				<-done
+				joinPreservingReceive()
 				return handBackShutdown()
 			}
 			if observeBudget() {
@@ -7588,11 +7592,11 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			if err != nil {
 				if parent.Err() != nil {
 					cancel()
-					<-done
+					joinPreservingReceive()
 					return handBackShutdown()
 				}
 				cancel()
-				<-done
+				joinPreservingReceive()
 				err = withCompetitionHeartbeatOwner(err, observation)
 				_ = self.handBackJob(job, "heartbeat_failed", err)
 				return fmt.Errorf("heartbeat competition job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
@@ -7621,11 +7625,11 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			if err != nil {
 				if parent.Err() != nil {
 					cancel()
-					<-done
+					joinPreservingReceive()
 					return handBackShutdown()
 				}
 				cancel()
-				<-done
+				joinPreservingReceive()
 				_ = self.handBackJob(job, "host_heartbeat_failed", err)
 				return fmt.Errorf("refresh evaluator host during job %s: %w", job.JobId, safeCompetitionHeartbeatError(err))
 			}
@@ -7634,7 +7638,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 			}
 		case <-parent.Done():
 			cancel()
-			<-done
+			joinPreservingReceive()
 			return handBackShutdown()
 		}
 	}
@@ -7643,6 +7647,7 @@ func (self *Worker) evaluateOne(parent context.Context, job *queuedJob, hostChec
 // Persists the same finished outcome without another claim or evaluation. Its
 // detached, bounded metadata lifetime never renews expired authority or scoring.
 func (self *Worker) completeWithRetry(parent context.Context, job *queuedJob, leaseExpiresAt time.Time, outcome EvaluationOutcome) (bool, error) {
+	defer outcome.closeReceiveCustody()
 	var retry bool
 	_, err := retryCompetitionLeaseOperation(withCompetitionJobAuthority(context.WithoutCancel(parent), job), leaseExpiresAt, self.heartbeatSettings.CompletionRetry, func(ctx context.Context) error {
 		completedRetry, err := self.store.Complete(ctx, self.settings, self.workerId, job.JobId, outcome)
@@ -7651,6 +7656,13 @@ func (self *Worker) completeWithRetry(parent context.Context, job *queuedJob, le
 		}
 		return err
 	})
+	// Housekeeping cannot alter an acknowledged database result. Shutdown,
+	// late/ambiguous completion or changed custody only preserves local bytes.
+	if err == nil && parent.Err() == nil && outcome.receiveCustody != nil {
+		if cleanupErr := outcome.receiveCustody.cleanup(parent, self.heartbeatSettings.ReceiveCleanup, job, outcome); cleanupErr != nil {
+			competitionReceiveCleanupFailures.WithLabelValues("cleanup").Inc()
+		}
+	}
 	return err == nil && retry, err
 }
 

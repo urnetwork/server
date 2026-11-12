@@ -122,23 +122,35 @@ func (self *competitionAgentEvaluator) Evaluate(parent context.Context, settings
 			competitionExecutorRemoteState.WithLabelValues(self.host.HostId).Set(competitionAgentStateNumber(response.State))
 			switch response.State {
 			case "succeeded", "failed", "canceled", "expired":
-				directory, createErr := os.MkdirTemp(settings.ArtifactRoot, ".executor-receive-"+manifest.Identity.RunId+"-")
+				directory, custody, createErr := createCompetitionReceive(settings.ArtifactRoot, job, manifest.Identity, manifest.Inputs)
 				if createErr == nil {
-					artifactResponse, artifactErr := self.transport.Exchange(ctx, competitionagent.Request{Operation: "artifacts", RunId: request.RunId, FencingToken: request.FencingToken}, "", directory)
-					if errors.Is(artifactErr, competitionagent.ErrIntegrity) {
-						_ = os.RemoveAll(directory)
-						return EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "authenticated executor artifact transfer rejected altered or invalid evidence"), distributedIntegrityRejected: true}
-					}
-					if artifactErr == nil && artifactResponse.ManifestSha256 == manifestDigest && sameCompetitionAgentIdentity(artifactResponse.Identity, &manifest.Identity) && artifactResponse.State == response.State {
-						outcome := authenticateDistributedCompetitionAttempt(ctx, settings, job, manifest, artifactResponse, directory)
-						if outcome.distributedArchiveVerified {
-							if self.afterRetained != nil {
-								if err := self.afterRetained(directory, artifactResponse, outcome); err != nil {
-									return failure("executor_qualification_failed", "retained no-op evidence did not pass the approved admission screen")
+					outcome, completed := func() (returned EvaluationOutcome, completed bool) {
+						defer func() {
+							if custody != nil && returned.receiveCustody != custody {
+								if err := custody.Close(); err != nil {
+									competitionReceiveCleanupFailures.WithLabelValues("close").Inc()
 								}
 							}
-							return outcome
+						}()
+						artifactResponse, artifactErr := self.transport.Exchange(ctx, competitionagent.Request{Operation: "artifacts", RunId: request.RunId, FencingToken: request.FencingToken}, "", directory)
+						if errors.Is(artifactErr, competitionagent.ErrIntegrity) {
+							_ = os.RemoveAll(directory)
+							return EvaluationOutcome{Error: terminalInfrastructureError("executor_integrity_rejected", "authenticated executor artifact transfer rejected altered or invalid evidence"), distributedIntegrityRejected: true}, true
 						}
+						if artifactErr == nil && artifactResponse.ManifestSha256 == manifestDigest && sameCompetitionAgentIdentity(artifactResponse.Identity, &manifest.Identity) && artifactResponse.State == response.State {
+							outcome := authenticateDistributedCompetitionAttempt(ctx, settings, job, manifest, artifactResponse, directory)
+							if outcome.distributedArchiveVerified {
+								outcome, err := self.retainedReceiveOutcome(directory, custody, artifactResponse, outcome)
+								if err != nil {
+									return failure("executor_qualification_failed", "retained no-op evidence did not pass the approved admission screen"), true
+								}
+								return outcome, true
+							}
+						}
+						return EvaluationOutcome{}, false
+					}()
+					if completed {
+						return outcome
 					}
 					// An incomplete copy/retention is not completion authority.
 					// Retry the same terminal execution inside its original budget.

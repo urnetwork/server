@@ -1,5 +1,6 @@
-// Only the reviewed legacy automated prefix can prove the slot-update
-// no-COMMIT continuation. SQL never enters diagnostics or caller authority.
+// Only the reviewed legacy and distributed graphs can prove their exact
+// returned transaction continuations. SQL never enters diagnostics or caller
+// authority; distributed business updates stay outside the read/config prefix.
 package controller
 
 import (
@@ -40,7 +41,7 @@ func competitionHeartbeatLegacySlotStatements() []competitionHeartbeatSqlStateme
 
 // A distributed heartbeat authenticates its host/fence, then updates the job
 // before its physical slot. This exact prefix is distinct from the singleton.
-func competitionHeartbeatDistributedSlotStatements() []competitionHeartbeatSqlStatement {
+func competitionHeartbeatDistributedPreBusinessStatements() []competitionHeartbeatSqlStatement {
 	legacy := competitionHeartbeatLegacySlotStatements()
 	return []competitionHeartbeatSqlStatement{
 		legacy[0],
@@ -49,9 +50,16 @@ func competitionHeartbeatDistributedSlotStatements() []competitionHeartbeatSqlSt
 		{step: competitionHeartbeatDatabaseJobAuthority, kind: "row_scan", sql: "SELECT EXISTS(SELECT 1 FROM competition_job j JOIN competition_execution_slot s ON s.slot_id=j.executor_slot_id WHERE j.job_id=$1 AND j.executor_host_id=$2 AND j.executor_slot_id=$3 AND j.executor_fencing_token=$4 AND s.host_id=j.executor_host_id AND s.job_id=j.job_id AND s.fencing_token=j.executor_fencing_token)"},
 		{step: competitionHeartbeatDatabaseJobAuthority, kind: "exec", sql: "SELECT set_config('urnetwork.competition_executor_host',$1,true), set_config('urnetwork.competition_executor_slot',$2,true),set_config('urnetwork.competition_executor_fence',$3,true)"},
 		legacy[4], legacy[5], legacy[6], legacy[7],
-		{step: competitionHeartbeatDatabaseJobUpdate, kind: "exec", sql: "UPDATE competition_job SET lease_expires_at = $3 WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at"},
-		{step: competitionHeartbeatDatabaseSlotUpdate, kind: "exec", sql: "UPDATE competition_execution_slot SET lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = $5 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at"},
 	}
+}
+
+// Business updates are never part of the separately reviewed read/config
+// prefix. The existing final slot proof still requires this complete graph.
+func competitionHeartbeatDistributedSlotStatements() []competitionHeartbeatSqlStatement {
+	return append(competitionHeartbeatDistributedPreBusinessStatements(),
+		competitionHeartbeatSqlStatement{step: competitionHeartbeatDatabaseJobUpdate, kind: "exec", sql: "UPDATE competition_job SET lease_expires_at = $3 WHERE job_id = $1 AND state = 'running' AND lease_owner = $2 AND $4 < lease_expires_at"},
+		competitionHeartbeatSqlStatement{step: competitionHeartbeatDatabaseSlotUpdate, kind: "exec", sql: "UPDATE competition_execution_slot SET lease_expires_at = $3, heartbeat_at = $4 WHERE slot_id = $5 AND worker_id = $1 AND job_id = $2 AND $4 < lease_expires_at"},
+	)
 }
 
 // One source-selected class spans the complete invocation, never a caller's

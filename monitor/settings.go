@@ -294,13 +294,16 @@ type TLSCertificateSignalSource interface {
 	TLSCertificates(ctx context.Context, network, address, serverName string) (TLSCertificateObservation, error)
 }
 
-// DNSRecordType is one address-family DNS record checked by SIGNALS.md
-// §18.3. Only DNSRecordA and DNSRecordAAAA are valid probe inputs.
+// DNSRecordType is one DNS record type a probe asks for. SIGNALS.md §18.3
+// checks only the address families, DNSRecordA and DNSRecordAAAA; §28.2 asks
+// public resolvers for the extender record name's DNSRecordTXT over the wire
+// query path.
 type DNSRecordType string
 
 const (
 	DNSRecordA    DNSRecordType = "A"
 	DNSRecordAAAA DNSRecordType = "AAAA"
+	DNSRecordTXT  DNSRecordType = "TXT"
 )
 
 // DNSResponseCode is the bounded response classification retained by the DNS
@@ -323,6 +326,9 @@ type DNSResponseObservation struct {
 	ResponseCode  DNSResponseCode
 	Authoritative bool
 	CNAMECount    int
+	// the values of a TXT question's answer, each record's character strings
+	// joined as a client joins them, in answer order
+	Texts []string
 }
 
 // DNSAuthoritativeObservation aggregates one direct response per discovered
@@ -339,6 +345,13 @@ type DNSAuthoritativeObservation struct {
 type DNSAliasSignalSource interface {
 	DNSAuthoritative(ctx context.Context, zone, hostname string, recordType DNSRecordType) (DNSAuthoritativeObservation, error)
 	DNSRecursive(ctx context.Context, hostname string, recordType DNSRecordType) (DNSResponseObservation, error)
+}
+
+// DNSTxtSignalSource optionally supplies one resolver's answer to a name's TXT
+// question, for SIGNALS.md §28.2. Production asks the resolver over the DNS
+// wire protocol (UDP, then TCP when truncated).
+type DNSTxtSignalSource interface {
+	DNSTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error)
 }
 
 // SettingsGenerationCheck compares the immutable settings already owned by a
@@ -1002,6 +1015,14 @@ func (r *sourceRunner) dnsRecursive(ctx context.Context, hostname string, record
 		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSAliasSignalSource")
 	}
 	return source.DNSRecursive(ctx, hostname, recordType)
+}
+
+func (r *sourceRunner) dnsTxt(ctx context.Context, resolver, hostname string) (DNSResponseObservation, error) {
+	source, ok := r.source.(DNSTxtSignalSource)
+	if !ok {
+		return DNSResponseObservation{}, fmt.Errorf("monitor: SignalSource does not implement DNSTxtSignalSource")
+	}
+	return source.DNSTxt(ctx, resolver, hostname)
 }
 
 func (r *sourceRunner) warpctl(ctx context.Context, args ...string) (string, error) {
