@@ -66,6 +66,12 @@ dated operator snapshot, not score/runtime authority or permission to restart an
 active qualification. Live season state remains authoritative in the API,
 database and the supervisor's state directory described below.
 
+Keep that file limited to the current jobs, verified release, pending approvals
+and next actions. Superseded preparation/incident snapshots belong in the linked
+`old/CURRENT-STATE-HISTORY-*` files, with their original bytes and digest retained.
+Open history only for a specific investigation; its readiness, hold and next-action
+fields are not current instructions.
+
 ### Prepared epoch-one to epoch-two operator handoff
 
 Status: `PREPARED / NOT LIVE` for the optional intake-first release. This is
