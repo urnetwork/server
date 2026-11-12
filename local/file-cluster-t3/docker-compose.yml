@@ -44,13 +44,18 @@ services:
   ntp:
     image: ${FILECLUSTER_T3_IMAGE:-sidecar-test-fc-minio:local}
     container_name: sidecar-test-fc-ntp
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.2
     hostname: fc-ntp
     restart: "no"
-    networks: [filecluster]
     entrypoint: ["/t3tool", "ntp", "-listen", ":123"]
   fc-meta-1-host1:
     <<: *host
     container_name: sidecar-test-fc-meta-1-host1
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.11
     hostname: fc-meta-1-host1
     command: [server, "--address", ":9000", "http://fc-meta-1-host{1...4}:9000/drives/d{1...2}"]
     environment:
@@ -64,6 +69,9 @@ services:
   fc-meta-1-host2:
     <<: *host
     container_name: sidecar-test-fc-meta-1-host2
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.12
     hostname: fc-meta-1-host2
     command: [server, "--address", ":9000", "http://fc-meta-1-host{1...4}:9000/drives/d{1...2}"]
     environment:
@@ -77,6 +85,9 @@ services:
   fc-meta-1-host3:
     <<: *host
     container_name: sidecar-test-fc-meta-1-host3
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.13
     hostname: fc-meta-1-host3
     command: [server, "--address", ":9000", "http://fc-meta-1-host{1...4}:9000/drives/d{1...2}"]
     environment:
@@ -90,6 +101,9 @@ services:
   fc-meta-1-host4:
     <<: *host
     container_name: sidecar-test-fc-meta-1-host4
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.14
     hostname: fc-meta-1-host4
     command: [server, "--address", ":9000", "http://fc-meta-1-host{1...4}:9000/drives/d{1...2}"]
     environment:
@@ -103,6 +117,9 @@ services:
   fc-seg-1-host1:
     <<: *host
     container_name: sidecar-test-fc-seg-1-host1
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.21
     hostname: fc-seg-1-host1
     command: [server, "--address", ":9000", "http://fc-seg-1-host{1...4}:9000/drives/d{1...4}"]
     environment:
@@ -118,6 +135,9 @@ services:
   fc-seg-1-host2:
     <<: *host
     container_name: sidecar-test-fc-seg-1-host2
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.22
     hostname: fc-seg-1-host2
     command: [server, "--address", ":9000", "http://fc-seg-1-host{1...4}:9000/drives/d{1...4}"]
     environment:
@@ -133,6 +153,9 @@ services:
   fc-seg-1-host3:
     <<: *host
     container_name: sidecar-test-fc-seg-1-host3
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.23
     hostname: fc-seg-1-host3
     command: [server, "--address", ":9000", "http://fc-seg-1-host{1...4}:9000/drives/d{1...4}"]
     environment:
@@ -148,6 +171,9 @@ services:
   fc-seg-1-host4:
     <<: *host
     container_name: sidecar-test-fc-seg-1-host4
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.24
     hostname: fc-seg-1-host4
     command: [server, "--address", ":9000", "http://fc-seg-1-host{1...4}:9000/drives/d{1...4}"]
     environment:
@@ -163,6 +189,9 @@ services:
   fc-meta-2:
     <<: *host
     container_name: sidecar-test-fc-meta-2
+    networks:
+      filecluster:
+        ipv4_address: 172.30.52.31
     hostname: fc-meta-2
     command: [server, "--address", ":9000", "/drives/d{1...8}"]
     environment:
@@ -183,6 +212,12 @@ services:
 networks:
   filecluster:
     name: sidecar-test-filecluster
+    # every host at a fixed address: a host a test stops and starts comes back where the others dial it, as a
+    # production host does, where with addresses handed out at start two hosts restarted together swap theirs and
+    # the hosts still up keep dialing the old ones, losing the set's write quorum for good
+    ipam:
+      config:
+        - subnet: 172.30.52.0/24
 
 volumes:
   sidecar-test-fc-meta-1-host1-d1:

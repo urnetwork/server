@@ -18,7 +18,8 @@ local/file-cluster-t3/t3.sh down     # removes the containers and their drives
 ```
 
 Containers are `sidecar-test-fc-*`, ports are on loopback above 50000, and the root user in `docker-compose.yml` is
-synthetic. The image is `FROM scratch` with two binaries built here, so nothing is fetched. Hosts run a drive timeout
+synthetic. Every host has a fixed address on the stack's own network (172.30.52.0/24), so a host a test stops and starts
+(sidecart3's HostDown and HostUp, the suite's host cases) comes back where the others dial it. The image is `FROM scratch` with two binaries built here, so nothing is fetched. Hosts run a drive timeout
 of 5 s unless `FILECLUSTER_T3_DRIVE_TIMEOUT` sets production's 30 s, as the nightly and Gn-out runs do.
 
 The hooked build never ships: a production cluster runs the same commit's release build, whose suite run has no
