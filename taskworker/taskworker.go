@@ -99,7 +99,6 @@ func initTaskSchedule(ctx context.Context) {
 		controller.ScheduleServiceReminders(clientSession, tx, controller.NextServiceRemindersAt(server.NowUtc()))
 		controller.ScheduleSubscriptionMetricsSync(clientSession, tx, server.NowUtc())
 		controller.ScheduleDeliverAccountMessages(clientSession, tx)
-		work.SchedulePayout(clientSession, tx)
 		work.ScheduleProcessPendingPayouts(clientSession, tx)
 		work.ScheduleCancelHungAccountPayments(clientSession, tx)
 		// work.SchedulePopulateAccountWallets(clientSession, tx)
@@ -350,7 +349,13 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			work.RemoveExpiredAuthCodesPost,
 			"bringyour.com/service/taskworker/work.RemoveExpiredAuthCodes",
 		),
-		work.NewPayoutTaskTarget(),
+		// the weekly USDC payout ended (owner decision 2026-11-12); a queued
+		// "payout" or "payout_retry" row runs once as a no-op
+		task.NewTaskTargetWithPost(
+			work.Payout,
+			work.PayoutPost,
+			"bringyour.com/service/taskworker/work.Payout",
+		),
 		task.NewTaskTargetWithPost(
 			work.ProcessPendingPayouts,
 			work.ProcessPendingPayoutsPost,

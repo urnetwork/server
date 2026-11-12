@@ -84,7 +84,7 @@ func (self *closeParkedTestFixture) openContract(networkId server.Id, opened tim
 
 func (self *closeParkedTestFixture) dryRun() *PayoutCloseParkedReport {
 	self.t.Helper()
-	report, err := PayoutsCloseParked(self.session, false, "")
+	report, err := PayoutsCloseParked(self.session, false, "", nil)
 	if err != nil {
 		self.t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func (self *closeParkedTestFixture) dryRun() *PayoutCloseParkedReport {
 
 func (self *closeParkedTestFixture) apply(digest string) *PayoutCloseParkedReport {
 	self.t.Helper()
-	report, err := PayoutsCloseParked(self.session, true, digest)
+	report, err := PayoutsCloseParked(self.session, true, digest, nil)
 	if err != nil {
 		self.t.Fatal(err)
 	}
@@ -265,7 +265,7 @@ func TestPayoutsCloseParkedDryRunWritesNothing(t *testing.T) {
 		before := f.tables()
 		server.RequirePgReadOnly()
 		t.Cleanup(server.Testing_ReleasePgReadOnly)
-		report, err := PayoutsCloseParked(f.session, false, "")
+		report, err := PayoutsCloseParked(f.session, false, "", nil)
 		// the process really was read only: a write on its path fails
 		writeRefused := false
 		func() {
@@ -327,7 +327,7 @@ func TestPayoutsCloseParkedApplyRefuses(t *testing.T) {
 
 		refuse := func(name string, expect string, want error) {
 			t.Helper()
-			report, err := PayoutsCloseParked(f.session, true, expect)
+			report, err := PayoutsCloseParked(f.session, true, expect, nil)
 			if !errors.Is(err, want) || !strings.HasSuffix(err.Error(), "; nothing was closed") {
 				t.Fatalf("%s: %v, want %v", name, err, want)
 			}
@@ -347,7 +347,7 @@ func TestPayoutsCloseParkedApplyRefuses(t *testing.T) {
 		refuse("payments on by default", digest, ErrPayoutCloseParkedPaymentsNotOff)
 		usdcSwitchTestDeclare(t, "payments: maybe\n")
 		refuse("unreadable switches", digest, ErrPayoutCloseParkedPaymentsNotOff)
-		if report, _ := PayoutsCloseParked(f.session, false, ""); !strings.HasPrefix(report.UsdcPayments, "unreadable: ") {
+		if report, _ := PayoutsCloseParked(f.session, false, "", nil); !strings.HasPrefix(report.UsdcPayments, "unreadable: ") {
 			t.Fatal("the dry run did not report the unreadable switches", report.UsdcPayments)
 		}
 
@@ -369,7 +369,7 @@ func TestPayoutsCloseParkedApplyRefusesWithoutSwitches(t *testing.T) {
 		f.pending(networkId, walletId, time.Date(2026, 10, 18, 10, 0, 0, 0, time.UTC), model.UsdToNanoCents(2))
 		report := f.dryRun()
 		before := f.tables()
-		if _, err := PayoutsCloseParked(f.session, true, report.Digest); !errors.Is(err, ErrPayoutCloseParkedPaymentsNotOff) || report.UsdcPayments != server.UsdcPayoutOn {
+		if _, err := PayoutsCloseParked(f.session, true, report.Digest, nil); !errors.Is(err, ErrPayoutCloseParkedPaymentsNotOff) || report.UsdcPayments != server.UsdcPayoutOn {
 			t.Fatal("an apply without usdc_payout.yml was not refused", err, report.UsdcPayments)
 		}
 		if after := f.tables(); after != before {
@@ -497,7 +497,7 @@ func TestPayoutsCloseParkedApplyClosesSelection(t *testing.T) {
 		if rerun.Parked.Count != 0 || rerun.Digest != closeParkedTestDigest(map[server.Id]model.NanoCents{}) || rerun.ClosedPendingCount != 0 {
 			t.Fatal("closed payments are still parked", rerun.Parked.Rows)
 		}
-		if _, err := PayoutsCloseParked(f.session, true, dry.Digest); !errors.Is(err, ErrPayoutCloseParkedDigestMismatch) {
+		if _, err := PayoutsCloseParked(f.session, true, dry.Digest, nil); !errors.Is(err, ErrPayoutCloseParkedDigestMismatch) {
 			t.Fatal("a rerun with the old digest was not refused", err)
 		}
 		if again := f.apply(rerun.Digest); again.Closed.Count != 0 || len(again.Skipped) != 0 {
@@ -547,7 +547,7 @@ func TestPayoutsCloseParkedApplySkipsChangedPayments(t *testing.T) {
 		t.Cleanup(func() { payoutCloseParkedBeforeBatch = previous })
 
 		dry := f.dryRun()
-		report, err := PayoutsCloseParked(f.session, true, dry.Digest)
+		report, err := PayoutsCloseParked(f.session, true, dry.Digest, nil)
 		if err == nil || !strings.Contains(err.Error(), "3 payment(s) changed since the census") {
 			t.Fatal("the skips were not reported as an error", err)
 		}
@@ -595,7 +595,7 @@ func TestPayoutsCloseParkedApplyStopsWhenPaymentsTurnOn(t *testing.T) {
 			}
 		}
 		t.Cleanup(func() { payoutCloseParkedBeforeBatch = previous })
-		report, err := PayoutsCloseParked(f.session, true, f.dryRun().Digest)
+		report, err := PayoutsCloseParked(f.session, true, f.dryRun().Digest, nil)
 		if !errors.Is(err, ErrPayoutCloseParkedPaymentsNotOff) || batches != 1 || report.Closed.Count != 1 || len(report.Skipped) != 0 ||
 			!strings.Contains(err.Error(), "stopped with 1 of the census's 3 payment(s) closed and 0 skipped") {
 			t.Fatal("the apply went on with payments on", err, batches, report.Closed)

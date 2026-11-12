@@ -355,6 +355,39 @@ What it does not change:
 - Provider-facing reads. A closed payment is listed like any canceled payment,
   and its sweeps still count as unpaid bytes.
 
+### Closing keyed payments paid another way: `payouts close-parked --paid`
+
+USDC payouts ended (owner decision 2026-11-12): the weekly payout run plans and
+sends nothing, and `payouts plan` is gone. A keyed payment (a
+`circle_idempotency_key`, no `payment_record`, no `tx_hash`) is never parked,
+because Circle may hold a transfer under its key. When another Circle transfer
+paid its obligation, name both:
+
+```
+bringyourctl payouts close-parked --paid=<payment_id>:<circle_transaction_id>[,...]
+bringyourctl payouts close-parked --paid=<same list> --apply --expect=<digest>
+```
+
+Circle has no lookup by idempotency key, so each entry is checked against the
+complete Circle listing of the payment's wallet address, in every state. The
+named transfer must be listed, COMPLETE, an outbound developer transfer from
+the chain's configured payout wallet, of the configured USDC, with a chain
+hash, of exactly the payout less the $0.01 fee at USDC precision. No listed
+transfer may be the payment's own attempt: an outbound transfer of that amount,
+created after the payment (24 h margin), that no payment row holds as its
+record, unless it is a failure that moved no funds. So the named transfer must
+be another row's record (a `payouts reimburse` row, say) or older than the
+payment. The payment must be pending, keyed, unsubmitted, not staged and not
+closed before. Any failed check refuses the whole command, dry run and apply.
+
+The digest also binds each paid payment's id, payout, key, transfer and hash.
+The apply checks each payment again, with the database and Circle, just before
+it closes it, and skips one that changed. A closure cancels the payment and
+journals `usdc_payout_closed` with reason `paid_elsewhere`, the key, the
+transfer, its hash, amount and time, and the rows holding it as their record.
+A canceled keyed payment is never re-planned or restored, and the sn-reconcile
+census skips a closed one, so it is never revived.
+
 ## Note (2026-10-27): the listing reads later sweeps below a contract id bound
 
 The 2026-10-26 listing still read every sweep of every later row in the stuck

@@ -13,6 +13,10 @@
 // batches, one transaction each, so no transaction holds many payments for long.
 // A payment that changed since the census is skipped; a rerun closes nothing
 // twice.
+//
+// With `--paid`, the census also holds the named keyed payments that another
+// Circle transfer paid (account_payment_close_paid.go), each with its checks;
+// the digest binds them, and the apply closes them after the parked ones.
 package controller
 
 import (
@@ -174,10 +178,12 @@ func newPayoutCloseParkedSet(payments []*model.UsdcParkedPayment) *PayoutClosePa
 	return set
 }
 
-// sha256 over each parked payment's id and payout, in id order: the apply
-// closes exactly the payments, with exactly the payouts, that the dry run
-// reported.
-func payoutCloseParkedDigest(rows []*PayoutCloseParkedRow) string {
+// sha256 over each parked payment's id and payout, in id order, then each paid
+// payment's id, payout, idempotency key, paying transfer and its hash, in id
+// order: the apply closes exactly the payments, with exactly the payouts and
+// transfers, that the dry run reported. Without paid payments it is the
+// digest of the parked payments alone, as before `--paid`.
+func payoutCloseParkedDigest(rows []*PayoutCloseParkedRow, paidRows []*PayoutClosePaidRow) string {
 	sorted := slices.Clone(rows)
 	slices.SortFunc(sorted, func(a *PayoutCloseParkedRow, b *PayoutCloseParkedRow) int {
 		return a.PaymentId.Cmp(b.PaymentId)
@@ -185,6 +191,13 @@ func payoutCloseParkedDigest(rows []*PayoutCloseParkedRow) string {
 	lines := []string{"urnetwork payouts close-parked v1"}
 	for _, row := range sorted {
 		lines = append(lines, fmt.Sprintf("payment %s %d", row.PaymentId, row.PayoutNanoCents))
+	}
+	sortedPaid := slices.Clone(paidRows)
+	slices.SortFunc(sortedPaid, func(a *PayoutClosePaidRow, b *PayoutClosePaidRow) int {
+		return a.PaymentId.Cmp(b.PaymentId)
+	})
+	for _, row := range sortedPaid {
+		lines = append(lines, fmt.Sprintf("paid %s %d %s %s %s", row.PaymentId, row.PayoutNanoCents, row.CircleIdempotencyKey, row.CircleTransactionId, row.TxHash))
 	}
 	sum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
 	return hex.EncodeToString(sum[:])
@@ -222,10 +235,29 @@ type PayoutCloseParkedReport struct {
 	// skipped because they changed since the census
 	Closed  *PayoutCloseParkedSet   `json:"closed,omitempty"`
 	Skipped []*PayoutCloseParkedRow `json:"skipped,omitempty"`
+	// --paid: the keyed payments another Circle transfer paid, as checked, and
+	// the entries that failed a check
+	Paid        []*PayoutClosePaidRow     `json:"paid,omitempty"`
+	PaidRefused []*PayoutClosePaidRefusal `json:"paid_refused,omitempty"`
+	// --apply with --paid: the paid payments this run closed, and those it
+	// skipped because they changed since the census
+	ClosedPaid  []*PayoutClosePaidRow `json:"closed_paid,omitempty"`
+	SkippedPaid []*PayoutClosePaidRow `json:"skipped_paid,omitempty"`
 }
 
-// Runs the dry run, or with `apply` the close-out, of the parked payments.
-func PayoutsCloseParked(clientSession *session.ClientSession, apply bool, expect string) (*PayoutCloseParkedReport, error) {
+// Runs the dry run, or with `apply` the close-out, of the parked payments and
+// of the keyed payments `paid` names.
+func PayoutsCloseParked(clientSession *session.ClientSession, apply bool, expect string, paid []*PayoutClosePaidEntry) (*PayoutCloseParkedReport, error) {
+	return payoutsCloseParked(clientSession, apply, expect, paid, newPayoutClosePaidCircle())
+}
+
+func payoutsCloseParked(
+	clientSession *session.ClientSession,
+	apply bool,
+	expect string,
+	paid []*PayoutClosePaidEntry,
+	circle *payoutClosePaidCircle,
+) (*PayoutCloseParkedReport, error) {
 	ctx := clientSession.Ctx
 	report := &PayoutCloseParkedReport{
 		RunId:        server.NewId(),
@@ -246,8 +278,23 @@ func PayoutsCloseParked(clientSession *session.ClientSession, apply bool, expect
 
 	parked := model.GetUsdcParkedPayments(ctx)
 	report.Parked = newPayoutCloseParkedSet(parked)
-	report.Digest = payoutCloseParkedDigest(report.Parked.Rows)
+	for _, entry := range paid {
+		row, refusal := payoutClosePaidCheck(ctx, circle, entry)
+		if refusal != "" {
+			report.PaidRefused = append(report.PaidRefused, &PayoutClosePaidRefusal{
+				PaymentId:           entry.PaymentId,
+				CircleTransactionId: entry.CircleTransactionId,
+				Reason:              refusal,
+			})
+			continue
+		}
+		report.Paid = append(report.Paid, row)
+	}
+	report.Digest = payoutCloseParkedDigest(report.Parked.Rows, report.Paid)
 	report.ClosedPendingCount = model.GetUsdcPayoutClosedPendingCount(ctx)
+	if 0 < len(report.PaidRefused) {
+		return report, fmt.Errorf("%w: %d of %d; nothing was closed", ErrPayoutClosePaidRefused, len(report.PaidRefused), len(paid))
+	}
 	if !apply {
 		return report, nil
 	}
@@ -264,12 +311,14 @@ func PayoutsCloseParked(clientSession *session.ClientSession, apply bool, expect
 	finish := func(err error) (*PayoutCloseParkedReport, error) {
 		report.Closed = newPayoutCloseParkedSet(closed)
 		report.Skipped = newPayoutCloseParkedSet(skipped).Rows
+		closedCount := len(closed) + len(report.ClosedPaid)
+		skippedCount := len(skipped) + len(report.SkippedPaid)
 		switch {
 		case err != nil:
 			err = fmt.Errorf("payouts close-parked: stopped with %d of the census's %d payment(s) closed and %d skipped; run the dry run again: %w",
-				len(closed), len(parked), len(skipped), err)
-		case 0 < len(skipped):
-			err = fmt.Errorf("payouts close-parked: %d payment(s) changed since the census and were not closed; run the dry run again", len(skipped))
+				closedCount, len(parked)+len(report.Paid), skippedCount, err)
+		case 0 < skippedCount:
+			err = fmt.Errorf("payouts close-parked: %d payment(s) changed since the census and were not closed; run the dry run again", skippedCount)
 		}
 		return report, err
 	}
@@ -303,6 +352,13 @@ func PayoutsCloseParked(clientSession *session.ClientSession, apply bool, expect
 			if !closedIds[payment.PaymentId] {
 				skipped = append(skipped, payment)
 			}
+		}
+	}
+	if 0 < len(report.Paid) {
+		closedPaid, skippedPaid, err := closePayoutPaidRows(clientSession, circle, report)
+		report.ClosedPaid, report.SkippedPaid = closedPaid, skippedPaid
+		if err != nil {
+			return finish(err)
 		}
 	}
 	return finish(nil)
@@ -385,6 +441,7 @@ func (self *PayoutCloseParkedReport) Text(ids bool) string {
 	if ids {
 		payoutCloseParkedRowsText(b, "parked", self.Parked.Rows)
 	}
+	self.paidText(b)
 	fmt.Fprintf(b, "digest %s\n", self.Digest)
 	if self.Closed != nil {
 		fmt.Fprintf(b, "closed: %d payment(s), %s USD (%d nano cents)\n", self.Closed.Count, formatPayoutCloseParkedUsd(self.Closed.PayoutNanoCents), self.Closed.PayoutNanoCents)
@@ -397,5 +454,19 @@ func (self *PayoutCloseParkedReport) Text(ids bool) string {
 			payoutCloseParkedRowsText(b, "skipped", self.Skipped)
 		}
 	}
+	self.closedPaidText(b)
 	return b.String()
+}
+
+// The command that closes exactly this census, for a dry run that found
+// payments to close; "" when it found none.
+func (self *PayoutCloseParkedReport) ApplyCommand() string {
+	if (self.Parked == nil || self.Parked.Count == 0) && len(self.Paid) == 0 {
+		return ""
+	}
+	command := "bringyourctl payouts close-parked"
+	if 0 < len(self.Paid) {
+		command += " --paid=" + payoutClosePaidArgument(self.Paid)
+	}
+	return command + " --apply --expect=" + self.Digest
 }
