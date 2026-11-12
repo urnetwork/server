@@ -32,8 +32,8 @@ package monitor
 //     segment placement's lead time;
 //   - filecluster-cohort-unobservable reports what could not be read.
 //
-// §19.8's business-hours pages wait for a business-hours path in the pager (OPS); until it has one they warn on
-// Slack, as §29.4's do. No series or finding names a network or repo.
+// §19.8's business-hours pages are raised at page severity, and the pager holds each until the business calendar
+// opens, as §29.4's (QD-754; page_classes.go's business rows). No series or finding names a network or repo.
 
 import (
 	"context"
@@ -349,7 +349,7 @@ func (self fileClusterCohortProbe) evaluate(settings *SidecarStorageSettings, in
 					"the segment cluster's drive operations, at their 30-day trend, reach half its measured capacity inside the segment placement's lead time",
 					fmt.Sprintf("hdd_ops=%.1f capacity=%.1f per_day=%.3f days=%.0f", input.hddOps, input.hddCapacity, projection.perDay, projection.days)))
 			} else {
-				findings = append(findings, healthyFinding(fileClusterCohortProbeId, tierWarn, fileClusterCohortClassHddTrigger, input.clusterId))
+				findings = append(findings, healthyFinding(fileClusterCohortProbeId, tierPage, fileClusterCohortClassHddTrigger, input.clusterId))
 			}
 		}
 	}
@@ -382,7 +382,7 @@ func (self fileClusterCohortProbe) evaluate(settings *SidecarStorageSettings, in
 			findings = append(findings, self.cohortFinding(fileClusterCohortClassLimit, input.clusterId, "",
 				"the metadata cluster stands at its cohort limit, 80% raw or 70% inodes: evs refuses its repos' payload 507 CLUSTER_FULL", observedText))
 		} else {
-			findings = append(findings, healthyFinding(fileClusterCohortProbeId, tierWarn, fileClusterCohortClassLimit, input.clusterId))
+			findings = append(findings, healthyFinding(fileClusterCohortProbeId, tierPage, fileClusterCohortClassLimit, input.clusterId))
 		}
 
 		exhaustionDays := math.Inf(1)
@@ -396,7 +396,7 @@ func (self fileClusterCohortProbe) evaluate(settings *SidecarStorageSettings, in
 			findings = append(findings, self.cohortFinding(fileClusterCohortClassExhaustion, input.clusterId, "",
 				"the cluster's own growth reaches 80% raw, 70% inodes or a 0.75 DWPD 7-day mean inside the move tool's lead time", observedText))
 		} else {
-			findings = append(findings, healthyFinding(fileClusterCohortProbeId, tierWarn, fileClusterCohortClassExhaustion, input.clusterId))
+			findings = append(findings, healthyFinding(fileClusterCohortProbeId, tierPage, fileClusterCohortClassExhaustion, input.clusterId))
 		}
 
 		trigger := ""
@@ -512,7 +512,7 @@ func fileClusterCohortBlindSymptom(frame string) string {
 	return "an input of the cluster's projection did not read"
 }
 
-// A finding of class at target, sustained once.
+// A finding of class at target, sustained once: a warn, or a page for §19.8's business classes.
 func (self fileClusterCohortProbe) cohortFinding(class string, target string, frame string, symptom string, observed string) finding {
 	finding := finding{
 		probeId:  fileClusterCohortProbeId,
@@ -524,6 +524,11 @@ func (self fileClusterCohortProbe) cohortFinding(class string, target string, fr
 		observed: observed,
 		sustain:  1,
 		playbook: "SIGNALS.md §29.7; §19.9's cohorts row and §19.10's file cluster row (DESIGN.md)",
+	}
+	switch class {
+	case fileClusterCohortClassLimit, fileClusterCohortClassExhaustion, fileClusterCohortClassHddTrigger:
+		// §19.8's business row: a page the pager holds for business hours
+		finding.tier = tierPage
 	}
 	switch class {
 	case fileClusterCohortClassLimit:

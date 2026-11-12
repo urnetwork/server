@@ -49083,9 +49083,11 @@ Classes:
   from M5 (owner decision 143); §12.6's runbook.
 - `dns-ns-down` **PAGE**, sustained 2 minutes: every NS fails its SOA read, its
   validation or serves a canary over 180 s old.
-- `dns-ns-failing` **WARN**, sustained an hour: one NS does. plan-DNS-running-ns
-  asks a business-hours page here, which waits for a business-hours path in the
-  pager; orders hold meanwhile, since ready waits on every running NS.
+- `dns-ns-failing` **PAGE** in business hours, sustained an hour: one NS does.
+  plan-DNS-running-ns's business-hours page (QD-754): Slack carries it at once,
+  and the pager holds it until the business calendar opens, dropping it if the
+  NS recovers first; orders hold meanwhile, since ready waits on every running
+  NS.
 - `dns-ns-serial-divergence` **WARN**, sustained 3 minutes: the NS serve
   different SOA serials.
 - `dns-key-window` **WARN**: the DNSKEY window an NS serves has 7 d or less
@@ -49110,8 +49112,10 @@ The other inputs are one bounded loopback Mimir query per run through a
 services host. No series, finding or page names a network or repo: clusters,
 sets, hosts, devices and processes only. The page classes reach §19.8's rota
 at any hour from M3 through the pager (alert_pager.go). §19.8's business-hours
-pages wait for a business-hours path in the pager, and warn on Slack until it
-has one.
+pages (QD-754) are raised at page severity too, so Slack carries each at once,
+and the pager holds one until the business calendar opens, abuse.yml's
+`business_hours` (Monday to Friday 09:00 to 18:00 UTC by default), then pages
+the rota; one whose incident clears first is dropped and pages nobody.
 
 This monitor publishes three gauges, pushed with the process's registry under
 warp: `urnetwork_filecluster_set_state{cluster,set,state}` (§29.1), state one
@@ -49215,13 +49219,13 @@ Classes:
 - `filecluster-drive-dwpd-day` **WARN**: the busiest drive's last 24 h past
   0.8 DWPD.
 - `filecluster-drive-dwpd-week` **WARN**: its 7-day mean over 0.5 DWPD.
-- `filecluster-drive-dwpd-business` **WARN** (§19.8's business-hours page):
-  its 7-day mean over 0.75 DWPD.
+- `filecluster-drive-dwpd-business` **PAGE** in business hours (§19.8's
+  business row): its 7-day mean over 0.75 DWPD.
 - `filecluster-drive-media-errors` **WARN**: SMART counts media errors.
 - `filecluster-drive-spare-low` **WARN**: available spare under 10%.
-- `filecluster-drive-rating-short` **WARN** (§19.8's business-hours page): at
-  its 30-day rate the drive's whole rated endurance lasts under five years of
-  service.
+- `filecluster-drive-rating-short` **PAGE** in business hours (§19.8's
+  business row): at its 30-day rate the drive's whole rated endurance lasts
+  under five years of service.
 - `filecluster-wear-unobservable` (visibility): Mimir or admin info did not
   read, a metadata cluster's loop publishes no drive writes, or no SMART log
   reached Mimir for its drives.
@@ -49301,19 +49305,19 @@ until §23.7 sets them (g0-recheck-0-hdd-trigger #3).
 
 Classes:
 
-- `filecluster-cohort-limit` **WARN** (§19.8's business-hours page): the
-  cluster stands at 80% raw or 70% inodes, and evs refuses its repos' payload
-  507 CLUSTER_FULL.
-- `filecluster-cohort-exhaustion` **WARN** (§19.8's business-hours page): the
-  cluster's earliest exhaustion (80% raw, 70% inodes, a 0.75 DWPD 7-day mean)
+- `filecluster-cohort-limit` **PAGE** in business hours (§19.8's business
+  row): the cluster stands at 80% raw or 70% inodes, and evs refuses its repos'
+  payload 507 CLUSTER_FULL.
+- `filecluster-cohort-exhaustion` **PAGE** in business hours (§19.8's business
+  row): the cluster's earliest exhaustion (80% raw, 70% inodes, a 0.75 DWPD 7-day mean)
   falls inside the move tool's lead time; the finding names the estate's
   earliest.
 - `filecluster-cohort-trigger` **WARN**: D-OPS-17's 50% raw or 40% inodes
   reached, or any of its marks projected inside the next metadata cluster's
   lead time (the 0.5 DWPD mark reached is §29.4's `filecluster-drive-dwpd-week`).
-- `filecluster-hdd-trigger` **WARN** (§19.8's business-hours page): a segment
-  cluster's projected drive operations reach half its measured capacity inside
-  the segment placement's lead time.
+- `filecluster-hdd-trigger` **PAGE** in business hours (§19.8's business
+  row): a segment cluster's projected drive operations reach half its measured
+  capacity inside the segment placement's lead time.
 - `filecluster-cohort-unobservable` (visibility): Mimir or admin info did not
   read, no filesystem of a cluster's drives reached Mimir, or a cluster's
   budget loop publishes no drive writes.

@@ -20,8 +20,8 @@ package monitor
 //   - filecluster-wear-unobservable reports what it could not read: Mimir, admin info, a metadata cluster's
 //     drive-write series, or its drives' SMART log.
 //
-// §19.8's business-hours pages wait for a business-hours path in the pager (OPS); until it has one they warn on
-// Slack, which the rota reads in business hours.
+// §19.8's business-hours pages are raised at page severity, and the pager holds each until the business calendar
+// opens (QD-754; page_classes.go's business rows). Slack carries them at once.
 
 import (
 	"context"
@@ -261,11 +261,11 @@ func (self fileClusterWearProbe) evaluate(settings *SidecarStorageSettings, clus
 				findings = append(findings,
 					self.wearFinding(settings, fileClusterWearClassDwpdWeek, clusterId, "",
 						"the busiest metadata drive's 7-day mean is over 0.5 DWPD", observed),
-					healthyFinding(fileClusterWearProbeId, tierWarn, fileClusterWearClassDwpdBusiness, clusterId))
+					healthyFinding(fileClusterWearProbeId, tierPage, fileClusterWearClassDwpdBusiness, clusterId))
 			default:
 				findings = append(findings,
 					healthyFinding(fileClusterWearProbeId, tierWarn, fileClusterWearClassDwpdWeek, clusterId),
-					healthyFinding(fileClusterWearProbeId, tierWarn, fileClusterWearClassDwpdBusiness, clusterId))
+					healthyFinding(fileClusterWearProbeId, tierPage, fileClusterWearClassDwpdBusiness, clusterId))
 			}
 		}
 	}
@@ -316,7 +316,7 @@ func (self fileClusterWearProbe) evaluate(settings *SidecarStorageSettings, clus
 				"a metadata drive's percentage used, at its 30-day rate, spends its rated endurance before five years of service",
 				fmt.Sprintf("cluster=%s percentage_used=%.0f rate_per_day=%.4f rating_days=%.0f %s", found.clusterId, found.used, rate, ratingDays, forgiven(found.clusterId))))
 		} else {
-			findings = append(findings, healthyFinding(fileClusterWearProbeId, tierWarn, fileClusterWearClassRatingShort, target))
+			findings = append(findings, healthyFinding(fileClusterWearProbeId, tierPage, fileClusterWearClassRatingShort, target))
 		}
 	}
 	for _, clusterId := range clusterIds {
@@ -332,7 +332,7 @@ func (self fileClusterWearProbe) evaluate(settings *SidecarStorageSettings, clus
 	return findings
 }
 
-// A finding of class at target, sustained as the class is.
+// A finding of class at target, sustained once: a warn, or a page for §19.8's business classes.
 func (self fileClusterWearProbe) wearFinding(settings *SidecarStorageSettings, class string, target string, frame string, symptom string, observed string) finding {
 	finding := finding{
 		probeId:  fileClusterWearProbeId,
@@ -344,6 +344,11 @@ func (self fileClusterWearProbe) wearFinding(settings *SidecarStorageSettings, c
 		observed: observed,
 		sustain:  1,
 		playbook: "SIGNALS.md §29.4; §19.10's file cluster row (DESIGN.md)",
+	}
+	switch class {
+	case fileClusterWearClassDwpdBusiness, fileClusterWearClassRatingShort:
+		// §19.8's business row: a page the pager holds for business hours
+		finding.tier = tierPage
 	}
 	switch class {
 	case fileClusterWearClassDwpdDay, fileClusterWearClassDwpdWeek, fileClusterWearClassDwpdBusiness:
