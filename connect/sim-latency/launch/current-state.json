@@ -73,12 +73,21 @@
     "source_baseline_scoring_and_evaluator_image_unchanged": true,
     "native_agent_retirement_fix_not_activated": true
   },
+  "approved_failed_job_retries": {
+    "approval": "EPOCH2-DISTRIBUTED-RETRY-APPROVAL-2026-11-12.json",
+    "jobs": ["01a1c402-9ca1-79d8-e114-5af7c2ef343d", "01a1c4af-c928-3e6a-d183-6c9f319cc119"],
+    "user_authorized": true,
+    "request_is_not_a_database_grant": true,
+    "implementation_and_deployment_pending": true,
+    "queued": false,
+    "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112"
+  },
   "pending_authorizations": [
     "Claim-only maintenance window for the independently verified combined worker; otherwise retain the previously approved empty-queue boundary.",
-    "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted.",
-    "Two old infrastructure failures require separately authorized controlled recovery; do not create fresh attempt clocks implicitly."
+    "Deletion of the three previously identified inactive compiler temporary directories remains unapproved; caches and compiler directories were not deleted."
   ],
   "next_actions": [
+    "Implement and qualify the newly user-approved distributed recovery authority for the two failed jobs; preserve original failures/order and do not grant cycles before deployment and positive idle/closure evidence.",
     "Monitor both exact active jobs and live readiness; investigate new failures from retained evidence.",
     "After authorized drain and positively verified global idle, activate only the receipt-pinned staged worker, verify its actual runtime identity and unchanged execution inputs, then resume claims.",
     "Do not change frozen product source, shared baseline, scoring rules, evaluator image or any original attempt deadline."
