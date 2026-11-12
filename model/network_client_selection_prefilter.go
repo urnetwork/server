@@ -3,6 +3,8 @@ package model
 import (
 	"slices"
 
+	"github.com/urnetwork/connect"
+
 	"github.com/urnetwork/server"
 )
 
@@ -18,6 +20,14 @@ type clientScoreRequestFilter struct {
 	// a request that requires modern providers refuses every other
 	// (FP2-MODERN.md)
 	requireModern bool
+	// Selector mode (FP2-PROTOCOL.md §6.3): the classes of the pool the
+	// request draws, which replace the family facets as the family filter;
+	// zero for a legacy request.
+	capabilityClasses providerCapabilityClassSet
+	// once the post-quantum marker is set, a strict post-quantum request
+	// refuses every provider without a positive signal (§12.4), in the
+	// same capability cell
+	requirePostQuantumPositive bool
 }
 
 // The nonzero values match the existing request-filter observation cells;
@@ -27,13 +37,20 @@ func (self clientScoreRequestFilter) rejection(clientId server.Id, score *Client
 	if score.NetworkOnly && score.NetworkId != self.callerNetworkId {
 		return 1
 	}
-	if !slices.Contains(self.facets, score.ipFamilyFacet()) {
+	if self.capabilityClasses != 0 {
+		if !self.capabilityClasses.has(score.capabilityClass()) || score.IpFamily() == connect.IpFamilyV6Only {
+			return 2
+		}
+	} else if !slices.Contains(self.facets, score.ipFamilyFacet()) {
 		return 2
 	}
 	if self.excludedClientIds[clientId] != 0 {
 		return 3
 	}
 	if self.requireModern && !score.Modern {
+		return 4
+	}
+	if self.requirePostQuantumPositive && !score.PostQuantumPositive {
 		return 4
 	}
 	return 0
