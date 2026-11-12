@@ -9,7 +9,7 @@
 # local vault, and reads api's internal gate at -api_url. Until api serves its
 # internal projection route (ACL-M4-02) and Client-class tokens verify for sockets
 # (plan-SOCK-client-auth) it answers every authenticated route unavailable, and
-# its log says what it waits for. `go run . keygen -out <file>` writes a key file.
+# its log says what it waits for. With no key file it stays not ready.
 
 export WARP_HOST="127.0.0.1"
 export WARP_BLOCK="local"

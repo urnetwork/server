@@ -31,8 +31,9 @@
 // authenticated route unavailable; tls/'s ValidateListen (TLS-M5-22) and smtp/'s (MAIL-M7-22), so neither
 // namespace is registered and the engine refuses every entry of both.
 //
-// `sockets keygen -out <file>` adds a new key to the key file at <file> (or -in's), keeping the live ones and
-// dropping the expired, for an operator to place in vault: the 30-day rotation with overlap. It prints no key.
+// The key file is the owner's to create in vault (SOCK.md's external list). The command that writes one is an
+// operations command, which sidecarctl holds (owner, 2026-11-07; server/sidecarctl since QD-750), so it is not
+// this binary's: question sock-m5-07-ticket-keygen-command asks for it, on socketsservice.SocketTicketKeyFileAdd.
 package main
 
 import (
@@ -487,37 +488,6 @@ func run(ctx context.Context, options *runOptions) error {
 	return sidecarhost.Run(ctx, runOptions)
 }
 
-// keygen: adds a new key to a key file, keeping the live ones and dropping the expired. The file is written with
-// owner-only permissions, and nothing of a key is printed.
-func keygen(arguments []string) error {
-	flags := flag.NewFlagSet("keygen", flag.ContinueOnError)
-	out := flags.String("out", "", "the key file to write")
-	in := flags.String("in", "", "the key file whose live keys to keep; empty is -out's, when it exists")
-	if err := flags.Parse(arguments); err != nil {
-		return err
-	}
-	if *out == "" {
-		return errors.New("keygen needs -out")
-	}
-	inPath := *in
-	if inPath == "" {
-		inPath = *out
-	}
-	existing, err := os.ReadFile(inPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	data, err := socketsservice.SocketTicketKeyFileAdd(existing, time.Now(), nil)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(*out, data, 0o600); err != nil {
-		return err
-	}
-	fmt.Fprintf(os.Stdout, "wrote %s with a new ticket key\n", *out)
-	return nil
-}
-
 var (
 	port   = flag.Int("port", 80, "the block's status port, which also serves the /socket/* routes")
 	apiUrl = flag.String("api_url", "", "api's base URL, whose internal gate the projection and the over-limit list are read from; empty leaves the block not ready")
@@ -528,13 +498,6 @@ func main() {
 	logs := server.ScrubCommandLogs()
 	defer logs.Flush()
 
-	if 1 < len(os.Args) && os.Args[1] == "keygen" {
-		if err := keygen(os.Args[2:]); err != nil {
-			fmt.Fprintf(os.Stderr, "keygen: %v\n", err)
-			logs.Exit(1)
-		}
-		return
-	}
 	flag.CommandLine.Init(os.Args[0], flag.ContinueOnError)
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
