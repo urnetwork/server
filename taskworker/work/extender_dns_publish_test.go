@@ -27,7 +27,7 @@ import (
 //
 // Two seams make this deterministic: the sample source is seeded, so the same
 // rows produce the same sets on every run, and the publisher is a fake that
-// keeps the zone in memory, so a test can assert the batch a tick sends and
+// keeps the zone in memory, so a test can assert the apply a tick makes and
 // the state it leaves behind. The Route 53 implementation is driven through a
 // fake of the two api calls it makes, which is where the set identifiers and
 // the geolocation fields are pinned.
@@ -53,15 +53,15 @@ func testExtenderDnsConfigYaml() []string {
 	}
 }
 
-// One apply as the fake publisher saw it.
-type testExtenderDnsBatch struct {
+// One tick's apply as the fake publisher saw it: what the tick asked for.
+type testExtenderDnsApply struct {
 	recordName            string
 	ttl                   int
 	upsertSets            []*extenderDnsRecordSet
 	deletedSetIdentifiers []string
 }
 
-func (self *testExtenderDnsBatch) setIdentifiers() []string {
+func (self *testExtenderDnsApply) setIdentifiers() []string {
 	setIdentifiers := []string{}
 	for _, upsertSet := range self.upsertSets {
 		setIdentifiers = append(setIdentifiers, upsertSet.setIdentifier())
@@ -69,7 +69,7 @@ func (self *testExtenderDnsBatch) setIdentifiers() []string {
 	return setIdentifiers
 }
 
-func (self *testExtenderDnsBatch) upsertSet(setIdentifier string) *extenderDnsRecordSet {
+func (self *testExtenderDnsApply) upsertSet(setIdentifier string) *extenderDnsRecordSet {
 	for _, upsertSet := range self.upsertSets {
 		if upsertSet.setIdentifier() == setIdentifier {
 			return upsertSet
@@ -80,19 +80,20 @@ func (self *testExtenderDnsBatch) upsertSet(setIdentifier string) *extenderDnsRe
 
 // A publisher that keeps the zone in memory.
 //
-// It decides what to delete with the same helper the Route 53 publisher uses,
-// so the two cannot disagree about what a tick leaves behind. Used from the
-// test goroutine only, as the tick is synchronous.
+// It sends its changes with the same helper the Route 53 publisher uses, so
+// the two cannot disagree about what a tick leaves behind. Used from the test
+// goroutine only, as the tick is synchronous.
 type testExtenderDnsPublisher struct {
-	batches            []*testExtenderDnsBatch
+	applies            []*testExtenderDnsApply
 	zoneSetIdentifiers []string
 	zoneSets           map[string]*extenderDnsRecordSet
-	err                error
+	// every change fails with err, which leaves the zone as it was
+	err error
 }
 
 func newTestExtenderDnsPublisher() *testExtenderDnsPublisher {
 	return &testExtenderDnsPublisher{
-		batches:            []*testExtenderDnsBatch{},
+		applies:            []*testExtenderDnsApply{},
 		zoneSetIdentifiers: []string{},
 		zoneSets:           map[string]*extenderDnsRecordSet{},
 	}
@@ -103,46 +104,56 @@ func (self *testExtenderDnsPublisher) publish(
 	recordName string,
 	ttl int,
 	desiredSets []*extenderDnsRecordSet,
-) error {
-	batch := &testExtenderDnsBatch{
+) ([]*extenderDnsChange, error) {
+	self.applies = append(self.applies, &testExtenderDnsApply{
 		recordName:            recordName,
 		ttl:                   ttl,
 		upsertSets:            desiredSets,
 		deletedSetIdentifiers: extenderDnsDeletedSetIdentifiers(self.zoneSetIdentifiers, desiredSets),
-	}
-	self.batches = append(self.batches, batch)
-	if self.err != nil {
-		// one route 53 batch is atomic, so a failed apply leaves the zone as
-		// it was
-		return self.err
-	}
+	})
 
-	for _, setIdentifier := range batch.deletedSetIdentifiers {
-		delete(self.zoneSets, setIdentifier)
-		self.zoneSetIdentifiers = slices.DeleteFunc(
-			self.zoneSetIdentifiers,
-			func(zoneSetIdentifier string) bool {
-				return zoneSetIdentifier == setIdentifier
-			},
-		)
+	existingRecordTypes := map[string]string{}
+	for setIdentifier, zoneSet := range self.zoneSets {
+		existingRecordTypes[setIdentifier] = zoneSet.recordType()
 	}
-	for _, desiredSet := range desiredSets {
-		setIdentifier := desiredSet.setIdentifier()
-		if _, ok := self.zoneSets[setIdentifier]; !ok {
-			self.zoneSetIdentifiers = append(self.zoneSetIdentifiers, setIdentifier)
-		}
-		self.zoneSets[setIdentifier] = desiredSet
-	}
-	return nil
+	return applyExtenderDnsChanges(
+		slices.Clone(self.zoneSetIdentifiers),
+		existingRecordTypes,
+		desiredSets,
+		func(desiredSet *extenderDnsRecordSet) error {
+			if self.err != nil {
+				return self.err
+			}
+			setIdentifier := desiredSet.setIdentifier()
+			if _, ok := self.zoneSets[setIdentifier]; !ok {
+				self.zoneSetIdentifiers = append(self.zoneSetIdentifiers, setIdentifier)
+			}
+			self.zoneSets[setIdentifier] = desiredSet
+			return nil
+		},
+		func(setIdentifier string) error {
+			if self.err != nil {
+				return self.err
+			}
+			delete(self.zoneSets, setIdentifier)
+			self.zoneSetIdentifiers = slices.DeleteFunc(
+				self.zoneSetIdentifiers,
+				func(zoneSetIdentifier string) bool {
+					return zoneSetIdentifier == setIdentifier
+				},
+			)
+			return nil
+		},
+	)
 }
 
-// The one batch a tick was expected to send.
-func (self *testExtenderDnsPublisher) onlyBatch(t testing.TB) *testExtenderDnsBatch {
+// The one apply a tick was expected to make.
+func (self *testExtenderDnsPublisher) onlyApply(t testing.TB) *testExtenderDnsApply {
 	t.Helper()
-	if len(self.batches) != 1 {
-		t.Fatalf("the tick sent %d batches, want exactly one", len(self.batches))
+	if len(self.applies) != 1 {
+		t.Fatalf("the tick made %d applies, want exactly one", len(self.applies))
 	}
-	return self.batches[0]
+	return self.applies[0]
 }
 
 // Replaces the publisher for one test.
@@ -501,6 +512,23 @@ func (self *testRoute53Api) ChangeResourceRecordSetsWithContext(
 	return &route53.ChangeResourceRecordSetsOutput{}, nil
 }
 
+// The changes the publisher sent, in order. Each set is a request of its own,
+// so every request must carry exactly one change, to the zone given.
+func (self *testRoute53Api) oneChangePerRequest(t testing.TB, hostedZoneId string) []*route53.Change {
+	t.Helper()
+	changes := []*route53.Change{}
+	for i, input := range self.changeInputs {
+		if got := aws.StringValue(input.HostedZoneId); got != hostedZoneId {
+			t.Fatalf("request %d went to zone %s, want %s", i, got, hostedZoneId)
+		}
+		if len(input.ChangeBatch.Changes) != 1 {
+			t.Fatalf("request %d carries %d changes, want one set per request", i, len(input.ChangeBatch.Changes))
+		}
+		changes = append(changes, input.ChangeBatch.Changes[0])
+	}
+	return changes
+}
+
 func testRoute53RecordSet(
 	name string,
 	setIdentifier string,
@@ -518,9 +546,9 @@ func testRoute53RecordSet(
 	}
 }
 
-// One apply is one batch: every desired set upserted, every set of ours that
-// is no longer desired deleted, and nothing else touched.
-func TestRoute53ExtenderDnsPublishesOneBatch(t *testing.T) {
+// One apply is one request per set: every desired set upserted, then every set
+// of ours that is no longer desired deleted, and nothing else touched.
+func TestRoute53ExtenderDnsPublishesOneSetPerRequest(t *testing.T) {
 	name := testExtenderDnsRecordName + "."
 	staleSet := testRoute53RecordSet(name, "extender-OC-A", route53.RRTypeA, "198.51.100.90")
 	manualSet := testRoute53RecordSet(name, "operator-A", route53.RRTypeA, "198.51.100.91")
@@ -543,12 +571,13 @@ func TestRoute53ExtenderDnsPublishesOneBatch(t *testing.T) {
 		{continentCode: "EU", ipVersion: 4, ips: testExtenderDnsIps(4, 1, 2)},
 		{ipVersion: 6, ips: testExtenderDnsIps(6, 1)},
 	}
-	if err := publisher.publish(
+	reported, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
 		desiredSets,
-	); err != nil {
+	)
+	if err != nil {
 		t.Fatalf("publish: %v", err)
 	}
 
@@ -559,10 +588,21 @@ func TestRoute53ExtenderDnsPublishesOneBatch(t *testing.T) {
 	connect.AssertEqual(t, aws.StringValue(api.listInputs[0].StartRecordName), name)
 	connect.AssertEqual(t, api.deliveredPageCount, 4)
 
-	connect.AssertEqual(t, len(api.changeInputs), 1)
-	connect.AssertEqual(t, aws.StringValue(api.changeInputs[0].HostedZoneId), testExtenderDnsHostedZoneId)
-	changes := api.changeInputs[0].ChangeBatch.Changes
+	changes := api.oneChangePerRequest(t, testExtenderDnsHostedZoneId)
 	connect.AssertEqual(t, len(changes), 3)
+	// and the publisher reports every change it sent, each landed
+	reportedSetIdentifiers := []string{}
+	for _, change := range reported {
+		if change.err != nil {
+			t.Fatalf("%s reported failed: %v", change.setIdentifier, change.err)
+		}
+		reportedSetIdentifiers = append(reportedSetIdentifiers, change.recordType+" "+change.setIdentifier)
+	}
+	connect.AssertEqual(t, reportedSetIdentifiers, []string{
+		"A extender-EU-A",
+		"AAAA extender-default-AAAA",
+		"A extender-OC-A",
+	})
 
 	// the desired sets, with the geolocation and identifier of C5
 	connect.AssertEqual(t, aws.StringValue(changes[0].Action), route53.ChangeActionUpsert)
@@ -606,9 +646,9 @@ func TestRoute53ExtenderDnsPublishesOneBatch(t *testing.T) {
 }
 
 // The first tick after a deployment: the zone holds no set at the record name
-// at all, so every set the sample wants is created and the batch is an upsert
-// per set with no delete in it. A neighbouring name carrying our own prefix is
-// still not ours -- only the name being published is.
+// at all, so every set the sample wants is created, an upsert per set and no
+// delete. A neighbouring name carrying our own prefix is still not ours --
+// only the name being published is.
 func TestRoute53ExtenderDnsCreatesEverySetInAnEmptyZone(t *testing.T) {
 	name := testExtenderDnsRecordName + "."
 	otherName := "other." + testExtenderWorkNetworkHost + "."
@@ -624,7 +664,7 @@ func TestRoute53ExtenderDnsCreatesEverySetInAnEmptyZone(t *testing.T) {
 	}
 
 	// a sampled state rather than a hand written one: two continents in v4 and
-	// one in v6, so the batch carries continent sets and the default set of
+	// one in v6, so the apply carries continent sets and the default set of
 	// both families
 	desiredSets := sampleTestExtenderDnsRecordSets(
 		slices.Concat(
@@ -646,7 +686,7 @@ func TestRoute53ExtenderDnsCreatesEverySetInAnEmptyZone(t *testing.T) {
 		"extender-default-AAAA",
 	})
 
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -662,11 +702,10 @@ func TestRoute53ExtenderDnsCreatesEverySetInAnEmptyZone(t *testing.T) {
 	connect.AssertEqual(t, aws.StringValue(api.listInputs[0].StartRecordName), name)
 	connect.AssertEqual(t, api.deliveredPageCount, 1)
 
-	// one batch, one upsert per desired set in the order the sample drew them,
-	// and nothing to delete because the zone held nothing of ours
-	connect.AssertEqual(t, len(api.changeInputs), 1)
-	connect.AssertEqual(t, aws.StringValue(api.changeInputs[0].HostedZoneId), testExtenderDnsHostedZoneId)
-	changes := api.changeInputs[0].ChangeBatch.Changes
+	// one upsert per desired set, each its own request, in the order the
+	// sample drew them, and nothing to delete because the zone held nothing
+	// of ours
+	changes := api.oneChangePerRequest(t, testExtenderDnsHostedZoneId)
 	connect.AssertEqual(t, len(changes), len(desiredSets))
 	for i, change := range changes {
 		desiredSet := desiredSets[i]
@@ -697,7 +736,7 @@ func TestRoute53ExtenderDnsCreatesEverySetInAnEmptyZone(t *testing.T) {
 }
 
 // An operator with no active extenders and nothing of ours in the zone writes
-// nothing at all: an empty change batch is rejected by the api.
+// nothing at all.
 func TestRoute53ExtenderDnsWritesNothingWithoutChanges(t *testing.T) {
 	api := &testRoute53Api{
 		existingRecordSets: []*route53.ResourceRecordSet{
@@ -714,7 +753,7 @@ func TestRoute53ExtenderDnsWritesNothingWithoutChanges(t *testing.T) {
 		hostedZoneId: testExtenderDnsHostedZoneId,
 	}
 
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -761,7 +800,7 @@ func TestRoute53ExtenderDnsResolvesTheZoneByName(t *testing.T) {
 		hostedZoneName: testExtenderDnsHostedZoneName,
 	}
 
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -807,7 +846,7 @@ func TestRoute53ExtenderDnsZoneIdOverridesTheName(t *testing.T) {
 		hostedZoneName: testExtenderDnsHostedZoneName,
 	}
 
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -856,7 +895,7 @@ func TestRoute53ExtenderDnsRefusesAZoneItCannotName(t *testing.T) {
 			api:            api,
 			hostedZoneName: testExtenderDnsHostedZoneName,
 		}
-		err := publisher.publish(
+		_, err := publisher.publish(
 			context.Background(),
 			testExtenderDnsRecordName,
 			testExtenderDnsTtl,
@@ -890,7 +929,7 @@ func TestRoute53ExtenderDnsReusesTheResolvedZoneId(t *testing.T) {
 	}
 
 	for range 3 {
-		if err := publisher.publish(
+		if _, err := publisher.publish(
 			context.Background(),
 			testExtenderDnsRecordName,
 			testExtenderDnsTtl,
@@ -951,7 +990,7 @@ func TestExtenderDnsPublishIsInertWithoutConfiguration(t *testing.T) {
 			t.Fatalf("an unconfigured dns block must not fail the tick: %v", err)
 		}
 	}
-	connect.AssertEqual(t, len(publisher.batches), 0)
+	connect.AssertEqual(t, len(publisher.applies), 0)
 }
 
 // The record name is configured, not derived. Publishing to a guessed name
@@ -965,7 +1004,7 @@ func TestExtenderDnsPublishNeedsARecordName(t *testing.T) {
 	if err == nil {
 		t.Fatalf("a dns block with no record name must not publish")
 	}
-	connect.AssertEqual(t, len(publisher.batches), 0)
+	connect.AssertEqual(t, len(publisher.applies), 0)
 }
 
 // Defaults of C5: eight addresses per set and a ttl of a minute unless the
@@ -1066,7 +1105,7 @@ func TestExtenderDnsPublishSamplesEveryContinentAndFamily(t *testing.T) {
 
 		runTestExtenderPublish(t, ctx)
 
-		batch := publisher.onlyBatch(t)
+		batch := publisher.onlyApply(t)
 		connect.AssertEqual(t, batch.recordName, testExtenderDnsRecordName)
 		connect.AssertEqual(t, batch.ttl, testExtenderDnsTtl)
 		connect.AssertEqual(t, batch.deletedSetIdentifiers, []string{})
@@ -1174,7 +1213,7 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 		)
 
 		runTestExtenderPublish(t, ctx)
-		first := publisher.onlyBatch(t)
+		first := publisher.onlyApply(t)
 		connect.AssertEqual(t, first.setIdentifiers(), []string{
 			"extender-EU-A",
 			"extender-NA-A",
@@ -1188,8 +1227,8 @@ func TestExtenderDnsPublishDeletesAContinentThatWentEmpty(t *testing.T) {
 		model.Testing_DeactivateNetworkExtenderAddress(ctx, europeExtenderId, 4)
 		runTestExtenderPublish(t, ctx)
 
-		connect.AssertEqual(t, len(publisher.batches), 2)
-		second := publisher.batches[1]
+		connect.AssertEqual(t, len(publisher.applies), 2)
+		second := publisher.applies[1]
 		connect.AssertEqual(t, second.setIdentifiers(), []string{
 			"extender-NA-A",
 			"extender-default-A",
@@ -1224,8 +1263,8 @@ func TestExtenderDnsPublishFailureDoesNotStopTheDrip(t *testing.T) {
 		result := runTestExtenderPublish(t, ctx)
 		connect.AssertEqual(t, result.Published, 1)
 		connect.AssertEqual(t, len(model.Testing_GetNetworkExtenderPublishes(ctx)), 1)
-		// the batch was attempted and left the zone as it was
-		connect.AssertEqual(t, len(publisher.onlyBatch(t).upsertSets), 4)
+		// the apply was attempted, every change failed, and the zone is as it was
+		connect.AssertEqual(t, len(publisher.onlyApply(t).upsertSets), 4)
 		connect.AssertEqual(t, publisher.zoneSetIdentifiers, []string{})
 
 		clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
@@ -1273,7 +1312,7 @@ func TestExtenderDnsFqdn(t *testing.T) {
 // What an apply removes is exactly the sets of ours the zone holds that this
 // tick no longer wants. A desired set is never deleted and re-upserted, and a
 // zone that lists one of ours twice produces one delete, since a second delete
-// of the same set fails the whole batch.
+// of the same set fails its request.
 func TestExtenderDnsDeletedSetIdentifiers(t *testing.T) {
 	desiredSets := []*extenderDnsRecordSet{
 		{continentCode: "EU", ipVersion: 4},
@@ -1315,9 +1354,9 @@ func TestExtenderDnsDeletedSetIdentifiers(t *testing.T) {
 
 // A zone holds more at one name than this publisher's address sets. A record of
 // another type, a set another owner put there, and the same set of ours listed
-// twice must all leave the batch with exactly one delete of our own stale set:
-// anything else either destroys someone's record or fails the whole batch on a
-// repeated change.
+// twice must all leave the apply with exactly one delete of our own stale set:
+// anything else either destroys someone's record or fails a request on a
+// repeated delete.
 func TestRoute53ExtenderDnsIgnoresForeignSets(t *testing.T) {
 	name := testExtenderDnsRecordName + "."
 	staleSet := testRoute53RecordSet(name, "extender-AS-A", route53.RRTypeA, "198.51.100.95")
@@ -1342,7 +1381,7 @@ func TestRoute53ExtenderDnsIgnoresForeignSets(t *testing.T) {
 	desiredSets := []*extenderDnsRecordSet{
 		{continentCode: "EU", ipVersion: 4, ips: testExtenderDnsIps(4, 1)},
 	}
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -1351,8 +1390,7 @@ func TestRoute53ExtenderDnsIgnoresForeignSets(t *testing.T) {
 		t.Fatalf("publish: %v", err)
 	}
 
-	connect.AssertEqual(t, len(api.changeInputs), 1)
-	changes := api.changeInputs[0].ChangeBatch.Changes
+	changes := api.oneChangePerRequest(t, testExtenderDnsHostedZoneId)
 	connect.AssertEqual(t, len(changes), 2)
 	connect.AssertEqual(t, aws.StringValue(changes[0].Action), route53.ChangeActionUpsert)
 	connect.AssertEqual(t, aws.StringValue(changes[0].ResourceRecordSet.SetIdentifier), "extender-EU-A")
@@ -1381,7 +1419,7 @@ func TestRoute53ExtenderDnsRetriesAZoneThatDidNotResolve(t *testing.T) {
 	}
 	desiredSets := []*extenderDnsRecordSet{{ipVersion: 4, ips: testExtenderDnsIps(4, 1)}}
 
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,
@@ -1396,7 +1434,7 @@ func TestRoute53ExtenderDnsRetriesAZoneThatDidNotResolve(t *testing.T) {
 	api.hostedZones = []*route53.HostedZone{
 		testRoute53HostedZone(testExtenderDnsHostedZoneName+".", testExtenderDnsNamedZoneId),
 	}
-	if err := publisher.publish(
+	if _, err := publisher.publish(
 		context.Background(),
 		testExtenderDnsRecordName,
 		testExtenderDnsTtl,

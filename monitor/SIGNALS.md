@@ -49707,6 +49707,82 @@ serving someone else's bundle; an older sequence at the mirror's sync. For the
 origin, read the publisher's outcomes (`store_error`, `sign_error`,
 `self_check_failed`: the signing key is not in `root_public_keys_hex`).
 
+### 27.2 Extender publishing
+
+Probe: `extender-publishing`
+
+Status: added 2026-11-11 with the fixes for two silent stops
+(factury/research/extender-health-2026-11-11.md §1.4, §5 items 1 and 2). The
+gossip drain had published nothing since 2026-11-06 07:49:44Z: a claim raised
+during that morning's Main brownout, the raise ended every replica's drain,
+and 10,919 records and revocations queued for five days. Route 53 had refused
+every dns tick since 2026-10-28 18:12Z ("RDATA character limit of 32000
+exceeded": all the sets went in one request, which Route 53 caps at 32,000
+value characters with each character of an UPSERT counted twice), while the
+dns gauges, drawn from the desired sets, read healthy.
+
+Source: two series the publishers export, labeled by fixed enums only:
+
+- `urnetwork_stats_extender_gossip_oldest_pending_seconds{kind}`: the age of
+  the oldest message written to `network_extender_publish` and not yet
+  released (`record`, `revocation`), from every taskworker's stats collector;
+  0 on an empty queue;
+- `urnetwork_taskworker_extender_dns_changes_total{record_type,outcome}`: every
+  set change the extender publish tick wanted (`A`, `AAAA`, `TXT`), `accepted`
+  by Route 53 or `failed`. Every combination exists from process start.
+
+```promql
+max by (kind) (urnetwork_stats_extender_gossip_oldest_pending_seconds{env="main"})
+sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env="main",outcome="failed"}[15m]))
+sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env="main",outcome="accepted"}[15m]))
+```
+
+Healthy: the gossip service drains the queue every 5 seconds, 64 rows a pass
+per replica, so the oldest unreleased message is seconds old. The publish tick
+runs every 10 minutes and writes every set in a request of its own, and no
+change fails.
+
+Thresholds (each judged at every one-minute evaluation of its hold; a gossip
+kind is the target `extender-gossip/<kind>`, a record type
+`extender-dns/<record_type>`):
+
+- WARN `extender-gossip-stalled`: the kind's oldest unreleased message older
+  than 10 minutes for 5 minutes. A failed drain pass retries after a backoff
+  of at most a minute, and an unready replica starts its drain once readiness
+  passes, so a stall this long is no replica draining at all.
+- WARN `extender-dns-publish-failing`: a failed change of the record type in
+  the trailing 15 minutes for 30 minutes, about three failed ticks in a row. A
+  change fails when Route 53 refused it, its request errored, or it was never
+  sent: the zone could not be resolved or listed, the publisher could not be
+  built, or a delete was held because an upsert of its type failed.
+- `extender-publishing-unobservable`: the read failed, a series is ambiguous
+  or missing at an evaluation, no stats collector exported the gossip queue
+  (`gossip_state_missing`), or no taskworker exported the changes counter
+  (`dns_state_missing`: a build that predates it).
+
+False-positive qualifiers: the gossip gauge is refreshed every 5 minutes with
+the stats collector's other database series, and the 10-minute threshold
+covers that cadence. The gossip queue also grows while every gossip replica is
+deliberately stopped. False-negative qualifiers: a dns block with no
+record name fails before any set is drawn and counts no change; the tick logs
+it and the dns gauges read zero. A set that keeps landing with stale content
+is not a failure here. Neither series says whether clients still reach the
+gossip mesh; that is the gossip service's own connection count.
+
+ACTION: for `extender-gossip-stalled`, read the gossip service's log for
+`[gossip]drain pass failed` (the database path of the replica) and
+`[gossip]not ready` (its readiness: Postgres, Redis and the migration head),
+and `process_start_time_seconds{service="gossip"}`. A replica that logs
+neither and still does not drain needs its unit restarted (stop the warp
+container itself and check `docker ps`). For `extender-dns-publish-failing`,
+read the taskworker log for `[extenderpublish]dns publish failed`, which names
+every failed set and Route 53's answer: `InvalidChangeBatch` points at a set's
+size or shape (the dns block's `sample_count`, record size), `AccessDenied` or
+a signature error at the dns block's credentials, `Throttling` or
+`PriorRequestNotComplete` at another writer of the hosted zone. The extenders
+dashboard (`urnetwork-extenders`) shows what Route 53 accepted and each
+outcome's rate.
+
 ## Shared provider-egress dashboard refresh
 
 Every Taskworker process starts its own stats collector. The provider-egress

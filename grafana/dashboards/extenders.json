@@ -566,7 +566,7 @@
      "legendFormat": "addresses in dns (v4)"
     }
    ],
-   "description": "IPv4 addresses the last publish tick wrote across every A set. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
+   "description": "IPv4 addresses in the A sets Route 53 accepted in the last publish tick. Exported only by a taskworker that ran a tick in the last 30 minutes. Series are per process and keyed by instance, so this aggregates across the fleet rather than selecting a bare series: during a redeploy the draining and starting processes both push."
   },
   {
    "id": 12,
@@ -620,7 +620,7 @@
      "legendFormat": "addresses in dns (v6)"
     }
    ],
-   "description": "IPv6 addresses the last publish tick wrote across every AAAA set."
+   "description": "IPv6 addresses in the AAAA sets Route 53 accepted in the last publish tick."
   },
   {
    "id": 13,
@@ -674,7 +674,7 @@
      "legendFormat": "extenders in dns"
     }
    ],
-   "description": "Distinct extenders reachable through the addresses the last tick published. Lower than the population: each set is a rotating sample, not the whole pool."
+   "description": "Distinct extenders reachable through the addresses Route 53 accepted in the last tick. Lower than the population: each set is a rotating sample, not the whole pool."
   },
   {
    "id": 14,
@@ -728,7 +728,7 @@
      "legendFormat": "signed TXT records"
     }
    ],
-   "description": "Signed extender records published across all TXT sets. Zero means the operator has no root key and only address sets were written \u2014 a client can then bootstrap addresses but cannot verify them."
+   "description": "Signed extender records in the TXT sets Route 53 accepted in the last tick. Zero with A and AAAA sets present means the TXT sets did not land, or the operator has no root key and only address sets were written: a released client then dials none of the dns addresses, since it dials only what a record verified."
   },
   {
    "id": 15,
@@ -782,7 +782,7 @@
      "legendFormat": "A sets"
     }
    ],
-   "description": "A record sets published \u2014 one per continent with ipv4 addresses, plus the global default."
+   "description": "A record sets Route 53 accepted in the last tick: one per continent with ipv4 addresses, plus the global default."
   },
   {
    "id": 16,
@@ -836,7 +836,7 @@
      "legendFormat": "AAAA sets"
     }
    ],
-   "description": "AAAA record sets published. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
+   "description": "AAAA record sets Route 53 accepted in the last tick. A family with no address anywhere produces no set at all rather than an empty one, since a record that resolves to nothing is worse than no record."
   },
   {
    "id": 17,
@@ -848,7 +848,7 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
+    "w": 8,
     "x": 0,
     "y": 20
    },
@@ -902,7 +902,7 @@
      "legendFormat": "ipv6"
     }
    ],
-   "description": "What each tick actually wrote. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns \u2014 the database can only say what was eligible."
+   "description": "What Route 53 accepted in each tick. The sets are recomputed every tick and never stored, so these gauges are the only record of what is in dns: the database can only say what was eligible. A set that failed is not counted, even where the zone still holds an older copy of it."
   },
   {
    "id": 18,
@@ -914,8 +914,8 @@
    },
    "gridPos": {
     "h": 8,
-    "w": 12,
-    "x": 12,
+    "w": 8,
+    "x": 8,
     "y": 20
    },
    "fieldConfig": {
@@ -977,7 +977,73 @@
      "legendFormat": "TXT"
     }
    ],
-   "description": "Sets published per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means signing stopped."
+   "description": "Sets Route 53 accepted per tick by record type. TXT tracks the locations the address sets answer for, so it should move with A and AAAA; TXT falling to zero alone means its sets were refused or signing stopped (see set changes by outcome)."
+  },
+  {
+   "id": 75,
+   "type": "timeseries",
+   "title": "set changes by outcome (30m)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 8,
+    "x": 16,
+    "y": 20
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env=\"$env\",outcome=\"accepted\"}[30m]))",
+     "refId": "A",
+     "legendFormat": "{{record_type}} accepted"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum by (record_type) (increase(urnetwork_taskworker_extender_dns_changes_total{env=\"$env\",outcome=\"failed\"}[30m]))",
+     "refId": "B",
+     "legendFormat": "{{record_type}} failed"
+    }
+   ],
+   "description": "Every set change the publish tick wanted over the last 30 minutes (three ticks), accepted by Route 53 or failed: refused, errored, or never sent because the zone could not be read or an upsert of its type failed. Each set is a request of its own, so a refused TXT set costs only TXT. Failed changes for half an hour raise extender-dns-publish-failing (monitor/SIGNALS.md \u00a727.2); the taskworker log line `dns publish failed` names each set and Route 53's answer."
   },
   {
    "id": 19,
@@ -2321,7 +2387,7 @@
    "description": "Refused pings stored per hour across the fleet, every reason together, from the per-extender rejections counter, which has no reason; the refusals by reason panel below says which. A step up that the ping rate does not share is a target, or a group of them, starting to refuse; the table beside this one names them. Fed from closed hour buckets, so the last hour is a step behind."
   },
   {
-   "id": 75,
+   "id": 77,
    "type": "timeseries",
    "title": "refusals by reason (24h)",
    "datasource": {

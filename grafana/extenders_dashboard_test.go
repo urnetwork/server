@@ -37,6 +37,7 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"addresses in dns":      "urnetwork_taskworker_extender_dns_addresses",
 		"record sets in dns":    "urnetwork_taskworker_extender_dns_sets",
 		"signed records in dns": "urnetwork_taskworker_extender_dns_txt_records",
+		"dns set outcomes":      "urnetwork_taskworker_extender_dns_changes_total",
 		"gossip backlog":        "urnetwork_stats_extender_gossip_pending",
 		"gossip staleness":      "urnetwork_stats_extender_gossip_oldest_pending_seconds",
 		"released to gossip":    "urnetwork_stats_extender_gossip_released_24h",
