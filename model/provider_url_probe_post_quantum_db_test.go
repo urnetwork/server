@@ -9,9 +9,11 @@ import (
 )
 
 // Which claimed turns measure post-quantum: a provider with no measured
-// outcome in RefreshAge is asked, one turn per RetryInterval; a measured
-// positive or negative outcome inside RefreshAge needs none; an unmeasured
-// session, or a measured one older than RefreshAge, does not count.
+// outcome in RefreshAge is asked on the turns whose claim ordinal is on the
+// stride; a measured positive or negative outcome inside RefreshAge needs
+// none; an unmeasured session, or a measured one older than RefreshAge, does
+// not count. The decision is the claim's own: the same claim decides the same
+// way however often it is marked.
 func TestProviderUrlProbePostQuantumTurns(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := t.Context()
@@ -23,14 +25,22 @@ func TestProviderUrlProbePostQuantumTurns(t *testing.T) {
 				t.Fatal("an outcome was not stored")
 			}
 		}
-		never, positive, negative, unmeasured, stale := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
+		never, offStride, positive, negative, unmeasured, stale := server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId(), server.NewId()
 		store(positive, now.Add(-time.Hour), &fp2EvidenceTestPositive)
 		store(negative, now.Add(-2*time.Hour), &fp2EvidenceTestNegative)
 		store(unmeasured, now.Add(-time.Hour), &fp2EvidenceTestUnmeasured)
 		store(stale, now.Add(-settings.RefreshAge-time.Minute), &fp2EvidenceTestPositive)
 
+		onStride := int64(settings.TurnStride) * 7
 		claimed := func() []ProviderUrlProbeDue {
-			return []ProviderUrlProbeDue{{ClientId: never}, {ClientId: positive}, {ClientId: negative}, {ClientId: unmeasured}, {ClientId: stale}}
+			return []ProviderUrlProbeDue{
+				{ClientId: never, ClaimOrdinal: onStride},
+				{ClientId: offStride, ClaimOrdinal: onStride + 1},
+				{ClientId: positive, ClaimOrdinal: onStride},
+				{ClientId: negative, ClaimOrdinal: onStride},
+				{ClientId: unmeasured, ClaimOrdinal: onStride},
+				{ClientId: stale, ClaimOrdinal: onStride},
+			}
 		}
 		asked := func(providers []ProviderUrlProbeDue) map[server.Id]bool {
 			out := map[server.Id]bool{}
@@ -39,42 +49,25 @@ func TestProviderUrlProbePostQuantumTurns(t *testing.T) {
 			}
 			return out
 		}
-
-		first := claimed()
-		markProviderUrlProbePostQuantumTurns(ctx, now, first, settings)
-		want := map[server.Id]bool{never: true, positive: false, negative: false, unmeasured: true, stale: true}
-		if got := asked(first); len(got) != len(want) || got[never] != want[never] || got[positive] != want[positive] ||
-			got[negative] != want[negative] || got[unmeasured] != want[unmeasured] || got[stale] != want[stale] {
-			t.Fatalf("first claim asked %v, want %v", got, want)
-		}
-
-		// within the retry interval a provider's next turn is not asked again
-		second := claimed()
-		markProviderUrlProbePostQuantumTurns(ctx, now.Add(time.Minute), second, settings)
-		for clientId, postQuantum := range asked(second) {
-			if postQuantum {
-				t.Fatalf("%s was asked again within the retry interval", clientId)
+		want := map[server.Id]bool{never: true, offStride: false, positive: false, negative: false, unmeasured: true, stale: true}
+		for attempt := 0; attempt < 2; attempt++ {
+			providers := claimed()
+			markProviderUrlProbePostQuantumTurns(ctx, now, providers, settings)
+			got := asked(providers)
+			for clientId, postQuantum := range want {
+				if got[clientId] != postQuantum {
+					t.Fatalf("attempt %d: %s asked %t, want %t (all %v)", attempt, clientId, got[clientId], postQuantum, got)
+				}
 			}
 		}
 
-		// once its turn key expires, a provider that still needs a measurement
-		// is asked again
-		server.Redis(ctx, func(r server.RedisClient) {
-			server.Raise(r.Del(ctx, providerUrlProbePostQuantumTurnKey(unmeasured)).Err())
-		})
-		third := claimed()
-		markProviderUrlProbePostQuantumTurns(ctx, now.Add(2*time.Minute), third, settings)
-		if got := asked(third); !got[unmeasured] || got[never] || got[positive] {
-			t.Fatalf("after the interval the claim asked %v", got)
-		}
-
-		// no retry interval asks every turn that needs a measurement
+		// a stride of one asks every turn that needs a measurement
 		every := DefaultProviderUrlProbePostQuantumSettings()
-		every.RetryInterval = 0
-		fourth := claimed()
-		markProviderUrlProbePostQuantumTurns(ctx, now.Add(3*time.Minute), fourth, every)
-		if got := asked(fourth); !got[never] || !got[unmeasured] || !got[stale] || got[positive] || got[negative] {
-			t.Fatalf("without a retry interval the claim asked %v", got)
+		every.TurnStride = 1
+		providers := claimed()
+		markProviderUrlProbePostQuantumTurns(ctx, now, providers, every)
+		if got := asked(providers); !got[never] || !got[offStride] || !got[unmeasured] || !got[stale] || got[positive] || got[negative] {
+			t.Fatalf("with a stride of one the claim asked %v", got)
 		}
 	})
 }
