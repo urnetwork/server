@@ -6,8 +6,9 @@ package controller
 // (state, close, commit, finalize, answer, fundedThrough, claimed) is the v2
 // client's with P (StLedgerV2Client). What is new is the census commitment on
 // STSettlement2Ctf, which takes the operator id n, and the carry contract
-// (STCtfCarry): its records of returned carry and its recycle. Writes are
-// durable intents of the existing engine, signed by the root key.
+// (STCtfCarry): its records of returned carry, what it holds of its own, and
+// its recycle. Writes are durable intents of the existing engine, signed by
+// the root key.
 
 import (
 	"bytes"
@@ -18,12 +19,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/holiman/uint256"
 	"golang.org/x/crypto/blake2b"
 
@@ -61,6 +64,36 @@ type StCtfCarry struct {
 	PoolHotkey   [32]byte
 }
 
+// StCtfCarryHeld is what the carry contract holds of its own (§4.6), read at
+// one finalized block: its residual, its coldkey's position on vault2's
+// escrow hotkey, which bounds what a recycle keeps, its least seed, and the
+// TAO its address can spend, which seed() stakes with any value sent.
+type StCtfCarryHeld struct {
+	Residual     uint256.Int
+	Position     uint256.Int
+	SeedMinimum  uint256.Int
+	SpendableRao uint256.Int
+}
+
+// Kept is what a recycle keeps on the escrow hotkey: the residual, or the
+// position where the runtime lowered it below, as the contract follows it.
+func (self *StCtfCarryHeld) Kept() uint256.Int {
+	if self.Position.Lt(&self.Residual) {
+		return self.Position
+	}
+	return self.Residual
+}
+
+// SeedShortfall is the least TAO, in rao, a seed() has to send to restore the
+// residual: the least seed less what the carry's address can already stake.
+func (self *StCtfCarryHeld) SeedShortfall() uint256.Int {
+	var shortfall uint256.Int
+	if self.SpendableRao.Lt(&self.SeedMinimum) {
+		shortfall.Sub(&self.SeedMinimum, &self.SpendableRao)
+	}
+	return shortfall
+}
+
 // StCtfClient is the swappable capture the flag chain client; CoreStClient
 // implements it. Views read the finalized head.
 type StCtfClient interface {
@@ -74,6 +107,10 @@ type StCtfClient interface {
 	// CtfRecycledFor reads the carry contract's recycledFor(epoch), R_k's
 	// record (§4.5).
 	CtfRecycledFor(ctx context.Context, carry common.Address, epoch uint64) (uint256.Int, error)
+	// CtfCarryHeld reads what the carry holds of its own at one finalized
+	// block: residual(), its position on the escrow hotkey that identity
+	// names, seedMinimum() and its address's spendable TAO.
+	CtfCarryHeld(ctx context.Context, carry common.Address, identity *StCtfCarry) (*StCtfCarryHeld, error)
 	// CtfCommitCensus sends commitCtfCensus(epoch, noId, hash) under
 	// ctfcensus:e:no.
 	CtfCommitCensus(ctx context.Context, epoch uint64, noId uint64, hash [32]byte) (string, error)
@@ -175,6 +212,60 @@ func (self *CoreStClient) CtfRecycledFor(ctx context.Context, carry common.Addre
 		return uint256.Int{}, fmt.Errorf("carry %s recycledFor(%d): %w", carry.Hex(), epoch, err)
 	}
 	return stUint256(recycled)
+}
+
+func (self *CoreStClient) CtfCarryHeld(ctx context.Context, carry common.Address, identity *StCtfCarry) (*StCtfCarryHeld, error) {
+	ctx, stopRead, err := beginStRpcRead(ctx, self.readHooks)
+	if err != nil {
+		return nil, err
+	}
+	defer stopRead()
+	finalized, err := self.finalizedBlock(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("finalized read head: %w", err)
+	}
+	block, out := finalized.Number, &StCtfCarryHeld{}
+	for _, read := range []struct {
+		name     string
+		calldata []byte
+		unpack   func([]byte) (*big.Int, error)
+		out      *uint256.Int
+	}{
+		{"residual()", stCtfCarryAbi.PackResidual(), stCtfCarryAbi.UnpackResidual, &out.Residual},
+		{"seedMinimum()", stCtfCarryAbi.PackSeedMinimum(), stCtfCarryAbi.UnpackSeedMinimum, &out.SeedMinimum},
+	} {
+		value, err := stViewAtBlock(self, ctx, carry, block, read.calldata, read.unpack)
+		if err == nil {
+			*read.out, err = stUint256(value)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("carry %s %s: %w", carry.Hex(), read.name, err)
+		}
+	}
+	position, err := self.stakeAtBlock(ctx, block, identity.EscrowHotkey, identity.Coldkey)
+	if err == nil {
+		out.Position, err = stUint256(position)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("carry %s position on the escrow hotkey: %w", carry.Hex(), err)
+	}
+	var balance *big.Int
+	err = self.eachRpc(ctx, func(ctx context.Context, client *ethclient.Client) error {
+		callCtx, cancel := context.WithTimeout(ctx, stCallTimeout)
+		defer cancel()
+		value, err := client.BalanceAt(callCtx, carry, new(big.Int).SetUint64(block))
+		balance = value
+		return err
+	})
+	if err == nil {
+		// The runtime reports the balance the EVM can spend, above the
+		// existential deposit; a seed stakes whole rao of it.
+		out.SpendableRao, err = stUint256(new(big.Int).Div(balance, big.NewInt(1_000_000_000)))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("carry %s balance: %w", carry.Hex(), err)
+	}
+	return out, nil
 }
 
 func (self *CoreStClient) CtfCommitCensus(ctx context.Context, epoch uint64, noId uint64, hash [32]byte) (string, error) {

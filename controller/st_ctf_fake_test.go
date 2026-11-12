@@ -80,8 +80,13 @@ type fakeCtfChain struct {
 	roundOf  map[uint64]uint64
 	carry    StCtfCarry
 	recycled map[uint64]uint256.Int
-	// held is the carry contract's stake on vault2's escrow hotkey.
-	held uint256.Int
+	// held is the carry contract's whole position on vault2's escrow hotkey
+	// and residual its residual(), which a recycle keeps there. seedMinimum
+	// is its seedMinimum() and spendable the TAO its address holds, in rao.
+	held        uint256.Int
+	residual    uint256.Int
+	seedMinimum uint256.Int
+	spendable   uint256.Int
 	// afterClose runs after a close of the CTF pool succeeds.
 	afterClose func()
 	// staking holds the runtime's StakingHotkeys lists by coldkey, and
@@ -101,7 +106,39 @@ func newFakeCtfChain(log *[]string) *fakeCtfChain {
 		carry: StCtfCarry{Vault: common.HexToAddress(testLedgerV2Vault), PoolId: ctfTestPoolId, Coldkey: stCtfCarryColdkey(ctfTestCarry),
 			VaultColdkey: ctfTestVaultColdkey, EscrowHotkey: ctfTestEscrowHotkey, PoolHotkey: ctfTestPoolHotkey},
 		staking: map[[32]byte][][32]byte{}, poolHotkeys: map[[32]byte]bool{ctfTestPoolHotkey: true},
+		// created with its 1 TAO seed as its residual
+		held: *uint256.NewInt(ctfTestSeedRao), residual: *uint256.NewInt(ctfTestSeedRao), seedMinimum: *uint256.NewInt(ctfTestSeedRao / 10),
 	}
+}
+
+// ctfTestSeedRao is the carry's seed: 1 TAO, staked as its residual.
+const ctfTestSeedRao = 1_000_000_000
+
+// sweep is root's sweep of the carry's position on the escrow hotkey, below a
+// nominator minimum it raised to minimum: the stake returns to the carry's
+// TAO, and the least seed becomes ten times the minimum. residual() reads as
+// before until a recycle or a seed follows it down.
+func (self *fakeCtfChain) sweep(minimum uint64) {
+	self.spendable.Add(&self.spendable, &self.held)
+	self.held.Clear()
+	self.seedMinimum.SetUint64(10 * minimum)
+}
+
+// seed is anyone's seed() with value rao: all the carry's TAO staked, its
+// gain added to the residual, which first follows a lowered position down.
+func (self *fakeCtfChain) seed(value uint64) error {
+	tao := *uint256.NewInt(value)
+	tao.Add(&tao, &self.spendable)
+	if tao.Lt(&self.seedMinimum) {
+		return fakeLedgerV2Revert("SeedTooSmall")
+	}
+	if self.held.Lt(&self.residual) {
+		self.residual = self.held
+	}
+	self.residual.Add(&self.residual, &tao)
+	self.held.Add(&self.held, &tao)
+	self.spendable.Clear()
+	return nil
 }
 
 // pool routes a read to the provider pool's fake or the CTF pool's.
@@ -196,6 +233,16 @@ func (self *fakeCtfChain) CtfRecycledFor(ctx context.Context, carry common.Addre
 	return self.recycled[epoch], nil
 }
 
+func (self *fakeCtfChain) CtfCarryHeld(ctx context.Context, carry common.Address, identity *StCtfCarry) (*StCtfCarryHeld, error) {
+	if err := self.failed("held"); err != nil {
+		return nil, err
+	}
+	if carry != ctfTestCarry || identity == nil || identity.Coldkey != self.carry.Coldkey || identity.EscrowHotkey != self.carry.EscrowHotkey {
+		return nil, fmt.Errorf("no carry %s with that identity", carry.Hex())
+	}
+	return &StCtfCarryHeld{Residual: self.residual, Position: self.held, SeedMinimum: self.seedMinimum, SpendableRao: self.spendable}, nil
+}
+
 func (self *fakeCtfChain) CtfCommitCensus(ctx context.Context, epoch uint64, noId uint64, hash [32]byte) (string, error) {
 	*self.log = append(*self.log, fmt.Sprintf("census %d", epoch))
 	if err := self.failed("commitcensus"); err != nil {
@@ -257,6 +304,14 @@ func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, 
 	if account == nil {
 		return "", errors.New("the driver names no carry account, so its call could change under one transaction key")
 	}
+	// As STCtfCarry.recycle, all or nothing: it keeps its residual, or the
+	// position below it; a claim to make needs a residual; it moves the rest.
+	kept := self.residual
+	if self.held.Lt(&kept) {
+		kept = self.held
+	}
+	held := self.held
+	var due uint256.Int
 	{
 		root := self.roots[rootIndex]
 		if account.Coldkey != self.carry.Coldkey {
@@ -267,15 +322,18 @@ func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, 
 		}
 		claimed := self.claimed[[2]uint64{ctfTestPoolId, index}]
 		if claimed.Lt(&account.Cumulative) {
-			var due uint256.Int
+			if kept.IsZero() {
+				return "", fakeLedgerV2Revert("ResidualMissing")
+			}
 			due.Sub(&account.Cumulative, &claimed)
-			self.held.Add(&self.held, &due)
-			self.claimed[[2]uint64{ctfTestPoolId, index}] = account.Cumulative
+			held.Add(&held, &due)
 		}
 	}
-	if self.held.IsZero() {
+	if !kept.Lt(&held) {
 		return "", fakeLedgerV2Revert("NothingToRecycle")
 	}
+	var moving uint256.Int
+	moving.Sub(&held, &kept)
 	// the transfer to vault2 on the pool hotkey adds it to vault2's list
 	if list := self.staking[ctfTestVaultColdkey]; !slices.Contains(list, ctfTestPoolHotkey) {
 		if stCtfStakingHotkeysMax <= len(list) {
@@ -283,13 +341,16 @@ func (self *fakeCtfChain) CtfRecycle(ctx context.Context, carry common.Address, 
 		}
 		self.staking[ctfTestVaultColdkey] = append(slices.Clone(list), ctfTestPoolHotkey)
 	}
+	if !due.IsZero() {
+		self.claimed[[2]uint64{ctfTestPoolId, index}] = account.Cumulative
+	}
 	// The next close captures it with the epoch's emission.
 	epoch := self.lastFunded + 1
 	recycled := self.recycled[epoch]
-	recycled.Add(&recycled, &self.held)
+	recycled.Add(&recycled, &moving)
 	self.recycled[epoch] = recycled
-	self.emission[epoch] += self.held.Uint64()
-	self.held.Clear()
+	self.emission[epoch] += moving.Uint64()
+	self.held, self.residual = kept, kept
 	return fmt.Sprintf("0xrecycle%d", rootIndex), nil
 }
 
