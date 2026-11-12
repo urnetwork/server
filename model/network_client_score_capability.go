@@ -97,13 +97,9 @@ func newClientScoreCapability(
 	egressTestEnabled bool,
 ) *clientScoreCapability {
 	counts, hasCounts := countFilter.healthCounts[clientId]
-	ipFamily := (&ClientScore{IpFamilies: ipFamilies}).IpFamily()
 	capability := &clientScoreCapability{
-		classification:      classifyProviderCapability(counts, ipFamily == connect.IpFamilyDualstack, countFilter.now, egressSettings),
+		classification:      classifyProviderCapabilityOfFamilies(counts, ipFamilies, countFilter.now, egressSettings),
 		postQuantumPositive: counts.postQuantumPositive(),
-	}
-	if ipFamily == connect.IpFamilyV6Only {
-		capability.classification = providerCapabilityClassification{class: providerCapabilityClassB}
 	}
 	capability.postQuantumModern = providerPostQuantumModern(capability.postQuantumPositive, countFilter.modernEvidence[clientId], countFilter.now)
 	if capability.classification.downgraded() {
