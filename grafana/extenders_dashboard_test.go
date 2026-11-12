@@ -44,6 +44,7 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"popularity":            "urnetwork_stats_extender_contracts_total",
 		"pings per extender":    "urnetwork_stats_extender_pings_total",
 		"pings by outcome":      "urnetwork_stats_extender_pings_24h",
+		"refusals by reason":    "sum by (pinger_kind, reason) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h",
 		"who is measuring":      "urnetwork_stats_extender_ping_sources_24h",
 		"extenders pinged":      "urnetwork_stats_extender_pinged_extenders_24h",
 		"refusing targets":      "urnetwork_stats_extender_ping_rejections_total",
@@ -67,6 +68,8 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		// the restarts of the extender processes (connect/EXTENDER.md G3)
 		"extender restarts":    "urnetwork_stats_extenders_restarting_24h",
 		"who reports its runs": "urnetwork_stats_extenders_reporting_runs_24h",
+		// the claims the ping report route refuses before storing them
+		"claims the operator refused": "urnetwork_extender_ping_report_refused_total",
 	} {
 		found := false
 		for _, expression := range expressions {
@@ -186,9 +189,10 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		return testPanel{}
 	}
 
-	// the verdict window, split by kind, verdict and relay, over time
+	// the verdict window, split by kind, verdict and relay, over time, the
+	// reasons of each verdict added up
 	outcomes := panelWith(t, func(expr string) bool {
-		return strings.HasPrefix(expr, "max by (pinger_kind, outcome, relayed) (urnetwork_stats_extender_pings_24h")
+		return strings.HasPrefix(expr, "sum by (pinger_kind, outcome, relayed) (max by (pinger_kind, outcome, relayed, reason) (urnetwork_stats_extender_pings_24h")
 	})
 	if outcomes.Type != "timeseries" {
 		t.Errorf("pings by kind and outcome is a %s, want a timeseries", outcomes.Type)
@@ -240,6 +244,15 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 		}
 	}
 
+	// the targets refusing the most count every reason, which the per-target
+	// counter cannot split: the panel says so, and what a stale directory
+	// does to the ranking
+	for _, want := range []string{"unknown_pinger", "stale directories"} {
+		if !strings.Contains(refusing.Description, want) {
+			t.Errorf("targets refusing the most description lacks %q", want)
+		}
+	}
+
 	// the retired provider-only names are gone with the rows they counted
 	for _, expression := range dashboardExpressions(dashboard) {
 		for _, retired := range []string{
@@ -250,6 +263,84 @@ func TestExtendersDashboardPingRow(t *testing.T) {
 			if strings.Contains(expression, retired) {
 				t.Errorf("query reads the retired %s: %q", retired, expression)
 			}
+		}
+	}
+}
+
+// The ping window gauge is published by every taskworker, one series per
+// kind, verdict, relay and reason (the extender ping review of 2026-11-11).
+// Every read of it takes the instances' max over all four labels before it
+// adds anything up: a max that leaves the reason out takes the largest reason
+// of a verdict for the whole verdict. And the refusals are read by reason:
+// the refused stat counts the refusals that judged the claim apart from the
+// unknown pingers, which are stale directories rather than refusing targets,
+// a panel splits the refusals by reason, and a panel shows the claims the
+// report route refused before storing.
+func TestExtendersDashboardReadsTheRefusalReason(t *testing.T) {
+	dashboard := readTestDashboard(t, "extenders.json")
+
+	const gauge = "urnetwork_stats_extender_pings_24h"
+	const dedupe = "max by (pinger_kind, outcome, relayed, reason) (" + gauge + "{"
+	reads := 0
+	for _, expression := range dashboardExpressions(dashboard) {
+		if !strings.Contains(expression, gauge) {
+			continue
+		}
+		reads += 1
+		if strings.Count(expression, gauge) != strings.Count(expression, dedupe) {
+			t.Errorf("a read of %s does not take the instances' max over every label, reason included: %q", gauge, expression)
+		}
+	}
+	if reads < 5 {
+		t.Fatalf("%d panels read %s", reads, gauge)
+	}
+
+	panelTitled := func(title string) testPanel {
+		t.Helper()
+		for _, panel := range dashboard.Panels {
+			if panel.Title == title {
+				return panel
+			}
+		}
+		t.Fatalf("no panel %q", title)
+		return testPanel{}
+	}
+
+	refused := panelTitled("refused (24h)")
+	if len(refused.Targets) != 2 {
+		t.Fatalf("refused (24h) has %d counts, want the refusals on the claim and the unknown pingers", len(refused.Targets))
+	}
+	if !strings.Contains(refused.Targets[0].Expr, `outcome="rejected",reason!~"unknown_pinger|rate_limited"`) {
+		t.Errorf("refused (24h) counts the refusals that are evidence against no one: %q", refused.Targets[0].Expr)
+	}
+	if !strings.Contains(refused.Targets[1].Expr, `outcome="rejected",reason="unknown_pinger"`) {
+		t.Errorf("refused (24h) does not count the unknown pingers apart: %q", refused.Targets[1].Expr)
+	}
+	for _, want := range []string{"stale directories", "gossip", "extender-directories-stale"} {
+		if !strings.Contains(refused.Description, want) {
+			t.Errorf("refused (24h) description lacks %q", want)
+		}
+	}
+
+	reasons := panelTitled("refusals by reason (24h)")
+	if reasons.Type != "timeseries" || len(reasons.Targets) != 1 ||
+		!strings.HasPrefix(reasons.Targets[0].Expr, "sum by (pinger_kind, reason) ("+dedupe+`env="$env",outcome="rejected"}`) {
+		t.Errorf("refusals by reason is not the refusals over time by kind and reason: %s %+v", reasons.Type, reasons.Targets)
+	}
+	for _, want := range []string{"unknown_pinger", "check gossip and DNS publishing", "rtt_below_observed", "rate_limited", "other", "§2.19c"} {
+		if !strings.Contains(reasons.Description, want) {
+			t.Errorf("refusals by reason description lacks %q", want)
+		}
+	}
+
+	route := panelTitled("claims the operator refused (per hour)")
+	if route.Type != "timeseries" || len(route.Targets) != 1 ||
+		route.Targets[0].Expr != `sum by (reason) (increase(urnetwork_extender_ping_report_refused_total{env="$env"}[1h]))` {
+		t.Errorf("claims the operator refused is not the route's refusals per hour by reason: %s %+v", route.Type, route.Targets)
+	}
+	for _, want := range []string{"POST /network/ping-report", "pinger_not_reporter", "replay", "rate_limited"} {
+		if !strings.Contains(route.Description, want) {
+			t.Errorf("claims the operator refused description lacks %q", want)
 		}
 	}
 }
