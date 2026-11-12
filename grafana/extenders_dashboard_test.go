@@ -59,7 +59,11 @@ func TestExtendersDashboardCoversGossipDnsAndPopularity(t *testing.T) {
 		"how activations end":   "urnetwork_extender_activations_total",
 		// the residents' relay of the webrtc carrier's offers (connect/EXTENDER.md S8)
 		"webrtc relay outcomes": "urnetwork_extender_webrtc_relay_offers_total",
-		"activation step times": "urnetwork_extender_activation_step_seconds",
+		// the extenders on webrtc without tcp, which the activation caps, and
+		// the activations the cap refused (connect/EXTENDER.md S8)
+		"extenders on webrtc without tcp": "urnetwork_stats_webrtc_only_extenders",
+		"refused at the webrtc cap":       `urnetwork_extender_activations_total{env="$env",stage="webrtc",outcome="cap"}`,
+		"activation step times":           "urnetwork_extender_activation_step_seconds",
 		// the refusals for room, which the activator waits out rather than
 		// backing off (connect#230)
 		"busy and budget refusals": `urnetwork_extender_activations_total{env="$env",stage=~"busy|budget"}`,

@@ -7,15 +7,16 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urnetwork/connect"
 )
 
 // The acceptance rule with the peer-to-peer webrtc carrier as a required path
 // (connect/EXTENDER.md C2a, S8), judged over the fake probes of
-// extender_activate_acceptance_test.go. Nothing here dials or reads the
-// database. The two required paths run at once, so where an order matters a
-// fake waits on what the other paths have done rather than on time.
+// extender_activate_acceptance_test.go on the fake clock. Nothing here dials or
+// reads the database. The webrtc test runs only where the tcp path failed or
+// was not offered (owner, 2026-11-12), so the paths run one after the other.
 
 const testWebRtcProbe = connect.ExtenderCarrierWebRtc
 
@@ -57,29 +58,32 @@ func TestExtenderActivationAcceptsOnWebRtcAlone(t *testing.T) {
 }
 
 // Root cause: a host behind nat that binds tcp 443 gets no answer on it, and a
-// tcp test that waited out the probe budget before the webrtc test would
-// starve it. Observable: the tcp test waits out the budget while the webrtc
-// test passes; the optional carriers start once webrtc passed, before tcp gave
-// up; the activation is stored on webrtc and quic, and tcp is listed as left
-// out with its timeout.
-func TestExtenderActivationAcceptsOnWebRtcWhileTcpGetsNoAnswer(t *testing.T) {
+// tcp challenge that waited out the probe budget would leave the webrtc test
+// that runs in its place none. Observable: of an activation that offers both,
+// the tcp challenge is cut at its 5 s share, the webrtc test runs only then,
+// with a 10 s budget of its own, and passes; the optional carriers run after
+// it, under its budget; the activation is stored on webrtc and quic, and tcp is
+// listed as left out with its 5 s timeout.
+func TestExtenderActivationTriesWebRtcOnceTheTcpChallengeGetsNoAnswer(t *testing.T) {
 	probes := newTestActivationProbes()
 	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
-	optionalAnswered := make(chan struct{})
+	webRtcStart := time.Time{}
 	probes.answer = func(ctx context.Context, probe string) error {
 		switch probe {
 		case tcpProbe:
-			// no answer, and only once the optional carrier has answered, so
-			// the shared budget is still whole when the optional carriers run
-			<-optionalAnswered
+			// no answer: a black-holed port
 			return probes.clock.WaitOut(ctx)
 		case testOptionalCarrierProbes.quic:
-			close(optionalAnswered)
 			return nil
 		default:
 			return fmt.Errorf("unexpected probe %s", probe)
 		}
 	}
+	probes.webRtcAnswer = func(ctx context.Context) (string, error) {
+		webRtcStart = probes.clock.Now()
+		return probes.webRtcClientAddress, nil
+	}
+	judgeStart := probes.clock.Now()
 	outcome := probes.judge(
 		context.Background(),
 		connect.ExtenderCarrierTcp,
@@ -90,20 +94,83 @@ func TestExtenderActivationAcceptsOnWebRtcWhileTcpGetsNoAnswer(t *testing.T) {
 		t.Fatalf("refused: %s", outcome.refusal)
 	}
 	connect.AssertEqual(t, outcome.carriers, []string{connect.ExtenderCarrierWebRtc, connect.ExtenderCarrierQuic})
+	connect.AssertEqual(t, probes.probesSoFar(), []string{tcpProbe, testWebRtcProbe, testOptionalCarrierProbes.quic})
 	connect.AssertEqual(t, testStepNames(outcome), []string{
 		connect.ExtenderCarrierTcp,
 		connect.ExtenderCarrierWebRtc,
 		connect.ExtenderCarrierQuic,
 	})
+	// the challenge had its share alone, and the webrtc test began at its end
 	connect.AssertEqual(t, outcome.steps[0].Outcome, extenderProbeStepOutcomeTimeout)
+	connect.AssertEqual(t, outcome.steps[0].ElapsedMs, testActivationTcpChallengeTimeout.Milliseconds())
+	connect.AssertEqual(t, webRtcStart.Sub(judgeStart), testActivationTcpChallengeTimeout)
+	// the webrtc test had a whole budget of its own, and quic ran under it
 	connect.AssertEqual(t, outcome.steps[1].Outcome, extenderProbeStepOutcomeOk)
+	connect.AssertEqual(t, outcome.steps[1].BudgetLeftMs, ExtenderActivateProbeTimeout.Milliseconds())
 	connect.AssertEqual(t, outcome.steps[2].Outcome, extenderProbeStepOutcomeOk)
-	// the optional carrier had all of the budget: it ran before tcp gave up
 	connect.AssertEqual(t, outcome.steps[2].BudgetLeftMs, ExtenderActivateProbeTimeout.Milliseconds())
 	if refused := testRefusedCarrierNames(t, outcome); !slices.Equal(refused, []string{tcpProbe}) {
 		t.Fatalf("refused carriers = %v, want tcp alone", refused)
 	}
-	if !strings.HasPrefix(outcome.refusedCarriers[0].Error, "the tcp carrier did not answer within the 10 s probe budget") {
+	if !strings.HasPrefix(outcome.refusedCarriers[0].Error, "the tcp carrier did not answer within 5 s") {
+		t.Fatalf("tcp was left out for %q", outcome.refusedCarriers[0].Error)
+	}
+}
+
+// The webrtc test that runs in place of a failed tcp path never outlasts the
+// activation's bound: after a forward that waited out the shared 10 s budget,
+// it has the 5 s left of the 15 s, and a webrtc test that gets no answer is
+// refused when they run out.
+func TestExtenderActivationBoundsTheWebRtcTestAfterATcpForwardTimesOut(t *testing.T) {
+	probes := newTestActivationProbes()
+	probes.forwardAnswer = func(ctx context.Context) error {
+		return probes.clock.WaitOut(ctx)
+	}
+	webRtcAllowance := time.Duration(0)
+	probes.webRtcAnswer = func(ctx context.Context) (string, error) {
+		deadline, _ := ctx.Deadline()
+		webRtcAllowance = deadline.Sub(probes.clock.Now())
+		return "", probes.clock.WaitOut(ctx)
+	}
+	judgeStart := probes.clock.Now()
+	outcome := probes.judge(context.Background(), connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
+	connect.AssertEqual(t, webRtcAllowance, testActivationTcpChallengeTimeout)
+	connect.AssertEqual(t, probes.clock.Now().Sub(judgeStart), ExtenderActivateProbeTimeout+testActivationTcpChallengeTimeout)
+	connect.AssertEqual(t, testStepNames(outcome), []string{
+		connect.ExtenderCarrierTcp,
+		extenderProbeStepForward,
+		connect.ExtenderCarrierWebRtc,
+	})
+	for _, want := range []string{
+		"the forward did not answer within the 10 s probe budget",
+		"; the webrtc carrier did not answer within the 5 s left of the 10 s probe budget",
+	} {
+		if !strings.Contains(outcome.refusal, want) {
+			t.Fatalf("refusal = %q, want it to name %q", outcome.refusal, want)
+		}
+	}
+	connect.AssertEqual(t, outcome.refusalStep, connect.ExtenderCarrierWebRtc)
+	connect.AssertEqual(t, outcome.refusalOutcome, extenderProbeStepOutcomeTimeout)
+}
+
+// A tcp path that fails after its challenge passed -- at the forward -- has
+// failed too: the webrtc test runs in its place, and tcp is listed as left out
+// with the forward's failure.
+func TestExtenderActivationTriesWebRtcOnceTheTcpForwardFails(t *testing.T) {
+	probes := newTestActivationProbes()
+	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
+	probes.forwardErr = errors.New("the forward was refused")
+	outcome := probes.judge(context.Background(), connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
+	if outcome.refusal != "" {
+		t.Fatalf("refused: %s", outcome.refusal)
+	}
+	connect.AssertEqual(t, outcome.carriers, []string{connect.ExtenderCarrierWebRtc})
+	connect.AssertEqual(t, probes.probesSoFar(), []string{tcpProbe, "forward", testWebRtcProbe})
+	if refused := testRefusedCarrierNames(t, outcome); !slices.Equal(refused, []string{tcpProbe}) {
+		t.Fatalf("refused carriers = %v, want tcp alone", refused)
+	}
+	if !strings.Contains(outcome.refusedCarriers[0].Error, "the forward failed after") ||
+		!strings.Contains(outcome.refusedCarriers[0].Error, "the forward was refused") {
 		t.Fatalf("tcp was left out for %q", outcome.refusedCarriers[0].Error)
 	}
 }
@@ -158,9 +225,13 @@ func TestExtenderActivationProbesNoOptionalCarrierBeforeARequiredPathPasses(t *t
 	connect.AssertEqual(t, optionalProbed, 3)
 }
 
-// An extender that answers on both required paths is stored on both, beside
-// every optional carrier that answered, in the order offered.
-func TestExtenderActivationAcceptsOnBothRequiredPaths(t *testing.T) {
+// Root cause: an activation that offered both required paths ran the webrtc
+// test beside a tcp path that passed, sending the extender's device an offer
+// and an ICE join for nothing. Observable: when the tcp path passes, the webrtc
+// test never runs; the activation is stored on tcp and every optional carrier
+// that answered, in the order offered, with webrtc neither stored nor listed
+// as refused, and no webrtc step.
+func TestExtenderActivationRunsNoWebRtcTestBesideAPassingTcpPath(t *testing.T) {
 	probes := newTestActivationProbes()
 	outcome := probes.judge(
 		context.Background(),
@@ -172,21 +243,45 @@ func TestExtenderActivationAcceptsOnBothRequiredPaths(t *testing.T) {
 	if outcome.refusal != "" {
 		t.Fatalf("refused: %s", outcome.refusal)
 	}
+	if slices.Contains(probes.probesSoFar(), testWebRtcProbe) {
+		t.Fatalf("the webrtc test ran beside a tcp path that passed: %v", probes.probesSoFar())
+	}
 	connect.AssertEqual(t, outcome.carriers, []string{
 		connect.ExtenderCarrierTcp,
 		connect.ExtenderCarrierQuic,
 		connect.ExtenderCarrierDns,
-		connect.ExtenderCarrierWebRtc,
 	})
 	connect.AssertEqual(t, outcome.dnsPorts, testAcceptanceDnsPorts)
 	connect.AssertEqual(t, len(outcome.refusedCarriers), 0)
-	// the tcp path's steps, then the webrtc path's, then the optional ones
-	names := testStepNames(outcome)
-	connect.AssertEqual(t, names[:3], []string{
+	connect.AssertEqual(t, testStepNames(outcome), []string{
 		connect.ExtenderCarrierTcp,
 		extenderProbeStepForward,
-		connect.ExtenderCarrierWebRtc,
+		connect.ExtenderCarrierDns,
+		connect.ExtenderCarrierDns,
+		connect.ExtenderCarrierQuic,
 	})
+	// the tcp path had the whole shared budget, and the optional carriers ran
+	// under it
+	connect.AssertEqual(t, outcome.steps[2].BudgetLeftMs, ExtenderActivateProbeTimeout.Milliseconds())
+}
+
+// A tcp challenge that is slow but answers within its share passes, and the
+// webrtc test is not run.
+func TestExtenderActivationKeepsASlowTcpChallengeWithinItsShare(t *testing.T) {
+	probes := newTestActivationProbes()
+	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
+	probes.answer = func(ctx context.Context, probe string) error {
+		if probe == tcpProbe {
+			probes.clock.Advance(testActivationTcpChallengeTimeout - time.Millisecond)
+		}
+		return nil
+	}
+	outcome := probes.judge(context.Background(), connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
+	if outcome.refusal != "" {
+		t.Fatalf("refused: %s", outcome.refusal)
+	}
+	connect.AssertEqual(t, outcome.carriers, []string{connect.ExtenderCarrierTcp})
+	connect.AssertEqual(t, probes.probesSoFar(), []string{tcpProbe, "forward"})
 }
 
 // An activation that passes neither required path it offered is refused with
@@ -215,9 +310,8 @@ func TestExtenderActivationRefusesWhenNeitherRequiredPathPasses(t *testing.T) {
 	connect.AssertEqual(t, outcome.refusalStep, connect.ExtenderCarrierWebRtc)
 	connect.AssertEqual(t, outcome.refusalOutcome, extenderProbeStepOutcomeError)
 	connect.AssertEqual(t, testStepNames(outcome), []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc})
-	probed := probes.probesSoFar()
-	slices.Sort(probed)
-	connect.AssertEqual(t, probed, []string{tcpProbe, testWebRtcProbe})
+	// one after the other: the webrtc test only once the tcp path failed
+	connect.AssertEqual(t, probes.probesSoFar(), []string{tcpProbe, testWebRtcProbe})
 	connect.AssertEqual(t, len(outcome.carriers), 0)
 	if outcomes := extenderActivationStageOutcomes[outcome.refusalStep]; !slices.Contains(outcomes, outcome.refusalOutcome) {
 		t.Fatalf("the refusal is counted at %s %s, which has no series", outcome.refusalStep, outcome.refusalOutcome)
@@ -289,6 +383,7 @@ func TestExtenderActivationRefusesWebRtcWithoutASignalingPath(t *testing.T) {
 		context.Background(),
 		probes.clock.activationClock(),
 		activationProbes,
+		testActivationTcpChallengeTimeout,
 		[]string{connect.ExtenderCarrierWebRtc},
 		testAcceptanceTcpPort,
 		testAcceptanceUdpPort,
@@ -300,22 +395,24 @@ func TestExtenderActivationRefusesWebRtcWithoutASignalingPath(t *testing.T) {
 	}
 }
 
-// A webrtc test that panics fails that path alone: the activation passes on
-// tcp, and webrtc is left out with the panic as its reason.
+// A webrtc test that panics fails that path alone, with the panic as its
+// reason: run in place of a tcp path that failed, the activation is refused
+// naming both.
 func TestExtenderActivationContainsAWebRtcProbePanic(t *testing.T) {
 	probes := newTestActivationProbes()
+	tcpProbe := fmt.Sprintf("%s:%d", connect.ExtenderCarrierTcp, testAcceptanceTcpPort)
+	probes.carrierErrs[tcpProbe] = errors.New("connection refused")
 	probes.webRtcAnswer = func(ctx context.Context) (string, error) {
 		panic("synthetic webrtc probe failure")
 	}
 	outcome := probes.judge(context.Background(), connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
-	if outcome.refusal != "" {
-		t.Fatalf("refused: %s", outcome.refusal)
+	for _, want := range []string{"connection refused", "; the webrtc carrier failed after", "synthetic webrtc probe failure"} {
+		if !strings.Contains(outcome.refusal, want) {
+			t.Fatalf("refusal = %q, want it to name %q", outcome.refusal, want)
+		}
 	}
-	connect.AssertEqual(t, outcome.carriers, []string{connect.ExtenderCarrierTcp})
-	if len(outcome.refusedCarriers) != 1 || outcome.refusedCarriers[0].Carrier != connect.ExtenderCarrierWebRtc ||
-		!strings.Contains(outcome.refusedCarriers[0].Error, "synthetic webrtc probe failure") {
-		t.Fatalf("refused carriers = %+v, want webrtc with the panic", outcome.refusedCarriers)
-	}
+	connect.AssertEqual(t, outcome.refusalStep, connect.ExtenderCarrierWebRtc)
+	connect.AssertEqual(t, outcome.refusalOutcome, extenderProbeStepOutcomeError)
 }
 
 // Without webrtc the activation is judged as it always was: an offer of tcp

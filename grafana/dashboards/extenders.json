@@ -3527,7 +3527,7 @@
      "legendFormat": "{{stage}} {{outcome}}"
     }
    ],
-   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account, unproven_account (the account's, for an account none of whose hosts has passed on the family in 7 days) -- or error when the budget check failed rather than refused (connect#230); config error is the operator's extender configuration; tcp and forward are the required test over public tcp, and webrtc the required test over the peer-to-peer webrtc carrier (C2a, S8), error when the step failed on its own, timeout when it ran out of the 10 s probe budget, other_family when the forward arrived on the other family; an activation that failed both required paths ends at webrtc. A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
+   "description": "Every extender activation the api answered, per hour, by the stage that ended it and how (connect/EXTENDER.md C2): store activated is an extender published; request refused it before any probe; busy is the api too busy to take it, refused before any budget was spent: probes when it was already probing as many activations as it takes at once, budget_lock when other spends held one of its budgets past the lock bound; budget is an activation budget that refused it, by which -- client, address, proven_address, account, unproven_account (the account's, for an account none of whose hosts has passed on the family in 7 days) -- or error when the budget check failed rather than refused (connect#230); config error is the operator's extender configuration; tcp and forward are the required test over public tcp, and webrtc the required test over the peer-to-peer webrtc carrier (C2a, S8), run only where the tcp path failed or was not offered, error when the step failed on its own, timeout when it ran out of its probe budget, other_family when the forward arrived on the other family; an activation that failed both required paths ends at webrtc, as does one the operator's cap on extenders without tcp refused with its webrtc test untried (cap). A climb in tcp or forward timeouts is extenders answering late or not at all; a climb in budget or busy is fleets restarting at once."
   },
   {
    "id": 64,
@@ -4678,6 +4678,72 @@
     }
    ],
    "description": "The peer-to-peer webrtc extender carrier's offers the exchange residents took from the prober and relayed to their clients, per hour, by outcome (connect/EXTENDER.md S8): answered is an offer the extender's client answered, whose answer was posted back for the api's activation probe or the taskworker's uptime probe; no_answer is a client that sent nothing back before the offer's deadline or whose answer failed -- an extender with no answerer, or one that predates the carrier, never answers; expired is an offer whose prober had stopped waiting when it was taken; rate_limited and busy are the relay's own bounds, a client's offers past its rate and the exchange relaying as many as it takes at once; oversized and malformed are an offer or answer past the size bound, or an offer that did not decode. The probe steps of the webrtc test itself are the webrtc step of the activation panels above."
+  },
+  {
+   "id": 187,
+   "type": "timeseries",
+   "title": "extenders on webrtc without tcp, and the cap's refusals (per hour)",
+   "datasource": {
+    "type": "prometheus",
+    "uid": "warp-mimir"
+   },
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 202
+   },
+   "fieldConfig": {
+    "defaults": {
+     "unit": "short",
+     "decimals": 0,
+     "min": 0,
+     "custom": {
+      "drawStyle": "line",
+      "lineWidth": 2,
+      "fillOpacity": 12,
+      "showPoints": "never",
+      "spanNulls": true,
+      "stacking": {
+       "mode": "none",
+       "group": "A"
+      }
+     }
+    },
+    "overrides": []
+   },
+   "options": {
+    "legend": {
+     "displayMode": "list",
+     "placement": "bottom",
+     "showLegend": true
+    },
+    "tooltip": {
+     "mode": "multi",
+     "sort": "desc"
+    }
+   },
+   "targets": [
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "max(urnetwork_stats_webrtc_only_extenders{env=\"$env\"})",
+     "refId": "A",
+     "legendFormat": "on webrtc without tcp"
+    },
+    {
+     "datasource": {
+      "type": "prometheus",
+      "uid": "warp-mimir"
+     },
+     "expr": "sum(increase(urnetwork_extender_activations_total{env=\"$env\",stage=\"webrtc\",outcome=\"cap\"}[1h]))",
+     "refId": "B",
+     "legendFormat": "refused at the cap"
+    }
+   ],
+   "description": "Active extenders with an active address accepted on the webrtc carrier without tcp (urnetwork_stats_webrtc_only_extenders), which the activation caps at ExtenderActivateSettings.MaxWebRtcOnlyExtenders (100 at first; connect/EXTENDER.md S8), and the activations the cap refused with their webrtc test untried in the hour. A population at the cap with refusals beside it is the cap binding: hosts that the internet reaches only over webrtc are being turned away."
   }
  ]
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
@@ -23,7 +24,8 @@ import (
 // posts, how long it waits, what it refuses, and what of an answer reaches
 // this host's ICE. Nothing here reads Redis or opens a peer connection.
 
-// A relay that holds the offers posted and answers from a table.
+// A relay that holds the offers posted and answers from a table, and logs the
+// order of its calls.
 type testWebRtcProbeRelay struct {
 	stateLock sync.Mutex
 	connected bool
@@ -35,13 +37,31 @@ type testWebRtcProbeRelay struct {
 	waits     []time.Duration
 	answer    *model.ExtenderWebRtcAnswer
 	clientIds []server.Id
+	// the channels woken, and the calls in order
+	wakes []string
+	calls []string
 }
 
-func (self *testWebRtcProbeRelay) clientConnected(ctx context.Context, clientId server.Id) bool {
+// The offer channel of the synthetic exchange process holding the client.
+const testWebRtcProbeChannel = "extender_webrtc_offer_synthetic-exchange_connect_g1"
+
+func (self *testWebRtcProbeRelay) clientResident(ctx context.Context, clientId server.Id) (string, bool) {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.clientIds = append(self.clientIds, clientId)
-	return self.connected
+	self.calls = append(self.calls, "resident")
+	if !self.connected {
+		return "", false
+	}
+	return testWebRtcProbeChannel, true
+}
+
+func (self *testWebRtcProbeRelay) wake(ctx context.Context, channel string, clientId server.Id) {
+	self.stateLock.Lock()
+	defer self.stateLock.Unlock()
+	self.clientIds = append(self.clientIds, clientId)
+	self.wakes = append(self.wakes, channel)
+	self.calls = append(self.calls, "wake")
 }
 
 func (self *testWebRtcProbeRelay) addOffer(
@@ -54,6 +74,7 @@ func (self *testWebRtcProbeRelay) addOffer(
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.clientIds = append(self.clientIds, clientId)
+	self.calls = append(self.calls, "add")
 	if !self.room {
 		return "", false
 	}
@@ -78,12 +99,16 @@ func (self *testWebRtcProbeRelay) waitAnswer(
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
 	self.waits = append(self.waits, timeout)
+	self.calls = append(self.calls, "wait")
 	if self.answer == nil {
 		return nil, false
 	}
 	return self.answer, true
 }
 
+// An answer whose candidates name the tested address 203.0.113.10 three
+// times, another address of its /24, another public address, an ipv6 one,
+// private and loopback addresses.
 const testWebRtcAnswerSdp = "v=0\r\n" +
 	"o=- 1 1 IN IP4 0.0.0.0\r\n" +
 	"s=-\r\n" +
@@ -94,7 +119,13 @@ const testWebRtcAnswerSdp = "v=0\r\n" +
 	"a=candidate:4 1 udp 1694498815 2001:db8::10 50003 typ srflx raddr :: rport 0\r\n" +
 	"a=candidate:5 1 udp 1694498815 198.51.100.20 50004 typ srflx raddr 0.0.0.0 rport 0\r\n" +
 	"a=candidate:6 1 udp 2130706431 127.0.0.1 50005 typ host\r\n" +
+	"a=candidate:7 1 udp 1694498815 203.0.113.11 50006 typ srflx raddr 0.0.0.0 rport 0\r\n" +
+	"a=candidate:8 1 udp 1694498815 203.0.113.10 50007 typ srflx raddr 0.0.0.0 rport 0\r\n" +
+	"a=candidate:9 1 udp 1694498815 203.0.113.10 50008 typ srflx raddr 0.0.0.0 rport 0\r\n" +
 	"a=end-of-candidates\r\n"
+
+// The activation's source address the answer above is tested from.
+var testWebRtcTestedIp = netip.MustParseAddr("203.0.113.10")
 
 func testWebRtcRelayAnswer(t *testing.T, sdp string) *model.ExtenderWebRtcAnswer {
 	t.Helper()
@@ -112,6 +143,7 @@ func newTestWebRtcRelayExchanger(relay *testWebRtcProbeRelay, settings *Extender
 	now := time.Date(2026, time.November, 11, 0, 0, 0, 0, time.UTC)
 	return &extenderWebRtcRelayExchanger{
 		clientId: clientId,
+		testedIp: testWebRtcTestedIp,
 		settings: settings,
 		relay:    relay,
 		now:      func() time.Time { return now },
@@ -121,8 +153,9 @@ func newTestWebRtcRelayExchanger(relay *testWebRtcProbeRelay, settings *Extender
 // Root cause: the probe had no path to the extender's client at all (S5's
 // seam answered nothing). Observable: the offer is posted for the one client
 // the exchanger was built for, with the probe's deadline cut to the whole
-// seconds Redis waits, the answer comes back, and only its public candidates,
-// at most the bound of them, reach this host's ICE.
+// seconds Redis waits, the exchange process holding the client is woken on its
+// channel after the add, the answer comes back, and only its candidates on the
+// tested address, at most the bound of them, reach this host's ICE.
 func TestExtenderWebRtcRelayExchangerRelaysTheOfferAndBoundsTheAnswer(t *testing.T) {
 	relay := &testWebRtcProbeRelay{connected: true, room: true}
 	settings := DefaultExtenderWebRtcProbeSettings()
@@ -137,18 +170,20 @@ func TestExtenderWebRtcRelayExchangerRelaysTheOfferAndBoundsTheAnswer(t *testing
 		t.Fatal(err)
 	}
 	connect.AssertEqual(t, answer.Type, webrtc.SDPTypeAnswer)
-	// the private and loopback candidates are dropped, and of the public ones
+	// every candidate off the tested address is dropped, and of those on it
 	// only the first two are kept
-	for _, dropped := range []string{"10.0.0.5", "192.168.1.5", "198.51.100.20", "127.0.0.1"} {
+	for _, dropped := range []string{"10.0.0.5", "192.168.1.5", "198.51.100.20", "127.0.0.1", "2001:db8::10", "203.0.113.11", "50008"} {
 		if strings.Contains(answer.SDP, dropped) {
 			t.Fatalf("the answer kept candidate %s:\n%s", dropped, answer.SDP)
 		}
 	}
-	for _, kept := range []string{"203.0.113.10", "2001:db8::10", "a=end-of-candidates", "s=-"} {
+	for _, kept := range []string{"203.0.113.10 50002", "203.0.113.10 50007", "a=end-of-candidates", "s=-"} {
 		if !strings.Contains(answer.SDP, kept) {
 			t.Fatalf("the answer lost %q:\n%s", kept, answer.SDP)
 		}
 	}
+	connect.AssertEqual(t, relay.calls, []string{"resident", "add", "wake", "wait"})
+	connect.AssertEqual(t, relay.wakes, []string{testWebRtcProbeChannel})
 
 	if len(relay.offers) != 1 {
 		t.Fatalf("offers posted = %d, want 1", len(relay.offers))
@@ -260,6 +295,8 @@ func TestExtenderWebRtcRelayExchangerFailsWithoutAnAnswer(t *testing.T) {
 			t.Fatalf("%s: err = %v, want %q", c.name, err, c.wantText)
 		}
 		connect.AssertEqual(t, len(c.relay.offers), c.wantOffers)
+		// a wake follows every add that found room, and only one
+		connect.AssertEqual(t, len(c.relay.wakes), c.wantOffers)
 		connect.AssertEqual(t, len(c.relay.removed), c.wantRemoved)
 		if 0 < c.wantRemoved {
 			connect.AssertEqual(t, c.relay.removed, c.relay.members)
@@ -291,25 +328,56 @@ func TestExtenderWebRtcRelayExchangerWaitsWithinTheProbeBudget(t *testing.T) {
 	connect.AssertEqual(t, relay.offers[0].ExpireTime(), now.Add(time.Second))
 }
 
-// The candidate bound keeps every line that is not a candidate, drops host
-// names, and keeps at most the bound of the public candidates in order.
+// Root cause: an answer could point this host's ICE checks at any of up to
+// eight public addresses of the answerer's choosing, so an activation could
+// aim the operator's checks at a third party. Observable: only candidates on
+// the tested address are kept -- an ipv4 address exactly, an ipv6 one by its
+// /64, a v4-mapped one as ipv4 -- and every other public address, the other
+// family, private and loopback addresses and host names are dropped; every
+// line that is not a candidate is kept; a tested address that is not valid,
+// or a bound of zero, keeps none.
 func TestBoundExtenderWebRtcAnswerCandidates(t *testing.T) {
-	bounded := boundExtenderWebRtcAnswerCandidates(testWebRtcAnswerSdp, 8)
-	for _, kept := range []string{"203.0.113.10", "2001:db8::10", "198.51.100.20"} {
+	bounded := boundExtenderWebRtcAnswerCandidates(testWebRtcAnswerSdp, testWebRtcTestedIp, 8)
+	for _, kept := range []string{"203.0.113.10 50002", "203.0.113.10 50007", "203.0.113.10 50008", "v=0", "s=-", "a=end-of-candidates"} {
 		if !strings.Contains(bounded, kept) {
-			t.Fatalf("lost %s", kept)
+			t.Fatalf("lost %s:\n%s", kept, bounded)
 		}
 	}
-	for _, dropped := range []string{"10.0.0.5", "192.168.1.5", "127.0.0.1"} {
+	for _, dropped := range []string{"203.0.113.11", "198.51.100.20", "2001:db8::10", "10.0.0.5", "192.168.1.5", "127.0.0.1"} {
 		if strings.Contains(bounded, dropped) {
-			t.Fatalf("kept %s", dropped)
+			t.Fatalf("kept %s:\n%s", dropped, bounded)
 		}
 	}
+	mapped := boundExtenderWebRtcAnswerCandidates(testWebRtcAnswerSdp, netip.MustParseAddr("::ffff:203.0.113.10"), 8)
+	if mapped != bounded {
+		t.Fatalf("a v4-mapped tested address kept other candidates:\n%s", mapped)
+	}
+
+	ipv6Sdp := "v=0\r\n" +
+		"a=candidate:1 1 udp 1694498815 2001:db8:0:1::10 50000 typ srflx raddr :: rport 0\r\n" +
+		"a=candidate:2 1 udp 2130706431 2001:db8:0:1:ffff::1 50001 typ host\r\n" +
+		"a=candidate:3 1 udp 1694498815 2001:db8:0:2::10 50002 typ srflx raddr :: rport 0\r\n" +
+		"a=candidate:4 1 udp 1694498815 203.0.113.10 50003 typ srflx raddr 0.0.0.0 rport 0\r\n"
+	ipv6Bounded := boundExtenderWebRtcAnswerCandidates(ipv6Sdp, netip.MustParseAddr("2001:db8:0:1::5"), 8)
+	for _, kept := range []string{"2001:db8:0:1::10", "2001:db8:0:1:ffff::1"} {
+		if !strings.Contains(ipv6Bounded, kept) {
+			t.Fatalf("lost %s of the tested /64:\n%s", kept, ipv6Bounded)
+		}
+	}
+	for _, dropped := range []string{"2001:db8:0:2::10", "203.0.113.10"} {
+		if strings.Contains(ipv6Bounded, dropped) {
+			t.Fatalf("kept %s off the tested /64:\n%s", dropped, ipv6Bounded)
+		}
+	}
+
 	named := "a=candidate:7 1 udp 2130706431 extender.example 50006 typ host\r\n"
-	if strings.Contains(boundExtenderWebRtcAnswerCandidates(named, 8), "extender.example") {
+	if strings.Contains(boundExtenderWebRtcAnswerCandidates(named, testWebRtcTestedIp, 8), "extender.example") {
 		t.Fatal("kept a host name candidate")
 	}
-	if none := boundExtenderWebRtcAnswerCandidates(testWebRtcAnswerSdp, 0); strings.Contains(none, "a=candidate:") {
+	if none := boundExtenderWebRtcAnswerCandidates(testWebRtcAnswerSdp, netip.Addr{}, 8); strings.Contains(none, "a=candidate:") {
+		t.Fatal("a tested address that is not valid kept a candidate")
+	}
+	if none := boundExtenderWebRtcAnswerCandidates(testWebRtcAnswerSdp, testWebRtcTestedIp, 0); strings.Contains(none, "a=candidate:") {
 		t.Fatal("a bound of zero kept a candidate")
 	}
 }

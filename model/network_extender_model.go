@@ -368,6 +368,60 @@ var extenderFirstContactCarriersPattern = fmt.Sprintf(
 	connect.ExtenderCarrierDns,
 )
 
+// Whether an address with these carriers was accepted on the webrtc carrier
+// without tcp (connect/EXTENDER.md S8): it lists webrtc, which the activation
+// tests only where the tcp path failed or was not offered, and not tcp. Such
+// an address is probed for uptime over webrtc, and the operator caps how many
+// extenders hold one (controller ExtenderActivateSettings.
+// MaxWebRtcOnlyExtenders).
+func ExtenderAddressWebRtcOnly(carriers []string) bool {
+	return slices.Contains(carriers, connect.ExtenderCarrierWebRtc) &&
+		!slices.Contains(carriers, connect.ExtenderCarrierTcp)
+}
+
+// The carriers column of an address that lists webrtc, and of one that lists
+// tcp, as postgres regular expressions over its comma-separated carriers
+// (ExtenderAddressWebRtcOnly).
+var (
+	extenderWebRtcCarriersPattern = fmt.Sprintf("(^|,)%s(,|$)", connect.ExtenderCarrierWebRtc)
+	extenderTcpCarriersPattern    = fmt.Sprintf("(^|,)%s(,|$)", connect.ExtenderCarrierTcp)
+)
+
+// How many active extenders hold an active address accepted on the webrtc
+// carrier without tcp (ExtenderAddressWebRtcOnly), which the activation's cap
+// compares with its bound before it runs a webrtc test. The extender of
+// excludePublicKey is left out, so an extender already counted activates
+// again, on either family; nil leaves none out.
+func CountActiveWebRtcOnlyNetworkExtenders(ctx context.Context, excludePublicKey []byte) int {
+	count := 0
+	server.Db(ctx, func(conn server.PgConn) {
+		result, err := conn.Query(
+			ctx,
+			`
+			SELECT COUNT(DISTINCT network_extender.extender_id)
+			FROM network_extender
+			INNER JOIN network_extender_address ON
+				network_extender_address.extender_id = network_extender.extender_id AND
+				network_extender_address.active
+			WHERE
+				network_extender.active AND
+				network_extender_address.carriers ~ $1 AND
+				network_extender_address.carriers !~ $2 AND
+				($3::bytea IS NULL OR network_extender.public_key != $3::bytea)
+			`,
+			extenderWebRtcCarriersPattern,
+			extenderTcpCarriersPattern,
+			excludePublicKey,
+		)
+		server.WithPgResult(result, err, func() {
+			if result.Next() {
+				server.Raise(result.Scan(&count))
+			}
+		})
+	})
+	return count
+}
+
 // The inverse, tolerant of the empty column an address with no carrier would
 // have.
 func splitExtenderCarriers(carriers string) []string {

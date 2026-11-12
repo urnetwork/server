@@ -83,9 +83,6 @@ type keyEventSubscriber struct {
 	peerListeners    map[server.Id]map[int64]*model.NetworkPeerListener
 	hopListeners     map[server.Id]map[int64]*model.StreamHopListener
 	closeListeners   map[server.Id]map[int64]*clientCloseListener
-	// the residents' relays of webrtc extender carrier offers
-	// (extender_webrtc_relay.go)
-	webRtcRelayListeners map[server.Id]map[int64]*extenderWebRtcRelayListener
 	// closes what this process holds of a client removed through the api
 	// (CLIENTCLOSE.md); it must not block
 	clientRemoved func(server.Id)
@@ -116,7 +113,6 @@ func newKeyEventSubscriber(ctx context.Context, settings *KeyEventDeliverySettin
 		peerListeners:        map[server.Id]map[int64]*model.NetworkPeerListener{},
 		hopListeners:         map[server.Id]map[int64]*model.StreamHopListener{},
 		closeListeners:       map[server.Id]map[int64]*clientCloseListener{},
-		webRtcRelayListeners: map[server.Id]map[int64]*extenderWebRtcRelayListener{},
 		clientRecyclePattern: clientRecyclePattern,
 		newPeerDelta:         model.NewNetworkPeerDelta,
 	}
@@ -132,7 +128,6 @@ func (self *keyEventSubscriber) patterns(db int) []string {
 		model.StreamHopsKeyEventPattern(db),
 		model.ClientRemovedKeyEventPattern(db),
 		model.ClientCloseKeyEventPattern(db),
-		model.ExtenderWebRtcOfferKeyEventPattern(db),
 	}
 	if self.clientRecyclePattern {
 		patterns = append(patterns, model.ClientRecycleKeyEventPattern(db))
@@ -208,29 +203,6 @@ func (self *keyEventSubscriber) AddCloseListener(clientId server.Id, listener *c
 	}
 }
 
-// AddWebRtcRelayListener registers a resident client's relay of webrtc
-// extender carrier offers for key-event kicks (connect/EXTENDER.md S8).
-func (self *keyEventSubscriber) AddWebRtcRelayListener(clientId server.Id, listener *extenderWebRtcRelayListener) (remove func()) {
-	self.stateLock.Lock()
-	defer self.stateLock.Unlock()
-	listenerId := self.nextListenerId
-	self.nextListenerId += 1
-	listeners, ok := self.webRtcRelayListeners[clientId]
-	if !ok {
-		listeners = map[int64]*extenderWebRtcRelayListener{}
-		self.webRtcRelayListeners[clientId] = listeners
-	}
-	listeners[listenerId] = listener
-	return func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		delete(listeners, listenerId)
-		if len(listeners) == 0 {
-			delete(self.webRtcRelayListeners, clientId)
-		}
-	}
-}
-
 // SetClientRemoved sets what a client's removed event runs. It must not block.
 func (self *keyEventSubscriber) SetClientRemoved(clientRemoved func(server.Id)) {
 	self.stateLock.Lock()
@@ -255,37 +227,6 @@ func (self *keyEventSubscriber) resyncCloseListeners() {
 		self.stateLock.Lock()
 		defer self.stateLock.Unlock()
 		for _, clientListeners := range self.closeListeners {
-			for _, listener := range clientListeners {
-				listeners = append(listeners, listener)
-			}
-		}
-	}()
-	if len(listeners) == 0 {
-		return
-	}
-	spacing := self.settings.ResyncSpreadTimeout / time.Duration(len(listeners))
-	go server.HandleError(func() {
-		for _, listener := range listeners {
-			listener.Kick()
-			select {
-			case <-self.ctx.Done():
-				return
-			case <-time.After(spacing):
-			}
-		}
-	})
-}
-
-// Kicks every webrtc relay listener, trickled over the resync spread, as the
-// close listeners are: an offer added while unsubscribed has no event of its
-// own. An offer lives seconds, so most such kicks find nothing; a kick starts
-// a worker only for that pass (extenderWebRtcRelayListener).
-func (self *keyEventSubscriber) resyncWebRtcRelayListeners() {
-	listeners := []*extenderWebRtcRelayListener{}
-	func() {
-		self.stateLock.Lock()
-		defer self.stateLock.Unlock()
-		for _, clientListeners := range self.webRtcRelayListeners {
 			for _, listener := range clientListeners {
 				listeners = append(listeners, listener)
 			}
@@ -454,24 +395,6 @@ func (self *keyEventSubscriber) dispatch(channel string, event string) {
 		}
 		return
 	}
-	if clientId, ok := model.ParseExtenderWebRtcOfferKeyEvent(channel); ok {
-		// a take (spop), the set emptying (del) and the ttl are the
-		// listener's own work or no offer at all
-		if event == "sadd" {
-			listeners := []*extenderWebRtcRelayListener{}
-			func() {
-				self.stateLock.Lock()
-				defer self.stateLock.Unlock()
-				for _, listener := range self.webRtcRelayListeners[clientId] {
-					listeners = append(listeners, listener)
-				}
-			}()
-			for _, listener := range listeners {
-				listener.Kick()
-			}
-		}
-		return
-	}
 	if networkId, clientId, ok := model.ParseNetworkPeerKeyEvent(channel); ok {
 		switch event {
 		case "set", "del", "expired":
@@ -556,7 +479,6 @@ func (self *keyEventSubscriber) run() {
 		keyEventResubscribes.Inc()
 		self.resyncAll()
 		self.resyncCloseListeners()
-		self.resyncWebRtcRelayListeners()
 
 		drain := func() {
 			defer unsub()

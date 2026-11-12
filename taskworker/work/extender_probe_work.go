@@ -26,11 +26,11 @@ import (
 //
 // Every five minutes each active address is dialed over the required paths it
 // was accepted on -- its tcp carrier, or its webrtc carrier through the
-// signaling relay, or both, webrtc beside tcp once tcp has failed or been slow
-// to pass -- with a fresh challenge (C2a; connect/EXTENDER.md S8). That is the whole liveness test: an address that
-// cannot sign bytes chosen now is not serving, whatever its record says. The
-// dial is the same one a client makes, so what passes here is what a client
-// can use.
+// signaling relay, or, for an address that lists both, tcp and then webrtc
+// only once tcp has failed -- with a fresh challenge (C2a; connect/EXTENDER.md
+// S8). That is the whole liveness test: an address that cannot sign bytes
+// chosen now is not serving, whatever its record says. The dial is the same
+// one a client makes, so what passes here is what a client can use.
 //
 // Removal is on consecutive failures, not on any failure and not on a sum. Six
 // in a row -- half an hour of being unreachable -- deactivates the address, and
@@ -92,32 +92,36 @@ const (
 	// time. An address left unprobed is the oldest probed of the next pass.
 	ExtenderProbeRecordReserve = 2 * time.Minute
 
-	// How long an address accepted on both required paths gives tcp before
-	// webrtc is probed beside it. A tcp probe that answers passes well within
-	// it, so a healthy address sends its extender's device no offer each
-	// pass, and one whose tcp port stopped answering, which waits out the
-	// budget, still leaves webrtc the activation's whole budget.
-	ExtenderProbeWebRtcHeadStart = ExtenderProbeAddressTimeout - controller.ExtenderActivateProbeTimeout
+	// How long the tcp challenge of an address that lists both required paths
+	// has before tcp is judged failed and webrtc is probed in its place
+	// (connect/EXTENDER.md S8). Webrtc is probed only once tcp has failed,
+	// never beside it (owner, 2026-11-12), as the activation runs it
+	// (controller.ExtenderActivateSettings.TcpChallengeTimeout): a tcp probe that
+	// answers passes well within this, so a healthy address sends its
+	// extender's device no offer, and one whose tcp port stopped answering
+	// still leaves webrtc the activation's whole budget of the address's.
+	ExtenderProbeTcpBeforeWebRtcTimeout = ExtenderProbeAddressTimeout - controller.ExtenderActivateProbeTimeout
 )
 
 // probeExtenderAddress probes one address over the required paths it was
 // accepted on (C2a, C3) and requires a challenge signature under the
 // extender's published key: the tcp carrier when the address lists it, the
 // webrtc carrier when it lists that (connect/EXTENDER.md S8), and, when it
-// lists both, tcp first and webrtc beside it once tcp has failed or not passed
-// within its head start, the address live while either answers. So an address
-// accepted on webrtc is never judged by a public tcp port it may not have, a
-// tcp port that stopped answering does not starve the webrtc probe of the
-// address budget, and a tcp port that answers costs no offer. An address that
-// lists neither is judged by tcp, as every address was before webrtc.
+// lists both, tcp first, its challenge cut at ExtenderProbeTcpBeforeWebRtcTimeout,
+// and webrtc only once tcp has failed, the address live while either answers.
+// So an address accepted on webrtc is never judged by a public tcp port it may
+// not have, a tcp port that stopped answering does not starve the webrtc
+// probe of the address budget, and a tcp port that answers costs no offer:
+// the two are never probed at once. An address that lists neither is judged
+// by tcp, as every address was before webrtc.
 //
 // It is a variable so a test can drive the task's accounting -- the failure
 // budget, the deactivation, the revocation -- deterministically, without
 // standing up an extender for every case and without waiting on real dials;
-// the two paths beneath it and the head start's timer are variables so a test
-// can prove which path an address is judged by, and when. Production never
-// replaces them; the real dials are proved against an in-process extender by
-// the activation tests, which run the same connect probes.
+// the two paths beneath it are variables so a test can prove which path an
+// address is judged by, and when. Production never replaces them; the real
+// dials are proved against an in-process extender by the activation tests,
+// which run the same connect probes.
 var probeExtenderAddress = func(
 	ctx context.Context,
 	target *model.NetworkExtenderProbeTarget,
@@ -139,70 +143,28 @@ var probeExtenderAddress = func(
 		})
 	}
 
-	// both, a staggered race: the first to pass ends the other, and the call
-	// returns once both have ended, so no probe outlives the address's place
-	// in the pass's concurrency
-	pathCtx, pathCancel := context.WithCancel(ctx)
-	defer pathCancel()
-	results := make(chan error, 2)
-	running := 0
-	start := func(probe func() error) {
-		running += 1
-		go func() {
-			results <- probeExtenderPath(probe)
-		}()
-	}
-	webRtcStarted := false
-	startWebRtc := func() {
-		if webRtcStarted || ctx.Err() != nil {
-			return
-		}
-		webRtcStarted = true
-		start(func() error {
-			return probeWebRtc(pathCtx, target, destinationHost)
-		})
-	}
-	start(func() error {
-		return probeTcp(pathCtx, target, serverName, destinationHost)
+	// both: tcp first, under its share, and webrtc in its place only once it
+	// has failed, under the rest of the address's budget
+	tcpCtx, tcpCancel := context.WithTimeout(ctx, ExtenderProbeTcpBeforeWebRtcTimeout)
+	tcpErr := probeExtenderPath(func() error {
+		return probeTcp(tcpCtx, target, serverName, destinationHost)
 	})
-	headStart, stopHeadStart := extenderProbeWebRtcHeadStart()
-	defer stopHeadStart()
-	passed := false
-	errs := []error{}
-	for 0 < running {
-		select {
-		case err := <-results:
-			running -= 1
-			switch {
-			case passed:
-				// the canceled path, joined
-			case err == nil:
-				passed = true
-				pathCancel()
-			default:
-				errs = append(errs, err)
-				startWebRtc()
-			}
-		case <-headStart:
-			headStart = nil
-			if !passed {
-				startWebRtc()
-			}
-		}
-	}
-	if passed {
+	tcpCancel()
+	if tcpErr == nil {
 		return nil
 	}
-	return errors.Join(errs...)
-}
-
-// The head start's timer, a channel that receives once it has elapsed and a
-// stop. It is a variable so a test can elapse it, or never, without waiting.
-var extenderProbeWebRtcHeadStart = func() (<-chan time.Time, func()) {
-	timer := time.NewTimer(ExtenderProbeWebRtcHeadStart)
-	return timer.C, func() {
-		timer.Stop()
+	if ctx.Err() != nil {
+		// the address's budget, or the pass, has ended: nothing is left to
+		// probe webrtc with
+		return tcpErr
 	}
+	webRtcErr := probeExtenderPath(func() error {
+		return probeWebRtc(ctx, target, destinationHost)
+	})
+	if webRtcErr == nil {
+		return nil
+	}
+	return errors.Join(tcpErr, webRtcErr)
 }
 
 // One path's probe, a panic in which fails that path alone rather than the

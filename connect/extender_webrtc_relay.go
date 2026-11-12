@@ -3,9 +3,11 @@
 //
 // The operator's prober runs in api and taskworker processes, which have no
 // path to the exchange resident holding an extender's client. So the prober
-// posts its offer to the client's Redis offer set, and the process hosting
-// the resident takes it on the set's key event and relays it the way a peers
-// update reaches the client: from the resident's internal client, whose id is
+// posts its offer to the client's Redis offer set and wakes the process
+// hosting the resident on that process's own offer channel
+// (extender_webrtc_offer_wakes.go), and the process takes the offer and
+// relays it the way a peers update reaches the client: from the resident's
+// internal client, whose id is
 // the control id, as the flagged `ExchangeSignals` the client's manager routes
 // to its extender answerer (connect net_extender_webrtc_signal.go). The
 // answer comes back on the client's exchange connection to the same internal
@@ -140,8 +142,9 @@ type extenderWebRtcRelayExchange func(ctx context.Context, offer webrtc.SessionD
 // relays them one at a time. Every resident registers one, and almost none
 // of their clients is an extender, so the listener holds no goroutine while
 // idle: a kick starts a worker when none runs, kicks coalesce while it runs,
-// and it ends once a pass finds no kick waiting. The key-event dispatch never
-// blocks on it. Kick and CloseAndWait are safe for concurrent use.
+// and it ends once a pass finds no kick waiting. The offer channel's reader
+// (extender_webrtc_offer_wakes.go) never blocks on it. Kick and CloseAndWait
+// are safe for concurrent use.
 type extenderWebRtcRelayListener struct {
 	ctx      context.Context
 	cancel   context.CancelFunc

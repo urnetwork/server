@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/urnetwork/connect"
@@ -20,15 +21,12 @@ import (
 // fakes here, so nothing dials and nothing reads the database; the task's
 // accounting over probeExtenderAddress is extender_probe_work_test.go's.
 
-// Replaces the two paths and the head start's timer for one test, logging
-// which path ran. The head start elapses only when the test sends on
-// headStart; nil never elapses.
+// Replaces the two paths for one test, logging which path ran.
 type testUptimePaths struct {
 	stateLock sync.Mutex
 	ran       []string
 	tcp       func(ctx context.Context) error
 	webRtc    func(ctx context.Context) error
-	headStart chan time.Time
 }
 
 func (self *testUptimePaths) log(path string) {
@@ -46,15 +44,10 @@ func (self *testUptimePaths) paths() []string {
 func (self *testUptimePaths) install(t *testing.T) {
 	previousTcp := probeExtenderTcpAddress
 	previousWebRtc := probeExtenderWebRtcAddress
-	previousHeadStart := extenderProbeWebRtcHeadStart
 	t.Cleanup(func() {
 		probeExtenderTcpAddress = previousTcp
 		probeExtenderWebRtcAddress = previousWebRtc
-		extenderProbeWebRtcHeadStart = previousHeadStart
 	})
-	extenderProbeWebRtcHeadStart = func() (<-chan time.Time, func()) {
-		return self.headStart, func() {}
-	}
 	probeExtenderTcpAddress = func(ctx context.Context, target *model.NetworkExtenderProbeTarget, serverName string, destinationHost string) error {
 		self.log(connect.ExtenderCarrierTcp)
 		if self.tcp == nil {
@@ -85,8 +78,7 @@ func testUptimeTarget(carriers ...string) *model.NetworkExtenderProbeTarget {
 // accepted on webrtc, which has no public tcp port, would be deactivated in
 // half an hour. Observable: a webrtc-only address is judged by webrtc alone
 // and never dialed on tcp; a tcp address, and one that lists neither, by tcp
-// alone; and an address that lists both, whose tcp passes within its head
-// start, by tcp alone.
+// alone; and an address that lists both, whose tcp passes, by tcp alone.
 func TestExtenderUptimeProbesTheRequiredPathTheAddressWasAcceptedOn(t *testing.T) {
 	for _, c := range []struct {
 		carriers []string
@@ -109,45 +101,75 @@ func TestExtenderUptimeProbesTheRequiredPathTheAddressWasAcceptedOn(t *testing.T
 	}
 }
 
-// Root cause: an address accepted on both paths whose tcp port stopped
-// answering would wait out the address budget on tcp and leave webrtc none;
-// and probing both at once sent the extender's device an offer every pass
-// that a working tcp port made pointless, and returned with the losing probe
-// still running. Observable: webrtc is probed beside tcp once the head start
-// elapses with tcp unanswered, passes the address and ends the tcp probe,
-// and the call returns only once the tcp probe has ended; a tcp failure
-// within the head start probes webrtc at once; both failing fails the address
+// Root cause: an address accepted on both paths was probed over webrtc beside
+// a tcp probe that was still running and could still pass, which sent the
+// extender's device an offer and an ICE join that a working tcp port made
+// pointless; and a tcp port that stopped answering must not wait out the
+// address budget and leave webrtc none. Observable, on the bubble's clock: a
+// tcp probe that gets no answer is cut at its 5 s share and ended before the
+// webrtc probe starts, which then has the rest of the address budget and
+// passes the address; a tcp probe that is refused at once is followed by
+// webrtc at once; one that passes, however late within its share, is the
+// address's judgment and webrtc never runs; both failing fails the address
 // with both reasons; and a pass whose budget has ended starts no webrtc probe.
-func TestExtenderUptimeGivesTcpAHeadStartOnADualPathAddress(t *testing.T) {
+func TestExtenderUptimeProbesWebRtcOnlyOnceTcpFailed(t *testing.T) {
 	target := testUptimeTarget(connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc)
 
-	tcpEnded := make(chan error, 1)
-	silentTcp := &testUptimePaths{
-		headStart: make(chan time.Time, 1),
-	}
-	silentTcp.tcp = func(ctx context.Context) error {
-		// the head start elapses with tcp unanswered, and only the end of
-		// the probe ends it
-		silentTcp.headStart <- time.Time{}
-		<-ctx.Done()
-		tcpEnded <- ctx.Err()
-		return ctx.Err()
-	}
-	silentTcp.install(t)
-	if err := probeExtenderAddress(context.Background(), target, "spoof.example", "api.example"); err != nil {
-		t.Fatalf("err = %v, want the webrtc pass", err)
-	}
-	select {
-	case err := <-tcpEnded:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("the tcp probe ended with %v, want the pass to cancel it", err)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), ExtenderProbeAddressTimeout)
+		defer cancel()
+		start := time.Now()
+		var tcpEnd, webRtcStart time.Time
+		var tcpErr error
+		var webRtcLeft time.Duration
+		silentTcp := &testUptimePaths{}
+		silentTcp.tcp = func(ctx context.Context) error {
+			// a black-holed port: only the end of the probe ends it
+			<-ctx.Done()
+			tcpEnd = time.Now()
+			tcpErr = ctx.Err()
+			return ctx.Err()
 		}
-	default:
-		t.Fatal("the call returned with the tcp probe still running")
-	}
-	if ran := silentTcp.paths(); !slices.Equal(ran, []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc}) {
-		t.Fatalf("paths = %v, want tcp then webrtc", ran)
-	}
+		silentTcp.webRtc = func(ctx context.Context) error {
+			webRtcStart = time.Now()
+			deadline, _ := ctx.Deadline()
+			webRtcLeft = deadline.Sub(webRtcStart)
+			return nil
+		}
+		silentTcp.install(t)
+		if err := probeExtenderAddress(ctx, target, "spoof.example", "api.example"); err != nil {
+			t.Fatalf("err = %v, want the webrtc pass", err)
+		}
+		if !errors.Is(tcpErr, context.DeadlineExceeded) {
+			t.Fatalf("the tcp probe ended with %v, want its share to run out", tcpErr)
+		}
+		connect.AssertEqual(t, tcpEnd.Sub(start), ExtenderProbeTcpBeforeWebRtcTimeout)
+		if webRtcStart.Before(tcpEnd) {
+			t.Fatalf("the webrtc probe started at %s, beside a tcp probe that ended at %s", webRtcStart.Sub(start), tcpEnd.Sub(start))
+		}
+		connect.AssertEqual(t, webRtcLeft, ExtenderProbeAddressTimeout-ExtenderProbeTcpBeforeWebRtcTimeout)
+		if ran := silentTcp.paths(); !slices.Equal(ran, []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc}) {
+			t.Fatalf("paths = %v, want tcp then webrtc", ran)
+		}
+	})
+
+	synctest.Test(t, func(t *testing.T) {
+		start := time.Now()
+		lateTcp := &testUptimePaths{
+			tcp: func(ctx context.Context) error {
+				time.Sleep(ExtenderProbeTcpBeforeWebRtcTimeout - time.Millisecond)
+				return ctx.Err()
+			},
+		}
+		lateTcp.install(t)
+		if err := probeExtenderAddress(context.Background(), target, "spoof.example", "api.example"); err != nil {
+			t.Fatalf("err = %v, want the late tcp pass", err)
+		}
+		connect.AssertEqual(t, time.Since(start), ExtenderProbeTcpBeforeWebRtcTimeout-time.Millisecond)
+		if ran := lateTcp.paths(); !slices.Equal(ran, []string{connect.ExtenderCarrierTcp}) {
+			t.Fatalf("paths = %v, want tcp alone", ran)
+		}
+	})
 
 	refusedTcp := &testUptimePaths{
 		tcp: func(ctx context.Context) error {
@@ -156,7 +178,7 @@ func TestExtenderUptimeGivesTcpAHeadStartOnADualPathAddress(t *testing.T) {
 	}
 	refusedTcp.install(t)
 	if err := probeExtenderAddress(context.Background(), target, "spoof.example", "api.example"); err != nil {
-		t.Fatalf("err = %v, want the webrtc pass without the head start", err)
+		t.Fatalf("err = %v, want the webrtc pass at once", err)
 	}
 	if ran := refusedTcp.paths(); !slices.Equal(ran, []string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc}) {
 		t.Fatalf("paths = %v, want tcp then webrtc", ran)

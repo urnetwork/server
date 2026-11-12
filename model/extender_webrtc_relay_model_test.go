@@ -17,25 +17,28 @@ import (
 // extender accepted on webrtc alone out of what a client reaches the operator
 // by.
 
-func TestExtenderWebRtcOfferKeyEvents(t *testing.T) {
+// Root cause: every exchange process found its residents' offers by matching
+// a `{*}w_offer` pattern against the keyspace notification of every set on
+// Main. Observable: an offer's wake goes to the one channel of the exchange
+// process its client's resident registration names, and carries the client
+// id alone.
+func TestExtenderWebRtcOfferWakesNameTheResidentsProcess(t *testing.T) {
 	clientId := server.NewId()
-	channel := "__keyspace@0__:" + extenderWebRtcOfferKey(clientId)
-	if parsed, ok := ParseExtenderWebRtcOfferKeyEvent(channel); !ok || parsed != clientId {
-		t.Fatalf("offer channel parsed to %s %t", parsed, ok)
+	resident := &NetworkClientResident{
+		ClientId:        clientId,
+		ResidentHost:    "edge-0",
+		ResidentService: "connect",
+		ResidentBlock:   "g3",
 	}
-	// each parser accepts only its own suffix
-	if _, ok := ParseExtenderWebRtcOfferKeyEvent("__keyspace@0__:" + clientCloseKey(clientId)); ok {
-		t.Fatal("the offer parser accepted a close channel")
+	connect.AssertEqual(t, ExtenderWebRtcOfferChannelForResident(resident), "extender_webrtc_offer_edge-0_connect_g3")
+	connect.AssertEqual(t, ExtenderWebRtcOfferChannel("edge-0", "connect", "g4") == ExtenderWebRtcOfferChannelForResident(resident), false)
+	if parsed, ok := ParseExtenderWebRtcOfferWake(clientId.String()); !ok || parsed != clientId {
+		t.Fatalf("wake parsed to %s %t", parsed, ok)
 	}
-	if _, ok := ParseClientCloseKeyEvent(channel); ok {
-		t.Fatal("the close parser accepted an offer channel")
-	}
-	// an answer list is no offer set
-	if _, ok := ParseExtenderWebRtcOfferKeyEvent("__keyspace@0__:" + extenderWebRtcAnswerKey(clientId, server.NewId())); ok {
-		t.Fatal("the offer parser accepted an answer list")
-	}
-	if ExtenderWebRtcOfferKeyEventPattern(3) != "__keyspace@3__:{*}w_offer" {
-		t.Fatalf("offer pattern %s", ExtenderWebRtcOfferKeyEventPattern(3))
+	for _, payload := range []string{"", "not-an-id", extenderWebRtcOfferKey(clientId)} {
+		if _, ok := ParseExtenderWebRtcOfferWake(payload); ok {
+			t.Fatalf("the wake %q parsed", payload)
+		}
 	}
 	// both keys of a client share its slot
 	connect.AssertEqual(t, extenderWebRtcOfferKey(clientId)[:38], extenderWebRtcAnswerKey(clientId, server.NewId())[:38])
@@ -247,5 +250,79 @@ func TestWebRtcOnlyExtendersAreNoFirstContact(t *testing.T) {
 		if !found {
 			t.Fatal("the webrtc-only address is not probed for uptime")
 		}
+	})
+}
+
+// Root cause: nothing counted the extenders the operator accepted on the
+// webrtc carrier without tcp, so nothing could cap them (controller
+// ExtenderActivateSettings.MaxWebRtcOnlyExtenders). Observable: the count is
+// of active extenders with an active address that lists webrtc and not tcp --
+// one listing webrtc beside quic counts, one listing tcp beside webrtc, a tcp
+// one, an inactive address and an inactive extender do not -- each extender
+// once however many such addresses it has, and the extender of the key left
+// out is not counted.
+func TestCountActiveWebRtcOnlyNetworkExtenders(t *testing.T) {
+	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		ctx := context.Background()
+		networkId := server.NewId()
+		baseTime := server.NowUtc().Add(-time.Hour)
+		connect.AssertEqual(t, CountActiveWebRtcOnlyNetworkExtenders(ctx, nil), 0)
+
+		newExtender := func(i int, active bool, addresses ...*NetworkExtenderAddress) []byte {
+			publicKey := []byte(fmt.Sprintf("extender-public-key-webrtc-only-%05d", i))
+			Testing_CreateNetworkExtender(
+				ctx,
+				&NetworkExtender{
+					ExtenderId:  server.NewId(),
+					NetworkId:   networkId,
+					ClientId:    server.NewId(),
+					PublicKey:   publicKey,
+					CreateTime:  baseTime,
+					TcpPort:     443,
+					UdpPort:     443,
+					DnsPort:     53,
+					DnsTld:      connect.DefaultExtenderDnsTld,
+					CountryCode: "US",
+					Active:      active,
+				},
+				addresses,
+			)
+			return publicKey
+		}
+		address := func(ip string, active bool, carriers ...string) *NetworkExtenderAddress {
+			addr := netip.MustParseAddr(ip)
+			ipVersion := 4
+			if addr.Is6() {
+				ipVersion = 6
+			}
+			return &NetworkExtenderAddress{
+				IpVersion:    ipVersion,
+				Ip:           addr,
+				Carriers:     carriers,
+				ActivateTime: baseTime,
+				Active:       active,
+			}
+		}
+		// two webrtc-only addresses, counted once
+		bothFamiliesKey := newExtender(
+			0,
+			true,
+			address("192.0.2.210", true, connect.ExtenderCarrierWebRtc),
+			address("2001:db8::210", true, connect.ExtenderCarrierWebRtc),
+		)
+		newExtender(1, true, address("192.0.2.211", true, connect.ExtenderCarrierWebRtc, connect.ExtenderCarrierQuic))
+		newExtender(2, true, address("192.0.2.212", true, connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc))
+		newExtender(3, true, address("192.0.2.213", true, connect.ExtenderCarrierTcp))
+		newExtender(4, true, address("192.0.2.214", false, connect.ExtenderCarrierWebRtc))
+		newExtender(5, false, address("192.0.2.215", true, connect.ExtenderCarrierWebRtc))
+
+		connect.AssertEqual(t, CountActiveWebRtcOnlyNetworkExtenders(ctx, nil), 2)
+		connect.AssertEqual(t, CountActiveWebRtcOnlyNetworkExtenders(ctx, bothFamiliesKey), 1)
+		connect.AssertEqual(t, CountActiveWebRtcOnlyNetworkExtenders(ctx, []byte("extender-public-key-none")), 2)
+
+		connect.AssertEqual(t, ExtenderAddressWebRtcOnly([]string{connect.ExtenderCarrierWebRtc}), true)
+		connect.AssertEqual(t, ExtenderAddressWebRtcOnly([]string{connect.ExtenderCarrierWebRtc, connect.ExtenderCarrierQuic}), true)
+		connect.AssertEqual(t, ExtenderAddressWebRtcOnly([]string{connect.ExtenderCarrierTcp, connect.ExtenderCarrierWebRtc}), false)
+		connect.AssertEqual(t, ExtenderAddressWebRtcOnly([]string{connect.ExtenderCarrierQuic}), false)
 	})
 }

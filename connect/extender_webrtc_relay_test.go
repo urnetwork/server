@@ -4,14 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/pion/webrtc/v4"
+	"github.com/redis/go-redis/v9"
 
 	connectlib "github.com/urnetwork/connect"
 
@@ -423,64 +423,152 @@ func TestDefaultExtenderWebRtcRelaySettings(t *testing.T) {
 	_ = connectlib.ControlId
 }
 
-// Whether the subscriber holds a relay listener for the client.
-func (self *keyEventSubscriber) testingHasWebRtcRelayListener(clientId server.Id) bool {
+// Whether the wakes hold a relay listener for the client.
+func (self *extenderWebRtcOfferWakes) testingHasListener(clientId server.Id) bool {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()
-	return 0 < len(self.webRtcRelayListeners[clientId])
+	return 0 < len(self.listeners[clientId])
 }
 
-// Root cause: an offer the prober posts has no way to the resident unless a
-// key event reaches its listener (S8). Observable: the subscriber psubscribes
-// the offer sets' channel, an sadd on a client's offer set kicks that
-// client's listener alone, and the take's own spop does not kick it again.
-func TestKeyEventSubscriberKicksTheWebRtcRelayListenerOnAnOffer(t *testing.T) {
-	if !slices.Contains((&keyEventSubscriber{}).patterns(3), model.ExtenderWebRtcOfferKeyEventPattern(3)) {
-		t.Fatal("the subscriber does not subscribe the webrtc offer sets")
+// Root cause: every exchange process found its residents' offers by matching
+// a `{*}w_offer` pattern against the keyspace notification of every set on
+// Main. Observable: the key event subscriber psubscribes no offer key; the
+// offers wake a process on its own channel (extender_webrtc_offer_wakes.go).
+func TestKeyEventSubscriberMatchesNoWebRtcOfferKey(t *testing.T) {
+	for _, recycle := range []bool{false, true} {
+		for _, pattern := range (&keyEventSubscriber{clientRecyclePattern: recycle}).patterns(3) {
+			if strings.Contains(pattern, "w_offer") {
+				t.Fatalf("the key event subscriber psubscribes %s", pattern)
+			}
+		}
 	}
+}
 
-	settings := DefaultExtenderWebRtcRelaySettings()
-	listener, store, exchange := newTestWebRtcRelayListener(t, settings, nil)
-	otherListener, otherStore, otherExchange := newTestWebRtcRelayListener(t, settings, nil)
-	subscriber := &keyEventSubscriber{
-		ctx:                  context.Background(),
-		webRtcRelayListeners: map[server.Id]map[int64]*extenderWebRtcRelayListener{},
-	}
-	removeListener := subscriber.AddWebRtcRelayListener(listener.clientId, listener)
-	defer removeListener()
-	removeOtherListener := subscriber.AddWebRtcRelayListener(otherListener.clientId, otherListener)
-	defer removeOtherListener()
+// One synthetic socket of the offer channel's shard subscription.
+type testWebRtcOfferWakeSocket struct {
+	channel   string
+	events    chan any
+	closed    chan struct{}
+	closeOnce sync.Once
+}
 
-	offer := testWebRtcRelayOffer(t, 5*time.Second)
-	store.add(offer)
-	otherStore.add(testWebRtcRelayOffer(t, 5*time.Second))
-	channel := fmt.Sprintf("__keyspace@0__:{%s}w_offer", listener.clientId)
-	// the take's spop and the set's ttl are no new offer
-	subscriber.dispatch(channel, "spop")
-	subscriber.dispatch(channel, "expire")
-	listener.workers.Wait()
-	if exchange.offerCount() != 0 {
-		t.Fatal("an event that adds no offer kicked the listener")
+func (self *testWebRtcOfferWakeSocket) ReceiveTimeout(ctx context.Context, timeout time.Duration) (any, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-self.closed:
+		return nil, errors.New("synthetic socket closed")
+	case event := <-self.events:
+		return event, nil
+	case <-time.After(timeout):
+		return nil, context.DeadlineExceeded
 	}
-	subscriber.dispatch(channel, "sadd")
-	store.waitPosted(t, 1)
-	if answer := store.answer(offer.RequestId); answer == nil || answer.Error != "" {
-		t.Fatalf("answer = %+v", answer)
-	}
-	otherListener.workers.Wait()
-	if otherExchange.offerCount() != 0 {
-		t.Fatal("one client's offer kicked another client's listener")
-	}
+}
 
-	// a removed listener is kicked no more
-	removeListener()
-	store.add(testWebRtcRelayOffer(t, 5*time.Second))
-	subscriber.dispatch(channel, "sadd")
-	listener.workers.Wait()
-	if exchange.offerCount() != 1 {
-		t.Fatalf("offers relayed = %d after the listener was removed, want 1", exchange.offerCount())
-	}
-	if subscriber.testingHasWebRtcRelayListener(listener.clientId) {
-		t.Fatal("the removed listener is still registered")
-	}
+func (self *testWebRtcOfferWakeSocket) SSubscribe(context.Context, ...string) error {
+	return nil
+}
+
+func (self *testWebRtcOfferWakeSocket) Ping(context.Context, ...string) error {
+	self.events <- &redis.Pong{}
+	return nil
+}
+
+func (self *testWebRtcOfferWakeSocket) Close() error {
+	self.closeOnce.Do(func() { close(self.closed) })
+	return nil
+}
+
+// The offers' wakes (connect/EXTENDER.md S8): the process's own channel,
+// subscribed with its first listener; a start of the subscription kicks every
+// listener, a wake kicks the named client's alone, a wake that names no
+// client or comes on another channel kicks none, and a removed listener is
+// woken no more.
+func TestExtenderWebRtcOfferWakesKickTheNamedClient(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		channel := model.ExtenderWebRtcOfferChannel("synthetic-exchange", "connect", "g1")
+		opened := make(chan *testWebRtcOfferWakeSocket, 4)
+		source := &server.RedisShardSubscriptionSource{
+			Open: func(ctx context.Context, channel string) (server.RedisShardSubscription, error) {
+				socket := &testWebRtcOfferWakeSocket{channel: channel, events: make(chan any, 64), closed: make(chan struct{})}
+				opened <- socket
+				return socket, nil
+			},
+		}
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		wakes := newExtenderWebRtcOfferWakes(ctx, channel, server.DefaultRedisShardSubscriptionSettings(), source, time.Second)
+		synctest.Wait()
+		select {
+		case <-opened:
+			t.Fatal("the wakes subscribed with no listener")
+		default:
+		}
+
+		settings := DefaultExtenderWebRtcRelaySettings()
+		listener, store, exchange := newTestWebRtcRelayListener(t, settings, nil)
+		other, otherStore, otherExchange := newTestWebRtcRelayListener(t, settings, nil)
+		// offers added before there was any subscription
+		first, otherFirst := testWebRtcRelayOffer(t, 5*time.Second), testWebRtcRelayOffer(t, 5*time.Second)
+		store.add(first)
+		otherStore.add(otherFirst)
+		removeListener := wakes.AddListener(listener.clientId, listener)
+		removeOther := wakes.AddListener(other.clientId, other)
+		defer removeOther()
+		synctest.Wait()
+		var socket *testWebRtcOfferWakeSocket
+		select {
+		case socket = <-opened:
+		default:
+			t.Fatal("the first listener opened no subscription")
+		}
+		if socket.channel != channel {
+			t.Fatalf("subscribed %s, want the process's own %s", socket.channel, channel)
+		}
+
+		// the start of the subscription kicks every listener
+		socket.events <- &redis.Subscription{Kind: "ssubscribe", Channel: channel, Count: 1}
+		synctest.Wait()
+		time.Sleep(time.Second)
+		synctest.Wait()
+		store.waitPosted(t, 1)
+		otherStore.waitPosted(t, 1)
+		if store.answer(first.RequestId) == nil || otherStore.answer(otherFirst.RequestId) == nil {
+			t.Fatal("the start of the subscription left an offer untaken")
+		}
+
+		// a wake kicks the named client alone
+		second, otherSecond := testWebRtcRelayOffer(t, 5*time.Second), testWebRtcRelayOffer(t, 5*time.Second)
+		store.add(second)
+		otherStore.add(otherSecond)
+		socket.events <- &redis.Message{Channel: channel, Payload: listener.clientId.String()}
+		synctest.Wait()
+		store.waitPosted(t, 1)
+		if answer := store.answer(second.RequestId); answer == nil || answer.Error != "" {
+			t.Fatalf("answer = %+v", answer)
+		}
+		if otherExchange.offerCount() != 1 {
+			t.Fatalf("another client's offers relayed = %d, want only its first", otherExchange.offerCount())
+		}
+
+		// a wake that names no client, or comes on another channel, kicks none
+		socket.events <- &redis.Message{Channel: channel, Payload: "not-a-client-id"}
+		socket.events <- &redis.Message{Channel: model.ExtenderWebRtcOfferChannel("synthetic-exchange", "connect", "g2"), Payload: other.clientId.String()}
+		synctest.Wait()
+		if otherExchange.offerCount() != 1 {
+			t.Fatalf("a wake for no one relayed another client's offer: %d", otherExchange.offerCount())
+		}
+
+		// a removed listener is woken no more
+		removeListener()
+		store.add(testWebRtcRelayOffer(t, 5*time.Second))
+		socket.events <- &redis.Message{Channel: channel, Payload: listener.clientId.String()}
+		synctest.Wait()
+		if exchange.offerCount() != 2 {
+			t.Fatalf("offers relayed = %d after the listener was removed, want 2", exchange.offerCount())
+		}
+		if wakes.testingHasListener(listener.clientId) {
+			t.Fatal("the removed listener is still registered")
+		}
+	})
 }

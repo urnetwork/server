@@ -16,6 +16,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/urnetwork/connect"
+	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -43,8 +44,12 @@ import (
 //
 // The probe's ICE gathers on one family, the activation's or the address's
 // (WebRtcSettings.IceIpVersion), since the extender's forward follows the
-// family of the pair it was reached on (A7), and its checks go to at most
-// MaxAnswerCandidateCount of the answer's candidates.
+// family of the pair it was reached on (A7). Its checks go only to the
+// answer's candidates on the address being tested -- the activation's source
+// address, or the address an uptime probe judges, by its /32 or the /64 of an
+// ipv6 one, as the camouflage and attribution rules compare an extender's
+// address -- and to at most MaxAnswerCandidateCount of those, so an answer
+// cannot point this host's checks anywhere else.
 
 // ErrExtenderWebRtcSignalingUnavailable is the webrtc test of an operator
 // with no signaling path to the extender.
@@ -86,11 +91,11 @@ type ExtenderWebRtcProbeSettings struct {
 	// it takes, as the relay bounds them
 	MaxOfferByteCount  int
 	MaxAnswerByteCount int
-	// the most of an answer's public candidates this host's ICE checks go
-	// to; the rest, and every candidate that is not a public address, are
-	// dropped before the answer applies. An answer names its candidates, so
-	// without a bound one answer could point this host's checks at as many
-	// addresses as fit in it.
+	// the most of an answer's candidates on the tested address this host's
+	// ICE checks go to; the rest, and every candidate on any other address,
+	// are dropped before the answer applies. An answer names its candidates,
+	// so without the bound and the address one answer could point this host's
+	// checks at as many addresses as fit in it.
 	MaxAnswerCandidateCount int
 }
 
@@ -108,10 +113,16 @@ func DefaultExtenderWebRtcProbeSettings() *ExtenderWebRtcProbeSettings {
 
 var defaultExtenderWebRtcProbeSettings = sync.OnceValue(DefaultExtenderWebRtcProbeSettings)
 
-// What the prober's exchanger signals through: the relay's Redis keys and
-// the resident registry in production, a fake in a test.
+// What the prober's exchanger signals through: the relay's Redis keys, the
+// resident registry and the exchange processes' offer channels in
+// production, a fake in a test.
 type extenderWebRtcProbeRelay interface {
-	clientConnected(ctx context.Context, clientId server.Id) bool
+	// the offer channel of the exchange process holding the client's
+	// resident, and whether the client has one
+	clientResident(ctx context.Context, clientId server.Id) (channel string, ok bool)
+	// wakes that process for the client's pending offers. Advisory: a lost
+	// wake leaves the offer to the process's resync takes or to expire
+	wake(ctx context.Context, channel string, clientId server.Id)
 	addOffer(
 		ctx context.Context,
 		clientId server.Id,
@@ -132,9 +143,19 @@ type extenderWebRtcProbeRedisRelay struct{}
 
 // A client is connected when it has a resident (model.GetResidentForClient),
 // which is where the platform locates a client: the resident's registration
-// names the exchange process holding it.
-func (extenderWebRtcProbeRedisRelay) clientConnected(ctx context.Context, clientId server.Id) bool {
-	return model.GetResidentForClient(ctx, clientId, 0) != nil
+// names the exchange process holding it, whose offer channel this is.
+func (extenderWebRtcProbeRedisRelay) clientResident(ctx context.Context, clientId server.Id) (string, bool) {
+	resident := model.GetResidentForClient(ctx, clientId, 0)
+	if resident == nil {
+		return "", false
+	}
+	return model.ExtenderWebRtcOfferChannelForResident(resident), true
+}
+
+func (extenderWebRtcProbeRedisRelay) wake(ctx context.Context, channel string, clientId server.Id) {
+	if err := model.PublishExtenderWebRtcOffer(ctx, channel, clientId); err != nil {
+		glog.Infof("[extender]webrtc offer wake for %s not published = %s\n", clientId, err)
+	}
 }
 
 func (extenderWebRtcProbeRedisRelay) addOffer(
@@ -161,9 +182,13 @@ func (extenderWebRtcProbeRedisRelay) waitAnswer(
 }
 
 // The exchanger of one probe (connect.WebRtcExtenderOfferExchanger): its one
-// offer to the one extender client it was built for.
+// offer to the one extender client it was built for, whose answer's
+// candidates it keeps to the tested address.
 type extenderWebRtcRelayExchanger struct {
 	clientId server.Id
+	// the address being tested: the activation's source address, or the
+	// address an uptime probe judges
+	testedIp netip.Addr
 	settings *ExtenderWebRtcProbeSettings
 	relay    extenderWebRtcProbeRelay
 	now      func() time.Time
@@ -198,7 +223,8 @@ func (self *extenderWebRtcRelayExchanger) exchangeOffer(
 			self.settings.MaxOfferByteCount,
 		)
 	}
-	if !self.relay.clientConnected(ctx, self.clientId) {
+	channel, connected := self.relay.clientResident(ctx, self.clientId)
+	if !connected {
 		return webrtc.SessionDescription{}, ErrExtenderWebRtcClientNotConnected
 	}
 
@@ -230,6 +256,7 @@ func (self *extenderWebRtcRelayExchanger) exchangeOffer(
 	if !added {
 		return webrtc.SessionDescription{}, ErrExtenderWebRtcOffersPending
 	}
+	self.relay.wake(ctx, channel, self.clientId)
 	relayAnswer, ok := self.relay.waitAnswer(ctx, self.clientId, relayOffer.RequestId, wait)
 	if !ok {
 		// a resident that never took the offer must not relay it later, to a
@@ -258,16 +285,21 @@ func (self *extenderWebRtcRelayExchanger) exchangeOffer(
 	if err := json.Unmarshal([]byte(relayAnswer.Answer), &answer); err != nil || answer.Type != webrtc.SDPTypeAnswer {
 		return webrtc.SessionDescription{}, fmt.Errorf("the webrtc answer is not an answer")
 	}
-	answer.SDP = boundExtenderWebRtcAnswerCandidates(answer.SDP, self.settings.MaxAnswerCandidateCount)
+	answer.SDP = boundExtenderWebRtcAnswerCandidates(answer.SDP, self.testedIp, self.settings.MaxAnswerCandidateCount)
 	return answer, nil
 }
 
-// The candidate lines of an answer this host's ICE checks may go to: public
-// addresses only, at most maxCandidateCount of them, in the answer's own
-// order. Every other line is kept as it is. connect's own filter, which the
-// carrier applies after this, is the stricter on what is public; this bounds
-// how many it can ever be given.
-func boundExtenderWebRtcAnswerCandidates(sdp string, maxCandidateCount int) string {
+// The candidate lines of an answer this host's ICE checks may go to: those on
+// the tested address alone -- its /32, or the /64 of an ipv6 address
+// (extenderCamouflageAddressPrefix), since a host behind nat answers from the
+// public address it activated from, and an ipv6 host may gather another
+// address of its /64 -- and public, at most maxCandidateCount of them, in the
+// answer's own order. Every other line is kept as it is. A tested address
+// that is not valid keeps no candidate. connect's own filter, which the
+// carrier applies after this, still keeps the checks off this host's own
+// addresses and links.
+func boundExtenderWebRtcAnswerCandidates(sdp string, testedIp netip.Addr, maxCandidateCount int) string {
+	testedPrefix := extenderCamouflageAddressPrefix(testedIp)
 	lines := strings.SplitAfter(sdp, "\n")
 	kept := make([]string, 0, len(lines))
 	candidateCount := 0
@@ -293,6 +325,9 @@ func boundExtenderWebRtcAnswerCandidates(sdp string, maxCandidateCount int) stri
 		if !addr.IsGlobalUnicast() || addr.IsPrivate() {
 			continue
 		}
+		if !testedPrefix.IsValid() || !testedPrefix.Contains(addr) {
+			continue
+		}
 		candidateCount += 1
 		kept = append(kept, line)
 	}
@@ -301,9 +336,9 @@ func boundExtenderWebRtcAnswerCandidates(sdp string, maxCandidateCount int) stri
 
 // The connect settings of one webrtc probe of one extender: the probe dial
 // settings with a carrier whose only extender is the one being proved,
-// signaled through the relay to its client, its ICE on ipVersion alone. The
-// close releases the carrier; a probe builds its own, so its sessions end
-// with it.
+// signaled through the relay to its client, its ICE on ipVersion alone and
+// its checks on testedIp alone. The close releases the carrier; a probe
+// builds its own, so its sessions end with it.
 func newExtenderWebRtcProbeConnectSettings(
 	ctx context.Context,
 	settings *ExtenderWebRtcProbeSettings,
@@ -311,9 +346,11 @@ func newExtenderWebRtcProbeConnectSettings(
 	clientId server.Id,
 	publicKey []byte,
 	ipVersion int,
+	testedIp netip.Addr,
 ) (*connect.ConnectSettings, func()) {
 	exchanger := &extenderWebRtcRelayExchanger{
 		clientId: clientId,
+		testedIp: testedIp,
 		settings: settings,
 		relay:    relay,
 		now:      time.Now,
@@ -337,7 +374,8 @@ func newExtenderWebRtcProbeConnectSettings(
 
 // The webrtc test of one activation (C2a): one dial over the carrier, which
 // challenges the extender and verifies its key before it is used, then the
-// verified `GET /hello` through it. Returns the caller address the api saw,
+// verified `GET /hello` through it, its checks on the activation's source
+// address alone. Returns the caller address the api saw,
 // whose family the activation checks. One dial rather than a carrier probe
 // and then a forward probe, since each dial is a signaling round trip and an
 // ICE join inside the one probe budget.
@@ -346,6 +384,7 @@ func probeExtenderWebRtcActivation(
 	clientId server.Id,
 	publicKey []byte,
 	ipVersion int,
+	sourceIp netip.Addr,
 	apiUrl string,
 	tlsConfig *tls.Config,
 ) (string, error) {
@@ -356,6 +395,7 @@ func probeExtenderWebRtcActivation(
 		clientId,
 		publicKey,
 		ipVersion,
+		sourceIp,
 	)
 	defer closeCarrier()
 	return connect.ProbeExtenderWebRtcForward(ctx, connectSettings, publicKey, apiUrl, tlsConfig)
@@ -376,6 +416,7 @@ func ProbeExtenderWebRtcUptime(
 		target.ClientId,
 		target.PublicKey,
 		target.IpVersion,
+		target.Ip,
 	)
 	defer closeCarrier()
 	_, err := connect.ProbeExtenderWebRtcCarrier(

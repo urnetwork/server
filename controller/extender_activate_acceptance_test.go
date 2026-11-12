@@ -32,6 +32,10 @@ const (
 // as an activation passes them on.
 var testAcceptanceDnsPorts = []int{53, 4053}
 
+// The tcp challenge's share of an activation that offers webrtc beside tcp,
+// the operator's default (ExtenderActivateSettings.TcpChallengeTimeout).
+var testActivationTcpChallengeTimeout = DefaultExtenderActivateSettings().TcpChallengeTimeout
+
 // Fake probes that answer from a table, and log each probe in the order it
 // was made as "<carrier>:<port>" or "forward".
 type testActivationProbes struct {
@@ -129,6 +133,7 @@ func (self *testActivationProbes) judge(ctx context.Context, carriers ...string)
 		ctx,
 		self.clock.activationClock(),
 		self.activationProbes(),
+		testActivationTcpChallengeTimeout,
 		carriers,
 		testAcceptanceTcpPort,
 		testAcceptanceUdpPort,

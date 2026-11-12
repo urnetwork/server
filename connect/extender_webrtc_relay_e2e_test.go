@@ -88,7 +88,7 @@ func testExchangeRelaysAWebRtcOfferToTheClient(t *testing.T, delivery localDeliv
 		// close-request listener registers just before it, in the same
 		// block, so its own first take marks the relay's registration
 		if !waitFor(ctx, 10*time.Second, func() bool {
-			return env.exchange.keyEventSubscriber.testingHasWebRtcRelayListener(clientIdA)
+			return env.exchange.extenderWebRtcOfferWakes.testingHasListener(clientIdA)
 		}) {
 			t.Fatal("client a's resident registered no webrtc relay listener")
 		}
@@ -104,6 +104,20 @@ func testExchangeRelaysAWebRtcOfferToTheClient(t *testing.T, delivery localDeliv
 		}
 		if _, added := model.AddExtenderWebRtcOffer(ctx, clientIdA, relayOffer, 2, 30*time.Second); !added {
 			t.Fatal("the offer was not added")
+		}
+		// the prober's wake, on the channel of the process client a's resident
+		// registration names. A wake published before the process's
+		// subscription is acknowledged is gone, and the acknowledgement's
+		// resync takes the offer instead
+		resident := model.GetResidentForClient(ctx, clientIdA, 0)
+		if resident == nil {
+			t.Fatal("client a's resident is not registered")
+		}
+		if channel := model.ExtenderWebRtcOfferChannelForResident(resident); channel != env.exchange.extenderWebRtcOfferWakes.channel {
+			t.Fatalf("the registration names %s, the exchange subscribes %s", channel, env.exchange.extenderWebRtcOfferWakes.channel)
+		}
+		if err := model.PublishExtenderWebRtcOffer(ctx, model.ExtenderWebRtcOfferChannelForResident(resident), clientIdA); err != nil {
+			t.Fatal(err)
 		}
 		answer, ok := model.WaitExtenderWebRtcAnswer(ctx, clientIdA, relayOffer.RequestId, 10*time.Second)
 		if !ok {
@@ -132,8 +146,9 @@ func testExchangeRelaysAWebRtcOfferToTheClient(t *testing.T, delivery localDeliv
 			t.Fatalf("%d offers were left behind", len(pending))
 		}
 
-		// a client with no resident has nothing to relay its offers: they stay
-		// pending and nobody answers, and client a is not asked
+		// a client with no resident has nothing to relay its offers, and no
+		// channel for the prober to wake: they stay pending and nobody
+		// answers, and client a is not asked
 		otherOffer := &model.ExtenderWebRtcOffer{
 			RequestId:    server.NewId(),
 			ExpireTimeMs: time.Now().Add(8 * time.Second).UnixMilli(),

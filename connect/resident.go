@@ -866,6 +866,9 @@ type Exchange struct {
 	// the webrtc extender carrier offers this exchange's residents relay at
 	// once, over all of them (ExtenderWebRtcRelaySettings.MaxConcurrentRelays)
 	extenderWebRtcRelaySlots chan struct{}
+	// the wakes of the residents' relays: this process's own offer channel,
+	// set exactly when keyEventSubscriber is (extender_webrtc_offer_wakes.go)
+	extenderWebRtcOfferWakes *extenderWebRtcOfferWakes
 
 	// set once `Drain` starts. While draining, new connections are refused
 	// (`ConnectHandler.Connect` 503s and `NominateLocalResident` declines) so
@@ -999,6 +1002,15 @@ func newExchange(
 		// residents register their listeners with it in `Resident.Run`
 		exchange.keyEventSubscriber = newKeyEventSubscriber(cancelCtx, &settings.KeyEventDelivery, settings.EnableStuckProviderRecycle)
 		exchange.keyEventSubscriber.SetClientRemoved(exchange.handleClientRemoved)
+		// the residents' webrtc offers wake this process on its own channel,
+		// the one its resident registrations name (connect/EXTENDER.md S8)
+		exchange.extenderWebRtcOfferWakes = newExtenderWebRtcOfferWakes(
+			cancelCtx,
+			model.ExtenderWebRtcOfferChannel(host, service, block),
+			server.DefaultRedisShardSubscriptionSettings(),
+			nil,
+			settings.KeyEventDelivery.ResyncSpreadTimeout,
+		)
 	}
 	exchange.contractOriginNotifications = model.NewContractOriginNotifications(cancelCtx, model.DefaultContractOriginNotificationSettings())
 	exchange.localTransport = newExchangeLocalTransport(cancelCtx, settings, block, ExchangeOpTransport)
@@ -4902,9 +4914,10 @@ func (self *Resident) Run() {
 		closeListener.Kick()
 
 		// the webrtc extender carrier's offers the prober relays to the
-		// client (connect/EXTENDER.md S8, extender_webrtc_relay.go). An offer
-		// added before this registration had no listener, so it takes once now;
-		// the listener holds no goroutine while it has nothing to relay
+		// client (connect/EXTENDER.md S8, extender_webrtc_relay.go), woken on
+		// this process's offer channel. An offer added before this
+		// registration had no listener, so it takes once now; the listener
+		// holds no goroutine while it has nothing to relay
 		relayListener := newExtenderWebRtcRelayListener(
 			self.ctx,
 			self.clientId,
@@ -4915,7 +4928,7 @@ func (self *Resident) Run() {
 			time.Now,
 		)
 		defer relayListener.CloseAndWait()
-		removeRelayListener := self.exchange.keyEventSubscriber.AddWebRtcRelayListener(self.clientId, relayListener)
+		removeRelayListener := self.exchange.extenderWebRtcOfferWakes.AddListener(self.clientId, relayListener)
 		defer removeRelayListener()
 		relayListener.Kick()
 	}

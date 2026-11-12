@@ -3,14 +3,25 @@
 // probe and the taskworker's uptime task -- signals an extender's client
 // through the exchange resident that holds it, which no api or taskworker
 // process can reach directly. Two per-client Redis keys carry it, modeled on
-// the client close requests (client_close_model.go):
+// the client close requests (client_close_model.go), and one channel per
+// exchange process wakes the resident:
 //   - `{<clientId>}w_offer` is a set of pending offers for the client. Only the
 //     prober adds to it, for the one extender it is testing, and its size is
 //     bounded at the add. The process that hosts the client's resident takes
-//     each offer exactly once (SPOP) on the set's sadd event, relays it to the
-//     client from the control id as a flagged `ExchangeSignals`, and posts the
-//     answer. Each add renews the set's ttl, which collects offers nobody
-//     took.
+//     each offer exactly once (SPOP), relays it to the client from the control
+//     id as a flagged `ExchangeSignals`, and posts the answer. Each add renews
+//     the set's ttl, which collects offers nobody took.
+//   - `extender_webrtc_offer_<host>_<service>_<block>` is the sharded channel
+//     of the exchange process the client's resident registration names
+//     (`ncr_<clientId>`). The prober publishes the client id on it after the
+//     add, and the process subscribes to its own channel alone, so no process
+//     matches the keyspace notifications of every set on Main to find the
+//     offers of its residents. A wake is advisory. One lost to a resubscribe
+//     is made up by the take every resident of the process makes as its
+//     subscription starts; one that goes to a process the client's resident
+//     has just left, by the take the resident's new registration makes, when
+//     the offer was added before it. An offer nobody takes expires with its
+//     prober's wait, and the next probe tries again.
 //   - `{<clientId>}w_answer:<requestId>` is the list the resident pushes the
 //     one answer of an offer onto, which the prober waits on with BLPOP. Lists
 //     raise no keyspace event under Main's `Kg$sx`, so an answer costs no
@@ -42,16 +53,46 @@ func extenderWebRtcAnswerKey(clientId server.Id, requestId server.Id) string {
 	return fmt.Sprintf("{%s}%s:%s", clientId, extenderWebRtcAnswerKeySuffix, requestId)
 }
 
-// The psubscribe pattern for the keyspace channels of every client's pending
-// webrtc offers on a db.
-func ExtenderWebRtcOfferKeyEventPattern(db int) string {
-	return fmt.Sprintf("__keyspace@%d__:{*}%s", db, extenderWebRtcOfferKeySuffix)
+// The sharded channel that wakes one exchange process for the offers of its
+// residents' clients: the host, service and block a resident registration
+// names (NetworkClientResident), which are the process's own.
+func ExtenderWebRtcOfferChannel(residentHost string, residentService string, residentBlock string) string {
+	return fmt.Sprintf("extender_webrtc_offer_%s_%s_%s", residentHost, residentService, residentBlock)
 }
 
-// The client id of a keyspace channel matching
-// `ExtenderWebRtcOfferKeyEventPattern`.
-func ParseExtenderWebRtcOfferKeyEvent(channel string) (server.Id, bool) {
-	return parseClientKeyEvent(channel, extenderWebRtcOfferKeySuffix)
+// The channel of the exchange process a resident registration names.
+func ExtenderWebRtcOfferChannelForResident(resident *NetworkClientResident) string {
+	return ExtenderWebRtcOfferChannel(resident.ResidentHost, resident.ResidentService, resident.ResidentBlock)
+}
+
+// How long a prober's publish of one wake may take. The wake is advisory: a
+// lost one leaves the offer to the takes of S8's resubscribe and registration,
+// or to expire with the prober's wait, and never holds the probe longer.
+const extenderWebRtcOfferPublishTimeout = time.Second
+
+// Wakes the exchange process of a client's resident for the client's pending
+// offers: its channel carries the client id. An error is the publish's, which
+// the caller only logs.
+func PublishExtenderWebRtcOffer(ctx context.Context, channel string, clientId server.Id) (returnErr error) {
+	publishCtx, publishCancel := context.WithTimeout(ctx, extenderWebRtcOfferPublishTimeout)
+	defer publishCancel()
+	if r := server.HandleError(func() {
+		server.Redis(publishCtx, func(r server.RedisClient) {
+			returnErr = r.SPublish(publishCtx, channel, clientId.String()).Err()
+		}, server.OptNoRetry())
+	}); r != nil {
+		returnErr = fmt.Errorf("the webrtc offer wake was not published: %v", r)
+	}
+	return
+}
+
+// The client id one wake carries, and whether it is one.
+func ParseExtenderWebRtcOfferWake(payload string) (server.Id, bool) {
+	clientId, err := server.ParseId(payload)
+	if err != nil {
+		return server.Id{}, false
+	}
+	return clientId, true
 }
 
 // Why a relay of one offer did not come back with an answer, as the resident

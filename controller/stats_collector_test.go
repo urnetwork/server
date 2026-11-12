@@ -313,6 +313,11 @@ func TestStatsRefreshDbExportsExtenderAndContractGauges(t *testing.T) {
 		if value := testStatsGaugeValue(t, statsExtendersRevoked24hGauge); value != 0 {
 			t.Fatalf("extenders_revoked_24h = %f, want an exported zero", value)
 		}
+		// none of the three is accepted on webrtc without tcp
+		// (connect/EXTENDER.md S8; the count is the model's, tested there)
+		if value := testStatsGaugeValue(t, statsWebRtcOnlyExtendersGauge); value != 0 {
+			t.Fatalf("webrtc_only_extenders = %f, want an exported zero", value)
+		}
 
 		// the per-country gauge replaces its whole label set, like providers
 		if count := testutil.CollectAndCount(
