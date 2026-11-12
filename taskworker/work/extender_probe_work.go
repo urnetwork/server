@@ -26,8 +26,8 @@ import (
 //
 // Every five minutes each active address is dialed over the required paths it
 // was accepted on -- its tcp carrier, or its webrtc carrier through the
-// signaling relay, or both at once -- with a fresh challenge (C2a;
-// connect/EXTENDER.md S8). That is the whole liveness test: an address that
+// signaling relay, or both, webrtc beside tcp once tcp has failed or been slow
+// to pass -- with a fresh challenge (C2a; connect/EXTENDER.md S8). That is the whole liveness test: an address that
 // cannot sign bytes chosen now is not serving, whatever its record says. The
 // dial is the same one a client makes, so what passes here is what a client
 // can use.
@@ -91,25 +91,33 @@ const (
 	// pass's verdict: no probe starts later than this before the pass's max
 	// time. An address left unprobed is the oldest probed of the next pass.
 	ExtenderProbeRecordReserve = 2 * time.Minute
+
+	// How long an address accepted on both required paths gives tcp before
+	// webrtc is probed beside it. A tcp probe that answers passes well within
+	// it, so a healthy address sends its extender's device no offer each
+	// pass, and one whose tcp port stopped answering, which waits out the
+	// budget, still leaves webrtc the activation's whole budget.
+	ExtenderProbeWebRtcHeadStart = ExtenderProbeAddressTimeout - controller.ExtenderActivateProbeTimeout
 )
 
 // probeExtenderAddress probes one address over the required paths it was
 // accepted on (C2a, C3) and requires a challenge signature under the
 // extender's published key: the tcp carrier when the address lists it, the
-// webrtc carrier when it lists that (connect/EXTENDER.md S8), and both at once
-// when it lists both, the address live while either answers. So an address
-// accepted on webrtc is never judged by a public tcp port it may not have,
-// and a tcp port that stopped answering, which waits out the budget, does not
-// starve the webrtc probe of it. An address that lists neither is judged by
-// tcp, as every address was before webrtc.
+// webrtc carrier when it lists that (connect/EXTENDER.md S8), and, when it
+// lists both, tcp first and webrtc beside it once tcp has failed or not passed
+// within its head start, the address live while either answers. So an address
+// accepted on webrtc is never judged by a public tcp port it may not have, a
+// tcp port that stopped answering does not starve the webrtc probe of the
+// address budget, and a tcp port that answers costs no offer. An address that
+// lists neither is judged by tcp, as every address was before webrtc.
 //
 // It is a variable so a test can drive the task's accounting -- the failure
 // budget, the deactivation, the revocation -- deterministically, without
 // standing up an extender for every case and without waiting on real dials;
-// the two paths beneath it are variables so a test can prove which path an
-// address is judged by. Production never replaces them; the real dials are
-// proved against an in-process extender by the activation tests, which run
-// the same connect probes.
+// the two paths beneath it and the head start's timer are variables so a test
+// can prove which path an address is judged by, and when. Production never
+// replaces them; the real dials are proved against an in-process extender by
+// the activation tests, which run the same connect probes.
 var probeExtenderAddress = func(
 	ctx context.Context,
 	target *model.NetworkExtenderProbeTarget,
@@ -118,39 +126,83 @@ var probeExtenderAddress = func(
 ) error {
 	listsTcp := slices.Contains(target.Carriers, connect.ExtenderCarrierTcp)
 	listsWebRtc := slices.Contains(target.Carriers, connect.ExtenderCarrierWebRtc)
+	probeTcp := probeExtenderTcpAddress
+	probeWebRtc := probeExtenderWebRtcAddress
 	switch {
 	case listsWebRtc && !listsTcp:
 		return probeExtenderPath(func() error {
-			return probeExtenderWebRtcAddress(ctx, target, destinationHost)
+			return probeWebRtc(ctx, target, destinationHost)
 		})
 	case !listsWebRtc:
 		return probeExtenderPath(func() error {
-			return probeExtenderTcpAddress(ctx, target, serverName, destinationHost)
+			return probeTcp(ctx, target, serverName, destinationHost)
 		})
 	}
-	// both: the first to pass ends the other
+
+	// both, a staggered race: the first to pass ends the other, and the call
+	// returns once both have ended, so no probe outlives the address's place
+	// in the pass's concurrency
 	pathCtx, pathCancel := context.WithCancel(ctx)
 	defer pathCancel()
 	results := make(chan error, 2)
-	go func() {
-		results <- probeExtenderPath(func() error {
-			return probeExtenderTcpAddress(pathCtx, target, serverName, destinationHost)
-		})
-	}()
-	go func() {
-		results <- probeExtenderPath(func() error {
-			return probeExtenderWebRtcAddress(pathCtx, target, destinationHost)
-		})
-	}()
-	errs := []error{}
-	for range 2 {
-		err := <-results
-		if err == nil {
-			return nil
+	running := 0
+	start := func(probe func() error) {
+		running += 1
+		go func() {
+			results <- probeExtenderPath(probe)
+		}()
+	}
+	webRtcStarted := false
+	startWebRtc := func() {
+		if webRtcStarted || ctx.Err() != nil {
+			return
 		}
-		errs = append(errs, err)
+		webRtcStarted = true
+		start(func() error {
+			return probeWebRtc(pathCtx, target, destinationHost)
+		})
+	}
+	start(func() error {
+		return probeTcp(pathCtx, target, serverName, destinationHost)
+	})
+	headStart, stopHeadStart := extenderProbeWebRtcHeadStart()
+	defer stopHeadStart()
+	passed := false
+	errs := []error{}
+	for 0 < running {
+		select {
+		case err := <-results:
+			running -= 1
+			switch {
+			case passed:
+				// the canceled path, joined
+			case err == nil:
+				passed = true
+				pathCancel()
+			default:
+				errs = append(errs, err)
+				startWebRtc()
+			}
+		case <-headStart:
+			headStart = nil
+			if !passed {
+				startWebRtc()
+			}
+		}
+	}
+	if passed {
+		return nil
 	}
 	return errors.Join(errs...)
+}
+
+// The head start's timer, a channel that receives once it has elapsed and a
+// stop. It is a variable so a test can elapse it, or never, without waiting.
+var extenderProbeWebRtcHeadStart = func() (<-chan time.Time, func()) {
+	timer := time.NewTimer(ExtenderProbeWebRtcHeadStart)
+	return timer.C, func() {
+		timer.Stop()
+	}
 }
 
 // One path's probe, a panic in which fails that path alone rather than the
