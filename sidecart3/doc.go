@@ -37,8 +37,12 @@
 //     sidecar_leaktest, its leak (capture_stores_leak.go).
 //   - scenario.go, §22.7's scenarios on T3 (TEST-M2-11): sidecartest's runner on a T3 Net, its stores
 //     captured, the keys its host wrote given to the guard, and §7.4's allowlist from server's own route
-//     tables; S1's code-create clause runs through server's router, and S3a and S4a through the builders
-//     T2 runs.
+//     tables; S1's three clauses run through server's router, and S3a and S4a through the builders T2
+//     runs.
+//   - scenario_sidecar.go, T3's enrolled sidecars: T3Api, server's api in process, every credential it
+//     answers or is sent handed to the capture, and T3Sidecar, a sidecar.Sidecar enrolled through
+//     server's own routes whose clients run on server's exchange, which S1's token and genesis clauses
+//     run on.
 //
 // server/sidecar-t3.sh runs this with -tags sidecar_testhooks,sidecar_pending and
 // WARP_TEST_ENV_FAIL_FAST=1, inside the private test stores test-env.sh attests: its suites cadence on
@@ -46,8 +50,10 @@
 //
 // Not yet here, and failing closed where a row would reach it:
 //
-//   - server's api for a T3 sidecar to enroll through: a T3 Net refuses a row that adds a sidecar, whose
-//     clients would run on T2's platform fakes, rather than passing it there.
+//   - a T3 Net's AddSidecar: a T3 Net refuses a row that adds a sidecar through sidecartest's helpers,
+//     whose clients would run on T2's platform fakes, rather than passing it there; a T3 test enrolls a
+//     T3Sidecar through server's api instead (scenario_sidecar.go), which reaches no evs, gkm or sockets
+//     host of server's yet.
 //   - a link's conditions (SetLink) and a contract's class (SetContractClass) on server's exchange, which
 //     takes neither: a row that asks for one fails as unapplied (sidecartest.Net.Unapplied).
 //   - the capture of the exchange's frames (CC2).
