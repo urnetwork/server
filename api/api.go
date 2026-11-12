@@ -415,6 +415,10 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 		// §7.5's team networks and their members (TEAM-M6-01)
 		router.NewRoute("POST", "/network/team-create", handlers.CreateNetworkTeam),
 		router.NewRoute("GET", "/network/members", handlers.GetNetworkMembers),
+		// §7.5's invitations and network switching (TEAM-M6-04)
+		router.NewRoute("POST", "/network/member-invite", handlers.CreateNetworkMemberInvite),
+		router.NewRoute("POST", "/network/member-invite-accept", handlers.AcceptNetworkMemberInvite),
+		router.NewRoute("POST", "/auth/network-switch", handlers.NetworkSwitch),
 		// §20.5's Becoming Team: the checkout that buys a team network its tier (QUOTA-M6-02)
 		router.NewRoute("POST", "/network/team-checkout", handlers.TeamCheckout),
 		router.NewRoute("POST", "/network/idp", handlers.CreateNetworkIdp),

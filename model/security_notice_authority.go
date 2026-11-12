@@ -15,6 +15,8 @@ package model
 //	             team's IdP (TEAM-M6-06)
 //	audit_webhook  a team gained a webhook its admin events are sent to
 //	             (TEAM-M6-09)
+//	member_invite  a team invited a person to join it, whose first device an
+//	             admin's device then admits (TEAM-M6-04)
 //
 // The recipients are the sign-in email addresses of the network's Owners and
 // Admins: in a personal network its owner's, the account security notices
@@ -47,6 +49,7 @@ const (
 	// the domain's TXT record was found
 	SecurityNetworkAuthorityDomainVerified = "domain_verified"
 	SecurityNetworkAuthorityAuditWebhook   = "audit_webhook"
+	SecurityNetworkAuthorityMemberInvite   = "member_invite"
 )
 
 // One change of a network's authority.

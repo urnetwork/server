@@ -319,6 +319,9 @@ var routeAccessByRoute = map[string]routeAccess{
 	"POST /network/enroll":                          routeAccessPublic,   // an auth key in the body is its credential (§7.8)
 	"POST /network/team-create":                     routeAccessNetwork,  // makes a team network, its caller the first Owner (§7.5)
 	"GET /network/members":                          routeAccessNetwork,  // a team's members (§7.5), Owners and Admins by the role gate
+	"POST /network/member-invite":                   routeAccessNetwork,  // invites a person to a team (§7.5), Owners and Admins by the role gate
+	"POST /network/member-invite-accept":            routeAccessNetwork,  // a person joins a team from an invite with its own sign-in (§7.5)
+	"POST /auth/network-switch":                     routeAccessNetwork,  // a person's credential for another network it signs in to (§7.5)
 	"POST /network/team-checkout":                   routeAccessNetwork,  // buys a team network its tier (§20.5), the Owner's or a Billing admin's by the role gate
 	"POST /network/idp":                             routeAccessNetwork,  // adds a team's OIDC IdP (§7.6), the Owner's by its role gate
 	"GET /auth/sso/callback":                        routeAccessPublic,   // the state names its flow, taken once (§7.6)

@@ -66,9 +66,13 @@ var routePermissionByRoute = map[string]model.RolePermission{
 	"GET /network/user":                 model.RolePermissionSelf,
 	"POST /preferences/set-preferences": model.RolePermissionSelf,
 	"POST /network/team-create":         model.RolePermissionSelf,
+	// a person's own joining and switching (§7.5)
+	"POST /network/member-invite-accept": model.RolePermissionSelf,
+	"POST /auth/network-switch":          model.RolePermissionSelf,
 
 	// members, roles and invitations
-	"GET /network/members": model.RolePermissionMembers,
+	"GET /network/members":        model.RolePermissionMembers,
+	"POST /network/member-invite": model.RolePermissionMembers,
 
 	// the network's own settings
 	"POST /account/change-name":               model.RolePermissionAdmin,
