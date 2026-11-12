@@ -13,7 +13,7 @@ import (
 	"github.com/urnetwork/server"
 )
 
-// stExtenderTestCreateTime is when a test's contracts were created.
+// When a test's contracts were created.
 var stExtenderTestCreateTime = time.Date(2026, 11, 28, 0, 0, 0, 0, time.UTC)
 
 // The amendment as SN25 sets it, from epoch 8 (§8.6.7), with platformEndpoints
@@ -71,7 +71,7 @@ func assertStExtenderSharesEachCountedOnce(
 	t.Helper()
 	var kept, platform, sameNetwork ByteCount
 	for _, share := range snapshot.Providers {
-		isPlatform := amendment.PlatformEndpoints.Holds(share.ClientId, stExtenderTestCreateTime)
+		isPlatform := amendment.PlatformEndpoints.holds(share.ClientId, stExtenderTestCreateTime)
 		isSameNetwork := !isPlatform && share.NetworkId == originNetworkId
 		switch {
 		case isPlatform:
@@ -102,7 +102,7 @@ func assertStExtenderSharesEachCountedOnce(
 func countStExtenderPoolShares(snapshot *contractUsageSnapshot, originNetworkId server.Id, amendment stExtenderAmendment) int {
 	count := 0
 	for _, share := range snapshot.Providers {
-		if amendment.PlatformEndpoints.Holds(share.ClientId, stExtenderTestCreateTime) || share.NetworkId == originNetworkId {
+		if amendment.PlatformEndpoints.holds(share.ClientId, stExtenderTestCreateTime) || share.NetworkId == originNetworkId {
 			count++
 		}
 	}
@@ -500,7 +500,7 @@ func TestStExtenderPlatformEndpointIsClassifiedByCreateTime(t *testing.T) {
 	amendment.PlatformEndpoints[edge.ClientId] = append(amendment.PlatformEndpoints[edge.ClientId],
 		&StPlatformEndpoint{ClientId: edge.ClientId, NetworkId: edge.NetworkId, Kind: StPlatformEndpointMxEdge, RegisterTime: again, RegisteredBy: "test"})
 	for created, want := range map[time.Time]bool{registered.Add(time.Hour): true, revoked.Add(time.Hour): false, again.Add(time.Hour): true} {
-		if got := amendment.PlatformEndpoints.Holds(edge.ClientId, created); got != want {
+		if got := amendment.PlatformEndpoints.holds(edge.ClientId, created); got != want {
 			t.Fatalf("created %s: %v", created, got)
 		}
 	}

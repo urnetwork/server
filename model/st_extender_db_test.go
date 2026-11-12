@@ -154,7 +154,7 @@ func TestStExtenderDbAmendedUsageReadsTheLiveContractRow(t *testing.T) {
 		}
 		// every pooled share, funded or not, is some client's
 		var pooledTotal ByteCount
-		for _, bytes := range pool.PooledByClient {
+		for _, bytes := range pool.ClientIdPooledBytes {
 			pooledTotal += bytes
 		}
 		if uint64(pooledTotal) != pool.PooledBytes() {

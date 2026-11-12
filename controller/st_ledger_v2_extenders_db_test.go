@@ -26,7 +26,7 @@ import (
 	"github.com/urnetwork/server/model"
 )
 
-// pooledContract retains one settled contract closed at closed, whose usage
+// Retains one settled contract closed at closed, whose usage
 // origin is its source on originNetwork, paid by payer (nil for none), with
 // the providers' usage.
 func (self *ledgerV2BuildFixture) pooledContract(closed time.Time, originNetwork server.Id, payer *server.Id, providers ...ledgerV2BuildUsage) {
@@ -44,7 +44,7 @@ func (self *ledgerV2BuildFixture) pooledContract(closed time.Time, originNetwork
 	})
 }
 
-// auditFrom runs the validator's audit as audit does, for a pool whose
+// Runs the validator's audit as audit does, for a pool whose
 // extender amendment is in force from extendersFrom (0 for none).
 func (self *ledgerV2BuildFixture) auditFrom(input *StLedgerV2BuildInput, root *StLedgerV2FinalizedRoot, heads ledgerV2Heads, extendersFrom uint64) *ledger.Result {
 	self.t.Helper()

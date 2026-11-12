@@ -1660,8 +1660,8 @@ func stDemandHeaderEpoch(tb testing.TB, epoch uint64, refs []string, null bool) 
 	return [32]byte(ledger.RefOf(data))
 }
 
-// stDemandCaptureEpochUsage captures an ended epoch's users and its extender census, as
-// the two usage steps the sync plans for it do (st_ledger_v2_extenders.go); an operator
+// Captures an ended epoch's users and its extender census, as the two usage
+// steps the sync plans for it do (st_ledger_v2_extenders.go); an operator
 // without extender records captures an empty census.
 func stDemandCaptureEpochUsage(ctx context.Context, key model.StDeploymentKey, epoch uint64) {
 	model.CaptureStLedgerV2EpochUsers(ctx, key, 1, epoch, 3)
