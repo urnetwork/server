@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "job_id": "01a1cc73-0d5d-0bd4-3f0b-5a2155fbde43",
+  "round_id": "01a1c110-585b-ce38-4f29-ca4860a1c058",
+  "host_id": "goofe",
+  "native_run_id": "39c8e006ac2cec752ed53625bfbfa06587905af65ba405d773aa28bfab255b69",
+  "execution_started_at": "2026-11-12T09:03:31.278113Z",
+  "original_deadline": "2026-11-12T12:03:31.278113Z",
+  "native_result": {
+    "state": "failed",
+    "exit_code": 1,
+    "cleanup_verified": true,
+    "stop_cleanup_verified": true,
+    "completed_candidate_replicates": 0,
+    "phase": "candidate_image_build"
+  },
+  "retained_builder_message": "trusted source application failed: bounded trusted source Git operation failed",
+  "offline_diagnostic": {
+    "private_directory": "/var/lib/urnetwork/competition-epoch2-source-apply-20261112.kvlY9Yei",
+    "canonical_patch_sha256": "45c049d770cd8a046ea0e7345f0d883f9a0c3d650264dd282fdb8660ae9cf939",
+    "trusted_installed_validator_used": true,
+    "routed_repositories": ["connect"],
+    "routed_patch_sha256": "80d825de396e7e969c7f1e0d4d375f2fce81c8d69228d824db40d7d2d2449d93",
+    "frozen_connect_commit": "388d8a153952fe36af1753908f4b21501967f3a8",
+    "temporary_index_matches_exact_frozen_tree": true,
+    "temporary_index_match_exit": 0,
+    "git_apply_cached_check_whitespace_error_all_exit": 1,
+    "files_with_hunks_rejected": 19,
+    "private_log_sha256": "ebda07dfd8de375ec78a3dfc0922f8c08c925bd5ebdfe1b9b0acd7324004dfcf",
+    "current_checkout_or_index_modified": false,
+    "candidate_code_executed_by_diagnostic": false,
+    "native_engine_probe_or_evaluation_restart": false
+  },
+  "conclusion": "The accepted patch does not apply to the epoch's exact frozen Connect source. The generic builder error obscures the failed Git phase; this offline applicability result does not alone prove which individual Git call failed in the original attempt.",
+  "follow_up": "Improve bounded private Git-phase diagnostics and regression coverage without guessing failure classes from arbitrary stderr or weakening source authentication. Do not grant a blind infrastructure recovery for an unchanged patch that is independently known not to apply.",
+  "original_failure_reclassified": false,
+  "new_recovery_granted": false,
+  "included_in_previously_approved_two_job_recovery": false
+}
