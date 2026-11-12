@@ -142,6 +142,9 @@ type claimRelayWorld struct {
 	chainBuilt int
 	estimated  []uint64
 	published  int
+	// a copy of each status published, its state and pools as they were then
+	// (its maps are shared with the pass's)
+	publishedStatuses []SnClaimRelayStatus
 }
 
 func newClaimRelayWorld(t testing.TB, amounts ...*uint256.Int) *claimRelayWorld {
@@ -224,6 +227,7 @@ func (self *claimRelayWorld) relay() *snClaimRelay {
 		publish: func(_ context.Context, status *SnClaimRelayStatus) {
 			self.status = status
 			self.published += 1
+			self.publishedStatuses = append(self.publishedStatuses, *status)
 		},
 		claimResults: func(result string, count int) { self.results[result] += count },
 		banned:       func(coldkey [32]byte) bool { return self.banned[coldkey] },

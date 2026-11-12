@@ -1418,9 +1418,9 @@ func TestDbClaimRelayReadsNoCtfPoolWithCtfOff(t *testing.T) {
 // the ones each network read before the fault. Two faults are tried in turn: a
 // row of the pool's roots that does not read back from the database, then a
 // latest root whose objects nobody published. In each the pass claims the
-// operator's pool and names the other, and an old app still reads its rows as
-// before; only the relay's own state, which every client reads and no app
-// draws, says ledger_unavailable. Once the pool reads again, its accounts are
+// operator's pool and names the other, and an old app still reads its rows,
+// and the relay's state, running, as before; only a partial=true client reads
+// the pass's ledger_unavailable. Once the pool reads again, its accounts are
 // answered again. This test fails if an old client sees an error during a CTF
 // pool fault.
 func TestDbClaimRelayAnswersOldClientsThroughACtfPoolFault(t *testing.T) {
@@ -1525,7 +1525,16 @@ func TestDbClaimRelayAnswersOldClientsThroughACtfPoolFault(t *testing.T) {
 				if rows, err := json.Marshal(old.Accounts); err != nil || string(rows) != poolRows[network.name] {
 					t.Fatalf("%s: an old app of the network with %s reads the rows %s (%v)\nwant, as before the fault, %s", name, network.name, rows, err, poolRows[network.name])
 				}
+				// and the relay's state is running, as before the CTF pool,
+				// whatever the pass said of the CTF pool; a partial=true client
+				// reads the pass's own state
+				if old.State != SnClaimRelayStateRunning {
+					t.Fatalf("%s: an old app of the network with %s reads the relay's state %s", name, network.name, old.State)
+				}
 				partial, err := SnClaimRelayWithArgs(&SnClaimRelayArgs{Partial: true}, network.session)
+				if state := snClaimRelayCurrentStatus(ctx, world.cfg, server.NowUtc()).State; err == nil && partial.State != state {
+					t.Fatalf("%s: a partial answer to the network with %s reads the relay's state %s, the pass's %s", name, network.name, partial.State, state)
+				}
 				if err != nil || partial.Error != nil || len(partial.UnavailablePools) != 1 || partial.UnavailablePools[0].NoId != claimRelayTestCtfPool {
 					t.Fatalf("%s: a partial answer to the network with %s %+v (%v)", name, network.name, partial, err)
 				}

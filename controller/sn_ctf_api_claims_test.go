@@ -21,11 +21,12 @@ import (
 )
 
 // snCtfClaimedChain is vault2 as the claim states read it: claimed(pool, i) is
-// i·10 + 7. It records each read, and can refuse or hold one until its
-// context ends.
+// i·10 + 7, plus grown once the test has the accounts claimed further. It
+// records each read, and can refuse or hold one until its context ends.
 type snCtfClaimedChain struct {
 	StLedgerV2Client
-	head uint64
+	head  uint64
+	grown uint64
 
 	lock           sync.Mutex
 	finalizedReads int
@@ -93,7 +94,7 @@ func (self *snCtfClaimedChain) LedgerV2ClaimedAt(ctx context.Context, noId uint6
 	self.blocks = append(self.blocks, block)
 	values := make([]uint256.Int, len(indexes))
 	for i, index := range indexes {
-		values[i].SetUint64(index*10 + 7)
+		values[i].SetUint64(index*10 + 7 + self.grown)
 	}
 	return values, nil
 }
@@ -139,12 +140,19 @@ func snCtfClaimedTestIndexes(from uint64, to uint64) []uint64 {
 
 func requireSnCtfClaimed(t testing.TB, what string, claimed map[uint64]uint256.Int, indexes []uint64) {
 	t.Helper()
+	requireSnCtfClaimedGrown(t, what, claimed, indexes, 0)
+}
+
+// requireSnCtfClaimedGrown requires the values the chain answered while its
+// accounts were claimed grown further.
+func requireSnCtfClaimedGrown(t testing.TB, what string, claimed map[uint64]uint256.Int, indexes []uint64, grown uint64) {
+	t.Helper()
 	if len(claimed) != len(indexes) {
 		t.Fatalf("%s: %d values, want %d", what, len(claimed), len(indexes))
 	}
 	for _, index := range indexes {
-		if value, ok := claimed[index]; !ok || value.Uint64() != index*10+7 {
-			t.Fatalf("%s: claimed of %d is %v (%t), want %d", what, index, value.Dec(), ok, index*10+7)
+		if value, ok := claimed[index]; !ok || value.Uint64() != index*10+7+grown {
+			t.Fatalf("%s: claimed of %d is %v (%t), want %d", what, index, value.Dec(), ok, index*10+7+grown)
 		}
 	}
 }
@@ -284,6 +292,210 @@ func TestSnCtfClaimedOfEndsWithItsContext(t *testing.T) {
 			t.Fatalf("%s held: %d reads still running after the call returned", name, inFlight)
 		}
 	}
+}
+
+// Stale if the read fails: once an account's claimed was read, an answer whose
+// fresh read of it does not finish in time, or fails, answers the last value
+// read, however old, so a slow chain never takes a won line away; claimed only
+// grows, so that value errs only by reading a claim a little late. A first read
+// that does not finish in time leaves the account out, its wins null. A value
+// answered this way is not fresh: the next answer reads the chain again.
+func TestSnCtfClaimedOfAnswersTheLastValueWhenAReadFails(t *testing.T) {
+	chain := &snCtfClaimedChain{head: 9_702_100}
+	now := withSnCtfClaimedChain(t, chain)
+	cfg := ledgerV2TestConfig()
+	pool := uint64(1<<32 + 1)
+	indexes := snCtfClaimedTestIndexes(0, 120)
+	timedOut := func(indexes []uint64) map[uint64]uint256.Int {
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		return snCtfClaimedOf(ctx, cfg, pool, indexes)
+	}
+
+	// a first read that times out: nothing to answer
+	chain.hold = true
+	if claimed := timedOut(indexes); len(claimed) != 0 {
+		t.Fatalf("a first read that timed out answered %d values", len(claimed))
+	}
+	chain.hold = false
+	requireSnCtfClaimed(t, "read", snCtfClaimedOf(context.Background(), cfg, pool, indexes), indexes)
+	chain.reads()
+
+	// past snCtfClaimedTtl, while the accounts were claimed further, each way a
+	// fresh read can fail answers the values read before
+	*now = now.Add(2 * snCtfClaimedTtl)
+	chain.grown = 1_000
+	chain.hold = true
+	requireSnCtfClaimedGrown(t, "a read that timed out", timedOut(indexes), indexes, 0)
+	chain.hold = false
+	chain.refuseFinalized = true
+	requireSnCtfClaimedGrown(t, "the finalized head refused", snCtfClaimedOf(context.Background(), cfg, pool, indexes), indexes, 0)
+	SetStLedgerV2Client(nil)
+	requireSnCtfClaimedGrown(t, "no chain client", snCtfClaimedOf(context.Background(), cfg, pool, indexes), indexes, 0)
+	// the last values are those accounts' alone: the same indexes of another
+	// vault, pool or deployment have none
+	otherVault, otherDeployment := ledgerV2TestConfig(), ledgerV2TestConfig()
+	otherVault.VaultV2[19] ^= 0xff
+	otherDeployment.ContractAddress[19] ^= 0xff
+	if otherDeployment.DeploymentKey() == cfg.DeploymentKey() {
+		t.Fatal("the other deployment has the same key")
+	}
+	for name, other := range map[string]map[uint64]uint256.Int{
+		"another vault":      snCtfClaimedOf(context.Background(), otherVault, pool, indexes),
+		"another pool":       snCtfClaimedOf(context.Background(), cfg, pool+1, indexes),
+		"another deployment": snCtfClaimedOf(context.Background(), otherDeployment, pool, indexes),
+	} {
+		if len(other) != 0 {
+			t.Fatalf("%s: %d values answered as last read", name, len(other))
+		}
+	}
+	SetStLedgerV2Client(chain)
+	chain.reads()
+	// the second batch refused: the first is read fresh, the rest answered as
+	// read before
+	chain.refuseBatch = 2
+	claimed := snCtfClaimedOf(context.Background(), cfg, pool, indexes)
+	if len(claimed) != len(indexes) {
+		t.Fatalf("the second batch refused: %d values, want %d", len(claimed), len(indexes))
+	}
+	requireSnCtfClaimedGrown(t, "the first batch", snCtfClaimedOnly(claimed, indexes[:50]), indexes[:50], 1_000)
+	requireSnCtfClaimedGrown(t, "the batches not read", snCtfClaimedOnly(claimed, indexes[50:]), indexes[50:], 0)
+	// those answered as read before were not read fresh: the next answer reads
+	// them, and only them
+	chain.reads()
+	requireSnCtfClaimedGrown(t, "read again", snCtfClaimedOf(context.Background(), cfg, pool, indexes), indexes, 1_000)
+	if _, sizes, _ := chain.reads(); !slices.Equal(sizes, []int{50, 20}) {
+		t.Fatalf("read again: batches %v, want the 70 answered as read before", sizes)
+	}
+	// an account never read on this instance has no last value
+	*now = now.Add(2 * snCtfClaimedTtl)
+	chain.hold = true
+	claimed = timedOut(slices.Concat(indexes[:1], snCtfClaimedTestIndexes(120, 130)))
+	requireSnCtfClaimedGrown(t, "a read that timed out, one account read before", claimed, indexes[:1], 1_000)
+}
+
+// Of two reads of one account the cache keeps the larger claimed and the later
+// time: claimed only grows, so a read that began earlier and finished later, or
+// one at an older finalized block, never lowers the value kept, which can be
+// answered long after while reads fail.
+func TestSnCtfClaimedKeepNeverLowersAValue(t *testing.T) {
+	snCtfResetClaimedCache()
+	t.Cleanup(snCtfResetClaimedCache)
+	cfg := ledgerV2TestConfig()
+	key := snCtfClaimedKey{deploymentKey: cfg.DeploymentKey(), vault: cfg.VaultV2, poolId: 1<<32 + 1, index: 3}
+	at := time.Date(2026, 12, 7, 12, 0, 0, 0, time.UTC)
+	cache := &snCtfClaimedCache
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+	kept := func(what string, claimed uint64, readTime time.Time) {
+		t.Helper()
+		if read := snCtfClaimedLast(key); read == nil || read.claimed.Uint64() != claimed || !read.readTime.Equal(readTime) {
+			t.Fatalf("%s: kept %+v, want %d read at %s", what, read, claimed, readTime)
+		}
+	}
+	snCtfClaimedKeep(key, *uint256.NewInt(1_600), at.Add(2*time.Second))
+	snCtfClaimedKeep(key, *uint256.NewInt(600), at)
+	kept("an older read finishing later", 1_600, at.Add(2*time.Second))
+	snCtfClaimedKeep(key, *uint256.NewInt(2_000), at.Add(3*time.Second))
+	kept("a newer read", 2_000, at.Add(3*time.Second))
+	snCtfClaimedKeep(key, *uint256.NewInt(2_500), at.Add(time.Second))
+	kept("a larger value read earlier, at a later block", 2_500, at.Add(3*time.Second))
+}
+
+// Answers that run at once, their reads failing now and then while the clock
+// moves past the time a value is fresh, keep the cache whole: each key it maps
+// is in its recency list, once, and it holds no more than its limit.
+func TestSnCtfClaimedOfKeepsTheCacheWholeUnderConcurrentAnswers(t *testing.T) {
+	limit := snCtfClaimedCacheLimit
+	snCtfClaimedCacheLimit = 40
+	t.Cleanup(func() { snCtfClaimedCacheLimit = limit })
+	chain := &snCtfFlakyClaimedChain{snCtfClaimedChain: &snCtfClaimedChain{head: 9_702_100}}
+	withSnCtfClaimedChain(t, chain.snCtfClaimedChain)
+	SetStLedgerV2Client(chain)
+	var elapsed atomic.Int64
+	start := time.Date(2026, 12, 7, 12, 0, 0, 0, time.UTC)
+	snCtfClaimedNow = func() time.Time { return start.Add(time.Duration(elapsed.Load())) }
+	cfg := ledgerV2TestConfig()
+	pool := uint64(1<<32 + 1)
+	var group sync.WaitGroup
+	for g := range 8 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for i := range 25 {
+				first := uint64((g*7 + i) % 60)
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				snCtfClaimedOf(ctx, cfg, pool, snCtfClaimedTestIndexes(first, first+10))
+				cancel()
+				elapsed.Add(int64(snCtfClaimedTtl / 8))
+			}
+		}()
+	}
+	group.Wait()
+	cache := &snCtfClaimedCache
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+	if len(cache.reads) != cache.recency.Len() || snCtfClaimedCacheLimit < cache.recency.Len() || cache.recency.Len() == 0 {
+		t.Fatalf("%d keys mapped, %d in the recency list, limit %d", len(cache.reads), cache.recency.Len(), snCtfClaimedCacheLimit)
+	}
+	for element := cache.recency.Front(); element != nil; element = element.Next() {
+		if read := element.Value.(*snCtfClaimedRead); cache.reads[read.key] != element {
+			t.Fatalf("index %d's element is not the one its key maps", read.key.index)
+		}
+	}
+}
+
+// snCtfFlakyClaimedChain refuses every third batch of claimed.
+type snCtfFlakyClaimedChain struct {
+	*snCtfClaimedChain
+	calls atomic.Int64
+}
+
+func (self *snCtfFlakyClaimedChain) LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
+	if self.calls.Add(1)%3 == 0 {
+		return nil, errors.New("rpc down")
+	}
+	return self.snCtfClaimedChain.LedgerV2ClaimedAt(ctx, noId, block, indexes)
+}
+
+// snCtfClaimedOnly is the values of claimed at indexes.
+func snCtfClaimedOnly(claimed map[uint64]uint256.Int, indexes []uint64) map[uint64]uint256.Int {
+	only := map[uint64]uint256.Int{}
+	for _, index := range indexes {
+		if value, ok := claimed[index]; ok {
+			only[index] = value
+		}
+	}
+	return only
+}
+
+// The values kept are bounded, the least recently used dropped first: an
+// account answered from the cache is used, so it stays; the one used least
+// recently is dropped, and with no read since, it has no last value.
+func TestSnCtfClaimedOfKeepsTheMostRecentlyUsed(t *testing.T) {
+	limit := snCtfClaimedCacheLimit
+	if limit < 100_000 {
+		t.Fatalf("the cache keeps %d accounts, want a few hundred thousand", limit)
+	}
+	snCtfClaimedCacheLimit = 3
+	t.Cleanup(func() { snCtfClaimedCacheLimit = limit })
+	chain := &snCtfClaimedChain{head: 9_702_100}
+	now := withSnCtfClaimedChain(t, chain)
+	cfg := ledgerV2TestConfig()
+	pool := uint64(1<<32 + 1)
+	ctx := context.Background()
+
+	snCtfClaimedOf(ctx, cfg, pool, []uint64{0, 1, 2})
+	// 0 is answered from the cache, so 1 is now the least recently used
+	*now = now.Add(time.Second)
+	snCtfClaimedOf(ctx, cfg, pool, []uint64{0})
+	snCtfClaimedOf(ctx, cfg, pool, []uint64{3})
+	if kept := snCtfClaimedCache.recency.Len(); kept != 3 || len(snCtfClaimedCache.reads) != 3 {
+		t.Fatalf("%d values kept, %d indexed, want 3", kept, len(snCtfClaimedCache.reads))
+	}
+	*now = now.Add(2 * snCtfClaimedTtl)
+	chain.refuseFinalized = true
+	requireSnCtfClaimed(t, "the kept values", snCtfClaimedOf(ctx, cfg, pool, []uint64{0, 1, 2, 3}), []uint64{0, 2, 3})
 }
 
 // snCtfHeldBatches is the chain with every batch held until its context ends.
