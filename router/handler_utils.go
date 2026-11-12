@@ -15,6 +15,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jackc/pgerrcode"
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -36,11 +39,6 @@ var (
 	httpErrorCodeRegex = regexp.MustCompile(`^((?:\[[^\]\r\n]*\])*)[ \t]*([45][0-9]{2})[ \t]+(?s:(.*))$`)
 )
 
-// This matches the existing public load-balancer cap. Enforcing it again at
-// the application boundary prevents a direct-backend request from bypassing
-// the public limit. Routes with smaller payloads should add a tighter cap.
-const MaxJsonRequestBytes int64 = 16 * 1024 * 1024
-
 // const BanMessage = "This client has been temporarily banned by bandit. support@ur.io"
 
 // The fixed answer to a failure the caller cannot act on, as a panic gets.
@@ -51,6 +49,13 @@ const UnexpectedErrorMessage = "Error. Please email support@ur.io for help."
 const (
 	InvalidRequestBodyMessage    = "Invalid request body."
 	UnreadableRequestBodyMessage = "The request body could not be read."
+)
+
+// The fixed bodies of the retryable 503s: a lock wait that ended, and a
+// Postgres connection that was cut. Their causes stay in the log.
+const (
+	lockTimeoutBody      = "{\"error\":\"Temporarily busy. Retry shortly.\"}\n"
+	dbConnectionLostBody = "{\"error\":\"Temporarily unavailable. Retry shortly.\"}\n"
 )
 
 type ImplFunction[R any] func(*session.ClientSession) (R, error)
@@ -243,11 +248,14 @@ func wrapWithInput[T any, R any](
 	// }
 
 	if req.Body != nil {
-		if req.ContentLength > MaxJsonRequestBytes {
+		// the public load balancer's cap, held again here so a request sent
+		// straight to a backend cannot pass it
+		jsonRequestMaxByteCount := currentRouterSettings().JsonRequestMaxByteCount
+		if req.ContentLength > jsonRequestMaxByteCount {
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		req.Body = http.MaxBytesReader(w, req.Body, MaxJsonRequestBytes)
+		req.Body = http.MaxBytesReader(w, req.Body, jsonRequestMaxByteCount)
 	}
 
 	body, err := bodyFormatter(clientSession, req)
@@ -548,10 +556,52 @@ func WrapWithInputBodyFormatterNoAuth[T any, R any](
 	)
 }
 
+// Reports whether r is, or wraps, a Postgres error of a connection-loss class:
+// a connection exception (08000), a connection that does not exist (08003) or
+// failed (08006), an administrator's shutdown (57P01), a crash shutdown
+// (57P02), or a server that cannot take connections yet (57P03). These are
+// what a Postgres or PgBouncer restart raises on the connections it cuts
+// (QD-759). A transport failure that carries no SQLSTATE is not one.
+func IsDbConnectionLost(r any) bool {
+	err, ok := r.(error)
+	if !ok || err == nil {
+		return false
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case pgerrcode.ConnectionException,
+		pgerrcode.ConnectionDoesNotExist,
+		pgerrcode.ConnectionFailure,
+		pgerrcode.AdminShutdown,
+		pgerrcode.CrashShutdown,
+		pgerrcode.CannotConnectNow:
+		return true
+	default:
+		return false
+	}
+}
+
+// The answer to a request whose Postgres connection was cut: 503 with the
+// settings' retry hint and a fixed body. The pool dials anew at its next use,
+// so the same request sent again is served; one whose effect may have
+// committed before the cut relies on its route's own idempotency.
+func writeDbConnectionLost(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	setRetryAfter(w, currentRouterSettings().DbConnectionLostRetryAfter)
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(dbConnectionLostBody))
+}
+
 // Answers err with the status and message it declares by the "<code> message"
 // convention. An error that declares none is an internal failure, such as
 // storage, transport or a dependency's url: it is answered with a fixed 500
-// and its text stays in the caller's log.
+// and its text stays in the caller's log. A lock wait that ended and a cut
+// Postgres connection are the two failures a retry gets past, and are
+// answered 503 with a retry hint.
 func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	if errors.Is(err, session.ErrAuthUnavailable) {
 		// Only a separately declared safe unavailable body can override the
@@ -561,7 +611,7 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 			if body, marshalErr := json.Marshal(unavailableBody.HttpUnavailableResultBody()); marshalErr == nil {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("X-Content-Type-Options", "nosniff")
-				w.Header().Set("Retry-After", "1")
+				setRetryAfter(w, currentRouterSettings().AuthUnavailableRetryAfter)
 				w.WriteHeader(http.StatusServiceUnavailable)
 				_, _ = w.Write(append(body, '\n'))
 				return true
@@ -579,9 +629,19 @@ func RaiseHttpError(err error, w http.ResponseWriter) (statusError bool) {
 	if server.IsLockTimeout(err) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
-		w.Header().Set("Retry-After", "1")
+		setRetryAfter(w, currentRouterSettings().LockTimeoutRetryAfter)
 		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte("{\"error\":\"Temporarily busy. Retry shortly.\"}\n"))
+		_, _ = w.Write([]byte(lockTimeoutBody))
+		return true
+	}
+
+	// A Postgres connection a restart cut (IsDbConnectionLost) is no failure
+	// of the request either: the pool dials anew, and the caller may retry at
+	// once. The caller's log is skipped for an answered status, so the cause
+	// is logged here.
+	if IsDbConnectionLost(err) {
+		glog.Infof("[h]postgres connection lost, answered retryable: %s\n", err)
+		writeDbConnectionLost(w)
 		return true
 	}
 
@@ -639,12 +699,20 @@ func DeclaresHttpStatus(err error) bool {
 	return errors.Is(err, session.ErrAuthUnavailable) || httpErrorCodeRegex.MatchString(err.Error())
 }
 
+// Reports whether err leaves PrivateErrors as it is: a declared status, or a
+// cut Postgres connection, which RaiseHttpError answers 503 with its retry
+// hint and logs itself.
+func keepsHttpAnswer(err error) bool {
+	return DeclaresHttpStatus(err) || IsDbConnectionLost(err)
+}
+
 // An impl error that declares no status is an unexpected internal failure,
 // such as storage, signing or a canceled dependency, and RaiseHttpError would
 // answer it with a 500. Here the text stays in the server log and the caller
 // is answered 503 with a fixed message, as the provider work routes answer
 // theirs. A declared status passes unchanged, with its message, retry
-// hint and result body.
+// hint and result body, and so does a cut Postgres connection
+// (IsDbConnectionLost), whose 503 carries a retry hint the fixed one lacks.
 //
 // A raise inside impl is returned the same way (server.HandleError logs it), so
 // a storage failure raised from a model call is a 503 and a refusal declared
@@ -654,7 +722,7 @@ func PrivateErrors[R any](impl ImplFunction[R]) ImplFunction[R] {
 		server.HandleError(func() {
 			result, err = impl(clientSession)
 		}, func(cause error) { err = cause })
-		if err == nil || DeclaresHttpStatus(err) {
+		if err == nil || keepsHttpAnswer(err) {
 			return result, err
 		}
 		glog.Infof("[h]impl error: [%s]%s\n", implName(impl), err)
@@ -669,7 +737,7 @@ func PrivateErrorsWithInput[T any, R any](impl ImplWithInputFunction[T, R]) Impl
 		server.HandleError(func() {
 			result, err = impl(input, clientSession)
 		}, func(cause error) { err = cause })
-		if err == nil || DeclaresHttpStatus(err) {
+		if err == nil || keepsHttpAnswer(err) {
 			return result, err
 		}
 		glog.Infof("[h]request impl error (%T): %s\n", input, err)

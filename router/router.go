@@ -102,7 +102,7 @@ func NewRouter(ctx context.Context, routes []*Route) *Router {
 		ctx:     ctx,
 		routes:  routes,
 		trie:    newRouteTrie(routes),
-		stats:   NewRouterStats(ctx, 60*time.Second),
+		stats:   NewRouterStats(ctx, currentRouterSettings().StatsWindow),
 		metrics: defaultHttpMetrics,
 	}
 }
@@ -172,6 +172,30 @@ func (self *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					http.Error(writer, "Service temporarily unavailable.", http.StatusServiceUnavailable)
 				}
 				observation.finish("canceled")
+				return
+			}
+			if IsDbConnectionLost(err) && !observation.writer.hijacked {
+				// A Postgres or PgBouncer restart cut the connection under
+				// the route (QD-759): the request is answered retryable, as
+				// RaiseHttpError answers the same error returned, and not as
+				// the failure a 500 says will repeat. The cause is logged
+				// without its stack, which would read as a panic. A response
+				// already committed aborts, as a done error's does, since
+				// appending to it would forge its end.
+				self.stats.Error(route.id)
+				glog.Infof("[h]route %s lost its postgres connection: %s\n", route.id, err)
+				if observation.writer.status != 0 {
+					observation.finish("aborted")
+					panic(http.ErrAbortHandler)
+				}
+				writeDbConnectionLost(writer)
+				if body != nil {
+					func() {
+						defer recover()
+						body.drain()
+					}()
+				}
+				observation.finish("unavailable")
 				return
 			}
 			self.stats.Error(route.id)
