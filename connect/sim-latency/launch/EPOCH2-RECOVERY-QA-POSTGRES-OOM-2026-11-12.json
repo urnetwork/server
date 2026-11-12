@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "incident": "isolated_recovery_qualification_postgres_oom",
+  "observed_at": "2026-11-12T08:18:28Z",
+  "scope": "Disposable QA PostgreSQL only; not main PostgreSQL or an evaluation container.",
+  "server_commit": "3e72d8572839264459898950f0fc040feda50f11",
+  "test": "TestMigrationsCompetitionDistributedPublishedPrefixesAndGuardFaults",
+  "test_error": "conn closed",
+  "test_log_sha256": "1af94365a7a169d7a2a6c5ddd4d4c554f10c943d13ce106b5eca739e98be210b",
+  "private_evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
+  "kernel_evidence": {
+    "journal_window": "2026-11-12T08:18:20Z/2026-11-12T08:18:35Z",
+    "container_id": "2ee6c908c16f52c15410f0bfe53879c0fec7a5ec620f8c108ce968ff34acb637",
+    "host_postgres_pid": 1697623,
+    "constraint": "CONSTRAINT_MEMCG",
+    "killed_process": "postgres",
+    "anonymous_rss_kib": 853108,
+    "configured_container_memory_bytes": 1073741824,
+    "configured_container_memory_and_swap_bytes": 1073741824,
+    "postgres_tmpfs_maximum_bytes": 805306368,
+    "root_independently_verified": true
+  },
+  "interpretation": {
+    "connection_loss_cause_established": true,
+    "query_memory_root_cause_audit_complete": false,
+    "fixture_memory_sufficiency_established": false,
+    "production_database_failure_demonstrated": false,
+    "automatic_retry_performed": false,
+    "error_suppressed": false,
+    "race_qualification_started": false
+  },
+  "completed_ordinary_checks": {
+    "controller": 393,
+    "cli": 33,
+    "root": 33
+  },
+  "next_action": "Audit schema-census planning and execution memory before choosing a query fix or prospectively bounded QA memory adjustment. Preserve the failed run; rerun affected checks and race qualification before deploying recovery authority.",
+  "live_attempts_restarted": false,
+  "main_database_modified": false
+}
