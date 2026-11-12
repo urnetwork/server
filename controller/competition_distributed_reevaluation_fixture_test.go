@@ -4,6 +4,7 @@ package controller
 
 import (
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -119,7 +120,11 @@ func TestCompetitionDistributedRecoveryPgHistoricalPublicationRejectsExpiredClea
 		intake, round := newCompetitionAnnouncedAdmissionFixtureAt(t, tb, databaseNow.Add(-3*time.Hour-3*time.Minute))
 		settings := intake.settings
 		settings.automationLease, settings.automationRoundId = &intake.lease, round.RoundId
-		settings.roundBaselinePreparation = &roundBaselinePreparationProfile{Settings: defaultRoundBaselinePreparationSettings()}
+		settings.roundBaselinePreparation = &roundBaselinePreparationProfile{
+			Config: roundBaselinePreparationConfig{Schema: 1, Kind: "sim-latency-round-baseline-preparation-config",
+				G2VolumePolicy: settings.EvaluationPolicy.G2VolumePolicy, WorkCoveragePolicy: settings.EvaluationPolicy.WorkCoveragePolicy.Clone()},
+			Settings: defaultRoundBaselinePreparationSettings(),
+		}
 		preparation, err := intake.store.ReserveRoundBaseline(ctx, settings, "synthetic-expired-control-owner", testWorkerImageDigest())
 		if err != nil || preparation == nil || !preparation.Deadline.Add(settings.roundBaselinePreparation.Settings.CleanupTimeout).Before(databaseNow) {
 			tb.Fatal("expired cleanup control did not own its original bounded reservation", err)
@@ -163,7 +168,7 @@ func TestCompetitionDistributedRecoveryPgCurrentIntakeBranchesKeepRealOpening(t 
 			tb.Fatal("ASAP fixture backdated or omitted its actual SQL opening/grant")
 		}
 		// Match RunDistributedCoordinator's real worker child, not its separate
-		// synthetic baseline producer profile with intentionally empty Config.
+		// baseline producer role, even though that role now has matching policy.
 		childSettings := *fixture.selected(0)
 		childSettings.roundBaselinePreparation, childSettings.distributedPreparationOnly = nil, false
 		for _, loader := range []struct {
@@ -208,5 +213,41 @@ func TestCompetitionDistributedRecoveryPgCurrentIntakeBranchesKeepRealOpening(t 
 		if string(prior.baselineJson) != string(after.baselineJson) {
 			tb.Fatal("ASAP completion republished the immutable prepared baseline")
 		}
+	})
+}
+
+// Source derivation must reject incomplete or differently scoped producer
+// roles before any native observation or persisted recovery mutation.
+func TestCompetitionDistributedRecoveryPgProducerPolicyMismatchStopsBeforeNative(t *testing.T) {
+	(&server.TestEnv{ApplyDbMigrations: true, RerunCount: 0}).Run(t, func(tb testing.TB) {
+		fixture := newCompetitionDistributedRecoveryPgFixture(t, tb)
+		originalSettings := fixture.settings
+		before := fixture.snapshot(tb.Context())
+		for _, change := range []struct {
+			name   string
+			mutate func(*roundBaselinePreparationConfig)
+		}{
+			{name: "missing-g2-policy", mutate: func(config *roundBaselinePreparationConfig) { config.G2VolumePolicy = "" }},
+			{name: "different-g2-policy", mutate: func(config *roundBaselinePreparationConfig) { config.G2VolumePolicy = "synthetic-other-policy/v1" }},
+			{name: "missing-coverage-policy", mutate: func(config *roundBaselinePreparationConfig) { config.WorkCoveragePolicy = nil }},
+			{name: "different-coverage-policy", mutate: func(config *roundBaselinePreparationConfig) {
+				config.WorkCoveragePolicy = config.WorkCoveragePolicy.Clone()
+				config.WorkCoveragePolicy.Kind = "synthetic-other-coverage/v1"
+			}},
+		} {
+			copy := *originalSettings
+			profile := *originalSettings.roundBaselinePreparation
+			change.mutate(&profile.Config)
+			copy.roundBaselinePreparation = &profile
+			fixture.settings = &copy
+			if receipt, err := fixture.authorize(tb, tb.Context()); err == nil || receipt != nil ||
+				!strings.Contains(err.Error(), "separately pinned baseline preparation role") || fixture.calls != 0 {
+				tb.Fatal("invalid producer role gained recovery authority", change.name, err)
+			}
+			if after := fixture.snapshot(tb.Context()); !reflect.DeepEqual(before, after) {
+				tb.Fatal("refused producer role changed terminal, audit or slot fences", change.name)
+			}
+		}
+		fixture.settings = originalSettings
 	})
 }

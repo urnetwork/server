@@ -644,6 +644,9 @@ func TestCompetitionDistributedRecoveryPgDerivesUnselectedOperatorRound(t *testi
 		copy.automationRoundId = server.Id{}
 		copy.executorHostId, copy.executorSlotId, copy.distributedRoundEpoch = "", 0, 0
 		copy.DistributedEvaluationPolicy = nil
+		// The local recovery CLI configures only the coordinator transport;
+		// it does not attach the worker's separate control-production role.
+		copy.roundBaselinePreparation, copy.distributedPreparationOnly = nil, false
 		fixture.settings = &copy
 		if receipt, err := fixture.authorize(tb, tb.Context()); err != nil || receipt == nil {
 			tb.Fatal("unselected operator role could not derive exact frozen source/round", err)

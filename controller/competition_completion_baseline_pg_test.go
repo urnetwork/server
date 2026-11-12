@@ -71,7 +71,11 @@ func finishCompetitionPreparedCompletionFixture(tb testing.TB, intake *competiti
 		tb.Fatal(err)
 	}
 	frozen.automationLease, frozen.automationRoundId = &intake.lease, round.RoundId
-	frozen.roundBaselinePreparation = &roundBaselinePreparationProfile{Settings: defaultRoundBaselinePreparationSettings()}
+	frozen.roundBaselinePreparation = &roundBaselinePreparationProfile{
+		Config: roundBaselinePreparationConfig{Schema: 1, Kind: "sim-latency-round-baseline-preparation-config",
+			G2VolumePolicy: frozen.EvaluationPolicy.G2VolumePolicy, WorkCoveragePolicy: frozen.EvaluationPolicy.WorkCoveragePolicy.Clone()},
+		Settings: defaultRoundBaselinePreparationSettings(),
+	}
 	preparation, err := intake.store.ReserveRoundBaseline(ctx, frozen, "synthetic-prepared-coordinator", testWorkerImageDigest())
 	if err != nil || preparation == nil {
 		tb.Fatal("genuine reserved queued source did not own baseline preparation", err)
