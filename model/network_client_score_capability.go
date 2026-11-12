@@ -295,12 +295,14 @@ type clientScorePostQuantumReadyCache struct {
 
 var clientScorePostQuantumReadyState = &clientScorePostQuantumReadyCache{}
 
+// A reset environment reads the marker again.
 func init() {
 	server.OnReset(func() {
 		clientScorePostQuantumReadyState.reset()
 	})
 }
 
+// Forgets the cached marker.
 func (self *clientScorePostQuantumReadyCache) reset() {
 	self.stateLock.Lock()
 	defer self.stateLock.Unlock()

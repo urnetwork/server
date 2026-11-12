@@ -80,6 +80,7 @@ var providerCapabilityClasses = []providerCapabilityClass{
 	providerCapabilityClassD,
 }
 
+// The class's letter, for logs.
 func (self providerCapabilityClass) String() string {
 	switch self {
 	case providerCapabilityClassA:
@@ -134,6 +135,7 @@ func providerCapabilityClassOf(ip string, protocol string) providerCapabilityCla
 // A set of classes, one bit per class.
 type providerCapabilityClassSet uint8
 
+// A set of the classes given.
 func newProviderCapabilityClassSet(classes ...providerCapabilityClass) providerCapabilityClassSet {
 	var set providerCapabilityClassSet
 	for _, class := range classes {
@@ -142,10 +144,12 @@ func newProviderCapabilityClassSet(classes ...providerCapabilityClass) providerC
 	return set
 }
 
+// Whether the set holds the class.
 func (self providerCapabilityClassSet) has(class providerCapabilityClass) bool {
 	return self&(1<<class) != 0
 }
 
+// The classes of both sets.
 func (self providerCapabilityClassSet) intersect(other providerCapabilityClassSet) providerCapabilityClassSet {
 	return self & other
 }

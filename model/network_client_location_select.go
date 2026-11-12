@@ -203,6 +203,7 @@ type findProviders2PoolFacets struct {
 	filters          map[ipFamilyFacet]func(*ClientScore) bool
 }
 
+// The facets and filters of a pool of classes, forced or not.
 func newFindProviders2PoolFacets(classes providerCapabilityClassSet, forceMinimum bool) findProviders2PoolFacets {
 	poolFacets := findProviders2PoolFacets{
 		filters: map[ipFamilyFacet]func(*ClientScore) bool{},
@@ -436,6 +437,7 @@ var findProviders2PostQuantumRequests = prometheus.NewCounterVec(prometheus.Coun
 	Help: "FindProviders2 requests that set post_quantum_encryption or require_modern_provider, per field",
 }, []string{"field"})
 
+// Every label set is exported from the first scrape.
 func init() {
 	for _, rankMode := range []RankMode{RankModeQuality, RankModeSpeed, RankModeOnline} {
 		for _, ip := range []string{ProviderCapabilityIpDualstack, ProviderCapabilityIpIpv4} {

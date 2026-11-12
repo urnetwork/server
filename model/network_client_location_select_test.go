@@ -421,3 +421,30 @@ func TestExportClientScoresTodaysFacetsIgnoreCapabilityCopies(t *testing.T) {
 		connect.AssertEqual(t, with.filterBytes, without.filterBytes)
 	}
 }
+
+// The modern partition document gains the capability facets' entries, and a
+// reader of today's facets decides each of its facets as before (§4.4).
+func TestModernPartitionWithCapabilityFacetsReadsTodaysFacets(t *testing.T) {
+	facet := func(counts []int) clientScoreFacetPayload {
+		return clientScoreFacetPayload{countsBytes: gobEncodeForTest(t, counts), counts: counts}
+	}
+	facets := map[ipFamilyFacet]clientScoreFacetPayload{
+		ipFamilyFacetDualstack:                  facet([]int{2, 3}),
+		ipFamilyFacetV4Only:                     facet([]int{}),
+		ipFamilyFacetV6Only:                     facet([]int{1}),
+		clientScoreCapabilityFacetIpv4Dualproto: facet([]int{}),
+		clientScoreCapabilityFacetDualstackTcp:  facet([]int{4}),
+		clientScoreCapabilityFacetIpv4Tcp:       facet([]int{}),
+	}
+	modernPageChecksums := map[ipFamilyFacet][][32]byte{
+		ipFamilyFacetDualstack:                 {{1}},
+		clientScoreCapabilityFacetDualstackTcp: {{2}},
+	}
+	partitionBytes := gobEncodeForTest(t, newClientScoreModernPartition(facets, modernPageChecksums))
+	state, checksums := clientScoreUnionFacetPartition(partitionBytes, ipFamilyFacetDualstack, facets[ipFamilyFacetDualstack].countsBytes, facets[ipFamilyFacetDualstack].counts)
+	connect.AssertEqual(t, state, clientScoreModernPartitioned)
+	connect.AssertEqual(t, checksums, [][32]byte{{1}})
+	state, checksums = clientScoreUnionFacetPartition(partitionBytes, clientScoreCapabilityFacetDualstackTcp, facets[clientScoreCapabilityFacetDualstackTcp].countsBytes, facets[clientScoreCapabilityFacetDualstackTcp].counts)
+	connect.AssertEqual(t, state, clientScoreModernPartitioned)
+	connect.AssertEqual(t, checksums, [][32]byte{{2}})
+}
