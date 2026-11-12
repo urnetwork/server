@@ -499,6 +499,10 @@ func TestMigrationsCurrentSuffixSchemaFaultsReachSignal(t *testing.T) {
 		// rows a release from before it stores read unknown rather than none.
 		{name: "ping target evidence count defaults to none", version: server.NetworkPingTargetEvidenceSchemaMigrationVersion(),
 			sql: `ALTER TABLE network_ping_target_hour_tally ALTER COLUMN evidence_rejection_count SET DEFAULT 0`},
+		// A capture the flag award's network is read by its own index, so a
+		// network's wins outlive its clients' rows.
+		{name: "ctf award network index absent", version: server.CtfAwardNetworkMigrationVersion(),
+			sql: `DROP INDEX ctf_award_network`},
 	}
 	// Current-head fault expectations must name a custodian still active at
 	// that head; inherited guards transfer with the published contract.

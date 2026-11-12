@@ -36,6 +36,8 @@ type snCtfClaimedChain struct {
 	refuseBatch     int
 	// hold every read until its context ends
 	hold bool
+	// called as each batch is read, as a slow read takes time
+	onBatch func()
 	// reads in progress
 	inFlight atomic.Int32
 }
@@ -77,6 +79,9 @@ func (self *snCtfClaimedChain) LedgerV2FinalizedBlock(ctx context.Context) (uint
 func (self *snCtfClaimedChain) LedgerV2ClaimedAt(ctx context.Context, noId uint64, block uint64, indexes []uint64) ([]uint256.Int, error) {
 	if err := self.wait(ctx); err != nil {
 		return nil, err
+	}
+	if self.onBatch != nil {
+		self.onBatch()
 	}
 	self.lock.Lock()
 	defer self.lock.Unlock()
@@ -146,9 +151,14 @@ func requireSnCtfClaimed(t testing.TB, what string, claimed map[uint64]uint256.I
 
 // One answer reads the finalized block once and every account at it, in
 // batches of at most stMaximumEVMRPCBatchCalls, the indexes in their order. A
-// value is answered as read for snCtfClaimedTtl, so an answer reads only the
-// accounts no answer read lately; past it, it is read again.
+// value is answered as read for snCtfClaimedTtl from when its read began, so
+// an answer reads only the accounts no answer read lately; past it, it is read
+// again. The time is about 30 s, but under the 30 s between the apps' reads
+// after a claim, so that each of those reads the chain again.
 func TestSnCtfClaimedOfReadsOneBlockInBatchesAndKeepsThem(t *testing.T) {
+	if snCtfClaimedTtl < 20*time.Second || 30*time.Second <= snCtfClaimedTtl {
+		t.Fatalf("claimed is kept %s, want about 30 s, under the apps' 30 s between reads after a claim", snCtfClaimedTtl)
+	}
 	chain := &snCtfClaimedChain{head: 9_702_100}
 	now := withSnCtfClaimedChain(t, chain)
 	cfg := ledgerV2TestConfig()
@@ -162,9 +172,9 @@ func TestSnCtfClaimedOfReadsOneBlockInBatchesAndKeepsThem(t *testing.T) {
 		t.Fatalf("120 accounts: %d finalized reads, batches %v at %v; want one, 50, 50 and 20 at its block", finalized, sizes, blocks)
 	}
 
-	// 25 s later the 120 are answered as read, and only 10 new ones are read,
-	// at the block the finalized head is at now
-	*now = now.Add(25 * time.Second)
+	// 5 s before they expire the 120 are answered as read, and only 10 new
+	// ones are read, at the block the finalized head is at now
+	*now = now.Add(snCtfClaimedTtl - 5*time.Second)
 	chain.head = 9_702_102
 	more := snCtfClaimedTestIndexes(0, 130)
 	requireSnCtfClaimed(t, "130 accounts, 120 kept", snCtfClaimedOf(ctx, cfg, pool, slices.Concat(more, []uint64{3, 125})), more)
@@ -176,11 +186,25 @@ func TestSnCtfClaimedOfReadsOneBlockInBatchesAndKeepsThem(t *testing.T) {
 	if finalized, sizes, _ := chain.reads(); finalized != 0 || len(sizes) != 0 {
 		t.Fatalf("every account kept: %d finalized reads, batches %v", finalized, sizes)
 	}
-	// the first 120 expire at 30 s, the last 10 not yet
+	// the first 120 expire, the last 10 not yet
 	*now = now.Add(5 * time.Second)
 	requireSnCtfClaimed(t, "120 expired", snCtfClaimedOf(ctx, cfg, pool, more), more)
 	if finalized, sizes, _ := chain.reads(); finalized != 1 || !slices.Equal(sizes, []int{50, 50, 20}) {
 		t.Fatalf("120 expired: %d finalized reads, batches %v", finalized, sizes)
+	}
+
+	// a value is kept from when its read began: one whose batch took 4 s is
+	// read again snCtfClaimedTtl after the read began, though it finished 4 s
+	// later, so a slow read is never kept longer than a quick one
+	snCtfResetClaimedCache()
+	chain.onBatch = func() { *now = now.Add(4 * time.Second) }
+	snCtfClaimedOf(ctx, cfg, pool, []uint64{1})
+	chain.onBatch = nil
+	chain.reads()
+	*now = now.Add(snCtfClaimedTtl - 4*time.Second)
+	snCtfClaimedOf(ctx, cfg, pool, []uint64{1})
+	if _, sizes, _ := chain.reads(); !slices.Equal(sizes, []int{1}) {
+		t.Fatalf("a slow read %s after it began: batches %v, want it read again", snCtfClaimedTtl, sizes)
 	}
 
 	// another pool, or another vault, is another account

@@ -4,8 +4,8 @@ package controller
 // (sn_ctf_api_wins.go): each winning coldkey's account in the CTF pool, its
 // cumulative in each finalized root that pays one of its wins, and vault2's
 // claimed. The answer gives them snCtfClaimsTimeout, about five seconds;
-// whatever is not read by then answers claimed null, so a chain outage never
-// fails the answer or holds it.
+// whatever is not read by then answers claimed null, so a claim state the
+// chain cannot give in time never fails the answer, nor holds it past that.
 //
 //   - The accounts come from the server's records and the ledger objects, each
 //     read once for all of the answer's coldkeys: the count of recorded
@@ -36,8 +36,12 @@ import (
 )
 
 // How long vault2's claimed of an account is answered as read before an
-// answer reads it again.
-const snCtfClaimedTtl = 30 * time.Second
+// answer reads it again, counted from when the read began. After a claim the
+// apps read the wins at its Done and again 30, 60 and 120 s after it, so a
+// value kept under 30 s is never the one an app's read before took, whatever
+// that read's latency: once the claim is final, the app's next read shows it,
+// unless another reader read the account in the meantime.
+const snCtfClaimedTtl = 25 * time.Second
 
 // The most claimed values kept. Past it the expired ones are dropped, and all
 // of them when that is not enough.
@@ -71,11 +75,12 @@ func snCtfResetClaimedCache() {
 }
 
 // snCtfClaimedOf is vault2's claimed of each index of the CTF pool, by index.
-// A value read less than snCtfClaimedTtl ago is answered as it was read. The
-// others are read at one finalized block, which is read once, a batch of
-// stMaximumEVMRPCBatchCalls at a time in the indexes' order, and each batch is
-// kept as soon as it is read. An index whose value is not read before ctx
-// ends, or whose batch the chain refuses, is left out.
+// A value whose read began less than snCtfClaimedTtl ago is answered as it was
+// read. The others are read at one finalized block, which is read once, a
+// batch of stMaximumEVMRPCBatchCalls at a time in the indexes' order, and each
+// batch is kept as soon as it is read, as of the time this read began. An
+// index whose value is not read before ctx ends, or whose batch the chain
+// refuses, is left out.
 func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes []uint64) map[uint64]uint256.Int {
 	claimed := map[uint64]uint256.Int{}
 	keyOf := func(index uint64) snCtfClaimedKey {
@@ -129,14 +134,13 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 			glog.Infof("[sn]ctf claimed of %d accounts of pool %d at block %d, %d of them read: %s\n", len(unread), poolId, block, start, err)
 			break
 		}
-		readTime := snCtfClaimedNow()
 		cache.lock.Lock()
 		if cache.reads == nil {
 			cache.reads = map[snCtfClaimedKey]snCtfClaimedRead{}
 		}
 		if snCtfClaimedCacheLimit < len(cache.reads)+len(batch) {
 			for key, read := range cache.reads {
-				if snCtfClaimedTtl <= readTime.Sub(read.readTime) {
+				if snCtfClaimedTtl <= now.Sub(read.readTime) {
 					delete(cache.reads, key)
 				}
 			}
@@ -146,7 +150,9 @@ func snCtfClaimedOf(ctx context.Context, cfg *StConfig, poolId uint64, indexes [
 		}
 		for i, index := range batch {
 			claimed[index] = values[i]
-			cache.reads[keyOf(index)] = snCtfClaimedRead{claimed: values[i], readTime: readTime}
+			// as of when the read began, never later: a value read slowly
+			// expires no later than one read quickly
+			cache.reads[keyOf(index)] = snCtfClaimedRead{claimed: values[i], readTime: now}
 		}
 		cache.lock.Unlock()
 	}

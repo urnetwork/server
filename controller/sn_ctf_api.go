@@ -465,8 +465,8 @@ func SnCtfClient(w http.ResponseWriter, r *http.Request) {
 // How long an answer of GET /sn/ctf/client may spend reading the claim states
 // of its wins: each coldkey's account in the CTF pool, and vault2's claimed at
 // the finalized head. A state not read by then answers claimed null, so a
-// chain that is down or slow never fails the answer or holds it past this.
-// Tests shorten it.
+// claim state that a chain down or slow cannot give never fails the answer,
+// nor holds it past this. Tests shorten it.
 var snCtfClaimsTimeout = 5 * time.Second
 
 // snCtfClientAnswer reads what GET /sn/ctf/client answers for a scope: a
