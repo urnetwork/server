@@ -219,8 +219,10 @@ func TestDeadlineDeferred2048ContractsPreserveConservationWithoutRetries(t *test
 				}
 			})
 		})
-		if len(providerTaskIds) != total {
-			t.Fatal("deadline population did not retain one projection owner each", len(providerTaskIds))
+		// The sweeps are the providers' whole record: the population queues no
+		// provider totals (BILLING-SPLIT.md).
+		if len(providerTaskIds) != 0 {
+			t.Fatal("deadline population published provider projection owners", len(providerTaskIds))
 		}
 		for _, f := range fixtures {
 			if reserved := Testing_NetEscrowByteCount(ctx, f.balanceId); reserved != 17*perPayer {
@@ -234,34 +236,17 @@ func TestDeadlineDeferred2048ContractsPreserveConservationWithoutRetries(t *test
 				t.Fatal("applied debit retained reservation", reserved)
 			}
 		}
-		providerTotalsBatchDue(ctx, providerTaskIds)
-		settings := task.DefaultTaskWorkerSettings()
-		settings.ClaimRegisteredTargetsOnly = true
-		worker := task.NewTaskWorker(ctx, settings)
-		defer worker.Close()
-		worker.AddTargets(NewLegacyProviderTotalsTaskTarget())
-		remaining := total
-		for pass := 0; remaining > 0; pass++ {
-			if pass >= total {
-				t.Fatal("provider batches did not finish bounded population")
-			}
-			finished, retried, posts, err := worker.EvalTasks(min(remaining, 256))
-			if err != nil || len(finished) == 0 || len(retried)+len(posts) != 0 {
-				t.Fatal("provider batch failed or rescheduled exact allocation", len(finished), len(retried), err)
-			}
-			remaining -= len(finished)
-		}
 		server.Db(ctx, func(conn server.PgConn) {
 			var grants, accounts, grantsWritten, accountsWritten, remainingDebt, remainingOwners int
 			server.Raise(conn.QueryRow(ctx, `SELECT
 				(SELECT count(*) FROM transfer_balance WHERE balance_id=ANY($1) AND balance_byte_count=100000-544),
-				(SELECT count(*) FROM account_balance WHERE network_id=ANY($2) AND provided_byte_count=8704 AND provided_net_revenue_nano_cents=8704),
+				(SELECT count(*) FROM account_balance WHERE network_id=ANY($2)),
 				(SELECT count(*) FROM test_deadline_grant_write),
 				(SELECT count(*) FROM test_provider_total_write),
 				(SELECT count(*) FROM transfer_debit_journal WHERE contract_id=ANY($3)),
-				(SELECT count(*) FROM pending_task WHERE task_id=ANY($4))`, balances, providers, ids, providerTaskIds).Scan(&grants, &accounts, &grantsWritten, &accountsWritten, &remainingDebt, &remainingOwners))
-			if grants != payerCount || accounts != 4 || grantsWritten != payerCount || accountsWritten < 32 || accountsWritten >= total || remainingDebt+remainingOwners != 0 {
-				t.Fatal("batched projections lost conservation or amortization", grants, accounts, grantsWritten, accountsWritten, remainingDebt, remainingOwners)
+				(SELECT count(*) FROM pending_task WHERE function_name=$4)`, balances, providers, ids, task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()).Scan(&grants, &accounts, &grantsWritten, &accountsWritten, &remainingDebt, &remainingOwners))
+			if grants != payerCount || accounts != 0 || grantsWritten != payerCount || accountsWritten != 0 || remainingDebt+remainingOwners != 0 {
+				t.Fatal("population lost debit conservation or wrote provider totals", grants, accounts, grantsWritten, accountsWritten, remainingDebt, remainingOwners)
 			}
 		})
 		before := deadlineOverlapSnapshot(ctx, ids, balances, providers)

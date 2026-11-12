@@ -29,7 +29,7 @@ type competitionIntakeFirstDatabaseFixture struct {
 // A real, presently live SQL lease is acquired first. Only the application
 // fixture clock is then moved backward to materialize its historical epoch;
 // all production triggers remain installed and active throughout bootstrap.
-func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context) *competitionIntakeFirstDatabaseFixture {
+func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context, configureFuture ...func(*Settings)) *competitionIntakeFirstDatabaseFixture {
 	t.Helper()
 	if server.CompetitionIntakeFirstMigrationVersion() == 0 {
 		t.Fatal("intake lifecycle fixture requires its actually registered composed migration")
@@ -116,6 +116,9 @@ func newCompetitionIntakeFirstDatabaseFixture(t *testing.T, ctx context.Context)
 	}
 	future, _, overlay := trustedInstrumentAuthorizationFixture(t)
 	settings.FutureEpochPolicy = future.FutureEpochPolicy
+	for _, configure := range configureFuture {
+		configure(settings)
+	}
 	// This is a new synthetic receipt of the fixture's frozen provider class,
 	// not a relabeling of a retained historical source-build receipt.
 	providerModel, providerReasoning, supported := model.CompetitionWinnerReviewProvider(model.CompetitionSnowWinnerReviewPolicy)

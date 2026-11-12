@@ -51,6 +51,11 @@ CREATE TEMP TABLE transfer_balance (
 CREATE TEMP TABLE solana_unfulfilled_payment (reason text, record_time timestamptz);
 CREATE TEMP TABLE apple_subscription_transaction (transaction_id text);
 CREATE TEMP TABLE play_purchase_binding (purchase_token text);
+CREATE TEMP TABLE crypto_payment_receipt (
+    asset text, state text, review_reason text, intent_id uuid,
+    first_seen_at timestamptz
+);
+CREATE TEMP TABLE crypto_scan_cursor (asset text, last_success_at timestamptz);
 `))
 }
 

@@ -11,6 +11,8 @@ import (
 // A committed sweep is earned money, but cannot stand in for a successfully
 // applied account projection. A rejected owner must remain visible as missing
 // account totals, and replay of that same owner must not repeat its increment.
+// Settlement queues no projection since 2026-11-11 (BILLING-SPLIT.md); the row
+// here is one an older binary queued, which the per-task reader still applies.
 func TestLegacySettlementPayoutAccountRequiresAppliedProjection(t *testing.T) {
 	providerTotalsTestEnv(t, func(t testing.TB, ctx context.Context) {
 		f, id := legacySettlementTestOpenFinals(t, ctx)
@@ -21,18 +23,15 @@ func TestLegacySettlementPayoutAccountRequiresAppliedProjection(t *testing.T) {
 			t.Fatalf("payout projection fixture settlement failed: %v", err)
 		}
 		requireLegacyProviderDurability(t, ctx, f, id, 11, 11)
+
+		projectionId := queueLegacyProviderTotalsFromSweepsForTest(t, ctx, id)
+		requireLegacyProviderBacklogDurability(t, ctx, f, id, 11, 11)
 		if got := contractPayoutTestAccountAmount(t, ctx, f.destinationNetworkId); got != (contractPayoutTestAmount{}) {
 			t.Fatalf("unapplied earnings masqueraded as account totals: %v", got)
 		}
-
-		var projectionId server.Id
-		server.Db(ctx, func(conn server.PgConn) {
-			server.Raise(conn.QueryRow(ctx, `SELECT task_id FROM pending_task WHERE run_once_key=$1`,
-				task.RunOnce("legacy_provider_totals", id).String()).Scan(&projectionId))
-		})
 		owner := task.GetTasks(ctx, projectionId)[projectionId]
 		if owner == nil {
-			t.Fatal("settlement lost its durable projection owner")
+			t.Fatal("queued projection lost its durable owner")
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			server.RaisePgResult(tx.Exec(ctx, `CREATE FUNCTION synthetic_payout_projection_failure() RETURNS trigger LANGUAGE plpgsql AS
@@ -45,7 +44,7 @@ func TestLegacySettlementPayoutAccountRequiresAppliedProjection(t *testing.T) {
 			t.Fatal("failed account projection reported success")
 		}
 		requireProviderTotalsTestState(t, ctx, projectionId, f.destinationNetworkId, false, 0, 0)
-		requireLegacyProviderDurability(t, ctx, f, id, 11, 11)
+		requireLegacyProviderBacklogDurability(t, ctx, f, id, 11, 11)
 		if got := contractPayoutTestAccountAmount(t, ctx, f.destinationNetworkId); got != (contractPayoutTestAmount{}) {
 			t.Fatalf("failed projection acquired account totals: %v", got)
 		}
@@ -54,13 +53,21 @@ func TestLegacySettlementPayoutAccountRequiresAppliedProjection(t *testing.T) {
 				DROP FUNCTION synthetic_payout_projection_failure()`))
 		})
 
-		want := map[server.Id]contractPayoutTestAmount{f.destinationNetworkId: {byteCount: 11, payout: 11}}
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId}, want)
+		want := contractPayoutTestAmount{byteCount: 11, payout: 11}
+		projectLegacyProviderTotalsForTest(t, ctx)
+		if got := contractPayoutTestAccountAmount(t, ctx, f.destinationNetworkId); got != want {
+			t.Fatalf("applied projection account totals = %v, want %v", got, want)
+		}
 		requireProviderTotalsTestState(t, ctx, projectionId, f.destinationNetworkId, true, 11, 11)
 		if _, _, err := target.RunSpecific(ctx, owner); err != nil {
 			t.Fatalf("applied account projection replay failed: %v", err)
 		}
-		assertContractPayoutTestAccounts(t, ctx, []server.Id{f.sourceNetworkId, f.destinationNetworkId}, want)
-		requireLegacyProviderDurability(t, ctx, f, id, 11, 11)
+		if got := contractPayoutTestAccountAmount(t, ctx, f.destinationNetworkId); got != want {
+			t.Fatalf("replayed projection account totals = %v, want %v", got, want)
+		}
+		if got := contractPayoutTestAccountAmount(t, ctx, f.sourceNetworkId); got != (contractPayoutTestAmount{}) {
+			t.Fatalf("payer acquired provider totals: %v", got)
+		}
+		requireLegacyProviderBacklogDurability(t, ctx, f, id, 11, 11)
 	})
 }

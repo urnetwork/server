@@ -12,15 +12,19 @@ import (
 //
 // The three recurring grants run on three different schedules, and each balance's
 // window extends a little past the end of its period so consecutive grants overlap
-// and a client never sees a gap at the boundary. Spending draws the balance that
-// ends first, so the old grant's leftover is used up before the new grant.
+// and a client never sees a gap at the boundary. Spending draws a network's paid
+// Pro grants first and otherwise the balance that ends first
+// (transfer_balance_funding_order.go), so the old grant's leftover is used up
+// before the new grant of its kind.
 
 // How long past the end of the day a daily free balance stays valid.
 const FreeGrantGrace = 1 * time.Hour
 
-// How long past the end of the month a monthly Pro balance stays valid. It is also
-// the window in which a lapsed subscriber is still Pro, because the Pro entitlement
-// is exactly "has an in-window pro balance" (see pro_model.go).
+// How long past the end of its cycle a Pro grant stays valid
+// (pro_grant_cycle_model.go). Consecutive cycles' grants overlap by this, and a
+// network whose subscription lapsed keeps its last grant, and so Pro, this long
+// past its last cycle, because the Pro entitlement is exactly "has an in-window pro
+// balance" (see pro_model.go).
 const ProGrantGrace = 24 * time.Hour
 
 // The window for the daily free grant covering `now`:
@@ -32,8 +36,12 @@ func FreeGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	return
 }
 
-// The window for the monthly Pro grant covering `now`:
-// [start of month, start of next month + 1 day).
+// The window of the retired calendar-month Pro grant covering `now`:
+// [start of month, start of next month + 1 day). Every network got it on the 1st
+// until grants moved to each network's own cycle (pro_grant_cycle_model.go). It
+// is kept to recognize those grants: the balance summary's legacy grants with no
+// recorded kind, and the cutover, which starts a network's cycles where its last
+// calendar grant's month ends.
 func ProGrantWindow(now time.Time) (startTime time.Time, endTime time.Time) {
 	year, month, _ := now.UTC().Date()
 	startTime = time.Date(year, month, 1, 0, 0, 0, 0, time.UTC)

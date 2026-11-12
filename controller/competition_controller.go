@@ -247,6 +247,9 @@ func (self *blobArtifactArchive) ArchiveAttempt(
 		manifest.Executor.RunId != competitionagent.RunId(job.JobId.String(), job.EvaluationCycle, job.AttemptCount)) {
 		return nil, errors.New("distributed archive lost its exact executor custody")
 	}
+	if err := validateCompetitionSecurityToolchainArchive(settings, job, manifest); err != nil {
+		return nil, err
+	}
 	artifacts := append([]evaluationArtifact(nil), manifest.Artifacts...)
 	workerArtifacts := []struct {
 		path   string
@@ -580,56 +583,58 @@ var (
 )
 
 type Settings struct {
-	OfficialReviewImportSha256    string `yaml:"official_review_import_sha256,omitempty"`
-	reevaluationRuntime           *model.CompetitionJobReevaluationRuntime
-	reevaluationRuntimeSha256     string
-	AutomationPolicy              model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
-	Enabled                       bool                                    `yaml:"enabled"`
-	CompetitionId                 string                                  `yaml:"competition_id"`
-	BaseSha                       string                                  `yaml:"base_sha"`
-	EvaluatorImageDigest          string                                  `yaml:"evaluator_image_digest"`
-	PatchPolicy                   PatchPolicy                             `yaml:"patch_policy"`
-	EvaluationPolicy              EvaluationPolicy                        `yaml:"evaluation_policy"`
-	FutureEpochPolicy             *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
-	IntakeFirstPolicy             *model.CompetitionIntakeFirstPolicy     `yaml:"intake_first_policy,omitempty"`
-	DistributedEvaluationPolicy   *CompetitionDistributedEvaluationPolicy `yaml:"-"`
-	SeasonPolicy                  SeasonPolicy                            `yaml:"season_policy"`
-	ArtifactRoot                  string                                  `yaml:"artifact_root"`
-	ArtifactBucket                string                                  `yaml:"artifact_bucket"`
-	ConfigLocalDirectory          string                                  `yaml:"config_local_directory"`
-	VaultLocalDirectory           string                                  `yaml:"vault_local_directory"`
-	SeasonEndsAt                  time.Time                               `yaml:"season_ends_at"`
-	RetainUntil                   time.Time                               `yaml:"retain_until"`
-	WorkerLeaseSeconds            int                                     `yaml:"worker_lease_seconds"`
-	WorkerHeartbeatSeconds        int                                     `yaml:"worker_heartbeat_seconds"`
-	HostHeartbeatMaxAgeSeconds    int                                     `yaml:"host_heartbeat_max_age_seconds"`
-	MaxInfrastructureAttempts     int                                     `yaml:"max_infrastructure_attempts"`
-	SimulatorCommand              string                                  `yaml:"simulator_command"`
-	EvaluatorCommand              string                                  `yaml:"evaluator_command"`
-	EvaluatorCommandSha256        string                                  `yaml:"evaluator_command_sha256"`
-	SelfCheckCommand              string                                  `yaml:"self_check_command"`
-	SelfCheckCommandSha256        string                                  `yaml:"self_check_command_sha256"`
-	Tokens                        []Token                                 `yaml:"-"`
-	SeedKey                       []byte                                  `yaml:"-"`
-	workloadGenerator             WorkloadGenerator
-	artifactArchive               artifactArchive
-	automationLease               *model.CompetitionSupervisorLease
-	automationRoundId             server.Id
-	automationTargetRoundId       server.Id
-	roundBaselinePreparation      *roundBaselinePreparationProfile
-	futureBaselinePreparation     *roundBaselinePreparationProfile
-	intakeAdmission               *competitionIntakeAdmission
-	intakeFirstActivation         *model.CompetitionSourceIntakeActivation
-	distributedCoordinator        *competitionDistributedCoordinatorProfile
-	distributedRoundEpoch         int
-	distributedPreparationOnly    bool
-	executorHostId                string
-	executorSlotId                int
-	executorReconcileExpiredOnly  bool
-	executorReconcileOnly         bool
-	distributedSourceCommits      map[string]string
-	executorControlAmendment      *competitionExecutorControlAmendmentRecord
-	executorQualificationRecovery *competitionExecutorQualificationRecoveryRecord
+	securityToolchainException          *competitionSecurityToolchainException
+	readinessSecurityToolchainException *competitionSecurityToolchainException
+	OfficialReviewImportSha256          string `yaml:"official_review_import_sha256,omitempty"`
+	reevaluationRuntime                 *model.CompetitionJobReevaluationRuntime
+	reevaluationRuntimeSha256           string
+	AutomationPolicy                    model.CompetitionAutomationPolicy       `yaml:"automation_policy"`
+	Enabled                             bool                                    `yaml:"enabled"`
+	CompetitionId                       string                                  `yaml:"competition_id"`
+	BaseSha                             string                                  `yaml:"base_sha"`
+	EvaluatorImageDigest                string                                  `yaml:"evaluator_image_digest"`
+	PatchPolicy                         PatchPolicy                             `yaml:"patch_policy"`
+	EvaluationPolicy                    EvaluationPolicy                        `yaml:"evaluation_policy"`
+	FutureEpochPolicy                   *CompetitionFutureEpochPolicy           `yaml:"future_epoch_policy,omitempty"`
+	IntakeFirstPolicy                   *model.CompetitionIntakeFirstPolicy     `yaml:"intake_first_policy,omitempty"`
+	DistributedEvaluationPolicy         *CompetitionDistributedEvaluationPolicy `yaml:"-"`
+	SeasonPolicy                        SeasonPolicy                            `yaml:"season_policy"`
+	ArtifactRoot                        string                                  `yaml:"artifact_root"`
+	ArtifactBucket                      string                                  `yaml:"artifact_bucket"`
+	ConfigLocalDirectory                string                                  `yaml:"config_local_directory"`
+	VaultLocalDirectory                 string                                  `yaml:"vault_local_directory"`
+	SeasonEndsAt                        time.Time                               `yaml:"season_ends_at"`
+	RetainUntil                         time.Time                               `yaml:"retain_until"`
+	WorkerLeaseSeconds                  int                                     `yaml:"worker_lease_seconds"`
+	WorkerHeartbeatSeconds              int                                     `yaml:"worker_heartbeat_seconds"`
+	HostHeartbeatMaxAgeSeconds          int                                     `yaml:"host_heartbeat_max_age_seconds"`
+	MaxInfrastructureAttempts           int                                     `yaml:"max_infrastructure_attempts"`
+	SimulatorCommand                    string                                  `yaml:"simulator_command"`
+	EvaluatorCommand                    string                                  `yaml:"evaluator_command"`
+	EvaluatorCommandSha256              string                                  `yaml:"evaluator_command_sha256"`
+	SelfCheckCommand                    string                                  `yaml:"self_check_command"`
+	SelfCheckCommandSha256              string                                  `yaml:"self_check_command_sha256"`
+	Tokens                              []Token                                 `yaml:"-"`
+	SeedKey                             []byte                                  `yaml:"-"`
+	workloadGenerator                   WorkloadGenerator
+	artifactArchive                     artifactArchive
+	automationLease                     *model.CompetitionSupervisorLease
+	automationRoundId                   server.Id
+	automationTargetRoundId             server.Id
+	roundBaselinePreparation            *roundBaselinePreparationProfile
+	futureBaselinePreparation           *roundBaselinePreparationProfile
+	intakeAdmission                     *competitionIntakeAdmission
+	intakeFirstActivation               *model.CompetitionSourceIntakeActivation
+	distributedCoordinator              *competitionDistributedCoordinatorProfile
+	distributedRoundEpoch               int
+	distributedPreparationOnly          bool
+	executorHostId                      string
+	executorSlotId                      int
+	executorReconcileExpiredOnly        bool
+	executorReconcileOnly               bool
+	distributedSourceCommits            map[string]string
+	executorControlAmendment            *competitionExecutorControlAmendmentRecord
+	executorQualificationRecovery       *competitionExecutorQualificationRecoveryRecord
 	// Non-serialized proof set only after exact retained runtime authentication.
 	runtimeIntentSha256 string
 }
@@ -1239,24 +1244,26 @@ type evaluationArtifact struct {
 }
 
 type artifactManifest struct {
-	Executor               *competitionExecutorArtifactIdentity `json:"executor,omitempty"`
-	Schema                 int                                  `json:"schema"`
-	JobId                  string                               `json:"job_id"`
-	RoundId                string                               `json:"round_id"`
-	SourceEpoch            int                                  `json:"source_epoch"`
-	Attempt                int                                  `json:"attempt"`
-	EvaluatorImageDigest   string                               `json:"evaluator_image_digest"`
-	ApiImageDigest         string                               `json:"api_image_digest"`
-	WorkerImageDigest      string                               `json:"worker_image_digest"`
-	EvaluatorCommandSha256 string                               `json:"evaluator_command_sha256"`
-	RequestSha256          string                               `json:"request_sha256"`
-	PatchSha256            string                               `json:"patch_sha256"`
-	StderrSha256           string                               `json:"stderr_sha256"`
-	ResultSha256           string                               `json:"result_sha256"`
-	Security               evaluationSecurity                   `json:"security"`
-	Artifacts              []evaluationArtifact                 `json:"artifacts"`
-	Failure                *CompetitionError                    `json:"failure,omitempty"`
-	Retention              *artifactRetention                   `json:"retention,omitempty"`
+	SecurityToolchainException    *competitionSecurityToolchainException `json:"security_toolchain_exception,omitempty"`
+	ExecutionEvaluatorImageDigest string                                 `json:"execution_evaluator_image_digest,omitempty"`
+	Executor                      *competitionExecutorArtifactIdentity   `json:"executor,omitempty"`
+	Schema                        int                                    `json:"schema"`
+	JobId                         string                                 `json:"job_id"`
+	RoundId                       string                                 `json:"round_id"`
+	SourceEpoch                   int                                    `json:"source_epoch"`
+	Attempt                       int                                    `json:"attempt"`
+	EvaluatorImageDigest          string                                 `json:"evaluator_image_digest"`
+	ApiImageDigest                string                                 `json:"api_image_digest"`
+	WorkerImageDigest             string                                 `json:"worker_image_digest"`
+	EvaluatorCommandSha256        string                                 `json:"evaluator_command_sha256"`
+	RequestSha256                 string                                 `json:"request_sha256"`
+	PatchSha256                   string                                 `json:"patch_sha256"`
+	StderrSha256                  string                                 `json:"stderr_sha256"`
+	ResultSha256                  string                                 `json:"result_sha256"`
+	Security                      evaluationSecurity                     `json:"security"`
+	Artifacts                     []evaluationArtifact                   `json:"artifacts"`
+	Failure                       *CompetitionError                      `json:"failure,omitempty"`
+	Retention                     *artifactRetention                     `json:"retention,omitempty"`
 }
 
 func (self CommandEvaluator) SelfCheck(ctx context.Context, settings *Settings) (HostSelfCheck, error) {
@@ -3566,6 +3573,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	checks, err := self.readinessChecks(ctx, settings)
 	result.Checks = checks
 	if err != nil {
+		glog.Infof("[competition]readiness checks failed: %s\n", competitionLogError(err))
 		result.Checks["database"] = false
 		evalError := infrastructureError("readiness_failed", "competition dependencies did not pass readiness")
 		evalError.Readiness = &result
@@ -3574,6 +3582,7 @@ func (self *Service) Ready(ctx context.Context) (ReadinessResult, *CompetitionEr
 	result.Ready = allChecks(checks)
 	result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, settings, round, checks)
 	if err != nil {
+		glog.Infof("[competition]readiness hold status unavailable: %s\n", competitionLogError(err))
 		result.Ready = false
 		result.Checks["automation_hold_status"] = false
 		evalError := infrastructureError("readiness_failed", "competition hold status is unavailable")
@@ -3705,10 +3714,12 @@ func (self *Service) Info(ctx context.Context) (*InfoResult, *CompetitionError) 
 		}
 		checks, checkErr := self.readinessChecks(ctx, effective)
 		if checkErr != nil {
+			glog.Infof("[competition]intake readiness checks failed: %s\n", competitionLogError(checkErr))
 			return infrastructureError("readiness_failed", "competition intake status is unavailable")
 		}
 		result.RuntimeStatus, err = self.competitionRuntimeStatus(ctx, effective, round, checks)
 		if err != nil {
+			glog.Infof("[competition]intake hold status unavailable: %s\n", competitionLogError(err))
 			return infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		return nil
@@ -4096,6 +4107,7 @@ func (self *Service) getScoreWithDecisionContract(ctx context.Context, jobId ser
 	if v2 {
 		held, holdErr := self.competitionPublicationHeld(ctx, settings, &job.Round)
 		if holdErr != nil {
+			glog.Infof("[competition]score job publication hold status unavailable: %s\n", competitionLogError(holdErr))
 			return nil, http.StatusServiceUnavailable, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		if held {
@@ -4145,6 +4157,7 @@ func (self *Service) roundViewContext(ctx context.Context, round *roundRecord) (
 	if competitionRoundUsesV2(round) {
 		held, holdErr := self.competitionPublicationHeld(ctx, self.settings, round)
 		if holdErr != nil {
+			glog.Infof("[competition]round publication hold status unavailable: %s\n", competitionLogError(holdErr))
 			return nil, infrastructureError("readiness_failed", "competition hold status is unavailable")
 		}
 		published = published && !held
@@ -6097,6 +6110,10 @@ func (self PostgresStore) GetJob(ctx context.Context, settings *Settings, jobId 
 }
 
 func (self PostgresStore) Readiness(ctx context.Context, settings *Settings) (checks map[string]bool, err error) {
+	settings, err = self.competitionReadinessExecutionSettings(ctx, settings)
+	if err != nil {
+		return nil, err
+	}
 	checks = map[string]bool{
 		"configuration":                true,
 		"frozen_policy":                true,
@@ -6372,8 +6389,11 @@ func (self PostgresStore) Claim(ctx context.Context, settings *Settings, workerI
 func (self PostgresStore) Heartbeat(ctx context.Context, settings *Settings, workerId string, jobId server.Id) error {
 	slotTable, slotId := competitionExecutionSlotTable(settings), competitionExecutorSlotId(settings)
 	return captureCompetitionHeartbeatDatabase(ctx, func(observation *competitionHeartbeatDatabaseObservation) {
-		if settings.AutomationPolicy.Enabled && settings.automationLease != nil && !competitionDistributedEnabled(settings) && self.beforeLeaseRowLockForTest == nil {
+		if settings.AutomationPolicy.Enabled && settings.automationLease != nil && self.beforeLeaseRowLockForTest == nil {
 			observation.sqlShape, observation.sqlValid = competitionHeartbeatLegacySlotShape, true
+			if competitionDistributedEnabled(settings) {
+				observation.sqlShape = competitionHeartbeatDistributedSlotShape
+			}
 		}
 		server.Tx(ctx, func(tx server.PgTx) {
 			tx = observation.beginCallback(tx)
@@ -6632,7 +6652,20 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 				if baselineSha256 != outcome.RoundBaselineSha256 {
 					panic(errors.New("round baseline outcome digest does not match its bytes"))
 				}
-				insertResult, insertErr := tx.Exec(ctx, `
+				readBaseline := func() (*roundBaselineRecord, error) {
+					return scanRoundBaseline(tx.QueryRow(ctx, `
+						SELECT round_id, baseline_json, baseline_sha256, source_job_id,
+						       source_attempt, source_artifact_manifest_sha256, base_sha,
+						       providers_sha256, evaluator_image_digest, scorer_version,
+						       hardware_id, host_qualification_sha256, created_at
+						FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
+					`, roundId))
+				}
+				storedBaseline, storedErr := readBaseline()
+				if errors.Is(storedErr, pgx.ErrNoRows) {
+					// A prepared control is authenticated below, not republished by
+					// each candidate. Before-insert guards also run on conflict no-ops.
+					insertResult, insertErr := tx.Exec(ctx, `
 					INSERT INTO competition_round_baseline (
 						round_id, baseline_json, baseline_sha256, source_job_id,
 						source_attempt, source_artifact_manifest_sha256, base_sha,
@@ -6641,23 +6674,18 @@ func (self PostgresStore) Complete(ctx context.Context, settings *Settings, work
 					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 					ON CONFLICT (round_id) DO NOTHING
 				`, roundId, outcome.RoundBaselineJson, baselineSha256, jobId, attempts,
-					manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
-					roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
-					settings.EvaluationPolicy.HostQualificationSha256, now)
-				server.Raise(insertErr)
-				if insertResult.RowsAffected() == 1 {
-					appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
-						"round_id": roundId.String(), "baseline_sha256": baselineSha256,
-						"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
-					})
+						manifestSha256, settings.BaseSha, providersSha256, settings.EvaluatorImageDigest,
+						roundSettings.scorerVersion(), roundSettings.EvaluationPolicy.HardwareId,
+						settings.EvaluationPolicy.HostQualificationSha256, now)
+					server.Raise(insertErr)
+					if insertResult.RowsAffected() == 1 {
+						appendEvent(ctx, tx, jobId, now, "round_baseline_frozen", workerId, map[string]any{
+							"round_id": roundId.String(), "baseline_sha256": baselineSha256,
+							"source_attempt": attempts, "artifact_manifest_sha256": manifestSha256,
+						})
+					}
+					storedBaseline, storedErr = readBaseline()
 				}
-				storedBaseline, storedErr := scanRoundBaseline(tx.QueryRow(ctx, `
-					SELECT round_id, baseline_json, baseline_sha256, source_job_id,
-					       source_attempt, source_artifact_manifest_sha256, base_sha,
-					       providers_sha256, evaluator_image_digest, scorer_version,
-					       hardware_id, host_qualification_sha256, created_at
-					FROM competition_round_baseline WHERE round_id = $1 FOR SHARE
-				`, roundId))
 				server.Raise(storedErr)
 				server.Raise(validateRoundBaselineRecord(roundSettings, round, storedBaseline))
 				if storedBaseline.Sha256 != baselineSha256 ||
@@ -7024,7 +7052,7 @@ func (self HostSelfCheck) Eligible(settings *Settings) bool {
 	return self.commonContainmentEligible(settings) &&
 		self.QualificationSha256 == competitionExecutorQualificationSha256(settings) &&
 		(settings.executorHostId == "" || self.HostId == settings.executorHostId) &&
-		self.ImageDigest == settings.EvaluatorImageDigest &&
+		self.ImageDigest == competitionExecutionImageDigest(settings) &&
 		(!self.RebaselinePassed || self.RebaselineRoundId != nil) &&
 		allChecks(self.Checks)
 }

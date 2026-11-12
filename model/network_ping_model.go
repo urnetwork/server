@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 
 	"github.com/urnetwork/server"
@@ -1422,13 +1423,40 @@ var NetworkPingCosigns = []int{
 	NetworkPingCosignUnknown,
 }
 
-// Pings of one pinger kind with one verdict, direct or relayed.
+// The reasons every window count carries for a refused verdict, in
+// publication order, so a reason that has gone quiet is a zero rather than an
+// absent series: the target's six (connect ExtenderProbeVerdictReason*), after
+// the 0 of a refusal that names none -- the pinger's record of an acceptance
+// whose co-signature did not verify. A co-signed or unknown verdict is stored
+// with no reason and is counted under 0 alone.
+//
+// The reason is how a refusal is read. Only some speak to either party's
+// honesty (connect/GEOMAP.md §5.5): an unknown pinger is the target's
+// directory not holding the pinger's record, and a rate limit is usually an
+// NLayer front's shared address. After gossip publishing stopped on
+// 2026-11-06 the directories went stale, and by 11-11 unknown pingers were
+// 98.7% of the extender pingers' refusals; counted without the reason, they
+// read as targets misbehaving.
+var NetworkPingRefusalReasons = []int{
+	int(connect.ExtenderProbeVerdictReasonOk),
+	int(connect.ExtenderProbeVerdictReasonRttBelowObserved),
+	int(connect.ExtenderProbeVerdictReasonNonce),
+	int(connect.ExtenderProbeVerdictReasonWrongExtender),
+	int(connect.ExtenderProbeVerdictReasonUnknownPinger),
+	int(connect.ExtenderProbeVerdictReasonBadSignature),
+	int(connect.ExtenderProbeVerdictReasonRateLimited),
+}
+
+// Pings of one pinger kind with one verdict and reason, direct or relayed.
 type ExtenderPingOutcomeCount struct {
 	PingerKind int
 	Cosign     int
 	// through an NLayer chain (hop_count above zero)
 	Relayed bool
-	Pings   int64
+	// the stored refusal reason (connect ExtenderProbeVerdictReason*), 0
+	// unless refused. The pinger reports it, so it may be one no target sends
+	Reason int
+	Pings  int64
 }
 
 // Distinct pingers of one kind.
@@ -1444,7 +1472,8 @@ type ExtenderPingSourceCount struct {
 // pinging a few extenders", which the row count alone cannot.
 type ExtenderPingCount struct {
 	Pings24h int64
-	// every pinger kind, verdict and relay, zero when none
+	// every pinger kind, verdict, reason and relay, zero when none
+	// (extenderPingOutcomeCounts)
 	Outcomes24h []ExtenderPingOutcomeCount
 	// every pinger kind, zero when none
 	Sources24h []ExtenderPingSourceCount
@@ -1454,41 +1483,34 @@ type ExtenderPingCount struct {
 
 // Counts the pings of the trailing day from the tallies. The window is the 24
 // clock hours up to and including the current one, the day to within an hour,
-// and the counts per kind, verdict and relay are its hours of the fleet's
-// tally. The distinct pingers per kind and the distinct targets are exact over
-// the utc days that cover the window, from the day tallies, and so an upper
-// bound of the window's own that is at most one day wider.
+// and the counts per kind, verdict, reason and relay are its hours of the
+// fleet's tally. The distinct pingers per kind and the distinct targets are
+// exact over the utc days that cover the window, from the day tallies, and so
+// an upper bound of the window's own that is at most one day wider.
 func CountExtenderPings(ctx context.Context, now time.Time) ExtenderPingCount {
 	windowStart := now.UTC().Truncate(time.Hour).Add(-23 * time.Hour)
 	firstDay := networkPingPartitionDay(windowStart)
 	lastDay := networkPingPartitionDay(now)
-	// one outcome count's group: the kind, the verdict and the relay
-	type outcomeKey struct {
-		pingerKind int
-		cosign     int
-		relayed    bool
-	}
 	count := ExtenderPingCount{}
-	outcomeKeyPings := map[outcomeKey]int64{}
+	groups := []ExtenderPingOutcomeCount{}
 	kindSources := map[int]int64{}
 	server.ReplicaDb(ctx, func(conn server.PgConn) {
 		result, err := conn.Query(
 			ctx,
 			`
-			SELECT pinger_kind, cosign, relayed, sum(ping_count)::bigint
+			SELECT pinger_kind, cosign, relayed, cosign_reason, sum(ping_count)::bigint
 			FROM network_ping_hour_tally
 			WHERE $1 <= hour
-			GROUP BY pinger_kind, cosign, relayed
+			GROUP BY pinger_kind, cosign, relayed, cosign_reason
 			`,
 			windowStart,
 		)
 		server.WithPgResult(result, err, func() {
 			for result.Next() {
-				var key outcomeKey
-				var pings int64
-				server.Raise(result.Scan(&key.pingerKind, &key.cosign, &key.relayed, &pings))
-				outcomeKeyPings[key] = pings
-				count.Pings24h += pings
+				var group ExtenderPingOutcomeCount
+				server.Raise(result.Scan(&group.PingerKind, &group.Cosign, &group.Relayed, &group.Reason, &group.Pings))
+				groups = append(groups, group)
+				count.Pings24h += group.Pings
 			}
 		})
 		result, err = conn.Query(
@@ -1526,27 +1548,76 @@ func CountExtenderPings(ctx context.Context, now time.Time) ExtenderPingCount {
 			}
 		})
 	})
+	count.Outcomes24h = extenderPingOutcomeCounts(groups)
 	for _, pingerKind := range NetworkPingPingerKinds {
-		for _, cosign := range NetworkPingCosigns {
-			for _, relayed := range []bool{false, true} {
-				count.Outcomes24h = append(count.Outcomes24h, ExtenderPingOutcomeCount{
-					PingerKind: pingerKind,
-					Cosign:     cosign,
-					Relayed:    relayed,
-					Pings: outcomeKeyPings[outcomeKey{
-						pingerKind: pingerKind,
-						cosign:     cosign,
-						relayed:    relayed,
-					}],
-				})
-			}
-		}
 		count.Sources24h = append(count.Sources24h, ExtenderPingSourceCount{
 			PingerKind: pingerKind,
 			Sources:    kindSources[pingerKind],
 		})
 	}
 	return count
+}
+
+// The window's outcome counts from the tally's groups. Every pinger kind,
+// verdict and relay comes first, zero included, in publication order: a
+// refusal once per reason of NetworkPingRefusalReasons, a co-signed or unknown
+// verdict once with no reason. Every other group follows in key order -- a
+// reason a pinger reported that no target sends -- so the outcomes always add
+// up to the window's pings. Pure.
+func extenderPingOutcomeCounts(groups []ExtenderPingOutcomeCount) []ExtenderPingOutcomeCount {
+	// a group's key: the count without its pings
+	groupKey := func(group ExtenderPingOutcomeCount) ExtenderPingOutcomeCount {
+		group.Pings = 0
+		return group
+	}
+	keyPings := map[ExtenderPingOutcomeCount]int64{}
+	for _, group := range groups {
+		keyPings[groupKey(group)] += group.Pings
+	}
+	outcomes := []ExtenderPingOutcomeCount{}
+	for _, pingerKind := range NetworkPingPingerKinds {
+		for _, cosign := range NetworkPingCosigns {
+			reasons := []int{int(connect.ExtenderProbeVerdictReasonOk)}
+			if cosign == NetworkPingCosignRejected {
+				reasons = NetworkPingRefusalReasons
+			}
+			for _, relayed := range []bool{false, true} {
+				for _, reason := range reasons {
+					key := ExtenderPingOutcomeCount{
+						PingerKind: pingerKind,
+						Cosign:     cosign,
+						Relayed:    relayed,
+						Reason:     reason,
+					}
+					outcome := key
+					outcome.Pings = keyPings[key]
+					delete(keyPings, key)
+					outcomes = append(outcomes, outcome)
+				}
+			}
+		}
+	}
+	// orders the relayed flag within a key
+	boolOrder := func(value bool) int {
+		if value {
+			return 1
+		}
+		return 0
+	}
+	others := slices.SortedFunc(maps.Keys(keyPings), func(a ExtenderPingOutcomeCount, b ExtenderPingOutcomeCount) int {
+		return cmp.Or(
+			cmp.Compare(a.PingerKind, b.PingerKind),
+			cmp.Compare(a.Cosign, b.Cosign),
+			cmp.Compare(boolOrder(a.Relayed), boolOrder(b.Relayed)),
+			cmp.Compare(a.Reason, b.Reason),
+		)
+	})
+	for _, key := range others {
+		outcome := key
+		outcome.Pings = keyPings[key]
+		outcomes = append(outcomes, outcome)
+	}
+	return outcomes
 }
 
 // The pings one target received from one pinger kind

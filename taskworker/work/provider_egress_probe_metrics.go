@@ -647,6 +647,11 @@ func (self *egressProbeMetricsReporter) submitEgressHealthScored(
 	if err == nil && scored != nil && !scored.CycleStartedAt.IsZero() {
 		urlProbeOutcomes.WithLabelValues("success").Add(float64(scored.OkCount))
 		urlProbeOutcomes.WithLabelValues("error").Add(float64(scored.Total - scored.OkCount))
+		// every leg the acknowledged turn measured, probationary loads
+		// included: the transports are the provider's, whatever the site
+		observeUrlProbeTransportOutcomes(measured)
+		// and every HTTP/3 leg its provider's country turned off
+		observeUrlProbeUdpCountryDisabled(measured, func() string { return self.country(ctx, providerClientId) })
 	}
 	// A nil result is the ingest client's intentional no-request path.
 	if scored != nil {

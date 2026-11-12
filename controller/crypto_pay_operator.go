@@ -118,6 +118,9 @@ func CryptoOperatorCredit(clientSession *session.ClientSession, intentId server.
 		return false, errors.New("the invoice is unlinked from its network (retention): grant by hand")
 	}
 	decimals := cryptoAssetDecimals(intent.Asset)
+	// on time as the scanner judges it: by the quote's expiry plus the coin's
+	// confirmation grace (Bitcoin's)
+	onTimeUntil := cryptoIntentPolicyFor(cryptoPayConfigFunc(), intent.Asset).onTimeUntil(intent)
 	credit := &cryptoCredit{receiptUsd: map[model.CryptoPaymentReceiptKey]model.NanoCents{}}
 	for _, receipt := range model.GetCryptoPaymentReceiptsForIntent(ctx, intentId) {
 		switch {
@@ -127,7 +130,7 @@ func CryptoOperatorCredit(clientSession *session.ClientSession, intentId server.
 			continue
 		}
 		var value model.NanoCents
-		if !receipt.FirstSeenAt.After(intent.ExpiresAt) {
+		if !receipt.FirstSeenAt.After(onTimeUntil) {
 			value = cryptoOnTimeShareNanoCents(intent, receipt.AmountAtomic)
 		} else if receipt.FirstSeenRateUsd != nil {
 			value = cryptoAtomicUsdValueNanoCents(receipt.AmountAtomic, decimals, *receipt.FirstSeenRateUsd)

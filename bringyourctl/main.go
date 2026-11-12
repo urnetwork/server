@@ -176,6 +176,7 @@ Usage:
     bringyourctl st v2-activation
     bringyourctl st v1-sweep-status
     bringyourctl st v2-activation-clear --no_id=<no_id> --first_epoch=<first_epoch> --vault_v2_address=<vault_v2_address> --settlement_v2_address=<settlement_v2_address> --by=<operator>
+    bringyourctl st ctf-outage --start=<start_time> --end=<end_time> --reason=<reason> --by=<operator>
     bringyourctl grafana load-defaults [--grafana_url=<grafana_url>] [--dashboards_only]
     bringyourctl grafana reconcile-alerting [--grafana_url=<grafana_url>]
     bringyourctl grafana test-alert [--grafana_url=<grafana_url>]
@@ -657,6 +658,8 @@ func main() {
 			stV2Activation(opts)
 		} else if activationClear, _ := opts.Bool("v2-activation-clear"); activationClear {
 			stV2ActivationClear(opts)
+		} else if ctfOutage, _ := opts.Bool("ctf-outage"); ctfOutage {
+			stCtfOutage(opts)
 		}
 	} else if grafana_, _ := opts.Bool("grafana"); grafana_ {
 		if loadDefaults, _ := opts.Bool("load-defaults"); loadDefaults {
@@ -963,10 +966,11 @@ func dbAudit(opts docopt.Opts) {
 }
 
 // dbBackfillSweepDestinationId backfills transfer_escrow_sweep.destination_id
-// on existing rows. A db migration adds the column; this command changes no
-// schema. The provider payout stats that needed it now read provider_payouts,
-// and migration 816 dropped the column's covering index, so each batch scans
-// the sweep table. It is idempotent and safe to re-run.
+// on existing rows without provider_payouts, the only rows whose provider
+// attribution reads it (BILLING-SPLIT.md). A db migration adds the column; this
+// command changes no schema. The provider payout stats that needed it now read
+// provider_payouts, and migration 816 dropped the column's covering index, so
+// each batch scans the sweep table. It is idempotent and safe to re-run.
 func dbBackfillSweepDestinationId(opts docopt.Opts) {
 	ctx := context.Background()
 
@@ -2880,7 +2884,8 @@ func upgradePlan(opts docopt.Opts) {
 
 	subscriptionYearDuration := 365 * 24 * time.Hour
 
-	endTime := startTime.Add(subscriptionYearDuration + subscriptionGracePeriod)
+	paidEndTime := startTime.Add(subscriptionYearDuration)
+	endTime := paidEndTime.Add(subscriptionGracePeriod)
 
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
@@ -2890,10 +2895,13 @@ func upgradePlan(opts docopt.Opts) {
 		NetRevenue:         0,
 		SubscriptionMarket: model.SubscriptionMarketManual,
 		// TransactionId:      paymentSearchResult.PaymentReference,
+		// the year is the period its Pro grant cycles are cut from
+		PaidEndTime: &paidEndTime,
 	}
 
 	model.AddSubscriptionRenewal(ctx, &subscriptionRenewal)
 
+	// the first cycle's Pro grant; the sweep grants the year's later cycles
 	controller.AddRefreshTransferBalance(ctx, networkId)
 }
 
@@ -3090,13 +3098,14 @@ func refreshTransferBalances(opts docopt.Opts) {
 	ctx := context.Background()
 	clientSession := session.NewLocalClientSession(ctx, "0.0.0.0:0", nil)
 
-	// run all three grants (free daily, pro monthly, referral period)
+	// run all three grants (free daily, pro per subscription cycle, referral
+	// period)
 	controller.RefreshFreeTransferBalances(
 		&controller.RefreshFreeTransferBalancesArgs{},
 		clientSession,
 	)
-	controller.RefreshProTransferBalances(
-		&controller.RefreshProTransferBalancesArgs{},
+	controller.RefreshProCycleTransferBalances(
+		&controller.RefreshProCycleTransferBalancesArgs{},
 		clientSession,
 	)
 	controller.RefreshReferralTransferBalances(

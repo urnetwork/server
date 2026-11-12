@@ -204,6 +204,11 @@ type ProxyDeviceManagerSettings struct {
 	// The default comes from proxy.yml `window_strict_handover`
 	// (window_strict_handover.go).
 	DisableStrictWindowHandover bool
+
+	// Notes each SOCKS sign-in and WireGuard handshake of a proxy for the Pro
+	// features notice (model ProxyFeatureUses). The process owns it; nil
+	// notes nothing.
+	FeatureUses *model.ProxyFeatureUses
 }
 
 type ProxyDeviceManager struct {
@@ -235,7 +240,10 @@ type ProxyDeviceManager struct {
 	// manager context because its result is shared by independent callers.
 	proxyDeviceConfigReader func(context.Context, server.Id) *model.ProxyDeviceConfig
 	proxyFeatureReader      func(context.Context, server.Id, string) bool
-	windowIdentityGate      *windowIdentityRestoreGate
+	// Notes a Pro feature use, in process only: settings.FeatureUses, or nil
+	// for a manager without an owner.
+	featureUseNoter    func(proxyId server.Id, feature string, useTime time.Time)
+	windowIdentityGate *windowIdentityRestoreGate
 	// One registration bound shared by every device this manager opens.
 	mintAdmission *localclient.MintAdmission
 	// One contract creation bound shared by every device this manager opens.
@@ -322,11 +330,24 @@ func NewProxyDeviceManager(ctx context.Context, settings *ProxyDeviceManagerSett
 	manager.proxyDeviceBuilder = manager.newProxyDevice
 	manager.proxyDeviceConfigReader = model.GetProxyDeviceConfigForAdmission
 	manager.proxyFeatureReader = model.ProxyFeatureAllowedForAdmission
+	if settings.FeatureUses != nil {
+		manager.featureUseNoter = settings.FeatureUses.Note
+	}
 	proxyLockCacheCapacityGauge.Set(float64(manager.lockCache.maxEntries))
 	if settings.ClientRemoved != nil {
 		manager.clientRemoved = newClientRemovedSubscriber(cancelCtx, manager, settings.ClientRemoved)
 	}
 	return manager
+}
+
+// Notes one use of a Pro proxy feature by a proxy, in process only (the owner
+// writes it in the background), so it is safe on the sign-in path. A manager
+// without an owner notes nothing.
+func (self *ProxyDeviceManager) noteFeatureUse(proxyId server.Id, feature string, useTime time.Time) {
+	if self == nil || self.featureUseNoter == nil {
+		return
+	}
+	self.featureUseNoter(proxyId, feature, useTime)
 }
 
 // Opens restoration after the old instance's drain-complete handoff. The

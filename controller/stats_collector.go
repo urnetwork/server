@@ -153,6 +153,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/urnetwork/connect"
 	"github.com/urnetwork/glog"
 	"github.com/urnetwork/server"
 	"github.com/urnetwork/server/model"
@@ -551,17 +552,27 @@ var statsExtenderContractsCounter = newStatsCounterVec(
 // the extenders dashboard. A ping is a ping here: providers and extenders both
 // ping, every verdict counts, a ping relayed through an NLayer chain counts
 // (§2.9), and the labels say which. The window gauges carry only bounded
-// labels -- two pinger kinds, three verdicts, relayed or not -- and the
-// per-extender counters have the same shape, cost and reset behaviour as the
-// contracts counter above, fed from the same closed hour buckets. The pings
-// counter also carries the pinger kind, which at most doubles its series and
-// is what shows the extender to extender traffic per hour.
+// labels -- two pinger kinds, three verdicts, relayed or not, and the reason
+// of a refusal, one of eight -- and the per-extender counters have the same
+// shape, cost and reset behaviour as the contracts counter above, fed from
+// the same closed hour buckets. The pings counter also carries the pinger
+// kind, which at most doubles its series and is what shows the extender to
+// extender traffic per hour.
+//
+// The reason is what says whom a refusal speaks against: without it, a stale
+// directory refusing every pinger it does not know (unknown_pinger) reads as
+// targets refusing honest claims, as it did from 2026-11-07, a day after
+// gossip publishing stopped. The window gauge is 36 series, and at most 4
+// more when a pinger reports a reason no target sends (other).
 var statsExtenderPings24hGauge = newStatsGaugeVec(
 	"extender_pings_24h",
-	"Pings stored in the 24 clock hours up to and including the current one, per pinger kind, verdict and whether an NLayer chain relayed them, from the ingest's hour tally",
+	"Pings stored in the 24 clock hours up to and including the current one, per pinger kind, verdict, refusal reason and whether an NLayer chain relayed them, from the ingest's hour tally. "+
+		"The reason is the target's (connect ExtenderProbeVerdictReason*): none for a co-signed or unknown verdict and for a refusal that named none; "+
+		"rtt_below_observed, nonce, wrong_extender, unknown_pinger, bad_signature, rate_limited; other for a reason no target sends",
 	"pinger_kind",
 	"outcome",
 	"relayed",
+	"reason",
 )
 var statsExtenderPingSources24hGauge = newStatsGaugeVec(
 	"extender_ping_sources_24h",
@@ -653,6 +664,23 @@ var statsPingOutcomeNames = map[int]string{
 	model.NetworkPingCosignRejected: "rejected",
 	model.NetworkPingCosignUnknown:  "unknown",
 }
+
+// The reason label values of the ping window gauge, connect's names for the
+// target's refusal reasons (ExtenderProbeVerdictReason*). A co-signed or
+// unknown verdict carries none, and so does a refusal that named none. The
+// pinger reports the reason, so any value no target sends is other, and the
+// label stays bounded whatever a pinger sends.
+var statsPingReasonNames = map[int]string{
+	int(connect.ExtenderProbeVerdictReasonOk):               "none",
+	int(connect.ExtenderProbeVerdictReasonRttBelowObserved): "rtt_below_observed",
+	int(connect.ExtenderProbeVerdictReasonNonce):            "nonce",
+	int(connect.ExtenderProbeVerdictReasonWrongExtender):    "wrong_extender",
+	int(connect.ExtenderProbeVerdictReasonUnknownPinger):    "unknown_pinger",
+	int(connect.ExtenderProbeVerdictReasonBadSignature):     "bad_signature",
+	int(connect.ExtenderProbeVerdictReasonRateLimited):      "rate_limited",
+}
+
+const statsPingReasonOther = "other"
 
 // statsCounterVec is a labeled monotonic counter with the same lazy
 // registration as the gauges. Unlike a gauge vec it is never replaced: a
@@ -1277,25 +1305,10 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 	statsExtenderGossipReleased24hGauge.replace(released)
 	statsExtenderGossipExtenders24hGauge.replace(releasedExtenders)
 
-	// every kind, verdict and relay is published, zero included, so a verdict
-	// that has gone quiet is a zero rather than an absent series (M4)
+	// every kind, verdict, reason and relay is published, zero included, so a
+	// verdict that has gone quiet is a zero rather than an absent series (M4)
 	pings := model.CountExtenderPings(ctx, now)
-	pingOutcomes := []statsLabeledValue{}
-	for _, count := range pings.Outcomes24h {
-		pingerKind, kindOk := statsPingerKindNames[count.PingerKind]
-		outcome, outcomeOk := statsPingOutcomeNames[count.Cosign]
-		if !kindOk || !outcomeOk {
-			continue
-		}
-		relayed := "no"
-		if count.Relayed {
-			relayed = "yes"
-		}
-		pingOutcomes = append(pingOutcomes, statsLabeledValue{
-			labelValues: []string{pingerKind, outcome, relayed},
-			value:       float64(count.Pings),
-		})
-	}
+	pingOutcomes := statsExtenderPingOutcomeValues(pings.Outcomes24h)
 	pingSources := []statsLabeledValue{}
 	for _, count := range pings.Sources24h {
 		pingerKind, ok := statsPingerKindNames[count.PingerKind]
@@ -1320,6 +1333,42 @@ func statsRefreshExtenders(ctx context.Context, now time.Time) {
 		statsRefreshDerivedLocations(ctx)
 	})
 	statsRefreshExtenderRuns(ctx, now)
+}
+
+// The ping window gauge's series from the window's outcome counts, in their
+// order: each count under its kind, verdict, relay and reason, a reason no
+// target sends added into other, and a kind or verdict with no label value
+// left out, as the other ping gauges leave it. Pure.
+func statsExtenderPingOutcomeValues(outcomes []model.ExtenderPingOutcomeCount) []statsLabeledValue {
+	values := []statsLabeledValue{}
+	keyIndexes := map[string]int{}
+	for _, count := range outcomes {
+		pingerKind, kindOk := statsPingerKindNames[count.PingerKind]
+		outcome, outcomeOk := statsPingOutcomeNames[count.Cosign]
+		if !kindOk || !outcomeOk {
+			continue
+		}
+		relayed := "no"
+		if count.Relayed {
+			relayed = "yes"
+		}
+		reason, ok := statsPingReasonNames[count.Reason]
+		if !ok {
+			reason = statsPingReasonOther
+		}
+		labelValues := []string{pingerKind, outcome, relayed, reason}
+		key := statsLabelKey(labelValues)
+		if index, ok := keyIndexes[key]; ok {
+			values[index].value += float64(count.Pings)
+			continue
+		}
+		keyIndexes[key] = len(values)
+		values = append(values, statsLabeledValue{
+			labelValues: labelValues,
+			value:       float64(count.Pings),
+		})
+	}
+	return values
 }
 
 // Publishes how many extenders restarted often in the trailing window, beside

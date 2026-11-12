@@ -1,10 +1,11 @@
 package controller
 
-// The invoice addresses a per-address coin's scanner reads (Bitcoin and ETH
-// through Alchemy, SOL through Helius, TAO through snow's node;
-// mmm/BTCPAY.md §17.3). Monero's and Zcash's daemons see every address of
-// their wallet; a Coinbase deposit address is ours only by the pool, so each
-// scan names the addresses in play:
+// The invoice addresses a per-address coin's scanner reads (ETH through
+// Alchemy, SOL through Helius, TAO through snow's node; mmm/BTCPAY.md §17.3).
+// Monero's and Zcash's daemons see every address of their wallet; a Coinbase
+// deposit address is ours only by the pool, so each scan names the addresses
+// in play (Bitcoin's block scanner looks them up itself, a block at a time,
+// with the same rules: crypto_pay_bitcoin.go):
 //
 //   - hot, read every scan: an open invoice, or one with a payment not yet at
 //     its final depth;

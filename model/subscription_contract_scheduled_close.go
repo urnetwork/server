@@ -12,7 +12,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/urnetwork/server"
-	"github.com/urnetwork/server/task"
 )
 
 // An expiration close must finish with the existing contract closed and its
@@ -28,7 +27,7 @@ func CloseContractAtDeadline(ctx context.Context, contractId server.Id, deadline
 
 // Counts describe this invocation's committed consumption, including durable
 // Redis debit journal entries. Original reports and exact escrow payouts remain
-// the financial record; provider totals are a replay-safe projection.
+// the financial record.
 type ContractDeadlineReconciliation struct {
 	ContractId    server.Id       `json:"contract_id"`
 	Outcome       ContractOutcome `json:"outcome"`
@@ -46,6 +45,9 @@ type ContractDeadlineReconciliation struct {
 // closed instead of being truncated.
 const deadlineEscrowRowLimit = 1024
 
+// The escrows are charged in the funding order (transfer_balance_funding_order.go),
+// as settlement charges them: a paid Pro grant first, then the earliest expiry.
+// A missing grant sorts last, as before.
 var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_count,COALESCE(b.start_balance_byte_count,0),
 	COALESCE(b.net_revenue_nano_cents,0),b.network_id,
 	GREATEST(0,COALESCE(b.balance_byte_count,0)::numeric-COALESCE((SELECT sum(debit_byte_count)
@@ -56,7 +58,7 @@ var deadlineEscrowRowsSql = fmt.Sprintf(`SELECT e.balance_id,e.balance_byte_coun
 	CROSS JOIN LATERAL (SELECT contract_id,balance_id,balance_byte_count,settled,payout_byte_count,redis_reserved
 		FROM transfer_escrow WHERE contract_id=requested.contract_id ORDER BY balance_id LIMIT %d) AS e
 	LEFT JOIN transfer_balance b USING(balance_id)
-	ORDER BY b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1)
+	ORDER BY COALESCE(%s,false) DESC,b.end_time NULLS LAST,e.balance_id`, deadlineEscrowRowLimit+1, transferBalanceFundsFirstSqlOf("b"))
 
 // The planner still costs the read at the row limit, and each estimated row
 // pays for two debit journal probes. Once dead journal tuples left that small
@@ -93,9 +95,8 @@ type contractDeadlineEscrow struct {
 // failure that prevents that commit must return an explicit error for retry,
 // never acknowledge an open contract as closed. Optional caches run after commit.
 // For Redis reservations the committed debit journal is consumption authority;
-// its existing batch updates grant totals. Provider totals likewise use the
-// immutable projection payload committed with exact earnings. Neither worker
-// chooses or repairs this contract's settlement after terminal acknowledgement.
+// its existing batch updates grant totals. That worker never chooses or
+// repairs this contract's settlement after terminal acknowledgement.
 func ReconcileContractAtDeadline(ctx context.Context, contractId server.Id, deadline time.Time) (result *ContractDeadlineReconciliation, returnErr error) {
 	if contractId == (server.Id{}) || deadline.IsZero() {
 		return nil, fmt.Errorf("invalid scheduled contract close")
@@ -106,14 +107,14 @@ func ReconcileContractAtDeadline(ctx context.Context, contractId server.Id, dead
 		// Admission can then wait without retaining the contract.
 		// The locked callback checks the full current scope before any write.
 		balanceIds := readDeadlineBalanceIds(ctx, contractId)
-		keys := deadlineFinancialOwnershipKeys(contractId, balanceIds)
+		keys := deadlineFinancialOwnershipKeys(balanceIds)
 		body := func(tx server.PgTx) {
 			result, posts = reconcileContractAtDeadlineWithOwnershipInTx(ctx, tx, contractId, deadline, true)
 		}
 		if len(keys) == 0 {
 			server.Tx(ctx, body, server.TxReadCommitted, server.OptNoRetry())
 		} else {
-			server.OwnedTx(ctx, keys, body, server.TxReadCommitted, server.OptNoRetry())
+			server.OwnedTx(ctx, keys, body, contractDeadlineOwnerTurnTxOptions(ctx, []server.Id{contractId})...)
 		}
 		server.RunPosts(ctx, posts...)
 	}, func(err error) { result, returnErr = nil, err })
@@ -140,14 +141,13 @@ func readDeadlineBalanceIds(ctx context.Context, contractId server.Id) (ids []se
 }
 
 // Funding still shares the grant owner with journal application and legacy
-// writers. Provider totals do not: only this contract's immutable publication
-// key joins the close. No shared provider-account row is written here.
-func deadlineFinancialOwnershipKeys(contractId server.Id, balanceIds []server.Id) []server.PgOwnershipKey {
+// writers. The close publishes no provider totals, so it needs no other key,
+// and no shared provider-account row is written here.
+func deadlineFinancialOwnershipKeys(balanceIds []server.Id) []server.PgOwnershipKey {
 	if len(balanceIds) == 0 {
 		return nil
 	}
-	return append(transferBalanceOwnershipKeys(balanceIds),
-		task.RunOnceOwnershipKey(task.RunOnce("legacy_provider_totals", contractId)))
+	return transferBalanceOwnershipKeys(balanceIds)
 }
 
 // Reuse the caller's transaction when it already holds the contract row. Such
@@ -191,7 +191,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 	}
 	balanceIds, err := contractTransferBalanceIdsInTx(ctx, tx, []server.Id{contractId})
 	server.Raise(err)
-	keys := deadlineFinancialOwnershipKeys(contractId, balanceIds)
+	keys := deadlineFinancialOwnershipKeys(balanceIds)
 	if len(keys) > 0 {
 		if preAdmitted {
 			if !server.TxOwnsKeys(tx, keys) {
@@ -233,7 +233,7 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		fundedUsage = 0
 	}
 	payouts := deadlineEscrowPayouts(fundedUsage, escrows, originNetworkId, len(participants) > 0, &result.Adjustments)
-	participantPayouts, accountPayouts := allocateContractParticipantPayouts(participants, originNetworkId, payouts)
+	participantPayouts := allocateContractParticipantPayouts(participants, originNetworkId, payouts)
 	usageParticipants, _, usageErr := contractParticipantsFromOwnerInTx(ctx, tx, contractId, owner.participants, owner.usageOriginIsSource)
 	if usageErr != nil {
 		usageParticipants = nil
@@ -289,17 +289,13 @@ func reconcileContractAtDeadlineWithOwnershipInTx(ctx context.Context, tx server
 		queueEscrowSettlementUpdates(batch, contractId, deadline, payouts)
 		for key, payout := range participantPayouts {
 			batch.Queue(participantSweepInsertSQL, contractId, key.balanceId, key.networkId,
-				payout.payoutByteCount, payout.payout, payout.destinationId, payout.providerPayouts)
+				payout.payoutByteCount, payout.payout, payout.providerPayouts)
 		}
 	})
+	// Exact earnings are the sweeps above; no lifetime provider totals are
+	// queued (BILLING-SPLIT.md).
 	// The settled flag advanced each positive reservation with a payout again.
 	publishSettlementNetEscrowSnapshots(ctx, tx, reservationSnapshots, deadlineMetadataReservations(positive, payouts), false)
-	if len(accountPayouts) > 0 {
-		// Exact earnings and the immutable projection owner are mandatory
-		// writes in the terminal commit. Only display totals wait for their
-		// existing provider batch; a held account cannot reject this close.
-		queueLegacyProviderTotalsInTx(ctx, tx, contractId, accountPayouts)
-	}
 	// The refresh publishes the mirror from a carried snapshot. A missing or
 	// dropped one leaves its balance to the refresh census; a bad optional
 	// snapshot must not block financial reconciliation.

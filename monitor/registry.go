@@ -121,6 +121,8 @@ func NewSignals() []Signal {
 		NewStaleContractsSignal(),
 		NewPaymentReconciliationSignal(),
 		NewPaymentFailuresSignal(),
+		NewGammaPaymentFailuresSignal(),
+		NewGammaWatcherSignal(),
 		NewEgressOutcomesSignal(),
 		NewHMACCutoverSignal(),
 		NewProbeCleanupSignal(),
@@ -233,6 +235,7 @@ func NewSignals() []Signal {
 		NewHostedContractCapSignal(),
 		NewContractStageInflightSignal(),
 		NewExtenderSeedMirrorsSignal(),
+		NewExtenderPublishingSignal(),
 	}
 }
 

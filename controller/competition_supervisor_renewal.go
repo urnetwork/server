@@ -181,6 +181,19 @@ func retryCompetitionAuthorityRenewal(ctx context.Context, leaseExpiresAt time.T
 // Optional facts mark the selected return branch, never alter its decision,
 // clock reads, predicate input, error identity, timeout, cap or authority bound.
 func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, completedDeadline func(error) bool, observation *competitionHeartbeatOwnerObservation) error {
+	return retryCompetitionAuthorityRenewalWithLockContinuation(ctx, leaseExpiresAt, settings, operation, completedDeadline, observation, nil)
+}
+
+// Only the job heartbeat supplies this narrower returned transaction proof.
+// The call ceiling is cumulative and the original total/authority never reset.
+type competitionAuthorityLockContinuation struct {
+	MaximumAttempts int
+	Completed       func(error) bool
+}
+
+// Historical callers supply no extension. An exact early read-only failure
+// may spend the already-owned reserve, not enlarge it or relax late ACK rules.
+func retryCompetitionAuthorityRenewalWithLockContinuation(ctx context.Context, leaseExpiresAt time.Time, settings competitionSupervisorRenewalSettings, operation func(context.Context) error, completedDeadline func(error) bool, observation *competitionHeartbeatOwnerObservation, continuation *competitionAuthorityLockContinuation) error {
 	defaults := defaultCompetitionSupervisorRenewalSettings()
 	if settings.LockRetry.Now == nil {
 		settings.LockRetry.Now = defaults.LockRetry.Now
@@ -326,8 +339,13 @@ func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresA
 		// allowance; it cannot borrow the owned-deadline recovery reserve.
 		lockRetry := attemptError == nil && (competitionSupervisorLockTimeout(err) || competitionLivenessPoolerRefusal(err))
 		deadlineRetry := attemptError == context.DeadlineExceeded && completedDeadline != nil && completedDeadline(err)
+		scopeLockRetry := lockRetry && continuation != nil && continuation.Completed != nil && continuation.Completed(err)
+		maximumAttempts := settings.LockRetry.MaximumAttempts
+		if scopeLockRetry && maximumAttempts < continuation.MaximumAttempts {
+			maximumAttempts = continuation.MaximumAttempts
+		}
 		if !lockRetry && !deadlineRetry || leaseExpiresAt.IsZero() || settings.Timeout <= 0 || settings.AttemptTimeout <= 0 ||
-			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= settings.LockRetry.MaximumAttempts {
+			settings.LockRetry.Timeout <= 0 || settings.LockRetry.Interval <= 0 || attempt+1 >= maximumAttempts {
 			observation.returning(competitionHeartbeatOwnerStoreError, ctx, totalCtx)
 			return err
 		}
@@ -336,7 +354,7 @@ func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresA
 			return ErrLeaseLost
 		}
 		totalExpired := totalCtx.Err() != nil || !now.Before(totalDeadline)
-		if totalExpired || lockRetry && !now.Before(lockDeadline) {
+		if totalExpired || lockRetry && !scopeLockRetry && !now.Before(lockDeadline) {
 			boundary := competitionHeartbeatOwnerLockAfterStore
 			if totalExpired {
 				boundary = competitionHeartbeatOwnerTotalAfterStore
@@ -344,7 +362,7 @@ func retryCompetitionAuthorityRenewalObserved(ctx context.Context, leaseExpiresA
 			observation.returning(boundary, ctx, totalCtx)
 			return err
 		}
-		lastError, deadlineRecovery = err, deadlineRetry
+		lastError, deadlineRecovery = err, deadlineRetry || scopeLockRetry
 		waitDeadline := totalDeadline
 		if !deadlineRecovery && lockDeadline.Before(waitDeadline) {
 			waitDeadline = lockDeadline

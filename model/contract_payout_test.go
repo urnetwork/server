@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/urnetwork/server"
+	"github.com/urnetwork/server/task"
 )
 
 type contractPayoutTestAmount struct {
@@ -44,6 +45,18 @@ func contractPayoutTestId(value byte) server.Id {
 	var id server.Id
 	id[len(id)-1] = value
 	return id
+}
+
+// Each provider network's total over the split's sweeps, across balances.
+func contractPayoutTestNetworkAmounts(participantSweeps map[participantSweepKey]*participantSweepPayout) map[server.Id]contractPayoutTestAmount {
+	amounts := map[server.Id]contractPayoutTestAmount{}
+	for key, payout := range participantSweeps {
+		amount := amounts[key.networkId]
+		amount.byteCount += payout.payoutByteCount
+		amount.payout += payout.payout
+		amounts[key.networkId] = amount
+	}
+	return amounts
 }
 
 // The allocation test is intentionally database-free: it pins every
@@ -159,20 +172,14 @@ func TestAllocateContractParticipantPayouts(t *testing.T) {
 		sweeps := map[server.Id]sweepPayout{
 			balanceId: {payoutByteCount: test.total, payout: grossPayout},
 		}
-		participantSweeps, accountPayouts := allocateContractParticipantPayouts(
+		participantSweeps := allocateContractParticipantPayouts(
 			test.participants,
 			originNetworkId,
 			sweeps,
 		)
-		got := map[server.Id]contractPayoutTestAmount{}
-		for networkId, payout := range accountPayouts {
-			got[networkId] = contractPayoutTestAmount{
-				byteCount: payout.payoutByteCount,
-				payout:    payout.payout,
-			}
-		}
+		got := contractPayoutTestNetworkAmounts(participantSweeps)
 		if !maps.Equal(got, test.want) {
-			t.Errorf("%s: account payout = %v, want %v", test.name, got, test.want)
+			t.Errorf("%s: network payout = %v, want %v", test.name, got, test.want)
 		}
 		if len(participantSweeps) != len(test.want) {
 			t.Errorf("%s: participant sweep count = %d, want %d", test.name, len(participantSweeps), len(test.want))
@@ -188,7 +195,7 @@ func TestAllocateContractParticipantPayouts(t *testing.T) {
 		participant(11, eligibleNetworkB),
 		participant(12, eligibleNetworkC),
 	}
-	participantSweeps, accountPayouts := allocateContractParticipantPayouts(
+	participantSweeps := allocateContractParticipantPayouts(
 		participants,
 		originNetworkId,
 		map[server.Id]sweepPayout{
@@ -196,20 +203,13 @@ func TestAllocateContractParticipantPayouts(t *testing.T) {
 			secondBalanceId: {payoutByteCount: 1, payout: 2},
 		},
 	)
-	wantAccounts := map[server.Id]contractPayoutTestAmount{
+	wantNetworks := map[server.Id]contractPayoutTestAmount{
 		eligibleNetworkA: {byteCount: 1, payout: 2},
 		eligibleNetworkB: {byteCount: 1, payout: 1},
 		eligibleNetworkC: {byteCount: 0, payout: 1},
 	}
-	gotAccounts := map[server.Id]contractPayoutTestAmount{}
-	for networkId, payout := range accountPayouts {
-		gotAccounts[networkId] = contractPayoutTestAmount{
-			byteCount: payout.payoutByteCount,
-			payout:    payout.payout,
-		}
-	}
-	if !maps.Equal(gotAccounts, wantAccounts) {
-		t.Errorf("multiple balances: account payout = %v, want %v", gotAccounts, wantAccounts)
+	if gotNetworks := contractPayoutTestNetworkAmounts(participantSweeps); !maps.Equal(gotNetworks, wantNetworks) {
+		t.Errorf("multiple balances: network payout = %v, want %v", gotNetworks, wantNetworks)
 	}
 	for balance, want := range map[server.Id]contractPayoutTestAmount{
 		balanceId:       {byteCount: 1, payout: 2},
@@ -263,22 +263,16 @@ func TestAllocateContractParticipantPayoutEligibilityMatrix(t *testing.T) {
 					}
 				}
 
-				participantSweeps, accountPayouts := allocateContractParticipantPayouts(
+				participantSweeps := allocateContractParticipantPayouts(
 					participants,
 					originNetworkId,
 					map[server.Id]sweepPayout{
 						balanceId: {payoutByteCount: totalByteCount, payout: totalPayout},
 					},
 				)
-				got := map[server.Id]contractPayoutTestAmount{}
-				for networkId, payout := range accountPayouts {
-					got[networkId] = contractPayoutTestAmount{
-						byteCount: payout.payoutByteCount,
-						payout:    payout.payout,
-					}
-				}
+				got := contractPayoutTestNetworkAmounts(participantSweeps)
 				if !maps.Equal(got, want) {
-					t.Fatalf("account payout = %v, want %v", got, want)
+					t.Fatalf("network payout = %v, want %v", got, want)
 				}
 				if len(participantSweeps) != len(want) {
 					t.Fatalf("participant sweep count = %d, want %d", len(participantSweeps), len(want))
@@ -296,7 +290,10 @@ func TestAllocateContractParticipantPayoutEligibilityMatrix(t *testing.T) {
 						t.Fatalf("eligible participant %d has no sweep", participantIndex)
 					}
 					wantAmount := want[participant.NetworkId]
-					if participantSweep.destinationId != participant.ClientId ||
+					wantProvider := []contractProviderPayout{{
+						ClientId: participant.ClientId, PayoutByteCount: wantAmount.byteCount, PayoutNanoCents: wantAmount.payout,
+					}}
+					if !slices.Equal(participantSweep.providerPayouts, wantProvider) ||
 						participantSweep.payoutByteCount != wantAmount.byteCount ||
 						participantSweep.payout != wantAmount.payout {
 						t.Fatalf("participant %d sweep = %+v, want client %s amount %v", participantIndex, participantSweep, participant.ClientId, wantAmount)
@@ -306,13 +303,13 @@ func TestAllocateContractParticipantPayoutEligibilityMatrix(t *testing.T) {
 		}
 	}
 
-	participantSweeps, accountPayouts := allocateContractParticipantPayouts(
+	participantSweeps := allocateContractParticipantPayouts(
 		nil,
 		originNetworkId,
 		map[server.Id]sweepPayout{balanceId: {payoutByteCount: totalByteCount, payout: totalPayout}},
 	)
-	if len(participantSweeps) != 0 || len(accountPayouts) != 0 {
-		t.Fatalf("empty participant set produced sweeps/accounts: %v/%v", participantSweeps, accountPayouts)
+	if len(participantSweeps) != 0 {
+		t.Fatalf("empty participant set produced sweeps: %v", participantSweeps)
 	}
 }
 
@@ -377,25 +374,29 @@ func contractPayoutTestAccountAmount(
 	return amount
 }
 
-func assertContractPayoutTestAccounts(
+// Settlement credits no lifetime provider totals (BILLING-SPLIT.md): it
+// queues no ApplyLegacyProviderTotals row, and no network's
+// account_balance.provided_* or {account_balance_<id>} Redis counters move.
+// The split's exact earnings stay in the sweeps (contractPayoutTestAmounts).
+func assertContractPayoutTestNoProviderTotals(
 	t testing.TB,
 	ctx context.Context,
 	networkIds []server.Id,
-	want map[server.Id]contractPayoutTestAmount,
 ) {
 	t.Helper()
-	// Apply the separate durable owner before inspecting account totals. The
-	// reader counts only applied PostgreSQL and Redis totals, never queued work.
-	projectLegacyProviderTotalsForTest(t, ctx)
-	seen := map[server.Id]bool{}
+	var queued, finished int
+	server.Db(ctx, func(conn server.PgConn) {
+		functionName := task.NewTaskTarget(ApplyLegacyProviderTotals).TargetFunctionName()
+		server.Raise(conn.QueryRow(ctx, `SELECT
+			(SELECT count(*) FROM pending_task WHERE function_name=$1),
+			(SELECT count(*) FROM finished_task WHERE function_name=$1)`, functionName).Scan(&queued, &finished))
+	})
+	if queued != 0 || finished != 0 {
+		t.Fatalf("settlement produced provider totals tasks: %d pending, %d finished", queued, finished)
+	}
 	for _, networkId := range networkIds {
-		if seen[networkId] {
-			continue
-		}
-		seen[networkId] = true
-		got := contractPayoutTestAccountAmount(t, ctx, networkId)
-		if got != want[networkId] {
-			t.Fatalf("account payout for %s = %v, want %v", networkId, got, want[networkId])
+		if got := contractPayoutTestAccountAmount(t, ctx, networkId); got != (contractPayoutTestAmount{}) {
+			t.Fatalf("account totals for %s = %v, want none", networkId, got)
 		}
 	}
 }
@@ -600,11 +601,10 @@ func TestContractPayoutParticipantMatrix(t *testing.T) {
 				t.Fatalf("%s: payout = %v, want %v", test.name, got, want)
 			}
 			assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, wantProviders)
-			assertContractPayoutTestAccounts(
+			assertContractPayoutTestNoProviderTotals(
 				t,
 				ctx,
 				append([]server.Id{originNetworkId}, participantNetworkIds...),
-				want,
 			)
 			assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, usedByteCount)
 		}
@@ -747,11 +747,10 @@ func TestCompanionContractPayoutParticipantsJoinByStreamId(t *testing.T) {
 				t.Fatalf("%s: companion payout = %v, want %v", test.name, got, want)
 			}
 			assertContractPayoutTestProviderAllocations(t, ctx, companionEscrow.ContractId, wantProviders)
-			assertContractPayoutTestAccounts(
+			assertContractPayoutTestNoProviderTotals(
 				t,
 				ctx,
 				[]server.Id{originNetworkId, intermediaryNetworkId, egressNetworkId},
-				want,
 			)
 			assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, companionEscrow.ContractId, usedByteCount)
 		}
@@ -846,11 +845,10 @@ func TestContractParticipantPayoutDisputeOutcomes(t *testing.T) {
 			assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, map[server.Id]int64{
 				egressClientId: usedByteCount / 2, intermediaryClientId: usedByteCount / 2,
 			})
-			assertContractPayoutTestAccounts(
+			assertContractPayoutTestNoProviderTotals(
 				t,
 				ctx,
 				[]server.Id{originNetworkId, intermediaryNetworkId, egressNetworkId},
-				want,
 			)
 			assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, usedByteCount)
 		}
@@ -934,11 +932,13 @@ func TestContractParticipantOrphanSweep(t *testing.T) {
 	})
 }
 
-// One extender party of a contract under settlement, described by how its
+// One extender tag of a contract under settlement, described by how its
 // provider identity overlaps the contract's own.
 type contractExtenderPayoutSpec struct {
-	// the extender's provider network is the payer's, so it is the
-	// same-network case the eligibility rule suppresses
+	// the extender's provider network is the payer's. Tagged on the origin,
+	// which is of its own network, it relays nothing and is no party
+	// (contractExtenderInsertSql); tagged on the egress it is a party of the
+	// payer's network, the case the eligibility rule suppresses
 	payerNetwork bool
 	// the extender's provider client is the egress client, so the two roles
 	// collapse to one participant
@@ -954,6 +954,13 @@ type contractExtenderPayoutSpec struct {
 // unchanged. The byte count is odd and the participant counts do not divide it,
 // which keeps the at-most-one-unit remainder observable, and the extenders are
 // attached to alternating sides to show the payout does not depend on the party.
+//
+// An extender tagged on an endpoint of its own network is no hop at all
+// (owner, 2026-11-11): it relays nothing to its own network, so the endpoints
+// split as if it were not there. Before, the payer network's extender on the
+// origin took a share, the egress was paid half the contract, and the other
+// half was paid to no one by the sweep and credited to the payer's own network
+// in the SN usage.
 func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 	useSyntheticIpDb(t)
 
@@ -971,7 +978,7 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				extenders: []contractExtenderPayoutSpec{{}},
 			},
 			{
-				name:      "an extender on the payer network earns nothing",
+				name:      "an extender of the payer's network on its own origin is no hop",
 				extenders: []contractExtenderPayoutSpec{{payerNetwork: true}},
 			},
 			{
@@ -1001,6 +1008,8 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				intermediary: true,
 			},
 			{
+				// the one on the origin is no hop; the one on the egress is a
+				// hop of the payer's network, which earns nothing
 				name:      "two extenders on the payer network leave the egress alone",
 				extenders: []contractExtenderPayoutSpec{{payerNetwork: true}, {payerNetwork: true}},
 			},
@@ -1069,12 +1078,16 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 					extenderNetworkId,
 					ip,
 				)
-				endpointId := originClientId
+				endpointId, endpointNetworkId := originClientId, originNetworkId
 				if extenderIndex%2 == 1 {
-					endpointId = egressClientId
+					endpointId, endpointNetworkId = egressClientId, egressNetworkId
 				}
 				extenderEndpointIps[endpointId] = append(extenderEndpointIps[endpointId], ip)
-				addParticipant(extenderClientId, extenderNetworkId)
+				// a tag on an endpoint of the extender's own network relays
+				// nothing and is no party (contractExtenderInsertSql)
+				if extenderNetworkId != endpointNetworkId {
+					addParticipant(extenderClientId, extenderNetworkId)
+				}
 			}
 
 			addContractPayoutTestClients(ctx, clients)
@@ -1139,8 +1152,12 @@ func TestContractExtenderPayoutParticipantMatrix(t *testing.T) {
 				t.Fatalf("%s: payout = %v, want %v", test.name, got, want)
 			}
 			assertContractPayoutTestProviderAllocations(t, ctx, escrow.ContractId, wantProviders)
-			assertContractPayoutTestAccounts(t, ctx, networkIds, want)
+			assertContractPayoutTestNoProviderTotals(t, ctx, networkIds)
 			assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, escrow.ContractId, usedByteCount)
+			// SN usage is not billing: the snapshot keeps every hop's even
+			// share, the payer network's too, and an extender is one of the
+			// hops (sn WHITEPAPER.md §8.6.2, Q7)
+			assertStContractUsageSnapshotHops(t, ctx, escrow.ContractId, sortedParticipants, usedByteCount, originNetworkId)
 		}
 	})
 }
@@ -1290,7 +1307,7 @@ func TestCompanionContractExtenderPayoutPaysTheReversedParties(t *testing.T) {
 			t.Fatalf("companion payout = %v, want %v", got, want)
 		}
 		assertContractPayoutTestProviderAllocations(t, ctx, companionEscrow.ContractId, wantProviders)
-		assertContractPayoutTestAccounts(t, ctx, networkIds, want)
+		assertContractPayoutTestNoProviderTotals(t, ctx, networkIds)
 		assertContractPayoutTestBalanceConsumed(t, ctx, balance.BalanceId, companionEscrow.ContractId, usedByteCount)
 	})
 }

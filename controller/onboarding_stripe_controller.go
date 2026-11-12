@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -368,9 +369,9 @@ func StripePaymentSheet(
 
 	// never start a second subscription while one is active: a sheet that looked
 	// like it failed would otherwise charge the customer again
-	if stripeNetworkHasActiveSubscription(clientSession, customerId) {
+	if refusal := stripeNewSubscriptionRefusal(clientSession, customerId); refusal != "" {
 		glog.Infof("[stripe]payment sheet: network %s already has an active subscription\n", networkId)
-		return stripePaymentSheetError(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage), nil
+		return stripePaymentSheetError(PurchaseErrorCodeAlreadySubscribed, refusal), nil
 	}
 
 	// a sheet the customer abandoned leaves a pending subscription behind; replace
@@ -512,6 +513,11 @@ func stripeCustomerIdForSession(clientSession *session.ClientSession) (string, e
 // shown when a network that already pays for Pro starts another purchase
 const stripeAlreadySubscribedMessage = "You already have an active Pro subscription, so no new payment was made. Manage your subscription from your account."
 
+// shown when the only thing in the way is the network's plan paid with Gamma,
+// which renews from its deposit: a card subscription beside it would charge
+// the customer twice
+const stripeGammaRenewsMessage = "Your Pro plan paid with Gamma renews from your Gamma deposit, so no new payment was made. To pay by card instead, turn its renewal off with POST /pay/gamma/settings and auto_renew false (see " + gammaManageUrl + "), then try again."
+
 // subscriptionMarketsBlockNewPurchase reports whether the network's active
 // supporter subscription markets mean it is already paying for Pro. Manual
 // grants, x402 agent payments and the one-time crypto payments (USDC and SOL
@@ -520,13 +526,22 @@ const stripeAlreadySubscribedMessage = "You already have an active Pro subscript
 // year used to block card checkout through its 30-day grace, so the renewal
 // notices (service_reminders pro_ending) sent its buyers to a card checkout
 // that refused them (mmm/ONBOARDING-RETENTION.md P17).
-func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket) bool {
+//
+// A plan paid with Gamma renews from the account's deposit while its
+// automatic renewal is on (gammaRenews), so it blocks then. With renewal off
+// (POST /pay/gamma/settings auto_renew false) it ends with its term like a
+// crypto year and blocks nothing (the owner, 2026-11-11).
+func subscriptionMarketsBlockNewPurchase(markets []model.SubscriptionMarket, gammaRenews bool) bool {
 	for _, market := range markets {
 		switch market {
 		case model.SubscriptionMarketManual, model.SubscriptionMarketX402,
 			model.SubscriptionMarketSolana, model.SubscriptionMarketMonero, model.SubscriptionMarketZcash,
 			model.SubscriptionMarketBittensor, model.SubscriptionMarketBitcoin, model.SubscriptionMarketEthereum:
 			continue
+		case model.SubscriptionMarketGamma:
+			if !gammaRenews {
+				continue
+			}
 		}
 		return true
 	}
@@ -552,24 +567,71 @@ func stripeSubscriptionBlocksNewPurchase(sub *stripe.Subscription) bool {
 	return true
 }
 
-// stripeNetworkHasActiveSubscription checks the network's recorded subscription
-// renewals (any store), the subscription behind its last Stripe window, and, when
-// it has a Stripe customer, the customer's live Stripe subscriptions, which cover
-// a payment made before its webhook landed. A Stripe error does not block the
-// purchase. stripe.Key must be set.
+// stripeNewSubscriptionRefusal is the message a new card subscription is
+// refused with, or "" when the network may start one. It checks the network's
+// recorded subscription renewals (any store), the subscription behind its last
+// Stripe window, and, when it has a Stripe customer, the customer's live Stripe
+// subscriptions, which cover a payment made before its webhook landed. A
+// Stripe error does not block the purchase. stripe.Key must be set.
+//
+// A plan paid with Gamma refuses only while it renews (gammaAccountRenews),
+// and then says so, unless a store subscription refuses anyway.
 //
 // The last window is for a renewal Stripe is still retrying after that window
 // ended. A network that bought through web checkout has no stripe_customer row,
 // so no customer leads to that subscription, and the payment sheet makes a new
 // empty customer for it: without this, a failing renewal could end up billed
 // beside a new subscription.
-func stripeNetworkHasActiveSubscription(clientSession *session.ClientSession, customerId string) bool {
+func stripeNewSubscriptionRefusal(clientSession *session.ClientSession, customerId string) string {
+	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
-	markets := model.GetActiveSubscriptionRenewalMarkets(clientSession.Ctx, networkId, model.SubscriptionTypeSupporter)
-	if subscriptionMarketsBlockNewPurchase(markets) {
-		return true
+	markets := model.GetActiveSubscriptionRenewalMarkets(ctx, networkId, model.SubscriptionTypeSupporter)
+	gammaRenews := slices.Contains(markets, model.SubscriptionMarketGamma) &&
+		gammaAccountRenews(model.GetGammaAccount(ctx, networkId))
+	if subscriptionMarketsBlockNewPurchase(markets, gammaRenews) {
+		if gammaRenews && !subscriptionMarketsBlockNewPurchase(markets, false) {
+			// the renewing plan paid with gamma is all that is in the way
+			return stripeGammaRenewsMessage
+		}
+		return stripeAlreadySubscribedMessage
 	}
-	if stripeLastWindowSubscriptionBilling(clientSession.Ctx, networkId) {
+	if stripeNetworkSubscriptionBills(ctx, networkId, customerId) {
+		return stripeAlreadySubscribedMessage
+	}
+	return ""
+}
+
+// stripeNetworkHasBillingSubscription is stripeNetworkSubscriptionBills for
+// a check outside a card purchase (a gamma Pro purchase, gamma's renewal
+// switch): it asks Stripe only when the network has a Stripe customer or a
+// Stripe window, and sets stripe.Key itself before it lists the customer's
+// subscriptions.
+func stripeNetworkHasBillingSubscription(clientSession *session.ClientSession) bool {
+	ctx := clientSession.Ctx
+	networkId := clientSession.ByJwt.NetworkId
+	customerId := ""
+	if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
+		customerId = *existing
+	}
+	if customerId == "" && model.GetLastSubscriptionRenewal(ctx, networkId, model.SubscriptionTypeSupporter, model.SubscriptionMarketStripe) == nil {
+		// nothing at Stripe to ask about
+		return false
+	}
+	if customerId != "" {
+		// the customer's subscription list goes through stripe-go
+		stripe.Key = stripeApiToken()
+	}
+	return stripeNetworkSubscriptionBills(ctx, networkId, customerId)
+}
+
+// stripeNetworkSubscriptionBills reports whether Stripe still bills, or is
+// about to bill, a subscription of the network that its recorded windows may
+// not show: the subscription behind its last Stripe window, or a live
+// subscription of its customer (customerId "" for none), which covers a
+// payment made before its webhook landed. A Stripe error counts as not
+// billing. stripe.Key must be set.
+func stripeNetworkSubscriptionBills(ctx context.Context, networkId server.Id, customerId string) bool {
+	if stripeLastWindowSubscriptionBilling(ctx, networkId) {
 		return true
 	}
 	if customerId == "" {

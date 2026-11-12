@@ -60,12 +60,13 @@ package controller
 //	  alchemy:
 //	    api_key: ...                                      # the endpoints are built from it when not given
 //	    eth_endpoint: https://eth-mainnet.g.alchemy.com/v2/...      # optional
-//	    btc_endpoint: https://bitcoin-mainnet.g.alchemy.com/v2/...  # optional; the address history needs Alchemy's UTXO add-on
-//	    notify_auth_token: ...                            # optional: registers each new address with the webhook
+//	    btc_endpoint: https://bitcoin-mainnet.g.alchemy.com/v2/...  # optional; the JSON-RPC alone, which the free tier serves (§16.7)
+//	    notify_auth_token: ...                            # optional: registers each new ETH address with the webhook
 //	    eth_webhook_id: wh_...                            # optional: the Address Activity webhook, a fast path only
 //	    eth_webhook_signing_key: whsec_...
-//	    btc_webhook_id: ...                               # optional, if Alchemy offers Bitcoin notifications there
-//	    btc_webhook_signing_key: ...
+//
+// Bitcoin needs no Alchemy add-on and has no webhook: its scanner reads every
+// block through the JSON-RPC (crypto_pay_bitcoin.go).
 //
 //	vault/<env>/helius.yml          # sol: helius.api_key, the RPC the scanner reads
 //	vault/<env>/st.yml              # tao: snow's Finney node (st.GetConnection, URNETWORK_ST_PROFILE)
@@ -88,22 +89,20 @@ import (
 )
 
 // The items a coin can sell. Monthly is card only (decision 6): no coin sells
-// it, whatever the config lists.
+// it, whatever the config lists. The data packs a coin can sell are the ones
+// pro.yml sells on the crypto rail (cryptoPayKnownItems); the 256 GiB pack is
+// not among them, whatever crypto_pay.yml lists.
 var cryptoPayKnownPlans = []string{model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
-var cryptoPayKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
 
-// The coins, in the order every UI shows them: the main selector's USDC,
-// Zcash and Monero, then "More coins": TAO, Bitcoin, ETH, SOL (mmm/BTCPAY.md
-// §17.6).
-var cryptoPayAssets = []string{
-	model.CryptoAssetUsdcSolana,
-	model.CryptoAssetZec,
-	model.CryptoAssetXmr,
-	model.CryptoAssetTao,
-	model.CryptoAssetBtc,
-	model.CryptoAssetEth,
-	model.CryptoAssetSol,
+// cryptoPayKnownItems are the data packs pro.yml sells with crypto, in its
+// order.
+func cryptoPayKnownItems() []string {
+	return dataPackIdsOn(model.DataRailCrypto)
 }
+
+// The coins, in the order every UI shows them (model.CryptoAssets, which the
+// payment monitor reads too).
+var cryptoPayAssets = model.CryptoAssets
 
 // The coins the scanner watches: USDC arrives by webhook.
 var cryptoPayScannedAssets = []string{
@@ -210,8 +209,8 @@ type CryptoPayAssetConfig struct {
 	// §17.4)
 	BufferPercent float64 `yaml:"buffer_percent"`
 	// how often this coin is scanned; 0 = scan_interval. Bitcoin's 10-minute
-	// blocks and ETH's 15-minute finality need no 20 s polling of every
-	// invoice address
+	// blocks (a scan reads the tip, and a block only when one is new) and
+	// ETH's 15-minute finality need no 20 s polling
 	ScanInterval time.Duration `yaml:"scan_interval"`
 	// the free addresses this coin's pool keeps; 0 = address_pool_target. A
 	// Coinbase coin's addresses are made one request each, so its pool is
@@ -219,7 +218,9 @@ type CryptoPayAssetConfig struct {
 	AddressPoolTarget int `yaml:"address_pool_target"`
 	// a per-address coin's scanner still reads an invoice's address this long
 	// after the invoice expired, was credited or was voided, for a late or an
-	// extra payment (24 h), less often than an open invoice's
+	// extra payment (24 h), less often than an open invoice's. Bitcoin's block
+	// scanner matches such an invoice's address in every block mined within
+	// this long of its close
 	WatchAfter time.Duration `yaml:"watch_after"`
 }
 
@@ -292,8 +293,19 @@ func (self *CryptoPayConfig) normalize() {
 		assetConfig.Plans = slices.DeleteFunc(slices.Clone(assetConfig.Plans), func(plan string) bool {
 			return !slices.Contains(cryptoPayKnownPlans, plan)
 		})
+		// a name that is not a data pack is never sold, and neither is a pack
+		// pro.yml does not sell with crypto (the 256 GiB pack is x402 and
+		// Gamma only), whatever this file lists. SellsItem asks pro.yml again
+		// when it sells.
 		assetConfig.Items = slices.DeleteFunc(slices.Clone(assetConfig.Items), func(item string) bool {
-			return !slices.Contains(cryptoPayKnownItems, item)
+			if !isDataPackItem(item) {
+				return true
+			}
+			if refusal := dataPackRefusal(item, model.DataRailCrypto); refusal != "" {
+				glog.Errorf("[cryptopay]crypto_pay.yml lists %s for %s, which pro.yml does not sell with crypto; it is not offered\n", item, asset)
+				return true
+			}
+			return false
 		})
 		// a source the coin may not be quoted from is dropped (CoinGecko for
 		// every coin but Monero, mmm/BTCPAY.md §17.4), and a list left with
@@ -400,6 +412,13 @@ func (self *CryptoPayConfig) normalize() {
 				assetConfig.AddressPoolTarget = cryptoCoinbasePoolTarget
 			}
 			if assetConfig.WatchAfter <= 0 {
+				assetConfig.WatchAfter = cryptoDefaultWatchAfter
+			}
+			// Bitcoin's block scan matches an invoice only while it is
+			// watched: a watch that ended within the confirmation grace would
+			// miss the payments the grace credits
+			if grace := cryptoAssetConfirmationGrace(asset); assetConfig.WatchAfter <= grace {
+				glog.Errorf("[cryptopay]crypto_pay.yml watches %s invoices %s after they close, inside the coin's %s confirmation grace; %s is used\n", asset, assetConfig.WatchAfter, grace, cryptoDefaultWatchAfter)
 				assetConfig.WatchAfter = cryptoDefaultWatchAfter
 			}
 		}
@@ -513,9 +532,10 @@ func (self *CryptoPayAssetConfig) SellsPlan(plan string) bool {
 	return self != nil && slices.Contains(self.Plans, plan) && slices.Contains(cryptoPayKnownPlans, plan)
 }
 
-// SellsItem reports whether the coin sells the data item.
+// SellsItem reports whether the coin sells the data item: crypto_pay.yml
+// lists it for the coin, and pro.yml sells it with crypto.
 func (self *CryptoPayAssetConfig) SellsItem(item string) bool {
-	return self != nil && slices.Contains(self.Items, item) && slices.Contains(cryptoPayKnownItems, item)
+	return self != nil && slices.Contains(self.Items, item) && dataPackSoldOn(item, model.DataRailCrypto)
 }
 
 var cryptoPayConfigOnce = sync.OnceValue(func() *CryptoPayConfig {
@@ -634,8 +654,8 @@ type cryptoWalletSettings struct {
 	// tao: the st profile the Finney connection was resolved for (mainnet,
 	// testnet)
 	ChainProfile string
-	// btc, eth: the Alchemy webhook, an optional fast path, and the Notify
-	// API token that registers new addresses with it
+	// eth: the Alchemy webhook, an optional fast path, and the Notify API
+	// token that registers new addresses with it
 	AlchemyWebhookId         string
 	AlchemyWebhookSigningKey string
 	AlchemyNotifyToken       string
@@ -743,10 +763,8 @@ func cryptoChainSettingsFromVault(asset string) (*cryptoWalletSettings, error) {
 			return strings.TrimSpace(value)
 		}
 		endpointKey := "eth_endpoint"
-		webhookKey := "eth_webhook"
 		if asset == model.CryptoAssetBtc {
 			endpointKey = "btc_endpoint"
-			webhookKey = "btc_webhook"
 		}
 		settings.ChainRpcUrl = optional("alchemy", endpointKey)
 		if settings.ChainRpcUrl == "" {
@@ -759,9 +777,12 @@ func cryptoChainSettingsFromVault(asset string) (*cryptoWalletSettings, error) {
 		if !strings.HasPrefix(settings.ChainRpcUrl, "https://") {
 			return nil, fmt.Errorf("alchemy.yml: alchemy.%s is not an https url", endpointKey)
 		}
-		settings.AlchemyWebhookId = optional("alchemy", webhookKey+"_id")
-		settings.AlchemyWebhookSigningKey = optional("alchemy", webhookKey+"_signing_key")
-		settings.AlchemyNotifyToken = optional("alchemy", "notify_auth_token")
+		if asset == model.CryptoAssetEth {
+			// the ETH webhook, a fast path only; Bitcoin has none
+			settings.AlchemyWebhookId = optional("alchemy", "eth_webhook_id")
+			settings.AlchemyWebhookSigningKey = optional("alchemy", "eth_webhook_signing_key")
+			settings.AlchemyNotifyToken = optional("alchemy", "notify_auth_token")
+		}
 	case model.CryptoAssetSol:
 		apiKey, err := vaultNonblankString("helius.yml", "helius", "api_key")
 		if err != nil {
@@ -1074,7 +1095,10 @@ func cryptoAssetNetworkWarning(asset string) string {
 	case model.CryptoAssetTao:
 		return "Send TAO on the Bittensor network (Finney) to this address, exactly the amount. TAO has no memo: the address alone identifies this invoice. TAO sent on another network or as a wrapped token is not credited."
 	case model.CryptoAssetBtc:
-		return "Send BTC on the Bitcoin network to this address, exactly the amount. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation."
+		// the confirmation grace: a payment is seen only once mined
+		// (cryptoBitcoinConfirmationGrace)
+		return "Send BTC on the Bitcoin network to this address, exactly the amount, before the quote expires. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation, which can take a while: one sent before the quote expires is credited at the quoted price if it confirms within " +
+			cryptoGraceHours(cryptoAssetConfirmationGrace(model.CryptoAssetBtc)) + " of the expiry."
 	case model.CryptoAssetEth:
 		return "Send ETH on Ethereum mainnet to this address, exactly the amount. ETH on another network (Base, Arbitrum, Optimism) or a token is not credited. A payment is credited once its block is finalized, about 15 minutes."
 	case model.CryptoAssetSol:
@@ -1108,10 +1132,46 @@ func cryptoAssetQuoteDecimals(asset string) int {
 
 // cryptoAssetQuoteTtl is how long a coin's quote holds: the config's expiry
 // for the scanned coins, the plan intent's hour for USDC (the amount is in
-// dollars and its unique suffix stays reserved long after).
+// dollars and its unique suffix stays reserved long after). It is the window
+// to send in, which expires_at states, for every coin: Bitcoin's confirmation
+// grace comes after it (cryptoAssetConfirmationGrace).
 func cryptoAssetQuoteTtl(config *CryptoPayConfig, asset string) time.Duration {
 	if asset == model.CryptoAssetUsdcSolana {
 		return solanaPlanIntentDuration
 	}
 	return config.Quote.Expiry
+}
+
+// cryptoAssetConfirmationGrace is how long past its quote's expiry a coin's
+// payment may first be seen and still count as sent within the quote:
+// credited at the quoted price, with the invoice open (pending, or seen while
+// short) until then, and not re-quoted meanwhile (cryptoRequoteInGrace).
+// Bitcoin's is cryptoBitcoinConfirmationGrace, 3 hours: its scanner sees a
+// payment only once it is mined, at its block's time, so a payment sent before
+// the expiry is first seen up to hours after it. Every other coin's is 0, as
+// it always was: Monero's and Zcash's wallets see a payment in the mempool,
+// and TAO, SOL, USDC and ETH see it within seconds of its block.
+func cryptoAssetConfirmationGrace(asset string) time.Duration {
+	if asset == model.CryptoAssetBtc {
+		return cryptoBitcoinConfirmationGrace
+	}
+	return 0
+}
+
+// CryptoAssetConfirmationGrace is cryptoAssetConfirmationGrace for the
+// operator tools.
+func CryptoAssetConfirmationGrace(asset string) time.Duration {
+	return cryptoAssetConfirmationGrace(asset)
+}
+
+// cryptoGraceHours is a confirmation grace in words: "3 hours".
+func cryptoGraceHours(grace time.Duration) string {
+	hours := int(grace / time.Hour)
+	if grace%time.Hour != 0 {
+		return fmt.Sprintf("%d minutes", int(grace/time.Minute))
+	}
+	if hours == 1 {
+		return "1 hour"
+	}
+	return fmt.Sprintf("%d hours", hours)
 }

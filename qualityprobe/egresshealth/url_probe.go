@@ -33,25 +33,60 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 	if len(compatible) == 0 {
 		return nil, ErrNoDestinations
 	}
+	// A load's first leg is its IPv4 HTTPS leg (urlProbeServesProvider): an
+	// IPv6-only provider has none, and is not measured. Otherwise the draw is
+	// the catalog's, less the URLs that serve no IPv4 (ipv4: false), so the
+	// URL a provider is asked for does not depend on the families it
+	// advertises. The IPv6 legs of a provider that advertises IPv6 load that
+	// URL when it serves IPv6, and otherwise a stand-in drawn, by the same
+	// draw, from the URLs of the turn's lane that serve IPv6 alone
+	// (ipv4: false; its country lane's when it has any, else the general
+	// lane's): those are the only loads such a URL is ever made on.
+	if !opts.ProviderIpFamily.Ipv4() {
+		return nil, ErrNoUrlForProviderFamily
+	}
+	generalStandIns := urlProbeIpv6StandIns(compatible)
+	countryStandIns := urlProbeIpv6StandIns(country)
+	compatible = urlProbeDestinationsForFamily(compatible, opts.ProviderIpFamily)
+	country = urlProbeDestinationsForFamily(country, opts.ProviderIpFamily)
+	if len(compatible) == 0 {
+		return nil, ErrNoUrlForProviderFamily
+	}
 	rng := opts.rng()
 	source := "general"
+	standIns := generalStandIns
 	if len(opts.SecurityDestinations) > 0 && rng.Intn(2) == 0 {
 		compatible = opts.SecurityDestinations
 		source = UrlSourceSecurityRecheck
+		standIns = nil
 	} else {
 		if len(country) == 0 {
 			source = "general_country_unavailable"
 		} else if rng.Intn(2) == 1 {
 			compatible = country
 			source = "country"
+			if 0 < len(countryStandIns) {
+				standIns = countryStandIns
+			}
 		}
 	}
 	chosen := compatible[rng.Intn(len(compatible))]
+	var standIn *Destination
 	if source == UrlSourceSecurityRecheck {
 		chosen.Canary = false
 		chosen.Incompatible = nil
+		// A recheck asks whether the stored URL's HTTPS identity now
+		// authenticates, and is never scored; it makes no HTTP/3 leg and no
+		// IPv6 leg: TLS findings are about the IPv4 HTTPS identity.
+		chosen.H3 = false
+		chosen.Ipv6 = false
+		chosen.Ipv4 = nil
+	} else if opts.ProviderIpFamily.Ipv6() && !chosen.ServesIpv6() && 0 < len(standIns) {
+		drawn := standIns[rng.Intn(len(standIns))]
+		standIn = &drawn
 	}
 	opts.LoadAttempts = 1
+	opts.urlProbeIpv6StandIn = standIn
 	result, err := check(ctx, client, []Destination{chosen}, opts)
 	if result != nil {
 		result.TableTotal = len(opts.Destinations) + len(opts.CountryDestinations)
@@ -71,7 +106,21 @@ func checkUrlProbe(ctx context.Context, client *http.Client, opts Options) (*Res
 				TlsMillis: float64(check.TlsHandshakeLatency) / float64(time.Millisecond), TtfbMillis: float64(check.RequestTimeToFirstByte) / float64(time.Millisecond),
 				BodyMillis: float64(check.BodyDuration) / float64(time.Millisecond), BodyBitsPerSecond: check.BodyBytesPerSecond * 8,
 				BodyFirstByteWaitMillis: float64(check.BodyFirstByteWait) / float64(time.Millisecond),
+				H3:                      urlProbeH3EvidenceOf(check.H3),
+				Ipv6:                    urlProbeIpv6EvidenceOf(check.Ipv6),
 			}
+			if opts.ProviderIpFamily.Ipv6() {
+				result.UrlProbeEvidence.IpFamily = opts.ProviderIpFamily.Normalize()
+			}
+			if leg := result.UrlProbeEvidence.Ipv6; leg != nil && standIn != nil {
+				// the IPv6 legs loaded the stand-in, which the evidence names
+				// beside the load's own URL
+				destination := *standIn
+				leg.Destination = &destination
+			}
+			// the country's switch turned UDP off for a URL of the outcome that
+			// declares h3: the load's own, or the stand-in its IPv6 legs loaded
+			result.UrlProbeEvidence.UdpProbesDisabled = check.UdpProbesDisabled || (check.Ipv6UdpProbesDisabled && check.Ipv6 != nil)
 		}
 	}
 	return result, err

@@ -68,8 +68,13 @@ type CryptoPaymentAsset struct {
 	Items []string `json:"items"`
 	// the confirmations a payment needs before it is credited
 	ConfirmationsRequired int `json:"confirmations_required"`
-	// how long a quote holds
+	// how long a quote holds: the window to send the payment in
 	QuoteTtlSeconds int `json:"quote_ttl_seconds"`
+	// how long past the quote's expiry a payment sent within it may confirm
+	// and still be credited at the quoted price: 10800 (3 hours) for btc,
+	// whose payments are seen only once mined; left out (0) for every other
+	// coin, whose quote ends at its expiry
+	ConfirmationGraceSeconds int `json:"confirmation_grace_seconds,omitempty"`
 	// whether the coin can be paid with now: true for every coin of assets
 	// (and of the balance's crypto_assets), false for one of
 	// unavailable_assets
@@ -178,7 +183,11 @@ type CryptoPaymentStatusResult struct {
 	Confirmations         int        `json:"confirmations"`
 	ConfirmationsRequired int        `json:"confirmations_required"`
 	ExpiresAt             *time.Time `json:"expires_at"`
-	CreditedAt            *time.Time `json:"credited_at"`
+	// as CryptoPaymentAsset.confirmation_grace_seconds: a payment sent before
+	// expires_at is credited at the quoted price while it confirms within this
+	// long after it (btc), and the invoice stays pending (or seen) until then
+	ConfirmationGraceSeconds int        `json:"confirmation_grace_seconds,omitempty"`
+	CreditedAt               *time.Time `json:"credited_at"`
 	// delivery code, once paid: the balance code to redeem
 	BalanceCode string              `json:"balance_code"`
 	Error       *CryptoPaymentError `json:"error,omitempty"`
@@ -221,12 +230,16 @@ type CryptoPaymentIntentResult struct {
 	// what to send and on which network, in English, for a person or an agent
 	// paying by hand (a coin sent on another network, or a token instead of
 	// the coin, is not credited)
-	NetworkWarning        string                     `json:"network_warning"`
-	QuotedAt              *time.Time                 `json:"quoted_at"`
-	ExpiresAt             *time.Time                 `json:"expires_at"`
-	ConfirmationsRequired int                        `json:"confirmations_required"`
-	Status                *CryptoPaymentStatusResult `json:"status,omitempty"`
-	Error                 *CryptoPaymentError        `json:"error,omitempty"`
+	NetworkWarning string     `json:"network_warning"`
+	QuotedAt       *time.Time `json:"quoted_at"`
+	// the end of the window to send the payment in
+	ExpiresAt *time.Time `json:"expires_at"`
+	// as CryptoPaymentAsset.confirmation_grace_seconds (btc 10800, left out
+	// for every other coin)
+	ConfirmationGraceSeconds int                        `json:"confirmation_grace_seconds,omitempty"`
+	ConfirmationsRequired    int                        `json:"confirmations_required"`
+	Status                   *CryptoPaymentStatusResult `json:"status,omitempty"`
+	Error                    *CryptoPaymentError        `json:"error,omitempty"`
 }
 
 // The statuses of §2.5.
@@ -360,6 +373,12 @@ func cryptoNewSolanaReference() string {
 
 // cryptoItemDescription is the fixed English description a wallet shows.
 func cryptoItemDescription(item string) string {
+	if isDataPackItem(item) {
+		// "URnetwork 1 TiB data", "URnetwork 256 GiB data" (a Gamma receipt)
+		if byteCount, ok := dataPackByteCount(item); ok {
+			return "URnetwork " + model.SalesDataItem(byteCount)
+		}
+	}
 	switch item {
 	case model.SolanaPlanYearly:
 		return "URnetwork Pro yearly"
@@ -569,7 +588,7 @@ func cryptoPaymentAssets(ctx context.Context, config *CryptoPayConfig) (availabl
 			}
 		}
 		items := []string{}
-		for _, item := range cryptoPayKnownItems {
+		for _, item := range cryptoPayKnownItems() {
 			if assetConfig.SellsItem(item) {
 				items = append(items, item)
 			}
@@ -578,15 +597,16 @@ func cryptoPaymentAssets(ctx context.Context, config *CryptoPayConfig) (availabl
 			continue
 		}
 		listed := &CryptoPaymentAsset{
-			Asset:                 asset,
-			Network:               cryptoAssetNetwork(asset),
-			Decimals:              cryptoAssetDecimals(asset),
-			QuoteDecimals:         cryptoAssetQuoteDecimals(asset),
-			PaymentLink:           cryptoAssetPaymentLink(asset),
-			Plans:                 plans,
-			Items:                 items,
-			ConfirmationsRequired: int(assetConfig.CreditConfirmations),
-			QuoteTtlSeconds:       int(cryptoAssetQuoteTtl(config, asset) / time.Second),
+			Asset:                    asset,
+			Network:                  cryptoAssetNetwork(asset),
+			Decimals:                 cryptoAssetDecimals(asset),
+			QuoteDecimals:            cryptoAssetQuoteDecimals(asset),
+			PaymentLink:              cryptoAssetPaymentLink(asset),
+			Plans:                    plans,
+			Items:                    items,
+			ConfirmationsRequired:    int(assetConfig.CreditConfirmations),
+			QuoteTtlSeconds:          int(cryptoAssetQuoteTtl(config, asset) / time.Second),
+			ConfirmationGraceSeconds: int(cryptoAssetConfirmationGrace(asset) / time.Second),
 		}
 		if cryptoAssetConfigured(config, asset) != nil {
 			// switched on, but the vault does not name everything selling it
@@ -704,13 +724,18 @@ type cryptoIntentRequest struct {
 }
 
 // CreateCryptoPaymentIntent answers POST /pay/crypto/intent: an invoice for
-// the signed-in caller's network. The rules, in order (§2.3): the asset, the
-// plan or item it sells, the guest guard, the welcome offer, the per-network
-// limit, the price, open-invoice reuse, then the quote and the address.
+// the signed-in caller's network. The rules, in order (§2.3): a pack pro.yml
+// does not sell with crypto, the asset, the plan or item it sells, the guest
+// guard, the welcome offer, the per-network limit, the price, open-invoice
+// reuse, then the quote and the address.
 func CreateCryptoPaymentIntent(
 	args *CreateCryptoPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*CryptoPaymentIntentResult, error) {
+	// whatever the coin: the 256 GiB pack is x402 and Gamma only
+	if refusal := dataPackRefusal(strings.TrimSpace(args.ItemId), model.DataRailCrypto); refusal != "" {
+		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+	}
 	config := cryptoPayConfigFunc()
 	asset := strings.TrimSpace(args.Asset)
 	if !slices.Contains(cryptoPayAssets, asset) {
@@ -775,7 +800,7 @@ func CreateCryptoPaymentIntent(
 		}
 		request.tier = tier.Tier.Name
 	} else {
-		priceUsd, ok := dataPackPriceUsd(itemId)
+		priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 		if !ok {
 			glog.Errorf("[cryptopay]no usable price in pro.yml for data pack %s\n", itemId)
 			return cryptoIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
@@ -795,6 +820,10 @@ func CreateDataCryptoPaymentIntent(
 	args *CreateDataCryptoPaymentIntentArgs,
 	clientSession *session.ClientSession,
 ) (*CryptoPaymentIntentResult, error) {
+	// whatever the coin: the 256 GiB pack is x402 and Gamma only
+	if refusal := dataPackRefusal(strings.TrimSpace(args.ItemId), model.DataRailCrypto); refusal != "" {
+		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+	}
 	config := cryptoPayConfigFunc()
 	asset := strings.TrimSpace(args.Asset)
 	if !slices.Contains(cryptoPayAssets, asset) {
@@ -838,7 +867,7 @@ func CreateDataCryptoPaymentIntent(
 		), nil
 	}
 
-	priceUsd, ok := dataPackPriceUsd(itemId)
+	priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 	if !ok {
 		glog.Errorf("[cryptopay]no usable price in pro.yml for data pack %s\n", itemId)
 		return cryptoIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
@@ -1048,28 +1077,29 @@ func cryptoIntentResult(
 	quotedAt := intent.QuotedAt
 	expiresAt := intent.ExpiresAt
 	result := &CryptoPaymentIntentResult{
-		IntentId:              intent.IntentId.String(),
-		StatusToken:           token,
-		Asset:                 intent.Asset,
-		Plan:                  plan,
-		ItemId:                itemId,
-		Delivery:              intent.Delivery,
-		NetworkName:           networkName,
-		Tier:                  intent.Tier,
-		OfferApplied:          intent.OfferApplied,
-		PriceUsd:              model.NanoCentsToUsd(intent.PriceUsdNanoCents),
-		RegularPriceUsd:       model.NanoCentsToUsd(intent.RegularPriceUsdNanoCents),
-		RateUsd:               intent.RateUsd,
-		Address:               intent.Address,
-		Amount:                cryptoFormatAtomic(intent.AmountAtomic, decimals),
-		AmountAtomic:          fmt.Sprintf("%d", intent.AmountAtomic),
-		Uri:                   cryptoPaymentUri(intent),
-		UriNote:               cryptoAssetUriNote(intent.Asset),
-		Network:               cryptoAssetNetwork(intent.Asset),
-		NetworkWarning:        cryptoAssetNetworkWarning(intent.Asset),
-		QuotedAt:              &quotedAt,
-		ExpiresAt:             &expiresAt,
-		ConfirmationsRequired: cryptoConfirmationsRequired(config, intent.Asset),
+		IntentId:                 intent.IntentId.String(),
+		StatusToken:              token,
+		Asset:                    intent.Asset,
+		Plan:                     plan,
+		ItemId:                   itemId,
+		Delivery:                 intent.Delivery,
+		NetworkName:              networkName,
+		Tier:                     intent.Tier,
+		OfferApplied:             intent.OfferApplied,
+		PriceUsd:                 model.NanoCentsToUsd(intent.PriceUsdNanoCents),
+		RegularPriceUsd:          model.NanoCentsToUsd(intent.RegularPriceUsdNanoCents),
+		RateUsd:                  intent.RateUsd,
+		Address:                  intent.Address,
+		Amount:                   cryptoFormatAtomic(intent.AmountAtomic, decimals),
+		AmountAtomic:             fmt.Sprintf("%d", intent.AmountAtomic),
+		Uri:                      cryptoPaymentUri(intent),
+		UriNote:                  cryptoAssetUriNote(intent.Asset),
+		Network:                  cryptoAssetNetwork(intent.Asset),
+		NetworkWarning:           cryptoAssetNetworkWarning(intent.Asset),
+		QuotedAt:                 &quotedAt,
+		ExpiresAt:                &expiresAt,
+		ConfirmationGraceSeconds: int(cryptoAssetConfirmationGrace(intent.Asset) / time.Second),
+		ConfirmationsRequired:    cryptoConfirmationsRequired(config, intent.Asset),
 	}
 	if intent.SolanaReference != nil {
 		// USDC only: the merchant address is shared, so a transfer sent by
@@ -1267,27 +1297,28 @@ func cryptoStatusResult(
 	expiresAt := intent.ExpiresAt
 	view := cryptoEvaluateIntent(intent, receipts, cryptoIntentPolicyFor(config, intent.Asset), now)
 	result := &CryptoPaymentStatusResult{
-		IntentId:              intent.IntentId.String(),
-		Asset:                 intent.Asset,
-		Plan:                  plan,
-		ItemId:                itemId,
-		Delivery:              intent.Delivery,
-		NetworkName:           networkName,
-		Status:                view.Status,
-		ReviewReason:          cryptoBuyerReviewReason(view.ReviewReason),
-		Amount:                cryptoFormatAtomic(intent.AmountAtomic, decimals),
-		AmountAtomic:          fmt.Sprintf("%d", intent.AmountAtomic),
-		Received:              cryptoFormatAtomic(view.ReceivedAtomic, decimals),
-		ReceivedAtomic:        fmt.Sprintf("%d", view.ReceivedAtomic),
-		Remaining:             cryptoFormatAtomic(view.RemainingAtomic, decimals),
-		RemainingAtomic:       fmt.Sprintf("%d", view.RemainingAtomic),
-		Excess:                cryptoFormatAtomic(max(0, view.ReceivedAtomic-intent.AmountAtomic), decimals),
-		ExcessAtomic:          fmt.Sprintf("%d", max(0, view.ReceivedAtomic-intent.AmountAtomic)),
-		Network:               cryptoAssetNetwork(intent.Asset),
-		Confirmations:         view.Confirmations,
-		ConfirmationsRequired: cryptoConfirmationsRequired(config, intent.Asset),
-		ExpiresAt:             &expiresAt,
-		CreditedAt:            intent.CreditedAt,
+		IntentId:                 intent.IntentId.String(),
+		Asset:                    intent.Asset,
+		Plan:                     plan,
+		ItemId:                   itemId,
+		Delivery:                 intent.Delivery,
+		NetworkName:              networkName,
+		Status:                   view.Status,
+		ReviewReason:             cryptoBuyerReviewReason(view.ReviewReason),
+		Amount:                   cryptoFormatAtomic(intent.AmountAtomic, decimals),
+		AmountAtomic:             fmt.Sprintf("%d", intent.AmountAtomic),
+		Received:                 cryptoFormatAtomic(view.ReceivedAtomic, decimals),
+		ReceivedAtomic:           fmt.Sprintf("%d", view.ReceivedAtomic),
+		Remaining:                cryptoFormatAtomic(view.RemainingAtomic, decimals),
+		RemainingAtomic:          fmt.Sprintf("%d", view.RemainingAtomic),
+		Excess:                   cryptoFormatAtomic(max(0, view.ReceivedAtomic-intent.AmountAtomic), decimals),
+		ExcessAtomic:             fmt.Sprintf("%d", max(0, view.ReceivedAtomic-intent.AmountAtomic)),
+		Network:                  cryptoAssetNetwork(intent.Asset),
+		Confirmations:            view.Confirmations,
+		ConfirmationsRequired:    cryptoConfirmationsRequired(config, intent.Asset),
+		ExpiresAt:                &expiresAt,
+		ConfirmationGraceSeconds: int(cryptoAssetConfirmationGrace(intent.Asset) / time.Second),
+		CreditedAt:               intent.CreditedAt,
 	}
 	switch view.Status {
 	case CryptoPaymentStatusExpired:
@@ -1331,12 +1362,16 @@ func CryptoPaymentRequote(
 	if intent.Asset != model.CryptoAssetUsdcSolana {
 		receipts = model.GetCryptoPaymentReceiptsForIntent(ctx, intent.IntentId)
 	}
-	view := cryptoEvaluateIntent(intent, receipts, cryptoIntentPolicyFor(config, intent.Asset), now)
+	policy := cryptoIntentPolicyFor(config, intent.Asset)
+	view := cryptoEvaluateIntent(intent, receipts, policy, now)
 	if view.Status != CryptoPaymentStatusPending && view.Status != CryptoPaymentStatusExpired {
 		return cryptoIntentError(PurchaseErrorCodeInvalidRequest, "This invoice can no longer be re-quoted."), nil
 	}
 	if intent.VoidedAt != nil {
 		return cryptoIntentError(PurchaseErrorCodeInvalidRequest, "This invoice is closed."), nil
+	}
+	if cryptoRequoteInGrace(intent, policy, now) {
+		return cryptoIntentError(PurchaseErrorCodeInvalidRequest, cryptoRequoteInGraceMessage(intent, policy)), nil
 	}
 	if !cryptoAssetEnabled(config, intent.Asset) {
 		cryptoPayQuoteResults.WithLabelValues(intent.Asset, cryptoQuoteRefusedDisabled).Inc()
@@ -1390,6 +1425,27 @@ func CryptoPaymentRequote(
 	return cryptoIntentResult(ctx, config, requoted, strings.TrimSpace(args.StatusToken), networkName, now), nil
 }
 
+// cryptoRequoteInGrace reports an invoice past its quote's expiry but within
+// its coin's confirmation grace (Bitcoin's): a payment sent within the quote
+// may still be unmined, and so unseen, and a new amount would be judged
+// against it. Such an invoice is not re-quoted until the grace ends; a buyer
+// who has not paid starts a new invoice, which has an address of its own
+// (the open-invoice reuse ends at the expiry). Before the expiry a pending
+// invoice is re-quoted as every coin's is, and a coin without a grace is
+// never held.
+func cryptoRequoteInGrace(intent *model.CryptoPaymentIntent, policy *cryptoIntentPolicy, now time.Time) bool {
+	return 0 < policy.confirmationGrace && intent.ExpiresAt.Before(now) && !policy.onTimeUntil(intent).Before(now)
+}
+
+// cryptoRequoteInGraceMessage is the refusal of a re-quote in the grace.
+func cryptoRequoteInGraceMessage(intent *model.CryptoPaymentIntent, policy *cryptoIntentPolicy) string {
+	return fmt.Sprintf(
+		"A payment sent before this quote expired may still be confirming, which can take up to %s, and it is credited at this quote's price. This invoice can be re-quoted from %s. To pay now, start a new invoice.",
+		cryptoGraceHours(policy.confirmationGrace),
+		policy.onTimeUntil(intent).UTC().Format(time.RFC3339),
+	)
+}
+
 // ----- the state of an invoice (§2.5, ZCASH.md §4.10) -----
 
 // cryptoIntentPolicy is what judging an invoice needs from the config.
@@ -1397,6 +1453,10 @@ type cryptoIntentPolicy struct {
 	decimals            int
 	acceptPercent       float64
 	creditConfirmations int64
+	// how long past the quote's expiry a payment may first be seen and still
+	// count as sent within it (cryptoAssetConfirmationGrace): Bitcoin's 3
+	// hours, 0 for every other coin
+	confirmationGrace time.Duration
 }
 
 func cryptoIntentPolicyFor(config *CryptoPayConfig, asset string) *cryptoIntentPolicy {
@@ -1404,11 +1464,19 @@ func cryptoIntentPolicyFor(config *CryptoPayConfig, asset string) *cryptoIntentP
 		decimals:            cryptoAssetDecimals(asset),
 		acceptPercent:       config.Quote.AcceptPercent,
 		creditConfirmations: 1,
+		confirmationGrace:   cryptoAssetConfirmationGrace(asset),
 	}
 	if assetConfig := config.Asset(asset); assetConfig != nil && 0 < assetConfig.CreditConfirmations {
 		policy.creditConfirmations = assetConfig.CreditConfirmations
 	}
 	return policy
+}
+
+// onTimeUntil is the last moment a payment to the invoice may first be seen
+// and still count as sent within its quote: the quote's expiry, plus the
+// coin's confirmation grace (Bitcoin's 3 hours, else none).
+func (self *cryptoIntentPolicy) onTimeUntil(intent *model.CryptoPaymentIntent) time.Time {
+	return intent.ExpiresAt.Add(self.confirmationGrace)
 }
 
 // What the scanner does with an invoice.
@@ -1502,6 +1570,11 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 // cryptoEvaluateIntent judges an invoice and its receipts at now. Pure: the
 // status endpoint and the scanner share it, and the tests drive it directly.
 //
+// "The quote" below ends at expires_at plus the coin's confirmation grace
+// (policy.onTimeUntil): Bitcoin's 3 hours, since its payments are first seen
+// at their block, and none for every other coin. A receipt is on time when it
+// was first seen by then.
+//
 //	credited                  paid (review/orphaned if a credited payment left the chain)
 //	voided                    review/voided with anything received or held, else expired
 //	held by an operator       review with the reason (orphaned: its credit was taken back
@@ -1511,7 +1584,8 @@ func cryptoReceiptHeld(receipt *model.CryptoPaymentReceipt) bool {
 //	past the quote, short     the late value at first-seen rates covers the price: credit
 //	                          at that value capped at the price; else review (underpaid
 //	                          when anything arrived on time, late_underpaid otherwise)
-//	before expiry, short      seen, with what remains to be sent
+//	before the quote ends,    seen, with what remains to be sent
+//	short
 func cryptoEvaluateIntent(
 	intent *model.CryptoPaymentIntent,
 	receipts []*model.CryptoPaymentReceipt,
@@ -1623,7 +1697,11 @@ func cryptoEvaluateIntent(
 	}
 
 	threshold := cryptoAcceptThresholdAtomic(intent.AmountAtomic, policy.acceptPercent)
-	expired := intent.ExpiresAt.Before(now)
+	// a Bitcoin payment sent before expires_at is first seen at its block: it
+	// is on time while its block is within the confirmation grace, and the
+	// invoice stays open until the grace ends (cryptoBitcoinConfirmationGrace)
+	onTimeUntil := policy.onTimeUntil(intent)
+	expired := onTimeUntil.Before(now)
 	view.RemainingAtomic = max(0, intent.AmountAtomic-view.ReceivedAtomic)
 
 	if len(counted) == 0 {
@@ -1638,7 +1716,7 @@ func cryptoEvaluateIntent(
 	onTime := []*model.CryptoPaymentReceipt{}
 	var onTimeAtomic int64
 	for _, receipt := range counted {
-		if !receipt.FirstSeenAt.After(intent.ExpiresAt) {
+		if !receipt.FirstSeenAt.After(onTimeUntil) {
 			onTime = append(onTime, receipt)
 			onTimeAtomic += receipt.AmountAtomic
 		}
@@ -1679,7 +1757,7 @@ func cryptoEvaluateIntent(
 	var lateValue model.NanoCents
 	for _, receipt := range counted {
 		var value model.NanoCents
-		if !receipt.FirstSeenAt.After(intent.ExpiresAt) {
+		if !receipt.FirstSeenAt.After(onTimeUntil) {
 			value = cryptoOnTimeShareNanoCents(intent, receipt.AmountAtomic)
 		} else {
 			if receipt.FirstSeenRateUsd == nil {

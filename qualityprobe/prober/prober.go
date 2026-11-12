@@ -29,6 +29,10 @@ type Provider struct {
 	OutcomeCount         int
 	ClaimOrdinal         int64
 	SecurityDestinations []egresshealth.Destination
+	// The IP families the provider advertises, from its claim: which legs
+	// its URL loads make (egresshealth.Options.ProviderIpFamily) and whether
+	// its tunnel carries IPv6. The zero value is legacy, IPv4 alone.
+	IpFamily egresshealth.IpFamily
 }
 
 // Opens a tunnel to one provider and returns an http.Client that
@@ -357,6 +361,27 @@ func (self *Prober) probeOne(ctx context.Context, provider Provider, timing *pro
 		line := fmt.Sprintf("egress-health: provider=%s %s", providerClientId, res.Summary())
 		if stages := res.FailureStageSummary(); stages != "" {
 			line += " failure_stages=" + stages
+		}
+		// h3= is the HTTP/3 leg of each load whose URL declares it: ok;
+		// silent, nothing answered its QUIC handshake, the one outcome that
+		// fails the load (and the server then judges it by place); skipped,
+		// its HTTPS leg failed first; not_measured; country_disabled, the
+		// provider's country disables UDP probes (not measured, never a
+		// failure); or, for a leg the site answered and refused, that leg's
+		// fixed stage, e.g. tls for an alert.
+		if h3 := res.H3Summary(); h3 != "" {
+			line += " h3=" + h3
+		}
+		// ipv6= is the IPv6 HTTPS leg of each load whose provider advertises
+		// IPv6: ok; skipped, its IPv4 HTTPS leg failed first; not_measured;
+		// no_url, the URL serves no IPv6 (not measured, never a failure); or
+		// a failed leg's fixed stage, which the server judges by place.
+		// ipv6_h3= is that leg's HTTP/3 leg, worded as h3= is.
+		if ipv6 := res.Ipv6Summary(); ipv6 != "" {
+			line += " ipv6=" + ipv6
+		}
+		if ipv6H3 := res.Ipv6H3Summary(); ipv6H3 != "" {
+			line += " ipv6_h3=" + ipv6H3
 		}
 		if timing := res.TimingSummary(); timing != "" {
 			line += " " + timing

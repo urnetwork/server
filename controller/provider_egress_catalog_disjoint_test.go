@@ -210,7 +210,37 @@ func TestQualityProbeCatalogFromConfiguredPathServesWhatItParses(t *testing.T) {
 		siteCount += len(destinations)
 	}
 	sort.Strings(countries)
-	t.Logf("served as parsed: general=%d candidates=%d countries=%d country_sites=%d", len(sites.Destinations), len(sites.Candidates), len(countries), siteCount)
+	h3 := func(rows []*model.ProviderEgressDestination) int {
+		count := 0
+		for _, row := range rows {
+			if row.H3 {
+				count++
+			}
+		}
+		return count
+	}
+	t.Logf("served as parsed: general=%d (h3 %d) candidates=%d (h3 %d) countries=%d country_sites=%d",
+		len(sites.Destinations), h3(sites.Destinations), len(sites.Candidates), h3(sites.Candidates), len(countries), siteCount)
+	families := func(rows []*model.ProviderEgressDestination) (ipv6 int, noIpv4 int) {
+		for _, row := range rows {
+			if row.Ipv6 {
+				ipv6++
+			}
+			if row.NoIpv4 {
+				noIpv4++
+			}
+		}
+		return
+	}
+	generalIpv6, generalNoIpv4 := families(sites.Destinations)
+	candidateIpv6, candidateNoIpv4 := families(sites.Candidates)
+	udpDisabled := []string{}
+	for country := range sites.CountrySettings {
+		udpDisabled = append(udpDisabled, country)
+	}
+	sort.Strings(udpDisabled)
+	t.Logf("ip families: general ipv6 %d, ipv4: false %d; candidates ipv6 %d, ipv4: false %d; countries with udp_probes: false %v",
+		generalIpv6, generalNoIpv4, candidateIpv6, candidateNoIpv4, udpDisabled)
 }
 
 // The served pool keeps every country list the general entries leave alone

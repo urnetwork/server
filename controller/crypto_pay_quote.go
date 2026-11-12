@@ -51,15 +51,19 @@ type CryptoPaymentQuoteResult struct {
 	// the amount an invoice made now asks: price × (1 + the coin's buffer) ÷
 	// rate, rounded up to quote_decimals. USDC's invoice adds a unique
 	// sub-cent suffix to the price
-	Amount                string     `json:"amount"`
-	AmountAtomic          string     `json:"amount_atomic"`
-	Network               string     `json:"network"`
-	Decimals              int        `json:"decimals"`
-	QuoteDecimals         int        `json:"quote_decimals"`
-	PaymentLink           bool       `json:"payment_link"`
-	QuoteTtlSeconds       int        `json:"quote_ttl_seconds"`
-	ConfirmationsRequired int        `json:"confirmations_required"`
-	QuotedAt              *time.Time `json:"quoted_at"`
+	Amount        string `json:"amount"`
+	AmountAtomic  string `json:"amount_atomic"`
+	Network       string `json:"network"`
+	Decimals      int    `json:"decimals"`
+	QuoteDecimals int    `json:"quote_decimals"`
+	PaymentLink   bool   `json:"payment_link"`
+	// the window to send the payment in
+	QuoteTtlSeconds int `json:"quote_ttl_seconds"`
+	// as CryptoPaymentAsset.confirmation_grace_seconds (btc 10800, left out
+	// for every other coin)
+	ConfirmationGraceSeconds int        `json:"confirmation_grace_seconds,omitempty"`
+	ConfirmationsRequired    int        `json:"confirmations_required"`
+	QuotedAt                 *time.Time `json:"quoted_at"`
 	// a refusal (the same codes as POST /pay/crypto/intent); left out on success
 	Error *CryptoPaymentError `json:"error,omitempty"`
 }
@@ -72,6 +76,10 @@ func cryptoQuoteError(code string, message string) *CryptoPaymentQuoteResult {
 func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.ClientSession) (*CryptoPaymentQuoteResult, error) {
 	if !payDataLookupLimiter.allow(clientSession) {
 		return nil, errors.New("429 Too many requests from this address. Try again in a minute.")
+	}
+	// whatever the coin: the 256 GiB pack is x402 and Gamma only
+	if refusal := dataPackRefusal(strings.TrimSpace(args.ItemId), model.DataRailCrypto); refusal != "" {
+		return cryptoQuoteError(PurchaseErrorCodeItemUnavailable, refusal), nil
 	}
 	ctx := clientSession.Ctx
 	config := cryptoPayConfigFunc()
@@ -96,15 +104,16 @@ func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.Cli
 	}
 
 	result := &CryptoPaymentQuoteResult{
-		Asset:                 asset,
-		Plan:                  plan,
-		ItemId:                itemId,
-		Network:               cryptoAssetNetwork(asset),
-		Decimals:              cryptoAssetDecimals(asset),
-		QuoteDecimals:         cryptoAssetQuoteDecimals(asset),
-		PaymentLink:           cryptoAssetPaymentLink(asset),
-		QuoteTtlSeconds:       int(cryptoAssetQuoteTtl(config, asset) / time.Second),
-		ConfirmationsRequired: cryptoConfirmationsRequired(config, asset),
+		Asset:                    asset,
+		Plan:                     plan,
+		ItemId:                   itemId,
+		Network:                  cryptoAssetNetwork(asset),
+		Decimals:                 cryptoAssetDecimals(asset),
+		QuoteDecimals:            cryptoAssetQuoteDecimals(asset),
+		PaymentLink:              cryptoAssetPaymentLink(asset),
+		QuoteTtlSeconds:          int(cryptoAssetQuoteTtl(config, asset) / time.Second),
+		ConfirmationGraceSeconds: int(cryptoAssetConfirmationGrace(asset) / time.Second),
+		ConfirmationsRequired:    cryptoConfirmationsRequired(config, asset),
 	}
 	if plan != "" {
 		offerApplied := false
@@ -127,7 +136,7 @@ func CryptoPaymentQuote(args *CryptoPaymentQuoteArgs, clientSession *session.Cli
 			result.RegularPriceUsd = tier.Tier.YearlyUsd
 		}
 	} else {
-		priceUsd, ok := dataPackPriceUsd(itemId)
+		priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCrypto)
 		if !ok {
 			glog.Errorf("[cryptopay]no usable price in pro.yml for data pack %s\n", itemId)
 			return cryptoQuoteError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil

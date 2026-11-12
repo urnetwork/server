@@ -267,6 +267,24 @@ type Destination struct {
 	// (CheckResult.Canary) -- so the server can tell when the site works there
 	// again. Where the destination is compatible it changes nothing.
 	Canary bool `json:"canary,omitempty"`
+	// Declares that the URL serves the same probe over HTTP/3 (QUIC over UDP).
+	// A URL probe of such a destination makes the HTTPS (TCP) fetch and then
+	// the same request over HTTP/3 through the same provider, under the same
+	// contract, and the load passes only when both do (url_h3.go). False, the
+	// default and what a catalog entry without the key means, keeps the HTTPS
+	// fetch the whole judgement.
+	H3 bool `json:"h3,omitempty"`
+	// Declares that the URL serves the same probe over IPv6, through an AAAA
+	// record (ipv6: true). A URL load through a provider that advertises IPv6
+	// then makes its legs over IPv6 too, after its IPv4 legs, and passes only
+	// when both families do (url_family.go). False, the default, makes no
+	// IPv6 leg: a URL without AAAA is never used for one.
+	Ipv6 bool `json:"ipv6,omitempty"`
+	// Nil or true: the URL serves the probe over IPv4, through an A record.
+	// False (ipv4: false) declares it does not; such a URL is not drawn, as
+	// every load's first leg is its IPv4 HTTPS leg (urlProbeServesProvider).
+	// Only false is served, so a URL that says nothing keeps its pool version.
+	Ipv4 *bool `json:"ipv4,omitempty"`
 }
 
 // The ceiling on any single body read, and the clamp on
@@ -445,6 +463,56 @@ type CheckResult struct {
 	// the server's request (Destination.Canary): unscored, and reported apart
 	// so the server keeps it out of the counts.
 	Canary bool
+	// Set when a URL probe loaded a destination that declares HTTP/3
+	// (Destination.H3): Ok then needs the HTTP/3 leg too.
+	H3Required bool
+	// The HTTP/3 (QUIC over UDP) leg of an H3Required load: the same request
+	// and contract through the same provider, made only once the HTTPS leg
+	// passed. Nil when the destination declares no HTTP/3 or the HTTPS leg
+	// failed. Every other field of this result describes the HTTPS leg; when
+	// this leg fails, Ok is false, FailureStage is FailureStageH3, Err names
+	// this leg's error, and its own stage is H3.FailureStage (url_h3.go).
+	H3 *CheckResult
+	// Set when a URL probe's provider advertises IPv6 and the turn has a URL
+	// that serves it, the load's own or its stand-in (url_family.go): Ok then
+	// needs the IPv6 legs too, unless they were not measured.
+	Ipv6Required bool
+	// The IPv6 legs of an Ipv6Required load: the HTTPS leg over the AAAA
+	// record of the URL they load, with that leg's HTTP/3 leg in Ipv6.H3, made
+	// only once the IPv4 HTTPS leg passed. Every other field of this result
+	// describes the IPv4 HTTPS leg; when the IPv6 legs fail, Ok is false,
+	// FailureStage is FailureStageIpv6 unless an IPv4 HTTP/3 leg failed first,
+	// and Err names the IPv6 leg's error (url_family.go).
+	Ipv6 *CheckResult
+	// The provider advertises IPv6 and no URL of the turn's lane serves it:
+	// the family is not measured on this load, which is judged on its IPv4
+	// legs.
+	Ipv6NoUrl bool
+	// The URL declares HTTP/3 and the provider's country disables UDP probes
+	// (Pool.CountrySettings): no HTTP/3 leg was made in any family, and the
+	// load is judged on its HTTPS legs alone, as a URL without h3 is.
+	UdpProbesDisabled bool
+	// The same two flags for the URL the IPv6 legs load (Ipv6Required), which
+	// is the load's own URL or its stand-in: Ipv6H3Required when it declares
+	// HTTP/3 and UDP probes run, so an IPv6 HTTP/3 leg is planned;
+	// Ipv6UdpProbesDisabled when it declares HTTP/3 and the provider's country
+	// disables UDP probes.
+	Ipv6H3Required        bool
+	Ipv6UdpProbesDisabled bool
+	// The leg's request found no address record of its family for its host,
+	// or for a redirect hop's: the provider's resolver answered, with no A
+	// record for an IPv4 leg or no AAAA record for an IPv6 one. A URL whose
+	// AAAA comes and goes by resolver and place is the URL's fault, never the
+	// provider's (url_family.go).
+	AddressRecordMissing bool
+}
+
+// Whether the IPv4 HTTPS (TCP) leg of the load passed, whatever its later
+// legs did: what the site's own health at this exit is judged by. Ok is the
+// load's verdict. An HTTP/3 leg, and an IPv6 leg, are only ever made after the
+// IPv4 HTTPS leg passed.
+func (self CheckResult) HttpsOk() bool {
+	return self.Ok || self.H3 != nil || self.Ipv6 != nil
 }
 
 // The ok/total tally for one class.
@@ -607,6 +675,19 @@ type Options struct {
 	// are loaded besides (see Destination.Incompatible, Destination.Canary).
 	// The zero Place excludes nothing.
 	ProviderPlace Place
+	// The IP families the provider advertises (its proven category, served
+	// with its claim). A URL probe makes its legs in each family the provider
+	// advertises and the URL serves (url_family.go). The zero value is legacy:
+	// IPv4 alone, as before families were proven.
+	ProviderIpFamily IpFamily
+	// The provider's country disables UDP probes (Pool.CountrySettings,
+	// udp_probes: false): a URL probe makes no HTTP/3 leg in any family, and a
+	// URL that declares h3 is judged on its HTTPS legs alone.
+	UdpProbesDisabled bool
+	// The URL a URL turn's IPv6 legs load when the URL it drew serves no IPv6,
+	// drawn by checkUrlProbe from the lane's URLs that do (url_family.go); nil
+	// otherwise, and for every other probe.
+	urlProbeIpv6StandIn *Destination
 
 	// The run's clock, with Sleep. Nil uses the wall clock and a sleep that
 	// selects on time.After and the context. Tests inject both so a run whose
@@ -826,6 +907,13 @@ func SamplePerRunOf(dests []Destination) int {
 // last attempt off every chain that drew long delays -- a load failed for the
 // prober's arithmetic, not the provider's traffic -- and one far longer would
 // hold a swallowing provider's tunnel open for nothing.
+//
+// A URL probe attempt of a destination that declares HTTP/3 makes its HTTP/3
+// leg in the same slot right after its HTTPS leg, bounded by one more
+// per-request timeout (url_h3.go), so in URL mode every attempt round is
+// counted twice: any drawn URL may declare it. A provider that advertises
+// IPv6 makes both legs again over IPv6 (url_family.go), so its rounds are
+// counted four times: any drawn URL may serve IPv6.
 func (self Options) RunBudget(loads int) time.Duration {
 	if loads < 1 {
 		loads = 1
@@ -833,7 +921,14 @@ func (self Options) RunBudget(loads int) time.Duration {
 	concurrency := self.concurrency()
 	rounds := (loads + concurrency - 1) / concurrency
 	attempts := self.loadAttempts()
-	budget := time.Duration(attempts*rounds) * self.perRequestTimeout()
+	legs := 1
+	if self.UrlProbe {
+		legs = 2
+		if self.ProviderIpFamily.Ipv6() {
+			legs = 4
+		}
+	}
+	budget := time.Duration(attempts*rounds*legs) * self.perRequestTimeout()
 	budget += time.Duration(attempts-1) * retryDelayCapFactor * self.loadRetryMeanInterval()
 	generations := 1 + self.tunnelRecreateAttempts()
 	budget += time.Duration(generations) * max(0, self.coldStartTimeout()-self.perRequestTimeout())
@@ -1452,7 +1547,7 @@ func (self *Result) FailureStageSummary() string {
 }
 
 func failureStageSummary(checks []CheckResult) string {
-	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended", "unknown"}
+	order := []string{"dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", FailureStageH3, FailureStageIpv6, "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended", "unknown"}
 	counts := map[string]int{}
 	for _, check := range checks {
 		if check.Ok {
@@ -1460,19 +1555,156 @@ func failureStageSummary(checks []CheckResult) string {
 		}
 		stage := check.FailureStage
 		switch stage {
-		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended":
+		case "dial_dns", "dial_tcp", "dial_dns_or_socket", "tls", "policy", "request_build", "request_dns_timeout", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_canceled", "request_eof", "request_unknown", "response_body", "response_judgment", FailureStageH3, FailureStageIpv6, "tunnel_unavailable", "local_control_registration", "local_contract_acquisition", "local_transport_admission", "run_ended":
 		default:
 			stage = "unknown"
 		}
 		counts[stage]++
 	}
+	return summaryOf(order, counts)
+}
+
+// The parts of a summary in their fixed order, each with its count.
+func summaryOf(order []string, counts map[string]int) string {
 	parts := make([]string, 0, len(counts))
-	for _, stage := range order {
-		if count := counts[stage]; count > 0 {
-			parts = append(parts, fmt.Sprintf("%s:%d", stage, count))
+	for _, outcome := range order {
+		if count := counts[outcome]; count > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", outcome, count))
 		}
 	}
 	return strings.Join(parts, ",")
+}
+
+// The outcome words an HTTP/3 leg summary can write, in order: ok, silent
+// (nothing answered the QUIC handshake: the one outcome that fails the load),
+// skipped (an earlier leg of the load failed first, so no leg was made),
+// not_measured, country_disabled (the provider's country disables UDP probes,
+// so no leg was made: not measured, never a failure), or, for a leg the site
+// answered and refused or failed, that leg's own stage -- tls for a TLS alert,
+// quic, response_content and the like.
+var urlProbeH3SummaryOrder = []string{"ok", "silent", "skipped", "not_measured", "country_disabled", "tls", FailureStageQuic, "redirect_policy", "redirect_limit", "redirect_location", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_eof", "request_unknown", "response_encoding", "response_body", "response_content", "response_performance", "unknown"}
+
+// One HTTP/3 leg's word in a summary (urlProbeH3SummaryOrder); nil for no leg.
+func urlProbeH3SummaryOutcome(leg *CheckResult, known map[string]bool) string {
+	switch UrlProbeH3Udp(leg) {
+	case "":
+		return "skipped"
+	case UrlProbeH3UdpPassed:
+		return "ok"
+	case UrlProbeH3UdpSilent:
+		return "silent"
+	case UrlProbeH3UdpNotMeasured:
+		return "not_measured"
+	}
+	if known[leg.FailureStage] {
+		return leg.FailureStage
+	}
+	return "unknown"
+}
+
+func knownOutcomes(order []string) map[string]bool {
+	known := map[string]bool{}
+	for _, outcome := range order {
+		known[outcome] = true
+	}
+	return known
+}
+
+// The IPv4 HTTP/3 leg outcomes of a run's loads whose destination declares
+// HTTP/3, finite and identity-free like FailureStageSummary (UrlProbeH3Udp,
+// urlProbeH3SummaryOrder). Each comes with its count. Empty when no load
+// declared HTTP/3.
+func (self *Result) H3Summary() string {
+	if self == nil {
+		return ""
+	}
+	known := knownOutcomes(urlProbeH3SummaryOrder)
+	counts := map[string]int{}
+	for _, check := range self.Checks {
+		if check.Canary {
+			continue
+		}
+		switch {
+		case check.UdpProbesDisabled:
+			counts["country_disabled"]++
+		case check.H3Required:
+			counts[urlProbeH3SummaryOutcome(check.H3, known)]++
+		}
+	}
+	return summaryOf(urlProbeH3SummaryOrder, counts)
+}
+
+// The outcome words of an IPv6 HTTPS leg summary, in order: ok; skipped (the
+// IPv4 HTTPS leg failed first, so no IPv6 leg was made); not_measured;
+// no_url (the provider advertises IPv6 and the URL does not serve it: not
+// measured, never a failure); or a failed leg's own stage.
+var urlProbeIpv6SummaryOrder = []string{"ok", "skipped", "not_measured", "no_url", "dial_tcp", "tls", "redirect_policy", "redirect_limit", "redirect_location", "request_dial_timeout", "request_tls_timeout", "request_connect_timeout", "request_write_timeout", "request_response_timeout", "request_timeout", "request_eof", "request_unknown", "response_encoding", "response_body", "response_content", "response_performance", "unknown"}
+
+// The IPv6 HTTPS leg outcomes of a run's loads whose provider advertises IPv6
+// (UrlProbeIpv6Tcp, urlProbeIpv6SummaryOrder), each with its count. Empty when
+// no load's provider advertised IPv6.
+func (self *Result) Ipv6Summary() string {
+	if self == nil {
+		return ""
+	}
+	known := knownOutcomes(urlProbeIpv6SummaryOrder)
+	counts := map[string]int{}
+	for _, check := range self.Checks {
+		if check.Canary {
+			continue
+		}
+		switch {
+		case check.Ipv6NoUrl:
+			counts["no_url"]++
+		case !check.Ipv6Required:
+		case check.Ipv6 == nil:
+			counts["skipped"]++
+		default:
+			switch UrlProbeIpv6Tcp(check.Ipv6) {
+			case UrlProbeIpv6TcpPassed:
+				counts["ok"]++
+			case UrlProbeIpv6TcpNotMeasured:
+				counts["not_measured"]++
+			default:
+				if known[check.Ipv6.FailureStage] {
+					counts[check.Ipv6.FailureStage]++
+				} else {
+					counts["unknown"]++
+				}
+			}
+		}
+	}
+	return summaryOf(urlProbeIpv6SummaryOrder, counts)
+}
+
+// The IPv6 HTTP/3 leg outcomes of a run's loads whose provider advertises
+// IPv6 and whose IPv6 legs load a URL that declares HTTP/3
+// (urlProbeH3SummaryOrder), each with its count: skipped when an earlier leg
+// failed first, so this leg was not made. Empty when there were none.
+func (self *Result) Ipv6H3Summary() string {
+	if self == nil {
+		return ""
+	}
+	known := knownOutcomes(urlProbeH3SummaryOrder)
+	counts := map[string]int{}
+	for _, check := range self.Checks {
+		if check.Canary || !check.Ipv6Required {
+			continue
+		}
+		switch {
+		case check.Ipv6UdpProbesDisabled:
+			counts["country_disabled"]++
+		case !check.Ipv6H3Required:
+		case check.Ipv6 == nil:
+			counts["skipped"]++
+		case check.Ipv6.H3 == nil && UrlProbeIpv6Tcp(check.Ipv6) == UrlProbeIpv6TcpNotMeasured:
+			// the family was not measured, its UDP leg with it
+			counts["not_measured"]++
+		default:
+			counts[urlProbeH3SummaryOutcome(check.Ipv6.H3, known)]++
+		}
+	}
+	return summaryOf(urlProbeH3SummaryOrder, counts)
 }
 
 // Lists the loads the run could not measure, in table order.

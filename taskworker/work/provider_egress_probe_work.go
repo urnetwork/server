@@ -1301,6 +1301,11 @@ func scoreEgressHealthResult(
 // are tallied against the run's scored sites without being among them; a
 // canary is tallied as a canary; a load that was not measured is not tallied
 // at all.
+//
+// The tally judges sites, so a load counts its HTTPS leg (CheckResult.HttpsOk):
+// a URL that declares HTTP/3 and failed only its HTTP/3 leg says the provider
+// does not carry UDP, not that the site does not work at the provider's place,
+// and must not move the site toward retirement or a place mark.
 func egressHealthSiteLoads(
 	res *egresshealth.Result,
 	place model.ProviderEgressPlace,
@@ -1315,7 +1320,7 @@ func egressHealthSiteLoads(
 	for _, check := range res.Checks {
 		if scores(check) {
 			scoredTotal++
-			if check.Ok {
+			if check.HttpsOk() {
 				scoredOk++
 			}
 		}
@@ -1335,19 +1340,19 @@ func egressHealthSiteLoads(
 			continue
 		}
 		if check.Canary {
-			loads = append(loads, model.ProviderEgressSiteLoad{Name: check.Name, Ok: check.Ok, Canary: true})
+			loads = append(loads, model.ProviderEgressSiteLoad{Name: check.Name, Ok: check.HttpsOk(), Canary: true})
 			continue
 		}
 		othersOk, othersTotal := scoredOk, scoredTotal
 		if scores(check) {
 			othersTotal--
-			if check.Ok {
+			if check.HttpsOk() {
 				othersOk--
 			}
 		}
 		loads = append(loads, model.ProviderEgressSiteLoad{
 			Name:    check.Name,
-			Ok:      check.Ok,
+			Ok:      check.HttpsOk(),
 			Healthy: healthy(othersOk, othersTotal),
 		})
 	}

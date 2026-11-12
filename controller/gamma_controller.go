@@ -8,7 +8,9 @@ package controller
 //	POST /pay/gamma/intent         bearer: the account's deposit hotkey, the price and the mint command
 //	POST /pay/gamma/status         status token: pending, seen, confirming, paid, expired, review
 //	GET  /pay/gamma/settings       bearer: the automatic renewal and top-up switches
-//	POST /pay/gamma/settings       bearer: set them, the top-up item and the monthly limit
+//	POST /pay/gamma/settings       bearer: set them, the top-up item and the monthly limit; a switch
+//	                               turned off cancels the charges it governs not yet sent, and
+//	                               lists those already sent (charging)
 //
 // The API reads Postgres only: the biller (gamma_biller.go) keeps the chain's
 // view there, so a request never waits on a node. The bearer token is the only
@@ -77,7 +79,12 @@ const (
 
 // The plans and data items gamma sells. Monthly too: gamma can renew.
 var gammaKnownPlans = []string{model.SolanaPlanMonthly, model.SolanaPlanYearly, model.SolanaPlanYearlyOnboarding}
-var gammaKnownItems = []string{StripeItemData1Tib, StripeItemData10Tib}
+
+// gammaKnownItems are the data packs pro.yml sells with Gamma, in its order:
+// data_1tib, data_10tib and the 256 GiB pack.
+func gammaKnownItems() []string {
+	return dataPackIdsOn(model.DataRailGamma)
+}
 
 // The biller writes its state every run; older than this, it is not running
 // and nothing is sold.
@@ -157,8 +164,8 @@ func gammaMaxSpend() int64 {
 			largest = max(largest, model.UsdToNanoCents(priceUsd))
 		}
 	}
-	for _, item := range gammaKnownItems {
-		if priceUsd, ok := dataPackPriceUsd(item); ok {
+	for _, item := range gammaKnownItems() {
+		if priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma); ok {
 			largest = max(largest, model.UsdToNanoCents(priceUsd))
 		}
 	}
@@ -303,8 +310,8 @@ func GammaTerms(clientSession *session.ClientSession) (*GammaTermsResult, error)
 			IndicativeTao:    gammaIndicativeTao(units, gammaPerTao),
 		})
 	}
-	for _, item := range gammaKnownItems {
-		priceUsd, ok := dataPackPriceUsd(item)
+	for _, item := range gammaKnownItems() {
+		priceUsd, ok := dataPackPriceUsd(item, model.DataRailGamma)
 		if !ok {
 			continue
 		}
@@ -339,7 +346,7 @@ func gammaIndicativeTao(units int64, gammaPerTao uint64) string {
 type CreateGammaPaymentIntentArgs struct {
 	// monthly | yearly | yearly_onboarding
 	Plan string `json:"plan,omitempty"`
-	// data_1tib | data_10tib
+	// a pack pro.yml sells with Gamma: data_1tib | data_10tib | data_256gib
 	ItemId string `json:"item_id,omitempty"`
 	// account (default): the plan or data lands on the caller's network;
 	// code: a data pack as a balance code
@@ -392,6 +399,53 @@ func gammaIntentError(code string, message string) *GammaPaymentIntentResult {
 
 const gammaUnavailableMessage = "Paying with Gamma is temporarily unavailable."
 
+// A plan paid with Gamma never charges for days another Pro subscription
+// pays for (the owner, 2026-11-11): beside one that renews, a Gamma Pro
+// purchase and Gamma renewal are refused, as card checkout is refused beside a
+// renewing Gamma plan (stripeNewSubscriptionRefusal).
+const gammaOtherProRenewsPurchaseMessage = "You already have a Pro subscription that renews, so no Gamma payment was started: paying with Gamma as well would charge you twice for the same days. Cancel that subscription, then pay with Gamma once it has ended."
+const gammaOtherProRenewsSettingsMessage = "You have another Pro subscription that renews, so Gamma renewal was not turned on: both would charge you for the same days. Cancel that subscription, then turn Gamma renewal on once it has ended."
+
+// a plan intent the biller holds while another Pro subscription pays for the
+// days it would buy (gammaPlanHold)
+const gammaPlanCoveredMessage = "Another Pro subscription pays for these days, so this Gamma payment is not charged while it runs. It is charged only if that subscription ends before this payment expires."
+
+// A Gamma plan is never charged beside another Gamma plan charge for the same
+// days (the owner, 2026-11-11). A plan purchase is refused while another Gamma
+// plan charge of the network is being made: a renewal, a seat upgrade or
+// another plan purchase in a spend batch cannot be voided safely, since its
+// spend may still land. Once it is paid, a plan can be bought again (an
+// upgrade starts at once, as before).
+const gammaPlanChargingPurchaseMessage = "A Gamma payment for your Pro plan is being charged now (its renewal, an upgrade at your client limit, or a plan you bought), so no Gamma payment was started: paying for a plan as well would charge you twice for the same days. Check again in a few minutes, once it is paid."
+
+// the status of a plan intent held while another Gamma plan charge of the
+// network is in flight (gammaPlanHold)
+const gammaPlanChargingMessage = "Another Gamma payment for your Pro plan is being charged now, so this one waits: if that one is paid, this one is not charged, since both would pay for the same days."
+
+// the status of a plan intent made before another Gamma plan of the network
+// was paid (gammaPlanHold)
+const gammaPlanPaidSinceMessage = "Another Gamma payment for your Pro plan was paid after this one was started, so this one is not charged: both would pay for the same days."
+
+// the status of a renewal or seat upgrade while a plan purchase of the
+// network is open (gammaPlanHold); automatic intents hand out no status
+// token, so this is for operators
+const gammaPlanReplacedMessage = "A Gamma plan purchase of this account is open and replaces this automatic charge: it waits while the purchase is open, is voided once the purchase is paid, and goes ahead only if the purchase expires unpaid."
+
+// gammaOtherProRenews reports whether a Pro subscription of the network other
+// than a plan paid with gamma renews or still bills, by card checkout's own
+// rule (stripeNewSubscriptionRefusal) with gamma left out: a recorded window
+// of Stripe, the App Store or Google Play that covers now (a manual grant, an
+// x402 month or a one-time crypto year never renews), the subscription behind
+// its last Stripe window still billing, or a live subscription of its Stripe
+// customer.
+func gammaOtherProRenews(clientSession *session.ClientSession) bool {
+	markets := model.GetActiveSubscriptionRenewalMarkets(clientSession.Ctx, clientSession.ByJwt.NetworkId, model.SubscriptionTypeSupporter)
+	if subscriptionMarketsBlockNewPurchase(markets, false) {
+		return true
+	}
+	return stripeNetworkHasBillingSubscription(clientSession)
+}
+
 // CreateGammaPaymentIntent answers POST /pay/gamma/intent.
 func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession *session.ClientSession) (*GammaPaymentIntentResult, error) {
 	ctx := clientSession.Ctx
@@ -410,7 +464,10 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	if plan != "" && !slices.Contains(gammaKnownPlans, plan) {
 		return gammaIntentError(PurchaseErrorCodePlanUnavailable, "That plan is not available with Gamma."), nil
 	}
-	if itemId != "" && !slices.Contains(gammaKnownItems, itemId) {
+	if itemId != "" && !slices.Contains(gammaKnownItems(), itemId) {
+		if refusal := dataPackRefusal(itemId, model.DataRailGamma); refusal != "" {
+			return gammaIntentError(PurchaseErrorCodeItemUnavailable, refusal), nil
+		}
 		return gammaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available with Gamma."), nil
 	}
 	delivery := strings.TrimSpace(args.Delivery)
@@ -448,6 +505,12 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 	if !allowNetworkIntent(networkId) {
 		return gammaIntentError(PurchaseErrorCodeRateLimited, "Too many payment attempts. Try again in a minute."), nil
 	}
+	if plan != "" && gammaOtherProRenews(clientSession) {
+		// Pro paid elsewhere renews: a Gamma plan beside it would charge the
+		// customer twice for the same days (an open one is not handed out
+		// again either)
+		return gammaIntentError(PurchaseErrorCodeAlreadySubscribed, gammaOtherProRenewsPurchaseMessage), nil
+	}
 
 	var priceUsd, regularUsd float64
 	tierName := ""
@@ -465,7 +528,7 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		tierName = tier.Tier.Name
 	} else {
 		var ok bool
-		priceUsd, ok = dataPackPriceUsd(itemId)
+		priceUsd, ok = dataPackPriceUsd(itemId, model.DataRailGamma)
 		if !ok {
 			return gammaIntentError(PurchaseErrorCodeItemUnavailable, "That data pack is not available."), nil
 		}
@@ -495,12 +558,33 @@ func CreateGammaPaymentIntent(args *CreateGammaPaymentIntentArgs, clientSession 
 		return result, nil
 	}
 
+	var open *model.GammaPaymentIntent
 	if delivery == model.CryptoDeliveryAccount {
-		if open := model.GetOpenGammaPaymentIntentForReuse(ctx, networkId, hotkey.Hotkey, item, delivery, now); open != nil {
-			token, tokenHash := cryptoNewStatusToken()
-			model.AddGammaPaymentIntentStatusToken(ctx, open.IntentId, tokenHash)
-			return gammaIntentResult(clientSession, view, open, hotkey, token, now), nil
+		open = model.GetOpenGammaPaymentIntentForReuse(ctx, networkId, hotkey.Hotkey, item, delivery, now)
+	}
+	if plan != "" {
+		// another Gamma plan charge of the network in flight (a renewal, a
+		// seat upgrade, another plan) cannot be voided: its spend may land.
+		// Asking again for the purchase being charged hands it back.
+		var exclude *server.Id
+		var since *time.Time
+		if open != nil {
+			exclude, since = &open.IntentId, &open.CreateTime
 		}
+		charging, paidSince := model.GetGammaPlanChargeState(ctx, networkId, gammaKnownPlans, exclude, since)
+		if charging {
+			return gammaIntentError(PurchaseErrorCodeAlreadySubscribed, gammaPlanChargingPurchaseMessage), nil
+		}
+		if paidSince {
+			// another plan was paid after the open one was made, so that one
+			// is never charged: this is a new purchase
+			open = nil
+		}
+	}
+	if open != nil {
+		token, tokenHash := cryptoNewStatusToken()
+		model.AddGammaPaymentIntentStatusToken(ctx, open.IntentId, tokenHash)
+		return gammaIntentResult(clientSession, view, open, hotkey, token, now), nil
 	}
 	if gammaMaxOpenIntentsPerNetwork <= model.CountOpenGammaPaymentIntents(ctx, networkId, now) {
 		return gammaIntentError(PurchaseErrorCodeRateLimited, "Too many open Gamma payments. Pay or let one expire first."), nil
@@ -779,6 +863,17 @@ func gammaStatusResult(clientSession *session.ClientSession, view *gammaView, in
 		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeQuoteExpired, Message: "The payment expired before the deposit could pay it."}
 		return result
 	}
+	if hold := gammaPlanHold(ctx, intent, now); hold != "" {
+		// covered: the biller does not charge it while another Pro
+		// subscription or another Gamma plan pays for the same days
+		// (gamma_auto.go)
+		result.Status = gammaStatusSeen
+		if balance < 0 {
+			result.Status = gammaStatusPending
+		}
+		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: hold}
+		return result
+	}
 	if charge != nil && (charge.State == model.GammaChargeSkipped || charge.State == model.GammaChargeFailed) {
 		result.Status = gammaStatusSeen
 		if balance < 0 {
@@ -842,23 +937,52 @@ type GammaSettingsResult struct {
 	// the plan a renewal or a seat upgrade buys; "" before a plan was paid
 	RenewPlan string `json:"renew_plan"`
 	// the deposit hotkey automatic charges draw from; "" before a payment
-	DepositHotkey  string              `json:"deposit_hotkey"`
-	DepositHotkeys []string            `json:"deposit_hotkeys"`
-	Error          *CryptoPaymentError `json:"error,omitempty"`
+	DepositHotkey  string   `json:"deposit_hotkey"`
+	DepositHotkeys []string `json:"deposit_hotkeys"`
+	// the automatic charges whose switch is off that were already being
+	// charged when it was turned off: a payment already sent to the chain
+	// cannot be recalled, so each can still be charged this once; empty when
+	// there is none
+	Charging []*GammaSettingsCharge `json:"charging"`
+	// Charging in a sentence; "" when it is empty
+	Notice string              `json:"notice,omitempty"`
+	Error  *CryptoPaymentError `json:"error,omitempty"`
+}
+
+// GammaSettingsCharge is an automatic charge already being made when its
+// switch was turned off (model.GammaAutomaticChargeInFlight).
+type GammaSettingsCharge struct {
+	IntentId string `json:"intent_id"`
+	// renew, topup or seat
+	Purpose     string `json:"purpose"`
+	Plan        string `json:"plan"`
+	ItemId      string `json:"item_id"`
+	AmountGamma string `json:"amount_gamma"`
+	// confirming: its spend was sent, or landed and is being credited
+	Status string `json:"status"`
 }
 
 // GetGammaSettings answers GET /pay/gamma/settings.
 func GetGammaSettings(clientSession *session.ClientSession) (*GammaSettingsResult, error) {
-	return gammaSettingsResult(clientSession), nil
+	return gammaSettingsResult(clientSession, model.GetGammaSwitchedOffChargesInFlight(clientSession.Ctx, clientSession.ByJwt.NetworkId)), nil
 }
 
-// SetGammaSettings answers POST /pay/gamma/settings.
+// SetGammaSettings answers POST /pay/gamma/settings. A switch turned off
+// (auto_renew: the renewal and the upgrade at the client limit; auto_topup:
+// the data top-up and that upgrade) cancels the open charges it governs that
+// are not yet sent: the biller voids them in its own step, and no spend batch
+// takes them meanwhile. One already sent to the chain cannot be recalled, and
+// voiding it would leave a payment that lands uncredited, so the switch is
+// still turned off and the answer lists that charge (charging) and says
+// plainly that it can still be charged this once (notice). Refusing instead
+// would spare the customer nothing, since the charge lands either way, and
+// would leave the switch on for the charges after it.
 func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSession) (*GammaSettingsResult, error) {
 	settings := &model.GammaAccountSettings{AutoRenew: args.AutoRenew, AutoTopup: args.AutoTopup}
 	if args.TopupItemId != nil {
 		item := strings.TrimSpace(*args.TopupItemId)
-		if !slices.Contains(gammaTopupItems, item) {
-			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeItemUnavailable, Message: "The top-up item is data_1tib or data_10tib."}}, nil
+		if !slices.Contains(gammaTopupItems(), item) {
+			return &GammaSettingsResult{Error: &CryptoPaymentError{Code: PurchaseErrorCodeItemUnavailable, Message: gammaTopupItemMessage()}}, nil
 		}
 		settings.TopupItem = &item
 	}
@@ -869,11 +993,20 @@ func SetGammaSettings(args *GammaSettingsArgs, clientSession *session.ClientSess
 		}
 		settings.MonthlyLimit = &units
 	}
-	model.SetGammaAccountSettings(clientSession.Ctx, clientSession.ByJwt.NetworkId, settings, gammaNow())
-	return gammaSettingsResult(clientSession), nil
+	if args.AutoRenew != nil && *args.AutoRenew && gammaOtherProRenews(clientSession) {
+		// a Gamma plan renewing beside Pro paid elsewhere would charge the
+		// customer twice for the same days; nothing in the request is applied
+		result := gammaSettingsResult(clientSession, model.GetGammaSwitchedOffChargesInFlight(clientSession.Ctx, clientSession.ByJwt.NetworkId))
+		result.Error = &CryptoPaymentError{Code: PurchaseErrorCodeAlreadySubscribed, Message: gammaOtherProRenewsSettingsMessage}
+		return result, nil
+	}
+	// what was already being charged, read under the account's row lock: a
+	// spend batch made after this sees the switch off
+	inFlight := model.SetGammaAccountSettings(clientSession.Ctx, clientSession.ByJwt.NetworkId, settings, gammaNow())
+	return gammaSettingsResult(clientSession, inFlight), nil
 }
 
-func gammaSettingsResult(clientSession *session.ClientSession) *GammaSettingsResult {
+func gammaSettingsResult(clientSession *session.ClientSession, inFlight []*model.GammaAutomaticChargeInFlight) *GammaSettingsResult {
 	ctx := clientSession.Ctx
 	networkId := clientSession.ByJwt.NetworkId
 	result := &GammaSettingsResult{
@@ -881,7 +1014,23 @@ func gammaSettingsResult(clientSession *session.ClientSession) *GammaSettingsRes
 		AutoTopup:      true,
 		TopupItemId:    StripeItemData1Tib,
 		DepositHotkeys: []string{},
+		Charging:       []*GammaSettingsCharge{},
 	}
+	for _, charge := range inFlight {
+		plan, itemId := cryptoSplitItem(charge.Item)
+		if charge.Item == model.SolanaPlanMonthly {
+			plan, itemId = charge.Item, ""
+		}
+		result.Charging = append(result.Charging, &GammaSettingsCharge{
+			IntentId:    charge.IntentId.String(),
+			Purpose:     charge.Purpose,
+			Plan:        plan,
+			ItemId:      itemId,
+			AmountGamma: gammaFormatUnits(charge.Amount),
+			Status:      gammaStatusConfirming,
+		})
+	}
+	result.Notice = gammaSettingsChargingNotice(inFlight)
 	for _, hotkey := range model.GetGammaDepositHotkeys(ctx, networkId) {
 		result.DepositHotkeys = append(result.DepositHotkeys, hotkey.Hotkey)
 	}
@@ -901,6 +1050,35 @@ func gammaSettingsResult(clientSession *session.ClientSession) *GammaSettingsRes
 	result.RenewPlan = account.RenewPlan
 	result.DepositHotkey = account.Hotkey
 	return result
+}
+
+// gammaSettingsChargingNotice says, in plain words, which automatic charges
+// were already being made when their switch was turned off, and that each can
+// still be charged this once; "" when there is none.
+func gammaSettingsChargingNotice(inFlight []*model.GammaAutomaticChargeInFlight) string {
+	descriptions := []string{}
+	for _, charge := range inFlight {
+		what := fmt.Sprintf("(%s, %s gamma)", gammaItemDescription(charge.Item), gammaFormatUnits(charge.Amount))
+		switch charge.Purpose {
+		case model.GammaPurposeRenew:
+			descriptions = append(descriptions, "the renewal of your plan "+what)
+		case model.GammaPurposeSeat:
+			descriptions = append(descriptions, "the upgrade to Pro at your client limit "+what)
+		case model.GammaPurposeTopup:
+			descriptions = append(descriptions, "the data top-up "+what)
+		default:
+			descriptions = append(descriptions, "an automatic charge "+what)
+		}
+	}
+	switch len(descriptions) {
+	case 0:
+		return ""
+	case 1:
+		text := descriptions[0]
+		return strings.ToUpper(text[:1]) + text[1:] + " was already being charged when you turned this off. A payment already sent to the chain can't be recalled, so it can still be charged this once, but none after it while the switch is off."
+	}
+	list := strings.Join(descriptions[:len(descriptions)-1], ", ") + " and " + descriptions[len(descriptions)-1]
+	return "These automatic charges were already being made when you turned them off: " + list + ". A payment already sent to the chain can't be recalled, so each can still be charged this once, but none after it while its switch is off."
 }
 
 // gammaParseUnits parses a decimal amount of gamma into units (at most 9

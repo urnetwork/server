@@ -28,7 +28,9 @@ func providerUrlProbeBatchMatches(left, right *ProviderEgressProbeBatchArgs) boo
 }
 
 // One URL has one attempt. Failed measured requests are requeued durably;
-// the worker never retains its tunnel for a retry timer.
+// the worker never retains its tunnel for a retry timer. The reserve is the
+// longest turn: a dual-stack provider's, whose URL may make both legs in both
+// families (egresshealth url_family.go).
 func providerUrlProbeRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	batch := providerUrlProbeBatch(args)
 	timeout := time.Duration(batch.ProbeTimeoutSeconds) * time.Second
@@ -36,6 +38,7 @@ func providerUrlProbeRunBudget(args *ProviderEgressProbeArgs) time.Duration {
 	options.UrlProbe = true
 	options.LoadAttempts = 1
 	options.TunnelRecreateAttempts = args.TunnelRecreateAttempts
+	options.ProviderIpFamily = egresshealth.IpFamilyDualstack
 	return timeout + options.RunBudget(1)
 }
 

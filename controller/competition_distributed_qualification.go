@@ -139,6 +139,9 @@ func qualifyCompetitionDistributedHost(ctx context.Context, settings *Settings, 
 	if err != nil || qualified {
 		return err
 	}
+	if settings.securityToolchainException != nil {
+		return errors.New("security toolchain exception requires retained admission evidence; it cannot resample a host")
+	}
 	jobId := competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256)
 	selected := *settings
 	selected.executorHostId, selected.executorSlotId = host.HostId, host.SlotId
@@ -375,6 +378,16 @@ func competitionExecutorReceiptBytes(receipt *competitionExecutorEquivalenceRece
 
 // Existing receipts cannot be relabeled as evidence for a later seed or policy.
 func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy, receipt *competitionExecutorEquivalenceReceipt) error {
+	return validateCompetitionExecutorReceiptWithException(settings, round, baseline, host, receipt, "")
+}
+
+// An explicit exact-document exception retains the failed throughput judgement;
+// all identities, samples, recomputed statistics and other screens stay strict.
+func validateCompetitionExecutorReceiptWithException(settings *Settings, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy, receipt *competitionExecutorEquivalenceReceipt, exceptionDocumentSha256 string) error {
+	exception := exceptionDocumentSha256 != ""
+	if exception && (receipt == nil || receipt.Passed || receipt.Retention == nil || !sha256Pattern.MatchString(exceptionDocumentSha256) || receipt.Retention.Sha256 != exceptionDocumentSha256) {
+		return errors.New("admission exception requires its exact retained failed document")
+	}
 	expectedJobId := competitionExecutorQualificationJobId(round.RoundId, host.HostId, settings.DistributedEvaluationPolicy.ApprovalSha256)
 	expectedRecovery := ""
 	if recovery := settings.executorQualificationRecovery; recovery != nil {
@@ -389,7 +402,7 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 		receipt.ControlAmendmentSha256 != competitionExecutorControlAmendmentSha256(settings) ||
 		receipt.BaselineSha256 != baseline.Sha256 || receipt.SourceLockSha256 != settings.AutomationPolicy.SourceLockSha256 || receipt.ProvidersSha256 != round.ProvidersSha256 ||
 		receipt.EvaluatorImageDigest != settings.EvaluatorImageDigest || receipt.QualificationSha256 != host.QualificationSha256 || receipt.ConfigLocalSha256 != settings.EvaluationPolicy.ConfigLocalSha256 || receipt.VaultLocalSha256 != settings.EvaluationPolicy.VaultLocalSha256 ||
-		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || !receipt.Passed || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
+		receipt.PolicyApprovalSha256 != settings.DistributedEvaluationPolicy.ApprovalSha256 || !receipt.Noop || (!receipt.Passed && !exception) || receipt.Replicates != 9 || receipt.StatisticalEquivalenceProven ||
 		receipt.ScreenKind != "operational-admission/v1" || receipt.MaximumRawScoreRelativeDifference != 0.05 || receipt.RawScoreRelativeDifference < 0 || receipt.RawScoreRelativeDifference > 0.05 || math.IsNaN(receipt.RawScoreRelativeDifference) || math.IsInf(receipt.RawScoreRelativeDifference, 0) || receipt.ConfidenceLevel != 0.95 ||
 		receipt.StatisticalMethod != "two-sided-welch-t-run-level" || !sha256Pattern.MatchString(receipt.ArchiveManifestSha256) || receipt.CreatedAt.After(receipt.QualificationDeadlineAt) || len(receipt.Metrics) != len(competitionNoopMetricNames(settings)) || !reflect.DeepEqual(receipt.WorkCoveragePolicy, settings.EvaluationPolicy.WorkCoveragePolicy) ||
 		receipt.QualificationJobId != expectedJobId.String() || receipt.QualificationStartedAt.IsZero() ||
@@ -432,6 +445,7 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 		}
 	}
 	seen := map[string]bool{}
+	excepted := false
 	for _, metric := range receipt.Metrics {
 		values, present := baselineValues[metric.Metric]
 		if !present || seen[metric.Metric] || len(metric.BaselineValues) != len(values) {
@@ -444,9 +458,10 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 			}
 		}
 		expected, err := compareCompetitionHostMetric(metric.Metric, metric.BaselineValues, metric.CandidateValues)
-		if err != nil || expected.SignificantShift {
+		if err != nil || (expected.SignificantShift && (!exception || metric.Metric != "throughput_p50_bytes_per_s")) {
 			return errors.New("host admission contains a significant or unavailable metric shift")
 		}
+		excepted = excepted || expected.SignificantShift
 		expected.BaselineWithinRunSe = baselineWithinSe[metric.Metric]
 		expected.CandidateWithinRunSe = metric.CandidateWithinRunSe
 		if len(expected.BaselineWithinRunSe) != len(metric.BaselineWithinRunSe) || len(expected.BaselineWithinRunSe) != len(metric.CandidateWithinRunSe) {
@@ -458,6 +473,12 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 				return errors.New("host admission changed within-run uncertainty records")
 			}
 		}
+		// math.Exp dispatches on CPU FMA support even within the same Go
+		// amd64 binary. Only bounded p-value roundoff may differ; the original
+		// canonical receipt and all recomputed admission decisions stay exact.
+		if competitionHostProbabilityRoundoffMatches(expected.TwoSidedPValue, metric.TwoSidedPValue) {
+			expected.TwoSidedPValue = metric.TwoSidedPValue
+		}
 		expectedBytes, expectedErr := json.Marshal(expected)
 		actualBytes, actualErr := json.Marshal(metric)
 		if expectedErr != nil || actualErr != nil || !bytes.Equal(expectedBytes, actualBytes) {
@@ -466,6 +487,9 @@ func validateCompetitionExecutorReceipt(settings *Settings, round *roundRecord, 
 		if metric.Metric == "raw_score" && (expected.BaselineMean <= 0 || receipt.RawScoreRelativeDifference != math.Abs(expected.Difference)/expected.BaselineMean) {
 			return errors.New("host admission changed its raw-score five-percent screen")
 		}
+	}
+	if exception && !excepted {
+		return errors.New("admission exception requires the declared failed throughput screen")
 	}
 	return nil
 }

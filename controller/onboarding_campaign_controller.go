@@ -177,12 +177,14 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 		return
 	}
 
+	platform, distribution := platformFromRequest(clientSession)
 	row := &model.NetworkOnboarding{
-		NetworkId: networkId,
-		CreatedAt: now,
-		Email:     hasEmail,
-		Platform:  platformFromRequest(clientSession),
-		Locale:    localeFromSession(clientSession),
+		NetworkId:    networkId,
+		CreatedAt:    now,
+		Email:        hasEmail,
+		Platform:     platform,
+		Distribution: distribution,
+		Locale:       localeFromSession(clientSession),
 	}
 	if ip, ok := clientIp(clientSession); ok {
 		if ipInfo, err := server.GetIpInfoFromString(ip); err == nil && ipInfo != nil {
@@ -229,8 +231,8 @@ func EnrollNetworkOnboarding(clientSession *session.ClientSession, networkId ser
 }
 
 // RecordOnboardingClientContext stores what a device reports on auth-client:
-// its time zone, locale and platform. Cheap updates, only while the sequence
-// runs, never fail the caller.
+// its time zone, locale, and platform with its app's distribution. Cheap
+// updates, only while the sequence runs, never fail the caller.
 func RecordOnboardingClientContext(clientSession *session.ClientSession, networkId server.Id, timeZone string, locale string, deviceSpec string) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -245,18 +247,19 @@ func RecordOnboardingClientContext(clientSession *session.ClientSession, network
 	if l := normalizeLocale(locale); l != "" {
 		model.SetNetworkOnboardingLocale(clientSession.Ctx, networkId, l)
 	}
-	if p := devicePlatform(clientSession, deviceSpec); p != "" {
-		model.SetNetworkOnboardingPlatform(clientSession.Ctx, networkId, p)
+	if p, d := devicePlatform(clientSession, deviceSpec); p != "" {
+		model.SetNetworkOnboardingPlatform(clientSession.Ctx, networkId, p, d)
 	}
 }
 
-// devicePlatform is the platform of a device authenticating: the one its app
-// declares (clientInfoPlatform), else what its device spec names.
-func devicePlatform(clientSession *session.ClientSession, deviceSpec string) string {
-	if p := clientInfoPlatform(clientSession); p != "" {
-		return p
+// devicePlatform is the platform of a device authenticating, with its app's
+// distribution: the ones its app declares (clientInfoPlatform), else the
+// platform its device spec names, of unknown distribution.
+func devicePlatform(clientSession *session.ClientSession, deviceSpec string) (platform string, distribution string) {
+	if p, d := clientInfoPlatform(clientSession); p != "" {
+		return p, d
 	}
-	return platformFromDeviceSpec(deviceSpec)
+	return platformFromDeviceSpec(deviceSpec), ""
 }
 
 func clientIp(clientSession *session.ClientSession) (string, bool) {
@@ -273,8 +276,9 @@ func clientIp(clientSession *session.ClientSession) (string, bool) {
 // Platform values (model.EventPlatform*): ios, macos, android, web, windows, linux.
 
 // platformFromRequest is the platform of a sign-up (or of the first device,
-// on the device path): the one the app declares (clientInfoPlatform), else the
-// browser's (platformFromUserAgent).
+// on the device path), with its app's distribution: the ones the app declares
+// (clientInfoPlatform), else the browser's platform (platformFromUserAgent), of
+// unknown distribution.
 //
 // mmm/ONBOARDING-RETENTION.md P14 and P6: a browser sign-up was recorded as the
 // visitor's OS, so a sign-up on ur.io from a Mac got platform macos and with
@@ -283,27 +287,30 @@ func clientIp(clientSession *session.ClientSession) (string, bool) {
 // card on the web. A Windows or Linux browser got the desktop app's platform.
 // A desktop browser is `web` now; a phone's or tablet's browser keeps the
 // phone's platform, since the site sends phones to the app's store.
-func platformFromRequest(clientSession *session.ClientSession) string {
-	if p := clientInfoPlatform(clientSession); p != "" {
-		return p
+func platformFromRequest(clientSession *session.ClientSession) (platform string, distribution string) {
+	if p, d := clientInfoPlatform(clientSession); p != "" {
+		return p, d
 	}
-	return platformFromUserAgent(clientSession)
+	return platformFromUserAgent(clientSession), ""
 }
 
-// clientInfoPlatform is the platform an app declares in X-UR-ClientInfo: every
-// app's sdk sets its device type on its api calls (android, ios, macos,
-// windows, linux), and ur.io's sdk host sets web. The macOS App Store build
-// and the direct-download build both declare macos, so it does not tell them
-// apart. "" for cli, server, unknown and no header.
-func clientInfoPlatform(clientSession *session.ClientSession) string {
+// clientInfoPlatform is the platform an app declares in X-UR-ClientInfo, with
+// the distribution it declares (session.ClientDistribution*, "" when unknown):
+// every app's sdk sets its device type and distribution on its api calls
+// (android, ios, macos, windows, linux), and ur.io's sdk host sets web. The
+// macOS App Store build and the direct-download build declare the same device
+// type, and only the distribution (app_store, mac_direct) tells them apart
+// (P6). The parser keeps a distribution only with a device type it pairs
+// with. "" and "" for cli, server, unknown and no header.
+func clientInfoPlatform(clientSession *session.ClientSession) (platform string, distribution string) {
 	if clientSession == nil {
-		return ""
+		return "", ""
 	}
 	switch deviceType := clientSession.ClientInfo.DeviceType; deviceType {
 	case "android", "ios", "macos", "windows", "linux", onboarding.PlatformWeb:
-		return deviceType
+		return deviceType, clientSession.ClientInfo.Distribution
 	}
-	return ""
+	return "", ""
 }
 
 // platformFromUserAgent reads the request's User-Agent: a browser's (every
@@ -366,10 +373,10 @@ var macAppModelPattern = regexp.MustCompile(`^(?:(?:mac|imac|imac pro|mac mini|m
 // (apple DeviceManager.getDeviceSpecs), e.g. "15.7.9 macbook air (m1, 2020)".
 // It names the Mac, not the store: the App Store build and the
 // direct-download build send the same spec (and declare the same device type
-// and version), so nothing tells them apart. The App Store build is the one
-// with a stable release (the direct DMG has only nightlies), so a Mac app is
-// macos, the App Store's platform (mmm/ONBOARDING-RETENTION.md P6). s is
-// lower case.
+// and version). Only the distribution their client info declares tells them
+// apart (clientInfoPlatform); a spec alone is macos of unknown distribution,
+// which the rules take for the App Store build, the one with a stable release
+// (mmm/ONBOARDING-RETENTION.md P6). s is lower case.
 func macAppModelSpec(s string) bool {
 	_, model, ok := strings.Cut(s, " ")
 	if !ok || !leadingOsVersion(s) {
@@ -676,7 +683,6 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 	cfg := model.Onboarding()
 	policy := cfg.MailPolicy()
 	mail := model.GetNetworkMailState(ctx, row.NetworkId)
-	appleStore := row.Platform == "ios" || row.Platform == "macos"
 	// the country and consent rules reach the live campaign only when the
 	// config says so (policy.apply_to_onboarding): the reviewed config
 	// injection, not a server deploy, changes who gets onboarding mail
@@ -709,9 +715,11 @@ func loadOnboardingFacts(ctx context.Context, row *model.NetworkOnboarding, now 
 		PolicyExit:     policyExit,
 		// an App Store network on path B could not redeem the emailed offer
 		// while no code reaches it (REVIEW.md finding 2): no offer email until
-		// offer.apple_email_enabled says the codes flow
-		NoOfferEmail:      !offerByCountry || (appleStore && path != onboarding.PathA && !cfg.Offer.AppleEmailEnabled),
+		// offer.apple_email_enabled says the codes flow. The direct-download
+		// Mac bills through Stripe and gets it (P6).
+		NoOfferEmail:      onboarding.OfferEmailWithheld(offerByCountry, row.Platform, row.Distribution, path, cfg.Offer.AppleEmailEnabled),
 		Platform:          row.Platform,
+		Distribution:      row.Distribution,
 		HasConnected:      connected,
 		WidgetAdded:       model.HasOnboardingEvent(ctx, row.NetworkId, model.EventWidgetAdded),
 		OfferState:        offerState,
@@ -808,7 +816,7 @@ func buildOnboardingSendPlan(ctx context.Context, row *model.NetworkOnboarding, 
 		Variant:         decision.Variant,
 		Opening:         decision.Opening,
 		Platform:        onboarding.DeviceName(row.Platform, templateLocale),
-		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform),
+		StoreBilled:     onboarding.StoreBilledPlatform(row.Platform, row.Distribution),
 		Browser:         row.Platform == onboarding.PlatformWeb,
 		Locale:          templateLocale,
 		DailyDataGb:     float64(model.Pro().Free.Data) / float64(model.Gib),

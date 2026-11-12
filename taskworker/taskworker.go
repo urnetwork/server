@@ -123,10 +123,11 @@ func initTaskSchedule(ctx context.Context) {
 		task.ScheduleTaskCleanup(clientSession, tx)
 		work.ScheduleBackfillInitialTransferBalance(clientSession, tx)
 		work.ScheduleIndexSearchLocations(clientSession, tx)
-		// the three data grants run on three different schedules:
-		// free daily, pro monthly, referral every referral period
+		// the three data grants run on three different schedules: free
+		// daily, pro at each network's own subscription cycle (granted at
+		// renewal, swept hourly), referral every referral period
 		controller.ScheduleRefreshFreeTransferBalances(clientSession, tx)
-		controller.ScheduleRefreshProTransferBalances(clientSession, tx)
+		controller.ScheduleRefreshProCycleTransferBalances(clientSession, tx)
 		controller.ScheduleRefreshReferralTransferBalances(clientSession, tx)
 		controller.ScheduleRebuildPointsLeaderboard(clientSession, tx)
 		// the SN Top board: one snapshot per tempo (LEADERTOP.md §8)
@@ -454,10 +455,16 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 			controller.AwardOperatorBlockPoints,
 			controller.AwardOperatorBlockPointsPost,
 		),
+		// retired: consumes the calendar-month grant's pending row without
+		// granting or scheduling a successor
 		task.NewTaskTargetWithPost(
 			controller.RefreshProTransferBalances,
 			controller.RefreshProTransferBalancesPost,
 			"bringyour.com/bringyour/controller.RefreshProTransferBalances",
+		),
+		task.NewTaskTargetWithPost(
+			controller.RefreshProCycleTransferBalances,
+			controller.RefreshProCycleTransferBalancesPost,
 		),
 		task.NewTaskTargetWithPost(
 			controller.RefreshReferralTransferBalances,
@@ -787,6 +794,11 @@ func initTaskWorkerWithSettings(ctx context.Context, settings *task.TaskWorkerSe
 		task.NewTaskTargetWithPost(
 			work.StLedgerV2UsageStep,
 			work.StLedgerV2UsageStepPost,
+		),
+		// sn CAPTURETHEFLAG.md §4.2, §4.3
+		task.NewTaskTargetWithPost(
+			work.StCtfDataStep,
+			work.StCtfDataStepPost,
 		),
 		task.NewTaskTargetWithPost(
 			work.StV1Sweep,

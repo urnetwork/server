@@ -810,7 +810,10 @@ func (self *stripeDisputeWonFixture) assertCut(t testing.TB) {
 // event.
 func TestStripeDisputeWonRestoresTheWindow(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
+		setProCycleTestData(t, 10*model.Tib)
 		fixture := newStripeDisputeWonFixture(t, "disputewon")
+		_, grantsBefore := proCycleTestBalances(t, fixture.ctx, fixture.networkId)
+		connect.AssertEqual(t, len(grantsBefore), 1)
 		fixture.deliver(t, "charge.dispute.created", "needs_response")
 		fixture.assertCut(t)
 
@@ -818,13 +821,23 @@ func TestStripeDisputeWonRestoresTheWindow(t *testing.T) {
 
 		ctx := fixture.ctx
 		connect.AssertEqual(t, activeRenewalCount(t, ctx, fixture.networkId, model.SubscriptionMarketStripe), 1)
+		// the period's balance comes back with the paid end, and the cycle's
+		// grant with its cycle's end and all its bytes
 		balances := model.GetActiveTransferBalances(ctx, fixture.networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].Pro, true)
-		connect.AssertEqual(t, balances[0].StartBalanceByteCount, RefreshSupporterTransferBalance)
-		connect.AssertEqual(t, balances[0].EndTime.Equal(fixture.periodEnd.Add(manualPaymentGracePeriod)), true)
+		connect.AssertEqual(t, balances[0].StartBalanceByteCount, 10*model.Tib)
+		connect.AssertEqual(t, balances[0].EndTime.Equal(grantsBefore[0].endTime), true)
+		periods, grants := proCycleTestBalances(t, ctx, fixture.networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, periods[0].endTime.Equal(fixture.periodEnd.Add(manualPaymentGracePeriod)), true)
+		connect.AssertEqual(t, len(grants), 1)
 		connect.AssertEqual(t, model.IsProNetwork(ctx, fixture.networkId), true)
 		connect.AssertEqual(t, fixture.wonEvents(t), 1)
+		// the restored cycle runs: no second grant for it
+		model.Testing_GrantDueProCycles(ctx, server.NowUtc())
+		_, grants = proCycleTestBalances(t, ctx, fixture.networkId)
+		connect.AssertEqual(t, len(grants), 1)
 
 		fixture.deliver(t, "charge.dispute.closed", stripeDisputeStatusWon)
 		connect.AssertEqual(t, len(model.GetActiveTransferBalances(ctx, fixture.networkId)), 1)

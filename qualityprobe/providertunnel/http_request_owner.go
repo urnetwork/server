@@ -18,6 +18,16 @@ type providerHttpTransport struct {
 	localWrite          interface{ ProviderLocalWriteUnavailable() bool }
 	// Verification-only pins for redirect targets. They grant no dial authority.
 	redirectPins map[string][]string
+	// The closed set of hosts this transport may speak TLS to (normalized
+	// pins plus extra hosts), the pins themselves, and the tunnel's private
+	// resolver. A URL request's HTTP/3 leg admits, resolves and verifies with
+	// exactly these (http3.go).
+	allowed  map[string][]string
+	pins     map[string][]string
+	resolver *providerUrlResolver
+	// The tunnel's UDP path for a URL request's HTTP/3 leg; nil when the
+	// transport was built over a bare dialer, which has none.
+	dialPacket dialContextFunc
 }
 
 // This monotonic proof is deliberately separate from error chains, which

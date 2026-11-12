@@ -32,7 +32,7 @@ Conventions:
 | `zec` | Zcash (shielded) | `zcash` | 8 | 6 | 0.5% | ZIP-321 | 10 confirmations | our zecd (watch-only) |
 | `xmr` | Monero | `monero` | 12 | 6 | 0.5% | `monero:` | 1 confirmation | our monero-wallet-rpc (view-only) |
 | `tao` | TAO | `bittensor` | 9 | 6 | 1% | none: address and amount | finalized | snow's Finney node (finalized blocks) |
-| `btc` | Bitcoin | `bitcoin` | 8 | 8 | 0.5% | BIP 21 | 1 confirmation, final at 6 | Alchemy (address history, UTXO API) |
+| `btc` | Bitcoin | `bitcoin` | 8 | 8 | 0.5% | BIP 21 | 1 confirmation, final at 6 | Alchemy's JSON-RPC, free tier (every block, scanned) |
 | `eth` | ETH | `ethereum` (mainnet) | 18 | 6 | 0.5% | EIP-681 | finalized (about 15 minutes) | Alchemy (incoming transfers, finalized tag) |
 | `sol` | native SOL | `solana` | 9 | 6 | 0.5% | Solana Pay, no `spl-token` | finalized | Helius RPC (signatures of the address) |
 
@@ -44,6 +44,21 @@ deposit addresses at any time).
 
 Every coin sells the yearly plan, the welcome offer, the data packs and balance codes, at the card price in USD;
 monthly is card only.
+
+### Bitcoin's confirmation grace
+
+A quote's `expires_at` is the end of the window to send the payment in, for every coin (`quote_ttl_seconds`: 30
+minutes, an hour for USDC). Bitcoin's scanner sees a payment only once it is mined (no mempool read, BTCPAY.md
+§16.7), and a payment sent at the end of the window can take hours to be mined. So a Bitcoin payment counts as sent
+within its quote, and is credited at the quoted price, while its block is at most **3 hours** past `expires_at`: the
+confirmation grace, `confirmation_grace_seconds` (10800) on the coin list, the quote, the invoice and its status.
+Through the grace a Bitcoin invoice stays open: `pending` while nothing is mined, `seen` while what is mined is
+short (a top-up mined in the grace still completes it at the price). A payment mined later is late, and judged as
+every coin's late payment is (valued at its first-seen rate). Every other coin has no grace: the field is left out,
+and its quote ends at `expires_at` as before. The 3 hours, and the price exposure they add, are worked out in
+BTCPAY.md §16.8 and `controller/crypto_pay_bitcoin.go` (`cryptoBitcoinConfirmationGrace`): under 1e-4 of the
+payments sent at the very end of the window miss it when their fee confirms them within 3 blocks while blocks run
+a fifth slow.
 
 ## GET /pay/crypto/assets
 
@@ -58,7 +73,7 @@ Response `CryptoPaymentAssetsResult`:
    "confirmations_required": 1, "quote_ttl_seconds": 3600, "available": true},
   {"asset": "btc", "network": "bitcoin", "decimals": 8, "quote_decimals": 8, "payment_link": true,
    "plans": ["yearly", "yearly_onboarding"], "items": ["data_1tib", "data_10tib"],
-   "confirmations_required": 1, "quote_ttl_seconds": 1800, "available": true}
+   "confirmations_required": 1, "quote_ttl_seconds": 1800, "confirmation_grace_seconds": 10800, "available": true}
  ],
  "unavailable_assets": [
   {"asset": "tao", "network": "bittensor", "decimals": 9, "quote_decimals": 6, "payment_link": false,
@@ -73,9 +88,12 @@ Response `CryptoPaymentAssetsResult`:
 `CryptoPaymentAsset`: `asset` (string: `usdc_solana` | `zec` | `xmr` | `tao` | `btc` | `eth` | `sol`), `network`
 (string, above), `decimals` (integer: `amount_atomic` = `amount` × 10^decimals), `quote_decimals` (integer: the
 most decimals an amount has), `payment_link` (boolean: false for `tao`), `plans` (string array, never `monthly`),
-`items` (string array), `confirmations_required` (integer), `quote_ttl_seconds` (integer), `available` (boolean),
-`unavailable_reason` (string, left out when `available`). `plans` and `items` are always arrays, `[]` when the coin
-sells none, never `null`; a coin that sells neither is not listed. The order means nothing.
+`items` (string array), `confirmations_required` (integer), `quote_ttl_seconds` (integer: the window to send in),
+`confirmation_grace_seconds` (integer: how long past the quote's expiry a payment sent within it may be mined and
+still be credited at the quoted price; 10800 for `btc`, left out for every other coin, which has none),
+`available` (boolean), `unavailable_reason` (string, left out when `available`). `plans` and `items` are always
+arrays, `[]` when the coin sells none, never `null`; a coin that sells neither is not listed. The order means
+nothing.
 
 `assets` lists only the coins that can be paid with now: a coin that is on and whose quote the server would make.
 A client offers every coin it names and no other. A coin that is on but cannot be paid with now is in
@@ -114,7 +132,9 @@ Then the coin is sold once its backend is configured and healthy (the reasons ab
 switch: it stops new invoices and re-quotes, while the coin's open invoices are still scanned and credited. A
 process reads crypto_pay.yml when it starts, so api, alt and taskworker are restarted after the config release.
 The order of a coin's launch: ur.io's widget update first, then the config release with the coin's entry, and for
-TAO the first scan only while the SN25 validator's deploy gate allows it.
+TAO the first scan only while the SN25 validator's deploy gate allows it. Bitcoin's scanner keeps its recent chain
+in `crypto_scan_cursor.recent_blocks`, a column the migration of `db_crypto_scan_chain.go` adds: that migration is
+applied before a taskworker that scans Bitcoin is deployed.
 
 ## Additions to GET /subscription/balance (`SubscriptionBalanceResult`)
 
@@ -167,11 +187,12 @@ Response `CryptoPaymentQuoteResult`:
  "price_usd": 40, "regular_price_usd": 40, "rate_usd": 73596.9,
  "amount": "0.00054622", "amount_atomic": "54622",
  "network": "bitcoin", "decimals": 8, "quote_decimals": 8, "payment_link": true,
- "quote_ttl_seconds": 1800, "confirmations_required": 1, "quoted_at": "2026-11-10T18:00:00Z"}
+ "quote_ttl_seconds": 1800, "confirmation_grace_seconds": 10800, "confirmations_required": 1,
+ "quoted_at": "2026-11-10T18:00:00Z"}
 ```
 
 `tier` is `""` for a data pack. USDC is quoted at its price (`rate_usd` 1); its invoice adds a unique sub-cent
-suffix. Refusals: as for
+suffix. `confirmation_grace_seconds` is the coin list's (left out for every coin but `btc`). Refusals: as for
 `/pay/crypto/intent` (`invalid_request`, `asset_unavailable`, `plan_unavailable`, `item_unavailable`,
 `offer_unavailable`), with every other field empty.
 
@@ -227,9 +248,9 @@ Response `CryptoPaymentIntentResult`:
   "uri": "bitcoin:bc1q…?amount=0.00054622&label=URnetwork&message=URnetwork%20Pro%20yearly",
   "uri_note": "",
   "network": "bitcoin",
-  "network_warning": "Send BTC on the Bitcoin network to this address, exactly the amount. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation.",
+  "network_warning": "Send BTC on the Bitcoin network to this address, exactly the amount, before the quote expires. BTC on another network (Lightning, Base, Ethereum, Solana) is not credited. A payment needs 1 confirmation, which can take a while: one sent before the quote expires is credited at the quoted price if it confirms within 3 hours of the expiry.",
   "quoted_at": "2026-11-10T18:00:00Z", "expires_at": "2026-11-10T18:30:00Z",
-  "confirmations_required": 1,
+  "confirmation_grace_seconds": 10800, "confirmations_required": 1,
   "status": { /* CryptoPaymentStatusResult */ }
 }
 ```
@@ -253,7 +274,8 @@ Response `CryptoPaymentIntentResult`:
 | `uri_note` | string | when `uri` is `""`, why: TAO has no payment link standard (the invoice shows the address and the amount with Copy, and a QR of the address only); else `""` |
 | `network` | string | the chain the payment must be sent on (as in the coin list) |
 | `network_warning` | string | what to send and on which network, in English, for a person or an agent paying by hand: a coin sent on another network or a token instead of the coin is not credited |
-| `quoted_at`, `expires_at` | string (time) | |
+| `quoted_at`, `expires_at` | string (time) | `expires_at` ends the window to send the payment in |
+| `confirmation_grace_seconds` | integer | Bitcoin's confirmation grace, 10800: a payment sent before `expires_at` is credited at this quote's price while it is mined within this long after it. Left out for every other coin |
 | `confirmations_required` | integer | |
 | `status` | `CryptoPaymentStatusResult` | the invoice's current status; left out on a refusal |
 | `error` | `CryptoPaymentError` | left out on success |
@@ -327,7 +349,7 @@ Response `CryptoPaymentStatusResult`:
   "excess": "0.00005378", "excess_atomic": "5378",
   "network": "bitcoin",
   "confirmations": 0, "confirmations_required": 1,
-  "expires_at": "2026-11-10T18:30:00Z", "credited_at": null,
+  "expires_at": "2026-11-10T18:30:00Z", "confirmation_grace_seconds": 10800, "credited_at": null,
   "balance_code": ""
 }
 ```
@@ -341,7 +363,8 @@ Response `CryptoPaymentStatusResult`:
 | `network` | string | the chain the payment is sent on |
 | `confirmations` | integer | the lowest among the receipts that make up the payment (0 in the mempool; for TAO, ETH and SOL, 1 once final) |
 | `confirmations_required` | integer | |
-| `expires_at` | string (time) | `null` for `unknown` |
+| `expires_at` | string (time) | the end of the window to send in; `null` for `unknown` |
+| `confirmation_grace_seconds` | integer | as the invoice's: 10800 for Bitcoin, left out for every other coin |
 | `credited_at` | string (time) or `null` | |
 | `balance_code` | string | delivery `code`, once paid: the code to redeem; else `""` |
 | `error` | `CryptoPaymentError` | `quote_expired` with `expired`; `underpaid` with `review`/`underpaid` and `review`/`late_underpaid`; else left out |
@@ -352,11 +375,11 @@ Response `CryptoPaymentStatusResult`:
 |---|---|
 | `unknown` | no such invoice, or the token does not match. Nothing else is filled in |
 | `paid` | credited. A credited invoice that later received a second payment stays `paid` (the second payment is held, `extra`, for an operator) |
-| `review` | needs an operator: `underpaid` (short at expiry), `late_underpaid` (arrived after expiry, worth less than the price at its first-seen rate), `orphaned` (a credited payment left the chain: its entitlement was ended and its credit taken back, `credited_at` is `null` again, until an operator grants it again), `voided` (a payment to an invoice an operator closed), `credit_failed` (the payment is there but its credit kept failing; an operator credits it by hand), `screening` (the payment is held by the sanctions screen; it is credited once it clears), `transfer_shape` (a TAO transfer sent as a batch, a proxy or multisig call, an EVM precompile send or a stake transfer: an operator confirms it reached Coinbase, then credits it), `amount_unmatched` (reserved for a coin whose deposit address is shared, matched by amount; not produced while every invoice has its own address) |
+| `review` | needs an operator: `underpaid` (short at expiry; Bitcoin: at the end of its grace), `late_underpaid` (arrived after expiry, Bitcoin after its grace, worth less than the price at its first-seen rate), `orphaned` (a credited payment left the chain: its entitlement was ended and its credit taken back, `credited_at` is `null` again, until an operator grants it again), `voided` (a payment to an invoice an operator closed), `credit_failed` (the payment is there but its credit kept failing; an operator credits it by hand), `screening` (the payment is held by the sanctions screen; it is credited once it clears), `transfer_shape` (a TAO transfer sent as a batch, a proxy or multisig call, an EVM precompile send or a stake transfer: an operator confirms it reached Coinbase, then credits it), `amount_unmatched` (reserved for a coin whose deposit address is shared, matched by amount; not produced while every invoice has its own address) |
 | `confirming` | received at least 99.5% of the amount (or, after expiry, a late payment worth the price at its first-seen rate), not yet at `confirmations_required` |
 | `seen` | something arrived, less than 99.5% of the amount; `remaining` says how much more to send to the same address |
-| `expired` | past `expires_at` with nothing received |
-| `pending` | nothing received yet |
+| `expired` | past `expires_at` with nothing received; for Bitcoin, past `expires_at` and its 3-hour confirmation grace |
+| `pending` | nothing received yet; for Bitcoin also through the grace after `expires_at`, since a payment sent in time may not be mined yet |
 
 `usdc_solana` reports only `pending`, `paid` and `expired` (Helius reports confirmed transfers only); a voided USDC
 invoice is `expired`, and a payment to it is held for an operator. A late payment that covers the price is
@@ -364,7 +387,8 @@ credited.
 
 On time is judged by the chain's time: a payment counts as made when its block was (or when it reached the
 mempool), not when the server noticed, so a payment made before `expires_at` is on time even if the server sees it
-later.
+later. Bitcoin is seen only in its block, so a Bitcoin payment is on time while its block is within the 3-hour
+confirmation grace after `expires_at` (above).
 
 ## POST /pay/crypto/requote
 
@@ -376,23 +400,29 @@ No auth; the token is the credential. Limited per client address (10 a minute; `
 - Every coin but USDC: a new rate, amount and expiry for the **same address**; the old quote is kept in the
   history. A coin that cannot be quoted now is `asset_unavailable`: the same refusal, from the same cached decision,
   as a new invoice's, and the coin is in `unavailable_assets` of `/pay/crypto/assets` meanwhile.
+- Bitcoin, past `expires_at` and within its 3-hour confirmation grace: `invalid_request`, with the time it can be
+  re-quoted. A payment sent within the quote may not be mined yet, and a new amount would be judged against it. To
+  pay meanwhile, start a new invoice: the open-invoice reuse ends at `expires_at`, so the new one has an address of
+  its own, and a payment of the old quote still credits the old invoice. Before `expires_at`, and once the grace is
+  over, a Bitcoin invoice is re-quoted as every coin's is.
 - USDC: the amount is already in dollars, so only `expires_at` moves.
 
 ## POST /pay/alchemy (internal)
 
-Every Alchemy webhook delivers here: ETH's Address Activity webhook, and Bitcoin's if Alchemy offers one. A delivery
-is verified with its own webhook's signing key (`X-Alchemy-Signature`, the hex HMAC-SHA256 of the raw body) before
-anything is read; an unknown webhook id or a bad signature is refused, and with no webhook configured every delivery
-is refused with 503. A verified delivery only brings the coin's next chain read forward: the invoice addresses it
-names as recipients are read on the coin's next scan, whatever their age. Polling the chain is the source of truth,
-so neither coin's availability depends on a webhook.
+ETH's Address Activity webhook delivers here; Bitcoin has none (its scanner reads every block; BTCPAY.md §16.7). A
+delivery is verified with its own webhook's signing key (`X-Alchemy-Signature`, the hex HMAC-SHA256 of the raw body)
+before anything is read; an unknown webhook id or a bad signature is refused, and with no webhook configured every
+delivery is refused with 503. A verified delivery only brings ETH's next chain read forward: the invoice addresses it
+names as recipients are read on the next ETH scan, whatever their age. Polling the chain is the source of truth, so
+ETH's availability does not depend on the webhook.
 
 ## Error codes added to `PurchaseErrorCode*`
 
 - `asset_unavailable`: the coin is off or not configured, or cannot be quoted right now (rates, the scanner or its
   source lagging or not knowing the network's height, the address pool, too many open invoices), or does not
   deliver balance codes yet. UI: "Temporarily unavailable".
-- `quote_expired`: the quote ran out with nothing received. UI offers "Refresh quote".
+- `quote_expired`: the quote ran out with nothing received (Bitcoin: and its confirmation grace). UI offers "Refresh
+  quote".
 - `underpaid`: the invoice ended short. UI shows the review copy.
 
 `CryptoPaymentError` is `{"code": string, "message": string}`.
@@ -414,7 +444,8 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   `vault/<env>/coinbase.yml` (`api.host`, `api.key_name`, `api.private_key`; the view and receive scopes), signed
   per request by the CDP SDK's JWT. The coin's wallet is looked up by its currency code (`GET /v2/accounts/TAO`,
   `BTC`, `ETH`, `SOL`): `api.account_id` is none of these wallets. The networks are `bittensor` (TAO: from Coinbase
-  Exchange's public currency data; the first live address request confirms it), `bitcoin`, `ethereum` and `solana`.
+  Exchange's public currency data, confirmed by live address requests on 2026-11-11), `bitcoin`, `ethereum` and
+  `solana`.
 - The invoice id the address is named with is reserved on its pool row, and the invoice that draws the address takes
   that id.
 - Coinbase answering an address the pool already holds stops the refill with an error
@@ -422,19 +453,39 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   If Coinbase turns out to give one static address for a coin, the coin's pool drains and it shows
   `address_pool_empty`; matching invoices on one shared address by unique amounts is designed (BTCPAY.md §17,
   `amount_unmatched`) but needs a schema change to the invoice's address uniqueness and is not built.
-- On 2026-11-10 our Coinbase account had no TAO wallet (`GET /v2/accounts/TAO` answered 404): TAO is unavailable
-  until one is opened (Receive TAO in the Coinbase app).
+- Our Coinbase account's TAO wallet exists since 2026-11-11 07:08Z (on 2026-11-10 `GET /v2/accounts/TAO` still
+  answered 404). Checked live that day with the rail's own `NewNamedAddress`: each per-invoice request on network
+  `bittensor` returns a new address, and so does each on `solana` for SOL. Coinbase issued a P2SH address (`3…`)
+  for BTC; the Bitcoin scanner matches every address type by the output's address.
 - Coinbase's own crediting of deposits is not on the path: trackers listed seven Coinbase TAO send and receive delays
   in 2026, one of 4.5 days on Prime, and a credit here comes from the chain, so such a delay does not keep a customer
   waiting.
 
 ### Detection, coin by coin
 
-- **Bitcoin** (Alchemy only, `vault/<env>/alchemy.yml`): each invoice address's transaction history, polled every
-  minute, from Alchemy's Blockbook-compatible UTXO API (`<btc_endpoint>/api/v2/address/<address>?details=txs`); only
-  outputs to the address count, and each payment's inputs are read for the screen. Heights from Alchemy's JSON-RPC
-  (`getblockchaininfo`). The UTXO API is an Alchemy add-on: the owner's key answered "UTXO requests are not allowed"
-  (401) on 2026-11-10, and Bitcoin stays unavailable (`scanner_lagging`) until the add-on is on.
+- **Bitcoin** (Alchemy's JSON-RPC alone, on the free tier, `vault/<env>/alchemy.yml`; BTCPAY.md §16.7): a block
+  scanner. Each scan (every minute) reads the tip (`getblockchaininfo`); each new block is read once
+  (`getblockhash`, then `getblock` at verbosity 2), and every address its outputs pay is matched against the invoice
+  addresses in play in one indexed lookup per block, as of the block's own time (open, or closed in the 24 hours
+  before it, or with a receipt still unconfirmed; never one made more than 3 hours after the block). Only outputs
+  count, summed per transaction and address, every script type (P2PKH, P2SH, P2WPKH, P2WSH, P2TR). Confirmations count
+  from the block's height. The recent blocks read (24), with their hashes and what each paid, are kept with the cursor
+  (`crypto_scan_cursor.recent_blocks`, written only when a scan completes): a block that is not a child of the kept tip
+  is a reorg, and the scan compares the kept hashes with the chain's back to the fork point and reads the blocks
+  after it again. A payment of a replaced block that the new chain does not hold is looked up
+  (`getrawtransaction` at verbosity 2): mined elsewhere it is reported there, back in the mempool it is seen again,
+  gone it is left to the scanner's vanished-receipt check (an invoice not yet credited only); a credited payment is
+  never taken back, and the reconciler reports one the chain no longer shows as an error instead of ending it. A
+  source behind the kept tip, or a chain changed below every kept block, fails the scan
+  (`crypto_scan_cursor.last_error`, the scanner-stalled page after 15 minutes). At most 10 blocks a scan and never
+  more than a week behind the tip (older blocks are passed over and counted in
+  `urnetwork_crypto_pay_scan_blocks_skipped_total`). The screen reads each payment's senders from its inputs'
+  prevouts (`getrawtransaction` at verbosity 2). No mempool read: an invoice goes from pending to confirming or paid
+  when its payment is mined, and a payment is first seen at its block's time. One mined within 3 hours of its
+  quote's expiry counts as sent within the quote, at the quoted price (the confirmation grace, above); only one
+  mined later is valued as late, at its block's time. About 1 million compute units a month of the free tier's 30
+  million (every method costs 10):
+  the tip, read by each scan and by each address refill's network check, once a minute each, and each block once.
 - **ETH** (Alchemy only): each invoice address's incoming transfers (`alchemy_getAssetTransfers`, `toAddress`, the
   external and internal categories), polled every 30 seconds, in exact wei; each paying transaction's receipt status
   (a reverted one moved nothing); credited once its block is at the `finalized` tag. The Address Activity webhook is
@@ -455,9 +506,9 @@ network it paid for. Those invoices are read through `/pay/crypto/status`.
   counted; a runtime the reader cannot read pauses it (`urnetwork_crypto_pay_tao_reader_paused`) without
   crash-looping. **The TAO scanner's first run on mainnet must pass the SN25 validator's deploy gate**: snow's node is
   shared with the validator.
-- **Watch windows** (TAO, Bitcoin, ETH, SOL): an open invoice's address is read every scan; one that expired, was
-  credited or was voided in the last 24 hours once every ten scan intervals; an address a webhook names, at the next
-  scan whatever its age.
+- **Watch windows** (TAO, ETH, SOL): an open invoice's address is read every scan; one that expired, was credited or
+  was voided in the last 24 hours once every ten scan intervals; an address a webhook names, at the next scan
+  whatever its age. Bitcoin matches the same invoices in every block, as of the block's time.
 
 ### Rates
 

@@ -361,7 +361,8 @@ func cryptoScan(
 		if view.NeedsRate {
 			if rate := rateNow(); rate != nil {
 				for _, receipt := range receipts {
-					if receipt.FirstSeenRateUsd == nil && receipt.FirstSeenAt.After(intent.ExpiresAt) {
+					// late: first seen past the quote and the coin's grace
+					if receipt.FirstSeenRateUsd == nil && receipt.FirstSeenAt.After(policy.onTimeUntil(intent)) {
 						model.SetCryptoPaymentReceiptFirstSeenRateInConn(nil, ctx, receipt.Key(), *rate)
 					}
 				}
@@ -408,7 +409,17 @@ func cryptoScan(
 
 	result.MarkedFinal = model.MarkCryptoPaymentReceiptsFinalInConn(nil, ctx, asset, finalKeys, now)
 
-	model.SetCryptoScanCursorSuccessInConn(nil, ctx, asset, int64(walletHeight), int64(walletHeight), int64(nodeHeight), int64(networkHeight), now)
+	// a block reader's kept chain is written with the cursor, only now that
+	// the scan is complete
+	var chain *model.CryptoScanChain
+	if chained, ok := wallet.(cryptoWalletChain); ok {
+		chain = chained.ScanChain()
+	}
+	if chain != nil {
+		model.SetCryptoScanCursorChainSuccessInConn(nil, ctx, asset, int64(walletHeight), int64(nodeHeight), int64(networkHeight), now, chain)
+	} else {
+		model.SetCryptoScanCursorSuccessInConn(nil, ctx, asset, int64(walletHeight), int64(walletHeight), int64(nodeHeight), int64(networkHeight), now)
+	}
 	cryptoPayScanLastSuccess.WithLabelValues(asset).Set(float64(now.Unix()))
 	cryptoPayHeights.WithLabelValues(asset, "wallet").Set(float64(walletHeight))
 	cryptoPayHeights.WithLabelValues(asset, "node").Set(float64(nodeHeight))

@@ -2220,6 +2220,25 @@ func RemoveNetworkClientsTaskPost(
 
 type NetworkClientsResult struct {
 	Clients []*NetworkClientInfo `json:"clients"`
+
+	// what the network's plan does with the Pro-only proxy features, in the
+	// proxies list only (GetNetworkProxies)
+	Plan *NetworkProxiesPlan `json:"plan,omitempty"`
+}
+
+// NetworkProxiesPlan is the plan beside the network's proxies, so an app can
+// say what a proxy's Pro-only features (NetworkClientInfo.ProFeatures) will do
+// on this plan: the apps' "Pro features in use" notice.
+type NetworkProxiesPlan struct {
+	// the network holds Pro now, read live (IsProNetwork), never from the
+	// jwt's pro claim, which is stale after an upgrade or a lapse
+	Pro bool `json:"pro"`
+	// pro.yml enforce_features: a network without Pro is refused the Pro-only
+	// features, at issuance (auth-client issues no SOCKS url and no WireGuard
+	// config) and at the proxy, for the credentials it already holds (a SOCKS
+	// sign-in is refused, a WireGuard peer is dropped). While false, every
+	// plan uses them.
+	ProFeaturesEnforced bool `json:"pro_features_enforced"`
 }
 
 // NetworkClientInfo is one row of the network's device list. The client's
@@ -2234,6 +2253,13 @@ type NetworkClientInfo struct {
 	// the unique exit of a hosted proxy created with unique_exit, in the
 	// proxies list only
 	Exit *ProxyExit `json:"exit,omitempty"`
+
+	// the Pro-only features (FeatureSocksProxy, FeatureWireguardProxy) the
+	// hosted proxy used within ProxyFeatureUseWindow, in the proxies list
+	// only: what the proxy stops serving to a network without Pro once
+	// enforce_features is on, for a proxy that actually uses it
+	// (proxyClientProFeatures)
+	ProFeatures []string `json:"pro_features,omitempty"`
 }
 
 type NetworkClientConnection struct {
@@ -2281,14 +2307,82 @@ func GetNetworkClients(clientSession *session.ClientSession) (*NetworkClientsRes
 // GetNetworkProxies lists the network's hosted proxy devices (clients with a
 // `proxy_device_config` row) with their `proxy_client` credentials. Everything
 // else about a row (resident, connections, roles, provide mode) reads the same
-// as GetNetworkClients.
+// as GetNetworkClients. Each proxy also says which Pro-only features it used
+// recently, and the list carries the network's plan
+// (addProxyProFeaturesToClientList).
 func GetNetworkProxies(clientSession *session.ClientSession) (*NetworkClientsResult, error) {
 	result, err := getNetworkClientList(clientSession, networkClientListProxies)
 	if err != nil || result == nil {
 		return result, err
 	}
 	addProxyExitsToClientList(clientSession.Ctx, result)
+	addProxyProFeaturesToClientList(clientSession.Ctx, clientSession.ByJwt.NetworkId, result)
 	return result, nil
+}
+
+// addProxyProFeaturesToClientList marks each proxy with the Pro-only features
+// it used within ProxyFeatureUseWindow, as the proxies recorded them
+// (proxy_feature_use_model.go), and reports the network's plan beside them.
+// The plan's Pro is read live and does not depend on the rollout switch, so an
+// app can warn a network without Pro before enforce_features turns on
+// (pro.yml): the apps' "Pro features in use" notice, which shows for a network
+// without Pro whose proxies list any. The marks are read best effort: a list
+// that cannot reach them still lists the proxies, with no Pro features.
+func addProxyProFeaturesToClientList(ctx context.Context, networkId server.Id, result *NetworkClientsResult) {
+	c := Pro()
+	now := server.NowUtc()
+	var uses map[server.Id]map[string]time.Time
+	// with no Pro-only proxy feature (no pro.yml) no proxy lists one, and the
+	// marks are not read
+	if c.ProOnlyFeature(FeatureSocksProxy) || c.ProOnlyFeature(FeatureWireguardProxy) {
+		proxyIds := []server.Id{}
+		for _, client := range result.Clients {
+			if client.ProxyClient != nil {
+				proxyIds = append(proxyIds, client.ProxyClient.ProxyId)
+			}
+		}
+		var err error
+		uses, err = GetProxyFeatureUses(ctx, proxyIds)
+		if err != nil {
+			glog.Infof("[nc][%s]proxy feature uses unread, listed without Pro features: %s\n", networkId, err)
+			uses = nil
+		}
+	}
+	for _, client := range result.Clients {
+		var proxyUses map[string]time.Time
+		if client.ProxyClient != nil {
+			proxyUses = uses[client.ProxyClient.ProxyId]
+		}
+		client.ProFeatures = proxyClientProFeatures(c, client.ProxyClient, proxyUses, now)
+	}
+	result.Plan = &NetworkProxiesPlan{
+		Pro:                 IsProNetwork(ctx, networkId),
+		ProFeaturesEnforced: c.EnforceFeatures,
+	}
+}
+
+// proxyClientProFeatures lists the Pro-only features a proxy used within
+// ProxyFeatureUseWindow before now: FeatureSocksProxy for a SOCKS sign-in with
+// its credentials, FeatureWireguardProxy for a completed WireGuard handshake,
+// as the proxy recorded them (uses, from ProxyFeatureUses). These are what the
+// proxy gates per network once enforce_features is on (proxy/server.go
+// validUser, validWgClients), for a proxy that actually uses them. Holding the
+// credentials is not use: every proxy issued while enforcement was dark holds
+// a SOCKS url, and one that serves only HTTP or HTTPS loses nothing. A feature
+// the free plan also includes is no Pro feature, and neither is one no plan
+// includes (no pro.yml). Nil for a proxy that used neither.
+func proxyClientProFeatures(c *ProConfig, proxyClient *ProxyClient, uses map[string]time.Time, now time.Time) []string {
+	if proxyClient == nil {
+		return nil
+	}
+	since := now.Add(-ProxyFeatureUseWindow)
+	var features []string
+	for _, feature := range proxyFeatureUseFeatures {
+		if c.ProOnlyFeature(feature) && proxyFeatureUsedSince(uses, feature, since) {
+			features = append(features, feature)
+		}
+	}
+	return features
 }
 
 // addProxyExitsToClientList reports each unique-exit proxy's exit in the list.

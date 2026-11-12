@@ -84,8 +84,14 @@ const appleUsdCurrency = "USD"
 var appleLegacySupporterProductIds = []string{"supporter", "supporter_yearly"}
 
 // appleProductAllowed reports whether a verified transaction's product is a
-// Pro subscription this server credits.
+// Pro subscription this server credits. The App Store sells UR Pro only: a
+// product named like a data pack (data_*) is never credited, whatever apple.yml
+// lists. The packs are sold on the rails pro.yml names (data_pack_rails.go),
+// and the stores are not one, so the 256 GiB pack cannot be sold here.
 func appleProductAllowed(allowedProductIds []string, productId string) bool {
+	if isDataPackItem(productId) {
+		return false
+	}
 	return slices.Contains(allowedProductIds, productId) ||
 		slices.Contains(appleLegacySupporterProductIds, productId)
 }
@@ -482,6 +488,7 @@ func appleCreditSubscriptionTransactionInTx(
 	}
 
 	endTime := transaction.expiresTime.Add(SubscriptionGracePeriod)
+	paidEndTime := transaction.expiresTime
 	renewal := &model.SubscriptionRenewal{
 		NetworkId:          transaction.networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -490,6 +497,7 @@ func appleCreditSubscriptionTransactionInTx(
 		NetRevenue:         transaction.creditNetRevenue(),
 		SubscriptionMarket: model.SubscriptionMarketApple,
 		TransactionId:      transaction.transactionId,
+		PaidEndTime:        &paidEndTime,
 	}
 	server.Raise(model.AddSubscriptionRenewalInTx(tx, ctx, renewal))
 	// the regional price tier (from the storefront) and the welcome offer (an
@@ -499,15 +507,18 @@ func appleCreditSubscriptionTransactionInTx(
 	// under its own savepoint
 	appleRecordWinbackInTx(tx, ctx, transaction)
 
+	// the period's Pro marker holds no data (SupporterPeriodTransferBalance)
 	model.AddTransferBalanceInTx(ctx, tx, &model.TransferBalance{
 		NetworkId:             transaction.networkId,
 		StartTime:             transaction.purchaseTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     transaction.creditNetRevenue(),
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	})
+	// the period's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, ctx, transaction.networkId)
 	if transaction.sandbox() {
 		// no payment was made, so there is no sale to post
 		return true

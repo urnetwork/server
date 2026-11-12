@@ -20,6 +20,7 @@ import (
 func TestStripeInvoicePaidRetryDoesNotDoubleCredit(t *testing.T) {
 	server.DefaultTestEnv().Run(t, func(t testing.TB) {
 		ctx := context.Background()
+		setProCycleTestData(t, 10*model.Tib)
 
 		networkId := server.NewId()
 		userId := server.NewId()
@@ -28,7 +29,9 @@ func TestStripeInvoicePaidRetryDoesNotDoubleCredit(t *testing.T) {
 		invoiceId := "in_test_duplicate_delivery_1"
 		netRevenue := model.UsdToNanoCents(10.00)
 		startTime := server.NowUtc()
-		endTime := startTime.Add(30 * 24 * time.Hour)
+		// the billing period's end plus the manual-payment grace, as
+		// stripeResolveInvoiceCredit passes it
+		endTime := startTime.Add(30*24*time.Hour + manualPaymentGracePeriod)
 
 		// first delivery credits
 		credited, err := stripeCreditInvoicePaid(ctx, networkId, invoiceId, netRevenue, startTime, endTime)
@@ -40,14 +43,20 @@ func TestStripeInvoicePaidRetryDoesNotDoubleCredit(t *testing.T) {
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, credited, false)
 
-		// ONE credit: one pro balance, with the subsidy revenue counted once.
-		// (GetActiveTransferBalances does not scan the subsidy column, so it is
-		// summed directly -- the sum over ALL the network's balances is what the
-		// provider subsidy accounting sees.)
+		// ONE credit: one cycle grant with the data, and the period's own balance
+		// (no data), each carrying the revenue once: the period's balance the
+		// period's, the cycle grant its share of the period, all of it for a
+		// one-cycle month. (GetActiveTransferBalances does not scan the subsidy
+		// column, so it is summed directly.)
 		balances := model.GetActiveTransferBalances(ctx, networkId)
 		connect.AssertEqual(t, len(balances), 1)
 		connect.AssertEqual(t, balances[0].Pro, true)
-		connect.AssertEqual(t, balances[0].BalanceByteCount, RefreshSupporterTransferBalance)
+		connect.AssertEqual(t, balances[0].BalanceByteCount, 10*model.Tib)
+		periods, grants := proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(periods), 1)
+		connect.AssertEqual(t, len(grants), 1)
+		connect.AssertEqual(t, periods[0].subsidy, netRevenue)
+		connect.AssertEqual(t, grants[0].subsidy, netRevenue)
 
 		var totalSubsidy model.NanoCents
 		server.Db(ctx, func(conn server.PgConn) {
@@ -66,7 +75,7 @@ func TestStripeInvoicePaidRetryDoesNotDoubleCredit(t *testing.T) {
 				}
 			})
 		})
-		connect.AssertEqual(t, totalSubsidy, netRevenue)
+		connect.AssertEqual(t, totalSubsidy, 2*netRevenue)
 
 		// the entitlement landed, once
 		connect.AssertEqual(t, model.IsProNetwork(ctx, networkId), true)
@@ -94,7 +103,8 @@ func TestStripeInvoicePaidRetryDoesNotDoubleCredit(t *testing.T) {
 		connect.AssertEqual(t, renewalCount, 1)
 		connect.AssertEqual(t, totalRevenue, netRevenue)
 
-		// a DIFFERENT invoice (the next billing period) still credits normally
+		// a DIFFERENT invoice (the next billing period) still credits normally;
+		// its cycle is granted at its own start, not inside this one
 		credited, err = stripeCreditInvoicePaid(
 			ctx,
 			networkId,
@@ -105,5 +115,7 @@ func TestStripeInvoicePaidRetryDoesNotDoubleCredit(t *testing.T) {
 		)
 		connect.AssertEqual(t, err, nil)
 		connect.AssertEqual(t, credited, true)
+		_, grants = proCycleTestBalances(t, ctx, networkId)
+		connect.AssertEqual(t, len(grants), 1)
 	})
 }

@@ -1125,6 +1125,9 @@ func stripeCreditInvoicePaidInTx(
 		return false, nil
 	}
 
+	// the invoice's billing period: endTime is its end plus the manual-payment
+	// grace (stripeResolveInvoiceCredit)
+	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          networkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -1133,6 +1136,7 @@ func stripeCreditInvoicePaidInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketStripe,
 		TransactionId:      invoiceId,
+		PaidEndTime:        &paidEndTime,
 	}
 
 	err := model.AddSubscriptionRenewalInTx(tx, ctx, &subscriptionRenewal)
@@ -1141,14 +1145,15 @@ func stripeCreditInvoicePaidInTx(
 		return false, err
 	}
 
-	// a supporter subscription -> carries the Pro entitlement
+	// a supporter subscription -> carries the Pro entitlement; the period's
+	// marker holds no data (SupporterPeriodTransferBalance)
 	transferBalance := &model.TransferBalance{
 		NetworkId:             networkId,
 		StartTime:             startTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     netRevenue,
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	}
 
@@ -1157,6 +1162,8 @@ func stripeCreditInvoicePaidInTx(
 		tx,
 		transferBalance,
 	)
+	// the period's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, ctx, networkId)
 
 	// the ledger row is new: this invoice is a new payment, posted once the
 	// transaction commits
@@ -2137,17 +2144,17 @@ func stripeCheckoutError(code string, message string) *StripeCreateCheckoutSessi
 // both sell exactly the same thing. A non-empty errMessage is customer-facing,
 // and errCode is its `PurchaseErrorCode*`.
 func stripeDataPackLineItems(itemId string) (lineItems []*stripe.CheckoutSessionLineItemParams, errCode string, errMessage string) {
-	byteCount, ok := stripeDataPackByteCount(itemId)
-	if !ok {
-		return nil, PurchaseErrorCodeInvalidRequest, "Unknown item."
+	byteCount, errCode, errMessage := stripeDataPackByteCount(itemId)
+	if errMessage != "" {
+		return nil, errCode, errMessage
 	}
 	productId, ok := stripeProductForByteCount(byteCount)
 	if !ok {
 		glog.Errorf("[stripe]no product configured for data pack %s\n", itemId)
 		return nil, PurchaseErrorCodeItemUnavailable, "That data pack is not available."
 	}
-	priceUsd, ok := stripeDataPackPriceUsd(byteCount)
-	if !ok || priceUsd <= 0 {
+	priceUsd, ok := dataPackPriceUsd(itemId, model.DataRailCard)
+	if !ok {
 		glog.Errorf("[stripe]no price in pro.yml for data pack %s\n", itemId)
 		return nil, PurchaseErrorCodeItemUnavailable, "That data pack is not available."
 	}
@@ -2163,15 +2170,20 @@ func stripeDataPackLineItems(itemId string) (lineItems []*stripe.CheckoutSession
 	}, "", ""
 }
 
-// stripeDataPackByteCount maps a data item id to the amount it grants, from pro.yml.
-func stripeDataPackByteCount(itemId string) (model.ByteCount, bool) {
-	switch itemId {
-	case StripeItemData1Tib:
-		return 1 * model.Tib, true
-	case StripeItemData10Tib:
-		return 10 * model.Tib, true
+// stripeDataPackByteCount is the amount a data pack sold by card grants, from
+// pro.yml. A pack pro.yml does not sell by card (the 256 GiB pack is x402 and
+// Gamma only) is refused with item_unavailable and where it is sold; an id
+// that names no pack is invalid_request. A non-empty errMessage is the
+// customer-facing refusal and errCode its `PurchaseErrorCode*`.
+func stripeDataPackByteCount(itemId string) (byteCount model.ByteCount, errCode string, errMessage string) {
+	sku, refusal := dataPackOnRail(itemId, model.DataRailCard)
+	if refusal != "" {
+		return 0, PurchaseErrorCodeItemUnavailable, refusal
 	}
-	return 0, false
+	if sku == nil || sku.Data <= 0 {
+		return 0, PurchaseErrorCodeInvalidRequest, "Unknown item."
+	}
+	return sku.Data, "", ""
 }
 
 // stripeProductForByteCount finds the Stripe product configured for a data amount, so
@@ -2187,17 +2199,6 @@ func stripeProductForByteCount(byteCount model.ByteCount) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// stripeDataPackPriceUsd is the price of a data amount, from pro.yml -- the same source
-// the site and the x402 skus quote from, so a customer is never shown two prices.
-func stripeDataPackPriceUsd(byteCount model.ByteCount) (float64, bool) {
-	for _, sku := range model.Pro().DataCodeSkus {
-		if sku.Data == byteCount {
-			return sku.PriceUsd, true
-		}
-	}
-	return 0, false
 }
 
 // stripeCheckoutUiMode normalizes the requested ui mode. Empty means hosted, so callers
@@ -2308,6 +2309,14 @@ func StripeCreateCheckoutSession(
 		), nil
 	}
 
+	// a data pack pro.yml does not sell by card (the 256 GiB pack) is refused
+	// before anything of Stripe's is touched, with where it is sold
+	if isDataPackItem(args.ItemId) {
+		if _, errCode, errMessage := stripeDataPackByteCount(args.ItemId); errMessage != "" {
+			return stripeCheckoutError(errCode, errMessage), nil
+		}
+	}
+
 	networkId := clientSession.ByJwt.NetworkId
 
 	params := &stripe.CheckoutSessionParams{
@@ -2334,9 +2343,9 @@ func StripeCreateCheckoutSession(
 		if existing, _ := model.GetStripeCustomer(clientSession); existing != nil {
 			customerId = *existing
 		}
-		if stripeNetworkHasActiveSubscription(clientSession, customerId) {
+		if refusal := stripeNewSubscriptionRefusal(clientSession, customerId); refusal != "" {
 			glog.Infof("[stripe]checkout: network %s already has an active subscription\n", networkId)
-			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, stripeAlreadySubscribedMessage), nil
+			return stripeCheckoutError(PurchaseErrorCodeAlreadySubscribed, refusal), nil
 		}
 
 		// the caller's regional tier price, the welcome-offer coupon when the
@@ -2383,7 +2392,11 @@ func StripeCreateCheckoutSession(
 			params.SubscriptionData.TrialPeriodDays = stripe.Int64(StripeSubscriptionTrialDays)
 		}
 
-	case StripeItemData1Tib, StripeItemData10Tib:
+	default:
+		if !isDataPackItem(args.ItemId) {
+			return stripeCheckoutError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
+		}
+		// a data pack pro.yml sells by card (refused above when it does not)
 		lineItems, errCode, errMessage := stripeDataPackLineItems(args.ItemId)
 		if errMessage != "" {
 			return stripeCheckoutError(errCode, errMessage), nil
@@ -2391,9 +2404,6 @@ func StripeCreateCheckoutSession(
 		// a one-time payment
 		params.Mode = stripe.String(string(stripe.CheckoutSessionModePayment))
 		params.LineItems = lineItems
-
-	default:
-		return stripeCheckoutError(PurchaseErrorCodeInvalidRequest, "Unknown item."), nil
 	}
 
 	checkoutSession, err := stripecheckout.New(params)

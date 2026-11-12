@@ -98,11 +98,16 @@ func (self PostgresStore) reserveDistributedExecutorQualification(ctx context.Co
 func (self PostgresStore) distributedExecutorQualified(ctx context.Context, settings *Settings, round *roundRecord, baseline *roundBaselineRecord, host CompetitionExecutorHostPolicy) (bool, error) {
 	var content []byte
 	var expected string
+	var approval []byte
+	var approvalDigest string
 	err := captureDatabaseError(func() {
 		server.Db(ctx, func(conn server.PgConn) {
 			loadErr := conn.QueryRow(ctx, `SELECT receipt_json,receipt_sha256 FROM competition_executor_equivalence WHERE round_id=$1 AND host_id=$2`, round.RoundId, host.HostId).Scan(&content, &expected)
 			if errors.Is(loadErr, pgx.ErrNoRows) {
-				return
+				loadErr = conn.QueryRow(ctx, `SELECT receipt_canonical,receipt_sha256,approval_canonical,approval_sha256 FROM competition_executor_admission_exception WHERE round_id=$1 AND host_id=$2`, round.RoundId, host.HostId).Scan(&content, &expected, &approval, &approvalDigest)
+				if errors.Is(loadErr, pgx.ErrNoRows) {
+					return
+				}
 			}
 			server.Raise(loadErr)
 		})
@@ -127,7 +132,23 @@ func (self PostgresStore) distributedExecutorQualified(ctx context.Context, sett
 		return false, err
 	}
 	digest := sha256.Sum256(canonical)
-	if hex.EncodeToString(digest[:]) != expected || validateCompetitionExecutorReceipt(&selected, round, baseline, host, receipt) != nil {
+	exceptionDocument := ""
+	if len(approval) > 0 {
+		var value CompetitionExecutorAdmissionException
+		if decodeFailureEvidenceJson(approval, &value) != nil {
+			return false, errors.New("invalid stored admission exception")
+		}
+		canonicalApproval, err := json.Marshal(value)
+		if err != nil {
+			return false, err
+		}
+		authority := sha256.Sum256(canonicalApproval)
+		if string(approval) != string(canonicalApproval) || hex.EncodeToString(authority[:]) != approvalDigest || validateCompetitionAdmissionException(value, receipt) != nil {
+			return false, errors.New("stored admission exception failed authentication")
+		}
+		exceptionDocument = value.ReceiptDocumentSha256
+	}
+	if hex.EncodeToString(digest[:]) != expected || validateCompetitionExecutorReceiptWithException(&selected, round, baseline, host, receipt, exceptionDocument) != nil {
 		return false, errors.New("stored executor admission evidence failed authentication")
 	}
 	reader, ok := settings.artifactArchive.(interface {

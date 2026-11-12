@@ -24,12 +24,13 @@
 //
 // SN usage does not change: a contract's usage snapshot still lists every
 // participant, same-network ones included, as provider usage
-// (contract_usage.go), independent of escrow. The draft SN25 extender
-// amendment (sn WHITEPAPER.md §8.6.2) moves same-network shares out of the
-// provider rows into the extender pool from its activation epoch, in the epoch
-// reader. That reader identifies them with contractShareIsIntraNetwork from the
-// snapshot's provider networks and the contract's origin network, which for
-// these contracts is now also the recorded payer.
+// (contract_usage.go), independent of escrow. The SN25 extender amendment (sn
+// WHITEPAPER.md §8.6.2) moves same-network shares out of the provider rows into
+// the extender pool from its activation epoch, in the epoch reader
+// (stContractSharesForEpoch). That reader identifies them with
+// contractShareIsIntraNetwork from the snapshot's provider networks and the
+// contract's origin network, which for these contracts is now also the
+// recorded payer.
 package model
 
 import (

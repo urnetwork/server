@@ -49,11 +49,11 @@ func TestGrantWritersRecordGrantKind(t *testing.T) {
 		referralCode := CreateNetworkReferralCode(ctx, referrerNetworkId)
 		connect.AssertNotEqual(t, CreateNetworkReferral(ctx, refereeNetworkId, referralCode.ReferralCode), nil)
 
-		// the three grant tasks
+		// the three grant tasks; the Pro grant is the network's cycle grant
 		freeStartTime, freeEndTime := FreeGrantWindow(now)
 		AddFreeTransferBalanceToAllNetworks(ctx, freeStartTime, freeEndTime, 1*Gib)
-		proStartTime, proEndTime := ProGrantWindow(now)
-		AddProTransferBalanceToAllNetworks(ctx, proStartTime, proEndTime, 4*Gib)
+		config.Pro.Data = 4 * Gib
+		grantDueProCycles(ctx, now)
 		referralStartTime, referralEndTime := ReferralGrantWindow(now)
 		AddReferralBonusesToAllNetworks(ctx, referralStartTime, referralEndTime, 2*Gib, 3*Gib)
 
@@ -94,7 +94,8 @@ func TestGrantWritersRecordGrantKind(t *testing.T) {
 			return grantKinds
 		}
 		connect.AssertEqual(t, grantKinds(freeNetworkId), []GrantKind{GrantKindFree})
-		connect.AssertEqual(t, grantKinds(proNetworkId), []GrantKind{GrantKindPro})
+		// a Pro network gets the daily free grant on top of its cycle grant
+		connect.AssertEqual(t, grantKinds(proNetworkId), []GrantKind{GrantKindFree, GrantKindPro})
 		connect.AssertEqual(t, grantKinds(referrerNetworkId), []GrantKind{GrantKindFree, GrantKindReferral})
 		connect.AssertEqual(t, grantKinds(refereeNetworkId), []GrantKind{GrantKindFree, GrantKindReferral})
 		connect.AssertEqual(t, grantKinds(otherNetworkId), []GrantKind{GrantKindNone, GrantKindNone, GrantKindNone, GrantKindFree})

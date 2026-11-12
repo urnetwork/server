@@ -33,14 +33,19 @@ const InitialTransferBalance = 32 * model.Gib
 // 30 days
 const InitialTransferBalanceDuration = 30 * 24 * time.Hour
 
-// The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount),
-// on three separate schedules -- see model.FreeGrantWindow / model.ProGrantWindow /
-// model.ReferralGrantWindow and the three Refresh*TransferBalances tasks below.
+// The recurring per-tier data grants come from pro.yml (model.Pro().DataAmount).
+// The free grant is daily (model.FreeGrantWindow) and the referral grant runs
+// every referral period (model.ReferralGrantWindow). The Pro grant comes at the
+// start of each of the network's own subscription cycles
+// (model.GrantProCycleInTx, PRO-GRANT-CYCLE.md): at each credit below, and by the
+// hourly RefreshProCycleTransferBalances.
 //
-// RefreshSupporterTransferBalance is the legacy amount still used at subscription
-// ACTIVATION, where the balance spans the whole subscription period alongside the
-// revenue/subsidy accounting. It is not the recurring meter.
-const RefreshSupporterTransferBalance = 600 * model.Gib
+// SupporterPeriodTransferBalance is what a paid supporter period's own balance
+// holds: nothing. That balance is the period's Pro marker, with the period's
+// window, revenue and purchase token, which the end paths, Play's overlap gate
+// and the sales history match. It replaced the 600 GiB activation credit
+// (owner, 2026-11-11); the period's data is its cycle grant.
+const SupporterPeriodTransferBalance = model.ByteCount(0)
 
 const SubscriptionGracePeriod = 24 * time.Hour
 
@@ -117,8 +122,24 @@ var playPackageName = sync.OnceValue(func() string {
 var playSkus = sync.OnceValue(func() map[string]*Sku {
 	var skus Skus
 	server.Config.RequireSimpleResource("play.yml").UnmarshalYaml(&skus)
-	return skus.Skus
+	return playCreditableSkus(skus.Skus)
 })
+
+// playCreditableSkus are the Play products this server credits: play.yml's,
+// except any named like a data pack (data_*). Google Play sells UR Pro only; the
+// packs are sold on the rails pro.yml names (data_pack_rails.go), and the stores
+// are not one, so the 256 GiB pack cannot be sold through Play.
+func playCreditableSkus(skus map[string]*Sku) map[string]*Sku {
+	creditable := map[string]*Sku{}
+	for productId, sku := range skus {
+		if isDataPackItem(productId) {
+			glog.Errorf("[sub]play.yml lists %s, a data pack; Google Play sells UR Pro only, so it is never credited\n", productId)
+			continue
+		}
+		creditable[productId] = sku
+	}
+	return creditable
+}
 
 // var companySenderEmail = sync.OnceValue(func() string {
 // 	c := server.Config.RequireSimpleResource("email.yml").Parse()
@@ -1745,6 +1766,10 @@ func playCreditSubscriptionInTx(
 		endTime := maxExpiryTime.Add(SubscriptionGracePeriod)
 		netRevenue := model.UsdToNanoCents((1.0 - sku.FeeFraction) * sku.PriceAmountUsd)
 
+		// the row starts at the subscription's start; its paid period ends at
+		// the expiry and starts where the purchase's previous paid period
+		// ended (model.proPaidPeriods)
+		paidEndTime := maxExpiryTime
 		renewal := &model.SubscriptionRenewal{
 			NetworkId:          playSubscriptionRenewal.NetworkId,
 			StartTime:          startTime,
@@ -1753,6 +1778,7 @@ func playCreditSubscriptionInTx(
 			PurchaseToken:      playSubscriptionRenewal.PurchaseToken,
 			SubscriptionType:   model.SubscriptionTypeSupporter,
 			SubscriptionMarket: model.SubscriptionMarketGoogle,
+			PaidEndTime:        &paidEndTime,
 		}
 		if err := model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, renewal); err != nil {
 			return false, err
@@ -1764,14 +1790,16 @@ func playCreditSubscriptionInTx(
 		// under its own savepoint
 		playRecordWinbackInTx(tx, clientSession.Ctx, sub, renewal)
 
-		// a supporter subscription -> carries the Pro entitlement
+		// a supporter subscription -> carries the Pro entitlement. The
+		// period's marker holds no data (SupporterPeriodTransferBalance); its
+		// revenue makes Play's overlap gate count it as this expiry's credit
 		transferBalance := &model.TransferBalance{
 			NetworkId:             playSubscriptionRenewal.NetworkId,
 			StartTime:             startTime,
 			EndTime:               endTime,
-			StartBalanceByteCount: RefreshSupporterTransferBalance,
+			StartBalanceByteCount: SupporterPeriodTransferBalance,
 			SubsidyNetRevenue:     netRevenue,
-			BalanceByteCount:      RefreshSupporterTransferBalance,
+			BalanceByteCount:      SupporterPeriodTransferBalance,
 			PurchaseToken:         playSubscriptionRenewal.PurchaseToken,
 			Pro:                   true,
 		}
@@ -1780,6 +1808,8 @@ func playCreditSubscriptionInTx(
 			tx,
 			transferBalance,
 		)
+		// the period's data: the full Pro grant for the cycle it starts
+		model.GrantProCycleInTx(tx, clientSession.Ctx, playSubscriptionRenewal.NetworkId)
 
 	} else {
 		// a data pack, NOT a subscription -> data only, never Pro
@@ -2130,19 +2160,25 @@ func verifyPlayAuth(ctx context.Context, auth string, publisherEmail string, aud
 	return errors.New("Missing authorization.")
 }
 
-// The grant windows (model.FreeGrantWindow, model.ProGrantWindow,
-// model.ReferralGrantWindow) live in the model, next to the balance summary that
-// tells a grant in its grace from the next grant of its kind.
+// The grant windows (model.FreeGrantWindow, model.ReferralGrantWindow) and the Pro
+// grant cycles (model.NextProCycle) live in the model, next to the balance summary
+// that tells a grant in its grace from the next grant of its kind.
 
 // AddRefreshTransferBalance grants one network the data allowance for its CURRENT
-// tier and period: a Pro network gets the monthly Pro amount, everyone else gets the
-// daily free amount. Used when a network is created and when a subscription changes,
-// so the network does not have to wait for the next scheduled grant.
+// tier and period: a Pro network gets the Pro grant of its current subscription cycle
+// unless that cycle has had it, and everyone else gets the daily free amount. Used
+// when a network is created and when a subscription changes (bringyourctl
+// upgrade-plan), so the network does not have to wait for the next scheduled grant.
+// A Pro network also gets the daily free amount, from the daily run
+// (RefreshFreeTransferBalances), like every network; a network that becomes Pro
+// keeps the day's free grant it already holds, so a refresh adds no second one.
+//
+// ReadCommitted, which the cycle grant needs (model.GrantProCycleInTx).
 func AddRefreshTransferBalance(ctx context.Context, networkId server.Id) (returnErr error) {
 	proGranted := false
 	server.Tx(ctx, func(tx server.PgTx) {
 		proGranted, returnErr = AddRefreshTransferBalanceInTx(tx, ctx, networkId)
-	})
+	}, server.TxReadCommitted)
 	if returnErr != nil {
 		return
 	}
@@ -2177,21 +2213,10 @@ func AddRefreshTransferBalanceInTx(tx server.PgTx, ctx context.Context, networkI
 	}
 
 	if pro {
-		// the Pro grant carries pro = true, which is what confers the entitlement
-		startTime, endTime := model.ProGrantWindow(server.NowUtc())
-		err := model.AddGrantTransferBalanceInTx(
-			tx,
-			ctx,
-			networkId,
-			model.GrantKindPro,
-			model.Pro().DataAmount(true),
-			startTime,
-			endTime,
-		)
-		if err != nil {
-			return false, err
-		}
-		return true, nil
+		// the Pro grant of the network's current cycle, once per cycle. It
+		// carries pro = true, which is what confers the entitlement. A tx at
+		// another isolation grants nothing here; the sweep grants it.
+		return model.GrantProCycleInTx(tx, ctx, networkId), nil
 	}
 
 	startTime, endTime := model.FreeGrantWindow(server.NowUtc())
@@ -2239,7 +2264,9 @@ func ScheduleRefreshFreeTransferBalances(clientSession *session.ClientSession, t
 }
 
 // RefreshFreeTransferBalances grants the daily free allowance (pro.yml free.data) to
-// every network without an active subscription.
+// every network, Pro and payment grace included, on top of the Pro cycle grant
+// (model.AddFreeTransferBalanceToAllNetworks). A Pro network spends it after its
+// paid Pro data.
 func RefreshFreeTransferBalances(
 	refreshFreeTransferBalances *RefreshFreeTransferBalancesArgs,
 	clientSession *session.ClientSession,
@@ -2273,7 +2300,77 @@ func RefreshFreeTransferBalancesPost(
 	return nil
 }
 
-// ----- Pro grant: runs every month -----
+// ----- Pro grant: each network on its own subscription cycle, swept hourly -----
+
+// How often the sweep runs. A network whose cycle starts with no renewal (the
+// monthly cycles of a yearly plan) gets its grant within this of the cycle's
+// start, inside the previous grant's one-day grace.
+const RefreshProCycleTransferBalancesInterval = 1 * time.Hour
+
+type RefreshProCycleTransferBalancesArgs struct {
+}
+
+type RefreshProCycleTransferBalancesResult struct {
+	GrantedCount int `json:"granted_count"`
+	EndedCount   int `json:"ended_count"`
+}
+
+func ScheduleRefreshProCycleTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
+	task.ScheduleTaskInTx(
+		tx,
+		RefreshProCycleTransferBalances,
+		&RefreshProCycleTransferBalancesArgs{},
+		clientSession,
+		task.RunOnce("refresh_pro_cycle_transfer_balances"),
+		task.RunAt(server.NowUtc().Add(RefreshProCycleTransferBalancesInterval)),
+		task.MaxTime(1*time.Hour),
+	)
+}
+
+// RefreshProCycleTransferBalances grants the FULL Pro allowance (pro.yml pro.data)
+// to every network whose subscription cycle is due and was not granted when its
+// renewal was recorded. It then ends the running cycle grants of networks whose
+// paid period was ended early (model.GrantDueProCycles). The balance is not
+// rationed per day: a Pro network gets the whole 10 TiB at the start of its cycle
+// and can spend it however it likes over the cycle.
+func RefreshProCycleTransferBalances(
+	refreshProCycleTransferBalances *RefreshProCycleTransferBalancesArgs,
+	clientSession *session.ClientSession,
+) (*RefreshProCycleTransferBalancesResult, error) {
+	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
+	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
+	// the process restarts) the sweep grants the cycles that are due by itself.
+	if model.Pro().DataAmount(true) <= 0 {
+		glog.Errorf("[sub]RefreshProCycleTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
+		return &RefreshProCycleTransferBalancesResult{}, nil
+	}
+	grantedNetworkIds, endedNetworkIds := model.GrantDueProCycles(clientSession.Ctx)
+	if 0 < len(grantedNetworkIds) || 0 < len(endedNetworkIds) {
+		glog.Infof("[sub]Pro cycle grants: %d granted, %d ended early\n", len(grantedNetworkIds), len(endedNetworkIds))
+	}
+	return &RefreshProCycleTransferBalancesResult{
+		GrantedCount: len(grantedNetworkIds),
+		EndedCount:   len(endedNetworkIds),
+	}, nil
+}
+
+func RefreshProCycleTransferBalancesPost(
+	refreshProCycleTransferBalances *RefreshProCycleTransferBalancesArgs,
+	refreshProCycleTransferBalancesResult *RefreshProCycleTransferBalancesResult,
+	clientSession *session.ClientSession,
+	tx server.PgTx,
+) error {
+	ScheduleRefreshProCycleTransferBalances(clientSession, tx)
+	return nil
+}
+
+// ----- Retired: the calendar-month Pro grant -----
+//
+// RefreshProTransferBalances granted every subscriber the Pro allowance on the 1st
+// of the month (UTC). Grants now follow each network's own cycle (above). The task
+// stays registered so its pending row (due 2026-12-01) is consumed by a binary that
+// grants nothing, and its post-hook schedules no successor. Nothing schedules it
+// any more.
 
 type RefreshProTransferBalancesArgs struct {
 }
@@ -2281,45 +2378,11 @@ type RefreshProTransferBalancesArgs struct {
 type RefreshProTransferBalancesResult struct {
 }
 
-func ScheduleRefreshProTransferBalances(clientSession *session.ClientSession, tx server.PgTx) {
-	// the start of the next month (time.Date normalizes month 13 to January)
-	year, month, _ := server.NowUtc().Date()
-	runAt := time.Date(year, month+1, 1, 0, 0, 0, 0, time.UTC)
-	task.ScheduleTaskInTx(
-		tx,
-		RefreshProTransferBalances,
-		&RefreshProTransferBalancesArgs{},
-		clientSession,
-		task.RunOnce("refresh_pro_transfer_balances"),
-		task.RunAt(runAt),
-		task.MaxTime(1*time.Hour),
-	)
-}
-
-// RefreshProTransferBalances grants the FULL monthly Pro allowance (pro.yml pro.data)
-// to every network with an active subscription, at the start of the month. The
-// balance is not rationed per-day: a Pro network gets the whole 10 TiB up front and
-// can spend it however it likes over the month.
 func RefreshProTransferBalances(
 	refreshProTransferBalances *RefreshProTransferBalancesArgs,
 	clientSession *session.ClientSession,
 ) (*RefreshProTransferBalancesResult, error) {
-	// Nothing to grant -> grant nothing, rather than write zero-byte balance rows. With no
-	// pro.yml this amount is zero. The task stays SCHEDULED, so once pro.yml lands (and
-	// the process restarts) the grants resume on their normal cadence by themselves.
-	if model.Pro().DataAmount(true) <= 0 {
-		glog.Errorf("[sub]RefreshProTransferBalances: no amount configured (is pro.yml present?); skipping the grant\n")
-		return &RefreshProTransferBalancesResult{}, nil
-	}
-
-	startTime, endTime := model.ProGrantWindow(server.NowUtc())
-	model.AddProTransferBalanceToAllNetworks(
-		clientSession.Ctx,
-		startTime,
-		endTime,
-		model.Pro().DataAmount(true),
-		transferGrantRunIds(clientSession.Ctx)...,
-	)
+	glog.Infof("[sub]RefreshProTransferBalances is retired; Pro grants follow each network's cycle (RefreshProCycleTransferBalances)\n")
 	return &RefreshProTransferBalancesResult{}, nil
 }
 
@@ -2329,7 +2392,6 @@ func RefreshProTransferBalancesPost(
 	clientSession *session.ClientSession,
 	tx server.PgTx,
 ) error {
-	ScheduleRefreshProTransferBalances(clientSession, tx)
 	return nil
 }
 
@@ -3051,6 +3113,9 @@ func solanaCreditPlanIntentInTx(
 		return false, nil
 	}
 
+	// the paid term, without the manual-payment grace the caller added to
+	// endTime (solanaCreditPaymentIntentInConn)
+	paidEndTime := endTime.Add(-manualPaymentGracePeriod)
 	subscriptionRenewal := model.SubscriptionRenewal{
 		NetworkId:          *paymentSearchResult.NetworkId,
 		SubscriptionType:   model.SubscriptionTypeSupporter,
@@ -3059,6 +3124,7 @@ func solanaCreditPlanIntentInTx(
 		NetRevenue:         netRevenue,
 		SubscriptionMarket: model.SubscriptionMarketSolana,
 		TransactionId:      paymentSearchResult.PaymentReference,
+		PaidEndTime:        &paidEndTime,
 	}
 
 	err = model.AddSubscriptionRenewalInTx(tx, clientSession.Ctx, &subscriptionRenewal)
@@ -3068,14 +3134,15 @@ func solanaCreditPlanIntentInTx(
 		return false, err
 	}
 
-	// a supporter subscription -> carries the Pro entitlement
+	// a supporter subscription -> carries the Pro entitlement; the term's
+	// marker holds no data (SupporterPeriodTransferBalance)
 	transferBalance := &model.TransferBalance{
 		NetworkId:             *paymentSearchResult.NetworkId,
 		StartTime:             startTime,
 		EndTime:               endTime,
-		StartBalanceByteCount: RefreshSupporterTransferBalance,
+		StartBalanceByteCount: SupporterPeriodTransferBalance,
 		SubsidyNetRevenue:     netRevenue,
-		BalanceByteCount:      RefreshSupporterTransferBalance,
+		BalanceByteCount:      SupporterPeriodTransferBalance,
 		Pro:                   true,
 	}
 	model.AddTransferBalanceInTx(
@@ -3083,6 +3150,8 @@ func solanaCreditPlanIntentInTx(
 		tx,
 		transferBalance,
 	)
+	// the term's data: the full Pro grant for the cycle it starts
+	model.GrantProCycleInTx(tx, clientSession.Ctx, *paymentSearchResult.NetworkId)
 
 	// this call consumed the intent: a new payment, posted once the
 	// transaction commits
