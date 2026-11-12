@@ -982,6 +982,9 @@ var migrationCurrentSuffixContracts = slices.Concat(
 	[]snMainnetMigrationContract{providerEgressH3PlaceMigrationContract},
 	// the IPv6 place evidence, versioned by its position
 	[]snMainnetMigrationContract{providerEgressIpv6PlaceMigrationContract},
+	// capture the flag's presence, census and lifecycle tables, versioned by
+	// their position
+	[]snMainnetMigrationContract{ctfMigrationContract},
 )
 
 // Free space a table keeps on every page it writes, so an update of an

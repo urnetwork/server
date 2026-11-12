@@ -490,6 +490,8 @@ var stLedgerV2SpentErrors = func() map[[4]byte]string {
 		"InvalidWindow", "InvalidTransition", "NoPendingRoot", "NoFault", "UnknownRoot", "StaleRootCount",
 		"EpochOutOfRange", "TotalMismatch", "TotalNotIncreased", "InvalidLeafCount", "InvalidRoot",
 		"IndexOutOfRange", "InvalidProof", "MalformedPath", "NothingToClaim",
+		// capture the flag: a census already committed for the epoch
+		"CensusAlreadyCommitted",
 	} {
 		var selector [4]byte
 		copy(selector[:], crypto.Keccak256([]byte(name + "()"))[:4])

@@ -204,6 +204,12 @@ type StConfig struct {
 	// refuses only the epochs whose rows need it.
 	Amendments   yaml.Node
 	ExtenderPool yaml.Node
+	// Ctf is the capture the flag driver's configuration (st_ctf_config.go),
+	// off unless st.yml's ctf block turns it on.
+	Ctf StCtfConfig
+	// CtfConfigError says why st.yml's ctf block was refused. A refused block
+	// turns capture the flag off, never the st subsystem.
+	CtfConfigError string
 }
 
 // DeploymentKey is the exact chain/coordinator identity used to namespace
@@ -295,6 +301,8 @@ type stVaultFile struct {
 	// too (st_ledger_v2_amendments.go).
 	Amendments   yaml.Node `yaml:"amendments"`
 	ExtenderPool yaml.Node `yaml:"extender_pool"`
+	// The capture the flag block stays raw for the same reason (stCtfSelect).
+	Ctf yaml.Node `yaml:"ctf"`
 
 	TestnetEnabled                bool                           `yaml:"testnet-enabled"`
 	TestnetAttemptUploadBudget    model.StAttemptUploadBudget    `yaml:"testnet-attempt-upload"`
@@ -334,6 +342,7 @@ type stVaultFile struct {
 	TestnetV1SweepRecoveryEpochs  yaml.Node                      `yaml:"testnet-v1-sweep-recovery-epochs"`
 	TestnetAmendments             yaml.Node                      `yaml:"testnet-amendments"`
 	TestnetExtenderPool           yaml.Node                      `yaml:"testnet-extender-pool"`
+	TestnetCtf                    yaml.Node                      `yaml:"testnet-ctf"`
 }
 
 // stConfigFromVault lazily loads `st.yml`. Unlike verify.yml the resource is
@@ -410,6 +419,7 @@ type stSelectedConfig struct {
 	ValidatorHotkeys                                                                                               []string
 	V1SweepEpoch, V1SweepRecoveryEpochs                                                                            yaml.Node
 	Amendments, ExtenderPool                                                                                       yaml.Node
+	Ctf                                                                                                            yaml.Node
 }
 
 func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
@@ -440,6 +450,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			V1SweepRecoveryEpochs: f.TestnetV1SweepRecoveryEpochs,
 			Amendments:            f.TestnetAmendments,
 			ExtenderPool:          f.TestnetExtenderPool,
+			Ctf:                   f.TestnetCtf,
 		}, nil
 	case stconn.ProfileMainnet:
 		return stSelectedConfig{
@@ -465,6 +476,7 @@ func selectStConfig(profile string, f stVaultFile) (stSelectedConfig, error) {
 			V1SweepRecoveryEpochs: f.V1SweepRecoveryEpochs,
 			Amendments:            f.Amendments,
 			ExtenderPool:          f.ExtenderPool,
+			Ctf:                   f.Ctf,
 		}, nil
 	default:
 		return stSelectedConfig{}, fmt.Errorf("st.yml unknown profile %q", profile)
@@ -560,6 +572,8 @@ func stConfigForProfile(profile string, file stVaultFile, rpcUrls []string) (*St
 	// A refused sweep configuration disables only the sweep; settlement,
 	// v2 included, keeps running.
 	stV1SweepSelect(cfg, profile, &s.V1SweepEpoch, &s.V1SweepRecoveryEpochs)
+	// Likewise a refused capture the flag block turns only capture the flag off.
+	stCtfSelect(cfg, profile, &s.Ctf)
 	if cfg.GenesisHash, err = stParseHex32(s.GenesisHash); err != nil {
 		return nil, fmt.Errorf("st.yml genesis_hash: %w", err)
 	}
@@ -2230,6 +2244,10 @@ func (self *CoreStClient) stakeMoveGasFloor(to common.Address, calldata []byte, 
 		return stV1ClaimGasFloor
 	case bytes.HasPrefix(calldata, stLedgerV2AbsorbStakeSelector) && self.cfg.LedgerV2Enabled() && to == self.cfg.VaultV2:
 		return stLedgerV2StakeMoveGasFloor
+	case bytes.HasPrefix(calldata, stCtfRecycleSelector) && self.cfg.Ctf.CarryAddress != (common.Address{}) && to == self.cfg.Ctf.CarryAddress:
+		// the carry's recycle claims and makes two stake moves from its own
+		// coldkey, whose StakingHotkeys list third parties can lengthen
+		return stLedgerV2StakeMoveGasFloor
 	}
 	return 0
 }
@@ -2981,6 +2999,9 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		if self.cfg.LedgerV2Enabled() {
 			addresses = append(addresses, self.cfg.SettlementV2, self.cfg.VaultV2)
 		}
+		if carry := stCtfCarryMirrored(self.cfg); carry != (common.Address{}) {
+			addresses = append(addresses, carry)
+		}
 		out, err := client.FilterLogs(callCtx, ethereum.FilterQuery{
 			FromBlock: new(big.Int).SetUint64(fromBlock),
 			ToBlock:   new(big.Int).SetUint64(toBlock),
@@ -3008,6 +3029,8 @@ func (self *CoreStClient) SyncEvents(ctx context.Context, fromBlock uint64, toBl
 		logDecoders := decoders
 		if v2Decoders, ok := self.stLedgerV2EventDecoders(log.Address); ok {
 			logDecoders = v2Decoders
+		} else if ctfDecoders, ok := self.stCtfEventDecoders(log.Address); ok {
+			logDecoders = ctfDecoders
 		}
 		for _, decode := range logDecoders {
 			if k, a, ok := decode(log); ok {
@@ -4919,6 +4942,7 @@ func StSyncChainEvents(ctx context.Context, _ uint64) (int, error) {
 		stApplyEventStatuses(ctx, cfg, events)
 		stApplyHeadBindings(ctx, cfg, events)
 		stApplyLedgerV2Events(ctx, cfg, events)
+		stApplyCtfEvents(ctx, cfg, events)
 		model.SetStChainCheckpoint(ctx, cfg.DeploymentKey(), model.StChainCheckpoint{NextBlock: nextBlock, BlockHash: canonicalHashes[toBlock]})
 		synced += len(events)
 		fromBlock = nextBlock
