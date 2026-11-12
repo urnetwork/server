@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -204,6 +205,23 @@ func (self *migrationPingDatabaseSource) PostgreSQL(ctx context.Context, query s
 	rows := []Row{}
 	var queryErr error
 	server.Db(ctx, func(conn server.PgConn) {
+		if observation := migrationCensusFromContext(ctx); observation != nil {
+			tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+			if err != nil {
+				queryErr = err
+				return
+			}
+			defer func() {
+				cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+				if err := tx.Rollback(cleanupCtx); err != nil && err != pgx.ErrTxClosed {
+					queryErr = err
+					observation.catalogRows, observation.catalogComplete = nil, false
+				}
+			}()
+			rows, queryErr = migrationCensusFixtureInTx(ctx, tx, query, observation, func() error { return tx.Commit(ctx) })
+			return
+		}
 		result, err := conn.Query(ctx, query, pgx.QueryExecModeSimpleProtocol)
 		if err != nil {
 			queryErr = err

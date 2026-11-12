@@ -183,11 +183,12 @@ type monitorConfig struct {
 	disabledHosts         []*host
 	routerGenerationCheck func(context.Context) (bool, error)
 
-	pgPort        int
-	pgbouncerPort int
-	pgUser        string
-	pgPassword    string
-	pgDb          string
+	pgPort             int
+	pgbouncerPort      int
+	pgUser             string
+	pgPassword         string
+	pgDb               string
+	pgStatementTimeout time.Duration
 
 	grafanaAdminPassword string
 	mimirQueryDomain     string
@@ -213,6 +214,7 @@ type monitorConfig struct {
 	// hard timeouts; a command exceeding these is recorded as unreachable
 	sshConnectTimeout time.Duration
 	commandTimeout    time.Duration
+	migrationCensus   MigrationCensusSettings
 
 	// Shared across the fresh probe environments created by Signal.Run. It
 	// bounds actual SSH handshakes rather than just top-level signal calls.
@@ -584,11 +586,26 @@ func (self *runner) pg(ctx context.Context, sql string) ([]pgRow, error) {
 	if h == nil {
 		return nil, fmt.Errorf("no pg-primary host in inventory")
 	}
+	statementMillis, err := pgStatementTimeoutMillis(self.cfg.pgStatementTimeout)
+	if err != nil {
+		return nil, err
+	}
+	if observation := migrationCensusFromContext(ctx); observation != nil {
+		return runMigrationCensus(ctx, sql, observation, func(script string) (string, error) {
+			remoteCmd := fmt.Sprintf(
+				"IFS= read -r PGPASSWORD; export PGPASSWORD; "+
+					"export PGOPTIONS='-c statement_timeout=%d -c default_transaction_read_only=on'; "+
+					"exec psql -h localhost -p %d -U %s %s -X -q --csv -t -v ON_ERROR_STOP=1 -f -",
+				statementMillis, self.cfg.pgPort, self.cfg.pgUser, self.cfg.pgDb,
+			)
+			return self.ssh(ctx, h, remoteCmd, self.cfg.pgPassword+"\n"+script)
+		})
+	}
 	remoteCmd := fmt.Sprintf(
 		"IFS= read -r PGPASSWORD; export PGPASSWORD; "+
-			"export PGOPTIONS='-c statement_timeout=30000 -c default_transaction_read_only=on'; "+
+			"export PGOPTIONS='-c statement_timeout=%d -c default_transaction_read_only=on'; "+
 			"exec psql -h localhost -p %d -U %s %s -X --csv -t -v ON_ERROR_STOP=1 -f -",
-		self.cfg.pgPort, self.cfg.pgUser, self.cfg.pgDb,
+		statementMillis, self.cfg.pgPort, self.cfg.pgUser, self.cfg.pgDb,
 	)
 	stdin := self.cfg.pgPassword + "\n" + sql
 	out, err := self.ssh(ctx, h, remoteCmd, stdin)
