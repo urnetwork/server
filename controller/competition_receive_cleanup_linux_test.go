@@ -45,7 +45,8 @@ func newCompetitionReceiveCleanupCycleFixture(t *testing.T, cycle int) *competit
 func newCompetitionReceiveCleanupInputFixture(t *testing.T, cycle int, inputs []competitionagent.File) *competitionReceiveCleanupFixture {
 	t.Helper()
 	now := time.Now().UTC()
-	started, deadline, lease := now.Add(-time.Minute), now.Add(time.Hour), now.Add(time.Minute)
+	started, lease := now.Add(-time.Minute), now.Add(time.Minute)
+	deadline := started.Add(time.Duration(submissionEvaluationTimeoutSeconds) * time.Second)
 	job := &queuedJob{ScoreJobResult: ScoreJobResult{JobId: server.NewId(), RoundId: server.NewId(), StartedAt: &started},
 		AttemptCount: 1, ExecutorHostId: "synthetic-receive-host", SlotId: 1, SlotFencingToken: 4, ExecutionDeadline: &deadline, LeaseExpiresAt: &lease}
 	executionStart := started
@@ -499,7 +500,9 @@ func TestCompetitionReceiveCleanupJoinedWorkerHandbackPreservesAndCloses(t *test
 		fixture := newCompetitionReceiveCleanupFixture(t)
 		fixture.retain(t)
 		settings := validSettings()
-		settings.EvaluationPolicy.ScoreTimeoutSeconds = int(time.Hour / time.Second)
+		if fixture.identity.DeadlineAt.Sub(fixture.identity.StartedAt) != time.Duration(settings.EvaluationPolicy.ScoreTimeoutSeconds)*time.Second {
+			t.Fatal("synthetic receive clock differs from the frozen worker evaluation duration")
+		}
 		evaluator := &competitionReceiveHandbackEvaluator{outcome: fixture.outcome, started: make(chan struct{})}
 		store := &competitionReceiveHandbackStore{custody: fixture.custody}
 		worker, err := newWorkerWithImageDigest(settings, store, evaluator, "synthetic-receive-handback-worker", testWorkerImageDigest())
