@@ -177,8 +177,11 @@ request/response/receipt hashes unchanged. Its separate receipt is
 It validates only the supplied partial scope and records the remaining source,
 instrument, transitive-context and paired-review obligations. The original local
 failure receipt still says invalid; neither that receipt nor Gemma's rejected
-response was rewritten. A new Qwen scoring-instrument scope is running separately;
-other remaining scopes have only been prepared offline.
+response was rewritten. A separate Qwen scoring-instrument response subsequently
+completed but named `canonical.patch` as a production code path. That is evidence,
+not product code: this response remains rejected without filtering, rewriting or
+rerunning it. Other prepared scopes remain unstarted pending a prospectively
+stricter renderer with explicit production-path choices.
 
 These are private, nonfinal observations, not submission approvals, complete
 honesty reviews, or authority to elect, reward or promote a candidate. No
