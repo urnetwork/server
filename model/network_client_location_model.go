@@ -5976,6 +5976,11 @@ func UpdateClientScores(ctx context.Context, ttl time.Duration, parallel int) (r
 				egressSettings,
 				minIndependentReliabilityWeights,
 			)
+			// the ranking index of the copy's class (§3.4): its forgiven runs
+			// are no failures of the capabilities it keeps
+			if egress := clientIdEgresses[clientScore.ClientId]; egress != nil && egress.egressIndex != nil {
+				rankClientScoreCapabilityTiers(&classified, capability.counts, countFilter.now, egressSettings)
+			}
 			setModern(&classified)
 			clientScore.capabilityCopy = &classified
 		}

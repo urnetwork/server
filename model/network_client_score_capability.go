@@ -115,6 +115,42 @@ func newClientScoreCapability(
 	return capability
 }
 
+// Sets a classified copy's scores and tiers from the ranking index of its
+// classified counts (FP2-PROTOCOL.md §3.4): the index base of Quality, zero
+// for Speed, as clientScoreRankModeBases gives a score with an index, over
+// the performance of its lowest lookback. The copy keeps the strict tiers
+// when its counts give no current evidence. The minimum scores, which the
+// selection weight reads, have a zero base either way and do not change.
+func rankClientScoreCapabilityTiers(classified *ClientScore, counts ProviderEgressHealthCounts, now time.Time, egressSettings *EgressIndexSettings) {
+	index := ComputeEgressIndex(&EgressHealthRun{MeasuredAt: counts.MeasuredAt, OkCount: counts.OKCount, Total: counts.Total}, now, egressSettings)
+	if !index.Evidence || len(classified.LookbackClientScores) == 0 {
+		return
+	}
+	minLookbackIndex := -1
+	for lookbackIndex := range classified.LookbackClientScores {
+		if minLookbackIndex < 0 || lookbackIndex < minLookbackIndex {
+			minLookbackIndex = lookbackIndex
+		}
+	}
+	lookback := classified.LookbackClientScores[minLookbackIndex]
+	ranked := &ClientScore{
+		Scores: map[string]int{},
+		Tiers:  map[string]int{},
+	}
+	rankModeBases, rankModeMinimumBases := clientScoreRankModeBases(0, 0, &index.Index)
+	setClientScoreRanks(
+		ranked,
+		rankModeBases,
+		rankModeMinimumBases,
+		lookback.MinRelativeLatencyMillis,
+		lookback.MaxBytesPerSecond,
+		lookback.HasLatencyTest,
+		lookback.HasSpeedTest,
+	)
+	classified.Scores = ranked.Scores
+	classified.Tiers = ranked.Tiers
+}
+
 // Modern as strict requests read it once the post-quantum marker is set
 // (§12.4): post-quantum positive, with the latest modern evidence fresh and
 // advertising resizable windows.
