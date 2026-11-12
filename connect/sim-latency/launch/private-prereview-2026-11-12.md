@@ -164,6 +164,22 @@ original preserved response without another inference call or modification of
 the original failure receipt. Gemma's local rejection also remains under
 diagnosis. Other scopes remain held pending these checks.
 
+The narrow offline validator subsequently passed 75 ordinary and 75 race-test
+executions. Its first build's compiler succeeded, but a post-build check wrongly
+expected linker flags in `go version -m` despite `-trimpath`; that actor failure
+remains preserved. A separately reviewed passive ELF inspector passed 21 ordinary
+and 21 race tests and verified the original binary's exact source-hash binding
+without executing it. The original binary was not rebuilt.
+
+The network-disabled offline Qwen validation then succeeded, with original
+request/response/receipt hashes unchanged. Its separate receipt is
+`706f503960bf354ad2032442bc4323e91d5c30aa7e6b76c54a679e6ae1c74125`.
+It validates only the supplied partial scope and records the remaining source,
+instrument, transitive-context and paired-review obligations. The original local
+failure receipt still says invalid; neither that receipt nor Gemma's rejected
+response was rewritten. A new Qwen scoring-instrument scope is running separately;
+other remaining scopes have only been prepared offline.
+
 These are private, nonfinal observations, not submission approvals, complete
 honesty reviews, or authority to elect, reward or promote a candidate. No
 candidate patch was executed by this review tooling. Protected result
