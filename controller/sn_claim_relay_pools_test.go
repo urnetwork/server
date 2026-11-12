@@ -3,9 +3,10 @@ package controller
 // sn_claim_relay_pools_test.go — the claim relay over the operator's two pools,
 // its pool and its capture the flag pool (sn CAPTURETHEFLAG.md §10): the unit is
 // (coldkey, pool), a due account takes its coldkey's other accounts above the
-// floor into the same batch, Claim now claims every pool, and the 30-day limit
-// stays per coldkey. Like sn_claim_relay_test.go, nothing here reads a database,
-// Redis or a network.
+// floor into the same batch, Claim now claims every pool, the 30-day limit stays
+// per coldkey, and the capture the flag pool is read only while capture the flag
+// is on. Like sn_claim_relay_test.go, nothing here reads a database, Redis or a
+// network.
 
 import (
 	"errors"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/holiman/uint256"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/urnetwork/server"
 )
 
 // The accounts the world's transactions sent, by pool and index, once each.
@@ -464,8 +467,92 @@ func TestStLedgerV2PoolKind(t *testing.T) {
 			t.Fatalf("%d: %s %q", c.noId, kind, label)
 		}
 	}
-	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}); !slices.Equal(pools, []uint64{1, 1<<32 + 1}) {
+	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}, true); !slices.Equal(pools, []uint64{1, 1<<32 + 1}) {
 		t.Fatalf("own pools %v", pools)
+	}
+	if pools := stLedgerV2OwnPools(&StConfig{NoId: 1}, false); !slices.Equal(pools, []uint64{1}) {
+		t.Fatalf("own pools with capture the flag off %v", pools)
+	}
+}
+
+// resetSnCtfApiConfigCache drops the kept read of ctf.yml, so that the next
+// read is the vault's.
+func resetSnCtfApiConfigCache() {
+	cache := &snCtfApiConfigCache
+	cache.lock.Lock()
+	defer cache.lock.Unlock()
+	cache.config = nil
+}
+
+// setCtfYmlTestApi sets ctf.yml's api block, one of the two switches of
+// stCtfPoolOn, until the test ends: enabled, or off as an absent ctf.yml reads.
+func setCtfYmlTestApi(t testing.TB, enabled bool) {
+	t.Helper()
+	apiConfigOf := snCtfApiConfigOf
+	snCtfApiConfigOf = func() *snCtfApiConfig {
+		return &snCtfApiConfig{Enabled: enabled, PageUrl: snCtfDefaultPageUrl}
+	}
+	t.Cleanup(func() { snCtfApiConfigOf = apiConfigOf })
+}
+
+// setCtfPoolTestSwitches sets the two switches of stCtfPoolOn until the test
+// ends: st.yml's ctf block, live or none, and ctf.yml's api block, enabled or
+// off, as an absent ctf.yml reads.
+func setCtfPoolTestSwitches(t testing.TB, cfg *StConfig, stYml bool, ctfYml bool) {
+	t.Helper()
+	cfg.Ctf = StCtfConfig{Mode: StCtfModeOff}
+	if stYml {
+		cfg.Ctf = StCtfConfig{Mode: StCtfModeLive, CarryAddress: ctfTestCarry}
+	}
+	setCtfYmlTestApi(t, ctfYml)
+}
+
+// The ledger route and the claim relay read capture the flag pools only while
+// both switches are on: st.yml's ctf block runs capture the flag, in shadow or
+// live, and the vault's ctf.yml enables its api block. With either off (no
+// ctf.yml, one without an api block, its api block off, one that does not
+// parse; no st.yml ctf block, or its mode off) the operator's own pools are
+// its pool alone.
+func TestStCtfPoolOnNeedsBothSwitches(t *testing.T) {
+	t.Cleanup(resetSnCtfApiConfigCache)
+	const enabled = "api:\n  enabled: true\n  page_url: https://ur.xyz/ctf\n"
+	for _, c := range []struct {
+		name string
+		mode StCtfMode
+		// the vault's ctf.yml, "" for none
+		ctfYml string
+		on     bool
+	}{
+		{"no ctf.yml", StCtfModeLive, "", false},
+		{"ctf.yml without an api block", StCtfModeLive, "presence:\n  enabled: true\ncensus:\n  enabled: true\n  first_epoch: 7\n", false},
+		{"ctf.yml with its api block off", StCtfModeLive, "api:\n  enabled: false\n", false},
+		{"ctf.yml that does not parse", StCtfModeLive, "api: [enabled\n", false},
+		{"no st.yml ctf block", "", enabled, false},
+		{"st.yml ctf mode off", StCtfModeOff, enabled, false},
+		{"shadow", StCtfModeShadow, enabled, true},
+		{"live", StCtfModeLive, enabled, true},
+	} {
+		pop := func() {}
+		if c.ctfYml != "" {
+			pop = server.Vault.PushSimpleResource("ctf.yml", []byte(c.ctfYml))
+		}
+		resetSnCtfApiConfigCache()
+		cfg := &StConfig{NoId: 1, Ctf: StCtfConfig{Mode: c.mode}}
+		on := stCtfPoolOn(cfg)
+		pop()
+		if on != c.on {
+			t.Fatalf("%s: on %t", c.name, on)
+		}
+		want := []uint64{1}
+		if c.on {
+			want = append(want, 1<<32+1)
+		}
+		if pools := stLedgerV2OwnPools(cfg, on); !slices.Equal(pools, want) {
+			t.Fatalf("%s: own pools %v", c.name, pools)
+		}
+	}
+	if stCtfPoolOn(nil) {
+		t.Fatal("a server without st.yml reads the capture the flag pool")
 	}
 }
 

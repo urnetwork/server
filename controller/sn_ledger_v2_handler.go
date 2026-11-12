@@ -105,12 +105,12 @@ func StLedgerV2PoolKind(noId uint64) (kind string, label string) {
 }
 
 // stLedgerV2OwnPools are the pools this operator answers for whether or not
-// its account record holds the coldkey: its pool, no_id n, and its capture
-// the flag pool, 2^32 + n, in ascending no_id. A pool none of whose roots is
-// mirrored holds no account.
-func stLedgerV2OwnPools(cfg *StConfig) []uint64 {
+// its account record holds the coldkey: its pool, no_id n, and, when ctfOn
+// (stCtfPoolOn), its capture the flag pool, 2^32 + n, in ascending no_id. A
+// pool none of whose roots is mirrored holds no account.
+func stLedgerV2OwnPools(cfg *StConfig, ctfOn bool) []uint64 {
 	noIds := []uint64{cfg.NoId}
-	if ctfPoolId, ok := stCtfPoolId(cfg); ok {
+	if ctfPoolId, ok := stCtfPoolId(cfg); ok && ctfOn {
 		noIds = append(noIds, ctfPoolId)
 	}
 	return noIds
@@ -188,10 +188,11 @@ func ParseStLedgerV2Coldkey(value string) ([32]byte, error) {
 // StLedgerV2Accounts returns the coldkey's account in every pool whose latest
 // finalized root or pending root holds one, by no_id: the finalized cumulative
 // with its claim proof and vault2's claimed, read at the finalized head, and
-// the pending cumulative. The pools are the server's own two, its pool and its
-// capture the flag pool, and those where the account index records the
-// coldkey. Without settlement v2 the list is empty. The answer is whole: any
-// pool that cannot be read is an error.
+// the pending cumulative. The pools are the server's own, its pool and, while
+// capture the flag is on (stCtfPoolOn), its capture the flag pool, and those
+// where the account index records the coldkey, but no capture the flag pool
+// while it is off. Without settlement v2 the list is empty. The answer is
+// whole: any pool that cannot be read is an error.
 func StLedgerV2Accounts(ctx context.Context, coldkey [32]byte) (*StLedgerV2AccountsResult, error) {
 	return stLedgerV2Accounts(ctx, coldkey, false)
 }
@@ -211,7 +212,8 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 		return result, nil
 	}
 	recorded := map[uint64]uint64{}
-	noIds := stLedgerV2OwnPools(cfg)
+	ctfOn := stCtfPoolOn(cfg)
+	noIds := stLedgerV2OwnPools(cfg, ctfOn)
 	var accounts []*model.StLedgerV2Account
 	if err := stLedgerV2Guard(func() error {
 		accounts = model.GetStLedgerV2AccountsForColdkey(ctx, cfg.DeploymentKey(), coldkey)
@@ -220,6 +222,10 @@ func stLedgerV2Accounts(ctx context.Context, coldkey [32]byte, partial bool) (*S
 		return nil, fmt.Errorf("st ledger v2: the account record of 0x%x: %w", coldkey, err)
 	}
 	for _, account := range accounts {
+		if _, ctfPool := amendment.CtfNoID(account.NoId); ctfPool && !ctfOn {
+			// capture the flag is off: none of its pools is read
+			continue
+		}
 		recorded[account.NoId] = account.Index
 		if !slices.Contains(noIds, account.NoId) {
 			noIds = append(noIds, account.NoId)

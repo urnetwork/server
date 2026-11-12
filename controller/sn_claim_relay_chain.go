@@ -779,20 +779,20 @@ func (self *snClaimRelayCoreChain) Send(ctx context.Context, send *snClaimRelayS
 	return receipt.outcome, nil
 }
 
-// snClaimRelayCoreLedger reads each of the operator's pools, its pool and its
-// capture the flag pool: the pool's account index and its latest finalized
-// root's tree. A coldkey in the index that the root does not hold at its
-// index, which vault2 would refuse anyway, is left out and logged. A pool whose
-// ledger cannot be read is left out of the pass and named, so that the other
-// pools' accounts are still claimed, once another pool with a finalized root
-// was read.
+// snClaimRelayCoreLedger reads each of the operator's pools, its pool and,
+// while capture the flag is on (stCtfPoolOn), its capture the flag pool: the
+// pool's account index and its latest finalized root's tree. A coldkey in the
+// index that the root does not hold at its index, which vault2 would refuse
+// anyway, is left out and logged. A pool whose ledger cannot be read is left
+// out of the pass and named, so that the other pools' accounts are still
+// claimed, once another pool with a finalized root was read.
 type snClaimRelayCoreLedger struct {
 	cfg *StConfig
 }
 
 func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) (*snClaimRelayLedgerRead, error) {
 	read := &snClaimRelayLedgerRead{Accounts: []*snClaimRelayAccount{}}
-	pools := stLedgerV2OwnPools(self.cfg)
+	pools := stLedgerV2OwnPools(self.cfg, stCtfPoolOn(self.cfg))
 	var errs []error
 	// the pools read that have a finalized root
 	rooted := 0
@@ -814,10 +814,9 @@ func (self *snClaimRelayCoreLedger) Accounts(ctx context.Context) (*snClaimRelay
 		read.Accounts = append(read.Accounts, poolAccounts...)
 	}
 	// A pool without a finalized root, like the capture the flag pool before
-	// its first or with capture the flag off, holds nothing to claim. When it
-	// is the only one read, the ledger is unavailable and the pass ends there,
-	// as it did with the operator's pool alone; the read still names the
-	// pools that failed.
+	// its first, holds nothing to claim. When it is the only one read, the
+	// ledger is unavailable and the pass ends there, as it did with the
+	// operator's pool alone; the read still names the pools that failed.
 	if 0 < len(read.Unavailable) && rooted == 0 {
 		return read, errors.Join(errs...)
 	}
