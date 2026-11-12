@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "observed_at": "2026-11-12T09:13:57.831335Z",
+  "observed_at": "2026-11-12T09:21:34.824591Z",
   "objective": "monitor the running competition and debug and fix any issues",
   "goal_complete": false,
   "scope": {
@@ -19,12 +19,12 @@
     "intake_ready": true,
     "grading_ready": true,
     "publication_held": false,
-    "diagnosis": "Goofe's prior measured attempt succeeded after same-clock reconciliation and retention. Its next job failed before measurements; offline checking proves its patch does not apply to the frozen Connect tree. Goofe has since launched the following FIFO job. Sille completed 9/9, exited zero and verified both cleanup boundaries; central retention is pending."
+    "diagnosis": "Both previously measured attempts are now recorded succeeded after same-clock reconciliation and retention. Goofe's intervening build failure has offline frozen-base nonapplication evidence. Both hosts have claimed their following FIFO jobs; no original deadline or measurement history was reset."
   },
   "queue": {
-    "succeeded": 12,
+    "succeeded": 13,
     "failed": 3,
-    "queued": 3,
+    "queued": 2,
     "running": 2
   },
   "recent_completed": [
@@ -49,6 +49,19 @@
         "deadline_extended": false,
         "new_terminal_failure_recorded": false
       }
+    },
+    {
+      "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
+      "host_id": "sille",
+      "started_at": "2026-11-12T07:37:00.304027",
+      "deadline": "2026-11-12T10:37:00.304027",
+      "observed_phase": "succeeded_central_retention_and_score_recorded",
+      "database_success_observed_at": "2026-11-12T09:21:34.824591Z",
+      "candidate_completed": 9,
+      "native_exit_code": 0,
+      "native_cleanup_verified": true,
+      "native_stop_cleanup_verified": true,
+      "database_custody": "same_attempt_reconciliation_fence_17_original_clock_preserved"
     }
   ],
   "active_attempts": [
@@ -63,17 +76,12 @@
       "database_fence": 32
     },
     {
-      "job_id": "01a1cc4c-f789-6f3b-2a87-08ef032e5bd0",
+      "job_id": "01a1cde8-1ba2-0703-1cc6-0b1ce3ac796c",
       "host_id": "sille",
-      "started_at": "2026-11-12T07:37:00.304027",
-      "deadline": "2026-11-12T10:37:00.304027",
-      "observed_phase": "native_succeeded_central_retention_pending",
-      "candidate_completed": 9,
-      "native_exit_code": 0,
-      "native_cleanup_verified": true,
-      "native_stop_cleanup_verified": true,
-      "database_custody": "released_after_heartbeat_timeout_2026-11-12T07:43:32.322963Z",
-      "reattachment_verified": false
+      "run_id": "b4f33b481989ea9e43637e5a2aa6e99abc710d5ec690f51f8852200a4c87c4dd",
+      "started_at": "2026-11-12T09:20:10.16599",
+      "deadline": "2026-11-12T12:20:10.16599",
+      "observed_phase": "new_fifo_claim"
     }
   ],
   "latest_failure": {
@@ -124,12 +132,25 @@
     "implementation_and_deployment_pending": true,
     "queued": false,
     "worktree": "/home/by/urnetwork/temp/competition-distributed-infrastructure-reevaluation-20261112",
-    "frozen_server_commit": "071c5856466418ffc39a41cfee79cd5bb2e25053",
+    "frozen_server_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
     "unqualified_remote_backup_branch": "competition-distributed-infrastructure-reevaluation-20261112",
     "frozen_sn_commit": "4c911b6066e864ee77d754988b998d0a0d9e1841",
     "frozen_sdk_commit": "3e8e3f4090b72259ef8775bf078fc0b167c05e9d",
     "qualification": {
-      "status": "bounded_snapshot_census_fix_and_deterministic_controls_under_implementation_not_yet_compiled",
+      "status": "bounded_census_pure_and_native_smoke_verified_running_no_result_yet",
+      "smoke": {
+        "source_commit": "a4eaa25d353daf628dbdd88b58ca8855e9f2fbb5",
+        "started_at": "2026-11-12T09:21:28Z",
+        "unit": "competition-distributed-recovery-independent-qa-20261112.service",
+        "invocation_id": "6e77ad0ea0a34c5dba6a9aad5d3630dd",
+        "main_pid": 2209408,
+        "evidence_directory": "/dev/shm/competition-distributed-recovery-qa-20261112.pCDvPyv7",
+        "selector": "^TestMigrationCensus",
+        "count": 1,
+        "native_psql_explicitly_enabled": true,
+        "postgres_memory_bytes": 1073741824,
+        "full_qualification_or_race_started": false
+      },
       "unit": "competition-distributed-recovery-independent-qa-20261112.service",
       "evidence": "/dev/shm/competition-distributed-recovery-qa-20261112.xGtHyAEm",
       "controller_ordinary_passed": 393,
