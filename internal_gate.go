@@ -43,9 +43,20 @@ func InternalGateCredentialFileName(caller InternalGateCaller) string {
 	return "internal-gate-" + string(caller) + ".yml"
 }
 
-// The bytes of one bearer: 256 bits, sent as unpadded base64url.
-const internalGateBearerByteCount = 32
+// The internal gate's credential format, each limit a field whose default is the format's value (QD-702).
+type InternalGateSettings struct {
+	// The bytes of one bearer: 256 bits, sent as unpadded base64url. A format limit both ends hold alike, so a
+	// credential file of any other size is refused.
+	BearerByteCount int
+}
 
+func DefaultInternalGateSettings() *InternalGateSettings {
+	return &InternalGateSettings{
+		BearerByteCount: 32,
+	}
+}
+
+// A bearer's encoding.
 var internalGateBearerEncoding = base64.RawURLEncoding
 
 // Who calls an internal route, by the bearer it carries: §19.4's services with no Postgres. Each route lists the
@@ -58,12 +69,15 @@ const (
 	InternalGateCallerSockets InternalGateCaller = "sockets"
 	InternalGateCallerTlsedge InternalGateCaller = "tlsedge"
 	InternalGateCallerMxedge  InternalGateCaller = "mxedge"
+	// connect's contract gate in CreateContract, which reads projections through api (QD-680)
+	InternalGateCallerConnect InternalGateCaller = "connect"
 )
 
 // Whether a class is one this release knows.
 func (self InternalGateCaller) known() bool {
 	switch self {
-	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge:
+	case InternalGateCallerEvs, InternalGateCallerGkm, InternalGateCallerSockets, InternalGateCallerTlsedge, InternalGateCallerMxedge,
+		InternalGateCallerConnect:
 		return true
 	}
 	return false
@@ -169,6 +183,7 @@ type internalGateCredentialYaml struct {
 // Reads a caller's credential file and returns the bearer it sends: current. Both values must be well formed, so
 // a file broken in its previous half is caught before a rotation needs it.
 func ParseInternalGateCredential(data []byte) (string, error) {
+	settings := DefaultInternalGateSettings()
 	credential := &internalGateCredentialYaml{}
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
@@ -180,7 +195,7 @@ func ParseInternalGateCredential(data []byte) (string, error) {
 			continue
 		}
 		raw, err := internalGateBearerEncoding.DecodeString(bearer)
-		if err != nil || len(raw) != internalGateBearerByteCount {
+		if err != nil || len(raw) != settings.BearerByteCount {
 			return "", fmt.Errorf("%w: a bearer that is not 256 bits in base64url", ErrInternalGateCredentialRefused)
 		}
 	}

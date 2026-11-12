@@ -39,6 +39,7 @@ type routeOwners struct {
 func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLane, owners routeOwners) []*router.Route {
 	providerWork := handlers.NewProviderWorkHandlers()
 	quotaService := handlers.NewQuotaServiceHandlers(nil, nil)
+	internalGateProjection := handlers.NewInternalGateProjectionHandlers(nil)
 	verifyRequestClosure := handlers.NewVerifyRequestClosureHandlers()
 	providerWorkBody := router.StreamingBody{IdleTimeout: 60 * time.Second, TransferTimeout: 60 * time.Second, ResponseTimeout: 300 * time.Second, DrainTimeout: 5 * time.Second}
 	connectControl := handlers.ConnectControl
@@ -501,5 +502,7 @@ func routesWithReservedAttemptUpload(reserved handlers.SnReservedAttemptUploadLa
 	// every route is classified by credential (route_authz.go, AUTHZ1.md)
 	// ServiceHost.Quota's Postgres half for the hosts with none, on their internal bearers (QUOTA-M2-11; QD-055)
 	routes = append(routes, quotaService.Routes()...)
+	// the authorization log for the gate hosts that read it through api, on their internal bearers (ACL-M4-05; QD-680)
+	routes = append(routes, internalGateProjection.Routes()...)
 	return applyRouteAccess(append(routes, oauth.Routes()...))
 }

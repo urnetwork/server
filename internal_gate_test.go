@@ -18,7 +18,7 @@ import (
 // A fresh bearer in its wire form, and its digest in hex.
 func newTestInternalGateBearer(t testing.TB) (string, string) {
 	t.Helper()
-	raw := make([]byte, internalGateBearerByteCount)
+	raw := make([]byte, DefaultInternalGateSettings().BearerByteCount)
 	if _, err := rand.Read(raw); err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestInternalGateCredentialSendsItsCurrentBearer(t *testing.T) {
 	connect.AssertEqual(t, err, nil)
 	connect.AssertEqual(t, bearer, current)
 
-	short := internalGateBearerEncoding.EncodeToString(make([]byte, internalGateBearerByteCount-1))
+	short := internalGateBearerEncoding.EncodeToString(make([]byte, DefaultInternalGateSettings().BearerByteCount-1))
 	refused := []string{
 		"",
 		"previous: " + previous + "\n",

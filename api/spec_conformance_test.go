@@ -282,6 +282,9 @@ func registry() []specEndpoint {
 		{"GET", "/internal/gate/over-limit", nil, rt(quotahost.QuotaApiOverLimit{})},
 		{"GET", "/internal/gate/draw-order/{network_id}", nil, rt(quotahost.QuotaApiDrawOrder{})},
 		{"POST", "/internal/gate/usage-batch", rt(quotahost.QuotaApiUsageBatch{}), rt(quotahost.QuotaApiUsageBatchResult{})},
+		// the internal gate's projection reads (ACL-M4-05): the client route's body, and a base's rows as raw bytes
+		{"GET", "/internal/gate/projection/{network_id}", nil, rt(controller.NetworkConfigProjectionResult{})},
+		{"GET", "/internal/gate/rows/{network_id}/{rows_sha256}", nil, nil},
 	}
 }
 
@@ -290,8 +293,9 @@ func registry() []specEndpoint {
 // present as routes; TestSpecRoutesImplemented covers that.)
 func skips() map[string]string {
 	return map[string]string{
-		"GET /device/share-code/{code}/qr.png": "image/png response, no JSON schema",
-		"GET /device/adopt-code/{code}/qr.png": "image/png response, no JSON schema",
+		"GET /device/share-code/{code}/qr.png":               "image/png response, no JSON schema",
+		"GET /device/adopt-code/{code}/qr.png":               "image/png response, no JSON schema",
+		"GET /internal/gate/rows/{network_id}/{rows_sha256}": "application/octet-stream response, no JSON schema",
 	}
 }
 

@@ -395,6 +395,11 @@ var routeAccessByRoute = map[string]routeAccess{
 	"GET /oauth/authorize":                          routeAccessPublic,  // §7.8's edge login: forwards to the advertised consent page
 	"GET /\\.well-known/ur/id-jwks\\.json":          routeAccessPublic,  // the id- set's keys, edge login's ID tokens (§7.8)
 	"POST /oauth/consent":                           routeAccessNetwork, // OAuth consent screen data
+
+	// the authorization log for the gate hosts that read it through api (ACL-M4-05): a gate host's internal bearer,
+	// verified by hash; api carries the log, and the gate checks its chain and holds the rows to their hash (QD-680)
+	"GET /internal/gate/projection/([^/]+)":   routeAccessPublic,
+	"GET /internal/gate/rows/([^/]+)/([^/]+)": routeAccessPublic,
 }
 
 // The only routes a lag.dev guest's client token is accepted on
