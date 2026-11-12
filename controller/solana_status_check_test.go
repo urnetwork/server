@@ -19,8 +19,9 @@ import (
 // A read reads the chain only for an intent past its first moments and not
 // long expired, and once per interval per reference.
 func TestSolanaStatusCheckDue(t *testing.T) {
-	solanaStatusChecks.reset()
-	t.Cleanup(solanaStatusChecks.reset)
+	settings := defaultSolanaStatusCheckSettings()
+	limiter := newSolanaStatusCheckLimiter(settings)
+	solanaStatusCheckDue := limiter.due
 	now := time.Date(2026, 11, 12, 18, 0, 0, 0, time.UTC)
 	expiresAt := now.Add(time.Hour)
 
@@ -35,7 +36,7 @@ func TestSolanaStatusCheckDue(t *testing.T) {
 	// due, then not again within the interval, then due again
 	connect.AssertEqual(t, solanaStatusCheckDue("ref-open", now.Add(-time.Minute), &expiresAt, now), true)
 	connect.AssertEqual(t, solanaStatusCheckDue("ref-open", now.Add(-time.Minute), &expiresAt, now.Add(5*time.Second)), false)
-	connect.AssertEqual(t, solanaStatusCheckDue("ref-open", now.Add(-time.Minute), &expiresAt, now.Add(solanaStatusCheckInterval)), true)
+	connect.AssertEqual(t, solanaStatusCheckDue("ref-open", now.Add(-time.Minute), &expiresAt, now.Add(settings.Interval)), true)
 	// another reference has its own interval
 	connect.AssertEqual(t, solanaStatusCheckDue("ref-other", now.Add(-time.Minute), &expiresAt, now.Add(5*time.Second)), true)
 
@@ -55,7 +56,7 @@ func TestSolanaStatusCheckCreditsALostDelivery(t *testing.T) {
 	t.Cleanup(func() { solanaStatusCheckLookupsFor = previousLookups })
 	clientSession := &session.ClientSession{Ctx: context.Background()}
 
-	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, solanaFixtureUsdcReference), true)
+	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, defaultSolanaStatusCheckSettings(), solanaFixtureUsdcReference), true)
 	connect.AssertEqual(t, test.credits, []string{fmt.Sprintf("%s %s %.3f", solanaFixtureUsdcReference, solanaFixtureUsdcSignature, solanaFixtureUsdcAmount)})
 	connect.AssertEqual(t, test.onboarded, 1)
 	// the native transfer in the same history pays no USDC intent: not recorded
@@ -66,7 +67,7 @@ func TestSolanaStatusCheckCreditsALostDelivery(t *testing.T) {
 	test.handled[solanaFixtureUsdcSignature] = true
 	test.handled[solanaFixtureNativeSignature] = true
 	transactionsRead := test.rpc.calls["getTransaction"]
-	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, solanaFixtureUsdcReference), false)
+	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, defaultSolanaStatusCheckSettings(), solanaFixtureUsdcReference), false)
 	connect.AssertEqual(t, test.rpc.calls["getTransaction"], transactionsRead)
 	connect.AssertEqual(t, len(test.credits), 1)
 }
@@ -79,11 +80,11 @@ func TestSolanaStatusCheckWithoutTheChain(t *testing.T) {
 	clientSession := &session.ClientSession{Ctx: context.Background()}
 
 	solanaChainRpcUrl = func() (string, bool) { return "", false }
-	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, solanaFixtureUsdcReference), false)
+	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, defaultSolanaStatusCheckSettings(), solanaFixtureUsdcReference), false)
 	connect.AssertEqual(t, len(test.rpc.calls), 0)
 
 	solanaChainRpcUrl = func() (string, bool) { return "https://synthetic.invalid/?api-key=synthetic", true }
 	test.rpc.err = fmt.Errorf("synthetic rpc outage")
-	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, solanaFixtureUsdcReference), false)
+	connect.AssertEqual(t, solanaCheckReferenceNow(clientSession, defaultSolanaStatusCheckSettings(), solanaFixtureUsdcReference), false)
 	connect.AssertEqual(t, len(test.credits), 0)
 }
